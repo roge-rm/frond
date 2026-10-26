@@ -1,0 +1,6 @@
+FORM ID 1000 AT (0 0 160 160) NOFRAME USABLE
+BEGIN
+ TITLE "Frond compatibility"
+ LABEL "Results: FrondCompatLog" ID 1001 AT (5 30)
+ LABEL "Firmware services + ARM/Thumb" ID 1002 AT (5 50)
+END

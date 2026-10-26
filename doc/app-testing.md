@@ -82,6 +82,11 @@ measurements, not physical Palm timings.
 
 ## Automated checks
 
+The [compatibility matrix](compatibility.md) adds firmware-free PACE/ARM execution
+cases and an optional SDK-built application for basic Palm services, native
+ARM/Thumb calls and callbacks, fresh result logs and session restore. It records
+skipped firmware rows explicitly and does not imply hardware equivalence.
+
 `make test` covers CPU alignment, PACE signature validation, device state,
 audio queues, export rollback and the model regressions. `make test-desktop`
 checks the desktop client protocol and save-failure workflow. Optional

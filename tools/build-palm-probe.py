@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-"""Build the optional Palm peripheral validation application with a locally installed SDK."""
+"""Build an optional Palm validation application with a locally installed SDK."""
 import argparse
 from pathlib import Path
 import subprocess
 
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--sdk', type=Path, default=Path('../palm-os-sdk/sdk-5r3'))
-p.add_argument('--probe', choices=['sd', 'network', 'keyboard', 'host-network'], default='sd')
+p.add_argument('--probe', choices=['sd', 'network', 'keyboard', 'host-network', 'compatibility'], default='sd')
 p.add_argument('--output', type=Path)
 a = p.parse_args()
 sdk, output = a.sdk.resolve(), (a.output or Path('build/' + a.probe + '-probe')).resolve()
 source = 'tests/palm/' + a.probe + '-probe'
-name = {'sd':'FrondSDProbe','network':'FrondNetProbe','keyboard':'FrondKeyboardProbe','host-network':'FrondHostProbe'}[a.probe]
+name = {'sd':'FrondSDProbe','network':'FrondNetProbe','keyboard':'FrondKeyboardProbe',
+        'host-network':'FrondHostProbe', 'compatibility':'FrondCompatProbe'}[a.probe]
 if not (sdk / 'include/PalmOS.h').is_file():
     p.error('Supply the Palm OS 5 SDK directory with --sdk')
 output.mkdir(parents=True, exist_ok=True)
@@ -21,6 +22,36 @@ subprocess.run(['m68k-palmos-gcc', '-O2', '-Wall', '-Wno-unknown-pragmas'] + inc
 subprocess.run(['m68k-palmos-gcc', '-L' + str(sdk / 'lib/m68k-palmos-coff'), str(output / 'probe.o'), '-o', str(output / 'probe')], check=True)
 subprocess.run(['pilrc', '-q', '-ro', source + '.rcp', str(output / 'probe.ro')], check=True)
 resources = []
+if a.probe == 'compatibility':
+    script = output / 'native.ld'
+    script.write_text('SECTIONS { . = 0; .text : { *(.text.compatibilityEntry) '
+                      '*(.text.compatibilityNative) *(.text*) *(.rodata*) } }\n')
+    for mode, resource in [('arm', 1000), ('thumb', 1001)]:
+        obj, elf = output / (mode + '.o'), output / (mode + '.elf')
+        binary = output / ('armc%04x.bin' % resource)
+        subprocess.run(['arm-palmos-gcc', '-O2', '-Wall', '-Werror', '-m' + mode,
+                        '-mthumb-interwork', '-march=armv4t', '-ffunction-sections',
+                        '-fno-pic', '-ffreestanding', '-nostdlib', '-fomit-frame-pointer'] + includes +
+                       ['-c', 'tests/palm/compatibility-native.c', '-o', str(obj)], check=True)
+        objects = [str(obj)]
+        entry = 'compatibilityNative'
+        if mode == 'thumb':
+            veneer = output / 'thumb-entry.o'
+            subprocess.run(['arm-palmos-gcc', '-march=armv4t', '-mthumb-interwork', '-c',
+                            'tests/palm/compatibility-thumb.S', '-o', str(veneer)], check=True)
+            objects.insert(0, str(veneer))
+            entry = 'compatibilityEntry'
+        for item in objects:
+            relocations = subprocess.check_output(['arm-palmos-objdump', '-r', item], text=True)
+            if 'R_ARM_ABS32' in relocations:
+                raise SystemExit('Native probe must not contain absolute relocations')
+        subprocess.run(['arm-palmos-ld', '-T', str(script), '-e', entry, '-nostdlib'] +
+                       objects + ['-o', str(elf)], check=True)
+        symbols = subprocess.check_output(['arm-palmos-nm', str(elf)], text=True).splitlines()
+        if not any(line.split() == ['00000000', 'T', entry] for line in symbols):
+            raise SystemExit('Native probe entry must be at resource offset zero')
+        subprocess.run(['arm-palmos-objcopy', '-O', 'binary', '-j', '.text', str(elf), str(binary)], check=True)
+        resources.append(str(binary))
 if a.probe == 'host-network':
     arm_object, arm_elf, arm_binary = output / 'tone.o', output / 'tone.elf', output / 'armc03e8.bin'
     subprocess.run(['arm-palmos-gcc', '-O2', '-Wall', '-marm', '-march=armv4t',

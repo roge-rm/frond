@@ -129,6 +129,10 @@ The [developer runner](doc/developer-run.md) installs several PRC/PDB files into
 private session copy, launches an app, runs replay, captures screenshots and
 exports named databases with JSON status and time limits.
 
+The [compatibility matrix](doc/compatibility.md) checks synthetic PACE/ARM programs
+and optional Palm service/native probes, with fresh logs before and after session
+restore. Physical TX comparison remains deferred.
+
 The [native ARM/Thumb debugger](doc/debugger.md) is available with `--gdb PORT`
 on IPv4 loopback. It supports registers, memory, stepping and address breakpoints;
 68k/PACE app-aware debugging and watchpoints are not implemented.
