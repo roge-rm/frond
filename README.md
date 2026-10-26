@@ -129,6 +129,10 @@ The [developer runner](doc/developer-run.md) installs several PRC/PDB files into
 private session copy, launches an app, runs replay, captures screenshots and
 exports named databases with JSON status and time limits.
 
+The [native ARM/Thumb debugger](doc/debugger.md) is available with `--gdb PORT`
+on IPv4 loopback. It supports registers, memory, stepping and address breakpoints;
+68k/PACE app-aware debugging and watchpoints are not implemented.
+
 The upstream core is pinned in `vendor/cloudpilot`. Frond's core changes are
 ordered patches in `patches/`; the build applies them to `build/source`.
 If you edit that generated tree, export your changes back to a patch before

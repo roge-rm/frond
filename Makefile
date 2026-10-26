@@ -15,7 +15,7 @@ out/frond: build/source/.prepared
 	cp build/source/src/uarm/cp-uarm out/frond.new
 	mv -f out/frond.new out/frond
 
-test: prepare test-developer-run test-device-controls test-scheduler test-wifi test-host-network test-keyboard test-network test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup
+test: prepare test-developer-run test-device-controls test-scheduler test-wifi test-host-network test-keyboard test-network test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup
 	python3 tests/audio-metrics.py
 	python3 tests/tx-baseline.py
 	python3 tests/input-latency.py
@@ -90,6 +90,17 @@ test-instruction-cache: out/frond
 		tests/instruction-cache.cpp @build/cache-core-objects.rsp build/source/src/common/libcommon.a \
 		$(CPU_TEST_LDLIBS) -o build/test-instruction-cache
 	./build/test-instruction-cache
+
+.PHONY: test-gdbstub
+build/test-gdbstub-target: out/frond tests/gdbstub-target.cpp
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/gdbstub-core.rsp
+	$(CXX) -std=c++17 -O1 -g \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/gdbstub-target.cpp @build/gdbstub-core.rsp build/source/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-gdbstub-target
+
+test-gdbstub: build/test-gdbstub-target
+	python3 tests/gdbstub.py
 
 test-pxa-timer: prepare
 	$(CXX) -std=c++17 -O1 -g -ffunction-sections -fdata-sections \
