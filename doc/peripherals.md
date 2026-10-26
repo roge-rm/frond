@@ -462,7 +462,7 @@ forwarding and arbitrary SDIO accessories remain unsupported. Serial and
 HotSync need end-to-end Palm transfer tests; register models alone do not
 establish a working external connection.
 
-The [wired serial investigation](tx-serial.md) covers the packed UART FIFO fix,
+The [serial support and tests](tx-serial.md) covers the packed UART FIFO fix,
 remaining UART/USB blockers, firmware-free regressions and optional fresh-log
 Palm Serial Manager probe.
 It does not provide a host serial endpoint or working HotSync.

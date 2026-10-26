@@ -63,7 +63,7 @@ Debugger configuration is not stored in guest sessions.
   idempotent. A breakpoint stays active until removed; GDB normally removes it
   to step past it. An ARM breakpoint does not match Thumb at the same address.
 - Watchpoint packets (`Z2`/`Z3`/`Z4`, and their removal forms) explicitly
-  return the empty unsupported response. See the investigation below.
+  return the empty unsupported response. See [watchpoints](#watchpoints).
 - Fixed 4096-byte incoming packet limit (`PacketSize=1000` in hexadecimal),
   escaped-wire checksums, ACK/NACK, reply retransmission, bounded numeric
   parsing, and exact write lengths. Bad/oversized packets receive NACK without
@@ -286,43 +286,13 @@ This smoke test does not validate program attribution or known-address
 breakpoints on real TX applications. No private TX fixture was used to validate
 this change.
 
-## Watchpoint investigation and blocker
+## Watchpoints
 
-A prototype moved watchpoint detection after each successful CPU memory access
-and queued a stop for the next native instruction boundary. Raw TCP tests of
-ARM/Thumb loads, stores and multiple stores confirmed each access executed once,
-with the complete instruction's memory effects, next PC and base-register
-writeback visible. However, a **GDB 16.3 multiarch client** then automatically
-stepped another instruction: a store at `0x12000` reported by the prototype at
-`0x12004` appeared in GDB at `0x12008`, after the following load also executed.
-
-ARM GDB sets `have_nonsteppable_watchpoint`, expecting a synchronous watchpoint
-trap **before** its triggering access. It removes the watchpoint and steps the
-instruction to finish it. This behavior and the pre-access ARM convention are
-explained in the [GDB ARM watchpoint discussion](https://sourceware.org/legacy-ml/gdb-patches/2014-09/msg00846.html).
-The RSP subset implemented here has no negotiation for post-instruction watch
-semantics. Swallowing GDB's next step would also swallow a real user's single
-step; reporting the old PC would misrepresent completed instruction state.
-Consequently the prototype is not shipped. Watchpoints need a design compatible
-with ARM GDB's pre-access convention, with no replay of MMIO or partial
-multi-access instructions, plus real-client and counted ARM/Thumb tests.
-
-The follow-up `tests/watchpoint-contract.py` reproduces this mismatch without
-enabling watchpoints in the product. A test-local RSP adapter translates an
-address breakpoint at `0x12004` (after a real ARM store at `0x12000`) into
-`T05watch:20000;`. GDB 16.3 removes the watchpoint, inserts a temporary breakpoint
-at `0x12008`, and sends **continue**, executing the next native load. The test
-checks PC `0x12008`, the load's distinct register value `0x11223344`, and exactly
-one store. Thus the extra step is not necessarily an RSP `s`: suppressing `s`
-cannot repair the contract. A passing diagnostic test confirms this blocker,
-not watchpoint support. If a future client behaves differently, investigate its
-transcript rather than weakening the assertion.
-
-The product still returns unsupported for `Z2`/`Z3`/`Z4`. Correct watchpoints
-require a separately validated stop before the triggering access, with an
-explicit way to complete any pending instruction without replaying earlier MMIO
-or partial multi-access effects. The PACE monitor step is not such a protocol
-negotiation and does not make the rejected post-access watchpoint design safe.
+ARM/Thumb and PACE watchpoints are not supported. A post-access stop is not
+compatible with the way ARM GDB resumes a watched instruction; a safe implementation
+must also avoid repeating MMIO or partial multi-access operations. The
+`tests/watchpoint-contract.py` diagnostic checks this limitation with a real GDB
+client when one is available.
 
 Protocol references: [GDB RSP overview](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Overview.html),
 [packets](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Packets.html), and

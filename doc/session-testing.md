@@ -66,13 +66,8 @@ deep sleep, USB/MSL/power-fault wake, extended OS timers, oscillator/regulator
 delays, and complete electrical pad/pull-up behavior remain unsupported. The RTC
 still uses host wall time, and physical-device timing has not been compared.
 
-Patch 0030 fixes an earlier failure in the ROM's resume path. The first fault was
-an instruction prefetch translation fault immediately after enabling the MMU;
-the later SRAM stack access fault occurred during exception handling. The patch
-models XScale's two 32-byte instruction fetch buffers, including hits across an
-MMU transition, replacement and invalidation. It does not add an SRAM mapping,
-change the MMU-enable delay or implement TLB lockdown. The existing instruction
-cache and CP15 control-bit limitations remain.
+The XScale instruction-fetch model preserves two 32-byte fetch buffers across
+MMU transitions. It does not implement TLB lockdown or change guest page tables.
 
 The hardware reference is the Intel XScale Core Developer's Manual, sections
 4.2.2–4.2.3 and 4.3.3
