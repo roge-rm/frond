@@ -113,7 +113,7 @@
 -    argparse::ArgumentParser program("cp-uarm");
 -
 -    program.add_description("cp-uarm emulates a Palm Tungsten E2");
-+    argparse::ArgumentParser program("frond-core", "0.1.0");
++    argparse::ArgumentParser program("frond-core", "0.2.0");
 +
 +    program.add_description("Frond Palm OS emulator");
  

@@ -1,16 +1,16 @@
-# Frond 0.1.0 desktop
+# Frond 0.2.0 desktop
 
 Frond's Qt 6 launcher provides desktop controls alongside the SDL Palm display.
 The Palm display remains a separate window in this release. Firmware is supplied
-by the user. Palm TX support is experimental. Virtual SD cards are supported; Wi-Fi and
-Bluetooth remain unavailable. See [peripherals](peripherals.md). Use the normal audio path while evaluating desktop behaviour.
+by the user. Palm TX support is experimental. Virtual SD cards and experimental virtual Wi-Fi are supported;
+Bluetooth remains unavailable. See [peripherals](peripherals.md). Use the normal audio path while evaluating desktop behaviour.
 
 ## Debian Trixie / KDE Plasma
 
 Install the locally built package:
 
 ```sh
-sudo apt install ./frond_0.1.0-6_amd64.deb
+sudo apt install ./frond_0.2.0-1_amd64.deb
 ```
 
 Launch **Frond** from Plasma's application menu. On first use, choose an existing
@@ -147,7 +147,7 @@ make deb
 `out/frond-desktop` finds `out/frond` beside it. The installed launcher uses
 `/usr/lib/frond/frond-core`. For development, `--core /absolute/path/to/frond`
 selects another binary. `frond-desktop /path/to/file.frond` opens that session;
-`--version` reports 0.1.0. `make out/frond` builds only the SDL emulator.
+`--version` reports 0.2.0. `make out/frond` builds only the SDL emulator.
 
 The Debian package derives shared-library dependencies from the binaries and
 includes Qt's platform and Wayland plugins. It contains no firmware, PRC,

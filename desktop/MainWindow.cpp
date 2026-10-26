@@ -194,7 +194,7 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     logLayout->addWidget(log);
     view->addAction(tr("Emulator &Log"), logDialog, &QWidget::show);
     menuBar()->addMenu(tr("&Help"))->addAction(tr("&About Frond"), this, [this] {
-        QMessageBox::about(this, tr("About Frond"), tr("Frond 0.1.0\nExperimental Palm TX emulator\nGPL-3.0-or-later"));
+        QMessageBox::about(this, tr("About Frond"), tr("Frond 0.2.0\nExperimental Palm TX emulator\nGPL-3.0-or-later"));
     });
     connect(&client, &DesktopClient::diagnostic, this, [this](const QString& text) {
         log->moveCursor(QTextCursor::End); log->insertPlainText(text);

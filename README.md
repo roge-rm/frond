@@ -9,7 +9,7 @@ You can install Palm apps, use virtual SD cards, and close the emulator and come
 back to where you left it. SunVox plays through its native ARM sound callbacks,
 and SimCity runs too.
 
-It's early, at version 0.1.0. Sound can break up when the host is busy, and some
+It's early, at version 0.2.0. Sound can break up when the host is busy, and some
 menus are slow. The launcher and Palm screen are separate windows for now.
 You'll need your own TX firmware; none is included.
 
@@ -104,7 +104,7 @@ To build and install a package locally:
 
 ```sh
 make deb
-sudo apt install ./out/frond_0.1.0-6_amd64.deb
+sudo apt install ./out/frond_0.2.0-1_amd64.deb
 ```
 
 It appears in Plasma's application menu as **Frond**. The package includes the
