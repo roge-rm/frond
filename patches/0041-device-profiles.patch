@@ -1,0 +1,282 @@
+diff --git a/src/common/device_profile5.h b/src/common/device_profile5.h
+new file mode 100644
+--- /dev/null
++++ b/src/common/device_profile5.h
+@@ -0,0 +1,84 @@
++#ifndef FROND_DEVICE_PROFILE5_H
++#define FROND_DEVICE_PROFILE5_H
++
++#include <cstddef>
++#include <cstdint>
++#include "device_type5.h"
++
++// These values are stored in existing sessions.
++enum class DisplayMode {
++    mode_160x160 = 1, mode_160x220 = 2, mode_240x240 = 3, mode_240x320 = 4,
++    mode_320x320 = 5, mode_320x480 = 6, mode_480x480 = 7, mode_480x720 = 8
++};
++
++enum class DeviceCohort5 { txNand, e2Nand, patchedE2, paravirtual };
++enum class DeviceSupport5 { txDesktop, inheritedUnverified };
++
++struct DeviceProfile5 {
++    DeviceType5 deviceType;
++    const char* id;
++    const char* name;
++    DeviceCohort5 cohort;
++    DeviceSupport5 support;
++    size_t norSize;  // Zero means no fixed size established by this profile.
++    size_t nandSize; // Raw NAND includes spare bytes; zero means no NAND.
++    uint32_t minRam, maxRam; // Powers of two, in bytes.
++    DisplayMode defaultDisplay;
++    uint16_t displayModes; // Bit n represents persisted DisplayMode n.
++    bool requiresExplicitNand;
++};
++
++// Inventory of implemented native models, not a list of verified Palm devices.
++inline constexpr DeviceProfile5 deviceProfiles5[] = {
++    {deviceTypeE2, "tungsten-e2", "Tungsten E2", DeviceCohort5::e2Nand,
++     DeviceSupport5::inheritedUnverified, 0, 34603008, 16u << 20, 32u << 20,
++     DisplayMode::mode_320x320, 1u << 5, false},
++    {deviceTypeFrankenE2, "franken-e2", "FrankenE2 / Tungsten E3", DeviceCohort5::patchedE2,
++     DeviceSupport5::inheritedUnverified, 0, 34603008, 16u << 20, 32u << 20,
++     DisplayMode::mode_320x480, 1u << 6, false},
++    {deviceTypePV, "repalm", "rePalm paravirtualized", DeviceCohort5::paravirtual,
++     DeviceSupport5::inheritedUnverified, 0, 0, 8u << 20, 1u << 31,
++     DisplayMode::mode_320x480, 0x1fe, false},
++    {deviceTypeTX, "palm-tx", "Palm TX", DeviceCohort5::txNand,
++     DeviceSupport5::txDesktop, 16u << 20, 2112u * 64 * 1024, 32u << 20, 32u << 20,
++     DisplayMode::mode_320x480, 1u << 6, true},
++};
++
++inline const DeviceProfile5* deviceProfile5(int32_t deviceType) {
++    for (const auto& profile : deviceProfiles5)
++        if (int32_t(profile.deviceType) == deviceType) return &profile;
++    return nullptr;
++}
++
++inline bool deviceProfileSupportsDesktop5(int32_t deviceType) {
++    const auto* profile = deviceProfile5(deviceType);
++    return profile && profile->support == DeviceSupport5::txDesktop;
++}
++
++inline bool deviceProfileSupportsRam5(int32_t deviceType, uint32_t bytes) {
++    const auto* profile = deviceProfile5(deviceType);
++    return profile && bytes >= profile->minRam && bytes <= profile->maxRam &&
++           bytes != 0 && (bytes & (bytes - 1)) == 0;
++}
++
++inline bool deviceProfileSupportsDisplay5(int32_t deviceType, int32_t mode) {
++    const auto* profile = deviceProfile5(deviceType);
++    return profile && mode >= 1 && mode <= 8 && (profile->displayModes & (1u << mode));
++}
++
++enum class DeviceFirmwareError5 { none, unknownDevice, norSize, explicitNand, nandSize };
++
++// Geometry checks cannot identify a dump's device or establish boot compatibility.
++inline DeviceFirmwareError5 deviceProfileValidateFirmware5(
++    int32_t deviceType, size_t norSize, size_t nandSize, bool fromSession, bool explicitNand) {
++    const auto* profile = deviceProfile5(deviceType);
++    if (!profile) return DeviceFirmwareError5::unknownDevice;
++    if (norSize == 0 || (profile->norSize && norSize != profile->norSize))
++        return DeviceFirmwareError5::norSize;
++    if (profile->requiresExplicitNand && !fromSession && !explicitNand)
++        return DeviceFirmwareError5::explicitNand;
++    if (nandSize != profile->nandSize) return DeviceFirmwareError5::nandSize;
++    return DeviceFirmwareError5::none;
++}
++
++#endif
+diff --git a/src/common/rom_info5.cpp b/src/common/rom_info5.cpp
+--- a/src/common/rom_info5.cpp
++++ b/src/common/rom_info5.cpp
+@@ -137,4 +137,4 @@
+ 
+-    return buffer[offset] | (buffer[offset + 1] << 8) | (buffer[offset + 2] << 16) |
+-           (buffer[offset + 3] << 24);
++    return uint32_t(buffer[offset]) | (uint32_t(buffer[offset + 1]) << 8) |
++           (uint32_t(buffer[offset + 2]) << 16) | (uint32_t(buffer[offset + 3]) << 24);
+ }
+@@ -142,3 +142,6 @@
+ std::string RomInfo5::ReadString(size_t offset, uint8_t maxLen, bool& error) const {
+-    if (error) return "";
++    if (error || offset > size) {
++        error = true;
++        return "";
++    }
+ 
+@@ -148,2 +151,6 @@
+     for (size_t i = 0; i < maxLen && !terminated; i++) {
++        if (i >= size - offset) {
++            error = true;
++            return "";
++        }
+         str[i] = buffer[offset + i];
+diff --git a/src/uarm/native/main.cpp b/src/uarm/native/main.cpp
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -66,3 +66,3 @@
+     uint32_t ramSizeFromMemorySize(uint32_t memorySize) {
+-        return 1 << (31 - __builtin_clz(memorySize));
++        return memorySize ? (1u << (31 - __builtin_clz(memorySize))) : 0;
+     }
+@@ -144,5 +144,13 @@
+ 
+-        if (SessionFile5::IsSessionFile(norOrSessionLen, norOrSessionData.get()) &&
+-            sessionFile.Deserialize(norOrSessionLen, norOrSessionData.get())) {
+-            sessionDevice = static_cast<DeviceType5>(sessionFile.GetDeviceType());
++        if (SessionFile5::IsSessionFile(norOrSessionLen, norOrSessionData.get())) {
++            if (!sessionFile.Deserialize(norOrSessionLen, norOrSessionData.get())) {
++                cerr << "invalid session image" << endl;
++                return false;
++            }
++            const auto* profile = deviceProfile5(sessionFile.GetDeviceType());
++            if (!profile) {
++                cerr << "unknown session device profile" << endl;
++                return false;
++            }
++            sessionDevice = profile->deviceType;
+             if (options.experimentalTx && sessionDevice != DeviceType5::deviceTypeTX) {
+@@ -176,2 +184,6 @@
+             romInfo = RomInfo5(nor.data, nor.size);
++            if (sessionDevice != deviceTypeTX && romInfo.GetDeviceType() != sessionDevice) {
++                cerr << "session device profile does not match ROM" << endl;
++                return false;
++            }
+         } else {
+@@ -245,2 +257,7 @@
+                                                      : romInfo.GetDeviceType();
++        if (romInfo.IsValid() && deviceProfile5(romInfo.GetDeviceType()) &&
++            romInfo.GetDeviceType() != deviceType) {
++            cerr << "selected device profile does not match ROM" << endl;
++            return false;
++        }
+         const bool isTx = deviceType == DeviceType5::deviceTypeTX;
+@@ -252,3 +269,4 @@
+             cerr << "EXPERIMENTAL Palm TX: reset and session testing" << endl;
+-            if (nor.size != (16ul << 20) || (sessionDevice == DeviceType5::deviceTypeInvalid && !options.nand)) {
++            if (nor.size != deviceProfile5(deviceType)->norSize ||
++                (sessionDevice == DeviceType5::deviceTypeInvalid && !options.nand)) {
+                 cerr << "TX requires a 16 MiB NOR image and an explicit --nand image" << endl;
+@@ -265,2 +283,10 @@
+             if (ramSize == 0) {
++                if (*options.ramSize == 0) {
++                    cerr << "unsupported RAM size: zero MiB" << endl;
++                    return false;
++                }
++                if (*options.ramSize > (UINT32_MAX >> 20)) {
++                    cerr << "unsupported RAM size: MiB value overflows" << endl;
++                    return false;
++                }
+                 ramSize = *options.ramSize << 20;
+@@ -290,5 +316,9 @@
+ 
+-        const uint32_t nandSize = deviceConfigurationGetNandSize(deviceType);
+-        if (nand.size != nandSize) {
+-            cerr << "invalid NAND size; expected " << nandSize << " bytes" << endl;
++        const auto firmwareError = deviceProfileValidateFirmware5(deviceType, nor.size, nand.size,
++            sessionDevice != deviceTypeInvalid, options.nand.has_value());
++        if (firmwareError != DeviceFirmwareError5::none) {
++            cerr << "invalid firmware geometry for device profile";
++            if (firmwareError == DeviceFirmwareError5::nandSize)
++                cerr << ": invalid NAND size; expected " << deviceConfigurationGetNandSize(deviceType) << " bytes";
++            cerr << endl;
+             return false;
+@@ -315,3 +345,3 @@
+ 
+-        if (options.desktopSocket && deviceType != DeviceType5::deviceTypeTX) {
++        if (options.desktopSocket && !deviceProfileSupportsDesktop5(deviceType)) {
+             cerr << "desktop sessions currently support Palm TX only" << endl;
+diff --git a/src/uarm/uarm/device_configuration.cpp b/src/uarm/uarm/device_configuration.cpp
+--- a/src/uarm/uarm/device_configuration.cpp
++++ b/src/uarm/uarm/device_configuration.cpp
+@@ -2,51 +2,13 @@
+ 
+-#include <sys/stat.h>
+-
+-#include "device_type5.h"
+-
+-bool deviceConfigurationSupportsRamSize(enum DeviceType5 deviceType, uint32_t ramSize) {
+-    switch (deviceType) {
+-        case DeviceType5::deviceTypeTX:
+-            return ramSize == (32ul << 20);
+-        case DeviceType5::deviceTypeE2:
+-        case DeviceType5::deviceTypeFrankenE2:
+-            return ramSize == (16ul << 20) || ramSize == (32ul << 20);
+-
+-        case DeviceType5::deviceTypePV:
+-            return (1ul << __builtin_ctz(ramSize)) == ramSize && ramSize >= 8 << 20;
+-
+-        default:
+-            return false;
+-    }
++bool deviceConfigurationSupportsRamSize(DeviceType5 deviceType, uint32_t ramSize) {
++    return deviceProfileSupportsRam5(deviceType, ramSize);
+ }
+ 
+-uint32_t deviceConfigurationGetNandSize(enum DeviceType5 deviceType) {
+-    switch (deviceType) {
+-        case DeviceType5::deviceTypeTX:
+-            return 2112ul * 64 * 1024;
+-        case DeviceType5::deviceTypeE2:
+-        case DeviceType5::deviceTypeFrankenE2:
+-            return 34603008;
+-
+-        default:
+-            return 0;
+-    }
++uint32_t deviceConfigurationGetNandSize(DeviceType5 deviceType) {
++    const auto* profile = deviceProfile5(deviceType);
++    return profile ? profile->nandSize : 0;
+ }
+ 
+-bool deviceConfigurationDeviceSupportsDisplayMode(DeviceType5 deviceType, DisplayMode displayMode) {
+-    switch (deviceType) {
+-        case DeviceType5::deviceTypeTX:
+-            return displayMode == DisplayMode::mode_320x480;
+-        case DeviceType5::deviceTypeE2:
+-            return displayMode == DisplayMode::mode_320x320;
+-
+-        case DeviceType5::deviceTypeFrankenE2:
+-            return displayMode == DisplayMode::mode_320x480;
+-
+-        case DeviceType5::deviceTypePV:
+-            return true;
+-
+-        default:
+-            return false;
+-    }
++bool deviceConfigurationDeviceSupportsDisplayMode(DeviceType5 deviceType, DisplayMode mode) {
++    return deviceProfileSupportsDisplay5(deviceType, int32_t(mode));
+ }
+@@ -54,11 +16,4 @@
+ DisplayMode deviceConfigurationDefaultDisplayMode(DeviceType5 deviceType) {
+-    switch (deviceType) {
+-        case DeviceType5::deviceTypeTX:
+-        case DeviceType5::deviceTypeFrankenE2:
+-        case DeviceType5::deviceTypePV:
+-            return DisplayMode::mode_320x480;
+-
+-        default:
+-            return DisplayMode::mode_320x320;
+-    }
++    const auto* profile = deviceProfile5(deviceType);
++    return profile ? profile->defaultDisplay : DisplayMode::mode_320x320;
+ }
+diff --git a/src/uarm/uarm/device_configuration.h b/src/uarm/uarm/device_configuration.h
+--- a/src/uarm/uarm/device_configuration.h
++++ b/src/uarm/uarm/device_configuration.h
+@@ -7,12 +7,3 @@
+ 
+-enum class DisplayMode {
+-    mode_160x160 = 1,
+-    mode_160x220 = 2,
+-    mode_240x240 = 3,
+-    mode_240x320 = 4,
+-    mode_320x320 = 5,
+-    mode_320x480 = 6,
+-    mode_480x480 = 7,
+-    mode_480x720 = 8
+-};
++#include "device_profile5.h"
+ 

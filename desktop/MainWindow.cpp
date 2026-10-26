@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "FirmwareInput.h"
 #include "SdExchangeDialog.h"
 #include <QAction>
 #include <QCheckBox>
@@ -318,8 +319,8 @@ void MainWindow::start() {
         source = QFileInfo(source).canonicalFilePath();
         arguments << source;
     } else {
-        if (QFileInfo(nor->text()).size() != 16777216 || QFileInfo(nand->text()).size() != 138412032)
-            return failure(tr("Choose a 16 MiB NOR image and a 132 MiB raw NAND image for the Palm TX."));
+        const auto firmwareError = frondFirmware::validateTxFiles(nor->text(), nand->text());
+        if (!firmwareError.isEmpty()) return failure(firmwareError);
         arguments << "--experimental-tx" << QFileInfo(nor->text()).absoluteFilePath() << "--nand" << QFileInfo(nand->text()).absoluteFilePath();
         settings.setValue("nor", nor->text()); settings.setValue("nand", nand->text());
     }

@@ -146,6 +146,10 @@ PACE monitor commands add read-only 68k registers, address breakpoints and
 exception snapshots. Active Palm app attribution, 68k stepping and watchpoints
 are not implemented.
 
+The [device profile inventory](doc/device-profiles.md) records the existing TX
+path and inherited native models. Other cohorts remain unverified and unavailable
+to the desktop.
+
 The upstream core is pinned in `vendor/cloudpilot`. Frond's core changes are
 ordered patches in `patches/`; the build applies them to `build/source`.
 If you edit that generated tree, export your changes back to a patch before

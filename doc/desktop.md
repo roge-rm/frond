@@ -75,7 +75,8 @@ the GUI; **View → Emulator Log** exposes diagnostic details.
 
 `.frond` files can be opened through the desktop file manager. Existing `.session`
 files also work through Open Session. A GUI-controlled session currently supports
-Palm TX only.
+Palm TX only. See the [device profile inventory](device-profiles.md) for the
+inherited models and staged support limits.
 
 ## Physical buttons
 

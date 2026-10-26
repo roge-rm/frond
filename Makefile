@@ -15,7 +15,7 @@ out/frond: build/source/.prepared
 	cp build/source/src/uarm/cp-uarm out/frond.new
 	mv -f out/frond.new out/frond
 
-test: prepare test-tx-serial test-gameplay-metrics test-mmu-fast-path test-pxa-power test-compatibility test-developer-run test-xscale-prefetch test-device-controls test-scheduler test-wifi test-host-network test-network-reliability test-keyboard test-network test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pace-debug test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup
+test: prepare test-device-profiles test-tx-serial test-gameplay-metrics test-mmu-fast-path test-pxa-power test-compatibility test-developer-run test-xscale-prefetch test-device-controls test-scheduler test-wifi test-host-network test-network-reliability test-keyboard test-network test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pace-debug test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup
 	python3 tests/audio-metrics.py
 	python3 tests/audio-timing.py
 	python3 tests/tx-baseline.py
@@ -333,3 +333,15 @@ test-tx-serial: prepare build/source/src/common/libcommon.a
 		-lz -o build/test-tx-serial-model
 	./build/test-tx-serial-model
 	python3 tests/tx-serial.py
+
+.PHONY: device-profiles test-device-profiles
+device-profiles: prepare
+	mkdir -p out
+	$(CXX) -std=c++17 -O2 -Ibuild/source/src/common tools/device-profiles.cpp -o out/frond-device-profiles
+
+test-device-profiles: out/frond device-profiles
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/common -Ibuild/source/src/uarm/uarm \
+		tests/device-profiles.cpp build/source/src/uarm/uarm/device_configuration.cpp \
+		build/source/src/common/libcommon.a -o build/test-device-profiles
+	./build/test-device-profiles
+	python3 tests/device-input.py
