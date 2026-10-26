@@ -12,7 +12,8 @@ import struct
 import subprocess
 import tempfile
 import time
-import zipfile
+
+from sd_results import check_records, read_log
 
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--core', type=Path, default=Path('out/frond'))
@@ -50,7 +51,22 @@ def emulator(session, label):
                 if ok is not None: assert fields[1] == (b'ok' if ok else b'error'), fields
                 return (fields[1] == b'ok', message) if ok is None else message
             time.sleep(2)
-            yield request
+            try:
+                yield request
+            except Exception as failure:
+                # Keep the failing guest for diagnosis, without changing the test result.
+                try:
+                    if process.poll() is None and not isinstance(failure, (TimeoutError, OSError)):
+                        connection.settimeout(20)
+                        request('save', root / (label + '-failed.frond'))
+                        replay = root / (label + '-failed.replay')
+                        snapshot = str(root / (label + '-failed.png')).replace('\\', '\\\\').replace('"', '\\"')
+                        replay.write_text(f'100 snapshot "{snapshot}"\n')
+                        request('input-replay', replay)
+                        time.sleep(.3)
+                except Exception as error:
+                    print('Failure capture:', error, flush=True)
+                raise
             request('quit'); assert process.wait(timeout=20) == 0
         finally:
             if stream: stream.close()
@@ -91,20 +107,21 @@ def check_image(path, size):
         return
     raise AssertionError('Palm-created GUEST.TXT is absent')
 
-def check_log(path, prior=False, host=True):
-    with zipfile.ZipFile(path) as archive:
-        raw = archive.read(next(n for n in archive.namelist() if 'FrondSDLog' in n))
-    count = struct.unpack_from('>H', raw, 76)[0]
-    offsets = [struct.unpack_from('>I', raw, 78+i*8)[0] for i in range(count)] + [len(raw)]
-    lines = [raw[x:y].rstrip(b'\0').decode() for x,y in zip(offsets, offsets[1:])]
-    # Evaluate only the most recent complete invocation.
-    start = max(i for i,line in enumerate(lines) if line.startswith('enumerate '))
-    lines = lines[start:]
-    print('\n'.join(lines), flush=True)
-    assert any(x.startswith('enumerate err=0000') for x in lines)
-    assert 'guest-match err=0000 value=0' in lines
-    if host: assert 'host-match err=0000 value=0' in lines
-    if prior: assert 'prior-match err=0000 value=0' in lines
+def probe_results(request, path, *, previous=(), size=32, prior=False, host=True):
+    # Preparation inside export is checkpointed and rolled back on failure.
+    # Let guest startup/mount/probe work advance before attempting a real export.
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        ready, _ = request('guest-ready', ok=None)
+        if ready:
+            request('export', path)  # An export error remains an acceptance failure.
+            lines = read_log(path)
+            starts = [i for i, line in enumerate(lines) if line.startswith('begin ')]
+            if starts and starts[-1] >= len(previous) and lines[-1].startswith('complete '):
+                print('\n'.join(lines[starts[-1]:]), flush=True)
+                return check_records(lines, size, previous=previous, prior=prior, host=host)
+        time.sleep(1)
+    raise AssertionError('No fresh, completed SD probe within 60 seconds; inspect the failure capture and rebuild the current probe if necessary')
 
 with emulator(source, 'initial') as request:
     assert request('sd-state') == 'none'
@@ -118,7 +135,7 @@ with emulator(source, 'initial') as request:
     request('sd-insert', image); time.sleep(3)
     request('install', a.probe.resolve()); time.sleep(2)
     request('launch-app', 'Frond SD probe'); time.sleep(3)
-    request('export', root / 'initial.zip'); check_log(root / 'initial.zip')
+    initial = probe_results(request, root / 'initial.zip')
     request('save', root / 'inserted.frond')
     assert hashlib.sha256(image.read_bytes()).hexdigest() == imported_hash
 with emulator(root / 'inserted.frond', 'resumed') as request:
@@ -130,7 +147,7 @@ with emulator(root / 'ejected.frond', 'ejected') as request:
     assert request('sd-state') == 'ejected'
     request('sd-reinsert'); time.sleep(3)
     request('launch-app', 'Frond SD probe'); time.sleep(3)
-    request('export', root / 'reinserted.zip'); check_log(root / 'reinserted.zip', prior=True)
+    reinserted = probe_results(request, root / 'reinserted.zip', previous=initial, prior=True)
     request('reset'); time.sleep(25)
     for attempt in range(20):
         ready, _ = request('launch-app', 'Frond SD probe', ok=None)
@@ -138,16 +155,11 @@ with emulator(root / 'ejected.frond', 'ejected') as request:
         time.sleep(5)
     assert ready, 'Palm OS did not become ready after reset'
     time.sleep(3)
-    for attempt in range(10):
-        exported, _ = request('export', root / 'reset.zip', ok=None)
-        if exported: break
-        time.sleep(3)
-    assert exported, 'Palm export API did not become ready after reset/probe launch'
-    check_log(root / 'reset.zip', prior=True)
+    reset = probe_results(request, root / 'reset.zip', previous=reinserted, prior=True)
     request('sd-eject'); time.sleep(3)
     request('sd-create', '128'); time.sleep(3)
     request('launch-app', 'Frond SD probe'); time.sleep(3)
-    request('export', root / 'large.zip'); check_log(root / 'large.zip', host=False)
+    probe_results(request, root / 'large.zip', previous=reset, size=128, host=False)
     request('save', root / 'large.frond')
 with emulator(root / 'large.frond', 'large-resumed') as request:
     assert request('sd-state') == 'inserted'

@@ -49,9 +49,19 @@ python3 tests/desktop-sd.py --session /path/to/tx.session \
 
 This optional test needs prc-tools-remix, PilRC and the Palm OS 5 SDK, supplied
 separately. Its results contain firmware, applications and Palm user data; do not
-publish the sessions or RAM export ZIPs. It can take several minutes to run. Boot/API readiness is retried after reset
-instead of assuming a fixed boot duration. Model and format regressions run through `make test-sd` and
-`make test` without firmware or SDK dependencies.
+publish the sessions or RAM export ZIPs. It can take several minutes to run.
+Rebuild the probe when its source changes: acceptance requires its invocation
+begin/completion markers, mounted capacity and explicit I/O results. Each stage
+must append a fresh complete invocation; a successful launch or an unchanged
+older log cannot establish a pass. The 128 MiB replacement must also report
+that the old card's host and guest files are absent before creating its own file.
+
+Guest readiness is bounded and lets startup/mount work progress before a full
+RAM export. Export errors and completed probe errors still fail immediately.
+On failure, the test attempts to save `<stage>-failed.frond` and a screen capture
+beside the log, preserving the original failure. Model, format and result-checker
+regressions run through `make test-sd` and `make test` without firmware or SDK
+dependencies.
 
 The controller changes follow Intel's
 [PXA27x Developer's Manual](https://support.eurotech-inc.com/developers/datasheets/PXA270_DeveloperManual.pdf),

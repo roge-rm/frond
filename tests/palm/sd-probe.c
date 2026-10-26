@@ -21,13 +21,18 @@ static void logResult(const Char* label, Err error, UInt32 value) {
 }
 static void probe(void) {
     UInt32 iterator = vfsIteratorStart, count = 0, bytes = 0;
+    UInt32 used = 0, total = 0, started = TimGetTicks();
     UInt16 volume = 0;
     FileRef file = 0;
     Char data[64];
     const Char expected[] = "Hello from host\n", written[] = "Written by Palm TX\n";
-    Err error = VFSVolumeEnumerate(&volume, &iterator);
+    Err error;
+    logResult("begin", 0, started);
+    error = VFSVolumeEnumerate(&volume, &iterator);
     logResult("enumerate", error, volume);
-    if (error) return;
+    if (error) { logResult("complete", error, started); return; }
+    error = VFSVolumeSize(volume, &used, &total);
+    logResult("volume-size", error, total);
     error = VFSFileOpen(volume, "/HOST.TXT", vfsModeRead, &file);
     logResult("host-open", error, 0);
     if (!error) {
@@ -35,15 +40,16 @@ static void probe(void) {
         error = VFSFileRead(file, sizeof(data) - 1, data, &bytes);
         logResult("host-read", error, bytes);
         logResult("host-match", StrCompare(data, expected) ? 1 : 0, 0);
-        VFSFileClose(file);
+        logResult("host-close", VFSFileClose(file), 0);
     }
     error = VFSFileOpen(volume, "/GUEST.TXT", vfsModeRead, &file);
     logResult("prior-open", error, 0);
     if (!error) {
         MemSet(data, sizeof(data), 0);
-        VFSFileRead(file, sizeof(data) - 1, data, &bytes);
+        error = VFSFileRead(file, sizeof(data) - 1, data, &bytes);
+        logResult("prior-read", error, bytes);
         logResult("prior-match", StrCompare(data, written) ? 1 : 0, 0);
-        VFSFileClose(file);
+        logResult("prior-close", VFSFileClose(file), 0);
     }
     error = VFSFileOpen(volume, "/GUEST.TXT", vfsModeWrite | vfsModeCreate | vfsModeTruncate, &file);
     logResult("guest-open", error, 0);
@@ -53,12 +59,15 @@ static void probe(void) {
         logResult("guest-close", VFSFileClose(file), 0);
     }
     error = VFSFileOpen(volume, "/GUEST.TXT", vfsModeRead, &file);
+    logResult("guest-reopen", error, 0);
     if (!error) {
         MemSet(data, sizeof(data), 0);
-        VFSFileRead(file, sizeof(data) - 1, data, &bytes);
+        error = VFSFileRead(file, sizeof(data) - 1, data, &bytes);
+        logResult("guest-read", error, bytes);
         logResult("guest-match", StrCompare(data, written) ? 1 : 0, 0);
-        VFSFileClose(file);
+        logResult("guest-read-close", VFSFileClose(file), 0);
     }
+    logResult("complete", 0, started);
 }
 UInt32 PilotMain(UInt16 command, MemPtr parameters, UInt16 flags) {
     EventType event;

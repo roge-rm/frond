@@ -174,6 +174,7 @@ deb: desktop
 
 .PHONY: test-sd
 test-sd: out/frond
+	python3 tests/sd-results.py
 	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/common -Ibuild/source/src/uarm/native \
 		tests/sd-session.cpp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-sd-session
 	./build/test-sd-session
