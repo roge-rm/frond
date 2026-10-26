@@ -1,0 +1,569 @@
+--- a/src/uarm/uarm/SoC.h
++++ b/src/uarm/uarm/SoC.h
+@@ -120,6 +120,7 @@
+    protected:
+     // Actual SoC needs to implement those, the other virtuals are taken
+     // care of in soc_generic.h
++    virtual void BeforeStateReplacement() {}
+     virtual void BeginSerialCheckpoint() {}
+     virtual void EndSerialCheckpoint() {}
+     virtual void OnSetFramebufferDirty() = 0;
+--- a/src/uarm/uarm/mem.cpp
++++ b/src/uarm/uarm/mem.cpp
+@@ -92,6 +92,15 @@
+     return memRegionAddFixed(mem, REGION_ROM, pa, sz, af, uD);
+ }
+ 
++bool memIsBufferRange(ArmMem* mem, uint32_t addr, uint32_t size, bool write) {
++    const uint64_t end = uint64_t(addr) + size;
++    if (!size || end > 0x100000000ull) return false;
++    const auto contains = [&](const ArmMemRegion& r) {
++        return r.ub && r.pa <= addr && end <= r.ub;
++    };
++    return contains(mem->regions[REGION_RAM]) || (!write && contains(mem->regions[REGION_ROM]));
++}
++
+ template <int size, bool write>
+ bool memAccess(struct ArmMem *mem, uint32_t addr, void *buf) {
+     const uint32_t ub = addr + size;
+--- a/src/uarm/uarm/mem.h
++++ b/src/uarm/uarm/mem.h
+@@ -17,6 +17,9 @@
+ bool memRegionAddRam(struct ArmMem* mem, uint32_t pa, uint32_t sz, ArmMemAccessF af, void* uD);
+ bool memRegionAddRom(struct ArmMem* mem, uint32_t pa, uint32_t sz, ArmMemAccessF af, void* uD);
+ 
++// True only for a complete RAM/ROM range, never MMIO. DMA tails may split these accesses.
++bool memIsBufferRange(ArmMem* mem, uint32_t addr, uint32_t size, bool write);
++
+ template <int size, bool write>
+ bool memAccess(struct ArmMem* mem, uint32_t addr, void* buf);
+ 
+--- a/src/uarm/uarm/pxa_DMA.cpp
++++ b/src/uarm/uarm/pxa_DMA.cpp
+@@ -172,48 +172,60 @@
+     return irqUpdate;
+ }
+ 
++static bool pxaDmaPrvBusError(PxaDma* dma, PxaDmaChannel* ch) {
++    ch->CSR |= 1;
++    pxaDmaPrvChannelStop(dma, ch);
++    return true; // caller must recalculate IRQ
++}
++
+ static bool pxaDmaPrvChannelDoBurst(
+     struct PxaDma* dma, uint_fast8_t channel)  // return true if irq need updating after what we did
+ {
+     struct PxaDmaChannel* ch = &dma->channels[channel];
+-    uint32_t each = 1 << (((ch->CR >> 14) & 3) - 1);
+     uint32_t num = 4 << ((ch->CR >> 16) & 3);
+-
+-    if (!((ch->CR >> 14) & 3)) {
+-        fprintf(stderr, "DMA is on but WIDTH is misprogrammed\n");
+-        uarmAbort();
+-    }
+-
+-    // we never transfer more than there is left
+     if (num > (ch->CR & 0x1fff)) num = ch->CR & 0x1fff;
+-
+-    if (num % each) {  // xfer size not multiple of xfer item sz?
+-
+-        fprintf(stderr, "cannot xfer %u bytes using %u-byte piece. Halting\n", (unsigned)num,
+-                (unsigned)each);
+-        uarmAbort();
+-    }
+-
+-    num /= each;  // convert from bytes to transfers
+-
+-    // fprintf(stderr, "dma ch %u burst, %u bytes left before it\n", channel, ch->CR & 0x1fff);
+-
+-    while (num--) {
+-        uint32_t src = ch->SAR;
+-        uint32_t dst = ch->TAR;
+-        uint32_t t;
+-
+-        if (!memAccess(dma->mem, src, each, false, &t) ||
+-            !memAccess(dma->mem, dst, each, true, &t)) {
+-            fprintf(stderr, "DMA xfer bus error\n");
+-            dma->channels[channel].CSR |= 1;  // signl bus error, not running
+-            pxaDmaPrvChannelStop(dma, ch);
+-            return true;
+-        }
+-
+-        if (ch->CR & 0x80000000ul) ch->SAR += each;
+-        if (ch->CR & 0x40000000ul) ch->TAR += each;
+-        ch->CR -= each;
++    const bool memoryMove = !(ch->CR & 0x30000000u) &&
++        memIsBufferRange(dma->mem, ch->SAR, num, false) &&
++        memIsBufferRange(dma->mem, ch->TAR, num, true);
++    const uint32_t width = (ch->CR >> 14) & 3;
++    // PXA27x table 5-6/5-14: WIDTH=00 is required for memory moves,
++    // but reserved for on-chip peripheral transactions. Use word memory beats.
++    if (!width && !memoryMove) return pxaDmaPrvBusError(dma, ch);
++    const uint32_t each = width ? 1u << (width - 1) : 4;
++
++    // A short memory-to-memory tail can be split into byte lanes. Never do
++    // that to MMIO: each read/write may consume FIFO data or acknowledge status.
++    const uint32_t tail = num % each;
++    const uint64_t tailSource = uint64_t(ch->SAR) + ((ch->CR & 0x80000000u) ? num - tail : 0);
++    const uint64_t tailTarget = uint64_t(ch->TAR) + ((ch->CR & 0x40000000u) ? num - tail : 0);
++    if (tail && (tailSource > 0xffffffffull || tailTarget > 0xffffffffull || (ch->CR & 0x30000000u) ||
++                 !memIsBufferRange(dma->mem, tailSource, tail, false) ||
++                 !memIsBufferRange(dma->mem, tailTarget, tail, true)))
++        return pxaDmaPrvBusError(dma, ch);
++
++    while (num) {
++        const uint32_t count = num < each ? num : each;
++        // The physical memory map cannot represent a wrapping access.
++        if (uint64_t(ch->SAR) + count > 0xffffffffull ||
++            uint64_t(ch->TAR) + count > 0xffffffffull)
++            return pxaDmaPrvBusError(dma, ch);
++        uint32_t value = 0;
++        bool ok = true;
++        if (count == each) {
++            ok = memAccess(dma->mem, ch->SAR, each, false, &value) &&
++                 memAccess(dma->mem, ch->TAR, each, true, &value);
++        } else {
++            uint8_t bytes[4]{};
++            for (unsigned i = 0; i < count && ok; ++i)
++                ok = memAccess(dma->mem, ch->SAR + i, 1, false, &bytes[i]);
++            for (unsigned i = 0; i < count && ok; ++i)
++                ok = memAccess(dma->mem, ch->TAR + i, 1, true, &bytes[i]);
++        }
++        if (!ok) return pxaDmaPrvBusError(dma, ch);
++        if (ch->CR & 0x80000000u) ch->SAR += count;
++        if (ch->CR & 0x40000000u) ch->TAR += count;
++        ch->CR -= count;
++        num -= count;
+     }
+ 
+     // check for end
+@@ -248,7 +260,7 @@
+             do {
+                 if (pxaDmaPrvChannelDoBurst(dma, channel)) irqUpdate = true;
+ 
+-            } while ((ch->CR & 0x1fff) && !justOne);
++            } while (pxaDmaPrvChannelRunning(dma, ch) && (ch->CR & 0x1fff) && !justOne);
+         }
+     }
+ 
+--- a/src/uarm/uarm/pxa_UART.cpp
++++ b/src/uarm/uarm/pxa_UART.cpp
+@@ -51,6 +51,10 @@
+     uint8_t irq;
+     uint32_t cyclesSinceRecv;
+     uint32_t transmitRemaining; // half-bit * divisor units; one batch advances 18
++    bool detaching;
++    bool externalClient;              // callback ownership is never serialized
++    PxaUartClientDetach detachF;
++    uint8_t modemInputs;               // live pin levels, not session state
+     unsigned ioCheckpoints;    // host-only nesting; never serialized
+ 
+     bool Paced() const { return fifoOccupancy && baseAddr != PXA_HWUART_BASE; }
+@@ -59,6 +63,14 @@
+         const uint32_t dataBits = 5 + (LCR & 3);
+         const uint32_t stopHalfBits = (LCR & 4) ? (dataBits == 5 ? 3 : 4) : 2;
+         return Divisor() * (2 * (1 + dataBits + ((LCR & 8) ? 1 : 0)) + stopHalfBits);
++    }
++    bool HasModem() const { return Paced() && (baseAddr == PXA_FFUART_BASE || baseAddr == PXA_BTUART_BASE); }
++    // Table 10-25: BTUART has only CTS/RTS; STUART has no modem pins.
++    uint8_t ModemInputMask() const { return HasModem() ? (baseAddr == PXA_FFUART_BASE ? 0xf0 : 0x10) : 0; }
++    uint8_t ModemOutputMask() const { return HasModem() ? (baseAddr == PXA_FFUART_BASE ? 3 : 2) : 0; }
++    bool Loopback() const { return Paced() && (MCR & 0x10); }
++    bool CanStartTransmit() const {
++        return !HasModem() || !(FCR & 1) || !(MCR & 0x20) || (MSR & 0x10);
+     }
+     bool Clocked() const { return (IER & 0x40) && (!Paced() || Divisor()); }
+ 
+@@ -152,7 +164,7 @@
+ #define UART_LSR_OE 0x02  // recv fifo overran
+ #define UART_LSR_DR 0x01  // byte received
+ 
+-#define UART_MCR_LOOP 0x10  // loop modem control lines (not full loopback)
++#define UART_MCR_LOOP 0x10  // local data and modem-control loopback on PXA27x
+ #define UART_MCR_OUT2 0x08  // when loop is 0 enables or disables UART interrupts
+ #define UART_MCR_OUT1 0x04  // force RI to 1
+ #define UART_MCR_RTS 0x02   // 1 -> nRTS is 0
+@@ -163,7 +175,7 @@
+ #define UART_MSR_DSR 0x20
+ #define UART_MSR_CTS 0x10
+ #define UART_MSR_DDCD 0x08  // dcd changed since last read
+-#define UART_MSR_TERI 0x04  // ri has changed from 0 to 1 since last read
++#define UART_MSR_TERI 0x04  // asserted RI has fallen since last read
+ #define UART_MSR_DDSR 0x02  // dsr changed since last read
+ #define UART_MSR_DCTS 0x01  // cts changed since last read
+ 
+@@ -171,7 +183,8 @@
+ 
+ static void pxaUartPrvIrq(struct PxaUart *uart, bool raise) {
+     pxaIcInt(uart->ic, uart->irq,
+-             (uart->IER & UART_IER_UUE) && !(uart->MCR & UART_MCR_LOOP) && (uart->MCR & UART_MCR_OUT2) &&
++             (uart->IER & UART_IER_UUE) &&
++                 (uart->Loopback() || (!(uart->MCR & UART_MCR_LOOP) && (uart->MCR & UART_MCR_OUT2))) &&
+                  raise /* only raise if ints are enabled */);
+ }
+ 
+@@ -209,7 +222,7 @@
+     func(chr, data);
+ }
+ 
+-static uint_fast8_t pxaUartPrvFifoUsed(struct UartFifo *fifo)  // return num spots used
++static uint_fast8_t pxaUartPrvFifoUsed(const struct UartFifo *fifo)  // return num spots used
+ {
+     uint_fast8_t v;
+ 
+@@ -282,7 +295,7 @@
+     if (uart->LSR & UART_LSR_TEMT) {  // if transmit, put in shift register immediately if it's idle
+ 
+         uart->transmitShift = v;
+-        uart->transmitRemaining = uart->CharacterUnits();
++        uart->transmitRemaining = 0;
+         uart->LSR &= ~UART_LSR_TEMT;
+         uart->reschedule.rescheduleCb(uart->reschedule.ctx, RESCHEDULE_TASK_UART);
+     } else if (uart->FCR & UART_FCR_TRFIFOE) {  // put in tx fifo if in fifo mode
+@@ -298,6 +311,22 @@
+     } else {
+         // nothing to do - buffer is full so we ignore this request
+     }
++}
++
++static void pxaUartPrvModemStatus(PxaUart* uart) {
++    if (!uart->Paced()) return;
++    if (!uart->HasModem()) { uart->MSR = 0; return; }
++    const uint8_t old = uart->MSR & 0xf0;
++    const uint8_t pins = uart->Loopback() ?
++        ((uart->MCR & 1) ? UART_MSR_DSR : 0) | ((uart->MCR & 2) ? UART_MSR_CTS : 0) |
++        ((uart->MCR & 4) ? UART_MSR_RI : 0) | ((uart->MCR & 8) ? UART_MSR_DCD : 0) : uart->modemInputs;
++    const uint8_t next = pins & uart->ModemInputMask();
++    const uint8_t changed = old ^ next;
++    uint8_t delta = ((changed & UART_MSR_CTS) ? UART_MSR_DCTS : 0) |
++                    ((changed & UART_MSR_DSR) ? UART_MSR_DDSR : 0) |
++                    ((changed & UART_MSR_DCD) ? UART_MSR_DDCD : 0) |
++                    ((old & UART_MSR_RI) && !(next & UART_MSR_RI) ? UART_MSR_TERI : 0);
++    uart->MSR = next | (uart->MSR & 0x0f) | delta;
+ }
+ 
+ static bool pxaUartPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size, bool write,
+@@ -401,6 +430,7 @@
+ 
+             case 4:
+                 uart->MCR = val;
++                pxaUartPrvModemStatus(uart);
+                 break;
+ 
+             case 7:
+@@ -465,6 +495,7 @@
+ 
+             case 6:
+                 val = uart->MSR;
++                if (uart->Paced()) { uart->MSR &= 0xf0; recalcValues = true; }
+                 break;
+ 
+             case 7:
+@@ -496,6 +527,8 @@
+ void pxaUartSetFuncs(struct PxaUart *uart, PxaUartReadF readF, PxaUartWriteF writeF,
+                      PxaUartClientIsActive clientIsActiveF, PxaUartClientTick clientTickF,
+                      void *userData) {
++    if (uart->ioCheckpoints || uart->detaching) return;
++    pxaUartDetachExternal(uart);
+     if (!readF)
+         readF = pxaUartPrvDefaultRead;  // these are special funcs since they get their own private
+                                         // data - the uart :)
+@@ -506,6 +539,71 @@
+     uart->clientIsActiveF = clientIsActiveF;
+     uart->clientTickF = clientTickF;
+     uart->callbackData = userData;
++}
++
++void pxaUartResync(PxaUart* uart) {
++    pxaUartPrvModemStatus(uart);
++    pxaUartPrvRecalc(uart);
++}
++
++bool pxaUartSetModemInputs(PxaUart* uart, uint8_t asserted) {
++    if (!uart->HasModem() || uart->ioCheckpoints || uart->detaching || (asserted & ~uart->ModemInputMask())) return false;
++    uart->modemInputs = asserted;
++    pxaUartResync(uart);
++    uart->reschedule.rescheduleCb(uart->reschedule.ctx, RESCHEDULE_TASK_UART);
++    return true;
++}
++
++uint8_t pxaUartGetModemOutputs(const PxaUart* uart) {
++    if (!uart->HasModem() || uart->Loopback()) return 0;
++    uint8_t outputs = uart->MCR & uart->ModemOutputMask();
++    if ((uart->FCR & UART_FCR_TRFIFOE) && (uart->MCR & 0x20) && (outputs & UART_MCR_RTS)) {
++        const unsigned threshold[] = {1, 8, 16, 32};
++        if (pxaUartPrvFifoUsed(&uart->RX) >= threshold[uart->FCR >> 6]) outputs &= ~UART_MCR_RTS;
++    }
++    return outputs;
++}
++
++void pxaUartDetachExternal(PxaUart* uart) {
++    if (!uart->externalClient || uart->ioCheckpoints) return;
++    uart->detaching = true;
++    struct Guard { PxaUart* uart; ~Guard() { uart->detaching = false; } } guard{uart};
++    const auto notify = uart->detachF;
++    void* context = uart->callbackData;
++    uart->externalClient = false;
++    uart->detachF = nullptr;
++    uart->readF = pxaUartPrvDefaultRead;
++    uart->writeF = pxaUartPrvDefaultWrite;
++    uart->clientIsActiveF = nullptr;
++    uart->clientTickF = nullptr;
++    uart->callbackData = nullptr;
++    uart->modemInputs = 0;
++    pxaUartResync(uart);
++    notify(context); // exactly once; clear ownership before notifying
++}
++
++bool pxaUartAttachExternal(PxaUart* uart, PxaUartReadF readF, PxaUartWriteF writeF,
++                          PxaUartClientIsActive activeF, PxaUartClientTick tickF,
++                          PxaUartClientDetach detachF, void* context) {
++    if (!uart->HasModem() || uart->baseAddr != PXA_FFUART_BASE || !detachF ||
++        uart->ioCheckpoints || uart->detaching || uart->externalClient || uart->Loopback() ||
++        !(uart->LSR & UART_LSR_TEMT) || (uart->LSR & UART_LSR_DR)) return false;
++    pxaUartSetFuncs(uart, readF, writeF, activeF, tickF, context);
++    uart->externalClient = true;
++    uart->detachF = detachF;
++    uart->modemInputs = 0; // explicit peer readiness, never saved CTS from an older peer
++    pxaUartResync(uart);
++    return true;
++}
++
++static void pxaUartPrvReceive(PxaUart* uart, uint_fast16_t value) {
++    uart->cyclesSinceRecv = 0;
++    if (uart->FCR & UART_FCR_TRFIFOE) {
++        if (!pxaUartPrvFifoPut(&uart->RX, value)) uart->LSR |= UART_LSR_OE;
++    } else if (uart->LSR & UART_LSR_DR) {
++        uart->LSR |= UART_LSR_OE;
++    } else uart->receiveHolding = value;
++    uart->LSR |= UART_LSR_DR;
+ }
+ 
+ struct PxaUart *pxaUartInit(struct ArmMem *physMem, struct Reschedule reschedule, struct PxaIc *ic,
+@@ -523,7 +621,8 @@
+     uart->IIR = UART_IIR_NOINT;
+     uart->IER = UART_IER_UUE | UART_IER_NRZE;  // uart on
+     uart->LSR = UART_LSR_TEMT | UART_LSR_TDRQ;
+-    uart->MSR = UART_MSR_CTS;
++    uart->MSR = uart->Paced() && !uart->HasModem() ? 0 : UART_MSR_CTS;
++    uart->modemInputs = uart->MSR;
+     pxaUartPrvFifoFlush(&uart->TX);
+     pxaUartPrvFifoFlush(&uart->RX);
+ 
+@@ -535,28 +634,35 @@
+     return uart;
+ }
+ 
+-void pxaUartProcess(struct PxaUart *uart)  // send and rceive up to one character
++void pxaUartProcess(struct PxaUart *uart)  // advance one serial-clock batch
+ {
+     uint_fast16_t v;
+     uint_fast8_t t;
+ 
+-    if (uart->ioCheckpoints || !uart->Clocked()) return;
+-
+-    if (uart->clientTickF) uart->clientTickF(uart->callbackData);
++    if (uart->ioCheckpoints || uart->detaching || !uart->Clocked()) return;
++
++    if (!uart->Loopback() && uart->clientTickF) uart->clientTickF(uart->callbackData);
+ 
+     // 102400 batches/sec; the 921600/divisor baud clock advances nine bits
+     // (18 half-bits) per batch. Carry fractional time between queued frames.
++    bool receivedLoop = false;
+     uint32_t budget = 18;
+     while (!(uart->LSR & UART_LSR_TEMT)) {
+         if (uart->Paced()) {
+-            if (!uart->transmitRemaining) uart->transmitRemaining = uart->CharacterUnits();
++            if (!uart->transmitRemaining) {
++                if (!uart->CanStartTransmit()) break;
++                uart->transmitRemaining = uart->CharacterUnits();
++            }
+             if (uart->transmitRemaining > budget) {
+                 uart->transmitRemaining -= budget;
+                 break;
+             }
+             budget -= uart->transmitRemaining;
+         }
+-        pxaUartPrvPutchar(uart, uart->transmitShift);
++        if (uart->Loopback()) {
++            pxaUartPrvReceive(uart, uart->transmitShift);
++            receivedLoop = true;
++        } else pxaUartPrvPutchar(uart, uart->transmitShift);
+ 
+         if (uart->FCR & UART_FCR_TRFIFOE) {  // fifo mode
+ 
+@@ -575,29 +681,14 @@
+             uart->transmitShift = uart->transmitHolding;
+             uart->LSR |= UART_LSR_TDRQ;
+         }
+-        uart->transmitRemaining = (uart->LSR & UART_LSR_TEMT) ? 0 : uart->CharacterUnits();
++        uart->transmitRemaining = 0;
+         if (!uart->Paced() || !budget) break;
+     }
+ 
+     // now process receiving
+-    v = pxaUartPrvGetchar(uart);
+-    if (v != UART_CHAR_NONE) {
+-        uart->cyclesSinceRecv = 0;
+-        if (uart->FCR & UART_FCR_TRFIFOE) {  // fifo mode
+-
+-            if (!pxaUartPrvFifoPut(&uart->RX, v)) {
+-                uart->LSR |= UART_LSR_OE;
+-            }
+-        } else {
+-            if (uart->LSR & UART_LSR_DR)
+-                uart->LSR |= UART_LSR_OE;
+-            else
+-                uart->receiveHolding = v;
+-        }
+-        uart->LSR |= UART_LSR_DR;
+-    } else if (uart->cyclesSinceRecv <= uart->ReceiveTimeoutTicks()) {
+-        uart->cyclesSinceRecv++;
+-    }
++    v = uart->Loopback() ? UART_CHAR_NONE : pxaUartPrvGetchar(uart);
++    if (v != UART_CHAR_NONE) pxaUartPrvReceive(uart, v);
++    else if (!receivedLoop && uart->cyclesSinceRecv <= uart->ReceiveTimeoutTicks()) ++uart->cyclesSinceRecv;
+ 
+     pxaUartPrvRecalc(uart);
+ }
+@@ -681,6 +772,10 @@
+         uart->IIR |= UART_IIR_SEND_DATA;
+     }
+ 
++    if (!errorSet && uart->HasModem() && (uart->IER & UART_IER_MIE) && (uart->MSR & 0x0f)) {
++        errorSet = true;
++        uart->IIR |= UART_IIR_MODEM_STAT;
++    }
+     if (!errorSet) uart->IIR |= UART_IIR_NOINT;
+ 
+     pxaUartPrvIrq(uart, errorSet);
+@@ -691,10 +786,10 @@
+ }
+ 
+ bool pxaUartTaskRequired(struct PxaUart *uart) {
+-    if (uart->ioCheckpoints || !uart->Clocked()) return false;
+-    return (uart->clientIsActiveF ? uart->clientIsActiveF(uart->callbackData) : false) ||
++    if (uart->ioCheckpoints || uart->detaching || !uart->Clocked()) return false;
++    return (!uart->Loopback() && uart->clientIsActiveF ? uart->clientIsActiveF(uart->callbackData) : false) ||
+            ((uart->LSR & UART_LSR_DR) && uart->cyclesSinceRecv < uart->ReceiveTimeoutTicks()) ||
+-           (uart->LSR & UART_LSR_TEMT) == 0;
++           ((uart->LSR & UART_LSR_TEMT) == 0 && (uart->transmitRemaining || uart->CanStartTransmit()));
+ }
+ 
+ void pxaUartBeginCheckpoint(PxaUart* uart) { ++uart->ioCheckpoints; }
+@@ -715,12 +810,14 @@
+ 
+ template <typename T>
+ void pxaUartLoad(struct PxaUart *uart, T &loader, uint32_t index) {
++    pxaUartDetachExternal(uart);
+     uint32_t version;
+     auto chunk = loader.GetChunkOrFail(ChunkType::pxaUart + index, SAVESTATE_VERSION, "uart", version);
+     if (!chunk) return;
+ 
+     LoadChunkHelper helper(*chunk);
+     uart->DoSaveLoad(helper, version);
++    pxaUartResync(uart);
+ }
+ 
+ template void pxaUartSave<Savestate<ChunkType>>(PxaUart *uart, Savestate<ChunkType> &savestate,
+--- a/src/uarm/uarm/pxa_UART.h
++++ b/src/uarm/uarm/pxa_UART.h
+@@ -37,14 +37,36 @@
+ typedef void (*PxaUartWriteF)(uint_fast16_t chr, void *userData);
+ typedef bool (*PxaUartClientIsActive)(void *userData);
+ typedef void (*PxaUartClientTick)(void *userData);
++typedef void (*PxaUartClientDetach)(void *userData);
++
++// Asserted logical levels; physical nCTS/nRTS polarity is abstracted here.
++#define PXA_UART_CTS 0x10
++#define PXA_UART_DSR 0x20
++#define PXA_UART_RI  0x40
++#define PXA_UART_DCD 0x80
++#define PXA_UART_DTR 0x01
++#define PXA_UART_RTS 0x02
+ 
+ struct PxaUart *pxaUartInit(struct ArmMem *physMem, struct Reschedule reschedule, struct PxaIc *ic,
+                             uint32_t baseAddr, uint8_t irq, bool fifoOccupancy = false);
+ void pxaUartProcess(struct PxaUart *uart);  // write out data in TX fifo and read data into RX fifo
+ 
++// Internal accessory callbacks survive normal restore. Live peers must use AttachExternal.
++// Callback bindings cannot be changed during a serial checkpoint.
+ void pxaUartSetFuncs(struct PxaUart *uart, PxaUartReadF readF, PxaUartWriteF writeF,
+                      PxaUartClientIsActive clientIsActiveF, PxaUartClientTick clientTickF,
+                      void *userData);
++
++// Model-only external ownership, not a host endpoint. Emulator-thread calls only.
++// Attach requires idle TX/RX and a detach notification. Caller must detach before
++// destroying its callback data or UART. Reset/normal load detach; checkpoints do not.
++bool pxaUartAttachExternal(PxaUart* uart, PxaUartReadF readF, PxaUartWriteF writeF,
++                          PxaUartClientIsActive activeF, PxaUartClientTick tickF,
++                          PxaUartClientDetach detachF, void* userData);
++void pxaUartDetachExternal(PxaUart* uart);
++bool pxaUartSetModemInputs(PxaUart* uart, uint8_t asserted);
++uint8_t pxaUartGetModemOutputs(const PxaUart* uart);
++void pxaUartResync(PxaUart* uart);
+ 
+ bool pxaUartIrReceiveEnabled(const PxaUart *uart);
+ 
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -381,7 +381,9 @@
+     pxa270wmmxLoad(wmmx, loader);
+     pxaKpcSleepReset(kpc);
+     pxaGpioSleepReset(gpio);
+-    pxaIcLoad(ic, loader);  // after deassertions from reset peripherals
++    pxaIcLoad(ic, loader);
++    for (auto* uart : {ffUart, stUart, btUart, hwUart})
++        if (uart) pxaUartResync(uart);  // after deassertions from reset peripherals
+     pxaRtcRefreshInterrupts(rtc);  // retained alarm lines survive the IC reset
+ }
+ 
+@@ -487,6 +489,8 @@
+     pxaI2sLoad(i2s, loader);
+     pxaI2cLoad(i2c, loader, 0);
+     pxaIcLoad(ic, loader);
++    for (auto* uart : {ffUart, stUart, btUart, hwUart})
++        if (uart) pxaUartResync(uart);
+     pxaMemCtrlrLoad(memCtrl, loader);
+     pxaPwrClkLoad(pwrClk, loader);
+     if (socRev == 2) pxaI2cLoad(pwrI2c, loader, 1);
+@@ -637,6 +641,11 @@
+ }
+ 
+ void SocPXA::SchedulePcmTask() { UpdateSchedulePcm(); }
++
++void SocPXA::BeforeStateReplacement() {
++    for (auto* uart : {ffUart, stUart, btUart, hwUart})
++        if (uart) pxaUartDetachExternal(uart);
++}
+ 
+ void SocPXA::BeginSerialCheckpoint() {
+     for (auto* uart : {ffUart, stUart, btUart, hwUart})
+--- a/src/uarm/uarm/soc_PXA.h
++++ b/src/uarm/uarm/soc_PXA.h
+@@ -71,6 +71,7 @@
+     void NotifyFastAudioUnderrun();
+ 
+    protected:
++    void BeforeStateReplacement() override;
+     void BeginSerialCheckpoint() override;
+     void EndSerialCheckpoint() override;
+     void OnSetFramebufferDirty() override;
+--- a/src/uarm/uarm/soc_generic_impl.h
++++ b/src/uarm/uarm/soc_generic_impl.h
+@@ -58,6 +58,7 @@
+ 
+ template <class T>
+ void SocGeneric<T>::Reset() {
++    this->BeforeStateReplacement();
+     paceBreakSyscall = 0;
+     SoC::Reset();
+ 
+@@ -110,6 +111,7 @@
+ template <class T>
+ bool SocGeneric<T>::Load(size_t savestateSize, void* savestateData) {
+     if (savestateSize == 0 || !savestateData) return true;
++    this->BeforeStateReplacement();
+ 
+     Savestate<ChunkType> savestate;
+     SavestateLoader<ChunkType> loader;

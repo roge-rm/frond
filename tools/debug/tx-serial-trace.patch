@@ -1,14 +1,14 @@
 --- a/src/uarm/uarm/pxa_UART.cpp
 +++ b/src/uarm/uarm/pxa_UART.cpp
-@@ -51,6 +51,7 @@
-     uint8_t irq;
-     uint32_t cyclesSinceRecv;
-     uint32_t transmitRemaining; // half-bit * divisor units; one batch advances 18
+@@ -55,6 +55,7 @@
+     bool externalClient;              // callback ownership is never serialized
+     PxaUartClientDetach detachF;
+     uint8_t modemInputs;               // live pin levels, not session state
 +    uint64_t traceTicks; // optional observer only, not serialized
      unsigned ioCheckpoints;    // host-only nesting; never serialized
  
      bool Paced() const { return fifoOccupancy && baseAddr != PXA_HWUART_BASE; }
-@@ -191,7 +192,15 @@
+@@ -204,7 +205,15 @@
      (void)chr;
      (void)userData;
  
@@ -25,7 +25,7 @@
  }
  
  static uint16_t pxaUartPrvGetchar(struct PxaUart *uart) {
-@@ -325,6 +334,16 @@
+@@ -354,6 +363,16 @@
          const uint32_t raw = size == 1 ? *(uint8_t *)buf :
              size == 2 ? *(uint16_t *)buf : *(uint32_t *)buf;
          val = raw & 0xff;
@@ -42,11 +42,11 @@
  
          switch (pa) {
              case 0:
-@@ -542,6 +561,7 @@
+@@ -641,6 +660,7 @@
  
-     if (uart->ioCheckpoints || !uart->Clocked()) return;
+     if (uart->ioCheckpoints || uart->detaching || !uart->Clocked()) return;
  
 +    ++uart->traceTicks;
-     if (uart->clientTickF) uart->clientTickF(uart->callbackData);
+     if (!uart->Loopback() && uart->clientTickF) uart->clientTickF(uart->callbackData);
  
      // 102400 batches/sec; the 921600/divisor baud clock advances nine bits

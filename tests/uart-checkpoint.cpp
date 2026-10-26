@@ -77,8 +77,8 @@ int main() {
     const auto count=peer.output.size();run(20);
     assert(peer.output.size()==count+1 && peer.output.back()==0x55);
     puts("PASS: checkpoint construction failure releases UART guard and pending TX progresses");
-    // An ordinary session restore has no rollback-able external peer. This remains
-    // a host-transport blocker: a future endpoint must disconnect on normal restore.
+    // Internal accessory callbacks intentionally survive restore. External live
+    // ownership uses AttachExternal instead (covered by uart-dma-peer.cpp).
     write(0,0x7e);assert(soc.Save());auto state=soc.GetSavestate();
     std::vector<uint8_t> saved(static_cast<uint8_t*>(state.data),static_cast<uint8_t*>(state.data)+state.size);
     const auto sent=peer.output.size();run(20);assert(peer.output.size()==sent+1);
@@ -94,5 +94,5 @@ int main() {
     write(3,0x83);write(0,96);write(1,0);write(3,3);write(1,0x41);write(2,7);
     write(0,0x66);run(20);assert(peer.output.size()==resetAt+1 && peer.output.back()==0x66);
     puts("PASS: rejected restore executes no TX; reset clears pending guest bytes and timing");
-    puts("BLOCKED: ordinary restore replays pending TX and reset retains callback bindings; future host peers must disconnect");
+    puts("PASS: internal accessory bindings survive restore/reset; normal restore replays their saved guest TX");
 }

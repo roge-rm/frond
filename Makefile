@@ -18,7 +18,7 @@ out/frond: build/source/.prepared build/source/src/common/libcommon.a
 	cp build/source/src/uarm/cp-uarm out/frond.new
 	mv -f out/frond.new out/frond
 
-test: test-build-tools prepare test-e2-state test-device-profiles test-uart-lifecycle test-uart-checkpoint test-tx-serial test-gameplay-metrics test-mmu-fast-path test-pxa-power test-compatibility test-developer-run test-xscale-prefetch test-device-controls test-scheduler test-wifi test-host-network test-network-reliability test-keyboard test-network test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pace-debug test-pace-step test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup
+test: test-build-tools prepare test-e2-state test-device-profiles test-uart-lifecycle test-uart-checkpoint test-uart-flow test-uart-dma-peer test-tx-serial test-gameplay-metrics test-mmu-fast-path test-pxa-power test-compatibility test-developer-run test-xscale-prefetch test-device-controls test-scheduler test-wifi test-host-network test-network-reliability test-keyboard test-network test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pace-debug test-pace-step test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup
 	python3 tests/audio-metrics.py
 	python3 tests/audio-timing.py
 	python3 tests/tx-baseline.py
@@ -387,3 +387,21 @@ test-e2-state: out/frond
 		tests/e2-state.cpp @build/e2-core.rsp build/source/src/common/libcommon.a \
 		$(CPU_TEST_LDLIBS) -o build/test-e2-state
 	./build/test-e2-state
+
+.PHONY: test-uart-flow
+test-uart-flow: prepare build/source/src/common/libcommon.a
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/uart-flow.cpp build/source/src/uarm/uarm/pxa_UART.cpp \
+		build/source/src/common/libcommon.a -lz -o build/test-uart-flow
+	./build/test-uart-flow
+
+.PHONY: test-uart-dma-peer
+build/test-uart-dma-peer: out/frond tests/uart-dma-peer.cpp
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/uart-dma-peer-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/native \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/uart-dma-peer.cpp @build/uart-dma-peer-core.rsp build/source/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-uart-dma-peer
+
+test-uart-dma-peer: build/test-uart-dma-peer
+	./build/test-uart-dma-peer
