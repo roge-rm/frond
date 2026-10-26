@@ -29,6 +29,22 @@ def git(root, *args):
     return subprocess.check_output(['git', '-C', str(root), *args], text=True).strip()
 
 
+class PackageCliTests(unittest.TestCase):
+    def test_help_and_unknown_options_do_not_build(self):
+        with tempfile.TemporaryDirectory(prefix='frond-package-cli-') as directory:
+            tools = Path(directory) / 'tools'
+            tools.mkdir()
+            for name in ('package-deb.py', 'package_policy.py'):
+                shutil.copyfile(ROOT / 'tools' / name, tools / name)
+            script = tools / 'package-deb.py'
+            help_result = subprocess.run([sys.executable, str(script), '--help'], capture_output=True)
+            self.assertEqual(help_result.returncode, 0)
+            self.assertIn(b'usage:', help_result.stdout)
+            bad_result = subprocess.run([sys.executable, str(script), '--unknown'], capture_output=True)
+            self.assertEqual(bad_result.returncode, 2)
+            self.assertFalse((Path(directory) / 'out').exists())
+
+
 class PrepareTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='frond-build-test-')

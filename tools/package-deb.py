@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Package locally built Frond binaries using a checked, explicit file inventory."""
 
+import argparse
 import gzip
 import os
 from pathlib import Path
@@ -113,6 +114,7 @@ Description: Native Palm TX emulator
 
 
 if __name__ == '__main__':
+    argparse.ArgumentParser(description=__doc__).parse_args()
     try:
         package()
     except (ValueError, OSError, subprocess.CalledProcessError) as error:
