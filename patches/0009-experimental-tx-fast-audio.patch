@@ -1,0 +1,421 @@
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -273,7 +273,7 @@
+ 
+         case SCHEDULER_TASK_PCM:
+             if (!syscallDispatchInProgress(syscallDispatch)) devicePcmPeriodic(dev);
+-            return (pcmSuspended && pcmEnabled) ? 0 : 1;
++            return (pcmSuspended && pcmEnabled && !fastAudioRouted) ? 0 : 1;
+ 
+         case SCHEDULER_TASK_AUX_1:
+             CycleBatch0();
+@@ -281,6 +281,7 @@
+ 
+         case SCHEDULER_TASK_AUX_2:
+             PumpEventQueues();
++            if (fastAudio) { fastAudio->Tick(GetTime()); UpdateFastAudioRoute(); }
+             return 1;
+ 
+         case SCHEDULER_TASK_AUX_3:
+@@ -310,13 +311,17 @@
+ }
+ 
+ void SocPXA::OnSetAudioQueue(struct AudioQueue *audioQueue) {
+-    deviceSetAudioQueue(dev, audioQueue);
+-}
+-
+-void SocPXA::OnSetPcmOutputEnabled() { SchedulePcmTask(); }
++    if (fastAudio) fastAudio->SetQueue(audioQueue);
++    deviceSetAudioQueue(dev, fastAudioRouted ? nullptr : audioQueue);
++}
++
++void SocPXA::OnSetPcmOutputEnabled() {
++    if (fastAudio) fastAudio->RestartOutput();
++    SchedulePcmTask();
++}
+ 
+ void SocPXA::OnSetPcmSuspended() {
+-    if (!pcmEnabled) return;
++    if (!pcmEnabled || fastAudioRouted) return;
+ 
+     scheduler->RescheduleTask(SCHEDULER_TASK_PCM, pcmSuspended ? 0 : 1);
+     if (!pcmSuspended) cpuSetSlowPath(cpu, SLOW_PATH_REASON_RESCHEDULE);
+@@ -407,6 +412,7 @@
+             deviceKey(dev, key, false);
+     }
+     if (audioQueue) audioQueueClear(audioQueue);
++    if (fastAudio) { fastAudio->Reset(); UpdateFastAudioRoute(); }
+ 
+     SchedulePcmTask();
+     keypadReset(kp);
+@@ -546,9 +552,10 @@
+ }
+ 
+ void SocPXA::UpdateSchedulePcm() {
++    // Preview backpressure pauses the whole guest; keep its codec and DMA clocks together.
+     scheduler->ScheduleTask(SCHEDULER_TASK_PCM,
+-                            1_sec / (pcmEnabled ? PCM_HZ_ENABLED : PCM_HZ_DISABLED),
+-                            pcmSuspended ? 0 : 1);
++                            1_sec / (pcmEnabled || fastAudioRouted ? PCM_HZ_ENABLED : PCM_HZ_DISABLED),
++                            (pcmSuspended && !fastAudioRouted) ? 0 : 1);
+ }
+ 
+ void SocPXA::RescheduleCB(void *ctx, uint32_t task) {
+@@ -617,3 +624,29 @@
+     cpuInvalidateCodeCache(cpu);
+     return true;
+ }
++
++
++bool SocPXA::EnableFastAudio() {
++    if (GetDeviceType() != DeviceType5::deviceTypeTX || fastAudio) return false;
++    fastAudio = std::make_unique<FastAudio>([this](uint32_t addr, void* data, unsigned size) {
++        return cpuMemOpExternal(cpu,data,addr,size,false);
++    });
++    fastAudio->SetQueue(audioQueue);
++    auto hook = [](void* ctx, uint32_t trap, uint32_t* regs) {
++        auto soc = static_cast<SocPXA*>(ctx);
++        soc->fastAudio->Handle(trap,regs,soc->GetTime(),soc->pcmEnabled);
++        soc->UpdateFastAudioRoute();
++        return true;
++    };
++    for (auto trap : {0x4318u,0x4320u,0x4324u})
++        patchDispatchAddPatch(patchDispatch,trap,hook,nullptr,this);
++    return true;
++}
++void SocPXA::UpdateFastAudioRoute() {
++    const bool bypass = fastAudio && fastAudio->Bypass();
++    if (bypass == fastAudioRouted) return;
++    fastAudioRouted = bypass;
++    deviceSetAudioQueue(dev,bypass ? nullptr : audioQueue);
++    UpdateSchedulePcm();
++    cpuSetSlowPath(cpu,SLOW_PATH_REASON_RESCHEDULE);
++}
+--- a/src/uarm/uarm/soc_PXA.h
++++ b/src/uarm/uarm/soc_PXA.h
+@@ -4,6 +4,7 @@
+ #include <cstdint>
+ 
+ #include "CPU.h"
++#include "fast_audio.h"
+ #include "device_type5.h"
+ #include "memory_buffer.h"
+ #include "soc_generic.h"
+@@ -54,6 +55,9 @@
+ 
+     uint32_t DispatchTicks(uint32_t clientType, uint32_t batchedTicks);
+ 
++    bool EnableFastAudio();
++    bool FastAudioActive() const { return fastAudio && fastAudio->Active(); }
++
+    protected:
+     void OnSetFramebufferDirty() override;
+     bool OnSleep() override;
+@@ -75,6 +79,9 @@
+     void OnSave(T &savestate);
+ 
+    private:
++    void UpdateFastAudioRoute();
++    std::unique_ptr<FastAudio> fastAudio;
++    bool fastAudioRouted{false};
+     void AllocateBuffers();
+     void SetupScheduler();
+     void SchedulePcmTask();
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -51,6 +51,7 @@
+     bool smallWindow;
+     optional<DisplayMode> displayMode;
+     bool experimentalTx;
++    bool experimentalFastAudio;
+     optional<unsigned int> runFor;
+     optional<string> framebufferOutput;
+     optional<string> inputReplay;
+@@ -214,6 +215,10 @@
+             ? sessionDevice : options.experimentalTx ? DeviceType5::deviceTypeTX
+                                                      : romInfo.GetDeviceType();
+         const bool isTx = deviceType == DeviceType5::deviceTypeTX;
++        if (options.experimentalFastAudio && (!isTx || md5(static_cast<uint8_t*>(nor.data),nor.size) != "85b048a692aa317763a7077ea72da6cb")) {
++            cerr << "experimental fast audio requires the verified TX 5.4 NOR image" << endl;
++            return false;
++        }
+         if (isTx) {
+             cerr << "EXPERIMENTAL Palm TX: reset and session testing" << endl;
+             if (options.sd) {
+@@ -338,8 +343,13 @@
+ 
+         AudioQueue* audioQueue = audioQueueCreate(AUDIO_QUEUE_SIZE);
+         soc->SetAudioQueue(audioQueue);
++        if (options.experimentalFastAudio && !static_cast<SocPXA*>(soc)->EnableFastAudio()) {
++            cerr << "unable to enable experimental fast audio" << endl;
++            return false;
++        }
+ 
+         MainLoop mainLoop(soc);
++        if (options.experimentalFastAudio) mainLoop.SetTimesliceUsec(1000000 / 120);
+         mainLoop.SetCyclesPerSecondLimit(options.mips * 1000000);
+ 
+         Rotation rotation = Rotation::portrait_0;
+@@ -377,6 +387,7 @@
+             .screenHeight = displayConfiguration.height + displayConfiguration.graffitiHeight};
+ 
+         uint64_t lastSpeedDump = startedAt;
++        bool waitForPreviewAudio = false;
+ 
+         while (true) {
+             uint64_t now = timestampUsec();
+@@ -392,7 +403,13 @@
+ 
+             if (!options.disableAudio) soc->SetPcmSuspended(audioDriver.GetAudioBackpressure());
+ 
+-            mainLoop.Cycle(now);
++            if (options.experimentalFastAudio && static_cast<SocPXA*>(soc)->FastAudioActive()) {
++                const auto pending = audioQueuePendingSamples(audioQueue);
++                if (!waitForPreviewAudio && pending > 3072) waitForPreviewAudio = true;
++                if (waitForPreviewAudio && pending < 2048) waitForPreviewAudio = false;
++            } else waitForPreviewAudio = false;
++            if (waitForPreviewAudio) mainLoop.PauseAt(now);
++            else mainLoop.Cycle(now);
+ 
+             sdlRenderer->Draw(sdlEventHandler.RedrawRequested());
+             sdlEventHandler.ClearRedrawRequested();
+@@ -474,6 +491,10 @@
+ 
+     program.add_argument("--framebuffer-output")
+         .help("save the unrotated LCD framebuffer as PNG at the end of --run-for");
++
++    program.add_argument("--experimental-fast-audio")
++        .help("preview one verified TX stereo stream before the firmware audio queue")
++        .default_value(false).implicit_value(true);
+ 
+     program.add_argument("--input-replay")
+         .help("replay timestamped pen/key events and snapshots from a text file");
+@@ -552,6 +573,7 @@
+                        .smallWindow = program.get<bool>("--small-window"),
+                        .displayMode = program.present<DisplayMode>("--display"),
+                        .experimentalTx = program.get<bool>("--experimental-tx"),
++                       .experimentalFastAudio = program.get<bool>("--experimental-fast-audio"),
+                        .runFor = program.present<unsigned int>("--run-for"),
+                        .framebufferOutput = program.present("--framebuffer-output"),
+                        .inputReplay = program.present("--input-replay")};
+--- a/src/uarm/MainLoop.cpp
++++ b/src/uarm/MainLoop.cpp
+@@ -14,9 +14,6 @@
+     constexpr uint32_t CYCLES_PER_SECOND_LIMIT_DEFAULT = 100000000;
+     constexpr uint32_t MAX_LOAD_MAX = 97;
+     constexpr uint32_t MAX_LOAD_CATCHUP_MARGIN = 20;
+-    constexpr uint32_t TIMESLICE_SIZE_USEC = 1000000 / MAIN_LOOP_FPS;
+-    constexpr uint32_t LAG_THRESHOLD_CATCHUP_USEC = (3 * TIMESLICE_SIZE_USEC / 2);
+-    constexpr uint32_t LAG_THRESHOLD_SKIP_USEC = 3 * TIMESLICE_SIZE_USEC;
+     constexpr int PRESERVE_TIMESLICES_FOR_CATCHUP = 3;
+ }  // namespace
+ 
+@@ -33,21 +30,34 @@
+     cyclesPerSecondAverage.Add(cyclesPerSecondLimit);
+ }
+ 
++void MainLoop::PauseAt(uint64_t now) {
++    // Audio pacing intentionally pauses guest time; discard the resulting host-time lag.
++    realTimeUsec = now;
++    virtualTimeUsec = now;
++    lastDeltaUsec = 0;
++}
++
++void MainLoop::SetTimesliceUsec(uint64_t usec) {
++    timesliceUsec = std::clamp<uint64_t>(usec,1000,1000000);
++}
++
+ double MainLoop::Cycle(uint64_t now) {
++    const uint64_t lagCatchup = 3 * timesliceUsec / 2;
++    const uint64_t lagSkip = 3 * timesliceUsec;
+     // virtualTimeUsec += static_cast<double>(socGetInjectedTimeNsec(soc)) / 1000;
+     soc->ResetInjectedTimeNsec();
+ 
+     double deltaUsec = now - virtualTimeUsec;
+     if (deltaUsec < 0) return 0;
+ 
+-    if (deltaUsec > LAG_THRESHOLD_SKIP_USEC) {
+-        deltaUsec = TIMESLICE_SIZE_USEC;
++    if (deltaUsec > lagSkip) {
++        deltaUsec = timesliceUsec;
+         virtualTimeUsec = now - deltaUsec;
+         cyclesPerSecondAverage.Reset(1);
+ 
+         // cerr << "too much lag, skipping forward" << endl << flush;
+-    } else if (lastDeltaUsec < LAG_THRESHOLD_CATCHUP_USEC &&
+-               deltaUsec >= LAG_THRESHOLD_CATCHUP_USEC) {
++    } else if (lastDeltaUsec < lagCatchup &&
++               deltaUsec >= lagCatchup) {
+         cyclesPerSecondAverage.Reset(PRESERVE_TIMESLICES_FOR_CATCHUP);
+     }
+ 
+@@ -55,7 +65,7 @@
+     realTimeUsec = now;
+ 
+     double cyclesPerSecond = CalculateCyclesPerSecond(
+-        deltaUsec >= LAG_THRESHOLD_CATCHUP_USEC ? (maxLoad - MAX_LOAD_CATCHUP_MARGIN) : maxLoad);
++        deltaUsec >= lagCatchup ? (maxLoad - MAX_LOAD_CATCHUP_MARGIN) : maxLoad);
+     const uint64_t cyclesEmulated =
+         soc->Run(deltaUsec * cyclesPerSecond / 1E6, round(cyclesPerSecond));
+ 
+@@ -72,7 +82,7 @@
+     return slizeSizeSeconds;
+ }
+ 
+-uint64_t MainLoop::GetTimesliceSizeUsec() const { return TIMESLICE_SIZE_USEC; }
++uint64_t MainLoop::GetTimesliceSizeUsec() const { return timesliceUsec; }
+ 
+ uint32_t MainLoop::GetCurrentIps() const { return currentIps; }
+ 
+--- a/src/uarm/MainLoop.h
++++ b/src/uarm/MainLoop.h
+@@ -13,6 +13,8 @@
+     MainLoop(SoC* soc);
+ 
+     double Cycle(uint64_t now);
++    void PauseAt(uint64_t now);
++    void SetTimesliceUsec(uint64_t usec);
+ 
+     uint64_t GetTimesliceSizeUsec() const;
+ 
+@@ -29,6 +31,7 @@
+     SoC* soc{nullptr};
+ 
+     uint64_t realTimeUsec{0};
++    uint64_t timesliceUsec{1000000 / MAIN_LOOP_FPS};
+     uint64_t lastCyclesPerSecond{0};
+ 
+     double virtualTimeUsec{0};
+--- /dev/null
++++ b/src/uarm/uarm/fast_audio.h
+@@ -0,0 +1,130 @@
++#ifndef FROND_FAST_AUDIO_H
++#define FROND_FAST_AUDIO_H
++
++#include <array>
++#include <cstdint>
++#include <cstdio>
++#include <functional>
++#include "audio_queue.h"
++
++// Optional preview of one verified TX PCM stream before its firmware queue.
++class FastAudio {
++public:
++    using Reader = std::function<bool(uint32_t, void*, unsigned)>;
++    explicit FastAudio(Reader read) : read(read) {}
++    void SetQueue(AudioQueue* value) { queue = value; }
++    void RestartOutput() { started=false; if (queue) audioQueueClear(queue); }
++    bool Bypass() const { return active || quietUntil; }
++    bool Active() const { return active; }
++    bool Failed() const { return failed; }
++    void Reset() {
++        active = failed = started = false;
++        quietUntil = 0;
++        if (queue) audioQueueClear(queue);
++    }
++    void Tick(uint64_t now) { if (quietUntil && now >= quietUntil) quietUntil = 0; }
++    void Handle(uint32_t trap, const uint32_t* r, uint64_t now, bool outputEnabled) {
++        if (trap == 0x4318) {
++            if (active) FallBack(now, "stream closed", false);
++            return;
++        }
++        if (failed) return;
++        if (trap == 0x4324) {
++            if (r[0] >= 16) FallBack(now, "device-level controls", true);
++            return;
++        }
++        if (trap != 0x4320 || !outputEnabled || !queue) return;
++        uint32_t object;
++        uint16_t left, right;
++        if (!Profile(r, object, left, right) || !r[2] || r[2] > 4096 || (r[2]&3) || (r[1]&3) || r[1] > UINT32_MAX-r[2]) {
++            FallBack(now, "unsupported driver, format or multiple streams", true);
++            return;
++        }
++        const unsigned frames = r[2]/4;
++        std::array<uint32_t, 1024> block;
++        for (unsigned i=0; i<frames; ++i) {
++            uint32_t sample;
++            if (!read(r[1]+i*4, &sample, 4)) {
++                FallBack(now, "unreadable PCM", true);
++                return;
++            }
++            auto l = Scale(int16_t(sample), left);
++            auto h = Scale(int16_t(sample>>16), right);
++            block[i] = uint16_t(l) | (uint32_t(uint16_t(h))<<16);
++        }
++        if (!active) {
++            audioQueueClear(queue);
++            active = true;
++            quietUntil = 0;
++            std::fputs("experimental fast audio: single stereo 44100 Hz stream active\n", stderr);
++        }
++        bool audible=false;
++        for (unsigned i=0; i<frames; ++i) audible = audible || block[i]!=0;
++        // Avoid pre-filling the preview with the driver's startup silence.
++        if (!started && !audible) return;
++        if (!started) {
++            // One SDL period of startup headroom absorbs a late emulation slice.
++            for (unsigned i=0; i<512; ++i) audioQueuePush(queue,0);
++        }
++        started=true;
++        if (audioQueuePendingSamples(queue)+frames > 6144) {
++            FallBack(now, "preview queue exceeded latency limit", true);
++            return;
++        }
++        for (unsigned i=0; i<frames; ++i) audioQueuePush(queue, block[i]);
++    }
++    static int16_t Scale(int16_t sample, uint16_t gain) {
++        const int32_t v = int32_t(sample)*gain;
++        // ARM ASR rounds negative values down; the verified mixer uses Q11.
++        return int16_t(v >= 0 ? v/2048 : -((-v+2047)/2048));
++    }
++private:
++    bool Word(uint32_t addr, uint32_t& out) { return !(addr&3) && read(addr,&out,4); }
++    bool Half(uint32_t addr, uint16_t& out) { return !(addr&1) && read(addr,&out,2); }
++    bool Is(uint32_t addr, uint32_t value) { uint32_t got; return Word(addr,got) && got==value; }
++    bool Profile(const uint32_t* r, uint32_t& object, uint16_t& left, uint16_t& right) {
++        if (r[0]>=16 || r[12]>UINT32_MAX-0x320) return false;
++        uint32_t entry, ldr, literal, globals, tableOffset;
++        if (!Word(r[12]+0x320,entry) || entry<0x600 || entry>UINT32_MAX-8192) return false;
++        if (!Is(entry,0xe92d4200) || !Is(entry+4,0xe5999000) || !Is(entry+8,0xe5999000) ||
++            !Is(entry+36,0xe0800100) || !Is(entry+40,0xe08ee009) ||
++            !Is(entry+44,0xe08e0100) || !Is(entry+48,0xe5900004) ||
++            !Word(entry+32,ldr) || (ldr&0xfffff000)!=0xe59fe000) return false;
++        // Check the final mixed-output conversion as well as the channel table layout.
++        if (!Is(entry-0x5f8,0xe4920004) || !Is(entry-0x5f4,0xe1a005c0) ||
++            !Is(entry-0x5f0,0xe250cc7f)) return false;
++        literal=entry+40+(ldr&0xfff);
++        if (!Word(literal,tableOffset) || !Word(r[9],globals) || !Word(globals,globals) ||
++            uint64_t(globals)+tableOffset+324>UINT32_MAX) return false;
++        const uint32_t table=globals+tableOffset;
++        unsigned count=0;
++        object=0;
++        for (unsigned i=0; i<16; ++i) {
++            uint32_t p;
++            if (!Word(table+20*i+4,p)) return false;
++            if (p) ++count;
++            if (i==r[0]) object=p;
++        }
++        if (count!=1 || !object || object>UINT32_MAX-44) return false;
++        uint32_t format,rate;
++        uint16_t channels;
++        return Word(object,format) && format==0x12 && Word(object+4,rate) && rate==44100 &&
++            Half(object+8,channels) && channels==2 && Half(object+40,left) && left<=1024 &&
++            Half(object+42,right) && right<=1024;
++    }
++    void FallBack(uint64_t now, const char* reason, bool latch) {
++        if (active) {
++            active=false;
++            started=false;
++            quietUntil=now+250000000; // Let delayed hardware audio drain before reconnecting it.
++            if (queue) audioQueueClear(queue);
++        }
++        failed=latch;
++        std::fprintf(stderr,"experimental fast audio: normal path (%s)\n",reason);
++    }
++    Reader read;
++    AudioQueue* queue{nullptr};
++    bool active{false}, failed{false}, started{false};
++    uint64_t quietUntil{0};
++};
++#endif

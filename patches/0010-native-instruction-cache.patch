@@ -1,0 +1,191 @@
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -16,6 +16,9 @@
+ #include "cputil.h"
+ #include "gdbstub.h"
+ #include "icache.h"
++#ifndef __EMSCRIPTEN__
++#include "icache_internal.h"
++#endif
+ #include "mem.h"
+ #include "memcpy.h"
+ #include "pace.h"
+@@ -3508,6 +3511,10 @@
+         if (fetchPc < 0x02000000UL) fetchPc |= cpu->pid;
+ #endif
+ 
++#ifndef __EMSCRIPTEN__
++        ok = icacheFetchCached<2>(cpu->ic, cpu->curInstrPC, translatedInstr, decoded);
++        if (!ok)
++#endif
+         ok = icacheFetch<memorySystemKind, 2, injected>(cpu->ic, cpu->curInstrPC, &fsr,
+                                                         translatedInstr, decoded);
+ 
+@@ -3556,6 +3563,10 @@
+         if (fetchPc < 0x02000000UL) fetchPc |= cpu->pid;
+ #endif
+ 
++#ifndef __EMSCRIPTEN__
++        ok = icacheFetchCached<4>(cpu->ic, cpu->curInstrPC, instr, decoded);
++        if (!ok)
++#endif
+         ok = icacheFetch<memorySystemKind, 4, injected>(cpu->ic, cpu->curInstrPC, &fsr, instr,
+                                                         decoded);
+ 
+--- a/src/uarm/uarm/icache.cpp
++++ b/src/uarm/uarm/icache.cpp
+@@ -1,62 +1,12 @@
+ //(c) uARM project    https://github.com/uARM-Palm/uARM    uARM@dmitry.gr
+ 
+-#include "icache.h"
++#include "icache_internal.h"
+ 
+ #include <cstdlib>
+ #include <cstring>
+ 
+ #include "CPU.h"
+ #include "cputil.h"
+-
+-#define CACHE_LINE_WIDTH_BITS 5
+-#define CACHE_INDEX_BITS 17
+-
+-// THIS FILE IS ABSOLUTELY NOT ENDIAN SAFE!
+-
+-#if (32 - CACHE_LINE_WIDTH_BITS - CACHE_INDEX_BITS <= 8)
+-    #define CACHE_TAG_TYPE uint_fast8_t
+-#else
+-    #define CACHE_TAG_TYPE uint_fast16_t
+-#endif
+-
+-#define calculateIndex(va) ((va >> CACHE_LINE_WIDTH_BITS) & ~(0xffffffff << CACHE_INDEX_BITS))
+-#define calculateTag(va) (va >> (CACHE_LINE_WIDTH_BITS + CACHE_INDEX_BITS))
+-#define calculateLineIndex(va) (va & ~(0xffffffff << CACHE_LINE_WIDTH_BITS))
+-#define maskLine(va) (va & (0xffffffff << CACHE_LINE_WIDTH_BITS))
+-
+-#ifdef __EMSCRIPTEN__
+-    #define DECODED_INSTRUCTION_TYPE uint16_t
+-    #define DECODED_BITS 0xc000
+-    #define DECODED_BITS_ARM 0x4000
+-    #define DECODED_BITS_THUMB 0xc000
+-    #define DECODED_BITS_SHIFT 0
+-#else
+-    #define DECODED_INSTRUCTION_TYPE uint32_t
+-    #define DECODED_BITS 0x03
+-    #define DECODED_BITS_ARM 0x02
+-    #define DECODED_BITS_THUMB 0x03
+-    #define DECODED_BITS_SHIFT 2
+-#endif
+-
+-struct icacheline {
+-    uint8_t data[1 << CACHE_LINE_WIDTH_BITS];
+-    DECODED_INSTRUCTION_TYPE decoded[1 << (CACHE_LINE_WIDTH_BITS - 1)];
+-    uint32_t translatedThumbInstructions[1 << (CACHE_LINE_WIDTH_BITS - 1)];
+-
+-    CACHE_TAG_TYPE tag;
+-    uint32_t revision;
+-} __attribute__((aligned(8)));
+-
+-struct icache {
+-    union {
+-        struct ArmMmu* mmu;
+-        struct ArmMpu* mpu;
+-    } memorySystem;
+-    struct ArmMem* mem;
+-
+-    uint32_t revision;
+-    struct icacheline cache[1 << CACHE_INDEX_BITS];
+-};
+ 
+ void icacheInval(struct icache* ic) {
+     ic->revision++;
+@@ -119,7 +69,7 @@
+     }
+ 
+     struct icacheline* line = ic->cache + calculateIndex(va);
+-    const uint_fast8_t tag = calculateTag(va);
++    const CACHE_TAG_TYPE tag = calculateTag(va);
+ 
+     if (line->revision != ic->revision || line->tag != tag) {
+         uint8_t data[sizeof(line->data)];
+--- /dev/null
++++ b/src/uarm/uarm/icache_internal.h
+@@ -0,0 +1,79 @@
++//(c) uARM project    https://github.com/uARM-Palm/uARM    uARM@dmitry.gr
++#ifndef FROND_ICACHE_INTERNAL_H
++#define FROND_ICACHE_INTERNAL_H
++
++#include <cstring>
++
++#include "icache.h"
++#include "cputil.h"
++
++#define CACHE_LINE_WIDTH_BITS 5
++#define CACHE_INDEX_BITS 17
++
++// THIS FILE IS ABSOLUTELY NOT ENDIAN SAFE!
++
++#if (32 - CACHE_LINE_WIDTH_BITS - CACHE_INDEX_BITS <= 8)
++    #define CACHE_TAG_TYPE uint_fast8_t
++#else
++    #define CACHE_TAG_TYPE uint_fast16_t
++#endif
++
++#define calculateIndex(va) ((va >> CACHE_LINE_WIDTH_BITS) & ~(0xffffffff << CACHE_INDEX_BITS))
++#define calculateTag(va) (va >> (CACHE_LINE_WIDTH_BITS + CACHE_INDEX_BITS))
++#define calculateLineIndex(va) (va & ~(0xffffffff << CACHE_LINE_WIDTH_BITS))
++#define maskLine(va) (va & (0xffffffff << CACHE_LINE_WIDTH_BITS))
++
++#ifdef __EMSCRIPTEN__
++    #define DECODED_INSTRUCTION_TYPE uint16_t
++    #define DECODED_BITS 0xc000
++    #define DECODED_BITS_ARM 0x4000
++    #define DECODED_BITS_THUMB 0xc000
++    #define DECODED_BITS_SHIFT 0
++#else
++    #define DECODED_INSTRUCTION_TYPE uint32_t
++    #define DECODED_BITS 0x03
++    #define DECODED_BITS_ARM 0x02
++    #define DECODED_BITS_THUMB 0x03
++    #define DECODED_BITS_SHIFT 2
++#endif
++
++struct icacheline {
++    uint8_t data[1 << CACHE_LINE_WIDTH_BITS];
++    DECODED_INSTRUCTION_TYPE decoded[1 << (CACHE_LINE_WIDTH_BITS - 1)];
++    uint32_t translatedThumbInstructions[1 << (CACHE_LINE_WIDTH_BITS - 1)];
++
++    CACHE_TAG_TYPE tag;
++    uint32_t revision;
++} __attribute__((aligned(8)));
++
++struct icache {
++    union {
++        struct ArmMmu* mmu;
++        struct ArmMpu* mpu;
++    } memorySystem;
++    struct ArmMem* mem;
++
++    uint32_t revision;
++    struct icacheline cache[1 << CACHE_INDEX_BITS];
++};
++
++#ifndef __EMSCRIPTEN__
++// Misses, invalidations, alignment faults and new decodes use icacheFetch.
++template <int size>
++static FORCE_INLINE bool icacheFetchCached(struct icache* ic, uint32_t va,
++                                           uint32_t& instr, uint32_t& decoded) {
++    if (va & (size - 1)) return false;
++    const auto* line = ic->cache + calculateIndex(va);
++    if (line->revision != ic->revision || line->tag != calculateTag(va)) return false;
++    const unsigned offset = calculateLineIndex(va);
++    const uint32_t cached = line->decoded[offset >> 1];
++    constexpr uint32_t kind = size == 4 ? DECODED_BITS_ARM : DECODED_BITS_THUMB;
++    if ((cached & DECODED_BITS) != kind) return false;
++    decoded = int32_t(cached) >> DECODED_BITS_SHIFT;
++    if constexpr (size == 4) std::memcpy(&instr, line->data + offset, sizeof(instr));
++    else instr = line->translatedThumbInstructions[offset >> 1];
++    return true;
++}
++#endif
++
++#endif

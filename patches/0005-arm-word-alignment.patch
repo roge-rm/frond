@@ -1,0 +1,81 @@
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -705,8 +705,17 @@
+ 
+     if constexpr (size > 1) {
+         if (vaddr & (size - 1)) {
+-            if (fsrP) *fsrP = 1;  // alignment fault;
+-            return false;
++            if constexpr (memorySystemKind == ARM_MEMORY_SYSTEM_MMU && size == 4) {
++                if (!cp15MMUAlignmentEnabled(cpu->cp15.cp15mmu)) {
++                    vaddr &= ~3u;
++                } else {
++                    if (fsrP) *fsrP = 1;
++                    return false;
++                }
++            } else {
++                if (fsrP) *fsrP = 1;  // alignment fault;
++                return false;
++            }
+         }
+     }
+ 
+@@ -1132,7 +1141,7 @@
+                 cpuPrvHandleMemErr(cpu, ea, false, false, fsr);
+                 return;
+             }
+-            op1 = memVal32;
++            op1 = (ea & 3) ? cpuPrvROR(memVal32, (ea & 3) * 8) : memVal32;
+             memVal32 = cpuPrvGetRegNotPC(cpu, instr & 0x0F);
+             ok = cpuPrvMemOp<memorySystemKind, 4, true>(cpu, &memVal32, ea, cpu->privileged, &fsr);
+             if (!ok) {
+@@ -1769,6 +1778,7 @@
+                 return;
+             }
+ 
++            if (ea & 3) memVal32 = cpuPrvROR(memVal32, (ea & 3) * 8);
+             destReg = (instr >> 12) & 0x0F;
+ 
+             // from RePalm:
+--- a/src/uarm/uarm/cp15mmu.cpp
++++ b/src/uarm/uarm/cp15mmu.cpp
+@@ -85,7 +85,7 @@
+ 
+             if (op2 == 0 && CRm == 0) {
+                 if (read)
+-                    val = cp15->control | 2;
++                    val = cp15->control;
+                 else {
+                     uint32_t origVal = val;
+ 
+@@ -105,6 +105,9 @@
+                         ERR("CP15: unknown bits changed");
+                     }
+ 
++                    if (tmp & 0x00000002UL) {  // A bit
++                        cp15->control ^= 0x00000002UL;
++                    }
+                     if (tmp & 0x00002000UL) {  // V bit
+ 
+                         cpuSetVectorAddr(cp15->cpu,
+@@ -358,6 +361,10 @@
+     return cp15;
+ }
+ 
++bool cp15MMUAlignmentEnabled(const struct ArmCP15MMU* cp15) {
++    return (cp15->control & 2) != 0;
++}
++
+ void cp15MMUSetFaultStatus(struct ArmCP15MMU* cp15, uint32_t addr, uint_fast8_t faultStatus) {
+     cp15->FAR = addr;
+     cp15->FSR = faultStatus;
+--- a/src/uarm/uarm/cp15mmu.h
++++ b/src/uarm/uarm/cp15mmu.h
+@@ -14,6 +14,7 @@
+                                uint32_t cpuid, uint32_t cacheId, bool xscale, bool omap);
+ void cp15MMUSetFaultStatus(struct ArmCP15MMU* cp15, uint32_t addr, uint_fast8_t faultStatus);
+ void cp15MMUCycle(struct ArmCP15MMU* cp15);
++bool cp15MMUAlignmentEnabled(const struct ArmCP15MMU* cp15);
+ 
+ template <typename T>
+ void cp15MMUSave(struct ArmCP15MMU* cp15, T& savestate);

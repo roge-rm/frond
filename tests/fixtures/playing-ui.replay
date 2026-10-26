@@ -1,0 +1,16 @@
+15000 pen-down 276 151
+15300 pen-up
+45000 pen-down 276 151
+45300 pen-up
+75000 pen-down 276 151
+75300 pen-up
+105000 pen-down 276 151
+105300 pen-up
+135000 pen-down 274 8
+135100 pen-up
+135100 snapshot out/menu-100.png
+135300 snapshot out/menu-300.png
+135500 snapshot out/menu-500.png
+136000 snapshot out/menu-1000.png
+137000 pen-down 100 50
+137200 pen-up

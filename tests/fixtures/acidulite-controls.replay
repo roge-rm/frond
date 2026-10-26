@@ -1,0 +1,21 @@
+0 pen-down 48 300
+200 pen-up
+2000 snapshot out/acidulite-playing.png
+12000 pen-down 140 300
+12200 pen-up
+16000 snapshot out/acidulite-stopped.png
+18000 pen-down 48 300
+18200 pen-up
+21000 snapshot out/acidulite-replay.png
+30000 pen-down 232 300
+30200 pen-up
+45000 snapshot out/acidulite-bench.png
+48000 pen-down 48 300
+48200 pen-up
+50000 snapshot out/acidulite-after-bench-2.png
+51000 snapshot out/acidulite-after-bench-3.png
+52000 snapshot out/acidulite-after-bench-4.png
+53000 snapshot out/acidulite-after-bench-5.png
+54000 pen-down 140 300
+54200 pen-up
+57000 snapshot out/acidulite-final.png

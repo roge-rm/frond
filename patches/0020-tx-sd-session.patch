@@ -1,0 +1,694 @@
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -128,7 +128,7 @@
+ 
+     bool readSession(const Options& options, Buffer& nor, Buffer& nand, Buffer& ram,
+                      Buffer& savestate, uint32_t& ramSize, RomInfo5& romInfo,
+-                     optional<DisplayMode>& displayMode, DeviceType5& sessionDevice) {
++                     optional<DisplayMode>& displayMode, DeviceType5& sessionDevice, bool& embeddedCard) {
+         SessionFile5 sessionFile;
+ 
+         size_t norOrSessionLen{0};
+@@ -156,6 +156,16 @@
+             copy(ram, sessionFile.GetMemorySize(), sessionFile.GetMemory());
+             copy(savestate, sessionFile.GetSavestateSize(), sessionFile.GetSavestate());
+ 
++            if (sessionFile.GetSdSize()) {
++                if (options.sd) { cerr << "session already contains an SD card" << endl; return false; }
++                const auto size = sessionFile.GetSdSize();
++                auto* image = static_cast<uint8_t*>(malloc(size));
++                if (!image) throw bad_alloc();
++                memcpy(image, sessionFile.GetSd(), size);
++                const auto id = md5(image, size);
++                sdCardInitializeWithData(size / SD_SECTOR_SIZE, image, id.c_str());
++                embeddedCard = true;
++            }
+             romInfo = RomInfo5(nor.data, nor.size);
+         } else {
+             romInfo = RomInfo5(norOrSessionData.get(), norOrSessionLen);
+@@ -213,9 +223,10 @@
+         optional<DisplayMode> displayMode = nullopt;
+         uint32_t ramSize{0};
+ 
++        bool embeddedCard = false;
+         DeviceType5 sessionDevice = DeviceType5::deviceTypeInvalid;
+         if (!readSession(options, nor, nand, memory, savestate, ramSize, romInfo, displayMode,
+-                         sessionDevice))
++                         sessionDevice, embeddedCard))
+             return false;
+         const DeviceType5 deviceType = sessionDevice != DeviceType5::deviceTypeInvalid
+             ? sessionDevice : options.experimentalTx ? DeviceType5::deviceTypeTX
+@@ -227,10 +238,6 @@
+         }
+         if (isTx) {
+             cerr << "EXPERIMENTAL Palm TX: reset and session testing" << endl;
+-            if (options.sd) {
+-                cerr << "SD cards are not yet validated for experimental TX mode" << endl;
+-                return false;
+-            }
+             if (nor.size != (16ul << 20) || (sessionDevice == DeviceType5::deviceTypeInvalid && !options.nand)) {
+                 cerr << "TX requires a 16 MiB NOR image and an explicit --nand image" << endl;
+                 return false;
+@@ -280,13 +287,16 @@
+         if (options.sd && !util::ReadFile(options.sd, sdData, sdLen)) return false;
+ 
+         if (sdData) {
+-            if (sdLen % SD_SECTOR_SIZE) {
++            if (!sdLen || sdLen % SD_SECTOR_SIZE || (isTx && (sdLen < (32u << 20) || sdLen > (128u << 20)))) {
+                 cout << "sd card image has bad size" << endl;
+                 return false;
+             }
+ 
+             string key = md5(sdData.get(), sdLen);
+-            sdCardInitializeWithData(sdLen / SD_SECTOR_SIZE, sdData.release(), key.c_str());
++            auto* owned = static_cast<uint8_t*>(malloc(sdLen));
++            if (!owned) throw bad_alloc();
++            memcpy(owned, sdData.get(), sdLen);
++            sdCardInitializeWithData(sdLen / SD_SECTOR_SIZE, owned, key.c_str());
+         }
+ 
+         const int gdbPort = options.gdbPort.value_or(-1);
+@@ -344,10 +354,10 @@
+ 
+         if (soc->SdInserted()) {
+             if (!soc->SdRemount()) {
+-                cerr << "failed to remount SD card" << endl;
+-                sdCardReset();
+-            }
+-        } else if (sdCardInitialized()) {
++                cerr << "failed to remount SD card: session and card image do not match" << endl;
++                return false;
++            }
++        } else if (sdCardInitialized() && !embeddedCard) {
+             soc->SdInsert();
+         }
+ 
+--- a/src/uarm/native/Commands.cpp
++++ b/src/uarm/native/Commands.cpp
+@@ -95,19 +95,18 @@
+             return;
+         }
+ 
+-        if (len % SD_SECTOR_SIZE) {
++        if (!len || len % SD_SECTOR_SIZE || (static_cast<commands::Context*>(context)->soc->GetDeviceType() == DeviceType5::deviceTypeTX && (len < (32u << 20) || len > (128u << 20)))) {
+             cout << "sd card image has bad size" << endl;
+             return;
+         }
+ 
+         auto ctx = reinterpret_cast<commands::Context*>(context);
+-        if (ctx->soc->GetDeviceType() == DeviceType5::deviceTypeTX) {
+-            cout << "SD cards are not yet validated for experimental TX mode" << endl;
+-            return;
+-        }
+         string key = md5(data.get(), len);
+ 
+-        sdCardInitializeWithData(len / SD_SECTOR_SIZE, data.release(), key.c_str());
++        auto* owned = static_cast<uint8_t*>(malloc(len));
++        if (!owned) throw bad_alloc();
++        memcpy(owned, data.get(), len);
++        sdCardInitializeWithData(len / SD_SECTOR_SIZE, owned, key.c_str());
+         ctx->soc->SdInsert();
+     }
+ 
+@@ -166,7 +165,8 @@
+             .SetNor(rom.size, reinterpret_cast<uint8_t*>(rom.data))
+             .SetNand(nand.size, reinterpret_cast<uint8_t*>(nand.data))
+             .SetMemory(memory.size, reinterpret_cast<uint8_t*>(memory.data))
+-            .SetSavestate(savestate.size, reinterpret_cast<uint8_t*>(savestate.data));
++            .SetSavestate(savestate.size, reinterpret_cast<uint8_t*>(savestate.data))
++            .SetSd(sd.size, sd.data);
+ 
+         if (!sessionFile.Serialize()) {
+             cout << "failed to serialize session" << endl;
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -11,6 +11,9 @@
+ #include <unistd.h>
+ 
+ #include "Commands.h"
++#include "SdImage.h"
++#include "app_launcher.h"
++#include "md5.h"
+ #include "ReadOnlyGuest.h"
+ #include "FileUtil.h"
+ #include "db_backup.h"
+@@ -56,7 +59,7 @@
+                 return true;
+             std::string argument;
+             if (!decode(line.substr(second + 1), argument)) return true;
+-            const bool work = command == "save" || command == "install" || command == "export" || command == "reset";
++            const bool work = command == "save" || command == "install" || command == "export" || command == "reset" || command == "launch-app" || command == "input-replay" || (command.rfind("sd-", 0) == 0 && command != "sd-state");
+             if (work) ctx.audioDriver.Pause();
+             Reply result;
+             try {
+@@ -121,10 +124,64 @@
+         }
+     }
+     Reply dispatch(commands::Context& ctx, const std::string& command, const std::string& path) {
+-        const bool fileCommand = command == "save" || command == "install" || command == "export";
++        const bool fileCommand = command == "save" || command == "install" || command == "export" || command == "sd-insert" || command == "sd-export" || command == "input-replay";
+         if (fileCommand && (path.empty() || path.front() != '/')) return {false, "argument", "An absolute file path is required."};
+-        if (!fileCommand && !path.empty()) return {false, "argument", "This command takes no argument."};
++        if (!fileCommand && command != "sd-create" && command != "launch-app" && !path.empty()) return {false, "argument", "This command takes no argument."};
++        if (command == "input-replay") {
++            InputReplay replacement; std::string error;
++            if (!replacement.Load(path, ctx.screenWidth, ctx.screenHeight, error)) return {false, "replay", error};
++            ctx.replay = std::move(replacement); ctx.replayStartedAt = timestampUsec();
++            return {true, "loaded", "Input replay loaded."};
++        }
++        if (command == "launch-app") {
++            if (path.empty() || path.size() > 31) return {false, "argument", "Enter a Palm application database name (up to 31 bytes)."};
++            if (!launchAppByName(ctx.soc->GetSyscallDispatch(), path.c_str()))
++                return {false, "launch", "Could not launch that application. Check its database name and wait for Palm OS to finish starting."};
++            return {true, "launched", "Application launched."};
++        }
++        if (command == "sd-state") return {true, "card", !sdCardInitialized() ? "none" : ctx.soc->SdInserted() ? "inserted" : "ejected"};
++        if (command == "sd-create" || command == "sd-insert") {
++            if (ctx.soc->SdInserted()) return {false, "busy", "Eject the current card before replacing it."};
++            std::vector<uint8_t> created;
++            std::unique_ptr<uint8_t[]> loaded;
++            const uint8_t* bytes; size_t size;
++            if (command == "sd-create") {
++                if (path != "32" && path != "64" && path != "128") return {false, "size", "Choose 32, 64 or 128 MiB."};
++                created = frondSd::create(unsigned(std::stoul(path))); bytes = created.data(); size = created.size();
++            } else {
++                if (!util::ReadFile(path, loaded, size)) return {false, "read", "Could not read the card image."};
++                if (!frondSd::validSize(size)) return {false, "size", "Use a 32–128 MiB raw SD image, aligned to 512 bytes."};
++                bytes = loaded.get();
++            }
++            auto* image = static_cast<uint8_t*>(malloc(size));
++            if (!image) throw std::bad_alloc();
++            memcpy(image, bytes, size);
++            const auto id = md5(image, size);
++            sdCardInitializeWithData(size / 512, image, id.c_str());
++            ctx.soc->SdInsert();
++            return {true, "inserted", "SD card inserted."};
++        }
++        if (command == "sd-eject") {
++            if (!sdCardInitialized() || !ctx.soc->SdInserted()) return {false, "empty", "No card is inserted."};
++            ctx.soc->SdEject();
++            return {true, "ejected", "SD card ejected. Its contents remain in this session."};
++        }
++        if (command == "sd-reinsert") {
++            if (!sdCardInitialized()) return {false, "empty", "This session has no card."};
++            ctx.soc->SdInsert();
++            return {true, "inserted", "SD card inserted."};
++        }
++        if (command == "sd-export") {
++            if (!sdCardInitialized()) return {false, "empty", "This session has no card."};
++            if (ctx.soc->SdInserted()) return {false, "busy", "Eject the card before exporting its image."};
++            const auto image = sdCardData(); writeAtomic(path, image.data, image.size);
++            return {true, "exported", "SD image exported."};
++        }
+         if (command == "save") {
++            if (sdCardInitialized()) {
++                const auto image = sdCardData(); const auto id = md5(static_cast<uint8_t*>(image.data), image.size);
++                sdCardRekey(id.c_str());
++            }
+             if (!ctx.soc->Save()) return {false, "save", "Could not save device state."};
+             SessionFile5 session;
+             const auto nor = ctx.soc->GetRomData(), nand = ctx.soc->GetNandData();
+@@ -132,7 +189,8 @@
+             session.SetDeviceType(int32_t(ctx.soc->GetDeviceType()))
+                 .SetDisplayMode(int32_t(ctx.soc->GetDisplayMode())).SetRamSize(ctx.soc->GetRamSize())
+                 .SetNor(nor.size, static_cast<uint8_t*>(nor.data)).SetNand(nand.size, static_cast<uint8_t*>(nand.data))
+-                .SetMemory(ram.size, static_cast<uint8_t*>(ram.data)).SetSavestate(state.size, static_cast<uint8_t*>(state.data));
++                .SetMemory(ram.size, static_cast<uint8_t*>(ram.data)).SetSavestate(state.size, static_cast<uint8_t*>(state.data))
++                .SetSd(sdCardData().size, sdCardData().data);
+             if (!session.Serialize()) return {false, "save", "Could not serialize session."};
+             writeAtomic(path, session.GetSerializedSession(), session.GetSerializedSessionSize());
+             return {true, "saved", "Session saved."};
+--- a/src/common/session/session_file5.cpp
++++ b/src/common/session/session_file5.cpp
+@@ -24,15 +24,16 @@
+ // * V2: Add RAM size to header
+ // * V3: RAM page size change 512b -> 1k: migrate memory image
+ // * V4: Add display mode
++// * V5: Add an embedded SD image, committed atomically with the peripheral state
+ 
+ namespace {
+     constexpr uint32_t MAGIC = 0x19800819;
+-    constexpr uint32_t CURRENT_VERSION = 4;
++    constexpr uint32_t CURRENT_VERSION = 5;
+ 
+     constexpr size_t SIZE_HEADER = 12;  // 4 byte magic + 4 byte version + 4 byte device ID
+-    constexpr size_t SIZE_TOC = 5 * 4;
+-
+-    constexpr size_t BUFFER_MAX_SIZE = 256 * 1024 * 1024;
++    constexpr size_t SIZE_TOC = 6 * 4;
++
++    constexpr size_t BUFFER_MAX_SIZE = 512 * 1024 * 1024;
+     constexpr size_t BUFFER_MIN_SIZE = 1024;
+ 
+     int32_t fallbackDisplayMode(int32_t deviceType) {
+@@ -126,6 +127,12 @@
+     return *this;
+ }
+ 
++const void* SessionFile5::GetSd() const { return sd; }
++size_t SessionFile5::GetSdSize() const { return sdSize; }
++SessionFile5& SessionFile5::SetSd(size_t size, const void* data) {
++    sdSize = size; sd = reinterpret_cast<const uint8_t*>(data); return *this;
++}
++
+ size_t SessionFile5::GetRamSize() { return ramSize; }
+ 
+ SessionFile5& SessionFile5::SetRamSize(uint32_t size) {
+@@ -138,17 +145,19 @@
+     serializedSessionSize = 0;
+     serializedSession = nullptr;
+ 
+-    const size_t sizeUncompressed = metadataSize + norSize + nandSize + memorySize + savestateSize;
++    const uint64_t sizeUncompressed = uint64_t(metadataSize) + norSize + nandSize + memorySize + savestateSize + sdSize;
++    if (sizeUncompressed > BUFFER_MAX_SIZE || sdSize > (128u << 20) || sdSize % 512 || (sdSize && !sd)) return false;
++    const uint32_t fileVersion = sdSize ? 5 : 4;
+ 
+     bufferSize =
+-        max(static_cast<size_t>(BUFFER_MIN_SIZE), SIZE_HEADER + SIZE_TOC + sizeUncompressed / 2);
++        max(static_cast<size_t>(BUFFER_MIN_SIZE), SIZE_HEADER + SIZE_TOC + size_t(sizeUncompressed) / 2);
+     buffer = make_unique<uint8_t[]>(bufferSize);
+     cursor = buffer.get();
+ 
+     bool success = true;
+ 
+     success &= Write32(MAGIC);
+-    success &= Write32(CURRENT_VERSION);
++    success &= Write32(fileVersion);
+     success &= Write32(deviceType);
+     success &= Write32(displayMode);
+     success &= Write32(ramSize);
+@@ -158,6 +167,7 @@
+     success &= Write32(nandSize);
+     success &= Write32(memorySize);
+     success &= Write32(savestateSize);
++    if (fileVersion >= 5) success &= Write32(sdSize);
+ 
+     if (!success) {
+         cerr << "failed to write header" << endl;
+@@ -200,6 +210,8 @@
+         cerr << "failed to write savestate" << endl;
+         return false;
+     }
++
++    if (!AppendToCompressionStream(sdSize, sd, stream)) return false;
+ 
+     if (!Flush(stream)) {
+         cerr << "failed to flush" << endl;
+@@ -222,6 +234,7 @@
+     metadataSize = norSize = nandSize = memorySize = savestateSize = 0;
+     metadata = nor = nand = memory = savestate = nullptr;
+ 
++    sdSize = 0; sd = nullptr;
+     serializedSession = reinterpret_cast<const uint8_t*>(data);
+     serializedSessionSize = size;
+ 
+@@ -239,6 +252,7 @@
+ 
+     if (magic != MAGIC) {
+         cerr << "bad magic" << endl;
++        return false;
+     }
+ 
+     switch (version) {
+@@ -249,6 +263,7 @@
+         case 2:
+         case 3:
+         case 4:
++        case 5:
+             return Deserialize_v1_v2_v3_v4(version);
+ 
+         default:
+@@ -466,13 +481,16 @@
+     nandSize = Read32(success);
+     memorySize = Read32(success);
+     savestateSize = Read32(success);
++    sdSize = sessionVersion >= 5 ? Read32(success) : 0;
+ 
+     if (!success) {
+         cerr << "failed to read v1 toc" << endl;
+         return false;
+     }
+ 
+-    bufferSize = metadataSize + norSize + nandSize + memorySize + savestateSize;
++    const uint64_t total = uint64_t(metadataSize) + norSize + nandSize + memorySize + savestateSize + sdSize;
++    if (total > BUFFER_MAX_SIZE || sdSize > (128u << 20) || sdSize % 512) return false;
++    bufferSize = size_t(total);
+     if (bufferSize > BUFFER_MAX_SIZE) {
+         cout << "v1 image: bad image size" << endl;
+         return false;
+@@ -510,6 +528,7 @@
+     cursor += memorySize;
+ 
+     savestate = cursor;
++    sd = sdSize ? cursor + savestateSize : nullptr;
+ 
+     if (version == 2) MigrateV2Memory();
+ 
+--- a/src/common/session/session_file5.h
++++ b/src/common/session/session_file5.h
+@@ -38,6 +38,10 @@
+     const void* GetSavestate() const;
+     size_t GetSavestateSize() const;
+     SessionFile5& SetSavestate(size_t size, const void* data);
++
++    const void* GetSd() const;
++    size_t GetSdSize() const;
++    SessionFile5& SetSd(size_t size, const void* data);
+ 
+     size_t GetRamSize();
+     SessionFile5& SetRamSize(uint32_t size);
+@@ -82,6 +86,9 @@
+     size_t savestateSize{0};
+     const uint8_t* savestate{nullptr};
+ 
++    size_t sdSize{0};
++    const uint8_t* sd{nullptr};
++
+     size_t serializedSessionSize{0};
+     const uint8_t* serializedSession{nullptr};
+ 
+--- a/src/uarm/uarm/pxa_MMC.cpp
++++ b/src/uarm/uarm/pxa_MMC.cpp
+@@ -26,6 +26,7 @@
+     bool clockOn, cmdQueued, dataXferOngoing;
+ 
+     struct VSD *vsd;
++    bool wordFifo;  // PXA27x transfers 1/2/4 bytes per FIFO access; PXA25x uses the low byte.
+ 
+     // fifo
+     uint32_t fifoBytes, fifoOfst;
+@@ -282,7 +283,8 @@
+     uint32_t val = 0;
+     bool ret = true;
+ 
+-    if (size != 4) {
++    const bool packedFifo = mmc->wordFifo && (pa == PXA_MMC_BASE + 0x40 || pa == PXA_MMC_BASE + 0x44);
++    if (size != 4 && !(packedFifo && (size == 1 || size == 2))) {
+         fprintf(stderr, "%s: Unexpected %s of %u bytes to 0x%08lx\n", __func__,
+                 write ? "write" : "read", size, (unsigned long)pa);
+         return false;
+@@ -294,7 +296,7 @@
+     //	fprintf(stderr, "MMC 0x%08x->[0x%08x]\n", *(uint32_t*)buf, (unsigned)(PXA_MMC_BASE + 4 *
+     // pa));
+ 
+-    if (write) val = *(uint32_t *)buf;
++    if (write) memcpy(&val, buf, size);
+ 
+     switch (pa) {
+         case 0:
+@@ -395,6 +397,12 @@
+                 val = mmc->numBlks;
+             break;
+ 
++        case 9:  // MMC_PRTBUF: partial TX bank swap, automatically cleared.
++            // This model stages complete blocks and accepts each FIFO byte immediately;
++            // bank swapping never stalls. Zero initializes the register without a swap.
++            if (!write) val = 0;
++            break;
++
+         case 10:
+             if (write) {
+                 mmc->iMask = val & 0x7f;
+@@ -448,14 +456,24 @@
+         case 16:
+             if (write)
+                 ret = false;
+-            else
+-                ret = pxaMmcPrvDataFifoR(mmc, &val);
++            else {
++                const unsigned count = mmc->wordFifo ? size : 1;
++                if (!mmc->fifoBytes) ret = false;
++                for (unsigned i = 0; i < count && mmc->fifoBytes; i++) {
++                    uint32_t byte = 0;
++                    ret = pxaMmcPrvDataFifoR(mmc, &byte) && ret;
++                    val |= byte << (8 * i);
++                }
++            }
+             break;
+ 
+         case 17:
+-            if (write)
+-                ret = pxaMmcPrvDataFifoW(mmc, val);
+-            else
++            if (write) {
++                const unsigned count = mmc->wordFifo ? size : 1;
++                if (!mmc->dataXferOngoing) ret = false;
++                for (unsigned i = 0; i < count && mmc->dataXferOngoing; i++)
++                    ret = pxaMmcPrvDataFifoW(mmc, val >> (8 * i)) && ret;
++            } else
+                 ret = false;
+             break;
+ 
+@@ -465,7 +483,7 @@
+     }
+ 
+     if (ret) {
+-        if (!write) *(uint32_t *)buf = val;
++        if (!write) memcpy(buf, &val, size);
+ 
+         //	if (!write)
+         //		fprintf(stderr, "MMC [0x%08x] -> 0x%08x\n", (unsigned)(PXA_MMC_BASE + 4 *
+@@ -475,13 +493,14 @@
+     return ret;
+ }
+ 
+-struct PxaMmc *pxaMmcInit(struct ArmMem *physMem, struct PxaIc *ic, struct PxaDma *dma) {
++struct PxaMmc *pxaMmcInit(struct ArmMem *physMem, struct PxaIc *ic, struct PxaDma *dma, bool wordFifo) {
+     struct PxaMmc *mmc = (struct PxaMmc *)malloc(sizeof(*mmc));
+ 
+     if (!mmc) ERR("cannot alloc MMC");
+ 
+     memset(mmc, 0, sizeof(*mmc));
+ 
++    mmc->wordFifo = wordFifo;
+     mmc->ic = ic;
+     mmc->dma = dma;
+     mmc->iMask = 0x7f;
+--- a/src/uarm/uarm/pxa_MMC.h
++++ b/src/uarm/uarm/pxa_MMC.h
+@@ -11,7 +11,7 @@
+ 
+ struct PxaMmc;
+ 
+-struct PxaMmc* pxaMmcInit(struct ArmMem* physMem, struct PxaIc* ic, struct PxaDma* dma);
++struct PxaMmc* pxaMmcInit(struct ArmMem* physMem, struct PxaIc* ic, struct PxaDma* dma, bool wordFifo = false);
+ 
+ void pxaMmcInsert(struct PxaMmc* mmc, struct VSD* vsd);  // NULL also acceptable
+ 
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -194,7 +194,7 @@
+         pwm[3] = pxaPwmInit(mem, PXA_PWM3_BASE);
+     }
+ 
+-    mmc = pxaMmcInit(mem, ic, dma);
++    mmc = pxaMmcInit(mem, ic, dma, socRev == 2);
+ 
+     displayConfiguration =
+         deviceConfigurationDisplayConfigForMode(deviceConfigurationDefaultDisplayMode(deviceType));
+--- a/src/uarm/uarm/vSD.cpp
++++ b/src/uarm/uarm/vSD.cpp
+@@ -10,7 +10,7 @@
+ #include "memory_buffer.h"
+ #include "savestate/savestateAll.h"
+ 
+-#define SAVESTATE_VERSION 0
++#define SAVESTATE_VERSION 1
+ 
+ // this is not and will never be a full SD card emulator, deal with it!
+ 
+@@ -48,7 +48,8 @@
+     uint8_t initWaitLeft;
+     uint32_t prevAcmd41Param;
+ 
+-    uint8_t curBuf[8];
++    uint8_t curBuf[64];
++    bool wideBus;
+     uint32_t curSec;
+     uint16_t curBufLen;
+     bool bufIsData;
+@@ -58,7 +59,7 @@
+     uint32_t numBlocksExpected;
+ 
+     template <typename T>
+-    void DoSaveLoad(T &chunkHelper) {
++    void DoSaveLoad(T &chunkHelper, uint32_t version) {
+         uint8_t state8 = static_cast<uint8_t>(state);
+ 
+         chunkHelper.Do32(nSec)
+@@ -70,7 +71,9 @@
+             .Do32(prevAcmd41Param)
+             .Do32(curSec)
+             .Do32(numBlocksExpected)
+-            .DoBuffer(curBuf, sizeof(curBuf));
++            .DoBuffer(curBuf, 8);
++        if (version >= 1) chunkHelper.Do(typename T::BoolPack() << wideBus).DoBuffer(curBuf + 8, 56);
++        else { wideBus = false; memset(curBuf + 8, 0, 56); }
+ 
+         state = static_cast<State>(state8);
+     }
+@@ -84,6 +87,7 @@
+ 
+ static void vsdCardReset(struct VSD *vsd) {
+     vsd->acmdShift = false;
++    vsd->wideBus = false;
+     vsd->rca = 0;
+     vsd->reportAcmdNext = false;
+     vsd->state = StateIdle;
+@@ -303,16 +307,18 @@
+             if (wasAcmd) {
+                 if (vsd->state != StateTran)
+                     replTyp = vsdRejectCmd(vsd, cmd, param, reply, InvalidInCurrentState, wasAcmd);
+-                else
+-                    replTyp = vsdPrepareR1resp(vsd, cmd, reply, 0, 0);  // success
++                else if ((param & 3) != 0 && (param & 3) != 2)
++                    replTyp = vsdRejectCmd(vsd, cmd, param, reply, UnacceptableParam, wasAcmd);
++                else {
++                    vsd->wideBus = (param & 3) == 2;
++                    replTyp = vsdPrepareR1resp(vsd, cmd, reply, 0, 0);
++                }
+             } else {
+                 if (vsd->state != StateTran)
+                     replTyp = vsdRejectCmd(vsd, cmd, param, reply, InvalidInCurrentState, wasAcmd);
+                 else {
+-                    vsd->state = StateData;
+-
+-                    // exists, required, but we do not support it in vSD yet
+-                    ERR("CMD6 not implemented\n");
++                    // Function switching is not modelled. Decline it without terminating the emulator.
++                    replTyp = vsdPrepareR1resp(vsd, cmd, reply, 0, 1u << 22);
+                 }
+             }
+             break;
+@@ -373,10 +379,18 @@
+             break;
+ 
+         case 13:
+-            if (wasAcmd)
+-                // XXX: ACMD13 exists
+-                replTyp = vsdRejectCmd(vsd, cmd, param, reply, InvalidInCurrentState, wasAcmd);
+-            else if (vsd->state != StateStby && vsd->state != StateTran &&
++            if (wasAcmd) {
++                if (vsd->state != StateTran)
++                    replTyp = vsdRejectCmd(vsd, cmd, param, reply, InvalidInCurrentState, wasAcmd);
++                else {
++                    memset(vsd->curBuf, 0, sizeof(vsd->curBuf));
++                    vsd->curBuf[0] = vsd->wideBus ? 0x80 : 0;
++                    // Unclassified speed; 16 KiB allocation units, no protected area.
++                    vsd->curBuf[10] = 0x10;
++                    vsd->curBufLen = 64; vsd->bufIsData = false; vsd->state = StateData;
++                    replTyp = vsdPrepareR1resp(vsd, cmd, reply, 0, 0);
++                }
++            } else if (vsd->state != StateStby && vsd->state != StateTran &&
+                      vsd->state != StateData && vsd->state != StateRcv && vsd->state != StatePrg &&
+                      vsd->state != StateDis)
+                 replTyp = vsdRejectCmd(vsd, cmd, param, reply, InvalidInCurrentState, wasAcmd);
+@@ -513,6 +527,14 @@
+                     vsd->state = StateReady;
+                 }
+             }
++            break;
++
++        case 42:  // ACMD42: enable/disable the DAT3 card-detect pull-up.
++            if (!wasAcmd || vsd->state != StateTran)
++                replTyp = vsdRejectCmd(vsd, cmd, param, reply, InvalidInCurrentState, wasAcmd);
++            else
++                // DAT3 is not electrically modelled; this has no effect on the separate GPIO detector.
++                replTyp = vsdPrepareR1resp(vsd, cmd, reply, 0, 0);
+             break;
+ 
+         case 51:
+@@ -701,20 +723,23 @@
+ 
+ template <typename T>
+ void vsdSave(struct VSD *vsd, T &savestate) {
+-    auto chunk = savestate.GetChunk(ChunkType::vsd, SAVESTATE_VERSION);
++    // Savestate layouts are cached: use one fixed layout before and after card insertion.
++    const uint32_t version = SAVESTATE_VERSION;
++    auto chunk = savestate.GetChunk(ChunkType::vsd, version);
+     if (!chunk) abort();
+ 
+     SaveChunkHelper helper(*chunk);
+-    vsd->DoSaveLoad(helper);
++    vsd->DoSaveLoad(helper, version);
+ }
+ 
+ template <typename T>
+ void vsdLoad(struct VSD *vsd, T &loader) {
+-    auto chunk = loader.GetChunkOrFail(ChunkType::vsd, SAVESTATE_VERSION, "vsd");
++    uint32_t version;
++    auto chunk = loader.GetChunkOrFail(ChunkType::vsd, SAVESTATE_VERSION, "vsd", version);
+     if (!chunk) return;
+ 
+     LoadChunkHelper helper(*chunk);
+-    vsd->DoSaveLoad(helper);
++    vsd->DoSaveLoad(helper, version);
+ }
+ 
+ template void vsdSave<Savestate<ChunkType>>(VSD *vsd, Savestate<ChunkType> &savestate);
+--- a/src/uarm/uarm/pxa_DMA.cpp
++++ b/src/uarm/uarm/pxa_DMA.cpp
+@@ -262,8 +262,8 @@
+ 
+         dma->reschedule.rescheduleCb(dma->reschedule.ctx, RESCHEDULE_TASK_DMA);
+ 
+-        ch->CSR &= ~0x100;
+-
++        // REQPEND reflects the peripheral request level. Starting a channel must not
++        // discard a request that was asserted before RUN was set.
+         if (!(ch->CSR & 0x40000000ul)) {  // not no-fetch mode
+ 
+             ch->CR &= ~0x1fff;  // so we fatch descr on first request
+--- /dev/null
++++ b/src/uarm/native/SdImage.h
+@@ -0,0 +1,50 @@
++#pragma once
++#include <cstdint>
++#include <stdexcept>
++#include <vector>
++
++namespace frondSd {
++constexpr size_t minBytes = 32u << 20, maxBytes = 128u << 20;
++inline bool validSize(size_t size) { return size >= minBytes && size <= maxBytes && size % 512 == 0; }
++inline void put16(uint8_t* p, uint16_t value) { p[0] = value; p[1] = value >> 8; }
++inline void put32(uint8_t* p, uint32_t value) { put16(p, value); put16(p + 2, value >> 16); }
++// Classic SD, DOS partition table and FAT16; no host filesystem mount is needed.
++inline std::vector<uint8_t> create(unsigned mib) {
++    if (mib != 32 && mib != 64 && mib != 128) throw std::runtime_error("Choose a 32, 64 or 128 MiB card.");
++    std::vector<uint8_t> image(size_t(mib) << 20);
++    const uint32_t start = 63, sectors = image.size() / 512 - start;
++    const uint8_t cluster = mib > 64 ? 8 : 4;
++    uint16_t fatSectors = 1;
++    for (;;) {
++        const uint32_t clusters = (sectors - 1 - 32 - 2 * fatSectors) / cluster;
++        const auto required = uint16_t(((clusters + 2) * 2 + 511) / 512);
++        if (fatSectors >= required) break;
++        fatSectors = required;
++    }
++    auto* partition = image.data() + 446;
++    partition[1] = 1; partition[2] = 1;
++    partition[4] = 6; partition[5] = 254; partition[6] = 255; partition[7] = 255;
++    put32(partition + 8, start); put32(partition + 12, sectors);
++    image[510] = 0x55; image[511] = 0xaa;
++    auto* boot = image.data() + start * 512;
++    boot[0] = 0xeb; boot[1] = 0x3c; boot[2] = 0x90;
++    const char oem[] = "FROND001", label[] = "FROND      ", type[] = "FAT16   ";
++    for (int i = 0; i < 8; i++) boot[3 + i] = oem[i];
++    put16(boot + 11, 512); boot[13] = cluster; put16(boot + 14, 1);
++    boot[16] = 2; put16(boot + 17, 512);
++    if (sectors < 65536) put16(boot + 19, sectors); else put32(boot + 32, sectors);
++    boot[21] = 0xf8; put16(boot + 22, fatSectors); put16(boot + 24, 63); put16(boot + 26, 255);
++    put32(boot + 28, start); boot[36] = 0x80; boot[38] = 0x29; put32(boot + 39, 0x46524f4e);
++    for (int i = 0; i < 11; i++) boot[43 + i] = label[i];
++    for (int i = 0; i < 8; i++) boot[54 + i] = type[i];
++    boot[510] = 0x55; boot[511] = 0xaa;
++    for (unsigned fat = 0; fat < 2; fat++) {
++        auto* data = image.data() + (start + 1 + fat * fatSectors) * 512;
++        put16(data, 0xfff8); put16(data + 2, 0xffff);
++    }
++    auto* root = image.data() + (start + 1 + 2 * fatSectors) * 512;
++    for (int i = 0; i < 11; i++) root[i] = label[i];
++    root[11] = 8;
++    return image;
++}
++}

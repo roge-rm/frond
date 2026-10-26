@@ -1,0 +1,81 @@
+--- a/src/uarm/uarm/SoC.cpp
++++ b/src/uarm/uarm/SoC.cpp
+@@ -1,4 +1,5 @@
+ #include "SoC.h"
++#include "MenuTrace.h"
+ 
+ #include <cstring>
+ 
+@@ -40,6 +41,7 @@
+ void SoC::KeyUp(enum KeyId key) { keyEventQueue->Push(KeyEvent::KeyUp(key)); }
+ 
+ void SoC::PenDown(int x, int y) {
++    menuTracePen(x,y);
+     penEventQueue->Push(PenEvent::PenDown(
+         std::min<int>(std::max<int>(x, 0), displayConfiguration.width),
+         std::min<int>(std::max<int>(y, 0),
+--- a/src/uarm/uarm/soc_generic_impl.h
++++ b/src/uarm/uarm/soc_generic_impl.h
+@@ -9,6 +9,7 @@
+ #include "MMU.h"
+ #include "MPU.h"
+ #include "SoC.h"
++#include "MenuTrace.h"
+ #include "cputil.h"
+ #include "savestate/savestateAll.h"
+ #include "system_state.h"
+@@ -230,6 +231,7 @@
+         if (evt.penDown && !penDown) eventQueueTicksAtPenDown = eventQueueTicks;
+         penDown = evt.penDown;
+ 
++        if (menuTraceActive) fprintf(stderr,"MENU TOUCH %llu %llu %d %d %d\n",(unsigned long long)timestampUsec(),(unsigned long long)GetTime(),evt.penDown,evt.x,evt.y);
+         static_cast<T&>(*this).OnTouch(evt.x, evt.y);
+     }
+ }
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -18,6 +18,8 @@
+ #include "FileUtil.h"
+ #include "Logging.h"
+ #include "MainLoop.h"
++#include "MenuTrace.h"
++#include "pace.h"
+ #include "InputReplay.h"
+ #include "Rotation.h"
+ #include "SdlAudioDriver.h"
+@@ -421,7 +423,18 @@
+             if (waitForPreviewAudio) mainLoop.PauseAt(now);
+             else mainLoop.Cycle(now);
+ 
++            if (menuTraceActive) {
++                const auto stamp = timestampUsec();
++                if (stamp - menuTraceStart > 2500000) menuTraceActive = false;
++                uint32_t first=0,last=0;auto frame=soc->GetPendingFrame(first,last);unsigned white=0;
++                if(frame && displayConfiguration.width==320 && displayConfiguration.height>=240) for(unsigned y=180;y<240;y++) for(unsigned x=196;x<320;x++) {
++                    const auto c=frame[y*320+x];if((c&255)>150&&((c>>8)&255)>150&&((c>>16)&255)>150)white++;
++                }
++                fprintf(stderr,"MENU FRAME %llu %llu %x %x %u %u %d\n",(unsigned long long)stamp,(unsigned long long)soc->GetTime(),cpuGetRegExternal(soc->GetCpu(),15),cpuIsModePace(soc->GetCpu())?paceGetPC():0,mainLoop.GetCurrentIps(),white,frame!=nullptr);
++            }
++            const auto menuDrawStart=timestampUsec();
+             sdlRenderer->Draw(sdlEventHandler.RedrawRequested());
++            if(menuTraceActive) fprintf(stderr,"MENU PRESENT %llu %llu\n",(unsigned long long)timestampUsec(),(unsigned long long)(timestampUsec()-menuDrawStart));
+             sdlEventHandler.ClearRedrawRequested();
+ 
+             if (!replay.Dispatch((timestampUsec() - replayStartedAt) / 1000, *soc, *sdlRenderer, replayError)) {
+--- /dev/null
++++ b/src/uarm/MenuTrace.h
+@@ -0,0 +1,14 @@
++#pragma once
++#include <cstdio>
++#include <cstdlib>
++#include "cputil.h"
++inline const bool menuTraceEnabled = std::getenv("FROND_MENU_TRACE") != nullptr;
++inline bool menuTraceActive = false;
++inline uint64_t menuTraceStart = 0;
++inline void menuTracePen(int x, int y) {
++    if (!menuTraceEnabled) return;
++    if (x == 274 && y == 8) {
++        menuTraceStart = timestampUsec(); menuTraceActive = true;
++    }
++    if (menuTraceActive) fprintf(stderr,"MENU INPUT %llu %d %d\n",(unsigned long long)timestampUsec(),x,y);
++}

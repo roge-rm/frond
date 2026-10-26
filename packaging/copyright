@@ -1,0 +1,20 @@
+Frond is derived from CloudpilotEmu and uARM.
+
+Source: https://github.com/roge-rm/frond
+CloudpilotEmu: https://github.com/cloudpilot-emu/cloudpilot-emu
+uARM: https://github.com/uARM-Palm/uARM
+
+Copyright: Frond, CloudpilotEmu, uARM and contributing authors, as identified
+in the source files. uARM includes work by Dmitry Grinberg. The PACE engine
+includes UAE-derived code and its retained author notices.
+
+The application is distributed under GPL-3.0-or-later. The full GPL version 3
+text is in /usr/share/doc/frond/LICENSE and /usr/share/common-licenses/GPL-3.
+
+The argparse component is copyright (c) 2018 Pranav Srinivas Kumar and is
+MIT licensed; its full notice is in argparse-LICENSE in this directory.
+The zip component's public-domain dedication and fallback licence are in
+zip-UNLICENSE in this directory. Embedded miniz retains its source notices.
+Qt, SDL and other system libraries are supplied separately by Debian.
+
+Palm firmware and applications are not included in this package.

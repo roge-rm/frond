@@ -1,0 +1,6 @@
+FORM ID 1000 AT (0 0 160 160) NOFRAME USABLE
+BEGIN
+ TITLE "Frond net probe"
+ LABEL "Results: FrondNetLog" ID 1001 AT (5 30)
+ BUTTON "Receive echo" ID 1002 AT (10 60 130 20) USABLE
+END

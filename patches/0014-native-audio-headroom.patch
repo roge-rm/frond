@@ -1,0 +1,133 @@
+--- a/src/uarm/native/SdlAudioDriver.h
++++ b/src/uarm/native/SdlAudioDriver.h
+@@ -10,7 +10,7 @@
+ 
+ class SdlAudioDriver {
+    public:
+-    SdlAudioDriver(SoC* soc, AudioQueue* audioQueue);
++    SdlAudioDriver(SoC* soc, AudioQueue* audioQueue, bool lowLatencyStartup = false);
+     ~SdlAudioDriver();
+ 
+     void Start();
+@@ -30,9 +30,12 @@
+     std::atomic<bool> audioBuffering{true};
+     std::atomic<bool> audioBackpressure{false};
+     std::atomic<uint64_t> underrunCount{0};
++    std::atomic<bool> starting{true};
++    bool lowLatencyStartup;
+ 
+     uint32_t bufferThresholdStart{0};
+     uint32_t bufferThresholdStop{0};
++    uint32_t bufferThresholdStartup{0};
+     uint32_t backpressureThresholdStart{0};
+     uint32_t backpressureThresholdStop{0};
+ };
+--- a/src/uarm/native/SdlAudioDriver.cpp
++++ b/src/uarm/native/SdlAudioDriver.cpp
+@@ -12,8 +12,8 @@
+     }
+ }  // namespace
+ 
+-SdlAudioDriver::SdlAudioDriver(SoC* soc, AudioQueue* audioQueue)
+-    : soc(soc), audioQueue(audioQueue) {}
++SdlAudioDriver::SdlAudioDriver(SoC* soc, AudioQueue* audioQueue, bool lowLatencyStartup)
++    : soc(soc), audioQueue(audioQueue), lowLatencyStartup(lowLatencyStartup) {}
+ 
+ SdlAudioDriver::~SdlAudioDriver() {
+     if (initialized) {
+@@ -25,6 +25,7 @@
+     if (initialized) {
+         soc->SetPcmOutputEnabled(true);
+         audioBuffering = true;
++        starting = true;
+         audioBackpressure = false;
+         SDL_PauseAudioDevice(audioDevice, 0);
+ 
+@@ -52,12 +53,14 @@
+         std::cout << "audio running, period size " << audioSpecActual.samples << std::endl;
+     }
+ 
++    audioQueueEnsureCapacity(audioQueue, size_t(audioSpecActual.samples) * 8 + 44100 / 20);
+     soc->SetPcmOutputEnabled(true);
+     bufferThresholdStart = audioSpecActual.samples;
+     bufferThresholdStop = audioSpecActual.samples * 3;
+-    // Leave four callbacks of headroom for the emulation thread to resume.
+-    backpressureThresholdStart = audioSpecActual.samples * 6;
+-    backpressureThresholdStop = audioSpecActual.samples * 4;
++    bufferThresholdStartup = audioSpecActual.samples * (lowLatencyStartup ? 3 : 6);
++    // Leave five callbacks of headroom for brief frontend stalls.
++    backpressureThresholdStart = audioSpecActual.samples * 7;
++    backpressureThresholdStop = audioSpecActual.samples * 5;
+ 
+     initialized = true;
+     SDL_PauseAudioDevice(audioDevice, 0);
+@@ -82,7 +85,10 @@
+     size_t samplesRemaining = len >> 2;
+     size_t samplesPending = audioQueuePendingSamples(audioQueue);
+ 
+-    if (audioBuffering && samplesPending > bufferThresholdStop) audioBuffering = false;
++    if (audioBuffering && samplesPending > (starting ? bufferThresholdStartup : bufferThresholdStop)) {
++        audioBuffering = false;
++        starting = false;
++    }
+ 
+     if (!audioBuffering && samplesPending < bufferThresholdStart) {
+         audioBuffering = true;
+--- a/src/uarm/uarm/audio_queue.h
++++ b/src/uarm/uarm/audio_queue.h
+@@ -7,6 +7,7 @@
+ struct AudioQueue;
+ 
+ struct AudioQueue* audioQueueCreate(size_t capacity);
++void audioQueueEnsureCapacity(struct AudioQueue* audioQueue, size_t capacity);
+ 
+ void audioQueuePush(struct AudioQueue* audioQueue, uint32_t sample);
+ 
+--- a/src/uarm/uarm/audio_queue.cpp
++++ b/src/uarm/uarm/audio_queue.cpp
+@@ -1,6 +1,7 @@
+ #include "audio_queue.h"
+ 
+ #include "queue.h"
++#include <utility>
+ 
+ #ifndef __EMSCRIPTEN__
+     #define AUDIO_QUEUE_THREADSAFE
+@@ -16,8 +17,9 @@
+ 
+ struct AudioQueue {
+     Queue<uint32_t> queue;
++    size_t capacity;
+ 
+-    AudioQueue(size_t capacity) : queue(capacity) {}
++    AudioQueue(size_t capacity) : queue(capacity), capacity(capacity) {}
+ 
+ #ifdef AUDIO_QUEUE_THREADSAFE
+     std::mutex mutex;
+@@ -28,6 +30,15 @@
+     AudioQueue* audioQueue = new AudioQueue(capacity);
+ 
+     return audioQueue;
++}
++
++void audioQueueEnsureCapacity(struct AudioQueue* audioQueue, size_t capacity) {
++    AUDIO_QUEUE_LOCK;
++    if (capacity <= audioQueue->capacity) return;
++    Queue<uint32_t> expanded(capacity);
++    while (audioQueue->queue.GetSize()) expanded.Push(audioQueue->queue.Pop());
++    audioQueue->queue = std::move(expanded);
++    audioQueue->capacity = capacity;
+ }
+ 
+ void audioQueuePush(struct AudioQueue* audioQueue, uint32_t sample) {
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -373,7 +373,7 @@
+             make_unique<SdlRenderer>(window, soc, scale, displayConfiguration, rotation);
+         SdlEventHandler sdlEventHandler(soc, scale, displayConfiguration, rotation);
+ 
+-        SdlAudioDriver audioDriver(soc, audioQueue);
++        SdlAudioDriver audioDriver(soc, audioQueue, options.experimentalFastAudio);
+         if (!options.disableAudio) audioDriver.Start();
+ 
+         commands::Register();

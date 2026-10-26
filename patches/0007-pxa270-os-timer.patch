@@ -1,0 +1,22 @@
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -394,6 +394,7 @@
+ 
+     deviceLoad(dev, loader);
+     if (GetDeviceType() == DeviceType5::deviceTypeTX) {
++        scheduler->ScheduleTask(SCHEDULER_TASK_TIMER, 1_sec / 3250000ULL, 1);
+         *pacePatch = {};
+         if (!PrepareM68kSupport() && cpuIsModePace(cpu)) {
+             loader.NotifyError();
+@@ -485,8 +486,9 @@
+ }
+ 
+ void SocPXA::SetupScheduler() {
+-    // Timer: 3.6864 MHz
+-    scheduler->ScheduleTask(SCHEDULER_TASK_TIMER, 1_sec / 3686400ULL, 1);
++    // PXA27x OSCR0 runs at 3.25 MHz; PXA25x uses 3.6864 MHz.
++    scheduler->ScheduleTask(SCHEDULER_TASK_TIMER,
++                            1_sec / (socRev == 2 ? 3250000ULL : 3686400ULL), 1);
+ 
+     // RTC: 1 Hz
+     scheduler->ScheduleTask(SCHEDULER_TASK_RTC, 1_sec, 1);

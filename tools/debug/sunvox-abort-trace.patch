@@ -1,0 +1,48 @@
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -95,6 +95,8 @@
+                                 15   - system control (arm standard)
+ */
+ 
++static unsigned sunvoxTraceRemaining = 0;
++
+ struct ArmBankedRegs {
+     uint32_t R13, R14;
+     uint32_t SPSR;  // usr mode doesn't have an SPSR
+@@ -417,6 +419,13 @@
+ // input addr is VA not MVA
+ static void cpuPrvHandleMemErr(struct ArmCpu *cpu, uint32_t addr, bool write, bool instrFetch,
+                                uint_fast8_t fsr) {
++    if (addr == 0x200b0bb6) sunvoxTraceRemaining = 2048;
++    if (sunvoxTraceRemaining) {
++        fprintf(stderr, "SVFAULT pc=%08x addr=%08x fsr=%u M=%02x SPSR=%08x vec=%08x\n",
++                cpu->curInstrPC, addr, unsigned(fsr), cpu->M, cpu->SPSR, cpu->vectorBase);
++        for (int i=0; i<16; i++) fprintf(stderr, " %08x", cpu->regs[i]);
++        fprintf(stderr, "\n");
++    }
+ // FCSE
+ #ifdef SUPPORT_FCSE
+     if (addr < 0x02000000UL)  // report addr is MVA
+@@ -3555,6 +3564,12 @@
+                               // of execption handler
+         }
+ 
++        if (sunvoxTraceRemaining) {
++            --sunvoxTraceRemaining;
++            fprintf(stderr, "SVTRACE %08x %08x M=%02x S=%08x F=%08x", cpu->curInstrPC, instr, cpu->M, cpu->SPSR, cpu->flags);
++            for (int i=0; i<15; i++) fprintf(stderr, " %08x", cpu->regs[i]);
++            fprintf(stderr, "\n");
++        }
+         cpu->regs[REG_NO_PC] += 4;
+ 
+ #ifdef __EMSCRIPTEN__
+--- a/src/uarm/uarm/cp15mmu.cpp
++++ b/src/uarm/uarm/cp15mmu.cpp
+@@ -88,6 +88,7 @@
+                     val = cp15->control;
+                 else {
+                     uint32_t origVal = val;
++                    fprintf(stderr, "SVCP15 %08x pc=%08x\n", val, cpuGetCurInstrPC(cp15->cpu));
+ 
+                     // some bits ignore writes. pretend they were wirtten as proper
+                     val |= 0x0070;

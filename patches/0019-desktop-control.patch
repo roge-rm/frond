@@ -1,0 +1,341 @@
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -15,6 +15,7 @@
+ 
+ #include "Cli.h"
+ #include "Commands.h"
++#include "DesktopControl.h"
+ #include "FileUtil.h"
+ #include "Logging.h"
+ #include "MainLoop.h"
+@@ -55,6 +56,7 @@
+     optional<unsigned int> runFor;
+     optional<string> framebufferOutput;
+     optional<string> inputReplay;
++    optional<string> desktopSocket;
+ };
+ 
+ namespace {
+@@ -197,6 +199,10 @@
+             cerr << "--run-for requires a positive duration and cannot be combined with --script" << endl;
+             return false;
+         }
++        if (options.desktopSocket && (options.runFor || options.script)) {
++            cerr << "--desktop-socket cannot be combined with --run-for or --script" << endl;
++            return false;
++        }
+         if (options.mips == 0) {
+             cerr << "MIPS must be finite" << endl;
+             return false;
+@@ -285,6 +291,10 @@
+ 
+         const int gdbPort = options.gdbPort.value_or(-1);
+ 
++        if (options.desktopSocket && deviceType != DeviceType5::deviceTypeTX) {
++            cerr << "desktop sessions currently support Palm TX only" << endl;
++            return false;
++        }
+         DisplayConfiguration displayConfiguration =
+             deviceConfigurationDisplayConfigForMode(*displayMode);
+ 
+@@ -377,7 +387,7 @@
+         if (!options.disableAudio) audioDriver.Start();
+ 
+         commands::Register();
+-        if (!options.runFor) cli::Start(options.script);
++        if (!options.runFor && !options.desktopSocket) cli::Start(options.script);
+         const uint64_t startedAt = timestampUsec();
+         uint64_t replayStartedAt = startedAt;
+         commands::Context commandContext{
+@@ -386,6 +396,12 @@
+             .screenWidth = displayConfiguration.width,
+             .screenHeight = displayConfiguration.height + displayConfiguration.graffitiHeight};
+ 
++        unique_ptr<DesktopControl> desktop;
++        if (options.desktopSocket) {
++            desktop = make_unique<DesktopControl>(*options.desktopSocket, !options.disableAudio);
++            SDL_SetWindowTitle(window, "Frond — Palm TX");
++        }
++
+         uint64_t lastSpeedDump = startedAt;
+         bool waitForPreviewAudio = false;
+         uint64_t lastAudioUnderruns = audioDriver.GetUnderrunCount();
+@@ -400,7 +416,11 @@
+             }
+ 
+             sdlEventHandler.HandleEvents();
+-            if (sdlEventHandler.QuitRequested()) break;
++            if (sdlEventHandler.QuitRequested()) {
++                if (!desktop) break;
++                desktop->event("close");
++                sdlEventHandler.ClearQuitRequested();
++            }
+ 
+             if (!options.disableAudio) soc->SetPcmSuspended(audioDriver.GetAudioBackpressure());
+ 
+@@ -426,7 +446,7 @@
+ 
+             if (!replay.Dispatch((timestampUsec() - replayStartedAt) / 1000, *soc, *sdlRenderer, replayError)) {
+                 audioDriver.Pause();
+-                if (!options.runFor) cli::Stop();
++                if (!options.runFor && !options.desktopSocket) cli::Stop();
+                 cerr << replayError << endl;
+                 return false;
+             }
+@@ -443,11 +463,12 @@
+                   << (100 * currentIps) / currentIpsMax << "%" << endl
+                   << flush;
+ 
+-                SDL_SetWindowTitle(window, s.str().c_str());
++                SDL_SetWindowTitle(window, desktop ? "Frond — Palm TX" : s.str().c_str());
+                 if (options.runFor) cout << s.str();
+             }
+ 
+-            if (!options.runFor && cli::Execute(&commandContext)) break;
++            if (desktop && desktop->poll(commandContext)) break;
++            if (!options.runFor && !desktop && cli::Execute(&commandContext)) break;
+ 
+             if (commandContext.rotation != rotation) {
+                 rotation = commandContext.rotation;
+@@ -467,7 +488,7 @@
+         }
+ 
+         audioDriver.Pause();
+-        if (!options.runFor) cli::Stop();
++        if (!options.runFor && !options.desktopSocket) cli::Stop();
+ 
+         if (options.framebufferOutput && !sdlRenderer->SaveFramebuffer(options.framebufferOutput->c_str())) {
+             cerr << "failed to save framebuffer: " << SDL_GetError() << endl;
+@@ -480,9 +501,9 @@
+ }  // namespace
+ 
+ int main(int argc, char** argv) {
+-    argparse::ArgumentParser program("cp-uarm");
+-
+-    program.add_description("cp-uarm emulates a Palm Tungsten E2");
++    argparse::ArgumentParser program("frond-core", "0.1.0");
++
++    program.add_description("Frond Palm OS emulator");
+ 
+     program.add_argument("nor_or_session").help("NOR rom or saved session").required();
+ 
+@@ -554,6 +575,8 @@
+             throw runtime_error("invalid display mode");
+         });
+ 
++    program.add_argument("--desktop-socket").help("private desktop control socket");
++
+     program.add_argument("--script").help("execute script on startup").metavar("<script file>");
+ 
+     try {
+@@ -584,11 +607,17 @@
+                        .experimentalFastAudio = program.get<bool>("--experimental-fast-audio"),
+                        .runFor = program.present<unsigned int>("--run-for"),
+                        .framebufferOutput = program.present("--framebuffer-output"),
+-                       .inputReplay = program.present("--input-replay")};
++                       .inputReplay = program.present("--input-replay"),
++                       .desktopSocket = program.present("--desktop-socket")};
+ 
+     logEnable();
+ 
+-    if (!run(options)) exit(1);
++    try {
++        if (!run(options)) return 1;
++    } catch (const std::exception& error) {
++        cerr << error.what() << endl;
++        return 1;
++    }
+ 
+     return 0;
+ }
+--- a/src/uarm/native/SdlEventHandler.h
++++ b/src/uarm/native/SdlEventHandler.h
+@@ -14,6 +14,7 @@
+ 
+     bool RedrawRequested() const;
+     bool QuitRequested() const;
++    void ClearQuitRequested() { quitRequested = false; }
+     void ClearRedrawRequested();
+ 
+     void SetRotation(Rotation rotation);
+--- /dev/null
++++ b/src/uarm/native/DesktopControl.h
+@@ -0,0 +1,178 @@
++#ifndef FROND_DESKTOP_CONTROL_H
++#define FROND_DESKTOP_CONTROL_H
++
++#include <cerrno>
++#include <cstdio>
++#include <cstring>
++#include <fcntl.h>
++#include <stdexcept>
++#include <sys/socket.h>
++#include <sys/un.h>
++#include <unistd.h>
++
++#include "Commands.h"
++#include "ReadOnlyGuest.h"
++#include "FileUtil.h"
++#include "db_backup.h"
++#include "db_installer.h"
++#include "session/session_file5.h"
++
++// Private Unix socket, owned by the launcher. Only the emulation thread dispatches requests.
++// Lines: id<TAB>command<TAB>hex UTF-8 argument. Replies: id<TAB>ok/error<TAB>code<TAB>hex text.
++class DesktopControl {
++ public:
++    DesktopControl(const std::string& path, bool sound) : sound(sound) {
++        sockaddr_un address{};
++        address.sun_family = AF_UNIX;
++        if (path.size() >= sizeof(address.sun_path)) throw std::runtime_error("desktop socket path too long");
++        std::memcpy(address.sun_path, path.c_str(), path.size() + 1);
++        fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
++        if (fd < 0) throw std::runtime_error("cannot create desktop socket");
++        if (connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0 ||
++            fcntl(fd, F_SETFL, O_NONBLOCK) < 0) {
++            close(fd);
++            fd = -1;
++            throw std::runtime_error("cannot connect to desktop launcher");
++        }
++        event("ready");
++    }
++    ~DesktopControl() { if (fd >= 0) close(fd); }
++    void event(const char* name) { output += std::string("0\tevent\t") + name + "\t\n"; }
++
++    bool poll(commands::Context& ctx) {
++        char data[4096];
++        const auto n = recv(fd, data, sizeof(data), 0);
++        if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) return true;
++        if (n > 0) input.append(data, n);
++        if (input.size() > 16384 || output.size() > 65536) return true;
++        const auto end = input.find('\n');
++        if (end != std::string::npos) {
++            const auto line = input.substr(0, end);
++            input.erase(0, end + 1);
++            const auto first = line.find('\t'), second = line.find('\t', first == std::string::npos ? 0 : first + 1);
++            if (first == std::string::npos || second == std::string::npos) return true;
++            const auto id = line.substr(0, first), command = line.substr(first + 1, second - first - 1);
++            if (id.empty() || id.size() > 20 || id == "0" || id.find_first_not_of("0123456789") != std::string::npos)
++                return true;
++            std::string argument;
++            if (!decode(line.substr(second + 1), argument)) return true;
++            const bool work = command == "save" || command == "install" || command == "export" || command == "reset";
++            if (work) ctx.audioDriver.Pause();
++            Reply result;
++            try {
++                result = dispatch(ctx, command, argument);
++            } catch (const std::exception& error) {
++                result = {false, "failed", error.what()};
++            }
++            if (work) {
++                // File I/O and Palm API injection deliberately pause playback; do not catch up that wall time.
++                if (sound) ctx.audioDriver.Start();
++                ctx.mainLoop.PauseAt(timestampUsec());
++            }
++            output += id + (result.ok ? "\tok\t" : "\terror\t") + result.code + "\t" + encode(result.message) + "\n";
++        }
++        if (!output.empty()) {
++            const auto sent = send(fd, output.data(), output.size(), MSG_NOSIGNAL);
++            if (sent > 0) output.erase(0, sent);
++            else if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) return true;
++        }
++        return quit && output.empty();
++    }
++
++ private:
++    struct Reply { bool ok{false}; std::string code{"failed"}, message; };
++    static std::string encode(const std::string& value) {
++        static const char digits[] = "0123456789abcdef";
++        std::string out;
++        for (unsigned char c : value) { out += digits[c >> 4]; out += digits[c & 15]; }
++        return out;
++    }
++    static bool decode(const std::string& value, std::string& out) {
++        if (value.size() % 2) return false;
++        auto digit = [](char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1; };
++        for (size_t i = 0; i < value.size(); i += 2) {
++            const int a = digit(value[i]), b = digit(value[i + 1]);
++            if (a < 0 || b < 0 || !(a || b)) return false;
++            out += char(a * 16 + b);
++        }
++        return true;
++    }
++    static void writeAtomic(const std::string& path, const void* bytes, size_t size) {
++        std::string temporary = path + ".tmp-XXXXXX";
++        const int file = mkstemp(temporary.data());
++        if (file < 0) throw std::runtime_error("cannot create output file: " + std::string(strerror(errno)));
++        bool open = true;
++        try {
++            const auto* data = static_cast<const uint8_t*>(bytes);
++            while (size) {
++                const auto n = write(file, data, size);
++                if (n < 0 && errno == EINTR) continue;
++                if (n <= 0) throw std::runtime_error("cannot write output file");
++                data += n; size -= n;
++            }
++            if (fsync(file) < 0) throw std::runtime_error("cannot flush output file");
++            const auto closed = close(file); open = false;
++            if (closed < 0 || rename(temporary.c_str(), path.c_str()) < 0)
++                throw std::runtime_error("cannot replace output file");
++        } catch (...) {
++            if (open) close(file);
++            unlink(temporary.c_str());
++            throw;
++        }
++    }
++    Reply dispatch(commands::Context& ctx, const std::string& command, const std::string& path) {
++        const bool fileCommand = command == "save" || command == "install" || command == "export";
++        if (fileCommand && (path.empty() || path.front() != '/')) return {false, "argument", "An absolute file path is required."};
++        if (!fileCommand && !path.empty()) return {false, "argument", "This command takes no argument."};
++        if (command == "save") {
++            if (!ctx.soc->Save()) return {false, "save", "Could not save device state."};
++            SessionFile5 session;
++            const auto nor = ctx.soc->GetRomData(), nand = ctx.soc->GetNandData();
++            const auto ram = ctx.soc->GetMemoryData(), state = ctx.soc->GetSavestate();
++            session.SetDeviceType(int32_t(ctx.soc->GetDeviceType()))
++                .SetDisplayMode(int32_t(ctx.soc->GetDisplayMode())).SetRamSize(ctx.soc->GetRamSize())
++                .SetNor(nor.size, static_cast<uint8_t*>(nor.data)).SetNand(nand.size, static_cast<uint8_t*>(nand.data))
++                .SetMemory(ram.size, static_cast<uint8_t*>(ram.data)).SetSavestate(state.size, static_cast<uint8_t*>(state.data));
++            if (!session.Serialize()) return {false, "save", "Could not serialize session."};
++            writeAtomic(path, session.GetSerializedSession(), session.GetSerializedSessionSize());
++            return {true, "saved", "Session saved."};
++        }
++        if (command == "install") {
++            std::unique_ptr<uint8_t[]> data; size_t size;
++            if (!util::ReadFile(path, data, size)) return {false, "read", "Could not read the application database."};
++            const auto result = dbInstallerInstall(ctx.soc->GetSyscallDispatch(), size, data.get());
++            switch (result) {
++                case DB_INSTALL_RESULT_OK: return {true, "installed", "Application installed."};
++                case DB_INSTALL_RESULT_NEEDS_RESET: return {true, "needs-reset", "Installed. Reset the Palm to finish installation."};
++                case DB_INSTALL_RESULT_ERR_CORRUPT: return {false, "corrupt", "The Palm database is corrupt."};
++                case DB_INSTALL_RESULT_ERR_OOM: return {false, "memory", "The Palm does not have enough memory."};
++                case DB_INSTALL_RESULT_ERR_IS_OPEN: return {false, "open", "Close this application on the Palm before replacing it."};
++                case DB_INSTALL_RESULT_ERR_COULD_NOT_OVERWRITE: return {false, "overwrite", "The existing database could not be replaced."};
++                case DB_INSTALL_RESULT_ERR_NOT_SUPPORTED: return {false, "unsupported", "Installation is not supported by this firmware."};
++                case DB_INSTALL_RESULT_ERR_NOT_CURRENTLY_POSSIBLE: return {false, "not-ready", "Wait for Palm OS to finish starting, then try again."};
++                default: return {false, "install", "Application installation failed."};
++            }
++        }
++        if (command == "export") {
++            ReadOnlyGuest checkpoint(*ctx.soc);
++            DbBackup backup(ctx.soc->GetSyscallDispatch(), DbBackup::BACKUP_TYPE_RAM);
++            if (!backup.Init()) return {false, "export", "Could not start database export."};
++            while (backup.GetState() == DbBackup::STATE_IN_PROGRESS) backup.Continue();
++            if (backup.GetState() != DbBackup::STATE_DONE || !backup.GetArchiveData() || !backup.GetArchiveSize())
++                return {false, "export", "Database export failed. No archive was written."};
++            writeAtomic(path, backup.GetArchiveData(), backup.GetArchiveSize());
++            return {true, "exported", "RAM databases exported."};
++        }
++        if (command == "reset") ctx.soc->Reset();
++        else if (command == "rotate") ctx.rotation = Rotation((int(ctx.rotation) + 1) % 4);
++        else if (command == "audio-on") { ctx.audioDriver.Start(); sound = true; }
++        else if (command == "audio-off") { ctx.audioDriver.Pause(); sound = false; }
++        else if (command == "quit") quit = true;
++        else return {false, "command", "Unknown desktop command."};
++        return {true, "done", "Done."};
++    }
++    int fd{-1};
++    bool sound, quit{false};
++    std::string input, output;
++};
++#endif

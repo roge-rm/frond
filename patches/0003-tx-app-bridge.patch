@@ -1,0 +1,227 @@
+diff --git a/src/uarm/uarm/CPU.cpp b/src/uarm/uarm/CPU.cpp
+index 759c6aa..c25f72f 100644
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -768,8 +768,9 @@ static FORCE_INLINE bool cpuPrvMemOp(struct ArmCpu *cpu, void *buf, uint32_t vad
+     if (cpuPrvMemOpEx<memorySystemKind, size, write>(cpu, buf, vaddr, priviledged, fsrP))
+         return true;
+ 
+-    fprintf(stderr, "%c of %u bytes to 0x%08lx failed!\n", (int)(write ? 'W' : 'R'), (unsigned)size,
+-            (unsigned long)vaddr);
++    fprintf(stderr, "%c of %u bytes to 0x%08lx failed (pc=0x%08x, fsr=%u)!\n",
++            (int)(write ? 'W' : 'R'), (unsigned)size, (unsigned long)vaddr,
++            cpu->curInstrPC, fsrP ? unsigned(*fsrP) : 0);
+ 
+     gdbStubDebugBreakRequested(cpu->debugStub);
+ 
+@@ -786,8 +787,9 @@ static FORCE_INLINE bool cpuPrvMemOpGeneric(struct ArmCpu *cpu, void *buf, uint3
+ #else
+     if (cpuPrvMemOpExGeneric<size, write>(cpu, buf, vaddr, priviledged, fsrP)) return true;
+ 
+-    fprintf(stderr, "%c of %u bytes to 0x%08lx failed!\n", (int)(write ? 'W' : 'R'), (unsigned)size,
+-            (unsigned long)vaddr);
++    fprintf(stderr, "%c of %u bytes to 0x%08lx failed (pc=0x%08x, fsr=%u)!\n",
++            (int)(write ? 'W' : 'R'), (unsigned)size, (unsigned long)vaddr,
++            cpu->curInstrPC, fsrP ? unsigned(*fsrP) : 0);
+ 
+     gdbStubDebugBreakRequested(cpu->debugStub);
+ 
+@@ -795,6 +797,8 @@ static FORCE_INLINE bool cpuPrvMemOpGeneric(struct ArmCpu *cpu, void *buf, uint3
+ #endif
+ }
+ 
++void cpuInvalidateCodeCache(struct ArmCpu *cpu) { icacheInval(cpu->ic); }
++
+ // for external use
+ bool cpuMemOpExternal(struct ArmCpu *cpu, void *buf, uint32_t vaddr, uint_fast8_t size,
+                       bool write)  // for external use
+diff --git a/src/uarm/uarm/CPU.h b/src/uarm/uarm/CPU.h
+index d886828..1b1fcf3 100644
+--- a/src/uarm/uarm/CPU.h
++++ b/src/uarm/uarm/CPU.h
+@@ -96,6 +96,9 @@ void cpuFinishInjectedSyscall68k(struct ArmCpu *cpu);
+ 
+ void cpuReset(struct ArmCpu *cpu, uint32_t pc);
+ 
++// Host code patches must discard decoded instructions as well as guest cache lines.
++void cpuInvalidateCodeCache(struct ArmCpu *cpu);
++
+ void cpuIrq(struct ArmCpu *cpu, bool fiq, bool raise);  // unraise when acknowledged
+ 
+ uint32_t cpuGetRegExternal(struct ArmCpu *cpu, uint_fast8_t reg);
+diff --git a/src/uarm/uarm/SoC.h b/src/uarm/uarm/SoC.h
+index 3102176..4cc450f 100644
+--- a/src/uarm/uarm/SoC.h
++++ b/src/uarm/uarm/SoC.h
+@@ -85,6 +85,7 @@ class SoC {
+     virtual void JamKey(enum KeyId key, uint32_t durationMsec) = 0;
+ 
+     bool IsPacePatched();
++    virtual bool PrepareM68kSupport() { return IsPacePatched(); }
+     virtual uint64_t GetTime() = 0;
+ 
+     // Actual SoC needs to implement those, the other virtuals are taken
+diff --git a/src/uarm/uarm/pace_patch.cpp b/src/uarm/uarm/pace_patch.cpp
+index 999e0a2..692d355 100644
+--- a/src/uarm/uarm/pace_patch.cpp
++++ b/src/uarm/uarm/pace_patch.cpp
+@@ -6,13 +6,15 @@
+ 
+ #include "cputil.h"
+ 
+-#define findCallout(var, name, location)                                                     \
+-    uint32_t var = decodeBBlBlx(rom, paceLocation + location - 0x1fd28);                     \
+-    if (!var) {                                                                              \
+-        fprintf(stderr, "unable to locate callout for" name ", PACE will not be patched\n"); \
+-        return;                                                                              \
+-    }                                                                                        \
+-    var += romBase;                                                                          \
++#define findCallout(var, name, location)                                                      \
++    const size_t site_##var = size_t(paceLocation) + location - 0x1fd28;                       \
++    if (site_##var > romSize || romSize - site_##var < 4) return;                             \
++    uint32_t var = decodeBBlBlx(rom, site_##var);                                             \
++    if (!var || (var & ~1u) >= romSize) {                                                    \
++        fprintf(stderr, "unable to locate callout for " name ", PACE will not be patched\n"); \
++        return;                                                                            \
++    }                                                                                      \
++    var += romBase;                                                                        \
+     printf("found PACE callout for " name " at %#010x\n", var);
+ 
+ static uint32_t decodeBBlBlx(void* rom, uint32_t addr) {
+@@ -58,15 +60,15 @@ void pacePatchInit(struct PacePatch* patch, uint32_t romBase, void* rom, size_t
+         0xE2, 0x44, 0xA0, 0x80, 0xE5, 0x48, 0x40, 0x80, 0xE5, 0x00, 0x80, 0x80, 0xE5, 0x18, 0x90,
+         0x9D, 0xE5, 0x00, 0x00, 0xA0, 0xE3, 0xF2, 0x4F, 0xBD, 0xE8, 0x1E, 0xFF, 0x2F, 0xE1};
+ 
+-    if (!rom) return;
++    if (!rom || romSize < sizeof(paceStartPattern) || romSize > UINT32_MAX) return;
+ 
+-    uint32_t paceLocation = 0;
+-    for (uint32_t i = 0; i < romSize - sizeof(paceStartPattern); i += 4) {
++    uint32_t paceLocation = UINT32_MAX;
++    for (uint32_t i = 0; i <= romSize - sizeof(paceStartPattern); i += 4) {
+         if (memcmp(reinterpret_cast<uint8_t*>(rom) + i, paceStartPattern,
+                    sizeof(paceStartPattern)) != 0)
+             continue;
+ 
+-        if (paceLocation != 0) {
++        if (paceLocation != UINT32_MAX) {
+             fprintf(stderr,
+                     "PACE signature found in both %#010x and %#010x, PACE will not be patched\n",
+                     paceLocation, i);
+@@ -76,7 +78,7 @@ void pacePatchInit(struct PacePatch* patch, uint32_t romBase, void* rom, size_t
+         paceLocation = i;
+     }
+ 
+-    if (!paceLocation) {
++    if (paceLocation == UINT32_MAX) {
+         fprintf(stderr, "unable to locate PACE, will not be patched\n");
+         return;
+     }
+diff --git a/src/uarm/uarm/soc_PXA.cpp b/src/uarm/uarm/soc_PXA.cpp
+index 4bc88e7..bcd0e46 100644
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -8,6 +8,7 @@
+ #include <cstdlib>
+ 
+ #include "CPU.h"
++#include "MMU.h"
+ #include "RAM.h"
+ #include "ROM.h"
+ #include "cputil.h"
+@@ -222,6 +223,9 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
+ 
+     nand = sp.nand;
+ 
++    if (deviceType == DeviceType5::deviceTypeTX)
++        scheduler->ScheduleTask(SCHEDULER_TASK_AUX_3, 1_msec, 1);
++
+     powerOnState->Save(*this);
+     SdEject();
+ }
+@@ -278,6 +282,11 @@ uint32_t SocPXA::DispatchTicks(uint32_t clientType, uint32_t batchedTicks) {
+             PumpEventQueues();
+             return 1;
+ 
++        case SCHEDULER_TASK_AUX_3:
++            // Install the bridge before the first guest PACE invocation. Once
++            // active, a slower check catches OS reloads after guest resets.
++            return PrepareM68kSupport() ? 1000 : 1;
++
+         default:
+             ERR("invalid client type\n");
+     }
+@@ -541,3 +550,48 @@ uint64_t SocPXA::GetTimeCB(void *ctx) {
+ template void SocGeneric<SocPXA>::Save<Savestate<ChunkType>>(Savestate<ChunkType> &savestate);
+ template void SocGeneric<SocPXA>::Save<SavestateProbe<ChunkType>>(
+     SavestateProbe<ChunkType> &savestate);
++
++// TX's IPL copies the OS from NAND into this RAM window. Enable the existing
++// signature-based PACE bridge before the guest enters its 68K application loop.
++// Never patch the IPL, NAND, or an image whose active mappings do not match.
++bool SocPXA::PrepareM68kSupport() {
++    if (GetDeviceType() != DeviceType5::deviceTypeTX) return IsPacePatched();
++
++    constexpr uint32_t virtualBase = 0x20000000;
++    constexpr uint32_t physicalOffset = 0x00200000;
++    constexpr uint32_t imageSize = 0x01000000;
++    ArmMmu* mmu = cpuGetMMU(cpu);
++    if (!mmuIsOn(mmu) || ramSize < physicalOffset + imageSize) return false;
++
++    // A guest-initiated reset can reload the original interpreter over our patch.
++    // Do not advertise a stale bridge after that reload.
++    if (IsPacePatched()) {
++        const uint32_t offset = pacePatch->enterPace - virtualBase;
++        const auto mapping = mmuTranslate(mmu, pacePatch->enterPace, true, false);
++        if (!MMU_TRANSLATE_RESULT_OK(mapping) ||
++            MMU_TRANSLATE_RESULT_PA(mapping) != RAM_BASE + physicalOffset + offset)
++            return false;
++        if (offset <= imageSize - 12) {
++            const auto* entry = reinterpret_cast<const uint32_t*>(
++                bufferMemory.buffer + physicalOffset + offset);
++            if (entry[0] == INSTR_PACE_ENTER && entry[1] == INSTR_PACE_RESUME &&
++                entry[2] == INSTR_PACE_RETURN_FROM_CALLOUT)
++                return true;
++        }
++        *pacePatch = {};
++    }
++
++    for (uint32_t offset = 0; offset < imageSize; offset += 1024) {
++        const auto mapping = mmuTranslate(mmu, virtualBase + offset, true, false);
++        if (!MMU_TRANSLATE_RESULT_OK(mapping) ||
++            MMU_TRANSLATE_RESULT_PA(mapping) != RAM_BASE + physicalOffset + offset)
++            return false;
++    }
++
++    pacePatchInit(pacePatch, virtualBase, bufferMemory.buffer + physicalOffset, imageSize);
++    if (!IsPacePatched()) return false;
++
++    memoryBufferMarkRangeDirty(&bufferMemory, physicalOffset, imageSize);
++    cpuInvalidateCodeCache(cpu);
++    return true;
++}
+diff --git a/src/uarm/uarm/soc_PXA.h b/src/uarm/uarm/soc_PXA.h
+index 9f92f9a..f5417b6 100644
+--- a/src/uarm/uarm/soc_PXA.h
++++ b/src/uarm/uarm/soc_PXA.h
+@@ -50,6 +50,7 @@ class SocPXA : public SocGeneric<SocPXA> {
+     DisplayMode GetDisplayMode() override;
+     void SuspendTimerInterrupts(bool suspendInterrupts) override;
+     bool LcdEnabled() override;
++    bool PrepareM68kSupport() override;
+ 
+     uint32_t DispatchTicks(uint32_t clientType, uint32_t batchedTicks);
+ 
+diff --git a/src/uarm/uarm/syscall_dispatch.cpp b/src/uarm/uarm/syscall_dispatch.cpp
+index 75343ac..82c9704 100644
+--- a/src/uarm/uarm/syscall_dispatch.cpp
++++ b/src/uarm/uarm/syscall_dispatch.cpp
+@@ -105,7 +105,7 @@ struct SyscallDispatch* initSyscallDispatch(SoC* soc) {
+ 
+ bool syscallDispatchInProgress(struct SyscallDispatch* sd) { return sd->nestLevel > 0; }
+ 
+-bool syscallDispatchM68kSupport(struct SyscallDispatch* sd) { return sd->soc->IsPacePatched(); }
++bool syscallDispatchM68kSupport(struct SyscallDispatch* sd) { return sd->soc->PrepareM68kSupport(); }
+ 
+ bool syscallDispatchPrepare(struct SyscallDispatch* sd) {
+     if (!syscallDispatchM68kSupport(sd)) return false;

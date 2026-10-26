@@ -1,0 +1,3 @@
+[submodule "vendor/cloudpilot"]
+	path = vendor/cloudpilot
+	url = https://github.com/cloudpilot-emu/cloudpilot-emu.git

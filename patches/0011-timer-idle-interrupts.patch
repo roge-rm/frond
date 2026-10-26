@@ -1,0 +1,36 @@
+--- a/src/uarm/uarm/pxa_TIMR.cpp
++++ b/src/uarm/uarm/pxa_TIMR.cpp
+@@ -66,12 +66,12 @@
+     }
+ }
+ 
+-static void pxaTimrPrvUpdateSingleStep(struct PxaTimr *timr) {
++static void pxaTimrPrvUpdateSingleStep(struct PxaTimr *timr, bool forceInterruptUpdate = true) {
+     uint_fast8_t i;
+ 
+     for (i = 0; i < 4; i++) pxaTimrPrvCheckMatchSingleStep(timr, i);
+ 
+-    pxaTimrPrvRaiseLowerInts(timr);
++    if (forceInterruptUpdate || timr->OSSR) pxaTimrPrvRaiseLowerInts(timr);
+ }
+ 
+ static void pxaTimrPrvUpdateMultiStep(struct PxaTimr *timr, uint32_t oscrOld,
+@@ -80,7 +80,7 @@
+ 
+     for (i = 0; i < 4; i++) pxaTimrPrvCheckMatchMultiStep(timr, i, oscrOld, batchedTicks);
+ 
+-    pxaTimrPrvRaiseLowerInts(timr);
++    if (timr->OSSR) pxaTimrPrvRaiseLowerInts(timr);
+ }
+ 
+ static bool pxaTimrPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size, bool write,
+@@ -174,7 +174,8 @@
+ void pxaTimrTick(struct PxaTimr *timr, uint32_t batchedTicks) {
+     if (batchedTicks == 1) {
+         timr->OSCR++;
+-        pxaTimrPrvUpdateSingleStep(timr);
++        // Ticks only set status bits; register writes still refresh cleared lines.
++        pxaTimrPrvUpdateSingleStep(timr, false);
+     } else {
+         const uint32_t oscrOld = timr->OSCR;
+         timr->OSCR += batchedTicks;

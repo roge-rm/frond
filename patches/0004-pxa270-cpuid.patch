@@ -1,0 +1,11 @@
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -49,7 +49,7 @@
+ 
+ #define CPUID_PXA255 0x69052D06ul  // spepping A0
+ #define CPUID_PXA260 0x69052D06ul  // spepping B1
+-#define CPUID_PXA270 0x49265013ul  // stepping C0
++#define CPUID_PXA270 0x69054114ul  // stepping C0
+ 
+ #define SRAM_BASE 0x5c000000ul
+ #define SRAM_SIZE 0x00040000ul

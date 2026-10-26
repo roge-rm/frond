@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Frond
+Comment=Palm TX emulator
+Exec=frond-desktop %f
+Icon=frond
+Terminal=false
+Categories=System;Emulator;
+MimeType=application/x-frond-session;
+StartupNotify=true

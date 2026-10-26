@@ -1,0 +1,18 @@
+7000 snapshot out/menu-perf-before-0.png
+8000 pen-down 274 8
+8100 pen-up
+10500 snapshot out/menu-perf-open-0.png
+11000 pen-down 100 50
+11100 pen-up
+13000 snapshot out/menu-perf-before-1.png
+14000 pen-down 274 8
+14100 pen-up
+16500 snapshot out/menu-perf-open-1.png
+17000 pen-down 100 50
+17100 pen-up
+19000 snapshot out/menu-perf-before-2.png
+20000 pen-down 274 8
+20100 pen-up
+22500 snapshot out/menu-perf-open-2.png
+23000 pen-down 100 50
+23100 pen-up

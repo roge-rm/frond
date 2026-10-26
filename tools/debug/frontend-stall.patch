@@ -1,0 +1,64 @@
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -349,6 +349,8 @@
+         }
+ 
+         MainLoop mainLoop(soc);
++        if (getenv("FROND_MAX_LOAD"))
++            mainLoop.SetMaxLoad(std::strtoul(getenv("FROND_MAX_LOAD"), nullptr, 10));
+         if (options.experimentalFastAudio) mainLoop.SetTimesliceUsec(1000000 / 120);
+         mainLoop.SetCyclesPerSecondLimit(options.mips * 1000000);
+ 
+@@ -401,6 +403,7 @@
+ 
+             sdlEventHandler.HandleEvents();
+             if (sdlEventHandler.QuitRequested()) break;
++            const auto eventsFinished = timestampUsec();
+ 
+             if (!options.disableAudio) soc->SetPcmSuspended(audioDriver.GetAudioBackpressure());
+ 
+@@ -418,10 +421,21 @@
+                 if (!waitForPreviewAudio && pending > 3072) waitForPreviewAudio = true;
+                 if (waitForPreviewAudio && pending < 2048) waitForPreviewAudio = false;
+             } else waitForPreviewAudio = false;
++            const auto executionStarted = timestampUsec();
+             if (waitForPreviewAudio) mainLoop.PauseAt(now);
+             else mainLoop.Cycle(now);
++            const auto executionFinished = timestampUsec();
+ 
+             sdlRenderer->Draw(sdlEventHandler.RedrawRequested());
++            const auto drawFinished = timestampUsec();
++            static const unsigned stallUsec = getenv("FROND_STALL_USEC")
++                ? std::min(200000u, unsigned(std::strtoul(getenv("FROND_STALL_USEC"), nullptr, 10))) : 0;
++            static uint64_t lastStall = startedAt;
++            if (stallUsec && timestampUsec() - lastStall >= 5000000) {
++                fprintf(stderr, "STALL %llu %u\n", (unsigned long long)timestampUsec(), stallUsec);
++                usleep(stallUsec);
++                lastStall = timestampUsec();
++            }
+             sdlEventHandler.ClearRedrawRequested();
+ 
+             if (!replay.Dispatch((timestampUsec() - replayStartedAt) / 1000, *soc, *sdlRenderer, replayError)) {
+@@ -431,6 +445,7 @@
+                 return false;
+             }
+ 
++            const auto replayFinished = timestampUsec();
+             if (now - lastSpeedDump > 1000000) {
+                 const uint64_t currentIps = mainLoop.GetCurrentIps();
+                 const uint64_t currentIpsMax = mainLoop.GetCurrentIpsMax();
+@@ -447,6 +462,14 @@
+                 if (options.runFor) cout << s.str();
+             }
+ 
++            static const bool frontendTrace = getenv("FROND_FRONTEND_TRACE") != nullptr;
++            if (frontendTrace) fprintf(stderr,
++                "FRAME %llu events=%llu run=%llu draw=%llu replay=%llu rest=%llu budget=%u\n",
++                (unsigned long long)now, (unsigned long long)(eventsFinished-now),
++                (unsigned long long)(executionFinished-executionStarted),
++                (unsigned long long)(drawFinished-executionFinished),
++                (unsigned long long)(replayFinished-drawFinished),
++                (unsigned long long)(timestampUsec()-replayFinished),mainLoop.GetCurrentIps());
+             if (!options.runFor && cli::Execute(&commandContext)) break;
+ 
+             if (commandContext.rotation != rotation) {

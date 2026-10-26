@@ -1,0 +1,86 @@
+--- a/src/uarm/uarm/SoC.cpp
++++ b/src/uarm/uarm/SoC.cpp
+@@ -3,6 +3,9 @@
+ #include <cstring>
+ 
+ #include "RAM.h"
++#include "cputil.h"
++#include <cstdlib>
++#include <cstdio>
+ #include "ROM.h"
+ #include "audio_queue.h"
+ #include "mem.h"
+@@ -40,13 +43,17 @@
+ void SoC::KeyUp(enum KeyId key) { keyEventQueue->Push(KeyEvent::KeyUp(key)); }
+ 
+ void SoC::PenDown(int x, int y) {
++    if (getenv("FROND_LATENCY_PCM")) fprintf(stderr, "LAT INPUT %llu 1 %d %d\n", (unsigned long long)timestampUsec(), x, y);
+     penEventQueue->Push(PenEvent::PenDown(
+         std::min<int>(std::max<int>(x, 0), displayConfiguration.width),
+         std::min<int>(std::max<int>(y, 0),
+                       displayConfiguration.height + displayConfiguration.graffitiHeight)));
+ }
+ 
+-void SoC::PenUp() { penEventQueue->Push(PenEvent::PenUp()); }
++void SoC::PenUp() {
++    if (getenv("FROND_LATENCY_PCM")) fprintf(stderr, "LAT INPUT %llu 0 -1 -1\n", (unsigned long long)timestampUsec());
++    penEventQueue->Push(PenEvent::PenUp());
++}
+ 
+ void SoC::SetFramebufferDirty(uint32_t pa, uint32_t size) {
+     const uint32_t end = pa + size - 1;
+--- a/src/uarm/uarm/soc_generic_impl.h
++++ b/src/uarm/uarm/soc_generic_impl.h
+@@ -227,6 +227,7 @@
+         if (evt.penDown && !penDown) eventQueueTicksAtPenDown = eventQueueTicks;
+         penDown = evt.penDown;
+ 
++        if (getenv("FROND_LATENCY_PCM")) fprintf(stderr, "LAT TOUCH %llu %d %d %d\n", (unsigned long long)timestampUsec(), evt.penDown, evt.x, evt.y);
+         static_cast<T&>(*this).OnTouch(evt.x, evt.y);
+     }
+ }
+--- a/src/uarm/uarm/ac97dev_WM9712L.cpp
++++ b/src/uarm/uarm/ac97dev_WM9712L.cpp
+@@ -482,6 +482,10 @@
+ }
+ 
+ static void wm9712LprvNewAudioPlaybackSample(struct WM9712L *wm, uint32_t samp) {
++    static const bool trace = getenv("FROND_LATENCY_PCM") != nullptr;
++    static bool silent = true;
++    if (trace && samp && silent) fprintf(stderr, "LAT GUEST %llu %zu\n", (unsigned long long)timestampUsec(), wm->audioQueue ? audioQueuePendingSamples(wm->audioQueue) : 0);
++    silent = !samp;
+     if (wm->audioQueue) audioQueuePush(wm->audioQueue, samp);
+ }
+ 
+--- a/src/uarm/native/SdlAudioDriver.cpp
++++ b/src/uarm/native/SdlAudioDriver.cpp
+@@ -2,6 +2,9 @@
+ 
+ #include <iostream>
+ 
++#include "cputil.h"
++#include <cstdio>
++#include <cstdlib>
+ #include "SDL_audio.h"
+ #include "SoC.h"
+ #include "audio_queue.h"
+@@ -72,6 +75,7 @@
+ }
+ 
+ void SdlAudioDriver::AudioCallback(uint8_t* stream, int len) {
++    const auto callbackAt = timestampUsec();
+     size_t samplesRemaining = len >> 2;
+     size_t samplesPending = audioQueuePendingSamples(audioQueue);
+ 
+@@ -94,4 +98,11 @@
+     if (samplesRemaining > 0) {
+         memset(stream + (len / 4 - samplesRemaining) * 4, 0, samplesRemaining * 4);
+     }
++    static FILE* capture = getenv("FROND_LATENCY_PCM") ? fopen(getenv("FROND_LATENCY_PCM"), "wb") : nullptr;
++    static unsigned long long frames = 0;
++    if (capture) {
++        fwrite(stream, 1, len, capture);
++        fprintf(stderr, "LAT AUDIO %llu %llu %d %zu\n", (unsigned long long)callbackAt, frames, len / 4, samplesPending);
++        frames += len / 4;
++    }
+ }

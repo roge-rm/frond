@@ -1,0 +1,63 @@
+--- a/src/uarm/MainLoop.cpp
++++ b/src/uarm/MainLoop.cpp
+@@ -12,15 +12,9 @@
+     constexpr int AVERAGE_TIMESLICES = 30;
+     constexpr uint32_t BIN_SIZE = 1000000;
+     constexpr uint32_t CYCLES_PER_SECOND_LIMIT_DEFAULT = 100000000;
++    constexpr uint32_t MAX_LOAD_MAX = 97;
+     constexpr uint32_t MAX_LOAD_CATCHUP_MARGIN = 20;
+     constexpr int PRESERVE_TIMESLICES_FOR_CATCHUP = 3;
+-#ifdef __EMSCRIPTEN__
+-    constexpr uint32_t MAX_LOAD_MAX = 97;
+-    constexpr bool LEGACY_BROWSER_PACING = true;
+-#else
+-    constexpr uint32_t MAX_LOAD_MAX = 94;  // Reserve time for native frontend work.
+-    constexpr bool LEGACY_BROWSER_PACING = false;
+-#endif
+ }  // namespace
+ 
+ MainLoop::MainLoop(SoC* soc)
+@@ -59,10 +53,10 @@
+     if (deltaUsec > lagSkip) {
+         deltaUsec = timesliceUsec;
+         virtualTimeUsec = now - deltaUsec;
+-        if (LEGACY_BROWSER_PACING) cyclesPerSecondAverage.Reset(1);
++        cyclesPerSecondAverage.Reset(1);
+ 
+         // cerr << "too much lag, skipping forward" << endl << flush;
+-    } else if (LEGACY_BROWSER_PACING && lastDeltaUsec < lagCatchup &&
++    } else if (lastDeltaUsec < lagCatchup &&
+                deltaUsec >= lagCatchup) {
+         cyclesPerSecondAverage.Reset(PRESERVE_TIMESLICES_FOR_CATCHUP);
+     }
+@@ -71,21 +65,21 @@
+     realTimeUsec = now;
+ 
+     double cyclesPerSecond = CalculateCyclesPerSecond(
+-        LEGACY_BROWSER_PACING && deltaUsec >= lagCatchup
+-            ? (maxLoad - MAX_LOAD_CATCHUP_MARGIN) : maxLoad);
+-    const uint64_t executionStarted = now;
+-    const double runUsec = LEGACY_BROWSER_PACING
+-        ? deltaUsec : std::min(deltaUsec, double(timesliceUsec));
++        deltaUsec >= lagCatchup ? (maxLoad - MAX_LOAD_CATCHUP_MARGIN) : maxLoad);
++#ifdef __EMSCRIPTEN__
++    const double runUsec = deltaUsec;
++#else
++    const double runUsec = std::min(deltaUsec, double(timesliceUsec));
++#endif
+     const uint64_t cyclesEmulated =
+         soc->Run(runUsec * cyclesPerSecond / 1E6, round(cyclesPerSecond));
+ 
+     const double slizeSizeSeconds = cyclesEmulated / cyclesPerSecond;
+ 
+     virtualTimeUsec += slizeSizeSeconds * 1E6;
+-    const uint64_t executionFinished = timestampUsec();
+-    if (executionFinished > executionStarted && (LEGACY_BROWSER_PACING || cyclesEmulated))
+-        cyclesPerSecondAverage.Add((cyclesEmulated * 1000000) /
+-                                   (executionFinished - executionStarted));
++    uint64_t now2 = timestampUsec();
++
++    if (now2 != now) cyclesPerSecondAverage.Add((cyclesEmulated * 1000000) / (now2 - now));
+ 
+     currentIps = cyclesPerSecond;
+     currentIpsMax = cyclesPerSecondAverage.Calculate();

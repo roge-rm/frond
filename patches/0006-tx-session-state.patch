@@ -1,0 +1,694 @@
+--- a/src/uarm/uarm/savestate/ChunkTypeUarm.h
++++ b/src/uarm/uarm/savestate/ChunkTypeUarm.h
+@@ -24,6 +24,11 @@
+     pxa255udc = 0x0130,
+     wm9712L = 0x0140,
+     bcm2035 = 0x0150,
++    pxa270imc = 0x0160,
++    pxa270kpc = 0x0170,
++    pxa270udc = 0x0180,
++    pxa270wmmx = 0x0190,
++    palmTx = 0x01a0,
+ 
+     pvIc = 0x1000,
+     pvTimer = 0x1010,
+--- a/src/uarm/native/Commands.cpp
++++ b/src/uarm/native/Commands.cpp
+@@ -100,6 +100,10 @@
+         }
+ 
+         auto ctx = reinterpret_cast<commands::Context*>(context);
++        if (ctx->soc->GetDeviceType() == DeviceType5::deviceTypeTX) {
++            cout << "SD cards are not yet validated for experimental TX mode" << endl;
++            return;
++        }
+         string key = md5(data.get(), len);
+ 
+         sdCardInitializeWithData(len / SD_SECTOR_SIZE, data.release(), key.c_str());
+@@ -109,21 +113,11 @@
+     void CmdReset(vector<string> args, cli::CommandEnvironment& env, void* context) {
+         auto ctx = reinterpret_cast<commands::Context*>(context);
+ 
+-        if (ctx->soc->GetDeviceType() == DeviceType5::deviceTypeTX) {
+-            cout << "TX reset state is incomplete; restart the process instead" << endl;
+-            return;
+-        }
+-
+         ctx->soc->Reset();
+     }
+ 
+     void CmdResetNoExtensions(vector<string> args, cli::CommandEnvironment& env, void* context) {
+         auto ctx = reinterpret_cast<commands::Context*>(context);
+-
+-        if (ctx->soc->GetDeviceType() == DeviceType5::deviceTypeTX) {
+-            cout << "TX reset state is incomplete; restart the process instead" << endl;
+-            return;
+-        }
+ 
+         ctx->soc->JamKey(keyIdUp, 2000);
+         ctx->soc->Reset();
+@@ -146,11 +140,6 @@
+         if (args.size() != 1 && args.size() != 2) return env.PrintUsage();
+ 
+         auto ctx = reinterpret_cast<commands::Context*>(context);
+-
+-        if (ctx->soc->GetDeviceType() == DeviceType5::deviceTypeTX) {
+-            cout << "TX sessions are not yet supported (PXA270 peripheral state incomplete)" << endl;
+-            return;
+-        }
+ 
+         if (sdCardInitialized()) {
+             string key = md5(reinterpret_cast<uint8_t*>(sdCardData().data), sdCardData().size);
+--- a/src/uarm/uarm/SoC.cpp
++++ b/src/uarm/uarm/SoC.cpp
+@@ -26,7 +26,8 @@
+     : savestate(make_unique<Savestate<ChunkType>>()),
+       powerOnState(make_unique<Savestate<ChunkType>>()),
+       penEventQueue(make_unique<Queue<PenEvent>>(EVENT_QUEUE_CAPACITY)),
+-      keyEventQueue(make_unique<Queue<KeyEvent>>(EVENT_QUEUE_CAPACITY)) {
++      keyEventQueue(make_unique<Queue<KeyEvent>>(EVENT_QUEUE_CAPACITY)),
++      audioQueue(nullptr) {
+     pacePatch = createPacePatch();
+     mem = memInit();
+ 
+@@ -176,6 +177,10 @@
+ bool SoC::IsPacePatched() { return pacePatch->enterPace; }
+ 
+ void SoC::Reset() {
++    penEventQueue->Clear();
++    keyEventQueue->Clear();
++    penDown = false;
++    if (audioQueue) audioQueueClear(audioQueue);
+     framebufferAccessLowWatermark = 0;
+     framebufferAccessHighWatermark = ~0u;
+ }
+--- a/src/uarm/uarm/devicePalmTungstenE2.cpp
++++ b/src/uarm/uarm/devicePalmTungstenE2.cpp
+@@ -312,6 +312,12 @@
+ 
+ template <typename T>
+ void deviceSave(struct Device *dev, T &savestate) {
++    if (dev->type == DeviceType5::deviceTypeTX) {
++        auto chunk = savestate.GetChunk(ChunkType::palmTx, 0);
++        if (!chunk) ERR("cannot allocate TX board state");
++        SaveChunkHelper helper(*chunk);
++        helper.Do32(dev->noRamMarker);
++    }
+     wm9712Lsave(dev->wm9712L, savestate);
+     directNandSave(dev->nand, savestate);
+     if (dev->bcm2035) bcm2035Save(dev->bcm2035, savestate);
+@@ -319,6 +325,12 @@
+ 
+ template <typename T>
+ void deviceLoad(struct Device *dev, T &loader) {
++    if (dev->type == DeviceType5::deviceTypeTX) {
++        auto chunk = loader.GetChunkOrFail(ChunkType::palmTx, 0, "Palm TX board");
++        if (!chunk) return;
++        LoadChunkHelper helper(*chunk);
++        helper.Do32(dev->noRamMarker);
++    }
+     wm9712Load(dev->wm9712L, loader);
+     directNandLoad(dev->nand, loader);
+     if (dev->bcm2035) bcm2035Load(dev->bcm2035, loader);
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -125,7 +125,7 @@
+ 
+     bool readSession(const Options& options, Buffer& nor, Buffer& nand, Buffer& ram,
+                      Buffer& savestate, uint32_t& ramSize, RomInfo5& romInfo,
+-                     optional<DisplayMode>& displayMode) {
++                     optional<DisplayMode>& displayMode, DeviceType5& sessionDevice) {
+         SessionFile5 sessionFile;
+ 
+         size_t norOrSessionLen{0};
+@@ -134,8 +134,9 @@
+ 
+         if (SessionFile5::IsSessionFile(norOrSessionLen, norOrSessionData.get()) &&
+             sessionFile.Deserialize(norOrSessionLen, norOrSessionData.get())) {
+-            if (options.experimentalTx) {
+-                cerr << "experimental TX mode requires raw NOR and NAND images; sessions are not supported" << endl;
++            sessionDevice = static_cast<DeviceType5>(sessionFile.GetDeviceType());
++            if (options.experimentalTx && sessionDevice != DeviceType5::deviceTypeTX) {
++                cerr << "experimental TX mode cannot load a different device's session" << endl;
+                 return false;
+             }
+             if (options.nand) {
+@@ -205,17 +206,21 @@
+         optional<DisplayMode> displayMode = nullopt;
+         uint32_t ramSize{0};
+ 
+-        if (!readSession(options, nor, nand, memory, savestate, ramSize, romInfo, displayMode))
+-            return false;
+-        const DeviceType5 deviceType = options.experimentalTx ? DeviceType5::deviceTypeTX
+-                                                             : romInfo.GetDeviceType();
+-        if (options.experimentalTx) {
+-            cerr << "EXPERIMENTAL Palm TX: input and app bridge testing; audio and sessions unvalidated" << endl;
++        DeviceType5 sessionDevice = DeviceType5::deviceTypeInvalid;
++        if (!readSession(options, nor, nand, memory, savestate, ramSize, romInfo, displayMode,
++                         sessionDevice))
++            return false;
++        const DeviceType5 deviceType = sessionDevice != DeviceType5::deviceTypeInvalid
++            ? sessionDevice : options.experimentalTx ? DeviceType5::deviceTypeTX
++                                                     : romInfo.GetDeviceType();
++        const bool isTx = deviceType == DeviceType5::deviceTypeTX;
++        if (isTx) {
++            cerr << "EXPERIMENTAL Palm TX: reset and session testing" << endl;
+             if (options.sd) {
+                 cerr << "SD cards are not yet validated for experimental TX mode" << endl;
+                 return false;
+             }
+-            if (!options.nand || nor.size != (16ul << 20)) {
++            if (nor.size != (16ul << 20) || (sessionDevice == DeviceType5::deviceTypeInvalid && !options.nand)) {
+                 cerr << "TX requires a 16 MiB NOR image and an explicit --nand image" << endl;
+                 return false;
+             }
+@@ -223,7 +228,7 @@
+             cerr << romInfo;
+         }
+ 
+-        if (!options.experimentalTx && (!romInfo.IsValid() || deviceType == DeviceType5::deviceTypeInvalid))
++        if (!isTx && (!romInfo.IsValid() || deviceType == DeviceType5::deviceTypeInvalid))
+             return false;
+ 
+         if (options.ramSize) {
+@@ -235,7 +240,7 @@
+             }
+         }
+ 
+-        if (ramSize == 0) ramSize = options.experimentalTx ? (32ul << 20) : romInfo.GetRecommendedRamSize();
++        if (ramSize == 0) ramSize = isTx ? (32ul << 20) : romInfo.GetRecommendedRamSize();
+ 
+         if (!deviceConfigurationSupportsRamSize(deviceType, ramSize)) {
+             cerr << "unsupported RAM size: " << ramSize << " bytes" << endl;
+@@ -298,10 +303,15 @@
+                 ? static_cast<SoC*>(new SocPV(ramSize, nor.data, nor.size, *displayMode, gdbPort))
+                 : static_cast<SoC*>(new SocPXA(deviceType, ramSize, nor.data, nor.size,
+                                                reinterpret_cast<uint8_t*>(nand.data), nand.size,
+-                                               gdbPort, options.experimentalTx ? 2 : deviceGetSocRev()));
++                                               gdbPort, isTx ? 2 : deviceGetSocRev()));
+ 
+         if (memory.data && memory.size > soc->GetMemoryData().size) {
+             cerr << "RAM size mismatch" << endl;
++            return false;
++        }
++        if (sessionDevice == DeviceType5::deviceTypeTX &&
++            (memory.size != soc->GetMemoryData().size || !savestate.size)) {
++            cerr << "TX session requires complete RAM and CPU/peripheral state" << endl;
+             return false;
+         }
+ 
+@@ -312,6 +322,7 @@
+ 
+         if (!soc->Load(savestate.size, savestate.data)) {
+             cerr << "failed to restore savestate" << endl;
++            return false;
+         }
+ 
+         if (savestate.data) free(savestate.data);
+--- a/src/uarm/uarm/pace_patch.cpp
++++ b/src/uarm/uarm/pace_patch.cpp
+@@ -64,8 +64,13 @@
+ 
+     uint32_t paceLocation = UINT32_MAX;
+     for (uint32_t i = 0; i <= romSize - sizeof(paceStartPattern); i += 4) {
+-        if (memcmp(reinterpret_cast<uint8_t*>(rom) + i, paceStartPattern,
+-                   sizeof(paceStartPattern)) != 0)
++        const auto *entry = reinterpret_cast<const uint32_t *>(
++            reinterpret_cast<const uint8_t *>(rom) + i);
++        const bool patched = entry[0] == INSTR_PACE_ENTER && entry[1] == INSTR_PACE_RESUME &&
++                             entry[2] == INSTR_PACE_RETURN_FROM_CALLOUT;
++        const size_t prefix = patched ? 12 : 0;
++        if (memcmp(reinterpret_cast<const uint8_t *>(rom) + i + prefix,
++                   paceStartPattern + prefix, sizeof(paceStartPattern) - prefix) != 0)
+             continue;
+ 
+         if (paceLocation != UINT32_MAX) {
+--- a/src/uarm/uarm/pxa270_IMC.cpp
++++ b/src/uarm/uarm/pxa270_IMC.cpp
+@@ -6,6 +6,7 @@
+ #include <cstring>
+ 
+ #include "cputil.h"
++#include "savestate/savestateAll.h"
+ #include "mem.h"
+ 
+ #define PXA270_IMC_BASE 0x58000000ul
+@@ -14,6 +15,11 @@
+ struct PxaImc {
+     uint32_t mcr;
+     uint8_t impmsr;
++
++    template <typename T>
++    void DoSaveLoad(T &h) {
++        h.Do32(mcr).Do8(impmsr);
++    }
+ };
+ 
+ static bool pxaImcPrvMemAccessF(void* userData, uint32_t pa, uint_fast8_t size, bool write,
+@@ -64,3 +70,22 @@
+ 
+     return imc;
+ }
++
++
++template <typename T>
++void pxaImcSave(PxaImc *state, T &savestate) {
++    auto chunk = savestate.GetChunk(ChunkType::pxa270imc, 0);
++    if (!chunk) ERR("cannot allocate pxa270imc state");
++    SaveChunkHelper helper(*chunk);
++    state->DoSaveLoad(helper);
++}
++
++void pxaImcLoad(PxaImc *state, SavestateLoader<ChunkType> &loader) {
++    auto chunk = loader.GetChunkOrFail(ChunkType::pxa270imc, 0, "pxa270imc");
++    if (!chunk) return;
++    LoadChunkHelper helper(*chunk);
++    state->DoSaveLoad(helper);
++}
++
++template void pxaImcSave<Savestate<ChunkType>>(PxaImc *, Savestate<ChunkType> &);
++template void pxaImcSave<SavestateProbe<ChunkType>>(PxaImc *, SavestateProbe<ChunkType> &);
+--- a/src/uarm/uarm/pxa270_IMC.h
++++ b/src/uarm/uarm/pxa270_IMC.h
+@@ -9,4 +9,9 @@
+ 
+ struct PxaImc* pxaImcInit(struct ArmMem* physMem);
+ 
++#include "savestate/ChunkTypeUarm.h"
++template <typename T> class SavestateLoader;
++template <typename T> void pxaImcSave(PxaImc *state, T &savestate);
++void pxaImcLoad(PxaImc *state, SavestateLoader<ChunkType> &loader);
++
+ #endif
+--- a/src/uarm/uarm/pxa270_KPC.cpp
++++ b/src/uarm/uarm/pxa270_KPC.cpp
+@@ -6,6 +6,7 @@
+ #include <cstring>
+ 
+ #include "cputil.h"
++#include "savestate/savestateAll.h"
+ #include "pxa_IC.h"
+ 
+ #define PXA270_KPC_BASE 0x41500000ul
+@@ -17,7 +18,7 @@
+     // regs
+     uint32_t kpc, kpmk, kpas, kpasmkp[4];
+     uint16_t kpkdi;
+-    uint8_t kpdkChanged : 1;
++    bool kpdkChanged;
+ 
+     // stimuli
+     uint64_t prevKeys;
+@@ -27,6 +28,14 @@
+     uint8_t numMatrixKeysPressed;
+     uint16_t jogSta[2];  // same format as KPREC reg, except we use bits 12..13 for jog sensor
+                          // status
++
++    template <typename T>
++    void DoSaveLoad(T &h) {
++        h.Do32(kpc).Do32(kpmk).Do32(kpas).DoBuffer32(kpasmkp, 4)
++            .Do16(kpkdi).DoBool(kpdkChanged).Do64(prevKeys)
++            .DoBuffer(matrixKeys, sizeof(matrixKeys)).Do8(directKeys)
++            .Do8(numMatrixKeysPressed).DoBuffer16(jogSta, 2);
++    }
+ };
+ 
+ static void pxaKpcPrvDoAutoScan(struct PxaKpc *kpc, bool causeIrq) {
+@@ -315,3 +324,23 @@
+     }
+     pxaKpcPrvJogRecalcRecalc(kpc);
+ }
++
++
++template <typename T>
++void pxaKpcSave(PxaKpc *state, T &savestate) {
++    auto chunk = savestate.GetChunk(ChunkType::pxa270kpc, 0);
++    if (!chunk) ERR("cannot allocate pxa270kpc state");
++    SaveChunkHelper helper(*chunk);
++    state->DoSaveLoad(helper);
++}
++
++void pxaKpcLoad(PxaKpc *state, SavestateLoader<ChunkType> &loader) {
++    auto chunk = loader.GetChunkOrFail(ChunkType::pxa270kpc, 0, "pxa270kpc");
++    if (!chunk) return;
++    LoadChunkHelper helper(*chunk);
++    state->DoSaveLoad(helper);
++    pxaKpcPrvIrqRecals(state);
++}
++
++template void pxaKpcSave<Savestate<ChunkType>>(PxaKpc *, Savestate<ChunkType> &);
++template void pxaKpcSave<SavestateProbe<ChunkType>>(PxaKpc *, SavestateProbe<ChunkType> &);
+--- a/src/uarm/uarm/pxa270_KPC.h
++++ b/src/uarm/uarm/pxa270_KPC.h
+@@ -17,4 +17,9 @@
+ void pxaKpcDirectKeyChange(struct PxaKpc *kpc, uint_fast8_t keyIdx, bool isDown);
+ void pxaKpcJogInput(struct PxaKpc *kpc, uint_fast8_t jogIdx, bool up);  // else down
+ 
++#include "savestate/ChunkTypeUarm.h"
++template <typename T> class SavestateLoader;
++template <typename T> void pxaKpcSave(PxaKpc *state, T &savestate);
++void pxaKpcLoad(PxaKpc *state, SavestateLoader<ChunkType> &loader);
++
+ #endif
+--- a/src/uarm/uarm/pxa270_UDC.cpp
++++ b/src/uarm/uarm/pxa270_UDC.cpp
+@@ -6,6 +6,7 @@
+ #include <cstring>
+ 
+ #include "cputil.h"
++#include "savestate/savestateAll.h"
+ #include "mem.h"
+ 
+ #define PXA_UDC_BASE 0x40600000UL
+@@ -25,6 +26,13 @@
+     uint32_t udccr, udcicr[2], udcisr[2], udcotgicr, udcotgisr, up2ocr;
+     uint16_t udcfnr;
+     uint8_t up3ocr;
++
++    template <typename T>
++    void DoSaveLoad(T &h) {
++        for (auto &e : ep) h.Do32(e.ccra).Do16(e.csr).Do16(e.bcr);
++        h.Do32(udccr).DoBuffer32(udcicr, 2).DoBuffer32(udcisr, 2)
++            .Do32(udcotgicr).Do32(udcotgisr).Do32(up2ocr).Do16(udcfnr).Do8(up3ocr);
++    }
+ };
+ 
+ static bool pxa270UdcPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size, bool write,
+@@ -167,3 +175,22 @@
+ 
+     return udc;
+ }
++
++
++template <typename T>
++void pxa270UdcSave(Pxa270Udc *state, T &savestate) {
++    auto chunk = savestate.GetChunk(ChunkType::pxa270udc, 0);
++    if (!chunk) ERR("cannot allocate pxa270udc state");
++    SaveChunkHelper helper(*chunk);
++    state->DoSaveLoad(helper);
++}
++
++void pxa270UdcLoad(Pxa270Udc *state, SavestateLoader<ChunkType> &loader) {
++    auto chunk = loader.GetChunkOrFail(ChunkType::pxa270udc, 0, "pxa270udc");
++    if (!chunk) return;
++    LoadChunkHelper helper(*chunk);
++    state->DoSaveLoad(helper);
++}
++
++template void pxa270UdcSave<Savestate<ChunkType>>(Pxa270Udc *, Savestate<ChunkType> &);
++template void pxa270UdcSave<SavestateProbe<ChunkType>>(Pxa270Udc *, SavestateProbe<ChunkType> &);
+--- a/src/uarm/uarm/pxa270_UDC.h
++++ b/src/uarm/uarm/pxa270_UDC.h
+@@ -14,4 +14,9 @@
+ 
+ struct Pxa270Udc *pxa270UdcInit(struct ArmMem *physMem, struct PxaIc *ic, struct PxaDma *dma);
+ 
++#include "savestate/ChunkTypeUarm.h"
++template <typename T> class SavestateLoader;
++template <typename T> void pxa270UdcSave(Pxa270Udc *state, T &savestate);
++void pxa270UdcLoad(Pxa270Udc *state, SavestateLoader<ChunkType> &loader);
++
+ #endif
+--- a/src/uarm/uarm/pxa270_WMMX.cpp
++++ b/src/uarm/uarm/pxa270_WMMX.cpp
+@@ -7,6 +7,7 @@
+ 
+ #include "CPEndian.h"
+ #include "cputil.h"
++#include "savestate/savestateAll.h"
+ 
+ union REG64 {
+     uint64_t v64;
+@@ -23,6 +24,12 @@
+     union REG64 wR[16];
+     uint32_t wCGR[4], wCASF;  // NZCV
+     uint8_t wCon, wCSSF;
++
++    template <typename T>
++    void DoSaveLoad(T &h) {
++        for (auto &r : wR) h.Do64(r.v64);
++        h.DoBuffer32(wCGR, 4).Do32(wCASF).Do8(wCon).Do8(wCSSF);
++    }
+ };
+ 
+ #define pxa270wmmxPrvDataRegsChanged(_wmmx) \
+@@ -2143,3 +2150,22 @@
+ 
+     return wmmx;
+ }
++
++
++template <typename T>
++void pxa270wmmxSave(Pxa270wmmx *state, T &savestate) {
++    auto chunk = savestate.GetChunk(ChunkType::pxa270wmmx, 0);
++    if (!chunk) ERR("cannot allocate pxa270wmmx state");
++    SaveChunkHelper helper(*chunk);
++    state->DoSaveLoad(helper);
++}
++
++void pxa270wmmxLoad(Pxa270wmmx *state, SavestateLoader<ChunkType> &loader) {
++    auto chunk = loader.GetChunkOrFail(ChunkType::pxa270wmmx, 0, "pxa270wmmx");
++    if (!chunk) return;
++    LoadChunkHelper helper(*chunk);
++    state->DoSaveLoad(helper);
++}
++
++template void pxa270wmmxSave<Savestate<ChunkType>>(Pxa270wmmx *, Savestate<ChunkType> &);
++template void pxa270wmmxSave<SavestateProbe<ChunkType>>(Pxa270wmmx *, SavestateProbe<ChunkType> &);
+--- a/src/uarm/uarm/pxa270_WMMX.h
++++ b/src/uarm/uarm/pxa270_WMMX.h
+@@ -10,4 +10,9 @@
+ 
+ struct Pxa270wmmx* pxa270wmmxInit(struct ArmCpu* cpu);
+ 
++#include "savestate/ChunkTypeUarm.h"
++template <typename T> class SavestateLoader;
++template <typename T> void pxa270wmmxSave(Pxa270wmmx *state, T &savestate);
++void pxa270wmmxLoad(Pxa270wmmx *state, SavestateLoader<ChunkType> &loader);
++
+ #endif
+--- a/src/uarm/uarm/pxa_LCD.cpp
++++ b/src/uarm/uarm/pxa_LCD.cpp
+@@ -24,7 +24,7 @@
+ #define UNMASKABLE_INTS 0x7C8E
+ 
+ #define PALETTE_SIZE 512
+-#define SAVESTATE_VERSION 0
++#define SAVESTATE_VERSION 1
+ 
+ struct PxaLcd {
+     struct PxaIc *ic;
+@@ -64,7 +64,7 @@
+     bool framebufferTrackingActive;
+ 
+     template <typename T>
+-    void DoSaveLoad(T &chunkHelper) {
++    void DoSaveLoad(T &chunkHelper, uint32_t version) {
+         chunkHelper.Do32(lccr0)
+             .Do32(lccr1)
+             .Do32(lccr2)
+@@ -81,8 +81,7 @@
+             .Do32(framebufferSize)
+             .DoBool(framebufferTrackingActive);
+ 
+-        // Only PXA255 for now.
+-        for (size_t i = 0; i < 2; i++)
++        for (size_t i = 0; i < (version >= 1 ? 7u : 2u); i++)
+             chunkHelper.Do32(fbr[i]).Do32(fdadr[i]).Do32(fsadr[i]).Do32(fidr[i]).Do32(ldcmd[i]);
+     }
+ };
+@@ -567,21 +566,29 @@
+ }
+ 
+ template <typename T>
+-void pxaLcdSave(struct PxaLcd *lcd, T &savestate) {
+-    auto chunk = savestate.GetChunk(ChunkType::pxaLcd, SAVESTATE_VERSION);
++void pxaLcdSave(struct PxaLcd *lcd, T &savestate, bool pxa270) {
++    const uint32_t version = pxa270 ? SAVESTATE_VERSION : 0;
++    auto chunk = savestate.GetChunk(ChunkType::pxaLcd, version);
+     if (!chunk) ERR("unable to allocate chunk");
+ 
+     SaveChunkHelper helper(*chunk);
+-    lcd->DoSaveLoad(helper);
++    lcd->DoSaveLoad(helper, version);
+ }
+ 
+ template <typename T>
+ void pxaLcdLoad(struct PxaLcd *lcd, T &loader) {
+-    auto chunk = loader.GetChunkOrFail(ChunkType::pxaLcd, SAVESTATE_VERSION, "pxaLcd");
++    uint32_t version;
++    auto chunk = loader.GetChunkOrFail(ChunkType::pxaLcd, SAVESTATE_VERSION, "pxaLcd", version);
+     if (!chunk) return;
+ 
+     LoadChunkHelper helper(*chunk);
+-    lcd->DoSaveLoad(helper);
++    lcd->DoSaveLoad(helper, version);
++
++    // Host frame buffers are rebuilt from guest RAM after loading.
++    lcd->framebufferDirty = true;
++    lcd->frame_pending = false;
++    memset(lcd->front_buffer, 0, lcd->width * lcd->height * 4);
++    memset(lcd->back_buffer, 0, lcd->width * lcd->height * 4);
+ 
+     pxaLcdUpdatePalette(lcd, PALETTE_SIZE);
+ 
+@@ -593,8 +600,8 @@
+     }
+ }
+ 
+-template void pxaLcdSave<Savestate<ChunkType>>(PxaLcd *lcd, Savestate<ChunkType> &savestate);
++template void pxaLcdSave<Savestate<ChunkType>>(PxaLcd *lcd, Savestate<ChunkType> &savestate, bool);
+ template void pxaLcdSave<SavestateProbe<ChunkType>>(PxaLcd *lcd,
+-                                                    SavestateProbe<ChunkType> &savestate);
++                                                    SavestateProbe<ChunkType> &savestate, bool);
+ template void pxaLcdLoad<SavestateLoader<ChunkType>>(PxaLcd *lcd,
+                                                      SavestateLoader<ChunkType> &loader);
+--- a/src/uarm/uarm/pxa_LCD.h
++++ b/src/uarm/uarm/pxa_LCD.h
+@@ -26,7 +26,7 @@
+ bool pxaLcdIsEnabled(struct PxaLcd *lcd);
+ 
+ template <typename T>
+-void pxaLcdSave(struct PxaLcd *lcd, T &savestate);
++void pxaLcdSave(struct PxaLcd *lcd, T &savestate, bool pxa270 = false);
+ 
+ template <typename T>
+ void pxaLcdLoad(struct PxaLcd *lcd, T &loader);
+--- a/src/uarm/uarm/pxa_PwrClk.cpp
++++ b/src/uarm/uarm/pxa_PwrClk.cpp
+@@ -15,7 +15,7 @@
+ #define PXA_POWER_MANAGER_BASE 0x40F00000UL
+ #define PXA_POWER_MANAGER_SIZE 0x00000180UL
+ 
+-#define SAVESTATE_VERSION 0
++#define SAVESTATE_VERSION 1
+ 
+ struct PxaPwrClk {
+     struct ArmCpu *cpu;
+@@ -28,8 +28,7 @@
+     bool turbo, isPXA270;
+ 
+     template <typename T>
+-    void DoSaveLoad(T &chunkHelper) {
+-        // PX255 only for now
++    void DoSaveLoad(T &chunkHelper, uint32_t version) {
+         chunkHelper.Do32(CCCR)
+             .Do32(CKEN)
+             .Do32(OSCR)
+@@ -45,6 +44,9 @@
+             .Do32(RCSR)
+             .Do32(PMFW)
+             .DoBool(turbo);
++        if (version >= 1)
++            chunkHelper.Do32(PSTR).Do32(PVCR).Do32(PUCR).Do32(PKWR).Do32(PKSR)
++                .DoBuffer32(PCMD, 32);
+     }
+ };
+ 
+@@ -383,21 +385,23 @@
+ 
+ template <typename T>
+ void pxaPwrClkSave(struct PxaPwrClk *pc, T &savestate) {
+-    auto chunk = savestate.GetChunk(ChunkType::pxaPwrClk, SAVESTATE_VERSION);
++    const uint32_t version = pc->isPXA270 ? SAVESTATE_VERSION : 0;
++    auto chunk = savestate.GetChunk(ChunkType::pxaPwrClk, version);
+     if (!chunk) ERR("unable to allocate chunk");
+ 
+     SaveChunkHelper helper(*chunk);
+-    pc->DoSaveLoad(helper);
++    pc->DoSaveLoad(helper, version);
+ }
+ 
+ template <typename T>
+ void pxaPwrClkLoad(struct PxaPwrClk *pc, T &loader) {
+-    auto chunk =
+-        loader.GetChunkOrFail(ChunkType::pxaPwrClk, SAVESTATE_VERSION, "pxa power / clock CP");
++    uint32_t version;
++    auto chunk = loader.GetChunkOrFail(ChunkType::pxaPwrClk, SAVESTATE_VERSION,
++                                       "pxa power / clock CP", version);
+     if (!chunk) return;
+ 
+     LoadChunkHelper helper(*chunk);
+-    pc->DoSaveLoad(helper);
++    pc->DoSaveLoad(helper, version);
+ }
+ 
+ template void pxaPwrClkSave<Savestate<ChunkType>>(PxaPwrClk *pc, Savestate<ChunkType> &savestate);
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -44,6 +44,7 @@
+ #include "reschedule.h"
+ #include "rom_info5.h"
+ #include "syscall_dispatch.h"
++#include "audio_queue.h"
+ 
+ #define SAVESTATE_VERSION 2
+ 
+@@ -226,7 +227,7 @@
+     if (deviceType == DeviceType5::deviceTypeTX)
+         scheduler->ScheduleTask(SCHEDULER_TASK_AUX_3, 1_msec, 1);
+ 
+-    powerOnState->Save(*this);
++    if (!powerOnState->Save(*this)) ERR("failed to capture power-on state");
+     SdEject();
+ }
+ 
+@@ -385,10 +386,26 @@
+         pxa255dspLoad(dsp, loader);
+         pxa255UdcLoad(udc1, loader);
+     } else {
+-        // no 27x for now
++        pxaImcLoad(imc, loader);
++        pxaKpcLoad(kpc, loader);
++        pxa270UdcLoad(udc2, loader);
++        pxa270wmmxLoad(wmmx, loader);
+     }
+ 
+     deviceLoad(dev, loader);
++    if (GetDeviceType() == DeviceType5::deviceTypeTX) {
++        *pacePatch = {};
++        if (!PrepareM68kSupport() && cpuIsModePace(cpu)) {
++            loader.NotifyError();
++            return;
++        }
++        penEventQueue->Clear();
++        keyEventQueue->Clear();
++        penDown = false;
++        for (unsigned key = keyIdHard1; key <= keyIdPower; ++key)
++            deviceKey(dev, key, false);
++    }
++    if (audioQueue) audioQueueClear(audioQueue);
+ 
+     SchedulePcmTask();
+     keypadReset(kp);
+@@ -429,13 +446,16 @@
+     pxaTimrSave(tmr, savestate);
+     pxaMmcSave(mmc, savestate);
+     pxaRtcSave(rtc, savestate);
+-    pxaLcdSave(lcd, savestate);
++    pxaLcdSave(lcd, savestate, socRev == 2);
+ 
+     if (socRev < 2) {
+         pxa255dspSave(dsp, savestate);
+         pxa255UdcSave(udc1, savestate);
+     } else {
+-        // no 27x for now
++        pxaImcSave(imc, savestate);
++        pxaKpcSave(kpc, savestate);
++        pxa270UdcSave(udc2, savestate);
++        pxa270wmmxSave(wmmx, savestate);
+     }
+ 
+     deviceSave(dev, savestate);
+--- a/src/uarm/uarm/soc_generic_impl.h
++++ b/src/uarm/uarm/soc_generic_impl.h
+@@ -67,7 +67,8 @@
+     pcmSuspended = false;
+ 
+     SavestateLoader<ChunkType> loader;
+-    loader.Load(powerOnState->GetBuffer(), powerOnState->GetSize(), static_cast<T&>(*this));
++    if (!loader.Load(powerOnState->GetBuffer(), powerOnState->GetSize(), static_cast<T&>(*this)))
++        ERR("failed to restore power-on state");
+ 
+     if (cardInserted) SdInsert();
+ 

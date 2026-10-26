@@ -1,0 +1,358 @@
+--- a/src/uarm/uarm/syscall_dispatch.cpp
++++ b/src/uarm/uarm/syscall_dispatch.cpp
+@@ -6,6 +6,7 @@
+ #include <iostream>
+ 
+ #include "CPU.h"
++#include "Defer.h"
+ #include "SoC.h"
+ #include "cputil.h"
+ #include "memcpy.h"
+@@ -92,6 +93,10 @@
+     ScratchState scratchStates[MAX_NEST_LEVEL];
+     size_t nestLevel{0};
+     bool deadMansSwitch{false};
++#ifndef __EMSCRIPTEN__
++    bool recoverable{false};
++    bool failed{false};
++#endif
+ };
+ 
+ struct SyscallDispatch* initSyscallDispatch(SoC* soc) {
+@@ -101,6 +106,30 @@
+     for (auto& scratchState : sd->scratchStates) scratchState.cpu = soc->GetCpu();
+ 
+     return sd;
++}
++
++#ifndef __EMSCRIPTEN__
++void syscallDispatchBeginRecovery(struct SyscallDispatch* sd) {
++    if (sd->nestLevel || sd->recoverable) ERR("nested injected-call recovery scope");
++    sd->recoverable = true;
++    sd->failed = false;
++}
++void syscallDispatchEndRecovery(struct SyscallDispatch* sd) {
++    sd->recoverable = false;
++    sd->failed = false;
++    sd->nestLevel = 0;
++    sd->deadMansSwitch = false;
++}
++#endif
++
++static void injectedCallTimeout(struct SyscallDispatch* sd) {
++#ifndef __EMSCRIPTEN__
++    if (sd->recoverable) {
++        sd->failed = true;
++        throw InjectedCallError();
++    }
++#endif
++    ERR("failed to execute injected call within time limit\n");
+ }
+ 
+ bool syscallDispatchInProgress(struct SyscallDispatch* sd) { return sd->nestLevel > 0; }
+@@ -213,7 +242,7 @@
+     cpuStartInjectedSyscall(sd->soc->GetCpu(), syscall);
+ 
+     if (!executeInjectedCall(sd->soc, flags)) {
+-        ERR("failed to execute injected call within time limit\n");
++        injectedCallTimeout(sd);
+     }
+ }
+ 
+@@ -232,7 +261,7 @@
+         if (executeInjectedCall(sd->soc, flags)) break;
+         if (sd->deadMansSwitch || (nand && nandGetWriteCnt(nand) != nandWriteCnt)) continue;
+ 
+-        ERR("failed to execute injected call within time limit\n");
++        injectedCallTimeout(sd);
+     }
+ 
+     cpuFinishInjectedSyscall68k(cpu);
+@@ -317,16 +346,21 @@
+ 
+ static uint32_t syscall68k(struct SyscallDispatch* sd, uint32_t flags, uint16_t syscall,
+                            bool returnPtr, std::function<void()> setupStack) {
++#ifndef __EMSCRIPTEN__
++    // Do not execute guest cleanup calls while unwinding a failed export.
++    if (sd->failed) return 0;
++#endif
+     const size_t nestLevel = pushState(
+         sd, (flags & SC_EXECUTE_FULL) ? ScratchState::Type::pace : ScratchState::Type::full);
+ 
+     if (flags & SC_EXECUTE_FULL) sd->soc->SuspendTimerInterrupts(true);
++    Defer resumeTimers([=]() {
++        if (flags & SC_EXECUTE_FULL) sd->soc->SuspendTimerInterrupts(false);
++    });
+ 
+     setupStack();
+     executeInjectedSyscall68k(sd, flags, syscall);
+     const uint32_t result = returnPtr ? paceGetAreg(0) : paceGetDreg(0);
+-
+-    if (flags & SC_EXECUTE_FULL) sd->soc->SuspendTimerInterrupts(false);
+ 
+     popState(sd, nestLevel);
+ 
+--- a/src/uarm/uarm/syscall_dispatch.h
++++ b/src/uarm/uarm/syscall_dispatch.h
+@@ -6,6 +6,17 @@
+ 
+ #define SC_EXECUTE_PURE 0
+ #define SC_EXECUTE_FULL 1
++
++#ifndef __EMSCRIPTEN__
++#include <stdexcept>
++// Native read-only operations can roll back the complete guest on timeout.
++class InjectedCallError : public std::runtime_error {
++ public:
++    InjectedCallError() : std::runtime_error("injected call timed out") {}
++};
++void syscallDispatchBeginRecovery(struct SyscallDispatch* sd);
++void syscallDispatchEndRecovery(struct SyscallDispatch* sd);
++#endif
+ 
+ struct SyscallDispatch;
+ struct ArmCpu;
+--- a/src/uarm/native/Commands.cpp
++++ b/src/uarm/native/Commands.cpp
+@@ -1,6 +1,7 @@
+ #pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+ 
+ #include "Commands.h"
++#include "ReadOnlyGuest.h"
+ 
+ #include <cstdint>
+ #include <iostream>
+@@ -354,35 +355,45 @@
+         auto ctx = reinterpret_cast<commands::Context*>(context);
+         SyscallDispatch* sd = ctx->soc->GetSyscallDispatch();
+ 
+-        DbBackup backup(sd, type);
+-
+-        if (!backup.Init()) {
+-            cout << "failed to initialize export" << endl;
+-            return;
+-        }
+-
+-        while (backup.GetState() == DbBackup::STATE_IN_PROGRESS) {
+-            if (backup.Continue()) {
+-                if (backup.HasLastProcessedDb()) {
+-                    cout << "OK " << backup.GetLastProcessedDb() << endl;
++        try {
++            ReadOnlyGuest checkpoint(*ctx->soc);
++            DbBackup backup(sd, type);
++
++            if (!backup.Init()) {
++                cout << "failed to initialize export" << endl;
++                return;
++            }
++
++            while (backup.GetState() == DbBackup::STATE_IN_PROGRESS) {
++                if (backup.Continue()) {
++                    if (backup.HasLastProcessedDb()) {
++                        cout << "OK " << backup.GetLastProcessedDb() << endl;
++                    }
++                } else {
++                    cout << "FAILED " << backup.GetLastProcessedDb() << endl;
+                 }
++            }
++
++            cout << endl;
++
++            if (backup.GetState() != DbBackup::STATE_DONE) {
++                cout << "export FAILED" << endl;
++                return;
++            }
++
++            const void* archive = backup.GetArchiveData();
++            const size_t size = backup.GetArchiveSize();
++            if (!archive || !size || backup.GetState() != DbBackup::STATE_DONE) {
++                cout << "export FAILED: cannot finish archive" << endl;
++                return;
++            }
++            if (util::WriteFile(args[0], reinterpret_cast<const uint8_t*>(archive), size)) {
++                cout << "export written to " << args[0] << endl;
+             } else {
+-                cout << "FAILED " << backup.GetLastProcessedDb() << endl;
++                cout << "failed to write export to " << args[0] << endl;
+             }
+-        }
+-
+-        cout << endl;
+-
+-        if (backup.GetState() != DbBackup::STATE_DONE) {
+-            cout << "export FAILED" << endl;
+-            return;
+-        }
+-
+-        if (util::WriteFile(args[0], reinterpret_cast<const uint8_t*>(backup.GetArchiveData()),
+-                            backup.GetArchiveSize())) {
+-            cout << "export written to " << args[0] << endl;
+-        } else {
+-            cout << "failed to write export to " << args[0] << endl;
++        } catch (const std::exception& error) {
++            cout << "export FAILED: " << error.what() << "; guest restored" << endl;
+         }
+     }
+ 
+--- a/src/uarm/uarm/db_backup.cpp
++++ b/src/uarm/uarm/db_backup.cpp
+@@ -73,6 +73,10 @@
+     }
+ 
+     zip = zip_stream_open(nullptr, 0, COMPRESSION_LEVEL, 'w');
++    if (!zip) {
++        state = STATE_ERROR;
++        return false;
++    }
+     chunkBuffer = make_unique<uint8_t[]>(MAX_CHUNK_SIZE);
+     state = STATE_IN_PROGRESS;
+ 
+@@ -106,10 +110,20 @@
+     }
+ 
+     const string entryName = getEntryName(*dbIterator);
+-    zip_entry_open(zip, entryName.c_str());
+-    Defer closeEntry([=]() { zip_entry_close(zip); });
++    if (zip_entry_open(zip, entryName.c_str()) != 0) {
++        state = STATE_ERROR;
++        return false;
++    }
++    Defer closeEntry([&]() {
++        if (zip_entry_close(zip) != 0) state = STATE_ERROR;
++    });
+ 
+     const uint32_t scratch = syscall68k_MemPtrNew(sd, SC_EXECUTE_PURE, 3);
++    if (!scratch) {
++        state = STATE_ERROR;
++        return false;
++    }
++    bool writeFailed = false;
+     Defer freeScratch([=]() { syscall68k_MemPtrFree(sd, SC_EXECUTE_PURE, scratch); });
+ 
+     const uint32_t writeProcP = scratch;
+@@ -132,11 +146,13 @@
+                 const uint32_t transferSize = min(size, MAX_CHUNK_SIZE);
+ 
+                 if (!syscallDispatch_memcpy_toHost(sd, chunkBuffer.get(), dataP, transferSize)) {
++                    writeFailed = true;
+                     cout << "DB backup: failed to copy chunk" << endl;
+                     return;
+                 }
+ 
+                 if (zip_entry_write(zip, chunkBuffer.get(), transferSize) != 0) {
++                    writeFailed = true;
+                     cout << "DB backup: failed to write chunk" << endl;
+                     return;
+                 }
+@@ -153,9 +169,12 @@
+     const uint16_t dbWriteResult = syscall68k_ExgDBWrite(sd, SC_EXECUTE_FULL, writeProcP, 0, nameP,
+                                                          dbIterator->localID, dbIterator->cardNo);
+ 
++    if (writeFailed || dbWriteResult != 0) {
++        state = STATE_ERROR;
++        return false;
++    }
+     state = ++dbIterator == dbList.end() ? STATE_DONE : STATE_IN_PROGRESS;
+-
+-    return dbWriteResult == 0;
++    return true;
+ }
+ 
+ bool DbBackup::HasLastProcessedDb() const { return lastProcessedDb[0] != '\0'; }
+@@ -189,7 +208,10 @@
+     if (state != STATE_DONE) return;
+ 
+     if (!archiveData) {
+-        zip_stream_copy(zip, &archiveData, &archiveSize);
++        if (zip_stream_copy(zip, &archiveData, &archiveSize) < 0) {
++            state = STATE_ERROR;
++            archiveSize = 0;
++        }
+ 
+         zip_stream_close(zip);
+         zip = nullptr;
+--- a/src/uarm/uarm/soc_generic_impl.h
++++ b/src/uarm/uarm/soc_generic_impl.h
+@@ -58,6 +58,7 @@
+ 
+ template <class T>
+ void SocGeneric<T>::Reset() {
++    paceBreakSyscall = 0;
+     SoC::Reset();
+ 
+     const bool pcmOutputEnabled = pcmEnabled;
+@@ -118,6 +119,8 @@
+ 
+ template <class T>
+ void SocGeneric<T>::Load(SavestateLoader<ChunkType>& loader) {
++    // The cached injection boundary belongs to the previous CPU execution state.
++    paceBreakSyscall = 0;
+     cpuLoad(cpu, loader);
+     scheduler->Load(loader);
+     systemStateLoad(systemState, loader);
+--- /dev/null
++++ b/src/uarm/native/ReadOnlyGuest.h
+@@ -0,0 +1,63 @@
++#ifndef FROND_READ_ONLY_GUEST_H
++#define FROND_READ_ONLY_GUEST_H
++
++#include <cstring>
++#include <stdexcept>
++#include <vector>
++
++#include "SoC.h"
++#include "cputil.h"
++#include "syscall_dispatch.h"
++#include "sdcard.h"
++
++// Palm database reads can populate/evict NVFS caches and run other guest work.
++// Restore the guest after export, including when an injected call times out.
++class ReadOnlyGuest {
++ public:
++    explicit ReadOnlyGuest(SoC& soc) : soc(soc), nandDirty(soc.IsNandDirty()) {
++        if (!soc.Save()) throw std::runtime_error("cannot checkpoint guest");
++        state = copy(soc.GetSavestate());
++        ram = copy(soc.GetMemoryData());
++        nand = copy(soc.GetNandData());
++        ramPages = copy(soc.GetMemoryDirtyPages());
++        nandPages = copy(soc.GetNandDirtyPages());
++        if (sdCardInitialized()) {
++            sd = copy(sdCardData());
++            sdPages = copy(sdCardDirtyPages());
++            sdDirty = sdCardIsDirty();
++        }
++        syscallDispatchBeginRecovery(soc.GetSyscallDispatch());
++    }
++    ~ReadOnlyGuest() {
++        // Restore before allowing the frontend to execute the guest again.
++        syscallDispatchEndRecovery(soc.GetSyscallDispatch());
++        restore(soc.GetMemoryData(), ram);
++        restore(soc.GetNandData(), nand);
++        if (!sd.empty()) restore(sdCardData(), sd);
++        if (!soc.Load(state.size(), state.data())) ERR("cannot restore export checkpoint");
++        restore(soc.GetMemoryDirtyPages(), ramPages);
++        restore(soc.GetNandDirtyPages(), nandPages);
++        soc.SetNandDirty(nandDirty);
++        if (!sd.empty()) {
++            restore(sdCardDirtyPages(), sdPages);
++            sdCardSetDirty(sdDirty);
++        }
++        soc.SetFramebufferDirty();
++    }
++    ReadOnlyGuest(const ReadOnlyGuest&) = delete;
++    ReadOnlyGuest& operator=(const ReadOnlyGuest&) = delete;
++
++ private:
++    static std::vector<uint8_t> copy(Buffer b) {
++        if (!b.size) return {};
++        const auto* p = static_cast<const uint8_t*>(b.data);
++        return {p, p + b.size};
++    }
++    static void restore(Buffer b, const std::vector<uint8_t>& saved) {
++        if (!saved.empty()) std::memcpy(b.data, saved.data(), saved.size());
++    }
++    SoC& soc;
++    bool nandDirty, sdDirty{false};
++    std::vector<uint8_t> state, ram, nand, ramPages, nandPages, sd, sdPages;
++};
++#endif

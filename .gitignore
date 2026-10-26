@@ -1,0 +1,11 @@
+/build/
+/out/
+/firmware/
+*.bin
+*.rom
+*.session
+__pycache__/
+
+# Local development journals and release preparation
+/.local/
+/doc/local-handoff.md

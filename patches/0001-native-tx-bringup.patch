@@ -1,0 +1,542 @@
+diff --git a/src/common/device_type5.h b/src/common/device_type5.h
+index 9caa8681..dd318a9b 100644
+--- a/src/common/device_type5.h
++++ b/src/common/device_type5.h
+@@ -5,6 +5,7 @@ enum DeviceType5 {
+     deviceTypeE2 = 0,
+     deviceTypeFrankenE2 = 1,
+     deviceTypePV = 2,
++    deviceTypeTX = 3,
+     deviceTypeInvalid = -1
+ };
+ 
+diff --git a/src/uarm/native/Commands.cpp b/src/uarm/native/Commands.cpp
+index 1c9a8f56..74b5c8ca 100644
+--- a/src/uarm/native/Commands.cpp
++++ b/src/uarm/native/Commands.cpp
+@@ -108,12 +108,22 @@ namespace {
+     void CmdReset(vector<string> args, cli::CommandEnvironment& env, void* context) {
+         auto ctx = reinterpret_cast<commands::Context*>(context);
+ 
++        if (ctx->soc->GetDeviceType() == DeviceType5::deviceTypeTX) {
++            cout << "TX reset state is incomplete; restart the process instead" << endl;
++            return;
++        }
++
+         ctx->soc->Reset();
+     }
+ 
+     void CmdResetNoExtensions(vector<string> args, cli::CommandEnvironment& env, void* context) {
+         auto ctx = reinterpret_cast<commands::Context*>(context);
+ 
++        if (ctx->soc->GetDeviceType() == DeviceType5::deviceTypeTX) {
++            cout << "TX reset state is incomplete; restart the process instead" << endl;
++            return;
++        }
++
+         ctx->soc->JamKey(keyIdUp, 2000);
+         ctx->soc->Reset();
+     }
+@@ -136,6 +146,11 @@ namespace {
+ 
+         auto ctx = reinterpret_cast<commands::Context*>(context);
+ 
++        if (ctx->soc->GetDeviceType() == DeviceType5::deviceTypeTX) {
++            cout << "TX sessions are not yet supported (PXA270 peripheral state incomplete)" << endl;
++            return;
++        }
++
+         if (sdCardInitialized()) {
+             string key = md5(reinterpret_cast<uint8_t*>(sdCardData().data), sdCardData().size);
+             sdCardRekey(key.c_str());
+diff --git a/src/uarm/native/SdlRenderer.cpp b/src/uarm/native/SdlRenderer.cpp
+index 63093610..ad30cf2b 100644
+--- a/src/uarm/native/SdlRenderer.cpp
++++ b/src/uarm/native/SdlRenderer.cpp
+@@ -69,6 +69,22 @@ SdlRenderer::~SdlRenderer() {
+     SDL_DestroyRenderer(renderer);
+ }
+ 
++bool SdlRenderer::SaveFramebuffer(const char* path) {
++    if (!frameTextureValid || !lcdEnabled) return false;
++    SDL_Surface* surface = SDL_CreateRGBSurfaceWithFormat(
++        0, displayConfiguration.width, displayConfiguration.height, 32, SDL_PIXELFORMAT_RGBA32);
++    if (!surface) return false;
++    SDL_Texture* previous = SDL_GetRenderTarget(renderer);
++    bool success = SDL_SetRenderTarget(renderer, frameTexture) == 0;
++    if (success)
++        success = SDL_RenderReadPixels(renderer, nullptr, surface->format->format,
++                                       surface->pixels, surface->pitch) == 0;
++    SDL_SetRenderTarget(renderer, previous);
++    if (success) success = IMG_SavePNG(surface, path) == 0;
++    SDL_FreeSurface(surface);
++    return success;
++}
++
+ void SdlRenderer::Draw(bool forceRedraw) {
+     const bool wasLcdEnabled = lcdEnabled;
+     lcdEnabled = soc->LcdEnabled();
+diff --git a/src/uarm/native/SdlRenderer.h b/src/uarm/native/SdlRenderer.h
+index 5126a180..59e8b3e6 100644
+--- a/src/uarm/native/SdlRenderer.h
++++ b/src/uarm/native/SdlRenderer.h
+@@ -16,6 +16,7 @@ class SdlRenderer {
+     ~SdlRenderer();
+ 
+     void Draw(bool forceRedraw);
++    bool SaveFramebuffer(const char* path);
+ 
+    private:
+     void DrawSilkscreen();
+diff --git a/src/uarm/native/main.cpp b/src/uarm/native/main.cpp
+index 448a722e..db99265f 100644
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -49,6 +49,9 @@ struct Options {
+     optional<unsigned int> ramSize;
+     bool smallWindow;
+     optional<DisplayMode> displayMode;
++    bool experimentalTx;
++    optional<unsigned int> runFor;
++    optional<string> framebufferOutput;
+ };
+ 
+ namespace {
+@@ -129,6 +132,10 @@ namespace {
+ 
+         if (SessionFile5::IsSessionFile(norOrSessionLen, norOrSessionData.get()) &&
+             sessionFile.Deserialize(norOrSessionLen, norOrSessionData.get())) {
++            if (options.experimentalTx) {
++                cerr << "experimental TX mode requires raw NOR and NAND images; sessions are not supported" << endl;
++                return false;
++            }
+             if (options.nand) {
+                 cerr << "separate NAND image cannot be used with session file" << endl;
+                 return false;
+@@ -146,7 +153,7 @@ namespace {
+             romInfo = RomInfo5(nor.data, nor.size);
+         } else {
+             romInfo = RomInfo5(norOrSessionData.get(), norOrSessionLen);
+-            if (!romInfo.IsValid()) {
++            if (!romInfo.IsValid() && !options.experimentalTx) {
+                 cerr << "provided file is neither a support ROM nor a session image" << endl;
+                 return false;
+             }
+@@ -178,6 +185,14 @@ namespace {
+     }
+ 
+     bool run(const Options& options) {
++        if (options.framebufferOutput && !options.runFor) {
++            cerr << "--framebuffer-output requires --run-for" << endl;
++            return false;
++        }
++        if (options.runFor && (options.script || *options.runFor == 0)) {
++            cerr << "--run-for requires a positive duration and cannot be combined with --script" << endl;
++            return false;
++        }
+         if (options.mips == 0) {
+             cerr << "MIPS must be finite" << endl;
+             return false;
+@@ -190,9 +205,23 @@ namespace {
+ 
+         if (!readSession(options, nor, nand, memory, savestate, ramSize, romInfo, displayMode))
+             return false;
+-        cerr << romInfo;
++        const DeviceType5 deviceType = options.experimentalTx ? DeviceType5::deviceTypeTX
++                                                             : romInfo.GetDeviceType();
++        if (options.experimentalTx) {
++            cerr << "EXPERIMENTAL Palm TX: input and app bridge testing; audio and sessions unvalidated" << endl;
++            if (options.sd) {
++                cerr << "SD cards are not yet validated for experimental TX mode" << endl;
++                return false;
++            }
++            if (!options.nand || nor.size != (16ul << 20)) {
++                cerr << "TX requires a 16 MiB NOR image and an explicit --nand image" << endl;
++                return false;
++            }
++        } else {
++            cerr << romInfo;
++        }
+ 
+-        if (!romInfo.IsValid() || romInfo.GetDeviceType() == DeviceType5::deviceTypeInvalid)
++        if (!options.experimentalTx && (!romInfo.IsValid() || deviceType == DeviceType5::deviceTypeInvalid))
+             return false;
+ 
+         if (options.ramSize) {
+@@ -204,9 +233,9 @@ namespace {
+             }
+         }
+ 
+-        if (ramSize == 0) ramSize = romInfo.GetRecommendedRamSize();
++        if (ramSize == 0) ramSize = options.experimentalTx ? (32ul << 20) : romInfo.GetRecommendedRamSize();
+ 
+-        if (!deviceConfigurationSupportsRamSize(romInfo.GetDeviceType(), ramSize)) {
++        if (!deviceConfigurationSupportsRamSize(deviceType, ramSize)) {
+             cerr << "unsupported RAM size: " << ramSize << " bytes" << endl;
+             return false;
+         }
+@@ -215,14 +244,14 @@ namespace {
+ 
+         if (!displayMode.has_value())
+             displayMode = options.displayMode.value_or(
+-                deviceConfigurationDefaultDisplayMode(romInfo.GetDeviceType()));
++                deviceConfigurationDefaultDisplayMode(deviceType));
+ 
+-        if (!deviceConfigurationDeviceSupportsDisplayMode(romInfo.GetDeviceType(), *displayMode)) {
++        if (!deviceConfigurationDeviceSupportsDisplayMode(deviceType, *displayMode)) {
+             cerr << "unsupported display mode for device" << endl;
+             return false;
+         }
+ 
+-        const uint32_t nandSize = deviceConfigurationGetNandSize(romInfo.GetDeviceType());
++        const uint32_t nandSize = deviceConfigurationGetNandSize(deviceType);
+         if (nand.size != nandSize) {
+             cerr << "invalid NAND size; expected " << nandSize << " bytes" << endl;
+             return false;
+@@ -242,7 +271,6 @@ namespace {
+             sdCardInitializeWithData(sdLen / SD_SECTOR_SIZE, sdData.release(), key.c_str());
+         }
+ 
+-        const DeviceType5 deviceType = romInfo.GetDeviceType();
+         const int gdbPort = options.gdbPort.value_or(-1);
+ 
+         DisplayConfiguration displayConfiguration =
+@@ -253,7 +281,7 @@ namespace {
+                 ? static_cast<SoC*>(new SocPV(ramSize, nor.data, nor.size, *displayMode, gdbPort))
+                 : static_cast<SoC*>(new SocPXA(deviceType, ramSize, nor.data, nor.size,
+                                                reinterpret_cast<uint8_t*>(nand.data), nand.size,
+-                                               gdbPort, deviceGetSocRev()));
++                                               gdbPort, options.experimentalTx ? 2 : deviceGetSocRev()));
+ 
+         if (memory.data && memory.size > soc->GetMemoryData().size) {
+             cerr << "RAM size mismatch" << endl;
+@@ -311,14 +339,21 @@ namespace {
+         if (!options.disableAudio) audioDriver.Start();
+ 
+         commands::Register();
+-        cli::Start(options.script);
++        if (!options.runFor) cli::Start(options.script);
+         commands::Context commandContext{
+             .soc = soc, .mainLoop = mainLoop, .audioDriver = audioDriver, .rotation = rotation};
+ 
+-        uint64_t lastSpeedDump = timestampUsec();
++        const uint64_t startedAt = timestampUsec();
++        uint64_t lastSpeedDump = startedAt;
+ 
+         while (true) {
+             uint64_t now = timestampUsec();
++            if (options.runFor && now - startedAt >= uint64_t(*options.runFor) * 1000000) {
++                cout << "bounded run complete; PC=0x" << hex
++                     << cpuGetRegExternal(soc->GetCpu(), 15) << dec
++                     << ", LCD=" << soc->LcdEnabled() << endl;
++                break;
++            }
+ 
+             if (!options.disableAudio) soc->SetPcmSuspended(audioDriver.GetAudioBackpressure());
+ 
+@@ -343,12 +378,13 @@ namespace {
+                   << flush;
+ 
+                 SDL_SetWindowTitle(window, s.str().c_str());
++                if (options.runFor) cout << s.str();
+             }
+ 
+             const int64_t timesliceRemaining =
+                 mainLoop.GetTimesliceSizeUsec() - static_cast<int64_t>(timestampUsec() - now);
+ 
+-            if (cli::Execute(&commandContext)) break;
++            if (!options.runFor && cli::Execute(&commandContext)) break;
+ 
+             if (commandContext.rotation != rotation) {
+                 rotation = commandContext.rotation;
+@@ -367,7 +403,12 @@ namespace {
+         }
+ 
+         audioDriver.Pause();
+-        cli::Stop();
++        if (!options.runFor) cli::Stop();
++
++        if (options.framebufferOutput && !sdlRenderer->SaveFramebuffer(options.framebufferOutput->c_str())) {
++            cerr << "failed to save framebuffer: " << SDL_GetError() << endl;
++            return false;
++        }
+ 
+         return true;
+     }
+@@ -383,6 +424,18 @@ int main(int argc, char** argv) {
+ 
+     program.add_argument("--nand", "-n").help("NAND rom file").metavar("<nand file>");
+ 
++    program.add_argument("--experimental-tx")
++        .help("experimental Palm TX boot bring-up from raw NOR/NAND images")
++        .default_value(false)
++        .implicit_value(true);
++
++    program.add_argument("--run-for")
++        .help("exit after this many wall-clock seconds and print execution diagnostics")
++        .scan<'u', unsigned int>();
++
++    program.add_argument("--framebuffer-output")
++        .help("save the unrotated LCD framebuffer as PNG at the end of --run-for");
++
+     program.add_argument("--sd", "-s").help("SD card file").metavar("<SD card file>");
+ 
+     program.add_argument("--ram-size")
+@@ -455,7 +508,10 @@ int main(int argc, char** argv) {
+                        .script = program.present("--script"),
+                        .ramSize = program.present<unsigned int>("--ram-size"),
+                        .smallWindow = program.get<bool>("--small-window"),
+-                       .displayMode = program.present<DisplayMode>("--display")};
++                       .displayMode = program.present<DisplayMode>("--display"),
++                       .experimentalTx = program.get<bool>("--experimental-tx"),
++                       .runFor = program.present<unsigned int>("--run-for"),
++                       .framebufferOutput = program.present("--framebuffer-output")};
+ 
+     logEnable();
+ 
+diff --git a/src/uarm/uarm/devicePalmTungstenE2.cpp b/src/uarm/uarm/devicePalmTungstenE2.cpp
+index 0b9e829c..c2ede9f8 100644
+--- a/src/uarm/uarm/devicePalmTungstenE2.cpp
++++ b/src/uarm/uarm/devicePalmTungstenE2.cpp
+@@ -9,6 +9,7 @@
+ #include "mmiodev_DirectNAND.h"
+ #include "savestate/savestateAll.h"
+ #include "uartdev_bcm2035.h"
++#include "pxa270_KPC.h"
+ 
+ // clang-format off
+ /*
+@@ -111,8 +112,19 @@ struct Device {
+     struct Reschedule reschedule;
+ 
+     enum DeviceType5 type;
++    struct PxaKpc *kpc;
++    uint32_t noRamMarker;
+ };
+ 
++// TX RAM probing expects writes at this address not to read back unchanged.
++static bool txNoRamAccess(void *ctx, uint32_t pa, uint_fast8_t size, bool write, void *buf) {
++    if (pa != 0xa5fffffc || size != 4) return false;
++    auto *dev = static_cast<Device *>(ctx);
++    if (write) dev->noRamMarker = *static_cast<uint32_t *>(buf);
++    else *static_cast<uint32_t *>(buf) = ~dev->noRamMarker;
++    return true;
++}
++
+ enum RamTermination deviceGetRamTerminationStyle(void) { return RamTerminationMirror; }
+ 
+ uint_fast8_t deviceGetSocRev(void) {
+@@ -152,6 +164,35 @@ struct Device *deviceSetup(enum DeviceType5 type, struct SocPeriphs *sp,
+ 
+     dev->reschedule = reschedule;
+ 
++    if (type == DeviceType5::deviceTypeTX) {
++        // Board wiring and flash geometry from upstream uARM's devicePalmTX.c.
++        static const struct NandSpecs txNandSpecs = {
++            .bytesPerPage = 2112, .blocksPerDevice = 1024, .pagesPerBlockLg2 = 6,
++            .flags = NAND_HAS_SECOND_READ_CMD, .devIdLen = 5,
++            .devId = {0xec, 0xf1, 0x00, 0x95, 0x40},
++        };
++        dev->bcm2035 = nullptr;
++        dev->kpc = static_cast<PxaKpc *>(sp->kpc);
++        dev->noRamMarker = 0;
++        dev->nand = directNandInit(sp->mem, deviceReschedule, 0x06000000, 0x05000000,
++                                  0x04000000, 0x00ffffff, sp->gpio, 18, &txNandSpecs,
++                                  nandContent, nandSize, pageBuffer);
++        if (!memRegionAdd(sp->mem, 0xa5fffffc, 4, txNoRamAccess, dev))
++            ERR("cannot map TX RAM probe marker");
++        dev->wm9712L = wm9712LInit(sp->ac97, sp->gpio, 39);
++        if (!dev->nand || !dev->wm9712L || !dev->kpc) ERR("cannot initialize TX board");
++        if (!keypadAddGpioKey(kp, keyIdPower, 0, false)) ERR("cannot initialize TX power key");
++        wm9712LsetAuxVoltage(dev->wm9712L, WM9712LauxPinBmon, 4200 / 3);
++        pxaGpioSetState(sp->gpio, 0, true);
++        pxaGpioSetState(sp->gpio, 1, true);
++        pxaGpioSetState(sp->gpio, 10, true);
++        pxaGpioSetState(sp->gpio, 14, true);  // SD absent
++        pxaGpioSetState(sp->gpio, 37, true);
++        pxaGpioSetState(sp->gpio, 90, true);
++        sp->nand = directNandGetNand(dev->nand);
++        return dev;
++    }
++
+     dev->wm9712L = wm9712LInit(sp->ac97, sp->gpio, 50);
+     if (!dev->wm9712L) ERR("Cannot init WM9712L");
+ 
+@@ -218,12 +259,26 @@ void devicePeriodic(struct Device *dev, uint32_t tier) {
+ void devicePcmPeriodic(struct Device *dev) { wm9712Lperiodic(dev->wm9712L); }
+ 
+ void deviceTouch(struct Device *dev, int x, int y) {
++    if (dev->type == DeviceType5::deviceTypeTX) {
++        wm9712LsetPen(dev->wm9712L, x >= 0 ? 320 + 9 * x : -1,
++                     y >= 0 ? 3800 - 8 * y : -1, 1000);
++        return;
++    }
+     wm9712LsetPen(dev->wm9712L, (x >= 0 && y >= 0) ? 280 + 10 * x : -1,
+                   (x >= 0 && y >= 0) ? 210 + 7 * y : -1, 1000);
+ }
+ 
+ void deviceKey(struct Device *dev, uint32_t key, bool down) {
+-    // nothing
++    if (dev->type != DeviceType5::deviceTypeTX) return;
++    static const KeyId matrix[3][4] = {
++        {keyIdPower, keyIdHard2, keyIdUp, keyIdRight},
++        {keyIdHard1, keyIdHard3, keyInvalid, keyInvalid},
++        {keyIdSelect, keyIdHard4, keyIdDown, keyIdLeft},
++    };
++    for (uint8_t col = 0; col < 3; col++)
++        for (uint8_t row = 0; row < 4; row++)
++            if (matrix[col][row] != keyInvalid && matrix[col][row] == key)
++                pxaKpcMatrixKeyChange(dev->kpc, row, col, down);
+ }
+ 
+ bool deviceTaskRequired(struct Device *dev, uint32_t tier) {
+@@ -241,7 +296,7 @@ void deviceSetAudioQueue(struct Device *dev, struct AudioQueue *audioQueue) {
+ bool deviceI2sConnected() { return false; }
+ 
+ void deviceSetSdCardInserted(struct Device *dev, bool inserted) {
+-    pxaGpioSetState(dev->gpio, 10, !inserted);
++    pxaGpioSetState(dev->gpio, dev->type == DeviceType5::deviceTypeTX ? 14 : 10, !inserted);
+ }
+ 
+ enum DeviceType5 deviceGetType(struct Device *dev) { return dev->type; }
+@@ -250,14 +305,14 @@ template <typename T>
+ void deviceSave(struct Device *dev, T &savestate) {
+     wm9712Lsave(dev->wm9712L, savestate);
+     directNandSave(dev->nand, savestate);
+-    bcm2035Save(dev->bcm2035, savestate);
++    if (dev->bcm2035) bcm2035Save(dev->bcm2035, savestate);
+ }
+ 
+ template <typename T>
+ void deviceLoad(struct Device *dev, T &loader) {
+     wm9712Load(dev->wm9712L, loader);
+     directNandLoad(dev->nand, loader);
+-    bcm2035Load(dev->bcm2035, loader);
++    if (dev->bcm2035) bcm2035Load(dev->bcm2035, loader);
+ }
+ 
+ template void deviceSave<Savestate<ChunkType>>(Device *dev, Savestate<ChunkType> &savestate);
+diff --git a/src/uarm/uarm/device_configuration.cpp b/src/uarm/uarm/device_configuration.cpp
+index d5da09aa..a6d213d3 100644
+--- a/src/uarm/uarm/device_configuration.cpp
++++ b/src/uarm/uarm/device_configuration.cpp
+@@ -6,6 +6,8 @@
+ 
+ bool deviceConfigurationSupportsRamSize(enum DeviceType5 deviceType, uint32_t ramSize) {
+     switch (deviceType) {
++        case DeviceType5::deviceTypeTX:
++            return ramSize == (32ul << 20);
+         case DeviceType5::deviceTypeE2:
+         case DeviceType5::deviceTypeFrankenE2:
+             return ramSize == (16ul << 20) || ramSize == (32ul << 20);
+@@ -20,6 +22,8 @@ bool deviceConfigurationSupportsRamSize(enum DeviceType5 deviceType, uint32_t ra
+ 
+ uint32_t deviceConfigurationGetNandSize(enum DeviceType5 deviceType) {
+     switch (deviceType) {
++        case DeviceType5::deviceTypeTX:
++            return 2112ul * 64 * 1024;
+         case DeviceType5::deviceTypeE2:
+         case DeviceType5::deviceTypeFrankenE2:
+             return 34603008;
+@@ -31,6 +35,8 @@ uint32_t deviceConfigurationGetNandSize(enum DeviceType5 deviceType) {
+ 
+ bool deviceConfigurationDeviceSupportsDisplayMode(DeviceType5 deviceType, DisplayMode displayMode) {
+     switch (deviceType) {
++        case DeviceType5::deviceTypeTX:
++            return displayMode == DisplayMode::mode_320x480;
+         case DeviceType5::deviceTypeE2:
+             return displayMode == DisplayMode::mode_320x320;
+ 
+@@ -47,6 +53,7 @@ bool deviceConfigurationDeviceSupportsDisplayMode(DeviceType5 deviceType, Displa
+ 
+ DisplayMode deviceConfigurationDefaultDisplayMode(DeviceType5 deviceType) {
+     switch (deviceType) {
++        case DeviceType5::deviceTypeTX:
+         case DeviceType5::deviceTypeFrankenE2:
+         case DeviceType5::deviceTypePV:
+             return DisplayMode::mode_320x480;
+diff --git a/src/uarm/uarm/nand.h b/src/uarm/uarm/nand.h
+index 8a4dd92b..d509a619 100644
+--- a/src/uarm/uarm/nand.h
++++ b/src/uarm/uarm/nand.h
+@@ -27,7 +27,7 @@ struct NandSpecs {
+     uint8_t pagesPerBlockLg2;
+     uint8_t flags;
+     uint8_t devIdLen;
+-    uint8_t devId[2];
++    uint8_t devId[6];
+ };
+ 
+ struct NAND *nandInit(uint8_t *nandContent, const struct MemoryBuffer *pageBuffer,
+diff --git a/src/uarm/uarm/soc_PXA.cpp b/src/uarm/uarm/soc_PXA.cpp
+index 6fd526f0..4bc88e71 100644
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -76,7 +76,7 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
+         ERR("unsupported RAM size %u\n", ramSize);
+ 
+     this->ramSize = ramSize;
+-    this->ramBase = ramBase;
++    this->ramBase = RAM_BASE;
+ 
+     AllocateBuffers();
+     SetupScheduler();
+@@ -88,16 +88,21 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
+     patchDispatchSetCpu(patchDispatch, cpu);
+ 
+     syscallDispatch = initSyscallDispatch(this);
+-    patchContext = registerPatches(patchDispatch, syscallDispatch, cpu, systemState);
++    // TX boots through IPL/NAND. E2 ROM patches are not validated for this layout.
++    if (deviceType != DeviceType5::deviceTypeTX)
++        patchContext = registerPatches(patchDispatch, syscallDispatch, cpu, systemState);
+ 
+     ram = ramInit(mem, this, RAM_BASE, ramSize, &bufferMemory, true);
+     rom = romInit(mem, ROM_BASE, romData, romSize);
+ 
+     void *peepholeBuffer = romGetPeepholeBuffer(rom);
+ 
+-    pacePatchInit(pacePatch, ROM_BASE, peepholeBuffer, romSize);
+-    peepholeOptimize((uint32_t *)peepholeBuffer, romSize);
+-    patch68kInit(romInfo.NeedsNandPatch() ? PATCH_68K_NVFS : 0);
++    if (deviceType != DeviceType5::deviceTypeTX) {
++        pacePatchInit(pacePatch, ROM_BASE, peepholeBuffer, romSize);
++        peepholeOptimize((uint32_t *)peepholeBuffer, romSize);
++    }
++    patch68kInit(deviceType != DeviceType5::deviceTypeTX && romInfo.NeedsNandPatch()
++                     ? PATCH_68K_NVFS : 0);
+ 
+     vSD = vsdInit(sdCardRead, sdCardWrite, 0);
+ 
+diff --git a/tools/test-tx-native.py b/tools/test-tx-native.py
+new file mode 100644
+index 00000000..81ba74d2
+--- /dev/null
++++ b/tools/test-tx-native.py
+@@ -0,0 +1,27 @@
++#!/usr/bin/env python3
++"""Check TX bring-up input validation without starting an interactive emulator."""
++
++import argparse
++import subprocess
++
++parser = argparse.ArgumentParser(description=__doc__)
++parser.add_argument("binary")
++parser.add_argument("nor")
++parser.add_argument("nand")
++args = parser.parse_args()
++
++base = [args.binary, "--experimental-tx", args.nor]
++cases = [
++    ([], "requires a 16 MiB"),
++    (["--nand", args.nor], "invalid NAND size"),
++    (["--nand", args.nand, "--ram-size", "16"], "unsupported RAM size"),
++    (["--nand", args.nand, "--display", "320x320"], "unsupported display mode"),
++    (["--nand", args.nand, "--run-for", "0"], "positive duration"),
++]
++
++for flags, expected in cases:
++    result = subprocess.run(base + flags, text=True, stdout=subprocess.PIPE,
++                            stderr=subprocess.STDOUT, timeout=10)
++    if result.returncode != 1 or expected not in result.stdout:
++        raise SystemExit(f"FAIL {flags}: exit={result.returncode}\n{result.stdout}")
++    print(f"PASS: {expected}")

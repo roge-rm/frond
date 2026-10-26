@@ -1,0 +1,93 @@
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -387,6 +387,9 @@
+                 break;
+             }
+ 
++            sdlEventHandler.HandleEvents();
++            if (sdlEventHandler.QuitRequested()) break;
++
+             if (!options.disableAudio) soc->SetPcmSuspended(audioDriver.GetAudioBackpressure());
+ 
+             mainLoop.Cycle(now);
+@@ -394,15 +397,12 @@
+             sdlRenderer->Draw(sdlEventHandler.RedrawRequested());
+             sdlEventHandler.ClearRedrawRequested();
+ 
+-            if (!replay.Dispatch((now - replayStartedAt) / 1000, *soc, *sdlRenderer, replayError)) {
++            if (!replay.Dispatch((timestampUsec() - replayStartedAt) / 1000, *soc, *sdlRenderer, replayError)) {
+                 audioDriver.Pause();
+                 if (!options.runFor) cli::Stop();
+                 cerr << replayError << endl;
+                 return false;
+             }
+-
+-            sdlEventHandler.HandleEvents();
+-            if (sdlEventHandler.QuitRequested()) break;
+ 
+             if (now - lastSpeedDump > 1000000) {
+                 const uint64_t currentIps = mainLoop.GetCurrentIps();
+--- a/src/uarm/native/SdlAudioDriver.cpp
++++ b/src/uarm/native/SdlAudioDriver.cpp
+@@ -2,7 +2,6 @@
+ 
+ #include <iostream>
+ 
+-#include "MainLoop.h"
+ #include "SDL_audio.h"
+ #include "SoC.h"
+ #include "audio_queue.h"
+@@ -24,8 +23,10 @@
+ 
+ void SdlAudioDriver::Start() {
+     if (initialized) {
++        soc->SetPcmOutputEnabled(true);
++        audioBuffering = true;
++        audioBackpressure = false;
+         SDL_PauseAudioDevice(audioDevice, 0);
+-        soc->SetPcmOutputEnabled(true);
+ 
+         return;
+     }
+@@ -52,14 +53,14 @@
+     }
+ 
+     soc->SetPcmOutputEnabled(true);
+-    SDL_PauseAudioDevice(audioDevice, 0);
+-
+     bufferThresholdStart = audioSpecActual.samples;
+-    bufferThresholdStop = 44100 / MAIN_LOOP_FPS * 4;
+-    backpressureThresholdStart = 44100 / MAIN_LOOP_FPS * 7;
+-    backpressureThresholdStop = 44100 / MAIN_LOOP_FPS * 8;
++    bufferThresholdStop = audioSpecActual.samples * 3;
++    // Leave four callbacks of headroom for the emulation thread to resume.
++    backpressureThresholdStart = audioSpecActual.samples * 6;
++    backpressureThresholdStop = audioSpecActual.samples * 4;
+ 
+     initialized = true;
++    SDL_PauseAudioDevice(audioDevice, 0);
+ }
+ 
+ void SdlAudioDriver::Pause() {
+@@ -69,7 +70,9 @@
+     SDL_PauseAudioDevice(audioDevice, 1);
+ }
+ 
+-bool SdlAudioDriver::GetAudioBackpressure() const { return audioBackpressure; }
++bool SdlAudioDriver::GetAudioBackpressure() const {
++    return audioBackpressure.load(std::memory_order_relaxed);
++}
+ 
+ void SdlAudioDriver::AudioCallback(uint8_t* stream, int len) {
+     size_t samplesRemaining = len >> 2;
+--- a/src/uarm/native/SdlAudioDriver.h
++++ b/src/uarm/native/SdlAudioDriver.h
+@@ -27,7 +27,7 @@
+     bool initialized{false};
+ 
+     std::atomic<bool> audioBuffering{true};
+-    bool audioBackpressure{false};
++    std::atomic<bool> audioBackpressure{false};
+ 
+     uint32_t bufferThresholdStart{0};
+     uint32_t bufferThresholdStop{0};

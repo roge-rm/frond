@@ -1,0 +1,103 @@
+--- a/src/uarm/native/SdlAudioDriver.h
++++ b/src/uarm/native/SdlAudioDriver.h
+@@ -16,6 +16,7 @@
+     void Start();
+     void Pause();
+     bool GetAudioBackpressure() const;
++    uint64_t GetUnderrunCount() const;
+ 
+     void AudioCallback(uint8_t* stream, int len);
+ 
+@@ -28,6 +29,7 @@
+ 
+     std::atomic<bool> audioBuffering{true};
+     std::atomic<bool> audioBackpressure{false};
++    std::atomic<uint64_t> underrunCount{0};
+ 
+     uint32_t bufferThresholdStart{0};
+     uint32_t bufferThresholdStop{0};
+--- a/src/uarm/native/SdlAudioDriver.cpp
++++ b/src/uarm/native/SdlAudioDriver.cpp
+@@ -74,6 +74,10 @@
+     return audioBackpressure.load(std::memory_order_relaxed);
+ }
+ 
++uint64_t SdlAudioDriver::GetUnderrunCount() const {
++    return underrunCount.load(std::memory_order_relaxed);
++}
++
+ void SdlAudioDriver::AudioCallback(uint8_t* stream, int len) {
+     size_t samplesRemaining = len >> 2;
+     size_t samplesPending = audioQueuePendingSamples(audioQueue);
+@@ -82,7 +86,7 @@
+ 
+     if (!audioBuffering && samplesPending < bufferThresholdStart) {
+         audioBuffering = true;
+-
++        underrunCount.fetch_add(1, std::memory_order_relaxed);
+         std::cout << "audio underrun" << std::endl;
+     }
+ 
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -388,6 +388,7 @@
+ 
+         uint64_t lastSpeedDump = startedAt;
+         bool waitForPreviewAudio = false;
++        uint64_t lastAudioUnderruns = audioDriver.GetUnderrunCount();
+ 
+         while (true) {
+             uint64_t now = timestampUsec();
+@@ -402,6 +403,15 @@
+             if (sdlEventHandler.QuitRequested()) break;
+ 
+             if (!options.disableAudio) soc->SetPcmSuspended(audioDriver.GetAudioBackpressure());
++
++            if (options.experimentalFastAudio) {
++                const auto underruns = audioDriver.GetUnderrunCount();
++                if (underruns != lastAudioUnderruns)
++                    static_cast<SocPXA*>(soc)->NotifyFastAudioUnderrun();
++                lastAudioUnderruns = underruns;
++                mainLoop.SetTimesliceUsec(static_cast<SocPXA*>(soc)->FastAudioActive()
++                    ? 1000000 / 120 : 1000000 / MAIN_LOOP_FPS);
++            }
+ 
+             if (options.experimentalFastAudio && static_cast<SocPXA*>(soc)->FastAudioActive()) {
+                 const auto pending = audioQueuePendingSamples(audioQueue);
+--- a/src/uarm/uarm/fast_audio.h
++++ b/src/uarm/uarm/fast_audio.h
+@@ -17,6 +17,9 @@
+     bool Bypass() const { return active || quietUntil; }
+     bool Active() const { return active; }
+     bool Failed() const { return failed; }
++    void NotifyUnderrun(uint64_t now) {
++        if (active) FallBack(now, "preview underrun", true);
++    }
+     void Reset() {
+         active = failed = started = false;
+         quietUntil = 0;
+--- a/src/uarm/uarm/soc_PXA.h
++++ b/src/uarm/uarm/soc_PXA.h
+@@ -57,6 +57,7 @@
+ 
+     bool EnableFastAudio();
+     bool FastAudioActive() const { return fastAudio && fastAudio->Active(); }
++    void NotifyFastAudioUnderrun();
+ 
+    protected:
+     void OnSetFramebufferDirty() override;
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -642,6 +642,12 @@
+         patchDispatchAddPatch(patchDispatch,trap,hook,nullptr,this);
+     return true;
+ }
++void SocPXA::NotifyFastAudioUnderrun() {
++    if (!fastAudio) return;
++    fastAudio->NotifyUnderrun(GetTime());
++    UpdateFastAudioRoute();
++}
++
+ void SocPXA::UpdateFastAudioRoute() {
+     const bool bypass = fastAudio && fastAudio->Bypass();
+     if (bypass == fastAudioRouted) return;

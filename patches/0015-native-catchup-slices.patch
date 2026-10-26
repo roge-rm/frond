@@ -1,0 +1,58 @@
+--- a/src/uarm/MainLoop.cpp
++++ b/src/uarm/MainLoop.cpp
+@@ -74,8 +74,10 @@
+         LEGACY_BROWSER_PACING && deltaUsec >= lagCatchup
+             ? (maxLoad - MAX_LOAD_CATCHUP_MARGIN) : maxLoad);
+     const uint64_t executionStarted = now;
++    const double runUsec = LEGACY_BROWSER_PACING
++        ? deltaUsec : std::min(deltaUsec, double(timesliceUsec));
+     const uint64_t cyclesEmulated =
+-        soc->Run(deltaUsec * cyclesPerSecond / 1E6, round(cyclesPerSecond));
++        soc->Run(runUsec * cyclesPerSecond / 1E6, round(cyclesPerSecond));
+ 
+     const double slizeSizeSeconds = cyclesEmulated / cyclesPerSecond;
+ 
+@@ -92,6 +94,11 @@
+ }
+ 
+ uint64_t MainLoop::GetTimesliceSizeUsec() const { return timesliceUsec; }
++
++int64_t MainLoop::GetSuggestedDelayUsec(uint64_t now) const {
++    // Catch up in short batches without sleeping away the remaining headroom.
++    return std::clamp<double>(timesliceUsec - (double(now) - virtualTimeUsec), 0, timesliceUsec);
++}
+ 
+ uint32_t MainLoop::GetCurrentIps() const { return currentIps; }
+ 
+--- a/src/uarm/MainLoop.h
++++ b/src/uarm/MainLoop.h
+@@ -17,6 +17,7 @@
+     void SetTimesliceUsec(uint64_t usec);
+ 
+     uint64_t GetTimesliceSizeUsec() const;
++    int64_t GetSuggestedDelayUsec(uint64_t now) const;
+ 
+     uint32_t GetCurrentIps() const;
+     uint64_t GetCurrentIpsMax() const;
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -447,9 +447,6 @@
+                 if (options.runFor) cout << s.str();
+             }
+ 
+-            const int64_t timesliceRemaining =
+-                mainLoop.GetTimesliceSizeUsec() - static_cast<int64_t>(timestampUsec() - now);
+-
+             if (!options.runFor && cli::Execute(&commandContext)) break;
+ 
+             if (commandContext.rotation != rotation) {
+@@ -465,7 +462,8 @@
+                 soc->SetFramebufferDirty();
+             }
+ 
+-            if (timesliceRemaining > 10) usleep(timesliceRemaining);
++            const auto delay = mainLoop.GetSuggestedDelayUsec(timestampUsec());
++            if (delay > 10) usleep(delay);
+         }
+ 
+         audioDriver.Pause();

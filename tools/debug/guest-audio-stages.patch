@@ -1,0 +1,132 @@
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -202,12 +202,18 @@
+     ERR("CLZ undefined");
+ }
+ 
++static const bool guestStageTrace = getenv("FROND_GUEST_TRACE") != nullptr;
++
+ static FORCE_INLINE uint32_t cpuPrvROR(uint32_t val, uint_fast8_t ror) {
+     return (val >> ror) | (val << (32 - ror));
+ }
+ 
++void traceGuestBoundary(struct ArmCpu* cpu, uint32_t pc, uint32_t from);
+ static FORCE_INLINE void cpuPrvSetPC(struct ArmCpu *cpu, uint32_t pc)  // with interworking
+ {
++    if (unlikely(guestStageTrace && ((cpu->curInstrPC ^ pc) & 0xf0000000)))
++        traceGuestBoundary(cpu, pc, cpu->curInstrPC);
++
+     const bool wasT = cpu->T;
+ 
+     cpu->regs[REG_NO_PC] = pc & ~1UL;
+--- a/src/uarm/uarm/patch_dispatch.cpp
++++ b/src/uarm/uarm/patch_dispatch.cpp
+@@ -10,6 +10,8 @@
+ #include "cputil.h"
+ #include "savestate/savestateAll.h"
+ #include "syscall.h"
++
++static uint32_t stageRead(struct ArmCpu*, uint32_t, unsigned, bool big);
+ 
+ #define MAX_PENDING_TAILPATCH 4
+ #define MAX_PATCHES 50
+@@ -121,6 +123,21 @@
+     fprintf(stderr, "syscall from %#10x: %s\n", registers[14],
+             syscallName ? syscallName : "[unknown]");
+ #endif
++
++    static const bool stageTrace = getenv("FROND_GUEST_TRACE") != nullptr;
++    if (stageTrace) {
++        uint32_t trap = packSyscall(pd->table, offset);
++        if (trap == 0x4164) {
++            uint32_t globals = stageRead(pd->cpu, stageRead(pd->cpu, registers[9], 4, false), 4, false);
++            uint32_t root = globals + stageRead(pd->cpu, 0x20098ea8, 4, false);
++            uint32_t state = stageRead(pd->cpu, root+16, 4, false);
++            uint32_t filter = stageRead(pd->cpu, state+4, 4, false);
++            fprintf(stderr, "STAGE FILTER %llu %x %u %u %u\n", (unsigned long long)timestampUsec(),
++                filter, stageRead(pd->cpu, filter+62, 2, false), stageRead(pd->cpu, filter+64, 2, false),
++                stageRead(pd->cpu, state+27, 1, false));
++        }
++
++    }
+ 
+     const uint32_t key = (((pd->table >> 2) - 1) << 10) | (offset >> 2);
+     const uint8_t patchIdx = pd->patchTable[key];
+@@ -289,3 +306,54 @@
+                                                            SavestateProbe<ChunkType>& savestate);
+ template void patchDispatchLoad<SavestateLoader<ChunkType>>(PatchDispatch* pd,
+                                                             SavestateLoader<ChunkType>& loader);
++
++
++static uint32_t stageRead(struct ArmCpu* cpu, uint32_t addr, unsigned count, bool big=false) {
++    uint32_t result = 0;
++    for (unsigned i = 0; i < count; ++i) {
++        uint8_t b = 0;
++        if (!cpuMemOpExternal(cpu, &b, addr+i, 1, false)) return 0;
++        if (big) result = (result << 8) | b;
++        else result |= uint32_t(b) << (i*8);
++    }
++    return result;
++}
++void traceGuestBoundary(struct ArmCpu* cpu, uint32_t pc, uint32_t from) {
++    auto r = cpuGetRegisters(cpu);
++    static uint32_t event = 0, callbackBuffer = 0, callbackFrames = 0;
++    static uint32_t eventReturn = 0x6b7584, renderEntry = 0x6939f8, renderReturn = 0x2004b6a1;
++    if (pc == 0x202cc02c && r[1] == 0x45b) {
++        uint32_t args = r[2];
++        renderEntry = stageRead(cpu, args+14, 4, true);
++        fprintf(stderr, "STAGE CREATE %llu %u %x %u %x %u\n", (unsigned long long)timestampUsec(),
++            stageRead(cpu,args+6,4,true), renderEntry, stageRead(cpu,args+22,4,true), args, r[3]);
++
++    }
++    if (pc == 0x202cc02c && r[1] == 0x11d) {
++        event = stageRead(cpu, r[2], 4, true);
++        eventReturn = r[14];
++        fprintf(stderr, "STAGE EVTENTER %llu %x %u\n", (unsigned long long)timestampUsec(),
++            event, stageRead(cpu, r[2]+4, 4, true));
++    }
++    if (pc == eventReturn && event) {
++        fprintf(stderr, "STAGE EVTRET %llu %x %u %u %d %d\n", (unsigned long long)timestampUsec(),
++            event, stageRead(cpu,event,2,true), stageRead(cpu,event+2,1),
++            (int16_t)stageRead(cpu,event+4,2,true), (int16_t)stageRead(cpu,event+6,2,true));
++        event = 0;
++    }
++    if (pc == renderEntry) {
++        callbackBuffer = r[2]; callbackFrames = r[3]; renderReturn = r[14];
++        fprintf(stderr, "STAGE RENDERIN %llu %x %u\n", (unsigned long long)timestampUsec(),r[2],r[3]);
++    }
++    if (pc == renderReturn && callbackBuffer && callbackFrames <= 8192) {
++        unsigned peak = 0;
++        for (unsigned i = 0; i < callbackFrames; i += 8) {
++            int16_t sample = stageRead(cpu, callbackBuffer+i*4, 2);
++            unsigned mag = sample < 0 ? -int(sample) : sample;
++            if (mag > peak) peak = mag;
++        }
++        fprintf(stderr, "STAGE RENDEROUT %llu %x %u %u\n", (unsigned long long)timestampUsec(),
++            callbackBuffer, callbackFrames, peak);
++        callbackBuffer = 0;
++    }
++}
+--- a/src/uarm/uarm/pxa_DMA.cpp
++++ b/src/uarm/uarm/pxa_DMA.cpp
+@@ -124,6 +124,20 @@
+         ch->SAR = nextS & ~0x03;
+         ch->TAR = nextT & ~0x03;
+         ch->CR = nextC;
++        static const bool trace = getenv("FROND_GUEST_TRACE") != nullptr;
++        if (trace && nextT == 0x40500040) {
++            unsigned peak = 0;
++            for (unsigned off = 0; off < (nextC & 0x1fff); off += 32) {
++                uint32_t sample = 0;
++                if (!memAccess<4, false>(dma->mem, nextS+off, &sample)) break;
++                int value = (int16_t)sample;
++                unsigned mag = value < 0 ? -value : value;
++                if (mag > peak) peak = mag;
++            }
++            fprintf(stderr, "STAGE DMA %llu %x %x %x %x %u\n",
++                (unsigned long long)timestampUsec(), dar, nextD, nextS, nextC, peak);
++        }
++
+ 
+         if (nextC & 0x00400000ul)  // start irq requested?
+             ch->CSR |= 2;
