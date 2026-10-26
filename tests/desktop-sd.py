@@ -29,7 +29,8 @@ def emulator(session, label):
     with tempfile.TemporaryDirectory(prefix='frond-sd-') as directory, (root / (label + '.log')).open('wb') as log:
         listener = socket.socket(socket.AF_UNIX)
         address = str(Path(directory) / 'control')
-        listener.bind(address); listener.listen(1); listener.settimeout(30)
+        # A shared heavy emulator slot can be busy before the core starts.
+        listener.bind(address); listener.listen(1); listener.settimeout(180)
         process = subprocess.Popen((['heavy', 'emulator'] if shutil.which('heavy') else []) + [str(core), str(session), '--no-sound', '--desktop-socket', address],
             stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
             env=dict(os.environ, SDL_VIDEODRIVER='dummy', SDL_AUDIODRIVER='dummy'))
