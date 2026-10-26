@@ -1,0 +1,50 @@
+--- a/src/uarm/MainLoop.cpp
++++ b/src/uarm/MainLoop.cpp
+@@ -45,7 +45,12 @@
+     timesliceUsec = std::clamp<uint64_t>(usec,1000,1000000);
+ }
+ 
+-double MainLoop::Cycle(uint64_t now) {
++double MainLoop::Cycle(uint64_t now, bool paused) {
++    if (paused) {
++        PauseAt(now);
++        return 0;
++    }
++
+     const uint64_t lagCatchup = 3 * timesliceUsec / 2;
+     const uint64_t lagSkip = 3 * timesliceUsec;
+     // virtualTimeUsec += static_cast<double>(socGetInjectedTimeNsec(soc)) / 1000;
+--- a/src/uarm/MainLoop.h
++++ b/src/uarm/MainLoop.h
+@@ -12,7 +12,7 @@
+    public:
+     MainLoop(SoC* soc);
+ 
+-    double Cycle(uint64_t now);
++    double Cycle(uint64_t now, bool paused = false);
+     void PauseAt(uint64_t now);
+     void SetTimesliceUsec(uint64_t usec);
+ 
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -451,7 +451,9 @@
+             }
+ 
+             // RPC and CLI controls can enable sound after --no-sound startup.
+-            if (soc->PcmOutputEnabled()) soc->SetPcmSuspended(audioDriver.GetAudioBackpressure());
++            // Backpressure must stop all guest clocks together. Suspending just
++            // the codec lets DMA and the guest stream deadlines run ahead.
++            const bool waitForAudio = soc->PcmOutputEnabled() && audioDriver.GetAudioBackpressure();
+ 
+             reportAudioUnderruns();
+             if (options.experimentalFastAudio) {
+@@ -464,8 +466,7 @@
+                 if (!waitForPreviewAudio && pending > 3072) waitForPreviewAudio = true;
+                 if (waitForPreviewAudio && pending < 2048) waitForPreviewAudio = false;
+             } else waitForPreviewAudio = false;
+-            if (waitForPreviewAudio) mainLoop.PauseAt(now);
+-            else mainLoop.Cycle(now);
++            mainLoop.Cycle(now, waitForAudio || waitForPreviewAudio);
+ 
+             sdlRenderer->Draw(sdlEventHandler.RedrawRequested(), sdlEventHandler.PressedButtons());
+             sdlEventHandler.ClearRedrawRequested();

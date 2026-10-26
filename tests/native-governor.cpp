@@ -18,7 +18,9 @@ class TimedSoc : public SocPXA {
     uint64_t descheduledUsec = 0;
     uint64_t lastBudget = 0;
     uint64_t lastCycles = 0;
+    uint64_t runCalls = 0;
     uint64_t Run(uint64_t cycles, uint64_t budget) override {
+        ++runCalls;
         lastBudget = budget;
         lastCycles = cycles;
         if (!cycles) { ++wallUsec; return 0; }
@@ -67,11 +69,18 @@ int main() {
 
     const auto prePauseBudget = soc.lastBudget;
     wallUsec += 5000000;
-    loop.PauseAt(wallUsec);
+    const auto callsBeforePause = soc.runCalls;
+    for (unsigned i = 0; i < 8; ++i) {
+        wallUsec += loop.GetTimesliceSizeUsec();
+        assert(loop.Cycle(wallUsec, true) == 0);
+        assert(soc.runCalls == callsBeforePause); // CPU and peripheral clocks stay together.
+    }
     assert(loop.GetSuggestedDelayUsec(wallUsec) == int64_t(loop.GetTimesliceSizeUsec()));
     deadline = wallUsec;
     cycle();
     assert(soc.lastBudget == prePauseBudget);
+    assert(soc.lastCycles <= prePauseBudget * loop.GetTimesliceSizeUsec() / 1000000);
+    assert(soc.runCalls == callsBeforePause + 1); // no catch-up burst after audio resumes.
 
     // Real compute-cost increases and the requested limit still constrain the clock.
     soc.capacity = 40000000;

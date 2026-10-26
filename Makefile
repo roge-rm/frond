@@ -17,6 +17,7 @@ out/frond: build/source/.prepared
 
 test: prepare test-developer-run test-xscale-prefetch test-device-controls test-scheduler test-wifi test-host-network test-keyboard test-network test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup
 	python3 tests/audio-metrics.py
+	python3 tests/audio-timing.py
 	python3 tests/tx-baseline.py
 	python3 tests/input-latency.py
 	python3 tests/menu-response.py

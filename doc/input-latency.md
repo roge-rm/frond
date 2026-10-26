@@ -118,3 +118,45 @@ additional fields do not relax its checks.
 `make test` covers onset detection, background rejection, missed-tap attribution,
 guest-stage attribution and new-frame/presentation requirements. Sessions and
 raw diagnostic exports stay outside Git.
+
+## Audio clock and DMA diagnosis
+
+Native audio backpressure pauses guest execution, including its timer, DMA and
+codec clocks, until SDL drains the queue. Host input polling, drawing and desktop
+control remain active. Pausing only the codec while guest time continues lets
+sound-stream deadlines advance against a stopped sample clock. This correction
+does not guarantee continuous PCM when the host cannot sustain the guest workload.
+
+For a matched guest CPU ceiling, add `--mips 40` (for example) to
+`tools/check-native-audio.py`. This is a ceiling, not a fixed budget: the native
+governor can still select a lower rate under host load. Compare the recorded
+`budget_mips_samples` as well as host load before attributing a difference to a
+change. Keep the binary and session unchanged throughout each measurement.
+
+`tools/debug/audio-timing-trace.patch` observes HAL writes, sampled DMA descriptor
+contents, codec silence/FIFO starvation, sound-stream lifecycle and backpressure.
+Apply this standalone observer to prepared source, rebuild, then enable
+`FROND_HAL_AUDIO=1 FROND_GUEST_TRACE=1 FROND_PCM_TRACE=1`. Summarize a captured log:
+
+```sh
+python3 tools/analyze-audio-timing.py /path/to/frond.log
+```
+
+HAL writes are downstream of application callbacks; their intervals are not
+callback execution times. DMA peaks inspect every eighth frame at descriptor
+fetch, so an all-zero probe is not proof of an entirely silent transfer. Codec
+rows cover 44,100 output frames and include startup/shutdown. Use lifecycle
+markers or a saved active continuous stream to distinguish intentional silence.
+A nonzero HAL buffer followed by silence in DMA/codec without FIFO starvation
+localizes the fault upstream of SDL, but does not by itself identify its cause.
+
+Backpressure intervals report both host time and guest time. Guest time should
+stay fixed while the native frontend waits. The analyser separates lifecycle
+boundaries and excludes negative intervals after a guest clock restore; it does
+not issue a continuity verdict. Use the existing strict PCM acceptance alongside
+it, retaining failed captures and shutdown tails.
+
+The observer logs on the emulation thread and changes measured throughput. It
+uses the existing TX HAL trap layout and is a diagnostic, not a general sound
+API monitor. Run uninstrumented comparisons separately and reverse the observer
+before ordinary builds. No host real-time scheduling changes are required.

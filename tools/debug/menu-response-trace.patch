@@ -43,9 +43,8 @@
  #include "InputReplay.h"
  #include "Rotation.h"
  #include "SdlAudioDriver.h"
-@@ -421,7 +423,18 @@
-             if (waitForPreviewAudio) mainLoop.PauseAt(now);
-             else mainLoop.Cycle(now);
+@@ -421,6 +423,17 @@
+             mainLoop.Cycle(now, waitForAudio || waitForPreviewAudio);
  
 +            if (menuTraceActive) {
 +                const auto stamp = timestampUsec();

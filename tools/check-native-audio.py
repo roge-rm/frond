@@ -117,6 +117,8 @@ def run(args):
     if args.cpu is not None:
         # Allocate guest memory on the chosen CPU's node before starting SDL workers.
         command = runner + ['taskset', '-c', str(args.cpu), str(binary), str(session)]
+    if args.mips is not None:
+        command += ['--mips', str(args.mips)]
     if not args.export_databases:
         command += ['--run-for', str(args.seconds)]
     if args.replay:
@@ -250,6 +252,7 @@ def main():
     p.add_argument('output', type=Path, help='new result directory; contains private session hashes and PCM')
     p.add_argument('--binary', type=Path, default=Path('out/frond'))
     p.add_argument('--seconds', type=int, default=180)
+    p.add_argument('--mips', type=int, help='guest CPU ceiling for matched pacing experiments; not a fixed budget')
     p.add_argument('--cpu', type=int, help='Linux CPU for the emulation thread; existing SDL workers regain the original affinity')
     p.add_argument('--replay', type=Path)
     p.add_argument('--export-databases', action='store_true', help='after capture, export all private RAM databases through the console')
@@ -257,6 +260,8 @@ def main():
     args = p.parse_args()
     if not 6 <= args.seconds <= 600:
         p.error('seconds must be between 6 and 600')
+    if args.mips is not None and not 1 <= args.mips <= 1000:
+        p.error('MIPS ceiling must be between 1 and 1000')
     if args.cpu is not None and args.cpu not in os.sched_getaffinity(0):
         p.error('CPU must be online and available in the current affinity mask')
     try:
