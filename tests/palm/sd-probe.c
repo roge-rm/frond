@@ -1,5 +1,8 @@
 #include <PalmOS.h>
 #include <VFSMgr.h>
+#include <ExpansionMgr.h>
+
+#define MOUNT_WAIT_SECONDS 30UL
 
 static void logResult(const Char* label, Err error, UInt32 value) {
     Char line[120];
@@ -19,7 +22,7 @@ static void logResult(const Char* label, Err error, UInt32 value) {
     }
     DmCloseDatabase(db);
 }
-static void probe(void) {
+static Err probe(void) {
     UInt32 iterator = vfsIteratorStart, count = 0, bytes = 0;
     UInt32 used = 0, total = 0, started = TimGetTicks();
     UInt16 volume = 0;
@@ -30,7 +33,7 @@ static void probe(void) {
     logResult("begin", 0, started);
     error = VFSVolumeEnumerate(&volume, &iterator);
     logResult("enumerate", error, volume);
-    if (error) { logResult("complete", error, started); return; }
+    if (error) { logResult("complete", error, started); return error; }
     error = VFSVolumeSize(volume, &used, &total);
     logResult("volume-size", error, total);
     error = VFSFileOpen(volume, "/HOST.TXT", vfsModeRead, &file);
@@ -68,22 +71,42 @@ static void probe(void) {
         logResult("guest-read-close", VFSFileClose(file), 0);
     }
     logResult("complete", 0, started);
+    return errNone;  // File errors are logged and must never trigger another attempt.
 }
 UInt32 PilotMain(UInt16 command, MemPtr parameters, UInt16 flags) {
     EventType event;
     Err menuError;
+    Boolean mountPending;
+    UInt32 nextMount, mountDeadline;
     if (command != sysAppLaunchCmdNormalLaunch) return 0;
-    probe();
+    mountPending = probe() == expErrEnumerationEmpty;
+    nextMount = TimGetTicks() + SysTicksPerSecond();
+    mountDeadline = TimGetTicks() + MOUNT_WAIT_SECONDS * SysTicksPerSecond();
     FrmGotoForm(1000);
     do {
         // This test probe cooperates with the host API bridge by revisiting its
-        // event-loop boundary while idle. Card operations are never retried here.
+        // event-loop boundary while idle.
         EvtGetEvent(&event, SysTicksPerSecond() / 10);
         if (!SysHandleEvent(&event) && !MenuHandleEvent(0, &event, &menuError)) {
             if (event.eType == frmLoadEvent) {
                 FrmSetActiveForm(FrmInitForm(event.data.frmLoad.formID));
             } else if (event.eType == frmOpenEvent) FrmDrawForm(FrmGetActiveForm());
             else FrmHandleEvent(FrmGetActiveForm(), &event);
+        }
+        // Expansion Manager mount notifications are asynchronous after reset.
+        // Keep processing UI events, and preserve every enumeration-empty run.
+        // Each new attempt has its own begin/complete pair. Never retry I/O.
+        if (event.eType != appStopEvent && mountPending) {
+            UInt32 now = TimGetTicks();
+            if ((Int32)(now - mountDeadline) >= 0) {
+                logResult("begin", errNone, now);
+                logResult("mount-timeout", expErrEnumerationEmpty, mountDeadline);
+                logResult("complete", expErrEnumerationEmpty, now);
+                mountPending = false;
+            } else if ((Int32)(now - nextMount) >= 0) {
+                mountPending = probe() == expErrEnumerationEmpty;
+                nextMount = TimGetTicks() + SysTicksPerSecond();
+            }
         }
     } while (event.eType != appStopEvent);
     FrmCloseAllForms();

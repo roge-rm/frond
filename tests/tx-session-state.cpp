@@ -6,6 +6,7 @@
 #include "CPU.h"
 #include "audio_queue.h"
 #include "soc_PXA.h"
+#include "sdcard.h"
 
 static ArmCpu* cpu;
 static void write32(uint32_t addr, uint32_t value) {
@@ -182,6 +183,28 @@ int main() {
     SavestateLoader<ChunkType> loader;
     assert(loader.Load(e2State.data, e2State.size, versions));
     assert(e2.Load(e2State.size, e2State.data));
+    // Cold reset preserves the physical card, including its active-low detect
+    // input. It must not require an artificial eject/insert edge after boot.
+    cpu = soc.GetCpu();
+    sdCardInitialize(65536, "reset-card");
+    uint8_t sector[512] = {};
+    sector[0] = 0x5a;
+    assert(sdCardWrite(65535, sector));
+    soc.SdInsert();
+    assert(soc.SdInserted() && !(read32(0x40e00000) & (1u << 14)));
+    soc.Reset();
+    assert(soc.SdInserted() && !(read32(0x40e00000) & (1u << 14)));
+    assert(!(read32(0x40e0000c) & (1u << 14))); // detect remains an input
+    assert(sdCardRead(65535, sector) && sector[0] == 0x5a);
+    soc.SdEject();
+    soc.Reset();
+    assert(!soc.SdInserted() && (read32(0x40e00000) & (1u << 14)));
+    assert(sdCardRead(65535, sector) && sector[0] == 0x5a);
+    soc.SdInsert();
+    assert(soc.SdInserted() && !(read32(0x40e00000) & (1u << 14)));
+    soc.SdEject();
+    sdCardReset();
+    puts("PASS: TX cold reset preserves inserted/ejected card detect and stored sectors");
     puts("PASS: E2 timer and version-zero LCD/power sessions");
     puts("PASS: TX peripheral/WMMX reload, truncated-state rollback and reset without RAM erasure");
 }

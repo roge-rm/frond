@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 import time
 
-from sd_results import ControlError, check_records, export_if_ready, read_log
+from sd_results import ControlError, ProbeTimeout, wait_for_probe as probe_results
 
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--core', type=Path, default=Path('out/frond'))
@@ -41,8 +41,15 @@ def emulator(session, label):
             connection, _ = listener.accept(); connection.settimeout(120); stream = connection.makefile('rb')
             assert stream.readline() == b'0\tevent\tready\t\n'
             serial = 0
-            def request(command, argument='', ok=True):
+            def request(command, argument='', ok=True, *, deadline=None):
                 nonlocal serial
+                if deadline is not None:
+                    left = deadline - time.monotonic()
+                    if left <= 0:
+                        raise ProbeTimeout('Probe readiness deadline expired')
+                    connection.settimeout(min(120, left))
+                else:
+                    connection.settimeout(120)
                 serial += 1
                 connection.sendall(f'{serial}\t{command}\t{str(argument).encode().hex()}\n'.encode())
                 fields = stream.readline().rstrip(b'\n').split(b'\t')
@@ -58,13 +65,12 @@ def emulator(session, label):
             except Exception as failure:
                 # Keep the failing guest for diagnosis, without changing the test result.
                 try:
-                    if process.poll() is None and not isinstance(failure, (TimeoutError, OSError)):
-                        connection.settimeout(20)
-                        request('save', root / (label + '-failed.frond'))
+                    if process.poll() is None and (not isinstance(failure, (TimeoutError, OSError)) or isinstance(failure, ProbeTimeout)):
+                        request('save', root / (label + '-failed.frond'), deadline=time.monotonic() + 20)
                         replay = root / (label + '-failed.replay')
                         snapshot = str(root / (label + '-failed.png')).replace('\\', '\\\\').replace('"', '\\"')
                         replay.write_text(f'100 snapshot "{snapshot}"\n')
-                        request('input-replay', replay)
+                        request('input-replay', replay, deadline=time.monotonic() + 20)
                         time.sleep(.3)
                 except Exception as error:
                     print('Failure capture:', error, flush=True)
@@ -94,21 +100,6 @@ def check_image(path, size):
     output = root / (path.stem + '-GUEST.TXT')
     subprocess.run([str(a.exchange_driver.resolve()), 'get', str(path), '/GUEST.TXT', str(output)], check=True)
     assert output.read_bytes() == b'Written by Palm TX\n'
-
-def probe_results(request, path, *, previous=(), size=32, prior=False, host=True):
-    # Readiness is a point-in-time result. Export prepares again atomically with
-    # checkpoint creation; only its explicit not-ready result can be retried.
-    deadline = time.monotonic() + 60
-    while time.monotonic() < deadline:
-        ready, _ = request('guest-ready', ok=None)
-        if ready and export_if_ready(request, path):
-            lines = read_log(path)
-            starts = [i for i, line in enumerate(lines) if line.startswith('begin ')]
-            if starts and starts[-1] >= len(previous) and lines[-1].startswith('complete '):
-                print('\n'.join(lines[starts[-1]:]), flush=True)
-                return check_records(lines, size, previous=previous, prior=prior, host=host)
-        time.sleep(1)
-    raise AssertionError('No fresh, completed SD probe within 60 seconds; inspect the failure capture and rebuild the current probe if necessary')
 
 with emulator(source, 'initial') as request:
     assert request('sd-state') == 'none'
@@ -144,7 +135,7 @@ with emulator(root / 'ejected.frond', 'ejected') as request:
             time.sleep(5)
         assert ready, 'Palm OS did not become ready after reset'
         time.sleep(3)
-        reset = probe_results(request, root / 'reset.zip', previous=reinserted, prior=True)
+        reset = probe_results(request, root / 'reset.zip', previous=reinserted, prior=True, reset_mount=True)
     request('sd-eject'); time.sleep(3)
     request('sd-create', '128'); time.sleep(3)
     request('launch-app', 'Frond SD probe'); time.sleep(3)

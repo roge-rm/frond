@@ -120,14 +120,48 @@ This fixture workaround does not establish support for indefinitely idle
 third-party apps; see the [open bridge issue](tx-native.md#open-developer-workflow-issue-indefinitely-idle-applications).
 
 Guest readiness is bounded and lets startup/mount work progress before a full
-RAM export. Only explicit `not-ready` responses are retried; export errors and
-completed probe errors still fail immediately. Export preflight advances the
-live guest before checkpointing, and that progress remains even if preparation
+RAM export. An API-ready response can precede the Expansion Manager's mounted
+volume after reset. After boot/API readiness, the reset probe phase allows at most
+60 seconds for mount readiness.
+Only a fresh three-record invocation containing successful `begin`, enumeration
+error `290D` (`expErrEnumerationEmpty`), and matching `complete` with that same
+error is recorded as mount-pending. The owned probe continues processing normal
+UI events and makes a new logged attempt once per guest second, for at most 30
+guest seconds. It stops retrying after successful enumeration or any other error;
+file I/O is never retried. Expiry produces a fatal `mount-timeout` record whose
+value is the absolute guest-tick deadline. The host requires appended
+begin/completion markers and every normal capacity, prior-content and I/O check
+before passing. A launch acknowledgement or an old log cannot establish recovery.
+Palm can stop the probe while opening the card launcher as the volume mounts.
+After a recorded empty result, the host may relaunch this owned probe within the
+same wall deadline; it never sends input or switches to a third-party app to
+force readiness. Each normal probe launch has the same bounded guest wait.
+
+Every reset observation is retained as `reset-observation-NNN.zip`, with its
+records, elapsed time and outcome in `reset-mount-readiness.json`. Empty-volume
+observations are printed rather than discarded. Missing, stale or partial results
+cannot pass the deadline; changed prior history, other enumeration errors,
+capacity mismatches and file I/O errors remain fatal. Outside this reset mount
+phase, any completed empty-enumeration attempt remains fatal, even if a later
+attempt succeeds. Explicit `not-ready` responses are
+retried within the same deadline; actual export errors fail immediately.
+
+Export preflight advances the live guest before checkpointing, and that progress
+remains even if preparation
 or export fails. Injected export work rolls back to the prepared checkpoint.
 On failure, the test attempts to save `<stage>-failed.frond` and a screen capture
 beside the log, preserving the original failure. Model, format and result-checker
 regressions run through `make test-sd` and `make test` without firmware or SDK
 dependencies.
+
+`make test-tx-state` also checks that cold reset preserves the inserted or ejected
+card, the TX's active-low GPIO14 detect input and stored sectors. Firmware-backed
+reset tests require an eventual fresh successful VFS invocation with the card
+left inserted; they do not simulate an extra eject/reinsert edge to make it mount.
+These checks establish eventual mount and enforce readiness deadlines. They do
+not validate the fidelity of Palm hardware mount latency. The bounded retry is
+part of the owned test fixture; it does not add retries to third-party Palm apps
+or change emulator card-detect timing.
 
 The controller changes follow Intel's
 [PXA27x Developer's Manual](https://support.eurotech-inc.com/developers/datasheets/PXA270_DeveloperManual.pdf),
