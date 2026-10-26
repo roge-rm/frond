@@ -15,7 +15,7 @@ out/frond: build/source/.prepared
 	cp build/source/src/uarm/cp-uarm out/frond.new
 	mv -f out/frond.new out/frond
 
-test: prepare test-compatibility test-developer-run test-xscale-prefetch test-device-controls test-scheduler test-wifi test-host-network test-keyboard test-network test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup
+test: prepare test-compatibility test-developer-run test-xscale-prefetch test-device-controls test-scheduler test-wifi test-host-network test-network-reliability test-keyboard test-network test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup
 	python3 tests/audio-metrics.py
 	python3 tests/audio-timing.py
 	python3 tests/tx-baseline.py
@@ -190,7 +190,7 @@ test-sd: out/frond
 	./build/test-pxa-dma
 
 .PHONY: test-network
-test-network: out/frond
+test-network: prepare build/source/src/common/libcommon.a
 	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
 		tests/network-simulation.cpp build/source/src/uarm/uarm/NetworkSimulation.cpp build/source/src/uarm/uarm/HostNetwork.cpp \
 		build/source/src/common/libcommon.a -lz -pthread -o build/test-network-simulation
@@ -219,7 +219,7 @@ test-host-network: prepare
 	./build/test-host-network
 
 .PHONY: test-wifi
-test-wifi: prepare
+test-wifi: prepare build/source/src/common/libcommon.a
 	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm \
 		tests/wifi-router.cpp build/source/src/uarm/uarm/WifiRouter.cpp \
 		$(shell pkg-config --cflags --libs slirp) -pthread -o build/test-wifi-router
@@ -275,3 +275,18 @@ test-tx-power-rom: out/frond
 	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
 		tests/tx-power-rom.cpp @build/power-rom-core.rsp build/source/src/common/libcommon.a \
 		$(CPU_TEST_LDLIBS) -o build/test-tx-power-rom
+
+# Standalone networking checks need no emulator binary or private Palm image.
+build/source/src/common/libcommon.a: build/source/.prepared
+	$(MAKE) -C build/source/src/common bin
+
+.PHONY: test-network-reliability
+test-network-reliability: prepare
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm \
+		tests/network-reliability.cpp build/source/src/uarm/uarm/HostNetwork.cpp \
+		-pthread -o build/test-network-reliability
+	./build/test-network-reliability
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm \
+		tests/network-dns.cpp build/source/src/uarm/uarm/HostNetwork.cpp \
+		-Wl,--wrap=getaddrinfo -Wl,--wrap=freeaddrinfo -pthread -o build/test-network-dns
+	./build/test-network-dns

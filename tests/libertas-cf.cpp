@@ -109,6 +109,43 @@ static std::vector<uint8_t> response() {
     assert(!(read(0x20) & 8));
     return out;
 }
+static std::vector<uint8_t> arpTx() {
+    // CF transmit descriptor followed by an Ethernet ARP request for 10.0.2.2.
+    std::vector<uint8_t> b(66);
+    b[8] = 24;
+    b[12] = 42;
+    const uint8_t mac[] = {2, 0x46, 0x72, 0x6f, 0x6e, 0x64};
+    std::fill(b.begin() + 24, b.begin() + 30, 0xff);
+    std::copy(mac, mac + 6, b.begin() + 30);
+    const uint8_t header[] = {8, 6, 0, 1, 8, 0, 6, 4, 0, 1};
+    std::copy(header, header + 10, b.begin() + 36);
+    std::copy(mac, mac + 6, b.begin() + 46);
+    b[52] = b[62] = 10;
+    b[54] = b[64] = 2;
+    b[55] = 15;
+    b[65] = 2;
+    return b;
+}
+static void transmit(const std::vector<uint8_t>& b) {
+    write(0x14, b.size());
+    for (auto byte : b) write(0x16, byte, 1);
+    write(2, 1);
+}
+static std::vector<uint8_t> packet() {
+    assert(read(0x20) & 2);
+    auto length = read(0x24);
+    assert(length >= 70 && length <= 1560);
+    std::vector<uint8_t> b;
+    for (unsigned i = 0; i < length; ++i) b.push_back(read(0x10, 1));
+    // RX is acknowledged separately from reading its data and its interrupt.
+    assert(read(0x20) & 2);
+    write(2, 2);
+    assert(b[32] == 0 && b[33] == length - 34);
+    const uint8_t llc[] = {0xaa, 0xaa, 3, 0, 0, 0, 8, 6};
+    assert(std::equal(llc, llc + 8, b.begin() + 34));
+    assert(b[48] == 0 && b[49] == 2);  // ARP reply opcode
+    return b;
+}
 int main() {
     NetworkSimulation mode;
     uint64_t now = 0;
@@ -149,6 +186,61 @@ int main() {
         assert(loader.Load(state.GetBuffer(), state.GetSize(), radio));
         assert(response() == hw);
     }
+    command(0x12);
+    response();
+    auto tx = arpTx();
+    for (unsigned round = 0; round < 16; ++round) {
+        // A partially submitted Ethernet packet is device state, and survives
+        // normal resume even though the old host router is discarded.
+        write(0x14, tx.size());
+        for (unsigned i = 0; i < 33; ++i) write(0x16, tx[i], 1);
+        assert(state.Save(radio));
+        assert(loader.Load(state.GetBuffer(), state.GetSize(), radio));
+        for (size_t i = 33; i < tx.size(); ++i) write(0x16, tx[i], 1);
+        write(2, 1);
+        radio.Poll();
+        auto first = packet();
+        transmit(tx);
+        transmit(tx);
+        radio.Poll();
+        assert(read(0x22) & 2);
+        write(0x22, 2);
+        assert(read(0x20) & 2);  // IRQ acknowledgement does not discard RX.
+        for (unsigned i = 0; i < 7; ++i) assert(read(0x10, 1) == first[i]);
+        assert(state.Save(radio));
+        assert(loader.Load(state.GetBuffer(), state.GetSize(), radio));
+        for (size_t i = 7; i < first.size(); ++i) assert(read(0x10, 1) == first[i]);
+        write(2, 2);
+        assert(packet() == first);  // Second queued packet retains its boundary.
+        assert(!(read(0x20) & 2));
+        {
+            NetworkSimulation::Checkpoint freeze(mode);
+            transmit(tx);
+            radio.Poll();
+            assert(!(read(0x20) & 2));  // No new external I/O during export.
+        }
+        transmit(tx);
+        radio.Poll();
+        assert(packet() == first);
+        transmit(tx);
+        radio.Poll();
+        command(0x24);
+        response();
+        assert(!(read(0x20) & 2));  // Disassociation clears pending packets.
+        transmit(tx);
+        radio.Poll();
+        assert(!(read(0x20) & 2));
+        command(0x12);
+        response();
+        transmit(tx);
+        radio.Poll();
+        assert(packet() == first);
+    }
+    auto malformed = tx;
+    malformed[8] = 23;  // Descriptor cannot point into itself.
+    transmit(malformed);
+    radio.Poll();
+    assert(!(read(0x20) & 2));
     command(6, 16);
     write(0x22, 8);
     pin(106, true);
@@ -162,5 +254,5 @@ int main() {
     assert(scheduled);
     puts(
         "PASS: Marvell CF firmware handshake, IRQ/data acknowledgement, hardware identity, Frond "
-        "scan, in-flight restore and reset/disable");
+        "scan, in-flight restore, 16 CF packet/partial FIFO restore and reassociation cycles, checkpoint freeze, malformed TX and reset/disable");
 }

@@ -1,0 +1,36 @@
+--- a/src/uarm/uarm/HostNetwork.cpp
++++ b/src/uarm/uarm/HostNetwork.cpp
+@@ -290,7 +290,11 @@
+     if (n >= 0) {
+         if (from.sin_family != AF_INET) {
+             length = sizeof(from);
+-            getpeername(s->fd, reinterpret_cast<sockaddr*>(&from), &length);
++            if (getpeername(s->fd, reinterpret_cast<sockaddr*>(&from), &length) < 0 &&
++                s->connected)
++                // Linux may forget the peer after both FINs while unread TCP
++                // bytes remain. Preserve the endpoint for those bytes and EOF.
++                from = endpoint(s->connectAddress, s->connectPort);
+         }
+         address = ntohl(from.sin_addr.s_addr);
+         port = ntohs(from.sin_port);
+--- a/src/uarm/uarm/LibertasCF.cpp
++++ b/src/uarm/uarm/LibertasCF.cpp
+@@ -222,12 +222,16 @@
+             fprintf(stderr, "%02x%s", tx[i], i % 16 == 15 ? "\n" : " ");
+         fprintf(stderr, "\n");
+     }
+-    if (!network->Frozen() && associated && router && tx.size() >= 24) {
++    if (!network->Frozen() && associated && tx.size() >= 24) {
+         const uint32_t offset = le16(tx, 8) | (uint32_t(le16(tx, 10)) << 16);
+         const uint16_t length = le16(tx, 12);
+         if (offset >= 24 && length >= 14 && length <= 1518 && offset <= tx.size() &&
+-            length <= tx.size() - offset)
++            length <= tx.size() - offset) {
++            // Normal restore discards host sockets but retains association and
++            // the transmit FIFO. A guest can finish that FIFO before Poll runs.
++            if (!router) router = std::make_unique<WifiRouter>();
+             router->Input(tx.data() + offset, length, clock.getTimeF(clock.userdata));
++        }
+     }
+     tx.clear();
+     cause |= 1;

@@ -165,8 +165,13 @@ default; use the other profiles when running deterministic network fixtures.
 
 `make test-wifi` checks the firmware download handshake, IRQ acknowledgement
 independent of response data, hardware identity, scan results, in-flight restore,
-reset/disable, and router DHCP/ARP/UDP behavior without Palm firmware. The
-register protocol follows the Linux Libertas
+reset/disable, partial Ethernet TX/RX FIFO restore, packet boundaries and repeated
+disassociation/reassociation without Palm firmware. Router tests check DHCP/ARP,
+96 binary UDP/DNS wire exchanges, three TCP connections with 128 exact binary
+roundtrips each, IPv4/TCP checksums, FIN/EOF, refused connections and a fresh
+router after restore. The controlled DNS server uses the host alias on an
+ephemeral loopback port; it does not test the host-configured `10.0.2.3` DNS
+proxy. The register protocol follows the Linux Libertas
 [CompactFlash driver](https://github.com/torvalds/linux/blob/v2.6.35/drivers/net/wireless/libertas/if_cs.c)
 and [command structures](https://github.com/torvalds/linux/blob/v2.6.35/drivers/net/wireless/libertas/host.h).
 The board wiring is documented by Linux's
@@ -178,7 +183,7 @@ The optional SDK test uses a session with a saved **Frond** Wi-Fi profile:
 ```sh
 python3 tools/build-palm-probe.py --probe host-network --sdk /path/to/sdk-5r3
 python3 tests/desktop-host-network.py --wireless --session /path/to/wifi.frond \
-  --output /path/to/new/private/results --audio --public
+  --output /path/to/new/private/results --audio
 ```
 
 For a sustained tone, add `--audio --tone-seconds 180 --require-gapless`.
@@ -240,8 +245,39 @@ supported; use **Virtual Wi-Fi** for its normal radio connection. A successful
 HTTP probe does not establish compatibility with every Palm app. Frond does not upgrade an application's old TLS implementation or
 provide HTTPS-to-HTTP conversion.
 
-`make test-host-network` exercises the native backend without firmware. The
-optional Palm probe checks DNS, HTTP, UDP, select, peek, nonblocking reads and
+Run all firmware-free networking checks independently of the emulator binary:
+
+```sh
+heavy build make -j1 test-wifi test-host-network test-network test-network-reliability
+```
+
+`heavy` is the shared-machine slot wrapper when available; otherwise run `make`
+directly. These targets build the small common library and test executables,
+without Palm firmware, an SDK or external services. `make test` includes them.
+
+`make test-host-network` covers basic backend calls. `make test-network-reliability`
+checks three 512 KiB TCP uploads and byte-exact replies with send backpressure,
+partial I/O, half-close/EOF and refused-connect recovery on reused socket slots.
+It also checks 96 UDP datagrams (including empty and 8 KiB datagrams), truncated
+peek without consumption, source addresses, select/receive timeouts and recovery.
+A separate executable wraps libc's resolver at link time: the real asynchronous
+worker performs 64 fresh lookups and controlled negative/transient responses,
+polling, timeout/reset cancellation and bounded-queue recovery. It never calls
+an external resolver. TCP receive retains the connected peer address when Linux
+has forgotten it after both FINs but still has unread bytes.
+
+`make test-network` checks the packed Palm ABI, sixteen synthetic queue
+saturation/partial-read snapshot cycles, same-mode preservation, library open
+ownership and repeated failure-profile recovery. Nested export checkpoints
+preserve a live UDP socket and a datagram arriving during the freeze; normal
+restore retains a closed Palm handle. The virtual radio also accepts a restored
+partial transmit FIFO before its first poll, recreating the router on demand.
+
+These are controlled localhost/model regressions. They establish neither general
+Internet/app compatibility, the system DNS proxy's behavior, long idle connection
+reliability, nor sustained firmware-backed traffic or audio performance.
+
+The optional Palm probe checks DNS, HTTP, UDP, select, peek, nonblocking reads and
 timeouts, with a native ARM tone running during a delayed HTTP response. It also
 checks that a live connection survives database export, closes on session resume
 and can be reopened:
@@ -250,7 +286,7 @@ and can be reopened:
 python3 tools/build-palm-probe.py --probe host-network --sdk /path/to/sdk-5r3 \
   --output build/host-network-probe
 python3 tests/desktop-host-network.py --session /path/to/tx.session \
-  --output /path/to/new/private/results --audio --public
+  --output /path/to/new/private/results --audio
 ```
 
 The optional audio check requires PulseAudio tools and captures only the test
