@@ -56,6 +56,10 @@ with tempfile.TemporaryDirectory(prefix='desktop-control-', dir='build') as dire
                     assert fields[1] == (b'ok' if ok else b'error'), fields
                     return fields[2], bytes.fromhex(fields[3].decode()).decode()
                 request('not-a-command', ok=False)
+                assert request('guest-ready')[0] == b'guest-ready'
+                request('guest-ready', 'unexpected', ok=False)
+                assert request('replay-state')[0] == b'finished'
+                request('replay-state', 'unexpected', ok=False)
                 request('save', 'relative.frond', ok=False)
                 request('save', root / 'missing' / 'state.frond', ok=False)
                 # Export retains the guest checkpoint, and reports failure without a partial file.
@@ -76,6 +80,16 @@ with tempfile.TemporaryDirectory(prefix='desktop-control-', dir='build') as dire
                 assert hashlib.sha256(saved.read_bytes()).digest() == saved_hash
                 request('rotate')
                 request('audio-off'); request('audio-on')
+                replay = root / 'capture.replay'
+                screenshot = root / 'replay screenshot.png'
+                replay.write_text('1000 snapshot "' + str(screenshot) + '"\n')
+                request('input-replay', replay)
+                assert request('replay-state')[0] == b'running'
+                deadline = time.monotonic() + 10
+                while request('replay-state')[0] != b'finished':
+                    assert time.monotonic() < deadline, 'replay did not finish'
+                    time.sleep(.1)
+                assert screenshot.read_bytes().startswith(b'\x89PNG\r\n\x1a\n')
                 request('quit'); assert process.wait(timeout=15) == 0
                 stream.close(); connection.close(); connection = None
                 # Restore the saved image, dispatch reset, and shut down cleanly again.

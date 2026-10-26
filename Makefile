@@ -15,7 +15,7 @@ out/frond: build/source/.prepared
 	cp build/source/src/uarm/cp-uarm out/frond.new
 	mv -f out/frond.new out/frond
 
-test: prepare test-device-controls test-scheduler test-wifi test-host-network test-keyboard test-network test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup
+test: prepare test-developer-run test-device-controls test-scheduler test-wifi test-host-network test-keyboard test-network test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup
 	python3 tests/audio-metrics.py
 	python3 tests/tx-baseline.py
 	python3 tests/input-latency.py
@@ -232,3 +232,7 @@ test-device-controls: out/frond
 		build/source/src/uarm/native/DeviceControls.cpp @build/controls-core-objects.rsp \
 		build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) $(shell sdl2-config --libs) -o build/test-device-controls
 	./build/test-device-controls
+
+.PHONY: test-developer-run
+test-developer-run:
+	python3 tests/developer-run.py

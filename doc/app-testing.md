@@ -1,5 +1,9 @@
 # Testing Palm applications
 
+For an automated install, launch, replay, screenshot and named log export, use
+the [developer runner](developer-run.md). It works in a private copy of a
+user-supplied TX session and returns JSON status with time limits.
+
 Use your own firmware and application files. Start the Palm and wait for its
 application event loop before installing. From the desktop, use **File → Install
 Application** and **Launch Application**. From the native console:

@@ -1,0 +1,34 @@
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -59,7 +59,7 @@
+                 return true;
+             std::string argument;
+             if (!decode(line.substr(second + 1), argument)) return true;
+-            const bool work = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "reset" || command == "launch-app" || command == "input-replay" || (command.rfind("sd-", 0) == 0 && command != "sd-state");
++            const bool work = command == "guest-ready" || command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "reset" || command == "launch-app" || command == "input-replay" || (command.rfind("sd-", 0) == 0 && command != "sd-state");
+             if (work) ctx.audioDriver.Pause();
+             Reply result;
+             try {
+@@ -127,6 +127,13 @@
+         const bool fileCommand = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "input-replay";
+         if (fileCommand && (path.empty() || path.front() != '/')) return {false, "argument", "An absolute file path is required."};
+         if (!fileCommand && command != "sd-create" && command != "launch-app" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && !path.empty()) return {false, "argument", "This command takes no argument."};
++        if (command == "guest-ready") {
++            if (!syscallDispatchPrepare(ctx.soc->GetSyscallDispatch()))
++                return {false, "not-ready", "Palm OS has not reached its application event loop."};
++            return {true, "guest-ready", "Palm OS can accept application commands."};
++        }
++        if (command == "replay-state")
++            return {true, ctx.replay.Finished() ? "finished" : "running", std::to_string(ctx.replay.LastEventMs())};
+         if (command == "input-replay") {
+             InputReplay replacement; std::string error;
+             if (!replacement.Load(path, ctx.screenWidth, ctx.screenHeight, error)) return {false, "replay", error};
+@@ -135,6 +142,8 @@
+         }
+         if (command == "launch-app") {
+             if (path.empty() || path.size() > 31) return {false, "argument", "Enter a Palm application database name (up to 31 bytes)."};
++            if (!syscallDispatchPrepare(ctx.soc->GetSyscallDispatch()))
++                return {false, "not-ready", "Wait for Palm OS to reach its application event loop."};
+             if (!launchAppByName(ctx.soc->GetSyscallDispatch(), path.c_str()))
+                 return {false, "launch", "Could not launch that application. Check its database name and wait for Palm OS to finish starting."};
+             return {true, "launched", "Application launched."};

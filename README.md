@@ -125,6 +125,10 @@ the optional tracing tools.
 For a repeatable run using your TX firmware, see the
 [boot and acceptance guide](doc/boot-check.md).
 
+The [developer runner](doc/developer-run.md) installs several PRC/PDB files into a
+private session copy, launches an app, runs replay, captures screenshots and
+exports named databases with JSON status and time limits.
+
 The upstream core is pinned in `vendor/cloudpilot`. Frond's core changes are
 ordered patches in `patches/`; the build applies them to `build/source`.
 If you edit that generated tree, export your changes back to a patch before
