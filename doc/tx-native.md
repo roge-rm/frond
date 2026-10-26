@@ -63,11 +63,39 @@ reload. E2-specific pen, NVFS and UI ROM hooks remain disabled for TX.
 
 The bridge enables application installation, launch and RAM database export.
 These operations need a suitable guest API boundary, so startup may still need
-time after a signature match. Database export snapshots and restores the guest
-around API injection, including memory, flash, card, peripheral and simulated
-network state. A failed export must not leave a partial archive or mutate the
-running guest. The checkpoint requires extra memory roughly equal to the guest
-RAM, flash and optional SD image.
+time after a signature match. Export first advances the live guest toward an
+`EvtGetEvent` boundary. This preflight work can advance guest time and change
+memory, flash, devices or network state; that progress remains on both success
+and failure. If preflight cannot reach the boundary within its budget, the
+desktop socket reports `not-ready`, without starting a checkpoint or an archive.
+
+After successful preflight, export immediately checkpoints the prepared guest.
+Injected database export work then restores memory, flash, card, peripheral,
+network and timing state to that checkpoint, including on failure. No partial
+archive is published. The whole request is therefore not read-only: only work
+after the checkpoint is rolled back. The checkpoint requires extra memory
+roughly equal to guest RAM, flash and the optional SD image.
+
+`guest-ready` is a point-in-time observation. Normal execution between socket
+requests can consume that PACE boundary, so export repeats preflight atomically
+with checkpoint creation. `make test-export-checkpoint` covers failed preflight,
+repeated not-ready progress, successful preflight followed by an injected export
+timeout, and rollback after successful export work.
+
+### Open developer-workflow issue: indefinitely idle applications
+
+An app blocked inside native `EvtGetEvent(evtWaitForever)` may remain `not-ready`
+until ordinary user input lets it return to PACE. Recognizing its last 68k trap
+is not sufficient to establish a safe injection boundary: the CPU can be inside
+a native wait or executing another Palm task. Injected 68k calls currently depend
+on the PACE callout frame and state pointer at the stopped boundary. The bridge
+has no verified way to reconstruct that context inside a blocked native call.
+It does not reuse a consumed boundary, inject input, or change third-party apps.
+
+The SD validation probe uses a bounded idle event wait to offer periodic PACE
+boundaries. That is a cooperative test fixture, not general support for exporting
+from indefinitely idle apps. Its card operations and fresh-result checks remain
+strict; readiness deadlines can still fail for third-party applications.
 
 ## Native performance
 

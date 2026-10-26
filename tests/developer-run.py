@@ -85,7 +85,9 @@ def fake_core():
                             Path(shlex.split(parts[2])[0]).write_bytes(b'fake PNG')
             elif command == 'export-db':
                 destination, name = argument.split('\n')
-                if config.get('export_error'):
+                if counts[command] <= config.get('export_retries', 0):
+                    ok, code, message = False, 'not-ready', 'Palm OS is busy.'
+                elif config.get('export_error'):
                     ok, code, message = False, 'export', 'Database not found'
                 else:
                     with zipfile.ZipFile(destination, 'w') as archive:
@@ -211,6 +213,19 @@ class DeveloperRunTest(unittest.TestCase):
     def test_export_failure(self):
         result = self.run_case({'export_error': True}, ['--export-db', 'Missing log'])
         self.assertEqual(result['error']['code'], 'export')
+        self.assertFalse(result['artifacts']['session_saved'])
+        self.assertEqual(sum(s['command'] == 'export-db' for s in result['steps']), 1)
+
+    def test_export_not_ready_is_bounded_and_retried(self):
+        result = self.run_case({'export_retries': 2}, ['--export-db', 'Test log'])
+        self.assertEqual(result['status'], 'ok', result)
+        exports = [s for s in result['steps'] if s['command'] == 'export-db']
+        self.assertEqual(len(exports), 3)
+
+    def test_export_not_ready_timeout(self):
+        result = self.run_case({'export_retries': 999}, ['--export-db', 'Test log', '--ready-timeout', '.3'])
+        self.assertEqual(result['error']['code'], 'timeout')
+        self.assertEqual(result['stage'], 'export')
         self.assertFalse(result['artifacts']['session_saved'])
 
     def test_unusual_output_path_is_quoted_for_native_replay(self):

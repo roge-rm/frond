@@ -1,0 +1,71 @@
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -14,7 +14,7 @@
+ #include "SdImage.h"
+ #include "app_launcher.h"
+ #include "md5.h"
+-#include "ReadOnlyGuest.h"
++#include "GuestExport.h"
+ #include "FileUtil.h"
+ #include "db_backup.h"
+ #include "db_installer.h"
+@@ -247,7 +247,8 @@
+                     return {false,"argument","Choose an absolute ZIP path and one Palm database name."};
+                 destination=path.substr(0,split);database=path.substr(split+1);
+             }
+-            ReadOnlyGuest checkpoint(*ctx.soc);
++            GuestExport guest(*ctx.soc);
++            if (!guest.Ready()) return {false, "not-ready", "Wait for Palm OS to reach its application event loop."};
+             DbBackup backup(ctx.soc->GetSyscallDispatch(), DbBackup::BACKUP_TYPE_RAM, database);
+             if (!backup.Init()) return {false, "export", "Could not start database export."};
+             while (backup.GetState() == DbBackup::STATE_IN_PROGRESS) backup.Continue();
+--- a/src/uarm/native/Commands.cpp
++++ b/src/uarm/native/Commands.cpp
+@@ -1,7 +1,7 @@
+ #pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+ 
+ #include "Commands.h"
+-#include "ReadOnlyGuest.h"
++#include "GuestExport.h"
+ 
+ #include <cstdint>
+ #include <iostream>
+@@ -356,7 +356,11 @@
+         SyscallDispatch* sd = ctx->soc->GetSyscallDispatch();
+ 
+         try {
+-            ReadOnlyGuest checkpoint(*ctx->soc);
++            GuestExport guest(*ctx->soc);
++            if (!guest.Ready()) {
++                cout << "Palm OS is not ready for database export; try again" << endl;
++                return;
++            }
+             DbBackup backup(sd, type);
+ 
+             if (!backup.Init()) {
+--- /dev/null
++++ b/src/uarm/native/GuestExport.h
+@@ -0,0 +1,23 @@
++#ifndef FROND_GUEST_EXPORT_H
++#define FROND_GUEST_EXPORT_H
++
++#include <memory>
++
++#include "ReadOnlyGuest.h"
++#include "syscall_dispatch.h"
++
++// Preparation runs on the live guest and may advance time and change guest state,
++// even when it cannot reach the event loop. Only the export work that follows a
++// successful preparation is checkpointed and rolled back.
++class GuestExport {
++ public:
++    explicit GuestExport(SoC& soc) {
++        if (syscallDispatchPrepare(soc.GetSyscallDispatch()))
++            checkpoint = std::make_unique<ReadOnlyGuest>(soc);
++    }
++    bool Ready() const { return bool(checkpoint); }
++
++ private:
++    std::unique_ptr<ReadOnlyGuest> checkpoint;
++};
++#endif

@@ -76,7 +76,9 @@ UInt32 PilotMain(UInt16 command, MemPtr parameters, UInt16 flags) {
     probe();
     FrmGotoForm(1000);
     do {
-        EvtGetEvent(&event, evtWaitForever);
+        // This test probe cooperates with the host API bridge by revisiting its
+        // event-loop boundary while idle. Card operations are never retried here.
+        EvtGetEvent(&event, SysTicksPerSecond() / 10);
         if (!SysHandleEvent(&event) && !MenuHandleEvent(0, &event, &menuError)) {
             if (event.eType == frmLoadEvent) {
                 FrmSetActiveForm(FrmInitForm(event.data.frmLoad.formID));

@@ -55,9 +55,15 @@ begin/completion markers, mounted capacity and explicit I/O results. Each stage
 must append a fresh complete invocation; a successful launch or an unchanged
 older log cannot establish a pass. The 128 MiB replacement must also report
 that the old card's host and guest files are absent before creating its own file.
+The probe uses a bounded idle event wait to provide periodic host API boundaries.
+This fixture workaround does not establish support for indefinitely idle
+third-party apps; see the [open bridge issue](tx-native.md#open-developer-workflow-issue-indefinitely-idle-applications).
 
 Guest readiness is bounded and lets startup/mount work progress before a full
-RAM export. Export errors and completed probe errors still fail immediately.
+RAM export. Only explicit `not-ready` responses are retried; export errors and
+completed probe errors still fail immediately. Export preflight advances the
+live guest before checkpointing, and that progress remains even if preparation
+or export fails. Injected export work rolls back to the prepared checkpoint.
 On failure, the test attempts to save `<stage>-failed.frond` and a screen capture
 beside the log, preserving the original failure. Model, format and result-checker
 regressions run through `make test-sd` and `make test` without firmware or SDK
@@ -323,9 +329,9 @@ NetLib reference must be restarted to use the fixture.
 Mode, open count, sockets and pending bytes are saved with the running session.
 Reset closes the connections while keeping the selected mode. Changing mode
 closes existing simulated connections; selecting the current mode preserves them.
-Older sessions start disabled. RAM database exports restore the network state
-along with the rest of the guest. Saved simulated connections have no external
-resources to reconnect.
+Older sessions start disabled. Injected RAM database export work restores network
+state to the prepared checkpoint along with the rest of the guest. Saved simulated
+connections have no external resources to reconnect.
 
 This is a development fixture, not general Palm network compatibility. Socket
 options, UDP, HTTP service, listen/accept, PB scatter/gather APIs, native ARM

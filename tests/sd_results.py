@@ -4,6 +4,22 @@ import struct
 import zipfile
 
 
+class ControlError(AssertionError):
+    def __init__(self, code, message):
+        super().__init__(f'{code}: {message}')
+        self.code = code
+
+
+def export_if_ready(request, path):
+    try:
+        request('export', path)
+    except ControlError as error:
+        if error.code != 'not-ready':
+            raise
+        return False
+    return True
+
+
 def read_log(path):
     with zipfile.ZipFile(path) as archive:
         names = [n for n in archive.namelist() if n.rsplit('/', 1)[-1].startswith('FrondSDLog.')]

@@ -70,6 +70,19 @@ The runner separately waits for `guest-ready`, which prepares Palm OS's
 `EvtGetEvent` boundary for application commands. A PACE signature alone is not
 sufficient. It repeats this check after resets and before replay.
 
+Readiness describes the instant it is checked; the guest can leave that boundary
+before the next command. Database export therefore performs its own preflight
+immediately before checkpointing. Live guest progress during preflight persists
+on both success and failure. Injected export work rolls back to the resulting
+checkpoint. Named exports retry explicit `not-ready` responses within
+`--ready-timeout`; other export errors fail immediately.
+
+An idle third-party app using `EvtGetEvent(evtWaitForever)` can remain not-ready
+until normal user input occurs. Safe injection inside that blocked native call
+is an [open bridge issue](tx-native.md#open-developer-workflow-issue-indefinitely-idle-applications).
+The SD test probe's bounded idle wait is a fixture workaround; the runner does
+not send input or modify apps to manufacture readiness.
+
 Only `not-ready` errors are retried. A missing app, corrupt database, an open app
 that cannot be replaced, failed export or unknown protocol command fails
 immediately. Use a session with the app closed when replacing it. A core without

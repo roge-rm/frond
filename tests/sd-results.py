@@ -6,7 +6,7 @@ import tempfile
 import unittest
 import zipfile
 
-from sd_results import check_records, read_log
+from sd_results import ControlError, check_records, export_if_ready, read_log
 
 
 def invocation(size=32, stamp=100, host=True, prior=False):
@@ -24,6 +24,22 @@ def invocation(size=32, stamp=100, host=True, prior=False):
 
 
 class Results(unittest.TestCase):
+    def test_only_not_ready_can_be_retried(self):
+        replies = iter(['not-ready', 'not-ready', None, 'export'])
+        calls = []
+        def request(command, path):
+            calls.append((command, path))
+            error = next(replies)
+            if error:
+                raise ControlError(error, 'test failure')
+        self.assertFalse(export_if_ready(request, 'log.zip'))
+        self.assertFalse(export_if_ready(request, 'log.zip'))
+        self.assertTrue(export_if_ready(request, 'log.zip'))
+        with self.assertRaises(ControlError) as raised:
+            export_if_ready(request, 'log.zip')
+        self.assertEqual(raised.exception.code, 'export')
+        self.assertEqual(calls, [('export', 'log.zip')] * 4)
+
     def test_fresh_invocations_and_capacity(self):
         first = invocation()
         check_records(first, 32)

@@ -315,7 +315,7 @@ def run(args):
                 result['stage'] = 'export'
                 for index, name in enumerate(args.export_db, 1):
                     archive = root / f'database-{index:03d}.zip'
-                    control.require('export-db', str(archive) + '\n' + name)
+                    control.retry_ready('export-db', str(archive) + '\n' + name, args.ready_timeout)
                     with zipfile.ZipFile(archive) as z:
                         if len(z.namelist()) != 1 or z.testzip() is not None:
                             raise RunError('export', f'Invalid named database archive: {archive}')

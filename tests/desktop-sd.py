@@ -13,7 +13,7 @@ import subprocess
 import tempfile
 import time
 
-from sd_results import check_records, read_log
+from sd_results import ControlError, check_records, export_if_ready, read_log
 
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--core', type=Path, default=Path('out/frond'))
@@ -48,7 +48,8 @@ def emulator(session, label):
                 assert len(fields) == 4 and fields[0] == str(serial).encode(), fields
                 message = bytes.fromhex(fields[3].decode()).decode()
                 print(label, command, fields[1].decode(), message, flush=True)
-                if ok is not None: assert fields[1] == (b'ok' if ok else b'error'), fields
+                if ok is not None and fields[1] != (b'ok' if ok else b'error'):
+                    raise ControlError(fields[2].decode(), message)
                 return (fields[1] == b'ok', message) if ok is None else message
             time.sleep(2)
             try:
@@ -108,13 +109,12 @@ def check_image(path, size):
     raise AssertionError('Palm-created GUEST.TXT is absent')
 
 def probe_results(request, path, *, previous=(), size=32, prior=False, host=True):
-    # Preparation inside export is checkpointed and rolled back on failure.
-    # Let guest startup/mount/probe work advance before attempting a real export.
+    # Readiness is a point-in-time result. Export prepares again atomically with
+    # checkpoint creation; only its explicit not-ready result can be retried.
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
         ready, _ = request('guest-ready', ok=None)
-        if ready:
-            request('export', path)  # An export error remains an acceptance failure.
+        if ready and export_if_ready(request, path):
             lines = read_log(path)
             starts = [i for i, line in enumerate(lines) if line.startswith('begin ')]
             if starts and starts[-1] >= len(previous) and lines[-1].startswith('complete '):
