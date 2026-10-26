@@ -57,7 +57,7 @@
 +                fprintf(stderr,"MENU FRAME %llu %llu %x %x %u %u %d\n",(unsigned long long)stamp,(unsigned long long)soc->GetTime(),cpuGetRegExternal(soc->GetCpu(),15),cpuIsModePace(soc->GetCpu())?paceGetPC():0,mainLoop.GetCurrentIps(),white,frame!=nullptr);
 +            }
 +            const auto menuDrawStart=timestampUsec();
-             sdlRenderer->Draw(sdlEventHandler.RedrawRequested());
+             sdlRenderer->Draw(sdlEventHandler.RedrawRequested(), sdlEventHandler.PressedButtons());
 +            if(menuTraceActive) fprintf(stderr,"MENU PRESENT %llu %llu\n",(unsigned long long)timestampUsec(),(unsigned long long)(timestampUsec()-menuDrawStart));
              sdlEventHandler.ClearRedrawRequested();
  

@@ -65,9 +65,10 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     nor = firmware(tr("NOR image:"), "nor");
     nand = firmware(tr("NAND image:"), "nand");
     layout->addWidget(setup);
-    doubleSize = new QCheckBox(tr("Double-size Palm display"), root);
+    doubleSize = new QCheckBox(tr("Double-size Palm display (when it fits)"), root);
+    doubleSize->setToolTip(tr("Uses normal size if the Palm display and buttons would exceed the available screen height."));
     const auto* screen = QGuiApplication::primaryScreen();
-    const bool fits = screen && screen->availableGeometry().height() >= 1020;
+    const bool fits = screen && screen->availableGeometry().height() >= 1180;
     doubleSize->setChecked(settings.value("doubleSize", fits).toBool());
     connect(doubleSize, &QCheckBox::toggled, this, [this](bool enabled) { settings.setValue("doubleSize", enabled); });
     layout->addWidget(doubleSize);

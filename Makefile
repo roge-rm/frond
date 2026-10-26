@@ -15,7 +15,7 @@ out/frond: build/source/.prepared
 	cp build/source/src/uarm/cp-uarm out/frond.new
 	mv -f out/frond.new out/frond
 
-test: prepare test-scheduler test-wifi test-host-network test-keyboard test-network test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup
+test: prepare test-device-controls test-scheduler test-wifi test-host-network test-keyboard test-network test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup
 	python3 tests/audio-metrics.py
 	python3 tests/input-latency.py
 	python3 tests/menu-response.py
@@ -221,3 +221,13 @@ test-wifi: prepare
 test-scheduler: prepare
 	$(CXX) -std=c++17 -O2 -Ibuild/source/src/uarm -Ibuild/source/src/uarm/uarm -Ibuild/source/src/common tests/scheduler-order.cpp -o build/test-scheduler-order
 	./build/test-scheduler-order
+
+.PHONY: test-device-controls
+test-device-controls: out/frond
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/controls-core-objects.rsp
+	$(CXX) -std=c++17 -O1 -g $(shell sdl2-config --cflags) \
+		-Ibuild/source/src/uarm/native -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/device-controls.cpp build/source/src/uarm/native/SdlEventHandler.cpp \
+		build/source/src/uarm/native/DeviceControls.cpp @build/controls-core-objects.rsp \
+		build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) $(shell sdl2-config --libs) -o build/test-device-controls
+	./build/test-device-controls

@@ -41,6 +41,9 @@ Complete Palm OS setup in the Palm window. If taps land in the wrong place,
 calibrate the touchscreen in Preferences. Use **File → Install Application** to
 install PRC or PDB files, then open them from the Palm launcher.
 
+Use the clickable controls below the Palm screen for the four app buttons and
+five-way navigator. They follow Palm OS button assignments.
+
 The desktop build targets Debian trixie with KDE Plasma. Other Linux desktops
 may work too. See the [desktop guide](doc/desktop.md) for settings and the command
 line interface.

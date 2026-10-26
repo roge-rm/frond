@@ -73,6 +73,28 @@ the GUI; **View → Emulator Log** exposes diagnostic details.
 files also work through Open Session. A GUI-controlled session currently supports
 Palm TX only.
 
+## Physical buttons
+
+The TX window includes a button strip beneath its display: Home, Calendar,
+five-way navigation with centre select, Contacts and Web. Click and hold
+for a held button; releasing the mouse releases it. Moving off the button or
+leaving, hiding or closing the window releases the pointer hold. Losing focus
+also releases keyboard-held buttons. A keyboard key and mouse press can hold
+the same button independently, and different buttons can form a chord.
+
+The strip sends hardware keypad events, so Palm OS button assignments and app
+handling apply. It remains usable when the infrared keyboard accessory is
+attached. With that accessory detached, F1–F4 operate the four application
+buttons, arrow keys navigate and Enter selects. The existing Escape power-key
+shortcut remains available, but TX sleep/resume is incomplete; the strip does
+not expose a Power button.
+
+The strip stays beneath the display when the view rotates. Its clicks are
+separate from touchscreen calibration. Normal and double-size displays include
+the controls; startup uses normal size if the complete double-size window would
+exceed the available screen height. Screenshots exported through the core's
+framebuffer commands still contain only the Palm display.
+
 ## Audio scheduling
 
 On a PipeWire desktop, check the sound server's scheduling as well as Frond's
@@ -150,3 +172,23 @@ on close and resume on a new launch, checks that the imported file stays unchang
 and verifies that disabling resume leaves the launcher idle. It does not touch the
 user's Frond settings. The core integration test uses a private copy of guest
 state in memory and writes only to its own temporary directory.
+
+## Adding device control profiles
+
+Physical controls use the native core's `DeviceControls.h` profiles. Each profile
+owns its layout, labels, icon choices and hit regions; drawing and pointer handling share that
+geometry. A new model should supply its own control arrangement and map presses
+to its actual keypad/GPIO inputs. The TX profile is the initial implementation.
+Models without a profile retain their existing display-only window.
+
+Keep the same approach as more devices are added: original vector artwork with
+rounded, shaded controls and a device-like bezel; device-specific button counts,
+navigators and keyboards; visible pressed states; and reliable release on focus
+loss, hiding, closing and rotation. Preserve the touchscreen's coordinate space,
+normal/double-size rendering and framebuffer-only exports. Test shared holds,
+button chords and the supported view rotations for each profile.
+
+Use independently created artwork and Frond styling. Do not copy another
+emulator's skin or bundle manufacturer photographs or branding as UI assets.
+Original artwork does not by itself settle trademark or registered-design
+questions for an exact product replica.

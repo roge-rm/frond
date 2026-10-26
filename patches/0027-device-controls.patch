@@ -1,0 +1,588 @@
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -23,6 +23,7 @@
+ #include "Rotation.h"
+ #include "SdlAudioDriver.h"
+ #include "SdlEventHandler.h"
++#include "DeviceControls.h"
+ #include "SdlRenderer.h"
+ #include "argparse.h"
+ #include "audio_queue.h"
+@@ -88,7 +89,8 @@
+         }
+     }
+ 
+-    SDL_Window* initSdl(DisplayConfiguration& displayConfiguration, int scale, Rotation rotation) {
++    SDL_Window* initSdl(DisplayConfiguration& displayConfiguration, int& scale, Rotation rotation,
++                        const DeviceControlProfile& controls) {
+         if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_AUDIO) < 0) {
+             cerr << "could not initialize SDL: " << SDL_GetError() << endl;
+             return nullptr;
+@@ -98,18 +100,23 @@
+ 
+         atexit(SDL_Quit);
+ 
++        SDL_Rect usable{};
++        if (controls.height && SDL_GetDisplayUsableBounds(0,&usable)==0) {
++            while (scale>1 && scale*(windowHeight(displayConfiguration,rotation)+controls.height)+48>usable.h)
++                --scale;
++        }
+         auto window = SDL_CreateWindow("cp-uarm", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+                                        scale * windowWidth(displayConfiguration, rotation),
+-                                       scale * windowHeight(displayConfiguration, rotation),
++                                       scale * (windowHeight(displayConfiguration, rotation)+controls.height),
+                                        SDL_WINDOW_ALLOW_HIGHDPI);
+ 
+         return window;
+     }
+ 
+     void sdlResizeWindow(SDL_Window* window, DisplayConfiguration& displayConfiguration, int scale,
+-                         Rotation rotation) {
++                         Rotation rotation, const DeviceControlProfile& controls) {
+         SDL_SetWindowSize(window, scale * windowWidth(displayConfiguration, rotation),
+-                          scale * windowHeight(displayConfiguration, rotation));
++                          scale * (windowHeight(displayConfiguration, rotation)+controls.height));
+     }
+ 
+     void copy(Buffer& buffer, size_t size, const void* data) {
+@@ -386,7 +393,7 @@
+             scale = options.smallWindow ? 2 : 3;
+         }
+ 
+-        SDL_Window* window = initSdl(displayConfiguration, scale, rotation);
++        SDL_Window* window = initSdl(displayConfiguration, scale, rotation, deviceControls(deviceType));
+         if (!window) {
+             cerr << "failed to init SDL" << endl;
+             return false;
+@@ -460,7 +467,7 @@
+             if (waitForPreviewAudio) mainLoop.PauseAt(now);
+             else mainLoop.Cycle(now);
+ 
+-            sdlRenderer->Draw(sdlEventHandler.RedrawRequested());
++            sdlRenderer->Draw(sdlEventHandler.RedrawRequested(), sdlEventHandler.PressedButtons());
+             sdlEventHandler.ClearRedrawRequested();
+ 
+             if (!replay.Dispatch((timestampUsec() - replayStartedAt) / 1000, *soc, *sdlRenderer, replayError)) {
+@@ -493,7 +500,7 @@
+                 rotation = commandContext.rotation;
+ 
+                 sdlRenderer.reset();
+-                sdlResizeWindow(window, displayConfiguration, scale, rotation);
++                sdlResizeWindow(window, displayConfiguration, scale, rotation, deviceControls(deviceType));
+ 
+                 sdlRenderer =
+                     make_unique<SdlRenderer>(window, soc, scale, displayConfiguration, rotation);
+--- a/src/uarm/native/SdlEventHandler.cpp
++++ b/src/uarm/native/SdlEventHandler.cpp
+@@ -47,7 +47,7 @@
+ SdlEventHandler::SdlEventHandler(SoC* soc, int scale,
+                                  DisplayConfiguration& deviceDisplayConfiguration,
+                                  Rotation rotation)
+-    : soc(soc), scale(scale), rotation(rotation) {
++    : soc(soc), controls(deviceControls(soc->GetDeviceType())), scale(scale), rotation(rotation) {
+     width = deviceDisplayConfiguration.width;
+     height = deviceDisplayConfiguration.height + deviceDisplayConfiguration.graffitiHeight;
+ }
+@@ -58,26 +58,43 @@
+     while (SDL_PollEvent(&event)) {
+         switch (event.type) {
+             case SDL_QUIT:
++                ReleaseInputs();
+                 quitRequested = true;
+                 break;
+ 
+             case SDL_MOUSEBUTTONDOWN:
+                 if (event.button.button != SDL_BUTTON_LEFT) break;
+-                penDown = true;
+-                soc->PenDown(RotateX(event.button.x, event.button.y) / scale,
+-                             RotateY(event.button.x, event.button.y) / scale);
++                ReleasePointer();
++                if (OnScreen(event.button.x,event.button.y)) {
++                    penDown = true;
++                    soc->PenDown(RotateX(event.button.x,event.button.y)/scale,
++                                 RotateY(event.button.x,event.button.y)/scale);
++                } else if (event.button.x>=0 && event.button.y>=0) {
++                    pointerKey=deviceControlAt(controls,ScreenWidth(),ScreenHeight(),
++                                                event.button.x/scale,event.button.y/scale);
++                    if (pointerKey && !hardKeys[pointerKey]) soc->KeyDown(pointerKey);
++                    redrawRequested=true;
++                }
++                if (penDown || pointerKey) SDL_CaptureMouse(SDL_TRUE);
+ 
+                 break;
+ 
+             case SDL_MOUSEBUTTONUP:
+                 if (event.button.button != SDL_BUTTON_LEFT) break;
+-                penDown = false;
+-                soc->PenUp();
++                ReleasePointer();
+ 
+                 break;
+ 
+             case SDL_MOUSEMOTION:
++                if (pointerKey) {
++                    if (event.motion.x<0 || event.motion.y<0 ||
++                        deviceControlAt(controls,ScreenWidth(),ScreenHeight(),
++                                        event.motion.x/scale,event.motion.y/scale)!=pointerKey)
++                        ReleasePointer();
++                    break;
++                }
+                 if (!penDown) break;
++                if (!OnScreen(event.motion.x,event.motion.y)) { ReleasePointer(); break; }
+ 
+                 soc->PenDown(RotateX(event.motion.x, event.motion.y) / scale,
+                              RotateY(event.motion.x, event.motion.y) / scale);
+@@ -93,7 +110,11 @@
+                     break;
+                 }
+                 enum KeyId key = mapKey(event.key.keysym.sym);
+-                if (key) { hardKeys[key]=true; soc->KeyDown(key); }
++                if (key && !hardKeys[key]) {
++                    hardKeys[key]=true;
++                    if (pointerKey!=key) soc->KeyDown(key);
++                    redrawRequested=true;
++                }
+                 break;
+             }
+ 
+@@ -102,17 +123,18 @@
+                 const auto scan=event.key.keysym.scancode;
+                 if (code && hostKeys[scan]) { hostKeys[scan]=false; if (--codeHolds[code]==0) soc->KeyboardKey(code,false); }
+                 enum KeyId key = mapKey(event.key.keysym.sym);
+-                if (key && hardKeys[key]) { hardKeys[key]=false; soc->KeyUp(key); }
++                if (key && hardKeys[key]) {
++                    hardKeys[key]=false;
++                    if (pointerKey!=key) soc->KeyUp(key);
++                    redrawRequested=true;
++                }
+                 break;
+             }
+ 
+             case SDL_WINDOWEVENT:
+-                if (event.window.event==SDL_WINDOWEVENT_FOCUS_LOST) {
+-                    soc->ReleaseKeyboard();
+-                    hostKeys.fill(false); codeHolds.fill(0);
+-                    for (unsigned i=1;i<hardKeys.size();i++) if (hardKeys[i]) { soc->KeyUp(static_cast<KeyId>(i)); hardKeys[i]=false; }
+-                    if (penDown) { soc->PenUp(); penDown=false; }
+-                }
++                if (event.window.event==SDL_WINDOWEVENT_FOCUS_LOST ||
++                    event.window.event==SDL_WINDOWEVENT_HIDDEN) ReleaseInputs();
++                if (event.window.event==SDL_WINDOWEVENT_LEAVE) ReleasePointer();
+                 if (event.window.event==SDL_WINDOWEVENT_EXPOSED) redrawRequested=true;
+                 break;
+ 
+@@ -126,15 +148,49 @@
+ 
+ void SdlEventHandler::ClearRedrawRequested() { redrawRequested = false; }
+ 
+-void SdlEventHandler::SetRotation(Rotation rotation) { this->rotation = rotation; }
++void SdlEventHandler::SetRotation(Rotation rotation) {
++    ReleasePointer(); this->rotation = rotation; redrawRequested=true;
++}
++int SdlEventHandler::ScreenWidth() const {
++    return rotation==Rotation::landscape_90 || rotation==Rotation::landscape_270 ? height : width;
++}
++int SdlEventHandler::ScreenHeight() const {
++    return rotation==Rotation::landscape_90 || rotation==Rotation::landscape_270 ? width : height;
++}
++bool SdlEventHandler::OnScreen(int x,int y) const {
++    return x>=0 && y>=0 && x<scale*ScreenWidth() && y<scale*ScreenHeight();
++}
++void SdlEventHandler::ReleasePointer() {
++    if (pointerKey) {
++        if (!hardKeys[pointerKey]) soc->KeyUp(pointerKey);
++        pointerKey=keyInvalid; redrawRequested=true;
++    }
++    if (penDown) { soc->PenUp();penDown=false; }
++    SDL_CaptureMouse(SDL_FALSE);
++}
++void SdlEventHandler::ReleaseInputs() {
++    ReleasePointer();
++    soc->ReleaseKeyboard();
++    hostKeys.fill(false); codeHolds.fill(0);
++    for (unsigned key=1;key<hardKeys.size();++key) {
++        if (hardKeys[key]) soc->KeyUp(static_cast<KeyId>(key));
++        hardKeys[key]=false;
++    }
++    redrawRequested=true;
++}
++uint32_t SdlEventHandler::PressedButtons() const {
++    uint32_t pressed=pointerKey ? (1u<<pointerKey) : 0;
++    for (unsigned key=1;key<hardKeys.size();++key) if(hardKeys[key])pressed|=1u<<key;
++    return pressed;
++}
+ 
+ int SdlEventHandler::RotateX(int x, int y) {
+     switch (rotation) {
+         case Rotation::landscape_90:
+-            return scale * width - y;
++            return scale * width - 1 - y;
+ 
+         case Rotation::portrait_180:
+-            return scale * width - x;
++            return scale * width - 1 - x;
+ 
+         case Rotation::landscape_270:
+             return y;
+@@ -150,10 +206,10 @@
+             return x;
+ 
+         case Rotation::portrait_180:
+-            return scale * height - y;
++            return scale * height - 1 - y;
+ 
+         case Rotation::landscape_270:
+-            return scale * height - x;
++            return scale * height - 1 - x;
+ 
+         default:
+             return y;
+--- a/src/uarm/native/SdlEventHandler.h
++++ b/src/uarm/native/SdlEventHandler.h
+@@ -2,6 +2,7 @@
+ #define _SDL_EVENT_HANDLER_
+ 
+ #include <array>
++#include "DeviceControls.h"
+ #include "Rotation.h"
+ #include "SoC.h"
+ #include "device_configuration.h"
+@@ -13,6 +14,7 @@
+ 
+     void HandleEvents();
+ 
++    uint32_t PressedButtons() const;
+     bool RedrawRequested() const;
+     bool QuitRequested() const;
+     void ClearQuitRequested() { quitRequested = false; }
+@@ -21,6 +23,11 @@
+     void SetRotation(Rotation rotation);
+ 
+    private:
++    void ReleasePointer();
++    void ReleaseInputs();
++    bool OnScreen(int x, int y) const;
++    int ScreenWidth() const;
++    int ScreenHeight() const;
+     int RotateX(int x, int y);
+     int RotateY(int x, int y);
+ 
+@@ -30,6 +37,8 @@
+     std::array<bool,512> hostKeys{};
+     std::array<uint8_t,128> codeHolds{};
+     std::array<bool,11> hardKeys{};
++    const DeviceControlProfile& controls;
++    KeyId pointerKey{keyInvalid};
+     bool penDown{false};
+     int scale{1};
+     bool redrawRequested{false};
+--- a/src/uarm/native/SdlRenderer.cpp
++++ b/src/uarm/native/SdlRenderer.cpp
+@@ -6,6 +6,7 @@
+ #include "SDL_image.h"
+ #include "SDL_render.h"
+ #include "Silkscreen.h"
++#include "DeviceControls.h"
+ 
+ namespace {
+     constexpr uint32_t FLUSH_PIPELNE_FRAMES = 3;
+@@ -38,9 +39,9 @@
+     int renderHeight = windowHeight, renderWidth = windowWidth;
+     SDL_GetRendererOutputSize(renderer, &renderWidth, &renderHeight);
+ 
+-    if (renderHeight != windowHeight && renderWidth != windowWidth) {
+-        SDL_RenderSetScale(renderer, static_cast<float>(renderWidth / windowWidth),
+-                           static_cast<float>(renderHeight / windowHeight));
++    if (renderHeight != windowHeight || renderWidth != windowWidth) {
++        SDL_RenderSetScale(renderer, static_cast<float>(renderWidth) / windowWidth,
++                           static_cast<float>(renderHeight) / windowHeight);
+     }
+ 
+     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0xff);
+@@ -65,7 +66,9 @@
+ 
+ SdlRenderer::~SdlRenderer() {
+     SDL_DestroyTexture(frameTexture);
++    SDL_DestroyTexture(intermediateTexture);
+     SDL_DestroyTexture(silkscreenTexture);
++    SDL_DestroyTexture(controlsTexture);
+     SDL_DestroyRenderer(renderer);
+ }
+ 
+@@ -85,11 +88,14 @@
+     return success;
+ }
+ 
+-void SdlRenderer::Draw(bool forceRedraw) {
++void SdlRenderer::Draw(bool forceRedraw, uint32_t buttons) {
++    const bool controlsChanged=pressedButtons != buttons;
++    forceRedraw = forceRedraw || controlsChanged;
++    pressedButtons = buttons;
+     const bool wasLcdEnabled = lcdEnabled;
+     lcdEnabled = soc->LcdEnabled();
+ 
+-    uint32_t firstDirtyLine, lastDirtyLine;
++    uint32_t firstDirtyLine=0, lastDirtyLine=0;
+     uint32_t* frame = soc->GetPendingFrame(firstDirtyLine, lastDirtyLine);
+ 
+     if (!frame && !forceRedraw && lcdEnabled == wasLcdEnabled &&
+@@ -97,9 +103,8 @@
+         return;
+     if (frame || forceRedraw || lcdEnabled != wasLcdEnabled) flushPipelineCounter = 0;
+ 
+-    frame += firstDirtyLine * displayConfiguration.width;
+-
+     if (frame) {
++        frame += firstDirtyLine * displayConfiguration.width;
+         uint8_t* pixels;
+         int pitch;
+         SDL_LockTexture(intermediateTexture, NULL, (void**)&pixels, &pitch);
+@@ -185,6 +190,29 @@
+         }
+     }
+ 
++    const bool landscape=rotation==Rotation::landscape_90 || rotation==Rotation::landscape_270;
++    const int screenWidth=landscape ? displayConfiguration.height+displayConfiguration.graffitiHeight : displayConfiguration.width;
++    const int screenHeight=landscape ? displayConfiguration.width : displayConfiguration.height+displayConfiguration.graffitiHeight;
++    const auto& controls=deviceControls(soc->GetDeviceType());
++    if(controls.count) {
++        if(!controlsTexture)
++            controlsTexture=SDL_CreateTexture(renderer,SDL_PIXELFORMAT_ABGR8888,
++                SDL_TEXTUREACCESS_TARGET,screenWidth*scale,controls.height*scale);
++        if(controlsTexture && (!controlsPainted || controlsChanged)) {
++            float sx,sy;SDL_RenderGetScale(renderer,&sx,&sy);
++            if(SDL_SetRenderTarget(renderer,controlsTexture)==0) {
++                SDL_RenderSetScale(renderer,1,1);
++                drawDeviceControls(renderer,controls,screenWidth,0,scale,buttons);
++                SDL_SetRenderTarget(renderer,nullptr);
++                SDL_RenderSetScale(renderer,sx,sy);
++                controlsPainted=true;
++            }
++        }
++        if(controlsPainted) {
++            SDL_Rect dest{0,screenHeight*scale,screenWidth*scale,controls.height*scale};
++            SDL_RenderCopy(renderer,controlsTexture,nullptr,&dest);
++        } else drawDeviceControls(renderer,controls,screenWidth,screenHeight,scale,buttons);
++    }
+     SDL_RenderPresent(renderer);
+ 
+     soc->ResetPendingFrame();
+--- a/src/uarm/native/SdlRenderer.h
++++ b/src/uarm/native/SdlRenderer.h
+@@ -15,7 +15,7 @@
+                 Rotation rotation);
+     ~SdlRenderer();
+ 
+-    void Draw(bool forceRedraw);
++    void Draw(bool forceRedraw, uint32_t buttons = 0);
+     bool SaveFramebuffer(const char* path);
+ 
+    private:
+@@ -28,11 +28,14 @@
+     SDL_Texture* frameTexture{nullptr};
+     SDL_Texture* intermediateTexture{nullptr};
+     SDL_Texture* silkscreenTexture{nullptr};
++    SDL_Texture* controlsTexture{nullptr};
++    bool controlsPainted{false};
+ 
+     bool frameTextureValid{false};
+     bool lcdEnabled{true};
+ 
+     uint32_t flushPipelineCounter{0};
++    uint32_t pressedButtons{0};
+ 
+     SoC* soc{nullptr};
+ 
+--- /dev/null
++++ b/src/uarm/native/DeviceControls.h
+@@ -0,0 +1,65 @@
++#ifndef FROND_DEVICE_CONTROLS_H
++#define FROND_DEVICE_CONTROLS_H
++#include <SDL.h>
++#include <array>
++#include <cstdlib>
++#include "device_type5.h"
++#include "keys.h"
++
++enum class DeviceControlIcon { home, calendar, contacts, web, up, down, left, right, select, power };
++struct DeviceButton {
++    KeyId key;
++    SDL_Rect bounds;
++    const char* label;
++    DeviceControlIcon icon;
++};
++struct DeviceControlProfile {
++    int width, height;
++    const DeviceButton* buttons;
++    size_t count;
++    SDL_Point navigator;
++    int navigatorRadius;
++};
++inline const DeviceControlProfile& deviceControls(DeviceType5 device) {
++    static const DeviceButton tx[] = {
++        {keyIdHard1, {8,30,44,40}, "Home", DeviceControlIcon::home},
++        {keyIdHard2, {58,30,44,40}, "Calendar", DeviceControlIcon::calendar},
++        {keyIdHard3, {218,30,44,40}, "Contacts", DeviceControlIcon::contacts},
++        {keyIdHard4, {268,30,44,40}, "Web", DeviceControlIcon::web},
++        {keyIdUp, {148,10,24,20}, "Up", DeviceControlIcon::up},
++        {keyIdDown, {148,58,24,20}, "Down", DeviceControlIcon::down},
++        {keyIdLeft, {124,32,22,24}, "Left", DeviceControlIcon::left},
++        {keyIdRight, {174,32,22,24}, "Right", DeviceControlIcon::right},
++        {keyIdSelect, {148,32,24,24}, "Select", DeviceControlIcon::select},
++    };
++    static const DeviceControlProfile txProfile{320,84,tx,std::size(tx),{160,44},38};
++    static const DeviceControlProfile empty{0,0,nullptr,0,{0,0},0};
++    return device == deviceTypeTX ? txProfile : empty;
++}
++inline SDL_Rect deviceButtonRect(const DeviceControlProfile& profile,
++                                const DeviceButton& button, int screenWidth, int screenHeight) {
++    auto r=button.bounds; r.x+=(screenWidth-profile.width)/2; r.y+=screenHeight; return r;
++}
++inline KeyId deviceControlAt(const DeviceControlProfile& profile, int screenWidth,
++                             int screenHeight, int x, int y) {
++    if(profile.navigatorRadius) {
++        const int dx=x-(screenWidth-profile.width)/2-profile.navigator.x;
++        const int dy=y-screenHeight-profile.navigator.y;
++        const int distance=dx*dx+dy*dy;
++        if(distance<=profile.navigatorRadius*profile.navigatorRadius) {
++            if(distance<=14*14)return keyIdSelect;
++            if(std::abs(dx)>std::abs(dy))return dx<0 ? keyIdLeft : keyIdRight;
++            return dy<0 ? keyIdUp : keyIdDown;
++        }
++    }
++    for(size_t i=0;i<profile.count;++i) {
++        if(profile.navigatorRadius && profile.buttons[i].icon>=DeviceControlIcon::up &&
++           profile.buttons[i].icon<=DeviceControlIcon::select)continue;
++        const auto r=deviceButtonRect(profile,profile.buttons[i],screenWidth,screenHeight);
++        if(x>=r.x && x<r.x+r.w && y>=r.y && y<r.y+r.h)return profile.buttons[i].key;
++    }
++    return keyInvalid;
++}
++void drawDeviceControls(SDL_Renderer* renderer, const DeviceControlProfile& profile,
++                        int screenWidth, int screenHeight, int scale, uint32_t pressed);
++#endif
+--- /dev/null
++++ b/src/uarm/native/DeviceControls.cpp
+@@ -0,0 +1,112 @@
++#include "DeviceControls.h"
++#include <cmath>
++
++void drawDeviceControls(SDL_Renderer* renderer, const DeviceControlProfile& profile,
++                        int width, int height, int scale, uint32_t pressed) {
++    if(!profile.count)return;
++    auto fill=[&](int x,int y,int w,int h) {SDL_Rect r{x*scale,y*scale,w*scale,h*scale};SDL_RenderFillRect(renderer,&r);};
++    auto line=[&](int x,int y,int xx,int yy) {
++        // Give the vector icons a consistent weight at either display scale.
++        for(int i=0;i<scale;++i)SDL_RenderDrawLine(renderer,x*scale,y*scale+i,xx*scale,yy*scale+i);
++    };
++    auto circle=[&](int x,int y,int radius) {
++        for(int d=0;d<360;d+=6) {
++            double a=d*3.141592653589793/180,b=(d+6)*3.141592653589793/180;
++            line(x+std::lround(radius*std::cos(a)),y+std::lround(radius*std::sin(a)),
++                 x+std::lround(radius*std::cos(b)),y+std::lround(radius*std::sin(b)));
++        }
++    };
++    auto shade=[&](SDL_Color c) {SDL_SetRenderDrawColor(renderer,c.r,c.g,c.b,255);};
++    auto blend=[](SDL_Color a,SDL_Color b,int step,int total) {
++        return SDL_Color{Uint8(a.r+(int(b.r)-a.r)*step/total),
++                         Uint8(a.g+(int(b.g)-a.g)*step/total),
++                         Uint8(a.b+(int(b.b)-a.b)*step/total),255};
++    };
++    auto rounded=[&](SDL_Rect r,int radius,SDL_Color top,SDL_Color bottom) {
++        for(int row=0;row<r.h;++row) {
++            int dy=row<radius ? radius-row-1 : row>=r.h-radius ? row-(r.h-radius) : 0;
++            int inset=dy ? radius-int(std::sqrt(radius*radius-dy*dy)) : 0;
++            shade(blend(top,bottom,row,r.h));fill(r.x+inset,r.y+row,r.w-2*inset,1);
++        }
++    };
++    auto disc=[&](int x,int y,int radius,SDL_Color top,SDL_Color bottom) {
++        for(int dy=-radius;dy<=radius;++dy) {
++            int half=int(std::sqrt(radius*radius-dy*dy));
++            shade(blend(top,bottom,dy+radius,2*radius));fill(x-half,y+dy,half*2+1,1);
++        }
++    };
++    const SDL_Color ink{16,25,37,255},silver{165,183,199,255};
++    // Original vector artwork: a brushed bezel, inset app keys and a five-way ring.
++    for(int y=0;y<profile.height;++y) {
++        shade(blend({55,72,91,255},{29,42,59,255},y,profile.height));fill(0,height+y,width,1);
++    }
++    shade(silver);fill(0,height,width,1);
++    shade(ink);fill(0,height+profile.height-1,width,1);
++    if(profile.navigatorRadius) {
++        const int x=(width-profile.width)/2+profile.navigator.x,y=height+profile.navigator.y;
++        const int radius=profile.navigatorRadius;
++        disc(x,y+2,radius,ink,ink);
++        disc(x,y,radius,silver,{68,84,102,255});
++        disc(x,y,radius-2,{111,131,151,255},{48,65,84,255});
++        // Each visible ring quadrant has the same radial hit region as the input path.
++        for(int dy=-radius+3;dy<=radius-3;++dy) {
++            const int half=int(std::sqrt((radius-3)*(radius-3)-dy*dy));
++            int begin=-half;
++            while(begin<=half) {
++                const auto key=deviceControlAt(profile,width,height,x+begin,y+dy);
++                int end=begin+1;
++                while(end<=half && deviceControlAt(profile,width,height,x+end,y+dy)==key)++end;
++                if(key!=keyIdSelect && (pressed&(1u<<key))) {
++                    shade(blend({89,176,214,255},{34,104,150,255},dy+radius,2*radius));
++                    fill(x+begin,y+dy,end-begin,1);
++                }
++                begin=end;
++            }
++        }
++        disc(x,y,16,ink,ink);
++        const bool down=pressed&(1u<<keyIdSelect);
++        disc(x,y+(down?1:0),14,down?SDL_Color{103,195,227,255}:silver,
++             down?SDL_Color{34,109,155,255}:SDL_Color{67,87,109,255});
++    }
++    for(size_t i=0;i<profile.count;++i) {
++        const auto& button=profile.buttons[i];auto r=deviceButtonRect(profile,button,width,height);
++        const bool down=pressed&(1u<<button.key);
++        const bool navigator=profile.navigatorRadius && button.icon>=DeviceControlIcon::up &&
++                             button.icon<=DeviceControlIcon::select;
++        if(!navigator) {
++            auto shadow=r;shadow.y+=2;rounded(shadow,9,ink,ink);
++            rounded(r,9,silver,{52,70,89,255});
++            SDL_Rect face{r.x+2,r.y+2,r.w-4,r.h-4};
++            rounded(face,7,down?SDL_Color{90,176,213,255}:SDL_Color{114,135,157,255},
++                    down?SDL_Color{34,105,150,255}:SDL_Color{57,76,98,255});
++        }
++        SDL_SetRenderDrawColor(renderer,238,245,250,255);
++        const int x=r.x+r.w/2,y=r.y+r.h/2+(down?1:0);
++        switch(button.icon) {
++            case DeviceControlIcon::home: // Home
++                line(x-10,y,x,y-9);line(x,y-9,x+10,y);line(x-7,y-2,x-7,y+9);
++                line(x+7,y-2,x+7,y+9);line(x-7,y+9,x+7,y+9);line(x,y+9,x,y+3);break;
++            case DeviceControlIcon::calendar: // Calendar
++                line(x-9,y-8,x+9,y-8);line(x-9,y-8,x-9,y+9);line(x+9,y-8,x+9,y+9);
++                line(x-9,y+9,x+9,y+9);line(x-9,y-3,x+9,y-3);
++                line(x-5,y-11,x-5,y-6);line(x+5,y-11,x+5,y-6);
++                fill(x-5,y+1,3,3);fill(x+2,y+1,3,3);break;
++            case DeviceControlIcon::contacts: // Contacts
++                circle(x,y-5,4);line(x-9,y+10,x-9,y+5);line(x-9,y+5,x-4,y+1);
++                line(x-4,y+1,x+4,y+1);line(x+4,y+1,x+9,y+5);line(x+9,y+5,x+9,y+10);
++                line(x-9,y+10,x+9,y+10);break;
++            case DeviceControlIcon::web: // Web
++                circle(x,y,10);line(x-10,y,x+10,y);line(x,y-10,x,y+10);
++                line(x-6,y-8,x-6,y+8);line(x+6,y-8,x+6,y+8);break;
++            case DeviceControlIcon::power:
++                circle(x,y+1,5);SDL_SetRenderDrawColor(renderer,down?57:99,down?133:115,down?176:132,255);
++                fill(x-2,y-6,5,5);SDL_SetRenderDrawColor(renderer,238,245,250,255);line(x,y-6,x,y+1);break;
++            case DeviceControlIcon::select: circle(x,y,5);break;
++            case DeviceControlIcon::up: line(x-5,y+3,x,y-3);line(x,y-3,x+5,y+3);break;
++            case DeviceControlIcon::down: line(x-5,y-3,x,y+3);line(x,y+3,x+5,y-3);break;
++            case DeviceControlIcon::left: line(x+3,y-5,x-3,y);line(x-3,y,x+3,y+5);break;
++            case DeviceControlIcon::right: line(x-3,y-5,x+3,y);line(x+3,y,x-3,y+5);break;
++            default: break;
++        }
++    }
++}
+--- a/src/uarm/Makefile
++++ b/src/uarm/Makefile
+@@ -126,6 +126,7 @@
+ SOURCE_CXX_NATIVE =						\
+ 	$(SOURCE_CXX)						\
+ 	native/Silkscreen.cpp				\
++	native/DeviceControls.cpp			\
+ 	native/SdlRenderer.cpp				\
+ 	native/SdlEventHandler.cpp			\
+ 	native/SdlAudioDriver.cpp			\
