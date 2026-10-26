@@ -43,7 +43,7 @@ def main():
         with socket.socket() as reservation:
             reservation.bind(('127.0.0.1', 0))
             port = reservation.getsockname()[1]
-        command = [str(args.core.resolve()), str(session), '--gdb', str(port), '--no-sound']
+        command = [str(args.core.resolve()), str(session), '--gdb', str(port), '--no-sound', '--run-for', str(int(args.timeout) + 1)]
         if shutil.which('heavy'):
             command = ['heavy', 'emulator'] + command
         env = dict(os.environ, SDL_VIDEODRIVER='dummy', SDL_AUDIODRIVER='dummy')
