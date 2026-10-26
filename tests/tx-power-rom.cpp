@@ -88,24 +88,28 @@ int main(int argc, char** argv) {
         bool prematureResume = false;
         for (unsigned cycle = 0; cycle < 2; ++cycle) {
             machine.pulse();
-            for (unsigned i = 0; i < 400 && machine.soc->LcdEnabled(); ++i) machine.run(5);
+            for (unsigned i = 0; i < 4000 && (machine.soc->LcdEnabled() || !machine.soc->PowerSleeping()); ++i) machine.run(5);
             require(!machine.soc->LcdEnabled(), "power key did not switch the display off");
-            // Round-trip the full session into a fresh SoC while the display is off.
+            require(machine.soc->PowerSleeping(), "ROM did not enter power sleep");
+            // Round-trip into a fresh SoC after actual PWRMODE=3 entry, not just LCD disable.
             auto saved = machine.snapshot(); machine.restore(saved);
-            require(!machine.soc->LcdEnabled(), "display-off state was lost during restore");
+            require(!machine.soc->LcdEnabled() && machine.soc->PowerSleeping(), "sleep state was lost during restore");
+            const uint32_t sleepingPc = cpuGetRegExternal(machine.soc->GetCpu(), 15);
             machine.run(10000);
-            const bool resumedWithoutKey = machine.soc->LcdEnabled();
+            const bool resumedWithoutKey = machine.soc->LcdEnabled() || !machine.soc->PowerSleeping();
+            if (!resumedWithoutKey)
+                require(cpuGetRegExternal(machine.soc->GetCpu(), 15) == sleepingPc, "CPU executed during sleep");
             prematureResume |= resumedWithoutKey;
             if (!resumedWithoutKey) { machine.pulse(); machine.run(10000); }
             require(machine.soc->LcdEnabled() && machine.nonblankFrame(), "ROM resume failed or blank LCD");
             saved = machine.snapshot(); machine.restore(saved); machine.run(1000);
             require(machine.soc->LcdEnabled() && machine.nonblankFrame(), "awake session did not persist");
-            std::printf("TX_POWER cycle=%u display_off_restore=ok resume=ok awake_restore=ok unsolicited_wake=%u\n",
+            std::printf("TX_POWER cycle=%u sleep_restore=ok resume=ok awake_restore=ok unsolicited_wake=%u\n",
                         cycle + 1, unsigned(resumedWithoutKey));
             std::fflush(stdout);
         }
         if (prematureResume) {
-            std::fputs("FAIL: ROM resumes, but the power manager wakes without a programmed event; true sleep remains unsupported\n", stderr);
+            std::fputs("FAIL: ROM resumes, but the power manager wakes without a programmed event; unsolicited wake detected\n", stderr);
             return 2;
         }
         std::puts("PASS: TX sleep/wake and full-session persistence");

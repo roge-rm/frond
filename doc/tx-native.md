@@ -80,8 +80,9 @@ writes and asserted interrupt levels retain their normal handling.
 On native TX, the OS timer batches up to 32 ticks between events. Counter reads
 account for instruction progress inside the current CPU batch; new matches and
 watchdog deadlines shorten the next batch. This removes repeated scheduler work
-without changing the timer frequency. During firmware sleep the timer can jump
-to its next interrupt. Saved timer state retains partially observed batches;
+without changing the timer frequency. During interrupt-driven idle the timer can jump
+to its next interrupt. PXA27x power sleep stops the 3.25-MHz timer clock; see
+[power lifecycle checks](session-testing.md#tx-power-transition-diagnostics). Saved timer state retains partially observed batches;
 older timer chunks still load, and E2 keeps its version-zero timer format.
 
 The frontend uses an adaptive governor with a 97% load ceiling. Native catch-up

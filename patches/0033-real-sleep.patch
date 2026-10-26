@@ -1,0 +1,724 @@
+--- a/src/uarm/uarm/SoC.h
++++ b/src/uarm/uarm/SoC.h
+@@ -59,7 +59,7 @@
+     void ClearFramebufferDirty();
+ 
+     void Sleep();
+-    void Wakeup(uint8_t wakeupSource);
++    virtual void Wakeup(uint8_t wakeupSource);
+ 
+     void SetAudioQueue(struct AudioQueue *audioQueue);
+     void SetPcmOutputEnabled(bool pcmOutputEnabled);
+--- a/src/uarm/uarm/pxa270_KPC.cpp
++++ b/src/uarm/uarm/pxa270_KPC.cpp
+@@ -105,14 +105,14 @@
+     } else {  // manual mode?
+ 
+         // calculate
+-        for (c = 0; c < ((kpc->kpc >> 23) & 7); c++) {
+-            if (!(kpc->kpc & (1 << (12 + c)))) continue;
++        for (c = 0; c <= ((kpc->kpc >> 23) & 7); c++) {
++            if (!(kpc->kpc & (1 << (13 + c)))) continue;
+ 
+             val |= kpc->matrixKeys[c];
+         }
+ 
+         // mask off unused row
+-        val &= ~((1 << (((kpc->kpc >> 26) & 7) + 1)) - 1);
++        val &= (1 << (((kpc->kpc >> 26) & 7) + 1)) - 1;
+ 
+         // irq if nonzero
+         if (val) kpc->kpc |= 0x00400000ul;
+@@ -326,6 +326,34 @@
+ }
+ 
+ 
++uint8_t pxaKpcMatrixWakeLevels(const PxaKpc* kpc) {
++    if (!(kpc->kpc & 0x1000)) return 0;  // ME must remain enabled (18.4.5).
++    uint8_t rows = 0;
++    for (unsigned col = 0; col <= ((kpc->kpc >> 23) & 7); ++col)
++        if ((kpc->kpc & 0x20000000) || (kpc->kpc & (1u << (13 + col))))
++            rows |= kpc->matrixKeys[col];
++    return rows & ((1u << (((kpc->kpc >> 26) & 7) + 1)) - 1);
++}
++
++uint8_t pxaKpcDirectWakeLevels(const PxaKpc* kpc) {
++    if (!(kpc->kpc & 2)) return 0;
++    uint8_t keys = kpc->directKeys & ((1u << (((kpc->kpc >> 6) & 7) + 1)) - 1);
++    if (kpc->kpc & 4) keys &= ~3u;  // Rotary encoders cannot wake sleep.
++    if (kpc->kpc & 8) keys &= ~12u;
++    return keys;
++}
++
++void pxaKpcSleepReset(PxaKpc* kpc) {
++    kpc->kpc = kpc->kpmk = 0;
++    kpc->kpas = 0xff;
++    memset(kpc->kpasmkp, 0, sizeof(kpc->kpasmkp));
++    kpc->kpkdi = 0x64;
++    kpc->kpdkChanged = false;
++    kpc->prevKeys = 0;
++    kpc->jogSta[0] = kpc->jogSta[1] = 0;
++    pxaKpcPrvIrqRecals(kpc);
++}
++
+ template <typename T>
+ void pxaKpcSave(PxaKpc *state, T &savestate) {
+     auto chunk = savestate.GetChunk(ChunkType::pxa270kpc, 0);
+--- a/src/uarm/uarm/pxa270_KPC.h
++++ b/src/uarm/uarm/pxa270_KPC.h
+@@ -17,6 +17,10 @@
+ void pxaKpcDirectKeyChange(struct PxaKpc *kpc, uint_fast8_t keyIdx, bool isDown);
+ void pxaKpcJogInput(struct PxaKpc *kpc, uint_fast8_t jogIdx, bool up);  // else down
+ 
++uint8_t pxaKpcMatrixWakeLevels(const PxaKpc* kpc);
++uint8_t pxaKpcDirectWakeLevels(const PxaKpc* kpc);
++void pxaKpcSleepReset(PxaKpc* kpc);
++
+ #include "savestate/ChunkTypeUarm.h"
+ template <typename T> class SavestateLoader;
+ template <typename T> void pxaKpcSave(PxaKpc *state, T &savestate);
+--- a/src/uarm/uarm/pxa_GPIO.cpp
++++ b/src/uarm/uarm/pxa_GPIO.cpp
+@@ -13,7 +13,7 @@
+ #define PXA_GPIO_BASE 0x40E00000UL
+ #define PXA_GPIO_SIZE 0x00001000UL
+ 
+-#define SAVESTATE_VERSION 0
++#define SAVESTATE_VERSION 1
+ 
+ struct PxaGpio {
+     struct PxaIc *ic;
+@@ -34,8 +34,13 @@
+     GpioDirsChangedF dirNotifF;
+     void *dirNotifD;
+ 
++    GpioChangedNotifF inputObserver;
++    void* inputObserverContext;
++    bool holdOutputs;
++    uint32_t heldDirs[4], heldLatches[4];
++
+     template <typename T>
+-    void DoSaveLoad(T &chunkHelper) {
++    void DoSaveLoad(T &chunkHelper, uint32_t version) {
+         chunkHelper.DoBuffer32(latches, sizeof(latches) >> 2)
+             .DoBuffer32(inputs, sizeof(inputs) >> 2)
+             .DoBuffer32(levels, sizeof(levels) >> 2)
+@@ -44,6 +49,8 @@
+             .DoBuffer32(fallDet, sizeof(fallDet) >> 2)
+             .DoBuffer32(detStatus, sizeof(detStatus) >> 2)
+             .DoBuffer32(AFRs, sizeof(AFRs) >> 2);
++        if (version >= 1)
++            chunkHelper.DoBool(holdOutputs).DoBuffer32(heldDirs, 4).DoBuffer32(heldLatches, 4);
+     }
+ };
+ 
+@@ -55,8 +62,9 @@
+         uarmAbort();
+     }
+ 
+-    val = gpio->dirs[which];
+-    newVal = (gpio->latches[which] & val) | (gpio->inputs[which] & (~val));
++    val = gpio->holdOutputs ? gpio->heldDirs[which] : gpio->dirs[which];
++    const uint32_t latch = gpio->holdOutputs ? gpio->heldLatches[which] : gpio->latches[which];
++    newVal = (latch & val) | (gpio->inputs[which] & (~val));
+ 
+     // process change notifs
+     t = newVal ^ oldVal;
+@@ -346,6 +354,7 @@
+     if (gpioNum >= gpio->nGpios) return;
+ 
+     p = gpio->inputs + set;
++    const bool oldLevel = (*p & v) != 0;
+     if (on)
+         *p |= v;
+     else
+@@ -353,6 +362,8 @@
+ 
+     pxaGpioPrvRecalcValues(gpio, set);
+     pxaGpioPrvRecalcIntrs(gpio);
++    if (oldLevel != on && gpio->inputObserver)
++        gpio->inputObserver(gpio->inputObserverContext, gpioNum, oldLevel, on);
+ }
+ 
+ enum PxaGpioState pxaGpioGetState(struct PxaGpio *gpio, uint_fast8_t gpioNum) {
+@@ -365,6 +376,11 @@
+ 
+     if (gpioNum >= gpio->nGpios) return PxaGpioStateNoSuchGpio;
+ 
++    if (gpio->holdOutputs)
++        return (gpio->heldDirs[sSet] & sV)
++            ? ((gpio->heldLatches[sSet] & sV) ? PxaGpioStateHigh : PxaGpioStateLow)
++            : PxaGpioStateHiZ;
++
+     afr = (gpio->AFRs[bSet] & bV) >> bShift;
+ 
+     if (gpio->socRev == 1 && gpioNum > 85) {  // AFRS work a bit different here
+@@ -393,22 +409,70 @@
+     gpio->dirNotifD = userData;
+ }
+ 
++void pxaGpioSetInputObserver(PxaGpio* gpio, GpioChangedNotifF callback, void* context) {
++    gpio->inputObserver = callback;
++    gpio->inputObserverContext = context;
++}
++
++bool pxaGpioIsInput(const PxaGpio* gpio, unsigned pin) {
++    return pin < gpio->nGpios && !(gpio->dirs[pin / 32] & (1u << (pin % 32)));
++}
++
++bool pxaGpioInputLevel(const PxaGpio* gpio, unsigned pin) {
++    return pin < gpio->nGpios && (gpio->inputs[pin / 32] & (1u << (pin % 32)));
++}
++
++unsigned pxaGpioAlternateFunction(const PxaGpio* gpio, unsigned pin) {
++    return pin < gpio->nGpios ? (gpio->AFRs[pin / 16] >> (2 * (pin % 16))) & 3 : 0;
++}
++
++void pxaGpioHoldSleepOutputs(PxaGpio* gpio, const uint32_t* levels) {
++    memcpy(gpio->heldDirs, gpio->dirs, sizeof(gpio->heldDirs));
++    memcpy(gpio->heldLatches, levels, sizeof(gpio->heldLatches));
++    gpio->holdOutputs = true;
++    for (unsigned i = 0; i < 4; ++i) pxaGpioPrvRecalcValues(gpio, i);
++}
++
++void pxaGpioReleaseSleepOutputs(PxaGpio* gpio) {
++    gpio->holdOutputs = false;
++    for (unsigned i = 0; i < 4; ++i) pxaGpioPrvRecalcValues(gpio, i);
++    if (gpio->dirNotifF) gpio->dirNotifF(gpio->dirNotifD);
++    pxaGpioPrvRecalcIntrs(gpio);
++}
++
++void pxaGpioSleepReset(PxaGpio* gpio) {
++    // External pin stimuli and the power-manager output hold are not GPIO registers.
++    memset(gpio->latches, 0, sizeof(gpio->latches));
++    memset(gpio->dirs, 0, sizeof(gpio->dirs));
++    memset(gpio->riseDet, 0, sizeof(gpio->riseDet));
++    memset(gpio->fallDet, 0, sizeof(gpio->fallDet));
++    memset(gpio->detStatus, 0, sizeof(gpio->detStatus));
++    memset(gpio->AFRs, 0, sizeof(gpio->AFRs));
++    for (unsigned i = 0; i < 4; ++i) pxaGpioPrvRecalcValues(gpio, i);
++    pxaGpioPrvRecalcIntrs(gpio);
++}
++
+ template <typename T>
+ void pxaGpioSave(struct PxaGpio *gpio, T &savestate) {
+-    auto chunk = savestate.GetChunk(ChunkType::pxaGpio, SAVESTATE_VERSION);
++    const uint32_t version = gpio->socRev == 2 ? SAVESTATE_VERSION : 0;
++    auto chunk = savestate.GetChunk(ChunkType::pxaGpio, version);
+     if (!chunk) ERR("unable to allocate chunk");
+ 
+     SaveChunkHelper helper(*chunk);
+-    gpio->DoSaveLoad(helper);
++    gpio->DoSaveLoad(helper, version);
+ }
+ 
+ template <typename T>
+ void pxaGpioLoad(struct PxaGpio *gpio, T &loader) {
+-    auto chunk = loader.GetChunkOrFail(ChunkType::pxaGpio, SAVESTATE_VERSION, "pxa gpio");
++    uint32_t version;
++    auto chunk = loader.GetChunkOrFail(ChunkType::pxaGpio, SAVESTATE_VERSION, "pxa gpio", version);
+     if (!chunk) return;
+ 
+     LoadChunkHelper helper(*chunk);
+-    gpio->DoSaveLoad(helper);
++    gpio->holdOutputs = false;
++    memset(gpio->heldDirs, 0, sizeof(gpio->heldDirs));
++    memset(gpio->heldLatches, 0, sizeof(gpio->heldLatches));
++    gpio->DoSaveLoad(helper, version);
+ }
+ 
+ template void pxaGpioSave<Savestate<ChunkType>>(PxaGpio *gpio, Savestate<ChunkType> &savestate);
+--- a/src/uarm/uarm/pxa_GPIO.h
++++ b/src/uarm/uarm/pxa_GPIO.h
+@@ -30,6 +30,15 @@
+ void pxaGpioSetState(struct PxaGpio* gpio, uint_fast8_t gpioNum,
+                      bool on);  // we can only set value (and only of input pins), not direction
+ 
++// Power-manager input sensing is independent of GPIO edge IRQs.
++void pxaGpioSetInputObserver(PxaGpio* gpio, GpioChangedNotifF callback, void* context);
++bool pxaGpioIsInput(const PxaGpio* gpio, unsigned pin);
++bool pxaGpioInputLevel(const PxaGpio* gpio, unsigned pin);
++unsigned pxaGpioAlternateFunction(const PxaGpio* gpio, unsigned pin);
++void pxaGpioHoldSleepOutputs(PxaGpio* gpio, const uint32_t* levels);
++void pxaGpioReleaseSleepOutputs(PxaGpio* gpio);
++void pxaGpioSleepReset(PxaGpio* gpio);
++
+ // only for output pins!
+ void pxaGpioSetNotif(struct PxaGpio* gpio, uint_fast8_t gpioNum, GpioChangedNotifF notifF,
+                      void* userData);  // one per pin. set ot NULL to disable
+--- a/src/uarm/uarm/pxa_PwrClk.cpp
++++ b/src/uarm/uarm/pxa_PwrClk.cpp
+@@ -7,6 +7,9 @@
+ 
+ #include "SoC.h"
+ #include "cputil.h"
++#include "pxa_GPIO.h"
++#include "pxa_RTC.h"
++#include "pxa270_KPC.h"
+ #include "savestate/savestateAll.h"
+ 
+ #define PXA_CLOCK_MANAGER_BASE 0x41300000UL
+@@ -15,7 +18,7 @@
+ #define PXA_POWER_MANAGER_BASE 0x40F00000UL
+ #define PXA_POWER_MANAGER_SIZE 0x00000180UL
+ 
+-#define SAVESTATE_VERSION 1
++#define SAVESTATE_VERSION 2
+ 
+ struct PxaPwrClk {
+     struct ArmCpu *cpu;
+@@ -26,6 +29,10 @@
+     // power mgr 270 only
+     uint32_t PSTR, PVCR, PUCR, PKWR, PKSR, PCMD[32];
+     bool turbo, isPXA270;
++    bool sleeping, wakePending;
++    bool restoring;
++    PxaGpio* gpio;
++    PxaKpc* kpc;
+ 
+     template <typename T>
+     void DoSaveLoad(T &chunkHelper, uint32_t version) {
+@@ -47,6 +54,7 @@
+         if (version >= 1)
+             chunkHelper.Do32(PSTR).Do32(PVCR).Do32(PUCR).Do32(PKWR).Do32(PKSR)
+                 .DoBuffer32(PCMD, 32);
++        if (version >= 2) chunkHelper.DoBool(sleeping).DoBool(wakePending);
+     }
+ };
+ 
+@@ -92,9 +100,17 @@
+                 else if (val == 1 && op2 == 0) {
+                     pc->soc->Sleep();
+                 } else if (val == 3 && op2 == 0) {
+-                    // pretend we woke up
+-                    pc->RCSR |= 4;
+-                    cpuReset(pc->cpu, 0);
++                    if (pc->isPXA270 && pc->gpio) {
++                        // Sleep ignores ordinary IRQs; only programmed PM sources exit it.
++                        pc->sleeping = true;
++                        pc->wakePending = false;
++                        pc->PSSR |= 0x71;  // SSS, PH, RDH, OTGPH
++                        pxaGpioHoldSleepOutputs(pc->gpio, pc->PGSR);
++                        pc->soc->Sleep();
++                    } else {
++                        pc->RCSR |= 4;
++                        cpuReset(pc->cpu, 0);
++                    }
+                 } else if (op2 == 0) {
+                     fprintf(stderr,
+                             "Someone tried to set processor power mode (cp14 reg7) to 0x%08lx\n",
+@@ -183,10 +199,10 @@
+             break;
+ 
+         case 0x04 / 4:  // PSSR
+-            if (write)
++            if (write) {
+                 pc->PSSR &= ~val;
+-
+-            else
++                if ((val & 0x10) && pc->gpio) pxaGpioReleaseSleepOutputs(pc->gpio);
++            } else
+                 val = pc->PSSR;
+             break;
+ 
+@@ -294,7 +310,7 @@
+         case 0x54 / 4:  // PKSR
+             if (!pc->isPXA270) return false;
+             if (write)
+-                pc->PKWR &= ~val;
++                pc->PKSR &= ~val;
+             else
+                 val = pc->PKSR;
+             break;
+@@ -358,7 +374,89 @@
+     return pc;
+ }
+ 
++static void pxaPwrClkGpioEdge(void* context, uint32_t pin, bool oldLevel, bool newLevel) {
++    auto* pc = static_cast<PxaPwrClk*>(context);
++    if (!pc->sleeping || pc->restoring || oldLevel == newLevel || !pxaGpioIsInput(pc->gpio, pin))
++        return;
++
++    uint32_t source = pin < 16 ? ((1u << pin) & 0xfe1b) : pin == 35 ? 0x01000000 : 0;
++    if (source && (pc->PWER & source) && ((newLevel ? pc->PRER : pc->PFER) & source))
++        pc->PEDR |= source, pc->wakePending = true;
++
++    const unsigned mux2[] = {121, 38, 53, 40, 36, 121, 121, 121};
++    const unsigned mux3[] = {121, 31, 113, 121};
++    if (pin == mux2[(pc->PWER >> 16) & 7])
++        pc->PEDR |= 1u << 17, pc->wakePending = true;
++    if (pin == mux3[(pc->PWER >> 19) & 3])
++        pc->PEDR |= 1u << 20, pc->wakePending = true;
++}
++
++static void pxaPwrClkRtcAlarm(void* context) {
++    auto* pc = static_cast<PxaPwrClk*>(context);
++    if (pc->sleeping && !pc->restoring && (pc->PWER & 0x80000000)) {
++        pc->PEDR |= 0x80000000;
++        pc->wakePending = true;
++    }
++}
++
++void pxaPwrClkConnectWakeSources(PxaPwrClk* pc, PxaGpio* gpio, PxaRtc* rtc, PxaKpc* kpc) {
++    pc->gpio = gpio;
++    pc->kpc = kpc;
++    pxaGpioSetInputObserver(gpio, pxaPwrClkGpioEdge, pc);
++    pxaRtcSetWakeCallback(rtc, pxaPwrClkRtcAlarm, pc);
++}
++
++bool pxaPwrClkSleeping(const PxaPwrClk* pc) { return pc && pc->sleeping; }
++void pxaPwrClkRestoreInProgress(PxaPwrClk* pc, bool restoring) { pc->restoring = restoring; }
++uint32_t pxaPwrClkSleepRetention(const PxaPwrClk* pc) { return pc->PMFW; }
++bool pxaPwrClkRetainPowerI2c(const PxaPwrClk* pc) { return (pc->PCFR & 0x40) != 0; }
++
++bool pxaPwrClkWakePending(PxaPwrClk* pc) {
++    if (!pc->sleeping || pc->restoring) return false;
++    // PKWR/PKSR bit order and GAFR input muxes: Tables 3-28, 3-29, 24-2.
++    static const struct { unsigned pin, matrixAf, row, directAf, key; } pads[] = {
++        {13,3,7,2,7}, {16,1,5,0,0}, {17,1,6,0,0}, {34,2,3,0,0},
++        {36,3,7,0,0}, {37,3,3,0,0}, {38,2,4,0,0}, {39,1,4,0,0},
++        {90,1,5,0,0}, {91,1,6,0,0}, {93,0,0,1,0}, {94,0,0,1,1},
++        {95,3,6,1,2}, {96,0,0,1,3}, {97,3,3,1,4}, {98,3,4,1,5},
++        {99,3,5,1,6}, {100,1,0,0,0}, {101,1,1,0,0}, {102,1,2,0,0}
++    };
++    const uint8_t rows = pxaKpcMatrixWakeLevels(pc->kpc);
++    const uint8_t keys = pxaKpcDirectWakeLevels(pc->kpc);
++    for (unsigned bit = 0; bit < 20; ++bit) {
++        const auto& pad = pads[bit];
++        if (!(pc->PKWR & (1u << bit)) || !pxaGpioIsInput(pc->gpio, pad.pin)) continue;
++        const unsigned af = pxaGpioAlternateFunction(pc->gpio, pad.pin);
++        const bool matrix = pad.matrixAf && af == pad.matrixAf;
++        const bool direct = pad.directAf && af == pad.directAf;
++        if ((matrix || direct) &&
++            (pxaGpioInputLevel(pc->gpio, pad.pin) ||
++             (matrix && (rows & (1u << pad.row))) || (direct && (keys & (1u << pad.key))))) {
++            pc->PKSR |= 1u << bit;
++            pc->wakePending = true;
++        }
++    }
++    return pc->wakePending;
++}
++
++void pxaPwrClkFinishSleep(PxaPwrClk* pc) {
++    // Table 3-2: retain wake configuration/status, scratchpad, RTC and clocks.
++    memset(pc->PGSR, 0, sizeof(pc->PGSR));
++    if (!pxaPwrClkRetainPowerI2c(pc)) {
++        pc->PVCR = 0;
++        memset(pc->PCMD, 0, sizeof(pc->PCMD));
++    }
++    pc->RCSR |= 4;  // SMR: sleep-exit reset, never set at sleep entry.
++    pc->turbo = false;
++    pc->sleeping = pc->wakePending = false;
++    if (pc->PCFR & 0x4000) {
++        pc->PSSR &= ~0x10u;
++        pxaGpioReleaseSleepOutputs(pc->gpio);
++    }
++}
++
+ void pxaPwrClkReset(struct PxaPwrClk *pc) {
++    pc->sleeping = pc->wakePending = false;
+     pc->CCCR = 0x00000122UL;  // set CCCR to almost default value (we use mult 32 not 27)
+     pc->CKEN = 0x000179EFUL;  // set CKEN to default value
+     pc->OSCR = 0x00000003UL;  // 32KHz oscillator on and stable
+@@ -401,7 +499,13 @@
+     if (!chunk) return;
+ 
+     LoadChunkHelper helper(*chunk);
++    pc->sleeping = pc->wakePending = false;  // v0/v1 never represented power sleep.
++    if (version == 0) {
++        pc->PSTR = pc->PVCR = pc->PUCR = pc->PKWR = pc->PKSR = 0;
++        memset(pc->PCMD, 0, sizeof(pc->PCMD));
++    }
+     pc->DoSaveLoad(helper, version);
++    if (pc->wakePending && !pc->sleeping) loader.NotifyError();
+ }
+ 
+ template void pxaPwrClkSave<Savestate<ChunkType>>(PxaPwrClk *pc, Savestate<ChunkType> &savestate);
+--- a/src/uarm/uarm/pxa_PwrClk.h
++++ b/src/uarm/uarm/pxa_PwrClk.h
+@@ -8,11 +8,21 @@
+ 
+ class SoC;
+ struct PxaPwrClk;
++struct PxaGpio;
++struct PxaRtc;
++struct PxaKpc;
+ 
+ struct PxaPwrClk* pxaPwrClkInit(struct ArmCpu* cpu, struct ArmMem* physMem, class SoC* soc,
+                                 bool isPXA270);
+ 
+ void pxaPwrClkReset(struct PxaPwrClk* pc);
++void pxaPwrClkConnectWakeSources(PxaPwrClk* pc, PxaGpio* gpio, PxaRtc* rtc, PxaKpc* kpc);
++bool pxaPwrClkSleeping(const PxaPwrClk* pc);
++bool pxaPwrClkWakePending(PxaPwrClk* pc);
++uint32_t pxaPwrClkSleepRetention(const PxaPwrClk* pc);
++bool pxaPwrClkRetainPowerI2c(const PxaPwrClk* pc);
++void pxaPwrClkFinishSleep(PxaPwrClk* pc);
++void pxaPwrClkRestoreInProgress(PxaPwrClk* pc, bool restoring);
+ 
+ template <typename T>
+ void pxaPwrClkSave(struct PxaPwrClk* pc, T& savestate);
+--- a/src/uarm/uarm/pxa_RTC.cpp
++++ b/src/uarm/uarm/pxa_RTC.cpp
+@@ -25,6 +25,8 @@
+     uint32_t RTAR;  // RTC alarm
+     uint32_t RTTR;  // RTC trim - we ignore this alltogether
+     uint8_t RTSR;   // RTC status
++    void (*wakeCallback)(void*);
++    void* wakeContext;
+ 
+     template <typename T>
+     void DoSaveLoad(T &chunkHelper, uint32_t version) {
+@@ -46,7 +48,11 @@
+     if (rtc->lastAlarmCheck < rtc->RTAR) {
+         const uint64_t now = palmEpochSeconds();
+ 
+-        if ((rtc->RTSR & 0x04) && now >= rtc->RTAR) rtc->RTSR |= 1;
++        if (now >= rtc->RTAR) {
++            if (rtc->RTSR & 0x04) rtc->RTSR |= 1;
++            // PXA27x 21.4.6.2: sleep wake is independent of RTSR[ALE].
++            if (rtc->wakeCallback) rtc->wakeCallback(rtc->wakeContext);
++        }
+ 
+         rtc->lastAlarmCheck = now;
+     }
+@@ -142,6 +148,13 @@
+     pxaRtcTickHz(rtc);
+ }
+ 
++void pxaRtcSetWakeCallback(PxaRtc* rtc, void (*callback)(void*), void* context) {
++    rtc->wakeCallback = callback;
++    rtc->wakeContext = context;
++}
++
++void pxaRtcRefreshInterrupts(PxaRtc* rtc) { pxaRtcPrvUpdateInterrupts(rtc); }
++
+ template <typename T>
+ void pxaRtcSave(struct PxaRtc *rtc, T &savestate) {
+     auto chunk = savestate.GetChunk(ChunkType::pxaRtc, SAVESTATE_VERSION);
+--- a/src/uarm/uarm/pxa_RTC.h
++++ b/src/uarm/uarm/pxa_RTC.h
+@@ -8,6 +8,9 @@
+ #include "pxa_IC.h"
+ 
+ struct PxaRtc;
++
++void pxaRtcSetWakeCallback(PxaRtc* rtc, void (*callback)(void*), void* context);
++void pxaRtcRefreshInterrupts(PxaRtc* rtc);
+ 
+ struct PxaRtc* pxaRtcInit(struct ArmMem* physMem, struct PxaIc* ic);
+ 
+--- a/src/uarm/uarm/pxa_TIMR.cpp
++++ b/src/uarm/uarm/pxa_TIMR.cpp
+@@ -90,7 +90,7 @@
+ }
+ 
+ static void pxaTimrAdvanceCounter(PxaTimr* timr, uint32_t ticks);
+-static void pxaTimrSynchronize(PxaTimr* timr) {
++void pxaTimrSynchronize(PxaTimr* timr) {
+     if (!timr->elapsedTicks) return;
+     const uint32_t elapsed = timr->elapsedTicks(timr->clockContext);
+     if (elapsed > timr->synchronizedTicks) {
+@@ -209,6 +209,8 @@
+     timr->synchronizedTicks -= consumed;
+     pxaTimrAdvanceCounter(timr, ticks - consumed);
+ }
++
++void pxaTimrRestartClock(PxaTimr* timr) { timr->synchronizedTicks = 0; }
+ void pxaTimrEnableBatching(PxaTimr* timr, uint32_t (*elapsedTicks)(void*),
+                            void (*reschedule)(void*), void* context) {
+     timr->elapsedTicks = elapsedTicks;
+--- a/src/uarm/uarm/pxa_TIMR.h
++++ b/src/uarm/uarm/pxa_TIMR.h
+@@ -10,6 +10,9 @@
+ #include "pxa_IC.h"
+ 
+ struct PxaTimr;
++
++void pxaTimrRestartClock(PxaTimr* timr);
++void pxaTimrSynchronize(PxaTimr* timr);
+ 
+ struct PxaTimr* pxaTimrInit(struct ArmMem* physMem, struct PxaIc* ic);
+ 
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -244,6 +244,8 @@
+ 
+     nand = sp.nand;
+ 
++    if (socRev == 2) pxaPwrClkConnectWakeSources(pwrClk, gpio, rtc, kpc);
++
+     if (deviceType == DeviceType5::deviceTypeTX)
+         scheduler->ScheduleTask(SCHEDULER_TASK_AUX_3, 1_msec, 1);
+ 
+@@ -273,6 +275,9 @@
+ bool SocPXA::LcdEnabled() { return pxaLcdIsEnabled(lcd); }
+ 
+ uint32_t SocPXA::DispatchTicks(uint32_t clientType, uint32_t batchedTicks) {
++    // Sleep stops the peripheral clocks. RTC and external input delivery remain live.
++    if (PowerSleeping() && clientType != SCHEDULER_TASK_RTC && clientType != SCHEDULER_TASK_AUX_2)
++        return 0;
+     switch (clientType) {
+         case SCHEDULER_TASK_TIMER:
+             pxaTimrTick(tmr, batchedTicks);
+@@ -284,6 +289,7 @@
+ 
+         case SCHEDULER_TASK_RTC:
+             pxaRtcTick(rtc);
++            if (pxaPwrClkWakePending(pwrClk)) ResumePowerSleep();
+             return 1;
+ 
+         case SCHEDULER_TASK_LCD:
+@@ -304,6 +310,10 @@
+ 
+         case SCHEDULER_TASK_AUX_2:
+             PumpEventQueues();
++            if (PowerSleeping()) {
++                if (pxaPwrClkWakePending(pwrClk)) ResumePowerSleep();
++                return 1;
++            }
+             deviceNetworkPeriodic(dev);
+             if (fastAudio) { fastAudio->Tick(GetTime()); UpdateFastAudioRoute(); }
+             return 1;
+@@ -321,6 +331,11 @@
+ void SocPXA::OnSetFramebufferDirty() { pxaLcdSetFramebufferDirty(lcd); }
+ 
+ bool SocPXA::OnSleep() {
++    if (PowerSleeping()) {
++        pxaTimrSynchronize(tmr);
++        cpuSetSlowPath(cpu, SLOW_PATH_REASON_RESCHEDULE);
++        return true;
++    }
+     if (cpuHasPendingInterrupt(cpu)) return false;
+ 
+     scheduler->RescheduleTaskAtLeast(SCHEDULER_TASK_TIMER, pxaTimrTicksToNextInterrupt(tmr));
+@@ -332,6 +347,73 @@
+ void SocPXA::OnWakeup() {
+     scheduler->RescheduleTaskAtLeast(SCHEDULER_TASK_TIMER, 1);
+     cpuSetSlowPath(cpu, SLOW_PATH_REASON_RESCHEDULE);
++}
++
++bool SocPXA::PowerSleeping() const { return pxaPwrClkSleeping(pwrClk); }
++
++void SocPXA::Wakeup(uint8_t wakeupSource) {
++    // Interrupt-controller wake implements idle, not PWRMODE=3 sleep (3.6.9).
++    if (PowerSleeping() || restoringPowerState) return;
++    SoC::Wakeup(wakeupSource);
++}
++
++void SocPXA::LoadSleepReset(SavestateLoader<ChunkType>& loader) {
++    // Use the same reset register values as cold boot, but only for reset domains
++    // in PXA27x Table 3-2. Do not load RAM, flash, RTC, clocks, scheduler, VSD,
++    // board peripherals, card identity or host configuration from this snapshot.
++    cpuLoad(cpu, loader);
++    pxaUartLoad(ffUart, loader, 0);
++    pxaUartLoad(stUart, loader, 2);
++    pxaUartLoad(btUart, loader, 3);
++    for (unsigned i = 0; i < 3; ++i) pxaSspLoad(ssp[i], loader, i);
++    pxaAC97Load(ac97, loader);
++    pxaDmaLoad(dma, loader);
++    pxaI2sLoad(i2s, loader);
++    pxaI2cLoad(i2c, loader, 0);
++    if (!pxaPwrClkRetainPowerI2c(pwrClk)) pxaI2cLoad(pwrI2c, loader, 1);
++    pxaMemCtrlrLoad(memCtrl, loader);
++    for (unsigned i = 0; i < 4; ++i) pxaPwmLoad(pwm[i], loader, i);
++    if (!(pxaPwrClkSleepRetention(pwrClk) & 0x0c)) pxaTimrLoad(tmr, loader);
++    pxaMmcLoad(mmc, loader);
++    pxaLcdLoad(lcd, loader);
++    pxaImcLoad(imc, loader);
++    pxa270UdcLoad(udc2, loader);
++    pxa270wmmxLoad(wmmx, loader);
++    pxaKpcSleepReset(kpc);
++    pxaGpioSleepReset(gpio);
++    pxaIcLoad(ic, loader);  // after deassertions from reset peripherals
++    pxaRtcRefreshInterrupts(rtc);  // retained alarm lines survive the IC reset
++}
++
++void SocPXA::ResumePowerSleep() {
++    const uint32_t retention = pxaPwrClkSleepRetention(pwrClk);
++    struct ResetDomains {
++        SocPXA& soc;
++        void Load(SavestateLoader<ChunkType>& loader) { soc.LoadSleepReset(loader); }
++    } domains{*this};
++    SavestateLoader<ChunkType> loader;
++    if (!loader.Load(powerOnState->GetBuffer(), powerOnState->GetSize(), domains))
++        ERR("failed to restore sleep-reset domains");
++
++    // Unretained SRAM has undefined contents on hardware; choose zero deterministically.
++    for (unsigned bank = 0; bank < 4; ++bank) {
++        if (retention & (0x100u << bank)) continue;
++        memset(bufferSram.buffer + bank * 0x10000, 0, 0x10000);
++        memoryBufferMarkRangeDirty(&bufferSram, bank * 0x10000, 0x10000);
++    }
++    pxaPwrClkFinishSleep(pwrClk);
++    *pacePatch = {};
++    if (audioQueue) audioQueueClear(audioQueue);
++    if (fastAudio) { fastAudio->Reset(); UpdateFastAudioRoute(); }
++    pxaLcdResetPaletteBuffer(lcd);
++    pxaTimrRestartClock(tmr);
++    scheduler->ScheduleTask(SCHEDULER_TASK_TIMER, 1_sec / 3250000ULL, 1);
++    scheduler->ScheduleTask(SCHEDULER_TASK_LCD, 1_sec / (64 * 3 * 60), 1);
++    scheduler->ScheduleTask(SCHEDULER_TASK_AUX_1, 36_sec / 3686400ULL, 1);
++    scheduler->ScheduleTask(SCHEDULER_TASK_AUX_3, 1_msec, 1);
++    if (deviceI2sConnected()) scheduler->ScheduleTask(SCHEDULER_TASK_I2S, 1_sec / 44100, 1);
++    SchedulePcmTask();
++    SoC::Wakeup(0);
+ }
+ 
+ void SocPXA::OnSetAudioQueue(struct AudioQueue *audioQueue) {
+@@ -378,6 +460,15 @@
+ }
+ 
+ void SocPXA::OnLoad(SavestateLoader<ChunkType> &loader) {
++    restoringPowerState = true;
++    pxaPwrClkRestoreInProgress(pwrClk, true);
++    struct RestoreGuard {
++        SocPXA& soc;
++        ~RestoreGuard() {
++            soc.restoringPowerState = false;
++            pxaPwrClkRestoreInProgress(soc.pwrClk, false);
++        }
++    } restoreGuard{*this};
+     vsdLoad(vSD, loader);
+ 
+     pxaUartLoad(ffUart, loader, 0);
+@@ -423,8 +514,9 @@
+     }
+ 
+     deviceLoad(dev, loader);
++    if (PowerSleeping() && !sleeping) { loader.NotifyError(); return; }
+     if (GetDeviceType() == DeviceType5::deviceTypeTX) {
+-        scheduler->ScheduleTask(SCHEDULER_TASK_TIMER, 1_sec / 3250000ULL, 1);
++        scheduler->ScheduleTask(SCHEDULER_TASK_TIMER, 1_sec / 3250000ULL, PowerSleeping() ? 0 : 1);
+         *pacePatch = {};
+         if (!PrepareM68kSupport() && cpuIsModePace(cpu)) {
+             loader.NotifyError();
+@@ -601,6 +693,7 @@
+ #ifndef __EMSCRIPTEN__
+ uint32_t SocPXA::TimerElapsedCB(void* ctx) {
+     auto* self = static_cast<SocPXA*>(ctx);
++    if (self->PowerSleeping() && self->sleeping) return 0;
+     const uint64_t extra = self->runningCyclesPerSecond
+         ? uint64_t(cpuCyclesInProgress(self->cpu)) * 1_sec / self->runningCyclesPerSecond : 0;
+     return self->scheduler->ElapsedTicks(SCHEDULER_TASK_TIMER, extra);
+--- a/src/uarm/uarm/soc_PXA.h
++++ b/src/uarm/uarm/soc_PXA.h
+@@ -52,6 +52,8 @@
+     DisplayMode GetDisplayMode() override;
+     void SuspendTimerInterrupts(bool suspendInterrupts) override;
+     bool LcdEnabled() override;
++    bool PowerSleeping() const;
++    void Wakeup(uint8_t wakeupSource) override;
+     bool PrepareM68kSupport() override;
+ 
+     uint32_t DispatchTicks(uint32_t clientType, uint32_t batchedTicks);
+@@ -86,6 +88,9 @@
+     void OnSave(T &savestate);
+ 
+    private:
++    void ResumePowerSleep();
++    void LoadSleepReset(SavestateLoader<ChunkType>& loader);
++    bool restoringPowerState{false};
+     void UpdateFastAudioRoute();
+     std::unique_ptr<FastAudio> fastAudio;
+     bool fastAudioRouted{false};

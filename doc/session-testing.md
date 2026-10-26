@@ -35,9 +35,36 @@ Restored TX schedules are migrated to the corrected timer rate. Timer frequency 
 
 ## TX power transition diagnostics
 
-TX sleep is still incomplete. The power manager currently starts sleep-exit reset
-immediately, without waiting for a programmed wake event. Successful display
-restoration does not establish that the device stayed asleep.
+Patch 0033 separates PXA27x power sleep (`PWRMODE=3`) from interrupt-driven
+idle. Power sleep stops CPU and peripheral-clock work until a qualified GPIO
+edge, keypad input level, or RTC alarm match. Wake enable, edge, direction and
+keypad alternate-function settings are honored; ordinary IRQs cannot wake it.
+RTC alarm wake does not require its CPU interrupt enable. Sleep and pending wake
+state persist in power chunk version 2; versions 0/1 load without power sleep.
+GPIO chunk version 1 preserves sleep output holds; version 0 still loads and E2
+continues writing version 0.
+
+Sleep exit resets CPU/CP15 and the nonretained peripheral register domains using
+the existing power-on register snapshot. It preserves RTC, wake configuration,
+scratchpad, clock settings, external device state and SDRAM. PSLR controls timer
+and SRAM retention; unretained SRAM banks become zero (hardware contents are
+undefined). GPIO outputs use PGSR and remain held until PSSR[PH] is cleared.
+Reset is applied at the scheduler wake boundary, outside input and IRQ callbacks.
+Session loading releases stale host keys without generating a new wake event.
+
+The ROM confirms a keypad wake with manual scans. This also required correcting
+the manual column-select bit position, inclusion of the last column, and valid
+row mask, plus PKSR write-one-to-clear handling. `make test-pxa-power` exercises
+wake qualification, clock stopping, retained/reset state, manual keypad scans,
+legacy chunks and fresh-SoC sleep restoration without firmware.
+
+References: Intel PXA27x Developer's Manual, Table 3-2 and sections 3.6.9,
+3.8.1.4–3.8.1.16, 18.4.1, 18.4.5 and 21.4.6.2
+([manual](https://courses.cs.washington.edu/courses/cse466/08wi/labs/l5/pxa27x_developers_manual.pdf)).
+This models the implemented TX wake sources, not all PXA power modes. Standby,
+deep sleep, USB/MSL/power-fault wake, extended OS timers, oscillator/regulator
+delays, and complete electrical pad/pull-up behavior remain unsupported. The RTC
+still uses host wall time, and physical-device timing has not been compared.
 
 Patch 0030 fixes an earlier failure in the ROM's resume path. The first fault was
 an instruction prefetch translation fault immediately after enabling the MMU;
@@ -66,9 +93,10 @@ heavy emulator ./build/test-tx-power-rom /private/tx.session
 heavy emulator ./build/test-tx-power-rom /private/TX-nor.bin /private/TX-nand.bin
 ```
 
-The test works on in-memory copies, performs two power-key transitions and
-round-trips full sessions into fresh SoCs with the display off and on. Exit 1
-means boot, display, resume or persistence failed. Exit 2 means resume and
+The test works on in-memory copies, allows up to twenty guest seconds for ROM
+sleep entry, performs two power-key transitions and round-trips full sessions into fresh SoCs after confirmed sleep entry and while
+awake. It checks that the CPU remains stationary for ten seconds of emulated
+time without input. Exit 1 means boot, display, resume or persistence failed. Exit 2 means resume and
 persistence worked but the device woke without a wake event. Only exit 0 is a
 complete sleep/wake pass. The fixture must be in a UI that handles the power key;
 booting raw firmware waits 60 seconds of guest time before testing it.
