@@ -26,14 +26,20 @@ def pcm_metrics(path, skip_seconds=3):
     skip = min(frames, int(skip_seconds * 44100))
     examined = samples[skip * 2:]
     peak = max(abs(min(examined, default=0)), abs(max(examined, default=0)))
-    zeros = longest = run = 0
+    zeros = longest = run = longest_internal = 0
+    first_signal = last_signal = None
     it = iter(examined)
-    for left, right in zip(it, it):
+    for frame, (left, right) in enumerate(zip(it, it), start=skip):
         if left == 0 and right == 0:
             zeros += 1
             run += 1
             longest = max(longest, run)
         else:
+            if first_signal is None:
+                first_signal = frame
+            else:
+                longest_internal = max(longest_internal, run)
+            last_signal = frame
             run = 0
     block_bytes = 441 * 4
     body = raw[skip * 4:]
@@ -45,6 +51,10 @@ def pcm_metrics(path, skip_seconds=3):
             'examined_frames': len(examined) // 2, 'peak': peak,
             'clipped_samples': sum(v in (-32768, 32767) for v in examined),
             'zero_frames': zeros, 'longest_zero_frames': longest,
+            'longest_internal_zero_frames': longest_internal,
+            'trailing_zero_frames': run,
+            'signal_span_seconds': (last_signal - first_signal + 1) / 44100
+                                   if first_signal is not None else 0,
             'silent_10ms_blocks': silent, 'complete_10ms_blocks': complete,
             'sha256': hashlib.sha256(raw).hexdigest()}
 
@@ -56,6 +66,33 @@ def pulse_list(kind):
 def cpu_ticks():
     values = list(map(int, Path('/proc/stat').read_text().splitlines()[0].split()[1:9]))
     return sum(values), values[3] + values[4]
+
+
+def thread_scheduling(pid, schedstats_enabled=False):
+    """Sample actual policies, including broker demotions, without changing them."""
+    rows = []
+    tasks = Path('/proc/%d/task' % pid)
+    try:
+        entries = list(tasks.iterdir())
+    except FileNotFoundError:
+        return rows
+    for task in entries:
+        tid = int(task.name)
+        try:
+            policy = os.sched_getscheduler(tid)
+            runtime, waiting, slices = map(int, (task / 'schedstat').read_text().split())
+            rows.append({'tid': tid, 'name': (task / 'comm').read_text().strip(),
+                         'producer': tid == pid,
+                         'policy': policy & ~os.SCHED_RESET_ON_FORK,
+                         'reset_on_fork': bool(policy & os.SCHED_RESET_ON_FORK),
+                         'priority': os.sched_getparam(tid).sched_priority,
+                         'runtime_ns': runtime,
+                         'runqueue_wait_ns': waiting if schedstats_enabled else None,
+                         'timeslices': slices})
+        except (ProcessLookupError, FileNotFoundError):
+            # A worker can finish between enumerating tasks and reading it.
+            continue
+    return rows
 
 
 def stop(process):
@@ -103,6 +140,11 @@ def run(args):
               'continuous_fixture': args.continuous, 'replay': str(args.replay) if args.replay else None}
     result['emulation_cpu'] = args.cpu
     try:
+        result['kernel_schedstats_enabled'] = (
+            Path('/proc/sys/kernel/sched_schedstats').read_text().strip() == '1')
+    except FileNotFoundError:
+        result['kernel_schedstats_enabled'] = False
+    try:
         with (args.output / 'frond.log').open('wb') as log, (args.output / 'capture.raw').open('wb') as raw:
             process = subprocess.Popen(command, env=env,
                                        stdin=subprocess.PIPE if args.export_databases else subprocess.DEVNULL, stdout=log,
@@ -117,13 +159,16 @@ def run(args):
                 time.sleep(.1)
             if not stream:
                 raise RuntimeError('Frond PulseAudio stream not found; use the PulseAudio SDL backend')
+            pid_text = stream.get('properties', {}).get('application.process.id', '')
+            if not pid_text.isdigit():
+                raise RuntimeError('PulseAudio stream does not identify its process')
+            pid = int(pid_text)
+            if os.getpgid(pid) != process.pid:
+                raise RuntimeError('PulseAudio stream process is outside this benchmark job')
+            result['emulator_pid'] = pid
+            result['initial_thread_scheduling'] = thread_scheduling(
+                pid, result['kernel_schedstats_enabled'])
             if args.cpu is not None:
-                pid_text = stream.get('properties', {}).get('application.process.id', '')
-                if not pid_text.isdigit():
-                    raise RuntimeError('PulseAudio stream does not identify its process')
-                pid = int(pid_text)
-                if os.getpgid(pid) != process.pid:
-                    raise RuntimeError('PulseAudio stream process is outside this benchmark job')
                 workers = []
                 # Keep audio/GPU workers free to run elsewhere; bind only the emulator thread.
                 for task in Path('/proc/%d/task' % pid).iterdir():
@@ -134,7 +179,6 @@ def run(args):
                             workers.append(tid)
                         except ProcessLookupError:
                             pass
-                result['emulator_pid'] = pid
                 result['emulator_affinity'] = sorted(os.sched_getaffinity(pid))
                 result['unbound_worker_threads'] = workers
             sink = next(s for s in pulse_list('sinks') if s['index'] == stream['sink'])
@@ -170,7 +214,9 @@ def run(args):
                 total = now[0] - prior[0]
                 loads.append({'elapsed_seconds': time.monotonic() - started,
                               'host_cpu_busy_fraction': 1 - (now[1] - prior[1]) / total if total else None,
-                              'loadavg': os.getloadavg()})
+                              'loadavg': os.getloadavg(),
+                              'thread_scheduling': thread_scheduling(
+                                  pid, result['kernel_schedstats_enabled'])})
                 prior = now
             result['exit_code'] = process.returncode
             stop(recorder)

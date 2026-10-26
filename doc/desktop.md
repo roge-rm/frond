@@ -73,6 +73,44 @@ the GUI; **View → Emulator Log** exposes diagnostic details.
 files also work through Open Session. A GUI-controlled session currently supports
 Palm TX only.
 
+## Audio scheduling
+
+On a PipeWire desktop, check the sound server's scheduling as well as Frond's
+log when investigating gaps:
+
+```sh
+systemctl status rtkit-daemon
+ps -eLo pid,tid,cls,rtprio,comm | rg 'pipewire|data-loop|frond'
+journalctl --user -u pipewire -u pipewire-pulse -u xdg-desktop-portal
+```
+
+PipeWire's active `data-loop` workers should receive real-time priority when
+RTKit is available. A running RTKit service alone does not prove that requests
+from the audio server succeed.
+
+If the desktop portal reports `Could not get pidns` during priority requests,
+PipeWire supports using RTKit directly. Put this override in
+`~/.config/pipewire/pipewire.conf.d/90-direct-rtkit.conf` and
+`~/.config/pipewire/pipewire-pulse.conf.d/90-direct-rtkit.conf`:
+
+```conf
+module.rt.args = {
+    rtportal.enabled = false
+}
+```
+
+The same override in `~/.config/pipewire/client.conf.d/90-direct-rtkit.conf`
+applies to PipeWire clients. Restart the user audio services, which briefly
+interrupts audio in other apps, then check the actual worker priorities:
+
+```sh
+systemctl --user restart pipewire pipewire-pulse wireplumber
+```
+
+This uses the existing broker permissions and CPU limits. Remove the override
+files and restart those services to restore portal selection. See PipeWire's
+[RT module options](https://docs.pipewire.org/page_module_rt.html).
+
 ## Build and package
 
 ```sh

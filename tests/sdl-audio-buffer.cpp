@@ -1,6 +1,8 @@
 // Exercise the production SDL audio callback without a host audio thread.
 #include <cassert>
 #include <cstdio>
+#include <iostream>
+#include <sstream>
 #include <vector>
 #include <SDL.h>
 #include "SdlAudioDriver.h"
@@ -47,7 +49,11 @@ int main() {
         assert(audioQueuePendingSamples(queue) == 600);
         uint32_t stream[512];
         auto callback = [&]() {
+            std::ostringstream output;
+            auto* previous = std::cout.rdbuf(output.rdbuf());
             driver.AudioCallback(reinterpret_cast<uint8_t*>(stream), sizeof(stream));
+            std::cout.rdbuf(previous);
+            assert(output.str().empty());  // Even an underrun must avoid console I/O.
         };
         push(1000);
         callback();

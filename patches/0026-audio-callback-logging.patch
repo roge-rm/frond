@@ -1,0 +1,48 @@
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -418,6 +418,14 @@
+         uint64_t lastSpeedDump = startedAt;
+         bool waitForPreviewAudio = false;
+         uint64_t lastAudioUnderruns = audioDriver.GetUnderrunCount();
++        auto reportAudioUnderruns = [&]() {
++            const auto underruns = audioDriver.GetUnderrunCount();
++            if (underruns != lastAudioUnderruns && options.experimentalFastAudio)
++                static_cast<SocPXA*>(soc)->NotifyFastAudioUnderrun();
++            // Console output can block; keep it out of the audio callback.
++            for (; lastAudioUnderruns < underruns; ++lastAudioUnderruns)
++                cout << "audio underrun" << endl;
++        };
+ 
+         while (true) {
+             uint64_t now = timestampUsec();
+@@ -438,11 +446,8 @@
+             // RPC and CLI controls can enable sound after --no-sound startup.
+             if (soc->PcmOutputEnabled()) soc->SetPcmSuspended(audioDriver.GetAudioBackpressure());
+ 
++            reportAudioUnderruns();
+             if (options.experimentalFastAudio) {
+-                const auto underruns = audioDriver.GetUnderrunCount();
+-                if (underruns != lastAudioUnderruns)
+-                    static_cast<SocPXA*>(soc)->NotifyFastAudioUnderrun();
+-                lastAudioUnderruns = underruns;
+                 mainLoop.SetTimesliceUsec(static_cast<SocPXA*>(soc)->FastAudioActive()
+                     ? 1000000 / 120 : 1000000 / MAIN_LOOP_FPS);
+             }
+@@ -502,6 +507,7 @@
+         }
+ 
+         audioDriver.Pause();
++        reportAudioUnderruns();
+         if (!options.runFor && !options.desktopSocket) cli::Stop();
+ 
+         if (options.framebufferOutput && !sdlRenderer->SaveFramebuffer(options.framebufferOutput->c_str())) {
+--- a/src/uarm/native/SdlAudioDriver.cpp
++++ b/src/uarm/native/SdlAudioDriver.cpp
+@@ -94,7 +94,6 @@
+     if (!audioBuffering && samplesPending < bufferThresholdStart) {
+         audioBuffering = true;
+         underrunCount.fetch_add(1, std::memory_order_relaxed);
+-        std::cout << "audio underrun" << std::endl;
+     }
+ 
+     if (!audioBackpressure && samplesPending > backpressureThresholdStart) audioBackpressure = true;

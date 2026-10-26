@@ -102,6 +102,19 @@ but does not reserve a core or control CPU frequency. It is not a playback
 default. Pair timing with PCM continuity checks, since a responsive menu alone
 does not establish reliable sound.
 
+The capture tool records each emulator thread's actual Linux scheduling policy,
+priority and accumulated CPU time at startup and once per second. This also
+shows whether a requested real-time policy was granted or later removed. The
+`host_load_samples` entries include these readings alongside host load. Run-queue
+wait time is recorded when kernel scheduler statistics are enabled; otherwise
+it is `null`, since a zero counter would not establish that the thread never
+waited. Sampling does not change scheduling policy or kernel settings.
+
+PCM metrics report the longest internal silent run and trailing silence
+separately. This helps distinguish a playback gap from silence captured during
+shutdown. The strict continuity verdict still includes trailing silence; these
+additional fields do not relax its checks.
+
 `make test` covers onset detection, background rejection, missed-tap attribution,
 guest-stage attribution and new-frame/presentation requirements. Sessions and
 raw diagnostic exports stay outside Git.
