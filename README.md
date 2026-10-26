@@ -104,7 +104,7 @@ up. Start with normal sound.
 
 ## Debian package
 
-To build and install a package locally:
+To build and install a package locally (`dpkg-dev` and `binutils` are also needed):
 
 ```sh
 make deb
@@ -118,8 +118,12 @@ emulator, launcher and documentation, with no firmware or Palm apps.
 
 ```sh
 make test
-make test-desktop
+QT_QPA_PLATFORM=offscreen make test-desktop
+make test-build-tools check-reconstruction
 ```
+
+See [build validation](doc/build-validation.md) for independent reconstruction,
+package checks and automated Trixie coverage.
 
 The core tests use synthetic memory and device data, so they don't need Palm
 firmware. The [application testing guide](doc/app-testing.md) covers tests that

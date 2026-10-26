@@ -1,21 +1,24 @@
 .PHONY: all clean prepare test test-cpu test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-pxa-timer benchmark-session test-native-governor test-db-list test-export-checkpoint test-db-backup
+BUILD_JOBS ?= 4
 CPU_TEST_LDLIBS ?= -lcurl -lpthread -lresolv $(shell pkg-config --libs slirp)
-PATCHES := $(sort $(wildcard patches/*.patch))
 all: out/frond desktop
 
 prepare: build/source/.prepared
 
-build/source/.prepared: $(PATCHES) tools/prepare.py
+# Check input content on every invocation, including removed patches and the gitlink.
+.PHONY: FORCE
+FORCE:
+
+build/source/.prepared: FORCE
 	python3 tools/prepare.py
 
-out/frond: build/source/.prepared
-	$(MAKE) -C build/source/src/common bin
+out/frond: build/source/.prepared build/source/src/common/libcommon.a
 	$(MAKE) -C build/source/src/uarm bin
 	mkdir -p out
 	cp build/source/src/uarm/cp-uarm out/frond.new
 	mv -f out/frond.new out/frond
 
-test: prepare test-device-profiles test-tx-serial test-gameplay-metrics test-mmu-fast-path test-pxa-power test-compatibility test-developer-run test-xscale-prefetch test-device-controls test-scheduler test-wifi test-host-network test-network-reliability test-keyboard test-network test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pace-debug test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup
+test: test-build-tools prepare test-device-profiles test-tx-serial test-gameplay-metrics test-mmu-fast-path test-pxa-power test-compatibility test-developer-run test-xscale-prefetch test-device-controls test-scheduler test-wifi test-host-network test-network-reliability test-keyboard test-network test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pace-debug test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup
 	python3 tests/audio-metrics.py
 	python3 tests/audio-timing.py
 	python3 tests/tx-baseline.py
@@ -163,7 +166,7 @@ benchmark-menu: out/frond
 .PHONY: desktop test-desktop deb
 desktop: out/frond
 	cmake -S desktop -B build/desktop -DCMAKE_BUILD_TYPE=RelWithDebInfo
-	cmake --build build/desktop -j4
+	+cmake --build build/desktop --parallel $(BUILD_JOBS)
 	cp build/desktop/frond-desktop out/frond-desktop.new
 	mv -f out/frond-desktop.new out/frond-desktop
 
@@ -276,7 +279,9 @@ test-tx-power-rom: out/frond
 		tests/tx-power-rom.cpp @build/power-rom-core.rsp build/source/src/common/libcommon.a \
 		$(CPU_TEST_LDLIBS) -o build/test-tx-power-rom
 
-# Standalone networking checks need no emulator binary or private Palm image.
+# Share one recursive library build across emulator and standalone tests,
+# and always check for edits in generated common source.
+.PHONY: build/source/src/common/libcommon.a
 build/source/src/common/libcommon.a: build/source/.prepared
 	$(MAKE) -C build/source/src/common bin
 
@@ -345,3 +350,11 @@ test-device-profiles: out/frond device-profiles
 		build/source/src/common/libcommon.a -o build/test-device-profiles
 	./build/test-device-profiles
 	python3 tests/device-input.py
+
+# Firmware-free build/package policy and independently reconstructed source.
+.PHONY: test-build-tools check-reconstruction
+test-build-tools:
+	python3 tests/build-tools.py
+
+check-reconstruction:
+	python3 tools/check-reconstruction.py
