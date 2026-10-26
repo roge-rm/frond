@@ -101,6 +101,14 @@ int main() {
         mouse(SDL_MOUSEMOTION,0,height*scale+1);input.HandleEvents();guest.pen(false);guest.expect({});
         const auto home=deviceButtonRect(profile,profile.buttons[0],width,height);
         int x=(home.x+10)*scale,y=(home.y+10)*scale;
+        // Host hardware shortcuts work without attaching the Palm keyboard.
+        for (auto [host, palm] : {std::pair<SDL_Keycode,KeyId>{SDLK_LEFT,keyIdLeft},
+                {SDLK_RIGHT,keyIdRight}, {SDLK_UP,keyIdUp}, {SDLK_DOWN,keyIdDown},
+                {SDLK_RETURN,keyIdSelect}, {SDLK_F1,keyIdHard1}, {SDLK_F2,keyIdHard2},
+                {SDLK_F3,keyIdHard3}, {SDLK_F4,keyIdHard4}, {SDLK_ESCAPE,keyIdPower}}) {
+            key(host,true); input.HandleEvents(); guest.expect({{palm,true}});
+            key(host,false); input.HandleEvents(); guest.expect({{palm,false}});
+        }
         // The keyboard and pointer can hold the same key without releasing one another.
         key(SDLK_F1,true);mouse(SDL_MOUSEBUTTONDOWN,x,y);input.HandleEvents();guest.expect({{keyIdHard1,true}});
         mouse(SDL_MOUSEBUTTONUP,x,y);input.HandleEvents();guest.expect({});assert(input.PressedButtons()&(1u<<keyIdHard1));

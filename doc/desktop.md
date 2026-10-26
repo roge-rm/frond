@@ -88,6 +88,7 @@ attached. With that accessory detached, F1–F4 operate the four application
 buttons, arrow keys navigate and Enter selects. The existing Escape power-key
 shortcut remains available, but TX sleep/resume is incomplete; the strip does
 not expose a Power button.
+The same shortcuts are listed in **Help → Hardware Keyboard Controls**.
 
 The strip stays beneath the display when the view rotates. Its clicks are
 separate from touchscreen calibration. Normal and double-size displays include

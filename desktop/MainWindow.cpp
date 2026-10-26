@@ -193,7 +193,16 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     log = new QPlainTextEdit(logDialog); log->setReadOnly(true); log->setMaximumBlockCount(1000);
     logLayout->addWidget(log);
     view->addAction(tr("Emulator &Log"), logDialog, &QWidget::show);
-    menuBar()->addMenu(tr("&Help"))->addAction(tr("&About Frond"), this, [this] {
+    auto* help = menuBar()->addMenu(tr("&Help"));
+    help->addAction(tr("Hardware &Keyboard Controls"), this, [this] {
+        QMessageBox::information(this, tr("Hardware Keyboard Controls"),
+            tr("With the Palm window focused and the infrared keyboard detached:\n\n"
+               "Arrow keys: five-way navigation\nEnter: centre select\n"
+               "F1: Home\nF2: Calendar\nF3: Contacts\nF4: Web\n"
+               "Escape: Power (sleep and wake are experimental)\n\n"
+               "Palm OS button assignments may change what the application buttons do."));
+    });
+    help->addAction(tr("&About Frond"), this, [this] {
         QMessageBox::about(this, tr("About Frond"), tr("Frond 0.2.0\nExperimental Palm TX emulator\nGPL-3.0-or-later"));
     });
     connect(&client, &DesktopClient::diagnostic, this, [this](const QString& text) {
