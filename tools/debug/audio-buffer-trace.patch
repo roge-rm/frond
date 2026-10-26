@@ -1,0 +1,284 @@
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -3530,6 +3530,8 @@
+     return cycleAcc;
+ }
+ 
++extern void audioGapTraceCpu(ArmCpu*, uint32_t);
++
+ template <int memorySystemKind, bool injected>
+ ATTR_EMCC_NOINLINE static uint32_t cpuCycleThumb(struct ArmCpu *cpu, uint32_t cycles) {
+     uint32_t cycleAcc = 0;
+@@ -3550,6 +3552,10 @@
+             if (!cpu->T) return cycleAcc;
+         }
+ 
++        static const bool audioTrace = getenv("FROND_GUEST_TRACE") != nullptr;
++        if (audioTrace && cpu->curInstrPC >= 0x2004b69c && cpu->curInstrPC <= 0x2004b6b4)
++            audioGapTraceCpu(cpu, cpu->curInstrPC);
++
+         cycleAcc += 1;
+ 
+         // FCSE
+@@ -3610,6 +3616,11 @@
+             cpu->curInstrPC = cpu->regs[REG_NO_PC];
+             if (cpu->T) return cycleAcc;
+         }
++
++        static const bool audioTrace = getenv("FROND_GUEST_TRACE") != nullptr;
++        if (audioTrace && ((cpu->curInstrPC >= 0x200873e8 && cpu->curInstrPC <= 0x20087980) ||
++                          (cpu->curInstrPC >= 0x2009d5a8 && cpu->curInstrPC <= 0x2009d738)))
++            audioGapTraceCpu(cpu, cpu->curInstrPC);
+ 
+         cycleAcc += 1;
+ 
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -4,6 +4,7 @@
+ 
+ #include "soc_PXA.h"
+ 
++#include <algorithm>
+ #include <cstddef>
+ #include <cstdlib>
+ 
+@@ -64,6 +65,57 @@
+ #define PCM_HZ_ENABLED 44300
+ #define PCM_HZ_DISABLED (44100 / 3)
+ 
++// Diagnostic only: one active SoC, verified TX firmware, stereo PCM mixer.
++static SocPXA* audioTraceSoc;
++static bool audioTraceProfileChecked, audioTraceProfileSupported;
++uint64_t audioGapTraceTime() { return audioTraceSoc ? audioTraceSoc->GetTime() : 0; }
++void audioGapTraceCpu(ArmCpu* cpu, uint32_t pc) {
++    switch(pc) {
++        case 0x200873e8: case 0x20087458: case 0x20087488: case 0x2008752c:
++        case 0x20087764: case 0x200877b0: case 0x20087980:
++        case 0x20087884: case 0x20087888:
++        case 0x2004b69c: case 0x2004b6a0: case 0x2004b6b0: case 0x2004b6b4:
++        case 0x2009d5b8: case 0x2009d6c0: case 0x2009d72c: break;
++        default: return;
++    }
++    bool failed=false;
++    auto word = [&](uint32_t addr) {
++        uint32_t v=0;
++        if (!cpuMemOpExternal(cpu,&v,addr,4,false)) failed=true;
++        return v;
++    };
++    if (!audioTraceProfileChecked) {
++        audioTraceProfileChecked=true;
++        audioTraceProfileSupported =
++            word(0x200873e8)==0xe92d41f0 && word(0x20087764)==0xe92d4df0 &&
++            word(0x200877b0)==0xe3500000 && word(0x20087884)==0xeb0013ba &&
++            word(0x2009d5b8)==0xe3500000 && word(0x2009d6c0)==0xe59d3004 &&
++            word(0x2009d72c)==0xe59d1000 && word(0x2004b69c)==0xf8d2f01b && !failed;
++        fprintf(stderr,"GUESTPROFILE supported=%d\n",audioTraceProfileSupported);
++    }
++    if (!audioTraceProfileSupported) return;
++    uint32_t r[16];
++    for(unsigned i=0;i<16;++i) r[i]=cpuGetRegExternal(cpu,i);
++    uint32_t obj=pc<0x200873e8 ? 0 : pc==0x200873e8 || pc==0x20087764 ? r[0] :
++        pc<0x20087764 ? r[4] : pc<=0x20087980 ? r[6] : 0;
++    const uint32_t free=obj?word(obj+16):0, size=obj?word(obj+32):0,
++        buf=obj?word(obj+36):0, need=obj?word(obj+68):0,
++        out=pc>=0x2009d5a8?word(r[13]+4):0, token=pc>=0x2009d5a8?word(r[13]):0;
++    fprintf(stderr,"GUEST time=%llu pc=%x r0=%x r1=%x r2=%x r3=%x r4=%x r5=%x r6=%x r7=%x lr=%x obj=%x free=%u size=%u buf=%x need=%u out=%x token=%x failed=%d\n",
++        (unsigned long long)audioGapTraceTime(),pc,r[0],r[1],r[2],r[3],r[4],r[5],r[6],r[7],r[14],obj,
++        free,size,buf,need,out,token,failed);
++    if(pc==0x2009d72c && !failed && out) {
++        uint32_t zero=0,peak=0;
++        for(unsigned i=0;i<4096;i+=4) {
++            uint32_t v=word(out+i); if(!v) ++zero;
++            peak=std::max(peak,unsigned(std::abs(int(int16_t(v)))));
++            peak=std::max(peak,unsigned(std::abs(int(int16_t(v>>16)))));
++        }
++        fprintf(stderr,"MIXOUT time=%llu addr=%x frames=1024 zeros=%u peak=%u failed=%d\n",
++            (unsigned long long)audioGapTraceTime(),out,zero,peak,failed);
++    }
++}
++
+ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, const uint32_t romSize,
+                uint8_t *nandContent, size_t nandSize, int gdbPort, uint_fast8_t socRev) {
+     RomInfo5 romInfo(romData, romSize);
+@@ -91,6 +143,37 @@
+     cpuSetM68kSyscallHandler(cpu, NetworkSimulation::Dispatch, &networkSimulation);
+ #endif
+     patchDispatchSetCpu(patchDispatch, cpu);
++    audioTraceSoc=this;
++    audioTraceProfileChecked = audioTraceProfileSupported = false;
++
++    if (getenv("FROND_HAL_AUDIO")) {
++        patchDispatchAddPatch(patchDispatch, 0x4320, [](void* context, uint32_t, uint32_t* r) {
++            auto soc = static_cast<SocPXA*>(context);
++            unsigned zeros=0, longest=0, run=0, peak=0, failed=0;
++            if (r[2] > 16384 || (r[2]&3) || r[1] > UINT32_MAX-r[2]) return true;
++            for (unsigned off=0; off<r[2]; off+=4) {
++                uint32_t sample;
++                if (!cpuMemOpExternal(soc->cpu, &sample, r[1]+off, 4, false)) { failed=1; break; }
++                if (!sample) { ++zeros; longest=std::max(longest,++run); } else run=0;
++                peak=std::max(peak,unsigned(std::abs(int(int16_t(sample)))));
++                peak=std::max(peak,unsigned(std::abs(int(int16_t(sample>>16)))));
++            }
++            fprintf(stderr,"HALPCM host=%llu guest=%llu channel=%u frames=%u zeros=%u longest=%u peak=%u failed=%u\n",
++                (unsigned long long)timestampUsec(), (unsigned long long)soc->GetTime(),
++                r[0],r[2]/4,zeros,longest,peak,failed);
++            return true;
++        }, nullptr, this);
++    }
++
++    if (getenv("FROND_HAL_AUDIO")) {
++        for (uint32_t trap : {0x4314u, 0x4318u, 0x4324u, 0x8d0cu, 0x8d10u, 0x8d14u, 0x8d18u, 0x8d1cu})
++            patchDispatchAddPatch(patchDispatch, trap, [](void* context, uint32_t trap, uint32_t* r) {
++                auto* soc = static_cast<SocPXA*>(context);
++                fprintf(stderr, "LIFECYCLE host=%llu guest=%llu trap=%x r0=%x r1=%x\n",
++                    (unsigned long long)timestampUsec(), (unsigned long long)soc->GetTime(), trap, r[0], r[1]);
++                return true;
++            }, nullptr, this);
++    }
+ 
+     syscallDispatch = initSyscallDispatch(this);
+     // TX boots through IPL/NAND. E2 ROM patches are not validated for this layout.
+--- a/src/uarm/uarm/pxa_DMA.cpp
++++ b/src/uarm/uarm/pxa_DMA.cpp
+@@ -21,7 +21,11 @@
+ 
+ #define SAVESTATE_VERSION 0
+ 
++extern uint64_t audioGapTraceTime();
++
+ struct PxaDmaChannel {
++    // Observer state is deliberately excluded from snapshots.
++    uint32_t traceWords, traceZeros, tracePeak, traceSource, traceDescriptor, traceBytes;
+     uint32_t DAR;  // descriptor address register
+     uint32_t SAR;  // source address register
+     uint32_t TAR;  // target address register
+@@ -124,6 +128,24 @@
+         ch->SAR = nextS & ~0x03;
+         ch->TAR = nextT & ~0x03;
+         ch->CR = nextC;
++        ch->traceWords=ch->traceZeros=ch->tracePeak=0;
++        ch->traceSource=nextS;
++        ch->traceDescriptor=dar;
++        ch->traceBytes=nextC & 0x1fff;
++        static const bool trace = getenv("FROND_GUEST_TRACE") != nullptr;
++        if (trace && nextT == 0x40500040) {
++            unsigned peak = 0;
++            for (unsigned off = 0; off < (nextC & 0x1fff); off += 32) {
++                uint32_t sample = 0;
++                if (!memAccess<4, false>(dma->mem, nextS+off, &sample)) break;
++                int value = (int16_t)sample;
++                unsigned mag = value < 0 ? -value : value;
++                if (mag > peak) peak = mag;
++            }
++            fprintf(stderr, "STAGE DMA %llu %x %x %x %x %u\n",
++                (unsigned long long)timestampUsec(), dar, nextD, nextS, nextC, peak);
++        }
++
+ 
+         if (nextC & 0x00400000ul)  // start irq requested?
+             ch->CSR |= 2;
+@@ -211,6 +233,20 @@
+             return true;
+         }
+ 
++        static const bool traceTransfer = getenv("FROND_GUEST_TRACE") != nullptr;
++        if (traceTransfer && dst==0x40500040 && each==4) {
++            if(!ch->traceWords) ch->traceSource=src;
++            ++ch->traceWords; if(!t) ++ch->traceZeros;
++            unsigned a=std::abs(int(int16_t(t))), b=std::abs(int(int16_t(t>>16)));
++            if(a>ch->tracePeak) ch->tracePeak=a;
++            if(b>ch->tracePeak) ch->tracePeak=b;
++            if((ch->CR & 0x1fff)==each) {
++                fprintf(stderr,"DMAPCM time=%llu source=%x words=%u zeros=%u peak=%u descriptor=%x complete=%d\n",
++                    (unsigned long long)audioGapTraceTime(),ch->traceSource,ch->traceWords,ch->traceZeros,ch->tracePeak,
++                    ch->traceDescriptor,ch->traceBytes != 0 && ch->traceWords*4==ch->traceBytes);
++                ch->traceWords=ch->traceZeros=ch->tracePeak=0;
++            }
++        }
+         if (ch->CR & 0x80000000ul) ch->SAR += each;
+         if (ch->CR & 0x40000000ul) ch->TAR += each;
+         ch->CR -= each;
+@@ -544,6 +580,9 @@
+ 
+     LoadChunkHelper helper(*chunk);
+     dma->DoSaveLoad(helper);
++    for (auto& ch : dma->channels) {
++        ch.traceWords=ch.traceZeros=ch.tracePeak=ch.traceSource=ch.traceDescriptor=ch.traceBytes=0;
++    }
+ }
+ 
+ template void pxaDmaSave<Savestate<ChunkType>>(PxaDma* dma, Savestate<ChunkType>& savestate);
+--- a/src/uarm/uarm/pxa_AC97.cpp
++++ b/src/uarm/uarm/pxa_AC97.cpp
+@@ -59,6 +59,7 @@
+ 
+     uint8_t pocr, picr, mccr, posr, pisr, mcsr, car, mocr, mosr, micr, misr;
+     uint32_t gcr, gsr, pcdr;
++    uint64_t tracePcmEmptySamples;
+ 
+     // prmary audio is PCM
+     // secondary is mic
+@@ -447,6 +448,7 @@
+ bool pxaAC97clientClientWantData(struct PxaAC97 *ac97, enum Ac97Codec which, uint32_t *dataPtr) {
+     struct Ac97CodecStruct *cd = pxaAC97prvCodecPtrGet(ac97, which);
+ 
++    if (which == Ac97PrimaryAudio && !cd->txFifo.numItems) ++ac97->tracePcmEmptySamples;
+     (void)pxaAC97PrvFifoGet(ac97, &cd->txFifo, dataPtr);
+ 
+     // they still get data, just last valid data. not fresh new data
+@@ -482,3 +484,5 @@
+                                                      SavestateProbe<ChunkType> &savestate);
+ template void pxaAC97Load<SavestateLoader<ChunkType>>(PxaAC97 *ac97,
+                                                       SavestateLoader<ChunkType> &loader);
++
++uint64_t pxaAC97TraceEmptySamples(PxaAC97 *ac97) { return ac97->tracePcmEmptySamples; }
+--- a/src/uarm/uarm/pxa_AC97.h
++++ b/src/uarm/uarm/pxa_AC97.h
+@@ -38,4 +38,6 @@
+ template <typename T>
+ void pxaAC97Load(struct PxaAC97 *ac97, T &loader);
+ 
++uint64_t pxaAC97TraceEmptySamples(PxaAC97 *ac97);
++
+ #endif  // _PXA_AC97_H_
+--- a/src/uarm/uarm/ac97dev_WM9712L.cpp
++++ b/src/uarm/uarm/ac97dev_WM9712L.cpp
+@@ -482,6 +482,20 @@
+ }
+ 
+ static void wm9712LprvNewAudioPlaybackSample(struct WM9712L *wm, uint32_t samp) {
++    static const bool enabled = getenv("FROND_PCM_TRACE") != nullptr;
++    static uint64_t frames = 0, zeros = 0, run = 0, longest = 0, previousEmpty = 0;
++    if (enabled) {
++        ++frames;
++        if (!samp) { ++zeros; ++run; if (run > longest) longest = run; }
++        else run = 0;
++        if (frames % 44100 == 0) {
++            uint64_t empty = pxaAC97TraceEmptySamples(wm->ac97);
++            fprintf(stderr, "GUESTPCM frames=%llu zeros=%llu longest=%llu fifo_empty=%llu rate=%u\n",
++                (unsigned long long)frames, (unsigned long long)zeros,
++                (unsigned long long)longest, (unsigned long long)(empty-previousEmpty), wm->dacRate);
++            zeros = 0; longest = 0; previousEmpty = empty;
++        }
++    }
+     if (wm->audioQueue) audioQueuePush(wm->audioQueue, samp);
+ }
+ 
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -485,6 +485,15 @@
+                 sdlEventHandler.ClearQuitRequested();
+             }
+ 
++            if (getenv("FROND_HAL_AUDIO")) {
++                static bool pressure = false;
++                if (pressure != audioDriver.GetAudioBackpressure()) {
++                    pressure = audioDriver.GetAudioBackpressure();
++                    fprintf(stderr, "PRESSURE host=%llu guest=%llu active=%d\n",
++                        (unsigned long long)now, (unsigned long long)soc->GetTime(), pressure);
++                }
++            }
++
+             // RPC and CLI controls can enable sound after --no-sound startup.
+             // Backpressure must stop all guest clocks together. Suspending just
+             // the codec lets DMA and the guest stream deadlines run ahead.

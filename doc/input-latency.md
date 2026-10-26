@@ -160,3 +160,36 @@ The observer logs on the emulation thread and changes measured throughput. It
 uses the existing TX HAL trap layout and is a diagnostic, not a general sound
 API monitor. Run uninstrumented comparisons separately and reverse the observer
 before ordinary builds. No host real-time scheduling changes are required.
+
+For deeper TX stereo-buffer diagnosis, use
+`tools/debug/audio-buffer-trace.patch` **instead of** `audio-timing-trace.patch`.
+It includes those observers and adds signature-checked firmware callback/mixer
+boundaries, queue capacity, mixed-buffer contents and actual DMA transfer counts.
+Use a disposable prepared source tree; preserve existing captures before rebuilding.
+
+```sh
+patch -d build/source -p1 < tools/debug/audio-buffer-trace.patch
+heavy build make -j4 out/frond benchmark-session
+# Freeze the resulting binary and input session before collecting evidence.
+FROND_HAL_AUDIO=1 FROND_GUEST_TRACE=1 FROND_PCM_TRACE=1 \
+  heavy emulator build/benchmark-session PRIVATE_SESSION 10 50 PRIVATE_OUTPUT.raw \
+  > PRIVATE_TRACE.log 2>&1
+python3 tools/analyze-audio-buffers.py PRIVATE_TRACE.log
+```
+
+`GUESTPROFILE supported=1` means the observer's TX instruction signatures matched;
+other firmware layouts are unsupported. Callback and mixer durations are elapsed
+**guest** time, including preemption. `filtered_accumulate` covers only the final
+filtered-sample accumulation helper, not the entire resampler. Actual `DMAPCM`
+counts describe successfully transferred stereo words; partial descriptors after
+restore are excluded from complete-block counts. Unreadable guest records are
+reported separately. These diagnostics do not detect repeated nonzero audio or
+prove physical continuity. Lifecycle events and backward guest clocks invalidate
+pending duration pairs.
+
+Insufficient guest CPU budget can exhaust a stream queue or let DMA reach a
+cleared output buffer before mixing finishes, without starving the codec FIFO.
+A higher budget can remove that failure in a particular workload; it does not
+establish a safe universal CPU floor. Compare frozen uninstrumented PCM as well
+as traced runs. No physical TX comparison is available. Reverse the optional
+observer before ordinary builds; production behavior is unchanged.
