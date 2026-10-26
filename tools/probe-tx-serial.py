@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Observe TX Palm Serial Manager support in private session copies; never claim HotSync."""
 import argparse
+from fractions import Fraction
 import importlib.util
 import json
 from pathlib import Path
@@ -112,6 +113,34 @@ def check_trace(text):
     return {'uart': '40100000', 'bytes': packet}
 
 
+def check_baud_trace(text):
+    start = None
+    count = 0
+    observed = []
+    for line in text.splitlines():
+        if not line.startswith(('UART_TX_START', 'UART_TX_CLOCK')):
+            continue
+        match = re.fullmatch(r'UART_TX_(START|CLOCK) uart=40100000 ticks=([0-9]+) divisor=([0-9]+) lcr=([0-9a-f]{2})', line)
+        require(match is not None, 'Invalid or wrong-UART baud trace')
+        kind, tick, divisor, lcr = match[1], int(match[2]), int(match[3]), int(match[4], 16)
+        require(0 < divisor <= 65535 and not lcr & 0x80, 'Invalid transmit clock configuration')
+        config = (divisor, lcr)
+        if kind == 'START':
+            start, count, active_config = tick, 0, config
+        else:
+            require(start is not None and active_config == config, 'Missing start or changed frame configuration')
+            data = 5 + (lcr & 3)
+            stop = Fraction(3, 2) if lcr & 4 and data == 5 else 2 if lcr & 4 else 1
+            frame = 1 + data + bool(lcr & 8) + stop
+            count += 1
+            elapsed = Fraction(102400 * divisor, 921600) * frame * count
+            expected = start + (elapsed.numerator + elapsed.denominator - 1) // elapsed.denominator
+            require(tick == expected, 'UART byte completed outside its configured baud/frame boundary')
+            observed.append({'tick': tick, 'divisor': divisor, 'lcr': lcr})
+    require(len(observed) == 8, 'Expected eight baud-paced byte completions')
+    return observed
+
+
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--session', type=Path, required=True, help='user-supplied ready TX session')
@@ -120,6 +149,8 @@ def parser():
     p.add_argument('--output', type=Path, required=True, help='new private result directory')
     p.add_argument('--require-ffuart-trace', action='store_true',
                    help='require exact eight-byte FFUART TX in each phase (optional observer build)')
+    p.add_argument('--require-baud-trace', action='store_true',
+                   help='also require baud/frame-correct UART completion ticks (updated observer)')
     p.add_argument('--timeout', type=runner.positive, default=180, help='wall seconds per phase including slot wait')
     return p
 
@@ -152,9 +183,11 @@ def run(args):
             require(result['status'] == 'ok', f'{phase}: {result.get("stage")}: {result.get("error")}')
             archive = Path(result['artifacts']['exports'][0]['path'])
             report['runs'][-1]['observations'] = check_records(read_log(archive), token)
-            if args.require_ffuart_trace:
+            if args.require_ffuart_trace or args.require_baud_trace:
                 log = (root / phase / 'core.log').read_text(errors='replace')
                 report['runs'][-1]['uart_tx_trace'] = check_trace(log)
+                if args.require_baud_trace:
+                    report['runs'][-1]['uart_baud_trace'] = check_baud_trace(log)
             session = Path(result['artifacts']['session'])
         require(runner.sha256(args.session) == report['input_sha256'], 'Input session changed')
         report['status'] = 'observed'

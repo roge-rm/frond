@@ -15,6 +15,7 @@ static uint32_t read(unsigned reg){uint32_t value;assert(access(context,PXA_STUA
 int main(){
     auto* uart=pxaUartInit(nullptr,{[](void*,uint32_t task){assert(task==RESCHEDULE_TASK_UART);++reschedules;},nullptr},nullptr,PXA_STUART_BASE,PXA_I_STUART,true);
     pxaUartSetFuncs(uart,[](void*)->uint_fast16_t{auto value=incoming;incoming=UART_CHAR_NONE;return value;},nullptr,[](void*){return incoming!=UART_CHAR_NONE;},nullptr,nullptr);
+    write(3,0x83);write(0,96);write(1,0);write(3,3); // start the baud clock
     assert(!pxaUartIrReceiveEnabled(uart));
     incoming=0x7b;write(8,3);assert(pxaUartIrReceiveEnabled(uart)&&reschedules);
     write(4,8);write(1,0x41); // OUT2 and UUE/RAVIE

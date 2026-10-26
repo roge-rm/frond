@@ -63,6 +63,23 @@ class SerialProbe(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 probe.check_trace('\n'.join(bad))
 
+    def test_baud_trace_rejects_early_drift_missing_and_wrong_config(self):
+        good = ['UART_TX_START uart=40100000 ticks=0 divisor=96 lcr=03']
+        good += [f'UART_TX_CLOCK uart=40100000 ticks={tick} divisor=96 lcr=03'
+                 for tick in (107,214,320,427,534,640,747,854)]
+        self.assertEqual(len(probe.check_baud_trace('\n'.join(good))), 8)
+        palm = ['UART_TX_START uart=40100000 ticks=0 divisor=96 lcr=07']
+        palm += [f'UART_TX_CLOCK uart=40100000 ticks={tick} divisor=96 lcr=07'
+                 for tick in (118,235,352,470,587,704,822,939)]
+        self.assertEqual(len(probe.check_baud_trace('\n'.join(palm))), 8)
+        broken = [good[1:], good[:-1], [s.replace('divisor=96', 'divisor=0') for s in good],
+                  [s.replace('40100000','40700000') for s in good],
+                  [s.replace('ticks=107 ', 'ticks=106 ') for s in good],
+                  [s.replace('ticks=854 ', 'ticks=856 ') for s in good]]
+        for bad in broken:
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                probe.check_baud_trace('\n'.join(bad))
+
     def test_stale_incomplete_duplicate_out_of_order_rejected(self):
         good = invocation(opened=True)
         cases = [invocation('b'*32), good[:-1], good + good, good[:3] + [good[2]] + good[3:],

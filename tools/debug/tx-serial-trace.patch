@@ -1,22 +1,31 @@
 --- a/src/uarm/uarm/pxa_UART.cpp
 +++ b/src/uarm/uarm/pxa_UART.cpp
-@@ -178,7 +178,14 @@
+@@ -51,6 +51,7 @@
+     uint8_t irq;
+     uint32_t cyclesSinceRecv;
+     uint32_t transmitRemaining; // half-bit * divisor units; one batch advances 18
++    uint64_t traceTicks; // optional observer only, not serialized
+     unsigned ioCheckpoints;    // host-only nesting; never serialized
+ 
+     bool Paced() const { return fifoOccupancy && baseAddr != PXA_HWUART_BASE; }
+@@ -191,7 +192,15 @@
      (void)chr;
      (void)userData;
  
 -    // nothing to do here
-+    // Optional observer build only. Bound logs even if guest firmware floods TX.
-+    // The normal default callback still discards output and never opens a peer.
 +    static unsigned traced = 0;
 +    if (getenv("FROND_SERIAL_TRACE") && traced < 128) {
 +        ++traced;
 +        const auto* uart = static_cast<const PxaUart*>(userData);
 +        fprintf(stderr, "SERIAL_TX uart=%08x char=%03x\n", uart->baseAddr, unsigned(chr));
++        fprintf(stderr, "UART_TX_CLOCK uart=%08x ticks=%llu divisor=%u lcr=%02x\n",
++                uart->baseAddr, (unsigned long long)uart->traceTicks,
++                uart->Divisor(), unsigned(uart->LCR));
 +    }
  }
  
  static uint16_t pxaUartPrvGetchar(struct PxaUart *uart) {
-@@ -311,6 +318,12 @@
+@@ -325,6 +334,16 @@
          const uint32_t raw = size == 1 ? *(uint8_t *)buf :
              size == 2 ? *(uint16_t *)buf : *(uint32_t *)buf;
          val = raw & 0xff;
@@ -25,7 +34,19 @@
 +            ++traced;
 +            fprintf(stderr, "SERIAL_THR uart=%08x size=%u data=%08x fcr=%02x ier=%02x\n",
 +                    uart->baseAddr, unsigned(size), raw, unsigned(uart->FCR), unsigned(uart->IER));
++            if (uart->LSR & UART_LSR_TEMT)
++                fprintf(stderr, "UART_TX_START uart=%08x ticks=%llu divisor=%u lcr=%02x\n",
++                        uart->baseAddr, (unsigned long long)uart->traceTicks,
++                        uart->Divisor(), unsigned(uart->LCR));
 +        }
  
          switch (pa) {
              case 0:
+@@ -542,6 +561,7 @@
+ 
+     if (uart->ioCheckpoints || !uart->Clocked()) return;
+ 
++    ++uart->traceTicks;
+     if (uart->clientTickF) uart->clientTickF(uart->callbackData);
+ 
+     // 102400 batches/sec; the 921600/divisor baud clock advances nine bits

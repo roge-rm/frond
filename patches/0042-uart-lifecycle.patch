@@ -1,0 +1,255 @@
+--- a/src/uarm/native/ReadOnlyGuest.h
++++ b/src/uarm/native/ReadOnlyGuest.h
+@@ -14,7 +14,7 @@
+ // Restore the guest after export, including when an injected call times out.
+ class ReadOnlyGuest {
+  public:
+-    explicit ReadOnlyGuest(SoC& soc) : soc(soc), networkCheckpoint(soc.networkSimulation), nandDirty(soc.IsNandDirty()) {
++    explicit ReadOnlyGuest(SoC& soc) : soc(soc), serialCheckpoint(soc), networkCheckpoint(soc.networkSimulation), nandDirty(soc.IsNandDirty()) {
+         if (!soc.Save()) throw std::runtime_error("cannot checkpoint guest");
+         state = copy(soc.GetSavestate());
+         ram = copy(soc.GetMemoryData());
+@@ -57,6 +57,7 @@
+         if (!saved.empty()) std::memcpy(b.data, saved.data(), saved.size());
+     }
+     SoC& soc;
++    SoC::SerialCheckpoint serialCheckpoint;
+     NetworkSimulation::Checkpoint networkCheckpoint;
+     bool nandDirty, sdDirty{false};
+     std::vector<uint8_t> state, ram, nand, ramPages, nandPages, sd, sdPages;
+--- a/src/uarm/uarm/SoC.h
++++ b/src/uarm/uarm/SoC.h
+@@ -35,6 +35,15 @@
+     NetworkSimulation networkSimulation;
+     std::unique_ptr<LibertasCF> wirelessDevice;
+ #endif
++    class SerialCheckpoint {
++       public:
++        explicit SerialCheckpoint(SoC& soc) : soc(soc) { soc.BeginSerialCheckpoint(); }
++        ~SerialCheckpoint() { soc.EndSerialCheckpoint(); }
++        SerialCheckpoint(const SerialCheckpoint&) = delete;
++        SerialCheckpoint& operator=(const SerialCheckpoint&) = delete;
++       private:
++        SoC& soc;
++    };
+     virtual bool KeyboardAttached() const { return false; }
+     virtual void AttachKeyboard(bool) {}
+     virtual bool KeyboardKey(uint8_t, bool) { return false; }
+@@ -111,6 +120,8 @@
+    protected:
+     // Actual SoC needs to implement those, the other virtuals are taken
+     // care of in soc_generic.h
++    virtual void BeginSerialCheckpoint() {}
++    virtual void EndSerialCheckpoint() {}
+     virtual void OnSetFramebufferDirty() = 0;
+     virtual bool OnSleep() = 0;
+     virtual void OnWakeup() = 0;
+--- a/src/uarm/uarm/pxa_UART.cpp
++++ b/src/uarm/uarm/pxa_UART.cpp
+@@ -15,7 +15,7 @@
+ 
+ #define UART_FIFO_EMPTY 0xFF
+ 
+-#define SAVESTATE_VERSION 1
++#define SAVESTATE_VERSION 2
+ 
+ struct UartFifo {
+     uint8_t read;
+@@ -50,6 +50,17 @@
+ 
+     uint8_t irq;
+     uint32_t cyclesSinceRecv;
++    uint32_t transmitRemaining; // half-bit * divisor units; one batch advances 18
++    unsigned ioCheckpoints;    // host-only nesting; never serialized
++
++    bool Paced() const { return fifoOccupancy && baseAddr != PXA_HWUART_BASE; }
++    uint32_t Divisor() const { return (uint32_t(DLH) << 8) | DLL; }
++    uint32_t CharacterUnits() const {
++        const uint32_t dataBits = 5 + (LCR & 3);
++        const uint32_t stopHalfBits = (LCR & 4) ? (dataBits == 5 ? 3 : 4) : 2;
++        return Divisor() * (2 * (1 + dataBits + ((LCR & 8) ? 1 : 0)) + stopHalfBits);
++    }
++    bool Clocked() const { return (IER & 0x40) && (!Paced() || Divisor()); }
+ 
+     uint8_t IER;  // interrupt enable register
+     uint8_t IIR;  // interrupt information register
+@@ -84,6 +95,8 @@
+             .Do8(ISR);
+         if (version>=1) chunkHelper.Do32(cyclesSinceRecv);
+         else cyclesSinceRecv=legacyIdle;
++        if (version >= 2) chunkHelper.Do32(transmitRemaining);
++        else transmitRemaining = 0;
+     }
+ };
+ 
+@@ -158,7 +171,7 @@
+ 
+ static void pxaUartPrvIrq(struct PxaUart *uart, bool raise) {
+     pxaIcInt(uart->ic, uart->irq,
+-             !(uart->MCR & UART_MCR_LOOP) && (uart->MCR & UART_MCR_OUT2) &&
++             (uart->IER & UART_IER_UUE) && !(uart->MCR & UART_MCR_LOOP) && (uart->MCR & UART_MCR_OUT2) &&
+                  raise /* only raise if ints are enabled */);
+ }
+ 
+@@ -269,6 +282,7 @@
+     if (uart->LSR & UART_LSR_TEMT) {  // if transmit, put in shift register immediately if it's idle
+ 
+         uart->transmitShift = v;
++        uart->transmitRemaining = uart->CharacterUnits();
+         uart->LSR &= ~UART_LSR_TEMT;
+         uart->reschedule.rescheduleCb(uart->reschedule.ctx, RESCHEDULE_TASK_UART);
+     } else if (uart->FCR & UART_FCR_TRFIFOE) {  // put in tx fifo if in fifo mode
+@@ -338,12 +352,6 @@
+                         t &= ~UART_IER_DMAE;  // undo the change
+                     }
+ 
+-                    if (t & UART_IER_UUE) {
+-                        if (val & UART_IER_UUE) {
+-                            uart->LSR = UART_LSR_TEMT | UART_LSR_TDRQ;
+-                            uart->MSR = UART_MSR_CTS;
+-                        }
+-                    }
+                     uart->IER ^= t;
+                 }
+                 break;
+@@ -353,7 +361,8 @@
+                 if (!(val & UART_FCR_TRFIFOE) || (t & UART_FCR_TRFIFOE)) {
+                     pxaUartPrvFifoFlush(&uart->TX);
+                     pxaUartPrvFifoFlush(&uart->RX);
+-                    uart->LSR = UART_LSR_TEMT | UART_LSR_TDRQ;
++                    const bool shifting = uart->Paced() && !(uart->LSR & UART_LSR_TEMT);
++                    uart->LSR = UART_LSR_TDRQ | (shifting ? 0 : UART_LSR_TEMT);
+                     uart->IIR = (val & UART_FCR_TRFIFOE ? UART_IIR_FIFOES : 0) | UART_IIR_NOINT;
+                 }
+                 if (val & UART_FCR_TRFIFOE) {
+@@ -363,7 +372,13 @@
+                     }
+                     if (val & UART_FCR_RESETTF) {
+                         pxaUartPrvFifoFlush(&uart->TX);
+-                        uart->LSR |= UART_LSR_TEMT | UART_LSR_TDRQ;
++                        // RESETTF clears the FIFO, not the current shift frame
++                        // (PXA27x manual table 10-12). Keep its remaining time.
++                        uart->LSR |= UART_LSR_TDRQ;
++                        if (!uart->Paced()) {
++                            uart->LSR |= UART_LSR_TEMT;
++                            uart->transmitRemaining = 0;
++                        }
+                     }
+                 }
+                 // Reset bits are pulses, including when FIFO mode was already on.
+@@ -472,7 +487,7 @@
+     }
+ 
+     if (recalcValues) pxaUartPrvRecalc(uart);
+-    if (write && uart->clientIsActiveF && uart->clientIsActiveF(uart->callbackData))
++    if (write && pxaUartTaskRequired(uart))
+         uart->reschedule.rescheduleCb(uart->reschedule.ctx,RESCHEDULE_TASK_UART);
+ 
+     return true;
+@@ -525,10 +540,22 @@
+     uint_fast16_t v;
+     uint_fast8_t t;
+ 
++    if (uart->ioCheckpoints || !uart->Clocked()) return;
++
+     if (uart->clientTickF) uart->clientTickF(uart->callbackData);
+ 
+-    // first process sending (if any)
+-    if (!(uart->LSR & UART_LSR_TEMT)) {
++    // 102400 batches/sec; the 921600/divisor baud clock advances nine bits
++    // (18 half-bits) per batch. Carry fractional time between queued frames.
++    uint32_t budget = 18;
++    while (!(uart->LSR & UART_LSR_TEMT)) {
++        if (uart->Paced()) {
++            if (!uart->transmitRemaining) uart->transmitRemaining = uart->CharacterUnits();
++            if (uart->transmitRemaining > budget) {
++                uart->transmitRemaining -= budget;
++                break;
++            }
++            budget -= uart->transmitRemaining;
++        }
+         pxaUartPrvPutchar(uart, uart->transmitShift);
+ 
+         if (uart->FCR & UART_FCR_TRFIFOE) {  // fifo mode
+@@ -548,6 +575,8 @@
+             uart->transmitShift = uart->transmitHolding;
+             uart->LSR |= UART_LSR_TDRQ;
+         }
++        uart->transmitRemaining = (uart->LSR & UART_LSR_TEMT) ? 0 : uart->CharacterUnits();
++        if (!uart->Paced() || !budget) break;
+     }
+ 
+     // now process receiving
+@@ -658,13 +687,21 @@
+ }
+ 
+ bool pxaUartIrReceiveEnabled(const PxaUart *uart) {
+-    return (uart->IER & UART_IER_UUE) && (uart->ISR & 0x02);
++    return uart->Clocked() && (uart->ISR & 0x02);
+ }
+ 
+ bool pxaUartTaskRequired(struct PxaUart *uart) {
++    if (uart->ioCheckpoints || !uart->Clocked()) return false;
+     return (uart->clientIsActiveF ? uart->clientIsActiveF(uart->callbackData) : false) ||
+            ((uart->LSR & UART_LSR_DR) && uart->cyclesSinceRecv < uart->ReceiveTimeoutTicks()) ||
+            (uart->LSR & UART_LSR_TEMT) == 0;
++}
++
++void pxaUartBeginCheckpoint(PxaUart* uart) { ++uart->ioCheckpoints; }
++void pxaUartEndCheckpoint(PxaUart* uart) {
++    if (!uart->ioCheckpoints) ERR("unbalanced UART checkpoint");
++    if (!--uart->ioCheckpoints)
++        uart->reschedule.rescheduleCb(uart->reschedule.ctx, RESCHEDULE_TASK_UART);
+ }
+ 
+ template <typename T>
+--- a/src/uarm/uarm/pxa_UART.h
++++ b/src/uarm/uarm/pxa_UART.h
+@@ -48,6 +48,10 @@
+ 
+ bool pxaUartIrReceiveEnabled(const PxaUart *uart);
+ 
++// Freeze callbacks and serial progress while temporary guest work is rolled back.
++void pxaUartBeginCheckpoint(PxaUart* uart);
++void pxaUartEndCheckpoint(PxaUart* uart);
++
+ bool pxaUartTaskRequired(struct PxaUart *uart);
+ 
+ template <typename T>
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -638,6 +638,15 @@
+ 
+ void SocPXA::SchedulePcmTask() { UpdateSchedulePcm(); }
+ 
++void SocPXA::BeginSerialCheckpoint() {
++    for (auto* uart : {ffUart, stUart, btUart, hwUart})
++        if (uart) pxaUartBeginCheckpoint(uart);
++}
++void SocPXA::EndSerialCheckpoint() {
++    for (auto* uart : {ffUart, stUart, btUart, hwUart})
++        if (uart) pxaUartEndCheckpoint(uart);
++}
++
+ void SocPXA::CycleBatch0() {
+     pxaDmaPeriodic(dma);
+     pxaUartProcess(ffUart);
+--- a/src/uarm/uarm/soc_PXA.h
++++ b/src/uarm/uarm/soc_PXA.h
+@@ -63,11 +63,16 @@
+     bool KeyboardKey(uint8_t code, bool down) override;
+     void ReleaseKeyboard() override;
+ 
++    // Model access for development probes; creates no host connection.
++    PxaUart* GetSerialUart() { return GetDeviceType() == deviceTypeTX ? ffUart : nullptr; }
++
+     bool EnableFastAudio();
+     bool FastAudioActive() const { return fastAudio && fastAudio->Active(); }
+     void NotifyFastAudioUnderrun();
+ 
+    protected:
++    void BeginSerialCheckpoint() override;
++    void EndSerialCheckpoint() override;
+     void OnSetFramebufferDirty() override;
+     bool OnSleep() override;
+     void OnWakeup() override;

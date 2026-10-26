@@ -2,6 +2,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <sys/wait.h>
+#include <unistd.h>
 #include "pxa_DMA.h"
 
 static ArmMemAccessF accessRegister;
@@ -9,7 +11,8 @@ static void* controller;
 static uint8_t source[16], destination[16];
 bool memRegionAdd(ArmMem*,uint32_t,uint32_t,ArmMemAccessF f,void* context){accessRegister=f;controller=context;return true;}
 void pxaIcInt(PxaIc*,uint_fast8_t,bool){}
-extern "C" void uarmAbort(){abort();}
+static bool expectedFatal=false;
+extern "C" void uarmAbort(){if(expectedFatal)std::_Exit(86);abort();}
 bool memAccess(ArmMem*,uint32_t address,uint_fast8_t size,bool write,void* data){
     uint8_t* storage=nullptr;
     if(address>=0x1000 && uint64_t(address)+size<=0x1010)storage=source+address-0x1000;
@@ -39,5 +42,16 @@ int main(){
     pxaDmaExternalReq(dma,21,false);memset(destination,0,sizeof(destination));configure();
     writeReg(0,0xc0000000);pxaDmaPeriodic(dma);assert(destination[0]==0);
     pxaDmaExternalReq(dma,21,true);pxaDmaPeriodic(dma);assert(!memcmp(source,destination,4));
+    // UART 32-bit DMA trailing bytes need a lane-valid/EOR contract that the
+    // present controller does not expose. Reproduce the partial-beat blocker.
+    fflush(nullptr);const auto pid=fork();assert(pid>=0);
+    if(!pid){
+        expectedFatal=true;configure();writeReg(0x20c,0xe000c003);
+        writeReg(0,0xc0000000);pxaDmaExternalReq(dma,21,true);
+        pxaDmaPeriodic(dma);std::_Exit(0);
+    }
+    int status;assert(waitpid(pid,&status,0)==pid);
+    assert(WIFEXITED(status)&&WEXITSTATUS(status)==86);
+    puts("BLOCKED: DMA cannot transfer a three-byte trailing payload using a 32-bit beat");
     puts("PASS: DMA honours requests asserted before and after RUN without transferring while deasserted");
 }

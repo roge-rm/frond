@@ -9,6 +9,79 @@ Wired host serial and USB/HotSync remain unsupported. Step 9 also supplies
 reproducible capability probes. No PTY, host serial device, socket listener,
 USB passthrough or HotSync service is opened by this change.
 
+## UART timing and export lifecycle (patch 0042)
+
+`0042-uart-lifecycle.patch` adds baud-paced PXA27x transmission using the guest's
+DLL/DLH divisor and LCR framing. At the existing 102400 Hz peripheral tick, it
+carries fractional character time between queued frames; rounding each character
+separately would accumulate drift. Five-bit frames with 1.5 stop bits and fast
+short frames are included. Earlier UART byte-transfer behavior remains covered.
+This is guest-clock timing, not electrical timing or host wall-clock accuracy.
+Callbacks remain byte-oriented; this adds no wire-bit or parity encoder.
+
+Clearing IER[UUE] suppresses UART interrupts and all byte/tick/activity callbacks,
+retaining pending guest data. A zero divisor stops the PXA27x baud clock, as
+specified by section 10.4.7 of the Intel manual. Pending transmission resumes
+when the unit and clock are re-enabled. The callback source owns unread data;
+a physical host transport would still need a policy for traffic arriving while
+the receiver is disabled. This does not implement host-side flow control.
+FIFO reset and mode changes clear queued data while allowing the current PXA27x
+shift frame to finish, including its remaining time (table 10-12).
+
+The UART chunk is now version 2, adding only the remaining transmit-frame time.
+Version-0 and version-1 chunks remain readable; their first pending frame starts
+with a full character time because those formats contain no partial-frame clock.
+New version-2 chunks require this core or newer. Existing input sessions are not
+rewritten by the probe runner. Keep copies before normal session upgrades.
+
+`ReadOnlyGuest` now acquires `SoC::SerialCheckpoint` before saving guest state.
+The guard freezes every PXA UART read/write/tick/activity callback, including polls
+triggered by register writes or scheduler queries. It stays active until RAM,
+flash, UART state, dirty flags and the framebuffer have been restored. Its
+nesting count is host-only and is not serialized. Constructor failure releases
+the guard; the outermost release reschedules pending serial work. Nested serial
+guards are supported; `ReadOnlyGuest`'s existing injected-call recovery scope
+still rejects nesting of that entire export object.
+
+```sh
+heavy build make -j1 test-uart-lifecycle test-uart-checkpoint test-tx-serial test-sd
+```
+
+The lifecycle test checks exact character boundaries over 64-byte streams,
+framing variants, maximum divisor, fractional carry, zero-clock/unit pauses,
+FIFO resets, pending RX/IRQs and partial-frame checkpoint restoration. The
+production export-guard test uses synthetic TX memory and an in-memory callback
+peer. Successful and exception exits, nested serial guards and save-constructor
+failure must produce no speculative external I/O. Original pending bytes resume
+once. It also checks rejected restore and reset. No firmware or SDK is required.
+
+The fresh normal and updated observer builds completed initial and restored
+runs on the same private TX session with its input hash unchanged. The Palm
+Serial Manager selected divisor 96 and LCR `07` (9600 8N2); the eight output
+bytes completed at UART ticks `118, 235, 352, 470, 587, 704, 822, 939` in both
+phases. The strict checker verified the actual framing rather than assuming
+8N1. This is an eight-byte emulator driver observation, not host transport,
+physical TX timing, sustained throughput or receive-path acceptance.
+
+An ordinary session restore intentionally restores guest FIFO contents. The test
+also reproduces its remaining external-peer hazard: if a byte was already sent
+after the snapshot, restoring that snapshot sends it again to a retained
+callback. Reset clears guest pending data but retains callback bindings.
+Internal accessory models need these bindings; a future host attachment must
+identify and disconnect external peers on reset/normal restore, then require
+explicit reconnection. This change does not add attachment ownership, close
+notifications or host descriptors, and therefore does not make a live endpoint
+safe to enable.
+
+DMA is still unsupported and enabling IER[DMAE] remains fatal. UART has no DMA
+controller/request wiring. The DMA engine also rejects a three-byte remainder
+with a four-byte beat; hardware UART DMA needs a valid-byte/EOR contract for
+trailing bytes, independent TX/RX requests, thresholds, error handling and state
+restore. `test-sd` now reproduces that partial-beat rejection in an isolated
+child process. Acknowledging DMAE without this machinery would falsely claim
+successful support. No such acknowledgement or partial UART DMA implementation
+is introduced.
+
 ## Hardware and code evidence
 
 The staged TX core creates FFUART at `0x40100000`, BTUART at `0x40200000` and
@@ -52,9 +125,8 @@ It also runs negative tests for the optional guest probe's result checker.
 - UART RX/TX and UDC endpoint configuration survive a chunk roundtrip. Sending
   a pending byte, restoring the chunk and continuing sends that byte again to
   the external callback. A host peer cannot be rolled back with guest memory.
-- Five 9600-baud 8N1 characters drain in five model ticks. The SoC UART task runs
-  at 102400 Hz; a real character at that setting needs about 107 ticks. DLL/LCR
-  currently affect receive timeout calculation, not callback TX line pacing.
+- PXA27x TX is now baud-paced by patch 0042. The previous five-characters-in-five-
+  ticks observation has been replaced by exact cadence and fractional-carry tests.
 - Packed PXA27x FIFO TX/RX transfers move exactly 1/2/4 requested bytes,
   including partial trailing transfers, occupancy and interrupt clearing. Error
   flags do not leak into adjacent data lanes. Over-reading an empty FIFO chooses
@@ -63,8 +135,9 @@ It also runs negative tests for the optional guest probe's result checker.
   sections 10.4.5 and 10.5.6. BUS and FIFO enable must both be set. Divisor
   accesses, byte mode, earlier FFUART and the separate PXA25x HWUART remain
   unchanged. Version-0 and version-1 chunks preserve partial RX and queued TX.
-- With UUE cleared, `pxaUartProcess` still consumes callback RX. An attachment
-  must gate delivery when disabled and handle FIFO capacity and overrun.
+- With UUE cleared, patch 0042 no longer consumes callback RX or polls the client.
+  FIFO capacity, overrun and host-side buffering/flow control still need a complete
+  transport contract.
 - UART DMA enable, UDC EP0 FIFO read/write and EP1 FIFO write reach fatal
   unimplemented paths. Each is isolated in a child process; the test replaces
   `uarmAbort` with a distinctive exit status and produces no crash dumps.
@@ -148,10 +221,9 @@ input session hash remained unchanged. This validates outgoing delivery through
 the real Palm driver into the UART callback. It does not validate a host peer,
 guest receive traffic or HotSync.
 
-The patch only changes PIO bus transfers; it does not add DMA, baud pacing,
-modem control, disabled-RX gating or external connection persistence. The UART
-chunk stays at version 1, its version-0 loader is unchanged, and the synthetic
-test loads both layouts with partial RX and queued TX. No guest bytes already
+Patch 0039 changed only PIO bus transfers. Patch 0042 later adds TX timing,
+disabled-unit gating and temporary-export callback freezing, as described above.
+DMA, modem control and external connection ownership remain unimplemented. No guest bytes already
 lost in an older running or saved session can be recovered by this correction.
 
 ## Optional UART output observer
@@ -173,13 +245,17 @@ cp out/frond out/frond-serial-trace
 git apply -R --directory=build/source tools/debug/tx-serial-trace.patch
 heavy build make -j2 out/frond
 FROND_SERIAL_TRACE=1 python3 tools/probe-tx-serial.py \
-  --core out/frond-serial-trace --require-ffuart-trace \
+  --core out/frond-serial-trace --require-baud-trace \
   --session /private/tx-ready.session \
   --output /private/results/serial-trace-01
 ```
 
 `--require-ffuart-trace` requires exactly that packet on FFUART in both phases
 and records it under `uart_tx_trace`; missing, extra or wrong-UART output fails.
+`--require-baud-trace` additionally checks every completion against the divisor,
+framing and UART tick at which the shift frame started, using `UART_TX_START`
+and `UART_TX_CLOCK` lines. It includes the exact byte check. Observer clocks
+count active, unfrozen UART ticks; they are diagnostics, not saved device state.
 The host delivery and HotSync flags still remain false.
 
 Compare `SERIAL_THR` and `SERIAL_TX` lines in each phase's private `core.log`
