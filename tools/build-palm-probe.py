@@ -6,12 +6,12 @@ import subprocess
 
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--sdk', type=Path, default=Path('../palm-os-sdk/sdk-5r3'))
-p.add_argument('--probe', choices=['sd', 'network'], default='sd')
+p.add_argument('--probe', choices=['sd', 'network', 'keyboard'], default='sd')
 p.add_argument('--output', type=Path)
 a = p.parse_args()
 sdk, output = a.sdk.resolve(), (a.output or Path('build/' + a.probe + '-probe')).resolve()
 source = 'tests/palm/' + a.probe + '-probe'
-name = 'FrondSDProbe' if a.probe == 'sd' else 'FrondNetProbe'
+name = {'sd':'FrondSDProbe','network':'FrondNetProbe','keyboard':'FrondKeyboardProbe'}[a.probe]
 if not (sdk / 'include/PalmOS.h').is_file():
     p.error('Supply the Palm OS 5 SDK directory with --sdk')
 output.mkdir(parents=True, exist_ok=True)

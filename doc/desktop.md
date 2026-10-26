@@ -10,7 +10,7 @@ Bluetooth remain unavailable. See [peripherals](peripherals.md). Use the normal 
 Install the locally built package:
 
 ```sh
-sudo apt install ./frond_0.1.0-2_amd64.deb
+sudo apt install ./frond_0.1.0-3_amd64.deb
 ```
 
 Launch **Frond** from Plasma's application menu. On first use, choose an existing
@@ -43,6 +43,11 @@ before replacing a card you want to keep. Supported sizes are 32–128 MiB FAT16
 The **Network** selector offers an experimental simulated NetLib echo server and
 connection error profiles. It has no Internet access. Mode and pending replies
 persist in the session. See [supported APIs and limits](peripherals.md#simulated-network-experimental).
+
+**Attach Palm infrared keyboard** sends computer-keyboard input through an
+emulated Palm keyboard accessory. Install and enable its Palm OS driver first,
+then type in the Palm window. The attachment persists in the session. See
+[keyboard setup](peripherals.md#computer-keyboard).
 
 **File → Install Application** accepts PRC/PDB files after Palm OS has started.
 **Launch Application** starts an installed app by its Palm database name.

@@ -6,6 +6,7 @@
 #include <QPushButton>
 #include <QLabel>
 #include <QComboBox>
+#include <QCheckBox>
 #include <QMessageBox>
 #include <QTimer>
 #include <QSettings>
@@ -34,6 +35,9 @@ s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
 s.sendall(b'0\tevent\tready\t\n')
 for line in s.makefile('rb'):
     i,cmd,arg=line.rstrip(b'\n').split(b'\t')
+    if cmd == b'keyboard-state':
+        s.sendall(i + b'\tok\tkeyboard\t6465746163686564\n')
+        continue
     if cmd == b'network-state':
         s.sendall(i + b'\tok\tnetwork\t64697361626c6564\n')
         continue
@@ -71,6 +75,7 @@ for line in s.makefile('rb'):
         const auto before = digest(source);
         QVERIFY(!before.isEmpty());
         QString saved, cardState, networkMode;
+        bool keyboardAttached=false;
         {
             MainWindow window(core); window.show(); window.openSession(source, true);
             auto* stop = window.findChild<QPushButton*>("stop");
@@ -79,6 +84,9 @@ for line in s.makefile('rb'):
             if (!screenshot.isEmpty()) QVERIFY(window.grab().save(screenshot));
             cardState = window.findChild<QLabel*>("sdState")->text();
             networkMode = window.findChild<QComboBox*>("networkMode")->currentData().toString();
+            keyboardAttached=window.findChild<QCheckBox*>("keyboardAttached")->isChecked();
+            const auto expectedKeyboard=qEnvironmentVariable("FROND_TEST_KEYBOARD");
+            if (!expectedKeyboard.isEmpty()) QCOMPARE(keyboardAttached,expectedKeyboard=="attached");
             const auto expectedNetwork = qEnvironmentVariable("FROND_TEST_NETWORK");
             if (!expectedNetwork.isEmpty()) QCOMPARE(networkMode, expectedNetwork);
             QVERIFY(!window.close());
@@ -93,6 +101,7 @@ for line in s.makefile('rb'):
             QTRY_VERIFY_WITH_TIMEOUT(stop->isEnabled(), 30000);
             QCOMPARE(window.findChild<QLabel*>("sdState")->text(), cardState);
             QCOMPARE(window.findChild<QComboBox*>("networkMode")->currentData().toString(), networkMode);
+            QCOMPARE(window.findChild<QCheckBox*>("keyboardAttached")->isChecked(),keyboardAttached);
             QVERIFY(!window.close());
             QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 60000);
             QCOMPARE(QSettings().value("lastSession").toString(), saved);

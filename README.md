@@ -72,6 +72,15 @@ doesn't connect to the Internet. Wi-Fi, Bluetooth, USB/HotSync and host serial
 connections aren't supported yet. The [peripheral guide](doc/peripherals.md)
 has the details.
 
+## Computer keyboard
+
+You can attach the computer keyboard as a Palm infrared keyboard. Check
+**Attach Palm infrared keyboard** in the launcher, install and enable the Palm
+keyboard driver, then type in the Palm window. It uses the accessory's scan codes
+and the guest driver. See [keyboard setup](doc/peripherals.md#computer-keyboard)
+for the driver and supported keys. In SunVox, `Z` and `X` play C and D through
+the selected module.
+
 ## Sound
 
 Normal playback uses SDL and your desktop's sound server. There's also an
@@ -86,7 +95,7 @@ To build and install a package locally:
 
 ```sh
 make deb
-sudo apt install ./out/frond_0.1.0-2_amd64.deb
+sudo apt install ./out/frond_0.1.0-3_amd64.deb
 ```
 
 It appears in Plasma's application menu as **Frond**. The package includes the

@@ -92,6 +92,11 @@ MainWindow::MainWindow(const QString& core) : core(core) {
         send("network-mode", network->itemData(index).toString());
     });
     layout->addWidget(network);
+    keyboard = new QCheckBox(tr("Attach Palm infrared keyboard"),root);
+    keyboard->setObjectName("keyboardAttached");
+    keyboard->setToolTip(tr("Uses the Palm Universal Wireless Keyboard protocol. Install and enable its Palm OS driver first. Type in the Palm window; modifiers and key releases are sent to the driver."));
+    connect(keyboard,&QCheckBox::clicked,this,[this](bool attached) { send("keyboard-attach",attached?"on":"off"); });
+    layout->addWidget(keyboard);
     auto* resume = new QCheckBox(tr("Resume last session on startup"), root);
     resume->setObjectName("resume");
     resume->setChecked(settings.value("resume", true).toBool());
@@ -219,7 +224,9 @@ MainWindow::MainWindow(const QString& core) : core(core) {
             const auto index = network->findData(message);
             if (index >= 0) network->setCurrentIndex(index);
         }
+        if (command=="keyboard-state" || command=="keyboard-attach") keyboard->setChecked(message=="attached");
         refresh();
+        if (command == "network-state" && !stopping) { send("keyboard-state"); return; }
         if (command == "sd-state" && !stopping) { send("network-state"); return; }
         statusBar()->showMessage(command == "sd-state" ? tr("Running. Sessions save automatically on close.") : message);
         const bool savedWorkingCopy = command == "save" && savingPath == sessionPath;
@@ -254,6 +261,7 @@ void MainWindow::refresh() {
     const bool enabled = client.available() && !busy && !stopping;
     for (auto* action : runningActions) action->setEnabled(enabled);
     network->setEnabled(enabled);
+    keyboard->setEnabled(enabled);
     sdCreate->setEnabled(enabled && !cardInserted); sdImport->setEnabled(enabled && !cardInserted);
     sdEject->setEnabled(enabled && cardInserted); sdReinsert->setEnabled(enabled && cardPresent && !cardInserted);
     sdExport->setEnabled(enabled && cardPresent && !cardInserted);

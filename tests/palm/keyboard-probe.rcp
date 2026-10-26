@@ -1,0 +1,5 @@
+FORM ID 1000 AT (0 0 160 160) NOFRAME USABLE
+BEGIN
+ TITLE "Frond keyboard probe"
+ LABEL "Results: FrondKeyboardLog" ID 1001 AT (5 30)
+END

@@ -141,8 +141,8 @@
  #include <cstddef>
  #include <cstdlib>
  
-@@ -89,6 +90,25 @@
- 
+@@ -94,6 +95,25 @@
+ #endif
      patchDispatchSetCpu(patchDispatch, cpu);
  
 +    if (getenv("FROND_HAL_AUDIO")) {

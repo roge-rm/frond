@@ -1,0 +1,680 @@
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -126,7 +126,7 @@
+     Reply dispatch(commands::Context& ctx, const std::string& command, const std::string& path) {
+         const bool fileCommand = command == "save" || command == "install" || command == "export" || command == "sd-insert" || command == "sd-export" || command == "input-replay";
+         if (fileCommand && (path.empty() || path.front() != '/')) return {false, "argument", "An absolute file path is required."};
+-        if (!fileCommand && command != "sd-create" && command != "launch-app" && command != "network-mode" && !path.empty()) return {false, "argument", "This command takes no argument."};
++        if (!fileCommand && command != "sd-create" && command != "launch-app" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && !path.empty()) return {false, "argument", "This command takes no argument."};
+         if (command == "input-replay") {
+             InputReplay replacement; std::string error;
+             if (!replacement.Load(path, ctx.screenWidth, ctx.screenHeight, error)) return {false, "replay", error};
+@@ -138,6 +138,18 @@
+             if (!launchAppByName(ctx.soc->GetSyscallDispatch(), path.c_str()))
+                 return {false, "launch", "Could not launch that application. Check its database name and wait for Palm OS to finish starting."};
+             return {true, "launched", "Application launched."};
++        }
++        if (command == "keyboard-state") return {true,"keyboard",ctx.soc->KeyboardAttached()?"attached":"detached"};
++        if (command == "keyboard-attach") {
++            if (path!="on" && path!="off") return {false,"argument","Use on or off."};
++            ctx.soc->AttachKeyboard(path=="on");
++            return {true,"keyboard",ctx.soc->KeyboardAttached()?"attached":"detached"};
++        }
++        if (command == "keyboard-key") {
++            unsigned code; char state,extra;
++            if (sscanf(path.c_str(),"%x %c %c",&code,&state,&extra)!=2 || !code || code>=128 || (state!='d' && state!='u'))
++                return {false,"argument","Use a hexadecimal scan code followed by d or u."};
++            return {ctx.soc->KeyboardKey(code,state=='d'),"keyboard","Keyboard event."};
+         }
+         if (command == "network-state") return {true, "network", ctx.soc->networkSimulation.GetModeName()};
+         if (command == "network-mode") {
+--- a/src/uarm/native/InputReplay.cpp
++++ b/src/uarm/native/InputReplay.cpp
+@@ -1,4 +1,5 @@
+ #include "InputReplay.h"
++#include "IrKeyboardMapping.h"
+ 
+ #include <algorithm>
+ #include <cctype>
+@@ -48,6 +49,12 @@
+             if (!(tokens >> key) || keys.find(key) == keys.end()) return fail();
+             event.kind = command == "key-down" ? Kind::keyDown : Kind::keyUp;
+             event.key = keys.at(key);
++        } else if (command == "keyboard-down" || command == "keyboard-up") {
++            std::string name;
++            if (!(tokens >> std::quoted(name))) return fail();
++            event.x=irKeyboardCode(SDL_GetScancodeFromName(name.c_str()));
++            if (!event.x) return fail();
++            event.kind=command=="keyboard-down"?Kind::keyboardDown:Kind::keyboardUp;
+         } else if (command == "snapshot") {
+             event.kind = Kind::snapshot;
+             if (!(tokens >> std::quoted(event.path)) || event.path.empty()) return fail();
+@@ -68,6 +75,8 @@
+             case Kind::penUp: soc.PenUp(); break;
+             case Kind::keyDown: soc.KeyDown(event.key); break;
+             case Kind::keyUp: soc.KeyUp(event.key); break;
++            case Kind::keyboardDown: soc.KeyboardKey(event.x,true); break;
++            case Kind::keyboardUp: soc.KeyboardKey(event.x,false); break;
+             case Kind::snapshot:
+                 if (!renderer.SaveFramebuffer(event.path.c_str())) {
+                     error = "cannot capture replay snapshot: " + event.path;
+--- a/src/uarm/native/InputReplay.h
++++ b/src/uarm/native/InputReplay.h
+@@ -18,7 +18,7 @@
+     bool Finished() const { return next == events.size(); }
+ 
+    private:
+-    enum class Kind { penDown, penUp, keyDown, keyUp, snapshot };
++    enum class Kind { penDown, penUp, keyDown, keyUp, keyboardDown, keyboardUp, snapshot };
+     struct Event {
+         uint64_t at;
+         Kind kind;
+--- a/src/uarm/native/SdlEventHandler.cpp
++++ b/src/uarm/native/SdlEventHandler.cpp
+@@ -3,6 +3,7 @@
+ #include <SDL.h>
+ 
+ #include "keys.h"
++#include "IrKeyboardMapping.h"
+ 
+ namespace {
+     enum KeyId mapKey(SDL_Keycode keysym) {
+@@ -84,20 +85,37 @@
+                 break;
+ 
+             case SDL_KEYDOWN: {
++                if (event.key.repeat) break;
++                const auto code=irKeyboardCode(event.key.keysym.scancode);
++                if (soc->KeyboardAttached() && code) {
++                    const auto scan=event.key.keysym.scancode;
++                    if (!hostKeys[scan]) { hostKeys[scan]=true; if (++codeHolds[code]==1) soc->KeyboardKey(code,true); }
++                    break;
++                }
+                 enum KeyId key = mapKey(event.key.keysym.sym);
+-                if (key) soc->KeyDown(key);
++                if (key) { hardKeys[key]=true; soc->KeyDown(key); }
+                 break;
+             }
+ 
+             case SDL_KEYUP: {
++                const auto code=irKeyboardCode(event.key.keysym.scancode);
++                const auto scan=event.key.keysym.scancode;
++                if (code && hostKeys[scan]) { hostKeys[scan]=false; if (--codeHolds[code]==0) soc->KeyboardKey(code,false); }
+                 enum KeyId key = mapKey(event.key.keysym.sym);
+-                if (key) soc->KeyUp(key);
++                if (key && hardKeys[key]) { hardKeys[key]=false; soc->KeyUp(key); }
+                 break;
+             }
+ 
+-            case SDL_WINDOWEVENT_EXPOSED:
+-                redrawRequested = true;
++            case SDL_WINDOWEVENT:
++                if (event.window.event==SDL_WINDOWEVENT_FOCUS_LOST) {
++                    soc->ReleaseKeyboard();
++                    hostKeys.fill(false); codeHolds.fill(0);
++                    for (unsigned i=1;i<hardKeys.size();i++) if (hardKeys[i]) { soc->KeyUp(static_cast<KeyId>(i)); hardKeys[i]=false; }
++                    if (penDown) { soc->PenUp(); penDown=false; }
++                }
++                if (event.window.event==SDL_WINDOWEVENT_EXPOSED) redrawRequested=true;
+                 break;
++
+         }
+     }
+ }
+--- a/src/uarm/native/SdlEventHandler.h
++++ b/src/uarm/native/SdlEventHandler.h
+@@ -1,6 +1,7 @@
+ #ifndef _SDL_EVENT_HANDLER_
+ #define _SDL_EVENT_HANDLER_
+ 
++#include <array>
+ #include "Rotation.h"
+ #include "SoC.h"
+ #include "device_configuration.h"
+@@ -26,6 +27,9 @@
+    private:
+     SoC* soc;
+ 
++    std::array<bool,512> hostKeys{};
++    std::array<uint8_t,128> codeHolds{};
++    std::array<bool,11> hardKeys{};
+     bool penDown{false};
+     int scale{1};
+     bool redrawRequested{false};
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -350,6 +350,9 @@
+             return false;
+         }
+ 
++        // Physical host keys are up when a session starts. Complete any saved
++        // make packets and send break codes, without altering export rollback.
++        soc->ReleaseKeyboard();
+         if (savestate.data) free(savestate.data);
+ 
+         if (soc->SdInserted()) {
+--- a/src/uarm/uarm/SoC.h
++++ b/src/uarm/uarm/SoC.h
+@@ -33,6 +33,10 @@
+ #ifndef __EMSCRIPTEN__
+     NetworkSimulation networkSimulation;
+ #endif
++    virtual bool KeyboardAttached() const { return false; }
++    virtual void AttachKeyboard(bool) {}
++    virtual bool KeyboardKey(uint8_t, bool) { return false; }
++    virtual void ReleaseKeyboard() {}
+     virtual void Reset();
+ 
+     virtual uint64_t Run(uint64_t maxCycles, uint64_t cyclesPerSecond) = 0;
+--- a/src/uarm/uarm/pxa_UART.cpp
++++ b/src/uarm/uarm/pxa_UART.cpp
+@@ -15,7 +15,7 @@
+ 
+ #define UART_FIFO_EMPTY 0xFF
+ 
+-#define SAVESTATE_VERSION 0
++#define SAVESTATE_VERSION 1
+ 
+ struct UartFifo {
+     uint8_t read;
+@@ -31,6 +31,7 @@
+ struct PxaUart {
+     struct PxaIc *ic;
+     uint32_t baseAddr;
++    bool fifoOccupancy;
+ 
+     struct Reschedule reschedule;
+ 
+@@ -48,7 +49,7 @@
+     uint16_t receiveHolding;  // char just received
+ 
+     uint8_t irq;
+-    uint8_t cyclesSinceRecv;
++    uint32_t cyclesSinceRecv;
+ 
+     uint8_t IER;  // interrupt enable register
+     uint8_t IIR;  // interrupt information register
+@@ -62,24 +63,34 @@
+     uint8_t DLH;  // divior latch high;
+     uint8_t ISR;  // infrared selection register
+ 
++    uint32_t ReceiveTimeoutTicks() const {
++        // CycleBatch0 runs at 102400 Hz. UART baud is 921600 / divisor;
++        // receive timeout is four configured character times, not four batches.
++        const uint32_t divisor=DLL || DLH ? (uint32_t(DLH)<<8)|DLL : 1;
++        const uint32_t bits=1+5+(LCR&3)+((LCR&8)?1:0)+((LCR&4)?2:1);
++        return (4*bits*divisor+8)/9;
++    }
+     template <typename T>
+-    void DoSaveLoad(T &chunkHelper) {
++    void DoSaveLoad(T &chunkHelper, uint32_t version) {
+         TX.DoSaveLoad(chunkHelper);
+         RX.DoSaveLoad(chunkHelper);
+ 
++        uint8_t legacyIdle=cyclesSinceRecv>255?255:cyclesSinceRecv;
+         chunkHelper.Do(typename T::Pack16() << transmitShift << transmitHolding)
+             .Do16(receiveHolding)
+-            .Do(typename T::Pack8() << irq << cyclesSinceRecv << IER << IIR)
++            .Do(typename T::Pack8() << irq << legacyIdle << IER << IIR)
+             .Do(typename T::Pack8() << FCR << LCR << LSR << MCR)
+             .Do(typename T::Pack8() << MSR << SPR << DLL << DLH)
+             .Do8(ISR);
++        if (version>=1) chunkHelper.Do32(cyclesSinceRecv);
++        else cyclesSinceRecv=legacyIdle;
+     }
+ };
+ 
+ #define UART_IER_DMAE 0x80   // DMA enable
+ #define UART_IER_UUE 0x40    // Uart unit enable
+ #define UART_IER_NRZE 0x20   // NRZI enable
+-#define UART_IER_RTOIE 0x10  // transmit timeout interrupt enable
++#define UART_IER_RTOIE 0x10  // receiver timeout interrupt enable
+ #define UART_IER_MIE 0x08    // modem interrupt enable
+ #define UART_IER_RLSE 0x04   // receiver line status interrupt enable
+ #define UART_IER_TIE 0x02    // transmit data request interrupt enable
+@@ -328,26 +339,24 @@
+ 
+             case 2:
+                 t = uart->FCR ^ val;
+-                if (t & UART_FCR_TRFIFOE) {
+-                    if (val & UART_FCR_TRFIFOE) {  // fifos are now on - perform other actions as
+-                                                   // requested
+-
+-                        if (val & UART_FCR_RESETRF) {
+-                            pxaUartPrvFifoFlush(&uart->RX);  // clear the RX fifo now
+-                        }
+-                        if (val & UART_FCR_RESETTF) {
+-                            pxaUartPrvFifoFlush(&uart->TX);  // clear the TX fifo now
+-                            uart->LSR = UART_LSR_TEMT | UART_LSR_TDRQ;
+-                        }
+-                        uart->IIR = UART_IIR_FIFOES | UART_IIR_NOINT;
+-                    } else {
++                if (!(val & UART_FCR_TRFIFOE) || (t & UART_FCR_TRFIFOE)) {
++                    pxaUartPrvFifoFlush(&uart->TX);
++                    pxaUartPrvFifoFlush(&uart->RX);
++                    uart->LSR = UART_LSR_TEMT | UART_LSR_TDRQ;
++                    uart->IIR = (val & UART_FCR_TRFIFOE ? UART_IIR_FIFOES : 0) | UART_IIR_NOINT;
++                }
++                if (val & UART_FCR_TRFIFOE) {
++                    if (val & UART_FCR_RESETRF) {
++                        pxaUartPrvFifoFlush(&uart->RX);
++                        uart->LSR &= ~UART_LSR_DR;
++                    }
++                    if (val & UART_FCR_RESETTF) {
+                         pxaUartPrvFifoFlush(&uart->TX);
+-                        pxaUartPrvFifoFlush(&uart->RX);
+-                        uart->LSR = UART_LSR_TEMT | UART_LSR_TDRQ;
+-                        uart->IIR = UART_IIR_NOINT;
++                        uart->LSR |= UART_LSR_TEMT | UART_LSR_TDRQ;
+                     }
+                 }
+-                uart->FCR = val;
++                // Reset bits are pulses, including when FIFO mode was already on.
++                uart->FCR = val & ~(UART_FCR_RESETRF | UART_FCR_RESETTF);
+                 break;
+ 
+             case 3:
+@@ -396,6 +405,7 @@
+ 
+                     val = uart->receiveHolding;
+                     uart->LSR &= ~UART_LSR_DR;
++                    recalcValues = true;
+                 }
+                 break;
+ 
+@@ -433,6 +443,9 @@
+             case 8:
+                 val = uart->ISR;
+                 break;
++            case 9: // PXA270 receive FIFO occupancy (FOR), read-only
++                if (uart->fifoOccupancy && (uart->FCR & UART_FCR_TRFIFOE)) val=pxaUartPrvFifoUsed(&uart->RX);
++                break;
+         }
+         if (size == 1)
+             *(uint8_t *)buf = val;
+@@ -441,6 +454,8 @@
+     }
+ 
+     if (recalcValues) pxaUartPrvRecalc(uart);
++    if (write && uart->clientIsActiveF && uart->clientIsActiveF(uart->callbackData))
++        uart->reschedule.rescheduleCb(uart->reschedule.ctx,RESCHEDULE_TASK_UART);
+ 
+     return true;
+ }
+@@ -461,7 +476,7 @@
+ }
+ 
+ struct PxaUart *pxaUartInit(struct ArmMem *physMem, struct Reschedule reschedule, struct PxaIc *ic,
+-                            uint32_t baseAddr, uint8_t irq) {
++                            uint32_t baseAddr, uint8_t irq, bool fifoOccupancy) {
+     struct PxaUart *uart = (struct PxaUart *)malloc(sizeof(*uart));
+ 
+     if (!uart) ERR("cannot alloc UART at 0x%08x", baseAddr);
+@@ -471,6 +486,7 @@
+     uart->reschedule = reschedule;
+     uart->irq = irq;
+     uart->baseAddr = baseAddr;
++    uart->fifoOccupancy = fifoOccupancy;
+     uart->IIR = UART_IIR_NOINT;
+     uart->IER = UART_IER_UUE | UART_IER_NRZE;  // uart on
+     uart->LSR = UART_LSR_TEMT | UART_LSR_TDRQ;
+@@ -520,8 +536,6 @@
+     v = pxaUartPrvGetchar(uart);
+     if (v != UART_CHAR_NONE) {
+         uart->cyclesSinceRecv = 0;
+-        uart->LSR |= UART_LSR_DR;
+-
+         if (uart->FCR & UART_FCR_TRFIFOE) {  // fifo mode
+ 
+             if (!pxaUartPrvFifoPut(&uart->RX, v)) {
+@@ -533,7 +547,8 @@
+             else
+                 uart->receiveHolding = v;
+         }
+-    } else if (uart->cyclesSinceRecv <= 4) {
++        uart->LSR |= UART_LSR_DR;
++    } else if (uart->cyclesSinceRecv <= uart->ReceiveTimeoutTicks()) {
+         uart->cyclesSinceRecv++;
+     }
+ 
+@@ -592,8 +607,8 @@
+             errorSet = true;
+             uart->IIR |= UART_IIR_RECV_DATA;
+         }
+-        if (pxaUartPrvFifoUsed(&uart->RX) && uart->cyclesSinceRecv >= 4 &&
+-            (uart->IER & UART_IER_RAVIE) && !errorSet) {
++        if (pxaUartPrvFifoUsed(&uart->RX) && uart->cyclesSinceRecv >= uart->ReceiveTimeoutTicks() &&
++            (uart->IER & UART_IER_RAVIE) && (uart->IER & UART_IER_RTOIE) && !errorSet) {
+             errorSet = true;
+             uart->IIR |= UART_IIR_RCV_TIMEOUT;
+         }
+@@ -624,8 +639,13 @@
+     pxaUartPrvIrq(uart, errorSet);
+ }
+ 
++bool pxaUartIrReceiveEnabled(const PxaUart *uart) {
++    return (uart->IER & UART_IER_UUE) && (uart->ISR & 0x02);
++}
++
+ bool pxaUartTaskRequired(struct PxaUart *uart) {
+     return (uart->clientIsActiveF ? uart->clientIsActiveF(uart->callbackData) : false) ||
++           ((uart->LSR & UART_LSR_DR) && uart->cyclesSinceRecv < uart->ReceiveTimeoutTicks()) ||
+            (uart->LSR & UART_LSR_TEMT) == 0;
+ }
+ 
+@@ -635,16 +655,17 @@
+     if (!chunk) ERR("unable to allocate chunk");
+ 
+     SaveChunkHelper helper(*chunk);
+-    uart->DoSaveLoad(helper);
++    uart->DoSaveLoad(helper, SAVESTATE_VERSION);
+ }
+ 
+ template <typename T>
+ void pxaUartLoad(struct PxaUart *uart, T &loader, uint32_t index) {
+-    auto chunk = loader.GetChunkOrFail(ChunkType::pxaUart + index, SAVESTATE_VERSION, "uart");
++    uint32_t version;
++    auto chunk = loader.GetChunkOrFail(ChunkType::pxaUart + index, SAVESTATE_VERSION, "uart", version);
+     if (!chunk) return;
+ 
+     LoadChunkHelper helper(*chunk);
+-    uart->DoSaveLoad(helper);
++    uart->DoSaveLoad(helper, version);
+ }
+ 
+ template void pxaUartSave<Savestate<ChunkType>>(PxaUart *uart, Savestate<ChunkType> &savestate,
+--- a/src/uarm/uarm/pxa_UART.h
++++ b/src/uarm/uarm/pxa_UART.h
+@@ -39,12 +39,14 @@
+ typedef void (*PxaUartClientTick)(void *userData);
+ 
+ struct PxaUart *pxaUartInit(struct ArmMem *physMem, struct Reschedule reschedule, struct PxaIc *ic,
+-                            uint32_t baseAddr, uint8_t irq);
++                            uint32_t baseAddr, uint8_t irq, bool fifoOccupancy = false);
+ void pxaUartProcess(struct PxaUart *uart);  // write out data in TX fifo and read data into RX fifo
+ 
+ void pxaUartSetFuncs(struct PxaUart *uart, PxaUartReadF readF, PxaUartWriteF writeF,
+                      PxaUartClientIsActive clientIsActiveF, PxaUartClientTick clientTickF,
+                      void *userData);
++
++bool pxaUartIrReceiveEnabled(const PxaUart *uart);
+ 
+ bool pxaUartTaskRequired(struct PxaUart *uart);
+ 
+--- a/src/uarm/uarm/savestate/ChunkTypeUarm.h
++++ b/src/uarm/uarm/savestate/ChunkTypeUarm.h
+@@ -50,6 +50,7 @@
+     mpu = 0x10090,
+     cp15mpu = 0x100a0,
+     networkSimulation = 0x100b0,
++    irKeyboard = 0x100c0,
+ };
+ 
+ inline ChunkType operator+(ChunkType chunkType, uint32_t index) {
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -145,12 +145,12 @@
+     gpio = pxaGpioInit(mem, ic, socRev);
+     tmr = pxaTimrInit(mem, ic);
+     rtc = pxaRtcInit(mem, ic);
+-    ffUart = pxaUartInit(mem, rescheduleCb, ic, PXA_FFUART_BASE, PXA_I_FFUART);
+-    stUart = pxaUartInit(mem, rescheduleCb, ic, PXA_STUART_BASE, PXA_I_STUART);
+-    btUart = pxaUartInit(mem, rescheduleCb, ic, PXA_BTUART_BASE, PXA_I_BTUART);
++    ffUart = pxaUartInit(mem, rescheduleCb, ic, PXA_FFUART_BASE, PXA_I_FFUART, socRev == 2);
++    stUart = pxaUartInit(mem, rescheduleCb, ic, PXA_STUART_BASE, PXA_I_STUART, socRev == 2);
++    btUart = pxaUartInit(mem, rescheduleCb, ic, PXA_BTUART_BASE, PXA_I_BTUART, socRev == 2);
+ 
+     if (socRev != 2) {
+-        hwUart = pxaUartInit(mem, rescheduleCb, ic, PXA_HWUART_BASE, PXA_I_HWUART);
++        hwUart = pxaUartInit(mem, rescheduleCb, ic, PXA_HWUART_BASE, PXA_I_HWUART, true);
+     }
+ 
+     pwrClk = pxaPwrClkInit(cpu, mem, this, socRev == 2);
+@@ -217,6 +217,18 @@
+     sp.ssp2 = ssp[1];
+     sp.ssp3 = ssp[2];
+     if (socRev == 2) sp.kpc = kpc;
++    if (deviceType==DeviceType5::deviceTypeTX) {
++        pxaUartSetFuncs(stUart,
++            [](void* ctx) -> uint_fast16_t {
++                auto* soc=static_cast<SocPXA*>(ctx);
++                return pxaUartIrReceiveEnabled(soc->stUart) ? soc->irKeyboard.Read(soc->GetTime()) : UART_CHAR_NONE;
++            }, nullptr,
++            [](void* ctx) {
++                auto* soc=static_cast<SocPXA*>(ctx);
++                return soc->irKeyboard.Pending() && pxaUartIrReceiveEnabled(soc->stUart);
++            },
++            nullptr, this);
++    }
+     sp.uarts[0] = ffUart;
+     sp.uarts[1] = hwUart;
+     sp.uarts[2] = stUart;
+@@ -362,6 +374,7 @@
+     pxaUartLoad(ffUart, loader, 0);
+     if (socRev != 2) pxaUartLoad(hwUart, loader, 1);
+     pxaUartLoad(stUart, loader, 2);
++    irKeyboard.Load(loader);
+     pxaUartLoad(btUart, loader, 3);
+ 
+     pxaSspLoad(ssp[0], loader, 0);
+@@ -430,6 +443,7 @@
+     pxaUartSave(ffUart, savestate, 0);
+     if (socRev != 2) pxaUartSave(hwUart, savestate, 1);
+     pxaUartSave(stUart, savestate, 2);
++    irKeyboard.Save(savestate);
+     pxaUartSave(btUart, savestate, 3);
+ 
+     pxaSspSave(ssp[0], savestate, 0);
+@@ -659,3 +673,19 @@
+     UpdateSchedulePcm();
+     cpuSetSlowPath(cpu,SLOW_PATH_REASON_RESCHEDULE);
+ }
++
++void SocPXA::AttachKeyboard(bool value) {
++    if (GetDeviceType()!=DeviceType5::deviceTypeTX) return;
++    irKeyboard.Attach(value);
++    RescheduleCB(this,RESCHEDULE_TASK_UART);
++}
++bool SocPXA::KeyboardKey(uint8_t code,bool down) {
++    const bool accepted=GetDeviceType()==DeviceType5::deviceTypeTX &&
++        (!down || pxaUartIrReceiveEnabled(stUart)) && irKeyboard.Key(code,down);
++    if (accepted) RescheduleCB(this,RESCHEDULE_TASK_UART);
++    return accepted;
++}
++void SocPXA::ReleaseKeyboard() {
++    irKeyboard.ReleaseAll();
++    if (irKeyboard.Pending()) RescheduleCB(this,RESCHEDULE_TASK_UART);
++}
+--- a/src/uarm/uarm/soc_PXA.h
++++ b/src/uarm/uarm/soc_PXA.h
+@@ -4,6 +4,7 @@
+ #include <cstdint>
+ 
+ #include "CPU.h"
++#include "IrKeyboard.h"
+ #include "fast_audio.h"
+ #include "device_type5.h"
+ #include "memory_buffer.h"
+@@ -55,6 +56,11 @@
+ 
+     uint32_t DispatchTicks(uint32_t clientType, uint32_t batchedTicks);
+ 
++    bool KeyboardAttached() const override { return irKeyboard.Attached(); }
++    void AttachKeyboard(bool value) override;
++    bool KeyboardKey(uint8_t code, bool down) override;
++    void ReleaseKeyboard() override;
++
+     bool EnableFastAudio();
+     bool FastAudioActive() const { return fastAudio && fastAudio->Active(); }
+     void NotifyFastAudioUnderrun();
+@@ -96,6 +102,7 @@
+     static uint64_t GetTimeCB(void *ctx);
+ 
+    private:
++    IrKeyboard irKeyboard;
+     uint8_t socRev{0};
+ 
+     PxaUart *ffUart{nullptr}, *hwUart{nullptr}, *stUart{nullptr}, *btUart{nullptr};
+--- a/src/uarm/uarm/soc_generic_impl.h
++++ b/src/uarm/uarm/soc_generic_impl.h
+@@ -64,6 +64,7 @@
+ #ifndef __EMSCRIPTEN__
+     const auto networkMode = std::string(networkSimulation.GetModeName());
+ #endif
++    const bool keyboardAttached = KeyboardAttached();
+     const bool pcmOutputEnabled = pcmEnabled;
+     const bool cardInserted = this->cardInserted;
+     const uint64_t accumulatedTime = scheduler->GetTime();
+@@ -78,6 +79,7 @@
+     networkSimulation.SetMode(networkMode);
+     networkSimulation.Reset();
+ #endif
++    AttachKeyboard(keyboardAttached);
+     if (cardInserted) SdInsert();
+ 
+     SetPcmOutputEnabled(pcmOutputEnabled);
+--- /dev/null
++++ b/src/uarm/uarm/IrKeyboard.h
+@@ -0,0 +1,63 @@
++#ifndef FROND_IR_KEYBOARD_H
++#define FROND_IR_KEYBOARD_H
++#include <array>
++#include <cstdint>
++#include "savestate/savestateAll.h"
++
++// Palm Universal Wireless Keyboard (3169WW): 9600 baud, 8N2 infrared packets.
++// Model the bytes at the UART boundary; no guest event injection.
++class IrKeyboard {
++ public:
++    static constexpr uint32_t capacity = 512;
++    bool Attached() const { return attached; }
++    bool Pending() const { return count != 0; }
++    void Attach(bool value) { if (!value) ReleaseAll(); attached=value; }
++    bool Key(uint8_t code, bool down) {
++        if (!code || code>=128 || (down && !attached) || held[code]==down) return false;
++        // Reserve a break-code slot for every held key. Overflow can reject a
++        // new make code, but must never lose a release for an accepted press.
++        if (down && count+HeldCount()+2>capacity) return false;
++        if (count>=capacity) return false;
++        queue[(head+count++)%capacity]=code | (down?0:0x80);
++        held[code]=down;
++        return true;
++    }
++    void ReleaseAll() { for (uint32_t i=1;i<128;i++) if (held[i]) Key(i,false); }
++    void Reset() { head=count=byte=0; nextByteAt=0; queue={}; held={}; }
++    uint16_t Read(uint64_t now) {
++        if (!count || now<nextByteAt) return 0x100; // UART_CHAR_NONE
++        const auto code=queue[head];
++        const uint8_t packet[]={0xff,0xc0,code,uint8_t(code^0xff),uint8_t(code^0x67),0xc1};
++        const auto value=packet[byte++];
++        nextByteAt=now+1145834; // ceil(11 bits / 9600 baud) in guest nanoseconds
++        if (byte==6) { byte=0; queue[head]=0; head=(head+1)%capacity; --count; }
++        return value;
++    }
++    template<class S> void Save(S& state) {
++        auto* chunk=state.GetChunk(ChunkType::irKeyboard,0);
++        SaveChunkHelper helper(*chunk); Transfer(helper);
++    }
++    void Load(SavestateLoader<ChunkType>& loader) {
++        attached=false; Reset();
++        if (!loader.HasChunk(ChunkType::irKeyboard)) return;
++        auto* chunk=loader.GetChunkOrFail(ChunkType::irKeyboard,0,"infrared keyboard");
++        if (!chunk) return;
++        LoadChunkHelper helper(*chunk); Transfer(helper);
++        bool valid=head<capacity && count<=capacity && byte<6 && (count || !byte);
++        for (auto value:held) valid &= value<=1;
++        valid &= count+HeldCount()<=capacity;
++        if (!valid) { attached=false; Reset(); loader.NotifyError(); }
++    }
++ private:
++    uint32_t head{},count{},byte{};
++    bool attached{};
++    uint64_t nextByteAt{};
++    std::array<uint8_t,capacity> queue{};
++    std::array<uint8_t,128> held{};
++    uint32_t HeldCount() const { uint32_t n=0; for (auto v:held) n+=bool(v); return n; }
++    template<class H> void Transfer(H& h) {
++        h.DoBool(attached).Do32(head).Do32(count).Do32(byte).Do64(nextByteAt)
++          .DoBuffer(queue.data(),queue.size()).DoBuffer(held.data(),held.size());
++    }
++};
++#endif
+--- /dev/null
++++ b/src/uarm/native/IrKeyboardMapping.h
+@@ -0,0 +1,76 @@
++#ifndef FROND_IR_KEYBOARD_MAPPING_H
++#define FROND_IR_KEYBOARD_MAPPING_H
++#include <SDL.h>
++// Physical positions follow the Palm Universal Wireless Keyboard's US layout.
++inline uint8_t irKeyboardCode(SDL_Scancode key) {
++    switch (key) {
++        case SDL_SCANCODE_GRAVE: return 0x0e;
++        case SDL_SCANCODE_1: return 0x16;
++        case SDL_SCANCODE_2: return 0x1e;
++        case SDL_SCANCODE_3: return 0x26;
++        case SDL_SCANCODE_4: return 0x25;
++        case SDL_SCANCODE_5: return 0x2e;
++        case SDL_SCANCODE_6: return 0x36;
++        case SDL_SCANCODE_7: return 0x3d;
++        case SDL_SCANCODE_8: return 0x3e;
++        case SDL_SCANCODE_9: return 0x46;
++        case SDL_SCANCODE_0: return 0x45;
++        case SDL_SCANCODE_MINUS: return 0x4e;
++        case SDL_SCANCODE_EQUALS: return 0x55;
++        case SDL_SCANCODE_BACKSPACE: return 0x66;
++        case SDL_SCANCODE_TAB: return 0x0d;
++        case SDL_SCANCODE_Q: return 0x15;
++        case SDL_SCANCODE_W: return 0x1d;
++        case SDL_SCANCODE_E: return 0x24;
++        case SDL_SCANCODE_R: return 0x2d;
++        case SDL_SCANCODE_T: return 0x2c;
++        case SDL_SCANCODE_Y: return 0x35;
++        case SDL_SCANCODE_U: return 0x3c;
++        case SDL_SCANCODE_I: return 0x43;
++        case SDL_SCANCODE_O: return 0x44;
++        case SDL_SCANCODE_P: return 0x4d;
++        case SDL_SCANCODE_LEFTBRACKET: return 0x54;
++        case SDL_SCANCODE_RIGHTBRACKET: return 0x5b;
++        case SDL_SCANCODE_BACKSLASH: return 0x5d;
++        case SDL_SCANCODE_CAPSLOCK: return 0x58;
++        case SDL_SCANCODE_A: return 0x1c;
++        case SDL_SCANCODE_S: return 0x1b;
++        case SDL_SCANCODE_D: return 0x23;
++        case SDL_SCANCODE_F: return 0x2b;
++        case SDL_SCANCODE_G: return 0x34;
++        case SDL_SCANCODE_H: return 0x33;
++        case SDL_SCANCODE_J: return 0x3b;
++        case SDL_SCANCODE_K: return 0x42;
++        case SDL_SCANCODE_L: return 0x4b;
++        case SDL_SCANCODE_SEMICOLON: return 0x4c;
++        case SDL_SCANCODE_APOSTROPHE: return 0x52;
++        case SDL_SCANCODE_RETURN: return 0x5a;
++        case SDL_SCANCODE_LSHIFT: return 0x12;
++        case SDL_SCANCODE_Z: return 0x1a;
++        case SDL_SCANCODE_X: return 0x22;
++        case SDL_SCANCODE_C: return 0x21;
++        case SDL_SCANCODE_V: return 0x2a;
++        case SDL_SCANCODE_B: return 0x32;
++        case SDL_SCANCODE_N: return 0x31;
++        case SDL_SCANCODE_M: return 0x3a;
++        case SDL_SCANCODE_COMMA: return 0x48;
++        case SDL_SCANCODE_PERIOD: return 0x49;
++        case SDL_SCANCODE_UP: return 0x28;
++        case SDL_SCANCODE_RSHIFT: return 0x59;
++        case SDL_SCANCODE_SLASH: return 0x4a;
++        case SDL_SCANCODE_LCTRL: return 0x14;
++        case SDL_SCANCODE_LALT: return 0x02;
++        case SDL_SCANCODE_LGUI: return 0x03;
++        case SDL_SCANCODE_HOME: return 0x11;
++        case SDL_SCANCODE_SPACE: return 0x29;
++        case SDL_SCANCODE_RALT: return 0x30;
++        case SDL_SCANCODE_LEFT: return 0x5e;
++        case SDL_SCANCODE_DOWN: return 0x60;
++        case SDL_SCANCODE_RIGHT: return 0x2f;
++        case SDL_SCANCODE_DELETE: return 0x1f;
++        case SDL_SCANCODE_RCTRL: return 0x14;
++        case SDL_SCANCODE_RGUI: return 0x03;
++        default: return 0;
++    }
++}
++#endif

@@ -62,6 +62,56 @@ function switching is declined safely. DMA startup retains an already pending
 peripheral request. The model does not implement a full SD electrical bus,
 SDHC/SDXC, arbitrary high-speed modes or an SDIO Wi-Fi card.
 
+## Computer keyboard
+
+Check **Attach Palm infrared keyboard** in the desktop launcher to connect the
+host keyboard as a Palm Universal Wireless Keyboard (3169WW). Install its Palm
+OS driver separately, reset the Palm if installation requests it, then open
+**Keyboard** on the Palm and turn its status **ON**. The 1.13 driver is available
+from [PalmDB](https://palmdb.net/app/palm-wireless-keyboard-driver-palm-os-ppc).
+The driver is not included in Frond or its Debian package.
+
+Type while the Palm display window has focus. Letters, numbers, punctuation,
+Shift, Ctrl, arrows, Return, Tab and Backspace are sent as accessory scan codes.
+The mapping uses physical US keyboard positions; choose the corresponding layout
+in the Palm driver. Left Alt acts as the accessory's Fn key, and Right Alt as
+AltGr. F1–F4 and Escape retain Frond's application-button and power mappings.
+With the attachment off, arrows and Return retain five-way navigation.
+
+This is a keyboard peripheral, not clipboard insertion: the Palm driver handles
+characters, modifiers and repeat. The driver decides which Palm events to emit;
+Palm apps may handle external keyboards differently. Palm SunVox accepts `Z` and
+`X` as C and D note input for the selected module; the octave follows the app's
+settings. The standard Palm driver delivers character key-down events and handles
+accessory releases internally, so this does not add a separate musical note-off
+API to apps. Input is ignored until the
+driver enables the infrared port. Attachment state and in-flight packets persist
+with the session. Host focus loss, detachment and session startup release held
+keys so modifiers do not remain stuck after switching windows or resuming.
+
+The model sends press/release packets to the PXA270 STUART at 9600 baud, 8N2,
+with guest-time byte spacing. It implements the keyboard's UART byte protocol,
+not optical pulses, IrLAP beaming or Bluetooth. The packet format and scan codes
+are documented in the author's [p1keyboard protocol notes](https://github.com/arpruss/p1keyboard/blob/master/p1notes.txt).
+UART receive occupancy, interrupt masking, FIFO reset and character-time receive
+timeout follow chapter 10 of the
+[Intel PXA27x manual](https://support.eurotech-inc.com/developers/datasheets/PXA270_DeveloperManual.pdf).
+
+`make test-keyboard` checks packet framing, timing, overflow/release handling,
+partial-packet restore, UART reception and SDL focus handling. An optional SDK
+probe checks the real Palm driver:
+
+```sh
+python3 tools/build-palm-probe.py --probe keyboard --sdk /path/to/sdk-5r3
+python3 tests/desktop-keyboard.py --session /path/to/calibrated-tx.session \
+  --driver /path/to/Keyboard_v113.prc --output /path/to/new/private/results
+```
+
+The acceptance test expects the driver's standard 320-pixel-wide settings form.
+It installs the driver, resets, enables it, types lower/upper-case letters and
+checks the exported Palm log. It also saves with Shift held and checks that
+resume releases it. Firmware, the driver PRC and output sessions stay outside Git.
+
 ## Simulated network (experimental)
 
 The desktop **Network** selector enables a deterministic 68k NetLib fixture.

@@ -15,7 +15,7 @@ out/frond: build/source/.prepared
 	cp build/source/src/uarm/cp-uarm out/frond.new
 	mv -f out/frond.new out/frond
 
-test: prepare test-network test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup
+test: prepare test-keyboard test-network test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup
 	python3 tests/audio-metrics.py
 	python3 tests/input-latency.py
 	python3 tests/menu-response.py
@@ -181,3 +181,19 @@ test-network: out/frond
 		tests/network-simulation.cpp build/source/src/uarm/uarm/NetworkSimulation.cpp \
 		build/source/src/common/libcommon.a -lz -o build/test-network-simulation
 	./build/test-network-simulation
+
+.PHONY: test-keyboard
+test-keyboard: out/frond
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/ir-keyboard.cpp build/source/src/common/libcommon.a -lz -o build/test-ir-keyboard
+	./build/test-ir-keyboard
+
+	$(CXX) -std=c++17 -O1 -g -ffunction-sections -fdata-sections -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/pxa-uart.cpp build/source/src/uarm/uarm/pxa_UART.cpp -Wl,--gc-sections -o build/test-pxa-uart
+	./build/test-pxa-uart
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/keyboard-core-objects.rsp
+	$(CXX) -std=c++17 -O1 -g $(shell sdl2-config --cflags) \
+		-Ibuild/source/src/uarm/native -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/host-keyboard.cpp build/source/src/uarm/native/SdlEventHandler.cpp @build/keyboard-core-objects.rsp \
+		build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) $(shell sdl2-config --libs) -o build/test-host-keyboard
+	./build/test-host-keyboard
