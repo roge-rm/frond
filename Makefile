@@ -18,7 +18,7 @@ out/frond: build/source/.prepared build/source/src/common/libcommon.a
 	cp build/source/src/uarm/cp-uarm out/frond.new
 	mv -f out/frond.new out/frond
 
-test: test-build-tools prepare test-device-profiles test-uart-lifecycle test-uart-checkpoint test-tx-serial test-gameplay-metrics test-mmu-fast-path test-pxa-power test-compatibility test-developer-run test-xscale-prefetch test-device-controls test-scheduler test-wifi test-host-network test-network-reliability test-keyboard test-network test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pace-debug test-pace-step test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup
+test: test-build-tools prepare test-e2-state test-device-profiles test-uart-lifecycle test-uart-checkpoint test-tx-serial test-gameplay-metrics test-mmu-fast-path test-pxa-power test-compatibility test-developer-run test-xscale-prefetch test-device-controls test-scheduler test-wifi test-host-network test-network-reliability test-keyboard test-network test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pace-debug test-pace-step test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup
 	python3 tests/audio-metrics.py
 	python3 tests/audio-timing.py
 	python3 tests/tx-baseline.py
@@ -379,3 +379,11 @@ test-uart-checkpoint: out/frond
 		tests/uart-checkpoint.cpp @build/uart-checkpoint-core.rsp build/source/src/common/libcommon.a \
 		$(CPU_TEST_LDLIBS) -o build/test-uart-checkpoint
 	./build/test-uart-checkpoint
+
+.PHONY: test-e2-state
+test-e2-state: out/frond
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/e2-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/e2-state.cpp @build/e2-core.rsp build/source/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-e2-state
+	./build/test-e2-state

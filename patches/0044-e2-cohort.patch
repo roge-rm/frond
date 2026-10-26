@@ -1,0 +1,32 @@
+diff --git a/src/uarm/native/InputReplay.cpp b/src/uarm/native/InputReplay.cpp
+index d701ac5..3218a44 100644
+--- a/src/uarm/native/InputReplay.cpp
++++ b/src/uarm/native/InputReplay.cpp
+@@ -18,6 +18,9 @@ bool InputReplay::Load(const std::string& path, int width, int height, std::stri
+     std::ifstream file(path);
+     if (!file) { error = "cannot open input replay: " + path; return false; }
+     const std::unordered_map<std::string, KeyId> keys = {
++        // Physical app-button positions work across boards; older names are TX aliases.
++        {"hard1", keyIdHard1}, {"hard2", keyIdHard2},
++        {"hard3", keyIdHard3}, {"hard4", keyIdHard4},
+         {"home", keyIdHard1}, {"calendar", keyIdHard2}, {"contacts", keyIdHard3},
+         {"web", keyIdHard4}, {"up", keyIdUp}, {"down", keyIdDown},
+         {"left", keyIdLeft}, {"right", keyIdRight}, {"center", keyIdSelect},
+diff --git a/src/uarm/uarm/soc_PXA.cpp b/src/uarm/uarm/soc_PXA.cpp
+index f6e4bd6..5dca582 100644
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -528,6 +528,13 @@ void SocPXA::OnLoad(SavestateLoader<ChunkType> &loader) {
+         for (unsigned key = keyIdHard1; key <= keyIdPower; ++key)
+             deviceKey(dev, key, false);
+     }
++    if (GetDeviceType() == DeviceType5::deviceTypeE2) {
++        // Host events queued before restore do not belong to the restored guest.
++        // Codec load releases the pen, and keypadReset below releases GPIO keys.
++        penEventQueue->Clear();
++        keyEventQueue->Clear();
++        penDown = false;
++    }
+     if (audioQueue) audioQueueClear(audioQueue);
+     if (fastAudio) { fastAudio->Reset(); UpdateFastAudioRoute(); }
+ 

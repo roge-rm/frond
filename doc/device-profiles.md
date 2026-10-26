@@ -77,8 +77,10 @@ Keep a proposed model unavailable to the desktop until it has evidence for:
 
 Keep private ROMs, metadata, identifying dump hashes, sessions, screenshots and
 capture logs outside Git. Public tests should build synthetic headers, flash
-geometry and session envelopes. There are no non-TX boot or peripheral results
-from this change.
+geometry and session envelopes. The shared-profile inventory itself establishes
+no non-TX boot or peripheral results. The [E2 qualification workflow](e2-qualification.md) adds synthetic board
+and session regressions plus an optional private firmware runner; the cohort
+remains unavailable to the desktop.
 
 ## Tests
 

@@ -94,6 +94,22 @@ class DeviceInputTest(unittest.TestCase):
                 rom.write_bytes(header(hal))
                 self.rejected([rom, '--desktop-socket', self.root / 'unused'], 'Palm TX only')
 
+    def test_e2_replay_bounds_and_physical_app_buttons(self):
+        replay = self.root / 'e2.replay'
+        # A duration rejection proves parsing succeeded, without executing synthetic ROM.
+        # Existing aliases keep their TX meaning; physical names avoid claiming an E2 Home key.
+        for key in ('hard1', 'hard2', 'hard3', 'hard4', 'home', 'calendar', 'contacts', 'web'):
+            replay.write_text(f'0 key-down {key}\n1000 key-up {key}\n')
+            self.rejected([self.e2, '--input-replay', replay, '--run-for', '1'],
+                          'input replay extends beyond')
+        replay.write_text('0 pen-down 319 439\n1000 pen-up\n')
+        self.rejected([self.e2, '--input-replay', replay, '--run-for', '1'],
+                      'input replay extends beyond')
+        for x, y in ((320, 319), (319, 440), (-1, 0)):
+            replay.write_text(f'0 pen-down {x} {y}\n')
+            self.rejected([self.e2, '--input-replay', replay, '--run-for', '1'],
+                          'invalid replay event')
+
     def test_unknown_and_mismatched_session_ids(self):
         for device in (-1, 4, 0x7fffffff):
             with self.subTest(device=device):

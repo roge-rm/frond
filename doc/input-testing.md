@@ -38,8 +38,13 @@ Commands: `pen-down X Y`, `pen-move X Y`, `pen-up`, `key-down KEY`, `key-up KEY`
 and `snapshot PATH`. For an attached infrared keyboard, `keyboard-down NAME` and
 `keyboard-up NAME` take SDL scancode names such as `Z` or `"Left Shift"`. Snapshot filenames may be quoted. Output directories must
 already exist. Key names are `home`, `calendar`, `contacts`, `web`, `up`, `down`,
-`left`, `right`, `center`, and `power`. Short host-time presses can be missed when guest execution is slow. Hold Home
-to open the recent-apps menu.
+`left`, `right`, `center`, and `power`. Physical app-button names `hard1` through
+`hard4` are also accepted. The names `home`, `calendar`, `contacts`, and `web`
+remain TX aliases for those positions, in that order; they do not describe E2
+app assignments. E2 replay coordinates include its 120-pixel silkscreen area,
+so the full surface is 320×440 while the LCD is 320×320. Short host-time presses
+can be missed when guest execution is slow. Hold Home on TX to open the
+recent-apps menu.
 
 Replay timing uses host wall time and is subject to emulation-loop jitter. It is
 not deterministic guest-instruction replay. Ensure the startup screenshot shows
