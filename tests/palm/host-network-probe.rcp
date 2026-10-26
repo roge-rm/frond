@@ -1,0 +1,7 @@
+FORM ID 1000 AT (0 0 160 160) NOFRAME USABLE
+BEGIN
+ TITLE "Frond host probe"
+ LABEL "Results: FrondHostLog" ID 1001 AT (5 30)
+ BUTTON "Read pending" ID 1002 AT (10 60 130 20) USABLE
+ BUTTON "Run again" ID 1003 AT (10 90 130 20) USABLE
+END

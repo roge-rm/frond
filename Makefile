@@ -15,7 +15,7 @@ out/frond: build/source/.prepared
 	cp build/source/src/uarm/cp-uarm out/frond.new
 	mv -f out/frond.new out/frond
 
-test: prepare test-keyboard test-network test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup
+test: prepare test-host-network test-keyboard test-network test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup
 	python3 tests/audio-metrics.py
 	python3 tests/input-latency.py
 	python3 tests/menu-response.py
@@ -178,8 +178,8 @@ test-sd: out/frond
 .PHONY: test-network
 test-network: out/frond
 	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
-		tests/network-simulation.cpp build/source/src/uarm/uarm/NetworkSimulation.cpp \
-		build/source/src/common/libcommon.a -lz -o build/test-network-simulation
+		tests/network-simulation.cpp build/source/src/uarm/uarm/NetworkSimulation.cpp build/source/src/uarm/uarm/HostNetwork.cpp \
+		build/source/src/common/libcommon.a -lz -pthread -o build/test-network-simulation
 	./build/test-network-simulation
 
 .PHONY: test-keyboard
@@ -197,3 +197,9 @@ test-keyboard: out/frond
 		tests/host-keyboard.cpp build/source/src/uarm/native/SdlEventHandler.cpp @build/keyboard-core-objects.rsp \
 		build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) $(shell sdl2-config --libs) -o build/test-host-keyboard
 	./build/test-host-keyboard
+
+.PHONY: test-host-network
+test-host-network: prepare
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm \
+		tests/host-network.cpp build/source/src/uarm/uarm/HostNetwork.cpp -pthread -o build/test-host-network
+	./build/test-host-network

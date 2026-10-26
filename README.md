@@ -66,11 +66,13 @@ The **SD Card** menu creates 32, 64 or 128 MiB FAT16 cards. You can also import 
 image, eject and reinsert a card, or export it. Card contents and insertion state
 are saved with the session. Close files on the Palm before ejecting.
 
-The **Network** selector is a small test network for apps using the supported
-68k NetLib calls. It has DNS, an echo server and connection-error modes. It
-doesn't connect to the Internet. Wi-Fi, Bluetooth, USB/HotSync and host serial
-connections aren't supported yet. The [peripheral guide](doc/peripherals.md)
-has the details.
+Choose **Network: Internet via host** to let supported 68k NetLib apps use your
+computer's Internet connection. It forwards IPv4 TCP/UDP and DNS without a TAP
+device or root access. Connections close when you resume a saved session, so
+apps need to reconnect. The selector also has local echo and connection-error
+test modes. Wi-Fi radio, Bluetooth, USB/HotSync and host serial connections
+aren't supported yet. The [peripheral guide](doc/peripherals.md) covers the
+API limits and setup. Blazer's Wi-Fi connection workflow is not supported.
 
 ## Computer keyboard
 
@@ -95,7 +97,7 @@ To build and install a package locally:
 
 ```sh
 make deb
-sudo apt install ./out/frond_0.1.0-3_amd64.deb
+sudo apt install ./out/frond_0.1.0-4_amd64.deb
 ```
 
 It appears in Plasma's application menu as **Frond**. The package includes the

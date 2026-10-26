@@ -1,0 +1,1325 @@
+--- a/src/uarm/Makefile
++++ b/src/uarm/Makefile
+@@ -116,6 +116,7 @@
+ 	uarm/audio_queue.cpp				\
+ 	uarm/db_list.cpp					\
+ 	uarm/db_backup.cpp					\
++	uarm/HostNetwork.cpp			\
+ 	uarm/NetworkSimulation.cpp			\
+ 	uarm/system_state.cpp
+ 
+--- a/src/uarm/native/ReadOnlyGuest.h
++++ b/src/uarm/native/ReadOnlyGuest.h
+@@ -14,7 +14,7 @@
+ // Restore the guest after export, including when an injected call times out.
+ class ReadOnlyGuest {
+  public:
+-    explicit ReadOnlyGuest(SoC& soc) : soc(soc), nandDirty(soc.IsNandDirty()) {
++    explicit ReadOnlyGuest(SoC& soc) : soc(soc), networkCheckpoint(soc.networkSimulation), nandDirty(soc.IsNandDirty()) {
+         if (!soc.Save()) throw std::runtime_error("cannot checkpoint guest");
+         state = copy(soc.GetSavestate());
+         ram = copy(soc.GetMemoryData());
+@@ -57,6 +57,7 @@
+         if (!saved.empty()) std::memcpy(b.data, saved.data(), saved.size());
+     }
+     SoC& soc;
++    NetworkSimulation::Checkpoint networkCheckpoint;
+     bool nandDirty, sdDirty{false};
+     std::vector<uint8_t> state, ram, nand, ramPages, nandPages, sd, sdPages;
+ };
+--- a/src/uarm/uarm/NetworkSimulation.cpp
++++ b/src/uarm/uarm/NetworkSimulation.cpp
+@@ -1,163 +1,527 @@
+ #include "NetworkSimulation.h"
+ #ifndef __EMSCRIPTEN__
++#include <arpa/inet.h>
++
+ #include <algorithm>
++#include <cstdio>
+ #include <cstring>
+ #include <stdexcept>
++#include <vector>
++
+ #include "CPU.h"
+ #include "pace.h"
+ namespace {
+-constexpr uint16_t param=0x1204, notOpen=0x1202, noSockets=0x1205, badSocket=0x1208,
+-    notConnected=0x120b, noInterfaces=0x120c, unimplemented=0x120e, timedOut=0x1212,
+-    alreadyConnected=0x1213, wouldBlock=0x122f, noName=0x123e;
+-// Read packed 68k arguments bytewise: pointers may only be two-byte aligned.
++constexpr uint16_t param = 0x1204, notOpen = 0x1202, noSockets = 0x1205, badSocket = 0x1208,
++                   notConnected = 0x120b, noInterfaces = 0x120c, unimplemented = 0x120e,
++                   timedOut = 0x1212, alreadyConnected = 0x1213, wouldBlock = 0x122f,
++                   noName = 0x123e;
++constexpr const char* modeNames[] = {"disabled", "connected", "timeout", "disconnected",
++                                     "internet"};
+ class Guest {
+- public:
++   public:
+     ArmCpu* cpu;
+     uint32_t sp;
+-    void bytes(uint32_t address, void* data, size_t size, bool write=false) {
+-        if ((!address && size) || size > UINT32_MAX-address) throw std::runtime_error("guest address");
+-        for (size_t i=0;i<size;i++)
+-            if (!cpuMemOpExternal(cpu, static_cast<uint8_t*>(data)+i, address+i, 1, write))
++    void bytes(uint32_t address, void* data, size_t size, bool write = false) {
++        if ((!address && size) || size > UINT32_MAX - address)
++            throw std::runtime_error("guest address");
++        for (size_t i = 0; i < size; i++)
++            if (!cpuMemOpExternal(cpu, static_cast<uint8_t*>(data) + i, address + i, 1, write))
+                 throw std::runtime_error("guest memory");
+     }
+     uint32_t read(uint32_t address, unsigned size) {
+-        uint8_t b[4]{}; bytes(address,b,size); uint32_t v=0;
+-        for(unsigned i=0;i<size;i++) v=(v<<8)|b[i];
+-        return v;
+-    }
+-    void put(uint32_t address,uint32_t value,unsigned size) {
+-        uint8_t b[4]{}; for(unsigned i=0;i<size;i++) b[size-1-i]=value>>(i*8); bytes(address,b,size,true);
+-    }
+-    uint32_t arg(unsigned offset,unsigned size=4) { if(sp>UINT32_MAX-offset) throw std::runtime_error("stack"); return read(sp+offset,size); }
++        uint8_t b[4]{};
++        bytes(address, b, size);
++        uint32_t value = 0;
++        for (unsigned i = 0; i < size; i++) value = (value << 8) | b[i];
++        return value;
++    }
++    void put(uint32_t address, uint32_t value, unsigned size) {
++        uint8_t b[4]{};
++        for (unsigned i = 0; i < size; i++) b[size - 1 - i] = value >> (8 * i);
++        bytes(address, b, size, true);
++    }
++    uint32_t arg(unsigned offset, unsigned size = 4) {
++        if (sp > UINT32_MAX - offset) throw std::runtime_error("stack");
++        return read(sp + offset, size);
++    }
+     std::string text(uint32_t address) {
+         std::string value;
+-        for(unsigned i=0;i<256;i++) { auto c=read(address+i,1); if(!c) return value; value+=char(c); }
++        for (unsigned i = 0; i < 256; i++) {
++            auto c = read(address + i, 1);
++            if (!c) return value;
++            value += char(c);
++        }
+         throw std::runtime_error("guest string");
+     }
++    void writable(uint32_t address, size_t size) {
++        if (!size) return;
++        if (!address || size > UINT32_MAX - address) throw std::runtime_error("guest output");
++        for (size_t i = 0; i < size;) {
++            auto value = read(address + i, 1);
++            put(address + i, value, 1);
++            i += std::min<size_t>(size - i, 4096 - ((address + i) & 4095));
++        }
++        auto value = read(address + size - 1, 1);
++        put(address + size - 1, value, 1);
++    }
++    void address(uint32_t p, uint32_t& ip, uint16_t& port) {
++        if (read(p, 2) != 2) throw std::runtime_error("address family");
++        port = read(p + 2, 2);
++        ip = read(p + 4, 4);
++    }
++    void putAddress(uint32_t p, uint32_t ip, uint16_t port) {
++        put(p, 2, 2);
++        put(p + 2, port, 2);
++        put(p + 4, ip, 4);
++    }
++    void yield() {
++        // The suspended caller owns these 32 bytes below its original SP. Palm
++        // OS delays only this task. On return, the 68k trampoline restores SP
++        // and retries the original NetLib trap with its arguments untouched.
++        if (sp < 32 || (sp & 1)) throw std::runtime_error("network wait stack");
++        const auto pc = paceGetPC();
++        if (pc < 4) throw std::runtime_error("network wait PC");
++        const auto frame = sp - 32;
++        writable(frame, 32);
++        put(frame, 1, 4);           // SysTaskDelay(1 tick)
++        put(frame + 4, 0x4e4f, 2);  // trap #15
++        put(frame + 6, 0xa0a0, 2);  // SysTaskDelay
++        put(frame + 8, 0x4fef, 2);
++        put(frame + 10, 32, 2);  // lea 32(sp),sp
++        put(frame + 12, 0x4ef9, 2);
++        put(frame + 14, pc - 4, 4);  // jmp original trap
++        cpuInvalidateCodeCache(cpu);
++        paceSetAreg(7, frame);
++        paceSetPC(frame + 4);
++    }
+ };
+-}
+-const char* NetworkSimulation::GetModeName() const {
+-    static const char* names[]={"disabled","connected","timeout","disconnected"}; return names[mode];
+-}
++}  // namespace
++NetworkSimulation::NetworkSimulation() = default;
++NetworkSimulation::~NetworkSimulation() = default;
++const char* NetworkSimulation::GetModeName() const { return modeNames[mode]; }
+ bool NetworkSimulation::SetMode(const std::string& name) {
+-    for(uint32_t i=0;i<4;i++) { static const char* names[]={"disabled","connected","timeout","disconnected"};
+-        if(name==names[i]) { if(mode!=i) { Reset(); mode=i; } return true; } }
++    for (uint32_t i = 0; i < 5; i++)
++        if (name == modeNames[i]) {
++            if (mode != i) {
++                Reset();
++                mode = i;
++            }
++            return true;
++        }
+     return false;
+ }
+-void NetworkSimulation::Reset() { opens=0; sockets={}; }
++void NetworkSimulation::Reset() {
++    opens = 0;
++    sockets = {};
++    if (!checkpoints) host.Reset();
++}
+ void NetworkSimulation::Load(SavestateLoader<ChunkType>& loader) {
+-    mode=disabled; Reset();
+-    if(!loader.HasChunk(ChunkType::networkSimulation)) return;
+-    auto* chunk=loader.GetChunkOrFail(ChunkType::networkSimulation,0,"simulated network");
+-    if(!chunk) return;
+-    LoadChunkHelper helper(*chunk); Transfer(helper);
+-    bool valid=mode<=disconnected && opens<=65535;
+-    for(const auto& s:sockets) {
+-        valid &= s.used<=1 && s.connected<=1 && s.size<=s.bytes.size() && (s.used || (!s.connected && !s.size));
+-        if (!opens || mode==disabled || mode==disconnected) valid &= !s.used;
+-    }
+-    if(!valid) { mode=disabled; Reset(); loader.NotifyError(); }
++    mode = disabled;
++    Reset();
++    if (!loader.HasChunk(ChunkType::networkSimulation)) return;
++    uint32_t version;
++    auto* chunk = loader.GetChunkOrFail(ChunkType::networkSimulation, 1, "network", version);
++    if (!chunk) return;
++    LoadChunkHelper helper(*chunk);
++    Transfer(helper, version);
++    bool valid = mode <= internet && opens <= 65535;
++    for (const auto& s : sockets) {
++        valid &= s.used <= 1 && s.connected <= 1 && s.size <= s.bytes.size() &&
++                 (s.type == 1 || s.type == 2) && (s.used || (!s.connected && !s.size));
++        if (!opens || mode == disabled || mode == disconnected) valid &= !s.used;
++    }
++    if (!valid) {
++        mode = disabled;
++        Reset();
++        loader.NotifyError();
++        return;
++    }
++    // Host TCP/UDP connections cannot survive snapshot restore. Retain occupied
++    // Palm references as closed handles until the app closes/reopens them.
++    if (mode == internet && !checkpoints)
++        for (auto& s : sockets) {
++            s.connected = 0;
++            s.size = 0;
++            s.bytes = {};
++        }
+ }
+-bool NetworkSimulation::Handle(ArmCpu* cpu,uint16_t trap) {
+-    Guest g{cpu,paceGetAreg(7)};
+-    uint32_t errPtr=0;
+-    bool pointerResult=trap==0xa81b;
+-    auto result=[&](int32_t value,uint16_t error=0) {
+-        if(errPtr) g.put(errPtr,error,2);
+-        paceSetDreg(0,value); if(pointerResult) paceSetAreg(0,error?0:uint32_t(value));
++bool NetworkSimulation::Handle(ArmCpu* cpu, uint16_t trap) {
++    Guest g{cpu, paceGetAreg(7)};
++    uint32_t errPtr = 0;
++    const bool pointerResult = trap == 0xa81b || trap == 0xa805;
++    const HostNetwork::Key key{g.sp, paceGetPC(), trap};
++    auto result = [&](int32_t value, uint16_t error = 0) {
++        if (errPtr) g.put(errPtr, error, 2);
++        paceSetDreg(0, value);
++        if (pointerResult) paceSetAreg(0, error ? 0 : uint32_t(value));
+         return true;
+     };
++    auto finish = [&](HostNetwork::Result r) {
++        if (r.waiting) {
++            g.yield();
++            return true;
++        }
++        host.Complete(key);
++        return result(r.value, r.error);
++    };
+     try {
+-        if(trap==0xa0ba) { // SysLibFind
+-            if(mode==disabled || g.text(g.arg(0))!="Net.lib") return false;
+-            g.put(g.arg(4),refnum,2); return result(0);
+-        }
+-        // Never pass our synthetic library reference to the real library table.
+-        if(trap==0xa0b8 && g.arg(0,2)==refnum) return result(0);
+-        if(trap==0xa0b9 && g.arg(0,2)==refnum) { paceSetAreg(0,0); return result(0); }
+-        if(trap<0xa800 || trap>0xa8ff || g.arg(0,2)!=refnum) return false;
+-        if(trap==0xa801) {
+-            errPtr=g.arg(2);
+-            if(mode==disabled || mode==disconnected) return result(noInterfaces,noInterfaces);
+-            if(opens==65535) return result(0x1206,0x1206);
+-            const auto previous=opens; result(previous?0x1201:0); ++opens; return true;
+-        }
+-        if(trap==0xa802) { if(!opens) return result(notOpen); if(--opens) return result(0x1203); Reset(); return result(0); }
+-        if(trap==0xa82e) { g.put(g.arg(2),opens,2); return result(0); }
+-        if(trap==0xa803 || trap==0xa804) return result(0);
+-        switch(trap) {
+-            case 0xa807: errPtr=g.arg(12); break;
+-            case 0xa808: errPtr=g.arg(8); break;
+-            case 0xa80c: errPtr=g.arg(14); break;
+-            case 0xa811: errPtr=g.arg(22); break;
+-            case 0xa813: errPtr=g.arg(24); break;
+-            case 0xa815: errPtr=g.arg(20); break;
+-            case 0xa81b: errPtr=g.arg(14); break;
+-            default: return result(-1,unimplemented);
+-        }
+-        // Validate the error output before changing model state.
+-        if(errPtr) { auto v=g.read(errPtr,2); g.put(errPtr,v,2); }
+-        if(!opens || mode==disabled || mode==disconnected) return result(pointerResult?0:-1,notOpen);
+-        if(trap==0xa81b) {
+-            const auto name=g.text(g.arg(2));
+-            if(name!="frond.test" && name!="10.0.0.2") return result(0,noName);
+-            const auto b=g.arg(6);
+-            // Pointers stay within the SDK's caller-owned NetHostInfoBufType.
+-            uint8_t data[96]{}; g.bytes(b,data,sizeof(data),true);
+-            g.put(b,b+64,4); g.put(b+4,b+32,4); g.put(b+8,2,2); g.put(b+10,4,2);
+-            g.put(b+12,b+40,4); g.put(b+40,b+48,4); g.put(b+48,0x0a000002,4);
+-            char hostname[]="frond.test"; g.bytes(b+64,hostname,sizeof(hostname),true);
++        if (trap == 0xa0ba) {
++            if (mode == disabled || g.text(g.arg(0)) != "Net.lib") return false;
++            g.put(g.arg(4), refnum, 2);
++            return result(0);
++        }
++        if (trap == 0xa0b8 && g.arg(0, 2) == refnum) return result(opens ? 0x1203 : 0);
++        if (trap == 0xa0b9 && g.arg(0, 2) == refnum) {
++            paceSetAreg(0, 0);
++            return result(0);
++        }
++        if (trap < 0xa800 || trap > 0xa8ff || g.arg(0, 2) != refnum) return false;
++        if (trap == 0xa800) {
++            paceSetAreg(0, 0);
++            return result(0);
++        }
++        if (trap == 0xa805) {
++            auto p = g.arg(6);
++            g.writable(p, 16);
++            in_addr ip{htonl(g.arg(2))};
++            char text[16];
++            if (!inet_ntop(AF_INET, &ip, text, sizeof(text))) return result(0, param);
++            g.bytes(p, text, strlen(text) + 1, true);
++            return result(p);
++        }
++        if (trap == 0xa806) {
++            in_addr ip{};
++            auto name = g.text(g.arg(2));
++            return result(inet_pton(AF_INET, name.c_str(), &ip) == 1 ? ntohl(ip.s_addr)
++                                                                     : UINT32_MAX);
++        }
++        if (trap == 0xa801 || trap == 0xa83b) {
++            errPtr = g.arg(trap == 0xa801 ? 2 : 8);
++            if (mode == internet && checkpoints) return result(0x1209, 0x1209);
++            if (mode == disabled || mode == disconnected) return result(noInterfaces, noInterfaces);
++            if (opens == 65535) return result(0x1206, 0x1206);
++            const auto previous = opens;
++            result(previous ? 0x1201 : 0);
++            ++opens;
++            return true;
++        }
++        if (trap == 0xa802) {
++            if (mode == internet && checkpoints) return result(0x1209);
++            if (!opens) return result(notOpen);
++            if (--opens) return result(0x1203);
++            Reset();
++            return result(0);
++        }
++        if (trap == 0xa82e) {
++            g.put(g.arg(2), opens, 2);
++            return result(0);
++        }
++        if (trap == 0xa803 || trap == 0xa804) return result(0);
++        if (trap == 0xa833) {
++            g.put(g.arg(4), opens ? 1 : 0, 1);
++            g.put(g.arg(8), 0, 2);
++            return result(opens ? 0 : notOpen);
++        }
++        if (trap == 0xa820) {
++            if (g.arg(2, 2)) return result(0x121c);
++            g.put(g.arg(4), 0x46726e64, 4);
++            g.put(g.arg(8), 0, 2);
++            return result(0);
++        }
++        if (trap == 0xa823 || trap == 0xa824) return result(opens ? 0 : notOpen);
++        if (trap == 0xa81c) {
++            const auto setting = g.arg(2, 2), p = g.arg(4), length = g.arg(8);
++            uint32_t value = 0;
++            unsigned size = 4;
++            if (setting == 4)
++                value = 0x46726e64;
++            else if (setting == 5)
++                size = 2;
++            else if (setting != 1 && setting != 2 && setting != 3)
++                return result(0x1218);
++            if (g.read(length, 2) < size) {
++                g.put(length, size, 2);
++                return result(0x120d);
++            }
++            g.put(p, value, size);
++            g.put(length, size, 2);
++            return result(0);
++        }
++        switch (trap) {
++            case 0xa807:
++                errPtr = g.arg(12);
++                break;
++            case 0xa808:
++                errPtr = g.arg(8);
++                break;
++            case 0xa809:
++                errPtr = g.arg(18);
++                break;
++            case 0xa80a:
++                errPtr = g.arg(20);
++                break;
++            case 0xa80b:
++            case 0xa80c:
++                errPtr = g.arg(14);
++                break;
++            case 0xa80f:
++                errPtr = g.arg(10);
++                break;
++            case 0xa811:
++                errPtr = g.arg(22);
++                break;
++            case 0xa813:
++                errPtr = g.arg(24);
++                break;
++            case 0xa815:
++                errPtr = g.arg(20);
++                break;
++            case 0xa81b:
++                errPtr = g.arg(14);
++                break;
++            case 0xa829:
++                errPtr = g.arg(24);
++                break;
++            default:
++                paceSetAreg(0, 0);
++                return result(-1, unimplemented);
++        }
++        if (errPtr) {
++            auto value = g.read(errPtr, 2);
++            g.put(errPtr, value, 2);
++        }
++        if (!opens || mode == disabled || mode == disconnected)
++            return result(pointerResult ? 0 : -1, notOpen);
++        if (mode == internet && checkpoints) return result(pointerResult ? 0 : -1, wouldBlock);
++        if (trap == 0xa81b) {
++            const auto name = g.text(g.arg(2));
++            const auto b = g.arg(6);
++            uint32_t ip = 0x0a000002;
++            if (mode == internet) {
++                g.writable(b, 568);
++                auto r = host.Resolve(name, ip, int32_t(g.arg(10)), key);
++                if (r.waiting) {
++                    g.yield();
++                    return true;
++                }
++                if (r.error != wouldBlock) host.Complete(key);
++                if (r.error) return result(0, r.error);
++            } else if (name != "frond.test" && name != "10.0.0.2")
++                return result(0, noName);
++            std::array<uint8_t, 568> data{};
++            g.bytes(b, data.data(), data.size(), true);
++            g.put(b, b + 16, 4);
++            g.put(b + 4, b + 272, 4);
++            g.put(b + 8, 2, 2);
++            g.put(b + 10, 4, 2);
++            g.put(b + 12, b + 536, 4);
++            g.put(b + 536, b + 552, 4);
++            g.put(b + 552, ip, 4);
++            const std::string canonical = mode == internet ? name : "frond.test";
++            g.bytes(b + 16, const_cast<char*>(canonical.c_str()), canonical.size() + 1, true);
+             return result(b);
+         }
+-        if(trap==0xa807) {
+-            // Palm SDK short enums occupy the high byte of a two-byte stack slot.
+-            if(g.arg(2,1)!=2 || g.arg(4,1)!=1 || (g.arg(6,2)!=0 && g.arg(6,2)!=6)) return result(-1,param);
+-            for(unsigned i=0;i<sockets.size();i++) if(!sockets[i].used) { result(i+4); sockets[i].used=1; return true; }
+-            return result(-1,noSockets);
+-        }
+-        if(trap==0xa815) {
+-            const auto width=g.arg(2,2); if(width>32) return result(-1,param);
+-            uint32_t ptr[3], masks[3]{}; unsigned ready=0;
+-            for(unsigned j=0;j<3;j++) { ptr[j]=g.arg(4+j*4); const auto wanted=ptr[j]?g.read(ptr[j],4):0;
+-                for(unsigned i=0;i<sockets.size();i++) { const auto bit=1u<<(i+4); if(i+4>=width || !(wanted&bit)) continue;
+-                    const auto& s=sockets[i]; if(!s.used) return result(-1,badSocket);
+-                    if((j==0 && s.size) || (j==1 && s.connected && s.size<s.bytes.size())) { masks[j]|=bit; ++ready; }
+-                }
+-            }
+-            for(unsigned j=0;j<3;j++) if(ptr[j]) g.put(ptr[j],masks[j],4);
++        if (trap == 0xa807) {
++            const auto type = g.arg(4, 1), protocol = g.arg(6, 2);
++            if (g.arg(2, 1) != 2 || (type != 1 && (mode != internet || type != 2)) ||
++                (protocol && protocol != (type == 1 ? 6 : 17)))
++                return result(-1, param);
++            for (unsigned i = 0; i < sockets.size(); i++)
++                if (!sockets[i].used) {
++                    if (mode == internet) {
++                        auto r = host.Open(i, type, protocol);
++                        if (r.error) return result(-1, r.error);
++                    }
++                    result(i + 4);
++                    sockets[i].used = 1;
++                    sockets[i].type = type;
++                    return true;
++                }
++            return result(-1, noSockets);
++        }
++        if (trap == 0xa815) {
++            const auto width = g.arg(2, 2);
++            if (width > 32) return result(-1, param);
++            uint32_t ptr[3], masks[3]{};
++            unsigned ready = 0;
++            for (unsigned j = 0; j < 3; j++) {
++                ptr[j] = g.arg(4 + j * 4);
++                if (ptr[j]) {
++                    g.writable(ptr[j], 4);
++                    masks[j] = g.read(ptr[j], 4);
++                }
++            }
++            if (mode == internet) {
++                auto r = host.Select(width, masks, int32_t(g.arg(16)), key);
++                if (r.waiting) {
++                    g.yield();
++                    return true;
++                }
++                host.Complete(key);
++                if (r.error) return result(-1, r.error);
++                ready = r.value;
++            } else
++                for (unsigned j = 0; j < 3; j++) {
++                    const auto wanted = masks[j];
++                    masks[j] = 0;
++                    for (unsigned i = 0; i < sockets.size(); i++) {
++                        const auto bit = 1u << (i + 4);
++                        if (i + 4 >= width || !(wanted & bit)) continue;
++                        const auto& s = sockets[i];
++                        if (!s.used) return result(-1, badSocket);
++                        if ((j == 0 && s.size) ||
++                            (j == 1 && s.connected && s.size < s.bytes.size())) {
++                            masks[j] |= bit;
++                            ++ready;
++                        }
++                    }
++                }
++            for (unsigned j = 0; j < 3; j++)
++                if (ptr[j]) g.put(ptr[j], masks[j], 4);
+             return result(ready);
+         }
+-        const auto id=g.arg(2,2); if(id<4 || id>=20 || !sockets[id-4].used) return result(-1,badSocket);
+-        auto& s=sockets[id-4];
+-        if(trap==0xa808) { result(0); s={}; return true; }
+-        if(trap==0xa80c) {
+-            if(s.connected) return result(-1,alreadyConnected);
+-            const auto address=g.arg(4);
+-            if(g.arg(8,2)<8 || g.read(address,2)!=2) return result(-1,param);
+-            if(mode==timeout) return result(-1,timedOut);
+-            if(g.read(address+2,2)!=7 || g.read(address+4,4)!=0x0a000002) return result(-1,noInterfaces);
+-            result(0); s.connected=1; return true;
+-        }
+-        if(!s.connected) return result(-1,notConnected);
+-        const auto buffer=g.arg(4), length=g.arg(8,2);
+-        if(g.arg(10,2) || g.arg(12)) return result(-1,unimplemented); // flags / peer-address forms
+-        if(!length) return result(0);
+-        if(trap==0xa811) {
+-            const auto count=std::min<size_t>(length,s.bytes.size()-s.size);
+-            if(!count) return result(-1,g.arg(18)?timedOut:wouldBlock);
+-            std::array<uint8_t,4096> incoming{}; g.bytes(buffer,incoming.data(),count);
+-            result(count); std::copy_n(incoming.data(),count,s.bytes.data()+s.size); s.size+=count; return true;
+-        }
+-        if(!s.size) return result(-1,g.arg(20)?timedOut:wouldBlock);
+-        const auto count=std::min<uint32_t>(length,s.size);
+-        g.bytes(buffer,s.bytes.data(),count,true); result(count);
+-        std::memmove(s.bytes.data(),s.bytes.data()+count,s.size-count); s.size-=count;
+-        std::fill(s.bytes.begin()+s.size,s.bytes.end(),0); return true;
+-    } catch(const std::exception&) {
+-        paceSetDreg(0,pointerResult?0:UINT32_MAX); if(pointerResult) paceSetAreg(0,0);
+-        try { if(errPtr) g.put(errPtr,param,2); } catch(...) {}
+-        // A bad unrelated SysLibFind argument must retain Palm's normal fault handling.
+-        return trap!=0xa0ba;
++        const auto id = g.arg(2, 2);
++        if (id < 4 || id >= 20 || !sockets[id - 4].used) return result(-1, badSocket);
++        auto& s = sockets[id - 4];
++        if (trap == 0xa808) {
++            if (mode == internet) host.Close(id - 4);
++            result(0);
++            s = Socket{};
++            return true;
++        }
++        if (trap == 0xa80c || trap == 0xa80b) {
++            if (trap == 0xa80c && s.connected) return result(-1, alreadyConnected);
++            if (g.arg(8, 2) < 8) return result(-1, param);
++            uint32_t ip;
++            uint16_t port;
++            g.address(g.arg(4), ip, port);
++            if (mode == internet) {
++                auto r = trap == 0xa80c ? host.Connect(id - 4, ip, port, int32_t(g.arg(10)), key)
++                                        : host.Bind(id - 4, ip, port);
++                if (!r.waiting && !r.error && trap == 0xa80c) s.connected = 1;
++                return finish(r);
++            }
++            if (trap == 0xa80b) return result(-1, unimplemented);
++            if (mode == timeout) return result(-1, timedOut);
++            if (port != 7 || ip != 0x0a000002) return result(-1, noInterfaces);
++            result(0);
++            s.connected = 1;
++            return true;
++        }
++        if (mode == internet) {
++            if (trap == 0xa809) {
++                const auto length = g.arg(12, 2);
++                if (length != 1 && length != 2 && length != 4) return result(-1, param);
++                return finish(
++                    host.SetOption(id - 4, g.arg(4, 2), g.arg(6, 2), g.read(g.arg(8), length)));
++            }
++            if (trap == 0xa80a) {
++                const auto length = g.arg(12), p = g.arg(8);
++                if (g.read(length, 2) < 4) {
++                    g.put(length, 4, 2);
++                    return result(-1, 0x120d);
++                }
++                g.writable(p, 4);
++                g.writable(length, 2);
++                uint32_t value;
++                auto r = host.GetOption(id - 4, g.arg(4, 2), g.arg(6, 2), value);
++                if (!r.error) {
++                    g.put(p, value, 4);
++                    g.put(length, 4, 2);
++                }
++                return finish(r);
++            }
++            if (trap == 0xa80f) return finish(host.Shutdown(id - 4, g.arg(4, 2)));
++            if (trap == 0xa829) {
++                for (unsigned j = 0; j < 2; j++) {
++                    const auto p = g.arg(4 + j * 8), length = g.arg(8 + j * 8);
++                    if (!p) continue;
++                    if (!length || g.read(length, 2) < 8) return result(-1, 0x120d);
++                    g.writable(p, 8);
++                    g.writable(length, 2);
++                }
++                for (unsigned j = 0; j < 2; j++) {
++                    const auto p = g.arg(4 + j * 8), length = g.arg(8 + j * 8);
++                    if (!p) continue;
++                    uint32_t ip;
++                    uint16_t port;
++                    auto r = host.Address(id - 4, j, ip, port);
++                    if (r.error) return finish(r);
++                    g.putAddress(p, ip, port);
++                    g.put(length, 8, 2);
++                }
++                return result(0);
++            }
++            if (trap == 0xa811 || trap == 0xa813) {
++                if (s.type == 2 && g.arg(8, 2) > 32767) return result(-1, 0x120a);
++                const auto p = g.arg(4), length = std::min<uint32_t>(g.arg(8, 2), 32767),
++                           flags = g.arg(10, 2), peer = g.arg(12);
++                std::vector<uint8_t> data(length);
++                if (trap == 0xa811) {
++                    uint32_t ip = 0;
++                    uint16_t port = 0;
++                    if (peer) {
++                        if (g.arg(16, 2) < 8) return result(-1, param);
++                        g.address(peer, ip, port);
++                    }
++                    g.bytes(p, data.data(), length);
++                    return finish(host.Send(id - 4, data.data(), length, flags, peer, ip, port,
++                                            int32_t(g.arg(18)), key));
++                }
++                const auto peerLength = g.arg(16);
++                g.writable(p, length);
++                if (peer) {
++                    if (!peerLength || g.read(peerLength, 2) < 8) return result(-1, 0x120d);
++                    g.writable(peer, 8);
++                    g.writable(peerLength, 2);
++                }
++                uint32_t ip;
++                uint16_t port;
++                auto r = host.Receive(id - 4, data.data(), length, flags, ip, port,
++                                      int32_t(g.arg(20)), key);
++                if (!r.waiting && !r.error) {
++                    g.bytes(p, data.data(), r.value, true);
++                    if (peer) {
++                        g.putAddress(peer, ip, port);
++                        g.put(peerLength, 8, 2);
++                    }
++                }
++                return finish(r);
++            }
++            return result(-1, unimplemented);
++        }
++        if (trap != 0xa811 && trap != 0xa813) return result(-1, unimplemented);
++        if (!s.connected) return result(-1, notConnected);
++        const auto buffer = g.arg(4), length = g.arg(8, 2);
++        if (g.arg(10, 2) || g.arg(12)) return result(-1, unimplemented);
++        if (!length) return result(0);
++        if (trap == 0xa811) {
++            const auto count = std::min<size_t>(length, s.bytes.size() - s.size);
++            if (!count) return result(-1, g.arg(18) ? timedOut : wouldBlock);
++            std::array<uint8_t, 4096> data{};
++            g.bytes(buffer, data.data(), count);
++            result(count);
++            std::copy_n(data.data(), count, s.bytes.data() + s.size);
++            s.size += count;
++            return true;
++        }
++        if (!s.size) return result(-1, g.arg(20) ? timedOut : wouldBlock);
++        const auto count = std::min<uint32_t>(length, s.size);
++        g.bytes(buffer, s.bytes.data(), count, true);
++        result(count);
++        std::memmove(s.bytes.data(), s.bytes.data() + count, s.size - count);
++        s.size -= count;
++        std::fill(s.bytes.begin() + s.size, s.bytes.end(), 0);
++        return true;
++    } catch (const std::exception&) {
++        if (!checkpoints) host.Complete(key);
++        paceSetDreg(0, pointerResult ? 0 : UINT32_MAX);
++        if (pointerResult) paceSetAreg(0, 0);
++        try {
++            if (errPtr) g.put(errPtr, param, 2);
++        } catch (...) {
++        }
++        return trap != 0xa0ba;
+     }
+ }
+ #endif
+--- a/src/uarm/uarm/NetworkSimulation.h
++++ b/src/uarm/uarm/NetworkSimulation.h
+@@ -4,13 +4,17 @@
+ #include <array>
+ #include <cstdint>
+ #include <string>
++
++#include "HostNetwork.h"
+ #include "savestate/savestateAll.h"
+ struct ArmCpu;
+-// Experimental 68k NetLib fixture. No host sockets or radio emulation.
++// 68k NetLib simulation and opt-in host socket forwarding; no radio emulation.
+ class NetworkSimulation {
+- public:
++   public:
++    NetworkSimulation();
++    ~NetworkSimulation();
+     static constexpr uint16_t refnum = 0x7ffe;
+-    enum Mode : uint32_t { disabled, connected, timeout, disconnected };
++    enum Mode : uint32_t { disabled, connected, timeout, disconnected, internet };
+     Mode GetMode() const { return static_cast<Mode>(mode); }
+     const char* GetModeName() const;
+     bool SetMode(const std::string& name);
+@@ -19,18 +23,45 @@
+     static bool Dispatch(void* context, ArmCpu* cpu, uint16_t trap) {
+         return static_cast<NetworkSimulation*>(context)->Handle(cpu, trap);
+     }
+-    template<class S> void Save(S& state) {
+-        auto* chunk = state.GetChunk(ChunkType::networkSimulation, 0);
+-        SaveChunkHelper helper(*chunk); Transfer(helper);
++    template <class S>
++    void Save(S& state) {
++        auto* chunk = state.GetChunk(ChunkType::networkSimulation, 1);
++        SaveChunkHelper helper(*chunk);
++        Transfer(helper, 1);
+     }
+     void Load(SavestateLoader<ChunkType>& loader);
+- private:
+-    struct Socket { uint32_t used{}, connected{}, size{}; std::array<uint8_t,4096> bytes{}; };
++    // Export checkpoints freeze external I/O and preserve live host descriptors.
++    class Checkpoint {
++       public:
++        explicit Checkpoint(NetworkSimulation& owner) : owner(owner) { ++owner.checkpoints; }
++        ~Checkpoint() { --owner.checkpoints; }
++        Checkpoint(const Checkpoint&) = delete;
++        Checkpoint& operator=(const Checkpoint&) = delete;
++
++       private:
++        NetworkSimulation& owner;
++    };
++
++   private:
++    struct Socket {
++        uint32_t used{}, connected{}, size{}, type{1};
++        std::array<uint8_t, 4096> bytes{};
++    };
++    HostNetwork host;
++    unsigned checkpoints{};
+     uint32_t mode{}, opens{};
+-    std::array<Socket,16> sockets{};
+-    template<class H> void Transfer(H& h) {
++    std::array<Socket, 16> sockets{};
++    template <class H>
++    void Transfer(H& h, uint32_t version) {
+         h.Do32(mode).Do32(opens);
+-        for (auto& s : sockets) h.Do32(s.used).Do32(s.connected).Do32(s.size).DoBuffer(s.bytes.data(), s.bytes.size());
++        for (auto& s : sockets) {
++            h.Do32(s.used).Do32(s.connected).Do32(s.size);
++            if (version >= 1)
++                h.Do32(s.type);
++            else
++                s.type = 1;
++            h.DoBuffer(s.bytes.data(), s.bytes.size());
++        }
+     }
+ };
+ #endif
+--- /dev/null
++++ b/src/uarm/uarm/HostNetwork.h
+@@ -0,0 +1,43 @@
++#ifndef FROND_HOST_NETWORK_H
++#define FROND_HOST_NETWORK_H
++#ifndef __EMSCRIPTEN__
++#include <cstddef>
++#include <cstdint>
++#include <memory>
++#include <string>
++#include <tuple>
++// Host descriptors and DNS jobs belong to this live runtime, never to a savestate.
++// All socket calls are nonblocking. Only the resolver worker can wait in host I/O.
++class HostNetwork {
++   public:
++    using Key = std::tuple<uint32_t, uint32_t, uint16_t>;
++    struct Result {
++        int32_t value{-1};
++        uint16_t error{};
++        bool waiting{};
++    };
++    HostNetwork();
++    ~HostNetwork();
++    void Reset();
++    Result Open(unsigned index, unsigned type, int protocol);
++    Result Close(unsigned index);
++    Result Connect(unsigned index, uint32_t address, uint16_t port, int32_t ticks, const Key& key);
++    Result Bind(unsigned index, uint32_t address, uint16_t port);
++    Result Send(unsigned index, const void* bytes, size_t size, unsigned flags, bool peer,
++                uint32_t address, uint16_t port, int32_t ticks, const Key& key);
++    Result Receive(unsigned index, void* bytes, size_t size, unsigned flags, uint32_t& address,
++                   uint16_t& port, int32_t ticks, const Key& key);
++    Result Select(unsigned width, uint32_t masks[3], int32_t ticks, const Key& key);
++    Result Resolve(const std::string& name, uint32_t& address, int32_t ticks, const Key& key);
++    Result Shutdown(unsigned index, unsigned direction);
++    Result Address(unsigned index, bool peer, uint32_t& address, uint16_t& port);
++    Result SetOption(unsigned index, uint16_t level, uint16_t option, uint32_t value);
++    Result GetOption(unsigned index, uint16_t level, uint16_t option, uint32_t& value);
++    void Complete(const Key& key);
++
++   private:
++    struct Impl;
++    std::unique_ptr<Impl> impl;
++};
++#endif
++#endif
+--- /dev/null
++++ b/src/uarm/uarm/HostNetwork.cpp
+@@ -0,0 +1,511 @@
++#include "HostNetwork.h"
++#ifndef __EMSCRIPTEN__
++#include <arpa/inet.h>
++#include <netdb.h>
++#include <netinet/tcp.h>
++#include <poll.h>
++#include <sys/socket.h>
++#include <unistd.h>
++
++#include <array>
++#include <atomic>
++#include <cerrno>
++#include <chrono>
++#include <condition_variable>
++#include <deque>
++#include <map>
++#include <mutex>
++#include <thread>
++
++namespace {
++constexpr uint16_t param = 0x1204, resources = 0x1206, closed = 0x1214, badSocket = 0x1208,
++                   timeout = 0x1212, wouldBlock = 0x122f, unsupported = 0x120e;
++using Clock = std::chrono::steady_clock;
++uint16_t palmError(int error) {
++    switch (error) {
++        case 0:
++            return 0;
++        case EAGAIN:
++        case EINPROGRESS:
++        case EALREADY:
++            return wouldBlock;
++        case ETIMEDOUT:
++            return timeout;
++        case ECONNRESET:
++        case EPIPE:
++            return closed;
++        case ECONNREFUSED:
++        case EHOSTUNREACH:
++            return 0x122d;
++        case ENETUNREACH:
++        case ENETDOWN:
++            return 0x120c;
++        case ENOTCONN:
++            return 0x120b;
++        case EADDRINUSE:
++            return 0x120f;
++        case EMFILE:
++        case ENFILE:
++        case ENOBUFS:
++            return resources;
++        case ENOMEM:
++            return 0x1207;
++        case EMSGSIZE:
++            return 0x120a;
++        case EOPNOTSUPP:
++        case EPROTONOSUPPORT:
++            return unsupported;
++        case EBADF:
++            return badSocket;
++        default:
++            return param;
++    }
++}
++sockaddr_in endpoint(uint32_t address, uint16_t port) {
++    sockaddr_in result{};
++    result.sin_family = AF_INET;
++    result.sin_addr.s_addr = htonl(address);
++    result.sin_port = htons(port);
++    return result;
++}
++struct DnsJob {
++    explicit DnsJob(std::string name) : name(std::move(name)) {}
++    std::string name;
++    uint32_t address{};
++    int error{};
++    std::atomic<bool> ready{false}, cancelled{false};
++};
++// One bounded resolver queue for the process. Cancellation never joins a libc
++// resolver call on the emulation thread. Jobs retain no CPU/guest/model pointers.
++class Resolver {
++    struct State {
++        std::mutex mutex;
++        std::condition_variable wake;
++        std::deque<std::shared_ptr<DnsJob>> queue;
++        bool stop = false;
++    };
++    std::shared_ptr<State> state = std::make_shared<State>();
++    std::thread worker;
++
++   public:
++    Resolver()
++        : worker([s = state] {
++              for (;;) {
++                  std::shared_ptr<DnsJob> job;
++                  {
++                      std::unique_lock lock(s->mutex);
++                      s->wake.wait(lock, [&] { return s->stop || !s->queue.empty(); });
++                      if (s->stop) return;
++                      job = s->queue.front();
++                      s->queue.pop_front();
++                  }
++                  if (job->cancelled.load()) continue;
++                  addrinfo hints{}, *answers = nullptr;
++                  hints.ai_family = AF_INET;
++                  hints.ai_socktype = SOCK_STREAM;
++                  job->error = getaddrinfo(job->name.c_str(), nullptr, &hints, &answers);
++                  if (!job->error && answers)
++                      job->address =
++                          ntohl(reinterpret_cast<sockaddr_in*>(answers->ai_addr)->sin_addr.s_addr);
++                  else if (!job->error)
++                      job->error = EAI_NONAME;
++                  if (answers) freeaddrinfo(answers);
++                  job->ready.store(true, std::memory_order_release);
++              }
++          }) {}
++    ~Resolver() {
++        {
++            std::lock_guard lock(state->mutex);
++            state->stop = true;
++        }
++        state->wake.notify_one();
++        worker.detach();
++    }
++    std::shared_ptr<DnsJob> Submit(const std::string& name) {
++        auto job = std::make_shared<DnsJob>(name);
++        {
++            std::lock_guard lock(state->mutex);
++            for (auto it = state->queue.begin(); it != state->queue.end();)
++                if ((*it)->cancelled.load())
++                    it = state->queue.erase(it);
++                else
++                    ++it;
++            if (state->queue.size() >= 16) return {};
++            state->queue.push_back(job);
++        }
++        state->wake.notify_one();
++        return job;
++    }
++};
++Resolver& resolver() {
++    static Resolver worker;
++    return worker;
++}
++}  // namespace
++struct HostNetwork::Impl {
++    struct Socket {
++        int fd = -1, connectError = 0, pendingError = 0;
++        unsigned type = 1;
++        bool connecting = false, connected = false, nonblocking = false;
++        uint32_t sendTicks = 0, receiveTicks = 0, connectAddress = 0;
++        uint16_t connectPort = 0;
++    };
++    struct Pending {
++        Clock::time_point started = Clock::now();
++        bool delaying = false;
++        std::shared_ptr<DnsJob> dns;
++    };
++    std::array<Socket, 16> sockets;
++    std::map<Key, Pending> pending;
++    Result Wait(const Key& key, int32_t ticks, bool nonblocking = false) {
++        if (nonblocking || ticks == 0) return {-1, wouldBlock};
++        if (ticks < -1) return {-1, param};
++        if (!pending.count(key) && pending.size() >= 32) return {-1, resources};
++        auto& wait = pending[key];
++        if (!wait.delaying) {
++            wait.started = Clock::now();
++            wait.delaying = true;
++        }
++        if (ticks > 0 &&
++            Clock::now() - wait.started >= std::chrono::milliseconds(int64_t(ticks) * 10))
++            return {-1, timeout};
++        return {0, 0, true};
++    }
++    static int32_t Limit(int32_t ticks, uint32_t option) {
++        return option && (ticks < 0 || uint32_t(ticks) > option) ? int32_t(option) : ticks;
++    }
++    Socket* Find(unsigned index) {
++        return index < sockets.size() && sockets[index].fd >= 0 ? &sockets[index] : nullptr;
++    }
++};
++HostNetwork::HostNetwork() : impl(std::make_unique<Impl>()) {}
++HostNetwork::~HostNetwork() { Reset(); }
++void HostNetwork::Reset() {
++    for (unsigned i = 0; i < 16; i++) Close(i);
++    for (auto& [key, p] : impl->pending)
++        if (p.dns) p.dns->cancelled = true;
++    impl->pending.clear();
++}
++void HostNetwork::Complete(const Key& key) {
++    auto it = impl->pending.find(key);
++    if (it != impl->pending.end()) {
++        if (it->second.dns) it->second.dns->cancelled = true;
++        impl->pending.erase(it);
++    }
++}
++HostNetwork::Result HostNetwork::Open(unsigned index, unsigned type, int protocol) {
++    if (index >= 16 || (type != 1 && type != 2) || (protocol && protocol != (type == 1 ? 6 : 17)))
++        return {-1, param};
++    Close(index);
++    auto& s = impl->sockets[index];
++    s.fd =
++        socket(AF_INET, (type == 1 ? SOCK_STREAM : SOCK_DGRAM) | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
++    s.type = type;
++    return s.fd < 0 ? Result{-1, palmError(errno)} : Result{int32_t(index + 4)};
++}
++HostNetwork::Result HostNetwork::Close(unsigned index) {
++    if (index >= 16) return {-1, badSocket};
++    auto& s = impl->sockets[index];
++    if (s.fd >= 0) close(s.fd);
++    s = Impl::Socket{};
++    return {0};
++}
++HostNetwork::Result HostNetwork::Connect(unsigned index, uint32_t address, uint16_t port,
++                                         int32_t ticks, const Key& key) {
++    auto* s = impl->Find(index);
++    if (!s) return {-1, closed};
++    if (s->connected) return {-1, 0x1213};
++    if (s->connectError) return {-1, palmError(s->connectError)};
++    if (s->connecting && (s->connectAddress != address || s->connectPort != port))
++        return {-1, 0x1209};
++    if (!s->connecting) {
++        s->connectAddress = address;
++        s->connectPort = port;
++        auto target = endpoint(address, port);
++        if (connect(s->fd, reinterpret_cast<sockaddr*>(&target), sizeof(target)) == 0) {
++            s->connected = true;
++            return {0};
++        }
++        if (errno != EINPROGRESS && errno != EALREADY && errno != EWOULDBLOCK) {
++            s->connectError = s->pendingError = errno;
++            return {-1, palmError(errno)};
++        }
++        s->connecting = true;
++    }
++    pollfd p{s->fd, POLLOUT, 0};
++    if (poll(&p, 1, 0) > 0 && p.revents) {
++        int error = 0;
++        socklen_t size = sizeof(error);
++        if (getsockopt(s->fd, SOL_SOCKET, SO_ERROR, &error, &size) < 0) error = errno;
++        s->connecting = false;
++        if (error) {
++            s->connectError = s->pendingError = error;
++            return {-1, palmError(error)};
++        }
++        s->connected = true;
++        return {0};
++    }
++    auto result = impl->Wait(key, ticks, s->nonblocking);
++    if (result.error == timeout) {
++        Close(index);
++    }
++    return result;
++}
++HostNetwork::Result HostNetwork::Bind(unsigned index, uint32_t address, uint16_t port) {
++    auto* s = impl->Find(index);
++    if (!s) return {-1, closed};
++    auto local = endpoint(address, port);
++    return bind(s->fd, reinterpret_cast<sockaddr*>(&local), sizeof(local)) < 0
++               ? Result{-1, palmError(errno)}
++               : Result{0};
++}
++HostNetwork::Result HostNetwork::Send(unsigned index, const void* bytes, size_t size,
++                                      unsigned flags, bool peer, uint32_t address, uint16_t port,
++                                      int32_t ticks, const Key& key) {
++    auto* s = impl->Find(index);
++    if (!s) return {-1, closed};
++    if (flags & ~5u) return {-1, 0x1260};
++    int hostFlags = MSG_DONTWAIT | MSG_NOSIGNAL | ((flags & 1) ? MSG_OOB : 0) |
++                    ((flags & 4) ? MSG_DONTROUTE : 0);
++    auto target = endpoint(address, port);
++    auto n =
++        sendto(s->fd, bytes, size, hostFlags, peer ? reinterpret_cast<sockaddr*>(&target) : nullptr,
++               peer ? sizeof(target) : 0);
++    if (n >= 0) return {int32_t(n)};
++    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
++        return impl->Wait(key, Impl::Limit(ticks, s->sendTicks), s->nonblocking);
++    return {-1, palmError(errno)};
++}
++HostNetwork::Result HostNetwork::Receive(unsigned index, void* bytes, size_t size, unsigned flags,
++                                         uint32_t& address, uint16_t& port, int32_t ticks,
++                                         const Key& key) {
++    auto* s = impl->Find(index);
++    if (!s) return {-1, closed};
++    if (flags & ~3u) return {-1, 0x1260};
++    sockaddr_in from{};
++    socklen_t length = sizeof(from);
++    auto n = recvfrom(s->fd, bytes, size,
++                      MSG_DONTWAIT | ((flags & 1) ? MSG_OOB : 0) | ((flags & 2) ? MSG_PEEK : 0),
++                      reinterpret_cast<sockaddr*>(&from), &length);
++    if (n >= 0) {
++        if (from.sin_family != AF_INET) {
++            length = sizeof(from);
++            getpeername(s->fd, reinterpret_cast<sockaddr*>(&from), &length);
++        }
++        address = ntohl(from.sin_addr.s_addr);
++        port = ntohs(from.sin_port);
++        return {int32_t(n)};
++    }
++    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
++        return impl->Wait(key, Impl::Limit(ticks, s->receiveTicks), s->nonblocking);
++    return {-1, palmError(errno)};
++}
++HostNetwork::Result HostNetwork::Select(unsigned width, uint32_t masks[3], int32_t ticks,
++                                        const Key& key) {
++    if (width > 32) return {-1, param};
++    const auto inRange = width == 32 ? UINT32_MAX : (uint32_t(1) << width) - 1;
++    if (((masks[0] | masks[1] | masks[2]) & inRange) & ~uint32_t(0x000ffff0))
++        return {-1, badSocket};
++    std::array<pollfd, 16> p{};
++    uint32_t ready[3]{};
++    unsigned n = 0;
++    for (unsigned i = 0; i < 16; i++) {
++        const uint32_t bit = 1u << (i + 4);
++        if (i + 4 >= width) continue;
++        const bool wanted = (masks[0] | masks[1] | masks[2]) & bit;
++        if (!wanted) continue;
++        auto* s = impl->Find(i);
++        if (!s) return {-1, closed};
++        p[i].fd = s->fd;
++        p[i].events = ((masks[0] & bit) ? POLLIN : 0) | ((masks[1] & bit) ? POLLOUT : 0) |
++                      ((masks[2] & bit) ? POLLPRI : 0);
++    }
++    // Unused entries must not poll descriptor zero.
++    for (unsigned i = 0; i < 16; i++)
++        if (!p[i].events) p[i].fd = -1;
++    if (poll(p.data(), p.size(), 0) < 0 && errno != EINTR) return {-1, palmError(errno)};
++    for (unsigned i = 0; i < 16; i++) {
++        const uint32_t bit = 1u << (i + 4);
++        const auto events = p[i].revents;
++        for (unsigned j = 0; j < 3; j++) {
++            const auto wanted = j == 0   ? (POLLIN | POLLHUP | POLLERR)
++                                : j == 1 ? (POLLOUT | POLLHUP | POLLERR)
++                                         : POLLPRI;
++            if ((masks[j] & bit) && (events & wanted)) {
++                ready[j] |= bit;
++                ++n;
++            }
++        }
++    }
++    if (!n && ticks) {
++        auto result = impl->Wait(key, ticks);
++        if (result.waiting) return result;
++        if (result.error != timeout) return result;
++    }
++    for (unsigned j = 0; j < 3; j++) masks[j] = ready[j];
++    return {int32_t(n)};
++}
++HostNetwork::Result HostNetwork::Resolve(const std::string& name, uint32_t& address, int32_t ticks,
++                                         const Key& key) {
++    in_addr numeric{};
++    if (inet_pton(AF_INET, name.c_str(), &numeric) == 1) {
++        address = ntohl(numeric.s_addr);
++        return {0};
++    }
++    if (name.empty() || name.size() > 255) return {-1, 0x1236};
++    if (!impl->pending.count(key) && impl->pending.size() >= 32) return {-1, resources};
++    auto& wait = impl->pending[key];
++    if (wait.dns && wait.dns->name != name) {
++        wait.dns->cancelled = true;
++        wait = Impl::Pending{};
++    }
++    if (!wait.dns) wait.dns = resolver().Submit(name);
++    if (!wait.dns) return {-1, resources};
++    if (wait.dns->ready.load(std::memory_order_acquire)) {
++        if (wait.dns->error) return {-1, uint16_t(wait.dns->error == EAI_AGAIN ? 0x123a : 0x123e)};
++        address = wait.dns->address;
++        return {0};
++    }
++    auto result = impl->Wait(key, ticks);
++    if (result.error == timeout) result.error = 0x123a;
++    return result;
++}
++HostNetwork::Result HostNetwork::Shutdown(unsigned index, unsigned direction) {
++    auto* s = impl->Find(index);
++    if (!s) return {-1, closed};
++    if (direction > 2) return {-1, param};
++    return shutdown(s->fd, direction) < 0 ? Result{-1, palmError(errno)} : Result{0};
++}
++HostNetwork::Result HostNetwork::Address(unsigned index, bool peer, uint32_t& address,
++                                         uint16_t& port) {
++    auto* s = impl->Find(index);
++    if (!s) return {-1, closed};
++    sockaddr_in a{};
++    socklen_t length = sizeof(a);
++    int status = peer ? getpeername(s->fd, reinterpret_cast<sockaddr*>(&a), &length)
++                      : getsockname(s->fd, reinterpret_cast<sockaddr*>(&a), &length);
++    if (status < 0) return {-1, palmError(errno)};
++    address = ntohl(a.sin_addr.s_addr);
++    port = ntohs(a.sin_port);
++    return {0};
++}
++HostNetwork::Result HostNetwork::SetOption(unsigned index, uint16_t level, uint16_t option,
++                                           uint32_t value) {
++    auto* s = impl->Find(index);
++    if (!s) return {-1, closed};
++    if (level == 0xffff && option == 0x2000) {
++        s->nonblocking = value;
++        return {0};
++    }
++    if (level == 0xffff && (option == 0x1005 || option == 0x1006)) {
++        if (value > INT32_MAX) return {-1, param};
++        (option == 0x1005 ? s->sendTicks : s->receiveTicks) = value;
++        return {0};
++    }
++    int hostLevel = SOL_SOCKET, hostOption = 0;
++    if (level == 0xffff) {
++        switch (option) {
++            case 4:
++                hostOption = SO_REUSEADDR;
++                break;
++            case 8:
++                hostOption = SO_KEEPALIVE;
++                break;
++            case 0x20:
++                hostOption = SO_BROADCAST;
++                break;
++            case 0x1001:
++                hostOption = SO_SNDBUF;
++                break;
++            case 0x1002:
++                hostOption = SO_RCVBUF;
++                break;
++            default:
++                return {-1, unsupported};
++        }
++    } else if (level == 6 && option == 1) {
++        hostLevel = IPPROTO_TCP;
++        hostOption = TCP_NODELAY;
++    } else
++        return {-1, unsupported};
++    const int setting = value;
++    return setsockopt(s->fd, hostLevel, hostOption, &setting, sizeof(setting)) < 0
++               ? Result{-1, palmError(errno)}
++               : Result{0};
++}
++HostNetwork::Result HostNetwork::GetOption(unsigned index, uint16_t level, uint16_t option,
++                                           uint32_t& value) {
++    auto* s = impl->Find(index);
++    if (!s) return {-1, closed};
++    if (level == 0xffff && option == 0x2000) {
++        value = s->nonblocking;
++        return {0};
++    }
++    if (level == 0xffff && option == 0x1008) {
++        value = s->type;
++        return {0};
++    }
++    if (level == 0xffff && (option == 0x1005 || option == 0x1006)) {
++        value = option == 0x1005 ? s->sendTicks : s->receiveTicks;
++        return {0};
++    }
++    int hostLevel = SOL_SOCKET, hostOption = 0;
++    if (level == 0xffff) {
++        switch (option) {
++            case 4:
++                hostOption = SO_REUSEADDR;
++                break;
++            case 8:
++                hostOption = SO_KEEPALIVE;
++                break;
++            case 0x20:
++                hostOption = SO_BROADCAST;
++                break;
++            case 0x1001:
++                hostOption = SO_SNDBUF;
++                break;
++            case 0x1002:
++                hostOption = SO_RCVBUF;
++                break;
++            case 0x1007:
++                hostOption = SO_ERROR;
++                break;
++            default:
++                return {-1, unsupported};
++        }
++    } else if (level == 6 && option == 1) {
++        hostLevel = IPPROTO_TCP;
++        hostOption = TCP_NODELAY;
++    } else
++        return {-1, unsupported};
++    if (hostOption == SO_ERROR) {
++        // Querying SO_ERROR consumes Linux's pending connect error. Retain the
++        // connect result so a later retry cannot misreport a refused socket as
++        // successfully connected after the application reads the error option.
++        if (s->connecting) {
++            pollfd p{s->fd, POLLOUT, 0};
++            if (poll(&p, 1, 0) <= 0 || !p.revents) {
++                value = 0;
++                return {0};
++            }
++            int error = 0;
++            socklen_t size = sizeof(error);
++            if (getsockopt(s->fd, SOL_SOCKET, SO_ERROR, &error, &size) < 0) error = errno;
++            s->connectError = s->pendingError = error;
++            s->connecting = false;
++            s->connected = !error;
++        }
++        if (s->pendingError) {
++            value = palmError(s->pendingError);
++            s->pendingError = 0;
++            return {0};
++        }
++    }
++    int setting = 0;
++    socklen_t size = sizeof(setting);
++    if (getsockopt(s->fd, hostLevel, hostOption, &setting, &size) < 0)
++        return {-1, palmError(errno)};
++    value = hostOption == SO_ERROR ? palmError(setting) : setting;
++    return {0};
++}
++#endif

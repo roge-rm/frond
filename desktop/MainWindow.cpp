@@ -84,10 +84,11 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     network = new QComboBox(root);
     network->setObjectName("networkMode");
     network->addItem(tr("Network: Disabled"), "disabled");
+    network->addItem(tr("Network: Internet via host"), "internet");
     network->addItem(tr("Network: Simulated echo server"), "connected");
     network->addItem(tr("Network: Simulated connection timeout"), "timeout");
     network->addItem(tr("Network: Simulated disconnection"), "disconnected");
-    network->setToolTip(tr("Experimental 68k NetLib simulation. frond.test (10.0.0.2), TCP echo port 7. No Internet access. Changing mode closes simulated connections."));
+    network->setToolTip(tr("Experimental 68k NetLib networking. Internet mode uses your computer connection; simulated modes stay local. Changing mode closes connections."));
     connect(network, qOverload<int>(&QComboBox::activated), this, [this](int index) {
         send("network-mode", network->itemData(index).toString());
     });

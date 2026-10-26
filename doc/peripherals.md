@@ -112,6 +112,65 @@ It installs the driver, resets, enables it, types lower/upper-case letters and
 checks the exported Palm log. It also saves with Shift held and checks that
 resume releases it. Firmware, the driver PRC and output sessions stay outside Git.
 
+## Internet via host (experimental)
+
+Choose **Network: Internet via host** before launching a Palm network app. Frond
+forwards supported 68k NetLib calls to Linux IPv4 sockets and the host DNS
+resolver. The computer supplies its normal routing, firewall and Internet
+connection. No TAP device, bridge setup, root access or Palm Wi-Fi configuration
+is needed. `127.0.0.1` refers to the host computer. Networking is disabled by
+default and switching mode closes existing connections.
+
+This supports outgoing TCP, UDP (including bind and peer addresses), DNS,
+select, peek, shutdown, local/remote address queries and common socket options:
+nonblocking, send/receive timeouts, reuse-address, keepalive, broadcast,
+send/receive buffer sizes and TCP_NODELAY. There are sixteen sockets. TCP sends
+can return a partial count; applications must handle it. Blocking operations
+poll nonblocking host sockets and yield the calling Palm task for one tick
+between attempts. DNS runs on a bounded worker queue, away from the emulation
+thread. Other guest tasks, including ARM sound callbacks, can run during a wait.
+
+The selected mode is saved with the session. Live host connections and pending
+DNS requests are not saved: resume retains closed Palm socket references so
+applications receive an error and can close/reopen them. Reset closes connections
+and keeps the mode. Database export preserves live host descriptors while
+freezing external I/O during its temporary guest checkpoint; it does not consume
+network data on behalf of the export. Finish an app's network operation before
+exporting its log, so its output reflects normal execution.
+
+This is a NetLib compatibility layer, not a Wi-Fi radio or a complete Palm
+network stack. Native ARM NetLib dispatch, apps that obtain library entry
+pointers, listen/accept, PB scatter/gather calls, raw sockets and IPv6 are not
+implemented. The synthetic reference is not a real Palm library-table entry.
+Unsupported calls return errors; full conventions for every unsupported API are
+not implemented. Apps that cached the real NetLib reference must be restarted.
+Blazer's Wi-Fi connection workflow is not supported; it still prompts to turn
+on the Palm radio. A successful HTTP probe does not establish compatibility
+with every Palm app. Frond does not upgrade an application's old TLS implementation or
+provide HTTPS-to-HTTP conversion.
+
+`make test-host-network` exercises the native backend without firmware. The
+optional Palm probe checks DNS, HTTP, UDP, select, peek, nonblocking reads and
+timeouts, with a native ARM tone running during a delayed HTTP response. It also
+checks that a live connection survives database export, closes on session resume
+and can be reopened:
+
+```sh
+python3 tools/build-palm-probe.py --probe host-network --sdk /path/to/sdk-5r3 \
+  --output build/host-network-probe
+python3 tests/desktop-host-network.py --session /path/to/tx.session \
+  --output /path/to/new/private/results --audio --public
+```
+
+The optional audio check requires PulseAudio tools and captures only the test
+process's stream. It records PCM gaps; `--require-gapless` additionally makes
+gaps of 10 ms or longer fail the test. `--wait-control` compares the delayed
+network read with an immediate reply followed by a normal Palm task delay.
+`--public` additionally fetches `http://example.com/`; all other
+network checks use local servers. Measurements describe emulator behavior,
+not physical TX timing. The SDK, ARM/m68k tools and firmware are supplied
+separately. Keep exported RAM, sessions and test results private.
+
 ## Simulated network (experimental)
 
 The desktop **Network** selector enables a deterministic 68k NetLib fixture.
@@ -167,8 +226,11 @@ ABI/model regressions.
 
 ## Remaining peripherals
 
-Host socket forwarding, Wi-Fi and Bluetooth hardware emulation, USB/HotSync and
-host serial forwarding remain unsupported. Host networking needs guest-friendly
-asynchronous waiting, bounded I/O, cancellation and explicit reconnect behaviour
-after resume. Serial/HotSync also needs an end-to-end Palm transfer test; register
-models alone do not establish a working external connection.
+The TX also uses Bluetooth accessories and phone/modem links, infrared beaming,
+USB/HotSync through its Multi-connector, SD/MMC/SDIO cards, and stereo headphones.
+See the [Palm TX user guide](https://palmdr.com/eBay%20Photos/tx_ug.pdf). Frond
+currently supplies virtual SD storage, audio and the infrared keyboard attachment.
+General infrared beaming, Wi-Fi/Bluetooth hardware emulation, USB/HotSync, host
+serial forwarding and arbitrary SDIO accessories remain unsupported. Serial and
+HotSync need end-to-end Palm transfer tests; register models alone do not
+establish a working external connection.
