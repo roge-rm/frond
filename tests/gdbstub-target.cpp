@@ -11,11 +11,15 @@
 
 static std::vector<uint8_t> memory(1024 * 1024);
 static uint32_t reads = 0, writes = 0;
+static ArmCpu* irqCpu = nullptr;
 static bool access(void*, uint32_t addr, uint_fast8_t size, bool write, void* buf) {
     if (uint64_t(addr) + size > memory.size()) return false;
     if (addr == 0x21000 && size == 4 && !write) { memcpy(buf, &reads, 4); return true; }
     if (addr == 0x21004 && size == 4 && !write) { memcpy(buf, &writes, 4); return true; }
-    if ((addr >= 0x20000 && addr < 0x20008) || addr == 0xffffe) { if (write) ++writes; else ++reads; }
+    if ((addr >= 0x20000 && addr < 0x20008) || (addr >= 0xffff8 && addr < 0x100000)) { if (write) ++writes; else ++reads; }
+    if (irqCpu && addr == 0x22000 && size == 4 && write)
+        cpuSetSlowPath(irqCpu, SLOW_PATH_REASON_RESCHEDULE);
+    if (irqCpu && addr == 0x22008 && size == 4 && write) cpuIrq(irqCpu, false, true);
     if (write) memcpy(memory.data() + addr, buf, size);
     else memcpy(buf, memory.data() + addr, size);
     return true;
@@ -49,6 +53,11 @@ int main(int argc, char** argv) {
         word(0x14004, INSTR_PACE_RESUME);
         word(0x14008, INSTR_PACE_RETURN_FROM_CALLOUT);
         word(0x15000, 0xeafffffe); // Native exception handler: B .
+        word(0x18, 0xe3a06055);    // IRQ handler sentinel: MOV r6,#0x55
+        word(0x1c, 0xeafffffe);    // B .
+        word(0x12004, 0xe5923004); // Watchpoint-contract probe: LDR r3,[r2,#4]
+        word(0x20004, 0x11223344); // Distinct sentinel for an unwanted extra load
+        word(0x12008, 0xeafffffe); // B .
         word(0x10, 0xeafffffe);    // Native data-abort vector: B .
         word(0x30000 + 17 * 4, 0x31000); // 68k PC
         word(0x30000 + 16 * 4, 0x34000); // A7
@@ -59,6 +68,7 @@ int main(int argc, char** argv) {
         pace.resumePace = 0x14004;
         pace.returnFromCallout = 0x14008;
         pace.calloutIllegalInstr = pace.calloutDivu = pace.calloutDivs = 0x15000;
+        pace.calloutSyscall = pace.calloutTrap0 = pace.calloutTrap8 = 0x15000;
         pace.calloutLine1010 = pace.calloutLine1111 = pace.calloutUnimplementedInstr = 0x15000;
     }
     auto patches = initPatchDispatch();
@@ -68,6 +78,7 @@ int main(int argc, char** argv) {
     mmuSetDomainCfg(cpuGetMMU(cpu), 3);
     mmuSetTTP(cpuGetMMU(cpu), 0x4000);
     cpuSetReg(cpu, ARM_REG_NUM_CPSR, ARM_SR_MODE_SVC);
+    if (paceFixture) irqCpu = cpu;
     CpuState target{cpu};
     Savestate<ChunkType> saved;
     if (paceFixture) assert(saved.Save(target));

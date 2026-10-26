@@ -1,0 +1,195 @@
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -3217,6 +3217,7 @@
+ 
+ void cpuReset(struct ArmCpu *cpu, uint32_t pc) {
+     gdbStubResetPace(cpu->debugStub);
++    cpu->modePace = false; // Reset starts at the native vector, never stale 68k state.
+     cpu->I = true;  // start w/o interrupts in supervisor mode
+     cpu->F = true;
+     cpu->M = ARM_SR_MODE_SVC;
+@@ -3447,7 +3448,7 @@
+ FORCE_INLINE static void cpuPrvCyclePace(struct ArmCpu *cpu) {
+     const uint32_t instructionPc = cpu->debugStub ? paceGetPC() : 0;
+     const auto status = paceExecute();
+-    if (cpu->debugStub) gdbStubPaceException(cpu->debugStub, instructionPc, status);
++    if (cpu->debugStub) gdbStubPaceInstructionCompleted(cpu->debugStub, instructionPc, status);
+     switch (status) {
+         case pace_status_ok:
+             return;
+--- a/src/uarm/uarm/gdbstub.cpp
++++ b/src/uarm/uarm/gdbstub.cpp
+@@ -24,7 +24,7 @@
+ namespace {
+ constexpr size_t packetSize = 4096; // RSP PacketSize is hexadecimal: 1000.
+ constexpr size_t maxBreakpoints = 16;
+-enum class RunState { Stopped, Running, Step };
++enum class RunState { Stopped, Running, Step, PaceStep };
+ enum class RxState { Idle, Data, Checksum1, Checksum2 };
+ struct Breakpoint { uint32_t addr, kind; char type; };
+ 
+@@ -107,7 +107,8 @@
+     std::vector<Breakpoint> breakpoints;
+     std::vector<uint32_t> paceBreakpoints;
+     bool stopPaceException = false, atPaceException = false;
+-    std::string lastPaceException;
++    std::string lastPaceException, lastPaceStep;
++    bool paceStepArmed = false, pendingPaceDispatch = false;
+ };
+ 
+ namespace {
+@@ -249,10 +250,25 @@
+         else {
+             std::string text(reinterpret_cast<char*>(bytes.data()), in.size() / 2);
+             std::string_view cmd(text);
+-            if (cmd == "pace" || cmd == "pace-last") {
+-                const std::string result = (cmd == "pace-last"
+-                    ? (s->lastPaceException.empty() ? "{\"version\":1,\"available\":false}" : s->lastPaceException)
+-                    : (cpuIsModePace(s->cpu) ? paceSnapshot(s->atPaceException ? "exception" : "boundary")
++            if (cmd == "pace-step") {
++                // A monitor command arms the next plain continue; it does not
++                // resume behind GDB's back or change the ARM meaning of s/si.
++                if (!cpuIsModePace(s->cpu) || s->pendingPaceDispatch || s->atPaceException) out = "E16";
++                else {
++                    s->paceStepArmed = true;
++                    s->lastPaceStep = "{\"version\":1,\"available\":false,\"reason\":\"armed\"}";
++                    out = "OK";
++                }
++            } else if (cmd == "pace-step off") {
++                if (s->paceStepArmed)
++                    s->lastPaceStep = "{\"version\":1,\"available\":false,\"reason\":\"cancelled\"}";
++                s->paceStepArmed = false;
++                out = "OK";
++            } else if (cmd == "pace" || cmd == "pace-last" || cmd == "pace-last-step") {
++                const std::string& saved = cmd == "pace-last-step" ? s->lastPaceStep : s->lastPaceException;
++                const std::string result = (cmd != "pace"
++                    ? (saved.empty() ? "{\"version\":1,\"available\":false}" : saved)
++                    : (cpuIsModePace(s->cpu) ? paceSnapshot(s->atPaceException ? "exception" : s->pendingPaceDispatch ? "dispatch" : "boundary")
+                        : "{\"version\":1,\"available\":false,\"reason\":\"native-mode\",\"program_identity\":null}")) + "\n";
+                 // qRcmd permits a single hex-encoded output reply. Keeping one
+                 // packet outstanding preserves ACK/NACK retransmission semantics.
+@@ -352,7 +368,8 @@
+                 setPc(s, addr);
+             }
+         }
+-        s->state = step ? RunState::Step : RunState::Running;
++        s->state = step ? RunState::Step : s->paceStepArmed ? RunState::PaceStep : RunState::Running;
++        s->paceStepArmed = false;
+         s->stepDone = false;
+         return; // The ACK was already sent; the reply is the eventual stop.
+     }
+@@ -360,7 +377,10 @@
+     // the standard empty unsupported reply, never terminate the emulator.
+     reply(s, out);
+ }
+-void stop(stub* s, const char* reason) {
++void stop(stub* s, const char* reason, bool paceCompleted = false) {
++    if (s->state == RunState::PaceStep && !paceCompleted)
++        s->lastPaceStep = "{\"version\":1,\"available\":false,\"reason\":\"interrupted-before-instruction\"}";
++    s->paceStepArmed = false;
+     s->state = RunState::Stopped;
+     s->stepDone = false;
+     s->stopReason = reason;
+@@ -422,9 +442,19 @@
+         if ((++s->poll & 1023) == 0) acceptClient(s, false);
+         if (s->sock < 0) return;
+     }
++    // A guest interrupt may transfer execution between the previous post-step
++    // stop and the next interpreter boundary. Never step an ARM handler while
++    // pretending it was a 68k instruction. The attempted step is cancelled.
++    if (s->state == RunState::PaceStep && !cpuIsModePace(s->cpu)) {
++        stop(s, "S05");
++    } else if (s->state == RunState::PaceStep) {
++        // Ctrl-C/EOF must be handled before the single attempt, not 1024 later.
++        // A PACE breakpoint at this boundary is deliberately stepped over once.
++        receive(s, false);
++    }
+     if (s->debugRequested) {
+         s->debugRequested = false;
+-        stop(s, "S05");
++        if (s->state != RunState::Stopped) stop(s, "S05");
+     } else if (s->state == RunState::Step && s->stepDone) stop(s, "S05");
+     else if (s->state == RunState::Running) {
+         if ((++s->poll & 1023) == 0) receive(s, false);
+@@ -435,7 +465,13 @@
+     if (s->state != RunState::Stopped) return;
+     for (;;) {
+         while (s->sock >= 0 && s->state == RunState::Stopped) receive(s, true);
+-        if (s->sock < 0 || s->state != RunState::Running) return;
++        if (s->sock < 0) return;
++        if (s->state == RunState::PaceStep) {
++            receive(s, false);
++            if (s->state == RunState::Stopped) continue;
++            return;
++        }
++        if (s->state != RunState::Running) return;
+         // Continue can redirect PC or change CPSR inside this very hook.
+         const uint32_t currentPc = cpuIsModePace(s->cpu) ? paceGetPC() : cpuGetRegisters(s->cpu)[15];
+         if (!breakpointHit(s, currentPc, cpuIsThumb(s->cpu))) return;
+@@ -447,13 +483,19 @@
+     if (!s) return;
+     s->paceBreakpoints.clear();
+     s->stopPaceException = s->atPaceException = false;
++    s->paceStepArmed = s->pendingPaceDispatch = false;
++    if (s->state == RunState::PaceStep) s->state = RunState::Running;
+     s->lastPaceException.clear();
+-}
+-void gdbStubPaceException(stub* s, uint32_t instructionPc, unsigned status) {
++    s->lastPaceStep.clear();
++}
++void gdbStubPaceInstructionCompleted(stub* s, uint32_t instructionPc, unsigned status) {
++    if (!gdbStubEnabled(s)) return;
+     // Syscalls, returns and emulator patch traps are normal control transfers.
+-    if (!gdbStubEnabled(s) || status == pace_status_ok || status == pace_status_syscall ||
+-        status == pace_status_return || status == pace_status_trap0 || status == pace_status_trap8) return;
+-    auto snapshot = paceSnapshot("exception");
++    const bool exception = status != pace_status_ok && status != pace_status_syscall &&
++        status != pace_status_return && status != pace_status_trap0 && status != pace_status_trap8;
++    const bool stepped = s->state == RunState::PaceStep;
++    if (!exception && !stepped) return;
++    auto snapshot = paceSnapshot(exception ? "exception" : status == pace_status_ok ? "boundary" : "dispatch");
+     snapshot.pop_back();
+     snapshot += ",\"instruction_pc\":" + std::to_string(instructionPc) +
+                 ",\"status\":" + std::to_string(status);
+@@ -464,14 +506,17 @@
+                     ",\"fault_write\":" + (write ? "true" : "false") +
+                     ",\"fault_status\":" + std::to_string(fsr);
+     }
+-    s->lastPaceException = snapshot + '}';
+-    if (!s->stopPaceException) return;
++    snapshot += '}';
++    if (exception) s->lastPaceException = snapshot;
++    if (stepped) s->lastPaceStep = snapshot;
++    if (!stepped && !s->stopPaceException) return;
+     // Observe the completed/partially completed instruction before dispatching
+     // its exception. Continue dispatches it once; it never replays the access.
+-    s->atPaceException = true;
+-    stop(s, "S05");
++    s->atPaceException = exception;
++    s->pendingPaceDispatch = status != pace_status_ok;
++    stop(s, "S05", stepped);
+     while (s->sock >= 0 && s->state == RunState::Stopped) receive(s, true);
+-    s->atPaceException = false;
++    s->atPaceException = s->pendingPaceDispatch = false;
+ }
+ 
+ stub* gdbStubInit(ArmCpu* cpu, int port) {
+--- a/src/uarm/uarm/gdbstub.h
++++ b/src/uarm/uarm/gdbstub.h
+@@ -18,14 +18,14 @@
+ void gdbStubDebugBreakRequested(struct stub *stub);
+ void gdbStubReportPc(struct stub *stub, uint32_t pc, bool thumb);
+ void gdbStubInstructionExecuted(struct stub *stub);
+-void gdbStubPaceException(struct stub *stub, uint32_t instructionPc, unsigned status);
++void gdbStubPaceInstructionCompleted(struct stub *stub, uint32_t instructionPc, unsigned status);
+ void gdbStubResetPace(struct stub *stub);
+ #else
+ #define gdbStubEnabled(...) false
+ #define gdbStubDebugBreakRequested(...)
+ #define gdbStubReportPc(...)
+ #define gdbStubInstructionExecuted(...)
+-#define gdbStubPaceException(...)
++#define gdbStubPaceInstructionCompleted(...)
+ #define gdbStubResetPace(...)
+ #endif
+ 

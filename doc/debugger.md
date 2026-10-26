@@ -80,9 +80,12 @@ multiple clients and reverse execution are not implemented.
 The RSP target architecture and ordinary register packets always describe ARM.
 At an optimized PACE stop, `info registers`, `$pc` and `x/i $pc` describe the
 **suspended native context**, not the executing 68k program. Use the PACE monitor
-commands below for 68k state. Native `s`/`si`, register writes, memory writes and
-continue-with-address return `E16` at a PACE stop. Plain continue, reads, interrupt
-and detach still work. Native breakpoints match only native execution; they never
+commands below for 68k state. Native RSP `s`/`vCont;s`, register writes, memory
+writes and continue-with-address return `E16` at a PACE stop. This does **not**
+guarantee that GDB's `si`/`stepi` command is rejected: ARM GDB can implement it as
+a temporary native breakpoint plus continue, using the suspended ARM PC. Do not
+use native `si`, `step`, `next` or `finish` to step PACE. Use the explicit monitor
+sequence below. Plain continue, reads, interrupt and detach still work. Native breakpoints match only native execution; they never
 match a 68k address. Stepping the native entry instruction can stop at the first
 PACE boundary before any 68k instruction executes.
 
@@ -107,13 +110,15 @@ installed. Duplicate insertion succeeds; `pace-clear` removes all PACE
 breakpoints. They stop before execution without patching code bytes. Continuing
 at an installed breakpoint stops again: clear it before continuing. They are
 address breakpoints, not app-scoped breakpoints; Palm can relocate or reuse code.
-No 68k single-step, register editing, relocation or symbol mapping is implemented.
+68k stepping uses the separate monitor sequence below. Register editing,
+relocation and symbol mapping are not implemented.
 
 `monitor pace` prints one JSON object (`version: 1`) containing D0–D7 (`d`),
 A0–A7 (`a`), PC, interpreter SR and the PACE state-block pointer. Numeric values
 are unsigned decimal. Reads copy host interpreter state without accessing guest
 memory, invoking Palm services or clearing a memory-fault latch. `phase` is
-`boundary` before an instruction or `exception` after a faulting instruction.
+`boundary` between instructions, `exception` after a faulting instruction, or
+`dispatch` after a stepped syscall/return/patch trap awaiting its native handling.
 Outside optimized PACE execution, the response is `available: false` with
 `reason: native-mode`; stale 68k registers are never presented as live registers.
 This includes native callouts and firmware paths that have not entered the
@@ -140,6 +145,61 @@ PACE breakpoints, exception-stop settings and retained snapshots are cleared on
 detach, connection loss, CPU reset and session load. They are not serialized;
 existing CPU/PACE session layouts and versions are unchanged. Native breakpoint
 lifecycle is unchanged. Debugging still blocks the frontend while stopped.
+
+## One PACE instruction attempt
+
+At an active optimized PACE boundary:
+
+```gdb
+monitor pace-step
+continue
+monitor pace-last-step
+monitor pace
+```
+
+`pace-step` only arms the **next plain continue** (`c` or `vCont;c`, optionally
+thread 1). It does not execute during the monitor request. That continue bypasses
+the PACE breakpoint at the current address once, attempts one interpreter
+instruction, then reports an ordinary `S05` stop. The breakpoint remains installed.
+Repeated steps use the same two-command sequence; `monitor pace-step off` cancels
+an armed step. No guest code is patched and the ARM target description is unchanged.
+
+`pace-last-step` returns a version 1 snapshot with `instruction_pc` (the attempted
+instruction), resulting `pc`, D/A/SR registers, numeric interpreter `status`, and
+fault details when applicable. A normal instruction has status 0 and phase
+`boundary`. Variable-length instructions, branches (including self branches),
+calls and returns each count as one attempt, regardless of their resulting PC.
+Arming a new step replaces the last record with `available: false, reason: armed`.
+Reset, restore and connection changes clear both the record and any pending step.
+
+The stop occurs **after the interpreter returns and before pending syscall,
+return, exception or patch-trap dispatch**. A memory-faulting instruction may have
+partially changed registers or completed earlier accesses; the snapshot preserves
+those effects. An instruction-fetch fault is still one attempted step. This is
+not rollback, an instruction retry, or a promise that the instruction retired.
+The normal dispatch runs exactly once on the next continue. `pace-step` returns
+`E16` while that dispatch is pending, including at `pace-stop on` exception stops;
+it cannot skip an unresolved exception or silently run native handlers to find
+another 68k instruction. Use continue with a known PACE/native breakpoint, or
+Ctrl-C, to reach a later boundary. `pace-stop on` and stepping together produce
+one exception stop, not two.
+
+If a guest IRQ transfers execution to native code before the next armed attempt,
+the step is cancelled at the native boundary **before the first native instruction
+executes**. `pace-last-step` reports `available: false` and
+`reason: interrupted-before-instruction`. Ctrl-C observed before the attempt has
+the same result with `S02`; already completed attempts remain completed. Guest
+interrupt delivery and peripherals otherwise keep the emulator's existing batch
+and scheduler timing. Stepping does not mask interrupts or add native execution
+in pursuit of a later PACE stop. Direct CPU reset also exits PACE mode before
+fetching the native reset vector.
+
+A stepped store followed by another store was tested with **GDB 16.3 multiarch**:
+the first stop has 68k PC `0x31002` and one successful store; the second explicit
+step has PC `0x31004` and two stores. A real-client partial-write test also checks
+that native abort dispatch does not replay the completed halfword. These stops
+use ordinary traps, not RSP hardware-watchpoint replies, so they do not request
+ARM GDB's watchpoint completion step.
 
 ## Program identity and private reports
 
@@ -172,7 +232,7 @@ DesktopControl commands while stopped: the emulation thread cannot serve them.
 ## Validation
 
 ```sh
-heavy build make -j2 test-gdbstub test-pace-debug
+heavy build make -j2 test-gdbstub test-pace-debug test-pace-step
 heavy build make -j2 test-compatibility test-tx-state test-instruction-cache test-arm-conditions test-cpu
 ```
 
@@ -199,6 +259,15 @@ The partial write test counts successful accesses to detect replay. The
 compatibility core also asserts snapshot inspection performs no memory access
 and preserves the fault latch. Report tests use a generated Palm database header.
 These mandatory tests need no ROM, SDK, application or private fixture.
+
+`tests/pace-step.py` additionally checks one-attempt semantics for multiword
+instructions, branches, BSR/RTS, PACE exit, syscalls and patch traps; instruction
+and extension-fetch faults; partial longword/MOVEM stores; IRQ and Ctrl-C
+interruption; cancellation; reply retransmission; detach/EOF; and reset/restore
+with an in-flight step. The GDB client tests run when `FROND_GDB` names a working
+ARM-capable GDB (or `gdb-multiarch` is on PATH); a skip is not client validation.
+The mandatory tests use only synthetic RAM. No real TX fixture has been used
+to validate stepping.
 
 Optional real TX smoke test, using your own already booted session:
 
@@ -237,6 +306,23 @@ step; reporting the old PC would misrepresent completed instruction state.
 Consequently the prototype is not shipped. Watchpoints need a design compatible
 with ARM GDB's pre-access convention, with no replay of MMIO or partial
 multi-access instructions, plus real-client and counted ARM/Thumb tests.
+
+The follow-up `tests/watchpoint-contract.py` reproduces this mismatch without
+enabling watchpoints in the product. A test-local RSP adapter translates an
+address breakpoint at `0x12004` (after a real ARM store at `0x12000`) into
+`T05watch:20000;`. GDB 16.3 removes the watchpoint, inserts a temporary breakpoint
+at `0x12008`, and sends **continue**, executing the next native load. The test
+checks PC `0x12008`, the load's distinct register value `0x11223344`, and exactly
+one store. Thus the extra step is not necessarily an RSP `s`: suppressing `s`
+cannot repair the contract. A passing diagnostic test confirms this blocker,
+not watchpoint support. If a future client behaves differently, investigate its
+transcript rather than weakening the assertion.
+
+The product still returns unsupported for `Z2`/`Z3`/`Z4`. Correct watchpoints
+require a separately validated stop before the triggering access, with an
+explicit way to complete any pending instruction without replaying earlier MMIO
+or partial multi-access effects. The PACE monitor step is not such a protocol
+negotiation and does not make the rejected post-access watchpoint design safe.
 
 Protocol references: [GDB RSP overview](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Overview.html),
 [packets](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Packets.html), and

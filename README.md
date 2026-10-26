@@ -147,8 +147,9 @@ gameplay fixture, fixed guest-time replay and optional execution/frame diagnosti
 The [ARM/Thumb and PACE debugger](doc/debugger.md) is available with `--gdb PORT`
 on IPv4 loopback. It supports native registers, memory, stepping and address breakpoints;
 PACE monitor commands add read-only 68k registers, address breakpoints and
-exception snapshots. Active Palm app attribution, 68k stepping and watchpoints
-are not implemented.
+exception snapshots. `monitor pace-step` followed by `continue` attempts one
+68k instruction and stops before pending native dispatch. Active Palm app
+attribution and watchpoints are not implemented.
 
 The [device profile inventory](doc/device-profiles.md) records the existing TX
 path and inherited native models. Other cohorts remain unverified and unavailable
