@@ -122,6 +122,9 @@ firmware. The [application testing guide](doc/app-testing.md) covers tests that
 use your own firmware and apps, and [input timing](doc/input-latency.md) describes
 the optional tracing tools.
 
+For a repeatable run using your TX firmware, see the
+[boot and acceptance guide](doc/boot-check.md).
+
 The upstream core is pinned in `vendor/cloudpilot`. Frond's core changes are
 ordered patches in `patches/`; the build applies them to `build/source`.
 If you edit that generated tree, export your changes back to a patch before
