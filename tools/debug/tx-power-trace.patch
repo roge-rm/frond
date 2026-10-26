@@ -1,0 +1,108 @@
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -423,8 +423,21 @@
+ }
+ 
+ // input addr is VA not MVA
++struct PowerInstruction {uint32_t pc, instruction, sp, lr, mode;};
++static PowerInstruction powerHistory[128];
++static unsigned powerIndex;
++static bool powerFault;
++static void powerRecord(ArmCpu* cpu, uint32_t instruction) {
++    if (!powerFault) powerHistory[powerIndex++ % 128] = {cpu->curInstrPC, instruction, cpu->regs[13], cpu->regs[14], cpu->M};
++}
+ static void cpuPrvHandleMemErr(struct ArmCpu *cpu, uint32_t addr, bool write, bool instrFetch,
+                                uint_fast8_t fsr) {
++if (!powerFault && getenv("FROND_POWER_TRACE")) {
++        powerFault = true;
++        fprintf(stderr,"POWER first-fault pc=%08x addr=%08x fsr=%u\n",cpu->curInstrPC,addr,(unsigned)fsr);
++        for(unsigned i=0;i<128;i++) {auto h=powerHistory[(powerIndex+i)%128]; fprintf(stderr,"POWER history pc=%08x instr=%08x sp=%08x lr=%08x mode=%02x\n",h.pc,h.instruction,h.sp,h.lr,h.mode);}
++        for(unsigned i=0;i<16;i++)fprintf(stderr,"POWER reg r%u=%08x\n",i,cpu->regs[i]);
++    }
+ // FCSE
+ #ifdef SUPPORT_FCSE
+     if (addr < 0x02000000UL)  // report addr is MVA
+@@ -3211,6 +3224,7 @@
+ }
+ 
+ void cpuReset(struct ArmCpu *cpu, uint32_t pc) {
++    if (getenv("FROND_POWER_TRACE")) fprintf(stderr, "POWER reset oldpc=%08x newpc=%08x\n", cpu->regs[15], pc);
+     cpu->I = true;  // start w/o interrupts in supervisor mode
+     cpu->F = true;
+     cpu->M = ARM_SR_MODE_SVC;
+@@ -3556,6 +3570,7 @@
+                               // of execption handler
+         }
+ 
++        powerRecord(cpu, translatedInstr);
+         cpu->regs[REG_NO_PC] += 2;
+ 
+ #ifdef __EMSCRIPTEN__
+@@ -3611,6 +3626,7 @@
+                               // of execption handler
+         }
+ 
++        powerRecord(cpu, instr);
+         cpu->regs[REG_NO_PC] += 4;
+ 
+ #ifdef __EMSCRIPTEN__
+--- a/src/uarm/uarm/MMU.cpp
++++ b/src/uarm/uarm/MMU.cpp
+@@ -119,6 +119,8 @@
+     if (!memAccess(mmu->mem, mmu->transTablPA + ((adr & 0xFFF00000ul) >> 18), 4, false, &t))
+         return TRANSLATE_RESULT_FAULT(0x0C);
+ 
++    if (getenv("FROND_POWER_TRACE") && (adr & 0xfff00000) == 0x5c000000)
++        fprintf(stderr, "POWER walk va=%08x ttbr=%08x l1addr=%08x l1=%08x write=%d\n", adr, mmu->transTablPA, mmu->transTablPA + ((adr & 0xfff00000) >> 18), t, write);
+     dom = (t >> 5) & 0x0F;
+     switch (t & 3) {
+         case 0:  // fault
+--- a/src/uarm/uarm/SoC.cpp
++++ b/src/uarm/uarm/SoC.cpp
+@@ -80,6 +80,7 @@
+ void SoC::Sleep() {
+     if (sleeping || !OnSleep()) return;
+ 
++    if (getenv("FROND_POWER_TRACE")) fprintf(stderr, "POWER sleep pc=%08x time=%llu\n", cpuGetRegExternal(cpu,15), (unsigned long long)GetTime());
+     sleeping = true;
+     cpuSetSleeping(cpu);
+ 
+@@ -89,6 +90,7 @@
+ 
+ void SoC::Wakeup(uint8_t wakeupSource) {
+     if (!sleeping) return;
++    if (getenv("FROND_POWER_TRACE")) fprintf(stderr, "POWER wake pc=%08x source=%u time=%llu\n", cpuGetRegExternal(cpu,15), wakeupSource, (unsigned long long)GetTime());
+     sleeping = false;
+ 
+     cpuWakeup(cpu);
+--- a/src/uarm/uarm/cp15mmu.cpp
++++ b/src/uarm/uarm/cp15mmu.cpp
+@@ -63,6 +63,9 @@
+ 
+     if (!read) val = cpuGetRegExternal(cpu, Rx);
+ 
++    if (getenv("FROND_POWER_TRACE") && !read && (CRn == 1 || CRn == 2 || CRn == 8 || CRn == 9 || CRn == 10))
++        fprintf(stderr, "POWER cp15 pc=%08x c%u,c%u,%u value=%08x ctrl=%08x ttbr=%08x active=%08x\n",
++            cpuGetCurInstrPC(cpu), CRn, CRm, op2, val, cp15->control, cp15->ttb, mmuGetTTP(cp15->mmu));
+     if (op1 != 0 || two) goto fail;  // CP15 only accessed with MCR/MRC with op1 == 0
+ 
+     switch (CRn) {
+@@ -366,6 +369,7 @@
+ }
+ 
+ void cp15MMUSetFaultStatus(struct ArmCP15MMU* cp15, uint32_t addr, uint_fast8_t faultStatus) {
++    if (getenv("FROND_POWER_STOP_ON_FAULT")) std::exit(86);
+     cp15->FAR = addr;
+     cp15->FSR = faultStatus;
+ }
+--- a/src/uarm/uarm/pxa_PwrClk.cpp
++++ b/src/uarm/uarm/pxa_PwrClk.cpp
+@@ -72,6 +72,8 @@
+ 
+     if (!read) val = cpuGetRegExternal(cpu, Rx);
+ 
++    if (getenv("FROND_POWER_TRACE") && !read && CRn == 7)
++        fprintf(stderr, "POWER mode pc=%08x value=%08x pwer=%08x prer=%08x pfer=%08x pkwr=%08x pspr=%08x pssr=%08x rcsr=%08x\n", cpuGetCurInstrPC(cpu), val, pc->PWER, pc->PRER, pc->PFER, pc->PKWR, pc->PSPR, pc->PSSR, pc->RCSR);
+     if (CRm == 0 && op1 == 0 && !two) {
+         switch (CRn) {
+             case 6:

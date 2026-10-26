@@ -1,0 +1,193 @@
+--- a/src/uarm/uarm/cp15mmu.cpp
++++ b/src/uarm/uarm/cp15mmu.cpp
+@@ -11,7 +11,7 @@
+ #include "icache.h"
+ #include "savestate/savestateAll.h"
+ 
+-#define SAVESTATE_VERSION 0
++#define SAVESTATE_VERSION 1
+ 
+ struct ArmCP15MMU {
+     struct ArmCpu* cpu;
+@@ -348,6 +348,7 @@
+     cp15->cpu = cpu;
+     cp15->mmu = mmu;
+     cp15->ic = ic;
++    icacheSetXscale(ic, xscale);
+     cp15->control = 0x00004072UL;
+     cp15->cpuid = cpuid;
+     cp15->cacheId = cacheId;
+@@ -377,15 +378,26 @@
+ 
+     SaveChunkHelper helper(*chunk);
+     cp15->DoSaveLoad(helper);
++    uint32_t fetchState[ICACHE_FETCH_STATE_WORDS];
++    icacheGetFetchState(cp15->ic, fetchState);
++    helper.DoBuffer32(fetchState, ICACHE_FETCH_STATE_WORDS);
+ }
+ 
+ template <typename T>
+ void cp15MMULoad(struct ArmCP15MMU* cp15, T& loader) {
+-    auto chunk = loader.GetChunkOrFail(ChunkType::cp15mmu, SAVESTATE_VERSION, "cp15mmu");
++    uint32_t version;
++    auto chunk = loader.GetChunkOrFail(ChunkType::cp15mmu, SAVESTATE_VERSION, "cp15mmu", version);
+     if (!chunk) return;
+ 
+     LoadChunkHelper helper(*chunk);
+     cp15->DoSaveLoad(helper);
++    uint32_t fetchState[ICACHE_FETCH_STATE_WORDS] = {};
++    fetchState[1] = fetchState[10] = 0xffffffff;
++    if (version >= 1) helper.DoBuffer32(fetchState, ICACHE_FETCH_STATE_WORDS);
++    if (!icacheSetFetchState(cp15->ic, fetchState)) {
++        loader.NotifyError();
++        return;
++    }
+ 
+     if (cp15->mmuSwitchCy > 0)
+         cpuSetSlowPath(cp15->cpu, SLOW_PATH_REASON_CP15);
+--- a/src/uarm/uarm/icache.cpp
++++ b/src/uarm/uarm/icache.cpp
+@@ -4,11 +4,59 @@
+ 
+ #include <cstdlib>
+ #include <cstring>
++#include <initializer_list>
+ 
+ #include "CPU.h"
+ #include "cputil.h"
+ 
++void icacheSetXscale(struct icache* ic, bool xscale) { ic->xscale = xscale; }
++
++void icacheGetFetchState(struct icache* ic, uint32_t* state) {
++    *state++ = ic->nextFetchBuffer;
++    for (const auto& buffer : ic->fetchBuffers) {
++        *state++ = buffer.base;
++        std::memcpy(state, buffer.words, sizeof(buffer.words));
++        state += 8;
++    }
++}
++
++bool icacheSetFetchState(struct icache* ic, const uint32_t* state) {
++    if (state[0] > 1) return false;
++    for (unsigned i : {1u, 10u})
++        if (state[i] != 0xffffffff && (state[i] & 31)) return false;
++    ic->nextFetchBuffer = *state++;
++    for (auto& buffer : ic->fetchBuffers) {
++        buffer.base = *state++;
++        std::memcpy(buffer.words, state, sizeof(buffer.words));
++        state += 8;
++    }
++    return true;
++}
++
++static void icacheRememberFetch(struct icache* ic, uint32_t va, const void* data) {
++    if (!ic->xscale) return;
++    auto& buffer = ic->fetchBuffers[ic->nextFetchBuffer];
++    ic->nextFetchBuffer ^= 1;
++    buffer.base = maskLine(va);
++    std::memcpy(buffer.words, data, sizeof(buffer.words));
++}
++
++template <int msys, int sz>
++static void icacheDecodeFetch(uint32_t word, uint32_t va, uint32_t& instr, uint32_t& decoded) {
++    if constexpr (sz == 4) {
++        instr = word;
++        decoded = cpuDecodeArm<msys>(instr);
++    } else {
++        decoded = cpuDecodeThumb<msys>((word >> ((va & 2) * 8)) & 0xffff, instr);
++    }
++}
++
+ void icacheInval(struct icache* ic) {
++    ic->nextFetchBuffer = 0;
++    for (auto& buffer : ic->fetchBuffers) {
++        buffer.base = 0xffffffff;
++        std::memset(buffer.words, 0, sizeof(buffer.words));
++    }
+     ic->revision++;
+ 
+     if (ic->revision == 0) {
+@@ -46,6 +94,11 @@
+ }
+ 
+ void icacheInvalAddr(struct icache* ic, uint32_t va) {
++    for (auto& buffer : ic->fetchBuffers)
++        if (buffer.base == maskLine(va)) {
++            buffer.base = 0xffffffff;
++            std::memset(buffer.words, 0, sizeof(buffer.words));
++        }
+     struct icacheline* line = ic->cache + calculateIndex(va);
+ 
+     if (line->revision != ic->revision || line->tag != calculateTag(va)) return;
+@@ -66,6 +119,16 @@
+ 
+         *fsrP = 3;
+         return false;
++    }
++
++    // A buffer hit precedes translation. Enabling the MMU does not discard
++    // instructions already fetched from the physical continuation address.
++    if (ic->xscale) {
++        for (const auto& buffer : ic->fetchBuffers)
++            if (buffer.base == maskLine(va)) {
++                icacheDecodeFetch<msys, sz>(buffer.words[(va & 31) / 4], va, instr, decoded);
++                return true;
++            }
+     }
+ 
+     struct icacheline* line = ic->cache + calculateIndex(va);
+@@ -101,6 +164,17 @@
+             cacheable = MPU_TEST_RESULT_CACHEABLE(mpuTestResult);
+         }
+ 
++        if (!cacheable && ic->xscale) {
++            uint32_t words[8];
++            if (!memInstructionFetch<sizeof(words)>(ic->mem, maskLine(pa), words)) {
++                *fsrP = 0x0d;
++                return false;
++            }
++            icacheRememberFetch(ic, va, words);
++            icacheDecodeFetch<msys, sz>(words[(va & 31) / 4], va, instr, decoded);
++            return true;
++        }
++
+         if (!cacheable) {
+             bool ok = memInstructionFetch<sz>(ic->mem, pa, &instr);
+ 
+@@ -128,6 +202,7 @@
+             return false;
+         };
+ 
++        icacheRememberFetch(ic, va, data);
+         for (size_t i = 0; i < sizeof(data); i += 8) {
+             const uint64_t d = *(uint64_t*)(data + i);
+             if ((uint32_t)d != *(uint32_t*)(line->data + i))
+--- a/src/uarm/uarm/icache.h
++++ b/src/uarm/uarm/icache.h
+@@ -17,6 +17,11 @@
+ struct icache* icacheInit(struct ArmMem* mem, struct ArmMmu* mmu);
+ struct icache* icacheInit(struct ArmMem* mem, struct ArmMpu* mpu);
+ 
++// XScale has two 32-byte fetch buffers even when instruction caching is disabled.
++constexpr unsigned ICACHE_FETCH_STATE_WORDS = 19;
++void icacheSetXscale(struct icache* ic, bool xscale);
++void icacheGetFetchState(struct icache* ic, uint32_t* state);
++bool icacheSetFetchState(struct icache* ic, const uint32_t* state);
+ void icacheInval(struct icache* ic);
+ void icacheInvalAddr(struct icache* ic, uint32_t addr);
+ void icacheInvalRange(struct icache* ic, uint32_t addr, uint32_t size);
+--- a/src/uarm/uarm/icache_internal.h
++++ b/src/uarm/uarm/icache_internal.h
+@@ -54,6 +54,12 @@
+     struct ArmMem* mem;
+ 
+     uint32_t revision;
++    bool xscale;
++    uint32_t nextFetchBuffer;
++    struct {
++        uint32_t base;
++        uint32_t words[8];
++    } fetchBuffers[2];
+     struct icacheline cache[1 << CACHE_INDEX_BITS];
+ };
+ 

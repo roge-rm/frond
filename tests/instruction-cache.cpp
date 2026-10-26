@@ -94,6 +94,9 @@ int main(int argc, char**) {
     assert(cpuGetRegExternal(cpu, 0) == 5);
     put(0x510000, 0xe3a00006);
     step(0x510000);
+    assert(cpuGetRegExternal(cpu, 0) == 5); // XScale fetch buffer still holds the line.
+    cpuInvalidateCodeCache(cpu);
+    step(0x510000);
     assert(cpuGetRegExternal(cpu, 0) == 6);
 
     step(0x10002);

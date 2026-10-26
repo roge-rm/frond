@@ -15,7 +15,7 @@ out/frond: build/source/.prepared
 	cp build/source/src/uarm/cp-uarm out/frond.new
 	mv -f out/frond.new out/frond
 
-test: prepare test-developer-run test-device-controls test-scheduler test-wifi test-host-network test-keyboard test-network test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup
+test: prepare test-developer-run test-xscale-prefetch test-device-controls test-scheduler test-wifi test-host-network test-keyboard test-network test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup
 	python3 tests/audio-metrics.py
 	python3 tests/tx-baseline.py
 	python3 tests/input-latency.py
@@ -247,3 +247,18 @@ test-device-controls: out/frond
 .PHONY: test-developer-run
 test-developer-run:
 	python3 tests/developer-run.py
+
+.PHONY: test-xscale-prefetch
+test-xscale-prefetch: out/frond
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/prefetch-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/xscale-prefetch.cpp @build/prefetch-core.rsp build/source/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-xscale-prefetch
+	./build/test-xscale-prefetch
+
+.PHONY: test-tx-power-rom
+test-tx-power-rom: out/frond
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/power-rom-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/tx-power-rom.cpp @build/power-rom-core.rsp build/source/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-tx-power-rom
