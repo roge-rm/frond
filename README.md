@@ -26,7 +26,7 @@ On Debian 13 (trixie):
 
 ```sh
 sudo apt install git build-essential python3 cmake qt6-base-dev qt6-wayland \
-  libsdl2-dev libsdl2-image-dev libreadline-dev libcurl4-openssl-dev
+  libsdl2-dev libsdl2-image-dev libreadline-dev libcurl4-openssl-dev libslirp-dev pkg-config
 git clone --recurse-submodules https://github.com/roge-rm/frond.git
 cd frond
 make -j4
@@ -66,13 +66,17 @@ The **SD Card** menu creates 32, 64 or 128 MiB FAT16 cards. You can also import 
 image, eject and reinsert a card, or export it. Card contents and insertion state
 are saved with the session. Close files on the Palm before ejecting.
 
-Choose **Network: Internet via host** to let supported 68k NetLib apps use your
-computer's Internet connection. It forwards IPv4 TCP/UDP and DNS without a TAP
-device or root access. Connections close when you resume a saved session, so
-apps need to reconnect. The selector also has local echo and connection-error
-test modes. Wi-Fi radio, Bluetooth, USB/HotSync and host serial connections
-aren't supported yet. The [peripheral guide](doc/peripherals.md) covers the
-API limits and setup. Blazer's Wi-Fi connection workflow is not supported.
+Choose **Network: Virtual Wi-Fi (Frond)**, turn on Wi-Fi inside Palm OS and
+connect to **Frond**. The Palm uses its own networking stack; the virtual router
+provides DHCP, DNS and IPv4 Internet access through your computer. It needs no
+root access, bridge setup or physical Wi-Fi adapter. Blazer can load HTTP pages;
+old TLS and browser limitations still apply to modern sites.
+
+The selector also keeps **Internet via host**, a smaller 68k NetLib forwarding
+mode, and local echo/error fixtures. Wi-Fi state and the selected mode persist
+with the session, but live Internet connections close on resume. Bluetooth,
+USB/HotSync and host serial connections aren't supported yet. See the
+[peripheral guide](doc/peripherals.md) for setup and limits.
 
 ## Computer keyboard
 
@@ -97,7 +101,7 @@ To build and install a package locally:
 
 ```sh
 make deb
-sudo apt install ./out/frond_0.1.0-4_amd64.deb
+sudo apt install ./out/frond_0.1.0-5_amd64.deb
 ```
 
 It appears in Plasma's application menu as **Frond**. The package includes the

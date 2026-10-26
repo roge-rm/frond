@@ -191,7 +191,7 @@ static void run(void) {
     logResult("start", 0, 0);
     error = SysLibFind("Net.lib", &ref);
     logResult("find", error, ref);
-    if (error || ref != 0x7ffe) {
+    if (error) {
         ref = 0;
         return;
     }
@@ -246,7 +246,12 @@ static void receivePending(void) {
     Int16 n;
     if (pendingSocket < 0) return;
     MemSet(bytes, sizeof(bytes), 0);
-    n = NetLibReceive(ref, pendingSocket, bytes, sizeof(bytes) - 1, 0, 0, 0, 100, &error);
+    if(ref != 0x7ffe){
+        const Char resume[]="resume\n";
+        n=NetLibSend(ref,pendingSocket,(void*)resume,StrLen(resume),0,0,0,500,&error);
+        if(n<0){logResult("checkpoint-receive",error,n);closeNetwork();return;}
+    }
+    n = NetLibReceive(ref, pendingSocket, bytes, sizeof(bytes) - 1, 0, 0, 0, 500, &error);
     logResult("checkpoint-receive", error, n);
     if (n >= 0) logResult("checkpoint-match", StrCompare(bytes, checkpointText) ? 1 : 0, 0);
     closeNetwork();

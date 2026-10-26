@@ -1,0 +1,1045 @@
+--- a/src/uarm/Makefile
++++ b/src/uarm/Makefile
+@@ -116,6 +116,8 @@
+ 	uarm/audio_queue.cpp				\
+ 	uarm/db_list.cpp					\
+ 	uarm/db_backup.cpp					\
++	uarm/WifiRouter.cpp \
++	uarm/LibertasCF.cpp \
+ 	uarm/HostNetwork.cpp			\
+ 	uarm/NetworkSimulation.cpp			\
+ 	uarm/system_state.cpp
+@@ -178,3 +180,9 @@
+ 	if test -z "$(DEVELOP)"; then $(WASMSTRIP) $@; fi
+ 
+ .PHONY: bin emscripten clean test
++
++# Native virtual wireless router
++CXXFLAGS_NATIVE_EXTRA += $(shell pkg-config --cflags slirp)
++LDFLAGS_NATIVE_EXTRA += $(shell pkg-config --libs slirp)
++CXXFLAGS_TEST_EXTRA += $(shell pkg-config --cflags slirp)
++LDFLAGS_TEST_EXTRA += $(shell pkg-config --libs slirp)
+--- a/src/uarm/uarm/devicePalmTungstenE2.cpp
++++ b/src/uarm/uarm/devicePalmTungstenE2.cpp
+@@ -10,6 +10,7 @@
+ #include "savestate/savestateAll.h"
+ #include "uartdev_bcm2035.h"
+ #include "pxa270_KPC.h"
++#include "LibertasCF.h"
+ 
+ // clang-format off
+ /*
+@@ -113,6 +114,9 @@
+ 
+     enum DeviceType5 type;
+     struct PxaKpc *kpc;
++#ifndef __EMSCRIPTEN__
++    LibertasCF *wifi;
++#endif
+     uint32_t noRamMarker;
+ };
+ 
+@@ -157,6 +161,9 @@
+     if (!dev) ERR("cannot alloc device");
+ 
+     dev->type = type;
++#ifndef __EMSCRIPTEN__
++    dev->wifi = nullptr;
++#endif
+ 
+     dev->gpio = sp->gpio;
+ 
+@@ -190,6 +197,11 @@
+         pxaGpioSetState(sp->gpio, 14, true);  // SD absent
+         pxaGpioSetState(sp->gpio, 37, true);
+         pxaGpioSetState(sp->gpio, 90, true);
++#ifndef __EMSCRIPTEN__
++        sp->soc->wirelessDevice = std::make_unique<LibertasCF>(
++            sp->mem, sp->gpio, reschedule, getTime, &sp->soc->networkSimulation);
++        dev->wifi = sp->soc->wirelessDevice.get();
++#endif
+         sp->nand = directNandGetNand(dev->nand);
+         return dev;
+     }
+@@ -254,7 +266,11 @@
+ }
+ 
+ void devicePeriodic(struct Device *dev, uint32_t tier) {
+-    if (tier == DEVICE_PERIODIC_TIER0) directNandPeriodic(dev->nand);
++    if (tier == DEVICE_PERIODIC_TIER0) {directNandPeriodic(dev->nand);
++#ifndef __EMSCRIPTEN__
++if(dev->wifi)dev->wifi->Tick();
++#endif
++}
+ }
+ 
+ void devicePcmPeriodic(struct Device *dev) { wm9712Lperiodic(dev->wm9712L); }
+@@ -292,7 +308,11 @@
+ 
+ bool deviceTaskRequired(struct Device *dev, uint32_t tier) {
+     if (tier == DEVICE_PERIODIC_TIER0) {
+-        return directNandTaskRequired(dev->nand);
++        return directNandTaskRequired(dev->nand)
++#ifndef __EMSCRIPTEN__
++            || (dev->wifi && dev->wifi->NeedsTick())
++#endif
++            ;
+     } else {
+         return true;
+     }
+@@ -318,6 +338,9 @@
+         SaveChunkHelper helper(*chunk);
+         helper.Do32(dev->noRamMarker);
+     }
++#ifndef __EMSCRIPTEN__
++    if(dev->wifi)dev->wifi->Save(savestate);
++#endif
+     wm9712Lsave(dev->wm9712L, savestate);
+     directNandSave(dev->nand, savestate);
+     if (dev->bcm2035) bcm2035Save(dev->bcm2035, savestate);
+@@ -331,6 +354,9 @@
+         LoadChunkHelper helper(*chunk);
+         helper.Do32(dev->noRamMarker);
+     }
++#ifndef __EMSCRIPTEN__
++    if(dev->wifi)dev->wifi->Load(loader);
++#endif
+     wm9712Load(dev->wm9712L, loader);
+     directNandLoad(dev->nand, loader);
+     if (dev->bcm2035) bcm2035Load(dev->bcm2035, loader);
+@@ -341,3 +367,9 @@
+                                                     SavestateProbe<ChunkType> &savestate);
+ template void deviceLoad<SavestateLoader<ChunkType>>(Device *dev,
+                                                      SavestateLoader<ChunkType> &loader);
++
++void deviceNetworkPeriodic(Device* dev){
++#ifndef __EMSCRIPTEN__
++    if(dev->wifi)dev->wifi->Poll();
++#endif
++}
+--- a/src/uarm/uarm/device.h
++++ b/src/uarm/uarm/device.h
+@@ -70,6 +70,7 @@
+                            size_t nandSize, const struct MemoryBuffer *nandPageBuffer);
+ void deviceKey(struct Device *dev, uint32_t key, bool down);
+ void devicePeriodic(struct Device *dev, uint32_t tier);
++void deviceNetworkPeriodic(Device* dev);
+ void devicePcmPeriodic(struct Device *dev);
+ void deviceTouch(struct Device *dev, int x, int y);
+ 
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -209,6 +209,7 @@
+ 
+     struct SocPeriphs sp = {};
+     sp.mem = mem;
++    sp.soc = this;
+     sp.gpio = gpio;
+     sp.i2c = i2c;
+     sp.i2s = i2s;
+@@ -296,6 +297,7 @@
+ 
+         case SCHEDULER_TASK_AUX_2:
+             PumpEventQueues();
++            deviceNetworkPeriodic(dev);
+             if (fastAudio) { fastAudio->Tick(GetTime()); UpdateFastAudioRoute(); }
+             return 1;
+ 
+--- a/src/uarm/uarm/SoC.h
++++ b/src/uarm/uarm/SoC.h
+@@ -6,6 +6,7 @@
+ #include <cstdint>
+ 
+ #include "NetworkSimulation.h"
++#include "LibertasCF.h"
+ #include "buffer.h"
+ #include "device_configuration.h"
+ #include "device_type5.h"
+@@ -32,6 +33,7 @@
+    public:
+ #ifndef __EMSCRIPTEN__
+     NetworkSimulation networkSimulation;
++    std::unique_ptr<LibertasCF> wirelessDevice;
+ #endif
+     virtual bool KeyboardAttached() const { return false; }
+     virtual void AttachKeyboard(bool) {}
+--- a/src/uarm/uarm/NetworkSimulation.h
++++ b/src/uarm/uarm/NetworkSimulation.h
+@@ -8,17 +8,18 @@
+ #include "HostNetwork.h"
+ #include "savestate/savestateAll.h"
+ struct ArmCpu;
+-// 68k NetLib simulation and opt-in host socket forwarding; no radio emulation.
++// Network profile; wireless mode leaves the real Palm NetLib in control.
+ class NetworkSimulation {
+    public:
+     NetworkSimulation();
+     ~NetworkSimulation();
+     static constexpr uint16_t refnum = 0x7ffe;
+-    enum Mode : uint32_t { disabled, connected, timeout, disconnected, internet };
++    enum Mode : uint32_t { disabled, connected, timeout, disconnected, internet, wireless };
+     Mode GetMode() const { return static_cast<Mode>(mode); }
+     const char* GetModeName() const;
+     bool SetMode(const std::string& name);
+     void Reset();
++    bool Frozen() const { return checkpoints != 0; }
+     bool Handle(ArmCpu* cpu, uint16_t trap);
+     static bool Dispatch(void* context, ArmCpu* cpu, uint16_t trap) {
+         return static_cast<NetworkSimulation*>(context)->Handle(cpu, trap);
+--- a/src/uarm/uarm/NetworkSimulation.cpp
++++ b/src/uarm/uarm/NetworkSimulation.cpp
+@@ -16,7 +16,7 @@
+                    timedOut = 0x1212, alreadyConnected = 0x1213, wouldBlock = 0x122f,
+                    noName = 0x123e;
+ constexpr const char* modeNames[] = {"disabled", "connected", "timeout", "disconnected",
+-                                     "internet"};
++                                     "internet", "wireless"};
+ class Guest {
+    public:
+     ArmCpu* cpu;
+@@ -100,7 +100,7 @@
+ NetworkSimulation::~NetworkSimulation() = default;
+ const char* NetworkSimulation::GetModeName() const { return modeNames[mode]; }
+ bool NetworkSimulation::SetMode(const std::string& name) {
+-    for (uint32_t i = 0; i < 5; i++)
++    for (uint32_t i = 0; i < 6; i++)
+         if (name == modeNames[i]) {
+             if (mode != i) {
+                 Reset();
+@@ -124,7 +124,7 @@
+     if (!chunk) return;
+     LoadChunkHelper helper(*chunk);
+     Transfer(helper, version);
+-    bool valid = mode <= internet && opens <= 65535;
++    bool valid = mode <= wireless && opens <= 65535 && (mode != wireless || !opens);
+     for (const auto& s : sockets) {
+         valid &= s.used <= 1 && s.connected <= 1 && s.size <= s.bytes.size() &&
+                  (s.type == 1 || s.type == 2) && (s.used || (!s.connected && !s.size));
+@@ -146,6 +146,7 @@
+         }
+ }
+ bool NetworkSimulation::Handle(ArmCpu* cpu, uint16_t trap) {
++    if(mode==wireless)return false;
+     Guest g{cpu, paceGetAreg(7)};
+     uint32_t errPtr = 0;
+     const bool pointerResult = trap == 0xa81b || trap == 0xa805;
+--- a/src/uarm/uarm/savestate/ChunkTypeUarm.h
++++ b/src/uarm/uarm/savestate/ChunkTypeUarm.h
+@@ -51,6 +51,7 @@
+     cp15mpu = 0x100a0,
+     networkSimulation = 0x100b0,
+     irKeyboard = 0x100c0,
++    libertasCF = 0x100d0,
+ };
+ 
+ inline ChunkType operator+(ChunkType chunkType, uint32_t index) {
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -59,7 +59,7 @@
+                 return true;
+             std::string argument;
+             if (!decode(line.substr(second + 1), argument)) return true;
+-            const bool work = command == "save" || command == "install" || command == "export" || command == "reset" || command == "launch-app" || command == "input-replay" || (command.rfind("sd-", 0) == 0 && command != "sd-state");
++            const bool work = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "reset" || command == "launch-app" || command == "input-replay" || (command.rfind("sd-", 0) == 0 && command != "sd-state");
+             if (work) ctx.audioDriver.Pause();
+             Reply result;
+             try {
+@@ -124,7 +124,7 @@
+         }
+     }
+     Reply dispatch(commands::Context& ctx, const std::string& command, const std::string& path) {
+-        const bool fileCommand = command == "save" || command == "install" || command == "export" || command == "sd-insert" || command == "sd-export" || command == "input-replay";
++        const bool fileCommand = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "input-replay";
+         if (fileCommand && (path.empty() || path.front() != '/')) return {false, "argument", "An absolute file path is required."};
+         if (!fileCommand && command != "sd-create" && command != "launch-app" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && !path.empty()) return {false, "argument", "This command takes no argument."};
+         if (command == "input-replay") {
+@@ -153,7 +153,8 @@
+         }
+         if (command == "network-state") return {true, "network", ctx.soc->networkSimulation.GetModeName()};
+         if (command == "network-mode") {
+-            if (!ctx.soc->networkSimulation.SetMode(path)) return {false, "argument", "Unknown simulated network mode."};
++            if (!ctx.soc->networkSimulation.SetMode(path)) return {false, "argument", "Unknown network mode."};
++            if (ctx.soc->wirelessDevice) ctx.soc->wirelessDevice->Poll();
+             return {true, "network", ctx.soc->networkSimulation.GetModeName()};
+         }
+         if (command == "sd-state") return {true, "card", !sdCardInitialized() ? "none" : ctx.soc->SdInserted() ? "inserted" : "ejected"};
+@@ -228,15 +229,23 @@
+                 default: return {false, "install", "Application installation failed."};
+             }
+         }
+-        if (command == "export") {
++        if (command == "export" || command == "export-db") {
++            std::string destination=path, database;
++            if(command=="export-db"){
++                const auto split=path.find('\n');
++                if(split==std::string::npos || split==0 || split+1==path.size() ||
++                   path.size()-split-1>31 || path.find('\n',split+1)!=std::string::npos)
++                    return {false,"argument","Choose an absolute ZIP path and one Palm database name."};
++                destination=path.substr(0,split);database=path.substr(split+1);
++            }
+             ReadOnlyGuest checkpoint(*ctx.soc);
+-            DbBackup backup(ctx.soc->GetSyscallDispatch(), DbBackup::BACKUP_TYPE_RAM);
++            DbBackup backup(ctx.soc->GetSyscallDispatch(), DbBackup::BACKUP_TYPE_RAM, database);
+             if (!backup.Init()) return {false, "export", "Could not start database export."};
+             while (backup.GetState() == DbBackup::STATE_IN_PROGRESS) backup.Continue();
+             if (backup.GetState() != DbBackup::STATE_DONE || !backup.GetArchiveData() || !backup.GetArchiveSize())
+                 return {false, "export", "Database export failed. No archive was written."};
+-            writeAtomic(path, backup.GetArchiveData(), backup.GetArchiveSize());
+-            return {true, "exported", "RAM databases exported."};
++            writeAtomic(destination, backup.GetArchiveData(), backup.GetArchiveSize());
++            return {true, "exported", database.empty()?"RAM databases exported.":"Database exported."};
+         }
+         if (command == "reset") ctx.soc->Reset();
+         else if (command == "rotate") ctx.rotation = Rotation((int(ctx.rotation) + 1) % 4);
+--- a/src/uarm/uarm/db_backup.cpp
++++ b/src/uarm/uarm/db_backup.cpp
+@@ -47,8 +47,8 @@
+     }
+ }  // namespace
+ 
+-DbBackup::DbBackup(SyscallDispatch* syscallDispatch, int backupType)
+-    : sd(syscallDispatch), backupType(backupType) {
++DbBackup::DbBackup(SyscallDispatch* syscallDispatch, int backupType, std::string databaseName)
++    : sd(syscallDispatch), databaseName(std::move(databaseName)), backupType(backupType) {
+     memset(lastProcessedDb, 0, sizeof(lastProcessedDb));
+ }
+ 
+@@ -65,6 +65,10 @@
+         return false;
+     }
+ 
++    if(!databaseName.empty() && std::none_of(dbList.begin(),dbList.end(),
++        [&](const auto& db){return !db.isRom && databaseName==db.name;})){
++        state=STATE_ERROR;return false;
++    }
+     dbIterator = dbList.begin();
+     if (dbIterator == dbList.end()) {
+         state = STATE_ERROR;
+@@ -170,6 +174,9 @@
+                                                          dbIterator->localID, dbIterator->cardNo);
+ 
+     if (writeFailed || dbWriteResult != 0) {
++        if(dbWriteResult) cerr << "DB backup: " << dbIterator->name << " failed with Palm error 0x"
++             << std::hex << dbWriteResult << std::dec << endl;
++        else cerr << "DB backup: " << dbIterator->name << " could not be copied to the archive" << endl;
+         state = STATE_ERROR;
+         return false;
+     }
+@@ -192,6 +199,7 @@
+ }
+ 
+ bool DbBackup::Include(DbMetadata& db) {
++    if(!databaseName.empty() && databaseName!=db.name)return false;
+     switch (backupType) {
+         case BACKUP_TYPE_RAM:
+             return !db.isRom && db.creator != DB_CREATOR_A68K;
+--- a/src/uarm/uarm/db_backup.h
++++ b/src/uarm/uarm/db_backup.h
+@@ -6,6 +6,7 @@
+ #include <cstddef>
+ #include <cstdint>
+ #include <memory>
++#include <string>
+ 
+ #include "db_list.h"
+ 
+@@ -24,7 +25,7 @@
+     static constexpr int STATE_ERROR = -1;
+ 
+    public:
+-    DbBackup(SyscallDispatch* syscallDispatch, int backupType);
++    DbBackup(SyscallDispatch* syscallDispatch, int backupType, std::string databaseName = {});
+     ~DbBackup();
+ 
+     bool Init();
+@@ -44,6 +45,7 @@
+    private:
+     SyscallDispatch* sd{nullptr};
+ 
++    std::string databaseName;
+     int backupType{BACKUP_TYPE_RAM};
+     int state{STATE_CREATED};
+ 
+--- /dev/null
++++ b/src/uarm/uarm/LibertasCF.cpp
+@@ -0,0 +1,410 @@
++#include "LibertasCF.h"
++#ifndef __EMSCRIPTEN__
++
++#include <algorithm>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++
++#include "cputil.h"
++namespace {
++uint16_t le16(const std::vector<uint8_t>& b, size_t at) {
++    return at + 1 < b.size() ? uint16_t(b[at]) | uint16_t(b[at + 1]) << 8 : 0;
++}
++void put16(std::vector<uint8_t>& b, size_t at, uint16_t value) {
++    if (at + 1 >= b.size()) b.resize(at + 2);
++    b[at] = value;
++    b[at + 1] = value >> 8;
++}
++const uint8_t mac[] = {0x02, 0x46, 0x72, 0x6f, 0x6e, 0x64};
++}  // namespace
++// Palm's bus library maps CompactFlash I/O/attribute space here and uses
++// GPIO94/108 for power, GPIO106 for reset, and active-low GPIO116 for IRQ.
++LibertasCF::LibertasCF(ArmMem* memory, PxaGpio* pins, Reschedule scheduler, GetEmuTime emuClock,
++                       NetworkSimulation* mode)
++    : network(mode),
++      gpio(pins),
++      schedule(scheduler),
++      clock(emuClock),
++      trace(getenv("FROND_WIFI_TRACE") != nullptr) {
++    if (!memRegionAdd(memory, 0x20000000, 0x10000, Memory, this) ||
++        !memRegionAdd(memory, 0x28000000, 0x10000, Memory, this))
++        ERR("cannot map TX WLAN");
++    for (auto pin : {94, 108, 106}) pxaGpioSetNotif(gpio, pin, Power, this);
++    Reset();
++    irqDirty = false;
++}
++void LibertasCF::Reset() {
++    mask = 0x1f;
++    cause = commandLength = txLength = 0;
++    configured = false;
++    associated = false;
++    if (!network->Frozen()) router.reset();
++    rx.clear();
++    rxPosition = 0;
++    helper = running = bootAck = false;
++    bootHeader = true;
++    firmwareRequest = 16;
++    command.clear();
++    response.clear();
++    tx.clear();
++    responsePosition = 0;
++    attribute.fill(0);
++    Dirty();
++}
++// GPIO notifications run before the GPIO bank finishes updating its levels.
++// Defer pin writes to the existing device scheduler to avoid re-entering it.
++void LibertasCF::Dirty() {
++    irqDirty = true;
++    schedule.rescheduleCb(schedule.ctx, RESCHEDULE_TASK_DEVICE_TIER0);
++}
++void LibertasCF::Tick() {
++    Sync();
++    if (irqDirty) {
++        irqDirty = false;
++        UpdateIrq();
++    }
++}
++void LibertasCF::UpdateIrq() {
++    pxaGpioSetState(gpio, 116, !(enabled && power1 && power2 && !reset && (cause & ~mask & 0x1f)));
++}
++void LibertasCF::Power(void* context, uint32_t pin, bool, bool value) {
++    auto& self = *static_cast<LibertasCF*>(context);
++    if (self.trace) fprintf(stderr, "WIFI GPIO %u=%u\n", pin, unsigned(value));
++    if (pin == 94)
++        self.power1 = value;
++    else if (pin == 108)
++        self.power2 = value;
++    else
++        self.reset = value;
++    if (!self.power1 || !self.power2 || self.reset) self.Reset();
++    self.Dirty();
++}
++void LibertasCF::Command() {
++    // Model the CF bootloader transport, rather than executing the radio CPU.
++    // The helper requests 16-byte headers followed by the specified data length.
++    if (!running) {
++        bootAck = true;
++        if (!helper) {
++            if (!commandLength) {
++                helper = true;
++                if (trace) fprintf(stderr, "WIFI helper loaded\n");
++            }
++        } else if (bootHeader && command.size() >= 16) {
++            const uint32_t op = le16(command, 0) | uint32_t(le16(command, 2)) << 16;
++            const uint32_t count = le16(command, 8) | uint32_t(le16(command, 10)) << 16;
++            if (op == 4 && count == 0) {
++                running = true;
++                traced = 0;
++                if (trace) fprintf(stderr, "WIFI firmware running\n");
++            } else if (op == 1 && count && count <= 4096) {
++                firmwareRequest = count;
++                bootHeader = false;
++            } else if (trace)
++                fprintf(stderr, "WIFI invalid boot header %u %u\n", op, count);
++        } else {
++            firmwareRequest = 16;
++            bootHeader = true;
++        }
++        command.clear();
++        return;
++    }
++    if (command.size() < 8) return;
++    const auto declared = le16(command, 2);
++    if (declared < 8 || declared > 3072 || declared > command.size()) {
++        command.clear();
++        return;
++    }
++    command.resize(declared);
++    const auto id = le16(command, 0);
++    if (trace) {
++        fprintf(stderr, "WIFI CMD %04x length %zu seq %u\n", id, command.size(), le16(command, 4));
++        for (size_t i = 0; i < std::min<size_t>(command.size(), 96); ++i)
++            fprintf(stderr, "%02x%s", command[i], i % 16 == 15 ? "\n" : " ");
++        fprintf(stderr, "\n");
++    }
++    response = command;
++    put16(response, 0, id | 0x8000);
++    put16(response, 6, 0);
++    if (id == 3) {
++        response.resize(46);
++        std::fill(response.begin() + 8, response.end(), 0);
++        put16(response, 8, 1);
++        put16(response, 10, 4);
++        put16(response, 12, 16);
++        put16(response, 14, 32);
++        std::copy(mac, mac + 6, response.begin() + 16);
++        put16(response, 22, 0x1000);
++        put16(response, 24, 1);
++        response[26] = 102;
++        response[27] = 0;
++        response[28] = 4;
++        response[29] = 0;
++        put16(response, 42, 0x303);
++    } else if (id == 6) {
++        bool matches = command.size() >= 15 && command[8] != 2;
++        if (command.size() >= 15) {
++            bool anyZero = true, anyBroadcast = true;
++            for (unsigned i = 0; i < 6; ++i) {
++                anyZero &= command[9 + i] == 0;
++                anyBroadcast &= command[9 + i] == 255;
++            }
++            if (!anyZero && !anyBroadcast) {
++                for (unsigned i = 0; i < 6; ++i)
++                    matches &= command[9 + i] == (i == 5 ? 0x65 : mac[i]);
++            }
++            for (size_t at = 15; at + 4 <= command.size();) {
++                const auto type = le16(command, at), length = le16(command, at + 2);
++                at += 4;
++                if (length > command.size() - at) {
++                    matches = false;
++                    break;
++                }
++                if (type == 0 && length)
++                    matches &= length == 5 && !memcmp(command.data() + at, "Frond", 5);
++                if (type == 0x101 && length) {
++                    bool channel = false;
++                    for (size_t i = 0; i + 7 <= length; i += 7) channel |= command[at + i + 1] == 6;
++                    matches &= channel && length % 7 == 0;
++                }
++                at += length;
++            }
++        }
++        std::vector<uint8_t> desc(21, 0);
++        std::copy(mac, mac + 6, desc.begin() + 2);
++        desc[7] = 0x65;
++        desc[8] = 35;
++        put16(desc, 17, 100);
++        put16(desc, 19, 1);
++        const uint8_t ies[] = {0, 5,    'F',  'r',  'o',  'n', 'd', 1,
++                               4, 0x82, 0x84, 0x8b, 0x96, 3,   1,   6};
++        desc.insert(desc.end(), ies, ies + sizeof(ies));
++        put16(desc, 0, desc.size() - 2);
++        response.resize(11);
++        put16(response, 8, matches ? desc.size() : 0);
++        response[10] = matches ? 1 : 0;
++        if (matches) response.insert(response.end(), desc.begin(), desc.end());
++    } else if (id == 0x4d) {
++        response.resize(16);
++        std::copy(mac, mac + 6, response.begin() + 10);
++    } else if (id == 0x12 || id == 0x50) {
++        response.resize(14);
++        std::fill(response.begin() + 8, response.end(), 0);
++        put16(response, 0, 0x8012);
++        put16(response, 12, 1);
++    }
++    if (id == 0x12 || id == 0x50) {
++        associated = true;
++        if (!router) router = std::make_unique<WifiRouter>();
++    }
++    if (id == 0x24 || id == 0x26) {
++        associated = false;
++        if (!network->Frozen()) router.reset();
++        rx.clear();
++        rxPosition = 0;
++    }
++    put16(response, 2, response.size());
++    // The CF response length includes eight trailing transport bytes, which
++    // Palm's driver (like Libertas) subtracts before parsing the command.
++    response.resize(response.size() + 8, 0);
++    responsePosition = 0;
++    cause |= 8;
++    if (trace)
++        fprintf(stderr, "WIFI RESPONSE %04x mask=%x cause=%x power=%u%u reset=%u\n", id, mask,
++                cause, power1, power2, reset);
++    command.clear();
++    UpdateIrq();
++}
++void LibertasCF::Send() {
++    if (trace) {
++        fprintf(stderr, "WIFI TX %zu bytes\n", tx.size());
++        for (size_t i = 0; i < std::min<size_t>(tx.size(), 64); ++i)
++            fprintf(stderr, "%02x%s", tx[i], i % 16 == 15 ? "\n" : " ");
++        fprintf(stderr, "\n");
++    }
++    if (!network->Frozen() && associated && router && tx.size() >= 24) {
++        const uint32_t offset = le16(tx, 8) | (uint32_t(le16(tx, 10)) << 16);
++        const uint16_t length = le16(tx, 12);
++        if (offset >= 24 && length >= 14 && length <= 1518 && offset <= tx.size() &&
++            length <= tx.size() - offset)
++            router->Input(tx.data() + offset, length, clock.getTimeF(clock.userdata));
++    }
++    tx.clear();
++    cause |= 1;
++    UpdateIrq();
++}
++void LibertasCF::Poll() {
++    if (!Sync() || network->Frozen() || !associated) return;
++    if (!router) router = std::make_unique<WifiRouter>();
++    router->Poll(clock.getTimeF(clock.userdata));
++    std::vector<uint8_t> bytes;
++    while (rx.size() < 64 && router->Receive(bytes)) {
++        if (trace)
++            fprintf(stderr, "WIFI RX %zu bytes ethertype=%02x%02x\n", bytes.size(), bytes[12],
++                    bytes[13]);
++        std::vector<uint8_t> packet(20, 0);
++        put16(packet, 0, 1);
++        packet[2] = 50;
++        packet[6] = 4;
++        put16(packet, 4, bytes.size() + 8);
++        put16(packet, 8, 20);
++        packet.insert(packet.end(), bytes.begin(), bytes.begin() + 12);
++        const auto payloadLength = bytes.size() - 6;
++        packet.push_back(payloadLength >> 8);
++        packet.push_back(payloadLength);
++        // This firmware's receive path strips LLC/SNAP unconditionally.
++        const uint8_t llc[] = {0xaa, 0xaa, 3, 0, 0, 0};
++        packet.insert(packet.end(), llc, llc + 6);
++        packet.insert(packet.end(), bytes.begin() + 12, bytes.end());
++        rx.push_back(std::move(packet));
++    }
++    if (!rx.empty()) {
++        cause |= 2;
++        UpdateIrq();
++    }
++}
++bool LibertasCF::Access(uint32_t pa, uint_fast8_t size, bool write, void* data) {
++    if (size != 1 && size != 2 && size != 4) return false;
++    if (!Sync() || !power1 || !power2 || reset) {
++        if (!write) memset(data, 0xff, size);
++        return true;
++    }
++    const auto offset = pa & 0xffff;
++    uint32_t value = 0;
++    if (write) memcpy(&value, data, size);
++    if (pa >= 0x28000000) {
++        if (offset + size > attribute.size()) {
++            if (!write) memset(data, 0, size);
++            return true;
++        }
++        if (write) {
++            memcpy(attribute.data() + offset, data, size);
++            if (offset == 0x200) configured = value & 1;
++        } else
++            memcpy(data, attribute.data() + offset, size);
++    } else if (write) {
++        switch (offset) {
++            case 0x04:
++                mask = value;
++                break;
++            case 0x18:
++                commandLength = value;
++                command.clear();
++                break;
++            case 0x1a:
++                for (unsigned i = 0; i < size && command.size() < 4096; ++i)
++                    command.push_back(value >> (8 * i));
++                break;
++            case 0x14:
++                txLength = value;
++                tx.clear();
++                break;
++            case 0x16:
++                for (unsigned i = 0; i < size && tx.size() < 4096; ++i)
++                    tx.push_back(value >> (8 * i));
++                break;
++            case 0x02:
++                if (value & 4) Command();
++                if (value & 1) Send();
++                if (value & 2) {
++                    if (trace)
++                        fprintf(stderr, "WIFI RX ACK position=%zu size=%zu\n", rxPosition,
++                                rx.empty() ? 0 : rx.front().size());
++                    if (!rx.empty()) rx.pop_front();
++                    rxPosition = 0;
++                    cause &= ~2;
++                }
++                break;
++            case 0x22:
++                // IRQ W1C acknowledges notification, not the unread response.
++                cause &= ~value;
++                break;
++        }
++        UpdateIrq();
++    } else {
++        switch (offset) {
++            case 0x04:
++                value = mask;
++                break;
++            case 0x20:
++                value = (!running || bootAck) ? 4
++                                              : (5 | (responsePosition < response.size() ? 8 : 0) |
++                                                 (rx.empty() ? 0 : 2) | (cause & 0x10));
++                bootAck = false;
++                break;
++            case 0x22:
++                value = cause;
++                break;
++            case 0x1c:
++                value = 4;
++                break;
++            case 0x28:
++                value = firmwareRequest;
++                break;
++            case 0x3e:
++                value = helper ? 0x5a00 : 0;
++                break;
++            case 0x3f:
++                value = helper ? 0x5a : 0;
++                break;
++            case 0x24:
++                value = rx.empty() ? 0 : rx.front().size();
++                break;
++            case 0x10:
++                for (unsigned i = 0; i < size; ++i)
++                    if (!rx.empty() && rxPosition < rx.front().size())
++                        value |= uint32_t(rx.front()[rxPosition++]) << (8 * i);
++                break;
++            case 0x30:
++                value = response.size();
++                break;
++            case 0x12:
++                for (unsigned i = 0; i < size; ++i)
++                    if (responsePosition < response.size())
++                        value |= uint32_t(response[responsePosition++]) << (8 * i);
++                break;
++        }
++        memcpy(data, &value, size);
++    }
++    if (trace && traced++ < 350 && offset != 0x1a && offset != 0x12)
++        fprintf(stderr, "WIFI %c %08x/%u=%08x\n", write ? 'W' : 'R', pa, unsigned(size), value);
++    return true;
++}
++
++bool LibertasCF::Sync() {
++    const bool next = network->GetMode() == NetworkSimulation::wireless;
++    if (next != enabled) {
++        enabled = next;
++        Reset();
++    }
++    return enabled;
++}
++void LibertasCF::Load(SavestateLoader<ChunkType>& loader) {
++    if (!network->Frozen()) router.reset();
++    if (!loader.HasChunk(ChunkType::libertasCF)) {
++        enabled = network->GetMode() == NetworkSimulation::wireless;
++        Reset();
++        power1 = pxaGpioGetState(gpio, 94) == PxaGpioStateHigh;
++        power2 = pxaGpioGetState(gpio, 108) == PxaGpioStateHigh;
++        reset = pxaGpioGetState(gpio, 106) == PxaGpioStateHigh;
++        irqDirty = false;
++        return;
++    }
++    auto* chunk = loader.GetChunkOrFail(ChunkType::libertasCF, 0, "TX Wi-Fi");
++    if (!chunk) return;
++    valid = true;
++    LoadChunkHelper state(*chunk);
++    Transfer(state);
++    valid &= !(mask & ~0x1f) && !(cause & ~0x1f) && commandLength <= 4097 && txLength <= 4096 &&
++             firmwareRequest > 0 && firmwareRequest <= 4096 && !(firmwareRequest & 1) &&
++             responsePosition <= response.size() &&
++             rxPosition <= (rx.empty() ? 0 : rx.front().size()) &&
++             (!associated || (enabled && running && helper && power1 && power2 && !reset)) &&
++             (!running || helper);
++    for (const auto& packet : rx) valid &= packet.size() >= 42 && packet.size() <= 1560;
++    if (!valid) {
++        Reset();
++        loader.NotifyError();
++    }
++}
++#endif
+--- /dev/null
++++ b/src/uarm/uarm/LibertasCF.h
+@@ -0,0 +1,115 @@
++#ifndef FROND_LIBERTAS_CF_H
++#define FROND_LIBERTAS_CF_H
++#ifndef __EMSCRIPTEN__
++#include <algorithm>
++#include <array>
++#include <cstdint>
++#include <deque>
++#include <memory>
++#include <vector>
++
++#include "NetworkSimulation.h"
++#include "WifiRouter.h"
++#include "get_emu_time.h"
++#include "mem.h"
++#include "pxa_GPIO.h"
++#include "reschedule.h"
++class LibertasCF {
++   public:
++    LibertasCF(ArmMem*, PxaGpio*, Reschedule, GetEmuTime, NetworkSimulation*);
++    void Poll();
++    template <class S>
++    void Save(S& state) {
++        auto* chunk = state.GetChunk(ChunkType::libertasCF, 0);
++        SaveChunkHelper helper(*chunk);
++        Transfer(helper);
++    }
++    void Load(SavestateLoader<ChunkType>& loader);
++    void Tick();
++    bool NeedsTick() const { return irqDirty; }
++
++   private:
++    NetworkSimulation* network;
++    bool enabled{};
++    bool Sync();
++    PxaGpio* gpio;
++    Reschedule schedule;
++    GetEmuTime clock;
++    bool associated{};
++    std::unique_ptr<WifiRouter> router;
++    std::deque<std::vector<uint8_t>> rx;
++    size_t rxPosition{};
++    void Send();
++    bool irqDirty{};
++    void Dirty();
++    bool power1{}, power2{}, reset{}, configured{};
++    bool trace{};
++    unsigned traced{};
++    bool helper{}, running{}, bootAck{}, bootHeader{true};
++    uint16_t firmwareRequest{16};
++    uint16_t mask{0x1f}, cause{}, commandLength{}, txLength{};
++    std::array<uint8_t, 1024> attribute{};
++    std::vector<uint8_t> command, response, tx;
++    size_t responsePosition{};
++    void UpdateIrq();
++    void Reset();
++    bool valid{true};
++    template <size_t capacity, class H>
++    void Buffer(H& h, std::vector<uint8_t>& bytes) {
++        std::array<uint8_t, capacity> storage{};
++        uint32_t length = bytes.size();
++        if (bytes.size() <= capacity) std::copy(bytes.begin(), bytes.end(), storage.begin());
++        h.Do32(length).DoBuffer(storage.data(), storage.size());
++        if (length <= capacity)
++            bytes.assign(storage.begin(), storage.begin() + length);
++        else {
++            valid = false;
++            bytes.clear();
++        }
++    }
++    template <class H>
++    void Transfer(H& h) {
++        h.DoBool(enabled)
++            .DoBool(power1)
++            .DoBool(power2)
++            .DoBool(reset)
++            .DoBool(configured)
++            .DoBool(associated)
++            .DoBool(irqDirty)
++            .DoBool(helper)
++            .DoBool(running)
++            .DoBool(bootAck)
++            .DoBool(bootHeader)
++            .Do16(firmwareRequest)
++            .Do16(mask)
++            .Do16(cause)
++            .Do16(commandLength)
++            .Do16(txLength)
++            .DoBuffer(attribute.data(), attribute.size());
++        uint32_t rsp = responsePosition, rxpos = rxPosition;
++        h.Do32(rsp).Do32(rxpos);
++        responsePosition = rsp;
++        rxPosition = rxpos;
++        Buffer<4096>(h, command);
++        Buffer<4096>(h, response);
++        Buffer<4096>(h, tx);
++        uint32_t count = rx.size();
++        h.Do32(count);
++        if (count > 64) valid = false;
++        std::deque<std::vector<uint8_t>> packets;
++        for (unsigned i = 0; i < 64; ++i) {
++            std::vector<uint8_t> bytes = i < rx.size() ? rx[i] : std::vector<uint8_t>{};
++            Buffer<1560>(h, bytes);
++            if (i < count) packets.push_back(std::move(bytes));
++        }
++        rx = std::move(packets);
++    }
++    void Command();
++    bool Access(uint32_t, uint_fast8_t, bool, void*);
++    static bool Memory(void* context, uint32_t pa, uint_fast8_t size, bool write, void* data) {
++        return static_cast<LibertasCF*>(context)->Access(pa, size, write, data);
++    }
++    static void Power(void*, uint32_t, bool, bool);
++};
++#endif
++#endif
+--- /dev/null
++++ b/src/uarm/uarm/WifiRouter.cpp
+@@ -0,0 +1,125 @@
++#include "WifiRouter.h"
++#ifndef __EMSCRIPTEN__
++#include <poll.h>
++#include <libslirp.h>
++
++#include <algorithm>
++#include <cstdio>
++#include <deque>
++#include <set>
++#include <vector>
++struct WifiRouter::Impl {
++    struct Timer {
++        SlirpTimerCb callback;
++        void* context;
++        int64_t deadline{-1};
++    };
++    uint64_t now{};
++    Slirp* slirp{};
++    SlirpCb callbacks{};
++    std::deque<std::vector<uint8_t>> incoming;
++    std::vector<pollfd> descriptors;
++    std::set<Timer*> timers;
++    Impl() {
++        callbacks.send_packet = [](const void* bytes, size_t size, void* context) -> slirp_ssize_t {
++            auto& self = *static_cast<Impl*>(context);
++            if (size >= 14 && size <= 1518 && self.incoming.size() < 64)
++                self.incoming.emplace_back(static_cast<const uint8_t*>(bytes),
++                                           static_cast<const uint8_t*>(bytes) + size);
++            return size;
++        };
++        callbacks.guest_error = [](const char* message, void*) {
++            fprintf(stderr, "Wi-Fi router: %s\n", message);
++        };
++        callbacks.clock_get_ns = [](void* context) -> int64_t {
++            return static_cast<Impl*>(context)->now;
++        };
++        callbacks.timer_new = [](SlirpTimerCb callback, void* cbcontext, void* context) -> void* {
++            auto& self = *static_cast<Impl*>(context);
++            auto* timer = new Timer{callback, cbcontext};
++            self.timers.insert(timer);
++            return timer;
++        };
++        callbacks.timer_free = [](void* timer, void* context) {
++            auto& self = *static_cast<Impl*>(context);
++            self.timers.erase(static_cast<Timer*>(timer));
++            delete static_cast<Timer*>(timer);
++        };
++        callbacks.timer_mod = [](void* timer, int64_t time, void*) {
++            static_cast<Timer*>(timer)->deadline = time;
++        };
++        callbacks.register_poll_fd = [](int, void*) {};
++        callbacks.unregister_poll_fd = [](int, void*) {};
++        callbacks.notify = [](void*) {};
++        SlirpConfig config{};
++        config.version = 4;
++        config.in_enabled = true;
++        config.vhostname = "frond";
++        config.vnetwork.s_addr = htonl(0x0a000200);
++        config.vnetmask.s_addr = htonl(0xffffff00);
++        config.vhost.s_addr = htonl(0x0a000202);
++        config.vdhcp_start.s_addr = htonl(0x0a00020f);
++        config.vnameserver.s_addr = htonl(0x0a000203);
++        config.if_mtu = 1500;
++        config.if_mru = 1500;
++        slirp = slirp_new(&config, &callbacks, this);
++    }
++    ~Impl() {
++        if (slirp) slirp_cleanup(slirp);
++        for (auto* timer : timers) delete timer;
++    }
++    static int Add(int fd, int events, void* context) {
++        auto& self = *static_cast<Impl*>(context);
++        short flags = 0;
++        if (events & SLIRP_POLL_IN) flags |= POLLIN;
++        if (events & SLIRP_POLL_OUT) flags |= POLLOUT;
++        if (events & SLIRP_POLL_PRI) flags |= POLLPRI;
++        self.descriptors.push_back({fd, flags, 0});
++        return self.descriptors.size() - 1;
++    }
++    static int Events(int index, void* context) {
++        auto& self = *static_cast<Impl*>(context);
++        if (index < 0 || size_t(index) >= self.descriptors.size()) return SLIRP_POLL_ERR;
++        const auto flags = self.descriptors[index].revents;
++        int events = 0;
++        if (flags & POLLIN) events |= SLIRP_POLL_IN;
++        if (flags & POLLOUT) events |= SLIRP_POLL_OUT;
++        if (flags & POLLPRI) events |= SLIRP_POLL_PRI;
++        if (flags & (POLLERR | POLLNVAL)) events |= SLIRP_POLL_ERR;
++        if (flags & POLLHUP) events |= SLIRP_POLL_HUP;
++        return events;
++    }
++};
++WifiRouter::WifiRouter() : impl(std::make_unique<Impl>()) {}
++WifiRouter::~WifiRouter() = default;
++bool WifiRouter::Valid() const { return impl->slirp; }
++void WifiRouter::Input(const uint8_t* data, size_t size, uint64_t now) {
++    if (!Valid() || size < 14 || size > 1518) return;
++    impl->now = now;
++    slirp_input(impl->slirp, data, size);
++}
++void WifiRouter::Poll(uint64_t now) {
++    if (!Valid()) return;
++    impl->now = now;
++    std::vector<Impl::Timer*> due;
++    for (auto* timer : impl->timers)
++        if (timer->deadline >= 0 && uint64_t(timer->deadline) <= now / 1000000)
++            due.push_back(timer);
++    for (auto* timer : due)
++        if (impl->timers.count(timer)) {
++            timer->deadline = -1;
++            timer->callback(timer->context);
++        }
++    impl->descriptors.clear();
++    uint32_t timeout = 0;
++    slirp_pollfds_fill(impl->slirp, &timeout, Impl::Add, impl.get());
++    const int status = poll(impl->descriptors.data(), impl->descriptors.size(), 0);
++    slirp_pollfds_poll(impl->slirp, status < 0, Impl::Events, impl.get());
++}
++bool WifiRouter::Receive(std::vector<uint8_t>& bytes) {
++    if (impl->incoming.empty()) return false;
++    bytes = std::move(impl->incoming.front());
++    impl->incoming.pop_front();
++    return true;
++}
++#endif
+--- /dev/null
++++ b/src/uarm/uarm/WifiRouter.h
+@@ -0,0 +1,21 @@
++#ifndef FROND_WIFI_ROUTER_H
++#define FROND_WIFI_ROUTER_H
++#ifndef __EMSCRIPTEN__
++#include <cstdint>
++#include <memory>
++#include <vector>
++class WifiRouter {
++   public:
++    WifiRouter();
++    ~WifiRouter();
++    bool Valid() const;
++    void Input(const uint8_t*, size_t, uint64_t now);
++    void Poll(uint64_t now);
++    bool Receive(std::vector<uint8_t>&);
++
++   private:
++    struct Impl;
++    std::unique_ptr<Impl> impl;
++};
++#endif
++#endif

@@ -10,7 +10,7 @@ Bluetooth remain unavailable. See [peripherals](peripherals.md). Use the normal 
 Install the locally built package:
 
 ```sh
-sudo apt install ./frond_0.1.0-4_amd64.deb
+sudo apt install ./frond_0.1.0-5_amd64.deb
 ```
 
 Launch **Frond** from Plasma's application menu. On first use, choose an existing
@@ -40,12 +40,20 @@ Image. Card contents and insertion state are saved inside the working session,
 including on normal close. Close Palm files before ejecting; export an image
 before replacing a card you want to keep. Supported sizes are 32–128 MiB FAT16.
 
-Choose **Network: Internet via host** for experimental IPv4 TCP/UDP and DNS
-through the host connection. Select it before launching a supported Palm app.
-It needs no bridge configuration or root access. The mode persists; live host
-connections close on session resume and apps must reconnect. Local echo and
-connection-error profiles remain available for testing. See
-[supported APIs and limits](peripherals.md#internet-via-host-experimental).
+For Internet access, select **Network: Virtual Wi-Fi (Frond)** before turning on
+Wi-Fi in Palm OS. Scan and connect to the open **Frond** network. Its virtual
+router supplies an address, DNS and IPv4 Internet access through the computer's
+connection. No root access, bridge setup or host Wi-Fi adapter is needed.
+Blazer supports HTTP pages through this path; modern TLS/browser compatibility
+is still limited. The mode, radio and saved Palm network profile persist, while
+live host connections close on resume; reload or reconnect in the Palm app.
+
+**File → Export Database…** exports one named Palm database into a ZIP, useful
+for retrieving application logs when an open system database prevents a full
+RAM export.
+
+**Internet via host** remains available for a subset of 68k NetLib apps, along
+with local echo and error fixtures. See [network setup and limits](peripherals.md#virtual-wi-fi-experimental).
 
 **Attach Palm infrared keyboard** sends computer-keyboard input through an
 emulated Palm keyboard accessory. Install and enable its Palm OS driver first,

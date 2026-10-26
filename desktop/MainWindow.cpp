@@ -84,11 +84,12 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     network = new QComboBox(root);
     network->setObjectName("networkMode");
     network->addItem(tr("Network: Disabled"), "disabled");
+    network->addItem(tr("Network: Virtual Wi-Fi (Frond)"), "wireless");
     network->addItem(tr("Network: Internet via host"), "internet");
     network->addItem(tr("Network: Simulated echo server"), "connected");
     network->addItem(tr("Network: Simulated connection timeout"), "timeout");
     network->addItem(tr("Network: Simulated disconnection"), "disconnected");
-    network->setToolTip(tr("Experimental 68k NetLib networking. Internet mode uses your computer connection; simulated modes stay local. Changing mode closes connections."));
+    network->setToolTip(tr("Virtual Wi-Fi uses the Palm networking stack and a Frond access point. Internet via host forwards a subset of 68k NetLib calls. Changing mode closes connections."));
     connect(network, qOverload<int>(&QComboBox::activated), this, [this](int index) {
         send("network-mode", network->itemData(index).toString());
     });
@@ -141,6 +142,13 @@ MainWindow::MainWindow(const QString& core) : core(core) {
         const auto path = outputFile(tr("Export RAM Databases"), tr("ZIP archives (*.zip)"), "Palm databases.zip");
         if (!path.isEmpty()) send("export", path);
     });
+    auto* exportDatabase = file->addAction(tr("Export &Database…"), this, [this] {
+        bool ok;
+        const auto name=QInputDialog::getText(this,tr("Export Database"),tr("Palm database name:"),QLineEdit::Normal,{},&ok);
+        if(!ok || name.isEmpty())return;
+        const auto path=outputFile(tr("Export Database"),tr("ZIP archives (*.zip)"),name+".zip");
+        if(!path.isEmpty())send("export-db",path+"\n"+name);
+    });
     file->addSeparator();
     file->addAction(tr("&Quit"), QKeySequence::Quit, this, &QWidget::close);
     auto* device = menuBar()->addMenu(tr("&Device"));
@@ -148,7 +156,7 @@ MainWindow::MainWindow(const QString& core) : core(core) {
         if (QMessageBox::question(this, tr("Reset Palm TX"), tr("Reset the Palm TX now?")) == QMessageBox::Yes) send("reset");
     });
     auto* rotate = device->addAction(tr("&Rotate"), this, [this] { send("rotate"); });
-    runningActions = {saveAction, copy, install, launch, exportAction, reset, rotate};
+    runningActions = {saveAction, copy, install, launch, exportAction, exportDatabase, reset, rotate};
     auto* cardMenu = menuBar()->addMenu(tr("&SD Card"));
     const auto replaceCard = [this] {
         return !cardPresent || QMessageBox::question(this, tr("Replace SD Card"),

@@ -1,5 +1,5 @@
 .PHONY: all clean prepare test test-cpu test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-pxa-timer benchmark-session test-native-governor test-db-list test-export-checkpoint test-db-backup
-CPU_TEST_LDLIBS ?= -lcurl -lpthread -lresolv
+CPU_TEST_LDLIBS ?= -lcurl -lpthread -lresolv $(shell pkg-config --libs slirp)
 PATCHES := $(sort $(wildcard patches/*.patch))
 all: out/frond desktop
 
@@ -15,7 +15,7 @@ out/frond: build/source/.prepared
 	cp build/source/src/uarm/cp-uarm out/frond.new
 	mv -f out/frond.new out/frond
 
-test: prepare test-host-network test-keyboard test-network test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup
+test: prepare test-wifi test-host-network test-keyboard test-network test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup
 	python3 tests/audio-metrics.py
 	python3 tests/input-latency.py
 	python3 tests/menu-response.py
@@ -203,3 +203,16 @@ test-host-network: prepare
 	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm \
 		tests/host-network.cpp build/source/src/uarm/uarm/HostNetwork.cpp -pthread -o build/test-host-network
 	./build/test-host-network
+
+.PHONY: test-wifi
+test-wifi: prepare
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm \
+		tests/wifi-router.cpp build/source/src/uarm/uarm/WifiRouter.cpp \
+		$(shell pkg-config --cflags --libs slirp) -pthread -o build/test-wifi-router
+	./build/test-wifi-router
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/libertas-cf.cpp build/source/src/uarm/uarm/LibertasCF.cpp \
+		build/source/src/uarm/uarm/WifiRouter.cpp build/source/src/uarm/uarm/NetworkSimulation.cpp \
+		build/source/src/uarm/uarm/HostNetwork.cpp build/source/src/common/libcommon.a \
+		$(shell pkg-config --cflags --libs slirp) -pthread -lz -o build/test-libertas-cf
+	./build/test-libertas-cf

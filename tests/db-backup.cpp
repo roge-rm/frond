@@ -6,12 +6,14 @@ extern "C" void uarmAbort() { std::abort(); }
 #include "db_backup.h"
 #include "syscall_dispatch.h"
 
-static bool allocationFails, copyFails;
+static bool allocationFails, copyFails, includeOpen;
 static uint16_t apiError;
 static uint32_t result;
 static M68kStub stub;
 bool dbListGet(SyscallDispatch*, DbMetadataList& list) {
-    list.resize(1); auto& db = list[0];
+    list.resize(includeOpen?2:1); auto& db = list[0];
+    db.localID=1;
+    if(includeOpen){auto& opened=list[1];std::strcpy(opened.name,"Shim Logs");opened.localID=2;opened.isRom=false;}
     std::strcpy(db.name, "AciduliteLog");
     db.attr = 8; db.creator = 0x526d7266; db.isRom = false;
     return true;
@@ -38,7 +40,8 @@ bool syscallDispatch_memcpy_toHost(SyscallDispatch*, void* out, uint32_t p, size
 void syscallDispatchRegisterM68kStub(SyscallDispatch*, uint32_t, M68kStub fn) { stub = fn; }
 void syscallDispatchUnregisterM68kStub(SyscallDispatch*, uint32_t) { stub = {}; }
 uint16_t syscall68k_ExgDBWrite(SyscallDispatch*, uint32_t, uint32_t, uint32_t,
-                              uint32_t, uint32_t, uint16_t) {
+                              uint32_t, uint32_t id, uint16_t) {
+    if(id==2)return 0x205;
     if (!apiError) stub(nullptr, 0x2000, []() {});
     return apiError;
 }
@@ -54,5 +57,12 @@ int main() {
         if (failure) assert(backup.GetArchiveData() == nullptr);
         else assert(result == 0 && backup.GetArchiveData() && backup.GetArchiveSize() > 0);
     }
+    allocationFails=copyFails=false;apiError=0;includeOpen=true;
+    DbBackup all(nullptr,DbBackup::BACKUP_TYPE_RAM);assert(all.Init());assert(all.Continue());
+    assert(!all.Continue() && all.GetArchiveData()==nullptr); // retain all-or-nothing export
+    DbBackup log(nullptr,DbBackup::BACKUP_TYPE_RAM,"AciduliteLog");assert(log.Init());
+    while(log.GetState()==DbBackup::STATE_IN_PROGRESS)assert(log.Continue());
+    assert(log.GetState()==DbBackup::STATE_DONE && log.GetArchiveData() && log.GetArchiveSize());
+    DbBackup missing(nullptr,DbBackup::BACKUP_TYPE_RAM,"Absent");assert(!missing.Init());
     puts("PASS: database export rejects allocation, copy and Palm API failures without a partial archive");
 }

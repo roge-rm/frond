@@ -9,3 +9,7 @@ __pycache__/
 # Local development journals and release preparation
 /.local/
 /doc/local-handoff.md
+
+# Crash dumps can contain guest RAM and firmware
+/core
+/core.[0-9]*

@@ -112,6 +112,71 @@ It installs the driver, resets, enables it, types lower/upper-case letters and
 checks the exported Palm log. It also saves with Shift held and checks that
 resume releases it. Firmware, the driver PRC and output sessions stay outside Git.
 
+## Virtual Wi-Fi (experimental)
+
+1. Select **Network: Virtual Wi-Fi (Frond)** in the desktop launcher.
+2. Turn Wi-Fi on inside Palm OS. A network app can also prompt to turn it on.
+3. Open the Wi-Fi network picker, scan and connect to **Frond**.
+
+Frond presents one open access point, on channel 6, to the TX's existing Marvell
+CF8381 driver. The driver loads its firmware from the user's Palm image and
+uses its normal commands, interrupts and packet transfers. The Palm keeps its
+own NetLib, TCP/IP stack and Wi-Fi configuration. This supports native ARM and
+68k applications without substituting a NetLib reference. Blazer can fetch HTTP
+pages through the simulated access point. Modern HTTPS sites can still fail
+because of the Palm application's TLS version, certificates or browser features.
+
+The access point exists inside the emulator. No radio traffic is transmitted,
+and no host Wi-Fi adapter, TAP interface, bridge configuration or root access is
+needed. The host may use wired or wireless Internet. A user-mode libslirp router
+provides IPv4 NAT, DHCP and DNS on `10.0.2.0/24`. The router/host alias is
+`10.0.2.2`, DNS is `10.0.2.3`, and the first DHCP lease is `10.0.2.15`.
+Use `10.0.2.2` to reach a service on the computer; `127.0.0.1` refers to the Palm.
+There are no incoming host-port forwards or host-directory shares.
+
+The mode, virtual radio state, in-flight device buffers and Palm's saved network
+profile persist with the session. Host Internet connections are closed during
+normal restore, reset or mode changes. An app may need to reconnect or reload;
+a saved browser page can still be available from the Palm's cache. Database
+export freezes external I/O and preserves the live router during its temporary
+guest checkpoint. Wi-Fi can keep system databases such as `Shim Logs` open.
+If a full RAM export fails because one is open, **File → Export Database…** can
+export a named application database, such as `AciduliteLog`, into its own ZIP.
+It still reports errors for that database; a full export never silently skips
+failed databases. Close Palm modal dialogs before installing or exporting if
+the operation cannot reach a suitable guest API boundary.
+
+The model implements the firmware transport and command subset used for this
+open access point. It does not emulate the radio's processor instruction by
+instruction, RF propagation, arbitrary access points, WEP/WPA authentication,
+Bluetooth networking or IPv6. Packet queues are bounded. Host socket polling is
+nonblocking and runs at the existing 30 Hz event pump. Wi-Fi is disabled by
+default; use the other profiles when running deterministic network fixtures.
+
+`make test-wifi` checks the firmware download handshake, IRQ acknowledgement
+independent of response data, hardware identity, scan results, in-flight restore,
+reset/disable, and router DHCP/ARP/UDP behavior without Palm firmware. The
+register protocol follows the Linux Libertas
+[CompactFlash driver](https://github.com/torvalds/linux/blob/v2.6.35/drivers/net/wireless/libertas/if_cs.c)
+and [command structures](https://github.com/torvalds/linux/blob/v2.6.35/drivers/net/wireless/libertas/host.h).
+The board wiring is documented by Linux's
+[Palm TX PCMCIA driver](https://github.com/torvalds/linux/blob/v2.6.35/drivers/pcmcia/pxa2xx_palmtx.c).
+Firmware is supplied separately and is not packaged with Frond.
+
+The optional SDK test uses a session with a saved **Frond** Wi-Fi profile:
+
+```sh
+python3 tools/build-palm-probe.py --probe host-network --sdk /path/to/sdk-5r3
+python3 tests/desktop-host-network.py --wireless --session /path/to/wifi.frond \
+  --output /path/to/new/private/results --audio --public
+```
+
+It exercises the real Palm NetLib through the virtual radio, not the synthetic
+NetLib reference. Results and PCM describe the emulator, not physical TX timing.
+The test uses single-database export for `FrondHostLog` so open system logs do
+not prevent retrieval. Its local server withholds a second response until after
+export, checking that the live TCP connection survives the temporary checkpoint.
+
 ## Internet via host (experimental)
 
 Choose **Network: Internet via host** before launching a Palm network app. Frond
@@ -144,9 +209,9 @@ pointers, listen/accept, PB scatter/gather calls, raw sockets and IPv6 are not
 implemented. The synthetic reference is not a real Palm library-table entry.
 Unsupported calls return errors; full conventions for every unsupported API are
 not implemented. Apps that cached the real NetLib reference must be restarted.
-Blazer's Wi-Fi connection workflow is not supported; it still prompts to turn
-on the Palm radio. A successful HTTP probe does not establish compatibility
-with every Palm app. Frond does not upgrade an application's old TLS implementation or
+In this NetLib forwarding mode, Blazer's Wi-Fi connection workflow is not
+supported; use **Virtual Wi-Fi** for its normal radio connection. A successful
+HTTP probe does not establish compatibility with every Palm app. Frond does not upgrade an application's old TLS implementation or
 provide HTTPS-to-HTTP conversion.
 
 `make test-host-network` exercises the native backend without firmware. The
@@ -230,7 +295,7 @@ The TX also uses Bluetooth accessories and phone/modem links, infrared beaming,
 USB/HotSync through its Multi-connector, SD/MMC/SDIO cards, and stereo headphones.
 See the [Palm TX user guide](https://palmdr.com/eBay%20Photos/tx_ug.pdf). Frond
 currently supplies virtual SD storage, audio and the infrared keyboard attachment.
-General infrared beaming, Wi-Fi/Bluetooth hardware emulation, USB/HotSync, host
-serial forwarding and arbitrary SDIO accessories remain unsupported. Serial and
+General infrared beaming, Bluetooth hardware emulation, USB/HotSync, host serial
+forwarding and arbitrary SDIO accessories remain unsupported. Serial and
 HotSync need end-to-end Palm transfer tests; register models alone do not
 establish a working external connection.

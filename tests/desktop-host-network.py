@@ -28,6 +28,11 @@ p.add_argument(
 )
 p.add_argument("--output", type=Path, required=True)
 p.add_argument(
+    "--wireless",
+    action="store_true",
+    help="Use native NetLib over virtual Wi-Fi; session must have a saved Frond network profile",
+)
+p.add_argument(
     "--audio",
     action="store_true",
     help="Capture the app ARM tone with the PulseAudio SDL backend",
@@ -52,6 +57,7 @@ a.output.mkdir(parents=True, exist_ok=False)
 root = a.output.resolve()
 core = a.core.resolve()
 source = a.session.resolve()
+profile = "wireless" if a.wireless else "internet"
 original = hashlib.sha256(source.read_bytes()).hexdigest()
 (root / "identity.json").write_text(
     json.dumps(
@@ -62,6 +68,7 @@ original = hashlib.sha256(source.read_bytes()).hexdigest()
             },
             "loadavg_start": os.getloadavg(),
             "wait_control": a.wait_control,
+            "network_mode": profile,
             "measurement": "emulator; excludes physical device and output hardware",
         },
         indent=2,
@@ -96,8 +103,17 @@ class Handler(socketserver.BaseRequestHandler):
                     + body
                 )
             else:
-                self.request.sendall(data)
                 checkpoint_seen.set()
+                if a.wireless:
+                    resume = b""
+                    while b"\n" not in resume:
+                        part = self.request.recv(32)
+                        if not part:
+                            return
+                        resume += part
+                    if resume != b"resume\n":
+                        return
+                self.request.sendall(data)
                 while self.request.recv(4096):
                     pass
         except (OSError, TimeoutError):
@@ -214,6 +230,9 @@ def emulator(session, label, audio=False):
 
             def request(command, argument="", ok=True):
                 nonlocal serial
+                if a.wireless and command == "export":
+                    command = "export-db"
+                    argument = str(argument) + "\nFrondHostLog"
                 serial += 1
                 connection.sendall(
                     f"{serial}\t{command}\t{str(argument).encode().hex()}\n".encode()
@@ -311,20 +330,23 @@ def emulator(session, label, audio=False):
 
 try:
     settings = config(
-        "localhost",
+        "10.0.2.2" if a.wireless else "localhost",
         server.server_address[1],
         udp.getsockname()[1],
         "/wait-control" if a.wait_control else "/slow",
         "local-config",
     )
     with emulator(source, "local", a.audio) as request:
-        request("network-mode", "internet")
+        request("network-mode", profile)
+        if a.wireless:
+            retry(request, "launch-app", "Preferences")
+            time.sleep(1)
         retry(request, "install", settings)
         retry(request, "install", a.probe.resolve())
         retry(request, "launch-app", "Frond host probe")
         assert request_seen.wait(10), "HTTP request never reached the local server"
         started = time.monotonic()
-        assert request("network-state") == "internet"
+        assert request("network-state") == profile
         elapsed = time.monotonic() - started
         assert elapsed < 2, "host UI control blocked during guest Receive"
         (root / "wait-responsiveness.json").write_text(
@@ -378,14 +400,19 @@ try:
         time.sleep(2)
         request("save", root / "connected.frond")
     with emulator(root / "connected.frond", "restored") as request:
-        assert request("network-state") == "internet"
+        assert request("network-state") == profile
         request("input-replay", read)
         time.sleep(2)
         retry(request, "export", root / "restored.zip")
         rows = records(root / "restored.zip")
-        assert any(r.startswith("checkpoint-receive err=1214") for r in rows), (
-            "restored host connections must be closed"
-        )
+        closed = any(r.startswith("checkpoint-receive err=1214") for r in rows)
+        if a.wireless:
+            # Native Palm TCP reports a reset stream as clean EOF on this ROM.
+            closed |= rows[-2:] == [
+                "checkpoint-receive err=0000 value=0",
+                "checkpoint-match err=0001 value=0",
+            ]
+        assert closed, "restored host connections must be closed"
         checkpoint_seen.clear()
         retry(request, "launch-app", "Frond host probe")
         assert checkpoint_seen.wait(30), "reconnected probe run did not finish"
@@ -412,6 +439,7 @@ try:
             "longest_exact_zero_ms": longest / 88.2,
             "measurement": "emulator PCM, excludes physical output",
             "wait_control": a.wait_control,
+            "network_mode": profile,
             "gapless_below_10_ms": longest / 88.2 < 10,
         }
         (root / "tone-check.json").write_text(json.dumps(result, indent=2) + "\n")
@@ -425,7 +453,10 @@ try:
             )
     if a.public:
         with emulator(source, "public") as request:
-            request("network-mode", "internet")
+            request("network-mode", profile)
+            if a.wireless:
+                retry(request, "launch-app", "Preferences")
+                time.sleep(1)
             retry(request, "install", a.probe.resolve())
             retry(request, "launch-app", "Frond host probe")
             time.sleep(4)
@@ -437,7 +468,7 @@ try:
             )
     assert hashlib.sha256(source.read_bytes()).hexdigest() == original
     print(
-        "PASS: Palm host DNS/TCP/UDP, cooperative waits, live export checkpoint, closed connections on restore and reconnect; input unchanged",
+        "PASS: Palm DNS/TCP/UDP, cooperative waits, live export checkpoint, closed connections on restore and reconnect; input unchanged",
         flush=True,
     )
 finally:
