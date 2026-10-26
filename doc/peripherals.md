@@ -31,21 +31,81 @@ Card-containing session files use format version 5; earlier sessions remain
 readable. New peripheral state may not be readable by older Frond builds. Copy
 important older sessions before opening them in a newer version.
 
+### Host↔Palm file exchange
+
+Install `mtools` (`sudo apt install mtools` on Debian trixie), then use
+**SD Card → Exchange Files…**. Frond itself runs as your normal desktop user,
+including on KDE Plasma and Wayland. There is no loop mount, FUSE mount or
+root filesystem access.
+
+1. Save your work and close every file using the card inside the Palm app.
+   Confirm the prompt. Frond ejects the card if needed. Ejection cannot flush
+   files an app has left open, and Frond cannot detect those open files.
+2. Frond saves an ejected recovery session, exports the card to private storage
+   and opens the exchange dialog. If the save or export fails, editing stops.
+3. Enter a card folder such as `/` or `/PALM/Programs` and choose **List Folder**.
+   **New Card Folder…** creates one folder at a time; its parent must exist.
+   **Copy Host File to Card…** asks for the full destination filename.
+   **Copy Card File to Host…** asks for the full source filename and a new host
+   filename. Copies preserve binary bytes, including music and application data.
+4. Choose **Apply and Reinsert** to load the edited image into the running Palm.
+   Open the file again in the Palm app after reinsertion. **Cancel** discards
+   staged card edits and leaves the original card ejected; use **Reinsert** to
+   return to it. Files already copied to the host remain there.
+
+Names already present on either side are refused, including card names that
+match only in case or by a short DOS alias. Choose a new name. There is no
+replace, delete or recursive folder copy operation. Each card edit uses a
+separate candidate image; failed or full-card copies leave the last successful
+revision unchanged. Copied bytes are checked before accepting a card edit.
+The running guest never shares an image with the host editor. Applying uses
+an explicit image insertion only after the dialog closes; failed insertion
+leaves the original card ejected. Normal session saving then includes the
+new card and guest state together. Imported images and sessions stay unchanged.
+
+The dialog shows the recovery path, under
+`$XDG_DATA_HOME/frond/sd-exchange/recovery-*/Before exchange.frond` (normally
+`~/.local/share/frond/sd-exchange`). To undo an exchange, **Save and Stop**, then
+open that recovery session. It contains the whole Palm as it was just after
+ejection. Recovery sessions are kept even after Cancel; remove them yourself
+when no longer needed. They contain firmware and personal data, and can be
+large. Private temporary images use Frond's cache directory and are removed on
+normal completion. A crash can leave cache files, but does not change the
+recovery session or imported files. A crash after applying and before saving
+can lose the applied changes.
+
+Exchange supports 32–128 MiB FAT16 images with a primary FAT16 partition or a
+FAT16 superfloppy. Other image layouts may still import into the emulator but
+cannot be edited here. Use literal absolute card paths; wildcards, traversal
+components and ambiguous trailing spaces/dots are refused. Long names and
+spaces are supported; characters outside the FAT code page depend on mtools.
+A single mtools operation has a 15-second timeout. The dialog waits for that
+operation to finish. Allow disk space for a recovery session and several full
+card copies. This workflow requires cooperative file closing by the Palm app;
+it does not make hot editing an inserted card safe.
+
 ### Validation
 
 A locally built Palm OS 68k probe uses the real VFS API to enumerate the card,
 read a host-prepared file, create/write/close/read a Palm file and append results
-to `FrondSDLog`. The native acceptance test checks the exported FAT image and
+to `FrondSDLog`. The native acceptance test uses the same mtools exchange backend to copy the
+host file in and retrieve the Palm file, then checks the exported FAT image and
 Palm log, restores a mounted snapshot, restores an ejected snapshot, reinserts,
 resets and reads again, then repeats creation/save/restore at 128 MiB. Imported
 firmware/session/card inputs remain unchanged. These are emulator tests, not
 physical SD timing or electrical validation.
 
 ```sh
+make test-desktop  # includes firmware-free exchange and rollback checks; needs mtools
 python3 tools/build-palm-probe.py --sdk ../palm-os-sdk/sdk-5r3
 python3 tests/desktop-sd.py --session /path/to/tx.session \
   --output /path/to/new/private/results
 ```
+
+The default run also checks TX reset. `--skip-reset` runs the exchange,
+save/restore, reinsert and 128 MiB stages without that separate reset check;
+its final report explicitly marks the omission. Both modes require new,
+complete VFS probe results and check that input sessions and images stay unchanged.
 
 This optional test needs prc-tools-remix, PilRC and the Palm OS 5 SDK, supplied
 separately. Its results contain firmware, applications and Palm user data; do not

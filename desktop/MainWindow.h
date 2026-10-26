@@ -3,6 +3,8 @@
 #include <QSettings>
 #include <QLockFile>
 #include "DesktopClient.h"
+#include "SdExchange.h"
+class QDialog;
 
 class QLineEdit;
 class QComboBox;
@@ -25,6 +27,9 @@ class MainWindow : public QMainWindow {
     void stop(bool closeApp);
     void askStop(const QString& message);
     void refresh();
+    void beginExchange();
+    void exchangeResult(bool ok, const QString& message);
+    void endExchange();
     void remember(const QString& path);
     void send(const QString& command, const QString& argument = {});
     void failure(const QString& message);
@@ -40,8 +45,14 @@ class MainWindow : public QMainWindow {
     QCheckBox *audio, *doubleSize, *keyboard;
     QPlainTextEdit* log;
     QList<QAction*> runningActions;
-    QAction *sdCreate, *sdImport, *sdEject, *sdReinsert, *sdExport;
+    QAction *sdCreate, *sdImport, *sdEject, *sdReinsert, *sdExport, *sdExchange;
     QLabel* sdStatus;
+    enum class ExchangeStage { None, Eject, Backup, Export, Insert };
+    ExchangeStage exchangeStage{ExchangeStage::None};
+    std::unique_ptr<QTemporaryDir> exchangeFiles, exchangeRecovery;
+    std::unique_ptr<SdExchange> exchange;
+    QDialog* exchangeDialog{nullptr};
+    QString exchangeBackup;
     bool cardPresent{false}, cardInserted{false};
     QWidget* setup;
     bool startupHandled{false}, busy{false}, stopping{false}, closeAfterStop{false}, allowClose{false};

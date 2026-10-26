@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "SdExchangeDialog.h"
 #include <QAction>
 #include <QCheckBox>
 #include <QCloseEvent>
@@ -186,6 +187,9 @@ MainWindow::MainWindow(const QString& core) : core(core) {
         const auto file = outputFile(tr("Export SD Image"), tr("SD images (*.img)"), "Palm SD.img");
         if (!file.isEmpty()) send("sd-export", file);
     });
+    cardMenu->addSeparator();
+    sdExchange = cardMenu->addAction(tr("Exchange &Files…"), this, &MainWindow::beginExchange);
+    sdExchange->setObjectName("sdExchange");
     auto* view = menuBar()->addMenu(tr("&View"));
     auto* logDialog = new QDialog(this);
     logDialog->setWindowTitle(tr("Emulator Log")); logDialog->resize(700, 400);
@@ -218,6 +222,8 @@ MainWindow::MainWindow(const QString& core) : core(core) {
         else send("sd-state");
     });
     connect(&client, &DesktopClient::finished, this, [this, open] {
+        if (exchangeDialog) exchangeDialog->reject();
+        else endExchange();
         busy = false; stopping = false; cardPresent = cardInserted = false;
         sdStatus->setText(tr("SD card: Not running")); sessionLock.reset(); forceButton->hide(); refresh(); open->setEnabled(true);
         if (closeAfterStop) { allowClose = true; close(); }
@@ -226,6 +232,7 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     connect(&client, &DesktopClient::closeRequested, this, [this] { stop(true); });
     connect(&client, &DesktopClient::result, this, [this](const QString& command, bool ok, const QString&, const QString& message) {
         busy = false; forceButton->hide(); refresh();
+        if (!ok && exchangeStage != ExchangeStage::None) { exchangeResult(false, message); return; }
         if (!ok) {
             log->appendPlainText(command + ": " + message);
             if (stopping) {
@@ -239,6 +246,7 @@ MainWindow::MainWindow(const QString& core) : core(core) {
         else if (command == "sd-create" || command == "sd-insert" || command == "sd-reinsert") cardPresent = cardInserted = true;
         else if (command == "sd-eject") cardInserted = false;
         sdStatus->setText(!cardPresent ? tr("SD card: No card") : cardInserted ? tr("SD card: Inserted") : tr("SD card: Ejected"));
+        if (exchangeStage != ExchangeStage::None) { exchangeResult(true, message); return; }
         if (command == "network-state" || command == "network-mode") {
             const auto index = network->findData(message);
             if (index >= 0) network->setCurrentIndex(index);
@@ -277,13 +285,14 @@ void MainWindow::refresh() {
     stopButton->setEnabled(running && !busy && !stopping);
     audio->setEnabled(!busy && !stopping);
     doubleSize->setEnabled(!running && !busy);
-    const bool enabled = client.available() && !busy && !stopping;
+    const bool enabled = client.available() && !busy && !stopping && exchangeStage == ExchangeStage::None;
     for (auto* action : runningActions) action->setEnabled(enabled);
     network->setEnabled(enabled);
     keyboard->setEnabled(enabled);
     sdCreate->setEnabled(enabled && !cardInserted); sdImport->setEnabled(enabled && !cardInserted);
     sdEject->setEnabled(enabled && cardInserted); sdReinsert->setEnabled(enabled && cardPresent && !cardInserted);
     sdExport->setEnabled(enabled && cardPresent && !cardInserted);
+    sdExchange->setEnabled(enabled && cardPresent);
 }
 void MainWindow::openSession(const QString& path, bool launch) {
     startupHandled = true;
@@ -363,7 +372,8 @@ void MainWindow::stop(bool closeApp) {
     if (!client.running()) { if (closeApp) { allowClose = true; close(); } return; }
     if (stopping) return;
     stopping = true; refresh();
-    if (client.available()) save();
+    if (exchangeDialog) exchangeDialog->reject();
+    else if (client.available() && exchangeStage == ExchangeStage::None) save();
     else statusBar()->showMessage(tr("Waiting to save the session…"));
 }
 void MainWindow::askStop(const QString& message) {
@@ -380,4 +390,64 @@ void MainWindow::failure(const QString& message) {
 void MainWindow::closeEvent(QCloseEvent* event) {
     if (allowClose || !client.running()) { event->accept(); return; }
     event->ignore(); stop(true);
+}
+
+void MainWindow::beginExchange() {
+    if (!client.available() || stopping || !cardPresent || exchangeStage != ExchangeStage::None) return;
+    if (!SdExchange::available()) return failure(tr("Install mtools to exchange files (Debian: sudo apt install mtools)."));
+    if (QMessageBox::question(this, tr("Close Palm Files Before Exchange"),
+            tr("Save your work and close all files using the SD card on the Palm. "
+               "Frond will eject the card and save a recovery session before editing a private image. "
+               "Ejection cannot flush files left open by a Palm app. Continue?"),
+            QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) return;
+    // The Palm window can request shutdown while the confirmation is open.
+    if (!client.available() || stopping || !cardPresent || exchangeStage != ExchangeStage::None) return;
+    const auto data = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/frond/sd-exchange";
+    const auto cache = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+    if (!QDir().mkpath(data) || !QDir().mkpath(cache)) return failure(tr("Could not create SD exchange storage."));
+    exchangeRecovery = std::make_unique<QTemporaryDir>(data + "/recovery-XXXXXX");
+    exchangeFiles = std::make_unique<QTemporaryDir>(cache + "/sd-exchange-XXXXXX");
+    if (!exchangeRecovery->isValid() || !exchangeFiles->isValid()) {
+        endExchange(); return failure(tr("Could not create private SD exchange storage."));
+    }
+    exchangeBackup = exchangeRecovery->path() + "/Before exchange.frond";
+    if (cardInserted) { exchangeStage = ExchangeStage::Eject; send("sd-eject"); }
+    else { exchangeStage = ExchangeStage::Backup; send("save", exchangeBackup); }
+}
+void MainWindow::endExchange() {
+    exchange.reset(); exchangeFiles.reset(); exchangeRecovery.reset();
+    exchangeStage = ExchangeStage::None; busy = false; refresh();
+}
+void MainWindow::exchangeResult(bool ok, const QString& message) {
+    if (ok && exchangeStage == ExchangeStage::Backup) exchangeRecovery->setAutoRemove(false);
+    if (!ok || stopping) {
+        endExchange();
+        if (stopping) save();
+        else failure(message + (QFileInfo::exists(exchangeBackup) ? tr("\nRecovery session: %1").arg(exchangeBackup) : QString{}));
+        return;
+    }
+    if (exchangeStage == ExchangeStage::Eject) {
+        exchangeStage = ExchangeStage::Backup; send("save", exchangeBackup);
+    } else if (exchangeStage == ExchangeStage::Backup) {
+        exchangeStage = ExchangeStage::Export; send("sd-export", exchangeFiles->path() + "/original.img");
+    } else if (exchangeStage == ExchangeStage::Export) {
+        exchange = std::make_unique<SdExchange>(exchangeFiles->path() + "/edit-XXXXXX");
+        QString error;
+        if (!exchange->open(exchangeFiles->path() + "/original.img", error)) {
+            endExchange(); failure(error); return;
+        }
+        SdExchangeDialog dialog(*exchange, exchangeBackup, this);
+        exchangeDialog = &dialog;
+        const auto result = dialog.exec();
+        exchangeDialog = nullptr;
+        if (result == QDialog::Accepted && !stopping && client.running()) {
+            exchangeStage = ExchangeStage::Insert; send("sd-insert", exchange->image());
+        } else {
+            endExchange();
+            if (stopping && client.running()) save();
+        }
+    } else if (exchangeStage == ExchangeStage::Insert) {
+        endExchange();
+        statusBar()->showMessage(tr("Card inserted. Recovery session: %1").arg(exchangeBackup));
+    }
 }

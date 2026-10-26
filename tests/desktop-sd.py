@@ -8,7 +8,6 @@ from pathlib import Path
 import signal
 import shutil
 import socket
-import struct
 import subprocess
 import tempfile
 import time
@@ -17,6 +16,8 @@ from sd_results import ControlError, check_records, export_if_ready, read_log
 
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--core', type=Path, default=Path('out/frond'))
+p.add_argument('--skip-reset', action='store_true', help='Check file exchange and persistence without the separate TX reset check')
+p.add_argument('--exchange-driver', type=Path, default=Path('build/desktop/sd-exchange-driver'))
 p.add_argument('--session', type=Path, required=True)
 p.add_argument('--probe', type=Path, default=Path('build/sd-probe/FrondSDProbe.prc'))
 p.add_argument('--output', type=Path, required=True)
@@ -78,35 +79,21 @@ def emulator(session, label):
                 try: process.wait(timeout=5)
                 except subprocess.TimeoutExpired: os.killpg(process.pid, signal.SIGKILL); process.wait()
 
-def geometry(data):
-    start = struct.unpack_from('<I', data, 454)[0]
-    boot = start * 512
-    fat = struct.unpack_from('<H', data, boot + 22)[0]
-    root = (start + 1 + 2 * fat) * 512
-    return start, fat, root, root + 32 * 512, data[boot + 13]
-
 def seed(path):
-    data = bytearray(path.read_bytes())
-    start, fat, directory, payload, _ = geometry(data)
-    at = directory + 32
-    data[at:at+11] = b'HOST    TXT'; data[at+11] = 32
-    struct.pack_into('<H', data, at+26, 2)
-    text = b'Hello from host\n'; struct.pack_into('<I', data, at+28, len(text))
-    data[payload:payload+len(text)] = text
-    for i in range(2): struct.pack_into('<H', data, (start+1+i*fat)*512+4, 0xffff)
-    path.write_bytes(data)
+    # Exercise the same rootless, transactional copy backend as the Qt dialog.
+    host = root / 'HOST.TXT'
+    host.write_bytes(b'Hello from host\n')
+    before = hashlib.sha256(path.read_bytes()).hexdigest()
+    edited = root / 'host-edited.img'
+    subprocess.run([str(a.exchange_driver.resolve()), 'put', str(path), str(host), '/HOST.TXT', str(edited)], check=True)
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == before
+    return edited
 
 def check_image(path, size):
-    data = path.read_bytes(); assert len(data) == size << 20
-    _, _, directory, payload, cluster_size = geometry(data)
-    for at in range(directory, directory + 32*512, 32):
-        if data[at:at+11] != b'GUEST   TXT': continue
-        cluster = struct.unpack_from('<H', data, at+26)[0]
-        length = struct.unpack_from('<I', data, at+28)[0]
-        begin = payload + (cluster-2)*cluster_size*512
-        assert data[begin:begin+length] == b'Written by Palm TX\n'
-        return
-    raise AssertionError('Palm-created GUEST.TXT is absent')
+    assert path.stat().st_size == size << 20
+    output = root / (path.stem + '-GUEST.TXT')
+    subprocess.run([str(a.exchange_driver.resolve()), 'get', str(path), '/GUEST.TXT', str(output)], check=True)
+    assert output.read_bytes() == b'Written by Palm TX\n'
 
 def probe_results(request, path, *, previous=(), size=32, prior=False, host=True):
     # Readiness is a point-in-time result. Export prepares again atomically with
@@ -130,7 +117,7 @@ with emulator(source, 'initial') as request:
     request('sd-create', '64', ok=False)
     request('sd-eject'); time.sleep(2)
     image = root / 'host.img'
-    request('sd-export', image); seed(image)
+    request('sd-export', image); image = seed(image)
     imported_hash = hashlib.sha256(image.read_bytes()).hexdigest()
     request('sd-insert', image); time.sleep(3)
     request('install', a.probe.resolve()); time.sleep(2)
@@ -148,14 +135,16 @@ with emulator(root / 'ejected.frond', 'ejected') as request:
     request('sd-reinsert'); time.sleep(3)
     request('launch-app', 'Frond SD probe'); time.sleep(3)
     reinserted = probe_results(request, root / 'reinserted.zip', previous=initial, prior=True)
-    request('reset'); time.sleep(25)
-    for attempt in range(20):
-        ready, _ = request('launch-app', 'Frond SD probe', ok=None)
-        if ready: break
-        time.sleep(5)
-    assert ready, 'Palm OS did not become ready after reset'
-    time.sleep(3)
-    reset = probe_results(request, root / 'reset.zip', previous=reinserted, prior=True)
+    reset = reinserted
+    if not a.skip_reset:
+        request('reset'); time.sleep(25)
+        for attempt in range(20):
+            ready, _ = request('launch-app', 'Frond SD probe', ok=None)
+            if ready: break
+            time.sleep(5)
+        assert ready, 'Palm OS did not become ready after reset'
+        time.sleep(3)
+        reset = probe_results(request, root / 'reset.zip', previous=reinserted, prior=True)
     request('sd-eject'); time.sleep(3)
     request('sd-create', '128'); time.sleep(3)
     request('launch-app', 'Frond SD probe'); time.sleep(3)
@@ -166,4 +155,4 @@ with emulator(root / 'large.frond', 'large-resumed') as request:
     request('sd-eject'); time.sleep(2)
     request('sd-export', root / 'large.img'); check_image(root / 'large.img', 128)
 assert hashlib.sha256(source.read_bytes()).hexdigest() == original
-print('PASS: TX VFS read/write, embedded card restore, ejected restore, reinsert, reset and 128 MiB persistence; imports unchanged')
+print('PASS: TX VFS file exchange, embedded card restore, ejected restore, reinsert and 128 MiB persistence; imports unchanged' + (' (reset explicitly skipped)' if a.skip_reset else '; reset verified'))

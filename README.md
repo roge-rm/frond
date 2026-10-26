@@ -26,7 +26,7 @@ On Debian 13 (trixie):
 
 ```sh
 sudo apt install git build-essential python3 cmake qt6-base-dev qt6-wayland \
-  libsdl2-dev libsdl2-image-dev libreadline-dev libcurl4-openssl-dev libslirp-dev pkg-config
+  libsdl2-dev libsdl2-image-dev libreadline-dev libcurl4-openssl-dev libslirp-dev pkg-config mtools
 git clone --recurse-submodules https://github.com/roge-rm/frond.git
 cd frond
 make -j4
@@ -67,7 +67,11 @@ last save.
 
 The **SD Card** menu creates 32, 64 or 128 MiB FAT16 cards. You can also import an
 image, eject and reinsert a card, or export it. Card contents and insertion state
-are saved with the session. Close files on the Palm before ejecting.
+are saved with the session. Close files on the Palm before ejecting. **Exchange Files…** copies files between
+the host and an ejected card using `mtools`, without mounting it or running Frond
+as root. It saves a recovery session and edits a private image; choose **Apply
+and Reinsert** to use the edits. Existing filenames are refused. See the
+[file exchange guide](doc/peripherals.md#hostpalm-file-exchange).
 
 Choose **Network: Virtual Wi-Fi (Frond)**, turn on Wi-Fi inside Palm OS and
 connect to **Frond**. The Palm uses its own networking stack; the virtual router

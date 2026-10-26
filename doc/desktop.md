@@ -37,7 +37,11 @@ since the last save. There is no periodic autosave in this release.
 
 The **SD Card** menu creates/imports cards and provides Eject, Reinsert and Export
 Image. Card contents and insertion state are saved inside the working session,
-including on normal close. Close Palm files before ejecting; export an image
+including on normal close. **Exchange Files…** saves a recovery session, then
+copies files through a private ejected image using `mtools`. Choose **Apply and
+Reinsert** to use the edits, or Cancel to keep the original ejected card. Existing
+host and card filenames are refused. See the [file exchange guide](peripherals.md#hostpalm-file-exchange).
+Close Palm files before ejecting; export an image
 before replacing a card you want to keep. Supported sizes are 32–128 MiB FAT16.
 
 For Internet access, select **Network: Virtual Wi-Fi (Frond)** before turning on
@@ -138,7 +142,7 @@ files and restart those services to restore portal selection. See PipeWire's
 
 ```sh
 sudo apt install git build-essential python3 cmake qt6-base-dev qt6-wayland \
-  libsdl2-dev libsdl2-image-dev libreadline-dev libcurl4-openssl-dev
+  libsdl2-dev libsdl2-image-dev libreadline-dev libcurl4-openssl-dev mtools
 make -j4
 make test
 make test-desktop
@@ -157,7 +161,12 @@ no global environment overrides are installed.
 
 ## Control and persistence tests
 
-`make test-desktop` tests the private socket client, partial frames, Unicode file
+`make test-desktop` requires `mtools`. Its firmware-free exchange tests cover
+32/64/128 MiB FAT16 copies, binary bytes, long filenames, case and alias
+collisions, existing host destinations and symlinks, full cards, subprocess
+failure rollback, recovery-save/export/insertion failures and cancellation.
+
+`make test-desktop` also tests the private socket client, partial frames, Unicode file
 names, command serialization, process restart and keeping the GUI open when
 automatic saving fails and the user cancels closing. With your own TX fixture:
 

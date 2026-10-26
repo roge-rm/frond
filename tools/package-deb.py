@@ -62,7 +62,7 @@ Architecture: {architecture}
 Maintainer: Frond contributors <frond@users.noreply.github.com>
 Section: otherosfs
 Priority: optional
-Depends: {deps}, qt6-qpa-plugins, qt6-wayland, libqt6svg6, hicolor-icon-theme
+Depends: {deps}, mtools, qt6-qpa-plugins, qt6-wayland, libqt6svg6, hicolor-icon-theme
 Installed-Size: {installed}
 Homepage: https://github.com/roge-rm/frond
 Description: Native Palm TX emulator
