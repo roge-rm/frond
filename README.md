@@ -101,7 +101,7 @@ To build and install a package locally:
 
 ```sh
 make deb
-sudo apt install ./out/frond_0.1.0-5_amd64.deb
+sudo apt install ./out/frond_0.1.0-6_amd64.deb
 ```
 
 It appears in Plasma's application menu as **Frond**. The package includes the

@@ -192,3 +192,14 @@
      const uint64_t avg = (cyclesPerSecondAverage.Calculate() * safetyMargin) / 100;
      const uint64_t avgBinned = max((avg / BIN_SIZE) * BIN_SIZE, static_cast<uint64_t>(BIN_SIZE));
  
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -477,7 +477,7 @@
+                   << flush;
+ 
+                 SDL_SetWindowTitle(window, desktop ? "Frond — Palm TX" : s.str().c_str());
+-                if (options.runFor) cout << s.str();
++                if (options.runFor || getenv("FROND_BUDGET_TRACE")) cout << s.str();
+             }
+ 
+             if (desktop && desktop->poll(commandContext)) break;

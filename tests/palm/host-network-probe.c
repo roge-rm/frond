@@ -120,7 +120,7 @@ static void http(void) {
     logResult("http-send", error, n);
     response[0] = 0;
     if (n >= 0) do {
-            n = NetLibReceive(ref, socket, data, sizeof(data) - 1, 0, 0, 0, 2000, &error);
+            n = NetLibReceive(ref, socket, data, sizeof(data) - 1, 0, 0, 0, 24000, &error);
             if (n > 0) {
                 UInt16 copy = n;
                 total += n;
@@ -201,6 +201,9 @@ static void run(void) {
         ref = 0;
         return;
     }
+    // Long audio controls must not enter the TX's normal inactivity sleep.
+    // Extend this countdown without changing the user's default preference.
+    EvtSetAutoOffTimer(SetAtLeast, 300);
     tone = MemPtrNew(sizeof(Tone));
     if (tone) {
         MemSet(tone, sizeof(Tone), 0);
@@ -217,7 +220,10 @@ static void run(void) {
     if (info) {
         address = *(UInt32*)info->addrListP[0];
         http();
-        if (!StrCompare(path, "/wait-control")) SysTaskDelay(400);
+        if (!StrNCompare(path, "/wait-control/", 14)) {
+            UInt32 seconds = StrAToI(path + 14);
+            if (seconds >= 4 && seconds <= 180) SysTaskDelay(seconds * SysTicksPerSecond());
+        }
         udp();
     }
     if (stream) {
@@ -230,6 +236,7 @@ static void run(void) {
         DmReleaseResource(armCode);
     }
     if (tone) MemPtrFree(tone);
+    EvtResetAutoOffTimer();
     if (info && udpPort) {
         pendingSocket = connectSocket();
         if (pendingSocket >= 0) {

@@ -10,7 +10,7 @@ Bluetooth remain unavailable. See [peripherals](peripherals.md). Use the normal 
 Install the locally built package:
 
 ```sh
-sudo apt install ./frond_0.1.0-5_amd64.deb
+sudo apt install ./frond_0.1.0-6_amd64.deb
 ```
 
 Launch **Frond** from Plasma's application menu. On first use, choose an existing

@@ -77,11 +77,22 @@ retain all ten bits to distinguish addresses separated by 2 GiB. The timer skips
 redundant interrupt-controller updates when no status bit is set; register
 writes and asserted interrupt levels retain their normal handling.
 
-The frontend uses the baseline adaptive governor with a 97% load ceiling and
-bounds each native catch-up request to one virtual frontend slice. Events are
-checked between batches. Normal SDL playback uses seven/five callback high/low
-water marks, six callbacks at startup and three during underrun recovery. The
-queue can grow when SDL negotiates a larger callback period.
+On native TX, the OS timer batches up to 32 ticks between events. Counter reads
+account for instruction progress inside the current CPU batch; new matches and
+watchdog deadlines shorten the next batch. This removes repeated scheduler work
+without changing the timer frequency. During firmware sleep the timer can jump
+to its next interrupt. Saved timer state retains partially observed batches;
+older timer chunks still load, and E2 keeps its version-zero timer format.
+
+The frontend uses an adaptive governor with a 97% load ceiling. Native catch-up
+reserves another ten percentage points and bounds each work request to one
+frontend slice; events are checked between batches. Normal SDL playback uses
+eight/six callback high/low water marks, six callbacks at startup and three during
+underrun recovery. The extra steady headroom costs about 12 ms at 512-frame
+callbacks. The experimental low-latency path retains its seven/five water marks.
+The queue can grow when SDL negotiates a larger callback period. Backpressure
+uses the current PCM-output state, including sound enabled over desktop RPC or
+the console after a `--no-sound` launch.
 
 Use a saved, already-playing session to compare execution cost separately from
 wall-clock pacing and SDL starvation:

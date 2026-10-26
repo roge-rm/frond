@@ -146,7 +146,8 @@ def run(args):
             result['capture_start_elapsed_seconds'] = time.monotonic() - started
             recorder = subprocess.Popen(['parec', '--device=' + monitor,
                                          '--monitor-stream=' + str(stream['index']), '--format=s16le',
-                                         '--rate=44100', '--channels=2', '--raw'], stdout=raw,
+                                         '--rate=44100', '--channels=2', '--raw',
+                                         '--latency-msec=20'], stdout=raw,
                                         stderr=subprocess.PIPE, start_new_session=True)
             prior = cpu_ticks()
             finish_at = time.monotonic() + args.seconds

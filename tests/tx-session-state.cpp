@@ -36,7 +36,7 @@ static uint64_t readWmmx(unsigned reg) {
 }
 struct E2Versions {
     void Load(SavestateLoader<ChunkType>& loader) {
-        for (auto type : {ChunkType::pxaLcd, ChunkType::pxaPwrClk}) {
+        for (auto type : {ChunkType::pxaLcd, ChunkType::pxaPwrClk, ChunkType::pxaTimr}) {
             uint32_t version = 99;
             assert(loader.GetChunkOrFail(type, 1, "E2 compatibility", version));
             assert(version == 0);
@@ -60,6 +60,22 @@ int main() {
     uint32_t ticks = read32(0x40a00010) - timerBefore;
     // Scheduler periods have integer-nanosecond resolution.
     assert(ticks >= 32400 && ticks <= 32600);
+    // A counter read inside a long CPU batch observes instruction progress,
+    // not the counter at the previous scheduler dispatch (up to 32 ticks stale).
+    write32(0xa0000000, 0xe5901000); // LDR r1,[r0]
+    write32(0xa0000004, 0xeafffffd); // B back to LDR
+    cpuInvalidateCodeCache(cpu);
+    cpuSetReg(cpu, 0, 0x40a00010);
+    cpuSetReg(cpu, 15, 0xa0000000);
+    soc.Run(1024, 10000000);
+    assert(read32(0x40a00010) - cpuGetRegExternal(cpu, 1) <= 2);
+    assert(cpuCyclesInProgress(cpu) == 0);
+    write32(0xa0000000, 0xe7fd6801); // Thumb LDR r1,[r0]; B back to LDR.
+    cpuInvalidateCodeCache(cpu);
+    cpuSetReg(cpu, 15, 0xa0000001);
+    soc.Run(1024, 10000000);
+    assert(read32(0x40a00010) - cpuGetRegExternal(cpu, 1) <= 2);
+    assert(cpuCyclesInProgress(cpu) == 0);
     // TX-only register banks and the seventh LCD DMA channel must survive reload.
     const uint32_t registers[] = {0x58000000, 0x41500048, 0x40600004, 0x40600008,
         0x4060000c, 0x40600018, 0x40600020, 0x40600024, 0x40600404,
@@ -71,6 +87,7 @@ int main() {
     }
     write32(0xa5fffffc, 0x76543210);
     for (unsigned i = 0; i < 16; ++i) loadWmmx(i, 0x123456789abcdef0ull + i);
+    const auto savedTimer = read32(0x40a00010);
     assert(soc.Save());
     const auto saved = soc.GetSavestate();
     std::vector<uint8_t> snapshot(saved.size);
@@ -83,6 +100,7 @@ int main() {
     soc.KeyDown(keyIdHard1);
     assert(soc.Load(snapshot.size(), snapshot.data()));
     assert(audioQueuePendingSamples(audio) == 0);
+    assert(read32(0x40a00010) == savedTimer);
     for (unsigned i = 0; i < expected.size(); ++i) assert(read32(registers[i]) == expected[i]);
     assert(read32(0xa5fffffc) == ~0x76543210u);
     for (unsigned i = 0; i < 16; ++i) assert(readWmmx(i) == 0x123456789abcdef0ull + i);

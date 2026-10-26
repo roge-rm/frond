@@ -1,0 +1,423 @@
+--- a/src/uarm/MainLoop.cpp
++++ b/src/uarm/MainLoop.cpp
+@@ -13,7 +13,11 @@
+     constexpr uint32_t BIN_SIZE = 1000000;
+     constexpr uint32_t CYCLES_PER_SECOND_LIMIT_DEFAULT = 100000000;
+     constexpr uint32_t MAX_LOAD_MAX = 97;
++#ifdef __EMSCRIPTEN__
+     constexpr uint32_t MAX_LOAD_CATCHUP_MARGIN = 20;
++#else
++    constexpr uint32_t MAX_LOAD_CATCHUP_MARGIN = 10;
++#endif
+     constexpr int PRESERVE_TIMESLICES_FOR_CATCHUP = 3;
+ }  // namespace
+ 
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -435,7 +435,8 @@
+                 sdlEventHandler.ClearQuitRequested();
+             }
+ 
+-            if (!options.disableAudio) soc->SetPcmSuspended(audioDriver.GetAudioBackpressure());
++            // RPC and CLI controls can enable sound after --no-sound startup.
++            if (soc->PcmOutputEnabled()) soc->SetPcmSuspended(audioDriver.GetAudioBackpressure());
+ 
+             if (options.experimentalFastAudio) {
+                 const auto underruns = audioDriver.GetUnderrunCount();
+--- a/src/uarm/native/SdlAudioDriver.cpp
++++ b/src/uarm/native/SdlAudioDriver.cpp
+@@ -58,9 +58,10 @@
+     bufferThresholdStart = audioSpecActual.samples;
+     bufferThresholdStop = audioSpecActual.samples * 3;
+     bufferThresholdStartup = audioSpecActual.samples * (lowLatencyStartup ? 3 : 6);
+-    // Leave five callbacks of headroom for brief frontend stalls.
+-    backpressureThresholdStart = audioSpecActual.samples * 7;
+-    backpressureThresholdStop = audioSpecActual.samples * 5;
++    // Normal playback reserves an extra callback for frontend scheduling jitter.
++    // The opt-in low-latency path keeps its existing reservoir.
++    backpressureThresholdStart = audioSpecActual.samples * (lowLatencyStartup ? 7 : 8);
++    backpressureThresholdStop = audioSpecActual.samples * (lowLatencyStartup ? 5 : 6);
+ 
+     initialized = true;
+     SDL_PauseAudioDevice(audioDevice, 0);
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -121,6 +121,9 @@
+     bool privileged;
+ 
+     uint32_t curInstrPC;
++#ifndef __EMSCRIPTEN__
++    const uint32_t* cyclesInProgress;
++#endif
+ 
+     struct ArmBankedRegs bank_usr;  // usr regs when in another mode
+     struct ArmBankedRegs bank_svc;  // svc regs when in another mode
+@@ -3485,8 +3488,27 @@
+     }
+ }
+ 
++#ifndef __EMSCRIPTEN__
++// Expose progress only while a CPU batch is on the stack. Peripheral reads can
++// observe the current instruction's time without forcing a batch every clock tick.
++struct CycleProgress {
++    ArmCpu* cpu;
++    const uint32_t* previous;
++    CycleProgress(ArmCpu* cpu, const uint32_t* count) : cpu(cpu), previous(cpu->cyclesInProgress) {
++        cpu->cyclesInProgress = count;
++    }
++    ~CycleProgress() { cpu->cyclesInProgress = previous; }
++};
++uint32_t cpuCyclesInProgress(const ArmCpu* cpu) {
++    return cpu->cyclesInProgress ? *cpu->cyclesInProgress : 0;
++}
++#endif
++
+ ATTR_EMCC_NOINLINE static uint32_t cpuCyclePace(struct ArmCpu *cpu, uint32_t cycles) {
+     uint32_t cycleAcc = 0;
++#ifndef __EMSCRIPTEN__
++    CycleProgress progress(cpu, &cycleAcc);
++#endif
+ 
+     while (cycleAcc < cycles) {
+         cpuPrvCyclePace(cpu);
+@@ -3501,6 +3523,9 @@
+ template <int memorySystemKind, bool injected>
+ ATTR_EMCC_NOINLINE static uint32_t cpuCycleThumb(struct ArmCpu *cpu, uint32_t cycles) {
+     uint32_t cycleAcc = 0;
++#ifndef __EMSCRIPTEN__
++    CycleProgress progress(cpu, &cycleAcc);
++#endif
+     bool ok;
+     uint32_t translatedInstr;
+     uint32_t decoded;
+@@ -3554,6 +3579,9 @@
+ template <int memorySystemKind, bool injected>
+ ATTR_EMCC_NOINLINE static uint32_t cpuCycleArm(struct ArmCpu *cpu, uint32_t cycles) {
+     uint32_t cycleAcc = 0;
++#ifndef __EMSCRIPTEN__
++    CycleProgress progress(cpu, &cycleAcc);
++#endif
+     bool ok;
+     uint32_t instr, decoded;
+     uint_fast8_t fsr;
+--- a/src/uarm/uarm/CPU.h
++++ b/src/uarm/uarm/CPU.h
+@@ -101,6 +101,9 @@
+ 
+ // Host code patches must discard decoded instructions as well as guest cache lines.
+ void cpuInvalidateCodeCache(struct ArmCpu *cpu);
++#ifndef __EMSCRIPTEN__
++uint32_t cpuCyclesInProgress(const ArmCpu* cpu);
++#endif
+ 
+ void cpuIrq(struct ArmCpu *cpu, bool fiq, bool raise);  // unraise when acknowledged
+ 
+--- a/src/uarm/uarm/pxa_TIMR.cpp
++++ b/src/uarm/uarm/pxa_TIMR.cpp
+@@ -3,6 +3,7 @@
+ #include "pxa_TIMR.h"
+ 
+ #include <cstdio>
++#include <algorithm>
+ #include <cstdlib>
+ #include <cstring>
+ 
+@@ -14,7 +15,7 @@
+ #define PXA_TIMR_BASE 0x40A00000UL
+ #define PXA_TIMR_SIZE 0x00010000UL
+ 
+-#define SAVESTATE_VERSION 0
++#define SAVESTATE_VERSION 1
+ 
+ struct PxaTimr {
+     struct PxaIc *ic;
+@@ -26,9 +27,13 @@
+     uint8_t OSSR;      // Status Register
+ 
+     uint32_t interruptsSuspendCount;
++    uint32_t synchronizedTicks;
++    uint32_t (*elapsedTicks)(void*);
++    void (*reschedule)(void*);
++    void* clockContext;
+ 
+     template <typename T>
+-    void DoSaveLoad(T &chunkHelper);
++    void DoSaveLoad(T &chunkHelper, uint32_t version);
+ };
+ 
+ static void pxaTimrPrvRaiseLowerInts(struct PxaTimr *timr) {
+@@ -59,7 +64,8 @@
+                                           uint32_t batchedTicks) {
+     uint_fast8_t v = 1UL << idx;
+ 
+-    if (batchedTicks >= (uint32_t)(timr->OSMR[idx] - oscrOld)) {
++    const uint32_t delta = timr->OSMR[idx] - oscrOld;
++    if (delta && batchedTicks >= delta) {
+         if (idx == 3 && timr->OWER) ERR("WDT fires\n");
+ 
+         if (timr->OIER & v) timr->OSSR |= v;
+@@ -81,6 +87,16 @@
+     for (i = 0; i < 4; i++) pxaTimrPrvCheckMatchMultiStep(timr, i, oscrOld, batchedTicks);
+ 
+     if (timr->OSSR) pxaTimrPrvRaiseLowerInts(timr);
++}
++
++static void pxaTimrAdvanceCounter(PxaTimr* timr, uint32_t ticks);
++static void pxaTimrSynchronize(PxaTimr* timr) {
++    if (!timr->elapsedTicks) return;
++    const uint32_t elapsed = timr->elapsedTicks(timr->clockContext);
++    if (elapsed > timr->synchronizedTicks) {
++        pxaTimrAdvanceCounter(timr, elapsed - timr->synchronizedTicks);
++        timr->synchronizedTicks = elapsed;
++    }
+ }
+ 
+ static bool pxaTimrPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size, bool write,
+@@ -94,6 +110,7 @@
+         return false;  // we do not support non-word accesses
+     }
+ 
++    pxaTimrSynchronize(timr);
+     pa = (pa - PXA_TIMR_BASE) >> 2;
+ 
+     if (write) {
+@@ -154,6 +171,7 @@
+         *(uint32_t *)buf = val;
+     }
+ 
++    if (write && timr->reschedule) timr->reschedule(timr->clockContext);
+     return true;
+ }
+ 
+@@ -171,7 +189,8 @@
+     return timr;
+ }
+ 
+-void pxaTimrTick(struct PxaTimr *timr, uint32_t batchedTicks) {
++static void pxaTimrAdvanceCounter(struct PxaTimr *timr, uint32_t batchedTicks) {
++    if (!batchedTicks) return;
+     if (batchedTicks == 1) {
+         timr->OSCR++;
+         // Ticks only set status bits; register writes still refresh cleared lines.
+@@ -184,6 +203,29 @@
+     }
+ }
+ 
++void pxaTimrTick(PxaTimr* timr, uint32_t ticks) {
++    // Register accesses may already have materialized part of this batch.
++    const uint32_t consumed = std::min(ticks, timr->synchronizedTicks);
++    timr->synchronizedTicks -= consumed;
++    pxaTimrAdvanceCounter(timr, ticks - consumed);
++}
++void pxaTimrEnableBatching(PxaTimr* timr, uint32_t (*elapsedTicks)(void*),
++                           void (*reschedule)(void*), void* context) {
++    timr->elapsedTicks = elapsedTicks;
++    timr->reschedule = reschedule;
++    timr->clockContext = context;
++}
++uint32_t pxaTimrNextBatch(PxaTimr* timr, uint32_t maximum) {
++    uint32_t next = maximum;
++    for (unsigned i = 0; i < 4; ++i) {
++        if (!(timr->OIER & (1u << i)) && !(i == 3 && timr->OWER)) continue;
++        if (timr->OSSR & (1u << i)) { next = 1; break; }
++        const uint32_t delta = timr->OSMR[i] - timr->OSCR;
++        if (delta && delta < next) next = delta;
++    }
++    return std::min(uint64_t(UINT32_MAX), uint64_t(timr->synchronizedTicks) + next);
++}
++
+ uint32_t pxaTimrTicksToNextInterrupt(struct PxaTimr *timr) {
+     uint32_t ticksToNextInterrupt = ~0;
+ 
+@@ -213,26 +255,30 @@
+ 
+ template <typename T>
+ void pxaTimrSave(PxaTimr *timr, T &savestate) {
+-    auto chunk = savestate.GetChunk(ChunkType::pxaTimr, SAVESTATE_VERSION);
++    const uint32_t version = timr->elapsedTicks ? SAVESTATE_VERSION : 0;
++    auto chunk = savestate.GetChunk(ChunkType::pxaTimr, version);
+     if (!chunk) ERR("unable to allocate chunk");
+ 
+     SaveChunkHelper helper(*chunk);
+-    timr->DoSaveLoad(helper);
++    timr->DoSaveLoad(helper, version);
+ }
+ 
+ template <typename T>
+ void pxaTimrLoad(PxaTimr *timr, T &loader) {
+-    auto chunk = loader.GetChunkOrFail(ChunkType::pxaTimr, SAVESTATE_VERSION, "pxaTimr");
++    uint32_t version;
++    auto chunk = loader.GetChunkOrFail(ChunkType::pxaTimr, SAVESTATE_VERSION, "pxaTimr", version);
+     if (!chunk) return;
+ 
+     LoadChunkHelper helper(*chunk);
+-    timr->DoSaveLoad(helper);
++    timr->synchronizedTicks = 0;
++    timr->DoSaveLoad(helper, version);
+ }
+ 
+ template <typename T>
+-void PxaTimr::DoSaveLoad(T &chunkHelper) {
++void PxaTimr::DoSaveLoad(T &chunkHelper, uint32_t version) {
+     chunkHelper.Do32(OSMR[0]).Do32(OSMR[1]).Do32(OSMR[2]).Do32(OSMR[3]).Do32(OSCR).Do(
+         typename T::Pack8() << OIER << OWER << OSSR);
++    if (version >= 1) chunkHelper.Do32(synchronizedTicks);
+ }
+ 
+ template void pxaTimrSave<Savestate<ChunkType>>(PxaTimr *timr, Savestate<ChunkType> &savestate);
+--- a/src/uarm/uarm/pxa_TIMR.h
++++ b/src/uarm/uarm/pxa_TIMR.h
+@@ -16,6 +16,10 @@
+ void pxaTimrTick(struct PxaTimr* timr, uint32_t batchedClocks);
+ 
+ uint32_t pxaTimrTicksToNextInterrupt(struct PxaTimr* timr);
++// Optional clock-aware batching. Callbacks and context are host bindings, never saved.
++void pxaTimrEnableBatching(PxaTimr* timr, uint32_t (*elapsedTicks)(void*),
++                           void (*reschedule)(void*), void* context);
++uint32_t pxaTimrNextBatch(PxaTimr* timr, uint32_t maximum = 32);
+ 
+ void pxaTimrSuspendInterrupts(struct PxaTimr* timr, bool suspendInterrupts);
+ 
+--- a/src/uarm/uarm/soc_generic.h
++++ b/src/uarm/uarm/soc_generic.h
+@@ -51,6 +51,8 @@
+ 
+    private:
+     uint16_t paceBreakSyscall{0};
++   protected:
++    uint64_t runningCyclesPerSecond{0};
+ };
+ 
+ #endif  // _SOC_GENERIC_H_
+--- a/src/uarm/uarm/soc_generic_impl.h
++++ b/src/uarm/uarm/soc_generic_impl.h
+@@ -188,6 +188,8 @@
+     auto cpu = this->cpu;
+     Scheduler<T>* scheduler = this->scheduler.get();
+ 
++    const uint64_t previousBudget = runningCyclesPerSecond;
++    runningCyclesPerSecond = cyclesPerSecond;
+     uint64_t cycles = 0;
+ 
+     while (cycles < maxCycles) {
+@@ -213,6 +215,7 @@
+         }
+     }
+ 
++    runningCyclesPerSecond = previousBudget;
+     return cycles;
+ }
+ 
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -144,6 +144,10 @@
+ 
+     gpio = pxaGpioInit(mem, ic, socRev);
+     tmr = pxaTimrInit(mem, ic);
++#ifndef __EMSCRIPTEN__
++    if (deviceType == DeviceType5::deviceTypeTX)
++        pxaTimrEnableBatching(tmr, TimerElapsedCB, TimerRescheduleCB, this);
++#endif
+     rtc = pxaRtcInit(mem, ic);
+     ffUart = pxaUartInit(mem, rescheduleCb, ic, PXA_FFUART_BASE, PXA_I_FFUART, socRev == 2);
+     stUart = pxaUartInit(mem, rescheduleCb, ic, PXA_STUART_BASE, PXA_I_STUART, socRev == 2);
+@@ -273,6 +277,9 @@
+         case SCHEDULER_TASK_TIMER:
+             pxaTimrTick(tmr, batchedTicks);
+ 
++#ifndef __EMSCRIPTEN__
++            if (GetDeviceType() == DeviceType5::deviceTypeTX) return pxaTimrNextBatch(tmr, sleeping ? UINT32_MAX : 32);
++#endif
+             return sleeping ? pxaTimrTicksToNextInterrupt(tmr) : 1;
+ 
+         case SCHEDULER_TASK_RTC:
+@@ -590,6 +597,20 @@
+             break;
+     }
+ }
++
++#ifndef __EMSCRIPTEN__
++uint32_t SocPXA::TimerElapsedCB(void* ctx) {
++    auto* self = static_cast<SocPXA*>(ctx);
++    const uint64_t extra = self->runningCyclesPerSecond
++        ? uint64_t(cpuCyclesInProgress(self->cpu)) * 1_sec / self->runningCyclesPerSecond : 0;
++    return self->scheduler->ElapsedTicks(SCHEDULER_TASK_TIMER, extra);
++}
++void SocPXA::TimerRescheduleCB(void* ctx) {
++    auto* self = static_cast<SocPXA*>(ctx);
++    self->scheduler->RescheduleTask(SCHEDULER_TASK_TIMER, pxaTimrNextBatch(self->tmr));
++    cpuSetSlowPath(self->cpu, SLOW_PATH_REASON_RESCHEDULE);
++}
++#endif
+ 
+ uint64_t SocPXA::GetTimeCB(void *ctx) {
+     return reinterpret_cast<SocPXA *>(ctx)->scheduler->GetTime();
+--- a/src/uarm/uarm/soc_PXA.h
++++ b/src/uarm/uarm/soc_PXA.h
+@@ -100,6 +100,10 @@
+ 
+     static void RescheduleCB(void *ctx, uint32_t task);
+     static uint64_t GetTimeCB(void *ctx);
++#ifndef __EMSCRIPTEN__
++    static uint32_t TimerElapsedCB(void* ctx);
++    static void TimerRescheduleCB(void* ctx);
++#endif
+ 
+    private:
+     IrKeyboard irKeyboard;
+--- a/src/uarm/uarm/scheduler.h
++++ b/src/uarm/uarm/scheduler.h
+@@ -36,6 +36,11 @@
+     void Advance(uint64_t cycles, uint64_t cyclesPerSecond);
+ 
+     uint64_t GetTime() const;
++    uint64_t ElapsedTicks(uint32_t taskType, uint64_t extraNsec = 0) const {
++        const auto& task = tasks[taskType];
++        const uint64_t now = accTime + extraNsec;
++        return now >= task.lastUpdate ? (now - task.lastUpdate) / task.period : 0;
++    }
+ 
+     template <typename U>
+     void Save(U& savestate);
+@@ -126,6 +131,16 @@
+     task.batchedTicks = batchTicks;
+     uint64_t nextUpdate = task.nextUpdate = task.lastUpdate + batchTicks * task.period;
+ 
++    // The high-frequency timer usually remains the first task. Keep its
++    // queue link when its new deadline is still strictly before its successor.
++    // Equal deadlines use normal reinsertion to retain the existing tie order.
++    if (queue[-1] == taskType &&
++        (queue[taskType] > SCHEDULER_TASK_MAX ||
++         nextUpdate < tasks[queue[taskType]].nextUpdate)) {
++        UpdateNextUpdate();
++        return;
++    }
++
+     int32_t idx = -1;
+     bool inserted = false;
+     bool deleted = false;
+@@ -191,8 +206,12 @@
+ 
+         if (task.nextUpdate > accTime) break;
+ 
+-        const uint32_t batchTicks = dispatchDelegate.DispatchTicks(taskType, task.batchedTicks);
+-        task.lastUpdate += task.batchedTicks * task.period;
++        // IRQ delivery can wake the CPU and reschedule this very task. Account
++        // for the batch actually dispatched, not a size changed by that callback.
++        const uint32_t dispatchedTicks = task.batchedTicks;
++        const uint64_t dispatchedPeriod = task.period;
++        const uint32_t batchTicks = dispatchDelegate.DispatchTicks(taskType, dispatchedTicks);
++        task.lastUpdate += dispatchedTicks * dispatchedPeriod;
+ 
+         RescheduleTaskImpl<false>(taskType, batchTicks);
+     }
+--- a/src/uarm/uarm/SoC.h
++++ b/src/uarm/uarm/SoC.h
+@@ -63,6 +63,7 @@
+ 
+     void SetAudioQueue(struct AudioQueue *audioQueue);
+     void SetPcmOutputEnabled(bool pcmOutputEnabled);
++    bool PcmOutputEnabled() const { return pcmEnabled; }
+     void SetPcmSuspended(bool pcmSuspended);
+ 
+     Buffer GetRomData();

@@ -43,16 +43,24 @@ p.add_argument(
     help="Fail when captured audio contains a gap of 10 ms or longer",
 )
 p.add_argument(
+    "--trace-audio", action="store_true",
+    help="Record each process's SDL PCM and codec/HAL diagnostics (requires the optional audio trace build)",
+)
+p.add_argument(
     "--wait-control",
     action="store_true",
     help="Use an immediate HTTP reply then a four-second guest task delay as the PCM control",
 )
+p.add_argument("--tone-seconds", type=int, default=4,
+               help="Continuous tone hold (4–180 seconds), in blocked HTTP or an idle task delay")
 p.add_argument(
     "--public",
     action="store_true",
     help="Also resolve example.com and fetch its HTTP page",
 )
 a = p.parse_args()
+if not 4 <= a.tone_seconds <= 180:
+    p.error("tone-seconds must be between 4 and 180")
 a.output.mkdir(parents=True, exist_ok=False)
 root = a.output.resolve()
 core = a.core.resolve()
@@ -68,6 +76,7 @@ original = hashlib.sha256(source.read_bytes()).hexdigest()
             },
             "loadavg_start": os.getloadavg(),
             "wait_control": a.wait_control,
+            "tone_seconds": a.tone_seconds,
             "network_mode": profile,
             "measurement": "emulator; excludes physical device and output hardware",
         },
@@ -93,7 +102,7 @@ class Handler(socketserver.BaseRequestHandler):
             if data.startswith(b"GET "):
                 request_seen.set()
                 if b"GET /slow " in data:
-                    if not release_response.wait(15):
+                    if not release_response.wait(a.tone_seconds + 15):
                         return
                 body = b"frond-host-ok\n"
                 self.request.sendall(
@@ -218,6 +227,9 @@ def emulator(session, label, audio=False):
                 SDL_VIDEODRIVER="dummy",
                 SDL_AUDIODRIVER="pulseaudio" if audio else "dummy",
                 PULSE_PROP="frond.host_check=" + token,
+                **({"FROND_PCM_TRACE": "1", "FROND_HAL_AUDIO": "1", "FROND_BUDGET_TRACE": "1",
+                    "FROND_LATENCY_PCM": str(root / (label + "-sdl.raw"))}
+                   if a.trace_audio else {}),
             ),
         )
         connection = stream = recorder = raw = None
@@ -281,6 +293,7 @@ def emulator(session, label, audio=False):
                         "--rate=44100",
                         "--channels=2",
                         "--raw",
+                        "--latency-msec=20",
                     ],
                     stdout=raw,
                     stderr=subprocess.DEVNULL,
@@ -328,12 +341,45 @@ def emulator(session, label, audio=False):
                     process.wait()
 
 
+def check_tone_capture():
+    if not a.audio:
+        return
+    samples = array.array("h")
+    samples.frombytes((root / "wait-tone.raw").read_bytes())
+    signal = [i for i, x in enumerate(samples) if abs(x) > 50]
+    assert signal, "captured tone is silent"
+    span = samples[signal[0] : signal[-1] + 1]
+    run = longest = 0
+    for x in span:
+        run = run + 1 if x == 0 else 0
+        longest = max(run, longest)
+    result = {
+        "seconds_between_first_last_signal": len(span) / 88200,
+        "peak": max(map(abs, span)),
+        "longest_exact_zero_ms": longest / 88.2,
+        "measurement": "emulator PCM during configured hold, excludes physical output",
+        "wait_control": a.wait_control,
+        "tone_seconds": a.tone_seconds,
+        "network_mode": profile,
+        "gapless_below_10_ms": longest / 88.2 < 10,
+    }
+    (root / "tone-check.json").write_text(json.dumps(result, indent=2) + "\n")
+    print(result, flush=True)
+    assert (
+        result["seconds_between_first_last_signal"] >= a.tone_seconds - 1 and result["peak"] < 32767
+    )
+    if a.require_gapless:
+        assert result["longest_exact_zero_ms"] < 10, (
+            "captured audio contains a gap of at least 10 ms"
+        )
+
+
 try:
     settings = config(
         "10.0.2.2" if a.wireless else "localhost",
         server.server_address[1],
         udp.getsockname()[1],
-        "/wait-control" if a.wait_control else "/slow",
+        ("/wait-control/" + str(a.tone_seconds)) if a.wait_control else "/slow",
         "local-config",
     )
     with emulator(source, "local", a.audio) as request:
@@ -344,7 +390,7 @@ try:
         retry(request, "install", settings)
         retry(request, "install", a.probe.resolve())
         retry(request, "launch-app", "Frond host probe")
-        assert request_seen.wait(10), "HTTP request never reached the local server"
+        assert request_seen.wait(45), "HTTP request never reached the local server"
         started = time.monotonic()
         assert request("network-state") == profile
         elapsed = time.monotonic() - started
@@ -359,11 +405,25 @@ try:
             )
             + "\n"
         )
-        time.sleep(4)
+        time.sleep(a.tone_seconds)
+        # Measure the configured continuous hold, before releasing the reply or
+        # doing post-test logging/export. Preserve PCM metrics even if a later
+        # network checkpoint fails independently.
+        request.stop_capture()
         release_response.set()
-        assert checkpoint_seen.wait(30), "probe did not finish network/tone checks"
+        check_tone_capture()
+        if not checkpoint_seen.wait(30):
+            request.stop_capture()
+            failure_shot = root / "failure.replay"
+            failure_shot.write_text("100 snapshot " + str(root / "failure.png") + "\n")
+            request("input-replay", failure_shot)
+            time.sleep(1)
+            request("save", root / "failure.frond")
+            raise AssertionError("probe did not finish network/tone checks; preserved failure session and screenshot")
         time.sleep(2)
         request.stop_capture()  # Exclude export pauses and later, separate tone runs.
+        if a.trace_audio:
+            assert (root / "local-sdl.raw").is_file(), "--trace-audio requires the optional audio trace build"
         shot = root / "stage.replay"
         shot.write_text("100 snapshot " + str(root / "stage.png") + "\n")
         request("input-replay", shot)
@@ -423,34 +483,6 @@ try:
         assert (
             records(root / "reconnected.zip")[-1] == "checkpoint-match err=0000 value=0"
         )
-    if a.audio:
-        samples = array.array("h")
-        samples.frombytes((root / "wait-tone.raw").read_bytes())
-        signal = [i for i, x in enumerate(samples) if abs(x) > 50]
-        assert signal, "captured tone is silent"
-        span = samples[signal[0] : signal[-1] + 1]
-        run = longest = 0
-        for x in span:
-            run = run + 1 if x == 0 else 0
-            longest = max(run, longest)
-        result = {
-            "seconds_between_first_last_signal": len(span) / 88200,
-            "peak": max(map(abs, span)),
-            "longest_exact_zero_ms": longest / 88.2,
-            "measurement": "emulator PCM, excludes physical output",
-            "wait_control": a.wait_control,
-            "network_mode": profile,
-            "gapless_below_10_ms": longest / 88.2 < 10,
-        }
-        (root / "tone-check.json").write_text(json.dumps(result, indent=2) + "\n")
-        print(result, flush=True)
-        assert (
-            result["seconds_between_first_last_signal"] >= 3 and result["peak"] < 32767
-        )
-        if a.require_gapless:
-            assert result["longest_exact_zero_ms"] < 10, (
-                "captured audio contains a gap of at least 10 ms"
-            )
     if a.public:
         with emulator(source, "public") as request:
             request("network-mode", profile)

@@ -15,7 +15,7 @@ out/frond: build/source/.prepared
 	cp build/source/src/uarm/cp-uarm out/frond.new
 	mv -f out/frond.new out/frond
 
-test: prepare test-wifi test-host-network test-keyboard test-network test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup
+test: prepare test-scheduler test-wifi test-host-network test-keyboard test-network test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup
 	python3 tests/audio-metrics.py
 	python3 tests/input-latency.py
 	python3 tests/menu-response.py
@@ -216,3 +216,8 @@ test-wifi: prepare
 		build/source/src/uarm/uarm/HostNetwork.cpp build/source/src/common/libcommon.a \
 		$(shell pkg-config --cflags --libs slirp) -pthread -lz -o build/test-libertas-cf
 	./build/test-libertas-cf
+
+.PHONY: test-scheduler
+test-scheduler: prepare
+	$(CXX) -std=c++17 -O2 -Ibuild/source/src/uarm -Ibuild/source/src/uarm/uarm -Ibuild/source/src/common tests/scheduler-order.cpp -o build/test-scheduler-order
+	./build/test-scheduler-order

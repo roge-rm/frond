@@ -171,6 +171,22 @@ python3 tests/desktop-host-network.py --wireless --session /path/to/wifi.frond \
   --output /path/to/new/private/results --audio --public
 ```
 
+For a sustained tone, add `--audio --tone-seconds 180 --require-gapless`.
+`--wait-control` replaces the blocked HTTP receive with an immediate response
+and an ordinary Palm task delay, keeping the same continuous ARM tone. The probe temporarily extends the Palm
+inactivity countdown without changing its default preference. Run the
+controls separately, with no other benchmark or build from the same session.
+The recording ends at the configured hold boundary, before the reply is
+released and before later network checks and exports. The strict PCM check
+rejects gaps of 10 ms or more between first and last signal. Its metrics are
+written even if a later networking check fails. A long idle connection can
+currently lose incoming traffic; sustained audio and network reconnection are
+separate checks.
+With the optional [pipeline diagnostics](tx-native.md#optional-pipeline-diagnostics)
+build, `--trace-audio` also saves separate SDL PCM for each emulator process and
+records codec/HAL statistics. This helps distinguish guest silence from host
+playback starvation. Diagnostic binaries are separate from normal builds.
+
 It exercises the real Palm NetLib through the virtual radio, not the synthetic
 NetLib reference. Results and PCM describe the emulator, not physical TX timing.
 The test uses single-database export for `FrondHostLog` so open system logs do

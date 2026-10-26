@@ -8,6 +8,9 @@ static ArmMemAccessF access;
 static void* timer;
 static bool lines[4];
 static unsigned requests;
+static uint32_t elapsedTicks, scheduledTicks;
+static uint32_t elapsed(void*) { return elapsedTicks; }
+static void reschedule(void* context) { scheduledTicks = pxaTimrNextBatch(static_cast<PxaTimr*>(context)); }
 extern "C" void uarmAbort() { std::abort(); }
 bool memRegionAdd(ArmMem*, uint32_t base, uint32_t, ArmMemAccessF callback, void* context) {
     assert(base == 0x40a00000);
@@ -75,5 +78,44 @@ int main() {
     pxaTimrTick(timr, 1);
     write(5, 4);
     assert(!lines[2]);
-    puts("PASS: timer idle ticks, match boundaries, wrap, clear, pending wake-up and suspend");
+    // Batched clocks are still visible during a CPU batch, and a new match
+    // reschedules from the original timer phase, including already observed ticks.
+    timr = pxaTimrInit(nullptr, nullptr);
+    write(0, 10); write(7, 1);
+    pxaTimrEnableBatching(timr, elapsed, reschedule, timr);
+    elapsedTicks = 3;
+    assert(read(4) == 3 && read(5) == 0);
+    assert(pxaTimrNextBatch(timr) == 10);
+    elapsedTicks = 7;
+    assert(read(4) == 7 && !lines[0]);
+    pxaTimrTick(timr, 10);
+    elapsedTicks = 0;
+    assert(read(4) == 10 && lines[0]);
+    pxaTimrTick(timr, 1);
+    write(5, 1);
+    elapsedTicks = 5;
+    write(0, 18); // Counter is 16; deadline is seven ticks after last dispatch.
+    assert(scheduledTicks == 7 && read(4) == 16 && !lines[0]);
+    pxaTimrTick(timr, 7);
+    elapsedTicks = 0;
+    assert(read(4) == 18 && lines[0]);
+    // If a 68k instruction crosses a deadline, retain its extra observed ticks.
+    pxaTimrTick(timr, 1); write(5, 1);
+    elapsedTicks = 12;
+    assert(read(4) == 31);
+    pxaTimrTick(timr, 10);
+    elapsedTicks = 2;
+    assert(read(4) == 31);
+    pxaTimrTick(timr, 4);
+    elapsedTicks = 0;
+    assert(read(4) == 33);
+    // A match equal to the batch's starting counter is behind the next tick,
+    // not a fresh match. In particular it must not spuriously fire the watchdog.
+    write(7, 0); write(3, read(4)); write(6, 1);
+    pxaTimrTick(timr, 3);
+    write(6, 0);
+    // Watchdog deadlines also bound batches when their IRQ is disabled.
+    write(7, 0); write(3, read(4) + 5); write(6, 1);
+    assert(pxaTimrNextBatch(timr) == 5);
+    puts("PASS: timer matches, wrap, pending wake-up, suspend and clock-aware batching");
 }

@@ -42,6 +42,7 @@ int main() {
     {
         SdlAudioDriver driver(&soc, queue, true);
         driver.Start();
+        assert(soc.PcmOutputEnabled());
         assert(driver.GetUnderrunCount() == 0);
         assert(audioQueuePendingSamples(queue) == 600);
         uint32_t stream[512];
@@ -75,9 +76,12 @@ int main() {
         callback();
         for (auto sample : stream) assert(sample == 0x10001000);
         driver.Pause();
+        assert(!soc.PcmOutputEnabled());
         driver.Start();
+        assert(soc.PcmOutputEnabled());
         assert(audioQueuePendingSamples(queue) == 600);
         driver.Pause();
+        assert(!soc.PcmOutputEnabled());
     }
     queue = audioQueueCreate(7350);
     soc.SetAudioQueue(queue);
@@ -85,12 +89,14 @@ int main() {
     {
         SdlAudioDriver driver(&soc, queue);
         driver.Start();
+        assert(soc.PcmOutputEnabled());
         push(7000);
         assert(audioQueuePendingSamples(queue) == 7600);
         std::vector<uint32_t> stream(actualPeriod);
         driver.AudioCallback(reinterpret_cast<uint8_t*>(stream.data()), stream.size() * 4);
         for (auto sample : stream) assert(sample == 0x10001000);
         driver.Pause();
+        assert(!soc.PcmOutputEnabled());
     }
     audioQueueClear(queue);
     audioQueuePush(queue, 1);
@@ -104,6 +110,7 @@ int main() {
     {
         SdlAudioDriver driver(&soc, queue);
         driver.Start();
+        assert(soc.PcmOutputEnabled());
         uint32_t stream[512];
         auto callback = [&]() {
             driver.AudioCallback(reinterpret_cast<uint8_t*>(stream), sizeof(stream));
@@ -114,6 +121,15 @@ int main() {
         push(600);
         callback();
         for (auto sample : stream) assert(sample == 0x10001000);
+        push(1600);
+        callback();
+        assert(driver.GetAudioBackpressure());
+        callback();
+        assert(driver.GetAudioBackpressure());
+        callback();
+        assert(driver.GetAudioBackpressure());
+        callback();
+        assert(!driver.GetAudioBackpressure());
         audioQueueClear(queue);
         callback();
         assert(driver.GetUnderrunCount() == 1);
@@ -121,6 +137,7 @@ int main() {
         callback();
         for (auto sample : stream) assert(sample == 0x10001000);
         driver.Pause();
+        assert(!soc.PcmOutputEnabled());
     }
     puts("PASS: SDL startup, bounded audio buffering, backpressure hysteresis and underrun recovery");
 }
