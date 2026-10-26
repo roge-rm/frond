@@ -24,6 +24,10 @@ jobs:
         with:
           submodules: true
           persist-credentials: false
+      - name: Trust this container checkout
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/vendor/cloudpilot"
       - name: Check build tools and independent source reconstruction
         run: make test-build-tools check-reconstruction
       - name: Build and run firmware-free core and desktop tests
