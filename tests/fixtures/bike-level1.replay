@@ -1,0 +1,12 @@
+# Bike or Die 2 v2.1b, level 1 paused at its starting position on calibrated TX.
+# Trial mode; no registration, license acceptance, purchase or network actions.
+# Use the private fixture instructions in doc/bike-performance.md.
+# Native input replay uses host milliseconds; benchmark-replay uses guest milliseconds.
+500 snapshot before.png
+1000 key-down up
+1500 snapshot response.png
+3000 snapshot riding.png
+5000 key-down right
+5500 key-up right
+8000 key-up up
+9000 snapshot after.png

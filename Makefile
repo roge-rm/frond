@@ -15,7 +15,7 @@ out/frond: build/source/.prepared
 	cp build/source/src/uarm/cp-uarm out/frond.new
 	mv -f out/frond.new out/frond
 
-test: prepare test-pxa-power test-compatibility test-developer-run test-xscale-prefetch test-device-controls test-scheduler test-wifi test-host-network test-network-reliability test-keyboard test-network test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pace-debug test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup
+test: prepare test-gameplay-metrics test-mmu-fast-path test-pxa-power test-compatibility test-developer-run test-xscale-prefetch test-device-controls test-scheduler test-wifi test-host-network test-network-reliability test-keyboard test-network test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pace-debug test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup
 	python3 tests/audio-metrics.py
 	python3 tests/audio-timing.py
 	python3 tests/tx-baseline.py
@@ -303,3 +303,23 @@ test-pxa-power: out/frond
 test-pace-debug: build/test-gdbstub-target
 	python3 tests/pace-debug.py
 	python3 tests/pace-report.py
+
+.PHONY: benchmark-replay
+benchmark-replay: out/frond
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' ! -name timeutil.o > build/replay-core.rsp
+	$(CXX) -std=c++17 -O2 -g $(shell sdl2-config --cflags) \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tools/benchmark-replay.cpp @build/replay-core.rsp build/source/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) $(shell pkg-config --libs sdl2 SDL2_image) -o build/benchmark-replay
+
+.PHONY: test-mmu-fast-path
+test-mmu-fast-path: out/frond
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/mmu-core.rsp
+	$(CXX) -std=c++17 -O2 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/mmu-fast-path.cpp @build/mmu-core.rsp build/source/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-mmu-fast-path
+	./build/test-mmu-fast-path
+
+.PHONY: test-gameplay-metrics
+test-gameplay-metrics: benchmark-replay
+	python3 tests/gameplay-metrics.py

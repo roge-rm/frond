@@ -1,0 +1,66 @@
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -3299,6 +3299,31 @@
+ 
+ uint32_t *cpuGetRegisters(struct ArmCpu *cpu) { return cpu->regs; }
+ 
++// Optional diagnostic build only: instruction attempts and 1/1021 PC samples.
++// These are execution counts, not host-time or hardware instruction-cost shares.
++struct ExecutionProfile {
++    bool enabled = std::getenv("FROND_EXECUTION_PROFILE") != nullptr;
++    uint64_t counts[3]{};
++    std::unordered_map<uint64_t,uint64_t> bins;
++    std::unordered_map<uint16_t,uint64_t> traps;
++    void Tick(unsigned kind, uint32_t pc, unsigned mode) {
++        if (!enabled) return;
++        if (++counts[kind] % 1021 == 0)
++            ++bins[(uint64_t(kind)<<40) | (uint64_t(mode)<<32) | (pc & ~255u)];
++    }
++    ~ExecutionProfile() {
++        if (!enabled) return;
++        for (unsigned i=0;i<3;++i)
++            fprintf(stderr,"EXEC_COUNT %u %llu\n",i,(unsigned long long)counts[i]);
++        for (const auto& b:bins)
++            fprintf(stderr,"EXEC_PC %u %u %08x %llu\n",unsigned(b.first>>40),
++                    unsigned((b.first>>32)&255),unsigned(b.first), (unsigned long long)b.second);
++        for (const auto& t:traps)
++            fprintf(stderr,"EXEC_TRAP %04x %llu\n",t.first,(unsigned long long)t.second);
++    }
++};
++static ExecutionProfile executionProfile;
++
+ static bool cpuPrvPaceCallout(struct ArmCpu *cpu, uint32_t destination) {
+     if (!paceSave68kState()) {
+         cpuPrvHandlePaceMemoryFault(cpu);
+@@ -3322,6 +3347,7 @@
+ 
+ static void cpuPrvPaceSyscall(struct ArmCpu *cpu) {
+     const uint16_t trapWord = paceReadTrapWord();
++    if (executionProfile.enabled) ++executionProfile.traps[trapWord];
+     if (paceGetFsr() != 0) return cpuPrvHandlePaceMemoryFault(cpu);
+ 
+     if (cpu->breakPaceSyscall && cpu->breakPaceSyscall == trapWord) {
+@@ -3508,6 +3534,7 @@
+ #endif
+ 
+     while (cycleAcc < cycles) {
++        executionProfile.Tick(2, paceGetPC(), cpu->M);
+         cpuPrvCyclePace(cpu);
+         cycleAcc += 20;
+ 
+@@ -3537,6 +3564,7 @@
+             if (!cpu->T) return cycleAcc;
+         }
+ 
++        executionProfile.Tick(1, cpu->curInstrPC, cpu->M);
+         cycleAcc += 1;
+ 
+         // FCSE
+@@ -3598,6 +3626,7 @@
+             if (cpu->T) return cycleAcc;
+         }
+ 
++        executionProfile.Tick(0, cpu->curInstrPC, cpu->M);
+         cycleAcc += 1;
+ 
+         // FCSE

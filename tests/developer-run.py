@@ -118,7 +118,8 @@ class DeveloperRunTest(unittest.TestCase):
         self.session.write_text(json.dumps(config or {}))
         args = runner.parser().parse_args([
             '--core', str(self.core), '--session', str(self.session), '--output', str(self.output),
-            '--app', 'Test App', '--settle', '0', '--timeout', '4',
+            *([] if '--resume-app' in extra else ['--app', 'Test App']),
+            '--settle', '0', '--timeout', '4',
             '--command-timeout', '1', '--ready-timeout', '1', *extra])
         # The peer is synthetic and does not run an emulator or occupy a shared slot.
         with patch.object(runner.shutil, 'which', return_value=None):
@@ -130,6 +131,15 @@ class DeveloperRunTest(unittest.TestCase):
             self.assertEqual(json.loads((self.output / 'result.json').read_text()), result)
         self.assertEqual(json.loads(self.session.read_text()), config or {})
         return result
+
+    def test_resume_does_not_relaunch_saved_workload(self):
+        result = self.run_case({'missing_app': True}, ['--resume-app', '--screenshot', '0'])
+        self.assertEqual(result['status'], 'ok', result)
+        commands = [step['command'] for step in result['steps']]
+        self.assertNotIn('launch-app', commands)
+        self.assertIn('guest-ready', commands)
+        self.assertIn('input-replay', commands)
+        self.assertTrue(result['artifacts']['session_saved'])
 
     def test_full_workflow_preserves_inputs_and_remaps_all_snapshots(self):
         prc, pdb = self.root / 'app.prc', self.root / 'data.pdb'

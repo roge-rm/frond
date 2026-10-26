@@ -137,6 +137,9 @@ The [compatibility matrix](doc/compatibility.md) checks synthetic PACE/ARM progr
 and optional Palm service/native probes, with fresh logs before and after session
 restore. Physical TX comparison remains deferred.
 
+The [Bike or Die investigation](doc/bike-performance.md) provides a private trial-mode
+gameplay fixture, fixed guest-time replay and optional execution/frame diagnostics.
+
 The [ARM/Thumb and PACE debugger](doc/debugger.md) is available with `--gdb PORT`
 on IPv4 loopback. It supports native registers, memory, stepping and address breakpoints;
 PACE monitor commands add read-only 68k registers, address breakpoints and

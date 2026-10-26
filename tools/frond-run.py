@@ -50,7 +50,10 @@ def parser():
     p.add_argument('--session', type=Path, required=True)
     p.add_argument('--output', type=Path, required=True, help='new private result directory')
     p.add_argument('--install', type=Path, action='append', default=[], help='PRC/PDB; repeat in install order')
-    p.add_argument('--app', required=True, help='exact Palm application database name')
+    launch = p.add_mutually_exclusive_group(required=True)
+    launch.add_argument('--app', help='exact Palm application database name')
+    launch.add_argument('--resume-app', action='store_true',
+                        help='continue the saved app without relaunching it')
     p.add_argument('--replay', type=Path)
     p.add_argument('--screenshot', type=int, action='append', default=[], metavar='MS',
                    help='capture at milliseconds after replay starts; repeat for several')
@@ -213,7 +216,7 @@ def run(args):
               'artifacts': {}, 'inputs': [], 'error': None}
     root = process = connection = None
     try:
-        for name in [args.app, *args.export_db]:
+        for name in ([args.app] if args.app is not None else []) + args.export_db:
             if not name or len(name.encode()) > 31 or '\n' in name or '\0' in name:
                 raise RunError('argument', 'Palm database names must be 1–31 UTF-8 bytes without newline/NUL')
         output = args.output.resolve()
@@ -295,7 +298,8 @@ def run(args):
                         control.require('reset')
                         control.retry_ready('guest-ready', '', args.ready_timeout)
                 result['stage'] = 'launch'
-                control.retry_ready('launch-app', args.app, args.ready_timeout)
+                if args.app is not None:
+                    control.retry_ready('launch-app', args.app, args.ready_timeout)
                 pause(args.settle, deadline)
                 control.retry_ready('guest-ready', '', args.ready_timeout)
                 result['stage'] = 'replay'

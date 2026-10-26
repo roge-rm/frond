@@ -28,6 +28,12 @@ the exact Palm database name, including case, rather than its PRC filename.
 An installation that requests a reset triggers a reset and another readiness
 check before the next install. Other install errors stop the run.
 
+Use `--resume-app` instead of `--app NAME` to continue the saved application's
+current screen without launching it again. This matters for games that restart
+their intro or show an About dialog on each launch. Readiness checks and the
+optional settle still run. Avoid installing applications in this mode when the
+saved foreground state matters: an installation or reset can change that state.
+
 `--headless` uses SDL's dummy display and audio drivers. Omit it to see the Palm
 window. Sound is off unless you pass `--sound`. The runner inherits the rest of
 your environment, including SDL driver settings.
