@@ -321,7 +321,12 @@ class Debugger(unittest.TestCase):
         self.rsp.set_reg(0, 123)
         self.assertEqual(self.rsp.request('Z0,10004,4'), 'OK')
         self.assertEqual(self.rsp.request('D'), 'OK')
-        self.assertEqual(self.rsp.sock.recv(1), b'')
+        # The peer may close before consuming our ACK for OK; Linux can then
+        # report a TCP reset instead of EOF. Both mean the detached socket closed.
+        try:
+            self.assertEqual(self.rsp.sock.recv(1), b'')
+        except ConnectionResetError:
+            pass
         self.reconnect()
         self.assertNotEqual(self.rsp.reg(0), 123)  # execution continued after detach
         # Old breakpoint is cleared; interrupt stops a running target.
