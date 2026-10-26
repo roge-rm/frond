@@ -1,0 +1,31 @@
+--- a/src/uarm/uarm/pxa_UART.cpp
++++ b/src/uarm/uarm/pxa_UART.cpp
+@@ -178,7 +178,14 @@
+     (void)chr;
+     (void)userData;
+ 
+-    // nothing to do here
++    // Optional observer build only. Bound logs even if guest firmware floods TX.
++    // The normal default callback still discards output and never opens a peer.
++    static unsigned traced = 0;
++    if (getenv("FROND_SERIAL_TRACE") && traced < 128) {
++        ++traced;
++        const auto* uart = static_cast<const PxaUart*>(userData);
++        fprintf(stderr, "SERIAL_TX uart=%08x char=%03x\n", uart->baseAddr, unsigned(chr));
++    }
+ }
+ 
+ static uint16_t pxaUartPrvGetchar(struct PxaUart *uart) {
+@@ -311,6 +318,12 @@
+         const uint32_t raw = size == 1 ? *(uint8_t *)buf :
+             size == 2 ? *(uint16_t *)buf : *(uint32_t *)buf;
+         val = raw & 0xff;
++        static unsigned traced = 0;
++        if (pa == 0 && !DLAB && getenv("FROND_SERIAL_TRACE") && traced < 128) {
++            ++traced;
++            fprintf(stderr, "SERIAL_THR uart=%08x size=%u data=%08x fcr=%02x ier=%02x\n",
++                    uart->baseAddr, unsigned(size), raw, unsigned(uart->FCR), unsigned(uart->IER));
++        }
+ 
+         switch (pa) {
+             case 0:

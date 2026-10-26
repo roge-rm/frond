@@ -1,0 +1,6 @@
+FORM ID 1000 AT (0 0 160 160) NOFRAME USABLE
+BEGIN
+ TITLE "Frond serial discovery"
+ LABEL "Results: FrondSerialLog" ID 1001 AT (5 30)
+ LABEL "No HotSync or USB attachment" ID 1002 AT (5 50)
+END

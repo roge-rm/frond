@@ -15,7 +15,7 @@ out/frond: build/source/.prepared
 	cp build/source/src/uarm/cp-uarm out/frond.new
 	mv -f out/frond.new out/frond
 
-test: prepare test-gameplay-metrics test-mmu-fast-path test-pxa-power test-compatibility test-developer-run test-xscale-prefetch test-device-controls test-scheduler test-wifi test-host-network test-network-reliability test-keyboard test-network test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pace-debug test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup
+test: prepare test-tx-serial test-gameplay-metrics test-mmu-fast-path test-pxa-power test-compatibility test-developer-run test-xscale-prefetch test-device-controls test-scheduler test-wifi test-host-network test-network-reliability test-keyboard test-network test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pace-debug test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup
 	python3 tests/audio-metrics.py
 	python3 tests/audio-timing.py
 	python3 tests/tx-baseline.py
@@ -323,3 +323,13 @@ test-mmu-fast-path: out/frond
 .PHONY: test-gameplay-metrics
 test-gameplay-metrics: benchmark-replay
 	python3 tests/gameplay-metrics.py
+
+# Capability regressions report missing transport explicitly; no host endpoint or firmware.
+.PHONY: test-tx-serial
+test-tx-serial: prepare build/source/src/common/libcommon.a
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/tx-serial-model.cpp build/source/src/uarm/uarm/pxa_UART.cpp \
+		build/source/src/uarm/uarm/pxa270_UDC.cpp build/source/src/common/libcommon.a \
+		-lz -o build/test-tx-serial-model
+	./build/test-tx-serial-model
+	python3 tests/tx-serial.py
