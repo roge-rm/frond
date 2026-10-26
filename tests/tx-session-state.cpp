@@ -50,6 +50,9 @@ int main() {
     SocPXA soc(DeviceType5::deviceTypeTX, 32 * 1024 * 1024, rom.data(), rom.size(),
                nand.data(), nand.size(), -1, 2);
     cpu = soc.GetCpu();
+    assert(soc.GetUsbController());
+    assert(soc.SetUsbTestCable(false) && (read32(0x40e00000) & (1u << 13)));
+    assert(soc.SetUsbTestCable(true) && !(read32(0x40e00000) & (1u << 13)));
     auto audio = audioQueueCreate(1024);
     soc.SetAudioQueue(audio);
     cpuSetCPAR(cpu, 3);
@@ -97,6 +100,7 @@ int main() {
     const auto saved = soc.GetSavestate();
     std::vector<uint8_t> snapshot(saved.size);
     std::memcpy(snapshot.data(), saved.data, saved.size);
+    assert(soc.SetUsbTestCable(false));
     write32(0x40600100, 4); // discard the unsent EP0 packet before restore
     for (auto addr : registers) write32(addr, 0);
     write32(0xa5fffffc, 0);
@@ -106,6 +110,7 @@ int main() {
     soc.KeyDown(keyIdHard1);
     assert(soc.Load(snapshot.size(), snapshot.data()));
     assert(audioQueuePendingSamples(audio) == 0);
+    assert(!(read32(0x40e00000) & (1u << 13))); // detector restored with guest state
     assert(read32(0x40600000) == 1 && !(read32(0x40600100) & 2));
     for (unsigned i = 0; i < 3; ++i) write32(0x40600300, 0x88776655);
     assert(read32(0x40600100) & 2); // restored four bytes + twelve new bytes
@@ -184,6 +189,9 @@ int main() {
     SocPXA e2(DeviceType5::deviceTypeE2, 16 * 1024 * 1024, rom.data(), 8 * 1024 * 1024,
               nand.data(), 33 * 1024 * 1024, -1, 0);
     cpu = e2.GetCpu();
+    const auto e2Pins = read32(0x40e00000);
+    assert(!e2.GetUsbController() && !e2.SetUsbTestCable(true));
+    assert(read32(0x40e00000) == e2Pins);
     write32(0xa0000000, 0xeafffffe);
     cpuInvalidateCodeCache(cpu);
     cpuSetReg(cpu, 15, 0xa0000000);

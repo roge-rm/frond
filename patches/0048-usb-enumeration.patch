@@ -1,0 +1,31 @@
+--- a/src/uarm/uarm/soc_PXA.h
++++ b/src/uarm/uarm/soc_PXA.h
+@@ -65,6 +65,11 @@
+ 
+     // Model access for development probes; creates no host connection.
+     PxaUart* GetSerialUart() { return GetDeviceType() == deviceTypeTX ? ffUart : nullptr; }
++
++    // Non-owning development-probe access; use only on this SoC's execution
++    // thread. The cable method drives the TX detector input, not a USB host.
++    Pxa270Udc* GetUsbController() { return GetDeviceType() == deviceTypeTX ? udc2 : nullptr; }
++    bool SetUsbTestCable(bool connected);
+ 
+     bool EnableFastAudio();
+     bool FastAudioActive() const { return fastAudio && fastAudio->Active(); }
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -449,6 +449,14 @@
+     deviceSetSdCardInserted(dev, false);
+ }
+ 
++bool SocPXA::SetUsbTestCable(bool connected) {
++    if (GetDeviceType() != deviceTypeTX) return false;
++    // Palm TX GPIO13 is the active-low USB cable detector. Linux palmtx.h
++    // names this GPIO_NR_PALMTX_USB_DETECT_N. No transceiver or endpoint is opened.
++    pxaGpioSetState(gpio, 13, !connected);
++    return true;
++}
++
+ void SocPXA::OnTouch(int x, int y) { deviceTouch(dev, x, y); }
+ 
+ void SocPXA::OnEngageKey(KeyId key, bool down) {

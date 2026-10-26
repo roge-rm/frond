@@ -490,3 +490,26 @@ exercise a USB host. The UDC state chunk is now version 1 and preserves EP0 byte
 and positions. Version-0 sessions load with empty FIFOs and cleared stub-generated
 packet/IRQ state; interrupt masks and endpoint configuration survive. Older
 Frond binaries cannot load the new UDC chunk.
+
+`0048-usb-enumeration.patch` adds TX-only internal probe access to the UDC and
+GPIO13 cable detector. It adds no production USB bus or host endpoint. The
+firmware-free `make test-usb-host-fixture` checks deterministic EP0 stimuli,
+FIFO/IRQ ordering and save/restore with a synthetic guest. The fixture seeds
+hardware-owned state directly; it does not implement wire timing or automatic
+standard requests.
+
+An optional bounded firmware diagnostic reads a private, initialized TX session:
+
+```sh
+heavy build make test-tx-usb-rom
+heavy emulator ./build/test-tx-usb-rom /path/to/private-tx.frond
+```
+
+It checks cable detection, programmed endpoint sizes, reset IRQ handling and
+queued-response persistence. Exit **2** reports the reproduced descriptor
+flush/IRQ-acknowledgement blocker; exit **1** reports unmet prerequisites or
+unexpected behavior. The test does not modify its input or save firmware data.
+Complete descriptor exchange, address assignment and configuration selection
+against Palm firmware remain unverified. Resolving packet/ACK timing and flush
+interactions requires further hardware evidence; no flushed data is retained to
+make the diagnostic pass.
