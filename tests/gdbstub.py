@@ -66,6 +66,18 @@ class Rsp:
         self.send(data)
         return self.packet()
 
+    def monitor(self, command):
+        self.send('qRcmd,' + command.encode().hex())
+        output = ''
+        while True:
+            result = self.packet()
+            if result.startswith('O') and result != 'OK':
+                output += bytes.fromhex(result[1:]).decode()
+            elif result == 'OK' or result.startswith('E') or not result:
+                return result, output
+            else:
+                return 'OK', output + bytes.fromhex(result).decode()
+
     def reg(self, number):
         return int.from_bytes(bytes.fromhex(self.request(f'p{number:x}')), 'little')
 
@@ -82,7 +94,7 @@ class Rsp:
 class Debugger(unittest.TestCase):
     def setUp(self):
         self.log = tempfile.TemporaryFile()
-        self.target = subprocess.Popen([str(ROOT / 'build/test-gdbstub-target')],
+        self.target = subprocess.Popen([str(ROOT / 'build/test-gdbstub-target')] + getattr(self, 'target_args', []),
                                        stdout=self.log, stderr=self.log)
         self.addCleanup(self.cleanup_target)
         deadline = time.monotonic() + 5

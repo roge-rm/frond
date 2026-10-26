@@ -12,7 +12,9 @@
 
 static constexpr uint32_t base = 0x10000, stack = base + 0x3000;
 static std::vector<uint8_t> memory(0x4000);
+static unsigned memoryAccesses = 0;
 static bool access(void*, uint32_t addr, uint_fast8_t size, bool write, void* buf) {
+    ++memoryAccesses;
     if (addr < base || uint64_t(addr) + size > base + memory.size()) return false;
     if (write) std::memcpy(memory.data() + addr - base, buf, size);
     else std::memcpy(buf, memory.data() + addr - base, size);
@@ -55,6 +57,17 @@ int main() {
     uint32_t addr; bool write; uint_fast8_t fsr;
     paceGetMemeryFault(&addr, &write, &fsr);
     assert(addr == base + memory.size() && !write && fsr);
+    // Debug inspection must not read guest memory, clear the fault latch, or
+    // mutate the interpreter. Repeated snapshots preserve all these invariants.
+    const unsigned beforeInspection = memoryAccesses;
+    const auto snapshot = paceDebugState();
+    assert(snapshot.pc == base + memory.size());
+    assert(snapshot.d[0] == paceGetDreg(0) && snapshot.a[7] == paceGetAreg(7));
+    assert(paceDebugState().sr == snapshot.sr);
+    uint32_t addrAfter; bool writeAfter; uint_fast8_t fsrAfter;
+    paceGetMemeryFault(&addrAfter, &writeAfter, &fsrAfter);
+    assert(addrAfter == addr && writeAfter == write && fsrAfter == fsr);
+    assert(memoryAccesses == beforeInspection);
     puts("PASS pace-execution: endian memory, arithmetic, branch, stack, traps and faults");
 
     // A real ARM -> Thumb -> ARM call chain, with stack and callee registers.

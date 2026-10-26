@@ -133,9 +133,11 @@ The [compatibility matrix](doc/compatibility.md) checks synthetic PACE/ARM progr
 and optional Palm service/native probes, with fresh logs before and after session
 restore. Physical TX comparison remains deferred.
 
-The [native ARM/Thumb debugger](doc/debugger.md) is available with `--gdb PORT`
-on IPv4 loopback. It supports registers, memory, stepping and address breakpoints;
-68k/PACE app-aware debugging and watchpoints are not implemented.
+The [ARM/Thumb and PACE debugger](doc/debugger.md) is available with `--gdb PORT`
+on IPv4 loopback. It supports native registers, memory, stepping and address breakpoints;
+PACE monitor commands add read-only 68k registers, address breakpoints and
+exception snapshots. Active Palm app attribution, 68k stepping and watchpoints
+are not implemented.
 
 The upstream core is pinned in `vendor/cloudpilot`. Frond's core changes are
 ordered patches in `patches/`; the build applies them to `build/source`.

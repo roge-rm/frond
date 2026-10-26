@@ -1,0 +1,264 @@
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -3209,6 +3209,7 @@
+ }
+ 
+ void cpuReset(struct ArmCpu *cpu, uint32_t pc) {
++    gdbStubResetPace(cpu->debugStub);
+     cpu->I = true;  // start w/o interrupts in supervisor mode
+     cpu->F = true;
+     cpu->M = ARM_SR_MODE_SVC;
+@@ -3437,7 +3438,10 @@
+ }
+ 
+ FORCE_INLINE static void cpuPrvCyclePace(struct ArmCpu *cpu) {
+-    switch (paceExecute()) {
++    const uint32_t instructionPc = cpu->debugStub ? paceGetPC() : 0;
++    const auto status = paceExecute();
++    if (cpu->debugStub) gdbStubPaceException(cpu->debugStub, instructionPc, status);
++    switch (status) {
+         case pace_status_ok:
+             return;
+ 
+@@ -3508,6 +3512,7 @@
+ #endif
+ 
+     while (cycleAcc < cycles) {
++        if (cpu->debugStub) gdbStubReportPc(cpu->debugStub, paceGetPC(), false);
+         cpuPrvCyclePace(cpu);
+         cycleAcc += 20;
+ 
+@@ -3849,6 +3854,7 @@
+ 
+ template <typename T>
+ void cpuLoad(ArmCpu *cpu, T &loader) {
++    gdbStubResetPace(cpu->debugStub);
+     icacheInval(cpu->ic);
+ 
+     paceLoad(loader);
+--- a/src/uarm/uarm/gdbstub.cpp
++++ b/src/uarm/uarm/gdbstub.cpp
+@@ -19,6 +19,7 @@
+ #include <string_view>
+ #include <vector>
+ #include "cputil.h"
++#include "pace.h"
+ 
+ namespace {
+ constexpr size_t packetSize = 4096; // RSP PacketSize is hexadecimal: 1000.
+@@ -104,6 +105,9 @@
+     size_t wireSize = 0;
+     std::string input, lastReply, stopReason = "S05";
+     std::vector<Breakpoint> breakpoints;
++    std::vector<uint32_t> paceBreakpoints;
++    bool stopPaceException = false, atPaceException = false;
++    std::string lastPaceException;
+ };
+ 
+ namespace {
+@@ -113,6 +117,7 @@
+     s->state = RunState::Running;
+     s->stepDone = false;
+     s->breakpoints.clear();
++    gdbStubResetPace(s);
+     s->debugRequested = false;
+     s->rx = RxState::Idle;
+     s->input.clear();
+@@ -162,6 +167,7 @@
+     s->input.clear();
+     s->lastReply.clear();
+     s->breakpoints.clear();
++    gdbStubResetPace(s);
+     s->debugRequested = false;
+     fprintf(stderr, "GDB connected\n");
+ }
+@@ -199,6 +205,29 @@
+     if (write && done) cpuInvalidateCodeCache(s->cpu);
+     return true;
+ }
++std::string paceSnapshot(const char* phase) {
++    const auto r = paceDebugState();
++    std::string out = "{\"version\":1,\"available\":true,\"phase\":\"" + std::string(phase) +
++                      "\",\"program_identity\":null,\"pc\":" + std::to_string(r.pc) +
++                      ",\"sr\":" + std::to_string(r.sr) +
++                      ",\"state_pointer\":" + std::to_string(r.statePtr);
++    for (unsigned bank = 0; bank < 2; ++bank) {
++        out += bank ? ",\"a\":[" : ",\"d\":[";
++        for (unsigned i = 0; i < 8; ++i) {
++            if (i) out += ',';
++            out += std::to_string(bank ? r.a[i] : r.d[i]);
++        }
++        out += ']';
++    }
++    return out + '}';
++}
++bool breakpointHit(stub* s, uint32_t pc, bool thumb) {
++    if (cpuIsModePace(s->cpu))
++        return std::find(s->paceBreakpoints.begin(), s->paceBreakpoints.end(), pc) != s->paceBreakpoints.end();
++    return std::any_of(s->breakpoints.begin(), s->breakpoints.end(), [=](const Breakpoint& bp) {
++        return bp.addr == pc && bp.kind == (thumb ? 2u : 4u);
++    });
++}
+ void command(stub* s, std::string_view in) {
+     // In all-stop mode, only interrupts and ACKs are accepted while executing.
+     if (s->state != RunState::Stopped) { reply(s, "E16"); return; }
+@@ -206,7 +235,41 @@
+     uint32_t addr = 0, len = 0, reg = 0;
+     std::array<uint8_t, packetSize / 2> bytes{};
+     if (in.find('\0') != in.npos) { reply(s, "E01"); return; }
+-    if (in == "qSupported" || in.substr(0, 11) == "qSupported:")
++    // ARM register packets remain ARM. Do not let native edits/steps silently
++    // change a suspended ARM context while optimized 68k code owns execution.
++    if (cpuIsModePace(s->cpu) && !in.empty() &&
++        (in.front() == 'P' || in.front() == 'G' || in.front() == 'M' ||
++         in.front() == 's' || in.substr(0, 7) == "vCont;s" ||
++         (in.front() == 'c' && in.size() > 1))) {
++        reply(s, "E16"); return;
++    }
++    if (in.substr(0, 6) == "qRcmd,") {
++        in.remove_prefix(6);
++        if (in.size() % 2 || !decodeHex(in, bytes.data(), in.size() / 2)) out = "E01";
++        else {
++            std::string text(reinterpret_cast<char*>(bytes.data()), in.size() / 2);
++            std::string_view cmd(text);
++            if (cmd == "pace" || cmd == "pace-last") {
++                const std::string result = (cmd == "pace-last"
++                    ? (s->lastPaceException.empty() ? "{\"version\":1,\"available\":false}" : s->lastPaceException)
++                    : (cpuIsModePace(s->cpu) ? paceSnapshot(s->atPaceException ? "exception" : "boundary")
++                       : "{\"version\":1,\"available\":false,\"reason\":\"native-mode\",\"program_identity\":null}")) + "\n";
++                // qRcmd permits a single hex-encoded output reply. Keeping one
++                // packet outstanding preserves ACK/NACK retransmission semantics.
++                out = encodeHex(reinterpret_cast<const uint8_t*>(result.data()), result.size());
++            } else if (cmd == "pace-stop on" || cmd == "pace-stop off") {
++                s->stopPaceException = cmd == "pace-stop on"; out = "OK";
++            } else if (cmd == "pace-clear") {
++                s->paceBreakpoints.clear(); out = "OK";
++            } else if (cmd.substr(0, 11) == "pace-break ") {
++                cmd.remove_prefix(11);
++                if (!number(cmd, addr) || !cmd.empty() || (addr & 1)) out = "E01";
++                else if (std::find(s->paceBreakpoints.begin(), s->paceBreakpoints.end(), addr) != s->paceBreakpoints.end()) out = "OK";
++                else if (s->paceBreakpoints.size() == maxBreakpoints) out = "E05";
++                else { s->paceBreakpoints.push_back(addr); out = "OK"; }
++            } else out = "E01";
++        }
++    } else if (in == "qSupported" || in.substr(0, 11) == "qSupported:")
+         out = "PacketSize=1000;qXfer:features:read+";
+     else if (in.substr(0, std::string_view("qXfer:features:read:target.xml:").size()) == "qXfer:features:read:target.xml:") {
+         // Prefix length is deliberately computed to keep syntax and parser in sync.
+@@ -366,9 +429,7 @@
+     else if (s->state == RunState::Running) {
+         if ((++s->poll & 1023) == 0) receive(s, false);
+         if (s->sock >= 0 && s->state == RunState::Running) {
+-            for (const auto& bp : s->breakpoints) {
+-                if (bp.addr == pc && bp.kind == (thumb ? 2u : 4u)) { stop(s, "S05"); break; }
+-            }
++            if (breakpointHit(s, pc, thumb)) stop(s, "S05");
+         }
+     }
+     if (s->state != RunState::Stopped) return;
+@@ -376,14 +437,41 @@
+         while (s->sock >= 0 && s->state == RunState::Stopped) receive(s, true);
+         if (s->sock < 0 || s->state != RunState::Running) return;
+         // Continue can redirect PC or change CPSR inside this very hook.
+-        const uint32_t currentPc = cpuGetRegisters(s->cpu)[15];
+-        const unsigned kind = cpuIsThumb(s->cpu) ? 2 : 4;
+-        const bool hit = std::any_of(s->breakpoints.begin(), s->breakpoints.end(), [=](const Breakpoint& bp) {
+-            return bp.addr == currentPc && bp.kind == kind;
+-        });
+-        if (!hit) return;
++        const uint32_t currentPc = cpuIsModePace(s->cpu) ? paceGetPC() : cpuGetRegisters(s->cpu)[15];
++        if (!breakpointHit(s, currentPc, cpuIsThumb(s->cpu))) return;
+         stop(s, "S05");
+     }
++}
++
++void gdbStubResetPace(stub* s) {
++    if (!s) return;
++    s->paceBreakpoints.clear();
++    s->stopPaceException = s->atPaceException = false;
++    s->lastPaceException.clear();
++}
++void gdbStubPaceException(stub* s, uint32_t instructionPc, unsigned status) {
++    // Syscalls, returns and emulator patch traps are normal control transfers.
++    if (!gdbStubEnabled(s) || status == pace_status_ok || status == pace_status_syscall ||
++        status == pace_status_return || status == pace_status_trap0 || status == pace_status_trap8) return;
++    auto snapshot = paceSnapshot("exception");
++    snapshot.pop_back();
++    snapshot += ",\"instruction_pc\":" + std::to_string(instructionPc) +
++                ",\"status\":" + std::to_string(status);
++    if (status == pace_status_memory_fault) {
++        uint32_t addr; bool write; uint_fast8_t fsr;
++        paceGetMemeryFault(&addr, &write, &fsr);
++        snapshot += ",\"fault_address\":" + std::to_string(addr) +
++                    ",\"fault_write\":" + (write ? "true" : "false") +
++                    ",\"fault_status\":" + std::to_string(fsr);
++    }
++    s->lastPaceException = snapshot + '}';
++    if (!s->stopPaceException) return;
++    // Observe the completed/partially completed instruction before dispatching
++    // its exception. Continue dispatches it once; it never replays the access.
++    s->atPaceException = true;
++    stop(s, "S05");
++    while (s->sock >= 0 && s->state == RunState::Stopped) receive(s, true);
++    s->atPaceException = false;
+ }
+ 
+ stub* gdbStubInit(ArmCpu* cpu, int port) {
+--- a/src/uarm/uarm/gdbstub.h
++++ b/src/uarm/uarm/gdbstub.h
+@@ -18,11 +18,15 @@
+ void gdbStubDebugBreakRequested(struct stub *stub);
+ void gdbStubReportPc(struct stub *stub, uint32_t pc, bool thumb);
+ void gdbStubInstructionExecuted(struct stub *stub);
++void gdbStubPaceException(struct stub *stub, uint32_t instructionPc, unsigned status);
++void gdbStubResetPace(struct stub *stub);
+ #else
+ #define gdbStubEnabled(...) false
+ #define gdbStubDebugBreakRequested(...)
+ #define gdbStubReportPc(...)
+ #define gdbStubInstructionExecuted(...)
++#define gdbStubPaceException(...)
++#define gdbStubResetPace(...)
+ #endif
+ 
+ #endif
+--- a/src/uarm/uarm/pace.cpp
++++ b/src/uarm/uarm/pace.cpp
+@@ -614,6 +614,20 @@
+ 
+ void paceSetPriviledged(bool _priviledged) { priviledged = _priviledged; }
+ 
++PaceDebugState paceDebugState() {
++    PaceDebugState result{};
++    for (unsigned i = 0; i < 8; ++i) {
++        result.d[i] = m68k_dreg(regs, i);
++        result.a[i] = m68k_areg(regs, i);
++    }
++    result.pc = regs.pc;
++    result.statePtr = statePtr;
++    // Compose lazy flags without changing regs.sr or the memory fault latch.
++    result.sr = (regs.sr & 0xff00) | (GET_XFLG << 4) | (GET_NFLG << 3) |
++                (GET_ZFLG << 2) | (GET_VFLG << 1) | GET_CFLG;
++    return result;
++}
++
+ enum paceStatus paceExecute() {
+     fsr = 0;
+     pendingStatus = pace_status_ok;
+--- a/src/uarm/uarm/pace.h
++++ b/src/uarm/uarm/pace.h
+@@ -62,6 +62,14 @@
+ uint32_t paceGetAreg(uint8_t index);
+ void paceSetAreg(uint8_t index, uint32_t value);
+ 
++// Host-only inspection: copies interpreter state without touching guest memory.
++// The CPU/debugger caller must establish whether this state is currently active.
++struct PaceDebugState {
++    uint32_t d[8], a[8], pc, statePtr;
++    uint16_t sr;
++};
++PaceDebugState paceDebugState();
++
+ enum paceStatus paceExecute();
+ 
+ template <typename T>
