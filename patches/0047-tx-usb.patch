@@ -1,0 +1,244 @@
+--- a/src/uarm/uarm/pxa270_UDC.cpp
++++ b/src/uarm/uarm/pxa270_UDC.cpp
+@@ -2,6 +2,7 @@
+ 
+ #include "pxa270_UDC.h"
+ 
++#include <algorithm>
+ #include <cstdlib>
+ #include <cstring>
+ 
+@@ -27,38 +28,97 @@
+     uint16_t udcfnr;
+     uint8_t up3ocr;
+ 
++    // CPU-side endpoint 0 storage only. No USB host, control-transfer sequencer,
++    // packet producer/consumer or DMA requests are attached to this controller.
++    uint8_t rx0[16], tx0[16];
++    uint8_t rx0Pos, tx0Count;
++
+     template <typename T>
+-    void DoSaveLoad(T &h) {
++    void DoSaveLoad(T &h, uint32_t version) {
+         for (auto &e : ep) h.Do32(e.ccra).Do16(e.csr).Do16(e.bcr);
+         h.Do32(udccr).DoBuffer32(udcicr, 2).DoBuffer32(udcisr, 2)
+             .Do32(udcotgicr).Do32(udcotgisr).Do32(up2ocr).Do16(udcfnr).Do8(up3ocr);
++        if (version >= 1)
++            h.DoBuffer(rx0, sizeof(rx0)).DoBuffer(tx0, sizeof(tx0))
++                .Do8(rx0Pos).Do8(tx0Count);
+     }
+ };
++
++// Intel PXA27x Developer's Manual 280000-003, sections 12.4.1,
++// 12.4.2 and 12.6.5-12.6.11. ISR latches are independent of endpoint status.
++static void pxa270UdcPrvIrq(Pxa270Udc *udc) {
++    pxaIcInt(udc->ic, PXA_I_USB, (udc->udcisr[0] & udc->udcicr[0]) ||
++             (udc->udcisr[1] & udc->udcicr[1]) || (udc->udcotgisr & udc->udcotgicr));
++}
++
++static void pxa270UdcPrvFlushTx0(Pxa270Udc *udc) {
++    memset(udc->tx0, 0, sizeof(udc->tx0));
++    udc->tx0Count = 0;
++    udc->ep[0].csr &= ~0x02; // IPR; flushing is not successful transmission
++}
++
++static void pxa270UdcPrvFlushRx0(Pxa270Udc *udc) {
++    memset(udc->rx0, 0, sizeof(udc->rx0));
++    udc->rx0Pos = 0;
++    udc->ep[0].bcr = 0;
++    udc->ep[0].csr &= ~0x40; // RNE; OPC is acknowledged separately
++}
++
++static bool pxa270UdcPrvFifo0(Pxa270Udc *udc, uint_fast8_t size, bool write, void *buf) {
++    if (!(udc->udccr & 1)) return false;
++    if (write) {
++        // Narrow writes are only for the final partial word (caller contract).
++        // Reject an unavailable FIFO atomically; do not invent a USB FIFO-error
++        // interrupt for an invalid processor access.
++        if ((udc->ep[0].csr & 2) || udc->tx0Count + size > sizeof(udc->tx0)) return false;
++        uint32_t value = 0;
++        if (size == 1) value = *static_cast<uint8_t *>(buf);
++        else if (size == 2) { uint16_t v; memcpy(&v, buf, 2); value = v; }
++        else memcpy(&value, buf, 4);
++        for (unsigned i = 0; i < size; ++i) udc->tx0[udc->tx0Count++] = value >> (8 * i);
++        if (udc->tx0Count == sizeof(udc->tx0)) udc->ep[0].csr |= 2;
++    } else {
++        uint32_t value = 0;
++        const unsigned count = std::min<unsigned>(4, udc->ep[0].bcr);
++        for (unsigned i = 0; i < count; ++i) value |= uint32_t(udc->rx0[udc->rx0Pos++]) << (8 * i);
++        udc->ep[0].bcr -= count;
++        if (!udc->ep[0].bcr) udc->ep[0].csr &= ~0x40;
++        // Empty/unused lanes read as zero; never return stale packet data.
++        memcpy(buf, &value, 4);
++    }
++    return true;
++}
+ 
+ static bool pxa270UdcPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size, bool write,
+                                    void *buf) {
+     struct Pxa270Udc *udc = (struct Pxa270Udc *)userData;
+     uint32_t val = 0;
+ 
+-    if (size != 4) {
+-        fprintf(stderr, "%s: Unexpected %s of %u bytes to 0x%08lx\n", __func__,
+-                write ? "write" : "read", size, (unsigned long)pa);
+-        return false;
+-    }
++    if (pa < PXA_UDC_BASE || pa >= PXA_UDC_BASE + PXA_UDC_SIZE || (pa & 3)) return false;
++    const bool fifo0 = pa == PXA_UDC_BASE + 0x300;
++    if (size != 4 && !(fifo0 && write && (size == 1 || size == 2))) return false;
++    if (fifo0) return pxa270UdcPrvFifo0(udc, size, write, buf);
+ 
+     pa = (pa - PXA_UDC_BASE) >> 2;
+-
+-    if (write) val = *(uint32_t *)buf;
++    if (write) memcpy(&val, buf, 4);
+ 
+     if (pa >= 0x100 / 4 && pa < 0x160 / 4) {
+         uint_fast8_t epNo = pa - 0x100 / 4;
+ 
+         if (!write)
+             val = udc->ep[epNo].csr;
+-        else if (!epNo)
+-            udc->ep[epNo].csr = ((udc->ep[epNo].csr & 0x1ff) | (val & 0x20e)) & ~(val & 0x191);
+-        else
+-            udc->ep[epNo].csr = ((udc->ep[epNo].csr & 0x3d7) | (val & 0x1a8)) & ~(val & 0x016);
++        else if (!epNo) {
++            // ACM/DME are R/W; AREN/FST/IPR are W1S; SA/SST/OPC are W1C.
++            auto &csr = udc->ep[0].csr;
++            csr = ((csr & ~0x208) | (val & 0x208) | (val & 0x122)) & ~(val & 0x091);
++            if (val & 0x004) pxa270UdcPrvFlushTx0(udc); // FTF reads zero
++            if (val & 0x001) pxa270UdcPrvFlushRx0(udc);
++        } else {
++            auto &e = udc->ep[epNo];
++            e.csr = ((e.csr & ~0x028) | (val & 0x028)) & ~(val & 0x016);
++            if ((e.ccra & 0x1000) && (val & 0x080)) e.csr |= 0x080;
++            if (val & 0x100) { e.bcr = 0; e.csr &= ~0x2c0; } // FEF self-clears
++        }
+     } else if (pa >= 0x200 / 4 && pa < 0x260 / 4) {
+         uint_fast8_t epNo = pa - 0x200 / 4;
+ 
+@@ -67,24 +127,34 @@
+         else
+             val = udc->ep[epNo].bcr;
+     } else if (pa >= 0x300 / 4 && pa < 0x360 / 4) {
+-        uint_fast8_t epNo = pa - 0x300 / 4;
+-
+-        ERR("FIFO %c for USB EP %d\n", write ? 'W' : 'R', epNo);
++        // Programmable endpoint FIFOs need configuration selection and packet
++        // buffering, which are not implemented. Fail the guest access rather
++        // than terminating the emulator or pretending a transfer succeeded.
++        return false;
+     } else if (pa >= 0x404 / 4 && pa < 0x460 / 4) {
+         uint_fast8_t epNo = pa - 0x400 / 4;
+ 
+-        if (write) {
++        if (write && !(udc->udccr & 1)) {
+             udc->ep[epNo].ccra = val & 0x07fffffful;
+         } else
+             val = udc->ep[epNo].ccra;
+     } else
+         switch (pa) {
+             case 0x000 / 4:  // UDCCR
+-                if (write)
++                if (write) {
++                    const bool disabling = (udc->udccr & 1) && !(val & 1);
+                     udc->udccr = ((udc->udccr & 0x70011ffeul) | (val & 0x80000001ul)) &
+-                                 ~(val & 0x0000001cul);
+-                else
+-                    val = udc->udccr;
++                                 ~(val & 0x00000008ul); // EMCE is W1C
++                    // UDR is ignored without host-enabled remote wakeup. SMAC
++                    // self-clears; there is no host-selected configuration here.
++                    udc->udccr &= ~0x14ul;
++                    if (disabling) {
++                        pxa270UdcPrvFlushTx0(udc);
++                        pxa270UdcPrvFlushRx0(udc);
++                        for (auto &e : udc->ep) { e.csr = 0; e.bcr = 0; }
++                        udc->udccr &= 0x80000009ul;
++                    }
++                } else val = udc->udccr;
+                 break;
+ 
+             case 0x04 / 4:  // UDICICR0
+@@ -103,14 +173,14 @@
+ 
+             case 0x0c / 4:  // UDICISR0
+                 if (write)
+-                    udc->udcisr[0] = val;
++                    udc->udcisr[0] &= ~val;
+                 else
+                     val = udc->udcisr[0];
+                 break;
+ 
+             case 0x10 / 4:  // UDICISR1
+                 if (write)
+-                    udc->udcisr[1] = val & 0xf800fffful;
++                    udc->udcisr[1] &= ~(val & 0xf800fffful);
+                 else
+                     val = udc->udcisr[1];
+                 break;
+@@ -154,7 +224,8 @@
+                 return false;
+         }
+ 
+-    if (!write) *(uint32_t *)buf = val;
++    if (!write) memcpy(buf, &val, 4);
++    else pxa270UdcPrvIrq(udc);
+ 
+     return true;
+ }
+@@ -173,23 +244,49 @@
+     if (!memRegionAdd(physMem, PXA_UDC_BASE, PXA_UDC_SIZE, pxa270UdcPrvMemAccessF, udc))
+         ERR("cannot add UDC to MEM\n");
+ 
++    pxa270UdcPrvIrq(udc);
+     return udc;
+ }
+ 
+ 
+ template <typename T>
+ void pxa270UdcSave(Pxa270Udc *state, T &savestate) {
+-    auto chunk = savestate.GetChunk(ChunkType::pxa270udc, 0);
++    auto chunk = savestate.GetChunk(ChunkType::pxa270udc, 1);
+     if (!chunk) ERR("cannot allocate pxa270udc state");
+     SaveChunkHelper helper(*chunk);
+-    state->DoSaveLoad(helper);
++    state->DoSaveLoad(helper, 1);
+ }
+ 
+ void pxa270UdcLoad(Pxa270Udc *state, SavestateLoader<ChunkType> &loader) {
+-    auto chunk = loader.GetChunkOrFail(ChunkType::pxa270udc, 0, "pxa270udc");
++    uint32_t version;
++    auto chunk = loader.GetChunkOrFail(ChunkType::pxa270udc, 1, "pxa270udc", version);
+     if (!chunk) return;
++    // Validate before publishing any loaded state or driving the interrupt line.
++    Pxa270Udc restored = *state;
+     LoadChunkHelper helper(*chunk);
+-    state->DoSaveLoad(helper);
++    restored.DoSaveLoad(helper, version);
++    if (version == 0) {
++        // The old stub had no FIFOs and treated ISR acknowledgements as writes.
++        // Its saved ISR/packet bits must not turn into phantom traffic/IRQs.
++        pxa270UdcPrvFlushTx0(&restored);
++        pxa270UdcPrvFlushRx0(&restored);
++        restored.ep[0].csr &= 0x328;
++        for (unsigned i = 1; i < 24; ++i) { restored.ep[i].csr &= 0x028; restored.ep[i].bcr = 0; }
++        restored.udcisr[0] = restored.udcisr[1] = restored.udcotgisr = 0;
++        restored.udccr &= 0x80000001ul;
++    }
++    if (chunk->HasError() || restored.rx0Pos > 16 || restored.tx0Count > 16 ||
++        restored.ep[0].bcr > 16 - restored.rx0Pos) {
++        loader.NotifyError();
++        return;
++    }
++    // Only documented bits participate in IRQ generation, including on restore.
++    restored.udcicr[1] &= 0xf800fffful;
++    restored.udcisr[1] &= 0xf800fffful;
++    restored.udcotgicr &= 0x010303fful;
++    restored.udcotgisr &= 0x010303fful;
++    *state = restored;
++    pxa270UdcPrvIrq(state);
+ }
+ 
+ template void pxa270UdcSave<Savestate<ChunkType>>(Pxa270Udc *, Savestate<ChunkType> &);

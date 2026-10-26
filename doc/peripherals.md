@@ -466,3 +466,27 @@ The [serial support and tests](tx-serial.md) covers the packed UART FIFO fix,
 remaining UART/USB blockers, firmware-free regressions and optional fresh-log
 Palm Serial Manager probe.
 It does not provide a host serial endpoint or working HotSync.
+
+## USB controller foundation
+
+USB enumeration and HotSync remain unsupported; there is no host USB endpoint.
+`0047-tx-usb.patch` adds bounded 16-byte EP0 transmit/receive storage, PIO word
+reads and word/byte/halfword writes, packet-ready/flush/receive-count semantics,
+write-one register acknowledgements, IRQ11 aggregation and configuration-register
+write protection. EP0 staging does not validate control-transfer phases, and loading a packet never
+completes a USB transaction by itself.
+These CPU-side rules follow the [Intel PXA27x Developer’s Manual, chapter 12](https://support.eurotech-inc.com/developers/datasheets/PXA270_DeveloperManual.pdf).
+
+The bus/control-transfer sequencer, configuration validation/selection, endpoints
+A–X FIFOs, DMA, cable/OTG signalling and host transport are unimplemented.
+Unsupported FIFO accesses return a guest access failure instead of aborting the
+emulator. Empty EP0 reads and unused read lanes deterministically return zero;
+invalid/full/disabled FIFO accesses fail without consuming data. Narrow writes
+are intended only for the final partial word; this caller rule is not enforced.
+
+Run `make test-pxa270-udc test-tx-state` (or `heavy build make ...` on shared hosts).
+Synthetic tests seed receive packets and pending IRQs directly; they do not
+exercise a USB host. The UDC state chunk is now version 1 and preserves EP0 bytes
+and positions. Version-0 sessions load with empty FIFOs and cleared stub-generated
+packet/IRQ state; interrupt masks and endpoint configuration survive. Older
+Frond binaries cannot load the new UDC chunk.

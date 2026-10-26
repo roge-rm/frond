@@ -19,7 +19,7 @@ bool memRegionAdd(ArmMem*, uint32_t base, uint32_t, ArmMemAccessF access, void* 
     regions.push_back({base, access, context}); return true;
 }
 void pxaIcInt(PxaIc*, uint_fast8_t number, bool raised) {
-    assert(number == PXA_I_FFUART || number == PXA_I_HWUART); if (raised) ++irqs;
+    assert(number == PXA_I_FFUART || number == PXA_I_HWUART || number == PXA_I_USB); if (raised) ++irqs;
 }
 static uint32_t io(uint32_t base, unsigned offset, bool write, uint32_t value = 0, unsigned size = 4) {
     for (auto& r : regions) if (r.base == base) {
@@ -174,10 +174,18 @@ int main() {
     puts("PASS: disabled UART retains pending callback RX until re-enabled");
     fatal([&] { write(1, 0xc0); });
     puts("BLOCKED: UART DMA enable reaches fatal unimplemented path");
-    fatal([] { io(0x40600000, 0x300, false); });
-    fatal([] { io(0x40600000, 0x300, true, 0x1234); });
-    fatal([] { io(0x40600000, 0x304, true, 0x1234); });
-    puts("BLOCKED: UDC EP0 read/write and EP1 FIFO write reach fatal unimplemented paths");
+    io(0x40600000, 0, true, 1);
+    assert(io(0x40600000, 0x300, false) == 0); // no host has supplied a packet
+    for (unsigned i = 0; i < 4; ++i) io(0x40600000, 0x300, true, 0x1234);
+    assert(io(0x40600000, 0x100, false) == 2); // locally staged, never transmitted
+    assert(io(0x40600000, 0x0c, false) == 0);
+    for (auto& r : regions) if (r.base == 0x40600000) {
+        uint32_t value = 0;
+        assert(!r.access(r.context, r.base + 0x300, 4, true, &value)); // full EP0
+        assert(!r.access(r.context, r.base + 0x304, 4, true, &value)); // unsupported EP A
+    }
+    puts("PASS: UDC EP0 staging; full/unsupported FIFO accesses fail without fatal traps");
+    puts("BLOCKED: UDC has no USB bus/control sequencer or host transport; no enumeration/HotSync");
     free(uart); free(udc); regions.clear();
     // Earlier FFUART and the separate PXA25x HWUART retain byte-mode transfers,
     // even if guest software writes the BUS bit. No new older-board behavior.

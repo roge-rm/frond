@@ -88,11 +88,16 @@ int main() {
     }
     write32(0xa5fffffc, 0x76543210);
     for (unsigned i = 0; i < 16; ++i) loadWmmx(i, 0x123456789abcdef0ull + i);
+    // USB foundation: save a partially loaded EP0 packet through the real SoC.
+    write32(0x40600000, 1);
+    write32(0x40600300, 0x44332211);
+    assert(!(read32(0x40600100) & 2));
     const auto savedTimer = read32(0x40a00010);
     assert(soc.Save());
     const auto saved = soc.GetSavestate();
     std::vector<uint8_t> snapshot(saved.size);
     std::memcpy(snapshot.data(), saved.data, saved.size);
+    write32(0x40600100, 4); // discard the unsent EP0 packet before restore
     for (auto addr : registers) write32(addr, 0);
     write32(0xa5fffffc, 0);
     for (unsigned i = 0; i < 16; ++i) loadWmmx(i, 0);
@@ -101,6 +106,10 @@ int main() {
     soc.KeyDown(keyIdHard1);
     assert(soc.Load(snapshot.size(), snapshot.data()));
     assert(audioQueuePendingSamples(audio) == 0);
+    assert(read32(0x40600000) == 1 && !(read32(0x40600100) & 2));
+    for (unsigned i = 0; i < 3; ++i) write32(0x40600300, 0x88776655);
+    assert(read32(0x40600100) & 2); // restored four bytes + twelve new bytes
+    assert(!read32(0x4060000c)); // no fabricated packet-complete IRQ
     assert(read32(0x40a00010) == savedTimer);
     for (unsigned i = 0; i < expected.size(); ++i) assert(read32(registers[i]) == expected[i]);
     assert(read32(0xa5fffffc) == ~0x76543210u);
@@ -128,6 +137,11 @@ int main() {
     assert(read32(0x58000000) == 0);
     assert(read32(0x41500048) == 100);
     assert(read32(0x40600004) == 0);
+    assert(read32(0x40600000) == 0 && read32(0x40600100) == 0);
+    write32(0x40600000, 1);
+    for (unsigned i = 0; i < 4; ++i) write32(0x40600300, i);
+    assert(read32(0x40600100) == 2); // cold reset cleared FIFO occupancy
+    write32(0x40600000, 0);
     assert(read32(0x40f00080) == 0);
     assert(read32(0x44000260) == 0);
     assert(read32(0xa5fffffc) == 0xffffffffu);
@@ -205,6 +219,7 @@ int main() {
     soc.SdEject();
     sdCardReset();
     puts("PASS: TX cold reset preserves inserted/ejected card detect and stored sectors");
+    puts("PASS: TX EP0 partial FIFO restore, packet readiness and cold reset through the real SoC");
     puts("PASS: E2 timer and version-zero LCD/power sessions");
     puts("PASS: TX peripheral/WMMX reload, truncated-state rollback and reset without RAM erasure");
 }
