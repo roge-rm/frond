@@ -84,7 +84,8 @@ checkpoint. Named exports retry explicit `not-ready` responses within
 `--ready-timeout`; other export errors fail immediately.
 
 An idle third-party app using `EvtGetEvent(evtWaitForever)` can remain not-ready
-until normal user input occurs. Safe injection inside that blocked native call
+until normal user input occurs. In an interactive session, interact with the app
+and retry the operation. Safe injection inside that blocked native call
 is an [open bridge issue](tx-native.md#open-developer-workflow-issue-indefinitely-idle-applications).
 The SD test probe's bounded idle wait is a fixture workaround; the runner does
 not send input or modify apps to manufacture readiness.

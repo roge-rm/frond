@@ -178,7 +178,13 @@ class Control:
                 return result
             if result['code'] != 'not-ready':
                 raise RunError(result['code'], result['message'])
-            pause(.2, deadline)
+            try:
+                pause(.2, deadline)
+            except RunError as error:
+                if error.code != 'timeout':
+                    raise
+                raise RunError('timeout', f'{command}: Palm OS did not become ready. '
+                               'An app waiting indefinitely for input may need normal user interaction.') from error
 
 
 def check_deadline(deadline):

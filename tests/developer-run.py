@@ -235,6 +235,7 @@ class DeveloperRunTest(unittest.TestCase):
     def test_export_not_ready_timeout(self):
         result = self.run_case({'export_retries': 999}, ['--export-db', 'Test log', '--ready-timeout', '.3'])
         self.assertEqual(result['error']['code'], 'timeout')
+        self.assertIn('waiting indefinitely', result['error']['message'])
         self.assertEqual(result['stage'], 'export')
         self.assertFalse(result['artifacts']['session_saved'])
 

@@ -237,7 +237,7 @@ MainWindow::MainWindow(const QString& core) : core(core) {
         else statusBar()->showMessage(tr("Stopped."));
     });
     connect(&client, &DesktopClient::closeRequested, this, [this] { stop(true); });
-    connect(&client, &DesktopClient::result, this, [this](const QString& command, bool ok, const QString&, const QString& message) {
+    connect(&client, &DesktopClient::result, this, [this](const QString& command, bool ok, const QString& code, const QString& message) {
         busy = false; forceButton->hide(); refresh();
         if (!ok && exchangeStage != ExchangeStage::None) { exchangeResult(false, message); return; }
         if (!ok) {
@@ -247,7 +247,10 @@ MainWindow::MainWindow(const QString& core) : core(core) {
                 else save();
                 return;
             }
-            failure(message); return;
+            if (code == "not-ready" && (command == "export" || command == "export-db" || command == "install" || command == "launch-app"))
+                failure(message + tr("\n\nIf the Palm is idle, interact with the open app and then try again."));
+            else failure(message);
+            return;
         }
         if (command == "sd-state") { cardPresent = message != "none"; cardInserted = message == "inserted"; }
         else if (command == "sd-create" || command == "sd-insert" || command == "sd-reinsert") cardPresent = cardInserted = true;
