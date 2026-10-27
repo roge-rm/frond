@@ -1,0 +1,195 @@
+--- a/src/uarm/uarm/audio_queue.h
++++ b/src/uarm/uarm/audio_queue.h
+@@ -15,6 +15,15 @@
+ 
+ size_t audioQueuePendingSamples(struct AudioQueue* audioQueue);
+ 
++struct AudioQueueState {
++    size_t pendingSamples;
++    uint64_t generation;
++};
++
++// A clear marks a discontinuity; consumers must re-prime for the new stream.
++AudioQueueState audioQueueGetState(struct AudioQueue* audioQueue);
++size_t audioQueuePopChunkIfGeneration(struct AudioQueue* audioQueue, uint32_t* destination,
++                                     size_t count, uint64_t generation);
+ void audioQueueClear(struct AudioQueue* audioQueue);
+ 
+ #endif  //  _AUDIO_QUEUE_H_
+--- a/src/uarm/uarm/audio_queue.cpp
++++ b/src/uarm/uarm/audio_queue.cpp
+@@ -18,6 +18,7 @@
+ struct AudioQueue {
+     Queue<uint32_t> queue;
+     size_t capacity;
++    uint64_t generation{0};
+ 
+     AudioQueue(size_t capacity) : queue(capacity), capacity(capacity) {}
+ 
+@@ -63,8 +64,24 @@
+     return audioQueue->queue.GetSize();
+ }
+ 
++AudioQueueState audioQueueGetState(struct AudioQueue* audioQueue) {
++    AUDIO_QUEUE_LOCK;
++    return {audioQueue->queue.GetSize(), audioQueue->generation};
++}
++
++size_t audioQueuePopChunkIfGeneration(struct AudioQueue* audioQueue, uint32_t* destination,
++                                     size_t count, uint64_t generation) {
++    AUDIO_QUEUE_LOCK;
++    if (audioQueue->generation != generation) return 0;
++    size_t actualCount = 0;
++    while (audioQueue->queue.GetSize() > 0 && actualCount < count)
++        destination[actualCount++] = audioQueue->queue.Pop();
++    return actualCount;
++}
++
+ void audioQueueClear(struct AudioQueue* audioQueue) {
+     AUDIO_QUEUE_LOCK;
+ 
+     audioQueue->queue.Clear();
++    ++audioQueue->generation;
+ }
+--- a/src/uarm/native/SdlAudioDriver.h
++++ b/src/uarm/native/SdlAudioDriver.h
+@@ -32,6 +32,7 @@
+     std::atomic<uint64_t> underrunCount{0};
+     std::atomic<bool> starting{true};
+     bool lowLatencyStartup;
++    uint64_t queueGeneration{0};  // owned by the SDL callback thread
+ 
+     uint32_t bufferThresholdStart{0};
+     uint32_t bufferThresholdStop{0};
+--- a/src/uarm/native/SdlAudioDriver.cpp
++++ b/src/uarm/native/SdlAudioDriver.cpp
+@@ -84,7 +84,14 @@
+ 
+ void SdlAudioDriver::AudioCallback(uint8_t* stream, int len) {
+     size_t samplesRemaining = len >> 2;
+-    size_t samplesPending = audioQueuePendingSamples(audioQueue);
++    const auto queueState = audioQueueGetState(audioQueue);
++    size_t samplesPending = queueState.pendingSamples;
++    if (queueState.generation != queueGeneration) {
++        queueGeneration = queueState.generation;
++        audioBuffering = true;
++        starting = true;
++        audioBackpressure = false;
++    }
+ 
+     if (audioBuffering && samplesPending > (starting ? bufferThresholdStartup : bufferThresholdStop)) {
+         audioBuffering = false;
+@@ -101,7 +108,8 @@
+ 
+     if (!audioBuffering) {
+         samplesRemaining -=
+-            audioQueuePopChunk(audioQueue, reinterpret_cast<uint32_t*>(stream), samplesRemaining);
++            audioQueuePopChunkIfGeneration(audioQueue, reinterpret_cast<uint32_t*>(stream),
++                                          samplesRemaining, queueGeneration);
+     }
+ 
+     if (samplesRemaining > 0) {
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -333,6 +333,8 @@
+ 
+ bool SocPXA::OnSleep() {
+     if (PowerSleeping()) {
++        if (audioQueue) audioQueueClear(audioQueue);
++        if (fastAudio) { fastAudio->Reset(); UpdateFastAudioRoute(); }
+         pxaTimrSynchronize(tmr);
+         cpuSetSlowPath(cpu, SLOW_PATH_REASON_RESCHEDULE);
+         return true;
+--- a/src/uarm/uarm/pxa_DMA.cpp
++++ b/src/uarm/uarm/pxa_DMA.cpp
+@@ -257,10 +257,16 @@
+         }
+ 
+         if (doWork) {
++            // A descriptor chain may be a ring. Yield even for unpaced memory
++            // transfers so guest execution, reset and checkpoint requests can
++            // run. One maximum-length descriptor still fits in this budget
++            // at the smallest burst size; running channels remain scheduled.
++            unsigned bursts = 0;
+             do {
+                 if (pxaDmaPrvChannelDoBurst(dma, channel)) irqUpdate = true;
+ 
+-            } while (pxaDmaPrvChannelRunning(dma, ch) && (ch->CR & 0x1fff) && !justOne);
++            } while (++bursts < 2048 && pxaDmaPrvChannelRunning(dma, ch) &&
++                     (ch->CR & 0x1fff) && !justOne);
+         }
+     }
+ 
+--- a/src/uarm/uarm/pxa_MMC.cpp
++++ b/src/uarm/uarm/pxa_MMC.cpp
+@@ -133,7 +133,8 @@
+ }
+ 
+ static bool pxaMmcPrvDataFifoW(struct PxaMmc *mmc, uint32_t val) {
+-    if (mmc->fifoBytes >= mmc->blkLen) {
++    if (!(mmc->cmdat & 8) || mmc->fifoBytes >= mmc->blkLen ||
++        mmc->fifoBytes >= sizeof(mmc->blockFifo)) {
+         fprintf(stderr, "Cannot write over-full fifo\n");
+         return false;
+     }
+@@ -177,7 +178,8 @@
+ }
+ 
+ static bool pxaMmcPrvDataFifoR(struct PxaMmc *mmc, uint32_t *valP) {
+-    if (!mmc->fifoBytes) {
++    if ((mmc->cmdat & 8) || !mmc->fifoBytes || mmc->fifoOfst >= sizeof(mmc->blockFifo) ||
++        mmc->fifoBytes > sizeof(mmc->blockFifo) - mmc->fifoOfst) {
+         fprintf(stderr, "MMC unit fifo empty at read\n");
+         return false;
+     }
+@@ -516,7 +518,23 @@
+     return mmc;
+ }
+ 
+-void pxaMmcInsert(struct PxaMmc *mmc, struct VSD *vsd) { mmc->vsd = vsd; }
++void pxaMmcInsert(struct PxaMmc *mmc, struct VSD *vsd) {
++    if (!vsd) {
++        // Removal ends the old card's transfer. Never drain its FIFO into a
++        // later block request through a null card, or expose it after reinsert.
++        if (mmc->dataXferOngoing) mmc->stat |= (mmc->cmdat & 8) ? 4 : 1;
++        if (mmc->cmdQueued) mmc->stat |= 0x2002;
++        mmc->dataXferOngoing = mmc->cmdQueued = false;
++        mmc->fifoBytes = mmc->fifoOfst = mmc->numBlks = 0;
++        mmc->stat = (mmc->stat & ~0xc0) | 0x1000;
++        mmc->iReg &= ~0x60;
++        pxaDmaExternalReq(mmc->dma, DMA_CMR_MMC_RX, false);
++        pxaDmaExternalReq(mmc->dma, DMA_CMR_MMC_TX, false);
++        pxaMmcPrvRecalcIregAndFifo(mmc);
++    }
++    // Reconnecting restored state is not a new transfer or physical card edge.
++    mmc->vsd = vsd;
++}
+ 
+ template <typename T>
+ void pxaMmcSave(struct PxaMmc *mmc, T &savestate) {
+@@ -534,6 +552,10 @@
+ 
+     LoadChunkHelper helper(*chunk);
+     mmc->DoSaveLoad(helper);
++    if (mmc->blkLen > 0x3ff || mmc->fifoBytes > sizeof(mmc->blockFifo) ||
++        mmc->fifoOfst > sizeof(mmc->blockFifo) ||
++        (!(mmc->cmdat & 8) && mmc->fifoBytes > sizeof(mmc->blockFifo) - mmc->fifoOfst))
++        loader.NotifyError();
+ }
+ 
+ template void pxaMmcSave<Savestate<ChunkType>>(PxaMmc *mmc, Savestate<ChunkType> &savestate);
+--- a/src/uarm/uarm/vSD.cpp
++++ b/src/uarm/uarm/vSD.cpp
+@@ -740,6 +740,12 @@
+ 
+     LoadChunkHelper helper(*chunk);
+     vsd->DoSaveLoad(helper, version);
++    // Restored lengths feed backing callbacks or a copy from the fixed status
++    // buffer. Reject corrupt state before it can be used by the controller.
++    if (vsd->state > StateDis ||
++        (vsd->bufIsData ? vsd->curBufLen != 512 : vsd->curBufLen > sizeof(vsd->curBuf)) ||
++        ((vsd->state == StateData || vsd->state == StateRcv) && !vsd->curBufLen) ||
++        (vsd->state == StateRcv && !vsd->bufIsData)) loader.NotifyError();
+ }
+ 
+ template void vsdSave<Savestate<ChunkType>>(VSD *vsd, Savestate<ChunkType> &savestate);

@@ -82,6 +82,10 @@ UI-root wait; offline symbol reports require matching executable, PRC and live
 resource bytes. General code ownership and watchpoints remain unsupported.
 Tools for [measuring input and audio timing](doc/input-latency.md) are also available.
 
+[Lifecycle tests](doc/session-testing.md) cover audio, SD transfers and local
+network/UART ownership across sleep, reset and restore. Physical-device timing
+remains unvalidated.
+
 The upstream core is pinned in `vendor/cloudpilot`; ordered patches in `patches/`
 are applied to `build/source`. See [build validation](doc/build-validation.md)
 for reconstruction and package checks.

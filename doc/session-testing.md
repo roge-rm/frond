@@ -80,6 +80,71 @@ load with empty fetch buffers. No firmware or guest page tables are changed.
 invalidation, first-level translation faults, fresh-CPU restore, legacy chunks
 and malformed state rejection. It is included in `make test`.
 
+## Audio, card and host I/O lifecycle
+
+True power sleep clears queued host PCM and fast-audio preview state. Ordinary
+interrupt idle retains them. A queue clear marks a stream discontinuity; SDL
+discards its previous buffering/backpressure decision and primes the replacement
+stream before playback. A concurrent clear cannot make an old callback snapshot
+consume replacement PCM. Audio already copied to SDL or the host sound backend
+cannot be retracted. Reset and nonempty load attempts also clear queued output; a rejected
+load restores guest state but does not retain external audio, sockets or peers.
+
+SD snapshots preserve partial controller transfers. Restore performs no backing
+I/O, and successful remount reconnects the controller without resetting its FIFO
+or adding a card-detect edge. Explicit removal, including failed remount after a
+fresh-SoC restore, discards pending transfer data and withdraws DMA requests.
+Invalid restored transfer lengths, FIFO bounds and card states are rejected.
+Close guest files before ejecting: aborting a transfer cannot flush an app's files.
+
+Memory-copy DMA descriptor rings yield after bounded work per channel so guest
+execution, other channels, reset and checkpoint requests remain reachable. UART
+peer callbacks stop during true power sleep; wake resets the UART domain and
+detaches its external owner. Nonempty normal and rejected loads close host socket/peer
+ownership; apps may need to reconnect. Temporary database checkpoints preserve
+ownership while freezing external effects. These checks do not add host serial
+transport, UART DMA, USB or HotSync support.
+
+`make test-lifecycle` is firmware-free and included in `make test`. It checks
+audio discontinuities and concurrent queue replacement, whole-guest clock pause
+under audio backpressure, fast-audio sleep/restart, cyclic DMA fairness, local
+socket/peer checkpoint and failure paths, partial SD transfers and rejected-load
+recovery. The existing power, session, network and UART suites remain in use.
+
+For whole-session firmware checks, including embedded SD backing, build the
+optional driver and use new private output directories:
+
+```sh
+heavy build make test-tx-lifecycle-rom
+timeout 600s heavy emulator ./build/test-tx-lifecycle-rom \
+  --plain-session /private/tx-ready.session \
+  --output /private/results/tx-plain-lifecycle
+timeout 600s heavy emulator ./build/test-tx-lifecycle-rom \
+  --audio-session /private/tx-playing-with-card.session \
+  --output /private/results/tx-audio-lifecycle
+```
+
+The driver accepts complete v4/v5 TX sessions and embedded 32/64/128 MiB cards.
+It copies inputs, preserves card attachment and backing bytes, records per-phase
+PCM, and round-trips awake and sleeping state into fresh SoCs. A plain fixture
+must enter true power sleep; an audio fixture requires nonzero PCM before/after
+awake restore and characterizes the app's power-key policy. LCD-off alone is not
+power sleep. When sleep occurs, it checks stationary CPU, no new PCM and unchanged
+card bytes for ten guest seconds, then wake and restored output. Reset checks
+bounded LCD/controller recovery and whole-session restore; it does not assert
+that the app or playback automatically restarts. The separate
+[SD VFS acceptance](peripherals.md#validation) requires fresh post-reset app and
+file-I/O results. A nonblank display alone does not establish UI recovery.
+
+Qualified TX fixtures have passed these phases with continuous audio and both
+inserted and ejected 32 MiB cards. This establishes playback restart, not gapless
+wake audio. PCM capture excludes SDL/backend and physical output latency. Guest
+run budgets and host deadlines are separate measurements; audio backpressure
+pauses scheduled CPU/peripheral work together, while RTC remains host-wall-time
+based. Physical TX comparisons and deterministic RTC timing remain unvalidated.
+Keep all snapshots, PCM and logs private. The driver needs an external host
+deadline, including time spent waiting for a shared emulator slot.
+
 For user-owned firmware, build the optional test and run either form:
 
 ```sh
@@ -95,6 +160,9 @@ time without input. Exit 1 means boot, display, resume or persistence failed. Ex
 persistence worked but the device woke without a wake event. Only exit 0 is a
 complete sleep/wake pass. The fixture must be in a UI that handles the power key;
 booting raw firmware waits 60 seconds of guest time before testing it.
+This older helper rejects embedded SD sessions; use `test-tx-lifecycle-rom` for
+those. The fixed-budget `benchmark-session` helper also rejects embedded cards
+rather than benchmarking a silently detached device.
 
 For a local diagnostic build, apply `tools/debug/tx-power-trace.patch` to the
 prepared source with `git apply --directory=build/source`. Set

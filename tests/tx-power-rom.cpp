@@ -33,6 +33,7 @@ struct Machine {
         SessionFile5 session;
         require(session.Deserialize(bytes.size(), bytes.data()), "invalid session");
         require(session.GetDeviceType() == deviceTypeTX, "TX session required");
+        require(!session.GetSdSize(), "embedded SD requires test-tx-lifecycle-rom");
         auto copy = [](const void* data, size_t size) {
             return std::vector<uint8_t>(static_cast<const uint8_t*>(data),
                                        static_cast<const uint8_t*>(data) + size);

@@ -21,7 +21,7 @@ class ProbeTimeout(TimeoutError):
 
 def export_if_ready(request, path):
     try:
-        request('export', path)
+        request('export-db', f'{path}\nFrondSDLog')
     except ControlError as error:
         if error.code != 'not-ready':
             raise

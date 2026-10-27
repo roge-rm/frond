@@ -467,3 +467,32 @@ test-debugger-inspect: out/frond
 		tests/debugger-inspect.cpp @build/debugger-inspect-core.rsp build/source/src/common/libcommon.a \
 		$(CPU_TEST_LDLIBS) -o build/test-debugger-inspect
 	./build/test-debugger-inspect
+
+.PHONY: test-lifecycle test-tx-lifecycle-rom
+test: test-lifecycle
+test-lifecycle: out/frond
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/lifecycle-core.rsp
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' ! -name cputil.o > build/audio-lifecycle-core.rsp
+	$(CXX) -std=c++17 -O1 -g $(shell sdl2-config --cflags) \
+		-Ibuild/source/src/uarm/native -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/audio-lifecycle.cpp build/source/src/uarm/native/SdlAudioDriver.cpp \
+		@build/audio-lifecycle-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-audio-lifecycle
+	./build/test-audio-lifecycle
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/native \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/peripheral-lifecycle.cpp @build/lifecycle-core.rsp build/source/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-peripheral-lifecycle
+	./build/test-peripheral-lifecycle
+	$(CXX) -std=c++17 -O1 -g -ffunction-sections -fdata-sections \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/sd-lifecycle.cpp build/source/src/uarm/uarm/pxa_MMC.cpp build/source/src/uarm/uarm/vSD.cpp \
+		build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -Wl,--gc-sections -o build/test-sd-lifecycle
+	./build/test-sd-lifecycle
+
+# Optional: build only; invoke explicitly with private sessions and a host deadline.
+test-tx-lifecycle-rom: out/frond
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/tx-lifecycle-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/tx-lifecycle-rom.cpp @build/tx-lifecycle-core.rsp build/source/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-tx-lifecycle-rom

@@ -79,7 +79,10 @@ class Results(unittest.TestCase):
                 return True, ''
             if command == 'launch-app':
                 apps.append(argument)
-            if command == 'export':
+            if command == 'export-db':
+                destination, database = str(argument).split('\n')
+                self.assertEqual(database, 'FrondSDLog')
+                argument = destination
                 exports[0] += 1
                 lines = old + empty
                 if exports[0] > 1 and mode != 'stale':
@@ -128,7 +131,7 @@ class Results(unittest.TestCase):
         self.assertEqual(report['status'], 'failed')
         self.assertEqual(len(report['observations']), 2)
         self.assertEqual(report['observations'][-1]['state'], 'failed')
-        self.assertEqual(sum(command == 'export' for command, _ in calls), 2)
+        self.assertEqual(sum(command == 'export-db' for command, _ in calls), 2)
 
     def test_only_not_ready_can_be_retried(self):
         replies = iter(['not-ready', 'not-ready', None, 'export'])
@@ -144,7 +147,7 @@ class Results(unittest.TestCase):
         with self.assertRaises(ControlError) as raised:
             export_if_ready(request, 'log.zip')
         self.assertEqual(raised.exception.code, 'export')
-        self.assertEqual(calls, [('export', 'log.zip')] * 4)
+        self.assertEqual(calls, [('export-db', 'log.zip\nFrondSDLog')] * 4)
 
     def test_fresh_invocations_and_capacity(self):
         first = invocation()

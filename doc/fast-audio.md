@@ -31,9 +31,12 @@ the first audible block and rejects a queue above 6144 frames. The host audio
 clock therefore controls sustained preview pacing. This is an experimental
 compatibility compromise: guest timing is affected while waiting for audio.
 
-Save states contain guest state only. Reset or restore discards queued preview
+Save states contain guest state only. Power sleep, reset or restore discards queued preview
 samples and rechecks the driver on the next write. Supply the flag again when
 starting a saved session in a new process. Audio off/on clears preview buffering.
+SDL re-primes after queue replacement; already delivered backend audio cannot
+be revoked. See the [lifecycle checks](session-testing.md#audio-card-and-host-io-lifecycle)
+for sleep, restore and failure coverage.
 
 ## Testing and limits
 

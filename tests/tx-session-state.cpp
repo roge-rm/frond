@@ -224,6 +224,26 @@ int main() {
     assert(sdCardRead(65535, sector) && sector[0] == 0x5a);
     soc.SdInsert();
     assert(soc.SdInserted() && !(read32(0x40e00000) & (1u << 14)));
+    // Reject an unsafe embedded controller length and recover the live card's
+    // prior controller state without consuming or changing backing sectors.
+    const auto blockLength = read32(0x4110001c);
+    assert(soc.Save());
+    auto cardState = soc.GetSavestate();
+    std::vector<uint32_t> brokenCard(static_cast<uint32_t*>(cardState.data),
+                                     static_cast<uint32_t*>(cardState.data) + cardState.size / 4);
+    size_t cardOffset = 1 + 2 * brokenCard[0];
+    bool changedCard = false;
+    for (unsigned i = 0; i < brokenCard[0]; ++i) {
+        if (brokenCard[1 + 2 * i] == uint32_t(ChunkType::pxaMmc)) {
+            brokenCard[cardOffset + 3] = 0xffff0001; // BLKLEN=65535, one block.
+            changedCard = true;
+        }
+        cardOffset += brokenCard[2 + 2 * i];
+    }
+    assert(changedCard && !soc.Load(brokenCard.size() * 4, brokenCard.data()));
+    assert(read32(0x4110001c) == blockLength);
+    assert(soc.SdInserted() && !(read32(0x40e00000) & (1u << 14)));
+    assert(sdCardRead(65535, sector) && sector[0] == 0x5a);
     soc.SdEject();
     sdCardReset();
     puts("PASS: TX cold reset preserves inserted/ejected card detect and stored sectors");

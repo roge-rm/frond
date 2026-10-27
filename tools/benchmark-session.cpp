@@ -39,6 +39,8 @@ int main(int argc, char** argv) {
         if (!session.Deserialize(data.size(), data.data()) ||
             session.GetDeviceType() != int(DeviceType5::deviceTypeTX))
             throw std::runtime_error("a saved TX session is required");
+        if (session.GetSdSize())
+            throw std::runtime_error("embedded SD is unsupported by this benchmark; use test-tx-lifecycle-rom for lifecycle checks");
         std::vector<uint8_t> nor(session.GetNorSize()), nand(session.GetNandSize());
         std::memcpy(nor.data(), session.GetNor(), nor.size());
         std::memcpy(nand.data(), session.GetNand(), nand.size());

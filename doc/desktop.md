@@ -96,8 +96,9 @@ The strip sends hardware keypad events, so Palm OS button assignments and app
 handling apply. It remains usable when the infrared keyboard accessory is
 attached. With that accessory detached, F1–F4 operate the four application
 buttons, arrow keys navigate and Enter selects. The existing Escape power-key
-shortcut remains available, but TX sleep/resume is incomplete; the strip does
-not expose a Power button.
+shortcut remains available; the strip does not expose a Power button.
+Qualified TX sessions have passed true sleep/wake and whole-session restore;
+see the [lifecycle guide](session-testing.md) for coverage and timing limits.
 The same shortcuts are listed in **Help → Hardware Keyboard Controls**.
 
 The strip stays beneath the display when the view rotates. Its clicks are

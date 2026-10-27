@@ -136,7 +136,9 @@ int main() {
         assert(driver.GetAudioBackpressure());
         callback();
         assert(!driver.GetAudioBackpressure());
-        audioQueueClear(queue);
+        // Drain without replacing the stream: this is an ordinary underrun.
+        std::vector<uint32_t> drained(audioQueuePendingSamples(queue));
+        assert(audioQueuePopChunk(queue, drained.data(), drained.size()) == drained.size());
         callback();
         assert(driver.GetUnderrunCount() == 1);
         push(1600);

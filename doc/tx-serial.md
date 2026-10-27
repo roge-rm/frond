@@ -52,6 +52,12 @@ beats, invalid peripheral widths and wrapping/unmapped accesses stop with BUSERR
 and its interrupt rather than aborting or repeating a failed burst. Completed
 partial transfers remain completed.
 
+Cyclic memory-copy descriptor chains yield after at most 2048 bursts per channel
+in a scheduler callback, then continue on a later dispatch. This keeps other
+channels and guest lifecycle operations reachable; it is not a wall-time latency
+guarantee. `make test-lifecycle` exercises rings across sleep, reset and accepted
+or rejected loads, alongside local socket and UART peer ownership checks.
+
 UART DMA remains unsupported and enabling IER[DMAE] remains fatal. Independent
 TX/RX requests, per-word valid-byte counts, EOR/EOC and error draining are missing.
 Memory-copy fixes do not implement those interfaces. Arbitrary unaligned/DALGN,
