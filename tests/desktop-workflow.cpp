@@ -25,6 +25,40 @@ static QByteArray digest(const QString& path) {
 class WorkflowTest : public QObject {
     Q_OBJECT
  private slots:
+    void fastAudioLaunchOption() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QTemporaryDir files;
+        QFile source(files.filePath("input.frond"));
+        QVERIFY(source.open(QIODevice::WriteOnly)); source.write("session"); source.close();
+        QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly));
+        core.write(R"PY(#!/usr/bin/python3
+import pathlib,socket,sys
+pathlib.Path(sys.argv[1]+'.args').write_text('\n'.join(sys.argv[1:]))
+s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+for line in s.makefile('rb'):
+    i,cmd,arg=line.rstrip(b'\n').split(b'\t')
+    message={b'keyboard-state':b'detached',b'network-state':b'disabled',b'sd-state':b'none'}.get(cmd,b'done')
+    if cmd==b'save': pathlib.Path(bytes.fromhex(arg.decode()).decode()).write_text('saved')
+    s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
+    if cmd==b'quit': break
+)PY");
+        core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        {
+            MainWindow window(core.fileName()); window.show();
+            auto* option = window.findChild<QCheckBox*>("fastAudio"); QVERIFY(option);
+            QVERIFY(!option->isChecked()); option->setChecked(true);
+            window.openSession(source.fileName(), true);
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("stop")->isEnabled(), 5000);
+            QVERIFY(!option->isEnabled());
+            QFile args(source.fileName()+".args"); QVERIFY(args.open(QIODevice::ReadOnly));
+            QVERIFY(args.readAll().contains("--experimental-fast-audio"));
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        }
+        MainWindow next(core.fileName());
+        QVERIFY(next.findChild<QCheckBox*>("fastAudio")->isChecked());
+        QSettings().clear();
+    }
     void failedSaveStaysOpen() {
         QTemporaryDir files;
         QFile source(files.path() + "/import.frond");

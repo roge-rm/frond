@@ -81,6 +81,12 @@ MainWindow::MainWindow(const QString& core) : core(core) {
         if (client.available()) send(enabled ? "audio-on" : "audio-off");
     });
     layout->addWidget(audio);
+    fastAudio = new QCheckBox(tr("Experimental low-latency audio"), root);
+    fastAudio->setObjectName("fastAudio");
+    fastAudio->setToolTip(tr("Applies on the next start. Supports one 44.1 kHz stereo stream with compatible Palm TX firmware; unsupported audio falls back to normal playback and may briefly pause."));
+    fastAudio->setChecked(settings.value("fastAudio", false).toBool());
+    connect(fastAudio, &QCheckBox::toggled, this, [this](bool enabled) { settings.setValue("fastAudio", enabled); });
+    layout->addWidget(fastAudio);
     sdStatus = new QLabel(tr("SD card: Not running"), root);
     sdStatus->setObjectName("sdState");
     layout->addWidget(sdStatus);
@@ -285,6 +291,7 @@ void MainWindow::refresh() {
     startButton->setEnabled(!running && !busy);
     stopButton->setEnabled(running && !busy && !stopping);
     audio->setEnabled(!busy && !stopping);
+    fastAudio->setEnabled(!running && !busy);
     doubleSize->setEnabled(!running && !busy);
     const bool enabled = client.available() && !busy && !stopping && exchangeStage == ExchangeStage::None;
     for (auto* action : runningActions) action->setEnabled(enabled);
@@ -331,6 +338,7 @@ void MainWindow::start() {
     sessionPath = source.startsWith(managedRoot + '/') ? source : managedRoot + "/Palm TX " +
         QDateTime::currentDateTime().toString("yyyy-MM-dd HH-mm-ss") + "-" + QUuid::createUuid().toString(QUuid::Id128).first(8) + ".frond";
     if (!audio->isChecked()) arguments << "--no-sound";
+    if (fastAudio->isChecked()) arguments << "--experimental-fast-audio";
     if (!doubleSize->isChecked()) arguments << "--small-window";
     sessionLock = std::make_unique<QLockFile>(sessionPath + ".lock");
     sessionLock->setStaleLockTime(0);

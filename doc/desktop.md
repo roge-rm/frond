@@ -3,7 +3,7 @@
 Frond's Qt 6 launcher provides desktop controls alongside the SDL Palm display.
 The Palm display remains a separate window in this release. Firmware is supplied
 by the user. Palm TX support is experimental. Virtual SD cards and experimental virtual Wi-Fi are supported;
-Bluetooth remains unavailable. See [peripherals](peripherals.md). Use the normal audio path while evaluating desktop behaviour.
+Bluetooth remains unavailable. See [peripherals](peripherals.md).
 
 ## Debian Trixie / KDE Plasma
 
@@ -22,6 +22,11 @@ Close Frond or its Palm window to save the running device automatically. The nex
 launch resumes that working session when **Resume last session on startup** is
 checked. Uncheck it to start at the launcher and choose a session yourself.
 **Save and Stop** saves the Palm and returns to the launcher.
+
+**Experimental low-latency audio** can reduce the delay between a tap and sound.
+Set it before starting the Palm. It supports one 44.1 kHz stereo stream with
+compatible TX firmware; unsupported playback falls back to normal audio and may
+briefly pause. See [fast audio](fast-audio.md) for the limitations.
 
 Working copies are stored under `$XDG_DATA_HOME/frond/sessions`, normally
 `~/.local/share/frond/sessions`. Imported session files and firmware images are

@@ -42,7 +42,7 @@ class MainWindow : public QMainWindow {
     QLineEdit *nor, *nand;
     QRadioButton *savedMode, *newMode;
     QPushButton *startButton, *stopButton, *forceButton;
-    QCheckBox *audio, *doubleSize, *keyboard;
+    QCheckBox *audio, *fastAudio, *doubleSize, *keyboard;
     QPlainTextEdit* log;
     QList<QAction*> runningActions;
     QAction *sdCreate, *sdImport, *sdEject, *sdReinsert, *sdExport, *sdExchange;
