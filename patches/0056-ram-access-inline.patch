@@ -1,0 +1,420 @@
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -21,6 +21,7 @@
+ #include "icache.h"
+ #ifndef __EMSCRIPTEN__
+ #include "icache_internal.h"
++#include "mem_internal.h"
+ #endif
+ #include "mem.h"
+ #include "memcpy.h"
+@@ -783,7 +784,11 @@
+         pa = vaddr;
+     }
+ 
++#ifndef __EMSCRIPTEN__
++    bool ok = memAccessRamInline<size, write>(cpu->mem, pa, buf);
++#else
+     bool ok = memAccess<size, write>(cpu->mem, pa, buf);
++#endif
+ 
+     if (!ok) {
+         if (fsrP) *fsrP = 10;  // external abort on non-linefetch
+--- a/src/uarm/uarm/RAM.cpp
++++ b/src/uarm/uarm/RAM.cpp
+@@ -1,6 +1,7 @@
+ //(c) uARM project    https://github.com/uARM-Palm/uARM    uARM@dmitry.gr
+ 
+ #include "RAM.h"
++#include "RAM_internal.h"
+ 
+ #include <cstdlib>
+ #include <cstring>
+@@ -10,145 +11,13 @@
+ #include "cputil.h"
+ #include "memory_buffer.h"
+ 
+-struct ArmRam {
+-    uint32_t adr;
+-    uint32_t sz;
+-    struct MemoryBuffer buf;
+-    class SoC* soc;
+-
+-    uint32_t framebufferStart;
+-    uint32_t framebufferStart_2;
+-    uint32_t framebufferStart_4;
+-    uint32_t framebufferStart_8;
+-    uint32_t framebufferStart_16;
+-    uint32_t framebufferStart_32;
+-    uint32_t framebufferStart_64;
+-    uint32_t framebufferEnd;
+-};
++void ramSetFramebufferDirty(struct ArmRam* ram, uint32_t pa, uint32_t size) {
++    ram->soc->SetFramebufferDirty(pa, size);
++}
+ 
+ template <int size, bool write>
+ bool ramAccessF(void* userData, uint32_t pa, void* bufP) {
+-    struct ArmRam* ram = (struct ArmRam*)userData;
+-    const uint32_t offset = pa - ram->adr;
+-    const uint8_t* addr = (uint8_t*)ram->buf.buffer + offset;
+-
+-    if constexpr (write) {
+-        MEMORY_BUFFER_MARK_DIRTY(ram->buf, offset);
+-
+-        switch (size) {
+-            case 1:
+-                if (offset < ram->framebufferEnd && offset >= ram->framebufferStart)
+-                    ram->soc->SetFramebufferDirty(pa, 1);
+-
+-                *((uint8_t*)addr) = *(uint8_t*)bufP;  // our memory system is little-endian
+-                break;
+-
+-            case 2:
+-                if (offset < ram->framebufferEnd && offset >= ram->framebufferStart_2)
+-                    ram->soc->SetFramebufferDirty(pa, 2);
+-
+-                *((uint16_t*)addr) =
+-                    htole16(*(uint16_t*)bufP);  // our memory system is little-endian
+-                break;
+-
+-            case 4:
+-                if (offset < ram->framebufferEnd && offset >= ram->framebufferStart_4)
+-                    ram->soc->SetFramebufferDirty(pa, 4);
+-
+-                *((uint32_t*)addr) = htole32(*(uint32_t*)bufP);
+-                break;
+-
+-            case 64:
+-                if (offset < ram->framebufferEnd && offset >= ram->framebufferStart_64)
+-                    ram->soc->SetFramebufferDirty(pa, 64);
+-
+-                if (offset & 0x3f) MEMORY_BUFFER_MARK_DIRTY(ram->buf, offset + 0x3f);
+-
+-                *((uint64_t*)(addr + 0)) = htole64(((uint64_t*)bufP)[0]);
+-                *((uint64_t*)(addr + 8)) = htole64(((uint64_t*)bufP)[1]);
+-                *((uint64_t*)(addr + 16)) = htole64(((uint64_t*)bufP)[2]);
+-                *((uint64_t*)(addr + 24)) = htole64(((uint64_t*)bufP)[3]);
+-                *((uint64_t*)(addr + 32)) = htole64(((uint64_t*)bufP)[4]);
+-                *((uint64_t*)(addr + 40)) = htole64(((uint64_t*)bufP)[5]);
+-                *((uint64_t*)(addr + 48)) = htole64(((uint64_t*)bufP)[6]);
+-                *((uint64_t*)(addr + 56)) = htole64(((uint64_t*)bufP)[7]);
+-                break;
+-
+-            case 32:
+-                if (offset < ram->framebufferEnd && offset >= ram->framebufferStart_32)
+-                    ram->soc->SetFramebufferDirty(pa, 32);
+-
+-                if (offset & 0x1f) MEMORY_BUFFER_MARK_DIRTY(ram->buf, offset + 0x1f);
+-
+-                *((uint64_t*)(addr + 0)) = htole64(((uint64_t*)bufP)[0]);
+-                *((uint64_t*)(addr + 8)) = htole64(((uint64_t*)bufP)[1]);
+-                *((uint64_t*)(addr + 16)) = htole64(((uint64_t*)bufP)[2]);
+-                *((uint64_t*)(addr + 24)) = htole64(((uint64_t*)bufP)[3]);
+-                break;
+-
+-            case 16:
+-                if (offset < ram->framebufferEnd && offset >= ram->framebufferStart_16)
+-                    ram->soc->SetFramebufferDirty(pa, 16);
+-
+-                if (offset & 0x0f) MEMORY_BUFFER_MARK_DIRTY(ram->buf, offset + 0x0f);
+-
+-                *((uint64_t*)(addr + 0)) = htole64(((uint64_t*)bufP)[0]);
+-                *((uint64_t*)(addr + 8)) = htole64(((uint64_t*)bufP)[1]);
+-                break;
+-
+-            case 8:
+-                if (offset < ram->framebufferEnd && offset >= ram->framebufferStart_8)
+-                    ram->soc->SetFramebufferDirty(pa, 8);
+-
+-                *((uint64_t*)(addr + 0)) = htole64(((uint64_t*)bufP)[0]);
+-                break;
+-
+-            default:
+-                return false;
+-        }
+-    } else {
+-        switch (size) {
+-            case 1:
+-
+-                *(uint8_t*)bufP = *((uint8_t*)addr);
+-                break;
+-
+-            case 2:
+-
+-                *(uint16_t*)bufP = le16toh(*((uint16_t*)addr));
+-                break;
+-
+-            case 4:
+-
+-                *(uint32_t*)bufP = le32toh(*((uint32_t*)addr));
+-                break;
+-
+-            case 64:
+-                ((uint64_t*)bufP)[4] = le64toh(*((uint64_t*)(addr + 32)));
+-                ((uint64_t*)bufP)[5] = le64toh(*((uint64_t*)(addr + 40)));
+-                ((uint64_t*)bufP)[6] = le64toh(*((uint64_t*)(addr + 48)));
+-                ((uint64_t*)bufP)[7] = le64toh(*((uint64_t*)(addr + 56)));
+-                // fallthrough
+-            case 32:
+-
+-                ((uint64_t*)bufP)[2] = le64toh(*((uint64_t*)(addr + 16)));
+-                ((uint64_t*)bufP)[3] = le64toh(*((uint64_t*)(addr + 24)));
+-                // fallthrough
+-            case 16:
+-
+-                ((uint64_t*)bufP)[1] = le64toh(*((uint64_t*)(addr + 8)));
+-                // fallthrough
+-            case 8:
+-                ((uint64_t*)bufP)[0] = le64toh(*((uint64_t*)(addr + 0)));
+-                break;
+-
+-            default:
+-
+-                return false;
+-        }
+-    }
+-
+-    return true;
++    return ramAccessInline<size, write>(userData, pa, bufP);
+ }
+ 
+ #define DECLARE_ACCESS_F_SIZE(size)                                                \
+--- /dev/null
++++ b/src/uarm/uarm/RAM_internal.h
+@@ -0,0 +1,158 @@
++// ArmRam layout and the RAM access body, shared with the CPU's inlined RAM path.
++#ifndef FROND_RAM_INTERNAL_H
++#define FROND_RAM_INTERNAL_H
++
++#include <cstdint>
++
++#include "CPEndian.h"
++#include "RAM.h"
++#include "cputil.h"
++#include "memory_buffer.h"
++
++class SoC;
++
++// Out of line so callers don't need SoC.h. Calls soc->SetFramebufferDirty.
++void ramSetFramebufferDirty(struct ArmRam* ram, uint32_t pa, uint32_t size);
++
++struct ArmRam {
++    uint32_t adr;
++    uint32_t sz;
++    struct MemoryBuffer buf;
++    class SoC* soc;
++
++    uint32_t framebufferStart;
++    uint32_t framebufferStart_2;
++    uint32_t framebufferStart_4;
++    uint32_t framebufferStart_8;
++    uint32_t framebufferStart_16;
++    uint32_t framebufferStart_32;
++    uint32_t framebufferStart_64;
++    uint32_t framebufferEnd;
++};
++
++template <int size, bool write>
++static FORCE_INLINE bool ramAccessInline(void* userData, uint32_t pa, void* bufP) {
++    struct ArmRam* ram = (struct ArmRam*)userData;
++    const uint32_t offset = pa - ram->adr;
++    const uint8_t* addr = (uint8_t*)ram->buf.buffer + offset;
++
++    if constexpr (write) {
++        MEMORY_BUFFER_MARK_DIRTY(ram->buf, offset);
++
++        switch (size) {
++            case 1:
++                if (offset < ram->framebufferEnd && offset >= ram->framebufferStart)
++                    ramSetFramebufferDirty(ram, pa, 1);
++
++                *((uint8_t*)addr) = *(uint8_t*)bufP;  // our memory system is little-endian
++                break;
++
++            case 2:
++                if (offset < ram->framebufferEnd && offset >= ram->framebufferStart_2)
++                    ramSetFramebufferDirty(ram, pa, 2);
++
++                *((uint16_t*)addr) =
++                    htole16(*(uint16_t*)bufP);  // our memory system is little-endian
++                break;
++
++            case 4:
++                if (offset < ram->framebufferEnd && offset >= ram->framebufferStart_4)
++                    ramSetFramebufferDirty(ram, pa, 4);
++
++                *((uint32_t*)addr) = htole32(*(uint32_t*)bufP);
++                break;
++
++            case 64:
++                if (offset < ram->framebufferEnd && offset >= ram->framebufferStart_64)
++                    ramSetFramebufferDirty(ram, pa, 64);
++
++                if (offset & 0x3f) MEMORY_BUFFER_MARK_DIRTY(ram->buf, offset + 0x3f);
++
++                *((uint64_t*)(addr + 0)) = htole64(((uint64_t*)bufP)[0]);
++                *((uint64_t*)(addr + 8)) = htole64(((uint64_t*)bufP)[1]);
++                *((uint64_t*)(addr + 16)) = htole64(((uint64_t*)bufP)[2]);
++                *((uint64_t*)(addr + 24)) = htole64(((uint64_t*)bufP)[3]);
++                *((uint64_t*)(addr + 32)) = htole64(((uint64_t*)bufP)[4]);
++                *((uint64_t*)(addr + 40)) = htole64(((uint64_t*)bufP)[5]);
++                *((uint64_t*)(addr + 48)) = htole64(((uint64_t*)bufP)[6]);
++                *((uint64_t*)(addr + 56)) = htole64(((uint64_t*)bufP)[7]);
++                break;
++
++            case 32:
++                if (offset < ram->framebufferEnd && offset >= ram->framebufferStart_32)
++                    ramSetFramebufferDirty(ram, pa, 32);
++
++                if (offset & 0x1f) MEMORY_BUFFER_MARK_DIRTY(ram->buf, offset + 0x1f);
++
++                *((uint64_t*)(addr + 0)) = htole64(((uint64_t*)bufP)[0]);
++                *((uint64_t*)(addr + 8)) = htole64(((uint64_t*)bufP)[1]);
++                *((uint64_t*)(addr + 16)) = htole64(((uint64_t*)bufP)[2]);
++                *((uint64_t*)(addr + 24)) = htole64(((uint64_t*)bufP)[3]);
++                break;
++
++            case 16:
++                if (offset < ram->framebufferEnd && offset >= ram->framebufferStart_16)
++                    ramSetFramebufferDirty(ram, pa, 16);
++
++                if (offset & 0x0f) MEMORY_BUFFER_MARK_DIRTY(ram->buf, offset + 0x0f);
++
++                *((uint64_t*)(addr + 0)) = htole64(((uint64_t*)bufP)[0]);
++                *((uint64_t*)(addr + 8)) = htole64(((uint64_t*)bufP)[1]);
++                break;
++
++            case 8:
++                if (offset < ram->framebufferEnd && offset >= ram->framebufferStart_8)
++                    ramSetFramebufferDirty(ram, pa, 8);
++
++                *((uint64_t*)(addr + 0)) = htole64(((uint64_t*)bufP)[0]);
++                break;
++
++            default:
++                return false;
++        }
++    } else {
++        switch (size) {
++            case 1:
++
++                *(uint8_t*)bufP = *((uint8_t*)addr);
++                break;
++
++            case 2:
++
++                *(uint16_t*)bufP = le16toh(*((uint16_t*)addr));
++                break;
++
++            case 4:
++
++                *(uint32_t*)bufP = le32toh(*((uint32_t*)addr));
++                break;
++
++            case 64:
++                ((uint64_t*)bufP)[4] = le64toh(*((uint64_t*)(addr + 32)));
++                ((uint64_t*)bufP)[5] = le64toh(*((uint64_t*)(addr + 40)));
++                ((uint64_t*)bufP)[6] = le64toh(*((uint64_t*)(addr + 48)));
++                ((uint64_t*)bufP)[7] = le64toh(*((uint64_t*)(addr + 56)));
++                // fallthrough
++            case 32:
++
++                ((uint64_t*)bufP)[2] = le64toh(*((uint64_t*)(addr + 16)));
++                ((uint64_t*)bufP)[3] = le64toh(*((uint64_t*)(addr + 24)));
++                // fallthrough
++            case 16:
++
++                ((uint64_t*)bufP)[1] = le64toh(*((uint64_t*)(addr + 8)));
++                // fallthrough
++            case 8:
++                ((uint64_t*)bufP)[0] = le64toh(*((uint64_t*)(addr + 0)));
++                break;
++
++            default:
++
++                return false;
++        }
++    }
++
++    return true;
++}
++
++#endif
+--- a/src/uarm/uarm/mem.cpp
++++ b/src/uarm/uarm/mem.cpp
+@@ -1,6 +1,7 @@
+ //(c) uARM project    https://github.com/uARM-Palm/uARM    uARM@dmitry.gr
+ 
+ #include "mem.h"
++#include "mem_internal.h"
+ 
+ #include <cstdlib>
+ #include <cstring>
+@@ -9,23 +10,6 @@
+ #include "ROM.h"
+ #include "cputil.h"
+ 
+-#define NUM_MEM_REGIONS 128
+-
+-#define REGION_RAM 0
+-#define REGION_ROM 1
+-#define REGION_BASE 2
+-
+-struct ArmMemRegion {
+-    uint32_t pa;
+-    uint32_t ub;
+-    ArmMemAccessF aF;
+-    void *uD;
+-};
+-
+-struct ArmMem {
+-    struct ArmMemRegion regions[NUM_MEM_REGIONS];
+-};
+-
+ struct ArmMem *memInit(void) {
+     struct ArmMem *mem = (struct ArmMem *)malloc(sizeof(*mem));
+ 
+--- /dev/null
++++ b/src/uarm/uarm/mem_internal.h
+@@ -0,0 +1,40 @@
++// ArmMem layout and an inlined RAM-first access, shared with the CPU's memory path.
++#ifndef FROND_MEM_INTERNAL_H
++#define FROND_MEM_INTERNAL_H
++
++#include <cstdint>
++
++#include "RAM_internal.h"
++#include "cputil.h"
++#include "mem.h"
++
++#define NUM_MEM_REGIONS 128
++
++#define REGION_RAM 0
++#define REGION_ROM 1
++#define REGION_BASE 2
++
++struct ArmMemRegion {
++    uint32_t pa;
++    uint32_t ub;
++    ArmMemAccessF aF;
++    void *uD;
++};
++
++struct ArmMem {
++    struct ArmMemRegion regions[NUM_MEM_REGIONS];
++};
++
++// memAccess with its first branch (primary RAM) inlined. Other addresses and sizes
++// go through memAccess, which repeats the RAM test and then checks ROM and devices.
++template <int size, bool write>
++static FORCE_INLINE bool memAccessRamInline(struct ArmMem* mem, uint32_t addr, void* buf) {
++    if constexpr (size <= 8) {
++        const uint32_t ub = addr + size;
++        const struct ArmMemRegion& ram = mem->regions[REGION_RAM];
++        if (ram.pa <= addr && ram.ub >= ub) return ramAccessInline<size, write>(ram.uD, addr, buf);
++    }
++    return memAccess<size, write>(mem, addr, buf);
++}
++
++#endif

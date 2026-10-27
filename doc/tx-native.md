@@ -118,6 +118,14 @@ retain all ten bits to distinguish addresses separated by 2 GiB. The timer skips
 redundant interrupt-controller updates when no status bit is set; register
 writes and asserted interrupt levels retain their normal handling.
 
+A fetch in the same 32-byte cache line as the previous one reuses that line,
+still checking its tag, revision and decoded slot. Loads and stores of up to
+8 bytes to primary RAM take an inlined path after MMU translation, with the same
+permission, alignment, dirty-page and framebuffer handling. On local Bike and
+SunVox guest-timed replays the core runs about 7% fewer host instructions, with
+identical frame, PCM and snapshot hashes. An access that runs past
+0xffffffff matches no RAM, ROM or device region and fails.
+
 On native TX, the OS timer batches up to 32 ticks between events. Counter reads
 account for instruction progress inside the current CPU batch; new matches and
 watchdog deadlines shorten the next batch. This removes repeated scheduler work

@@ -1,0 +1,88 @@
+--- a/src/uarm/uarm/mem.cpp
++++ b/src/uarm/uarm/mem.cpp
+@@ -22,6 +22,9 @@
+ 
+ void memDeinit(struct ArmMem *mem) { (void)mem; }
+ 
++// A region's end is stored in 32 bits, with 0 meaning a free slot, so it has to end below 4 GiB.
++static bool memRegionFits(uint32_t pa, uint32_t sz) { return uint64_t(pa) + sz <= 0xffffffffull; }
++
+ static bool checkForIntersection(struct ArmMem *mem, uint32_t pa, uint32_t sz) {
+     uint_fast8_t i;
+ 
+@@ -37,6 +40,8 @@
+ 
+ static bool memRegionAddFixed(struct ArmMem *mem, uint8_t region, uint32_t pa, uint32_t sz,
+                               ArmMemAccessF af, void *uD) {
++    if (!memRegionFits(pa, sz)) return false;
++
+     mem->regions[region].pa = pa;
+     mem->regions[region].aF = af;
+     mem->regions[region].uD = uD;
+@@ -48,6 +53,7 @@
+ bool memRegionAdd(struct ArmMem *mem, uint32_t pa, uint32_t sz, ArmMemAccessF aF, void *uD) {
+     uint_fast8_t i;
+ 
++    if (!memRegionFits(pa, sz)) return false;
+     if (checkForIntersection(mem, pa, sz)) return false;
+ 
+     // find a free region and put it there
+@@ -88,6 +94,7 @@
+ template <int size, bool write>
+ bool memAccess(struct ArmMem *mem, uint32_t addr, void *buf) {
+     const uint32_t ub = addr + size;
++    if (ub < addr) return false;  // wrapped past 0xffffffff, so in no region
+ 
+     if (mem->regions[REGION_RAM].pa <= addr && mem->regions[REGION_RAM].ub >= ub) {
+         return ramAccessF<size, write>(mem->regions[REGION_RAM].uD, addr, buf);
+@@ -123,6 +130,7 @@
+ 
+ bool memAccess(struct ArmMem *mem, uint32_t addr, uint_fast8_t size, bool write, void *buf) {
+     const uint32_t ub = addr + size;
++    if (ub < addr) return false;  // wrapped past 0xffffffff, so in no region
+ 
+     if (mem->regions[REGION_RAM].pa <= addr && mem->regions[REGION_RAM].ub >= ub) {
+         return ramAccessF(mem->regions[REGION_RAM].uD, addr, size, write, buf);
+@@ -147,6 +155,7 @@
+ template <int size>
+ bool memInstructionFetch(struct ArmMem *mem, uint32_t addr, void *buf) {
+     const uint32_t ub = addr + size;
++    if (ub < addr) return false;  // wrapped past 0xffffffff, so in no region
+ 
+     if (mem->regions[REGION_RAM].pa <= addr && mem->regions[REGION_RAM].ub >= ub)
+         return ramAccessF<size, false>(mem->regions[REGION_RAM].uD, addr, buf);
+--- a/src/uarm/uarm/mem_internal.h
++++ b/src/uarm/uarm/mem_internal.h
+@@ -32,7 +32,9 @@
+     if constexpr (size <= 8) {
+         const uint32_t ub = addr + size;
+         const struct ArmMemRegion& ram = mem->regions[REGION_RAM];
+-        if (ram.pa <= addr && ram.ub >= ub) return ramAccessInline<size, write>(ram.uD, addr, buf);
++        // ub < addr means the access wrapped past 0xffffffff; memAccess rejects it.
++        if (ub >= addr && ram.pa <= addr && ram.ub >= ub)
++            return ramAccessInline<size, write>(ram.uD, addr, buf);
+     }
+     return memAccess<size, write>(mem, addr, buf);
+ }
+--- a/src/uarm/uarm/RAM.cpp
++++ b/src/uarm/uarm/RAM.cpp
+@@ -134,7 +134,7 @@
+ }
+ 
+ void* ramResolveAddress(struct ArmRam* ram, uint32_t pv, uint32_t size) {
+-    if (pv < ram->adr || pv + size > ram->adr + ram->sz) return nullptr;
++    if (pv < ram->adr || uint64_t(pv) + size > uint64_t(ram->adr) + ram->sz) return nullptr;
+ 
+     return ram->buf.buffer + (pv - ram->adr);
+ }
+--- a/src/uarm/uarm/ROM.cpp
++++ b/src/uarm/uarm/ROM.cpp
+@@ -132,7 +132,7 @@
+ void *romGetData(struct ArmRom *rom) { return rom->data; }
+ 
+ void *romResolveAddress(struct ArmRom *rom, uint32_t pa, uint32_t size) {
+-    if (pa < rom->base || pa + size > rom->base + rom->size) return nullptr;
++    if (pa < rom->base || uint64_t(pa) + size > uint64_t(rom->base) + rom->size) return nullptr;
+ 
+     return reinterpret_cast<uint8_t *>(rom->data) + (pa - rom->base);
+ }
