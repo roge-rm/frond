@@ -1,6 +1,6 @@
 # Build and package checks
 
-Frond 0.2.0 targets Debian 13 (trixie) with KDE Plasma. Build tools are listed in
+Frond 0.3.0 targets Debian 13 (trixie) with KDE Plasma. Build tools are listed in
 [the README](../README.md). Packaging also needs `dpkg-dev` and `binutils`.
 The installed package uses `mtools` for SD exchange and `libslirp0` for virtual
 Wi-Fi; the latter must be found from the core's ELF dependencies. Qt's platform,
@@ -72,7 +72,7 @@ output across toolchain versions or checkout paths.
 An existing package can be checked without installing it:
 
 ```sh
-python3 tools/check-package.py out/frond_0.2.0-1_amd64.deb
+python3 tools/check-package.py out/frond_0.3.0-1_amd64.deb
 ```
 
 The validator checks the version, architecture, required runtime dependencies,
@@ -83,8 +83,8 @@ that inventory.
 
 ## Automated coverage and limits
 
-`.github/workflows/validate.yml` runs in Debian trixie on pushes and pull
-requests. It installs `mtools`, `libslirp-dev` and `gdb-multiarch`, initializes the pinned
+`.github/workflows/validate.yml` currently runs manually with `workflow_dispatch`
+in Debian trixie. It installs `mtools`, `libslirp-dev` and `gdb-multiarch`, initializes the pinned
 submodule, runs independent reconstruction and synthetic packaging checks, then
 builds and runs the firmware-free core and Qt desktop tests. It checks source
 again after testing. It does not create Frond release packages or upload files,

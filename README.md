@@ -5,7 +5,7 @@ Frond runs Palm OS 5 on Linux, with a Palm TX on your desktop. It's built on
 [uARM](https://github.com/uARM-Palm/uARM), with a Qt launcher and TX hardware,
 sound and input support.
 
-It's early, at version 0.2.0. You'll need your own Palm TX firmware; none is
+It's early, at version 0.3.0. You'll need your own Palm TX firmware; none is
 included. The launcher and Palm display use separate windows. Sound can break
 up when the host is busy, and some menus are slow.
 
@@ -56,7 +56,7 @@ To build and install a package locally (`dpkg-dev` and `binutils` are also neede
 
 ```sh
 make deb
-sudo apt install ./out/frond_0.2.0-1_amd64.deb
+sudo apt install ./out/frond_0.3.0-1_amd64.deb
 ```
 
 The package adds Frond to Plasma's application menu. It does not include firmware
