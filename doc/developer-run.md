@@ -30,8 +30,8 @@ check before the next install. Other install errors stop the run.
 
 Use `--resume-app` instead of `--app NAME` to continue the saved application's
 current screen without launching it again. This matters for games that restart
-their intro or show an About dialog on each launch. Readiness checks and the
-optional settle still run. Avoid installing applications in this mode when the
+their intro or show an About dialog on each launch. The optional settle still
+runs. Avoid installing applications in this mode when the
 saved foreground state matters: an installation or reset can change that state.
 
 `--headless` uses SDL's dummy display and audio drivers. Omit it to see the Palm
@@ -72,9 +72,12 @@ does not establish that an app's first screen has finished drawing; increase
 ## Readiness and time limits
 
 The desktop socket's `ready` event means that the host control channel is open.
-The runner separately waits for `guest-ready`, which prepares Palm OS's
-`EvtGetEvent` boundary for application commands. A PACE signature alone is not
-sufficient. It repeats this check after resets and before replay.
+The runner separately waits for `guest-ready`, which finds a supported Palm OS
+application-call boundary. The qualified TX native path also supports an idle
+native app without waiting for a 68k event trap. A PACE signature alone is not
+sufficient. It repeats this check after resets. Replay itself does not require
+an application-call boundary; resuming without installs also skips the initial
+readiness check.
 
 Readiness describes the instant it is checked; the guest can leave that boundary
 before the next command. Database export therefore performs its own preflight
@@ -83,12 +86,13 @@ on both success and failure. Injected export work rolls back to the resulting
 checkpoint. Named exports retry explicit `not-ready` responses within
 `--ready-timeout`; other export errors fail immediately.
 
-An idle third-party app using `EvtGetEvent(evtWaitForever)` can remain not-ready
-until normal user input occurs. In an interactive session, interact with the app
-and retry the operation. Safe injection inside that blocked native call
-is an [open bridge issue](tx-native.md#open-developer-workflow-issue-indefinitely-idle-applications).
-The SD test probe's bounded idle wait is a fixture workaround; the runner does
-not send input or modify apps to manufacture readiness.
+The [qualified TX native boundary](tx-native.md#pace-and-palm-api-injection)
+allows operations during native event waits without sending input or modifying
+apps. Unsupported firmware, busy guest code or an unqualified task context can
+still return `not-ready`. Readiness and command deadlines remain bounded.
+Failed installations roll back guest changes, including a failed replacement
+that has already deleted the old database. A successful install or launch
+commits its changes; database export always rolls back its injected guest work.
 
 Only `not-ready` errors are retried. A missing app, corrupt database, an open app
 that cannot be replaced, failed export or unknown protocol command fails
@@ -106,6 +110,10 @@ All limits are wall-clock seconds and accept fractional values:
 
 The earliest applicable limit wins. Replay has the overall deadline; its status
 requests also have command deadlines. Large replays need a larger `--timeout`.
+The native core also bounds each call and caps a session at 20 accounted guest
+seconds and 30 wall seconds, checked between calls/callbacks. Raising runner
+deadlines does not raise those core bounds. Native exports allow up to 64 MiB per
+database and 256 MiB per archive; exceeding a bound fails without publishing a ZIP.
 On timeout or Ctrl-C, the runner stops only its own process group, including a
 queued `heavy` invocation. Cleanup allows up to three seconds before forcing
 that group to exit. It does not attempt a save after a failed command or timeout.
@@ -129,6 +137,8 @@ Artifacts include the session, core log, screenshots with their requested times
 and exports with their database names. Each `--export-db NAME` writes a ZIP named
 `database-NNN.zip` containing only that database, useful for application logs.
 A missing or unexportable database fails the run. No full RAM export is needed.
+Archive entry filenames escape path separators, percent signs and control
+characters; the database name in the PRC/PDB header remains unchanged.
 `session_saved` is true only after a successful final save. On failure,
 `working.frond` may still be the starting session; completed artifacts and the
 core log remain for inspection. Replay dispatch errors are recorded in `core.log`;
@@ -154,3 +164,19 @@ redirection, named exports, input preservation, protocol errors and bounded
 startup, command and overall waits. The optional second command exercises the
 real TX socket, readiness, replay status, PNG capture, save and restore using
 your session. It automatically takes a shared emulator slot.
+
+For a separate real-guest workflow check, build and run the optional idle probe:
+
+```sh
+python3 tools/build-palm-probe.py --probe idle
+python3 tests/desktop-idle.py --session /private/tx-ready.session --output /private/results/idle-check
+```
+
+The probe stores wait counters in RAM so the driver can distinguish an
+outstanding event call from periodic nil returns. It refuses to count a
+nil-returning control as blocked-wait acceptance. The native case additionally
+requires independently verified kernel-idle ranges for that firmware; see
+`python3 tests/desktop-idle.py --help`. Both cases retain private checkpoints,
+request logs and original hashes, and exercise replacement failure, named ZIP
+exports, launch, persistence and controlled log retrieval without key or pen
+input. `--baseline` reproduces readiness failures and always exits nonzero.

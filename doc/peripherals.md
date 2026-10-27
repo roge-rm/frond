@@ -116,8 +116,9 @@ must append a fresh complete invocation; a successful launch or an unchanged
 older log cannot establish a pass. The 128 MiB replacement must also report
 that the old card's host and guest files are absent before creating its own file.
 The probe uses a bounded idle event wait to provide periodic host API boundaries.
-This fixture workaround does not establish support for indefinitely idle
-third-party apps; see the [open bridge issue](tx-native.md#open-developer-workflow-issue-indefinitely-idle-applications).
+This fixture workaround does not establish idle-app support by itself. Qualified
+TX firmware also has a [guarded native call boundary](tx-native.md#pace-and-palm-api-injection)
+for application and database operations during native event waits.
 
 Guest readiness is bounded and lets startup/mount work progress before a full
 RAM export. An API-ready response can precede the Expansion Manager's mounted

@@ -172,16 +172,18 @@ class Control:
 
     def retry_ready(self, command, argument, seconds):
         deadline = min(self.deadline, time.monotonic() + seconds)
+        saw_not_ready = False
         while True:
-            result = self.request(command, argument, deadline)
-            if result['ok']:
-                return result
-            if result['code'] != 'not-ready':
-                raise RunError(result['code'], result['message'])
             try:
+                result = self.request(command, argument, deadline)
+                if result['ok']:
+                    return result
+                if result['code'] != 'not-ready':
+                    raise RunError(result['code'], result['message'])
+                saw_not_ready = True
                 pause(.2, deadline)
             except RunError as error:
-                if error.code != 'timeout':
+                if error.code != 'timeout' or not saw_not_ready or time.monotonic() < deadline:
                     raise
                 raise RunError('timeout', f'{command}: Palm OS did not become ready. '
                                'An app waiting indefinitely for input may need normal user interaction.') from error
@@ -296,7 +298,8 @@ def run(args):
                 if control.line(startup) != ['0', 'event', 'ready', '']:
                     raise RunError('protocol', 'Missing desktop ready event')
                 result['stage'] = 'ready'
-                control.retry_ready('guest-ready', '', args.ready_timeout)
+                if installs or args.app is not None:
+                    control.retry_ready('guest-ready', '', args.ready_timeout)
                 for path in installs:
                     result['stage'] = 'install'
                     installed = control.retry_ready('install', path, args.ready_timeout)
@@ -307,7 +310,6 @@ def run(args):
                 if args.app is not None:
                     control.retry_ready('launch-app', args.app, args.ready_timeout)
                 pause(args.settle, deadline)
-                control.retry_ready('guest-ready', '', args.ready_timeout)
                 result['stage'] = 'replay'
                 control.require('input-replay', replay)
                 until = time.monotonic() + max(args.run_for, last_ms / 1000)

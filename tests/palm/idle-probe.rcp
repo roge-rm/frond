@@ -1,0 +1,2 @@
+/* No form resources: readiness must not depend on drawing. */
+STRING ID 1000 "Frond idle witness v2"

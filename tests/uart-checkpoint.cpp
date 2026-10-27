@@ -77,6 +77,26 @@ int main() {
     const auto count=peer.output.size();run(20);
     assert(peer.output.size()==count+1 && peer.output.back()==0x55);
     puts("PASS: checkpoint construction failure releases UART guard and pending TX progresses");
+    // Commit releases exactly its own freezes, retaining any outer owners.
+    write(0,0x5a); peer.input={0x90};
+    const auto committedAt=peer.output.size();
+    {
+        SoC::SerialCheckpoint serial(soc);
+        NetworkSimulation::Checkpoint network(soc.networkSimulation);
+        {
+            ReadOnlyGuest checkpoint(soc);
+            run(10);
+            checkpoint.Commit(); checkpoint.Commit();
+            assert(soc.networkSimulation.Frozen() && !pxaUartTaskRequired(uart));
+        }
+        run(10);
+        assert(soc.networkSimulation.Frozen() && peer.output.size()==committedAt);
+    }
+    assert(!soc.networkSimulation.Frozen()); run(20);
+    assert(peer.output.size()==committedAt+1 && peer.output.back()==0x5a);
+    assert(peer.input.empty() && read(0)==0x90);
+    { ReadOnlyGuest next(soc); next.Commit(); }
+    puts("PASS: commit releases only its own UART/network freezes and resumes real peer I/O once");
     // Internal accessory callbacks intentionally survive restore. External live
     // ownership uses AttachExternal instead (covered by uart-dma-peer.cpp).
     write(0,0x7e);assert(soc.Save());auto state=soc.GetSavestate();

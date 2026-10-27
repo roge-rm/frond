@@ -75,6 +75,18 @@ int main() {
         assert(cpuGetRegExternal(cpu, 0) == 123);
         assert(soc.GetTime() == time);
     }
+    // A caught timeout still leaves the transaction uncommittable; destruction
+    // must roll it back and allow a fresh recovery scope afterwards.
+    {
+        ReadOnlyGuest checkpoint(soc);
+        try { syscall68k_MemPtrNew(soc.GetSyscallDispatch(), SC_EXECUTE_FULL, 4); }
+        catch (const InjectedCallError&) {}
+        bool rejected = false;
+        try { checkpoint.Commit(); } catch (const std::runtime_error&) { rejected = true; }
+        assert(rejected);
+    }
+    assert(!std::memcmp(original.data(), ram, original.size()));
+    assert(!syscallDispatchInProgress(soc.GetSyscallDispatch()));
     // Successful read-only operations restore their side effects too.
     {
         ReadOnlyGuest checkpoint(soc);

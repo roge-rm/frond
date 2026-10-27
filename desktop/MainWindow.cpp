@@ -248,7 +248,7 @@ MainWindow::MainWindow(const QString& core) : core(core) {
                 return;
             }
             if (code == "not-ready" && (command == "export" || command == "export-db" || command == "install" || command == "launch-app"))
-                failure(message + tr("\n\nIf the Palm is idle, interact with the open app and then try again."));
+                failure(message + tr("\n\nWait for Palm OS to finish its current activity, then try again."));
             else failure(message);
             return;
         }

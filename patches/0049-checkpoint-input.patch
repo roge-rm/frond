@@ -1,0 +1,383 @@
+--- a/src/uarm/native/ReadOnlyGuest.h
++++ b/src/uarm/native/ReadOnlyGuest.h
+@@ -14,7 +14,7 @@
+ // Restore the guest after export, including when an injected call times out.
+ class ReadOnlyGuest {
+  public:
+-    explicit ReadOnlyGuest(SoC& soc) : soc(soc), serialCheckpoint(soc), networkCheckpoint(soc.networkSimulation), nandDirty(soc.IsNandDirty()) {
++    explicit ReadOnlyGuest(SoC& soc) : soc(soc), serialCheckpoint(soc), inputCheckpoint(soc), networkCheckpoint(soc.networkSimulation), nandDirty(soc.IsNandDirty()) {
+         if (!soc.Save()) throw std::runtime_error("cannot checkpoint guest");
+         state = copy(soc.GetSavestate());
+         ram = copy(soc.GetMemoryData());
+@@ -28,13 +28,25 @@
+         }
+         syscallDispatchBeginRecovery(soc.GetSyscallDispatch());
+     }
++    // Keep successful install/launch changes and end recovery/I/O freezing now.
++    // Idempotent so callers can commit before the lexical scope ends.
++    void Commit() {
++        if (!active) return;
++        if (syscallDispatchInProgress(soc.GetSyscallDispatch()))
++            throw std::runtime_error("cannot commit an unfinished injected call");
++        syscallDispatchEndRecovery(soc.GetSyscallDispatch());
++        active = false;
++        serialCheckpoint.Finish();
++        networkCheckpoint.Finish();
++    }
+     ~ReadOnlyGuest() {
++        if (!active) return;
+         // Restore before allowing the frontend to execute the guest again.
+         syscallDispatchEndRecovery(soc.GetSyscallDispatch());
+         restore(soc.GetMemoryData(), ram);
+         restore(soc.GetNandData(), nand);
+         if (!sd.empty()) restore(sdCardData(), sd);
+-        if (!soc.Load(state.size(), state.data())) ERR("cannot restore export checkpoint");
++        if (!inputCheckpoint.Restore(state.size(), state.data())) ERR("cannot restore export checkpoint");
+         restore(soc.GetMemoryDirtyPages(), ramPages);
+         restore(soc.GetNandDirtyPages(), nandPages);
+         soc.SetNandDirty(nandDirty);
+@@ -58,6 +70,8 @@
+     }
+     SoC& soc;
+     SoC::SerialCheckpoint serialCheckpoint;
++    SoC::InputCheckpoint inputCheckpoint;
++    bool active{true};
+     NetworkSimulation::Checkpoint networkCheckpoint;
+     bool nandDirty, sdDirty{false};
+     std::vector<uint8_t> state, ram, nand, ramPages, nandPages, sd, sdPages;
+--- a/src/uarm/uarm/NetworkSimulation.h
++++ b/src/uarm/uarm/NetworkSimulation.h
+@@ -35,12 +35,14 @@
+     class Checkpoint {
+        public:
+         explicit Checkpoint(NetworkSimulation& owner) : owner(owner) { ++owner.checkpoints; }
+-        ~Checkpoint() { --owner.checkpoints; }
++        ~Checkpoint() { Finish(); }
++        void Finish() { if (active) { --owner.checkpoints; active = false; } }
+         Checkpoint(const Checkpoint&) = delete;
+         Checkpoint& operator=(const Checkpoint&) = delete;
+ 
+        private:
+         NetworkSimulation& owner;
++        bool active{true};
+     };
+ 
+    private:
+--- a/src/uarm/uarm/SoC.h
++++ b/src/uarm/uarm/SoC.h
+@@ -4,6 +4,7 @@
+ #include <memory.h>
+ 
+ #include <cstdint>
++#include <functional>
+ 
+ #include "NetworkSimulation.h"
+ #include "LibertasCF.h"
+@@ -35,14 +36,19 @@
+     NetworkSimulation networkSimulation;
+     std::unique_ptr<LibertasCF> wirelessDevice;
+ #endif
++    class InputCheckpoint;
++    bool RestoringCheckpoint() const { return restoringCheckpoint; }
++
+     class SerialCheckpoint {
+        public:
+         explicit SerialCheckpoint(SoC& soc) : soc(soc) { soc.BeginSerialCheckpoint(); }
+-        ~SerialCheckpoint() { soc.EndSerialCheckpoint(); }
++        ~SerialCheckpoint() { Finish(); }
++        void Finish() { if (active) { soc.EndSerialCheckpoint(); active = false; } }
+         SerialCheckpoint(const SerialCheckpoint&) = delete;
+         SerialCheckpoint& operator=(const SerialCheckpoint&) = delete;
+        private:
+         SoC& soc;
++        bool active{true};
+     };
+     virtual bool KeyboardAttached() const { return false; }
+     virtual void AttachKeyboard(bool) {}
+@@ -120,6 +126,7 @@
+    protected:
+     // Actual SoC needs to implement those, the other virtuals are taken
+     // care of in soc_generic.h
++    virtual std::function<void()> CapturePeripheralInput() { return [] {}; }
+     virtual void BeforeStateReplacement() {}
+     virtual void BeginSerialCheckpoint() {}
+     virtual void EndSerialCheckpoint() {}
+@@ -200,10 +207,51 @@
+     uint32_t framebufferAccessHighWatermark{~0u};
+ 
+    private:
++    bool restoringCheckpoint{false};
+     SoC(const SoC &) = delete;
+     SoC(SoC &&) = delete;
+     SoC &operator=(const SoC &) = delete;
+     SoC &operator=(SoC &&) = delete;
+ };
+ 
++// Host input is deliberately outside the session format. A temporary rollback
++// must restore it together with the guest, including events consumed speculatively.
++class SoC::InputCheckpoint {
++ public:
++    explicit InputCheckpoint(SoC& soc)
++        : soc(soc), pens(*soc.penEventQueue), keys(*soc.keyEventQueue),
++          ticks(soc.eventQueueTicks), penTicks(soc.eventQueueTicksAtPenDown),
++          jammed(soc.jammedKey), releaseAt(soc.releaseJammedKeyAt), down(soc.penDown),
++          restorePeripheral(soc.CapturePeripheralInput()) {}
++    bool Restore(size_t size, void* data) {
++        struct Guard {
++            SoC& soc;
++            bool previous;
++            ~Guard() { soc.restoringCheckpoint = previous; }
++        } guard{soc, soc.restoringCheckpoint};
++        soc.restoringCheckpoint = true;
++        // Restore external stimuli before loading GPIO/device registers, so load
++        // callbacks see the original inputs without synthesizing new edges.
++        restorePeripheral();
++        const bool ok = soc.Load(size, data);
++        *soc.penEventQueue = pens;
++        *soc.keyEventQueue = keys;
++        soc.eventQueueTicks = ticks;
++        soc.eventQueueTicksAtPenDown = penTicks;
++        soc.jammedKey = jammed;
++        soc.releaseJammedKeyAt = releaseAt;
++        soc.penDown = down;
++        return ok;
++    }
++ private:
++    SoC& soc;
++    Queue<PenEvent> pens;
++    Queue<KeyEvent> keys;
++    uint64_t ticks, penTicks;
++    KeyId jammed;
++    uint64_t releaseAt;
++    bool down;
++    std::function<void()> restorePeripheral;
++};
++
+ #endif  // _SOC_H_
+--- a/src/uarm/uarm/ac97dev_WM9712L.cpp
++++ b/src/uarm/uarm/ac97dev_WM9712L.cpp
+@@ -673,19 +673,27 @@
+     wm->DoSaveLoad(helper);
+ }
+ 
++std::function<void()> wm9712CaptureInput(struct WM9712L *wm) {
++    const auto x = wm->penX, y = wm->penY, z = wm->penZ;
++    const bool down = wm->penDown;
++    return [wm, x, y, z, down] {
++        wm->penX = x; wm->penY = y; wm->penZ = z; wm->penDown = down;
++    };
++}
++
+ template <typename T>
+-void wm9712Load(struct WM9712L *wm, T &loader) {
++void wm9712Load(struct WM9712L *wm, T &loader, bool preserveInput) {
+     auto chunk = loader.GetChunkOrFail(ChunkType::wm9712L, SAVESTATE_VERSION, "wm9712L");
+     if (!chunk) return;
+ 
+     LoadChunkHelper helper(*chunk);
+     wm->DoSaveLoad(helper);
+ 
+-    wm9712LsetPen(wm, 0, 0, -1);
++    if (!preserveInput) wm9712LsetPen(wm, 0, 0, -1);
+ }
+ 
+ template void wm9712Lsave<Savestate<ChunkType>>(WM9712L *wm, Savestate<ChunkType> &savestate);
+ template void wm9712Lsave<SavestateProbe<ChunkType>>(WM9712L *wm,
+                                                      SavestateProbe<ChunkType> &savestate);
+ template void wm9712Load<SavestateLoader<ChunkType>>(WM9712L *wm,
+-                                                     SavestateLoader<ChunkType> &loader);
++                                                     SavestateLoader<ChunkType> &loader, bool);
+--- a/src/uarm/uarm/ac97dev_WM9712L.h
++++ b/src/uarm/uarm/ac97dev_WM9712L.h
+@@ -2,6 +2,8 @@
+ 
+ #ifndef _AC97_WM9712L_H_
+ #define _AC97_WM9712L_H_
++
++#include <functional>
+ 
+ #include <cstdint>
+ 
+@@ -34,6 +36,7 @@
+ void wm9712Lsave(struct WM9712L *wm, T &savestate);
+ 
+ template <typename T>
+-void wm9712Load(struct WM9712L *wm, T &loader);
++void wm9712Load(struct WM9712L *wm, T &loader, bool preserveInput = false);
++std::function<void()> wm9712CaptureInput(struct WM9712L *wm);
+ 
+ #endif
+--- a/src/uarm/uarm/device.h
++++ b/src/uarm/uarm/device.h
+@@ -2,6 +2,8 @@
+ 
+ #ifndef _DEVICE_H_
+ #define _DEVICE_H_
++
++#include <functional>
+ 
+ #include <cstdint>
+ #include <cstdio>
+@@ -88,6 +90,7 @@
+ void deviceSave(struct Device *dev, T &savestate);
+ 
+ template <typename T>
+-void deviceLoad(struct Device *dev, T &loader);
++void deviceLoad(struct Device *dev, T &loader, bool preserveInput = false);
++std::function<void()> deviceCaptureInput(struct Device *dev);
+ 
+ #endif
+--- a/src/uarm/uarm/devicePalmTungstenE2.cpp
++++ b/src/uarm/uarm/devicePalmTungstenE2.cpp
+@@ -346,8 +346,12 @@
+     if (dev->bcm2035) bcm2035Save(dev->bcm2035, savestate);
+ }
+ 
++std::function<void()> deviceCaptureInput(struct Device *dev) {
++    return wm9712CaptureInput(dev->wm9712L);
++}
++
+ template <typename T>
+-void deviceLoad(struct Device *dev, T &loader) {
++void deviceLoad(struct Device *dev, T &loader, bool preserveInput) {
+     if (dev->type == DeviceType5::deviceTypeTX) {
+         auto chunk = loader.GetChunkOrFail(ChunkType::palmTx, 0, "Palm TX board");
+         if (!chunk) return;
+@@ -357,7 +361,7 @@
+ #ifndef __EMSCRIPTEN__
+     if(dev->wifi)dev->wifi->Load(loader);
+ #endif
+-    wm9712Load(dev->wm9712L, loader);
++    wm9712Load(dev->wm9712L, loader, preserveInput);
+     directNandLoad(dev->nand, loader);
+     if (dev->bcm2035) bcm2035Load(dev->bcm2035, loader);
+ }
+@@ -366,7 +370,7 @@
+ template void deviceSave<SavestateProbe<ChunkType>>(Device *dev,
+                                                     SavestateProbe<ChunkType> &savestate);
+ template void deviceLoad<SavestateLoader<ChunkType>>(Device *dev,
+-                                                     SavestateLoader<ChunkType> &loader);
++                                                     SavestateLoader<ChunkType> &loader, bool);
+ 
+ void deviceNetworkPeriodic(Device* dev){
+ #ifndef __EMSCRIPTEN__
+--- a/src/uarm/uarm/keys.cpp
++++ b/src/uarm/uarm/keys.cpp
+@@ -157,6 +157,11 @@
+     keypadPrvMatrixRecalc(kp);
+ }
+ 
++std::function<void()> keypadCaptureInput(struct Keypad *kp) {
++    const Keypad saved = *kp;
++    return [kp, saved] { *kp = saved; };
++}
++
+ void keypadReset(struct Keypad *kp) {
+     int i, j;
+ 
+--- a/src/uarm/uarm/keys.h
++++ b/src/uarm/uarm/keys.h
+@@ -4,6 +4,7 @@
+ #define _KEYS_H_
+ 
+ #include <cstdint>
++#include <functional>
+ 
+ #include "pxa_GPIO.h"
+ 
+@@ -32,5 +33,6 @@
+ void keypadKeyEvt(struct Keypad *kp, enum KeyId key, bool wentDown);
+ 
+ void keypadReset(struct Keypad *kp);
++std::function<void()> keypadCaptureInput(struct Keypad *kp);
+ 
+ #endif
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -525,35 +525,36 @@
+         pxa270wmmxLoad(wmmx, loader);
+     }
+ 
+-    deviceLoad(dev, loader);
++    deviceLoad(dev, loader, RestoringCheckpoint());
+     if (PowerSleeping() && !sleeping) { loader.NotifyError(); return; }
+     if (GetDeviceType() == DeviceType5::deviceTypeTX) {
+-        scheduler->ScheduleTask(SCHEDULER_TASK_TIMER, 1_sec / 3250000ULL, PowerSleeping() ? 0 : 1);
++        if (!RestoringCheckpoint())
++            scheduler->ScheduleTask(SCHEDULER_TASK_TIMER, 1_sec / 3250000ULL, PowerSleeping() ? 0 : 1);
+         *pacePatch = {};
+         if (!PrepareM68kSupport() && cpuIsModePace(cpu)) {
+             loader.NotifyError();
+             return;
+         }
++    }
++    if (!RestoringCheckpoint()) {
++        // Full session replacement discards host inputs from the previous guest.
++        // Checkpoint rollback instead restores these from its host-side snapshot.
+         penEventQueue->Clear();
+         keyEventQueue->Clear();
+         penDown = false;
+-        for (unsigned key = keyIdHard1; key <= keyIdPower; ++key)
+-            deviceKey(dev, key, false);
+-    }
+-    if (GetDeviceType() == DeviceType5::deviceTypeE2) {
+-        // Host events queued before restore do not belong to the restored guest.
+-        // Codec load releases the pen, and keypadReset below releases GPIO keys.
+-        penEventQueue->Clear();
+-        keyEventQueue->Clear();
+-        penDown = false;
++        if (GetDeviceType() == DeviceType5::deviceTypeTX)
++            for (unsigned key = keyIdHard1; key <= keyIdPower; ++key)
++                deviceKey(dev, key, false);
+     }
+     if (audioQueue) audioQueueClear(audioQueue);
+     if (fastAudio) { fastAudio->Reset(); UpdateFastAudioRoute(); }
+ 
+-    SchedulePcmTask();
+-    keypadReset(kp);
++    if (!RestoringCheckpoint()) {
++        SchedulePcmTask();
++        keypadReset(kp);
++        UpdateSchedulePcm();
++    }
+     SetFramebufferDirty();
+-    UpdateSchedulePcm();
+ }
+ 
+ template <typename T>
+@@ -656,6 +657,12 @@
+ }
+ 
+ void SocPXA::SchedulePcmTask() { UpdateSchedulePcm(); }
++
++std::function<void()> SocPXA::CapturePeripheralInput() {
++    auto keypad = keypadCaptureInput(kp);
++    auto device = deviceCaptureInput(dev);
++    return [keypad, device] { keypad(); device(); };
++}
+ 
+ void SocPXA::BeforeStateReplacement() {
+     for (auto* uart : {ffUart, stUart, btUart, hwUart})
+--- a/src/uarm/uarm/soc_PXA.h
++++ b/src/uarm/uarm/soc_PXA.h
+@@ -76,6 +76,7 @@
+     void NotifyFastAudioUnderrun();
+ 
+    protected:
++    std::function<void()> CapturePeripheralInput() override;
+     void BeforeStateReplacement() override;
+     void BeginSerialCheckpoint() override;
+     void EndSerialCheckpoint() override;
+--- a/src/uarm/uarm/soc_generic_impl.h
++++ b/src/uarm/uarm/soc_generic_impl.h
+@@ -111,6 +111,10 @@
+ template <class T>
+ bool SocGeneric<T>::Load(size_t savestateSize, void* savestateData) {
+     if (savestateSize == 0 || !savestateData) return true;
++    if (!this->RestoringCheckpoint()) {
++        jammedKey = keyInvalid;
++        releaseJammedKeyAt = 0;
++    }
+     this->BeforeStateReplacement();
+ 
+     Savestate<ChunkType> savestate;

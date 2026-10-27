@@ -1,4 +1,4 @@
-.PHONY: all clean prepare test test-cpu test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-pxa-timer benchmark-session test-native-governor test-db-list test-export-checkpoint test-db-backup
+.PHONY: all clean prepare test test-cpu test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-pxa-timer benchmark-session test-native-governor test-db-list test-export-checkpoint test-db-backup test-checkpoint-input test-native-database
 BUILD_JOBS ?= 4
 CPU_TEST_LDLIBS ?= -lcurl -lpthread -lresolv $(shell pkg-config --libs slirp)
 all: out/frond desktop
@@ -18,7 +18,7 @@ out/frond: build/source/.prepared build/source/src/common/libcommon.a
 	cp build/source/src/uarm/cp-uarm out/frond.new
 	mv -f out/frond.new out/frond
 
-test: test-build-tools prepare test-pxa270-udc test-usb-host-fixture test-e2-state test-device-profiles test-uart-lifecycle test-uart-checkpoint test-uart-flow test-uart-dma-peer test-tx-serial test-gameplay-metrics test-mmu-fast-path test-pxa-power test-compatibility test-developer-run test-xscale-prefetch test-device-controls test-scheduler test-wifi test-host-network test-network-reliability test-keyboard test-network test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pace-debug test-pace-step test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup
+test: test-build-tools prepare test-pxa270-udc test-usb-host-fixture test-e2-state test-device-profiles test-uart-lifecycle test-uart-checkpoint test-uart-flow test-uart-dma-peer test-tx-serial test-gameplay-metrics test-mmu-fast-path test-pxa-power test-compatibility test-developer-run test-xscale-prefetch test-device-controls test-scheduler test-wifi test-host-network test-network-reliability test-keyboard test-network test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pace-debug test-pace-step test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup test-checkpoint-input test-native-database
 	python3 tests/audio-metrics.py
 	python3 tests/audio-timing.py
 	python3 tests/tx-baseline.py
@@ -425,3 +425,35 @@ test-tx-usb-rom: out/frond
 	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
 		tests/tx-usb-rom.cpp @build/usb-rom-core.rsp build/source/src/common/libcommon.a \
 		$(CPU_TEST_LDLIBS) -o build/test-tx-usb-rom
+
+.PHONY: test-checkpoint-input test-native-database
+test-checkpoint-input: out/frond
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/checkpoint-input-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/native \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/checkpoint-input.cpp @build/checkpoint-input-core.rsp build/source/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-checkpoint-input
+	./build/test-checkpoint-input
+
+test-native-database: prepare build/source/src/common/libcommon.a
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/native \
+		-Ibuild/source/src/uarm -Ibuild/source/src/uarm/uarm -Ibuild/source/src/common -Ibuild/source/src/common/zip \
+		tests/native-database.cpp build/source/src/common/libcommon.a -o build/test-native-database
+	./build/test-native-database
+
+# Firmware-free native CPU/callback/memory and SoC lifecycle regressions.
+.PHONY: test-native-primitives
+test: test-native-primitives
+test-native-primitives: out/frond
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/native-primitives-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/native-primitives.cpp @build/native-primitives-core.rsp build/source/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-native-primitives
+	./build/test-native-primitives exact-hooks
+	./build/test-native-primitives nested-hooks
+	./build/test-native-primitives buffers
+	./build/test-native-primitives scratch
+	./build/test-native-primitives stack-owner
+	./build/test-native-primitives runtime-replacement
+	./build/test-native-primitives soc-lifecycle

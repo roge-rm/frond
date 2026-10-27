@@ -1,0 +1,1274 @@
+--- a/src/uarm/Makefile
++++ b/src/uarm/Makefile
+@@ -111,6 +111,7 @@
+ 	uarm/cp15mmu.cpp 					\
+ 	uarm/cp15mpu.cpp 					\
+ 	uarm/memcpy.cpp						\
++	uarm/native_boundary.cpp \
+ 	uarm/syscall_dispatch.cpp			\
+ 	uarm/db_installer.cpp				\
+ 	uarm/audio_queue.cpp				\
+--- a/src/uarm/native/Commands.cpp
++++ b/src/uarm/native/Commands.cpp
+@@ -2,6 +2,7 @@
+ 
+ #include "Commands.h"
+ #include "GuestExport.h"
++#include "GuestDatabaseOps.h"
+ 
+ #include <cstdint>
+ #include <iostream>
+@@ -285,7 +286,9 @@
+ 
+         auto ctx = reinterpret_cast<commands::Context*>(context);
+ 
+-        const auto result = dbInstallerInstall(ctx->soc->GetSyscallDispatch(), len, data.get());
++        int result;
++        try { result = GuestDatabaseOps::Install(*ctx->soc, len, data.get()); }
++        catch (const std::exception& error) { cout << "installation failed: " << error.what() << endl; return; }
+ 
+         switch (result) {
+             case DB_INSTALL_RESULT_NEEDS_RESET:
+@@ -353,49 +356,16 @@
+         if (args.size() != 1) return env.PrintUsage();
+ 
+         auto ctx = reinterpret_cast<commands::Context*>(context);
+-        SyscallDispatch* sd = ctx->soc->GetSyscallDispatch();
+-
+         try {
+-            GuestExport guest(*ctx->soc);
+-            if (!guest.Ready()) {
++            std::vector<uint8_t> archive;
++            if (!GuestDatabaseOps::Export(*ctx->soc, "", archive, type)) {
+                 cout << "Palm OS is not ready for database export; try again" << endl;
+                 return;
+             }
+-            DbBackup backup(sd, type);
+-
+-            if (!backup.Init()) {
+-                cout << "failed to initialize export" << endl;
+-                return;
+-            }
+-
+-            while (backup.GetState() == DbBackup::STATE_IN_PROGRESS) {
+-                if (backup.Continue()) {
+-                    if (backup.HasLastProcessedDb()) {
+-                        cout << "OK " << backup.GetLastProcessedDb() << endl;
+-                    }
+-                } else {
+-                    cout << "FAILED " << backup.GetLastProcessedDb() << endl;
+-                }
+-            }
+-
+-            cout << endl;
+-
+-            if (backup.GetState() != DbBackup::STATE_DONE) {
+-                cout << "export FAILED" << endl;
+-                return;
+-            }
+-
+-            const void* archive = backup.GetArchiveData();
+-            const size_t size = backup.GetArchiveSize();
+-            if (!archive || !size || backup.GetState() != DbBackup::STATE_DONE) {
+-                cout << "export FAILED: cannot finish archive" << endl;
+-                return;
+-            }
+-            if (util::WriteFile(args[0], reinterpret_cast<const uint8_t*>(archive), size)) {
++            if (util::WriteFile(args[0], archive.data(), archive.size()))
+                 cout << "export written to " << args[0] << endl;
+-            } else {
++            else
+                 cout << "failed to write export to " << args[0] << endl;
+-            }
+         } catch (const std::exception& error) {
+             cout << "export FAILED: " << error.what() << "; guest restored" << endl;
+         }
+@@ -417,9 +387,10 @@
+         if (args.size() != 1) return env.PrintUsage();
+ 
+         auto ctx = reinterpret_cast<commands::Context*>(context);
+-        SyscallDispatch* sd = ctx->soc->GetSyscallDispatch();
+-
+-        launchAppByName(sd, args[0].c_str());
++        try {
++            if (GuestDatabaseOps::Launch(*ctx->soc, args[0]) != GuestDatabaseOps::LaunchResult::launched)
++                cout << "application could not be launched at this time" << endl;
++        } catch (const std::exception& error) { cout << "launch failed: " << error.what() << endl; }
+     }
+ 
+     void CmdSaveNand(vector<string> args, cli::CommandEnvironment& env, void* context) {
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -11,10 +11,14 @@
+ #include <unistd.h>
+ 
+ #include "Commands.h"
++#include "ReadOnlyGuest.h"
++#include "native_boundary.h"
++#include "CPU.h"
+ #include "SdImage.h"
+ #include "app_launcher.h"
+ #include "md5.h"
+ #include "GuestExport.h"
++#include "GuestDatabaseOps.h"
+ #include "FileUtil.h"
+ #include "db_backup.h"
+ #include "db_installer.h"
+@@ -64,6 +68,8 @@
+             Reply result;
+             try {
+                 result = dispatch(ctx, command, argument);
++            } catch (const InjectedCallError& error) {
++                result = {false, "timeout", error.what()};
+             } catch (const std::exception& error) {
+                 result = {false, "failed", error.what()};
+             }
+@@ -128,8 +134,8 @@
+         if (fileCommand && (path.empty() || path.front() != '/')) return {false, "argument", "An absolute file path is required."};
+         if (!fileCommand && command != "sd-create" && command != "launch-app" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && !path.empty()) return {false, "argument", "This command takes no argument."};
+         if (command == "guest-ready") {
+-            if (!syscallDispatchPrepare(ctx.soc->GetSyscallDispatch()))
+-                return {false, "not-ready", "Palm OS has not reached its application event loop."};
++            if (!GuestDatabaseOps::Ready(*ctx.soc))
++                return {false, "not-ready", "Palm OS has not reached a supported application boundary."};
+             return {true, "guest-ready", "Palm OS can accept application commands."};
+         }
+         if (command == "replay-state")
+@@ -142,9 +148,10 @@
+         }
+         if (command == "launch-app") {
+             if (path.empty() || path.size() > 31) return {false, "argument", "Enter a Palm application database name (up to 31 bytes)."};
+-            if (!syscallDispatchPrepare(ctx.soc->GetSyscallDispatch()))
+-                return {false, "not-ready", "Wait for Palm OS to reach its application event loop."};
+-            if (!launchAppByName(ctx.soc->GetSyscallDispatch(), path.c_str()))
++            const auto launched = GuestDatabaseOps::Launch(*ctx.soc, path);
++            if (launched == GuestDatabaseOps::LaunchResult::notReady)
++                return {false, "not-ready", "Wait for Palm OS to reach a supported application boundary."};
++            if (launched != GuestDatabaseOps::LaunchResult::launched)
+                 return {false, "launch", "Could not launch that application. Check its database name and wait for Palm OS to finish starting."};
+             return {true, "launched", "Application launched."};
+         }
+@@ -225,7 +232,7 @@
+         if (command == "install") {
+             std::unique_ptr<uint8_t[]> data; size_t size;
+             if (!util::ReadFile(path, data, size)) return {false, "read", "Could not read the application database."};
+-            const auto result = dbInstallerInstall(ctx.soc->GetSyscallDispatch(), size, data.get());
++            const auto result = GuestDatabaseOps::Install(*ctx.soc, size, data.get());
+             switch (result) {
+                 case DB_INSTALL_RESULT_OK: return {true, "installed", "Application installed."};
+                 case DB_INSTALL_RESULT_NEEDS_RESET: return {true, "needs-reset", "Installed. Reset the Palm to finish installation."};
+@@ -247,14 +254,10 @@
+                     return {false,"argument","Choose an absolute ZIP path and one Palm database name."};
+                 destination=path.substr(0,split);database=path.substr(split+1);
+             }
+-            GuestExport guest(*ctx.soc);
+-            if (!guest.Ready()) return {false, "not-ready", "Wait for Palm OS to reach its application event loop."};
+-            DbBackup backup(ctx.soc->GetSyscallDispatch(), DbBackup::BACKUP_TYPE_RAM, database);
+-            if (!backup.Init()) return {false, "export", "Could not start database export."};
+-            while (backup.GetState() == DbBackup::STATE_IN_PROGRESS) backup.Continue();
+-            if (backup.GetState() != DbBackup::STATE_DONE || !backup.GetArchiveData() || !backup.GetArchiveSize())
+-                return {false, "export", "Database export failed. No archive was written."};
+-            writeAtomic(destination, backup.GetArchiveData(), backup.GetArchiveSize());
++            std::vector<uint8_t> archive;
++            if (!GuestDatabaseOps::Export(*ctx.soc, database, archive))
++                return {false, "not-ready", "Wait for Palm OS to reach a supported application boundary."};
++            writeAtomic(destination, archive.data(), archive.size());
+             return {true, "exported", database.empty()?"RAM databases exported.":"Database exported."};
+         }
+         if (command == "reset") ctx.soc->Reset();
+--- /dev/null
++++ b/src/uarm/native/GuestDatabaseOps.h
+@@ -0,0 +1,83 @@
++#ifndef FROND_GUEST_DATABASE_OPS_H
++#define FROND_GUEST_DATABASE_OPS_H
++
++#include "GuestExport.h"
++#include "NativeDatabase.h"
++#include "app_launcher.h"
++#include "db_backup.h"
++#include "native_boundary.h"
++
++// Shared desktop/console workflow. Native preparation only observes guest state;
++// all calls and allocations run under a recoverable whole-guest transaction.
++namespace GuestDatabaseOps {
++inline bool Ready(SoC& soc) {
++    return NativeBoundary::Prepare(soc) || syscallDispatchPrepare(soc.GetSyscallDispatch());
++}
++
++inline int Install(SoC& soc, size_t size, void* data) {
++    if (!NativeBoundary::Prepare(soc)) {
++        if (!syscallDispatchM68kSupport(soc.GetSyscallDispatch())) return DB_INSTALL_RESULT_ERR_NOT_SUPPORTED;
++        if (!syscallDispatchPrepare(soc.GetSyscallDispatch())) return DB_INSTALL_RESULT_ERR_NOT_CURRENTLY_POSSIBLE;
++        ReadOnlyGuest transaction(soc);
++        const int result = dbInstallerInstall(soc.GetSyscallDispatch(), size, data);
++        if (result >= 0) transaction.Commit();
++        return result;
++    }
++    ReadOnlyGuest transaction(soc);
++    NativeBoundary::Session session(soc);
++    NativeDatabase<NativeBoundary::Session> database(session);
++    const int result = database.Install(static_cast<uint8_t*>(data), size);
++    if (result >= 0) {
++        database.Finish();
++        session.Close();
++        transaction.Commit();
++    }
++    return result;
++}
++
++enum class LaunchResult { notReady, failed, launched };
++inline LaunchResult Launch(SoC& soc, const std::string& name) {
++    if (!NativeBoundary::Prepare(soc)) {
++        if (!syscallDispatchPrepare(soc.GetSyscallDispatch())) return LaunchResult::notReady;
++        ReadOnlyGuest transaction(soc);
++        if (!launchAppByName(soc.GetSyscallDispatch(), name.c_str())) return LaunchResult::failed;
++        transaction.Commit();
++        return LaunchResult::launched;
++    }
++    ReadOnlyGuest transaction(soc);
++    NativeBoundary::Session session(soc);
++    NativeDatabase<NativeBoundary::Session> database(session);
++    if (!database.Launch(name)) return LaunchResult::failed;
++    database.Finish();
++    session.Close();
++    transaction.Commit();
++    return LaunchResult::launched;
++}
++
++// Returns false only when no supported boundary is available. Errors throw;
++// the caller publishes output only after this function's rollback completes.
++inline bool Export(SoC& soc, const std::string& name, std::vector<uint8_t>& bytes,
++                   int backupType = DbBackup::BACKUP_TYPE_RAM) {
++    if (backupType == DbBackup::BACKUP_TYPE_RAM && NativeBoundary::Prepare(soc)) {
++        ReadOnlyGuest transaction(soc);
++        NativeBoundary::Session session(soc);
++        NativeDatabase<NativeBoundary::Session> database(session);
++        auto archive = database.Export(name);
++        database.Finish();
++        session.Close();
++        bytes = std::move(archive);
++        return true;
++    }
++    GuestExport guest(soc);
++    if (!guest.Ready()) return false;
++    DbBackup backup(soc.GetSyscallDispatch(), backupType, name);
++    if (!backup.Init()) throw std::runtime_error("Could not start database export");
++    while (backup.GetState() == DbBackup::STATE_IN_PROGRESS) backup.Continue();
++    if (backup.GetState() != DbBackup::STATE_DONE || !backup.GetArchiveData() || !backup.GetArchiveSize())
++        throw std::runtime_error("Database export failed; no archive was written");
++    const auto* data = static_cast<const uint8_t*>(backup.GetArchiveData());
++    bytes.assign(data, data + backup.GetArchiveSize());
++    return true;
++}
++}
++#endif
+--- /dev/null
++++ b/src/uarm/native/NativeDatabase.h
+@@ -0,0 +1,183 @@
++#ifndef FROND_NATIVE_DATABASE_H
++#define FROND_NATIVE_DATABASE_H
++
++#include <algorithm>
++#include <array>
++#include <cstring>
++#include <functional>
++#include <stdexcept>
++#include <string>
++#include <vector>
++
++#include "CPU.h"
++#include "Defer.h"
++#include "db_installer.h"
++#include "db_archive_name.h"
++#include "palmos_errors.h"
++#include "zip.h"
++
++// Native Palm database operations. Session owns a verified UI-task call context;
++// the caller owns a guest transaction spanning construction and destruction.
++// Session::Call restores the stopped CPU after every synchronous native call.
++template<class Session>
++class NativeDatabase {
++ public:
++    explicit NativeDatabase(Session& session) : session(session) {
++        scratch = session.DataAddress();
++        if (!scratch || (scratch & 3) || session.DataSize() < 256)
++            throw std::runtime_error("Palm scratch allocation failed");
++        uint8_t zero[256]{};
++        write(scratch, zero, sizeof(zero));
++    }
++
++    // The call session owns this scratch allocation and releases it on Close().
++    void Finish() { scratch = 0; }
++
++    uint32_t Find(const std::string& name) {
++        setName(name);
++        return call(0x815c, {scratch + 64, 0, 0, 0});
++    }
++
++    bool Launch(const std::string& name) {
++        const uint32_t database = Find(name);
++        return database && call(0x88f8, {database, 0, 0, 0}) == 0;
++    }
++
++    int Install(const uint8_t* bytes, size_t length) {
++        if (!bytes || length < 78 || length > maxDatabaseBytes) return DB_INSTALL_RESULT_ERR_CORRUPT;
++        size_t offset = 0;
++        bool callbackFailed = false, deleteFailed = false;
++        unsigned callbacks = 0;
++        session.RegisterCallback(scratch + 32, [&](ArmCpu* cpu) {
++            auto* r = cpuGetRegisters(cpu);
++            uint32_t requested = 0;
++            if (++callbacks > maxCallbacks || !session.Read(r[1], &requested, 4)) {
++                callbackFailed = true; r[0] = 1; return;
++            }
++            const uint32_t count = uint32_t(std::min<size_t>({requested, length - offset, maxChunk}));
++            if (!session.Write(r[0], bytes + offset, count) || !session.Write(r[1], &count, 4)) {
++                callbackFailed = true; r[0] = 1; return;
++            }
++            offset += count; r[0] = 0;
++        });
++        session.RegisterCallback(scratch + 36, [&](ArmCpu* cpu) {
++            auto* r = cpuGetRegisters(cpu);
++            if (++callbacks > maxCallbacks) { deleteFailed = true; r[0] = 0; return; }
++            const uint32_t database = r[2];
++            const bool okay = call(0x8148, {database, 0, 0, 0}) == 0;
++            deleteFailed |= !okay;
++            cpuGetRegisters(cpu)[0] = okay;
++        });
++        Defer unregister([&] { session.UnregisterCallback(scratch + 32); session.UnregisterCallback(scratch + 36); });
++        uint32_t zero = 0;
++        write(scratch + 48, &zero, 4);
++        write(scratch + 52, &zero, 4);
++        const uint32_t error = session.Call(0x82fc, {scratch + 32, scratch + 36, 0, scratch + 48}, {scratch + 52, 1});
++        uint8_t reset = 0;
++        read(scratch + 52, &reset, 1);
++        if (deleteFailed) return DB_INSTALL_RESULT_ERR_COULD_NOT_OVERWRITE;
++        if (callbackFailed) return DB_INSTALL_RESULT_ERR_UNKNOWN;
++        switch (error) {
++            case 0: return reset ? DB_INSTALL_RESULT_NEEDS_RESET : DB_INSTALL_RESULT_OK;
++            case dmErrMemError: return DB_INSTALL_RESULT_ERR_OOM;
++            case dmErrCorruptDatabase: return DB_INSTALL_RESULT_ERR_CORRUPT;
++            case dmErrDatabaseOpen: return DB_INSTALL_RESULT_ERR_IS_OPEN;
++            default: return DB_INSTALL_RESULT_ERR_UNKNOWN;
++        }
++    }
++
++    std::vector<uint8_t> Export(const std::string& name) {
++        std::vector<uint32_t> databases;
++        if (!name.empty()) {
++            const uint32_t db = Find(name);
++            if (!db || !(db & 0x80000000u)) throw std::runtime_error("RAM database not found");
++            databases.push_back(db);
++        } else {
++            const uint32_t count = call(0x81d4, {});
++            if (count > 65535) throw std::runtime_error("Invalid Palm database count");
++            for (uint32_t i = 0; i < count; ++i) {
++                const uint32_t db = call(0x8188, {i, 0, 0, 0});
++                if (!db) throw std::runtime_error("Could not enumerate Palm databases");
++                if (db & 0x80000000u) databases.push_back(db);
++            }
++        }
++        zip_t* zip = zip_stream_open(nullptr, 0, 1, 'w');
++        if (!zip) throw std::runtime_error("Could not allocate database archive");
++        Defer close([&] { zip_stream_close(zip); });
++        size_t total = 0;
++        for (const uint32_t db : databases) {
++            uint32_t creator = 0;
++            write(scratch + 48, &creator, sizeof(creator));
++            if (session.Call(0x812c, {db, 0, 0, 0}, {0, 0, 0, 0, 0, 0, 0, scratch + 48}))
++                throw std::runtime_error("Could not read Palm database metadata");
++            read(scratch + 48, &creator, sizeof(creator));
++            if (creator == 0x6136386bu) continue;
++            auto pdb = exportOne(db);
++            total += pdb.size();
++            if (total > maxArchiveBytes) throw std::runtime_error("Database archive exceeds limit");
++            std::string entry = entryName(pdb);
++            if (zip_entry_open(zip, entry.c_str())) throw std::runtime_error("Could not open archive entry");
++            const bool written = zip_entry_write(zip, pdb.data(), pdb.size()) == 0;
++            const bool closed = zip_entry_close(zip) == 0;
++            if (!written || !closed) throw std::runtime_error("Could not write archive entry");
++        }
++        void* output = nullptr; ssize_t size = 0;
++        if (zip_stream_copy(zip, &output, &size) < 0 || !output || !size)
++            throw std::runtime_error("Could not finish database archive");
++        Defer freeOutput([&] { free(output); });
++        const auto* data = static_cast<const uint8_t*>(output);
++        return {data, data + size};
++    }
++
++ private:
++    static constexpr size_t maxDatabaseBytes = 64 * 1024 * 1024, maxArchiveBytes = 256 * 1024 * 1024;
++    static constexpr unsigned maxCallbacks = 65536, maxChunk = 65536;
++    Session& session;
++    uint32_t scratch{0};
++    uint32_t call(uint16_t trap, std::array<uint32_t, 4> args) { return session.Call(trap, args, {}); }
++    void read(uint32_t address, void* data, size_t size) {
++        if (!session.Read(address, data, size)) throw std::runtime_error("Palm memory read failed");
++    }
++    void write(uint32_t address, const void* data, size_t size) {
++        if (!session.Write(address, data, size)) throw std::runtime_error("Palm memory write failed");
++    }
++    void setName(const std::string& name) {
++        if (name.empty() || name.size() > 31 || name.find('\0') != std::string::npos)
++            throw std::runtime_error("Invalid Palm database name");
++        write(scratch + 64, name.c_str(), name.size() + 1);
++    }
++    std::vector<uint8_t> exportOne(uint32_t database) {
++        std::vector<uint8_t> bytes;
++        bool failed = false; unsigned callbacks = 0;
++        session.RegisterCallback(scratch + 32, [&](ArmCpu* cpu) {
++            auto* r = cpuGetRegisters(cpu); uint32_t size = 0;
++            if (++callbacks > maxCallbacks || !session.Read(r[1], &size, 4) ||
++                size > maxDatabaseBytes - bytes.size()) { failed = true; r[0] = 1; return; }
++            if (uint64_t(r[0]) + size > 0x100000000ull) { failed = true; r[0] = 1; return; }
++            const size_t previous = bytes.size(); bytes.resize(previous + size);
++            for (uint32_t done = 0; done < size;) {
++                const uint32_t chunk = std::min<uint32_t>(maxChunk, size - done);
++                if (!session.Read(r[0] + done, bytes.data() + previous + done, chunk)) {
++                    failed = true; r[0] = 1; return;
++                }
++                done += chunk;
++            }
++            r[0] = 0;
++        });
++        Defer unregister([&] { session.UnregisterCallback(scratch + 32); });
++        const uint8_t zero = 0; write(scratch + 64, &zero, 1);
++        const uint32_t error = call(0x8304, {scratch + 32, 0, scratch + 64, database});
++        if (error || failed || bytes.size() < 78) throw std::runtime_error("Palm database export failed");
++        return bytes;
++    }
++    static std::string entryName(const std::vector<uint8_t>& pdb) {
++        const auto end = std::find(pdb.begin(), pdb.begin() + 32, 0);
++        if (end == pdb.begin() || end == pdb.begin() + 32) throw std::runtime_error("Invalid exported database name");
++        const std::string name(pdb.begin(), end);
++        const uint16_t attributes = (uint16_t(pdb[32]) << 8) | pdb[33];
++        const uint32_t creator = (uint32_t(pdb[64]) << 24) | (uint32_t(pdb[65]) << 16) |
++                                 (uint32_t(pdb[66]) << 8) | pdb[67];
++        return dbArchiveName(name, attributes, creator, false);
++    }
++};
++#endif
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -173,6 +173,17 @@
+ 
+     uint32_t slowPath;
+     uint16_t breakPaceSyscall;
++    #ifndef __EMSCRIPTEN__
++    uint32_t nativePc[2];
++    struct { uint32_t address; NativeCallback callback; void* context; } nativeCallbacks[8];
++    uint8_t nativeCallDepth;
++    bool nativeSessionActive;
++    uint32_t nativeStackLower, nativeStackUpper;
++    uint32_t nativeStackOwnerAddress, nativeStackOwnerValue;
++    uint32_t nativeScratchBase, nativeScratchSize;
++    uint8_t* nativeScratchData;
++    #endif
++
+ 
+     M68kTrapHandlerMap *m68kTrap0Handlers;
+ 
+@@ -394,6 +405,11 @@
+ static void cpuPrvException(struct ArmCpu *cpu, uint32_t vector_pc, uint32_t lr,
+                             uint_fast8_t newLowBits)  // enters arm mode
+ {
++#ifndef __EMSCRIPTEN__
++    if (cpu->nativeCallDepth && ((newLowBits & 0x1f) == ARM_SR_MODE_ABT ||
++                                  (newLowBits & 0x1f) == ARM_SR_MODE_UND))
++        cpuSetSlowPath(cpu, SLOW_PATH_REASON_NATIVE_FAULT);
++#endif
+     if (cpu->modePace) {
+ #ifdef TRACE_PACE
+         fprintf(stderr, "exception in PACE %#010x %#010x\n", lr,
+@@ -712,6 +728,16 @@
+ template <int memorySystemKind, int size, bool write>
+ static FORCE_INLINE bool cpuPrvMemOpEx(struct ArmCpu *cpu, void *buf, uint32_t vaddr,
+                                        bool priviledged, uint_fast8_t *fsrP) {
++#ifndef __EMSCRIPTEN__
++    if (unlikely(cpu->nativeCallDepth && cpu->nativeScratchData &&
++                 vaddr >= cpu->nativeScratchBase &&
++                 uint64_t(vaddr) + size <= uint64_t(cpu->nativeScratchBase) + cpu->nativeScratchSize)) {
++        auto* scratch = cpu->nativeScratchData + vaddr - cpu->nativeScratchBase;
++        if constexpr (write) memcpy(scratch, buf, size); else memcpy(buf, scratch, size);
++        return true;
++    }
++#endif
++
+     if constexpr (size > 1) {
+         if (vaddr & (size - 1)) {
+             if constexpr (memorySystemKind == ARM_MEMORY_SYSTEM_MMU && size == 4) {
+@@ -3216,6 +3242,9 @@
+ }
+ 
+ void cpuReset(struct ArmCpu *cpu, uint32_t pc) {
++#ifndef __EMSCRIPTEN__
++    cpuClearNativeRuntime(cpu);
++#endif
+     gdbStubResetPace(cpu->debugStub);
+     cpu->modePace = false; // Reset starts at the native vector, never stale 68k state.
+     cpu->I = true;  // start w/o interrupts in supervisor mode
+@@ -3301,6 +3330,159 @@
+ 
+     return cpu;
+ }
++
++#ifndef __EMSCRIPTEN__
++void cpuClearNativeRuntime(ArmCpu* cpu) {
++    cpu->nativePc[0] = cpu->nativePc[1] = 0;
++    memset(cpu->nativeCallbacks, 0, sizeof(cpu->nativeCallbacks));
++    cpu->nativeCallDepth = 0;
++    cpu->nativeSessionActive = false;
++    cpu->nativeStackLower = cpu->nativeStackUpper = 0;
++    cpu->nativeStackOwnerAddress = cpu->nativeStackOwnerValue = 0;
++    cpu->nativeScratchData = nullptr;
++    cpu->nativeScratchBase = cpu->nativeScratchSize = 0;
++    cpuClearSlowPath(cpu, SLOW_PATH_REASON_NATIVE_PC | SLOW_PATH_REASON_NATIVE_FAULT);
++}
++
++bool cpuAcquireNativeSession(ArmCpu* cpu) {
++    if (cpu->nativeSessionActive || cpu->nativeCallDepth || cpu->nativePc[0] || cpu->nativeScratchData) return false;
++    for (const auto& h:cpu->nativeCallbacks) if (h.callback) return false;
++    cpu->nativeSessionActive=true; return true;
++}
++
++bool cpuSetNativePcBreak(ArmCpu* cpu, uint32_t first, uint32_t second) {
++    if (cpu->nativeCallDepth || (first && !(first & 1) && (first & 3)) ||
++        (second && !(second & 1) && (second & 3))) return false;
++    cpu->nativePc[0] = first; cpu->nativePc[1] = second;
++    cpuClearSlowPath(cpu, SLOW_PATH_REASON_NATIVE_PC);
++    return true;
++}
++
++bool cpuRegisterNativeCallback(ArmCpu* cpu, uint32_t address, NativeCallback callback, void* context) {
++    if (!address || !callback || (!(address & 1) && (address & 3))) return false;
++    for (const auto& slot : cpu->nativeCallbacks)
++        if (slot.callback && slot.address == address) return false;
++    for (auto& slot : cpu->nativeCallbacks) if (!slot.callback) {
++        slot.address = address; slot.callback = callback; slot.context = context; return true;
++    }
++    return false;
++}
++void cpuUnregisterNativeCallback(ArmCpu* cpu, uint32_t address) {
++    for (auto& slot : cpu->nativeCallbacks) if (slot.address == address) slot = {};
++}
++
++bool cpuStartNativeCall(ArmCpu* cpu, uint32_t entry) {
++    if (cpu->nativeCallDepth >= 4 || !entry || (!(entry & 1) && (entry & 3))) return false;
++    ++cpu->nativeCallDepth;
++    cpuClearSlowPath(cpu, SLOW_PATH_REASON_NATIVE_FAULT | SLOW_PATH_REASON_INJECTED_CALL_DONE);
++    cpu->modePace = false;
++    cpuPrvSetReg(cpu, REG_NO_PC, entry);
++    cpu->regs[REG_NO_LR] = INJECTED_CALL_LR_MAGIC;
++    return true;
++}
++void cpuSetNativeStackBounds(ArmCpu* cpu, uint32_t lower, uint32_t upper,
++                             uint32_t ownerAddress, uint32_t ownerValue) {
++    cpu->nativeStackLower=lower; cpu->nativeStackUpper=upper;
++    cpu->nativeStackOwnerAddress=ownerAddress; cpu->nativeStackOwnerValue=ownerValue;
++}
++void cpuEndNativeCall(ArmCpu* cpu) {
++    if (cpu->nativeCallDepth) --cpu->nativeCallDepth;
++    cpuClearSlowPath(cpu, SLOW_PATH_REASON_NATIVE_FAULT | SLOW_PATH_REASON_INJECTED_CALL_DONE);
++}
++
++// Validate each 1KB mapping segment before any transfer. Virtual buffers may
++// span discontiguous physical pages. MMIO is never read as a side effect.
++static bool nativeSegment(ArmCpu* cpu, uint32_t address, uint32_t size, bool write, uint32_t& pa) {
++    if (cpu->memorySystemKind != ARM_MEMORY_SYSTEM_MMU) return false;
++#ifdef SUPPORT_FCSE
++    if (address < 0x02000000u) address |= cpu->pid;
++#endif
++    auto t = mmuTranslate(cpu->memorySystem.mmu,address,true,write);
++    if (!MMU_TRANSLATE_RESULT_OK(t)) return false;
++    pa = MMU_TRANSLATE_RESULT_PA(t);
++    return memIsBufferRange(cpu->mem,pa,size,write);
++}
++static bool nativeRange(ArmCpu* cpu, uint32_t address, uint32_t size, bool write) {
++    if (!size) return true;
++    if (uint64_t(address)+size>0x100000000ull) return false;
++    for (uint64_t va=address; va<uint64_t(address)+size;) {
++        const uint32_t count=std::min<uint64_t>(0x400-(va&0x3ff),uint64_t(address)+size-va);
++        uint32_t pa;
++        if (!nativeSegment(cpu,va,count,write,pa)) return false;
++        va+=count;
++    }
++    return true;
++}
++bool cpuNativeRamRange(ArmCpu* cpu, uint32_t address, uint32_t size) {
++    return nativeRange(cpu,address,size,true);
++}
++bool cpuNativeBuffer(ArmCpu* cpu, uint32_t address, void* data, uint32_t size, bool write) {
++    if (!size) return true;
++    if (!data || !nativeRange(cpu,address,size,write)) return false;
++    for (uint32_t offset=0; offset<size;) {
++        const uint32_t count=std::min<uint32_t>(0x400-((address+offset)&0x3ff),size-offset);
++        uint32_t pa;
++        if (!nativeSegment(cpu,address+offset,count,write,pa)) return false;
++        for (uint32_t i=0;i<count;++i) {
++            auto* byte=static_cast<uint8_t*>(data)+offset+i;
++            if (write ? !memAccess<1,true>(cpu->mem,pa+i,byte) : !memAccess<1,false>(cpu->mem,pa+i,byte)) return false;
++        }
++        offset+=count;
++    }
++    return true;
++}
++
++bool cpuSetNativeScratch(ArmCpu* cpu, uint32_t base, void* data, uint32_t size) {
++    if (cpu->nativeCallDepth) return false;
++    if (!data) {
++        cpu->nativeScratchData = nullptr; cpu->nativeScratchBase = cpu->nativeScratchSize = 0;
++        return true;
++    }
++    if (cpu->memorySystemKind != ARM_MEMORY_SYSTEM_MMU || !mmuIsOn(cpu->memorySystem.mmu) ||
++        (base & 0xfff) || !size || (size & 0xfff) || size > 0x40000 ||
++        uint64_t(base) + size > 0xffff0000ull) return false;
++    for (uint32_t offset = 0; offset < size; offset += 0x400) {
++        if (MMU_TRANSLATE_RESULT_OK(mmuTranslate(cpu->memorySystem.mmu, base + offset, true, false)) ||
++            MMU_TRANSLATE_RESULT_OK(mmuTranslate(cpu->memorySystem.mmu, base + offset, true, true))) return false;
++    }
++    cpu->nativeScratchBase = base; cpu->nativeScratchSize = size;
++    cpu->nativeScratchData = static_cast<uint8_t*>(data);
++    return true;
++}
++
++static bool nativeHook(ArmCpu* cpu, bool injected) {
++    const uint32_t address = cpu->regs[REG_NO_PC] | (cpu->T ? 1u : 0u);
++    if (!injected) {
++        if (address && (address == cpu->nativePc[0] || address == cpu->nativePc[1])) {
++            cpuSetSlowPath(cpu, SLOW_PATH_REASON_NATIVE_PC); return true;
++        }
++        return false;
++    }
++    if (!cpu->nativeCallDepth) return false;
++    if ((cpu->M==ARM_SR_MODE_SYS || cpu->M==ARM_SR_MODE_USR) && cpu->nativeStackUpper &&
++        (cpu->regs[REG_NO_SP]<cpu->nativeStackLower || cpu->regs[REG_NO_SP]>cpu->nativeStackUpper)) {
++        // A full call may legitimately schedule other tasks. The owned UI
++        // scratch bounds do not describe their stacks. Invalid metadata fails closed.
++        uint32_t owner=0;
++        if (!cpu->nativeStackOwnerAddress ||
++            !cpuNativeBuffer(cpu,cpu->nativeStackOwnerAddress,&owner,4,false) ||
++            owner==cpu->nativeStackOwnerValue) {
++            cpuSetSlowPath(cpu,SLOW_PATH_REASON_NATIVE_FAULT); return true;
++        }
++    }
++    for (const auto& slot : cpu->nativeCallbacks) if (slot.callback && slot.address == address) {
++        // Copy before invoking: a callback may unregister itself. Exceptions propagate to recovery.
++        const auto callback = slot.callback; void* context = slot.context;
++        callback(cpu, context);
++        cpuPrvSetReg(cpu, REG_NO_PC, cpu->regs[REG_NO_LR]);
++        if (cpu->regs[REG_NO_PC] == INJECTED_CALL_LR_MAGIC)
++            cpuSetSlowPath(cpu, SLOW_PATH_REASON_INJECTED_CALL_DONE);
++        return true;
++    }
++    return false;
++}
++
++#endif
+ 
+ void cpuSetM68kSyscallHandler(ArmCpu* cpu, M68kSyscallHandler handler, void* context) {
+     cpu->m68kSyscallHandler=handler; cpu->m68kSyscallContext=context;
+@@ -3542,6 +3724,10 @@
+     uint_fast8_t fsr;
+ 
+     while (cycleAcc < cycles) {
++#ifndef __EMSCRIPTEN__
++        if (unlikely(cpu->nativePc[0] || (injected && cpu->nativeCallDepth)) && nativeHook(cpu, injected))
++            return cycleAcc + (injected ? 1 : 0);
++#endif
+         cpu->curInstrPC = cpu->regs[REG_NO_PC];  // needed for stub to get proper pc
+         if (cpu->debugStub) {
+             gdbStubReportPc(cpu->debugStub, cpu->regs[REG_NO_PC], true);
+@@ -3603,6 +3789,10 @@
+     uint_fast8_t fsr;
+ 
+     while (cycleAcc < cycles) {
++#ifndef __EMSCRIPTEN__
++        if (unlikely(cpu->nativePc[0] || (injected && cpu->nativeCallDepth)) && nativeHook(cpu, injected))
++            return cycleAcc + (injected ? 1 : 0);
++#endif
+         cpu->curInstrPC = cpu->regs[REG_NO_PC];  // needed for stub to get proper pc
+         if (cpu->debugStub) {
+             gdbStubReportPc(cpu->debugStub, cpu->regs[REG_NO_PC], false);
+@@ -3862,6 +4052,9 @@
+ 
+ template <typename T>
+ void cpuLoad(ArmCpu *cpu, T &loader) {
++#ifndef __EMSCRIPTEN__
++    cpuClearNativeRuntime(cpu);
++#endif
+     gdbStubResetPace(cpu->debugStub);
+     icacheInval(cpu->ic);
+ 
+@@ -3889,6 +4082,9 @@
+     LoadChunkHelper helper(*chunk);
+     cpu->DoSaveLoad(helper, version);
+ 
++#ifndef __EMSCRIPTEN__
++    cpuClearSlowPath(cpu, SLOW_PATH_REASON_NATIVE_PC | SLOW_PATH_REASON_NATIVE_FAULT);
++#endif
+     cpu->waitingEventsTotal = cpu->waitingFiqs + cpu->waitingIrqs;
+     cpuUpdateSlowPath(cpu);
+ }
+@@ -3929,7 +4125,26 @@
+     auto waitingIrqs = cpu->waitingIrqs;
+     auto waitingFiqs = cpu->waitingFiqs;
+ 
++#ifndef __EMSCRIPTEN__
++    const auto nativeDepth = cpu->nativeCallDepth;
++    const auto nativeSession = cpu->nativeSessionActive;
++    const auto stackLower=cpu->nativeStackLower, stackUpper=cpu->nativeStackUpper;
++    const auto stackOwnerAddress=cpu->nativeStackOwnerAddress, stackOwnerValue=cpu->nativeStackOwnerValue;
++    const auto scratchBase = cpu->nativeScratchBase, scratchSize = cpu->nativeScratchSize;
++    auto* scratchData = cpu->nativeScratchData;
++    decltype(cpu->nativeCallbacks) callbacks;
++    memcpy(callbacks, cpu->nativeCallbacks, sizeof(callbacks));
++#endif
+     cpuLoad(cpu, loader);
++#ifndef __EMSCRIPTEN__
++    memcpy(cpu->nativeCallbacks, callbacks, sizeof(callbacks));
++    cpu->nativeCallDepth = nativeDepth;
++    cpu->nativeSessionActive = nativeSession;
++    cpu->nativeStackLower=stackLower; cpu->nativeStackUpper=stackUpper;
++    cpu->nativeStackOwnerAddress=stackOwnerAddress; cpu->nativeStackOwnerValue=stackOwnerValue;
++    cpu->nativeScratchBase = scratchBase; cpu->nativeScratchSize = scratchSize;
++    cpu->nativeScratchData = scratchData;
++#endif
+ 
+     cpu->sleeping = sleeping;
+     cpu->waitingIrqs = waitingIrqs;
+--- a/src/uarm/uarm/CPU.h
++++ b/src/uarm/uarm/CPU.h
+@@ -50,6 +50,8 @@
+ #define SLOW_PATH_REASON_RESCHEDULE 0x20
+ #define SLOW_PATH_REASON_PACE_SYSCALL_BREAK 0x40
+ #define SLOW_PATH_REASON_INJECTED_CALL_DONE 0x80
++#define SLOW_PATH_REASON_NATIVE_PC 0x100
++#define SLOW_PATH_REASON_NATIVE_FAULT 0x200
+ 
+ #define ARM_MEMORY_SYSTEM_MMU 0
+ #define ARM_MEMORY_SYSTEM_MPU 1
+@@ -146,6 +148,25 @@
+ uint32_t cpuCycle(struct ArmCpu *cpu, uint32_t cycles);
+ 
+ uint32_t cpuCyclePure(struct ArmCpu *cpu);
++#ifndef __EMSCRIPTEN__
++// Tagged addresses: bit 0 selects Thumb. Hooks run only during injected execution.
++using NativeCallback = void (*)(ArmCpu*, void*);
++bool cpuRegisterNativeCallback(ArmCpu*, uint32_t address, NativeCallback, void* context);
++void cpuUnregisterNativeCallback(ArmCpu*, uint32_t address);
++void cpuClearNativeRuntime(ArmCpu*);
++bool cpuAcquireNativeSession(ArmCpu*);
++bool cpuSetNativePcBreak(ArmCpu*, uint32_t first, uint32_t second);
++bool cpuStartNativeCall(ArmCpu*, uint32_t entry);
++void cpuEndNativeCall(ArmCpu*);
++void cpuSetNativeStackBounds(ArmCpu*, uint32_t lower, uint32_t upper,
++                             uint32_t ownerAddress = 0, uint32_t ownerValue = 0);
++// Side-effect-free RAM/ROM access: rejects MMIO, wrap and invalid mappings.
++bool cpuNativeBuffer(ArmCpu*, uint32_t address, void* data, uint32_t size, bool write);
++bool cpuNativeRamRange(ArmCpu*, uint32_t address, uint32_t size);
++// Temporary host-owned bootstrap stack, accepted only over unmapped virtual pages.
++bool cpuSetNativeScratch(ArmCpu*, uint32_t base, void* data, uint32_t size);
++#endif
++
+ 
+ using M68kTrapHandler = std::function<bool(struct ArmCpu *, uint32_t address)>;
+ void cpuAddM68kTrap0Handler(struct ArmCpu *cpu, uint32_t address, M68kTrapHandler handler);
+--- a/src/uarm/uarm/SoC.h
++++ b/src/uarm/uarm/SoC.h
+@@ -59,8 +59,14 @@
+     virtual uint64_t Run(uint64_t maxCycles, uint64_t cyclesPerSecond) = 0;
+     virtual bool RunToPaceSyscall(uint16_t syscall, uint64_t maxCycles,
+                                   uint64_t cyclesPerSecond) = 0;
++#ifndef __EMSCRIPTEN__
++    virtual bool RunToNativePc(uint32_t, uint32_t, uint64_t, uint64_t) { return false; }
++#endif
+     virtual bool ExecuteInjected(uint64_t maxCycles, uint64_t cyclesPerSecond) = 0;
+ 
++    void AccountInjectedCycles(uint64_t cycles, uint64_t cyclesPerSecond) {
++        if (cyclesPerSecond) injectedTimeNsec += (cycles * 1000000000ull) / cyclesPerSecond;
++    }
+     uint64_t GetInjectedTimeNsec() { return injectedTimeNsec; }
+     void ResetInjectedTimeNsec() { injectedTimeNsec = 0; }
+ 
+--- /dev/null
++++ b/src/uarm/uarm/db_archive_name.h
+@@ -0,0 +1,25 @@
++#ifndef FROND_DB_ARCHIVE_NAME_H
++#define FROND_DB_ARCHIVE_NAME_H
++#include <cstdint>
++#include <stdexcept>
++#include <string>
++
++// A Palm database name is a single logical name, not an archive path. Escape
++// separators and '%' reversibly so valid guest names cannot traverse directories
++// or collide with their escaped spelling. The PDB/PRC header remains unchanged.
++inline std::string dbArchiveName(const std::string& name, uint32_t attributes,
++                                 uint32_t creator, bool isRom) {
++    if (name.empty() || name.size() > 31 || name.find('\0') != std::string::npos)
++        throw std::runtime_error("Invalid exported database name");
++    static const char hex[] = "0123456789ABCDEF";
++    std::string encoded;
++    for (const unsigned char c : name) {
++        if (c == '/' || c == '\\' || c == '%' || c == ':' || c < 32 || c == 127) {
++            encoded += '%'; encoded += hex[c >> 4]; encoded += hex[c & 15];
++        } else encoded += char(c);
++    }
++    const char* suffix = creator == 0x636c7072 && (attributes & 0x0200) ? ".pqa" :
++                         (attributes & 1) ? ".prc" : ".pdb";
++    return (isRom ? "rom/" : creator == 0x6136386b ? "cache/" : "") + encoded + suffix;
++}
++#endif
+--- a/src/uarm/uarm/db_backup.cpp
++++ b/src/uarm/uarm/db_backup.cpp
+@@ -1,4 +1,5 @@
+ #include "db_backup.h"
++#include "db_archive_name.h"
+ 
+ #include <algorithm>
+ #include <cstdlib>
+@@ -14,36 +15,13 @@
+ using namespace std;
+ 
+ namespace {
+-    constexpr uint16_t dmHdrAttrResDB = 0x0001;
+-    constexpr uint16_t dmHdrAttrLaunchableData = 0x0200;
+-
+     constexpr int COMPRESSION_LEVEL = 1;
+     constexpr uint32_t MAX_CHUNK_SIZE = 64 * 1024;
+ 
+     constexpr uint32_t DB_CREATOR_A68K = 0x6136386b;  // 'a68k'
+-    constexpr uint32_t DB_CREATOR_CLPR = 0x636c7072;  // 'clpr
+ 
+     string getEntryName(DbMetadata& meta) {
+-        const char* suffix;
+-        const char* prefix;
+-
+-        if (meta.creator == DB_CREATOR_CLPR && (meta.attr & dmHdrAttrLaunchableData)) {
+-            suffix = ".pqa";
+-        } else if (meta.attr & dmHdrAttrResDB) {
+-            suffix = ".prc";
+-        } else {
+-            suffix = ".pdb";
+-        }
+-
+-        if (meta.isRom) {
+-            prefix = "rom/";
+-        } else if (meta.creator == DB_CREATOR_A68K) {
+-            prefix = "cache/";
+-        } else {
+-            prefix = "";
+-        }
+-
+-        return string(prefix) + meta.name + suffix;
++        return dbArchiveName(meta.name, meta.attr, meta.creator, meta.isRom);
+     }
+ }  // namespace
+ 
+--- /dev/null
++++ b/src/uarm/uarm/native_boundary.cpp
+@@ -0,0 +1,274 @@
++#include "native_boundary.h"
++#ifndef __EMSCRIPTEN__
++#include <algorithm>
++#include <cstring>
++#include <cstdio>
++#include <chrono>
++#include <exception>
++#include <map>
++#include <stdexcept>
++#include "CPU.h"
++#include "Defer.h"
++#include "SoC.h"
++#include "savestate/ChunkTypeUarm.h"
++#include "savestate/Savestate.h"
++#include "savestate/SavestateLoader.h"
++#include "syscall_dispatch.h"
++
++namespace NativeBoundary {
++namespace {
++constexpr uint32_t task = 0x1ff02218, nativeTable = 0x1ff05e3c;
++constexpr uint32_t waitPc = 0x2004d536, allocationSize = 32 * 1024;
++constexpr uint32_t dataSize = 8192, bootstrapBase = 0x7e000000;
++constexpr uint64_t budget = 50000000;
++uint32_t word(ArmCpu* cpu, uint32_t a) {
++    uint32_t v;
++    if (!cpuNativeBuffer(cpu,a,&v,4,false)) throw std::runtime_error("native metadata is not mapped RAM/ROM");
++    return v;
++}
++bool bytes(ArmCpu* cpu, uint32_t a, const void* p, uint32_t n) {
++    std::vector<uint8_t> data(n);
++    return cpuNativeBuffer(cpu,a,data.data(),n,false) && !memcmp(data.data(),p,n);
++}
++bool owner(ArmCpu* cpu) {
++    return word(cpu,0x1ff00630)==0x1ff020f8 &&
++           word(cpu,0x1ff042b8)==task && word(cpu,0x1ff042bc)==task &&
++           word(cpu,0x1ff042c8)==0 && // scheduler disable/lock bytes
++           (word(cpu,task+0x18)&0xffffff00)==0x100;
++}
++// This profile deliberately excludes the pen/silk wait at 0x2004db92.
++// The verified route is EvtGetSysEvent -> original event-manager wait,
++// with the matching complete prologue and its saved return slot.
++bool validate(SoC& soc) {
++    auto* cpu=soc.GetCpu();
++    if (soc.GetDeviceType()!=DeviceType5::deviceTypeTX || cpuIsModePace(cpu) ||
++        cpuGetMemorySystemKind(cpu)!=ARM_MEMORY_SYSTEM_MMU) return false;
++    auto* r=cpuGetRegisters(cpu);
++    if (r[15]!=waitPc || !cpuIsThumb(cpu) ||
++        (cpuGetRegExternal(cpu,ARM_REG_NUM_CPSR)&0xff)!=0x3f ||
++        r[14]!=0x2004d533 || !owner(cpu)) return false;
++    static const uint16_t prologue[]={0xb5f3,0xb08f,0x1c05,0x4649,0x6809,0x6849,0x484a,0x1840};
++    static const uint16_t clear[]={0xf01f,0xfaf1,0x2100,0x7171,0x2800,0xd01f};
++    static const uint32_t wrapper[]={0xe92d4278,0xe5999000,0xe5999020,0xe59f60e8,0xe1a05000,
++        0xe0866009,0xe2864d40,0xe5942048,0xe1a0e00f,0xe12fff12,0xe5d40016};
++    if (!bytes(cpu,0x2004d3aa,prologue,sizeof(prologue)) ||
++        !bytes(cpu,0x2004d52e,clear,sizeof(clear)) ||
++        !bytes(cpu,0x201de2dc,wrapper,sizeof(wrapper))) return false;
++    if ((r[13]&3) || r[13]<0x10000 || !cpuNativeRamRange(cpu,r[13],112) ||
++        word(cpu,r[13]+84)!=0x201de304 || word(cpu,r[13]+108)!=0x20037d55 ||
++        word(cpu,r[13]+60)!=r[5]) return false;
++    const uint32_t root=word(cpu,r[9]);
++    if (root!=0x1ff00ffc || word(cpu,r[9]-8)!=nativeTable ||
++        word(cpu,r[9]-4)!=0x1ff04e5c) return false;
++    const uint32_t globals=word(cpu,root+4);
++    if (!cpuNativeRamRange(cpu,globals,0x600)) return false;
++    const uint32_t events=word(cpu,globals+0x4a4+0x3c);
++    if (events!=r[4] || events+0x20!=r[6] || !cpuNativeRamRange(cpu,events,0x80)) return false;
++    uint8_t flags[8];
++    if (!cpuNativeBuffer(cpu,events+0x20,flags,sizeof(flags),false) || flags[5]!=0 || flags[3]!=0) return false;
++    // Original wait event group is task 3's saved blocking object, not another task's wait.
++    if (word(cpu,r[13]+56)!=globals+0x4a4 || word(cpu,task+0x30)!=0x1ff042b8) return false;
++    return true;
++}
++struct CpuCheckpoint {
++    ArmCpu* cpu;
++    Savestate<ChunkType> state;
++    SavestateLoader<ChunkType> loader;
++    void Save(Savestate<ChunkType>& s) { cpuPrepareInjectedCall(cpu,s); }
++    void Save(SavestateProbe<ChunkType>& s) { cpuPrepareInjectedCall(cpu,s); }
++    void Load(SavestateLoader<ChunkType>& l) { cpuFinishInjectedCall(cpu,l); }
++    explicit CpuCheckpoint(ArmCpu* c):cpu(c) { state.Save(*this); }
++    void Restore() { loader.Load(state.GetBuffer(),state.GetSize(),*this); }
++};
++void require(bool ok,const char* reason) { if (!ok) throw std::runtime_error(reason); }
++}
++
++bool Prepare(SoC& soc) {
++    if (soc.GetDeviceType()!=DeviceType5::deviceTypeTX || syscallDispatchInProgress(soc.GetSyscallDispatch())) return false;
++    try {
++        // Reject different firmware before running. No guest API is used here.
++        static const uint16_t signature[]={0x2100,0x7171,0x2800,0xd01f};
++        if (!bytes(soc.GetCpu(),0x2004d532,signature,sizeof(signature))) return false;
++        if (validate(soc)) return true;
++        return soc.RunToNativePc(waitPc|1,0,budget,budget) && validate(soc);
++    } catch (const std::runtime_error&) { return false; }
++}
++
++struct Session::Impl {
++    SoC& soc;
++    ArmCpu* cpu;
++    uint32_t allocation{0}, depth{0};
++    bool closed{false}, failed{false};
++    uint32_t calls{0}, callbacks{0};
++    const std::chrono::steady_clock::time_point started=std::chrono::steady_clock::now();
++    uint64_t startedGuest;
++    void budgetCheck() {
++        require(std::chrono::steady_clock::now()-started<std::chrono::seconds(30) &&
++                soc.GetInjectedTimeNsec()-startedGuest<20000000000ull,"native session deadline exceeded");
++    }
++    std::vector<uint8_t> bootstrap;
++    struct Callback { Impl* self; std::function<void(ArmCpu*)> fn; };
++    std::map<uint32_t,Callback> handlers;
++    std::exception_ptr callbackError;
++    explicit Impl(SoC& soc):soc(soc),cpu(soc.GetCpu()),startedGuest(soc.GetInjectedTimeNsec()),bootstrap(128*1024,0xa5) {}
++    bool copy(uint32_t a,void* p,uint32_t n,bool write) {
++        if (n>16*1024*1024) return false;
++        return cpuNativeBuffer(cpu,a,p,n,write);
++    }
++    static void callback(ArmCpu* cpu,void* opaque) {
++        auto* c=static_cast<Callback*>(opaque);
++        Impl* self=c->self;
++        try {
++            self->budgetCheck();
++            require(++self->callbacks<=65536 && owner(cpu),"native callback/task guard failed");
++            auto fn=c->fn; // self-unregistration is safe, even when fn throws
++            fn(cpu);
++        } catch (...) {
++            self->callbackError=std::current_exception();
++            self->failed=true;
++            // Stop at this instruction so RunUntil can account completed guest
++            // cycles before propagating the host exception to whole-guest recovery.
++            cpuSetSlowPath(cpu,SLOW_PATH_REASON_NATIVE_FAULT);
++        }
++    }
++
++    uint32_t invoke(uint16_t trap,std::array<uint32_t,4> args,const std::vector<uint32_t>& stackArgs,bool boot) {
++        budgetCheck();
++        require(!closed && !failed && syscallDispatchRecoveryActive(soc.GetSyscallDispatch()),"native recovery scope is not active");
++        require(depth<4 && ++calls<=65536 && stackArgs.size()<=16,"native call bound exceeded");
++        struct Entry { uint16_t trap; uint32_t address; uint32_t signature[4]; };
++        static const Entry entries[]={
++            {0x812c,0x200685ec,{0xe59fc004,0xe08cc00f,0xe12fff1c,0xfffc35d1}},
++            {0x8148,0x2006865c,{0xe59fc004,0xe08cc00f,0xe12fff1c,0xfffc2801}},
++            {0x815c,0x200686ac,{0xe59fc004,0xe08cc00f,0xe12fff1c,0xfffc1cad}},
++            {0x81d4,0x2006888c,{0xe59fc004,0xe08cc00f,0xe12fff1c,0xfffc3473}},
++            {0x8188,0x2006875c,{0xe59fc004,0xe08cc00f,0xe12fff1c,0xfffc3547}},
++            {0x8304,0x204ae7a8,{0xe92d4ff0,0xe5999000,0xe24dd034,0xe599932c}},
++            {0x82fc,0x20068d2c,{0xe59fc004,0xe08cc00f,0xe12fff1c,0xfffcf751}},
++            {0x88f8,0x2006a51c,{0xe59fc004,0xe08cc00f,0xe12fff1c,0xfffe5c1d}},
++            {0x8584,0x2006974c,{0xe59fc004,0xe08cc00f,0xe12fff1c,0xfffd8d73}},
++            {0x84b8,0x2006941c,{0xe59fc004,0xe08cc00f,0xe12fff1c,0xfffd8afb}}
++        };
++        const Entry* expected=nullptr;
++        for (const auto& candidate:entries) if (candidate.trap==trap) expected=&candidate;
++        require(expected,"native trap is outside qualified database API set");
++        require(owner(cpu),"native task changed before call");
++        auto* r=cpuGetRegisters(cpu);
++        require(word(cpu,r[9]-8)==nativeTable,"native syscall table changed");
++        const uint32_t entry=word(cpu,nativeTable+(trap&0xfff));
++        require(entry==expected->address && bytes(cpu,entry,expected->signature,sizeof(expected->signature)),
++                "native syscall firmware signature mismatch");
++        CpuCheckpoint saved(cpu);
++        uint8_t taskContext[0x34]; uint32_t userSp=word(cpu,task+0x24);
++        require(copy(task+0x40,taskContext,sizeof(taskContext),false),"cannot snapshot task context");
++        Defer restore([&] {
++            cpuNativeBuffer(cpu,task+0x24,&userSp,4,true);
++            cpuNativeBuffer(cpu,task+0x40,taskContext,sizeof(taskContext),true);
++            saved.Restore();
++        });
++        uint32_t stack = boot ? bootstrapBase+bootstrap.size()-64 :
++            (depth ? r[13] : allocation+allocationSize-64);
++        stack = (stack - uint32_t(stackArgs.size()*4) - 8) & ~7u;
++        require(boot || stack>allocation+dataSize+256,"native scratch stack exhausted");
++        if (boot) {
++            for (size_t i=0;i<stackArgs.size();++i)
++                memcpy(bootstrap.data()+stack-bootstrapBase+i*4,&stackArgs[i],4);
++        } else require(copy(stack,const_cast<uint32_t*>(stackArgs.data()),stackArgs.size()*4,true),"native stack arguments unmapped");
++        std::copy(args.begin(),args.end(),r);
++        r[13]=stack;
++        const bool suspendTimers = depth == 0;
++        if (suspendTimers) soc.SuspendTimerInterrupts(true);
++        Defer resumeTimers([&] { if (suspendTimers) soc.SuspendTimerInterrupts(false); });
++        ++depth;
++        Defer leave([&] { --depth; });
++        cpuSetNativeStackBounds(cpu,boot ? bootstrapBase+256 : allocation+dataSize+4,
++                                boot ? bootstrapBase+bootstrap.size()-4 : allocation+allocationSize-4,0x1ff042bc,task);
++        require(cpuStartNativeCall(cpu,entry),"native call nesting rejected");
++        Defer finish([&] { cpuEndNativeCall(cpu); });
++        bool completed=false;
++        if (boot) {
++            uint64_t cycles=0;
++            Defer account([&] { soc.AccountInjectedCycles(cycles,budget); });
++            while (cycles<budget) {
++                cycles+=cpuCyclePure(cpu);
++                const auto reason=cpuGetSlowPathReason(cpu);
++                if (reason&SLOW_PATH_REASON_NATIVE_FAULT) break;
++                if (reason&SLOW_PATH_REASON_INJECTED_CALL_DONE) { completed=true; break; }
++            }
++        } else completed=soc.ExecuteInjected(budget,budget);
++        if (callbackError) std::rethrow_exception(callbackError);
++        require(completed && !(cpuGetSlowPathReason(cpu)&SLOW_PATH_REASON_NATIVE_FAULT),"native call fault or cycle deadline");
++        require(owner(cpu) && r[13]==stack,"native call changed task or stack");
++        if (allocation) {
++            const uint32_t marker=0xa55a3cc3;
++            require(word(cpu,allocation+dataSize)==marker &&
++                    word(cpu,allocation+allocationSize-4)==marker,"native scratch stack guard damaged");
++        }
++        return r[0];
++    }
++};
++
++Session::Session(SoC& soc) {
++    require(syscallDispatchRecoveryActive(soc.GetSyscallDispatch()) &&
++            !syscallDispatchInProgress(soc.GetSyscallDispatch()),"native session requires top-level recovery checkpoint");
++    require(validate(soc),"unqualified native boundary");
++    auto candidate=std::make_unique<Impl>(soc);
++    require(cpuAcquireNativeSession(candidate->cpu),"native session already active");
++    Defer failure([&] { if (candidate) cpuClearNativeRuntime(candidate->cpu); });
++    require(cpuSetNativeScratch(candidate->cpu,bootstrapBase,candidate->bootstrap.data(),candidate->bootstrap.size()),"bootstrap address is mapped");
++    candidate->allocation=candidate->invoke(0x8584,{allocationSize,0,0,0},{},true);
++    require(candidate->allocation && !(candidate->allocation&3) &&
++            cpuNativeRamRange(candidate->cpu,candidate->allocation,allocationSize),("native scratch allocation is not RAM: "+std::to_string(candidate->allocation)).c_str());
++    // The original UI call frame is never writable scratch.
++    const uint32_t oldSp=cpuGetRegisters(candidate->cpu)[13];
++    require(uint64_t(candidate->allocation)+allocationSize<=oldSp || candidate->allocation>oldSp+112,"scratch overlaps UI frame");
++    require(cpuSetNativeScratch(candidate->cpu,0,nullptr,0),"cannot release bootstrap mapping");
++    const uint32_t marker=0xa55a3cc3;
++    require(candidate->copy(candidate->allocation+dataSize,const_cast<uint32_t*>(&marker),4,true) &&
++            candidate->copy(candidate->allocation+allocationSize-4,const_cast<uint32_t*>(&marker),4,true),"cannot initialize stack guards");
++    impl=std::move(candidate);
++}
++Session::~Session() { if (impl) cpuClearNativeRuntime(impl->cpu); }
++uint32_t Session::Call(uint16_t trap,std::array<uint32_t,4> args,std::vector<uint32_t> stackArgs) {
++    try { return impl->invoke(trap,args,stackArgs,false); }
++    catch (...) { impl->failed=true; throw; }
++}
++bool Session::Read(uint32_t address,void* dest,uint32_t size) {
++    return !impl->closed && !impl->failed && impl->copy(address,dest,size,false);
++}
++bool Session::Write(uint32_t address,const void* src,uint32_t size) {
++    return !impl->closed && !impl->failed && impl->copy(address,const_cast<void*>(src),size,true);
++}
++void Session::RegisterCallback(uint32_t address,std::function<void(ArmCpu*)> fn) {
++    require(!impl->closed && !impl->failed && fn && address>=DataAddress() &&
++            uint64_t(address)+4<=uint64_t(DataAddress())+DataSize() && !(address&3),"invalid native callback address");
++    auto result=impl->handlers.emplace(address,Impl::Callback{impl.get(),std::move(fn)});
++    require(result.second,"duplicate native callback");
++    if (!cpuRegisterNativeCallback(impl->cpu,address,Impl::callback,&result.first->second)) {
++        impl->handlers.erase(result.first); throw std::runtime_error("native callback slots exhausted");
++    }
++}
++void Session::UnregisterCallback(uint32_t address) {
++    cpuUnregisterNativeCallback(impl->cpu,address); impl->handlers.erase(address);
++}
++uint32_t Session::DataAddress() const { return impl->allocation+64; }
++uint32_t Session::DataSize() const { return dataSize-64; }
++void Session::Close() {
++    require(!impl->depth,"cannot close native session from callback");
++    if (impl->closed) return;
++    require(!impl->failed,"failed native session requires whole-guest rollback");
++    for (const auto& h:impl->handlers) cpuUnregisterNativeCallback(impl->cpu,h.first);
++    impl->handlers.clear();
++    require(cpuSetNativeScratch(impl->cpu,bootstrapBase,impl->bootstrap.data(),impl->bootstrap.size()),"bootstrap address changed");
++    const uint32_t allocation=impl->allocation;
++    // Check guards before freeing; never dereference the freed block in invoke.
++    const uint32_t marker=0xa55a3cc3;
++    require(word(impl->cpu,allocation+dataSize)==marker && word(impl->cpu,allocation+allocationSize-4)==marker,"stack guards damaged before free");
++    impl->allocation=0;
++    try { require(impl->invoke(0x84b8,{allocation,0,0,0},{},true)==0,"native scratch free failed"); }
++    catch (...) { impl->failed=true; throw; }
++    impl->closed=true;
++    cpuClearNativeRuntime(impl->cpu);
++}
++}
++#endif
+--- /dev/null
++++ b/src/uarm/uarm/native_boundary.h
+@@ -0,0 +1,40 @@
++#ifndef FROND_NATIVE_BOUNDARY_H
++#define FROND_NATIVE_BOUNDARY_H
++#ifndef __EMSCRIPTEN__
++#include <array>
++#include <cstdint>
++#include <functional>
++#include <memory>
++#include <vector>
++class SoC;
++struct ArmCpu;
++namespace NativeBoundary {
++// No guest API calls or guest writes. Advances at most 50M normal cycles.
++// A successful return is a candidate, revalidated by Session after checkpoint.
++bool Prepare(SoC& soc);
++class Session {
++ public:
++    // Requires active syscallDispatchBeginRecovery and a whole-guest checkpoint.
++    // Revalidates boundary before allocating one owned guest scratch block.
++    explicit Session(SoC& soc);
++    ~Session();
++    Session(const Session&) = delete;
++    Session& operator=(const Session&) = delete;
++    uint32_t Call(uint16_t trap, std::array<uint32_t,4> args = {},
++                  std::vector<uint32_t> stackArgs = {});
++    bool Read(uint32_t address, void* dest, uint32_t size);
++    bool Write(uint32_t address, const void* src, uint32_t size);
++    void RegisterCallback(uint32_t address, std::function<void(ArmCpu*)> callback);
++    void UnregisterCallback(uint32_t address);
++    uint32_t DataAddress() const;
++    uint32_t DataSize() const;
++    // Must succeed before committing writes; destructor only restores host/CPU state.
++    // On any exception discard the entire checkpoint (including allocation).
++    void Close();
++ private:
++    struct Impl;
++    std::unique_ptr<Impl> impl;
++};
++}
++#endif
++#endif
+--- a/src/uarm/uarm/soc_generic.h
++++ b/src/uarm/uarm/soc_generic.h
+@@ -14,6 +14,9 @@
+ 
+     uint64_t Run(uint64_t maxCycles, uint64_t cyclesPerSecond) override;
+     bool RunToPaceSyscall(uint16_t syscall, uint64_t maxCycles, uint64_t cyclesPerSecond) override;
++#ifndef __EMSCRIPTEN__
++    bool RunToNativePc(uint32_t first, uint32_t second, uint64_t maxCycles, uint64_t cyclesPerSecond) override;
++#endif
+     bool ExecuteInjected(uint64_t maxCycles, uint64_t cyclesPerSecond) override;
+ 
+     void Reset() override;
+--- a/src/uarm/uarm/soc_generic_impl.h
++++ b/src/uarm/uarm/soc_generic_impl.h
+@@ -6,6 +6,7 @@
+ // clang-format on
+ 
+ #include "CPU.h"
++#include "Defer.h"
+ #include "MMU.h"
+ #include "MPU.h"
+ #include "SoC.h"
+@@ -44,12 +45,26 @@
+     return true;
+ }
+ 
++#ifndef __EMSCRIPTEN__
++template <class T>
++bool SocGeneric<T>::RunToNativePc(uint32_t first, uint32_t second, uint64_t maxCycles, uint64_t cyclesPerSecond) {
++    if (!first || !maxCycles || cyclesPerSecond < 1000 || maxCycles > 50000000 ||
++        !cpuSetNativePcBreak(this->cpu, first, second)) return false;
++    paceBreakSyscall = 0;
++    Defer clear([&] { cpuSetNativePcBreak(this->cpu, 0, 0); });
++    const uint64_t cycles = RunUntil<SLOW_PATH_REASON_NATIVE_PC, false>(maxCycles, cyclesPerSecond);
++    injectedTimeNsec += (cycles * 1000000) / (cyclesPerSecond / 1000);
++    return cpuGetSlowPathReason(this->cpu) & SLOW_PATH_REASON_NATIVE_PC;
++}
++
++#endif
++
+ template <class T>
+ bool SocGeneric<T>::ExecuteInjected(uint64_t maxCycles, uint64_t cyclesPerSecond) {
+     auto cpu = this->cpu;
+ 
+     const uint64_t cycles =
+-        RunUntil<SLOW_PATH_REASON_INJECTED_CALL_DONE, true>(maxCycles, cyclesPerSecond);
++        RunUntil<SLOW_PATH_REASON_INJECTED_CALL_DONE | SLOW_PATH_REASON_NATIVE_FAULT, true>(maxCycles, cyclesPerSecond);
+ 
+     injectedTimeNsec += (cycles * 1000000) / (cyclesPerSecond / 1000);
+ 
+@@ -196,6 +211,7 @@
+ 
+     const uint64_t previousBudget = runningCyclesPerSecond;
+     runningCyclesPerSecond = cyclesPerSecond;
++    Defer restoreBudget([&] { runningCyclesPerSecond = previousBudget; });
+     uint64_t cycles = 0;
+ 
+     while (cycles < maxCycles) {
+@@ -221,7 +237,6 @@
+         }
+     }
+ 
+-    runningCyclesPerSecond = previousBudget;
+     return cycles;
+ }
+ 
+--- a/src/uarm/uarm/syscall_dispatch.cpp
++++ b/src/uarm/uarm/syscall_dispatch.cpp
+@@ -114,7 +114,9 @@
+     sd->recoverable = true;
+     sd->failed = false;
+ }
++bool syscallDispatchRecoveryActive(struct SyscallDispatch* sd) { return sd->recoverable; }
+ void syscallDispatchEndRecovery(struct SyscallDispatch* sd) {
++    cpuClearNativeRuntime(sd->soc->GetCpu());
+     sd->recoverable = false;
+     sd->failed = false;
+     sd->nestLevel = 0;
+--- a/src/uarm/uarm/syscall_dispatch.h
++++ b/src/uarm/uarm/syscall_dispatch.h
+@@ -16,6 +16,7 @@
+ };
+ void syscallDispatchBeginRecovery(struct SyscallDispatch* sd);
+ void syscallDispatchEndRecovery(struct SyscallDispatch* sd);
++bool syscallDispatchRecoveryActive(struct SyscallDispatch* sd);
+ #endif
+ 
+ struct SyscallDispatch;

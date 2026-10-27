@@ -62,40 +62,47 @@ interpreter invocation, and detects overwritten entry instructions after an OS
 reload. E2-specific pen, NVFS and UI ROM hooks remain disabled for TX.
 
 The bridge enables application installation, launch and RAM database export.
-These operations need a suitable guest API boundary, so startup may still need
-time after a signature match. Export first advances the live guest toward an
-`EvtGetEvent` boundary. This preflight work can advance guest time and change
-memory, flash, devices or network state; that progress remains on both success
-and failure. If preflight cannot reach the boundary within its budget, the
-desktop socket reports `not-ready`, without starting a checkpoint or an archive.
+These operations need a verified guest API boundary. The 68k path stops before
+an `EvtGetEvent` trap. For the qualified TX firmware, a native path can also stop
+at a natural return from the UI event manager's internal wait. This supports
+commands while a native application waits without returning to PACE.
 
-After successful preflight, export immediately checkpoints the prepared guest.
-Injected database export work then restores memory, flash, card, peripheral,
-network and timing state to that checkpoint, including on failure. No partial
-archive is published. The whole request is therefore not read-only: only work
-after the checkpoint is rolled back. The checkpoint requires extra memory
-roughly equal to guest RAM, flash and the optional SD image.
+Native preflight checks the firmware instructions, saved caller chain, running
+and selected UI task, scheduler lock state, event-manager flags and memory
+mappings. It makes no guest API calls or explicit guest writes. It never sends
+input, changes an application's wait timeout, or reuses a consumed PACE frame.
+The native path rejects different firmware, busy tasks and unqualified call
+chains. The existing 68k path remains available where supported; if neither path
+is ready, the command returns `not-ready`. A successful signature scan alone does
+not establish readiness.
+
+Preflight advances the live guest and can change memory, flash, devices or
+network state. That progress remains on success and failure. After preflight,
+export immediately checkpoints the prepared guest. Database calls, temporary
+allocations and callbacks run inside bounded recovery. Native calls use owned
+scratch memory and a separate stack, then restore the interrupted CPU/task
+context. Export rolls back guest memory, storage and saved device state before
+publishing its ZIP. No archive is published after a guest-operation failure.
+
+Install and launch use transactions too: successful results commit, while
+failed replacement or a call fault/timeout restores the previous guest. Queued
+and held host inputs survive temporary rollback. Ordinary session restore still
+discards stale host input. The checkpoint requires extra memory roughly equal
+to guest RAM, flash and the optional SD image.
 
 `guest-ready` is a point-in-time observation. Normal execution between socket
-requests can consume that PACE boundary, so export repeats preflight atomically
-with checkpoint creation. `make test-export-checkpoint` covers failed preflight,
-repeated not-ready progress, successful preflight followed by an injected export
-timeout, and rollback after successful export work.
+requests can consume the boundary, so each operation repeats preflight before
+its checkpoint. Calls and callbacks have count, memory and execution bounds;
+native sessions also have aggregate guest-time and wall-time limits. A blocked
+or unsupported guest operation returns an error rather than manufacturing
+readiness.
 
-### Open developer-workflow issue: indefinitely idle applications
-
-An app blocked inside native `EvtGetEvent(evtWaitForever)` may remain `not-ready`
-until ordinary user input lets it return to PACE. Recognizing its last 68k trap
-is not sufficient to establish a safe injection boundary: the CPU can be inside
-a native wait or executing another Palm task. Injected 68k calls currently depend
-on the PACE callout frame and state pointer at the stopped boundary. The bridge
-has no verified way to reconstruct that context inside a blocked native call.
-It does not reuse a consumed boundary, inject input, or change third-party apps.
-
-The SD validation probe uses a bounded idle event wait to offer periodic PACE
-boundaries. That is a cooperative test fixture, not general support for exporting
-from indefinitely idle apps. Its card operations and fresh-result checks remain
-strict; readiness deadlines can still fail for third-party applications.
+`make test-export-checkpoint`, `make test-checkpoint-input` and the optional
+real-guest workflow acceptance cover preflight, rollback, failed replacement,
+input preservation, saved sessions and named log retrieval. Full RAM export
+still fails if an included database cannot be exported; use named export for
+an application's closed log database. Open applications cannot always be
+replaced, even when the command boundary is available.
 
 ## Native performance
 

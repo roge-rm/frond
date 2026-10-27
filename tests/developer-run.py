@@ -57,6 +57,10 @@ def fake_core():
                 ok, code = False, 'command'
             elif command == 'guest-ready':
                 ok = counts[command] > config.get('ready_retries', 0)
+                if config.get('unsupported_after_launch') and counts.get('launch-app', 0):
+                    ok = False
+                if config.get('slow_ready_retry') and counts[command] > 1:
+                    time.sleep(.5)
                 code = 'guest-ready' if ok else 'not-ready'
             elif command == 'install':
                 code = 'needs-reset' if config.get('reset') else 'installed'
@@ -133,13 +137,20 @@ class DeveloperRunTest(unittest.TestCase):
         return result
 
     def test_resume_does_not_relaunch_saved_workload(self):
-        result = self.run_case({'missing_app': True}, ['--resume-app', '--screenshot', '0'])
+        result = self.run_case({'missing_app': True, 'ready_retries': 999}, ['--resume-app', '--screenshot', '0'])
         self.assertEqual(result['status'], 'ok', result)
         commands = [step['command'] for step in result['steps']]
         self.assertNotIn('launch-app', commands)
-        self.assertIn('guest-ready', commands)
+        self.assertNotIn('guest-ready', commands)
         self.assertIn('input-replay', commands)
         self.assertTrue(result['artifacts']['session_saved'])
+
+    def test_replay_does_not_require_a_second_guest_boundary(self):
+        result = self.run_case({'unsupported_after_launch': True}, ['--screenshot', '0'])
+        self.assertEqual(result['status'], 'ok', result)
+        commands = [step['command'] for step in result['steps']]
+        self.assertEqual(commands.count('guest-ready'), 1)
+        self.assertLess(commands.index('launch-app'), commands.index('input-replay'))
 
     def test_full_workflow_preserves_inputs_and_remaps_all_snapshots(self):
         prc, pdb = self.root / 'app.prc', self.root / 'data.pdb'
@@ -180,6 +191,11 @@ class DeveloperRunTest(unittest.TestCase):
         result = self.run_case({'ready_retries': 999}, ['--ready-timeout', '.3'])
         self.assertEqual(result['error']['code'], 'timeout')
         self.assertEqual(result['stage'], 'ready')
+
+    def test_readiness_timeout_during_retry_explains_idle_wait(self):
+        result = self.run_case({'ready_retries': 999, 'slow_ready_retry': True}, ['--ready-timeout', '.3'])
+        self.assertEqual(result['error']['code'], 'timeout')
+        self.assertIn('waiting indefinitely', result['error']['message'])
 
     def test_hung_command_timeout(self):
         result = self.run_case({'hang': 'launch-app'}, ['--command-timeout', '.15'])
