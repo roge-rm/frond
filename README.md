@@ -70,11 +70,17 @@ QT_QPA_PLATFORM=offscreen make test-desktop
 make test-build-tools check-reconstruction
 ```
 
-The tests above need no Palm firmware. For application testing with your own
-firmware, see the [developer runner](doc/developer-run.md) and
-[compatibility tests](doc/compatibility.md). Frond also provides an
-[ARM and PACE debugger](doc/debugger.md) and tools for
-[measuring input and audio timing](doc/input-latency.md).
+The tests above need no Palm firmware. With your own firmware, the
+[developer runner](doc/developer-run.md) supports application installation,
+launch, RAM database export and log retrieval, including during qualified TX
+native UI waits. See the [compatibility tests](doc/compatibility.md) for app probes.
+
+The [ARM and PACE debugger](doc/debugger.md) provides ARM/Thumb stepping and
+breakpoints, PACE inspection and explicit 68k stepping validated with real GDB
+and a TX session. Foreground-app attribution is restricted to the qualified TX
+UI-root wait; offline symbol reports require matching executable, PRC and live
+resource bytes. General code ownership and watchpoints remain unsupported.
+Tools for [measuring input and audio timing](doc/input-latency.md) are also available.
 
 The upstream core is pinned in `vendor/cloudpilot`; ordered patches in `patches/`
 are applied to `build/source`. See [build validation](doc/build-validation.md)
