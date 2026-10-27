@@ -97,6 +97,12 @@ native sessions also have aggregate guest-time and wall-time limits. A blocked
 or unsupported guest operation returns an error rather than manufacturing
 readiness.
 
+Ordinary injected calls have a 50-million-cycle limit. The database-image importer
+alone can continue through ten such slices, checking deadlines between slices
+without restarting the call. This accommodates larger databases while preserving
+the 20-accounted-guest-second and 30-wall-second session limits and rollback on
+fault or exhaustion.
+
 `make test-export-checkpoint`, `make test-checkpoint-input` and the optional
 real-guest workflow acceptance cover preflight, rollback, failed replacement,
 input preservation, saved sessions and named log retrieval. Full RAM export

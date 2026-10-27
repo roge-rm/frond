@@ -3,4 +3,5 @@ BEGIN
  TITLE "Frond compatibility"
  LABEL "Results: FrondCompatLog" ID 1001 AT (5 30)
  LABEL "Firmware services + ARM/Thumb" ID 1002 AT (5 50)
+ BUTTON "Tap to finish" ID 1003 AT (20 80 120 40) USABLE FRAME
 END

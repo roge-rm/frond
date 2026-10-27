@@ -17,6 +17,7 @@ import sys
 import tempfile
 import time
 import zipfile
+import zlib
 
 
 class RunError(Exception):
@@ -47,7 +48,10 @@ def nonnegative(value):
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--core', type=Path, default=Path(__file__).resolve().parents[1] / 'out/frond')
-    p.add_argument('--session', type=Path, required=True)
+    origin = p.add_mutually_exclusive_group(required=True)
+    origin.add_argument('--session', type=Path, help='restore a complete saved session')
+    origin.add_argument('--nor', type=Path, help='cold boot TX from this NOR and --nand, without saved RAM/CPU')
+    p.add_argument('--nand', type=Path, help='TX NAND paired with --nor; copied before execution')
     p.add_argument('--output', type=Path, required=True, help='new private result directory')
     p.add_argument('--install', type=Path, action='append', default=[], help='PRC/PDB; repeat in install order')
     launch = p.add_mutually_exclusive_group(required=True)
@@ -224,18 +228,25 @@ def run(args):
               'artifacts': {}, 'inputs': [], 'error': None}
     root = process = connection = None
     try:
+        if bool(args.nor) != bool(args.nand):
+            raise RunError('argument', '--nor and --nand must be supplied together')
         for name in ([args.app] if args.app is not None else []) + args.export_db:
             if not name or len(name.encode()) > 31 or '\n' in name or '\0' in name:
                 raise RunError('argument', 'Palm database names must be 1–31 UTF-8 bytes without newline/NUL')
         output = args.output.resolve()
         if any(c in str(output) for c in ('\n', '\r', '\0')):
             raise RunError('argument', 'Output paths cannot contain newline/NUL')
-        paths = [args.core.resolve(), args.session.resolve(), *[p.resolve() for p in args.install]]
+        origins = [args.session.resolve()] if args.session else [args.nor.resolve(), args.nand.resolve()]
+        paths = [args.core.resolve(), *origins, *[p.resolve() for p in args.install]]
+        install_start = 1 + len(origins)
         if args.replay:
             paths.append(args.replay.resolve())
         for path in paths:
             if not path.is_file():
                 raise RunError('input', f'Input file does not exist: {path}')
+        if not args.session and (origins[0].stat().st_size != 16 * 1024 * 1024 or
+                                 origins[1].stat().st_size != 132 * 1024 * 1024):
+            raise RunError('input', 'Cold boot requires 16 MiB TX NOR and 132 MiB raw NAND')
         if not os.access(paths[0], os.X_OK):
             raise RunError('input', 'Core is not executable')
         for path in args.install:
@@ -253,10 +264,12 @@ def run(args):
         for index, path in enumerate(paths):
             check_deadline(deadline)
             record = {'path': str(path), 'sha256': sha256(path)}
-            if index == 1:
-                copy = root / 'working.frond'
-            elif 2 <= index < 2 + len(args.install):
-                copy = root / f'install-{index - 1:03d}{path.suffix.lower()}'
+            if index == 0:
+                copy = root / 'core'
+            elif index < install_start:
+                copy = root / ('working.frond' if args.session else 'input-nor.bin' if index == 1 else 'input-nand.bin')
+            elif install_start <= index < install_start + len(args.install):
+                copy = root / f'install-{index - install_start + 1:03d}{path.suffix.lower()}'
                 installs.append(copy)
             elif args.replay and index == len(paths) - 1:
                 copy = replay_source = root / 'source.replay'
@@ -264,7 +277,7 @@ def run(args):
                 copy = None
             if copy:
                 shutil.copyfile(path, copy)
-                copy.chmod(0o600)
+                copy.chmod(0o700 if index == 0 else 0o600)
                 if sha256(copy) != record['sha256']:
                     raise RunError('input-changed', f'Input changed while copying: {path}')
                 record['copy'] = str(copy)
@@ -272,13 +285,17 @@ def run(args):
         replay, last_ms, captures = prepare_replay(replay_source, root, args.screenshot)
         result['artifacts']['screenshots'] = captures
         result['artifacts']['exports'] = []
+        result['origin'] = {'mode': 'session-restore' if args.session else 'cold-boot',
+                            'saved_ram_cpu_loaded': bool(args.session)}
         with tempfile.TemporaryDirectory(prefix='frond-run-') as socket_dir, (root / 'core.log').open('wb') as log:
             with socket.socket(socket.AF_UNIX) as listener:
                 address = str(Path(socket_dir) / 'control')
                 listener.bind(address)
                 listener.listen(1)
+                boot = [str(root / 'working.frond')] if args.session else [
+                    '--experimental-tx', str(root / 'input-nor.bin'), '--nand', str(root / 'input-nand.bin')]
                 command = (['heavy', 'emulator'] if shutil.which('heavy') else []) + [
-                    str(paths[0]), str(root / 'working.frond'), '--desktop-socket', address]
+                    str(root / 'core'), *boot, '--desktop-socket', address]
                 if not args.sound:
                     command.append('--no-sound')
                 result['command'] = command
@@ -328,9 +345,16 @@ def run(args):
                 for index, name in enumerate(args.export_db, 1):
                     archive = root / f'database-{index:03d}.zip'
                     control.retry_ready('export-db', str(archive) + '\n' + name, args.ready_timeout)
-                    with zipfile.ZipFile(archive) as z:
-                        if len(z.namelist()) != 1 or z.testzip() is not None:
-                            raise RunError('export', f'Invalid named database archive: {archive}')
+                    try:
+                        with zipfile.ZipFile(archive) as z:
+                            entries = z.infolist()
+                            if (len(entries) != 1 or entries[0].flag_bits & 1 or
+                                    entries[0].compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED) or
+                                    z.testzip() is not None):
+                                raise RunError('export', f'Invalid named database archive: {archive}')
+                    except (RuntimeError, NotImplementedError, EOFError, zipfile.BadZipFile,
+                            zlib.error) as error:
+                        raise RunError('export', f'Unreadable named database archive: {archive}: {error}') from error
                     result['artifacts']['exports'].append({'database': name, 'path': str(archive)})
                 result['stage'] = 'save'
                 control.require('save', root / 'working.frond')
@@ -352,6 +376,18 @@ def run(args):
         if connection:
             connection.close()
         stop(process)
+        unchanged = {}
+        for record in result['inputs']:
+            try:
+                unchanged[record['path']] = sha256(Path(record['path'])) == record['sha256']
+            except OSError:
+                unchanged[record['path']] = False
+        result['inputs_unchanged'] = unchanged
+        if not all(unchanged.values()):
+            result['status'] = 'error'
+            if result['error'] is None:
+                result['stage'] = 'validate-inputs'
+                result['error'] = {'code': 'input-changed', 'message': 'An original input changed during execution'}
         result['elapsed_seconds'] = round(time.monotonic() - started, 3)
         result['core_exit_code'] = process.returncode if process else None
         if root:

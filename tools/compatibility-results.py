@@ -7,6 +7,12 @@ APP = 'Frond compatibility'
 LOG = 'FrondCompatLog'
 CASES = ('memory', 'database', 'preferences', 'ticks', 'drawing',
          'native-arm', 'native-thumb', 'event-queue')
+INTERACTIVE_CASES = CASES + ('ui-control',)
+
+
+def cases(version):
+    require(type(version) is int and version in (1, 2), 'Unsupported probe version')
+    return CASES if version == 1 else INTERACTIVE_CASES
 
 
 def require(condition, message):
@@ -34,7 +40,7 @@ def config_database(token, previous=''):
     return raw
 
 
-def read_log(path):
+def read_log(path, *, version=1):
     with zipfile.ZipFile(path) as archive:
         names = archive.namelist()
         require(len(names) == 1 and names[0].rsplit('/', 1)[-1] == LOG + '.pdb',
@@ -46,32 +52,42 @@ def read_log(path):
     require(raw[:32].split(b'\0', 1)[0] == LOG.encode() and raw[60:68] == b'LOGSFrCp',
             'Wrong Palm log database identity')
     require(not (struct.unpack_from('>H', raw, 32)[0] & 1), 'Log must be a record database')
+    require(raw[72:76] == b'\0' * 4, 'Chained record lists are unsupported')
     count = struct.unpack_from('>H', raw, 76)[0]
     end = 78 + count * 8
-    require(count == len(CASES) + 2 and end <= len(raw), 'Wrong compatibility record count')
+    require(count == len(cases(version)) + 2 and end <= len(raw), 'Wrong compatibility record count')
+    require(all(not (raw[82 + i * 8] & 0xa0) for i in range(count)),
+            'Deleted or busy compatibility record')
+    ids = [raw[83 + i * 8:86 + i * 8] for i in range(count)]
+    require(len(set(ids)) == count and b'\0\0\0' not in ids, 'Invalid record identities')
     offsets = [struct.unpack_from('>I', raw, 78 + i * 8)[0] for i in range(count)] + [len(raw)]
     require(all(end <= x < y <= len(raw) for x, y in zip(offsets, offsets[1:])),
             'Invalid Palm record offsets')
     records = [raw[x:y] for x, y in zip(offsets, offsets[1:])]
     require(all(r.endswith(b'\0') and b'\0' not in r[:-1] for r in records),
             'Malformed Palm text records')
-    return [r[:-1].decode('ascii') for r in records]
+    try:
+        return [r[:-1].decode('ascii') for r in records]
+    except UnicodeDecodeError as error:
+        raise ValueError('Non-ASCII compatibility record') from error
 
 
-def check_records(lines, token, *, resumed=False):
-    require(len(lines) == len(CASES) + 2, 'Missing, duplicate or extra results')
-    require(lines[0] == f'begin token={token} version=1', 'Stale or incompatible probe log')
+def check_records(lines, token, *, resumed=False, version=1):
+    require(isinstance(token, str) and re.fullmatch('[0-9a-f]{32}', token), 'Invalid run token')
+    labels = cases(version)
+    require(len(lines) == len(labels) + 2, 'Missing, duplicate or extra results')
+    require(lines[0] == f'begin token={token} version={version}', 'Stale or incompatible probe log')
     require(lines[-1] == f'complete token={token} failures=0', 'Incomplete or failed probe invocation')
     results = []
-    for label, line in zip(CASES, lines[1:-1]):
+    for label, line in zip(labels, lines[1:-1]):
         match = re.fullmatch(r'([a-z-]+) err=([0-9a-fA-F]{4}) value=([0-9]+)', line)
         require(match is not None and match[1] == label, f'Missing or reordered result: {label}')
         require(int(match[2], 16) == 0, f'Guest probe failed: {label}')
         value = int(match[3])
         expected = {'memory': 256, 'database': 2 if resumed else 1,
                     'preferences': 2 if resumed else 1, 'drawing': 3,
-                    'native-arm': checksum(), 'native-thumb': checksum(), 'event-queue': 1}
-        require(value >= 2 if label == 'ticks' else value == expected[label],
+                    'native-arm': checksum(), 'native-thumb': checksum(), 'event-queue': 1, 'ui-control': 1003}
+        require(2 <= value < 500 if label == 'ticks' else value == expected[label],
                 f'Unexpected observable value for {label}: {value}')
         results.append({'case': label, 'status': 'pass', 'value': value})
     return results

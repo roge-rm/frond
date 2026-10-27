@@ -24,13 +24,16 @@ spec.loader.exec_module(runner)
 
 def fake_core():
     print(os.getpid(), flush=True)
-    session = Path(sys.argv[1])
-    config = json.loads(session.read_text())
+    raw = sys.argv[1] == '--experimental-tx'
+    session = Path(sys.argv[4] if raw else sys.argv[1])
+    config = json.loads(session.open().readline() if raw else session.read_text())
+    if config.get('mutate_core'):
+        Path(config['mutate_core']).write_text('changed original executable')
     if config.get('early_exit'):
         return 7
     time.sleep(config.get('startup_delay', 0))
     with socket.socket(socket.AF_UNIX) as connection:
-        connection.connect(sys.argv[3])
+        connection.connect(sys.argv[sys.argv.index('--desktop-socket') + 1])
 
         def send(frame):
             data = frame.encode()
@@ -94,8 +97,19 @@ def fake_core():
                 elif config.get('export_error'):
                     ok, code, message = False, 'export', 'Database not found'
                 else:
-                    with zipfile.ZipFile(destination, 'w') as archive:
+                    with zipfile.ZipFile(destination, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
                         archive.writestr(name + '.pdb', b'synthetic log')
+                    if config.get('bad_archive'):
+                        raw = bytearray(Path(destination).read_bytes())
+                        central = raw.index(b'PK\x01\x02')
+                        if config['bad_archive'] == 'compression':
+                            raw[8:10] = raw[central + 10:central + 12] = b'\x63\0'
+                        elif config['bad_archive'] == 'encrypted':
+                            raw[6] |= 1; raw[central + 8] |= 1
+                        else:
+                            data_start = 30 + int.from_bytes(raw[26:28], 'little') + int.from_bytes(raw[28:30], 'little')
+                            raw[data_start] = 7  # Invalid DEFLATE block type.
+                        Path(destination).write_bytes(raw)
                     code = 'exported'
             elif command == 'save':
                 Path(argument).write_text('{"saved":true}')
@@ -144,6 +158,43 @@ class DeveloperRunTest(unittest.TestCase):
         self.assertNotIn('guest-ready', commands)
         self.assertIn('input-replay', commands)
         self.assertTrue(result['artifacts']['session_saved'])
+
+    def test_cold_boot_uses_only_copied_flash_and_frozen_core(self):
+        nor, nand = self.root / 'nor.bin', self.root / 'nand.bin'
+        for path, size in [(nor, 16 << 20), (nand, 132 << 20)]:
+            with path.open('wb') as stream:
+                stream.write(b'{}\n'); stream.truncate(size)
+        args = runner.parser().parse_args(['--core', str(self.core), '--nor', str(nor),
+            '--nand', str(nand), '--resume-app', '--output', str(self.output),
+            '--settle', '0', '--timeout', '5'])
+        with patch.object(runner.shutil, 'which', return_value=None):
+            result = runner.run(args)
+        self.assertEqual(result['status'], 'ok', result)
+        self.assertEqual(result['origin'], {'mode': 'cold-boot', 'saved_ram_cpu_loaded': False})
+        self.assertEqual([r['path'] for r in result['inputs']], [str(self.core), str(nor), str(nand)])
+        self.assertTrue(all(result['inputs_unchanged'].values()))
+        self.assertEqual(result['command'][0], str(self.output / 'core'))
+        self.assertNotIn(str(self.session), result['command'])
+        self.assertIn(str(self.output / 'input-nand.bin'), result['command'])
+        self.assertTrue((self.output / 'working.frond').is_file())
+        self.assertEqual(nor.stat().st_size, 16 << 20)
+        self.assertEqual(nand.stat().st_size, 132 << 20)
+
+    def test_raw_flash_requires_pair_and_exact_sizes(self):
+        for extra in [[], ['--nand', str(self.session)]]:
+            args = runner.parser().parse_args(['--core', str(self.core), '--nor', str(self.session),
+                '--resume-app', '--output', str(self.output), *extra])
+            result = runner.run(args)
+            self.assertEqual(result['status'], 'error', result)
+            self.assertFalse(self.output.exists())
+
+    def test_original_core_change_cannot_change_executed_snapshot_or_pass(self):
+        original = runner.sha256(self.core)
+        result = self.run_case({'mutate_core': str(self.core)})
+        self.assertEqual(result['status'], 'error', result)
+        self.assertEqual(result['error']['code'], 'input-changed')
+        self.assertFalse(result['inputs_unchanged'][str(self.core)])
+        self.assertEqual(runner.sha256(self.output / 'core'), original)
 
     def test_replay_does_not_require_a_second_guest_boundary(self):
         result = self.run_case({'unsupported_after_launch': True}, ['--screenshot', '0'])
@@ -242,6 +293,17 @@ class DeveloperRunTest(unittest.TestCase):
         self.assertFalse(result['artifacts']['session_saved'])
         self.assertEqual(sum(s['command'] == 'export-db' for s in result['steps']), 1)
 
+    def test_undecodable_export_is_structured_and_stops_before_save(self):
+        for kind in ('compression', 'encrypted', 'deflate'):
+            with self.subTest(kind=kind):
+                self.output = self.root / kind
+                result = self.run_case({'bad_archive': kind}, ['--export-db', 'Test log'])
+                self.assertEqual(result['status'], 'error')
+                self.assertEqual(result['stage'], 'export')
+                self.assertEqual(result['error']['code'], 'export')
+                self.assertFalse(result['artifacts']['session_saved'])
+                self.assertNotIn('save', [s['command'] for s in result['steps']])
+
     def test_export_not_ready_is_bounded_and_retried(self):
         result = self.run_case({'export_retries': 2}, ['--export-db', 'Test log'])
         self.assertEqual(result['status'], 'ok', result)
@@ -303,6 +365,6 @@ class DeveloperRunTest(unittest.TestCase):
 
 
 if __name__ == '__main__':
-    if len(sys.argv) > 2 and sys.argv[2] == '--desktop-socket':
+    if '--desktop-socket' in sys.argv:
         sys.exit(fake_core())
     unittest.main()

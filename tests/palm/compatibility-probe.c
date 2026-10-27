@@ -4,6 +4,7 @@
 #define CREATOR 'FrCp'
 static DmOpenRef logDB;
 static UInt16 failures;
+static Boolean queued;
 static Char token[33], previous[33];
 static void record(const Char* text) {
     UInt16 index = dmMaxRecordIndex;
@@ -129,8 +130,8 @@ static void run(void) {
     if (DmCreateDatabase(0, "FrondCompatLog", CREATOR, 'LOGS', false)) return;
     logDB = DmOpenDatabase(0, DmFindDatabase(0, "FrondCompatLog"), dmModeReadWrite);
     if (!logDB) return;
-    failures = 0;
-    StrPrintF(text, "begin token=%s version=1", token); record(text);
+    failures = 0; queued = false;
+    StrPrintF(text, "begin token=%s version=2", token); record(text);
     memoryProbe(); databaseProbe(); preferenceProbe();
     started = TimGetTicks(); SysTaskDelay(2); elapsed = TimGetTicks() - started;
     result("ticks", elapsed >= 2 && elapsed < SysTicksPerSecond() * 5UL, elapsed);
@@ -162,8 +163,12 @@ UInt32 PilotMain(UInt16 command, MemPtr parameters, UInt16 flags) {
     do {
         EvtGetEvent(&event, evtWaitForever);
         if (event.eType == firstUserEvent && logDB) {
-            Char text[100];
             result("event-queue", true, 1);
+            queued = true;
+        } else if (event.eType == ctlSelectEvent && event.data.ctlSelect.controlID == 1003
+                   && queued && logDB) {
+            Char text[100];
+            result("ui-control", true, 1003);
             StrPrintF(text, "complete token=%s failures=%u", token, failures); record(text);
             DmCloseDatabase(logDB); logDB = 0;
         } else if (!SysHandleEvent(&event) && !MenuHandleEvent(0, &event, &menuError)) {

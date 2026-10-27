@@ -32,6 +32,9 @@ These small programs are deliberately bounded; they are not ISA conformance test
 The Python tests reject stale tokens, unfinished runs, duplicate or missing
 results, guest failures, wrong values, bad record offsets and wrong database
 identity. They also check session chaining and explicit skipped firmware rows.
+The private app-matrix tests cover pinned inputs, exact database records,
+blocked stages, malformed archives and numeric fields, and a live synthetic
+developer-runner connection.
 Synthetic socket tests in `test-developer-run` separately check readiness, ordered
 installs, input preservation, export failures, deadlines and process cleanup.
 
@@ -65,7 +68,11 @@ probe; the second restores that run's saved session, installs a new configuratio
 and relaunches the existing probe. The second run requires the first token in
 both its database record and saved preference before replacing them. This checks
 fresh application execution after session restore, rather than merely exporting
-the first run's log again. It is not a reset, cold boot or physical flash test.
+the first run's log again. Use `--nor /private/tx-nor.bin --nand
+/private/tx-nand.bin` instead of `--session` for the first run to cold boot from
+prepared flash without saved RAM/CPU state. The second run still restores the
+first saved session. Prepared flash must have Palm setup completed; this does not
+exercise factory setup or physical flash. Reset is a separate coverage dimension.
 
 Both firmware runs check these cases in order:
 
@@ -85,7 +92,11 @@ Both firmware runs check these cases in order:
   The Thumb resource enters through an ARM veneer and returns through interworking.
   The builder rejects absolute ARM relocations and requires entry offset zero.
 - `event-queue`: enqueue a private user event and observe it in the application's
-  real event loop before writing the completion record.
+  real event loop.
+- `ui-control`: dispatch a real pen-down/up gesture to control 1003 and require
+  its Palm control event before writing the completion record. A run without the
+  gesture cannot pass. The current probe format is version 2; `--probe-version 1`
+  explicitly selects legacy validation without this interaction check.
 
 The probe owns `FrondCompatCfg`, `FrondCompatLog`, `FrondCompatData` and the `FrCp`
 preference. It replaces those test records **inside the private session copy**.
@@ -108,13 +119,62 @@ Keep the entire output private: sessions contain firmware, installed apps and
 personal data, and even logs/screenshots may contain private content. Generated
 SDK binaries stay in ignored `build/`; only original probe source is tracked.
 
-The matrix adds repeatable coverage for basic services and the mixed 68k/native
-boundary. It does not run third-party applications or accept their licenses.
-SimCity and SunVox remain version/session-specific smoke workloads described in
-[application testing](app-testing.md); no fresh third-party verdict follows from
-this probe. Native sound stream callbacks and PCM continuity have separate
+The SDK matrix adds repeatable coverage for basic services and the mixed
+68k/native boundary. It does not run third-party applications or accept their
+licenses. Use the separate private app matrix below for application workloads;
+no third-party verdict follows from the SDK probe. Native sound stream callbacks
+and PCM continuity have separate
 [audio tests](app-testing.md#pcm-capture-and-continuity). SD, networking and keyboard
 acceptance remain separate in [peripherals](peripherals.md). Sleep/wake,
 full-screen drawing/UI response, ARMlets using other APIs, native libraries,
 exceptions, self-modifying code, Bluetooth and USB are outside this focused
 application probe. Record those as untested here, even when other tests exist.
+
+## Private application matrix
+
+```sh
+python3 tools/app-compatibility.py --manifest /private/apps.json \
+  --output build/app-matrix-01
+```
+
+Keep the manifest and all results private. `--help` describes manifest version 1.
+Each manifest pins the executable, session or raw flash, PRC/PDB installs and
+replays by SHA-256. Paths are relative to the manifest. App version strings are
+declared metadata, not independently detected versions. The tool snapshots inputs
+before invoking the developer runner live; it never imports an earlier pass JSON.
+Every invocation and stage receives a new identifier, with input and artifact
+hashes retained for review. A new host identifier alone does not prove a new guest
+application invocation; the SDK token probe supplies that separate oracle.
+
+The five stages are `cold-boot`, `launch`, `interaction`, `persistence` and
+`restore`. Each has explicit assertions or a skip reason. A session fixture cannot
+establish cold boot. A raw flash fixture starts the cold-boot stage without saved
+RAM/CPU state; this stage requires visual review. Launch installs and starts the
+named app, then interaction resumes its saved session with a bounded physical
+input replay. Later stages consume the preceding saved session. Skipping
+persistence may still allow restore from the interaction session; the recorded
+`source_stage` makes that gap explicit. Failed stages block downstream stages.
+`launch.resume_app: true` resumes an existing foreground fixture and leaves fresh
+install/launch coverage untested.
+
+Two assertion kinds are available:
+
+- `database-records` names a database, four-character type and creator, and ordered
+  record SHA-256 hashes. The checker requires a single named ZIP member, exact
+  database identity and valid record boundaries/IDs, rejecting deleted or busy
+  records. Interaction must change the launch records; persistence and restore
+  must retain the preceding exact records.
+- `visual-review` supplies an expected observation and screenshot times. Screenshots
+  always produce `needs-review`; runner success, dispatched input or a frame alone
+  cannot pass visual correctness. Keep any subsequent visual assessment separate,
+  keyed by matrix/stage IDs and image hashes.
+
+`execution_status` is `ok` or `error`; CLI exit 0 means execution completed.
+`coverage_status` is independently `complete`, `incomplete` or `needs-review`.
+Skipped, blocked and review-only observations do not become compatibility passes.
+Database retention across saved sessions proves whole-session byte retention; it
+does not prove the application saved its project, reopened it after relaunch, or
+made it durable across cold boot. Test those behaviors with their own replay and
+oracle, and label missing evidence explicitly. License or trial screens establish
+only that screen was reached. See [application testing](app-testing.md) for UI and
+audio workload guidance.

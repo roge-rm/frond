@@ -1,0 +1,28 @@
+--- a/src/uarm/uarm/native_boundary.cpp
++++ b/src/uarm/uarm/native_boundary.cpp
+@@ -242,6 +242,8 @@
+                                 boot ? bootstrapBase+bootstrap.size()-4 : allocation+allocationSize-4,0x1ff042bc,task);
+         require(cpuStartNativeCall(cpu,entry),"native call nesting rejected");
+         Defer finish([&] { cpuEndNativeCall(cpu); });
++        // Resource-heavy installs need more time; retain deadline checks between slices.
++        const unsigned callSlices = !boot && trap == 0x82fc ? 10 : 1;
+         bool completed=false;
+         if (boot) {
+             uint64_t cycles=0;
+@@ -252,9 +254,14 @@
+                 if (reason&SLOW_PATH_REASON_NATIVE_FAULT) break;
+                 if (reason&SLOW_PATH_REASON_INJECTED_CALL_DONE) { completed=true; break; }
+             }
+-        } else completed=soc.ExecuteInjected(budget,budget);
++        } else for (unsigned slice = 0; slice < callSlices; ++slice) {
++            completed = soc.ExecuteInjected(budget,budget);
++            if (completed || (cpuGetSlowPathReason(cpu)&SLOW_PATH_REASON_NATIVE_FAULT)) break;
++            if (slice + 1 < callSlices) budgetCheck();
++        }
+         if (callbackError) std::rethrow_exception(callbackError);
+-        require(completed && !(cpuGetSlowPathReason(cpu)&SLOW_PATH_REASON_NATIVE_FAULT),"native call fault or cycle deadline");
++        require(!(cpuGetSlowPathReason(cpu)&SLOW_PATH_REASON_NATIVE_FAULT),"native call fault");
++        require(completed,"native call cycle deadline");
+         require(owner(cpu) && r[13]==stack,"native call changed task or stack");
+         if (allocation) {
+             const uint32_t marker=0xa55a3cc3;

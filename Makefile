@@ -271,6 +271,7 @@ build/test-compatibility-core: out/frond tests/compatibility-core.cpp
 test-compatibility: build/test-compatibility-core
 	./build/test-compatibility-core
 	python3 tests/compatibility.py
+	python3 tests/app-compatibility.py
 
 .PHONY: test-tx-power-rom
 test-tx-power-rom: out/frond

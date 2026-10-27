@@ -3,7 +3,8 @@
 `tools/frond-run.py` installs PRC/PDB files, launches an app, runs input replay,
 captures screenshots and exports named Palm databases. It uses a private copy
 of your session and saves the resulting state as `working.frond`. You need your
-own TX session with Palm OS setup completed. Firmware and apps are not included.
+own TX session or flash images with Palm OS setup completed. Firmware and apps
+are not included.
 
 Build the core, then choose a new result directory outside Git:
 
@@ -22,6 +23,12 @@ Python 3.11 or later is required. `--core /absolute/path/to/frond` selects anoth
 core. When `heavy` is on PATH, the runner automatically uses `heavy emulator` and
 holds that shared slot until the core exits. Run builds separately; do not wrap
 the runner in another `heavy emulator` command.
+
+For a cold boot, replace `--session` with `--nor /private/tx-nor.bin --nand
+/private/tx-nand.bin`. These must be a 16 MiB NOR and a 132 MiB raw NAND image,
+including spare bytes. This starts without saved RAM or CPU state. Prepared flash
+can already contain Palm setup and applications; cold boot does not imply factory
+setup coverage. `--resume-app` omits an explicit application launch in either mode.
 
 Install flags are processed in order and may be repeated. The app argument is
 the exact Palm database name, including case, rather than its PRC filename.
@@ -110,8 +117,11 @@ All limits are wall-clock seconds and accept fractional values:
 
 The earliest applicable limit wins. Replay has the overall deadline; its status
 requests also have command deadlines. Large replays need a larger `--timeout`.
-The native core also bounds each call and caps a session at 20 accounted guest
-seconds and 30 wall seconds, checked between calls/callbacks. Raising runner
+The native core bounds ordinary calls to 50 million cycles. Database imports may
+continue the same call through up to ten 50-million-cycle slices, with deadline
+checks between unfinished slices. The CPU rate remains 50 million cycles per
+accounted guest second. A native operation session is capped at 20 accounted guest
+seconds and 30 wall seconds, checked between calls/callbacks and slices. Raising runner
 deadlines does not raise those core bounds. Native exports allow up to 64 MiB per
 database and 256 MiB per archive; exceeding a bound fails without publishing a ZIP.
 On timeout or Ctrl-C, the runner stops only its own process group, including a
@@ -132,6 +142,9 @@ and message, or null), ordered socket `steps`, input paths and SHA-256 hashes,
 `elapsed_seconds`, `core_exit_code` and `artifacts`. Each step includes command,
 argument, success, code and message. The stage identifies validation, preparation,
 startup, readiness, install, launch, replay, export, save, quit or completion.
+`origin` distinguishes `cold-boot` from `session-restore` and records whether
+saved RAM/CPU state was loaded. `inputs_unchanged` verifies the original input
+hashes again after execution; a changed original makes the run fail.
 
 Artifacts include the session, core log, screenshots with their requested times
 and exports with their database names. Each `--export-db NAME` writes a ZIP named
@@ -145,8 +158,9 @@ core log remain for inspection. Replay dispatch errors are recorded in `core.log
 the JSON reports the closed socket or process exit and the replay stage.
 
 The output directory must not already exist. It is created with mode 0700;
-session and install copies have mode 0600. The core receives the copied session
-and copied PRC/PDB files. Original input sessions, firmware and app files are
+session, flash and install copies have mode 0600. The executable is also frozen
+in the output directory and run from that copy. The core receives copied session
+or flash and PRC/PDB files. Original input sessions, firmware and app files are
 never save destinations. Keep the whole result directory private: sessions
 contain firmware and personal data, and logs, screenshots and database exports
 can contain user data. Do not commit them.

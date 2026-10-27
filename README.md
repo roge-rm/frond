@@ -73,7 +73,9 @@ make test-build-tools check-reconstruction
 The tests above need no Palm firmware. With your own firmware, the
 [developer runner](doc/developer-run.md) supports application installation,
 launch, RAM database export and log retrieval, including during qualified TX
-native UI waits. See the [compatibility tests](doc/compatibility.md) for app probes.
+native UI waits. The [compatibility tests](doc/compatibility.md) include fresh-token
+SDK probes with real form interaction and a repeatable private application matrix
+that separates launch, interaction, persistence and restore observations.
 
 The [ARM and PACE debugger](doc/debugger.md) provides ARM/Thumb stepping and
 breakpoints, PACE inspection and explicit 68k stepping validated with real GDB
