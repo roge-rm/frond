@@ -457,3 +457,13 @@ test-native-primitives: out/frond
 	./build/test-native-primitives stack-owner
 	./build/test-native-primitives runtime-replacement
 	./build/test-native-primitives soc-lifecycle
+
+.PHONY: test-debugger-inspect
+test: test-debugger-inspect
+test-debugger-inspect: out/frond
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/debugger-inspect-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/debugger-inspect.cpp @build/debugger-inspect-core.rsp build/source/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-debugger-inspect
+	./build/test-debugger-inspect

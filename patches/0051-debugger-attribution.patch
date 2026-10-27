@@ -1,0 +1,336 @@
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -3392,23 +3392,24 @@
+ 
+ // Validate each 1KB mapping segment before any transfer. Virtual buffers may
+ // span discontiguous physical pages. MMIO is never read as a side effect.
+-static bool nativeSegment(ArmCpu* cpu, uint32_t address, uint32_t size, bool write, uint32_t& pa) {
++static bool nativeSegment(ArmCpu* cpu, uint32_t address, uint32_t size, bool write, uint32_t& pa, bool inspect = false) {
+     if (cpu->memorySystemKind != ARM_MEMORY_SYSTEM_MMU) return false;
+ #ifdef SUPPORT_FCSE
+     if (address < 0x02000000u) address |= cpu->pid;
+ #endif
+-    auto t = mmuTranslate(cpu->memorySystem.mmu,address,true,write);
++    auto t = inspect ? mmuTranslateInspect(cpu->memorySystem.mmu,address,write) :
++                       mmuTranslate(cpu->memorySystem.mmu,address,true,write);
+     if (!MMU_TRANSLATE_RESULT_OK(t)) return false;
+     pa = MMU_TRANSLATE_RESULT_PA(t);
+     return memIsBufferRange(cpu->mem,pa,size,write);
+ }
+-static bool nativeRange(ArmCpu* cpu, uint32_t address, uint32_t size, bool write) {
++static bool nativeRange(ArmCpu* cpu, uint32_t address, uint32_t size, bool write, bool inspect = false) {
+     if (!size) return true;
+     if (uint64_t(address)+size>0x100000000ull) return false;
+     for (uint64_t va=address; va<uint64_t(address)+size;) {
+         const uint32_t count=std::min<uint64_t>(0x400-(va&0x3ff),uint64_t(address)+size-va);
+         uint32_t pa;
+-        if (!nativeSegment(cpu,va,count,write,pa)) return false;
++        if (!nativeSegment(cpu,va,count,write,pa,inspect)) return false;
+         va+=count;
+     }
+     return true;
+@@ -3431,6 +3432,28 @@
+     }
+     return true;
+ }
++
++bool cpuInspectRamRange(ArmCpu* cpu,uint32_t address,uint32_t size) {
++    if (!size || uint64_t(address)+size>0x100000000ull) return false;
++    for (uint64_t va=address;va<uint64_t(address)+size;) {
++        uint32_t count=std::min<uint64_t>(0x400-(va&0x3ff),uint64_t(address)+size-va),pa;
++        if (!nativeSegment(cpu,va,count,false,pa,true) || !memIsBufferRange(cpu->mem,pa,count,true)) return false;
++        va+=count;
++    }
++    return true;
++}
++bool cpuInspectRead(ArmCpu* cpu,uint32_t address,void* dest,uint32_t size) {
++    if (!size || size>1048576 || !dest || !nativeRange(cpu,address,size,false,true)) return false;
++    for (uint32_t offset=0;offset<size;) {
++        uint32_t count=std::min<uint32_t>(0x400-((address+offset)&0x3ff),size-offset),pa;
++        if (!nativeSegment(cpu,address+offset,count,false,pa,true)) return false;
++        for (uint32_t i=0;i<count;++i)
++            if (!memAccess<1,false>(cpu->mem,pa+i,static_cast<uint8_t*>(dest)+offset+i)) return false;
++        offset+=count;
++    }
++    return true;
++}
++void cpuSetDebugSoc(ArmCpu* cpu,SoC* soc) { gdbStubSetSoc(cpu->debugStub,soc); }
+ 
+ bool cpuSetNativeScratch(ArmCpu* cpu, uint32_t base, void* data, uint32_t size) {
+     if (cpu->nativeCallDepth) return false;
+--- a/src/uarm/uarm/CPU.h
++++ b/src/uarm/uarm/CPU.h
+@@ -84,6 +84,10 @@
+     void *userData;
+ };
+ 
++class SoC;
++bool cpuInspectRead(ArmCpu*,uint32_t,void*,uint32_t);
++bool cpuInspectRamRange(ArmCpu*,uint32_t,uint32_t);
++void cpuSetDebugSoc(ArmCpu*,SoC*);
+ struct ArmCpu *cpuInit(uint32_t pc, struct ArmMem *mem, uint8_t memorySystemKind, bool xscale,
+                        bool omap, int debugPort, uint32_t cpuid, uint32_t cacheId,
+                        struct PatchDispatch *patchDispatch, struct PacePatch *pacePatch,
+--- a/src/uarm/uarm/MMU.cpp
++++ b/src/uarm/uarm/MMU.cpp
+@@ -45,7 +45,7 @@
+ bool mmuIsOn(struct ArmMmu *mmu) { return mmu->transTablPA != MMU_DISABLED_TTP; }
+ 
+ static FORCE_INLINE MMUTranslateResult translateAndCache(struct ArmMmu *mmu, uint32_t adr,
+-                                                         bool priviledged, bool write) {
++                                                         bool priviledged, bool write, bool inspect = false) {
+     bool c = false;
+     bool section = false, coarse = true, pxa_tex_page = false;
+     uint32_t va, paPage = 0, sz, t, pa;
+@@ -54,10 +54,14 @@
+     uint8_t fsr;
+     MMUTranslateResult result;
+ 
++    const auto readTable = [&](uint32_t pa, uint32_t* dest) {
++        return (!inspect || memIsBufferRange(mmu->mem,pa,4,false)) &&
++               memAccess<4,false>(mmu->mem,pa,dest);
++    };
+     // read first level table
+     if (mmu->transTablPA & 3) return TRANSLATE_RESULT_FAULT(0x01);  // alignment fault
+ 
+-    if (!memAccess(mmu->mem, mmu->transTablPA + ((adr & 0xFFF00000ul) >> 18), 4, false, &t))
++    if (!readTable(mmu->transTablPA + ((adr & 0xFFF00000ul) >> 18), &t))
+         return TRANSLATE_RESULT_FAULT(0x0C);
+ 
+     dom = (t >> 5) & 0x0F;
+@@ -90,7 +94,7 @@
+     }
+ 
+     // read second level table
+-    if (!memAccess(mmu->mem, t, 4, false, &t)) {
++    if (!readTable(t, &t)) {
+         return TRANSLATE_RESULT_FAULT(0x0E | (dom << 4));
+     }
+ 
+@@ -159,7 +163,7 @@
+ translated:
+     pa = (adr - va) + paPage;
+ 
+-    if (sz > 1024) {
++    if (!inspect && sz > 1024) {
+         for (uint32_t offset = 0; offset < sz; offset += 4096) {
+             struct TlbEntry *tlbEntry = mmu->tlb + ((va + offset) >> 12);
+ 
+@@ -205,6 +209,17 @@
+     if (tlbEntry->c) result |= (1ull << 62);
+ 
+     return result;
++}
++
++MMUTranslateResult mmuTranslateInspect(ArmMmu* mmu, uint32_t addr, bool write) {
++    if (mmu->transTablPA == MMU_DISABLED_TTP) return addr;
++    const auto& entry=mmu->tlb[addr >> 12];
++    if (entry.revision != mmu->revision) return translateAndCache(mmu,addr,true,write,true);
++    if (write) {
++        auto fsr=checkPermissionsForWrite(mmu,entry.ap,entry.domain,entry.section,true);
++        if (fsr) return TRANSLATE_RESULT_FAULT(fsr);
++    }
++    return uint64_t((addr & 0xfff) | (entry.pa << 12));
+ }
+ 
+ uint32_t mmuGetTTP(struct ArmMmu *mmu) { return mmu->transTablPA; }
+--- a/src/uarm/uarm/MMU.h
++++ b/src/uarm/uarm/MMU.h
+@@ -27,6 +27,7 @@
+ 
+ bool mmuIsOn(struct ArmMmu *mmu);
+ 
++MMUTranslateResult mmuTranslateInspect(ArmMmu*, uint32_t, bool write);
+ uint32_t mmuGetTTP(struct ArmMmu *mmu);
+ void mmuSetTTP(struct ArmMmu *mmu, uint32_t ttp);
+ 
+--- a/src/uarm/uarm/native_boundary.cpp
++++ b/src/uarm/uarm/native_boundary.cpp
+@@ -23,12 +23,12 @@
+ constexpr uint64_t budget = 50000000;
+ uint32_t word(ArmCpu* cpu, uint32_t a) {
+     uint32_t v;
+-    if (!cpuNativeBuffer(cpu,a,&v,4,false)) throw std::runtime_error("native metadata is not mapped RAM/ROM");
++    if (!cpuInspectRead(cpu,a,&v,4)) throw std::runtime_error("native metadata is not mapped RAM/ROM");
+     return v;
+ }
+ bool bytes(ArmCpu* cpu, uint32_t a, const void* p, uint32_t n) {
+     std::vector<uint8_t> data(n);
+-    return cpuNativeBuffer(cpu,a,data.data(),n,false) && !memcmp(data.data(),p,n);
++    return cpuInspectRead(cpu,a,data.data(),n) && !memcmp(data.data(),p,n);
+ }
+ bool owner(ArmCpu* cpu) {
+     return word(cpu,0x1ff00630)==0x1ff020f8 &&
+@@ -54,18 +54,18 @@
+     if (!bytes(cpu,0x2004d3aa,prologue,sizeof(prologue)) ||
+         !bytes(cpu,0x2004d52e,clear,sizeof(clear)) ||
+         !bytes(cpu,0x201de2dc,wrapper,sizeof(wrapper))) return false;
+-    if ((r[13]&3) || r[13]<0x10000 || !cpuNativeRamRange(cpu,r[13],112) ||
++    if ((r[13]&3) || r[13]<0x10000 || !cpuInspectRamRange(cpu,r[13],112) ||
+         word(cpu,r[13]+84)!=0x201de304 || word(cpu,r[13]+108)!=0x20037d55 ||
+         word(cpu,r[13]+60)!=r[5]) return false;
+     const uint32_t root=word(cpu,r[9]);
+     if (root!=0x1ff00ffc || word(cpu,r[9]-8)!=nativeTable ||
+         word(cpu,r[9]-4)!=0x1ff04e5c) return false;
+     const uint32_t globals=word(cpu,root+4);
+-    if (!cpuNativeRamRange(cpu,globals,0x600)) return false;
++    if (!cpuInspectRamRange(cpu,globals,0x600)) return false;
+     const uint32_t events=word(cpu,globals+0x4a4+0x3c);
+-    if (events!=r[4] || events+0x20!=r[6] || !cpuNativeRamRange(cpu,events,0x80)) return false;
++    if (events!=r[4] || events+0x20!=r[6] || !cpuInspectRamRange(cpu,events,0x80)) return false;
+     uint8_t flags[8];
+-    if (!cpuNativeBuffer(cpu,events+0x20,flags,sizeof(flags),false) || flags[5]!=0 || flags[3]!=0) return false;
++    if (!cpuInspectRead(cpu,events+0x20,flags,sizeof(flags)) || flags[5]!=0 || flags[3]!=0) return false;
+     // Original wait event group is task 3's saved blocking object, not another task's wait.
+     if (word(cpu,r[13]+56)!=globals+0x4a4 || word(cpu,task+0x30)!=0x1ff042b8) return false;
+     return true;
+@@ -92,6 +92,63 @@
+         if (validate(soc)) return true;
+         return soc.RunToNativePc(waitPc|1,0,budget,budget) && validate(soc);
+     } catch (const std::runtime_error&) { return false; }
++}
++
++std::string InspectUiApp(SoC& soc) {
++    const std::string unavailable="{\"available\":false,\"reason\":\"unqualified-ui-root\"}";
++    try {
++        if (!validate(soc)) return unavailable;
++        auto* cpu=soc.GetCpu();
++        // Pinned current-task TLS lookup and app/root split, not a PACE context.
++        static const uint16_t slot[]={0xb5b0,0x1c04,0xf000,0xf89b,0x1c05,0xd00a};
++        static const uint16_t appfn[]={0xb5b0,0x1c04,0x1c0d,0xf007,0xf840,0x6bc1,0x2900,0xd104};
++        static const uint16_t dbfn[]={0xb470,0x9c03,0x6885,0x2900,0xd001,0x68ae,0x600e};
++        if (!bytes(cpu,0x20056046,slot,sizeof(slot)) ||
++            !bytes(cpu,0x2004f008,appfn,sizeof(appfn)) ||
++            !bytes(cpu,0x2002da40,dbfn,sizeof(dbfn))) return unavailable;
++        static const uint8_t tlsLookup[]={0xb0,0xb5,0x04,0x1c,0x00,0xf0,0x9b,0xf8,0x05,0x1c,0x0a,0xd0,0x63,0x1c,0x03,0xd1,0x68,0x68,0xb0,0xbc,0x08,0xbc,0x18,0x47,0x20,0x1c,0x00,0xf0,0x9e,0xf8,0x00,0x28,0x01,0xd1,0x00,0x20,0xf5,0xe7,0x29,0x68,0x00,0x20,0x0a,0x68,0xa2,0x42,0xf0,0xd9,0xa0,0x00,0x40,0x18,0x40,0x68,0xec,0xe7,0x80,0xb5,0x20,0x28,0x03,0xd3,0x00,0x20,0x80,0xbc,0x08,0xbc,0x18,0x47,0xff,0xf7,0xdb,0xff,0xf9,0xe7,0x80,0xb5,0x00,0x20,0xc0,0x43,0xff,0xf7,0xd5,0xff,0x80,0xbc,0x08,0xbc,0x18,0x47};
++        if (!bytes(cpu,0x20056046,tlsLookup,sizeof(tlsLookup))) return unavailable;
++        static const uint8_t tlsInfo[]={0x80,0xb5,0x8a,0xb0,0x09,0xa8,0x15,0xf0,0x63,0xfe,0x69,0x46,0x09,0x98,0x16,0xf0,0x1b,0xfb,0x00,0x98,0x0a,0xb0,0x80,0xbc,0x08,0xbc,0x18,0x47};
++        if (!bytes(cpu,0x20056184,tlsInfo,sizeof(tlsInfo))) return unavailable;
++        static const uint8_t kalInfo[]={0x10,0x40,0x2d,0xe9,0x20,0xd0,0x4d,0xe2,0x01,0x40,0xa0,0xe1,0x00,0x08,0xa0,0xe1,0x40,0x08,0xa0,0xe1,0x0d,0x10,0xa0,0xe1,0x0d,0x00,0x00,0xef,0x00,0x00,0x50,0xe3,0x00,0x00,0x60,0x12,0x00,0x08,0xa0,0x11,0x20,0x08,0xa0,0x11,0xf0,0x0c,0x80,0x13,0x17,0x00,0x00,0x1a,0x00,0x00,0x9d,0xe5,0x00,0x10,0x90,0xe5,0x00,0x10,0x84,0xe5,0x04,0x00,0x90,0xe5,0x14,0x00,0x84,0xe5,0x08,0x00,0x9d,0xe5,0x04,0x00,0x84,0xe5,0x10,0x00,0x9d,0xe5,0x08,0x00,0x84,0xe5,0x0c,0x00,0x9d,0xe5,0x0c,0x00,0x84,0xe5,0x15,0x00,0xdd,0xe5,0x10,0x00,0x84,0xe5,0x1a,0x00,0xdd,0xe5,0x1e,0x00,0xc4,0xe5,0xf6,0x01,0xdd,0xe1,0x18,0x00,0x84,0xe5,0xb8,0x01,0xdd,0xe1,0xbc,0x01,0xc4,0xe1,0x1b,0x00,0xdd,0xe5,0x1f,0x00,0xc4,0xe5,0x1c,0x00,0xdd,0xe5,0x20,0x00,0xc4,0xe5,0x00,0x00,0xa0,0xe3,0x20,0xd0,0x8d,0xe2,0x10,0x40,0xbd,0xe8};
++        if (!bytes(cpu,0x200a72b0,kalInfo,sizeof(kalInfo))) return unavailable;
++        auto ptr=[&](uint32_t a) {
++            uint32_t v=word(cpu,a);
++            require(v && !(v&3) && cpuInspectRamRange(cpu,v,64),"invalid app link");
++            return v;
++        };
++        uint32_t tcb=ptr(task), tls=ptr(tcb), app=ptr(tls+4);
++        // Only a normal root launch at the already-qualified UI wait is supported.
++        if ((word(cpu,app)&0xffff)!=0 || word(cpu,app+60)!=0 ||
++            (word(cpu,app+8)&0xffff)!=0x000e) return unavailable;
++        uint32_t ref=ptr(app+20), db=ptr(ref+8), id=word(cpu,db+8), header=word(cpu,db+12);
++        if (!id || (id&3)) return unavailable;
++        if (id&0x80000000u) {
++            // Support only an already-resident header, with independent cache agreement.
++            if (!cpuInspectRamRange(cpu,id&0x7fffffffu,4) || word(cpu,id&0x7fffffffu)!=header || !cpuInspectRamRange(cpu,header,80)) return unavailable;
++            if ((header&3) || header<8 || !cpuInspectRamRange(cpu,header-8,8)) return unavailable;
++            uint32_t chunk=word(cpu,header-8), flags=word(cpu,header-4);
++            if (chunk&0x80000000u) return unavailable;
++            uint32_t signed24=flags&0xffffff;
++            if (signed24&0x800000) signed24|=0xff000000;
++            uint32_t back=((chunk>>28)&3) | (signed24<<2);
++            if (back ? header-8-back*4!=(id&0x7fffffffu) : (flags>>28)!=15) return unavailable;
++            uint32_t total=chunk&0xffffff, padding=(chunk>>24)&15;
++            if (total<8+padding+80) return unavailable;
++        } else if (id!=header) return unavailable;
++        uint8_t h[80];
++        if (!cpuInspectRead(cpu,header,h,sizeof(h)) || !memchr(h,0,32)) return unavailable;
++        auto u16=[&](unsigned o) {return uint32_t(h[o]) | (uint32_t(h[o+1])<<8);};
++        auto u32=[&](unsigned o) {return u16(o) | (u16(o+2)<<16);};
++        if (!(u16(32)&1) || u32(60)!=0x6170706c) return unavailable;
++        auto hex=[](const uint8_t* b,unsigned n) {std::string s; const char* d="0123456789abcdef";
++            for(unsigned i=0;i<n;++i){s+=d[b[i]>>4];s+=d[b[i]&15];}return s;};
++        auto fourcc=[&](unsigned o) {uint8_t b[]={h[o+3],h[o+2],h[o+1],h[o]};return hex(b,4);};
++        unsigned length=static_cast<const uint8_t*>(memchr(h,0,32))-h;
++        return "{\"available\":true,\"verified\":true,\"source\":\"tx-qualified-ui-root-wait\",\"ui_task_id\":3,\"database\":{\"card\":0,\"local_id\":"+
++            std::to_string(id)+",\"name_hex\":\""+hex(h,length)+"\",\"type_hex\":\""+fourcc(60)+
++            "\",\"creator_hex\":\""+fourcc(64)+"\",\"version\":"+std::to_string(u16(34))+"}}";
++    } catch (const std::runtime_error&) { return unavailable; }
+ }
+ 
+ struct Session::Impl {
+--- a/src/uarm/uarm/native_boundary.h
++++ b/src/uarm/uarm/native_boundary.h
+@@ -6,12 +6,14 @@
+ #include <functional>
+ #include <memory>
+ #include <vector>
++#include <string>
+ class SoC;
+ struct ArmCpu;
+ namespace NativeBoundary {
+ // No guest API calls or guest writes. Advances at most 50M normal cycles.
+ // A successful return is a candidate, revalidated by Session after checkpoint.
+ bool Prepare(SoC& soc);
++std::string InspectUiApp(SoC& soc);
+ class Session {
+  public:
+     // Requires active syscallDispatchBeginRecovery and a whole-guest checkpoint.
+--- a/src/uarm/uarm/gdbstub.cpp
++++ b/src/uarm/uarm/gdbstub.cpp
+@@ -20,6 +20,7 @@
+ #include <vector>
+ #include "cputil.h"
+ #include "pace.h"
++#include "native_boundary.h"
+ 
+ namespace {
+ constexpr size_t packetSize = 4096; // RSP PacketSize is hexadecimal: 1000.
+@@ -96,6 +97,7 @@
+ 
+ struct stub {
+     ArmCpu* cpu;
++    SoC* soc = nullptr;
+     int listener = -1, sock = -1;
+     RunState state = RunState::Stopped;
+     bool stepDone = false, escaped = false, oversized = false, debugRequested = false;
+@@ -250,7 +252,12 @@
+         else {
+             std::string text(reinterpret_cast<char*>(bytes.data()), in.size() / 2);
+             std::string_view cmd(text);
+-            if (cmd == "pace-step") {
++            if (cmd == "attribution") {
++                std::string result="{\"version\":1,\"foreground_app\":";
++                result+=s->soc ? NativeBoundary::InspectUiApp(*s->soc) : "{\"available\":false,\"reason\":\"unsupported-profile\"}";
++                result+=",\"code_owner\":{\"available\":false,\"reason\":\"resource-map-unverified\"}}\n";
++                out=encodeHex(reinterpret_cast<const uint8_t*>(result.data()),result.size());
++            } else if (cmd == "pace-step") {
+                 // A monitor command arms the next plain continue; it does not
+                 // resume behind GDB's back or change the ARM meaning of s/si.
+                 if (!cpuIsModePace(s->cpu) || s->pendingPaceDispatch || s->atPaceException) out = "E16";
+@@ -430,6 +437,7 @@
+ } // namespace
+ 
+ bool gdbStubEnabled(stub* s) { return s && s->sock >= 0; }
++void gdbStubSetSoc(stub* s,SoC* soc) { if(s) s->soc=soc; }
+ void gdbStubDebugBreakRequested(stub* s) {
+     if (gdbStubEnabled(s)) s->debugRequested = true;
+ }
+@@ -544,5 +552,6 @@
+ }
+ #else
+ struct stub {};
++void gdbStubSetSoc(stub*,SoC*) {}
+ stub* gdbStubInit(ArmCpu*, int) { static stub disabled; return &disabled; }
+ #endif
+--- a/src/uarm/uarm/gdbstub.h
++++ b/src/uarm/uarm/gdbstub.h
+@@ -10,7 +10,9 @@
+ #define GDB_STUB_ENABLED 1
+ #endif
+ 
++class SoC;
+ struct stub;
++void gdbStubSetSoc(stub*,SoC*);
+ struct stub *gdbStubInit(struct ArmCpu *cpu, int port);
+ 
+ #ifdef GDB_STUB_ENABLED
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -88,6 +88,7 @@
+                   0x0B16A16AUL, patchDispatch, pacePatch, systemState);
+ 
+ #ifndef __EMSCRIPTEN__
++    cpuSetDebugSoc(cpu,this);
+     cpuSetM68kSyscallHandler(cpu, NetworkSimulation::Dispatch, &networkSimulation);
+ #endif
+     patchDispatchSetCpu(patchDispatch, cpu);

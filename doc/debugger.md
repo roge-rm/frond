@@ -111,7 +111,8 @@ breakpoints. They stop before execution without patching code bytes. Continuing
 at an installed breakpoint stops again: clear it before continuing. They are
 address breakpoints, not app-scoped breakpoints; Palm can relocate or reuse code.
 68k stepping uses the separate monitor sequence below. Register editing,
-relocation and symbol mapping are not implemented.
+relocation and automatic runtime symbol loading are not implemented; see the
+byte-verified offline [symbol report](#program-identity-and-private-reports).
 
 `monitor pace` prints one JSON object (`version: 1`) containing D0–D7 (`d`),
 A0–A7 (`a`), PC, interpreter SR and the PACE state-block pointer. Numeric values
@@ -203,9 +204,19 @@ ARM GDB's watchpoint completion step.
 
 ## Program identity and private reports
 
-The debugger reports `program_identity: null`: no validated guest database/app
-identity lookup is available. A state pointer or 68k PC alone cannot establish
-which Palm application owns the current code. For a reproducible report, copy
+`monitor attribution` reports foreground-app metadata at the qualified TX native
+UI wait. It follows the UI task's independent TLS/root-app/open-database chain,
+checks the firmware route and database header, and rejects nested launches,
+transitions and inconsistent or unmapped metadata. It reads RAM/ROM without guest
+API calls, guest writes, page-table MMIO reads or TLB changes. At other stops,
+including PACE, `foreground_app.available` is false. This is deliberately limited
+to the qualified normal-launch UI root; it is not a general Palm OS app lookup.
+Names and type/creator bytes are hex encoded to preserve their original bytes.
+
+The current PC can belong to firmware, a library or a native callout while an app
+is in the foreground. `code_owner` remains unavailable, and PACE snapshots retain
+`program_identity: null`. A state pointer or 68k PC alone cannot establish which
+Palm database owns the code. For a reproducible report, copy
 one JSON object printed by `monitor pace` or `monitor pace-last` into a private
 file, then attach the identity of the PRC/PDB you intended to run:
 
@@ -219,10 +230,34 @@ file. It includes the database name, raw type/creator bytes, version and resourc
 IDs/file offsets. `declared_program.active_app_verified` is always false and
 `guest_load_address` is null. File offsets are never treated as guest addresses;
 the supplied file may differ from the installed or active application. The
-helper does not connect to the emulator. No symbols, stack unwinding, active-app
-attribution or fatal-alert detection are claimed. Treat reports as private: even
+helper does not connect to the emulator. Stack unwinding and fatal-alert
+detection are not provided. Treat reports as private: even
 registers and database names can contain app/user data. Do not commit reports,
 GDB transcripts, firmware or session copies.
+
+For a matching 68k compiler executable, add `--executable /private/MyApp`.
+The helper extracts `.text` with `m68k-palmos-objdump`/`objcopy` (override the
+tool prefix with `--tool-prefix`) and requires an exact, unique match
+inside one `code` PRC resource. Text symbols from `nm` are then expressed
+as resource offsets. A mismatched or ambiguous executable fails; neither linker
+addresses nor PRC file offsets are used as guest load addresses.
+
+An optional `--runtime-map /private/runtime-map.json` binds those offsets to a
+captured guest interval. A version 1 map contains `program_sha256`, `context_pc`,
+the complete `context` monitor object, and `resources` entries with `type_hex`,
+`id`, `address`, `size`, and the SHA-256 of the complete live resource bytes.
+The helper requires the exact context, matching program/resource hashes and sizes,
+valid nonoverlapping address ranges, and a PC within a mapped resource. It reports
+the nearest preceding text symbol and displacement, without asserting function
+boundaries. The map is supplied capture evidence: the helper cannot authenticate
+its origin or establish that it describes the current emulator stop. Capture it
+at the same stop as the context. Byte equivalence establishes a code location;
+it does not establish which database or foreground application owns the bytes.
+`active_app_verified` remains false for this mapping. The SDK debugger acceptance
+probe produces such a map only after comparing the complete locked live resource
+against a unique local PRC resource.
+Relocated or modified live bytes that differ from the supplied resource fail the
+hash check; the helper does not guess relocations or recover stripped symbols.
 
 For app installation and replay, use the [developer workflow](developer-run.md)
 to produce a private working session, then open that session with `--gdb`.
@@ -232,7 +267,7 @@ DesktopControl commands while stopped: the emulation thread cannot serve them.
 ## Validation
 
 ```sh
-heavy build make -j2 test-gdbstub test-pace-debug test-pace-step
+heavy build make -j2 test-gdbstub test-pace-debug test-pace-step test-debugger-inspect
 heavy build make -j2 test-compatibility test-tx-state test-instruction-cache test-arm-conditions test-cpu
 ```
 
@@ -259,6 +294,10 @@ The partial write test counts successful accesses to detect replay. The
 compatibility core also asserts snapshot inspection performs no memory access
 and preserves the fault latch. Report tests use a generated Palm database header.
 These mandatory tests need no ROM, SDK, application or private fixture.
+`tests/debugger-inspect.cpp` also checks device-backed page-table rejection,
+unchanged TLB state, read-only RAM classification, bounded buffer failures and
+unchanged RAM/dirty pages. Attribution protocol tests reject unqualified native
+and PACE contexts and retain no identity across reset/load.
 
 `tests/pace-step.py` additionally checks one-attempt semantics for multiword
 instructions, branches, BSR/RTS, PACE exit, syscalls and patch traps; instruction
@@ -266,8 +305,8 @@ and extension-fetch faults; partial longword/MOVEM stores; IRQ and Ctrl-C
 interruption; cancellation; reply retransmission; detach/EOF; and reset/restore
 with an in-flight step. The GDB client tests run when `FROND_GDB` names a working
 ARM-capable GDB (or `gdb-multiarch` is on PATH); a skip is not client validation.
-The mandatory tests use only synthetic RAM. No real TX fixture has been used
-to validate stepping.
+The mandatory tests use only synthetic RAM. The optional SDK probe below also
+validates known instruction semantics against a qualified TX session with real GDB.
 
 Optional real TX smoke test, using your own already booted session:
 
@@ -283,8 +322,30 @@ process group. The deadline includes slot/startup time. It writes `core.log`,
 `result.json` and the input copy outside the checkout. Failure to observe PACE
 before the deadline fails the test; it does not claim app execution passed.
 This smoke test does not validate program attribution or known-address
-breakpoints on real TX applications. No private TX fixture was used to validate
-this change.
+breakpoints on real TX applications.
+
+For known instruction semantics, build the SDK probe and supply it to the same
+driver with an ARM-capable GDB:
+
+```sh
+python3 tools/build-palm-probe.py --probe debugger --sdk /private/sdk-5r3
+FROND_GDB=/path/to/gdb-multiarch python3 tests/pace-debug-tx.py \
+  --session /private/tx-ready.session --probe build/debugger-probe/FrondDebugProbe.prc \
+  --output /private/results/debugger-acceptance-01 --timeout 180
+```
+
+The driver uses normal installation and launch on copied state, with no input
+events. The app locks its code resource and supplies a descriptor; GDB compares
+the full live resource with a unique PRC resource before using its entry points.
+The acceptance checks repeatable snapshots, known-address breakpoints, arithmetic,
+stores, a taken branch, and explicit PACE step/continue. An overlapping `MemMove`
+has distinct outcomes for zero, one and repeated dispatches. A timed deliberate
+divide-by-zero checks one-attempt exception capture, rejection of another PACE
+step, dispatch to the qualified native callout, and its first native instruction.
+It does not establish firmware recovery from the exception or complete fatal
+handler execution. This path has passed with a private TX session and GDB 16.3;
+other firmware still requires qualification. Results include context and runtime
+resource maps for private symbol reports, plus hashes and input-preservation checks.
 
 ## Watchpoints
 
@@ -293,6 +354,25 @@ compatible with the way ARM GDB resumes a watched instruction; a safe implementa
 must also avoid repeating MMIO or partial multi-access operations. The
 `tests/watchpoint-contract.py` diagnostic checks this limitation with a real GDB
 client when one is available.
+
+The pre-access investigation established two bounded designs in an isolated,
+firmware-free prototype with real GDB 16.3. Native ARM/Thumb transfer planning
+can stop before any transfer or register writeback, discard the fetched plan,
+and let GDB complete the instruction once. A later-word STM/PUSH watch must stop
+before the first word; condition checks, actual aligned bus ranges and transfer
+order must match the executor. A production implementation needs shared decoding
+and coverage of register offsets, swaps, double transfers, coprocessors and helper
+paths. Speculative MMIO or page-table reads cannot be used to predict accesses.
+
+PACE can instead suspend on its live host call stack before a logical memory
+access. A custom monitor stop with ordinary `S05` can continue that exact access
+without repeating earlier MMIO reads or partial writes. Such a stop exposes
+partial instruction state and must have a distinct continuation phase; ARM GDB's
+hardware-watchpoint completion cannot step a suspended 68k instruction correctly.
+Reset/load, debugger mutation, disconnect, instruction-fetch versus data-read
+classification and optimized helper coverage require a complete lifecycle contract.
+These are design results, not supported commands. The production stub continues
+to reject `Z2`/`Z3`/`Z4` explicitly until that coverage is implemented and tested.
 
 Protocol references: [GDB RSP overview](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Overview.html),
 [packets](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Packets.html), and

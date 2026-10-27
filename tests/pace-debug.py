@@ -31,6 +31,25 @@ class PaceDebugger(unittest.TestCase):
         self.rsp.set_reg(13, 0x35000)
         self.rsp.set_reg(15, 0x14000)
 
+    def test_attribution_requires_qualified_soc_and_preserves_stop(self):
+        def inspect():
+            registers, context = self.rsp.request('g'), self.monitor('pace')
+            counts = self.rsp.read(0x21000, 8)
+            value = self.monitor('attribution')
+            self.assertEqual(value['version'], 1)
+            self.assertFalse(value['foreground_app']['available'])
+            self.assertFalse(value['code_owner']['available'])
+            self.assertEqual(self.monitor('attribution'), value)
+            self.assertEqual(self.rsp.request('g'), registers)
+            self.assertEqual(self.monitor('pace'), context)
+            self.assertEqual(self.rsp.read(0x21000, 8), counts)
+        inspect()
+        self.enter()
+        self.monitor('pace-break 31000')
+        self.assertEqual(self.rsp.request('c'), 'S05')
+        self.assertTrue(self.monitor('pace')['available'])
+        inspect()
+
     def test_registers_breakpoints_and_native_guards(self):
         self.assertFalse(self.monitor('pace')['available'])
         self.assertFalse(self.monitor('pace-last')['available'])
@@ -153,6 +172,7 @@ class PaceDebugger(unittest.TestCase):
                 self.rsp.write(0x22000, struct.pack('<I', action))
                 self.assertEqual(self.rsp.request('c'), 'S05')
                 self.assertEqual(self.rsp.reg(15), 0x10000)
+                self.assertFalse(self.monitor('attribution')['foreground_app']['available'])
                 self.assertFalse(self.monitor('pace-last')['available'])
                 self.enter('4afc')
                 self.assertEqual(self.rsp.request('c'), 'S05')
