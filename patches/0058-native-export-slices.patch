@@ -1,0 +1,14 @@
+--- a/src/uarm/uarm/native_boundary.cpp
++++ b/src/uarm/uarm/native_boundary.cpp
+@@ -242,8 +242,9 @@
+                                 boot ? bootstrapBase+bootstrap.size()-4 : allocation+allocationSize-4,0x1ff042bc,task);
+         require(cpuStartNativeCall(cpu,entry),"native call nesting rejected");
+         Defer finish([&] { cpuEndNativeCall(cpu); });
+-        // Resource-heavy installs need more time; retain deadline checks between slices.
+-        const unsigned callSlices = !boot && trap == 0x82fc ? 10 : 1;
++        // Installs and exports of large databases need more time; record databases
++        // near 500 KB take over 100M cycles to export. Deadline checks run between slices.
++        const unsigned callSlices = !boot && (trap == 0x82fc || trap == 0x8304) ? 10 : 1;
+         bool completed=false;
+         if (boot) {
+             uint64_t cycles=0;

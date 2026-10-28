@@ -146,7 +146,8 @@ static void malformed() {
     corrupt(writing, ChunkType::pxaMmc, 12, 1024);
     if (f.restore(writing)) {
         uint32_t value = 0;
-        require(!registers(controller, 0x41100040, 4, false, &value), "write state exposed invalid RXFIFO");
+        value = 1;
+        require(registers(controller, 0x41100040, 4, false, &value) && value == 0, "write state exposed invalid RXFIFO");
     }
     require(f.restore(good), "recovery after write-state guard");
     require(regRead(0x40) == expected, "restored read");
@@ -158,7 +159,8 @@ static void eject() {
     pxaMmcInsert(f.mmc, nullptr);
     require(!rxRequest && !txRequest, "ejection left DMA requested");
     uint32_t value = 0;
-    require(!registers(controller, 0x41100040, 4, false, &value), "ejected card exposes stale FIFO");
+    value = 1;
+    require(registers(controller, 0x41100040, 4, false, &value) && value == 0, "ejected card exposes stale FIFO");
     require(reads == count, "ejection accessed backing");
     pxaMmcInsert(f.mmc, f.card); command(f.card, 12);
     f.transfer(false); regRead(0x40);
@@ -167,7 +169,8 @@ static void eject() {
     const auto before = writes;
     pxaMmcInsert(writer.mmc, nullptr);
     require(!rxRequest && !txRequest, "write ejection left DMA requested");
-    require(!registers(controller, 0x41100044, 4, true, &value), "ejected card accepts FIFO writes");
+    require(registers(controller, 0x41100044, 4, true, &value), "ejected card FIFO write faulted");
+    require((regRead(0x04) & 0x804) == 0x804, "ejected write did not end with a CRC error");
     require(writes == before, "partial ejected write reached backing");
     pxaMmcInsert(writer.mmc, writer.card); command(writer.card, 12);
     writer.transfer(true);
@@ -184,7 +187,8 @@ static void eject() {
     pxaMmcInsert(fresh.mmc, nullptr);
     require(fresh.restore(saved), "fresh restore before failed remount");
     pxaMmcInsert(fresh.mmc, nullptr);  // Rejected backing even though no old pointer exists.
-    require(!registers(controller, 0x41100040, 4, false, &value), "failed remount exposed restored FIFO");
+    value = 1;
+    require(registers(controller, 0x41100040, 4, false, &value) && value == 0, "failed remount exposed restored FIFO");
 }
 int main(int argc, char** argv) {
     try {

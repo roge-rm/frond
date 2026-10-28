@@ -1,0 +1,158 @@
+--- a/src/uarm/uarm/pxa_MMC.cpp
++++ b/src/uarm/uarm/pxa_MMC.cpp
+@@ -86,6 +86,16 @@
+     pxaMmcPrvIrqUpdate(mmc);
+ }
+ 
++// A failed block ends the transfer with DATA_TRAN_DONE and the error in MMC_STAT, as the
++// PXA27x does for timed-out or rejected data (manual 15.5). A failed write is not left busy.
++static void pxaMmcPrvDataXferFail(struct PxaMmc *mmc, uint16_t error) {
++    mmc->stat |= error | 0x0800;
++    if (mmc->cmdat & 8) mmc->stat |= 0x1000;
++    mmc->dataXferOngoing = false;
++    mmc->numBlks = 0;
++    mmc->fifoBytes = mmc->fifoOfst = 0;
++}
++
+ static void pxaMmcPrvDataXferNextBlockRead(struct PxaMmc *mmc) {
+     enum SdDataReplyType ret;
+ 
+@@ -97,13 +107,13 @@
+     ret = vsdDataXferBlockFromCard(mmc->vsd, mmc->blockFifo, mmc->blkLen);
+     switch (ret) {
+         case SdDataErrWrongBlockSize:  // would manifest as a crc error
+-            mmc->stat |= 0x0008;       // crc read error
++            pxaMmcPrvDataXferFail(mmc, 0x0008);  // crc read error
+             break;
+ 
+         case SdDataErrWrongCurrentState:  // would manifest as a timeout
+         case SdDataErrBackingStore:
+         default:
+-            mmc->stat |= 0x0001;
++            pxaMmcPrvDataXferFail(mmc, 0x0001);  // read data timeout
+             break;
+ 
+         case SdDataOk:
+@@ -133,21 +143,17 @@
+ }
+ 
+ static bool pxaMmcPrvDataFifoW(struct PxaMmc *mmc, uint32_t val) {
++    // Bytes past BLKLEN are not transmitted (manual 15.8.4); the bus access still completes.
+     if (!(mmc->cmdat & 8) || mmc->fifoBytes >= mmc->blkLen ||
+-        mmc->fifoBytes >= sizeof(mmc->blockFifo)) {
+-        fprintf(stderr, "Cannot write over-full fifo\n");
+-        return false;
+-    }
++        mmc->fifoBytes >= sizeof(mmc->blockFifo))
++        return true;
+ 
+     mmc->blockFifo[mmc->fifoBytes++] = val;
+ 
+     if (mmc->fifoBytes == mmc->blkLen) {
+         enum SdDataReplyType ret;
+ 
+-        if (!mmc->dataXferOngoing) {
+-            fprintf(stderr, "Cannot write block if no xfer ongoing\n");
+-            return false;
+-        }
++        if (!mmc->dataXferOngoing) return true;
+ 
+         ret = vsdDataXferBlockToCard(mmc->vsd, mmc->blockFifo, mmc->blkLen);
+         switch (ret) {
+@@ -156,7 +162,7 @@
+                                               // crc errors
+             case SdDataErrBackingStore:
+             default:
+-                mmc->stat |= 0x0004;  // crc write error
++                pxaMmcPrvDataXferFail(mmc, 0x0004);  // crc write error
+                 break;
+ 
+             case SdDataOk:
+@@ -178,10 +184,11 @@
+ }
+ 
+ static bool pxaMmcPrvDataFifoR(struct PxaMmc *mmc, uint32_t *valP) {
++    // An empty RX FIFO reads as zero; the bus access still completes.
+     if ((mmc->cmdat & 8) || !mmc->fifoBytes || mmc->fifoOfst >= sizeof(mmc->blockFifo) ||
+         mmc->fifoBytes > sizeof(mmc->blockFifo) - mmc->fifoOfst) {
+-        fprintf(stderr, "MMC unit fifo empty at read\n");
+-        return false;
++        *valP = 0;
++        return true;
+     }
+ 
+     *valP = mmc->blockFifo[mmc->fifoOfst++];
+@@ -460,7 +467,6 @@
+                 ret = false;
+             else {
+                 const unsigned count = mmc->wordFifo ? size : 1;
+-                if (!mmc->fifoBytes) ret = false;
+                 for (unsigned i = 0; i < count && mmc->fifoBytes; i++) {
+                     uint32_t byte = 0;
+                     ret = pxaMmcPrvDataFifoR(mmc, &byte) && ret;
+@@ -471,8 +477,8 @@
+ 
+         case 17:
+             if (write) {
++                // Writes outside a write transfer are dropped without a bus error.
+                 const unsigned count = mmc->wordFifo ? size : 1;
+-                if (!mmc->dataXferOngoing) ret = false;
+                 for (unsigned i = 0; i < count && mmc->dataXferOngoing; i++)
+                     ret = pxaMmcPrvDataFifoW(mmc, val >> (8 * i)) && ret;
+             } else
+@@ -522,7 +528,9 @@
+     if (!vsd) {
+         // Removal ends the old card's transfer. Never drain its FIFO into a
+         // later block request through a null card, or expose it after reinsert.
+-        if (mmc->dataXferOngoing) mmc->stat |= (mmc->cmdat & 8) ? 4 : 1;
++        // An unfinished block gets no CRC token or data, so it ends as a write CRC
++        // error or read timeout with DATA_TRAN_DONE (manual 15.5).
++        if (mmc->dataXferOngoing) mmc->stat |= ((mmc->cmdat & 8) ? 4 : 1) | 0x0800;
+         if (mmc->cmdQueued) mmc->stat |= 0x2002;
+         mmc->dataXferOngoing = mmc->cmdQueued = false;
+         mmc->fifoBytes = mmc->fifoOfst = mmc->numBlks = 0;
+--- a/src/uarm/uarm/vSD.cpp
++++ b/src/uarm/uarm/vSD.cpp
+@@ -143,9 +143,10 @@
+ 
+     switch (why) {
+         case InvalidInCurrentState:
++            // An illegal command gets no response and leaves the state alone (SD physical
++            // layer 2.00, 4.6.1). The host sees a response timeout.
+             fprintf(stderr, " -> invalid in current state %u\n", vsd->state);
+-            r1orr = 1UL << 22;
+-            break;
++            return SdReplyNone;
+ 
+         case UnacceptableParam:
+             fprintf(stderr, " -> parameter is unacceptable\n");
+@@ -571,9 +572,8 @@
+                 break;
+             }
+ 
+-            if ((param >> 16) != vsd->rca) {
+-                replTyp = vsdRejectCmd(vsd, cmd, param, reply, UnacceptableParam,
+-                                       false /* there is no ACMD55 */);
++            if ((param >> 16) != vsd->rca) {  // addressed to another card: no response
++                replTyp = SdReplyNone;
+                 break;
+             }
+             vsd->acmdShift = true;
+@@ -619,6 +619,8 @@
+         if (!vsd->secW(vsd->curSec, data)) {
+             fprintf(stderr, "failed to write SD backing store sec %lu\n",
+                     (unsigned long)vsd->curSec);
++            // A failed single block ends the command; a multiple block one waits for CMD12.
++            if (!vsd->bufContinuous) vsd->state = StateTran;
+             return SdDataErrBackingStore;
+         }
+         if (vsd->haveExpectedNumBlocks && !--vsd->numBlocksExpected)
+@@ -652,6 +654,8 @@
+         if (!vsd->secR(vsd->curSec, data)) {
+             fprintf(stderr, "failed to read SD backing store sec %lu\n",
+                     (unsigned long)vsd->curSec);
++            // A failed single block ends the command; a multiple block one waits for CMD12.
++            if (!vsd->bufContinuous) vsd->state = StateTran;
+             return SdDataErrBackingStore;
+         }
+ 

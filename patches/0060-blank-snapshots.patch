@@ -1,0 +1,165 @@
+--- a/src/uarm/native/SdlRenderer.h
++++ b/src/uarm/native/SdlRenderer.h
+@@ -16,7 +16,9 @@
+     ~SdlRenderer();
+ 
+     void Draw(bool forceRedraw, uint32_t buttons = 0);
+-    bool SaveFramebuffer(const char* path);
++    // Saves the unrotated LCD frame as PNG. With the LCD off, or before the first frame,
++    // it saves a black frame of the same size and sets blank.
++    bool SaveFramebuffer(const char* path, bool& blank);
+ 
+    private:
+     void DrawSilkscreen();
+--- a/src/uarm/native/SdlRenderer.cpp
++++ b/src/uarm/native/SdlRenderer.cpp
+@@ -72,17 +72,22 @@
+     SDL_DestroyRenderer(renderer);
+ }
+ 
+-bool SdlRenderer::SaveFramebuffer(const char* path) {
+-    if (!frameTextureValid || !lcdEnabled) return false;
++bool SdlRenderer::SaveFramebuffer(const char* path, bool& blank) {
++    blank = !frameTextureValid || !lcdEnabled;
+     SDL_Surface* surface = SDL_CreateRGBSurfaceWithFormat(
+         0, displayConfiguration.width, displayConfiguration.height, 32, SDL_PIXELFORMAT_RGBA32);
+     if (!surface) return false;
+-    SDL_Texture* previous = SDL_GetRenderTarget(renderer);
+-    bool success = SDL_SetRenderTarget(renderer, frameTexture) == 0;
+-    if (success)
+-        success = SDL_RenderReadPixels(renderer, nullptr, surface->format->format,
+-                                       surface->pixels, surface->pitch) == 0;
+-    SDL_SetRenderTarget(renderer, previous);
++    bool success = true;
++    if (blank) {
++        success = SDL_FillRect(surface, nullptr, SDL_MapRGBA(surface->format, 0, 0, 0, 0xff)) == 0;
++    } else {
++        SDL_Texture* previous = SDL_GetRenderTarget(renderer);
++        success = SDL_SetRenderTarget(renderer, frameTexture) == 0;
++        if (success)
++            success = SDL_RenderReadPixels(renderer, nullptr, surface->format->format,
++                                           surface->pixels, surface->pitch) == 0;
++        SDL_SetRenderTarget(renderer, previous);
++    }
+     if (success) success = IMG_SavePNG(surface, path) == 0;
+     SDL_FreeSurface(surface);
+     return success;
+--- a/src/uarm/native/InputReplay.h
++++ b/src/uarm/native/InputReplay.h
+@@ -13,9 +13,13 @@
+ class InputReplay {
+    public:
+     bool Load(const std::string& path, int width, int height, std::string& error);
+-    bool Dispatch(uint64_t elapsedMs, SoC& soc, SdlRenderer& renderer, std::string& error);
++    // Delivers due events. Snapshot failures are recorded in SnapshotResults, not returned.
++    void Dispatch(uint64_t elapsedMs, SoC& soc, SdlRenderer& renderer);
+     uint64_t LastEventMs() const { return events.empty() ? 0 : events.back().at; }
+     bool Finished() const { return next == events.size(); }
++    // One entry per snapshot taken so far, in order: "ok", "failed", or "lcd-off" or
++    // "no-frame" for a black frame saved with the LCD off or before its first frame.
++    const std::vector<std::string>& SnapshotResults() const { return snapshots; }
+ 
+    private:
+     enum class Kind { penDown, penUp, keyDown, keyUp, keyboardDown, keyboardUp, snapshot };
+@@ -27,6 +31,7 @@
+         std::string path;
+     };
+     std::vector<Event> events;
++    std::vector<std::string> snapshots;
+     size_t next{0};
+ };
+ 
+--- a/src/uarm/native/InputReplay.cpp
++++ b/src/uarm/native/InputReplay.cpp
+@@ -14,6 +14,7 @@
+ 
+ bool InputReplay::Load(const std::string& path, int width, int height, std::string& error) {
+     events.clear();
++    snapshots.clear();
+     next = 0;
+     std::ifstream file(path);
+     if (!file) { error = "cannot open input replay: " + path; return false; }
+@@ -69,8 +70,7 @@
+     return true;
+ }
+ 
+-bool InputReplay::Dispatch(uint64_t elapsedMs, SoC& soc, SdlRenderer& renderer,
+-                           std::string& error) {
++void InputReplay::Dispatch(uint64_t elapsedMs, SoC& soc, SdlRenderer& renderer) {
+     while (next < events.size() && events[next].at <= elapsedMs) {
+         const auto& event = events[next++];
+         switch (event.kind) {
+@@ -80,14 +80,21 @@
+             case Kind::keyUp: soc.KeyUp(event.key); break;
+             case Kind::keyboardDown: soc.KeyboardKey(event.x,true); break;
+             case Kind::keyboardUp: soc.KeyboardKey(event.x,false); break;
+-            case Kind::snapshot:
+-                if (!renderer.SaveFramebuffer(event.path.c_str())) {
+-                    error = "cannot capture replay snapshot: " + event.path;
+-                    return false;
++            case Kind::snapshot: {
++                // A failed snapshot is reported but never ends the run.
++                bool blank = false;
++                if (!renderer.SaveFramebuffer(event.path.c_str(), blank)) {
++                    snapshots.push_back("failed");
++                    std::cerr << "cannot capture replay snapshot: " << event.path << std::endl;
++                } else {
++                    const char* result = !blank ? "ok" : soc.LcdEnabled() ? "no-frame" : "lcd-off";
++                    snapshots.push_back(result);
++                    if (blank) std::cout << "replay snapshot " << result << ", saved a black frame: "
++                                         << event.path << std::endl;
+                 }
+                 break;
++            }
+         }
+         std::cout << "replay event " << next << " at " << elapsedMs << " ms" << std::endl;
+     }
+-    return true;
+ }
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -140,6 +140,11 @@
+         }
+         if (command == "replay-state")
+             return {true, ctx.replay.Finished() ? "finished" : "running", std::to_string(ctx.replay.LastEventMs())};
++        if (command == "replay-snapshots") {
++            std::string results;
++            for (const auto& result : ctx.replay.SnapshotResults()) results += (results.empty() ? "" : ",") + result;
++            return {true, "snapshots", results};
++        }
+         if (command == "input-replay") {
+             InputReplay replacement; std::string error;
+             if (!replacement.Load(path, ctx.screenWidth, ctx.screenHeight, error)) return {false, "replay", error};
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -506,12 +506,7 @@
+             sdlRenderer->Draw(sdlEventHandler.RedrawRequested(), sdlEventHandler.PressedButtons());
+             sdlEventHandler.ClearRedrawRequested();
+ 
+-            if (!replay.Dispatch((timestampUsec() - replayStartedAt) / 1000, *soc, *sdlRenderer, replayError)) {
+-                audioDriver.Pause();
+-                if (!options.runFor && !options.desktopSocket) cli::Stop();
+-                cerr << replayError << endl;
+-                return false;
+-            }
++            replay.Dispatch((timestampUsec() - replayStartedAt) / 1000, *soc, *sdlRenderer);
+ 
+             if (now - lastSpeedDump > 1000000) {
+                 const uint64_t currentIps = mainLoop.GetCurrentIps();
+@@ -553,9 +548,13 @@
+         reportAudioUnderruns();
+         if (!options.runFor && !options.desktopSocket) cli::Stop();
+ 
+-        if (options.framebufferOutput && !sdlRenderer->SaveFramebuffer(options.framebufferOutput->c_str())) {
+-            cerr << "failed to save framebuffer: " << SDL_GetError() << endl;
+-            return false;
++        if (options.framebufferOutput) {
++            bool blank = false;
++            if (!sdlRenderer->SaveFramebuffer(options.framebufferOutput->c_str(), blank)) {
++                cerr << "failed to save framebuffer: " << SDL_GetError() << endl;
++                return false;
++            }
++            if (blank) cout << "framebuffer output with the LCD off, saved a black frame" << endl;
+         }
+ 
+         return true;

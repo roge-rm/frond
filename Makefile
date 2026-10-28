@@ -64,6 +64,20 @@ clean:
 	rm -rf build out
 
 
+.PHONY: test-replay-snapshot
+test: test-replay-snapshot
+test-replay-snapshot: out/frond
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/replay-snapshot-core.rsp
+	$(CXX) -std=c++17 -O1 -g $(shell sdl2-config --cflags) \
+		-Ibuild/source/src/uarm/native -Ibuild/source/src/uarm/uarm \
+		-Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/replay-snapshot.cpp build/source/src/uarm/.build/native/SdlRenderer.o \
+		build/source/src/uarm/.build/native/InputReplay.o build/source/src/uarm/.build/native/Silkscreen.o \
+		build/source/src/uarm/.build/native/DeviceControls.o \
+		@build/replay-snapshot-core.rsp build/source/src/common/libcommon.a \
+		$(shell sdl2-config --libs) -lSDL2_image $(CPU_TEST_LDLIBS) -o build/test-replay-snapshot
+	./build/test-replay-snapshot
+
 test-sdl-audio: out/frond
 	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/audio-core-objects.rsp
 	$(CXX) -std=c++17 -O1 -g $(shell sdl2-config --cflags) \

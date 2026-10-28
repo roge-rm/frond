@@ -337,10 +337,19 @@ def run(args):
                     if state['code'] == 'finished' and time.monotonic() >= until:
                         break
                     pause(.1, deadline)
-                for capture in captures:
+                # Cores list each snapshot as ok, lcd-off, no-frame or failed. A black frame
+                # saved with the LCD off is still a screenshot. Missing ones fail the run
+                # after the session is saved.
+                snapshots = control.request('replay-snapshots')
+                states = snapshots['message'].split(',') if snapshots['ok'] and snapshots['code'] == 'snapshots' else []
+                missing = []
+                for index, capture in enumerate(sorted(captures, key=lambda c: c['at_ms'])):
+                    if index < len(states) and states[index]:
+                        capture['state'] = states[index]
                     path = Path(capture['path'])
-                    if not path.is_file() or path.stat().st_size == 0:
-                        raise RunError('screenshot', f'Screenshot was not written: {path}')
+                    capture['written'] = path.is_file() and path.stat().st_size > 0
+                    if not capture['written']:
+                        missing.append(str(path))
                 result['stage'] = 'export'
                 for index, name in enumerate(args.export_db, 1):
                     archive = root / f'database-{index:03d}.zip'
@@ -367,6 +376,8 @@ def run(args):
                     raise RunError('timeout', 'Core did not exit after quit') from error
                 if code:
                     raise RunError('process-exit', f'Core exited with status {code}')
+                if missing:
+                    raise RunError('screenshot', 'Screenshot was not written: ' + ', '.join(missing))
         result.update(status='ok', stage='complete')
     except KeyboardInterrupt:
         result['error'] = {'code': 'interrupted', 'message': 'Run interrupted'}

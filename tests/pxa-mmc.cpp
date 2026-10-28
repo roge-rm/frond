@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <unistd.h>
 #include "pxa_MMC.h"
 #include "savestate/savestateAll.h"
 
@@ -57,9 +58,52 @@ int main(){
     assert(loader.Load(checkpoint.GetBuffer(),checkpoint.GetSize(),target));
     memset(status,0,sizeof(status));
     assert(vsdDataXferBlockFromCard(card,status,64)==SdDataOk && status[0]==0x80 && status[10]==0x10);
+    // Data errors end the transfer with DATA_TRAN_DONE and never fault later FIFO accesses.
+    command(24,512,512,true);  // sector 1 has no backing store
+    for(unsigned i=0;i<128;i++)writeReg(0x44,0);
+    assert((readReg(4)&0x1804)==0x1804);
+    writeReg(0x44,0);writeReg(0x44,0,1);assert(readReg(0x40)==0);
+    command(17,512,512,false);
+    assert((readReg(4)&0x801)==0x801);assert(readReg(0x40)==0);
+    // Ejecting mid-block: write CRC error and DATA_TRAN_DONE, then response timeouts.
+    command(24,0,512,true);
+    for(unsigned i=0;i<64;i++)writeReg(0x44,0x55555555);
+    pxaMmcInsert(mmc,nullptr);
+    assert((readReg(4)&0x1804)==0x1804);
+    writeReg(0x44,0x66666666);assert(readReg(0x40)==0);
+    assert(sector[0]==0x11);  // the partial block was never written
+    command(13,3u<<16,0,false);
+    writeReg(0x10,1);writeReg(0,2);
+    assert((readReg(4)&0x2002)==0x2002);
+    // A reinserted card is idle: block commands are illegal and get no response (SD 4.6.1).
+    vsdReset(card,65536);pxaMmcInsert(mmc,card);
+    command(24,0,512,true);
+    assert((readReg(4)&0x2002)==0x2002);assert(!(readReg(4)&0x800));
+    for(unsigned i=0;i<128;i++)writeReg(0x44,0x77777777);
+    assert(sector[0]==0x11);
+    uint8_t reply[17]{};assert(vsdCommand(card,24,0,reply)==SdReplyNone);
+    assert(vsdCommand(card,55,3u<<16,reply)==SdReplyNone);  // not addressed: no response
+    initCard(card);
+    command(24,0,512,true);
+    for(unsigned i=0;i<128;i++)writeReg(0x44,0x88888888);
+    assert((readReg(4)&0x1804)==0x1800&&sector[0]==0x88);
+    for(unsigned i=0;i<128;i++)writeReg(0x44,0x44332211);  // ignored, no transfer
+    assert(sector[0]==0x88);
+    for(unsigned i=0;i<512;i+=4)memcpy(sector+i,"\x11\x22\x33\x44",4);
+    // A guest retrying illegal commands logs a bounded amount, and card reset restarts the count.
+    {
+        fflush(stderr);int saved=dup(2);FILE* sink=tmpfile();assert(sink&&saved>=0);dup2(fileno(sink),2);
+        vsdReset(card,65536);pxaMmcInsert(mmc,card);
+        for(unsigned i=0;i<20000;i++){command(24,0,512,true);assert((readReg(4)&0x2002)==0x2002);}
+        fflush(stderr);long bytes=ftell(sink);
+        vsdReset(card,65536);pxaMmcInsert(mmc,card);command(24,0,512,true);fflush(stderr);
+        long again=ftell(sink);
+        dup2(saved,2);close(saved);fclose(sink);
+        assert(bytes>0&&bytes<4096);assert(again>bytes);  // limited, then full lines again after reset
+    }
     // PXA25x keeps its previous one-byte-per-word access behaviour.
     card=vsdInit(readSector,writeSector,65536);initCard(card);
     mmc=pxaMmcInit(nullptr,nullptr,nullptr);pxaMmcInsert(mmc,card);
     command(17,0,512,false);assert(readReg(0x40)==0x11);assert(readReg(0x40)==0x22);
-    puts("PASS: PXA27x packed FIFO widths, block write, PRTBUF, SD status and PXA25x compatibility");
+    puts("PASS: PXA27x packed FIFO widths, block write, PRTBUF, SD status, error and removal signalling, PXA25x compatibility");
 }

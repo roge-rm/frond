@@ -1,0 +1,133 @@
+diff --git a/src/uarm/uarm/vSD.cpp b/src/uarm/uarm/vSD.cpp
+--- a/src/uarm/uarm/vSD.cpp
++++ b/src/uarm/uarm/vSD.cpp
+@@ -8,6 +8,7 @@
+ 
+ #include "cputil.h"
+ #include "memory_buffer.h"
++#include "sd_log_limit.h"
+ #include "savestate/savestateAll.h"
+ 
+ #define SAVESTATE_VERSION 1
+@@ -58,6 +59,8 @@
+     bool haveExpectedNumBlocks;
+     uint32_t numBlocksExpected;
+ 
++    SdLogLimit rejectLog;  // not saved
++
+     template <typename T>
+     void DoSaveLoad(T &chunkHelper, uint32_t version) {
+         uint8_t state8 = static_cast<uint8_t>(state);
+@@ -139,26 +142,28 @@
+                                      enum RejectReason why, bool wasAcmd) {
+     uint32_t r1orr = 1UL << 19;  // generic error
+ 
+-    fprintf(stderr, "Rejecting %sCMD%u(0x%08lx)\n", wasAcmd ? "A" : "", cmd, (unsigned long)param);
++    bool log = sdLogAllow(&vsd->rejectLog, "vSD", "rejected commands");
++
++    if (log) fprintf(stderr, "Rejecting %sCMD%u(0x%08lx)\n", wasAcmd ? "A" : "", cmd, (unsigned long)param);
+ 
+     switch (why) {
+         case InvalidInCurrentState:
+             // An illegal command gets no response and leaves the state alone (SD physical
+             // layer 2.00, 4.6.1). The host sees a response timeout.
+-            fprintf(stderr, " -> invalid in current state %u\n", vsd->state);
++            if (log) fprintf(stderr, " -> invalid in current state %u\n", vsd->state);
+             return SdReplyNone;
+ 
+         case UnacceptableParam:
+-            fprintf(stderr, " -> parameter is unacceptable\n");
++            if (log) fprintf(stderr, " -> parameter is unacceptable\n");
+             r1orr = 1UL << 31;
+             break;
+ 
+         case UnknownCommand:
+-            fprintf(stderr, " -> unknown command\n");
++            if (log) fprintf(stderr, " -> unknown command\n");
+             return SdReplyNone;
+ 
+         default:
+-            fprintf(stderr, " -> some other reason\n");
++            if (log) fprintf(stderr, " -> some other reason\n");
+             break;
+     }
+ 
+@@ -694,6 +699,7 @@
+ void vsdReset(struct VSD *vsd, uint32_t nSec) {
+     vsd->nSec = nSec;
+     vsd->hcCard = nSec > 4194304;
++    sdLogReset(&vsd->rejectLog);
+ 
+     vsdCardReset(vsd);
+ }
+diff --git a/src/uarm/uarm/pxa_MMC.cpp b/src/uarm/uarm/pxa_MMC.cpp
+--- a/src/uarm/uarm/pxa_MMC.cpp
++++ b/src/uarm/uarm/pxa_MMC.cpp
+@@ -9,6 +9,7 @@
+ #include "mem.h"
+ #include "pxa_DMA.h"
+ #include "savestate/savestateAll.h"
++#include "sd_log_limit.h"
+ 
+ #define PXA_MMC_BASE 0x41100000UL
+ #define PXA_MMC_SIZE 0x00001000UL
+@@ -16,6 +17,8 @@
+ #define SAVESTATE_VERSION 0
+ 
+ struct PxaMmc {
++    SdLogLimit noReplyLog;  // not saved
++
+     struct PxaDma *dma;
+     struct PxaIc *ic;
+ 
+@@ -228,7 +231,7 @@
+             len = 0;
+             if ((mmc->cmdat & 3) == 0)  // no reply as expected
+                 success = true;
+-            else
++            else if (sdLogAllow(&mmc->noReplyLog, "MMC", "missing replies"))
+                 fprintf(stderr, "Got no reply, when %u bits were expected\n",
+                         ((mmc->cmdat & 3) == 2) ? 136 : 48);
+             break;
+@@ -525,6 +528,7 @@
+ }
+ 
+ void pxaMmcInsert(struct PxaMmc *mmc, struct VSD *vsd) {
++    sdLogReset(&mmc->noReplyLog);
+     if (!vsd) {
+         // Removal ends the old card's transfer. Never drain its FIFO into a
+         // later block request through a null card, or expose it after reinsert.
+diff --git a/src/uarm/uarm/sd_log_limit.h b/src/uarm/uarm/sd_log_limit.h
+new file mode 100644
+--- /dev/null
++++ b/src/uarm/uarm/sd_log_limit.h
+@@ -0,0 +1,29 @@
++#ifndef _SD_LOG_LIMIT_H_
++#define _SD_LOG_LIMIT_H_
++
++#include <cstdint>
++#include <cstdio>
++
++// Limits repeated SD/MMC error lines on stderr. The first SD_LOG_FULL are logged in full,
++// then one summary line per SD_LOG_EVERY suppressed repeats. It counts events only, so
++// output is the same for a given run. Logging state only: never saved.
++struct SdLogLimit {
++    uint32_t seen;
++};
++
++#define SD_LOG_FULL 8
++#define SD_LOG_EVERY 4096
++
++// True when this occurrence should be logged in full.
++static inline bool sdLogAllow(SdLogLimit *l, const char *prefix, const char *what) {
++    if (l->seen < 0xffffffffu) l->seen++;
++    if (l->seen <= SD_LOG_FULL) return true;
++    uint32_t suppressed = l->seen - SD_LOG_FULL;
++    if (!(suppressed % SD_LOG_EVERY))
++        fprintf(stderr, "%s: %u more %s suppressed\n", prefix, (unsigned)suppressed, what);
++    return false;
++}
++
++static inline void sdLogReset(SdLogLimit *l) { l->seen = 0; }
++
++#endif

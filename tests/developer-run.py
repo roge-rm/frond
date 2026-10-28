@@ -90,6 +90,8 @@ def fake_core():
                         parts = event.split(maxsplit=2)
                         if parts[1] == 'snapshot':
                             Path(shlex.split(parts[2])[0]).write_bytes(b'fake PNG')
+            elif command == 'replay-snapshots':
+                code, message = 'snapshots', config.get('snapshot_states', '')
             elif command == 'export-db':
                 destination, name = argument.split('\n')
                 if counts[command] <= config.get('export_retries', 0):
@@ -284,8 +286,18 @@ class DeveloperRunTest(unittest.TestCase):
         self.assertEqual(result['core_exit_code'], 7)
 
     def test_missing_snapshot(self):
-        result = self.run_case({'missing_screenshot': True}, ['--screenshot', '0'])
+        result = self.run_case({'missing_screenshot': True, 'snapshot_states': 'failed'}, ['--screenshot', '0'])
         self.assertEqual(result['error']['code'], 'screenshot')
+        # The run continues to save the session before reporting the missing screenshot.
+        self.assertTrue(result['artifacts']['session_saved'])
+        self.assertEqual(result['artifacts']['screenshots'][0]['state'], 'failed')
+        self.assertFalse(result['artifacts']['screenshots'][0]['written'])
+
+    def test_lcd_off_snapshot_is_recorded(self):
+        result = self.run_case({'snapshot_states': 'ok,lcd-off'}, ['--screenshot', '0', '--screenshot', '10'])
+        self.assertEqual(result['status'], 'ok')
+        self.assertEqual([c['state'] for c in result['artifacts']['screenshots']], ['ok', 'lcd-off'])
+        self.assertTrue(all(c['written'] for c in result['artifacts']['screenshots']))
 
     def test_export_failure(self):
         result = self.run_case({'export_error': True}, ['--export-db', 'Missing log'])
