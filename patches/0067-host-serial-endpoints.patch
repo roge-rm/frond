@@ -1,0 +1,769 @@
+diff --git a/src/uarm/Makefile b/src/uarm/Makefile
+index 54f9bb3..03f23e0 100644
+--- a/src/uarm/Makefile
++++ b/src/uarm/Makefile
+@@ -120,6 +120,7 @@ SOURCE_CXX =		 					\
+ 	uarm/WifiRouter.cpp \
+ 	uarm/LibertasCF.cpp \
+ 	uarm/HostNetwork.cpp			\
++	uarm/HostSerial.cpp			\
+ 	uarm/NetworkSimulation.cpp			\
+ 	uarm/system_state.cpp
+ 
+diff --git a/src/uarm/native/Commands.h b/src/uarm/native/Commands.h
+index 5efd472..ba7c5df 100644
+--- a/src/uarm/native/Commands.h
++++ b/src/uarm/native/Commands.h
+@@ -11,6 +11,9 @@
+ #include "SdlAudioDriver.h"
+ #include "SoC.h"
+ 
++class HostSerial;
++struct PxaUart;
++
+ namespace commands {
+     struct Context {
+         SoC* soc;
+@@ -21,6 +24,9 @@ namespace commands {
+         uint64_t& replayStartedAt;
+         int screenWidth;
+         int screenHeight;
++        HostSerial* serial{nullptr};      // live host endpoint, never session state
++        PxaUart* serialUart{nullptr};     // TX FFUART for serial-mode changes
++        std::string serialError{};        // why the last endpoint could not open
+     };
+ 
+     void Register();
+diff --git a/src/uarm/native/DesktopControl.h b/src/uarm/native/DesktopControl.h
+index 2e4613c..27a2ff5 100644
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -12,6 +12,7 @@
+ 
+ #include "Commands.h"
+ #include "ReadOnlyGuest.h"
++#include "HostSerial.h"
+ #include "native_boundary.h"
+ #include "CPU.h"
+ #include "SdImage.h"
+@@ -44,7 +45,17 @@ class DesktopControl {
+         event("ready");
+     }
+     ~DesktopControl() { if (fd >= 0) close(fd); }
+-    void event(const char* name) { output += std::string("0\tevent\t") + name + "\t\n"; }
++    void event(const char* name, const std::string& message = {}) {
++        output += std::string("0\tevent\t") + name + "\t" + encode(message) + "\n";
++    }
++    // Pushes the serial state when it changes, for example on a peer connect or hangup.
++    void serialChanged(commands::Context& ctx) {
++        // Clients that never use serial never see the event.
++        const auto state = SerialState(ctx);
++        if (state == lastSerial || (state == "off" && lastSerial.empty())) return;
++        lastSerial = state;
++        event("serial", state);
++    }
+ 
+     bool poll(commands::Context& ctx) {
+         char data[4096];
+@@ -89,6 +100,12 @@ class DesktopControl {
+     }
+ 
+  private:
++    std::string lastSerial;
++    static std::string SerialState(commands::Context& ctx) {
++        if (!ctx.serial) return "off";
++        const auto state = ctx.serial->Describe();
++        return state == "off" && !ctx.serialError.empty() ? "off " + ctx.serialError : state;
++    }
+     struct Reply { bool ok{false}; std::string code{"failed"}, message; };
+     static std::string encode(const std::string& value) {
+         static const char digits[] = "0123456789abcdef";
+@@ -132,7 +149,7 @@ class DesktopControl {
+     Reply dispatch(commands::Context& ctx, const std::string& command, const std::string& path) {
+         const bool fileCommand = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "input-replay";
+         if (fileCommand && (path.empty() || path.front() != '/')) return {false, "argument", "An absolute file path is required."};
+-        if (!fileCommand && command != "sd-create" && command != "launch-app" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && !path.empty()) return {false, "argument", "This command takes no argument."};
++        if (!fileCommand && command != "sd-create" && command != "launch-app" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "serial-mode" && !path.empty()) return {false, "argument", "This command takes no argument."};
+         if (command == "guest-ready") {
+             if (!GuestDatabaseOps::Ready(*ctx.soc))
+                 return {false, "not-ready", "Palm OS has not reached a supported application boundary."};
+@@ -172,6 +189,15 @@ class DesktopControl {
+                 return {false,"argument","Use a hexadecimal scan code followed by d or u."};
+             return {ctx.soc->KeyboardKey(code,state=='d'),"keyboard","Keyboard event."};
+         }
++        if (command == "serial-state") return {true, "serial", SerialState(ctx)};
++        if (command == "serial-mode") {
++            HostSerial::Config config;
++            if (!ctx.serial || !HostSerial::Parse(path, config)) return {false, "argument", "Use off, pty or tcp:PORT."};
++            // A new endpoint detaches the old one first; queued bytes are dropped.
++            ctx.serialError.clear();
++            if (!ctx.serial->Start(ctx.serialUart, config, ctx.serialError)) return {false, "serial", ctx.serialError};
++            return {true, "serial", SerialState(ctx)};
++        }
+         if (command == "network-state") return {true, "network", ctx.soc->networkSimulation.GetModeName()};
+         if (command == "network-mode") {
+             if (!ctx.soc->networkSimulation.SetMode(path)) return {false, "argument", "Unknown network mode."};
+diff --git a/src/uarm/native/main.cpp b/src/uarm/native/main.cpp
+index 5befab0..2923020 100644
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -17,6 +17,7 @@
+ #include "Commands.h"
+ #include "DesktopControl.h"
+ #include "FileUtil.h"
++#include "HostSerial.h"
+ #include "Logging.h"
+ #include "MainLoop.h"
+ #include "InputReplay.h"
+@@ -58,6 +59,7 @@ struct Options {
+     optional<string> framebufferOutput;
+     optional<string> inputReplay;
+     optional<string> desktopSocket;
++    optional<string> serial;
+ };
+ 
+ namespace {
+@@ -237,6 +239,11 @@ namespace {
+             cerr << "--desktop-socket cannot be combined with --run-for or --script" << endl;
+             return false;
+         }
++        HostSerial::Config serialConfig;
++        if (options.serial && !HostSerial::Parse(*options.serial, serialConfig)) {
++            cerr << "--serial must be off, pty or tcp:PORT (PORT 0..65535)" << endl;
++            return false;
++        }
+         if (options.mips == 0) {
+             cerr << "MIPS must be finite" << endl;
+             return false;
+@@ -451,6 +458,21 @@ namespace {
+             .screenWidth = displayConfiguration.width,
+             .screenHeight = displayConfiguration.height + displayConfiguration.graffitiHeight};
+ 
++        // The endpoint opens after the session loads, so a restore starts detached.
++        HostSerial serial;
++        commandContext.serial = &serial;
++        if (soc->GetDeviceType() == DeviceType5::deviceTypeTX)
++            commandContext.serialUart = static_cast<SocPXA*>(soc)->GetSerialUart();
++        if (serialConfig.kind != HostSerial::Kind::off) {
++            if (!isTx) {
++                cerr << "--serial needs a Palm TX" << endl;
++                return false;
++            }
++            if (!serial.Start(commandContext.serialUart, serialConfig, commandContext.serialError))
++                cerr << "serial: " << commandContext.serialError << endl;
++            cout << "serial: " << serial.Describe() << endl;
++        }
++
+         unique_ptr<DesktopControl> desktop;
+         if (options.desktopSocket) {
+             desktop = make_unique<DesktopControl>(*options.desktopSocket, !options.disableAudio);
+@@ -501,7 +523,9 @@ namespace {
+                 if (!waitForPreviewAudio && pending > 3072) waitForPreviewAudio = true;
+                 if (waitForPreviewAudio && pending < 2048) waitForPreviewAudio = false;
+             } else waitForPreviewAudio = false;
++            serial.Service();
+             mainLoop.Cycle(now, waitForAudio || waitForPreviewAudio);
++            serial.Service();
+ 
+             sdlRenderer->Draw(sdlEventHandler.RedrawRequested(), sdlEventHandler.PressedButtons());
+             sdlEventHandler.ClearRedrawRequested();
+@@ -524,6 +548,7 @@ namespace {
+                 if (options.runFor) cout << s.str();
+             }
+ 
++            if (desktop) desktop->serialChanged(commandContext);
+             if (desktop && desktop->poll(commandContext)) break;
+             if (!options.runFor && !desktop && cli::Execute(&commandContext)) break;
+ 
+@@ -544,6 +569,7 @@ namespace {
+             if (delay > 10) usleep(delay);
+         }
+ 
++        serial.Stop();
+         audioDriver.Pause();
+         reportAudioUnderruns();
+         if (!options.runFor && !options.desktopSocket) cli::Stop();
+@@ -639,6 +665,11 @@ int main(int argc, char** argv) {
+ 
+     program.add_argument("--desktop-socket").help("private desktop control socket");
+ 
++    program.add_argument("--serial")
++        .help("connect the TX serial port to a host PTY (pty) or a TCP listener on 127.0.0.1 "
++              "(tcp:PORT, one client at a time); default off")
++        .metavar("<off|pty|tcp:PORT>");
++
+     program.add_argument("--script").help("execute script on startup").metavar("<script file>");
+ 
+     try {
+@@ -670,7 +701,8 @@ int main(int argc, char** argv) {
+                        .runFor = program.present<unsigned int>("--run-for"),
+                        .framebufferOutput = program.present("--framebuffer-output"),
+                        .inputReplay = program.present("--input-replay"),
+-                       .desktopSocket = program.present("--desktop-socket")};
++                       .desktopSocket = program.present("--desktop-socket"),
++                       .serial = program.present("--serial")};
+ 
+     logEnable();
+ 
+diff --git a/src/uarm/uarm/HostSerial.cpp b/src/uarm/uarm/HostSerial.cpp
+new file mode 100644
+index 0000000..418abd9
+--- /dev/null
++++ b/src/uarm/uarm/HostSerial.cpp
+@@ -0,0 +1,435 @@
++#ifndef __EMSCRIPTEN__
++#include "HostSerial.h"
++
++#include <arpa/inet.h>
++#include <fcntl.h>
++#include <netinet/in.h>
++#include <netinet/tcp.h>
++#include <poll.h>
++#include <sys/eventfd.h>
++#include <sys/socket.h>
++#include <termios.h>
++#include <unistd.h>
++
++#include <algorithm>
++#include <atomic>
++#include <cerrno>
++#include <cstdlib>
++#include <cstring>
++#include <deque>
++#include <mutex>
++#include <thread>
++
++#include "pxa_UART.h"
++
++// Tests only: runs on the worker after a host write, before the sent bytes leave the queue.
++void (*hostSerialAfterWriteHook)() = nullptr;
++
++namespace {
++// Queues shared by the emulator thread and the worker. Only the worker touches
++// descriptors other than the eventfd; only the emulator thread touches the UART.
++struct Shared {
++    std::mutex mutex;
++    std::deque<uint8_t> rx, tx;  // host to guest, guest to host
++    std::atomic<size_t> rxSize{0}, txSize{0};
++    std::atomic<bool> connected{false}, stop{false};
++    std::atomic<uint64_t> received{0}, sent{0}, rxDiscarded{0}, txDropped{0};
++    uint64_t txGeneration{0};  // bumped under mutex whenever tx is cleared
++    int wake{-1};
++
++    // Caller holds mutex. Bytes the worker copied out before this are not erased later.
++    void ClearTx() {
++        tx.clear();
++        txSize = 0;
++        ++txGeneration;
++    }
++    void Wake() {
++        const uint64_t one = 1;
++        (void)!write(wake, &one, sizeof(one));
++    }
++    void Disconnect() {
++        std::lock_guard lock(mutex);
++        connected = false;
++        ClearTx();
++    }
++};
++
++void closeFd(int& fd) {
++    if (fd >= 0) close(fd);
++    fd = -1;
++}
++
++bool nonblocking(int fd) {
++    const int flags = fcntl(fd, F_GETFL);
++    return flags >= 0 && fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 &&
++           fcntl(fd, F_SETFD, FD_CLOEXEC) == 0;
++}
++
++// Moves bytes between one descriptor and the queues. Returns false on EOF, hangup
++// or error. A hangup while the receive queue is full ends the connection at once;
++// bytes the host sent that are still unread in the kernel are lost.
++bool pump(Shared& s, int fd, short revents, bool socket) {
++    const bool hangup = revents & (POLLHUP | POLLERR | POLLRDHUP);
++    if (revents & POLLIN || hangup) {
++        uint8_t buffer[1024];
++        const size_t space = HostSerial::queueBytes - std::min(HostSerial::queueBytes, s.rxSize.load());
++        if (!space) {
++            if (hangup) return false;
++        } else {
++            const ssize_t got = read(fd, buffer, std::min(space, sizeof(buffer)));
++            if (got == 0) return false;
++            if (got < 0 && errno != EAGAIN && errno != EINTR) return false;  // EIO: PTY hung up
++            if (got > 0) {
++                std::lock_guard lock(s.mutex);
++                s.rx.insert(s.rx.end(), buffer, buffer + got);
++                s.rxSize = s.rx.size();
++                s.received += got;
++            }
++        }
++    }
++    if (s.txSize.load()) {
++        uint8_t buffer[1024];
++        size_t count;
++        uint64_t generation;
++        {
++            std::lock_guard lock(s.mutex);
++            count = std::min(s.tx.size(), sizeof(buffer));
++            std::copy(s.tx.begin(), s.tx.begin() + count, buffer);
++            generation = s.txGeneration;
++        }
++        const ssize_t done = socket ? send(fd, buffer, count, MSG_NOSIGNAL) : write(fd, buffer, count);
++        if (done < 0 && errno != EAGAIN && errno != EINTR) return false;
++        if (done > 0 && hostSerialAfterWriteHook) hostSerialAfterWriteHook();
++        if (done > 0) {
++            std::lock_guard lock(s.mutex);
++            // A reset or load may have cleared the queue and the guest refilled it.
++            if (generation == s.txGeneration) {
++                s.tx.erase(s.tx.begin(), s.tx.begin() + std::min<size_t>(done, s.tx.size()));
++                s.txSize = s.tx.size();
++            }
++            s.sent += done;
++        }
++    }
++    return true;
++}
++
++// A PTY master reports POLLHUP from when the last slave descriptor closes until a
++// program opens it again. It does not report the first open, so a new PTY counts
++// as connected.
++void ptyWorker(std::shared_ptr<Shared> s, int master) {
++    bool hung = false;
++    while (!s->stop) {
++        pollfd fds[2] = {{s->wake, POLLIN, 0}, {master, 0, 0}};
++        if (!hung) {
++            if (s->rxSize < HostSerial::queueBytes) fds[1].events |= POLLIN;
++            if (s->txSize) fds[1].events |= POLLOUT;
++        }
++        // POLLHUP stays raised while nobody has the slave open, so check for a new
++        // open on a short timer instead of polling the master.
++        if (poll(fds, hung ? 1 : 2, hung ? 50 : -1) < 0 && errno != EINTR) break;
++        if (fds[0].revents & POLLIN) {
++            uint64_t value;
++            (void)!read(s->wake, &value, sizeof(value));
++        }
++        if (hung) {
++            pollfd probe{master, POLLIN, 0};
++            if (poll(&probe, 1, 0) >= 0 && !(probe.revents & POLLHUP)) {
++                hung = false;
++                s->connected = true;
++            }
++            continue;
++        }
++        if (fds[1].revents && !pump(*s, master, fds[1].revents, false)) {
++            hung = true;
++            tcflush(master, TCIFLUSH);  // what the old peer wrote is not for the next one
++            s->Disconnect();
++        }
++    }
++}
++
++// One client at a time; a second client is accepted and closed at once.
++void tcpWorker(std::shared_ptr<Shared> s, int listener) {
++    int client = -1;
++    while (!s->stop) {
++        pollfd fds[3] = {{s->wake, POLLIN, 0}, {listener, POLLIN, 0}, {client, 0, 0}};
++        if (client >= 0) {
++            fds[2].events = POLLRDHUP;  // peer close, seen even while not reading
++            if (s->rxSize < HostSerial::queueBytes) fds[2].events |= POLLIN;
++            if (s->txSize) fds[2].events |= POLLOUT;
++        }
++        if (poll(fds, client >= 0 ? 3 : 2, -1) < 0 && errno != EINTR) break;
++        if (fds[0].revents & POLLIN) {
++            uint64_t value;
++            (void)!read(s->wake, &value, sizeof(value));
++        }
++        if (fds[1].revents & POLLIN) {
++            const int accepted = accept(listener, nullptr, nullptr);
++            if (accepted >= 0 && client < 0 && nonblocking(accepted)) {
++                const int on = 1;
++                setsockopt(accepted, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
++                client = accepted;
++                {
++                    std::lock_guard lock(s->mutex);
++                    s->ClearTx();
++                }
++                s->connected = true;
++            } else if (accepted >= 0) {
++                close(accepted);
++            }
++        }
++        if (client >= 0 && fds[2].revents && !pump(*s, client, fds[2].revents, true)) {
++            closeFd(client);
++            s->Disconnect();
++        }
++    }
++    closeFd(client);
++}
++}  // namespace
++
++struct HostSerial::Impl {
++    Config config;
++    PxaUart* uart{nullptr};
++    std::shared_ptr<Shared> shared;
++    std::thread worker;
++    int fd{-1};  // PTY master or TCP listener, owned by the worker while it runs
++    std::string endpoint;
++    bool attached{false};
++    int lastInputs{-1};
++    bool ctsOpen{true};
++    uint32_t disableCount{0};
++    uint64_t consumed{0};         // bytes taken from rx by the guest or dropped
++    uint64_t receivedAtService{0};  // shared->received at the previous Service
++
++    static uint_fast16_t Read(void* context) {
++        auto& self = *static_cast<Impl*>(context);
++        if (!self.shared) return UART_CHAR_NONE;
++        auto& s = *self.shared;
++        // The peer honours RTS, like a host port with hardware flow control.
++        if (!s.rxSize.load(std::memory_order_relaxed) ||
++            !(pxaUartGetModemOutputs(self.uart) & PXA_UART_RTS))
++            return UART_CHAR_NONE;
++        uint8_t byte;
++        size_t left;
++        {
++            std::lock_guard lock(s.mutex);
++            if (s.rx.empty()) return UART_CHAR_NONE;
++            byte = s.rx.front();
++            s.rx.pop_front();
++            left = s.rxSize = s.rx.size();
++            ++self.consumed;
++        }
++        if (left == queueBytes / 2) s.Wake();
++        return byte;
++    }
++    static void Write(uint_fast16_t chr, void* context) {
++        auto* shared = static_cast<Impl*>(context)->shared.get();
++        if (!shared) return;
++        auto& s = *shared;
++        bool wasEmpty = false;
++        if (s.connected) {
++            std::lock_guard lock(s.mutex);
++            if (s.tx.size() < queueBytes) {
++                wasEmpty = s.tx.empty();
++                s.tx.push_back(uint8_t(chr));
++                s.txSize = s.tx.size();
++            } else {
++                ++s.txDropped;
++            }
++        } else {
++            ++s.txDropped;  // no peer on the line
++        }
++        if (wasEmpty) s.Wake();
++    }
++    static bool Active(void* context) {
++        const auto* shared = static_cast<Impl*>(context)->shared.get();
++        return shared && shared->rxSize.load(std::memory_order_relaxed) != 0;
++    }
++    static void Detached(void* context) {
++        auto& self = *static_cast<Impl*>(context);
++        self.attached = false;
++        self.lastInputs = -1;
++        if (self.shared) self.DropQueues();
++    }
++    void DropQueues() {
++        DropReceived(SIZE_MAX);
++        std::lock_guard lock(shared->mutex);
++        shared->ClearTx();
++    }
++    // Drops up to count bytes from the front of the receive queue.
++    void DropReceived(size_t count) {
++        bool wasFull;
++        {
++            std::lock_guard lock(shared->mutex);
++            wasFull = shared->rx.size() >= queueBytes / 2;
++            count = std::min(count, shared->rx.size());
++            shared->rx.erase(shared->rx.begin(), shared->rx.begin() + count);
++            shared->rxSize = shared->rx.size();
++            shared->rxDiscarded += count;
++            consumed += count;
++        }
++        if (wasFull && count) shared->Wake();
++    }
++};
++
++bool HostSerial::Parse(const std::string& text, Config& config) {
++    if (text == "off") {
++        config = {};
++        return true;
++    }
++    if (text == "pty") {
++        config = {Kind::pty, 0};
++        return true;
++    }
++    if (text.rfind("tcp:", 0) != 0 || text.size() < 5 || text.size() > 9) return false;
++    unsigned port = 0;
++    for (size_t i = 4; i < text.size(); ++i) {
++        if (text[i] < '0' || text[i] > '9') return false;
++        port = port * 10 + unsigned(text[i] - '0');
++    }
++    if (port > 65535) return false;
++    config = {Kind::tcp, uint16_t(port)};
++    return true;
++}
++
++std::string HostSerial::Format(const Config& config) {
++    switch (config.kind) {
++        case Kind::pty:
++            return "pty";
++        case Kind::tcp:
++            return "tcp:" + std::to_string(config.port);
++        default:
++            return "off";
++    }
++}
++
++HostSerial::HostSerial() : impl(std::make_unique<Impl>()) {}
++HostSerial::~HostSerial() { Stop(); }
++
++bool HostSerial::Start(PxaUart* uart, const Config& config, std::string& error) {
++    Stop();
++    if (config.kind == Kind::off) return true;
++    if (!uart) {
++        error = "This device has no serial port.";
++        return false;
++    }
++    auto shared = std::make_shared<Shared>();
++    shared->wake = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
++    if (shared->wake < 0) {
++        error = std::string("eventfd: ") + strerror(errno);
++        return false;
++    }
++    int fd = -1;
++    std::string endpoint;
++    uint16_t port = config.port;
++    if (config.kind == Kind::pty) {
++        fd = posix_openpt(O_RDWR | O_NOCTTY);
++        const char* name = fd >= 0 && grantpt(fd) == 0 && unlockpt(fd) == 0 ? ptsname(fd) : nullptr;
++        termios raw{};
++        if (!name || !nonblocking(fd) || tcgetattr(fd, &raw) != 0) {
++            error = std::string("Could not open a PTY: ") + strerror(errno);
++            closeFd(fd);
++            close(shared->wake);
++            return false;
++        }
++        cfmakeraw(&raw);
++        tcsetattr(fd, TCSANOW, &raw);
++        endpoint = name;
++        shared->connected = true;
++    } else {
++        fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
++        const int on = 1;
++        sockaddr_in address{};
++        address.sin_family = AF_INET;
++        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++        address.sin_port = htons(config.port);
++        socklen_t length = sizeof(address);
++        if (fd < 0 || setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) != 0 ||
++            bind(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0 || listen(fd, 1) != 0 ||
++            getsockname(fd, reinterpret_cast<sockaddr*>(&address), &length) != 0) {
++            error = "Could not listen on 127.0.0.1:" + std::to_string(config.port) + ": " + strerror(errno);
++            closeFd(fd);
++            close(shared->wake);
++            return false;
++        }
++        port = ntohs(address.sin_port);
++        endpoint = "127.0.0.1:" + std::to_string(port);
++    }
++    impl->config = {config.kind, port};
++    impl->uart = uart;
++    impl->shared = shared;
++    impl->fd = fd;
++    impl->endpoint = endpoint;
++    impl->attached = false;
++    impl->lastInputs = -1;
++    impl->ctsOpen = true;
++    impl->consumed = impl->receivedAtService = 0;
++    impl->worker = config.kind == Kind::pty ? std::thread(ptyWorker, shared, fd) : std::thread(tcpWorker, shared, fd);
++    return true;
++}
++
++void HostSerial::Stop() {
++    if (!impl->shared) return;
++    if (impl->attached) pxaUartDetachExternal(impl->uart);  // calls Detached
++    impl->shared->stop = true;
++    impl->shared->Wake();
++    if (impl->worker.joinable()) impl->worker.join();
++    closeFd(impl->fd);
++    close(impl->shared->wake);
++    impl->shared.reset();
++    impl->uart = nullptr;
++    impl->attached = false;
++    impl->config = {};
++    impl->endpoint.clear();
++}
++
++void HostSerial::Service() {
++    auto* s = impl->shared.get();
++    if (!s) return;
++    if (!impl->attached) {
++        if (!pxaUartAttachExternal(impl->uart, Impl::Read, Impl::Write, Impl::Active, nullptr,
++                                   Impl::Detached, impl.get()))
++            return;  // busy, frozen or in loopback; try again next time
++        impl->attached = true;
++        impl->lastInputs = -1;
++        impl->disableCount = pxaUartDisableCount(impl->uart);
++        impl->receivedAtService = s->received;
++    }
++    // A closed port has no receiver: bytes from the host are lost, as on a wire.
++    // After a close and reopen since the last call, drop the bytes that were
++    // already waiting then; later ones may have come after the reopen.
++    const auto disabled = pxaUartDisableCount(impl->uart);
++    const uint64_t waiting = impl->receivedAtService;
++    impl->receivedAtService = s->received;
++    if (!pxaUartReceiverEnabled(impl->uart))
++        impl->DropReceived(SIZE_MAX);
++    else if (disabled != impl->disableCount && waiting > impl->consumed)
++        impl->DropReceived(size_t(waiting - impl->consumed));
++    impl->disableCount = disabled;
++    const size_t pending = s->txSize;
++    if (pending >= queueBytes / 2) impl->ctsOpen = false;
++    if (pending <= queueBytes / 4) impl->ctsOpen = true;
++    const int inputs = s->connected ? PXA_UART_DSR | PXA_UART_DCD | (impl->ctsOpen ? PXA_UART_CTS : 0) : 0;
++    if (inputs != impl->lastInputs && pxaUartSetModemInputs(impl->uart, uint8_t(inputs)))
++        impl->lastInputs = inputs;
++    if (s->rxSize) pxaUartKick(impl->uart);
++}
++
++HostSerial::Config HostSerial::GetConfig() const { return impl->config; }
++bool HostSerial::Attached() const { return impl->attached; }
++bool HostSerial::Connected() const { return impl->shared && impl->shared->connected; }
++std::string HostSerial::Endpoint() const { return impl->endpoint; }
++
++std::string HostSerial::Describe() const {
++    if (!impl->shared) return "off";
++    return std::string(impl->config.kind == Kind::pty ? "pty " : "tcp ") + impl->endpoint +
++           (Connected() ? " connected" : " waiting");
++}
++
++HostSerial::Counters HostSerial::GetCounters() const {
++    if (!impl->shared) return {};
++    auto& s = *impl->shared;
++    return {s.received, s.sent, s.rxDiscarded, s.txDropped};
++}
++size_t HostSerial::PendingReceive() const { return impl->shared ? impl->shared->rxSize.load() : 0; }
++size_t HostSerial::PendingSend() const { return impl->shared ? impl->shared->txSize.load() : 0; }
++#endif
+diff --git a/src/uarm/uarm/HostSerial.h b/src/uarm/uarm/HostSerial.h
+new file mode 100644
+index 0000000..c0a306c
+--- /dev/null
++++ b/src/uarm/uarm/HostSerial.h
+@@ -0,0 +1,61 @@
++#ifndef FROND_HOST_SERIAL_H
++#define FROND_HOST_SERIAL_H
++#ifndef __EMSCRIPTEN__
++#include <cstddef>
++#include <cstdint>
++#include <memory>
++#include <string>
++
++struct PxaUart;
++
++// Connects the TX FFUART to a host PTY or a TCP listener on 127.0.0.1. A worker
++// thread owns the descriptors and moves bytes through two bounded queues; it never
++// touches the UART. Every method runs on the emulator thread. Nothing here is
++// session state: a load or reset detaches, and Service attaches again once the UART
++// is idle.
++class HostSerial {
++   public:
++    enum class Kind { off, pty, tcp };
++    struct Config {
++        Kind kind{Kind::off};
++        uint16_t port{0};  // TCP only; 0 picks a free port
++    };
++    struct Counters {
++        uint64_t received{}, sent{}, rxDiscarded{}, txDropped{};
++    };
++    // Each queue holds this many bytes. The worker stops reading the host once
++    // the receive queue is full; CTS drops while the send queue is half full.
++    static constexpr size_t queueBytes = 4096;
++
++    static bool Parse(const std::string& text, Config& config);  // off, pty, tcp:PORT
++    static std::string Format(const Config& config);
++
++    HostSerial();
++    ~HostSerial();
++    HostSerial(const HostSerial&) = delete;
++    HostSerial& operator=(const HostSerial&) = delete;
++
++    // Opens the endpoint and starts the worker. Off is accepted and opens nothing.
++    bool Start(PxaUart* uart, const Config& config, std::string& error);
++    // Detaches from the UART, stops the worker and closes every descriptor.
++    void Stop();
++    // Call between emulation slices: attaches when the UART is idle, updates
++    // modem inputs, drops received bytes while the guest receiver is off and
++    // wakes the UART when bytes are waiting.
++    void Service();
++
++    Config GetConfig() const;
++    bool Attached() const;
++    bool Connected() const;
++    std::string Endpoint() const;  // /dev/pts/N or 127.0.0.1:PORT; empty when off
++    std::string Describe() const;  // off, or kind, endpoint and peer state
++    Counters GetCounters() const;
++    size_t PendingReceive() const;
++    size_t PendingSend() const;
++
++   private:
++    struct Impl;
++    std::unique_ptr<Impl> impl;
++};
++#endif
++#endif
+diff --git a/src/uarm/uarm/pxa_UART.cpp b/src/uarm/uarm/pxa_UART.cpp
+index e899274..361c0b1 100644
+--- a/src/uarm/uarm/pxa_UART.cpp
++++ b/src/uarm/uarm/pxa_UART.cpp
+@@ -61,6 +61,7 @@ struct PxaUart {
+     PxaUartClientDetach detachF;
+     uint8_t modemInputs;               // live pin levels, not session state
+     unsigned ioCheckpoints;    // host-only nesting; never serialized
++    uint32_t disableCount;     // IER[UUE] clears seen, for host peers; never serialized
+ 
+     bool Paced() const { return fifoOccupancy && baseAddr != PXA_HWUART_BASE; }
+     uint32_t Divisor() const { return (uint32_t(DLH) << 8) | DLL; }
+@@ -395,6 +396,7 @@ static bool pxaUartPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size,
+                         t &= ~UART_IER_DMAE;  // undo the change
+                     }
+ 
++                    if ((t & UART_IER_UUE) && !(val & UART_IER_UUE)) ++uart->disableCount;
+                     uart->IER ^= t;
+                 }
+                 break;
+@@ -916,6 +918,17 @@ void pxaUartDmaEndOfChain(PxaUart* uart) {
+     pxaUartPrvRecalc(uart);
+ }
+ 
++bool pxaUartReceiverEnabled(const PxaUart* uart) {
++    return !uart->ioCheckpoints && uart->Clocked() && !uart->Loopback();
++}
++
++uint32_t pxaUartDisableCount(const PxaUart* uart) { return uart->disableCount; }
++
++void pxaUartKick(PxaUart* uart) {
++    if (pxaUartTaskRequired(uart))
++        uart->reschedule.rescheduleCb(uart->reschedule.ctx, RESCHEDULE_TASK_UART);
++}
++
+ bool pxaUartIrReceiveEnabled(const PxaUart *uart) {
+     return uart->Clocked() && (uart->ISR & 0x02);
+ }
+diff --git a/src/uarm/uarm/pxa_UART.h b/src/uarm/uarm/pxa_UART.h
+index e183b30..7d08c02 100644
+--- a/src/uarm/uarm/pxa_UART.h
++++ b/src/uarm/uarm/pxa_UART.h
+@@ -67,6 +67,11 @@ void pxaUartDetachExternal(PxaUart* uart);
+ bool pxaUartSetModemInputs(PxaUart* uart, uint8_t asserted);
+ uint8_t pxaUartGetModemOutputs(const PxaUart* uart);
+ void pxaUartResync(PxaUart* uart);
++// Live host peers: the receiver is clocked (IER[UUE] and a divisor), how often the
++// guest has turned the UART off, and a way to wake the UART task when bytes wait. Emulator-thread calls only.
++bool pxaUartReceiverEnabled(const PxaUart* uart);
++uint32_t pxaUartDisableCount(const PxaUart* uart);  // counts IER[UUE] clears; not saved
++void pxaUartKick(PxaUart* uart);
+ 
+ bool pxaUartIrReceiveEnabled(const PxaUart *uart);
+ 

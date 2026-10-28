@@ -27,6 +27,15 @@ TX images are limited to 32–128 MiB and must be aligned to 512-byte sectors.
 Inputs remain unchanged unless explicitly selected as an export destination.
 Sessions with embedded cards reject a conflicting `--sd` argument.
 
+Imported FAT12, FAT16 and FAT32 images work, with or without a partition table.
+On a FAT32 card made by `mkfs.fat`, Palm can read files but can't create them;
+the TX's FAT driver wants the root folder's FAT entry to be 0x0FFFFFFF.
+
+Ejecting the card or putting the Palm to sleep while an app is writing to it
+quickly can leave Palm's SD driver stuck in its write loop, and the Palm stops
+responding until it's reset. The card image stays intact. Sleep with the card
+idle, or with a file open and written now and then, works.
+
 Card-containing session files use format version 5; earlier sessions remain
 readable. New peripheral state may not be readable by older Frond builds. Copy
 important older sessions before opening them in a newer version.
@@ -170,7 +179,8 @@ sections 15.9.10 and 15.9.17–18: the partial-buffer register is recognized and
 PXA270 FIFO accesses transfer 1/2/4 bytes. PXA25x retains its existing byte-mode
 behaviour. The card supplies SD status and acknowledges DAT3 pull-up control;
 function switching is declined safely. DMA startup retains an already pending
-peripheral request. The model does not implement a full SD electrical bus,
+peripheral request. A removed card, data errors and illegal commands reach Palm's
+driver as status and interrupt bits, without a bus fault. The model does not implement a full SD electrical bus,
 SDHC/SDXC, arbitrary high-speed modes or an SDIO Wi-Fi card.
 
 ## Computer keyboard
@@ -236,6 +246,10 @@ own NetLib, TCP/IP stack and Wi-Fi configuration. This supports native ARM and
 68k applications without substituting a NetLib reference. Blazer can fetch HTTP
 pages through the simulated access point. Blazer's HTTPS only offers SSL 3.0
 with RC4, which current servers and OpenSSL refuse, so most HTTPS sites fail.
+Blazer doesn't report a refused or lost connection and stays on Sending.
+VersaMail also works. For Network HotSync, run pilot-link on the computer, for
+example `pilot-xfer -p net:127.0.0.1 -l`, and enter 10.0.2.2 as the PC address
+in the Palm's HotSync setup; searching the network for it doesn't work.
 
 The access point exists inside the emulator. No radio traffic is transmitted,
 and no host Wi-Fi adapter, TAP interface, bridge configuration or root access is
@@ -462,60 +476,102 @@ ABI/model regressions.
 The TX also uses Bluetooth accessories and phone/modem links, infrared beaming,
 USB/HotSync through its Multi-connector, SD/MMC/SDIO cards, and stereo headphones.
 See the [Palm TX user guide](https://palmdr.com/eBay%20Photos/tx_ug.pdf). Frond
-currently supplies virtual SD storage, audio and the infrared keyboard attachment.
-General infrared beaming, Bluetooth hardware emulation, USB/HotSync, host serial
-forwarding and arbitrary SDIO accessories remain unsupported. Serial and
-HotSync need end-to-end Palm transfer tests; register models alone do not
-establish a working external connection.
+currently supplies virtual SD storage, audio, the infrared keyboard attachment,
+the cradle serial port on a host PTY or a 127.0.0.1 TCP port and USB HotSync to
+the same kinds of endpoint. General infrared beaming, Bluetooth hardware
+emulation and arbitrary SDIO accessories remain unsupported. Serial HotSync over
+the host serial endpoint has not been tested.
 
-The [serial support and tests](tx-serial.md) covers the packed UART FIFO fix,
-remaining UART/USB blockers, firmware-free regressions and optional fresh-log
-Palm Serial Manager probe.
-It does not provide a host serial endpoint or working HotSync.
+The [serial support and tests](tx-serial.md) covers the UART model, the host
+endpoint, firmware-free regressions and the Palm Serial Manager probes.
 
-## USB controller foundation
+## USB HotSync
 
-USB enumeration and HotSync remain unsupported; there is no host USB endpoint.
-`0047-tx-usb.patch` adds bounded 16-byte EP0 transmit/receive storage, PIO word
-reads and word/byte/halfword writes, packet-ready/flush/receive-count semantics,
-write-one register acknowledgements, IRQ11 aggregation and configuration-register
-write protection. EP0 staging does not validate control-transfer phases, and loading a packet never
-completes a USB transaction by itself.
-These CPU-side rules follow the [Intel PXA27x Developer’s Manual, chapter 12](https://support.eurotech-inc.com/developers/datasheets/PXA270_DeveloperManual.pdf).
+`--usb pty` or `--usb tcp:PORT` plugs the TX into an emulated USB host and moves
+the bytes of its HotSync port to a host PTY or a TCP listener on 127.0.0.1, one
+client at a time. pilot-link and the like talk to it as they would to a serial
+cradle. It is off by default and needs a Palm TX. The desktop app has the same
+choice under **USB**.
 
-The bus/control-transfer sequencer, configuration validation/selection, endpoints
-A–X FIFOs, DMA, cable/OTG signalling and host transport are unimplemented.
-Unsupported FIFO accesses return a guest access failure instead of aborting the
-emulator. Empty EP0 reads and unused read lanes deterministically return zero;
-invalid/full/disabled FIFO accesses fail without consuming data. Narrow writes
-are intended only for the final partial word; this caller rule is not enforced.
+```sh
+out/frond session.frond --usb pty        # prints: usb: pty /dev/pts/N connected detached
+out/frond session.frond --usb tcp:5024   # prints: usb: tcp 127.0.0.1:5024 waiting detached
+pilot-xfer -p /dev/pts/N -l
+```
 
-Run `make test-pxa270-udc test-tx-state` (or `heavy build make ...` on shared hosts).
-Synthetic tests seed receive packets and pending IRQs directly; they do not
-exercise a USB host. The UDC state chunk is now version 1 and preserves EP0 bytes
-and positions. Version-0 sessions load with empty FIFOs and cleared stub-generated
-packet/IRQ state; interrupt masks and endpoint configuration survive. Older
-Frond binaries cannot load the new UDC chunk.
+The core prints each bus step as a `usb:` line. The desktop control commands are
+`usb-state` and `usb-mode off|pty|tcp:PORT`, and the core sends a `usb` event when
+the state changes. The state is the endpoint kind, the endpoint, `connected` or
+`waiting` for a client (a PTY always shows `connected`), and the bus phase: `detached`, `waiting` (for the TX to
+turn its UDC on), `connecting`, `resetting`, `enumerating`, `running` or `failed`.
 
-`0048-usb-enumeration.patch` adds TX-only internal probe access to the UDC and
-GPIO13 cable detector. It adds no production USB bus or host endpoint. The
-firmware-free `make test-usb-host-fixture` checks deterministic EP0 stimuli,
-FIFO/IRQ ordering and save/restore with a synthetic guest. The fixture seeds
-hardware-owned state directly; it does not implement wire timing or automatic
-standard requests.
+Open the HotSync app and tap the HotSync button (Local, Cradle/Cable), then run
+the pilot-link command. Each HotSync takes 15 to 20 seconds. Tested with
+pilot-link 0.15.1: `pilot-xfer -l`, `-f` (fetch), `-i` (install) and pilot-dlpsh
+`user`, `df` and `ls`. pilot-link only opens serial devices, so for TCP put a
+PTY in front of the port. A plain `socat` PTY relay doesn't work with it; the
+relay in `tools/probe-tx-usb-hotsync.py` does.
 
-An optional bounded firmware diagnostic reads a private, initialized TX session:
+How it works:
+
+- The host runs on the emulator thread on emulated time: a frame every 1 ms,
+  transactions kept inside frames, bus time for each packet and the USB connect,
+  reset and SET_ADDRESS delays.
+- The host sleeps between the events it needs: the next transaction, the connect
+  and reset delays, a SOF only if the TX has the SOF interrupt on, and any TX write
+  to the UDC. A NAKed token is tried again 10 us after the TX next writes to the
+  UDC, or in the next frame.
+- With the cable plugged in (GPIO13 low) the host waits for the TX to turn its
+  UDC on and then set the EP0 and reset interrupts, then resets it and reads
+  the device and configuration descriptors, sets address 2 and configuration 1.
+  A standard request that gets only NAKs for 100 ms has its SETUP sent again, as
+  the TX sometimes drops one while it starts HotSync.
+- It asks for the Palm port list with vendor request 0x04 (Get Extended
+  Connection Information), or 0x03 only when 0x04 stalls. The `cnys` (HotSync)
+  port is picked if listed, otherwise the first port. Outside HotSync the TX
+  lists `Grhc`; when HotSync starts it re-enumerates with `cnys` on IN 6 and
+  OUT 7. With no port listed the host asks again every second and sends no bulk
+  traffic.
+- The bytes on the bulk endpoints are passed through unchanged; pilot-link finds
+  the NET protocol on them by itself. IN tokens stop while the host side can't
+  take a full packet.
+- When the TX turns its UDC off, or off and on again, the host starts over.
+  Control requests that time out are retried a few times.
+- Nothing of the host is saved in a session. Loading or resetting unplugs the
+  cable and plugs it in again half a second later, so the TX enumerates again.
+  Switching the mode while running does the same. A database list or export
+  during HotSync leaves the cable in.
+- With USB off the cable stays in (GPIO13 low), as the TX had it before the
+  bridge, also for a session saved while the bridge had it out.
+
+Firmware-free tests:
+
+```sh
+heavy build make test-pxa270-udc test-usb-host-fixture test-usb-enumeration test-usb-bridge test-usb-bridge-soc
+```
+
+`test-usb-bridge` runs the host against a scripted TX: enumeration, the port
+list, flow control, a UDC toggle, detach, a late port list, the 0x03 fallback,
+a silent device, a UDC turned off and on, a lost SETUP, a slow vendor request
+and the PTY link. `test-usb-bridge-soc` runs the bridge on a TX without firmware:
+the cable on emulated time, sleeping, checkpoint restores, loads and USB off.
+
+With a private, initialized TX session:
 
 ```sh
 heavy build make test-tx-usb-rom
 heavy emulator ./build/test-tx-usb-rom /path/to/private-tx.frond
+python3 tools/probe-tx-usb-hotsync.py --session /path/to/private-tx.frond \
+  --install small.prc --output build/usb-hotsync
 ```
 
-It checks cable detection, programmed endpoint sizes, reset IRQ handling and
-queued-response persistence. Exit **2** reports the reproduced descriptor
-flush/IRQ-acknowledgement blocker; exit **1** reports unmet prerequisites or
-unexpected behavior. The test does not modify its input or save firmware data.
-Complete descriptor exchange, address assignment and configuration selection
-against Palm firmware remain unverified. Resolving packet/ACK timing and flush
-interactions requires further hardware evidence; no flushed data is retained to
-make the diagnostic pass.
+The probe runs HotSync five times by replaying taps on the HotSync button and
+runs list, fetch, install, list again and pilot-dlpsh, writing
+`usb-hotsync.json`. Add `--endpoint tcp` for the TCP listener. It doesn't
+change its input session.
+
+The UDC model follows the [Intel PXA27x Developer’s Manual, chapter 12](https://support.eurotech-inc.com/developers/datasheets/PXA270_DeveloperManual.pdf).
+With the UDC or an endpoint off, A-X FIFO reads return 0 and writes are ignored.
+There is no OTG, USB DMA or D+ pull-up model; the host takes "UDC on, then the
+EP0 and reset interrupts set" as the device being on the bus. Turning the UDC off
+leaves UDCICR as it was, so the host waits for a new UDCICR write.

@@ -73,6 +73,8 @@ def parser():
     p.add_argument('--command-timeout', type=positive, default=30, help='maximum time per socket command (default 30)')
     p.add_argument('--headless', action='store_true', help='use SDL dummy video/audio drivers')
     p.add_argument('--sound', action='store_true', help='enable sound (disabled by default)')
+    p.add_argument('--serial', metavar='off|pty|tcp:PORT', help='host serial endpoint for the core')
+    p.add_argument('--usb', metavar='off|pty|tcp:PORT', help='host endpoint for the USB HotSync port')
     return p
 
 
@@ -155,6 +157,8 @@ class Control:
                 fields = self.line(deadline)
                 if fields == ['0', 'event', 'close', '']:
                     raise RunError('closed', 'Palm window was closed during the run')
+                if fields[:3] in (['0', 'event', 'serial'], ['0', 'event', 'usb']):
+                    continue  # live serial/USB state, sent only with --serial/--usb
                 if len(fields) != 4 or fields[0] != str(self.serial) or fields[1] not in ('ok', 'error'):
                     raise RunError('protocol', f'Unexpected response: {fields!r}')
                 try:
@@ -298,6 +302,10 @@ def run(args):
                     str(root / 'core'), *boot, '--desktop-socket', address]
                 if not args.sound:
                     command.append('--no-sound')
+                if args.serial:
+                    command += ['--serial', args.serial]
+                if args.usb:
+                    command += ['--usb', args.usb]
                 result['command'] = command
                 env = dict(os.environ)
                 if args.headless:

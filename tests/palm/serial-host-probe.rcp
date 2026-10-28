@@ -1,0 +1,6 @@
+FORM ID 1000 AT (0 0 160 160) NOFRAME USABLE
+BEGIN
+ TITLE "Frond serial host probe"
+ LABEL "Results: FrondSerialHostLog" ID 1001 AT (5 30)
+ LABEL "Talks to the host serial peer" ID 1002 AT (5 50)
+END

@@ -15,6 +15,7 @@
 #include <QGroupBox>
 #include <QGuiApplication>
 #include <QScreen>
+#include <QSpinBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -108,6 +109,74 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     keyboard->setToolTip(tr("Uses the Palm Universal Wireless Keyboard protocol. Install and enable its Palm OS driver first. Type in the Palm window; modifiers and key releases are sent to the driver."));
     connect(keyboard,&QCheckBox::clicked,this,[this](bool attached) { send("keyboard-attach",attached?"on":"off"); });
     layout->addWidget(keyboard);
+    auto* serialRow = new QHBoxLayout;
+    serial = new QComboBox(root);
+    serial->setObjectName("serialMode");
+    serial->addItem(tr("Serial port: Off"), "off");
+    serial->addItem(tr("Serial port: PTY"), "pty");
+    serial->addItem(tr("Serial port: TCP on 127.0.0.1"), "tcp");
+    serialPort = new QSpinBox(root);
+    serialPort->setObjectName("serialPort");
+    serialPort->setRange(1, 65535);
+    serialPort->setPrefix(tr("Port "));
+    loadSerialSettings();
+    serialRow->addWidget(serial, 1);
+    serialRow->addWidget(serialPort);
+    layout->addLayout(serialRow);
+    serialState = new QLabel(root);
+    serialState->setObjectName("serialState");
+    serialState->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    layout->addWidget(serialState);
+    // While running, the choice is saved only once the core has opened it.
+    auto serialChanged = [this] {
+        if (client.running()) {
+            if (client.available()) send("serial-mode", serialArgument());
+            return;
+        }
+        settings.setValue("serialMode", serial->currentData());
+        settings.setValue("serialPort", serialPort->value());
+        refresh();
+    };
+    connect(serial, qOverload<int>(&QComboBox::activated), this, serialChanged);
+    connect(serialPort, &QSpinBox::editingFinished, this, [this, serialChanged] {
+        if (client.running() ? serial->currentData() == "tcp" : serialPort->value() != settings.value("serialPort", 5023).toInt())
+            serialChanged();
+    });
+    showSerial({});
+    auto* usbRow = new QHBoxLayout;
+    usb = new QComboBox(root);
+    usb->setObjectName("usbMode");
+    usb->addItem(tr("USB: Off"), "off");
+    usb->addItem(tr("USB: PTY"), "pty");
+    usb->addItem(tr("USB: TCP on 127.0.0.1"), "tcp");
+    usb->setToolTip(tr("Plugs the TX into a host that moves its HotSync bytes to a PTY or TCP port, for pilot-link and the like."));
+    usbPort = new QSpinBox(root);
+    usbPort->setObjectName("usbPort");
+    usbPort->setRange(1, 65535);
+    usbPort->setPrefix(tr("Port "));
+    loadUsbSettings();
+    usbRow->addWidget(usb, 1);
+    usbRow->addWidget(usbPort);
+    layout->addLayout(usbRow);
+    usbState = new QLabel(root);
+    usbState->setObjectName("usbState");
+    usbState->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    layout->addWidget(usbState);
+    auto usbChanged = [this] {
+        if (client.running()) {
+            if (client.available()) send("usb-mode", usbArgument());
+            return;
+        }
+        settings.setValue("usbMode", usb->currentData());
+        settings.setValue("usbPort", usbPort->value());
+        refresh();
+    };
+    connect(usb, qOverload<int>(&QComboBox::activated), this, usbChanged);
+    connect(usbPort, &QSpinBox::editingFinished, this, [this, usbChanged] {
+        if (client.running() ? usb->currentData() == "tcp" : usbPort->value() != settings.value("usbPort", 5024).toInt())
+            usbChanged();
+    });
+    showUsb({});
     auto* resume = new QCheckBox(tr("Resume last session on startup"), root);
     resume->setObjectName("resume");
     resume->setChecked(settings.value("resume", true).toBool());
@@ -232,16 +301,20 @@ MainWindow::MainWindow(const QString& core) : core(core) {
         if (exchangeDialog) exchangeDialog->reject();
         else endExchange();
         busy = false; stopping = false; cardPresent = cardInserted = false;
-        sdStatus->setText(tr("SD card: Not running")); sessionLock.reset(); forceButton->hide(); refresh(); open->setEnabled(true);
+        sdStatus->setText(tr("SD card: Not running")); showSerial({}); loadSerialSettings(); showUsb({}); loadUsbSettings(); sessionLock.reset(); forceButton->hide(); refresh(); open->setEnabled(true);
         if (closeAfterStop) { allowClose = true; close(); }
         else statusBar()->showMessage(tr("Stopped."));
     });
     connect(&client, &DesktopClient::closeRequested, this, [this] { stop(true); });
+    connect(&client, &DesktopClient::serialState, this, [this](const QString& state) { showSerial(state); });
+    connect(&client, &DesktopClient::usbState, this, [this](const QString& state) { showUsb(state); });
     connect(&client, &DesktopClient::result, this, [this](const QString& command, bool ok, const QString& code, const QString& message) {
         busy = false; forceButton->hide(); refresh();
         if (!ok && exchangeStage != ExchangeStage::None) { exchangeResult(false, message); return; }
         if (!ok) {
             log->appendPlainText(command + ": " + message);
+            if (command == "serial-mode") showSerial("off " + message);  // the core is now off
+            if (command == "usb-mode") showUsb("off " + message);
             if (stopping) {
                 if (command == "save" && savingPath == sessionPath) askStop(message);
                 else save();
@@ -262,8 +335,20 @@ MainWindow::MainWindow(const QString& core) : core(core) {
             if (index >= 0) network->setCurrentIndex(index);
         }
         if (command=="keyboard-state" || command=="keyboard-attach") keyboard->setChecked(message=="attached");
+        if (command == "serial-mode") {
+            settings.setValue("serialMode", serial->currentData());
+            if (serial->currentData() == "tcp") settings.setValue("serialPort", serialPort->value());
+        }
+        if (command == "serial-state" || command == "serial-mode") showSerial(message);
+        if (command == "usb-mode") {
+            settings.setValue("usbMode", usb->currentData());
+            if (usb->currentData() == "tcp") settings.setValue("usbPort", usbPort->value());
+        }
+        if (command == "usb-state" || command == "usb-mode") showUsb(message);
         refresh();
         if (command == "network-state" && !stopping) { send("keyboard-state"); return; }
+        if (command == "keyboard-state" && !stopping && serialArgument() != "off") { send("serial-state"); return; }
+        if ((command == "keyboard-state" || command == "serial-state") && !stopping && usbArgument() != "off") { send("usb-state"); return; }
         if (command == "sd-state" && !stopping) { send("network-state"); return; }
         statusBar()->showMessage(command == "sd-state" ? tr("Running. Sessions save automatically on close.") : message);
         const bool savedWorkingCopy = command == "save" && savingPath == sessionPath;
@@ -300,6 +385,11 @@ void MainWindow::refresh() {
     for (auto* action : runningActions) action->setEnabled(enabled);
     network->setEnabled(enabled);
     keyboard->setEnabled(enabled);
+    const bool serialEditable = !busy && !stopping && (!running || enabled);
+    serial->setEnabled(serialEditable);
+    serialPort->setEnabled(serialEditable && serial->currentData() == "tcp");
+    usb->setEnabled(serialEditable);
+    usbPort->setEnabled(serialEditable && usb->currentData() == "tcp");
     sdCreate->setEnabled(enabled && !cardInserted); sdImport->setEnabled(enabled && !cardInserted);
     sdEject->setEnabled(enabled && cardInserted); sdReinsert->setEnabled(enabled && cardPresent && !cardInserted);
     sdExport->setEnabled(enabled && cardPresent && !cardInserted);
@@ -343,6 +433,8 @@ void MainWindow::start() {
     if (!audio->isChecked()) arguments << "--no-sound";
     if (fastAudio->isChecked()) arguments << "--experimental-fast-audio";
     if (!doubleSize->isChecked()) arguments << "--small-window";
+    if (serialArgument() != "off") arguments << "--serial" << serialArgument();
+    if (usbArgument() != "off") arguments << "--usb" << usbArgument();
     sessionLock = std::make_unique<QLockFile>(sessionPath + ".lock");
     sessionLock->setStaleLockTime(0);
     if (!sessionLock->tryLock()) {
@@ -354,6 +446,60 @@ void MainWindow::start() {
     const bool launched = client.start(core, arguments);
     if (!launched) { busy = false; sessionLock.reset(); }
     refresh(); statusBar()->showMessage(launched ? tr("Starting Palm TX…") : tr("Could not start Palm TX."));
+}
+QString MainWindow::serialArgument() const {
+    const auto mode = serial->currentData().toString();
+    return mode == "tcp" ? "tcp:" + QString::number(serialPort->value()) : mode;
+}
+// Live readout of the core's serial-state reply: "off", "off <error>" or
+// "<pty|tcp> <endpoint> <connected|waiting>". Empty while no core is running.
+// While running, the mode and port follow what the core actually has open.
+void MainWindow::showSerial(const QString& state) {
+    const auto parts = state.split(' ');
+    if (!state.isEmpty()) {
+        serial->setCurrentIndex(std::max(0, serial->findData(parts[0])));
+        if (parts[0] == "tcp" && parts.size() > 1) {
+            const auto port = parts[1].section(':', -1).toInt();
+            if (port > 0) serialPort->setValue(port);
+        }
+        refresh();
+    }
+    if (state.isEmpty()) serialState->clear();
+    else if (parts[0] == "off") serialState->setText(parts.size() > 1 ? tr("Serial: off, %1").arg(state.mid(4)) : QString());
+    else if (parts.size() == 3)
+        serialState->setText(tr("Serial: %1, %2").arg(parts[1], parts[2] == "connected" ? tr("connected") : tr("waiting for a connection")));
+    else serialState->setText(tr("Serial: %1").arg(state));
+}
+void MainWindow::loadSerialSettings() {
+    serial->setCurrentIndex(std::max(0, serial->findData(settings.value("serialMode", "off").toString())));
+    serialPort->setValue(settings.value("serialPort", 5023).toInt());
+}
+QString MainWindow::usbArgument() const {
+    const auto mode = usb->currentData().toString();
+    return mode == "tcp" ? "tcp:" + QString::number(usbPort->value()) : mode;
+}
+// The core's usb-state reply: "off", "off <error>" or
+// "<pty|tcp> <endpoint> <connected|waiting> <bus phase>".
+void MainWindow::showUsb(const QString& state) {
+    const auto parts = state.split(' ');
+    if (!state.isEmpty()) {
+        usb->setCurrentIndex(std::max(0, usb->findData(parts[0])));
+        if (parts[0] == "tcp" && parts.size() > 1) {
+            const auto port = parts[1].section(':', -1).toInt();
+            if (port > 0) usbPort->setValue(port);
+        }
+        refresh();
+    }
+    if (state.isEmpty()) usbState->clear();
+    else if (parts[0] == "off") usbState->setText(parts.size() > 1 ? tr("USB: off, %1").arg(state.mid(4)) : QString());
+    else if (parts.size() == 4)
+        usbState->setText(tr("USB: %1, %2, %3").arg(parts[1], parts[2] == "connected" ? tr("connected") : tr("waiting for a connection"),
+                                                    parts[3] == "running" ? tr("TX enumerated") : tr("TX %1").arg(parts[3])));
+    else usbState->setText(tr("USB: %1").arg(state));
+}
+void MainWindow::loadUsbSettings() {
+    usb->setCurrentIndex(std::max(0, usb->findData(settings.value("usbMode", "off").toString())));
+    usbPort->setValue(settings.value("usbPort", 5024).toInt());
 }
 void MainWindow::remember(const QString& path) {
     auto list = settings.value("recentSessions").toStringList();

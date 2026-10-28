@@ -1,0 +1,1598 @@
+diff --git a/src/uarm/Makefile b/src/uarm/Makefile
+--- a/src/uarm/Makefile
++++ b/src/uarm/Makefile
+@@ -121,6 +121,8 @@ SOURCE_CXX =		 					\
+ 	uarm/LibertasCF.cpp \
+ 	uarm/HostNetwork.cpp			\
+ 	uarm/HostSerial.cpp			\
++	uarm/UsbBusHost.cpp			\
++	uarm/UsbHostBridge.cpp			\
+ 	uarm/NetworkSimulation.cpp			\
+ 	uarm/system_state.cpp
+ 
+diff --git a/src/uarm/native/Commands.h b/src/uarm/native/Commands.h
+--- a/src/uarm/native/Commands.h
++++ b/src/uarm/native/Commands.h
+@@ -12,6 +12,7 @@
+ #include "SoC.h"
+ 
+ class HostSerial;
++class UsbHostBridge;
+ struct PxaUart;
+ 
+ namespace commands {
+@@ -27,6 +28,8 @@ namespace commands {
+         HostSerial* serial{nullptr};      // live host endpoint, never session state
+         PxaUart* serialUart{nullptr};     // TX FFUART for serial-mode changes
+         std::string serialError{};        // why the last endpoint could not open
++        UsbHostBridge* usb{nullptr};      // live USB host bridge, never session state
++        std::string usbError{};           // why the last USB endpoint could not open
+     };
+ 
+     void Register();
+diff --git a/src/uarm/native/DesktopControl.h b/src/uarm/native/DesktopControl.h
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -13,6 +13,8 @@
+ #include "Commands.h"
+ #include "ReadOnlyGuest.h"
+ #include "HostSerial.h"
++#include "UsbHostBridge.h"
++#include "soc_PXA.h"
+ #include "native_boundary.h"
+ #include "CPU.h"
+ #include "SdImage.h"
+@@ -56,6 +58,13 @@ class DesktopControl {
+         lastSerial = state;
+         event("serial", state);
+     }
++    // Same for the USB bridge.
++    void usbChanged(commands::Context& ctx) {
++        const auto state = UsbState(ctx);
++        if (state == lastUsb || (state == "off" && lastUsb.empty())) return;
++        lastUsb = state;
++        event("usb", state);
++    }
+ 
+     bool poll(commands::Context& ctx) {
+         char data[4096];
+@@ -100,7 +109,12 @@ class DesktopControl {
+     }
+ 
+  private:
+-    std::string lastSerial;
++    std::string lastSerial, lastUsb;
++    static std::string UsbState(commands::Context& ctx) {
++        if (!ctx.usb) return "off";
++        const auto state = ctx.usb->Describe();
++        return state == "off" && !ctx.usbError.empty() ? "off " + ctx.usbError : state;
++    }
+     static std::string SerialState(commands::Context& ctx) {
+         if (!ctx.serial) return "off";
+         const auto state = ctx.serial->Describe();
+@@ -149,7 +163,7 @@ class DesktopControl {
+     Reply dispatch(commands::Context& ctx, const std::string& command, const std::string& path) {
+         const bool fileCommand = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "input-replay";
+         if (fileCommand && (path.empty() || path.front() != '/')) return {false, "argument", "An absolute file path is required."};
+-        if (!fileCommand && command != "sd-create" && command != "launch-app" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "serial-mode" && !path.empty()) return {false, "argument", "This command takes no argument."};
++        if (!fileCommand && command != "sd-create" && command != "launch-app" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "serial-mode" && command != "usb-mode" && !path.empty()) return {false, "argument", "This command takes no argument."};
+         if (command == "guest-ready") {
+             if (!GuestDatabaseOps::Ready(*ctx.soc))
+                 return {false, "not-ready", "Palm OS has not reached a supported application boundary."};
+@@ -198,6 +212,15 @@ class DesktopControl {
+             if (!ctx.serial->Start(ctx.serialUart, config, ctx.serialError)) return {false, "serial", ctx.serialError};
+             return {true, "serial", SerialState(ctx)};
+         }
++        if (command == "usb-state") return {true, "usb", UsbState(ctx)};
++        if (command == "usb-mode") {
++            HostSerial::Config config;
++            if (!ctx.usb || !HostSerial::Parse(path, config)) return {false, "argument", "Use off, pty or tcp:PORT."};
++            // A new endpoint unplugs the cable first; queued bytes are dropped.
++            ctx.usbError.clear();
++            if (!ctx.usb->Start(dynamic_cast<SocPXA*>(ctx.soc), config, ctx.usbError)) return {false, "usb", ctx.usbError};
++            return {true, "usb", UsbState(ctx)};
++        }
+         if (command == "network-state") return {true, "network", ctx.soc->networkSimulation.GetModeName()};
+         if (command == "network-mode") {
+             if (!ctx.soc->networkSimulation.SetMode(path)) return {false, "argument", "Unknown network mode."};
+diff --git a/src/uarm/native/main.cpp b/src/uarm/native/main.cpp
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -18,6 +18,7 @@
+ #include "DesktopControl.h"
+ #include "FileUtil.h"
+ #include "HostSerial.h"
++#include "UsbHostBridge.h"
+ #include "Logging.h"
+ #include "MainLoop.h"
+ #include "InputReplay.h"
+@@ -60,6 +61,7 @@ struct Options {
+     optional<string> inputReplay;
+     optional<string> desktopSocket;
+     optional<string> serial;
++    optional<string> usb;
+ };
+ 
+ namespace {
+@@ -244,6 +246,11 @@ namespace {
+             cerr << "--serial must be off, pty or tcp:PORT (PORT 0..65535)" << endl;
+             return false;
+         }
++        HostSerial::Config usbConfig;
++        if (options.usb && !HostSerial::Parse(*options.usb, usbConfig)) {
++            cerr << "--usb must be off, pty or tcp:PORT (PORT 0..65535)" << endl;
++            return false;
++        }
+         if (options.mips == 0) {
+             cerr << "MIPS must be finite" << endl;
+             return false;
+@@ -472,6 +479,19 @@ namespace {
+                 cerr << "serial: " << commandContext.serialError << endl;
+             cout << "serial: " << serial.Describe() << endl;
+         }
++        UsbHostBridge usb;
++        commandContext.usb = &usb;
++        if (usbConfig.kind != HostSerial::Kind::off) {
++            if (!isTx) {
++                cerr << "--usb needs a Palm TX" << endl;
++                return false;
++            }
++            if (!usb.Start(static_cast<SocPXA*>(soc), usbConfig, commandContext.usbError))
++                cerr << "usb: " << commandContext.usbError << endl;
++            cout << "usb: " << usb.Describe() << endl;
++        } else if (isTx) {
++            usb.Start(static_cast<SocPXA*>(soc), usbConfig, commandContext.usbError);  // off: cable as without USB
++        }
+ 
+         unique_ptr<DesktopControl> desktop;
+         if (options.desktopSocket) {
+@@ -524,8 +544,11 @@ namespace {
+                 if (waitForPreviewAudio && pending < 2048) waitForPreviewAudio = false;
+             } else waitForPreviewAudio = false;
+             serial.Service();
++            usb.Service();
+             mainLoop.Cycle(now, waitForAudio || waitForPreviewAudio);
+             serial.Service();
++            usb.Service();
++            for (const auto& message : usb.TakeMessages()) cout << message << endl;
+ 
+             sdlRenderer->Draw(sdlEventHandler.RedrawRequested(), sdlEventHandler.PressedButtons());
+             sdlEventHandler.ClearRedrawRequested();
+@@ -549,6 +572,7 @@ namespace {
+             }
+ 
+             if (desktop) desktop->serialChanged(commandContext);
++            if (desktop) desktop->usbChanged(commandContext);
+             if (desktop && desktop->poll(commandContext)) break;
+             if (!options.runFor && !desktop && cli::Execute(&commandContext)) break;
+ 
+@@ -570,6 +594,12 @@ namespace {
+         }
+ 
+         serial.Stop();
++        if (const auto* host = usb.Host()) {
++            const auto& c = host->GetCounters();
++            cout << "usb: " << c.ticks << " ticks, " << c.frames << " frames, " << c.transactions << " transactions, "
++                 << c.setupRetries << " SETUP retries" << endl;
++        }
++        usb.Stop();
+         audioDriver.Pause();
+         reportAudioUnderruns();
+         if (!options.runFor && !options.desktopSocket) cli::Stop();
+@@ -670,6 +700,11 @@ int main(int argc, char** argv) {
+               "(tcp:PORT, one client at a time); default off")
+         .metavar("<off|pty|tcp:PORT>");
+ 
++    program.add_argument("--usb")
++        .help("connect the TX USB HotSync port to a host PTY (pty) or a TCP listener on 127.0.0.1 "
++              "(tcp:PORT, one client at a time) through a built-in USB host; default off")
++        .metavar("<off|pty|tcp:PORT>");
++
+     program.add_argument("--script").help("execute script on startup").metavar("<script file>");
+ 
+     try {
+@@ -702,7 +737,8 @@ int main(int argc, char** argv) {
+                        .framebufferOutput = program.present("--framebuffer-output"),
+                        .inputReplay = program.present("--input-replay"),
+                        .desktopSocket = program.present("--desktop-socket"),
+-                       .serial = program.present("--serial")};
++                       .serial = program.present("--serial"),
++                       .usb = program.present("--usb")};
+ 
+     logEnable();
+ 
+diff --git a/src/uarm/uarm/HostSerial.cpp b/src/uarm/uarm/HostSerial.cpp
+--- a/src/uarm/uarm/HostSerial.cpp
++++ b/src/uarm/uarm/HostSerial.cpp
+@@ -305,36 +305,31 @@ std::string HostSerial::Format(const Config& config) {
+ HostSerial::HostSerial() : impl(std::make_unique<Impl>()) {}
+ HostSerial::~HostSerial() { Stop(); }
+ 
+-bool HostSerial::Start(PxaUart* uart, const Config& config, std::string& error) {
+-    Stop();
+-    if (config.kind == Kind::off) return true;
+-    if (!uart) {
+-        error = "This device has no serial port.";
+-        return false;
+-    }
+-    auto shared = std::make_shared<Shared>();
+-    shared->wake = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+-    if (shared->wake < 0) {
++namespace {
++// Opens a PTY master or a 127.0.0.1 listener and the worker's eventfd.
++bool openEndpoint(const HostSerial::Config& config, Shared& shared, int& fd, std::string& endpoint,
++                  uint16_t& port, std::string& error) {
++    shared.wake = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
++    if (shared.wake < 0) {
+         error = std::string("eventfd: ") + strerror(errno);
+         return false;
+     }
+-    int fd = -1;
+-    std::string endpoint;
+-    uint16_t port = config.port;
+-    if (config.kind == Kind::pty) {
++    fd = -1;
++    port = config.port;
++    if (config.kind == HostSerial::Kind::pty) {
+         fd = posix_openpt(O_RDWR | O_NOCTTY);
+         const char* name = fd >= 0 && grantpt(fd) == 0 && unlockpt(fd) == 0 ? ptsname(fd) : nullptr;
+         termios raw{};
+         if (!name || !nonblocking(fd) || tcgetattr(fd, &raw) != 0) {
+             error = std::string("Could not open a PTY: ") + strerror(errno);
+             closeFd(fd);
+-            close(shared->wake);
++            closeFd(shared.wake);
+             return false;
+         }
+         cfmakeraw(&raw);
+         tcsetattr(fd, TCSANOW, &raw);
+         endpoint = name;
+-        shared->connected = true;
++        shared.connected = true;
+     } else {
+         fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+         const int on = 1;
+@@ -348,12 +343,28 @@ bool HostSerial::Start(PxaUart* uart, const Config& config, std::string& error)
+             getsockname(fd, reinterpret_cast<sockaddr*>(&address), &length) != 0) {
+             error = "Could not listen on 127.0.0.1:" + std::to_string(config.port) + ": " + strerror(errno);
+             closeFd(fd);
+-            close(shared->wake);
++            closeFd(shared.wake);
+             return false;
+         }
+         port = ntohs(address.sin_port);
+         endpoint = "127.0.0.1:" + std::to_string(port);
+     }
++    return true;
++}
++}  // namespace
++
++bool HostSerial::Start(PxaUart* uart, const Config& config, std::string& error) {
++    Stop();
++    if (config.kind == Kind::off) return true;
++    if (!uart) {
++        error = "This device has no serial port.";
++        return false;
++    }
++    auto shared = std::make_shared<Shared>();
++    int fd = -1;
++    std::string endpoint;
++    uint16_t port = 0;
++    if (!openEndpoint(config, *shared, fd, endpoint, port, error)) return false;
+     impl->config = {config.kind, port};
+     impl->uart = uart;
+     impl->shared = shared;
+@@ -432,4 +443,110 @@ HostSerial::Counters HostSerial::GetCounters() const {
+ }
+ size_t HostSerial::PendingReceive() const { return impl->shared ? impl->shared->rxSize.load() : 0; }
+ size_t HostSerial::PendingSend() const { return impl->shared ? impl->shared->txSize.load() : 0; }
++
++struct HostByteLink::Impl {
++    HostSerial::Config config;
++    std::shared_ptr<Shared> shared;
++    std::thread worker;
++    int fd{-1};
++    std::string endpoint;
++};
++
++HostByteLink::HostByteLink() : impl(std::make_unique<Impl>()) {}
++HostByteLink::~HostByteLink() { Close(); }
++
++bool HostByteLink::Open(const HostSerial::Config& config, std::string& error) {
++    Close();
++    if (config.kind == HostSerial::Kind::off) return true;
++    auto shared = std::make_shared<Shared>();
++    int fd = -1;
++    std::string endpoint;
++    uint16_t port = 0;
++    if (!openEndpoint(config, *shared, fd, endpoint, port, error)) return false;
++    impl->config = {config.kind, port};
++    impl->shared = shared;
++    impl->fd = fd;
++    impl->endpoint = endpoint;
++    impl->worker = config.kind == HostSerial::Kind::pty ? std::thread(ptyWorker, shared, fd)
++                                                       : std::thread(tcpWorker, shared, fd);
++    return true;
++}
++
++void HostByteLink::Close() {
++    if (!impl->shared) return;
++    impl->shared->stop = true;
++    impl->shared->Wake();
++    if (impl->worker.joinable()) impl->worker.join();
++    closeFd(impl->fd);
++    close(impl->shared->wake);
++    impl->shared.reset();
++    impl->config = {};
++    impl->endpoint.clear();
++}
++
++bool HostByteLink::IsOpen() const { return bool(impl->shared); }
++bool HostByteLink::Connected() const { return impl->shared && impl->shared->connected; }
++HostSerial::Config HostByteLink::GetConfig() const { return impl->config; }
++std::string HostByteLink::Endpoint() const { return impl->endpoint; }
++
++size_t HostByteLink::Receive(uint8_t* out, size_t max) {
++    auto* s = impl->shared.get();
++    if (!s || !s->rxSize.load(std::memory_order_relaxed)) return 0;
++    size_t count, left;
++    {
++        std::lock_guard lock(s->mutex);
++        count = std::min(max, s->rx.size());
++        std::copy(s->rx.begin(), s->rx.begin() + count, out);
++        s->rx.erase(s->rx.begin(), s->rx.begin() + count);
++        left = s->rxSize = s->rx.size();
++    }
++    // The worker stopped reading the host while the queue was full.
++    if (count && left + count >= HostSerial::queueBytes / 2 && left < HostSerial::queueBytes / 2) s->Wake();
++    return count;
++}
++
++size_t HostByteLink::SendSpace() const {
++    auto* s = impl->shared.get();
++    if (!s || !s->connected) return 0;
++    return HostSerial::queueBytes - std::min(HostSerial::queueBytes, s->txSize.load());
++}
++
++size_t HostByteLink::Send(const uint8_t* data, size_t size) {
++    auto* s = impl->shared.get();
++    if (!s || !s->connected) return 0;
++    bool wasEmpty;
++    size_t count;
++    {
++        std::lock_guard lock(s->mutex);
++        count = std::min(size, HostSerial::queueBytes - std::min(HostSerial::queueBytes, s->tx.size()));
++        wasEmpty = s->tx.empty();
++        s->tx.insert(s->tx.end(), data, data + count);
++        s->txSize = s->tx.size();
++    }
++    if (wasEmpty && count) s->Wake();
++    return count;
++}
++
++void HostByteLink::Clear() {
++    auto* s = impl->shared.get();
++    if (!s) return;
++    bool wasFull;
++    {
++        std::lock_guard lock(s->mutex);
++        wasFull = s->rx.size() >= HostSerial::queueBytes / 2;
++        s->rxDiscarded += s->rx.size();
++        s->rx.clear();
++        s->rxSize = 0;
++        s->ClearTx();
++    }
++    if (wasFull) s->Wake();
++}
++
++size_t HostByteLink::PendingReceive() const { return impl->shared ? impl->shared->rxSize.load() : 0; }
++size_t HostByteLink::PendingSend() const { return impl->shared ? impl->shared->txSize.load() : 0; }
++HostSerial::Counters HostByteLink::GetCounters() const {
++    if (!impl->shared) return {};
++    auto& s = *impl->shared;
++    return {s.received, s.sent, s.rxDiscarded, s.txDropped};
++}
+ #endif
+diff --git a/src/uarm/uarm/HostSerial.h b/src/uarm/uarm/HostSerial.h
+--- a/src/uarm/uarm/HostSerial.h
++++ b/src/uarm/uarm/HostSerial.h
+@@ -57,5 +57,38 @@ class HostSerial {
+     struct Impl;
+     std::unique_ptr<Impl> impl;
+ };
++
++// Byte pipe to a host PTY or a TCP listener on 127.0.0.1, the same endpoints and
++// worker as HostSerial, for a device model other than the UART (the USB serial
++// bridge). Every method runs on the emulator thread.
++class HostByteLink {
++   public:
++    HostByteLink();
++    ~HostByteLink();
++    HostByteLink(const HostByteLink&) = delete;
++    HostByteLink& operator=(const HostByteLink&) = delete;
++
++    bool Open(const HostSerial::Config& config, std::string& error);  // off opens nothing
++    void Close();
++    bool IsOpen() const;
++    bool Connected() const;
++    HostSerial::Config GetConfig() const;
++    std::string Endpoint() const;
++    // Host to guest: takes up to max bytes.
++    size_t Receive(uint8_t* out, size_t max);
++    // Guest to host: room left in the send queue, 0 without a peer.
++    size_t SendSpace() const;
++    // Queues up to SendSpace() bytes and returns how many were taken.
++    size_t Send(const uint8_t* data, size_t size);
++    // Drops both queues.
++    void Clear();
++    size_t PendingReceive() const;
++    size_t PendingSend() const;
++    HostSerial::Counters GetCounters() const;
++
++   private:
++    struct Impl;
++    std::unique_ptr<Impl> impl;
++};
+ #endif
+ #endif
+diff --git a/src/uarm/uarm/SoC.h b/src/uarm/uarm/SoC.h
+--- a/src/uarm/uarm/SoC.h
++++ b/src/uarm/uarm/SoC.h
+@@ -134,6 +134,8 @@ class SoC {
+     // care of in soc_generic.h
+     virtual std::function<void()> CapturePeripheralInput() { return [] {}; }
+     virtual void BeforeStateReplacement() {}
++    // After a reset, or a load that succeeded.
++    virtual void StateReplaced() {}
+     virtual void BeginSerialCheckpoint() {}
+     virtual void EndSerialCheckpoint() {}
+     virtual void OnSetFramebufferDirty() = 0;
+diff --git a/src/uarm/uarm/UsbBusHost.cpp b/src/uarm/uarm/UsbBusHost.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/uarm/uarm/UsbBusHost.cpp
+@@ -0,0 +1,493 @@
++#include "UsbBusHost.h"
++
++#include <algorithm>
++#include <cstdio>
++#include <cstring>
++
++using R = Pxa270UdcHostResult;
++
++namespace {
++// Full-speed bit times: 12 Mbit/s.
++uint64_t bitsNs(uint64_t bits) { return (bits * 1000 + 11) / 12; }
++// Token (SYNC, PID, ADDR, ENDP, CRC5: 32), DATAx (SYNC, PID, CRC16: 32 + 8 * bytes),
++// handshake (16), a 2-bit EOP after each packet and two 2-bit inter-packet gaps.
++uint64_t transactionBits(unsigned bytes) { return 32 + 32 + 8ull * bytes + 16 + 3 * 2 + 2 * 2; }
++constexpr uint64_t nakBits = 32 + 16 + 2 * 2 + 2;  // token, NAK/STALL handshake
++constexpr uint64_t timeoutBits = 32 + 2 + 18;      // token, bus turnaround timeout
++constexpr uint64_t sofBits = 32 + 2;
++constexpr uint64_t eofGuardNs = 50000;             // keep clear of the frame end
++
++std::string hex4(uint16_t value) {
++    char text[8];
++    std::snprintf(text, sizeof(text), "%04x", value);
++    return text;
++}
++std::string printable(const uint8_t* bytes, size_t size) {
++    std::string text;
++    for (size_t i = 0; i < size; ++i) text += bytes[i] >= 0x20 && bytes[i] < 0x7f ? char(bytes[i]) : '.';
++    return text;
++}
++}  // namespace
++
++UsbBusHost::UsbBusHost(std::function<Pxa270Udc*()> udc, Link link) : udc(std::move(udc)), link(std::move(link)) {}
++
++const char* UsbBusHost::PhaseName(Phase phase) {
++    switch (phase) {
++        case Phase::detached: return "detached";
++        case Phase::waitEnable: return "waiting";
++        case Phase::connect: return "connecting";
++        case Phase::reset: return "resetting";
++        case Phase::enumerate: return "enumerating";
++        case Phase::running: return "running";
++        case Phase::failed: return "failed";
++    }
++    return "?";
++}
++
++void UsbBusHost::Message(const std::string& text) {
++    if (messages.size() < 64) messages.push_back(text);
++}
++
++void UsbBusHost::Attach() {
++    if (phase != Phase::detached && phase != Phase::failed) return;
++    Detach();
++    phase = Phase::waitEnable;
++    poked = true;  // look at the UDC on the next tick
++}
++
++void UsbBusHost::Detach() {
++    phase = Phase::detached;
++    inFlight = Token::none;
++    control = {};
++    sofRunning = false;
++    address = pendingAddress = 0;
++    attempts = 0;
++    outPending = clearHalt = false;
++    outSize = 0;
++    bulkTimeouts = 0;
++    retryAt = busyUntil = lastControlEnd = requeryAt = 0;
++    poked = waitSpace = false;
++    step = 0;
++    inEndpoint = outEndpoint = 0;
++    portFunction.clear();
++}
++
++uint64_t UsbBusHost::NextWake() const {
++    if (phase == Phase::detached || phase == Phase::failed) return UINT64_MAX;
++    if (poked) return 0;
++    if (phase == Phase::waitEnable) return UINT64_MAX;  // the UDE and UDCICR writes poke
++    if (phase == Phase::connect || phase == Phase::reset) return phaseAt;
++    uint64_t wake = inFlight != Token::none ? busyUntil : retryAt;
++    if (pendingAddress) wake = std::min(wake, addressAt);
++    auto* u = udc();
++    if (sofRunning && u && pxa270UdcHostSofWanted(u)) wake = std::min(wake, nextSof);
++    return wake;
++}
++
++bool UsbBusHost::LinkWaiting() const {
++    if (phase != Phase::running || !inEndpoint || inFlight != Token::none || control.active || poked) return false;
++    return (!outPending && link.pending && link.pending()) || (waitSpace && link.sendSpace && link.sendSpace() >= 64);
++}
++
++// A NAK, or nothing to send: try again 10 us after the guest next touches the UDC
++// (Poke), or once the next frame has started.
++void UsbBusHost::Nak() {
++    nakAt = now;
++    retryAt = std::max(now + nakRetryNs, nextSof + bitsNs(sofBits));
++}
++
++bool UsbBusHost::Addressed() { return pxa270UdcHostAddress(udc()) == address; }
++
++// Enumeration failed: reset the port and start again a little later, a few times.
++void UsbBusHost::Restart(const char* why) {
++    Message(std::string("usb: ") + why);
++    inFlight = Token::none;
++    control = {};
++    sofRunning = false;
++    outPending = clearHalt = false;
++    if (++attempts >= maxAttempts) {
++        phase = Phase::failed;
++        Message("usb: gave up; unplug and plug in again to retry");
++        return;
++    }
++    phase = Phase::connect;
++    phaseAt = now + retryNs;
++}
++
++void UsbBusHost::StartControl(uint8_t type, uint8_t request, uint16_t value, uint16_t index, uint16_t length) {
++    control = {};
++    control.active = true;
++    const uint8_t setup[8] = {type, request, uint8_t(value), uint8_t(value >> 8), uint8_t(index),
++                              uint8_t(index >> 8), uint8_t(length), uint8_t(length >> 8)};
++    std::memcpy(control.setup, setup, 8);
++    // After a SOF, at least 1 ms after the previous transfer (and the address recovery).
++    uint64_t earliest = std::max(lastControlEnd + frameNs, now + 1);
++    if (pendingAddress) earliest = std::max(earliest, addressAt);
++    control.startAt = (earliest + frameNs - 1) / frameNs * frameNs;
++    control.deadline = control.startAt + controlTimeoutNs;
++}
++
++void UsbBusHost::ControlDone(Result result) {
++    control.active = false;
++    lastControlEnd = now;
++    if (phase == Phase::enumerate || (step >= 6 && !inEndpoint)) return EnumerationStep(result);
++    if (clearHalt) {
++        clearHalt = false;
++        if (result != Result::ok) Restart("could not clear a halted endpoint");
++    }
++}
++
++void UsbBusHost::EnumerationStep(Result result) {
++    const auto& d = control.data;
++    auto fail = [&](const char* what) {
++        Restart((std::string(what) + (result == Result::stall ? " stalled" :
++                                      result == Result::timeout ? " timed out" : " failed")).c_str());
++    };
++    switch (step) {
++        case 0:  // GET_DESCRIPTOR(device, 8) at address 0
++            if (result != Result::ok || d.size() < 8 ||
++                (d[7] != 8 && d[7] != 16 && d[7] != 32 && d[7] != 64))
++                return fail("device descriptor");
++            maxPacket0 = d[7];
++            step = 1;
++            return StartControl(0x00, 5, deviceAddress, 0, 0);
++        case 1:  // SET_ADDRESS, then 2 ms recovery (USB 2.0 9.2.6.3)
++            if (result != Result::ok) return fail("SET_ADDRESS");
++            pendingAddress = deviceAddress;
++            addressAt = now + 2 * frameNs;
++            step = 2;
++            return StartControl(0x80, 6, 0x0100, 0, 18);
++        case 2:
++            if (result != Result::ok || d.size() < 18) return fail("device descriptor");
++            vendor = uint16_t(d[8] | d[9] << 8);
++            product = uint16_t(d[10] | d[11] << 8);
++            step = 3;
++            return StartControl(0x80, 6, 0x0200, 0, 9);
++        case 3:
++            if (result != Result::ok || d.size() < 9) return fail("configuration descriptor");
++            configLength = uint16_t(d[2] | d[3] << 8);
++            configuration = d[5];
++            if (configLength < 9) return fail("configuration descriptor");
++            step = 4;
++            return StartControl(0x80, 6, 0x0200, 0, configLength);
++        case 4:
++            if (result != Result::ok || d.size() < 9) return fail("configuration descriptor");
++            step = 5;
++            return StartControl(0x00, 9, configuration, 0, 0);
++        case 5:
++            if (result != Result::ok) return fail("SET_CONFIGURATION");
++            step = 6;
++            // GET_EXT_CONNECTION_INFORMATION, as pilot-link and the Linux visor driver ask.
++            return StartControl(0xc2, 4, 0, 0, 20);
++        case 6:
++            inEndpoint = outEndpoint = 0;
++            portFunction.clear();
++            if (result == Result::ok && d.size() >= 12 && d[0]) {
++                // num_ports, endpoint_numbers_different, 2 reserved, then 8 bytes per port:
++                // function id (4), port, endpoint info (IN << 4 | OUT), 2 reserved.
++                const unsigned ports = std::min<unsigned>(d[0], unsigned((d.size() - 4) / 8));
++                unsigned chosen = 0;
++                for (unsigned i = 0; i < ports; ++i)
++                    if (!std::memcmp(&d[4 + 8 * i], "cnys", 4)) chosen = i;
++                const uint8_t* port = &d[4 + 8 * chosen];
++                portFunction = printable(port, 4);
++                inEndpoint = d[1] ? port[5] >> 4 : port[4];
++                outEndpoint = d[1] ? port[5] & 15 : port[4];
++            } else if (result == Result::stall) {
++                step = 7;
++                // GET_CONNECTION_INFORMATION (Visor, Palm OS 3): pick the HotSync port.
++                return StartControl(0xc2, 3, 0, 0, 18);
++            }
++            break;
++        case 7:
++            if (result == Result::ok && d.size() >= 4) {
++                const unsigned ports = std::min<unsigned>(d[0] | d[1] << 8, unsigned((d.size() - 2) / 2));
++                for (unsigned i = 0; i < ports; ++i)
++                    if (d[2 + 2 * i] == 2) {
++                        portFunction = "hotsync";
++                        inEndpoint = outEndpoint = d[3 + 2 * i];
++                    }
++            }
++            break;
++    }
++    const bool wasRunning = phase == Phase::running;
++    phase = Phase::running;
++    attempts = 0;
++    // No port named yet (the TX lists none outside HotSync at times): ask again each
++    // second. The bulk endpoints are never guessed; the TX ROM faults on OUT data to an
++    // endpoint it has not set up.
++    if (!inEndpoint || !outEndpoint) {
++        inEndpoint = outEndpoint = 0;
++        requeryAt = now + 1000 * frameNs;
++        if (!wasRunning) {
++            ++counters.enumerations;
++            Message("usb: enumerated " + hex4(vendor) + ":" + hex4(product) + ", no HotSync port yet");
++        }
++        return;
++    }
++    if (!wasRunning) ++counters.enumerations;
++    Message("usb: enumerated " + hex4(vendor) + ":" + hex4(product) + ", port " +
++            (portFunction.empty() ? std::string("(none)") : "'" + portFunction + "'") + " IN " +
++            std::to_string(inEndpoint) + " OUT " + std::to_string(outEndpoint));
++}
++
++// Reserves bus time for a transaction of `bits`, handshake included.
++// False if it would not fit in what is left of this frame.
++bool UsbBusHost::Begin(Token token, unsigned bits) {
++    const uint64_t ns = bitsNs(bits);
++    if (now < lastSof + bitsNs(sofBits)) {
++        retryAt = lastSof + bitsNs(sofBits);
++        return false;
++    }
++    if (now % frameNs + ns + eofGuardNs > frameNs) {
++        retryAt = nextSof + bitsNs(sofBits);
++        return false;
++    }
++    inFlight = token;
++    busyUntil = now + ns;
++    if (log) log->push_back({now, now + ns});
++    ++counters.transactions;
++    return true;
++}
++
++bool UsbBusHost::StartTransaction() {
++    auto* u = udc();
++    if (control.active) {
++        if (now < control.startAt) {
++            retryAt = control.startAt;
++            return false;
++        }
++        if (now > control.deadline) {
++            ControlDone(Result::timeout);
++            return false;
++        }
++        switch (control.stage) {
++            case Stage::setup: return Begin(Token::setup, unsigned(transactionBits(8)));
++            case Stage::dataOut: {
++                const unsigned length = control.setup[6] | control.setup[7] << 8;
++                return Begin(Token::out0, unsigned(transactionBits(std::min<unsigned>(maxPacket0, length - unsigned(control.sent)))));
++            }
++            case Stage::statusOut: return Begin(Token::out0, unsigned(transactionBits(0)));
++            case Stage::dataIn:
++            case Stage::statusIn: {
++                if (!Addressed()) return Begin(Token::in0, unsigned(timeoutBits));
++                unsigned size = 0;
++                const R r = pxa270UdcHostPeekIn(u, 0, &size);
++                return Begin(Token::in0, unsigned(r == R::Ack ? transactionBits(size) : nakBits));
++            }
++        }
++        return false;
++    }
++    if (phase != Phase::running) return false;
++    if (!inEndpoint) {
++        if (now < requeryAt) {
++            retryAt = requeryAt;
++            return false;
++        }
++        step = 6;
++        StartControl(0xc2, 4, 0, 0, 20);
++        return false;
++    }
++    if (clearHalt) {
++        StartControl(0x02, 1, 0, haltedEndpoint, 0);
++        return false;
++    }
++    if (!outPending && link.receive) {
++        outSize = unsigned(link.receive(outPacket, 64));
++        outPending = outSize != 0;
++    }
++    const bool wantIn = link.sendSpace && link.sendSpace() >= 64;
++    if (outPending && (preferOut || !wantIn)) {
++        preferOut = false;
++        inFlightEndpoint = outEndpoint;
++        return Begin(Token::bulkOut, unsigned(Addressed() ? transactionBits(outSize) : timeoutBits));
++    }
++    preferOut = true;
++    waitSpace = !wantIn;
++    if (!wantIn) {
++        Nak();  // Service pokes once the host side has room or bytes
++        return false;
++    }
++    inFlightEndpoint = uint8_t(0x80 | inEndpoint);
++    if (!Addressed()) return Begin(Token::bulkIn, unsigned(timeoutBits));
++    unsigned size = 0;
++    const R r = pxa270UdcHostPeekIn(u, inFlightEndpoint, &size);
++    return Begin(Token::bulkIn, unsigned(r == R::Ack ? transactionBits(size) : r == R::Timeout ? timeoutBits : nakBits));
++}
++
++void UsbBusHost::FinishTransaction() {
++    auto* u = udc();
++    const Token token = inFlight;
++    inFlight = Token::none;
++    const bool addressed = Addressed();
++    auto nak = [&] {
++        ++counters.naks;
++        Nak();
++        // Nothing but NAKs on a standard request for a while: the device may have missed
++        // the SETUP. Vendor requests (the Palm port list) can take a TX several hundred
++        // ms, and a new SETUP would start them over.
++        if (control.active && control.stage != Stage::setup && !(control.setup[0] & 0x60) &&
++            now >= control.setupAt + setupRetryNs) {
++            ++counters.setupRetries;
++            char text[96];
++            std::snprintf(text, sizeof(text), "usb: no answer on EP0 to %02x/%02x %ums after its SETUP, sending it again",
++                          control.setup[0], control.setup[1], unsigned((now - control.setupAt) / frameNs));
++            Message(text);
++            control.stage = Stage::setup;
++            control.data.clear();
++            control.sent = 0;
++        }
++    };
++    switch (token) {
++        case Token::none: return;
++        case Token::setup: {
++            if (!addressed) return ControlDone(Result::timeout);
++            const R r = pxa270UdcHostSetup(u, control.setup);
++            if (r != R::Ack) return ControlDone(Result::error);
++            control.setupAt = now;
++            const unsigned length = control.setup[6] | control.setup[7] << 8;
++            control.stage = (control.setup[0] & 0x80) ? (length ? Stage::dataIn : Stage::statusIn)
++                                                      : (length ? Stage::dataOut : Stage::statusIn);
++            return;
++        }
++        case Token::out0: {
++            if (!addressed) return ControlDone(Result::timeout);
++            const bool status = control.stage == Stage::statusOut;
++            const unsigned length = control.setup[6] | control.setup[7] << 8;
++            const unsigned n = status ? 0 : std::min<unsigned>(maxPacket0, length - unsigned(control.sent));
++            const R r = pxa270UdcHostOut(u, status ? nullptr : control.out.data() + control.sent, n);
++            if (r == R::Nak) return nak();
++            if (r == R::Stall) return ControlDone(Result::stall);
++            if (r != R::Ack) return ControlDone(Result::error);
++            if (status) return ControlDone(Result::ok);
++            control.sent += n;
++            if (control.sent >= length) control.stage = Stage::statusIn;
++            return;
++        }
++        case Token::in0: {
++            if (!addressed) return ControlDone(Result::timeout);
++            unsigned size = 0;
++            R r = pxa270UdcHostPeekIn(u, 0, &size);
++            uint8_t data[64];
++            if (r == R::Nak) return nak();
++            r = pxa270UdcHostIn(u, data, &size);  // ACK, or the STALL handshake
++            if (r == R::Nak) return nak();
++            if (r == R::Stall) return ControlDone(Result::stall);
++            if (r != R::Ack) return ControlDone(Result::error);
++            if (control.stage == Stage::statusIn) return ControlDone(size ? Result::error : Result::ok);
++            const unsigned length = control.setup[6] | control.setup[7] << 8;
++            control.data.insert(control.data.end(), data, data + size);
++            if (control.data.size() > length) return ControlDone(Result::error);
++            if (size < maxPacket0 || control.data.size() == length) control.stage = Stage::statusOut;
++            return;
++        }
++        case Token::bulkIn: {
++            uint8_t data[64];
++            unsigned size = 0;
++            const R r = addressed ? pxa270UdcHostEpIn(u, inFlightEndpoint, data, &size) : R::Timeout;
++            if (r == R::Ack) {
++                bulkTimeouts = 0;
++                if (size) link.send(data, size);
++                counters.bytesIn += size;
++                return;
++            }
++            if (r == R::Nak) return nak();
++            if (r == R::Stall) {
++                clearHalt = true;
++                haltedEndpoint = inFlightEndpoint;
++                return;
++            }
++            if (++bulkTimeouts >= 100) Restart("the bulk IN endpoint stopped answering");
++            else retryAt = now + nakRetryNs;
++            return;
++        }
++        case Token::bulkOut: {
++            const R r = addressed ? pxa270UdcHostEpOut(u, inFlightEndpoint, outPacket, outSize) : R::Timeout;
++            if (r == R::Ack) {
++                bulkTimeouts = 0;
++                outPending = false;
++                counters.bytesOut += outSize;
++                return;
++            }
++            if (r == R::Nak) return nak();
++            if (r == R::Stall) {
++                clearHalt = true;
++                haltedEndpoint = inFlightEndpoint;
++                return;
++            }
++            if (++bulkTimeouts >= 100) Restart("the bulk OUT endpoint stopped answering");
++            else retryAt = now + nakRetryNs;
++            return;
++        }
++    }
++}
++
++void UsbBusHost::Tick(uint64_t nowNs) {
++    now = nowNs;
++    ++counters.ticks;
++    if (poked) {
++        poked = false;
++        if (retryAt > now) retryAt = std::max(now, nakAt + nakRetryNs);
++    }
++    if (phase == Phase::detached || phase == Phase::failed) return;
++    auto* u = udc();
++    if (!u) return;
++    // On the bus: the device listens for a reset and EP0 (see pxa270UdcHostListening).
++    const bool present = pxa270UdcHostListening(u);
++    const bool reconnected = phase != Phase::waitEnable && pxa270UdcHostEnableCount(u) != enableCount;
++    if (!present || reconnected) {
++        if (phase != Phase::waitEnable) {
++            Message(present ? "usb: the TX left the bus and came back" : "usb: the TX left the bus; waiting");
++            Detach();
++            phase = Phase::waitEnable;
++        }
++        if (!present) return;
++    }
++    switch (phase) {
++        case Phase::waitEnable:
++            enableCount = pxa270UdcHostEnableCount(u);
++            phase = Phase::connect;
++            phaseAt = now + connectNs;
++            return;
++        case Phase::connect:
++            if (now < phaseAt) return;
++            // Port reset: the UDC drops its address and configuration at once; the host
++            // waits out the reset and recovery before its first SETUP.
++            if (!pxa270UdcHostReset(u)) return;
++            address = pendingAddress = 0;
++            maxPacket0 = 8;
++            phase = Phase::reset;
++            phaseAt = now + resetNs;
++            sofRunning = true;
++            lastSof = now / frameNs * frameNs;
++            nextSof = lastSof + frameNs;
++            retryAt = 0;
++            return;
++        default: break;
++    }
++    if (inFlight != Token::none && now >= busyUntil) FinishTransaction();
++    if (!Running()) return;  // a restart from FinishTransaction
++    if (sofRunning && now >= nextSof) {
++        // Frames slept through still count in UDCFNR, which wraps at 2048.
++        const uint64_t frames = (now - lastSof) / frameNs;
++        const uint64_t count = frames % 2048 ? frames % 2048 : 2048;
++        for (uint64_t i = 0; i < count; ++i) pxa270UdcHostFrame(u);
++        counters.frames += frames;
++        lastSof = now / frameNs * frameNs;
++        nextSof = lastSof + frameNs;
++    }
++    if (pendingAddress && now >= addressAt) {
++        address = pendingAddress;
++        pendingAddress = 0;
++    }
++    if (phase == Phase::reset) {
++        if (now < phaseAt) return;
++        phase = Phase::enumerate;
++        step = 0;
++        StartControl(0x80, 6, 0x0100, 0, 8);
++    }
++    if (inFlight != Token::none || now < retryAt) return;
++    // A step that only prepares (a new control transfer) may start at once.
++    for (unsigned i = 0; i < 2 && inFlight == Token::none && now >= retryAt && Running(); ++i)
++        if (StartTransaction()) break;
++}
+diff --git a/src/uarm/uarm/UsbBusHost.h b/src/uarm/uarm/UsbBusHost.h
+new file mode 100644
+--- /dev/null
++++ b/src/uarm/uarm/UsbBusHost.h
+@@ -0,0 +1,129 @@
++#ifndef FROND_USB_BUS_HOST_H
++#define FROND_USB_BUS_HOST_H
++#include <cstddef>
++#include <cstdint>
++#include <functional>
++#include <string>
++#include <utility>
++#include <vector>
++
++#include "pxa270_UDC.h"
++
++// Full-speed USB host for the PXA27x UDC, run on emulated time by whoever calls Tick:
++// connect debounce, port reset, enumeration, SET_CONFIGURATION, Palm's
++// GET_EXT_CONNECTION_INFORMATION (vendor request 0x04, or 0x03 if that stalls), then
++// bulk IN/OUT polling on the HotSync port, with the bytes going to and from `Link`.
++// Rules kept on the bus:
++// - SOF every 1 ms of emulated time. A transaction never crosses the end of a frame.
++// - SETUP and OUT data reach the UDC, and an IN is taken from it, only once the whole
++//   packet has been on the wire. A NAKed token is retried 10 us after the guest next
++//   writes to the UDC (see Poke), or at the start of the next frame.
++// - A standard control request that only gets NAKs sends its SETUP again every 100 ms,
++//   as the device may have lost it, until the 500 ms deadline. The TX ROM reads a SETUP
++//   and then drops it at times while it starts HotSync.
++// - A control transfer starts on a frame boundary at least 1 ms after the previous one.
++// - Tokens go to the host's idea of the device address; another address gets no answer.
++// Nothing here is session state. Every call runs on the emulator thread.
++class UsbBusHost {
++   public:
++    struct Link {
++        std::function<size_t()> sendSpace;                       // guest to host room
++        std::function<size_t(const uint8_t*, size_t)> send;      // guest to host
++        std::function<size_t(uint8_t*, size_t)> receive;         // host to guest
++        std::function<size_t()> pending;                         // host to guest bytes waiting
++    };
++    enum class Phase { detached, waitEnable, connect, reset, enumerate, running, failed };
++    static constexpr uint64_t frameNs = 1000000;
++    static constexpr uint64_t nakRetryNs = 10000;
++    static constexpr uint64_t connectNs = 100 * frameNs;   // USB 2.0 7.1.7.3 debounce
++    static constexpr uint64_t resetNs = 20 * frameNs;      // 10 ms reset, 10 ms recovery
++    static constexpr uint64_t controlTimeoutNs = 500 * frameNs;
++    static constexpr uint64_t setupRetryNs = 100 * frameNs;
++    static constexpr uint64_t retryNs = 250 * frameNs;  // after a failed enumeration
++    static constexpr unsigned maxAttempts = 5;
++    static constexpr uint8_t deviceAddress = 2;
++
++    struct Counters {
++        uint64_t frames{}, transactions{}, naks{}, bytesIn{}, bytesOut{}, enumerations{}, setupRetries{}, ticks{};
++    };
++
++    UsbBusHost(std::function<Pxa270Udc*()> udc, Link link);
++
++    void Attach();     // cable in: waits for the device to listen, then resets and enumerates
++    void Detach();     // cable out: forgets the device
++    void Tick(uint64_t nowNs);
++    // Emulated time the next Tick is needed by: 0 for at once, UINT64_MAX for none
++    // (detached, failed, or waiting for the guest to turn the UDC on).
++    uint64_t NextWake() const;
++    // The guest wrote to the UDC: tick soon and retry a NAKed token.
++    void Poke() { poked = true; }
++    // Bytes or room arrived on the link while the bridge was idle; Poke if so.
++    bool LinkWaiting() const;
++    Phase GetPhase() const { return phase; }
++    static const char* PhaseName(Phase phase);
++
++    uint16_t Vendor() const { return vendor; }
++    uint16_t Product() const { return product; }
++    const std::string& PortFunction() const { return portFunction; }
++    uint8_t InEndpoint() const { return inEndpoint; }
++    uint8_t OutEndpoint() const { return outEndpoint; }
++    const Counters& GetCounters() const { return counters; }
++    std::vector<std::string> TakeMessages() { return std::move(messages); }
++
++    // Optional record of every transaction's bus interval [start, end) in ns.
++    std::vector<std::pair<uint64_t, uint64_t>>* log{nullptr};
++
++   private:
++    enum class Token : uint8_t { none, setup, out0, in0, bulkIn, bulkOut };
++    enum class Stage : uint8_t { setup, dataIn, dataOut, statusIn, statusOut };
++    struct Control {
++        bool active{false};
++        uint8_t setup[8]{};
++        std::vector<uint8_t> out, data;
++        Stage stage{Stage::setup};
++        size_t sent{0};
++        uint64_t startAt{0}, deadline{0}, setupAt{0};
++    };
++    enum class Result { ok, stall, timeout, error };
++
++    void Restart(const char* why);
++    void StartControl(uint8_t type, uint8_t request, uint16_t value, uint16_t index, uint16_t length);
++    void ControlDone(Result result);
++    void EnumerationStep(Result result);
++    bool StartTransaction();
++    void FinishTransaction();
++    bool Begin(Token token, unsigned bytes);
++    void Message(const std::string& text);
++    void Nak();
++    bool Running() const { return phase == Phase::reset || phase == Phase::enumerate || phase == Phase::running; }
++    bool Addressed();
++
++    std::function<Pxa270Udc*()> udc;
++    Link link;
++    Phase phase{Phase::detached};
++    uint64_t now{0}, phaseAt{0}, nextSof{0}, lastSof{0}, busyUntil{0}, retryAt{0}, lastControlEnd{0};
++    bool sofRunning{false}, poked{false}, waitSpace{false};
++    uint64_t nakAt{0};
++    Token inFlight{Token::none};
++    uint8_t inFlightEndpoint{0};
++    unsigned attempts{0};
++    uint8_t address{0}, pendingAddress{0};
++    uint64_t addressAt{0};
++    Control control;
++    unsigned step{0};
++    uint8_t maxPacket0{8}, configuration{0};
++    uint16_t configLength{0}, vendor{0}, product{0};
++    std::string portFunction;
++    uint8_t inEndpoint{0}, outEndpoint{0};
++    // Running: the OUT packet being sent and which direction goes next.
++    uint8_t outPacket[64]{};
++    unsigned outSize{0};
++    bool outPending{false}, preferOut{false}, clearHalt{false};
++    uint8_t haltedEndpoint{0};
++    unsigned bulkTimeouts{0};
++    uint32_t enableCount{0};
++    uint64_t requeryAt{0};  // the UDC's UDE count when this connection began
++    Counters counters;
++    std::vector<std::string> messages;
++};
++#endif
+diff --git a/src/uarm/uarm/UsbHostBridge.cpp b/src/uarm/uarm/UsbHostBridge.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/uarm/uarm/UsbHostBridge.cpp
+@@ -0,0 +1,159 @@
++#ifndef __EMSCRIPTEN__
++#include "UsbHostBridge.h"
++
++#include "soc_PXA.h"
++
++struct UsbHostBridge::Impl {
++    SocPXA* soc{nullptr};
++    Config config;
++    HostByteLink link;
++    std::unique_ptr<UsbBusHost> host;
++    bool replaced{false}, plugPending{false};
++    uint64_t plugAt{0};
++    std::vector<std::string> messages;
++    UsbBusHost::Phase lastPhase{UsbBusHost::Phase::detached};
++
++    // Peripheral batch, on emulated time: unplug after a load or reset, plug in when
++    // due, then the host's own work.
++    static void Tick(void* context, uint64_t now) {
++        auto& self = *static_cast<Impl*>(context);
++        if (!self.host) return;
++        if (self.replaced) {
++            self.replaced = false;
++            self.Unplug();
++            self.plugPending = true;
++            self.plugAt = now + replugNs;
++        }
++        if (self.plugPending && now >= self.plugAt) {
++            self.plugPending = false;
++            self.soc->SetUsbTestCable(true);
++            self.host->Attach();
++        }
++        self.host->Tick(now);
++    }
++    static uint64_t Wake(void* context) {
++        auto& self = *static_cast<Impl*>(context);
++        if (!self.host) return UINT64_MAX;
++        if (self.replaced) return 0;
++        const uint64_t wake = self.host->NextWake();
++        return self.plugPending ? std::min(wake, self.plugAt) : wake;
++    }
++    // Reset or load: the host forgets the device at once; the next tick unplugs the cable.
++    // Off: a session saved while the bridge had the cable out gets it back in.
++    static void Replaced(void* context) {
++        auto& self = *static_cast<Impl*>(context);
++        self.replaced = true;
++        if (self.host) self.host->Detach();
++        self.link.Clear();
++    }
++    // Any guest write to the UDC.
++    static void Notify(void* context) {
++        auto& self = *static_cast<Impl*>(context);
++        if (!self.host) return;
++        self.host->Poke();
++        self.soc->KickUsbHost();
++    }
++    void Unplug() {
++        if (soc->UsbTestCableAttached()) soc->SetUsbTestCable(false);
++    }
++};
++
++UsbHostBridge::UsbHostBridge() : impl(std::make_unique<Impl>()) {}
++UsbHostBridge::~UsbHostBridge() { Stop(); }
++
++bool UsbHostBridge::Start(SocPXA* soc, const Config& config, std::string& error) {
++    Stop();
++    if (!soc || soc->GetDeviceType() != DeviceType5::deviceTypeTX || !soc->GetUsbController()) {
++        if (config.kind == HostSerial::Kind::off) return true;
++        error = "This device has no USB port.";
++        return false;
++    }
++    // Off, or an endpoint that can't open: GPIO13 stays low, the level the TX has always
++    // had without a bridge, also after loading a session saved while a bridge had the
++    // cable out.
++    auto off = [&] {
++        impl->soc = soc;
++        if (!soc->UsbTestCableAttached()) soc->SetUsbTestCable(true);
++        const UsbHostHooks hooks{impl.get(), nullptr, nullptr, Impl::Replaced};
++        soc->SetUsbHostHooks(&hooks);
++    };
++    if (config.kind == HostSerial::Kind::off) {
++        off();
++        return true;
++    }
++    if (!impl->link.Open(config, error)) {
++        off();
++        return false;
++    }
++    impl->soc = soc;
++    const bool wasPlugged = soc->UsbTestCableAttached();
++    impl->Unplug();
++    impl->config = impl->link.GetConfig();
++    auto* link = &impl->link;
++    impl->host = std::make_unique<UsbBusHost>(
++        [soc] { return soc->GetUsbController(); },
++        UsbBusHost::Link{[link] { return link->SendSpace(); },
++                         [link](const uint8_t* data, size_t size) { return link->Send(data, size); },
++                         [link](uint8_t* data, size_t size) { return link->Receive(data, size); },
++                         [link] { return link->PendingReceive(); }});
++    // A cable the session left plugged in comes out first, so the TX sees a new plug.
++    impl->plugPending = true;
++    impl->plugAt = soc->GetTime() + (wasPlugged ? replugNs : 0);
++    impl->lastPhase = UsbBusHost::Phase::detached;
++    const UsbHostHooks hooks{impl.get(), Impl::Tick, Impl::Wake, Impl::Replaced};
++    soc->SetUsbHostHooks(&hooks);
++    pxa270UdcHostSetNotify(soc->GetUsbController(), Impl::Notify, impl.get());
++    soc->KickUsbHost();
++    return true;
++}
++
++void UsbHostBridge::Stop() {
++    if (!impl->soc) return;
++    impl->soc->SetUsbHostHooks(nullptr);
++    if (impl->soc->GetUsbController()) pxa270UdcHostSetNotify(impl->soc->GetUsbController(), nullptr, nullptr);
++    // Back to the level the TX has without a bridge: GPIO13 low, no host on the bus.
++    if (impl->host) impl->host->Detach();
++    if (!impl->soc->UsbTestCableAttached()) impl->soc->SetUsbTestCable(true);
++    impl->host.reset();
++    impl->link.Close();
++    impl->soc = nullptr;
++    impl->config = {};
++    impl->replaced = impl->plugPending = false;
++}
++
++void UsbHostBridge::Service() {
++    auto* soc = impl->soc;
++    if (!soc) return;
++    if (!impl->host) {
++        // Off: put the cable back after a load (see Start).
++        if (impl->replaced) {
++            impl->replaced = false;
++            if (!soc->UsbTestCableAttached()) soc->SetUsbTestCable(true);
++        }
++        return;
++    }
++    // The emulated-time work happens in the peripheral batch; this only wakes it when
++    // a load dropped its schedule, the host side has bytes or room, or it is overdue.
++    if (impl->host->LinkWaiting()) impl->host->Poke();
++    const uint64_t wake = Impl::Wake(impl.get());
++    if (wake <= soc->GetTime()) soc->KickUsbHost();
++    for (auto& message : impl->host->TakeMessages()) impl->messages.push_back(std::move(message));
++    const auto phase = impl->host->GetPhase();
++    if (phase != impl->lastPhase) {
++        impl->lastPhase = phase;
++        impl->messages.push_back(std::string("usb: ") + UsbBusHost::PhaseName(phase));
++    }
++}
++
++UsbHostBridge::Config UsbHostBridge::GetConfig() const { return impl->config; }
++std::string UsbHostBridge::Endpoint() const { return impl->link.Endpoint(); }
++
++std::string UsbHostBridge::Describe() const {
++    if (!impl->host) return "off";
++    return std::string(impl->config.kind == HostSerial::Kind::pty ? "pty " : "tcp ") + impl->link.Endpoint() +
++           (impl->link.Connected() ? " connected " : " waiting ") + UsbBusHost::PhaseName(impl->host->GetPhase());
++}
++
++const UsbBusHost* UsbHostBridge::Host() const { return impl->host.get(); }
++std::vector<std::string> UsbHostBridge::TakeMessages() { return std::move(impl->messages); }
++#endif
+diff --git a/src/uarm/uarm/UsbHostBridge.h b/src/uarm/uarm/UsbHostBridge.h
+new file mode 100644
+--- /dev/null
++++ b/src/uarm/uarm/UsbHostBridge.h
+@@ -0,0 +1,47 @@
++#ifndef FROND_USB_HOST_BRIDGE_H
++#define FROND_USB_HOST_BRIDGE_H
++#ifndef __EMSCRIPTEN__
++#include <cstddef>
++#include <cstdint>
++#include <memory>
++#include <string>
++#include <vector>
++
++#include "HostSerial.h"
++#include "UsbBusHost.h"
++
++class SocPXA;
++
++// Connects the TX's USB port to a host PTY or a TCP listener on 127.0.0.1 through
++// UsbBusHost: plugs the cable in (GPIO13), enumerates the TX and moves the bytes of its
++// HotSync port both ways. Start and every load or reset unplug the cable and plug it in
++// again half a second of emulated time later; checkpoint restores for reads leave it.
++// The host runs in the SoC's peripheral batch on emulated time and sleeps between the
++// events it needs. Off keeps GPIO13 low, as the TX has always had it, with no host on
++// the bus. Every method runs on the emulator thread.
++class UsbHostBridge {
++   public:
++    using Config = HostSerial::Config;
++    static constexpr uint64_t replugNs = 500000000;
++
++    UsbHostBridge();
++    ~UsbHostBridge();
++    UsbHostBridge(const UsbHostBridge&) = delete;
++    UsbHostBridge& operator=(const UsbHostBridge&) = delete;
++
++    bool Start(SocPXA* soc, const Config& config, std::string& error);
++    void Stop();  // unplugs the cable and closes the endpoint
++    void Service();  // between emulation slices
++
++    Config GetConfig() const;
++    std::string Endpoint() const;
++    std::string Describe() const;  // off, or kind, endpoint, peer and USB state
++    std::vector<std::string> TakeMessages();
++    const UsbBusHost* Host() const;  // nullptr when off
++
++   private:
++    struct Impl;
++    std::unique_ptr<Impl> impl;
++};
++#endif
++#endif
+diff --git a/src/uarm/uarm/pxa270_UDC.cpp b/src/uarm/uarm/pxa270_UDC.cpp
+--- a/src/uarm/uarm/pxa270_UDC.cpp
++++ b/src/uarm/uarm/pxa270_UDC.cpp
+@@ -77,6 +77,12 @@ struct Pxa270Udc {
+     uint8_t memSwitched;     // SMAC done since the last SET_CONFIGURATION/SET_INTERFACE
+     uint8_t hw0, hw0Flags, hw0Len;
+     uint8_t hw0Data[2];
++    // Host side only, not saved: UDE 0->1 count, whether UDCICR was written since
++    // the latest enable, and who to tell about guest register writes.
++    uint32_t enableCount;
++    bool icrSinceEnable;
++    void (*notify)(void *);
++    void *notifyContext;
+ 
+     template <typename T>
+     void DoSaveLoad(T &h, uint32_t version) {
+@@ -284,6 +290,10 @@ static bool pxa270UdcPrvFifo0(Pxa270Udc *udc, uint_fast8_t size, bool write, voi
+     return true;
+ }
+ 
++static void pxa270UdcPrvNotify(Pxa270Udc *udc) {
++    if (udc->notify) udc->notify(udc->notifyContext);
++}
++
+ static bool pxa270UdcPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size, bool write,
+                                    void *buf) {
+     struct Pxa270Udc *udc = (struct Pxa270Udc *)userData;
+@@ -292,6 +302,7 @@ static bool pxa270UdcPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t siz
+     if (pa < PXA_UDC_BASE || pa >= PXA_UDC_BASE + PXA_UDC_SIZE || (pa & 3)) return false;
+     const bool fifo = pa >= PXA_UDC_BASE + 0x300 && pa < PXA_UDC_BASE + 0x360;
+     if (size != 4 && !(fifo && write && (size == 1 || size == 2))) return false;
++    if (write) pxa270UdcPrvNotify(udc);
+     if (pa == PXA_UDC_BASE + 0x300) return pxa270UdcPrvFifo0(udc, size, write, buf);
+     if (fifo) return pxa270UdcPrvFifoX(udc, (pa - PXA_UDC_BASE - 0x300) >> 2, size, write, buf);
+ 
+@@ -349,6 +360,10 @@ static bool pxa270UdcPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t siz
+                         udc->udccr = (udc->udccr & ~UDCCR_UDE) | UDCCR_EMCE;
+                         enabling = false;
+                     }
++                    if (enabling) {
++                        udc->enableCount++;
++                        udc->icrSinceEnable = false;
++                    }
+                     // SMAC switches the endpoint memory to the active configuration: the
+                     // A-X FIFOs are flushed and their bulk traffic stops NAKing.
+                     if ((val & UDCCR_SMAC) && (udc->udccr & UDCCR_UDE)) {
+@@ -373,16 +388,18 @@ static bool pxa270UdcPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t siz
+                 break;
+ 
+             case 0x04 / 4:  // UDICICR0
+-                if (write)
++                if (write) {
+                     udc->udcicr[0] = val;
+-                else
++                    if (udc->udccr & UDCCR_UDE) udc->icrSinceEnable = true;
++                } else
+                     val = udc->udcicr[0];
+                 break;
+ 
+             case 0x08 / 4:  // UDICICR1
+-                if (write)
++                if (write) {
+                     udc->udcicr[1] = val & 0xf800fffful;
+-                else
++                    if (udc->udccr & UDCCR_UDE) udc->icrSinceEnable = true;
++                } else
+                     val = udc->udcicr[1];
+                 break;
+ 
+@@ -440,7 +457,10 @@ static bool pxa270UdcPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t siz
+         }
+ 
+     if (!write) memcpy(buf, &val, 4);
+-    else pxa270UdcPrvIrq(udc);
++    else {
++        pxa270UdcPrvIrq(udc);
++        pxa270UdcPrvNotify(udc);
++    }
+ 
+     return true;
+ }
+@@ -483,6 +503,22 @@ bool pxa270UdcHostFrame(Pxa270Udc *udc) {
+ 
+ uint8_t pxa270UdcHostAddress(const Pxa270Udc *udc) { return udc->address; }
+ 
++bool pxa270UdcHostSofWanted(const Pxa270Udc *udc) { return udc->udcicr[1] & (1u << 30); }
++
++bool pxa270UdcHostEnabled(const Pxa270Udc *udc) { return udc->udccr & UDCCR_UDE; }
++
++bool pxa270UdcHostListening(const Pxa270Udc *udc) {
++    return (udc->udccr & UDCCR_UDE) && udc->icrSinceEnable && (udc->udcicr[0] & 1) &&
++           (udc->udcicr[1] & (1u << 27));
++}
++
++void pxa270UdcHostSetNotify(Pxa270Udc *udc, void (*notify)(void *), void *context) {
++    udc->notify = notify;
++    udc->notifyContext = context;
++}
++
++uint32_t pxa270UdcHostEnableCount(const Pxa270Udc *udc) { return udc->enableCount; }
++
+ // Standard requests the UDC decodes itself (manual 12.4.4). Returns false for requests
+ // it forwards to the guest through the EP0 FIFO.
+ static bool pxa270UdcPrvHardwareRequest(Pxa270Udc *udc, const uint8_t setup[8]) {
+@@ -833,6 +869,8 @@ void pxa270UdcLoad(Pxa270Udc *state, SavestateLoader<ChunkType> &loader) {
+     restored.udcisr[1] &= 0xf800fffful;
+     restored.udcotgicr &= 0x010303fful;
+     restored.udcotgisr &= 0x010303fful;
++    // A session saved with the UDC on and its interrupts set up is taken as listening.
++    restored.icrSinceEnable = restored.udccr & UDCCR_UDE;
+     *state = restored;
+     pxa270UdcPrvIrq(state);
+ }
+diff --git a/src/uarm/uarm/pxa270_UDC.h b/src/uarm/uarm/pxa270_UDC.h
+--- a/src/uarm/uarm/pxa270_UDC.h
++++ b/src/uarm/uarm/pxa270_UDC.h
+@@ -24,6 +24,22 @@ enum class Pxa270UdcHostResult { Ack, Nak, Stall, Disabled, Unsupported, Timeout
+ bool pxa270UdcHostReset(struct Pxa270Udc *udc);
+ // Start of frame: advances UDCFNR and latches IRSOF.
+ bool pxa270UdcHostFrame(struct Pxa270Udc *udc);
++// UDCCR.UDE: the guest has the UDC on, so the device pulls D+ up and can be reset.
++bool pxa270UdcHostEnabled(const struct Pxa270Udc *udc);
++// UDE set, and since that enable the guest has written UDCICR with the EP0 and reset
++// (IERS) interrupts on. The model has no D+ pull-up; a host treats this as the device
++// being on the bus. The TX ROM sets UDE well before it can answer EP0, and a reset or
++// SETUP before then is lost. UDE=0 leaves UDCICR as it was, so the ICR write has to be
++// a new one. A loaded session with UDE set counts as written.
++bool pxa270UdcHostListening(const struct Pxa270Udc *udc);
++// Called on every guest write to the UDC, register or FIFO, so a sleeping host can
++// look again. nullptr removes it. Not saved.
++void pxa270UdcHostSetNotify(struct Pxa270Udc *udc, void (*notify)(void *), void *context);
++// Counts UDE 0->1 writes. UDE=0 takes the D+ pull-up away, so a change means the device
++// left the bus and came back, even between two host looks at UDE.
++uint32_t pxa270UdcHostEnableCount(const struct Pxa270Udc *udc);
++// The guest has the SOF interrupt (IRSOF) enabled.
++bool pxa270UdcHostSofWanted(const struct Pxa270Udc *udc);
+ // Device address set by the last completed SET_ADDRESS, 0 after reset.
+ uint8_t pxa270UdcHostAddress(const struct Pxa270Udc *udc);
+ // SETUP packet. Standard requests the UDC answers itself (SET_ADDRESS, SET/CLEAR_FEATURE,
+diff --git a/src/uarm/uarm/soc_PXA.cpp b/src/uarm/uarm/soc_PXA.cpp
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -4,6 +4,7 @@
+ 
+ #include "soc_PXA.h"
+ 
++#include <algorithm>
+ #include <cstddef>
+ #include <cstdlib>
+ #include <utility>
+@@ -327,7 +328,7 @@ uint32_t SocPXA::DispatchTicks(uint32_t clientType, uint32_t batchedTicks) {
+ 
+         case SCHEDULER_TASK_AUX_1:
+             CycleBatch0();
+-            return Batch0Required() ? 1 : 0;
++            return Batch0Ticks();
+ 
+         case SCHEDULER_TASK_AUX_2:
+             PumpEventQueues();
+@@ -480,6 +481,15 @@ bool SocPXA::SetUsbTestCable(bool connected) {
+     return true;
+ }
+ 
++bool SocPXA::UsbTestCableAttached() {
++    return GetDeviceType() == deviceTypeTX && !pxaGpioInputLevel(gpio, 13);
++}
++
++void SocPXA::KickUsbHost() {
++    scheduler->RescheduleTask(SCHEDULER_TASK_AUX_1, 1);
++    cpuSetSlowPath(cpu, SLOW_PATH_REASON_RESCHEDULE);
++}
++
+ void SocPXA::OnTouch(int x, int y) { deviceTouch(dev, x, y); }
+ 
+ void SocPXA::OnEngageKey(KeyId key, bool down) {
+@@ -692,13 +702,21 @@ void SocPXA::BeforeStateReplacement() {
+         if (uart) pxaUartDetachExternal(uart);
+ }
+ 
++void SocPXA::StateReplaced() {
++    // A checkpoint restore for a read (database list, export) puts back the state from
++    // just before; the USB host was paused meanwhile and carries on.
++    if (usbHostHooks.replaced && !RestoringCheckpoint()) usbHostHooks.replaced(usbHostHooks.context);
++}
++
+ void SocPXA::BeginSerialCheckpoint() {
+     for (auto* uart : {ffUart, stUart, btUart, hwUart})
+         if (uart) pxaUartBeginCheckpoint(uart);
++    ++usbHostPaused;
+ }
+ void SocPXA::EndSerialCheckpoint() {
+     for (auto* uart : {ffUart, stUart, btUart, hwUart})
+         if (uart) pxaUartEndCheckpoint(uart);
++    if (usbHostPaused) --usbHostPaused;
+ }
+ 
+ void SocPXA::CycleBatch0() {
+@@ -711,6 +729,9 @@ void SocPXA::CycleBatch0() {
+         if (ssp[i]) pxaSspPeriodic(ssp[i]);
+     }
+     devicePeriodic(dev, DEVICE_PERIODIC_TIER0);
++    if (usbHostHooks.tick && !usbHostPaused &&
++        (!usbHostHooks.wake || usbHostHooks.wake(usbHostHooks.context) <= GetTime()))
++        usbHostHooks.tick(usbHostHooks.context, GetTime());
+ }
+ 
+ bool SocPXA::Batch0Required() {
+@@ -732,6 +753,18 @@ bool SocPXA::Batch0Required() {
+     return false;
+ }
+ 
++// Batches until AUX_1 runs again: 1 while a peripheral needs it, else as many as the USB
++// host can sleep, else 0.
++uint32_t SocPXA::Batch0Ticks() {
++    if (Batch0Required()) return 1;
++    if (!usbHostHooks.wake || usbHostPaused) return 0;
++    const uint64_t wake = usbHostHooks.wake(usbHostHooks.context);
++    if (wake == UINT64_MAX) return 0;
++    const uint64_t now = GetTime(), period = 36_sec / 3686400ULL;
++    if (wake <= now + period) return 1;
++    return uint32_t(std::min<uint64_t>((wake - now + period - 1) / period, UINT32_MAX));
++}
++
+ void SocPXA::UpdateSchedulePcm() {
+     // Preview backpressure pauses the whole guest; keep its codec and DMA clocks together.
+     scheduler->ScheduleTask(SCHEDULER_TASK_PCM,
+diff --git a/src/uarm/uarm/soc_PXA.h b/src/uarm/uarm/soc_PXA.h
+--- a/src/uarm/uarm/soc_PXA.h
++++ b/src/uarm/uarm/soc_PXA.h
+@@ -28,6 +28,12 @@ struct PxaRtc;
+ struct PxaLcd;
+ struct Pxa270wmmx;
+ struct Pxa270Udc;
++struct UsbHostHooks {
++    void* context{nullptr};
++    void (*tick)(void* context, uint64_t nowNs){nullptr};
++    uint64_t (*wake)(void* context){nullptr};  // emulated ns of the next tick needed, UINT64_MAX none
++    void (*replaced)(void* context){nullptr};
++};
+ struct PxaImc;
+ struct PxaKpc;
+ struct Pxa255dsp;
+@@ -70,6 +76,14 @@ class SocPXA : public SocGeneric<SocPXA> {
+     // thread. The cable method drives the TX detector input, not a USB host.
+     Pxa270Udc* GetUsbController() { return GetDeviceType() == deviceTypeTX ? udc2 : nullptr; }
+     bool SetUsbTestCable(bool connected);
++    bool UsbTestCableAttached();
++    // A USB host on emulated time (UsbHostBridge). `tick` runs in the peripheral batch
++    // (about every 10 us) once the time `wake` asks for has come, except during a serial
++    // checkpoint; `replaced` runs on a reset or after a load succeeds, but not for a
++    // checkpoint restore. KickUsbHost runs the batch soon, for an earlier wake.
++    // nullptr removes the hooks.
++    void SetUsbHostHooks(const UsbHostHooks* hooks) { usbHostHooks = hooks ? *hooks : UsbHostHooks{}; }
++    void KickUsbHost();
+ 
+     bool EnableFastAudio();
+     bool FastAudioActive() const { return fastAudio && fastAudio->Active(); }
+@@ -78,6 +92,7 @@ class SocPXA : public SocGeneric<SocPXA> {
+    protected:
+     std::function<void()> CapturePeripheralInput() override;
+     void BeforeStateReplacement() override;
++    void StateReplaced() override;
+     void BeginSerialCheckpoint() override;
+     void EndSerialCheckpoint() override;
+     void OnSetFramebufferDirty() override;
+@@ -112,6 +127,7 @@ class SocPXA : public SocGeneric<SocPXA> {
+ 
+     void CycleBatch0();
+     bool Batch0Required();
++    uint32_t Batch0Ticks();
+ 
+     void UpdateSchedulePcm();
+ 
+@@ -125,6 +141,8 @@ class SocPXA : public SocGeneric<SocPXA> {
+    private:
+     IrKeyboard irKeyboard;
+     uint8_t socRev{0};
++    UsbHostHooks usbHostHooks{};
++    unsigned usbHostPaused{0};
+ 
+     PxaUart *ffUart{nullptr}, *hwUart{nullptr}, *stUart{nullptr}, *btUart{nullptr};
+     PxaSsp *ssp[3]{nullptr, nullptr, nullptr};
+diff --git a/src/uarm/uarm/soc_generic_impl.h b/src/uarm/uarm/soc_generic_impl.h
+--- a/src/uarm/uarm/soc_generic_impl.h
++++ b/src/uarm/uarm/soc_generic_impl.h
+@@ -74,6 +74,7 @@ bool SocGeneric<T>::ExecuteInjected(uint64_t maxCycles, uint64_t cyclesPerSecond
+ template <class T>
+ void SocGeneric<T>::Reset() {
+     this->BeforeStateReplacement();
++    this->StateReplaced();
+     paceBreakSyscall = 0;
+     SoC::Reset();
+ 
+@@ -144,6 +145,7 @@ bool SocGeneric<T>::Load(size_t savestateSize, void* savestateData) {
+         return false;
+     }
+ 
++    this->StateReplaced();
+     return true;
+ }
+ 

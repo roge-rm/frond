@@ -102,8 +102,9 @@ execution, other channels, reset and checkpoint requests remain reachable. UART
 peer callbacks stop during true power sleep; wake resets the UART domain and
 detaches its external owner. Nonempty normal and rejected loads close host socket/peer
 ownership; apps may need to reconnect. Temporary database checkpoints preserve
-ownership while freezing external effects. These checks do not add host serial
-transport, UART DMA, USB or HotSync support.
+ownership while freezing external effects. The host serial endpoint, UART DMA
+and USB HotSync have their own tests, in [serial](tx-serial.md) and
+[USB HotSync](peripherals.md#usb-hotsync).
 
 `make test-lifecycle` is firmware-free and included in `make test`. It checks
 audio discontinuities and concurrent queue replacement, whole-guest clock pause

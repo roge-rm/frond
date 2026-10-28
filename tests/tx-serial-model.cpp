@@ -42,6 +42,11 @@ static void attach(PxaUart* uart, Peer& peer) {
     }, [](uint_fast16_t c, void* p) { static_cast<Peer*>(p)->outgoing.push_back(c); },
     [](void* p) { return !static_cast<Peer*>(p)->incoming.empty(); }, nullptr, &peer);
 }
+// Receive is paced at the programmed baud: step until the peer has sent everything.
+static void receive(PxaUart* uart, Peer& peer) {
+    for (unsigned ticks = 0; ticks < 2000000 && !peer.incoming.empty(); ++ticks) pxaUartProcess(uart);
+    assert(peer.incoming.empty());
+}
 static void transmit(PxaUart* uart, Peer& peer, unsigned count) {
     const auto goal = peer.outgoing.size() + count;
     for (unsigned ticks = 0; ticks < 2000000 && peer.outgoing.size() < goal; ++ticks)
@@ -54,7 +59,8 @@ struct State {
     template<class T> void Save(T& state) { pxaUartSave(uart, state); pxa270UdcSave(udc, state); }
     void Load(SavestateLoader<ChunkType>& state) { pxaUartLoad(uart, state); pxa270UdcLoad(udc, state); }
 };
-// Version 0 has the same guest registers/FIFOs, but no final 32-bit timeout counter.
+// Older versions have the same guest registers/FIFOs. Version 0 lacks the 32-bit
+// timeout counter, 1 the TX frame time, 2 the RX frame time and DMA trailing flags.
 static std::vector<uint32_t> legacyVersion(Savestate<ChunkType>& saved, uint32_t version) {
     const auto* data = static_cast<const uint32_t*>(saved.GetBuffer());
     std::vector<uint32_t> words(data, data + saved.GetSize() / 4);
@@ -63,9 +69,9 @@ static std::vector<uint32_t> legacyVersion(Savestate<ChunkType>& saved, uint32_t
     for (unsigned i = 0; i < count; ++i) {
         const auto length = le32toh(words[2 + 2 * i]);
         if (le32toh(words[1 + 2 * i]) == static_cast<uint32_t>(ChunkType::pxaUart)) {
-            assert(length > 2 && le32toh(words[offset]) == 2 && version < 2);
+            assert(length > 4 && le32toh(words[offset]) == 3 && version < 3);
             words[offset] = htole32(version);
-            const unsigned remove = 2 - version;
+            const unsigned remove = 4 - version;
             words[2 + 2 * i] = htole32(length - remove);
             words.erase(words.begin() + offset + length - remove, words.begin() + offset + length);
             return words;
@@ -92,7 +98,7 @@ int main() {
     const std::vector<uint16_t> binary{0, 0x7f, 0x80, 0xff, 0x46};
     peer.incoming.assign(binary.begin(), binary.end());
     for (auto c : binary) write(0, c);
-    for (unsigned i = 0; i < binary.size(); ++i) pxaUartProcess(uart);
+    receive(uart, peer);
     transmit(uart, peer, binary.size() - peer.outgoing.size());
     assert(peer.outgoing == binary && read(9) == binary.size() && irqs && reschedules);
     for (auto c : binary) assert(read(0) == c);
@@ -100,7 +106,7 @@ int main() {
     puts("PASS: FFUART binary callbacks and guest register/IRQ receive path (synthetic)");
 
     // Core chunks preserve guest queues; a live external peer is not rolled back.
-    peer.incoming = {0x12, 0x34}; pxaUartProcess(uart); pxaUartProcess(uart);
+    peer.incoming = {0x12, 0x34}; receive(uart, peer);
     write(0, 0xab); write(0, 0xcd);
     io(0x40600000, 0x404, true, 0x12345);
     State state{uart, udc}; Savestate<ChunkType> saved; assert(saved.Save(state));
@@ -129,30 +135,34 @@ int main() {
             std::vector<uint16_t>{0x80,0x12,0x34}));
     write(2, 0x27); // BUS, FIFO, resets; trigger one byte for IRQ checks
     peer.incoming = {0x246,0x72,0x53,0x72,0,0x7f,0x80,0xff};
-    for (unsigned i = 0; i < 8; ++i) pxaUartProcess(uart);
+    receive(uart, peer);
     assert(read(9) == 8 && (read(2) & 0x0f) == 4);
     assert(read(0) == 0x72537246 && read(9) == 4); // error flags are not data lanes
     assert(io(PXA_FFUART_BASE, 0, false, 0, 2) == 0x7f00 && read(9) == 2);
     assert(io(PXA_FFUART_BASE, 0, false, 0, 1) == 0x80 && read(9) == 1);
     assert(read(0) == 0xff && read(9) == 0 && !(read(5) & 1)); // unused lanes zero, no phantom bytes
     assert((read(2) & 0x0f) == 1);
-    peer.incoming = {0xa5}; pxaUartProcess(uart);
+    peer.incoming = {0xa5}; receive(uart, peer);
     assert(read(0) == 0xa5 && read(9) == 0); // FIFO still usable after over-read
     puts("PASS: PXA27x packed 1/2/4-byte TX/RX, trailing bytes, occupancy and IRQ clearing");
 
     // No new state fields: retain BUS, partial RX and queued packed TX on restore.
     peer.incoming = {0x46,0x72,0x53,0x72,0,0x7f,0x80,0xff};
-    for (unsigned i = 0; i < 8; ++i) pxaUartProcess(uart);
+    receive(uart, peer);
     assert(read(0) == 0x72537246);
     write(0, 0xff807f00); assert(saved.Save(state));
     auto legacy = legacyVersion(saved, 0);
     auto legacyOne = legacyVersion(saved, 1);
+    auto legacyTwo = legacyVersion(saved, 2);
     write(2, 7); // clear BUS and both FIFOs
     assert(loader.Load(saved.GetBuffer(), saved.GetSize(), state));
     assert(read(0) == 0xff807f00 && read(9) == 0);
     peer.outgoing.clear();
     transmit(uart, peer, 4);
     assert((peer.outgoing == std::vector<uint16_t>{0,0x7f,0x80,0xff}));
+    assert(loader.Load(legacyTwo.data(), legacyTwo.size() * 4, state));
+    assert(read(0) == 0xff807f00 && read(9) == 0);
+    transmit(uart, peer, 4);
     assert(loader.Load(legacyOne.data(), legacyOne.size() * 4, state));
     assert(read(0) == 0xff807f00 && read(9) == 0);
     transmit(uart, peer, 4);
@@ -166,14 +176,14 @@ int main() {
     assert((peer.outgoing == std::vector<uint16_t>{0xef}));
     write(2, 0x27); write(3, 0x83); write(0, 0xdeadbe60);
     assert(read(0) == 0x60); write(3, 3);
-    puts("PASS: version-0/1 packed FIFO restore and unchanged byte/divisor accesses");
+    puts("PASS: version-0/1/2 packed FIFO restore and unchanged byte/divisor accesses");
     write(1, 0); peer.incoming = {0x55};
     const auto before = peer.reads; pxaUartProcess(uart);
     assert(peer.reads == before && peer.incoming.size() == 1 && !(read(5) & 1));
-    write(1, 0x41); pxaUartProcess(uart); assert(read(0) == 0x55);
+    write(1, 0x41); receive(uart, peer); assert(read(0) == 0x55);
     puts("PASS: disabled UART retains pending callback RX until re-enabled");
-    fatal([&] { write(1, 0xc0); });
-    puts("BLOCKED: UART DMA enable reaches fatal unimplemented path");
+    write(1, 0xc0); assert(read(1) == 0xc0); write(1, 0x41);
+    puts("PASS: PXA27x UART DMA enable is accepted (see uart-dma tests)");
     io(0x40600000, 0, true, 1);
     assert(io(0x40600000, 0x300, false) == 0); // no host has supplied a packet
     for (unsigned i = 0; i < 4; ++i) io(0x40600000, 0x300, true, 0x1234);
@@ -181,11 +191,14 @@ int main() {
     assert(io(0x40600000, 0x0c, false) == 0);
     for (auto& r : regions) if (r.base == 0x40600000) {
         uint32_t value = 0;
-        assert(!r.access(r.context, r.base + 0x300, 4, true, &value)); // full EP0
-        assert(!r.access(r.context, r.base + 0x304, 4, true, &value)); // unsupported EP A
+        assert(r.access(r.context, r.base + 0x300, 4, true, &value)); // full EP0: dropped
+        assert(r.access(r.context, r.base + 0x304, 4, true, &value)); // EP A is OUT here: write dropped
+        assert(r.access(r.context, r.base + 0x308, 4, true, &value)); // EP B not enabled: ignored
+        value = 0xffffffff;
+        assert(r.access(r.context, r.base + 0x308, 4, false, &value) && value == 0);
     }
-    puts("PASS: UDC EP0 staging; full/unsupported FIFO accesses fail without fatal traps");
-    puts("BLOCKED: UDC has no USB bus/control sequencer or host transport; no enumeration/HotSync");
+    puts("PASS: UDC EP0 staging; writes to a full EP0 or an OUT FIFO are dropped, disabled FIFOs read 0 and ignore writes");
+    puts("NOTE: the USB host and HotSync bridge are covered by test-usb-enumeration, test-usb-bridge and test-tx-usb-rom");
     free(uart); free(udc); regions.clear();
     // Earlier FFUART and the separate PXA25x HWUART retain byte-mode transfers,
     // even if guest software writes the BUS bit. No new older-board behavior.
@@ -199,7 +212,8 @@ int main() {
         assert((peer.outgoing == std::vector<uint16_t>{0x46}));
         peer.incoming = {0x12,0x34}; pxaUartProcess(uart); pxaUartProcess(uart);
         assert(io(base, 0, false) == 0x12 && io(base, 0, false) == 0x34);
+        fatal([&] { io(base, 4, true, 0xc0); });
         free(uart); regions.clear();
     }
-    puts("PASS: earlier FFUART and PXA25x HWUART retain byte-mode bus behavior");
+    puts("PASS: earlier FFUART and PXA25x HWUART retain byte-mode bus behavior; their DMA enable stays fatal");
 }

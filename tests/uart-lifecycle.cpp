@@ -59,7 +59,76 @@ static void paced(unsigned divisor,unsigned lcr,unsigned halfBits) {
         assert(f.sentAt[i]==((i+1)*units+17)/18); // no cumulative ceil-per-byte drift
     }
 }
+// RX bytes arrive one frame apart at the programmed baud and LCR, not all at once.
+static void receivePaced(unsigned divisor,unsigned lcr,unsigned halfBits) {
+    Fixture f;f.configure(divisor,lcr);
+    for(unsigned i=0;i<40;++i)f.incoming.push_back(i&((1u<<(5+(lcr&3)))-1));
+    std::vector<uint64_t> at;
+    while(at.size()<40){
+        f.step(1);for(auto n=f.read(9);at.size()<n;)at.push_back(f.now);
+        assert(f.now<40ull*divisor*halfBits/18+100);
+    }
+    const double units=double(divisor)*halfBits/18;
+    for(unsigned k=0;k<40;++k){
+        const double expected=1+k*units;
+        if(at[k]+2<expected||at[k]>expected+2)std::fprintf(stderr,"rx divisor=%u lcr=%x k=%u at=%llu expected=%.2f\n",divisor,lcr,k,(unsigned long long)at[k],expected);
+        assert(at[k]+2>=expected && at[k]<=expected+2);
+    }
+    assert(!(f.read(5)&2)); // no overrun
+}
 int main() {
+    receivePaced(96,3,20);    // 9600 8N1
+    receivePaced(96,7,22);    // 9600 8N2
+    receivePaced(96,0x0e,22); // 9600 7E2
+    receivePaced(8,3,20);     // 115200 8N1
+    receivePaced(1,0,14);     // fastest 5N1: sometimes two bytes per batch
+    puts("PASS: RX paced at the programmed baud and frame size with fractional carry");
+    {
+        // ITL 8, RAVIE+RTOIE: three bytes raise no data IRQ; timeout after four character times.
+        Fixture f;f.write(2,0x67);f.write(1,0x51);f.incoming={1,2,3};
+        while(f.read(9)<3)f.step(1);
+        const auto last=f.now;const unsigned timeout=(4*10*96+8)/9;
+        while(f.now<last+timeout-1){f.step(1);assert((f.read(2)&15)==1 && !irq);}
+        f.step(2);assert((f.read(2)&15)==0x0c && irq);
+        uint32_t one=0;assert(access(context,PXA_FFUART_BASE,1,false,&one) && one==1);
+        assert((f.read(2)&15)==1 && !irq && f.read(9)==2); // a FIFO read restarts the timeout
+        f.step(timeout-2);assert((f.read(2)&15)==1);f.step(3);assert((f.read(2)&15)==0x0c);
+        for(unsigned i=0;i<6;++i)f.incoming.push_back(0x10+i);
+        while(f.read(9)<8)f.step(1);
+        assert((f.read(2)&15)==4 && irq); // trigger level reached
+    }
+    puts("PASS: RX trigger level and character timeout follow guest time; FIFO read restarts the timeout");
+    {
+        // A guest that does not drain overruns: the FIFO keeps 64 bytes, OE clears on LSR read.
+        Fixture f;f.configure(8,3);f.write(2,0xe7);f.write(1,0x45);
+        for(unsigned i=0;i<70;++i)f.incoming.push_back(i);
+        while(!f.incoming.empty())f.step(1);
+        assert(f.read(9)==64 && (f.read(2)&15)==6 && irq);
+        const auto lsr=f.read(5);assert((lsr&3)==3 && !(lsr&0x80));
+        assert(!(f.read(5)&2) && (f.read(2)&15)==4);
+        for(unsigned i=0;i<64;++i){uint32_t c=0;assert(access(context,PXA_FFUART_BASE,1,false,&c) && c==i);}
+        assert(f.read(9)==0 && !(f.read(5)&1));
+        // Non-FIFO mode: the new byte is lost and the holding register kept.
+        f.write(2,0);f.incoming={0x61,0x62};while(!f.incoming.empty())f.step(1);
+        assert((f.read(5)&3)==3 && (f.read(2)&15)==4 && f.read(0)==0x61);
+    }
+    puts("PASS: RX overrun when the guest does not drain; OE line status and clear on LSR read");
+    {
+        // Save mid-frame: restore gives the same arrival ticks as the uninterrupted run.
+        Fixture f;f.incoming={0x31,0x32,0x33,0x34,0x35,0x36};
+        while(f.read(9)<2)f.step(1);
+        f.step(30);
+        Savestate<ChunkType> saved;assert(saved.Save(f));
+        const auto pending=f.incoming;const auto start=f.now;
+        auto record=[&]{std::vector<uint32_t> levels;for(unsigned i=0;i<800;++i){f.step(1);levels.push_back(f.read(9)|(f.read(2)<<8));}return levels;};
+        const auto first=record();
+        assert(f.read(9)==6 && f.incoming.empty());
+        SavestateLoader<ChunkType> loader;assert(loader.Load(saved.GetBuffer(),saved.GetSize(),f));
+        f.incoming=pending;f.now=start;
+        assert(record()==first && f.read(9)==6);
+        for(unsigned i=0;i<6;++i){uint32_t c=0;assert(access(context,PXA_FFUART_BASE,1,false,&c) && c==0x31+i);}
+    }
+    puts("PASS: save/load mid-frame keeps RX pacing, FIFO and timeout phase");
     paced(96,7,22);       // real TX Serial Manager defaults: 9600 8N2
     paced(96,3,20);       // 9600 8N1
     paced(12,0x1f,24);    // 76800 8E2

@@ -13,6 +13,7 @@
 #include <QDialog>
 #include "SdImage.h"
 #include <QSettings>
+#include <QSpinBox>
 #include "MainWindow.h"
 
 static QByteArray digest(const QString& path) {
@@ -57,6 +58,242 @@ for line in s.makefile('rb'):
         }
         MainWindow next(core.fileName());
         QVERIFY(next.findChild<QCheckBox*>("fastAudio")->isChecked());
+        QSettings().clear();
+    }
+    void serialSetting() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QTemporaryDir files;
+        QFile source(files.filePath("input.frond"));
+        QVERIFY(source.open(QIODevice::WriteOnly)); source.write("session"); source.close();
+        QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly));
+        core.write(R"PY(#!/usr/bin/python3
+import pathlib,socket,sys,threading,time
+pathlib.Path(sys.argv[1]+'.args').write_text('\n'.join(sys.argv[1:]))
+trace=pathlib.Path(sys.argv[1]+'.commands')
+s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+lock=threading.Lock()
+def send(data):
+    with lock: s.sendall(data)
+s.sendall(b'0\tevent\tready\t\n')
+state=b'tcp 127.0.0.1:5099 waiting'
+def peer():
+    # A client connects and later hangs up; the core pushes each change.
+    for event in (b'tcp 127.0.0.1:5099 connected', b'tcp 127.0.0.1:5099 waiting'):
+        time.sleep(.6)
+        send(b'0\tevent\tserial\t'+event.hex().encode()+b'\n')
+pushed=False
+for line in s.makefile('rb'):
+    i,cmd,arg=line.rstrip(b'\n').split(b'\t')
+    arg=bytes.fromhex(arg.decode())
+    with trace.open('ab') as t: t.write(cmd+b' '+arg+b'\n')
+    if cmd==b'serial-mode':
+        if arg==b'tcp:80':
+            send(i+b'\terror\tserial\t'+b'Could not listen on 127.0.0.1:80'.hex().encode()+b'\n'); continue
+        state={b'pty':b'pty /dev/pts/9 connected',b'off':b'off'}.get(arg,b'tcp 127.0.0.1:'+arg[4:]+b' waiting')
+    message={b'keyboard-state':b'detached',b'network-state':b'disabled',b'sd-state':b'none',
+             b'serial-state':state,b'serial-mode':state}.get(cmd,b'done')
+    if cmd==b'save': pathlib.Path(arg.decode()).write_text('saved')
+    send(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
+    if cmd==b'serial-state' and not pushed:
+        pushed=True; threading.Thread(target=peer,daemon=True).start()
+    if cmd==b'quit': break
+)PY");
+        core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        const auto commands = [&] {
+            QFile trace(source.fileName() + ".commands");
+            return trace.open(QIODevice::ReadOnly) ? QString::fromUtf8(trace.readAll()) : QString();
+        };
+        {
+            MainWindow window(core.fileName()); window.show();
+            auto* mode = window.findChild<QComboBox*>("serialMode"); QVERIFY(mode);
+            auto* port = window.findChild<QSpinBox*>("serialPort"); QVERIFY(port);
+            auto* state = window.findChild<QLabel*>("serialState"); QVERIFY(state);
+            QCOMPARE(mode->currentData().toString(), QString("off"));
+            QVERIFY(!port->isEnabled());
+            // Off by default: no flag and no serial-state request.
+            window.openSession(source.fileName(), true);
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("stop")->isEnabled(), 5000);
+            QTRY_VERIFY_WITH_TIMEOUT(commands().contains("keyboard-state"), 5000);
+            QFile args(source.fileName() + ".args"); QVERIFY(args.open(QIODevice::ReadOnly));
+            QVERIFY(!args.readAll().contains("--serial"));
+            QVERIFY(!commands().contains("serial"));
+            QVERIFY(state->text().isEmpty());
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        }
+        QFile::remove(source.fileName() + ".commands");
+        {
+            MainWindow window(core.fileName()); window.show();
+            auto* mode = window.findChild<QComboBox*>("serialMode");
+            auto* port = window.findChild<QSpinBox*>("serialPort");
+            auto* state = window.findChild<QLabel*>("serialState");
+            mode->setCurrentIndex(mode->findData("tcp"));
+            emit mode->activated(mode->currentIndex());
+            QVERIFY(port->isEnabled());
+            port->setValue(5099);
+            emit port->editingFinished();
+            QCOMPARE(QSettings().value("serialMode").toString(), QString("tcp"));
+            QCOMPARE(QSettings().value("serialPort").toInt(), 5099);
+            window.openSession(source.fileName(), true);
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("stop")->isEnabled(), 5000);
+            QFile args(source.fileName() + ".args"); QVERIFY(args.open(QIODevice::ReadOnly));
+            QVERIFY(args.readAll().contains("--serial\ntcp:5099"));
+            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Serial: 127.0.0.1:5099, waiting for a connection"), 5000);
+            // A later connect and hangup show up without a request.
+            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Serial: 127.0.0.1:5099, connected"), 5000);
+            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Serial: 127.0.0.1:5099, waiting for a connection"), 5000);
+            // A change while running switches the live endpoint.
+            QTRY_VERIFY_WITH_TIMEOUT(mode->isEnabled(), 5000);
+            mode->setCurrentIndex(mode->findData("pty"));
+            emit mode->activated(mode->currentIndex());
+            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Serial: /dev/pts/9, connected"), 5000);
+            QVERIFY(commands().contains("serial-mode pty\n"));
+            QVERIFY(!port->isEnabled());
+            // A port that cannot be opened is shown and leaves serial off.
+            QTRY_VERIFY_WITH_TIMEOUT(mode->isEnabled(), 5000);
+            QString shown;
+            QTimer dialogPoll;
+            dialogPoll.setInterval(50);
+            connect(&dialogPoll, &QTimer::timeout, &window, [&] {
+                if (auto* box = window.findChild<QMessageBox*>(); box && box->isVisible()) {
+                    shown = box->text();
+                    box->done(QMessageBox::Ok);
+                }
+            });
+            dialogPoll.start();
+            mode->setCurrentIndex(mode->findData("tcp"));
+            port->setValue(80);
+            emit mode->activated(mode->currentIndex());
+            QTRY_VERIFY_WITH_TIMEOUT(shown.contains("127.0.0.1:80"), 5000);
+            dialogPoll.stop();
+            QVERIFY(state->text().startsWith("Serial: off, Could not listen on 127.0.0.1:80"));
+            // The failed choice is not saved and the mode shows what is open.
+            QCOMPARE(mode->currentData().toString(), QString("off"));
+            QCOMPARE(QSettings().value("serialMode").toString(), QString("pty"));
+            QCOMPARE(QSettings().value("serialPort").toInt(), 5099);
+            QTRY_VERIFY_WITH_TIMEOUT(mode->isEnabled(), 5000);
+            mode->setCurrentIndex(mode->findData("pty"));
+            emit mode->activated(mode->currentIndex());
+            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Serial: /dev/pts/9, connected"), 5000);
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+            QVERIFY(state->text().isEmpty());
+        }
+        MainWindow next(core.fileName());
+        QCOMPARE(next.findChild<QComboBox*>("serialMode")->currentData().toString(), QString("pty"));
+        QCOMPARE(next.findChild<QSpinBox*>("serialPort")->value(), 5099);
+        QSettings().clear();
+    }
+    void usbSetting() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QTemporaryDir files;
+        QFile source(files.filePath("input.frond"));
+        QVERIFY(source.open(QIODevice::WriteOnly)); source.write("session"); source.close();
+        QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly));
+        core.write(R"PY(#!/usr/bin/python3
+import pathlib,socket,sys,threading,time
+pathlib.Path(sys.argv[1]+'.args').write_text('\n'.join(sys.argv[1:]))
+trace=pathlib.Path(sys.argv[1]+'.commands')
+s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+lock=threading.Lock()
+def send(data):
+    with lock: s.sendall(data)
+s.sendall(b'0\tevent\tready\t\n')
+state=b'tcp 127.0.0.1:5098 waiting connecting'
+def bus():
+    # The TX enumerates and a client connects; the core pushes each change.
+    for event in (b'tcp 127.0.0.1:5098 waiting running', b'tcp 127.0.0.1:5098 connected running'):
+        time.sleep(.6)
+        send(b'0\tevent\tusb\t'+event.hex().encode()+b'\n')
+pushed=False
+for line in s.makefile('rb'):
+    i,cmd,arg=line.rstrip(b'\n').split(b'\t')
+    arg=bytes.fromhex(arg.decode())
+    with trace.open('ab') as t: t.write(cmd+b' '+arg+b'\n')
+    if cmd==b'usb-mode':
+        if arg==b'tcp:80':
+            send(i+b'\terror\tusb\t'+b'Could not listen on 127.0.0.1:80'.hex().encode()+b'\n'); continue
+        state={b'pty':b'pty /dev/pts/8 waiting detached',b'off':b'off'}.get(arg,b'tcp 127.0.0.1:'+arg[4:]+b' waiting detached')
+    message={b'keyboard-state':b'detached',b'network-state':b'disabled',b'sd-state':b'none',
+             b'usb-state':state,b'usb-mode':state}.get(cmd,b'done')
+    if cmd==b'save': pathlib.Path(arg.decode()).write_text('saved')
+    send(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
+    if cmd==b'usb-state' and not pushed:
+        pushed=True; threading.Thread(target=bus,daemon=True).start()
+    if cmd==b'quit': break
+)PY");
+        core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        const auto commands = [&] {
+            QFile trace(source.fileName() + ".commands");
+            return trace.open(QIODevice::ReadOnly) ? QString::fromUtf8(trace.readAll()) : QString();
+        };
+        {
+            MainWindow window(core.fileName()); window.show();
+            auto* mode = window.findChild<QComboBox*>("usbMode"); QVERIFY(mode);
+            auto* port = window.findChild<QSpinBox*>("usbPort"); QVERIFY(port);
+            auto* state = window.findChild<QLabel*>("usbState"); QVERIFY(state);
+            QCOMPARE(mode->currentData().toString(), QString("off"));
+            QVERIFY(!port->isEnabled());
+            // Off by default: no flag and no usb-state request.
+            window.openSession(source.fileName(), true);
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("stop")->isEnabled(), 5000);
+            QTRY_VERIFY_WITH_TIMEOUT(commands().contains("keyboard-state"), 5000);
+            QFile args(source.fileName() + ".args"); QVERIFY(args.open(QIODevice::ReadOnly));
+            QVERIFY(!args.readAll().contains("--usb"));
+            QVERIFY(!commands().contains("usb"));
+            QVERIFY(state->text().isEmpty());
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        }
+        QFile::remove(source.fileName() + ".commands");
+        {
+            MainWindow window(core.fileName()); window.show();
+            auto* mode = window.findChild<QComboBox*>("usbMode");
+            auto* port = window.findChild<QSpinBox*>("usbPort");
+            auto* state = window.findChild<QLabel*>("usbState");
+            mode->setCurrentIndex(mode->findData("tcp"));
+            emit mode->activated(mode->currentIndex());
+            QVERIFY(port->isEnabled());
+            port->setValue(5098);
+            emit port->editingFinished();
+            QCOMPARE(QSettings().value("usbMode").toString(), QString("tcp"));
+            QCOMPARE(QSettings().value("usbPort").toInt(), 5098);
+            window.openSession(source.fileName(), true);
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("stop")->isEnabled(), 5000);
+            QFile args(source.fileName() + ".args"); QVERIFY(args.open(QIODevice::ReadOnly));
+            const auto passed = args.readAll();
+            QVERIFY(passed.contains("--usb\ntcp:5098"));
+            QVERIFY(!passed.contains("--serial"));
+            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("USB: 127.0.0.1:5098, waiting for a connection, TX connecting"), 5000);
+            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("USB: 127.0.0.1:5098, waiting for a connection, TX enumerated"), 5000);
+            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("USB: 127.0.0.1:5098, connected, TX enumerated"), 5000);
+            // A change while running switches the live endpoint.
+            QTRY_VERIFY_WITH_TIMEOUT(mode->isEnabled(), 5000);
+            mode->setCurrentIndex(mode->findData("pty"));
+            emit mode->activated(mode->currentIndex());
+            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("USB: /dev/pts/8, waiting for a connection, TX detached"), 5000);
+            QVERIFY(commands().contains("usb-mode pty\n"));
+            QVERIFY(!port->isEnabled());
+            QCOMPARE(QSettings().value("usbMode").toString(), QString("pty"));
+            // A port that cannot be opened is shown, leaves USB off and is not saved.
+            QTRY_VERIFY_WITH_TIMEOUT(mode->isEnabled(), 5000);
+            QTimer dialogPoll;
+            dialogPoll.setInterval(50);
+            connect(&dialogPoll, &QTimer::timeout, &window, [&] {
+                if (auto* box = window.findChild<QMessageBox*>(); box && box->isVisible()) box->done(QMessageBox::Ok);
+            });
+            dialogPoll.start();
+            mode->setCurrentIndex(mode->findData("tcp"));
+            port->setValue(80);
+            emit mode->activated(mode->currentIndex());
+            QTRY_VERIFY_WITH_TIMEOUT(state->text().startsWith("USB: off, Could not listen on 127.0.0.1:80"), 5000);
+            dialogPoll.stop();
+            QCOMPARE(mode->currentData().toString(), QString("off"));
+            QCOMPARE(QSettings().value("usbMode").toString(), QString("pty"));
+            QCOMPARE(QSettings().value("usbPort").toInt(), 5098);
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+            QVERIFY(state->text().isEmpty());
+        }
+        MainWindow next(core.fileName());
+        QCOMPARE(next.findChild<QComboBox*>("usbMode")->currentData().toString(), QString("pty"));
+        QCOMPARE(next.findChild<QSpinBox*>("usbPort")->value(), 5098);
         QSettings().clear();
     }
     void failedSaveStaysOpen() {

@@ -44,11 +44,14 @@ it requires a separately supplied Palm driver.
 The **SD Card** menu creates and imports card images. **Exchange Files…** copies
 files between the host and an ejected card without root access. Close files on
 the Palm before ejecting. Virtual Wi-Fi provides Internet access through your
-computer without a bridge or physical Wi-Fi adapter. Bluetooth, USB/HotSync and
-host serial connections are not yet supported.
+computer without a bridge or physical Wi-Fi adapter. The **Serial port** and
+**USB** settings connect the TX's cradle serial port and USB HotSync to a PTY or
+a TCP port on your computer, for terminal programs and pilot-link. Bluetooth and
+infrared beaming are not supported.
 
-See the [desktop guide](doc/desktop.md) for sessions and controls, and the
-[peripheral guide](doc/peripherals.md) for SD cards, networking and keyboard setup.
+See the [desktop guide](doc/desktop.md) for sessions and controls, the
+[peripheral guide](doc/peripherals.md) for SD cards, networking, USB HotSync and
+keyboard setup, and the [serial guide](doc/tx-serial.md) for the serial port.
 
 ## Debian package
 

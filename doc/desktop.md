@@ -69,6 +69,21 @@ emulated Palm keyboard accessory. Install and enable its Palm OS driver first,
 then type in the Palm window. The attachment persists in the session. See
 [keyboard setup](peripherals.md#computer-keyboard).
 
+**Serial port** connects the Palm's cradle serial port (FFUART) to the computer.
+Choose **PTY** and open the `/dev/pts` path shown under it with a terminal program
+such as `screen` or `minicom`, or choose **TCP on 127.0.0.1** with a port and connect
+one client at a time, for example `nc 127.0.0.1 5023`. It is off by default, the
+choice is kept between runs and changing it while running closes the old
+connection. See [host serial](tx-serial.md#host-endpoint).
+
+**USB** plugs the TX's USB port into the computer for HotSync with pilot-link
+and the like. Choose **PTY** or **TCP on 127.0.0.1** as for the serial port. The
+line under it shows the endpoint, whether a client is connected and how far the
+TX got on the bus (enumerated once it is ready). Start HotSync on the Palm, then
+run the pilot-link command, for example `pilot-xfer -p /dev/pts/7 -l`. It is off
+by default and the choice is kept between runs. See
+[USB HotSync](peripherals.md#usb-hotsync).
+
 **File → Install Application** accepts PRC/PDB files after Palm OS has started.
 **Launch Application** starts an installed app by its Palm database name.
 **Export RAM Databases** writes a ZIP of the Palm's RAM databases, including

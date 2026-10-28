@@ -13,6 +13,7 @@ class QCheckBox;
 class QRadioButton;
 class QPlainTextEdit;
 class QLabel;
+class QSpinBox;
 class MainWindow : public QMainWindow {
     Q_OBJECT
  public:
@@ -32,13 +33,23 @@ class MainWindow : public QMainWindow {
     void endExchange();
     void remember(const QString& path);
     void send(const QString& command, const QString& argument = {});
+    QString serialArgument() const;
+    void showSerial(const QString& state);
+    void loadSerialSettings();
+    QString usbArgument() const;
+    void showUsb(const QString& state);
+    void loadUsbSettings();
     void failure(const QString& message);
     QString outputFile(const QString& title, const QString& filter, const QString& defaultName);
     DesktopClient client;
     QSettings settings;
     QString core, sessionPath, savingPath;
     std::unique_ptr<QLockFile> sessionLock;
-    QComboBox *sessions, *network;
+    QComboBox *sessions, *network, *serial, *usb;
+    QSpinBox* serialPort;
+    QSpinBox* usbPort;
+    QLabel* serialState;
+    QLabel* usbState;
     QLineEdit *nor, *nand;
     QRadioButton *savedMode, *newMode;
     QPushButton *startButton, *stopButton, *forceButton;

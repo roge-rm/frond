@@ -1,0 +1,566 @@
+diff --git a/src/uarm/uarm/pxa_DMA.cpp b/src/uarm/uarm/pxa_DMA.cpp
+--- a/src/uarm/uarm/pxa_DMA.cpp
++++ b/src/uarm/uarm/pxa_DMA.cpp
+@@ -48,6 +48,7 @@ struct PxaDma {
+     uint32_t DINT;
+     struct PxaDmaChannel channels[32];
+     uint8_t CMR[75];  // channel map registers	[  we store lower 8 bits only :-)  ]
++    struct PxaDmaPeripheral peripherals[75];  // wiring by request line, never serialized
+ 
+     template <typename T>
+     void DoSaveLoad(T& chunkHelper) {
+@@ -79,6 +80,10 @@ static void pxaDmaPrvChannelIrqRecalc(struct PxaDma* dma, uint_fast8_t channel)
+ 
+         dma->DINT |= 1 << channel;
+     }
++    if ((dma->channels[channel].CSR & 0x10000200ul) == 0x10000200ul) {  // EORINT with EORIRQEN
++
++        dma->DINT |= 1 << channel;
++    }
+ 
+     pxaIcInt(dma->ic, PXA_I_DMA, !!dma->DINT);
+ }
+@@ -133,6 +138,25 @@ static void pxaDmaPrvChannelDescrFetch(
+     // nextS, nextT, nextC);
+ }
+ 
++// The handshake-capable peripheral mapped to this channel, if it is the only
++// request line mapped there. A stale mapping shared with another line is ignored.
++static struct PxaDmaPeripheral* pxaDmaPrvPeripheral(struct PxaDma* dma, uint_fast8_t channel) {
++    struct PxaDmaPeripheral* found = nullptr;
++    for (unsigned i = 0; i < sizeof(dma->CMR); i++) {
++        if (!(dma->CMR[i] & 0x80) || (dma->CMR[i] & 0x1f) != channel) continue;
++        if (found || !dma->peripherals[i].validBytes) return nullptr;
++        found = &dma->peripherals[i];
++    }
++    return found;
++}
++
++// A receive channel stopping at the end of its chain signals EOC to its peripheral.
++static void pxaDmaPrvEndOfChain(struct PxaDma* dma, uint_fast8_t channel) {
++    if (!(dma->channels[channel].CR & 0x20000000ul)) return;
++    struct PxaDmaPeripheral* peripheral = pxaDmaPrvPeripheral(dma, channel);
++    if (peripheral && peripheral->endOfChain) peripheral->endOfChain(peripheral->ctx);
++}
++
+ static bool pxaDmaPrvChannelCheckForEnd(
+     struct PxaDma* dma, uint_fast8_t channel)  // return true if irq need updating after what we did
+ {
+@@ -155,11 +179,13 @@ static bool pxaDmaPrvChannelCheckForEnd(
+ 
+             // fprintf(stderr, "end cause no descr\n");
+             pxaDmaPrvChannelStop(dma, ch);
++            pxaDmaPrvEndOfChain(dma, channel);
+             irqUpdate = true;
+         } else if (ch->DAR & 1) {  // no more descriptors?
+ 
+             // fprintf(stderr, "end cause DAR\n");
+             pxaDmaPrvChannelStop(dma, ch);
++            pxaDmaPrvEndOfChain(dma, channel);
+             irqUpdate = true;
+         } else {  // fetch next descriptor
+ 
+@@ -184,6 +210,16 @@ static bool pxaDmaPrvChannelDoBurst(
+     struct PxaDmaChannel* ch = &dma->channels[channel];
+     uint32_t num = 4 << ((ch->CR >> 16) & 3);
+     if (num > (ch->CR & 0x1fff)) num = ch->CR & 0x1fff;
++    // Flow-controlled FIFO peripherals: reads take only the valid bytes, and a
++    // short tail goes to or from the peripheral in byte lanes (PXA27x 5.4.6).
++    struct PxaDmaPeripheral* peripheral =
++        (ch->CR & 0x30000000u) ? pxaDmaPrvPeripheral(dma, channel) : nullptr;
++    const bool fromPeripheral = peripheral && (ch->CR & 0x20000000u);
++    const bool toPeripheral = peripheral && !fromPeripheral && (ch->CR & 0x10000000u);
++    if (fromPeripheral) {
++        const uint32_t valid = peripheral->validBytes(peripheral->ctx);
++        if (num > valid) num = valid;
++    }
+     const bool memoryMove = !(ch->CR & 0x30000000u) &&
+         memIsBufferRange(dma->mem, ch->SAR, num, false) &&
+         memIsBufferRange(dma->mem, ch->TAR, num, true);
+@@ -198,7 +234,12 @@ static bool pxaDmaPrvChannelDoBurst(
+     const uint32_t tail = num % each;
+     const uint64_t tailSource = uint64_t(ch->SAR) + ((ch->CR & 0x80000000u) ? num - tail : 0);
+     const uint64_t tailTarget = uint64_t(ch->TAR) + ((ch->CR & 0x40000000u) ? num - tail : 0);
+-    if (tail && (tailSource > 0xffffffffull || tailTarget > 0xffffffffull || (ch->CR & 0x30000000u) ||
++    if (tail && (fromPeripheral || toPeripheral) &&
++        (tailSource > 0xffffffffull || tailTarget > 0xffffffffull ||
++         !memIsBufferRange(dma->mem, fromPeripheral ? tailTarget : tailSource, tail, fromPeripheral)))
++        return pxaDmaPrvBusError(dma, ch);
++    if (tail && !fromPeripheral && !toPeripheral &&
++        (tailSource > 0xffffffffull || tailTarget > 0xffffffffull || (ch->CR & 0x30000000u) ||
+                  !memIsBufferRange(dma->mem, tailSource, tail, false) ||
+                  !memIsBufferRange(dma->mem, tailTarget, tail, true)))
+         return pxaDmaPrvBusError(dma, ch);
+@@ -214,12 +255,25 @@ static bool pxaDmaPrvChannelDoBurst(
+         if (count == each) {
+             ok = memAccess(dma->mem, ch->SAR, each, false, &value) &&
+                  memAccess(dma->mem, ch->TAR, each, true, &value);
++        } else if (fromPeripheral) {
++            // A short read takes exactly count bytes from the peripheral FIFO,
++            // in halfword and byte reads, then lands in memory byte by byte.
++            uint8_t bytes[4]{};
++            for (unsigned i = 0; i < count && ok;) {
++                const unsigned piece = count - i >= 2 ? 2 : 1;
++                uint32_t part = 0;
++                ok = memAccess(dma->mem, ch->SAR, piece, false, &part);
++                for (unsigned k = 0; k < piece; ++k) bytes[i + k] = part >> (8 * k);
++                i += piece;
++            }
++            for (unsigned i = 0; i < count && ok; ++i)
++                ok = memAccess(dma->mem, ch->TAR + i, 1, true, &bytes[i]);
+         } else {
+             uint8_t bytes[4]{};
+             for (unsigned i = 0; i < count && ok; ++i)
+                 ok = memAccess(dma->mem, ch->SAR + i, 1, false, &bytes[i]);
+             for (unsigned i = 0; i < count && ok; ++i)
+-                ok = memAccess(dma->mem, ch->TAR + i, 1, true, &bytes[i]);
++                ok = memAccess(dma->mem, ch->TAR + (toPeripheral ? 0 : i), 1, true, &bytes[i]);
+         }
+         if (!ok) return pxaDmaPrvBusError(dma, ch);
+         if (ch->CR & 0x80000000u) ch->SAR += count;
+@@ -228,6 +282,23 @@ static bool pxaDmaPrvChannelDoBurst(
+         num -= count;
+     }
+ 
++    // End of receive (figure 5-9): stop, jump to the next descriptor or keep waiting.
++    if (fromPeripheral && peripheral->endOfReceive && peripheral->endOfReceive(peripheral->ctx)) {
++        ch->CSR |= 0x200;
++        if (!(ch->CSR & 0x40000000ul) && (ch->CR & 0x1fff)) {
++            if (ch->CSR & 0x04000000ul) {
++                pxaDmaPrvChannelStop(dma, ch);
++            } else if (ch->CSR & 0x08000000ul) {
++                if (ch->DAR & 1)
++                    pxaDmaPrvChannelStop(dma, ch);
++                else
++                    pxaDmaPrvChannelDescrFetch(dma, ch);
++            }
++        }
++        pxaDmaPrvChannelCheckForEnd(dma, channel);
++        return true;
++    }
++
+     // check for end
+     return pxaDmaPrvChannelCheckForEnd(dma, channel);
+ }
+@@ -403,6 +474,15 @@ void pxaDmaExternalReq(struct PxaDma* dma, uint_fast8_t chNum, bool requested) {
+     }
+ }
+ 
++void pxaDmaSetPeripheral(struct PxaDma* dma, uint_fast8_t chNum,
++                         const struct PxaDmaPeripheral* peripheral) {
++    if (chNum >= sizeof(dma->CMR)) return;
++    if (peripheral)
++        dma->peripherals[chNum] = *peripheral;
++    else
++        dma->peripherals[chNum] = PxaDmaPeripheral{};
++}
++
+ void pxaDmaPeriodic(struct PxaDma* dma) {
+     uint32_t i;
+ 
+diff --git a/src/uarm/uarm/pxa_DMA.h b/src/uarm/uarm/pxa_DMA.h
+--- a/src/uarm/uarm/pxa_DMA.h
++++ b/src/uarm/uarm/pxa_DMA.h
+@@ -110,6 +110,19 @@ void pxaDmaPeriodic(struct PxaDma* dma);
+ void pxaDmaExternalReq(struct PxaDma* dma, uint_fast8_t chNum,
+                        bool requested);  // request a transfer burst
+ 
++// Receive handshakes for a FIFO peripheral on one request line (PXA27x 5.4.6).
++// validBytes: bytes the next flow-controlled read may take (the data-valid bus).
++// endOfReceive: checked after each read burst; true signals EOR.
++// endOfChain: the channel serving the line stopped at the end of its chain (EOC).
++// Peripheral targets also take byte writes for a short tail. Not session state.
++struct PxaDmaPeripheral {
++    uint_fast8_t (*validBytes)(void* ctx);
++    bool (*endOfReceive)(void* ctx);
++    void (*endOfChain)(void* ctx);
++    void* ctx;
++};
++void pxaDmaSetPeripheral(struct PxaDma* dma, uint_fast8_t chNum, const struct PxaDmaPeripheral* peripheral);
++
+ bool pxaDmaTaskRequired(struct PxaDma* dma);
+ 
+ template <typename T>
+diff --git a/src/uarm/uarm/pxa_UART.cpp b/src/uarm/uarm/pxa_UART.cpp
+--- a/src/uarm/uarm/pxa_UART.cpp
++++ b/src/uarm/uarm/pxa_UART.cpp
+@@ -15,7 +15,7 @@
+ 
+ #define UART_FIFO_EMPTY 0xFF
+ 
+-#define SAVESTATE_VERSION 2
++#define SAVESTATE_VERSION 3
+ 
+ struct UartFifo {
+     uint8_t read;
+@@ -51,6 +51,11 @@ struct PxaUart {
+     uint8_t irq;
+     uint32_t cyclesSinceRecv;
+     uint32_t transmitRemaining; // half-bit * divisor units; one batch advances 18
++    uint32_t receiveRemaining;  // same units until the receiver takes the next frame
++    bool rxTrailing;            // DMA request for trailing bytes until EOR (FCR[TRAIL])
++    bool rxEndOfChain;          // IIR[EOC], cleared by reading IIR
++    PxaUartDmaRequestF dmaRequestF;  // SoC wiring, never serialized
++    void* dmaContext;
+     bool detaching;
+     bool externalClient;              // callback ownership is never serialized
+     PxaUartClientDetach detachF;
+@@ -109,6 +114,12 @@ struct PxaUart {
+         else cyclesSinceRecv=legacyIdle;
+         if (version >= 2) chunkHelper.Do32(transmitRemaining);
+         else transmitRemaining = 0;
++        if (version >= 3)
++            chunkHelper.Do32(receiveRemaining).Do(typename T::BoolPack() << rxTrailing << rxEndOfChain);
++        else {
++            receiveRemaining = 0;
++            rxTrailing = rxEndOfChain = false;
++        }
+     }
+ };
+ 
+@@ -122,6 +133,7 @@ struct PxaUart {
+ #define UART_IER_RAVIE 0x01  // receiver data available interrupt enable
+ 
+ #define UART_IIR_FIFOES 0xC0       // fifo enable status
++#define UART_IIR_EOC 0x20          // DMA end of descriptor chain (PXA27x)
+ #define UART_IIR_TOD 0x08          // character timout interrupt pending
+ #define UART_IIR_RECV_ERR 0x06     // receive error(overrun, parity, framing, break)
+ #define UART_IIR_RECV_DATA 0x04    // receive data available
+@@ -131,6 +143,8 @@ struct PxaUart {
+ #define UART_IIR_NOINT 0x01        // no interrupt pending
+ 
+ #define UART_FCR_BUS 0x20  // PXA27x 32-bit peripheral bus (FIFO mode only)
++#define UART_FCR_TRAIL 0x10  // PXA27x: DMA removes trailing bytes
++#define UART_FCR_TIL 0x08    // PXA27x: TX interrupt/DMA request when the FIFO is empty
+ #define UART_FCR_ITL_MASK 0xC0  // mask for ITL part of FCR
+ #define UART_FCR_ITL_1 0x00     // interrupt when >=1 byte in recv fifo
+ #define UART_FCR_ITL_8 0x40     // interrupt when >=8 byte in recv fifo
+@@ -375,8 +389,8 @@ static bool pxaUartPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size,
+                 } else {
+                     t = uart->IER ^ val;
+ 
+-                    if (t & UART_IER_DMAE) {
+-                        // we could support this...later
++                    if ((t & UART_IER_DMAE) && !uart->Paced()) {
++                        // Only the PXA27x UART DMA interface is modelled.
+                         ERR("pxaUART: DMA mode cannot be enabled");
+                         t &= ~UART_IER_DMAE;  // undo the change
+                     }
+@@ -390,6 +404,7 @@ static bool pxaUartPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size,
+                 if (!(val & UART_FCR_TRFIFOE) || (t & UART_FCR_TRFIFOE)) {
+                     pxaUartPrvFifoFlush(&uart->TX);
+                     pxaUartPrvFifoFlush(&uart->RX);
++                    uart->rxTrailing = uart->rxEndOfChain = false;
+                     const bool shifting = uart->Paced() && !(uart->LSR & UART_LSR_TEMT);
+                     uart->LSR = UART_LSR_TDRQ | (shifting ? 0 : UART_LSR_TEMT);
+                     uart->IIR = (val & UART_FCR_TRFIFOE ? UART_IIR_FIFOES : 0) | UART_IIR_NOINT;
+@@ -398,6 +413,7 @@ static bool pxaUartPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size,
+                     if (val & UART_FCR_RESETRF) {
+                         pxaUartPrvFifoFlush(&uart->RX);
+                         uart->LSR &= ~UART_LSR_DR;
++                        uart->rxTrailing = uart->rxEndOfChain = false;
+                     }
+                     if (val & UART_FCR_RESETTF) {
+                         pxaUartPrvFifoFlush(&uart->TX);
+@@ -461,6 +477,8 @@ static bool pxaUartPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size,
+                         val |= uint32_t(pxaUartPrvFifoGet(&uart->RX) & 0xff) << (8 * i);
+                     }
+                     if (!pxaUartPrvFifoUsed(&uart->RX)) uart->LSR &= ~UART_LSR_DR;
++                    // A FIFO read clears the character timeout and restarts it (10.4.2.1.2).
++                    if (uart->Paced()) uart->cyclesSinceRecv = 0;
+                     recalcValues = true;  // error bits might have changed
+                 } else {                  // polled mode -> read rx polled reg
+ 
+@@ -479,6 +497,10 @@ static bool pxaUartPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size,
+ 
+             case 2:
+                 val = uart->IIR;
++                if (uart->rxEndOfChain) {  // EOC clears on read
++                    uart->rxEndOfChain = false;
++                    recalcValues = true;
++                }
+                 break;
+ 
+             case 3:
+@@ -491,6 +513,10 @@ static bool pxaUartPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size,
+ 
+             case 5:
+                 val = uart->LSR;
++                if (uart->LSR & UART_LSR_OE) {  // overrun clears on read
++                    uart->LSR &= ~UART_LSR_OE;
++                    recalcValues = true;
++                }
+                 break;
+ 
+             case 6:
+@@ -596,10 +622,18 @@ bool pxaUartAttachExternal(PxaUart* uart, PxaUartReadF readF, PxaUartWriteF writ
+     return true;
+ }
+ 
++static unsigned pxaUartPrvTriggerLevel(const PxaUart* uart) {
++    static const unsigned levels[] = {1, 8, 16, 32};
++    return levels[uart->FCR >> 6];
++}
++
+ static void pxaUartPrvReceive(PxaUart* uart, uint_fast16_t value) {
+     uart->cyclesSinceRecv = 0;
+     if (uart->FCR & UART_FCR_TRFIFOE) {
++        // A full FIFO keeps its bytes and discards the new one (LSR[OE]).
+         if (!pxaUartPrvFifoPut(&uart->RX, value)) uart->LSR |= UART_LSR_OE;
++        // Reaching the trigger level is a normal DMA request, not trailing bytes.
++        if (pxaUartPrvFifoUsed(&uart->RX) >= pxaUartPrvTriggerLevel(uart)) uart->rxTrailing = false;
+     } else if (uart->LSR & UART_LSR_DR) {
+         uart->LSR |= UART_LSR_OE;
+     } else uart->receiveHolding = value;
+@@ -686,9 +720,35 @@ void pxaUartProcess(struct PxaUart *uart)  // advance one serial-clock batch
+     }
+ 
+     // now process receiving
+-    v = uart->Loopback() ? UART_CHAR_NONE : pxaUartPrvGetchar(uart);
+-    if (v != UART_CHAR_NONE) pxaUartPrvReceive(uart, v);
+-    else if (!receivedLoop && uart->cyclesSinceRecv <= uart->ReceiveTimeoutTicks()) ++uart->cyclesSinceRecv;
++    bool received = receivedLoop;
++    if (uart->Loopback()) {
++    } else if (!uart->Paced()) {
++        v = pxaUartPrvGetchar(uart);
++        if (v != UART_CHAR_NONE) {
++            pxaUartPrvReceive(uart, v);
++            received = true;
++        }
++    } else {
++        // A byte from the peer lands in the receiver at once; the line then
++        // carries no other byte for one frame at the programmed baud and LCR.
++        // On an idle line a new byte ends in this batch, so no time carries.
++        uint32_t receiveBudget = 18;
++        bool busy = uart->receiveRemaining != 0;
++        while (true) {
++            if (uart->receiveRemaining > receiveBudget) {
++                uart->receiveRemaining -= receiveBudget;
++                break;
++            }
++            receiveBudget = busy ? receiveBudget - uart->receiveRemaining : 0;
++            uart->receiveRemaining = 0;
++            v = pxaUartPrvGetchar(uart);
++            if (v == UART_CHAR_NONE) break;
++            pxaUartPrvReceive(uart, v);
++            received = busy = true;
++            uart->receiveRemaining = uart->CharacterUnits();
++        }
++    }
++    if (!received && uart->cyclesSinceRecv <= uart->ReceiveTimeoutTicks()) ++uart->cyclesSinceRecv;
+ 
+     pxaUartPrvRecalc(uart);
+ }
+@@ -706,22 +766,41 @@ static void pxaUartPrvRecalc(struct PxaUart *uart) {
+     uint_fast8_t v;
+ 
+     uart->LSR &= ~UART_LSR_FIFOE;
+-    uart->IIR &= UART_IIR_FIFOES;  // clear all other bits...
++    uart->IIR &= UART_IIR_FIFOES;  // clear all other bits, EOC is set again below
+     uart->LSR &= ~(UART_LSR_BI | UART_LSR_FE | UART_LSR_PE);
+ 
++    bool rxRequest = false, txRequest = false;
++    const bool dma = uart->Paced() && (uart->IER & UART_IER_DMAE) && (uart->IER & UART_IER_UUE);
++
+     if (uart->FCR & UART_FCR_TRFIFOE) {  // fifo mode
+ 
+-        // check rx fifo for errors
++        // FIFOE: any byte in the FIFO has an error (table 10-17).
++        bool fifoError = false;
+         for (v = 0; v < pxaUartPrvFifoUsed(&uart->RX); v++) {
+-            if ((pxaUartPrvFifoPeekNth(&uart->RX, v) >> 8) && (uart->IER & UART_IER_RLSE)) {
+-                uart->LSR |= UART_LSR_FIFOE;
++            if (pxaUartPrvFifoPeekNth(&uart->RX, v) >> 8) {
++                fifoError = true;
++                break;
++            }
++        }
++        const uint_fast8_t used = pxaUartPrvFifoUsed(&uart->RX);
++        const bool frontError = used && (pxaUartPrvFifoPeek(&uart->RX) >> 8);
++        if (uart->Paced()) {
++            if (fifoError) uart->LSR |= UART_LSR_FIFOE;
++            // Line status for the byte at the front or an overrun. With DMA on,
++            // any error in the FIFO stops receive requests and interrupts
++            // without a mask so the driver drains by PIO (10.4.2.5).
++            if (((uart->IER & UART_IER_RLSE) && (frontError || (uart->LSR & UART_LSR_OE))) ||
++                (dma && fifoError)) {
+                 uart->IIR |= UART_IIR_RECV_ERR;
+                 errorSet = true;
+-                break;
+             }
++        } else if (fifoError && (uart->IER & UART_IER_RLSE)) {
++            uart->LSR |= UART_LSR_FIFOE;
++            uart->IIR |= UART_IIR_RECV_ERR;
++            errorSet = true;
+         }
+ 
+-        v = pxaUartPrvFifoUsed(&uart->RX);
++        v = used;
+         if (v) pxaUartPrvRecalcCharBits(uart, pxaUartPrvFifoPeek(&uart->RX));
+ 
+         switch (uart->FCR & UART_FCR_ITL_MASK) {
+@@ -745,11 +824,32 @@ static void pxaUartPrvRecalc(struct PxaUart *uart) {
+             errorSet = true;
+             uart->IIR |= UART_IIR_RECV_DATA;
+         }
+-        if (pxaUartPrvFifoUsed(&uart->RX) && uart->cyclesSinceRecv >= uart->ReceiveTimeoutTicks() &&
+-            (uart->IER & UART_IER_RAVIE) && (uart->IER & UART_IER_RTOIE) && !errorSet) {
++        const bool timedOut = used && uart->cyclesSinceRecv >= uart->ReceiveTimeoutTicks();
++        // Leaving DMA or TRAIL mid-trail hands the trailing bytes back to the CPU.
++        if (!dma || !(uart->FCR & UART_FCR_TRAIL)) uart->rxTrailing = false;
++        // With FCR[TRAIL], DMA takes the trailing bytes after the character
++        // timeout until EOR or EOC; otherwise the timeout interrupts the CPU.
++        if (dma && (uart->FCR & UART_FCR_TRAIL) && timedOut && !v && !uart->rxEndOfChain)
++            uart->rxTrailing = true;
++        if (used && (timedOut || uart->rxEndOfChain) && !uart->rxTrailing &&
++            (uart->IER & (dma ? UART_IER_DMAE : UART_IER_RAVIE)) && (uart->IER & UART_IER_RTOIE) &&
++            !errorSet) {
+             errorSet = true;
+             uart->IIR |= UART_IIR_RCV_TIMEOUT;
+         }
++        if (dma) {
++            const uint_fast8_t txUsed = pxaUartPrvFifoUsed(&uart->TX);
++            rxRequest = !fifoError && (v || uart->rxTrailing);
++            txRequest = (uart->FCR & UART_FCR_TIL) ? !txUsed : txUsed < UART_FIFO_DEPTH / 2;
++        }
++        if (uart->Paced()) {
++            // TDRQ: half empty, or empty with FCR[TIL] (table 10-12).
++            const uint_fast8_t txUsed = pxaUartPrvFifoUsed(&uart->TX);
++            if ((uart->FCR & UART_FCR_TIL) ? !txUsed : txUsed <= UART_FIFO_DEPTH / 2)
++                uart->LSR |= UART_LSR_TDRQ;
++            else
++                uart->LSR &= ~UART_LSR_TDRQ;
++        }
+     } else {  // polling mode
+ 
+         uint_fast16_t c = uart->receiveHolding;
+@@ -757,7 +857,8 @@ static void pxaUartPrvRecalc(struct PxaUart *uart) {
+         if (uart->LSR & UART_LSR_DR) {
+             pxaUartPrvRecalcCharBits(uart, c);
+ 
+-            if ((c >> 8) && !errorSet && (uart->IER & UART_IER_RLSE)) {
++            if (((c >> 8) || (uart->Paced() && (uart->LSR & UART_LSR_OE))) && !errorSet &&
++                (uart->IER & UART_IER_RLSE)) {
+                 uart->IIR |= UART_IIR_RECV_ERR;
+                 errorSet = true;
+             } else if (!errorSet && (uart->IER & UART_IER_RAVIE)) {
+@@ -777,8 +878,42 @@ static void pxaUartPrvRecalc(struct PxaUart *uart) {
+         uart->IIR |= UART_IIR_MODEM_STAT;
+     }
+     if (!errorSet) uart->IIR |= UART_IIR_NOINT;
++    if (uart->rxEndOfChain) uart->IIR |= UART_IIR_EOC;
++
++    if (uart->dmaRequestF) {
++        uart->dmaRequestF(uart->dmaContext, true, rxRequest);
++        uart->dmaRequestF(uart->dmaContext, false, txRequest);
++    }
++    pxaUartPrvIrq(uart, errorSet || uart->rxEndOfChain);
++}
++
++void pxaUartSetDma(PxaUart* uart, PxaUartDmaRequestF requestF, void* context) {
++    uart->dmaRequestF = requestF;
++    uart->dmaContext = context;
++    pxaUartPrvRecalc(uart);
++}
+ 
+-    pxaUartPrvIrq(uart, errorSet);
++uint_fast8_t pxaUartDmaValidBytes(PxaUart* uart) {
++    if (!(uart->FCR & UART_FCR_TRFIFOE)) return 0;
++    // Bytes before the first error; error bytes are left for PIO.
++    uint_fast8_t n = 0;
++    while (n < pxaUartPrvFifoUsed(&uart->RX) && !(pxaUartPrvFifoPeekNth(&uart->RX, n) >> 8)) ++n;
++    return n;
++}
++
++bool pxaUartDmaEndOfReceive(PxaUart* uart) {
++    if (!uart->rxTrailing || pxaUartPrvFifoUsed(&uart->RX)) return false;
++    uart->rxTrailing = false;
++    pxaUartPrvRecalc(uart);
++    return true;
++}
++
++void pxaUartDmaEndOfChain(PxaUart* uart) {
++    // 10.4.2.6: only with FCR[TRAIL], and only when bytes are left for the CPU.
++    if (!(uart->FCR & UART_FCR_TRAIL) || !pxaUartPrvFifoUsed(&uart->RX)) return;
++    uart->rxEndOfChain = true;
++    uart->rxTrailing = false;
++    pxaUartPrvRecalc(uart);
+ }
+ 
+ bool pxaUartIrReceiveEnabled(const PxaUart *uart) {
+@@ -789,6 +924,7 @@ bool pxaUartTaskRequired(struct PxaUart *uart) {
+     if (uart->ioCheckpoints || uart->detaching || !uart->Clocked()) return false;
+     return (!uart->Loopback() && uart->clientIsActiveF ? uart->clientIsActiveF(uart->callbackData) : false) ||
+            ((uart->LSR & UART_LSR_DR) && uart->cyclesSinceRecv < uart->ReceiveTimeoutTicks()) ||
++           uart->receiveRemaining ||
+            ((uart->LSR & UART_LSR_TEMT) == 0 && (uart->transmitRemaining || uart->CanStartTransmit()));
+ }
+ 
+diff --git a/src/uarm/uarm/pxa_UART.h b/src/uarm/uarm/pxa_UART.h
+--- a/src/uarm/uarm/pxa_UART.h
++++ b/src/uarm/uarm/pxa_UART.h
+@@ -70,6 +70,15 @@ void pxaUartResync(PxaUart* uart);
+ 
+ bool pxaUartIrReceiveEnabled(const PxaUart *uart);
+ 
++// PXA27x UART DMA (IER[DMAE], 10.4.2.3). The UART raises and drops its RX and
++// TX request lines through requestF; the SoC passes the handshakes below to its
++// DMA controller. Emulator-thread calls only; wiring is not session state.
++typedef void (*PxaUartDmaRequestF)(void *context, bool receive, bool requested);
++void pxaUartSetDma(PxaUart *uart, PxaUartDmaRequestF requestF, void *context);
++uint_fast8_t pxaUartDmaValidBytes(PxaUart *uart);  // RX bytes DMA may read now
++bool pxaUartDmaEndOfReceive(PxaUart *uart);        // after a receive burst: EOR
++void pxaUartDmaEndOfChain(PxaUart *uart);          // receive channel ended its chain
++
+ // Freeze callbacks and serial progress while temporary guest work is rolled back.
+ void pxaUartBeginCheckpoint(PxaUart* uart);
+ void pxaUartEndCheckpoint(PxaUart* uart);
+diff --git a/src/uarm/uarm/soc_PXA.cpp b/src/uarm/uarm/soc_PXA.cpp
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -6,6 +6,7 @@
+ 
+ #include <cstddef>
+ #include <cstdlib>
++#include <utility>
+ 
+ #include "CPU.h"
+ #include "MMU.h"
+@@ -158,6 +159,25 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
+         hwUart = pxaUartInit(mem, rescheduleCb, ic, PXA_HWUART_BASE, PXA_I_HWUART, true);
+     }
+ 
++    if (socRev == 2) {
++        // DRCMR request lines: RX, then TX at the next number (PXA27x table 5-13).
++        const std::pair<PxaUart*, uint8_t> lines[] = {
++            {ffUart, DMA_CMR_FFUART_RX}, {btUart, DMA_CMR_BTUART_RX}, {stUart, DMA_CMR_STUART_RX}};
++        for (size_t i = 0; i < 3; i++) {
++            uartDma[i] = {dma, lines[i].second};
++            pxaUartSetDma(lines[i].first, [](void* context, bool receive, bool requested) {
++                auto* line = static_cast<UartDmaLine*>(context);
++                pxaDmaExternalReq(line->dma, line->rxRequest + (receive ? 0 : 1), requested);
++            }, &uartDma[i]);
++            const PxaDmaPeripheral handshake{
++                [](void* uart) -> uint_fast8_t { return pxaUartDmaValidBytes(static_cast<PxaUart*>(uart)); },
++                [](void* uart) { return pxaUartDmaEndOfReceive(static_cast<PxaUart*>(uart)); },
++                [](void* uart) { pxaUartDmaEndOfChain(static_cast<PxaUart*>(uart)); }, lines[i].first};
++            pxaDmaSetPeripheral(dma, lines[i].second, &handshake);
++            pxaDmaSetPeripheral(dma, lines[i].second + 1, &handshake);
++        }
++    }
++
+     pwrClk = pxaPwrClkInit(cpu, mem, this, socRev == 2);
+ 
+     if (socRev == 2) {
+diff --git a/src/uarm/uarm/soc_PXA.h b/src/uarm/uarm/soc_PXA.h
+--- a/src/uarm/uarm/soc_PXA.h
++++ b/src/uarm/uarm/soc_PXA.h
+@@ -131,6 +131,8 @@ class SocPXA : public SocGeneric<SocPXA> {
+     PxaGpio *gpio{nullptr};
+     PxaAC97 *ac97{nullptr};
+     PxaDma *dma{nullptr};
++    struct UartDmaLine { PxaDma *dma; uint8_t rxRequest; };  // PXA27x UART DMA wiring
++    UartDmaLine uartDma[3]{};
+     PxaI2s *i2s{nullptr};
+     PxaI2c *i2c{nullptr};
+     PxaIc *ic{nullptr};
