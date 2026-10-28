@@ -4,6 +4,12 @@
 #include <cstring>
 #include <vector>
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
 #include "LibertasCF.h"
 extern "C" void uarmAbort() { std::abort(); }
 struct Region {
@@ -59,7 +65,7 @@ static void pin(unsigned number, bool value) {
     inCallback = false;
     levels[number] = value;
 }
-static void boot(LibertasCF& radio) {
+static void bootHelper(LibertasCF& radio) {
     pin(106, true);
     pin(94, true);
     pin(108, true);
@@ -75,6 +81,8 @@ static void boot(LibertasCF& radio) {
     write(0x18, 0);
     write(2, 4);
     assert(read(0x3e) == 0x5a00);
+}
+static void bootFirmware() {
     const uint8_t header[] = {1, 0, 0, 0, 0, 0, 0, 0xc0, 16, 0, 0, 0, 0, 0, 0, 0};
     write(0x18, 17);
     for (unsigned i = 0; i < 16; i += 2) write(0x1a, header[i] | (unsigned(header[i + 1]) << 8));
@@ -89,6 +97,10 @@ static void boot(LibertasCF& radio) {
     write(2, 4);
     assert(read(0x20, 1) == 4);
     write(4, 0);
+}
+static void boot(LibertasCF& radio) {
+    bootHelper(radio);
+    bootFirmware();
 }
 static void command(unsigned id, unsigned size = 8) {
     write(0x18, size);
@@ -125,6 +137,45 @@ static std::vector<uint8_t> arpTx() {
     b[55] = 15;
     b[65] = 2;
     return b;
+}
+static uint16_t sum(const std::vector<uint8_t>& b, size_t at, size_t length, uint32_t total = 0) {
+    for (size_t i = 0; i < length; i += 2)
+        total += (b[at + i] << 8) | (i + 1 < length ? b[at + i + 1] : 0);
+    while (total >> 16) total = (total & 0xffff) + (total >> 16);
+    return ~total;
+}
+static std::vector<uint8_t> synTx(uint16_t port) {
+    // CF transmit descriptor followed by a TCP SYN from 10.0.2.15 to 10.0.2.2:port.
+    std::vector<uint8_t> b(24 + 54);
+    b[8] = 24;
+    b[12] = 54;
+    const uint8_t gateway[] = {0x52, 0x55, 10, 0, 2, 2}, mac[] = {2, 0x46, 0x72, 0x6f, 0x6e, 0x64};
+    std::copy(gateway, gateway + 6, b.begin() + 24);
+    std::copy(mac, mac + 6, b.begin() + 30);
+    b[36] = 8;
+    const size_t ip = 38, tcp = 58;
+    const uint8_t header[] = {0x45, 0, 0, 40, 0, 1, 0, 0, 64, 6, 0, 0, 10, 0, 2, 15, 10, 0, 2, 2};
+    std::copy(header, header + 20, b.begin() + ip);
+    const uint16_t check = sum(b, ip, 20);
+    b[ip + 10] = check >> 8;
+    b[ip + 11] = check;
+    b[tcp] = 0xc3;
+    b[tcp + 1] = 0x50;
+    b[tcp + 2] = port >> 8;
+    b[tcp + 3] = port;
+    b[tcp + 4] = 1;
+    b[tcp + 12] = 0x50;
+    b[tcp + 13] = 2;
+    b[tcp + 14] = 0x20;
+    uint32_t pseudo = 0x0a00 + 0x020f + 0x0a00 + 0x0202 + 6 + 20;
+    const uint16_t tcpCheck = sum(b, tcp, 20, pseudo);
+    b[tcp + 16] = tcpCheck >> 8;
+    b[tcp + 17] = tcpCheck;
+    return b;
+}
+static bool pendingConnection(int listener) {
+    pollfd p{listener, POLLIN, 0};
+    return poll(&p, 1, 200) == 1;
 }
 static void transmit(const std::vector<uint8_t>& b) {
     write(0x14, b.size());
@@ -236,6 +287,74 @@ int main() {
         radio.Poll();
         assert(packet() == first);
     }
+    // Leaving Wi-Fi mode takes the access point out of range but keeps the chip.
+    int listener = socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in local{};
+    local.sin_family = AF_INET;
+    local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t localSize = sizeof(local);
+    assert(bind(listener, reinterpret_cast<sockaddr*>(&local), sizeof(local)) == 0);
+    assert(getsockname(listener, reinterpret_cast<sockaddr*>(&local), &localSize) == 0);
+    assert(listen(listener, 4) == 0);
+    const auto syn = synTx(ntohs(local.sin_port));
+    assert(mode.SetMode("disabled"));
+    radio.Poll();
+    assert(read(0x20) != 0xffff && read(0x3e) == 0x5a00);
+    transmit(tx);
+    transmit(syn);
+    radio.Poll();
+    assert(!(read(0x20) & 2));  // Frames are dropped.
+    assert(!pendingConnection(listener));  // No host connection is opened.
+    command(6, 16);
+    assert(response()[10] == 0);  // No access point in a scan.
+    assert(state.Save(radio));
+    assert(loader.Load(state.GetBuffer(), state.GetSize(), radio));
+    assert(read(0x20) != 0xffff);
+    assert(mode.SetMode("wireless"));
+    radio.Poll();
+    assert(!(read(0x20) & 2));  // Nothing sent out of range arrives later.
+    transmit(tx);
+    radio.Poll();
+    packet();  // Back in range, the same association carries traffic again.
+    transmit(syn);
+    radio.Poll();
+    assert(pendingConnection(listener));  // The same SYN does reach the host in range.
+    close(listener);
+    // Powering the radio down out of range removes it, and it stays absent.
+    assert(mode.SetMode("disabled"));
+    radio.Poll();
+    pin(94, false);
+    radio.Tick();
+    assert(read(0x20) == 0xffff);
+    pin(94, true);
+    radio.Tick();
+    assert(read(0x20) == 0xffff);
+    pin(106, true);
+    radio.Tick();
+    assert(read(0x20) == 0xffff);
+    // A mode switch while Palm loads firmware keeps the radio, and a join out of
+    // range times out without opening a router.
+    assert(mode.SetMode("wireless"));
+    radio.Poll();
+    bootHelper(radio);
+    assert(mode.SetMode("disabled"));
+    radio.Poll();
+    assert(read(0x3e) == 0x5a00);
+    bootFirmware();
+    command(0x12);
+    auto join = response();
+    assert(join[10] == 2 && join[12] == 0);
+    transmit(tx);
+    radio.Poll();
+    assert(mode.SetMode("wireless"));
+    radio.Poll();
+    assert(!(read(0x20) & 2));  // A failed join leaves no association.
+    command(0x12);
+    join = response();
+    assert(join[10] == 0 && join[12] == 1);
+    transmit(tx);
+    radio.Poll();
+    packet();
     auto malformed = tx;
     malformed[8] = 23;  // Descriptor cannot point into itself.
     transmit(malformed);
@@ -249,10 +368,13 @@ int main() {
     assert(mode.SetMode("disabled"));
     radio.Poll();
     assert(read(0x20) == 0xffff);
+    pin(106, false);
+    radio.Tick();
+    assert(read(0x20) == 0xffff);  // Powered up again outside Wi-Fi mode, the chip is absent.
     uint32_t empty = 0;
     assert(loader.Load(&empty, sizeof(empty), radio));
     assert(scheduled);
     puts(
         "PASS: Marvell CF firmware handshake, IRQ/data acknowledgement, hardware identity, Frond "
-        "scan, in-flight restore, 16 CF packet/partial FIFO restore and reassociation cycles, checkpoint freeze, malformed TX and reset/disable");
+        "scan, in-flight restore, 16 CF packet/partial FIFO restore and reassociation cycles, checkpoint freeze, malformed TX, out-of-range mode switch, boot and join, power-down and reset/disable");
 }

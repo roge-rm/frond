@@ -234,8 +234,8 @@ CF8381 driver. The driver loads its firmware from the user's Palm image and
 uses its normal commands, interrupts and packet transfers. The Palm keeps its
 own NetLib, TCP/IP stack and Wi-Fi configuration. This supports native ARM and
 68k applications without substituting a NetLib reference. Blazer can fetch HTTP
-pages through the simulated access point. Modern HTTPS sites can still fail
-because of the Palm application's TLS version, certificates or browser features.
+pages through the simulated access point. Blazer's HTTPS only offers SSL 3.0
+with RC4, which current servers and OpenSSL refuse, so most HTTPS sites fail.
 
 The access point exists inside the emulator. No radio traffic is transmitted,
 and no host Wi-Fi adapter, TAP interface, bridge configuration or root access is
@@ -247,8 +247,13 @@ There are no incoming host-port forwards or host-directory shares.
 
 The mode, virtual radio state, in-flight device buffers and Palm's saved network
 profile persist with the session. Host Internet connections are closed during
-normal restore, reset or mode changes. An app may need to reconnect or reload;
-a saved browser page can still be available from the Palm's cache. Database
+normal restore, reset or mode changes. Switching away from Virtual Wi-Fi while
+Palm's Wi-Fi is on works like leaving the access point's range: the radio stays,
+traffic stops, and switching back lets Palm use the same Wi-Fi connection. While
+out of range, Palm shows its own network errors, and an app that opens NetLib can
+wait on a Palm dialog until you dismiss it. An app still holding the simulated
+NetLib from another mode gets "not open" errors in Virtual Wi-Fi until it is
+started again. An app may need to reconnect or reload; a saved browser page can still be available from the Palm's cache. Database
 export freezes external I/O and preserves the live router during its temporary
 guest checkpoint. Wi-Fi can keep system databases such as `Shim Logs` open.
 If a full RAM export fails because one is open, **File → Export Database…** can

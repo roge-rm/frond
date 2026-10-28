@@ -1,0 +1,44 @@
+diff --git a/src/uarm/uarm/NetworkSimulation.cpp b/src/uarm/uarm/NetworkSimulation.cpp
+--- a/src/uarm/uarm/NetworkSimulation.cpp
++++ b/src/uarm/uarm/NetworkSimulation.cpp
+@@ -146,7 +146,10 @@ void NetworkSimulation::Load(SavestateLoader<ChunkType>& loader) {
+         }
+ }
+ bool NetworkSimulation::Handle(ArmCpu* cpu, uint16_t trap) {
+-    if(mode==wireless)return false;
++    // Virtual Wi-Fi leaves Net.lib lookups and real references to Palm's NetLib.
++    // A reference this fixture handed out earlier stays closed, like out of range.
++    if (mode == wireless && trap != 0xa0b8 && trap != 0xa0b9 && (trap < 0xa800 || trap > 0xa8ff))
++        return false;
+     Guest g{cpu, paceGetAreg(7)};
+     uint32_t errPtr = 0;
+     const bool pointerResult = trap == 0xa81b || trap == 0xa805;
+@@ -167,7 +170,8 @@ bool NetworkSimulation::Handle(ArmCpu* cpu, uint16_t trap) {
+     };
+     try {
+         if (trap == 0xa0ba) {
+-            if (mode == disabled || g.text(g.arg(0)) != "Net.lib") return false;
++            if (mode == disabled || mode == wireless || g.text(g.arg(0)) != "Net.lib")
++                return false;
+             g.put(g.arg(4), refnum, 2);
+             return result(0);
+         }
+@@ -199,7 +203,8 @@ bool NetworkSimulation::Handle(ArmCpu* cpu, uint16_t trap) {
+         if (trap == 0xa801 || trap == 0xa83b) {
+             errPtr = g.arg(trap == 0xa801 ? 2 : 8);
+             if (mode == internet && checkpoints) return result(0x1209, 0x1209);
+-            if (mode == disabled || mode == disconnected) return result(noInterfaces, noInterfaces);
++            if (mode == disabled || mode == disconnected || mode == wireless)
++                return result(noInterfaces, noInterfaces);
+             if (opens == 65535) return result(0x1206, 0x1206);
+             const auto previous = opens;
+             result(previous ? 0x1201 : 0);
+@@ -291,7 +296,7 @@ bool NetworkSimulation::Handle(ArmCpu* cpu, uint16_t trap) {
+             auto value = g.read(errPtr, 2);
+             g.put(errPtr, value, 2);
+         }
+-        if (!opens || mode == disabled || mode == disconnected)
++        if (!opens || mode == disabled || mode == disconnected || mode == wireless)
+             return result(pointerResult ? 0 : -1, notOpen);
+         if (mode == internet && checkpoints) return result(pointerResult ? 0 : -1, wouldBlock);
+         if (trap == 0xa81b) {

@@ -10,7 +10,8 @@ static ArmMemAccessF accessRegister;
 static void* controller;
 static uint8_t sector[512];
 bool memRegionAdd(ArmMem*,uint32_t,uint32_t,ArmMemAccessF f,void* context){accessRegister=f;controller=context;return true;}
-void pxaIcInt(PxaIc*,uint_fast8_t,bool){}
+static bool icLevel;
+void pxaIcInt(PxaIc*,uint_fast8_t,bool level){icLevel=level;}
 void pxaDmaExternalReq(PxaDma*,uint_fast8_t,bool){}
 extern "C" void uarmAbort(){abort();}
 static bool readSector(uint32_t n,void* out){if(n)return false;memcpy(out,sector,512);return true;}
@@ -90,6 +91,75 @@ int main(){
     for(unsigned i=0;i<128;i++)writeReg(0x44,0x44332211);  // ignored, no transfer
     assert(sector[0]==0x88);
     for(unsigned i=0;i<512;i+=4)memcpy(sector+i,"\x11\x22\x33\x44",4);
+    // CMD7 with RCA 0 or another card's RCA deselects without a response (SD 4.3.1).
+    {
+        initCard(card);
+        writeReg(0,1);writeReg(0x30,7);writeReg(0x34,0);writeReg(0x38,0);writeReg(0x10,0);writeReg(0,2);
+        assert((readReg(4)&0x2022)==0x2000);  // command done, no response timeout or CRC error
+        uint8_t r[17]{};
+        assert(vsdCommand(card,7,0x00050000,r)==SdReplyNone);
+        assert(((cardCommand(card,13,3u<<16)>>9)&15)==3);  // stand-by
+        assert(vsdCommand(card,7,3u<<16,r)==SdReply48bitsAndBusy);
+        assert(((cardCommand(card,13,3u<<16)>>9)&15)==4);  // transfer
+    }
+    // An illegal command is latched and reported once, in the next response (SD 4.10.1).
+    {
+        uint8_t r[17]{};
+        assert(vsdCommand(card,63,0,r)==SdReplyNone);
+        assert(cardCommand(card,13,3u<<16)&(1u<<22));
+        assert(!(cardCommand(card,13,3u<<16)&(1u<<22)));
+        assert(vsdCommand(card,63,0,r)==SdReplyNone);
+        cardCommand(card,0);  // reset clears it
+        initCard(card);
+        assert(!(cardCommand(card,13,3u<<16)&(1u<<22)));
+    }
+    // Responses without status (R2, R3, R7) also clear the latch, and valid commands the card does
+    // not implement are not illegal.
+    {
+        uint8_t r[17]{};
+        initCard(card);
+        assert(vsdCommand(card,63,0,r)==SdReplyNone);
+        assert(vsdCommand(card,55,7u<<16,r)==SdReplyNone);  // not for this card: latch kept
+        cardCommand(card,7,0);  // deselect: valid, no response, clears it
+        assert(!(cardCommand(card,13,3u<<16)&(1u<<22)));
+        cardCommand(card,7,3u<<16);
+        assert(vsdCommand(card,56,0,r)==SdReplyNone && vsdCommand(card,42,0,r)==SdReplyNone);
+        assert(!(cardCommand(card,13,3u<<16)&(1u<<22)));
+        for(unsigned c:{28u,29u,30u})assert(vsdCommand(card,c,0,r)==SdReply48bits);
+        assert(!(cardCommand(card,13,3u<<16)&(1u<<22)));
+        // Erase zeroes the range; CMD38 without a range is an erase sequence error.
+        assert(cardCommand(card,38)&(1u<<28));
+        cardCommand(card,32,0);cardCommand(card,33,0);
+        assert(!(cardCommand(card,38)&(1u<<28))&&sector[0]==0&&sector[511]==0);
+        memset(sector,0x5a,512);
+        cardCommand(card,32,0);cardCommand(card,33,0);cardCommand(card,38);
+        assert(sector[0]==0&&sector[100]==0);
+        // R2 (CMD10 needs stand-by) and R6 (CMD3) after an illegal command carry no bit.
+        cardCommand(card,0);
+        assert(vsdCommand(card,63,0,r)==SdReplyNone);
+        for(int i=0;i<32;i++){cardCommand(card,55);if(cardCommand(card,41,0x00300000)&0x80000000u)break;}
+        assert(vsdCommand(card,2,0,r)==SdReply136bits);
+        assert(vsdCommand(card,3,0,r)==SdReply48bits&&!(r[3]&0x40));  // R6 bit 14 clear
+        initCard(card);
+        for(unsigned i=0;i<512;i+=4)memcpy(sector+i,"\x11\x22\x33\x44",4);
+    }
+    // PXA27x I_REG: DAT_ERR (bit 8) and RES_ERR (bit 9), gated by I_MASK (Linux pxamci.h).
+    {
+        writeReg(0x28,0x3ff);assert(readReg(0x28)==0x37f);  // bit 7 (TINT) is not modelled
+        command(17,512,512,false);  // sector 1 has no backing store
+        assert((readReg(4)&0x801)==0x801);
+        assert((readReg(0x2c)&0x300)==0x100);assert(!icLevel);
+        writeReg(0x28,0x37f&~0x100u);assert(icLevel);
+        writeReg(0x28,0x37f);assert(!icLevel);
+        command(63,0,0,false);  // no response
+        assert((readReg(4)&0x2002)==0x2002);
+        assert((readReg(0x2c)&0x300)==0x200);
+        writeReg(0x28,0x37f&~0x200u);assert(icLevel);
+        writeReg(0x28,0x37f);
+        writeReg(0,1);writeReg(0x30,13);writeReg(0x34,3);writeReg(0x38,0);writeReg(0x10,1);writeReg(0,2);
+        assert((readReg(4)&0x2022)==0x2000);  // a clean command clears both
+        assert(!(readReg(0x2c)&0x300));
+    }
     // A guest retrying illegal commands logs a bounded amount, and card reset restarts the count.
     {
         fflush(stderr);int saved=dup(2);FILE* sink=tmpfile();assert(sink&&saved>=0);dup2(fileno(sink),2);
@@ -104,6 +174,7 @@ int main(){
     // PXA25x keeps its previous one-byte-per-word access behaviour.
     card=vsdInit(readSector,writeSector,65536);initCard(card);
     mmc=pxaMmcInit(nullptr,nullptr,nullptr);pxaMmcInsert(mmc,card);
+    writeReg(0x28,0x3ff);assert(readReg(0x28)==0x7f);  // PXA25x I_MASK has 7 bits
     command(17,0,512,false);assert(readReg(0x40)==0x11);assert(readReg(0x40)==0x22);
     puts("PASS: PXA27x packed FIFO widths, block write, PRTBUF, SD status, error and removal signalling, PXA25x compatibility");
 }

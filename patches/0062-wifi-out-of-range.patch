@@ -1,0 +1,74 @@
+diff --git a/src/uarm/uarm/LibertasCF.cpp b/src/uarm/uarm/LibertasCF.cpp
+--- a/src/uarm/uarm/LibertasCF.cpp
++++ b/src/uarm/uarm/LibertasCF.cpp
+@@ -142,7 +142,8 @@ void LibertasCF::Command() {
+         response[29] = 0;
+         put16(response, 42, 0x303);
+     } else if (id == 6) {
+-        bool matches = command.size() >= 15 && command[8] != 2;
++        bool matches = command.size() >= 15 && command[8] != 2 &&
++                       network->GetMode() == NetworkSimulation::wireless;
+         if (command.size() >= 15) {
+             bool anyZero = true, anyBroadcast = true;
+             for (unsigned i = 0; i < 6; ++i) {
+@@ -191,11 +192,16 @@ void LibertasCF::Command() {
+         response.resize(14);
+         std::fill(response.begin() + 8, response.end(), 0);
+         put16(response, 0, 0x8012);
+-        put16(response, 12, 1);
+-    }
+-    if (id == 0x12 || id == 0x50) {
+-        associated = true;
+-        if (!router) router = std::make_unique<WifiRouter>();
++        if (network->GetMode() == NetworkSimulation::wireless) {
++            put16(response, 12, 1);
++            associated = true;
++            if (!router) router = std::make_unique<WifiRouter>();
++        } else {
++            // Out of range the join times out: status 2 is the pre-v9 firmware's
++            // "timer expired waiting for the AP".
++            put16(response, 10, 2);
++            associated = false;
++        }
+     }
+     if (id == 0x24 || id == 0x26) {
+         associated = false;
+@@ -222,7 +228,8 @@ void LibertasCF::Send() {
+             fprintf(stderr, "%02x%s", tx[i], i % 16 == 15 ? "\n" : " ");
+         fprintf(stderr, "\n");
+     }
+-    if (!network->Frozen() && associated && tx.size() >= 24) {
++    if (!network->Frozen() && associated && tx.size() >= 24 &&
++        network->GetMode() == NetworkSimulation::wireless) {
+         const uint32_t offset = le16(tx, 8) | (uint32_t(le16(tx, 10)) << 16);
+         const uint16_t length = le16(tx, 12);
+         if (offset >= 24 && length >= 14 && length <= 1518 && offset <= tx.size() &&
+@@ -238,7 +245,9 @@ void LibertasCF::Send() {
+     UpdateIrq();
+ }
+ void LibertasCF::Poll() {
+-    if (!Sync() || network->Frozen() || !associated) return;
++    if (!Sync() || network->Frozen() || !associated ||
++        network->GetMode() != NetworkSimulation::wireless)
++        return;
+     if (!router) router = std::make_unique<WifiRouter>();
+     router->Poll(clock.getTimeF(clock.userdata));
+     std::vector<uint8_t> bytes;
+@@ -376,10 +385,16 @@ bool LibertasCF::Access(uint32_t pa, uint_fast8_t size, bool write, void* data)
+ }
+ 
+ bool LibertasCF::Sync() {
+-    const bool next = network->GetMode() == NetworkSimulation::wireless;
++    const bool inRange = network->GetMode() == NetworkSimulation::wireless;
++    // The radio is soldered in on a real TX. Leaving Wi-Fi mode while it is powered,
++    // booting or running, takes the access point out of range: frames are dropped and
++    // host connections close, but the chip keeps answering until Palm powers it down.
++    const bool next = inRange || (enabled && power1 && power2 && !reset);
+     if (next != enabled) {
+         enabled = next;
+         Reset();
++    } else if (!inRange && router && !network->Frozen()) {
++        router.reset();
+     }
+     return enabled;
+ }

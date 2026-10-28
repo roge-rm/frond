@@ -352,9 +352,44 @@ int main() {
     openLibrary();
     openSocket();
     assert(net.SetMode("wireless"));
+    // Real NetLib owns wireless lookups and its own references.
     start();
-    assert(!net.Handle(nullptr, 0xa801));  // Real NetLib owns wireless calls.
+    arg(0, 0x200);
+    arg(4, 0x300);
+    put(0x300, 0, 2);
+    assert(!net.Handle(nullptr, 0xa0ba) && !get(0x300, 2));
+    start();
+    arg(0, 18, 2);
+    arg(2, 0x302);
+    assert(!net.Handle(nullptr, 0xa801));
+    assert(!net.Handle(nullptr, 0xa807));
+    assert(!net.Handle(nullptr, 0xa0b9));
+    start();
+    assert(!net.Handle(nullptr, 0xa0a0));
+    // A fixture reference kept from before the switch is closed, out of range.
+    put(0x302, 0, 2);
+    openLibrary();
+    assert(d0 == 0x120c && get(0x302, 2) == 0x120c);
+    put(0x302, 0, 2);
+    start();
+    arg(2, 2, 1);
+    arg(4, 1, 1);
+    arg(12, 0x302);
+    assert(net.Handle(nullptr, 0xa807));
+    assert(d0 == UINT32_MAX && get(0x302, 2) == 0x1202);
+    start();
+    arg(2, 4, 2);
+    arg(4, 0x600);
+    arg(8, 10, 2);
+    arg(24, 0x302);
+    assert(net.Handle(nullptr, 0xa813));
+    assert(d0 == UINT32_MAX && get(0x302, 2) == 0x1202);
+    start();
+    assert(net.Handle(nullptr, 0xa802) && d0 == 0x1202);
+    assert(net.SetMode("connected"));
+    openLibrary();
+    assert(!d0);
     puts(
         "PASS: simulated NetLib packed ABI, echo, error profiles, invalid memory and pending reply "
-        "restore; 16 saturation/partial-read snapshot cycles, mode recovery, library ownership, nested live UDP checkpoint and closed host handles on normal restore");
+        "restore; 16 saturation/partial-read snapshot cycles, mode recovery, library ownership, closed fixture references in wireless, nested live UDP checkpoint and closed host handles on normal restore");
 }

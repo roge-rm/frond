@@ -101,6 +101,44 @@ static uint32_t chunkWord(const std::vector<uint32_t>& state, ChunkType type, un
     }
     throw std::runtime_error("missing chunk");
 }
+static size_t chunkSize(const std::vector<uint32_t>& state, ChunkType type) {
+    for (unsigned i = 0; i < state[0]; ++i)
+        if (state[1 + 2 * i] == uint32_t(type)) return state[2 + 2 * i];
+    throw std::runtime_error("missing chunk");
+}
+// Older layouts are the same words without the newer trailing fields, which are ignored.
+static void downgrade(std::vector<uint32_t>& state, ChunkType type, uint32_t version) {
+    corrupt(state, type, 0, version);
+    corrupt(state, type, chunkSize(state, type) - 1, 0xffffffffu);
+}
+static uint32_t status(VSD* card) { return command(card, 13, 3u << 16); }
+static void versions() {
+    Fixture f;
+    uint8_t reply[17]{};
+    require(vsdCommand(f.card, 63, 0, reply) == SdReplyNone, "unknown command answered");
+    auto state = f.snapshot();
+    require(status(f.card) & 1u << 22, "illegal command not latched");
+    require(!(status(f.card) & 1u << 22), "illegal command latched twice");
+    require(f.restore(state) && (status(f.card) & 1u << 22), "latch lost in savestate");
+    require(f.restore(state), "restore");
+    auto old = state; downgrade(old, ChunkType::vsd, 1);
+    require(f.restore(old) && !(status(f.card) & 1u << 22), "version 1 vsd state not loaded clear");
+    require(chunkWord(state, ChunkType::vsd, 0) == 2, "vsd version");
+    old = state; downgrade(old, ChunkType::vsd, 0);
+    require(f.restore(old) && !(status(f.card) & 1u << 22), "version 0 vsd state not loaded clear");
+    // A failed read raises DAT_ERR; older MMC states default the new mask bits to masked.
+    regWrite(0, 1); regWrite(0x1c, 512); regWrite(0x20, 1); regWrite(0x30, 17);
+    regWrite(0x34, 0); regWrite(0x38, 512); regWrite(0x10, 5); regWrite(0, 2);
+    require((regRead(0x04) & 1) && (regRead(0x2c) & 0x100), "DAT_ERR not raised");
+    state = f.snapshot();
+    require(chunkWord(state, ChunkType::pxaMmc, 0) == 1, "mmc version");
+    regWrite(0x28, 0);
+    require(f.restore(state) && regRead(0x28) == 0x37f && (regRead(0x2c) & 0x100), "mmc v1 restore");
+    old = state; downgrade(old, ChunkType::pxaMmc, 0);
+    regWrite(0x28, 0);
+    require(f.restore(old) && regRead(0x28) == 0x37f && (regRead(0x2c) & 0x100),
+            "version 0 mmc state not loaded with new bits masked");
+}
 static void transfers() {
     for (unsigned i = 0; i < sector.size(); ++i) sector[i] = i;
     Fixture f; f.transfer(false);
@@ -192,10 +230,10 @@ static void eject() {
 }
 int main(int argc, char** argv) {
     try {
-        if (argc == 1) { transfers(); malformed(); eject(); }
+        if (argc == 1) { versions(); transfers(); malformed(); eject(); }
         else if (!std::strcmp(argv[1], "malformed")) malformed();
         else if (!std::strcmp(argv[1], "eject")) eject();
         else throw std::runtime_error("unknown case");
-        std::puts("PASS SD lifecycle: partial transfers, no load replay, malformed rejection and card removal");
+        std::puts("PASS SD lifecycle: partial transfers, savestate versions, no load replay, malformed rejection and card removal");
     } catch (const std::exception& e) { std::fprintf(stderr, "FAIL %s\n", e.what()); return 1; }
 }

@@ -1,0 +1,297 @@
+diff --git a/src/uarm/uarm/pxa_MMC.cpp b/src/uarm/uarm/pxa_MMC.cpp
+--- a/src/uarm/uarm/pxa_MMC.cpp
++++ b/src/uarm/uarm/pxa_MMC.cpp
+@@ -14,7 +14,12 @@
+ #define PXA_MMC_BASE 0x41100000UL
+ #define PXA_MMC_SIZE 0x00001000UL
+ 
+-#define SAVESTATE_VERSION 0
++#define SAVESTATE_VERSION 1
++
++// MMC_I_REG / MMC_I_MASK bits above the PXA25x ones (PXA27x manual 15.8, Linux pxamci.h)
++#define I_DAT_ERR 0x0100
++#define I_RES_ERR 0x0200
++#define I_MASK_PXA27X 0x037f
+ 
+ struct PxaMmc {
+     SdLogLimit noReplyLog;  // not saved
+@@ -23,8 +28,8 @@ struct PxaMmc {
+     struct PxaIc *ic;
+ 
+     uint32_t arg;
+-    uint16_t stat, readTo, blkLen, numBlks;
+-    uint8_t spi, iMask, iReg, cmdat, clockSpeed, resTo, cmdReg;
++    uint16_t stat, readTo, blkLen, numBlks, iMask, iReg;
++    uint8_t spi, cmdat, clockSpeed, resTo, cmdReg;
+     uint16_t respBuf[8];
+     bool clockOn, cmdQueued, dataXferOngoing;
+ 
+@@ -36,17 +41,29 @@ struct PxaMmc {
+     uint8_t blockFifo[1024];
+ 
+     template <typename T>
+-    void DoSaveLoad(T &chunkHelper) {
++    void DoSaveLoad(T &chunkHelper, uint32_t version) {
++        uint8_t iMaskLo = iMask, iRegLo = iReg, iMaskHi = 0, iRegHi = 0;
++
+         chunkHelper.Do32(arg)
+             .Do(typename T::Pack16() << stat << readTo)
+             .Do(typename T::Pack16() << blkLen << numBlks)
+-            .Do(typename T::Pack8() << spi << iMask << iReg << cmdat)
++            .Do(typename T::Pack8() << spi << iMaskLo << iRegLo << cmdat)
+             .Do(typename T::Pack8() << clockSpeed << resTo << cmdReg)
+             .DoBuffer16(respBuf, sizeof(respBuf) >> 1)
+             .Do(typename T::BoolPack() << clockOn << cmdQueued << dataXferOngoing)
+             .Do32(fifoBytes)
+             .Do32(fifoOfst)
+             .DoBuffer(blockFifo, sizeof(blockFifo));
++        if (version >= 1) {
++            iMaskHi = iMask >> 8;
++            iRegHi = iReg >> 8;
++            chunkHelper.Do(typename T::Pack8() << iMaskHi << iRegHi);
++        } else {
++            iMaskHi = wordFifo ? I_MASK_PXA27X >> 8 : 0;  // older states had the new bits masked
++            iRegHi = 0;
++        }
++        iMask = (uint16_t)iMaskHi << 8 | iMaskLo;
++        iReg = (uint16_t)iRegHi << 8 | iRegLo;
+     }
+ };
+ 
+@@ -71,6 +88,12 @@ static void pxaMmcPrvRecalcIregAndFifo(struct PxaMmc *mmc) {
+     mmc->iReg &= ~7;
+     mmc->iReg |= (mmc->stat >> 11) & 7;
+ 
++    if (mmc->wordFifo) {  // PXA27x only: data (read TO, write CRC, read CRC) and response (TO, CRC) errors
++        mmc->iReg &= ~(I_DAT_ERR | I_RES_ERR);
++        if (mmc->stat & 0x000d) mmc->iReg |= I_DAT_ERR;
++        if (mmc->stat & 0x0022) mmc->iReg |= I_RES_ERR;
++    }
++
+     if ((mmc->cmdat & 4) && (mmc->cmdat & 8) && mmc->numBlks) {
+         mmc->stat |= 0x40;
+         mmc->iReg |= 0x40;
+@@ -417,7 +440,7 @@ static bool pxaMmcPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size,
+ 
+         case 10:
+             if (write) {
+-                mmc->iMask = val & 0x7f;
++                mmc->iMask = val & (mmc->wordFifo ? I_MASK_PXA27X : 0x7f);
+                 pxaMmcPrvIrqUpdate(mmc);
+             } else
+                 val = mmc->iMask;
+@@ -514,7 +537,7 @@ struct PxaMmc *pxaMmcInit(struct ArmMem *physMem, struct PxaIc *ic, struct PxaDm
+     mmc->wordFifo = wordFifo;
+     mmc->ic = ic;
+     mmc->dma = dma;
+-    mmc->iMask = 0x7f;
++    mmc->iMask = wordFifo ? I_MASK_PXA27X : 0x7f;
+     mmc->cmdat = 0x80;
+     mmc->resTo = 0x40;
+     mmc->cmdReg = 0x40;
+@@ -554,16 +577,21 @@ void pxaMmcSave(struct PxaMmc *mmc, T &savestate) {
+     if (!chunk) ERR("unable to allocate chunk");
+ 
+     SaveChunkHelper helper(*chunk);
+-    mmc->DoSaveLoad(helper);
++    mmc->DoSaveLoad(helper, SAVESTATE_VERSION);
+ }
+ 
+ template <typename T>
+ void pxaMmcLoad(struct PxaMmc *mmc, T &loader) {
+-    auto chunk = loader.GetChunkOrFail(ChunkType::pxaMmc, SAVESTATE_VERSION, "pxa mmc");
++    uint32_t version;
++    auto chunk = loader.GetChunkOrFail(ChunkType::pxaMmc, SAVESTATE_VERSION, "pxa mmc", version);
+     if (!chunk) return;
+ 
+     LoadChunkHelper helper(*chunk);
+-    mmc->DoSaveLoad(helper);
++    mmc->DoSaveLoad(helper, version);
++    if (version < 1 && mmc->wordFifo) {  // error bits follow MMC_STAT; the IRQ line is left alone
++        if (mmc->stat & 0x000d) mmc->iReg |= I_DAT_ERR;
++        if (mmc->stat & 0x0022) mmc->iReg |= I_RES_ERR;
++    }
+     if (mmc->blkLen > 0x3ff || mmc->fifoBytes > sizeof(mmc->blockFifo) ||
+         mmc->fifoOfst > sizeof(mmc->blockFifo) ||
+         (!(mmc->cmdat & 8) && mmc->fifoBytes > sizeof(mmc->blockFifo) - mmc->fifoOfst))
+diff --git a/src/uarm/uarm/vSD.cpp b/src/uarm/uarm/vSD.cpp
+--- a/src/uarm/uarm/vSD.cpp
++++ b/src/uarm/uarm/vSD.cpp
+@@ -11,7 +11,7 @@
+ #include "sd_log_limit.h"
+ #include "savestate/savestateAll.h"
+ 
+-#define SAVESTATE_VERSION 1
++#define SAVESTATE_VERSION 2
+ 
+ // this is not and will never be a full SD card emulator, deal with it!
+ 
+@@ -45,6 +45,10 @@ struct VSD {
+     bool hcCard;
+     bool acmdShift;
+     bool reportAcmdNext;
++    bool illegalPending;  // ILLEGAL_COMMAND goes out in the next response (spec 4.10.1)
++    bool illegalReport;   // this command's status carries it; not saved
++    bool eraseHaveStart, eraseHaveEnd;
++    uint32_t eraseStart, eraseEnd;
+ 
+     uint8_t initWaitLeft;
+     uint32_t prevAcmd41Param;
+@@ -77,6 +81,14 @@ struct VSD {
+             .DoBuffer(curBuf, 8);
+         if (version >= 1) chunkHelper.Do(typename T::BoolPack() << wideBus).DoBuffer(curBuf + 8, 56);
+         else { wideBus = false; memset(curBuf + 8, 0, 56); }
++        if (version >= 2)
++            chunkHelper.Do(typename T::BoolPack() << illegalPending << eraseHaveStart << eraseHaveEnd)
++                .Do32(eraseStart)
++                .Do32(eraseEnd);
++        else {
++            illegalPending = eraseHaveStart = eraseHaveEnd = false;
++            eraseStart = eraseEnd = 0;
++        }
+ 
+         state = static_cast<State>(state8);
+     }
+@@ -93,6 +105,8 @@ static void vsdCardReset(struct VSD *vsd) {
+     vsd->wideBus = false;
+     vsd->rca = 0;
+     vsd->reportAcmdNext = false;
++    vsd->illegalPending = false;
++    vsd->eraseHaveStart = vsd->eraseHaveEnd = false;
+     vsd->state = StateIdle;
+     vsd->prevAcmd41Param = 0;
+     vsd->initWaitLeft = 20;
+@@ -104,6 +118,7 @@ static uint32_t vsdCalcR1resp(struct VSD *vsd, uint32_t r1bicBits, uint32_t r1or
+     r1 |= ((uint32_t)vsd->state) << 9;
+     if (vsd->acmdShift || vsd->reportAcmdNext) r1 |= 1 << 5;
+     vsd->reportAcmdNext = false;
++    if (vsd->illegalReport) r1 |= 1UL << 22;
+ 
+     /// XXX: "ready for data" bit 8?
+ 
+@@ -151,6 +166,7 @@ static enum SdReplyType vsdRejectCmd(struct VSD *vsd, uint8_t cmd, uint32_t para
+             // An illegal command gets no response and leaves the state alone (SD physical
+             // layer 2.00, 4.6.1). The host sees a response timeout.
+             if (log) fprintf(stderr, " -> invalid in current state %u\n", vsd->state);
++            vsd->illegalPending = true;
+             return SdReplyNone;
+ 
+         case UnacceptableParam:
+@@ -160,6 +176,7 @@ static enum SdReplyType vsdRejectCmd(struct VSD *vsd, uint8_t cmd, uint32_t para
+ 
+         case UnknownCommand:
+             if (log) fprintf(stderr, " -> unknown command\n");
++            vsd->illegalPending = true;
+             return SdReplyNone;
+ 
+         default:
+@@ -253,6 +270,10 @@ enum SdReplyType vsdCommand(struct VSD *vsd, uint8_t cmd, uint32_t param,
+     uint8_t *reply = (uint8_t *)replyOut;
+     enum SdReplyType replTyp;
+ 
++    // A valid command clears ILLEGAL_COMMAND whatever its response type (spec 4.10.1, B);
++    // it is reported in that command's status if it has one.
++    vsd->illegalReport = vsd->illegalPending;
++    vsd->illegalPending = false;
+     vsd->acmdShift = false;
+     reply[0] = cmd;
+ 
+@@ -337,9 +358,9 @@ enum SdReplyType vsdCommand(struct VSD *vsd, uint8_t cmd, uint32_t param,
+             } else if ((vsd->state == StateStby || vsd->state == StateTran ||
+                         vsd->state == StateData || vsd->state == StatePrg) &&
+                        vsd->rca != (param >> 16)) {  // we were not addressed
+-
++                // Deselect: the card goes to stand-by and does not answer (RCA 0 or another card's).
+                 vsd->state = StateStby;
+-                replTyp = vsdPrepareR1resp(vsd, cmd, reply, 0, 0);
++                replTyp = SdReplyNone;
+             } else
+                 replTyp = vsdRejectCmd(vsd, cmd, param, reply, InvalidInCurrentState,
+                                        false /* there is no ACMD7 */);
+@@ -485,6 +506,54 @@ enum SdReplyType vsdCommand(struct VSD *vsd, uint8_t cmd, uint32_t param,
+             }
+             break;
+ 
++        case 28:  // write protect: no protection is modelled, so these only answer
++        case 29:
++        case 30:
++            if (wasAcmd || vsd->state != StateTran)
++                replTyp = vsdRejectCmd(vsd, cmd, param, reply, InvalidInCurrentState, wasAcmd);
++            else
++                replTyp = vsdPrepareR1resp(vsd, cmd, reply, 0, 0);
++            break;
++
++        case 32:  // erase start and end
++        case 33:
++            if (wasAcmd || vsd->state != StateTran)
++                replTyp = vsdRejectCmd(vsd, cmd, param, reply, InvalidInCurrentState, wasAcmd);
++            else if (!vsd->hcCard && (param % 512))
++                replTyp = vsdRejectCmd(vsd, cmd, param, reply, UnacceptableParam, wasAcmd);
++            else {
++                uint32_t sec = vsd->hcCard ? param : param / 512;
++                if (cmd == 32) {
++                    vsd->eraseStart = sec;
++                    vsd->eraseHaveStart = true;
++                } else {
++                    vsd->eraseEnd = sec;
++                    vsd->eraseHaveEnd = true;
++                }
++                replTyp = vsdPrepareR1resp(vsd, cmd, reply, 0, 0);
++            }
++            break;
++
++        case 38:  // erase: sectors read back as zero (SCR DATA_STAT_AFTER_ERASE is 0); never busy
++            if (wasAcmd || vsd->state != StateTran) {
++                replTyp = vsdRejectCmd(vsd, cmd, param, reply, InvalidInCurrentState, wasAcmd);
++            } else if (!vsd->eraseHaveStart || !vsd->eraseHaveEnd || vsd->eraseStart > vsd->eraseEnd) {
++                vsd->eraseHaveStart = vsd->eraseHaveEnd = false;
++                replTyp = vsdPrepareR1resp(vsd, cmd, reply, 0, 1UL << 28);  // ERASE_SEQ_ERROR
++            } else {
++                uint8_t zero[512];
++                uint32_t sec, last = vsd->eraseEnd;
++                bool ok = true;
++
++                memset(zero, 0, sizeof(zero));
++                if (last >= vsd->nSec) last = vsd->nSec - 1;
++                for (sec = vsd->eraseStart; ok && sec <= last && sec < vsd->nSec; sec++)
++                    ok = vsd->secW(sec, zero);
++                vsd->eraseHaveStart = vsd->eraseHaveEnd = false;
++                replTyp = vsdPrepareR1resp(vsd, cmd, reply, 0, ok ? 0 : 1UL << 19);
++            }
++            break;
++
+         case 41:
+             if (!wasAcmd) {
+                 replTyp = vsdRejectCmd(vsd, cmd, param, reply, UnknownCommand, wasAcmd);
+@@ -536,7 +605,11 @@ enum SdReplyType vsdCommand(struct VSD *vsd, uint8_t cmd, uint32_t param,
+             break;
+ 
+         case 42:  // ACMD42: enable/disable the DAT3 card-detect pull-up.
+-            if (!wasAcmd || vsd->state != StateTran)
++            if (!wasAcmd) {  // CMD42 lock/unlock needs a data phase that is not modelled
++                replTyp = SdReplyNone;
++                break;
++            }
++            if (vsd->state != StateTran)
+                 replTyp = vsdRejectCmd(vsd, cmd, param, reply, InvalidInCurrentState, wasAcmd);
+             else
+                 // DAT3 is not electrically modelled; this has no effect on the separate GPIO detector.
+@@ -570,6 +643,10 @@ enum SdReplyType vsdCommand(struct VSD *vsd, uint8_t cmd, uint32_t param,
+             }
+             break;
+ 
++        case 56:  // general command needs a data phase that is not modelled: ignored, not illegal
++            replTyp = SdReplyNone;
++            break;
++
+         case 55:
+             if (vsd->state == StateReady || vsd->state == StateIdent) {
+                 replTyp = vsdRejectCmd(vsd, cmd, param, reply, InvalidInCurrentState,
+@@ -578,6 +655,7 @@ enum SdReplyType vsdCommand(struct VSD *vsd, uint8_t cmd, uint32_t param,
+             }
+ 
+             if ((param >> 16) != vsd->rca) {  // addressed to another card: no response
++                vsd->illegalPending = vsd->illegalReport;  // not for this card
+                 replTyp = SdReplyNone;
+                 break;
+             }
