@@ -1,0 +1,106 @@
+diff --git a/src/common/device_profile5.h b/src/common/device_profile5.h
+--- a/src/common/device_profile5.h
++++ b/src/common/device_profile5.h
+@@ -31,7 +31,7 @@
+ // Inventory of implemented native models, not a list of verified Palm devices.
+ inline constexpr DeviceProfile5 deviceProfiles5[] = {
+     {deviceTypeE2, "tungsten-e2", "Tungsten E2", DeviceCohort5::e2Nand,
+-     DeviceSupport5::inheritedUnverified, 0, 34603008, 16u << 20, 32u << 20,
++     DeviceSupport5::inheritedUnverified, 8u << 20, 34603008, 16u << 20, 32u << 20,
+      DisplayMode::mode_320x320, 1u << 5, false},
+     {deviceTypeFrankenE2, "franken-e2", "FrankenE2 / Tungsten E3", DeviceCohort5::patchedE2,
+      DeviceSupport5::inheritedUnverified, 0, 34603008, 16u << 20, 32u << 20,
+@@ -66,14 +66,27 @@
+     return profile && mode >= 1 && mode <= 8 && (profile->displayModes & (1u << mode));
+ }
+ 
+-enum class DeviceFirmwareError5 { none, unknownDevice, norSize, explicitNand, nandSize };
++enum class DeviceFirmwareError5 { none, unknownDevice, norSize, explicitNand, nandSize, norLayout };
++
++// E2 NOR: 128 KiB boot block, then the PalmCard header that maps the 8 MiB part.
++// Fresh firmware only: E2 sessions from earlier builds may use another layout.
++inline constexpr size_t e2NorHeaderOffset5 = 0x20000;
++
++inline DeviceFirmwareError5 deviceProfileValidateNorLayout5(int32_t deviceType, size_t headerOffset,
++                                                            bool fromSession) {
++    if (deviceType == deviceTypeE2 && !fromSession && headerOffset != e2NorHeaderOffset5)
++        return DeviceFirmwareError5::norLayout;
++    return DeviceFirmwareError5::none;
++}
+ 
+ // Geometry checks cannot identify a dump's device or establish boot compatibility.
+ inline DeviceFirmwareError5 deviceProfileValidateFirmware5(
+     int32_t deviceType, size_t norSize, size_t nandSize, bool fromSession, bool explicitNand) {
+     const auto* profile = deviceProfile5(deviceType);
+     if (!profile) return DeviceFirmwareError5::unknownDevice;
+-    if (norSize == 0 || (profile->norSize && norSize != profile->norSize))
++    // E2 sessions saved before the 8 MiB check may hold another NOR size; they still load.
++    const bool norSizeChecked = profile->norSize && !(fromSession && deviceType == deviceTypeE2);
++    if (norSize == 0 || (norSizeChecked && norSize != profile->norSize))
+         return DeviceFirmwareError5::norSize;
+     if (profile->requiresExplicitNand && !fromSession && !explicitNand)
+         return DeviceFirmwareError5::explicitNand;
+diff --git a/src/common/rom_info5.cpp b/src/common/rom_info5.cpp
+--- a/src/common/rom_info5.cpp
++++ b/src/common/rom_info5.cpp
+@@ -75,6 +75,8 @@
+ 
+ uint32_t RomInfo5::GetHalId() const { return halId; }
+ 
++size_t RomInfo5::GetHeaderOffset() const { return headerOffset; }
++
+ uint32_t RomInfo5::GetRecommendedRamSize() const {
+     return IsDmitryPatched() ? (32ul << 20) : (16ul << 20);
+ }
+@@ -123,6 +125,7 @@
+ 
+     companyId = Read32(offset + 0x80, error);
+     halId = Read32(offset + 0x84, error);
++    headerOffset = offset;
+ 
+     return !error;
+ }
+diff --git a/src/common/rom_info5.h b/src/common/rom_info5.h
+--- a/src/common/rom_info5.h
++++ b/src/common/rom_info5.h
+@@ -27,6 +27,9 @@
+ 
+     uint32_t GetRecommendedRamSize() const;
+ 
++    // Byte offset of the parsed card header within the image.
++    size_t GetHeaderOffset() const;
++
+     DeviceType5 GetDeviceType() const;
+ 
+    private:
+@@ -50,6 +53,7 @@
+ 
+     uint32_t companyId{0};
+     uint32_t halId{0};
++    size_t headerOffset{0};
+ };
+ 
+ std::ostream& operator<<(std::ostream& stream, RomInfo5& romInfo);
+diff --git a/src/uarm/native/main.cpp b/src/uarm/native/main.cpp
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -328,10 +328,18 @@
+             return false;
+         }
+ 
+-        const auto firmwareError = deviceProfileValidateFirmware5(deviceType, nor.size, nand.size,
++        auto firmwareError = deviceProfileValidateFirmware5(deviceType, nor.size, nand.size,
+             sessionDevice != deviceTypeInvalid, options.nand.has_value());
++        if (firmwareError == DeviceFirmwareError5::none && romInfo.IsValid())
++            firmwareError = deviceProfileValidateNorLayout5(deviceType, romInfo.GetHeaderOffset(),
++                                                            sessionDevice != deviceTypeInvalid);
+         if (firmwareError != DeviceFirmwareError5::none) {
+             cerr << "invalid firmware geometry for device profile";
++            if (firmwareError == DeviceFirmwareError5::norSize && deviceProfile5(deviceType)->norSize)
++                cerr << ": invalid NOR size; expected " << deviceProfile5(deviceType)->norSize << " bytes";
++            if (firmwareError == DeviceFirmwareError5::norLayout)
++                cerr << ": invalid NOR layout; expected the card header at 0x" << hex
++                     << e2NorHeaderOffset5 << dec;
+             if (firmwareError == DeviceFirmwareError5::nandSize)
+                 cerr << ": invalid NAND size; expected " << deviceConfigurationGetNandSize(deviceType) << " bytes";
+             cerr << endl;

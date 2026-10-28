@@ -1,4 +1,5 @@
-// Firmware-free PXA27x sleep, wake qualification, reset domains and state compatibility.
+// Firmware-free PXA27x and PXA25x sleep, wake qualification, reset domains and state
+// compatibility.
 #include <cassert>
 #include <chrono>
 #include <cstdio>
@@ -64,6 +65,83 @@ static std::vector<uint8_t> legacy(const std::vector<uint8_t>& source, ChunkType
     const auto* bytes = reinterpret_cast<uint8_t*>(result.data());
     return {bytes, bytes + result.size() * 4};
 }
+// PXA25x (E2): GPIO0-15 wake, sleep-exit reset with RCSR[SMR], and SDRAM held out of
+// the address map until MDCNFG enables a partition, so boot-time RAM clears are lost.
+static void pxa25xSleep() {
+    // MIRROR is MARK in the RAM probe mirror above the 32 MiB of RAM.
+    static constexpr uint32_t MDCNFG = 0x48000000, MARK = 0xa0002000, MIRROR = MARK + (32u << 20);
+    std::vector<uint8_t> rom(8u << 20), nand(34603008, 0xff);
+    const uint32_t branch = 0xeafffffe;
+    memcpy(rom.data(), &branch, 4);
+    SocPXA soc(deviceTypeE2, 32 * 1024 * 1024, rom.data(), rom.size(),
+               nand.data(), nand.size(), -1, 0);
+    write(soc, PM + 0x0c, 1u << 2);  // power key is GPIO2, active low
+    write(soc, PM + 0x10, 0);
+    write(soc, PM + 0x14, 1u << 2);
+    write(soc, PM + 0x08, 0x5ca1ab1e);
+    write(soc, MARK, 0x12345678);
+    assert(read(soc, MIRROR) == 0x12345678);
+    sleep(soc);
+    run(soc, 2000);
+    assert(soc.PowerSleeping());
+    soc.Wakeup(26);  // ordinary IRQs do not end power sleep
+    assert(soc.PowerSleeping());
+    power(soc, true);
+    assert(!soc.PowerSleeping());
+    assert(read(soc, PM + 0x18) == (1u << 2));
+    assert(read(soc, PM + 0x30) & 4);
+    assert((read(soc, PM + 4) & 0x31) == 0x31);
+    assert(read(soc, PM + 8) == 0x5ca1ab1e);
+    assert(read(soc, MARK) == 0 && read(soc, MIRROR) == 0);
+    write(soc, MARK, 0xdeadbeef);  // dropped while SDRAM is held
+    write(soc, MIRROR, 0xfeedface);  // the mirror is held too
+
+    // A held session restores held, and a version 0 memory controller chunk never holds.
+    auto saved = snapshot(soc);
+    SocPXA fresh(deviceTypeE2, 32 * 1024 * 1024, rom.data(), rom.size(),
+                 nand.data(), nand.size(), -1, 0);
+    assert(fresh.Load(saved.size(), saved.data()));
+    assert(read(fresh, MARK) == 0 && read(fresh, MIRROR) == 0);
+    auto old = legacy(saved, ChunkType::pxaMemCtrlr, 0, 1);
+    assert(fresh.Load(old.size(), old.data()));
+    write(fresh, MARK, 0x0badf00d);
+    assert(read(fresh, MARK) == 0x0badf00d && read(fresh, MIRROR) == 0x0badf00d);
+
+    write(soc, MDCNFG, 0x00000ac8);  // no DE bits: still held
+    assert(read(soc, MARK) == 0 && read(soc, MIRROR) == 0);
+    write(soc, MDCNFG, 0x00001bcd);
+    assert(read(soc, MARK) == 0x12345678 && read(soc, MIRROR) == 0x12345678);
+    write(soc, MIRROR, 0x5eed5eed);
+    assert(read(soc, MARK) == 0x5eed5eed);
+    write(soc, MARK, 0x12345678);
+    power(soc, false);
+
+    // Each edge needs its own enable: a press is a falling edge.
+    write(soc, PM + 0x0c, 1u << 2);
+    write(soc, PM + 0x10, 0);
+    write(soc, PM + 0x14, 0);
+    sleep(soc);
+    power(soc, true);
+    assert(soc.PowerSleeping());
+    write(soc, PM + 0x10, 1u << 2);
+    power(soc, false);
+    assert(!soc.PowerSleeping() && read(soc, MARK) == 0);
+    write(soc, MDCNFG, 0x00001bcd);
+
+    // Soft reset releases a hold, and old power manager and GPIO chunks still load.
+    sleep(soc); power(soc, true); power(soc, false);
+    soc.Reset();
+    write(soc, MARK, 0x600df00d);
+    assert(read(soc, MARK) == 0x600df00d);
+    saved = snapshot(soc);
+    old = legacy(saved, ChunkType::pxaPwrClk, 1, 2);
+    old = legacy(old, ChunkType::pxaGpio, 0, 9);
+    assert(soc.Load(old.size(), old.data()));
+    old = legacy(old, ChunkType::pxaPwrClk, 0, 37);
+    assert(soc.Load(old.size(), old.data()));
+    assert(!soc.PowerSleeping());
+}
+
 int main() {
     std::vector<uint8_t> rom(16 * 1024 * 1024), nand(132 * 1024 * 1024, 0xff);
     const uint32_t branch = 0xeafffffe;
@@ -245,5 +323,6 @@ int main() {
     run(fresh, 1100);
     assert(fresh.PowerSleeping());
     assert(read(fresh, 0x40900008) & 1);
-    puts("PASS: PXA27x qualified sleep wake, reset retention, legacy and fresh-state restore");
+    pxa25xSleep();
+    puts("PASS: PXA27x and PXA25x sleep wake, reset retention, legacy and fresh-state restore");
 }

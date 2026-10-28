@@ -107,10 +107,17 @@ int main(){
     puts("PASS: normal restore closes owned peer once, prevents saved-pin resurrection/replay and rejects busy reattach");
     {
         Peer failed;assert(failed.attach(uart));assert(pxaUartSetModemInputs(uart,PXA_UART_CTS));tx(0x43);
-        assert(!soc.Load(saved.size()-4,saved.data()));assert(failed.closes==1 && failed.receive()==-1);
-        ticks(1000);assert(!failed.sent);soc.Reset();config();assert(failed.closes==1);
+        ur(6);const auto msr=ur(6);assert(msr==PXA_UART_CTS); // the first read clears the delta bits
+        // A refused load keeps the peer, its pins and the pending guest byte, with no new pin edges.
+        // The whole savestate, scheduler phases included, matches with the client kept.
+        const auto before=snapshot();
+        assert(!soc.Load(saved.size()-4,saved.data()));assert(failed.closes==0 && failed.fd>=0);
+        assert(!failed.rejectedReentry && snapshot()==before);
+        assert(ur(6)==msr);ticks(1000);assert(failed.sent==1 && failed.receive()==0x43);
+        soc.Reset();config();assert(failed.closes==1 && failed.rejectedReentry==1);
+        soc.Reset();config();assert(failed.closes==1);
     }
-    puts("PASS: rejected restore and reset do not retain or close an owned descriptor twice");
+    puts("PASS: rejected restore keeps an owned peer attached, and reset closes it once");
     {
         Peer live;assert(live.attach(uart));assert(soc.Load(0,nullptr) && !live.closes);assert(pxaUartSetModemInputs(uart,PXA_UART_CTS));
         for(unsigned attempt=0;attempt<2;++attempt){

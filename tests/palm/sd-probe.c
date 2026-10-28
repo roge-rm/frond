@@ -71,6 +71,27 @@ static Err probe(void) {
         logResult("guest-match", StrCompare(data, written) ? 1 : 0, 0);
         logResult("guest-read-close", VFSFileClose(file), 0);
     }
+    // Delete a file the probe makes, then /DELETE.TXT if the host put one there.
+    // A reopen after each delete must fail with vfsErrFileNotFound.
+    error = VFSFileOpen(volume, "/SCRATCH.TXT", vfsModeWrite | vfsModeCreate | vfsModeTruncate, &file);
+    logResult("scratch-open", error, 0);
+    if (!error) {
+        error = VFSFileWrite(file, StrLen(written), written, &count);
+        logResult("scratch-write", error, count);
+        logResult("scratch-close", VFSFileClose(file), 0);
+        logResult("scratch-delete", VFSFileDelete(volume, "/SCRATCH.TXT"), 0);
+        error = VFSFileOpen(volume, "/SCRATCH.TXT", vfsModeRead, &file);
+        if (!error) VFSFileClose(file);
+        logResult("scratch-gone", error, 0);
+    }
+    error = VFSFileOpen(volume, "/DELETE.TXT", vfsModeRead, &file);
+    if (!error) {
+        VFSFileClose(file);
+        logResult("host-delete", VFSFileDelete(volume, "/DELETE.TXT"), 0);
+        error = VFSFileOpen(volume, "/DELETE.TXT", vfsModeRead, &file);
+        if (!error) VFSFileClose(file);
+        logResult("host-delete-gone", error, 0);
+    }
     logResult("complete", 0, started);
     return errNone;  // File errors are logged and must never trigger another attempt.
 }

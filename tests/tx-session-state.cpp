@@ -37,10 +37,13 @@ static uint64_t readWmmx(unsigned reg) {
 }
 struct E2Versions {
     void Load(SavestateLoader<ChunkType>& loader) {
-        for (auto type : {ChunkType::pxaLcd, ChunkType::pxaPwrClk, ChunkType::pxaTimr}) {
+        // The E2 power manager saves version 2 with PXA25x power sleep.
+        const struct { ChunkType type; uint32_t version; } chunks[] = {
+            {ChunkType::pxaLcd, 0}, {ChunkType::pxaPwrClk, 2}, {ChunkType::pxaTimr, 0}};
+        for (auto chunk : chunks) {
             uint32_t version = 99;
-            assert(loader.GetChunkOrFail(type, 1, "E2 compatibility", version));
-            assert(version == 0);
+            assert(loader.GetChunkOrFail(chunk.type, 2, "E2 compatibility", version));
+            assert(version == chunk.version);
         }
     }
 };
@@ -185,7 +188,7 @@ int main() {
     fresh.Run(5000000, 100000000);
     frame = fresh.GetPendingFrame(first, last);
     assert(frame && frame[0] == 0xff0000ff && frame[320 * 480 - 1] == frame[0]);
-    // E2 keeps the old timer and version-zero LCD/power wire format.
+    // E2 keeps the old timer and version-zero LCD wire format; power is version two.
     SocPXA e2(DeviceType5::deviceTypeE2, 16 * 1024 * 1024, rom.data(), 8 * 1024 * 1024,
               nand.data(), 33 * 1024 * 1024, -1, 0);
     cpu = e2.GetCpu();
@@ -248,6 +251,6 @@ int main() {
     sdCardReset();
     puts("PASS: TX cold reset preserves inserted/ejected card detect and stored sectors");
     puts("PASS: TX EP0 partial FIFO restore, packet readiness and cold reset through the real SoC");
-    puts("PASS: E2 timer and version-zero LCD/power sessions");
+    puts("PASS: E2 timer, version-zero LCD and version-two power sessions");
     puts("PASS: TX peripheral/WMMX reload, truncated-state rollback and reset without RAM erasure");
 }

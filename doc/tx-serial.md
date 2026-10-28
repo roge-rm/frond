@@ -47,7 +47,7 @@ the modem inputs between emulation slices. Each received byte still takes one
 frame at the programmed baud on emulated time.
 
 Nothing from the host is session state. Reset, session load and a mode change
-detach the UART and drop both queues; the host connection stays open (except on a
+detach the UART and drop both queues; a refused load leaves it attached; the host connection stays open (except on a
 mode change) and the UART is attached again once its TX and RX are idle. A
 restored session starts detached and reattaches the same way. Saved MSR bits are
 recomputed from the live peer after a load. Input replays do not record serial

@@ -13,11 +13,16 @@ ROOT = Path(__file__).resolve().parents[1]
 CORE = ROOT / 'out/frond'
 
 
-def header(hal=0x68737072):
-    data = bytearray(256)
-    struct.pack_into('<I', data, 8, 0xfeedbeef)
-    struct.pack_into('<II', data, 0x80, 0x50616c6d, hal)
+def header(hal=0x68737072, size=256, at=0):
+    data = bytearray(size)
+    struct.pack_into('<I', data, at + 8, 0xfeedbeef)
+    struct.pack_into('<II', data, at + 0x80, 0x50616c6d, hal)
     return data
+
+
+def e2_nor(size=8 << 20, at=0x20000):
+    """E2 NOR layout: card header after the 128 KiB boot block."""
+    return header(size=size, at=at)
 
 
 def session(path, device, *, nor=None, nand=0, display=6, ram=32 << 20, sd=False):
@@ -51,7 +56,7 @@ class DeviceInputTest(unittest.TestCase):
         cls.nor = cls.root / 'nor'
         cls.nand = cls.root / 'nand'
         cls.e2 = cls.root / 'e2'
-        cls.e2.write_bytes(header())
+        cls.e2.write_bytes(e2_nor())
         for file, size in ((cls.nor, 16 << 20), (cls.nand, 138412032)):
             with file.open('wb') as stream:
                 stream.truncate(size)
@@ -67,6 +72,7 @@ class DeviceInputTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stderr)
         self.assertIn(message, result.stderr + result.stdout)
         self.assertNotIn('SDL', result.stderr)
+        return result
 
     def test_inventory(self):
         data = json.loads(subprocess.check_output([ROOT / 'out/frond-device-profiles']))
@@ -87,18 +93,38 @@ class DeviceInputTest(unittest.TestCase):
         self.rejected(base + ['--nand', self.nand, '--display', '320x320'], 'unsupported display mode')
         self.rejected([self.e2, '--nand', self.nand], 'invalid NAND size')
 
+    def test_e2_nor_size_and_layout(self):
+        cases = ((e2_nor(4 << 20), 'invalid NOR size; expected 8388608 bytes'),
+                 (e2_nor((8 << 20) + 1), 'invalid NOR size; expected 8388608 bytes'),
+                 (header(), 'invalid NOR size; expected 8388608 bytes'),
+                 (e2_nor(at=0), 'invalid NOR layout'),
+                 (e2_nor(at=0x40000), 'invalid NOR layout'))
+        for index, (data, message) in enumerate(cases):
+            with self.subTest(case=index):
+                rom = self.root / f'e2-bad-{index}'
+                rom.write_bytes(data)
+                self.rejected([rom, '--run-for', '1'], message)
+        # E2 sessions saved before these checks keep their NOR; the synthetic state then fails.
+        for index, nor in enumerate((e2_nor(4 << 20), e2_nor(16 << 20), e2_nor(at=0))):
+            with self.subTest(session=index):
+                path = session(self.root / f'e2-old-session-{index}', 0, nor=nor, nand=34603008,
+                               display=5)
+                result = self.rejected([path, '--run-for', '1'], 'failed to restore savestate')
+                self.assertNotIn('invalid', result.stderr)
+
     def test_inherited_cohorts_cannot_use_desktop(self):
         for hal in (0x68737072, 0x446d4752, 0x50765076):
             with self.subTest(hal=hal):
                 rom = self.root / 'inherited'
-                rom.write_bytes(header(hal))
+                rom.write_bytes(e2_nor() if hal == 0x68737072 else header(hal))
                 self.rejected([rom, '--desktop-socket', self.root / 'unused'], 'Palm TX only')
 
     def test_e2_replay_bounds_and_physical_app_buttons(self):
         replay = self.root / 'e2.replay'
         # A duration rejection proves parsing succeeded, without executing synthetic ROM.
         # Existing aliases keep their TX meaning; physical names avoid claiming an E2 Home key.
-        for key in ('hard1', 'hard2', 'hard3', 'hard4', 'home', 'calendar', 'contacts', 'web'):
+        for key in ('hard1', 'hard2', 'hard3', 'hard4', 'home', 'calendar', 'contacts', 'web',
+                    'up', 'down', 'left', 'right', 'center', 'power'):
             replay.write_text(f'0 key-down {key}\n1000 key-up {key}\n')
             self.rejected([self.e2, '--input-replay', replay, '--run-for', '1'],
                           'input replay extends beyond')

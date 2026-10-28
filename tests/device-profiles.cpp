@@ -54,6 +54,28 @@ int main() {
     assert(deviceProfileValidateFirmware5(3, 16u << 20, 138412032, true, false) == DeviceFirmwareError5::none);
     assert(deviceProfileValidateFirmware5(3, (16u << 20) - 1, 138412032, true, false) == DeviceFirmwareError5::norSize);
     assert(deviceProfileValidateFirmware5(3, 16u << 20, 128u << 20, false, true) == DeviceFirmwareError5::nandSize);
+    // E2 NOR is an 8 MiB part with its card header after the 128 KiB boot block.
+    assert(deviceProfileValidateFirmware5(0, 8u << 20, 34603008, false, true) == DeviceFirmwareError5::none);
+    for (size_t nor : {size_t(4u << 20), size_t((8u << 20) - 1), size_t((8u << 20) + 1), size_t(16u << 20)})
+        assert(deviceProfileValidateFirmware5(0, nor, 34603008, false, true) == DeviceFirmwareError5::norSize);
+    assert(deviceProfileValidateNorLayout5(0, 0x20000, false) == DeviceFirmwareError5::none);
+    for (size_t at : {size_t(0), size_t(0x8000), size_t(0x40000)})
+        assert(deviceProfileValidateNorLayout5(0, at, false) == DeviceFirmwareError5::norLayout);
+    for (int other : {1, 2, 3}) assert(deviceProfileValidateNorLayout5(other, 0, false) == DeviceFirmwareError5::none);
+    // E2 sessions from builds before the size and layout checks still load; TX sessions don't.
+    for (size_t nor : {size_t(4u << 20), size_t(16u << 20)})
+        assert(deviceProfileValidateFirmware5(0, nor, 34603008, true, false) == DeviceFirmwareError5::none);
+    assert(deviceProfileValidateFirmware5(0, 0, 34603008, true, false) == DeviceFirmwareError5::norSize);
+    assert(deviceProfileValidateFirmware5(0, 8u << 20, 34603007, true, false) == DeviceFirmwareError5::nandSize);
+    assert(deviceProfileValidateNorLayout5(0, 0, true) == DeviceFirmwareError5::none);
+    {
+        std::vector<uint8_t> nor(8u << 20);
+        put32(nor, 0x20000 + 8, 0xfeedbeef);
+        put32(nor, 0x20000 + 0x80, 0x50616c6d);
+        put32(nor, 0x20000 + 0x84, 0x68737072);
+        const RomInfo5 info(nor.data(), nor.size());
+        assert(info.IsValid() && info.GetDeviceType() == deviceTypeE2 && info.GetHeaderOffset() == 0x20000);
+    }
 
     // Public header layout and IDs from RomInfo5, no dump data.
     for (auto hal : {0x68737072u, 0x446d4752u, 0x50765076u, 0x12345678u}) {
@@ -93,5 +115,5 @@ int main() {
         assert(std::memcmp(decoded.GetMemory(), synthetic, sizeof(synthetic)) == 0);
         assert(decoded.GetSdSize() == (sd ? 512u : 0u));
     }
-    std::cout << "PASS: native cohort inventory, geometry, header bounds and v4/v5 session IDs\n";
+    std::cout << "PASS: native cohort inventory, geometry, E2 NOR size/layout, header bounds and v4/v5 session IDs\n";
 }

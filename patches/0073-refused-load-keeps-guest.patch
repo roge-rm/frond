@@ -1,0 +1,200 @@
+diff --git a/src/uarm/uarm/SoC.h b/src/uarm/uarm/SoC.h
+--- a/src/uarm/uarm/SoC.h
++++ b/src/uarm/uarm/SoC.h
+@@ -136,6 +136,8 @@ class SoC {
+     virtual void BeforeStateReplacement() {}
+     // After a reset, or a load that succeeded.
+     virtual void StateReplaced() {}
++    // A load was refused; restore loads the previous state back.
++    virtual void StateReplacementRefused(const std::function<void()>& restore) { restore(); }
+     virtual void BeginSerialCheckpoint() {}
+     virtual void EndSerialCheckpoint() {}
+     virtual void OnSetFramebufferDirty() = 0;
+diff --git a/src/uarm/uarm/pxa_UART.cpp b/src/uarm/uarm/pxa_UART.cpp
+--- a/src/uarm/uarm/pxa_UART.cpp
++++ b/src/uarm/uarm/pxa_UART.cpp
+@@ -61,6 +61,17 @@ struct PxaUart {
+     PxaUartClientDetach detachF;
+     uint8_t modemInputs;               // live pin levels, not session state
+     unsigned ioCheckpoints;    // host-only nesting; never serialized
++    // The external client while a state load is tried; never serialized.
++    struct SuspendedClient {
++        bool active;
++        PxaUartReadF readF;
++        PxaUartWriteF writeF;
++        PxaUartClientIsActive activeF;
++        PxaUartClientTick tickF;
++        PxaUartClientDetach detachF;
++        void* context;
++        uint8_t modemInputs;
++    } suspended;
+     uint32_t disableCount;     // IER[UUE] clears seen, for host peers; never serialized
+ 
+     bool Paced() const { return fifoOccupancy && baseAddr != PXA_HWUART_BASE; }
+@@ -610,6 +621,44 @@ void pxaUartDetachExternal(PxaUart* uart) {
+     notify(context); // exactly once; clear ownership before notifying
+ }
+ 
++void pxaUartSuspendExternal(PxaUart* uart) {
++    if (!uart->externalClient || uart->ioCheckpoints || uart->suspended.active) return;
++    uart->suspended = {true, uart->readF, uart->writeF, uart->clientIsActiveF, uart->clientTickF,
++                       uart->detachF, uart->callbackData, uart->modemInputs};
++    // Same register effect as a detach, without the notification. detaching stays set
++    // until resume, so attach, modem input and I/O are refused meanwhile.
++    uart->detaching = true;
++    uart->externalClient = false;
++    uart->detachF = nullptr;
++    uart->readF = pxaUartPrvDefaultRead;
++    uart->writeF = pxaUartPrvDefaultWrite;
++    uart->clientIsActiveF = nullptr;
++    uart->clientTickF = nullptr;
++    uart->callbackData = nullptr;
++    uart->modemInputs = 0;
++    pxaUartResync(uart);
++}
++
++void pxaUartResumeExternal(PxaUart* uart, bool keep) {
++    if (!uart->suspended.active) return;
++    const auto client = uart->suspended;
++    uart->suspended = {};
++    struct Guard { PxaUart* uart; ~Guard() { uart->detaching = false; } } guard{uart};
++    if (!keep) {
++        client.detachF(client.context);
++        return;
++    }
++    // No resync: the caller loads the UART registers next, with these pins.
++    uart->readF = client.readF;
++    uart->writeF = client.writeF;
++    uart->clientIsActiveF = client.activeF;
++    uart->clientTickF = client.tickF;
++    uart->detachF = client.detachF;
++    uart->callbackData = client.context;
++    uart->modemInputs = client.modemInputs;
++    uart->externalClient = true;
++}
++
+ bool pxaUartAttachExternal(PxaUart* uart, PxaUartReadF readF, PxaUartWriteF writeF,
+                           PxaUartClientIsActive activeF, PxaUartClientTick tickF,
+                           PxaUartClientDetach detachF, void* context) {
+@@ -942,9 +991,9 @@ bool pxaUartTaskRequired(struct PxaUart *uart) {
+ }
+ 
+ void pxaUartBeginCheckpoint(PxaUart* uart) { ++uart->ioCheckpoints; }
+-void pxaUartEndCheckpoint(PxaUart* uart) {
++void pxaUartEndCheckpoint(PxaUart* uart, bool kick) {
+     if (!uart->ioCheckpoints) ERR("unbalanced UART checkpoint");
+-    if (!--uart->ioCheckpoints)
++    if (!--uart->ioCheckpoints && kick)
+         uart->reschedule.rescheduleCb(uart->reschedule.ctx, RESCHEDULE_TASK_UART);
+ }
+ 
+diff --git a/src/uarm/uarm/pxa_UART.h b/src/uarm/uarm/pxa_UART.h
+--- a/src/uarm/uarm/pxa_UART.h
++++ b/src/uarm/uarm/pxa_UART.h
+@@ -59,11 +59,17 @@ void pxaUartSetFuncs(struct PxaUart *uart, PxaUartReadF readF, PxaUartWriteF wri
+ 
+ // Model-only external ownership, not a host endpoint. Emulator-thread calls only.
+ // Attach requires idle TX/RX and a detach notification. Caller must detach before
+-// destroying its callback data or UART. Reset/normal load detach; checkpoints do not.
++// destroying its callback data or UART. Reset/normal load detach; checkpoints and
++// refused loads do not.
+ bool pxaUartAttachExternal(PxaUart* uart, PxaUartReadF readF, PxaUartWriteF writeF,
+                           PxaUartClientIsActive activeF, PxaUartClientTick tickF,
+                           PxaUartClientDetach detachF, void* userData);
+ void pxaUartDetachExternal(PxaUart* uart);
++// Around a state load: suspend takes the client off without notifying it. Resume with
++// keep puts it back as it was, before the old state is loaded again; otherwise the
++// client gets its detach notification.
++void pxaUartSuspendExternal(PxaUart* uart);
++void pxaUartResumeExternal(PxaUart* uart, bool keep);
+ bool pxaUartSetModemInputs(PxaUart* uart, uint8_t asserted);
+ uint8_t pxaUartGetModemOutputs(const PxaUart* uart);
+ void pxaUartResync(PxaUart* uart);
+@@ -86,7 +92,8 @@ void pxaUartDmaEndOfChain(PxaUart *uart);          // receive channel ended its
+ 
+ // Freeze callbacks and serial progress while temporary guest work is rolled back.
+ void pxaUartBeginCheckpoint(PxaUart* uart);
+-void pxaUartEndCheckpoint(PxaUart* uart);
++// kick reschedules the UART task for work held back meanwhile.
++void pxaUartEndCheckpoint(PxaUart* uart, bool kick = true);
+ 
+ bool pxaUartTaskRequired(struct PxaUart *uart);
+ 
+diff --git a/src/uarm/uarm/soc_PXA.cpp b/src/uarm/uarm/soc_PXA.cpp
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -760,12 +760,29 @@ std::function<void()> SocPXA::CapturePeripheralInput() {
+     return [keypad, device] { keypad(); device(); };
+ }
+ 
++// External UART clients are suspended while a load is tried. A refused load keeps
++// them, since the guest carries on as it was.
+ void SocPXA::BeforeStateReplacement() {
+     for (auto* uart : {ffUart, stUart, btUart, hwUart})
+-        if (uart) pxaUartDetachExternal(uart);
++        if (uart) pxaUartSuspendExternal(uart);
++}
++
++void SocPXA::StateReplacementRefused(const std::function<void()>& restore) {
++    // The UART checkpoint keeps the resumed clients through the reload. It ends without
++    // a UART kick, so scheduler phases stay as saved.
++    for (auto* uart : {ffUart, stUart, btUart, hwUart})
++        if (uart) {
++            pxaUartResumeExternal(uart, true);
++            pxaUartBeginCheckpoint(uart);
++        }
++    restore();
++    for (auto* uart : {ffUart, stUart, btUart, hwUart})
++        if (uart) pxaUartEndCheckpoint(uart, false);
+ }
+ 
+ void SocPXA::StateReplaced() {
++    for (auto* uart : {ffUart, stUart, btUart, hwUart})
++        if (uart) pxaUartResumeExternal(uart, false);
+     // A checkpoint restore for a read (database list, export) puts back the state from
+     // just before; the USB host was paused meanwhile and carries on.
+     if (usbHostHooks.replaced && !RestoringCheckpoint()) usbHostHooks.replaced(usbHostHooks.context);
+diff --git a/src/uarm/uarm/soc_PXA.h b/src/uarm/uarm/soc_PXA.h
+--- a/src/uarm/uarm/soc_PXA.h
++++ b/src/uarm/uarm/soc_PXA.h
+@@ -93,6 +93,7 @@ class SocPXA : public SocGeneric<SocPXA> {
+     std::function<void()> CapturePeripheralInput() override;
+     void BeforeStateReplacement() override;
+     void StateReplaced() override;
++    void StateReplacementRefused(const std::function<void()>& restore) override;
+     void BeginSerialCheckpoint() override;
+     void EndSerialCheckpoint() override;
+     void OnSetFramebufferDirty() override;
+diff --git a/src/uarm/uarm/soc_generic_impl.h b/src/uarm/uarm/soc_generic_impl.h
+--- a/src/uarm/uarm/soc_generic_impl.h
++++ b/src/uarm/uarm/soc_generic_impl.h
+@@ -127,20 +127,26 @@ bool SocGeneric<T>::Save() {
+ template <class T>
+ bool SocGeneric<T>::Load(size_t savestateSize, void* savestateData) {
+     if (savestateSize == 0 || !savestateData) return true;
++    // Host input sits outside the savestate; a refused load puts it back too.
++    SoC::InputCheckpoint input(*this);
+     if (!this->RestoringCheckpoint()) {
+         jammedKey = keyInvalid;
+         releaseJammedKeyAt = 0;
+     }
+-    this->BeforeStateReplacement();
+ 
+     Savestate<ChunkType> savestate;
+     SavestateLoader<ChunkType> loader;
+ 
+     savestate.Save(*this);
++    this->BeforeStateReplacement();
+ 
+     if (!loader.Load(savestateData, savestateSize, *this)) {
+-        if (!loader.Load(savestate.GetBuffer(), savestate.GetSize(), *this))
+-            ERR("failed to restore initial state after load failure");
++        // Restore as a checkpoint, so scheduler phases, the keypad, queued host input
++        // and attached serial clients are left as they were before this call.
++        bool restored = false;
++        this->StateReplacementRefused(
++            [&] { restored = input.Restore(savestate.GetSize(), savestate.GetBuffer()); });
++        if (!restored) ERR("failed to restore initial state after load failure");
+ 
+         return false;
+     }

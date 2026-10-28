@@ -100,8 +100,9 @@ Close guest files before ejecting: aborting a transfer cannot flush an app's fil
 Memory-copy DMA descriptor rings yield after bounded work per channel so guest
 execution, other channels, reset and checkpoint requests remain reachable. UART
 peer callbacks stop during true power sleep; wake resets the UART domain and
-detaches its external owner. Nonempty normal and rejected loads close host socket/peer
-ownership; apps may need to reconnect. Temporary database checkpoints preserve
+detaches its external owner. Nonempty normal loads close host socket/peer
+ownership; apps may need to reconnect. A refused load keeps the peer attached, as
+the guest carries on as it was. Temporary database checkpoints preserve
 ownership while freezing external effects. The host serial endpoint, UART DMA
 and USB HotSync have their own tests, in [serial](tx-serial.md) and
 [USB HotSync](peripherals.md#usb-hotsync).

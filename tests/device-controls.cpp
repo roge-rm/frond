@@ -2,6 +2,7 @@
 #include <cassert>
 #include <cstdio>
 #include <vector>
+#include <tuple>
 #include <utility>
 #include <SDL.h>
 #include "SdlEventHandler.h"
@@ -68,19 +69,32 @@ int main() {
     // A different device may use an app key for Calendar and separate up/down buttons.
     const DeviceButton otherButtons[]={{keyIdHard1,{4,4,30,30},"Calendar",DeviceControlIcon::calendar},
                                       {keyIdUp,{40,4,30,30},"Up",DeviceControlIcon::up}};
-    const DeviceControlProfile other{160,40,otherButtons,2,{0,0},0};
+    const DeviceControlProfile other{160,40,otherButtons,2,{0,0,0,0},0,{0,0,0,0}};
     assert(deviceControlAt(other,160,200,50,215)==keyIdUp);
     for(auto rotation:{Rotation::portrait_0,Rotation::landscape_90,Rotation::portrait_180,Rotation::landscape_270})
     for(int scale:{1,2}) {
         Guest guest;DisplayConfiguration display{320,480,0,160};SdlEventHandler input(&guest,scale,display,rotation);
         const bool landscape=rotation==Rotation::landscape_90 || rotation==Rotation::landscape_270;
         const int width=landscape?480:320,height=landscape?320:480;
-        // The curved navigator is clickable between the arrow icons as well.
-        const int nx=(width-profile.width)/2+profile.navigator.x,ny=height+profile.navigator.y;
-        assert(deviceControlAt(profile,width,height,nx-23,ny-10)==keyIdLeft);
-        assert(deviceControlAt(profile,width,height,nx+10,ny-23)==keyIdUp);
+        // The whole rounded five-way ring is clickable, split along its diagonals around the select pill.
+        const auto& nav=profile.navigator;
+        const int left=(width-profile.width)/2+nav.x,top=height+nav.y;
+        const int nx=left+nav.w/2,ny=top+nav.h/2;
+        assert(deviceControlAt(profile,width,height,left+2,ny)==keyIdLeft);
+        assert(deviceControlAt(profile,width,height,left+nav.w-3,ny+4)==keyIdRight);
+        assert(deviceControlAt(profile,width,height,nx+10,top+2)==keyIdUp);
+        assert(deviceControlAt(profile,width,height,nx-10,top+nav.h-3)==keyIdDown);
+        assert(deviceControlAt(profile,width,height,left+14,top+7)==keyIdUp);
+        assert(deviceControlAt(profile,width,height,left+8,top+12)==keyIdLeft);
         assert(deviceControlAt(profile,width,height,nx,ny)==keyIdSelect);
-        assert(deviceControlAt(profile,width,height,nx+38,ny+38)==keyInvalid);
+        assert(deviceControlAt(profile,width,height,nx+profile.select.w/2-2,ny)==keyIdSelect);
+        // Rounded corners and the gaps between controls are not buttons.
+        assert(deviceControlAt(profile,width,height,left+1,top+1)==keyInvalid);
+        assert(deviceControlAt(profile,width,height,left-3,ny)==keyInvalid);
+        assert(deviceControlAt(profile,width,height,nx,top+nav.h+1)==keyInvalid);
+        const auto pocket=deviceButtonRect(profile,profile.buttons[0],width,height);
+        assert(deviceControlAt(profile,width,height,pocket.x,pocket.y)==keyInvalid);
+        assert(deviceControlAt(profile,width,height,pocket.x+pocket.w,pocket.y+pocket.h/2)==keyInvalid);
         for(size_t i=0;i<profile.count;++i) {
             const auto& b=profile.buttons[i];auto r=deviceButtonRect(profile,b,width,height);
             const int x=(r.x+r.w/2)*scale,y=(r.y+r.h/2)*scale;
@@ -139,6 +153,18 @@ int main() {
         auto idle=pixel((home.x+5)*scale,(home.y+home.h/2)*scale);
         drawDeviceControls(renderer,profile,width,height,scale,1u<<keyIdHard1);
         assert(idle!=pixel((home.x+5)*scale,(home.y+home.h/2)*scale));
+        // Each five-way part darkens where it is hit.
+        for(auto [part,px,py]:{std::tuple<KeyId,int,int>{keyIdUp,nx,top+4},{keyIdDown,nx,top+nav.h-4},
+                {keyIdLeft,left+4,ny},{keyIdRight,left+nav.w-4,ny},{keyIdSelect,nx,ny}}) {
+            assert(deviceControlAt(profile,width,height,px,py)==part);
+            drawDeviceControls(renderer,profile,width,height,scale,0);
+            const auto before=pixel(px*scale,py*scale);
+            drawDeviceControls(renderer,profile,width,height,scale,1u<<part);
+            const auto after=pixel(px*scale,py*scale);
+            Uint8 r0,g0,b0,r1,g1,b1;
+            SDL_GetRGB(before,surface->format,&r0,&g0,&b0);SDL_GetRGB(after,surface->format,&r1,&g1,&b1);
+            assert(r1+g1+b1<r0+g0+b0);
+        }
         assert(pixel(0,0)==SDL_MapRGBA(surface->format,255,255,255,255));
         SDL_DestroyRenderer(renderer);SDL_FreeSurface(surface);
     }

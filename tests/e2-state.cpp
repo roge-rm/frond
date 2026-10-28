@@ -28,6 +28,49 @@ static void idle(SocPXA& soc) {
     cpuSetReg(soc.GetCpu(), ARM_REG_NUM_CPSR, ARM_SR_MODE_SVC | ARM_SR_I | ARM_SR_F);
     cpuSetReg(soc.GetCpu(), 15, 0xa0000000);
 }
+// E2 NAND: CLE 0x04000002, ALE 0x04000004, data 0x04000000; 528-byte pages,
+// one column byte and two page bytes, area commands 00/01/50.
+static void nandByte(SocPXA& soc, uint32_t address, uint8_t value) {
+    assert(memAccess(cpuGetMem(soc.GetCpu()), address, 1, true, &value));
+}
+static uint8_t nandRead(SocPXA& soc) {
+    uint8_t value = 0;
+    assert(memAccess(cpuGetMem(soc.GetCpu()), 0x04000000, 1, false, &value));
+    return value;
+}
+static void nandAddress(SocPXA& soc, uint32_t page, bool column = true) {
+    if (column) nandByte(soc, 0x04000004, 0);
+    nandByte(soc, 0x04000004, page & 0xff);
+    nandByte(soc, 0x04000004, page >> 8);
+}
+static void nandReady(SocPXA& soc) {
+    run(soc, 1);
+    nandByte(soc, 0x04000002, 0x70);
+    assert(nandRead(soc) == 0x40);
+}
+static const char nandText[] = "Frond E2 NAND program";
+static void nandProgram(SocPXA& soc, uint32_t page) {
+    nandByte(soc, 0x04000002, 0x00);
+    nandByte(soc, 0x04000002, 0x80);
+    nandAddress(soc, page);
+    for (char c : nandText) nandByte(soc, 0x04000000, uint8_t(c));
+    nandByte(soc, 0x04000002, 0x10);
+    nandReady(soc);
+}
+static bool nandHasText(SocPXA& soc, uint32_t page) {
+    nandByte(soc, 0x04000002, 0x00);
+    nandAddress(soc, page);
+    run(soc, 1);
+    for (char c : nandText) if (nandRead(soc) != uint8_t(c)) return false;
+    return true;
+}
+static bool nandErased(SocPXA& soc, uint32_t page) {
+    nandByte(soc, 0x04000002, 0x00);
+    nandAddress(soc, page);
+    run(soc, 1);
+    for (unsigned i = 0; i < 528; ++i) if (nandRead(soc) != 0xff) return false;
+    return true;
+}
 static std::vector<uint8_t> state(SocPXA& soc) {
     assert(soc.Save());
     auto data = soc.GetSavestate();
@@ -66,6 +109,24 @@ int main() {
         run(soc);
         assert(read(soc,0x40e00000) & (1u << 11));
         assert(!(read(soc,0x40e00004) & (1u << 18)));
+        // Guest program and erase reach the raw NAND image, survive a soft reset and
+        // are carried by the session envelope below.
+        constexpr uint32_t kept = 0x1234, erased = 0x2005;
+        nandProgram(soc, kept);
+        nandProgram(soc, erased);
+        assert(soc.IsNandDirty());
+        const auto* raw = static_cast<const uint8_t*>(soc.GetNandData().data);
+        assert(memcmp(raw + kept * 528, nandText, sizeof(nandText)) == 0);
+        assert(nandHasText(soc, kept) && nandHasText(soc, erased));
+        nandByte(soc, 0x04000002, 0x60);
+        nandAddress(soc, erased & ~31u, false);
+        nandByte(soc, 0x04000002, 0xd0);
+        nandReady(soc);
+        assert(nandErased(soc, erased) && nandHasText(soc, kept));
+        soc.Reset();
+        idle(soc);
+        run(soc, 1);
+        assert(nandHasText(soc, kept) && nandErased(soc, erased));
         write(soc, 0xa0002000, 0x12345678);
         assert(read(soc, 0xa0002000 + ram) == 0x12345678); // RAM probe mirror
         const uint32_t descriptor = 0xa0003000, framebuffer = 0xa0100000;
@@ -104,6 +165,28 @@ int main() {
             }
             assert(removed && !soc.Load(missingCodec.size(),missingCodec.data()));
             assert(read(soc, 0x40f00008) == 0x87654321);
+            // A refused load leaves the running guest exactly as it was: the whole
+            // savestate (scheduler phases included) and a host key still queued.
+            {
+                run(soc, 3);
+                const auto before = state(soc);
+                const auto pin = read(soc, 0x40e00000);
+                soc.KeyDown(keyIdHard2);
+                auto truncated = saved; truncated.resize(saved.size() / 2);
+                auto corrupt = saved;
+                for (unsigned i = 0; i < toc[0]; ++i)
+                    if (toc[1 + 2*i] == uint32_t(ChunkType::pxaGpio))
+                        reinterpret_cast<uint32_t*>(corrupt.data())[1 + 2*i] = 0x7ffffffe;
+                for (auto* bad : {&truncated, &missingCodec, &corrupt}) {
+                    assert(!soc.Load(bad->size(), bad->data()));
+                    assert(state(soc) == before);
+                    assert(read(soc, 0x40e00000) == pin);
+                }
+                run(soc);
+                assert(!(read(soc,0x40e00000) & (1u << 13)));
+                soc.KeyUp(keyIdHard2); run(soc);
+                assert(read(soc,0x40e00000) & (1u << 13));
+            }
             auto audio = audioQueueCreate(1024);
             soc.SetAudioQueue(audio); audioQueuePush(audio,0x12345678);
             assert(soc.Load(saved.size(), saved.data()));
@@ -147,13 +230,17 @@ int main() {
                 assert(sector[0] == 0x5a);
             }
             run(fresh);
+            assert(nandHasText(fresh, kept) && nandErased(fresh, erased));
             frame = fresh.GetPendingFrame(first,last);
             assert(frame && frame[0] == 0xff0000ff && frame[320*320-1] == frame[0]);
             fresh.Reset();
             assert(read(fresh,0xa0002000) == 0x12345678 && fresh.SdInserted() == card);
+            idle(fresh);
+            run(fresh, 1);
+            assert(nandHasText(fresh, kept));
             assert(bool(read(fresh,0x40e00000) & (1u << 10)) == !card);
             if (card) { soc.SdEject(); sdCardReset(); }
         }
     }
-    puts("PASS: E2 16/32 MiB GPIO keys, pen, RAM mirror, LCD, v4/v5 fresh-SoC restore, rollback and reset/card retention");
+    puts("PASS: E2 16/32 MiB GPIO keys, pen, NAND program/erase, RAM mirror, LCD, v4/v5 fresh-SoC restore, rollback and reset/card/NAND retention");
 }

@@ -1,0 +1,364 @@
+diff --git a/src/uarm/uarm/mem.cpp b/src/uarm/uarm/mem.cpp
+--- a/src/uarm/uarm/mem.cpp
++++ b/src/uarm/uarm/mem.cpp
+@@ -78,6 +78,47 @@ bool memRegionAddRam(struct ArmMem *mem, uint32_t pa, uint32_t sz, ArmMemAccessF
+     return memRegionAddFixed(mem, REGION_RAM, pa, sz, af, uD);
+ }
+ 
++static bool memHeldRamAccess(void *, uint32_t, uint_fast8_t size, bool write, void *buf) {
++    if (!write) memset(buf, 0, size);
++    return true;
++}
++
++bool memRamHeld(const struct ArmMem *mem) { return mem->heldRam.ub != 0; }
++
++// A device slot backed by the same RAM buffer, like the E2 RAM probe mirror.
++static bool memIsRamMirror(const struct ArmMemRegion &region, const struct ArmMemRegion &ram) {
++    return region.ub && region.aF == ram.aF && region.uD != ram.uD && region.uD &&
++           ((struct ArmRam *)region.uD)->buf.buffer == ((struct ArmRam *)ram.uD)->buf.buffer;
++}
++
++bool memHoldRam(struct ArmMem *mem, bool held) {
++    if (held == memRamHeld(mem)) return true;
++    if (!held) {
++        // Held mirrors keep their ArmRam as uD; the stand-in slot has none.
++        for (int i = REGION_BASE; i < NUM_MEM_REGIONS; i++)
++            if (mem->regions[i].aF == memHeldRamAccess && mem->regions[i].uD)
++                mem->regions[i].aF = mem->heldRam.aF;
++        mem->regions[mem->heldSlot] = {};
++        mem->regions[REGION_RAM] = mem->heldRam;
++        mem->heldRam = {};
++        return true;
++    }
++    // Swap the RAM region for a device slot over the same range. The RAM fast paths
++    // only test the REGION_RAM bounds, so they see nothing while it is held.
++    for (int i = REGION_BASE; i < NUM_MEM_REGIONS; i++) {
++        if (mem->regions[i].ub) continue;
++        const struct ArmMemRegion ram = mem->regions[REGION_RAM];
++        for (int j = REGION_BASE; j < NUM_MEM_REGIONS; j++)
++            if (memIsRamMirror(mem->regions[j], ram)) mem->regions[j].aF = memHeldRamAccess;
++        mem->heldRam = ram;
++        mem->heldSlot = i;
++        mem->regions[i] = {ram.pa, ram.ub, memHeldRamAccess, nullptr};
++        mem->regions[REGION_RAM] = {};
++        return true;
++    }
++    return false;
++}
++
+ bool memRegionAddRom(struct ArmMem *mem, uint32_t pa, uint32_t sz, ArmMemAccessF af, void *uD) {
+     return memRegionAddFixed(mem, REGION_ROM, pa, sz, af, uD);
+ }
+diff --git a/src/uarm/uarm/mem.h b/src/uarm/uarm/mem.h
+--- a/src/uarm/uarm/mem.h
++++ b/src/uarm/uarm/mem.h
+@@ -17,6 +17,11 @@ bool memRegionAdd(struct ArmMem* mem, uint32_t pa, uint32_t sz, ArmMemAccessF af
+ bool memRegionAddRam(struct ArmMem* mem, uint32_t pa, uint32_t sz, ArmMemAccessF af, void* uD);
+ bool memRegionAddRom(struct ArmMem* mem, uint32_t pa, uint32_t sz, ArmMemAccessF af, void* uD);
+ 
++// While held, primary RAM and its mirrors reach no memory: reads return 0 and writes are
++// dropped, as with SDRAM still in self-refresh. Returns false if no slot is free.
++bool memHoldRam(struct ArmMem* mem, bool held);
++bool memRamHeld(const struct ArmMem* mem);
++
+ // True only for a complete RAM/ROM range, never MMIO. DMA tails may split these accesses.
+ bool memIsBufferRange(ArmMem* mem, uint32_t addr, uint32_t size, bool write);
+ 
+diff --git a/src/uarm/uarm/mem_internal.h b/src/uarm/uarm/mem_internal.h
+--- a/src/uarm/uarm/mem_internal.h
++++ b/src/uarm/uarm/mem_internal.h
+@@ -23,6 +23,10 @@ struct ArmMemRegion {
+ 
+ struct ArmMem {
+     struct ArmMemRegion regions[NUM_MEM_REGIONS];
++    // Primary RAM while memHoldRam has it out of the address map, and the slot that
++    // stands in for it.
++    struct ArmMemRegion heldRam;
++    int heldSlot;
+ };
+ 
+ // memAccess with its first branch (primary RAM) inlined. Other addresses and sizes
+diff --git a/src/uarm/uarm/pxa_GPIO.cpp b/src/uarm/uarm/pxa_GPIO.cpp
+--- a/src/uarm/uarm/pxa_GPIO.cpp
++++ b/src/uarm/uarm/pxa_GPIO.cpp
+@@ -454,7 +454,8 @@ void pxaGpioSleepReset(PxaGpio* gpio) {
+ 
+ template <typename T>
+ void pxaGpioSave(struct PxaGpio *gpio, T &savestate) {
+-    const uint32_t version = gpio->socRev == 2 ? SAVESTATE_VERSION : 0;
++    // Version 1 keeps sleep output holds on both PXA25x and PXA27x; version 0 still loads.
++    const uint32_t version = SAVESTATE_VERSION;
+     auto chunk = savestate.GetChunk(ChunkType::pxaGpio, version);
+     if (!chunk) ERR("unable to allocate chunk");
+ 
+diff --git a/src/uarm/uarm/pxa_MemCtrl.cpp b/src/uarm/uarm/pxa_MemCtrl.cpp
+--- a/src/uarm/uarm/pxa_MemCtrl.cpp
++++ b/src/uarm/uarm/pxa_MemCtrl.cpp
+@@ -11,7 +11,8 @@
+ #define PXA_MEM_CONTROLLER_BASE 0x48000000UL
+ #define PXA_MEM_CONTROLLER_SIZE 0x00004000UL
+ 
+-#define SAVESTATE_VERSION 0
++// Version 1 adds the SDRAM hold after PXA25x sleep exit.
++#define SAVESTATE_VERSION 1
+ 
+ struct PxaMemCtrlr {
+     uint32_t mdcnfg, mdrefr, msc[3], mecr, sxcnfg, sxmrs, mcmem[2], mcatt[2], mcio[2], mdmrs;
+@@ -20,9 +21,13 @@ struct PxaMemCtrlr {
+     uint16_t sa1110;
+     uint8_t lcdbscntr;
+     bool g2;
++    // SDRAM stays in self-refresh after a PXA25x sleep exit until MDCNFG enables a
++    // partition again, so boot code that clears RAM before that never reaches it.
++    bool sdramHeld;
++    struct ArmMem* mem;
+ 
+     template <typename T>
+-    void DoSaveLoad(T& chunkHelper) {
++    void DoSaveLoad(T& chunkHelper, uint32_t version) {
+         chunkHelper.Do32(mdcnfg)
+             .Do32(mdrefr)
+             .DoBuffer32(msc, sizeof(msc) >> 2)
+@@ -42,6 +47,7 @@ struct PxaMemCtrlr {
+             .Do32(reg_0x20)
+             .Do16(sa1110)
+             .Do8(lcdbscntr);
++        if (version >= 1) chunkHelper.DoBool(sdramHeld);
+     }
+ };
+ 
+@@ -65,9 +71,14 @@ static bool pxaMemCtrlrPrvClockMgrMemAccessF(void* userData, uint32_t pa, uint_f
+ 
+     switch (pa) {
+         case 0:  // MDCNFG
+-            if (write)
++            if (write) {
+                 mc->mdcnfg = val;
+-            else
++                // DE0-DE3 (3.5.2.1): any enabled partition ends the sleep-exit hold.
++                if (mc->sdramHeld && (val & 0x00030003)) {
++                    mc->sdramHeld = false;
++                    memHoldRam(mc->mem, false);
++                }
++            } else
+                 val = mc->mdcnfg;
+             break;
+ 
+@@ -218,6 +229,7 @@ struct PxaMemCtrlr* pxaMemCtrlrInit(struct ArmMem* physMem, uint_fast8_t socRev)
+ 
+     memset(mc, 0, sizeof(*mc));
+     mc->g2 = socRev == 2;
++    mc->mem = physMem;
+ 
+     mc->mdcnfg = 0x0b000b00ul;
+     mc->mdmrs = 0x00220022ul;
+@@ -237,23 +249,31 @@ struct PxaMemCtrlr* pxaMemCtrlrInit(struct ArmMem* physMem, uint_fast8_t socRev)
+     return mc;
+ }
+ 
++void pxaMemCtrlrHoldSdram(struct PxaMemCtrlr* mc) {
++    if (!memHoldRam(mc->mem, true)) ERR("cannot hold SDRAM");
++    mc->sdramHeld = true;
++}
++
+ template <typename T>
+ void pxaMemCtrlrSave(struct PxaMemCtrlr* pxaMemCtrlr, T& savestate) {
+     auto chunk = savestate.GetChunk(ChunkType::pxaMemCtrlr, SAVESTATE_VERSION);
+     if (!chunk) ERR("unable to allocate chunk");
+ 
+     SaveChunkHelper helper(*chunk);
+-    pxaMemCtrlr->DoSaveLoad(helper);
++    pxaMemCtrlr->DoSaveLoad(helper, SAVESTATE_VERSION);
+ }
+ 
+ template <typename T>
+ void pxaMemCtrlrLoad(struct PxaMemCtrlr* pxaMemCtrlr, T& loader) {
+-    auto chunk =
+-        loader.GetChunkOrFail(ChunkType::pxaMemCtrlr, SAVESTATE_VERSION, "pxa memory controller");
++    uint32_t version;
++    auto chunk = loader.GetChunkOrFail(ChunkType::pxaMemCtrlr, SAVESTATE_VERSION,
++                                       "pxa memory controller", version);
+     if (!chunk) return;
+ 
+     LoadChunkHelper helper(*chunk);
+-    pxaMemCtrlr->DoSaveLoad(helper);
++    pxaMemCtrlr->sdramHeld = false;  // v0 never held SDRAM.
++    pxaMemCtrlr->DoSaveLoad(helper, version);
++    if (!memHoldRam(pxaMemCtrlr->mem, pxaMemCtrlr->sdramHeld)) loader.NotifyError();
+ }
+ 
+ template void pxaMemCtrlrSave<Savestate<ChunkType>>(PxaMemCtrlr* pxaMemCtrlr,
+diff --git a/src/uarm/uarm/pxa_MemCtrl.h b/src/uarm/uarm/pxa_MemCtrl.h
+--- a/src/uarm/uarm/pxa_MemCtrl.h
++++ b/src/uarm/uarm/pxa_MemCtrl.h
+@@ -11,6 +11,9 @@ struct PxaMemCtrlr;
+ 
+ struct PxaMemCtrlr* pxaMemCtrlrInit(struct ArmMem* physMem, uint_fast8_t socRev);
+ 
++// PXA25x sleep exit: RAM is out of the address map until MDCNFG enables SDRAM.
++void pxaMemCtrlrHoldSdram(struct PxaMemCtrlr* mc);
++
+ template <typename T>
+ void pxaMemCtrlrSave(struct PxaMemCtrlr* pxaMemCtrlr, T& savestate);
+ 
+diff --git a/src/uarm/uarm/pxa_PwrClk.cpp b/src/uarm/uarm/pxa_PwrClk.cpp
+--- a/src/uarm/uarm/pxa_PwrClk.cpp
++++ b/src/uarm/uarm/pxa_PwrClk.cpp
+@@ -100,11 +100,12 @@ static bool pxaPwrClkPrvCoproc14regXferFunc(struct ArmCpu *cpu, void *userData,
+                 else if (val == 1 && op2 == 0) {
+                     pc->soc->Sleep();
+                 } else if (val == 3 && op2 == 0) {
+-                    if (pc->isPXA270 && pc->gpio) {
++                    if (pc->gpio) {
+                         // Sleep ignores ordinary IRQs; only programmed PM sources exit it.
+                         pc->sleeping = true;
+                         pc->wakePending = false;
+-                        pc->PSSR |= 0x71;  // SSS, PH, RDH, OTGPH
++                        // SSS, PH, RDH; PXA27x adds OTGPH.
++                        pc->PSSR |= pc->isPXA270 ? 0x71 : 0x31;
+                         pxaGpioHoldSleepOutputs(pc->gpio, pc->PGSR);
+                         pc->soc->Sleep();
+                     } else {
+@@ -379,9 +380,12 @@ static void pxaPwrClkGpioEdge(void* context, uint32_t pin, bool oldLevel, bool n
+     if (!pc->sleeping || pc->restoring || oldLevel == newLevel || !pxaGpioIsInput(pc->gpio, pin))
+         return;
+ 
+-    uint32_t source = pin < 16 ? ((1u << pin) & 0xfe1b) : pin == 35 ? 0x01000000 : 0;
++    // PXA25x wakes on GPIO0-15 (Table 3-12); PXA27x on a subset plus GPIO35 and muxed pins.
++    uint32_t source = !pc->isPXA270 ? (pin < 16 ? 1u << pin : 0)
++        : pin < 16 ? ((1u << pin) & 0xfe1b) : pin == 35 ? 0x01000000 : 0;
+     if (source && (pc->PWER & source) && ((newLevel ? pc->PRER : pc->PFER) & source))
+         pc->PEDR |= source, pc->wakePending = true;
++    if (!pc->isPXA270) return;
+ 
+     const unsigned mux2[] = {121, 38, 53, 40, 36, 121, 121, 121};
+     const unsigned mux3[] = {121, 31, 113, 121};
+@@ -413,6 +417,7 @@ bool pxaPwrClkRetainPowerI2c(const PxaPwrClk* pc) { return (pc->PCFR & 0x40) !=
+ 
+ bool pxaPwrClkWakePending(PxaPwrClk* pc) {
+     if (!pc->sleeping || pc->restoring) return false;
++    if (!pc->isPXA270) return pc->wakePending;  // PXA25x has no keypad wake (PKWR).
+     // PKWR/PKSR bit order and GAFR input muxes: Tables 3-28, 3-29, 24-2.
+     static const struct { unsigned pin, matrixAf, row, directAf, key; } pads[] = {
+         {13,3,7,2,7}, {16,1,5,0,0}, {17,1,6,0,0}, {34,2,3,0,0},
+@@ -483,7 +488,8 @@ void pxaPwrClkReset(struct PxaPwrClk *pc) {
+ 
+ template <typename T>
+ void pxaPwrClkSave(struct PxaPwrClk *pc, T &savestate) {
+-    const uint32_t version = pc->isPXA270 ? SAVESTATE_VERSION : 0;
++    // PXA25x moved to version 2 with power sleep; older versions still load.
++    const uint32_t version = SAVESTATE_VERSION;
+     auto chunk = savestate.GetChunk(ChunkType::pxaPwrClk, version);
+     if (!chunk) ERR("unable to allocate chunk");
+ 
+diff --git a/src/uarm/uarm/soc_PXA.cpp b/src/uarm/uarm/soc_PXA.cpp
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -97,8 +97,12 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
+ 
+     syscallDispatch = initSyscallDispatch(this);
+     // TX boots through IPL/NAND. E2 ROM patches are not validated for this layout.
++    // The E2 sleeps through the PXA25x power manager below, so it keeps SysSleep and
++    // auto-off; the patched FrankenE2 ROM keeps the inherited no-sleep patch.
+     if (deviceType != DeviceType5::deviceTypeTX)
+-        patchContext = registerPatches(patchDispatch, syscallDispatch, cpu, systemState);
++        patchContext = registerPatches(patchDispatch, syscallDispatch, cpu, systemState,
++            deviceType == DeviceType5::deviceTypeE2 ? PATCH_FEATURE_ALL & ~PATCH_FEATURE_NO_SLEEP
++                                                     : PATCH_FEATURE_ALL);
+ 
+     ram = ramInit(mem, this, RAM_BASE, ramSize, &bufferMemory, true);
+     rom = romInit(mem, ROM_BASE, romData, romSize);
+@@ -266,7 +270,7 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
+ 
+     nand = sp.nand;
+ 
+-    if (socRev == 2) pxaPwrClkConnectWakeSources(pwrClk, gpio, rtc, kpc);
++    pxaPwrClkConnectWakeSources(pwrClk, gpio, rtc, socRev == 2 ? kpc : nullptr);
+ 
+     if (deviceType == DeviceType5::deviceTypeTX)
+         scheduler->ScheduleTask(SCHEDULER_TASK_AUX_3, 1_msec, 1);
+@@ -412,6 +416,10 @@ void SocPXA::LoadSleepReset(SavestateLoader<ChunkType>& loader) {
+ }
+ 
+ void SocPXA::ResumePowerSleep() {
++    if (socRev != 2) {
++        ResumePowerSleep25x();
++        return;
++    }
+     const uint32_t retention = pxaPwrClkSleepRetention(pwrClk);
+     struct ResetDomains {
+         SocPXA& soc;
+@@ -442,6 +450,61 @@ void SocPXA::ResumePowerSleep() {
+     SoC::Wakeup(0);
+ }
+ 
++void SocPXA::LoadSleepReset25x(SavestateLoader<ChunkType>& loader) {
++    // PXA25x sleep exit (3.4.4) is a reset with RCSR[SMR] set. RTC, power manager,
++    // clocks, SDRAM contents and board devices are kept; the units below take their
++    // cold boot register values and the OS reprograms them on resume.
++    cpuLoad(cpu, loader);
++    pxaUartLoad(ffUart, loader, 0);
++    pxaUartLoad(hwUart, loader, 1);
++    pxaUartLoad(stUart, loader, 2);
++    pxaUartLoad(btUart, loader, 3);
++    pxaSspLoad(ssp[0], loader, 0);
++    pxaSspLoad(ssp[1], loader, 1);
++    if (socRev > 0) pxaSspLoad(ssp[2], loader, 2);
++    pxaAC97Load(ac97, loader);
++    pxaDmaLoad(dma, loader);
++    pxaI2sLoad(i2s, loader);
++    pxaI2cLoad(i2c, loader, 0);
++    pxaMemCtrlrLoad(memCtrl, loader);
++    pxaPwmLoad(pwm[0], loader, 0);
++    pxaPwmLoad(pwm[1], loader, 1);
++    pxaTimrLoad(tmr, loader);
++    pxaMmcLoad(mmc, loader);
++    pxaLcdLoad(lcd, loader);
++    pxa255dspLoad(dsp, loader);
++    pxa255UdcLoad(udc1, loader);
++    pxaGpioSleepReset(gpio);
++    pxaIcLoad(ic, loader);
++    for (auto* uart : {ffUart, hwUart, stUart, btUart})
++        if (uart) pxaUartResync(uart);
++    pxaRtcRefreshInterrupts(rtc);
++}
++
++void SocPXA::ResumePowerSleep25x() {
++    struct ResetDomains {
++        SocPXA& soc;
++        void Load(SavestateLoader<ChunkType>& loader) { soc.LoadSleepReset25x(loader); }
++    } domains{*this};
++    SavestateLoader<ChunkType> loader;
++    if (!loader.Load(powerOnState->GetBuffer(), powerOnState->GetSize(), domains))
++        ERR("failed to restore sleep-reset domains");
++
++    pxaPwrClkFinishSleep(pwrClk);
++    // The boot code clears RAM before it enables SDRAM; on hardware those writes are
++    // lost while SDRAM is still in self-refresh.
++    pxaMemCtrlrHoldSdram(memCtrl);
++    if (audioQueue) audioQueueClear(audioQueue);
++    pxaLcdResetPaletteBuffer(lcd);
++    pxaTimrRestartClock(tmr);
++    scheduler->ScheduleTask(SCHEDULER_TASK_TIMER, 1_sec / 3686400ULL, 1);
++    scheduler->ScheduleTask(SCHEDULER_TASK_LCD, 1_sec / (64 * 3 * 60), 1);
++    scheduler->ScheduleTask(SCHEDULER_TASK_AUX_1, 36_sec / 3686400ULL, 1);
++    if (deviceI2sConnected()) scheduler->ScheduleTask(SCHEDULER_TASK_I2S, 1_sec / 44100, 1);
++    SchedulePcmTask();
++    SoC::Wakeup(0);
++}
++
+ void SocPXA::OnSetAudioQueue(struct AudioQueue *audioQueue) {
+     if (fastAudio) fastAudio->SetQueue(audioQueue);
+     deviceSetAudioQueue(dev, fastAudioRouted ? nullptr : audioQueue);
+diff --git a/src/uarm/uarm/soc_PXA.h b/src/uarm/uarm/soc_PXA.h
+--- a/src/uarm/uarm/soc_PXA.h
++++ b/src/uarm/uarm/soc_PXA.h
+@@ -117,6 +117,8 @@ class SocPXA : public SocGeneric<SocPXA> {
+    private:
+     void ResumePowerSleep();
+     void LoadSleepReset(SavestateLoader<ChunkType>& loader);
++    void ResumePowerSleep25x();
++    void LoadSleepReset25x(SavestateLoader<ChunkType>& loader);
+     bool restoringPowerState{false};
+     void UpdateFastAudioRoute();
+     std::unique_ptr<FastAudio> fastAudio;

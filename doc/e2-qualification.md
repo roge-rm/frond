@@ -29,8 +29,10 @@ The new board test is also included in `make test`.
 ## Optional private firmware evidence
 
 Supply a legally held E2 NOR with the inherited recognized Palm/E2 header. The
-runner refuses other headers; neither file size nor screen geometry identifies
-firmware. A matching raw NAND has 528-byte pages, including spare bytes, for
+runner refuses other headers, a NOR that isn't 8,388,608 bytes and a NOR whose
+card header isn't at 0x20000, after the 128 KiB boot block. E2 sessions saved
+by earlier builds skip these two checks. Size and layout still
+don't identify firmware. A matching raw NAND has 528-byte pages, including spare bytes, for
 34,603,008 bytes total. That geometry alone cannot identify its device, language,
 provenance or compatibility with a NOR. Verify the pairing privately. Omitting
 NAND deliberately exercises the inherited erased-flash path, which may still
@@ -71,10 +73,24 @@ Do not accept application licences or fetch fixtures as part of this workflow.
 Keep the cohort unavailable to the desktop until the device-profile gates are
 met. Separate cold boot with existing and blank NAND, complete calibration,
 editor content persistence and continued input after fresh-process restore.
-Check normal reset, audio, guest storage/SD operations, and representative apps
-independently. Codec/SD synthetic passes do not establish guest audio or storage.
-IR keyboard drivers, Bluetooth, USB/HotSync, networking and sleep/wake need their
-own evidence. Physical-device timing and behavior require available hardware.
+Check normal reset and representative apps independently. Codec/SD synthetic
+passes do not establish guest audio or storage.
+IR keyboard drivers, Bluetooth, USB/HotSync and networking need their own
+evidence. Power-key sleep and wake work on the dumped ROM, including a second
+cycle and a session saved asleep and woken in a fresh process. A soft reset opens
+Preferences on Date & Time, as the ROM does on hardware. Physical-device timing and behavior require available hardware.
+
+On the dumped ROM the SD probe (`tests/palm/sd-probe.c`) reads, writes and
+deletes files on a 32 MiB card, after card insert, eject and reinsert, after
+sleep and wake with the card in, and after a fresh-process restore with the card
+embedded in the session. A file held open and written through a sleep is
+complete afterwards. The E2's VFS returns `vfsErrFileEOF` on a read that reaches
+the end of the file, where the TX returns no error, so `tests/sd_results.py`
+doesn't accept E2 logs as they are. The codec runs at 44.1 kHz with variable
+rate on. Taps, the alarm preview in Sounds & Alerts and SunVox notes give guest
+PCM at the right pitch, it stops in sleep and comes back after wake. Edited
+memos survive leaving Memos and a fresh-process restore. Damaged session files
+are refused, and a refused savestate leaves the running guest as it was.
 
 Record exact fixture identities, source hashes, observations and unresolved
 failures only in a private local report. Do not commit NOR/NAND, metadata,

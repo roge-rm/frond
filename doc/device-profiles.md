@@ -21,7 +21,8 @@ to load arbitrary firmware. `tx-desktop` names the existing experimental TX path
 
 - `palm-tx`, session ID 3: existing TX desktop path, 16 MiB NOR, 138,412,032-byte
   raw NAND (132 MiB, including spare bytes), 32 MiB RAM and 320×480 display.
-- `tungsten-e2`, ID 0: inherited E2 CLI model, 34,603,008-byte raw NAND,
+- `tungsten-e2`, ID 0: inherited E2 CLI model, 8 MiB NOR with its card header at
+  0x20000, 34,603,008-byte raw NAND,
   16 or 32 MiB RAM and 320×320 display. Desktop qualification is pending.
 - `franken-e2`, ID 1: inherited patched E2 / Frankenpilot model, the same NAND
   geometry and RAM choices, with a 320×480 display. This is a patched model,

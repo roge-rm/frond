@@ -234,11 +234,14 @@ int main() {
         Peer fresh; assert(fresh.attach(uart)); run(soc,5); assert(fresh.output()==-2);
         write(soc,PXA_FFUART_BASE,0x54); run(soc,5); assert(fresh.output()==0x54);
         auto state=snapshot(soc); write(soc,PXA_FFUART_BASE,0x55);
+        // A refused load keeps the peer, and the byte written before it still goes out.
         assert(!soc.Load(state.size()-4,state.data()));
-        assert(fresh.closes==1 && fresh.output()==-1); run(soc,5); assert(fresh.sent==1);
+        assert(!fresh.closes && fresh.output()==-2); run(soc,5);
+        assert(fresh.sent==2 && fresh.output()==0x55);
+        soc.Reset(); assert(fresh.closes==1 && fresh.output()==-1);
         soc.Reset(); assert(fresh.closes==1);
     }
-    puts("PASS: scheduled socket peer I/O freezes/rolls back/commits, sleep stops callbacks, wake resets UART and closes ownership once, failed restore fails closed");
+    puts("PASS: scheduled socket peer I/O freezes/rolls back/commits, sleep stops callbacks, wake resets UART and closes ownership once, failed restore keeps the peer");
 
     NetCalls calls(soc); assert(soc.networkSimulation.SetMode("internet"));
     auto livePort=calls.openUdp();
