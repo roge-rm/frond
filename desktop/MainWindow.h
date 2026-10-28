@@ -4,6 +4,7 @@
 #include <QLockFile>
 #include "DesktopClient.h"
 #include "SdExchange.h"
+#include "FirmwareInput.h"
 class QDialog;
 
 class QLineEdit;
@@ -40,12 +41,15 @@ class MainWindow : public QMainWindow {
     void showUsb(const QString& state);
     void loadUsbSettings();
     void failure(const QString& message);
+    void showDevice(const QString& id);
+    QString deviceLabel() const;
+    frondFirmware::Device currentDevice() const;
     QString outputFile(const QString& title, const QString& filter, const QString& defaultName);
     DesktopClient client;
     QSettings settings;
     QString core, sessionPath, savingPath;
     std::unique_ptr<QLockFile> sessionLock;
-    QComboBox *sessions, *network, *serial, *usb;
+    QComboBox *sessions, *network, *serial, *usb, *deviceChoice;
     QSpinBox* serialPort;
     QSpinBox* usbPort;
     QLabel* serialState;
@@ -65,6 +69,9 @@ class MainWindow : public QMainWindow {
     QDialog* exchangeDialog{nullptr};
     QString exchangeBackup;
     bool cardPresent{false}, cardInserted{false};
+    // The device of the running core; the keyboard, serial, USB and network controls are Palm TX only.
+    bool runningE2{false};
+    QString networkTip, keyboardTip, serialTip, usbTip, fastAudioTip;
     QWidget* setup;
     bool startupHandled{false}, busy{false}, stopping{false}, closeAfterStop{false}, allowClose{false};
 };

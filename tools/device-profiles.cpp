@@ -21,7 +21,8 @@ int main() {
         std::cout << "{\"id\":\"" << p.id << "\",\"session_device_id\":" << int(p.deviceType)
                   << ",\"name\":\"" << p.name << "\",\"cohort\":\"" << cohortName(p.cohort)
                   << "\",\"status\":\""
-                  << (p.support == DeviceSupport5::txDesktop ? "tx-desktop" : "inherited-unverified")
+                  << (p.support == DeviceSupport5::txDesktop ? "tx-desktop"
+                      : p.support == DeviceSupport5::e2Desktop ? "e2-desktop" : "inherited-unverified")
                   << "\",\"nor_bytes\":";
         if (p.norSize) std::cout << p.norSize; else std::cout << "null";
         std::cout << ",\"raw_nand_bytes\":" << p.nandSize

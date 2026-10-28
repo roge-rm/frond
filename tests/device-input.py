@@ -77,10 +77,11 @@ class DeviceInputTest(unittest.TestCase):
     def test_inventory(self):
         data = json.loads(subprocess.check_output([ROOT / 'out/frond-device-profiles']))
         self.assertEqual([p['id'] for p in data['profiles'] if p['status'] == 'tx-desktop'], ['palm-tx'])
+        self.assertEqual([p['id'] for p in data['profiles'] if p['status'] == 'e2-desktop'], ['tungsten-e2'])
         self.assertEqual(len(data['profiles']), 4)
         self.assertEqual({p['cohort'] for p in data['profiles']},
                          {'tx-nor-nand', 'e2-nor-nand', 'patched-e2', 'paravirtual'})
-        self.assertTrue(all(p['status'] == 'inherited-unverified' for p in data['profiles'][:3]))
+        self.assertTrue(all(p['status'] == 'inherited-unverified' for p in data['profiles'][1:3]))
 
     def test_tx_raw_geometry_and_options(self):
         base = [self.nor, '--experimental-tx']
@@ -113,11 +114,11 @@ class DeviceInputTest(unittest.TestCase):
                 self.assertNotIn('invalid', result.stderr)
 
     def test_inherited_cohorts_cannot_use_desktop(self):
-        for hal in (0x68737072, 0x446d4752, 0x50765076):
+        for hal in (0x446d4752, 0x50765076):
             with self.subTest(hal=hal):
                 rom = self.root / 'inherited'
-                rom.write_bytes(e2_nor() if hal == 0x68737072 else header(hal))
-                self.rejected([rom, '--desktop-socket', self.root / 'unused'], 'Palm TX only')
+                rom.write_bytes(header(hal))
+                self.rejected([rom, '--desktop-socket', self.root / 'unused'], 'Palm TX and Tungsten E2 only')
 
     def test_e2_replay_bounds_and_physical_app_buttons(self):
         replay = self.root / 'e2.replay'

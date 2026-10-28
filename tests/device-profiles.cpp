@@ -24,7 +24,7 @@ int main() {
         assert(ids.insert(p.id).second && types.insert(p.deviceType).second);
         assert(deviceProfile5(p.deviceType) == &p);
         desktopCount += deviceProfileSupportsDesktop5(p.deviceType);
-        assert(deviceProfileSupportsDesktop5(p.deviceType) == (p.deviceType == deviceTypeTX));
+        assert(deviceProfileSupportsDesktop5(p.deviceType) == (p.deviceType == deviceTypeTX || p.deviceType == deviceTypeE2));
         assert(deviceConfigurationGetNandSize(p.deviceType) == p.nandSize);
         assert(deviceConfigurationDefaultDisplayMode(p.deviceType) == p.defaultDisplay);
         for (uint32_t ram : {0u, 1u, 8u << 20, 16u << 20, 24u << 20, 32u << 20, 64u << 20, 1u << 31, UINT32_MAX}) {
@@ -43,7 +43,7 @@ int main() {
         assert(deviceProfileValidateFirmware5(p.deviceType, 0, p.nandSize, false, true) == DeviceFirmwareError5::norSize);
         assert(deviceProfileValidateFirmware5(p.deviceType, nor, p.nandSize + 1, true, false) == DeviceFirmwareError5::nandSize);
     }
-    assert(desktopCount == 1);
+    assert(desktopCount == 2);
     for (int id : {INT_MIN, -1, 4, 99, INT_MAX}) {
         assert(!deviceProfile5(id) && !deviceProfileSupportsDesktop5(id));
         assert(!deviceProfileSupportsRam5(id, 32u << 20));

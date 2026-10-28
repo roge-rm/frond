@@ -36,7 +36,7 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     resize(620, 380);
     auto* root = new QWidget(this);
     auto* layout = new QVBoxLayout(root);
-    setup = new QGroupBox(tr("Palm TX"), root);
+    setup = new QGroupBox(tr("Palm device"), root);
     auto* form = new QFormLayout(setup);
     savedMode = new QRadioButton(tr("Open a saved session"), setup);
     savedMode->setChecked(true);
@@ -56,6 +56,7 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     auto firmware = [&](const QString& label, const QString& key) {
         auto* row = new QHBoxLayout;
         auto* field = new QLineEdit(settings.value(key).toString(), setup);
+        field->setObjectName(key);
         auto* button = new QPushButton(tr("Browse…"), setup);
         row->addWidget(field, 1); row->addWidget(button);
         connect(button, &QPushButton::clicked, this, [this, field, label] {
@@ -65,8 +66,16 @@ MainWindow::MainWindow(const QString& core) : core(core) {
         form->addRow(label, row);
         return field;
     };
+    deviceChoice = new QComboBox(setup);
+    deviceChoice->setObjectName("device");
+    deviceChoice->addItem(tr("Detect from the NOR image"), int(frondFirmware::Device::automatic));
+    deviceChoice->addItem(tr("Palm TX"), int(frondFirmware::Device::tx));
+    deviceChoice->addItem(tr("Tungsten E2"), int(frondFirmware::Device::e2));
+    deviceChoice->setCurrentIndex(std::max(0, deviceChoice->findData(settings.value("device", int(frondFirmware::Device::automatic)).toInt())));
+    connect(deviceChoice, qOverload<int>(&QComboBox::activated), this, [this] { settings.setValue("device", deviceChoice->currentData()); });
+    form->addRow(tr("Device:"), deviceChoice);
     nor = firmware(tr("NOR image:"), "nor");
-    nand = firmware(tr("NAND image:"), "nand");
+    nand = firmware(tr("NAND image (optional for the E2):"), "nand");
     layout->addWidget(setup);
     doubleSize = new QCheckBox(tr("Double-size Palm display (when it fits)"), root);
     doubleSize->setToolTip(tr("Uses normal size if the Palm display and buttons would exceed the available screen height."));
@@ -231,7 +240,7 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     file->addAction(tr("&Quit"), QKeySequence::Quit, this, &QWidget::close);
     auto* device = menuBar()->addMenu(tr("&Device"));
     auto* reset = device->addAction(tr("&Reset…"), this, [this] {
-        if (QMessageBox::question(this, tr("Reset Palm TX"), tr("Reset the Palm TX now?")) == QMessageBox::Yes) send("reset");
+        if (QMessageBox::question(this, tr("Reset Palm"), tr("Reset the %1 now?").arg(deviceLabel())) == QMessageBox::Yes) send("reset");
     });
     auto* rotate = device->addAction(tr("&Rotate"), this, [this] { send("rotate"); });
     runningActions = {saveAction, copy, install, launch, exportAction, exportDatabase, reset, rotate};
@@ -279,11 +288,12 @@ MainWindow::MainWindow(const QString& core) : core(core) {
             tr("With the Palm window focused and the infrared keyboard detached:\n\n"
                "Arrow keys: five-way navigation\nEnter: centre select\n"
                "F1: Home\nF2: Calendar\nF3: Contacts\nF4: Web\n"
+               "On the Tungsten E2, F1 to F4 are Calendar, Contacts, Tasks and Note Pad.\n"
                "Escape: Power (sleep and wake are experimental)\n\n"
                "Palm OS button assignments may change what the application buttons do."));
     });
     help->addAction(tr("&About Frond"), this, [this] {
-        QMessageBox::about(this, tr("About Frond"), tr("Frond 0.3.0\nExperimental Palm TX emulator\nGPL-3.0-or-later"));
+        QMessageBox::about(this, tr("About Frond"), tr("Frond 0.3.0\nExperimental Palm TX and Tungsten E2 emulator\nGPL-3.0-or-later"));
     });
     connect(&client, &DesktopClient::diagnostic, this, [this](const QString& text) {
         log->moveCursor(QTextCursor::End); log->insertPlainText(text);
@@ -295,12 +305,12 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     connect(&client, &DesktopClient::started, this, [this] {
         busy = false; statusBar()->showMessage(tr("Running. Your session will be saved when you close Frond.")); refresh();
         if (stopping) save();
-        else send("sd-state");
+        else send("device-state");
     });
     connect(&client, &DesktopClient::finished, this, [this, open] {
         if (exchangeDialog) exchangeDialog->reject();
         else endExchange();
-        busy = false; stopping = false; cardPresent = cardInserted = false;
+        busy = false; stopping = false; cardPresent = cardInserted = false; runningE2 = false;
         sdStatus->setText(tr("SD card: Not running")); showSerial({}); loadSerialSettings(); showUsb({}); loadUsbSettings(); sessionLock.reset(); forceButton->hide(); refresh(); open->setEnabled(true);
         if (closeAfterStop) { allowClose = true; close(); }
         else statusBar()->showMessage(tr("Stopped."));
@@ -325,6 +335,12 @@ MainWindow::MainWindow(const QString& core) : core(core) {
             else failure(message);
             return;
         }
+        if (command == "device-state") {
+            showDevice(message);
+            if (stopping) save();
+            else send("sd-state");
+            return;
+        }
         if (command == "sd-state") { cardPresent = message != "none"; cardInserted = message == "inserted"; }
         else if (command == "sd-create" || command == "sd-insert" || command == "sd-reinsert") cardPresent = cardInserted = true;
         else if (command == "sd-eject") cardInserted = false;
@@ -347,8 +363,8 @@ MainWindow::MainWindow(const QString& core) : core(core) {
         if (command == "usb-state" || command == "usb-mode") showUsb(message);
         refresh();
         if (command == "network-state" && !stopping) { send("keyboard-state"); return; }
-        if (command == "keyboard-state" && !stopping && serialArgument() != "off") { send("serial-state"); return; }
-        if ((command == "keyboard-state" || command == "serial-state") && !stopping && usbArgument() != "off") { send("usb-state"); return; }
+        if (command == "keyboard-state" && !stopping && !runningE2 && serialArgument() != "off") { send("serial-state"); return; }
+        if ((command == "keyboard-state" || command == "serial-state") && !stopping && !runningE2 && usbArgument() != "off") { send("usb-state"); return; }
         if (command == "sd-state" && !stopping) { send("network-state"); return; }
         statusBar()->showMessage(command == "sd-state" ? tr("Running. Sessions save automatically on close.") : message);
         const bool savedWorkingCopy = command == "save" && savingPath == sessionPath;
@@ -364,6 +380,12 @@ MainWindow::MainWindow(const QString& core) : core(core) {
         }
     });
     connect(&client, &DesktopClient::started, open, [open] { open->setEnabled(false); });
+    networkTip = network->toolTip(); keyboardTip = keyboard->toolTip(); serialTip = serial->toolTip();
+    usbTip = usb->toolTip(); fastAudioTip = fastAudio->toolTip();
+    // The launcher follows the chosen or detected device before Start.
+    connect(deviceChoice, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] { refresh(); });
+    connect(nor, &QLineEdit::textChanged, this, [this] { refresh(); });
+    connect(newMode, &QRadioButton::toggled, this, [this] { refresh(); });
     refresh();
     statusBar()->showMessage(tr("Ready. Sessions are saved automatically when you close Frond."));
     QTimer::singleShot(0, this, [this] {
@@ -379,17 +401,24 @@ void MainWindow::refresh() {
     startButton->setEnabled(!running && !busy);
     stopButton->setEnabled(running && !busy && !stopping);
     audio->setEnabled(!busy && !stopping);
-    fastAudio->setEnabled(!running && !busy);
+    const auto caps = frondFirmware::capabilities(currentDevice());
+    const auto reason = tr("Not available on the %1 yet").arg(frondFirmware::deviceName(currentDevice()));
+    auto note = [&](QWidget* w, bool supported, const QString& tip) { w->setToolTip(supported ? tip : reason); };
+    note(network, caps.network, networkTip); note(keyboard, caps.keyboard, keyboardTip);
+    note(serial, caps.serial, serialTip); note(serialPort, caps.serial, {});
+    note(usb, caps.usb, usbTip); note(usbPort, caps.usb, {});
+    note(fastAudio, caps.fastAudio, fastAudioTip);
+    fastAudio->setEnabled(!running && !busy && caps.fastAudio);
     doubleSize->setEnabled(!running && !busy);
     const bool enabled = client.available() && !busy && !stopping && exchangeStage == ExchangeStage::None;
     for (auto* action : runningActions) action->setEnabled(enabled);
-    network->setEnabled(enabled);
-    keyboard->setEnabled(enabled);
-    const bool serialEditable = !busy && !stopping && (!running || enabled);
-    serial->setEnabled(serialEditable);
-    serialPort->setEnabled(serialEditable && serial->currentData() == "tcp");
-    usb->setEnabled(serialEditable);
-    usbPort->setEnabled(serialEditable && usb->currentData() == "tcp");
+    network->setEnabled(enabled && caps.network);
+    keyboard->setEnabled(enabled && caps.keyboard);
+    const bool editable = !busy && !stopping && (!running || enabled);
+    serial->setEnabled(editable && caps.serial);
+    serialPort->setEnabled(editable && caps.serial && serial->currentData() == "tcp");
+    usb->setEnabled(editable && caps.usb);
+    usbPort->setEnabled(editable && caps.usb && usb->currentData() == "tcp");
     sdCreate->setEnabled(enabled && !cardInserted); sdImport->setEnabled(enabled && !cardInserted);
     sdEject->setEnabled(enabled && cardInserted); sdReinsert->setEnabled(enabled && cardPresent && !cardInserted);
     sdExport->setEnabled(enabled && cardPresent && !cardInserted);
@@ -412,29 +441,37 @@ void MainWindow::start() {
     startupHandled = true;
     if (!QFileInfo(core).isExecutable()) return failure(tr("The Frond emulator executable could not be found. Reinstall Frond or build both desktop and core targets."));
     QStringList arguments;
-    QString source;
+    QString source, newName = "Palm";
+    auto startDevice = frondFirmware::Device::tx;  // a saved session's device is not known until it runs
     if (savedMode->isChecked()) {
         source = QFileInfo(sessions->currentText()).absoluteFilePath();
         if (sessions->currentText().isEmpty() || !QFileInfo(source).isFile()) return failure(tr("Choose an existing session file."));
         source = QFileInfo(source).canonicalFilePath();
         arguments << source;
     } else {
-        const auto firmwareError = frondFirmware::validateTxFiles(nor->text(), nand->text());
+        auto chosen = frondFirmware::Device(deviceChoice->currentData().toInt());
+        const auto firmwareError = frondFirmware::validateFiles(chosen, nor->text(), nand->text(), &chosen);
         if (!firmwareError.isEmpty()) return failure(firmwareError);
-        arguments << "--experimental-tx" << QFileInfo(nor->text()).absoluteFilePath() << "--nand" << QFileInfo(nand->text()).absoluteFilePath();
+        // The TX needs its flag for a raw NOR; the E2 is recognised from its header.
+        if (chosen == frondFirmware::Device::tx) arguments << "--experimental-tx";
+        arguments << QFileInfo(nor->text()).absoluteFilePath();
+        if (!nand->text().isEmpty()) arguments << "--nand" << QFileInfo(nand->text()).absoluteFilePath();
         settings.setValue("nor", nor->text()); settings.setValue("nand", nand->text());
+        newName = frondFirmware::deviceName(chosen);
+        startDevice = chosen;
     }
     const auto data = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/frond/sessions";
     if (!QDir().mkpath(data)) return failure(tr("Could not create the session storage directory."));
     // Compare canonical paths so an XDG data directory symlink does not clone on every resume.
     const auto managedRoot = QFileInfo(data).canonicalFilePath();
-    sessionPath = source.startsWith(managedRoot + '/') ? source : managedRoot + "/Palm TX " +
+    sessionPath = source.startsWith(managedRoot + '/') ? source : managedRoot + "/" + newName + " " +
         QDateTime::currentDateTime().toString("yyyy-MM-dd HH-mm-ss") + "-" + QUuid::createUuid().toString(QUuid::Id128).first(8) + ".frond";
     if (!audio->isChecked()) arguments << "--no-sound";
-    if (fastAudio->isChecked()) arguments << "--experimental-fast-audio";
+    const auto caps = frondFirmware::capabilities(startDevice);
+    if (fastAudio->isChecked() && caps.fastAudio) arguments << "--experimental-fast-audio";
     if (!doubleSize->isChecked()) arguments << "--small-window";
-    if (serialArgument() != "off") arguments << "--serial" << serialArgument();
-    if (usbArgument() != "off") arguments << "--usb" << usbArgument();
+    if (caps.serial && serialArgument() != "off") arguments << "--serial" << serialArgument();
+    if (caps.usb && usbArgument() != "off") arguments << "--usb" << usbArgument();
     sessionLock = std::make_unique<QLockFile>(sessionPath + ".lock");
     sessionLock->setStaleLockTime(0);
     if (!sessionLock->tryLock()) {
@@ -445,7 +482,7 @@ void MainWindow::start() {
     log->clear(); busy = true;
     const bool launched = client.start(core, arguments);
     if (!launched) { busy = false; sessionLock.reset(); }
-    refresh(); statusBar()->showMessage(launched ? tr("Starting Palm TX…") : tr("Could not start Palm TX."));
+    refresh(); statusBar()->showMessage(launched ? tr("Starting the Palm…") : tr("Could not start the Palm."));
 }
 QString MainWindow::serialArgument() const {
     const auto mode = serial->currentData().toString();
@@ -518,7 +555,7 @@ QString MainWindow::outputFile(const QString& title, const QString& filter, cons
 }
 void MainWindow::save(bool saveAs) {
     if (!client.available()) return;
-    const auto path = saveAs ? outputFile(tr("Save a Copy"), tr("Frond sessions (*.frond)"), "Palm TX.frond") : sessionPath;
+    const auto path = saveAs ? outputFile(tr("Save a Copy"), tr("Frond sessions (*.frond)"), deviceLabel() + ".frond") : sessionPath;
     if (path.isEmpty()) return;
     savingPath = path; send("save", path);
 }
@@ -541,6 +578,21 @@ void MainWindow::askStop(const QString& message) {
     if (answer == QMessageBox::Retry) save();
     else if (answer == QMessageBox::Discard) send("quit");
     else { stopping = closeAfterStop = false; refresh(); }
+}
+// The device the controls follow: the running one, else the chooser or the NOR detection.
+// A saved session or an unknown NOR counts as the TX (nothing greyed).
+frondFirmware::Device MainWindow::currentDevice() const {
+    if (client.running()) return runningE2 ? frondFirmware::Device::e2 : frondFirmware::Device::tx;
+    if (savedMode->isChecked()) return frondFirmware::Device::tx;
+    auto chosen = frondFirmware::Device(deviceChoice->currentData().toInt());
+    if (chosen == frondFirmware::Device::automatic) chosen = frondFirmware::detectDevice(nor->text());
+    return chosen == frondFirmware::Device::e2 ? chosen : frondFirmware::Device::tx;
+}
+QString MainWindow::deviceLabel() const { return runningE2 ? tr("Tungsten E2") : tr("Palm TX"); }
+void MainWindow::showDevice(const QString& id) {
+    runningE2 = id == "tungsten-e2";
+    if (runningE2) { showSerial("off"); showUsb("off"); }
+    refresh();
 }
 void MainWindow::failure(const QString& message) {
     QMessageBox::critical(this, tr("Frond"), message);

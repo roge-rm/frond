@@ -1,7 +1,7 @@
 # Device profiles and staged support
 
-The desktop still starts Palm TX only. The native core inherits three other
-models from the pinned Cloudpilot source. Listing a model does not establish
+The desktop starts the Palm TX and the Tungsten E2. The native core inherits two
+other models from the pinned Cloudpilot source. Listing a model does not establish
 that a particular firmware, peripheral or application works in Frond.
 
 Build the public inventory without any firmware:
@@ -14,8 +14,8 @@ heavy build make device-profiles
 The JSON contains model names, stable session IDs, geometry and support status.
 It never scans firmware, sessions or a private ROM collection. `nor_bytes: null`
 means that the profile has no established fixed NOR size. It is not an invitation
-to load arbitrary firmware. `tx-desktop` names the existing experimental TX path;
-`inherited-unverified` does not enable another desktop device.
+to load arbitrary firmware. `tx-desktop` names the experimental TX path and `e2-desktop` the Tungsten E2
+path in the desktop. `inherited-unverified` does not enable another desktop device.
 
 ## Current inventory
 
@@ -23,7 +23,7 @@ to load arbitrary firmware. `tx-desktop` names the existing experimental TX path
   raw NAND (132 MiB, including spare bytes), 32 MiB RAM and 320×480 display.
 - `tungsten-e2`, ID 0: inherited E2 CLI model, 8 MiB NOR with its card header at
   0x20000, 34,603,008-byte raw NAND,
-  16 or 32 MiB RAM and 320×320 display. Desktop qualification is pending.
+  16 or 32 MiB RAM and 320×320 display. Available in the desktop (`e2-desktop`).
 - `franken-e2`, ID 1: inherited patched E2 / Frankenpilot model, the same NAND
   geometry and RAM choices, with a 320×480 display. This is a patched model,
   not evidence of support for another retail Palm. Desktop qualification is pending.
@@ -80,8 +80,8 @@ Keep private ROMs, metadata, identifying dump hashes, sessions, screenshots and
 capture logs outside Git. Public tests should build synthetic headers, flash
 geometry and session envelopes. The shared-profile inventory itself establishes
 no non-TX boot or peripheral results. The [E2 qualification workflow](e2-qualification.md) adds synthetic board
-and session regressions plus an optional private firmware runner; the cohort
-remains unavailable to the desktop.
+and session regressions plus an optional private firmware runner; the E2 is
+available in the desktop and the other inherited cohorts are not.
 
 ## Tests
 
@@ -92,5 +92,6 @@ heavy build make -j4 test-device-profiles test-desktop
 The cohort tests cover all four existing models, invalid IDs, zero and
 non-power-of-two RAM, overflow, display ranges, raw NAND with and without spare
 bytes, mismatched profile tags, truncated ROM headers and v4/v5 sessions. The Qt
-file validator uses sparse synthetic files. CLI rejection tests stop before
+file validator uses sparse synthetic files, including E2 header detection and
+refusal of a NOR image for the other device. CLI rejection tests stop before
 SoC construction or SDL startup. No firmware or proprietary app is needed.

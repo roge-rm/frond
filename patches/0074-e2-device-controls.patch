@@ -1,0 +1,498 @@
+diff --git a/src/uarm/native/DeviceControls.cpp b/src/uarm/native/DeviceControls.cpp
+--- a/src/uarm/native/DeviceControls.cpp
++++ b/src/uarm/native/DeviceControls.cpp
+@@ -1,6 +1,9 @@
+ #include "DeviceControls.h"
+ #include <algorithm>
++#include <array>
+ #include <cmath>
++#include <cstring>
++#include <tuple>
+ #include <vector>
+ 
+ namespace {
+@@ -78,14 +81,10 @@
+     float s;
+     std::vector<Rgb> pixels;
+ };
+-}  // namespace
+ 
+-void drawDeviceControls(SDL_Renderer* renderer, const DeviceControlProfile& profile,
+-                        int width, int height, int scale, uint32_t pressed) {
+-    if(!profile.count)return;
++void paintTxControls(Canvas& canvas, const DeviceControlProfile& profile, int width, uint32_t pressed) {
+     const float H=profile.height;
+     const int ox=(width-profile.width)/2;
+-    Canvas canvas(width,profile.height,scale);
+     auto down=[&](KeyId key) {return (pressed&(1u<<key))!=0;};
+     auto all=[&](float,float) {return 1.f;};
+     auto shifted=[&](SDL_Rect r) {r.x+=int(ox);return r;};
+@@ -110,7 +109,7 @@
+         if(deviceNavigatorButton(profile,button))continue;
+         const bool held=down(button.key);
+         const SDL_Rect pocket=shifted(button.bounds);
+-        const float corner=deviceButtonCorner(pocket);
++        const float corner=deviceButtonCorner(profile,pocket);
+         const float x0=pocket.x-2,y0=pocket.y-2,x1=pocket.x+pocket.w+2,y1=pocket.y+pocket.h+2;
+         // Recessed pocket with a thin grey rim, lit along its lower lip.
+         canvas.paint(x0,y0,x1,y1,[&](float x,float y) {return canvas.edge(deviceRoundedDistance(pocket,corner,x,y));},
+@@ -195,9 +194,11 @@
+             return canvas.edge(std::fabs(pillDistance(x,y)+0.4f)-0.3f)*(held?0.12f:0.22f);
+         },[](float,float,Rgb) {return Rgb{90,95,104};});
+     }
++}
+ 
++SDL_Texture* canvasTexture(SDL_Renderer* renderer, const Canvas& canvas) {
+     auto* surface=SDL_CreateRGBSurfaceWithFormat(0,canvas.w,canvas.h,32,SDL_PIXELFORMAT_RGBA32);
+-    if(!surface)return;
++    if(!surface)return nullptr;
+     for(int y=0;y<canvas.h;++y) {
+         auto* row=static_cast<Uint8*>(surface->pixels)+y*surface->pitch;
+         for(int x=0;x<canvas.w;++x) {
+@@ -208,11 +209,317 @@
+             row[x*4+3]=255;
+         }
+     }
+-    if(auto* texture=SDL_CreateTextureFromSurface(renderer,surface)) {
+-        SDL_SetTextureBlendMode(texture,SDL_BLENDMODE_NONE);
++    auto* texture=SDL_CreateTextureFromSurface(renderer,surface);
++    if(texture)SDL_SetTextureBlendMode(texture,SDL_BLENDMODE_NONE);
++    SDL_FreeSurface(surface);
++    return texture;
++}
++
++// Distance to a circular arc running clockwise on screen from angle a0 to a1, in radians.
++float arc(float x, float y, float cx, float cy, float r, float a0, float a1) {
++    const float tau=6.2831853f;
++    float a=std::atan2(y-cy,x-cx);
++    while(a<a0)a+=tau;
++    while(a>=a0+tau)a-=tau;
++    if(a<=a1)return std::fabs(std::hypot(x-cx,y-cy)-r);
++    return std::min(std::hypot(x-cx-r*std::cos(a0),y-cy-r*std::sin(a0)),
++                    std::hypot(x-cx-r*std::cos(a1),y-cy-r*std::sin(a1)));
++}
++float degrees(float d) {return d*0.017453293f;}
++// Signed distance to a convex polygon, either winding; negative inside.
++template <size_t N>
++float polygon(float x, float y, const std::array<std::array<float,2>,N>& p) {
++    float area=0;
++    for(size_t i=0;i<N;++i)area+=p[i][0]*p[(i+1)%N][1]-p[(i+1)%N][0]*p[i][1];
++    const float sign=area<0 ? -1.f : 1.f;
++    float inside=-1e9f,outside=1e9f;
++    for(size_t i=0;i<N;++i) {
++        const auto& a=p[i];const auto& b=p[(i+1)%N];
++        const float ex=b[0]-a[0],ey=b[1]-a[1];
++        inside=std::max(inside,sign*((x-a[0])*ey-(y-a[1])*ex)/std::hypot(ex,ey));
++        outside=std::min(outside,segment(x,y,a[0],a[1],b[0],b[1]));
++    }
++    return inside>0 ? outside : inside;
++}
++
++// Stroke glyphs for the keyboard areas: x from the glyph centre, y from the baseline.
++float glyphDistance(char c, float x, float y) {
++    float d=1e9f;
++    auto line=[&](float ax,float ay,float bx,float by) {d=std::min(d,segment(x,y,ax,ay,bx,by));};
++    switch(c) {
++        case 'a': d=ring(x,y,0,-2.7f,2.7f);line(2.7f,-5.4f,2.7f,0);break;
++        case 'b': d=ring(x,y,0,-2.7f,2.7f);line(-2.7f,-8.4f,-2.7f,0);break;
++        case 'c': d=arc(x,y,0,-2.7f,2.7f,degrees(40),degrees(320));break;
++        case '1': line(0.4f,-8,0.4f,0);line(-1.8f,-6.2f,0.4f,-8);break;
++        case '2': {
++            const float cx=0,cy=-5.8f,r=2.3f;
++            d=arc(x,y,cx,cy,r,degrees(180),degrees(390));
++            line(cx+r*std::cos(degrees(30)),cy+r*std::sin(degrees(30)),-2.4f,0);line(-2.4f,0,2.6f,0);
++            break;
++        }
++        case '3':
++            d=std::min(arc(x,y,0,-6,2,degrees(200),degrees(450)),arc(x,y,0,-2,2.1f,degrees(270),degrees(520)));
++            break;
++        default: break;
++    }
++    return d;
++}
++float textDistance(const char* text, float x, float y) {
++    // Glyphs are drawn 1.15 times their outline size so they stay legible at normal size.
++    const float size=1.15f,advance=6.4f*size;
++    const size_t n=std::strlen(text);
++    float d=1e9f;
++    for(size_t i=0;i<n;++i)d=std::min(d,glyphDistance(text[i],(x-(i-(n-1)*0.5f)*advance)/size,y/size)*size);
++    return d;
++}
++
++// Distance to the E2 app key icons, in strip units from the key centre.
++float e2IconDistance(DeviceControlIcon icon, float x, float y) {
++    float d=1e9f;
++    auto line=[&](float ax,float ay,float bx,float by) {d=std::min(d,segment(x,y,ax,ay,bx,by));};
++    switch(icon) {
++        case DeviceControlIcon::calendar: {
++            // A page with binder tabs and a small grid.
++            const SDL_Rect page{-7,-6,14,13};
++            d=std::fabs(deviceRoundedDistance(page,1.5f,x,y));
++            line(-7,-2.4f,7,-2.4f);line(-3.5f,-8.2f,-3.5f,-4.4f);line(3.5f,-8.2f,3.5f,-4.4f);
++            line(-7,2.3f,7,2.3f);line(-2.3f,-2.4f,-2.3f,7);line(2.3f,-2.4f,2.3f,7);
++            break;
++        }
++        case DeviceControlIcon::contacts:
++            d=ring(x,y,0,-3.4f,3.1f);d=std::min(d,arc(x,y,0,7.6f,6.8f,degrees(196),degrees(344)));
++            line(-6.5f,5.7f,6.5f,5.7f);
++            break;
++        case DeviceControlIcon::tasks: {
++            const SDL_Rect box{-7,-6,12,12};
++            d=std::fabs(deviceRoundedDistance(box,1.5f,x,y));
++            line(-4,-0.5f,-1.2f,2.6f);line(-1.2f,2.6f,7,-7.5f);
++            break;
++        }
++        case DeviceControlIcon::notes: {
++            // A note page with a pencil across its corner.
++            const SDL_Rect page{-7,-7,11,14};
++            if(segment(x,y,0,4.5f,7.5f,-6)>2.6f)d=std::fabs(deviceRoundedDistance(page,1.2f,x,y));
++            line(-4.5f,-3,1.5f,-3);line(-4.5f,0.3f,-0.5f,0.3f);line(-4.5f,3.6f,-2.5f,3.6f);
++            line(0.9f,2.6f,7.5f,-6.5f);line(-0.9f,1.3f,5.7f,-7.8f);line(-0.9f,1.3f,-0.3f,4.7f);
++            line(-0.3f,4.7f,0.9f,2.6f);line(5.7f,-7.8f,7.5f,-6.5f);
++            break;
++        }
++        default: break;
++    }
++    return d;
++}
++
++void paintE2Controls(Canvas& canvas, const DeviceControlProfile& profile, int width, uint32_t pressed) {
++    const float H=profile.height;
++    const int ox=(width-profile.width)/2;
++    auto down=[&](KeyId key) {return (pressed&(1u<<key))!=0;};
++    auto all=[&](float,float) {return 1.f;};
++    auto shifted=[&](SDL_Rect r) {r.x+=ox;return r;};
++    // Original vector artwork: a midnight blue face below the silkscreen glass.
++    canvas.paint(0,0,width,H,all,[&](float x,float y,Rgb) {
++        const Rgb c=mix(Rgb{36,44,64},Rgb{13,16,26},std::pow(y/H,0.85f));
++        const float t=std::fabs(x-width*0.5f)/(width*0.5f);
++        return c*(1-0.22f*t*t);
++    });
++    canvas.paint(0,0,width,2,[&](float,float y) {return canvas.edge(std::fabs(y-0.5f)-0.5f);},
++                 [](float,float,Rgb) {return Rgb{5,6,10};});
++    canvas.paint(0,0,width,4,[&](float,float y) {return canvas.edge(std::fabs(y-1.7f)-0.4f)*0.6f;},
++                 [](float,float,Rgb) {return Rgb{84,96,124};});
++
++    for(size_t i=0;i<profile.count;++i) {
++        const auto& button=profile.buttons[i];
++        if(deviceNavigatorButton(profile,button))continue;
++        const bool held=down(button.key);
++        const SDL_Rect key=shifted(button.bounds);
++        const float corner=deviceButtonCorner(profile,key),sink=held ? 0.8f : 0;
++        const float x0=key.x-4,y0=key.y-4,x1=key.x+key.w+4,y1=key.y+key.h+6;
++        const float kcx=key.x+key.w*0.5f,kcy=key.y+key.h*0.5f+sink;
++        auto d=[&](float x,float y) {return deviceRoundedDistance(key,corner,x,y);};
++        // Shadow and a dark seam round the key.
++        canvas.paint(x0,y0,x1,y1,[&](float x,float y) {return clamp01((2-d(x,y-1.6f))/4)*(held?0.35f:0.65f);},
++                     [](float,float,Rgb) {return Rgb{2,3,6};});
++        canvas.paint(x0,y0,x1,y1,[&](float x,float y) {return canvas.edge(d(x,y)-1.1f);},
++                     [](float,float,Rgb) {return Rgb{6,8,13};});
++        // Silver rim, lit along the top; the navy face sits inside it.
++        canvas.paint(x0,y0,x1,y1,[&](float x,float y) {return canvas.edge(d(x,y));},[&](float,float y,Rgb) {
++            const Rgb c=mix(Rgb{178,186,200},Rgb{82,90,106},clamp01((y-key.y)/key.h));
++            return held ? c*0.7f : c;
++        });
++        auto face=[&](float x,float y) {return d(x,y-sink)+1.6f;};
++        canvas.paint(x0,y0,x1,y1,[&](float x,float y) {return canvas.edge(face(x,y));},[&](float x,float y,Rgb) {
++            const float t=clamp01((y-key.y-sink)/key.h);
++            Rgb c=mix(Rgb{48,60,90},Rgb{20,26,42},t);
++            const float r=std::hypot((x-kcx)/(key.w*0.42f),(y-key.y-sink-key.h*0.3f)/(key.h*0.3f));
++            c=c+Rgb{22,26,36}*std::pow(clamp01(1-r),2.f);
++            c=mix(Rgb{14,18,30},c,clamp01(-face(x,y)/2.5f));
++            // Held: darker, with a shadow under the rim's top edge.
++            return held ? c*(0.5f+0.2f*clamp01(-face(x,y-1.5f)/3)) : c;
++        });
++        const Rgb ink=held ? Rgb{106,116,136} : Rgb{190,201,220};
++        canvas.paint(kcx-11,kcy-11,kcx+11,kcy+11,[&](float x,float y) {
++            return canvas.edge(e2IconDistance(button.icon,x-kcx,y-kcy)-0.6f);
++        },[&](float,float,Rgb) {return ink;});
++    }
++
++    if(profile.navigator.w<=0)return;
++    const SDL_Rect nav=shifted(profile.navigator),pill=shifted(profile.select);
++    const float cx=nav.x+nav.w*0.5f,cy=nav.y+nav.h*0.5f,R=nav.w*0.5f,r=pill.w*0.5f;
++    const float x0=nav.x-5,y0=nav.y-5,x1=nav.x+nav.w+5,y1=nav.y+nav.h+7;
++    auto dist=[&](float x,float y) {return std::hypot(x-cx,y-cy);};
++    auto part=[&](float x,float y) {return deviceNavigatorAt(profile,x-ox,y);};
++    // Round brushed-silver five-way in a dark seam, with a soft shadow.
++    canvas.paint(x0,y0,x1,y1,[&](float x,float y) {return clamp01((R+2.5f-dist(x,y-1.8f))/4.5f)*0.75f;},
++                 [](float,float,Rgb) {return Rgb{1,2,5};});
++    canvas.paint(x0,y0,x1,y1,[&](float x,float y) {return canvas.edge(dist(x,y)-R-1.4f);},
++                 [](float,float,Rgb) {return Rgb{5,6,10};});
++    canvas.paint(x0,y0,x1,y1,[&](float x,float y) {return canvas.edge(dist(x,y)-R);},[&](float x,float y,Rgb) {
++        const float t=clamp01((y-nav.y)/nav.h),rr=std::max(dist(x,y),0.001f);
++        Rgb c=mix(Rgb{214,219,228},Rgb{116,123,137},t);
++        // Lit from the top left, with faint concentric brushing.
++        c=c*(0.92f+0.1f*(-(x-cx)*0.5f-(y-cy)*0.85f)/rr)+Rgb{2,2,2}*std::sin(rr*2.6f);
++        // The rim rolls off at the outer edge and slopes into the groove round select.
++        c=mix(c,c*0.66f,clamp01(1+(rr-R)/2));
++        c=c*(1-0.25f*std::pow(clamp01(1-(rr-r-2)/8),2.f));
++        const KeyId k=part(x,y);
++        return k!=keyInvalid && k!=keyIdSelect && down(k) ? c*0.6f : c;
++    });
++    // Small arrow marks on each direction.
++    for(auto [key,ax,ay]:{std::tuple<KeyId,float,float>{keyIdUp,0,-1},{keyIdDown,0,1},{keyIdLeft,-1,0},{keyIdRight,1,0}}) {
++        const float tip=R-6.5f,base=R-11,half=3.6f;
++        const std::array<std::array<float,2>,3> mark{{{cx+ax*tip,cy+ay*tip},
++                                                      {cx+ax*base-ay*half,cy+ay*base+ax*half},
++                                                      {cx+ax*base+ay*half,cy+ay*base-ax*half}}};
++        const Rgb ink=down(key) ? Rgb{46,52,64} : Rgb{78,86,102};
++        canvas.paint(cx-R,cy-R,cx+R,cy+R,[&](float x,float y) {
++            return canvas.edge(polygon(x,y,mark));
++        },[&](float,float,Rgb) {return ink;});
++    }
++    // Dark groove and the domed navy select key.
++    const bool held=down(keyIdSelect);
++    const float sink=held ? 0.8f : 0;
++    canvas.paint(x0,y0,x1,y1,[&](float x,float y) {return canvas.edge(dist(x,y)-r-2.2f);},
++                 [&](float,float y,Rgb) {return mix(Rgb{12,15,24},Rgb{54,62,80},clamp01((y-pill.y)/pill.h));});
++    auto selectDistance=[&](float x,float y) {return dist(x,y-sink)-r+0.3f;};
++    canvas.paint(x0,y0,x1,y1,[&](float x,float y) {return canvas.edge(selectDistance(x,y));},[&](float x,float y,Rgb) {
++        const float t=clamp01((y-pill.y-sink)/pill.h);
++        Rgb c=held ? mix(Rgb{26,33,52},Rgb{18,22,36},t) : mix(Rgb{64,80,116},Rgb{26,33,54},t);
++        const float h=std::hypot((x-cx)/(r*0.8f),(y-cy-sink+r*0.45f)/(r*0.5f));
++        if(!held)c=c+Rgb{20,24,34}*std::pow(clamp01(1-h),2.f);
++        return c;
++    });
++    canvas.paint(x0,y0,x1,y1,[&](float x,float y) {
++        return canvas.edge(std::fabs(selectDistance(x,y)+0.7f)-0.35f)*(held?0.15f:0.5f)*clamp01((cy-y)/r+0.3f);
++    },[](float,float,Rgb) {return Rgb{140,154,182};});
++}
++
++// Distance to the silkscreen icons, in LCD pixels from the button centre.
++float silkscreenIconDistance(SilkscreenIcon icon, float x, float y) {
++    float d=1e9f;
++    auto line=[&](float ax,float ay,float bx,float by) {d=std::min(d,segment(x,y,ax,ay,bx,by));};
++    switch(icon) {
++        case SilkscreenIcon::home:
++            line(-11,-1,0,-11);line(0,-11,11,-1);line(-8,-3.6f,-8,10);line(8,-3.6f,8,10);line(-8,10,8,10);
++            line(-2.6f,10,-2.6f,3.4f);line(-2.6f,3.4f,2.6f,3.4f);line(2.6f,3.4f,2.6f,10);
++            break;
++        case SilkscreenIcon::menu: {
++            // A pull-down menu: title bar and items.
++            const SDL_Rect frame{-10,-8,20,17};
++            d=std::fabs(deviceRoundedDistance(frame,2,x,y));
++            line(-10,-3.5f,10,-3.5f);line(-6.5f,0.5f,5,0.5f);line(-6.5f,4.5f,2,4.5f);
++            break;
++        }
++        case SilkscreenIcon::favorites: {
++            std::array<std::array<float,2>,10> p;
++            for(int i=0;i<10;++i) {
++                const float a=degrees(-90+36*i),r=i%2 ? 4.9f : 11.5f;
++                p[i]={r*std::cos(a),r*std::sin(a)+1};
++            }
++            for(int i=0;i<10;++i)line(p[i][0],p[i][1],p[(i+1)%10][0],p[(i+1)%10][1]);
++            break;
++        }
++        case SilkscreenIcon::find:
++            d=ring(x,y,-2.5f,-2.5f,6.6f);
++            d=std::min(d,segment(x,y,2.6f,2.6f,8.6f,8.6f)-1.1f);
++            break;
++        case SilkscreenIcon::clock:
++            d=ring(x,y,0,0,6.6f);line(0,0,0,-4.2f);line(0,0,3.2f,1.4f);
++            break;
++        case SilkscreenIcon::brightness:
++            d=std::min(ring(x,y,0,0,3.2f),std::hypot(x,y)<3.2f && x<0 ? 0.f : 1e9f);
++            for(int i=0;i<8;++i) {
++                const float a=degrees(45*i);
++                line(5.4f*std::cos(a),5.4f*std::sin(a),7.8f*std::cos(a),7.8f*std::sin(a));
++            }
++            break;
++        case SilkscreenIcon::letters: d=textDistance("abc",x,y-4.5f);break;
++        case SilkscreenIcon::numbers: d=textDistance("123",x,y-4.5f);break;
++    }
++    return d;
++}
++
++void paintSilkscreen(Canvas& canvas, const DeviceSilkscreen& silk) {
++    const float W=silk.width,H=silk.height;
++    const Rgb ink{176,192,220},line{104,120,150};
++    // Dark printed glass over the digitizer.
++    canvas.paint(0,0,W,H,[](float,float) {return 1.f;},[&](float x,float y,Rgb) {
++        const Rgb c=mix(Rgb{25,29,42},Rgb{17,20,30},y/H);
++        const float t=std::fabs(x-W*0.5f)/(W*0.5f);
++        return c*(1-0.12f*t*t);
++    });
++    // Graffiti writing area: one outline, split into letters and numbers by two marks.
++    const SDL_Rect box{silk.letters.x,silk.letters.y,silk.numbers.x+silk.numbers.w-silk.letters.x,silk.letters.h};
++    const float bx0=box.x-2,by0=box.y-2,bx1=box.x+box.w+2,by1=box.y+box.h+2;
++    canvas.paint(bx0,by0,bx1,by1,[&](float x,float y) {return canvas.edge(deviceRoundedDistance(box,7,x,y));},
++                 [&](float,float y,Rgb) {return mix(Rgb{31,36,51},Rgb{26,30,44},clamp01((y-box.y)/box.h));});
++    canvas.paint(bx0,by0,bx1,by1,[&](float x,float y) {
++        return canvas.edge(std::fabs(deviceRoundedDistance(box,7,x,y)+0.5f)-0.6f);
++    },[&](float,float,Rgb) {return line;});
++    const float split=silk.numbers.x;
++    for(float sign:{1.f,-1.f}) {
++        const float rim=sign>0 ? box.y : box.y+box.h;
++        const std::array<std::array<float,2>,3> mark{{{split-3.4f,rim},{split+3.4f,rim},{split,rim+sign*5.5f}}};
++        canvas.paint(split-5,rim-7,split+5,rim+7,[&](float x,float y) {
++            return canvas.edge(polygon(x,y,mark));
++        },[&](float,float,Rgb) {return line;});
++    }
++    // Buttons: a pad over the reachable part of each ROM rectangle, with its icon centred.
++    for(size_t i=0;i<silk.count;++i) {
++        const auto& button=silk.buttons[i];
++        SDL_Rect r=button.bounds;
++        r.h=std::min(r.y+r.h,silk.height)-r.y;
++        const float corner=std::min(r.w,r.h)*0.22f,cx=r.x+r.w*0.5f,cy=r.y+r.h*0.5f;
++        const float x0=r.x-1,y0=r.y-1,x1=r.x+r.w+1,y1=r.y+r.h+1;
++        canvas.paint(x0,y0,x1,y1,[&](float x,float y) {return canvas.edge(deviceRoundedDistance(r,corner,x,y));},
++                     [&](float,float y,Rgb) {return mix(Rgb{36,42,60},Rgb{29,34,49},clamp01((y-r.y)/r.h));});
++        canvas.paint(x0,y0,x1,y1,[&](float x,float y) {
++            return canvas.edge(std::fabs(deviceRoundedDistance(r,corner,x,y)+0.5f)-0.45f)*0.8f;
++        },[](float,float,Rgb) {return Rgb{70,82,108};});
++        const bool text=button.icon==SilkscreenIcon::letters || button.icon==SilkscreenIcon::numbers;
++        const float stroke=text ? 0.5f : r.w<30 || r.h<30 ? 0.6f : 0.8f;
++        canvas.paint(cx-14,cy-14,cx+14,cy+14,[&](float x,float y) {
++            return canvas.edge(silkscreenIconDistance(button.icon,x-cx,y-cy)-stroke);
++        },[&](float,float,Rgb) {return ink;});
++    }
++}
++}  // namespace
++
++void drawDeviceControls(SDL_Renderer* renderer, const DeviceControlProfile& profile,
++                        int width, int height, int scale, uint32_t pressed) {
++    if(!profile.count)return;
++    Canvas canvas(width,profile.height,scale);
++    if(profile.style==DeviceControlStyle::e2)paintE2Controls(canvas,profile,width,pressed);
++    else paintTxControls(canvas,profile,width,pressed);
++    if(auto* texture=canvasTexture(renderer,canvas)) {
+         const SDL_Rect dest{0,height*scale,canvas.w,canvas.h};
+         SDL_RenderCopy(renderer,texture,nullptr,&dest);
+         SDL_DestroyTexture(texture);
+     }
+-    SDL_FreeSurface(surface);
++}
++
++SDL_Texture* createDeviceSilkscreen(SDL_Renderer* renderer, const DeviceSilkscreen& silkscreen, int scale) {
++    if(!silkscreen.count)return nullptr;
++    Canvas canvas(silkscreen.width,silkscreen.height,scale);
++    paintSilkscreen(canvas,silkscreen);
++    return canvasTexture(renderer,canvas);
+ }
+diff --git a/src/uarm/native/DeviceControls.h b/src/uarm/native/DeviceControls.h
+--- a/src/uarm/native/DeviceControls.h
++++ b/src/uarm/native/DeviceControls.h
+@@ -8,7 +8,8 @@
+ #include "device_type5.h"
+ #include "keys.h"
+ 
+-enum class DeviceControlIcon { home, calendar, contacts, web, up, down, left, right, select, power };
++enum class DeviceControlIcon { home, calendar, contacts, web, up, down, left, right, select, power, tasks, notes };
++enum class DeviceControlStyle { tx, e2 };
+ struct DeviceButton {
+     KeyId key;
+     SDL_Rect bounds;
+@@ -23,6 +24,9 @@
+     SDL_Rect navigator;
+     int navigatorCorner;
+     SDL_Rect select;
++    DeviceControlStyle style{DeviceControlStyle::tx};
++    // App key corner radius as a fraction of the key's shorter side.
++    float buttonCorner{0.3f};
+ };
+ inline const DeviceControlProfile& deviceControls(DeviceType5 device) {
+     // App keys hit their whole pocket; the five-way entries place the direction parts.
+@@ -38,8 +42,22 @@
+         {keyIdSelect, {135,30,50,22}, "Select", DeviceControlIcon::select},
+     };
+     static const DeviceControlProfile txProfile{320,84,tx,std::size(tx),{110,9,100,64},22,{135,30,50,22}};
++    // E2: app keys hard1-4 open Calendar, Contacts, Tasks and Note Pad; a round five-way between the pairs.
++    static const DeviceButton e2[] = {
++        {keyIdHard1, {10,22,44,34}, "Calendar", DeviceControlIcon::calendar},
++        {keyIdHard2, {62,27,44,34}, "Contacts", DeviceControlIcon::contacts},
++        {keyIdHard3, {214,27,44,34}, "Tasks", DeviceControlIcon::tasks},
++        {keyIdHard4, {266,22,44,34}, "Note Pad", DeviceControlIcon::notes},
++        {keyIdUp, {150,10,20,14}, "Up", DeviceControlIcon::up},
++        {keyIdDown, {150,56,20,14}, "Down", DeviceControlIcon::down},
++        {keyIdLeft, {130,30,14,20}, "Left", DeviceControlIcon::left},
++        {keyIdRight, {176,30,14,20}, "Right", DeviceControlIcon::right},
++        {keyIdSelect, {146,26,28,28}, "Select", DeviceControlIcon::select},
++    };
++    static const DeviceControlProfile e2Profile{320,80,e2,std::size(e2),{128,8,64,64},32,{146,26,28,28},
++                                                DeviceControlStyle::e2,0.46f};
+     static const DeviceControlProfile empty{0,0,nullptr,0,{0,0,0,0},0,{0,0,0,0}};
+-    return device == deviceTypeTX ? txProfile : empty;
++    return device == deviceTypeTX ? txProfile : device == deviceTypeE2 ? e2Profile : empty;
+ }
+ // Signed distance from (x,y) to a rounded rectangle; negative inside.
+ inline float deviceRoundedDistance(const SDL_Rect& r, float radius, float x, float y) {
+@@ -61,8 +79,10 @@
+                                 const DeviceButton& button, int screenWidth, int screenHeight) {
+     auto r=button.bounds; r.x+=(screenWidth-profile.width)/2; r.y+=screenHeight; return r;
+ }
+-// App keys are rounded squares; their pockets share this corner.
+-inline float deviceButtonCorner(const SDL_Rect& r) {return std::min(r.w,r.h)*0.3f;}
++// App keys are rounded rectangles; their pockets share this corner.
++inline float deviceButtonCorner(const DeviceControlProfile& profile, const SDL_Rect& r) {
++    return std::min(r.w,r.h)*profile.buttonCorner;
++}
+ inline bool deviceNavigatorButton(const DeviceControlProfile& profile, const DeviceButton& button) {
+     return profile.navigator.w>0 && button.icon>=DeviceControlIcon::up &&
+            button.icon<=DeviceControlIcon::select;
+@@ -76,11 +96,47 @@
+     for(size_t i=0;i<profile.count;++i) {
+         if(deviceNavigatorButton(profile,profile.buttons[i]))continue;
+         const auto& r=profile.buttons[i].bounds;
+-        if(deviceRoundedDistance(r,deviceButtonCorner(r),sx+0.5f,sy+0.5f)<=0)
++        if(deviceRoundedDistance(r,deviceButtonCorner(profile,r),sx+0.5f,sy+0.5f)<=0)
+             return profile.buttons[i].key;
+     }
+     return keyInvalid;
+ }
+ void drawDeviceControls(SDL_Renderer* renderer, const DeviceControlProfile& profile,
+                         int screenWidth, int screenHeight, int scale, uint32_t pressed);
++
++// Printed silkscreen under the LCD. Taps on it reach the guest as pen input; these
++// rectangles only place the artwork.
++enum class SilkscreenIcon { home, menu, favorites, find, clock, brightness, letters, numbers };
++struct SilkscreenButton {
++    SDL_Rect bounds;
++    const char* label;
++    SilkscreenIcon icon;
++};
++struct DeviceSilkscreen {
++    int width, height;
++    const SilkscreenButton* buttons;
++    size_t count;
++    // Graffiti letter and number areas.
++    SDL_Rect letters, numbers;
++};
++inline const DeviceSilkscreen& deviceSilkscreen(DeviceType5 device) {
++    // The E2 ROM's 'aslk' 19000 rectangles, in LCD pixels (twice the Palm OS
++    // coordinates) from the top of the silkscreen. Menu, Find, abc and 123 run
++    // past the 120 rows the digitizer reaches, as in the ROM.
++    static const SilkscreenButton e2[] = {
++        {{0,8,46,56}, "Home", SilkscreenIcon::home},
++        {{0,68,46,56}, "Menu", SilkscreenIcon::menu},
++        {{274,8,46,56}, "Favorites", SilkscreenIcon::favorites},
++        {{274,68,46,56}, "Find", SilkscreenIcon::find},
++        {{50,8,22,38}, "Clock", SilkscreenIcon::clock},
++        {{250,8,22,38}, "Brightness", SilkscreenIcon::brightness},
++        {{50,100,36,40}, "Letter keyboard", SilkscreenIcon::letters},
++        {{236,100,36,40}, "Number keyboard", SilkscreenIcon::numbers},
++    };
++    static const DeviceSilkscreen e2Silkscreen{320,120,e2,std::size(e2),{54,4,124,112},{178,4,88,112}};
++    static const DeviceSilkscreen none{0,0,nullptr,0,{0,0,0,0},{0,0,0,0}};
++    return device == deviceTypeE2 ? e2Silkscreen : none;
++}
++// Draws the silkscreen at scale into a new texture the caller owns.
++SDL_Texture* createDeviceSilkscreen(SDL_Renderer* renderer, const DeviceSilkscreen& silkscreen, int scale);
+ #endif
+diff --git a/src/uarm/native/SdlRenderer.cpp b/src/uarm/native/SdlRenderer.cpp
+--- a/src/uarm/native/SdlRenderer.cpp
++++ b/src/uarm/native/SdlRenderer.cpp
+@@ -55,7 +55,12 @@
+                           displayConfiguration.width, displayConfiguration.height);
+ 
+     if (displayConfiguration.graffitiHeight > 0) {
+-        silkscreenTexture = loadSilkscreen(renderer);
++        // Devices with drawn silkscreen art use it when it fits the display mode.
++        const auto& silkscreen = deviceSilkscreen(soc->GetDeviceType());
++        silkscreenTexture = silkscreen.count && silkscreen.width == displayConfiguration.width &&
++                                    silkscreen.height == displayConfiguration.graffitiHeight
++                                ? createDeviceSilkscreen(renderer, silkscreen, scale)
++                                : loadSilkscreen(renderer);
+     }
+ 
+     SDL_SetRenderDrawColor(renderer, 0xff, 0xff, 0xff, 0xff);

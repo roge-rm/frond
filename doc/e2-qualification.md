@@ -1,9 +1,17 @@
 # Tungsten E2 qualification workflow
 
-The E2 remains `inherited-unverified` and unavailable to the Qt desktop and its
-control protocol. Patch `0044-e2-cohort.patch` adds physical app-button replay
-names and clears obsolete queued host input on E2 restore. It does not enable a
-new desktop device or change TX key aliases or restore behavior.
+The Tungsten E2 is available in the Qt desktop and its control protocol
+(`e2-desktop` in the profile inventory). It passed the gates below on the dumped
+ROM: cold boot with and without NAND, calibration, editor content and continued
+input after a fresh-process restore, reset, sleep and wake, SD, audio and six
+representative apps. The other inherited cohorts stay unavailable.
+
+Known limits. The E2's VFS returns `vfsErrFileEOF` at the end of a file, where
+the TX returns no error, so the SD test script doesn't accept E2 logs as they
+are. IR keyboard drivers, Bluetooth, USB and HotSync, and networking aren't
+covered; the desktop turns those controls off for the E2. Physical-device timing
+isn't checked. Patch `0044-e2-cohort.patch` adds physical app-button replay
+names and clears obsolete queued host input on E2 restore.
 
 ## Firmware-free regressions
 
@@ -68,10 +76,9 @@ content and subsequent input work. Check normal reset separately. Do not infer
 text entry from a changed frame, or persistence from an unchanged setup screen.
 Do not accept application licences or fetch fixtures as part of this workflow.
 
-## Qualification gates still required
+## Qualification gates
 
-Keep the cohort unavailable to the desktop until the device-profile gates are
-met. Separate cold boot with existing and blank NAND, complete calibration,
+The desktop was enabled once these were met. Separate cold boot with existing and blank NAND, complete calibration,
 editor content persistence and continued input after fresh-process restore.
 Check normal reset and representative apps independently. Codec/SD synthetic
 passes do not establish guest audio or storage.

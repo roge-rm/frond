@@ -1,0 +1,108 @@
+diff --git a/src/common/device_profile5.h b/src/common/device_profile5.h
+index 856ed05..2dd7183 100644
+--- a/src/common/device_profile5.h
++++ b/src/common/device_profile5.h
+@@ -12,7 +12,7 @@ enum class DisplayMode {
+ };
+ 
+ enum class DeviceCohort5 { txNand, e2Nand, patchedE2, paravirtual };
+-enum class DeviceSupport5 { txDesktop, inheritedUnverified };
++enum class DeviceSupport5 { txDesktop, e2Desktop, inheritedUnverified };
+ 
+ struct DeviceProfile5 {
+     DeviceType5 deviceType;
+@@ -31,7 +31,7 @@ struct DeviceProfile5 {
+ // Inventory of implemented native models, not a list of verified Palm devices.
+ inline constexpr DeviceProfile5 deviceProfiles5[] = {
+     {deviceTypeE2, "tungsten-e2", "Tungsten E2", DeviceCohort5::e2Nand,
+-     DeviceSupport5::inheritedUnverified, 8u << 20, 34603008, 16u << 20, 32u << 20,
++     DeviceSupport5::e2Desktop, 8u << 20, 34603008, 16u << 20, 32u << 20,
+      DisplayMode::mode_320x320, 1u << 5, false},
+     {deviceTypeFrankenE2, "franken-e2", "FrankenE2 / Tungsten E3", DeviceCohort5::patchedE2,
+      DeviceSupport5::inheritedUnverified, 0, 34603008, 16u << 20, 32u << 20,
+@@ -52,7 +52,8 @@ inline const DeviceProfile5* deviceProfile5(int32_t deviceType) {
+ 
+ inline bool deviceProfileSupportsDesktop5(int32_t deviceType) {
+     const auto* profile = deviceProfile5(deviceType);
+-    return profile && profile->support == DeviceSupport5::txDesktop;
++    return profile && (profile->support == DeviceSupport5::txDesktop ||
++                       profile->support == DeviceSupport5::e2Desktop);
+ }
+ 
+ inline bool deviceProfileSupportsRam5(int32_t deviceType, uint32_t bytes) {
+diff --git a/src/uarm/native/DesktopControl.h b/src/uarm/native/DesktopControl.h
+index cec5af9..595b54e 100644
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -191,6 +191,13 @@ class DesktopControl {
+                 return {false, "launch", "Could not launch that application. Check its database name and wait for Palm OS to finish starting."};
+             return {true, "launched", "Application launched."};
+         }
++        if (command == "device-state") return {true, "device", deviceProfile5(ctx.soc->GetDeviceType())->id};
++        // Keyboard, serial and USB hardware are modelled for the Palm TX only.
++        const bool tx = ctx.soc->GetDeviceType() == DeviceType5::deviceTypeTX;
++        if (!tx && (command == "serial-mode" || command == "usb-mode" || (command == "keyboard-attach" && path != "off")))
++            return {false, "unsupported", "This device has no emulated keyboard, serial or USB port."};
++        if (!tx && command == "network-mode" && path != "disabled")
++            return {false, "unsupported", "This device has no emulated network."};
+         if (command == "keyboard-state") return {true,"keyboard",ctx.soc->KeyboardAttached()?"attached":"detached"};
+         if (command == "keyboard-attach") {
+             if (path!="on" && path!="off") return {false,"argument","Use on or off."};
+diff --git a/src/uarm/native/main.cpp b/src/uarm/native/main.cpp
+index 322d84e..ed2d68e 100644
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -223,7 +223,8 @@ namespace {
+         return true;
+     }
+ 
+-    bool run(const Options& options) {
++    bool run(const Options& requested) {
++        Options options = requested;
+         if (options.gdbPort && (*options.gdbPort == 0 || *options.gdbPort > 65535)) {
+             cerr << "GDB port must be 1..65535" << endl;
+             return false;
+@@ -275,6 +276,12 @@ namespace {
+             return false;
+         }
+         const bool isTx = deviceType == DeviceType5::deviceTypeTX;
++        // The desktop passes its saved TX-only settings to every device; the E2 skips them.
++        if (options.desktopSocket && !isTx) {
++            options.experimentalFastAudio = false;
++            serialConfig = HostSerial::Config{};
++            usbConfig = HostSerial::Config{};
++        }
+         if (options.experimentalFastAudio && (!isTx || md5(static_cast<uint8_t*>(nor.data),nor.size) != "85b048a692aa317763a7077ea72da6cb")) {
+             cerr << "experimental fast audio requires the verified TX 5.4 NOR image" << endl;
+             return false;
+@@ -366,7 +373,7 @@ namespace {
+         const int gdbPort = options.gdbPort ? static_cast<int>(*options.gdbPort) : -1;
+ 
+         if (options.desktopSocket && !deviceProfileSupportsDesktop5(deviceType)) {
+-            cerr << "desktop sessions currently support Palm TX only" << endl;
++            cerr << "desktop sessions currently support Palm TX and Tungsten E2 only" << endl;
+             return false;
+         }
+         DisplayConfiguration displayConfiguration =
+@@ -501,10 +508,11 @@ namespace {
+             usb.Start(static_cast<SocPXA*>(soc), usbConfig, commandContext.usbError);  // off: cable as without USB
+         }
+ 
++        const string desktopTitle = string("Frond — ") + deviceProfile5(deviceType)->name;
+         unique_ptr<DesktopControl> desktop;
+         if (options.desktopSocket) {
+             desktop = make_unique<DesktopControl>(*options.desktopSocket, !options.disableAudio);
+-            SDL_SetWindowTitle(window, "Frond — Palm TX");
++            SDL_SetWindowTitle(window, desktopTitle.c_str());
+         }
+ 
+         uint64_t lastSpeedDump = startedAt;
+@@ -575,7 +583,7 @@ namespace {
+                   << (100 * currentIps) / currentIpsMax << "%" << endl
+                   << flush;
+ 
+-                SDL_SetWindowTitle(window, desktop ? "Frond — Palm TX" : s.str().c_str());
++                SDL_SetWindowTitle(window, desktop ? desktopTitle.c_str() : s.str().c_str());
+                 if (options.runFor) cout << s.str();
+             }
+ 

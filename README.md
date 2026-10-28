@@ -1,17 +1,16 @@
 # Frond
 
-Frond runs Palm OS 5 on Linux, with a Palm TX on your desktop. It's built on
-[CloudpilotEmu](https://github.com/cloudpilot-emu/cloudpilot-emu) and
-[uARM](https://github.com/uARM-Palm/uARM), with a Qt launcher and TX hardware,
-sound and input support.
+Frond is a Palm OS 5 emulator for Linux, made for developing and running Palm
+apps. It emulates the Palm TX and the Tungsten E2, with their buttons, sound, SD
+card, sleep and wake, and saved sessions. More devices are planned.
 
-It's early, at version 0.3.0. You'll need your own Palm TX firmware; none is
-included. The launcher and Palm display use separate windows. Sound can break
-up when the host is busy, and some menus are slow.
+You need your own firmware dumped from the device; none is included. Frond is
+early, at version 0.3.0. Sound can break up when your computer is busy, and some
+menus are slow.
 
 <img src="doc/images/tx-sunvox-editor.png" width="240" alt="SunVox running on the emulated Palm TX" /> <img src="doc/images/tx-simcity-zone.png" width="240" alt="Building a city in SimCity on the emulated Palm TX" />
 
-## Build and run
+## Build
 
 On Debian 13 (Trixie):
 
@@ -24,48 +23,74 @@ make -j4
 ./out/frond-desktop
 ```
 
-Choose your TX NOR and NAND images and click **Start**. Frond expects a 16 MiB
-NOR and a 132 MiB raw NAND dump, including spare bytes. It leaves the original
-images unchanged. Complete Palm OS setup, then use **File → Install Application**
-to install PRC or PDB files. If taps land in the wrong place, calibrate the
-screen in Palm Preferences.
-
-Close either window to save the session. Frond can resume it on the next launch;
-**Save and Stop** returns to the launcher, and **Save a Copy** creates a separate
-snapshot. Sessions contain firmware and personal data, so keep them private.
-There is no periodic autosave; a crash can lose changes since the last save.
-
-The buttons below the Palm screen are clickable. With the Palm infrared keyboard
-detached, the arrow keys control the five-way navigator, Enter selects, and F1–F4
-operate the application buttons. See **Help → Hardware Keyboard Controls** for
-the mappings. You can also attach an emulated Palm infrared keyboard for typing;
-it requires a separately supplied Palm driver.
-
-The **SD Card** menu creates and imports card images. **Exchange Files…** copies
-files between the host and an ejected card without root access. Close files on
-the Palm before ejecting. Virtual Wi-Fi provides Internet access through your
-computer without a bridge or physical Wi-Fi adapter. The **Serial port** and
-**USB** settings connect the TX's cradle serial port and USB HotSync to a PTY or
-a TCP port on your computer, for terminal programs and pilot-link. Bluetooth and
-infrared beaming are not supported.
-
-See the [desktop guide](doc/desktop.md) for sessions and controls, the
-[peripheral guide](doc/peripherals.md) for SD cards, networking, USB HotSync and
-keyboard setup, and the [serial guide](doc/tx-serial.md) for the serial port.
-
-## Debian package
-
-To build and install a package locally (`dpkg-dev` and `binutils` are also needed):
+To build and install a Debian package instead (also needs `dpkg-dev` and
+`binutils`):
 
 ```sh
 make deb
 sudo apt install ./out/frond_0.3.0-1_amd64.deb
 ```
 
-The package adds Frond to Plasma's application menu. It does not include firmware
-or Palm applications.
+The package adds Frond to the application menu. It doesn't include firmware or
+Palm apps.
 
-## Development
+## Firmware
+
+| Device | NOR | NAND |
+|---|---|---|
+| Palm TX | 16 MiB | 132 MiB raw dump, with spare bytes |
+| Tungsten E2 | 8 MiB | 34,603,008 bytes raw dump, optional |
+
+Pick the device, or let Frond detect it from the NOR, choose the files and click
+**Start**. Frond reads the files and never changes them. Go through Palm OS setup,
+then use **File → Install Application** to install PRC and PDB files. If taps land
+in the wrong place, calibrate the screen in Palm Preferences.
+
+## Using it
+
+The launcher and the Palm screen are separate windows. Closing either one saves
+the session, and Frond offers to resume it next time. **Save and Stop** goes back
+to the launcher and **Save a Copy** keeps a separate snapshot. There's no
+autosave, so a crash loses what changed since the last save. Sessions hold your
+firmware and personal data, so keep them private.
+
+The buttons under the screen and the E2's silkscreen are clickable. On your
+keyboard the arrow keys work the five-way, Enter selects and F1 to F4 are the app
+buttons; **Help → Hardware Keyboard Controls** lists them all. On the TX you can
+also attach an emulated Palm infrared keyboard for typing, which needs Palm's
+keyboard driver.
+
+The **SD Card** menu makes and imports card images, and **Exchange Files…** copies
+files between your computer and an ejected card. Close files on the Palm before
+ejecting.
+
+On the TX:
+
+- Virtual Wi-Fi gets the Palm onto the internet through your computer, with no
+  bridge or Wi-Fi adapter needed.
+- **Serial port** connects the cradle serial port to a PTY or a TCP port, for
+  terminal programs and pilot-link.
+- **USB** does HotSync over a PTY or TCP port.
+
+The E2 doesn't have these yet; USB HotSync, infrared and Bluetooth are planned
+for both devices. Settings a device doesn't support are greyed out.
+
+More in the [desktop guide](doc/desktop.md), the
+[peripheral guide](doc/peripherals.md) (SD cards, networking, USB HotSync,
+keyboard), the [serial guide](doc/tx-serial.md) and
+[E2 notes](doc/e2-qualification.md).
+
+## For developers
+
+- The [developer runner](doc/developer-run.md) installs and launches apps, exports
+  RAM databases and fetches logs from the command line.
+- The [debugger](doc/debugger.md) works with GDB: ARM and Thumb stepping,
+  breakpoints, PACE inspection and 68k stepping. Watchpoints aren't supported yet.
+- [Compatibility tests](doc/compatibility.md) check apps for launch, interaction,
+  saved data and restore.
+- [Input and audio timing](doc/input-latency.md) tools measure latency.
+
+Tests that need no firmware:
 
 ```sh
 make test
@@ -73,36 +98,19 @@ QT_QPA_PLATFORM=offscreen make test-desktop
 make test-build-tools check-reconstruction
 ```
 
-The tests above need no Palm firmware. With your own firmware, the
-[developer runner](doc/developer-run.md) supports application installation,
-launch, RAM database export and log retrieval, including during qualified TX
-native UI waits. The [compatibility tests](doc/compatibility.md) include fresh-token
-SDK probes with real form interaction and a repeatable private application matrix
-that separates launch, interaction, persistence and restore observations.
-
-The [ARM and PACE debugger](doc/debugger.md) provides ARM/Thumb stepping and
-breakpoints, PACE inspection and explicit 68k stepping validated with real GDB
-and a TX session. Foreground-app attribution is restricted to the qualified TX
-UI-root wait; offline symbol reports require matching executable, PRC and live
-resource bytes. General code ownership and watchpoints remain unsupported.
-Tools for [measuring input and audio timing](doc/input-latency.md) are also available.
-
-[Lifecycle tests](doc/session-testing.md) cover audio, SD transfers and local
-network/UART ownership across sleep, reset and restore. Physical-device timing
-remains unvalidated.
-
-The upstream core is pinned in `vendor/cloudpilot`; ordered patches in `patches/`
-are applied to `build/source`. See [build validation](doc/build-validation.md)
-for reconstruction and package checks.
+The upstream core is pinned in `vendor/cloudpilot`, and the ordered patches in
+`patches/` are applied to it in `build/source`. See
+[build validation](doc/build-validation.md) and
+[session testing](doc/session-testing.md).
 
 ## Credits and licence
 
-Frond uses CloudpilotEmu's optimized execution core, PACE integration and SDL
-frontend, and Dmitry Grinberg's uARM TX board model. Thanks to their authors for
-the work this builds on.
+Frond is built on [CloudpilotEmu](https://github.com/cloudpilot-emu/cloudpilot-emu)
+(its execution core, PACE support and SDL frontend) and Dmitry Grinberg's
+[uARM](https://github.com/uARM-Palm/uARM) TX board model. Thanks to their authors.
 
-GPL-3.0-or-later, see [LICENSE](LICENSE). Palm firmware and applications have
-their own licences and must be supplied separately.
+GPL-3.0-or-later, see [LICENSE](LICENSE). Palm firmware and apps have their own
+licences and must be supplied separately.
 
 Enjoy!<br>
 Dan

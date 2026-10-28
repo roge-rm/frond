@@ -2,7 +2,7 @@
 
 Frond's Qt 6 launcher provides desktop controls alongside the SDL Palm display.
 The Palm display remains a separate window in this release. Firmware is supplied
-by the user. Palm TX support is experimental. Virtual SD cards and experimental virtual Wi-Fi are supported;
+by the user. Palm TX and Tungsten E2 support is experimental. Virtual SD cards and experimental virtual Wi-Fi are supported;
 Bluetooth remains unavailable. See [peripherals](peripherals.md).
 
 ## Debian Trixie / KDE Plasma
@@ -14,8 +14,13 @@ sudo apt install ./frond_0.3.0-1_amd64.deb
 ```
 
 Launch **Frond** from Plasma's application menu. On first use, choose an existing
-Frond session, or select a 16 MiB TX NOR image and a 132 MiB raw NAND image, then
-click **Start**. Firmware paths are remembered. Complete Palm OS setup in the
+Frond session, or choose a device and its firmware images, then click **Start**.
+The TX needs a 16 MiB NOR image and a 132 MiB raw NAND image. The Tungsten E2
+needs an 8 MiB NOR image and can take a 34,603,008-byte raw NAND image; with no
+NAND it starts from blank flash and you set it up again. **Device** can detect the
+device from the NOR image (the E2 from its card header at 0x20000, the TX from its
+size) or you can choose it. Frond refuses a NOR image that belongs to another
+device than the one chosen. Firmware paths are remembered. Complete Palm OS setup in the
 Palm window when starting from raw firmware.
 
 Close Frond or its Palm window to save the running device automatically. The next
@@ -94,11 +99,18 @@ is locked while open to prevent two Frond windows overwriting it. Errors appear 
 the GUI; **View → Emulator Log** exposes diagnostic details.
 
 `.frond` files can be opened through the desktop file manager. Existing `.session`
-files also work through Open Session. A GUI-controlled session currently supports
-Palm TX only. See the [device profile inventory](device-profiles.md) for the
+files also work through Open Session. A GUI-controlled session supports
+the Palm TX and the Tungsten E2. See the [device profile inventory](device-profiles.md) for the
 inherited models and staged support limits.
 
 ## Physical buttons
+
+The E2 window has its own strip: Calendar, Contacts, a five-way navigator
+with a pill-shaped centre select, Tasks and Note Pad, under a drawn silkscreen
+with the Graffiti area, Home, Menu, Favorites, Find, clock, brightness and the ABC
+and 123 keyboards. Click the silkscreen buttons and the strip like the TX buttons;
+F1 to F4 are the four application buttons and Escape is Power. Normal and
+double size and rotation work as on the TX.
 
 The TX window includes a button strip beneath its display: Home, Calendar,
 five-way navigation with centre select, Contacts and Web. Click and hold

@@ -7,6 +7,8 @@
 #include <QLabel>
 #include <QComboBox>
 #include <QCheckBox>
+#include <QLineEdit>
+#include <QRadioButton>
 #include <QMessageBox>
 #include <QTimer>
 #include <QAction>
@@ -296,6 +298,123 @@ for line in s.makefile('rb'):
         QCOMPARE(next.findChild<QSpinBox*>("usbPort")->value(), 5098);
         QSettings().clear();
     }
+    void e2NewSession() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QSettings().setValue("serialMode", "tcp"); QSettings().setValue("usbMode", "pty");
+        QSettings().setValue("fastAudio", true);
+        QTemporaryDir files;
+        const auto norPath = files.filePath("e2-nor"), nandPath = files.filePath("e2-nand"), txNor = files.filePath("tx-nor");
+        {
+            // Sparse synthetic images: the E2 card header at 0x20000.
+            QFile nor(norPath); QVERIFY(nor.open(QIODevice::WriteOnly)); QVERIFY(nor.resize(8 << 20));
+            const char header[] = {char(0xef), char(0xbe), char(0xed), char(0xfe)};
+            nor.seek(0x20008); nor.write(header, 4);
+            const char palm[] = {'m', 'l', 'a', 'P'}, hal[] = {'r', 'p', 's', 'h'};
+            nor.seek(0x20080); nor.write(palm, 4); nor.write(hal, 4);
+            QFile tx(txNor); QVERIFY(tx.open(QIODevice::WriteOnly)); QVERIFY(tx.resize(16 << 20));
+            QFile nand(nandPath); QVERIFY(nand.open(QIODevice::WriteOnly)); QVERIFY(nand.resize(34603008));
+        }
+        QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly));
+        core.write(R"PY(#!/usr/bin/python3
+import pathlib,socket,sys
+pathlib.Path(sys.argv[0]+'.args').write_text('\n'.join(sys.argv[1:]))
+trace=pathlib.Path(sys.argv[0]+'.commands')
+s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+for line in s.makefile('rb'):
+    i,cmd,arg=line.rstrip(b'\n').split(b'\t')
+    with trace.open('ab') as t: t.write(cmd+b'\n')
+    message={b'device-state':b'tungsten-e2',b'keyboard-state':b'detached',b'network-state':b'disabled',b'sd-state':b'none'}.get(cmd,b'done')
+    if cmd==b'save': pathlib.Path(bytes.fromhex(arg.decode()).decode()).write_text('saved')
+    s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
+    if cmd==b'quit': break
+)PY");
+        core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        const auto read = [&](const QString& suffix) {
+            QFile file(core.fileName() + suffix);
+            return file.open(QIODevice::ReadOnly) ? QString::fromUtf8(file.readAll()) : QString();
+        };
+        MainWindow window(core.fileName()); window.show();
+        auto* device = window.findChild<QComboBox*>("device"); QVERIFY(device);
+        auto* start = window.findChild<QPushButton*>("start");
+        auto* stop = window.findChild<QPushButton*>("stop");
+        // A TX choice with an E2 NOR is refused and nothing starts.
+        window.findChild<QLineEdit*>("nor")->setText(norPath);
+        window.findChild<QLineEdit*>("nand")->setText({});
+        for (auto* radio : window.findChildren<QRadioButton*>()) if (radio->text().startsWith("Start")) radio->setChecked(true);
+        device->setCurrentIndex(device->findText("Palm TX"));
+        // The launcher greys the unsupported settings once the device is settled, before Start.
+        const QStringList gated{"serialMode", "usbMode", "fastAudio"};
+        auto gatedWidget = [&](const QString& name) { return window.findChild<QWidget*>(name); };
+        for (const auto& name : gated) QVERIFY2(gatedWidget(name)->isEnabled(), qPrintable(name));
+        for (const char* mode : {"Detect from the NOR image", "Tungsten E2"}) {
+            device->setCurrentIndex(device->findText(mode));
+            for (const auto& name : gated) {
+                QVERIFY2(!gatedWidget(name)->isEnabled(), qPrintable(name));
+                QVERIFY2(gatedWidget(name)->toolTip().contains("Not available on the Tungsten E2 yet"), qPrintable(name));
+            }
+            QVERIFY(!window.findChild<QSpinBox*>("serialPort")->isEnabled());
+            QVERIFY(!window.findChild<QSpinBox*>("usbPort")->isEnabled());
+        }
+        // The saved values stay while they are greyed.
+        QCOMPARE(window.findChild<QComboBox*>("serialMode")->currentData().toString(), QString("tcp"));
+        QCOMPARE(window.findChild<QComboBox*>("usbMode")->currentData().toString(), QString("pty"));
+        QVERIFY(window.findChild<QCheckBox*>("fastAudio")->isChecked());
+        device->setCurrentIndex(device->findText("Palm TX"));
+        for (const auto& name : gated) {
+            QVERIFY2(gatedWidget(name)->isEnabled(), qPrintable(name));
+            QVERIFY2(!gatedWidget(name)->toolTip().contains("Not available"), qPrintable(name));
+        }
+        QVERIFY(window.findChild<QSpinBox*>("serialPort")->isEnabled());
+        QString shown;
+        QTimer dialogPoll;
+        dialogPoll.setInterval(50);
+        connect(&dialogPoll, &QTimer::timeout, &window, [&] {
+            if (auto* box = window.findChild<QMessageBox*>(); box && box->isVisible()) { shown = box->text(); box->done(QMessageBox::Ok); }
+        });
+        dialogPoll.start();
+        start->click();
+        QTRY_VERIFY_WITH_TIMEOUT(shown.contains("Tungsten E2"), 5000);
+        QVERIFY(read(".args").isEmpty());
+        // Detecting the device from the NOR starts the E2: no TX flag, and no NAND when it's empty.
+        device->setCurrentIndex(0);
+        start->click();
+        QTRY_VERIFY_WITH_TIMEOUT(stop->isEnabled(), 5000);
+        dialogPoll.stop();
+        const auto args = read(".args").split('\n');
+        QCOMPARE(args.value(0), norPath);
+        QVERIFY(!args.contains("--experimental-tx") && !args.contains("--nand"));
+        QTRY_VERIFY_WITH_TIMEOUT(read(".commands").contains("sd-state"), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(read(".commands").contains("network-state"), 5000);
+        // The TX-only controls are off, and their saved settings are not sent.
+        QVERIFY(!window.findChild<QComboBox*>("networkMode")->isEnabled());
+        QVERIFY(!window.findChild<QCheckBox*>("keyboardAttached")->isEnabled());
+        QVERIFY(!window.findChild<QComboBox*>("serialMode")->isEnabled());
+        QVERIFY(!window.findChild<QComboBox*>("usbMode")->isEnabled());
+        QVERIFY(!read(".commands").contains("serial-state") && !read(".commands").contains("usb-state"));
+        // A NAND file is passed on when given.
+        window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        MainWindow second(core.fileName()); second.show();
+        for (auto* radio : second.findChildren<QRadioButton*>()) if (radio->text().startsWith("Start")) radio->setChecked(true);
+        second.findChild<QLineEdit*>("nor")->setText(norPath);
+        second.findChild<QLineEdit*>("nand")->setText(nandPath);
+        auto* secondDevice = second.findChild<QComboBox*>("device");
+        secondDevice->setCurrentIndex(secondDevice->findText("Tungsten E2"));
+        second.findChild<QPushButton*>("start")->click();
+        QTRY_VERIFY_WITH_TIMEOUT(second.findChild<QPushButton*>("stop")->isEnabled(), 5000);
+        QVERIFY(read(".args").contains("--nand\n" + nandPath));
+        QVERIFY(!read(".args").contains("--experimental-tx"));
+        second.close(); QTRY_VERIFY_WITH_TIMEOUT(!second.isVisible(), 5000);
+        // The serial, USB and fast audio settings made before the E2 session are still saved.
+        QCOMPARE(QSettings().value("serialMode").toString(), QString("tcp"));
+        QCOMPARE(QSettings().value("usbMode").toString(), QString("pty"));
+        QVERIFY(QSettings().value("fastAudio").toBool());
+        MainWindow third(core.fileName()); third.show();
+        QCOMPARE(third.findChild<QComboBox*>("serialMode")->currentData().toString(), QString("tcp"));
+        QCOMPARE(third.findChild<QComboBox*>("usbMode")->currentData().toString(), QString("pty"));
+        QVERIFY(third.findChild<QCheckBox*>("fastAudio")->isChecked());
+        QSettings().clear();
+    }
     void failedSaveStaysOpen() {
         QTemporaryDir files;
         QFile source(files.path() + "/import.frond");
@@ -309,6 +428,9 @@ s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
 s.sendall(b'0\tevent\tready\t\n')
 for line in s.makefile('rb'):
     i,cmd,arg=line.rstrip(b'\n').split(b'\t')
+    if cmd == b'device-state':
+        s.sendall(i + b'\tok\tdevice\t' + b'palm-tx'.hex().encode() + b'\n')
+        continue
     if cmd == b'keyboard-state':
         s.sendall(i + b'\tok\tkeyboard\t6465746163686564\n')
         continue
@@ -374,7 +496,8 @@ for line in s.makefile('rb'):
     cmd=cmd.decode(); arg=bytes.fromhex(arg.decode()).decode()
     with trace.open('a') as f: f.write(cmd+'\t'+arg+'\n')
     ok=True; message='done'
-    if cmd=='sd-state': message=state
+    if cmd=='device-state': message='palm-tx'
+    elif cmd=='sd-state': message=state
     elif cmd=='network-state': message='disabled'
     elif cmd=='keyboard-state': message='detached'
     elif cmd=='sd-eject':
