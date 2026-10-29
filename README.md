@@ -1,12 +1,13 @@
 # Frond
 
-Frond is a Palm OS 5 emulator for Linux, made for developing and running Palm
-apps. It emulates the Palm TX and the Tungsten E2, with their buttons, sound, SD
+Frond is a Palm OS emulator for Linux, made for running and developing Palm apps and games. 
+Currently it emulates the Palm T|X and the Tungsten E2, with their buttons, sound, SD
 card, sleep and wake, and saved sessions. More devices are planned.
 
-You need your own firmware dumped from the device; none is included. Frond is
-early, at version 0.4.0. Sound can break up when your computer is busy, and some
-menus are slow.
+To run this you will need to provide a Palm T|X or E2 device firmware as none are included.
+This is an early release - 0.4.0 - but so far results are promising. 
+
+Dan
 
 <img src="doc/images/tx-sunvox-editor.png" width="240" alt="SunVox running on the emulated Palm TX" /> <img src="doc/images/tx-simcity-zone.png" width="240" alt="Building a city in SimCity on the emulated Palm TX" />
 
