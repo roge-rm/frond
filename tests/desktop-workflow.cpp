@@ -62,7 +62,7 @@ for line in s.makefile('rb'):
             QVERIFY(!option->isEnabled());
             QFile args(source.fileName()+".args"); QVERIFY(args.open(QIODevice::ReadOnly));
             const auto arguments = args.readAll();
-            QVERIFY(arguments.contains("--experimental-fast-audio"));
+            QVERIFY(arguments.contains("--fast-audio"));
             QVERIFY(arguments.contains("--window-scale\n1.75"));
             QVERIFY(arguments.contains("--smooth-lcd"));
             QVERIFY(!scale->isEnabled()); QVERIFY(!smooth->isEnabled());
@@ -397,7 +397,7 @@ for line in s.makefile('rb'):
         const auto args = read(".args").split('\n');
         QCOMPARE(args.value(0), norPath);
         QVERIFY(!args.contains("--experimental-tx") && !args.contains("--nand"));
-        QVERIFY(args.contains("--experimental-fast-audio"));
+        QVERIFY(args.contains("--fast-audio"));
         // Leave automatic sizing to the core, which knows the restored device and display.
         QVERIFY(!args.contains("--window-scale") && !args.contains("--smooth-lcd"));
         QVERIFY(!QSettings().contains("windowScale"));

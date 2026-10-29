@@ -45,7 +45,7 @@ make -j4
 ```
 
 The [fast audio option](fast-audio.md) can be tested with the same protocol by
-adding `--experimental-fast-audio` to the emulator command.
+adding `--fast-audio` to the emulator command.
 
 ## Guest pipeline stages
 
