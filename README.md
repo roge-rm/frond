@@ -58,6 +58,8 @@ firmware and personal data, so keep them private.
 Choose a display scale from 1× to 2× in 0.25 steps before starting. Frond defaults
 to the largest that fits your screen. LCD pixels stay sharp; **Smooth LCD scaling**
 softens them if you prefer.
+Enjoy!<br>
+Dan
 
 The buttons under the screen and the E2's silkscreen are clickable. On your
 keyboard the arrow keys work the five-way, Enter selects and F1 to F4 are the app
@@ -125,6 +127,3 @@ Frond is built on [CloudpilotEmu](https://github.com/cloudpilot-emu/cloudpilot-e
 
 GPL-3.0-or-later, see [LICENSE](LICENSE). Palm firmware and apps have their own
 licences and must be supplied separately.
-
-Enjoy!<br>
-Dan
