@@ -15,7 +15,11 @@
 #include <QGroupBox>
 #include <QGuiApplication>
 #include <QScreen>
+#include <QScrollArea>
 #include <QSpinBox>
+#include <QSlider>
+#include <QSignalBlocker>
+#include "WindowScale.h"
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -33,7 +37,7 @@
 
 MainWindow::MainWindow(const QString& core) : core(core) {
     setWindowTitle(tr("Frond"));
-    resize(620, 380);
+    resize(620, 650);
     auto* root = new QWidget(this);
     auto* layout = new QVBoxLayout(root);
     setup = new QGroupBox(tr("Palm device"), root);
@@ -77,13 +81,28 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     nor = firmware(tr("NOR image:"), "nor");
     nand = firmware(tr("NAND image (optional for the E2):"), "nand");
     layout->addWidget(setup);
-    doubleSize = new QCheckBox(tr("Double-size Palm display (when it fits)"), root);
-    doubleSize->setToolTip(tr("Uses normal size if the Palm display and buttons would exceed the available screen height."));
-    const auto* screen = QGuiApplication::primaryScreen();
-    const bool fits = screen && screen->availableGeometry().height() >= 1180;
-    doubleSize->setChecked(settings.value("doubleSize", fits).toBool());
-    connect(doubleSize, &QCheckBox::toggled, this, [this](bool enabled) { settings.setValue("doubleSize", enabled); });
-    layout->addWidget(doubleSize);
+    auto* scaleRow = new QHBoxLayout;
+    scaleLabel = new QLabel(root);
+    windowScale = new QSlider(Qt::Horizontal, root);
+    windowScale->setObjectName("windowScale");
+    windowScale->setRange(4, 8);
+    windowScale->setTickInterval(1);
+    windowScale->setTickPosition(QSlider::TicksBelow);
+    windowScale->setToolTip(tr("1× to 2× in 0.25 steps. Applies on the next start; defaults to the largest size that fits the screen."));
+    windowScale->setValue(std::clamp(settings.value("windowScale", 4).toInt(), 4, 8));
+    connect(windowScale, &QSlider::valueChanged, this, [this](int quarters) {
+        settings.setValue("windowScale", quarters);
+        scaleLabel->setText(tr("Display scale: %1×").arg(quarters / 4.0));
+    });
+    scaleRow->addWidget(scaleLabel);
+    scaleRow->addWidget(windowScale, 1);
+    layout->addLayout(scaleRow);
+    smoothLcd = new QCheckBox(tr("Smooth LCD scaling"), root);
+    smoothLcd->setObjectName("smoothLcd");
+    smoothLcd->setToolTip(tr("Applies on the next start. Off keeps LCD pixels sharp; the button strip and silkscreen stay crisp in either mode."));
+    smoothLcd->setChecked(settings.value("smoothLcd", false).toBool());
+    connect(smoothLcd, &QCheckBox::toggled, this, [this](bool enabled) { settings.setValue("smoothLcd", enabled); });
+    layout->addWidget(smoothLcd);
     audio = new QCheckBox(tr("Enable sound"), root);
     audio->setChecked(settings.value("audio", true).toBool());
     connect(audio, &QCheckBox::toggled, this, [this](bool enabled) {
@@ -93,7 +112,7 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     layout->addWidget(audio);
     fastAudio = new QCheckBox(tr("Experimental low-latency audio"), root);
     fastAudio->setObjectName("fastAudio");
-    fastAudio->setToolTip(tr("Applies on the next start. Supports one 44.1 kHz stereo stream with compatible Palm TX firmware; unsupported audio falls back to normal playback and may briefly pause."));
+    fastAudio->setToolTip(tr("Applies on the next start. Supports one 44.1 kHz stereo stream with qualified Palm TX or Tungsten E2 firmware; unsupported audio falls back to normal playback and may briefly pause."));
     fastAudio->setChecked(settings.value("fastAudio", false).toBool());
     connect(fastAudio, &QCheckBox::toggled, this, [this](bool enabled) { settings.setValue("fastAudio", enabled); });
     layout->addWidget(fastAudio);
@@ -158,7 +177,7 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     usb->addItem(tr("USB: Off"), "off");
     usb->addItem(tr("USB: PTY"), "pty");
     usb->addItem(tr("USB: TCP on 127.0.0.1"), "tcp");
-    usb->setToolTip(tr("Plugs the TX into a host that moves its HotSync bytes to a PTY or TCP port, for pilot-link and the like."));
+    usb->setToolTip(tr("Plugs the Palm into a host that moves its HotSync bytes to a PTY or TCP port, for pilot-link and the like."));
     usbPort = new QSpinBox(root);
     usbPort->setObjectName("usbPort");
     usbPort->setRange(1, 65535);
@@ -191,6 +210,44 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     resume->setChecked(settings.value("resume", true).toBool());
     connect(resume, &QCheckBox::toggled, this, [this](bool enabled) { settings.setValue("resume", enabled); });
     layout->addWidget(resume);
+    auto* irdaRow=new QHBoxLayout;
+    irda=new QComboBox(root);irda->setObjectName("irdaMode");
+    irda->addItem(tr("Infrared beaming: Off"),"off");
+    irda->addItem(tr("Infrared beaming: PTY"),"pty");
+    irda->addItem(tr("Infrared beaming: TCP on 127.0.0.1"),"tcp");
+    irda->setToolTip(tr("Link two Frond instances with tools/link-irda.py. Detach the infrared keyboard first."));
+    irdaPort=new QSpinBox(root);irdaPort->setObjectName("irdaPort");
+    irdaPort->setRange(1,65535);irdaPort->setPrefix(tr("Port "));loadIrdaSettings();
+    irdaRow->addWidget(irda,1);irdaRow->addWidget(irdaPort);layout->addLayout(irdaRow);
+    irdaState=new QLabel(root);irdaState->setObjectName("irdaState");
+    irdaState->setTextInteractionFlags(Qt::TextSelectableByMouse);layout->addWidget(irdaState);
+    auto irdaChanged=[this] {
+        if(client.running()){if(client.available())send("irda-mode",irdaArgument());return;}
+        settings.setValue("irdaMode",irda->currentData());settings.setValue("irdaPort",irdaPort->value());refresh();
+    };
+    connect(irda,qOverload<int>(&QComboBox::activated),this,irdaChanged);
+    connect(irdaPort,&QSpinBox::editingFinished,this,[this,irdaChanged]{if(irda->currentData()=="tcp")irdaChanged();});
+
+    auto* bluetoothRow = new QHBoxLayout;
+    bluetooth = new QCheckBox(tr("Bluetooth virtual controller"), root);
+    bluetooth->setObjectName("bluetoothEnabled");
+    bluetoothSocket = new QLineEdit(root);
+    bluetoothSocket->setObjectName("bluetoothSocket");
+    bluetoothSocket->setPlaceholderText(tr("Absolute controller socket path"));
+    loadBluetoothSettings();
+    bluetoothRow->addWidget(bluetooth); bluetoothRow->addWidget(bluetoothSocket, 1);
+    layout->addLayout(bluetoothRow);
+    bluetoothState = new QLabel(root); bluetoothState->setObjectName("bluetoothState");
+    bluetoothState->setWordWrap(true); bluetoothState->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    layout->addWidget(bluetoothState);
+    auto bluetoothChanged = [this] {
+        if (client.running()) { if (client.available()) send("bluetooth-mode", bluetoothArgument()); return; }
+        settings.setValue("bluetoothEnabled", bluetooth->isChecked());
+        settings.setValue("bluetoothSocket", bluetoothSocket->text()); refresh();
+    };
+    connect(bluetooth, &QCheckBox::clicked, this, bluetoothChanged);
+    connect(bluetoothSocket, &QLineEdit::editingFinished, this, bluetoothChanged);
+
     auto* buttons = new QHBoxLayout;
     startButton = new QPushButton(tr("Start"), root);
     startButton->setObjectName("start"); startButton->setDefault(true);
@@ -200,7 +257,11 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     forceButton->hide();
     buttons->addStretch(); buttons->addWidget(forceButton); buttons->addWidget(stopButton); buttons->addWidget(startButton);
     layout->addLayout(buttons);
-    setCentralWidget(root);
+    auto* scroll = new QScrollArea(this);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setWidget(root);
+    setCentralWidget(scroll);
     connect(startButton, &QPushButton::clicked, this, &MainWindow::start);
     connect(stopButton, &QPushButton::clicked, this, [this] { stop(false); });
     connect(forceButton, &QPushButton::clicked, this, [this] {
@@ -293,7 +354,7 @@ MainWindow::MainWindow(const QString& core) : core(core) {
                "Palm OS button assignments may change what the application buttons do."));
     });
     help->addAction(tr("&About Frond"), this, [this] {
-        QMessageBox::about(this, tr("About Frond"), tr("Frond 0.3.0\nExperimental Palm TX and Tungsten E2 emulator\nGPL-3.0-or-later"));
+        QMessageBox::about(this, tr("About Frond"), tr("Frond 0.4.0\nExperimental Palm TX and Tungsten E2 emulator\nGPL-3.0-or-later"));
     });
     connect(&client, &DesktopClient::diagnostic, this, [this](const QString& text) {
         log->moveCursor(QTextCursor::End); log->insertPlainText(text);
@@ -311,13 +372,15 @@ MainWindow::MainWindow(const QString& core) : core(core) {
         if (exchangeDialog) exchangeDialog->reject();
         else endExchange();
         busy = false; stopping = false; cardPresent = cardInserted = false; runningE2 = false;
-        sdStatus->setText(tr("SD card: Not running")); showSerial({}); loadSerialSettings(); showUsb({}); loadUsbSettings(); sessionLock.reset(); forceButton->hide(); refresh(); open->setEnabled(true);
+        sdStatus->setText(tr("SD card: Not running")); showSerial({}); loadSerialSettings(); showUsb({}); loadUsbSettings(); showIrda({}); loadIrdaSettings(); showBluetooth({}); loadBluetoothSettings(); sessionLock.reset(); forceButton->hide(); refresh(); open->setEnabled(true);
         if (closeAfterStop) { allowClose = true; close(); }
         else statusBar()->showMessage(tr("Stopped."));
     });
     connect(&client, &DesktopClient::closeRequested, this, [this] { stop(true); });
     connect(&client, &DesktopClient::serialState, this, [this](const QString& state) { showSerial(state); });
     connect(&client, &DesktopClient::usbState, this, [this](const QString& state) { showUsb(state); });
+    connect(&client, &DesktopClient::bluetoothState, this, &MainWindow::showBluetooth);
+    connect(&client,&DesktopClient::infraredState,this,[this](const QString& state){showIrda(state);});
     connect(&client, &DesktopClient::result, this, [this](const QString& command, bool ok, const QString& code, const QString& message) {
         busy = false; forceButton->hide(); refresh();
         if (!ok && exchangeStage != ExchangeStage::None) { exchangeResult(false, message); return; }
@@ -325,6 +388,7 @@ MainWindow::MainWindow(const QString& core) : core(core) {
             log->appendPlainText(command + ": " + message);
             if (command == "serial-mode") showSerial("off " + message);  // the core is now off
             if (command == "usb-mode") showUsb("off " + message);
+            if(command=="irda-mode")showIrda("off error: "+message);
             if (stopping) {
                 if (command == "save" && savingPath == sessionPath) askStop(message);
                 else save();
@@ -361,10 +425,18 @@ MainWindow::MainWindow(const QString& core) : core(core) {
             if (usb->currentData() == "tcp") settings.setValue("usbPort", usbPort->value());
         }
         if (command == "usb-state" || command == "usb-mode") showUsb(message);
+        if(command=="irda-state" || command=="irda-mode")showIrda(message);
+        if(command=="bluetooth-state" || command=="bluetooth-mode") {
+            showBluetooth(message);
+            if(command=="bluetooth-mode") {
+                settings.setValue("bluetoothEnabled", bluetooth->isChecked());
+                if(bluetooth->isChecked())settings.setValue("bluetoothSocket", bluetoothSocket->text());
+            }
+        }
         refresh();
         if (command == "network-state" && !stopping) { send("keyboard-state"); return; }
         if (command == "keyboard-state" && !stopping && !runningE2 && serialArgument() != "off") { send("serial-state"); return; }
-        if ((command == "keyboard-state" || command == "serial-state") && !stopping && !runningE2 && usbArgument() != "off") { send("usb-state"); return; }
+        if ((command == "keyboard-state" || command == "serial-state") && !stopping && usbArgument() != "off") { send("usb-state"); return; }
         if (command == "sd-state" && !stopping) { send("network-state"); return; }
         statusBar()->showMessage(command == "sd-state" ? tr("Running. Sessions save automatically on close.") : message);
         const bool savedWorkingCopy = command == "save" && savingPath == sessionPath;
@@ -381,7 +453,7 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     });
     connect(&client, &DesktopClient::started, open, [open] { open->setEnabled(false); });
     networkTip = network->toolTip(); keyboardTip = keyboard->toolTip(); serialTip = serial->toolTip();
-    usbTip = usb->toolTip(); fastAudioTip = fastAudio->toolTip();
+    usbTip = usb->toolTip(); irdaTip=irda->toolTip(); fastAudioTip = fastAudio->toolTip();
     // The launcher follows the chosen or detected device before Start.
     connect(deviceChoice, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] { refresh(); });
     connect(nor, &QLineEdit::textChanged, this, [this] { refresh(); });
@@ -407,18 +479,34 @@ void MainWindow::refresh() {
     note(network, caps.network, networkTip); note(keyboard, caps.keyboard, keyboardTip);
     note(serial, caps.serial, serialTip); note(serialPort, caps.serial, {});
     note(usb, caps.usb, usbTip); note(usbPort, caps.usb, {});
+    note(irda,caps.infrared,irdaTip);note(irdaPort,caps.infrared,{});
     note(fastAudio, caps.fastAudio, fastAudioTip);
     fastAudio->setEnabled(!running && !busy && caps.fastAudio);
-    doubleSize->setEnabled(!running && !busy);
+    windowScale->setEnabled(!running && !busy);
+    smoothLcd->setEnabled(!running && !busy);
+    if (!settings.contains("windowScale")) {
+        const auto* display = QGuiApplication::primaryScreen();
+        const auto available = display ? display->availableGeometry().size() : QSize(0, 0);
+        const QSignalBlocker blocked(windowScale);
+        windowScale->setValue(int(4 * fittingWindowScale(320,
+            currentDevice() == frondFirmware::Device::e2 ? 520 : 564,
+            available.width(), available.height())));
+    }
+    scaleLabel->setText(tr("Display scale: %1×").arg(windowScale->value() / 4.0));
     const bool enabled = client.available() && !busy && !stopping && exchangeStage == ExchangeStage::None;
     for (auto* action : runningActions) action->setEnabled(enabled);
     network->setEnabled(enabled && caps.network);
-    keyboard->setEnabled(enabled && caps.keyboard);
+    keyboard->setEnabled(enabled && caps.keyboard && irda->currentData()=="off");
     const bool editable = !busy && !stopping && (!running || enabled);
     serial->setEnabled(editable && caps.serial);
     serialPort->setEnabled(editable && caps.serial && serial->currentData() == "tcp");
     usb->setEnabled(editable && caps.usb);
     usbPort->setEnabled(editable && caps.usb && usb->currentData() == "tcp");
+    irda->setEnabled(editable && caps.infrared && !keyboard->isChecked());
+    irdaPort->setEnabled(editable && caps.infrared && !keyboard->isChecked() && irda->currentData()=="tcp");
+    bluetooth->setEnabled(editable && caps.bluetooth);
+    bluetoothSocket->setEnabled(editable && caps.bluetooth && bluetooth->isChecked());
+    bluetooth->setToolTip(caps.bluetooth ? tr("See doc/bluetooth-provider.md for controller setup.") : reason);
     sdCreate->setEnabled(enabled && !cardInserted); sdImport->setEnabled(enabled && !cardInserted);
     sdEject->setEnabled(enabled && cardInserted); sdReinsert->setEnabled(enabled && cardPresent && !cardInserted);
     sdExport->setEnabled(enabled && cardPresent && !cardInserted);
@@ -469,9 +557,13 @@ void MainWindow::start() {
     if (!audio->isChecked()) arguments << "--no-sound";
     const auto caps = frondFirmware::capabilities(startDevice);
     if (fastAudio->isChecked() && caps.fastAudio) arguments << "--experimental-fast-audio";
-    if (!doubleSize->isChecked()) arguments << "--small-window";
+    if (settings.contains("windowScale"))
+        arguments << "--window-scale" << QString::number(windowScale->value() / 4.0);
+    if (smoothLcd->isChecked()) arguments << "--smooth-lcd";
     if (caps.serial && serialArgument() != "off") arguments << "--serial" << serialArgument();
     if (caps.usb && usbArgument() != "off") arguments << "--usb" << usbArgument();
+    if(caps.infrared && irdaArgument()!="off")arguments << "--irda" << irdaArgument();
+    if(caps.bluetooth && bluetooth->isChecked()) arguments << "--bluetooth" << bluetoothArgument();
     sessionLock = std::make_unique<QLockFile>(sessionPath + ".lock");
     sessionLock->setStaleLockTime(0);
     if (!sessionLock->tryLock()) {
@@ -484,6 +576,35 @@ void MainWindow::start() {
     if (!launched) { busy = false; sessionLock.reset(); }
     refresh(); statusBar()->showMessage(launched ? tr("Starting the Palm…") : tr("Could not start the Palm."));
 }
+QString MainWindow::bluetoothArgument() const {
+    return bluetooth->isChecked() ? bluetoothSocket->text() : QStringLiteral("off");
+}
+void MainWindow::loadBluetoothSettings() {
+    bluetooth->setChecked(settings.value("bluetoothEnabled",false).toBool());
+    bluetoothSocket->setText(settings.value("bluetoothSocket").toString());
+}
+void MainWindow::showBluetooth(const QString& state) {
+    bluetoothState->setText(state.isEmpty() || state=="off" ? QString() : tr("Bluetooth: %1").arg(state));
+}
+QString MainWindow::irdaArgument() const {
+    return irda->currentData()=="tcp" ? "tcp:"+QString::number(irdaPort->value()) : irda->currentData().toString();
+}
+void MainWindow::loadIrdaSettings() {
+    irda->setCurrentIndex(std::max(0,irda->findData(settings.value("irdaMode","off").toString())));
+    irdaPort->setValue(settings.value("irdaPort",5030).toInt());
+}
+void MainWindow::showIrda(const QString& state) {
+    if(state.isEmpty()){irdaState->clear();return;}
+    const auto parts=state.split(' ',Qt::SkipEmptyParts);
+    const auto mode=parts.value(0).section(':',0,0);
+    irda->setCurrentIndex(std::max(0,irda->findData(mode)));
+    if(mode=="tcp"){
+        const auto port=parts.value(1).section(':',-1).toInt();if(port>0)irdaPort->setValue(port);
+    }
+    settings.setValue("irdaMode",irda->currentData());settings.setValue("irdaPort",irdaPort->value());
+    irdaState->setText(state=="off"?QString():tr("Infrared: %1").arg(state));refresh();
+}
+
 QString MainWindow::serialArgument() const {
     const auto mode = serial->currentData().toString();
     return mode == "tcp" ? "tcp:" + QString::number(serialPort->value()) : mode;
@@ -531,7 +652,7 @@ void MainWindow::showUsb(const QString& state) {
     else if (parts[0] == "off") usbState->setText(parts.size() > 1 ? tr("USB: off, %1").arg(state.mid(4)) : QString());
     else if (parts.size() == 4)
         usbState->setText(tr("USB: %1, %2, %3").arg(parts[1], parts[2] == "connected" ? tr("connected") : tr("waiting for a connection"),
-                                                    parts[3] == "running" ? tr("TX enumerated") : tr("TX %1").arg(parts[3])));
+                                                    parts[3] == "running" ? tr("%1 enumerated").arg(deviceLabel()) : tr("%1 %2").arg(deviceLabel(), parts[3])));
     else usbState->setText(tr("USB: %1").arg(state));
 }
 void MainWindow::loadUsbSettings() {
@@ -591,7 +712,7 @@ frondFirmware::Device MainWindow::currentDevice() const {
 QString MainWindow::deviceLabel() const { return runningE2 ? tr("Tungsten E2") : tr("Palm TX"); }
 void MainWindow::showDevice(const QString& id) {
     runningE2 = id == "tungsten-e2";
-    if (runningE2) { showSerial("off"); showUsb("off"); }
+    if (runningE2) showSerial("off");
     refresh();
 }
 void MainWindow::failure(const QString& message) {

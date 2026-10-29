@@ -1,16 +1,22 @@
-# Frond 0.3.0 desktop
+# Frond 0.4.0 desktop
 
 Frond's Qt 6 launcher provides desktop controls alongside the SDL Palm display.
 The Palm display remains a separate window in this release. Firmware is supplied
 by the user. Palm TX and Tungsten E2 support is experimental. Virtual SD cards and experimental virtual Wi-Fi are supported;
-Bluetooth remains unavailable. See [peripherals](peripherals.md).
+Infrared beaming links two Frond instances; detach the infrared keyboard and
+choose **Infrared beaming: TCP** with a different port for each instance, then
+connect them with [the relay](infrared.md). Both devices also offer an opt-in
+**Bluetooth virtual controller**: start the [optional provider](bluetooth-provider.md),
+enter its absolute BR/EDR socket path and enable the checkbox. Then turn Bluetooth
+off and on in Palm OS. The live status distinguishes a configured endpoint from
+a connected controller. Bluetooth is off by default. See [peripherals](peripherals.md).
 
 ## Debian Trixie / KDE Plasma
 
 Install the locally built package:
 
 ```sh
-sudo apt install ./frond_0.3.0-1_amd64.deb
+sudo apt install ./frond_0.4.0-1_amd64.deb
 ```
 
 Launch **Frond** from Plasma's application menu. On first use, choose an existing
@@ -30,7 +36,7 @@ checked. Uncheck it to start at the launcher and choose a session yourself.
 
 **Experimental low-latency audio** can reduce the delay between a tap and sound.
 Set it before starting the Palm. It supports one 44.1 kHz stereo stream with
-compatible TX firmware; unsupported playback falls back to normal audio and may
+qualified TX or Tungsten E2 firmware; unsupported playback falls back to normal audio and may
 briefly pause. See [fast audio](fast-audio.md) for the limitations.
 
 Working copies are stored under `$XDG_DATA_HOME/frond/sessions`, normally
@@ -81,10 +87,10 @@ one client at a time, for example `nc 127.0.0.1 5023`. It is off by default, the
 choice is kept between runs and changing it while running closes the old
 connection. See [host serial](tx-serial.md#host-endpoint).
 
-**USB** plugs the TX's USB port into the computer for HotSync with pilot-link
+**USB** plugs the TX or E2 USB port into the computer for HotSync with pilot-link
 and the like. Choose **PTY** or **TCP on 127.0.0.1** as for the serial port. The
 line under it shows the endpoint, whether a client is connected and how far the
-TX got on the bus (enumerated once it is ready). Start HotSync on the Palm, then
+Palm got on the bus (enumerated once it is ready). Start HotSync on the Palm, then
 run the pilot-link command, for example `pilot-xfer -p /dev/pts/7 -l`. It is off
 by default and the choice is kept between runs. See
 [USB HotSync](peripherals.md#usb-hotsync).
@@ -93,8 +99,11 @@ by default and the choice is kept between runs. See
 **Launch Application** starts an installed app by its Palm database name.
 **Export RAM Databases** writes a ZIP of the Palm's RAM databases, including
 unrelated installed apps and user data. **Device** provides normal reset and
-rotation. Sound can be enabled or disabled from the launcher. Choose normal or double-size
-display before starting; the default fits the desktop height. A working session
+rotation. Sound can be enabled or disabled from the launcher. The display-scale
+slider offers 1×, 1.25×, 1.5×, 1.75× and 2× before starting. The default is the
+largest that fits the screen, including the button strip and window frame.
+LCD pixels stay sharp by default; **Smooth LCD scaling** enables linear filtering.
+The button strip and E2 silkscreen are drawn at the selected scale in either mode. A working session
 is locked while open to prevent two Frond windows overwriting it. Errors appear in
 the GUI; **View → Emulator Log** exposes diagnostic details.
 
@@ -109,8 +118,8 @@ The E2 window has its own strip: Calendar, Contacts, a five-way navigator
 with a pill-shaped centre select, Tasks and Note Pad, under a drawn silkscreen
 with the Graffiti area, Home, Menu, Favorites, Find, clock, brightness and the ABC
 and 123 keyboards. Click the silkscreen buttons and the strip like the TX buttons;
-F1 to F4 are the four application buttons and Escape is Power. Normal and
-double size and rotation work as on the TX.
+F1 to F4 are the four application buttons and Escape is Power. Scaling and
+rotation work as on the TX.
 
 The TX window includes a button strip beneath its display: Home, Calendar,
 five-way navigation with centre select, Contacts and Web. Click and hold
@@ -129,10 +138,13 @@ see the [lifecycle guide](session-testing.md) for coverage and timing limits.
 The same shortcuts are listed in **Help → Hardware Keyboard Controls**.
 
 The strip stays beneath the display when the view rotates. Its clicks are
-separate from touchscreen calibration. Normal and double-size displays include
-the controls; startup uses normal size if the complete double-size window would
-exceed the available screen height. Screenshots exported through the core's
+separate from touchscreen calibration. Every display scale includes the controls. Screenshots exported through the core's
 framebuffer commands still contain only the Palm display.
+
+The native runner uses the same automatic default. Set `--window-scale 1.25`
+(or `1`, `1.5`, `1.75`, `2`) to request a particular scale, and add `--smooth-lcd`
+for smoothing. `--small-window` remains an alias for 1×. An explicit scale can
+exceed the screen size; automatic sizing checks both width and height.
 
 ## Audio scheduling
 
@@ -186,7 +198,7 @@ make deb
 `out/frond-desktop` finds `out/frond` beside it. The installed launcher uses
 `/usr/lib/frond/frond-core`. For development, `--core /absolute/path/to/frond`
 selects another binary. `frond-desktop /path/to/file.frond` opens that session;
-`--version` reports 0.3.0. `make out/frond` builds only the SDL emulator.
+`--version` reports 0.4.0. `make out/frond` builds only the SDL emulator.
 
 The Debian package derives shared-library dependencies from the binaries and
 includes Qt's platform and Wayland plugins. It contains no firmware, PRC,
@@ -229,7 +241,7 @@ Keep the same approach as more devices are added: original vector artwork with
 rounded, shaded controls and a device-like bezel; device-specific button counts,
 navigators and keyboards; visible pressed states; and reliable release on focus
 loss, hiding, closing and rotation. Preserve the touchscreen's coordinate space,
-normal/double-size rendering and framebuffer-only exports. Test shared holds,
+all five display scales, sharp/smooth LCD rendering and framebuffer-only exports. Test shared holds,
 button chords and the supported view rotations for each profile.
 
 Use independently created artwork and Frond styling. Do not copy another

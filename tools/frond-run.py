@@ -157,8 +157,9 @@ class Control:
                 fields = self.line(deadline)
                 if fields == ['0', 'event', 'close', '']:
                     raise RunError('closed', 'Palm window was closed during the run')
-                if fields[:3] in (['0', 'event', 'serial'], ['0', 'event', 'usb']):
-                    continue  # live serial/USB state, sent only with --serial/--usb
+                if fields[:3] in (['0', 'event', 'serial'], ['0', 'event', 'usb'],
+                                  ['0', 'event', 'infrared'], ['0', 'event', 'bluetooth']):
+                    continue  # asynchronous endpoint status, never a command reply
                 if len(fields) != 4 or fields[0] != str(self.serial) or fields[1] not in ('ok', 'error'):
                     raise RunError('protocol', f'Unexpected response: {fields!r}')
                 try:

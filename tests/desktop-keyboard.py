@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Optional TX infrared keyboard driver and session acceptance test using the locally built Palm probe."""
+"""Optional TX/E2 infrared keyboard driver and session acceptance test using the locally built Palm probe."""
 import argparse
 from contextlib import contextmanager
 import hashlib

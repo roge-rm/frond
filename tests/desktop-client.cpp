@@ -49,6 +49,49 @@ s.close()
         QTRY_COMPARE(finished.count(), 2);
         QCOMPARE(error.count(), 0);
     }
+    void infraredEvents() {
+        QTemporaryDir dir;QFile fake(dir.filePath("core.py"));QVERIFY(fake.open(QIODevice::WriteOnly));
+        fake.write(R"PY(import socket,sys
+s=socket.socket(socket.AF_UNIX);s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+for line in s.makefile('rb'):
+    i,command,arg=line.rstrip(b'\n').split(b'\t')
+    if command==b'irda-state':
+        state=b'tcp:5030 127.0.0.1:5030 connected'
+        s.sendall(b'0\tevent\tinfrared\t'+state.hex().encode()+b'\n')
+        s.sendall(i+b'\tok\tinfrared\t'+state.hex().encode()+b'\n')
+    elif command==b'quit':
+        s.sendall(i+b'\tok\tdone\t\n');break
+)PY");fake.close();
+        DesktopClient client;QSignalSpy ready(&client,&DesktopClient::started),state(&client,&DesktopClient::infraredState);
+        QSignalSpy result(&client,&DesktopClient::result),error(&client,&DesktopClient::error),finished(&client,&DesktopClient::finished);
+        QVERIFY(client.start("/usr/bin/python3",{fake.fileName()}));QTRY_COMPARE(ready.count(),1);
+        QVERIFY(client.request("irda-state"));QTRY_COMPARE(result.count(),1);QCOMPARE(state.count(),1);
+        QCOMPARE(state.first().at(0).toString(),"tcp:5030 127.0.0.1:5030 connected");QCOMPARE(error.count(),0);
+        QVERIFY(client.request("quit"));QTRY_COMPARE(finished.count(),1);
+    }
+    void bluetoothEvents() {
+        QTemporaryDir dir;QFile fake(dir.filePath("core.py"));QVERIFY(fake.open(QIODevice::WriteOnly));
+        fake.write(R"PY(import socket,sys
+s=socket.socket(socket.AF_UNIX);s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+for line in s.makefile('rb'):
+    i,command,arg=line.rstrip(b'\n').split(b'\t')
+    if command==b'bluetooth-state':
+        state=b'configured; turn Bluetooth off and on in Palm OS'
+        s.sendall(b'0\tevent\tbluetooth\t'+state.hex().encode()+b'\n')
+        s.sendall(i+b'\tok\tbluetooth\t'+state.hex().encode()+b'\n')
+    elif command==b'quit':
+        s.sendall(i+b'\tok\tdone\t\n');break
+)PY");fake.close();
+        DesktopClient client;QSignalSpy ready(&client,&DesktopClient::started),state(&client,&DesktopClient::bluetoothState);
+        QSignalSpy result(&client,&DesktopClient::result),error(&client,&DesktopClient::error),finished(&client,&DesktopClient::finished);
+        QVERIFY(client.start("/usr/bin/python3",{fake.fileName()}));QTRY_COMPARE(ready.count(),1);
+        QVERIFY(client.request("bluetooth-state"));QTRY_COMPARE(result.count(),1);QCOMPARE(state.count(),1);
+        QCOMPARE(state.first().at(0).toString(),"configured; turn Bluetooth off and on in Palm OS");QCOMPARE(error.count(),0);
+        QVERIFY(client.request("quit"));QTRY_COMPARE(finished.count(),1);
+    }
+
     void failedStart() {
         DesktopClient client;
         QSignalSpy error(&client, &DesktopClient::error), finished(&client, &DesktopClient::finished);

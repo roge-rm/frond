@@ -22,16 +22,18 @@ static std::vector<uint8_t> saved(SoC& soc) {
     return std::vector<uint8_t>(data, data + state.size);
 }
 
-int main() {
-    std::vector<uint8_t> rom(16 * 1024 * 1024), nand(132 * 1024 * 1024, 0xff);
-    SocPXA soc(deviceTypeTX, 32 * 1024 * 1024, rom.data(), rom.size(), nand.data(), nand.size(), -1, 2);
+static void exercise(DeviceType5 type) {
+    const bool tx=type==deviceTypeTX;
+    std::vector<uint8_t> rom((tx?16:8) * 1024 * 1024), nand(tx?132 * 1024 * 1024:34603008, 0xff);
+    SocPXA soc(type, (tx?32:16) * 1024 * 1024, rom.data(), rom.size(), nand.data(), nand.size(), -1, tx?2:0);
     auto* cpu = soc.GetCpu();
     const uint32_t branch = 0xeafffffe;
     std::memcpy(static_cast<uint8_t*>(soc.GetMemoryData().data) + 0x3000, &branch, 4);
     cpuSetReg(cpu, 15, 0xa0003000);
     auto run = [&](unsigned ms) { for (unsigned i = 0; i < ms; ++i) assert(soc.Run(100000, 100000000) >= 100000); };
     auto udc = [&](unsigned offset, uint32_t value) { assert(cpuMemOpExternal(cpu, &value, 0x40600000 + offset, 4, true)); };
-    assert(soc.UsbTestCableAttached());  // GPIO13 low without a bridge
+    assert(soc.UsbTestCableAttached()==tx); // TX cable in by default, E2 cable out.
+    assert(soc.SetUsbTestCable(true));
 
     UsbHostBridge bridge;
     std::string error;
@@ -51,12 +53,12 @@ int main() {
     puts("PASS: the cable goes in on emulated time inside Run; the host sleeps while the UDC is off");
 
     // EP1 IN, UDE, then the EP0 and reset interrupts: connect wait, reset, first SETUP.
-    udc(0x404, 1u | 64u << 2 | 1u << 12 | 2u << 13 | 1u << 15 | 1u << 25);
+    if(tx)udc(0x404, 1u | 64u << 2 | 1u << 12 | 2u << 13 | 1u << 15 | 1u << 25);
     udc(0, 1);
     run(200);
     assert(host->GetPhase() == UsbBusHost::Phase::waitEnable);  // no UDCICR write yet
-    udc(4, 1);
-    udc(8, 1u << 27);
+    if(tx){udc(4, 1);udc(8, 1u << 27);}
+    else udc(0x50,0xfe);
     run(50);
     assert(host->GetPhase() == UsbBusHost::Phase::connect);
     run(80);
@@ -100,18 +102,18 @@ int main() {
 
     // That save loaded with USB off gets the cable back, as the TX has it without a bridge.
     bridge.Stop();
-    assert(soc.UsbTestCableAttached());
+    assert(soc.UsbTestCableAttached()==tx);
     UsbHostBridge off;
     assert(off.Start(&soc, {}, error) && off.Describe() == "off");
     assert(soc.Load(unplugged.size(), const_cast<uint8_t*>(unplugged.data())));
     assert(!soc.UsbTestCableAttached());
     off.Service();
-    assert(soc.UsbTestCableAttached());
+    assert(soc.UsbTestCableAttached()==tx);
     off.Stop();
     assert(soc.Load(unplugged.size(), const_cast<uint8_t*>(unplugged.data())));
     assert(!soc.UsbTestCableAttached());
     UsbHostBridge later;
-    assert(later.Start(&soc, {}, error) && soc.UsbTestCableAttached());
+    assert(later.Start(&soc, {}, error) && soc.UsbTestCableAttached()==tx);
     later.Stop();
     run(10);
     puts("PASS: USB off puts back a cable a save left out, at start and after a load");
@@ -129,12 +131,14 @@ int main() {
     UsbHostBridge failed;
     error.clear();
     assert(!failed.Start(&soc, {HostSerial::Kind::tcp, ntohs(address.sin_port)}, error) && !error.empty());
-    assert(soc.UsbTestCableAttached() && failed.Describe() == "off");
+    assert(soc.UsbTestCableAttached()==tx && failed.Describe() == "off");
     assert(soc.Load(unplugged.size(), const_cast<uint8_t*>(unplugged.data())));
     assert(!soc.UsbTestCableAttached());
     failed.Service();
-    assert(soc.UsbTestCableAttached());
+    assert(soc.UsbTestCableAttached()==tx);
     failed.Stop();
     close(listener);
     puts("PASS: a port in use leaves USB off and the cable in, also after a load");
 }
+
+int main(){exercise(deviceTypeTX);exercise(deviceTypeE2);}

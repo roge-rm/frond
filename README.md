@@ -5,7 +5,7 @@ apps. It emulates the Palm TX and the Tungsten E2, with their buttons, sound, SD
 card, sleep and wake, and saved sessions. More devices are planned.
 
 You need your own firmware dumped from the device; none is included. Frond is
-early, at version 0.3.0. Sound can break up when your computer is busy, and some
+early, at version 0.4.0. Sound can break up when your computer is busy, and some
 menus are slow.
 
 <img src="doc/images/tx-sunvox-editor.png" width="240" alt="SunVox running on the emulated Palm TX" /> <img src="doc/images/tx-simcity-zone.png" width="240" alt="Building a city in SimCity on the emulated Palm TX" />
@@ -28,7 +28,7 @@ To build and install a Debian package instead (also needs `dpkg-dev` and
 
 ```sh
 make deb
-sudo apt install ./out/frond_0.3.0-1_amd64.deb
+sudo apt install ./out/frond_0.4.0-1_amd64.deb
 ```
 
 The package adds Frond to the application menu. It doesn't include firmware or
@@ -54,9 +54,13 @@ to the launcher and **Save a Copy** keeps a separate snapshot. There's no
 autosave, so a crash loses what changed since the last save. Sessions hold your
 firmware and personal data, so keep them private.
 
+Choose a display scale from 1× to 2× in 0.25 steps before starting. Frond defaults
+to the largest that fits your screen. LCD pixels stay sharp; **Smooth LCD scaling**
+softens them if you prefer.
+
 The buttons under the screen and the E2's silkscreen are clickable. On your
 keyboard the arrow keys work the five-way, Enter selects and F1 to F4 are the app
-buttons; **Help → Hardware Keyboard Controls** lists them all. On the TX you can
+buttons; **Help → Hardware Keyboard Controls** lists them all. On either device you can
 also attach an emulated Palm infrared keyboard for typing, which needs Palm's
 keyboard driver.
 
@@ -70,10 +74,19 @@ On the TX:
   bridge or Wi-Fi adapter needed.
 - **Serial port** connects the cradle serial port to a PTY or a TCP port, for
   terminal programs and pilot-link.
-- **USB** does HotSync over a PTY or TCP port.
 
-The E2 doesn't have these yet; USB HotSync, infrared and Bluetooth are planned
-for both devices. Settings a device doesn't support are greyed out.
+Both the TX and E2 support **USB HotSync** over a PTY or TCP port and
+[infrared beaming](doc/infrared.md) between Frond instances. Detach the infrared
+keyboard before enabling beaming. Both also support an opt-in
+[virtual Bluetooth controller](doc/bluetooth-provider.md), using a separately
+started local provider. Bluetooth defaults to off. The E2's networking and serial
+controls stay greyed out.
+
+Both devices also offer **Experimental low-latency audio** for one 44.1 kHz
+stereo stream on qualified firmware. Qualified basic ARM callbacks can preview
+at the render-to-writer handoff; other supported streams use HAL interception.
+Playback falls back to the normal path when the host cannot keep up. See the
+[audio limits](doc/fast-audio.md).
 
 More in the [desktop guide](doc/desktop.md), the
 [peripheral guide](doc/peripherals.md) (SD cards, networking, USB HotSync,

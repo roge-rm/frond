@@ -1,0 +1,396 @@
+diff --git a/src/uarm/native/Commands.h b/src/uarm/native/Commands.h
+--- a/src/uarm/native/Commands.h
++++ b/src/uarm/native/Commands.h
+@@ -28,6 +28,7 @@
+         int screenHeight;
+         HostInfrared* infrared{nullptr};
+         std::string infraredError{};
++        std::string bluetoothError{};
+         HostSerial* serial{nullptr};      // live host endpoint, never session state
+         PxaUart* serialUart{nullptr};     // TX FFUART for serial-mode changes
+         std::string serialError{};        // why the last endpoint could not open
+diff --git a/src/uarm/native/DesktopControl.h b/src/uarm/native/DesktopControl.h
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -72,6 +72,13 @@
+         const auto state=ctx.infrared ? ctx.infrared->Describe() : "off";
+         if (state==lastInfrared || (state=="off" && lastInfrared.empty())) return;
+         lastInfrared=state;event("infrared",state);
++    }
++
++    void bluetoothChanged(commands::Context& ctx) {
++        if(ctx.soc->GetDeviceType()!=deviceTypeTX && ctx.soc->GetDeviceType()!=deviceTypeE2)return;
++        const auto state=static_cast<SocPXA*>(ctx.soc)->BluetoothState();
++        if(state==lastBluetooth || (state=="off" && lastBluetooth.empty()))return;
++        lastBluetooth=state;event("bluetooth",state);
+     }
+ 
+     bool poll(commands::Context& ctx) {
+@@ -117,7 +124,7 @@
+     }
+ 
+  private:
+-    std::string lastSerial, lastUsb, lastInfrared;
++    std::string lastSerial, lastUsb, lastInfrared, lastBluetooth;
+     static std::string UsbState(commands::Context& ctx) {
+         if (!ctx.usb) return "off";
+         const auto state = ctx.usb->Describe();
+@@ -171,7 +178,7 @@
+     Reply dispatch(commands::Context& ctx, const std::string& command, const std::string& path) {
+         const bool fileCommand = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "input-replay";
+         if (fileCommand && (path.empty() || path.front() != '/')) return {false, "argument", "An absolute file path is required."};
+-        if (!fileCommand && command != "sd-create" && command != "launch-app" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && !path.empty()) return {false, "argument", "This command takes no argument."};
++        if (!fileCommand && command != "sd-create" && command != "launch-app" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "bluetooth-mode" && !path.empty()) return {false, "argument", "This command takes no argument."};
+         if (command == "guest-ready") {
+             if (!GuestDatabaseOps::Ready(*ctx.soc))
+                 return {false, "not-ready", "Palm OS has not reached a supported application boundary."};
+@@ -206,6 +213,18 @@
+             return {false, "unsupported", "This device has no emulated serial port."};
+         if (!tx && command == "network-mode" && path != "disabled")
+             return {false, "unsupported", "This device has no emulated network."};
++        if(command=="bluetooth-state" || command=="bluetooth-mode") {
++            if(ctx.soc->GetDeviceType()!=deviceTypeTX && ctx.soc->GetDeviceType()!=deviceTypeE2)
++                return {false,"unsupported","This device has no Bluetooth radio."};
++            auto* machine=static_cast<SocPXA*>(ctx.soc);
++            if(command=="bluetooth-mode") {
++                if(path!="off" && (path.empty() || path.front()!='/' || path.find(char(0))!=std::string::npos))
++                    return {false,"argument","Use off or an absolute virtual controller Unix socket path."};
++                if(!machine->SetBluetooth(path=="off"?std::string():path,ctx.bluetoothError))
++                    return {false,"bluetooth",ctx.bluetoothError};
++            }
++            return {true,"bluetooth",machine->BluetoothState()};
++        }
+         if (command == "irda-stats") {
+             if (!ctx.infrared || (ctx.soc->GetDeviceType()!=deviceTypeTX && ctx.soc->GetDeviceType()!=deviceTypeE2))
+                 return {false,"unsupported","This device has no infrared endpoint."};
+diff --git a/src/uarm/native/main.cpp b/src/uarm/native/main.cpp
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -67,6 +67,7 @@
+     optional<string> serial;
+     optional<string> infrared;
+     optional<string> usb;
++    optional<string> bluetooth;
+ };
+ 
+ namespace {
+@@ -512,6 +513,17 @@
+             }
+             cout << "infrared: " << infrared.Describe() << endl;
+         }
++        if (options.bluetooth) {
++            const auto& path=*options.bluetooth;
++            if ((!isTx && deviceType!=deviceTypeE2) ||
++                (path!="off" && (path.empty() || path.front()!='/' || path.find(char(0))!=string::npos))) {
++                cerr << "--bluetooth needs off or an absolute virtual controller Unix socket path on TX/E2" << endl;return false;
++            }
++            if (!static_cast<SocPXA*>(soc)->SetBluetooth(path=="off"?string():path,commandContext.bluetoothError)) {
++                cerr << "bluetooth: " << commandContext.bluetoothError << endl;return false;
++            }
++            cout << "bluetooth: " << static_cast<SocPXA*>(soc)->BluetoothState() << endl;
++        }
+         UsbHostBridge usb;
+         commandContext.usb = &usb;
+         if (usbConfig.kind != HostSerial::Kind::off) {
+@@ -567,10 +579,11 @@
+             const bool waitForAudio = soc->PcmOutputEnabled() && audioDriver.GetAudioBackpressure();
+ 
+             reportAudioUnderruns();
+-            if (options.experimentalFastAudio) {
+-                mainLoop.SetTimesliceUsec(static_cast<SocPXA*>(soc)->FastAudioActive()
++            // SIR peers need character-sized handoffs. A full display slice can
++            // consume the original stack's entire discovery receive window.
++            mainLoop.SetTimesliceUsec(infrared.GetConfig().kind!=HostSerial::Kind::off ? 1000 :
++                options.experimentalFastAudio && static_cast<SocPXA*>(soc)->FastAudioActive()
+                     ? 1000000 / 120 : 1000000 / MAIN_LOOP_FPS);
+-            }
+ 
+             if (options.experimentalFastAudio && static_cast<SocPXA*>(soc)->FastAudioActive()) {
+                 const auto pending = audioQueuePendingSamples(audioQueue);
+@@ -610,6 +623,7 @@
+             if (desktop) desktop->serialChanged(commandContext);
+             if (desktop) desktop->usbChanged(commandContext);
+             if (desktop) desktop->infraredChanged(commandContext);
++            if (desktop) desktop->bluetoothChanged(commandContext);
+             if (desktop && desktop->poll(commandContext)) break;
+             if (!options.runFor && !desktop && cli::Execute(&commandContext)) break;
+ 
+@@ -751,6 +765,10 @@
+         .help("connect the TX serial port to a host PTY (pty) or a TCP listener on 127.0.0.1 "
+               "(tcp:PORT, one client at a time); default off")
+         .metavar("<off|pty|tcp:PORT>");
++
++    program.add_argument("--bluetooth")
++        .help("connect the virtual Bluetooth radio to a local H4 controller Unix socket; default off")
++        .metavar("<off|/controller/socket>");
+ 
+     program.add_argument("--irda")
+         .help("connect infrared SIR bytes to a host PTY or loopback TCP listener; exclusive with keyboard; default off")
+@@ -797,7 +815,8 @@
+                        .desktopSocket = program.present("--desktop-socket"),
+                        .serial = program.present("--serial"),
+                        .infrared = program.present("--irda"),
+-                       .usb = program.present("--usb")};
++                       .usb = program.present("--usb"),
++                       .bluetooth = program.present("--bluetooth")};
+ 
+     logEnable();
+ 
+diff --git a/src/uarm/uarm/HostInfrared.cpp b/src/uarm/uarm/HostInfrared.cpp
+--- a/src/uarm/uarm/HostInfrared.cpp
++++ b/src/uarm/uarm/HostInfrared.cpp
+@@ -2,6 +2,8 @@
+ #include "HostInfrared.h"
+ #include "soc_PXA.h"
+ #include "pxa_UART.h"
++#include <deque>
++#include <algorithm>
+ struct HostInfrared::Impl {
+     SocPXA* soc{};
+     HostByteLink link;
+@@ -9,6 +11,22 @@
+     uint64_t dropped{},discarded{};
+     bool restart{};
+     std::string error;
++    std::deque<uint8_t> transmit;
++    uint64_t transmitPeer{};
++    void Flush() {
++        if(transmit.empty() || !soc)return;
++        if(transmitPeer!=link.PeerGeneration()){dropped+=transmit.size();transmit.clear();return;}
++        // UART callbacks have already paced these bytes. Publish each frontend
++        // slice, without adding another complete frame's transmission delay.
++        uint8_t data[1024];size_t budget=8192;
++        while(!transmit.empty() && budget){
++            const size_t count=std::min({sizeof(data),transmit.size(),budget,link.SendSpace()});
++            if(!count)break;
++            std::copy_n(transmit.begin(),count,data);
++            const size_t sent=link.SendForPeer(data,count,transmitPeer);if(!sent)break;
++            for(size_t i=0;i<sent;++i)transmit.pop_front();budget-=sent;
++        }
++    }
+     static uint_fast16_t Read(void* context) {
+         auto& s=*static_cast<Impl*>(context);
+         uint8_t value;
+@@ -17,8 +35,15 @@
+     static void Write(uint_fast16_t value,void* context) {
+         auto& s=*static_cast<Impl*>(context);
+         if (value&~0xffu) { ++s.dropped; return; }
+-        uint8_t byte=value;
+-        if (s.link.Send(&byte,1)!=1) ++s.dropped;
++        const auto generation=s.link.PeerGeneration();
++        if(!s.transmit.empty() && s.transmitPeer!=generation){s.dropped+=s.transmit.size();s.transmit.clear();}
++        if(!s.link.Connected()){++s.dropped;return;}
++        if(s.transmit.size()>=8192){++s.dropped;return;}
++        if(s.transmit.empty())s.transmitPeer=generation;
++        s.transmit.push_back(uint8_t(value));
++        // Publish from Service after this guest slice. Sending synchronously
++        // from the last UART character can let another frontend reply before
++        // the source guest has finished its transmit-to-receive turnaround.
+     }
+     static bool Pending(void* context) {
+         return static_cast<Impl*>(context)->link.PendingReceive()!=0;
+@@ -33,7 +58,7 @@
+         auto& s=*static_cast<Impl*>(context);
+         // Closing the peer, rather than just clearing the userspace queues,
+         // prevents old kernel-buffered bytes entering the new guest timeline.
+-        s.link.Close();s.restart=true;
++        s.link.Close();s.transmit.clear();s.restart=true;
+     }
+ };
+ HostInfrared::HostInfrared():impl(std::make_unique<Impl>()){}
+@@ -54,7 +79,7 @@
+ }
+ void HostInfrared::Stop() {
+     if (impl->soc) impl->soc->SetIrHostHooks(nullptr);
+-    impl->link.Close();impl->soc=nullptr;impl->config={};impl->restart=false;impl->error.clear();
++    impl->link.Close();impl->transmit.clear();impl->soc=nullptr;impl->config={};impl->restart=false;impl->error.clear();
+ }
+ void HostInfrared::Service() {
+     auto* soc=impl->soc;
+@@ -73,6 +98,7 @@
+         if (!impl->link.Open(impl->config,impl->error,true)) return;
+         Impl::ModeChanged(impl.get());
+     }
++    impl->Flush();
+     // Register transitions update the receive generation immediately. The
+     // worker samples arrivals; OS-buffered unsampled bytes have no optical time.
+     Impl::ModeChanged(impl.get());
+diff --git a/src/uarm/uarm/HostSerial.cpp b/src/uarm/uarm/HostSerial.cpp
+--- a/src/uarm/uarm/HostSerial.cpp
++++ b/src/uarm/uarm/HostSerial.cpp
+@@ -38,6 +38,7 @@
+     bool scopedReceive{false}; // immutable after worker start; legacy serial/USB unchanged
+     bool receiveEnabled{false}; // mutex-protected, for scoped links only
+     uint64_t receiveTag{0}, receiveGeneration{0};
++    std::atomic<uint64_t> peerGeneration{0};
+     int wake{-1};
+ 
+     // Caller holds mutex. Bytes the worker copied out before this are not erased later.
+@@ -57,7 +58,7 @@
+         std::lock_guard lock(mutex);
+         connected = false;
+         ClearTx();
+-        if (scopedReceive) ClearReceive();
++        if (scopedReceive) {ClearReceive();++peerGeneration;}
+     }
+ };
+ 
+@@ -90,13 +91,14 @@
+             if (got < 0 && errno != EAGAIN && errno != EINTR) return false;  // EIO: PTY hung up
+             if (got > 0) {
+                 std::lock_guard lock(s.mutex);
+-                s.received += got;
+                 if (s.scopedReceive && (!s.receiveEnabled || generation!=s.receiveGeneration))
+                     s.rxDiscarded += got;
+                 else {
+                     s.rx.insert(s.rx.end(), buffer, buffer + got);
+                     s.rxSize = s.rx.size();
+                 }
++                // Publish the count after its queue/discard result is visible.
++                s.received += got;
+             }
+         }
+     }
+@@ -184,7 +186,7 @@
+                 {
+                     std::lock_guard lock(s->mutex);
+                     s->ClearTx();
+-                    if (s->scopedReceive) s->ClearReceive();
++                    if (s->scopedReceive) {s->ClearReceive();++s->peerGeneration;}
+                 }
+                 s->connected = true;
+             } else if (accepted >= 0) {
+@@ -537,12 +539,17 @@
+ }
+ 
+ size_t HostByteLink::Send(const uint8_t* data, size_t size) {
++    return SendForPeer(data,size,UINT64_MAX);
++}
++uint64_t HostByteLink::PeerGeneration() const {return impl->shared?impl->shared->peerGeneration.load():0;}
++size_t HostByteLink::SendForPeer(const uint8_t* data, size_t size,uint64_t generation) {
+     auto* s = impl->shared.get();
+     if (!s || !s->connected) return 0;
+     bool wasEmpty;
+     size_t count;
+     {
+         std::lock_guard lock(s->mutex);
++        if (!s->connected || (generation!=UINT64_MAX && generation!=s->peerGeneration)) return 0;
+         count = std::min(size, HostSerial::queueBytes - std::min(HostSerial::queueBytes, s->tx.size()));
+         wasEmpty = s->tx.empty();
+         s->tx.insert(s->tx.end(), data, data + count);
+diff --git a/src/uarm/uarm/HostSerial.h b/src/uarm/uarm/HostSerial.h
+--- a/src/uarm/uarm/HostSerial.h
++++ b/src/uarm/uarm/HostSerial.h
+@@ -83,6 +83,8 @@
+     size_t SendSpace() const;
+     // Queues up to SendSpace() bytes and returns how many were taken.
+     size_t Send(const uint8_t* data, size_t size);
++    size_t SendForPeer(const uint8_t* data,size_t size,uint64_t generation);
++    uint64_t PeerGeneration() const;
+     // Drops both queues.
+     void Clear();
+     size_t PendingReceive() const;
+diff --git a/src/uarm/uarm/pxa_PWM.cpp b/src/uarm/uarm/pxa_PWM.cpp
+--- a/src/uarm/uarm/pxa_PWM.cpp
++++ b/src/uarm/uarm/pxa_PWM.cpp
+@@ -92,7 +92,7 @@
+ 
+ template <typename T>
+ void pxaPwmLoad(struct PxaPwm* pwm, T& loader, uint32_t index) {
+-    auto chunk = loader.GetChunkOrFail(ChunkType::pxaPwm, SAVESTATE_VERSION, "pxa pwm");
++    auto chunk = loader.GetChunkOrFail(ChunkType::pxaPwm + index, SAVESTATE_VERSION, "pxa pwm");
+     if (!chunk) return;
+ 
+     LoadChunkHelper helper(*chunk);
+diff --git a/src/uarm/uarm/soc_PXA.cpp b/src/uarm/uarm/soc_PXA.cpp
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -370,6 +370,7 @@
+ 
+ bool SocPXA::OnSleep() {
+     if (PowerSleeping()) {
++        deviceSuspendBluetooth(dev);
+         if (irHostHooks.replaced && !usbHostPaused) irHostHooks.replaced(irHostHooks.context);
+         if (audioQueue) audioQueueClear(audioQueue);
+         if (fastAudio) { fastAudio->Sleep(); RestoreFastAudioRoute(); }
+@@ -816,6 +817,7 @@
+ // them, since the guest carries on as it was.
+ void SocPXA::BeforeStateReplacement() {
+     ++irReplacementDepth;
++    deviceBeginBluetoothCheckpoint(dev);
+     if(fastAudio) {fastAudio->BeforeGuestReplacement();RestoreFastAudioRoute();}
+     for (auto* uart : {ffUart, stUart, btUart, hwUart})
+         if (uart) pxaUartSuspendExternal(uart);
+@@ -834,11 +836,14 @@
+     for (auto* uart : {ffUart, stUart, btUart, hwUart})
+         if (uart) pxaUartEndCheckpoint(uart, false);
+     if (irReplacementDepth) --irReplacementDepth;
++    deviceEndBluetoothCheckpoint(dev,PowerSleeping());
+     RefreshIrMode(this);
+ }
+ 
+ void SocPXA::StateReplaced() {
+     if (irReplacementDepth) --irReplacementDepth;
++    deviceEndBluetoothCheckpoint(dev,PowerSleeping());
++    if (!RestoringCheckpoint()) deviceBluetoothStateReplaced(dev);
+     if(fastAudio) {fastAudio->GuestReplacementFinished();RestoreFastAudioRoute();}
+     for (auto* uart : {ffUart, stUart, btUart, hwUart})
+         if (uart) pxaUartResumeExternal(uart, false);
+@@ -849,6 +854,7 @@
+ }
+ 
+ void SocPXA::BeginSerialCheckpoint() {
++    deviceBeginBluetoothCheckpoint(dev);
+     for (auto* uart : {ffUart, stUart, btUart, hwUart})
+         if (uart) pxaUartBeginCheckpoint(uart);
+     ++usbHostPaused;
+@@ -857,7 +863,10 @@
+     for (auto* uart : {ffUart, stUart, btUart, hwUart})
+         if (uart) pxaUartEndCheckpoint(uart, false);
+     if (usbHostPaused) --usbHostPaused;
++    deviceEndBluetoothCheckpoint(dev,PowerSleeping());
+     serialResumePending = true;
++    if (!usbHostPaused && PowerSleeping() && irHostHooks.replaced)
++        irHostHooks.replaced(irHostHooks.context);
+     RefreshIrMode(this);
+ }
+ 
+@@ -1062,6 +1071,7 @@
+ 
+ void SocPXA::RefreshIrMode(void* context) {
+     auto& soc=*static_cast<SocPXA*>(context);
++    if (soc.dev) deviceBluetoothPinsChanged(soc.dev);
+     if (!soc.usbHostPaused && !soc.irReplacementDepth && soc.irHostHooks.modeChanged)
+         soc.irHostHooks.modeChanged(soc.irHostHooks.context);
+ }
+@@ -1100,7 +1110,9 @@
+     if (irKeyboard.Pending()) RescheduleCB(this,RESCHEDULE_TASK_UART);
+ }
+ 
+-SocPXA::~SocPXA() { cpuSetEarlyAudioHook(cpu,nullptr,nullptr,0,0); }
++bool SocPXA::SetBluetooth(const std::string& path,std::string& error) {return deviceSetBluetooth(dev,path,error);}
++std::string SocPXA::BluetoothState() {return deviceBluetoothState(dev);}
++SocPXA::~SocPXA() { deviceStopBluetooth(dev);cpuSetEarlyAudioHook(cpu,nullptr,nullptr,0,0); }
+ 
+ void SocPXA::RestoreFastAudioRoute() {
+     fastAudioRouted=fastAudio && fastAudio->Bypass();
+diff --git a/src/uarm/uarm/soc_PXA.h b/src/uarm/uarm/soc_PXA.h
+--- a/src/uarm/uarm/soc_PXA.h
++++ b/src/uarm/uarm/soc_PXA.h
+@@ -5,6 +5,7 @@
+ 
+ #include "CPU.h"
+ #include "IrKeyboard.h"
++#include <string>
+ #include "fast_audio.h"
+ #include "device_type5.h"
+ #include "memory_buffer.h"
+@@ -91,6 +92,8 @@
+     bool SetIrHostHooks(const IrHostHooks* hooks);
+     bool IrHostAttached() const { return irHostHooks.context != nullptr; }
+     bool IrPowerEnabled();
++    bool SetBluetooth(const std::string& path,std::string& error);
++    std::string BluetoothState();
+     bool HostIoPaused() const { return usbHostPaused != 0; }
+     PxaUart* GetIrUart() { return stUart; }
+ 

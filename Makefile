@@ -18,7 +18,7 @@ out/frond: build/source/.prepared build/source/src/common/libcommon.a
 	cp build/source/src/uarm/cp-uarm out/frond.new
 	mv -f out/frond.new out/frond
 
-test: test-build-tools prepare test-pxa270-udc test-usb-host-fixture test-usb-enumeration test-usb-bridge test-usb-bridge-soc test-e2-state test-device-profiles test-uart-lifecycle test-uart-checkpoint test-uart-flow test-uart-dma-peer test-tx-serial test-gameplay-metrics test-mmu-fast-path test-mem-region-bounds test-pxa-power test-compatibility test-developer-run test-xscale-prefetch test-device-controls test-scheduler test-wifi test-host-network test-network-reliability test-keyboard test-network test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pace-debug test-pace-step test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup test-checkpoint-input test-native-database
+test: test-build-tools test-audio-results test-earlier-audio prepare test-pxa255-udc test-pxa270-udc test-usb-host-fixture test-usb-enumeration test-usb-bridge test-usb-bridge-soc test-e2-state test-device-profiles test-uart-lifecycle test-uart-checkpoint test-uart-flow test-uart-dma-peer test-tx-serial test-gameplay-metrics test-mmu-fast-path test-mem-region-bounds test-pxa-power test-compatibility test-developer-run test-xscale-prefetch test-device-controls test-scheduler test-wifi test-host-network test-network-reliability test-keyboard test-network test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pace-debug test-pace-step test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup test-checkpoint-input test-native-database
 	python3 tests/audio-metrics.py
 	python3 tests/audio-timing.py
 	python3 tests/tx-baseline.py
@@ -228,6 +228,10 @@ test-keyboard: out/frond
 		tests/host-keyboard.cpp build/source/src/uarm/native/SdlEventHandler.cpp @build/keyboard-core-objects.rsp \
 		build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) $(shell sdl2-config --libs) -o build/test-host-keyboard
 	./build/test-host-keyboard
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/ir-keyboard-board.cpp @build/keyboard-core-objects.rsp \
+		build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-ir-keyboard-board
+	./build/test-ir-keyboard-board
 
 .PHONY: test-host-network
 test-host-network: prepare
@@ -430,6 +434,12 @@ build/test-uart-dma-peer: out/frond tests/uart-dma-peer.cpp
 test-uart-dma-peer: build/test-uart-dma-peer
 	./build/test-uart-dma-peer
 
+.PHONY: test-pxa255-udc
+test-pxa255-udc: build/source/src/common/libcommon.a
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/pxa255-udc.cpp build/source/src/common/libcommon.a -o build/test-pxa255-udc
+	./build/test-pxa255-udc
+
 .PHONY: test-pxa270-udc
 test-pxa270-udc: build/source/src/common/libcommon.a
 	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
@@ -445,7 +455,7 @@ test-usb-enumeration: build/source/src/common/libcommon.a
 .PHONY: test-usb-bridge
 test-usb-bridge: build/source/src/common/libcommon.a
 	$(CXX) -std=c++17 -O1 -g -Wall -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
-		tests/usb-bridge.cpp build/source/src/uarm/uarm/UsbBusHost.cpp build/source/src/uarm/uarm/HostSerial.cpp \
+		tests/usb-bridge.cpp build/source/src/uarm/uarm/pxa255_UDC.cpp build/source/src/uarm/uarm/UsbBusHost.cpp build/source/src/uarm/uarm/HostSerial.cpp \
 		build/source/src/uarm/uarm/pxa_UART.cpp build/source/src/common/libcommon.a -lz -lpthread -o build/test-usb-bridge
 	timeout 300 ./build/test-usb-bridge
 
@@ -550,3 +560,68 @@ test-host-serial: prepare build/source/src/common/libcommon.a
 		tests/host-serial.cpp build/source/src/uarm/uarm/pxa_UART.cpp build/source/src/uarm/uarm/HostSerial.cpp \
 		build/source/src/common/libcommon.a -lz -lpthread -o build/test-host-serial
 	timeout 120 ./build/test-host-serial
+
+.PHONY: test-audio-results
+test-audio-results:
+	python3 tests/audio-results.py
+
+.PHONY: test-earlier-audio
+test-earlier-audio: out/frond
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm tests/early-audio-ledger.cpp -o build/test-early-audio-ledger
+	./build/test-early-audio-ledger
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm tests/early-audio.cpp build/source/src/uarm/uarm/audio_queue.cpp -pthread -o build/test-early-audio
+	./build/test-early-audio
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm tests/early-audio-checkpoint.cpp build/source/src/uarm/uarm/audio_queue.cpp -pthread -o build/test-early-audio-checkpoint
+	./build/test-early-audio-checkpoint
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common tests/patch-dispatch.cpp build/source/src/uarm/uarm/patch_dispatch.cpp build/source/src/uarm/.build/cputil.o build/source/src/common/libcommon.a -lz -o build/test-patch-dispatch
+	./build/test-patch-dispatch
+
+.PHONY: test-irda-endpoint
+test: test-irda-endpoint
+test-irda-endpoint: out/frond
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/irda-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/native -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/irda-endpoint.cpp @build/irda-core.rsp build/source/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-irda-endpoint
+	./build/test-irda-endpoint
+
+.PHONY: test-irda-results
+test: test-irda-results
+test-irda-results:
+	python3 tests/irda-results.py
+
+.PHONY: test-irda-link
+test: test-irda-link
+test-irda-link:
+	python3 tests/irda-link.py
+
+.PHONY: test-bluetooth
+test: test-bluetooth
+test-bluetooth: out/frond
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm tests/bluetooth-uart-messaging.cpp -o build/test-bluetooth-uart-messaging
+	./build/test-bluetooth-uart-messaging
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/bluetooth-bootstrap.cpp build/source/src/common/libcommon.a -lz -o build/test-bluetooth-bootstrap
+	./build/test-bluetooth-bootstrap
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm \
+		tests/bluetooth-backend.cpp build/source/src/uarm/uarm/BluetoothBackend.cpp -o build/test-bluetooth-backend
+	./build/test-bluetooth-backend
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/bluetooth-controller.cpp build/source/src/uarm/uarm/uartdev_bcm2035.cpp \
+		build/source/src/uarm/uarm/BluetoothBackend.cpp build/source/src/common/libcommon.a -lz -o build/test-bluetooth-controller
+	./build/test-bluetooth-controller
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/bluetooth-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/native -Ibuild/source/src/uarm/uarm \
+		-Ibuild/source/src/uarm -Ibuild/source/src/common tests/bluetooth-soc.cpp @build/bluetooth-core.rsp \
+		build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-bluetooth-soc
+	./build/test-bluetooth-soc
+
+.PHONY: test-bluetooth-results
+test: test-bluetooth-results
+test-bluetooth-results:
+	python3 tests/bluetooth-results.py
+
+.PHONY: test-peripheral-qualification
+test: test-peripheral-qualification
+test-peripheral-qualification:
+	python3 tests/peripheral-qualification.py

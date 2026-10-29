@@ -12,7 +12,7 @@ FILES = {
     'usr/share/mime/packages/frond.xml': 0o644,
     **{f'usr/share/doc/frond/{name}': 0o644 for name in (
         'copyright', 'LICENSE', 'argparse-LICENSE', 'zip-UNLICENSE', 'README',
-        'peripherals.md', 'changelog.gz')},
+        'peripherals.md', 'infrared.md', 'bluetooth-provider.md', 'peripheral-qualification.md', 'changelog.gz')},
 }
 RUNTIME_PACKAGES = ('mtools', 'libslirp0', 'qt6-qpa-plugins', 'qt6-wayland',
                     'libqt6svg6', 'hicolor-icon-theme')

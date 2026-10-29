@@ -193,7 +193,11 @@ int main() {
               nand.data(), 33 * 1024 * 1024, -1, 0);
     cpu = e2.GetCpu();
     const auto e2Pins = read32(0x40e00000);
-    assert(!e2.GetUsbController() && !e2.SetUsbTestCable(true));
+    assert(!e2.GetUsbController()); // This accessor remains the TX PXA270 controller.
+    assert(e2.GetUsbPort() && e2.SetUsbTestCable(true) && e2.UsbTestCableAttached());
+    assert(!(read32(0x40e00004) & (1u << 3))); // Active-low E2 GPIO35.
+    assert(e2.SetUsbTestCable(false) && !e2.UsbTestCableAttached());
+    assert(read32(0x40e00004) & (1u << 3));
     assert(read32(0x40e00000) == e2Pins);
     write32(0xa0000000, 0xeafffffe);
     cpuInvalidateCodeCache(cpu);

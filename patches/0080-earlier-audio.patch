@@ -1,0 +1,875 @@
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -173,6 +173,9 @@
+     struct SystemState *systemState;
+ 
+     uint32_t slowPath;
++    void (*earlyAudioHook)(ArmCpu*,void*,uint32_t,uint32_t) = nullptr;
++    void* earlyAudioContext = nullptr;
++    uint32_t earlyAudioFrom[2]{};
+     uint16_t breakPaceSyscall;
+     #ifndef __EMSCRIPTEN__
+     uint32_t nativePc[2];
+@@ -2698,6 +2701,9 @@
+ 
+     cpu->regs[REG_NO_PC] = cpu->regs[REG_NO_LR] + 2 + (offsetLo << 1);
+     cpu->regs[REG_NO_LR] = lr;
++    if (unlikely(cpu->earlyAudioHook!=nullptr) &&
++        (cpu->curInstrPC==cpu->earlyAudioFrom[0] || cpu->curInstrPC==cpu->earlyAudioFrom[1]))
++        cpu->earlyAudioHook(cpu,cpu->earlyAudioContext,cpu->regs[REG_NO_PC]|1u,cpu->curInstrPC);
+ }
+ 
+ template <int memorySystemKind>
+@@ -4254,3 +4260,12 @@
+     ArmCpu *cpu, SavestateProbe<ChunkType> &savestate);
+ template void cpuFinishInjectedCall<SavestateLoader<ChunkType>>(ArmCpu *cpu,
+                                                                 SavestateLoader<ChunkType> &loader);
++
++// Execution-thread observer; ownership follows this CPU instance.
++void cpuSetEarlyAudioHook(ArmCpu* cpu,void (*hook)(ArmCpu*,void*,uint32_t,uint32_t),void* context,uint32_t ready,uint32_t dispose) {
++    cpu->earlyAudioHook=hook;cpu->earlyAudioContext=context;
++    cpu->earlyAudioFrom[0]=ready;cpu->earlyAudioFrom[1]=dispose;
++}
++
++void cpuGetInstructionFetchState(ArmCpu* cpu,uint32_t* state) {icacheGetFetchState(cpu->ic,state);}
++bool cpuRestoreInstructionFetchState(ArmCpu* cpu,const uint32_t* state) {return icacheSetFetchState(cpu->ic,state);}
+--- a/src/uarm/uarm/CPU.h
++++ b/src/uarm/uarm/CPU.h
+@@ -3,13 +3,16 @@
+ #ifndef _CPU_H_
+ #define _CPU_H_
+ 
+-struct ArmCpu;
+-
+ #include <cstdint>
+ #include <functional>
+ 
+ #include "mem.h"
+ #include "pace_patch.h"
++
++struct ArmCpu;
++// Execution-thread-only observer, owned by the containing SoC. Null by default.
++using EarlyAudioHook = void (*)(ArmCpu*, void*, uint32_t target, uint32_t source);
++void cpuSetEarlyAudioHook(ArmCpu*, EarlyAudioHook, void*, uint32_t readySite, uint32_t disposeSite);
+ 
+ #define ARM_SR_N 0x80000000UL
+ #define ARM_SR_Z 0x40000000UL
+@@ -107,6 +110,11 @@
+ 
+ // Host code patches must discard decoded instructions as well as guest cache lines.
+ void cpuInvalidateCodeCache(struct ArmCpu *cpu);
++// Host checkpoint repair preserves the separately serialized XScale fetch buffers.
++// Caller provides ICACHE_FETCH_STATE_WORDS words (see icache.h).
++void cpuGetInstructionFetchState(ArmCpu*, uint32_t*);
++bool cpuRestoreInstructionFetchState(ArmCpu*, const uint32_t*);
++
+ #ifndef __EMSCRIPTEN__
+ uint32_t cpuCyclesInProgress(const ArmCpu* cpu);
+ #endif
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -1,3 +1,5 @@
++#include "CPU.h"
++#include "icache.h"
+ // clang-format off
+ #include "soc_generic_impl.h" // IWYU pragma: keep
+ // clang-format on
+@@ -359,7 +361,7 @@
+ bool SocPXA::OnSleep() {
+     if (PowerSleeping()) {
+         if (audioQueue) audioQueueClear(audioQueue);
+-        if (fastAudio) { fastAudio->Reset(); UpdateFastAudioRoute(); }
++        if (fastAudio) { fastAudio->Sleep(); RestoreFastAudioRoute(); }
+         pxaTimrSynchronize(tmr);
+         cpuSetSlowPath(cpu, SLOW_PATH_REASON_RESCHEDULE);
+         return true;
+@@ -373,6 +375,7 @@
+ }
+ 
+ void SocPXA::OnWakeup() {
++    if(fastAudio) {fastAudio->Wake(GetTime());RestoreFastAudioRoute();}
+     scheduler->RescheduleTaskAtLeast(SCHEDULER_TASK_TIMER, 1);
+     cpuSetSlowPath(cpu, SLOW_PATH_REASON_RESCHEDULE);
+ }
+@@ -438,7 +441,7 @@
+     pxaPwrClkFinishSleep(pwrClk);
+     *pacePatch = {};
+     if (audioQueue) audioQueueClear(audioQueue);
+-    if (fastAudio) { fastAudio->Reset(); UpdateFastAudioRoute(); }
++    if (fastAudio) { fastAudio->Wake(GetTime()); RestoreFastAudioRoute(); }
+     pxaLcdResetPaletteBuffer(lcd);
+     pxaTimrRestartClock(tmr);
+     scheduler->ScheduleTask(SCHEDULER_TASK_TIMER, 1_sec / 3250000ULL, 1);
+@@ -494,6 +497,7 @@
+     // The boot code clears RAM before it enables SDRAM; on hardware those writes are
+     // lost while SDRAM is still in self-refresh.
+     pxaMemCtrlrHoldSdram(memCtrl);
++    if(fastAudio) {fastAudio->Wake(GetTime());RestoreFastAudioRoute();}
+     if (audioQueue) audioQueueClear(audioQueue);
+     pxaLcdResetPaletteBuffer(lcd);
+     pxaTimrRestartClock(tmr);
+@@ -507,7 +511,7 @@
+ 
+ void SocPXA::OnSetAudioQueue(struct AudioQueue *audioQueue) {
+     if (fastAudio) fastAudio->SetQueue(audioQueue);
+-    deviceSetAudioQueue(dev, fastAudioRouted ? nullptr : audioQueue);
++    deviceSetAudioQueue(dev, (fastAudioRouted || (fastAudio && fastAudio->OutputFenced())) ? nullptr : audioQueue);
+ }
+ 
+ void SocPXA::OnSetPcmOutputEnabled() {
+@@ -566,6 +570,24 @@
+ }
+ 
+ void SocPXA::OnLoad(SavestateLoader<ChunkType> &loader) {
++    // Load callbacks rebuild host registrations and IRQ wiring. They must not
++    // discard the restored XScale fetch buffers or add a spurious scheduler kick
++    // when returning to the same checkpointed guest timeline.
++    struct CheckpointCpuGuard {
++        ArmCpu* cpu;
++        bool checkpoint;
++        uint32_t reasons;
++        uint32_t fetch[ICACHE_FETCH_STATE_WORDS];
++        CheckpointCpuGuard(ArmCpu* cpu,bool checkpoint):cpu(cpu),checkpoint(checkpoint),reasons(cpuGetSlowPathReason(cpu)) {
++            if(checkpoint)cpuGetInstructionFetchState(cpu,fetch);
++        }
++        ~CheckpointCpuGuard() {
++            if(!checkpoint)return;
++            if(!cpuRestoreInstructionFetchState(cpu,fetch))std::abort();
++            if(reasons&SLOW_PATH_REASON_RESCHEDULE)cpuSetSlowPath(cpu,SLOW_PATH_REASON_RESCHEDULE);
++            else cpuClearSlowPath(cpu,SLOW_PATH_REASON_RESCHEDULE);
++        }
++    } checkpointCpuGuard{cpu,RestoringCheckpoint()};
+     restoringPowerState = true;
+     pxaPwrClkRestoreInProgress(pwrClk, true);
+     struct RestoreGuard {
+@@ -643,7 +665,11 @@
+                 deviceKey(dev, key, false);
+     }
+     if (audioQueue) audioQueueClear(audioQueue);
+-    if (fastAudio) { fastAudio->Reset(); UpdateFastAudioRoute(); }
++    if (fastAudio) {
++        fastAudio->GuestLoaded(RestoringCheckpoint());
++        if(!RestoringCheckpoint() && PowerSleeping())fastAudio->Sleep();
++        if(RestoringCheckpoint())RestoreFastAudioRoute();else UpdateFastAudioRoute();
++    }
+ 
+     if (!RestoringCheckpoint()) {
+         SchedulePcmTask();
+@@ -757,12 +783,28 @@
+ std::function<void()> SocPXA::CapturePeripheralInput() {
+     auto keypad = keypadCaptureInput(kp);
+     auto device = deviceCaptureInput(dev);
+-    return [keypad, device] { keypad(); device(); };
++    // InputCheckpoint exists before checkpointed guest work and before a load.
++    // Sharing the scope through the restoration closure fences output until the
++    // checkpoint lifetime ends, including refused-load recovery.
++    struct AudioScope {
++        SocPXA& soc;
++        FastAudio& audio;
++        uint64_t token;
++        AudioScope(SocPXA& soc,FastAudio& audio):soc(soc),audio(audio),token(audio.BeginAudioCheckpoint()) {
++            soc.RestoreFastAudioRoute();
++        }
++        ~AudioScope() {audio.EndAudioCheckpoint(token);soc.RestoreFastAudioRoute();}
++        void Restore() {audio.RestoreAudioCheckpoint(token);soc.RestoreFastAudioRoute();}
++    };
++    std::shared_ptr<AudioScope> audio;
++    if(fastAudio)audio=std::make_shared<AudioScope>(*this,*fastAudio);
++    return [keypad, device, audio] {if(audio)audio->Restore();keypad();device();};
+ }
+ 
+ // External UART clients are suspended while a load is tried. A refused load keeps
+ // them, since the guest carries on as it was.
+ void SocPXA::BeforeStateReplacement() {
++    if(fastAudio) {fastAudio->BeforeGuestReplacement();RestoreFastAudioRoute();}
+     for (auto* uart : {ffUart, stUart, btUart, hwUart})
+         if (uart) pxaUartSuspendExternal(uart);
+ }
+@@ -776,11 +818,13 @@
+             pxaUartBeginCheckpoint(uart);
+         }
+     restore();
++    if(fastAudio) {fastAudio->GuestReplacementFinished();RestoreFastAudioRoute();}
+     for (auto* uart : {ffUart, stUart, btUart, hwUart})
+         if (uart) pxaUartEndCheckpoint(uart, false);
+ }
+ 
+ void SocPXA::StateReplaced() {
++    if(fastAudio) {fastAudio->GuestReplacementFinished();RestoreFastAudioRoute();}
+     for (auto* uart : {ffUart, stUart, btUart, hwUart})
+         if (uart) pxaUartResumeExternal(uart, false);
+     // A checkpoint restore for a read (database list, export) puts back the state from
+@@ -795,8 +839,20 @@
+ }
+ void SocPXA::EndSerialCheckpoint() {
+     for (auto* uart : {ffUart, stUart, btUart, hwUart})
+-        if (uart) pxaUartEndCheckpoint(uart);
++        if (uart) pxaUartEndCheckpoint(uart, false);
+     if (usbHostPaused) --usbHostPaused;
++    serialResumePending = true;
++}
++
++uint64_t SocPXA::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
++    // Releasing a host guard does not alter the restored guest's scheduler/CPU.
++    // Deliver the host notification when execution resumes, including new peer data.
++    if (serialResumePending && !usbHostPaused && !PowerSleeping()) {
++        serialResumePending = false;
++        for (auto* uart : {ffUart, stUart, btUart, hwUart})
++            if (uart) pxaUartKick(uart);
++    }
++    return SocGeneric<SocPXA>::Run(maxCycles, cyclesPerSecond);
+ }
+ 
+ void SocPXA::CycleBatch0() {
+@@ -938,17 +994,38 @@
+ bool SocPXA::EnableFastAudio() {
+     if ((GetDeviceType() != DeviceType5::deviceTypeTX && GetDeviceType() != DeviceType5::deviceTypeE2) || fastAudio) return false;
+     fastAudio = std::make_unique<FastAudio>([this](uint32_t addr, void* data, unsigned size) {
+-        return cpuMemOpExternal(cpu,data,addr,size,false);
++        return cpuInspectRead(cpu,addr,data,size);
+     }, GetDeviceType()==deviceTypeE2 ? FastAudio::Driver::e2 : FastAudio::Driver::tx);
+     fastAudio->SetQueue(audioQueue);
++    fastAudio->SetEarlyPlayback(true);
++    if(PowerSleeping())fastAudio->Sleep();
++    auto observer=[](ArmCpu* cpu,void* context,uint32_t pc,uint32_t from) {
++        auto* self=static_cast<SocPXA*>(context);
++        if(self->GetCpu()==cpu && self->fastAudio)
++            {self->fastAudio->EarlyTransition(cpuGetRegisters(cpu),pc,from,self->GetTime(),self->pcmEnabled);
++            self->fastAudio->ValidateEarly(self->GetTime());self->UpdateFastAudioRoute();}
++    };
++    const bool e2=GetDeviceType()==deviceTypeE2;
++    cpuSetEarlyAudioHook(cpu,observer,this,e2?0x20072c7c:0x20057cd4,e2?0x200665c0:0x2004b618);
+     auto hook = [](void* ctx, uint32_t trap, uint32_t* regs) {
+         auto soc = static_cast<SocPXA*>(ctx);
+-        soc->fastAudio->Handle(trap,regs,soc->GetTime(),soc->pcmEnabled);
++        if(trap==0x4324)soc->fastAudio->ControlHead(regs,soc->GetTime(),patchDispatchCanTrackTail(soc->patchDispatch));
++        const bool suppress=soc->fastAudio->ObserveHal(trap,regs,soc->GetTime());
++        soc->fastAudio->ValidateEarly(soc->GetTime());
++        soc->fastAudio->Handle(trap,regs,soc->GetTime(),soc->pcmEnabled,suppress);
++        soc->fastAudio->TryEarly(soc->GetTime(),soc->pcmEnabled);
+         soc->UpdateFastAudioRoute();
+         return true;
+     };
+-    for (auto trap : {0x4318u,0x4320u,0x4324u})
++    auto tail=[](void* ctx,uint32_t,const uint32_t* before,uint32_t* regs) {
++        auto* soc=static_cast<SocPXA*>(ctx);
++        soc->fastAudio->ControlTail(before,regs,soc->GetTime());
++        soc->fastAudio->TryEarly(soc->GetTime(),soc->pcmEnabled);
++        soc->UpdateFastAudioRoute();
++    };
++    for (auto trap : {0x4314u,0x4318u,0x4320u})
+         patchDispatchAddPatch(patchDispatch,trap,hook,nullptr,this);
++    patchDispatchAddPatch(patchDispatch,0x4324,hook,tail,this);
+     return true;
+ }
+ void SocPXA::NotifyFastAudioUnderrun() {
+@@ -961,7 +1038,7 @@
+     const bool bypass = fastAudio && fastAudio->Bypass();
+     if (bypass == fastAudioRouted) return;
+     fastAudioRouted = bypass;
+-    deviceSetAudioQueue(dev,bypass ? nullptr : audioQueue);
++    deviceSetAudioQueue(dev,(bypass || (fastAudio && fastAudio->OutputFenced())) ? nullptr : audioQueue);
+     UpdateSchedulePcm();
+     cpuSetSlowPath(cpu,SLOW_PATH_REASON_RESCHEDULE);
+ }
+@@ -981,3 +1058,10 @@
+     irKeyboard.ReleaseAll();
+     if (irKeyboard.Pending()) RescheduleCB(this,RESCHEDULE_TASK_UART);
+ }
++
++SocPXA::~SocPXA() { cpuSetEarlyAudioHook(cpu,nullptr,nullptr,0,0); }
++
++void SocPXA::RestoreFastAudioRoute() {
++    fastAudioRouted=fastAudio && fastAudio->Bypass();
++    deviceSetAudioQueue(dev,(fastAudioRouted || (fastAudio && fastAudio->OutputFenced())) ? nullptr : audioQueue);
++}
+--- a/src/uarm/uarm/soc_PXA.h
++++ b/src/uarm/uarm/soc_PXA.h
+@@ -8,6 +8,7 @@
+ #include "fast_audio.h"
+ #include "device_type5.h"
+ #include "memory_buffer.h"
++#include "SoC.h"
+ #include "soc_generic.h"
+ 
+ struct PxaUart;
+@@ -48,12 +49,18 @@
+     friend SocGeneric<SocPXA>;
+ 
+    public:
++    ~SocPXA();
++    void RestoreFastAudioRoute();
++    FastAudio::EarlyDiagnostics AudioDiagnostics() const { return fastAudio?fastAudio->EarlyStatus():FastAudio::EarlyDiagnostics{}; }
++    bool AudioOutputFenced() const { return fastAudio && fastAudio->OutputFenced(); }
++    FastAudio::HostState AudioHostState() const { return fastAudio?fastAudio->CaptureHostState():FastAudio::HostState{}; }
+     static constexpr int MEMORY_SYSTEM_KIND = ARM_MEMORY_SYSTEM_MMU;
+ 
+    public:
+     SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, const uint32_t romSize,
+            uint8_t *nandContent, size_t nandSize, int gdbPort, uint_fast8_t socRev);
+ 
++    uint64_t Run(uint64_t maxCycles, uint64_t cyclesPerSecond) override;
+     uint32_t *GetPendingFrame(uint32_t &firstDirtyLine, uint32_t &lastDirtyLine) override;
+     void ResetPendingFrame() override;
+     DeviceType5 GetDeviceType() override;
+@@ -154,6 +161,7 @@
+     uint8_t socRev{0};
+     UsbHostHooks usbHostHooks{};
+     unsigned usbHostPaused{0};
++    bool serialResumePending{false};
+ 
+     PxaUart *ffUart{nullptr}, *hwUart{nullptr}, *stUart{nullptr}, *btUart{nullptr};
+     PxaSsp *ssp[3]{nullptr, nullptr, nullptr};
+--- a/src/uarm/uarm/SoC.h
++++ b/src/uarm/uarm/SoC.h
+@@ -233,6 +233,8 @@
+           ticks(soc.eventQueueTicks), penTicks(soc.eventQueueTicksAtPenDown),
+           jammed(soc.jammedKey), releaseAt(soc.releaseJammedKeyAt), down(soc.penDown),
+           restorePeripheral(soc.CapturePeripheralInput()) {}
++    // A committed transaction discards restoration ownership immediately.
++    void Finish() { restorePeripheral = {}; }
+     bool Restore(size_t size, void* data) {
+         struct Guard {
+             SoC& soc;
+--- a/src/uarm/uarm/fast_audio.h
++++ b/src/uarm/uarm/fast_audio.h
+@@ -7,6 +7,9 @@
+ #include <functional>
+ #include <utility>
+ #include "audio_queue.h"
++#include "early_audio_ledger.h"
++#include <cstring>
++#include <stdexcept>
+ 
+ // Optional preview of one qualified TX or E2 PCM stream before its firmware queue.
+ class FastAudio {
+@@ -15,21 +18,43 @@
+     enum class Driver { tx, e2 };
+     explicit FastAudio(Reader read, Driver driver = Driver::tx) : read(read), driver(driver) {}
+     void SetQueue(AudioQueue* value) { queue = value; }
+-    void RestartOutput() { started=false; if (queue) audioQueueClear(queue); }
+-    bool Bypass() const { return active || quietUntil; }
++    void RestartOutput() { ledger.CancelAll(); ledger.DeliveryDiscontinuity(); started=false; if (queue) audioQueueClear(queue); }
++    void ValidateEarly(uint64_t now) {if(earlyPlayback && ledger.Failed() && !failed)FallBack(now,"submission contradiction",true);}
++    void SetEarlyPlayback(bool enabled) {earlyPlayback=enabled;}
++    bool Bypass() const { return active || quietUntil || ledger.HasPreviewed() || (sleeping && wasPreviewing); }
++    bool ControlSuspended() const {return stopped || !controls.empty() || sleeping;}
++    void Sleep() {
++        if(sleeping)return;
++        sleeping=true;wasPreviewing=active || quietUntil;ledger.CancelAll();
++        active=false;started=false;quietUntil=0;if(queue)audioQueueClear(queue);
++    }
++    void Wake(uint64_t now) {
++        if(!sleeping)return;
++        sleeping=false;if(wasPreviewing)quietUntil=now+250000000;
++        wasPreviewing=false;started=false;if(queue)audioQueueClear(queue);
++    }
+     bool Active() const { return active; }
+     bool Failed() const { return failed; }
+     void NotifyUnderrun(uint64_t now) {
+         if (active) FallBack(now, "preview underrun", true);
+     }
+     void Reset() {
++        ledger.NewTimeline();
++        if(OutputFenced())ledger.Fence();
+         active = failed = started = false;
++        controls.clear();knownChannel=UINT32_MAX;stopped=sleeping=wasPreviewing=false;
+         quietUntil = 0;
+         if (queue) audioQueueClear(queue);
+     }
+-    void Tick(uint64_t now) { if (quietUntil && now >= quietUntil) quietUntil = 0; }
+-    void Handle(uint32_t trap, const uint32_t* r, uint64_t now, bool outputEnabled) {
++    void Tick(uint64_t now) { if (quietUntil && now >= quietUntil && !ledger.HasPreviewed()) quietUntil = 0; }
++    void Handle(uint32_t trap, const uint32_t* r, uint64_t now, bool outputEnabled, bool suppress=false) {
++        if(trap==0x4314) {
++            if(active || ledger.HasPreviewed())FallBack(now,"another stream created",true);
++            return;
++        }
+         if (trap == 0x4318) {
++            if(knownChannel!=UINT32_MAX && knownChannel!=r[0])return;
++            knownChannel=UINT32_MAX;stopped=false;
+             if (active) FallBack(now, "stream closed", false);
+             return;
+         }
+@@ -38,50 +63,247 @@
+             if (r[0] >= 16) FallBack(now, "device-level controls", true);
+             return;
+         }
+-        if (trap != 0x4320 || !outputEnabled || !queue) return;
++        if (trap != 0x4320 || !outputEnabled || !queue || OutputFenced() || ControlSuspended()) return;
+         uint32_t object;
+         uint16_t left, right;
+         if (!Profile(r, object, left, right) || !r[2] || r[2] > 4096 || (r[2]&3) || (r[1]&3) || r[1] > UINT32_MAX-r[2]) {
+             FallBack(now, "unsupported driver, format or multiple streams", true);
+             return;
+         }
+-        const unsigned frames = r[2]/4;
+-        std::array<uint32_t, 1024> block;
+-        for (unsigned i=0; i<frames; ++i) {
+-            uint32_t sample;
+-            if (!read(r[1]+i*4, &sample, 4)) {
+-                FallBack(now, "unreadable PCM", true);
+-                return;
++        if(suppress)return;
++        std::vector<uint8_t> pcm(r[2]);
++        if (!read(r[1],pcm.data(),r[2])) {FallBack(now,"unreadable PCM",true);return;}
++        Enqueue(pcm,left,right,now);
++    }
++    bool Enqueue(const std::vector<uint8_t>& pcm,uint16_t left,uint16_t right,uint64_t now) {
++        if(failed || OutputFenced() || ControlSuspended() || !queue || pcm.empty() || pcm.size()>4096 || (pcm.size()&3))return false;
++        const unsigned frames=pcm.size()/4;
++        std::array<uint32_t,1024> block{};
++        std::memcpy(block.data(),pcm.data(),pcm.size());
++        bool audible=false;
++        for(unsigned i=0;i<frames;++i) {
++            const auto v=block[i];
++            block[i]=uint16_t(Scale(int16_t(v),left)) | uint32_t(uint16_t(Scale(int16_t(v>>16),right)))<<16;
++            audible=audible || block[i];
++        }
++        if(!active) {
++            active=true;quietUntil=0;audioQueueClear(queue);
++            std::fputs("experimental fast audio: single stereo 44100 Hz stream active\n",stderr);
++        }
++        if(!started && !audible)return true;
++        if(!started)for(unsigned i=0;i<512;++i)audioQueuePush(queue,0);
++        started=true;
++        if(audioQueuePendingSamples(queue)+frames>6144) {FallBack(now,"preview queue exceeded latency limit",true);return false;}
++        for(unsigned i=0;i<frames;++i)audioQueuePush(queue,block[i]);
++        return true;
++    }
++    void TryEarly(uint64_t now,bool outputEnabled=true) {
++        if(!earlyPlayback || !outputEnabled || failed || ledger.Failed() || !ledger.Bound() ||
++           OutputFenced() || ControlSuspended() || ledger.HasCanceled())return;
++        ledger.Resume();
++        // Batch in original submission order after an exact HAL ownership witness.
++        const auto records=ledger.Records();
++        for(const auto& r:records)if(!r.data.eligible || r.canceled || r.data.key.channel!=knownChannel)return;
++        for(const auto& r:records) {
++            if(r.previewed)continue;
++            if(!Enqueue(r.data.pcm,r.data.left,r.data.right,now))return;
++            if(!ledger.MarkPreviewed(r.sequence)) {FallBack(now,"lost submission ownership",true);return;}
++            ++previews;
++        }
++    }
++    struct Control {uint32_t channel,command,sp,lr;bool qualifiedStart;};
++    bool QualifiedStart(const uint32_t* r) {
++        const bool e2=driver==Driver::e2;
++        const uint32_t entry=e2?0x20065de4:0x2004ae3c,call=e2?0x20065e30:0x2004ae88;
++        uint16_t next;
++        return r[14]==call+5 && Is(entry,0xb089b5f0) && Is(entry+4,0x1c04464d) &&
++            Is(call-4,0x21056aa0) && Is(call,e2?0xfa0ef020:0xfda0f021) && Half(call+4,next) && next==0x2800;
++    }
++    void ControlHead(const uint32_t* r,uint64_t now,bool canTrack) {
++        if(failed)return;
++        if(r[1]==2 || r[1]==4)return;
++        if((knownChannel!=UINT32_MAX && knownChannel!=r[0]) ||
++           r[0]>=16 || r[1]>6 || !canTrack || controls.size()==4) {
++            FallBack(now,"untracked audio control",true);return;
++        }
++        if(r[1]==0)knownChannel=UINT32_MAX;
++        ledger.Cancel(r[0]);started=false;if(queue)audioQueueClear(queue);
++        controls.push_back({r[0],r[1],r[13],r[14],r[1]==5 && QualifiedStart(r)});
++        if(r[1]==6)stopped=true;
++    }
++    void ControlTail(const uint32_t* before,const uint32_t* result,uint64_t now) {
++        for(auto it=controls.begin();it!=controls.end();++it) {
++            const auto c=*it;
++            if(c.channel!=before[0] || c.command!=before[1] || c.sp!=before[13] || c.lr!=before[14])continue;
++            controls.erase(it);
++            if(c.command==5 && result[0]!=0) {FallBack(now,"failed stream start",true);return;}
++            if(c.command==5 && result[0]==0) {
++                if(ledger.Pending()) {FallBack(now,"start before previous writer retired",true);return;}
++                ledger.NewTimeline();if(OutputFenced())ledger.Fence();
++                knownChannel=c.qualifiedStart?c.channel:UINT32_MAX;stopped=false;
++                ++starts;
++
+             }
+-            auto l = Scale(int16_t(sample), left);
+-            auto h = Scale(int16_t(sample>>16), right);
+-            block[i] = uint16_t(l) | (uint32_t(uint16_t(h))<<16);
+-        }
+-        if (!active) {
+-            audioQueueClear(queue);
+-            active = true;
+-            quietUntil = 0;
+-            std::fputs("experimental fast audio: single stereo 44100 Hz stream active\n", stderr);
+-        }
+-        bool audible=false;
+-        for (unsigned i=0; i<frames; ++i) audible = audible || block[i]!=0;
+-        // Avoid pre-filling the preview with the driver's startup silence.
+-        if (!started && !audible) return;
+-        if (!started) {
+-            // One SDL period of startup headroom absorbs a late emulation slice.
+-            for (unsigned i=0; i<512; ++i) audioQueuePush(queue,0);
+-        }
+-        started=true;
+-        if (audioQueuePendingSamples(queue)+frames > 6144) {
+-            FallBack(now, "preview queue exceeded latency limit", true);
+-            return;
+-        }
+-        for (unsigned i=0; i<frames; ++i) audioQueuePush(queue, block[i]);
++            // Stop remains suspended: the caller marks canceled messages after HAL returns.
++            return;
++        }
++        // Fresh portable restores have no matching host invocation; never qualify them.
+     }
+     static int16_t Scale(int16_t sample, uint16_t gain) {
+         const int32_t v = int32_t(sample)*gain;
+         // ARM ASR rounds negative values down; the verified mixer uses Q11.
+         return int16_t(v >= 0 ? v/2048 : -((-v+2047)/2048));
++    }
++    struct HostState {
++        EarlyAudioLedger ledger;
++        bool active,failed;
++        uint64_t quietUntil;
++        std::vector<Control> controls;
++        uint32_t knownChannel;
++        bool stopped,sleeping,wasPreviewing;
++    };
++    HostState CaptureHostState() const {return {ledger,active,failed,quietUntil,controls,knownChannel,stopped,sleeping,wasPreviewing};}
++    bool OutputFenced() const {return !audioCheckpoints.empty() || replacementDepth;}
++    uint64_t BeginAudioCheckpoint() {
++        if(audioCheckpoints.size()>=8)throw std::runtime_error("audio checkpoint nesting exceeded");
++        const uint64_t token=++checkpointSequence;
++        audioCheckpoints.push_back({token,CaptureHostState()});
++        ledger.Fence();started=false;if(queue)audioQueueClear(queue);
++        return token;
++    }
++    void RestoreAudioCheckpoint(uint64_t token) {
++        for(const auto& frame:audioCheckpoints)if(frame.token==token) {
++            ledger=frame.state.ledger;active=frame.state.active;failed=frame.state.failed;
++            quietUntil=frame.state.quietUntil;controls=frame.state.controls;knownChannel=frame.state.knownChannel;
++            stopped=frame.state.stopped;sleeping=frame.state.sleeping;wasPreviewing=frame.state.wasPreviewing;
++            started=false;ledger.Fence();
++            if(queue)audioQueueClear(queue);
++            return;
++        }
++        throw std::runtime_error("unknown audio checkpoint");
++    }
++    void EndAudioCheckpoint(uint64_t token) {
++        for(auto it=audioCheckpoints.begin();it!=audioCheckpoints.end();++it)if(it->token==token) {
++            audioCheckpoints.erase(it);ReprimeAfterFence();return;
++        }
++        throw std::runtime_error("unbalanced audio checkpoint");
++    }
++    void BeforeGuestReplacement() {
++        if(replacementDepth>=8)throw std::runtime_error("audio replacement nesting exceeded");
++        ++replacementDepth;ledger.Fence();started=false;if(queue)audioQueueClear(queue);
++    }
++    void GuestReplacementFinished() {
++        if(!replacementDepth)throw std::runtime_error("unbalanced audio replacement");
++        --replacementDepth;ReprimeAfterFence();
++    }
++    void GuestLoaded(bool checkpoint) {
++        if(!checkpoint)Reset();
++        else {started=false;if(queue)audioQueueClear(queue);if(OutputFenced())ledger.Fence();}
++    }
++    void ReprimeAfterFence() {
++        started=false;if(queue)audioQueueClear(queue);
++        if(OutputFenced())ledger.Fence();else ledger.Unfence();
++    }
++    struct EarlyDiagnostics { uint64_t ready,consumed,disposed,rejected,contradictions;size_t pending;uint64_t previewed,skipped; };
++    EarlyDiagnostics EarlyStatus() const {return {earlyReady,earlyConsumed,earlyDisposed,earlyRejected,earlyContradictions,ledger.Pending(),previews,skips};}
++    ~FastAudio() = default;
++    void EarlyTransition(const uint32_t* regs,uint32_t pc,uint32_t from,uint64_t now=0,bool outputEnabled=true) {
++        const bool e2=driver==Driver::e2;
++        const uint32_t wrapper=e2?0x20072c6c:0x20057cc4;
++        const uint32_t writer=e2?0x2006659c:0x2004b5f4;
++        if(!Is(wrapper,0x1c04b510) || !Is(wrapper+4,0x43d22200) ||
++           !Is(wrapper+8,0xff48f7ff) || !Is(wrapper+12,e2?0xf01368e0:0xf01468e0) ||
++           !Is((e2?0x200665ec:0x2004b644)+0x34,0x2e00692e) ||
++           !Is((e2?0x200665ec:0x2004b644)+0x58,e2?0xfd38f019:0xf8d2f01b) ||
++           !Is(e2?0x200800b8:0x20066844,0x47384730) ||
++           !Is(writer,0x1c05b5f8) || !Is(writer+0x18,0x6920d007) ||
++           !Is(writer+0x1c,0xd00a2800) || !Is(writer+0x20,e2?0xf01e1c20:0xf0201c20)) {
++            ++earlyRejected;ledger.Fail();return;
++        }
++        if(from==(e2?0x200665c0u:0x2004b618u)) {
++            if((pc&~1u)!=(e2?0x20085410u:0x2006bb94u) || regs[0]!=regs[4])return;
++            uint32_t msg[5];
++            if(!read(regs[4],msg,sizeof(msg)) || msg[0]!=regs[5] || !msg[4])return;
++            const bool hadPreview=ledger.HasPreviewed();
++            auto result=ledger.Dispose(regs[5],regs[4]);
++            if(hadPreview && !active && result!=EarlyAudioLedger::Result::untracked)quietUntil=now+250000000;
++            if(result==EarlyAudioLedger::Result::contradiction)++earlyContradictions;
++            else if(result!=EarlyAudioLedger::Result::untracked)++earlyDisposed;
++            return;
++        }
++        if(from!=(e2?0x20072c7cu:0x20057cd4u) || (pc&~1u)!=(e2?0x200861f8u:0x2006c974u))return;
++        if(failed)return;
++        uint32_t stack[2],header[4],msg[5],stream[15];
++        if(!read(regs[13],stack,sizeof(stack)) || stack[1]!=(e2?0x20066669u:0x2004b6c1u))return;
++        const uint32_t queue=regs[4],message=stack[0],owner=regs[5];
++        if(!read(queue,header,sizeof(header)) || header[3]!=regs[0] ||
++           !read(message,msg,sizeof(msg)) || !read(owner,stream,sizeof(stream)) ||
++           msg[0]!=owner || stream[9]!=queue || msg[4])return;
++        const uint32_t count=header[1]>>16;
++        uint32_t last=0;
++        if(!count || count>64 || uint64_t(header[0])+4*(count-1)>UINT32_MAX ||
++           !Word(header[0]+4*(count-1),last) || last!=message) {++earlyRejected;return;}
++        uint32_t hal[16];std::memcpy(hal,regs,sizeof(hal));
++        hal[0]=stream[10];hal[1]=msg[1];hal[2]=msg[3];
++        if(regs[9]<4 || !Word(regs[9]-4,hal[12])) {++earlyRejected;return;}
++        uint32_t object;uint16_t left,right;
++        if(!msg[3] || msg[3]>4096 || msg[3]>msg[2] || msg[2]>4096 || (msg[3]&3) || (msg[1]&3) ||
++           !Profile(hal,object,left,right)) {++earlyRejected;return;}
++        uint32_t rate;
++        if(!Word(object+44,rate) || rate!=44100) {++earlyRejected;return;}
++        EarlyAudioLedger::Submission submission{{owner,message,msg[1],stream[10],object},left,right,std::vector<uint8_t>(msg[3])};
++        if(!read(msg[1],submission.pcm.data(),msg[3])) {++earlyRejected;return;}
++        const bool raw=(stream[0]&0xffff)==0x0101 && stream[1]==0 && (stream[2]&0xffff)==0x12 && stream[3]==44100 &&
++            stream[4]>=0x10000 && stream[4]<0x02000000 && !(stream[4]&3) && stream[5]==0;
++        bool ownedMembers=count<=2;
++        for(unsigned i=0;i<count && ownedMembers;++i) {
++            uint32_t member=0;
++            ownedMembers=Word(header[0]+4*i,member) && (member==stream[13] || member==stream[14]);
++        }
++        submission.eligible=raw && ownedMembers && stream[13] && stream[14] && stream[13]!=stream[14] &&
++            (message==stream[13] || message==stream[14]) && stream[10]==knownChannel;
++        if(ledger.Observe(std::move(submission),false)) {
++            ++earlyReady;
++            if(ControlSuspended() || OutputFenced())ledger.Cancel(stream[10]);
++            TryEarly(now,outputEnabled);
++        }
++        else ++earlyContradictions;
++    }
++    bool ObserveHal(uint32_t trap,const uint32_t* r,uint64_t now=0) {
++        bool suppress=false;
++        if(trap==0x4324)return false;
++        if(trap==0x4318) {ledger.JoinedClose(r[0]);return false;}
++        if(trap!=0x4320 || !ledger.Pending())return false;
++        const auto& record=ledger.Records().front();
++        const bool hadPreview=record.previewed;
++        // Different channels have independent writers. They are unsupported for
++        // early playback, but cannot retire or reorder this channel's ledger.
++        if(record.data.key.channel!=r[0]) {++earlyRejected;return false;}
++        if(record.data.key.message!=r[4] || record.data.key.stream!=r[5]) {
++            // A restored guest may already have a buffer in flight before the
++            // first observed handoff. Unknown startup HAL writes use HAL normally.
++            if(!ledger.Bound() && !ledger.TrackedMessage(r[5],r[4]))return false;
++            ledger.Fail();++earlyContradictions;return false;
++        }
++        uint32_t actualObject=0;uint16_t left=0,right=0;
++        const bool supported=Profile(r,actualObject,left,right);
++        if(!supported)++earlyRejected;
++        if(r[2]>4096 || !actualObject || !Half(actualObject+40,left) || !Half(actualObject+42,right)) {
++            ledger.Fail();++earlyContradictions;return false;
++        }
++        EarlyAudioLedger::Submission data{{r[5],r[4],r[1],r[0],actualObject},left,right,std::vector<uint8_t>(r[2])};
++        if(!read(r[1],data.pcm.data(),r[2])) {ledger.Fail();++earlyContradictions;return false;}
++        // Canceled submissions may legally reach HAL after a gain change.
++        if(record.canceled) {data.left=record.data.left;data.right=record.data.right;}
++        auto result=ledger.Hal(data,&suppress);
++        if(hadPreview && !active)quietUntil=now+250000000;
++        if(result==EarlyAudioLedger::Result::contradiction) {
++            ++earlyContradictions;
++        }
++        else if(result!=EarlyAudioLedger::Result::untracked)++earlyConsumed;
++        if(ledger.Failed() && earlyPlayback && !failed)FallBack(now,"submission mismatch",true);
++        if(suppress)++skips;
++        return suppress;
+     }
+ private:
+     bool Word(uint32_t addr, uint32_t& out) { return !(addr&3) && read(addr,&out,4); }
+@@ -150,6 +372,8 @@
+             Half(object+42,right) && right<=1024;
+     }
+     void FallBack(uint64_t now, const char* reason, bool latch) {
++        if(latch) {ledger.CancelAll();knownChannel=UINT32_MAX;controls.clear();stopped=false;}
++        if(ledger.HasPreviewed() && !quietUntil)quietUntil=now+250000000;
+         if (active) {
+             active=false;
+             started=false;
+@@ -159,10 +383,20 @@
+         failed=latch;
+         std::fprintf(stderr,"experimental fast audio: normal path (%s)\n",reason);
+     }
++    bool earlyPlayback=false,stopped=false,sleeping=false,wasPreviewing=false;
++    uint32_t knownChannel=UINT32_MAX;
++    std::vector<Control> controls;
++    uint64_t previews=0,skips=0,starts=0,abandoned=0;
+     Reader read;
+     Driver driver;
+     AudioQueue* queue{nullptr};
+     bool active{false}, failed{false}, started{false};
+     uint64_t quietUntil{0};
++    EarlyAudioLedger ledger;
++    struct AudioCheckpoint {uint64_t token;HostState state;};
++    std::vector<AudioCheckpoint> audioCheckpoints;
++    uint64_t checkpointSequence=0;
++    unsigned replacementDepth=0;
++    uint64_t earlyReady=0,earlyConsumed=0,earlyDisposed=0,earlyRejected=0,earlyContradictions=0;
+ };
+ #endif
+--- /dev/null
++++ b/src/uarm/uarm/early_audio_ledger.h
+@@ -0,0 +1,116 @@
++#ifndef FROND_EARLY_AUDIO_LEDGER_H
++#define FROND_EARLY_AUDIO_LEDGER_H
++#include <cstdint>
++#include <deque>
++#include <vector>
++#include <utility>
++
++// Host-only ownership. Guest adapter supplies already-qualified snapshots.
++// No pointers into guest memory survive a call; payload storage is bounded.
++class EarlyAudioLedger {
++ public:
++    struct Key {
++        uint32_t stream, message, buffer, channel, object;
++        bool operator==(const Key& b) const {
++            return stream==b.stream && message==b.message && buffer==b.buffer &&
++                   channel==b.channel && object==b.object;
++        }
++    };
++    struct Submission {
++        Key key;
++        uint16_t left, right;
++        std::vector<uint8_t> pcm;
++        bool eligible=false;
++    };
++    struct Record {
++        Submission data;
++        uint64_t generation, incarnation, sequence;
++        bool previewed, canceled;
++    };
++    enum class Result { untracked, observed, suppress, contradiction };
++    static constexpr size_t capacity=8;
++    bool Bound() const { return bound; }
++    bool TrackedMessage(uint32_t stream,uint32_t message) const { for(const auto& r:records)if(r.data.key.stream==stream && r.data.key.message==message)return true;return false; }
++    bool Failed() const { return failed; }
++    bool Warm() const { return warm && !failed && !fenced && !blocked; }
++    bool Fenced() const { return fenced; }
++    size_t Pending() const { return records.size(); }
++    bool HasPreviewed() const {
++        for(const auto& r:records)if(r.previewed)return true;
++        return false;
++    }
++    const std::deque<Record>& Records() const { return records; }
++    bool HasCanceled() const {for(const auto& r:records)if(r.canceled)return true;return false;}
++    void Resume() {if(!HasCanceled())blocked=false;}
++    bool MarkPreviewed(uint64_t seq) {for(auto& r:records)if(r.sequence==seq){r.previewed=true;return true;}return false;}
++    void Fail() { failed=true; warm=false; }
++    void NewTimeline() {
++        records.clear(); ++generation; ++incarnation;
++        owner=ownerChannel=0; failed=false; warm=false; fenced=false; blocked=false; bound=false;
++    }
++    void DeliveryDiscontinuity() {warm=false;++generation;}
++    void CancelAll() {warm=false;blocked=true;for(auto& r:records)r.canceled=true;}
++    void Fence() { fenced=true; warm=false; }
++    void Unfence() { fenced=false; warm=false; ++generation; }
++    void Cancel(uint32_t channel) {
++        warm=false; blocked=true;
++        for(auto& r:records)if(r.data.key.channel==channel)r.canceled=true;
++    }
++    // Only call after the guest has joined its writer, before HAL destroys channel.
++    void JoinedClose(uint32_t channel) {
++        for(auto it=records.begin();it!=records.end();) {
++            if(it->data.key.channel==channel)it=records.erase(it);else ++it;
++        }
++        if(owner && ownerChannel==channel) {owner=ownerChannel=0; ++incarnation; warm=false; blocked=false; bound=false;}
++    }
++    bool Observe(Submission data, bool previewed) {
++        if(failed || data.pcm.empty() || data.pcm.size()>4096 || (data.pcm.size()&3) ||
++           !data.key.stream || !data.key.message || !data.key.object) {
++            Fail(); return false;
++        }
++        if(records.size()==capacity || (owner && owner!=data.key.stream)) {
++            Fail(); return false;
++        }
++        for(const auto& r:records)if(r.data.key.message==data.key.message) {
++            Fail(); return false; // A live message cannot be reused before retirement.
++        }
++        if(!owner) {owner=data.key.stream; ownerChannel=data.key.channel; ++incarnation;}
++        records.push_back({std::move(data),generation,incarnation,++sequence,previewed,false});
++        return true;
++    }
++    Result Hal(const Submission& data, bool* suppress=nullptr) {
++        if(suppress)*suppress=false;
++        if(records.empty())return Result::untracked;
++        const auto& head=records.front();
++        if(!(head.data.key==data.key)) {Fail();return Result::contradiction;}
++        const bool previewed=head.previewed;
++        if(suppress)*suppress=previewed || head.canceled;
++        const bool exact=head.data.left==data.left && head.data.right==data.right && head.data.pcm==data.pcm;
++        records.pop_front();
++        if(!exact) {Fail();return Result::contradiction;}
++        if(!failed)bound=true;
++        if(records.empty() && !failed && !fenced) {warm=true;bound=true;}
++        return previewed?Result::suppress:Result::observed;
++    }
++    Result Dispose(uint32_t stream,uint32_t message) {
++        if(records.empty())return Result::untracked;
++        bool known=false;
++        for(const auto& r:records)known=known || (r.data.key.stream==stream && r.data.key.message==message);
++        if(!known)return Result::untracked;
++        const auto& head=records.front();
++        if(head.data.key.stream!=stream || head.data.key.message!=message) {
++            Fail();return Result::contradiction;
++        }
++        const bool previewed=head.previewed;
++        records.pop_front();
++        if(!failed)bound=true;
++        if(records.empty() && !failed && !fenced) {warm=true;bound=true;}
++        return previewed?Result::suppress:Result::observed;
++    }
++ private:
++    std::deque<Record> records;
++    uint64_t generation=1,incarnation=0,sequence=0;
++    uint32_t owner=0,ownerChannel=0;
++    bool failed=false,warm=false,fenced=false,blocked=false,bound=false;
++};
++#endif
+--- a/src/uarm/uarm/patch_dispatch.cpp
++++ b/src/uarm/uarm/patch_dispatch.cpp
+@@ -84,6 +84,8 @@
+         cpuClearSlowPath(pd->cpu, SLOW_PATH_REASON_PATCH_PENDING);
+     }
+ }
++
++bool patchDispatchCanTrackTail(PatchDispatch* pd) { return pd->nPendingTailpatches < MAX_PENDING_TAILPATCH; }
+ 
+ void destroyPatchDispatch(struct PatchDispatch* pd) { free(pd); }
+ 
+@@ -172,7 +174,7 @@
+                                                pendingTailpatch->registersAtInvocation, registers);
+ 
+         if (i != static_cast<size_t>(pd->nPendingTailpatches - 1))
+-            pd->pendingTailpatches[i] = pd->pendingTailpatches[pd->nPendingTailpatches];
++            pd->pendingTailpatches[i] = pd->pendingTailpatches[pd->nPendingTailpatches - 1];
+ 
+         pd->nPendingTailpatches--;
+         updateSlowPath(pd);
+@@ -238,6 +240,11 @@
+     const uint8_t loadedTalpatchesCount = pd->nPendingTailpatches;
+     pd->nPendingTailpatches = 0;
+ 
++    if (loadedTalpatchesCount > MAX_PENDING_TAILPATCH) {
++        loader.NotifyError();
++        updateSlowPath(pd);
++        return;
++    }
+     for (size_t i = 0; i < loadedTalpatchesCount; i++) {
+         SerializedTailpatch& serializedTailpatch(pd->serializedTailpatches[i]);
+         Patch* patch = nullptr;
+--- a/src/uarm/uarm/patch_dispatch.h
++++ b/src/uarm/uarm/patch_dispatch.h
+@@ -13,6 +13,8 @@
+ struct ArmCpu;
+ 
+ struct PatchDispatch* initPatchDispatch();
++
++bool patchDispatchCanTrackTail(PatchDispatch* pd);
+ 
+ void destroyPatchDispatch(struct PatchDispatch* pd);
+ void patchDispatchReset(struct PatchDispatch* pd);
+--- a/src/uarm/native/ReadOnlyGuest.h
++++ b/src/uarm/native/ReadOnlyGuest.h
+@@ -37,6 +37,7 @@
+         syscallDispatchEndRecovery(soc.GetSyscallDispatch());
+         active = false;
+         serialCheckpoint.Finish();
++        inputCheckpoint.Finish();
+         networkCheckpoint.Finish();
+     }
+     ~ReadOnlyGuest() {

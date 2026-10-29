@@ -74,6 +74,21 @@ class DeviceInputTest(unittest.TestCase):
         self.assertNotIn('SDL', result.stderr)
         return result
 
+    def test_window_scaling_options(self):
+        for scale in ('1', '1.25', '1.5', '1.75', '2'):
+            with self.subTest(scale=scale):
+                self.rejected([self.nor, '--experimental-tx', '--window-scale', scale,
+                               '--smooth-lcd'], 'explicit --nand')
+        for scale in ('0', '1.1', '2.25', 'nan', 'inf', '1.25oops'):
+            with self.subTest(scale=scale):
+                self.rejected([self.nor, '--window-scale', scale], 'invalid window scale')
+
+    def test_fast_audio_requires_qualified_firmware(self):
+        cases = ([self.nor, '--experimental-tx', '--nand', self.nand], [self.e2])
+        for args in cases:
+            self.rejected([*args, '--experimental-fast-audio'],
+                          'requires a verified TX 5.4 or Tungsten E2 NOR')
+
     def test_inventory(self):
         data = json.loads(subprocess.check_output([ROOT / 'out/frond-device-profiles']))
         self.assertEqual([p['id'] for p in data['profiles'] if p['status'] == 'tx-desktop'], ['palm-tx'])

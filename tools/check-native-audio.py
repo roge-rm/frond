@@ -119,8 +119,8 @@ def run(args):
         command = runner + ['taskset', '-c', str(args.cpu), str(binary), str(session)]
     if args.mips is not None:
         command += ['--mips', str(args.mips)]
-    if not args.export_databases:
-        command += ['--run-for', str(args.seconds)]
+    # Keep the producer running until the live capture is complete. A bounded
+    # guest exit before stopping parec records teardown silence as playback loss.
     if args.replay:
         replay = args.replay.resolve()
         identity[str(replay)] = hashlib.sha256(replay.read_bytes()).hexdigest()
@@ -149,15 +149,16 @@ def run(args):
     try:
         with (args.output / 'frond.log').open('wb') as log, (args.output / 'capture.raw').open('wb') as raw:
             process = subprocess.Popen(command, env=env,
-                                       stdin=subprocess.PIPE if args.export_databases else subprocess.DEVNULL, stdout=log,
+                                       stdin=subprocess.PIPE, stdout=log,
                                        stderr=subprocess.STDOUT, start_new_session=True)
             deadline = time.monotonic() + 30
             stream = None
             while process.poll() is None and time.monotonic() < deadline:
                 stream = next((s for s in pulse_list('sink-inputs')
                                if s.get('properties', {}).get('frond.check_id') == token), None)
-                if stream:
+                if stream and any(str(s['index']) == str(stream['sink']) for s in pulse_list('sinks')):
                     break
+                stream = None
                 time.sleep(.1)
             if not stream:
                 raise RuntimeError('Frond PulseAudio stream not found; use the PulseAudio SDL backend')
@@ -183,7 +184,7 @@ def run(args):
                             pass
                 result['emulator_affinity'] = sorted(os.sched_getaffinity(pid))
                 result['unbound_worker_threads'] = workers
-            sink = next(s for s in pulse_list('sinks') if s['index'] == stream['sink'])
+            sink = next(s for s in pulse_list('sinks') if str(s['index']) == str(stream['sink']))
             monitor = sink.get('monitor_source_name', sink.get('monitor_source'))
             if isinstance(monitor, int):
                 monitor = next(s['name'] for s in pulse_list('sources') if s['index'] == monitor)
@@ -200,11 +201,13 @@ def run(args):
             finishing = False
             log_boundary = None
             while process.poll() is None:
-                if args.export_databases and not finishing and time.monotonic() >= finish_at:
+                if not finishing and time.monotonic() >= finish_at:
                     stop(recorder)
                     log_boundary = (args.output / 'frond.log').stat().st_size
+                    result['capture_ended_while_emulator_running'] = process.poll() is None
                     archive = (args.output / 'ram-databases.zip').resolve()
-                    process.stdin.write(('db-export ' + str(archive) + '\nquit\n').encode())
+                    quit_commands = ('db-export ' + str(archive) + '\n') if args.export_databases else ''
+                    process.stdin.write((quit_commands + 'quit\n').encode())
                     process.stdin.flush()
                     finishing = True
                 if not finishing and recorder.poll() is not None:
@@ -231,7 +234,9 @@ def run(args):
         result['budget_mips_samples'] = [float(v) for v in re.findall(r'cp-uarm @ ([0-9.]+) MIPS', text)]
         result['replay_events'] = [line for line in text.splitlines() if line.startswith('replay event ')]
         # Silence is only a failure criterion for a known continuous fixture.
-        result['continuity_pass'] = (process.returncode == 0 and result['sdl_underruns'] == 0
+        result['continuity_pass'] = (process.returncode == 0 and finishing
+                                     and result.get('capture_ended_while_emulator_running') is True
+                                     and result['sdl_underruns'] == 0
                                      and result['pcm']['seconds'] >= args.seconds - 3
                                      and result['pcm']['peak'] > 0
                                      and result['pcm']['clipped_samples'] == 0
@@ -242,7 +247,9 @@ def run(args):
         result['host_load_samples'] = loads
         (args.output / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
     print(json.dumps({k: v for k, v in result.items() if k != 'host_load_samples'}, indent=2))
-    return int(result['exit_code'] != 0 or result['continuity_pass'] is False
+    return int(result['exit_code'] != 0 or not finishing
+               or result.get('capture_ended_while_emulator_running') is not True
+               or result['continuity_pass'] is False
                or (args.export_databases and not result['database_export_written']))
 
 

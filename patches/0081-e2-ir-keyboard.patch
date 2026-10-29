@@ -1,0 +1,44 @@
+diff --git a/src/uarm/uarm/soc_PXA.cpp b/src/uarm/uarm/soc_PXA.cpp
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -250,7 +250,7 @@
+     sp.ssp2 = ssp[1];
+     sp.ssp3 = ssp[2];
+     if (socRev == 2) sp.kpc = kpc;
+-    if (deviceType==DeviceType5::deviceTypeTX) {
++    if (deviceType==DeviceType5::deviceTypeTX || deviceType==DeviceType5::deviceTypeE2) {
+         pxaUartSetFuncs(stUart,
+             [](void* ctx) -> uint_fast16_t {
+                 auto* soc=static_cast<SocPXA*>(ctx);
+@@ -1044,12 +1044,12 @@
+ }
+ 
+ void SocPXA::AttachKeyboard(bool value) {
+-    if (GetDeviceType()!=DeviceType5::deviceTypeTX) return;
++    if (GetDeviceType()!=DeviceType5::deviceTypeTX && GetDeviceType()!=DeviceType5::deviceTypeE2) return;
+     irKeyboard.Attach(value);
+     RescheduleCB(this,RESCHEDULE_TASK_UART);
+ }
+ bool SocPXA::KeyboardKey(uint8_t code,bool down) {
+-    const bool accepted=GetDeviceType()==DeviceType5::deviceTypeTX &&
++    const bool accepted=(GetDeviceType()==DeviceType5::deviceTypeTX || GetDeviceType()==DeviceType5::deviceTypeE2) &&
+         (!down || pxaUartIrReceiveEnabled(stUart)) && irKeyboard.Key(code,down);
+     if (accepted) RescheduleCB(this,RESCHEDULE_TASK_UART);
+     return accepted;
+diff --git a/src/uarm/native/DesktopControl.h b/src/uarm/native/DesktopControl.h
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -192,10 +192,10 @@
+             return {true, "launched", "Application launched."};
+         }
+         if (command == "device-state") return {true, "device", deviceProfile5(ctx.soc->GetDeviceType())->id};
+-        // Keyboard and cradle serial remain TX-only; USB supports TX and E2.
++        // Both boards support the IR accessory and USB; cradle serial is TX-only.
+         const bool tx = ctx.soc->GetDeviceType() == DeviceType5::deviceTypeTX;
+-        if (!tx && (command == "serial-mode" || (command == "keyboard-attach" && path != "off")))
+-            return {false, "unsupported", "This device has no emulated keyboard or serial port."};
++        if (!tx && command == "serial-mode")
++            return {false, "unsupported", "This device has no emulated serial port."};
+         if (!tx && command == "network-mode" && path != "disabled")
+             return {false, "unsupported", "This device has no emulated network."};
+         if (command == "keyboard-state") return {true,"keyboard",ctx.soc->KeyboardAttached()?"attached":"detached"};
