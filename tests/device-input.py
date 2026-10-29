@@ -86,8 +86,10 @@ class DeviceInputTest(unittest.TestCase):
     def test_fast_audio_requires_qualified_firmware(self):
         cases = ([self.nor, '--experimental-tx', '--nand', self.nand], [self.e2])
         for args in cases:
-            self.rejected([*args, '--experimental-fast-audio'],
-                          'requires a verified TX 5.4 or Tungsten E2 NOR')
+            for option in ('--fast-audio', '--experimental-fast-audio'):
+                with self.subTest(args=args, option=option):
+                    self.rejected([*args, option],
+                                  'requires a verified TX 5.4 or Tungsten E2 NOR')
 
     def test_inventory(self):
         data = json.loads(subprocess.check_output([ROOT / 'out/frond-device-profiles']))

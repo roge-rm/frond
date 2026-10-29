@@ -110,7 +110,7 @@ MainWindow::MainWindow(const QString& core) : core(core) {
         if (client.available()) send(enabled ? "audio-on" : "audio-off");
     });
     layout->addWidget(audio);
-    fastAudio = new QCheckBox(tr("Experimental low-latency audio"), root);
+    fastAudio = new QCheckBox(tr("Low-latency audio"), root);
     fastAudio->setObjectName("fastAudio");
     fastAudio->setToolTip(tr("Applies on the next start. Supports one 44.1 kHz stereo stream with qualified Palm TX or Tungsten E2 firmware; unsupported audio falls back to normal playback and may briefly pause."));
     fastAudio->setChecked(settings.value("fastAudio", false).toBool());
@@ -556,7 +556,7 @@ void MainWindow::start() {
         QDateTime::currentDateTime().toString("yyyy-MM-dd HH-mm-ss") + "-" + QUuid::createUuid().toString(QUuid::Id128).first(8) + ".frond";
     if (!audio->isChecked()) arguments << "--no-sound";
     const auto caps = frondFirmware::capabilities(startDevice);
-    if (fastAudio->isChecked() && caps.fastAudio) arguments << "--experimental-fast-audio";
+    if (fastAudio->isChecked() && caps.fastAudio) arguments << "--fast-audio";
     if (settings.contains("windowScale"))
         arguments << "--window-scale" << QString::number(windowScale->value() / 4.0);
     if (smoothLcd->isChecked()) arguments << "--smooth-lcd";

@@ -82,9 +82,9 @@ keyboard before enabling beaming. Both also support an opt-in
 started local provider. Bluetooth defaults to off. The E2's networking and serial
 controls stay greyed out.
 
-Both devices also offer **Experimental low-latency audio** for one 44.1 kHz
-stereo stream on qualified firmware. Qualified basic ARM callbacks can preview
-at the render-to-writer handoff; other supported streams use HAL interception.
+Both devices also offer opt-in **Low-latency audio** for one 44.1 kHz
+stereo stream on qualified firmware. It is off by default. Qualified basic ARM
+callbacks can preview at the render-to-writer handoff; other supported streams use HAL interception.
 Playback falls back to the normal path when the host cannot keep up. See the
 [audio limits](doc/fast-audio.md).
 

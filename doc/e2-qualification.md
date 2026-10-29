@@ -123,9 +123,9 @@ accesses, EP0 hardware requests and configuration acknowledgement, IRQ masks and
 acknowledgements, backpressure, partial-packet/legacy restore and corrupt-state
 refusal. `test-usb-bridge-soc` checks shared host lifecycle behavior on both boards.
 
-## Experimental low-latency audio
+## Low-latency audio
 
-The desktop and `--experimental-fast-audio` support the qualified E2 firmware
+The desktop and `--fast-audio` support the qualified E2 firmware
 with a separate runtime driver profile. It previews one signed 16-bit stereo
 44.1 kHz stream before the firmware queue, retaining the driver's volume and
 pan calculation. Qualified basic ARM callbacks can use the earlier render-to-writer

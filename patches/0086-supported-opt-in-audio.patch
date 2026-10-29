@@ -1,0 +1,58 @@
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -299,7 +299,7 @@
+             const bool qualified=(isTx && digest=="85b048a692aa317763a7077ea72da6cb") ||
+                 (deviceType==deviceTypeE2 && digest=="2a9faf69b43ba590cfb9ba78e4eef11c");
+             if (!qualified) {
+-                cerr << "experimental fast audio requires a verified TX 5.4 or Tungsten E2 NOR image" << endl;
++                cerr << "low-latency audio requires a verified TX 5.4 or Tungsten E2 NOR image" << endl;
+                 return false;
+             }
+         }
+@@ -455,7 +455,7 @@
+         AudioQueue* audioQueue = audioQueueCreate(AUDIO_QUEUE_SIZE);
+         soc->SetAudioQueue(audioQueue);
+         if (options.experimentalFastAudio && !static_cast<SocPXA*>(soc)->EnableFastAudio()) {
+-            cerr << "unable to enable experimental fast audio" << endl;
++            cerr << "unable to enable low-latency audio" << endl;
+             return false;
+         }
+ 
+@@ -691,7 +691,7 @@
+     program.add_argument("--framebuffer-output")
+         .help("save the unrotated LCD framebuffer as PNG at the end of --run-for");
+ 
+-    program.add_argument("--experimental-fast-audio")
++    program.add_argument("--fast-audio", "--experimental-fast-audio")
+         .help("preview one qualified TX or E2 stereo stream before the firmware audio queue")
+         .default_value(false).implicit_value(true);
+ 
+@@ -808,7 +808,7 @@
+                        .smoothLcd = program.get<bool>("--smooth-lcd"),
+                        .displayMode = program.present<DisplayMode>("--display"),
+                        .experimentalTx = program.get<bool>("--experimental-tx"),
+-                       .experimentalFastAudio = program.get<bool>("--experimental-fast-audio"),
++                       .experimentalFastAudio = program.get<bool>("--fast-audio"),
+                        .runFor = program.present<unsigned int>("--run-for"),
+                        .framebufferOutput = program.present("--framebuffer-output"),
+                        .inputReplay = program.present("--input-replay"),
+--- a/src/uarm/uarm/fast_audio.h
++++ b/src/uarm/uarm/fast_audio.h
+@@ -88,7 +88,7 @@
+         }
+         if(!active) {
+             active=true;quietUntil=0;audioQueueClear(queue);
+-            std::fputs("experimental fast audio: single stereo 44100 Hz stream active\n",stderr);
++            std::fputs("low-latency audio: single stereo 44100 Hz stream active\n",stderr);
+         }
+         if(!started && !audible)return true;
+         if(!started)for(unsigned i=0;i<512;++i)audioQueuePush(queue,0);
+@@ -381,7 +381,7 @@
+             if (queue) audioQueueClear(queue);
+         }
+         failed=latch;
+-        std::fprintf(stderr,"experimental fast audio: normal path (%s)\n",reason);
++        std::fprintf(stderr,"low-latency audio: normal path (%s)\n",reason);
+     }
+     bool earlyPlayback=false,stopped=false,sleeping=false,wasPreviewing=false;
+     uint32_t knownChannel=UINT32_MAX;

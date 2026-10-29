@@ -1,13 +1,15 @@
-# Experimental TX and Tungsten E2 fast audio
+# TX and Tungsten E2 low-latency audio
 
 Run a qualified TX or Tungsten E2 session with:
 
 ```sh
-./out/frond /path/to/tx.session --experimental-fast-audio
+./out/frond /path/to/tx.session --fast-audio
 ```
 
-The option is off by default. It requires a qualified TX 5.4 or Tungsten E2 NOR
-and a recognised runtime sound driver. Other firmware is refused before startup.
+Low-latency audio is supported within the qualified scope below and is off by
+default. The older `--experimental-fast-audio` spelling remains an alias.
+It requires a qualified TX 5.4 or Tungsten E2 NOR and a recognised runtime sound
+driver. Other firmware is refused before startup.
 Firmware and application files are read unchanged.
 
 The preview reads completed PCM before the firmware's blocking output queue.
@@ -43,8 +45,8 @@ retirement, joined close, reset or restore establishes a safe boundary.
 The frontend uses 120 Hz CPU slices and pauses guest execution when the preview
 queue exceeds 3072 frames, resuming below 2048. It adds 512 silent frames before
 the first audible block and rejects a queue above 6144 frames. The host audio
-clock therefore controls sustained preview pacing. This is an experimental
-compatibility compromise: guest timing is affected while waiting for audio.
+clock therefore controls sustained preview pacing. Guest timing is affected
+while waiting for audio.
 
 Save states contain guest state only. Power sleep, reset and intentional restore
 discard queued host PCM. Audio off/on cancels obsolete delivery while retaining
@@ -60,8 +62,14 @@ again when starting a saved session in a new process. See the
 
 ## Testing and limits
 
+TX and E2 qualification includes matched 180-second normal/earlier-path SunVox
+runs on a quiet host with zero SDL underruns, silent 10 ms blocks or clipping.
+Controls, cancellation, fallback and session lifecycle have separate checks.
+This qualifies the guarded stream paths described above; it does not guarantee
+continuity under host contention or support additional firmware and formats.
+
 Use the [keyboard timing protocol](input-latency.md#keyboard-onset) with
-`--experimental-fast-audio` to compare against the normal path. Check both note
+`--fast-audio` to compare against the normal path. Check both note
 onsets and sustained playback. A shorter queue can reduce response time while
 making playback more sensitive to host scheduling; there is no guaranteed
 end-to-end latency target.
