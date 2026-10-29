@@ -71,6 +71,9 @@ def package(root=ROOT):
         copy('vendor/cloudpilot/src/common/zip/UNLICENSE', 'usr/share/doc/frond/zip-UNLICENSE')
         copy('doc/desktop.md', 'usr/share/doc/frond/README')
         copy('doc/peripherals.md', 'usr/share/doc/frond/peripherals.md')
+        copy('doc/infrared.md', 'usr/share/doc/frond/infrared.md')
+        copy('doc/bluetooth-provider.md', 'usr/share/doc/frond/bluetooth-provider.md')
+        copy('doc/peripheral-qualification.md', 'usr/share/doc/frond/peripheral-qualification.md')
         (work / 'debian/control').write_text('Source: frond\n\nPackage: frond\nArchitecture: any\nDescription: Palm TX emulator\n')
         deps = subprocess.check_output(['dpkg-shlibdeps', '--warnings=1', '-O', '-e' + str(core),
                                         '-e' + str(gui)], cwd=work, text=True)
@@ -93,7 +96,7 @@ Priority: optional
 Depends: {deps}
 Installed-Size: {installed}
 Homepage: https://github.com/roge-rm/frond
-Description: Native Palm TX emulator
+Description: Native Palm TX and Tungsten E2 emulator
  Qt desktop launcher and SDL Palm display with persistent sessions,
  application installation and database export. Firmware is supplied separately.
 ''')

@@ -15,6 +15,7 @@ class QRadioButton;
 class QPlainTextEdit;
 class QLabel;
 class QSpinBox;
+class QSlider;
 class MainWindow : public QMainWindow {
     Q_OBJECT
  public:
@@ -37,6 +38,12 @@ class MainWindow : public QMainWindow {
     QString serialArgument() const;
     void showSerial(const QString& state);
     void loadSerialSettings();
+    QString bluetoothArgument() const;
+    void showBluetooth(const QString& state);
+    void loadBluetoothSettings();
+    QString irdaArgument() const;
+    void showIrda(const QString& state);
+    void loadIrdaSettings();
     QString usbArgument() const;
     void showUsb(const QString& state);
     void loadUsbSettings();
@@ -49,15 +56,21 @@ class MainWindow : public QMainWindow {
     QSettings settings;
     QString core, sessionPath, savingPath;
     std::unique_ptr<QLockFile> sessionLock;
-    QComboBox *sessions, *network, *serial, *usb, *deviceChoice;
+    QComboBox *sessions, *network, *serial, *usb, *irda, *deviceChoice;
     QSpinBox* serialPort;
     QSpinBox* usbPort;
+    QSpinBox* irdaPort;
+    QLabel* irdaState;
     QLabel* serialState;
     QLabel* usbState;
-    QLineEdit *nor, *nand;
+    QLineEdit *nor, *nand, *bluetoothSocket;
+    QCheckBox* bluetooth;
+    QLabel* bluetoothState;
     QRadioButton *savedMode, *newMode;
     QPushButton *startButton, *stopButton, *forceButton;
-    QCheckBox *audio, *fastAudio, *doubleSize, *keyboard;
+    QCheckBox *audio, *fastAudio, *smoothLcd, *keyboard;
+    QSlider* windowScale;
+    QLabel* scaleLabel;
     QPlainTextEdit* log;
     QList<QAction*> runningActions;
     QAction *sdCreate, *sdImport, *sdEject, *sdReinsert, *sdExport, *sdExchange;
@@ -69,9 +82,9 @@ class MainWindow : public QMainWindow {
     QDialog* exchangeDialog{nullptr};
     QString exchangeBackup;
     bool cardPresent{false}, cardInserted{false};
-    // The device of the running core; the keyboard, serial, USB and network controls are Palm TX only.
+    // The running device selects the available peripheral controls.
     bool runningE2{false};
-    QString networkTip, keyboardTip, serialTip, usbTip, fastAudioTip;
+    QString networkTip, keyboardTip, serialTip, usbTip, irdaTip, fastAudioTip;
     QWidget* setup;
     bool startupHandled{false}, busy{false}, stopping{false}, closeAfterStop{false}, allowClose{false};
 };

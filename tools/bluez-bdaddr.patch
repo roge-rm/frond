@@ -1,0 +1,426 @@
+diff --git a/emulator/btdev.c b/emulator/btdev.c
+index 7a8d8a4..0a89bec 100644
+--- a/emulator/btdev.c
++++ b/emulator/btdev.c
+@@ -604,6 +604,31 @@ static void conn_remove(void *data)
+ 	free(conn);
+ }
+ 
++/*
++ * A disappearing virtual controller cannot complete a link handshake. Tell
++ * surviving hosts before removing their linked handles; otherwise their HCI
++ * stacks retain a live connection to a controller which no longer exists.
++ */
++static void disconnect_complete(struct btdev *dev, uint16_t handle,
++					uint8_t status, uint8_t reason);
++
++static void conn_notify_peer_lost(void *data, void *user_data)
++{
++	struct btdev_conn *conn = data;
++
++	if (conn->link)
++		disconnect_complete(conn->link->dev, conn->link->handle,
++				BT_HCI_ERR_SUCCESS, HCI_CONNECTION_TIMEOUT);
++
++	queue_foreach(conn->links, conn_notify_peer_lost, NULL);
++}
++
++static void conn_peer_lost(void *data)
++{
++	conn_notify_peer_lost(data, NULL);
++	conn_remove(data);
++}
++
+ static void le_ext_adv_free(void *data)
+ {
+ 	struct le_ext_adv *ext_adv = data;
+@@ -666,7 +691,7 @@ static void btdev_reset(struct btdev *btdev)
+ 		btdev->inquiry_id = 0;
+ 	}
+ 
+-	queue_remove_all(btdev->conns, NULL, NULL, conn_remove);
++	queue_remove_all(btdev->conns, NULL, NULL, conn_peer_lost);
+ 	queue_remove_all(btdev->le_ext_adv, NULL, NULL, le_ext_adv_free);
+ 	queue_remove_all(btdev->le_per_adv, NULL, NULL, free);
+ 	queue_remove_all(btdev->le_big, NULL, NULL, le_big_free);
+@@ -1012,7 +1037,7 @@ static bool inquiry_callback(void *user_data)
+ 		if (!btdev_list[i] || btdev_list[i] == btdev)
+ 			continue;
+ 
+-		if (!(btdev_list[i]->scan_enable & 0x02))
++		if (!(btdev_list[i]->scan_enable & 0x01))
+ 			continue;
+ 
+ 		if (btdev->inquiry_mode == 0x02 &&
+@@ -8434,9 +8459,10 @@ void btdev_destroy(struct btdev *btdev)
+ 		timeout_remove(btdev->inquiry_id);
+ 
+ 	bt_crypto_unref(btdev->crypto);
++	queue_remove_all(btdev->conns, NULL, NULL, conn_peer_lost);
+ 	del_btdev(btdev);
+ 
+-	queue_destroy(btdev->conns, conn_remove);
++	queue_destroy(btdev->conns, NULL);
+ 	queue_destroy(btdev->le_ext_adv, le_ext_adv_free);
+ 	queue_destroy(btdev->le_per_adv, free);
+ 	queue_destroy(btdev->le_big, le_big_free);
+@@ -8623,6 +8649,20 @@ static const struct btdev_cmd *default_cmd(struct btdev *btdev, uint16_t opcode,
+ {
+ 	const struct btdev_cmd *cmd;
+ 
++	/*
++	 * Frond qualification extension: virtual-controller address programming.
++	 * Broadcom Write_BD_ADDR (0xfc01), six address bytes in HCI order.
++	 * No guest or firmware image is changed.
++	 */
++	if (opcode == 0xfc01) {
++		uint8_t status = len == 6 ? BT_HCI_ERR_SUCCESS :
++				BT_HCI_ERR_INVALID_PARAMETERS;
++		if (!status)
++			btdev_set_bdaddr(btdev, data);
++		cmd_complete(btdev, opcode, &status, sizeof(status));
++		return NULL;
++	}
++
+ 	if (btdev->emu_opcode == opcode)
+ 		return vnd_cmd(btdev, opcode, btdev->emu_cmds, data, len);
+ 
+@@ -8738,7 +8778,7 @@ static void process_cmd(struct btdev *btdev, const void *data, uint16_t len)
+ 	}
+ }
+ 
+-static void send_acl(struct btdev *dev, const void *data, uint16_t len)
++static void send_acl(struct btdev *dev, const void *data, uint32_t len)
+ {
+ 	struct bt_hci_acl_hdr hdr;
+ 	struct iovec iov[3];
+@@ -8845,7 +8885,8 @@ static void send_iso(struct btdev *dev, const void *data, uint16_t len)
+ 	send_packet(conn->link->dev, iov, 3);
+ }
+ 
+-void btdev_receive_h4(struct btdev *btdev, const void *data, uint16_t len)
++void btdev_receive_h4(struct btdev *btdev, const void *data,
++							uint32_t len)
+ {
+ 	uint8_t pkt_type;
+ 
+diff --git a/emulator/btdev.h b/emulator/btdev.h
+index aa04ca6..0bdcf5a 100644
+--- a/emulator/btdev.h
++++ b/emulator/btdev.h
+@@ -100,7 +100,8 @@ void btdev_set_command_handler(struct btdev *btdev, btdev_command_func handler,
+ 
+ void btdev_set_send_handler(struct btdev *btdev, btdev_send_func handler,
+ 							void *user_data);
+-void btdev_receive_h4(struct btdev *btdev, const void *data, uint16_t len);
++void btdev_receive_h4(struct btdev *btdev, const void *data,
++							uint32_t len);
+ 
+ int btdev_add_hook(struct btdev *btdev, enum btdev_hook_type type,
+ 				uint16_t opcode, btdev_hook_func handler,
+diff --git a/emulator/server.c b/emulator/server.c
+index 5a827b2..7b8f7f4 100644
+--- a/emulator/server.c
++++ b/emulator/server.c
+@@ -22,6 +22,7 @@
+ #include <sys/epoll.h>
+ #include <sys/ioctl.h>
+ #include <sys/socket.h>
++#include <sys/random.h>
+ #include <sys/un.h>
+ #include <netinet/in.h>
+ #include <arpa/inet.h>
+@@ -35,6 +36,10 @@
+ #include "server.h"
+ 
+ #define uninitialized_var(x) x = x
++#define CLIENT_TX_LIMIT (1024 * 1024)
++
++static uint64_t controller_serial;
++static bool controller_serial_ready;
+ 
+ struct server {
+ 	enum server_type type;
+@@ -53,9 +58,14 @@ struct client {
+ 	struct btdev *btdev;
+ 	uint8_t *pkt_data;
+ 	uint8_t pkt_type;
+-	uint16_t pkt_expect;
+-	uint16_t pkt_len;
+-	uint16_t pkt_offset;
++	size_t pkt_expect;
++	size_t pkt_len;
++	size_t pkt_offset;
++	uint8_t *tx_data;
++	size_t tx_size;
++	size_t tx_offset;
++	size_t tx_capacity;
++	bool failed;
+ };
+ 
+ static void detach_client(void *data)
+@@ -89,25 +99,111 @@ static void client_destroy(void *user_data)
+ 	btdev_destroy(client->btdev);
+ 
+ 	close(client->fd);
++	free(client->pkt_data);
++	free(client->tx_data);
+ 
+ 	free(client);
+ }
+ 
++static void client_fail(struct client *client)
++{
++	if (client->failed)
++		return;
++
++	client->failed = true;
++	shutdown(client->fd, SHUT_RDWR);
++}
++
++static bool client_flush(struct client *client)
++{
++	while (client->tx_offset < client->tx_size) {
++		ssize_t written;
++
++		written = send(client->fd, client->tx_data + client->tx_offset,
++				client->tx_size - client->tx_offset,
++				MSG_DONTWAIT | MSG_NOSIGNAL);
++		if (written < 0) {
++			if (errno == EINTR)
++				continue;
++
++			if (errno == EAGAIN || errno == EWOULDBLOCK) {
++				mainloop_modify_fd(client->fd, EPOLLIN | EPOLLOUT);
++				return true;
++			}
++
++			client_fail(client);
++			return false;
++		}
++
++		if (!written) {
++			client_fail(client);
++			return false;
++		}
++
++		client->tx_offset += written;
++	}
++
++	client->tx_offset = client->tx_size = 0;
++	mainloop_modify_fd(client->fd, EPOLLIN);
++	return true;
++}
++
+ static void client_write_callback(const struct iovec *iov, int iovlen,
+ 							void *user_data)
+ {
+ 	struct client *client = user_data;
+-	struct msghdr msg;
+-	ssize_t written;
++	size_t size = 0, pending, capacity;
++	uint8_t *data;
++	int i;
+ 
+-	memset(&msg, 0, sizeof(msg));
++	if (client->failed)
++		return;
++
++	for (i = 0; i < iovlen; i++) {
++		if (iov[i].iov_len > CLIENT_TX_LIMIT - size) {
++			client_fail(client);
++			return;
++		}
++
++		size += iov[i].iov_len;
++	}
+ 
+-	msg.msg_iov = (struct iovec *) iov;
+-	msg.msg_iovlen = iovlen;
++	pending = client->tx_size - client->tx_offset;
+ 
+-	written = sendmsg(client->fd, &msg, MSG_DONTWAIT);
+-	if (written < 0)
++	if (size > CLIENT_TX_LIMIT - pending) {
++		client_fail(client);
+ 		return;
++	}
++
++	if (client->tx_offset)
++		memmove(client->tx_data, client->tx_data + client->tx_offset,
++								pending);
++
++	client->tx_offset = 0;
++	client->tx_size = pending;
++	capacity = client->tx_capacity ? client->tx_capacity : 4096;
++
++	while (capacity < pending + size)
++		capacity *= 2;
++
++	if (capacity > client->tx_capacity) {
++		data = realloc(client->tx_data, capacity);
++		if (!data) {
++			client_fail(client);
++			return;
++		}
++
++		client->tx_data = data;
++		client->tx_capacity = capacity;
++	}
++
++	for (i = 0; i < iovlen; i++) {
++		memcpy(client->tx_data + client->tx_size, iov[i].iov_base,
++							iov[i].iov_len);
++		client->tx_size += iov[i].iov_len;
++	}
++
++	client_flush(client);
+ }
+ 
+ static void client_read_callback(int fd, uint32_t events, void *user_data)
+@@ -116,19 +212,33 @@ static void client_read_callback(int fd, uint32_t events, void *user_data)
+ 	static uint8_t buf[4096];
+ 	uint8_t *ptr = buf;
+ 	ssize_t len;
+-	uint16_t count;
++	size_t count;
+ 
+ 	if (events & (EPOLLERR | EPOLLHUP)) {
+ 		mainloop_remove_fd(client->fd);
+ 		return;
+ 	}
+ 
+-again:
++	if (client->failed)
++		return;
++
++	if ((events & EPOLLOUT) && !client_flush(client))
++		return;
++
++	if (!(events & EPOLLIN))
++		return;
++
+ 	len = recv(fd, buf + client->pkt_offset,
+ 			sizeof(buf) - client->pkt_offset, MSG_DONTWAIT);
+ 	if (len < 0) {
+-		if (errno == EAGAIN)
+-			goto again;
++		if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
++			client_fail(client);
++
++		return;
++	}
++
++	if (!len) {
++		mainloop_remove_fd(client->fd);
+ 		return;
+ 	}
+ 
+@@ -149,7 +259,8 @@ again:
+ 			switch (client->pkt_type) {
+ 			case HCI_COMMAND_PKT:
+ 				if (count < HCI_COMMAND_HDR_SIZE + 1) {
+-					client->pkt_offset += len;
++					memmove(buf, ptr, count);
++					client->pkt_offset = count;
+ 					return;
+ 				}
+ 				cmd_hdr = (hci_command_hdr *) (ptr + 1);
+@@ -160,7 +271,8 @@ again:
+ 				break;
+ 			case HCI_ACLDATA_PKT:
+ 				if (count < HCI_ACL_HDR_SIZE + 1) {
+-					client->pkt_offset += len;
++					memmove(buf, ptr, count);
++					client->pkt_offset = count;
+ 					return;
+ 				}
+ 				acl_hdr = (hci_acl_hdr*)(ptr + 1);
+@@ -170,7 +282,8 @@ again:
+ 				break;
+ 			case HCI_ISODATA_PKT:
+ 				if (count < HCI_ISO_HDR_SIZE + 1) {
+-					client->pkt_offset += len;
++					memmove(buf, ptr, count);
++					client->pkt_offset = count;
+ 					return;
+ 				}
+ 				iso_hdr = (hci_iso_hdr *)(ptr + 1);
+@@ -181,7 +294,8 @@ again:
+ 				break;
+ 			case HCI_SCODATA_PKT:
+ 				if (count < HCI_SCO_HDR_SIZE + 1) {
+-					client->pkt_offset += len;
++					memmove(buf, ptr, count);
++					client->pkt_offset = count;
+ 					return;
+ 				}
+ 				sco_hdr = (hci_sco_hdr *)(ptr + 1);
+@@ -197,6 +311,11 @@ again:
+ 				return;
+ 			}
+ 
++			if (!client->pkt_data) {
++				client_fail(client);
++				return;
++			}
++
+ 			client->pkt_offset = 0;
+ 		}
+ 
+@@ -257,6 +376,41 @@ static void dev_debug(const char *str, void *user_data)
+ 	}
+ }
+ 
++/*
++ * Each connection is a new controller epoch. Avoid reassigning a departed
++ * controller's identity to another peer in Palm's saved discovery/trust cache.
++ * A random process base also separates independently restarted virtual radios.
++ * The TX may later program its original factory identity with Write_BD_ADDR.
++ */
++static bool assign_controller_address(struct btdev *btdev)
++{
++	uint8_t address[6] = { 0, 0, 0, 0, 0, 0x02 };
++	unsigned int i;
++
++	if (!controller_serial_ready) {
++		uint8_t seed[5];
++
++		if (getrandom(seed, sizeof(seed), GRND_NONBLOCK) !=
++						(ssize_t) sizeof(seed))
++			return false;
++
++		for (i = 0; i < sizeof(seed); i++)
++			controller_serial |= (uint64_t) seed[i] << (i * 8);
++
++		controller_serial_ready = true;
++	}
++
++	if (controller_serial == UINT64_C(0xffffffffff))
++		return false;
++
++	controller_serial++;
++
++	for (i = 0; i < 5; i++)
++		address[i] = controller_serial >> (i * 8);
++
++	return btdev_set_bdaddr(btdev, address);
++}
++
+ static void server_accept_callback(int fd, uint32_t events, void *user_data)
+ {
+ 	struct server *server = user_data;
+@@ -304,6 +458,13 @@ static void server_accept_callback(int fd, uint32_t events, void *user_data)
+ 		return;
+ 	}
+ 
++	if (!assign_controller_address(client->btdev)) {
++		btdev_destroy(client->btdev);
++		close(client->fd);
++		free(client);
++		return;
++	}
++
+ 	btdev_set_send_handler(client->btdev, client_write_callback, client);
+ 
+ done:

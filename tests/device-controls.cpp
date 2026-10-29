@@ -9,6 +9,8 @@
 #include <SDL.h>
 #include "SdlEventHandler.h"
 #include "SdlRenderer.h"
+#include "WindowScale.h"
+#include <SDL_image.h>
 class Guest : public SoC {
  public:
     explicit Guest(DeviceType5 device=deviceTypeTX) : device(device) {
@@ -24,7 +26,7 @@ class Guest : public SoC {
     void noPen() {assert(penEventQueue->GetSize()==0);}
     void pen(bool down,int x=0,int y=0) {
         assert(penEventQueue->GetSize()==1);auto e=penEventQueue->Pop();
-        assert(e.penDown==down);if(down)assert(e.x==x && e.y==y);
+        assert(e.penDown==down);if(down) { if(e.x!=x || e.y!=y)std::fprintf(stderr,"pen got %d,%d expected %d,%d\n",e.x,e.y,x,y);assert(e.x==x && e.y==y); }
     }
     std::vector<std::pair<uint8_t,bool>> events;
     bool KeyboardAttached() const override {return attached;}
@@ -38,7 +40,11 @@ class Guest : public SoC {
     void DumpMMU() override{}
     void JamKey(KeyId,uint32_t) override{}
     uint64_t GetTime() override{return 0;}
-    uint32_t* GetPendingFrame(uint32_t&,uint32_t&) override{return nullptr;}
+    std::vector<uint32_t> frame;
+    uint32_t* GetPendingFrame(uint32_t& first,uint32_t& last) override {
+        if(frame.empty())return nullptr;
+        first=0;last=displayConfiguration.height-1;return frame.data();
+    }
     void ResetPendingFrame() override{}
     DeviceType5 GetDeviceType() override{return device;}
     DisplayMode GetDisplayMode() override{return device==deviceTypeE2 ? DisplayMode::mode_320x320 : DisplayMode::mode_320x480;}
@@ -70,7 +76,7 @@ static void window(Uint8 event) {
     SDL_Event e{};e.type=SDL_WINDOWEVENT;e.window.event=event;assert(SDL_PushEvent(&e)==1);
 }
 // Window pixel for a guest point: the inverse of SdlEventHandler's rotation, at the pixel's centre.
-static std::pair<int,int> windowPoint(Rotation rotation,int scale,int w,int h,int gx,int gy) {
+static std::pair<int,int> windowPoint(Rotation rotation,float scale,int w,int h,int gx,int gy) {
     const int x=gx*scale+scale/2,y=gy*scale+scale/2;
     switch(rotation) {
         case Rotation::landscape_90: return {y,scale*w-1-x};
@@ -106,27 +112,30 @@ static void silkscreen() {
     auto same=[](SDL_Rect a,SDL_Rect b) {return a.x==b.x && a.y==b.y && a.w==b.w && a.h==b.h;};
     assert(same(silk.letters,{27*2,162*2-320,62*2,56*2}) && same(silk.numbers,{89*2,162*2-320,44*2,56*2}));
     const auto& controls=deviceControls(deviceTypeE2);
-    for(int scale:{1,2}) {
+    for(float scale:{1.f,1.25f,1.5f,1.75f,2.f}) {
         // Unrotated reference art at this scale.
         auto* ref=SDL_CreateRGBSurfaceWithFormat(0,320*scale,120*scale,32,SDL_PIXELFORMAT_RGBA32);
         auto* refRenderer=SDL_CreateSoftwareRenderer(ref);assert(ref && refRenderer);
         auto* art=createDeviceSilkscreen(refRenderer,silk,scale);assert(art);
         SDL_RenderCopy(refRenderer,art,nullptr,nullptr);SDL_DestroyTexture(art);
         auto at=[&](float x,float y) {return readPixel(ref,int(x*scale),int(y*scale));};
-        // Home, Menu, Favorites and Find are light discs inside their reachable rectangle on the dark panel.
-        for(size_t i=0;i<4;++i) {
-            const auto& b=silk.buttons[i];const int h=std::min(b.bounds.y+b.bounds.h,120)-b.bounds.y;
-            const float cx=b.bounds.x+b.bounds.w*0.5f,cy=b.bounds.y+h*0.5f,R=std::min(b.bounds.w,h)*0.5f-4;
-            assert(cy-R-1.5f>b.bounds.y && cy+R+1.5f<b.bounds.y+h);
-            const int panel=brightness(at(b.bounds.x+1.5f,b.bounds.y+1.5f));
-            assert(panel<300 && brightness(at(cx,cy-R-1.5f))<panel+12 && brightness(at(cx,cy+R+1.5f))<panel+12);
-            assert(brightness(at(cx,cy-R+1.5f))>panel+180 && brightness(at(cx-R+1.5f,cy))>panel+180);
+        // Exact thin-line appearance samples apply at integral scales.
+        if(scale==1 || scale==2) {
+            // Home, Menu, Favorites and Find are light discs inside their reachable rectangle on the dark panel.
+            for(size_t i=0;i<4;++i) {
+                const auto& b=silk.buttons[i];const int h=std::min(b.bounds.y+b.bounds.h,120)-b.bounds.y;
+                const float cx=b.bounds.x+b.bounds.w*0.5f,cy=b.bounds.y+h*0.5f,R=std::min(b.bounds.w,h)*0.5f-4;
+                assert(cy-R-1.5f>b.bounds.y && cy+R+1.5f<b.bounds.y+h);
+                const int panel=brightness(at(b.bounds.x+1.5f,b.bounds.y+1.5f));
+                assert(panel<300 && brightness(at(cx,cy-R-1.5f))<panel+12 && brightness(at(cx,cy+R+1.5f))<panel+12);
+                assert(brightness(at(cx,cy-R+1.5f))>panel+180 && brightness(at(cx-R+1.5f,cy))>panel+180);
+            }
+            // Lines between the columns and Graffiti areas; the letter/number split shows as ticks only.
+            const int panel=brightness(at(120,60));
+            for(float x:{48.f,273.f})assert(brightness(at(x,60))>panel+120 && brightness(at(x+2,60))<panel+12);
+            for(float y:{4.f,116.f})assert(brightness(at(silk.numbers.x,y))>panel+120);
+            assert(brightness(at(silk.numbers.x,60))<panel+12);
         }
-        // Lines between the columns and Graffiti areas; the letter/number split shows as ticks only.
-        const int panel=brightness(at(120,60));
-        for(float x:{48.f,273.f})assert(brightness(at(x,60))>panel+120 && brightness(at(x+2,60))<panel+12);
-        for(float y:{4.f,116.f})assert(brightness(at(silk.numbers.x,y))>panel+120);
-        assert(brightness(at(silk.numbers.x,60))<panel+12);
         for(auto rotation:{Rotation::portrait_0,Rotation::landscape_90,Rotation::portrait_180,Rotation::landscape_270}) {
             Guest guest(deviceTypeE2);DisplayConfiguration display=guest.display();
             const bool landscape=rotation==Rotation::landscape_90 || rotation==Rotation::landscape_270;
@@ -168,7 +177,7 @@ static void silkscreen() {
 static void exercise(DeviceType5 device) {
     const auto& profile=deviceControls(device);
     for(auto rotation:{Rotation::portrait_0,Rotation::landscape_90,Rotation::portrait_180,Rotation::landscape_270})
-    for(int scale:{1,2}) {
+    for(float scale:{1.f,1.25f,1.5f,1.75f,2.f}) {
         Guest guest(device);DisplayConfiguration display=guest.display();
         SdlEventHandler input(&guest,scale,display,rotation);
         const int screenWidth=display.width,screenHeight=display.height+display.graffitiHeight;
@@ -281,6 +290,52 @@ static void exercise(DeviceType5 device) {
     }
 }
 
+static void lcdScaling() {
+    // A high-frequency guest frame distinguishes nearest from linear filtering.
+    for(auto device:{deviceTypeTX,deviceTypeE2})
+    for(float scale:{1.f,1.25f,1.5f,1.75f,2.f})
+    for(auto rotation:{Rotation::portrait_0,Rotation::landscape_90,Rotation::portrait_180,Rotation::landscape_270}) {
+        Guest guest(device);auto display=guest.display();
+        guest.frame.resize(display.width*display.height);
+        for(int y=0;y<display.height;++y)for(int x=0;x<display.width;++x)
+            guest.frame[y*display.width+x]=(x%2) ? 0xffffffff : 0xff000000;
+        const bool landscape=rotation==Rotation::landscape_90 || rotation==Rotation::landscape_270;
+        const int width=landscape?display.height+display.graffitiHeight:display.width;
+        const int height=landscape?display.width:display.height+display.graffitiHeight;
+        auto* win=SDL_CreateWindow("LCD scale",0,0,width*scale,(height+deviceControls(device).height)*scale,0);assert(win);
+        int blended[2]{};
+        for(int smooth=0;smooth<2;++smooth) {
+            SdlRenderer renderer(win,&guest,scale,display,rotation,smooth);
+            renderer.Draw(true);
+            auto* shot=SDL_CreateRGBSurfaceWithFormat(0,width*scale,(height+deviceControls(device).height)*scale,32,SDL_PIXELFORMAT_RGBA32);assert(shot);
+            assert(SDL_RenderReadPixels(SDL_GetRenderer(win),nullptr,shot->format->format,shot->pixels,shot->pitch)==0);
+            // Inspect the interior LCD, away from borders and the printed panel.
+            for(int y=5;y<display.height-5;++y)for(int x=5;x<display.width-5;++x) {
+                auto [wx,wy]=windowPoint(rotation,scale,display.width,display.height+display.graffitiHeight,x,y);
+                const auto c=readPixel(shot,wx,wy);
+                blended[smooth]+=c.r>0 && c.r<255;
+            }
+            SDL_FreeSurface(shot);
+            bool blank=true;
+            const char* path="build/step7-scale-frame.png";
+            assert(renderer.SaveFramebuffer(path,blank) && !blank);
+            auto* frame=IMG_Load(path);assert(frame);
+            assert(frame->w==display.width && frame->h==display.height);
+            for(int x=0;x<display.width;++x)assert(readPixel(frame,x,4).r==(x%2?255:0));
+            SDL_FreeSurface(frame);std::remove(path);
+        }
+        assert(blended[0]==0);
+        if(scale>1)assert(blended[1]>0);
+        SDL_DestroyWindow(win);
+    }
+    assert(fittingWindowScale(320,564,1920,1080)==1.75f);
+    assert(fittingWindowScale(320,520,1920,1080)==1.75f);
+    assert(fittingWindowScale(320,564,1920,1200)==2.f);
+    assert(fittingWindowScale(320,564,1280,800)==1.25f);
+    assert(fittingWindowScale(320,564,500,2000)==1.5f);
+    assert(fittingWindowScale(320,564,300,500)==1.f);
+}
+
 int main() {
     SDL_setenv("SDL_VIDEODRIVER","dummy",1);assert(SDL_Init(SDL_INIT_VIDEO|SDL_INIT_EVENTS)==0);
     const auto& profile=deviceControls(deviceTypeTX);
@@ -299,5 +354,6 @@ int main() {
     exercise(deviceTypeTX);
     exercise(deviceTypeE2);
     silkscreen();
+    lcdScaling();
     SDL_Quit();puts("PASS: TX and E2 device buttons, holds/chords, focus/drag/rotation release, touch isolation, scales, pressed rendering and E2 silkscreen");
 }

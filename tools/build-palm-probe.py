@@ -6,14 +6,14 @@ import subprocess
 
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--sdk', type=Path, default=Path('../palm-os-sdk/sdk-5r3'))
-p.add_argument('--probe', choices=['sd', 'network', 'keyboard', 'host-network', 'compatibility', 'serial', 'serial-host', 'idle', 'debugger'], default='sd')
+p.add_argument('--probe', choices=['sd', 'network', 'keyboard', 'host-network', 'compatibility', 'serial', 'serial-host', 'idle', 'debugger', 'audio', 'irda', 'irda-db', 'bluetooth'], default='sd')
 p.add_argument('--output', type=Path)
 a = p.parse_args()
 sdk, output = a.sdk.resolve(), (a.output or Path('build/' + a.probe + '-probe')).resolve()
 source = 'tests/palm/' + a.probe + '-probe'
 name = {'sd':'FrondSDProbe','network':'FrondNetProbe','keyboard':'FrondKeyboardProbe',
         'host-network':'FrondHostProbe', 'compatibility':'FrondCompatProbe', 'serial':'FrondSerialProbe', 'serial-host':'FrondSerialHostProbe',
-        'idle':'FrondIdleProbe', 'debugger':'FrondDebugProbe'}[a.probe]
+        'idle':'FrondIdleProbe', 'debugger':'FrondDebugProbe', 'audio':'FrondAudioProbe', 'irda':'FrondIRProbe', 'irda-db':'FrondDBBeam', 'bluetooth':'FrondBluetoothProbe'}[a.probe]
 if not (sdk / 'include/PalmOS.h').is_file():
     p.error('Supply the Palm OS 5 SDK directory with --sdk')
 output.mkdir(parents=True, exist_ok=True)
@@ -58,15 +58,15 @@ if a.probe == 'compatibility':
             raise SystemExit('Native probe entry must be at resource offset zero')
         subprocess.run(['arm-palmos-objcopy', '-O', 'binary', '-j', '.text', str(elf), str(binary)], check=True)
         resources.append(str(binary))
-if a.probe == 'host-network':
+if a.probe in ('host-network', 'audio'):
     arm_object, arm_elf, arm_binary = output / 'tone.o', output / 'tone.elf', output / 'armc03e8.bin'
     subprocess.run(['arm-palmos-gcc', '-O2', '-Wall', '-marm', '-march=armv4t',
                     '-fno-pic', '-fno-strict-aliasing', '-ffreestanding', '-nostdlib',
-                    '-fomit-frame-pointer', '-c', 'tests/palm/host-network-tone.c', '-o', str(arm_object)], check=True)
+                    '-fomit-frame-pointer', '-c', 'tests/palm/' + ('audio-callback.c' if a.probe == 'audio' else 'host-network-tone.c'), '-o', str(arm_object)], check=True)
     relocations = subprocess.check_output(['arm-palmos-objdump', '-r', str(arm_object)], text=True)
     if 'R_ARM_ABS32' in relocations:
         raise SystemExit('ARM callback must not contain absolute relocations')
-    subprocess.run(['arm-palmos-ld', '-Ttext=0', '-e', 'hostTone', '-nostdlib', str(arm_object), '-o', str(arm_elf)], check=True)
+    subprocess.run(['arm-palmos-ld', '-Ttext=0', '-e', 'audioCallback' if a.probe == 'audio' else 'hostTone', '-nostdlib', str(arm_object), '-o', str(arm_elf)], check=True)
     subprocess.run(['arm-palmos-objcopy', '-O', 'binary', '-j', '.text', str(arm_elf), str(arm_binary)], check=True)
     resources.append(str(arm_binary))
 subprocess.run(['build-prc', '-o', str(output / (name + '.prc')), source + '.def',

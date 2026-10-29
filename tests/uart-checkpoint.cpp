@@ -44,6 +44,16 @@ int main() {
     auto read=[&](unsigned reg){uint32_t value=0;assert(cpuMemOpExternal(cpu,&value,PXA_FFUART_BASE+4*reg,4,false));return value;};
     auto run=[&](unsigned ms){for(unsigned i=0;i<ms;++i)assert(soc.Run(100000,100000000)>=100000);};
     write(3,0x83);write(0,96);write(1,0);write(3,3);write(4,8);write(1,0x41);write(2,7);
+    // Releasing a read-only host scope must leave the exact restored CPU and
+    // scheduler phase intact. Any UART notification is delivered on the next Run.
+    cpuClearSlowPath(cpu,SLOW_PATH_REASON_RESCHEDULE);
+    assert(soc.Save());
+    auto beforeGuard=soc.GetSavestate();
+    std::vector<uint8_t> checkpointBytes(static_cast<uint8_t*>(beforeGuard.data),static_cast<uint8_t*>(beforeGuard.data)+beforeGuard.size);
+    {ReadOnlyGuest checkpoint(soc);run(10);}
+    assert(soc.Save());auto afterGuard=soc.GetSavestate();
+    assert(afterGuard.size==checkpointBytes.size() && !std::memcmp(afterGuard.data,checkpointBytes.data(),checkpointBytes.size()));
+    puts("PASS: serial guard release preserves exact restored CPU/scheduler state before execution resumes");
     Peer peer;peer.attach(uart);
     for(unsigned round=0;round<4;++round){
         write(0,0x40+round);peer.input={uint16_t(0x80+round)};

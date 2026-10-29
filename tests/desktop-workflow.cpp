@@ -16,6 +16,7 @@
 #include "SdImage.h"
 #include <QSettings>
 #include <QSpinBox>
+#include <QSlider>
 #include "MainWindow.h"
 
 static QByteArray digest(const QString& path) {
@@ -51,15 +52,26 @@ for line in s.makefile('rb'):
             MainWindow window(core.fileName()); window.show();
             auto* option = window.findChild<QCheckBox*>("fastAudio"); QVERIFY(option);
             QVERIFY(!option->isChecked()); option->setChecked(true);
+            auto* scale = window.findChild<QSlider*>("windowScale"); QVERIFY(scale);
+            QCOMPARE(scale->minimum(), 4); QCOMPARE(scale->maximum(), 8);
+            scale->setValue(7);
+            auto* smooth = window.findChild<QCheckBox*>("smoothLcd"); QVERIFY(smooth);
+            QVERIFY(!smooth->isChecked()); smooth->setChecked(true);
             window.openSession(source.fileName(), true);
             QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("stop")->isEnabled(), 5000);
             QVERIFY(!option->isEnabled());
             QFile args(source.fileName()+".args"); QVERIFY(args.open(QIODevice::ReadOnly));
-            QVERIFY(args.readAll().contains("--experimental-fast-audio"));
+            const auto arguments = args.readAll();
+            QVERIFY(arguments.contains("--experimental-fast-audio"));
+            QVERIFY(arguments.contains("--window-scale\n1.75"));
+            QVERIFY(arguments.contains("--smooth-lcd"));
+            QVERIFY(!scale->isEnabled()); QVERIFY(!smooth->isEnabled());
             window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
         }
         MainWindow next(core.fileName());
         QVERIFY(next.findChild<QCheckBox*>("fastAudio")->isChecked());
+        QCOMPARE(next.findChild<QSlider*>("windowScale")->value(), 7);
+        QVERIFY(next.findChild<QCheckBox*>("smoothLcd")->isChecked());
         QSettings().clear();
     }
     void serialSetting() {
@@ -263,14 +275,14 @@ for line in s.makefile('rb'):
             const auto passed = args.readAll();
             QVERIFY(passed.contains("--usb\ntcp:5098"));
             QVERIFY(!passed.contains("--serial"));
-            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("USB: 127.0.0.1:5098, waiting for a connection, TX connecting"), 5000);
-            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("USB: 127.0.0.1:5098, waiting for a connection, TX enumerated"), 5000);
-            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("USB: 127.0.0.1:5098, connected, TX enumerated"), 5000);
+            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("USB: 127.0.0.1:5098, waiting for a connection, Palm TX connecting"), 5000);
+            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("USB: 127.0.0.1:5098, waiting for a connection, Palm TX enumerated"), 5000);
+            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("USB: 127.0.0.1:5098, connected, Palm TX enumerated"), 5000);
             // A change while running switches the live endpoint.
             QTRY_VERIFY_WITH_TIMEOUT(mode->isEnabled(), 5000);
             mode->setCurrentIndex(mode->findData("pty"));
             emit mode->activated(mode->currentIndex());
-            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("USB: /dev/pts/8, waiting for a connection, TX detached"), 5000);
+            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("USB: /dev/pts/8, waiting for a connection, Palm TX detached"), 5000);
             QVERIFY(commands().contains("usb-mode pty\n"));
             QVERIFY(!port->isEnabled());
             QCOMPARE(QSettings().value("usbMode").toString(), QString("pty"));
@@ -324,7 +336,8 @@ s.sendall(b'0\tevent\tready\t\n')
 for line in s.makefile('rb'):
     i,cmd,arg=line.rstrip(b'\n').split(b'\t')
     with trace.open('ab') as t: t.write(cmd+b'\n')
-    message={b'device-state':b'tungsten-e2',b'keyboard-state':b'detached',b'network-state':b'disabled',b'sd-state':b'none'}.get(cmd,b'done')
+    message={b'device-state':b'tungsten-e2',b'keyboard-state':b'detached',b'network-state':b'disabled',b'sd-state':b'none',b'usb-state':b'pty /dev/pts/9 connected running'}.get(cmd,b'done')
+    if cmd==b'keyboard-attach': message=b'attached' if bytes.fromhex(arg.decode())==b'on' else b'detached'
     if cmd==b'save': pathlib.Path(bytes.fromhex(arg.decode()).decode()).write_text('saved')
     s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
     if cmd==b'quit': break
@@ -344,7 +357,7 @@ for line in s.makefile('rb'):
         for (auto* radio : window.findChildren<QRadioButton*>()) if (radio->text().startsWith("Start")) radio->setChecked(true);
         device->setCurrentIndex(device->findText("Palm TX"));
         // The launcher greys the unsupported settings once the device is settled, before Start.
-        const QStringList gated{"serialMode", "usbMode", "fastAudio"};
+        const QStringList gated{"serialMode"};
         auto gatedWidget = [&](const QString& name) { return window.findChild<QWidget*>(name); };
         for (const auto& name : gated) QVERIFY2(gatedWidget(name)->isEnabled(), qPrintable(name));
         for (const char* mode : {"Detect from the NOR image", "Tungsten E2"}) {
@@ -384,14 +397,25 @@ for line in s.makefile('rb'):
         const auto args = read(".args").split('\n');
         QCOMPARE(args.value(0), norPath);
         QVERIFY(!args.contains("--experimental-tx") && !args.contains("--nand"));
+        QVERIFY(args.contains("--experimental-fast-audio"));
+        // Leave automatic sizing to the core, which knows the restored device and display.
+        QVERIFY(!args.contains("--window-scale") && !args.contains("--smooth-lcd"));
+        QVERIFY(!QSettings().contains("windowScale"));
         QTRY_VERIFY_WITH_TIMEOUT(read(".commands").contains("sd-state"), 5000);
         QTRY_VERIFY_WITH_TIMEOUT(read(".commands").contains("network-state"), 5000);
-        // The TX-only controls are off, and their saved settings are not sent.
+        // TX-only network/serial controls stay off; the E2 keyboard and USB are usable.
         QVERIFY(!window.findChild<QComboBox*>("networkMode")->isEnabled());
-        QVERIFY(!window.findChild<QCheckBox*>("keyboardAttached")->isEnabled());
+        QVERIFY(window.findChild<QCheckBox*>("keyboardAttached")->isEnabled());
+        window.findChild<QCheckBox*>("keyboardAttached")->click();
+        QTRY_VERIFY_WITH_TIMEOUT(read(".commands").contains("keyboard-attach"), 5000);
+        QTRY_VERIFY(window.findChild<QCheckBox*>("keyboardAttached")->isChecked());
         QVERIFY(!window.findChild<QComboBox*>("serialMode")->isEnabled());
-        QVERIFY(!window.findChild<QComboBox*>("usbMode")->isEnabled());
-        QVERIFY(!read(".commands").contains("serial-state") && !read(".commands").contains("usb-state"));
+        QTRY_VERIFY(window.findChild<QComboBox*>("usbMode")->isEnabled());
+        QVERIFY(!read(".commands").contains("serial-state"));
+        QTRY_VERIFY_WITH_TIMEOUT(read(".commands").contains("usb-state"), 5000);
+        QVERIFY(read(".args").contains("--usb\npty"));
+        QTRY_VERIFY(window.findChild<QLabel*>("usbState")->text().contains("Tungsten E2 enumerated"));
+        QVERIFY(!window.findChild<QComboBox*>("usbMode")->toolTip().contains("Not available"));
         // A NAND file is passed on when given.
         window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
         MainWindow second(core.fileName()); second.show();
@@ -413,6 +437,128 @@ for line in s.makefile('rb'):
         QCOMPARE(third.findChild<QComboBox*>("serialMode")->currentData().toString(), QString("tcp"));
         QCOMPARE(third.findChild<QComboBox*>("usbMode")->currentData().toString(), QString("pty"));
         QVERIFY(third.findChild<QCheckBox*>("fastAudio")->isChecked());
+        QSettings().clear();
+    }
+    void infraredSetting_data() {
+        QTest::addColumn<QByteArray>("deviceId");
+        QTest::newRow("tx") << QByteArray("palm-tx");
+        QTest::newRow("e2") << QByteArray("tungsten-e2");
+    }
+    void infraredSetting() {
+        QFETCH(QByteArray, deviceId);
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QSettings().setValue("irdaMode", "tcp"); QSettings().setValue("irdaPort", 5097);
+        QTemporaryDir files;
+        QFile source(files.filePath("input.frond")); QVERIFY(source.open(QIODevice::WriteOnly));
+        source.write("session"); source.close();
+        QFile identity(source.fileName()+".device"); QVERIFY(identity.open(QIODevice::WriteOnly)); identity.write(deviceId); identity.close();
+        QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly));
+        core.write(R"PY(#!/usr/bin/python3
+import pathlib,socket,sys
+base=pathlib.Path(sys.argv[1]);pathlib.Path(str(base)+'.args').write_text('\n'.join(sys.argv[1:]))
+device=pathlib.Path(str(base)+'.device').read_bytes()
+s=socket.socket(socket.AF_UNIX);s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+state=b'tcp:5097 127.0.0.1:5097 connected'
+s.sendall(b'0\tevent\tready\t\n0\tevent\tinfrared\t'+state.hex().encode()+b'\n')
+for line in s.makefile('rb'):
+    i,cmd,arg=line.rstrip(b'\n').split(b'\t');arg=bytes.fromhex(arg.decode())
+    message={b'device-state':device,b'sd-state':b'none',b'network-state':b'disabled',b'keyboard-state':b'detached'}.get(cmd,b'done')
+    if cmd==b'irda-mode':
+        state=b'off' if arg==b'off' else arg+b' 127.0.0.1:'+arg.split(b':')[-1]+b' waiting'
+        s.sendall(b'0\tevent\tinfrared\t'+state.hex().encode()+b'\n');message=state
+    if cmd==b'keyboard-attach':message=b'attached' if arg==b'on' else b'detached'
+    if cmd==b'save':pathlib.Path(arg.decode()).write_text('saved')
+    s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
+    if cmd==b'quit':break
+)PY");
+        core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner));
+        {
+            MainWindow window(core.fileName()); window.show(); window.openSession(source.fileName(),true);
+            auto* mode=window.findChild<QComboBox*>("irdaMode"); auto* port=window.findChild<QSpinBox*>("irdaPort");
+            auto* keyboard=window.findChild<QCheckBox*>("keyboardAttached"); auto* state=window.findChild<QLabel*>("irdaState");
+            QVERIFY(mode && port && keyboard && state);
+            QTRY_VERIFY(mode->isEnabled() && state->text().contains("connected"));
+            QVERIFY(!keyboard->isEnabled()); QCOMPARE(port->value(),5097);
+            QFile args(source.fileName()+".args"); QVERIFY(args.open(QIODevice::ReadOnly)); QVERIFY(args.readAll().contains("--irda\ntcp:5097"));
+            mode->setCurrentIndex(mode->findData("off")); QMetaObject::invokeMethod(mode,"activated",Q_ARG(int,mode->currentIndex()));
+            QTRY_VERIFY(keyboard->isEnabled()); QTRY_COMPARE(state->text(),QString());
+            keyboard->click(); QTRY_VERIFY(keyboard->isChecked() && !mode->isEnabled());
+            QTRY_VERIFY(keyboard->isEnabled()); keyboard->click(); QTRY_VERIFY(mode->isEnabled());
+            mode->setCurrentIndex(mode->findData("tcp")); QMetaObject::invokeMethod(mode,"activated",Q_ARG(int,mode->currentIndex()));
+            QTRY_VERIFY(state->text().contains("waiting")); QTRY_VERIFY(!keyboard->isEnabled());
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(),5000);
+        }
+        MainWindow next(core.fileName());
+        QCOMPARE(next.findChild<QComboBox*>("irdaMode")->currentData().toString(),QString("tcp"));
+        QCOMPARE(next.findChild<QSpinBox*>("irdaPort")->value(),5097);
+        QSettings().clear();
+    }
+    void bluetoothSetting_data() {
+        QTest::addColumn<QByteArray>("deviceId");
+        QTest::newRow("tx") << QByteArray("palm-tx");
+        QTest::newRow("e2") << QByteArray("tungsten-e2");
+    }
+    void bluetoothSetting() {
+        QFETCH(QByteArray, deviceId);
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QTemporaryDir files;
+        const auto socketPath = files.filePath("private controller socket");
+        QFile source(files.filePath("input.frond")); QVERIFY(source.open(QIODevice::WriteOnly));
+        source.write("session"); source.close();
+        QFile identity(source.fileName()+".device"); QVERIFY(identity.open(QIODevice::WriteOnly)); identity.write(deviceId); identity.close();
+        QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly));
+        core.write(R"PY(#!/usr/bin/python3
+import pathlib,socket,sys
+base=pathlib.Path(sys.argv[1]);pathlib.Path(str(base)+'.args').write_text('\n'.join(sys.argv[1:]))
+device=pathlib.Path(str(base)+'.device').read_bytes()
+s=socket.socket(socket.AF_UNIX);s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+state=(sys.argv[sys.argv.index('--bluetooth')+1].encode()+b' connected') if '--bluetooth' in sys.argv else b'off'
+s.sendall(b'0\tevent\tready\t\n0\tevent\tbluetooth\t'+state.hex().encode()+b'\n')
+for line in s.makefile('rb'):
+    i,cmd,arg=line.rstrip(b'\n').split(b'\t');arg=bytes.fromhex(arg.decode())
+    message={b'device-state':device,b'sd-state':b'none',b'network-state':b'disabled',b'keyboard-state':b'detached'}.get(cmd,b'done')
+    if cmd==b'bluetooth-mode':
+        if arg.endswith(b'missing'):
+            s.sendall(i+b'\terror\tbluetooth\t'+b'Controller socket unavailable'.hex().encode()+b'\n');continue
+        state=b'off' if arg==b'off' else arg+b' connected';message=state
+        s.sendall(b'0\tevent\tbluetooth\t'+state.hex().encode()+b'\n')
+    if cmd==b'save':pathlib.Path(arg.decode()).write_text('saved')
+    s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
+    if cmd==b'quit':break
+)PY");
+        core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner));
+        {
+            MainWindow window(core.fileName()); window.show();
+            auto* enabled=window.findChild<QCheckBox*>("bluetoothEnabled");
+            auto* path=window.findChild<QLineEdit*>("bluetoothSocket");
+            auto* state=window.findChild<QLabel*>("bluetoothState");
+            QVERIFY(enabled && path && state); QVERIFY(!enabled->isChecked()); QVERIFY(!path->isEnabled());
+            enabled->click(); path->setText(socketPath); emit path->editingFinished();
+            QCOMPARE(QSettings().value("bluetoothSocket").toString(),socketPath);
+            window.openSession(source.fileName(),true);
+            QTRY_VERIFY(enabled->isEnabled() && state->text().contains("connected"));
+            QFile args(source.fileName()+".args"); QVERIFY(args.open(QIODevice::ReadOnly));
+            QVERIFY(args.readAll().contains("--bluetooth\n"+socketPath.toUtf8()));
+            enabled->click(); QTRY_VERIFY(enabled->isEnabled() && state->text().isEmpty());
+            QVERIFY(!path->isEnabled()); enabled->click();
+            QTRY_VERIFY(enabled->isEnabled() && state->text().contains("connected"));
+            QString shown; QTimer dismiss; dismiss.setInterval(20);
+            connect(&dismiss,&QTimer::timeout,&window,[&]{
+                if(auto* box=window.findChild<QMessageBox*>();box && box->isVisible()) {shown=box->text();box->done(QMessageBox::Ok);}
+            }); dismiss.start();
+            path->setText(socketPath+" missing"); emit path->editingFinished();
+            QTRY_VERIFY(shown.contains("Controller socket unavailable"));
+            QCOMPARE(QSettings().value("bluetoothSocket").toString(),socketPath);
+            QTRY_VERIFY(enabled->isEnabled()); enabled->click();
+            QTRY_VERIFY(enabled->isEnabled() && state->text().isEmpty());
+            QCOMPARE(QSettings().value("bluetoothSocket").toString(),socketPath);
+            path->setText(socketPath); enabled->click();
+            QTRY_VERIFY(enabled->isEnabled() && state->text().contains("connected"));
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(),5000);
+        }
+        MainWindow next(core.fileName());
+        QVERIFY(next.findChild<QCheckBox*>("bluetoothEnabled")->isChecked());
+        QCOMPARE(next.findChild<QLineEdit*>("bluetoothSocket")->text(),socketPath);
         QSettings().clear();
     }
     void failedSaveStaysOpen() {

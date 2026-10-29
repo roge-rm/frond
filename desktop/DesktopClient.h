@@ -24,6 +24,8 @@ class DesktopClient : public QObject {
     void closeRequested();
     void serialState(const QString& state);  // pushed by the core on a change
     void usbState(const QString& state);
+    void infraredState(const QString& state);
+    void bluetoothState(const QString& state);
     void stalled();
     void diagnostic(const QString& text);
  private:

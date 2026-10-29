@@ -8,8 +8,8 @@ representative apps. The other inherited cohorts stay unavailable.
 
 Known limits. The E2's VFS returns `vfsErrFileEOF` at the end of a file, where
 the TX returns no error, so the SD test script doesn't accept E2 logs as they
-are. IR keyboard drivers, Bluetooth, USB and HotSync, and networking aren't
-covered; the desktop turns those controls off for the E2. Physical-device timing
+are. Networking remains unavailable. Bluetooth has separate original-stack
+qualification as described below. USB HotSync is supported as described below. Physical-device timing
 isn't checked. Patch `0044-e2-cohort.patch` adds physical app-button replay
 names and clears obsolete queued host input on E2 restore.
 
@@ -82,8 +82,9 @@ The desktop was enabled once these were met. Separate cold boot with existing an
 editor content persistence and continued input after fresh-process restore.
 Check normal reset and representative apps independently. Codec/SD synthetic
 passes do not establish guest audio or storage.
-IR keyboard drivers, Bluetooth, USB/HotSync and networking need their own
-evidence. Power-key sleep and wake work on the dumped ROM, including a second
+IrDA beaming and virtual Bluetooth are qualified as described below; networking
+remains unavailable. Power-key sleep
+and wake work on the dumped ROM, including a second
 cycle and a session saved asleep and woken in a fresh process. A soft reset opens
 Preferences on Date & Time, as the ROM does on hardware. Physical-device timing and behavior require available hardware.
 
@@ -102,3 +103,91 @@ are refused, and a refused savestate leaves the running guest as it was.
 Record exact fixture identities, source hashes, observations and unresolved
 failures only in a private local report. Do not commit NOR/NAND, metadata,
 identifying dump hashes, sessions, captures, logs or exported guest databases.
+
+## USB HotSync
+
+The E2 uses the PXA255 USB controller with fixed bulk endpoints. The shared
+host and PTY/TCP bridge support pilot-link HotSync from the Qt desktop or
+`--usb pty` / `--usb tcp:PORT`. Its cradle serial port remains unavailable.
+See [USB HotSync](peripherals.md#usb-hotsync) for usage and transport limits.
+
+Qualification covers enumeration, database listing, installing and fetching a
+small record database with identical record payloads, and fetching it again over
+TCP after a fresh-process session restore. With the USB bridge active, the E2
+also passed true sleep and wake, restoring a sleeping session in a fresh process,
+checkpoint preservation, rejected-load rollback and normal-load reattachment.
+The tests do not establish physical USB timing or arbitrary USB accessory support.
+
+`test-pxa255-udc` covers fixed FIFO addresses and directions, byte-wide FIFO
+accesses, EP0 hardware requests and configuration acknowledgement, IRQ masks and
+acknowledgements, backpressure, partial-packet/legacy restore and corrupt-state
+refusal. `test-usb-bridge-soc` checks shared host lifecycle behavior on both boards.
+
+## Experimental low-latency audio
+
+The desktop and `--experimental-fast-audio` support the qualified E2 firmware
+with a separate runtime driver profile. It previews one signed 16-bit stereo
+44.1 kHz stream before the firmware queue, retaining the driver's volume and
+pan calculation. Qualified basic ARM callbacks can use the earlier render-to-writer
+handoff after a witnessed stream start; extended/decoder streams remain on HAL.
+Other firmware is refused; unsupported streams or playback starvation fall back
+to normal audio. See [fast audio](fast-audio.md).
+
+Qualification includes exact PCM agreement with the normal codec path and
+isolated SunVox note responses, plus preview reactivation after session restore,
+audio off/on, sleep/wake and restoration of a sleeping session. Reset clears
+queued preview audio. Firmware-free profile and ARM interception tests cover
+both E2 and TX. Host callback measurements exclude sound-server and physical
+output delay; the smaller queue remains sensitive to host scheduling.
+
+## Infrared keyboard
+
+The E2 supports the same Palm Universal Wireless Keyboard accessory as the TX.
+The original Palm 1.13 driver receives typed lower/upper-case characters through
+the E2 STUART. Qualification also checks reset, attachment persistence, fresh
+restore with Shift held, detachment and reattachment. The saved enabled driver
+programs a 9600-baud 8N1 STUART receiver with infrared enabled. The accessory
+model retains its 8N2 transmit spacing; this does not assert that the E2 driver
+programs two stop bits.
+
+`make test-keyboard` checks both boards through their real UART MMIO, including
+receiver gating, exact accessory packets, partial-packet restore and releases.
+The optional `tests/desktop-keyboard.py` acceptance workflow accepts an E2
+session too. The driver must be supplied separately; see
+[keyboard setup](peripherals.md#computer-keyboard). This is the accessory byte
+protocol; IrDA beaming and Bluetooth are separate peripherals.
+
+## IrDA beaming
+
+TX/E2 beaming passes through the original guest stacks in all four directions.
+The SDK probes verify exact 4096-byte payloads and a serialized two-record Palm
+database imported in both cross-device directions by the original `ExgDBRead`
+API, preserving records and IDs.
+Cancellation during payload transmission returns the original user-cancel error;
+a fresh peer and retry delivers the complete payload without changing prior logs.
+Peer interruption, checkpoint/refused-load rollback, accepted replacement, power,
+sleep/wake and fresh sleeping-session restore are also checked. The desktop
+enables beaming and prevents simultaneous infrared keyboard attachment.
+
+See [infrared setup, tests and timing limits](infrared.md). This decoded SIR
+transport does not qualify optical timing or host IrDA-stack interoperability.
+
+## Virtual Bluetooth
+
+The original E2 driver and unchanged uploaded image operate through the optional
+[local virtual controller provider](bluetooth-provider.md). Original Exchange
+Manager send/receive, real mid-payload Cancel and fresh retry, raw BtLib RFCOMM
+with credit advancement and L2CAP echo all pass exact 4096-byte checks. Original
+PIN entry, authentication/encryption state queries and trusted-device
+persistent flags are checked separately.
+
+Read-only checkpoint and refused-load rollback preserve the live transfer and
+exact model/RAM/NAND state. Idle accepted replacement, reset/reinitialization,
+true sleep/wake and fresh sleeping-session restore are followed by a fresh
+successful transfer. External radio connections are not serialized. Loading
+mid-transfer closes the old peer without claiming success; the original progress
+dialog can remain blocked and require Reset before radio reinitialization.
+
+The desktop exposes the controller for E2, default off. This qualifies the listed
+virtual profiles and original APIs, without claiming interoperability with a
+physical adapter, arbitrary profiles or physical radio/encryption timing.

@@ -184,7 +184,9 @@ class PackagePolicyTests(unittest.TestCase):
             (root / 'packaging/debian-revision').write_text('1\n')
             for name in ('LICENSE', 'packaging/org.frond.Frond.desktop', 'packaging/frond.svg',
                          'packaging/frond-mime.xml', 'packaging/copyright', 'doc/desktop.md',
-                         'doc/peripherals.md', 'vendor/cloudpilot/src/argparse/LICENSE',
+                         'doc/peripherals.md', 'doc/infrared.md', 'doc/bluetooth-provider.md',
+                         'doc/peripheral-qualification.md',
+                         'vendor/cloudpilot/src/argparse/LICENSE',
                          'vendor/cloudpilot/src/common/zip/UNLICENSE'):
                 (root / name).write_text('Synthetic fixture, not a Frond release.\n')
             source = root / 'dummy.c'

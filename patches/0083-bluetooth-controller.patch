@@ -1,0 +1,780 @@
+diff --git a/src/uarm/Makefile b/src/uarm/Makefile
+--- a/src/uarm/Makefile
++++ b/src/uarm/Makefile
+@@ -122,6 +122,7 @@
+ 	uarm/HostNetwork.cpp			\
+ 	uarm/HostSerial.cpp			\
+ 	uarm/HostInfrared.cpp \
++	uarm/BluetoothBackend.cpp \
+ 	uarm/UsbBusHost.cpp			\
+ 	uarm/UsbHostBridge.cpp			\
+ 	uarm/NetworkSimulation.cpp			\
+diff --git a/src/uarm/uarm/device.h b/src/uarm/uarm/device.h
+--- a/src/uarm/uarm/device.h
++++ b/src/uarm/uarm/device.h
+@@ -4,6 +4,7 @@
+ #define _DEVICE_H_
+ 
+ #include <functional>
++#include <string>
+ 
+ #include <cstdint>
+ #include <cstdio>
+@@ -93,4 +94,15 @@
+ void deviceLoad(struct Device *dev, T &loader, bool preserveInput = false);
+ std::function<void()> deviceCaptureInput(struct Device *dev);
+ 
++// Optional virtual H4 controller, native Unix socket. No host adapter ownership.
++bool deviceSetBluetooth(Device*,const std::string& socketPath,std::string& error);
++std::string deviceBluetoothState(Device*);
++void deviceBeginBluetoothCheckpoint(Device*);
++void deviceEndBluetoothCheckpoint(Device*,bool sleeping=false);
++void deviceBluetoothStateReplaced(Device*);
++void deviceSuspendBluetooth(Device*);
++void deviceBluetoothPinsChanged(Device*);
++void deviceStopBluetooth(Device*);
++
++
+ #endif
+diff --git a/src/uarm/uarm/devicePalmTungstenE2.cpp b/src/uarm/uarm/devicePalmTungstenE2.cpp
+--- a/src/uarm/uarm/devicePalmTungstenE2.cpp
++++ b/src/uarm/uarm/devicePalmTungstenE2.cpp
+@@ -178,7 +178,11 @@
+             .flags = NAND_HAS_SECOND_READ_CMD, .devIdLen = 5,
+             .devId = {0xec, 0xf1, 0x00, 0x95, 0x40},
+         };
+-        dev->bcm2035 = nullptr;
++        dev->bcm2035 = bcm2035Init(getTime,sp->gpio,true);
++        sp->btUart=sp->uarts[3];
++        bcm2035RegisterWithUart(dev->bcm2035,sp->btUart);
++        for(unsigned pin:{17u,83u})pxaGpioSetNotif(sp->gpio,pin,
++            [](void* context,uint32_t,bool,bool){bcm2035PowerChanged(static_cast<Bcm2035*>(context));},dev->bcm2035);
+         dev->kpc = static_cast<PxaKpc *>(sp->kpc);
+         dev->noRamMarker = 0;
+         dev->nand = directNandInit(sp->mem, deviceReschedule, 0x06000000, 0x05000000,
+@@ -209,7 +213,7 @@
+     dev->wm9712L = wm9712LInit(sp->ac97, sp->gpio, 50);
+     if (!dev->wm9712L) ERR("Cannot init WM9712L");
+ 
+-    dev->bcm2035 = bcm2035Init(getTime);
++    dev->bcm2035 = bcm2035Init(getTime,sp->gpio);
+ 
+     dev->nand =
+         directNandInit(sp->mem, deviceReschedule, 0x04000002UL, 0x04000004UL, 0x04000000UL,
+@@ -262,6 +266,8 @@
+ 
+     sp->nand = directNandGetNand(dev->nand);
+     bcm2035RegisterWithUart(dev->bcm2035, sp->btUart);
++    for(unsigned pin:{32u,80u})pxaGpioSetNotif(sp->gpio,pin,
++        [](void* context,uint32_t,bool,bool){bcm2035PowerChanged(static_cast<Bcm2035*>(context));},dev->bcm2035);
+ 
+     return dev;
+ }
+@@ -348,7 +354,8 @@
+ }
+ 
+ std::function<void()> deviceCaptureInput(struct Device *dev) {
+-    return wm9712CaptureInput(dev->wm9712L);
++    auto touch=wm9712CaptureInput(dev->wm9712L);auto radio=bcm2035CaptureInput(dev->bcm2035);
++    return [touch,radio]{touch();if(radio)radio();};
+ }
+ 
+ template <typename T>
+@@ -378,3 +385,20 @@
+     if(dev->wifi)dev->wifi->Poll();
+ #endif
+ }
++
++bool deviceSetBluetooth(Device* dev,const std::string& path,std::string& error){
++    if(!dev->bcm2035){error="No Bluetooth controller on this board.";return false;}
++    return bcm2035SetBackend(dev->bcm2035,path,error);
++}
++std::string deviceBluetoothState(Device* dev){return bcm2035BackendState(dev->bcm2035);}
++void deviceBeginBluetoothCheckpoint(Device* dev){bcm2035BeginCheckpoint(dev->bcm2035);}
++void deviceEndBluetoothCheckpoint(Device* dev,bool sleeping){bcm2035EndCheckpoint(dev->bcm2035,sleeping);}
++void deviceSuspendBluetooth(Device* dev){bcm2035Suspend(dev->bcm2035);}
++void deviceBluetoothPinsChanged(Device* dev){bcm2035PowerChanged(dev->bcm2035);}
++void deviceBluetoothStateReplaced(Device* dev){bcm2035Suspend(dev->bcm2035);}
++void deviceStopBluetooth(Device* dev){
++    if(!dev->bcm2035)return;
++    const bool tx=dev->type==deviceTypeTX;
++    for(unsigned pin:{tx?17u:32u,tx?83u:80u})pxaGpioSetNotif(dev->gpio,pin,nullptr,nullptr);
++    bcm2035Stop(dev->bcm2035);dev->bcm2035=nullptr;
++}
+diff --git a/src/uarm/uarm/uartdev_bcm2035.h b/src/uarm/uarm/uartdev_bcm2035.h
+--- a/src/uarm/uarm/uartdev_bcm2035.h
++++ b/src/uarm/uarm/uartdev_bcm2035.h
+@@ -2,13 +2,16 @@
+ #define _UART_BCM2035_H_
+ 
+ #include <cstdint>
++#include <string>
++#include <functional>
++struct PxaGpio;
+ 
+ #include "get_emu_time.h"
+ #include "pxa_UART.h"
+ 
+ struct Bcm2035;
+ 
+-struct Bcm2035* bcm2035Init(GetEmuTime getTime);
++struct Bcm2035* bcm2035Init(GetEmuTime getTime,PxaGpio* gpio=nullptr,bool tx=false);
+ 
+ void bcm2035RegisterWithUart(struct Bcm2035* bcm2035, PxaUart* uart);
+ 
+@@ -18,4 +21,14 @@
+ template <typename T>
+ void bcm2035Load(struct Bcm2035* bcm2035, T& loader);
+ 
++bool bcm2035SetBackend(Bcm2035*,const std::string& path,std::string& error);
++std::string bcm2035BackendState(Bcm2035*);
++// Host-only deferred GPIO history, restored before tentative GPIO loads.
++std::function<void()> bcm2035CaptureInput(Bcm2035*);
++void bcm2035BeginCheckpoint(Bcm2035*);
++void bcm2035EndCheckpoint(Bcm2035*,bool sleeping=false);
++void bcm2035Suspend(Bcm2035*);
++void bcm2035PowerChanged(Bcm2035*);
++void bcm2035Stop(Bcm2035*);
++
+ #endif  // _UART_BCM2035_H_
+diff --git a/src/uarm/uarm/uartdev_bcm2035.cpp b/src/uarm/uarm/uartdev_bcm2035.cpp
+--- a/src/uarm/uarm/uartdev_bcm2035.cpp
++++ b/src/uarm/uarm/uartdev_bcm2035.cpp
+@@ -3,9 +3,15 @@
+ #include <cstdio>
+ 
+ #include "savestate/savestateAll.h"
++#include "BluetoothBackend.h"
++#include "BluetoothBootstrap.h"
++#include "BluetoothUartMessaging.h"
++#include "pxa_GPIO.h"
++#include <string>
++#include <vector>
+ #include "scheduler.h"
+ 
+-#define SAVESTATE_VERSION 0
++#define SAVESTATE_VERSION 2
+ 
+ namespace {
+     constexpr uint8_t CMD_ENTER_UPLOAD[] = {0x01, 0x2e, 0xfc, 0x00};
+@@ -29,17 +35,96 @@
+ }  // namespace
+ 
+ struct Bcm2035 {
++    explicit Bcm2035(GetEmuTime clock,PxaGpio* gpio,bool tx):getTime(clock),gpio(gpio),txBoard(tx),bootstrap(!tx){}
++    ~Bcm2035(){backend.Close();}
+     GetEmuTime getTime;
+ 
+-    State state;
+-    Mode mode;
+-
+-    const uint8_t* buffer;
+-    uint32_t bufferSize;
+-    uint32_t bufferIndex;
+-
+-    uint64_t delay;
+-    uint64_t transitionTimestamp;
++    State state{};
++    Mode mode{};
++
++    const uint8_t* buffer{};
++    uint32_t bufferSize{};
++    uint32_t bufferIndex{};
++
++    uint64_t delay{};
++    uint64_t transitionTimestamp{};
++    PxaGpio* gpio{};
++    PxaUart* uart{};
++    bool txBoard{},enabled{},blocked{},lastPowered{},powerKnown{};
++    unsigned checkpoints{};
++    bool deferredPowerReset{};
++    std::vector<unsigned> restoringPower;
++    uint64_t lastPoll{};
++    std::string path,lastError;
++    BluetoothBackend backend;
++    BluetoothBootstrap bootstrap;
++    BluetoothUartMessaging uartMessaging;
++    uint64_t Now(){return getTime.getTimeF(getTime.userdata);}
++    bool Powered() const {
++        if(!gpio)return true;
++        return pxaGpioGetState(gpio,txBoard?17:32)==PxaGpioStateHigh &&
++            pxaGpioGetState(gpio,txBoard?83:80)==PxaGpioStateHigh;
++    }
++    void PowerChanged(){
++        if(!enabled)return;
++        const bool on=Powered();
++        if(checkpoints){
++            if(restoringPower.empty() && powerKnown && on!=lastPowered)deferredPowerReset=true;
++            return;
++        }
++        if(deferredPowerReset || (powerKnown && on!=lastPowered)){
++            backend.Close();bootstrap.Reset();uartMessaging.Reset();blocked=!on;lastPoll=0;if(on)lastError.clear();
++        }
++        deferredPowerReset=false;lastPowered=on;powerKnown=true;
++    }
++    void Suspend(){backend.Close();bootstrap.Reset();uartMessaging.Reset();blocked=true;powerKnown=true;lastPowered=Powered();lastPoll=0;deferredPowerReset=false;}
++    bool EnsureBackend(){
++        if(blocked || !Powered())return false;
++        if(backend.Connected())return true;
++        if(!backend.Open(path,lastError)){blocked=true;return false;}
++        return true;
++    }
++    bool SendHci(const uint8_t* bytes,size_t size){
++        if(!EnsureBackend())return false;
++        if(txBoard){
++            const auto result=uartMessaging.Command(bytes,size,[this](const uint8_t* b,size_t n){return bootstrap.Respond(b,n);});
++            if(result!=BluetoothUartMessaging::Result::unhandled)return result==BluetoothUartMessaging::Result::handled;
++        }
++        // The virtual controller does not implement other board-vendor extensions.
++        // Return a correctly framed Unknown HCI Command completion; never claim
++        // that a factory address or low-power register was changed.
++        if(size>=4 && bytes[0]==1 && (bytes[2]&0xfc)==0xfc &&
++           !(txBoard && bytes[1]==1 && bytes[2]==0xfc)){
++            const uint8_t response[]={4,14,4,1,bytes[1],bytes[2],1};
++            return bootstrap.Respond(response,sizeof(response));
++        }
++        return backend.Write(bytes,size);
++    }
++    void TickHost(){
++        if(checkpoints || !enabled)return;
++        PowerChanged();if(blocked || !Powered())return;
++        const auto now=Now();bootstrap.Tick(now);
++        if(now-lastPoll>=1000000){lastPoll=now;const bool was=backend.Connected();backend.Poll();if(was && !backend.Connected()){lastError="Bluetooth controller disconnected; turn Bluetooth off and on in Palm OS.";Suspend();}}
++    }
++    uint_fast16_t ReadHost(){
++        TickHost();if(checkpoints || blocked || !Powered())return UART_CHAR_NONE;
++        // The controller owns queued bytes while the guest closes RTS, including
++        // hardware automatic RTS at the UART FIFO threshold.
++        if(uart && (txBoard?!(pxaUartGetModemOutputs(uart)&PXA_UART_RTS):!pxaUartHwReceiveReady(uart)))return UART_CHAR_NONE;
++        // The UART clocks individual bytes. A local completion must wait for
++        // the current controller packet, even across callbacks/checkpoints.
++        if(backend.FrameInProgress())return backend.Read();
++        if(txBoard && !uartMessaging.PendingControllerInput(backend.Pending()!=0,[this](const uint8_t* b,size_t n){return bootstrap.Respond(b,n);})){lastError="Bluetooth UART wake queue overflow; turn Bluetooth off and on in Palm OS.";Suspend();return UART_CHAR_NONE;}
++        const auto c=bootstrap.Read(Now());
++        return c!=UART_CHAR_NONE?c:txBoard && !uartMessaging.CanReadController()?UART_CHAR_NONE:backend.Read();
++    }
++    void WriteHost(uint8_t c){
++        if(checkpoints)return;
++        PowerChanged();if(blocked || !Powered())return;
++        if(!bootstrap.Write(c,Now(),[this](const uint8_t*b,size_t n){return SendHci(b,n);})){lastError="Unsupported or malformed Bluetooth UART stream; turn Bluetooth off and on in Palm OS.";Suspend();}
++    }
++    bool ActiveHost() const {return !checkpoints && !blocked && Powered() && (backend.Connected() || bootstrap.Pending());}
++
+ 
+     template <typename T>
+     void DoSaveLoad(T& chunkHelper) {
+@@ -145,6 +230,8 @@
+ static uint_fast16_t bcm2035ReadF(void* userData) {
+     Bcm2035* bcm2035 = reinterpret_cast<Bcm2035*>(userData);
+ 
++    if(bcm2035->enabled)return bcm2035->ReadHost();
++    if(bcm2035->txBoard)return UART_CHAR_NONE;
+     if (bcm2035->mode != Mode::send) return UART_CHAR_NONE;
+ 
+     uint8_t c = bcm2035->buffer[bcm2035->bufferIndex++];
+@@ -159,6 +246,8 @@
+ static void bcm2035WriteF(uint_fast16_t chr, void* userData) {
+     Bcm2035* bcm2035 = reinterpret_cast<Bcm2035*>(userData);
+ 
++    if(bcm2035->enabled){bcm2035->WriteHost(uint8_t(chr));return;}
++    if(bcm2035->txBoard)return;
+     if (bcm2035->mode != Mode::receive) return;
+ 
+     if (static_cast<uint_fast16_t>(bcm2035->buffer[bcm2035->bufferIndex++]) != chr) {
+@@ -173,12 +262,14 @@
+ static bool bcm2035ClientIsActive(void* userData) {
+     Bcm2035* bcm2035 = reinterpret_cast<Bcm2035*>(userData);
+ 
+-    return bcm2035->state != State::receiveUploadCmd;
++    return bcm2035->enabled?bcm2035->ActiveHost():!bcm2035->txBoard && bcm2035->state != State::receiveUploadCmd;
+ }
+ 
+ static void bcm2035ClientTick(void* userData) {
+     Bcm2035* bcm2035 = reinterpret_cast<Bcm2035*>(userData);
+ 
++    if(bcm2035->enabled){bcm2035->TickHost();return;}
++    if(bcm2035->txBoard)return;
+     if (bcm2035->mode != Mode::wait) return;
+ 
+     const uint64_t timestamp = bcm2035->getTime.getTimeF(bcm2035->getTime.userdata);
+@@ -188,17 +279,15 @@
+     }
+ }
+ 
+-struct Bcm2035* bcm2035Init(GetEmuTime getTime) {
+-    Bcm2035* bcm2035 = reinterpret_cast<Bcm2035*>(malloc(sizeof(Bcm2035)));
+-    memset(bcm2035, 0, sizeof(*bcm2035));
+-
+-    bcm2035->getTime = getTime;
++struct Bcm2035* bcm2035Init(GetEmuTime getTime,PxaGpio* gpio,bool tx) {
++    auto* bcm2035 = new Bcm2035(getTime,gpio,tx);
+     bcm2035SetState(bcm2035, State::receiveUploadCmd);
+ 
+     return bcm2035;
+ }
+ 
+ void bcm2035RegisterWithUart(struct Bcm2035* bcm2035, PxaUart* uart) {
++    bcm2035->uart=uart;
+     pxaUartSetFuncs(uart, bcm2035ReadF, bcm2035WriteF, bcm2035ClientIsActive, bcm2035ClientTick,
+                     bcm2035);
+ }
+@@ -210,15 +299,30 @@
+ 
+     SaveChunkHelper helper(*chunk);
+     bcm2035->DoSaveLoad(helper);
++    bcm2035->bootstrap.Transfer(helper);
++    bcm2035->uartMessaging.Transfer(helper);
+ }
+ 
+ template <typename T>
+ void bcm2035Load(struct Bcm2035* bcm2035, T& loader) {
+-    auto chunk = loader.GetChunk(ChunkType::bcm2035, SAVESTATE_VERSION, "bcm2035");
++    // TX sessions predating the radio model have no controller chunk.
++    if(!loader.HasChunk(ChunkType::bcm2035))return;
++    uint32_t version=0;
++    auto chunk = loader.GetChunkOrFail(ChunkType::bcm2035, SAVESTATE_VERSION, "bcm2035",version);
+     if (!chunk) return;
+ 
+     LoadChunkHelper helper(*chunk);
+     bcm2035->DoSaveLoad(helper);
++    if(version)bcm2035->bootstrap.Transfer(helper);
++    else bcm2035->bootstrap.Reset();
++    if(version>=2)bcm2035->uartMessaging.Transfer(helper);
++    else bcm2035->uartMessaging.Reset();
++    const auto state=static_cast<unsigned>(bcm2035->state),mode=static_cast<unsigned>(bcm2035->mode);
++    const bool bufferState=state==0 || state==2 || state==4;
++    const auto expectedMode=state==0?unsigned(Mode::receive):bufferState?unsigned(Mode::send):unsigned(Mode::wait);
++    const uint32_t expectedSize=state==0?4:state==2?7:2;
++    if(state>5 || mode!=expectedMode || !bcm2035->bootstrap.Valid() || !bcm2035->uartMessaging.Valid() ||
++       (bufferState && (bcm2035->bufferSize!=expectedSize || bcm2035->bufferIndex>=expectedSize))){loader.NotifyError();return;}
+ 
+     switch (bcm2035->state) {
+         case State::receiveUploadCmd:
+@@ -243,3 +347,46 @@
+                                                      SavestateProbe<ChunkType>& savestate);
+ template void bcm2035Load<SavestateLoader<ChunkType>>(Bcm2035* bcm2035,
+                                                       SavestateLoader<ChunkType>& loader);
++
++// Host configuration/lifecycle is intentionally outside the guest-state chunk.
++bool bcm2035SetBackend(Bcm2035* b,const std::string& path,std::string& error){
++    if(b->checkpoints){error="Bluetooth cannot change during temporary guest work.";return false;}
++    if(path==b->path && b->enabled==!path.empty()){error.clear();return true;}
++    if(!path.empty()){BluetoothBackend candidate;if(!candidate.Open(path,error))return false;}
++    b->backend.Close();b->deferredPowerReset=false;b->restoringPower.clear();b->path=path;b->enabled=!path.empty();b->bootstrap.Reset();b->uartMessaging.Reset();
++    bcm2035SetState(b,State::receiveUploadCmd);b->blocked=b->Powered();
++    b->lastPowered=b->Powered();b->powerKnown=true;b->lastPoll=0;b->lastError.clear();
++    if(b->uart)pxaUartKick(b->uart);
++    error.clear();return true;
++}
++std::string bcm2035BackendState(Bcm2035* b){
++    if(!b || !b->enabled)return "off";
++    if(b->checkpoints && b->backend.Connected())return "connected";
++    if(!b->lastError.empty())return "disconnected: "+b->lastError;
++    if(!b->Powered())return "configured; radio off";
++    return b->backend.Connected()?"connected":b->blocked?"configured; turn Bluetooth off and on in Palm OS":"configured";
++}
++void bcm2035BeginCheckpoint(Bcm2035* b){if(b)++b->checkpoints;}
++void bcm2035EndCheckpoint(Bcm2035* b,bool sleeping){
++    if(!b || !b->checkpoints)return;
++    --b->checkpoints;
++    while(!b->restoringPower.empty() && b->checkpoints<=b->restoringPower.back())b->restoringPower.pop_back();
++    if(!b->checkpoints){b->PowerChanged();if(sleeping && b->enabled)b->Suspend();}
++}
++std::function<void()> bcm2035CaptureInput(Bcm2035* b){
++    if(!b)return {};
++    const auto pending=b->deferredPowerReset;const auto restoring=b->restoringPower;
++    return [b,pending,restoring]{
++        b->deferredPowerReset=pending;b->restoringPower=restoring;
++        // Input restoration precedes nested GPIO load. Ignore those synthetic
++        // edges until that load returns to the enclosing checkpoint depth.
++        b->restoringPower.push_back(b->checkpoints);
++    };
++}
++void bcm2035Suspend(Bcm2035* b){if(b && b->enabled && !b->checkpoints)b->Suspend();}
++void bcm2035PowerChanged(Bcm2035* b){if(b)b->PowerChanged();}
++void bcm2035Stop(Bcm2035* b){
++    if(!b)return;
++    if(b->uart)pxaUartSetFuncs(b->uart,nullptr,nullptr,nullptr,nullptr,nullptr);
++    delete b;
++}
+diff --git a/src/uarm/uarm/BluetoothBackend.h b/src/uarm/uarm/BluetoothBackend.h
+new file mode 100644
+--- /dev/null
++++ b/src/uarm/uarm/BluetoothBackend.h
+@@ -0,0 +1,33 @@
++#ifndef FROND_BLUETOOTH_BACKEND_H
++#define FROND_BLUETOOTH_BACKEND_H
++#include <array>
++#include <cstddef>
++#include <cstdint>
++#include <string>
++#include <vector>
++
++// User-selected H4 controller endpoint. It owns live host I/O only; no descriptor,
++// partial host packet or peer generation is portable guest state. Emulator thread.
++class BluetoothBackend {
++ public:
++    static constexpr size_t maxFrame=65540, capacity=1024*1024;
++    BluetoothBackend()=default;
++    ~BluetoothBackend(){Close();}
++    BluetoothBackend(const BluetoothBackend&)=delete;
++    BluetoothBackend& operator=(const BluetoothBackend&)=delete;
++    bool Open(const std::string& path,std::string& error);
++    void Close();
++    bool Connected() const {return fd>=0;}
++    bool Write(const uint8_t* data,size_t size);
++    void Poll();
++    uint16_t Read(); // 0x100 means no byte, same as UART_CHAR_NONE.
++    bool FrameInProgress() const {return frameRemaining!=0;}
++    size_t Pending() const {return received.size()-readAt;}
++    size_t Queued() const {return outgoing.size()-sentAt;}
++ private:
++    int fd{-1};
++    std::vector<uint8_t> incoming,outgoing,received;
++    size_t expected{},sentAt{},readAt{},frameRemaining{};
++    bool Consume(const uint8_t* bytes,size_t size);
++};
++#endif
+diff --git a/src/uarm/uarm/BluetoothBackend.cpp b/src/uarm/uarm/BluetoothBackend.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/uarm/uarm/BluetoothBackend.cpp
+@@ -0,0 +1,93 @@
++#include "BluetoothBackend.h"
++#include <algorithm>
++#include <cerrno>
++#include <cstring>
++#ifndef __EMSCRIPTEN__
++#include <fcntl.h>
++#include <sys/socket.h>
++#include <sys/un.h>
++#include <unistd.h>
++#endif
++
++bool BluetoothBackend::Open(const std::string& path,std::string& error) {
++#ifdef __EMSCRIPTEN__
++    error="Bluetooth controller endpoints require the native runner.";return false;
++#else
++    if(path.empty() || path[0]!='/' || path.find('\0')!=std::string::npos || path.size()>=sizeof(sockaddr_un::sun_path)) {
++        error="Choose an absolute Unix socket path shorter than 108 bytes.";return false;
++    }
++    const int candidate=socket(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0);
++    if(candidate<0){error=std::strerror(errno);return false;}
++    sockaddr_un address{};address.sun_family=AF_UNIX;
++    std::memcpy(address.sun_path,path.c_str(),path.size()+1);
++    // A local Unix connect has no network route/timeout. Set nonblocking before
++    // connection so a full listener queue cannot stall the emulation thread.
++    if(fcntl(candidate,F_SETFL,O_NONBLOCK)<0 || connect(candidate,reinterpret_cast<sockaddr*>(&address),sizeof(address))<0) {
++        error=std::strerror(errno);close(candidate);return false;
++    }
++    Close();fd=candidate;error.clear();return true;
++#endif
++}
++void BluetoothBackend::Close() {
++#ifndef __EMSCRIPTEN__
++    if(fd>=0)close(fd);
++#endif
++    fd=-1;incoming.clear();outgoing.clear();received.clear();expected=sentAt=readAt=frameRemaining=0;
++}
++bool BluetoothBackend::Write(const uint8_t* bytes,size_t size) {
++    if(!Connected() || !bytes || !size || size>maxFrame || size>capacity-Queued()) {Close();return false;}
++    if(sentAt){outgoing.erase(outgoing.begin(),outgoing.begin()+sentAt);sentAt=0;}
++    outgoing.insert(outgoing.end(),bytes,bytes+size);return true;
++}
++bool BluetoothBackend::Consume(const uint8_t* bytes,size_t size) {
++    for(size_t i=0;i<size;++i) {
++        if(incoming.size()==maxFrame)return false;
++        incoming.push_back(bytes[i]);
++        if(incoming.size()==1 && incoming[0]!=2 && incoming[0]!=3 && incoming[0]!=4)return false;
++        if(incoming[0]==4 && incoming.size()==3)expected=3+incoming[2];
++        else if(incoming[0]==2 && incoming.size()==5)expected=5+incoming[3]+(size_t(incoming[4])<<8);
++        else if(incoming[0]==3 && incoming.size()==4)expected=4+incoming[3];
++        if(expected>maxFrame)return false;
++        if(expected && incoming.size()==expected) {
++            if(expected>capacity-Pending())return false;
++            if(readAt){received.erase(received.begin(),received.begin()+readAt);readAt=0;}
++            received.insert(received.end(),incoming.begin(),incoming.end());
++            incoming.clear();expected=0;
++        }
++    }
++    return true;
++}
++void BluetoothBackend::Poll() {
++#ifndef __EMSCRIPTEN__
++    if(!Connected())return;
++    // Bounded work per guest callback. A short write keeps its exact suffix.
++    for(unsigned tries=0;tries<4 && Queued();++tries) {
++        const auto n=send(fd,outgoing.data()+sentAt,Queued(),MSG_DONTWAIT|MSG_NOSIGNAL);
++        if(n<0 && errno==EINTR)continue;
++        if(n<0 && (errno==EAGAIN || errno==EWOULDBLOCK))break;
++        if(n<=0){Close();return;}
++        sentAt+=size_t(n);
++    }
++    if(sentAt==outgoing.size()){outgoing.clear();sentAt=0;}
++    std::array<uint8_t,4096> bytes;
++    for(unsigned tries=0;tries<4;++tries) {
++        const auto n=recv(fd,bytes.data(),bytes.size(),MSG_DONTWAIT);
++        if(n<0 && errno==EINTR)continue;
++        if(n<0 && (errno==EAGAIN || errno==EWOULDBLOCK))break;
++        if(n<=0 || !Consume(bytes.data(),size_t(n))){Close();return;}
++    }
++#endif
++}
++uint16_t BluetoothBackend::Read() {
++    if(!Pending())return 0x100;
++    if(!frameRemaining){
++        // Consume exposes complete validated frames only. Retain this frame's
++        // ownership across byte callbacks and receive-buffer compaction.
++        const auto* p=received.data()+readAt;
++        frameRemaining=p[0]==4?3+p[2]:p[0]==2?5+p[3]+(size_t(p[4])<<8):4+p[3];
++    }
++    --frameRemaining;
++    const auto c=received[readAt++];
++    if(readAt==received.size()){received.clear();readAt=0;}
++    return c;
++}
+diff --git a/src/uarm/uarm/BluetoothBootstrap.h b/src/uarm/uarm/BluetoothBootstrap.h
+new file mode 100644
+--- /dev/null
++++ b/src/uarm/uarm/BluetoothBootstrap.h
+@@ -0,0 +1,125 @@
++#ifndef FROND_BLUETOOTH_BOOTSTRAP_H
++#define FROND_BLUETOOTH_BOOTSTRAP_H
++#include <array>
++#include <cstdint>
++#include <cstring>
++#include <functional>
++
++// The Palm drivers upload their own unchanged image over the UART, then use
++// ordinary H4. This models that wire contract, not execution of the 8051 image.
++class BluetoothBootstrap {
++ public:
++    static constexpr uint32_t maxFrame=65540;
++    using HciSink=std::function<bool(const uint8_t*,size_t)>;
++    enum Stage : uint32_t { hciBeforeUpload, replyDelay, bootAckDelay, mini, patch, bootReadyDelay, hci, failed };
++    explicit BluetoothBootstrap(bool e2=true):e2(e2){}
++    void Reset() {stage=hciBeforeUpload;rxCount=wanted=head=count=0;due=0;rx={};out={};}
++    bool Failed() const {return stage==failed;}
++    bool InHci() const {return stage==hci || stage==hciBeforeUpload;}
++    bool Ready() const {return stage==hci;}
++    bool Respond(const uint8_t* bytes,size_t size){return Emit(bytes,size);}
++    bool Pending() const {return count || stage==replyDelay || stage==bootAckDelay || stage==bootReadyDelay;}
++    Stage State() const {return Stage(stage);}
++    void Tick(uint64_t now) {
++        if(count || now<due)return;
++        if(stage==replyDelay){const uint8_t v[]={4,14,4,1,0x2e,0xfc,0};Emit(v,sizeof(v));stage=bootAckDelay;due=0;}
++        else if(stage==bootAckDelay && due){const uint8_t v[]={'4','1'};Emit(v,sizeof(v));stage=mini;due=0;}
++        else if(stage==bootReadyDelay){
++            // E2 explicitly consumes four bytes before HCI init; their contents
++            // are ignored. Use a valid vendor event for this virtual controller.
++            const uint8_t v[]={4,0xff,1,0};Emit(v,sizeof(v));stage=hci;due=0;
++        }
++    }
++    uint16_t Read(uint64_t now) {
++        Tick(now);if(!count)return 0x100;
++        const auto c=out[head];out[head]=0;head=(head+1)%out.size();--count;
++        if(!count && stage==bootAckDelay)due=now+150000000;
++        return c;
++    }
++    bool Write(uint8_t c,uint64_t now,const HciSink& sink) {
++        if(Failed())return false;
++        if(stage==replyDelay || stage==bootAckDelay || stage==bootReadyDelay)return Reject();
++        if(stage==patch && !rxCount && c=='Z') {
++            if(e2){stage=bootReadyDelay;due=now+100000000;}else stage=hci;
++            return true;
++        }
++        if(!rxCount) {
++            if(stage==mini && c!=':')return Reject();
++            if(stage==patch && c!='@')return Reject();
++            if(InHci() && c!=1 && c!=2 && c!=3)return Reject();
++        }
++        if(rxCount==rx.size())return Reject();
++        rx[rxCount++]=c;
++        if(InHci()) {
++            if(rx[0]==1 && rxCount==4)wanted=4+rx[3];
++            else if(rx[0]==2 && rxCount==5)wanted=5+rx[3]+(uint32_t(rx[4])<<8);
++            else if(rx[0]==3 && rxCount==4)wanted=4+rx[3];
++            if(wanted>rx.size())return Reject();
++            if(wanted && rxCount==wanted) {
++                if(rx[0]==1 && wanted==4 && rx[1]==0x2e && rx[2]==0xfc) {
++                    stage=replyDelay;due=now+10000000;
++                } else if(!sink || !sink(rx.data(),rxCount))return Reject();
++                ClearRx();
++            }
++            return true;
++        }
++        const auto digits=stage==mini?2u:4u;
++        if(rxCount==digits+1) {
++            uint32_t n=0;
++            for(unsigned i=1;i<=digits;++i){const int d=Hex(rx[i]);if(d<0)return Reject();n=n*16+unsigned(d);}
++            wanted=2*n+11;
++            if(wanted>rx.size())return Reject();
++        }
++        if(wanted && rxCount==wanted) {
++            unsigned sum=0;
++            for(unsigned i=1;i+1<rxCount;i+=2) {
++                const int hi=Hex(rx[i]),lo=Hex(rx[i+1]);if(hi<0 || lo<0)return Reject();
++                sum+=16*hi+lo;
++            }
++            const bool valid=!(sum&255);
++            if(stage==mini) {
++                const uint8_t ack=valid?'1':'0';if(!Emit(&ack,1))return false;
++                if(valid && wanted==11 && !std::memcmp(rx.data(),":00000001FF",11))stage=patch;
++            } else {
++                const uint8_t ack[]={'0','0',uint8_t(valid?'1':'0')};if(!Emit(ack,sizeof(ack)))return false;
++            }
++            ClearRx();
++        }
++        return true;
++    }
++    template<class H> void Transfer(H& h) {
++        h.Do32(stage).Do32(rxCount).Do32(wanted).Do32(head).Do32(count).Do64(due)
++            .DoBuffer(rx.data(),rx.size()).DoBuffer(out.data(),out.size());
++    }
++    bool Valid() const {
++        if(stage>failed || rxCount>rx.size() || wanted>rx.size() || head>=out.size() || count>out.size())return false;
++        if(!rxCount)return !wanted;
++        uint32_t header=0,expected=0;
++        if(InHci()){
++            if(rx[0]!=1 && rx[0]!=2 && rx[0]!=3)return false;
++            header=rx[0]==2?5:4;
++            if(rxCount>=header)expected=header+(rx[0]==2?uint32_t(rx[3])+(uint32_t(rx[4])<<8):rx[3]);
++        }else if(stage==mini || stage==patch){
++            if(rx[0]!=(stage==mini?':':'@'))return false;
++            header=stage==mini?3:5;
++            if(rxCount>=header){
++                uint32_t length=0;for(uint32_t i=1;i<header;++i){const auto digit=Hex(rx[i]);if(digit<0)return false;length=16*length+uint32_t(digit);}
++                expected=2*length+11;
++            }
++        }else return false;
++        // A completed frame is consumed synchronously by Write; only a partial
++        // header/frame can be present at a serialization boundary.
++        return rxCount<header?!wanted:expected<=rx.size() && wanted==expected && rxCount<expected;
++    }
++ private:
++    bool e2;
++    uint32_t stage{hciBeforeUpload},rxCount{},wanted{},head{},count{};
++    uint64_t due{};
++    std::array<uint8_t,maxFrame> rx{};
++    std::array<uint8_t,64> out{};
++    static int Hex(uint8_t c){if(c>='0' && c<='9')return c-'0';if(c>='A' && c<='F')return c-'A'+10;return -1;}
++    void ClearRx(){rx={};rxCount=wanted=0;}
++    bool Reject(){stage=failed;ClearRx();out={};head=count=0;return false;}
++    bool Emit(const uint8_t* v,size_t n){if(n>out.size()-count)return Reject();for(size_t i=0;i<n;++i)out[(head+count++)%out.size()]=v[i];return true;}
++};
++#endif
+diff --git a/src/uarm/uarm/BluetoothUartMessaging.h b/src/uarm/uarm/BluetoothUartMessaging.h
+new file mode 100644
+--- /dev/null
++++ b/src/uarm/uarm/BluetoothUartMessaging.h
+@@ -0,0 +1,64 @@
++#ifndef FROND_BLUETOOTH_UART_MESSAGING_H
++#define FROND_BLUETOOTH_UART_MESSAGING_H
++#include <algorithm>
++#include <array>
++#include <cstddef>
++#include <cstdint>
++
++// Legacy TX controller transport, inferred from the original driver's FC27/29
++// producer and EF-event consumer. This models UART availability, not electrical
++// wake polarity, radio execution or physical idle/power timing. The extra mode-
++// activation EF04 is a virtual-controller notification; its physical BCM2035
++// bytes were not captured (the original driver only counts those four bytes).
++class BluetoothUartMessaging {
++ public:
++    enum class Result { unhandled, handled, failed };
++    void Reset(){state=0;parameters={};}
++    bool CanReadController()const{return state==0 || state==1;}
++    template<class Send> Result Command(const uint8_t* b,size_t n,Send send){
++        if(n==4 && b[0]==1 && b[1]==3 && b[2]==12){Reset();return Result::unhandled;}
++        if(n<4 || b[0]!=1 || b[2]!=0xfc || (b[1]!=0x27 && b[1]!=0x28 && b[1]!=0x29))return Result::unhandled;
++        auto complete=[&](uint8_t status){const uint8_t r[]={4,14,4,1,b[1],0xfc,status};return send(r,sizeof(r));};
++        auto done=[](bool ok){return ok?Result::handled:Result::failed;};
++        if(b[1]==0x27){
++            if(n!=14 || b[3]!=10)return done(complete(0x12));
++            if(b[4]!=0 && b[4]!=2)return done(complete(0x11));
++            for(size_t i=7;i<13;++i)if(b[i]>1)return done(complete(0x12));
++            if(b[4]==0 && b[10])return done(complete(0x12));
++            std::copy(b+4,b+14,parameters.begin());state=b[4]==2?1:0;
++            if(!complete(0))return Result::failed;
++            return done(state==0 || Event(4,send));
++        }
++        if(b[1]==0x28){
++            if(n!=4 || b[3])return done(complete(0x12));
++            std::array<uint8_t,17> r{4,14,14,1,0x28,0xfc,0};
++            std::copy(parameters.begin(),parameters.end(),r.begin()+7);
++            return done(send(r.data(),r.size()));
++        }
++        if(n!=5 || b[3]!=1)return done(complete(0x12));
++        if(!state)return done(complete(0x0c));
++        switch(b[4]){
++            case 1: state=1;return done(Event(4,send)); // Host wake request -> wake acknowledgment.
++            case 2: if(state==3)state=1;return Result::handled; // Host acknowledges controller wake.
++            case 3: state=2;return done(Event(6,send)); // Host sleep request -> sleep acknowledgment.
++            case 4: return Result::handled; // No autonomous sleep request is outstanding.
++            default:return done(complete(0x12));
++        }
++    }
++    template<class Send>bool PendingControllerInput(bool pending,Send send){
++        if(state!=2 || !pending)return true;
++        if(!Event(3,send))return false;
++        state=3;return true;
++    }
++    template<class T>void Transfer(T& h){h.Do32(state).DoBuffer(parameters.data(),parameters.size());}
++    bool Valid()const{
++        if(state>3 || parameters[0]!=(state?2:0))return false;
++        for(size_t i=3;i<9;++i)if(parameters[i]>1)return false;
++        return parameters[0]!=0 || !parameters[6];
++    }
++ private:
++    uint32_t state{}; // 0 disabled, 1 awake, 2 asleep, 3 controller wake awaiting host acknowledgment.
++    std::array<uint8_t,10>parameters{};
++    template<class Send>static bool Event(uint8_t token,Send send){const uint8_t r[]={4,0xef,1,token};return send(r,sizeof(r));}
++};
++#endif
+diff --git a/src/uarm/uarm/pxa_UART.cpp b/src/uarm/uarm/pxa_UART.cpp
+--- a/src/uarm/uarm/pxa_UART.cpp
++++ b/src/uarm/uarm/pxa_UART.cpp
+@@ -597,14 +597,25 @@
+     return true;
+ }
+ 
++static bool pxaUartPrvRtsAsserted(const PxaUart* uart) {
++    if (!(uart->MCR & UART_MCR_RTS)) return false;
++    if ((uart->FCR & UART_FCR_TRFIFOE) && (uart->MCR & 0x20)) {
++        const unsigned threshold[] = {1, 8, 16, 32};
++        if (pxaUartPrvFifoUsed(&uart->RX) >= threshold[uart->FCR >> 6]) return false;
++    }
++    return true;
++}
++
+ uint8_t pxaUartGetModemOutputs(const PxaUart* uart) {
+     if (!uart->HasModem() || uart->Loopback()) return 0;
+     uint8_t outputs = uart->MCR & uart->ModemOutputMask();
+-    if ((uart->FCR & UART_FCR_TRFIFOE) && (uart->MCR & 0x20) && (outputs & UART_MCR_RTS)) {
+-        const unsigned threshold[] = {1, 8, 16, 32};
+-        if (pxaUartPrvFifoUsed(&uart->RX) >= threshold[uart->FCR >> 6]) outputs &= ~UART_MCR_RTS;
+-    }
++    if (!pxaUartPrvRtsAsserted(uart)) outputs &= ~UART_MCR_RTS;
+     return outputs;
++}
++
++bool pxaUartHwReceiveReady(const PxaUart* uart) {
++    return uart->baseAddr==PXA_HWUART_BASE && uart->Clocked() && uart->Divisor() &&
++        !(uart->MCR & UART_MCR_LOOP) && pxaUartPrvRtsAsserted(uart);
+ }
+ 
+ void pxaUartDetachExternal(PxaUart* uart) {
+diff --git a/src/uarm/uarm/pxa_UART.h b/src/uarm/uarm/pxa_UART.h
+--- a/src/uarm/uarm/pxa_UART.h
++++ b/src/uarm/uarm/pxa_UART.h
+@@ -72,6 +72,9 @@
+ void pxaUartResumeExternal(PxaUart* uart, bool keep);
+ bool pxaUartSetModemInputs(PxaUart* uart, uint8_t asserted);
+ uint8_t pxaUartGetModemOutputs(const PxaUart* uart);
++// Board-wired HWUART RTS/AFE receive permission, including clock and FIFO
++// threshold. Keeps the existing HWUART timing path; other ports use modem outputs.
++bool pxaUartHwReceiveReady(const PxaUart* uart);
+ void pxaUartResync(PxaUart* uart);
+ // Live host peers: the receiver is clocked (IER[UUE] and a divisor), how often the
+ // guest has turned the UART off, and a way to wake the UART task when bytes wait. Emulator-thread calls only.

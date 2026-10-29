@@ -115,6 +115,8 @@ def fake_core():
                     code = 'exported'
             elif command == 'save':
                 Path(argument).write_text('{"saved":true}')
+            for endpoint in config.get('endpoint_events', []):
+                send(f'0\tevent\t{endpoint}\t6f6666\n')
             send(f'{serial}\t{"ok" if ok else "error"}\t{code}\t{message.encode().hex()}\n')
             if command == 'quit':
                 return 0

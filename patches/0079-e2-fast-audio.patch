@@ -1,0 +1,133 @@
+--- a/src/uarm/uarm/fast_audio.h
++++ b/src/uarm/uarm/fast_audio.h
+@@ -5,13 +5,15 @@
+ #include <cstdint>
+ #include <cstdio>
+ #include <functional>
++#include <utility>
+ #include "audio_queue.h"
+ 
+-// Optional preview of one verified TX PCM stream before its firmware queue.
++// Optional preview of one qualified TX or E2 PCM stream before its firmware queue.
+ class FastAudio {
+ public:
+     using Reader = std::function<bool(uint32_t, void*, unsigned)>;
+-    explicit FastAudio(Reader read) : read(read) {}
++    enum class Driver { tx, e2 };
++    explicit FastAudio(Reader read, Driver driver = Driver::tx) : read(read), driver(driver) {}
+     void SetQueue(AudioQueue* value) { queue = value; }
+     void RestartOutput() { started=false; if (queue) audioQueueClear(queue); }
+     bool Bypass() const { return active || quietUntil; }
+@@ -89,15 +91,47 @@
+         if (r[0]>=16 || r[12]>UINT32_MAX-0x320) return false;
+         uint32_t entry, ldr, literal, globals, tableOffset;
+         if (!Word(r[12]+0x320,entry) || entry<0x600 || entry>UINT32_MAX-8192) return false;
+-        if (!Is(entry,0xe92d4200) || !Is(entry+4,0xe5999000) || !Is(entry+8,0xe5999000) ||
+-            !Is(entry+36,0xe0800100) || !Is(entry+40,0xe08ee009) ||
+-            !Is(entry+44,0xe08e0100) || !Is(entry+48,0xe5900004) ||
+-            !Word(entry+32,ldr) || (ldr&0xfffff000)!=0xe59fe000) return false;
+-        // Check the final mixed-output conversion as well as the channel table layout.
+-        if (!Is(entry-0x5f8,0xe4920004) || !Is(entry-0x5f4,0xe1a005c0) ||
+-            !Is(entry-0x5f0,0xe250cc7f)) return false;
+-        literal=entry+40+(ldr&0xfff);
+-        if (!Word(literal,tableOffset) || !Word(r[9],globals) || !Word(globals,globals) ||
++        if (driver == Driver::tx) {
++            if (!Is(entry,0xe92d4200) || !Is(entry+4,0xe5999000) || !Is(entry+8,0xe5999000) ||
++                !Is(entry+36,0xe0800100) || !Is(entry+40,0xe08ee009) ||
++                !Is(entry+44,0xe08e0100) || !Is(entry+48,0xe5900004) ||
++                !Word(entry+32,ldr) || (ldr&0xfffff000)!=0xe59fe000) return false;
++            // Final mixed-output signed Q11 conversion.
++            if (!Is(entry-0x5f8,0xe4920004) || !Is(entry-0x5f4,0xe1a005c0) ||
++                !Is(entry-0x5f0,0xe250cc7f)) return false;
++            literal=entry+40+(ldr&0xfff);
++            if (!Word(literal,tableOffset)) return false;
++        } else if (driver == Driver::e2) {
++            // E2 HALSoundWrite uses an ARM interworking veneer into its Thumb driver.
++            uint32_t delta;
++            if (!Is(entry,0xe59fc004) || !Is(entry+4,0xe08cc00f) || !Is(entry+8,0xe12fff1c) ||
++                !Word(entry+12,delta)) return false;
++            const int64_t target=int64_t(entry)+12+int32_t(delta);
++            if (target<0x421 || target>UINT32_MAX-8192 || !(target&1)) return false;
++            const uint32_t code=uint32_t(target)&~1u;
++            const std::pair<unsigned,uint16_t> lookup[] = {
++                {0,0xb570},{2,0x1c1c},{4,0x2800},{10,0x2810},{14,0x2314},
++                {16,0x4358},{18,0x464e},{20,0x6836},{22,0x6836},
++                {26,0x199b},{28,0x331c},{30,0x18c0},{32,0x6840}};
++            for (auto [offset,expected]:lookup) {
++                uint16_t got;
++                if (!Half(code+offset,got) || got!=expected) return false;
++            }
++            // Check the gain fields and final stereo mixer conversion as well.
++            const std::pair<int,uint16_t> mixer[] = {
++                {-0x420,0x6810},{-0x41e,0x6851},{-0x418,0x12c0},{-0x416,0x12c9},
++                {0x1d7c,0x8981},{0x1d82,0x8941},{0x1d84,0x8541},{0x1d86,0x8501}};
++            for (auto [offset,expected]:mixer) {
++                uint16_t got;
++                if (!Half(uint32_t(int64_t(code)+offset),got) || got!=expected) return false;
++            }
++            uint16_t tableLoad;
++            if (!Half(code+24,tableLoad) || (tableLoad&0xff00)!=0x4b00) return false;
++            literal=((code+28)&~3u)+(tableLoad&255)*4;
++            if (!Word(literal,tableOffset) || tableOffset>UINT32_MAX-28) return false;
++            tableOffset+=28;
++        } else return false;
++        if (!Word(r[9],globals) || !Word(globals,globals) ||
+             uint64_t(globals)+tableOffset+324>UINT32_MAX) return false;
+         const uint32_t table=globals+tableOffset;
+         unsigned count=0;
+@@ -126,6 +160,7 @@
+         std::fprintf(stderr,"experimental fast audio: normal path (%s)\n",reason);
+     }
+     Reader read;
++    Driver driver;
+     AudioQueue* queue{nullptr};
+     bool active{false}, failed{false}, started{false};
+     uint64_t quietUntil{0};
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -936,10 +936,10 @@
+ 
+ 
+ bool SocPXA::EnableFastAudio() {
+-    if (GetDeviceType() != DeviceType5::deviceTypeTX || fastAudio) return false;
++    if ((GetDeviceType() != DeviceType5::deviceTypeTX && GetDeviceType() != DeviceType5::deviceTypeE2) || fastAudio) return false;
+     fastAudio = std::make_unique<FastAudio>([this](uint32_t addr, void* data, unsigned size) {
+         return cpuMemOpExternal(cpu,data,addr,size,false);
+-    });
++    }, GetDeviceType()==deviceTypeE2 ? FastAudio::Driver::e2 : FastAudio::Driver::tx);
+     fastAudio->SetQueue(audioQueue);
+     auto hook = [](void* ctx, uint32_t trap, uint32_t* regs) {
+         auto soc = static_cast<SocPXA*>(ctx);
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -284,13 +284,17 @@
+         const bool isTx = deviceType == DeviceType5::deviceTypeTX;
+         // The desktop passes its saved TX-only settings to every device; the E2 skips them.
+         if (options.desktopSocket && !isTx) {
+-            options.experimentalFastAudio = false;
+             serialConfig = HostSerial::Config{};
+ 
+         }
+-        if (options.experimentalFastAudio && (!isTx || md5(static_cast<uint8_t*>(nor.data),nor.size) != "85b048a692aa317763a7077ea72da6cb")) {
+-            cerr << "experimental fast audio requires the verified TX 5.4 NOR image" << endl;
+-            return false;
++        if (options.experimentalFastAudio) {
++            const auto digest=md5(static_cast<uint8_t*>(nor.data),nor.size);
++            const bool qualified=(isTx && digest=="85b048a692aa317763a7077ea72da6cb") ||
++                (deviceType==deviceTypeE2 && digest=="2a9faf69b43ba590cfb9ba78e4eef11c");
++            if (!qualified) {
++                cerr << "experimental fast audio requires a verified TX 5.4 or Tungsten E2 NOR image" << endl;
++                return false;
++            }
+         }
+         if (isTx) {
+             cerr << "EXPERIMENTAL Palm TX: reset and session testing" << endl;
+@@ -655,7 +659,7 @@
+         .help("save the unrotated LCD framebuffer as PNG at the end of --run-for");
+ 
+     program.add_argument("--experimental-fast-audio")
+-        .help("preview one verified TX stereo stream before the firmware audio queue")
++        .help("preview one qualified TX or E2 stereo stream before the firmware audio queue")
+         .default_value(false).implicit_value(true);
+ 
+     program.add_argument("--input-replay")

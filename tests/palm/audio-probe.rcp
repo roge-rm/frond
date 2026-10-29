@@ -1,0 +1,6 @@
+FORM ID 1000 AT (0 0 160 160) NOFRAME USABLE
+BEGIN
+ TITLE "Frond audio probe"
+ LABEL "Results: FrondAudioLog" ID 1001 AT (5 30)
+ LABEL "Automatic controls and callbacks" ID 1002 AT (5 50)
+END

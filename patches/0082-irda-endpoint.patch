@@ -1,0 +1,706 @@
+diff --git a/src/uarm/Makefile b/src/uarm/Makefile
+--- a/src/uarm/Makefile
++++ b/src/uarm/Makefile
+@@ -121,6 +121,7 @@
+ 	uarm/LibertasCF.cpp \
+ 	uarm/HostNetwork.cpp			\
+ 	uarm/HostSerial.cpp			\
++	uarm/HostInfrared.cpp \
+ 	uarm/UsbBusHost.cpp			\
+ 	uarm/UsbHostBridge.cpp			\
+ 	uarm/NetworkSimulation.cpp			\
+diff --git a/src/uarm/native/Commands.h b/src/uarm/native/Commands.h
+--- a/src/uarm/native/Commands.h
++++ b/src/uarm/native/Commands.h
+@@ -12,6 +12,7 @@
+ #include "SoC.h"
+ 
+ class HostSerial;
++class HostInfrared;
+ class UsbHostBridge;
+ struct PxaUart;
+ 
+@@ -25,6 +26,8 @@
+         uint64_t& replayStartedAt;
+         int screenWidth;
+         int screenHeight;
++        HostInfrared* infrared{nullptr};
++        std::string infraredError{};
+         HostSerial* serial{nullptr};      // live host endpoint, never session state
+         PxaUart* serialUart{nullptr};     // TX FFUART for serial-mode changes
+         std::string serialError{};        // why the last endpoint could not open
+diff --git a/src/uarm/native/DesktopControl.h b/src/uarm/native/DesktopControl.h
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -13,8 +13,10 @@
+ #include "Commands.h"
+ #include "ReadOnlyGuest.h"
+ #include "HostSerial.h"
++#include "HostInfrared.h"
+ #include "UsbHostBridge.h"
+ #include "soc_PXA.h"
++#include "pxa_UART.h"
+ #include "native_boundary.h"
+ #include "CPU.h"
+ #include "SdImage.h"
+@@ -64,6 +66,12 @@
+         if (state == lastUsb || (state == "off" && lastUsb.empty())) return;
+         lastUsb = state;
+         event("usb", state);
++    }
++
++    void infraredChanged(commands::Context& ctx) {
++        const auto state=ctx.infrared ? ctx.infrared->Describe() : "off";
++        if (state==lastInfrared || (state=="off" && lastInfrared.empty())) return;
++        lastInfrared=state;event("infrared",state);
+     }
+ 
+     bool poll(commands::Context& ctx) {
+@@ -109,7 +117,7 @@
+     }
+ 
+  private:
+-    std::string lastSerial, lastUsb;
++    std::string lastSerial, lastUsb, lastInfrared;
+     static std::string UsbState(commands::Context& ctx) {
+         if (!ctx.usb) return "off";
+         const auto state = ctx.usb->Describe();
+@@ -163,7 +171,7 @@
+     Reply dispatch(commands::Context& ctx, const std::string& command, const std::string& path) {
+         const bool fileCommand = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "input-replay";
+         if (fileCommand && (path.empty() || path.front() != '/')) return {false, "argument", "An absolute file path is required."};
+-        if (!fileCommand && command != "sd-create" && command != "launch-app" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "serial-mode" && command != "usb-mode" && !path.empty()) return {false, "argument", "This command takes no argument."};
++        if (!fileCommand && command != "sd-create" && command != "launch-app" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && !path.empty()) return {false, "argument", "This command takes no argument."};
+         if (command == "guest-ready") {
+             if (!GuestDatabaseOps::Ready(*ctx.soc))
+                 return {false, "not-ready", "Palm OS has not reached a supported application boundary."};
+@@ -198,10 +206,32 @@
+             return {false, "unsupported", "This device has no emulated serial port."};
+         if (!tx && command == "network-mode" && path != "disabled")
+             return {false, "unsupported", "This device has no emulated network."};
++        if (command == "irda-stats") {
++            if (!ctx.infrared || (ctx.soc->GetDeviceType()!=deviceTypeTX && ctx.soc->GetDeviceType()!=deviceTypeE2))
++                return {false,"unsupported","This device has no infrared endpoint."};
++            auto* machine=static_cast<SocPXA*>(ctx.soc);const auto state=pxaUartIrState(machine->GetIrUart());
++            const auto c=ctx.infrared->GetCounters();
++            return {true,"infrared", "rx="+std::to_string(c.received)+" tx="+std::to_string(c.sent)+
++                " rx_drop="+std::to_string(ctx.infrared->DroppedReceive())+" tx_drop="+std::to_string(ctx.infrared->DroppedTransmit())+
++                " pending="+std::to_string(ctx.infrared->PendingReceive())+" baud="+std::to_string(state.baud)+
++                " rx_on="+std::to_string(state.receive)+" tx_on="+std::to_string(state.transmit)+
++                " power="+std::to_string(machine->IrPowerEnabled())+" sleeping="+std::to_string(machine->PowerSleeping())};
++        }
++        if (command == "irda-state") return {true,"infrared",ctx.infrared ? ctx.infrared->Describe() : "off"};
++        if (command == "irda-mode") {
++            if (ctx.soc->GetDeviceType()!=deviceTypeTX && ctx.soc->GetDeviceType()!=deviceTypeE2)
++                return {false,"unsupported","This device has no infrared port."};
++            HostSerial::Config config;
++            if (!ctx.infrared || !HostSerial::Parse(path,config)) return {false,"argument","Use off, pty or tcp:PORT."};
++            const bool ok=ctx.infrared->Start(static_cast<SocPXA*>(ctx.soc),config,ctx.infraredError);
++            return {ok,"infrared",ok?ctx.infrared->Describe():ctx.infraredError};
++        }
+         if (command == "keyboard-state") return {true,"keyboard",ctx.soc->KeyboardAttached()?"attached":"detached"};
+         if (command == "keyboard-attach") {
+             if (path!="on" && path!="off") return {false,"argument","Use on or off."};
+             ctx.soc->AttachKeyboard(path=="on");
++            if (ctx.soc->KeyboardAttached()!=(path=="on"))
++                return {false,"infrared","Infrared peer owns this UART; turn it off before attaching the keyboard."};
+             return {true,"keyboard",ctx.soc->KeyboardAttached()?"attached":"detached"};
+         }
+         if (command == "keyboard-key") {
+diff --git a/src/uarm/native/main.cpp b/src/uarm/native/main.cpp
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -18,6 +18,7 @@
+ #include "DesktopControl.h"
+ #include "FileUtil.h"
+ #include "HostSerial.h"
++#include "HostInfrared.h"
+ #include "UsbHostBridge.h"
+ #include "Logging.h"
+ #include "MainLoop.h"
+@@ -64,6 +65,7 @@
+     optional<string> inputReplay;
+     optional<string> desktopSocket;
+     optional<string> serial;
++    optional<string> infrared;
+     optional<string> usb;
+ };
+ 
+@@ -252,6 +254,10 @@
+         if (options.serial && !HostSerial::Parse(*options.serial, serialConfig)) {
+             cerr << "--serial must be off, pty or tcp:PORT (PORT 0..65535)" << endl;
+             return false;
++        }
++        HostSerial::Config infraredConfig;
++        if (options.infrared && !HostSerial::Parse(*options.infrared,infraredConfig)) {
++            cerr << "--irda must be off, pty or tcp:PORT" << endl; return false;
+         }
+         HostSerial::Config usbConfig;
+         if (options.usb && !HostSerial::Parse(*options.usb, usbConfig)) {
+@@ -497,6 +503,15 @@
+                 cerr << "serial: " << commandContext.serialError << endl;
+             cout << "serial: " << serial.Describe() << endl;
+         }
++        HostInfrared infrared;
++        commandContext.infrared = &infrared;
++        if (infraredConfig.kind != HostSerial::Kind::off) {
++            if ((!isTx && deviceType != deviceTypeE2) ||
++                !infrared.Start(static_cast<SocPXA*>(soc),infraredConfig,commandContext.infraredError)) {
++                cerr << "infrared: " << commandContext.infraredError << endl; return false;
++            }
++            cout << "infrared: " << infrared.Describe() << endl;
++        }
+         UsbHostBridge usb;
+         commandContext.usb = &usb;
+         if (usbConfig.kind != HostSerial::Kind::off) {
+@@ -564,9 +579,11 @@
+             } else waitForPreviewAudio = false;
+             serial.Service();
+             usb.Service();
++            infrared.Service();
+             mainLoop.Cycle(now, waitForAudio || waitForPreviewAudio);
+             serial.Service();
+             usb.Service();
++            infrared.Service();
+             for (const auto& message : usb.TakeMessages()) cout << message << endl;
+ 
+             sdlRenderer->Draw(sdlEventHandler.RedrawRequested(), sdlEventHandler.PressedButtons());
+@@ -592,6 +609,7 @@
+ 
+             if (desktop) desktop->serialChanged(commandContext);
+             if (desktop) desktop->usbChanged(commandContext);
++            if (desktop) desktop->infraredChanged(commandContext);
+             if (desktop && desktop->poll(commandContext)) break;
+             if (!options.runFor && !desktop && cli::Execute(&commandContext)) break;
+ 
+@@ -612,6 +630,7 @@
+             if (delay > 10) usleep(delay);
+         }
+ 
++        infrared.Stop();
+         serial.Stop();
+         if (const auto* host = usb.Host()) {
+             const auto& c = host->GetCounters();
+@@ -731,6 +750,10 @@
+     program.add_argument("--serial")
+         .help("connect the TX serial port to a host PTY (pty) or a TCP listener on 127.0.0.1 "
+               "(tcp:PORT, one client at a time); default off")
++        .metavar("<off|pty|tcp:PORT>");
++
++    program.add_argument("--irda")
++        .help("connect infrared SIR bytes to a host PTY or loopback TCP listener; exclusive with keyboard; default off")
+         .metavar("<off|pty|tcp:PORT>");
+ 
+     program.add_argument("--usb")
+@@ -773,6 +796,7 @@
+                        .inputReplay = program.present("--input-replay"),
+                        .desktopSocket = program.present("--desktop-socket"),
+                        .serial = program.present("--serial"),
++                       .infrared = program.present("--irda"),
+                        .usb = program.present("--usb")};
+ 
+     logEnable();
+diff --git a/src/uarm/uarm/HostInfrared.cpp b/src/uarm/uarm/HostInfrared.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/uarm/uarm/HostInfrared.cpp
+@@ -0,0 +1,95 @@
++#ifndef __EMSCRIPTEN__
++#include "HostInfrared.h"
++#include "soc_PXA.h"
++#include "pxa_UART.h"
++struct HostInfrared::Impl {
++    SocPXA* soc{};
++    HostByteLink link;
++    HostSerial::Config config;
++    uint64_t dropped{},discarded{};
++    bool restart{};
++    std::string error;
++    static uint_fast16_t Read(void* context) {
++        auto& s=*static_cast<Impl*>(context);
++        uint8_t value;
++        return s.link.Receive(&value,1)==1 ? value : UART_CHAR_NONE;
++    }
++    static void Write(uint_fast16_t value,void* context) {
++        auto& s=*static_cast<Impl*>(context);
++        if (value&~0xffu) { ++s.dropped; return; }
++        uint8_t byte=value;
++        if (s.link.Send(&byte,1)!=1) ++s.dropped;
++    }
++    static bool Pending(void* context) {
++        return static_cast<Impl*>(context)->link.PendingReceive()!=0;
++    }
++    static void ModeChanged(void* context) {
++        auto& s=*static_cast<Impl*>(context);if (!s.soc) return;
++        const auto state=pxaUartIrState(s.soc->GetIrUart());
++        const uint64_t tag=(uint64_t(state.baud)<<8)|(state.lcr&0x3f);
++        s.link.SetReceiveWindow(s.soc->IrPowerEnabled() && state.receive,tag);
++    }
++    static void Replaced(void* context) {
++        auto& s=*static_cast<Impl*>(context);
++        // Closing the peer, rather than just clearing the userspace queues,
++        // prevents old kernel-buffered bytes entering the new guest timeline.
++        s.link.Close();s.restart=true;
++    }
++};
++HostInfrared::HostInfrared():impl(std::make_unique<Impl>()){}
++HostInfrared::~HostInfrared(){Stop();}
++bool HostInfrared::Start(SocPXA* soc,const HostSerial::Config& config,std::string& error) {
++    Stop();error.clear();impl->dropped=impl->discarded=0;
++    if (config.kind==HostSerial::Kind::off) return true;
++    if (!soc) {error="Infrared needs a Palm TX or Tungsten E2.";return false;}
++    IrHostHooks hooks{impl.get(),Impl::Read,Impl::Write,Impl::Pending,Impl::Replaced,Impl::ModeChanged};
++    if (!soc->SetIrHostHooks(&hooks)) {
++        error="Infrared UART is busy; detach the keyboard and let pending UART bytes drain.";return false;
++    }
++    impl->soc=soc;
++    if (!impl->link.Open(config,error,true)) {Stop();return false;}
++    Impl::ModeChanged(impl.get());
++    impl->config=impl->link.GetConfig();
++    return true;
++}
++void HostInfrared::Stop() {
++    if (impl->soc) impl->soc->SetIrHostHooks(nullptr);
++    impl->link.Close();impl->soc=nullptr;impl->config={};impl->restart=false;impl->error.clear();
++}
++void HostInfrared::Service() {
++    auto* soc=impl->soc;
++    if (!soc || soc->HostIoPaused()) return;
++    if (soc->PowerSleeping()) {
++        if (impl->link.IsOpen()) Impl::Replaced(impl.get());
++        return;
++    }
++    if (impl->restart) {
++        impl->restart=false;
++        if (soc->KeyboardAttached()) {
++            soc->SetIrHostHooks(nullptr);impl->soc=nullptr;impl->config={};
++            impl->error="Restored keyboard owns the infrared UART.";
++            return;
++        }
++        if (!impl->link.Open(impl->config,impl->error,true)) return;
++        Impl::ModeChanged(impl.get());
++    }
++    // Register transitions update the receive generation immediately. The
++    // worker samples arrivals; OS-buffered unsampled bytes have no optical time.
++    Impl::ModeChanged(impl.get());
++    if (soc->IrPowerEnabled() && pxaUartIrReceiveEnabled(soc->GetIrUart()) && impl->link.PendingReceive())
++        pxaUartKick(soc->GetIrUart());
++}
++HostSerial::Config HostInfrared::GetConfig() const {return impl->config;}
++std::string HostInfrared::Endpoint() const {return impl->link.Endpoint();}
++uint64_t HostInfrared::DroppedTransmit() const {return impl->dropped;}
++uint64_t HostInfrared::DroppedReceive() const {return impl->discarded+impl->link.GetCounters().rxDiscarded;}
++size_t HostInfrared::PendingReceive() const {return impl->link.PendingReceive();}
++HostSerial::Counters HostInfrared::GetCounters() const {return impl->link.GetCounters();}
++std::string HostInfrared::Describe() const {
++    if (impl->config.kind==HostSerial::Kind::off) return impl->error.empty()?"off":"off error: "+impl->error;
++    return HostSerial::Format(impl->config)+" "+impl->link.Endpoint()+
++        (impl->link.Connected()?" connected":" waiting")+
++        (impl->restart?" suspended":"")+
++        (impl->error.empty()?"":" error: "+impl->error);
++}
++#endif
+diff --git a/src/uarm/uarm/HostInfrared.h b/src/uarm/uarm/HostInfrared.h
+new file mode 100644
+--- /dev/null
++++ b/src/uarm/uarm/HostInfrared.h
+@@ -0,0 +1,31 @@
++#ifndef FROND_HOST_INFRARED_H
++#define FROND_HOST_INFRARED_H
++#ifndef __EMSCRIPTEN__
++#include <memory>
++#include <string>
++#include "HostSerial.h"
++class SocPXA;
++// A SIR byte endpoint. The guest owns IrLAP, IAS, TinyTP and OBEX.
++// All calls run on the emulation thread; HostByteLink owns the host worker.
++class HostInfrared {
++ public:
++    HostInfrared();
++    ~HostInfrared();
++    HostInfrared(const HostInfrared&)=delete;
++    HostInfrared& operator=(const HostInfrared&)=delete;
++    bool Start(SocPXA* soc,const HostSerial::Config& config,std::string& error);
++    void Stop();
++    void Service();
++    HostSerial::Config GetConfig() const;
++    std::string Describe() const;
++    std::string Endpoint() const;
++    uint64_t DroppedTransmit() const;
++    uint64_t DroppedReceive() const;
++    size_t PendingReceive() const;
++    HostSerial::Counters GetCounters() const;
++ private:
++    struct Impl;
++    std::unique_ptr<Impl> impl;
++};
++#endif
++#endif
+diff --git a/src/uarm/uarm/HostSerial.cpp b/src/uarm/uarm/HostSerial.cpp
+--- a/src/uarm/uarm/HostSerial.cpp
++++ b/src/uarm/uarm/HostSerial.cpp
+@@ -35,6 +35,9 @@
+     std::atomic<bool> connected{false}, stop{false};
+     std::atomic<uint64_t> received{0}, sent{0}, rxDiscarded{0}, txDropped{0};
+     uint64_t txGeneration{0};  // bumped under mutex whenever tx is cleared
++    bool scopedReceive{false}; // immutable after worker start; legacy serial/USB unchanged
++    bool receiveEnabled{false}; // mutex-protected, for scoped links only
++    uint64_t receiveTag{0}, receiveGeneration{0};
+     int wake{-1};
+ 
+     // Caller holds mutex. Bytes the worker copied out before this are not erased later.
+@@ -43,6 +46,9 @@
+         txSize = 0;
+         ++txGeneration;
+     }
++    void ClearReceive() { // caller holds mutex
++        rxDiscarded += rx.size();rx.clear();rxSize=0;++receiveGeneration;
++    }
+     void Wake() {
+         const uint64_t one = 1;
+         (void)!write(wake, &one, sizeof(one));
+@@ -51,6 +57,7 @@
+         std::lock_guard lock(mutex);
+         connected = false;
+         ClearTx();
++        if (scopedReceive) ClearReceive();
+     }
+ };
+ 
+@@ -72,6 +79,8 @@
+     const bool hangup = revents & (POLLHUP | POLLERR | POLLRDHUP);
+     if (revents & POLLIN || hangup) {
+         uint8_t buffer[1024];
++        uint64_t generation=0;
++        if (s.scopedReceive) {std::lock_guard lock(s.mutex);generation=s.receiveGeneration;}
+         const size_t space = HostSerial::queueBytes - std::min(HostSerial::queueBytes, s.rxSize.load());
+         if (!space) {
+             if (hangup) return false;
+@@ -81,9 +90,13 @@
+             if (got < 0 && errno != EAGAIN && errno != EINTR) return false;  // EIO: PTY hung up
+             if (got > 0) {
+                 std::lock_guard lock(s.mutex);
+-                s.rx.insert(s.rx.end(), buffer, buffer + got);
+-                s.rxSize = s.rx.size();
+                 s.received += got;
++                if (s.scopedReceive && (!s.receiveEnabled || generation!=s.receiveGeneration))
++                    s.rxDiscarded += got;
++                else {
++                    s.rx.insert(s.rx.end(), buffer, buffer + got);
++                    s.rxSize = s.rx.size();
++                }
+             }
+         }
+     }
+@@ -171,6 +184,7 @@
+                 {
+                     std::lock_guard lock(s->mutex);
+                     s->ClearTx();
++                    if (s->scopedReceive) s->ClearReceive();
+                 }
+                 s->connected = true;
+             } else if (accepted >= 0) {
+@@ -455,10 +469,11 @@
+ HostByteLink::HostByteLink() : impl(std::make_unique<Impl>()) {}
+ HostByteLink::~HostByteLink() { Close(); }
+ 
+-bool HostByteLink::Open(const HostSerial::Config& config, std::string& error) {
++bool HostByteLink::Open(const HostSerial::Config& config, std::string& error, bool scopedReceive) {
+     Close();
+     if (config.kind == HostSerial::Kind::off) return true;
+     auto shared = std::make_shared<Shared>();
++    shared->scopedReceive=scopedReceive;
+     int fd = -1;
+     std::string endpoint;
+     uint16_t port = 0;
+@@ -472,6 +487,16 @@
+     return true;
+ }
+ 
++void HostByteLink::SetReceiveWindow(bool enabled,uint64_t tag) {
++    auto* s=impl->shared.get();if (!s || !s->scopedReceive) return;
++    {
++        std::lock_guard lock(s->mutex);
++        if (s->receiveEnabled==enabled && (!enabled || s->receiveTag==tag)) return;
++        s->receiveEnabled=enabled;s->receiveTag=tag;s->ClearReceive();
++    }
++    s->Wake();
++}
++
+ void HostByteLink::Close() {
+     if (!impl->shared) return;
+     impl->shared->stop = true;
+diff --git a/src/uarm/uarm/HostSerial.h b/src/uarm/uarm/HostSerial.h
+--- a/src/uarm/uarm/HostSerial.h
++++ b/src/uarm/uarm/HostSerial.h
+@@ -68,7 +68,10 @@
+     HostByteLink(const HostByteLink&) = delete;
+     HostByteLink& operator=(const HostByteLink&) = delete;
+ 
+-    bool Open(const HostSerial::Config& config, std::string& error);  // off opens nothing
++    bool Open(const HostSerial::Config& config, std::string& error, bool scopedReceive = false);  // off opens nothing
++    // Scoped links isolate input by peer and receive window. Closing/changing a
++    // window drops its queued input; the worker samples new bytes in that window.
++    void SetReceiveWindow(bool enabled, uint64_t tag);
+     void Close();
+     bool IsOpen() const;
+     bool Connected() const;
+diff --git a/src/uarm/uarm/pxa_GPIO.cpp b/src/uarm/uarm/pxa_GPIO.cpp
+--- a/src/uarm/uarm/pxa_GPIO.cpp
++++ b/src/uarm/uarm/pxa_GPIO.cpp
+@@ -31,6 +31,7 @@
+     GpioChangedNotifF notifF[121];
+     void *notifD[121];
+ 
++    void (*configurationObserver)(void*);void* configurationContext;
+     GpioDirsChangedF dirNotifF;
+     void *dirNotifD;
+ 
+@@ -317,6 +318,7 @@
+     }
+ 
+ done:
++    if (write && gpio->configurationObserver) gpio->configurationObserver(gpio->configurationContext);
+     return true;
+ }
+ 
+@@ -404,6 +406,10 @@
+     gpio->notifD[gpioNum] = userData;
+ }
+ 
++void pxaGpioSetConfigurationObserver(PxaGpio* gpio,void (*notify)(void*),void* context) {
++    gpio->configurationObserver=notify;gpio->configurationContext=context;
++}
++
+ void pxaGpioSetDirsChangedNotif(struct PxaGpio *gpio, GpioDirsChangedF notifF, void *userData) {
+     gpio->dirNotifF = notifF;
+     gpio->dirNotifD = userData;
+diff --git a/src/uarm/uarm/pxa_GPIO.h b/src/uarm/uarm/pxa_GPIO.h
+--- a/src/uarm/uarm/pxa_GPIO.h
++++ b/src/uarm/uarm/pxa_GPIO.h
+@@ -39,6 +39,9 @@
+ void pxaGpioReleaseSleepOutputs(PxaGpio* gpio);
+ void pxaGpioSleepReset(PxaGpio* gpio);
+ 
++// Independent of keypad direction callbacks; observes guest register writes.
++void pxaGpioSetConfigurationObserver(PxaGpio* gpio,void (*notify)(void*),void* context);
++
+ // only for output pins!
+ void pxaGpioSetNotif(struct PxaGpio* gpio, uint_fast8_t gpioNum, GpioChangedNotifF notifF,
+                      void* userData);  // one per pin. set ot NULL to disable
+diff --git a/src/uarm/uarm/pxa_UART.cpp b/src/uarm/uarm/pxa_UART.cpp
+--- a/src/uarm/uarm/pxa_UART.cpp
++++ b/src/uarm/uarm/pxa_UART.cpp
+@@ -32,6 +32,8 @@
+     struct PxaIc *ic;
+     uint32_t baseAddr;
+     bool fifoOccupancy;
++    bool timedByBoard; // wiring only; never serialized
++    void (*modeObserver)(void*);void* modeContext; // wiring only
+ 
+     struct Reschedule reschedule;
+ 
+@@ -74,7 +76,7 @@
+     } suspended;
+     uint32_t disableCount;     // IER[UUE] clears seen, for host peers; never serialized
+ 
+-    bool Paced() const { return fifoOccupancy && baseAddr != PXA_HWUART_BASE; }
++    bool Paced() const { return (fifoOccupancy || timedByBoard) && baseAddr != PXA_HWUART_BASE; }
+     uint32_t Divisor() const { return (uint32_t(DLH) << 8) | DLL; }
+     uint32_t CharacterUnits() const {
+         const uint32_t dataBits = 5 + (LCR & 3);
+@@ -557,6 +559,8 @@
+     }
+ 
+     if (recalcValues) pxaUartPrvRecalc(uart);
++    if (write && uart->modeObserver && ((pa==0 && DLAB) || pa==1 || pa==2 || pa==3 || pa==8))
++        uart->modeObserver(uart->modeContext);
+     if (write && pxaUartTaskRequired(uart))
+         uart->reschedule.rescheduleCb(uart->reschedule.ctx,RESCHEDULE_TASK_UART);
+ 
+@@ -982,6 +986,19 @@
+     return uart->Clocked() && (uart->ISR & 0x02);
+ }
+ 
++bool pxaUartIrTransmitEnabled(const PxaUart* uart) {
++    return uart->Clocked() && (uart->ISR & 1);
++}
++void pxaUartSetPacing(PxaUart* uart, bool enabled) { uart->timedByBoard = enabled; }
++void pxaUartSetModeObserver(PxaUart* uart,void (*notify)(void*),void* context) {
++    uart->modeObserver=notify;uart->modeContext=context;
++}
++PxaIrState pxaUartIrState(const PxaUart* uart) {
++    return {uart->Divisor() ? 921600u / uart->Divisor() : 0, uart->LCR,
++            pxaUartIrReceiveEnabled(uart), pxaUartIrTransmitEnabled(uart),
++            bool(uart->LSR & UART_LSR_TEMT) && !(uart->LSR & UART_LSR_DR)};
++}
++
+ bool pxaUartTaskRequired(struct PxaUart *uart) {
+     if (uart->ioCheckpoints || uart->detaching || !uart->Clocked()) return false;
+     return (!uart->Loopback() && uart->clientIsActiveF ? uart->clientIsActiveF(uart->callbackData) : false) ||
+diff --git a/src/uarm/uarm/pxa_UART.h b/src/uarm/uarm/pxa_UART.h
+--- a/src/uarm/uarm/pxa_UART.h
++++ b/src/uarm/uarm/pxa_UART.h
+@@ -80,6 +80,12 @@
+ void pxaUartKick(PxaUart* uart);
+ 
+ bool pxaUartIrReceiveEnabled(const PxaUart *uart);
++bool pxaUartIrTransmitEnabled(const PxaUart *uart);
++// Board wiring, not session state: enable character timing on PXA25x STUART too.
++void pxaUartSetPacing(PxaUart* uart, bool enabled);
++void pxaUartSetModeObserver(PxaUart* uart, void (*notify)(void*), void* context);
++struct PxaIrState { uint32_t baud; uint8_t lcr; bool receive, transmit, idle; };
++PxaIrState pxaUartIrState(const PxaUart* uart);
+ 
+ // PXA27x UART DMA (IER[DMAE], 10.4.2.3). The UART raises and drops its RX and
+ // TX request lines through requestF; the SoC passes the handshakes below to its
+diff --git a/src/uarm/uarm/soc_PXA.cpp b/src/uarm/uarm/soc_PXA.cpp
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -251,14 +251,24 @@
+     sp.ssp3 = ssp[2];
+     if (socRev == 2) sp.kpc = kpc;
+     if (deviceType==DeviceType5::deviceTypeTX || deviceType==DeviceType5::deviceTypeE2) {
++        pxaUartSetPacing(stUart,true);
++        pxaUartSetModeObserver(stUart,RefreshIrMode,this);
++        pxaGpioSetConfigurationObserver(gpio,RefreshIrMode,this);
+         pxaUartSetFuncs(stUart,
+             [](void* ctx) -> uint_fast16_t {
+                 auto* soc=static_cast<SocPXA*>(ctx);
+-                return pxaUartIrReceiveEnabled(soc->stUart) ? soc->irKeyboard.Read(soc->GetTime()) : UART_CHAR_NONE;
+-            }, nullptr,
++                if (!pxaUartIrReceiveEnabled(soc->stUart)) return UART_CHAR_NONE;
++                if (soc->irHostHooks.read) return soc->IrPowerEnabled() ? soc->irHostHooks.read(soc->irHostHooks.context) : UART_CHAR_NONE;
++                return soc->irKeyboard.Read(soc->GetTime());
++            }, [](uint_fast16_t value,void* ctx) {
++                auto* soc=static_cast<SocPXA*>(ctx);
++                if (soc->irHostHooks.write && soc->IrPowerEnabled() && pxaUartIrTransmitEnabled(soc->stUart))
++                    soc->irHostHooks.write(value,soc->irHostHooks.context);
++            },
+             [](void* ctx) {
+                 auto* soc=static_cast<SocPXA*>(ctx);
+-                return soc->irKeyboard.Pending() && pxaUartIrReceiveEnabled(soc->stUart);
++                if (!pxaUartIrReceiveEnabled(soc->stUart)) return false;
++                return soc->irHostHooks.pending ? soc->IrPowerEnabled() && soc->irHostHooks.pending(soc->irHostHooks.context) : soc->irKeyboard.Pending();
+             },
+             nullptr, this);
+     }
+@@ -360,6 +370,7 @@
+ 
+ bool SocPXA::OnSleep() {
+     if (PowerSleeping()) {
++        if (irHostHooks.replaced && !usbHostPaused) irHostHooks.replaced(irHostHooks.context);
+         if (audioQueue) audioQueueClear(audioQueue);
+         if (fastAudio) { fastAudio->Sleep(); RestoreFastAudioRoute(); }
+         pxaTimrSynchronize(tmr);
+@@ -804,6 +815,7 @@
+ // External UART clients are suspended while a load is tried. A refused load keeps
+ // them, since the guest carries on as it was.
+ void SocPXA::BeforeStateReplacement() {
++    ++irReplacementDepth;
+     if(fastAudio) {fastAudio->BeforeGuestReplacement();RestoreFastAudioRoute();}
+     for (auto* uart : {ffUart, stUart, btUart, hwUart})
+         if (uart) pxaUartSuspendExternal(uart);
+@@ -821,15 +833,19 @@
+     if(fastAudio) {fastAudio->GuestReplacementFinished();RestoreFastAudioRoute();}
+     for (auto* uart : {ffUart, stUart, btUart, hwUart})
+         if (uart) pxaUartEndCheckpoint(uart, false);
++    if (irReplacementDepth) --irReplacementDepth;
++    RefreshIrMode(this);
+ }
+ 
+ void SocPXA::StateReplaced() {
++    if (irReplacementDepth) --irReplacementDepth;
+     if(fastAudio) {fastAudio->GuestReplacementFinished();RestoreFastAudioRoute();}
+     for (auto* uart : {ffUart, stUart, btUart, hwUart})
+         if (uart) pxaUartResumeExternal(uart, false);
+     // A checkpoint restore for a read (database list, export) puts back the state from
+     // just before; the USB host was paused meanwhile and carries on.
+     if (usbHostHooks.replaced && !RestoringCheckpoint()) usbHostHooks.replaced(usbHostHooks.context);
++    if (irHostHooks.replaced && !RestoringCheckpoint()) irHostHooks.replaced(irHostHooks.context);
+ }
+ 
+ void SocPXA::BeginSerialCheckpoint() {
+@@ -842,6 +858,7 @@
+         if (uart) pxaUartEndCheckpoint(uart, false);
+     if (usbHostPaused) --usbHostPaused;
+     serialResumePending = true;
++    RefreshIrMode(this);
+ }
+ 
+ uint64_t SocPXA::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
+@@ -1043,7 +1060,31 @@
+     cpuSetSlowPath(cpu,SLOW_PATH_REASON_RESCHEDULE);
+ }
+ 
++void SocPXA::RefreshIrMode(void* context) {
++    auto& soc=*static_cast<SocPXA*>(context);
++    if (!soc.usbHostPaused && !soc.irReplacementDepth && soc.irHostHooks.modeChanged)
++        soc.irHostHooks.modeChanged(soc.irHostHooks.context);
++}
++
++bool SocPXA::IrPowerEnabled() {
++    // Active-high transceiver shutdown: Linux palmte2.h / mach/palmtx.h.
++    // An input/alternate-function pin has not explicitly powered this link on.
++    return pxaGpioGetState(gpio,GetDeviceType()==deviceTypeTX?40:48)==PxaGpioStateLow;
++}
++
++bool SocPXA::SetIrHostHooks(const IrHostHooks* hooks) {
++    if (hooks) {
++        if (!hooks->context || !hooks->read || !hooks->write || !hooks->pending || !hooks->replaced ||
++            (GetDeviceType()!=deviceTypeTX && GetDeviceType()!=deviceTypeE2) ||
++            irHostHooks.context || irKeyboard.Attached() || irKeyboard.Pending() ||
++            !pxaUartIrState(stUart).idle) return false;
++    }
++    irHostHooks = hooks ? *hooks : IrHostHooks{};
++    return true;
++}
++
+ void SocPXA::AttachKeyboard(bool value) {
++    if (value && IrHostAttached()) return;
+     if (GetDeviceType()!=DeviceType5::deviceTypeTX && GetDeviceType()!=DeviceType5::deviceTypeE2) return;
+     irKeyboard.Attach(value);
+     RescheduleCB(this,RESCHEDULE_TASK_UART);
+diff --git a/src/uarm/uarm/soc_PXA.h b/src/uarm/uarm/soc_PXA.h
+--- a/src/uarm/uarm/soc_PXA.h
++++ b/src/uarm/uarm/soc_PXA.h
+@@ -12,6 +12,14 @@
+ #include "soc_generic.h"
+ 
+ struct PxaUart;
++struct IrHostHooks {
++    void* context{};
++    uint_fast16_t (*read)(void*){};
++    void (*write)(uint_fast16_t,void*){};
++    bool (*pending)(void*){};
++    void (*replaced)(void*){};
++    void (*modeChanged)(void*){};
++};
+ struct PxaSsp;
+ struct PxaGpio;
+ struct PxaAC97;
+@@ -78,6 +86,14 @@
+     bool KeyboardKey(uint8_t code, bool down) override;
+     void ReleaseKeyboard() override;
+ 
++    // One infrared accessory at a time. Hook ownership is host-only and is not
++    // serialized. Reset/accepted load invalidate the peer; checkpoints do not.
++    bool SetIrHostHooks(const IrHostHooks* hooks);
++    bool IrHostAttached() const { return irHostHooks.context != nullptr; }
++    bool IrPowerEnabled();
++    bool HostIoPaused() const { return usbHostPaused != 0; }
++    PxaUart* GetIrUart() { return stUart; }
++
+     // Model access for development probes; creates no host connection.
+     PxaUart* GetSerialUart() { return GetDeviceType() == deviceTypeTX ? ffUart : nullptr; }
+ 
+@@ -158,6 +174,9 @@
+ 
+    private:
+     IrKeyboard irKeyboard;
++    IrHostHooks irHostHooks{};
++    unsigned irReplacementDepth{};
++    static void RefreshIrMode(void* context);
+     uint8_t socRev{0};
+     UsbHostHooks usbHostHooks{};
+     unsigned usbHostPaused{0};

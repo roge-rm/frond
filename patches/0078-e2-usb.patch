@@ -1,0 +1,840 @@
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -192,10 +192,10 @@
+             return {true, "launched", "Application launched."};
+         }
+         if (command == "device-state") return {true, "device", deviceProfile5(ctx.soc->GetDeviceType())->id};
+-        // Keyboard, serial and USB hardware are modelled for the Palm TX only.
++        // Keyboard and cradle serial remain TX-only; USB supports TX and E2.
+         const bool tx = ctx.soc->GetDeviceType() == DeviceType5::deviceTypeTX;
+-        if (!tx && (command == "serial-mode" || command == "usb-mode" || (command == "keyboard-attach" && path != "off")))
+-            return {false, "unsupported", "This device has no emulated keyboard, serial or USB port."};
++        if (!tx && (command == "serial-mode" || (command == "keyboard-attach" && path != "off")))
++            return {false, "unsupported", "This device has no emulated keyboard or serial port."};
+         if (!tx && command == "network-mode" && path != "disabled")
+             return {false, "unsupported", "This device has no emulated network."};
+         if (command == "keyboard-state") return {true,"keyboard",ctx.soc->KeyboardAttached()?"attached":"detached"};
+@@ -221,6 +221,7 @@
+         }
+         if (command == "usb-state") return {true, "usb", UsbState(ctx)};
+         if (command == "usb-mode") {
++            if (!tx && ctx.soc->GetDeviceType()!=deviceTypeE2) return {false,"unsupported","USB is not supported on this device."};
+             HostSerial::Config config;
+             if (!ctx.usb || !HostSerial::Parse(path, config)) return {false, "argument", "Use off, pty or tcp:PORT."};
+             // A new endpoint unplugs the cable first; queued bytes are dropped.
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -286,7 +286,7 @@
+         if (options.desktopSocket && !isTx) {
+             options.experimentalFastAudio = false;
+             serialConfig = HostSerial::Config{};
+-            usbConfig = HostSerial::Config{};
++
+         }
+         if (options.experimentalFastAudio && (!isTx || md5(static_cast<uint8_t*>(nor.data),nor.size) != "85b048a692aa317763a7077ea72da6cb")) {
+             cerr << "experimental fast audio requires the verified TX 5.4 NOR image" << endl;
+@@ -496,14 +496,14 @@
+         UsbHostBridge usb;
+         commandContext.usb = &usb;
+         if (usbConfig.kind != HostSerial::Kind::off) {
+-            if (!isTx) {
+-                cerr << "--usb needs a Palm TX" << endl;
++            if (!isTx && deviceType != deviceTypeE2) {
++                cerr << "--usb needs a Palm TX or Tungsten E2" << endl;
+                 return false;
+             }
+             if (!usb.Start(static_cast<SocPXA*>(soc), usbConfig, commandContext.usbError))
+                 cerr << "usb: " << commandContext.usbError << endl;
+             cout << "usb: " << usb.Describe() << endl;
+-        } else if (isTx) {
++        } else if (isTx || deviceType == deviceTypeE2) {
+             usb.Start(static_cast<SocPXA*>(soc), usbConfig, commandContext.usbError);  // off: cable as without USB
+         }
+ 
+--- a/src/uarm/uarm/UsbBusHost.cpp
++++ b/src/uarm/uarm/UsbBusHost.cpp
+@@ -29,7 +29,7 @@
+ }
+ }  // namespace
+ 
+-UsbBusHost::UsbBusHost(std::function<Pxa270Udc*()> udc, Link link) : udc(std::move(udc)), link(std::move(link)) {}
++UsbBusHost::UsbBusHost(std::function<UsbDevicePort()> udc, Link link) : udc(std::move(udc)), link(std::move(link)) {}
+ 
+ const char* UsbBusHost::PhaseName(Phase phase) {
+     switch (phase) {
+@@ -79,8 +79,8 @@
+     if (phase == Phase::connect || phase == Phase::reset) return phaseAt;
+     uint64_t wake = inFlight != Token::none ? busyUntil : retryAt;
+     if (pendingAddress) wake = std::min(wake, addressAt);
+-    auto* u = udc();
+-    if (sofRunning && u && pxa270UdcHostSofWanted(u)) wake = std::min(wake, nextSof);
++    auto u = udc();
++    if (sofRunning && u && u.SofWanted()) wake = std::min(wake, nextSof);
+     return wake;
+ }
+ 
+@@ -96,7 +96,7 @@
+     retryAt = std::max(now + nakRetryNs, nextSof + bitsNs(sofBits));
+ }
+ 
+-bool UsbBusHost::Addressed() { return pxa270UdcHostAddress(udc()) == address; }
++bool UsbBusHost::Addressed() { return udc().Address() == address; }
+ 
+ // Enumeration failed: reset the port and start again a little later, a few times.
+ void UsbBusHost::Restart(const char* why) {
+@@ -251,7 +251,7 @@
+ }
+ 
+ bool UsbBusHost::StartTransaction() {
+-    auto* u = udc();
++    auto u = udc();
+     if (control.active) {
+         if (now < control.startAt) {
+             retryAt = control.startAt;
+@@ -272,7 +272,7 @@
+             case Stage::statusIn: {
+                 if (!Addressed()) return Begin(Token::in0, unsigned(timeoutBits));
+                 unsigned size = 0;
+-                const R r = pxa270UdcHostPeekIn(u, 0, &size);
++                const R r = u.PeekIn(0, &size);
+                 return Begin(Token::in0, unsigned(r == R::Ack ? transactionBits(size) : nakBits));
+             }
+         }
+@@ -311,12 +311,12 @@
+     inFlightEndpoint = uint8_t(0x80 | inEndpoint);
+     if (!Addressed()) return Begin(Token::bulkIn, unsigned(timeoutBits));
+     unsigned size = 0;
+-    const R r = pxa270UdcHostPeekIn(u, inFlightEndpoint, &size);
++    const R r = u.PeekIn(inFlightEndpoint, &size);
+     return Begin(Token::bulkIn, unsigned(r == R::Ack ? transactionBits(size) : r == R::Timeout ? timeoutBits : nakBits));
+ }
+ 
+ void UsbBusHost::FinishTransaction() {
+-    auto* u = udc();
++    auto u = udc();
+     const Token token = inFlight;
+     inFlight = Token::none;
+     const bool addressed = Addressed();
+@@ -342,7 +342,7 @@
+         case Token::none: return;
+         case Token::setup: {
+             if (!addressed) return ControlDone(Result::timeout);
+-            const R r = pxa270UdcHostSetup(u, control.setup);
++            const R r = u.Setup(control.setup);
+             if (r != R::Ack) return ControlDone(Result::error);
+             control.setupAt = now;
+             const unsigned length = control.setup[6] | control.setup[7] << 8;
+@@ -355,7 +355,7 @@
+             const bool status = control.stage == Stage::statusOut;
+             const unsigned length = control.setup[6] | control.setup[7] << 8;
+             const unsigned n = status ? 0 : std::min<unsigned>(maxPacket0, length - unsigned(control.sent));
+-            const R r = pxa270UdcHostOut(u, status ? nullptr : control.out.data() + control.sent, n);
++            const R r = u.Out(status ? nullptr : control.out.data() + control.sent, n);
+             if (r == R::Nak) return nak();
+             if (r == R::Stall) return ControlDone(Result::stall);
+             if (r != R::Ack) return ControlDone(Result::error);
+@@ -367,10 +367,10 @@
+         case Token::in0: {
+             if (!addressed) return ControlDone(Result::timeout);
+             unsigned size = 0;
+-            R r = pxa270UdcHostPeekIn(u, 0, &size);
++            R r = u.PeekIn(0, &size);
+             uint8_t data[64];
+             if (r == R::Nak) return nak();
+-            r = pxa270UdcHostIn(u, data, &size);  // ACK, or the STALL handshake
++            r = u.In(data, &size);  // ACK, or the STALL handshake
+             if (r == R::Nak) return nak();
+             if (r == R::Stall) return ControlDone(Result::stall);
+             if (r != R::Ack) return ControlDone(Result::error);
+@@ -384,7 +384,7 @@
+         case Token::bulkIn: {
+             uint8_t data[64];
+             unsigned size = 0;
+-            const R r = addressed ? pxa270UdcHostEpIn(u, inFlightEndpoint, data, &size) : R::Timeout;
++            const R r = addressed ? u.EpIn(inFlightEndpoint, data, &size) : R::Timeout;
+             if (r == R::Ack) {
+                 bulkTimeouts = 0;
+                 if (size) link.send(data, size);
+@@ -402,7 +402,7 @@
+             return;
+         }
+         case Token::bulkOut: {
+-            const R r = addressed ? pxa270UdcHostEpOut(u, inFlightEndpoint, outPacket, outSize) : R::Timeout;
++            const R r = addressed ? u.EpOut(inFlightEndpoint, outPacket, outSize) : R::Timeout;
+             if (r == R::Ack) {
+                 bulkTimeouts = 0;
+                 outPending = false;
+@@ -430,14 +430,14 @@
+         if (retryAt > now) retryAt = std::max(now, nakAt + nakRetryNs);
+     }
+     if (phase == Phase::detached || phase == Phase::failed) return;
+-    auto* u = udc();
++    auto u = udc();
+     if (!u) return;
+     // On the bus: the device listens for a reset and EP0 (see pxa270UdcHostListening).
+-    const bool present = pxa270UdcHostListening(u);
+-    const bool reconnected = phase != Phase::waitEnable && pxa270UdcHostEnableCount(u) != enableCount;
++    const bool present = u.Listening();
++    const bool reconnected = phase != Phase::waitEnable && u.EnableCount() != enableCount;
+     if (!present || reconnected) {
+         if (phase != Phase::waitEnable) {
+-            Message(present ? "usb: the TX left the bus and came back" : "usb: the TX left the bus; waiting");
++            Message(present ? "usb: the device left the bus and came back" : "usb: the device left the bus; waiting");
+             Detach();
+             phase = Phase::waitEnable;
+         }
+@@ -445,7 +445,7 @@
+     }
+     switch (phase) {
+         case Phase::waitEnable:
+-            enableCount = pxa270UdcHostEnableCount(u);
++            enableCount = u.EnableCount();
+             phase = Phase::connect;
+             phaseAt = now + connectNs;
+             return;
+@@ -453,7 +453,7 @@
+             if (now < phaseAt) return;
+             // Port reset: the UDC drops its address and configuration at once; the host
+             // waits out the reset and recovery before its first SETUP.
+-            if (!pxa270UdcHostReset(u)) return;
++            if (!u.Reset()) return;
+             address = pendingAddress = 0;
+             maxPacket0 = 8;
+             phase = Phase::reset;
+@@ -471,7 +471,7 @@
+         // Frames slept through still count in UDCFNR, which wraps at 2048.
+         const uint64_t frames = (now - lastSof) / frameNs;
+         const uint64_t count = frames % 2048 ? frames % 2048 : 2048;
+-        for (uint64_t i = 0; i < count; ++i) pxa270UdcHostFrame(u);
++        for (uint64_t i = 0; i < count; ++i) u.Frame();
+         counters.frames += frames;
+         lastSof = now / frameNs * frameNs;
+         nextSof = lastSof + frameNs;
+--- a/src/uarm/uarm/UsbBusHost.h
++++ b/src/uarm/uarm/UsbBusHost.h
+@@ -7,9 +7,9 @@
+ #include <utility>
+ #include <vector>
+ 
+-#include "pxa270_UDC.h"
++#include "UsbDevicePort.h"
+ 
+-// Full-speed USB host for the PXA27x UDC, run on emulated time by whoever calls Tick:
++// Full-speed USB host for the PXA25x/PXA27x UDC, run on emulated time by whoever calls Tick:
+ // connect debounce, port reset, enumeration, SET_CONFIGURATION, Palm's
+ // GET_EXT_CONNECTION_INFORMATION (vendor request 0x04, or 0x03 if that stalls), then
+ // bulk IN/OUT polling on the HotSync port, with the bytes going to and from `Link`.
+@@ -47,7 +47,7 @@
+         uint64_t frames{}, transactions{}, naks{}, bytesIn{}, bytesOut{}, enumerations{}, setupRetries{}, ticks{};
+     };
+ 
+-    UsbBusHost(std::function<Pxa270Udc*()> udc, Link link);
++    UsbBusHost(std::function<UsbDevicePort()> udc, Link link);
+ 
+     void Attach();     // cable in: waits for the device to listen, then resets and enumerates
+     void Detach();     // cable out: forgets the device
+@@ -98,7 +98,7 @@
+     bool Running() const { return phase == Phase::reset || phase == Phase::enumerate || phase == Phase::running; }
+     bool Addressed();
+ 
+-    std::function<Pxa270Udc*()> udc;
++    std::function<UsbDevicePort()> udc;
+     Link link;
+     Phase phase{Phase::detached};
+     uint64_t now{0}, phaseAt{0}, nextSof{0}, lastSof{0}, busyUntil{0}, retryAt{0}, lastControlEnd{0};
+--- /dev/null
++++ b/src/uarm/uarm/UsbDevicePort.h
+@@ -0,0 +1,30 @@
++#pragma once
++#include "pxa255_UDC.h"
++#include "pxa270_UDC.h"
++
++// Bus operations shared by the PXA25x and PXA27x hosts. Register semantics remain
++// in their respective controllers. Implicit pointer conversion preserves TX fixtures.
++class UsbDevicePort {
++ public:
++    UsbDevicePort() = default;
++    UsbDevicePort(Pxa270Udc* p): p270(p) {}
++    UsbDevicePort(Pxa255Udc* p): p255(p) {}
++    explicit operator bool() const { return p270 || p255; }
++    bool Reset() const { return p270 ? pxa270UdcHostReset(p270) : pxa255UdcHostReset(p255); }
++    bool Frame() const { return p270 ? pxa270UdcHostFrame(p270) : pxa255UdcHostFrame(p255); }
++    bool Enabled() const { return p270 ? pxa270UdcHostEnabled(p270) : pxa255UdcHostEnabled(p255); }
++    bool Listening() const { return p270 ? pxa270UdcHostListening(p270) : pxa255UdcHostListening(p255); }
++    bool SofWanted() const { return p270 ? pxa270UdcHostSofWanted(p270) : pxa255UdcHostSofWanted(p255); }
++    uint32_t EnableCount() const { return p270 ? pxa270UdcHostEnableCount(p270) : pxa255UdcHostEnableCount(p255); }
++    uint8_t Address() const { return p270 ? pxa270UdcHostAddress(p270) : pxa255UdcHostAddress(p255); }
++    void SetNotify(void (*notify)(void*), void* context) const { if(p270) pxa270UdcHostSetNotify(p270, notify, context); else if(p255) pxa255UdcHostSetNotify(p255, notify, context); }
++    Pxa270UdcHostResult Setup(const uint8_t* data) const { return p270 ? pxa270UdcHostSetup(p270, data) : pxa255UdcHostSetup(p255, data); }
++    Pxa270UdcHostResult Out(const uint8_t* data, unsigned size) const { return p270 ? pxa270UdcHostOut(p270, data, size) : pxa255UdcHostOut(p255, data, size); }
++    Pxa270UdcHostResult In(uint8_t* data, unsigned* size) const { return p270 ? pxa270UdcHostIn(p270, data, size) : pxa255UdcHostIn(p255, data, size); }
++    Pxa270UdcHostResult EpOut(uint8_t ep, const uint8_t* data, unsigned size) const { return p270 ? pxa270UdcHostEpOut(p270, ep, data, size) : pxa255UdcHostEpOut(p255, ep, data, size); }
++    Pxa270UdcHostResult EpIn(uint8_t ep, uint8_t* data, unsigned* size) const { return p270 ? pxa270UdcHostEpIn(p270, ep, data, size) : pxa255UdcHostEpIn(p255, ep, data, size); }
++    Pxa270UdcHostResult PeekIn(uint8_t ep, unsigned* size) const { return p270 ? pxa270UdcHostPeekIn(p270, ep, size) : pxa255UdcHostPeekIn(p255, ep, size); }
++ private:
++    Pxa270Udc* p270{nullptr};
++    Pxa255Udc* p255{nullptr};
++};
+--- a/src/uarm/uarm/UsbHostBridge.cpp
++++ b/src/uarm/uarm/UsbHostBridge.cpp
+@@ -63,17 +63,16 @@
+ 
+ bool UsbHostBridge::Start(SocPXA* soc, const Config& config, std::string& error) {
+     Stop();
+-    if (!soc || soc->GetDeviceType() != DeviceType5::deviceTypeTX || !soc->GetUsbController()) {
++    if (!soc || !soc->GetUsbPort()) {
+         if (config.kind == HostSerial::Kind::off) return true;
+         error = "This device has no USB port.";
+         return false;
+     }
+-    // Off, or an endpoint that can't open: GPIO13 stays low, the level the TX has always
+-    // had without a bridge, also after loading a session saved while a bridge had the
+-    // cable out.
++    // Restore the board's disconnected-host default, also after loading a session
++    // saved with a different cable level: TX GPIO13 low; E2 GPIO35 high.
+     auto off = [&] {
+         impl->soc = soc;
+-        if (!soc->UsbTestCableAttached()) soc->SetUsbTestCable(true);
++        soc->SetUsbTestCable(soc->UsbDefaultCableAttached());
+         const UsbHostHooks hooks{impl.get(), nullptr, nullptr, Impl::Replaced};
+         soc->SetUsbHostHooks(&hooks);
+     };
+@@ -91,7 +90,7 @@
+     impl->config = impl->link.GetConfig();
+     auto* link = &impl->link;
+     impl->host = std::make_unique<UsbBusHost>(
+-        [soc] { return soc->GetUsbController(); },
++        [soc] { return soc->GetUsbPort(); },
+         UsbBusHost::Link{[link] { return link->SendSpace(); },
+                          [link](const uint8_t* data, size_t size) { return link->Send(data, size); },
+                          [link](uint8_t* data, size_t size) { return link->Receive(data, size); },
+@@ -102,7 +101,7 @@
+     impl->lastPhase = UsbBusHost::Phase::detached;
+     const UsbHostHooks hooks{impl.get(), Impl::Tick, Impl::Wake, Impl::Replaced};
+     soc->SetUsbHostHooks(&hooks);
+-    pxa270UdcHostSetNotify(soc->GetUsbController(), Impl::Notify, impl.get());
++    soc->GetUsbPort().SetNotify(Impl::Notify, impl.get());
+     soc->KickUsbHost();
+     return true;
+ }
+@@ -110,10 +109,10 @@
+ void UsbHostBridge::Stop() {
+     if (!impl->soc) return;
+     impl->soc->SetUsbHostHooks(nullptr);
+-    if (impl->soc->GetUsbController()) pxa270UdcHostSetNotify(impl->soc->GetUsbController(), nullptr, nullptr);
+-    // Back to the level the TX has without a bridge: GPIO13 low, no host on the bus.
++    if (impl->soc->GetUsbPort()) impl->soc->GetUsbPort().SetNotify(nullptr, nullptr);
++    // Restore the board default with no host on the bus.
+     if (impl->host) impl->host->Detach();
+-    if (!impl->soc->UsbTestCableAttached()) impl->soc->SetUsbTestCable(true);
++    impl->soc->SetUsbTestCable(impl->soc->UsbDefaultCableAttached());
+     impl->host.reset();
+     impl->link.Close();
+     impl->soc = nullptr;
+@@ -125,10 +124,10 @@
+     auto* soc = impl->soc;
+     if (!soc) return;
+     if (!impl->host) {
+-        // Off: put the cable back after a load (see Start).
++        // Off: restore the board cable default after a load (see Start).
+         if (impl->replaced) {
+             impl->replaced = false;
+-            if (!soc->UsbTestCableAttached()) soc->SetUsbTestCable(true);
++            soc->SetUsbTestCable(soc->UsbDefaultCableAttached());
+         }
+         return;
+     }
+--- a/src/uarm/uarm/UsbHostBridge.h
++++ b/src/uarm/uarm/UsbHostBridge.h
+@@ -12,12 +12,12 @@
+ 
+ class SocPXA;
+ 
+-// Connects the TX's USB port to a host PTY or a TCP listener on 127.0.0.1 through
+-// UsbBusHost: plugs the cable in (GPIO13), enumerates the TX and moves the bytes of its
++// Connects the TX or E2 USB port to a host PTY or a TCP listener on 127.0.0.1 through
++// UsbBusHost: plugs the cable in (TX GPIO13, E2 GPIO35), enumerates the device and moves the bytes of its
+ // HotSync port both ways. Start and every load or reset unplug the cable and plug it in
+ // again half a second of emulated time later; checkpoint restores for reads leave it.
+ // The host runs in the SoC's peripheral batch on emulated time and sleeps between the
+-// events it needs. Off keeps GPIO13 low, as the TX has always had it, with no host on
++// events it needs. Off keeps TX GPIO13 low or E2 GPIO35 high, with no host on
+ // the bus. Every method runs on the emulator thread.
+ class UsbHostBridge {
+    public:
+--- a/src/uarm/uarm/devicePalmTungstenE2.cpp
++++ b/src/uarm/uarm/devicePalmTungstenE2.cpp
+@@ -245,6 +245,7 @@
+     pxaGpioSetState(sp->gpio, 4,
+                     true);  // not in cradle (also prevents FIQ wtchdog from firing after 5 sec)
+ 
++    pxaGpioSetState(sp->gpio, 35, true); // USB cable absent (palmte2.h USB_DETECT_N)
+     pxaGpioSetState(sp->gpio, 40, true);  // no hotsync button pressed [??]
+ 
+     pxaGpioSetState(sp->gpio, 12, false);  // no headphones [??]
+--- a/src/uarm/uarm/pxa255_UDC.cpp
++++ b/src/uarm/uarm/pxa255_UDC.cpp
+@@ -1,135 +1,265 @@
+ //(c) uARM project    https://github.com/uARM-Palm/uARM    uARM@dmitry.gr
+-
+ #include "pxa255_UDC.h"
+-
++#include <algorithm>
+ #include <cstdlib>
+ #include <cstring>
+-
+ #include "cputil.h"
+-#include "mem.h"
+ #include "savestate/savestateAll.h"
+ 
+-#define PXA_UDC_BASE 0x40600000UL
+-#define PXA_UDC_SIZE 0x00001000UL
++// Intel PXA255 Developer's Manual (March 2003), chapter 12. Fixed endpoint
++// directions and FIFO addresses differ from the PXA270's programmable endpoints.
++struct Pxa255Udc {
++    PxaDma* dma;
++    PxaIc* ic;
++    uint32_t reg4{};
++    uint8_t ccr{0xa0}, uicr0{0xff}, uicr1{0xff};
++    uint8_t cfr{}, sir[2]{}, fnHigh{0x40};
++    uint16_t frame{};
++    uint8_t csr[16]{};
++    struct Fifo { uint8_t data[2][64]{}, size[2]{}, head{}, count{}, fill{}, pos{}; } fifo[16];
++    uint8_t rx0[16]{}, tx0[16]{}, rxPos{}, rxSize{}, txSize{};
++    bool ready0{};
++    uint8_t address{}, pendingAddress{}, configuration{}, remoteWake{};
++    // Hardware-decoded request: data IN, status IN, status OUT, or stall.
++    uint8_t hw{}, hwLength{}, hwData[2]{};
++    bool gated{};
++    uint32_t enableCount{};
++    void (*notify)(void*){};
++    void* notifyContext{};
+ 
+-#define SAVESTATE_VERSION 0
+-
+-struct Pxa255Udc {
+-    struct PxaDma *dma;
+-    struct PxaIc *ic;
+-
+-    uint32_t reg4;
+-
+-    uint8_t ccr, uicr0, uicr1;
+-
+-    template <typename T>
+-    void DoSaveLoad(T &chunkHelper) {
+-        chunkHelper.Do32(reg4).Do(typename T::Pack8() << ccr << uicr0 << uicr1);
++    template<class T> void DoSaveLoad(T& h, uint32_t version) {
++        // Preserve the original eight-byte v0 chunk prefix.
++        h.Do32(reg4).Do(typename T::Pack8() << ccr << uicr0 << uicr1);
++        if (!version) return;
++        h.Do8(cfr).DoBuffer(sir,2).Do8(fnHigh).Do16(frame).DoBuffer(csr,16);
++        for(auto& f:fifo) h.DoBuffer(f.data,sizeof(f.data)).DoBuffer(f.size,2)
++            .Do8(f.head).Do8(f.count).Do8(f.fill).Do8(f.pos);
++        h.DoBuffer(rx0,16).DoBuffer(tx0,16).Do8(rxPos).Do8(rxSize).Do8(txSize)
++            .DoBool(ready0).Do8(address).Do8(pendingAddress).Do8(configuration).Do8(remoteWake)
++            .Do8(hw).Do8(hwLength).DoBuffer(hwData,2).DoBool(gated);
+     }
+ };
++using R=Pxa270UdcHostResult;
++namespace {
++constexpr unsigned fifoAddress[16]={0x80,0x100,0x180,0x200,0x400,0xa0,0x600,0x680,0x700,0x900,0xc0,0xb00,0xb80,0xc00,0xe00,0xe0};
++bool inEp(unsigned ep) {return ep && (ep%5==1 || ep%5==0);}
++bool outEp(unsigned ep) {return ep && ep%5==2;}
++unsigned packetSize(unsigned ep) {return ep%5==0?8:64;}
++void irq(Pxa255Udc* u) {
++    pxaIcInt(u->ic,PXA_I_USB, (u->sir[0]&~u->uicr0) || (u->sir[1]&~u->uicr1) ||
++        ((u->ccr&0x40) && !(u->ccr&0x80)) || ((u->ccr&0x18) && !(u->ccr&0x20)) ||
++        ((u->fnHigh&0x80) && !(u->fnHigh&0x40)));
++}
++void event(Pxa255Udc* u,unsigned ep) {
++    const uint8_t mask=ep<8?u->uicr0:u->uicr1;
++    if(!(mask&(1u<<(ep%8))))u->sir[ep/8]|=1u<<(ep%8);
++    irq(u);
++}
++void clearPackets(Pxa255Udc* u) {
++    for(auto& f:u->fifo)f={};
++    std::memset(u->csr,0,sizeof(u->csr));
++    u->rxPos=u->rxSize=u->txSize=0;u->ready0=false;u->hw=0;u->gated=false;
++    u->address=u->pendingAddress=u->configuration=u->remoteWake=0;
++    u->sir[0]=u->sir[1]=0;
++}
++void commit(Pxa255Udc::Fifo& f) {
++    if(f.count==2)return;
++    f.size[(f.head+f.count)&1]=f.fill;++f.count;f.fill=0;
++}
++void consume(Pxa255Udc::Fifo& f) {if(f.count){f.head^=1;--f.count;f.pos=0;}}
++uint8_t status(Pxa255Udc* u,unsigned ep) {
++    if(!ep)return (u->csr[0]&0xb1) | (u->remoteWake?8:0) | (u->rxPos<u->rxSize?0x40:0);
++    const auto& f=u->fifo[ep];
++    if(inEp(ep))return (u->csr[ep]&0x3a) | (f.count<2?1:0);
++    if(outEp(ep))return (u->csr[ep]&0x38) | (f.count?3:0) |
++        (f.count && f.pos<f.size[f.head]?0x40:0) | (f.count && f.size[f.head]<64?0x80:0);
++    return 0; // Isochronous endpoints are not connected to this host transport.
++}
++R stall(Pxa255Udc* u,unsigned ep) {
++    u->csr[ep]|=0x10;event(u,ep);return R::Stall;
++}
++R peek(Pxa255Udc* u,unsigned ep,unsigned* size) {
++    if(!u || !(u->ccr&1))return R::Disabled;
++    if(ep & 0x70)return R::Timeout;
++    ep &= 15;
++    if(ep && !inEp(ep))return R::Timeout;
++    if((u->csr[ep]&0x20) || (!ep && u->hw==4))return R::Stall;
++    if(!ep) {
++        if(u->hw==1){*size=u->hwLength;return R::Ack;}
++        if(u->hw==2 || u->hw==5){
++            if(u->gated && (u->cfr&4) && !(u->cfr&0x80))return R::Nak;
++            *size=0;return R::Ack;
++        }
++        if(u->csr[0]&1)return R::Nak;
++        if(!u->ready0)return R::Nak;
++        *size=u->txSize;return R::Ack;
++    }
++    if(!u->configuration)return R::Timeout;
++    auto& f=u->fifo[ep];if(!f.count)return R::Nak;
++    *size=f.size[f.head];return R::Ack;
++}
++bool access(void* ctx,uint32_t pa,uint_fast8_t size,bool write,void* buf) {
++    auto* u=static_cast<Pxa255Udc*>(ctx);unsigned off=pa-0x40600000;
++    if(size!=1 && size!=2 && size!=4)return false;
++    uint32_t value=0;if(write)std::memcpy(&value,buf,size);
++    int ep=-1;
++    for(unsigned i=0;i<16;++i)if(off==fifoAddress[i]){ep=i;break;}
++    if(ep>=0) {
++        // PXA25x UDDR registers transfer exactly one byte, even on word accesses.
++        if(!(u->ccr&1))value=0;
++        else if(!ep) {
++            if(write) {if(!u->ready0 && u->txSize<16){u->tx0[u->txSize++]=value;if(u->txSize==16)u->ready0=true;}}
++            else value=u->rxPos<u->rxSize?u->rx0[u->rxPos++]:0;
++        } else {
++            auto& f=u->fifo[ep];
++            if(write && inEp(ep)) {
++                if(f.count<2 && f.fill<packetSize(ep)) {
++                    f.data[(f.head+f.count)&1][f.fill++]=value;
++                    if(f.fill==packetSize(ep))commit(f);
++                }
++            } else if(!write)value=outEp(ep) && f.count && f.pos<f.size[f.head]?f.data[f.head][f.pos++]:0;
++        }
++    } else if(off==0) {
++        if(write) {
++            const bool enabled=u->ccr&1;
++            u->ccr=(u->ccr&0x58&~value) | (u->ccr&2) | (value&0xa1);
++            if(!(value&1)) {
++                // UDE=0 resets the entire UDC, including pending SOF/USB IRQs.
++                clearPackets(u);u->ccr=value&0xa0;u->cfr=0;
++                u->uicr0=u->uicr1=0xff;u->fnHigh=0x40;u->frame=0;
++            }
++            else if(!enabled){++u->enableCount;u->ccr|=2;}
++        } else value=u->ccr;
++    } else if(off==4) {if(write)u->reg4=value;else value=u->reg4;}
++    else if(off==8) {if(write)u->cfr=value&0x84;else value=u->cfr;}
++    else if(off>=0x10 && off<0x50 && !(off&3)) {
++        const unsigned e=(off-0x10)/4;auto& f=u->fifo[e];
++        if(write && (u->ccr&1)) {
++            if(!e) {
++                u->csr[0]&=~(value&0x91);
++                if(value&4){u->txSize=0;u->ready0=false;}
++                if(value&2)u->ready0=true;
++                if(value&0x20)u->csr[0]|=0x20;
++            } else if(inEp(e)) {
++                u->csr[e]&=~(value&0x1a);
++                u->csr[e]=(u->csr[e]&~0x20)|(value&0x20);
++                if(value&4)f={};
++                if(value&0x80)commit(f);
++            } else if(outEp(e)) {
++                u->csr[e]=(u->csr[e]&~0x38)|(value&0x28)|(u->csr[e]&0x10&~value);
++                if(value&2)consume(f);
++            }
++        } else if(!write)value=status(u,e);
++    } else if(off==0x50 || off==0x54) {
++        auto& mask=off==0x50?u->uicr0:u->uicr1;if(write)mask=value;else value=mask;
++    } else if(off==0x58 || off==0x5c) {
++        auto& bits=u->sir[(off-0x58)/4];if(write)bits&=~value;else value=bits;
++    } else if(off==0x60) {
++        if(write)u->fnHigh=(u->fnHigh&0x80&~value)|(value&0x40);
++        else value=u->fnHigh|((u->frame>>8)&7);
++    } else if(off==0x64) {if(!write)value=u->frame&255;}
++    else if(off>=0x68 && off<=0x7c && !(off&3)) {
++        constexpr unsigned eps[]={2,4,7,9,12,14};const auto& f=u->fifo[eps[(off-0x68)/4]];
++        if(!write)value=f.count && f.pos<f.size[f.head]?f.size[f.head]-f.pos-1:0;
++    } else return false;
++    if(write){irq(u);if(u->notify)u->notify(u->notifyContext);}
++    else std::memcpy(buf,&value,size);
++    return true;
++}
++}
+ 
+-static bool pxa255UdcPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size, bool write,
+-                                   void *buf) {
+-    struct Pxa255Udc *udc = (struct Pxa255Udc *)userData;
+-    uint32_t val;
+-
+-    if (size != 4) {
+-        fprintf(stderr, "%s: Unexpected %s of %u bytes to 0x%08lx\n", __func__,
+-                write ? "write" : "read", size, (unsigned long)pa);
+-        return false;
++Pxa255Udc* pxa255UdcInit(ArmMem* mem,PxaIc* ic,PxaDma* dma) {
++    auto* u=new Pxa255Udc{};u->ic=ic;u->dma=dma;
++    if(!memRegionAdd(mem,0x40600000,0x1000,access,u))ERR("cannot add UDC to MEM");
++    return u;
++}
++bool pxa255UdcHostEnabled(const Pxa255Udc* u){return u && (u->ccr&1);}
++bool pxa255UdcHostListening(const Pxa255Udc* u){return pxa255UdcHostEnabled(u) && !(u->uicr0&1) && !(u->ccr&0x80);}
++uint32_t pxa255UdcHostEnableCount(const Pxa255Udc* u){return u->enableCount;}
++bool pxa255UdcHostSofWanted(const Pxa255Udc* u){return !(u->fnHigh&0x40);}
++uint8_t pxa255UdcHostAddress(const Pxa255Udc* u){return u->address;}
++void pxa255UdcHostSetNotify(Pxa255Udc* u,void(*notify)(void*),void* context){u->notify=notify;u->notifyContext=context;}
++bool pxa255UdcHostReset(Pxa255Udc* u){
++    if(!pxa255UdcHostEnabled(u))return false;
++    clearPackets(u);u->frame=0;u->ccr|=0x42;irq(u);return true;
++}
++bool pxa255UdcHostFrame(Pxa255Udc* u){
++    if(!pxa255UdcHostEnabled(u))return false;
++    u->frame=(u->frame+1)&2047;u->fnHigh|=0x80;irq(u);return true;
++}
++R pxa255UdcHostPeekIn(Pxa255Udc* u,uint8_t ep,unsigned* size){return peek(u,ep,size);}
++R pxa255UdcHostSetup(Pxa255Udc* u,const uint8_t s[8]) {
++    if(!pxa255UdcHostEnabled(u))return R::Disabled;
++    u->txSize=0;u->ready0=false;u->rxPos=u->rxSize=0;u->csr[0]=0;u->hw=0;u->gated=false;u->cfr&=~0x80;
++    const unsigned value=s[2]|s[3]<<8,index=s[4]|s[5]<<8,length=s[6]|s[7]<<8;
++    auto data=[&](unsigned v){u->hw=1;u->hwLength=std::min(length,2u);u->hwData[0]=v;u->hwData[1]=v>>8;};
++    const unsigned recipient=s[0]&31;
++    if(!(s[0]&0x60)) {
++        if(s[1]==5 && s[0]==0 && value<128 && !index && !length){u->pendingAddress=value;u->hw=5;return R::Ack;}
++        if(s[1]==0 && (s[0]&0x80) && recipient<=2){data(recipient==0?u->remoteWake*2:recipient==2 && (index&15)?bool(u->csr[index&15]&0x20):0);return R::Ack;}
++        if(s[1]==8 && s[0]==0x80){data(u->configuration);u->hwLength=std::min(length,1u);return R::Ack;}
++        if(s[1]==10 && s[0]==0x81){data(0);u->hwLength=std::min(length,1u);return R::Ack;}
++        if((s[1]==1 || s[1]==3) && !length) {
++            if(recipient==0 && value==1)u->remoteWake=s[1]==3;
++            else if(recipient==2 && !value && (index&15)) {
++                auto& csr=u->csr[index&15];if(s[1]==3)csr|=0x20;else csr&=~0x30;
++            } else {u->hw=4;return R::Ack;}
++            u->hw=2;return R::Ack;
++        }
++        if(s[1]==9 || s[1]==11) {
++            if((s[1]==9 && (s[0]!=0 || value>3)) || (s[1]==11 && (s[0]!=1 || value)) || length){u->hw=4;return R::Ack;}
++            if(s[1]==9)u->configuration=value;
++            for(unsigned i=1;i<16;++i){u->fifo[i]={};u->csr[i]=0;}
++            u->hw=2;u->gated=true;
++            // Unlike PXA270, these two hardware-decoded requests also reach software.
++        }
+     }
+-
+-    pa = (pa - PXA_UDC_BASE) >> 2;
+-
+-    if (write) val = *(uint32_t *)buf;
+-
+-    switch (pa) {
+-        case 0:  // UDCCR
+-            if (write)
+-                udc->ccr = val;
+-            else
+-                val = udc->ccr;
+-            break;
+-
+-        case 0x01:  // undocumented reg
+-            if (write)
+-                udc->reg4 = val;
+-            else
+-                val = udc->reg4;
+-            break;
+-
+-        case 0x14:  // UICR0
+-            if (write)
+-                udc->uicr0 = val;
+-            else
+-                val = udc->uicr0;
+-            break;
+-
+-        case 0x15:  // UICR1
+-            if (write)
+-                udc->uicr1 = val;
+-            else
+-                val = udc->uicr1;
+-            break;
+-
+-        // Stub those for now
+-        case 0x04:  // UDCCS0
+-        case 0x16:  // USIR0
+-        case 0x17:  // USIR1
+-        case 0x18:  // UFNRH
+-            if (!write) val = 0;
+-            break;
+-
+-            // other regs, TODO
+-
+-        default:
+-            return false;
+-    }
+-
+-    if (!write) *(uint32_t *)buf = val;
+-
+-    return true;
+-}
+-
+-struct Pxa255Udc *pxa255UdcInit(struct ArmMem *physMem, struct PxaIc *ic, struct PxaDma *dma) {
+-    struct Pxa255Udc *udc = (struct Pxa255Udc *)malloc(sizeof(*udc));
+-
+-    if (!udc) ERR("cannot alloc UDC");
+-
+-    memset(udc, 0, sizeof(*udc));
+-
+-    udc->ic = ic;
+-    udc->dma = dma;
+-    udc->ccr = 0xa0;
+-    udc->uicr0 = 0xff;
+-    udc->uicr1 = 0xff;
+-
+-    if (!memRegionAdd(physMem, PXA_UDC_BASE, PXA_UDC_SIZE, pxa255UdcPrvMemAccessF, udc))
+-        ERR("cannot add UDC to MEM\n");
+-
+-    return udc;
+-}
+-
+-template <typename T>
+-void pxa255UdcSave(struct Pxa255Udc *udc, T &savestate) {
+-    auto chunk = savestate.GetChunk(ChunkType::pxa255udc, SAVESTATE_VERSION);
+-    if (!chunk) ERR("unable to allocate chunk");
+-
+-    SaveChunkHelper helper(*chunk);
+-    udc->DoSaveLoad(helper);
+-}
+-
+-template <typename T>
+-void pxa255UdcLoad(struct Pxa255Udc *udc, T &loader) {
+-    auto chunk = loader.GetChunk(ChunkType::pxa255udc, SAVESTATE_VERSION, "pxa255 udc");
+-    if (!chunk) return;
+-
+-    LoadChunkHelper helper(*chunk);
+-    udc->DoSaveLoad(helper);
+-}
+-
+-template void pxa255UdcSave<Savestate<ChunkType>>(Pxa255Udc *udc, Savestate<ChunkType> &savestate);
+-template void pxa255UdcSave<SavestateProbe<ChunkType>>(Pxa255Udc *udc,
+-                                                       SavestateProbe<ChunkType> &savestate);
+-template void pxa255UdcLoad<SavestateLoader<ChunkType>>(Pxa255Udc *udc,
+-                                                        SavestateLoader<ChunkType> &loader);
++    std::memcpy(u->rx0,s,8);u->rxSize=8;u->csr[0]=0x81;event(u,0);return R::Ack;
++}
++R pxa255UdcHostOut(Pxa255Udc* u,const uint8_t* data,unsigned size) {
++    if(!pxa255UdcHostEnabled(u))return R::Disabled;
++    if(size>16 || (size && !data))return R::Timeout;
++    if((u->csr[0]&0x20) || u->hw==4)return stall(u,0);
++    if(u->csr[0]&1)return R::Nak;
++    u->txSize=0;u->ready0=false;
++    if(u->hw==3 && !size){u->hw=0;return R::Ack;}
++    if(size)std::memcpy(u->rx0,data,size);
++    u->rxPos=0;u->rxSize=size;u->csr[0]|=1;event(u,0);return R::Ack;
++}
++R pxa255UdcHostIn(Pxa255Udc* u,uint8_t data[16],unsigned* size) {
++    const auto r=peek(u,0,size);if(r!=R::Ack)return r==R::Stall?stall(u,0):r;
++    if(u->hw==1){std::memcpy(data,u->hwData,*size);u->hw=3;return R::Ack;}
++    if(u->hw==2 || u->hw==5){if(u->hw==5){u->address=u->pendingAddress;u->pendingAddress=0;}u->hw=0;return R::Ack;}
++    std::memcpy(data,u->tx0,*size);u->txSize=0;u->ready0=false;event(u,0);return R::Ack;
++}
++R pxa255UdcHostEpIn(Pxa255Udc* u,uint8_t ep,uint8_t data[64],unsigned* size) {
++    if(ep & 0x70)return R::Timeout;
++    ep &= 15;
++    const auto r=peek(u,ep,size);if(r!=R::Ack)return r==R::Stall?stall(u,ep):r;
++    if(!ep)return pxa255UdcHostIn(u,data,size);
++    auto& f=u->fifo[ep];std::memcpy(data,f.data[f.head],*size);consume(f);u->csr[ep]|=2;event(u,ep);return R::Ack;
++}
++R pxa255UdcHostEpOut(Pxa255Udc* u,uint8_t ep,const uint8_t* data,unsigned size) {
++    if(!pxa255UdcHostEnabled(u))return R::Disabled;
++    if(ep>=16 || !outEp(ep) || !u->configuration || size>64 || (size && !data))return R::Timeout;
++    if(u->csr[ep]&0x20)return stall(u,ep);
++    auto& f=u->fifo[ep];if(f.count==2)return R::Nak;
++    const unsigned tail=(f.head+f.count)&1;if(size)std::memcpy(f.data[tail],data,size);
++    f.size[tail]=size;++f.count;event(u,ep);return R::Ack;
++}
++template<class T>void pxa255UdcSave(Pxa255Udc* u,T& state){
++    auto* chunk=state.GetChunk(ChunkType::pxa255udc,1);if(!chunk)ERR("cannot allocate UDC state");
++    SaveChunkHelper h(*chunk);u->DoSaveLoad(h,1);
++}
++void pxa255UdcLoad(Pxa255Udc* u,SavestateLoader<ChunkType>& loader){
++    uint32_t version;auto* chunk=loader.GetChunkOrFail(ChunkType::pxa255udc,1,"pxa255udc",version);if(!chunk)return;
++    Pxa255Udc restored{};restored.dma=u->dma;restored.ic=u->ic;restored.notify=u->notify;restored.notifyContext=u->notifyContext;restored.enableCount=u->enableCount;
++    LoadChunkHelper h(*chunk);restored.DoSaveLoad(h,version);
++    bool valid=!chunk->HasError() && restored.rxPos<=restored.rxSize && restored.rxSize<=16 && restored.txSize<=16 &&
++        restored.address<128 && restored.pendingAddress<128 && restored.configuration<=3 && restored.remoteWake<=1 && restored.hw<=5 && restored.hwLength<=2;
++    for(auto& f:restored.fifo)valid=valid && f.head<2 && f.count<=2 && f.fill<=64 && f.pos<=64 && f.size[0]<=64 && f.size[1]<=64 && (!f.count || f.pos<=f.size[f.head]);
++    if(!valid){loader.NotifyError();return;}
++    *u=restored;irq(u);
++}
++template void pxa255UdcSave<Savestate<ChunkType>>(Pxa255Udc*,Savestate<ChunkType>&);
++template void pxa255UdcSave<SavestateProbe<ChunkType>>(Pxa255Udc*,SavestateProbe<ChunkType>&);
+--- a/src/uarm/uarm/pxa255_UDC.h
++++ b/src/uarm/uarm/pxa255_UDC.h
+@@ -17,7 +17,23 @@
+ template <typename T>
+ void pxa255UdcSave(struct Pxa255Udc *udc, T &savestate);
+ 
+-template <typename T>
+-void pxa255UdcLoad(struct Pxa255Udc *udc, T &loader);
++#include "pxa270_UDC.h" // Common host transaction result; the register models are separate.
++#include "savestate/ChunkTypeUarm.h"
++template<class T> class SavestateLoader;
++void pxa255UdcLoad(Pxa255Udc*, SavestateLoader<ChunkType>&);
+ 
++bool pxa255UdcHostReset(Pxa255Udc*);
++bool pxa255UdcHostFrame(Pxa255Udc*);
++bool pxa255UdcHostEnabled(const Pxa255Udc*);
++bool pxa255UdcHostListening(const Pxa255Udc*);
++bool pxa255UdcHostSofWanted(const Pxa255Udc*);
++uint32_t pxa255UdcHostEnableCount(const Pxa255Udc*);
++uint8_t pxa255UdcHostAddress(const Pxa255Udc*);
++void pxa255UdcHostSetNotify(Pxa255Udc*, void (*)(void*), void*);
++Pxa270UdcHostResult pxa255UdcHostSetup(Pxa255Udc*, const uint8_t[8]);
++Pxa270UdcHostResult pxa255UdcHostOut(Pxa255Udc*, const uint8_t*, unsigned);
++Pxa270UdcHostResult pxa255UdcHostIn(Pxa255Udc*, uint8_t[16], unsigned*);
++Pxa270UdcHostResult pxa255UdcHostEpOut(Pxa255Udc*, uint8_t, const uint8_t*, unsigned);
++Pxa270UdcHostResult pxa255UdcHostEpIn(Pxa255Udc*, uint8_t, uint8_t[64], unsigned*);
++Pxa270UdcHostResult pxa255UdcHostPeekIn(Pxa255Udc*, uint8_t, unsigned*);
+ #endif
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -537,15 +537,15 @@
+ }
+ 
+ bool SocPXA::SetUsbTestCable(bool connected) {
+-    if (GetDeviceType() != deviceTypeTX) return false;
+-    // Palm TX GPIO13 is the active-low USB cable detector. Linux palmtx.h
+-    // names this GPIO_NR_PALMTX_USB_DETECT_N. No transceiver or endpoint is opened.
+-    pxaGpioSetState(gpio, 13, !connected);
++    if(GetDeviceType()!=deviceTypeTX && GetDeviceType()!=deviceTypeE2)return false;
++    // Linux palmtx.h: TX GPIO13; palmte2.h: E2 GPIO35, both active low.
++    pxaGpioSetState(gpio, GetDeviceType()==deviceTypeTX ? 13 : 35, !connected);
+     return true;
+ }
+ 
+ bool SocPXA::UsbTestCableAttached() {
+-    return GetDeviceType() == deviceTypeTX && !pxaGpioInputLevel(gpio, 13);
++    return (GetDeviceType()==deviceTypeTX || GetDeviceType()==deviceTypeE2) &&
++        !pxaGpioInputLevel(gpio,GetDeviceType()==deviceTypeTX ? 13 : 35);
+ }
+ 
+ void SocPXA::KickUsbHost() {
+--- a/src/uarm/uarm/soc_PXA.h
++++ b/src/uarm/uarm/soc_PXA.h
+@@ -28,6 +28,8 @@
+ struct PxaLcd;
+ struct Pxa270wmmx;
+ struct Pxa270Udc;
++#include "UsbDevicePort.h"
++
+ struct UsbHostHooks {
+     void* context{nullptr};
+     void (*tick)(void* context, uint64_t nowNs){nullptr};
+@@ -75,6 +77,12 @@
+     // Non-owning development-probe access; use only on this SoC's execution
+     // thread. The cable method drives the TX detector input, not a USB host.
+     Pxa270Udc* GetUsbController() { return GetDeviceType() == deviceTypeTX ? udc2 : nullptr; }
++    UsbDevicePort GetUsbPort() {
++        if(GetDeviceType()==deviceTypeTX)return UsbDevicePort(udc2);
++        if(GetDeviceType()==deviceTypeE2)return UsbDevicePort(udc1);
++        return {};
++    }
++    bool UsbDefaultCableAttached() { return GetDeviceType()==deviceTypeTX; }
+     bool SetUsbTestCable(bool connected);
+     bool UsbTestCableAttached();
+     // A USB host on emulated time (UsbHostBridge). `tick` runs in the peripheral batch

@@ -14,10 +14,10 @@ inline QString deviceName(Device device) {
 }
 
 // Which settings a device supports. One place for the launcher and the running state.
-struct Capabilities { bool network, keyboard, serial, usb, fastAudio; };
+struct Capabilities { bool network, keyboard, serial, usb, fastAudio, infrared, bluetooth; };
 inline Capabilities capabilities(Device device) {
-    if (device == Device::e2) return {false, false, false, false, false};
-    return {true, true, true, true, true};
+    if (device == Device::e2) return {false, true, false, true, true, true, true};
+    return {true, true, true, true, true, true, true};
 }
 
 // Looks for the Palm card header the way the core does (every 32 KiB) and says

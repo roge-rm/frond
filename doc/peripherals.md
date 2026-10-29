@@ -1,4 +1,8 @@
-# Palm TX peripherals
+# Palm TX and Tungsten E2 peripherals
+
+See [repeatable peripheral qualification](peripheral-qualification.md) for the
+private session runner, readiness barriers and independent evidence checks used
+when qualifying devices.
 
 ## Virtual SD cards
 
@@ -186,8 +190,9 @@ SDHC/SDXC, arbitrary high-speed modes or an SDIO Wi-Fi card.
 ## Computer keyboard
 
 Check **Attach Palm infrared keyboard** in the desktop launcher to connect the
-host keyboard as a Palm Universal Wireless Keyboard (3169WW). Install its Palm
-OS driver separately, reset the Palm if installation requests it, then open
+host keyboard as a Palm Universal Wireless Keyboard (3169WW) on the TX or E2.
+Install its Palm OS driver separately, reset the Palm if installation requests
+it, then open
 **Keyboard** on the Palm and turn its status **ON**. The 1.13 driver is available
 from [PalmDB](https://palmdb.net/app/palm-wireless-keyboard-driver-palm-os-ppc).
 The driver is not included in Frond or its Debian package.
@@ -210,8 +215,9 @@ driver enables the infrared port. Attachment state and in-flight packets persist
 with the session. Host focus loss, detachment and session startup release held
 keys so modifiers do not remain stuck after switching windows or resuming.
 
-The model sends press/release packets to the PXA270 STUART at 9600 baud, 8N2,
-with guest-time byte spacing. It implements the keyboard's UART byte protocol,
+The model sends press/release packets to the PXA270/PXA255 STUART at 9600 baud, 8N2,
+with guest-time byte spacing. The E2 Palm 1.13 driver configures 8N1 reception;
+the accessory's extra stop time is idle receive time. This implements the keyboard's UART byte protocol,
 not optical pulses, IrLAP beaming or Bluetooth. The packet format and scan codes
 are documented in the author's [p1keyboard protocol notes](https://github.com/arpruss/p1keyboard/blob/master/p1notes.txt).
 UART receive occupancy, interrupt masking, FIFO reset and character-time receive
@@ -219,12 +225,12 @@ timeout follow chapter 10 of the
 [Intel PXA27x manual](https://support.eurotech-inc.com/developers/datasheets/PXA270_DeveloperManual.pdf).
 
 `make test-keyboard` checks packet framing, timing, overflow/release handling,
-partial-packet restore, UART reception and SDL focus handling. An optional SDK
-probe checks the real Palm driver:
+partial-packet restore, UART reception on both boards and SDL focus handling.
+An optional SDK probe checks the real Palm driver:
 
 ```sh
 python3 tools/build-palm-probe.py --probe keyboard --sdk /path/to/sdk-5r3
-python3 tests/desktop-keyboard.py --session /path/to/calibrated-tx.session \
+python3 tests/desktop-keyboard.py --session /path/to/calibrated-tx-or-e2.session \
   --driver /path/to/Keyboard_v113.prc --output /path/to/new/private/results
 ```
 
@@ -478,19 +484,26 @@ USB/HotSync through its Multi-connector, SD/MMC/SDIO cards, and stereo headphone
 See the [Palm TX user guide](https://palmdr.com/eBay%20Photos/tx_ug.pdf). Frond
 currently supplies virtual SD storage, audio, the infrared keyboard attachment,
 the cradle serial port on a host PTY or a 127.0.0.1 TCP port and USB HotSync to
-the same kinds of endpoint. General infrared beaming, Bluetooth hardware
-emulation and arbitrary SDIO accessories remain unsupported. Serial HotSync over
+the same kinds of endpoint. Both TX and E2 also support
+[IrDA beaming between instances](infrared.md) and an opt-in
+[virtual Bluetooth controller](bluetooth-provider.md). Arbitrary SDIO accessories
+remain outstanding. Serial HotSync over
 the host serial endpoint has not been tested.
+
+The Bluetooth endpoint uses the original Palm driver and a separately started
+local H4 provider. Original OPP send/receive, SPP/RFCOMM and L2CAP data, PIN/security
+APIs and lifecycle recovery are qualified on both boards. It defaults to off;
+physical adapters and arbitrary Bluetooth profiles are not qualified.
 
 The [serial support and tests](tx-serial.md) covers the UART model, the host
 endpoint, firmware-free regressions and the Palm Serial Manager probes.
 
 ## USB HotSync
 
-`--usb pty` or `--usb tcp:PORT` plugs the TX into an emulated USB host and moves
+`--usb pty` or `--usb tcp:PORT` plugs the TX or E2 into an emulated USB host and moves
 the bytes of its HotSync port to a host PTY or a TCP listener on 127.0.0.1, one
 client at a time. pilot-link and the like talk to it as they would to a serial
-cradle. It is off by default and needs a Palm TX. The desktop app has the same
+cradle. It is off by default and supports the Palm TX and Tungsten E2. The desktop app has the same
 choice under **USB**.
 
 ```sh
@@ -502,11 +515,11 @@ pilot-xfer -p /dev/pts/N -l
 The core prints each bus step as a `usb:` line. The desktop control commands are
 `usb-state` and `usb-mode off|pty|tcp:PORT`, and the core sends a `usb` event when
 the state changes. The state is the endpoint kind, the endpoint, `connected` or
-`waiting` for a client (a PTY always shows `connected`), and the bus phase: `detached`, `waiting` (for the TX to
+`waiting` for a client (a PTY always shows `connected`), and the bus phase: `detached`, `waiting` (for the Palm to
 turn its UDC on), `connecting`, `resetting`, `enumerating`, `running` or `failed`.
 
 Open the HotSync app and tap the HotSync button (Local, Cradle/Cable), then run
-the pilot-link command. Each HotSync takes 15 to 20 seconds. Tested with
+the pilot-link command. TX HotSync typically takes 15 to 20 seconds. Tested with
 pilot-link 0.15.1: `pilot-xfer -l`, `-f` (fetch), `-i` (install) and pilot-dlpsh
 `user`, `df` and `ls`. pilot-link only opens serial devices, so for TCP put a
 PTY in front of the port. A plain `socat` PTY relay doesn't work with it; the
@@ -541,13 +554,14 @@ How it works:
   cable and plugs it in again half a second later, so the TX enumerates again.
   Switching the mode while running does the same. A database list or export
   during HotSync leaves the cable in.
-- With USB off the cable stays in (GPIO13 low), as the TX had it before the
-  bridge, also for a session saved while the bridge had it out.
+- With USB off the TX cable stays in (GPIO13 low), as it did before the bridge.
+  The E2 cable is absent (GPIO35 high). Loading a session restores the selected
+  board's default cable level when the host is off.
 
 Firmware-free tests:
 
 ```sh
-heavy build make test-pxa270-udc test-usb-host-fixture test-usb-enumeration test-usb-bridge test-usb-bridge-soc
+heavy build make test-pxa255-udc test-pxa270-udc test-usb-host-fixture test-usb-enumeration test-usb-bridge test-usb-bridge-soc
 ```
 
 `test-usb-bridge` runs the host against a scripted TX: enumeration, the port
@@ -575,3 +589,11 @@ With the UDC or an endpoint off, A-X FIFO reads return 0 and writes are ignored.
 There is no OTG, USB DMA or D+ pull-up model; the host takes "UDC on, then the
 EP0 and reset interrupts set" as the device being on the bus. Turning the UDC off
 leaves UDCICR as it was, so the host waits for a new UDCICR write.
+
+The E2 controller follows the [Intel PXA255 Developer's Manual, chapter 12](https://support.eurotech-inc.com/developers/datasheets/PXA255_XScale_Developers_Manual_Mar2003.pdf).
+It has fixed endpoint directions and byte-wide FIFO accesses, 16-byte EP0 and
+64-byte bulk packets. SET_CONFIGURATION and SET_INTERFACE also notify guest
+software, and their status stage honors UDCCFR acknowledgement gating. Its
+versioned controller state retains packets and loads the earlier register-only
+state. USB DMA and isochronous transfers are unsupported. E2 cable detection uses
+active-low GPIO35, as defined in the [Linux E2 board header](https://github.com/torvalds/linux/blob/v3.12/arch/arm/mach-pxa/include/mach/palmte2.h).
