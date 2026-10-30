@@ -20,6 +20,7 @@ import threading
 import time
 
 CHUNK = 65536
+CONNECT_SECONDS = 10
 
 
 def port(text):
@@ -186,6 +187,21 @@ def unix_server(path):
     return server
 
 
+def carry(host, remote, name, local, count, relay):
+    """Connects one core connection to the host and pumps it, or closes it if the host can't be reached."""
+    try:
+        peer = socket.create_connection((host, remote), timeout=CONNECT_SECONDS)
+    except OSError as e:
+        print(f'Controller {count}: could not reach {name}: {e.strerror or e}.', flush=True)
+        local.close()
+        with relay.lock:
+            relay.stats['failed'] += 1
+        return
+    peer.settimeout(None)
+    keepalive(peer)
+    relay.pair(peer, local, f'Controller {count} to {name}')
+
+
 def join(host, remote, path, seconds, relay):
     server = unix_server(path)
     name = f'[{host}]:{remote}' if ':' in host else f'{host}:{remote}'
@@ -201,17 +217,8 @@ def join(host, remote, path, seconds, relay):
                 continue
             local.settimeout(None)
             count += 1
-            try:
-                peer = socket.create_connection((host, remote), timeout=10)
-            except OSError as e:
-                print(f'Controller {count}: could not reach {name}: {e.strerror or e}.', flush=True)
-                local.close()
-                with relay.lock:
-                    relay.stats['failed'] += 1
-                continue
-            peer.settimeout(None)
-            keepalive(peer)
-            relay.pair(peer, local, f'Controller {count} to {name}')
+            # Reaching the host can take up to 10 s, so it happens off this loop.
+            threading.Thread(target=carry, args=(host, remote, name, local, count, relay), daemon=True).start()
     finally:
         server.close()
         try:

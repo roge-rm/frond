@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import json
 import socket
+import struct
 import subprocess
 import sys
 import time
@@ -85,6 +86,30 @@ class Tests(unittest.TestCase):
             self.assertEqual(result['dropped'][0],4);self.assertEqual(result['received'],[4,10])
         finally:
             for p in peers+[core]:p.close()
+            if process and process.poll() is None:process.kill();process.wait()
+    def test_dead_peer_with_reading_paused(self):
+        # A network peer that resets while the core isn't reading (so the link has stopped reading the peer)
+        # ends the run when bytes for it can't be sent, instead of retrying the send forever.
+        core=socket.socket();core.setsockopt(socket.SOL_SOCKET,socket.SO_RCVBUF,4096);core.bind(('127.0.0.1',0));core.listen();core.settimeout(10)
+        remote=socket.socket();remote.bind(('127.0.0.1',0));remote.listen();remote.settimeout(10)
+        process=None;peers=[]
+        try:
+            process=subprocess.Popen([sys.executable,str(Path(__file__).resolve().parents[1]/'tools/link-irda.py'),str(core.getsockname()[1]),f'127.0.0.1:{remote.getsockname()[1]}','--seconds','20'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+            local,_=core.accept();peers.append(local);other,_=remote.accept();peers.append(other)
+            self.assertIn('linked',process.stdout.readline())
+            # The core doesn't read: fill everything between the peer and it.
+            other.setblocking(False);idle=0
+            while idle<5:
+                try:other.send(bytes(65536));idle=0
+                except BlockingIOError:idle+=1;time.sleep(.1)
+            other.setsockopt(socket.SOL_SOCKET,socket.SO_LINGER,struct.pack('ii',1,0));other.close();peers.remove(other)
+            local.sendall(b'late')
+            started=time.monotonic()
+            out,err=process.communicate(timeout=15);self.assertEqual(process.returncode,0,err)
+            self.assertLess(time.monotonic()-started,5)
+            self.assertEqual(json.loads(out.splitlines()[-1])['reason'],'peer disconnected')
+        finally:
+            for p in peers+[core,remote]:p.close()
             if process and process.poll() is None:process.kill();process.wait()
     def test_reconnect_deadline(self):
         # --seconds bounds a run whose local core never comes back.
