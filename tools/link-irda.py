@@ -3,7 +3,8 @@
 
 Each endpoint is PORT (a local Frond's --irda tcp:PORT), HOST:PORT (connect to another
 machine, such as an Android Frond waiting for a peer) or listen:PORT (wait on all
-interfaces for one peer, such as an Android Frond connecting here)."""
+interfaces for one peer, such as an Android Frond connecting here). A local Frond whose
+Palm sleeps closes its port until it wakes; PORT is connected again meanwhile."""
 import argparse
 import json
 import selectors
@@ -14,7 +15,7 @@ QUEUE_BYTES=4096
 
 
 def endpoint(text):
-    """Returns ('connect',host,port) or ('listen','',port); a plain port is 127.0.0.1."""
+    """Returns ('local','127.0.0.1',port), ('connect',host,port) or ('listen','',port)."""
     text=str(text).strip()
     if text.startswith('listen:'):kind,host,port='listen','',text[7:]
     elif text.startswith('['):
@@ -24,20 +25,34 @@ def endpoint(text):
     elif ':' in text:
         kind='connect';host,port=text.rsplit(':',1)
         if not host or ':' in host:raise ValueError(text)
-    else:kind,host,port='connect','127.0.0.1',text
+    else:kind,host,port='local','127.0.0.1',text
     if not port.isdigit() or not 1<=int(port)<=65535:raise ValueError(text)
     return kind,host,int(port)
 
 
 def name(e):
     kind,host,port=e
+    if kind=='local':return str(port)
     return f'listen:{port}' if kind=='listen' else (f'[{host}]:{port}' if ':' in host else f'{host}:{port}')
 
 
+RETRY_SECONDS=.3
+
+
 def link(first,second,seconds=None):
-    peers=[];listeners={};selector=selectors.DefaultSelector();pending=[bytearray(),bytearray()]
-    received=[0,0];sent=[0,0];started=time.monotonic();reason='deadline'
+    """Joins the endpoints until one ends. A local core's port (PORT) that closes, as a sleeping Palm's does
+    until it wakes, is connected again for as long as the other side stays up; bytes for it meanwhile are
+    dropped, as IrDA retries. A network peer closing, or both sides down at once, ends the run."""
+    peers=[None,None];listeners={};selector=selectors.DefaultSelector();pending=[bytearray(),bytearray()]
+    received=[0,0];sent=[0,0];dropped=[0,0];reconnects=[0,0];retry=[0.0,0.0];started=time.monotonic();reason='deadline'
     ends=[endpoint(e) for e in (first,second)]
+    def result():return {'reason':reason,'received':received,'sent':sent,'dropped':dropped,'reconnects':reconnects}
+    def ready(i,peer):
+        peer.setsockopt(socket.IPPROTO_TCP,socket.TCP_NODELAY,1);peer.setblocking(False);peers[i]=peer
+    def down(i):
+        try:selector.unregister(peers[i])
+        except (KeyError,ValueError):pass
+        peers[i].close();peers[i]=None;pending[i].clear()
     try:
         # Listeners first, so a peer can connect while the other side is being reached.
         for i,(kind,_,port) in enumerate(ends):
@@ -49,18 +64,25 @@ def link(first,second,seconds=None):
         def left():return None if seconds is None else seconds-(time.monotonic()-started)
         for i,(kind,host,port) in enumerate(ends):
             # A bounded run also ends while waiting for a peer or connecting.
-            if left() is not None and left()<=0:return {'reason':reason,'received':received,'sent':sent}
+            if left() is not None and left()<=0:return result()
             if kind=='listen':
                 listeners[i].settimeout(left())
                 try:peer,address=listeners[i].accept()
-                except socket.timeout:return {'reason':reason,'received':received,'sent':sent}
+                except socket.timeout:return result()
                 listeners.pop(i).close()
                 print(f'Peer {address[0].removeprefix("::ffff:")} connected on port {port}.',flush=True)
             else:peer=socket.create_connection((host,port),timeout=10 if left() is None else max(.01,min(10,left())))
-            peer.setsockopt(socket.IPPROTO_TCP,socket.TCP_NODELAY,1);peer.setblocking(False);peers.append(peer)
+            ready(i,peer)
         print(f'Infrared endpoints linked: {name(ends[0])} and {name(ends[1])}.',flush=True)
         while seconds is None or time.monotonic()-started<seconds:
+            for i,(kind,host,port) in enumerate(ends):
+                if peers[i] is not None or time.monotonic()<retry[i]:continue
+                try:peer=socket.create_connection((host,port),timeout=1)
+                except OSError:retry[i]=time.monotonic()+RETRY_SECONDS;continue
+                ready(i,peer);reconnects[i]+=1
+                print(f'Core on port {port} is back.',flush=True)
             for i,peer in enumerate(peers):
+                if peer is None:continue
                 events=(selectors.EVENT_READ if len(pending[1-i])<QUEUE_BYTES else 0)
                 if pending[i]:events|=selectors.EVENT_WRITE
                 try:selector.get_key(peer)
@@ -69,24 +91,37 @@ def link(first,second,seconds=None):
                 else:
                     if events:selector.modify(peer,events,i)
                     else:selector.unregister(peer)
-            timeout=.5 if seconds is None else max(0,min(.5,seconds-(time.monotonic()-started)))
+            timeout=.1 if None in peers else .5
+            if seconds is not None:timeout=max(0,min(timeout,seconds-(time.monotonic()-started)))
+            if not selector.get_map():
+                time.sleep(timeout);continue
             for key,events in selector.select(timeout):
                 i=key.data;peer=key.fileobj
+                if peers[i] is not peer:continue
                 if events&selectors.EVENT_READ:
                     try:data=peer.recv(QUEUE_BYTES-len(pending[1-i]))
                     except BlockingIOError:continue
+                    except OSError:data=b''
                     if not data:
-                        reason='peer disconnected'
-                        return {'reason':reason,'received':received,'sent':sent}
-                    pending[1-i].extend(data);received[i]+=len(data)
+                        kind,_,port=ends[i]
+                        if kind!='local' or peers[1-i] is None:
+                            reason='peer disconnected'
+                            return result()
+                        down(i);retry[i]=time.monotonic()+RETRY_SECONDS
+                        print(f'Core on port {port} closed; connecting again.',flush=True)
+                        continue
+                    received[i]+=len(data)
+                    if peers[1-i] is None:dropped[1-i]+=len(data)
+                    else:pending[1-i].extend(data)
                 if events&selectors.EVENT_WRITE:
                     try:count=peer.send(pending[i])
                     except BlockingIOError:continue
+                    except OSError:count=0
                     del pending[i][:count];sent[i]+=count
-        return {'reason':reason,'received':received,'sent':sent}
+        return result()
     finally:
         selector.close()
-        for peer in peers+list(listeners.values()):peer.close()
+        for peer in [p for p in peers if p is not None]+list(listeners.values()):peer.close()
 
 
 def main():

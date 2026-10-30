@@ -67,7 +67,7 @@ object IrBeam {
     fun port(text: String): Int? = text.trim().toIntOrNull()?.takeIf { it in 1..65535 }
 
     // HOST:PORT, [IPv6]:PORT, or a host alone for the default port. Null when it can't be used.
-    fun address(text: String): Pair<String, Int>? {
+    fun address(text: String, defaultPort: Int = DEFAULT_PORT): Pair<String, Int>? {
         val t = text.trim()
         if (t.isEmpty() || t.any { it.isWhitespace() }) return null
         if (t.startsWith("[")) {
@@ -75,18 +75,18 @@ object IrBeam {
             if (close < 2) return null
             val host = t.substring(1, close)
             val rest = t.substring(close + 1)
-            if (rest.isEmpty()) return host to DEFAULT_PORT
+            if (rest.isEmpty()) return host to defaultPort
             if (!rest.startsWith(":")) return null
             return port(rest.substring(1))?.let { host to it }
         }
         return when (t.count { it == ':' }) {
-            0 -> t to DEFAULT_PORT
+            0 -> t to defaultPort
             1 -> {
                 val host = t.substringBefore(':')
                 if (host.isEmpty()) null else port(t.substringAfter(':'))?.let { host to it }
             }
             // A bare IPv6 address, without a port.
-            else -> t to DEFAULT_PORT
+            else -> t to defaultPort
         }
     }
 
@@ -378,7 +378,7 @@ object IrBeam {
     // TCP keepalive, so a peer that vanished without closing is noticed in about two minutes. The idle
     // and interval options are Linux's TCP_KEEPIDLE (4), TCP_KEEPINTVL (5) and TCP_KEEPCNT (6) in seconds
     // and counts, which OsConstants doesn't name.
-    private fun keepAlive(socket: Socket) {
+    fun keepAlive(socket: Socket) {
         try { socket.keepAlive = true } catch (_: IOException) {}
         try {
             ParcelFileDescriptor.fromSocket(socket).use { pfd ->
@@ -387,7 +387,7 @@ object IrBeam {
                 Os.setsockoptInt(pfd.fileDescriptor, OsConstants.IPPROTO_TCP, 6, 4)
             }
         } catch (e: Exception) {
-            Log.w(TAG, "beaming: keepalive times not set: $e")
+            Log.w(TAG, "keepalive times not set: $e")
         }
     }
 

@@ -602,6 +602,11 @@ test: test-irda-link
 test-irda-link:
 	python3 tests/irda-link.py
 
+.PHONY: test-bluetooth-link
+test: test-bluetooth-link
+test-bluetooth-link:
+	python3 tests/bluetooth-link.py
+
 .PHONY: test-bluetooth
 test: test-bluetooth
 test-bluetooth: out/frond

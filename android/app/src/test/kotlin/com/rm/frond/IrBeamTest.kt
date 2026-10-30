@@ -62,6 +62,6 @@ class IrBeamTest {
 
     @Test
     fun infraredIsOnAndroid() {
-        assertEquals(listOf("BLUETOOTH", "USB", "SERIAL"), Peripheral.entries.map { it.name })
+        assertEquals(listOf("USB", "SERIAL"), Peripheral.entries.map { it.name })
     }
 }

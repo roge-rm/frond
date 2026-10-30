@@ -63,6 +63,8 @@ class FrondActivity : SDLActivity() {
         Os.setenv("SDL_ANDROID_BLOCK_ON_PAUSE", "0", true)
         Os.setenv("SDL_ANDROID_BLOCK_ON_PAUSE_PAUSEAUDIO", "1", true)
         HostDns.start(applicationContext)
+        // A btvirt and sockets left by an emulator that was killed.
+        Thread { BtLink.clean(applicationContext) }.start()
         super.onCreate(savedInstanceState)
         fitInsideSystemBars()
         requestFrameRate()
@@ -487,6 +489,7 @@ class FrondActivity : SDLActivity() {
         if (running === this) running = null
         HostDns.stop(applicationContext)
         IrBeam.stop()
+        BtLink.stop(applicationContext)
         link.close()
         // Native statics in the core don't reset between runs, so the process ends with the activity.
         if (isFinishing) Process.killProcess(Process.myPid())

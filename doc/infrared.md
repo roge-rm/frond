@@ -40,8 +40,10 @@ desktop is 10.0.2.2; to reach one waiting in an emulator, run
 `adb forward tcp:5030 tcp:5030` and connect to 127.0.0.1:5030.
 
 The relay on the phone keeps waiting after a peer goes; Connect shows
-Disconnected with a Connect again button. link-irda.py exits when either side
-closes, so start it again. Beaming is off each time the emulator starts.
+Disconnected with a Connect again button. When a local Frond's Palm sleeps its
+port closes until it wakes; link-irda.py connects to it again while the other
+side stays up. It exits when a network peer closes or both sides are gone, so
+start it again then. Beaming is off each time the emulator starts.
 
 ## Using it
 

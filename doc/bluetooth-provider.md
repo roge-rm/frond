@@ -52,3 +52,22 @@ the independent payload with `tools/check-bluetooth-probe.py`, passing `--before
 to require a fresh attempt and unchanged prior history. The
 [qualification runner](peripheral-qualification.md) automates readiness, replay,
 exports, evidence checks and process cleanup for private device plans.
+
+## Bluetooth over the network
+
+Fronds on different machines share one btvirt: the host runs it, the others carry their controller connections to it over TCP. Each connection is still its own controller, so every Frond gets its own radio. Bytes pass unchanged and nothing is encrypted, so use it on a network you trust.
+
+On Android, Bluetooth is on the corner menu's Device section. Host other Fronds runs btvirt in the app and takes peers on a port (5032 by default; the dialog shows this device's addresses). Join another Frond takes HOST:PORT of a Frond that hosts. Two Android Fronds work with one hosting and the other joining.
+
+On the desktop, `tools/link-bluetooth.py` does both:
+
+```sh
+# Host: run btvirt as above and take network peers on port 5032.
+python3 tools/link-bluetooth.py serve "$PWD/build/bluetooth-sockets/bt-server-bredr" listen:5032
+
+# Join an Android or desktop host, then start Frond on the socket it makes.
+python3 tools/link-bluetooth.py join 192.168.1.20:5032 "$PWD/build/bt-join"
+out/frond owned-session.frond --bluetooth "$PWD/build/bt-join"
+```
+
+An Android Frond joins a desktop host the same way, with the desktop's address and serve's port. Turn Bluetooth off and on in Palm OS after changing any of this, as with a local btvirt. Use two different identities (an E2 and a TX, or TX images with different addresses), as described above.

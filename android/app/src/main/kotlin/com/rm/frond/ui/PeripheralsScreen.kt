@@ -54,6 +54,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.rm.frond.BeamMode
+import com.rm.frond.BtLink
+import com.rm.frond.BtMode
 import com.rm.frond.FatImage
 import com.rm.frond.IrBeam
 import com.rm.frond.NetworkMode
@@ -79,6 +81,7 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
     var confirmReset by remember { mutableStateOf(false) }
     var choosingNetwork by remember { mutableStateOf(false) }
     var choosingBeam by remember { mutableStateOf(false) }
+    var choosingBluetooth by remember { mutableStateOf(false) }
     val saveCopy = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
         if (uri != null) model.saveCopy(uri)
     }
@@ -247,6 +250,13 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                     )
                 }
                 if (model.beam.phase == IrBeam.Phase.DISCONNECTED) action("Connect again") { model.retryBeam() }
+                item(key = "bluetooth") {
+                    ListItem(
+                        headlineContent = { Text("Bluetooth") },
+                        supportingContent = { Text(bluetoothText(model.bluetooth, model.radio)) },
+                        modifier = Modifier.clickableRow { choosingBluetooth = true },
+                    )
+                }
                 item(key = "network") {
                     val mode = model.network
                     val usable = model.device.network && mode != null
@@ -317,6 +327,36 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
             onChoose = { mode ->
                 choosingBeam = false
                 model.changeBeam(mode)
+            },
+        )
+    }
+    if (choosingBluetooth) {
+        val current = model.bluetooth.mode
+        val last = remember { BtLink.last(context) }
+        val start = if (current != BtMode.Off) current else last ?: BtMode.Off
+        LinkDialog(
+            title = "Bluetooth",
+            labels = listOf("Off", "Host other Fronds", "Join another Frond"),
+            defaultPort = BtLink.DEFAULT_PORT,
+            choice = when (current) {
+                is BtMode.Host -> "listen"
+                is BtMode.Join -> "connect"
+                BtMode.Off -> "off"
+            },
+            port = (start as? BtMode.Host)?.port,
+            address = (last as? BtMode.Join ?: start as? BtMode.Join)?.let { IrBeam.hostPort(it.host, it.port) },
+            addresses = produceState<List<String>?>(null) { value = withContext(Dispatchers.IO) { IrBeam.addresses(context) } }.value,
+            onDismiss = { choosingBluetooth = false },
+            toMode = { choice, port, address ->
+                when (choice) {
+                    "listen" -> IrBeam.port(port)?.let { BtMode.Host(it) }
+                    "connect" -> BtLink.address(address)?.let { BtMode.Join(it.first, it.second) }
+                    else -> BtMode.Off
+                }
+            },
+            onChoose = { mode ->
+                choosingBluetooth = false
+                model.changeBluetooth(mode)
             },
         )
     }
@@ -480,6 +520,27 @@ private fun beamText(s: IrBeam.Status): String = when (s.phase) {
     IrBeam.Phase.DISCONNECTED -> s.error ?: "Disconnected"
 }
 
+private fun bluetoothText(s: BtLink.Status, radio: String?): String {
+    val link = when (val mode = s.mode) {
+        BtMode.Off -> return s.error?.let { "Off. $it" } ?: "Off"
+        is BtMode.Host -> "Hosting on port ${mode.port}" + when (s.links) {
+            0 -> ""
+            1 -> ", 1 Frond connected"
+            else -> ", ${s.links} Fronds connected"
+        }
+        is BtMode.Join -> if (s.links > 0) "Connected to ${IrBeam.hostPort(mode.host, mode.port)}"
+        else s.error ?: "Joined to ${IrBeam.hostPort(mode.host, mode.port)}"
+    }
+    // The core's word on the Palm's radio, where it needs something done.
+    val note = when {
+        radio == null -> null
+        radio.contains("turn Bluetooth off and on") -> "Turn Bluetooth off and on in Palm OS."
+        radio.startsWith("disconnected: ") -> radio.removePrefix("disconnected: ")
+        else -> null
+    }
+    return if (note == null) link else "$link. $note"
+}
+
 // Off, wait for a peer on a port, or connect to another Frond's address.
 @Composable
 private fun BeamDialog(
@@ -490,32 +551,61 @@ private fun BeamDialog(
     onChoose: (BeamMode) -> Unit,
 ) {
     val start = if (current != BeamMode.Off) current else last ?: BeamMode.Off
-    var choice by remember { mutableStateOf(if (current == BeamMode.Off) "off" else start.encode().substringBefore(':')) }
-    var port by remember { mutableStateOf(((start as? BeamMode.Listen)?.port ?: IrBeam.DEFAULT_PORT).toString()) }
-    var address by remember {
-        mutableStateOf((last as? BeamMode.Connect ?: start as? BeamMode.Connect)?.let { IrBeam.hostPort(it.host, it.port) } ?: "")
-    }
-    val mode: BeamMode? = when (choice) {
-        "listen" -> IrBeam.port(port)?.let { BeamMode.Listen(it) }
-        "connect" -> IrBeam.address(address)?.let { BeamMode.Connect(it.first, it.second) }
-        else -> BeamMode.Off
-    }
+    LinkDialog(
+        title = "Infrared beaming",
+        labels = listOf("Off", "Wait for a peer", "Connect to another Frond"),
+        defaultPort = IrBeam.DEFAULT_PORT,
+        choice = if (current == BeamMode.Off) "off" else start.encode().substringBefore(':'),
+        port = (start as? BeamMode.Listen)?.port,
+        address = (last as? BeamMode.Connect ?: start as? BeamMode.Connect)?.let { IrBeam.hostPort(it.host, it.port) },
+        addresses = addresses,
+        onDismiss = onDismiss,
+        toMode = { choice, port, address ->
+            when (choice) {
+                "listen" -> IrBeam.port(port)?.let { BeamMode.Listen(it) }
+                "connect" -> IrBeam.address(address)?.let { BeamMode.Connect(it.first, it.second) }
+                else -> BeamMode.Off
+            }
+        },
+        onChoose = onChoose,
+    )
+}
+
+// Off, take peers on a port (choice "listen") or reach another Frond's address ("connect").
+@Composable
+private fun <T> LinkDialog(
+    title: String,
+    // For off, listen and connect.
+    labels: List<String>,
+    defaultPort: Int,
+    choice: String,
+    port: Int?,
+    address: String?,
+    addresses: List<String>?,
+    onDismiss: () -> Unit,
+    toMode: (choice: String, port: String, address: String) -> T?,
+    onChoose: (T) -> Unit,
+) {
+    var picked by remember { mutableStateOf(choice) }
+    var portText by remember { mutableStateOf((port ?: defaultPort).toString()) }
+    var addressText by remember { mutableStateOf(address ?: "") }
+    val mode = toMode(picked, portText, addressText)
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Infrared beaming") },
+        title = { Text(title) },
         text = {
             Column {
-                for ((id, label) in listOf("off" to "Off", "listen" to "Wait for a peer", "connect" to "Connect to another Frond")) {
+                for ((id, label) in listOf("off", "listen", "connect").zip(labels)) {
                     ListItem(
                         headlineContent = { Text(label) },
-                        leadingContent = { RadioButton(selected = choice == id, onClick = null) },
-                        modifier = Modifier.clickableRow { choice = id },
+                        leadingContent = { RadioButton(selected = picked == id, onClick = null) },
+                        modifier = Modifier.clickableRow { picked = id },
                     )
                 }
-                if (choice == "listen") {
+                if (picked == "listen") {
                     OutlinedTextField(
-                        port,
-                        { port = it.filter(Char::isDigit).take(5) },
+                        portText,
+                        { portText = it.filter(Char::isDigit).take(5) },
                         label = { Text("Port") },
                         singleLine = true,
                         isError = mode == null,
@@ -528,14 +618,14 @@ private fun BeamDialog(
                         modifier = Modifier.padding(top = 8.dp),
                     )
                 }
-                if (choice == "connect") {
+                if (picked == "connect") {
                     OutlinedTextField(
-                        address,
-                        { address = it.trim() },
+                        addressText,
+                        { addressText = it.trim() },
                         label = { Text("Address and port") },
-                        placeholder = { Text("192.168.1.20:${IrBeam.DEFAULT_PORT}") },
+                        placeholder = { Text("192.168.1.20:$defaultPort") },
                         singleLine = true,
-                        isError = address.isNotEmpty() && mode == null,
+                        isError = addressText.isNotEmpty() && mode == null,
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
