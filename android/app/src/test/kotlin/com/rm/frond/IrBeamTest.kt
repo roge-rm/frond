@@ -7,14 +7,14 @@ import org.junit.Test
 class IrBeamTest {
     @Test
     fun ports() {
-        assertEquals(5030, IrBeam.port("5030"))
-        assertEquals(1, IrBeam.port(" 1 "))
-        assertEquals(65535, IrBeam.port("65535"))
-        assertNull(IrBeam.port("0"))
-        assertNull(IrBeam.port("65536"))
-        assertNull(IrBeam.port(""))
-        assertNull(IrBeam.port("port"))
-        assertNull(IrBeam.port("-1"))
+        assertEquals(5030, NetRelay.port("5030"))
+        assertEquals(1, NetRelay.port(" 1 "))
+        assertEquals(65535, NetRelay.port("65535"))
+        assertNull(NetRelay.port("0"))
+        assertNull(NetRelay.port("65536"))
+        assertNull(NetRelay.port(""))
+        assertNull(NetRelay.port("port"))
+        assertNull(NetRelay.port("-1"))
     }
 
     @Test
@@ -36,8 +36,8 @@ class IrBeamTest {
 
     @Test
     fun hostPort() {
-        assertEquals("10.0.2.2:5030", IrBeam.hostPort("10.0.2.2", 5030))
-        assertEquals("[fe80::1]:5030", IrBeam.hostPort("fe80::1", 5030))
+        assertEquals("10.0.2.2:5030", NetRelay.hostPort("10.0.2.2", 5030))
+        assertEquals("[fe80::1]:5030", NetRelay.hostPort("fe80::1", 5030))
     }
 
     @Test
@@ -56,12 +56,17 @@ class IrBeamTest {
     @Test
     fun coreMode() {
         // HostSerial::Parse takes off or tcp:PORT.
-        assertEquals("off", IrBeam.coreMode(null))
-        assertEquals("tcp:40123", IrBeam.coreMode(40123))
+        assertEquals("off", NetRelay.coreMode(null))
+        assertEquals("tcp:40123", NetRelay.coreMode(40123))
     }
 
     @Test
-    fun infraredIsOnAndroid() {
-        assertEquals(listOf("USB", "SERIAL"), Peripheral.entries.map { it.name })
+    fun infraredState() {
+        // HostInfrared::Describe.
+        assertNull(IrBeam.coreLeftReason("tcp:40123 127.0.0.1:40123 waiting", 40123))
+        assertNull(IrBeam.coreLeftReason("tcp:40123 127.0.0.1:40123 waiting suspended", 40123))
+        assertEquals("The emulator's infrared stopped.", IrBeam.coreLeftReason("off", 40123))
+        assertEquals("Restored keyboard owns the infrared UART.", IrBeam.coreLeftReason("off error: Restored keyboard owns the infrared UART.", 40123))
+        assertEquals("The emulator's infrared stopped.", IrBeam.coreLeftReason("tcp:40124 127.0.0.1:40124 waiting", 40123))
     }
 }

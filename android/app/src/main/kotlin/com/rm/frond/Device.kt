@@ -1,12 +1,5 @@
 package com.rm.frond
 
-// The peripherals the desktop shows for every device (desktop/FirmwareInput.h) that Android doesn't
-// do yet; these show greyed out.
-enum class Peripheral(val label: String) {
-    USB("USB HotSync"),
-    SERIAL("Serial port"),
-}
-
 // The core's network modes (network-mode and network-state), in the desktop's order and words.
 // The TX has them all; other devices only Disabled.
 enum class NetworkMode(val id: String, val label: String) {
@@ -38,10 +31,12 @@ enum class Device(
     val sdSlot: Boolean = true,
     // Virtual Wi-Fi and the other network modes; the core refuses them on other devices.
     val network: Boolean = false,
+    // The cradle serial port (serial-mode); the core refuses it on other devices.
+    val serialPort: Boolean = false,
 ) {
     TX(
         "palm-tx", "Palm TX", 3, 16L shl 20, 2112L * 64 * 1024, true, listOf("--experimental-tx"),
-        "85b048a692aa317763a7077ea72da6cb", network = true,
+        "85b048a692aa317763a7077ea72da6cb", network = true, serialPort = true,
     ),
 
     // The E2 is recognised from its NOR header, so it needs no flag. Its NAND is optional, as on the
