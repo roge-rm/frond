@@ -1,0 +1,1066 @@
+diff --git a/src/uarm/native/InputReplay.cpp b/src/uarm/native/InputReplay.cpp
+index e3179e4..cdd3054 100644
+--- a/src/uarm/native/InputReplay.cpp
++++ b/src/uarm/native/InputReplay.cpp
+@@ -71,6 +71,10 @@ bool InputReplay::Load(const std::string& path, int width, int height, std::stri
+ }
+ 
+ void InputReplay::Dispatch(uint64_t elapsedMs, SoC& soc, SdlRenderer& renderer) {
++    Dispatch(elapsedMs, soc, [&](const char* path, bool& blank) { return renderer.SaveFramebuffer(path, blank); });
++}
++
++void InputReplay::Dispatch(uint64_t elapsedMs, SoC& soc, const std::function<bool(const char*, bool&)>& save) {
+     while (next < events.size() && events[next].at <= elapsedMs) {
+         const auto& event = events[next++];
+         switch (event.kind) {
+@@ -83,7 +87,7 @@ void InputReplay::Dispatch(uint64_t elapsedMs, SoC& soc, SdlRenderer& renderer)
+             case Kind::snapshot: {
+                 // A failed snapshot is reported but never ends the run.
+                 bool blank = false;
+-                if (!renderer.SaveFramebuffer(event.path.c_str(), blank)) {
++                if (!save(event.path.c_str(), blank)) {
+                     snapshots.push_back("failed");
+                     std::cerr << "cannot capture replay snapshot: " << event.path << std::endl;
+                 } else {
+diff --git a/src/uarm/native/InputReplay.h b/src/uarm/native/InputReplay.h
+index 6c73b97..12f1e4f 100644
+--- a/src/uarm/native/InputReplay.h
++++ b/src/uarm/native/InputReplay.h
+@@ -2,6 +2,7 @@
+ #define FROND_INPUT_REPLAY_H
+ 
+ #include <cstdint>
++#include <functional>
+ #include <string>
+ #include <vector>
+ 
+@@ -15,6 +16,9 @@ class InputReplay {
+     bool Load(const std::string& path, int width, int height, std::string& error);
+     // Delivers due events. Snapshot failures are recorded in SnapshotResults, not returned.
+     void Dispatch(uint64_t elapsedMs, SoC& soc, SdlRenderer& renderer);
++    // Same, with snapshots saved by save(path, blank), which works like
++    // SdlRenderer::SaveFramebuffer.
++    void Dispatch(uint64_t elapsedMs, SoC& soc, const std::function<bool(const char*, bool&)>& save);
+     uint64_t LastEventMs() const { return events.empty() ? 0 : events.back().at; }
+     bool Finished() const { return next == events.size(); }
+     // One entry per snapshot taken so far, in order: "ok", "failed", or "lcd-off" or
+diff --git a/src/uarm/native/RenderThread.h b/src/uarm/native/RenderThread.h
+new file mode 100644
+index 0000000..f0e47cc
+--- /dev/null
++++ b/src/uarm/native/RenderThread.h
+@@ -0,0 +1,327 @@
++#ifndef FROND_RENDER_THREAD_H
++#define FROND_RENDER_THREAD_H
++
++#include <SDL.h>
++
++#include <algorithm>
++#include <condition_variable>
++#include <cstdint>
++#include <cstring>
++#include <functional>
++#include <mutex>
++#include <optional>
++#include <string>
++#include <thread>
++#include <vector>
++
++#include "Rotation.h"
++#include "WindowLayout.h"
++
++// Decides whether a draw is due, the same way for the one-thread renderer and the
++// guest thread: a new frame, a forced redraw, a change of LCD power or pressed
++// buttons, or one of the few presents after the last change.
++class DrawGate {
++   public:
++    bool Pass(bool frame, bool forceRedraw, uint32_t buttons, bool lcdEnabled) {
++        forceRedraw = forceRedraw || pressedButtons != buttons;
++        pressedButtons = buttons;
++        const bool wasLcdEnabled = lcd;
++        lcd = lcdEnabled;
++        if (!frame && !forceRedraw && lcd == wasLcdEnabled && flushPipelineCounter++ >= FLUSH_PIPELINE_FRAMES)
++            return false;
++        if (frame || forceRedraw || lcd != wasLcdEnabled) flushPipelineCounter = 0;
++        return true;
++    }
++
++   private:
++    static constexpr uint32_t FLUSH_PIPELINE_FRAMES = 3;
++    uint32_t pressedButtons{0};
++    bool lcd{true};
++    uint32_t flushPipelineCounter{0};
++};
++
++// What the render thread draws next. Draws the guest thread published since the last
++// take are merged: the newest pixels, LCD state and buttons, and every row any of them
++// changed.
++struct DrawState {
++    const uint32_t* pixels{nullptr};  // whole LCD frame, or null when no new frame came
++    uint32_t firstDirtyLine{0}, lastDirtyLine{0};
++    bool lcdEnabled{true};
++    uint32_t buttons{0};
++    bool redraw{false};  // the guest asked for a redraw, e.g. after an expose or a new layout
++};
++
++// What the SDL thread has to act on, gathered from SDL events by RenderLink::Filter.
++struct RenderNotices {
++    bool resized{false};     // the window changed size
++    bool redraw{false};      // the window needs drawing again
++    bool pump{false};        // a window or app event came: run SDL's event pump soon
++    bool foreground{false};  // the app came back from the background
++};
++
++// Hands the guest thread's work over to the SDL thread and back. The SDL thread, the one
++// that made the window, owns the window, renderer, SDL events and audio device calls. The
++// guest thread owns the SoC and everything that touches it.
++//
++// LCD frames go through three buffers: the guest thread copies into its own back buffer,
++// then swaps it with the middle one under the lock; the SDL thread swaps the middle one
++// with its front buffer when it draws. Neither side waits for the other and the newest
++// frame wins.
++class RenderLink {
++   public:
++    struct Input {
++        bool layout{false};  // a new window layout instead of an event
++        SDL_Event event{};
++        WindowLayout windowLayout{};
++        std::optional<Rotation> rotation;  // the rotation this layout is for, when it changed
++    };
++
++    RenderLink(int width, int height) : width(width), height(height), renderThread(std::this_thread::get_id()) {
++        for (auto& buffer : buffers) buffer.assign(size_t(width) * height, 0);
++        // Each buffer takes the whole frame the first time it is filled.
++        for (auto& stale : staleLines) stale = {0, uint32_t(height - 1)};
++    }
++
++    // SDL thread: a new layout, queued behind the events so far.
++    void PushLayout(const WindowLayout& layout, std::optional<Rotation> rotation = std::nullopt) {
++        std::lock_guard<std::mutex> lock(mutex);
++        inputs.push_back(Input{true, {}, layout, rotation});
++    }
++
++    // SDL event filter, installed with SDL_SetEventFilter(RenderLink::Filter, &link). SDL
++    // runs it on the thread that pushes the event: Android's UI thread for touches, the
++    // SDL thread inside its event pump otherwise. Every event goes straight to the guest
++    // thread's queue and is dropped from SDL's own. Input doesn't wake the SDL thread;
++    // window, app and render events do, so it can lay out, redraw or pump.
++    static int SDLCALL Filter(void* userdata, SDL_Event* event) {
++        auto& link = *static_cast<RenderLink*>(userdata);
++        std::lock_guard<std::mutex> lock(link.mutex);
++        link.inputs.push_back(Input{false, *event, {}, std::nullopt});
++        auto& n = link.notices;
++        switch (event->type) {
++            case SDL_WINDOWEVENT:
++                if (event->window.event == SDL_WINDOWEVENT_SIZE_CHANGED) n.resized = true;
++                if (event->window.event == SDL_WINDOWEVENT_EXPOSED) n.redraw = true;
++                break;
++            case SDL_APP_DIDENTERBACKGROUND:
++                link.background = true;
++                break;
++            case SDL_APP_DIDENTERFOREGROUND:
++                link.background = false;
++                n.foreground = true;
++                break;
++            case SDL_RENDER_TARGETS_RESET:
++            case SDL_RENDER_DEVICE_RESET:
++                n.redraw = true;
++                break;
++            case SDL_QUIT:
++            case SDL_APP_TERMINATING:
++            case SDL_APP_LOWMEMORY:
++            case SDL_APP_WILLENTERBACKGROUND:
++            case SDL_APP_WILLENTERFOREGROUND:
++                break;
++            default:
++                return 0;
++        }
++        n.pump = true;
++        link.woken = true;
++        link.wake.notify_one();
++        return 0;
++    }
++    // SDL thread: what the filter noticed since the last call, and whether the app is in
++    // the background.
++    RenderNotices TakeNotices(bool& inBackground) {
++        std::lock_guard<std::mutex> lock(mutex);
++        RenderNotices taken = notices;
++        notices = {};
++        inBackground = background;
++        return taken;
++    }
++
++    // Guest thread: everything pushed since the last call.
++    void TakeInputs(std::vector<Input>& out) {
++        out.clear();
++        std::lock_guard<std::mutex> lock(mutex);
++        out.swap(inputs);
++    }
++
++    // Guest thread: one draw. frame is the SoC's whole LCD frame or null.
++    void Publish(const uint32_t* frame, uint32_t firstDirtyLine, uint32_t lastDirtyLine, bool lcdEnabled,
++                 uint32_t buttons, bool redraw) {
++        if (frame) {
++            lastDirtyLine = std::min<uint32_t>(lastDirtyLine, height - 1);
++            // The back buffer last held the frame from a few draws ago: bring the rows
++            // changed since then up to date as well.
++            auto& stale = staleLines[back];
++            const uint32_t first = std::min(firstDirtyLine, stale.first);
++            const uint32_t last = stale.first <= stale.last ? std::max(lastDirtyLine, stale.last) : lastDirtyLine;
++            if (first <= last)
++                memcpy(buffers[back].data() + size_t(first) * width, frame + size_t(first) * width,
++                       size_t(last - first + 1) * width * 4);
++            stale = {UINT32_MAX, 0};
++            for (int i = 0; i < 3; ++i) {
++                if (i == back) continue;
++                staleLines[i].first = std::min(staleLines[i].first, firstDirtyLine);
++                staleLines[i].last = std::max(staleLines[i].last, lastDirtyLine);
++            }
++        }
++        {
++            std::lock_guard<std::mutex> lock(mutex);
++            if (frame) {
++                std::swap(back, middle);
++                if (!pendingFrame) {
++                    pending.firstDirtyLine = firstDirtyLine;
++                    pending.lastDirtyLine = lastDirtyLine;
++                } else {
++                    pending.firstDirtyLine = std::min(pending.firstDirtyLine, firstDirtyLine);
++                    pending.lastDirtyLine = std::max(pending.lastDirtyLine, lastDirtyLine);
++                }
++                pendingFrame = true;
++            }
++            pending.lcdEnabled = lcdEnabled;
++            pending.buttons = buttons;
++            pending.redraw = pending.redraw || redraw;
++            pendingDraw = true;
++            woken = true;
++        }
++        wake.notify_one();
++    }
++
++    // SDL thread: the merged draw since the last take, if any. The pixels stay valid
++    // until the next take.
++    bool TakeDraw(DrawState& out) {
++        std::lock_guard<std::mutex> lock(mutex);
++        if (!pendingDraw) return false;
++        out = pending;
++        out.pixels = nullptr;
++        pending.redraw = false;
++        if (pendingFrame) {
++            std::swap(front, middle);
++            out.pixels = buffers[front].data();
++            hasFront = true;
++        }
++        pendingDraw = pendingFrame = false;
++        return true;
++    }
++    // SDL thread: the last frame it took, for a redraw after the renderer changes.
++    const uint32_t* FrontFrame() const { return hasFront ? buffers[front].data() : nullptr; }
++
++    // Guest thread: requests for the SDL thread.
++    void RequestRotation(Rotation rotation) {
++        std::lock_guard<std::mutex> lock(mutex);
++        rotationRequest = rotation;
++        woken = true;
++        wake.notify_one();
++    }
++    // Doesn't wake the SDL thread; it sets the title on its next wake.
++    void SetTitle(const std::string& title) {
++        std::lock_guard<std::mutex> lock(mutex);
++        titleRequest = title;
++    }
++    std::optional<Rotation> TakeRotation() {
++        std::lock_guard<std::mutex> lock(mutex);
++        auto rotation = rotationRequest;
++        rotationRequest.reset();
++        return rotation;
++    }
++    std::optional<std::string> TakeTitle() {
++        std::lock_guard<std::mutex> lock(mutex);
++        auto title = std::move(titleRequest);
++        titleRequest.reset();
++        return title;
++    }
++
++    // Runs work on the SDL thread and waits for it; runs it at once when called there.
++    // Used for replay snapshots and audio device calls, which belong to the SDL thread.
++    void Call(const std::function<void()>& work) {
++        if (std::this_thread::get_id() == renderThread) {
++            work();
++            return;
++        }
++        std::unique_lock<std::mutex> lock(mutex);
++        call = &work;
++        callDone = false;
++        woken = true;
++        wake.notify_one();
++        done.wait(lock, [&] { return callDone || stopped; });
++        call = nullptr;
++    }
++    // SDL thread: runs a waiting call, if any.
++    void RunCall() {
++        const std::function<void()>* work;
++        {
++            std::lock_guard<std::mutex> lock(mutex);
++            work = callDone ? nullptr : call;
++        }
++        if (!work) return;
++        (*work)();
++        {
++            std::lock_guard<std::mutex> lock(mutex);
++            callDone = true;
++        }
++        done.notify_all();
++    }
++
++    // SDL thread: waits until the guest thread or the filter has something, or the time
++    // is up. Returns false when the time ran out.
++    bool Wait(int ms) {
++        std::unique_lock<std::mutex> lock(mutex);
++        const bool wasWoken = wake.wait_for(lock, std::chrono::milliseconds(ms), [&] { return woken; });
++        woken = false;
++        return wasWoken;
++    }
++
++    // Guest thread: it has left its loop. SDL thread: it stops; the guest thread leaves
++    // its loop and any waiting call returns.
++    void Finish() {
++        std::lock_guard<std::mutex> lock(mutex);
++        finished = true;
++        woken = true;
++        wake.notify_one();
++    }
++    bool Finished() {
++        std::lock_guard<std::mutex> lock(mutex);
++        return finished;
++    }
++    void Stop() {
++        {
++            std::lock_guard<std::mutex> lock(mutex);
++            stopped = true;
++        }
++        done.notify_all();
++    }
++    bool Stopped() {
++        std::lock_guard<std::mutex> lock(mutex);
++        return stopped;
++    }
++
++   private:
++    struct Lines { uint32_t first, last; };
++
++    const int width, height;
++    const std::thread::id renderThread;
++
++    std::mutex mutex;
++    std::condition_variable wake, done;
++    bool woken{false};
++
++    // Frames. back and staleLines belong to the guest thread; middle, front and pending
++    // are shared under the mutex.
++    std::vector<uint32_t> buffers[3];
++    int back{0}, middle{1}, front{2};
++    bool hasFront{false};
++    Lines staleLines[3];
++    DrawState pending;
++    bool pendingDraw{false}, pendingFrame{false};
++
++    std::vector<Input> inputs;
++    RenderNotices notices;
++    bool background{false};
++    std::optional<Rotation> rotationRequest;
++    std::optional<std::string> titleRequest;
++    const std::function<void()>* call{nullptr};
++    bool callDone{true};
++    bool finished{false}, stopped{false};
++};
++
++#endif
+diff --git a/src/uarm/native/SdlAudioDriver.cpp b/src/uarm/native/SdlAudioDriver.cpp
+index 8ddc369..ca672fa 100644
+--- a/src/uarm/native/SdlAudioDriver.cpp
++++ b/src/uarm/native/SdlAudioDriver.cpp
+@@ -29,7 +29,7 @@ void SdlAudioDriver::Start() {
+         audioBuffering = true;
+         starting = true;
+         audioBackpressure = false;
+-        SDL_PauseAudioDevice(audioDevice, 0);
++        OnDeviceThread([&] { SDL_PauseAudioDevice(audioDevice, 0); });
+ 
+         return;
+     }
+@@ -46,8 +46,10 @@ void SdlAudioDriver::Start() {
+ 
+     SDL_AudioSpec audioSpecActual;
+ 
+-    audioDevice = SDL_OpenAudioDevice(nullptr, 0, &audioSpecRequested, &audioSpecActual,
+-                                      SDL_AUDIO_ALLOW_SAMPLES_CHANGE);
++    OnDeviceThread([&] {
++        audioDevice = SDL_OpenAudioDevice(nullptr, 0, &audioSpecRequested, &audioSpecActual,
++                                          SDL_AUDIO_ALLOW_SAMPLES_CHANGE);
++    });
+     if (audioDevice == 0) {
+         std::cout << "failed to open audio device" << std::endl;
+         return;
+@@ -66,14 +68,14 @@ void SdlAudioDriver::Start() {
+     backpressureThresholdStop = audioSpecActual.samples * (lowLatencyStartup ? 5 : 6);
+ 
+     initialized = true;
+-    SDL_PauseAudioDevice(audioDevice, 0);
++    OnDeviceThread([&] { SDL_PauseAudioDevice(audioDevice, 0); });
+ }
+ 
+ void SdlAudioDriver::Pause() {
+     if (!initialized) return;
+ 
+     soc->SetPcmOutputEnabled(false);
+-    SDL_PauseAudioDevice(audioDevice, 1);
++    OnDeviceThread([&] { SDL_PauseAudioDevice(audioDevice, 1); });
+ }
+ 
+ bool SdlAudioDriver::GetAudioBackpressure() const {
+diff --git a/src/uarm/native/SdlAudioDriver.h b/src/uarm/native/SdlAudioDriver.h
+index 798d8a4..8d5a6c0 100644
+--- a/src/uarm/native/SdlAudioDriver.h
++++ b/src/uarm/native/SdlAudioDriver.h
+@@ -4,6 +4,7 @@
+ #include <SDL.h>
+ 
+ #include <atomic>
++#include <functional>
+ 
+ class SoC;
+ struct AudioQueue;
+@@ -25,8 +26,15 @@ class SdlAudioDriver {
+ 
+     void AudioCallback(uint8_t* stream, int len);
+ 
++    // Runs the SDL device calls through run, which runs them on the SDL thread and waits.
++    // Android's background pause holds the device lock on that thread until resume.
++    void SetDeviceThread(std::function<void(const std::function<void()>&)> run) { deviceThread = std::move(run); }
++
+    private:
++    void OnDeviceThread(const std::function<void()>& work) { deviceThread ? deviceThread(work) : work(); }
++
+     SoC* soc;
++    std::function<void(const std::function<void()>&)> deviceThread;
+     AudioQueue* audioQueue;
+     SDL_AudioDeviceID audioDevice;
+ 
+diff --git a/src/uarm/native/SdlEventHandler.cpp b/src/uarm/native/SdlEventHandler.cpp
+index 77eca74..636b8ea 100644
+--- a/src/uarm/native/SdlEventHandler.cpp
++++ b/src/uarm/native/SdlEventHandler.cpp
+@@ -57,8 +57,12 @@ SdlEventHandler::SdlEventHandler(SoC* soc, float scale,
+ 
+ void SdlEventHandler::HandleEvents() {
+     SDL_Event event;
++    while (SDL_PollEvent(&event)) HandleEvent(event);
++}
+ 
+-    while (SDL_PollEvent(&event)) {
++void SdlEventHandler::HandleEvent(const SDL_Event& polled) {
++    SDL_Event event = polled;
++    {
+         switch (event.type) {
+             case SDL_QUIT:
+                 ReleaseInputs();
+@@ -79,7 +83,7 @@ void SdlEventHandler::HandleEvents() {
+                     if (pointerKey && !hardKeys[pointerKey]) soc->KeyDown(pointerKey);
+                     redrawRequested=true;
+                 }
+-                if (penDown || pointerKey) SDL_CaptureMouse(SDL_TRUE);
++                if (penDown || pointerKey) Capture(true);
+ 
+                 break;
+ 
+@@ -201,7 +205,11 @@ void SdlEventHandler::ReleasePointer() {
+         pointerKey=keyInvalid; redrawRequested=true;
+     }
+     if (penDown) { soc->PenUp();penDown=false; }
+-    SDL_CaptureMouse(SDL_FALSE);
++    Capture(false);
++}
++void SdlEventHandler::Capture(bool on) {
++    capture.store(on, std::memory_order_relaxed);
++    if (directCapture) SDL_CaptureMouse(on ? SDL_TRUE : SDL_FALSE);
+ }
+ void SdlEventHandler::ReleaseInputs() {
+     ReleasePointer();
+diff --git a/src/uarm/native/SdlEventHandler.h b/src/uarm/native/SdlEventHandler.h
+index f777ecd..97d392e 100644
+--- a/src/uarm/native/SdlEventHandler.h
++++ b/src/uarm/native/SdlEventHandler.h
+@@ -1,7 +1,10 @@
+ #ifndef _SDL_EVENT_HANDLER_
+ #define _SDL_EVENT_HANDLER_
+ 
++#include <SDL.h>
++
+ #include <array>
++#include <atomic>
+ #include "DeviceControls.h"
+ #include "Rotation.h"
+ #include "WindowLayout.h"
+@@ -13,7 +16,13 @@ class SdlEventHandler {
+     SdlEventHandler(SoC* soc, float scale, DisplayConfiguration& deviceDisplayConfiguration,
+                     Rotation rotation);
+ 
++    // Polls SDL and handles every event; for a single thread that owns SDL and the SoC.
+     void HandleEvents();
++    // Handles one event on the thread that owns the SoC, when another thread polls SDL.
++    void HandleEvent(const SDL_Event& event);
++    // With direct capture off, the SDL thread applies WantsCapture with SDL_CaptureMouse.
++    void SetDirectCapture(bool direct) { directCapture = direct; }
++    bool WantsCapture() const { return capture.load(std::memory_order_relaxed); }
+ 
+     uint32_t PressedButtons() const;
+     bool RedrawRequested() const;
+@@ -31,6 +40,7 @@ class SdlEventHandler {
+ 
+    private:
+     void ReleasePointer();
++    void Capture(bool on);
+     void ReleaseInputs();
+     bool OnScreen(int x, int y) const;
+     int ScreenWidth() const;
+@@ -54,6 +64,8 @@ class SdlEventHandler {
+     bool resized{false};
+     bool background{false};
+     bool fitted{false};
++    bool directCapture{true};
++    std::atomic<bool> capture{false};
+     WindowLayout layout;
+ 
+     int width;
+diff --git a/src/uarm/native/SdlRenderer.cpp b/src/uarm/native/SdlRenderer.cpp
+index b6da393..5843ee0 100644
+--- a/src/uarm/native/SdlRenderer.cpp
++++ b/src/uarm/native/SdlRenderer.cpp
+@@ -11,8 +11,6 @@
+ #include "DeviceControls.h"
+ 
+ namespace {
+-    constexpr uint32_t FLUSH_PIPELNE_FRAMES = 3;
+-
+     SDL_Texture* loadSilkscreen(SDL_Renderer* renderer) {
+         SDL_RWops* rwops = SDL_RWFromConstMem((const void*)silkscreenPng_data, silkscreenPng_len);
+         SDL_Surface* surface = IMG_LoadPNG_RW(rwops);
+@@ -31,6 +29,7 @@ SdlRenderer::SdlRenderer(SDL_Window* window, SoC* soc, float scale,
+                          WindowFit fit, uint32_t background)
+     : window(window),
+       soc(soc),
++      deviceType(soc->GetDeviceType()),
+       // A fitted window draws in device pixels and lets the renderer scale and place them.
+       scale(fit == WindowFit::none ? scale : 1.f),
+       rotation(rotation),
+@@ -57,7 +56,7 @@ SdlRenderer::SdlRenderer(SDL_Window* window, SoC* soc, float scale,
+         const int screenHeight = displayConfiguration.height + displayConfiguration.graffitiHeight;
+         const int deviceWidth = landscape ? screenHeight : displayConfiguration.width;
+         const int deviceHeight = (landscape ? displayConfiguration.width : screenHeight) +
+-                                 deviceControls(soc->GetDeviceType()).height;
++                                 deviceControls(deviceType).height;
+         layout = fitWindowLayout(fit, deviceWidth, deviceHeight, windowWidth, windowHeight);
+ 
+         // The viewport is in output pixels while the scale is 1, then the scale maps device
+@@ -90,7 +89,7 @@ SdlRenderer::SdlRenderer(SDL_Window* window, SoC* soc, float scale,
+ 
+     if (displayConfiguration.graffitiHeight > 0) {
+         // Devices with drawn silkscreen art use it when it fits the display mode.
+-        const auto& silkscreen = deviceSilkscreen(soc->GetDeviceType());
++        const auto& silkscreen = deviceSilkscreen(deviceType);
+         silkscreenTexture = silkscreen.count && silkscreen.width == displayConfiguration.width &&
+                                     silkscreen.height == displayConfiguration.graffitiHeight
+                                 ? createDeviceSilkscreen(renderer, silkscreen, artworkScale)
+@@ -135,19 +134,22 @@ bool SdlRenderer::SaveFramebuffer(const char* path, bool& blank) {
+ }
+ 
+ void SdlRenderer::Draw(bool forceRedraw, uint32_t buttons) {
+-    const bool controlsChanged=pressedButtons != buttons;
+-    forceRedraw = forceRedraw || controlsChanged;
+-    pressedButtons = buttons;
+-    const bool wasLcdEnabled = lcdEnabled;
+-    lcdEnabled = soc->LcdEnabled();
++    const bool lcd = soc->LcdEnabled();
+ 
+     uint32_t firstDirtyLine=0, lastDirtyLine=0;
+     uint32_t* frame = soc->GetPendingFrame(firstDirtyLine, lastDirtyLine);
+ 
+-    if (!frame && !forceRedraw && lcdEnabled == wasLcdEnabled &&
+-        flushPipelineCounter++ >= FLUSH_PIPELNE_FRAMES)
+-        return;
+-    if (frame || forceRedraw || lcdEnabled != wasLcdEnabled) flushPipelineCounter = 0;
++    if (!gate.Pass(frame != nullptr, forceRedraw, buttons, lcd)) return;
++    Render(frame, firstDirtyLine, lastDirtyLine, lcd, buttons);
++
++    soc->ResetPendingFrame();
++}
++
++void SdlRenderer::Render(const uint32_t* frame, uint32_t firstDirtyLine, uint32_t lastDirtyLine,
++                         bool lcdEnabled, uint32_t buttons) {
++    const bool controlsChanged = pressedButtons != buttons;
++    pressedButtons = buttons;
++    this->lcdEnabled = lcdEnabled;
+ 
+     if (frame) {
+         frame += firstDirtyLine * displayConfiguration.width;
+@@ -238,7 +240,7 @@ void SdlRenderer::Draw(bool forceRedraw, uint32_t buttons) {
+     const bool landscape=rotation==Rotation::landscape_90 || rotation==Rotation::landscape_270;
+     const int screenWidth=landscape ? displayConfiguration.height+displayConfiguration.graffitiHeight : displayConfiguration.width;
+     const int screenHeight=landscape ? displayConfiguration.width : displayConfiguration.height+displayConfiguration.graffitiHeight;
+-    const auto& controls=deviceControls(soc->GetDeviceType());
++    const auto& controls=deviceControls(deviceType);
+     if(controls.count) {
+         if(!controlsTexture)
+             controlsTexture=SDL_CreateTexture(renderer,SDL_PIXELFORMAT_ABGR8888,
+@@ -260,8 +262,6 @@ void SdlRenderer::Draw(bool forceRedraw, uint32_t buttons) {
+         } else drawDeviceControls(renderer,controls,screenWidth,screenHeight,scale,buttons);
+     }
+     SDL_RenderPresent(renderer);
+-
+-    soc->ResetPendingFrame();
+ }
+ 
+ // A fitted window clears to the background colour and the screen area to white.
+diff --git a/src/uarm/native/SdlRenderer.h b/src/uarm/native/SdlRenderer.h
+index 1813e48..6e1ec29 100644
+--- a/src/uarm/native/SdlRenderer.h
++++ b/src/uarm/native/SdlRenderer.h
+@@ -5,6 +5,7 @@
+ 
+ #include <cstdint>
+ 
++#include "RenderThread.h"
+ #include "Rotation.h"
+ #include "WindowLayout.h"
+ #include "SoC.h"
+@@ -17,7 +18,12 @@ class SdlRenderer {
+                 uint32_t background = 0);
+     ~SdlRenderer();
+ 
++    // Draws the SoC's pending frame on the calling thread, which owns the SoC.
+     void Draw(bool forceRedraw, uint32_t buttons = 0);
++    // Draws a frame handed over from the guest thread; never touches the SoC. frame is a
++    // whole LCD frame, or null to keep the last one; only its dirty rows are uploaded.
++    void Render(const uint32_t* frame, uint32_t firstDirtyLine, uint32_t lastDirtyLine, bool lcdEnabled,
++                uint32_t buttons);
+     // Saves the unrotated LCD frame as PNG. With the LCD off, or before the first frame,
+     // it saves a black frame of the same size and sets blank.
+     bool SaveFramebuffer(const char* path, bool& blank);
+@@ -41,10 +47,11 @@ class SdlRenderer {
+     bool frameTextureValid{false};
+     bool lcdEnabled{true};
+ 
+-    uint32_t flushPipelineCounter{0};
++    DrawGate gate;
+     uint32_t pressedButtons{0};
+ 
+     SoC* soc{nullptr};
++    DeviceType5 deviceType;
+ 
+     const float scale;
+     float artworkScale{1};
+diff --git a/src/uarm/native/main.cpp b/src/uarm/native/main.cpp
+index 57145db..4e009d1 100644
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -3,6 +3,7 @@
+ 
+ #include <SDL.h>
+ #include <SDL_image.h>
++#include <pthread.h>
+ #include <unistd.h>
+ 
+ #include <cstring>
+@@ -12,6 +13,8 @@
+ #include <optional>
+ #include <sstream>
+ #include <string>
++#include <thread>
++#include <vector>
+ 
+ #include "Cli.h"
+ #include "Commands.h"
+@@ -23,6 +26,7 @@
+ #include "Logging.h"
+ #include "MainLoop.h"
+ #include "InputReplay.h"
++#include "RenderThread.h"
+ #include "Rotation.h"
+ #include "SdlAudioDriver.h"
+ #include "SdlEventHandler.h"
+@@ -572,113 +576,280 @@ namespace {
+                 cout << "audio underrun" << endl;
+         };
+ 
+-        while (true) {
+-            uint64_t now = timestampUsec();
+-            if (options.runFor && now - startedAt >= uint64_t(*options.runFor) * 1000000) {
+-                cout << "bounded run complete; PC=0x" << hex
+-                     << cpuGetRegExternal(soc->GetCpu(), 15) << dec
+-                     << ", LCD=" << soc->LcdEnabled() << endl;
+-                break;
++        // Two threads from here on. This one, which made the window, owns SDL: events, the
++        // renderer, the window and audio device calls. The guest thread owns the SoC and
++        // runs the loop below; everything that reaches the guest, input included, happens
++        // on it in the same order and at the same points as with one thread. RenderLink
++        // carries SDL events to it in order and its LCD frames back.
++        RenderLink link(displayConfiguration.width, displayConfiguration.height);
++        sdlEventHandler.SetDirectCapture(false);
++        audioDriver.SetDeviceThread([&](const function<void()>& work) { link.Call(work); });
++
++        // SDL thread state: what it drew last, whether the app is hidden, and whether the
++        // window needs drawing again (redraw) or the whole frame uploaded again (redrawAll).
++        bool appBackground = false;
++        uint32_t shownButtons = 0;
++        bool shownLcd = true;
++        bool redraw = false, redrawAll = false;
++        // Draws what the guest thread published since the last draw. In the background the
++        // draw stays pending, so the newest frame is drawn on return. A draw with no new
++        // frame and nothing changed is skipped.
++        auto drawPending = [&]() {
++            if (appBackground) return;
++            DrawState draw;
++            const bool taken = link.TakeDraw(draw);
++            if (!taken && !redraw && !redrawAll) return;
++            if (!taken) {
++                draw.buttons = shownButtons;
++                draw.lcdEnabled = shownLcd;
+             }
+-
+-            sdlEventHandler.HandleEvents();
+-            if (sdlEventHandler.QuitRequested()) {
+-                if (!desktop) break;
+-                desktop->event("close");
+-                sdlEventHandler.ClearQuitRequested();
++            if (!draw.pixels && !draw.redraw && !redraw && !redrawAll && draw.buttons == shownButtons &&
++                draw.lcdEnabled == shownLcd)
++                return;
++            shownButtons = draw.buttons;
++            shownLcd = draw.lcdEnabled;
++            if (redrawAll) {
++                draw.pixels = link.FrontFrame();
++                draw.firstDirtyLine = 0;
++                draw.lastDirtyLine = displayConfiguration.height - 1;
+             }
++            redraw = redrawAll = false;
++            sdlRenderer->Render(draw.pixels, draw.firstDirtyLine, draw.lastDirtyLine, draw.lcdEnabled,
++                                draw.buttons);
++        };
+ 
+-            // A phone has the app in the background: no guest time, drawing or catch-up on
+-            // return. SDL pauses the audio device; the control socket still answers.
+-            if (sdlEventHandler.InBackground()) {
+-                mainLoop.PauseAt(now);
+-                if (desktop && desktop->poll(commandContext)) break;
+-                usleep(50000);
+-                continue;
+-            }
++        auto guestLoop = [&]() {
++            DrawGate gate;
++            vector<RenderLink::Input> inputs;
++            // Snapshots are taken on the SDL thread once it has drawn the newest frame.
++            auto snapshot = [&](const char* path, bool& blank) {
++                bool saved = false;
++                link.Call([&] {
++                    drawPending();
++                    saved = sdlRenderer->SaveFramebuffer(path, blank);
++                });
++                return saved;
++            };
++
++            while (!link.Stopped()) {
++                uint64_t now = timestampUsec();
++                if (options.runFor && now - startedAt >= uint64_t(*options.runFor) * 1000000) {
++                    cout << "bounded run complete; PC=0x" << hex
++                         << cpuGetRegExternal(soc->GetCpu(), 15) << dec
++                         << ", LCD=" << soc->LcdEnabled() << endl;
++                    break;
++                }
+ 
+-            // RPC and CLI controls can enable sound after --no-sound startup.
+-            // Backpressure must stop all guest clocks together. Suspending just
+-            // the codec lets DMA and the guest stream deadlines run ahead.
+-            const bool waitForAudio = soc->PcmOutputEnabled() && audioDriver.GetAudioBackpressure();
+-
+-            reportAudioUnderruns();
+-            // SIR peers need character-sized handoffs. A full display slice can
+-            // consume the original stack's entire discovery receive window.
+-            mainLoop.SetTimesliceUsec(infrared.GetConfig().kind!=HostSerial::Kind::off ? 1000 :
+-                options.experimentalFastAudio && static_cast<SocPXA*>(soc)->FastAudioActive()
+-                    ? 1000000 / 120 : 1000000 / MAIN_LOOP_FPS);
+-
+-            if (options.experimentalFastAudio && static_cast<SocPXA*>(soc)->FastAudioActive()) {
+-                const auto pending = audioQueuePendingSamples(audioQueue);
+-                if (!waitForPreviewAudio && pending > 3072) waitForPreviewAudio = true;
+-                if (waitForPreviewAudio && pending < 2048) waitForPreviewAudio = false;
+-            } else waitForPreviewAudio = false;
+-            serial.Service();
+-            usb.Service();
+-            infrared.Service();
+-            mainLoop.Cycle(now, waitForAudio || waitForPreviewAudio);
+-            serial.Service();
+-            usb.Service();
+-            infrared.Service();
+-            for (const auto& message : usb.TakeMessages()) cout << message << endl;
+-
+-            sdlRenderer->Draw(sdlEventHandler.RedrawRequested(), sdlEventHandler.PressedButtons());
+-            sdlEventHandler.ClearRedrawRequested();
+-
+-            replay.Dispatch((timestampUsec() - replayStartedAt) / 1000, *soc, *sdlRenderer);
+-
+-            if (now - lastSpeedDump > 1000000) {
+-                const uint64_t currentIps = mainLoop.GetCurrentIps();
+-                const uint64_t currentIpsMax = mainLoop.GetCurrentIpsMax();
+-                lastSpeedDump = now;
+-
+-                ostringstream s;
+-                s << "cp-uarm @ " << fixed << setprecision(2)
+-                  << static_cast<float>(currentIps) / 1000000 << " MIPS, limit "
+-                  << static_cast<float>(currentIpsMax) / 1000000 << " MIPS -> "
+-                  << (100 * currentIps) / currentIpsMax << "%" << endl
+-                  << flush;
+-
+-                SDL_SetWindowTitle(window, desktop ? desktopTitle.c_str() : s.str().c_str());
+-                if (options.runFor) cout << s.str();
+-            }
++                link.TakeInputs(inputs);
++                for (const auto& input : inputs) {
++                    if (!input.layout) {
++                        sdlEventHandler.HandleEvent(input.event);
++                        continue;
++                    }
++                    // The SDL thread laid the window out again after a resize or rotation. A
++                    // rotation applies here, with the layout made for it.
++                    if (input.rotation) sdlEventHandler.SetRotation(*input.rotation);
++                    sdlEventHandler.TakeResized();
++                    sdlEventHandler.SetLayout(input.windowLayout, fitted);
++                    soc->SetFramebufferDirty();
++                }
++                if (sdlEventHandler.QuitRequested()) {
++                    if (!desktop) break;
++                    desktop->event("close");
++                    sdlEventHandler.ClearQuitRequested();
++                }
+ 
+-            if (desktop) desktop->serialChanged(commandContext);
+-            if (desktop) desktop->usbChanged(commandContext);
+-            if (desktop) desktop->infraredChanged(commandContext);
+-            if (desktop) desktop->bluetoothChanged(commandContext);
+-            if (desktop && desktop->poll(commandContext)) break;
+-            if (!options.runFor && !desktop && cli::Execute(&commandContext)) break;
++                // A phone has the app in the background: no guest time, drawing or catch-up on
++                // return. SDL pauses the audio device; the control socket still answers.
++                if (sdlEventHandler.InBackground()) {
++                    mainLoop.PauseAt(now);
++                    if (desktop && desktop->poll(commandContext)) break;
++                    usleep(50000);
++                    continue;
++                }
+ 
+-            if (commandContext.rotation != rotation) {
+-                rotation = commandContext.rotation;
++                // RPC and CLI controls can enable sound after --no-sound startup.
++                // Backpressure must stop all guest clocks together. Suspending just
++                // the codec lets DMA and the guest stream deadlines run ahead.
++                const bool waitForAudio = soc->PcmOutputEnabled() && audioDriver.GetAudioBackpressure();
++
++                reportAudioUnderruns();
++                // SIR peers need character-sized handoffs. A full display slice can
++                // consume the original stack's entire discovery receive window.
++                mainLoop.SetTimesliceUsec(infrared.GetConfig().kind!=HostSerial::Kind::off ? 1000 :
++                    options.experimentalFastAudio && static_cast<SocPXA*>(soc)->FastAudioActive()
++                        ? 1000000 / 120 : 1000000 / MAIN_LOOP_FPS);
++
++                if (options.experimentalFastAudio && static_cast<SocPXA*>(soc)->FastAudioActive()) {
++                    const auto pending = audioQueuePendingSamples(audioQueue);
++                    if (!waitForPreviewAudio && pending > 3072) waitForPreviewAudio = true;
++                    if (waitForPreviewAudio && pending < 2048) waitForPreviewAudio = false;
++                } else waitForPreviewAudio = false;
++                serial.Service();
++                usb.Service();
++                infrared.Service();
++                mainLoop.Cycle(now, waitForAudio || waitForPreviewAudio);
++                serial.Service();
++                usb.Service();
++                infrared.Service();
++                for (const auto& message : usb.TakeMessages()) cout << message << endl;
++
++                // Hand the frame to the SDL thread; it uploads and presents it.
++                {
++                    const bool lcdEnabled = soc->LcdEnabled();
++                    uint32_t firstDirtyLine = 0, lastDirtyLine = 0;
++                    const uint32_t* frame = soc->GetPendingFrame(firstDirtyLine, lastDirtyLine);
++                    const uint32_t buttons = sdlEventHandler.PressedButtons();
++                    const bool redrawRequested = sdlEventHandler.RedrawRequested();
++                    if (gate.Pass(frame != nullptr, redrawRequested, buttons, lcdEnabled)) {
++                        link.Publish(frame, firstDirtyLine, lastDirtyLine, lcdEnabled, buttons, redrawRequested);
++                        soc->ResetPendingFrame();
++                    }
++                }
++                sdlEventHandler.ClearRedrawRequested();
+ 
+-                sdlRenderer.reset();
+-                sdlResizeWindow(window, displayConfiguration, scale, rotation, deviceControls(deviceType));
++                replay.Dispatch((timestampUsec() - replayStartedAt) / 1000, *soc, snapshot);
+ 
+-                sdlRenderer =
+-                    make_unique<SdlRenderer>(window, soc, scale, displayConfiguration, rotation, options.smoothLcd,
+-                                         options.windowFit, options.windowBackground);
+-                sdlEventHandler.SetRotation(rotation);
+-                sdlEventHandler.SetLayout(sdlRenderer->Layout(), fitted);
++                if (now - lastSpeedDump > 1000000) {
++                    const uint64_t currentIps = mainLoop.GetCurrentIps();
++                    const uint64_t currentIpsMax = mainLoop.GetCurrentIpsMax();
++                    lastSpeedDump = now;
+ 
+-                soc->SetFramebufferDirty();
++                    ostringstream s;
++                    s << "cp-uarm @ " << fixed << setprecision(2)
++                      << static_cast<float>(currentIps) / 1000000 << " MIPS, limit "
++                      << static_cast<float>(currentIpsMax) / 1000000 << " MIPS -> "
++                      << (100 * currentIps) / currentIpsMax << "%" << endl
++                      << flush;
++
++                    if (!desktop) link.SetTitle(s.str());
++                    if (options.runFor) cout << s.str();
++                }
++
++                if (desktop) desktop->serialChanged(commandContext);
++                if (desktop) desktop->usbChanged(commandContext);
++                if (desktop) desktop->infraredChanged(commandContext);
++                if (desktop) desktop->bluetoothChanged(commandContext);
++                if (desktop && desktop->poll(commandContext)) break;
++                if (!options.runFor && !desktop && cli::Execute(&commandContext)) break;
++
++                // The SDL thread resizes the window and sends the new layout back with the
++                // rotation; input uses the old rotation until then.
++                if (commandContext.rotation != rotation) {
++                    rotation = commandContext.rotation;
++                    link.RequestRotation(rotation);
++                }
++
++                const auto delay = mainLoop.GetSuggestedDelayUsec(timestampUsec());
++                if (delay > 10) usleep(delay);
+             }
++        };
+ 
+-            // A fitted window lays the device out again when it changes size.
+-            if (sdlEventHandler.TakeResized() && fitted) {
+-                sdlRenderer.reset();
+-                sdlRenderer = make_unique<SdlRenderer>(window, soc, scale, displayConfiguration, rotation,
+-                                                       options.smoothLcd, options.windowFit,
+-                                                       options.windowBackground);
+-                sdlEventHandler.SetLayout(sdlRenderer->Layout(), fitted);
+-                soc->SetFramebufferDirty();
++        // Events go straight from SDL to the guest thread through the filter. Setting the
++        // filter drops SDL's queue, so hand over what is queued first.
++        {
++            SDL_Event event;
++            while (SDL_PeepEvents(&event, 1, SDL_GETEVENT, SDL_FIRSTEVENT, SDL_LASTEVENT) > 0)
++                RenderLink::Filter(&link, &event);
++            SDL_SetEventFilter(RenderLink::Filter, &link);
++        }
++
++        exception_ptr guestError;
++        thread guest([&] {
++#ifdef __linux__
++            pthread_setname_np(pthread_self(), "FrondCore");
++#endif
++            try {
++                guestLoop();
++            } catch (...) {
++                guestError = current_exception();
+             }
++            link.Finish();
++        });
+ 
+-            const auto delay = mainLoop.GetSuggestedDelayUsec(timestampUsec());
+-            if (delay > 10) usleep(delay);
++        // The SDL thread: pumps SDL events, draws handed-over frames and serves the guest
++        // thread's requests until the guest thread leaves its loop.
++        exception_ptr renderError;
++        try {
++            bool captured = false;
++            Rotation shownRotation = rotation;
++            // A new renderer starts blank; draw the last frame into it at once.
++            auto newRenderer = [&](optional<Rotation> rotated) {
++                sdlRenderer.reset();
++                sdlRenderer = make_unique<SdlRenderer>(window, soc, scale, displayConfiguration, shownRotation,
++                                                       options.smoothLcd, options.windowFit, options.windowBackground);
++                link.PushLayout(sdlRenderer->Layout(), rotated);
++                if (!appBackground)
++                    sdlRenderer->Render(link.FrontFrame(), 0, displayConfiguration.height - 1, shownLcd, shownButtons);
++                else redrawAll = true;
++            };
++
++            // SDL's event pump runs the filter for desktop events and, on Android, notices
++            // pause and resume (which come as semaphores, not events) and checks AAudio.
++            // On Android the filter gets touches and window events without a pump, so the
++            // pump runs only after a window or app event and every 100 ms. X11 events only
++            // come in while SDL pumps, so the desktop pumps every 8 ms.
++#ifdef __ANDROID__
++            constexpr uint64_t pumpUsec = 100000;
++#else
++            constexpr uint64_t pumpUsec = 8000;
++#endif
++            uint64_t lastPump = 0;
++            while (!link.Finished()) {
++                const uint64_t waitUsec = appBackground ? 50000 : pumpUsec;
++                const uint64_t sincePump = timestampUsec() - lastPump;
++                link.Wait(sincePump >= waitUsec ? 0 : int((waitUsec - sincePump + 999) / 1000));
++
++                bool inBackground = appBackground;
++                RenderNotices notices = link.TakeNotices(inBackground);
++                if (notices.pump || timestampUsec() - lastPump >= waitUsec) {
++                    SDL_PumpEvents();
++                    lastPump = timestampUsec();
++                    // Anything SDL queued without the filter (none expected) goes over too.
++                    SDL_Event event;
++                    while (SDL_PeepEvents(&event, 1, SDL_GETEVENT, SDL_FIRSTEVENT, SDL_LASTEVENT) > 0)
++                        RenderLink::Filter(&link, &event);
++                    const RenderNotices pumped = link.TakeNotices(inBackground);
++                    notices.resized = notices.resized || pumped.resized;
++                    notices.redraw = notices.redraw || pumped.redraw;
++                    notices.foreground = notices.foreground || pumped.foreground;
++                }
++                appBackground = inBackground;
++                redraw = redraw || notices.redraw;
++                // Back from the background: upload the whole newest frame, in case the GL
++                // context was lost.
++                if (notices.foreground) redrawAll = true;
++                // A fitted window lays the device out again once per wake, after the resize
++                // events so far.
++                if (notices.resized && fitted) newRenderer(nullopt);
++
++                if (const auto requested = link.TakeRotation()) {
++                    shownRotation = *requested;
++                    sdlRenderer.reset();
++                    sdlResizeWindow(window, displayConfiguration, scale, shownRotation, deviceControls(deviceType));
++                    newRenderer(shownRotation);
++                }
++                if (const auto title = link.TakeTitle()) SDL_SetWindowTitle(window, title->c_str());
++
++                const bool capture = sdlEventHandler.WantsCapture();
++                if (capture != captured) {
++                    SDL_CaptureMouse(capture ? SDL_TRUE : SDL_FALSE);
++                    captured = capture;
++                }
++
++                drawPending();
++                link.RunCall();
++            }
++        } catch (...) {
++            renderError = current_exception();
+         }
++        link.Stop();
++        guest.join();
++        SDL_SetEventFilter(nullptr, nullptr);
++        if (renderError) rethrow_exception(renderError);
++        if (guestError) rethrow_exception(guestError);
++        // The last frame the guest thread published, as the one-thread loop drew it.
++        if (options.framebufferOutput) drawPending();
+ 
+         infrared.Stop();
+         serial.Stop();
