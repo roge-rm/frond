@@ -40,7 +40,8 @@ class PalmDatabases(private val context: Context, private val link: ControlLink)
     }
 
     fun launch(name: String) {
-        run("launch-app", name)
+        val reply = link.request("launch-app", name, timeoutSeconds = 120)
+        if (!reply.ok) throw Failed(if (reply.code == "launch") launchFailed(name) else message(reply))
     }
 
     // Writes every RAM database, or the one named, as a ZIP to a picked document.
@@ -116,6 +117,12 @@ class PalmDatabases(private val context: Context, private val link: ControlLink)
             }
             return found.sortedBy { it.name.lowercase() }
         }
+
+        // The core couldn't find or open the application. Built-in ones go by their database name,
+        // which often isn't the name in the launcher.
+        fun launchFailed(name: String) =
+            "Couldn't find an application with the database name \"$name\", or Palm OS is still starting. " +
+                "Built-in applications often have other database names: Memos is Memos-PMem."
 
         // The core's reply as a message. Not ready means the guest is in the middle of something.
         fun message(reply: ControlLink.Reply): String =

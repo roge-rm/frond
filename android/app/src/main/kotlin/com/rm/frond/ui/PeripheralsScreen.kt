@@ -275,7 +275,7 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
         AlertDialog(
             onDismissRequest = { confirmEject = false; confirmFiles = false },
             title = { Text("Eject the card?") },
-            text = { Text("Close any files open on the Palm first.") },
+            text = { Text(if (files) "Close any files open on the Palm first. Frond saves a recovery session before the exchange." else "Close any files open on the Palm first.") },
             confirmButton = {
                 TextButton(onClick = {
                     confirmEject = false

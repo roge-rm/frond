@@ -159,6 +159,70 @@ object Sessions {
         }
     }
 
+    // A session saved before an SD card exchange, like the desktop's "Before exchange.frond":
+    // files/recovery/before-exchange.frond, and before-exchange.json with the name it came from,
+    // written once the save is complete. Dropped after the exchange, kept as a session if it fails.
+    fun recoveryFolder(context: Context) = File(context.filesDir, "recovery")
+    fun recoveryFile(context: Context) = File(recoveryFolder(context), "before-exchange.frond")
+    private fun recoveryMeta(context: Context) = File(recoveryFolder(context), "before-exchange.json")
+
+    // Room a recovery save needs: the saved session's size with some slack, or for an unsaved one its
+    // firmware and RAM, as the save is compressed but can't be smaller than nothing.
+    fun recoveryNeeds(savedSize: Long?, device: Device): Long =
+        if (savedSize != null && savedSize > 0) savedSize + savedSize / 4 + (16L shl 20)
+        else device.norSize + device.nandSize + (64L shl 20)
+
+    // Saves the running session as the recovery copy. Returns an error message or null.
+    fun saveRecovery(context: Context, link: ControlLink, name: String): String? {
+        dropRecovery(context)
+        recoveryFolder(context).mkdirs()
+        val reply = link.request("save", recoveryFile(context).path, timeoutSeconds = 120)
+        if (!reply.ok || !recoveryFile(context).isFile) {
+            dropRecovery(context)
+            return reply.message.ifEmpty { "Couldn't save the session." }
+        }
+        try {
+            val meta = recoveryMeta(context)
+            val temporary = File(meta.path + ".tmp")
+            temporary.writeText(JSONObject().put("name", name).toString())
+            if (!temporary.renameTo(meta)) throw IOException("can't write ${meta.name}")
+        } catch (e: Exception) {
+            dropRecovery(context)
+            return "Couldn't save the session."
+        }
+        return null
+    }
+
+    fun dropRecovery(context: Context) {
+        recoveryFolder(context).listFiles().orEmpty().forEach { it.delete() }
+    }
+
+    // Moves a complete recovery copy into the session list as "<name> before exchange" and returns
+    // that name, or null when there was none. A save that didn't finish is dropped.
+    fun adoptRecovery(context: Context): String? {
+        val file = recoveryFile(context)
+        val meta = recoveryMeta(context)
+        try {
+            if (!file.isFile || !meta.isFile) return null
+            val type = header(file)?.third ?: return null
+            val device = Device.byCoreType(type.toInt()) ?: return null
+            val from = try { JSONObject(meta.readText()).getString("name") } catch (e: Exception) { device.label }
+            val id = UUID.randomUUID().toString()
+            if (!file.renameTo(data(context, id))) return null
+            // A recovery of a recovery keeps one "before exchange"; freeName numbers it.
+            val name = freeName(context, "${from.removeSuffix(" before exchange")} before exchange")
+            try {
+                write(context, Session(id, name, device, System.currentTimeMillis(), 0L, data(context, id)))
+            } catch (e: IOException) {
+                data(context, id).delete()
+                return null
+            }
+            return name
+        } finally {
+            dropRecovery(context)
+        }
+    }
+
     // Reads the session header: magic, version and device type, all little-endian 32-bit.
     private fun header(file: File): Triple<Long, Long, Long>? = try {
         java.io.DataInputStream(file.inputStream()).use { input ->
