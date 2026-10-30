@@ -139,6 +139,26 @@ object Sessions {
         "Couldn't export the session."
     }
 
+    // Saves the running Palm to a picked document, like the desktop's Save a Copy. The core saves to
+    // a private file first and keeps running from and saving to its own session. Blocks; run it off
+    // the main thread. Returns an error message or null.
+    fun saveCopy(context: Context, link: ControlLink, to: Uri): String? {
+        val folder = File(context.cacheDir, "sessions").also { it.mkdirs() }
+        val copy = File(folder, "copy.frond")
+        try {
+            val reply = link.request("save", copy.path, timeoutSeconds = 120)
+            if (!reply.ok) throw IOException(reply.message)
+            val output = context.contentResolver.openOutputStream(to, "wt") ?: throw IOException("no stream")
+            output.use { o -> copy.inputStream().use { it.copyTo(o, 1 shl 20) } }
+            return null
+        } catch (e: Exception) {
+            try { android.provider.DocumentsContract.deleteDocument(context.contentResolver, to) } catch (_: Exception) {}
+            return "Couldn't save the copy."
+        } finally {
+            copy.delete()
+        }
+    }
+
     // Reads the session header: magic, version and device type, all little-endian 32-bit.
     private fun header(file: File): Triple<Long, Long, Long>? = try {
         java.io.DataInputStream(file.inputStream()).use { input ->

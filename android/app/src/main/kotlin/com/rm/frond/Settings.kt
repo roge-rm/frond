@@ -21,6 +21,7 @@ data class Settings(
     val size: ScreenSize = ScreenSize.FIT,
     val smoothing: Boolean = false,
     val orientation: Orientation = Orientation.PHONE,
+    val sound: Boolean = true,
     val fastAudio: Boolean = false,
 ) {
     // HomeActivity passes these to FrondActivity, which runs in its own process.
@@ -28,6 +29,7 @@ data class Settings(
         .putExtra(EXTRA_SIZE, size.name)
         .putExtra(EXTRA_SMOOTHING, smoothing)
         .putExtra(EXTRA_ORIENTATION, orientation.name)
+        .putExtra(EXTRA_SOUND, sound)
         .putExtra(EXTRA_FAST_AUDIO, fastAudio)
 
     companion object {
@@ -35,6 +37,7 @@ data class Settings(
         private const val EXTRA_SIZE = "size"
         private const val EXTRA_SMOOTHING = "smoothing"
         private const val EXTRA_ORIENTATION = "orientation"
+        private const val EXTRA_SOUND = "sound"
         private const val EXTRA_FAST_AUDIO = "fastAudio"
 
         fun load(context: Context): Settings {
@@ -43,6 +46,7 @@ data class Settings(
                 size = enumOr(p.getString(EXTRA_SIZE, null), ScreenSize.FIT),
                 smoothing = p.getBoolean(EXTRA_SMOOTHING, false),
                 orientation = enumOr(p.getString(EXTRA_ORIENTATION, null), Orientation.PHONE),
+                sound = p.getBoolean(EXTRA_SOUND, true),
                 fastAudio = p.getBoolean(EXTRA_FAST_AUDIO, false),
             )
         }
@@ -52,6 +56,7 @@ data class Settings(
                 .putString(EXTRA_SIZE, settings.size.name)
                 .putBoolean(EXTRA_SMOOTHING, settings.smoothing)
                 .putString(EXTRA_ORIENTATION, settings.orientation.name)
+                .putBoolean(EXTRA_SOUND, settings.sound)
                 .putBoolean(EXTRA_FAST_AUDIO, settings.fastAudio)
                 .apply()
         }
@@ -64,6 +69,7 @@ data class Settings(
                 size = enumOr(extras.getString(EXTRA_SIZE), saved.size),
                 smoothing = extras.getBoolean(EXTRA_SMOOTHING, saved.smoothing),
                 orientation = enumOr(extras.getString(EXTRA_ORIENTATION), saved.orientation),
+                sound = extras.getBoolean(EXTRA_SOUND, saved.sound),
                 fastAudio = extras.getBoolean(EXTRA_FAST_AUDIO, saved.fastAudio),
             )
         }

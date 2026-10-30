@@ -1,0 +1,14 @@
+diff --git a/src/uarm/native/main.cpp b/src/uarm/native/main.cpp
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -826,7 +826,9 @@
+                     if (rotationPending) {
+                         shownRotation = *rotationPending;
+                         sdlRenderer.reset();
+-                        sdlResizeWindow(window, displayConfiguration, scale, shownRotation, deviceControls(deviceType));
++                        // A fitted window keeps its size and lays the rotated device out inside it.
++                        if (!fitted)
++                            sdlResizeWindow(window, displayConfiguration, scale, shownRotation, deviceControls(deviceType));
+                     }
+                     if (newRenderer(rotationPending)) {
+                         rotationPending.reset();

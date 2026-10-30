@@ -67,6 +67,10 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
     var confirmReplace by remember { mutableStateOf<String?>(null) }
     var naming by remember { mutableStateOf(false) }
     var exporting by remember { mutableStateOf<FatImage.Entry?>(null) }
+    var confirmReset by remember { mutableStateOf(false) }
+    val saveCopy = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
+        if (uri != null) model.saveCopy(uri)
+    }
 
     val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) model.job("Inserting", "Couldn't insert the image") { it.insertImage(uri) }
@@ -207,6 +211,12 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                     }
                     SdCard.State.UNKNOWN -> action("Try again") { model.refresh() }
                 }
+                item { Header("Device", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp)) }
+                action("Reset") { confirmReset = true }
+                action("Rotate") { model.rotate() }
+                item { Header("Session", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp)) }
+                action("Save a copy") { saveCopy.launch("${model.name}.frond") }
+                action("Emulator log") { model.showLog() }
                 item { Header("Not on Android yet", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp)) }
                 items(Peripheral.entries) { p ->
                     ListItem(
@@ -277,6 +287,16 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                 }) { Text("Replace") }
             },
             dismissButton = { TextButton(onClick = { confirmReplace = null }) { Text("Cancel") } },
+        )
+    }
+    if (confirmReset) {
+        AlertDialog(
+            onDismissRequest = { confirmReset = false },
+            title = { Text("Reset the ${model.device.label} now?") },
+            confirmButton = {
+                TextButton(onClick = { confirmReset = false; model.reset() }) { Text("Reset") }
+            },
+            dismissButton = { TextButton(onClick = { confirmReset = false }) { Text("Cancel") } },
         )
     }
     if (model.askingLeave) {
