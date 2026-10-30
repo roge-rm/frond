@@ -222,12 +222,12 @@ class FrondActivity : SDLActivity() {
         }, "FrondStopSave").start()
     }
 
-    // A small button in the corner that opens the Peripherals screen (SD card and the rest).
+    // A small button in the corner that opens the menu screen (applications, SD card and the rest).
     private fun addMenuButton() {
         val layout = SDLActivity.getContentView() as? RelativeLayout ?: return
         val button = android.widget.ImageButton(this).apply {
             setImageResource(R.drawable.ic_menu)
-            contentDescription = "Peripherals"
+            contentDescription = "Menu"
             setBackgroundColor(Color.TRANSPARENT)
             alpha = 0.7f
             val pad = (8 * resources.displayMetrics.density).toInt()

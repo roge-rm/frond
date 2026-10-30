@@ -18,8 +18,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-// What the Peripherals screen shows. Card work runs one job at a time off the main thread.
-class PeripheralsModel(private val activity: PeripheralsActivity, val device: Device, private val card: SdCard?) {
+// What the emulator's menu screen shows. Card and database work runs one job at a time off the main thread.
+class PeripheralsModel(
+    private val activity: PeripheralsActivity,
+    val device: Device,
+    private val card: SdCard?,
+    private val databases: PalmDatabases?,
+) {
     var state by mutableStateOf(SdCard.State.UNKNOWN)
         private set
     var busy by mutableStateOf<String?>(null)
@@ -37,6 +42,9 @@ class PeripheralsModel(private val activity: PeripheralsActivity, val device: De
         private set
     // Asking whether to insert the changed card on leaving the file view.
     var askingLeave by mutableStateOf(false)
+    // Asking for a database name: "launch" or "export", with the RAM databases found for the list.
+    var naming by mutableStateOf<String?>(null)
+    var found by mutableStateOf(emptyList<PalmDatabases.Info>())
 
     val available get() = card != null
 
@@ -59,6 +67,65 @@ class PeripheralsModel(private val activity: PeripheralsActivity, val device: De
             busy = null
             if (error != null) alert = failTitle to error
         }
+    }
+
+    // Database work through the control link; leaves the card state alone.
+    fun palm(label: String, failTitle: String, work: (PalmDatabases) -> Unit) {
+        val d = databases ?: return
+        if (busy != null) return
+        busy = label
+        activity.lifecycleScope.launch {
+            val error = withContext(Dispatchers.IO) {
+                try {
+                    work(d)
+                    null
+                } catch (e: Exception) {
+                    if (e is PalmDatabases.Failed) e.message else "Couldn't read or write the file."
+                }
+            }
+            busy = null
+            if (error != null) alert = failTitle to error
+        }
+    }
+
+    fun install(uri: android.net.Uri) = palm("Installing", "Couldn't install") { d ->
+        val result = d.install(uri)
+        activity.runOnUiThread { note = result }
+    }
+
+    // Asks for a name at once and fills the list of RAM databases in when it's read (an export of
+    // all of them, which can take a while). A failed list still lets you type a name.
+    var listing by mutableStateOf(false)
+        private set
+    private var asks = 0
+
+    fun askName(what: String) {
+        val d = databases ?: return
+        if (busy != null || naming != null) return
+        found = emptyList()
+        naming = what
+        listing = true
+        val asked = ++asks
+        activity.lifecycleScope.launch {
+            val list = withContext(Dispatchers.IO) {
+                try { d.list() } catch (e: Exception) { emptyList() }
+            }
+            // A later question has its own list coming.
+            if (asked != asks) return@launch
+            found = if (what == "launch") list.filter { it.application } else list
+            listing = false
+        }
+    }
+
+    // Launching returns to the Palm, where the application opens.
+    fun launch(name: String) = palm("Launching", "Couldn't launch") { d ->
+        d.launch(name)
+        activity.runOnUiThread { activity.finish() }
+    }
+
+    fun export(to: android.net.Uri, name: String?) = palm("Exporting", "Couldn't export") { d ->
+        d.export(to, name)
+        activity.runOnUiThread { note = if (name == null) "RAM databases exported" else "$name exported" }
     }
 
     fun refresh() = job("Reading", "Couldn't read the card") { }
@@ -127,7 +194,7 @@ class PeripheralsModel(private val activity: PeripheralsActivity, val device: De
     }
 }
 
-// The SD card and the other peripherals of the running Palm. Runs in the emulator's process and uses
+// The emulator's menu: applications and databases, the SD card and the other peripherals of the running Palm. Runs in the emulator's process and uses
 // FrondActivity's control link. While it's open the emulator is in the background and the guest is
 // paused; Home from here saves the session like it does from the emulator.
 class PeripheralsActivity : ComponentActivity() {
@@ -138,7 +205,12 @@ class PeripheralsActivity : ComponentActivity() {
         enableEdgeToEdge()
         val device = Device.byId(intent?.getStringExtra(FrondActivity.EXTRA_DEVICE)) ?: Device.TX
         val emulator = FrondActivity.running
-        model = PeripheralsModel(this, device, emulator?.let { SdCard(applicationContext, it.control, it.session) })
+        model = PeripheralsModel(
+            this,
+            device,
+            emulator?.let { SdCard(applicationContext, it.control, it.session) },
+            emulator?.let { PalmDatabases(applicationContext, it.control) },
+        )
         // Without the emulator (the process was restarted here) there's nothing to show.
         if (emulator == null) {
             finish()

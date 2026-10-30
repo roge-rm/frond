@@ -4,11 +4,13 @@ import android.text.format.Formatter
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -37,6 +39,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -45,6 +48,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.rm.frond.FatImage
+import com.rm.frond.PalmDatabases
 import com.rm.frond.Peripheral
 import com.rm.frond.PeripheralsModel
 import com.rm.frond.SdCard
@@ -73,6 +77,14 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
             model.note = "Card image exported"
         }
     }
+    val pickApp = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) model.install(uri)
+    }
+    // The database to export once a document is picked; null exports all RAM databases.
+    var exportName by rememberSaveable { mutableStateOf<String?>(null) }
+    val saveZip = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
+        if (uri != null) model.export(uri, exportName)
+    }
     val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) model.addFile(uri)
     }
@@ -93,7 +105,7 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(if (path == null) "Peripherals" else "SD card $path", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                title = { Text(if (path == null) model.device.label else "SD card $path", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                 navigationIcon = {
                     IconButton(onClick = { if (path == null) onClose() else if (path == "/") model.leaveFiles() else model.up() }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
@@ -156,7 +168,18 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
             }
         } else {
             LazyColumn(Modifier.padding(padding).fillMaxSize()) {
-                item { Header("SD card", Modifier.padding(horizontal = 16.dp)) }
+                fun action(label: String, onClick: () -> Unit) = item(key = label) {
+                    ListItem(headlineContent = { Text(label) }, modifier = Modifier.clickableRow(onClick = onClick))
+                }
+                item { Header("Applications", Modifier.padding(horizontal = 16.dp)) }
+                action("Install application") { pickApp.launch(arrayOf("*/*")) }
+                action("Launch application") { model.askName("launch") }
+                action("Export RAM databases") {
+                    exportName = null
+                    saveZip.launch("Palm databases.zip")
+                }
+                action("Export database") { model.askName("export") }
+                item { Header("SD card", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp)) }
                 item {
                     val (label, colour) = when (model.state) {
                         SdCard.State.INSERTED -> "Inserted" to MaterialTheme.colorScheme.primary
@@ -165,9 +188,6 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                         SdCard.State.UNKNOWN -> "Not known" to MaterialTheme.colorScheme.error
                     }
                     ListItem(headlineContent = { Text(label) }, leadingContent = { Marker(colour) })
-                }
-                fun action(label: String, onClick: () -> Unit) = item(key = label) {
-                    ListItem(headlineContent = { Text(label) }, modifier = Modifier.clickableRow(onClick = onClick))
                 }
                 when (model.state) {
                     SdCard.State.INSERTED -> {
@@ -271,6 +291,23 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
             },
         )
     }
+    model.naming?.let { what ->
+        DatabaseNameDialog(
+            title = if (what == "launch") "Launch application" else "Export database",
+            action = if (what == "launch") "Launch" else "Export",
+            found = model.found,
+            listing = model.listing,
+            onDismiss = { model.naming = null },
+            onChoose = { name ->
+                model.naming = null
+                if (what == "launch") model.launch(name)
+                else {
+                    exportName = name
+                    saveZip.launch("$name.zip")
+                }
+            },
+        )
+    }
     if (naming) {
         var name by remember { mutableStateOf("") }
         AlertDialog(
@@ -290,4 +327,48 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
             dismissButton = { TextButton(onClick = { naming = false }) { Text("Cancel") } },
         )
     }
+}
+
+// Asks for a Palm database name (up to 31 bytes), with the matching databases found in RAM to pick from.
+@Composable
+private fun DatabaseNameDialog(
+    title: String,
+    action: String,
+    found: List<PalmDatabases.Info>,
+    listing: Boolean,
+    onDismiss: () -> Unit,
+    onChoose: (String) -> Unit,
+) {
+    var name by remember { mutableStateOf("") }
+    val shown = found.filter { it.name.contains(name.trim(), ignoreCase = true) }
+    val valid = name.isNotBlank() && name.toByteArray(Charsets.ISO_8859_1).size <= 31
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            Column {
+                OutlinedTextField(
+                    name,
+                    { name = it },
+                    label = { Text("Palm database name") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (listing) Progress()
+                else if (shown.isNotEmpty()) {
+                    LazyColumn(Modifier.padding(top = 8.dp).heightIn(max = 280.dp)) {
+                        items(shown, key = { it.name }) { db ->
+                            ListItem(
+                                headlineContent = { Text(db.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                supportingContent = { Text(db.creator) },
+                                modifier = Modifier.clickableRow { onChoose(db.name) },
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(enabled = valid, onClick = { onChoose(name.trim()) }) { Text(action) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
