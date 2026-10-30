@@ -209,6 +209,33 @@ class PeripheralsModel(
 
     fun retryBeam() = IrBeam.retry()
 
+    // Bluetooth over the network, as the relay says, and what the core says about the Palm's radio.
+    var bluetooth by mutableStateOf(BtLink.status.value)
+        private set
+    var radio by mutableStateOf<String?>(null)
+        private set
+
+    fun watchBluetooth() {
+        activity.lifecycleScope.launch {
+            BtLink.status.collect {
+                bluetooth = it
+                readRadio()
+            }
+        }
+    }
+
+    fun readRadio() {
+        val l = link ?: return
+        activity.lifecycleScope.launch {
+            val reply = withContext(Dispatchers.IO) { l.request("bluetooth-state", timeoutSeconds = 30) }
+            radio = if (reply.ok) reply.message else null
+        }
+    }
+
+    fun changeBluetooth(mode: BtMode) = device("Changing Bluetooth", "Couldn't change Bluetooth", false) { l ->
+        BtLink.set(activity.applicationContext, l, mode).also { activity.runOnUiThread { readRadio() } }
+    }
+
     // Both go back to the Palm, where the reset or rotation shows.
     fun reset() = device("Resetting", "Couldn't reset", true) { send(it, "reset") }
 
@@ -321,6 +348,7 @@ class PeripheralsActivity : ComponentActivity() {
         model.readKeyboard()
         model.readNetwork()
         model.watchBeam()
+        model.watchBluetooth()
         setContent {
             FrondTheme {
                 Surface(Modifier.fillMaxSize()) {
