@@ -46,16 +46,17 @@ index 6c73b97..12f1e4f 100644
      // One entry per snapshot taken so far, in order: "ok", "failed", or "lcd-off" or
 diff --git a/src/uarm/native/RenderThread.h b/src/uarm/native/RenderThread.h
 new file mode 100644
-index 0000000..f0e47cc
+index 0000000..a70b875
 --- /dev/null
 +++ b/src/uarm/native/RenderThread.h
-@@ -0,0 +1,327 @@
+@@ -0,0 +1,393 @@
 +#ifndef FROND_RENDER_THREAD_H
 +#define FROND_RENDER_THREAD_H
 +
 +#include <SDL.h>
 +
 +#include <algorithm>
++#include <chrono>
 +#include <condition_variable>
 +#include <cstdint>
 +#include <cstring>
@@ -103,12 +104,24 @@ index 0000000..f0e47cc
 +    bool redraw{false};  // the guest asked for a redraw, e.g. after an expose or a new layout
 +};
 +
-+// What the SDL thread has to act on, gathered from SDL events by RenderLink::Filter.
++// What the SDL thread has to act on, gathered from SDL events by RenderLink's filter.
 +struct RenderNotices {
 +    bool resized{false};     // the window changed size
 +    bool redraw{false};      // the window needs drawing again
++    bool redrawAll{false};   // the textures were lost: upload the whole frame again
++    bool lost{false};        // the renderer was lost: make a new one
 +    bool pump{false};        // a window or app event came: run SDL's event pump soon
 +    bool foreground{false};  // the app came back from the background
++
++    RenderNotices& operator|=(const RenderNotices& other) {
++        resized = resized || other.resized;
++        redraw = redraw || other.redraw;
++        redrawAll = redrawAll || other.redrawAll;
++        lost = lost || other.lost;
++        pump = pump || other.pump;
++        foreground = foreground || other.foreground;
++        return *this;
++    }
 +};
 +
 +// Hands the guest thread's work over to the SDL thread and back. The SDL thread, the one
@@ -140,44 +153,34 @@ index 0000000..f0e47cc
 +        inputs.push_back(Input{true, {}, layout, rotation});
 +    }
 +
-+    // SDL event filter, installed with SDL_SetEventFilter(RenderLink::Filter, &link). SDL
-+    // runs it on the thread that pushes the event: Android's UI thread for touches, the
-+    // SDL thread inside its event pump otherwise. Every event goes straight to the guest
-+    // thread's queue and is dropped from SDL's own. Input doesn't wake the SDL thread;
-+    // window, app and render events do, so it can lay out, redraw or pump.
++    // SDL thread: installs Filter and hands SDL's queue over to the guest thread, with no
++    // event lost or doubled. SDL_SetEventFilter empties SDL's queue and the Android UI
++    // thread can push at any time, so a watch first holds each new event and marks SDL's
++    // copy of it, the older queued events go over, then the filter goes in and the held
++    // events follow. SDL checks for watches before it takes its lock, so a push already
++    // under way can miss the watch; the 1 ms wait lets it reach the queue first.
++    void InstallFilter() {
++        SDL_AddEventWatch(Hold, this);
++        std::this_thread::sleep_for(std::chrono::milliseconds(1));
++        SDL_FilterEvents(Queued, this);
++        SDL_SetEventFilter(Filter, this);
++        SDL_DelEventWatch(Hold, this);
++        std::lock_guard<std::mutex> lock(mutex);
++        ReleaseHeld();
++    }
++    // SDL thread: hands over anything SDL queued without the filter and empties its queue.
++    void DrainQueue() { SDL_FilterEvents(Queued, this); }
++
++    // SDL event filter, installed by InstallFilter. SDL runs it on the thread that pushes
++    // the event: Android's UI thread for touches, the SDL thread inside its event pump
++    // otherwise. Every event goes straight to the guest thread's queue and is dropped from
++    // SDL's own. Input doesn't wake the SDL thread; window, app and render events do, so
++    // it can lay out, redraw or pump.
 +    static int SDLCALL Filter(void* userdata, SDL_Event* event) {
 +        auto& link = *static_cast<RenderLink*>(userdata);
 +        std::lock_guard<std::mutex> lock(link.mutex);
-+        link.inputs.push_back(Input{false, *event, {}, std::nullopt});
-+        auto& n = link.notices;
-+        switch (event->type) {
-+            case SDL_WINDOWEVENT:
-+                if (event->window.event == SDL_WINDOWEVENT_SIZE_CHANGED) n.resized = true;
-+                if (event->window.event == SDL_WINDOWEVENT_EXPOSED) n.redraw = true;
-+                break;
-+            case SDL_APP_DIDENTERBACKGROUND:
-+                link.background = true;
-+                break;
-+            case SDL_APP_DIDENTERFOREGROUND:
-+                link.background = false;
-+                n.foreground = true;
-+                break;
-+            case SDL_RENDER_TARGETS_RESET:
-+            case SDL_RENDER_DEVICE_RESET:
-+                n.redraw = true;
-+                break;
-+            case SDL_QUIT:
-+            case SDL_APP_TERMINATING:
-+            case SDL_APP_LOWMEMORY:
-+            case SDL_APP_WILLENTERBACKGROUND:
-+            case SDL_APP_WILLENTERFOREGROUND:
-+                break;
-+            default:
-+                return 0;
-+        }
-+        n.pump = true;
-+        link.woken = true;
-+        link.wake.notify_one();
++        link.ReleaseHeld();
++        link.Take(*event);
 +        return 0;
 +    }
 +    // SDL thread: what the filter noticed since the last call, and whether the app is in
@@ -350,6 +353,68 @@ index 0000000..f0e47cc
 +   private:
 +    struct Lines { uint32_t first, last; };
 +
++    // Marks SDL's copy of an event the watch already holds.
++    static constexpr uint32_t heldStamp = 0xffffffff;
++
++    // Watch used while InstallFilter runs: holds each new event, in order.
++    static int SDLCALL Hold(void* userdata, SDL_Event* event) {
++        auto& link = *static_cast<RenderLink*>(userdata);
++        std::lock_guard<std::mutex> lock(link.mutex);
++        link.held.push_back(*event);
++        event->common.timestamp = heldStamp;
++        return 1;
++    }
++    // For SDL_FilterEvents: takes each queued event the watch doesn't hold and removes all.
++    static int SDLCALL Queued(void* userdata, SDL_Event* event) {
++        auto& link = *static_cast<RenderLink*>(userdata);
++        if (event->common.timestamp == heldStamp) return 0;
++        std::lock_guard<std::mutex> lock(link.mutex);
++        link.Take(*event);
++        return 0;
++    }
++    // With the mutex held: the events the watch held, behind the ones taken so far.
++    void ReleaseHeld() {
++        for (const auto& event : held) Take(event);
++        held.clear();
++    }
++    // With the mutex held: queues an event for the guest thread and notes what the SDL
++    // thread has to act on.
++    void Take(const SDL_Event& event) {
++        inputs.push_back(Input{false, event, {}, std::nullopt});
++        auto& n = notices;
++        switch (event.type) {
++            case SDL_WINDOWEVENT:
++                if (event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) n.resized = true;
++                if (event.window.event == SDL_WINDOWEVENT_EXPOSED) n.redraw = true;
++                break;
++            case SDL_APP_DIDENTERBACKGROUND:
++                background = true;
++                break;
++            case SDL_APP_DIDENTERFOREGROUND:
++                background = false;
++                n.foreground = true;
++                break;
++            case SDL_RENDER_TARGETS_RESET:
++                n.redrawAll = true;
++                break;
++            case SDL_RENDER_DEVICE_RESET:
++                n.redrawAll = true;
++                n.lost = true;
++                break;
++            case SDL_QUIT:
++            case SDL_APP_TERMINATING:
++            case SDL_APP_LOWMEMORY:
++            case SDL_APP_WILLENTERBACKGROUND:
++            case SDL_APP_WILLENTERFOREGROUND:
++                break;
++            default:
++                return;
++        }
++        n.pump = true;
++        woken = true;
++        wake.notify_one();
++    }
++
 +    const int width, height;
 +    const std::thread::id renderThread;
 +
@@ -367,6 +432,7 @@ index 0000000..f0e47cc
 +    bool pendingDraw{false}, pendingFrame{false};
 +
 +    std::vector<Input> inputs;
++    std::vector<SDL_Event> held;  // events the watch held while InstallFilter ran
 +    RenderNotices notices;
 +    bool background{false};
 +    std::optional<Rotation> rotationRequest;
@@ -535,7 +601,7 @@ index f777ecd..97d392e 100644
  
      int width;
 diff --git a/src/uarm/native/SdlRenderer.cpp b/src/uarm/native/SdlRenderer.cpp
-index b6da393..5843ee0 100644
+index b6da393..de5779f 100644
 --- a/src/uarm/native/SdlRenderer.cpp
 +++ b/src/uarm/native/SdlRenderer.cpp
 @@ -11,8 +11,6 @@
@@ -555,7 +621,15 @@ index b6da393..5843ee0 100644
        // A fitted window draws in device pixels and lets the renderer scale and place them.
        scale(fit == WindowFit::none ? scale : 1.f),
        rotation(rotation),
-@@ -57,7 +56,7 @@ SdlRenderer::SdlRenderer(SDL_Window* window, SoC* soc, float scale,
+@@ -41,6 +40,7 @@ SdlRenderer::SdlRenderer(SDL_Window* window, SoC* soc, float scale,
+     SDL_GetWindowSize(window, &windowWidth, &windowHeight);
+ 
+     renderer = SDL_CreateRenderer(window, -1, 0);
++    if (!renderer) return;
+ 
+     int renderHeight = windowHeight, renderWidth = windowWidth;
+     SDL_GetRendererOutputSize(renderer, &renderWidth, &renderHeight);
+@@ -57,7 +57,7 @@ SdlRenderer::SdlRenderer(SDL_Window* window, SoC* soc, float scale,
          const int screenHeight = displayConfiguration.height + displayConfiguration.graffitiHeight;
          const int deviceWidth = landscape ? screenHeight : displayConfiguration.width;
          const int deviceHeight = (landscape ? displayConfiguration.width : screenHeight) +
@@ -564,7 +638,7 @@ index b6da393..5843ee0 100644
          layout = fitWindowLayout(fit, deviceWidth, deviceHeight, windowWidth, windowHeight);
  
          // The viewport is in output pixels while the scale is 1, then the scale maps device
-@@ -90,7 +89,7 @@ SdlRenderer::SdlRenderer(SDL_Window* window, SoC* soc, float scale,
+@@ -90,7 +90,7 @@ SdlRenderer::SdlRenderer(SDL_Window* window, SoC* soc, float scale,
  
      if (displayConfiguration.graffitiHeight > 0) {
          // Devices with drawn silkscreen art use it when it fits the display mode.
@@ -573,7 +647,7 @@ index b6da393..5843ee0 100644
          silkscreenTexture = silkscreen.count && silkscreen.width == displayConfiguration.width &&
                                      silkscreen.height == displayConfiguration.graffitiHeight
                                  ? createDeviceSilkscreen(renderer, silkscreen, artworkScale)
-@@ -135,19 +134,22 @@ bool SdlRenderer::SaveFramebuffer(const char* path, bool& blank) {
+@@ -135,19 +135,23 @@ bool SdlRenderer::SaveFramebuffer(const char* path, bool& blank) {
  }
  
  void SdlRenderer::Draw(bool forceRedraw, uint32_t buttons) {
@@ -599,13 +673,14 @@ index b6da393..5843ee0 100644
 +
 +void SdlRenderer::Render(const uint32_t* frame, uint32_t firstDirtyLine, uint32_t lastDirtyLine,
 +                         bool lcdEnabled, uint32_t buttons) {
++    if (!renderer) return;
 +    const bool controlsChanged = pressedButtons != buttons;
 +    pressedButtons = buttons;
 +    this->lcdEnabled = lcdEnabled;
  
      if (frame) {
          frame += firstDirtyLine * displayConfiguration.width;
-@@ -238,7 +240,7 @@ void SdlRenderer::Draw(bool forceRedraw, uint32_t buttons) {
+@@ -238,7 +242,7 @@ void SdlRenderer::Draw(bool forceRedraw, uint32_t buttons) {
      const bool landscape=rotation==Rotation::landscape_90 || rotation==Rotation::landscape_270;
      const int screenWidth=landscape ? displayConfiguration.height+displayConfiguration.graffitiHeight : displayConfiguration.width;
      const int screenHeight=landscape ? displayConfiguration.width : displayConfiguration.height+displayConfiguration.graffitiHeight;
@@ -614,7 +689,7 @@ index b6da393..5843ee0 100644
      if(controls.count) {
          if(!controlsTexture)
              controlsTexture=SDL_CreateTexture(renderer,SDL_PIXELFORMAT_ABGR8888,
-@@ -260,8 +262,6 @@ void SdlRenderer::Draw(bool forceRedraw, uint32_t buttons) {
+@@ -260,8 +264,6 @@ void SdlRenderer::Draw(bool forceRedraw, uint32_t buttons) {
          } else drawDeviceControls(renderer,controls,screenWidth,screenHeight,scale,buttons);
      }
      SDL_RenderPresent(renderer);
@@ -624,7 +699,7 @@ index b6da393..5843ee0 100644
  
  // A fitted window clears to the background colour and the screen area to white.
 diff --git a/src/uarm/native/SdlRenderer.h b/src/uarm/native/SdlRenderer.h
-index 1813e48..6e1ec29 100644
+index 1813e48..5d3b956 100644
 --- a/src/uarm/native/SdlRenderer.h
 +++ b/src/uarm/native/SdlRenderer.h
 @@ -5,6 +5,7 @@
@@ -635,7 +710,7 @@ index 1813e48..6e1ec29 100644
  #include "Rotation.h"
  #include "WindowLayout.h"
  #include "SoC.h"
-@@ -17,7 +18,12 @@ class SdlRenderer {
+@@ -17,12 +18,20 @@ class SdlRenderer {
                  uint32_t background = 0);
      ~SdlRenderer();
  
@@ -648,7 +723,15 @@ index 1813e48..6e1ec29 100644
      // Saves the unrotated LCD frame as PNG. With the LCD off, or before the first frame,
      // it saves a black frame of the same size and sets blank.
      bool SaveFramebuffer(const char* path, bool& blank);
-@@ -41,10 +47,11 @@ class SdlRenderer {
+     // Where the device sits in the window, in window coordinates.
+     const WindowLayout& Layout() const { return layout; }
++    // False when SDL couldn't make the renderer, e.g. with no surface yet. Drawing then
++    // does nothing.
++    bool Valid() const { return renderer != nullptr; }
+ 
+    private:
+     void DrawSilkscreen();
+@@ -41,10 +50,11 @@ class SdlRenderer {
      bool frameTextureValid{false};
      bool lcdEnabled{true};
  
@@ -662,7 +745,7 @@ index 1813e48..6e1ec29 100644
      const float scale;
      float artworkScale{1};
 diff --git a/src/uarm/native/main.cpp b/src/uarm/native/main.cpp
-index 57145db..4e009d1 100644
+index 57145db..a34a1a5 100644
 --- a/src/uarm/native/main.cpp
 +++ b/src/uarm/native/main.cpp
 @@ -3,6 +3,7 @@
@@ -690,7 +773,7 @@ index 57145db..4e009d1 100644
  #include "Rotation.h"
  #include "SdlAudioDriver.h"
  #include "SdlEventHandler.h"
-@@ -572,113 +576,280 @@ namespace {
+@@ -572,113 +576,284 @@ namespace {
                  cout << "audio underrun" << endl;
          };
  
@@ -720,7 +803,7 @@ index 57145db..4e009d1 100644
 +        // draw stays pending, so the newest frame is drawn on return. A draw with no new
 +        // frame and nothing changed is skipped.
 +        auto drawPending = [&]() {
-+            if (appBackground) return;
++            if (appBackground || !sdlRenderer->Valid()) return;
 +            DrawState draw;
 +            const bool taken = link.TakeDraw(draw);
 +            if (!taken && !redraw && !redrawAll) return;
@@ -954,14 +1037,8 @@ index 57145db..4e009d1 100644
 -                                                       options.windowBackground);
 -                sdlEventHandler.SetLayout(sdlRenderer->Layout(), fitted);
 -                soc->SetFramebufferDirty();
-+        // Events go straight from SDL to the guest thread through the filter. Setting the
-+        // filter drops SDL's queue, so hand over what is queued first.
-+        {
-+            SDL_Event event;
-+            while (SDL_PeepEvents(&event, 1, SDL_GETEVENT, SDL_FIRSTEVENT, SDL_LASTEVENT) > 0)
-+                RenderLink::Filter(&link, &event);
-+            SDL_SetEventFilter(RenderLink::Filter, &link);
-+        }
++        // Events go straight from SDL to the guest thread through the filter.
++        link.InstallFilter();
 +
 +        exception_ptr guestError;
 +        thread guest([&] {
@@ -984,15 +1061,25 @@ index 57145db..4e009d1 100644
 +        try {
 +            bool captured = false;
 +            Rotation shownRotation = rotation;
-+            // A new renderer starts blank; draw the last frame into it at once.
++            // A new renderer or rotation waits while the app is in the background, as Android
++            // may have no surface to draw on until it is back.
++            bool rebuild = !sdlRenderer->Valid(), rendererFailed = false;
++            optional<Rotation> rotationPending;
++            // A new renderer starts blank; draw the last frame into it at once. Returns false
++            // when SDL couldn't make one, to try again on the next wake.
 +            auto newRenderer = [&](optional<Rotation> rotated) {
 +                sdlRenderer.reset();
 +                sdlRenderer = make_unique<SdlRenderer>(window, soc, scale, displayConfiguration, shownRotation,
 +                                                       options.smoothLcd, options.windowFit, options.windowBackground);
++                if (!sdlRenderer->Valid()) {
++                    if (!rendererFailed) cerr << "failed to create renderer: " << SDL_GetError() << endl;
++                    rendererFailed = true;
++                    return false;
++                }
++                rendererFailed = false;
 +                link.PushLayout(sdlRenderer->Layout(), rotated);
-+                if (!appBackground)
-+                    sdlRenderer->Render(link.FrontFrame(), 0, displayConfiguration.height - 1, shownLcd, shownButtons);
-+                else redrawAll = true;
++                sdlRenderer->Render(link.FrontFrame(), 0, displayConfiguration.height - 1, shownLcd, shownButtons);
++                return true;
 +            };
 +
 +            // SDL's event pump runs the filter for desktop events and, on Android, notices
@@ -1017,28 +1104,28 @@ index 57145db..4e009d1 100644
 +                    SDL_PumpEvents();
 +                    lastPump = timestampUsec();
 +                    // Anything SDL queued without the filter (none expected) goes over too.
-+                    SDL_Event event;
-+                    while (SDL_PeepEvents(&event, 1, SDL_GETEVENT, SDL_FIRSTEVENT, SDL_LASTEVENT) > 0)
-+                        RenderLink::Filter(&link, &event);
-+                    const RenderNotices pumped = link.TakeNotices(inBackground);
-+                    notices.resized = notices.resized || pumped.resized;
-+                    notices.redraw = notices.redraw || pumped.redraw;
-+                    notices.foreground = notices.foreground || pumped.foreground;
++                    link.DrainQueue();
++                    notices |= link.TakeNotices(inBackground);
 +                }
 +                appBackground = inBackground;
 +                redraw = redraw || notices.redraw;
-+                // Back from the background: upload the whole newest frame, in case the GL
-+                // context was lost.
-+                if (notices.foreground) redrawAll = true;
++                // Back from the background or textures lost: upload the whole newest frame.
++                if (notices.foreground || notices.redrawAll) redrawAll = true;
 +                // A fitted window lays the device out again once per wake, after the resize
-+                // events so far.
-+                if (notices.resized && fitted) newRenderer(nullopt);
++                // events so far, and a lost renderer is made again.
++                if ((notices.resized && fitted) || notices.lost) rebuild = true;
++                if (const auto requested = link.TakeRotation()) rotationPending = requested;
 +
-+                if (const auto requested = link.TakeRotation()) {
-+                    shownRotation = *requested;
-+                    sdlRenderer.reset();
-+                    sdlResizeWindow(window, displayConfiguration, scale, shownRotation, deviceControls(deviceType));
-+                    newRenderer(shownRotation);
++                if (!appBackground && (rotationPending || rebuild)) {
++                    if (rotationPending) {
++                        shownRotation = *rotationPending;
++                        sdlRenderer.reset();
++                        sdlResizeWindow(window, displayConfiguration, scale, shownRotation, deviceControls(deviceType));
++                    }
++                    if (newRenderer(rotationPending)) {
++                        rotationPending.reset();
++                        rebuild = false;
++                    }
 +                }
 +                if (const auto title = link.TakeTitle()) SDL_SetWindowTitle(window, title->c_str());
 +
