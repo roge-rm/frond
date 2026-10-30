@@ -193,7 +193,14 @@ class PeripheralsModel(
         private set
 
     fun watchBeam() {
-        activity.lifecycleScope.launch { IrBeam.status.collect { beam = it } }
+        activity.lifecycleScope.launch {
+            IrBeam.status.collect {
+                val changed = it.phase != beam.phase
+                beam = it
+                // Beaming ending can come with the core restoring the keyboard from a loaded session.
+                if (changed) readKeyboard()
+            }
+        }
     }
 
     fun changeBeam(mode: BeamMode) = device("Changing infrared beaming", "Couldn't change infrared beaming", false) { l ->

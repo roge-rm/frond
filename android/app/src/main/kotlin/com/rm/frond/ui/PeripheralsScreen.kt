@@ -40,9 +40,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.graphics.Color
@@ -309,7 +312,7 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
         BeamDialog(
             current = model.beam.mode,
             last = remember { IrBeam.last(context) },
-            addresses = remember { IrBeam.addresses(context) },
+            addresses = produceState<List<String>?>(null) { value = withContext(Dispatchers.IO) { IrBeam.addresses(context) } }.value,
             onDismiss = { choosingBeam = false },
             onChoose = { mode ->
                 choosingBeam = false
@@ -470,7 +473,7 @@ private fun DatabaseNameDialog(
 }
 
 private fun beamText(s: IrBeam.Status): String = when (s.phase) {
-    IrBeam.Phase.OFF -> "Off"
+    IrBeam.Phase.OFF -> s.error?.let { "Off. $it" } ?: "Off"
     IrBeam.Phase.WAITING -> "Waiting for a peer on port ${(s.mode as? BeamMode.Listen)?.port}"
     IrBeam.Phase.CONNECTING -> "Connecting to ${(s.mode as? BeamMode.Connect)?.let { IrBeam.hostPort(it.host, it.port) }}"
     IrBeam.Phase.CONNECTED -> "Connected to ${s.peer ?: "a peer"}"
@@ -482,7 +485,7 @@ private fun beamText(s: IrBeam.Status): String = when (s.phase) {
 private fun BeamDialog(
     current: BeamMode,
     last: BeamMode?,
-    addresses: List<String>,
+    addresses: List<String>?,
     onDismiss: () -> Unit,
     onChoose: (BeamMode) -> Unit,
 ) {
@@ -519,7 +522,7 @@ private fun BeamDialog(
                         modifier = Modifier.fillMaxWidth(),
                     )
                     Text(
-                        if (addresses.isEmpty()) "No network address" else "This device: " + addresses.joinToString(", "),
+                        if (addresses == null) "Looking up this device's address" else if (addresses.isEmpty()) "No network address" else "This device: " + addresses.joinToString(", "),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(top = 8.dp),

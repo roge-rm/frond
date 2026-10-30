@@ -2,6 +2,9 @@ package com.rm.frond
 
 import android.content.Context
 import android.net.ConnectivityManager
+import android.os.ParcelFileDescriptor
+import android.system.Os
+import android.system.OsConstants
 import android.util.Log
 import java.io.IOException
 import java.net.Inet4Address
@@ -101,6 +104,8 @@ object IrBeam {
     private var corePort = 0
     private var server: ServerSocket? = null
     private var session: Session? = null
+    // FrondActivity's control link, for asking the core whether its infrared is still on our port.
+    @Volatile private var link: ControlLink? = null
 
     // The last mode set, for the choices shown next time.
     fun last(context: Context): BeamMode? =
@@ -115,6 +120,7 @@ object IrBeam {
     // Returns an error to show, or null.
     fun set(context: Context, link: ControlLink, mode: BeamMode): String? {
         stop()
+        this.link = link
         if (mode == BeamMode.Off) {
             val reply = link.request("irda-mode", "off", timeoutSeconds = 30)
             return if (reply.ok) null else reply.message
@@ -179,6 +185,7 @@ object IrBeam {
             server = null
             session?.close()
             session = null
+            link = null
             state.value = Status()
         }
     }
@@ -209,10 +216,16 @@ object IrBeam {
         while (gen == generation) {
             val peer = try { listener.accept() } catch (e: IOException) { return }
             synchronized(lock) {
-                // One peer at a time, like the core.
-                if (gen != generation || session != null) {
+                // One peer at a time, like the core. A new peer replaces the old one, which may have
+                // vanished without closing (a phone leaving the network).
+                if (gen != generation) {
                     try { peer.close() } catch (_: IOException) {}
                 } else {
+                    session?.let {
+                        Log.i(TAG, "beaming: a new peer replaces ${it.peer.inetAddress?.hostAddress}")
+                        it.close()
+                    }
+                    session = null
                     begin(gen, mode, peer)
                 }
             }
@@ -242,14 +255,42 @@ object IrBeam {
         }
     }
 
-    // One network peer joined to the core's endpoint. The core drops its side on reset, sleep or a loaded
-    // session; then this connects to it again and keeps the network peer.
+    // The core's infrared left our port (turned off, or a loaded session restored the keyboard): beaming is
+    // off and the reason shows.
+    private fun coreLeft(s: Session, reason: String) {
+        synchronized(lock) {
+            if (session !== s) return
+            session = null
+            if (s.generation != generation) return
+            ++generation
+            try { server?.close() } catch (_: IOException) {}
+            server = null
+            Log.i(TAG, "beaming: off, $reason")
+            state.value = Status(error = reason)
+        }
+    }
+
+    // Asks the core whether its infrared is still tcp on this port. Null means yes or can't tell yet (a busy
+    // core); otherwise the reason it isn't.
+    private fun coreGone(port: Int): String? {
+        val l = link ?: return "The emulator stopped."
+        val reply = l.request("irda-state", timeoutSeconds = 10)
+        if (!reply.ok) return if (reply.code == "timeout") null else reply.message
+        val text = reply.message
+        if (text.startsWith("tcp:$port ")) return null
+        return text.substringAfter("error: ", "").ifEmpty { "The emulator's infrared stopped." }
+    }
+
+    // One network peer joined to the core's endpoint. The core drops its side on reset or a loaded session,
+    // and closes its listening port while the Palm sleeps; this keeps the network peer and connects to the
+    // core again for as long as the core's infrared stays tcp on this port.
     private class Session(val generation: Int, val mode: BeamMode, val peer: Socket, val corePort: Int) {
         @Volatile private var core: Socket? = null
         @Volatile private var closed = false
 
         fun start() {
             try { peer.tcpNoDelay = true } catch (_: IOException) {}
+            keepAlive(peer)
             Thread(::fromPeer, "FrondBeamIn").apply { isDaemon = true }.start()
             Thread(::fromCore, "FrondBeamOut").apply { isDaemon = true }.start()
         }
@@ -293,10 +334,17 @@ object IrBeam {
                         tcpNoDelay = true
                     }
                 } catch (e: IOException) {
-                    if (++failures >= 10) {
-                        Log.w(TAG, "beaming: can't reach the core on 127.0.0.1:$corePort: $e")
-                        finish("The emulator's infrared stopped.")
-                        return
+                    // A sleeping Palm keeps the core's port closed until it wakes, which can be any time.
+                    if (++failures % 10 == 0) {
+                        val gone = coreGone(corePort)
+                        if (gone != null) {
+                            Log.w(TAG, "beaming: core left 127.0.0.1:$corePort: $gone")
+                            if (!closed) {
+                                close()
+                                coreLeft(this, gone)
+                            }
+                            return
+                        }
                     }
                     Thread.sleep(300)
                     continue
@@ -327,7 +375,24 @@ object IrBeam {
         }
     }
 
-    // This device's IPv4 addresses, for the other side to connect to.
+    // TCP keepalive, so a peer that vanished without closing is noticed in about two minutes. The idle
+    // and interval options are Linux's TCP_KEEPIDLE (4), TCP_KEEPINTVL (5) and TCP_KEEPCNT (6) in seconds
+    // and counts, which OsConstants doesn't name.
+    private fun keepAlive(socket: Socket) {
+        try { socket.keepAlive = true } catch (_: IOException) {}
+        try {
+            ParcelFileDescriptor.fromSocket(socket).use { pfd ->
+                Os.setsockoptInt(pfd.fileDescriptor, OsConstants.IPPROTO_TCP, 4, 60)
+                Os.setsockoptInt(pfd.fileDescriptor, OsConstants.IPPROTO_TCP, 5, 15)
+                Os.setsockoptInt(pfd.fileDescriptor, OsConstants.IPPROTO_TCP, 6, 4)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "beaming: keepalive times not set: $e")
+        }
+    }
+
+    // This device's IPv4 addresses, for the other side to connect to. Walks the network interfaces, so never
+    // on the main thread.
     fun addresses(context: Context): List<String> {
         val found = mutableListOf<String>()
         try {
