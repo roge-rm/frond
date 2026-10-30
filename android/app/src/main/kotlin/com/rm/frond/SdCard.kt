@@ -73,24 +73,42 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
         }
     }
 
-    // Starts editing: ejects the card if needed, exports it and checks it's a FAT16 card.
+    // Starts editing: ejects the card if needed, saves a recovery session like the desktop, exports the
+    // card and checks it's a FAT16 card. Refuses to start when there isn't room for the recovery copy.
     fun beginEdit() {
         folder.mkdirs()
         if (pendingFor(context, session) != null && !restorePending(context, link, session)) {
             throw Failed("The last edit of this card wasn't put back in the Palm. Close the emulator and open it again.")
         }
         discard()
+        Sessions.adoptRecovery(context)
+        val owner = session?.let { Sessions.read(context, File(it).name.removeSuffix(".frond")) }
+        val device = owner?.device ?: Device.TX
+        // The recovery copy, plus the card's working copy and the copy each edit makes.
+        val needs = Sessions.recoveryNeeds(owner?.file?.takeIf { it.isFile }?.length(), device) + 2 * FatImage.MAX_BYTES
+        val free = context.filesDir.usableSpace
+        if (free < needs) {
+            throw Failed("There isn't room to save a recovery session before the exchange. Free up about ${(needs - free + (1L shl 20) - 1) shr 20} MB and try again.")
+        }
         val inserted = state() == State.INSERTED
         wasInserted = inserted
         try {
             if (inserted) eject()
+            Sessions.saveRecovery(context, link, owner?.name ?: device.label)?.let {
+                throw Failed("Couldn't save a recovery session, so the exchange didn't start. $it")
+            }
+        } catch (e: Exception) {
+            if (inserted) try { reinsert() } catch (_: Exception) { }
+            throw e
+        }
+        try {
             run("sd-export", working.path)
             FatImage.open(working, false).use { }
         } catch (e: Exception) {
-            // Leave the card as it was found.
+            // Leave the card as it was found and keep the recovery session.
             File(folder, "card.img").delete()
             if (inserted) try { reinsert() } catch (_: Exception) { }
-            throw e
+            throw Failed(message(e) + kept(Sessions.adoptRecovery(context)))
         }
         changed = false
     }
@@ -160,9 +178,21 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
     }
 
     // Puts the edited image in the emulator, or the untouched card back when nothing changed.
+    // The recovery session goes once the card is back; a failed insert keeps it as a session.
     fun finishEdit() {
-        if (changed) run("sd-insert", working.path) else if (wasInserted) reinsert()
+        try {
+            if (changed) run("sd-insert", working.path) else if (wasInserted) reinsert()
+        } catch (e: Failed) {
+            throw Failed(message(e) + kept(Sessions.adoptRecovery(context)))
+        }
         discard()
+        Sessions.dropRecovery(context)
+    }
+
+    // Leaves the exchange without the changes; the card stays ejected and the recovery session goes.
+    fun cancelEdit() {
+        discard()
+        Sessions.dropRecovery(context)
     }
 
     // Drops the private copy; the card stays ejected.
@@ -254,6 +284,8 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
         // Removes private copies left by a process that stopped mid-edit. The edited card of a session
         // that still exists stays until it has been inserted.
         fun clean(context: Context) {
+            // A recovery session left by an exchange that never finished.
+            Sessions.adoptRecovery(context)
             val folder = File(context.filesDir, "sd-exchange")
             val marker = File(folder, PENDING)
             val owner = if (marker.isFile) marker.readText() else null
@@ -262,6 +294,9 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
                 if (!(keep && (it.name == "card.img" || it.name == PENDING))) it.delete()
             }
         }
+
+        // Says where the recovery session went, after a failed exchange.
+        fun kept(name: String?) = if (name == null) "" else "\n\nThe session from before the exchange is on the home screen as \"$name\"."
 
         fun message(e: Exception): String = when (e) {
             is Failed, is FatImage.FatException -> e.message ?: "Something went wrong."

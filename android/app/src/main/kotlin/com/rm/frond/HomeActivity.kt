@@ -26,7 +26,7 @@ class HomeModel(private val activity: HomeActivity) {
         private set
     // A message for a dialog, with its title.
     var alert by mutableStateOf<Pair<String, String>?>(null)
-    var firmwareFor by mutableStateOf<Device?>(null)
+    var firmwareOpen by mutableStateOf(false)
     var settingsOpen by mutableStateOf(false)
     var settings by mutableStateOf(Settings())
         private set
@@ -38,6 +38,10 @@ class HomeModel(private val activity: HomeActivity) {
 
     fun reload() {
         Firmware.recover(activity)
+        // A recovery session left by an SD exchange that never finished, once the emulator is gone.
+        if (!emulatorRunning()) Sessions.adoptRecovery(activity)?.let {
+            alert = "Exchange didn't finish" to "The session from before the SD card exchange is here as \"$it\"."
+        }
         sessions = Sessions.list(activity)
         firmwareReady = Device.shown.associateWith { Firmware.ready(activity, it) }
         settings = Settings.load(activity)
@@ -58,6 +62,11 @@ class HomeModel(private val activity: HomeActivity) {
         )
     }
 
+    private fun emulatorRunning(): Boolean {
+        val manager = activity.getSystemService(android.app.ActivityManager::class.java) ?: return true
+        return manager.runningAppProcesses.orEmpty().any { it.processName == activity.packageName + ":emulator" }
+    }
+
     fun newSession(device: Device) = start(Sessions.create(activity, device))
 }
 
@@ -70,12 +79,11 @@ class HomeActivity : ComponentActivity() {
         setContent {
             FrondTheme {
                 Surface(Modifier.fillMaxSize()) {
-                    val device = model.firmwareFor
-                    BackHandler(enabled = device != null) { model.firmwareFor = null }
+                    BackHandler(enabled = model.firmwareOpen) { model.firmwareOpen = false }
                     BackHandler(enabled = model.settingsOpen) { model.settingsOpen = false }
                     when {
                         model.settingsOpen -> SettingsScreen(model)
-                        device != null -> FirmwareScreen(model, device)
+                        model.firmwareOpen -> FirmwareScreen(model)
                         else -> HomeScreen(model)
                     }
                 }

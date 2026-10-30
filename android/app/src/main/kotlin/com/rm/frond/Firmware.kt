@@ -50,6 +50,52 @@ object Firmware {
         return Header.NONE
     }
 
+    // Picks the device from the NOR like desktop/FirmwareInput.h detectDevice: an E2 card header,
+    // else the Palm TX size. Null when it can't tell.
+    fun detect(nor: File): Device? {
+        val header = try { header(nor) } catch (e: IOException) { return null }
+        if (header == Header.E2 || header == Header.E2_WRONG_PLACE) return Device.E2
+        if (nor.length() == Device.TX.norSize) return Device.TX
+        return null
+    }
+
+    const val NOT_DETECTED = "This isn't a Palm TX or Tungsten E2 NOR image."
+
+    // A picked NOR is copied here first, so the device can be found before the import.
+    fun picked(context: Context) = File(File(context.filesDir, "firmware"), "picked-nor.bin")
+
+    // Bigger than any NOR the app takes; anything past it is refused while copying.
+    private const val PICK_LIMIT = 32L shl 20
+
+    // Copies a picked NOR into picked(). Returns an error message or null. Runs off the main thread.
+    fun pick(context: Context, uri: Uri): String? {
+        val to = picked(context)
+        to.parentFile?.mkdirs()
+        try {
+            val input = context.contentResolver.openInputStream(uri) ?: throw IOException("no stream")
+            input.use { i ->
+                to.outputStream().use { o ->
+                    val buffer = ByteArray(1 shl 20)
+                    var total = 0L
+                    while (true) {
+                        val n = i.read(buffer)
+                        if (n < 0) break
+                        total += n
+                        if (total > PICK_LIMIT) {
+                            to.delete()
+                            return NOT_DETECTED
+                        }
+                        o.write(buffer, 0, n)
+                    }
+                }
+            }
+            return null
+        } catch (e: Exception) {
+            to.delete()
+            return "Couldn't read the NOR image."
+        }
+    }
+
     private fun mib(bytes: Long) = if (bytes % (1L shl 20) == 0L) "${bytes shr 20} MiB" else "%,d bytes".format(bytes)
 
     // The same checks as desktop/FirmwareInput.h: the header names this device and the sizes fit.
@@ -107,20 +153,23 @@ object Firmware {
     // Held by import and recover so one can't run in the middle of the other.
     private val lock = Any()
 
-    // Copies the picked images into app storage. Checks them first and keeps the old ones on any error.
-    // Returns an error message, or null when the new firmware is in place. Runs off the main thread.
-    fun import(context: Context, device: Device, norUri: Uri, nandUri: Uri?): String? = synchronized(lock) {
-        return importLocked(context, device, norUri, nandUri)
+    // Puts the picked NOR (see pick) and NAND into app storage. Checks them first and keeps the old
+    // ones on any error. Returns an error message, or null when the new firmware is in place. Runs off
+    // the main thread.
+    fun import(context: Context, device: Device, nandUri: Uri?): String? = synchronized(lock) {
+        return importLocked(context, device, picked(context), nandUri)
     }
 
-    private fun importLocked(context: Context, device: Device, norUri: Uri, nandUri: Uri?): String? {
+    private fun importLocked(context: Context, device: Device, pickedNor: File, nandUri: Uri?): String? {
         val folder = folder(context, device)
         folder.mkdirs()
         recover(listOf(nor(context, device), nand(context, device)))
         val newNor = File(folder, "nor.bin.new")
         val newNand = File(folder, "nand.bin.new")
         try {
-            if (!copy(context, norUri, newNor)) return "Couldn't read the NOR image."
+            if (!pickedNor.isFile) return "Couldn't read the NOR image."
+            // A copy, so the pick stays for another try after an error.
+            if (!copyFile(pickedNor, newNor)) return "Couldn't read the NOR image."
             if (nandUri != null && !copy(context, nandUri, newNand)) return "Couldn't read the NAND image."
             check(device, newNor, if (nandUri != null) newNand else null)?.let { return it }
             // The old pair moves to *.old first, so a failed rename puts it back and never leaves
@@ -148,11 +197,20 @@ object Firmware {
                 placed += target
             }
             (pairs.map { it.second } + listOfNotNull(dropped)).forEach { File(it.path + ".old").delete() }
+            pickedNor.delete()
             return null
         } finally {
             newNor.delete()
             newNand.delete()
         }
+    }
+
+    private fun copyFile(from: File, to: File): Boolean = try {
+        from.copyTo(to, overwrite = true)
+        true
+    } catch (e: IOException) {
+        to.delete()
+        false
     }
 
     fun md5(file: File): String? = try {

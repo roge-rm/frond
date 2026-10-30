@@ -248,7 +248,7 @@ class PeripheralsModel(
 
     // Closes the file view and leaves the card ejected, without the changes.
     fun discard() = job("Reading", "Couldn't read the card") { c ->
-        c.discard()
+        c.cancelEdit()
         activity.runOnUiThread { path = null }
     }
 }

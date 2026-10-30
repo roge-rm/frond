@@ -223,7 +223,7 @@ private fun LazyListScope.deviceSection(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Header(device.label, Modifier.weight(1f))
-            TextButton(onClick = { model.firmwareFor = device }) { Text("Firmware") }
+            TextButton(onClick = { model.firmwareOpen = true }) { Text("Firmware") }
         }
     }
     if (model.firmwareReady[device] != true) {
@@ -231,7 +231,7 @@ private fun LazyListScope.deviceSection(
             ListItem(
                 headlineContent = { Text("No firmware") },
                 leadingContent = { Marker(MaterialTheme.colorScheme.error) },
-                trailingContent = { TextButton(onClick = { model.firmwareFor = device }) { Text("Import") } },
+                trailingContent = { TextButton(onClick = { model.firmwareOpen = true }) { Text("Import") } },
             )
         }
     }
