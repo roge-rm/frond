@@ -13,6 +13,11 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_EXTENSIONS ON)
 set(CMAKE_CXX_STANDARD 17)
 
+# Debug builds optimise all native code like the desktop's -O2 -g, SDL included, so
+# speed measured on a debug build holds for release.
+string(APPEND CMAKE_C_FLAGS_DEBUG " -O2")
+string(APPEND CMAKE_CXX_FLAGS_DEBUG " -O2")
+
 # Debug builds would turn on SDL_assert, and a failed one blocks on a dialog
 # (Android's audio enumeration trips one on capture devices).
 set(SDL_ASSERTIONS "release" CACHE STRING "" FORCE)

@@ -6,6 +6,8 @@ import android.content.pm.ApplicationInfo
 import android.media.AudioManager
 import android.system.Os
 import android.view.Gravity
+import android.view.Surface
+import android.view.SurfaceHolder
 import android.view.View
 import android.widget.RelativeLayout
 import android.widget.TextView
@@ -55,9 +57,12 @@ class FrondActivity : SDLActivity() {
         Os.setenv("SDL_ANDROID_BLOCK_ON_PAUSE_PAUSEAUDIO", "1", true)
         super.onCreate(savedInstanceState)
         fitInsideSystemBars()
+        requestFrameRate()
         addSavingNote()
         addMenuButton()
         SdCard.clean(this)
+        // An edited card kept from a kill goes back into the Palm once the core answers.
+        Thread { SdCard.restorePending(applicationContext, link, sessionPath) }.apply { isDaemon = true }.start()
         running = this
         if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) logSpeed()
         if (Build.VERSION.SDK_INT >= 33) {
@@ -123,6 +128,22 @@ class FrondActivity : SDLActivity() {
             view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
             insets
         }
+    }
+
+    // The core draws at most 60 frames a second. Saying so lets a 90 or 120 Hz display drop to
+    // 60 Hz, so frames show evenly instead of 11 and 22 ms apart.
+    private fun requestFrameRate() {
+        if (Build.VERSION.SDK_INT < 30) return
+        val holder = SDLActivity.mSurface?.holder ?: return
+        fun request(surface: Surface) {
+            if (surface.isValid) surface.setFrameRate(60f, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)
+        }
+        holder.addCallback(object : SurfaceHolder.Callback {
+            override fun surfaceCreated(holder: SurfaceHolder) = request(holder.surface)
+            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
+            override fun surfaceDestroyed(holder: SurfaceHolder) {}
+        })
+        request(holder.surface)
     }
 
     // SDL asks for an orientation from the window's shape; the setting decides instead.
@@ -323,6 +344,7 @@ class FrondActivity : SDLActivity() {
 
     // The control link, for the Peripherals screen in this process.
     val control: ControlLink get() = link
+    val session: String? get() = sessionPath
 
     companion object {
         // The emulator in this process, if it's up.
