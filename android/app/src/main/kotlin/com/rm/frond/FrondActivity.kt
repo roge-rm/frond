@@ -486,6 +486,7 @@ class FrondActivity : SDLActivity() {
         }
         if (running === this) running = null
         HostDns.stop(applicationContext)
+        IrBeam.stop()
         link.close()
         // Native statics in the core don't reset between runs, so the process ends with the activity.
         if (isFinishing) Process.killProcess(Process.myPid())

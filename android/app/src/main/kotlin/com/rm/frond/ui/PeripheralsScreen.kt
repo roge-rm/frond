@@ -50,7 +50,9 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.rm.frond.BeamMode
 import com.rm.frond.FatImage
+import com.rm.frond.IrBeam
 import com.rm.frond.NetworkMode
 import com.rm.frond.PalmDatabases
 import com.rm.frond.Peripheral
@@ -73,6 +75,7 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
     var exporting by remember { mutableStateOf<FatImage.Entry?>(null) }
     var confirmReset by remember { mutableStateOf(false) }
     var choosingNetwork by remember { mutableStateOf(false) }
+    var choosingBeam by remember { mutableStateOf(false) }
     val saveCopy = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
         if (uri != null) model.saveCopy(uri)
     }
@@ -219,14 +222,28 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                 item { Header("Device", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp)) }
                 item(key = "keyboard") {
                     val attached = model.keyboard
+                    // The keyboard and beaming share the Palm's infrared port.
+                    val usable = attached != null && model.beam.phase == IrBeam.Phase.OFF
+                    val faded = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
                     ListItem(
-                        headlineContent = { Text("Infrared keyboard") },
+                        headlineContent = { Text("Infrared keyboard", color = if (usable) Color.Unspecified else faded) },
                         trailingContent = {
-                            Switch(checked = attached == true, enabled = attached != null, onCheckedChange = { model.attachKeyboard(it) })
+                            Switch(checked = attached == true, enabled = usable, onCheckedChange = { model.attachKeyboard(it) })
                         },
-                        modifier = Modifier.clickableRow { if (attached != null) model.attachKeyboard(!attached) },
+                        modifier = if (usable) Modifier.clickableRow { model.attachKeyboard(attached != true) } else Modifier,
                     )
                 }
+                item(key = "beam") {
+                    val beam = model.beam
+                    val usable = model.keyboard == false
+                    val faded = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                    ListItem(
+                        headlineContent = { Text("Infrared beaming", color = if (usable) Color.Unspecified else faded) },
+                        supportingContent = { Text(beamText(beam), color = if (usable) Color.Unspecified else faded) },
+                        modifier = if (usable) Modifier.clickableRow { choosingBeam = true } else Modifier,
+                    )
+                }
+                if (model.beam.phase == IrBeam.Phase.DISCONNECTED) action("Connect again") { model.retryBeam() }
                 item(key = "network") {
                     val mode = model.network
                     val usable = model.device.network && mode != null
@@ -286,6 +303,18 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
             },
             confirmButton = {},
             dismissButton = { TextButton(onClick = { choosingNetwork = false }) { Text("Cancel") } },
+        )
+    }
+    if (choosingBeam) {
+        BeamDialog(
+            current = model.beam.mode,
+            last = remember { IrBeam.last(context) },
+            addresses = remember { IrBeam.addresses(context) },
+            onDismiss = { choosingBeam = false },
+            onChoose = { mode ->
+                choosingBeam = false
+                model.changeBeam(mode)
+            },
         )
     }
     if (choosingSize) {
@@ -436,6 +465,80 @@ private fun DatabaseNameDialog(
             }
         },
         confirmButton = { TextButton(enabled = valid, onClick = { onChoose(name.trim()) }) { Text(action) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+private fun beamText(s: IrBeam.Status): String = when (s.phase) {
+    IrBeam.Phase.OFF -> "Off"
+    IrBeam.Phase.WAITING -> "Waiting for a peer on port ${(s.mode as? BeamMode.Listen)?.port}"
+    IrBeam.Phase.CONNECTING -> "Connecting to ${(s.mode as? BeamMode.Connect)?.let { IrBeam.hostPort(it.host, it.port) }}"
+    IrBeam.Phase.CONNECTED -> "Connected to ${s.peer ?: "a peer"}"
+    IrBeam.Phase.DISCONNECTED -> s.error ?: "Disconnected"
+}
+
+// Off, wait for a peer on a port, or connect to another Frond's address.
+@Composable
+private fun BeamDialog(
+    current: BeamMode,
+    last: BeamMode?,
+    addresses: List<String>,
+    onDismiss: () -> Unit,
+    onChoose: (BeamMode) -> Unit,
+) {
+    val start = if (current != BeamMode.Off) current else last ?: BeamMode.Off
+    var choice by remember { mutableStateOf(if (current == BeamMode.Off) "off" else start.encode().substringBefore(':')) }
+    var port by remember { mutableStateOf(((start as? BeamMode.Listen)?.port ?: IrBeam.DEFAULT_PORT).toString()) }
+    var address by remember {
+        mutableStateOf((last as? BeamMode.Connect ?: start as? BeamMode.Connect)?.let { IrBeam.hostPort(it.host, it.port) } ?: "")
+    }
+    val mode: BeamMode? = when (choice) {
+        "listen" -> IrBeam.port(port)?.let { BeamMode.Listen(it) }
+        "connect" -> IrBeam.address(address)?.let { BeamMode.Connect(it.first, it.second) }
+        else -> BeamMode.Off
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Infrared beaming") },
+        text = {
+            Column {
+                for ((id, label) in listOf("off" to "Off", "listen" to "Wait for a peer", "connect" to "Connect to another Frond")) {
+                    ListItem(
+                        headlineContent = { Text(label) },
+                        leadingContent = { RadioButton(selected = choice == id, onClick = null) },
+                        modifier = Modifier.clickableRow { choice = id },
+                    )
+                }
+                if (choice == "listen") {
+                    OutlinedTextField(
+                        port,
+                        { port = it.filter(Char::isDigit).take(5) },
+                        label = { Text("Port") },
+                        singleLine = true,
+                        isError = mode == null,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Text(
+                        if (addresses.isEmpty()) "No network address" else "This device: " + addresses.joinToString(", "),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
+                if (choice == "connect") {
+                    OutlinedTextField(
+                        address,
+                        { address = it.trim() },
+                        label = { Text("Address and port") },
+                        placeholder = { Text("192.168.1.20:${IrBeam.DEFAULT_PORT}") },
+                        singleLine = true,
+                        isError = address.isNotEmpty() && mode == null,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+        },
+        confirmButton = { TextButton(enabled = mode != null, onClick = { mode?.let(onChoose) }) { Text("OK") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }

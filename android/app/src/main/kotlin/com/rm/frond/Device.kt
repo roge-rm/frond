@@ -3,7 +3,6 @@ package com.rm.frond
 // The peripherals the desktop shows for every device (desktop/FirmwareInput.h) that Android doesn't
 // do yet; these show greyed out.
 enum class Peripheral(val label: String) {
-    INFRARED("Infrared"),
     BLUETOOTH("Bluetooth"),
     USB("USB HotSync"),
     SERIAL("Serial port"),

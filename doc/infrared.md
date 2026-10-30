@@ -13,6 +13,38 @@ out/frond second.frond --irda tcp:5031
 python3 tools/link-irda.py 5030 5031
 ```
 
+## Beaming over the network
+
+Each link-irda.py endpoint can be a plain local port as above, `HOST:PORT` to
+connect to another machine, or `listen:PORT` to wait on all interfaces for one
+peer. On Android, open the emulator's menu, then Infrared beaming. Wait for a
+peer listens on a port (5030 by default) and shows the phone's address;
+Connect to another Frond takes `HOST:PORT`.
+
+Android to desktop, with the phone waiting on port 5030:
+
+```sh
+out/frond desk.frond --irda tcp:5031
+python3 tools/link-irda.py 5031 192.168.1.20:5030
+```
+
+Or the other way, with the phone set to connect to the desktop's address and port 5030:
+
+```sh
+python3 tools/link-irda.py 5031 listen:5030
+```
+
+Android to Android: one phone waits for a peer, the other connects to its
+address and port. Nothing runs on the desktop. From an Android emulator the
+desktop is 10.0.2.2; to reach one waiting in an emulator, run
+`adb forward tcp:5030 tcp:5030` and connect to 127.0.0.1:5030.
+
+The relay on the phone keeps waiting after a peer goes; Connect shows
+Disconnected with a Connect again button. link-irda.py exits when either side
+closes, so start it again. Beaming is off each time the emulator starts.
+
+## Using it
+
 Use Palm OS's normal Beam command. Both guests must be awake and the receiving
 Palm must have Beam Receive enabled. Ports bind to the local machine. The relay
 forwards bounded byte queues without changing the guest's IrLAP, IAS, TinyTP or

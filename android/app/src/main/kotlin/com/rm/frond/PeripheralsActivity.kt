@@ -188,6 +188,20 @@ class PeripheralsModel(
         if (reply.ok) null else reply.message
     }
 
+    // Infrared beaming over the network, as the relay says. Kept up to date while the menu is open.
+    var beam by mutableStateOf(IrBeam.status.value)
+        private set
+
+    fun watchBeam() {
+        activity.lifecycleScope.launch { IrBeam.status.collect { beam = it } }
+    }
+
+    fun changeBeam(mode: BeamMode) = device("Changing infrared beaming", "Couldn't change infrared beaming", false) { l ->
+        IrBeam.set(activity.applicationContext, l, mode)
+    }
+
+    fun retryBeam() = IrBeam.retry()
+
     // Both go back to the Palm, where the reset or rotation shows.
     fun reset() = device("Resetting", "Couldn't reset", true) { send(it, "reset") }
 
@@ -299,6 +313,7 @@ class PeripheralsActivity : ComponentActivity() {
         model.refresh()
         model.readKeyboard()
         model.readNetwork()
+        model.watchBeam()
         setContent {
             FrondTheme {
                 Surface(Modifier.fillMaxSize()) {
