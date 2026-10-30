@@ -4,7 +4,6 @@ package com.rm.frond
 // works on Android so far; these show greyed out.
 enum class Peripheral(val label: String) {
     NETWORK("Network"),
-    IR_KEYBOARD("Infrared keyboard"),
     INFRARED("Infrared"),
     BLUETOOTH("Bluetooth"),
     USB("USB HotSync"),

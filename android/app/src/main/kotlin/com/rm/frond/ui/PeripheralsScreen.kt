@@ -31,6 +31,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -212,6 +213,16 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                     SdCard.State.UNKNOWN -> action("Try again") { model.refresh() }
                 }
                 item { Header("Device", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp)) }
+                item(key = "keyboard") {
+                    val attached = model.keyboard
+                    ListItem(
+                        headlineContent = { Text("Infrared keyboard") },
+                        trailingContent = {
+                            Switch(checked = attached == true, enabled = attached != null, onCheckedChange = { model.attachKeyboard(it) })
+                        },
+                        modifier = Modifier.clickableRow { if (attached != null) model.attachKeyboard(!attached) },
+                    )
+                }
                 action("Reset") { confirmReset = true }
                 action("Rotate") { model.rotate() }
                 item { Header("Session", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp)) }
