@@ -75,6 +75,31 @@ fun registerFetch(name: String, url: String, sha256: String, source: File) = tas
 val fetchSdl = registerFetch("fetchSdl", sdlUrl, sdlSha256, sdlSource)
 val fetchSdlImage = registerFetch("fetchSdlImage", sdlImageUrl, sdlImageSha256, sdlImageSource)
 
+val networkRoot = rootProject.layout.buildDirectory.dir("net").get().asFile
+val networkTasks = listOf("arm64-v8a", "x86_64").map { abi ->
+    tasks.register<Exec>("buildNetwork${abi.replace("-", "").replace("_", "")}") {
+        group = "build"
+        inputs.file(rootProject.file("build-network.py"))
+        inputs.property("ndkVersion", "28.2.13676358")
+        inputs.file(File(androidComponents.sdkComponents.sdkDirectory.get().asFile,
+            "ndk/28.2.13676358/source.properties"))
+        outputs.files(listOf(".built", "install/lib/libslirp.a", "install/lib/libglib-2.0.a",
+            "install/lib/libpcre2-8.a", "install/lib/libiconv.a", "install/lib/libintl.a", "install/include/slirp/libslirp.h", "install/include/slirp/libslirp-version.h",
+            "install/include/glib-2.0/glib.h", "install/include/glib-2.0/glibconfig.h",
+            "install/lib/pkgconfig/glib-2.0.pc", "install/lib/pkgconfig/slirp.pc")
+            .map { File(networkRoot, "$abi/$it") })
+        commandLine("python3", rootProject.file("build-network.py"),
+            "--ndk", File(androidComponents.sdkComponents.sdkDirectory.get().asFile, "ndk/28.2.13676358"),
+            "--abi", abi, "--root", networkRoot)
+    }
+}
+networkTasks[1].configure { mustRunAfter(networkTasks[0]) }
+tasks.configureEach {
+    if (name.startsWith("configureCMake") || name.startsWith("buildCMake")) {
+        dependsOn(networkTasks)
+    }
+}
+
 android {
     namespace = "com.rm.frond"
     compileSdk {
@@ -93,6 +118,7 @@ android {
                 arguments += listOf(
                     "-DANDROID_STL=c++_shared",
                     "-DFROND_CORE=${coreSource.absolutePath}",
+                    "-DFROND_NETWORK_ROOT=${networkRoot.absolutePath}",
                     "-DSDL2_SOURCE=${sdlSource.absolutePath}",
                     "-DSDL2_IMAGE_SOURCE=${sdlImageSource.absolutePath}",
                     "-DFROND_SELF_TEST=${if (selfTest) "ON" else "OFF"}",
