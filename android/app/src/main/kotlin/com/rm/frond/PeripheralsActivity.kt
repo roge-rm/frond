@@ -215,9 +215,14 @@ class PeripheralsModel(
     var usb by mutableStateOf(UsbLink.status.value)
         private set
 
+    // The debugger's relay, on only when Settings turned it on for this run.
+    var debugger by mutableStateOf(DebugLink.status.value)
+        private set
+
     fun watchLinks() {
         activity.lifecycleScope.launch { SerialLink.status.collect { serial = it } }
         activity.lifecycleScope.launch { UsbLink.status.collect { usb = it } }
+        activity.lifecycleScope.launch { DebugLink.status.collect { debugger = it } }
     }
 
     fun changeSerial(mode: BeamMode) = device("Changing the serial port", "Couldn't change the serial port", false) { l ->

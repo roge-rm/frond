@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -27,10 +28,13 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
@@ -39,9 +43,12 @@ import androidx.compose.ui.unit.dp
 import com.rm.frond.ControllerMap
 import com.rm.frond.Device
 import com.rm.frond.HomeModel
+import com.rm.frond.NetRelay
 import com.rm.frond.PalmButton
 import com.rm.frond.Orientation
 import com.rm.frond.ScreenSize
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -69,9 +76,40 @@ fun SettingsScreen(model: HomeModel) {
             Header("Audio", Modifier.padding(top = 16.dp))
             SwitchRow("Sound", s.sound) { v -> model.update(s.copy(sound = v)) }
             SwitchRow("Low-latency audio", s.fastAudio) { v -> model.update(s.copy(fastAudio = v)) }
+            Header("Debugger", Modifier.padding(top = 16.dp))
+            SwitchRow("gdb server", s.debugger) { v -> model.update(s.copy(debugger = v)) }
+            if (s.debugger) DebuggerPort(s.debuggerPort) { v -> model.update(s.copy(debuggerPort = v)) }
             Header("Controller", Modifier.padding(top = 16.dp))
             for (device in Device.shown) ControllerSection(model, device)
         }
+    }
+}
+
+// The port gdb connects to on this device, saved once it's a valid port, with this device's addresses.
+@Composable
+private fun DebuggerPort(port: Int, onChange: (Int) -> Unit) {
+    val context = LocalContext.current
+    var text by remember { mutableStateOf(port.toString()) }
+    val valid = NetRelay.port(text) != null
+    OutlinedTextField(
+        text,
+        {
+            text = it.filter(Char::isDigit).take(5)
+            NetRelay.port(text)?.let(onChange)
+        },
+        label = { Text("Port") },
+        singleLine = true,
+        isError = !valid,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+    )
+    val addresses = produceState<List<String>?>(null) { value = withContext(Dispatchers.IO) { NetRelay.addresses(context) } }.value
+    if (addresses != null) {
+        Text(
+            if (addresses.isEmpty()) "No network address" else "This device: " + addresses.joinToString(", "),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 

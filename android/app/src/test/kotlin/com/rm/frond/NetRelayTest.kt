@@ -18,6 +18,24 @@ class NetRelayTest {
         assertEquals(UsbLink.DEFAULT_PORT, UsbLink.defaultPort)
         // Bluetooth has its own relay on 5032.
         assertEquals(setOf(5030, 5032, 5033, 5034), setOf(IrBeam.defaultPort, BtLink.DEFAULT_PORT, SerialLink.defaultPort, UsbLink.defaultPort))
+        // gdb's usual remote port.
+        assertEquals(3333, DebugLink.defaultPort)
+        assertEquals(DebugLink.DEFAULT_PORT, DebugLink.defaultPort)
+    }
+
+    @Test
+    fun debuggerReleaseConnectsOnce() {
+        // The core's gdb port opened at launch never leaves while the core runs.
+        assertNull(DebugLink.coreLeftReason("", 40123))
+        val port = DebugLink.freePort()!!
+        assertTrue(port in 1..65535)
+        // Nothing listening yet: the caller tries again.
+        assertFalse(DebugLink.release(port))
+        java.net.ServerSocket(port, 1, java.net.InetAddress.getByName("127.0.0.1")).use { core ->
+            assertTrue(DebugLink.release(port))
+            // The core sees a gdb that connected and closed at once.
+            core.accept().use { assertEquals(-1, it.getInputStream().read()) }
+        }
     }
 
     @Test
