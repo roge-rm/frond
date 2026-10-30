@@ -1,10 +1,18 @@
 import java.net.URI
 import java.security.MessageDigest
+import java.util.Properties
 
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
 }
+
+// Release signing comes from ../Keys/frond-keystore.properties, beside the
+// projects rather than in one. Without that file the release build is unsigned.
+val signingProperties: Properties? = rootProject.file("../../../AndroidStudioProjects/Keys/frond-keystore.properties")
+    .takeIf { it.exists() }
+    ?.let { f -> Properties().apply { f.inputStream().use { load(it) } } }
+val releaseStoreFile = signingProperties?.getProperty("storeFile")
 
 // The repo root, one above android/. The core is reconstructed there in build/source.
 val repoRoot: File = rootProject.projectDir.parentFile
@@ -100,9 +108,25 @@ android {
         }
     }
 
+    signingConfigs {
+        if (releaseStoreFile != null) {
+            create("release") {
+                storeFile = file(releaseStoreFile)
+                storePassword = signingProperties?.getProperty("storePassword")
+                keyAlias = signingProperties?.getProperty("keyAlias")
+                keyPassword = signingProperties?.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         debug {
             applicationIdSuffix = ".debug"
+        }
+        release {
+            if (releaseStoreFile != null) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
     sourceSets {
