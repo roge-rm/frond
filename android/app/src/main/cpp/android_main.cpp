@@ -3,6 +3,7 @@
 // moves the process into app storage and runs the desktop front end's main().
 #include <SDL.h>
 #include <android/log.h>
+#include <jni.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -111,4 +112,17 @@ extern "C" int SDL_main(int argc, char** argv) {
     std::fflush(stdout);
     LOG("core exited with %d", status);
     return status;
+}
+
+// Controller presses from FrondActivity, on the Android UI thread. They go into SDL's queue as key
+// events with no scancode, so the core's SdlEventHandler maps them by keycode alone to the Palm's
+// hardware buttons and never to the infrared keyboard. SDL_PushEvent is thread-safe.
+extern "C" JNIEXPORT void JNICALL Java_com_rm_frond_PalmButtons_push(JNIEnv*, jclass, jint keycode, jboolean down) {
+    SDL_Event event{};
+    event.type = down ? SDL_KEYDOWN : SDL_KEYUP;
+    event.key.timestamp = SDL_GetTicks();
+    event.key.state = down ? SDL_PRESSED : SDL_RELEASED;
+    event.key.keysym.scancode = SDL_SCANCODE_UNKNOWN;
+    event.key.keysym.sym = keycode;
+    SDL_PushEvent(&event);
 }
