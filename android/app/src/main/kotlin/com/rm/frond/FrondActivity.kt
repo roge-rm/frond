@@ -46,6 +46,8 @@ class FrondActivity : SDLActivity() {
     @Volatile private var panelOpen = false
     // One save at a time: the background save and the save on back.
     private val saveLock = Any()
+    // Game controller buttons and sticks to the Palm's buttons. UI thread only.
+    private lateinit var controller: ControllerInput
 
     override fun getLibraries(): Array<String> = arrayOf("c++_shared", "SDL2", "SDL2_image", "main")
 
@@ -66,6 +68,7 @@ class FrondActivity : SDLActivity() {
         addSavingNote()
         addMenuButton()
         addKeyboard()
+        addController()
         SdCard.clean(this)
         // An edited card kept from a kill goes back into the Palm once the core answers.
         Thread { SdCard.restorePending(applicationContext, link, sessionPath) }.apply { isDaemon = true }.start()
@@ -175,7 +178,58 @@ class FrondActivity : SDLActivity() {
             if (event.action == android.view.KeyEvent.ACTION_UP) leave()
             return true
         }
+        // Controller keys go to the Palm here and never reach SDL, so they don't also arrive as
+        // keyboard keys. Unused ones are swallowed too, or Android turns B into Back.
+        if (ControllerMap.fromController(event)) {
+            when (event.action) {
+                android.view.KeyEvent.ACTION_DOWN -> if (event.repeatCount == 0 && !leaving) controller.key(event.deviceId, event.keyCode, true)
+                android.view.KeyEvent.ACTION_UP -> controller.key(event.deviceId, event.keyCode, false)
+            }
+            return true
+        }
         return super.dispatchKeyEvent(event)
+    }
+
+    override fun dispatchGenericMotionEvent(event: android.view.MotionEvent): Boolean {
+        if (event.isFromSource(android.view.InputDevice.SOURCE_JOYSTICK) && event.action == android.view.MotionEvent.ACTION_MOVE) {
+            if (!leaving) {
+                controller.axes(
+                    event.deviceId,
+                    event.getAxisValue(android.view.MotionEvent.AXIS_X),
+                    event.getAxisValue(android.view.MotionEvent.AXIS_Y),
+                    event.getAxisValue(android.view.MotionEvent.AXIS_HAT_X),
+                    event.getAxisValue(android.view.MotionEvent.AXIS_HAT_Y),
+                )
+            }
+            return true
+        }
+        return super.dispatchGenericMotionEvent(event)
+    }
+
+    // Controller mapping for this device from Settings, and releases when a controller goes away.
+    private fun addController() {
+        val device = Device.byId(intent?.getStringExtra(EXTRA_DEVICE)) ?: Device.TX
+        val buttons = PalmButtons(device, link, cacheDir)
+        controller = ControllerInput(ControllerMap.load(this, device), buttons::press)
+        getSystemService(android.hardware.input.InputManager::class.java)?.registerInputDeviceListener(
+            object : android.hardware.input.InputManager.InputDeviceListener {
+                override fun onInputDeviceAdded(deviceId: Int) {}
+                override fun onInputDeviceChanged(deviceId: Int) {}
+                override fun onInputDeviceRemoved(deviceId: Int) = controller.release(deviceId)
+            },
+            null,
+        )
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        // Android stops sending a held controller's events to a window without focus.
+        if (!hasFocus) controller.releaseAll()
+        super.onWindowFocusChanged(hasFocus)
+    }
+
+    override fun onPause() {
+        controller.releaseAll()
+        super.onPause()
     }
 
     // Saves the session and asks the core to quit. SDL then finishes the activity when its main
@@ -184,6 +238,7 @@ class FrondActivity : SDLActivity() {
         if (leaving) return
         leaving = true
         runOnUiThread {
+            controller.releaseAll()
             hideKeyboard()
             keyboardButton?.visibility = View.GONE
             savingNote?.visibility = View.VISIBLE

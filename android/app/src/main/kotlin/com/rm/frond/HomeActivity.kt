@@ -31,6 +31,33 @@ class HomeModel(private val activity: HomeActivity) {
     var settings by mutableStateOf(Settings())
         private set
 
+    // Controller mapping per device, and the Palm button waiting for a controller key, if any.
+    var controllers by mutableStateOf(emptyMap<Device, ControllerMap>())
+        private set
+    var capturing by mutableStateOf<Pair<Device, PalmButton>?>(null)
+
+    fun assign(key: Int) {
+        val (device, button) = capturing ?: return
+        capturing = null
+        setController(device, controllers.getValue(device).assign(button, key))
+    }
+
+    fun clearButton(device: Device, button: PalmButton) {
+        capturing = null
+        setController(device, controllers.getValue(device).clear(button))
+    }
+
+    fun resetController(device: Device) {
+        capturing = null
+        ControllerMap.reset(activity, device)
+        controllers = controllers + (device to ControllerMap.defaults(device))
+    }
+
+    private fun setController(device: Device, map: ControllerMap) {
+        ControllerMap.save(activity, device, map)
+        controllers = controllers + (device to map)
+    }
+
     fun update(changed: Settings) {
         settings = changed
         Settings.save(activity, changed)
@@ -45,6 +72,7 @@ class HomeModel(private val activity: HomeActivity) {
         sessions = Sessions.list(activity)
         firmwareReady = Device.shown.associateWith { Firmware.ready(activity, it) }
         settings = Settings.load(activity)
+        controllers = Device.shown.associateWith { ControllerMap.load(activity, it) }
     }
 
     fun start(session: Session) {
@@ -80,7 +108,9 @@ class HomeActivity : ComponentActivity() {
             FrondTheme {
                 Surface(Modifier.fillMaxSize()) {
                     BackHandler(enabled = model.firmwareOpen) { model.firmwareOpen = false }
-                    BackHandler(enabled = model.settingsOpen) { model.settingsOpen = false }
+                    BackHandler(enabled = model.settingsOpen) {
+                        if (model.capturing != null) model.capturing = null else model.settingsOpen = false
+                    }
                     when {
                         model.settingsOpen -> SettingsScreen(model)
                         model.firmwareOpen -> FirmwareScreen(model)
@@ -89,6 +119,25 @@ class HomeActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    // The key just assigned, whose release shouldn't reach the screen.
+    private var assignedKey = 0
+
+    // While Settings waits for a controller key, the next one pressed is assigned.
+    override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        if (event.action == android.view.KeyEvent.ACTION_UP && event.keyCode == assignedKey) {
+            assignedKey = 0
+            return true
+        }
+        if (model.capturing != null && model.settingsOpen && ControllerMap.fromController(event)) {
+            if (event.action == android.view.KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                model.assign(event.keyCode)
+                assignedKey = event.keyCode
+            }
+            return true
+        }
+        return super.dispatchKeyEvent(event)
     }
 
     override fun onResume() {

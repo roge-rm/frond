@@ -22,6 +22,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -35,7 +36,10 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import com.rm.frond.ControllerMap
+import com.rm.frond.Device
 import com.rm.frond.HomeModel
+import com.rm.frond.PalmButton
 import com.rm.frond.Orientation
 import com.rm.frond.ScreenSize
 
@@ -65,6 +69,39 @@ fun SettingsScreen(model: HomeModel) {
             Header("Audio", Modifier.padding(top = 16.dp))
             SwitchRow("Sound", s.sound) { v -> model.update(s.copy(sound = v)) }
             SwitchRow("Low-latency audio", s.fastAudio) { v -> model.update(s.copy(fastAudio = v)) }
+            Header("Controller", Modifier.padding(top = 16.dp))
+            for (device in Device.shown) ControllerSection(model, device)
+        }
+    }
+}
+
+// Each Palm button with the controller keys that press it. Tap one, then press a controller key.
+@Composable
+private fun ControllerSection(model: HomeModel, device: Device) {
+    val map = model.controllers[device] ?: return
+    Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(device.label, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+        TextButton(onClick = { model.resetController(device) }) { Text("Reset to defaults") }
+    }
+    for (button in PalmButton.on(device)) {
+        val waiting = model.capturing == (device to button)
+        Row(
+            Modifier.fillMaxWidth()
+                .clickableRow { model.capturing = if (waiting) null else device to button }
+                .padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(button.label(device), Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
+            if (waiting) {
+                Text("Press a controller button", color = MaterialTheme.colorScheme.primary)
+                TextButton(onClick = { model.clearButton(device, button) }) { Text("Clear") }
+            } else {
+                val keys = map.keysFor(button)
+                Text(
+                    if (keys.isEmpty()) "None" else keys.joinToString(", ") { ControllerMap.keyName(it) },
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }
