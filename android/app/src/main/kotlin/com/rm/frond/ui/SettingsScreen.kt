@@ -63,6 +63,7 @@ fun SettingsScreen(model: HomeModel) {
                 model.update(s.copy(orientation = v))
             }
             Header("Audio", Modifier.padding(top = 16.dp))
+            SwitchRow("Sound", s.sound) { v -> model.update(s.copy(sound = v)) }
             SwitchRow("Low-latency audio", s.fastAudio) { v -> model.update(s.copy(fastAudio = v)) }
         }
     }

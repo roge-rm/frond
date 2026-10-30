@@ -88,6 +88,7 @@ class FrondActivity : SDLActivity() {
         }
         arguments += listOf("--window-fit", settings.size.arg, "--window-background", BACKGROUND_HEX)
         if (settings.smoothing) arguments += "--smooth-lcd"
+        if (!settings.sound) arguments += "--no-sound"
         if (settings.fastAudio && fastAudioQualified()) {
             arguments += "--fast-audio"
         } else {

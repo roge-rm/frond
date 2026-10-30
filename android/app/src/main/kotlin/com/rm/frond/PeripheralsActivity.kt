@@ -13,6 +13,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.lifecycleScope
 import com.rm.frond.ui.FrondTheme
+import com.rm.frond.ui.LogScreen
 import com.rm.frond.ui.PeripheralsScreen
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -24,6 +25,9 @@ class PeripheralsModel(
     val device: Device,
     private val card: SdCard?,
     private val databases: PalmDatabases?,
+    private val link: ControlLink?,
+    // The running session's name, for the copy's file name.
+    val name: String,
 ) {
     var state by mutableStateOf(SdCard.State.UNKNOWN)
         private set
@@ -128,6 +132,42 @@ class PeripheralsModel(
         activity.runOnUiThread { note = if (name == null) "RAM databases exported" else "$name exported" }
     }
 
+    // Device menu work through the control link; returns to the Palm when done if back is set.
+    private fun device(label: String, failTitle: String, back: Boolean, work: (ControlLink) -> String?) {
+        val l = link ?: return
+        if (busy != null) return
+        busy = label
+        activity.lifecycleScope.launch {
+            val error = withContext(Dispatchers.IO) { work(l) }
+            busy = null
+            if (error != null) alert = failTitle to error
+            else if (back) activity.finish()
+        }
+    }
+
+    private fun send(l: ControlLink, command: String): String? {
+        val reply = l.request(command, timeoutSeconds = 30)
+        return if (reply.ok) null else reply.message
+    }
+
+    // Both go back to the Palm, where the reset or rotation shows.
+    fun reset() = device("Resetting", "Couldn't reset", true) { send(it, "reset") }
+
+    fun rotate() = device("Rotating", "Couldn't rotate", true) { send(it, "rotate") }
+
+    fun saveCopy(to: android.net.Uri) = device("Saving", "Couldn't save a copy", false) { l ->
+        Sessions.saveCopy(activity.applicationContext, l, to).also { if (it == null) activity.runOnUiThread { note = "Copy saved" } }
+    }
+
+    // The core's log while the log view is open, or null when it's closed.
+    var log by mutableStateOf<String?>(null)
+
+    fun showLog() {
+        activity.lifecycleScope.launch {
+            log = withContext(Dispatchers.IO) { CoreLog.read(activity.applicationContext) }
+        }
+    }
+
     fun refresh() = job("Reading", "Couldn't read the card") { }
 
     // Lists the open folder again after a change.
@@ -210,6 +250,8 @@ class PeripheralsActivity : ComponentActivity() {
             device,
             emulator?.let { SdCard(applicationContext, it.control, it.session) },
             emulator?.let { PalmDatabases(applicationContext, it.control) },
+            emulator?.control,
+            emulator?.session?.let { Sessions.read(this, java.io.File(it).name.removeSuffix(".frond"))?.name } ?: device.label,
         )
         // Without the emulator (the process was restarted here) there's nothing to show.
         if (emulator == null) {
@@ -220,10 +262,13 @@ class PeripheralsActivity : ComponentActivity() {
         setContent {
             FrondTheme {
                 Surface(Modifier.fillMaxSize()) {
-                    BackHandler(enabled = model.path != null) {
-                        if (model.path == "/") model.leaveFiles() else model.up()
+                    BackHandler(enabled = model.path != null || model.log != null) {
+                        if (model.log != null) model.log = null
+                        else if (model.path == "/") model.leaveFiles() else model.up()
                     }
-                    PeripheralsScreen(model, onClose = { finish() })
+                    val log = model.log
+                    if (log != null) LogScreen(log, onClose = { model.log = null })
+                    else PeripheralsScreen(model, onClose = { finish() })
                 }
             }
         }
