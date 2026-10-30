@@ -586,16 +586,24 @@ object DebugLink : NetRelay(3333, "", "", "debugger", "debugger") {
 
     override fun coreLeftReason(state: String, port: Int): String? = null
 
-    // A free loopback port for --gdb, or null.
-    fun freePort(): Int? = try {
-        ServerSocket(0, 1, LOOPBACK).use { it.localPort }
-    } catch (e: IOException) {
-        null
+    // Holds a free loopback port for --gdb, or null when there's none: a socket bound with SO_REUSEADDR that never
+    // listens. The core's own SO_REUSEADDR bind and listen can share the port, while other binds and outgoing
+    // connections can't take it before the core gets there. Close it once the core is gone.
+    fun reservePort(): Socket? {
+        val socket = Socket()
+        return try {
+            socket.reuseAddress = true
+            socket.bind(InetSocketAddress(LOOPBACK, 0))
+            socket
+        } catch (e: IOException) {
+            try { socket.close() } catch (_: IOException) {}
+            null
+        }
     }
 
     // Lets a core that's still waiting for its first gdb go on: connecting and closing at once is a gdb that
     // came and went. A core that's already running takes it the same way and carries on. False when nothing
-    // answered on port.
+    // answered on port. With the port held by reservePort() nothing but the core can be listening on it.
     fun release(port: Int): Boolean = try {
         Socket().use { it.connect(InetSocketAddress(LOOPBACK, port), 1_000) }
         true

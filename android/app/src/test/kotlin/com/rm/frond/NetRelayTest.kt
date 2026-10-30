@@ -27,14 +27,22 @@ class NetRelayTest {
     fun debuggerReleaseConnectsOnce() {
         // The core's gdb port opened at launch never leaves while the core runs.
         assertNull(DebugLink.coreLeftReason("", 40123))
-        val port = DebugLink.freePort()!!
-        assertTrue(port in 1..65535)
-        // Nothing listening yet: the caller tries again.
-        assertFalse(DebugLink.release(port))
-        java.net.ServerSocket(port, 1, java.net.InetAddress.getByName("127.0.0.1")).use { core ->
-            assertTrue(DebugLink.release(port))
-            // The core sees a gdb that connected and closed at once.
-            core.accept().use { assertEquals(-1, it.getInputStream().read()) }
+        val loopback = java.net.InetAddress.getByName("127.0.0.1")
+        DebugLink.reservePort()!!.use { reserved ->
+            val port = reserved.localPort
+            assertTrue(port in 1..65535)
+            // Nothing listening yet: the caller tries again.
+            assertFalse(DebugLink.release(port))
+            // Another bind without SO_REUSEADDR can't take the held port.
+            assertTrue(runCatching { java.net.Socket().use { it.bind(java.net.InetSocketAddress(loopback, port)) } }.isFailure)
+            // The core binds with SO_REUSEADDR and listens on it while it's held.
+            java.net.ServerSocket().use { core ->
+                core.reuseAddress = true
+                core.bind(java.net.InetSocketAddress(loopback, port), 1)
+                assertTrue(DebugLink.release(port))
+                // The core sees a gdb that connected and closed at once.
+                core.accept().use { assertEquals(-1, it.getInputStream().read()) }
+            }
         }
     }
 
