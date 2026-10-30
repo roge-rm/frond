@@ -138,7 +138,7 @@ class PeripheralsActivity : ComponentActivity() {
         enableEdgeToEdge()
         val device = Device.byId(intent?.getStringExtra(FrondActivity.EXTRA_DEVICE)) ?: Device.TX
         val emulator = FrondActivity.running
-        model = PeripheralsModel(this, device, emulator?.let { SdCard(applicationContext, it.control) })
+        model = PeripheralsModel(this, device, emulator?.let { SdCard(applicationContext, it.control, it.session) })
         // Without the emulator (the process was restarted here) there's nothing to show.
         if (emulator == null) {
             finish()

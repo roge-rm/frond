@@ -86,21 +86,37 @@ object Firmware {
     }
 
     // Puts back a firmware file left as *.old by an import that was stopped between its renames.
-    fun recover(context: Context) {
-        for (device in Device.entries) {
-            for (target in listOf(nor(context, device), nand(context, device))) {
-                val old = File(target.path + ".old")
-                if (old.isFile && !target.exists()) old.renameTo(target)
-            }
-        }
+    // All or nothing per device: when any file with an .old is missing, the import was stopped, so the
+    // new files go and every .old comes back. Otherwise the import finished and the .old files go.
+    fun recover(context: Context) = synchronized(lock) {
+        for (device in Device.entries) recover(listOf(nor(context, device), nand(context, device)))
     }
+
+    internal fun recover(targets: List<File>) {
+        val olds = targets.map { File(it.path + ".old") }.filter { it.isFile }
+        if (olds.isEmpty()) return
+        if (targets.all { t -> !File(t.path + ".old").isFile || t.exists() }) {
+            olds.forEach { it.delete() }
+            return
+        }
+        // A target with no .old yet is still the old file (the stop came during the first renames).
+        olds.forEach { File(it.path.removeSuffix(".old")).delete() }
+        olds.forEach { it.renameTo(File(it.path.removeSuffix(".old"))) }
+    }
+
+    // Held by import and recover so one can't run in the middle of the other.
+    private val lock = Any()
 
     // Copies the picked images into app storage. Checks them first and keeps the old ones on any error.
     // Returns an error message, or null when the new firmware is in place. Runs off the main thread.
-    fun import(context: Context, device: Device, norUri: Uri, nandUri: Uri?): String? {
+    fun import(context: Context, device: Device, norUri: Uri, nandUri: Uri?): String? = synchronized(lock) {
+        return importLocked(context, device, norUri, nandUri)
+    }
+
+    private fun importLocked(context: Context, device: Device, norUri: Uri, nandUri: Uri?): String? {
         val folder = folder(context, device)
         folder.mkdirs()
-        recover(context)
+        recover(listOf(nor(context, device), nand(context, device)))
         val newNor = File(folder, "nor.bin.new")
         val newNand = File(folder, "nand.bin.new")
         try {
