@@ -100,6 +100,28 @@ tasks.configureEach {
     }
 }
 
+val bluetoothRoot = rootProject.layout.buildDirectory.dir("bt").get().asFile
+val bluetoothTasks = listOf("arm64-v8a", "x86_64").map { abi ->
+    tasks.register<Exec>("buildBluetooth${abi.replace("-", "").replace("_", "")}") {
+        group = "build"
+        inputs.file(rootProject.file("build-bluetooth.py"))
+        inputs.file(File(repoRoot, "tools/bluez-bdaddr.patch"))
+        inputs.file(File(androidComponents.sdkComponents.sdkDirectory.get().asFile,
+            "ndk/28.2.13676358/source.properties"))
+        outputs.file(File(bluetoothRoot, "$abi/.built"))
+        outputs.file(File(bluetoothRoot, "jniLibs/$abi/libbtvirt.so"))
+        commandLine("python3", rootProject.file("build-bluetooth.py"),
+            "--ndk", File(androidComponents.sdkComponents.sdkDirectory.get().asFile, "ndk/28.2.13676358"),
+            "--abi", abi, "--root", bluetoothRoot)
+    }
+}
+bluetoothTasks[1].configure { mustRunAfter(bluetoothTasks[0]) }
+tasks.configureEach {
+    if (name.startsWith("merge") && name.endsWith("JniLibFolders")) {
+        dependsOn(bluetoothTasks)
+    }
+}
+
 android {
     namespace = "com.rm.frond"
     compileSdk {
@@ -155,8 +177,12 @@ android {
             }
         }
     }
+    packaging {
+        jniLibs.useLegacyPackaging = true
+    }
     sourceSets {
         getByName("main") {
+            jniLibs.directories.add(File(bluetoothRoot, "jniLibs").absolutePath)
             // SDL's Java glue, SDLActivity and friends, straight from the pinned tarball.
             java.directories.add(File(sdlSource, "android-project/app/src/main/java").absolutePath)
         }
