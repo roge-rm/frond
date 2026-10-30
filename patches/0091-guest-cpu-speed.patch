@@ -1,0 +1,239 @@
+diff --git a/src/uarm/uarm/CPU.cpp b/src/uarm/uarm/CPU.cpp
+index 8a98b8a..833700a 100644
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -3747,17 +3747,17 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCyclePace(struct ArmCpu *cpu, uint32_t cyc
+ }
+ 
+ #ifndef __EMSCRIPTEN__
+-// icacheFetchCached for a va in the same 32-byte line as the previous fetch, so the
+-// line pointer is reused instead of recomputing the index. Revision, tag and decoded
+-// slot are still checked, since execFns can invalidate or (through nested execution)
+-// refill the line.
++// icacheFetchCached for a va in the same 32-byte line as the previous fetch. The line
++// was valid for lineVa when ic->epoch was lineEpoch, and the epoch moves on every
++// invalidation and refill, so an unchanged epoch means the line still holds lineVa.
++// The decoded slot is still checked, since execFns can decode other slots of the line.
+ template <int size>
+ static FORCE_INLINE bool cpuPrvFetchSameLine(const struct icache* ic, const struct icacheline* line,
+-                                             uint32_t lineVa, uint32_t va, uint32_t& instr,
+-                                             uint32_t& decoded) {
++                                             uint32_t lineVa, uint32_t lineEpoch, uint32_t va,
++                                             uint32_t& instr, uint32_t& decoded) {
+     // lineVa is line aligned, so this also requires va to be aligned to size.
+     if ((va & ~uint32_t((1u << CACHE_LINE_WIDTH_BITS) - size)) != lineVa) return false;
+-    if (line->revision != ic->revision || line->tag != calculateTag(va)) return false;
++    if (ic->epoch != lineEpoch) return false;
+     const unsigned offset = calculateLineIndex(va);
+     const uint32_t cached = line->decoded[offset >> 1];
+     constexpr uint32_t kind = size == 4 ? DECODED_BITS_ARM : DECODED_BITS_THUMB;
+@@ -3767,6 +3767,17 @@ static FORCE_INLINE bool cpuPrvFetchSameLine(const struct icache* ic, const stru
+     else instr = line->translatedThumbInstructions[offset >> 1];
+     return true;
+ }
++
++// After a fetch outside the fast path: remember pc's line for cpuPrvFetchSameLine if the
++// cache holds it now, otherwise make the fast path miss until the next slow fetch.
++static FORCE_INLINE void cpuPrvRememberLine(const struct icache* ic, uint32_t pc,
++                                            const struct icacheline*& line, uint32_t& lineVa,
++                                            uint32_t& lineEpoch) {
++    line = ic->cache + calculateIndex(pc);
++    lineVa = line->revision == ic->revision && line->tag == calculateTag(pc) ? maskLine(pc)
++                                                                             : 0xffffffff;
++    lineEpoch = ic->epoch;
++}
+ #endif
+ 
+ // debug is cpu->debugStub != NULL, which is fixed when the CPU is created.
+@@ -3780,6 +3791,7 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleThumb(struct ArmCpu *cpu, uint32_t cy
+     struct icache* const ic = cpu->ic;
+     const struct icacheline* line = ic->cache;
+     uint32_t lineVa = 0xffffffff;  // never matches: the fast path mask clears bits 1-4
++    uint32_t lineEpoch = ic->epoch;
+ #endif
+     bool ok;
+     uint32_t translatedInstr;
+@@ -3809,14 +3821,17 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleThumb(struct ArmCpu *cpu, uint32_t cy
+ 
+ #ifndef __EMSCRIPTEN__
+         const uint32_t pc = cpu->curInstrPC;
+-        ok = cpuPrvFetchSameLine<2>(ic, line, lineVa, pc, translatedInstr, decoded);
++        ok = cpuPrvFetchSameLine<2>(ic, line, lineVa, lineEpoch, pc, translatedInstr, decoded);
+         if (!ok) {
+-            ok = icacheFetchCached<2>(ic, pc, translatedInstr, decoded);
++            // Fetch through copies, so the fast path's values stay in registers.
++            uint32_t slowInstr = 0, slowDecoded = 0;
++            ok = icacheFetchCached<2>(ic, pc, slowInstr, slowDecoded);
+             if (!ok)
+-                ok = icacheFetch<memorySystemKind, 2, injected>(ic, pc, &fsr, translatedInstr,
+-                                                                decoded);
+-            line = ic->cache + calculateIndex(pc);
+-            lineVa = maskLine(pc);
++                ok = icacheFetch<memorySystemKind, 2, injected>(ic, pc, &fsr, slowInstr,
++                                                                slowDecoded);
++            translatedInstr = slowInstr;
++            decoded = slowDecoded;
++            cpuPrvRememberLine(ic, pc, line, lineVa, lineEpoch);
+         }
+ #else
+         ok = icacheFetch<memorySystemKind, 2, injected>(cpu->ic, cpu->curInstrPC, &fsr,
+@@ -3860,6 +3875,7 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleArm(struct ArmCpu *cpu, uint32_t cycl
+     struct icache* const ic = cpu->ic;
+     const struct icacheline* line = ic->cache;
+     uint32_t lineVa = 0xffffffff;  // never matches: the fast path mask clears bits 1-4
++    uint32_t lineEpoch = ic->epoch;
+ #endif
+     bool ok;
+     uint32_t instr, decoded;
+@@ -3888,12 +3904,17 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleArm(struct ArmCpu *cpu, uint32_t cycl
+ 
+ #ifndef __EMSCRIPTEN__
+         const uint32_t pc = cpu->curInstrPC;
+-        ok = cpuPrvFetchSameLine<4>(ic, line, lineVa, pc, instr, decoded);
++        ok = cpuPrvFetchSameLine<4>(ic, line, lineVa, lineEpoch, pc, instr, decoded);
+         if (!ok) {
+-            ok = icacheFetchCached<4>(ic, pc, instr, decoded);
+-            if (!ok) ok = icacheFetch<memorySystemKind, 4, injected>(ic, pc, &fsr, instr, decoded);
+-            line = ic->cache + calculateIndex(pc);
+-            lineVa = maskLine(pc);
++            // Fetch through copies, so the fast path's values stay in registers.
++            uint32_t slowInstr = 0, slowDecoded = 0;
++            ok = icacheFetchCached<4>(ic, pc, slowInstr, slowDecoded);
++            if (!ok)
++                ok = icacheFetch<memorySystemKind, 4, injected>(ic, pc, &fsr, slowInstr,
++                                                                slowDecoded);
++            instr = slowInstr;
++            decoded = slowDecoded;
++            cpuPrvRememberLine(ic, pc, line, lineVa, lineEpoch);
+         }
+ #else
+         ok = icacheFetch<memorySystemKind, 4, injected>(cpu->ic, cpu->curInstrPC, &fsr, instr,
+diff --git a/src/uarm/uarm/icache.cpp b/src/uarm/uarm/icache.cpp
+index 83ac75a..5cca0ac 100644
+--- a/src/uarm/uarm/icache.cpp
++++ b/src/uarm/uarm/icache.cpp
+@@ -58,6 +58,7 @@ void icacheInval(struct icache* ic) {
+         std::memset(buffer.words, 0, sizeof(buffer.words));
+     }
+     ic->revision++;
++    ic->epoch++;
+ 
+     if (ic->revision == 0) {
+         ic->revision = 1;
+@@ -104,6 +105,7 @@ void icacheInvalAddr(struct icache* ic, uint32_t va) {
+     if (line->revision != ic->revision || line->tag != calculateTag(va)) return;
+ 
+     line->revision = ic->revision - 1;
++    ic->epoch++;
+ }
+ 
+ void icacheInvalRange(struct icache* ic, uint32_t addr, uint32_t size) {
+@@ -224,6 +226,7 @@ bool icacheFetch(struct icache* ic, uint32_t va, uint_fast8_t* fsrP, uint32_t& i
+ 
+         line->revision = ic->revision;
+         line->tag = tag;
++        ic->epoch++;
+     }
+ 
+     switch (sz) {
+diff --git a/src/uarm/uarm/icache_internal.h b/src/uarm/uarm/icache_internal.h
+index 534adc4..fd60197 100644
+--- a/src/uarm/uarm/icache_internal.h
++++ b/src/uarm/uarm/icache_internal.h
+@@ -54,6 +54,9 @@ struct icache {
+     struct ArmMem* mem;
+ 
+     uint32_t revision;
++    // Bumped whenever any line can change validity or contents (invalidation, refill).
++    // While it holds still, a line that was valid stays valid.
++    uint32_t epoch;
+     bool xscale;
+     uint32_t nextFetchBuffer;
+     struct {
+diff --git a/src/uarm/uarm/pxa_LCD.cpp b/src/uarm/uarm/pxa_LCD.cpp
+index f641f7d..69aaa51 100644
+--- a/src/uarm/uarm/pxa_LCD.cpp
++++ b/src/uarm/uarm/pxa_LCD.cpp
+@@ -2,6 +2,7 @@
+ 
+ #include "pxa_LCD.h"
+ 
++#include <algorithm>
+ #include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
+@@ -10,6 +11,7 @@
+ #include "SoC.h"
+ #include "cputil.h"
+ #include "mem.h"
++#include "mem_internal.h"
+ #include "memory_buffer.h"
+ #include "pxa_IC.h"
+ #include "savestate/savestateAll.h"
+@@ -86,7 +88,7 @@ struct PxaLcd {
+     }
+ };
+ 
+-static uint32_t unpack_rgb16(uint16_t rgb16) {
++static inline uint32_t unpack_rgb16(uint16_t rgb16) {
+     uint8_t r = (rgb16 >> 11) & 0x1f;
+     uint8_t g = (rgb16 >> 5) & 0x3f;
+     uint8_t b = (rgb16 >> 0) & 0x1f;
+@@ -365,6 +367,48 @@ static void pxaLcdPrvScreenDataPixel(struct PxaLcd *lcd, uint32_t color) {
+     }
+ }
+ 
++// 16 bpp frame data read straight from primary RAM: the same pixels, flips and i_pixel as
++// the word-by-word loop below. False leaves anything else (other regions, a held RAM,
++// unaligned data) to that loop.
++static bool pxaLcdPrvScreenData16FromRam(struct PxaLcd *lcd, uint32_t addr, uint32_t len) {
++    const uint32_t words = len / 4;
++    const uint32_t total = uint32_t(lcd->width) * lcd->height;
++    const struct ArmMemRegion &region = lcd->mem->regions[REGION_RAM];
++    if (!region.ub || (addr & 3) || addr < region.pa ||
++        uint64_t(addr) + uint64_t(words) * 4 > region.ub || lcd->i_pixel >= total)
++        return false;
++
++    const struct ArmRam *ram = (const struct ArmRam *)region.uD;
++    const uint8_t *src = (const uint8_t *)ram->buf.buffer + (addr - ram->adr);
++    uint32_t pixels = words * 2;
++
++    while (pixels) {
++        const uint32_t run = std::min(pixels, total - lcd->i_pixel);
++        uint32_t *dst = lcd->back_buffer + lcd->i_pixel;
++
++        for (uint32_t i = 0; i < run; i++) {
++            uint16_t rgb16;
++            memcpy(&rgb16, src + i * 2, sizeof(rgb16));
++            dst[i] = unpack_rgb16(rgb16);
++        }
++
++        src += run * 2;
++        pixels -= run;
++        lcd->i_pixel += run;
++
++        if (lcd->i_pixel == total) {
++            lcd->i_pixel = 0;
++            lcd->frame_pending = true;
++
++            uint32_t *front_buffer = lcd->front_buffer;
++            lcd->front_buffer = lcd->back_buffer;
++            lcd->back_buffer = front_buffer;
++        }
++    }
++
++    return true;
++}
++
+ static void pxaLcdPrvScreenDataDma(struct PxaLcd *lcd, uint32_t addr /*PA*/, uint32_t len) {
+     uint8_t data[4];
+     uint32_t i, j;
+@@ -395,6 +439,8 @@ static void pxaLcdPrvScreenDataDma(struct PxaLcd *lcd, uint32_t addr /*PA*/, uin
+ 
+     if (lcd->framebufferTrackingActive && !lcd->framebufferDirty) return;
+ 
++    if (bpp == 4 && pxaLcdPrvScreenData16FromRam(lcd, addr, len)) len = 0;
++
+     len /= 4;
+     while (len--) {
+         pxaLcdPrvDma(lcd, data, addr, 4);
