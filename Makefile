@@ -88,6 +88,13 @@ test-sdl-audio: out/frond
 		$(CPU_TEST_LDLIBS) -o build/test-sdl-audio-buffer
 	./build/test-sdl-audio-buffer
 
+.PHONY: test-render-link
+test: test-render-link
+test-render-link: prepare
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra $(shell sdl2-config --cflags) \
+		-Ibuild/source/src/uarm/native -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm \
+		tests/render-link.cpp $(shell sdl2-config --libs) -lpthread -o build/test-render-link
+	./build/test-render-link
 
 test-fast-audio: out/frond
 	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm \
