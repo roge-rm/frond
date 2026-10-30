@@ -46,11 +46,17 @@ def link(first,second,seconds=None):
                 server=socket.create_server(('',port),family=socket.AF_INET6 if dual else socket.AF_INET,backlog=1,dualstack_ipv6=dual)
                 listeners[i]=server
                 print(f'Waiting for a peer on port {port}.',flush=True)
+        def left():return None if seconds is None else seconds-(time.monotonic()-started)
         for i,(kind,host,port) in enumerate(ends):
+            # A bounded run also ends while waiting for a peer or connecting.
+            if left() is not None and left()<=0:return {'reason':reason,'received':received,'sent':sent}
             if kind=='listen':
-                peer,address=listeners[i].accept();listeners.pop(i).close()
+                listeners[i].settimeout(left())
+                try:peer,address=listeners[i].accept()
+                except socket.timeout:return {'reason':reason,'received':received,'sent':sent}
+                listeners.pop(i).close()
                 print(f'Peer {address[0].removeprefix("::ffff:")} connected on port {port}.',flush=True)
-            else:peer=socket.create_connection((host,port),timeout=10)
+            else:peer=socket.create_connection((host,port),timeout=10 if left() is None else max(.01,min(10,left())))
             peer.setsockopt(socket.IPPROTO_TCP,socket.TCP_NODELAY,1);peer.setblocking(False);peers.append(peer)
         print(f'Infrared endpoints linked: {name(ends[0])} and {name(ends[1])}.',flush=True)
         while seconds is None or time.monotonic()-started<seconds:

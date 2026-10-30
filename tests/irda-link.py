@@ -6,6 +6,7 @@ import json
 import socket
 import subprocess
 import sys
+import time
 import unittest
 class Tests(unittest.TestCase):
     def test_binary_duplex_and_disconnect(self):
@@ -52,6 +53,13 @@ class Tests(unittest.TestCase):
         finally:
             for p in peers+[core]:p.close()
             if process and process.poll() is None:process.kill();process.wait()
+    def test_listen_deadline(self):
+        # --seconds also ends a run still waiting for its listen: peer.
+        free=socket.socket();free.bind(('',0));port=free.getsockname()[1];free.close()
+        started=time.monotonic()
+        p=subprocess.run([sys.executable,str(Path(__file__).resolve().parents[1]/'tools/link-irda.py'),f'listen:{port}','1234','--seconds','0.5'],capture_output=True,text=True,timeout=10)
+        self.assertEqual(p.returncode,0,p.stderr);self.assertLess(time.monotonic()-started,5)
+        self.assertEqual(json.loads(p.stdout.splitlines()[-1])['reason'],'deadline')
     def test_bad_endpoint_refused(self):
         for bad in ('listen:0','host:','0','listen:x','a:b:c'):
             p=subprocess.run([sys.executable,str(Path(__file__).resolve().parents[1]/'tools/link-irda.py'),bad,'1234'],capture_output=True,text=True)
