@@ -150,6 +150,25 @@ class PeripheralsModel(
         return if (reply.ok) null else reply.message
     }
 
+    // The Palm infrared keyboard: attached or not, null until the core says.
+    var keyboard by mutableStateOf<Boolean?>(null)
+        private set
+
+    fun readKeyboard() {
+        val l = link ?: return
+        activity.lifecycleScope.launch {
+            val reply = withContext(Dispatchers.IO) { l.request("keyboard-state", timeoutSeconds = 30) }
+            if (reply.ok) keyboard = reply.message == "attached"
+        }
+    }
+
+    fun attachKeyboard(on: Boolean) =
+        device(if (on) "Attaching" else "Detaching", if (on) "Couldn't attach the keyboard" else "Couldn't detach the keyboard", false) { l ->
+            val reply = l.request("keyboard-attach", if (on) "on" else "off", timeoutSeconds = 30)
+            if (reply.ok) activity.runOnUiThread { keyboard = reply.message == "attached" }
+            if (reply.ok) null else reply.message
+        }
+
     // Both go back to the Palm, where the reset or rotation shows.
     fun reset() = device("Resetting", "Couldn't reset", true) { send(it, "reset") }
 
@@ -259,6 +278,7 @@ class PeripheralsActivity : ComponentActivity() {
             return
         }
         model.refresh()
+        model.readKeyboard()
         setContent {
             FrondTheme {
                 Surface(Modifier.fillMaxSize()) {

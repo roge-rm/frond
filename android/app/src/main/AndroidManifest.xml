@@ -25,14 +25,15 @@
             </intent-filter>
         </activity>
 
-        <!-- SDL runs the native core in its own process; SDLActivity comes from SDL2's Java glue. -->
+        <!-- SDL runs the native core in its own process; SDLActivity comes from SDL2's Java glue.
+             It takes every configuration change itself, since recreating it would stop the core. -->
         <activity
             android:name=".FrondActivity"
             android:process=":emulator"
             android:theme="@style/Theme.Frond.Emulator"
             android:label="@string/app_name"
             android:launchMode="singleTask"
-            android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation"
+            android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation|density|fontScale|fontWeightAdjustment|colorMode|touchscreen|mcc|mnc|grammaticalGender|assetsPaths"
             android:preferMinimalPostProcessing="true"
             android:exported="false" />
 

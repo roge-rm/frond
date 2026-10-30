@@ -36,6 +36,11 @@ class FrondActivity : SDLActivity() {
     @Volatile private var quitSent = false
     private lateinit var settings: Settings
     private var savingNote: TextView? = null
+    private var menuButton: View? = null
+    private var keyboardButton: View? = null
+    private var keyboard: PalmKeyboard? = null
+    // The Palm infrared keyboard, as the core last said.
+    @Volatile private var keyboardAttached = false
     @Volatile private var stopped = false
     // Set while our own Peripherals screen covers the emulator; it saves on its own stop instead.
     @Volatile private var panelOpen = false
@@ -60,6 +65,7 @@ class FrondActivity : SDLActivity() {
         requestFrameRate()
         addSavingNote()
         addMenuButton()
+        addKeyboard()
         SdCard.clean(this)
         // An edited card kept from a kill goes back into the Palm once the core answers.
         Thread { SdCard.restorePending(applicationContext, link, sessionPath) }.apply { isDaemon = true }.start()
@@ -125,8 +131,17 @@ class FrondActivity : SDLActivity() {
             isAppearanceLightNavigationBars = false
         }
         ViewCompat.setOnApplyWindowInsetsListener(layout) { view, insets ->
-            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+            // The soft keyboard shrinks the surface too, and the core fits the device above it.
+            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout() or WindowInsetsCompat.Type.ime())
             view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+            // With the soft keyboard up the device would cover the corner buttons, so it goes below them.
+            val buttons = if (insets.isVisible(WindowInsetsCompat.Type.ime())) menuButton?.height ?: 0 else 0
+            (SDLActivity.mSurface?.layoutParams as? android.view.ViewGroup.MarginLayoutParams)?.let {
+                if (it.topMargin != buttons) {
+                    it.topMargin = buttons
+                    SDLActivity.mSurface?.layoutParams = it
+                }
+            }
             insets
         }
     }
@@ -168,7 +183,11 @@ class FrondActivity : SDLActivity() {
     private fun leave() {
         if (leaving) return
         leaving = true
-        runOnUiThread { savingNote?.visibility = View.VISIBLE }
+        runOnUiThread {
+            hideKeyboard()
+            keyboardButton?.visibility = View.GONE
+            savingNote?.visibility = View.VISIBLE
+        }
         Thread({
             val path = sessionPath
             val reply = synchronized(saveLock) {
@@ -234,15 +253,74 @@ class FrondActivity : SDLActivity() {
             val pad = (8 * resources.displayMetrics.density).toInt()
             setPadding(pad, pad, pad, pad)
             setOnClickListener { openPanel() }
+            id = View.generateViewId()
         }
+        menuButton = button
         layout.addView(button, RelativeLayout.LayoutParams(RelativeLayout.LayoutParams.WRAP_CONTENT, RelativeLayout.LayoutParams.WRAP_CONTENT).apply {
             addRule(RelativeLayout.ALIGN_PARENT_TOP)
             addRule(RelativeLayout.ALIGN_PARENT_END)
         })
     }
 
+    // While the Palm infrared keyboard is attached, a keyboard button beside the menu button shows
+    // and hides the soft keyboard. Hardware keys reach the core through SDL either way.
+    private fun addKeyboard() {
+        val layout = SDLActivity.getContentView() as? RelativeLayout ?: return
+        val input = PalmKeyboard(this)
+        layout.addView(input, RelativeLayout.LayoutParams(1, 1))
+        keyboard = input
+        val button = android.widget.ImageButton(this).apply {
+            setImageResource(R.drawable.ic_keyboard)
+            contentDescription = "Keyboard"
+            setBackgroundColor(Color.TRANSPARENT)
+            alpha = 0.7f
+            val pad = (8 * resources.displayMetrics.density).toInt()
+            setPadding(pad, pad, pad, pad)
+            visibility = View.GONE
+            setOnClickListener { toggleKeyboard() }
+        }
+        layout.addView(button, RelativeLayout.LayoutParams(RelativeLayout.LayoutParams.WRAP_CONTENT, RelativeLayout.LayoutParams.WRAP_CONTENT).apply {
+            addRule(RelativeLayout.ALIGN_PARENT_TOP)
+            menuButton?.let { addRule(RelativeLayout.START_OF, it.id) } ?: addRule(RelativeLayout.ALIGN_PARENT_END)
+        })
+        keyboardButton = button
+    }
+
+    private fun imeShowing(): Boolean =
+        ViewCompat.getRootWindowInsets(window.decorView)?.isVisible(WindowInsetsCompat.Type.ime()) == true
+
+    private fun toggleKeyboard() {
+        val input = keyboard ?: return
+        if (imeShowing()) hideKeyboard() else if (keyboardAttached) input.show()
+    }
+
+    private fun hideKeyboard() {
+        keyboard?.hide()
+        SDLActivity.mSurface?.requestFocus()
+    }
+
+    // Asks the core whether the infrared keyboard is attached and shows the keyboard button to match.
+    private fun readKeyboard() {
+        Thread({
+            val reply = link.request("keyboard-state", timeoutSeconds = 60)
+            if (!reply.ok) return@Thread
+            val attached = reply.message == "attached"
+            keyboardAttached = attached
+            runOnUiThread {
+                keyboardButton?.visibility = if (attached && !leaving) View.VISIBLE else View.GONE
+                if (!attached && keyboard?.hasFocus() == true) hideKeyboard()
+            }
+        }, "FrondKeyboard").apply { isDaemon = true }.start()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (!leaving) readKeyboard()
+    }
+
     private fun openPanel() {
         if (leaving) return
+        hideKeyboard()
         panelOpen = true
         startActivity(
             android.content.Intent(this, PeripheralsActivity::class.java)
@@ -330,6 +408,19 @@ class FrondActivity : SDLActivity() {
     }
 
     override fun onDestroy() {
+        // Android recreates the activity for a change the manifest doesn't take. SDL would quit the
+        // core, and a second core can't start in this process, so save the session and end the
+        // process instead; the next start loads the save.
+        if (!isFinishing && !leaving) {
+            sessionPath?.let { path ->
+                val reply = synchronized(saveLock) {
+                    releaseInput()
+                    link.request("save", path, timeoutSeconds = 20)
+                }
+                Log.w(TAG, "recreated by Android, saved: ${reply.code} ${reply.message}")
+            }
+            Process.killProcess(Process.myPid())
+        }
         super.onDestroy()
         // A core that stopped by itself, before anyone asked it to quit, failed to start or crashed.
         if (isFinishing && !quitSent) {
