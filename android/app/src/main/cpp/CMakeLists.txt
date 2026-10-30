@@ -56,17 +56,21 @@ core_sources("${COMMON}" SOURCE_CXX common_cxx)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${UARM}/Makefile" "${COMMON}/Makefile" "${FROND_CORE}/.prepared")
 
-# The virtual Wi-Fi router needs libslirp, which needs GLib; Android builds it
-# without a router for now (see android/app/src/main/cpp/WifiRouterNone.cpp).
-list(FILTER uarm_cxx EXCLUDE REGEX "/uarm/WifiRouter\\.cpp$")
 # The SDL front end in native/ builds into libmain.so with the Android entry point.
 set(front_end ${uarm_cxx})
 list(FILTER front_end INCLUDE REGEX "/native/")
 list(FILTER uarm_cxx EXCLUDE REGEX "/native/")
 
-add_library(frondcore STATIC ${uarm_c} ${uarm_cxx} ${common_c} ${common_cxx} WifiRouterNone.cpp)
+add_library(frondcore STATIC ${uarm_c} ${uarm_cxx} ${common_c} ${common_cxx})
 target_include_directories(frondcore PUBLIC
     "${UARM}/uarm" "${UARM}" "${COMMON}" "${COMMON}/zip" "${FROND_CORE}/src/argparse")
+set(network "${FROND_NETWORK_ROOT}/${ANDROID_ABI}/install")
+add_library(slirp STATIC IMPORTED)
+set_target_properties(slirp PROPERTIES
+    IMPORTED_LOCATION "${network}/lib/libslirp.a"
+    INTERFACE_INCLUDE_DIRECTORIES "${network}/include/slirp")
+target_link_libraries(frondcore PUBLIC slirp
+    "${network}/lib/libglib-2.0.a" "${network}/lib/libpcre2-8.a" "${network}/lib/libiconv.a" "${network}/lib/libintl.a" m)
 target_compile_definitions(frondcore PUBLIC _FILE_OFFSET_BITS=64)
 # The core is too slow to use at -O0, so debug builds optimise it as well.
 target_compile_options(frondcore PRIVATE -O2 -g
