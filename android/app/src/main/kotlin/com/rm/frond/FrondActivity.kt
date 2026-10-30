@@ -64,7 +64,7 @@ class FrondActivity : SDLActivity() {
         Os.setenv("SDL_ANDROID_BLOCK_ON_PAUSE_PAUSEAUDIO", "1", true)
         HostDns.start(applicationContext)
         // A btvirt and sockets left by an emulator that was killed.
-        Thread { BtLink.clean(applicationContext) }.start()
+        BtLink.cleanLater(applicationContext)
         super.onCreate(savedInstanceState)
         fitInsideSystemBars()
         requestFrameRate()

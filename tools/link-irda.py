@@ -49,6 +49,16 @@ def link(first,second,seconds=None):
     def result():return {'reason':reason,'received':received,'sent':sent,'dropped':dropped,'reconnects':reconnects}
     def ready(i,peer):
         peer.setsockopt(socket.IPPROTO_TCP,socket.TCP_NODELAY,1);peer.setblocking(False);peers[i]=peer
+    def closed(i):
+        # True when the run ends: a network peer, or both sides at once. A local core is connected again.
+        nonlocal reason
+        kind,_,port=ends[i]
+        if kind!='local' or peers[1-i] is None:
+            reason='peer disconnected'
+            return True
+        down(i);retry[i]=time.monotonic()+RETRY_SECONDS
+        print(f'Core on port {port} closed; connecting again.',flush=True)
+        return False
     def down(i):
         try:selector.unregister(peers[i])
         except (KeyError,ValueError):pass
@@ -100,23 +110,22 @@ def link(first,second,seconds=None):
                 if peers[i] is not peer:continue
                 if events&selectors.EVENT_READ:
                     try:data=peer.recv(QUEUE_BYTES-len(pending[1-i]))
-                    except BlockingIOError:continue
+                    except BlockingIOError:data=None
                     except OSError:data=b''
-                    if not data:
-                        kind,_,port=ends[i]
-                        if kind!='local' or peers[1-i] is None:
-                            reason='peer disconnected'
-                            return result()
-                        down(i);retry[i]=time.monotonic()+RETRY_SECONDS
-                        print(f'Core on port {port} closed; connecting again.',flush=True)
+                    if data==b'':
+                        if closed(i):return result()
                         continue
-                    received[i]+=len(data)
-                    if peers[1-i] is None:dropped[1-i]+=len(data)
-                    else:pending[1-i].extend(data)
-                if events&selectors.EVENT_WRITE:
+                    if data:
+                        received[i]+=len(data)
+                        if peers[1-i] is None:dropped[1-i]+=len(data)
+                        else:pending[1-i].extend(data)
+                if events&selectors.EVENT_WRITE and pending[i]:
                     try:count=peer.send(pending[i])
                     except BlockingIOError:continue
-                    except OSError:count=0
+                    # A side that can't take bytes has gone, the same as one that closed.
+                    except OSError:
+                        if closed(i):return result()
+                        continue
                     del pending[i][:count];sent[i]+=count
         return result()
     finally:

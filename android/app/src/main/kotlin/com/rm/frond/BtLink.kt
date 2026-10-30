@@ -76,12 +76,18 @@ object BtLink {
     private val state = MutableStateFlow(Status())
     val status: StateFlow<Status> get() = state
 
+    // Held for a whole change, so changes, cleaning and turning off after a failure run one at a time.
+    // Taken before lock, never after.
+    private val changing = Any()
     private val lock = Any()
     // Bumped on every change; threads from an older setting stop.
     @Volatile private var generation = 0
     private var program: Process? = null
     private var tcpServer: ServerSocket? = null
     private var unixServer: LocalServerSocket? = null
+    // The bound socket whose descriptor unixServer listens on. Kept so its finalizer doesn't close the
+    // descriptor under the server; LocalServerSocket.close() leaves a descriptor it didn't make open.
+    private var unixBound: LocalSocket? = null
     private val pairs = mutableSetOf<Link>()
     @Volatile private var link: ControlLink? = null
 
@@ -98,42 +104,48 @@ object BtLink {
     // Sets the core's endpoint and the relay. Blocks on the control link and on btvirt starting, so never on
     // the main thread. Returns an error to show, or null.
     fun set(context: Context, link: ControlLink, mode: BtMode): String? {
-        // The core lets go of the old endpoint first, so btvirt and the sockets can go.
-        val off = link.request("bluetooth-mode", "off", timeoutSeconds = 30)
-        stop(context)
-        if (!off.ok) return off.message
-        if (mode == BtMode.Off) return null
-        this.link = link
-        remember(context, mode)
-        val dir = folder(context)
-        dir.mkdirs()
-        val gen = synchronized(lock) { ++generation }
-        val core: File = when (mode) {
-            is BtMode.Host -> {
-                val error = host(context, gen, mode, dir)
-                if (error != null) {
-                    stop(context)
-                    return error
-                }
-                File(dir, SERVER)
+        synchronized(changing) {
+            // The core lets go of the old endpoint first, so btvirt and the sockets can go.
+            val off = link.request("bluetooth-mode", "off", timeoutSeconds = 30)
+            close()
+            clean(context)
+            if (!off.ok) return off.message
+            if (mode == BtMode.Off) return null
+            remember(context, mode)
+            val dir = folder(context)
+            dir.mkdirs()
+            val gen = synchronized(lock) {
+                this.link = link
+                ++generation
             }
-            is BtMode.Join -> {
-                val error = join(gen, mode, File(dir, JOIN))
-                if (error != null) {
-                    stop(context)
-                    return error
-                }
-                File(dir, JOIN)
+            val (error, core) = when (mode) {
+                is BtMode.Host -> host(context, gen, mode, dir) to File(dir, SERVER)
+                is BtMode.Join -> join(gen, mode, File(dir, JOIN)) to File(dir, JOIN)
+                BtMode.Off -> return null
             }
-            BtMode.Off -> return null
+            if (error != null) {
+                undo(gen)
+                return error
+            }
+            val reply = link.request("bluetooth-mode", coreMode(core), timeoutSeconds = 30)
+            if (!reply.ok) {
+                undo(gen)
+                return reply.message
+            }
+            Log.i(TAG, "bluetooth: ${mode.encode()}, core on $core")
+            return null
         }
-        val reply = link.request("bluetooth-mode", coreMode(core), timeoutSeconds = 30)
-        if (!reply.ok) {
-            stop(context)
-            return reply.message
+    }
+
+    // Closes what a failed change set up, unless something newer has replaced it.
+    private fun undo(gen: Int) {
+        synchronized(lock) {
+            if (gen != generation) return
+            ++generation
+            closeAll()
+            link = null
+            state.value = Status()
         }
-        Log.i(TAG, "bluetooth: ${mode.encode()}, core on $core")
-        return null
     }
 
     private fun host(context: Context, gen: Int, mode: BtMode.Host, dir: File): String? {
@@ -181,21 +193,23 @@ object BtLink {
 
     private fun join(gen: Int, mode: BtMode.Join, path: File): String? {
         path.delete()
+        val bound = LocalSocket(LocalSocket.SOCKET_STREAM)
         val server = try {
-            val bound = LocalSocket(LocalSocket.SOCKET_STREAM)
             bound.bind(LocalSocketAddress(path.path, LocalSocketAddress.Namespace.FILESYSTEM))
-            // Takes the bound socket's descriptor and listens on it.
+            // Listens on the bound socket's descriptor, which stays bound's to close.
             LocalServerSocket(bound.fileDescriptor)
         } catch (e: IOException) {
             Log.w(TAG, "bluetooth: join socket: $e")
+            try { bound.close() } catch (_: IOException) {}
             return "Couldn't make the Bluetooth socket."
         }
         synchronized(lock) {
             if (gen != generation) {
-                closeServer(server)
+                closeServer(server, bound)
                 return "Changed while starting."
             }
             unixServer = server
+            unixBound = bound
             state.value = Status(mode)
         }
         Thread({ acceptCore(gen, mode, server) }, "FrondBtJoin").apply { isDaemon = true }.start()
@@ -204,8 +218,19 @@ object BtLink {
 
     // Each network peer gets its own controller from btvirt.
     private fun acceptPeers(gen: Int, mode: BtMode.Host, listener: ServerSocket, socket: File) {
+        var failures = 0
         while (gen == generation) {
-            val peer = try { listener.accept() } catch (e: IOException) { return }
+            val peer = try {
+                listener.accept().also { failures = 0 }
+            } catch (e: IOException) {
+                if (gen != generation) return
+                if (IrBeam.acceptFailed(e, ++failures)) {
+                    Log.w(TAG, "bluetooth: stopped taking peers: $e")
+                    fail(gen, "Stopped taking other Fronds.")
+                    return
+                }
+                continue
+            }
             val local = LocalSocket(LocalSocket.SOCKET_STREAM)
             try {
                 local.connect(LocalSocketAddress(socket.path, LocalSocketAddress.Namespace.FILESYSTEM))
@@ -222,8 +247,19 @@ object BtLink {
 
     // Each connection the core makes (Palm OS turning Bluetooth on, after a reset or sleep) goes to the host.
     private fun acceptCore(gen: Int, mode: BtMode.Join, server: LocalServerSocket) {
+        var failures = 0
         while (gen == generation) {
-            val local = try { server.accept() } catch (e: IOException) { return }
+            val local = try {
+                server.accept().also { failures = 0 }
+            } catch (e: IOException) {
+                if (gen != generation) return
+                if (IrBeam.acceptFailed(e, ++failures)) {
+                    Log.w(TAG, "bluetooth: stopped taking the core's connections: $e")
+                    fail(gen, "The Bluetooth socket stopped working.")
+                    return
+                }
+                continue
+            }
             if (gen != generation) {
                 shut(local)
                 return
@@ -275,46 +311,77 @@ object BtLink {
         val code = try { process.waitFor() } catch (e: InterruptedException) { return }
         if (gen != generation) return
         Log.w(TAG, "bluetooth: btvirt stopped ($code)")
-        try { link?.request("bluetooth-mode", "off", timeoutSeconds = 30) } catch (_: Exception) {}
-        synchronized(lock) {
+        fail(gen, "The Bluetooth host stopped.")
+    }
+
+    // Turns Bluetooth off with the reason shown, unless a newer setting has replaced gen. Holding changing
+    // keeps a set() from starting between the check and the core going off.
+    private fun fail(gen: Int, reason: String) {
+        synchronized(changing) {
             if (gen != generation) return
-            ++generation
-            closeAll()
-            state.value = Status(error = "The Bluetooth host stopped.")
+            try { link?.request("bluetooth-mode", "off", timeoutSeconds = 30) } catch (_: Exception) {}
+            synchronized(lock) {
+                if (gen != generation) return
+                ++generation
+                closeAll()
+                link = null
+                state.value = Status(error = reason)
+            }
         }
     }
 
-    // Closes the relay and btvirt without touching the core, for an emulator that's ending or a new setting.
+    // Closes the relay and btvirt without touching the core, for an emulator that's ending. Doesn't block:
+    // the /proc scan runs on its own thread.
     fun stop(context: Context) {
+        close()
+        cleanLater(context)
+    }
+
+    private fun close() {
         synchronized(lock) {
             ++generation
             closeAll()
             link = null
             state.value = Status()
         }
-        clean(context)
     }
 
     // Under lock.
     private fun closeAll() {
         try { tcpServer?.close() } catch (_: IOException) {}
         tcpServer = null
-        unixServer?.let { closeServer(it) }
+        unixServer?.let { closeServer(it, unixBound) }
         unixServer = null
+        unixBound = null
         pairs.forEach { it.close() }
         pairs.clear()
         program?.destroy()
         program = null
     }
 
+    // clean() on its own thread, skipped if a setting has been made since.
+    fun cleanLater(context: Context) {
+        val gen = generation
+        Thread({
+            synchronized(changing) {
+                if (gen == generation) clean(context)
+            }
+        }, "FrondBtClean").apply { isDaemon = true }.start()
+    }
+
     // Stops any btvirt left from an earlier emulator (one that was killed) and removes the stale sockets.
-    // Same uid, so /proc shows ours.
-    fun clean(context: Context) {
-        val exe = File(context.applicationInfo.nativeLibraryDir, PROGRAM).path
+    // Any libbtvirt.so of this package counts, including one from before an app update, whose
+    // nativeLibraryDir has gone. Only our uid's processes. Scans /proc, so never on the main thread.
+    private fun clean(context: Context) {
+        val uid = Os.getuid()
+        val ours = "/${context.packageName}-"
         File("/proc").listFiles()?.forEach { p ->
             val pid = p.name.toIntOrNull() ?: return@forEach
+            val owner = try { Os.stat(p.path).st_uid } catch (e: Exception) { return@forEach }
+            if (owner != uid) return@forEach
             val command = try { File(p, "cmdline").readBytes() } catch (e: IOException) { return@forEach }
-            if (String(command).substringBefore('\u0000') == exe) {
+            val exe = String(command).substringBefore('\u0000')
+            if (exe.endsWith("/$PROGRAM") && ours in exe) {
                 try { Os.kill(pid, OsConstants.SIGTERM) } catch (e: Exception) {}
             }
         }
@@ -341,9 +408,10 @@ object BtLink {
     }
 
     // Shutting the descriptor down wakes a thread blocked in accept(), which close() alone doesn't.
-    private fun closeServer(server: LocalServerSocket) {
+    private fun closeServer(server: LocalServerSocket, bound: LocalSocket?) {
         try { Os.shutdown(server.fileDescriptor, OsConstants.SHUT_RDWR) } catch (_: Exception) {}
         try { server.close() } catch (_: IOException) {}
+        try { bound?.close() } catch (_: IOException) {}
     }
 
     private fun shut(c: Closeable) {

@@ -3,6 +3,7 @@ package com.rm.frond
 import android.content.Context
 import android.net.ConnectivityManager
 import android.os.ParcelFileDescriptor
+import android.system.ErrnoException
 import android.system.Os
 import android.system.OsConstants
 import android.util.Log
@@ -98,6 +99,9 @@ object IrBeam {
     private val state = MutableStateFlow(Status())
     val status: StateFlow<Status> get() = state
 
+    // Held for a whole change, so changes and turning off after a failure run one at a time. Taken
+    // before lock, never after.
+    private val changing = Any()
     private val lock = Any()
     // Bumped on every change; threads from an older setting stop.
     @Volatile private var generation = 0
@@ -119,53 +123,55 @@ object IrBeam {
     // Sets the core's endpoint and the relay. Blocks on the control link, so never on the main thread.
     // Returns an error to show, or null.
     fun set(context: Context, link: ControlLink, mode: BeamMode): String? {
-        stop()
-        this.link = link
-        if (mode == BeamMode.Off) {
-            val reply = link.request("irda-mode", "off", timeoutSeconds = 30)
-            return if (reply.ok) null else reply.message
-        }
-        val port = try {
-            ServerSocket(0, 1, LOOPBACK).use { it.localPort }
-        } catch (e: IOException) {
-            return "Couldn't find a free port."
-        }
-        val reply = link.request("irda-mode", coreMode(port), timeoutSeconds = 30)
-        if (!reply.ok) return reply.message
-        remember(context, mode)
-        var failed: String? = null
-        synchronized(lock) {
-            val gen = ++generation
-            corePort = port
-            when (mode) {
-                is BeamMode.Listen -> {
-                    val listener = try {
-                        ServerSocket().apply {
-                            reuseAddress = true
-                            bind(InetSocketAddress(mode.port), 4)
-                        }
-                    } catch (e: IOException) {
-                        null
-                    }
-                    if (listener == null) {
-                        ++generation
-                        failed = "Couldn't wait on port ${mode.port}. Another app may be using it."
-                    } else {
-                        server = listener
-                        state.value = Status(mode, Phase.WAITING)
-                        Thread({ accept(gen, mode, listener) }, "FrondBeamWait").apply { isDaemon = true }.start()
-                    }
-                }
-                is BeamMode.Connect -> connectLater(gen, mode)
-                BeamMode.Off -> {}
+        synchronized(changing) {
+            stop()
+            this.link = link
+            if (mode == BeamMode.Off) {
+                val reply = link.request("irda-mode", "off", timeoutSeconds = 30)
+                return if (reply.ok) null else reply.message
             }
+            val port = try {
+                ServerSocket(0, 1, LOOPBACK).use { it.localPort }
+            } catch (e: IOException) {
+                return "Couldn't find a free port."
+            }
+            val reply = link.request("irda-mode", coreMode(port), timeoutSeconds = 30)
+            if (!reply.ok) return reply.message
+            remember(context, mode)
+            var failed: String? = null
+            synchronized(lock) {
+                val gen = ++generation
+                corePort = port
+                when (mode) {
+                    is BeamMode.Listen -> {
+                        val listener = try {
+                            ServerSocket().apply {
+                                reuseAddress = true
+                                bind(InetSocketAddress(mode.port), 4)
+                            }
+                        } catch (e: IOException) {
+                            null
+                        }
+                        if (listener == null) {
+                            ++generation
+                            failed = "Couldn't wait on port ${mode.port}. Another app may be using it."
+                        } else {
+                            server = listener
+                            state.value = Status(mode, Phase.WAITING)
+                            Thread({ accept(gen, mode, listener) }, "FrondBeamWait").apply { isDaemon = true }.start()
+                        }
+                    }
+                    is BeamMode.Connect -> connectLater(gen, mode)
+                    BeamMode.Off -> {}
+                }
+            }
+            if (failed != null) {
+                link.request("irda-mode", "off", timeoutSeconds = 30)
+                return failed
+            }
+            Log.i(TAG, "beaming: ${mode.encode()}, core on 127.0.0.1:$port")
+            return null
         }
-        if (failed != null) {
-            link.request("irda-mode", "off", timeoutSeconds = 30)
-            return failed
-        }
-        Log.i(TAG, "beaming: ${mode.encode()}, core on 127.0.0.1:$port")
-        return null
     }
 
     // Connects again after a Connect peer was lost.
@@ -213,8 +219,19 @@ object IrBeam {
     }
 
     private fun accept(gen: Int, mode: BeamMode.Listen, listener: ServerSocket) {
+        var failures = 0
         while (gen == generation) {
-            val peer = try { listener.accept() } catch (e: IOException) { return }
+            val peer = try {
+                listener.accept().also { failures = 0 }
+            } catch (e: IOException) {
+                if (gen != generation) return
+                if (acceptFailed(e, ++failures)) {
+                    Log.w(TAG, "beaming: stopped waiting for peers: $e")
+                    fail(gen, "Stopped waiting for other Fronds.")
+                    return
+                }
+                continue
+            }
             synchronized(lock) {
                 // One peer at a time, like the core. A new peer replaces the old one, which may have
                 // vanished without closing (a phone leaving the network).
@@ -230,6 +247,40 @@ object IrBeam {
                 }
             }
         }
+    }
+
+    // Turns beaming off with the reason shown, unless a newer setting has replaced gen. Holding changing
+    // keeps a set() from starting between the check and the core going off.
+    private fun fail(gen: Int, reason: String) {
+        synchronized(changing) {
+            if (gen != generation) return
+            try { link?.request("irda-mode", "off", timeoutSeconds = 30) } catch (_: Exception) {}
+            synchronized(lock) {
+                if (gen != generation) return
+                ++generation
+                try { server?.close() } catch (_: IOException) {}
+                server = null
+                session?.close()
+                session = null
+                link = null
+                state.value = Status(error = reason)
+            }
+        }
+    }
+
+    // For a listener whose accept() threw: false to try again after a moment, true when it won't work again.
+    // A peer that gave up mid-handshake (ECONNABORTED), a signal or running short of descriptors or memory
+    // passes; a closed or broken descriptor, or 50 failures in a row (about 10 s), doesn't.
+    fun acceptFailed(e: IOException, failures: Int): Boolean {
+        var cause: Throwable? = e
+        while (cause != null && cause !is ErrnoException) cause = cause.cause
+        val errno = if (cause is ErrnoException) cause.errno else null
+        if (errno == OsConstants.EBADF || errno == OsConstants.EINVAL || errno == OsConstants.ENOTSOCK) return true
+        val message = e.message ?: ""
+        if (listOf("closed", "EBADF", "Bad file descriptor").any { message.contains(it, ignoreCase = true) }) return true
+        if (failures >= 50) return true
+        try { Thread.sleep(200) } catch (_: InterruptedException) { return true }
+        return false
     }
 
     // Under lock.

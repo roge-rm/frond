@@ -2,6 +2,7 @@
 """tools/link-bluetooth.py over loopback: one Unix connection per TCP connection, both directions,
 closing either side, join and serve chained, stale sockets and bad arguments."""
 from pathlib import Path
+import importlib.util
 import json
 import os
 import socket
@@ -198,6 +199,38 @@ class Tests(unittest.TestCase):
             self.assertIn('could not reach', p.stdout.readline())
         finally:
             stop(p)
+
+    def test_join_slow_host_does_not_hold_up_the_next_core(self):
+        # A host that doesn't answer (its accept queue full, so SYNs are dropped) holds each connection
+        # for the connect timeout; the core's next connection is still taken meanwhile.
+        spec = importlib.util.spec_from_file_location('link_bluetooth', TOOL)
+        tool = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tool)
+        tool.CONNECT_SECONDS = 2
+        host = socket.socket()
+        host.bind(('127.0.0.1', 0))
+        host.listen(0)
+        self.closing.append(host)
+        for _ in range(3):
+            filler = socket.socket()
+            filler.setblocking(False)
+            filler.connect_ex(host.getsockname())
+            self.closing.append(filler)
+        time.sleep(.2)
+        joined = os.path.join(self.dir.name, 'join')
+        relay = tool.Relay()
+        t = threading.Thread(target=tool.join, args=('127.0.0.1', host.getsockname()[1], joined, 6, relay), daemon=True)
+        t.start()
+        started = time.monotonic()
+        cores = [connect_unix(joined) for _ in range(2)]
+        self.closing += cores
+        for core in cores:
+            core.settimeout(10)
+            self.assertEqual(core.recv(1), b'')
+        # One after the other would take twice the timeout.
+        self.assertLess(time.monotonic() - started, 3.5)
+        t.join(10)
+        self.assertEqual(relay.stats['failed'], 2)
 
     def test_join_replaces_a_stale_socket_and_refuses_a_live_one(self):
         path, _ = self.unix_listener('live')
