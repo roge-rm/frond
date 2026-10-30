@@ -1,0 +1,217 @@
+diff --git a/src/uarm/native/DesktopControl.h b/src/uarm/native/DesktopControl.h
+index ad5e73c..0fbb3ef 100644
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -169,6 +169,11 @@ class DesktopControl {
+             const auto closed = close(file); open = false;
+             if (closed < 0 || rename(temporary.c_str(), path.c_str()) < 0)
+                 throw std::runtime_error("cannot replace output file");
++            // Makes the rename itself durable; a failure here leaves the new file in place.
++            const auto slash = path.rfind('/');
++            const int folder = ::open(slash == std::string::npos ? "." : slash == 0 ? "/" : path.substr(0, slash).c_str(),
++                                      O_RDONLY | O_DIRECTORY);
++            if (folder >= 0) { fsync(folder); ::close(folder); }
+         } catch (...) {
+             if (open) close(file);
+             unlink(temporary.c_str());
+@@ -371,6 +376,15 @@ class DesktopControl {
+             writeAtomic(destination, archive.data(), archive.size());
+             return {true, "exported", database.empty()?"RAM databases exported.":"Database exported."};
+         }
++        if (command == "speed-state") {
++            // Same figures as the desktop window title, plus audio underruns since start.
++            char text[128];
++            const uint64_t ips = ctx.mainLoop.GetCurrentIps(), ipsMax = ctx.mainLoop.GetCurrentIpsMax();
++            std::snprintf(text, sizeof(text), "%.2f MIPS, limit %.2f MIPS, %u%%, %llu underruns",
++                          ips / 1e6, ipsMax / 1e6, ipsMax ? unsigned(100 * ips / ipsMax) : 0u,
++                          static_cast<unsigned long long>(ctx.audioDriver.GetUnderrunCount()));
++            return {true, "speed", text};
++        }
+         if (command == "reset") ctx.soc->Reset();
+         else if (command == "rotate") ctx.rotation = Rotation((int(ctx.rotation) + 1) % 4);
+         else if (command == "audio-on") { ctx.audioDriver.Start(); sound = true; }
+diff --git a/src/uarm/native/SdlAudioDriver.cpp b/src/uarm/native/SdlAudioDriver.cpp
+index 2a946eb..8ddc369 100644
+--- a/src/uarm/native/SdlAudioDriver.cpp
++++ b/src/uarm/native/SdlAudioDriver.cpp
+@@ -12,8 +12,10 @@ namespace {
+     }
+ }  // namespace
+ 
+-SdlAudioDriver::SdlAudioDriver(SoC* soc, AudioQueue* audioQueue, bool lowLatencyStartup)
+-    : soc(soc), audioQueue(audioQueue), lowLatencyStartup(lowLatencyStartup) {}
++SdlAudioDriver::SdlAudioDriver(SoC* soc, AudioQueue* audioQueue, bool lowLatencyStartup,
++                               uint16_t periodFrames)
++    : soc(soc), audioQueue(audioQueue), lowLatencyStartup(lowLatencyStartup),
++      periodFrames(periodFrames) {}
+ 
+ SdlAudioDriver::~SdlAudioDriver() {
+     if (initialized) {
+@@ -36,7 +38,7 @@ void SdlAudioDriver::Start() {
+                                         .format = AUDIO_S16,
+                                         .channels = 2,
+                                         .silence = 0,
+-                                        .samples = 512,
++                                        .samples = periodFrames,
+                                         .padding = 0,
+                                         .size = 0,
+                                         .callback = ::audioCallback,
+diff --git a/src/uarm/native/SdlAudioDriver.h b/src/uarm/native/SdlAudioDriver.h
+index 601b24b..798d8a4 100644
+--- a/src/uarm/native/SdlAudioDriver.h
++++ b/src/uarm/native/SdlAudioDriver.h
+@@ -10,7 +10,8 @@ struct AudioQueue;
+ 
+ class SdlAudioDriver {
+    public:
+-    SdlAudioDriver(SoC* soc, AudioQueue* audioQueue, bool lowLatencyStartup = false);
++    SdlAudioDriver(SoC* soc, AudioQueue* audioQueue, bool lowLatencyStartup = false,
++                   uint16_t periodFrames = 512);
+     ~SdlAudioDriver();
+ 
+     void Start();
+@@ -18,6 +19,10 @@ class SdlAudioDriver {
+     bool GetAudioBackpressure() const;
+     uint64_t GetUnderrunCount() const;
+ 
++    // Leaves the device open at destruction. SDL's Android pause holds the device lock on the
++    // main thread until resume, so closing it while in the background never returns.
++    void Abandon() { initialized = false; }
++
+     void AudioCallback(uint8_t* stream, int len);
+ 
+    private:
+@@ -32,6 +37,7 @@ class SdlAudioDriver {
+     std::atomic<uint64_t> underrunCount{0};
+     std::atomic<bool> starting{true};
+     bool lowLatencyStartup;
++    uint16_t periodFrames;
+     uint64_t queueGeneration{0};  // owned by the SDL callback thread
+ 
+     uint32_t bufferThresholdStart{0};
+diff --git a/src/uarm/native/SdlEventHandler.cpp b/src/uarm/native/SdlEventHandler.cpp
+index 4d48c61..77eca74 100644
+--- a/src/uarm/native/SdlEventHandler.cpp
++++ b/src/uarm/native/SdlEventHandler.cpp
+@@ -140,6 +140,17 @@ void SdlEventHandler::HandleEvents() {
+                 ReleaseInputs();
+                 break;
+ 
++            // Mobile systems only: the app is hidden or shown again.
++            case SDL_APP_DIDENTERBACKGROUND:
++                ReleaseInputs();
++                background = true;
++                break;
++
++            case SDL_APP_DIDENTERFOREGROUND:
++                background = false;
++                redrawRequested = true;
++                break;
++
+             case SDL_WINDOWEVENT:
+                 if (event.window.event==SDL_WINDOWEVENT_FOCUS_LOST ||
+                     event.window.event==SDL_WINDOWEVENT_HIDDEN ||
+diff --git a/src/uarm/native/SdlEventHandler.h b/src/uarm/native/SdlEventHandler.h
+index d604f01..f777ecd 100644
+--- a/src/uarm/native/SdlEventHandler.h
++++ b/src/uarm/native/SdlEventHandler.h
+@@ -26,6 +26,8 @@ class SdlEventHandler {
+     void SetLayout(const WindowLayout& layout, bool fitted);
+     // True once after the window changed size.
+     bool TakeResized();
++    // True while a mobile system has the app in the background.
++    bool InBackground() const { return background; }
+ 
+    private:
+     void ReleasePointer();
+@@ -50,6 +52,7 @@ class SdlEventHandler {
+     bool redrawRequested{false};
+     bool quitRequested{false};
+     bool resized{false};
++    bool background{false};
+     bool fitted{false};
+     WindowLayout layout;
+ 
+diff --git a/src/uarm/native/main.cpp b/src/uarm/native/main.cpp
+index b46f72f..57145db 100644
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -53,6 +53,7 @@ struct Options {
+     optional<unsigned int> gdbPort;
+     unsigned int mips;
+     bool disableAudio;
++    unsigned int audioPeriod;
+     optional<string> script;
+     optional<unsigned int> ramSize;
+     bool smallWindow;
+@@ -268,6 +269,10 @@ namespace {
+             cerr << "--usb must be off, pty or tcp:PORT (PORT 0..65535)" << endl;
+             return false;
+         }
++        if (options.audioPeriod < 64 || options.audioPeriod > 8192) {
++            cerr << "--audio-period must be 64..8192 frames" << endl;
++            return false;
++        }
+         if (options.mips == 0) {
+             cerr << "MIPS must be finite" << endl;
+             return false;
+@@ -483,7 +488,11 @@ namespace {
+         SdlEventHandler sdlEventHandler(soc, scale, displayConfiguration, rotation);
+         sdlEventHandler.SetLayout(sdlRenderer->Layout(), fitted);
+ 
+-        SdlAudioDriver audioDriver(soc, audioQueue, options.experimentalFastAudio);
++        // Low-latency audio's queue limits assume 512-frame periods.
++        if (options.experimentalFastAudio && options.audioPeriod != 512)
++            cerr << "--audio-period is ignored with --fast-audio" << endl;
++        SdlAudioDriver audioDriver(soc, audioQueue, options.experimentalFastAudio,
++                                   options.experimentalFastAudio ? 512 : options.audioPeriod);
+         if (!options.disableAudio) audioDriver.Start();
+ 
+         commands::Register();
+@@ -579,6 +588,15 @@ namespace {
+                 sdlEventHandler.ClearQuitRequested();
+             }
+ 
++            // A phone has the app in the background: no guest time, drawing or catch-up on
++            // return. SDL pauses the audio device; the control socket still answers.
++            if (sdlEventHandler.InBackground()) {
++                mainLoop.PauseAt(now);
++                if (desktop && desktop->poll(commandContext)) break;
++                usleep(50000);
++                continue;
++            }
++
+             // RPC and CLI controls can enable sound after --no-sound startup.
+             // Backpressure must stop all guest clocks together. Suspending just
+             // the codec lets DMA and the guest stream deadlines run ahead.
+@@ -670,7 +688,8 @@ namespace {
+                  << c.setupRetries << " SETUP retries" << endl;
+         }
+         usb.Stop();
+-        audioDriver.Pause();
++        if (sdlEventHandler.InBackground()) audioDriver.Abandon();
++        else audioDriver.Pause();
+         reportAudioUnderruns();
+         if (!options.runFor && !options.desktopSocket) cli::Stop();
+ 
+@@ -724,6 +743,12 @@ int main(int argc, char** argv) {
+         .scan<'u', unsigned int>();
+     ;
+ 
++    program.add_argument("--audio-period")
++        .help("host audio period in frames (64..8192); default 512")
++        .metavar("<frames>")
++        .scan<'u', unsigned int>()
++        .default_value(512u);
++
+     program.add_argument("--no-sound", "-q")
+         .help("start with audio off")
+         .default_value(false)
+@@ -833,6 +858,7 @@ int main(int argc, char** argv) {
+                        .gdbPort = program.present<unsigned int>("--gdb"),
+                        .mips = program.get<unsigned int>("--mips"),
+                        .disableAudio = program.get<bool>("--no-sound"),
++                       .audioPeriod = program.get<unsigned int>("--audio-period"),
+                        .script = program.present("--script"),
+                        .ramSize = program.present<unsigned int>("--ram-size"),
+                        .smallWindow = program.get<bool>("--small-window"),

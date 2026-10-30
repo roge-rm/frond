@@ -1,0 +1,293 @@
+package com.rm.frond.ui
+
+import android.text.format.Formatter
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.ListItem
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import com.rm.frond.FatImage
+import com.rm.frond.Peripheral
+import com.rm.frond.PeripheralsModel
+import com.rm.frond.SdCard
+
+private val SIZES = listOf(32, 64, 128)
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
+    val context = LocalContext.current
+    val snackbar = remember { SnackbarHostState() }
+    var choosingSize by remember { mutableStateOf(false) }
+    var confirmEject by remember { mutableStateOf(false) }
+    var confirmFiles by remember { mutableStateOf(false) }
+    // What to do once the user agrees to lose the ejected card: "create" or "image".
+    var confirmReplace by remember { mutableStateOf<String?>(null) }
+    var naming by remember { mutableStateOf(false) }
+    var exporting by remember { mutableStateOf<FatImage.Entry?>(null) }
+
+    val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) model.job("Inserting", "Couldn't insert the image") { it.insertImage(uri) }
+    }
+    val saveImage = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
+        if (uri != null) model.job("Copying", "Couldn't export the image") {
+            it.exportImage(uri)
+            model.note = "Card image exported"
+        }
+    }
+    val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) model.addFile(uri)
+    }
+    val saveFile = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
+        val entry = exporting
+        exporting = null
+        if (uri != null && entry != null) model.exportFile(entry, uri)
+    }
+
+    LaunchedEffect(model.note) {
+        model.note?.let {
+            snackbar.showSnackbar(it)
+            model.note = null
+        }
+    }
+
+    val path = model.path
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text(if (path == null) "Peripherals" else "SD card $path", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                navigationIcon = {
+                    IconButton(onClick = { if (path == null) onClose() else if (path == "/") model.leaveFiles() else model.up() }) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+            )
+        },
+        snackbarHost = { SnackbarHost(snackbar) },
+        bottomBar = {
+            if (path != null) {
+                Surface(tonalElevation = 2.dp) {
+                    Row(
+                        Modifier.fillMaxWidth().navigationBarsPadding().padding(16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        val pad = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+                        OutlinedButton(onClick = { naming = true }, shape = MaterialTheme.shapes.small, contentPadding = pad) {
+                            Text("New folder", maxLines = 1, softWrap = false)
+                        }
+                        OutlinedButton(onClick = { pickFile.launch(arrayOf("*/*")) }, shape = MaterialTheme.shapes.small, contentPadding = pad) {
+                            Text("Add file", maxLines = 1, softWrap = false)
+                        }
+                        Spacer(Modifier.weight(1f))
+                        Button(onClick = { model.insertEdited() }, shape = MaterialTheme.shapes.small, contentPadding = pad) {
+                            Text("Insert", maxLines = 1, softWrap = false)
+                        }
+                    }
+                }
+            }
+        },
+    ) { padding ->
+        if (path != null) {
+            LazyColumn(Modifier.padding(padding).fillMaxSize()) {
+                item {
+                    Text(
+                        "${Formatter.formatShortFileSize(context, model.free)} free" + if (model.changed) " · Changed" else "",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    )
+                }
+                if (model.entries.isEmpty()) item { EmptyNote("Empty folder") }
+                items(model.entries, key = { it.shortName }) { e ->
+                    ListItem(
+                        headlineContent = { Text(e.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        supportingContent = { Text(if (e.directory) "Folder" else Formatter.formatShortFileSize(context, e.size)) },
+                        leadingContent = {
+                            Marker(if (e.directory) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.outlineVariant)
+                        },
+                        modifier = Modifier.clickableRow {
+                            if (e.directory) model.open(SdCard.joined(path, e.name))
+                            else {
+                                exporting = e
+                                saveFile.launch(e.name)
+                            }
+                        },
+                    )
+                }
+                item { Spacer(Modifier.size(16.dp)) }
+            }
+        } else {
+            LazyColumn(Modifier.padding(padding).fillMaxSize()) {
+                item { Header("SD card", Modifier.padding(horizontal = 16.dp)) }
+                item {
+                    val (label, colour) = when (model.state) {
+                        SdCard.State.INSERTED -> "Inserted" to MaterialTheme.colorScheme.primary
+                        SdCard.State.EJECTED -> "Ejected" to MaterialTheme.colorScheme.secondary
+                        SdCard.State.NONE -> "No card" to MaterialTheme.colorScheme.outlineVariant
+                        SdCard.State.UNKNOWN -> "Not known" to MaterialTheme.colorScheme.error
+                    }
+                    ListItem(headlineContent = { Text(label) }, leadingContent = { Marker(colour) })
+                }
+                fun action(label: String, onClick: () -> Unit) = item(key = label) {
+                    ListItem(headlineContent = { Text(label) }, modifier = Modifier.clickableRow(onClick = onClick))
+                }
+                when (model.state) {
+                    SdCard.State.INSERTED -> {
+                        action("Files") { confirmFiles = true }
+                        action("Eject") { confirmEject = true }
+                    }
+                    SdCard.State.EJECTED -> {
+                        action("Insert") { model.job("Inserting", "Couldn't insert the card") { it.reinsert() } }
+                        action("Files") { model.openFiles() }
+                        action("Export image") { saveImage.launch("SD card.img") }
+                        action("New card") { confirmReplace = "create" }
+                        action("Insert image") { confirmReplace = "image" }
+                    }
+                    SdCard.State.NONE -> {
+                        action("New card") { choosingSize = true }
+                        action("Insert image") { pickImage.launch(arrayOf("*/*")) }
+                    }
+                    SdCard.State.UNKNOWN -> action("Try again") { model.refresh() }
+                }
+                item { Header("Not on Android yet", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp)) }
+                items(Peripheral.entries) { p ->
+                    ListItem(
+                        headlineContent = {
+                            Text(p.label, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f))
+                        },
+                    )
+                }
+                item { Spacer(Modifier.size(16.dp)) }
+            }
+        }
+    }
+
+    model.busy?.let { label ->
+        AlertDialog(onDismissRequest = {}, confirmButton = {}, title = { Text(label) }, text = { Progress() })
+    }
+    model.alert?.let { (title, text) ->
+        AlertDialog(
+            onDismissRequest = { model.alert = null },
+            title = { Text(title) },
+            text = { Text(text) },
+            confirmButton = { TextButton(onClick = { model.alert = null }) { Text("OK") } },
+        )
+    }
+    if (choosingSize) {
+        AlertDialog(
+            onDismissRequest = { choosingSize = false },
+            title = { Text("New card") },
+            text = {
+                LazyColumn {
+                    items(SIZES) { mib ->
+                        ListItem(headlineContent = { Text("$mib MB") }, modifier = Modifier.clickableRow {
+                            choosingSize = false
+                            model.job("Making the card", "Couldn't make the card") { it.create(mib) }
+                        })
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = { choosingSize = false }) { Text("Cancel") } },
+        )
+    }
+    if (confirmEject || confirmFiles) {
+        val files = confirmFiles
+        AlertDialog(
+            onDismissRequest = { confirmEject = false; confirmFiles = false },
+            title = { Text("Eject the card?") },
+            text = { Text("Close any files open on the Palm first.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmEject = false
+                    confirmFiles = false
+                    if (files) model.openFiles() else model.job("Ejecting", "Couldn't eject the card") { it.eject() }
+                }) { Text("Eject") }
+            },
+            dismissButton = { TextButton(onClick = { confirmEject = false; confirmFiles = false }) { Text("Cancel") } },
+        )
+    }
+    confirmReplace?.let { what ->
+        AlertDialog(
+            onDismissRequest = { confirmReplace = null },
+            title = { Text("Replace the ejected card?") },
+            text = { Text("Its files are lost unless you export the image first.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmReplace = null
+                    if (what == "create") choosingSize = true else pickImage.launch(arrayOf("*/*"))
+                }) { Text("Replace") }
+            },
+            dismissButton = { TextButton(onClick = { confirmReplace = null }) { Text("Cancel") } },
+        )
+    }
+    if (model.askingLeave) {
+        AlertDialog(
+            onDismissRequest = { model.askingLeave = false },
+            title = { Text("Insert the changed card?") },
+            confirmButton = {
+                TextButton(onClick = { model.askingLeave = false; model.insertEdited() }) { Text("Insert") }
+            },
+            dismissButton = {
+                TextButton(onClick = { model.askingLeave = false; model.discard() }) { Text("Discard changes") }
+            },
+        )
+    }
+    if (naming) {
+        var name by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { naming = false },
+            title = { Text("New folder") },
+            text = {
+                val focus = remember { FocusRequester() }
+                OutlinedTextField(name, { name = it }, singleLine = true, modifier = Modifier.fillMaxWidth().focusRequester(focus))
+                LaunchedEffect(Unit) { focus.requestFocus() }
+            },
+            confirmButton = {
+                TextButton(enabled = name.isNotBlank(), onClick = {
+                    naming = false
+                    model.makeFolder(name)
+                }) { Text("Make") }
+            },
+            dismissButton = { TextButton(onClick = { naming = false }) { Text("Cancel") } },
+        )
+    }
+}

@@ -1,0 +1,25 @@
+[versions]
+agp = "9.4.0"
+kotlin = "2.3.21"
+coreKtx = "1.19.0"
+activityCompose = "1.13.0"
+composeMultiplatform = "1.12.1"
+composeMultiplatformMaterial3 = "1.9.0"
+materialIcons = "1.7.8"
+kotlinxCoroutines = "1.10.2"
+junit = "4.13.2"
+
+[libraries]
+androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
+androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
+jb-compose-runtime = { group = "org.jetbrains.compose.runtime", name = "runtime", version.ref = "composeMultiplatform" }
+jb-compose-foundation = { group = "org.jetbrains.compose.foundation", name = "foundation", version.ref = "composeMultiplatform" }
+jb-compose-ui = { group = "org.jetbrains.compose.ui", name = "ui", version.ref = "composeMultiplatform" }
+jb-compose-material3 = { group = "org.jetbrains.compose.material3", name = "material3", version.ref = "composeMultiplatformMaterial3" }
+compose-material-icons = { group = "androidx.compose.material", name = "material-icons-core", version.ref = "materialIcons" }
+kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "kotlinxCoroutines" }
+junit = { group = "junit", name = "junit", version.ref = "junit" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }

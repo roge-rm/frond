@@ -1,0 +1,459 @@
+diff --git a/src/uarm/native/SdlEventHandler.cpp b/src/uarm/native/SdlEventHandler.cpp
+index 02f3bfe..4d48c61 100644
+--- a/src/uarm/native/SdlEventHandler.cpp
++++ b/src/uarm/native/SdlEventHandler.cpp
+@@ -2,6 +2,8 @@
+ 
+ #include <SDL.h>
+ 
++#include <cmath>
++
+ #include "keys.h"
+ #include "IrKeyboardMapping.h"
+ 
+@@ -33,6 +35,7 @@ namespace {
+                 return keyIdDown;
+ 
+             case SDLK_RETURN:
++            case SDLK_SELECT:
+                 return keyIdSelect;
+ 
+             case SDLK_ESCAPE:
+@@ -64,6 +67,7 @@ void SdlEventHandler::HandleEvents() {
+ 
+             case SDL_MOUSEBUTTONDOWN:
+                 if (event.button.button != SDL_BUTTON_LEFT) break;
++                MapPointer(event.button.x, event.button.y);
+                 ReleasePointer();
+                 if (OnScreen(event.button.x,event.button.y)) {
+                     penDown = true;
+@@ -86,6 +90,7 @@ void SdlEventHandler::HandleEvents() {
+                 break;
+ 
+             case SDL_MOUSEMOTION:
++                MapPointer(event.motion.x, event.motion.y);
+                 if (pointerKey) {
+                     if (event.motion.x<0 || event.motion.y<0 ||
+                         deviceControlAt(controls,ScreenWidth(),ScreenHeight(),
+@@ -131,9 +136,15 @@ void SdlEventHandler::HandleEvents() {
+                 break;
+             }
+ 
++            case SDL_APP_WILLENTERBACKGROUND:
++                ReleaseInputs();
++                break;
++
+             case SDL_WINDOWEVENT:
+                 if (event.window.event==SDL_WINDOWEVENT_FOCUS_LOST ||
+-                    event.window.event==SDL_WINDOWEVENT_HIDDEN) ReleaseInputs();
++                    event.window.event==SDL_WINDOWEVENT_HIDDEN ||
++                    event.window.event==SDL_WINDOWEVENT_MINIMIZED) ReleaseInputs();
++                if (event.window.event==SDL_WINDOWEVENT_SIZE_CHANGED) { ReleasePointer(); resized=true; }
+                 if (event.window.event==SDL_WINDOWEVENT_LEAVE) ReleasePointer();
+                 if (event.window.event==SDL_WINDOWEVENT_EXPOSED) redrawRequested=true;
+                 break;
+@@ -151,6 +162,19 @@ void SdlEventHandler::ClearRedrawRequested() { redrawRequested = false; }
+ void SdlEventHandler::SetRotation(Rotation rotation) {
+     ReleasePointer(); this->rotation = rotation; redrawRequested=true;
+ }
++void SdlEventHandler::SetLayout(const WindowLayout& layout, bool fitted) {
++    ReleasePointer(); this->layout = layout; this->fitted = fitted;
++    if (fitted) scale = 1;
++    redrawRequested=true;
++}
++bool SdlEventHandler::TakeResized() { const bool was=resized; resized=false; return was; }
++// A fitted window maps each pointer to the device pixel under its centre, so the rest
++// works at scale 1.
++void SdlEventHandler::MapPointer(int& x, int& y) const {
++    if (!fitted) return;
++    x = int(std::floor((x + 0.5f - layout.x) / layout.scaleX));
++    y = int(std::floor((y + 0.5f - layout.y) / layout.scaleY));
++}
+ int SdlEventHandler::ScreenWidth() const {
+     return rotation==Rotation::landscape_90 || rotation==Rotation::landscape_270 ? height : width;
+ }
+diff --git a/src/uarm/native/SdlEventHandler.h b/src/uarm/native/SdlEventHandler.h
+index ae6bc71..d604f01 100644
+--- a/src/uarm/native/SdlEventHandler.h
++++ b/src/uarm/native/SdlEventHandler.h
+@@ -4,6 +4,7 @@
+ #include <array>
+ #include "DeviceControls.h"
+ #include "Rotation.h"
++#include "WindowLayout.h"
+ #include "SoC.h"
+ #include "device_configuration.h"
+ 
+@@ -21,6 +22,10 @@ class SdlEventHandler {
+     void ClearRedrawRequested();
+ 
+     void SetRotation(Rotation rotation);
++    // Pointer positions map through the layout's offset and scale when fitted is set.
++    void SetLayout(const WindowLayout& layout, bool fitted);
++    // True once after the window changed size.
++    bool TakeResized();
+ 
+    private:
+     void ReleasePointer();
+@@ -30,6 +35,7 @@ class SdlEventHandler {
+     int ScreenHeight() const;
+     int RotateX(int x, int y);
+     int RotateY(int x, int y);
++    void MapPointer(int& x, int& y) const;
+ 
+    private:
+     SoC* soc;
+@@ -43,6 +49,9 @@ class SdlEventHandler {
+     float scale{1};
+     bool redrawRequested{false};
+     bool quitRequested{false};
++    bool resized{false};
++    bool fitted{false};
++    WindowLayout layout;
+ 
+     int width;
+     int height;
+diff --git a/src/uarm/native/SdlRenderer.cpp b/src/uarm/native/SdlRenderer.cpp
+index d348709..b6da393 100644
+--- a/src/uarm/native/SdlRenderer.cpp
++++ b/src/uarm/native/SdlRenderer.cpp
+@@ -1,5 +1,7 @@
+ #include "SdlRenderer.h"
+ 
++#include <algorithm>
++#include <cmath>
+ #include <cstdint>
+ #include <cstdio>
+ 
+@@ -25,12 +27,16 @@ namespace {
+ }  // namespace
+ 
+ SdlRenderer::SdlRenderer(SDL_Window* window, SoC* soc, float scale,
+-                         DisplayConfiguration& displayConfiguration, Rotation rotation, bool smoothLcd)
++                         DisplayConfiguration& displayConfiguration, Rotation rotation, bool smoothLcd,
++                         WindowFit fit, uint32_t background)
+     : window(window),
+       soc(soc),
+-      scale(scale),
++      // A fitted window draws in device pixels and lets the renderer scale and place them.
++      scale(fit == WindowFit::none ? scale : 1.f),
+       rotation(rotation),
+-      displayConfiguration(displayConfiguration) {
++      displayConfiguration(displayConfiguration),
++      fit(fit),
++      background(background) {
+     int windowHeight, windowWidth;
+     SDL_GetWindowSize(window, &windowWidth, &windowHeight);
+ 
+@@ -46,6 +52,29 @@ SdlRenderer::SdlRenderer(SDL_Window* window, SoC* soc, float scale,
+ 
+     artworkScale = scale * static_cast<float>(renderWidth) / windowWidth;
+ 
++    if (fit != WindowFit::none) {
++        const bool landscape = rotation == Rotation::landscape_90 || rotation == Rotation::landscape_270;
++        const int screenHeight = displayConfiguration.height + displayConfiguration.graffitiHeight;
++        const int deviceWidth = landscape ? screenHeight : displayConfiguration.width;
++        const int deviceHeight = (landscape ? displayConfiguration.width : screenHeight) +
++                                 deviceControls(soc->GetDeviceType()).height;
++        layout = fitWindowLayout(fit, deviceWidth, deviceHeight, windowWidth, windowHeight);
++
++        // The viewport is in output pixels while the scale is 1, then the scale maps device
++        // pixels into it.
++        const float pixelsX = static_cast<float>(renderWidth) / windowWidth;
++        const float pixelsY = static_cast<float>(renderHeight) / windowHeight;
++        SDL_RenderSetScale(renderer, 1, 1);
++        const SDL_Rect viewport{int(std::lround(layout.x * pixelsX)), int(std::lround(layout.y * pixelsY)),
++                                int(std::lround(layout.width * pixelsX)),
++                                int(std::lround(layout.height * pixelsY))};
++        SDL_RenderSetViewport(renderer, &viewport);
++        SDL_RenderSetScale(renderer, layout.scaleX * pixelsX, layout.scaleY * pixelsY);
++        artworkScale = std::max(layout.scaleX * pixelsX, layout.scaleY * pixelsY);
++    } else {
++        layout = WindowLayout{scale, scale, 0, 0, windowWidth, windowHeight};
++    }
++
+     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0xff);
+     SDL_RenderClear(renderer);
+ 
+@@ -66,10 +95,12 @@ SdlRenderer::SdlRenderer(SDL_Window* window, SoC* soc, float scale,
+                                     silkscreen.height == displayConfiguration.graffitiHeight
+                                 ? createDeviceSilkscreen(renderer, silkscreen, artworkScale)
+                                 : loadSilkscreen(renderer);
++        // Fitted art meets fractional scales.
++        if (silkscreenTexture && fit != WindowFit::none)
++            SDL_SetTextureScaleMode(silkscreenTexture, SDL_ScaleModeLinear);
+     }
+ 
+-    SDL_SetRenderDrawColor(renderer, 0xff, 0xff, 0xff, 0xff);
+-    SDL_RenderClear(renderer);
++    ClearWindow();
+     DrawSilkscreen();
+     SDL_RenderPresent(renderer);
+ }
+@@ -156,8 +187,7 @@ void SdlRenderer::Draw(bool forceRedraw, uint32_t buttons) {
+         frameTextureValid = true;
+     }
+ 
+-    SDL_SetRenderDrawColor(renderer, 0xff, 0xff, 0xff, 0xff);
+-    SDL_RenderClear(renderer);
++    ClearWindow();
+     DrawSilkscreen();
+ 
+     if (frameTextureValid && lcdEnabled) {
+@@ -213,6 +243,7 @@ void SdlRenderer::Draw(bool forceRedraw, uint32_t buttons) {
+         if(!controlsTexture)
+             controlsTexture=SDL_CreateTexture(renderer,SDL_PIXELFORMAT_ABGR8888,
+                 SDL_TEXTUREACCESS_TARGET,int(screenWidth*artworkScale),int(controls.height*artworkScale));
++        if(controlsTexture && fit!=WindowFit::none) SDL_SetTextureScaleMode(controlsTexture,SDL_ScaleModeLinear);
+         if(controlsTexture && (!controlsPainted || controlsChanged)) {
+             float sx,sy;SDL_RenderGetScale(renderer,&sx,&sy);
+             if(SDL_SetRenderTarget(renderer,controlsTexture)==0) {
+@@ -233,6 +264,23 @@ void SdlRenderer::Draw(bool forceRedraw, uint32_t buttons) {
+     soc->ResetPendingFrame();
+ }
+ 
++// A fitted window clears to the background colour and the screen area to white.
++void SdlRenderer::ClearWindow() {
++    if (fit == WindowFit::none) {
++        SDL_SetRenderDrawColor(renderer, 0xff, 0xff, 0xff, 0xff);
++        SDL_RenderClear(renderer);
++        return;
++    }
++    SDL_SetRenderDrawColor(renderer, background >> 16, (background >> 8) & 0xff, background & 0xff, 0xff);
++    SDL_RenderClear(renderer);
++    const bool landscape = rotation == Rotation::landscape_90 || rotation == Rotation::landscape_270;
++    const int screenHeight = displayConfiguration.height + displayConfiguration.graffitiHeight;
++    const SDL_Rect screen{0, 0, landscape ? screenHeight : displayConfiguration.width,
++                          landscape ? displayConfiguration.width : screenHeight};
++    SDL_SetRenderDrawColor(renderer, 0xff, 0xff, 0xff, 0xff);
++    SDL_RenderFillRect(renderer, &screen);
++}
++
+ void SdlRenderer::DrawSilkscreen() {
+     if (!silkscreenTexture) return;
+ 
+diff --git a/src/uarm/native/SdlRenderer.h b/src/uarm/native/SdlRenderer.h
+index 6404245..1813e48 100644
+--- a/src/uarm/native/SdlRenderer.h
++++ b/src/uarm/native/SdlRenderer.h
+@@ -6,22 +6,27 @@
+ #include <cstdint>
+ 
+ #include "Rotation.h"
++#include "WindowLayout.h"
+ #include "SoC.h"
+ #include "device_configuration.h"
+ 
+ class SdlRenderer {
+    public:
+     SdlRenderer(SDL_Window* window, SoC* soc, float scale, DisplayConfiguration& displayConfiguration,
+-                Rotation rotation, bool smoothLcd = false);
++                Rotation rotation, bool smoothLcd = false, WindowFit fit = WindowFit::none,
++                uint32_t background = 0);
+     ~SdlRenderer();
+ 
+     void Draw(bool forceRedraw, uint32_t buttons = 0);
+     // Saves the unrotated LCD frame as PNG. With the LCD off, or before the first frame,
+     // it saves a black frame of the same size and sets blank.
+     bool SaveFramebuffer(const char* path, bool& blank);
++    // Where the device sits in the window, in window coordinates.
++    const WindowLayout& Layout() const { return layout; }
+ 
+    private:
+     void DrawSilkscreen();
++    void ClearWindow();
+ 
+    private:
+     SDL_Window* window{nullptr};
+@@ -45,6 +50,9 @@ class SdlRenderer {
+     float artworkScale{1};
+     Rotation rotation;
+     DisplayConfiguration displayConfiguration;
++    WindowFit fit;
++    WindowLayout layout;
++    uint32_t background;
+ 
+    private:
+     SdlRenderer();
+diff --git a/src/uarm/native/WindowLayout.h b/src/uarm/native/WindowLayout.h
+new file mode 100644
+index 0000000..7bd756c
+--- /dev/null
++++ b/src/uarm/native/WindowLayout.h
+@@ -0,0 +1,60 @@
++#pragma once
++
++#include <algorithm>
++#include <cmath>
++#include <cstdint>
++#include <string>
++
++// How a resizable window holds the device. none keeps the fixed window scale in the
++// top left; fit keeps the device's shape at the largest size that fits; whole uses the
++// largest whole multiple that fits; fill stretches the device to the whole window.
++enum class WindowFit { none, fit, whole, fill };
++
++// Where the device sits in the window, in window coordinates.
++struct WindowLayout {
++    float scaleX{1}, scaleY{1};
++    int x{0}, y{0}, width{0}, height{0};
++};
++
++inline bool parseWindowFit(const std::string& value, WindowFit& fit) {
++    if (value == "fit") fit = WindowFit::fit;
++    else if (value == "whole") fit = WindowFit::whole;
++    else if (value == "fill") fit = WindowFit::fill;
++    else return false;
++    return true;
++}
++
++// Parses RRGGBB into 0xRRGGBB.
++inline bool parseWindowColour(const std::string& value, uint32_t& colour) {
++    if (value.size() != 6 || value.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos)
++        return false;
++    colour = uint32_t(std::stoul(value, nullptr, 16));
++    return true;
++}
++
++// Centres the device of deviceWidth x deviceHeight in a window of windowWidth x windowHeight.
++inline WindowLayout fitWindowLayout(WindowFit fit, int deviceWidth, int deviceHeight, int windowWidth,
++                                    int windowHeight) {
++    WindowLayout layout;
++    if (fit == WindowFit::none || deviceWidth <= 0 || deviceHeight <= 0 || windowWidth <= 0 ||
++        windowHeight <= 0) {
++        layout.width = deviceWidth;
++        layout.height = deviceHeight;
++        return layout;
++    }
++    const float scaleX = float(windowWidth) / deviceWidth, scaleY = float(windowHeight) / deviceHeight;
++    if (fit == WindowFit::fill) {
++        layout.scaleX = scaleX;
++        layout.scaleY = scaleY;
++    } else {
++        float scale = std::min(scaleX, scaleY);
++        // A window smaller than the device falls back to fitting.
++        if (fit == WindowFit::whole && scale >= 1) scale = std::floor(scale);
++        layout.scaleX = layout.scaleY = scale;
++    }
++    layout.width = std::min(windowWidth, int(std::lround(deviceWidth * layout.scaleX)));
++    layout.height = std::min(windowHeight, int(std::lround(deviceHeight * layout.scaleY)));
++    layout.x = (windowWidth - layout.width) / 2;
++    layout.y = (windowHeight - layout.height) / 2;
++    return layout;
++}
+diff --git a/src/uarm/native/main.cpp b/src/uarm/native/main.cpp
+index c2e21a1..b46f72f 100644
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -28,6 +28,7 @@
+ #include "SdlEventHandler.h"
+ #include "DeviceControls.h"
+ #include "SdlRenderer.h"
++#include "WindowLayout.h"
+ #include "WindowScale.h"
+ #include "argparse.h"
+ #include "audio_queue.h"
+@@ -57,6 +58,8 @@ struct Options {
+     bool smallWindow;
+     optional<float> windowScale;
+     bool smoothLcd;
++    WindowFit windowFit;
++    uint32_t windowBackground;
+     optional<DisplayMode> displayMode;
+     bool experimentalTx;
+     bool experimentalFastAudio;
+@@ -100,7 +103,7 @@ namespace {
+     }
+ 
+     SDL_Window* initSdl(DisplayConfiguration& displayConfiguration, float& scale, Rotation rotation,
+-                        const DeviceControlProfile& controls) {
++                        const DeviceControlProfile& controls, bool resizable) {
+         if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_AUDIO) < 0) {
+             cerr << "could not initialize SDL: " << SDL_GetError() << endl;
+             return nullptr;
+@@ -121,7 +124,7 @@ namespace {
+         auto window = SDL_CreateWindow("cp-uarm", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+                                        scale * windowWidth(displayConfiguration, rotation),
+                                        scale * (windowHeight(displayConfiguration, rotation)+controls.height),
+-                                       SDL_WINDOW_ALLOW_HIGHDPI);
++                                       SDL_WINDOW_ALLOW_HIGHDPI | (resizable ? SDL_WINDOW_RESIZABLE : 0));
+ 
+         return window;
+     }
+@@ -467,15 +470,18 @@ namespace {
+ 
+         float scale = options.windowScale.value_or(options.smallWindow ? 1.f : 0.f);
+ 
+-        SDL_Window* window = initSdl(displayConfiguration, scale, rotation, deviceControls(deviceType));
++        const bool fitted = options.windowFit != WindowFit::none;
++        SDL_Window* window = initSdl(displayConfiguration, scale, rotation, deviceControls(deviceType), fitted);
+         if (!window) {
+             cerr << "failed to init SDL" << endl;
+             return false;
+         }
+ 
+         auto sdlRenderer =
+-            make_unique<SdlRenderer>(window, soc, scale, displayConfiguration, rotation, options.smoothLcd);
++            make_unique<SdlRenderer>(window, soc, scale, displayConfiguration, rotation, options.smoothLcd,
++                                         options.windowFit, options.windowBackground);
+         SdlEventHandler sdlEventHandler(soc, scale, displayConfiguration, rotation);
++        sdlEventHandler.SetLayout(sdlRenderer->Layout(), fitted);
+ 
+         SdlAudioDriver audioDriver(soc, audioQueue, options.experimentalFastAudio);
+         if (!options.disableAudio) audioDriver.Start();
+@@ -634,12 +640,24 @@ namespace {
+                 sdlResizeWindow(window, displayConfiguration, scale, rotation, deviceControls(deviceType));
+ 
+                 sdlRenderer =
+-                    make_unique<SdlRenderer>(window, soc, scale, displayConfiguration, rotation, options.smoothLcd);
++                    make_unique<SdlRenderer>(window, soc, scale, displayConfiguration, rotation, options.smoothLcd,
++                                         options.windowFit, options.windowBackground);
+                 sdlEventHandler.SetRotation(rotation);
++                sdlEventHandler.SetLayout(sdlRenderer->Layout(), fitted);
+ 
+                 soc->SetFramebufferDirty();
+             }
+ 
++            // A fitted window lays the device out again when it changes size.
++            if (sdlEventHandler.TakeResized() && fitted) {
++                sdlRenderer.reset();
++                sdlRenderer = make_unique<SdlRenderer>(window, soc, scale, displayConfiguration, rotation,
++                                                       options.smoothLcd, options.windowFit,
++                                                       options.windowBackground);
++                sdlEventHandler.SetLayout(sdlRenderer->Layout(), fitted);
++                soc->SetFramebufferDirty();
++            }
++
+             const auto delay = mainLoop.GetSuggestedDelayUsec(timestampUsec());
+             if (delay > 10) usleep(delay);
+         }
+@@ -737,6 +755,20 @@ int main(int argc, char** argv) {
+             if (value == "2") return 2.f;
+             throw runtime_error("invalid window scale: " + value);
+         });
++    program.add_argument("--window-fit")
++        .help("fit the device to a resizable window: fit, whole or fill")
++        .action([](const string& value) {
++            WindowFit fit;
++            if (!parseWindowFit(value, fit)) throw runtime_error("invalid window fit: " + value);
++            return fit;
++        });
++    program.add_argument("--window-background")
++        .help("colour around a fitted device as RRGGBB; default: 000000")
++        .action([](const string& value) {
++            uint32_t colour;
++            if (!parseWindowColour(value, colour)) throw runtime_error("invalid window background: " + value);
++            return colour;
++        });
+     program.add_argument("--smooth-lcd")
+         .help("smooth LCD scaling instead of sharp nearest-neighbour pixels")
+         .default_value(false).implicit_value(true);
+@@ -806,6 +838,8 @@ int main(int argc, char** argv) {
+                        .smallWindow = program.get<bool>("--small-window"),
+                        .windowScale = program.present<float>("--window-scale"),
+                        .smoothLcd = program.get<bool>("--smooth-lcd"),
++                       .windowFit = program.present<WindowFit>("--window-fit").value_or(WindowFit::none),
++                       .windowBackground = program.present<uint32_t>("--window-background").value_or(0),
+                        .displayMode = program.present<DisplayMode>("--display"),
+                        .experimentalTx = program.get<bool>("--experimental-tx"),
+                        .experimentalFastAudio = program.get<bool>("--fast-audio"),
