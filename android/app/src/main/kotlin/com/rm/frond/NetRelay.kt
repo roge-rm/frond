@@ -73,6 +73,9 @@ abstract class NetRelay(
     // What the peer is called in messages: another Frond for infrared, anything for serial and USB.
     protected open val closedMessage = "The other side closed the connection."
     protected open val stoppedMessage = "Stopped waiting for connections."
+    // What happens when a new peer sends more than HELD_MAX before the core side first connects: true drops the
+    // peer, false discards what's held and keeps holding the newest bytes.
+    protected open val dropPeerOnEarlyOverflow = true
 
     // HOST:PORT, [IPv6]:PORT, or a host alone for this relay's default port.
     fun address(text: String): Pair<String, Int>? = address(text, defaultPort)
@@ -302,6 +305,10 @@ abstract class NetRelay(
     private inner class Session(val generation: Int, val mode: BeamMode, val peer: Socket, val corePort: Int) {
         @Volatile private var core: Socket? = null
         @Volatile private var closed = false
+        // Peer bytes from before the core side first connects (session start, or a replaced peer the core
+        // hasn't let go of yet), sent once it does. Null after that. core and held change under heldLock.
+        private var held: HeldBytes? = HeldBytes(HELD_MAX)
+        private val heldLock = Any()
 
         fun start() {
             try { peer.tcpNoDelay = true } catch (_: IOException) {}
@@ -322,8 +329,8 @@ abstract class NetRelay(
             ended(this, reason)
         }
 
-        // Network to core. Bytes that arrive while the core side is reconnecting are dropped, as on a wire
-        // with nothing at the other end.
+        // Network to core. Bytes from before the core side first connects are held (up to HELD_MAX); bytes
+        // that arrive while it reconnects later are dropped, as on a wire with nothing at the other end.
         private fun fromPeer() {
             val buffer = ByteArray(CHUNK)
             try {
@@ -331,7 +338,22 @@ abstract class NetRelay(
                 while (!closed) {
                     val n = input.read(buffer)
                     if (n < 0) break
-                    try { core?.getOutputStream()?.write(buffer, 0, n) } catch (_: IOException) {}
+                    var overflow = false
+                    val c = synchronized(heldLock) {
+                        val h = held
+                        if (h != null && !h.offer(buffer, n)) {
+                            overflow = dropPeerOnEarlyOverflow
+                            h.clear()
+                            h.offer(buffer, n)
+                        }
+                        core
+                    }
+                    if (overflow) {
+                        Log.w(TAG, "$what: peer sent over $HELD_MAX bytes before the core connected")
+                        finish("The emulator wasn't ready for that much data.")
+                        return
+                    }
+                    try { c?.getOutputStream()?.write(buffer, 0, n) } catch (_: IOException) {}
                 }
                 finish(closedMessage)
             } catch (e: IOException) {
@@ -366,7 +388,13 @@ abstract class NetRelay(
                     continue
                 }
                 failures = 0
-                core = c
+                synchronized(heldLock) {
+                    held?.let {
+                        try { c.getOutputStream().write(it.drain()) } catch (_: IOException) {}
+                    }
+                    held = null
+                    core = c
+                }
                 if (closed) {
                     try { c.close() } catch (_: IOException) {}
                     return
@@ -394,6 +422,9 @@ abstract class NetRelay(
     companion object {
         private const val TAG = "Frond"
         private const val CHUNK = 4096
+        // Peer bytes held before the core side first connects: a few seconds of serial at 115200, or a
+        // HotSync burst.
+        const val HELD_MAX = 64 * 1024
         // The core listens on IPv4 only; Android's getLoopbackAddress() is ::1.
         private val LOOPBACK: InetAddress = InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1))
 
@@ -491,6 +522,8 @@ object IrBeam : NetRelay(5030, "irda-mode", "irda-state", "beam", "beaming") {
     const val DEFAULT_PORT = 5030
     override val closedMessage = "The other Frond closed the connection."
     override val stoppedMessage = "Stopped waiting for other Fronds."
+    // A sleeping Palm keeps the core's port closed for any length of time; frames beamed then are lost, not fatal.
+    override val dropPeerOnEarlyOverflow = false
 
     override fun coreLeftReason(state: String, port: Int): String? {
         if (state.startsWith("tcp:$port ")) return null
@@ -521,4 +554,26 @@ fun tcpLeftReason(state: String, port: Int, fallback: String): String? {
     if (state.startsWith("tcp 127.0.0.1:$port ")) return null
     // "off REASON" after a failed switch; anything else (plain off, another port, a pty) has no reason to show.
     return if (state.startsWith("off ")) state.removePrefix("off ").trim().ifEmpty { fallback } else fallback
+}
+
+// A capped byte buffer for NetRelay's early peer bytes.
+class HeldBytes(private val max: Int) {
+    private var data = ByteArray(0)
+    private var size = 0
+
+    val length get() = size
+
+    // Appends n bytes; false, appending nothing, when that would pass max.
+    fun offer(bytes: ByteArray, n: Int): Boolean {
+        if (size + n > max) return false
+        if (size + n > data.size) data = data.copyOf(maxOf(size + n, minOf(max, data.size * 2 + 1024)))
+        System.arraycopy(bytes, 0, data, size, n)
+        size += n
+        return true
+    }
+
+    fun clear() { size = 0 }
+
+    // Everything held, emptying it.
+    fun drain(): ByteArray = data.copyOf(size).also { size = 0 }
 }

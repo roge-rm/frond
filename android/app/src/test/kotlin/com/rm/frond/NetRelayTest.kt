@@ -1,7 +1,10 @@
 package com.rm.frond
 
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class NetRelayTest {
@@ -51,5 +54,21 @@ class NetRelayTest {
         // Saved modes carry their port, whichever relay reads them.
         assertEquals(BeamMode.Connect("10.0.2.2", 5034), BeamMode.decode(BeamMode.Connect("10.0.2.2", 5034).encode()))
         assertEquals(BeamMode.Listen(5033), BeamMode.decode("listen:5033"))
+    }
+
+    @Test
+    fun heldBytesKeepOrderAndCap() {
+        val held = HeldBytes(10)
+        assertTrue(held.offer(byteArrayOf(1, 2, 3, 9), 3))
+        assertTrue(held.offer(byteArrayOf(4, 5, 6, 7, 8, 9, 10), 7))
+        // An eleventh byte would pass the cap, so nothing of it is kept.
+        assertFalse(held.offer(byteArrayOf(11), 1))
+        assertEquals(10, held.length)
+        assertArrayEquals(byteArrayOf(1, 2, 3, 4, 5, 6, 7, 8, 9, 10), held.drain())
+        assertEquals(0, held.length)
+        assertTrue(held.offer(byteArrayOf(42), 1))
+        held.clear()
+        assertArrayEquals(ByteArray(0), held.drain())
+        assertEquals(64 * 1024, NetRelay.HELD_MAX)
     }
 }

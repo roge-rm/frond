@@ -69,7 +69,8 @@ unchanged. On the desktop, put a PTY in front of it for a terminal or pilot-link
 python3 tools/link-pty.py PHONE:5033 --link /tmp/palm-serial   # prints: PTY /dev/pts/N
 ```
 
-or `link-pty.py listen:5033` when the phone connects. `tools/link-irda.py` joins
+or `link-pty.py listen:5033` when the phone connects. Each program that opens the
+PTY finds it raw and empty; bytes that come while none has it open are dropped. `tools/link-irda.py` joins
 two TCP endpoints in any of these forms, so it can also join the phone to a
 desktop core started with `--serial tcp:PORT`. The E2 has no serial port.
 
