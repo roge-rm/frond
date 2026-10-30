@@ -5,7 +5,8 @@ pilot-link and terminal programs take the printed /dev/pts/N (or --link PATH) as
 endpoint is PORT (a local Frond's --serial or --usb tcp:PORT), HOST:PORT (connect, such as an Android
 Frond waiting for a peer) or listen:PORT (wait on all interfaces for one peer, such as an Android
 Frond connecting here). Bytes pass both ways unchanged. The PTY stays open between programs, so
-pilot-link can run again and again; the run ends when the TCP side closes."""
+pilot-link can run again and again; each program finds it raw and empty, and TCP bytes that come while no
+program has it open are dropped. The run ends when the TCP side closes."""
 import argparse
 import importlib.util
 import json
@@ -14,12 +15,16 @@ from pathlib import Path
 import select
 import socket
 import time
+import termios
 import tty
 
 spec = importlib.util.spec_from_file_location('link_irda', Path(__file__).resolve().parent / 'link-irda.py')
 link_irda = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(link_irda)
 CHUNK = 4096
+# TCP bytes waiting for the program on the PTY. When it's full, TCP is read no further until the program
+# catches up.
+PENDING_MAX = 64 * 1024
 
 
 def connect(end, seconds):
@@ -36,13 +41,35 @@ def connect(end, seconds):
         return peer
 
 
+def reset_slave(name):
+    """Makes the PTY raw and drops what no program read, for the next program to open it."""
+    fd = os.open(name, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    try:
+        tty.setraw(fd, termios.TCSANOW)
+        termios.tcflush(fd, termios.TCIFLUSH)
+    finally:
+        os.close(fd)
+
+
+def hung_up(master):
+    """True while no program has the PTY open."""
+    poller = select.poll()
+    poller.register(master, select.POLLIN)
+    return any(event & select.POLLHUP for _, event in poller.poll(0))
+
+
 def relay(end, link=None, seconds=None):
-    """Runs until the TCP side closes or seconds pass. Returns counts for the result line."""
+    """Runs until the TCP side closes or seconds pass. Returns counts for the result line: from_tcp written
+    to the PTY, to_tcp read from it, dropped with no program to take them."""
     started = time.monotonic()
     master, slave = os.openpty()
-    tty.setraw(slave)
     name = os.ttyname(slave)
-    received, sent, reason = 0, 0, 'deadline'
+    tty.setraw(slave)
+    # Only programs hold the slave, so the master sees a hangup when the last one closes it.
+    os.close(slave)
+    os.set_blocking(master, False)
+    received, sent, dropped, reason = 0, 0, 0, 'deadline'
+    pending = bytearray()
     peer = None
     try:
         if link:
@@ -55,24 +82,55 @@ def relay(end, link=None, seconds=None):
         try:
             peer = connect(end, seconds)
         except socket.timeout:
-            return {'reason': reason, 'from_tcp': 0, 'to_tcp': 0}
+            return {'reason': reason, 'from_tcp': 0, 'to_tcp': 0, 'dropped': 0}
         peer.setblocking(True)
         peer.settimeout(None)
         peer.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         print(f'Linked {name} and {link_irda.name(end)}.', flush=True)
+        hung = True
+        poller = select.poll()
         while seconds is None or time.monotonic() - started < seconds:
-            ready = select.select([master, peer], [], [], .1)[0]
-            if master in ready:
+            if hung and not hung_up(master):
+                hung = False
+            poller.register(peer, select.POLLRDHUP | (select.POLLIN if len(pending) < PENDING_MAX else 0))
+            if hung:
                 try:
-                    data = os.read(master, CHUNK)
-                except OSError:
-                    data = b''
-                if data:
-                    peer.sendall(data)
-                    sent += len(data)
-                else:
-                    time.sleep(.01)
-            if peer in ready:
+                    poller.unregister(master)
+                except KeyError:
+                    pass
+            else:
+                poller.register(master, select.POLLIN | (select.POLLOUT if pending else 0))
+            events = dict(poller.poll(100))
+            if not hung and master in events:
+                event = events[master]
+                if event & (select.POLLIN | select.POLLHUP | select.POLLERR):
+                    # Read before the hangup is handled, so what a program wrote just before closing still goes out.
+                    while True:
+                        try:
+                            data = os.read(master, CHUNK)
+                        except (BlockingIOError, OSError):
+                            data = b''
+                        if not data:
+                            break
+                        peer.sendall(data)
+                        sent += len(data)
+                if event & select.POLLHUP:
+                    hung = True
+                    dropped += len(pending)
+                    pending.clear()
+                    try:
+                        reset_slave(name)
+                    except OSError:
+                        pass
+                elif pending and event & select.POLLOUT:
+                    try:
+                        n = os.write(master, pending)
+                    except (BlockingIOError, OSError):
+                        n = 0
+                    del pending[:n]
+                    received += n
+            event = events.get(peer.fileno(), 0)
+            if event & (select.POLLIN | select.POLLHUP | select.POLLERR):
                 try:
                     data = peer.recv(CHUNK)
                 except OSError:
@@ -80,14 +138,21 @@ def relay(end, link=None, seconds=None):
                 if not data:
                     reason = 'peer disconnected'
                     break
-                os.write(master, data)
-                received += len(data)
-        return {'reason': reason, 'from_tcp': received, 'to_tcp': sent}
+                if hung and hung_up(master):
+                    dropped += len(data)
+                else:
+                    # A program may have opened the PTY during the poll.
+                    hung = False
+                    pending += data
+            elif event & select.POLLRDHUP:
+                # Closed with bytes still unread while the program isn't keeping up: those are lost.
+                reason = 'peer disconnected'
+                break
+        return {'reason': reason, 'from_tcp': received, 'to_tcp': sent, 'dropped': dropped}
     finally:
         if peer:
             peer.close()
         os.close(master)
-        os.close(slave)
         if link and os.path.islink(link) and os.readlink(link) == name:
             os.unlink(link)
 
