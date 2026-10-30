@@ -73,9 +73,13 @@ abstract class NetRelay(
     // What the peer is called in messages: another Frond for infrared, anything for serial and USB.
     protected open val closedMessage = "The other side closed the connection."
     protected open val stoppedMessage = "Stopped waiting for connections."
+    protected open val coreClosedMessage = "The emulator closed the connection."
     // What happens when a new peer sends more than HELD_MAX before the core side first connects: true drops the
     // peer, false discards what's held and keeps holding the newest bytes.
     protected open val dropPeerOnEarlyOverflow = true
+    // True ends the peer when the core closes its side (the debugger, where that means gdb detached), false
+    // connects to the core again and keeps the peer.
+    protected open val coreCloseEndsPeer = false
 
     // HOST:PORT, [IPv6]:PORT, or a host alone for this relay's default port.
     fun address(text: String): Pair<String, Int>? = address(text, defaultPort)
@@ -122,40 +126,55 @@ abstract class NetRelay(
             val reply = link.request(modeCommand, coreMode(port), timeoutSeconds = 30)
             if (!reply.ok) return reply.message
             remember(context, mode)
-            var failed: String? = null
-            synchronized(lock) {
-                val gen = ++generation
-                corePort = port
-                when (mode) {
-                    is BeamMode.Listen -> {
-                        val listener = try {
-                            ServerSocket().apply {
-                                reuseAddress = true
-                                bind(InetSocketAddress(mode.port), 4)
-                            }
-                        } catch (e: IOException) {
-                            null
-                        }
-                        if (listener == null) {
-                            ++generation
-                            failed = "Couldn't wait on port ${mode.port}. Another app may be using it."
-                        } else {
-                            server = listener
-                            state.value = Status(mode, Phase.WAITING)
-                            Thread({ accept(gen, mode, listener) }, "FrondRelayWait-$what").apply { isDaemon = true }.start()
-                        }
-                    }
-                    is BeamMode.Connect -> connectLater(gen, mode)
-                    BeamMode.Off -> {}
-                }
-            }
+            val failed = startRelay(mode, port)
             if (failed != null) {
                 link.request(modeCommand, "off", timeoutSeconds = 30)
                 return failed
             }
-            Log.i(TAG, "$what: ${mode.encode()}, core on 127.0.0.1:$port")
             return null
         }
+    }
+
+    // Relays a peer to an endpoint the core opened at launch on corePort, such as the debugger, which has no
+    // mode command. Returns an error to show, or null.
+    fun relay(mode: BeamMode, corePort: Int): String? {
+        synchronized(changing) {
+            stop()
+            return startRelay(mode, corePort)?.also { state.value = Status(error = it) }
+        }
+    }
+
+    // Under changing, after stop().
+    private fun startRelay(mode: BeamMode, port: Int): String? {
+        var failed: String? = null
+        synchronized(lock) {
+            val gen = ++generation
+            corePort = port
+            when (mode) {
+                is BeamMode.Listen -> {
+                    val listener = try {
+                        ServerSocket().apply {
+                            reuseAddress = true
+                            bind(InetSocketAddress(mode.port), 4)
+                        }
+                    } catch (e: IOException) {
+                        null
+                    }
+                    if (listener == null) {
+                        ++generation
+                        failed = "Couldn't wait on port ${mode.port}. Another app may be using it."
+                    } else {
+                        server = listener
+                        state.value = Status(mode, Phase.WAITING)
+                        Thread({ accept(gen, mode, listener) }, "FrondRelayWait-$what").apply { isDaemon = true }.start()
+                    }
+                }
+                is BeamMode.Connect -> connectLater(gen, mode)
+                BeamMode.Off -> {}
+            }
+        }
+        if (failed == null) Log.i(TAG, "$what: ${mode.encode()}, core on 127.0.0.1:$port")
+        return failed
     }
 
     // Connects again after a Connect peer was lost.
@@ -293,6 +312,8 @@ abstract class NetRelay(
     // Asks the core whether its endpoint is still tcp on this port. Null means yes or can't tell yet (a busy
     // core); otherwise the reason it isn't.
     private fun coreGone(port: Int): String? {
+        // An endpoint opened at launch lasts as long as the core.
+        if (stateCommand.isEmpty()) return null
         val l = link ?: return "The emulator stopped."
         val reply = l.request(stateCommand, timeoutSeconds = 10)
         if (!reply.ok) return if (reply.code == "timeout") null else reply.message
@@ -414,6 +435,10 @@ abstract class NetRelay(
                     core = null
                     try { c.close() } catch (_: IOException) {}
                 }
+                if (coreCloseEndsPeer) {
+                    finish(coreClosedMessage)
+                    return
+                }
                 if (!closed) Thread.sleep(200)
             }
         }
@@ -426,7 +451,7 @@ abstract class NetRelay(
         // HotSync burst.
         const val HELD_MAX = 64 * 1024
         // The core listens on IPv4 only; Android's getLoopbackAddress() is ::1.
-        private val LOOPBACK: InetAddress = InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1))
+        val LOOPBACK: InetAddress = InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1))
 
         // "1".."65535", or null.
         fun port(text: String): Int? = text.trim().toIntOrNull()?.takeIf { it in 1..65535 }
@@ -547,6 +572,36 @@ object UsbLink : NetRelay(5034, "usb-mode", "usb-state", "usb", "usb") {
 
     override fun coreLeftReason(state: String, port: Int): String? =
         tcpLeftReason(state, port, "The emulator's USB stopped.")
+}
+
+// The core's gdb server (--gdb PORT, 127.0.0.1 only), turned on in Settings and opened at launch, so it has no mode
+// or state command. The core waits for the first gdb before it runs the Palm, stops the Palm whenever gdb connects
+// and closes its side when gdb detaches, which ends the peer here too. Only waits for gdb, never connects out.
+object DebugLink : NetRelay(3333, "", "", "debugger", "debugger") {
+    const val DEFAULT_PORT = 3333
+    override val closedMessage = "gdb closed the connection."
+    override val stoppedMessage = "Stopped waiting for gdb."
+    override val coreClosedMessage = "gdb detached."
+    override val coreCloseEndsPeer = true
+
+    override fun coreLeftReason(state: String, port: Int): String? = null
+
+    // A free loopback port for --gdb, or null.
+    fun freePort(): Int? = try {
+        ServerSocket(0, 1, LOOPBACK).use { it.localPort }
+    } catch (e: IOException) {
+        null
+    }
+
+    // Lets a core that's still waiting for its first gdb go on: connecting and closing at once is a gdb that
+    // came and went. A core that's already running takes it the same way and carries on. False when nothing
+    // answered on port.
+    fun release(port: Int): Boolean = try {
+        Socket().use { it.connect(InetSocketAddress(LOOPBACK, port), 1_000) }
+        true
+    } catch (e: IOException) {
+        false
+    }
 }
 
 // For serial-state and usb-state: null while still tcp on port, otherwise the core's reason or fallback.

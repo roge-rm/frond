@@ -38,6 +38,32 @@ they do not exit Frond. The loopback listener remains available. Reconnecting
 stops at the next native or optimized PACE instruction boundary, with fresh debugger state.
 Debugger configuration is not stored in guest sessions.
 
+## On Android
+
+Turn on Settings > Debugger > gdb server and set its port (3333 unless you change it).
+It applies to the next session you open. The Palm then waits for gdb before it runs,
+with a note showing this device's address. From another machine on the same network:
+
+```gdb
+target remote PHONE:3333
+```
+
+The app passes the core `--gdb` on a loopback port and waits for gdb on the port you set,
+on all of the phone's network addresses, with no password. Only turn it on on a network
+you trust. For an emulator, forward a port first and connect to it on your computer:
+
+```sh
+adb forward tcp:3333 tcp:3333
+gdb-multiarch -ex 'target remote 127.0.0.1:3333'
+```
+
+The menu's Device section shows whether gdb is connected. Back while the Palm waits for
+gdb, or while gdb has it stopped, ends the gdb connection, saves and leaves. gdb gets no
+answers while the emulator is hidden (the menu screen is open or you're in another app)
+or while the Palm is asleep, since the core only serves gdb between instructions; wake
+the Palm first. The Palm runs slower with the gdb server on. Everything below works the
+same through the phone.
+
 ## Implemented scope
 
 - One emulated ARM CPU and one synthetic RSP thread (ID 1), using all-stop mode.

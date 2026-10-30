@@ -36,6 +36,8 @@ class FrondActivity : SDLActivity() {
     @Volatile private var quitSent = false
     private lateinit var settings: Settings
     private var savingNote: TextView? = null
+    // The core's loopback gdb port while the debugger is on (Settings), else null.
+    private var debugPort: Int? = null
     private var menuButton: View? = null
     private var keyboardButton: View? = null
     private var keyboard: PalmKeyboard? = null
@@ -69,6 +71,7 @@ class FrondActivity : SDLActivity() {
         fitInsideSystemBars()
         requestFrameRate()
         addSavingNote()
+        startDebugger()
         addMenuButton()
         addKeyboard()
         addController()
@@ -106,6 +109,7 @@ class FrondActivity : SDLActivity() {
         } else {
             arguments += listOf("--audio-period", audioPeriod().toString())
         }
+        debugPort?.let { arguments += listOf("--gdb", it.toString()) }
         arguments += listOf("--desktop-socket", link.path.path)
         return arguments.toTypedArray()
     }
@@ -247,6 +251,7 @@ class FrondActivity : SDLActivity() {
             savingNote?.visibility = View.VISIBLE
         }
         Thread({
+            letDebuggerGo()
             val path = sessionPath
             val reply = synchronized(saveLock) {
                 releaseInput()
@@ -386,6 +391,60 @@ class FrondActivity : SDLActivity() {
         )
     }
 
+    // With the debugger on in Settings: a loopback port for the core's --gdb, gdb's port on the network through
+    // DebugLink, and a note over the emulator while the core waits for gdb before it runs the Palm.
+    private fun startDebugger() {
+        if (!settings.debugger) return
+        val port = DebugLink.freePort()
+        if (port == null) {
+            Log.e(TAG, "debugger: no free loopback port")
+            return
+        }
+        debugPort = port
+        val layout = SDLActivity.getContentView() as? RelativeLayout
+        val note = TextView(this).apply {
+            setTextColor(Color.WHITE)
+            textSize = 16f
+            gravity = Gravity.CENTER
+            setPadding(48, 24, 48, 24)
+            setBackgroundColor(Color.argb(0xCC, 0x0B, 0x0C, 0x11))
+            visibility = View.GONE
+        }
+        layout?.addView(note, RelativeLayout.LayoutParams(RelativeLayout.LayoutParams.WRAP_CONTENT, RelativeLayout.LayoutParams.WRAP_CONTENT).apply {
+            addRule(RelativeLayout.CENTER_IN_PARENT)
+        })
+        Thread({
+            val error = DebugLink.relay(BeamMode.Listen(settings.debuggerPort), port)
+            val addresses = NetRelay.addresses(applicationContext)
+            val text = when {
+                error != null -> error
+                addresses.isEmpty() -> "Waiting for gdb on port ${settings.debuggerPort}"
+                else -> "Waiting for gdb at " + addresses.joinToString(", ") { "$it:${settings.debuggerPort}" }
+            }
+            runOnUiThread { if (!link.connectedOnce && !leaving) { note.text = text; note.visibility = View.VISIBLE } }
+            // Nothing can reach the core's gdb port, so let the Palm run without it.
+            if (error != null) releaseDebugger(port)
+        }, "FrondDebugger").apply { isDaemon = true }.start()
+        link.whenConnected { runOnUiThread { layout?.removeView(note) } }
+    }
+
+    // Ends any gdb session, which lets a Palm stopped in gdb run, and lets a core still waiting for its first gdb
+    // go on, so the control link can save. Not on the main thread.
+    private fun letDebuggerGo() {
+        val port = debugPort ?: return
+        DebugLink.stop()
+        if (!link.connectedOnce) releaseDebugger(port)
+    }
+
+    // Until the core takes a connection on its gdb port; it may not be listening yet just after launch.
+    private fun releaseDebugger(port: Int) {
+        val until = System.nanoTime() + 10_000_000_000L
+        while (!link.connectedOnce && System.nanoTime() < until) {
+            if (DebugLink.release(port)) return
+            Thread.sleep(300)
+        }
+    }
+
     // A small note over the emulator while back saves the session.
     private fun addSavingNote() {
         val layout = SDLActivity.getContentView() as? RelativeLayout ?: return
@@ -470,6 +529,8 @@ class FrondActivity : SDLActivity() {
         // core, and a second core can't start in this process, so save the session and end the
         // process instead; the next start loads the save.
         if (!isFinishing && !leaving) {
+            // Sockets can't be opened on the main thread.
+            Thread(::letDebuggerGo, "FrondDebugger").apply { start(); join(12_000) }
             sessionPath?.let { path ->
                 val reply = synchronized(saveLock) {
                     releaseInput()
@@ -491,6 +552,7 @@ class FrondActivity : SDLActivity() {
         IrBeam.stop()
         SerialLink.stop()
         UsbLink.stop()
+        DebugLink.stop()
         BtLink.stop(applicationContext)
         link.close()
         // Native statics in the core don't reset between runs, so the process ends with the activity.

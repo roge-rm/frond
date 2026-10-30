@@ -23,6 +23,9 @@ data class Settings(
     val orientation: Orientation = Orientation.PHONE,
     val sound: Boolean = true,
     val fastAudio: Boolean = false,
+    // The core's gdb server, relayed by DebugLink on debuggerPort. The Palm waits for gdb before it runs.
+    val debugger: Boolean = false,
+    val debuggerPort: Int = DebugLink.DEFAULT_PORT,
 ) {
     // HomeActivity passes these to FrondActivity, which runs in its own process.
     fun putInto(intent: Intent): Intent = intent
@@ -31,6 +34,8 @@ data class Settings(
         .putExtra(EXTRA_ORIENTATION, orientation.name)
         .putExtra(EXTRA_SOUND, sound)
         .putExtra(EXTRA_FAST_AUDIO, fastAudio)
+        .putExtra(EXTRA_DEBUGGER, debugger)
+        .putExtra(EXTRA_DEBUGGER_PORT, debuggerPort)
 
     companion object {
         private const val FILE = "settings"
@@ -39,6 +44,8 @@ data class Settings(
         private const val EXTRA_ORIENTATION = "orientation"
         private const val EXTRA_SOUND = "sound"
         private const val EXTRA_FAST_AUDIO = "fastAudio"
+        private const val EXTRA_DEBUGGER = "debugger"
+        private const val EXTRA_DEBUGGER_PORT = "debuggerPort"
 
         fun load(context: Context): Settings {
             val p = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
@@ -48,6 +55,8 @@ data class Settings(
                 orientation = enumOr(p.getString(EXTRA_ORIENTATION, null), Orientation.PHONE),
                 sound = p.getBoolean(EXTRA_SOUND, true),
                 fastAudio = p.getBoolean(EXTRA_FAST_AUDIO, false),
+                debugger = p.getBoolean(EXTRA_DEBUGGER, false),
+                debuggerPort = NetRelay.port(p.getInt(EXTRA_DEBUGGER_PORT, DebugLink.DEFAULT_PORT).toString()) ?: DebugLink.DEFAULT_PORT,
             )
         }
 
@@ -58,6 +67,8 @@ data class Settings(
                 .putString(EXTRA_ORIENTATION, settings.orientation.name)
                 .putBoolean(EXTRA_SOUND, settings.sound)
                 .putBoolean(EXTRA_FAST_AUDIO, settings.fastAudio)
+                .putBoolean(EXTRA_DEBUGGER, settings.debugger)
+                .putInt(EXTRA_DEBUGGER_PORT, settings.debuggerPort)
                 .apply()
         }
 
@@ -71,6 +82,8 @@ data class Settings(
                 orientation = enumOr(extras.getString(EXTRA_ORIENTATION), saved.orientation),
                 sound = extras.getBoolean(EXTRA_SOUND, saved.sound),
                 fastAudio = extras.getBoolean(EXTRA_FAST_AUDIO, saved.fastAudio),
+                debugger = extras.getBoolean(EXTRA_DEBUGGER, saved.debugger),
+                debuggerPort = extras.getInt(EXTRA_DEBUGGER_PORT, saved.debuggerPort),
             )
         }
 

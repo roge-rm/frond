@@ -68,6 +68,11 @@ class ControlLink(val path: File, private val onEvent: (String, String) -> Unit)
         }
     }
 
+    // Runs action on the link's thread once the core connects, or once the link has ended without it.
+    fun whenConnected(action: () -> Unit) {
+        connected.thenRun(action)
+    }
+
     // Sends a command and waits for its reply. Never call this on the core's own thread.
     // Never throws: a core that isn't there or stops answers closed or timeout.
     fun request(command: String, argument: String = "", timeoutSeconds: Long = 120): Reply {

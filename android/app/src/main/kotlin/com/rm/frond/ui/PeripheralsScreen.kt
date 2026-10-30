@@ -279,6 +279,14 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                     )
                 }
                 if (model.usb.phase == NetRelay.Phase.DISCONNECTED) action("Connect again") { UsbLink.retry() }
+                if (model.debugger.phase != NetRelay.Phase.OFF || model.debugger.error != null) {
+                    item(key = "debugger") {
+                        ListItem(
+                            headlineContent = { Text("Debugger") },
+                            supportingContent = { Text(debuggerText(model.debugger)) },
+                        )
+                    }
+                }
                 item(key = "network") {
                     val mode = model.network
                     val usable = model.device.network && mode != null
@@ -559,6 +567,12 @@ private fun relayText(s: NetRelay.Status): String = when (s.phase) {
     NetRelay.Phase.CONNECTING -> "Connecting to ${(s.mode as? BeamMode.Connect)?.let { NetRelay.hostPort(it.host, it.port) }}"
     NetRelay.Phase.CONNECTED -> "Connected to ${s.peer ?: "a peer"}"
     NetRelay.Phase.DISCONNECTED -> s.error ?: "Disconnected"
+}
+
+private fun debuggerText(s: NetRelay.Status): String = when (s.phase) {
+    NetRelay.Phase.CONNECTED -> "gdb connected from ${s.peer ?: "the network"}"
+    NetRelay.Phase.WAITING -> "Waiting for gdb on port ${(s.mode as? BeamMode.Listen)?.port}"
+    else -> s.error?.let { "Off. $it" } ?: "Off"
 }
 
 private fun bluetoothText(s: BtLink.Status, radio: String?): String {
