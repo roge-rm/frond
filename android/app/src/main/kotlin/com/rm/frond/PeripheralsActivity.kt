@@ -169,6 +169,25 @@ class PeripheralsModel(
             if (reply.ok) null else reply.message
         }
 
+    // The core's network mode, null until it says.
+    var network by mutableStateOf<NetworkMode?>(null)
+        private set
+
+    fun readNetwork() {
+        val l = link ?: return
+        activity.lifecycleScope.launch {
+            val reply = withContext(Dispatchers.IO) { l.request("network-state", timeoutSeconds = 30) }
+            if (reply.ok) network = NetworkMode.byId(reply.message)
+        }
+    }
+
+    // Live, like the desktop's Network menu; changing it closes the Palm's connections.
+    fun changeNetwork(mode: NetworkMode) = device("Changing the network", "Couldn't change the network", false) { l ->
+        val reply = l.request("network-mode", mode.id, timeoutSeconds = 30)
+        if (reply.ok) activity.runOnUiThread { network = NetworkMode.byId(reply.message) }
+        if (reply.ok) null else reply.message
+    }
+
     // Both go back to the Palm, where the reset or rotation shows.
     fun reset() = device("Resetting", "Couldn't reset", true) { send(it, "reset") }
 
@@ -279,6 +298,7 @@ class PeripheralsActivity : ComponentActivity() {
         }
         model.refresh()
         model.readKeyboard()
+        model.readNetwork()
         setContent {
             FrondTheme {
                 Surface(Modifier.fillMaxSize()) {

@@ -27,6 +27,7 @@ import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -44,11 +45,13 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.rm.frond.FatImage
+import com.rm.frond.NetworkMode
 import com.rm.frond.PalmDatabases
 import com.rm.frond.Peripheral
 import com.rm.frond.PeripheralsModel
@@ -69,6 +72,7 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
     var naming by remember { mutableStateOf(false) }
     var exporting by remember { mutableStateOf<FatImage.Entry?>(null) }
     var confirmReset by remember { mutableStateOf(false) }
+    var choosingNetwork by remember { mutableStateOf(false) }
     val saveCopy = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
         if (uri != null) model.saveCopy(uri)
     }
@@ -223,6 +227,16 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                         modifier = Modifier.clickableRow { if (attached != null) model.attachKeyboard(!attached) },
                     )
                 }
+                item(key = "network") {
+                    val mode = model.network
+                    val usable = model.device.network && mode != null
+                    val faded = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                    ListItem(
+                        headlineContent = { Text("Network", color = if (model.device.network) Color.Unspecified else faded) },
+                        supportingContent = { Text(mode?.label ?: "", color = if (model.device.network) Color.Unspecified else faded) },
+                        modifier = if (usable) Modifier.clickableRow { choosingNetwork = true } else Modifier,
+                    )
+                }
                 action("Reset") { confirmReset = true }
                 action("Rotate") { model.rotate() }
                 item { Header("Session", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp)) }
@@ -250,6 +264,28 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
             title = { Text(title) },
             text = { Text(text) },
             confirmButton = { TextButton(onClick = { model.alert = null }) { Text("OK") } },
+        )
+    }
+    if (choosingNetwork) {
+        AlertDialog(
+            onDismissRequest = { choosingNetwork = false },
+            title = { Text("Network") },
+            text = {
+                LazyColumn {
+                    items(NetworkMode.entries) { mode ->
+                        ListItem(
+                            headlineContent = { Text(mode.label) },
+                            leadingContent = { RadioButton(selected = mode == model.network, onClick = null) },
+                            modifier = Modifier.clickableRow {
+                                choosingNetwork = false
+                                if (mode != model.network) model.changeNetwork(mode)
+                            },
+                        )
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = { choosingNetwork = false }) { Text("Cancel") } },
         )
     }
     if (choosingSize) {

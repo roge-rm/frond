@@ -57,6 +57,33 @@ def fetch(root, name, url, digest):
     return source
 
 
+# Android has no /etc/resolv.conf. The app writes its network's DNS servers to a file and names it
+# in SLIRP_RESOLV_CONF before the core starts; libslirp reads it like resolv.conf and notices changes.
+SLIRP_RESOLV_OLD = '''#if defined(__HAIKU__)
+#define RESOLV_CONF_PATH "/boot/system/settings/network/resolv.conf"
+#else'''
+SLIRP_RESOLV_NEW = '''#if defined(__ANDROID__)
+static const char *android_resolv_conf(void)
+{
+    const char *path = getenv("SLIRP_RESOLV_CONF");
+    return path && *path ? path : "/etc/resolv.conf";
+}
+#define RESOLV_CONF_PATH android_resolv_conf()
+#elif defined(__HAIKU__)
+#define RESOLV_CONF_PATH "/boot/system/settings/network/resolv.conf"
+#else'''
+
+
+def patch_slirp(source):
+    path = source / 'src/slirp.c'
+    text = path.read_text()
+    if SLIRP_RESOLV_NEW in text:
+        return
+    if text.count(SLIRP_RESOLV_OLD) != 1:
+        raise RuntimeError('libslirp resolv.conf code not found')
+    path.write_text(text.replace(SLIRP_RESOLV_OLD, SLIRP_RESOLV_NEW))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--ndk', type=Path, required=True)
@@ -81,6 +108,7 @@ def main():
     sources.mkdir(exist_ok=True)
     iconv, intl, glib, slirp = [fetch(sources, *spec) for spec in SOURCES]
     (glib / 'subprojects/libffi.wrap').write_text(FFI_WRAP)
+    patch_slirp(slirp)
     shutil.copytree(intl, glib / 'subprojects/proxy-libintl', dirs_exist_ok=True)
     shutil.rmtree(build, ignore_errors=True)
     build.mkdir()
