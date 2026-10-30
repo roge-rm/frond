@@ -58,11 +58,13 @@ import com.rm.frond.BtLink
 import com.rm.frond.BtMode
 import com.rm.frond.FatImage
 import com.rm.frond.IrBeam
+import com.rm.frond.NetRelay
 import com.rm.frond.NetworkMode
 import com.rm.frond.PalmDatabases
-import com.rm.frond.Peripheral
 import com.rm.frond.PeripheralsModel
 import com.rm.frond.SdCard
+import com.rm.frond.SerialLink
+import com.rm.frond.UsbLink
 
 private val SIZES = listOf(32, 64, 128)
 
@@ -82,6 +84,8 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
     var choosingNetwork by remember { mutableStateOf(false) }
     var choosingBeam by remember { mutableStateOf(false) }
     var choosingBluetooth by remember { mutableStateOf(false) }
+    var choosingSerial by remember { mutableStateOf(false) }
+    var choosingUsb by remember { mutableStateOf(false) }
     val saveCopy = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
         if (uri != null) model.saveCopy(uri)
     }
@@ -229,7 +233,7 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                 item(key = "keyboard") {
                     val attached = model.keyboard
                     // The keyboard and beaming share the Palm's infrared port.
-                    val usable = attached != null && model.beam.phase == IrBeam.Phase.OFF
+                    val usable = attached != null && model.beam.phase == NetRelay.Phase.OFF
                     val faded = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
                     ListItem(
                         headlineContent = { Text("Infrared keyboard", color = if (usable) Color.Unspecified else faded) },
@@ -245,11 +249,11 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                     val faded = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
                     ListItem(
                         headlineContent = { Text("Infrared beaming", color = if (usable) Color.Unspecified else faded) },
-                        supportingContent = { Text(beamText(beam), color = if (usable) Color.Unspecified else faded) },
+                        supportingContent = { Text(relayText(beam), color = if (usable) Color.Unspecified else faded) },
                         modifier = if (usable) Modifier.clickableRow { choosingBeam = true } else Modifier,
                     )
                 }
-                if (model.beam.phase == IrBeam.Phase.DISCONNECTED) action("Connect again") { model.retryBeam() }
+                if (model.beam.phase == NetRelay.Phase.DISCONNECTED) action("Connect again") { model.retryBeam() }
                 item(key = "bluetooth") {
                     ListItem(
                         headlineContent = { Text("Bluetooth") },
@@ -257,6 +261,24 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                         modifier = Modifier.clickableRow { choosingBluetooth = true },
                     )
                 }
+                item(key = "serial") {
+                    val usable = model.device.serialPort
+                    val faded = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                    ListItem(
+                        headlineContent = { Text("Serial port", color = if (usable) Color.Unspecified else faded) },
+                        supportingContent = if (usable) ({ Text(relayText(model.serial)) }) else null,
+                        modifier = if (usable) Modifier.clickableRow { choosingSerial = true } else Modifier,
+                    )
+                }
+                if (model.device.serialPort && model.serial.phase == NetRelay.Phase.DISCONNECTED) action("Connect again") { SerialLink.retry() }
+                item(key = "usb") {
+                    ListItem(
+                        headlineContent = { Text("USB HotSync") },
+                        supportingContent = { Text(relayText(model.usb)) },
+                        modifier = Modifier.clickableRow { choosingUsb = true },
+                    )
+                }
+                if (model.usb.phase == NetRelay.Phase.DISCONNECTED) action("Connect again") { UsbLink.retry() }
                 item(key = "network") {
                     val mode = model.network
                     val usable = model.device.network && mode != null
@@ -272,14 +294,6 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                 item { Header("Session", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp)) }
                 action("Save a copy") { saveCopy.launch("${model.name}.frond") }
                 action("Emulator log") { model.showLog() }
-                item { Header("Not on Android yet", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp)) }
-                items(Peripheral.entries) { p ->
-                    ListItem(
-                        headlineContent = {
-                            Text(p.label, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f))
-                        },
-                    )
-                }
                 item { Spacer(Modifier.size(16.dp)) }
             }
         }
@@ -319,14 +333,41 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
         )
     }
     if (choosingBeam) {
-        BeamDialog(
+        RelayDialog(
+            title = "Infrared beaming",
+            labels = listOf("Off", "Wait for a peer", "Connect to another Frond"),
+            relay = IrBeam,
             current = model.beam.mode,
-            last = remember { IrBeam.last(context) },
-            addresses = produceState<List<String>?>(null) { value = withContext(Dispatchers.IO) { IrBeam.addresses(context) } }.value,
             onDismiss = { choosingBeam = false },
             onChoose = { mode ->
                 choosingBeam = false
                 model.changeBeam(mode)
+            },
+        )
+    }
+    if (choosingSerial) {
+        RelayDialog(
+            title = "Serial port",
+            labels = listOf("Off", "Wait for a peer", "Connect to an address"),
+            relay = SerialLink,
+            current = model.serial.mode,
+            onDismiss = { choosingSerial = false },
+            onChoose = { mode ->
+                choosingSerial = false
+                model.changeSerial(mode)
+            },
+        )
+    }
+    if (choosingUsb) {
+        RelayDialog(
+            title = "USB HotSync",
+            labels = listOf("Off", "Wait for a peer", "Connect to an address"),
+            relay = UsbLink,
+            current = model.usb.mode,
+            onDismiss = { choosingUsb = false },
+            onChoose = { mode ->
+                choosingUsb = false
+                model.changeUsb(mode)
             },
         )
     }
@@ -344,12 +385,12 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                 BtMode.Off -> "off"
             },
             port = (start as? BtMode.Host)?.port,
-            address = (last as? BtMode.Join ?: start as? BtMode.Join)?.let { IrBeam.hostPort(it.host, it.port) },
-            addresses = produceState<List<String>?>(null) { value = withContext(Dispatchers.IO) { IrBeam.addresses(context) } }.value,
+            address = (last as? BtMode.Join ?: start as? BtMode.Join)?.let { NetRelay.hostPort(it.host, it.port) },
+            addresses = produceState<List<String>?>(null) { value = withContext(Dispatchers.IO) { NetRelay.addresses(context) } }.value,
             onDismiss = { choosingBluetooth = false },
             toMode = { choice, port, address ->
                 when (choice) {
-                    "listen" -> IrBeam.port(port)?.let { BtMode.Host(it) }
+                    "listen" -> NetRelay.port(port)?.let { BtMode.Host(it) }
                     "connect" -> BtLink.address(address)?.let { BtMode.Join(it.first, it.second) }
                     else -> BtMode.Off
                 }
@@ -512,12 +553,12 @@ private fun DatabaseNameDialog(
     )
 }
 
-private fun beamText(s: IrBeam.Status): String = when (s.phase) {
-    IrBeam.Phase.OFF -> s.error?.let { "Off. $it" } ?: "Off"
-    IrBeam.Phase.WAITING -> "Waiting for a peer on port ${(s.mode as? BeamMode.Listen)?.port}"
-    IrBeam.Phase.CONNECTING -> "Connecting to ${(s.mode as? BeamMode.Connect)?.let { IrBeam.hostPort(it.host, it.port) }}"
-    IrBeam.Phase.CONNECTED -> "Connected to ${s.peer ?: "a peer"}"
-    IrBeam.Phase.DISCONNECTED -> s.error ?: "Disconnected"
+private fun relayText(s: NetRelay.Status): String = when (s.phase) {
+    NetRelay.Phase.OFF -> s.error?.let { "Off. $it" } ?: "Off"
+    NetRelay.Phase.WAITING -> "Waiting for a peer on port ${(s.mode as? BeamMode.Listen)?.port}"
+    NetRelay.Phase.CONNECTING -> "Connecting to ${(s.mode as? BeamMode.Connect)?.let { NetRelay.hostPort(it.host, it.port) }}"
+    NetRelay.Phase.CONNECTED -> "Connected to ${s.peer ?: "a peer"}"
+    NetRelay.Phase.DISCONNECTED -> s.error ?: "Disconnected"
 }
 
 private fun bluetoothText(s: BtLink.Status, radio: String?): String {
@@ -528,8 +569,8 @@ private fun bluetoothText(s: BtLink.Status, radio: String?): String {
             1 -> ", 1 Frond connected"
             else -> ", ${s.links} Fronds connected"
         }
-        is BtMode.Join -> if (s.links > 0) "Connected to ${IrBeam.hostPort(mode.host, mode.port)}"
-        else s.error ?: "Joined to ${IrBeam.hostPort(mode.host, mode.port)}"
+        is BtMode.Join -> if (s.links > 0) "Connected to ${NetRelay.hostPort(mode.host, mode.port)}"
+        else s.error ?: "Joined to ${NetRelay.hostPort(mode.host, mode.port)}"
     }
     // The core's word on the Palm's radio, where it needs something done.
     val note = when {
@@ -541,29 +582,32 @@ private fun bluetoothText(s: BtLink.Status, radio: String?): String {
     return if (note == null) link else "$link. $note"
 }
 
-// Off, wait for a peer on a port, or connect to another Frond's address.
+// Off, wait for a peer on a port, or connect to an address, for one of the network relays.
 @Composable
-private fun BeamDialog(
+private fun RelayDialog(
+    title: String,
+    labels: List<String>,
+    relay: NetRelay,
     current: BeamMode,
-    last: BeamMode?,
-    addresses: List<String>?,
     onDismiss: () -> Unit,
     onChoose: (BeamMode) -> Unit,
 ) {
+    val context = LocalContext.current
+    val last = remember { relay.last(context) }
     val start = if (current != BeamMode.Off) current else last ?: BeamMode.Off
     LinkDialog(
-        title = "Infrared beaming",
-        labels = listOf("Off", "Wait for a peer", "Connect to another Frond"),
-        defaultPort = IrBeam.DEFAULT_PORT,
+        title = title,
+        labels = labels,
+        defaultPort = relay.defaultPort,
         choice = if (current == BeamMode.Off) "off" else start.encode().substringBefore(':'),
         port = (start as? BeamMode.Listen)?.port,
-        address = (last as? BeamMode.Connect ?: start as? BeamMode.Connect)?.let { IrBeam.hostPort(it.host, it.port) },
-        addresses = addresses,
+        address = (last as? BeamMode.Connect ?: start as? BeamMode.Connect)?.let { NetRelay.hostPort(it.host, it.port) },
+        addresses = produceState<List<String>?>(null) { value = withContext(Dispatchers.IO) { NetRelay.addresses(context) } }.value,
         onDismiss = onDismiss,
         toMode = { choice, port, address ->
             when (choice) {
-                "listen" -> IrBeam.port(port)?.let { BeamMode.Listen(it) }
-                "connect" -> IrBeam.address(address)?.let { BeamMode.Connect(it.first, it.second) }
+                "listen" -> NetRelay.port(port)?.let { BeamMode.Listen(it) }
+                "connect" -> relay.address(address)?.let { BeamMode.Connect(it.first, it.second) }
                 else -> BeamMode.Off
             }
         },
@@ -571,7 +615,7 @@ private fun BeamDialog(
     )
 }
 
-// Off, take peers on a port (choice "listen") or reach another Frond's address ("connect").
+// Off, take peers on a port (choice "listen") or reach an address ("connect").
 @Composable
 private fun <T> LinkDialog(
     title: String,

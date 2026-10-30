@@ -523,7 +523,17 @@ the pilot-link command. TX HotSync typically takes 15 to 20 seconds. Tested with
 pilot-link 0.15.1: `pilot-xfer -l`, `-f` (fetch), `-i` (install) and pilot-dlpsh
 `user`, `df` and `ls`. pilot-link only opens serial devices, so for TCP put a
 PTY in front of the port. A plain `socat` PTY relay doesn't work with it; the
-relay in `tools/probe-tx-usb-hotsync.py` does.
+relay in `tools/probe-tx-usb-hotsync.py` and `tools/link-pty.py` do.
+
+On Android, USB HotSync in the emulator's menu has Wait for a peer (port 5034 by
+default) and Connect to an address. The app joins the core's TCP endpoint to that
+peer and passes bytes unchanged. On the desktop, `tools/link-pty.py` puts a PTY
+in front of the phone the way the probe's relay does:
+
+```sh
+python3 tools/link-pty.py PHONE:5034 --link /tmp/palm-usb   # or listen:5034 when the phone connects
+pilot-xfer -p /tmp/palm-usb -l
+```
 
 How it works:
 

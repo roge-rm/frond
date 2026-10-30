@@ -209,6 +209,25 @@ class PeripheralsModel(
 
     fun retryBeam() = IrBeam.retry()
 
+    // The serial port and USB HotSync over the network, as their relays say.
+    var serial by mutableStateOf(SerialLink.status.value)
+        private set
+    var usb by mutableStateOf(UsbLink.status.value)
+        private set
+
+    fun watchLinks() {
+        activity.lifecycleScope.launch { SerialLink.status.collect { serial = it } }
+        activity.lifecycleScope.launch { UsbLink.status.collect { usb = it } }
+    }
+
+    fun changeSerial(mode: BeamMode) = device("Changing the serial port", "Couldn't change the serial port", false) { l ->
+        SerialLink.set(activity.applicationContext, l, mode)
+    }
+
+    fun changeUsb(mode: BeamMode) = device("Changing USB HotSync", "Couldn't change USB HotSync", false) { l ->
+        UsbLink.set(activity.applicationContext, l, mode)
+    }
+
     // Bluetooth over the network, as the relay says, and what the core says about the Palm's radio.
     var bluetooth by mutableStateOf(BtLink.status.value)
         private set
@@ -349,6 +368,7 @@ class PeripheralsActivity : ComponentActivity() {
         model.readNetwork()
         model.watchBeam()
         model.watchBluetooth()
+        model.watchLinks()
         setContent {
             FrondTheme {
                 Surface(Modifier.fillMaxSize()) {

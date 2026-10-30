@@ -30,14 +30,14 @@ sealed class BtMode {
     fun encode(): String = when (this) {
         Off -> "off"
         is Host -> "host:$port"
-        is Join -> "join:${IrBeam.hostPort(host, port)}"
+        is Join -> "join:${NetRelay.hostPort(host, port)}"
     }
 
     companion object {
         fun decode(text: String?): BtMode? = when {
             text == null -> null
             text == "off" -> Off
-            text.startsWith("host:") -> IrBeam.port(text.removePrefix("host:"))?.let { Host(it) }
+            text.startsWith("host:") -> NetRelay.port(text.removePrefix("host:"))?.let { Host(it) }
             text.startsWith("join:") -> BtLink.address(text.removePrefix("join:"))?.let { Join(it.first, it.second) }
             else -> null
         }
@@ -68,7 +68,7 @@ object BtLink {
     )
 
     // HOST:PORT, [IPv6]:PORT or a host alone for 5032.
-    fun address(text: String) = IrBeam.address(text, DEFAULT_PORT)
+    fun address(text: String) = NetRelay.address(text, DEFAULT_PORT)
 
     // The core's bluetooth-mode argument.
     fun coreMode(socket: File?) = socket?.path ?: "off"
@@ -224,7 +224,7 @@ object BtLink {
                 listener.accept().also { failures = 0 }
             } catch (e: IOException) {
                 if (gen != generation) return
-                if (IrBeam.acceptFailed(e, ++failures)) {
+                if (NetRelay.acceptFailed(e, ++failures)) {
                     Log.w(TAG, "bluetooth: stopped taking peers: $e")
                     fail(gen, "Stopped taking other Fronds.")
                     return
@@ -253,7 +253,7 @@ object BtLink {
                 server.accept().also { failures = 0 }
             } catch (e: IOException) {
                 if (gen != generation) return
-                if (IrBeam.acceptFailed(e, ++failures)) {
+                if (NetRelay.acceptFailed(e, ++failures)) {
                     Log.w(TAG, "bluetooth: stopped taking the core's connections: $e")
                     fail(gen, "The Bluetooth socket stopped working.")
                     return
@@ -272,7 +272,7 @@ object BtLink {
                     shut(peer)
                     shut(local)
                     synchronized(lock) {
-                        if (gen == generation) state.value = state.value.copy(error = "Couldn't reach ${IrBeam.hostPort(mode.host, mode.port)}.")
+                        if (gen == generation) state.value = state.value.copy(error = "Couldn't reach ${NetRelay.hostPort(mode.host, mode.port)}.")
                     }
                     return@Thread
                 }
@@ -283,7 +283,7 @@ object BtLink {
 
     private fun begin(gen: Int, mode: BtMode, peer: Socket, local: LocalSocket) {
         try { peer.tcpNoDelay = true } catch (_: IOException) {}
-        IrBeam.keepAlive(peer)
+        NetRelay.keepAlive(peer)
         val p = Link(gen, peer, local)
         synchronized(lock) {
             if (gen != generation) {

@@ -607,6 +607,11 @@ test: test-bluetooth-link
 test-bluetooth-link:
 	python3 tests/bluetooth-link.py
 
+.PHONY: test-pty-link
+test: test-pty-link
+test-pty-link:
+	python3 tests/pty-link.py
+
 .PHONY: test-bluetooth
 test: test-bluetooth
 test-bluetooth: out/frond

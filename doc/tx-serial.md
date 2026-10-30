@@ -58,6 +58,21 @@ to emulated time depends on host scheduling and the emulator's speed, and modem
 input changes land between emulation slices (a timeslice, about 1/60 s). Byte
 order, pacing within a burst and flow control do not depend on it.
 
+## Over the network
+
+On Android the port is reached over the network: in the emulator's menu, Serial
+port, choose Wait for a peer (port 5033 by default) or Connect to an address. The
+app joins the core's TCP endpoint to that peer, one at a time, and passes bytes
+unchanged. On the desktop, put a PTY in front of it for a terminal or pilot-link:
+
+```sh
+python3 tools/link-pty.py PHONE:5033 --link /tmp/palm-serial   # prints: PTY /dev/pts/N
+```
+
+or `link-pty.py listen:5033` when the phone connects. `tools/link-irda.py` joins
+two TCP endpoints in any of these forms, so it can also join the phone to a
+desktop core started with `--serial tcp:PORT`. The E2 has no serial port.
+
 ## Model behavior
 
 PXA27x FIFO PIO transfers 1/2/4 little-endian bytes when FCR[BUS] is set. TX and RX

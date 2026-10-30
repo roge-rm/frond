@@ -41,9 +41,4 @@ class BtLinkTest {
         assertEquals("off", BtLink.coreMode(null))
         assertEquals("/data/user/0/com.rm.frond/no_backup/bt/bt-server-bredr", BtLink.coreMode(File("/data/user/0/com.rm.frond/no_backup/bt/bt-server-bredr")))
     }
-
-    @Test
-    fun bluetoothIsOnAndroid() {
-        assertEquals(false, Peripheral.entries.any { it.label == "Bluetooth" })
-    }
 }
