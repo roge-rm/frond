@@ -52,9 +52,35 @@ class PeripheralsModel(
 
     val available get() = card != null
 
+    // While the core waits for its first gdb nothing answers the control link, so work isn't started; the reads
+    // run again once it connects.
+    var waitingForGdb by mutableStateOf(FrondActivity.running?.waitingForGdb == true)
+        private set
+
+    fun watchGdb() {
+        val l = link ?: return
+        if (!waitingForGdb) return
+        l.whenConnected {
+            activity.runOnUiThread {
+                if (!waitingForGdb) return@runOnUiThread
+                waitingForGdb = false
+                refresh()
+                readKeyboard()
+                readNetwork()
+                readRadio()
+            }
+        }
+    }
+
+    // Says so instead of starting work the core can't answer yet.
+    private fun waiting(): Boolean {
+        if (waitingForGdb) note = "Waiting for gdb"
+        return waitingForGdb
+    }
+
     fun job(label: String, failTitle: String, work: (SdCard) -> Unit) {
         val c = card ?: return
-        if (busy != null) return
+        if (busy != null || waiting()) return
         busy = label
         activity.lifecycleScope.launch {
             val error = withContext(Dispatchers.IO) {
@@ -76,7 +102,7 @@ class PeripheralsModel(
     // Database work through the control link; leaves the card state alone.
     fun palm(label: String, failTitle: String, work: (PalmDatabases) -> Unit) {
         val d = databases ?: return
-        if (busy != null) return
+        if (busy != null || waiting()) return
         busy = label
         activity.lifecycleScope.launch {
             val error = withContext(Dispatchers.IO) {
@@ -105,7 +131,7 @@ class PeripheralsModel(
 
     fun askName(what: String) {
         val d = databases ?: return
-        if (busy != null || naming != null) return
+        if (busy != null || naming != null || waiting()) return
         found = emptyList()
         naming = what
         listing = true
@@ -135,7 +161,7 @@ class PeripheralsModel(
     // Device menu work through the control link; returns to the Palm when done if back is set.
     private fun device(label: String, failTitle: String, back: Boolean, work: (ControlLink) -> String?) {
         val l = link ?: return
-        if (busy != null) return
+        if (busy != null || waiting()) return
         busy = label
         activity.lifecycleScope.launch {
             val error = withContext(Dispatchers.IO) { work(l) }
@@ -156,6 +182,7 @@ class PeripheralsModel(
 
     fun readKeyboard() {
         val l = link ?: return
+        if (waitingForGdb) return
         activity.lifecycleScope.launch {
             val reply = withContext(Dispatchers.IO) { l.request("keyboard-state", timeoutSeconds = 30) }
             if (reply.ok) keyboard = reply.message == "attached"
@@ -175,6 +202,7 @@ class PeripheralsModel(
 
     fun readNetwork() {
         val l = link ?: return
+        if (waitingForGdb) return
         activity.lifecycleScope.launch {
             val reply = withContext(Dispatchers.IO) { l.request("network-state", timeoutSeconds = 30) }
             if (reply.ok) network = NetworkMode.byId(reply.message)
@@ -250,6 +278,7 @@ class PeripheralsModel(
 
     fun readRadio() {
         val l = link ?: return
+        if (waitingForGdb) return
         activity.lifecycleScope.launch {
             val reply = withContext(Dispatchers.IO) { l.request("bluetooth-state", timeoutSeconds = 30) }
             radio = if (reply.ok) reply.message else null
@@ -368,7 +397,8 @@ class PeripheralsActivity : ComponentActivity() {
             finish()
             return
         }
-        model.refresh()
+        model.watchGdb()
+        if (!model.waitingForGdb) model.refresh()
         model.readKeyboard()
         model.readNetwork()
         model.watchBeam()
