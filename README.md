@@ -1,11 +1,11 @@
 # Frond
 
-Frond is a Palm OS emulator for Linux, made for running and developing Palm apps and games. 
+Frond is a Palm OS emulator for Linux and Android, made for running and developing Palm apps and games. 
 Currently it emulates the Palm T|X and the Tungsten E2, with their buttons, sound, SD
 card, sleep and wake, and saved sessions. More devices are planned.
 
 To run this you will need to provide a Palm T|X or E2 device firmware as none are included.
-This is an early release - 0.4.0 - but so far results are promising. 
+This is an early release - 0.5.0 - but so far results are promising. 
 
 Dan
 
@@ -29,11 +29,13 @@ To build and install a Debian package instead (also needs `dpkg-dev` and
 
 ```sh
 make deb
-sudo apt install ./out/frond_0.4.0-1_amd64.deb
+sudo apt install ./out/frond_0.5.0-1_amd64.deb
 ```
 
 The package adds Frond to the application menu. It doesn't include firmware or
 Palm apps.
+
+Or add my apt repo as shown on https://hunke.ws/apt/ and run `sudo apt install frond`.
 
 ## Firmware
 
@@ -95,6 +97,14 @@ More in the [desktop guide](doc/desktop.md), the
 [peripheral guide](doc/peripherals.md) (SD cards, networking, USB HotSync,
 keyboard), the [serial guide](doc/tx-serial.md) and
 [E2 notes](doc/e2-qualification.md).
+
+## Android
+
+Frond also runs on Android 8 and up, on phones and tablets. It does the T|X and the E2, with saved sessions you can export and import, SD cards with file exchange, installing and launching Palm apps and the low-latency audio option. As with the desktop version, you bring your own firmware.
+
+Virtual Wi-Fi and Internet via host work on the T|X. Infrared beaming, Bluetooth, the serial port, USB HotSync and the gdb server go over the network, to another Frond or to the desktop tools: `tools/link-irda.py`, `tools/link-bluetooth.py` and `tools/link-pty.py` for pilot-link.
+
+To get it, add my F-Droid repo https://hunke.ws/fdroid/repo in your F-Droid client, and updates come with it.
 
 ## For developers
 

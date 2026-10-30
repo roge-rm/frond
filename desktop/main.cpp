@@ -10,7 +10,7 @@ int main(int argc, char** argv) {
     QApplication app(argc, argv);
     app.setOrganizationName("Frond");
     app.setApplicationName("Frond");
-    app.setApplicationVersion("0.4.0");
+    app.setApplicationVersion("0.5.0");
     app.setDesktopFileName("org.frond.Frond");
     app.setWindowIcon(QIcon::fromTheme("frond"));
     QCommandLineParser parser;
