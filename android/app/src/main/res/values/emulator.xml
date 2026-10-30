@@ -1,0 +1,9 @@
+<resources>
+    <!-- FrondActivity: dark around the device and behind the system bars, in every day/night mode. -->
+    <style name="Theme.Frond.Emulator" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/emulator_background</item>
+        <item name="android:statusBarColor">@color/emulator_background</item>
+        <item name="android:navigationBarColor">@color/emulator_background</item>
+    </style>
+    <color name="emulator_background">#FF0B0C11</color>
+</resources>
