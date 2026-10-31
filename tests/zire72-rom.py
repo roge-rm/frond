@@ -2,7 +2,7 @@
 """Zire 72 detection, rejection and boot checks on the private Zire NOR, plus the E2 and TX still loading.
 
 Skipped when the firmware isn't there. FROND_ZIRE_LAUNCHER=1 adds the launcher and key runs, FROND_ZIRE_STORAGE=1
-the SD card, session and memo runs. Mutated copies live in a temporary directory under build/;
+the SD card, session and memo runs, FROND_HARD_RESET=1 the TX and E2 erase prompt after reset-hard. Mutated copies live in a temporary directory under build/;
 the originals are only read and their SHA-256 is checked before and after.
 """
 import hashlib
@@ -115,8 +115,10 @@ class Core:
         end = time.monotonic() + timeout
         while True:
             line = self.send(command, expect)
-            if done in line or time.monotonic() > end:
+            if done in line:
                 return line
+            if time.monotonic() > end:
+                raise AssertionError(f'{command}: no {done!r} after {timeout} s; last reply {line.strip()!r}')
             time.sleep(1)
 
     def launch(self, name, timeout=60):
@@ -197,22 +199,7 @@ class Core:
         return self.process.returncode
 
 
-def boot_to_launcher(root, tries=3):
-    """Cold boots the real NOR to the launcher, starting again if setup hangs.
-
-    About one cold boot in three ends on a white screen after the last setup form's Done, with or
-    without the PACE patch, and nothing wakes it; a fresh boot gets past it.
-    """
-    for attempt in range(tries):
-        try:
-            return boot_once(root)
-        except AssertionError as error:
-            if 'launcher.png' not in str(error) or attempt == tries - 1:
-                raise
-            (root / 'boot.log').rename(root / f'boot-hung-{attempt}.log')
-
-
-def boot_once(root):
+def boot_to_launcher(root):
     """Cold boots the real NOR through calibration and setup and saves a session at the launcher.
 
     Each tap waits for its screen: the red target under the pen for calibration, then a new title that has
@@ -247,7 +234,6 @@ def boot_once(root):
             rows = core.wait_frame(frame, settled, 30)
             (root / f'setup-{step}.png').write_bytes(frame.read_bytes())
             title = rows[:24]
-            time.sleep(2)  # an early tap on Install the CD's Done leaves a blank screen
             core.tap(root, x, y)
         # The launcher's wallpaper: most of the lower screen is coloured, not white or grey.
         core.wait_frame(root / 'launcher.png', lambda rows: rows is not None and sum(
@@ -368,6 +354,13 @@ class Zire72RomTest(unittest.TestCase):
         self.rejected([ZIRE, '--device', 'palm-tx'], 'does not match ROM')
         self.rejected([ZIRE, '--device', 'palm-e2'], 'does not match ROM')
         self.rejected([ZIRE, '--experimental-tx'], 'Unknown argument: --experimental-tx')
+        # Sessions hold cards up to 128 MiB, so the Zire takes 32-128 MiB like the TX.
+        for mib in (16, 129, 256):
+            card = self.root / f'card-{mib}.img'
+            with card.open('wb') as f:
+                f.truncate(mib << 20)
+            self.rejected([ZIRE, '--sd', card], 'sd card image has bad size')
+            card.unlink()
 
     @unittest.skipUnless(E2.is_file() and TX.is_file() and TX_NAND.is_file(), 'E2 or TX firmware missing')
     def test_e2_and_tx_unchanged(self):
@@ -459,6 +452,25 @@ class Zire72KeysTest(unittest.TestCase):
         self.assertIn('replay snapshot lcd-off', log)
         self.assertNotEqual(self.frame('wake2-11000')[30:], launcher[30:])
 
+    def test_short_power_presses(self):
+        # 100 ms presses, like a phone tap: one as soon as the LCD goes off (the DAL may still be going
+        # to sleep), one once it's well asleep. Both wake it.
+        core = Core([self.session], self.root / 'short.log')
+
+        def tap_power():
+            mark = len(core.lines)
+            core.replay(self.root, ['0 key-down power', '100 key-up power'])
+            core.released(mark)
+        try:
+            for name, settle in (('entry', 0), ('asleep', 3)):
+                core.key(self.root, 'power')
+                core.wait_frame(self.root / f'short-{name}-off.png', lambda rows: rows is None, 20)
+                time.sleep(settle)
+                tap_power()
+                core.wait_frame(self.root / f'short-{name}-on.png', lambda rows: rows is not None, 10)
+        finally:
+            self.assertEqual(core.close(), 0)
+
     def test_soft_and_hard_reset(self):
         # Soft reset keeps the store and lands on Prefs > Date & Time; hard reset erases it and boots to
         # calibration. Frames are polled until they match, with the LCD off or the logo in between.
@@ -478,6 +490,74 @@ class Zire72KeysTest(unittest.TestCase):
             self.assertEqual(core.close(), 0)
         self.assertFalse(date_time_prefs(self.frame('launcher')))
         self.assertFalse(date_time_prefs(calibrate))
+
+def erase_prompt(rows, tx):
+    """The DAL's "Erase all data?" prompt: on the TX the red Yes and blue No rows, on the E2 a block of
+    black text in the middle of a white screen."""
+    if rows is None:
+        return False
+    def px(x, y):
+        return rows[y][4 * x:4 * x + 3]
+    if tx:
+        red = sum(1 for x in range(320) for y in range(288, 312) if px(x, y)[0] > 150 and max(px(x, y)[1:]) < 90)
+        blue = sum(1 for x in range(320) for y in range(448, 472) if px(x, y)[2] > 120 and px(x, y)[0] < 90)
+        return red > 100 and blue > 100
+    dark = [y for y in range(320) for x in range(320) if sum(px(x, y)) < 384]
+    colour = sum(1 for y in range(320) for x in range(320) if max(px(x, y)) - min(px(x, y)) > 40)
+    return 1500 < len(dark) < 4000 and colour == 0 and 100 < min(dark) and max(dark) < 210 and max(dark) - min(dark) > 40
+
+
+@unittest.skipUnless(E2.is_file() and TX.is_file() and TX_NAND.is_file() and CORE.is_file()
+                     and os.environ.get('FROND_HARD_RESET'),
+                     'set FROND_HARD_RESET=1 with the E2 and TX firmware for the 2 minute hard reset run')
+class HardResetPromptTest(unittest.TestCase):
+    """reset-hard holds power through the boot, so the TX and E2 DAL ask to erase; a soft reset during the
+    hold cancels it. Frames are only taken once the hold is over."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.temp = tempfile.TemporaryDirectory(prefix='hard-reset-', dir=ROOT / 'build')
+        cls.root = Path(cls.temp.name)
+
+    @classmethod
+    def tearDownClass(cls):
+        if os.environ.get('FROND_ZIRE_EVIDENCE'):
+            out = Path(os.environ['FROND_ZIRE_EVIDENCE'])
+            out.mkdir(parents=True, exist_ok=True)
+            for path in cls.root.glob('*.png'):
+                (out / path.name).write_bytes(path.read_bytes())
+        cls.temp.cleanup()
+
+    def run_reset(self, name, image, tx, soft_after=None):
+        core = Core(image, self.root / f'{name}.log')
+        try:
+            core.wait_frame(self.root / f'{name}-boot.png', lambda rows: rows is not None, 60)
+            core.send('reset-hard')
+            if soft_after is not None:
+                time.sleep(soft_after)
+                core.send('reset')
+            time.sleep(12)
+            path = self.root / f'{name}.png'
+            # The prompt waits for a key, so it is still up after the 9 s hold.
+            end = time.monotonic() + 20
+            while time.monotonic() < end:
+                if erase_prompt(core.frame(path), tx):
+                    return True
+                time.sleep(1)
+            return False
+        finally:
+            self.assertEqual(core.close(), 0)
+
+    def test_e2_prompt(self):
+        self.assertTrue(self.run_reset('e2-hard', [E2], False), 'no erase prompt on the E2')
+
+    def test_tx_prompt(self):
+        self.assertTrue(self.run_reset('tx-hard', [TX, '--device', 'palm-tx', '--nand', TX_NAND], True),
+                        'no erase prompt on the TX')
+
+    def test_soft_reset_cancels_hold(self):
+        self.assertFalse(self.run_reset('e2-soft', [E2], False, soft_after=1), 'the hold outlived a soft reset')
+
 
 SDK = ROOT.parent / 'palm-os-sdk/sdk-5r3'
 PROBE_READY = (SDK / 'include/PalmOS.h').is_file() and all(shutil.which(t) for t in ('m68k-palmos-gcc', 'pilrc'))
@@ -568,15 +648,9 @@ class Zire72StorageTest(unittest.TestCase):
     def sleep_and_wake(self, core, name):
         core.key(self.root, 'power')
         core.wait_frame(self.root / f'{name}-asleep.png', lambda rows: rows is None, 20)
-        # A press while the DAL is still going to sleep is lost, so press again while the LCD stays off.
-        for _ in range(3):
-            time.sleep(2)
-            core.key(self.root, 'power')
-            try:
-                return core.wait_frame(self.root / f'{name}-awake.png', lambda rows: rows is not None, 10)
-            except AssertionError:
-                pass
-        raise AssertionError(f'{name}: power did not wake the Zire')
+        # Pressed while the DAL may still be going to sleep; the press waits until it's asleep.
+        core.key(self.root, 'power')
+        return core.wait_frame(self.root / f'{name}-awake.png', lambda rows: rows is not None, 10)
 
     def test_1_card_read_write_delete(self):
         core = self.core(self.session, 'card')

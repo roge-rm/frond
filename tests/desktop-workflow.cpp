@@ -928,6 +928,65 @@ for line in s.makefile('rb'):
         window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
         QSettings().clear();
     }
+    // Save first, then the core dies before the save answers: the next session's save doesn't erase.
+    void hardResetDroppedWhenCoreDies() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QTemporaryDir files;
+        QFile source(files.path() + "/hard.frond");
+        QVERIFY(source.open(QIODevice::WriteOnly)); source.write("session"); source.close();
+        const auto sent = files.path() + "/sent";
+        QFile core(files.path() + "/core");
+        QVERIFY(core.open(QIODevice::WriteOnly));
+        core.write(R"PY(#!/usr/bin/python3
+import os,socket,sys
+s=socket.socket(socket.AF_UNIX)
+s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+folder=sys.argv[0].rsplit('/',1)[0]
+first=not os.path.exists(folder+'/ran')
+open(folder+'/ran','w').close()
+log=open(folder+'/sent','a')
+for line in s.makefile('rb'):
+    i,cmd,arg=line.rstrip(b'\n').split(b'\t')
+    log.write(cmd.decode()+'\n'); log.flush()
+    if cmd==b'save' and first: os._exit(3)
+    message={b'keyboard-state':b'detached',b'network-state':b'disabled',b'device-state':b'palm-tx',b'sd-state':b'none'}.get(cmd,b'done')
+    s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
+    if cmd==b'quit': break
+)PY");
+        core.close();
+        QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        auto commands = [&] {
+            QFile f(sent); if (!f.open(QIODevice::ReadOnly)) return QStringList();
+            QStringList all = QString::fromUtf8(f.readAll()).split('\n', Qt::SkipEmptyParts), work;
+            for (const auto& c : all) if (c == "save" || c == "hard-reset" || c == "quit") work << c;
+            return work;
+        };
+        MainWindow window(core.fileName()); window.show(); window.openSession(source.fileName(), true);
+        auto* hard = window.findChild<QPushButton*>("hardReset");
+        QTRY_VERIFY_WITH_TIMEOUT(hard->isEnabled(), 5000);
+        QTimer poll; poll.setInterval(30);
+        connect(&poll, &QTimer::timeout, &window, [&] {
+            auto* box = window.findChild<QMessageBox*>();
+            if (!box || !box->isVisible()) return;
+            if (!box->text().startsWith("Erase everything")) { box->done(QMessageBox::Ok); return; }
+            for (auto* b : box->buttons()) if (b->text() == "Save first") { b->click(); return; }
+        });
+        poll.start();
+        hard->click();
+        QTRY_COMPARE_WITH_TIMEOUT(commands(), QStringList({"save"}), 3000);
+        // The core is gone; start the session again and save it.
+        QTest::qWait(1000);
+        window.openSession(source.fileName(), true);
+        QTRY_VERIFY_WITH_TIMEOUT(hard->isVisible() && hard->isEnabled(), 5000);
+        window.findChild<QPushButton*>("save")->click();
+        QTRY_COMPARE_WITH_TIMEOUT(commands(), QStringList({"save", "save"}), 3000);
+        QTest::qWait(300);
+        QCOMPARE(commands(), QStringList({"save", "save"}));
+        poll.stop();
+        window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        QSettings().clear();
+    }
     void runningView() {
         QSettings().clear(); QSettings().setValue("resume", false);
         QDir(managedFolder()).removeRecursively();
