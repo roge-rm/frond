@@ -248,3 +248,6 @@ Use independently created artwork and Frond styling. Do not copy another
 emulator's skin or bundle manufacturer photographs or branding as UI assets.
 Original artwork does not by itself settle trademark or registered-design
 questions for an exact product replica.
+
+How the bars and silkscreens are drawn, and the steps for a new device, are in
+[device button bars and silkscreens](device-art.md).
