@@ -358,6 +358,10 @@ static void artDevice(DeviceArt art) {
         assert(at((up.x+up.w+p.buttons[2].bounds.x)*0.5f,40)==keyInvalid);
         // The outer keys sit higher, as on the device.
         assert(p.buttons[0].bounds.y<p.buttons[1].bounds.y && p.buttons[3].bounds.y<p.buttons[2].bounds.y);
+        // The scroll housing, 5 units round the keys, has the same gap above, under the
+        // 4-unit bezel edge, as below.
+        const int above=(up.y-5)-4,below=p.height-(dn.y+dn.h+5);
+        assert(above>=2 && std::abs(above-below)<=1);
     }
     // Every key has a visible pressed state, at 1x and 2x.
     for(float scale:{1.f,2.f}) {
@@ -443,6 +447,121 @@ static void artSilkscreen(DeviceArt art) {
     }
 }
 
+// Palm IIIx: no board yet either. Four round app keys, a peanut scroll rocker split at its waist
+// and a teal power key at the far left, under a 160-wide screen.
+static void iiixArt() {
+    const auto& p=deviceControls(DeviceArt::iiix);
+    const int width=160,height=220,u=2;
+    assert(p.width==320 && p.height==88 && p.unit==u && deviceControlsHeight(p)==44);
+    assert(p.count==7 && p.style==DeviceControlStyle::iiix && p.navigator.w==0);
+    const KeyId keys[]={keyIdHard1,keyIdHard2,keyIdHard3,keyIdHard4,keyIdUp,keyIdDown,keyIdPower};
+    for(size_t i=0;i<p.count;++i)assert(p.buttons[i].key==keys[i]);
+    auto at=[&](float x,float y) {
+        return deviceControlAt(p,width,height,int(std::floor(x/u)),height+int(std::floor(y/u)));
+    };
+    for(size_t i=0;i<p.count;++i) {
+        const auto& b=p.buttons[i];const auto& k=b.bounds;
+        const auto r=deviceButtonRect(p,b,width,height);
+        assert(r.x>=0 && r.x+r.w<=width && r.y>=height && r.y+r.h<=height+deviceControlsHeight(p));
+        assert(at(k.x+k.w*0.5f,k.y+k.h*0.5f)==b.key);
+        assert(deviceControlAt(p,width,height,r.x+r.w/2,r.y+r.h/2)==b.key);
+        // Rounded corners miss; the middles of the sides hit. Power's corners are too small to miss.
+        if(b.key!=keyIdPower)assert(at(k.x+1,k.y+1)==keyInvalid && at(k.x+k.w-2,k.y+k.h-2)==keyInvalid);
+        assert(at(k.x+2,k.y+k.h*0.5f)==b.key && at(k.x+k.w-3,k.y+k.h*0.5f)==b.key);
+        if(b.key!=keyIdDown)assert(at(k.x+k.w*0.5f,k.y-2)==keyInvalid);
+        if(b.key!=keyIdUp)assert(at(k.x+k.w*0.5f,k.y+k.h+1)==keyInvalid);
+    }
+    const auto* b=p.buttons;
+    // App keys left to right, the outer ones lower, with gaps between them.
+    for(int k=1;k<4;++k)assert(b[k].bounds.x>b[k-1].bounds.x+b[k-1].bounds.w);
+    assert(b[0].bounds.y>b[1].bounds.y && b[3].bounds.y>b[2].bounds.y);
+    assert(at((b[0].bounds.x+b[0].bounds.w+b[1].bounds.x)*0.5f,46)==keyInvalid);
+    assert(at((b[2].bounds.x+b[2].bounds.w+b[3].bounds.x)*0.5f,46)==keyInvalid);
+    // The rocker: up above its waist, down below, no gap, and gaps to the keys either side.
+    const auto& up=b[4].bounds;const auto& dn=b[5].bounds;
+    assert(up.x==dn.x && up.y+up.h==dn.y && b[1].bounds.x+b[1].bounds.w<up.x && up.x+up.w<b[2].bounds.x);
+    assert(at(160,dn.y-2)==keyIdUp && at(160,dn.y+1)==keyIdDown && at(152,dn.y-2)==keyIdUp && at(167,dn.y+1)==keyIdDown);
+    assert(at(160,up.y+3)==keyIdUp && at(160,dn.y+dn.h-3)==keyIdDown);
+    // The split row hits across the drawn waist, off centre too.
+    for(float x:{153.f,155.f,165.f,167.f})assert(at(x,dn.y)==keyIdUp || at(x,dn.y)==keyIdDown);
+    assert(at((b[1].bounds.x+b[1].bounds.w+up.x)*0.5f,44)==keyInvalid);
+    assert(at((up.x+up.w+b[2].bounds.x)*0.5f,44)==keyInvalid);
+    // Power: a small rounded rectangle at the left edge, apart from Date Book.
+    const auto& pw=b[6].bounds;
+    assert(b[6].corner>0 && b[6].corner<pw.w*0.5f && pw.x+pw.w<b[0].bounds.x);
+    assert(at(pw.x+1.5f,pw.y+3.5f)==keyIdPower && at(pw.x+pw.w-2,pw.y+pw.h-3)==keyIdPower);
+    assert(at((pw.x+pw.w+b[0].bounds.x)*0.5f,pw.y+pw.h*0.5f)==keyInvalid);
+    assert(at(0.5f,pw.y+pw.h*0.5f)==keyInvalid && at(pw.x+pw.w*0.5f,pw.y-2)==keyInvalid);
+    // Every key, power included, has a visible pressed state at 2x and 4x.
+    for(float scale:{2.f,4.f}) {
+        auto* surface=SDL_CreateRGBSurfaceWithFormat(0,int(width*scale),int(44*scale),32,SDL_PIXELFORMAT_RGBA32);
+        auto* renderer=SDL_CreateSoftwareRenderer(surface);assert(surface && renderer);
+        auto sum=[&](float x,float y) {return brightness(readPixel(surface,int(x/u*scale),int(y/u*scale)));};
+        for(size_t i=0;i<p.count;++i) {
+            const auto& k=b[i].bounds;
+            // A spot away from the icon: low on the app keys and power, the middle of a lobe.
+            float x=k.x+k.w*0.5f,y=k.y+k.h*(i<4 ? 0.85f : i==6 ? 0.8f : 0.5f);
+            drawDeviceControls(renderer,p,width,0,scale,0);
+            const int idle=sum(x,y);
+            drawDeviceControls(renderer,p,width,0,scale,1u<<b[i].key);
+            const int held=sum(x,y);
+            if(held>=idle-12)std::fprintf(stderr,"IIIx key %d at %g,%g: idle %d held %d\n",b[i].key,x,y,idle,held);
+            assert(held<idle-12);
+        }
+        // Holding one lobe of the rocker leaves the other lobe alone.
+        for(int lobe=0;lobe<2;++lobe) {
+            const float x=160,y=lobe ? up.y+15.5f : dn.y+dn.h-15.5f;
+            drawDeviceControls(renderer,p,width,0,scale,0);
+            const auto idle=readPixel(surface,int(x/u*scale),int(y/u*scale));
+            drawDeviceControls(renderer,p,width,0,scale,1u<<(lobe ? keyIdDown : keyIdUp));
+            const auto held=readPixel(surface,int(x/u*scale),int(y/u*scale));
+            assert(idle.r==held.r && idle.g==held.g && idle.b==held.b);
+        }
+        SDL_DestroyRenderer(renderer);SDL_FreeSurface(surface);
+    }
+
+    // Silkscreen: the ROM's System 'silk' 10000, doubled from row 160.
+    const auto& silk=deviceSilkscreen(DeviceArt::iiix);
+    assert(silk.count==6 && silk.width==320 && silk.height==120 && silk.unit==2 && silk.style==SilkscreenStyle::iiix);
+    const std::pair<SilkscreenIcon,SDL_Rect> rom[]={
+        {SilkscreenIcon::home,{0,164,27,28}},{SilkscreenIcon::menu,{0,192,27,28}},
+        {SilkscreenIcon::calc,{133,164,27,28}},{SilkscreenIcon::find,{133,192,27,28}},
+        {SilkscreenIcon::letters,{27,206,18,14}},{SilkscreenIcon::numbers,{115,206,18,14}}};
+    for(auto [icon,r]:rom) {
+        size_t found=0;
+        for(size_t i=0;i<silk.count;++i)if(silk.buttons[i].icon==icon) {
+            const auto& sb=silk.buttons[i].bounds;++found;
+            assert(sb.x==r.x*2 && sb.w==r.w*2 && sb.y==(r.y-160)*2 && sb.h==r.h*2);
+        }
+        assert(found==1);
+    }
+    auto same=[](SDL_Rect a,SDL_Rect c) {return a.x==c.x && a.y==c.y && a.w==c.w && a.h==c.h;};
+    assert(same(silk.letters,{54,8,124,112}) && same(silk.numbers,{178,8,88,112}));
+    for(float scale:{2.f,4.f}) {
+        const int w=int(160*scale),h=int(60*scale);
+        auto* s=SDL_CreateRGBSurfaceWithFormat(0,w,h,32,SDL_PIXELFORMAT_RGBA32);
+        auto* r=SDL_CreateSoftwareRenderer(s);assert(s && r);
+        auto* t=createDeviceSilkscreen(r,silk,scale);assert(t);
+        int tw,th;SDL_QueryTexture(t,nullptr,nullptr,&tw,&th);assert(tw==w && th==h);
+        SDL_RenderCopy(r,t,nullptr,nullptr);SDL_DestroyTexture(t);
+        auto pt=[&](float x,float y) {return brightness(readPixel(s,int(x*scale/2),int(y*scale/2)));};
+        // Pale speckled panel; dark discs round light glyphs.
+        const int panel=pt(120,60);
+        assert(panel>400);
+        for(size_t i=0;i<4;++i) {
+            const auto& sb=silk.buttons[i].bounds;
+            const float cx=sb.x+sb.w*0.5f,cy=sb.y+sb.h*0.5f,R=std::min(sb.w,sb.h)*0.5f-6;
+            assert(cx-R>=0 && cx+R<=320 && cy-R>=0 && cy+R<=120);
+            assert(pt(cx,cy-R+2.5f)<panel-200 && pt(cx-R+2.5f,cy)<panel-200);
+        }
+        // One rounded box inside the Graffiti areas, with a dark triangle at each end of the split.
+        assert(pt(160,3.5f)<panel-200 && pt(160,116.5f)<panel-200 && pt(61.5f,60)<panel-200 && pt(258.5f,60)<panel-200);
+        assert(pt(178,5)<panel-200 && pt(178,115)<panel-200 && std::abs(pt(178,60)-panel)<40);
+        assert(std::abs(pt(52,60)-panel)<40 && std::abs(pt(268,60)-panel)<40);
+        SDL_DestroyRenderer(r);SDL_FreeSurface(s);
+    }
+}
+
 static void zireAndM515() {
     // TX and E2 keep their art through DeviceType5; the others have none yet.
     assert(deviceArt(deviceTypeTX)==DeviceArt::tx && deviceArt(deviceTypeE2)==DeviceArt::e2);
@@ -453,6 +572,7 @@ static void zireAndM515() {
         artDevice(art);
         artSilkscreen(art);
     }
+    iiixArt();
 }
 
 static void lcdScaling() {
@@ -521,5 +641,5 @@ int main() {
     zireAndM515();
     silkscreen();
     lcdScaling();
-    SDL_Quit();puts("PASS: TX and E2 device buttons, holds/chords, focus/drag/rotation release, touch isolation, scales, pressed rendering and E2 silkscreen; Zire 72 and m515 hit areas, pressed art and silkscreens");
+    SDL_Quit();puts("PASS: TX and E2 device buttons, holds/chords, focus/drag/rotation release, touch isolation, scales, pressed rendering and E2 silkscreen; Zire 72, m515 and IIIx hit areas, pressed art and silkscreens");
 }
