@@ -132,8 +132,8 @@ android {
         applicationId = "com.rm.frond"
         minSdk = 26
         targetSdk = 37
-        versionCode = 1
-        versionName = "0.5.0"
+        versionCode = 2
+        versionName = "0.5.1"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
         externalNativeBuild {
             cmake {

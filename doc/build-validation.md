@@ -1,6 +1,6 @@
 # Build and package checks
 
-Frond 0.5.0 targets Debian 13 (trixie) with KDE Plasma. Build tools are listed in
+Frond 0.5.1 targets Debian 13 (trixie) with KDE Plasma. Build tools are listed in
 [the README](../README.md). Packaging also needs `dpkg-dev` and `binutils`.
 The installed package uses `mtools` for SD exchange and `libslirp0` for virtual
 Wi-Fi; the latter must be found from the core's ELF dependencies. Qt's platform,
@@ -72,7 +72,7 @@ output across toolchain versions or checkout paths.
 An existing package can be checked without installing it:
 
 ```sh
-python3 tools/check-package.py out/frond_0.5.0-1_amd64.deb
+python3 tools/check-package.py out/frond_0.5.1-1_amd64.deb
 ```
 
 The validator checks the version, architecture, required runtime dependencies,
