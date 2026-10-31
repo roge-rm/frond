@@ -36,7 +36,10 @@ all use it. The core's internal device numbers are never saved or sent.
 - `repalm`: inherited paravirtualized model, no NAND, power-of-two RAM
   sizes starting at 8 MiB and the eight inherited display modes. It requires
   matching paravirtualized firmware. Desktop qualification is pending.
-- `palm-zire-72`, `sony-clie-tg50`, `palm-iiix` and `palm-m515`: reserved for
+- `palm-zire-72`: found from its card header (Palm, HAL aZ72, small card at 0x0 and big
+  card at 0x20000), 14,942,208-byte NOR, no NAND, 32 MiB RAM and 320×320 display. The core
+  checks the firmware and then says the Zire 72 isn't supported yet.
+- `sony-clie-tg50`, `palm-iiix` and `palm-m515`: reserved for
   coming devices. They have button bar art but no board, and the core refuses them.
 
 Other Palm OS devices have no native profile here. Sharing an ARM CPU, screen

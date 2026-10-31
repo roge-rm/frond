@@ -385,6 +385,7 @@ test-device-profiles: out/frond device-profiles
 		build/source/src/common/libcommon.a -o build/test-device-profiles
 	./build/test-device-profiles
 	python3 tests/device-input.py
+	python3 tests/zire72-rom.py
 
 # Firmware-free build/package policy and independently reconstructed source.
 .PHONY: test-build-tools check-reconstruction

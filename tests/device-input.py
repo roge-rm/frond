@@ -25,6 +25,24 @@ def e2_nor(size=8 << 20, at=0x20000):
     return header(size=size, at=at)
 
 
+ZIRE_SIZE = 14942208
+AZ72, HSPR = 0x615a3732, 0x68737072
+
+
+def zire_nor(size=ZIRE_SIZE, small=AZ72, big=AZ72, big_length=None, small_at=0, name=b'PalmCard'):
+    """Zire 72 NOR layout: a small card at 0x0 and a big card at 0x20000 to the end."""
+    data = bytearray(size)
+    for at, hal, length in ((small_at, small, 0x10000),
+                            (0x20000, big, ZIRE_SIZE - 0x20000 if big_length is None else big_length)):
+        if at + 0x90 > size:
+            continue
+        struct.pack_into('<I', data, at + 8, 0xfeedbeef)
+        data[at + 0x10:at + 0x10 + len(name) + 1] = name + b'\0'
+        struct.pack_into('<III', data, at + 0x6c, length, 0, 0)
+        struct.pack_into('<II', data, at + 0x80, 0x50616c6d, hal)
+    return data
+
+
 def session(path, device, *, nor=None, nand=0, display=6, ram=32 << 20, sd=False):
     nor = header() if nor is None else nor
     # A hand-built v6 envelope, independent of the C++ writer: the device is a 32-byte name field.
@@ -96,10 +114,15 @@ class DeviceInputTest(unittest.TestCase):
         self.assertEqual([p['name'] for p in data['profiles']],
                          ['palm-tx', 'palm-e2', 'palm-e2-franken', 'repalm',
                           'palm-zire-72', 'sony-clie-tg50', 'palm-iiix', 'palm-m515'])
+        zire = data['profiles'][4]
+        self.assertEqual((zire['cohort'], zire['status'], zire['nor_bytes'], zire['raw_nand_bytes']),
+                         ('zire72-nor', 'inherited-unverified', ZIRE_SIZE, 0))
+        self.assertEqual((zire['ram_min_bytes'], zire['ram_max_bytes'], zire['default_display_mode'],
+                          zire['display_mode_mask']), (32 << 20, 32 << 20, 5, 1 << 5))
         self.assertEqual({p['cohort'] for p in data['profiles']},
-                         {'tx-nor-nand', 'e2-nor-nand', 'patched-e2', 'paravirtual', 'reserved'})
+                         {'tx-nor-nand', 'e2-nor-nand', 'patched-e2', 'paravirtual', 'zire72-nor', 'reserved'})
         self.assertTrue(all(p['status'] == 'inherited-unverified' for p in data['profiles'][2:4]))
-        self.assertTrue(all(p['status'] == 'reserved' for p in data['profiles'][4:]))
+        self.assertTrue(all(p['status'] == 'reserved' for p in data['profiles'][5:]))
 
     def test_tx_raw_geometry_and_options(self):
         base = [self.nor, '--device', 'palm-tx']
@@ -156,7 +179,7 @@ class DeviceInputTest(unittest.TestCase):
                           'invalid replay event')
 
     def test_unknown_and_mismatched_session_names(self):
-        for device in ('palm-tx2', 'tungsten-e2', 'palm-zire-72', 'sony-clie-tg50'):
+        for device in ('palm-tx2', 'tungsten-e2', 'sony-clie-tg50'):
             with self.subTest(device=device):
                 path = session(self.root / 'unknown', device)
                 self.rejected([path], f"this session is for {device}, which Frond can't run")
@@ -171,6 +194,104 @@ class DeviceInputTest(unittest.TestCase):
         path = session(self.root / 'e2', 'palm-e2')
         self.rejected([path, '--device', 'palm-tx'], "doesn't match the session's device palm-e2")
 
+    def test_zire72_passes_validation_then_is_refused(self):
+        refused = "the Zire 72 isn't supported yet"
+        rom = self.root / 'zire'
+        rom.write_bytes(zire_nor())
+        self.rejected([rom], refused)
+        self.rejected([rom, '--device', 'palm-zire-72'], refused)
+        # Display and RAM defaults come from the profile (32 MiB, 320x320).
+        self.rejected([rom, '--ram-size', '32', '--display', '320x320'], refused)
+        # A Zire session whose NOR is the Zire's passes everything but the final refusal.
+        # The desktop's saved TX serial settings are dropped for non-TX devices before this point.
+        path = session(self.root / 'zire-session', 'palm-zire-72', nor=zire_nor(), display=5)
+        self.rejected([path], refused)
+
+    def test_zire72_rejections(self):
+        rom = self.root / 'zire-bad'
+
+        def reject(data, message, *args):
+            rom.write_bytes(data)
+            result = self.rejected([rom, *map(str, args)], message)
+            self.assertNotIn('supported yet', result.stderr)
+
+        size = 'invalid NOR size; expected 14942208 bytes'
+        for length in (ZIRE_SIZE - 1, ZIRE_SIZE - 0x10000, 8 << 20, 16 << 20, 0x20000, 0x10000):
+            with self.subTest(size=length):
+                reject(zire_nor(length), size)
+        with self.subTest(case='zero length'):
+            reject(b'', 'neither a supported ROM nor a session image')
+        with self.subTest(case='tiny'):
+            reject(b'\0' * 0x100, 'neither a supported ROM nor a session image')
+        with self.subTest(case='both HALs E2'):
+            reject(zire_nor(small=HSPR, big=HSPR), 'invalid NOR size; expected 8388608 bytes')
+        with self.subTest(case='both HALs unknown'):
+            reject(zire_nor(small=0x12345678, big=0x12345678), 'device: unknown')
+        with self.subTest(case='big HAL differs'):
+            reject(zire_nor(big=0x12345678), 'invalid NOR layout')
+        with self.subTest(case='big HAL E2'):
+            reject(zire_nor(big=HSPR), 'invalid NOR layout')
+        with self.subTest(case='small HAL differs'):
+            reject(zire_nor(small=0x12345678), 'device: unknown')
+        with self.subTest(case='small signature damaged'):
+            data = zire_nor()
+            struct.pack_into('<I', data, 8, 0)
+            reject(data, 'invalid NOR layout')
+        with self.subTest(case='big size field'):
+            for length in (0xe20001, 0xe1ffff, 0, 0xffffffff):
+                reject(zire_nor(big_length=length), 'invalid NOR layout')
+        with self.subTest(case='card names'):
+            reject(zire_nor(name=b'OtherCard'), 'invalid NOR layout')
+        good = zire_nor()
+        with self.subTest(case='nand'):
+            reject(good, 'invalid NAND size; expected 0 bytes', '--nand', self.e2)
+        for ram in ('16', '64', '8'):
+            with self.subTest(ram=ram):
+                reject(good, 'unsupported RAM size', '--ram-size', ram)
+        for display in ('320x480', '160x160'):
+            with self.subTest(display=display):
+                reject(good, 'unsupported display mode', '--display', display)
+        with self.subTest(case='fast audio'):
+            for option in ('--fast-audio', '--experimental-fast-audio'):
+                reject(good, 'requires a verified TX 5.4 or Tungsten E2 NOR', option)
+
+    def test_zire72_device_and_session_mismatches(self):
+        rom = self.root / 'zire-mismatch'
+        rom.write_bytes(zire_nor())
+        self.rejected([rom, '--device', 'palm-tx', '--nand', self.nand], 'does not match ROM')
+        self.rejected([rom, '--device', 'palm-e2'], 'does not match ROM')
+        e2 = self.root / 'e2-rom'
+        e2.write_bytes(e2_nor())
+        self.rejected([e2, '--device', 'palm-zire-72'], 'does not match ROM')
+        self.rejected([self.nor, '--device', 'palm-zire-72'], 'neither a supported ROM nor a session image')
+        cases = (('palm-zire-72', e2_nor()), ('palm-zire-72', header(0x50765076)),
+                 ('palm-e2', zire_nor()), ('palm-tx', zire_nor()), ('palm-e2-franken', zire_nor()))
+        for index, (device, nor) in enumerate(cases):
+            with self.subTest(case=index):
+                path = session(self.root / f'zire-mismatch-session-{index}', device, nor=nor,
+                               nand=34603008 if device == 'palm-e2' else 0, display=5)
+                self.rejected([path], 'selected device profile does not match ROM'
+                              if device == 'palm-tx' else 'session device profile does not match ROM')
+        path = session(self.root / 'zire-named', 'palm-zire-72', nor=zire_nor(), display=5)
+        self.rejected([path, '--device', 'palm-e2'], "doesn't match the session's device palm-zire-72")
+        # An unknown or damaged device name in a session is refused before any ROM is read.
+        for device in ('palm-zire-7', 'palm-zire-72x', 'zire-72', 'zire72'):
+            with self.subTest(device=device):
+                path = session(self.root / 'zire-bad-name', device, nor=zire_nor(), display=5)
+                self.rejected([path], f"this session is for {device}, which Frond can't run")
+
+    def test_zire72_layout_in_a_session_and_other_devices_unchanged(self):
+        # The layout check applies to sessions too.
+        path = session(self.root / 'zire-bad-layout', 'palm-zire-72', nor=zire_nor(big_length=1), display=5)
+        self.rejected([path], 'invalid NOR layout')
+        path = session(self.root / 'zire-bad-size', 'palm-zire-72', nor=zire_nor(8 << 20), display=5)
+        self.rejected([path], 'invalid NOR size; expected 14942208 bytes')
+        path = session(self.root / 'zire-nand', 'palm-zire-72', nor=zire_nor(), nand=34603008, display=5)
+        self.rejected([path], 'invalid NAND size; expected 0 bytes')
+        # E2 and TX inputs are judged as before.
+        self.rejected([self.nor], 'neither a supported ROM nor a session image')
+        self.rejected([self.nor, '--device', 'palm-tx'], 'explicit --nand')
+
     def test_numbered_sessions_are_refused(self):
         # Sessions before v6 name the device by number; they are refused, never mapped.
         for version in (0, 1, 4, 5):
@@ -182,7 +303,7 @@ class DeviceInputTest(unittest.TestCase):
     def test_device_option_names(self):
         self.rejected([self.nor, '--device', 'tx'], 'unknown device tx')
         self.rejected([self.nor, '--device', '3'], 'unknown device 3')
-        self.rejected([self.nor, '--device', 'palm-zire-72'], "palm-zire-72 isn't supported yet")
+        self.rejected([self.nor, '--device', 'sony-clie-tg50'], "sony-clie-tg50 isn't supported yet")
         self.rejected([self.nor], 'neither a supported ROM nor a session image')
         self.rejected([self.nor, '--device', 'palm-e2'], 'neither a supported ROM nor a session image')
         self.rejected([self.e2, '--device', 'palm-e2', '--nand', self.nand], 'invalid NAND size')

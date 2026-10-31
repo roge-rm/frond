@@ -8,6 +8,7 @@ static const char* cohortName(DeviceCohort5 cohort) {
         case DeviceCohort5::e2Nand: return "e2-nor-nand";
         case DeviceCohort5::patchedE2: return "patched-e2";
         case DeviceCohort5::paravirtual: return "paravirtual";
+        case DeviceCohort5::zire72Nor: return "zire72-nor";
         case DeviceCohort5::reserved: return "reserved";
     }
     return "unknown";
