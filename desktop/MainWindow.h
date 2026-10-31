@@ -5,13 +5,17 @@
 #include "DesktopClient.h"
 #include "SdExchange.h"
 #include "FirmwareInput.h"
+#include "SessionStore.h"
 class QDialog;
+class SettingsDialog;
+class QListWidget;
+class QListWidgetItem;
+class QMenu;
 
 class QLineEdit;
 class QComboBox;
 class QPushButton;
 class QCheckBox;
-class QRadioButton;
 class QPlainTextEdit;
 class QLabel;
 class QSpinBox;
@@ -20,12 +24,28 @@ class MainWindow : public QMainWindow {
     Q_OBJECT
  public:
     explicit MainWindow(const QString& core);
+    // Starts (or with launch false, imports) a session file; the command line and resume use it.
     void openSession(const QString& path, bool launch = false);
+    // Copies a session file into the managed folder. Returns an error message, or empty.
+    QString importSession(const QString& path);
  protected:
     void closeEvent(QCloseEvent* event) override;
  private:
     void start();
-    void chooseSession();
+    void startSession(const frondSessions::Info& info);
+    void launch(const QString& sessionPath, QStringList arguments, frondFirmware::Device device);
+    void addDevice();
+    bool ensureFirmware(frondFirmware::Device device);
+    void importSessionDialog();
+    void showFirmware(frondFirmware::Device device = frondFirmware::Device::automatic);
+    void refreshSessions(const QString& select = {});
+    void renameSession(const QString& path);
+    void exportSession(const QString& path);
+    void deleteSession(const QString& path);
+    QMenu* rowMenu(const QString& path, QWidget* parent);
+    QString sessionFolder() const;
+    QString firmwareRoot() const;
+    frondSessions::Info infoFor(const QString& path) const;
     void save(bool saveAs = false);
     void stop(bool closeApp);
     void askStop(const QString& message);
@@ -33,7 +53,7 @@ class MainWindow : public QMainWindow {
     void beginExchange();
     void exchangeResult(bool ok, const QString& message);
     void endExchange();
-    void remember(const QString& path);
+    QString sessionFile() const;
     void send(const QString& command, const QString& argument = {});
     QString serialArgument() const;
     void showSerial(const QString& state);
@@ -56,17 +76,20 @@ class MainWindow : public QMainWindow {
     QSettings settings;
     QString core, sessionPath, savingPath;
     std::unique_ptr<QLockFile> sessionLock;
-    QComboBox *sessions, *network, *serial, *usb, *irda, *deviceChoice;
+    QComboBox *network, *serial, *usb, *irda;
     QSpinBox* serialPort;
     QSpinBox* usbPort;
     QSpinBox* irdaPort;
     QLabel* irdaState;
     QLabel* serialState;
     QLabel* usbState;
-    QLineEdit *nor, *nand, *bluetoothSocket;
+    QLineEdit* bluetoothSocket;
     QCheckBox* bluetooth;
     QLabel* bluetoothState;
-    QRadioButton *savedMode, *newMode;
+    QListWidget* sessionList;
+    QLabel* emptyNote;
+    QPushButton* addButton;
+    SettingsDialog* settingsDialog;
     QPushButton *startButton, *stopButton, *forceButton;
     QCheckBox *audio, *fastAudio, *smoothLcd, *keyboard;
     QSlider* windowScale;
@@ -85,6 +108,6 @@ class MainWindow : public QMainWindow {
     // The running device selects the available peripheral controls.
     bool runningE2{false};
     QString networkTip, keyboardTip, serialTip, usbTip, irdaTip, fastAudioTip;
-    QWidget* setup;
+    QWidget *home, *runningPage;
     bool startupHandled{false}, busy{false}, stopping{false}, closeAfterStop{false}, allowClose{false};
 };
