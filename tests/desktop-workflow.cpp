@@ -336,7 +336,7 @@ s.sendall(b'0\tevent\tready\t\n')
 for line in s.makefile('rb'):
     i,cmd,arg=line.rstrip(b'\n').split(b'\t')
     with trace.open('ab') as t: t.write(cmd+b'\n')
-    message={b'device-state':b'tungsten-e2',b'keyboard-state':b'detached',b'network-state':b'disabled',b'sd-state':b'none',b'usb-state':b'pty /dev/pts/9 connected running'}.get(cmd,b'done')
+    message={b'device-state':b'palm-e2',b'keyboard-state':b'detached',b'network-state':b'disabled',b'sd-state':b'none',b'usb-state':b'pty /dev/pts/9 connected running'}.get(cmd,b'done')
     if cmd==b'keyboard-attach': message=b'attached' if bytes.fromhex(arg.decode())==b'on' else b'detached'
     if cmd==b'save': pathlib.Path(bytes.fromhex(arg.decode()).decode()).write_text('saved')
     s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
@@ -389,14 +389,16 @@ for line in s.makefile('rb'):
         start->click();
         QTRY_VERIFY_WITH_TIMEOUT(shown.contains("Tungsten E2"), 5000);
         QVERIFY(read(".args").isEmpty());
-        // Detecting the device from the NOR starts the E2: no TX flag, and no NAND when it's empty.
+        // Detecting the device from the NOR starts the E2 by name, with no NAND when it's empty.
         device->setCurrentIndex(0);
         start->click();
         QTRY_VERIFY_WITH_TIMEOUT(stop->isEnabled(), 5000);
         dialogPoll.stop();
         const auto args = read(".args").split('\n');
-        QCOMPARE(args.value(0), norPath);
-        QVERIFY(!args.contains("--experimental-tx") && !args.contains("--nand"));
+        QCOMPARE(args.value(0), QString("--device"));
+        QCOMPARE(args.value(1), QString("palm-e2"));
+        QCOMPARE(args.value(2), norPath);
+        QVERIFY(!args.contains("--nand"));
         QVERIFY(args.contains("--fast-audio"));
         // Leave automatic sizing to the core, which knows the restored device and display.
         QVERIFY(!args.contains("--window-scale") && !args.contains("--smooth-lcd"));
@@ -427,7 +429,7 @@ for line in s.makefile('rb'):
         second.findChild<QPushButton*>("start")->click();
         QTRY_VERIFY_WITH_TIMEOUT(second.findChild<QPushButton*>("stop")->isEnabled(), 5000);
         QVERIFY(read(".args").contains("--nand\n" + nandPath));
-        QVERIFY(!read(".args").contains("--experimental-tx"));
+        QVERIFY(read(".args").contains("--device\npalm-e2\n"));
         second.close(); QTRY_VERIFY_WITH_TIMEOUT(!second.isVisible(), 5000);
         // The serial, USB and fast audio settings made before the E2 session are still saved.
         QCOMPARE(QSettings().value("serialMode").toString(), QString("tcp"));
@@ -442,7 +444,7 @@ for line in s.makefile('rb'):
     void infraredSetting_data() {
         QTest::addColumn<QByteArray>("deviceId");
         QTest::newRow("tx") << QByteArray("palm-tx");
-        QTest::newRow("e2") << QByteArray("tungsten-e2");
+        QTest::newRow("e2") << QByteArray("palm-e2");
     }
     void infraredSetting() {
         QFETCH(QByteArray, deviceId);
@@ -496,7 +498,7 @@ for line in s.makefile('rb'):
     void bluetoothSetting_data() {
         QTest::addColumn<QByteArray>("deviceId");
         QTest::newRow("tx") << QByteArray("palm-tx");
-        QTest::newRow("e2") << QByteArray("tungsten-e2");
+        QTest::newRow("e2") << QByteArray("palm-e2");
     }
     void bluetoothSetting() {
         QFETCH(QByteArray, deviceId);

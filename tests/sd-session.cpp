@@ -9,12 +9,12 @@ int main() {
     std::vector<uint8_t> card(512);
     for (unsigned i=0;i<card.size();i++) card[i]=i*17;
     SessionFile5 source;
-    source.SetDeviceType(3).SetRamSize(32u<<20).SetNor(sizeof(nor),nor)
+    source.SetDeviceName("palm-tx").SetRamSize(32u<<20).SetNor(sizeof(nor),nor)
         .SetMemory(sizeof(ram),ram).SetSavestate(sizeof(state),state).SetSd(card.size(),card.data());
     assert(source.Serialize());
     std::vector<uint8_t> saved(static_cast<const uint8_t*>(source.GetSerializedSession()),
                                static_cast<const uint8_t*>(source.GetSerializedSession())+source.GetSerializedSessionSize());
-    assert(saved[4]==5);
+    assert(saved[4]==6);
     SessionFile5 decoded;
     assert(decoded.Deserialize(saved.size(),saved.data()));
     assert(decoded.GetSdSize()==card.size() && !memcmp(decoded.GetSd(),card.data(),card.size()));
@@ -23,10 +23,10 @@ int main() {
     assert(!decoded.Deserialize(broken.size(),broken.data()));
     assert(!decoded.Deserialize(saved.size()-1,saved.data()));
     // An oversized SD TOC must be rejected before allocating its claimed payload.
-    broken=saved;for(int i=40;i<44;i++) broken[i]=255;
+    broken=saved;for(int i=68;i<72;i++) broken[i]=255;
     assert(!decoded.Deserialize(broken.size(),broken.data()));
     source.SetSd(0,nullptr);assert(source.Serialize());
-    assert(static_cast<const uint8_t*>(source.GetSerializedSession())[4]==4);
+    assert(static_cast<const uint8_t*>(source.GetSerializedSession())[4]==6);
     assert(decoded.Deserialize(source.GetSerializedSessionSize(),source.GetSerializedSession()));
     assert(decoded.GetSdSize()==0 && decoded.GetSd()==nullptr);
     source.SetSd(513,card.data());assert(!source.Serialize());

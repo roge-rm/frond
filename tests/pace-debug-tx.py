@@ -37,13 +37,14 @@ def digest(path):
 
 
 def descriptor(path):
-    """Find the initialized probe descriptor in a private v4/v5 session RAM."""
+    """Find the initialized probe descriptor in a private v6 session RAM."""
     data = path.read_bytes()
     magic, version = struct.unpack_from('<II', data)
-    if magic != 0x19800819 or version not in (4, 5):
-        raise ValueError('expected v4/v5 session')
-    header = 44 if version == 5 else 40
-    sizes = struct.unpack_from('<' + 'I' * (6 if version == 5 else 5), data, 20)
+    if magic != 0x19800819 or version != 6:
+        raise ValueError('expected a v6 session')
+    # Magic, version, 32-byte device name, display, RAM size, then six section sizes.
+    header = 72
+    sizes = struct.unpack_from('<6I', data, 48)
     decoder = zlib.decompressobj()
     payload = decoder.decompress(data[header:], 512*1024*1024+1)
     if not decoder.eof or len(payload) != sum(sizes):

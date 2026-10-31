@@ -298,7 +298,7 @@ def run(args):
                 listener.bind(address)
                 listener.listen(1)
                 boot = [str(root / 'working.frond')] if args.session else [
-                    '--experimental-tx', str(root / 'input-nor.bin'), '--nand', str(root / 'input-nand.bin')]
+                    '--device', 'palm-tx', str(root / 'input-nor.bin'), '--nand', str(root / 'input-nand.bin')]
                 command = (['heavy', 'emulator'] if shutil.which('heavy') else []) + [
                     str(root / 'core'), *boot, '--desktop-socket', address]
                 if not args.sound:

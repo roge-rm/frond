@@ -56,8 +56,8 @@ def run(core, args, output, name, seconds, replay=None, replay_seconds=30):
                 raise RuntimeError(f'{name} did not save/capture; inspect private log')
             # This runner must never route a different device into the E2 verdict.
             with saved.open('rb') as stream:
-                magic, version, device = struct.unpack('<III', stream.read(12))
-            if magic != 0x19800819 or version not in (4, 5) or device != 0:
+                magic, version, device = struct.unpack('<II32s', stream.read(40))
+            if magic != 0x19800819 or version != 6 or device.rstrip(b'\0') != b'palm-e2':
                 raise RuntimeError('saved file is not an E2 session')
             return saved
         finally:

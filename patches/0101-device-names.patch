@@ -1,0 +1,946 @@
+diff --git a/src/common/device_profile5.h b/src/common/device_profile5.h
+--- a/src/common/device_profile5.h
++++ b/src/common/device_profile5.h
+@@ -11,15 +11,30 @@
+     mode_320x320 = 5, mode_320x480 = 6, mode_480x480 = 7, mode_480x720 = 8
+ };
+ 
+-enum class DeviceCohort5 { txNand, e2Nand, patchedE2, paravirtual };
+-enum class DeviceSupport5 { txDesktop, e2Desktop, inheritedUnverified };
++enum class DeviceCohort5 { txNand, e2Nand, patchedE2, paravirtual, reserved };
++enum class DeviceSupport5 { txDesktop, e2Desktop, inheritedUnverified, reserved };
++// How a device is told from its firmware: the card header's company and HAL IDs, or the NOR size.
++enum class DeviceDetect5 { cardHeader, norSize, none };
++// Which board model runs it.
++enum class DeviceBoard5 { pxa255E2, pxa270Tx, paravirtual, none };
++// Which button bar and silkscreen art a device gets (native/DeviceControls.h draws them).
++enum class DeviceArt { none, tx, e2, zire72, m515, iiix, tg50 };
++// Settings and peripherals a device supports; the desktop and core gate on these.
++struct DeviceCapabilities5 { bool network, keyboard, serial, usb, fastAudio, infrared, bluetooth; };
+ 
++// A device's fixed name is what sessions, settings, the control socket and command line use.
++// DeviceType5 is internal only and never saved.
+ struct DeviceProfile5 {
+-    DeviceType5 deviceType;
+-    const char* id;
++    DeviceType5 deviceType;  // deviceTypeInvalid for a name reserved for a device not built yet
+     const char* name;
++    const char* displayName;
+     DeviceCohort5 cohort;
+     DeviceSupport5 support;
++    DeviceDetect5 detect;
++    uint32_t companyId, halId; // Card header IDs for cardHeader; companyId 0 matches any.
++    DeviceBoard5 board;
++    DeviceArt art;
++    DeviceCapabilities5 capabilities;
+     size_t norSize;  // Zero means no fixed size established by this profile.
+     size_t nandSize; // Raw NAND includes spare bytes; zero means no NAND.
+     uint32_t minRam, maxRam; // Powers of two, in bytes.
+@@ -28,28 +43,79 @@
+     bool requiresExplicitNand;
+ };
+ 
+-// Inventory of implemented native models, not a list of verified Palm devices.
++inline constexpr uint32_t deviceCompanyPalm5 = 0x50616c6d;  // 'Palm'
++inline constexpr size_t deviceNameMax5 = 31;
++
++// Inventory of native models and reserved names, not a list of verified Palm devices.
+ inline constexpr DeviceProfile5 deviceProfiles5[] = {
+-    {deviceTypeE2, "tungsten-e2", "Tungsten E2", DeviceCohort5::e2Nand,
+-     DeviceSupport5::e2Desktop, 8u << 20, 34603008, 16u << 20, 32u << 20,
+-     DisplayMode::mode_320x320, 1u << 5, false},
+-    {deviceTypeFrankenE2, "franken-e2", "FrankenE2 / Tungsten E3", DeviceCohort5::patchedE2,
+-     DeviceSupport5::inheritedUnverified, 0, 34603008, 16u << 20, 32u << 20,
+-     DisplayMode::mode_320x480, 1u << 6, false},
++    {deviceTypeTX, "palm-tx", "Palm TX", DeviceCohort5::txNand, DeviceSupport5::txDesktop,
++     DeviceDetect5::norSize, 0, 0, DeviceBoard5::pxa270Tx, DeviceArt::tx,
++     {true, true, true, true, true, true, true},
++     16u << 20, 2112u * 64 * 1024, 32u << 20, 32u << 20, DisplayMode::mode_320x480, 1u << 6, true},
++    {deviceTypeE2, "palm-e2", "Tungsten E2", DeviceCohort5::e2Nand, DeviceSupport5::e2Desktop,
++     DeviceDetect5::cardHeader, deviceCompanyPalm5, 0x68737072 /* hspr */, DeviceBoard5::pxa255E2,
++     DeviceArt::e2, {false, true, false, true, true, true, true},
++     8u << 20, 34603008, 16u << 20, 32u << 20, DisplayMode::mode_320x320, 1u << 5, false},
++    // The E2 board with a patched E3-style ROM.
++    {deviceTypeFrankenE2, "palm-e2-franken", "FrankenE2 / Tungsten E3", DeviceCohort5::patchedE2,
++     DeviceSupport5::inheritedUnverified, DeviceDetect5::cardHeader, deviceCompanyPalm5,
++     0x446d4752 /* DmGR */, DeviceBoard5::pxa255E2, DeviceArt::none, {},
++     0, 34603008, 16u << 20, 32u << 20, DisplayMode::mode_320x480, 1u << 6, false},
+     {deviceTypePV, "repalm", "rePalm paravirtualized", DeviceCohort5::paravirtual,
+-     DeviceSupport5::inheritedUnverified, 0, 0, 8u << 20, 1u << 31,
+-     DisplayMode::mode_320x480, 0x1fe, false},
+-    {deviceTypeTX, "palm-tx", "Palm TX", DeviceCohort5::txNand,
+-     DeviceSupport5::txDesktop, 16u << 20, 2112u * 64 * 1024, 32u << 20, 32u << 20,
+-     DisplayMode::mode_320x480, 1u << 6, true},
++     DeviceSupport5::inheritedUnverified, DeviceDetect5::cardHeader, 0, 0x50765076 /* PvPv */,
++     DeviceBoard5::paravirtual, DeviceArt::none, {},
++     0, 0, 8u << 20, 1u << 31, DisplayMode::mode_320x480, 0x1fe, false},
++    // Reserved names: art only, no board yet.
++    {deviceTypeInvalid, "palm-zire-72", "Zire 72", DeviceCohort5::reserved, DeviceSupport5::reserved,
++     DeviceDetect5::none, 0, 0, DeviceBoard5::none, DeviceArt::zire72, {},
++     0, 0, 0, 0, DisplayMode::mode_320x480, 0, false},
++    {deviceTypeInvalid, "sony-clie-tg50", "Sony CLIÉ TG50", DeviceCohort5::reserved, DeviceSupport5::reserved,
++     DeviceDetect5::none, 0, 0, DeviceBoard5::none, DeviceArt::tg50, {},
++     0, 0, 0, 0, DisplayMode::mode_320x320, 0, false},
++    {deviceTypeInvalid, "palm-iiix", "Palm IIIx", DeviceCohort5::reserved, DeviceSupport5::reserved,
++     DeviceDetect5::none, 0, 0, DeviceBoard5::none, DeviceArt::iiix, {},
++     0, 0, 0, 0, DisplayMode::mode_160x160, 0, false},
++    {deviceTypeInvalid, "palm-m515", "Palm m515", DeviceCohort5::reserved, DeviceSupport5::reserved,
++     DeviceDetect5::none, 0, 0, DeviceBoard5::none, DeviceArt::m515, {},
++     0, 0, 0, 0, DisplayMode::mode_160x160, 0, false},
+ };
+ 
++// Built devices only; reserved names have no internal type.
+ inline const DeviceProfile5* deviceProfile5(int32_t deviceType) {
++    if (deviceType < 0) return nullptr;
+     for (const auto& profile : deviceProfiles5)
+         if (int32_t(profile.deviceType) == deviceType) return &profile;
+     return nullptr;
+ }
+ 
++// Any table entry, reserved names included; nullptr for an unknown name.
++inline const DeviceProfile5* deviceProfileNamed5(const char* name) {
++    if (!name) return nullptr;
++    for (const auto& profile : deviceProfiles5) {
++        const char *a = profile.name, *b = name;
++        while (*a && *a == *b) ++a, ++b;
++        if (!*a && !*b) return &profile;
++    }
++    return nullptr;
++}
++
++// The internal type for a name Frond can run, or deviceTypeInvalid.
++inline DeviceType5 deviceTypeNamed5(const char* name) {
++    const auto* profile = deviceProfileNamed5(name);
++    return profile ? profile->deviceType : deviceTypeInvalid;
++}
++
++// The fixed name of a built device, or nullptr.
++inline const char* deviceName5(int32_t deviceType) {
++    const auto* profile = deviceProfile5(deviceType);
++    return profile ? profile->name : nullptr;
++}
++
++inline DeviceArt deviceArtFor5(int32_t deviceType) {
++    const auto* profile = deviceProfile5(deviceType);
++    return profile ? profile->art : DeviceArt::none;
++}
++
+ inline bool deviceProfileSupportsDesktop5(int32_t deviceType) {
+     const auto* profile = deviceProfile5(deviceType);
+     return profile && (profile->support == DeviceSupport5::txDesktop ||
+diff --git a/src/common/rom_info5.cpp b/src/common/rom_info5.cpp
+--- a/src/common/rom_info5.cpp
++++ b/src/common/rom_info5.cpp
+@@ -3,7 +3,7 @@
+ #include <iostream>
+ #include <string>
+ 
+-#include "device_type5.h"
++#include "device_profile5.h"
+ 
+ #pragma GCC diagnostic ignored "-Wmultichar"
+ 
+@@ -13,7 +13,6 @@
+     constexpr uint32_t HAL_ID_DMITRY_TUNGSTEN_E3 = 'DmGR';
+     constexpr uint32_t HAL_ID_TUNGSTEN_E2 = 'hspr';
+     constexpr uint32_t HAL_ID_PV = 'PvPv';
+-    constexpr uint32_t COMPANY_ID_PALM = 'Palm';
+ 
+     constexpr uint32_t SIGNATURE = 0xfeedbeef;
+ 
+@@ -30,20 +29,9 @@
+         return str;
+     }
+ 
+-    const char* describeDeviceType(DeviceType5 deviceType) {
+-        switch (deviceType) {
+-            case DeviceType5::deviceTypePV:
+-                return "rePalm paravirtualized";
+-
+-            case DeviceType5::deviceTypeE2:
+-                return "Tungsten E2";
+-
+-            case DeviceType5::deviceTypeFrankenE2:
+-                return "Tungsten E3 / Dmitry's Frankenpilot";
+-
+-            default:
+-                return "unknown";
+-        }
++    std::string describeDeviceType(DeviceType5 deviceType) {
++        const auto* profile = deviceProfile5(deviceType);
++        return profile ? std::string(profile->name) + " (" + profile->displayName + ")" : "unknown";
+     }
+ }  // namespace
+ 
+@@ -84,17 +72,10 @@
+ DeviceType5 RomInfo5::GetDeviceType() const {
+     if (!isValid) return DeviceType5::deviceTypeInvalid;
+ 
+-    if (halId == HAL_ID_PV) {
+-        return DeviceType5::deviceTypePV;
+-    }
+-
+-    if (companyId == COMPANY_ID_PALM && halId == HAL_ID_TUNGSTEN_E2) {
+-        return DeviceType5::deviceTypeE2;
+-    }
+-
+-    if (companyId == COMPANY_ID_PALM && halId == HAL_ID_DMITRY_TUNGSTEN_E3) {
+-        return DeviceType5::deviceTypeFrankenE2;
+-    }
++    for (const auto& profile : deviceProfiles5)
++        if (profile.detect == DeviceDetect5::cardHeader && profile.halId == halId &&
++            (!profile.companyId || profile.companyId == companyId))
++            return profile.deviceType;
+ 
+     return DeviceType5::deviceTypeInvalid;
+ }
+diff --git a/src/common/session/session_file5.cpp b/src/common/session/session_file5.cpp
+--- a/src/common/session/session_file5.cpp
++++ b/src/common/session/session_file5.cpp
+@@ -4,19 +4,11 @@
+ #include <cstring>
+ #include <iostream>
+ 
+-#include "CPCrc.h"
+ #include "Defer.h"
+-#include "rle.h"
+-#include "rom_info5.h"
+ #include "zip/miniz.h"
+ 
+ using namespace std;
+ 
+-#define DEVICE_TYPE_E3 1
+-
+-#define DISPLAY_MODE_320x320 5
+-#define DISPLAY_MODE_320x480 6
+-
+ // Versions
+ //
+ // * V0: first RLE compressed version
+@@ -25,20 +17,27 @@
+ // * V3: RAM page size change 512b -> 1k: migrate memory image
+ // * V4: Add display mode
+ // * V5: Add an embedded SD image, committed atomically with the peripheral state
++// * V6: The device is a fixed name in a 32-byte NUL-padded field, and the SD size is always present.
++//       Earlier versions name the device by number and are refused.
+ 
+ namespace {
+     constexpr uint32_t MAGIC = 0x19800819;
+-    constexpr uint32_t CURRENT_VERSION = 5;
++    constexpr uint32_t CURRENT_VERSION = 6;
++    constexpr uint32_t FIRST_NAMED_VERSION = 6;
++    constexpr size_t SIZE_DEVICE_NAME = 32;
+ 
+-    constexpr size_t SIZE_HEADER = 12;  // 4 byte magic + 4 byte version + 4 byte device ID
+-    constexpr size_t SIZE_TOC = 6 * 4;
++    constexpr size_t SIZE_HEADER = 8 + SIZE_DEVICE_NAME;  // magic, version, device name
++    constexpr size_t SIZE_TOC = 8 * 4;
+ 
+     constexpr size_t BUFFER_MAX_SIZE = 512 * 1024 * 1024;
+     constexpr size_t BUFFER_MIN_SIZE = 1024;
+ 
+-    int32_t fallbackDisplayMode(int32_t deviceType) {
+-        // E3 = 320x480, and everything else is 320x320
+-        return deviceType == DEVICE_TYPE_E3 ? DISPLAY_MODE_320x320 : DISPLAY_MODE_320x480;
++    // Lower-case letters, digits and dashes, 1 to 31 of them.
++    bool validDeviceName(const std::string& name) {
++        if (name.empty() || name.size() >= SIZE_DEVICE_NAME) return false;
++        for (char c : name)
++            if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-')) return false;
++        return true;
+     }
+ }  // namespace
+ 
+@@ -56,12 +55,12 @@
+     return true;
+ }
+ 
+-int32_t SessionFile5::GetDeviceType() const { return deviceType; }
++const std::string& SessionFile5::GetDeviceName() const { return deviceName; }
+ 
+ int32_t SessionFile5::GetDisplayMode() const { return displayMode; }
+ 
+-SessionFile5& SessionFile5::SetDeviceType(int32_t deviceId) {
+-    this->deviceType = deviceId;
++SessionFile5& SessionFile5::SetDeviceName(const std::string& name) {
++    deviceName = name;
+ 
+     return *this;
+ }
+@@ -147,7 +146,10 @@
+ 
+     const uint64_t sizeUncompressed = uint64_t(metadataSize) + norSize + nandSize + memorySize + savestateSize + sdSize;
+     if (sizeUncompressed > BUFFER_MAX_SIZE || sdSize > (128u << 20) || sdSize % 512 || (sdSize && !sd)) return false;
+-    const uint32_t fileVersion = sdSize ? 5 : 4;
++    if (!validDeviceName(deviceName)) {
++        cerr << "session device name is missing or invalid" << endl;
++        return false;
++    }
+ 
+     bufferSize =
+         max(static_cast<size_t>(BUFFER_MIN_SIZE), SIZE_HEADER + SIZE_TOC + size_t(sizeUncompressed) / 2);
+@@ -157,8 +159,12 @@
+     bool success = true;
+ 
+     success &= Write32(MAGIC);
+-    success &= Write32(fileVersion);
+-    success &= Write32(deviceType);
++    success &= Write32(CURRENT_VERSION);
++    if (success) {
++        memset(cursor, 0, SIZE_DEVICE_NAME);
++        memcpy(cursor, deviceName.data(), deviceName.size());
++        cursor += SIZE_DEVICE_NAME;
++    }
+     success &= Write32(displayMode);
+     success &= Write32(ramSize);
+ 
+@@ -167,7 +173,7 @@
+     success &= Write32(nandSize);
+     success &= Write32(memorySize);
+     success &= Write32(savestateSize);
+-    if (fileVersion >= 5) success &= Write32(sdSize);
++    success &= Write32(sdSize);
+ 
+     if (!success) {
+         cerr << "failed to write header" << endl;
+@@ -255,21 +261,15 @@
+         return false;
+     }
+ 
+-    switch (version) {
+-        case 0:
+-            return Deserialize_v0();
+-
+-        case 1:
+-        case 2:
+-        case 3:
+-        case 4:
+-        case 5:
+-            return Deserialize_v1_v2_v3_v4(version);
+-
+-        default:
+-            cerr << "unsupported session version " << version << endl;
+-            return false;
++    if (version < FIRST_NAMED_VERSION) {
++        cerr << "this session was saved by an older Frond and can't be loaded" << endl;
++        return false;
+     }
++    if (version > CURRENT_VERSION) {
++        cerr << "unsupported session version " << version << endl;
++        return false;
++    }
++    return Deserialize_v6();
+ }
+ 
+ bool SessionFile5::Write32(uint32_t data) {
+@@ -346,145 +346,35 @@
+     return deflateResult == Z_STREAM_END;
+ }
+ 
+-bool SessionFile5::Deserialize_v0() {
+-    bool success = true;
+-
+-    metadataSize = Read32(success);
+-
+-    const uint32_t sizeNorCompressed = Read32(success);
+-    const uint32_t crcNor = Read32(success);
+-
+-    const uint32_t sizeRamCompressed = Read32(success);
+-    const uint32_t crcRam = Read32(success);
+-
+-    const uint32_t sizeNandCompressed = Read32(success);
+-    const uint32_t crcNand = Read32(success);
+-
+-    if (!success) {
+-        cerr << "unable to read v0 toc" << endl;
+-        return false;
+-    }
+-
+-    if (ccursor - serializedSession + metadataSize + sizeNorCompressed + sizeRamCompressed +
+-            sizeNandCompressed !=
+-        serializedSessionSize) {
+-        cerr << "session image v0 size mismatch" << endl;
+-        return false;
+-    }
+-
+-    const uint8_t* cc = ccursor + metadataSize;
+-    size_t remaining = serializedSessionSize - (cc - serializedSession);
+-
+-    norSize = rle_get_chunk_size(remaining, cc, success);
+-    remaining -= sizeNorCompressed;
+-    cc += sizeNorCompressed;
+-
+-    if (!success) {
+-        cerr << "bad v0 nor chunk: " << rle_getLastError() << endl;
++bool SessionFile5::Deserialize_v6() {
++    if (serializedSessionSize - (ccursor - serializedSession) < SIZE_DEVICE_NAME) {
++        cerr << "unable to read session device name" << endl;
+         return false;
+     }
+-
+-    memorySize = rle_get_chunk_size(remaining, cc, success);
+-    remaining -= sizeRamCompressed;
+-    cc += sizeRamCompressed;
+-
+-    if (!success) {
+-        cerr << "bad v0 ram chunk: " << rle_getLastError() << endl;
++    const char* field = reinterpret_cast<const char*>(ccursor);
++    deviceName.assign(field, strnlen(field, SIZE_DEVICE_NAME));
++    ccursor += SIZE_DEVICE_NAME;
++    for (size_t i = deviceName.size(); i < SIZE_DEVICE_NAME; ++i)
++        if (field[i]) deviceName.clear();
++    if (!validDeviceName(deviceName)) {
++        cerr << "session device name is invalid" << endl;
+         return false;
+     }
+ 
+-    nandSize = rle_get_chunk_size(remaining, cc, success);
+-
+-    if (!success) {
+-        cerr << "bad v0 nand chunk: " << rle_getLastError() << endl;
+-        return false;
+-    }
+-
+-    bufferSize = metadataSize + norSize + nandSize + memorySize;
+-    if (bufferSize > BUFFER_MAX_SIZE) {
+-        cout << "v0 image: bad image size" << endl;
+-        return false;
+-    }
+-
+-    buffer = make_unique<uint8_t[]>(bufferSize);
+-    cursor = buffer.get();
+-
+-    memcpy(cursor, ccursor, metadataSize);
+-    metadata = cursor;
+-    cursor += metadataSize;
+-    ccursor += metadataSize;
+-
+-    if (!rle_decode_chunk(sizeNorCompressed, ccursor, bufferSize - (cursor - buffer.get()),
+-                          cursor)) {
+-        cerr << "failed to decode v0 nor: " << rle_getLastError() << endl;
+-        return false;
+-    }
+-
+-    nor = cursor;
+-    cursor += norSize;
+-    ccursor += sizeNorCompressed;
+-
+-    if (!rle_decode_chunk(sizeRamCompressed, ccursor, bufferSize - (cursor - buffer.get()),
+-                          cursor)) {
+-        cerr << "failed to decode v0 ram: " << rle_getLastError() << endl;
+-        return false;
+-    }
+-
+-    memory = cursor;
+-    cursor += memorySize;
+-    ccursor += sizeRamCompressed;
+-
+-    if (!rle_decode_chunk(sizeNandCompressed, ccursor, bufferSize - (cursor - buffer.get()),
+-                          cursor)) {
+-        cerr << "failed to decode v0 nand: " << rle_getLastError() << endl;
+-        return false;
+-    }
+-
+-    nand = cursor;
+-
+-    if (crc::CRC32(nor, norSize) != crcNor) {
+-        cerr << "session image v0: nor crc mismatch" << endl;
+-        return false;
+-    }
+-
+-    if (crc::CRC32(memory, memorySize) != crcRam) {
+-        cerr << "session image v0: ram crc mismatch" << endl;
+-        return false;
+-    }
+-
+-    if (crc::CRC32(nand, nandSize) != crcNand) {
+-        cerr << "session image v0: nand crc mismatch" << endl;
+-        return false;
+-    }
+-
+-    RomInfo5 info(nor, norSize);
+-    if (!info.IsValid()) {
+-        cerr << "session image v0: unable to determine device type" << endl;
+-        return false;
+-    }
+-
+-    deviceType = static_cast<uint32_t>(info.GetDeviceType());
+-    displayMode = DISPLAY_MODE_320x320;
+-
+-    return true;
+-}
+-
+-bool SessionFile5::Deserialize_v1_v2_v3_v4(uint32_t sessionVersion) {
+     bool success = true;
+ 
+-    deviceType = Read32(success);
+-    displayMode = sessionVersion > 3 ? Read32(success) : fallbackDisplayMode(deviceType);
+-    ramSize = sessionVersion > 1 ? Read32(success) : (16ul << 20);
++    displayMode = Read32(success);
++    ramSize = Read32(success);
+ 
+     metadataSize = Read32(success);
+     norSize = Read32(success);
+     nandSize = Read32(success);
+     memorySize = Read32(success);
+     savestateSize = Read32(success);
+-    sdSize = sessionVersion >= 5 ? Read32(success) : 0;
++    sdSize = Read32(success);
+ 
+     if (!success) {
+-        cerr << "failed to read v1 toc" << endl;
++        cerr << "failed to read session toc" << endl;
+         return false;
+     }
+ 
+@@ -492,7 +382,7 @@
+     if (total > BUFFER_MAX_SIZE || sdSize > (128u << 20) || sdSize % 512) return false;
+     bufferSize = size_t(total);
+     if (bufferSize > BUFFER_MAX_SIZE) {
+-        cout << "v1 image: bad image size" << endl;
++        cerr << "session image: bad image size" << endl;
+         return false;
+     }
+ 
+@@ -504,12 +394,12 @@
+                                              serializedSessionSize - (ccursor - serializedSession));
+ 
+     if (uncompressResult != Z_OK) {
+-        cerr << "failed to uncompress v1 image" << endl;
++        cerr << "failed to uncompress session image" << endl;
+         return false;
+     }
+ 
+     if (destLen != bufferSize) {
+-        cerr << "v1 image: bad size" << endl;
++        cerr << "session image: bad size" << endl;
+         return false;
+     }
+ 
+@@ -530,24 +420,5 @@
+     savestate = cursor;
+     sd = sdSize ? cursor + savestateSize : nullptr;
+ 
+-    if (version == 2) MigrateV2Memory();
+-
+     return true;
+ }
+-
+-void SessionFile5::MigrateV2Memory() {
+-    if (!memory) return;
+-
+-    const size_t migratedMemorySize = memorySize + 32 * 1024;
+-    const size_t ramSize = memorySize - 32 * 1024;
+-    migratedMemory = make_unique<uint8_t[]>(migratedMemorySize);
+-
+-    memcpy(migratedMemory.get(), memory, ramSize);
+-    memset(migratedMemory.get() + ramSize, 0, 64 * 1024);
+-
+-    memcpy(migratedMemory.get() + ramSize, memory + ramSize, 16 * 1024);
+-    memcpy(migratedMemory.get() + ramSize + 32 * 1024, memory + ramSize + 16 * 1024, 16 * 1024);
+-
+-    memory = migratedMemory.get();
+-    memorySize = migratedMemorySize;
+-}
+diff --git a/src/common/session/session_file5.h b/src/common/session/session_file5.h
+--- a/src/common/session/session_file5.h
++++ b/src/common/session/session_file5.h
+@@ -5,6 +5,7 @@
+ #include <cstdint>
+ #include <memory>
+ #include <optional>
++#include <string>
+ 
+ struct mz_stream_s;
+ 
+@@ -14,9 +15,10 @@
+ 
+     static bool IsSessionFile(size_t size, const void* data);
+ 
+-    int32_t GetDeviceType() const;
++    // The device's fixed name from device_profile5.h, like "palm-tx".
++    const std::string& GetDeviceName() const;
+     int32_t GetDisplayMode() const;
+-    SessionFile5& SetDeviceType(int32_t deviceId);
++    SessionFile5& SetDeviceName(const std::string& name);
+     SessionFile5& SetDisplayMode(int32_t displayMode);
+ 
+     const void* GetMetadata() const;
+@@ -62,13 +64,10 @@
+     bool GrowBuffer(mz_stream_s& stream);
+     bool Flush(mz_stream_s& stream);
+ 
+-    bool Deserialize_v0();
+-    bool Deserialize_v1_v2_v3_v4(uint32_t version);
+-
+-    void MigrateV2Memory();
++    bool Deserialize_v6();
+ 
+    private:
+-    int32_t deviceType{0};
++    std::string deviceName;
+     int32_t displayMode{0};
+ 
+     size_t metadataSize{0};
+@@ -95,8 +94,6 @@
+     size_t bufferSize{0};
+     std::unique_ptr<uint8_t[]> buffer;
+ 
+-    std::unique_ptr<uint8_t[]> migratedMemory;
+-
+     uint32_t ramSize{0};
+ 
+     uint8_t* cursor;
+diff --git a/src/common/web/common.d.ts b/src/common/web/common.d.ts
+--- a/src/common/web/common.d.ts
++++ b/src/common/web/common.d.ts
+@@ -78,9 +78,10 @@
+ export interface SessionFile5<VoidPtr> {
+     IsSessionFile(size: number, data: VoidPtr): boolean;
+ 
+-    GetDeviceType(): DeviceType5;
++    // The device's fixed name, like "palm-tx".
++    GetDeviceName(): string;
+     GetDisplayMode(): number;
+-    SetDeviceType(deviceTyoe: DeviceType5): SessionFile5<VoidPtr>;
++    SetDeviceName(name: string): SessionFile5<VoidPtr>;
+     SetDisplayMode(displayMode: DisplayMode): SessionFile5<VoidPtr>;
+ 
+     GetMetadata(): VoidPtr;
+diff --git a/src/common/web/session_file5.idl b/src/common/web/session_file5.idl
+--- a/src/common/web/session_file5.idl
++++ b/src/common/web/session_file5.idl
+@@ -3,9 +3,9 @@
+ 
+     boolean IsSessionFile(long size, [Const] VoidPtr data);
+ 
+-    long GetDeviceType();
++    DOMString GetDeviceName();
+     long GetDisplayMode();
+-    [Ref] SessionFile5 SetDeviceType(long deviceType);
++    [Ref] SessionFile5 SetDeviceName(DOMString name);
+     [Ref] SessionFile5 SetDisplayMode(long displayMode);
+ 
+     [Const] VoidPtr GetMetadata();
+diff --git a/src/uarm/native/Commands.cpp b/src/uarm/native/Commands.cpp
+--- a/src/uarm/native/Commands.cpp
++++ b/src/uarm/native/Commands.cpp
+@@ -21,6 +21,7 @@
+ #include "db_list.h"
+ #include "md5.h"
+ #include "sdcard.h"
++#include "device_profile5.h"
+ #include "session/session_file5.h"
+ #include "syscall_dispatch.h"
+ #include "cputil.h"
+@@ -160,7 +161,7 @@
+         const Buffer savestate = ctx->soc->GetSavestate();
+         const Buffer sd = sdCardData();
+ 
+-        sessionFile.SetDeviceType(static_cast<int32_t>(ctx->soc->GetDeviceType()))
++        sessionFile.SetDeviceName(deviceProfile5(ctx->soc->GetDeviceType())->name)
+             .SetDisplayMode(static_cast<int32_t>(ctx->soc->GetDisplayMode()))
+             .SetRamSize(ctx->soc->GetRamSize())
+             .SetNor(rom.size, reinterpret_cast<uint8_t*>(rom.data))
+diff --git a/src/uarm/native/DesktopControl.h b/src/uarm/native/DesktopControl.h
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -12,6 +12,7 @@
+ #include <unistd.h>
+ 
+ #include "Commands.h"
++#include "device_profile5.h"
+ #include "ReadOnlyGuest.h"
+ #include "HostSerial.h"
+ #include "HostInfrared.h"
+@@ -75,8 +76,12 @@
+         lastInfrared=state;event("infrared",state);
+     }
+ 
++    static const DeviceCapabilities5& capabilities(commands::Context& ctx) {
++        return deviceProfile5(ctx.soc->GetDeviceType())->capabilities;
++    }
++
+     void bluetoothChanged(commands::Context& ctx) {
+-        if(ctx.soc->GetDeviceType()!=deviceTypeTX && ctx.soc->GetDeviceType()!=deviceTypeE2)return;
++        if(!capabilities(ctx).bluetooth)return;
+         const auto state=static_cast<SocPXA*>(ctx.soc)->BluetoothState();
+         if(state==lastBluetooth || (state=="off" && lastBluetooth.empty()))return;
+         lastBluetooth=state;event("bluetooth",state);
+@@ -246,15 +251,14 @@
+                 return {false, "launch", "Could not launch that application. Check its database name and wait for Palm OS to finish starting."};
+             return {true, "launched", "Application launched."};
+         }
+-        if (command == "device-state") return {true, "device", deviceProfile5(ctx.soc->GetDeviceType())->id};
+-        // Both boards support the IR accessory and USB; cradle serial is TX-only.
+-        const bool tx = ctx.soc->GetDeviceType() == DeviceType5::deviceTypeTX;
+-        if (!tx && command == "serial-mode")
++        if (command == "device-state") return {true, "device", deviceProfile5(ctx.soc->GetDeviceType())->name};
++        const auto& caps = capabilities(ctx);
++        if (!caps.serial && command == "serial-mode")
+             return {false, "unsupported", "This device has no emulated serial port."};
+-        if (!tx && command == "network-mode" && path != "disabled")
++        if (!caps.network && command == "network-mode" && path != "disabled")
+             return {false, "unsupported", "This device has no emulated network."};
+         if(command=="bluetooth-state" || command=="bluetooth-mode") {
+-            if(ctx.soc->GetDeviceType()!=deviceTypeTX && ctx.soc->GetDeviceType()!=deviceTypeE2)
++            if(!caps.bluetooth)
+                 return {false,"unsupported","This device has no Bluetooth radio."};
+             auto* machine=static_cast<SocPXA*>(ctx.soc);
+             if(command=="bluetooth-mode") {
+@@ -266,7 +270,7 @@
+             return {true,"bluetooth",machine->BluetoothState()};
+         }
+         if (command == "irda-stats") {
+-            if (!ctx.infrared || (ctx.soc->GetDeviceType()!=deviceTypeTX && ctx.soc->GetDeviceType()!=deviceTypeE2))
++            if (!ctx.infrared || !caps.infrared)
+                 return {false,"unsupported","This device has no infrared endpoint."};
+             auto* machine=static_cast<SocPXA*>(ctx.soc);const auto state=pxaUartIrState(machine->GetIrUart());
+             const auto c=ctx.infrared->GetCounters();
+@@ -278,7 +282,7 @@
+         }
+         if (command == "irda-state") return {true,"infrared",ctx.infrared ? ctx.infrared->Describe() : "off"};
+         if (command == "irda-mode") {
+-            if (ctx.soc->GetDeviceType()!=deviceTypeTX && ctx.soc->GetDeviceType()!=deviceTypeE2)
++            if (!caps.infrared)
+                 return {false,"unsupported","This device has no infrared port."};
+             HostSerial::Config config;
+             if (!ctx.infrared || !HostSerial::Parse(path,config)) return {false,"argument","Use off, pty or tcp:PORT."};
+@@ -310,7 +314,7 @@
+         }
+         if (command == "usb-state") return {true, "usb", UsbState(ctx)};
+         if (command == "usb-mode") {
+-            if (!tx && ctx.soc->GetDeviceType()!=deviceTypeE2) return {false,"unsupported","USB is not supported on this device."};
++            if (!caps.usb) return {false,"unsupported","USB is not supported on this device."};
+             HostSerial::Config config;
+             if (!ctx.usb || !HostSerial::Parse(path, config)) return {false, "argument", "Use off, pty or tcp:PORT."};
+             // A new endpoint unplugs the cable first; queued bytes are dropped.
+@@ -371,7 +375,7 @@
+             SessionFile5 session;
+             const auto nor = ctx.soc->GetRomData(), nand = ctx.soc->GetNandData();
+             const auto ram = ctx.soc->GetMemoryData(), state = ctx.soc->GetSavestate();
+-            session.SetDeviceType(int32_t(ctx.soc->GetDeviceType()))
++            session.SetDeviceName(deviceProfile5(ctx.soc->GetDeviceType())->name)
+                 .SetDisplayMode(int32_t(ctx.soc->GetDisplayMode())).SetRamSize(ctx.soc->GetRamSize())
+                 .SetNor(nor.size, static_cast<uint8_t*>(nor.data)).SetNand(nand.size, static_cast<uint8_t*>(nand.data))
+                 .SetMemory(ram.size, static_cast<uint8_t*>(ram.data)).SetSavestate(state.size, static_cast<uint8_t*>(state.data))
+diff --git a/src/uarm/native/DeviceControls.h b/src/uarm/native/DeviceControls.h
+--- a/src/uarm/native/DeviceControls.h
++++ b/src/uarm/native/DeviceControls.h
+@@ -6,7 +6,7 @@
+ #include <cmath>
+ #include <cstdint>
+ #include <cstdlib>
+-#include "device_type5.h"
++#include "device_profile5.h"
+ #include "keys.h"
+ 
+ enum class DeviceControlIcon { home, calendar, contacts, web, up, down, left, right, select, power, tasks, notes,
+@@ -56,11 +56,12 @@
+ using DeviceKeyMask=uint64_t;
+ static_assert(keyIdCount<=64,"DeviceKeyMask has a bit per key");
+ inline DeviceKeyMask deviceKeyBit(KeyId key) {return DeviceKeyMask(1)<<key;}
+-// Which button bar and silkscreen art a device gets. Zire 72, m515, IIIx and TG50 have no
+-// DeviceType5 yet, so only tests and renders reach them until those boards exist.
+-enum class DeviceArt { none, tx, e2, zire72, m515, iiix, tg50 };
+-inline DeviceArt deviceArt(DeviceType5 device) {
+-    return device == deviceTypeTX ? DeviceArt::tx : device == deviceTypeE2 ? DeviceArt::e2 : DeviceArt::none;
++// Button bar and silkscreen art from the device table. Reserved names (Zire 72, m515, IIIx and
++// TG50) have art but no board yet, so only tests and renders reach them by name.
++inline DeviceArt deviceArt(DeviceType5 device) { return deviceArtFor5(device); }
++inline DeviceArt deviceArt(const char* name) {
++    const auto* profile = deviceProfileNamed5(name);
++    return profile ? profile->art : DeviceArt::none;
+ }
+ inline const DeviceControlProfile& deviceControls(DeviceArt art) {
+     // App keys hit their whole pocket; the five-way entries place the direction parts.
+diff --git a/src/uarm/native/main.cpp b/src/uarm/native/main.cpp
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -66,7 +66,7 @@
+     WindowFit windowFit;
+     uint32_t windowBackground;
+     optional<DisplayMode> displayMode;
+-    bool experimentalTx;
++    optional<string> device;
+     bool experimentalFastAudio;
+     optional<unsigned int> runFor;
+     optional<string> framebufferOutput;
+@@ -156,7 +156,8 @@
+ 
+     bool readSession(const Options& options, Buffer& nor, Buffer& nand, Buffer& ram,
+                      Buffer& savestate, uint32_t& ramSize, RomInfo5& romInfo,
+-                     optional<DisplayMode>& displayMode, DeviceType5& sessionDevice, bool& embeddedCard) {
++                     optional<DisplayMode>& displayMode, DeviceType5 requestedDevice,
++                     DeviceType5& sessionDevice, bool& embeddedCard) {
+         SessionFile5 sessionFile;
+ 
+         size_t norOrSessionLen{0};
+@@ -168,14 +169,16 @@
+                 cerr << "invalid session image" << endl;
+                 return false;
+             }
+-            const auto* profile = deviceProfile5(sessionFile.GetDeviceType());
+-            if (!profile) {
+-                cerr << "unknown session device profile" << endl;
++            const auto* profile = deviceProfileNamed5(sessionFile.GetDeviceName().c_str());
++            if (!profile || profile->deviceType == deviceTypeInvalid) {
++                cerr << "this session is for " << sessionFile.GetDeviceName()
++                     << ", which Frond can't run" << endl;
+                 return false;
+             }
+             sessionDevice = profile->deviceType;
+-            if (options.experimentalTx && sessionDevice != DeviceType5::deviceTypeTX) {
+-                cerr << "experimental TX mode cannot load a different device's session" << endl;
++            if (requestedDevice != deviceTypeInvalid && sessionDevice != requestedDevice) {
++                cerr << "--device " << deviceName5(requestedDevice) << " doesn't match the session's device "
++                     << profile->name << endl;
+                 return false;
+             }
+             if (options.nand) {
+@@ -209,8 +212,10 @@
+             }
+         } else {
+             romInfo = RomInfo5(norOrSessionData.get(), norOrSessionLen);
+-            if (!romInfo.IsValid() && !options.experimentalTx) {
+-                cerr << "provided file is neither a support ROM nor a session image" << endl;
++            // Devices without a card header are only started by name.
++            if (!romInfo.IsValid() && (requestedDevice == deviceTypeInvalid ||
++                                       deviceProfile5(requestedDevice)->detect != DeviceDetect5::norSize)) {
++                cerr << "provided file is neither a supported ROM nor a session image" << endl;
+                 return false;
+             }
+ 
+@@ -282,6 +287,20 @@
+             return false;
+         }
+ 
++        DeviceType5 requestedDevice = deviceTypeInvalid;
++        if (options.device) {
++            const auto* profile = deviceProfileNamed5(options.device->c_str());
++            if (!profile) {
++                cerr << "unknown device " << *options.device << "; use palm-tx or palm-e2" << endl;
++                return false;
++            }
++            if (profile->deviceType == deviceTypeInvalid) {
++                cerr << profile->name << " isn't supported yet" << endl;
++                return false;
++            }
++            requestedDevice = profile->deviceType;
++        }
++
+         Buffer nor, nand, memory, savestate;
+         RomInfo5 romInfo;
+         optional<DisplayMode> displayMode = nullopt;
+@@ -290,11 +309,11 @@
+         bool embeddedCard = false;
+         DeviceType5 sessionDevice = DeviceType5::deviceTypeInvalid;
+         if (!readSession(options, nor, nand, memory, savestate, ramSize, romInfo, displayMode,
+-                         sessionDevice, embeddedCard))
++                         requestedDevice, sessionDevice, embeddedCard))
+             return false;
+         const DeviceType5 deviceType = sessionDevice != DeviceType5::deviceTypeInvalid
+-            ? sessionDevice : options.experimentalTx ? DeviceType5::deviceTypeTX
+-                                                     : romInfo.GetDeviceType();
++            ? sessionDevice : requestedDevice != deviceTypeInvalid ? requestedDevice
++                                                                   : romInfo.GetDeviceType();
+         if (romInfo.IsValid() && deviceProfile5(romInfo.GetDeviceType()) &&
+             romInfo.GetDeviceType() != deviceType) {
+             cerr << "selected device profile does not match ROM" << endl;
+@@ -424,7 +443,7 @@
+         }
+ 
+         SoC* soc =
+-            (deviceType == DeviceType5::deviceTypePV)
++            (deviceProfile5(deviceType)->board == DeviceBoard5::paravirtual)
+                 ? static_cast<SoC*>(new SocPV(ramSize, nor.data, nor.size, *displayMode, gdbPort))
+                 : static_cast<SoC*>(new SocPXA(deviceType, ramSize, nor.data, nor.size,
+                                                reinterpret_cast<uint8_t*>(nand.data), nand.size,
+@@ -512,10 +531,11 @@
+         // The endpoint opens after the session loads, so a restore starts detached.
+         HostSerial serial;
+         commandContext.serial = &serial;
++        const auto& capabilities = deviceProfile5(deviceType)->capabilities;
+         if (soc->GetDeviceType() == DeviceType5::deviceTypeTX)
+             commandContext.serialUart = static_cast<SocPXA*>(soc)->GetSerialUart();
+         if (serialConfig.kind != HostSerial::Kind::off) {
+-            if (!isTx) {
++            if (!capabilities.serial) {
+                 cerr << "--serial needs a Palm TX" << endl;
+                 return false;
+             }
+@@ -526,7 +546,7 @@
+         HostInfrared infrared;
+         commandContext.infrared = &infrared;
+         if (infraredConfig.kind != HostSerial::Kind::off) {
+-            if ((!isTx && deviceType != deviceTypeE2) ||
++            if (!capabilities.infrared ||
+                 !infrared.Start(static_cast<SocPXA*>(soc),infraredConfig,commandContext.infraredError)) {
+                 cerr << "infrared: " << commandContext.infraredError << endl; return false;
+             }
+@@ -534,7 +554,7 @@
+         }
+         if (options.bluetooth) {
+             const auto& path=*options.bluetooth;
+-            if ((!isTx && deviceType!=deviceTypeE2) ||
++            if (!capabilities.bluetooth ||
+                 (path!="off" && (path.empty() || path.front()!='/' || path.find(char(0))!=string::npos))) {
+                 cerr << "--bluetooth needs off or an absolute virtual controller Unix socket path on TX/E2" << endl;return false;
+             }
+@@ -546,18 +566,18 @@
+         UsbHostBridge usb;
+         commandContext.usb = &usb;
+         if (usbConfig.kind != HostSerial::Kind::off) {
+-            if (!isTx && deviceType != deviceTypeE2) {
++            if (!capabilities.usb) {
+                 cerr << "--usb needs a Palm TX or Tungsten E2" << endl;
+                 return false;
+             }
+             if (!usb.Start(static_cast<SocPXA*>(soc), usbConfig, commandContext.usbError))
+                 cerr << "usb: " << commandContext.usbError << endl;
+             cout << "usb: " << usb.Describe() << endl;
+-        } else if (isTx || deviceType == deviceTypeE2) {
++        } else if (capabilities.usb) {
+             usb.Start(static_cast<SocPXA*>(soc), usbConfig, commandContext.usbError);  // off: cable as without USB
+         }
+ 
+-        const string desktopTitle = string("Frond — ") + deviceProfile5(deviceType)->name;
++        const string desktopTitle = string("Frond — ") + deviceProfile5(deviceType)->displayName;
+         unique_ptr<DesktopControl> desktop;
+         if (options.desktopSocket) {
+             desktop = make_unique<DesktopControl>(*options.desktopSocket, !options.disableAudio);
+@@ -893,10 +913,9 @@
+ 
+     program.add_argument("--nand", "-n").help("NAND rom file").metavar("<nand file>");
+ 
+-    program.add_argument("--experimental-tx")
+-        .help("experimental Palm TX boot bring-up from raw NOR/NAND images")
+-        .default_value(false)
+-        .implicit_value(true);
++    program.add_argument("--device")
++        .help("device for raw firmware, palm-tx or palm-e2; the E2 is also found from its NOR header")
++        .metavar("<name>");
+ 
+     program.add_argument("--run-for")
+         .help("exit after this many wall-clock seconds and print execution diagnostics")
+@@ -1044,7 +1063,7 @@
+                        .windowFit = program.present<WindowFit>("--window-fit").value_or(WindowFit::none),
+                        .windowBackground = program.present<uint32_t>("--window-background").value_or(0),
+                        .displayMode = program.present<DisplayMode>("--display"),
+-                       .experimentalTx = program.get<bool>("--experimental-tx"),
++                       .device = program.present("--device"),
+                        .experimentalFastAudio = program.get<bool>("--fast-audio"),
+                        .runFor = program.present<unsigned int>("--run-for"),
+                        .framebufferOutput = program.present("--framebuffer-output"),
+diff --git a/tools/test-tx-native.py b/tools/test-tx-native.py
+--- a/tools/test-tx-native.py
++++ b/tools/test-tx-native.py
+@@ -10,7 +10,7 @@
+ parser.add_argument("nand")
+ args = parser.parse_args()
+ 
+-base = [args.binary, "--experimental-tx", args.nor]
++base = [args.binary, "--device", "palm-tx", args.nor]
+ cases = [
+     ([], "requires a 16 MiB"),
+     (["--nand", args.nor], "invalid NAND size"),

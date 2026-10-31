@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cassert>
 #include <cstring>
 #include <climits>
@@ -15,14 +16,26 @@ static void put32(std::vector<uint8_t>& data, size_t at, uint32_t value) {
 }
 
 int main() {
-    static_assert(deviceTypeE2 == 0 && deviceTypeFrankenE2 == 1 && deviceTypePV == 2 && deviceTypeTX == 3);
     static_assert(int(DisplayMode::mode_320x320) == 5 && int(DisplayMode::mode_320x480) == 6);
-    std::set<std::string> ids;
+    std::set<std::string> names;
     std::set<int> types;
     unsigned desktopCount = 0;
+    const std::vector<std::string> reserved{"palm-zire-72", "sony-clie-tg50", "palm-iiix", "palm-m515"};
     for (const auto& p : deviceProfiles5) {
-        assert(ids.insert(p.id).second && types.insert(p.deviceType).second);
+        // Names are unique, short and plain; they go into session headers.
+        assert(names.insert(p.name).second && std::strlen(p.name) <= deviceNameMax5);
+        for (const char* c = p.name; *c; ++c) assert((*c >= 'a' && *c <= 'z') || (*c >= '0' && *c <= '9') || *c == '-');
+        assert(deviceProfileNamed5(p.name) == &p);
+        if (p.deviceType == deviceTypeInvalid) {
+            assert(p.support == DeviceSupport5::reserved && p.board == DeviceBoard5::none && p.art != DeviceArt::none);
+            assert(std::find(reserved.begin(), reserved.end(), p.name) != reserved.end());
+            assert(deviceTypeNamed5(p.name) == deviceTypeInvalid);
+            continue;
+        }
+        // Built devices round-trip name -> device -> name.
+        assert(types.insert(p.deviceType).second);
         assert(deviceProfile5(p.deviceType) == &p);
+        assert(deviceTypeNamed5(p.name) == p.deviceType && std::string(deviceName5(deviceTypeNamed5(p.name))) == p.name);
         desktopCount += deviceProfileSupportsDesktop5(p.deviceType);
         assert(deviceProfileSupportsDesktop5(p.deviceType) == (p.deviceType == deviceTypeTX || p.deviceType == deviceTypeE2));
         assert(deviceConfigurationGetNandSize(p.deviceType) == p.nandSize);
@@ -43,7 +56,14 @@ int main() {
         assert(deviceProfileValidateFirmware5(p.deviceType, 0, p.nandSize, false, true) == DeviceFirmwareError5::norSize);
         assert(deviceProfileValidateFirmware5(p.deviceType, nor, p.nandSize + 1, true, false) == DeviceFirmwareError5::nandSize);
     }
-    assert(desktopCount == 2);
+    assert(desktopCount == 2 && names.size() == 8 && types.size() == 4);
+    assert(std::string(deviceName5(deviceTypeTX)) == "palm-tx" && std::string(deviceName5(deviceTypeE2)) == "palm-e2");
+    assert(deviceProfileNamed5("palm-tx")->capabilities.serial && !deviceProfileNamed5("palm-e2")->capabilities.serial);
+    // Unknown names are refused, including numbers, old ids, case and prefixes.
+    for (const char* name : {"", "3", "0", "tx", "tungsten-e2", "franken-e2", "Palm-TX", "palm-tx ", "palm", "palm-tx2"}) {
+        assert(!deviceProfileNamed5(name) && deviceTypeNamed5(name) == deviceTypeInvalid);
+    }
+    assert(!deviceProfileNamed5(nullptr) && !deviceName5(deviceTypeInvalid) && !deviceName5(99));
     for (int id : {INT_MIN, -1, 4, 99, INT_MAX}) {
         assert(!deviceProfile5(id) && !deviceProfileSupportsDesktop5(id));
         assert(!deviceProfileSupportsRam5(id, 32u << 20));
@@ -96,24 +116,56 @@ int main() {
         assert(!RomInfo5(header.data(), header.size()).IsValid());
     }
 
-    // The 0.2.0 v4/v5 envelope keeps the same device and display IDs.
-    for (int type : {0, 1, 2, 3}) for (bool sd : {false, true}) {
+    // A session saved with a device name loads with that name.
+    for (const auto& p : deviceProfiles5) for (bool sd : {false, true}) {
+        if (p.deviceType == deviceTypeInvalid) continue;
         const uint8_t synthetic[] = {0, 1, 2, 3};
         std::vector<uint8_t> card(512);
         SessionFile5 source;
-        source.SetDeviceType(type).SetDisplayMode(int(deviceProfile5(type)->defaultDisplay))
+        source.SetDeviceName(p.name).SetDisplayMode(int(p.defaultDisplay))
             .SetRamSize(32u << 20).SetNor(sizeof(synthetic), synthetic)
             .SetMemory(sizeof(synthetic), synthetic).SetSavestate(sizeof(synthetic), synthetic);
         if (sd) source.SetSd(card.size(), card.data());
         assert(source.Serialize());
+        const auto* bytes = static_cast<const uint8_t*>(source.GetSerializedSession());
+        assert(std::string(reinterpret_cast<const char*>(bytes + 8)) == p.name);
         SessionFile5 decoded;
         assert(decoded.Deserialize(source.GetSerializedSessionSize(), source.GetSerializedSession()));
-        assert(decoded.GetVersion() == (sd ? 5u : 4u));
-        assert(decoded.GetDeviceType() == type && decoded.GetRamSize() == (32u << 20));
-        assert(decoded.GetDisplayMode() == int(deviceProfile5(type)->defaultDisplay));
+        assert(decoded.GetVersion() == 6u);
+        assert(decoded.GetDeviceName() == p.name && deviceProfileNamed5(decoded.GetDeviceName().c_str()) == &p);
+        assert(decoded.GetRamSize() == (32u << 20));
+        assert(decoded.GetDisplayMode() == int(p.defaultDisplay));
         assert(decoded.GetMemorySize() == sizeof(synthetic));
         assert(std::memcmp(decoded.GetMemory(), synthetic, sizeof(synthetic)) == 0);
         assert(decoded.GetSdSize() == (sd ? 512u : 0u));
     }
-    std::cout << "PASS: native cohort inventory, geometry, E2 NOR size/layout, header bounds and v4/v5 session IDs\n";
+    {
+        // No name, or one that isn't plain, is never written.
+        const uint8_t synthetic[] = {0};
+        for (const char* name : {"", "Palm TX", "palm_tx", "0123456789012345678901234567890123"}) {
+            SessionFile5 source;
+            source.SetDeviceName(name).SetNor(sizeof(synthetic), synthetic);
+            assert(!source.Serialize());
+        }
+        // Numbered sessions from before v6 are refused.
+        for (uint32_t version : {0u, 1u, 4u, 5u}) {
+            std::vector<uint8_t> old(64);
+            put32(old, 0, 0x19800819); put32(old, 4, version); put32(old, 8, 3);
+            SessionFile5 decoded;
+            assert(SessionFile5::IsSessionFile(old.size(), old.data()));
+            assert(!decoded.Deserialize(old.size(), old.data()));
+        }
+        // A name field with bytes after its NUL is refused.
+        SessionFile5 source;
+        source.SetDeviceName("palm-tx").SetNor(sizeof(synthetic), synthetic);
+        assert(source.Serialize());
+        std::vector<uint8_t> bytes(static_cast<const uint8_t*>(source.GetSerializedSession()),
+                                   static_cast<const uint8_t*>(source.GetSerializedSession()) + source.GetSerializedSessionSize());
+        SessionFile5 decoded;
+        bytes[8 + 20] = 'x';
+        assert(!decoded.Deserialize(bytes.size(), bytes.data()));
+        bytes.resize(20);
+        assert(!decoded.Deserialize(bytes.size(), bytes.data()));
+    }
+    std::cout << "PASS: device names, cohort inventory, geometry, E2 NOR size/layout, header bounds and v6 named sessions\n";
 }

@@ -778,9 +778,13 @@ static void viewsLeaveOlderDevices() {
 }
 
 static void zireAndM515() {
-    // TX and E2 keep their art through DeviceType5; the others have none yet.
+    // Art comes from the device table, by internal type for built devices and by name for all.
     assert(deviceArt(deviceTypeTX)==DeviceArt::tx && deviceArt(deviceTypeE2)==DeviceArt::e2);
     assert(deviceArt(deviceTypePV)==DeviceArt::none && deviceArt(deviceTypeFrankenE2)==DeviceArt::none);
+    assert(deviceArt("palm-tx")==DeviceArt::tx && deviceArt("palm-e2")==DeviceArt::e2);
+    assert(deviceArt("palm-zire-72")==DeviceArt::zire72 && deviceArt("palm-m515")==DeviceArt::m515);
+    assert(deviceArt("palm-iiix")==DeviceArt::iiix && deviceArt("sony-clie-tg50")==DeviceArt::tg50);
+    assert(deviceArt("tungsten-e2")==DeviceArt::none && deviceArt("")==DeviceArt::none && deviceArt(nullptr)==DeviceArt::none);
     assert(&deviceControls(deviceTypeTX)==&deviceControls(DeviceArt::tx) && &deviceSilkscreen(deviceTypeE2)==&deviceSilkscreen(DeviceArt::e2));
     assert(deviceControls(deviceTypeTX).unit==1 && deviceControls(deviceTypeE2).unit==1 && deviceSilkscreen(deviceTypeE2).unit==1);
     for(auto art:{DeviceArt::zire72,DeviceArt::m515}) {

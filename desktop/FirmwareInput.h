@@ -7,18 +7,32 @@
 #include "device_profile5.h"
 
 namespace frondFirmware {
+// The devices the desktop starts. Settings and the core get the device's fixed name from
+// device_profile5.h, never this enum.
 enum class Device { automatic, tx, e2 };
 
-inline QString deviceName(Device device) {
-    return device == Device::tx ? QStringLiteral("Palm TX") : QStringLiteral("Tungsten E2");
+// The device's table entry; automatic counts as the TX.
+inline const DeviceProfile5& profile(Device device) {
+    return *deviceProfileNamed5(device == Device::e2 ? "palm-e2" : "palm-tx");
 }
 
-// Which settings a device supports. One place for the launcher and the running state.
-struct Capabilities { bool network, keyboard, serial, usb, fastAudio, infrared, bluetooth; };
-inline Capabilities capabilities(Device device) {
-    if (device == Device::e2) return {false, true, false, true, true, true, true};
-    return {true, true, true, true, true, true, true};
+// The fixed name, like palm-tx; empty for automatic.
+inline QString deviceId(Device device) {
+    return device == Device::automatic ? QString() : QString::fromLatin1(profile(device).name);
 }
+
+// The device for a fixed name; automatic for an empty or unknown one.
+inline Device deviceFromId(const QString& id) {
+    if (id == QLatin1String(profile(Device::tx).name)) return Device::tx;
+    if (id == QLatin1String(profile(Device::e2).name)) return Device::e2;
+    return Device::automatic;
+}
+
+inline QString deviceName(Device device) { return QString::fromUtf8(profile(device).displayName); }
+
+// Which settings a device supports, from the device table.
+using Capabilities = DeviceCapabilities5;
+inline Capabilities capabilities(Device device) { return profile(device).capabilities; }
 
 // Looks for the Palm card header the way the core does (every 32 KiB) and says
 // whether it names an E2. 'other' is a header for another device, 'none' no header.
@@ -48,7 +62,7 @@ inline Device detectDevice(const QString& norPath) {
     if (!QFileInfo(norPath).isFile() || !nor.open(QIODevice::ReadOnly)) return Device::automatic;
     const auto header = norHeader(nor);
     if (header == Header::e2 || header == Header::e2WrongPlace) return Device::e2;
-    if (size_t(nor.size()) == deviceProfile5(deviceTypeTX)->norSize) return Device::tx;
+    if (size_t(nor.size()) == profile(Device::tx).norSize) return Device::tx;
     return Device::automatic;
 }
 
@@ -71,7 +85,7 @@ inline QString validateFiles(Device chosen, const QString& norPath, const QStrin
         return header == Header::e2WrongPlace ? QStringLiteral("This E2 NOR image doesn't have its header at 0x20000.")
                : header == Header::other ? QStringLiteral("This NOR image is not for a Tungsten E2.")
                                          : QStringLiteral("This NOR image has no Tungsten E2 header. Check the device choice.");
-    const auto* profile = deviceProfile5(device == Device::tx ? deviceTypeTX : deviceTypeE2);
+    const auto* profile = &frondFirmware::profile(device);
     const bool nandGiven = !nandPath.isEmpty();
     QFile nand(nandPath);
     if (device == Device::tx || nandGiven) {

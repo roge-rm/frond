@@ -72,10 +72,11 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     };
     deviceChoice = new QComboBox(setup);
     deviceChoice->setObjectName("device");
-    deviceChoice->addItem(tr("Detect from the NOR image"), int(frondFirmware::Device::automatic));
-    deviceChoice->addItem(tr("Palm TX"), int(frondFirmware::Device::tx));
-    deviceChoice->addItem(tr("Tungsten E2"), int(frondFirmware::Device::e2));
-    deviceChoice->setCurrentIndex(std::max(0, deviceChoice->findData(settings.value("device", int(frondFirmware::Device::automatic)).toInt())));
+    // Items hold the device's fixed name, which is also what the setting stores; empty detects.
+    deviceChoice->addItem(tr("Detect from the NOR image"), QString());
+    for (auto device : {frondFirmware::Device::tx, frondFirmware::Device::e2})
+        deviceChoice->addItem(frondFirmware::deviceName(device), frondFirmware::deviceId(device));
+    deviceChoice->setCurrentIndex(std::max(0, deviceChoice->findData(settings.value("device").toString())));
     connect(deviceChoice, qOverload<int>(&QComboBox::activated), this, [this] { settings.setValue("device", deviceChoice->currentData()); });
     form->addRow(tr("Device:"), deviceChoice);
     nor = firmware(tr("NOR image:"), "nor");
@@ -354,7 +355,7 @@ MainWindow::MainWindow(const QString& core) : core(core) {
                "Palm OS button assignments may change what the application buttons do."));
     });
     help->addAction(tr("&About Frond"), this, [this] {
-        QMessageBox::about(this, tr("About Frond"), tr("Frond 0.5.1\nExperimental Palm TX and Tungsten E2 emulator\nGPL-3.0-or-later"));
+        QMessageBox::about(this, tr("About Frond"), tr("Frond 0.6.0\nExperimental Palm TX and Tungsten E2 emulator\nGPL-3.0-or-later"));
     });
     connect(&client, &DesktopClient::diagnostic, this, [this](const QString& text) {
         log->moveCursor(QTextCursor::End); log->insertPlainText(text);
@@ -537,11 +538,10 @@ void MainWindow::start() {
         source = QFileInfo(source).canonicalFilePath();
         arguments << source;
     } else {
-        auto chosen = frondFirmware::Device(deviceChoice->currentData().toInt());
+        auto chosen = frondFirmware::deviceFromId(deviceChoice->currentData().toString());
         const auto firmwareError = frondFirmware::validateFiles(chosen, nor->text(), nand->text(), &chosen);
         if (!firmwareError.isEmpty()) return failure(firmwareError);
-        // The TX needs its flag for a raw NOR; the E2 is recognised from its header.
-        if (chosen == frondFirmware::Device::tx) arguments << "--experimental-tx";
+        arguments << "--device" << frondFirmware::deviceId(chosen);
         arguments << QFileInfo(nor->text()).absoluteFilePath();
         if (!nand->text().isEmpty()) arguments << "--nand" << QFileInfo(nand->text()).absoluteFilePath();
         settings.setValue("nor", nor->text()); settings.setValue("nand", nand->text());
@@ -705,13 +705,15 @@ void MainWindow::askStop(const QString& message) {
 frondFirmware::Device MainWindow::currentDevice() const {
     if (client.running()) return runningE2 ? frondFirmware::Device::e2 : frondFirmware::Device::tx;
     if (savedMode->isChecked()) return frondFirmware::Device::tx;
-    auto chosen = frondFirmware::Device(deviceChoice->currentData().toInt());
+    auto chosen = frondFirmware::deviceFromId(deviceChoice->currentData().toString());
     if (chosen == frondFirmware::Device::automatic) chosen = frondFirmware::detectDevice(nor->text());
     return chosen == frondFirmware::Device::e2 ? chosen : frondFirmware::Device::tx;
 }
-QString MainWindow::deviceLabel() const { return runningE2 ? tr("Tungsten E2") : tr("Palm TX"); }
+QString MainWindow::deviceLabel() const {
+    return frondFirmware::deviceName(runningE2 ? frondFirmware::Device::e2 : frondFirmware::Device::tx);
+}
 void MainWindow::showDevice(const QString& id) {
-    runningE2 = id == "tungsten-e2";
+    runningE2 = frondFirmware::deviceFromId(id) == frondFirmware::Device::e2;
     if (runningE2) showSerial("off");
     refresh();
 }

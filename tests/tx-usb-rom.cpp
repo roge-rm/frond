@@ -34,7 +34,7 @@ struct Machine {
     explicit Machine(const std::vector<uint8_t>& bytes) {
         SessionFile5 session;
         require(session.Deserialize(bytes.size(), bytes.data()), "invalid session");
-        require(session.GetDeviceType() == deviceTypeTX, "TX session required");
+        require(session.GetDeviceName() == "palm-tx", "TX session required");
         auto copy = [](const void* data, size_t size) {
             auto* begin = static_cast<const uint8_t*>(data);
             return std::vector<uint8_t>(begin, begin + size);

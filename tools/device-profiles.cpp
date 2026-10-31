@@ -8,6 +8,7 @@ static const char* cohortName(DeviceCohort5 cohort) {
         case DeviceCohort5::e2Nand: return "e2-nor-nand";
         case DeviceCohort5::patchedE2: return "patched-e2";
         case DeviceCohort5::paravirtual: return "paravirtual";
+        case DeviceCohort5::reserved: return "reserved";
     }
     return "unknown";
 }
@@ -18,11 +19,12 @@ int main() {
     for (const auto& p : deviceProfiles5) {
         if (!first) std::cout << ',';
         first = false;
-        std::cout << "{\"id\":\"" << p.id << "\",\"session_device_id\":" << int(p.deviceType)
-                  << ",\"name\":\"" << p.name << "\",\"cohort\":\"" << cohortName(p.cohort)
+        std::cout << "{\"name\":\"" << p.name << "\",\"display_name\":\"" << p.displayName
+                  << "\",\"cohort\":\"" << cohortName(p.cohort)
                   << "\",\"status\":\""
                   << (p.support == DeviceSupport5::txDesktop ? "tx-desktop"
-                      : p.support == DeviceSupport5::e2Desktop ? "e2-desktop" : "inherited-unverified")
+                      : p.support == DeviceSupport5::e2Desktop ? "e2-desktop"
+                      : p.support == DeviceSupport5::reserved ? "reserved" : "inherited-unverified")
                   << "\",\"nor_bytes\":";
         if (p.norSize) std::cout << p.norSize; else std::cout << "null";
         std::cout << ",\"raw_nand_bytes\":" << p.nandSize

@@ -85,17 +85,22 @@ class HomeModel(private val activity: HomeActivity) {
     }
 
     fun start(session: Session) {
-        if (!session.saved && firmwareReady[session.device] != true) {
-            alert = "No firmware" to "Import the ${session.device.label} firmware first."
+        val device = session.device
+        if (session.old || device == null) {
+            alert = "Saved by an older Frond" to "This session was saved by an older Frond and can't be loaded."
+            return
+        }
+        if (!session.saved && firmwareReady[device] != true) {
+            alert = "No firmware" to "Import the ${device.label} firmware first."
             return
         }
         Sessions.markUsed(activity, session)
         activity.startActivity(
             settings.putInto(Intent(activity, FrondActivity::class.java))
                 .putExtra(FrondActivity.EXTRA_SESSION, session.file.path)
-                .putExtra(FrondActivity.EXTRA_DEVICE, session.device.id)
-                .putExtra(FrondActivity.EXTRA_NOR, Firmware.nor(activity, session.device).path)
-                .putExtra(FrondActivity.EXTRA_NAND, Firmware.nand(activity, session.device).path),
+                .putExtra(FrondActivity.EXTRA_DEVICE, device.id)
+                .putExtra(FrondActivity.EXTRA_NOR, Firmware.nor(activity, device).path)
+                .putExtra(FrondActivity.EXTRA_NAND, Firmware.nand(activity, device).path),
         )
     }
 

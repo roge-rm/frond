@@ -27,14 +27,12 @@ def e2_nor(size=8 << 20, at=0x20000):
 
 def session(path, device, *, nor=None, nand=0, display=6, ram=32 << 20, sd=False):
     nor = header() if nor is None else nor
-    # A hand-built 0.2.0 envelope, independent of the C++ writer.
+    # A hand-built v6 envelope, independent of the C++ writer: the device is a 32-byte name field.
     memory, state, card = b'RAM', b'STATE', bytes(512) if sd else b''
-    fields = [0x19800819, 5 if sd else 4, device & 0xffffffff, display, ram,
-              0, len(nor), nand, len(memory), len(state)]
-    if sd:
-        fields.append(len(card))
+    fields = [display, ram, 0, len(nor), nand, len(memory), len(state), len(card)]
     compressor = zlib.compressobj()
     with path.open('wb') as stream:
+        stream.write(struct.pack('<II', 0x19800819, 6) + device.encode().ljust(32, b'\0')[:32])
         stream.write(struct.pack('<' + 'I' * len(fields), *fields))
         stream.write(compressor.compress(nor))
         block = bytes(1 << 20)
@@ -77,14 +75,14 @@ class DeviceInputTest(unittest.TestCase):
     def test_window_scaling_options(self):
         for scale in ('1', '1.25', '1.5', '1.75', '2'):
             with self.subTest(scale=scale):
-                self.rejected([self.nor, '--experimental-tx', '--window-scale', scale,
+                self.rejected([self.nor, '--device', 'palm-tx', '--window-scale', scale,
                                '--smooth-lcd'], 'explicit --nand')
         for scale in ('0', '1.1', '2.25', 'nan', 'inf', '1.25oops'):
             with self.subTest(scale=scale):
                 self.rejected([self.nor, '--window-scale', scale], 'invalid window scale')
 
     def test_fast_audio_requires_qualified_firmware(self):
-        cases = ([self.nor, '--experimental-tx', '--nand', self.nand], [self.e2])
+        cases = ([self.nor, '--device', 'palm-tx', '--nand', self.nand], [self.e2])
         for args in cases:
             for option in ('--fast-audio', '--experimental-fast-audio'):
                 with self.subTest(args=args, option=option):
@@ -93,18 +91,21 @@ class DeviceInputTest(unittest.TestCase):
 
     def test_inventory(self):
         data = json.loads(subprocess.check_output([ROOT / 'out/frond-device-profiles']))
-        self.assertEqual([p['id'] for p in data['profiles'] if p['status'] == 'tx-desktop'], ['palm-tx'])
-        self.assertEqual([p['id'] for p in data['profiles'] if p['status'] == 'e2-desktop'], ['tungsten-e2'])
-        self.assertEqual(len(data['profiles']), 4)
+        self.assertEqual([p['name'] for p in data['profiles'] if p['status'] == 'tx-desktop'], ['palm-tx'])
+        self.assertEqual([p['name'] for p in data['profiles'] if p['status'] == 'e2-desktop'], ['palm-e2'])
+        self.assertEqual([p['name'] for p in data['profiles']],
+                         ['palm-tx', 'palm-e2', 'palm-e2-franken', 'repalm',
+                          'palm-zire-72', 'sony-clie-tg50', 'palm-iiix', 'palm-m515'])
         self.assertEqual({p['cohort'] for p in data['profiles']},
-                         {'tx-nor-nand', 'e2-nor-nand', 'patched-e2', 'paravirtual'})
-        self.assertTrue(all(p['status'] == 'inherited-unverified' for p in data['profiles'][1:3]))
+                         {'tx-nor-nand', 'e2-nor-nand', 'patched-e2', 'paravirtual', 'reserved'})
+        self.assertTrue(all(p['status'] == 'inherited-unverified' for p in data['profiles'][2:4]))
+        self.assertTrue(all(p['status'] == 'reserved' for p in data['profiles'][4:]))
 
     def test_tx_raw_geometry_and_options(self):
-        base = [self.nor, '--experimental-tx']
+        base = [self.nor, '--device', 'palm-tx']
         self.rejected(base, 'explicit --nand')
         self.rejected(base + ['--nand', self.e2], 'invalid NAND size')
-        self.rejected([self.e2, '--experimental-tx', '--nand', self.nand], 'does not match ROM')
+        self.rejected([self.e2, '--device', 'palm-tx', '--nand', self.nand], 'does not match ROM')
         self.rejected(base + ['--nand', self.nand, '--ram-size', '16'], 'unsupported RAM size')
         self.rejected(base + ['--nand', self.nand, '--ram-size', '0'], 'unsupported RAM size')
         self.rejected(base + ['--nand', self.nand, '--ram-size', '4096'], 'overflows')
@@ -125,7 +126,7 @@ class DeviceInputTest(unittest.TestCase):
         # E2 sessions saved before these checks keep their NOR; the synthetic state then fails.
         for index, nor in enumerate((e2_nor(4 << 20), e2_nor(16 << 20), e2_nor(at=0))):
             with self.subTest(session=index):
-                path = session(self.root / f'e2-old-session-{index}', 0, nor=nor, nand=34603008,
+                path = session(self.root / f'e2-old-session-{index}', 'palm-e2', nor=nor, nand=34603008,
                                display=5)
                 result = self.rejected([path, '--run-for', '1'], 'failed to restore savestate')
                 self.assertNotIn('invalid', result.stderr)
@@ -154,32 +155,53 @@ class DeviceInputTest(unittest.TestCase):
             self.rejected([self.e2, '--input-replay', replay, '--run-for', '1'],
                           'invalid replay event')
 
-    def test_unknown_and_mismatched_session_ids(self):
-        for device in (-1, 4, 0x7fffffff):
+    def test_unknown_and_mismatched_session_names(self):
+        for device in ('palm-tx2', 'tungsten-e2', 'palm-zire-72', 'sony-clie-tg50'):
             with self.subTest(device=device):
                 path = session(self.root / 'unknown', device)
-                self.rejected([path], 'unknown session device profile')
-        path = session(self.root / 'mismatch', 1)
+                self.rejected([path], f"this session is for {device}, which Frond can't run")
+        for device in ('', 'Palm TX', 'palm_tx', 'x' * 32):
+            with self.subTest(device=device):
+                path = session(self.root / 'bad-name', device)
+                self.rejected([path], 'invalid session image')
+        path = session(self.root / 'mismatch', 'palm-e2-franken')
         self.rejected([path], 'does not match ROM')
-        path = session(self.root / 'tx-tag-e2-rom', 3)
+        path = session(self.root / 'tx-tag-e2-rom', 'palm-tx')
         self.rejected([path], 'does not match ROM')
-        path = session(self.root / 'e2', 0)
-        self.rejected([path, '--experimental-tx'], "different device's session")
+        path = session(self.root / 'e2', 'palm-e2')
+        self.rejected([path, '--device', 'palm-tx'], "doesn't match the session's device palm-e2")
+
+    def test_numbered_sessions_are_refused(self):
+        # Sessions before v6 name the device by number; they are refused, never mapped.
+        for version in (0, 1, 4, 5):
+            with self.subTest(version=version):
+                path = self.root / f'numbered-{version}'
+                path.write_bytes(struct.pack('<III', 0x19800819, version, 3) + bytes(64))
+                self.rejected([path], "saved by an older Frond and can't be loaded")
+
+    def test_device_option_names(self):
+        self.rejected([self.nor, '--device', 'tx'], 'unknown device tx')
+        self.rejected([self.nor, '--device', '3'], 'unknown device 3')
+        self.rejected([self.nor, '--device', 'palm-zire-72'], "palm-zire-72 isn't supported yet")
+        self.rejected([self.nor], 'neither a supported ROM nor a session image')
+        self.rejected([self.nor, '--device', 'palm-e2'], 'neither a supported ROM nor a session image')
+        self.rejected([self.e2, '--device', 'palm-e2', '--nand', self.nand], 'invalid NAND size')
+        self.rejected([self.e2, '--device', 'palm-tx', '--nand', self.nand], 'does not match ROM')
 
     def test_session_ram_display_and_corruption(self):
-        path = session(self.root / 'display', 2, nor=header(0x50765076), display=99)
+        path = session(self.root / 'display', 'repalm', nor=header(0x50765076), display=99)
         self.rejected([path], 'unsupported display mode')
-        path = session(self.root / 'ram', 2, nor=header(0x50765076), ram=24 << 20)
+        path = session(self.root / 'ram', 'repalm', nor=header(0x50765076), ram=24 << 20)
         self.rejected([path], 'unsupported RAM size')
-        path = session(self.root / 'broken', 0)
+        path = session(self.root / 'broken', 'palm-e2')
         path.write_bytes(path.read_bytes()[:-1])
         self.rejected([path], 'invalid session image')
 
-    def test_020_tx_v4_v5_envelopes(self):
-        # Check legacy decoding and TX routing using an intentional pre-SoC option rejection.
+    def test_named_tx_sessions_load(self):
+        # A palm-tx session decodes and routes to the TX, shown by a pre-SoC option rejection.
         for sd in (False, True):
             with self.subTest(sd=sd):
-                path = session(self.root / 'tx', 3, nor=bytes(16 << 20), nand=138412032, sd=sd)
+                path = session(self.root / 'tx', 'palm-tx', nor=bytes(16 << 20), nand=138412032, sd=sd)
                 self.rejected([path, '--ram-size', '32'], 'cannot specify RAM size for an existing session')
                 self.rejected([path, '--nand', self.nand], 'separate NAND image cannot be used')
 

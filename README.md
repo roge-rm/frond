@@ -46,7 +46,7 @@ make -j4
 ```
 
 `make deb` builds a Debian package instead (also needs `dpkg-dev` and `binutils`), which
-installs with `sudo apt install ./out/frond_0.5.1-1_amd64.deb`. Neither the packages nor
+installs with `sudo apt install ./out/frond_0.6.0-1_amd64.deb`. Neither the packages nor
 the APK include firmware or Palm apps.
 
 ## Firmware
