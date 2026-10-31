@@ -57,16 +57,16 @@ the APK include firmware or Palm apps.
 | Tungsten E2 | 8 MiB | 34,603,008 bytes raw dump, optional |
 
 Frond detects the device from the NOR and reads the files without changing them. On
-Linux choose the files and click **Start**; on Android import them when you add a
-device. Go through Palm OS setup the first time. If taps land in the wrong place,
+Linux use **File → Firmware…** or click **Add device**; on Android import them when you
+add a device. Go through Palm OS setup the first time. If taps land in the wrong place,
 calibrate the screen in Palm Preferences.
 
 ## Using it
 
-**Sessions.** Each Palm you run is a saved session. On Linux, closing the launcher or
-the Palm window saves it and Frond offers to resume it next time, **Save and Stop** goes
-back to the launcher and **Save a Copy** keeps a separate snapshot. On Android sessions
-are listed on the home screen and can be exported and imported. There's no autosave,
+**Sessions.** Each Palm you run is a saved session. On Linux and Android sessions are
+listed on the home screen (Devices) and can be renamed, exported, imported and deleted.
+On Linux, closing the window saves it and Frond offers to resume it next time, **Save and
+Stop** goes back to the list and **Save a copy…** keeps a separate snapshot. There's no autosave,
 so a crash loses what changed since the last save. Sessions hold your firmware and
 personal data, so keep them private.
 

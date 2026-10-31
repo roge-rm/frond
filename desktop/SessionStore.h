@@ -177,8 +177,8 @@ inline QString remove(const Info& info) {
     QLockFile lock(info.path + ".lock");
     lock.setStaleLockTime(0);
     if (!lock.tryLock()) return QStringLiteral("This session is open in another Frond.");
-    QFile::remove(info.path);
-    QFile::remove(markerPath(info.path));
+    for (const auto& path : {info.path, markerPath(info.path)})
+        if (QFileInfo::exists(path) && !QFile::remove(path)) return QStringLiteral("Couldn't delete the session.");
     return {};  // the lock file goes when 'lock' unlocks
 }
 
@@ -189,15 +189,20 @@ inline QString importFile(const QString& folder, const QString& from, QString* n
     if (!QDir().mkpath(folder)) return QStringLiteral("Couldn't save the session.");
     auto base = cleanName(QFileInfo(from).completeBaseName());
     if (base.isEmpty()) base = frondFirmware::deviceName(frondFirmware::deviceFromId(header.device));
-    const auto name = freeName(folder, base);
+    // The name is held with a marker while the file lands, so no other Frond takes it meanwhile.
+    const auto name = reserve(folder, base, header.device);
+    if (name.isEmpty()) return QStringLiteral("Couldn't save the session.");
     const auto target = filePath(folder, name);
+    const auto fail = [&] {
+        QFile::remove(target + ".part");
+        QFile::remove(markerPath(target));
+        return QStringLiteral("Couldn't save the session.");
+    };
     // Copied to .part and renamed after the check, so a stopped import leaves no session behind.
     QFile::remove(target + ".part");
-    if (!QFile::copy(from, target + ".part")) return QStringLiteral("Couldn't save the session.");
-    if (!QFile::rename(target + ".part", target)) {
-        QFile::remove(target + ".part");
-        return QStringLiteral("Couldn't save the session.");
-    }
+    if (!QFile::copy(from, target + ".part")) return fail();
+    if (!QFile::rename(target + ".part", target)) return fail();
+    QFile::remove(markerPath(target));
     if (newName) *newName = name;
     return {};
 }

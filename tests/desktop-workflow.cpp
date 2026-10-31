@@ -17,6 +17,7 @@
 #include "FirmwareStore.h"
 #include "SessionStore.h"
 #include <QMessageBox>
+#include <QMenuBar>
 #include <QTimer>
 #include <QAction>
 #include <QDialog>
@@ -691,7 +692,7 @@ for line in s.makefile('rb'):
 )PY");
         core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
         MainWindow window(core.fileName()); window.show(); window.openSession(source, true);
-        auto* action = window.findChild<QAction*>("sdExchange"); QVERIFY(action);
+        auto* action = window.findChild<QPushButton*>("sdExchange"); QVERIFY(action);
         QTRY_VERIFY_WITH_TIMEOUT(action->isEnabled(), 5000);
         bool sawEditor = false, sawError = false;
         QTimer poll; poll.setInterval(10);
@@ -707,14 +708,13 @@ for line in s.makefile('rb'):
                 if (!dialog->isVisible()) return;
                 sawEditor = true;
                 QVERIFY(!action->isEnabled());
-                for (auto* a : window.findChildren<QAction*>())
-                    if (a->text() == "&Reinsert" || a->text() == "Insert &Image…") QVERIFY(!a->isEnabled());
+                for (const auto* name : {"sdInsert", "sdInsertImage", "sdEject", "sdNew"}) QVERIFY(!window.findChild<QPushButton*>(name)->isEnabled());
                 if (mode == "cancel-edit") dialog->reject();
                 else if (mode == "close-edit") window.close();
                 else dialog->accept();
             }
         });
-        poll.start(); action->trigger();
+        poll.start(); action->click();
         QTRY_VERIFY_WITH_TIMEOUT((mode == "close-edit" || mode == "close-start") ? !window.isVisible() : action->isEnabled(), 10000);
         poll.stop();
         const auto state = window.findChild<QLabel*>("sdState")->text();
@@ -851,6 +851,69 @@ for line in s.makefile('rb'):
         window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
         // The core's save went into the same session, and it is the one that resumes.
         QCOMPARE(QSettings().value("lastSession").toString(), QFileInfo(managedFolder() + "/Trip.frond").canonicalFilePath());
+        QDir(managedFolder()).removeRecursively();
+        QSettings().clear();
+    }
+    // The running page has the Android Menu sections, and the menu bar only File and Help.
+    void runningView() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        putSession("Trip", 6, "palm-e2", 1);
+        QTemporaryDir files;
+        QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly));
+        core.write(R"PY(#!/usr/bin/python3
+import pathlib,socket,sys
+s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+card=b'inserted'
+for line in s.makefile('rb'):
+    i,cmd,arg=line.rstrip(b'\n').split(b'\t')
+    message={b'keyboard-state':b'detached',b'network-state':b'disabled',b'device-state':b'palm-e2'}.get(cmd,b'done')
+    if cmd==b'sd-state': message=card
+    if cmd==b'sd-eject': card=b'ejected'
+    s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
+    if cmd==b'quit': break
+)PY");
+        core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        MainWindow window(core.fileName()); window.show();
+        QStringList menus;
+        for (auto* action : window.menuBar()->actions()) menus << action->text();
+        QCOMPARE(menus, QStringList({"&File", "&Help"}));
+        QStringList items;
+        for (auto* action : window.menuBar()->actions().first()->menu()->actions()) if (!action->isSeparator()) items << action->text();
+        QCOMPARE(items, QStringList({"&Import session…", "&Firmware…", "&Settings…", "&Quit"}));
+        auto* list = window.findChild<QListWidget*>("sessionList");
+        emit list->itemActivated(list->item(0));
+        auto* sd = window.findChild<QLabel*>("sdState");
+        QTRY_COMPARE_WITH_TIMEOUT(sd->text(), QString("Inserted"), 5000);
+        QStringList headings;
+        for (auto* label : window.findChild<QWidget*>("running")->findChildren<QLabel*>())
+            if (QStringList({"Applications", "SD card", "Device"}).contains(label->text())) headings << label->text();
+        QCOMPARE(headings, QStringList({"Applications", "SD card", "Device"}));
+        const auto shown = [&](const char* name) { return window.findChild<QPushButton*>(name)->isVisibleTo(&window); };
+        QVERIFY(shown("sdExchange") && shown("sdEject") && !shown("sdInsert") && !shown("sdNew") && !shown("sdRetry"));
+        QTRY_VERIFY(window.findChild<QPushButton*>("installApp")->isEnabled());
+        // The E2 has no network or serial port; its USB, keyboard and Bluetooth stay.
+        QVERIFY(!window.findChild<QComboBox*>("networkMode")->isEnabled());
+        QVERIFY(!window.findChild<QComboBox*>("serialMode")->isEnabled());
+        QVERIFY(window.findChild<QCheckBox*>("keyboardAttached")->isEnabled());
+        // Sound here and in Settings are the same setting.
+        auto* sound = window.findChild<QCheckBox*>("sound");
+        QVERIFY(sound->isChecked());
+        sound->click();
+        QVERIFY(!QSettings().value("audio").toBool() && !window.findChild<SettingsDialog*>()->audio->isChecked());
+        QTimer answer;
+        answer.setInterval(30);
+        connect(&answer, &QTimer::timeout, &window, [&] {
+            if (auto* box = window.findChild<QMessageBox*>(); box && box->isVisible()) box->button(QMessageBox::Yes)->click();
+        });
+        answer.start();
+        QTRY_VERIFY(window.findChild<QPushButton*>("sdEject")->isEnabled());
+        window.findChild<QPushButton*>("sdEject")->click();
+        QTRY_COMPARE_WITH_TIMEOUT(sd->text(), QString("Ejected"), 5000);
+        QTRY_VERIFY(shown("sdInsert") && shown("sdExchange") && shown("sdExport") && shown("sdNew") && shown("sdInsertImage") && !shown("sdEject"));
+        answer.stop();
+        window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
         QDir(managedFolder()).removeRecursively();
         QSettings().clear();
     }
@@ -1091,6 +1154,23 @@ for line in s.makefile('rb'):
         QVERIFY(dialog->grab().save(folder + "/settings.png"));
         dialog->hide();
         QDir(managedFolder()).removeRecursively();
+        // With FROND_TEST_CORE and FROND_TEST_E2_NOR (and optionally FROND_TEST_E2_NAND) a real E2 runs for running.png.
+        const auto core = qEnvironmentVariable("FROND_TEST_CORE"), nor = qEnvironmentVariable("FROND_TEST_E2_NOR");
+        if (!core.isEmpty() && !nor.isEmpty()) {
+            const auto root = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/frond/firmware";
+            QVERIFY(frondFirmware::importImages(root, frondFirmware::Device::e2, nor, qEnvironmentVariable("FROND_TEST_E2_NAND")).isEmpty());
+            QVERIFY(frondSessions::create(managedFolder(), "Tungsten E2", "palm-e2"));
+            MainWindow running(core); running.show();
+            auto* list = running.findChild<QListWidget*>("sessionList");
+            emit list->itemActivated(list->item(0));
+            QTRY_VERIFY_WITH_TIMEOUT(running.findChild<QLabel*>("sdState")->text() != "Not known", 60000);
+            QTest::qWait(500);
+            QVERIFY(running.grab().save(folder + "/running.png"));
+            running.close();
+            QTRY_VERIFY_WITH_TIMEOUT(!running.isVisible(), 60000);
+            QDir(managedFolder()).removeRecursively();
+            QDir(root).removeRecursively();
+        }
         QSettings().clear();
     }
     void persistence() {

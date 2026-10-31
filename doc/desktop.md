@@ -4,10 +4,10 @@ Frond's Qt 6 launcher provides desktop controls alongside the SDL Palm display.
 The Palm display remains a separate window in this release. Firmware is supplied
 by the user. Palm TX and Tungsten E2 support is experimental. Virtual SD cards and experimental virtual Wi-Fi are supported;
 Infrared beaming links two Frond instances; detach the infrared keyboard and
-choose **Infrared beaming: TCP** with a different port for each instance, then
+choose **Infrared beaming: Wait for a peer** with a different port for each instance, then
 connect them with [the relay](infrared.md). Both devices also offer an opt-in
 **Bluetooth virtual controller**: start the [optional provider](bluetooth-provider.md),
-enter its absolute BR/EDR socket path and enable the checkbox. Then turn Bluetooth
+enter its absolute BR/EDR socket path and turn on Bluetooth on the running page. Then turn Bluetooth
 off and on in Palm OS. The live status distinguishes a configured endpoint from
 a connected controller. Bluetooth is off by default. See [peripherals](peripherals.md).
 
@@ -19,32 +19,47 @@ Install the locally built package:
 sudo apt install ./frond_0.6.0-1_amd64.deb
 ```
 
-Launch **Frond** from Plasma's application menu. On first use, choose an existing
-Frond session, or choose a device and its firmware images, then click **Start**.
-The TX needs a 16 MiB NOR image and a 132 MiB raw NAND image. The Tungsten E2
-needs an 8 MiB NOR image and can take a 34,603,008-byte raw NAND image; with no
-NAND it starts from blank flash and you set it up again. **Device** can detect the
-device from the NOR image (the E2 from its card header at 0x20000, the TX from its
-size) or you can choose it. Frond refuses a NOR image that belongs to another
-device than the one chosen. Firmware paths are remembered. Complete Palm OS setup in the
-Palm window when starting from raw firmware.
+Launch **Frond** from Plasma's application menu. The window opens on **Devices**, a
+list of your saved sessions. Each row shows the session name and a second line like
+"Tungsten E2 · Saved Oct 31 · 12 MB", "Tungsten E2 · Not saved" or "Saved by an older
+Frond" (greyed, it can only be deleted). Double-click a row, press Enter or click
+**Start** to start it. Right-click a row, or use its **…** button, for **Rename**,
+**Export…** and **Delete**.
 
-Close Frond or its Palm window to save the running device automatically. The next
-launch resumes that working session when **Resume last session on startup** is
-checked. Uncheck it to start at the launcher and choose a session yourself.
-**Save and Stop** saves the Palm and returns to the launcher.
+**Add device** lists the Palm TX and the Tungsten E2 with "Ready" or "Needs firmware".
+A ready device starts a new session at once. For the other one the Firmware dialog
+opens first and the device starts after the import.
+
+**File → Firmware…** (Import firmware) takes a NOR image and, for the E2, an optional
+NAND image. The TX needs a 16 MiB NOR image and a 132 MiB raw NAND image. The Tungsten
+E2 needs an 8 MiB NOR image and can take a 34,603,008-byte raw NAND image; with no NAND
+it starts from blank flash and you set it up again. **Device** can detect the device
+from the NOR image (the E2 from its card header at 0x20000, the TX from its size) or
+you can choose it. Frond refuses a NOR image that belongs to another device than the
+one chosen. The images are copied into `~/.local/share/frond/firmware/<device name>/`,
+so you can move the originals. Complete Palm OS setup in the Palm window when starting
+from raw firmware.
+
+**File → Settings…** has Display (Size from 1× to 2×, **Smooth pixels**), Audio
+(**Sound**, **Low-latency audio**) and **Resume last session on startup**. Size and
+Smooth pixels apply on the next start. Sound is the same setting as Sound on the
+running page.
+
+**File → Import session…** copies a `.frond` file into the list. Close Frond or its
+Palm window to save the running device automatically. The next launch resumes that
+session when **Resume last session on startup** is on. **Save and Stop** saves the
+Palm and returns to the list.
 
 **Low-latency audio** can reduce the delay between a tap and sound.
 It is off by default. Set it before starting the Palm. It supports one 44.1 kHz
 stereo stream with qualified TX or Tungsten E2 firmware; unsupported playback
 falls back to normal audio and may briefly pause. See [fast audio](fast-audio.md) for the limitations.
 
-Working copies are stored under `$XDG_DATA_HOME/frond/sessions`, normally
-`~/.local/share/frond/sessions`. Imported session files and firmware images are
-not overwritten. Each import gets its own working copy on save. **File → Save
-Session** updates the working copy; **Save a Copy** writes a separate snapshot.
-A session names its device, `palm-tx` or `palm-e2`. Sessions from earlier Frond
-versions stored a number instead and won't open; start again from firmware.
+Sessions are stored under `$XDG_DATA_HOME/frond/sessions`, normally
+`~/.local/share/frond/sessions`, one `<name>.frond` file each. A device that was never
+saved is a small `<name>.frond.new` marker until its first save. Imported and exported
+files are copies. A session names its device, `palm-tx` or `palm-e2`. Sessions from
+earlier Frond versions stored a number instead and won't open; start again from firmware.
 Session files contain firmware, installed applications and Palm user data.
 
 The last-session setting is updated only after a successful working-copy save.
@@ -53,14 +68,30 @@ writes use a temporary file beside the destination and replace it atomically.
 Normal close is covered; forced termination, a crash or power loss can lose work
 since the last save. There is no periodic autosave in this release.
 
-The **SD Card** menu creates/imports cards and provides Eject, Reinsert and Export
-Image. Card contents and insertion state are saved inside the working session,
-including on normal close. **Exchange Files…** saves a recovery session, then
-copies files through a private ejected image using `mtools`. Choose **Apply and
-Reinsert** to use the edits, or Cancel to keep the original ejected card. Existing
-host and card filenames are refused. See the [file exchange guide](peripherals.md#hostpalm-file-exchange).
-Close Palm files before ejecting; export an image
-before replacing a card you want to keep. Supported sizes are 32–128 MiB FAT16.
+## Running page
+
+While a Palm runs, the window shows its sections instead of the list, and the title is
+the session name. **Save**, **Save a copy…**, **Emulator log** and **Save and Stop**
+stay at the bottom of the window. **Force Stop…** appears there if the emulator stops
+answering. Ctrl+S saves.
+
+- **Applications:** **Install application** (PRC/PDB, after Palm OS has started),
+  **Launch application** (by its Palm database name), **Export RAM databases** (a ZIP
+  of everything in RAM, including other apps and user data) and **Export database**
+  (one named database, useful for logs when an open system database stops the full
+  export).
+- **SD card:** the state (Inserted, Ejected, No card or Not known) and the actions that
+  fit it: **Files**, **Eject**, **Insert**, **Export image**, **New card** (32, 64 or 128 MB)
+  and **Insert image**. Card contents and insertion state are saved in the session.
+  **Files** saves a recovery session, then copies files through a private ejected image
+  using `mtools`. Choose **Apply and Reinsert** to use the edits, or Cancel to keep the
+  original card. Existing host and card filenames are refused. See the
+  [file exchange guide](peripherals.md#hostpalm-file-exchange). Close Palm files before
+  ejecting and export an image before replacing a card you want to keep. Cards are
+  32 to 128 MiB FAT16.
+- **Device:** Sound, Network, Infrared keyboard, Serial port, USB HotSync, Infrared
+  beaming, Bluetooth, **Reset** and **Rotate**. A control the device doesn't have yet
+  is greyed. All of them grey while the emulator is busy.
 
 For Internet access, select **Network: Virtual Wi-Fi (Frond)** before turning on
 Wi-Fi in Palm OS. Scan and connect to the open **Frond** network. Its virtual
@@ -70,49 +101,39 @@ Blazer supports HTTP pages through this path; modern TLS/browser compatibility
 is still limited. The mode, radio and saved Palm network profile persist, while
 live host connections close on resume; reload or reconnect in the Palm app.
 
-**File → Export Database…** exports one named Palm database into a ZIP, useful
-for retrieving application logs when an open system database prevents a full
-RAM export.
-
 **Internet via host** remains available for a subset of 68k NetLib apps, along
 with local echo and error fixtures. See [network setup and limits](peripherals.md#virtual-wi-fi-experimental).
 
-**Attach Palm infrared keyboard** sends computer-keyboard input through an
+**Infrared keyboard** sends computer-keyboard input through an
 emulated Palm keyboard accessory. Install and enable its Palm OS driver first,
 then type in the Palm window. The attachment persists in the session. See
 [keyboard setup](peripherals.md#computer-keyboard).
 
 **Serial port** connects the Palm's cradle serial port (FFUART) to the computer.
-Choose **PTY** and open the `/dev/pts` path shown under it with a terminal program
-such as `screen` or `minicom`, or choose **TCP on 127.0.0.1** with a port and connect
-one client at a time, for example `nc 127.0.0.1 5023`. It is off by default, the
-choice is kept between runs and changing it while running closes the old
-connection. See [host serial](tx-serial.md#host-endpoint).
+Choose **Terminal (PTY)** and open the `/dev/pts` path shown under it with a terminal
+program such as `screen` or `minicom`, or choose **Wait for a peer** with a port (it
+listens on 127.0.0.1) and connect one client at a time, for example
+`nc 127.0.0.1 5023`. It is off by default, the choice is kept between runs and changing
+it while running closes the old connection. See [host serial](tx-serial.md#host-endpoint).
 
-**USB** plugs the TX or E2 USB port into the computer for HotSync with pilot-link
-and the like. Choose **PTY** or **TCP on 127.0.0.1** as for the serial port. The
-line under it shows the endpoint, whether a client is connected and how far the
-Palm got on the bus (enumerated once it is ready). Start HotSync on the Palm, then
-run the pilot-link command, for example `pilot-xfer -p /dev/pts/7 -l`. It is off
-by default and the choice is kept between runs. See
+**USB HotSync** plugs the TX or E2 USB port into the computer for HotSync with
+pilot-link and the like. Choose **Terminal (PTY)** or **Wait for a peer** as for the
+serial port. The line under it shows the endpoint, whether a client is connected and
+how far the Palm got on the bus (enumerated once it is ready). Start HotSync on the
+Palm, then run the pilot-link command, for example `pilot-xfer -p /dev/pts/7 -l`. It
+is off by default and the choice is kept between runs. See
 [USB HotSync](peripherals.md#usb-hotsync).
 
-**File → Install Application** accepts PRC/PDB files after Palm OS has started.
-**Launch Application** starts an installed app by its Palm database name.
-**Export RAM Databases** writes a ZIP of the Palm's RAM databases, including
-unrelated installed apps and user data. **Device** provides normal reset and
-rotation. Sound can be enabled or disabled from the launcher. The display-scale
-slider offers 1×, 1.25×, 1.5×, 1.75× and 2× before starting. The default is the
-largest that fits the screen, including the button strip and window frame.
-LCD pixels stay sharp by default; **Smooth LCD scaling** enables linear filtering.
-The button strip and E2 silkscreen are drawn at the selected scale in either mode. A working session
-is locked while open to prevent two Frond windows overwriting it. Errors appear in
-the GUI; **View → Emulator Log** exposes diagnostic details.
+LCD pixels stay sharp by default; **Smooth pixels** in Settings turns on linear
+filtering. The default size is the largest that fits the screen, including the button
+strip and window frame. The button strip and E2 silkscreen are drawn at the selected
+scale in either mode. A session is locked while open to prevent two Frond windows
+overwriting it. Errors appear in the window; **Emulator log** shows diagnostic details.
 
-`.frond` files can be opened through the desktop file manager. Existing `.session`
-files also work through Open Session. A GUI-controlled session supports
-the Palm TX and the Tungsten E2. See the [device profile inventory](device-profiles.md) for the
-inherited models and staged support limits.
+`.frond` files can be brought in with **File → Import session…**. A GUI-controlled
+session supports the Palm TX and the Tungsten E2. See the
+[device profile inventory](device-profiles.md) for the inherited models and staged
+support limits.
 
 ## Physical buttons
 

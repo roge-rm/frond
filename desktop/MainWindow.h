@@ -95,8 +95,10 @@ class MainWindow : public QMainWindow {
     QSlider* windowScale;
     QLabel* scaleLabel;
     QPlainTextEdit* log;
-    QList<QAction*> runningActions;
-    QAction *sdCreate, *sdImport, *sdEject, *sdReinsert, *sdExport, *sdExchange;
+    QList<QWidget*> runningButtons;
+    QAction* importAction;
+    QPushButton *sdCreate, *sdImport, *sdEject, *sdReinsert, *sdExport, *sdExchange, *sdRetry;
+    QCheckBox* soundToggle;
     QLabel* sdStatus;
     enum class ExchangeStage { None, Eject, Backup, Export, Insert };
     ExchangeStage exchangeStage{ExchangeStage::None};
@@ -104,10 +106,10 @@ class MainWindow : public QMainWindow {
     std::unique_ptr<SdExchange> exchange;
     QDialog* exchangeDialog{nullptr};
     QString exchangeBackup;
-    bool cardPresent{false}, cardInserted{false};
+    bool cardPresent{false}, cardInserted{false}, sdKnown{false};
     // The running device selects the available peripheral controls.
     bool runningE2{false};
     QString networkTip, keyboardTip, serialTip, usbTip, irdaTip, fastAudioTip;
-    QWidget *home, *runningPage;
+    QWidget *home, *runningPage, *sessionBar = nullptr;
     bool startupHandled{false}, busy{false}, stopping{false}, closeAfterStop{false}, allowClose{false};
 };
