@@ -431,14 +431,15 @@ MainWindow::MainWindow(const QString& core) : core(core) {
         forceButton->show(); statusBar()->showMessage(tr("The emulator is not responding. Waiting for it to finish…"));
     });
     connect(&client, &DesktopClient::started, this, [this] {
-        busy = false; statusBar()->showMessage(tr("Running. Your session will be saved when you close Frond.")); refresh();
+        busy = false; hardResetAfterSave = false;
+        statusBar()->showMessage(tr("Running. Your session will be saved when you close Frond.")); refresh();
         if (stopping) save();
         else send("device-state");
     });
     connect(&client, &DesktopClient::finished, this, [this] {
         if (exchangeDialog) exchangeDialog->reject();
         else endExchange();
-        busy = false; stopping = false; cardPresent = cardInserted = false; runningE2 = false;
+        busy = false; stopping = false; hardResetAfterSave = false; cardPresent = cardInserted = false; runningE2 = false;
         sdKnown = false; showSerial({}); loadSerialSettings(); showUsb({}); loadUsbSettings(); showIrda({}); loadIrdaSettings(); showBluetooth({}); loadBluetoothSettings(); sessionLock.reset(); forceButton->hide(); refreshSessions();
         if (closeAfterStop) { allowClose = true; close(); }
         else statusBar()->showMessage(tr("Stopped."));
