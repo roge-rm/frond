@@ -1,0 +1,166 @@
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -5,6 +5,7 @@
+ #include <cstdio>
+ #include <cstring>
+ #include <fcntl.h>
++#include <iostream>
+ #include <stdexcept>
+ #include <sys/socket.h>
+ #include <sys/un.h>
+@@ -86,8 +87,10 @@
+         const auto n = recv(fd, data, sizeof(data), 0);
+         if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) return true;
+         if (n > 0) input.append(data, n);
+-        if (input.size() > 16384 || output.size() > 65536) return true;
+-        const auto end = input.find('\n');
++        if (input.size() > 16384 || !flush()) return true;
++        // Take the next command only once the last reply is sent, so a large reply like db-list stays
++        // the only thing queued and a slow reader can't grow the output without limit.
++        const auto end = output.empty() ? input.find('\n') : std::string::npos;
+         if (end != std::string::npos) {
+             const auto line = input.substr(0, end);
+             input.erase(0, end + 1);
+@@ -98,7 +101,7 @@
+                 return true;
+             std::string argument;
+             if (!decode(line.substr(second + 1), argument)) return true;
+-            const bool work = command == "guest-ready" || command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "reset" || command == "launch-app" || command == "input-replay" || (command.rfind("sd-", 0) == 0 && command != "sd-state");
++            const bool work = command == "guest-ready" || command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "db-list" || command == "reset" || command == "launch-app" || command == "input-replay" || (command.rfind("sd-", 0) == 0 && command != "sd-state");
+             if (work) ctx.audioDriver.Pause();
+             Reply result;
+             try {
+@@ -115,15 +118,18 @@
+             }
+             output += id + (result.ok ? "\tok\t" : "\terror\t") + result.code + "\t" + encode(result.message) + "\n";
+         }
+-        if (!output.empty()) {
+-            const auto sent = send(fd, output.data(), output.size(), MSG_NOSIGNAL);
+-            if (sent > 0) output.erase(0, sent);
+-            else if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) return true;
+-        }
++        if (!flush()) return true;
+         return quit && output.empty();
+     }
+ 
+  private:
++    // Sends what the socket takes now; false when the client has gone.
++    bool flush() {
++        if (output.empty()) return true;
++        const auto sent = send(fd, output.data(), output.size(), MSG_NOSIGNAL);
++        if (sent > 0) output.erase(0, sent);
++        return sent >= 0 || errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR;
++    }
+     std::string lastSerial, lastUsb, lastInfrared, lastBluetooth;
+     static std::string UsbState(commands::Context& ctx) {
+         if (!ctx.usb) return "off";
+@@ -376,6 +382,21 @@
+             writeAtomic(destination, archive.data(), archive.size());
+             return {true, "exported", database.empty()?"RAM databases exported.":"Database exported."};
+         }
++        if (command == "db-list") {
++            // One line per RAM database: type, creator and attributes in hex, then the hex name.
++            DbMetadataList list;
++            if (!GuestDatabaseOps::List(*ctx.soc, list))
++                return {false, "not-ready", "Wait for Palm OS to reach a supported application boundary."};
++            std::string text;
++            for (const auto& db : list) {
++                char fields[32];
++                std::snprintf(fields, sizeof(fields), "%08x %08x %04x ", unsigned(db.type), unsigned(db.creator),
++                              unsigned(db.attr & 0xffff));
++                text += fields + encode(db.name) + "\n";
++            }
++            std::cout << "db-list: " << list.size() << " RAM databases" << std::endl;
++            return {true, "databases", text};
++        }
+         if (command == "speed-state") {
+             // Same figures as the desktop window title, plus audio underruns since start.
+             char text[128];
+--- a/src/uarm/native/GuestDatabaseOps.h
++++ b/src/uarm/native/GuestDatabaseOps.h
+@@ -5,6 +5,7 @@
+ #include "NativeDatabase.h"
+ #include "app_launcher.h"
+ #include "db_backup.h"
++#include "db_list.h"
+ #include "native_boundary.h"
+ 
+ // Shared desktop/console workflow. Native preparation only observes guest state;
+@@ -54,6 +55,29 @@
+     return LaunchResult::launched;
+ }
+ 
++// The RAM databases' directory entries, without serialising any database. Read-only: the guest
++// is rolled back afterwards like Export. Returns false only when no supported boundary is available.
++inline bool List(SoC& soc, DbMetadataList& list) {
++    if (NativeBoundary::Prepare(soc)) {
++        ReadOnlyGuest transaction(soc);
++        NativeBoundary::Session session(soc);
++        NativeDatabase<NativeBoundary::Session> database(session);
++        auto found = database.List();
++        database.Finish();
++        session.Close();
++        list = std::move(found);
++        return true;
++    }
++    GuestExport guest(soc);
++    if (!guest.Ready()) return false;
++    DbMetadataList all;
++    if (!dbListGet(soc.GetSyscallDispatch(), all)) throw std::runtime_error("Could not read the Palm database list");
++    list.clear();
++    for (const auto& db : all)
++        if (!db.isRom && db.creator != 0x6136386bu) list.push_back(db);
++    return true;
++}
++
+ // Returns false only when no supported boundary is available. Errors throw;
+ // the caller publishes output only after this function's rollback completes.
+ inline bool Export(SoC& soc, const std::string& name, std::vector<uint8_t>& bytes,
+--- a/src/uarm/native/NativeDatabase.h
++++ b/src/uarm/native/NativeDatabase.h
+@@ -13,6 +13,7 @@
+ #include "Defer.h"
+ #include "db_installer.h"
+ #include "db_archive_name.h"
++#include "db_list.h"
+ #include "palmos_errors.h"
+ #include "zip.h"
+ 
+@@ -86,6 +87,37 @@
+         }
+     }
+ 
++    // Name, attributes, type and creator of each RAM database, read from the database directory
++    // without opening any. Skips a68k like Export.
++    DbMetadataList List() {
++        const uint32_t count = call(0x81d4, {});
++        if (count > 65535) throw std::runtime_error("Invalid Palm database count");
++        DbMetadataList list;
++        for (uint32_t i = 0; i < count; ++i) {
++            const uint32_t db = call(0x8188, {i, 0, 0, 0});
++            if (!db) throw std::runtime_error("Could not enumerate Palm databases");
++            if (!(db & 0x80000000u)) continue;
++            // Native order at scratch: creator +48, type +52, attributes +56, name +64.
++            uint8_t zero[48]{};
++            write(scratch + 48, zero, sizeof(zero));
++            if (session.Call(0x812c, {db, scratch + 64, scratch + 56, 0}, {0, 0, 0, 0, 0, 0, scratch + 52, scratch + 48}))
++                throw std::runtime_error("Could not read Palm database metadata");
++            DbMetadata meta{};
++            uint16_t attributes = 0;
++            read(scratch + 48, &meta.creator, 4);
++            read(scratch + 52, &meta.type, 4);
++            read(scratch + 56, &attributes, 2);
++            read(scratch + 64, meta.name, sizeof(meta.name));
++            meta.name[sizeof(meta.name) - 1] = 0;
++            if (meta.creator == 0x6136386bu || !meta.name[0]) continue;
++            meta.attr = attributes;
++            meta.index = uint16_t(i);
++            meta.localID = db;
++            list.push_back(meta);
++        }
++        return list;
++    }
++
+     std::vector<uint8_t> Export(const std::string& name) {
+         std::vector<uint32_t> databases;
+         if (!name.empty()) {

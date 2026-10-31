@@ -47,8 +47,11 @@ data class Settings(
         private const val EXTRA_DEBUGGER = "debugger"
         private const val EXTRA_DEBUGGER_PORT = "debuggerPort"
 
+        // Reads the file again when the other process wrote it: Home and the emulator run in their own
+        // processes and both change Sound.
+        @Suppress("DEPRECATION")
         fun load(context: Context): Settings {
-            val p = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+            val p = context.getSharedPreferences(FILE, Context.MODE_MULTI_PROCESS)
             return Settings(
                 size = enumOr(p.getString(EXTRA_SIZE, null), ScreenSize.FIT),
                 smoothing = p.getBoolean(EXTRA_SMOOTHING, false),

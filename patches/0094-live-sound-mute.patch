@@ -1,0 +1,79 @@
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -136,6 +136,11 @@
+         const auto state = ctx.usb->Describe();
+         return state == "off" && !ctx.usbError.empty() ? "off " + ctx.usbError : state;
+     }
++    // on: playing, muted: playing silence, off: no device open or paused by audio-off.
++    std::string SoundState(commands::Context& ctx) const {
++        if (!sound || !ctx.audioDriver.Running()) return "off";
++        return ctx.audioDriver.Muted() ? "muted" : "on";
++    }
+     static std::string SerialState(commands::Context& ctx) {
+         if (!ctx.serial) return "off";
+         const auto state = ctx.serial->Describe();
+@@ -189,7 +194,7 @@
+     Reply dispatch(commands::Context& ctx, const std::string& command, const std::string& path) {
+         const bool fileCommand = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "input-replay";
+         if (fileCommand && (path.empty() || path.front() != '/')) return {false, "argument", "An absolute file path is required."};
+-        if (!fileCommand && command != "sd-create" && command != "launch-app" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "bluetooth-mode" && !path.empty()) return {false, "argument", "This command takes no argument."};
++        if (!fileCommand && command != "sd-create" && command != "launch-app" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "bluetooth-mode" && command != "sound-mode" && !path.empty()) return {false, "argument", "This command takes no argument."};
+         if (command == "guest-ready") {
+             if (!GuestDatabaseOps::Ready(*ctx.soc))
+                 return {false, "not-ready", "Palm OS has not reached a supported application boundary."};
+@@ -406,9 +411,19 @@
+                           static_cast<unsigned long long>(ctx.audioDriver.GetUnderrunCount()));
+             return {true, "speed", text};
+         }
++        if (command == "sound-state") return {true, "sound", SoundState(ctx)};
++        if (command == "sound-mode") {
++            // Off mutes a playing device; on unmutes it, or starts it after --no-sound or audio-off.
++            if (path != "on" && path != "off") return {false, "argument", "Use on or off."};
++            ctx.audioDriver.SetMuted(path == "off");
++            if (path == "on" && !sound) { ctx.audioDriver.Start(); sound = true; }
++            const auto state = SoundState(ctx);
++            std::cout << "sound: " << state << std::endl;
++            return {true, "sound", state};
++        }
+         if (command == "reset") ctx.soc->Reset();
+         else if (command == "rotate") ctx.rotation = Rotation((int(ctx.rotation) + 1) % 4);
+-        else if (command == "audio-on") { ctx.audioDriver.Start(); sound = true; }
++        else if (command == "audio-on") { ctx.audioDriver.SetMuted(false); ctx.audioDriver.Start(); sound = true; }
+         else if (command == "audio-off") { ctx.audioDriver.Pause(); sound = false; }
+         else if (command == "quit") quit = true;
+         else return {false, "command", "Unknown desktop command."};
+--- a/src/uarm/native/SdlAudioDriver.cpp
++++ b/src/uarm/native/SdlAudioDriver.cpp
+@@ -116,7 +116,8 @@
+                                           samplesRemaining, queueGeneration);
+     }
+ 
+-    if (samplesRemaining > 0) {
++    if (muted.load(std::memory_order_relaxed)) memset(stream, 0, len);
++    else if (samplesRemaining > 0) {
+         memset(stream + (len / 4 - samplesRemaining) * 4, 0, samplesRemaining * 4);
+     }
+ }
+--- a/src/uarm/native/SdlAudioDriver.h
++++ b/src/uarm/native/SdlAudioDriver.h
+@@ -18,6 +18,12 @@
+     void Start();
+     void Pause();
+     bool GetAudioBackpressure() const;
++
++    // Plays silence while still draining the queue at the device's pace, so guest audio timing,
++    // backpressure and the low-latency path behave the same as when playing.
++    void SetMuted(bool value) { muted.store(value, std::memory_order_relaxed); }
++    bool Muted() const { return muted.load(std::memory_order_relaxed); }
++    bool Running() const { return initialized; }
+     uint64_t GetUnderrunCount() const;
+ 
+     // Leaves the device open at destruction. SDL's Android pause holds the device lock on the
+@@ -42,6 +48,7 @@
+ 
+     std::atomic<bool> audioBuffering{true};
+     std::atomic<bool> audioBackpressure{false};
++    std::atomic<bool> muted{false};
+     std::atomic<uint64_t> underrunCount{0};
+     std::atomic<bool> starting{true};
+     bool lowLatencyStartup;

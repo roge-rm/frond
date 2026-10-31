@@ -1,0 +1,47 @@
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -136,6 +136,30 @@
+         const auto state = ctx.usb->Describe();
+         return state == "off" && !ctx.usbError.empty() ? "off " + ctx.usbError : state;
+     }
++    // Reads the TX display driver's rotation in degrees, the value SysGetOrientation converts, without
++    // running guest code. The driver's globals are at [[0x1ff00ffc + 0x248] + 0x3c] on the TX 5.4 ROM; the
++    // getter's code is checked first so another ROM gives "" (unknown).
++    static std::string TxOrientation(ArmCpu* cpu) {
++        const auto word = [cpu](uint32_t address, uint32_t& value) {
++            return cpuMemOpExternal(cpu, &value, address, 4, false);
++        };
++        static const uint32_t getter[] = {0xe5999000, 0xe5999248, 0xe59f05a8, 0xe0800009, 0xe1d000b0};
++        uint32_t value = 0;
++        for (unsigned i = 0; i < 5; ++i)
++            if (!word(0x2033a4a4 + 4 * i, value) || value != getter[i]) return "";
++        uint32_t offset = 0, base = 0;
++        if (!word(0x2033aa5c, offset) || offset != 0x3c || !word(0x1ff00ffc + 0x248, base) || !base || (base & 3))
++            return "";
++        uint16_t degrees = 0;
++        if (!cpuMemOpExternal(cpu, &degrees, base + offset, 2, false)) return "";
++        switch (degrees) {
++            case 0: return "portrait";
++            case 90: return "landscape";
++            case 180: return "reverse-portrait";
++            case 270: return "reverse-landscape";
++            default: return "";
++        }
++    }
+     // on: playing, muted: playing silence, off: no device open or paused by audio-off.
+     std::string SoundState(commands::Context& ctx) const {
+         if (!sound || !ctx.audioDriver.Running()) return "off";
+@@ -402,6 +426,13 @@
+             std::cout << "db-list: " << list.size() << " RAM databases" << std::endl;
+             return {true, "databases", text};
+         }
++        if (command == "guest-orientation") {
++            if (ctx.soc->GetDeviceType() != DeviceType5::deviceTypeTX)
++                return {false, "unsupported", "This device has no screen rotation."};
++            const auto orientation = TxOrientation(ctx.soc->GetCpu());
++            if (orientation.empty()) return {false, "unknown", "The screen orientation can't be read right now."};
++            return {true, "orientation", orientation};
++        }
+         if (command == "speed-state") {
+             // Same figures as the desktop window title, plus audio underruns since start.
+             char text[128];

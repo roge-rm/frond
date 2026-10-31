@@ -17,8 +17,10 @@ class PalmButtons(private val device: Device, private val link: ControlLink, pri
             return
         }
         if (!down) return
-        val (x, y) = tapPoint(device, button) ?: return
+        if (tapPoint(device, button, PORTRAIT) == null) return
         taps.execute {
+            val orientation = orientation() ?: return@execute
+            val (x, y) = tapPoint(device, button, orientation) ?: return@execute
             val file = File(dir, "controller-${button.id}.replay")
             file.writeText("0 pen-down $x $y\n$TAP_MS pen-up\n")
             val reply = link.request("input-replay", file.path, timeoutSeconds = 5)
@@ -26,7 +28,21 @@ class PalmButtons(private val device: Device, private val link: ControlLink, pri
         }
     }
 
+    // The guest's own screen orientation, which moves the TX's status bar, or null when the core can't
+    // read it. Then there's no tap, as a guess could land inside the running app.
+    private fun orientation(): String? {
+        if (device != Device.TX) return PORTRAIT
+        val reply = link.request("guest-orientation", timeoutSeconds = 5)
+        if (reply.ok) return reply.message
+        Log.w(FrondActivity.TAG, "guest-orientation: ${reply.code} ${reply.message}")
+        return null
+    }
+
     companion object {
+        // guest-orientation replies.
+        const val PORTRAIT = "portrait"
+        const val REVERSE_LANDSCAPE = "reverse-landscape"
+
         // In libmain.so, which SDLActivity loads.
         @JvmStatic external fun push(keycode: Int, down: Boolean)
 
@@ -52,16 +68,20 @@ class PalmButtons(private val device: Device, private val link: ControlLink, pri
         }
 
         // Where Home and Menu are in the core's pen coordinates (screen pixels, the silkscreen below
-        // the screen). E2: the left column of its 320x120 silkscreen. TX: Menu is the second icon
-        // of the status bar along the bottom of its 320x480 screen in portrait.
-        fun tapPoint(device: Device, button: PalmButton): Pair<Int, Int>? = when (device) {
+        // the screen), for the guest's orientation. E2: the left column of its 320x120 silkscreen.
+        // TX: Menu is the second icon of the status bar, along the bottom of its 320x480 screen in
+        // portrait. The status bar's rotate icon turns it to reverse landscape, which puts the bar
+        // along the top, its icons in reverse. Other orientations aren't measured, so no tap.
+        fun tapPoint(device: Device, button: PalmButton, orientation: String): Pair<Int, Int>? = when (device) {
             Device.E2 -> when (button) {
                 PalmButton.HOME -> 27 to 351
                 PalmButton.MENU -> 27 to 405
                 else -> null
             }
-            Device.TX -> when (button) {
-                PalmButton.MENU -> 54 to 466
+            Device.TX -> when {
+                button != PalmButton.MENU -> null
+                orientation == PORTRAIT -> 54 to 466
+                orientation == REVERSE_LANDSCAPE -> 266 to 14
                 else -> null
             }
         }

@@ -1,6 +1,7 @@
 package com.rm.frond
 
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -123,8 +124,8 @@ class PeripheralsModel(
         activity.runOnUiThread { note = result }
     }
 
-    // Asks for a name at once and fills the list of RAM databases in when it's read (an export of
-    // all of them, which can take a while). A failed list still lets you type a name.
+    // Asks for a name at once and fills the list of RAM databases in when the core has read it.
+    // A failed list still lets you type a name.
     var listing by mutableStateOf(false)
         private set
     private var asks = 0
@@ -138,7 +139,10 @@ class PeripheralsModel(
         val asked = ++asks
         activity.lifecycleScope.launch {
             val list = withContext(Dispatchers.IO) {
-                try { d.list() } catch (e: Exception) { emptyList() }
+                try { d.list() } catch (e: Exception) {
+                    Log.w(FrondActivity.TAG, "database list: ${e.message}")
+                    emptyList()
+                }
             }
             // A later question has its own list coming.
             if (asked != asks) return@launch
@@ -187,6 +191,15 @@ class PeripheralsModel(
             val reply = withContext(Dispatchers.IO) { l.request("keyboard-state", timeoutSeconds = 30) }
             if (reply.ok) keyboard = reply.message == "attached"
         }
+    }
+
+    // The saved Sound setting. FrondActivity applies it to the core when the Palm shows again.
+    var sound by mutableStateOf(Settings.load(activity).sound)
+        private set
+
+    fun changeSound(on: Boolean) {
+        Settings.save(activity, Settings.load(activity).copy(sound = on))
+        sound = on
     }
 
     fun attachKeyboard(on: Boolean) =
