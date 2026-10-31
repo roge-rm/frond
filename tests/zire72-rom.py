@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
 """Zire 72 detection, rejection and boot checks on the private Zire NOR, plus the E2 and TX still loading.
 
-Skipped when the firmware isn't there. Mutated copies live in a temporary directory under build/;
+Skipped when the firmware isn't there. FROND_ZIRE_LAUNCHER=1 adds the launcher and key runs, FROND_ZIRE_STORAGE=1
+the SD card, session and memo runs. Mutated copies live in a temporary directory under build/;
 the originals are only read and their SHA-256 is checked before and after.
 """
 import hashlib
 import os
+import re
+import shutil
 from pathlib import Path
 import struct
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
+import zipfile
 import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -58,6 +63,202 @@ def png_rows(path):
         prev = row
     return rows
 
+
+def date_time_prefs(rows):
+    """Prefs > Date & Time: the long blue Preferences tab, the panel title and a white body."""
+    def px(x, y):
+        return rows[y][4 * x:4 * x + 3]
+    tab = sum(1 for x in range(100, 128) if px(x, 12)[2] > 150 and px(x, 12)[0] < 80)
+    title = sum(1 for x in range(200, 316) for y in range(6, 20) if sum(px(x, y)) < 200)
+    white = sum(1 for x in range(0, 320, 4) for y in range(150, 280, 4) if min(px(x, y)) > 230)
+    return tab >= 8 and 400 <= title <= 600 and white > 0.9 * 80 * 33
+
+
+class Core:
+    """A core process driven over its console; waits on its output and frames, not on the clock."""
+
+    def __init__(self, image, log, *args):
+        self.lines, self.log = [], log.open('w')
+        self.process = subprocess.Popen([str(CORE), *map(str, image), '--no-sound', *map(str, args)],
+                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                        text=True, errors='replace',
+                                        env={**os.environ, 'SDL_VIDEODRIVER': 'dummy', 'SDL_AUDIODRIVER': 'dummy'})
+        self.reader = threading.Thread(target=self.read, daemon=True)
+        self.reader.start()
+        self.snaps = 0
+
+    def read(self):
+        for line in self.process.stdout:
+            self.lines.append(line)
+            self.log.write(line)
+
+    def send(self, command, expect=None, timeout=30):
+        """Sends a console command; with expect, returns the first later line holding one of its strings."""
+        mark = len(self.lines)
+        self.process.stdin.write(command + '\n')
+        self.process.stdin.flush()
+        if expect is None:
+            return None
+        expect = (expect,) if isinstance(expect, str) else expect
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            for line in self.lines[mark:]:
+                if any(e in line for e in expect):
+                    return line
+            if self.process.poll() is not None:
+                break
+            time.sleep(0.1)
+        raise AssertionError(f'no {expect} after {command}')
+
+    def until(self, command, expect, done='', timeout=60):
+        """Repeats a command until its reply holds done, e.g. while Palm OS isn't ready for host calls."""
+        end = time.monotonic() + timeout
+        while True:
+            line = self.send(command, expect)
+            if done in line or time.monotonic() > end:
+                return line
+            time.sleep(1)
+
+    def launch(self, name, timeout=60):
+        """Launches an app by database name, retrying while Palm OS isn't at a point that takes host calls."""
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            mark = len(self.lines)
+            self.send(f'launch "{name}"')
+            time.sleep(3)
+            if not any('launch' in line and ('could not' in line or 'failed' in line) for line in self.lines[mark:]):
+                return
+        raise AssertionError(f'{name} did not launch')
+
+    def replay(self, root, lines):
+        self.snaps += 1
+        path = root / f'console-{self.snaps}.replay'
+        path.write_text('\n'.join(lines) + '\n')
+        return self.send(f'input-replay "{path}"', 'input replay loaded')
+
+    # A new replay replaces the running one, so these wait for their release to go out.
+    def released(self, mark):
+        end = time.monotonic() + 10
+        while time.monotonic() < end:
+            if any('replay event 2 ' in line for line in self.lines[mark:]):
+                return
+            time.sleep(0.05)
+        raise AssertionError('replay release not sent')
+
+    def key(self, root, name):
+        mark = len(self.lines)
+        self.replay(root, [f'0 key-down {name}', f'200 key-up {name}'])
+        self.released(mark)
+
+    def tap(self, root, x, y):
+        mark = len(self.lines)
+        self.replay(root, [f'0 pen-down {x} {y}', f'150 pen-up'])
+        self.released(mark)
+
+    def frame(self, path, timeout=10):
+        """Saves a frame and returns its rows, or None with the LCD off."""
+        path.unlink(missing_ok=True)
+        mark = len(self.lines)
+        self.replay(path.parent, [f'0 snapshot "{path}"'])
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            if any('lcd-off' in line for line in self.lines[mark:]):
+                return None
+            if path.is_file():
+                time.sleep(0.2)
+                return png_rows(path)
+            time.sleep(0.1)
+        raise AssertionError('no frame')
+
+    def wait_frame(self, path, check, timeout=60):
+        """Polls frames until check(rows) holds; rows is None while the LCD is off."""
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            rows = self.frame(path)
+            if check(rows):
+                return rows
+            time.sleep(1)
+        raise AssertionError(f'{path.name}: frame never matched')
+
+    def output(self):
+        return ''.join(self.lines)
+
+    def close(self):
+        try:
+            if self.process.poll() is None:
+                self.process.stdin.write('quit\n')
+                self.process.stdin.flush()
+                self.process.wait(timeout=30)
+        except (BrokenPipeError, subprocess.TimeoutExpired):
+            self.process.kill()
+            self.process.wait()
+        self.reader.join(timeout=5)
+        self.log.close()
+        return self.process.returncode
+
+
+def boot_to_launcher(root, tries=3):
+    """Cold boots the real NOR to the launcher, starting again if setup hangs.
+
+    About one cold boot in three ends on a white screen after the last setup form's Done, with or
+    without the PACE patch, and nothing wakes it; a fresh boot gets past it.
+    """
+    for attempt in range(tries):
+        try:
+            return boot_once(root)
+        except AssertionError as error:
+            if 'launcher.png' not in str(error) or attempt == tries - 1:
+                raise
+            (root / 'boot.log').rename(root / f'boot-hung-{attempt}.log')
+
+
+def boot_once(root):
+    """Cold boots the real NOR through calibration and setup and saves a session at the launcher.
+
+    Each tap waits for its screen: the red target under the pen for calibration, then a new title that has
+    stopped changing. With the console running, guest time drifts from host time too much for fixed times.
+    """
+    session = root / 'launcher.session'
+    core = Core([ZIRE], root / 'boot.log')
+
+    def red(rows, x, y):
+        # The target's red rings around its centre.
+        return sum(1 for dx in range(-12, 13, 3) for dy in range(-12, 13, 3)
+                   if 0 <= x + dx < 320 and 0 <= y + dy < 320 and rows[y + dy][4 * (x + dx)] > 180
+                   and rows[y + dy][4 * (x + dx) + 1] < 80) > 10
+
+    try:
+        frame = root / 'boot-frame.png'
+        for x, y in [(291, 292), (27, 27), (160, 160)]:
+            rows = core.wait_frame(frame, lambda rows: rows is not None and red(rows, x, y), 120)
+            if x == 291:
+                (root / 'calibrate.png').write_bytes(frame.read_bytes())
+            core.tap(root, x, y)
+        title = rows[:24]
+        # Language OK, Welcome Next, Next, Not now, Done.
+        for step, (x, y) in enumerate([(40, 300), (280, 304), (280, 304), (45, 302), (35, 304)]):
+            seen = []
+
+            def settled(rows):
+                seen.append(None if rows is None else rows[:24])
+                # A title bar, not a blank screen between forms.
+                inked = rows is not None and sum(1 for row in rows[:24] for i in range(0, 1280, 16) if row[i] < 128) > 20
+                return inked and rows[:24] != title and len(seen) > 1 and seen[-1] == seen[-2]
+            rows = core.wait_frame(frame, settled, 30)
+            (root / f'setup-{step}.png').write_bytes(frame.read_bytes())
+            title = rows[:24]
+            time.sleep(2)  # an early tap on Install the CD's Done leaves a blank screen
+            core.tap(root, x, y)
+        # The launcher's wallpaper: most of the lower screen is coloured, not white or grey.
+        core.wait_frame(root / 'launcher.png', lambda rows: rows is not None and sum(
+            1 for x in range(0, 320, 8) for y in range(150, 280, 8)
+            if max(rows[y][4 * x:4 * x + 3]) - min(rows[y][4 * x:4 * x + 3]) > 30) > 400, 60)
+        time.sleep(1)
+        core.send(f'save-session "{session}"', 'wrote session')
+    finally:
+        core.close()
+    assert session.is_file(), 'launcher session not saved'
+    return session
 
 @unittest.skipUnless(ZIRE.is_file() and CORE.is_file(), 'private Zire 72 firmware or core missing')
 class Zire72RomTest(unittest.TestCase):
@@ -199,16 +400,7 @@ class Zire72KeysTest(unittest.TestCase):
         assert cls.before == ZIRE_SHA, 'Zire 72 NOR is not the inventoried image'
         cls.temp = tempfile.TemporaryDirectory(prefix='zire72-keys-', dir=ROOT / 'build')
         cls.root = Path(cls.temp.name)
-        cls.session = cls.root / 'launcher.session'
-        # Calibration (three targets), language OK, Welcome Next, Next, Not now, Done.
-        taps = [(25500, 291, 292), (28500, 27, 27), (31500, 160, 160), (36000, 40, 300),
-                (39000, 280, 304), (42500, 280, 304), (45500, 45, 302), (48500, 35, 304)]
-        lines = [f'24000 snapshot "{cls.root / "calibrate.png"}"']
-        for at, x, y in taps:
-            lines += [f'{at} pen-down {x} {y}', f'{at + 150} pen-up']
-        lines.append(f'58000 snapshot "{cls.root / "launcher.png"}"')
-        cls.drive([ZIRE], cls.replay('boot', lines), [(62, f'save-session "{cls.session}"'), (3, None)])
-        assert cls.session.is_file(), 'launcher session not saved'
+        cls.session = boot_to_launcher(cls.root)
 
     @classmethod
     def tearDownClass(cls):
@@ -225,30 +417,6 @@ class Zire72KeysTest(unittest.TestCase):
         path = cls.root / f'{name}.replay'
         path.write_text('\n'.join(lines) + '\n')
         return path
-
-    @classmethod
-    def drive(cls, image, replay, steps):
-        """Runs the core in real time, sending console commands after each wait in seconds."""
-        log = (cls.root / f'{replay.stem}.log').open('w')
-        core = subprocess.Popen([str(CORE), *map(str, image), '--no-sound', '--input-replay', str(replay)],
-                                stdin=subprocess.PIPE, stdout=log, stderr=subprocess.STDOUT, text=True,
-                                env={**os.environ, 'SDL_VIDEODRIVER': 'dummy', 'SDL_AUDIODRIVER': 'dummy'})
-        try:
-            for wait, command in steps:
-                time.sleep(wait)
-                if command:
-                    core.stdin.write(command + '\n')
-                    core.stdin.flush()
-            core.stdin.write('quit\n')
-            core.stdin.flush()
-            core.wait(timeout=30)
-        finally:
-            if core.poll() is None:
-                core.kill()
-                core.wait()
-            core.stdin.close()
-            log.close()
-        return (cls.root / f'{replay.stem}.log').read_text()
 
     def keys(self, name, events, until):
         """Presses keys from the launcher session and returns the core's log."""
@@ -292,15 +460,234 @@ class Zire72KeysTest(unittest.TestCase):
         self.assertNotEqual(self.frame('wake2-11000')[30:], launcher[30:])
 
     def test_soft_and_hard_reset(self):
-        # Soft reset keeps the store and lands on Prefs; hard reset erases it and boots to calibration.
-        self.drive([self.session], self.replay('soft', [f'26000 snapshot "{self.root / "soft.png"}"']),
-                   [(1, 'reset'), (27, None)])
-        self.drive([self.session], self.replay('hard', [f'26000 snapshot "{self.root / "hard.png"}"']),
-                   [(1, 'reset-hard'), (27, None)])
-        soft, hard, calibrate = self.frame('soft'), self.frame('hard'), self.frame('calibrate')
-        self.assertNotEqual(soft, hard)
-        self.assertNotEqual(soft[30:], self.frame('launcher')[30:])
-        self.assertEqual(hard[:100], calibrate[:100])  # the instructions; the device picture below is animated
+        # Soft reset keeps the store and lands on Prefs > Date & Time; hard reset erases it and boots to
+        # calibration. Frames are polled until they match, with the LCD off or the logo in between.
+        calibrate = self.frame('calibrate')
+        core = Core([self.session], self.root / 'soft.log')
+        try:
+            core.send('reset')
+            core.wait_frame(self.root / 'soft.png', lambda rows: rows is not None and date_time_prefs(rows))
+        finally:
+            self.assertEqual(core.close(), 0)
+        core = Core([self.session], self.root / 'hard.log')
+        try:
+            core.send('reset-hard')
+            # The instructions; the device picture below is animated.
+            core.wait_frame(self.root / 'hard.png', lambda rows: rows is not None and rows[:100] == calibrate[:100])
+        finally:
+            self.assertEqual(core.close(), 0)
+        self.assertFalse(date_time_prefs(self.frame('launcher')))
+        self.assertFalse(date_time_prefs(calibrate))
+
+SDK = ROOT.parent / 'palm-os-sdk/sdk-5r3'
+PROBE_READY = (SDK / 'include/PalmOS.h').is_file() and all(shutil.which(t) for t in ('m68k-palmos-gcc', 'pilrc'))
+MTOOLS = all(shutil.which(t) for t in ('mformat', 'mcopy', 'mtype', 'mdir'))
+
+
+@unittest.skipUnless(ZIRE.is_file() and CORE.is_file() and os.environ.get('FROND_ZIRE_STORAGE') and PROBE_READY and MTOOLS,
+                     'set FROND_ZIRE_STORAGE=1 with the Zire 72 firmware, the Palm OS SDK and mtools for the 6 minute '
+                     'card and session run')
+class Zire72StorageTest(unittest.TestCase):
+    """SD card VFS through the SD probe, eject, sleep with a card and a file open, sessions with an embedded
+    card and a memo, and refused damaged sessions. The tests run in order, each from the last one's session."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.before = sha(ZIRE)
+        assert cls.before == ZIRE_SHA, 'Zire 72 NOR is not the inventoried image'
+        cls.temp = tempfile.TemporaryDirectory(prefix='zire72-storage-', dir=ROOT / 'build')
+        cls.root = Path(cls.temp.name)
+        subprocess.run(['python3', str(ROOT / 'tools/build-palm-probe.py'), '--sdk', str(SDK), '--probe', 'sd',
+                        '--output', str(cls.root / 'probe')], cwd=ROOT, check=True, capture_output=True)
+        cls.probe = cls.root / 'probe/FrondSDProbe.prc'
+        cls.card = cls.card_image('card.img', {'HOST.TXT': b'Hello from host\n', 'DELETE.TXT': b'delete me\n'})
+        cls.session = boot_to_launcher(cls.root)
+
+    @classmethod
+    def tearDownClass(cls):
+        if os.environ.get('FROND_ZIRE_EVIDENCE'):
+            out = Path(os.environ['FROND_ZIRE_EVIDENCE'])
+            out.mkdir(parents=True, exist_ok=True)
+            for path in [*cls.root.glob('*.png'), *cls.root.glob('*.log')]:
+                (out / path.name).write_bytes(path.read_bytes())
+        cls.temp.cleanup()
+        assert sha(ZIRE) == cls.before, 'Zire 72 NOR changed'
+
+    @classmethod
+    def card_image(cls, name, files, mib=32):
+        path = cls.root / name
+        with path.open('wb') as card:
+            card.truncate(mib << 20)
+        subprocess.run(['mformat', '-i', str(path), '-v', 'FROND', '::'], check=True, capture_output=True)
+        for file, data in files.items():
+            (cls.root / file).write_bytes(data)
+            subprocess.run(['mcopy', '-i', str(path), str(cls.root / file), '::/' + file], check=True)
+        return path
+
+    def card_file(self, card, name):
+        result = subprocess.run(['mtype', '-i', str(card), '::/' + name], capture_output=True)
+        return result.stdout if result.returncode == 0 else None
+
+    def core(self, image, name, *args):
+        core = Core([image], self.root / f'{name}.log', *args)
+        self.addCleanup(lambda: self.assertNotIn('Invalid instr', core.output()))
+        return core
+
+    def run_probe(self, core, name, runs):
+        """Starts the probe and returns the log records of its newest run once that run is complete."""
+        core.launch('Frond SD probe')
+        path = self.root / f'{name}.zip'
+        end = time.monotonic() + 90
+        while time.monotonic() < end:
+            path.unlink(missing_ok=True)
+            core.send(f'db-export "{path}"', ('export written', 'not ready', 'FAILED'))
+            if path.is_file():
+                records = probe_log(path)
+                begins = [i for i, line in enumerate(records) if line.startswith('begin ')]
+                if len(begins) >= runs and any(r.startswith('complete ') for r in records[begins[runs - 1]:]):
+                    return records[begins[runs - 1]:]
+            time.sleep(2)
+        raise AssertionError(f'probe run {runs} did not complete')
+
+    def check_probe(self, records, prior):
+        fields = dict(line.split(' ', 1) for line in records)
+        for key in ('enumerate', 'host-open', 'host-close', 'guest-open', 'guest-write', 'guest-close', 'guest-reopen',
+                    'guest-read-close', 'scratch-open', 'scratch-write', 'scratch-close', 'scratch-delete'):
+            self.assertTrue(fields[key].startswith('err=0000'), (key, fields[key]))
+        # The 5.2.8 VFS gives vfsErrFileEOF (2A07) for a read that reaches the end, like the E2.
+        for key in ('host-read', 'guest-read'):
+            self.assertIn(fields[key][:8], ('err=0000', 'err=2A07'), key)
+        for key in ('host-match', 'guest-match', 'complete'):
+            self.assertTrue(fields[key].startswith('err=0000'), (key, fields[key]))
+        self.assertTrue(fields['scratch-gone'].startswith('err=2A08'))
+        self.assertTrue(fields['prior-open'].startswith('err=0000' if prior else 'err=2A08'))
+        if prior:
+            self.assertTrue(fields['prior-match'].startswith('err=0000'))
+        return fields
+
+    def sleep_and_wake(self, core, name):
+        core.key(self.root, 'power')
+        core.wait_frame(self.root / f'{name}-asleep.png', lambda rows: rows is None, 20)
+        # A press while the DAL is still going to sleep is lost, so press again while the LCD stays off.
+        for _ in range(3):
+            time.sleep(2)
+            core.key(self.root, 'power')
+            try:
+                return core.wait_frame(self.root / f'{name}-awake.png', lambda rows: rows is not None, 10)
+            except AssertionError:
+                pass
+        raise AssertionError(f'{name}: power did not wake the Zire')
+
+    def test_1_card_read_write_delete(self):
+        core = self.core(self.session, 'card')
+        try:
+            core.send(f'mount "{self.card}"')
+            core.until(f'install "{self.probe}"', ('installation', 'not'), 'successful')
+            fields = self.check_probe(self.run_probe(core, 'card', 1), prior=False)
+            self.assertTrue(fields['host-delete'].startswith('err=0000'))
+            self.assertTrue(fields['host-delete-gone'].startswith('err=2A08'))
+            core.send(f'save-sd "{self.root / "card-out.img"}"', 'wrote SD image')
+            core.send(f'save-session "{self.root / "card.session"}"', 'wrote session')
+        finally:
+            self.assertEqual(core.close(), 0)
+        out = self.root / 'card-out.img'
+        self.assertEqual(self.card_file(out, 'GUEST.TXT'), b'Written by Palm TX\n')
+        self.assertIsNone(self.card_file(out, 'DELETE.TXT'))
+        self.assertEqual(self.card_file(out, 'HOST.TXT'), b'Hello from host\n')
+        self.assertIsNone(self.card_file(self.card, 'GUEST.TXT'))  # the mounted image is a copy
+
+    def test_2_card_session_eject_and_sleep(self):
+        # A fresh process from the session with the card in it, then eject, reinsert, sleep and wake.
+        core = self.core(self.root / 'card.session', 'restored')
+        try:
+            self.check_probe(self.run_probe(core, 'restored', 2), prior=True)
+            core.send(f'save-sd "{self.root / "ejected.img"}"', 'wrote SD image')
+            core.send('unmount')
+            core.send(f'mount "{self.root / "ejected.img"}"')
+            self.check_probe(self.run_probe(core, 'reinserted', 3), prior=True)
+            self.sleep_and_wake(core, 'card')
+            self.check_probe(self.run_probe(core, 'woken', 4), prior=True)
+            core.send(f'save-session "{self.root / "woken.session"}"', 'wrote session')
+        finally:
+            self.assertEqual(core.close(), 0)
+
+    def test_3_sleep_with_a_file_open(self):
+        # HOLD.TXT has the probe keep HOLD.DAT open and write a 512-byte block every 10 event passes.
+        hold = self.card_image('hold.img', {'HOST.TXT': b'Hello from host\n', 'HOLD.TXT': b'40 10'})
+        core = self.core(self.root / 'woken.session', 'hold')
+        try:
+            core.send('unmount')
+            core.send(f'mount "{hold}"')
+            core.launch('Frond SD probe')
+            core.until(f'db-export "{self.root / "hold-early.zip"}"', ('export written', 'not ready'), 'written')
+            self.sleep_and_wake(core, 'hold')
+            end = time.monotonic() + 120
+            while time.monotonic() < end:
+                path = self.root / 'hold.zip'
+                core.until(f'db-export "{path}"', ('export written', 'not ready'), 'written')
+                records = probe_log(path)
+                if any(r.startswith('hold-size') for r in records):
+                    break
+                time.sleep(3)
+            self.assertIn('hold-size err=0000 value=20480', records)
+            self.assertIn('hold-close err=0000 value=40', records)
+            core.send(f'save-sd "{self.root / "hold-out.img"}"', 'wrote SD image')
+        finally:
+            self.assertEqual(core.close(), 0)
+        data = self.card_file(self.root / 'hold-out.img', 'HOLD.DAT')
+        self.assertEqual(data, b''.join(bytes([i]) * 512 for i in range(40)))
+
+    def test_4_memo_survives_a_new_process(self):
+        core = self.core(self.session, 'memo')
+        memo = self.root / 'memo.session'
+        try:
+            core.launch('Memos-PMem')
+            # New, then the title bar menu, Edit, Keyboard; the keyboard's keys type "Frind neni".
+            for x, y in [(30, 304), (60, 10), (120, 13), (150, 159)]:
+                core.tap(self.root, x, y)
+                time.sleep(2)
+            for x, y in [(112, 193), (85, 171), (196, 171), (173, 215), (90, 193), (160, 258), (195, 215),
+                         (63, 171), (195, 215), (196, 171), (37, 294), (30, 304)]:
+                core.tap(self.root, x, y)
+                time.sleep(0.1)
+            time.sleep(2)
+            core.send(f'save-session "{memo}"', 'wrote session')
+        finally:
+            self.assertEqual(core.close(), 0)
+        core = self.core(memo, 'memo-restored')
+        try:
+            # Memos waits for events forever, so host calls are taken from Calendar.
+            core.key(self.root, 'hard1')
+            path = self.root / 'memo.zip'
+            core.until(f'db-export "{path}"', ('export written', 'not ready'), 'written')
+        finally:
+            self.assertEqual(core.close(), 0)
+        with zipfile.ZipFile(path) as archive:
+            self.assertIn(b'Frind neni', archive.read('MemosDB-PMem.pdb'))
+
+    def test_5_damaged_sessions_refused(self):
+        data = (self.root / 'card.session').read_bytes()
+        for name, bad in [('empty', b''), ('truncated-64', data[:64]), ('truncated-half', data[:len(data) // 2]),
+                          ('truncated-last', data[:-1]), ('flipped', data[:len(data) // 2] + bytes([data[len(data) // 2] ^ 0x40])
+                                                           + data[len(data) // 2 + 1:])]:
+            path = self.root / f'bad-{name}.session'
+            path.write_bytes(bad)
+            result = subprocess.run([str(CORE), path, '--no-sound', '--run-for', '1'], capture_output=True, text=True,
+                                    timeout=60, env={**os.environ, 'SDL_VIDEODRIVER': 'dummy'})
+            self.assertEqual(result.returncode, 1, name)
+            self.assertNotIn('palm-zire-72 (Zire 72)', result.stdout + result.stderr, name)
+
+
+def probe_log(path):
+    """The SD probe's FrondSDLog records from a db-export archive."""
+    with zipfile.ZipFile(path) as archive:
+        name = next((n for n in archive.namelist() if n.startswith('FrondSDLog')), None)
+        if not name:
+            return []
+        data = archive.read(name)
+    count = struct.unpack('>H', data[76:78])[0]
+    offsets = [struct.unpack('>I', data[78 + 8 * i:82 + 8 * i])[0] for i in range(count)] + [len(data)]
+    return [data[offsets[i]:offsets[i + 1]].split(b'\0')[0].decode() for i in range(count)]
 
 
 if __name__ == '__main__':
