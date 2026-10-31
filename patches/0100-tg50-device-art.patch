@@ -1,0 +1,979 @@
+diff --git a/src/uarm/native/DeviceControls.cpp b/src/uarm/native/DeviceControls.cpp
+--- a/src/uarm/native/DeviceControls.cpp
++++ b/src/uarm/native/DeviceControls.cpp
+@@ -142,6 +142,20 @@
+             d=std::min(d,polygon(x,y,tip));
+             break;
+         }
++        case DeviceControlIcon::graffiti:
++            // A pen writing a looped stroke.
++            d=arc(x,y,-3.4f,2.2f,3,degrees(60),degrees(330));
++            line(-3.4f+3*std::cos(degrees(60)),2.2f+3*std::sin(degrees(60)),3,5.6f);
++            line(7.4f,-7.4f,1.6f,-1.6f);
++            d=std::min(d,segment(x,y,6.2f,-6.2f,2.6f,-2.6f)-1.1f);
++            line(1.6f,-1.6f,0.4f,0.4f);
++            break;
++        case DeviceControlIcon::back:
++            // A U-turn arrow pointing back to the left.
++            d=arc(x,y,1,0,4.6f,degrees(-90),degrees(90));
++            line(1,-4.6f,-6,-4.6f);line(1,4.6f,-3,4.6f);
++            line(-6,-4.6f,-2.8f,-7.8f);line(-6,-4.6f,-2.8f,-1.4f);
++            break;
+         default: break;
+     }
+     return d;
+@@ -184,15 +198,15 @@
+ 
+ // How far a five-way point belongs to the held directions, 0 to 1, blended softly across the
+ // diagonals; the hit test splits them hard along the same lines.
+-float navigatorHeld(const SDL_Rect& n, float x, float y, uint32_t pressed) {
+-    auto down=[&](KeyId key) {return (pressed&(1u<<key))!=0;};
++float navigatorHeld(const SDL_Rect& n, float x, float y, DeviceKeyMask pressed) {
++    auto down=[&](KeyId key) {return (pressed&deviceKeyBit(key))!=0;};
+     const float dx=x-n.x-n.w*0.5f,dy=y-n.y-n.h*0.5f;
+     const float across=(std::fabs(dx)*n.h-std::fabs(dy)*n.w)/std::hypot(float(n.w),float(n.h));
+     const float sideways=clamp01(0.5f+across/6);
+     return sideways*float(down(dx<0 ? keyIdLeft : keyIdRight))+(1-sideways)*float(down(dy<0 ? keyIdUp : keyIdDown));
+ }
+ 
+-void paintNavigator(Canvas& canvas, const DeviceControlProfile& profile, int ox, uint32_t pressed,
++void paintNavigator(Canvas& canvas, const DeviceControlProfile& profile, int ox, DeviceKeyMask pressed,
+                     const NavigatorLook& look) {
+     SDL_Rect nav=profile.navigator,pill=profile.select;
+     nav.x+=ox;pill.x+=ox;
+@@ -224,7 +238,7 @@
+                (1-navigatorHeld(nav,x,y,pressed)*0.7f);
+     },[&](float,float,Rgb) {return look.highlight;});
+     // Groove round the pill-shaped select key; holding it presses it in.
+-    const bool held=(pressed&(1u<<keyIdSelect))!=0;
++    const bool held=(pressed&deviceKeyBit(keyIdSelect))!=0;
+     const float sink=held ? 0.8f : 0;
+     canvas.paint(x0,y0,x1,y1,[&](float x,float y) {return canvas.edge(dp(x,y)-1.8f);},
+                  [&](float,float y,Rgb) {return mix(look.groove,look.groove*1.6f,clamp01((y-pill.y)/pill.h));});
+@@ -243,10 +257,10 @@
+     },[&](float,float,Rgb) {return look.pillEdge;});
+ }
+ 
+-void paintTxControls(Canvas& canvas, const DeviceControlProfile& profile, int width, uint32_t pressed) {
++void paintTxControls(Canvas& canvas, const DeviceControlProfile& profile, int width, DeviceKeyMask pressed) {
+     const float H=profile.height;
+     const int ox=(width-profile.width)/2;
+-    auto down=[&](KeyId key) {return (pressed&(1u<<key))!=0;};
++    auto down=[&](KeyId key) {return (pressed&deviceKeyBit(key))!=0;};
+     auto all=[&](float,float) {return 1.f;};
+     auto shifted=[&](SDL_Rect r) {r.x+=int(ox);return r;};
+     // Original vector artwork: a satin near-black face stepped down into a band below the screen.
+@@ -380,10 +394,10 @@
+     return d;
+ }
+ 
+-void paintE2Controls(Canvas& canvas, const DeviceControlProfile& profile, int width, uint32_t pressed) {
++void paintE2Controls(Canvas& canvas, const DeviceControlProfile& profile, int width, DeviceKeyMask pressed) {
+     const float H=profile.height;
+     const int ox=(width-profile.width)/2;
+-    auto down=[&](KeyId key) {return (pressed&(1u<<key))!=0;};
++    auto down=[&](KeyId key) {return (pressed&deviceKeyBit(key))!=0;};
+     auto all=[&](float,float) {return 1.f;};
+     auto shifted=[&](SDL_Rect r) {r.x+=ox;return r;};
+     // Original vector artwork: brushed silver face under the screen glass, stepped down into a
+@@ -496,10 +510,10 @@
+ // Original Zire 72 body: blue-tinted satin silver. The Zire 72s is plain silver.
+ const Rgb zire72Body{156,165,182};
+ 
+-void paintZire72Controls(Canvas& canvas, const DeviceControlProfile& profile, int width, uint32_t pressed) {
++void paintZire72Controls(Canvas& canvas, const DeviceControlProfile& profile, int width, DeviceKeyMask pressed) {
+     const float H=profile.height;
+     const int ox=(width-profile.width)/2;
+-    auto down=[&](KeyId key) {return (pressed&(1u<<key))!=0;};
++    auto down=[&](KeyId key) {return (pressed&deviceKeyBit(key))!=0;};
+     auto all=[&](float,float) {return 1.f;};
+     auto shifted=[&](SDL_Rect r) {r.x+=ox;return r;};
+     // Satin body under the silkscreen glass, a little darker towards the bottom and the sides.
+@@ -548,10 +562,10 @@
+     }
+ }
+ 
+-void paintM515Controls(Canvas& canvas, const DeviceControlProfile& profile, int width, uint32_t pressed) {
++void paintM515Controls(Canvas& canvas, const DeviceControlProfile& profile, int width, DeviceKeyMask pressed) {
+     const float H=profile.height;
+     const int ox=(width-profile.width)/2;
+-    auto down=[&](KeyId key) {return (pressed&(1u<<key))!=0;};
++    auto down=[&](KeyId key) {return (pressed&deviceKeyBit(key))!=0;};
+     auto all=[&](float,float) {return 1.f;};
+     auto shifted=[&](SDL_Rect r) {r.x+=ox;return r;};
+     // Satin silver metal with a faint mauve tint, lit from above.
+@@ -620,10 +634,10 @@
+     return std::min(m,c)-h*h*k*0.25f;
+ }
+ 
+-void paintIIIxControls(Canvas& canvas, const DeviceControlProfile& profile, int width, uint32_t pressed) {
++void paintIIIxControls(Canvas& canvas, const DeviceControlProfile& profile, int width, DeviceKeyMask pressed) {
+     const float H=profile.height;
+     const int ox=(width-profile.width)/2;
+-    auto down=[&](KeyId key) {return (pressed&(1u<<key))!=0;};
++    auto down=[&](KeyId key) {return (pressed&deviceKeyBit(key))!=0;};
+     auto all=[&](float,float) {return 1.f;};
+     auto shifted=[&](SDL_Rect r) {r.x+=ox;return r;};
+     // Dark charcoal textured plastic, lit from above.
+@@ -914,19 +928,461 @@
+         }
+     }
+ }
++
++// Stroke font for the TG50 keyboard: a squared-off face with cut corners. Each glyph is
++// polylines split by '|', points "x,y" on a cell 4 wide with capitals from y 0 to the baseline
++// at 6; lowercase is 4 high and descenders reach 8.
++const char* tg50GlyphStrokes(char c) {
++    switch(c) {
++        case 'A': return "0,6 0,1 1,0 3,0 4,1 4,6|0,3.5 4,3.5";
++        case 'B': return "0,3 3,3 4,4 4,5 3,6 0,6 0,0 3,0 4,1 4,2 3,3";
++        case 'C': return "4,0 1,0 0,1 0,5 1,6 4,6";
++        case 'D': return "0,0 3,0 4,1 4,5 3,6 0,6 0,0";
++        case 'E': return "4,0 0,0 0,6 4,6|0,3 3,3";
++        case 'F': return "4,0 0,0 0,6|0,3 3,3";
++        case 'G': return "4,1 3,0 1,0 0,1 0,5 1,6 3,6 4,5 4,3.4 2.2,3.4";
++        case 'H': return "0,0 0,6|4,0 4,6|0,3 4,3";
++        case 'I': return "0.8,0 3.2,0|2,0 2,6|0.8,6 3.2,6";
++        case 'J': return "4,0 4,5 3,6 1,6 0,5";
++        case 'K': return "0,0 0,6|0,3.6 4,0|1.5,2.3 4,6";
++        case 'L': return "0,0 0,6 4,6";
++        case 'M': return "0,6 0,0 2,3 4,0 4,6";
++        case 'N': return "0,6 0,0 4,6 4,0";
++        case 'O': case '0': return "1,0 3,0 4,1 4,5 3,6 1,6 0,5 0,1 1,0";
++        case 'P': return "0,6 0,0 3,0 4,1 4,2.4 3,3.4 0,3.4";
++        case 'Q': return "1,0 3,0 4,1 4,5 3,6 1,6 0,5 0,1 1,0|2.6,4.6 4.2,6.2";
++        case 'R': return "0,6 0,0 3,0 4,1 4,2.4 3,3.4 0,3.4|2.2,3.4 4,6";
++        case 'S': return "4,1 3,0 1,0 0,1 0,2 1,3 3,3 4,4 4,5 3,6 1,6 0,5";
++        case 'T': return "0,0 4,0|2,0 2,6";
++        case 'U': return "0,0 0,5 1,6 3,6 4,5 4,0";
++        case 'V': return "0,0 2,6 4,0";
++        case 'W': return "0,0 1,6 2,2.6 3,6 4,0";
++        case 'X': return "0,0 4,6|4,0 0,6";
++        case 'Y': return "0,0 2,3 4,0|2,3 2,6";
++        case 'Z': return "0,0 4,0 0,6 4,6";
++        case '1': return "1,1 2,0 2,6";
++        case '2': return "0,1 1,0 3,0 4,1 4,2.2 0,6 4,6";
++        case '3': return "0,0 4,0 2,2.6 3,2.6 4,3.6 4,5 3,6 1,6 0,5";
++        case '4': return "3,6 3,0 0,4 4,4";
++        case '5': return "4,0 0,0 0,2.6 3,2.6 4,3.6 4,5 3,6 0,6";
++        case '6': return "3.4,0 1,0 0,1 0,5 1,6 3,6 4,5 4,3.6 3,2.6 0,2.6";
++        case '7': return "0,0 4,0 1.4,6";
++        case '8': return "1,3 0,2 0,1 1,0 3,0 4,1 4,2 3,3 1,3 0,4 0,5 1,6 3,6 4,5 4,4 3,3";
++        case '9': return "4,3.4 1,3.4 0,2.4 0,1 1,0 3,0 4,1 4,5 3,6 0.6,6";
++        case 'a': return "0.4,2 3,2 3.6,2.6 3.6,6 1,6 0.4,5.4 0.4,4.6 1,4 3.6,4";
++        case 'b': return "0.4,0 0.4,6 3,6 3.6,5.4 3.6,2.6 3,2 0.4,2";
++        case 'c': return "3.6,2 1,2 0.4,2.6 0.4,5.4 1,6 3.6,6";
++        case 'e': return "0.4,4 3.6,4 3.6,2.6 3,2 1,2 0.4,2.6 0.4,5.4 1,6 3.6,6";
++        case 'f': return "3.4,0 2.2,0 1.6,0.6 1.6,6|0.4,2 3,2";
++        case 'g': return "3.6,6 1,6 0.4,5.4 0.4,2.6 1,2 3.6,2 3.6,7.4 3,8 0.6,8";
++        case 'h': return "0.4,0 0.4,6|0.4,2 3,2 3.6,2.6 3.6,6";
++        case 'i': return "2,2 2,6|2,0.4 2,0.6";
++        case 'k': return "0.6,0 0.6,6|3.6,2 0.6,4.4|1.8,3.6 3.6,6";
++        case 'l': return "1.6,0 1.6,5.4 2.2,6 2.8,6";
++        case 'n': return "0.4,6 0.4,2 3,2 3.6,2.6 3.6,6";
++        case 'o': return "1,2 3,2 3.6,2.6 3.6,5.4 3,6 1,6 0.4,5.4 0.4,2.6 1,2";
++        case 'p': return "0.4,8 0.4,2 3,2 3.6,2.6 3.6,5.4 3,6 0.4,6";
++        case 'r': return "0.4,6 0.4,2|0.4,3.2 1.6,2 3.4,2";
++        case 's': return "3.6,2 1,2 0.4,2.6 0.4,3.4 1,4 3,4 3.6,4.6 3.6,5.4 3,6 0.4,6";
++        case 't': return "1.6,0.4 1.6,5.4 2.2,6 3.2,6|0.4,2 3.2,2";
++        case '#': return "1.4,0.6 1,5.4|3,0.6 2.6,5.4|0,2.2 4,2.2|0,3.8 4,3.8";
++        case '<': return "4,0.6 0,3 4,5.4";
++        case '>': return "0,0.6 4,3 0,5.4";
++        case '(': return "3,-0.4 1.8,0.8 1.8,5.2 3,6.4";
++        case ')': return "1,-0.4 2.2,0.8 2.2,5.2 1,6.4";
++        case '\\': return "0,0 4,6";
++        case '/': return "4,0 0,6";
++        case '$': return "4,1.4 3,0.6 1,0.6 0,1.6 0,2.4 1,3 3,3 4,3.6 4,4.4 3,5.4 1,5.4 0,4.6|2,-0.4 2,6.4";
++        case '\'': return "2,0 2,2";
++        case '~': return "0,3.4 1,2.4 3,3.6 4,2.6";
++        case '%': return "4,0 0,6|0.4,0.4 1.6,0.4 1.6,1.6 0.4,1.6 0.4,0.4|2.4,4.4 3.6,4.4 3.6,5.6 2.4,5.6 2.4,4.4";
++        case '+': return "2,1 2,5|0,3 4,3";
++        case '*': return "2,0.8 2,5.2|0.2,1.9 3.8,4.1|0.2,4.1 3.8,1.9";
++        case '=': return "0,2 4,2|0,4 4,4";
++        case '@': return "3,4.2 3,2 1.6,2 1,2.6 1,3.6 1.6,4.2 4,4.2 4,1 3,0 1,0 0,1 0,5 1,6 3.6,6";
++        case '_': return "0,6.4 4,6.4";
++        case '-': return "0.6,3.2 3.4,3.2";
++        case ';': return "2,2 2,2.2|2.2,4.8 1.4,6.8";
++        case ',': return "2.2,5 1.4,7";
++        case ':': return "2,2 2,2.2|2,5.6 2,5.8";
++        case '.': return "2,5.6 2,5.8";
++        default: return nullptr;
++    }
++}
++
++struct Tg50Glyph {
++    std::vector<std::array<float,4>> segments;
++    float left, advance;
++};
++const Tg50Glyph& tg50Glyph(char c) {
++    // Parsed once; C++ makes the static's set-up thread-safe.
++    static const auto glyphs=[] {
++        std::array<Tg50Glyph,128> g{};
++        for(int i=0;i<128;++i) {
++            g[i].left=0;g[i].advance=3;
++            const char* p=tg50GlyphStrokes(char(i));
++            if(!p)continue;
++            float minX=1e9f,maxX=-1e9f,px=0,py=0;bool first=true;
++            while(*p) {
++                char* end;
++                const float x=std::strtof(p,&end);p=end+1;
++                const float y=std::strtof(p,&end);p=end;
++                if(!first)g[i].segments.push_back({px,py,x,y});
++                minX=std::min(minX,x);maxX=std::max(maxX,x);
++                px=x;py=y;first=false;
++                if(*p=='|')first=true;
++                if(*p)++p;
++            }
++            g[i].left=minX;g[i].advance=maxX-minX+1.8f;
++        }
++        return g;
++    }();
++    return glyphs[size_t(c)&127];
++}
++// Distance from (x,y) to a line of text, both in cells of the font scaled by size, centred
++// across x with the cap height from y 0 to 6.
++float tg50TextDistance(const char* text, float x, float y, float size) {
++    float total=0;
++    for(const char* c=text;*c;++c)total+=tg50Glyph(*c).advance;
++    float pen=-(total-1.8f)*0.5f*size,d=1e9f;
++    for(const char* c=text;*c;++c) {
++        const auto& g=tg50Glyph(*c);
++        const float gx=(x-pen)/size+g.left;
++        for(const auto& s:g.segments)d=std::min(d,segment(gx,y/size,s[0],s[1],s[2],s[3]));
++        pen+=g.advance*size;
++    }
++    return d*size;
++}
++float tg50TextWidth(const char* text, float size) {
++    float total=0;
++    for(const char* c=text;*c;++c)total+=tg50Glyph(*c).advance;
++    return (total-1.8f)*size;
++}
++
++// What's printed on and under each TG50 keyboard key, in tg50Key order (drive 2-7, column
++// 0-6): the face, a second character at its lower right, the blue symbol under the key, a red
++// one, and a drawn mark for keys without words.
++enum class Tg50Mark { none, blueBar, redBar, up, down, left, right, enter };
++struct Tg50Legend { const char* face; const char* second; const char* blue; const char* red; Tg50Mark mark; };
++const Tg50Legend tg50Legends[42]={
++    {"Caps","","","",Tg50Mark::none},{"Q","","1","",Tg50Mark::none},{"W","","2","",Tg50Mark::none},
++    {"E","","3","",Tg50Mark::none},{"R","","4","",Tg50Mark::none},{"T","","5","",Tg50Mark::none},
++    {"H","","\\","",Tg50Mark::none},
++    {"Tab","","","",Tg50Mark::none},{"Y","","6","",Tg50Mark::none},{"U","","7","",Tg50Mark::none},
++    {"I","","8","",Tg50Mark::none},{"O","","9","",Tg50Mark::none},{"P","","0","",Tg50Mark::none},
++    {"J","","$","",Tg50Mark::none},
++    {"Shift","","","",Tg50Mark::none},{"A","","#","",Tg50Mark::none},{"S","","<","",Tg50Mark::none},
++    {"D","",">","",Tg50Mark::none},{"F","","(","",Tg50Mark::none},{"G","",")","",Tg50Mark::none},
++    {"K","","'","",Tg50Mark::none},
++    {"Ctrl","","","",Tg50Mark::none},{"Z","","","",Tg50Mark::none},{"X","","","",Tg50Mark::none},
++    {"C","","%","",Tg50Mark::none},{"V","","+","",Tg50Mark::none},{"B","","/","",Tg50Mark::none},
++    {"L","","~","",Tg50Mark::none},
++    {"","","","",Tg50Mark::blueBar},{"N","","*","",Tg50Mark::none},{"M","","=","",Tg50Mark::none},
++    {";",",","","",Tg50Mark::none},{":",".","","",Tg50Mark::none},{"","","","",Tg50Mark::up},
++    {"","","","",Tg50Mark::down},
++    {"","","","",Tg50Mark::redBar},{"Space","","","",Tg50Mark::none},{"@","_","-","",Tg50Mark::none},
++    {"","","","",Tg50Mark::left},{"","","","",Tg50Mark::right},{"","","","",Tg50Mark::enter},
++    {"BS","","","Del",Tg50Mark::none},
++};
++const Rgb tg50Blue{38,78,178},tg50Red{196,44,40};
++
++// CLIE PEG-TG50: brushed champagne-silver body, an app row of round and slim silver keys, a
++// silver QWERTY with printed legends and the Jog Dial tab to the right.
++void paintTg50Controls(Canvas& canvas, const DeviceControlProfile& profile, int width, DeviceKeyMask pressed,
++                       const DeviceControlView& view) {
++    const int ox=(width-profile.width)/2;
++    const float H=view.keyboard ? profile.height : profile.height-profile.keyboardHeight;
++    auto down=[&](KeyId key) {return (pressed&deviceKeyBit(key))!=0;};
++    auto shifted=[&](SDL_Rect r) {r.x+=ox;return r;};
++    const Rgb background{26,26,28},body{184,180,171};
++    // Window background round the body: beside the side tab, and below a hidden keyboard.
++    canvas.paint(0,0,canvas.w/canvas.s,canvas.h/canvas.s,[](float,float) {return 1.f;},
++                 [&](float,float,Rgb) {return background;});
++    // Brushed metal: lit from above with fine horizontal streaks.
++    auto brushed=[&](float x,float y,float top,float bottom,Rgb base) {
++        Rgb c=mix(base*1.05f,base*0.84f,std::pow(clamp01((y-top)/(bottom-top)),1.2f));
++        c=c+Rgb{5,5,5}*speckle(x*0.05f,y*1.5f)+Rgb{2,2,2}*std::sin(y*5.3f+std::sin(x*0.07f)*1.4f);
++        return c;
++    };
++    canvas.paint(0,0,width,H,[](float,float) {return 1.f;},[&](float x,float y,Rgb) {
++        const float t=std::fabs(x-width*0.5f)/(width*0.5f);
++        return brushed(x,y,0,H,body)*(1-0.12f*t*t);
++    });
++    // The screen bezel's lower edge, then the body's foot.
++    canvas.paint(0,0,width,3,[&](float,float y) {return canvas.edge(y-1.2f);},[](float,float,Rgb) {return Rgb{40,40,42};});
++    canvas.paint(0,0,width,5,[&](float,float y) {return canvas.edge(std::fabs(y-2.2f)-0.6f)*0.8f;},
++                 [](float,float,Rgb) {return Rgb{238,236,230};});
++    canvas.paint(0,H-3,width,H,[&](float,float y) {return canvas.edge(std::fabs(y-H+0.8f)-0.8f)*0.6f;},
++                 [](float,float,Rgb) {return Rgb{96,92,86};});
++
++    const SilverKeyLook keys{Rgb{92,90,88},Rgb{240,239,236},Rgb{196,194,190},Rgb{14,14,14},Rgb{226,223,216},
++                             Rgb{60,60,66},Rgb{50,50,56},1.1f,0.74f};
++    const Rgb ink{62,62,68},glow{226,146,44};
++    const DeviceButton* up=nullptr;const DeviceButton* dn=nullptr;
++    for(size_t i=0;i<profile.count;++i) {
++        if(profile.buttons[i].key==keyIdUp)up=&profile.buttons[i];
++        if(profile.buttons[i].key==keyIdDown)dn=&profile.buttons[i];
++    }
++    // Icons printed above the app keys, and the bar that holds the slim keys.
++    auto printed=[&](DeviceControlIcon icon,float cx,float cy,float k) {
++        canvas.paint(cx-10*k,cy-10*k,cx+10*k,cy+10*k,[&](float x,float y) {
++            return canvas.edge(iconDistance(icon,(x-cx)/k,(y-cy)/k)*k-0.55f);
++        },[&](float,float,Rgb) {return ink;});
++    };
++    if(up && dn) {
++        const SDL_Rect a=shifted(up->bounds);
++        const float cx=a.x+a.w*0.5f;
++        // Scroll mark: a small up and down triangle.
++        canvas.paint(cx-5,4,cx+5,17,[&](float x,float y) {
++            const std::array<std::array<float,2>,3> t0{{{cx-3,9},{cx+3,9},{cx,5.4f}}},t1{{{cx-3,11.4f},{cx+3,11.4f},{cx,15}}};
++            return canvas.edge(std::min(polygon(x,y,t0),polygon(x,y,t1)));
++        },[&](float,float,Rgb) {return ink;});
++    }
++    SDL_Rect bar{0,0,0,0};
++    for(size_t i=0;i<profile.count;++i) {
++        const auto& b=profile.buttons[i];
++        if(b.section!=DeviceControlSection::main)continue;
++        const SDL_Rect r=shifted(b.bounds);
++        if(b.key!=keyIdUp && b.key!=keyIdDown)printed(b.icon,r.x+r.w*0.5f,10.2f,b.bounds.w<30 ? 0.52f : 0.5f);
++        if(b.bounds.w>30) {
++            // The bar spans the slim keys.
++            if(!bar.w) bar=r;
++            const int x1=std::max(bar.x+bar.w,r.x+r.w),y1=std::max(bar.y+bar.h,r.y+r.h);
++            bar.x=std::min(bar.x,r.x);bar.y=std::min(bar.y,r.y);bar.w=x1-bar.x;bar.h=y1-bar.y;
++        }
++    }
++    if(bar.w) {
++        const SDL_Rect tray{bar.x-4,bar.y-4,bar.w+8,bar.h+8};
++        const float tc=tray.h*0.5f;
++        auto d=[&](float x,float y) {return deviceRoundedDistance(tray,tc,x,y);};
++        const float x0=tray.x-3,y0=tray.y-3,x1=tray.x+tray.w+3,y1=tray.y+tray.h+4;
++        canvas.paint(x0,y0,x1,y1,[&](float x,float y) {return clamp01((2-d(x,y-1.5f))/4)*0.35f;},
++                     [](float,float,Rgb) {return Rgb{60,58,54};});
++        canvas.paint(x0,y0,x1,y1,[&](float x,float y) {return canvas.edge(d(x,y));},[&](float,float y,Rgb) {
++            return mix(Rgb{214,212,206},Rgb{150,148,146},clamp01((y-tray.y)/tray.h));
++        });
++        canvas.paint(x0,y0,x1,y1,[&](float x,float y) {return canvas.edge(d(x,y)+1.6f);},[&](float,float y,Rgb) {
++            return mix(Rgb{112,114,122},Rgb{150,152,160},clamp01((y-tray.y)/tray.h));
++        });
++    }
++    // Slim keys: silver pills with a pale light line along the middle.
++    const SilverKeyLook slim{Rgb{70,70,76},Rgb{236,236,236},Rgb{184,184,188},Rgb{16,16,18},Rgb{170,172,180},
++                             ink,ink,1.0f,0.72f};
++    auto lightLine=[&](const SDL_Rect& r,float sink,bool held) {
++        const float y=r.y+r.h*0.5f+sink,inset=r.h*0.5f+1;
++        canvas.paint(r.x,y-2,r.x+r.w,y+2,[&](float x,float yy) {
++            return canvas.edge(segment(x,yy,r.x+inset,y,r.x+r.w-inset,y)-0.7f)*(held?0.4f:0.85f);
++        },[](float,float,Rgb) {return Rgb{214,232,250};});
++    };
++    for(size_t i=0;i<profile.count;++i) {
++        const auto& b=profile.buttons[i];
++        if(b.section!=DeviceControlSection::main || b.key==keyIdUp || b.key==keyIdDown)continue;
++        const SDL_Rect r=shifted(b.bounds);
++        const bool held=down(b.key);
++        const float corner=deviceButtonCorner(profile,b);
++        if(b.bounds.w<30) {
++            // Round dimpled key in a dark ring.
++            const SDL_Rect dome{r.x+2,r.y+2,r.w-4,r.h-4};
++            canvas.paint(r.x-1,r.y-1,r.x+r.w+1,r.y+r.h+2,[&](float x,float y) {
++                return canvas.edge(deviceRoundedDistance(r,corner,x,y));
++            },[](float,float,Rgb) {return Rgb{84,82,80};});
++            paintSilverKey(canvas,dome,dome.w*0.5f,held,b.icon,1,keys,false);
++            const float cx=dome.x+dome.w*0.5f,cy=dome.y+dome.h*0.5f+(held?0.7f:0);
++            canvas.paint(cx-7,cy-7,cx+7,cy+7,[&](float x,float y) {return canvas.edge(std::hypot(x-cx,y-cy)-5.2f);},
++                         [&](float x,float y,Rgb p) {return p*(0.86f+0.1f*clamp01((y-cy+5)/10)+0.02f*(x-cx)/5);});
++            canvas.paint(cx-7,cy-7,cx+7,cy+7,[&](float x,float y) {
++                return canvas.edge(std::fabs(std::hypot(x-cx,y-cy)-5.4f)-0.3f)*0.6f*clamp01((y-cy)/5);
++            },[](float,float,Rgb) {return Rgb{252,252,250};});
++            continue;
++        }
++        paintSilverKey(canvas,r,corner,held,b.icon,1,slim,false);
++        lightLine(r,held?0.7f:0,held);
++    }
++    if(up && dn) {
++        // The scroll rocker: one pill split across its middle; a held half sinks and darkens.
++        const SDL_Rect a=shifted(up->bounds),b=shifted(dn->bounds);
++        // Drawn on the shape the two halves hit-test against.
++        const SDL_Rect pill=up->shape.w>0 ? shifted(up->shape) : SDL_Rect{a.x,a.y,a.w,b.y+b.h-a.y};
++        const float corner=deviceButtonCorner(profile,*up);
++        paintSilverKey(canvas,pill,corner,false,DeviceControlIcon::up,1,slim,false);
++        for(int half=0;half<2;++half) {
++            if(!down(half ? keyIdDown : keyIdUp))continue;
++            const float top=half ? b.y : a.y-2,bottom=half ? b.y+b.h+2 : a.y+a.h;
++            canvas.paint(pill.x,top,pill.x+pill.w,bottom,[&](float x,float y) {
++                return canvas.edge(deviceRoundedDistance(pill,corner,x,y)+0.3f);
++            },[&](float,float y,Rgb p) {return p*(half ? 0.66f : 0.66f+0.1f*clamp01((y-a.y)/a.h));});
++        }
++        lightLine(pill,0,false);
++        // The split.
++        canvas.paint(pill.x,b.y-1,pill.x+pill.w,b.y+1,[&](float x,float y) {
++            return canvas.edge(std::fabs(y-b.y)-0.35f)*canvas.edge(deviceRoundedDistance(pill,corner,x,y)+1.5f)*0.7f;
++        },[](float,float,Rgb) {return Rgb{90,90,96};});
++    }
++
++    // Keyboard: silver keys with dark legends that light amber while held, blue and red
++    // symbols printed on the body under them.
++    if(view.keyboard) {
++        for(size_t i=0;i<profile.count;++i) {
++            const auto& b=profile.buttons[i];
++            if(b.section!=DeviceControlSection::keyboard)continue;
++            const int index=b.key-keyIdKeyboard;
++            if(index<0 || index>=42)continue;
++            const auto& legend=tg50Legends[index];
++            const SDL_Rect r=shifted(b.bounds);
++            const bool held=down(b.key);
++            paintSilverKey(canvas,r,deviceButtonCorner(profile,b),held,b.icon,1,keys,false);
++            const float sink=held ? 0.7f : 0,cx=r.x+r.w*0.5f,cy=r.y+r.h*0.5f+sink;
++            const Rgb face=held ? glow : ink;
++            auto text=[&](const char* t,float tx,float ty,float size,float weight,Rgb colour) {
++                const float hw=tg50TextWidth(t,size)*0.5f+2,top=ty-2*size,bottom=ty+8*size+1;
++                canvas.paint(tx-hw,top,tx+hw,bottom,[&](float x,float y) {
++                    return canvas.edge(tg50TextDistance(t,x-tx,y-ty,size)-weight);
++                },[&](float,float,Rgb) {return colour;});
++            };
++            if(*legend.second) {
++                // Two symbols: one at the upper left, the other at the lower right.
++                text(legend.face,r.x+8,r.y+3.5f+sink,1.1f,0.65f,face);
++                text(legend.second,r.x+r.w-8,r.y+r.h-11.5f+sink,1.1f,0.65f,face);
++            } else if(*legend.face) {
++                const bool word=std::strlen(legend.face)>1;
++                const float size=word ? 1.05f : 1.45f;
++                text(legend.face,cx,cy-3*size,size,word ? 0.6f : 0.75f,face);
++            }
++            // Shapes for the keys without words: the shift bars, arrows and Enter.
++            auto shape=[&](auto distance,Rgb colour) {
++                canvas.paint(r.x,r.y,r.x+r.w,r.y+r.h+1,[&](float x,float y) {return canvas.edge(distance(x-cx,y-cy));},
++                             [&](float,float,Rgb) {return colour;});
++            };
++            auto triangle=[&](float dx,float dy,float s) {
++                // Points along (dx,dy), centred on the key, s across.
++                return [=](float x,float y) {
++                    const std::array<std::array<float,2>,3> t{{{dx*s*0.6f,dy*s*0.6f},
++                        {-dx*s*0.4f-dy*s*0.6f,-dy*s*0.4f+dx*s*0.6f},{-dx*s*0.4f+dy*s*0.6f,-dy*s*0.4f-dx*s*0.6f}}};
++                    return polygon(x,y,t);
++                };
++            };
++            switch(legend.mark) {
++                case Tg50Mark::blueBar: case Tg50Mark::redBar: {
++                    const Rgb c=legend.mark==Tg50Mark::blueBar ? tg50Blue : tg50Red;
++                    shape([&](float x,float y) {return segment(x,y,-r.w*0.3f,0,r.w*0.3f,0)-1.3f;},held ? c*0.8f : c);
++                    break;
++                }
++                case Tg50Mark::up: case Tg50Mark::down: {
++                    // The arrows page up and down on the red layer.
++                    const float dir=legend.mark==Tg50Mark::up ? -1 : 1;
++                    shape([&](float x,float y) {return triangle(0,dir,6)(x,y+3.6f);},face);
++                    text(dir<0 ? "PgUp" : "PgDn",cx,cy+1.6f,0.62f,0.42f,held ? glow : tg50Red);
++                    break;
++                }
++                case Tg50Mark::left: case Tg50Mark::right:
++                    shape(triangle(legend.mark==Tg50Mark::left ? -1 : 1,0,6.4f),face);
++                    break;
++                case Tg50Mark::enter:
++                    // Return arrow: down from the right, then left to a head.
++                    shape([&](float x,float y) {
++                        float d=std::min(segment(x,y,7,-4,7,1.6f),segment(x,y,7,1.6f,-6,1.6f))-0.75f;
++                        return std::min(d,std::min(segment(x,y,-7.4f,1.6f,-3.8f,-1.6f),segment(x,y,-7.4f,1.6f,-3.8f,4.8f))-0.75f);
++                    },face);
++                    break;
++                case Tg50Mark::none: break;
++            }
++            // Printed under the key, towards its right.
++            if(*legend.blue)text(legend.blue,r.x+r.w-7,r.y+r.h+3.2f,0.72f,0.5f,tg50Blue);
++            if(*legend.red)text(legend.red,r.x+r.w-9,r.y+r.h+3.2f,0.72f,0.5f,tg50Red);
++        }
++    }
++
++    // Side tab: a silver panel off the body's right edge holding the Jog Dial and Back.
++    if(view.sideTab && profile.sideTabWidth>0) {
++        const SDL_Rect panel=shifted(profile.sideTab);
++        const SDL_Rect outline{panel.x-12,panel.y,panel.w+12,panel.h};
++        auto dp=[&](float x,float y) {return deviceRoundedDistance(outline,9,x,y);};
++        const float px0=panel.x,px1=panel.x+panel.w+3,py0=panel.y-2,py1=panel.y+panel.h+4;
++        canvas.paint(px0,py0,px1,py1,[&](float x,float y) {return clamp01((2-dp(x-1,y-1.5f))/4)*0.6f;},
++                     [](float,float,Rgb) {return Rgb{8,8,8};});
++        canvas.paint(px0,py0,px1,py1,[&](float x,float y) {return canvas.edge(dp(x,y));},[&](float x,float y,Rgb) {
++            const float t=clamp01((x-panel.x)/panel.w);
++            return brushed(x,y,panel.y,panel.y+panel.h,body*0.92f)*(1.04f-0.16f*t*t);
++        });
++        canvas.paint(px0,py0,px1,py1,[&](float x,float y) {
++            return canvas.edge(std::fabs(dp(x,y)+0.7f)-0.35f)*0.6f*clamp01((panel.y+40-y)/40);
++        },[](float,float,Rgb) {return Rgb{244,242,236};});
++        // The seam where the tab meets the body.
++        canvas.paint(panel.x,panel.y,panel.x+2,panel.y+panel.h,[&](float x,float) {return canvas.edge(std::fabs(x-panel.x-0.5f)-0.5f)*0.7f;},
++                     [](float,float,Rgb) {return Rgb{70,68,64};});
++        const DeviceButton* jog[3]={nullptr,nullptr,nullptr};const DeviceButton* back=nullptr;
++        for(size_t i=0;i<profile.count;++i) {
++            const auto& b=profile.buttons[i];
++            if(b.key==keyIdJogUp)jog[0]=&b;
++            if(b.key==keyIdJogPress)jog[1]=&b;
++            if(b.key==keyIdJogDown)jog[2]=&b;
++            if(b.key==keyIdBack)back=&b;
++        }
++        if(jog[0] && jog[1] && jog[2]) {
++            // Dark slot with the ribbed wheel showing above and below its press key.
++            const SDL_Rect a=shifted(jog[0]->bounds),c=shifted(jog[2]->bounds);
++            const SDL_Rect slot{a.x-2,a.y-2,a.w+4,c.y+c.h-a.y+4};
++            const float sc=8;
++            canvas.paint(slot.x-1,slot.y-1,slot.x+slot.w+1,slot.y+slot.h+2,[&](float x,float y) {
++                return canvas.edge(deviceRoundedDistance(slot,sc,x,y));
++            },[&](float,float y,Rgb) {return mix(Rgb{30,30,32},Rgb{52,52,54},clamp01((y-slot.y)/slot.h));});
++            canvas.paint(slot.x-1,slot.y-1,slot.x+slot.w+1,slot.y+slot.h+2,[&](float x,float y) {
++                return canvas.edge(std::fabs(deviceRoundedDistance(slot,sc,x,y)-0.6f)-0.4f)*0.7f*clamp01((y-slot.y)/slot.h);
++            },[](float,float,Rgb) {return Rgb{232,230,224};});
++            const float wheelTop=a.y,wheelBottom=c.y+c.h,wcy=(wheelTop+wheelBottom)*0.5f,wr=(wheelBottom-wheelTop)*0.5f;
++            for(int part=0;part<3;part+=2) {
++                const auto& button=*jog[part];
++                const SDL_Rect r=shifted(button.bounds);
++                const bool held=down(button.key);
++                const float corner=deviceButtonCorner(profile,button);
++                auto d=[&](float x,float y) {return deviceRoundedDistance(r,corner,x,y);};
++                canvas.paint(r.x,r.y,r.x+r.w,r.y+r.h,[&](float x,float y) {return canvas.edge(d(x,y));},[&](float x,float y,Rgb) {
++                    // A wheel seen edge on: brightest where it faces out, with ribs across.
++                    const float s=clamp01(std::fabs(y-wcy)/wr),facing=std::sqrt(std::max(0.f,1-s*s));
++                    Rgb col=mix(Rgb{70,70,74},Rgb{198,196,192},facing);
++                    const float rib=std::asin(std::min(1.f,(y-wcy)/wr))*wr;
++                    col=col*(0.86f+0.14f*std::cos(rib*2.4f));
++                    col=col*(1-0.22f*std::pow(std::fabs(x-r.x-r.w*0.5f)/(r.w*0.5f),3.f));
++                    return held ? col*0.62f : col;
++                });
++                const float dir=part ? 1 : -1,ty=r.y+r.h*0.5f-dir*1.2f;
++                const float tx=r.x+r.w*0.5f;
++                canvas.paint(tx-5,ty-5,tx+5,ty+5,[&](float x,float y) {
++                    return canvas.edge(std::min(segment(x,y,tx-3.2f,ty-dir*1.6f,tx,ty+dir*1.6f),
++                                                segment(x,y,tx+3.2f,ty-dir*1.6f,tx,ty+dir*1.6f))-0.6f);
++                },[&](float,float,Rgb) {return held ? Rgb{40,40,44} : Rgb{52,52,58};});
++            }
++            // The press key: a silver dome between the rolling halves.
++            const auto& press=*jog[1];
++            const SDL_Rect r=shifted(press.bounds);
++            const bool held=down(press.key);
++            const SDL_Rect dome{r.x+2,r.y+1,r.w-4,r.h-2};
++            paintSilverKey(canvas,dome,dome.h*0.5f,held,press.icon,1,keys,false);
++            const float cx=dome.x+dome.w*0.5f,cy=dome.y+dome.h*0.5f+(held?0.7f:0);
++            canvas.paint(cx-4,cy-4,cx+4,cy+4,[&](float x,float y) {return canvas.edge(std::hypot(x-cx,y-cy)-1.8f);},
++                         [&](float,float,Rgb) {return held ? glow : ink;});
++        }
++        if(back) {
++            const SDL_Rect r=shifted(back->bounds);
++            paintSilverKey(canvas,r,deviceButtonCorner(profile,*back),down(keyIdBack),back->icon,0.62f,keys);
++        }
++    }
++}
+ }  // namespace
+ 
+ void drawDeviceControls(SDL_Renderer* renderer, const DeviceControlProfile& profile,
+-                        int width, int height, float scale, uint32_t pressed) {
++                        int width, int height, float scale, DeviceKeyMask pressed,
++                        const DeviceControlView& view) {
+     if(!profile.count)return;
+-    // The canvas is in strip units, scale/unit device pixels each.
++    // The canvas is in strip units, scale/unit device pixels each; the side tab widens it.
+     const int u=profile.unit;
+-    Canvas canvas(width*u,profile.height,scale/u);
++    Canvas canvas(deviceControlsWidth(profile,width,view)*u,deviceControlsUnits(profile,view),scale/u);
+     switch(profile.style) {
+         case DeviceControlStyle::e2: paintE2Controls(canvas,profile,width*u,pressed);break;
+         case DeviceControlStyle::zire72: paintZire72Controls(canvas,profile,width*u,pressed);break;
+         case DeviceControlStyle::m515: paintM515Controls(canvas,profile,width*u,pressed);break;
+         case DeviceControlStyle::iiix: paintIIIxControls(canvas,profile,width*u,pressed);break;
++        case DeviceControlStyle::tg50: paintTg50Controls(canvas,profile,width*u,pressed,view);break;
+         default: paintTxControls(canvas,profile,width*u,pressed);
+     }
+     if(auto* texture=canvasTexture(renderer,canvas)) {
+diff --git a/src/uarm/native/DeviceControls.h b/src/uarm/native/DeviceControls.h
+--- a/src/uarm/native/DeviceControls.h
++++ b/src/uarm/native/DeviceControls.h
+@@ -4,13 +4,16 @@
+ #include <algorithm>
+ #include <array>
+ #include <cmath>
++#include <cstdint>
+ #include <cstdlib>
+ #include "device_type5.h"
+ #include "keys.h"
+ 
+ enum class DeviceControlIcon { home, calendar, contacts, web, up, down, left, right, select, power, tasks, notes,
+-                               media, music, phone, memo };
+-enum class DeviceControlStyle { tx, e2, zire72, m515, iiix };
++                               media, music, phone, memo, graffiti, back, legend };
++enum class DeviceControlStyle { tx, e2, zire72, m515, iiix, tg50 };
++// Parts of a strip that can be hidden: the TG50's keyboard and its side tab.
++enum class DeviceControlSection { main, keyboard, sideTab };
+ struct DeviceButton {
+     KeyId key;
+     SDL_Rect bounds;
+@@ -18,6 +21,10 @@
+     DeviceControlIcon icon;
+     // Corner radius in strip units; 0 takes the profile's.
+     float corner{0};
++    DeviceControlSection section{DeviceControlSection::main};
++    // A key that is part of a bigger rounded shape, like half a rocker, hits where that shape
++    // (with the corner above) and its bounds overlap; w 0 for none.
++    SDL_Rect shape{0,0,0,0};
+ };
+ struct DeviceControlProfile {
+     int width, height;
+@@ -34,10 +41,24 @@
+     int unit{1};
+     // Select key corner radius in strip units; 0 for a pill.
+     float selectCorner{0};
++    // Strip units at the bottom that belong to the keyboard; hiding it takes them off.
++    int keyboardHeight{0};
++    // Side tab panel right of the screen, and the strip units it adds to the window's width.
++    SDL_Rect sideTab{0,0,0,0};
++    int sideTabWidth{0};
+ };
+-// Which button bar and silkscreen art a device gets. Zire 72, m515 and IIIx have no DeviceType5
+-// yet, so only tests and renders reach them until those boards exist.
+-enum class DeviceArt { none, tx, e2, zire72, m515, iiix };
++// Which hideable parts of a strip are shown.
++struct DeviceControlView {
++    bool keyboard{true};
++    bool sideTab{true};
++};
++// Pressed keys, one bit per KeyId.
++using DeviceKeyMask=uint64_t;
++static_assert(keyIdCount<=64,"DeviceKeyMask has a bit per key");
++inline DeviceKeyMask deviceKeyBit(KeyId key) {return DeviceKeyMask(1)<<key;}
++// Which button bar and silkscreen art a device gets. Zire 72, m515, IIIx and TG50 have no
++// DeviceType5 yet, so only tests and renders reach them until those boards exist.
++enum class DeviceArt { none, tx, e2, zire72, m515, iiix, tg50 };
+ inline DeviceArt deviceArt(DeviceType5 device) {
+     return device == deviceTypeTX ? DeviceArt::tx : device == deviceTypeE2 ? DeviceArt::e2 : DeviceArt::none;
+ }
+@@ -115,6 +136,74 @@
+     };
+     static const DeviceControlProfile iiixProfile{320,88,iiix,std::size(iiix),{0,0,0,0},0,{0,0,0,0},
+                                                   DeviceControlStyle::iiix,0.5f,2};
++    // CLIE PEG-TG50: round Home and Graffiti keys at the ends of the app row, five slim keys in
++    // a raised bar between them (Date Book, Address, the scroll rocker split across its middle,
++    // To Do, Memo Pad), then the QWERTY keyboard. The Jog Dial and Back sit on a tab right of
++    // the screen, level with the app row; the real ones are on the left side of the body.
++    constexpr auto kb=DeviceControlSection::keyboard;
++    constexpr auto tab=DeviceControlSection::sideTab;
++    static const DeviceButton tg50[] = {
++        {keyIdHome, {6,18,24,24}, "Home", DeviceControlIcon::home, 12},
++        {keyIdHard1, {42,22,44,16}, "Date Book", DeviceControlIcon::calendar, 8},
++        {keyIdHard2, {90,22,44,16}, "Address", DeviceControlIcon::phone, 8},
++        {keyIdUp, {138,22,44,8}, "Up", DeviceControlIcon::up, 8, DeviceControlSection::main, {138,22,44,16}},
++        {keyIdDown, {138,30,44,8}, "Down", DeviceControlIcon::down, 8, DeviceControlSection::main, {138,22,44,16}},
++        {keyIdHard3, {186,22,44,16}, "To Do", DeviceControlIcon::tasks, 8},
++        {keyIdHard4, {234,22,44,16}, "Memo Pad", DeviceControlIcon::memo, 8},
++        {keyIdGraffiti, {290,18,24,24}, "Graffiti", DeviceControlIcon::graffiti, 12},
++        // Keys 27x24 on a 31-unit pitch, rows 34 apart; each row below starts half a key in. Ids
++        // follow the ROM's key matrix; the modifier column is Caps, Tab, Shift, Ctrl, Blue, Red
++        // on drives 2-7, as in uARM's TG50 model.
++        {tg50Key(2,1), {7,52,27,24}, "Q", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(2,2), {38,52,27,24}, "W", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(2,3), {69,52,27,24}, "E", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(2,4), {100,52,27,24}, "R", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(2,5), {131,52,27,24}, "T", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(3,1), {162,52,27,24}, "Y", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(3,2), {193,52,27,24}, "U", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(3,3), {224,52,27,24}, "I", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(3,4), {255,52,27,24}, "O", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(3,5), {286,52,27,24}, "P", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(4,1), {23,86,27,24}, "A", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(4,2), {54,86,27,24}, "S", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(4,3), {85,86,27,24}, "D", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(4,4), {116,86,27,24}, "F", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(4,5), {147,86,27,24}, "G", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(2,6), {178,86,27,24}, "H", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(3,6), {209,86,27,24}, "J", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(4,6), {240,86,27,24}, "K", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(5,6), {271,86,27,24}, "L", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(3,0), {7,120,43,24}, "Tab", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(5,1), {54,120,27,24}, "Z", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(5,2), {85,120,27,24}, "X", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(5,3), {116,120,27,24}, "C", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(5,4), {147,120,27,24}, "V", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(5,5), {178,120,27,24}, "B", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(6,1), {209,120,27,24}, "N", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(6,2), {240,120,27,24}, "M", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(7,6), {271,120,42,24}, "Backspace", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(5,0), {20,154,41,24}, "Ctrl", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(6,0), {65,154,47,24}, "Blue shift", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(7,2), {116,154,27,24}, "Minus", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(6,3), {147,154,27,24}, "Comma", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(6,4), {178,154,27,24}, "Full stop", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(6,5), {209,154,27,24}, "Up", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(7,5), {240,154,58,24}, "Enter", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(4,0), {20,188,41,24}, "Shift", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(7,0), {65,188,47,24}, "Red shift", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(7,1), {116,188,58,24}, "Space", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(7,3), {178,188,27,24}, "Left", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(6,6), {209,188,27,24}, "Down", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(7,4), {240,188,27,24}, "Right", DeviceControlIcon::legend, 0, kb},
++        {tg50Key(2,0), {271,188,27,24}, "Caps lock", DeviceControlIcon::legend, 0, kb},
++        // Side tab: the Jog Dial rolls up and down either side of its press, then Back.
++        {keyIdJogUp, {325,9,24,26}, "Jog up", DeviceControlIcon::up, 6, tab},
++        {keyIdJogPress, {325,37,24,22}, "Jog press", DeviceControlIcon::select, 11, tab},
++        {keyIdJogDown, {325,61,24,26}, "Jog down", DeviceControlIcon::down, 6, tab},
++        {keyIdBack, {325,98,24,22}, "Back", DeviceControlIcon::back, 6, tab},
++    };
++    static const DeviceControlProfile tg50Profile{320,224,tg50,std::size(tg50),{0,0,0,0},0,{0,0,0,0},
++                                                  DeviceControlStyle::tg50,0.3f,1,0,176,{320,4,34,124},36};
+     static const DeviceControlProfile empty{0,0,nullptr,0,{0,0,0,0},0,{0,0,0,0}};
+     switch(art) {
+         case DeviceArt::tx: return txProfile;
+@@ -122,12 +211,29 @@
+         case DeviceArt::zire72: return zire72Profile;
+         case DeviceArt::m515: return m515Profile;
+         case DeviceArt::iiix: return iiixProfile;
++        case DeviceArt::tg50: return tg50Profile;
+         default: return empty;
+     }
+ }
+ inline const DeviceControlProfile& deviceControls(DeviceType5 device) {return deviceControls(deviceArt(device));}
++inline bool deviceControlShown(const DeviceButton& button, const DeviceControlView& view) {
++    return button.section==DeviceControlSection::main ||
++           (button.section==DeviceControlSection::keyboard ? view.keyboard : view.sideTab);
++}
++// Strip height in strip units: without the keyboard, down to the side tab's foot if that's lower.
++inline int deviceControlsUnits(const DeviceControlProfile& profile, const DeviceControlView& view) {
++    int h=view.keyboard ? profile.height : profile.height-profile.keyboardHeight;
++    if(view.sideTab && profile.sideTabWidth>0)h=std::max(h,profile.sideTab.y+profile.sideTab.h+4);
++    return h;
++}
+ // Strip height in screen pixels.
+-inline int deviceControlsHeight(const DeviceControlProfile& profile) {return profile.height/profile.unit;}
++inline int deviceControlsHeight(const DeviceControlProfile& profile, const DeviceControlView& view={}) {
++    return deviceControlsUnits(profile,view)/profile.unit;
++}
++// Window width the strip needs under a screen, in screen pixels, with the side tab to the right.
++inline int deviceControlsWidth(const DeviceControlProfile& profile, int screenWidth, const DeviceControlView& view={}) {
++    return screenWidth+(view.sideTab ? profile.sideTabWidth/profile.unit : 0);
++}
+ // Signed distance from (x,y) to a rounded rectangle; negative inside.
+ inline float deviceRoundedDistance(const SDL_Rect& r, float radius, float x, float y) {
+     const float qx=std::fabs(x-r.x-r.w*0.5f)-r.w*0.5f+radius;
+@@ -163,22 +269,28 @@
+            button.icon<=DeviceControlIcon::select;
+ }
+ inline KeyId deviceControlAt(const DeviceControlProfile& profile, int screenWidth,
+-                             int screenHeight, int x, int y) {
++                             int screenHeight, int x, int y, const DeviceControlView& view={}) {
+     // Integer window points hit-test at their pixel centre, in strip units.
+     const int u=profile.unit;
+     const float sx=(x+0.5f)*u-(screenWidth*u-profile.width)/2,sy=(y-screenHeight+0.5f)*u;
+     const auto part=deviceNavigatorAt(profile,sx,sy);
+     if(part!=keyInvalid)return part;
+     for(size_t i=0;i<profile.count;++i) {
+-        if(deviceNavigatorButton(profile,profile.buttons[i]))continue;
+-        const auto& r=profile.buttons[i].bounds;
+-        if(deviceRoundedDistance(r,deviceButtonCorner(profile,profile.buttons[i]),sx,sy)<=0)
+-            return profile.buttons[i].key;
++        if(deviceNavigatorButton(profile,profile.buttons[i]) || !deviceControlShown(profile.buttons[i],view))continue;
++        const auto& b=profile.buttons[i];
++        const auto& r=b.bounds;
++        if(b.shape.w>0) {
++            if(sx>=r.x && sx<r.x+r.w && sy>=r.y && sy<r.y+r.h &&
++               deviceRoundedDistance(b.shape,deviceButtonCorner(profile,b),sx,sy)<=0)
++                return b.key;
++        } else if(deviceRoundedDistance(r,deviceButtonCorner(profile,b),sx,sy)<=0)
++            return b.key;
+     }
+     return keyInvalid;
+ }
+ void drawDeviceControls(SDL_Renderer* renderer, const DeviceControlProfile& profile,
+-                        int screenWidth, int screenHeight, float scale, uint32_t pressed);
++                        int screenWidth, int screenHeight, float scale, DeviceKeyMask pressed,
++                        const DeviceControlView& view={});
+ 
+ // Printed silkscreen under the LCD. Taps on it reach the guest as pen input; these
+ // rectangles only place the artwork.
+diff --git a/src/uarm/native/RenderThread.h b/src/uarm/native/RenderThread.h
+--- a/src/uarm/native/RenderThread.h
++++ b/src/uarm/native/RenderThread.h
+@@ -23,7 +23,7 @@
+ // buttons, or one of the few presents after the last change.
+ class DrawGate {
+    public:
+-    bool Pass(bool frame, bool forceRedraw, uint32_t buttons, bool lcdEnabled) {
++    bool Pass(bool frame, bool forceRedraw, uint64_t buttons, bool lcdEnabled) {
+         forceRedraw = forceRedraw || pressedButtons != buttons;
+         pressedButtons = buttons;
+         const bool wasLcdEnabled = lcd;
+@@ -36,7 +36,7 @@
+ 
+    private:
+     static constexpr uint32_t FLUSH_PIPELINE_FRAMES = 3;
+-    uint32_t pressedButtons{0};
++    uint64_t pressedButtons{0};
+     bool lcd{true};
+     uint32_t flushPipelineCounter{0};
+ };
+@@ -48,7 +48,7 @@
+     const uint32_t* pixels{nullptr};  // whole LCD frame, or null when no new frame came
+     uint32_t firstDirtyLine{0}, lastDirtyLine{0};
+     bool lcdEnabled{true};
+-    uint32_t buttons{0};
++    uint64_t buttons{0};
+     bool redraw{false};  // the guest asked for a redraw, e.g. after an expose or a new layout
+ };
+ 
+@@ -150,7 +150,7 @@
+ 
+     // Guest thread: one draw. frame is the SoC's whole LCD frame or null.
+     void Publish(const uint32_t* frame, uint32_t firstDirtyLine, uint32_t lastDirtyLine, bool lcdEnabled,
+-                 uint32_t buttons, bool redraw) {
++                 uint64_t buttons, bool redraw) {
+         if (frame) {
+             lastDirtyLine = std::min<uint32_t>(lastDirtyLine, height - 1);
+             // The back buffer last held the frame from a few draws ago: bring the rows
+diff --git a/src/uarm/native/SdlEventHandler.cpp b/src/uarm/native/SdlEventHandler.cpp
+--- a/src/uarm/native/SdlEventHandler.cpp
++++ b/src/uarm/native/SdlEventHandler.cpp
+@@ -50,7 +50,11 @@
+ SdlEventHandler::SdlEventHandler(SoC* soc, float scale,
+                                  DisplayConfiguration& deviceDisplayConfiguration,
+                                  Rotation rotation)
+-    : soc(soc), controls(deviceControls(soc->GetDeviceType())), scale(scale), rotation(rotation) {
++    : SdlEventHandler(soc, deviceControls(soc->GetDeviceType()), scale, deviceDisplayConfiguration, rotation) {}
++
++SdlEventHandler::SdlEventHandler(SoC* soc, const DeviceControlProfile& controls, float scale,
++                                 DisplayConfiguration& deviceDisplayConfiguration, Rotation rotation)
++    : soc(soc), controls(controls), scale(scale), rotation(rotation) {
+     width = deviceDisplayConfiguration.width;
+     height = deviceDisplayConfiguration.height + deviceDisplayConfiguration.graffitiHeight;
+ }
+@@ -221,9 +225,9 @@
+     }
+     redrawRequested=true;
+ }
+-uint32_t SdlEventHandler::PressedButtons() const {
+-    uint32_t pressed=pointerKey ? (1u<<pointerKey) : 0;
+-    for (unsigned key=1;key<hardKeys.size();++key) if(hardKeys[key])pressed|=1u<<key;
++uint64_t SdlEventHandler::PressedButtons() const {
++    uint64_t pressed=pointerKey ? deviceKeyBit(pointerKey) : 0;
++    for (unsigned key=1;key<hardKeys.size();++key) if(hardKeys[key])pressed|=deviceKeyBit(KeyId(key));
+     return pressed;
+ }
+ 
+diff --git a/src/uarm/native/SdlEventHandler.h b/src/uarm/native/SdlEventHandler.h
+--- a/src/uarm/native/SdlEventHandler.h
++++ b/src/uarm/native/SdlEventHandler.h
+@@ -15,6 +15,9 @@
+    public:
+     SdlEventHandler(SoC* soc, float scale, DisplayConfiguration& deviceDisplayConfiguration,
+                     Rotation rotation);
++    // With a strip profile given directly, for art whose device has no DeviceType5 yet.
++    SdlEventHandler(SoC* soc, const DeviceControlProfile& controls, float scale,
++                    DisplayConfiguration& deviceDisplayConfiguration, Rotation rotation);
+ 
+     // Polls SDL and handles every event; for a single thread that owns SDL and the SoC.
+     void HandleEvents();
+@@ -24,7 +27,7 @@
+     void SetDirectCapture(bool direct) { directCapture = direct; }
+     bool WantsCapture() const { return capture.load(std::memory_order_relaxed); }
+ 
+-    uint32_t PressedButtons() const;
++    uint64_t PressedButtons() const;
+     bool RedrawRequested() const;
+     bool QuitRequested() const;
+     void ClearQuitRequested() { quitRequested = false; }
+@@ -54,7 +57,7 @@
+ 
+     std::array<bool,512> hostKeys{};
+     std::array<uint8_t,128> codeHolds{};
+-    std::array<bool,11> hardKeys{};
++    std::array<bool,keyIdCount> hardKeys{};
+     const DeviceControlProfile& controls;
+     KeyId pointerKey{keyInvalid};
+     bool penDown{false};
+diff --git a/src/uarm/native/SdlRenderer.cpp b/src/uarm/native/SdlRenderer.cpp
+--- a/src/uarm/native/SdlRenderer.cpp
++++ b/src/uarm/native/SdlRenderer.cpp
+@@ -134,7 +134,7 @@
+     return success;
+ }
+ 
+-void SdlRenderer::Draw(bool forceRedraw, uint32_t buttons) {
++void SdlRenderer::Draw(bool forceRedraw, uint64_t buttons) {
+     const bool lcd = soc->LcdEnabled();
+ 
+     uint32_t firstDirtyLine=0, lastDirtyLine=0;
+@@ -147,7 +147,7 @@
+ }
+ 
+ void SdlRenderer::Render(const uint32_t* frame, uint32_t firstDirtyLine, uint32_t lastDirtyLine,
+-                         bool lcdEnabled, uint32_t buttons) {
++                         bool lcdEnabled, uint64_t buttons) {
+     if (!renderer) return;
+     const bool controlsChanged = pressedButtons != buttons;
+     pressedButtons = buttons;
+diff --git a/src/uarm/native/SdlRenderer.h b/src/uarm/native/SdlRenderer.h
+--- a/src/uarm/native/SdlRenderer.h
++++ b/src/uarm/native/SdlRenderer.h
+@@ -19,11 +19,11 @@
+     ~SdlRenderer();
+ 
+     // Draws the SoC's pending frame on the calling thread, which owns the SoC.
+-    void Draw(bool forceRedraw, uint32_t buttons = 0);
++    void Draw(bool forceRedraw, uint64_t buttons = 0);
+     // Draws a frame handed over from the guest thread; never touches the SoC. frame is a
+     // whole LCD frame, or null to keep the last one; only its dirty rows are uploaded.
+     void Render(const uint32_t* frame, uint32_t firstDirtyLine, uint32_t lastDirtyLine, bool lcdEnabled,
+-                uint32_t buttons);
++                uint64_t buttons);
+     // Saves the unrotated LCD frame as PNG. With the LCD off, or before the first frame,
+     // it saves a black frame of the same size and sets blank.
+     bool SaveFramebuffer(const char* path, bool& blank);
+@@ -51,7 +51,7 @@
+     bool lcdEnabled{true};
+ 
+     DrawGate gate;
+-    uint32_t pressedButtons{0};
++    uint64_t pressedButtons{0};
+ 
+     SoC* soc{nullptr};
+     DeviceType5 deviceType;
+diff --git a/src/uarm/native/main.cpp b/src/uarm/native/main.cpp
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -588,7 +588,7 @@
+         // SDL thread state: what it drew last, whether the app is hidden, and whether the
+         // window needs drawing again (redraw) or the whole frame uploaded again (redrawAll).
+         bool appBackground = false;
+-        uint32_t shownButtons = 0;
++        uint64_t shownButtons = 0;
+         bool shownLcd = true;
+         bool redraw = false, redrawAll = false;
+         // Draws what the guest thread published since the last draw. In the background the
+@@ -699,7 +699,7 @@
+                     const bool lcdEnabled = soc->LcdEnabled();
+                     uint32_t firstDirtyLine = 0, lastDirtyLine = 0;
+                     const uint32_t* frame = soc->GetPendingFrame(firstDirtyLine, lastDirtyLine);
+-                    const uint32_t buttons = sdlEventHandler.PressedButtons();
++                    const uint64_t buttons = sdlEventHandler.PressedButtons();
+                     const bool redrawRequested = sdlEventHandler.RedrawRequested();
+                     if (gate.Pass(frame != nullptr, redrawRequested, buttons, lcdEnabled)) {
+                         link.Publish(frame, firstDirtyLine, lastDirtyLine, lcdEnabled, buttons, redrawRequested);
+diff --git a/src/uarm/uarm/keys.h b/src/uarm/uarm/keys.h
+--- a/src/uarm/uarm/keys.h
++++ b/src/uarm/uarm/keys.h
+@@ -21,9 +21,23 @@
+     keyIdLeft = 7,
+     keyIdRight = 8,
+     keyIdSelect = 9,
+-    keyIdPower = 10
++    keyIdPower = 10,
++    // CLIE PEG-TG50 keys: Home and Graffiti in the app row, the side Jog Dial and Back,
++    // then its 42 keyboard keys in rows from the top left.
++    keyIdHome = 11,
++    keyIdGraffiti = 12,
++    keyIdJogUp = 13,
++    keyIdJogDown = 14,
++    keyIdJogPress = 15,
++    keyIdBack = 16,
++    keyIdKeyboard = 17,
++    keyIdCount = keyIdKeyboard + 42
+ };
+ 
++// TG50 keyboard key at drive line 2-7 and column 0-6 of the ROM's keyboard code table; column c
++// reads sense bit (c == 0 ? 1 : c == 1 ? 0 : c). Column 0 holds the modifiers and Tab.
++constexpr KeyId tg50Key(int drive, int column) { return KeyId(keyIdKeyboard + (drive - 2) * 7 + column); }
++
+ struct Keypad *keypadInit(struct PxaGpio *gpio, bool matrixHasPullUps);
+ bool keypadDefineRow(struct Keypad *kp, unsigned rowIdx, int8_t gpio);
+ bool keypadDefineCol(struct Keypad *kp, unsigned colIdx, int8_t gpio);

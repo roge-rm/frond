@@ -3,6 +3,7 @@
 #include <cassert>
 #include <cstdlib>
 #include <cstdio>
+#include <cstring>
 #include <vector>
 #include <tuple>
 #include <utility>
@@ -18,6 +19,7 @@ class Guest : public SoC {
     }
     DeviceType5 device;
     DisplayConfiguration display() const {return displayConfiguration;}
+    void setDisplay(DisplayConfiguration c) {displayConfiguration=c;}
     bool attached=false;
     void expect(std::initializer_list<std::pair<KeyId,bool>> expected) {
         assert(keyEventQueue->GetSize()==expected.size());
@@ -562,6 +564,219 @@ static void iiixArt() {
     }
 }
 
+static void tg50Art() {
+    const auto& p=deviceControls(DeviceArt::tg50);
+    const int width=320,height=320;
+    const DeviceControlView all{},noKeyboard{false,true},noTab{true,false},neither{false,false};
+    assert(p.width==320 && p.height==224 && p.unit==1 && p.style==DeviceControlStyle::tg50 && p.navigator.w==0);
+    assert(p.count==8+42+4 && p.keyboardHeight==176 && p.sideTabWidth==36);
+    assert(deviceSilkscreen(DeviceArt::tg50).count==0);
+    // The strip shrinks without the keyboard, down to the side tab's foot while that shows.
+    assert(deviceControlsHeight(p)==224 && deviceControlsHeight(p,noTab)==224);
+    assert(deviceControlsHeight(p,noKeyboard)==132 && deviceControlsHeight(p,neither)==48);
+    assert(deviceControlsWidth(p,width)==356 && deviceControlsWidth(p,width,noKeyboard)==356);
+    assert(deviceControlsWidth(p,width,noTab)==320 && deviceControlsWidth(p,width,neither)==320);
+    // Every key once: the app row, all 42 keyboard keys and the tab's four.
+    std::vector<int> seen(keyIdCount,0);
+    for(size_t i=0;i<p.count;++i)++seen[p.buttons[i].key];
+    for(int k=keyIdHard1;k<keyIdCount;++k)assert(seen[k]==(k==keyIdLeft || k==keyIdRight || k==keyIdSelect || k==keyIdPower ? 0 : 1));
+    auto at=[&](float x,float y,const DeviceControlView& view) {
+        return deviceControlAt(p,width,height,int(std::floor(x)),height+int(std::floor(y)),view);
+    };
+    for(size_t i=0;i<p.count;++i) {
+        const auto& b=p.buttons[i];const auto& k=b.bounds;
+        const bool keyboard=b.key>=keyIdKeyboard,tab=b.key>=keyIdJogUp && b.key<=keyIdBack;
+        assert(b.section==(keyboard ? DeviceControlSection::keyboard : tab ? DeviceControlSection::sideTab : DeviceControlSection::main));
+        // Inside the strip and clear of its edges; the tab's keys inside its panel, right of the screen.
+        assert(k.y>=4 && (tab || k.y+k.h<=(keyboard ? p.height-8 : 48-4)));
+        if(tab) {
+            const auto& t=p.sideTab;
+            assert(k.x>t.x && k.x+k.w<t.x+t.w && k.y>t.y && k.y+k.h<t.y+t.h && t.x+t.w<width+p.sideTabWidth);
+            assert(deviceControlsUnits(p,noKeyboard)>=t.y+t.h+4);
+        } else assert(k.x>=4 && k.x+k.w<=width-4);
+        if(keyboard)assert(k.y>=48);
+        const float cx=k.x+k.w*0.5f,cy=k.y+k.h*0.5f;
+        const bool rocker=b.key==keyIdUp || b.key==keyIdDown;
+        assert(at(cx,cy,all)==b.key);
+        if(!rocker)assert(at(k.x,cy,all)==b.key && at(k.x+k.w-1,cy,all)==b.key);
+        // Rounded corners miss; half a unit past each side hits nothing, but for the rocker's split.
+        // The rocker's halves meet across the split; the pill check below covers them.
+        if(!rocker)assert(at(k.x,k.y,all)==keyInvalid && at(k.x+k.w-1,k.y+k.h-1,all)==keyInvalid);
+        assert(at(k.x-1,cy,all)==keyInvalid && at(k.x+k.w,cy,all)==keyInvalid);
+        if(b.key!=keyIdDown)assert(at(cx,k.y-1,all)==keyInvalid);
+        if(b.key!=keyIdUp)assert(at(cx,k.y+k.h,all)==keyInvalid);
+        // Hiding a part takes its keys' hit areas with it and leaves the rest.
+        assert(at(cx,cy,noKeyboard)==(keyboard ? keyInvalid : b.key));
+        assert(at(cx,cy,noTab)==(tab ? keyInvalid : b.key));
+        assert(at(cx,cy,neither)==(keyboard || tab ? keyInvalid : b.key));
+    }
+    // Keyboard rows: 27x24 keys, gaps of 4 across and 10 down, the rows below set in.
+    for(size_t i=1;i<p.count;++i) {
+        const auto& a=p.buttons[i-1].bounds;const auto& b=p.buttons[i].bounds;
+        if(p.buttons[i-1].key>=keyIdKeyboard && p.buttons[i].key>=keyIdKeyboard && a.y==b.y) {
+            assert(b.x-(a.x+a.w)==4);
+            assert(at(a.x+a.w+2,a.y+a.h*0.5f,all)==keyInvalid);
+        }
+    }
+    // Keyboard ids follow the ROM's matrix: drive 2-7, column 0-6 of its code table.
+    auto button=[&](KeyId id) -> const DeviceButton& {
+        for(size_t j=0;j<p.count;++j)if(p.buttons[j].key==id)return p.buttons[j];
+        abort();
+    };
+    auto key=[&](int drive,int column) -> const SDL_Rect& {return button(tg50Key(drive,column)).bounds;};
+    assert(tg50Key(2,0)==keyIdKeyboard && tg50Key(7,6)==keyIdCount-1);
+    const std::pair<std::pair<int,int>,const char*> named[]={
+        {{2,1},"Q"},{{3,5},"P"},{{2,6},"H"},{{5,6},"L"},{{3,0},"Tab"},{{6,1},"N"},{{6,3},"Comma"},
+        {{6,4},"Full stop"},{{6,5},"Up"},{{6,6},"Down"},{{7,1},"Space"},{{7,2},"Minus"},{{7,3},"Left"},
+        {{7,4},"Right"},{{7,5},"Enter"},{{7,6},"Backspace"},
+        {{2,0},"Caps lock"},{{4,0},"Shift"},{{5,0},"Ctrl"},{{6,0},"Blue shift"},{{7,0},"Red shift"}};
+    for(auto [dc,label]:named)assert(std::strcmp(button(tg50Key(dc.first,dc.second)).label,label)==0);
+    assert(key(2,1).x==7 && key(3,5).x+key(3,5).w==313 && key(4,1).x==23 && key(5,1).x==key(4,2).x);
+    // Rows start Q, A, Tab, Ctrl and Shift; the modifier column runs Caps, Tab, Shift, Ctrl,
+    // Blue, Red down drives 2-7.
+    const std::pair<int,int> first[]={{2,1},{4,1},{3,0},{5,0},{4,0}};
+    for(int row=1;row<5;++row) {
+        const auto& r=key(first[row].first,first[row].second);
+        assert(r.y-key(first[row-1].first,first[row-1].second).y==34);
+        assert(at(r.x+10,r.y-5,all)==keyInvalid);
+    }
+    // App row: Up over Down with no gap, gaps to the slim keys either side and round keys at the ends.
+    const DeviceButton* b=p.buttons;
+    assert(b[0].key==keyIdHome && b[7].key==keyIdGraffiti && b[3].key==keyIdUp && b[4].key==keyIdDown);
+    const auto& up=b[3].bounds;const auto& dn=b[4].bounds;
+    assert(up.x==dn.x && up.y+up.h==dn.y && at(160,dn.y-1,all)==keyIdUp && at(160,dn.y,all)==keyIdDown);
+    // The halves hit the drawn pill split at its middle: every pixel centre round it hits
+    // exactly where the pill is, so the curved ends miss just outside the outline.
+    const SDL_Rect pill{up.x,up.y,up.w,dn.y+dn.h-up.y};
+    assert(b[3].shape.w==pill.w && b[3].shape.h==pill.h && b[4].shape.y==pill.y && b[3].corner==pill.h*0.5f);
+    for(int y=pill.y-3;y<pill.y+pill.h+3;++y)for(int x=pill.x-3;x<pill.x+pill.w+3;++x) {
+        const float d=deviceRoundedDistance(pill,pill.h*0.5f,x+0.5f,y+0.5f);
+        assert(at(x,y,all)==(d<=0 ? (y<dn.y ? keyIdUp : keyIdDown) : keyInvalid));
+    }
+    assert(at(pill.x+1,pill.y+1,all)==keyInvalid && at(pill.x+1,pill.y+pill.h-2,all)==keyInvalid);
+    assert(at(pill.x+pill.w-2,pill.y+1,all)==keyInvalid && at(pill.x+pill.w-2,pill.y+pill.h-2,all)==keyInvalid);
+    for(int i:{0,1,2,4,5,6}) {
+        const auto& l=b[i].bounds;const auto& r=b[i==2 ? 3 : i+1].bounds;
+        assert(r.x-(l.x+l.w)>=4 && at((l.x+l.w+r.x)*0.5f,30,all)==keyInvalid);
+    }
+    // Side tab: jog up, press, jog down, then Back, with gaps between, level with the app row.
+    const auto& t=p.buttons+50;
+    assert(t[0].key==keyIdJogUp && t[1].key==keyIdJogPress && t[2].key==keyIdJogDown && t[3].key==keyIdBack);
+    assert(t[0].bounds.y<b[0].bounds.y && p.sideTab.y<=b[0].bounds.y);
+    for(int i=1;i<4;++i) {
+        const auto& a=t[i-1].bounds;const auto& c=t[i].bounds;
+        assert(c.y>a.y+a.h && at(a.x+a.w*0.5f,a.y+a.h,all)==keyInvalid);
+    }
+    assert(at(321,60,all)==keyInvalid && at(352,60,all)==keyInvalid);
+
+    // Keys past bit 31 and on the side tab go through the event handler's pointer path:
+    // pressed, shown in PressedButtons, released on leaving the key, on button up and on focus loss.
+    {
+        Guest guest;guest.setDisplay({320,320,0,160});DisplayConfiguration display=guest.display();
+        SdlEventHandler input(&guest,p,1,display,Rotation::portrait_0);
+        auto centre=[&](KeyId id) {
+            for(size_t i=0;i<p.count;++i)if(p.buttons[i].key==id) {
+                const auto& k=p.buttons[i].bounds;return std::pair<int,int>{k.x+k.w/2,height+k.y+k.h/2};
+            }
+            abort();
+        };
+        const KeyId z=tg50Key(5,1),bs=tg50Key(7,6);
+        assert(z>31 && bs==keyIdCount-1);
+        auto [zx,zy]=centre(z);
+        mouse(SDL_MOUSEBUTTONDOWN,zx,zy);input.HandleEvents();guest.expect({{z,true}});
+        assert(input.PressedButtons()==deviceKeyBit(z) && (input.PressedButtons()>>32)!=0);
+        mouse(SDL_MOUSEMOTION,zx,zy-14);input.HandleEvents();guest.expect({{z,false}});assert(!input.PressedButtons());
+        mouse(SDL_MOUSEBUTTONUP,zx,zy-14);input.HandleEvents();guest.expect({});
+        auto [bx,by]=centre(bs);
+        mouse(SDL_MOUSEBUTTONDOWN,bx,by);input.HandleEvents();guest.expect({{bs,true}});
+        assert(input.PressedButtons()==deviceKeyBit(bs));
+        window(SDL_WINDOWEVENT_FOCUS_LOST);input.HandleEvents();guest.expect({{bs,false}});assert(!input.PressedButtons());
+        mouse(SDL_MOUSEBUTTONUP,bx,by);input.HandleEvents();guest.expect({});
+        for(KeyId id:{keyIdBack,keyIdJogPress,keyIdHome}) {
+            auto [x,y]=centre(id);
+            mouse(SDL_MOUSEBUTTONDOWN,x,y);input.HandleEvents();guest.expect({{id,true}});
+            assert(input.PressedButtons()==deviceKeyBit(id));
+            mouse(SDL_MOUSEBUTTONUP,x,y);input.HandleEvents();guest.expect({{id,false}});assert(!input.PressedButtons());
+        }
+        guest.noPen();
+    }
+
+    // Pressed states, and the hidden parts drawn or left out.
+    for(float scale:{1.f,2.f}) {
+        const int sw=int(356*scale),sh=int(224*scale);
+        auto* surface=SDL_CreateRGBSurfaceWithFormat(0,sw,sh,32,SDL_PIXELFORMAT_RGBA32);
+        auto* renderer=SDL_CreateSoftwareRenderer(surface);assert(surface && renderer);
+        auto sum=[&](float x,float y) {return brightness(readPixel(surface,int(x*scale),int(y*scale)));};
+        for(size_t i=0;i<p.count;++i) {
+            const auto& k=p.buttons[i].bounds;const KeyId id=p.buttons[i].key;
+            // A spot clear of legends, icons and the light line: low on most keys, beside the
+            // dimple or the jog press's dot, near the ends of the rocker's halves.
+            float x=k.x+k.w*0.5f,y=k.y+k.h*0.85f;
+            if(id==keyIdHome || id==keyIdGraffiti)y=k.y+k.h-4.5f;
+            if(id==keyIdUp || id==keyIdDown)x=k.x+10,y=k.y+k.h*0.5f;
+            if(id==keyIdJogPress)x=k.x+k.w*0.5f+6,y=k.y+k.h*0.5f;
+            if(id==keyIdJogUp || id==keyIdJogDown)x=k.x+4,y=k.y+k.h*0.5f;
+            if(id>=keyIdKeyboard)x=k.x+5;
+            drawDeviceControls(renderer,p,width,0,scale,0);
+            const int idle=sum(x,y);
+            drawDeviceControls(renderer,p,width,0,scale,deviceKeyBit(id));
+            const int held=sum(x,y);
+            if(held>=idle-12)std::fprintf(stderr,"TG50 key %d at %g,%g scale %g: idle %d held %d\n",id,x,y,scale,idle,held);
+            assert(held<idle-12);
+        }
+        // Holding one half of the rocker leaves the other alone.
+        for(int half=0;half<2;++half) {
+            const float x=up.x+10,y=half ? up.y+3 : dn.y+dn.h-3;
+            drawDeviceControls(renderer,p,width,0,scale,0);
+            const auto idle=readPixel(surface,int(x*scale),int(y*scale));
+            drawDeviceControls(renderer,p,width,0,scale,deviceKeyBit(half ? keyIdDown : keyIdUp));
+            const auto held=readPixel(surface,int(x*scale),int(y*scale));
+            assert(idle.r==held.r && idle.g==held.g && idle.b==held.b);
+        }
+        // Without the keyboard the body stops at the app row; without the tab nothing is drawn right of the screen.
+        const auto mark=[&] {SDL_SetRenderDrawColor(renderer,255,0,255,255);SDL_RenderClear(renderer);};
+        auto magenta=[&](float x,float y) {const auto c=readPixel(surface,int(x*scale),int(y*scale));return c.r==255 && c.g==0 && c.b==255;};
+        mark();drawDeviceControls(renderer,p,width,0,scale,0,noKeyboard);
+        assert(sum(160,100)<120 && sum(34,10)>300 && sum(352,110)>300 && magenta(160,140));
+        mark();drawDeviceControls(renderer,p,width,0,scale,0,neither);
+        assert(magenta(337,30) && magenta(160,60) && sum(34,10)>300);
+        mark();drawDeviceControls(renderer,p,width,0,scale,0,noTab);
+        assert(magenta(337,30) && sum(5,200)>300 && !magenta(160,220));
+        mark();drawDeviceControls(renderer,p,width,0,scale,0,all);
+        assert(!magenta(355,223) && sum(352,110)>300 && sum(337,200)<120);
+        SDL_DestroyRenderer(renderer);SDL_FreeSurface(surface);
+    }
+}
+
+// Devices without a keyboard or side tab draw and hit the same whatever the view, and keys
+// past bit 31 leave their art alone.
+static void viewsLeaveOlderDevices() {
+    const DeviceControlView views[]={{false,true},{true,false},{false,false}};
+    for(auto art:{DeviceArt::tx,DeviceArt::e2,DeviceArt::zire72,DeviceArt::m515,DeviceArt::iiix}) {
+        const auto& p=deviceControls(art);
+        const int width=320/p.unit,height=200,sh=deviceControlsHeight(p);
+        assert(p.keyboardHeight==0 && p.sideTabWidth==0);
+        for(const auto& view:views) {
+            assert(deviceControlsHeight(p,view)==sh && deviceControlsWidth(p,width,view)==width);
+            for(int y=height;y<height+sh;++y)for(int x=0;x<width;++x)
+                assert(deviceControlAt(p,width,height,x,y,view)==deviceControlAt(p,width,height,x,y));
+        }
+        for(float scale:{1.f,2.f}) {
+            const int w=int(width*scale),h=int(sh*scale);
+            auto* a=SDL_CreateRGBSurfaceWithFormat(0,w,h,32,SDL_PIXELFORMAT_RGBA32);
+            auto* b=SDL_CreateRGBSurfaceWithFormat(0,w,h,32,SDL_PIXELFORMAT_RGBA32);
+            auto* ra=SDL_CreateSoftwareRenderer(a);auto* rb=SDL_CreateSoftwareRenderer(b);
+            const DeviceKeyMask held=deviceKeyBit(keyIdHard2)|deviceKeyBit(keyIdDown);
+            drawDeviceControls(ra,p,width,0,scale,held);
+            drawDeviceControls(rb,p,width,0,scale,held|deviceKeyBit(KeyId(keyIdKeyboard+20))|deviceKeyBit(KeyId(keyIdCount-1)),
+                               views[2]);
+            for(int y=0;y<h;++y)assert(std::memcmp(static_cast<Uint8*>(a->pixels)+y*a->pitch,
+                                                   static_cast<Uint8*>(b->pixels)+y*b->pitch,size_t(w)*4)==0);
+            SDL_DestroyRenderer(ra);SDL_DestroyRenderer(rb);SDL_FreeSurface(a);SDL_FreeSurface(b);
+        }
+    }
+}
+
 static void zireAndM515() {
     // TX and E2 keep their art through DeviceType5; the others have none yet.
     assert(deviceArt(deviceTypeTX)==DeviceArt::tx && deviceArt(deviceTypeE2)==DeviceArt::e2);
@@ -573,6 +788,8 @@ static void zireAndM515() {
         artSilkscreen(art);
     }
     iiixArt();
+    tg50Art();
+    viewsLeaveOlderDevices();
 }
 
 static void lcdScaling() {
@@ -641,5 +858,5 @@ int main() {
     zireAndM515();
     silkscreen();
     lcdScaling();
-    SDL_Quit();puts("PASS: TX and E2 device buttons, holds/chords, focus/drag/rotation release, touch isolation, scales, pressed rendering and E2 silkscreen; Zire 72, m515 and IIIx hit areas, pressed art and silkscreens");
+    SDL_Quit();puts("PASS: TX and E2 device buttons, holds/chords, focus/drag/rotation release, touch isolation, scales, pressed rendering and E2 silkscreen; Zire 72, m515, IIIx and TG50 hit areas, pressed art and silkscreens; TG50 keyboard and side tab hiding");
 }
