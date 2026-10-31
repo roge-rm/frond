@@ -1,6 +1,6 @@
 # Frond
 
-Frond is a Palm OS emulator for Linux and Android, made for running and developing Palm apps and games.
+Frond is a Palm OS emulator for Linux and Android, based on [CloudpilotEmu](https://github.com/cloudpilot-emu/cloudpilot-emu), made for running and developing Palm apps and games.
 
 Currently it emulates the Palm T|X and the Tungsten E2, with sound, SD support, networking, saved sessions and more. 
 Look below to see the features in more detail. More devices are planned.
