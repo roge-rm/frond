@@ -505,7 +505,7 @@ endpoint, firmware-free regressions and the Palm Serial Manager probes.
 `--usb pty` or `--usb tcp:PORT` plugs the TX or E2 into an emulated USB host and moves
 the bytes of its HotSync port to a host PTY or a TCP listener on 127.0.0.1, one
 client at a time. pilot-link and the like talk to it as they would to a serial
-cradle. It is off by default and supports the Palm TX and Tungsten E2. The desktop app has the same
+cradle. It is off by default and supports the Palm TX, Tungsten E2 and Zire 72 (command line only for now). The desktop app has the same
 choice under **USB**.
 
 ```sh
@@ -567,7 +567,8 @@ How it works:
   Switching the mode while running does the same. A database list or export
   during HotSync leaves the cable in.
 - With USB off the TX cable stays in (GPIO13 low), as it did before the bridge.
-  The E2 cable is absent (GPIO35 high). Loading a session restores the selected
+  The E2 cable is absent (GPIO35 high), and so is the Zire's (GPIO15 low; its
+  detect is active high, palmz72.c). Loading a session restores the selected
   board's default cable level when the host is off.
 
 Firmware-free tests:

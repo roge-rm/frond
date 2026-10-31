@@ -1,0 +1,290 @@
+diff --git a/src/common/device_profile5.h b/src/common/device_profile5.h
+--- a/src/common/device_profile5.h
++++ b/src/common/device_profile5.h
+@@ -65,11 +65,12 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
+      DeviceSupport5::inheritedUnverified, DeviceDetect5::cardHeader, 0, 0x50765076 /* PvPv */,
+      DeviceBoard5::paravirtual, DeviceArt::none, {},
+      0, 0, 8u << 20, 1u << 31, DisplayMode::mode_320x480, 0x1fe, false},
+-    // XIP NOR with a small and a big card like the E2, on a PXA270; no NAND. Boots to the launcher; peripherals are off.
++    // XIP NOR with a small and a big card like the E2, on a PXA270; no NAND, Wi-Fi or serial. Bluetooth and the
++    // camera stay off until they're qualified.
+     {deviceTypeZire72, "palm-zire-72", "Zire 72", DeviceCohort5::zire72Nor,
+      DeviceSupport5::inheritedUnverified, DeviceDetect5::cardHeader, deviceCompanyPalm5,
+      0x615a3732 /* aZ72 */, DeviceBoard5::pxa270Zire72, DeviceArt::zire72,
+-     {},  // peripherals switch on as each one is emulated
++     {false, true, false, true, false, true, false},
+      14942208, 0, 32u << 20, 32u << 20, DisplayMode::mode_320x320, 1u << 5, false},
+     // Reserved names: art only, no board yet.
+     {deviceTypeInvalid, "sony-clie-tg50", "Sony CLIÉ TG50", DeviceCohort5::reserved, DeviceSupport5::reserved,
+diff --git a/src/uarm/native/InputReplay.cpp b/src/uarm/native/InputReplay.cpp
+--- a/src/uarm/native/InputReplay.cpp
++++ b/src/uarm/native/InputReplay.cpp
+@@ -59,6 +59,9 @@ bool InputReplay::Load(const std::string& path, int width, int height, std::stri
+             event.x=irKeyboardCode(SDL_GetScancodeFromName(name.c_str()));
+             if (!event.x) return fail();
+             event.kind=command=="keyboard-down"?Kind::keyboardDown:Kind::keyboardUp;
++        } else if (command == "keyboard-attach" || command == "keyboard-detach") {
++            event.kind = Kind::keyboardAttach;
++            event.x = command == "keyboard-attach";
+         } else if (command == "snapshot") {
+             event.kind = Kind::snapshot;
+             if (!(tokens >> std::quoted(event.path)) || event.path.empty()) return fail();
+@@ -84,6 +87,7 @@ void InputReplay::Dispatch(uint64_t elapsedMs, SoC& soc, const std::function<boo
+             case Kind::keyUp: soc.KeyUp(event.key); break;
+             case Kind::keyboardDown: soc.KeyboardKey(event.x,true); break;
+             case Kind::keyboardUp: soc.KeyboardKey(event.x,false); break;
++            case Kind::keyboardAttach: soc.AttachKeyboard(event.x); break;
+             case Kind::snapshot: {
+                 // A failed snapshot is reported but never ends the run.
+                 bool blank = false;
+diff --git a/src/uarm/native/InputReplay.h b/src/uarm/native/InputReplay.h
+--- a/src/uarm/native/InputReplay.h
++++ b/src/uarm/native/InputReplay.h
+@@ -26,7 +26,7 @@ class InputReplay {
+     const std::vector<std::string>& SnapshotResults() const { return snapshots; }
+ 
+    private:
+-    enum class Kind { penDown, penUp, keyDown, keyUp, keyboardDown, keyboardUp, snapshot };
++    enum class Kind { penDown, penUp, keyDown, keyUp, keyboardDown, keyboardUp, keyboardAttach, snapshot };
+     struct Event {
+         uint64_t at;
+         Kind kind;
+diff --git a/src/uarm/native/main.cpp b/src/uarm/native/main.cpp
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -574,7 +574,7 @@ namespace {
+         commandContext.usb = &usb;
+         if (usbConfig.kind != HostSerial::Kind::off) {
+             if (!capabilities.usb) {
+-                cerr << "--usb needs a Palm TX or Tungsten E2" << endl;
++                cerr << "--usb needs a Palm TX, Tungsten E2 or Zire 72" << endl;
+                 return false;
+             }
+             if (!usb.Start(static_cast<SocPXA*>(soc), usbConfig, commandContext.usbError))
+diff --git a/src/uarm/uarm/SoC.h b/src/uarm/uarm/SoC.h
+--- a/src/uarm/uarm/SoC.h
++++ b/src/uarm/uarm/SoC.h
+@@ -217,9 +217,6 @@ class SoC {
+     // Time of the last JamKey; only a key jammed right before Reset() (no emulated time between)
+     // is held through it, so a reset during a hard reset's power hold cancels the hold.
+     uint64_t jammedKeyAt{~0ull};
+-    // When the power key last went down; time of the first held-back power press, or 0.
+-    uint64_t powerKeyDownAt{0};
+-    uint64_t powerPressHeldSince{0};
+     bool penDown{false};
+ 
+     bool cardInserted{false};
+@@ -250,7 +247,7 @@ class SoC::InputCheckpoint {
+     explicit InputCheckpoint(SoC& soc)
+         : soc(soc), pens(*soc.penEventQueue), keys(*soc.keyEventQueue),
+           ticks(soc.eventQueueTicks), penTicks(soc.eventQueueTicksAtPenDown),
+-          jammed(soc.jammedKey), releaseAt(soc.releaseJammedKeyAt), down(soc.penDown),
++          jammed(soc.jammedKey), releaseAt(soc.releaseJammedKeyAt), jammedAt(soc.jammedKeyAt), down(soc.penDown),
+           restorePeripheral(soc.CapturePeripheralInput()) {}
+     // A committed transaction discards restoration ownership immediately.
+     void Finish() { restorePeripheral = {}; }
+@@ -271,6 +268,7 @@ class SoC::InputCheckpoint {
+         soc.eventQueueTicksAtPenDown = penTicks;
+         soc.jammedKey = jammed;
+         soc.releaseJammedKeyAt = releaseAt;
++        soc.jammedKeyAt = jammedAt;
+         soc.penDown = down;
+         return ok;
+     }
+@@ -280,7 +278,7 @@ class SoC::InputCheckpoint {
+     Queue<KeyEvent> keys;
+     uint64_t ticks, penTicks;
+     KeyId jammed;
+-    uint64_t releaseAt;
++    uint64_t releaseAt, jammedAt;
+     bool down;
+     std::function<void()> restorePeripheral;
+ };
+diff --git a/src/uarm/uarm/devicePalmTungstenE2.cpp b/src/uarm/uarm/devicePalmTungstenE2.cpp
+--- a/src/uarm/uarm/devicePalmTungstenE2.cpp
++++ b/src/uarm/uarm/devicePalmTungstenE2.cpp
+@@ -238,6 +238,10 @@ struct Device *deviceSetup(enum DeviceType5 type, struct SocPeriphs *sp,
+         dev->nand = nullptr;
+         if (!memRegionAdd(sp->mem, 0x04000000, 0x04000000, zireEmptyBusAccess, dev))
+             ERR("cannot map Zire 72 chip select 1");
++        // PXA27x quick capture interface (manual chapter 27) with no sensor behind it: registers
++        // read 0 and take writes, so the CameraDriver starts and finds no camera.
++        if (!memRegionAdd(sp->mem, 0x50000000, 0x1000, zireEmptyBusAccess, dev))
++            ERR("cannot map Zire 72 camera interface");
+         dev->wm9712L = wm9712LInit(sp->ac97, sp->gpio, -1, 27);
+         if (!dev->wm9712L || !dev->kpc) ERR("cannot initialize Zire 72 board");
+         // The power key is on the matrix and on GPIO0, which the DAL reads as pressed when low
+@@ -247,7 +251,7 @@ struct Device *deviceSetup(enum DeviceType5 type, struct SocPeriphs *sp,
+         pxaGpioSetState(sp->gpio, 0, true);   // power key up
+         pxaGpioSetState(sp->gpio, 1, true);   // reset button up
+         pxaGpioSetState(sp->gpio, 14, true);  // SD absent
+-        pxaGpioSetState(sp->gpio, 15, true);  // USB cable absent
++        pxaGpioSetState(sp->gpio, 15, false); // USB cable absent (VBUS, active high)
+         pxaGpioSetState(sp->gpio, 37, true);  // low starts MfgTestExt's serial test loop
+         pxaGpioSetState(sp->gpio, 94, false); // 32 MiB RAM
+         pxaGpioSetState(sp->gpio, 99, true);  // no external power; low shows the battery charging
+diff --git a/src/uarm/uarm/soc_PXA.cpp b/src/uarm/uarm/soc_PXA.cpp
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -257,7 +257,8 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
+     sp.ssp2 = ssp[1];
+     sp.ssp3 = ssp[2];
+     if (socRev == 2) sp.kpc = kpc;
+-    if (deviceType==DeviceType5::deviceTypeTX || deviceType==DeviceType5::deviceTypeE2) {
++    if (deviceType==DeviceType5::deviceTypeTX || deviceType==DeviceType5::deviceTypeE2 ||
++        deviceType==DeviceType5::deviceTypeZire72) {
+         pxaUartSetPacing(stUart,true);
+         pxaUartSetModeObserver(stUart,RefreshIrMode,this);
+         pxaGpioSetConfigurationObserver(gpio,RefreshIrMode,this);
+@@ -560,16 +561,22 @@ void SocPXA::OnSdEject() {
+     deviceSetSdCardInserted(dev, false);
+ }
+ 
++// USB cable detect: Linux palmtx.h TX GPIO13 and palmte2.h E2 GPIO35 are active low; the Zire's
++// GPIO15 is active high (palmz72.c palm27x_udc_init(15, 95, 0)).
++static int UsbDetectPin(DeviceType5 type) {
++    return type==deviceTypeTX ? 13 : type==deviceTypeE2 ? 35 : type==deviceTypeZire72 ? 15 : -1;
++}
++
+ bool SocPXA::SetUsbTestCable(bool connected) {
+-    if(GetDeviceType()!=deviceTypeTX && GetDeviceType()!=deviceTypeE2)return false;
+-    // Linux palmtx.h: TX GPIO13; palmte2.h: E2 GPIO35, both active low.
+-    pxaGpioSetState(gpio, GetDeviceType()==deviceTypeTX ? 13 : 35, !connected);
++    const int pin=UsbDetectPin(GetDeviceType());
++    if(pin<0)return false;
++    pxaGpioSetState(gpio, pin, GetDeviceType()==deviceTypeZire72 ? connected : !connected);
+     return true;
+ }
+ 
+ bool SocPXA::UsbTestCableAttached() {
+-    return (GetDeviceType()==deviceTypeTX || GetDeviceType()==deviceTypeE2) &&
+-        !pxaGpioInputLevel(gpio,GetDeviceType()==deviceTypeTX ? 13 : 35);
++    const int pin=UsbDetectPin(GetDeviceType());
++    return pin>=0 && pxaGpioInputLevel(gpio,pin)==(GetDeviceType()==deviceTypeZire72);
+ }
+ 
+ void SocPXA::KickUsbHost() {
+@@ -584,7 +591,7 @@ bool SocPXA::HoldKeyEvent(const KeyEvent& event) {
+     const uint64_t now = GetTime();
+     // The Zire's DAL stays awake only if power is still held about 130 ms after the wake, so
+     // a short press (a phone tap) is held for 250 ms.
+-    if (!event.keyDown) return now < powerKeyDownAt + 250_msec;
++    if (!event.keyDown) return powerKeyDownAt && now < powerKeyDownAt + 250_msec;
+     // A press while the DAL goes to sleep (LCD already off) puts it in a sleep that only a held
+     // key wakes, so the press waits until the Zire is asleep, for 3 s at most.
+     if (PowerSleeping() || LcdEnabled()) { powerPressHeldSince = 0; return false; }
+@@ -595,6 +602,7 @@ bool SocPXA::HoldKeyEvent(const KeyEvent& event) {
+ }
+ 
+ void SocPXA::OnEngageKey(KeyId key, bool down) {
++    if (key == keyIdPower && down) powerKeyDownAt = GetTime();
+     deviceKey(dev, key, down);
+     keypadKeyEvt(kp, key, down);
+ }
+@@ -611,6 +619,7 @@ void SocPXA::OnReset() {
+         pxaRtcRestoreRetained(rtc, resetRtc);
+     }
+     powerOnReset = false;
++    powerKeyDownAt = powerPressHeldSince = 0;
+ }
+ 
+ void SocPXA::OnLoad(SavestateLoader<ChunkType> &loader) {
+@@ -632,6 +641,8 @@ void SocPXA::OnLoad(SavestateLoader<ChunkType> &loader) {
+             else cpuClearSlowPath(cpu,SLOW_PATH_REASON_RESCHEDULE);
+         }
+     } checkpointCpuGuard{cpu,RestoringCheckpoint()};
++    // Emulated time starts again from the loaded state; a checkpoint restores these with the input.
++    if (!RestoringCheckpoint()) powerKeyDownAt = powerPressHeldSince = 0;
+     restoringPowerState = true;
+     pxaPwrClkRestoreInProgress(pwrClk, true);
+     struct RestoreGuard {
+@@ -842,7 +853,11 @@ std::function<void()> SocPXA::CapturePeripheralInput() {
+     };
+     std::shared_ptr<AudioScope> audio;
+     if(fastAudio)audio=std::make_shared<AudioScope>(*this,*fastAudio);
+-    return [keypad, device, audio] {if(audio)audio->Restore();keypad();device();};
++    const uint64_t keyDownAt=powerKeyDownAt, heldSince=powerPressHeldSince;
++    return [this, keypad, device, audio, keyDownAt, heldSince] {
++        if(audio)audio->Restore();keypad();device();
++        powerKeyDownAt=keyDownAt;powerPressHeldSince=heldSince;
++    };
+ }
+ 
+ // External UART clients are suspended while a load is tried. A refused load keeps
+@@ -1111,15 +1126,17 @@ void SocPXA::RefreshIrMode(void* context) {
+ }
+ 
+ bool SocPXA::IrPowerEnabled() {
+-    // Active-high transceiver shutdown: Linux palmte2.h / mach/palmtx.h.
++    // Active-high transceiver shutdown: Linux palmte2.h, mach/palmtx.h, palmz72.h.
+     // An input/alternate-function pin has not explicitly powered this link on.
+-    return pxaGpioGetState(gpio,GetDeviceType()==deviceTypeTX?40:48)==PxaGpioStateLow;
++    const auto type=GetDeviceType();
++    return pxaGpioGetState(gpio,type==deviceTypeTX?40:type==deviceTypeZire72?49:48)==PxaGpioStateLow;
+ }
+ 
+ bool SocPXA::SetIrHostHooks(const IrHostHooks* hooks) {
+     if (hooks) {
+         if (!hooks->context || !hooks->read || !hooks->write || !hooks->pending || !hooks->replaced ||
+-            (GetDeviceType()!=deviceTypeTX && GetDeviceType()!=deviceTypeE2) ||
++            (GetDeviceType()!=deviceTypeTX && GetDeviceType()!=deviceTypeE2 &&
++             GetDeviceType()!=deviceTypeZire72) ||
+             irHostHooks.context || irKeyboard.Attached() || irKeyboard.Pending() ||
+             !pxaUartIrState(stUart).idle) return false;
+     }
+@@ -1129,12 +1146,14 @@ bool SocPXA::SetIrHostHooks(const IrHostHooks* hooks) {
+ 
+ void SocPXA::AttachKeyboard(bool value) {
+     if (value && IrHostAttached()) return;
+-    if (GetDeviceType()!=DeviceType5::deviceTypeTX && GetDeviceType()!=DeviceType5::deviceTypeE2) return;
++    if (GetDeviceType()!=DeviceType5::deviceTypeTX && GetDeviceType()!=DeviceType5::deviceTypeE2 &&
++        GetDeviceType()!=DeviceType5::deviceTypeZire72) return;
+     irKeyboard.Attach(value);
+     RescheduleCB(this,RESCHEDULE_TASK_UART);
+ }
+ bool SocPXA::KeyboardKey(uint8_t code,bool down) {
+-    const bool accepted=(GetDeviceType()==DeviceType5::deviceTypeTX || GetDeviceType()==DeviceType5::deviceTypeE2) &&
++    const bool accepted=(GetDeviceType()==DeviceType5::deviceTypeTX || GetDeviceType()==DeviceType5::deviceTypeE2 ||
++                         GetDeviceType()==DeviceType5::deviceTypeZire72) &&
+         (!down || pxaUartIrReceiveEnabled(stUart)) && irKeyboard.Key(code,down);
+     if (accepted) RescheduleCB(this,RESCHEDULE_TASK_UART);
+     return accepted;
+diff --git a/src/uarm/uarm/soc_PXA.h b/src/uarm/uarm/soc_PXA.h
+--- a/src/uarm/uarm/soc_PXA.h
++++ b/src/uarm/uarm/soc_PXA.h
+@@ -103,9 +103,11 @@ class SocPXA : public SocGeneric<SocPXA> {
+ 
+     // Non-owning development-probe access; use only on this SoC's execution
+     // thread. The cable method drives the TX detector input, not a USB host.
+-    Pxa270Udc* GetUsbController() { return GetDeviceType() == deviceTypeTX ? udc2 : nullptr; }
++    Pxa270Udc* GetUsbController() {
++        return GetDeviceType() == deviceTypeTX || GetDeviceType() == deviceTypeZire72 ? udc2 : nullptr;
++    }
+     UsbDevicePort GetUsbPort() {
+-        if(GetDeviceType()==deviceTypeTX)return UsbDevicePort(udc2);
++        if(GetDeviceType()==deviceTypeTX || GetDeviceType()==deviceTypeZire72)return UsbDevicePort(udc2);
+         if(GetDeviceType()==deviceTypeE2)return UsbDevicePort(udc1);
+         return {};
+     }
+@@ -152,6 +154,10 @@ class SocPXA : public SocGeneric<SocPXA> {
+     template <typename T>
+     void OnSave(T &savestate);
+ 
++    // When the power key last went down; time of the first held-back power press, or 0 (Zire only).
++    uint64_t powerKeyDownAt{0};
++    uint64_t powerPressHeldSince{0};
++
+    private:
+     PxaRtcRetained resetRtc{};
+     void ResumePowerSleep();
+diff --git a/src/uarm/uarm/soc_generic_impl.h b/src/uarm/uarm/soc_generic_impl.h
+--- a/src/uarm/uarm/soc_generic_impl.h
++++ b/src/uarm/uarm/soc_generic_impl.h
+@@ -295,7 +295,6 @@ void SocGeneric<T>::PumpKeyEventQueue() {
+         if (HoldKeyEvent(keyEventQueue->Peek())) return;
+         KeyEvent evt(keyEventQueue->Pop());
+         if (evt.key == jammedKey) return;
+-        if (evt.key == keyIdPower && evt.keyDown) powerKeyDownAt = scheduler->GetTime();
+ 
+         static_cast<T&>(*this).OnEngageKey(evt.key, evt.keyDown);
+     }

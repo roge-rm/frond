@@ -34,6 +34,9 @@ class InputSoc : public SocPXA {
         assert(penDown && eventQueueTicks == 101 && eventQueueTicksAtPenDown == 100);
         assert(jammedKey == keyIdUp && releaseJammedKeyAt == 500000000);
     }
+    uint64_t PowerDownAt() const { return powerKeyDownAt; }
+    uint64_t PowerHeldSince() const { return powerPressHeldSince; }
+    size_t QueuedKeys() const { return keyEventQueue->GetSize(); }
     void customSchedule() {
         scheduler->ScheduleTask(SCHEDULER_TASK_TIMER, 12345, 7);
         scheduler->ScheduleTask(SCHEDULER_TASK_PCM, 23456, 3);
@@ -129,4 +132,42 @@ static void test(DeviceType5 type) {
     { ReadOnlyGuest next(soc); next.Commit(); }
     std::printf("PASS: %s checkpoint input, timing, full restore, commit and scope balance\n", tx ? "TX" : "E2");
 }
-int main() { test(deviceTypeTX); test(deviceTypeE2); }
+// Zire 72: the power press times are rolled back with a checkpoint and cleared by a reset or a
+// load, so a release after either isn't held until the old press time.
+static void zire() {
+    std::vector<uint8_t> rom(14942208);
+    InputSoc soc(deviceTypeZire72, 32u << 20, rom.data(), rom.size(), nullptr, 0, -1, 2);
+    write(soc, 0xa0003000, 0xeafffffe);
+    cpuSetReg(soc.GetCpu(), 15, 0xa0003000);
+    auto run = [&](unsigned ms) { for (unsigned i = 0; i < ms; ++i) soc.Run(100000, 100000000); };
+    run(2000);
+    // LCD off and not asleep: the press waits up to 3 s, then goes in.
+    soc.KeyDown(keyIdPower);
+    run(100);
+    assert(soc.QueuedKeys() == 1 && soc.PowerHeldSince());
+    run(3100);
+    assert(!soc.QueuedKeys() && soc.PowerDownAt() > 4000000000ull);
+    const auto downAt = soc.PowerDownAt();
+    {
+        ReadOnlyGuest checkpoint(soc);
+        soc.KeyUp(keyIdPower); soc.KeyDown(keyIdPower);
+        run(400);
+        assert(soc.PowerDownAt() != downAt || soc.PowerHeldSince());
+    }
+    assert(soc.PowerDownAt() == downAt && !soc.PowerHeldSince());
+    soc.Reset();
+    assert(!soc.PowerDownAt() && !soc.PowerHeldSince() && soc.GetTime() < downAt);
+    soc.KeyUp(keyIdPower); soc.KeyDown(keyIdHard1);
+    run(200);
+    assert(!soc.QueuedKeys());
+    run(500);
+    soc.KeyDown(keyIdPower);
+    run(3500);
+    assert(soc.PowerDownAt());
+    assert(soc.Save()); auto b = soc.GetSavestate();
+    std::vector<uint8_t> state(static_cast<uint8_t*>(b.data), static_cast<uint8_t*>(b.data) + b.size);
+    assert(soc.Load(state.size(), state.data()));
+    assert(!soc.PowerDownAt() && !soc.PowerHeldSince());
+    std::printf("PASS: Zire power press times roll back with a checkpoint and clear on reset and load\n");
+}
+int main() { test(deviceTypeTX); test(deviceTypeE2); zire(); }

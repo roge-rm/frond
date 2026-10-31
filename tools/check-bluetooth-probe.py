@@ -13,7 +13,7 @@ PAYLOAD_NAME = 'FrondBTReceived'
 
 
 def database_records(raw, name):
-    if len(raw) < 78 or raw[:32].rstrip(b'\0') != name.encode('ascii'):
+    if len(raw) < 78 or raw[:32].split(b'\0', 1)[0] != name.encode('ascii'):
         raise ValueError('wrong Palm database identity')
     if struct.unpack_from('>H', raw, 32)[0] & 1 or raw[60:68] != b'DATAFrBO':
         raise ValueError('expected a FrBO record database')
@@ -34,7 +34,7 @@ def read_records(path, name):
             if entry.is_dir() or entry.file_size < 78:
                 continue
             with archive.open(entry) as source:
-                if source.read(32).rstrip(b'\0') == name.encode('ascii'):
+                if source.read(32).split(b'\0', 1)[0] == name.encode('ascii'):
                     matches.append(entry)
         if len(matches) != 1 or matches[0].file_size > 1024 * 1024:
             raise ValueError('need exactly one bounded ' + name + ' database')

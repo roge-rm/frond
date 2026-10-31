@@ -35,7 +35,7 @@ SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy ./out/frond \
 ```
 
 Commands: `pen-down X Y`, `pen-move X Y`, `pen-up`, `key-down KEY`, `key-up KEY`,
-and `snapshot PATH`. For an attached infrared keyboard, `keyboard-down NAME` and
+and `snapshot PATH`. `keyboard-attach` and `keyboard-detach` plug the infrared keyboard in and out. For an attached infrared keyboard, `keyboard-down NAME` and
 `keyboard-up NAME` take SDL scancode names such as `Z` or `"Left Shift"`. Snapshot filenames may be quoted. Output directories must
 already exist. Key names are `home`, `calendar`, `contacts`, `web`, `up`, `down`,
 `left`, `right`, `center`, and `power`. Physical app-button names `hard1` through
