@@ -194,15 +194,15 @@ int main() {
             soc.SetAudioQueue(nullptr); // queues live for this short test process
             auto memory = soc.GetMemoryData(), flash = soc.GetNandData();
             SessionFile5 envelope;
-            envelope.SetDeviceType(0).SetDisplayMode(5).SetRamSize(ram)
+            envelope.SetDeviceName("palm-e2").SetDisplayMode(5).SetRamSize(ram)
                 .SetNor(rom.size(),rom.data()).SetNand(flash.size,flash.data)
                 .SetMemory(memory.size,memory.data).SetSavestate(saved.size(),saved.data());
             if (card) envelope.SetSd(sdCardData().size,sdCardData().data);
             assert(envelope.Serialize());
             SessionFile5 decoded;
             assert(decoded.Deserialize(envelope.GetSerializedSessionSize(),envelope.GetSerializedSession()));
-            assert(decoded.GetVersion() == (card ? 5u : 4u));
-            assert(decoded.GetDeviceType() == 0 && decoded.GetDisplayMode() == 5 && decoded.GetRamSize() == ram);
+            assert(decoded.GetVersion() == 6u);
+            assert(decoded.GetDeviceName() == "palm-e2" && decoded.GetDisplayMode() == 5 && decoded.GetRamSize() == ram);
             std::vector<uint8_t> freshNor(decoded.GetNorSize()), freshNand(decoded.GetNandSize());
             memcpy(freshNor.data(),decoded.GetNor(),freshNor.size());
             memcpy(freshNand.data(),decoded.GetNand(),freshNand.size());

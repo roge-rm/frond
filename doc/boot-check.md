@@ -4,7 +4,7 @@ Build with `make`, then run from the repository root with your own firmware:
 
 ```sh
 SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy ./out/frond \
-  --experimental-tx /path/to/Palm-TX-5.4-nor.bin \
+  --device palm-tx /path/to/Palm-TX-5.4-nor.bin \
   --nand /path/to/Palm-TX-5.4-nand.bin --no-sound --run-for 60 \
   --framebuffer-output /tmp/frond-tx-setup.png
 ```

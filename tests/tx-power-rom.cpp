@@ -32,7 +32,7 @@ struct Machine {
     void restore(const std::vector<uint8_t>& bytes) {
         SessionFile5 session;
         require(session.Deserialize(bytes.size(), bytes.data()), "invalid session");
-        require(session.GetDeviceType() == deviceTypeTX, "TX session required");
+        require(session.GetDeviceName() == "palm-tx", "TX session required");
         require(!session.GetSdSize(), "embedded SD requires test-tx-lifecycle-rom");
         auto copy = [](const void* data, size_t size) {
             return std::vector<uint8_t>(static_cast<const uint8_t*>(data),
@@ -52,7 +52,7 @@ struct Machine {
         auto state = soc->GetSavestate(), memory = soc->GetMemoryData();
         auto flash = soc->GetNandData(), rom = soc->GetRomData();
         SessionFile5 session;
-        session.SetDeviceType(deviceTypeTX).SetDisplayMode(6).SetRamSize(32 * 1024 * 1024)
+        session.SetDeviceName("palm-tx").SetDisplayMode(6).SetRamSize(32 * 1024 * 1024)
             .SetNor(rom.size, rom.data).SetNand(flash.size, flash.data)
             .SetMemory(memory.size, memory.data).SetSavestate(state.size, state.data);
         require(session.Serialize(), "session serialization failed");

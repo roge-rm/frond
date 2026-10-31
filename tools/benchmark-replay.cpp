@@ -100,7 +100,7 @@ int main(int argc, char** argv) {
         input.seekg(0);
         if (!input.read(reinterpret_cast<char*>(data.data()),data.size())) throw std::runtime_error("incomplete session");
         SessionFile5 session;
-        if (!session.Deserialize(data.size(),data.data()) || session.GetDeviceType()!=int(DeviceType5::deviceTypeTX))
+        if (!session.Deserialize(data.size(),data.data()) || session.GetDeviceName()!="palm-tx")
             throw std::runtime_error("complete TX session required");
         if (session.GetSdSize()) throw std::runtime_error("use a session without an SD image for this benchmark");
         std::vector<uint8_t> nor(session.GetNorSize()),nand(session.GetNandSize());

@@ -11,25 +11,33 @@ heavy build make device-profiles
 ./out/frond-device-profiles
 ```
 
-The JSON contains model names, stable session IDs, geometry and support status.
+The JSON contains each device's fixed name, display name, geometry and support status.
 It never scans firmware, sessions or a private ROM collection. `nor_bytes: null`
 means that the profile has no established fixed NOR size. It is not an invitation
 to load arbitrary firmware. `tx-desktop` names the experimental TX path and `e2-desktop` the Tungsten E2
 path in the desktop. `inherited-unverified` does not enable another desktop device.
 
-## Current inventory
+## Device names
 
-- `palm-tx`, session ID 3: existing TX desktop path, 16 MiB NOR, 138,412,032-byte
+Every device has a fixed name. Session files, desktop and Android settings, the
+control socket's `device-state` reply, the core's `--device` option and log output
+all use it. The core's internal device numbers are never saved or sent.
+
+- `palm-tx`: existing TX desktop path, 16 MiB NOR, 138,412,032-byte
   raw NAND (132 MiB, including spare bytes), 32 MiB RAM and 320×480 display.
-- `tungsten-e2`, ID 0: inherited E2 CLI model, 8 MiB NOR with its card header at
+  Raw firmware needs `--device palm-tx`.
+- `palm-e2`: inherited E2 model, 8 MiB NOR with its card header at
   0x20000, 34,603,008-byte raw NAND,
   16 or 32 MiB RAM and 320×320 display. Available in the desktop (`e2-desktop`).
-- `franken-e2`, ID 1: inherited patched E2 / Frankenpilot model, the same NAND
+  Found from its card header; `--device palm-e2` is optional.
+- `palm-e2-franken`: inherited patched E2 / Frankenpilot model, the same NAND
   geometry and RAM choices, with a 320×480 display. This is a patched model,
   not evidence of support for another retail Palm. Desktop qualification is pending.
-- `repalm`, ID 2: inherited paravirtualized model, no NAND, power-of-two RAM
+- `repalm`: inherited paravirtualized model, no NAND, power-of-two RAM
   sizes starting at 8 MiB and the eight inherited display modes. It requires
   matching paravirtualized firmware. Desktop qualification is pending.
+- `palm-zire-72`, `sony-clie-tg50`, `palm-iiix` and `palm-m515`: reserved for
+  coming devices. They have button bar art but no board, and the core refuses them.
 
 Other Palm OS devices have no native profile here. Sharing an ARM CPU, screen
 size or Palm OS version does not establish matching board wiring, flash layout,
@@ -39,9 +47,11 @@ this native inventory.
 ## Implementation and evidence
 
 Patch `0041-device-profiles.patch` adds `src/common/device_profile5.h` to the
-prepared source. It is shared by native device configuration, core firmware
-validation and the desktop's TX file checks. The four numeric device IDs and
-eight display IDs keep their existing session values. The catalogue contains
+prepared source, and patch `0101-device-names.patch` makes it the one device
+table: name, display name, detection, board, button bar art and capabilities.
+Native device configuration, ROM detection, core firmware validation, the control
+socket and the desktop's file checks and settings all look devices up there. The
+catalogue contains
 only constraints already in `device_configuration.cpp`, TX bring-up patch 0001
 and the inherited `RomInfo5` model recognition. No private dump metadata or
 firmware hashes were used to populate it.
@@ -52,16 +62,17 @@ when no image is supplied. TX raw boot continues to require an explicit NAND.
 There is no new flag to force an unverified device into the TX desktop path.
 
 Validation checks readable files, model identity where the inherited ROM parser
-recognises it, RAM/display choices and NOR/NAND geometry. Unknown session IDs,
+recognises it, RAM/display choices and NOR/NAND geometry. Unknown device names,
 recognised ROM/profile mismatches, corrupt session envelopes and overflowing
 RAM arguments are rejected. Truncated ROM header strings are bounded. Size
 checks cannot distinguish same-sized firmware dumps, authenticate a TX dump or
 prove that it boots. TX continues to use its explicit raw-image path because the
 inherited header parser does not identify its IPL/NAND layout.
 
-The 0.2.0 v4 envelope and v5 envelope with embedded SD retain their formats and
-IDs. Valid TX sessions need no migration. Synthetic tests exercise both readers
-and writers; they do not establish guest boot or a complete hardware restore.
+Session files are version 6: the header holds the device name in a 32-byte
+NUL-padded field. Sessions from earlier versions stored a number and are refused
+with a short message; there's no migration. Synthetic tests exercise the reader
+and writer; they do not establish guest boot or a complete hardware restore.
 
 ## Qualifying another cohort
 
@@ -89,9 +100,11 @@ available in the desktop and the other inherited cohorts are not.
 heavy build make -j4 test-device-profiles test-desktop
 ```
 
-The cohort tests cover all four existing models, invalid IDs, zero and
+The tests cover every device name, name to device to name round trips, refused
+unknown names and numbered sessions, invalid internal IDs, zero and
 non-power-of-two RAM, overflow, display ranges, raw NAND with and without spare
-bytes, mismatched profile tags, truncated ROM headers and v4/v5 sessions. The Qt
+bytes, mismatched profile tags, truncated ROM headers and named sessions with and
+without an SD card. The Qt
 file validator uses sparse synthetic files, including E2 header detection and
 refusal of a NOR image for the other device. CLI rejection tests stop before
 SoC construction or SDL startup. No firmware or proprietary app is needed.

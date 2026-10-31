@@ -91,6 +91,17 @@ class FirmwareInputTest : public QObject {
         QVERIFY(!frondFirmware::validateFiles(Device::tx, txPath, nandPath).isEmpty());
         QVERIFY(!frondFirmware::validateFiles(Device::tx, txPath, {}).isEmpty());
     }
+    void deviceNames() {
+        // Settings and the core get the fixed name; it round-trips, and other names detect.
+        for (auto device : {Device::tx, Device::e2})
+            QCOMPARE(frondFirmware::deviceFromId(frondFirmware::deviceId(device)), device);
+        QCOMPARE(frondFirmware::deviceId(Device::tx), QString("palm-tx"));
+        QCOMPARE(frondFirmware::deviceId(Device::e2), QString("palm-e2"));
+        QVERIFY(frondFirmware::deviceId(Device::automatic).isEmpty());
+        for (const char* other : {"", "1", "tungsten-e2", "palm-zire-72"})
+            QCOMPARE(frondFirmware::deviceFromId(other), Device::automatic);
+        QVERIFY(!frondFirmware::capabilities(Device::e2).serial && frondFirmware::capabilities(Device::tx).network);
+    }
 };
 QTEST_GUILESS_MAIN(FirmwareInputTest)
 #include "firmware-input.moc"

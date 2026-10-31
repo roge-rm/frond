@@ -29,7 +29,7 @@ int main(int argc, char** argv) {
             throw std::runtime_error("incomplete session read");
         SessionFile5 session;
         if (!session.Deserialize(data.size(), data.data()) ||
-            session.GetDeviceType() != int(DeviceType5::deviceTypeTX))
+            session.GetDeviceName() != "palm-tx")
             throw std::runtime_error("a saved TX session is required");
         std::vector<uint8_t> nor(session.GetNorSize()), nand(session.GetNandSize());
         std::memcpy(nor.data(), session.GetNor(), nor.size());

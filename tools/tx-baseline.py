@@ -216,7 +216,7 @@ def main():
         save()
         if args.nor:
             png = output / 'cold-boot.png'
-            command = heavy_command('emulator', [str(core), '--experimental-tx', str(inputs['nor']),
+            command = heavy_command('emulator', [str(core), '--device', 'palm-tx', str(inputs['nor']),
                        '--nand', str(inputs['nand']), '--no-sound', '--run-for', str(args.cold_seconds),
                        '--framebuffer-output', str(png)])
             if step('cold-boot', command, args.cold_seconds + 120, lambda: check_png(png)):

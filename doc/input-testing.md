@@ -29,7 +29,7 @@ Run a fixed startup replay after building:
 
 ```sh
 SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy ./out/frond \
-  --experimental-tx /path/to/Palm-TX-5.4-nor.bin \
+  --device palm-tx /path/to/Palm-TX-5.4-nor.bin \
   --nand /path/to/Palm-TX-5.4-nand.bin --no-sound --run-for 130 \
   --input-replay /path/to/input.replay
 ```

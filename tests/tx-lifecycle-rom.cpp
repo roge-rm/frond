@@ -66,11 +66,10 @@ struct Machine {
     void restore(const std::vector<uint8_t>& bytes) {
         SessionFile5 session;
         require(session.Deserialize(bytes.size(), bytes.data()), "invalid session");
-        require(session.GetVersion() == 4 || session.GetVersion() == 5,
-                "only complete outer session v4/v5 supported");
-        require(session.GetDeviceType() == deviceTypeTX, "TX session required");
+        require(session.GetVersion() == 6, "only complete outer session v6 supported");
+        require(session.GetDeviceName() == "palm-tx", "TX session required");
         const auto size = session.GetSdSize();
-        require(!size || (session.GetVersion() == 5 &&
+        require(!size || (
                     (size == (32u << 20) || size == (64u << 20) || size == (128u << 20))),
                 "unsupported embedded SD size");
         soc.reset();
@@ -107,7 +106,7 @@ struct Machine {
         auto rom = soc->GetRomData(), flash = soc->GetNandData();
         auto memory = soc->GetMemoryData(), state = soc->GetSavestate();
         SessionFile5 session;
-        session.SetDeviceType(deviceTypeTX).SetDisplayMode(int(soc->GetDisplayMode()))
+        session.SetDeviceName("palm-tx").SetDisplayMode(int(soc->GetDisplayMode()))
             .SetRamSize(soc->GetRamSize()).SetNor(rom.size, rom.data)
             .SetNand(flash.size, flash.data).SetMemory(memory.size, memory.data)
             .SetSavestate(state.size, state.data).SetSd(sd.size, sd.data)

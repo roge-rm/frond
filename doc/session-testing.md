@@ -3,7 +3,7 @@
 The native console accepts `save-session /path/to/tx.session` and `reset`.
 Restore a complete session with `./out/frond /path/to/tx.session`; the session
 selects the TX device automatically. Raw firmware startup still needs
-`--experimental-tx NOR --nand NAND`. Original firmware inputs are never rewritten.
+`--device palm-tx NOR --nand NAND`. Original firmware inputs are never rewritten.
 A session contains firmware, flash, RAM and CPU/peripheral state and stays outside Git.
 
 Patch 0006 adds serialization for PXA270 IMC, keypad, USB controller and WMMX,
@@ -126,7 +126,7 @@ timeout 600s heavy emulator ./build/test-tx-lifecycle-rom \
   --output /private/results/tx-audio-lifecycle
 ```
 
-The driver accepts complete v4/v5 TX sessions and embedded 32/64/128 MiB cards.
+The driver accepts complete v6 `palm-tx` sessions and embedded 32/64/128 MiB cards.
 It copies inputs, preserves card attachment and backing bytes, records per-phase
 PCM, and round-trips awake and sleeping state into fresh SoCs. A plain fixture
 must enter true power sleep; an audio fixture requires nonzero PCM before/after

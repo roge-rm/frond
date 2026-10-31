@@ -24,8 +24,8 @@ spec.loader.exec_module(runner)
 
 def fake_core():
     print(os.getpid(), flush=True)
-    raw = sys.argv[1] == '--experimental-tx'
-    session = Path(sys.argv[4] if raw else sys.argv[1])
+    raw = sys.argv[1] == '--device'
+    session = Path(sys.argv[5] if raw else sys.argv[1])
     config = json.loads(session.open().readline() if raw else session.read_text())
     if config.get('mutate_core'):
         Path(config['mutate_core']).write_text('changed original executable')

@@ -37,7 +37,7 @@ int main(int argc, char** argv) {
             throw std::runtime_error("incomplete session read");
         SessionFile5 session;
         if (!session.Deserialize(data.size(), data.data()) ||
-            session.GetDeviceType() != int(DeviceType5::deviceTypeTX))
+            session.GetDeviceName() != "palm-tx")
             throw std::runtime_error("a saved TX session is required");
         if (session.GetSdSize())
             throw std::runtime_error("embedded SD is unsupported by this benchmark; use test-tx-lifecycle-rom for lifecycle checks");

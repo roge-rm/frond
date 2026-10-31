@@ -230,28 +230,30 @@ private fun SessionRow(
 ) {
     val context = LocalContext.current
     var menu by remember { mutableStateOf(false) }
-    val detail = if (s.saved) {
+    val detail = if (s.old) {
+        listOfNotNull(s.device?.label, "Saved by an older Frond").joinToString(" · ")
+    } else if (s.saved) {
         val at = DateUtils.formatDateTime(
             context, s.savedAt,
             DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_SHOW_TIME or DateUtils.FORMAT_ABBREV_MONTH,
         )
-        "${s.device.label} · Saved $at · ${Formatter.formatShortFileSize(context, s.size)}"
-    } else "${s.device.label} · Not saved"
+        "${s.device?.label} · Saved $at · ${Formatter.formatShortFileSize(context, s.size)}"
+    } else "${s.device?.label} · Not saved"
     ListItem(
         headlineContent = { Text(s.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
         supportingContent = { Text(detail, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-        leadingContent = { Marker(if (s.saved) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant) },
+        leadingContent = { Marker(if (s.saved && !s.old) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant) },
         trailingContent = {
             Box {
                 IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, contentDescription = "More") }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                    DropdownMenuItem(text = { Text("Rename") }, onClick = { menu = false; onRename(s) })
-                    DropdownMenuItem(text = { Text("Export") }, enabled = s.saved, onClick = { menu = false; onExport(s) })
+                    DropdownMenuItem(text = { Text("Rename") }, enabled = !s.old, onClick = { menu = false; onRename(s) })
+                    DropdownMenuItem(text = { Text("Export") }, enabled = s.saved && !s.old, onClick = { menu = false; onExport(s) })
                     DropdownMenuItem(text = { Text("Delete") }, onClick = { menu = false; onDelete(s) })
                 }
             }
         },
-        modifier = Modifier.clickableRow(onClick = onOpen, onLongClick = { onRename(s) }),
+        modifier = Modifier.clickableRow(onClick = onOpen, onLongClick = { if (!s.old) onRename(s) }),
     )
 }
 

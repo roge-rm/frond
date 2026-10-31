@@ -11,7 +11,7 @@ parser.add_argument("binary")
 parser.add_argument("nor")
 parser.add_argument("nand")
 args = parser.parse_args()
-command = [args.binary, "--experimental-tx", args.nor, "--nand", args.nand,
+command = [args.binary, "--device", "palm-tx", args.nor, "--nand", args.nand,
            "--no-sound", "--run-for", "1"]
 cases = {
     "negative-time": "-1 pen-up\n",

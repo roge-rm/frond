@@ -1,4 +1,4 @@
-# Frond 0.5.1 desktop
+# Frond 0.6.0 desktop
 
 Frond's Qt 6 launcher provides desktop controls alongside the SDL Palm display.
 The Palm display remains a separate window in this release. Firmware is supplied
@@ -16,7 +16,7 @@ a connected controller. Bluetooth is off by default. See [peripherals](periphera
 Install the locally built package:
 
 ```sh
-sudo apt install ./frond_0.5.1-1_amd64.deb
+sudo apt install ./frond_0.6.0-1_amd64.deb
 ```
 
 Launch **Frond** from Plasma's application menu. On first use, choose an existing
@@ -43,6 +43,8 @@ Working copies are stored under `$XDG_DATA_HOME/frond/sessions`, normally
 `~/.local/share/frond/sessions`. Imported session files and firmware images are
 not overwritten. Each import gets its own working copy on save. **File → Save
 Session** updates the working copy; **Save a Copy** writes a separate snapshot.
+A session names its device, `palm-tx` or `palm-e2`. Sessions from earlier Frond
+versions stored a number instead and won't open; start again from firmware.
 Session files contain firmware, installed applications and Palm user data.
 
 The last-session setting is updated only after a successful working-copy save.
@@ -198,7 +200,7 @@ make deb
 `out/frond-desktop` finds `out/frond` beside it. The installed launcher uses
 `/usr/lib/frond/frond-core`. For development, `--core /absolute/path/to/frond`
 selects another binary. `frond-desktop /path/to/file.frond` opens that session;
-`--version` reports 0.5.1. `make out/frond` builds only the SDL emulator.
+`--version` reports 0.6.0. `make out/frond` builds only the SDL emulator.
 
 The Debian package derives shared-library dependencies from the binaries and
 includes Qt's platform and Wayland plugins. It contains no firmware, PRC,

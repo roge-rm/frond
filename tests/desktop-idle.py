@@ -42,12 +42,13 @@ def digest(path):
 
 
 def session_memory(path):
-    """Read v4/v5 session RAM without modifying/restoring the guest."""
+    """Read v6 session RAM without modifying/restoring the guest."""
     data = path.read_bytes()
     magic, version = struct.unpack_from('<II', data)
-    require(magic == 0x19800819 and version in (4, 5), 'need v4/v5 saved session')
-    header = 44 if version == 5 else 40
-    sizes = struct.unpack_from('<' + 'I' * (6 if version == 5 else 5), data, 20)
+    require(magic == 0x19800819 and version == 6, 'need a v6 saved session')
+    # Magic, version, 32-byte device name, display, RAM size, then six section sizes.
+    header = 72
+    sizes = struct.unpack_from('<6I', data, 48)
     decoder = zlib.decompressobj()
     payload = decoder.decompress(data[header:], 512 * 1024 * 1024 + 1)
     require(decoder.eof and len(payload) == sum(sizes), 'invalid session compression/length')

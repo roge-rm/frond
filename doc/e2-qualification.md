@@ -24,7 +24,7 @@ heavy build make check-reconstruction
 RAM and card data, at both 16 and 32 MiB RAM. It checks queued GPIO app/navigation/
 power keys, release of obsolete queued host input after restore, direct GPIO50
 pen detection including the silkscreen area, the RAM
-probe mirror, actual LCD DMA rendering, v4/v5 envelope round trips, fresh-SoC
+probe mirror, actual LCD DMA rendering, named `palm-e2` session round trips, fresh-SoC
 RAM/LCD/card restoration, reset with retained RAM/card detect, audio queue
 clearing, and atomic rejection of truncated or missing-codec peripheral state.
 It does not execute Palm firmware or establish usable guest applications.

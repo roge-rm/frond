@@ -11,7 +11,7 @@ the [README](../README.md).
 ## Firmware and startup
 
 ```sh
-./out/frond --experimental-tx /path/to/Palm-TX-5.4-nor.bin \
+./out/frond --device palm-tx /path/to/Palm-TX-5.4-nor.bin \
   --nand /path/to/Palm-TX-5.4-nand.bin
 ```
 
@@ -20,8 +20,8 @@ The TX configuration uses 32 MiB RAM, a PXA270 and a 320 × 480 display. It expe
 bytes. NOR and NAND inputs are copied into process memory and are not overwritten.
 
 The TX NOR contains an IPL rather than the Palm card header used by E2 detection,
-so raw TX firmware needs the explicit flag. Saved sessions select their own
-device type. See the [boot smoke test](boot-check.md) for bounded headless runs.
+so raw TX firmware needs `--device palm-tx`. Saved sessions name their own
+device. See the [boot smoke test](boot-check.md) for bounded headless runs.
 
 Firmware layout validation can be run separately:
 

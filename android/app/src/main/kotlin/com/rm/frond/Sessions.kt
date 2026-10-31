@@ -10,13 +10,16 @@ import java.util.UUID
 
 // A saved Palm. The core writes and reads <id>.frond (SessionFile5); <id>.json holds its name,
 // device and times. A session that hasn't been saved yet starts from the device's firmware.
+// An old one was saved by an earlier Frond (a numbered session file or a device name this
+// version doesn't know, then device is null); it can only be deleted.
 data class Session(
     val id: String,
     val name: String,
-    val device: Device,
+    val device: Device?,
     val created: Long,
     val used: Long,
     val file: File,
+    val old: Boolean = false,
 ) {
     val saved: Boolean get() = file.isFile
     val savedAt: Long get() = file.lastModified()
@@ -24,9 +27,12 @@ data class Session(
 }
 
 object Sessions {
-    // SessionFile5's magic and newest version, in common/session/session_file5.cpp.
+    // SessionFile5's magic and newest version, in common/session/session_file5.cpp. Version 6 is the
+    // first to name the device; earlier ones are refused.
     private const val MAGIC = 0x19800819L
-    private const val VERSION = 5L
+    private const val VERSION = 6L
+    private const val FIRST_NAMED_VERSION = 6L
+    private const val DEVICE_NAME_SIZE = 32
 
     fun folder(context: Context) = File(context.filesDir, "sessions").also { it.mkdirs() }
 
@@ -59,14 +65,12 @@ object Sessions {
             }
             if (read32() != MAGIC) return null
             val version = read32()
-            if (version !in 1..VERSION) return null
-            read32() // device type
-            if (version > 3) read32() // display mode
-            if (version > 1) read32() // RAM size
+            if (version !in FIRST_NAMED_VERSION..VERSION) return null
+            input.readFully(ByteArray(DEVICE_NAME_SIZE)) // device name
+            read32(); read32() // display mode, RAM size
             val metadataSize = read32()
             val norSize = read32()
-            read32(); read32(); read32() // NAND, memory, savestate
-            if (version >= 5) read32() // SD
+            read32(); read32(); read32(); read32() // NAND, memory, savestate, SD
             val inflated = java.util.zip.InflaterInputStream(input, java.util.zip.Inflater(), 1 shl 16)
             val digest = java.security.MessageDigest.getInstance("MD5")
             val buffer = ByteArray(1 shl 16)
@@ -91,15 +95,18 @@ object Sessions {
 
     fun read(context: Context, id: String): Session? = try {
         val json = JSONObject(meta(context, id).readText())
-        val device = Device.byId(json.getString("device")) ?: throw IOException("unknown device")
-        Session(id, json.getString("name"), device, json.getLong("created"), json.optLong("used"), data(context, id))
+        val device = Device.byId(json.getString("device"))
+        val file = data(context, id)
+        val old = device == null || (file.isFile && (header(file)?.version ?: 0L) < FIRST_NAMED_VERSION)
+        Session(id, json.getString("name"), device, json.getLong("created"), json.optLong("used"), file, old)
     } catch (e: Exception) {
         null
     }
 
     private fun write(context: Context, s: Session) {
+        val device = s.device ?: throw IOException("old session")
         val json = JSONObject()
-            .put("name", s.name).put("device", s.device.id)
+            .put("name", s.name).put("device", device.id)
             .put("created", s.created).put("used", s.used)
         val file = meta(context, s.id)
         val temporary = File(file.path + ".tmp")
@@ -204,8 +211,7 @@ object Sessions {
         val meta = recoveryMeta(context)
         try {
             if (!file.isFile || !meta.isFile) return null
-            val type = header(file)?.third ?: return null
-            val device = Device.byCoreType(type.toInt()) ?: return null
+            val device = Device.byId(header(file)?.device) ?: return null
             val from = try { JSONObject(meta.readText()).getString("name") } catch (e: Exception) { device.label }
             val id = UUID.randomUUID().toString()
             if (!file.renameTo(data(context, id))) return null
@@ -223,14 +229,25 @@ object Sessions {
         }
     }
 
-    // Reads the session header: magic, version and device type, all little-endian 32-bit.
-    private fun header(file: File): Triple<Long, Long, Long>? = try {
+    private class Header(val magic: Long, val version: Long, val device: String?)
+
+    // Reads the session header: little-endian 32-bit magic and version, then the device's fixed
+    // name, NUL-padded to 32 bytes. Versions before 6 have no name.
+    private fun header(file: File): Header? = try {
         java.io.DataInputStream(file.inputStream()).use { input ->
-            val b = ByteArray(12)
-            input.readFully(b)
+            val b = ByteArray(8 + DEVICE_NAME_SIZE)
+            input.readFully(b, 0, 8)
             fun at(i: Int) = (b[i].toLong() and 0xff) or ((b[i + 1].toLong() and 0xff) shl 8) or
                 ((b[i + 2].toLong() and 0xff) shl 16) or ((b[i + 3].toLong() and 0xff) shl 24)
-            Triple(at(0), at(4), at(8))
+            val version = at(4)
+            val device = if (version >= FIRST_NAMED_VERSION) {
+                input.readFully(b, 8, DEVICE_NAME_SIZE)
+                val name = b.copyOfRange(8, b.size)
+                String(name, 0, name.indexOf(0).let { if (it < 0) name.size else it }, Charsets.US_ASCII)
+            } else {
+                null
+            }
+            Header(at(0), version, device)
         }
     } catch (e: IOException) {
         null
@@ -242,11 +259,12 @@ object Sessions {
         // Copied to .part and renamed after the checks, so a stopped import leaves no session behind.
         val target = File(data(context, id).path + ".part")
         if (!Firmware.copy(context, from, target)) return "Couldn't read that file."
-        val (magic, version, type) = header(target) ?: Triple(0L, 0L, -1L)
-        val device = Device.byCoreType(type.toInt())
+        val header = header(target) ?: Header(0L, 0L, null)
+        val device = Device.byId(header.device)
         val error = when {
-            magic != MAGIC -> "That isn't a Frond session."
-            version > VERSION -> "That session is from a newer Frond."
+            header.magic != MAGIC -> "That isn't a Frond session."
+            header.version > VERSION -> "That session is from a newer Frond."
+            header.version < FIRST_NAMED_VERSION -> "That session is from an older Frond and can't be opened."
             device == null || device !in Device.shown -> "That session is for a device Frond can't run here yet."
             else -> null
         }
