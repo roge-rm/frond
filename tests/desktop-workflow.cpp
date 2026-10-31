@@ -8,7 +8,14 @@
 #include <QComboBox>
 #include <QCheckBox>
 #include <QLineEdit>
-#include <QRadioButton>
+#include <QListWidget>
+#include <QStandardPaths>
+#include <QToolButton>
+#include <QMenu>
+#include <QInputDialog>
+#include "Dialogs.h"
+#include "FirmwareStore.h"
+#include "SessionStore.h"
 #include <QMessageBox>
 #include <QTimer>
 #include <QAction>
@@ -347,62 +354,53 @@ for line in s.makefile('rb'):
             QFile file(core.fileName() + suffix);
             return file.open(QIODevice::ReadOnly) ? QString::fromUtf8(file.readAll()) : QString();
         };
+        const auto firmwareRoot = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/frond/firmware";
+        {
+            // A TX choice with an E2 NOR is refused and nothing is stored.
+            FirmwareDialog dialog(firmwareRoot, frondFirmware::Device::tx);
+            dialog.findChild<QLineEdit*>("nor")->setText(norPath);
+            QVERIFY(dialog.importImages().contains("Tungsten E2"));
+            QVERIFY(!QFileInfo::exists(firmwareRoot + "/palm-tx"));
+            QVERIFY(!QFileInfo::exists(firmwareRoot + "/palm-e2"));
+        }
         MainWindow window(core.fileName()); window.show();
-        auto* device = window.findChild<QComboBox*>("device"); QVERIFY(device);
-        auto* start = window.findChild<QPushButton*>("start");
         auto* stop = window.findChild<QPushButton*>("stop");
-        // A TX choice with an E2 NOR is refused and nothing starts.
-        window.findChild<QLineEdit*>("nor")->setText(norPath);
-        window.findChild<QLineEdit*>("nand")->setText({});
-        for (auto* radio : window.findChildren<QRadioButton*>()) if (radio->text().startsWith("Start")) radio->setChecked(true);
-        device->setCurrentIndex(device->findText("Palm TX"));
-        // The launcher greys the unsupported settings once the device is settled, before Start.
-        const QStringList gated{"serialMode"};
-        auto gatedWidget = [&](const QString& name) { return window.findChild<QWidget*>(name); };
-        for (const auto& name : gated) QVERIFY2(gatedWidget(name)->isEnabled(), qPrintable(name));
-        for (const char* mode : {"Detect from the NOR image", "Tungsten E2"}) {
-            device->setCurrentIndex(device->findText(mode));
-            for (const auto& name : gated) {
-                QVERIFY2(!gatedWidget(name)->isEnabled(), qPrintable(name));
-                QVERIFY2(gatedWidget(name)->toolTip().contains("Not available on the Tungsten E2 yet"), qPrintable(name));
-            }
-            QVERIFY(!window.findChild<QSpinBox*>("serialPort")->isEnabled());
-            QVERIFY(!window.findChild<QSpinBox*>("usbPort")->isEnabled());
-        }
-        // The saved values stay while they are greyed.
-        QCOMPARE(window.findChild<QComboBox*>("serialMode")->currentData().toString(), QString("tcp"));
-        QCOMPARE(window.findChild<QComboBox*>("usbMode")->currentData().toString(), QString("pty"));
-        QVERIFY(window.findChild<QCheckBox*>("fastAudio")->isChecked());
-        device->setCurrentIndex(device->findText("Palm TX"));
-        for (const auto& name : gated) {
-            QVERIFY2(gatedWidget(name)->isEnabled(), qPrintable(name));
-            QVERIFY2(!gatedWidget(name)->toolTip().contains("Not available"), qPrintable(name));
-        }
-        QVERIFY(window.findChild<QSpinBox*>("serialPort")->isEnabled());
-        QString shown;
+        QVERIFY(window.findChild<QLabel*>("emptyNote")->isVisible());
+        // Add device lists the E2 as needing firmware, opens Firmware with it chosen, and starts it
+        // once the firmware is imported. Detecting the device from the NOR picks the E2 by name.
+        QString addText, firmwareDevice;
         QTimer dialogPoll;
         dialogPoll.setInterval(50);
         connect(&dialogPoll, &QTimer::timeout, &window, [&] {
-            if (auto* box = window.findChild<QMessageBox*>(); box && box->isVisible()) { shown = box->text(); box->done(QMessageBox::Ok); }
+            if (auto* add = window.findChild<AddDeviceDialog*>(); add && add->isVisible()) {
+                auto* devices = add->findChild<QListWidget*>("devices");
+                addText = devices->item(1)->text();
+                devices->setCurrentRow(1);
+                emit devices->itemActivated(devices->item(1));
+            } else if (auto* firmware = window.findChild<FirmwareDialog*>(); firmware && firmware->isVisible()) {
+                firmwareDevice = firmware->findChild<QComboBox*>("device")->currentData().toString();
+                firmware->findChild<QLineEdit*>("nor")->setText(norPath);
+                firmware->findChild<QPushButton*>("import")->click();
+            }
         });
         dialogPoll.start();
-        start->click();
-        QTRY_VERIFY_WITH_TIMEOUT(shown.contains("Tungsten E2"), 5000);
-        QVERIFY(read(".args").isEmpty());
-        // Detecting the device from the NOR starts the E2 by name, with no NAND when it's empty.
-        device->setCurrentIndex(0);
-        start->click();
+        window.findChild<QPushButton*>("addDevice")->click();
         QTRY_VERIFY_WITH_TIMEOUT(stop->isEnabled(), 5000);
         dialogPoll.stop();
+        QCOMPARE(addText, QString("Tungsten E2\nNeeds firmware"));
+        QCOMPARE(firmwareDevice, QString("palm-e2"));
+        QVERIFY(QFileInfo::exists(firmwareRoot + "/palm-e2/nor.bin"));
+        QVERIFY(!QFileInfo::exists(firmwareRoot + "/palm-e2/nand.bin"));
         const auto args = read(".args").split('\n');
         QCOMPARE(args.value(0), QString("--device"));
         QCOMPARE(args.value(1), QString("palm-e2"));
-        QCOMPARE(args.value(2), norPath);
+        QCOMPARE(args.value(2), firmwareRoot + "/palm-e2/nor.bin");
         QVERIFY(!args.contains("--nand"));
         QVERIFY(args.contains("--fast-audio"));
         // Leave automatic sizing to the core, which knows the restored device and display.
         QVERIFY(!args.contains("--window-scale") && !args.contains("--smooth-lcd"));
         QVERIFY(!QSettings().contains("windowScale"));
+        QCOMPARE(window.windowTitle(), QString("Tungsten E2"));
         QTRY_VERIFY_WITH_TIMEOUT(read(".commands").contains("sd-state"), 5000);
         QTRY_VERIFY_WITH_TIMEOUT(read(".commands").contains("network-state"), 5000);
         // TX-only network/serial controls stay off; the E2 keyboard and USB are usable.
@@ -412,6 +410,8 @@ for line in s.makefile('rb'):
         QTRY_VERIFY_WITH_TIMEOUT(read(".commands").contains("keyboard-attach"), 5000);
         QTRY_VERIFY(window.findChild<QCheckBox*>("keyboardAttached")->isChecked());
         QVERIFY(!window.findChild<QComboBox*>("serialMode")->isEnabled());
+        QVERIFY(window.findChild<QComboBox*>("serialMode")->toolTip().contains("Not available on the Tungsten E2 yet"));
+        QVERIFY(!window.findChild<QSpinBox*>("serialPort")->isEnabled());
         QTRY_VERIFY(window.findChild<QComboBox*>("usbMode")->isEnabled());
         QVERIFY(!read(".commands").contains("serial-state"));
         QTRY_VERIFY_WITH_TIMEOUT(read(".commands").contains("usb-state"), 5000);
@@ -420,16 +420,37 @@ for line in s.makefile('rb'):
         QVERIFY(!window.findChild<QComboBox*>("usbMode")->toolTip().contains("Not available"));
         // A NAND file is passed on when given.
         window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        // With firmware stored the E2 is Ready, and a NAND file is stored and passed on when given.
+        {
+            FirmwareDialog dialog(firmwareRoot, frondFirmware::Device::e2);
+            dialog.findChild<QLineEdit*>("nor")->setText(norPath);
+            dialog.findChild<QLineEdit*>("nand")->setText(nandPath);
+            QVERIFY(dialog.importImages().isEmpty());
+            QCOMPARE(dialog.imported(), frondFirmware::Device::e2);
+        }
         MainWindow second(core.fileName()); second.show();
-        for (auto* radio : second.findChildren<QRadioButton*>()) if (radio->text().startsWith("Start")) radio->setChecked(true);
-        second.findChild<QLineEdit*>("nor")->setText(norPath);
-        second.findChild<QLineEdit*>("nand")->setText(nandPath);
-        auto* secondDevice = second.findChild<QComboBox*>("device");
-        secondDevice->setCurrentIndex(secondDevice->findText("Tungsten E2"));
-        second.findChild<QPushButton*>("start")->click();
+        QCOMPARE(second.findChild<QListWidget*>("sessionList")->count(), 1);
+        QCOMPARE(second.findChild<QListWidget*>("sessionList")->currentItem()->data(Qt::UserRole + 1).toBool(), true);
+        QVERIFY(!second.findChild<QPushButton*>("start")->isEnabled());
+        QString secondText;
+        QTimer secondPoll;
+        secondPoll.setInterval(50);
+        connect(&secondPoll, &QTimer::timeout, &second, [&] {
+            if (auto* add = second.findChild<AddDeviceDialog*>(); add && add->isVisible()) {
+                auto* devices = add->findChild<QListWidget*>("devices");
+                secondText = devices->item(1)->text();
+                devices->setCurrentRow(1);
+                emit devices->itemActivated(devices->item(1));
+            }
+        });
+        secondPoll.start();
+        second.findChild<QPushButton*>("addDevice")->click();
         QTRY_VERIFY_WITH_TIMEOUT(second.findChild<QPushButton*>("stop")->isEnabled(), 5000);
-        QVERIFY(read(".args").contains("--nand\n" + nandPath));
+        secondPoll.stop();
+        QCOMPARE(secondText, QString("Tungsten E2\nReady"));
+        QVERIFY(read(".args").contains("--nand\n" + firmwareRoot + "/palm-e2/nand.bin"));
         QVERIFY(read(".args").contains("--device\npalm-e2\n"));
+        QCOMPARE(second.windowTitle(), QString("Tungsten E2 2"));
         second.close(); QTRY_VERIFY_WITH_TIMEOUT(!second.isVisible(), 5000);
         // The serial, USB and fast audio settings made before the E2 session are still saved.
         QCOMPARE(QSettings().value("serialMode").toString(), QString("tcp"));
@@ -730,6 +751,347 @@ for line in s.makefile('rb'):
             QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
         }
         QCOMPARE(digest(source), original);
+    }
+    // Sessions in the managed folder, written the way the core does (magic, version, device name).
+    static QByteArray sessionBytes(quint32 version, const QByteArray& device) {
+        QByteArray bytes;
+        for (quint32 value : {0x19800819u, version})
+            for (int i = 0; i < 4; i++) bytes.append(char(value >> (8 * i)));
+        return bytes + device.leftJustified(32, '\0', true) + "body";
+    }
+    static QString managedFolder() {
+        return QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/frond/sessions";
+    }
+    static void putSession(const QString& name, quint32 version, const QByteArray& device, int daysAgo) {
+        QDir().mkpath(managedFolder());
+        QFile file(managedFolder() + "/" + name + ".frond");
+        QVERIFY(file.open(QIODevice::WriteOnly)); file.write(sessionBytes(version, device)); file.close();
+        QVERIFY(file.open(QIODevice::ReadWrite));
+        QVERIFY(file.setFileTime(QDateTime::currentDateTime().addDays(-daysAgo), QFileDevice::FileModificationTime));
+    }
+    static QStringList rowTexts(MainWindow& window, const QString& label) {
+        QStringList texts;
+        auto* list = window.findChild<QListWidget*>("sessionList");
+        for (int i = 0; i < list->count(); i++) texts << list->itemWidget(list->item(i))->findChild<QLabel*>(label)->text();
+        return texts;
+    }
+    static void rowAction(MainWindow& window, int row, const QString& action) {
+        auto* list = window.findChild<QListWidget*>("sessionList");
+        auto* menu = list->itemWidget(list->item(row))->findChild<QPushButton*>("rowMenu")->menu();
+        for (auto* a : menu->actions()) if (a->objectName() == action) { QVERIFY(a->isEnabled()); a->trigger(); return; }
+        QFAIL("no such row action");
+    }
+    void sessionListRows() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        putSession("Trip", 6, "palm-tx", 1);
+        putSession("Work", 6, "palm-e2", 0);
+        putSession("Ancient", 5, "palm-tx", 2);
+        QVERIFY(frondSessions::create(managedFolder(), "Fresh", "palm-tx"));
+        QFile marker(managedFolder() + "/Fresh.frond.new");
+        QVERIFY(marker.open(QIODevice::ReadWrite)); marker.setFileTime(QDateTime::currentDateTime().addSecs(60), QFileDevice::FileModificationTime);
+        MainWindow window{QString()}; window.show();
+        auto* list = window.findChild<QListWidget*>("sessionList");
+        QCOMPARE(rowTexts(window, "sessionName"), QStringList({"Fresh", "Work", "Trip", "Ancient"}));
+        const auto detail = rowTexts(window, "sessionDetail");
+        QCOMPARE(detail[0], QString::fromUtf8("Palm TX · Not saved"));
+        QVERIFY(detail[1].startsWith(QString::fromUtf8("Tungsten E2 · Saved ")));
+        QVERIFY(detail[1].endsWith(QString::fromUtf8(" · ") + QLocale().formattedDataSize(sessionBytes(6, "palm-e2").size())));
+        QVERIFY(detail[2].startsWith(QString::fromUtf8("Palm TX · Saved ")));
+        QCOMPARE(detail[3], QString("Saved by an older Frond"));  // a version 5 file names no device
+        QVERIFY(!window.findChild<QLabel*>("emptyNote")->isVisible());
+        // The old one can only be deleted.
+        list->setCurrentRow(3);
+        QVERIFY(!window.findChild<QPushButton*>("start")->isEnabled());
+        auto* menu = list->itemWidget(list->item(3))->findChild<QPushButton*>("rowMenu")->menu();
+        for (auto* a : menu->actions()) QCOMPARE(a->isEnabled(), a->objectName() == "deleteSession");
+        // The unsaved one can't be exported.
+        menu = list->itemWidget(list->item(0))->findChild<QPushButton*>("rowMenu")->menu();
+        for (auto* a : menu->actions()) QCOMPARE(a->isEnabled(), a->objectName() != "exportSession");
+        list->setCurrentRow(1);
+        QVERIFY(window.findChild<QPushButton*>("start")->isEnabled());
+        QDir(managedFolder()).removeRecursively();
+        MainWindow empty{QString()};
+        QVERIFY(empty.findChild<QListWidget*>("sessionList")->count() == 0);
+        empty.show();
+        QVERIFY(empty.findChild<QLabel*>("emptyNote")->isVisible());
+        QVERIFY(!empty.findChild<QPushButton*>("start")->isEnabled());
+        QSettings().clear();
+    }
+    void sessionStartFromList() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        putSession("Trip", 6, "palm-tx", 1);
+        QTemporaryDir files;
+        QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly));
+        core.write(R"PY(#!/usr/bin/python3
+import pathlib,socket,sys
+pathlib.Path(sys.argv[0]+'.args').write_text('\n'.join(sys.argv[1:]))
+s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+for line in s.makefile('rb'):
+    i,cmd,arg=line.rstrip(b'\n').split(b'\t')
+    message={b'keyboard-state':b'detached',b'network-state':b'disabled',b'sd-state':b'none',b'device-state':b'palm-tx'}.get(cmd,b'done')
+    if cmd==b'save': pathlib.Path(bytes.fromhex(arg.decode()).decode()).write_text('saved')
+    s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
+    if cmd==b'quit': break
+)PY");
+        core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        MainWindow window(core.fileName()); window.show();
+        auto* list = window.findChild<QListWidget*>("sessionList");
+        QCOMPARE(list->count(), 1);
+        emit list->itemActivated(list->item(0));
+        QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("stop")->isEnabled(), 5000);
+        QFile args(core.fileName() + ".args"); QVERIFY(args.open(QIODevice::ReadOnly));
+        QCOMPARE(QString::fromUtf8(args.readAll()).split('\n').value(0), QFileInfo(managedFolder() + "/Trip.frond").canonicalFilePath());
+        QVERIFY(QFileInfo::exists(managedFolder() + "/Trip.frond.lock"));
+        QVERIFY(!window.findChild<QWidget*>("home")->isVisible());
+        QVERIFY(window.findChild<QWidget*>("running")->isVisible());
+        QCOMPARE(window.windowTitle(), QString("Trip"));
+        window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        // The core's save went into the same session, and it is the one that resumes.
+        QCOMPARE(QSettings().value("lastSession").toString(), QFileInfo(managedFolder() + "/Trip.frond").canonicalFilePath());
+        QDir(managedFolder()).removeRecursively();
+        QSettings().clear();
+    }
+    void sessionRenameDelete() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        putSession("Trip", 6, "palm-tx", 1);
+        putSession("Work", 6, "palm-e2", 0);
+        MainWindow window{QString()}; window.show();
+        auto* list = window.findChild<QListWidget*>("sessionList");
+        QString text, name;
+        QTimer poll;
+        poll.setInterval(30);
+        QMessageBox::StandardButton answer = QMessageBox::Cancel;
+        connect(&poll, &QTimer::timeout, &window, [&] {
+            if (auto* input = window.findChild<QInputDialog*>(); input && input->isVisible()) {
+                name = input->textValue(); input->setTextValue(text); input->accept();
+            } else if (auto* box = window.findChild<QMessageBox*>(); box && box->isVisible()) {
+                name = box->text();
+                if (auto* button = box->button(answer)) button->click(); else box->done(answer);
+            }
+        });
+        poll.start();
+        // Rename (row 0 is Work, the newest).
+        text = "Journal";
+        rowAction(window, 0, "renameSession");
+        QTRY_COMPARE(rowTexts(window, "sessionName"), QStringList({"Journal", "Trip"}));
+        QCOMPARE(name, QString("Work"));
+        QVERIFY(QFileInfo::exists(managedFolder() + "/Journal.frond") && !QFileInfo::exists(managedFolder() + "/Work.frond"));
+        QCOMPARE(list->currentItem()->data(Qt::UserRole).toString(), managedFolder() + "/Journal.frond");
+        // A name in use is refused and says so.
+        text = "Trip"; name.clear();
+        rowAction(window, 0, "renameSession");
+        QTRY_VERIFY(name.contains("already a session called Trip"));
+        QVERIFY(QFileInfo::exists(managedFolder() + "/Journal.frond"));
+        // Delete asks first.
+        name.clear(); answer = QMessageBox::Cancel;
+        rowAction(window, 1, "deleteSession");
+        QTRY_COMPARE(name, QString("Delete Trip?"));
+        QCOMPARE(list->count(), 2);
+        QVERIFY(QFileInfo::exists(managedFolder() + "/Trip.frond"));
+        answer = QMessageBox::Yes;
+        rowAction(window, 1, "deleteSession");
+        QTRY_COMPARE(list->count(), 1);
+        QVERIFY(!QFileInfo::exists(managedFolder() + "/Trip.frond"));
+        poll.stop();
+        QDir(managedFolder()).removeRecursively();
+        QSettings().clear();
+    }
+    // A real mouse click (routed by the window, so by childAt) on a row's "..." opens its menu.
+    void rowMenuClick() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        putSession("Trip", 6, "palm-tx", 1);
+        MainWindow window{QString()}; window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        auto* list = window.findChild<QListWidget*>("sessionList");
+        auto* more = list->itemWidget(list->item(0))->findChild<QPushButton*>("rowMenu");
+        QTest::mouseClick(window.windowHandle(), Qt::LeftButton, {}, more->mapTo(&window, more->rect().center()));
+        QTRY_VERIFY(qobject_cast<QMenu*>(QApplication::activePopupWidget()));
+        QCOMPARE(QApplication::activePopupWidget(), more->menu());
+        QApplication::activePopupWidget()->close();
+        QDir(managedFolder()).removeRecursively();
+        QSettings().clear();
+    }
+    // Opening a row asks for missing firmware once, also when the dialog is cancelled.
+    void rowActivateOnce() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        QDir(QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/frond/firmware").removeRecursively();
+        QVERIFY(frondSessions::create(managedFolder(), "Fresh", "palm-tx"));
+        QTemporaryDir files;
+        QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly)); core.write("#!/bin/sh\n"); core.close();
+        QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        MainWindow window(core.fileName()); window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        int shown = 0;
+        QTimer poll;
+        poll.setInterval(20);
+        connect(&poll, &QTimer::timeout, &window, [&] {
+            if (auto* firmware = window.findChild<FirmwareDialog*>(); firmware && firmware->isVisible()) { shown++; firmware->reject(); }
+        });
+        poll.start();
+        auto* list = window.findChild<QListWidget*>("sessionList");
+        const auto at = list->visualItemRect(list->item(0)).center();
+        QTest::mouseDClick(window.windowHandle(), Qt::LeftButton, {}, list->viewport()->mapTo(&window, at));
+        QTest::qWait(300);
+        QCOMPARE(shown, 1);
+        poll.stop();
+        QDir(managedFolder()).removeRecursively();
+        QSettings().clear();
+    }
+    // Firmware for another device leaves a message and starts nothing.
+    void wrongFirmware() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        const auto firmwareRoot = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/frond/firmware";
+        QDir(firmwareRoot).removeRecursively();
+        QTemporaryDir files;
+        const auto norPath = files.filePath("e2-nor");
+        {
+            QFile nor(norPath); QVERIFY(nor.open(QIODevice::WriteOnly)); QVERIFY(nor.resize(8 << 20));
+            nor.seek(0x20008); nor.write("\xef\xbe\xed\xfe", 4);
+            nor.seek(0x20080); nor.write("mlaP", 4); nor.write("rpsh", 4);
+        }
+        QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly)); core.write("#!/bin/sh\n"); core.close();
+        QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        MainWindow window(core.fileName()); window.show();
+        QString message;
+        QTimer poll;
+        poll.setInterval(30);
+        connect(&poll, &QTimer::timeout, &window, [&] {
+            if (auto* box = window.findChild<QMessageBox*>(); box && box->isVisible()) { message = box->text(); box->accept(); }
+            else if (auto* add = window.findChild<AddDeviceDialog*>(); add && add->isVisible()) {
+                auto* devices = add->findChild<QListWidget*>("devices");
+                devices->setCurrentRow(0);  // the TX
+                emit devices->itemActivated(devices->item(0));
+            } else if (auto* firmware = window.findChild<FirmwareDialog*>(); firmware && firmware->isVisible()) {
+                firmware->findChild<QComboBox*>("device")->setCurrentIndex(0);  // detect: finds the E2
+                firmware->findChild<QLineEdit*>("nor")->setText(norPath);
+                firmware->findChild<QPushButton*>("import")->click();
+            }
+        });
+        poll.start();
+        window.findChild<QPushButton*>("addDevice")->click();
+        QTRY_VERIFY_WITH_TIMEOUT(!message.isEmpty(), 5000);
+        poll.stop();
+        QVERIFY(message.contains("for the Tungsten E2") && message.contains("Palm TX"));
+        QCOMPARE(window.findChild<QListWidget*>("sessionList")->count(), 0);
+        QVERIFY(QDir(managedFolder()).entryList(QDir::Files).isEmpty());
+        QDir(firmwareRoot).removeRecursively();
+        QSettings().clear();
+    }
+    // Renaming keeps resume pointing at the session; deleting a locked one leaves it alone.
+    void sessionResumeSetting() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        putSession("Trip", 6, "palm-tx", 1);
+        putSession("Work", 6, "palm-e2", 0);
+        const auto canonical = [](const QString& name) {
+            return QFileInfo(managedFolder()).canonicalFilePath() + "/" + name + ".frond";
+        };
+        QSettings().setValue("lastSession", canonical("Work"));
+        MainWindow window{QString()}; window.show();
+        QString text = "Journal";
+        QMessageBox::StandardButton answer = QMessageBox::Yes;
+        QTimer poll;
+        poll.setInterval(30);
+        connect(&poll, &QTimer::timeout, &window, [&] {
+            if (auto* input = window.findChild<QInputDialog*>(); input && input->isVisible()) { input->setTextValue(text); input->accept(); }
+            else if (auto* box = window.findChild<QMessageBox*>(); box && box->isVisible()) box->button(answer) ? box->button(answer)->click() : box->done(answer);
+        });
+        poll.start();
+        rowAction(window, 0, "renameSession");
+        QTRY_COMPARE(rowTexts(window, "sessionName"), QStringList({"Journal", "Trip"}));
+        QCOMPARE(QSettings().value("lastSession").toString(), canonical("Journal"));
+        // The session is open in another Frond: Delete says no and keeps the setting.
+        QLockFile lock(managedFolder() + "/Journal.frond.lock"); QVERIFY(lock.tryLock());
+        answer = QMessageBox::Yes;
+        rowAction(window, 0, "deleteSession");
+        QTest::qWait(300);
+        QVERIFY(QFileInfo::exists(managedFolder() + "/Journal.frond"));
+        QCOMPARE(QSettings().value("lastSession").toString(), canonical("Journal"));
+        lock.unlock();
+        rowAction(window, 0, "deleteSession");
+        QTRY_COMPARE(window.findChild<QListWidget*>("sessionList")->count(), 1);
+        QVERIFY(!QSettings().contains("lastSession"));
+        poll.stop();
+        QDir(managedFolder()).removeRecursively();
+        QSettings().clear();
+    }
+    // A session opened from outside the folder takes its name at once.
+    void openOutsideReservesName() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        QTemporaryDir files;
+        QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly)); core.write("#!/bin/sh\nsleep 5\n"); core.close();
+        QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        QFile source(files.filePath("Outside.frond")); QVERIFY(source.open(QIODevice::WriteOnly));
+        source.write(sessionBytes(6, "palm-tx")); source.close();
+        MainWindow window(core.fileName()); window.show();
+        window.openSession(source.fileName(), true);
+        QVERIFY(QFileInfo::exists(managedFolder() + "/Palm TX.frond.new"));
+        QCOMPARE(frondSessions::freeName(managedFolder(), "Palm TX"), QString("Palm TX 2"));
+        window.close();
+        QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 8000);
+        QDir(managedFolder()).removeRecursively();
+        QSettings().clear();
+    }
+    void sessionImport() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        QTemporaryDir files;
+        const auto put = [&](const QString& name, const QByteArray& data) -> QString {
+            QFile f(files.filePath(name)); if (!f.open(QIODevice::WriteOnly)) return {}; f.write(data); return f.fileName();
+        };
+        const auto good = put("Holiday.frond", sessionBytes(6, "palm-e2"));
+        MainWindow window{QString()}; window.show();
+        QVERIFY(window.importSession(good).isEmpty());
+        QVERIFY(window.importSession(good).isEmpty());
+        { const auto names = rowTexts(window, "sessionName"); QCOMPARE(QSet<QString>(names.begin(), names.end()), QSet<QString>({"Holiday", "Holiday 2"})); }
+        // The copy is in the managed folder and the original stays where it was.
+        QVERIFY(QFileInfo::exists(managedFolder() + "/Holiday.frond") && QFileInfo::exists(good));
+        QCOMPARE(window.importSession(put("text.frond", "not a session")), QString("That isn't a Frond session."));
+        QVERIFY(window.importSession(put("old.frond", sessionBytes(5, "palm-tx"))).contains("older Frond"));
+        QCOMPARE(window.findChild<QListWidget*>("sessionList")->count(), 2);
+        QDir(managedFolder()).removeRecursively();
+        QSettings().clear();
+    }
+    void settingsDialog() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        MainWindow window{QString()}; window.show();
+        auto* dialog = window.findChild<SettingsDialog*>(); QVERIFY(dialog);
+        QVERIFY(dialog->windowScale && dialog->smoothLcd && dialog->audio && dialog->fastAudio && dialog->resume);
+        QVERIFY(dialog->audio->isChecked() && !dialog->resume->isChecked());
+        QCOMPARE(dialog->audio->text(), QString("Sound"));
+        QCOMPARE(dialog->smoothLcd->text(), QString("Smooth pixels"));
+        dialog->audio->setChecked(false);
+        QVERIFY(!QSettings().value("audio").toBool());
+        QSettings().clear();
+    }
+    // Not run by ctest: FROND_TEST_SHOTS=<folder> saves pictures of the home window and Settings.
+    void screenshots() {
+        const auto folder = qEnvironmentVariable("FROND_TEST_SHOTS");
+        if (folder.isEmpty()) QSKIP("FROND_TEST_SHOTS not set");
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        putSession("Palm TX", 6, "palm-tx", 1);
+        putSession("Tungsten E2 for a trip with a very long name to see it cut off", 6, "palm-e2", 0);
+        QVERIFY(frondSessions::create(managedFolder(), "Fresh", "palm-tx"));
+        MainWindow window{QString()}; window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QTest::qWait(200);
+        QVERIFY(window.grab().save(folder + "/home.png"));
+        auto* dialog = window.findChild<SettingsDialog*>();
+        dialog->show();
+        QVERIFY(QTest::qWaitForWindowExposed(dialog));
+        QVERIFY(dialog->grab().save(folder + "/settings.png"));
+        dialog->hide();
+        QDir(managedFolder()).removeRecursively();
+        QSettings().clear();
     }
     void persistence() {
         const auto core = qEnvironmentVariable("FROND_TEST_CORE");

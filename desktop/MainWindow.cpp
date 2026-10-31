@@ -1,6 +1,11 @@
 #include "MainWindow.h"
 #include "FirmwareInput.h"
 #include "SdExchangeDialog.h"
+#include "Dialogs.h"
+#include "FirmwareStore.h"
+#include <QListWidget>
+#include <QMenu>
+#include <QPainter>
 #include <QAction>
 #include <QCheckBox>
 #include <QCloseEvent>
@@ -28,95 +33,86 @@
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
-#include <QRadioButton>
 #include <QStandardPaths>
 #include <QStatusBar>
 #include <QTimer>
-#include <QUuid>
 #include <QVBoxLayout>
 
 MainWindow::MainWindow(const QString& core) : core(core) {
     setWindowTitle(tr("Frond"));
     resize(620, 650);
-    auto* root = new QWidget(this);
+    restoreGeometry(settings.value("windowGeometry").toByteArray());
+    auto* outer = new QWidget(this);
+    auto* outerLayout = new QVBoxLayout(outer);
+    home = new QWidget(outer);
+    home->setObjectName("home");
+    auto* homeLayout = new QVBoxLayout(home);
+    homeLayout->setContentsMargins(0, 0, 0, 0);
+    auto* title = new QLabel(tr("Devices"), home);
+    auto titleFont = title->font();
+    titleFont.setPointSizeF(titleFont.pointSizeF() * 1.4); titleFont.setBold(true);
+    title->setFont(titleFont);
+    homeLayout->addWidget(title);
+    sessionList = new QListWidget(home);
+    sessionList->setObjectName("sessionList");
+    sessionList->setContextMenuPolicy(Qt::CustomContextMenu);
+    sessionList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    sessionList->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+    sessionList->setMinimumHeight(260);
+    homeLayout->addWidget(sessionList, 1);
+    emptyNote = new QLabel(tr("No devices yet. Click Add device to set one up."), home);
+    emptyNote->setObjectName("emptyNote");
+    emptyNote->setWordWrap(true);
+    homeLayout->addWidget(emptyNote);
+    auto* homeButtons = new QHBoxLayout;
+    addButton = new QPushButton(tr("Add device"), home);
+    addButton->setObjectName("addDevice");
+    startButton = new QPushButton(tr("Start"), home);
+    startButton->setObjectName("start"); startButton->setDefault(true);
+    homeButtons->addWidget(addButton); homeButtons->addStretch(); homeButtons->addWidget(startButton);
+    homeLayout->addLayout(homeButtons);
+    outerLayout->addWidget(home, 1);
+    connect(addButton, &QPushButton::clicked, this, &MainWindow::addDevice);
+    connect(startButton, &QPushButton::clicked, this, &MainWindow::start);
+    connect(sessionList, &QListWidget::itemActivated, this, [this] { start(); });
+    connect(sessionList, &QListWidget::currentItemChanged, this, [this] { refresh(); });
+    connect(sessionList, &QWidget::customContextMenuRequested, this, [this](const QPoint& at) {
+        if (auto* item = sessionList->itemAt(at)) {
+            sessionList->setCurrentItem(item);
+            std::unique_ptr<QMenu> menu(rowMenu(item->data(Qt::UserRole).toString(), this));
+            menu->exec(sessionList->viewport()->mapToGlobal(at));
+        }
+    });
+    // The running controls go on this page while a Palm runs.
+    auto* root = new QWidget(outer);
+    runningPage = root;
+    runningPage->setObjectName("running");
     auto* layout = new QVBoxLayout(root);
-    setup = new QGroupBox(tr("Palm device"), root);
-    auto* form = new QFormLayout(setup);
-    savedMode = new QRadioButton(tr("Open a saved session"), setup);
-    savedMode->setChecked(true);
-    newMode = new QRadioButton(tr("Start with firmware images"), setup);
-    form->addRow(savedMode);
-    sessions = new QComboBox(setup);
-    sessions->setObjectName("sessions");
-    sessions->setEditable(true);
-    sessions->addItems(settings.value("recentSessions").toStringList());
-    auto* sessionRow = new QHBoxLayout;
-    sessionRow->addWidget(sessions, 1);
-    auto* browse = new QPushButton(tr("Browse…"), setup);
-    sessionRow->addWidget(browse);
-    form->addRow(tr("Session:"), sessionRow);
-    connect(browse, &QPushButton::clicked, this, &MainWindow::chooseSession);
-    form->addRow(newMode);
-    auto firmware = [&](const QString& label, const QString& key) {
-        auto* row = new QHBoxLayout;
-        auto* field = new QLineEdit(settings.value(key).toString(), setup);
-        field->setObjectName(key);
-        auto* button = new QPushButton(tr("Browse…"), setup);
-        row->addWidget(field, 1); row->addWidget(button);
-        connect(button, &QPushButton::clicked, this, [this, field, label] {
-            const auto file = QFileDialog::getOpenFileName(this, label, field->text(), tr("Firmware images (*.bin *.rom);;All files (*)"));
-            if (!file.isEmpty()) { field->setText(file); newMode->setChecked(true); }
-        });
-        form->addRow(label, row);
-        return field;
-    };
-    deviceChoice = new QComboBox(setup);
-    deviceChoice->setObjectName("device");
-    // Items hold the device's fixed name, which is also what the setting stores; empty detects.
-    deviceChoice->addItem(tr("Detect from the NOR image"), QString());
-    for (auto device : {frondFirmware::Device::tx, frondFirmware::Device::e2})
-        deviceChoice->addItem(frondFirmware::deviceName(device), frondFirmware::deviceId(device));
-    deviceChoice->setCurrentIndex(std::max(0, deviceChoice->findData(settings.value("device").toString())));
-    connect(deviceChoice, qOverload<int>(&QComboBox::activated), this, [this] { settings.setValue("device", deviceChoice->currentData()); });
-    form->addRow(tr("Device:"), deviceChoice);
-    nor = firmware(tr("NOR image:"), "nor");
-    nand = firmware(tr("NAND image (optional for the E2):"), "nand");
-    layout->addWidget(setup);
-    auto* scaleRow = new QHBoxLayout;
-    scaleLabel = new QLabel(root);
-    windowScale = new QSlider(Qt::Horizontal, root);
-    windowScale->setObjectName("windowScale");
-    windowScale->setRange(4, 8);
-    windowScale->setTickInterval(1);
-    windowScale->setTickPosition(QSlider::TicksBelow);
-    windowScale->setToolTip(tr("1× to 2× in 0.25 steps. Applies on the next start; defaults to the largest size that fits the screen."));
+    layout->setContentsMargins(0, 0, 0, 0);
+    outerLayout->addWidget(runningPage);
+    settingsDialog = new SettingsDialog(this);
+    windowScale = settingsDialog->windowScale;
+    scaleLabel = settingsDialog->scaleLabel;
+    smoothLcd = settingsDialog->smoothLcd;
+    audio = settingsDialog->audio;
+    fastAudio = settingsDialog->fastAudio;
     windowScale->setValue(std::clamp(settings.value("windowScale", 4).toInt(), 4, 8));
     connect(windowScale, &QSlider::valueChanged, this, [this](int quarters) {
         settings.setValue("windowScale", quarters);
-        scaleLabel->setText(tr("Display scale: %1×").arg(quarters / 4.0));
+        scaleLabel->setText(tr("Size: %1×").arg(quarters / 4.0));
     });
-    scaleRow->addWidget(scaleLabel);
-    scaleRow->addWidget(windowScale, 1);
-    layout->addLayout(scaleRow);
-    smoothLcd = new QCheckBox(tr("Smooth LCD scaling"), root);
-    smoothLcd->setObjectName("smoothLcd");
-    smoothLcd->setToolTip(tr("Applies on the next start. Off keeps LCD pixels sharp; the button strip and silkscreen stay crisp in either mode."));
     smoothLcd->setChecked(settings.value("smoothLcd", false).toBool());
     connect(smoothLcd, &QCheckBox::toggled, this, [this](bool enabled) { settings.setValue("smoothLcd", enabled); });
-    layout->addWidget(smoothLcd);
-    audio = new QCheckBox(tr("Enable sound"), root);
     audio->setChecked(settings.value("audio", true).toBool());
     connect(audio, &QCheckBox::toggled, this, [this](bool enabled) {
         settings.setValue("audio", enabled);
         if (client.available()) send(enabled ? "audio-on" : "audio-off");
     });
-    layout->addWidget(audio);
-    fastAudio = new QCheckBox(tr("Low-latency audio"), root);
-    fastAudio->setObjectName("fastAudio");
-    fastAudio->setToolTip(tr("Applies on the next start. Supports one 44.1 kHz stereo stream with qualified Palm TX or Tungsten E2 firmware; unsupported audio falls back to normal playback and may briefly pause."));
+    fastAudio->setToolTip(tr("Applies on the next start."));
     fastAudio->setChecked(settings.value("fastAudio", false).toBool());
     connect(fastAudio, &QCheckBox::toggled, this, [this](bool enabled) { settings.setValue("fastAudio", enabled); });
-    layout->addWidget(fastAudio);
+    settingsDialog->resume->setChecked(settings.value("resume", true).toBool());
+    connect(settingsDialog->resume, &QCheckBox::toggled, this, [this](bool enabled) { settings.setValue("resume", enabled); });
     sdStatus = new QLabel(tr("SD card: Not running"), root);
     sdStatus->setObjectName("sdState");
     layout->addWidget(sdStatus);
@@ -206,11 +202,6 @@ MainWindow::MainWindow(const QString& core) : core(core) {
             usbChanged();
     });
     showUsb({});
-    auto* resume = new QCheckBox(tr("Resume last session on startup"), root);
-    resume->setObjectName("resume");
-    resume->setChecked(settings.value("resume", true).toBool());
-    connect(resume, &QCheckBox::toggled, this, [this](bool enabled) { settings.setValue("resume", enabled); });
-    layout->addWidget(resume);
     auto* irdaRow=new QHBoxLayout;
     irda=new QComboBox(root);irda->setObjectName("irdaMode");
     irda->addItem(tr("Infrared beaming: Off"),"off");
@@ -250,20 +241,19 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     connect(bluetoothSocket, &QLineEdit::editingFinished, this, bluetoothChanged);
 
     auto* buttons = new QHBoxLayout;
-    startButton = new QPushButton(tr("Start"), root);
-    startButton->setObjectName("start"); startButton->setDefault(true);
     stopButton = new QPushButton(tr("Save and Stop"), root);
     stopButton->setObjectName("stop");
     forceButton = new QPushButton(tr("Force Stop…"), root);
     forceButton->hide();
-    buttons->addStretch(); buttons->addWidget(forceButton); buttons->addWidget(stopButton); buttons->addWidget(startButton);
+    buttons->addStretch(); buttons->addWidget(forceButton); buttons->addWidget(stopButton);
     layout->addLayout(buttons);
+    layout->addStretch();
     auto* scroll = new QScrollArea(this);
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
-    scroll->setWidget(root);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setWidget(outer);
     setCentralWidget(scroll);
-    connect(startButton, &QPushButton::clicked, this, &MainWindow::start);
     connect(stopButton, &QPushButton::clicked, this, [this] { stop(false); });
     connect(forceButton, &QPushButton::clicked, this, [this] {
         if (QMessageBox::warning(this, tr("Force Stop"), tr("Stop without saving? Changes since the last save will be lost."),
@@ -272,8 +262,11 @@ MainWindow::MainWindow(const QString& core) : core(core) {
         }
     });
     auto* file = menuBar()->addMenu(tr("&File"));
-    auto* open = file->addAction(tr("&Open Session…"), this, &MainWindow::chooseSession);
-    open->setShortcut(QKeySequence::Open);
+    auto* importAction = file->addAction(tr("&Import session…"), this, &MainWindow::importSessionDialog);
+    importAction->setShortcut(QKeySequence::Open);
+    file->addAction(tr("&Firmware…"), this, [this] { showFirmware(); });
+    file->addAction(tr("&Settings…"), this, [this] { settingsDialog->exec(); });
+    file->addSeparator();
     auto* saveAction = file->addAction(tr("&Save Session"), this, [this] { save(); });
     saveAction->setShortcut(QKeySequence::Save);
     auto* copy = file->addAction(tr("Save a &Copy…"), this, [this] { save(true); });
@@ -369,11 +362,11 @@ MainWindow::MainWindow(const QString& core) : core(core) {
         if (stopping) save();
         else send("device-state");
     });
-    connect(&client, &DesktopClient::finished, this, [this, open] {
+    connect(&client, &DesktopClient::finished, this, [this] {
         if (exchangeDialog) exchangeDialog->reject();
         else endExchange();
         busy = false; stopping = false; cardPresent = cardInserted = false; runningE2 = false;
-        sdStatus->setText(tr("SD card: Not running")); showSerial({}); loadSerialSettings(); showUsb({}); loadUsbSettings(); showIrda({}); loadIrdaSettings(); showBluetooth({}); loadBluetoothSettings(); sessionLock.reset(); forceButton->hide(); refresh(); open->setEnabled(true);
+        sdStatus->setText(tr("SD card: Not running")); showSerial({}); loadSerialSettings(); showUsb({}); loadUsbSettings(); showIrda({}); loadIrdaSettings(); showBluetooth({}); loadBluetoothSettings(); sessionLock.reset(); forceButton->hide(); refreshSessions();
         if (closeAfterStop) { allowClose = true; close(); }
         else statusBar()->showMessage(tr("Stopped."));
     });
@@ -443,7 +436,8 @@ MainWindow::MainWindow(const QString& core) : core(core) {
         const bool savedWorkingCopy = command == "save" && savingPath == sessionPath;
         if (command == "save") {
             if (savedWorkingCopy) {
-                remember(sessionPath); settings.setValue("lastSession", sessionPath); settings.sync();
+                settings.setValue("lastSession", sessionPath); settings.sync();
+                QFile::remove(frondSessions::markerPath(sessionPath)); refreshSessions();
             }
             savingPath.clear();
         }
@@ -452,14 +446,10 @@ MainWindow::MainWindow(const QString& core) : core(core) {
             else save();
         }
     });
-    connect(&client, &DesktopClient::started, open, [open] { open->setEnabled(false); });
     networkTip = network->toolTip(); keyboardTip = keyboard->toolTip(); serialTip = serial->toolTip();
-    usbTip = usb->toolTip(); irdaTip=irda->toolTip(); fastAudioTip = fastAudio->toolTip();
-    // The launcher follows the chosen or detected device before Start.
-    connect(deviceChoice, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] { refresh(); });
-    connect(nor, &QLineEdit::textChanged, this, [this] { refresh(); });
-    connect(newMode, &QRadioButton::toggled, this, [this] { refresh(); });
-    refresh();
+    usbTip = usb->toolTip(); irdaTip=irda->toolTip();
+    fastAudioTip = fastAudio->toolTip();
+    refreshSessions();
     statusBar()->showMessage(tr("Ready. Sessions are saved automatically when you close Frond."));
     QTimer::singleShot(0, this, [this] {
         if (startupHandled) return;
@@ -470,8 +460,12 @@ MainWindow::MainWindow(const QString& core) : core(core) {
 }
 void MainWindow::refresh() {
     const bool running = client.running();
-    setup->setEnabled(!running && !busy);
-    startButton->setEnabled(!running && !busy);
+    home->setVisible(!running);
+    runningPage->setVisible(running);
+    setWindowTitle(running && !sessionPath.isEmpty() ? QFileInfo(sessionPath).completeBaseName() : tr("Frond"));
+    const auto* current = sessionList->currentItem();
+    startButton->setEnabled(!running && !busy && current && !current->data(Qt::UserRole + 1).toBool());
+    addButton->setEnabled(!running && !busy);
     stopButton->setEnabled(running && !busy && !stopping);
     audio->setEnabled(!busy && !stopping);
     const auto caps = frondFirmware::capabilities(currentDevice());
@@ -493,7 +487,7 @@ void MainWindow::refresh() {
             currentDevice() == frondFirmware::Device::e2 ? 520 : 564,
             available.width(), available.height())));
     }
-    scaleLabel->setText(tr("Display scale: %1×").arg(windowScale->value() / 4.0));
+    scaleLabel->setText(tr("Size: %1×").arg(windowScale->value() / 4.0));
     const bool enabled = client.available() && !busy && !stopping && exchangeStage == ExchangeStage::None;
     for (auto* action : runningActions) action->setEnabled(enabled);
     network->setEnabled(enabled && caps.network);
@@ -513,47 +507,239 @@ void MainWindow::refresh() {
     sdExport->setEnabled(enabled && cardPresent && !cardInserted);
     sdExchange->setEnabled(enabled && cardPresent);
 }
-void MainWindow::openSession(const QString& path, bool launch) {
+QString MainWindow::sessionFolder() const {
+    return QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/frond/sessions";
+}
+QString MainWindow::firmwareRoot() const {
+    return QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/frond/firmware";
+}
+QString MainWindow::sessionFile() const {
+    const auto* item = sessionList->currentItem();
+    return item ? item->data(Qt::UserRole).toString() : QString();
+}
+frondSessions::Info MainWindow::infoFor(const QString& path) const { return frondSessions::describe(path); }
+
+namespace {
+// Draws its text on one line, cut with an ellipsis when the row is narrower.
+class ElidedLabel : public QLabel {
+ public:
+    using QLabel::QLabel;
+    QSize minimumSizeHint() const override { return {0, QLabel::sizeHint().height()}; }
+ protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setPen(palette().color(isEnabled() ? QPalette::Active : QPalette::Disabled, foregroundRole()));
+        painter.drawText(rect(), Qt::AlignVCenter | Qt::AlignLeft, fontMetrics().elidedText(text(), Qt::ElideRight, width()));
+    }
+};
+}
+
+// The session path with the folder resolved, as the settings keep it; the file need not exist.
+static QString canonicalSession(const QString& path) {
+    const QFileInfo file(path);
+    const auto folder = file.dir().canonicalPath();
+    return folder.isEmpty() ? file.absoluteFilePath() : folder + '/' + file.fileName();
+}
+
+// Rebuilds the list from the managed folder, keeping 'select' (else the current row) selected.
+void MainWindow::refreshSessions(const QString& select) {
+    const auto keep = select.isEmpty() ? sessionFile() : select;
+    const QSignalBlocker blocked(sessionList);
+    sessionList->clear();
+    int row = 0, selectRow = -1;
+    for (const auto& info : frondSessions::list(sessionFolder())) {
+        const auto device = frondFirmware::deviceFromId(info.device);
+        const auto label = info.old && device == frondFirmware::Device::automatic ? QString() : frondFirmware::deviceName(device);
+        QStringList parts;
+        if (!label.isEmpty()) parts << label;
+        if (info.old) parts << tr("Saved by an older Frond");
+        else if (info.saved) parts << tr("Saved %1").arg(QLocale().toString(info.when, QLocale::ShortFormat))
+                                   << QLocale().formattedDataSize(info.size);
+        else parts << tr("Not saved");
+        // "<device> · Saved <date> · <size>"
+        const auto detail = parts.join(QString::fromUtf8(" · "));
+        auto* item = new QListWidgetItem(sessionList);
+        item->setData(Qt::UserRole, info.path);
+        item->setData(Qt::UserRole + 1, info.old);
+        item->setToolTip(info.path);
+        auto* line = new QWidget;
+        auto* box = new QHBoxLayout(line);
+        box->setContentsMargins(4, 2, 2, 2);
+        auto* text = new QVBoxLayout;
+        text->setSpacing(0);
+        auto* name = new ElidedLabel(info.name, line);
+        name->setObjectName("sessionName");
+        auto nameFont = name->font(); nameFont.setBold(true); name->setFont(nameFont);
+        auto* second = new ElidedLabel(detail, line);
+        second->setObjectName("sessionDetail");
+        if (info.old) { name->setEnabled(false); second->setEnabled(false); }
+        else second->setForegroundRole(QPalette::PlaceholderText);
+        name->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        second->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        text->addWidget(name); text->addWidget(second);
+        box->addLayout(text, 1);
+        auto* more = new QPushButton(QString::fromUtf8("…"), line);
+        more->setObjectName("rowMenu");
+        more->setToolTip(tr("More"));
+        more->setFixedWidth(32);
+        more->setMenu(rowMenu(info.path, more));
+        box->addWidget(more);
+        item->setSizeHint(QSize(0, line->sizeHint().height() + 6));
+        sessionList->setItemWidget(item, line);
+        if (info.path == keep) selectRow = row;
+        row++;
+    }
+    if (selectRow < 0 && row > 0) selectRow = 0;
+    if (selectRow >= 0) sessionList->setCurrentRow(selectRow);
+    sessionList->setVisible(row > 0);
+    emptyNote->setVisible(row == 0);
+    refresh();
+}
+// Rename, Export and Delete for one session; each action looks the session up again when used.
+QMenu* MainWindow::rowMenu(const QString& path, QWidget* parent) {
+    const auto info = infoFor(path);
+    auto* menu = new QMenu(parent);
+    auto* rename = menu->addAction(tr("Rename…"), this, [this, path] { QTimer::singleShot(0, this, [this, path] { renameSession(path); }); });
+    rename->setObjectName("renameSession"); rename->setEnabled(!info.old);
+    auto* exportAction = menu->addAction(tr("Export…"), this, [this, path] { QTimer::singleShot(0, this, [this, path] { exportSession(path); }); });
+    exportAction->setObjectName("exportSession"); exportAction->setEnabled(info.saved && !info.old);
+    auto* remove = menu->addAction(tr("Delete"), this, [this, path] { QTimer::singleShot(0, this, [this, path] { deleteSession(path); }); });
+    remove->setObjectName("deleteSession");
+    return menu;
+}
+void MainWindow::renameSession(const QString& path) {
+    const auto info = infoFor(path);
+    bool ok;
+    const auto name = QInputDialog::getText(this, tr("Rename"), tr("Name"), QLineEdit::Normal, info.name, &ok);
+    if (!ok) return;
+    const auto error = frondSessions::rename(sessionFolder(), info, name);
+    if (!error.isEmpty()) return failure(error);
+    const auto renamed = frondSessions::filePath(sessionFolder(), frondSessions::cleanName(name));
+    if (settings.value("lastSession").toString() == canonicalSession(path))
+        settings.setValue("lastSession", canonicalSession(renamed));
+    refreshSessions(renamed);
+}
+void MainWindow::exportSession(const QString& path) {
+    const auto info = infoFor(path);
+    if (!info.saved) return;
+    const auto target = outputFile(tr("Export"), tr("Frond sessions (*.frond)"), info.name + ".frond");
+    if (target.isEmpty()) return;
+    const auto error = frondSessions::exportFile(info, target);
+    if (!error.isEmpty()) failure(error);
+    else statusBar()->showMessage(tr("Session exported."));
+}
+void MainWindow::deleteSession(const QString& path) {
+    const auto info = infoFor(path);
+    if (QMessageBox::question(this, tr("Delete"), tr("Delete %1?").arg(info.name),
+                              QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) return;
+    const auto last = canonicalSession(path);
+    const auto error = frondSessions::remove(info);
+    if (!error.isEmpty()) failure(error);
+    else if (settings.value("lastSession").toString() == last) settings.remove("lastSession");
+    refreshSessions();
+}
+QString MainWindow::importSession(const QString& path) {
+    QString name;
+    const auto error = frondSessions::importFile(sessionFolder(), path, &name);
+    if (error.isEmpty()) refreshSessions(frondSessions::filePath(sessionFolder(), name));
+    return error;
+}
+void MainWindow::importSessionDialog() {
+    if (client.running()) return;
+    const auto path = QFileDialog::getOpenFileName(this, tr("Import session"), {}, tr("Frond sessions (*.frond *.session);;All files (*)"));
+    if (path.isEmpty()) return;
+    const auto error = importSession(path);
+    if (!error.isEmpty()) failure(error);
+    else statusBar()->showMessage(tr("Session imported."));
+}
+void MainWindow::showFirmware(frondFirmware::Device device) {
+    FirmwareDialog dialog(firmwareRoot(), device, this);
+    dialog.exec();
+}
+// True once the device's firmware is stored, asking for it through the Firmware dialog if not.
+bool MainWindow::ensureFirmware(frondFirmware::Device device) {
+    if (frondFirmware::ready(firmwareRoot(), device)) return true;
+    FirmwareDialog dialog(firmwareRoot(), device, this);
+    if (dialog.exec() != QDialog::Accepted) return false;
+    if (frondFirmware::ready(firmwareRoot(), device)) return true;
+    failure(tr("That firmware is for the %1. The %2 still needs its own.")
+                .arg(frondFirmware::deviceName(dialog.imported()), frondFirmware::deviceName(device)));
+    return false;
+}
+void MainWindow::addDevice() {
+    if (client.running() || busy) return;
+    AddDeviceDialog dialog(firmwareRoot(), this);
+    if (dialog.exec() != QDialog::Accepted) return;
+    const auto device = dialog.device();
+    if (!ensureFirmware(device)) return;
+    const auto name = frondSessions::reserve(sessionFolder(), frondFirmware::deviceName(device), frondFirmware::deviceId(device));
+    if (name.isEmpty())
+        return failure(tr("Could not create the session storage directory."));
+    const auto path = frondSessions::filePath(sessionFolder(), name);
+    refreshSessions(path);
+    startSession(infoFor(path));
+}
+// The command line and resume: a session file anywhere. One outside the managed folder is
+// opened as it is and saved as a new session in the folder.
+void MainWindow::openSession(const QString& path, bool launchNow) {
     startupHandled = true;
     if (client.running()) return;
-    savedMode->setChecked(true);
-    sessions->setCurrentText(QFileInfo(path).absoluteFilePath());
-    if (launch) QTimer::singleShot(0, this, &MainWindow::start);
-}
-void MainWindow::chooseSession() {
-    if (client.running()) return;
-    const auto path = QFileDialog::getOpenFileName(this, tr("Open Session"), sessions->currentText(), tr("Frond sessions (*.frond *.session);;All files (*)"));
-    if (!path.isEmpty()) openSession(path);
+    if (!launchNow) {
+        const auto error = importSession(QFileInfo(path).absoluteFilePath());
+        if (!error.isEmpty()) failure(error);
+        return;
+    }
+    if (!QFileInfo(core).isExecutable()) return failure(tr("The Frond emulator executable could not be found. Reinstall Frond or build both desktop and core targets."));
+    const auto source = QFileInfo(QFileInfo(path).absoluteFilePath()).canonicalFilePath();
+    if (source.isEmpty() || !QFileInfo(source).isFile()) return failure(tr("Choose an existing session file."));
+    if (!QDir().mkpath(sessionFolder())) return failure(tr("Could not create the session storage directory."));
+    // Compare canonical paths so an XDG data directory symlink does not clone on every resume.
+    const auto managedRoot = QFileInfo(sessionFolder()).canonicalFilePath();
+    const auto header = frondSessions::readHeader(source);
+    auto device = frondFirmware::deviceFromId(header.device);
+    if (device == frondFirmware::Device::automatic) device = frondFirmware::Device::tx;
+    QString target = source;
+    bool reserved = false;
+    if (!source.startsWith(managedRoot + '/')) {
+        // The marker holds the new name until the first save, so no other Frond takes it.
+        const auto name = frondSessions::reserve(managedRoot, frondFirmware::deviceName(device), frondFirmware::deviceId(device));
+        if (name.isEmpty()) return failure(tr("Could not create the session storage directory."));
+        target = frondSessions::filePath(managedRoot, name);
+        reserved = true;
+    }
+    launch(target, {source}, device);
+    if (reserved && !busy) QFile::remove(frondSessions::markerPath(target));  // it didn't start
+    refreshSessions();
 }
 void MainWindow::start() {
     if (client.running()) return;
     startupHandled = true;
+    const auto path = sessionFile();
+    if (path.isEmpty()) return;
+    startSession(infoFor(path));
+}
+void MainWindow::startSession(const frondSessions::Info& info) {
+    if (client.running() || info.old) return;
+    startupHandled = true;
     if (!QFileInfo(core).isExecutable()) return failure(tr("The Frond emulator executable could not be found. Reinstall Frond or build both desktop and core targets."));
+    const auto device = frondFirmware::deviceFromId(info.device);
     QStringList arguments;
-    QString source, newName = "Palm";
-    auto startDevice = frondFirmware::Device::tx;  // a saved session's device is not known until it runs
-    if (savedMode->isChecked()) {
-        source = QFileInfo(sessions->currentText()).absoluteFilePath();
-        if (sessions->currentText().isEmpty() || !QFileInfo(source).isFile()) return failure(tr("Choose an existing session file."));
-        source = QFileInfo(source).canonicalFilePath();
+    if (info.saved) {
+        const auto source = QFileInfo(info.path).canonicalFilePath();
+        if (source.isEmpty()) return failure(tr("Choose an existing session file."));
         arguments << source;
     } else {
-        auto chosen = frondFirmware::deviceFromId(deviceChoice->currentData().toString());
-        const auto firmwareError = frondFirmware::validateFiles(chosen, nor->text(), nand->text(), &chosen);
-        if (!firmwareError.isEmpty()) return failure(firmwareError);
-        arguments << "--device" << frondFirmware::deviceId(chosen);
-        arguments << QFileInfo(nor->text()).absoluteFilePath();
-        if (!nand->text().isEmpty()) arguments << "--nand" << QFileInfo(nand->text()).absoluteFilePath();
-        settings.setValue("nor", nor->text()); settings.setValue("nand", nand->text());
-        newName = frondFirmware::deviceName(chosen);
-        startDevice = chosen;
+        if (!ensureFirmware(device)) return;
+        arguments << "--device" << frondFirmware::deviceId(device) << frondFirmware::storedNor(firmwareRoot(), device);
+        if (!frondFirmware::storedNand(firmwareRoot(), device).isEmpty())
+            arguments << "--nand" << frondFirmware::storedNand(firmwareRoot(), device);
     }
-    const auto data = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/frond/sessions";
-    if (!QDir().mkpath(data)) return failure(tr("Could not create the session storage directory."));
-    // Compare canonical paths so an XDG data directory symlink does not clone on every resume.
-    const auto managedRoot = QFileInfo(data).canonicalFilePath();
-    sessionPath = source.startsWith(managedRoot + '/') ? source : managedRoot + "/" + newName + " " +
-        QDateTime::currentDateTime().toString("yyyy-MM-dd HH-mm-ss") + "-" + QUuid::createUuid().toString(QUuid::Id128).first(8) + ".frond";
+    if (!QDir().mkpath(sessionFolder())) return failure(tr("Could not create the session storage directory."));
+    launch(QFileInfo(sessionFolder()).canonicalFilePath() + '/' + QFileInfo(info.path).fileName(), arguments, device);
+}
+// Starts the core on 'arguments' (the session file or the firmware) and saves to 'target'.
+void MainWindow::launch(const QString& target, QStringList arguments, frondFirmware::Device startDevice) {
+    sessionPath = target;
     if (!audio->isChecked()) arguments << "--no-sound";
     const auto caps = frondFirmware::capabilities(startDevice);
     if (fastAudio->isChecked() && caps.fastAudio) arguments << "--fast-audio";
@@ -659,14 +845,6 @@ void MainWindow::loadUsbSettings() {
     usb->setCurrentIndex(std::max(0, usb->findData(settings.value("usbMode", "off").toString())));
     usbPort->setValue(settings.value("usbPort", 5024).toInt());
 }
-void MainWindow::remember(const QString& path) {
-    auto list = settings.value("recentSessions").toStringList();
-    list.removeAll(path); list.prepend(path);
-    while (list.size() > 12) list.removeLast();
-    settings.setValue("recentSessions", list);
-    sessions->clear(); sessions->addItems(list);
-    savedMode->setChecked(true);
-}
 QString MainWindow::outputFile(const QString& title, const QString& filter, const QString& defaultName) {
     QFileDialog dialog(this, title, QDir::homePath() + '/' + defaultName, filter);
     dialog.setAcceptMode(QFileDialog::AcceptSave);
@@ -700,14 +878,10 @@ void MainWindow::askStop(const QString& message) {
     else if (answer == QMessageBox::Discard) send("quit");
     else { stopping = closeAfterStop = false; refresh(); }
 }
-// The device the controls follow: the running one, else the chooser or the NOR detection.
-// A saved session or an unknown NOR counts as the TX (nothing greyed).
+// The device the controls follow: the running one, else the TX (nothing greyed).
 frondFirmware::Device MainWindow::currentDevice() const {
     if (client.running()) return runningE2 ? frondFirmware::Device::e2 : frondFirmware::Device::tx;
-    if (savedMode->isChecked()) return frondFirmware::Device::tx;
-    auto chosen = frondFirmware::deviceFromId(deviceChoice->currentData().toString());
-    if (chosen == frondFirmware::Device::automatic) chosen = frondFirmware::detectDevice(nor->text());
-    return chosen == frondFirmware::Device::e2 ? chosen : frondFirmware::Device::tx;
+    return frondFirmware::Device::tx;
 }
 QString MainWindow::deviceLabel() const {
     return frondFirmware::deviceName(runningE2 ? frondFirmware::Device::e2 : frondFirmware::Device::tx);
@@ -721,7 +895,7 @@ void MainWindow::failure(const QString& message) {
     QMessageBox::critical(this, tr("Frond"), message);
 }
 void MainWindow::closeEvent(QCloseEvent* event) {
-    if (allowClose || !client.running()) { event->accept(); return; }
+    if (allowClose || !client.running()) { settings.setValue("windowGeometry", saveGeometry()); event->accept(); return; }
     event->ignore(); stop(true);
 }
 
