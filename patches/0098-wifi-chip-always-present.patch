@@ -1,0 +1,50 @@
+diff --git a/src/uarm/uarm/LibertasCF.cpp b/src/uarm/uarm/LibertasCF.cpp
+--- a/src/uarm/uarm/LibertasCF.cpp
++++ b/src/uarm/uarm/LibertasCF.cpp
+@@ -385,23 +385,24 @@
+ }
+ 
+ bool LibertasCF::Sync() {
+-    const bool inRange = network->GetMode() == NetworkSimulation::wireless;
+-    // The radio is soldered in on a real TX. Leaving Wi-Fi mode while it is powered,
+-    // booting or running, takes the access point out of range: frames are dropped and
+-    // host connections close, but the chip keeps answering until Palm powers it down.
+-    const bool next = inRange || (enabled && power1 && power2 && !reset);
+-    if (next != enabled) {
+-        enabled = next;
++    // The radio is soldered in on a real TX, so the chip is always there. Outside
++    // Virtual Wi-Fi the access point is out of range: scans find nothing, joins time
++    // out, frames are dropped and host connections close. Palm resets if its driver
++    // powers the radio up and finds no chip.
++    if (!enabled) {
++        // Older sessions saved an absent chip outside Wi-Fi mode.
++        enabled = true;
+         Reset();
+-    } else if (!inRange && router && !network->Frozen()) {
++    } else if (network->GetMode() != NetworkSimulation::wireless && router &&
++               !network->Frozen()) {
+         router.reset();
+     }
+-    return enabled;
++    return true;
+ }
+ void LibertasCF::Load(SavestateLoader<ChunkType>& loader) {
+     if (!network->Frozen()) router.reset();
+     if (!loader.HasChunk(ChunkType::libertasCF)) {
+-        enabled = network->GetMode() == NetworkSimulation::wireless;
++        enabled = true;
+         Reset();
+         power1 = pxaGpioGetState(gpio, 94) == PxaGpioStateHigh;
+         power2 = pxaGpioGetState(gpio, 108) == PxaGpioStateHigh;
+diff --git a/src/uarm/uarm/LibertasCF.h b/src/uarm/uarm/LibertasCF.h
+--- a/src/uarm/uarm/LibertasCF.h
++++ b/src/uarm/uarm/LibertasCF.h
+@@ -30,7 +30,7 @@
+ 
+    private:
+     NetworkSimulation* network;
+-    bool enabled{};
++    bool enabled{true};
+     bool Sync();
+     PxaGpio* gpio;
+     Reschedule schedule;

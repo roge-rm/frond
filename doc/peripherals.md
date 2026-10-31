@@ -267,7 +267,9 @@ There are no incoming host-port forwards or host-directory shares.
 
 The mode, virtual radio state, in-flight device buffers and Palm's saved network
 profile persist with the session. Host Internet connections are closed during
-normal restore, reset or mode changes. Switching away from Virtual Wi-Fi while
+normal restore, reset or mode changes. The Wi-Fi radio is always there, as on a real
+TX; outside Virtual Wi-Fi the access point is out of range, so turning Wi-Fi on
+finds no network. Switching away from Virtual Wi-Fi while
 Palm's Wi-Fi is on works like leaving the access point's range: the radio stays,
 traffic stops, and switching back lets Palm use the same Wi-Fi connection. While
 out of range, Palm shows its own network errors, and an app that opens NetLib can

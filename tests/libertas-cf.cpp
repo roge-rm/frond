@@ -203,6 +203,22 @@ int main() {
     LibertasCF radio(nullptr, nullptr, {[](void*, uint32_t) { scheduled = true; }, nullptr},
                      {[](void* p) { return *static_cast<uint64_t*>(p); }, &now}, &mode);
     assert(read(0x20) == 0xffff);
+    // The chip is soldered in: a TX that was never in Wi-Fi mode still finds it when
+    // Palm turns Wi-Fi on, and with the access point out of range a scan is empty and
+    // a join times out. An absent chip made Palm reset.
+    radio.Poll();
+    boot(radio);
+    command(3, 46);
+    assert(response()[16] == 2);
+    command(6, 16);
+    assert(response()[10] == 0);
+    command(0x12);
+    auto lonely = response();
+    assert(lonely[10] == 2 && lonely[12] == 0);
+    pin(94, false);
+    pin(108, false);
+    radio.Tick();
+    assert(read(0x20) == 0xffff);
     assert(mode.SetMode("wireless"));
     radio.Poll();
     boot(radio);
@@ -320,7 +336,8 @@ int main() {
     radio.Poll();
     assert(pendingConnection(listener));  // The same SYN does reach the host in range.
     close(listener);
-    // Powering the radio down out of range removes it, and it stays absent.
+    // Powering the radio down out of range resets it, and powered up again it is a
+    // fresh chip waiting for its firmware.
     assert(mode.SetMode("disabled"));
     radio.Poll();
     pin(94, false);
@@ -328,7 +345,7 @@ int main() {
     assert(read(0x20) == 0xffff);
     pin(94, true);
     radio.Tick();
-    assert(read(0x20) == 0xffff);
+    assert(read(0x20) == 4 && read(0x3e) == 0);
     pin(106, true);
     radio.Tick();
     assert(read(0x20) == 0xffff);
@@ -370,11 +387,11 @@ int main() {
     assert(read(0x20) == 0xffff);
     pin(106, false);
     radio.Tick();
-    assert(read(0x20) == 0xffff);  // Powered up again outside Wi-Fi mode, the chip is absent.
+    assert(read(0x20) == 4);  // Powered up again outside Wi-Fi mode, the chip is still there.
     uint32_t empty = 0;
     assert(loader.Load(&empty, sizeof(empty), radio));
     assert(scheduled);
     puts(
-        "PASS: Marvell CF firmware handshake, IRQ/data acknowledgement, hardware identity, Frond "
+        "PASS: Marvell CF chip present outside Wi-Fi mode, firmware handshake, IRQ/data acknowledgement, hardware identity, Frond "
         "scan, in-flight restore, 16 CF packet/partial FIFO restore and reassociation cycles, checkpoint freeze, malformed TX, out-of-range mode switch, boot and join, power-down and reset/disable");
 }
