@@ -290,6 +290,171 @@ static void exercise(DeviceType5 device) {
     }
 }
 
+// Zire 72 and m515 art: no board yet, so hit areas, pressed drawing and silkscreens are checked
+// through the shared helpers on their own screen sizes.
+static void artDevice(DeviceArt art) {
+    const auto& p=deviceControls(art);
+    const bool zire=art==DeviceArt::zire72;
+    // Screen width and height in LCD pixels, silkscreen included.
+    const int width=zire ? 320 : 160,height=zire ? 440 : 220,u=p.unit;
+    assert(p.width==320 && u==(zire ? 1 : 2) && deviceControlsHeight(p)*u==p.height);
+    assert(p.count==(zire ? 9u : 6u) && p.style==(zire ? DeviceControlStyle::zire72 : DeviceControlStyle::m515));
+    for(int k=0;k<4;++k)assert(p.buttons[k].key==KeyId(keyIdHard1+k));
+    // Strip units to the screen point whose centre lands there.
+    auto at=[&](float x,float y) {
+        return deviceControlAt(p,width,height,int(std::floor(x/u)),height+int(std::floor(y/u)));
+    };
+    for(size_t i=0;i<p.count;++i) {
+        const auto& b=p.buttons[i];
+        const auto r=deviceButtonRect(p,b,width,height);
+        assert(r.x>=0 && r.x+r.w<=width && r.y>=height && r.y+r.h<=height+deviceControlsHeight(p));
+        // Each key hits at its centre, in strip units and through its screen rectangle.
+        assert(at(b.bounds.x+b.bounds.w*0.5f,b.bounds.y+b.bounds.h*0.5f)==b.key);
+        assert(deviceControlAt(p,width,height,r.x+r.w/2,r.y+r.h/2)==b.key);
+        if(deviceNavigatorButton(p,b))continue;
+        // Pills and round keys: their corners are outside, their ends inside.
+        const auto& k=b.bounds;
+        assert(at(k.x+1,k.y+1)==keyInvalid && at(k.x+k.w-2,k.y+k.h-2)==keyInvalid);
+        assert(at(k.x+2,k.y+k.h*0.5f)==b.key && at(k.x+k.w-3,k.y+k.h*0.5f)==b.key);
+        assert(at(k.x+k.w*0.5f,k.y-2)==keyInvalid && at(k.x+k.w*0.5f,k.y+k.h+1)==keyInvalid);
+    }
+    if(zire) {
+        // Calendar over Contacts on the left, Media over Music on the right.
+        const auto& b=p.buttons;
+        assert(b[0].bounds.x==b[1].bounds.x && b[0].bounds.y<b[1].bounds.y && b[2].bounds.x==b[3].bounds.x);
+        assert(b[1].bounds.x+b[1].bounds.w<p.navigator.x && b[2].bounds.x>p.navigator.x+p.navigator.w);
+        // Gaps between the stacked pills and between the pills and the five-way.
+        assert(at(50,(b[0].bounds.y+b[0].bounds.h+b[1].bounds.y)*0.5f)==keyInvalid);
+        assert(at(270,(b[2].bounds.y+b[2].bounds.h+b[3].bounds.y)*0.5f)==keyInvalid);
+        assert(at((b[0].bounds.x+b[0].bounds.w+p.navigator.x)*0.5f,52)==keyInvalid);
+        assert(at((b[2].bounds.x+p.navigator.x+p.navigator.w)*0.5f,52)==keyInvalid);
+        // Five-way: a rounded square split on its diagonals round a rounded-rectangle select key.
+        const auto& n=p.navigator;const auto& s=p.select;
+        const float cx=n.x+n.w*0.5f,cy=n.y+n.h*0.5f;
+        assert(p.selectCorner>0 && p.selectCorner<s.h*0.5f);
+        assert(at(cx,cy)==keyIdSelect && at(s.x+3.5f,s.y+3.5f)==keyIdSelect);
+        // A pill select would leave this corner to the ring.
+        assert(deviceRoundedDistance(s,s.h*0.5f,s.x+3.5f,s.y+3.5f)>1);
+        assert(at(s.x-3,s.y-3)!=keyIdSelect && at(s.x-3,s.y-3)!=keyInvalid);
+        assert(at(cx,n.y+2)==keyIdUp && at(cx,n.y+n.h-3)==keyIdDown);
+        assert(at(n.x+2,cy)==keyIdLeft && at(n.x+n.w-3,cy)==keyIdRight);
+        assert(at(cx,s.y-3)==keyIdUp && at(s.x-3,cy)==keyIdLeft && at(s.x+s.w+2,cy)==keyIdRight && at(cx,s.y+s.h+2)==keyIdDown);
+        assert(at(n.x+1,n.y+1)==keyInvalid && at(n.x+n.w-2,n.y+n.h-2)==keyInvalid);
+        assert(at(cx,n.y-2)==keyInvalid && at(n.x-2,cy)==keyInvalid);
+    } else {
+        // m515: no five-way; the scroll keys are round and stacked, with a gap between them.
+        assert(p.navigator.w==0);
+        const auto& up=p.buttons[4].bounds;const auto& dn=p.buttons[5].bounds;
+        assert(p.buttons[4].key==keyIdUp && p.buttons[5].key==keyIdDown && up.x==dn.x && up.y+up.h<=dn.y);
+        assert(at(up.x+up.w*0.5f,(up.y+up.h+dn.y)*0.5f)==keyInvalid);
+        assert(at(up.x+up.w*0.5f,up.y+3)==keyIdUp && at(dn.x+dn.w*0.5f,dn.y+dn.h-3)==keyIdDown);
+        // Gaps between the app keys and the scroll keys.
+        for(int k=0;k<3;++k) {
+            const auto& a=p.buttons[k].bounds;const auto& b=p.buttons[k+1].bounds;
+            if(k==1)continue;
+            assert(at((a.x+a.w+b.x)*0.5f,a.y+a.h*0.5f)==keyInvalid);
+        }
+        assert(at((p.buttons[1].bounds.x+p.buttons[1].bounds.w+up.x)*0.5f,40)==keyInvalid);
+        assert(at((up.x+up.w+p.buttons[2].bounds.x)*0.5f,40)==keyInvalid);
+        // The outer keys sit higher, as on the device.
+        assert(p.buttons[0].bounds.y<p.buttons[1].bounds.y && p.buttons[3].bounds.y<p.buttons[2].bounds.y);
+    }
+    // Every key has a visible pressed state, at 1x and 2x.
+    for(float scale:{1.f,2.f}) {
+        const int sh=deviceControlsHeight(p);
+        auto* surface=SDL_CreateRGBSurfaceWithFormat(0,int(width*scale),int(sh*scale),32,SDL_PIXELFORMAT_RGBA32);
+        auto* renderer=SDL_CreateSoftwareRenderer(surface);assert(surface && renderer);
+        auto sum=[&](float x,float y) {
+            const auto c=readPixel(surface,int(x/u*scale),int(y/u*scale));return brightness(c);
+        };
+        for(size_t i=0;i<p.count;++i) {
+            const auto& b=p.buttons[i].bounds;
+            // A spot on the key away from its icon.
+            float x=b.x+b.w*0.5f,y=b.y+b.h*0.5f;
+            if(!deviceNavigatorButton(p,p.buttons[i]) && p.buttons[i].key!=keyIdUp && p.buttons[i].key!=keyIdDown)
+                x=b.x+b.w*(zire ? 0.2f : 0.5f),y=b.y+b.h*(zire ? 0.5f : 0.75f);
+            drawDeviceControls(renderer,p,width,0,scale,0);
+            const int idle=sum(x,y);
+            drawDeviceControls(renderer,p,width,0,scale,1u<<p.buttons[i].key);
+            const int held=sum(x,y);
+            if(held>=idle-12)std::fprintf(stderr,"key %d at %g,%g: idle %d held %d\n",p.buttons[i].key,x,y,idle,held);
+            assert(held<idle-12);
+        }
+        SDL_DestroyRenderer(renderer);SDL_FreeSurface(surface);
+    }
+}
+
+static void artSilkscreen(DeviceArt art) {
+    const auto& silk=deviceSilkscreen(art);
+    const bool zire=art==DeviceArt::zire72;
+    assert(silk.count==8 && silk.width==320 && silk.height==120 && silk.unit==(zire ? 1 : 2));
+    // ROM tables in Palm OS coordinates (Zire 72 NOR 'aslk' 19000, m515 'silk' 10002), doubled
+    // from the top of the silkscreen and kept to the panel's width.
+    const int top=160;
+    const std::pair<SilkscreenIcon,SDL_Rect> zireRom[]={
+        {SilkscreenIcon::home,{0,162,23,28}},{SilkscreenIcon::menu,{0,192,23,28}},
+        {SilkscreenIcon::favorites,{138,164,27,28}},{SilkscreenIcon::find,{138,192,27,28}},
+        {SilkscreenIcon::clock,{23,162,11,19}},{SilkscreenIcon::brightness,{121,162,16,19}},
+        {SilkscreenIcon::letters,{23,206,18,20}},{SilkscreenIcon::numbers,{115,206,23,20}}};
+    const std::pair<SilkscreenIcon,SDL_Rect> m515Rom[]={
+        {SilkscreenIcon::home,{-3,163,24,27}},{SilkscreenIcon::menu,{-3,191,24,28}},
+        {SilkscreenIcon::calc,{140,163,22,30}},{SilkscreenIcon::find,{140,191,22,38}},
+        {SilkscreenIcon::clock,{22,163,11,19}},{SilkscreenIcon::brightness,{127,163,11,19}},
+        {SilkscreenIcon::letters,{22,206,14,23}},{SilkscreenIcon::numbers,{124,204,15,25}}};
+    for(auto [icon,r]:zire ? std::vector(std::begin(zireRom),std::end(zireRom)) : std::vector(std::begin(m515Rom),std::end(m515Rom))) {
+        size_t found=0;
+        for(size_t i=0;i<silk.count;++i)if(silk.buttons[i].icon==icon) {
+            const auto& b=silk.buttons[i].bounds;++found;
+            const int x0=std::max(0,r.x*2),x1=std::min(320,(r.x+r.w)*2);
+            assert(b.x==x0 && b.w==x1-x0 && b.y==r.y*2-top*2 && b.h==r.h*2);
+        }
+        assert(found==1);
+    }
+    auto same=[](SDL_Rect a,SDL_Rect b) {return a.x==b.x && a.y==b.y && a.w==b.w && a.h==b.h;};
+    if(zire)assert(same(silk.letters,{54,4,124,132}) && same(silk.numbers,{178,4,88,132}));
+    else assert(same(silk.letters,{54,8,124,112}) && same(silk.numbers,{178,8,88,112}));
+    for(float scale:{1.f,2.f}) {
+        // The texture covers the LCD's silkscreen rows: 120 on the Zire 72, 60 on the m515.
+        const int w=int(320*scale/silk.unit),h=int(120*scale/silk.unit);
+        auto* s=SDL_CreateRGBSurfaceWithFormat(0,w,h,32,SDL_PIXELFORMAT_RGBA32);
+        auto* r=SDL_CreateSoftwareRenderer(s);assert(s && r);
+        auto* t=createDeviceSilkscreen(r,silk,scale);assert(t);
+        int tw,th;SDL_QueryTexture(t,nullptr,nullptr,&tw,&th);assert(tw==w && th==h);
+        SDL_RenderCopy(r,t,nullptr,nullptr);SDL_DestroyTexture(t);
+        auto at=[&](float x,float y) {return brightness(readPixel(s,int(x*scale/silk.unit),int(y*scale/silk.unit)));};
+        // Discs are lighter than the panel round their glyphs.
+        const int panel=at(120,60);
+        for(size_t i=0;i<4;++i) {
+            const auto& b=silk.buttons[i].bounds;const int bh=std::min(b.y+b.h,120)-b.y;
+            const float cx=b.x+b.w*0.5f,cy=b.y+bh*0.5f,R=std::min(b.w,bh)*0.5f-(zire ? 4 : 2);
+            assert(cx-R>=0 && cx+R<=320 && cy-R>=0 && cy+R<=120);
+            assert(at(cx,cy-R+2.5f)>panel+150 && at(cx-R+2.5f,cy)>panel+150);
+        }
+        if(zire) {
+            // Full-height lines close the side columns; the split is ticks only.
+            for(float x:{48.5f,273.5f})assert(at(x,60)>panel+150);
+            assert(at(178.5f,4)>panel+150 && at(178.5f,60)<panel+12);
+        } else {
+            // One rounded box with a triangle at each end of the split.
+            assert(at(160,3.5f)>panel+150 && at(160,116.5f)>panel+150 && at(49.5f,60)>panel+150 && at(271.5f,60)>panel+150);
+            assert(at(178,5)>panel+150 && at(178,115)>panel+150 && at(178,60)<panel+12);
+        }
+        SDL_DestroyRenderer(r);SDL_FreeSurface(s);
+    }
+}
+
+static void zireAndM515() {
+    // TX and E2 keep their art through DeviceType5; the others have none yet.
+    assert(deviceArt(deviceTypeTX)==DeviceArt::tx && deviceArt(deviceTypeE2)==DeviceArt::e2);
+    assert(deviceArt(deviceTypePV)==DeviceArt::none && deviceArt(deviceTypeFrankenE2)==DeviceArt::none);
+    assert(&deviceControls(deviceTypeTX)==&deviceControls(DeviceArt::tx) && &deviceSilkscreen(deviceTypeE2)==&deviceSilkscreen(DeviceArt::e2));
+    assert(deviceControls(deviceTypeTX).unit==1 && deviceControls(deviceTypeE2).unit==1 && deviceSilkscreen(deviceTypeE2).unit==1);
+    for(auto art:{DeviceArt::zire72,DeviceArt::m515}) {
+        artDevice(art);
+        artSilkscreen(art);
+    }
+}
+
 static void lcdScaling() {
     // A high-frequency guest frame distinguishes nearest from linear filtering.
     for(auto device:{deviceTypeTX,deviceTypeE2})
@@ -353,7 +518,8 @@ int main() {
     assert(deviceControlAt(other,160,200,50,215)==keyIdUp);
     exercise(deviceTypeTX);
     exercise(deviceTypeE2);
+    zireAndM515();
     silkscreen();
     lcdScaling();
-    SDL_Quit();puts("PASS: TX and E2 device buttons, holds/chords, focus/drag/rotation release, touch isolation, scales, pressed rendering and E2 silkscreen");
+    SDL_Quit();puts("PASS: TX and E2 device buttons, holds/chords, focus/drag/rotation release, touch isolation, scales, pressed rendering and E2 silkscreen; Zire 72 and m515 hit areas, pressed art and silkscreens");
 }
