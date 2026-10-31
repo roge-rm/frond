@@ -194,18 +194,24 @@ class DeviceInputTest(unittest.TestCase):
         path = session(self.root / 'e2', 'palm-e2')
         self.rejected([path, '--device', 'palm-tx'], "doesn't match the session's device palm-e2")
 
-    def test_zire72_passes_validation_then_is_refused(self):
-        refused = "the Zire 72 isn't supported yet"
+    def test_zire72_passes_validation_and_starts(self):
         rom = self.root / 'zire'
-        rom.write_bytes(zire_nor())
-        self.rejected([rom], refused)
-        self.rejected([rom, '--device', 'palm-zire-72'], refused)
+        data = zire_nor()
+        struct.pack_into('<I', data, 0, 0xeafffffe)  # reset vector: b . so the board idles quietly
+        rom.write_bytes(data)
+        env = {**os.environ, 'SDL_VIDEODRIVER': 'dummy', 'SDL_AUDIODRIVER': 'dummy'}
         # Display and RAM defaults come from the profile (32 MiB, 320x320).
-        self.rejected([rom, '--ram-size', '32', '--display', '320x320'], refused)
-        # A Zire session whose NOR is the Zire's passes everything but the final refusal.
+        for args in ([rom], [rom, '--device', 'palm-zire-72'], [rom, '--ram-size', '32', '--display', '320x320']):
+            with self.subTest(args=args[1:]):
+                result = subprocess.run([str(CORE), *map(str, args), '--no-sound', '--run-for', '1'],
+                                        capture_output=True, text=True, timeout=30, env=env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('bounded run complete; PC=0x0', result.stdout + result.stderr)
+                self.assertNotIn('supported yet', result.stderr)
+        # A Zire session whose NOR is the Zire's passes validation and fails only on its fake state.
         # The desktop's saved TX serial settings are dropped for non-TX devices before this point.
         path = session(self.root / 'zire-session', 'palm-zire-72', nor=zire_nor(), display=5)
-        self.rejected([path], refused)
+        self.rejected([path], 'failed to restore savestate')
 
     def test_zire72_rejections(self):
         rom = self.root / 'zire-bad'
