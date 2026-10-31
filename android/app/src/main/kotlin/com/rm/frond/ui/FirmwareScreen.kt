@@ -100,7 +100,7 @@ fun FirmwareScreen(model: HomeModel) {
             TopAppBar(
                 title = { Text("Import firmware") },
                 navigationIcon = {
-                    IconButton(onClick = { model.firmwareOpen = false }) {
+                    IconButton(onClick = { model.closeFirmware() }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 },
@@ -160,7 +160,13 @@ fun FirmwareScreen(model: HomeModel) {
                         val result = withContext(Dispatchers.IO) { Firmware.import(context, d, nand) }
                         busy = false
                         model.reload()
-                        if (result == null) model.firmwareOpen = false else error = result
+                        if (result != null) {
+                            error = result
+                            return@launch
+                        }
+                        val thenStart = model.startAfterImport
+                        model.closeFirmware()
+                        if (thenStart) model.newSession(d)
                     }
                 },
                 modifier = Modifier.fillMaxWidth().padding(16.dp),

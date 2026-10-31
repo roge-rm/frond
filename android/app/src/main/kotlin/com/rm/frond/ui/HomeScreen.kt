@@ -8,14 +8,12 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -24,10 +22,11 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
+import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -45,6 +44,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.platform.LocalContext
@@ -72,7 +72,7 @@ fun HomeScreen(model: HomeModel) {
     var renaming by remember { mutableStateOf<Session?>(null) }
     var deleting by remember { mutableStateOf<Session?>(null) }
     var exporting by remember { mutableStateOf<Session?>(null) }
-    var choosingDevice by remember { mutableStateOf(false) }
+    var adding by remember { mutableStateOf(false) }
 
     val importSession = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
@@ -98,7 +98,6 @@ fun HomeScreen(model: HomeModel) {
         }
     }
 
-    val ready = Device.shown.filter { model.firmwareReady[it] == true }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -111,6 +110,10 @@ fun HomeScreen(model: HomeModel) {
                                 menu = false
                                 importSession.launch(arrayOf("*/*"))
                             })
+                            DropdownMenuItem(text = { Text("Firmware") }, onClick = {
+                                menu = false
+                                model.openFirmware()
+                            })
                             DropdownMenuItem(text = { Text("Settings") }, onClick = {
                                 menu = false
                                 model.settingsOpen = true
@@ -122,24 +125,24 @@ fun HomeScreen(model: HomeModel) {
         },
         snackbarHost = { SnackbarHost(snackbar) },
         floatingActionButton = {
-            if (ready.isNotEmpty()) {
-                FloatingActionButton(
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    contentColor = MaterialTheme.colorScheme.onPrimary,
-                    onClick = { if (ready.size == 1) model.newSession(ready[0]) else choosingDevice = true },
-                ) {
-                    Icon(Icons.Default.Add, contentDescription = "New session")
-                }
-            }
+            ExtendedFloatingActionButton(
+                text = { Text("Add device") },
+                icon = { Icon(Icons.Default.Add, contentDescription = null) },
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = MaterialTheme.colorScheme.onPrimary,
+                onClick = { adding = true },
+            )
         },
     ) { padding ->
         LazyColumn(Modifier.padding(padding).fillMaxSize()) {
-            for (device in Device.shown) {
-                deviceSection(model, device, onRename = { renaming = it }, onDelete = { deleting = it }, onExport = {
+            item(key = "header") { Header("Devices", Modifier.padding(start = 16.dp, top = 8.dp)) }
+            items(model.sessions, key = { it.id }) { s ->
+                SessionRow(s, onOpen = { model.start(s) }, onRename = { renaming = it }, onDelete = { deleting = it }, onExport = {
                     exporting = it
                     exportSession.launch("${it.name}.frond")
                 })
             }
+            if (model.sessions.isEmpty()) item(key = "empty") { EmptyNote("No devices yet. Tap Add device to set one up.") }
             item { Spacer(Modifier.size(80.dp)) }
         }
     }
@@ -190,55 +193,30 @@ fun HomeScreen(model: HomeModel) {
             dismissButton = { TextButton(onClick = { deleting = null }) { Text("Cancel") } },
         )
     }
-    if (choosingDevice) {
+    if (adding) {
         AlertDialog(
-            onDismissRequest = { choosingDevice = false },
-            title = { Text("New session") },
+            onDismissRequest = { adding = false },
+            title = { Text("Add device") },
             text = {
                 LazyColumn {
-                    items(ready) { d ->
-                        ListItem(headlineContent = { Text(d.label) }, modifier = Modifier.clickableRow {
-                            choosingDevice = false
-                            model.newSession(d)
-                        })
+                    items(Device.shown) { d ->
+                        val ready = model.firmwareReady[d] == true
+                        ListItem(
+                            headlineContent = { Text(d.label) },
+                            supportingContent = { Text(if (ready) "Ready" else "Needs firmware") },
+                            leadingContent = { Marker(if (ready) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant) },
+                            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                            modifier = Modifier.clickableRow {
+                                adding = false
+                                if (ready) model.newSession(d) else model.openFirmware(thenStart = true)
+                            },
+                        )
                     }
                 }
             },
             confirmButton = {},
-            dismissButton = { TextButton(onClick = { choosingDevice = false }) { Text("Cancel") } },
+            dismissButton = { TextButton(onClick = { adding = false }) { Text("Cancel") } },
         )
-    }
-}
-
-private fun LazyListScope.deviceSection(
-    model: HomeModel,
-    device: Device,
-    onRename: (Session) -> Unit,
-    onDelete: (Session) -> Unit,
-    onExport: (Session) -> Unit,
-) {
-    item(key = "h" + device.id) {
-        Row(
-            Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Header(device.label, Modifier.weight(1f))
-            TextButton(onClick = { model.firmwareOpen = true }) { Text("Firmware") }
-        }
-    }
-    if (model.firmwareReady[device] != true) {
-        item(key = "f" + device.id) {
-            ListItem(
-                headlineContent = { Text("No firmware") },
-                leadingContent = { Marker(MaterialTheme.colorScheme.error) },
-                trailingContent = { TextButton(onClick = { model.firmwareOpen = true }) { Text("Import") } },
-            )
-        }
-    }
-    val list = model.sessions.filter { it.device == device }
-    items(list, key = { it.id }) { s -> SessionRow(s, onOpen = { model.start(s) }, onRename, onDelete, onExport) }
-    if (list.isEmpty() && model.firmwareReady[device] == true) {
-        item(key = "e" + device.id) { EmptyNote("No sessions") }
     }
 }
 
@@ -257,8 +235,8 @@ private fun SessionRow(
             context, s.savedAt,
             DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_SHOW_TIME or DateUtils.FORMAT_ABBREV_MONTH,
         )
-        "Saved $at · ${Formatter.formatShortFileSize(context, s.size)}"
-    } else "Not saved"
+        "${s.device.label} · Saved $at · ${Formatter.formatShortFileSize(context, s.size)}"
+    } else "${s.device.label} · Not saved"
     ListItem(
         headlineContent = { Text(s.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
         supportingContent = { Text(detail, maxLines = 1, overflow = TextOverflow.Ellipsis) },
