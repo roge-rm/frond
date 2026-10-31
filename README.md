@@ -1,26 +1,16 @@
 # Frond
 
 Frond is a Palm OS emulator for Linux and Android, made for running and developing Palm apps and games.
-Currently it emulates the Palm T|X and the Tungsten E2, with their buttons, sound, SD
-card, sleep and wake, and saved sessions. More devices are planned.
 
-To run this you will need to provide a Palm T|X or E2 device firmware as none are included.
-This is an early release - 0.5.0 - but so far results are promising.
+Currently it emulates the Palm T|X and the Tungsten E2, with sound, SD support, networking, saved sessions and more. 
+Look below to see the features in more detail. More devices are planned.
 
+To run this you will need to provide a Palm T|X or E2 device firmware - none are included.
+
+Let me know what works, what doesn't and what you'd like in #frond [on my discord](https://discord.gg/9Wun47jGC6).. or open an issue here.
+
+Enjoy!<br>
 Dan
-
-<table>
-  <tr>
-    <td align="center"><img src="doc/images/tx-sunvox-pattern.png" width="320" alt="SunVox pattern editor and synth modules, with the Palm input area hidden" /><br>SunVox · input area hidden</td>
-    <td align="center"><img src="doc/images/tx-memos-keyboard.png" width="320" alt="Memos showing a Frond demo note with the on-screen keyboard open" /><br>Memos · keyboard open</td>
-  </tr>
-  <tr>
-    <td align="center"><img src="doc/images/tx-simcity-city.png" width="320" alt="SimCity with residential and commercial zones, roads and a power station, with the keyboard open" /><br>SimCity · keyboard open</td>
-    <td align="center"><img src="doc/images/tx-bike-gameplay.png" width="320" alt="Bike gameplay showing the rider, a red flag and rocky mountain terrain in full screen" /><br>Bike · full screen</td>
-  </tr>
-</table>
-
-And on Android:
 
 <table>
   <tr>
