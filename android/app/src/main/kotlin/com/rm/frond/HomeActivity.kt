@@ -27,6 +27,10 @@ class HomeModel(private val activity: HomeActivity) {
     // A message for a dialog, with its title.
     var alert by mutableStateOf<Pair<String, String>?>(null)
     var firmwareOpen by mutableStateOf(false)
+        private set
+    // Whether the firmware screen was opened from Add device, so the imported device starts.
+    var startAfterImport by mutableStateOf(false)
+        private set
     var settingsOpen by mutableStateOf(false)
     var settings by mutableStateOf(Settings())
         private set
@@ -35,6 +39,11 @@ class HomeModel(private val activity: HomeActivity) {
     var controllers by mutableStateOf(emptyMap<Device, ControllerMap>())
         private set
     var capturing by mutableStateOf<Pair<Device, PalmButton>?>(null)
+    // The device whose controls Settings is showing, if any.
+    var controlsFor by mutableStateOf<Device?>(null)
+
+    // Devices with at least one session, in Device.shown order.
+    val added get() = Device.shown.filter { d -> sessions.any { it.device == d } }
 
     fun assign(key: Int) {
         val (device, button) = capturing ?: return
@@ -96,6 +105,16 @@ class HomeModel(private val activity: HomeActivity) {
     }
 
     fun newSession(device: Device) = start(Sessions.create(activity, device))
+
+    fun openFirmware(thenStart: Boolean = false) {
+        startAfterImport = thenStart
+        firmwareOpen = true
+    }
+
+    fun closeFirmware() {
+        firmwareOpen = false
+        startAfterImport = false
+    }
 }
 
 class HomeActivity : ComponentActivity() {
@@ -107,9 +126,13 @@ class HomeActivity : ComponentActivity() {
         setContent {
             FrondTheme {
                 Surface(Modifier.fillMaxSize()) {
-                    BackHandler(enabled = model.firmwareOpen) { model.firmwareOpen = false }
+                    BackHandler(enabled = model.firmwareOpen) { model.closeFirmware() }
                     BackHandler(enabled = model.settingsOpen) {
-                        if (model.capturing != null) model.capturing = null else model.settingsOpen = false
+                        when {
+                            model.capturing != null -> model.capturing = null
+                            model.controlsFor != null -> model.controlsFor = null
+                            else -> model.settingsOpen = false
+                        }
                     }
                     when {
                         model.settingsOpen -> SettingsScreen(model)

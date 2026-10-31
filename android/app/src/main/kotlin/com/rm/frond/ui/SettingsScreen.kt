@@ -53,6 +53,13 @@ import kotlinx.coroutines.withContext
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(model: HomeModel) {
+    val controls = model.controlsFor
+    if (controls != null) ControlsScreen(model, controls) else SettingsList(model)
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SettingsList(model: HomeModel) {
     val s = model.settings
     Scaffold(
         topBar = {
@@ -80,7 +87,14 @@ fun SettingsScreen(model: HomeModel) {
             SwitchRow("gdb server", s.debugger) { v -> model.update(s.copy(debugger = v)) }
             if (s.debugger) DebuggerPort(s.debuggerPort) { v -> model.update(s.copy(debuggerPort = v)) }
             Header("Controller", Modifier.padding(top = 16.dp))
-            for (device in Device.shown) ControllerSection(model, device)
+            val added = model.added
+            if (added.isEmpty()) EmptyNote("Add a device to set its controls.")
+            for (device in added) {
+                Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(device.label, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
+                    TextButton(onClick = { model.controlsFor = device }) { Text("Set controls") }
+                }
+            }
         }
     }
 }
@@ -114,13 +128,31 @@ private fun DebuggerPort(port: Int, onChange: (Int) -> Unit) {
 }
 
 // Each Palm button with the controller keys that press it. Tap one, then press a controller key.
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ControllerSection(model: HomeModel, device: Device) {
-    val map = model.controllers[device] ?: return
-    Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(device.label, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
-        TextButton(onClick = { model.resetController(device) }) { Text("Reset to defaults") }
+private fun ControlsScreen(model: HomeModel, device: Device) {
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("${device.label} controls") },
+                navigationIcon = {
+                    IconButton(onClick = { model.capturing = null; model.controlsFor = null }) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+                actions = { TextButton(onClick = { model.resetController(device) }) { Text("Reset to defaults") } },
+            )
+        },
+    ) { padding ->
+        Column(Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
+            ControllerButtons(model, device)
+        }
     }
+}
+
+@Composable
+private fun ControllerButtons(model: HomeModel, device: Device) {
+    val map = model.controllers[device] ?: return
     for (button in PalmButton.on(device)) {
         val waiting = model.capturing == (device to button)
         Row(
