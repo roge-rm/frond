@@ -855,6 +855,79 @@ for line in s.makefile('rb'):
         QSettings().clear();
     }
     // The running page has the Android Menu sections, and the menu bar only File and Help.
+    void hardReset() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QTemporaryDir files;
+        QFile source(files.path() + "/hard.frond");
+        QVERIFY(source.open(QIODevice::WriteOnly)); source.write("session"); source.close();
+        const auto sent = files.path() + "/sent";
+        QFile core(files.path() + "/core");
+        QVERIFY(core.open(QIODevice::WriteOnly));
+        core.write(R"PY(#!/usr/bin/python3
+import socket,sys
+s=socket.socket(socket.AF_UNIX)
+s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+saves=0
+log=open(sys.argv[0].rsplit('/',1)[0]+'/sent','a')
+for line in s.makefile('rb'):
+    i,cmd,arg=line.rstrip(b'\n').split(b'\t')
+    log.write(cmd.decode()+'\n'); log.flush()
+    if cmd==b'save':
+        saves+=1
+        if saves==1: s.sendall(i+b'\terror\twrite\t'+b'Disk full'.hex().encode()+b'\n'); continue
+    message={b'keyboard-state':b'detached',b'network-state':b'disabled',b'device-state':b'palm-tx',b'sd-state':b'none'}.get(cmd,b'done')
+    s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
+    if cmd==b'quit': break
+)PY");
+        core.close();
+        QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        auto commands = [&] {
+            QFile f(sent); if (!f.open(QIODevice::ReadOnly)) return QStringList();
+            QStringList all = QString::fromUtf8(f.readAll()).split('\n', Qt::SkipEmptyParts), work;
+            for (const auto& c : all) if (c == "save" || c == "hard-reset" || c == "quit") work << c;
+            return work;
+        };
+        MainWindow window(core.fileName()); window.show(); window.openSession(source.fileName(), true);
+        auto* hard = window.findChild<QPushButton*>("hardReset");
+        QTRY_VERIFY_WITH_TIMEOUT(hard->isEnabled(), 5000);
+        QVERIFY(hard->isVisibleTo(&window));
+        QString answer, text, failed;
+        QTimer poll; poll.setInterval(30);
+        connect(&poll, &QTimer::timeout, &window, [&] {
+            auto* box = window.findChild<QMessageBox*>();
+            if (!box || !box->isVisible()) return;
+            if (box->text().contains("Disk full")) { failed = box->text(); box->done(QMessageBox::Ok); return; }
+            text = box->text();
+            if (answer == "Cancel") {
+                if (const auto shots = qEnvironmentVariable("FROND_TEST_SHOTS"); !shots.isEmpty()) {
+                    box->grab().save(shots + "/hard-reset-dialog.png");
+                    window.grab().save(shots + "/hard-reset-running.png");
+                }
+                box->button(QMessageBox::Cancel)->click();
+                return;
+            }
+            for (auto* b : box->buttons()) if (b->text() == answer) { b->click(); return; }
+        });
+        poll.start();
+        answer = "Cancel"; hard->click();
+        QCOMPARE(text, QString("Erase everything on the Palm TX?"));
+        QTRY_VERIFY(hard->isEnabled());
+        QCOMPARE(commands(), QStringList());
+        // A failed save leaves the Palm alone.
+        answer = "Save first"; hard->click();
+        QTRY_VERIFY_WITH_TIMEOUT(!failed.isEmpty(), 3000);
+        QTRY_VERIFY(hard->isEnabled());
+        QCOMPARE(commands(), QStringList({"save"}));
+        hard->click();
+        QTRY_COMPARE_WITH_TIMEOUT(commands(), QStringList({"save", "save", "hard-reset"}), 3000);
+        QTRY_VERIFY(hard->isEnabled());
+        answer = "Erase"; hard->click();
+        QTRY_COMPARE_WITH_TIMEOUT(commands(), QStringList({"save", "save", "hard-reset", "hard-reset"}), 3000);
+        poll.stop();
+        window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        QSettings().clear();
+    }
     void runningView() {
         QSettings().clear(); QSettings().setValue("resume", false);
         QDir(managedFolder()).removeRecursively();
