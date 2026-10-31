@@ -1,0 +1,674 @@
+diff --git a/src/uarm/native/DeviceControls.cpp b/src/uarm/native/DeviceControls.cpp
+--- a/src/uarm/native/DeviceControls.cpp
++++ b/src/uarm/native/DeviceControls.cpp
+@@ -97,6 +97,37 @@
+                  -2.6f+4.6f*std::cos(degrees(-30)),0.4f+4.6f*std::sin(degrees(-30)));
+             line(3,5.2f,8,-5.2f);
+             break;
++        case DeviceControlIcon::media: {
++            // A camera seen from the front: body, viewfinder bump, lens and flash.
++            const SDL_Rect body{-8,-4,16,11};
++            d=std::fabs(deviceRoundedDistance(body,1.6f,x,y));
++            if(y<-4) {line(-5.6f,-4,-5,-6.4f);line(-5,-6.4f,-1.6f,-6.4f);line(-1.6f,-6.4f,-1,-4);}
++            d=std::min(d,ring(x,y,2.4f,1.6f,2.9f));
++            d=std::min(d,std::hypot(x+4.6f,y+0.8f)-0.6f);
++            break;
++        }
++        case DeviceControlIcon::music: {
++            // Two beamed eighth notes with filled heads.
++            line(-2.2f,3.6f,-2.2f,-5.4f);line(5,2.2f,5,-6.8f);
++            line(-2.2f,-5.4f,5,-6.8f);d=std::min(d,segment(x,y,-2.2f,-4.2f,5,-5.6f)-0.3f);
++            for(auto [hx,hy]:{std::pair<float,float>{-4.3f,4},{2.9f,2.6f}}) {
++                // Heads tilt up to the right.
++                const float c=0.9397f,sn=-0.342f,u=(x-hx)*c-(y-hy)*sn,v=(x-hx)*sn+(y-hy)*c;
++                const float k=std::hypot(u/2.3f,v/1.6f);
++                d=std::min(d,k<=1 ? 0.f : ellipse(u,v,2.3f,1.6f));
++            }
++            break;
++        }
++        case DeviceControlIcon::phone: {
++            // A telephone handset lying diagonally, the ear and mouth cups facing up and right.
++            const float cx=6.4f,cy=-6.4f,r=10.8f;
++            d=arc(x,y,cx,cy,r,degrees(98),degrees(172))-0.8f;
++            for(float a:{degrees(98),degrees(172)}) {
++                const float ex=cx+r*std::cos(a),ey=cy+r*std::sin(a);
++                d=std::min(d,segment(x,y,ex,ey,ex-std::cos(a)*2.6f,ey-std::sin(a)*2.6f)-1.7f);
++            }
++            break;
++        }
+         default: break;
+     }
+     return d;
+@@ -144,7 +175,7 @@
+                     const NavigatorLook& look) {
+     SDL_Rect nav=profile.navigator,pill=profile.select;
+     nav.x+=ox;pill.x+=ox;
+-    const float corner=profile.navigatorCorner,pr=pill.h*0.5f;
++    const float corner=profile.navigatorCorner,pr=profile.selectCorner>0 ? profile.selectCorner : pill.h*0.5f;
+     const float cy=nav.y+nav.h*0.5f;
+     const float x0=nav.x-4,y0=nav.y-3,x1=nav.x+nav.w+4,y1=nav.y+nav.h+5;
+     auto dn=[&](float x,float y) {return deviceRoundedDistance(nav,corner,x,y);};
+@@ -303,6 +334,9 @@
+             d=std::min({d,arc(x,y,0.2f,-5.3f,1.7f,degrees(-90),degrees(90)),arc(x,y,0.6f,-1.8f,1.8f,degrees(-90),degrees(90))});
+             break;
+         case 'C': d=arc(x,y,0.3f,-3.5f,3.5f,degrees(45),degrees(315));break;
++        case 'a': d=ring(x,y,-0.4f,-2.5f,2.5f);line(2.1f,-5.2f,2.1f,0);break;
++        case 'b': d=ring(x,y,0.4f,-2.5f,2.5f);line(-2.1f,-7.4f,-2.1f,0);break;
++        case 'c': d=arc(x,y,0.3f,-2.5f,2.5f,degrees(45),degrees(315));break;
+         case '1': line(0.4f,-7,0.4f,0);line(-1.6f,-5.4f,0.4f,-7);break;
+         case '2': {
+             const float cx=0,cy=-5,r=2;
+@@ -395,6 +429,167 @@
+                                                   Rgb{78,82,88},Rgb{170,174,180},Rgb{128,132,139},Rgb{236,238,242}});
+ }
+ 
++// Colours of a light silver key sitting in a dark outline groove.
++struct SilverKeyLook {
++    Rgb groove, faceTop, faceBottom, sheen, lip, ink, inkHeld;
++    float grooveWidth, held;
++};
++
++// A raised silver key of any rounded shape: a dark groove round it, a bright lip on the body
++// below the groove, a lit face and its icon. Held keys sink and darken.
++void paintSilverKey(Canvas& canvas, const SDL_Rect& key, float corner, bool held, DeviceControlIcon icon,
++                    float iconScale, const SilverKeyLook& look, bool drawIcon=true) {
++    const float sink=held ? 0.7f : 0,gw=look.grooveWidth;
++    const float x0=key.x-gw-4,y0=key.y-gw-4,x1=key.x+key.w+gw+4,y1=key.y+key.h+gw+6;
++    const float kcx=key.x+key.w*0.5f,kcy=key.y+key.h*0.5f+sink;
++    auto d=[&](float x,float y) {return deviceRoundedDistance(key,corner,x,y);};
++    // Bright lip where the body curves into the groove, strongest underneath.
++    canvas.paint(x0,y0,x1,y1,[&](float x,float y) {
++        return canvas.edge(std::fabs(d(x,y)-gw-0.6f)-0.6f)*clamp01(0.15f+0.85f*(y-key.y)/key.h);
++    },[&](float,float,Rgb) {return look.lip;});
++    canvas.paint(x0,y0,x1,y1,[&](float x,float y) {return canvas.edge(d(x,y)-gw);},
++                 [&](float,float,Rgb) {return look.groove;});
++    // Face: lit along the top, a soft sheen across its middle, darkening into the groove.
++    auto face=[&](float x,float y) {return d(x,y-sink);};
++    canvas.paint(x0,y0,x1,y1,[&](float x,float y) {return canvas.edge(face(x,y)+0.3f);},[&](float x,float y,Rgb) {
++        const float t=clamp01((y-key.y-sink)/key.h);
++        Rgb c=mix(look.faceTop,look.faceBottom,t);
++        const float r=std::hypot((x-kcx)/(key.w*0.5f),(y-key.y-sink-key.h*0.35f)/(key.h*0.45f));
++        c=c+look.sheen*std::pow(clamp01(1-r),1.5f);
++        c=mix(c*0.72f,c,clamp01(-face(x,y)/2.2f));
++        // Held: darker, with a shadow under the groove's top edge.
++        return held ? c*(look.held+0.12f*clamp01(-face(x,y-1.6f)/3)) : c;
++    });
++    // Fine highlight just inside the top edge.
++    canvas.paint(x0,y0,x1,y1,[&](float x,float y) {
++        return canvas.edge(std::fabs(face(x,y)+1.1f)-0.35f)*(held?0.15f:0.6f)*clamp01((kcy-y)/(key.h*0.5f));
++    },[](float,float,Rgb) {return Rgb{252,253,255};});
++    if(!drawIcon)return;
++    const Rgb ink=held ? look.inkHeld : look.ink;
++    const float reach=11*iconScale;
++    canvas.paint(kcx-reach,kcy-reach,kcx+reach,kcy+reach,[&](float x,float y) {
++        return canvas.edge(iconDistance(icon,(x-kcx)/iconScale,(y-kcy)/iconScale)*iconScale-0.65f*iconScale);
++    },[&](float,float,Rgb) {return ink;});
++}
++
++// Original Zire 72 body: blue-tinted satin silver. The Zire 72s is plain silver.
++const Rgb zire72Body{156,165,182};
++
++void paintZire72Controls(Canvas& canvas, const DeviceControlProfile& profile, int width, uint32_t pressed) {
++    const float H=profile.height;
++    const int ox=(width-profile.width)/2;
++    auto down=[&](KeyId key) {return (pressed&(1u<<key))!=0;};
++    auto all=[&](float,float) {return 1.f;};
++    auto shifted=[&](SDL_Rect r) {r.x+=ox;return r;};
++    // Satin body under the silkscreen glass, a little darker towards the bottom and the sides.
++    canvas.paint(0,0,width,H,all,[&](float x,float y,Rgb) {
++        Rgb c=mix(zire72Body*1.06f,zire72Body*0.8f,std::pow(y/H,1.2f));
++        c=c+Rgb{12,12,14}*std::exp(-std::pow((y-10)/5,2.f));
++        c=c+Rgb{2.5f,2.5f,2.5f}*std::sin(y*8.3f+std::sin(x*0.29f)*0.7f);
++        const float t=std::fabs(x-width*0.5f)/(width*0.5f);
++        return c*(1-0.2f*t*t);
++    });
++    // The bright chamfer of the glass bezel, then its shadow.
++    canvas.paint(0,0,width,3,[&](float,float y) {return canvas.edge(y-1);},[](float,float,Rgb) {return Rgb{40,43,50};});
++    canvas.paint(0,0,width,8,[&](float,float y) {return canvas.edge(std::fabs(y-3.8f)-2.6f);},
++                 [](float,float,Rgb) {return Rgb{226,231,239};});
++    canvas.paint(0,0,width,8,[&](float,float y) {return canvas.edge(std::fabs(y-2)-0.6f)*0.8f;},
++                 [](float,float,Rgb) {return Rgb{252,253,255};});
++    canvas.paint(0,5,width,9,[&](float,float y) {return canvas.edge(std::fabs(y-6.8f)-0.5f)*0.4f;},
++                 [](float,float,Rgb) {return Rgb{70,75,88};});
++    canvas.paint(0,H-3,width,H,[&](float,float y) {return canvas.edge(std::fabs(y-H+0.8f)-0.8f)*0.5f;},
++                 [](float,float,Rgb) {return Rgb{72,78,92};});
++
++    const SilverKeyLook keys{Rgb{30,33,42},Rgb{216,220,228},Rgb{168,173,184},Rgb{12,12,13},Rgb{226,231,240},
++                             Rgb{44,47,56},Rgb{36,38,46},1.7f,0.72f};
++    for(size_t i=0;i<profile.count;++i) {
++        const auto& button=profile.buttons[i];
++        if(deviceNavigatorButton(profile,button))continue;
++        const SDL_Rect key=shifted(button.bounds);
++        paintSilverKey(canvas,key,deviceButtonCorner(profile,key),down(button.key),button.icon,1.0f,keys);
++    }
++
++    // Silver rounded-square five-way: a raised outer rim falling inwards to a light
++    // rounded-rectangle select key.
++    if(profile.navigator.w>0)
++        paintNavigator(canvas,profile,ox,pressed,{Rgb{30,33,42},Rgb{240,243,249},Rgb{160,167,182},Rgb{118,125,140},
++                                                  Rgb{186,192,204},Rgb{255,255,255},8,0.45f,0.3f,0.72f,
++                                                  Rgb{34,37,46},Rgb{214,218,226},Rgb{164,169,180},Rgb{250,251,253}});
++    // A dark step where the rim drops to the inner face.
++    if(profile.navigator.w>0) {
++        SDL_Rect nav=profile.navigator;nav.x+=ox;
++        const float inner=profile.navigatorCorner-8;
++        const SDL_Rect step{nav.x+8,nav.y+8,nav.w-16,nav.h-16};
++        canvas.paint(nav.x,nav.y,nav.x+nav.w,nav.y+nav.h,[&](float x,float y) {
++            return canvas.edge(std::fabs(deviceRoundedDistance(step,inner,x,y))-0.5f)*
++                   (0.35f+0.4f*clamp01((nav.y+nav.h-y)/nav.h));
++        },[](float,float,Rgb) {return Rgb{44,48,60};});
++    }
++}
++
++void paintM515Controls(Canvas& canvas, const DeviceControlProfile& profile, int width, uint32_t pressed) {
++    const float H=profile.height;
++    const int ox=(width-profile.width)/2;
++    auto down=[&](KeyId key) {return (pressed&(1u<<key))!=0;};
++    auto all=[&](float,float) {return 1.f;};
++    auto shifted=[&](SDL_Rect r) {r.x+=ox;return r;};
++    // Satin silver metal with a faint mauve tint, lit from above.
++    const Rgb body{170,166,174};
++    canvas.paint(0,0,width,H,all,[&](float x,float y,Rgb) {
++        Rgb c=mix(body*1.04f,body*0.78f,std::pow(y/H,1.1f));
++        c=c+Rgb{2,2,2}*std::sin(y*7.7f+std::sin(x*0.31f)*0.8f);
++        const float t=std::fabs(x-width*0.5f)/(width*0.5f);
++        return c*(1-0.22f*t*t);
++    });
++    // Lower edge of the silkscreen bezel.
++    canvas.paint(0,0,width,4,[&](float,float y) {return canvas.edge(y-1.4f);},[](float,float,Rgb) {return Rgb{62,60,66};});
++    canvas.paint(0,0,width,6,[&](float,float y) {return canvas.edge(std::fabs(y-2.6f)-1)*0.85f;},
++                 [](float,float,Rgb) {return Rgb{226,224,230};});
++
++    // Each key is a silver dome in a dark ring; the ring's outer edge is the hit area.
++    const SilverKeyLook keys{Rgb{24,24,28},Rgb{224,222,228},Rgb{160,158,166},Rgb{18,18,18},Rgb{214,212,220},
++                             Rgb{40,40,46},Rgb{30,30,36},3.8f,0.7f};
++    // The scroll keys sit in thinner rings.
++    SilverKeyLook scroll=keys;
++    scroll.grooveWidth=2.2f;scroll.groove=Rgb{52,51,58};
++    auto paintRound=[&](const DeviceButton& button,bool icon) {
++        const SDL_Rect hit=shifted(button.bounds);
++        const auto& look=icon ? keys : scroll;
++        const int g=int(look.grooveWidth+0.5f)+(icon ? 0 : 1);
++        const SDL_Rect dome{hit.x+g,hit.y+g,hit.w-2*g,hit.h-2*g};
++        paintSilverKey(canvas,dome,dome.w*0.5f,down(button.key),button.icon,1.5f,look,icon);
++    };
++    for(size_t i=0;i<profile.count;++i) {
++        const auto& button=profile.buttons[i];
++        if(button.key==keyIdUp || button.key==keyIdDown)continue;
++        paintRound(button,true);
++    }
++
++    // Scroll keys: two plain domes stacked in a recessed pill housing.
++    const DeviceButton* up=nullptr;const DeviceButton* dn=nullptr;
++    for(size_t i=0;i<profile.count;++i) {
++        if(profile.buttons[i].key==keyIdUp)up=&profile.buttons[i];
++        if(profile.buttons[i].key==keyIdDown)dn=&profile.buttons[i];
++    }
++    if(up && dn) {
++        const SDL_Rect a=shifted(up->bounds),b=shifted(dn->bounds);
++        const SDL_Rect housing{a.x-5,a.y-5,a.w+10,b.y+b.h-a.y+10};
++        const float hr=housing.w*0.5f;
++        auto dh=[&](float x,float y) {return deviceRoundedDistance(housing,hr,x,y);};
++        const float x0=housing.x-4,y0=housing.y-3,x1=housing.x+housing.w+4,y1=housing.y+housing.h+4;
++        canvas.paint(x0,y0,x1,y1,[&](float x,float y) {
++            return canvas.edge(std::fabs(dh(x,y)-1.2f)-0.6f)*clamp01(0.2f+0.8f*(y-housing.y)/housing.h);
++        },[](float,float,Rgb) {return Rgb{222,220,228};});
++        canvas.paint(x0,y0,x1,y1,[&](float x,float y) {return canvas.edge(dh(x,y));},[&](float,float y,Rgb) {
++            return mix(Rgb{104,102,110},Rgb{146,144,152},clamp01((y-housing.y)/housing.h));
++        });
++        canvas.paint(x0,y0,x1,y1,[&](float x,float y) {return canvas.edge(std::fabs(dh(x,y))-0.5f)*0.7f;},
++                     [](float,float,Rgb) {return Rgb{60,59,66};});
++        paintRound(*up,false);
++        paintRound(*dn,false);
++    }
++}
++
+ // Glyphs on the silkscreen discs, filled: signed distance in LCD pixels from the disc centre.
+ float silkscreenDiscGlyph(SilkscreenIcon icon, float x, float y) {
+     switch(icon) {
+@@ -424,31 +619,74 @@
+             }
+             return polygon(x,y,p);
+         }
++        case SilkscreenIcon::calc: {
++            // Four rounded keys in a square, with plus, divide, times and equals cut out.
++            float d=1e9f;
++            for(float kx:{-5.4f,5.4f})for(float ky:{-5.4f,5.4f})d=std::min(d,box(x,y,kx-2.6f,ky-2.6f,kx+2.6f,ky+2.6f)-2);
++            auto cut=[&](float v) {d=std::max(d,-(v-0.75f));};
++            cut(std::min(segment(x,y,-8,-5.4f,-2.8f,-5.4f),segment(x,y,-5.4f,-8,-5.4f,-2.8f)));
++            cut(std::min({segment(x,y,2.8f,-5.4f,8,-5.4f),std::hypot(x-5.4f,y+7.9f)-0.3f,std::hypot(x-5.4f,y+2.9f)-0.3f}));
++            cut(std::min(segment(x,y,-7.4f,3.4f,-3.4f,7.4f),segment(x,y,-7.4f,7.4f,-3.4f,3.4f)));
++            cut(std::min(segment(x,y,2.8f,4.1f,8,4.1f),segment(x,y,2.8f,6.7f,8,6.7f)));
++            return d;
++        }
+         case SilkscreenIcon::find:
+             return std::min(ring(x,y,2.5f,-2.5f,6.3f)-1.8f,segment(x,y,-2.6f,2.6f,-8.6f,8.6f)-2.3f);
+         default: return 1e9f;
+     }
+ }
+ 
++// Printed silkscreen colours and sizes; mark scales the clock, brightness and keyboard labels.
++struct SilkscreenLook {
++    Rgb panelTop, panelBottom, edge, ink, discTop, discBottom, glyph;
++    float vignette, line, discInset, mark;
++};
++
+ void paintSilkscreen(Canvas& canvas, const DeviceSilkscreen& silk) {
+     const float W=silk.width,H=silk.height;
+-    const Rgb ink{158,162,165};
+-    // Dark grey printed panel over the digitizer.
++    // E2: dark grey print with light grey discs. Zire 72: a bluer grey with silver discs.
++    // m515: light grey-green print with pale discs and one Graffiti box.
++    const SilkscreenLook look=
++        silk.style==SilkscreenStyle::zire72 ? SilkscreenLook{Rgb{82,87,100},Rgb{74,79,92},Rgb{36,39,46},Rgb{178,183,194},
++                                                             Rgb{196,200,208},Rgb{170,175,184},Rgb{50,54,64},0.08f,0.5f,4,1}
++      : silk.style==SilkscreenStyle::m515 ? SilkscreenLook{Rgb{132,139,128},Rgb{122,129,118},Rgb{70,74,68},Rgb{236,240,232},
++                                                           Rgb{228,231,224},Rgb{204,208,200},Rgb{70,75,68},0.06f,1,2,1.4f}
++      : SilkscreenLook{Rgb{68,72,76},Rgb{62,66,70},Rgb{38,40,43},Rgb{158,162,165},
++                       Rgb{172,175,177},Rgb{156,159,161},Rgb{72,76,80},0.06f,0.45f,4,1};
++    const bool oneBox=silk.style==SilkscreenStyle::m515;
++    const Rgb ink=look.ink;
++    // Printed panel over the digitizer.
+     canvas.paint(0,0,W,H,[](float,float) {return 1.f;},[&](float x,float y,Rgb) {
+-        const Rgb c=mix(Rgb{68,72,76},Rgb{62,66,70},y/H);
++        const Rgb c=mix(look.panelTop,look.panelBottom,y/H);
+         const float t=std::fabs(x-W*0.5f)/(W*0.5f);
+-        return c*(1-0.06f*t*t);
++        return c*(1-look.vignette*t*t);
+     });
+-    canvas.paint(0,0,W,1.5f,[&](float,float y) {return canvas.edge(y-0.6f);},[](float,float,Rgb) {return Rgb{38,40,43};});
+-    // Thin lines between the button columns and the Graffiti areas, and ticks splitting
+-    // letters from numbers at the top and bottom.
+-    auto lines=[&](float x,float y) {
+-        // Lines sit on LCD pixel centres so they stay sharp at normal size.
+-        const float split=silk.numbers.x+0.5f;
+-        const float tick=std::min(box(x,y,split-0.45f,0,split+0.45f,13),box(x,y,split-0.45f,H-15,split+0.45f,H));
+-        return std::min({tick,std::fabs(x-(silk.letters.x-5.5f))-0.45f,std::fabs(x-(silk.numbers.x+silk.numbers.w+7.5f))-0.45f});
+-    };
+-    canvas.paint(0,0,W,H,[&](float x,float y) {return canvas.edge(lines(x,y));},[&](float,float,Rgb) {return ink;});
++    canvas.paint(0,0,W,1.5f*silk.unit,[&](float,float y) {return canvas.edge(y-0.6f*silk.unit);},[&](float,float,Rgb) {return look.edge;});
++    // Graffiti box, the printed bounds of the letter and number areas.
++    // Box lines on odd units sit on LCD pixel centres at 2 units per pixel.
++    const float bx0=silk.letters.x-5,bx1=silk.numbers.x+silk.numbers.w+5,by0=3,by1=H-3,bc=9;
++    if(oneBox) {
++        // One rounded box with triangles at the top and bottom marking the split.
++        const SDL_Rect frame{int(bx0),int(by0),int(bx1-bx0),int(by1-by0)};
++        const float split=silk.numbers.x;
++        const std::array<std::array<float,2>,3> top{{{split-4.5f,by0},{split+4.5f,by0},{split,by0+6}}};
++        const std::array<std::array<float,2>,3> bottom{{{split-4.5f,by1},{split+4.5f,by1},{split,by1-6}}};
++        canvas.paint(0,0,W,H,[&](float x,float y) {
++            return canvas.edge(std::min({std::fabs(deviceRoundedDistance(frame,bc,x,y))-look.line,
++                                         polygon(x,y,top),polygon(x,y,bottom)}));
++        },[&](float,float,Rgb) {return ink;});
++    } else {
++        // Thin lines between the button columns and the Graffiti areas, and ticks splitting
++        // letters from numbers at the top and bottom.
++        auto lines=[&](float x,float y) {
++            // Lines sit on LCD pixel centres so they stay sharp at normal size.
++            const float split=silk.numbers.x+0.5f;
++            const float tick=std::min(box(x,y,split-look.line,0,split+look.line,13),box(x,y,split-look.line,H-15,split+look.line,H));
++            return std::min({tick,std::fabs(x-(silk.letters.x-5.5f))-look.line,std::fabs(x-(silk.numbers.x+silk.numbers.w+7.5f))-look.line});
++        };
++        canvas.paint(0,0,W,H,[&](float x,float y) {return canvas.edge(lines(x,y));},[&](float,float,Rgb) {return ink;});
++    }
++    const float k=look.mark;
+     for(size_t i=0;i<silk.count;++i) {
+         const auto& button=silk.buttons[i];
+         SDL_Rect r=button.bounds;
+@@ -457,41 +695,50 @@
+         switch(button.icon) {
+             case SilkscreenIcon::clock:
+             case SilkscreenIcon::brightness: {
+-                // Small glyph near the top of its rectangle.
+-                const float cy=r.y+7;
+-                canvas.paint(cx-8,cy-8,cx+8,cy+8,[&](float x,float y) {
+-                    x-=cx;y-=cy;
++                // Small glyph near the top of its rectangle; inside the box's corners on the m515.
++                const float gx=oneBox ? (button.icon==SilkscreenIcon::clock ? bx0+9 : bx1-9) : cx;
++                const float cy=oneBox ? by0+9 : r.y+7;
++                canvas.paint(gx-8*k,cy-8*k,gx+8*k,cy+8*k,[&](float x,float y) {
++                    x=(x-gx)/k;y=(y-cy)/k;
+                     float d;
+                     if(button.icon==SilkscreenIcon::clock) {
+                         d=std::min({ring(x,y,0,0,4.4f),segment(x,y,0,0,0,-2.8f),segment(x,y,0,0,2,0.9f)});
+                     } else {
+                         d=ring(x,y,0,0,2.1f);
+-                        for(int k=0;k<8;++k)d=std::min(d,std::hypot(x-4.6f*std::cos(degrees(45*k)),y-4.6f*std::sin(degrees(45*k)))-0.3f);
++                        for(int n=0;n<8;++n)d=std::min(d,std::hypot(x-4.6f*std::cos(degrees(45*n)),y-4.6f*std::sin(degrees(45*n)))-0.3f);
+                     }
+-                    return canvas.edge(d-0.5f);
++                    return canvas.edge(d*k-0.5f*k);
+                 },[&](float,float,Rgb) {return ink;});
+                 break;
+             }
+             case SilkscreenIcon::letters:
+             case SilkscreenIcon::numbers: {
+-                const char* text=button.icon==SilkscreenIcon::letters ? "ABC" : "123";
+-                const float base=r.y+r.h-6;
+-                canvas.paint(cx-12,base-9,cx+12,base+2,[&](float x,float y) {
+-                    return canvas.edge(textDistance(text,x-cx,y-base)-0.75f);
++                const bool letters=button.icon==SilkscreenIcon::letters;
++                const char* text=letters ? (oneBox ? "abc" : "ABC") : "123";
++                // The m515 sets its labels in the box's lower corners, each with a dot.
++                const float tx=oneBox ? (letters ? bx0+20 : bx1-20) : cx;
++                const float base=oneBox ? by1-6 : r.y+r.h-6;
++                canvas.paint(tx-12*k,base-9*k,tx+12*k,base+2*k,[&](float x,float y) {
++                    return canvas.edge(textDistance(text,(x-tx)/k,(y-base)/k)*k-0.75f*k);
+                 },[&](float,float,Rgb) {return ink;});
++                if(oneBox) {
++                    const float dx=letters ? bx0+6 : bx1-6,dy=by1-6;
++                    canvas.paint(dx-3,dy-3,dx+3,dy+3,[&](float x,float y) {return canvas.edge(std::hypot(x-dx,y-dy)-1.8f);},
++                                 [&](float,float,Rgb) {return ink;});
++                }
+                 break;
+             }
+             default: {
+-                // Lighter grey disc with a dark glyph, centred on the reachable rectangle.
+-                const float cy=r.y+r.h*0.5f,R=std::min(r.w,r.h)*0.5f-4;
++                // Lighter disc with a dark glyph, centred on the reachable rectangle.
++                const float cy=r.y+r.h*0.5f,R=std::min(r.w,r.h)*0.5f-look.discInset;
+                 canvas.paint(cx-R-1,cy-R-1,cx+R+1,cy+R+1,[&](float x,float y) {
+                     return canvas.edge(std::hypot(x-cx,y-cy)-R);
+                 },[&](float x,float y,Rgb) {
+-                    return mix(Rgb{172,175,177},Rgb{156,159,161},clamp01((y-cy+R)/(2*R)))*(1-0.04f*clamp01((x-cx)/R));
++                    return mix(look.discTop,look.discBottom,clamp01((y-cy+R)/(2*R)))*(1-0.04f*clamp01((x-cx)/R));
+                 });
+                 canvas.paint(cx-R,cy-R,cx+R,cy+R,[&](float x,float y) {
+                     return canvas.edge(silkscreenDiscGlyph(button.icon,(x-cx)*19/R,(y-cy)*19/R)*R/19);
+-                },[](float,float,Rgb) {return Rgb{72,76,80};});
++                },[&](float,float,Rgb) {return look.glyph;});
+             }
+         }
+     }
+@@ -501,9 +748,15 @@
+ void drawDeviceControls(SDL_Renderer* renderer, const DeviceControlProfile& profile,
+                         int width, int height, float scale, uint32_t pressed) {
+     if(!profile.count)return;
+-    Canvas canvas(width,profile.height,scale);
+-    if(profile.style==DeviceControlStyle::e2)paintE2Controls(canvas,profile,width,pressed);
+-    else paintTxControls(canvas,profile,width,pressed);
++    // The canvas is in strip units, scale/unit device pixels each.
++    const int u=profile.unit;
++    Canvas canvas(width*u,profile.height,scale/u);
++    switch(profile.style) {
++        case DeviceControlStyle::e2: paintE2Controls(canvas,profile,width*u,pressed);break;
++        case DeviceControlStyle::zire72: paintZire72Controls(canvas,profile,width*u,pressed);break;
++        case DeviceControlStyle::m515: paintM515Controls(canvas,profile,width*u,pressed);break;
++        default: paintTxControls(canvas,profile,width*u,pressed);
++    }
+     if(auto* texture=canvasTexture(renderer,canvas)) {
+         const SDL_Rect dest{0,int(std::lround(height*scale)),canvas.w,canvas.h};
+         SDL_RenderCopy(renderer,texture,nullptr,&dest);
+@@ -513,7 +766,7 @@
+ 
+ SDL_Texture* createDeviceSilkscreen(SDL_Renderer* renderer, const DeviceSilkscreen& silkscreen, float scale) {
+     if(!silkscreen.count)return nullptr;
+-    Canvas canvas(silkscreen.width,silkscreen.height,scale);
++    Canvas canvas(silkscreen.width,silkscreen.height,scale/silkscreen.unit);
+     paintSilkscreen(canvas,silkscreen);
+     return canvasTexture(renderer,canvas);
+ }
+diff --git a/src/uarm/native/DeviceControls.h b/src/uarm/native/DeviceControls.h
+--- a/src/uarm/native/DeviceControls.h
++++ b/src/uarm/native/DeviceControls.h
+@@ -8,8 +8,9 @@
+ #include "device_type5.h"
+ #include "keys.h"
+ 
+-enum class DeviceControlIcon { home, calendar, contacts, web, up, down, left, right, select, power, tasks, notes };
+-enum class DeviceControlStyle { tx, e2 };
++enum class DeviceControlIcon { home, calendar, contacts, web, up, down, left, right, select, power, tasks, notes,
++                               media, music, phone };
++enum class DeviceControlStyle { tx, e2, zire72, m515 };
+ struct DeviceButton {
+     KeyId key;
+     SDL_Rect bounds;
+@@ -27,8 +28,18 @@
+     DeviceControlStyle style{DeviceControlStyle::tx};
+     // App key corner radius as a fraction of the key's shorter side.
+     float buttonCorner{0.3f};
++    // Strip units per screen pixel. Art is authored 320 units wide, so 160-wide screens use 2.
++    int unit{1};
++    // Select key corner radius in strip units; 0 for a pill.
++    float selectCorner{0};
+ };
+-inline const DeviceControlProfile& deviceControls(DeviceType5 device) {
++// Which button bar and silkscreen art a device gets. Zire 72 and m515 have no DeviceType5 yet,
++// so only tests and renders reach them until those boards exist.
++enum class DeviceArt { none, tx, e2, zire72, m515 };
++inline DeviceArt deviceArt(DeviceType5 device) {
++    return device == deviceTypeTX ? DeviceArt::tx : device == deviceTypeE2 ? DeviceArt::e2 : DeviceArt::none;
++}
++inline const DeviceControlProfile& deviceControls(DeviceArt art) {
+     // App keys hit their whole pocket; the five-way entries place the direction parts.
+     static const DeviceButton tx[] = {
+         {keyIdHard1, {4,25,44,40}, "Home", DeviceControlIcon::home},
+@@ -57,9 +68,47 @@
+     };
+     static const DeviceControlProfile e2Profile{320,80,e2,std::size(e2),{112,6,96,64},22,{136,27,48,22},
+                                                 DeviceControlStyle::e2,0.27f};
++    // Zire 72: pill-shaped app keys in stacked pairs, Calendar over Contacts on the left and
++    // Media (camera) over Music on the right, round a rounded-square five-way with a
++    // rounded-rectangle select key.
++    static const DeviceButton zire72[] = {
++        {keyIdHard1, {10,19,82,28}, "Calendar", DeviceControlIcon::calendar},
++        {keyIdHard2, {10,57,82,28}, "Contacts", DeviceControlIcon::contacts},
++        {keyIdHard3, {228,19,82,28}, "Media", DeviceControlIcon::media},
++        {keyIdHard4, {228,57,82,28}, "Music", DeviceControlIcon::music},
++        {keyIdUp, {150,15,20,14}, "Up", DeviceControlIcon::up},
++        {keyIdDown, {150,76,20,12}, "Down", DeviceControlIcon::down},
++        {keyIdLeft, {108,42,18,20}, "Left", DeviceControlIcon::left},
++        {keyIdRight, {194,42,18,20}, "Right", DeviceControlIcon::right},
++        {keyIdSelect, {138,36,44,32}, "Select", DeviceControlIcon::select},
++    };
++    static const DeviceControlProfile zire72Profile{320,96,zire72,std::size(zire72),{105,13,110,78},25,{138,36,44,32},
++                                                    DeviceControlStyle::zire72,0.5f,1,10};
++    // m515 on a 160-wide screen, 2 units per pixel: four round app keys (Date Book, Address,
++    // To Do, Note Pad), the outer ones higher, either side of two round scroll keys stacked in a
++    // pill-shaped housing. No five-way, so up and down hit as their own round keys.
++    static const DeviceButton m515[] = {
++        {keyIdHard1, {4,12,52,52}, "Date Book", DeviceControlIcon::calendar},
++        {keyIdHard2, {68,18,52,52}, "Address", DeviceControlIcon::phone},
++        {keyIdHard3, {200,18,52,52}, "To Do", DeviceControlIcon::tasks},
++        {keyIdHard4, {264,12,52,52}, "Note Pad", DeviceControlIcon::notes},
++        {keyIdUp, {144,6,32,32}, "Up", DeviceControlIcon::up},
++        {keyIdDown, {144,40,32,32}, "Down", DeviceControlIcon::down},
++    };
++    static const DeviceControlProfile m515Profile{320,80,m515,std::size(m515),{0,0,0,0},0,{0,0,0,0},
++                                                  DeviceControlStyle::m515,0.5f,2};
+     static const DeviceControlProfile empty{0,0,nullptr,0,{0,0,0,0},0,{0,0,0,0}};
+-    return device == deviceTypeTX ? txProfile : device == deviceTypeE2 ? e2Profile : empty;
++    switch(art) {
++        case DeviceArt::tx: return txProfile;
++        case DeviceArt::e2: return e2Profile;
++        case DeviceArt::zire72: return zire72Profile;
++        case DeviceArt::m515: return m515Profile;
++        default: return empty;
++    }
+ }
++inline const DeviceControlProfile& deviceControls(DeviceType5 device) {return deviceControls(deviceArt(device));}
++// Strip height in screen pixels.
++inline int deviceControlsHeight(const DeviceControlProfile& profile) {return profile.height/profile.unit;}
+ // Signed distance from (x,y) to a rounded rectangle; negative inside.
+ inline float deviceRoundedDistance(const SDL_Rect& r, float radius, float x, float y) {
+     const float qx=std::fabs(x-r.x-r.w*0.5f)-r.w*0.5f+radius;
+@@ -71,14 +120,17 @@
+     const auto& n=profile.navigator;
+     if(n.w<=0 || deviceRoundedDistance(n,profile.navigatorCorner,x,y)>0)return keyInvalid;
+     const auto& s=profile.select;
+-    if(deviceRoundedDistance(s,s.h*0.5f,x,y)<=1)return keyIdSelect;
++    if(deviceRoundedDistance(s,profile.selectCorner>0 ? profile.selectCorner : s.h*0.5f,x,y)<=1)return keyIdSelect;
+     const float dx=x-n.x-n.w*0.5f,dy=y-n.y-n.h*0.5f;
+     if(std::fabs(dx)*n.h>std::fabs(dy)*n.w)return dx<0 ? keyIdLeft : keyIdRight;
+     return dy<0 ? keyIdUp : keyIdDown;
+ }
+ inline SDL_Rect deviceButtonRect(const DeviceControlProfile& profile,
+                                 const DeviceButton& button, int screenWidth, int screenHeight) {
+-    auto r=button.bounds; r.x+=(screenWidth-profile.width)/2; r.y+=screenHeight; return r;
++    // Screen pixels; strip units divide by the unit.
++    const int u=profile.unit;
++    auto r=button.bounds; r.x=(r.x+(screenWidth*u-profile.width)/2)/u; r.y=r.y/u+screenHeight; r.w/=u; r.h/=u;
++    return r;
+ }
+ // App keys are rounded rectangles; their pockets share this corner.
+ inline float deviceButtonCorner(const DeviceControlProfile& profile, const SDL_Rect& r) {
+@@ -90,14 +142,15 @@
+ }
+ inline KeyId deviceControlAt(const DeviceControlProfile& profile, int screenWidth,
+                              int screenHeight, int x, int y) {
+-    // Integer window points hit-test at their pixel centre.
+-    const int sx=x-(screenWidth-profile.width)/2,sy=y-screenHeight;
+-    const auto part=deviceNavigatorAt(profile,sx+0.5f,sy+0.5f);
++    // Integer window points hit-test at their pixel centre, in strip units.
++    const int u=profile.unit;
++    const float sx=(x+0.5f)*u-(screenWidth*u-profile.width)/2,sy=(y-screenHeight+0.5f)*u;
++    const auto part=deviceNavigatorAt(profile,sx,sy);
+     if(part!=keyInvalid)return part;
+     for(size_t i=0;i<profile.count;++i) {
+         if(deviceNavigatorButton(profile,profile.buttons[i]))continue;
+         const auto& r=profile.buttons[i].bounds;
+-        if(deviceRoundedDistance(r,deviceButtonCorner(profile,r),sx+0.5f,sy+0.5f)<=0)
++        if(deviceRoundedDistance(r,deviceButtonCorner(profile,r),sx,sy)<=0)
+             return profile.buttons[i].key;
+     }
+     return keyInvalid;
+@@ -107,7 +160,9 @@
+ 
+ // Printed silkscreen under the LCD. Taps on it reach the guest as pen input; these
+ // rectangles only place the artwork.
+-enum class SilkscreenIcon { home, menu, favorites, find, clock, brightness, letters, numbers };
++enum class SilkscreenIcon { home, menu, favorites, find, clock, brightness, letters, numbers, calc };
++// E2 and Zire 72: two Graffiti areas between full-height lines; m515: one rounded box.
++enum class SilkscreenStyle { e2, zire72, m515 };
+ struct SilkscreenButton {
+     SDL_Rect bounds;
+     const char* label;
+@@ -119,8 +174,11 @@
+     size_t count;
+     // Graffiti letter and number areas.
+     SDL_Rect letters, numbers;
++    SilkscreenStyle style{SilkscreenStyle::e2};
++    // Silkscreen units per LCD pixel, as for the strip.
++    int unit{1};
+ };
+-inline const DeviceSilkscreen& deviceSilkscreen(DeviceType5 device) {
++inline const DeviceSilkscreen& deviceSilkscreen(DeviceArt art) {
+     // The E2 ROM's 'aslk' 19000 rectangles, in LCD pixels (twice the Palm OS
+     // coordinates) from the top of the silkscreen. Menu, Find, abc and 123 run
+     // past the 120 rows the digitizer reaches, as in the ROM.
+@@ -135,9 +193,44 @@
+         {{236,100,36,40}, "Number keyboard", SilkscreenIcon::numbers},
+     };
+     static const DeviceSilkscreen e2Silkscreen{320,120,e2,std::size(e2),{54,4,124,112},{178,4,88,112}};
++    // Zire 72: the NOR's 'aslk' 19000 (at 0x7c340), doubled from row 320 as for the E2.
++    // Favorites and Find run to x 330 in the ROM; kept to the panel's width here.
++    static const SilkscreenButton zire72[] = {
++        {{0,4,46,56}, "Home", SilkscreenIcon::home},
++        {{0,64,46,56}, "Menu", SilkscreenIcon::menu},
++        {{276,8,44,56}, "Favorites", SilkscreenIcon::favorites},
++        {{276,64,44,56}, "Find", SilkscreenIcon::find},
++        {{46,4,22,38}, "Clock", SilkscreenIcon::clock},
++        {{242,4,32,38}, "Brightness", SilkscreenIcon::brightness},
++        {{46,92,36,40}, "Letter keyboard", SilkscreenIcon::letters},
++        {{230,92,46,40}, "Number keyboard", SilkscreenIcon::numbers},
++    };
++    static const DeviceSilkscreen zire72Silkscreen{320,120,zire72,std::size(zire72),{54,4,124,132},{178,4,88,132},
++                                                   SilkscreenStyle::zire72};
++    // m515: 'silk' 10002 of the ROM's device resources (clock and brightness), in units of half
++    // an LCD pixel from row 160, so Palm OS coordinates doubled as above. Home and Menu start at
++    // x -6 and Calc and Find run to 324 in the ROM; kept to the panel's width here.
++    static const SilkscreenButton m515[] = {
++        {{0,6,42,54}, "Home", SilkscreenIcon::home},
++        {{0,62,42,56}, "Menu", SilkscreenIcon::menu},
++        {{280,6,40,60}, "Calc", SilkscreenIcon::calc},
++        {{280,62,40,76}, "Find", SilkscreenIcon::find},
++        {{44,6,22,38}, "Clock", SilkscreenIcon::clock},
++        {{254,6,22,38}, "Brightness", SilkscreenIcon::brightness},
++        {{44,92,28,46}, "Letter keyboard", SilkscreenIcon::letters},
++        {{248,88,30,50}, "Number keyboard", SilkscreenIcon::numbers},
++    };
++    static const DeviceSilkscreen m515Silkscreen{320,120,m515,std::size(m515),{54,8,124,112},{178,8,88,112},
++                                                 SilkscreenStyle::m515,2};
+     static const DeviceSilkscreen none{0,0,nullptr,0,{0,0,0,0},{0,0,0,0}};
+-    return device == deviceTypeE2 ? e2Silkscreen : none;
++    switch(art) {
++        case DeviceArt::e2: return e2Silkscreen;
++        case DeviceArt::zire72: return zire72Silkscreen;
++        case DeviceArt::m515: return m515Silkscreen;
++        default: return none;
++    }
+ }
+-// Draws the silkscreen at scale into a new texture the caller owns.
++inline const DeviceSilkscreen& deviceSilkscreen(DeviceType5 device) {return deviceSilkscreen(deviceArt(device));}
++// Draws the silkscreen at scale (device pixels per LCD pixel) into a new texture the caller owns.
+ SDL_Texture* createDeviceSilkscreen(SDL_Renderer* renderer, const DeviceSilkscreen& silkscreen, float scale);
+ #endif
+diff --git a/src/uarm/native/SdlRenderer.cpp b/src/uarm/native/SdlRenderer.cpp
+--- a/src/uarm/native/SdlRenderer.cpp
++++ b/src/uarm/native/SdlRenderer.cpp
+@@ -57,7 +57,7 @@
+         const int screenHeight = displayConfiguration.height + displayConfiguration.graffitiHeight;
+         const int deviceWidth = landscape ? screenHeight : displayConfiguration.width;
+         const int deviceHeight = (landscape ? displayConfiguration.width : screenHeight) +
+-                                 deviceControls(deviceType).height;
++                                 deviceControlsHeight(deviceControls(deviceType));
+         layout = fitWindowLayout(fit, deviceWidth, deviceHeight, windowWidth, windowHeight);
+ 
+         // The viewport is in output pixels while the scale is 1, then the scale maps device
+@@ -91,8 +91,8 @@
+     if (displayConfiguration.graffitiHeight > 0) {
+         // Devices with drawn silkscreen art use it when it fits the display mode.
+         const auto& silkscreen = deviceSilkscreen(deviceType);
+-        silkscreenTexture = silkscreen.count && silkscreen.width == displayConfiguration.width &&
+-                                    silkscreen.height == displayConfiguration.graffitiHeight
++        silkscreenTexture = silkscreen.count && silkscreen.width == displayConfiguration.width * silkscreen.unit &&
++                                    silkscreen.height == displayConfiguration.graffitiHeight * silkscreen.unit
+                                 ? createDeviceSilkscreen(renderer, silkscreen, artworkScale)
+                                 : loadSilkscreen(renderer);
+         // Fitted art meets fractional scales.
+@@ -246,7 +246,7 @@
+     if(controls.count) {
+         if(!controlsTexture)
+             controlsTexture=SDL_CreateTexture(renderer,SDL_PIXELFORMAT_ABGR8888,
+-                SDL_TEXTUREACCESS_TARGET,int(screenWidth*artworkScale),int(controls.height*artworkScale));
++                SDL_TEXTUREACCESS_TARGET,int(screenWidth*artworkScale),int(deviceControlsHeight(controls)*artworkScale));
+         if(controlsTexture && fit!=WindowFit::none) SDL_SetTextureScaleMode(controlsTexture,SDL_ScaleModeLinear);
+         if(controlsTexture && (!controlsPainted || controlsChanged)) {
+             float sx,sy;SDL_RenderGetScale(renderer,&sx,&sy);
+@@ -259,7 +259,7 @@
+             }
+         }
+         if(controlsPainted) {
+-            SDL_Rect dest{0,int(screenHeight*scale),int(screenWidth*scale),int(controls.height*scale)};
++            SDL_Rect dest{0,int(screenHeight*scale),int(screenWidth*scale),int(deviceControlsHeight(controls)*scale)};
+             SDL_RenderCopy(renderer,controlsTexture,nullptr,&dest);
+         } else drawDeviceControls(renderer,controls,screenWidth,screenHeight,scale,buttons);
+     }
+diff --git a/src/uarm/native/main.cpp b/src/uarm/native/main.cpp
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -122,13 +122,13 @@
+         if (scale == 0) {
+             scale = SDL_GetDisplayUsableBounds(0, &usable) == 0
+                 ? fittingWindowScale(windowWidth(displayConfiguration, rotation),
+-                                     windowHeight(displayConfiguration, rotation) + controls.height,
++                                     windowHeight(displayConfiguration, rotation) + deviceControlsHeight(controls),
+                                      usable.w, usable.h)
+                 : 1.f;
+         }
+         auto window = SDL_CreateWindow("cp-uarm", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+                                        scale * windowWidth(displayConfiguration, rotation),
+-                                       scale * (windowHeight(displayConfiguration, rotation)+controls.height),
++                                       scale * (windowHeight(displayConfiguration, rotation)+deviceControlsHeight(controls)),
+                                        SDL_WINDOW_ALLOW_HIGHDPI | (resizable ? SDL_WINDOW_RESIZABLE : 0));
+ 
+         return window;
+@@ -137,7 +137,7 @@
+     void sdlResizeWindow(SDL_Window* window, DisplayConfiguration& displayConfiguration, float scale,
+                          Rotation rotation, const DeviceControlProfile& controls) {
+         SDL_SetWindowSize(window, scale * windowWidth(displayConfiguration, rotation),
+-                          scale * (windowHeight(displayConfiguration, rotation)+controls.height));
++                          scale * (windowHeight(displayConfiguration, rotation)+deviceControlsHeight(controls)));
+     }
+ 
+     void copy(Buffer& buffer, size_t size, const void* data) {
