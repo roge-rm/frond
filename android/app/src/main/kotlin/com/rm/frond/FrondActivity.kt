@@ -54,6 +54,11 @@ class FrondActivity : SDLActivity() {
     @Volatile private var panelOpen = false
     // One save at a time: the background save and the save on back.
     private val saveLock = Any()
+    // Sound as last sent to the core; Settings can change it while the Palm runs. UI thread only.
+    @Volatile private var sound = true
+    private val soundSender = java.util.concurrent.Executors.newSingleThreadExecutor {
+        Thread(it, "FrondSound").apply { isDaemon = true }
+    }
     // Game controller buttons and sticks to the Palm's buttons. UI thread only.
     private lateinit var controller: ControllerInput
 
@@ -62,6 +67,7 @@ class FrondActivity : SDLActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         sessionPath = intent?.getStringExtra(EXTRA_SESSION)
         settings = Settings.from(this, intent)
+        sound = settings.sound
         requestedOrientation = settings.orientation.request
         File(filesDir, START_ERROR).delete()
         link = ControlLink(File(filesDir, "control.sock")) { name, _ -> if (name == "close") leave() }
@@ -371,6 +377,23 @@ class FrondActivity : SDLActivity() {
         SDLActivity.mSurface?.requestFocus()
     }
 
+    // Turns sound on or off in the running core when Settings or the Peripherals screen changed it. Off mutes the output and keeps the
+    // guest's audio timing; on after a start with --no-sound opens the audio device.
+    private fun applySound() {
+        val wanted = Settings.load(this).sound
+        if (wanted == sound) return
+        sound = wanted
+        link.whenConnected {
+            if (!link.connectedOnce) return@whenConnected
+            // Each send reads the setting when it goes out, so the last one carries the newest value
+            // whatever order changes made before the link connected are queued in.
+            soundSender.execute {
+                val reply = link.request("sound-mode", if (sound) "on" else "off", timeoutSeconds = 10)
+                if (!reply.ok) Log.w(TAG, "sound-mode: ${reply.code} ${reply.message}")
+            }
+        }
+    }
+
     // Asks the core whether the infrared keyboard is attached and shows the keyboard button to match. Waits for
     // the control link first, which with the debugger on can be a long time.
     private fun readKeyboard() {
@@ -393,6 +416,7 @@ class FrondActivity : SDLActivity() {
     override fun onResume() {
         super.onResume()
         if (!leaving) readKeyboard()
+        if (!leaving) applySound()
     }
 
     private fun openPanel() {

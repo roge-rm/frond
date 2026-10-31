@@ -230,6 +230,13 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                     SdCard.State.UNKNOWN -> action("Try again") { model.refresh() }
                 }
                 item { Header("Device", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp)) }
+                item(key = "sound") {
+                    ListItem(
+                        headlineContent = { Text("Sound") },
+                        trailingContent = { Switch(checked = model.sound, onCheckedChange = { model.changeSound(it) }) },
+                        modifier = Modifier.clickableRow { model.changeSound(!model.sound) },
+                    )
+                }
                 item(key = "keyboard") {
                     val attached = model.keyboard
                     // The keyboard and beaming share the Palm's infrared port.

@@ -5,8 +5,6 @@ import android.net.Uri
 import android.provider.DocumentsContract
 import java.io.File
 import java.io.IOException
-import java.io.InputStream
-import java.util.zip.ZipInputStream
 
 // Installs, launches and exports Palm databases in the running core, like the desktop's File menu
 // (install, launch-app, export and export-db on the control socket). Files pass through private
@@ -14,7 +12,7 @@ import java.util.zip.ZipInputStream
 class PalmDatabases(private val context: Context, private val link: ControlLink) {
     class Failed(message: String) : Exception(message)
 
-    // A database from the header of its .prc or .pdb.
+    // A RAM database as the core lists it, from its database header.
     data class Info(val name: String, val type: String, val creator: String, val resource: Boolean) {
         val application get() = resource && type == "appl"
     }
@@ -58,8 +56,8 @@ class PalmDatabases(private val context: Context, private val link: ControlLink)
         }
     }
 
-    // The RAM databases, read from an export of all of them.
-    fun list(): List<Info> = withExport(null) { zip -> zip.inputStream().use { readArchive(it) } }
+    // The RAM databases, from the core's database directory (db-list), sorted by name.
+    fun list(): List<Info> = parseList(run("db-list", "").message)
 
     private fun <T> withExport(name: String?, use: (File) -> T): T {
         folder.mkdirs()
@@ -83,39 +81,26 @@ class PalmDatabases(private val context: Context, private val link: ControlLink)
     }
 
     companion object {
-        const val HEADER_BYTES = 78
         // dmHdrAttrResDB: a resource database (.prc).
         private const val RESOURCE = 0x0001
 
-        // Name, attributes, type and creator from a Palm database header, or null if it's too short.
-        fun header(bytes: ByteArray): Info? {
-            if (bytes.size < HEADER_BYTES) return null
-            val end = (0 until 32).firstOrNull { bytes[it] == 0.toByte() } ?: 32
-            if (end == 0) return null
-            val name = String(bytes, 0, end, Charsets.ISO_8859_1)
-            val attributes = ((bytes[32].toInt() and 0xff) shl 8) or (bytes[33].toInt() and 0xff)
-            fun code(at: Int) = String(bytes, at, 4, Charsets.ISO_8859_1)
-            return Info(name, code(60), code(64), attributes and RESOURCE != 0)
-        }
-
-        // The databases in an export ZIP, sorted by name.
-        fun readArchive(input: InputStream): List<Info> {
-            val found = mutableListOf<Info>()
-            ZipInputStream(input).use { zip ->
-                while (true) {
-                    val entry = zip.nextEntry ?: break
-                    if (entry.isDirectory) continue
-                    val head = ByteArray(HEADER_BYTES)
-                    var got = 0
-                    while (got < HEADER_BYTES) {
-                        val n = zip.read(head, got, HEADER_BYTES - got)
-                        if (n < 0) break
-                        got += n
-                    }
-                    if (got == HEADER_BYTES) header(head)?.let { found += it }
+        // db-list's reply: per line, type, creator and attributes in hex, then the name's bytes in hex.
+        // Lines that don't parse are left out.
+        fun parseList(text: String): List<Info> {
+            fun bytes(hex: String) = ByteArray(hex.length / 2) { hex.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
+            fun code(hex: String) = String(bytes(hex), Charsets.ISO_8859_1)
+            val found = text.lineSequence().mapNotNull { line ->
+                val parts = line.split(' ')
+                if (parts.size != 4 || parts[0].length != 8 || parts[1].length != 8 || parts[3].isEmpty() ||
+                    parts[3].length % 2 != 0) return@mapNotNull null
+                try {
+                    val attributes = parts[2].toInt(16)
+                    Info(String(bytes(parts[3]), Charsets.ISO_8859_1), code(parts[0]), code(parts[1]), attributes and RESOURCE != 0)
+                } catch (e: NumberFormatException) {
+                    null
                 }
             }
-            return found.sortedBy { it.name.lowercase() }
+            return found.toList().sortedBy { it.name.lowercase() }
         }
 
         // The core couldn't find or open the application. Built-in ones go by their database name,

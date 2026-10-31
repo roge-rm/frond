@@ -26,7 +26,15 @@ struct Fake {
         case 0x84b8:return 0;
         case 0x815c:return !strcmp(reinterpret_cast<char*>(memory.data()+args[0]),"missing") ? 0 : 0x80000010;
         case 0x88f8:return 0;
-        case 0x812c: {uint32_t creator=(uint32_t(pdb[64])<<24)|(uint32_t(pdb[65])<<16)|(uint32_t(pdb[66])<<8)|pdb[67]; Write(stack.at(7),&creator,4);return 0;}
+        case 0x812c: {
+            auto be32=[&](size_t at){return (uint32_t(pdb[at])<<24)|(uint32_t(pdb[at+1])<<16)|(uint32_t(pdb[at+2])<<8)|pdb[at+3];};
+            uint32_t creator=be32(64),type=be32(60);uint16_t attributes=(uint16_t(pdb[32])<<8)|pdb[33];
+            Write(stack.at(7),&creator,4);
+            if(args[1])Write(args[1],pdb.data(),32);
+            if(args[2])Write(args[2],&attributes,2);
+            if(stack.at(6))Write(stack.at(6),&type,4);
+            return 0;
+        }
         case 0x81d4:return 2;
         case 0x8188:return args[0] ? 0x80000010 : 0x20001000;
         case 0x8148:++deletes;return 0;
@@ -81,11 +89,17 @@ int main(){
     auto zip=db.Export("test");assert(zip.size()>4 && zip[0]=='P' && zip[1]=='K');assert(f.callbacks.empty());verifyZip(zip,f.pdb);
     f.writeFailure=true;bool failed=false;try{db.Export("test");}catch(const std::runtime_error&){failed=true;}assert(failed && f.callbacks.empty());f.writeFailure=false;
     auto all=db.Export("");assert(all.size()>4);verifyZip(all,f.pdb);
+    // List reads the directory entry of each RAM database only: no exports, no callbacks.
+    {const auto exports=f.exports;auto list=db.List();assert(list.size()==1 && f.exports==exports && f.callbacks.empty());
+     assert(!strncmp(list[0].name,reinterpret_cast<const char*>(f.pdb.data()),32) && list[0].localID==0x80000010);
+     assert(list[0].type==((uint32_t(f.pdb[60])<<24)|(uint32_t(f.pdb[61])<<16)|(uint32_t(f.pdb[62])<<8)|f.pdb[63]));
+     assert(list[0].attr==((uint16_t(f.pdb[32])<<8)|f.pdb[33]));}
     f.pdb.resize(200000,0x5a);f.requestSize=100000;f.exportSize=70000;
     assert(db.Install(f.pdb.data(),f.pdb.size())==0 && f.installed==f.pdb);
     verifyZip(db.Export("test"),f.pdb);
     memcpy(f.pdb.data()+64,"a68k",4);const auto exports=f.exports;
     auto empty=db.Export("");auto* archive=zip_stream_open(reinterpret_cast<const char*>(empty.data()),empty.size(),0,'r');
     assert(archive && zip_entries_total(archive)==0 && f.exports==exports);zip_stream_close(archive);
+    assert(db.List().empty());
     db.Finish();
 }
