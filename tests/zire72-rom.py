@@ -2,13 +2,15 @@
 """Zire 72 detection, rejection and boot checks on the private Zire NOR, plus the E2 and TX still loading.
 
 Skipped when the firmware isn't there. FROND_ZIRE_LAUNCHER=1 adds the launcher and key runs, FROND_ZIRE_STORAGE=1
-the SD card, session and memo runs, FROND_HARD_RESET=1 the TX and E2 erase prompt after reset-hard. Mutated copies live in a temporary directory under build/;
+the SD card, session and memo runs, FROND_HARD_RESET=1 the TX and E2 erase prompt after reset-hard,
+FROND_ZIRE_PERIPHERALS=1 USB HotSync, IrDA beaming, the infrared keyboard and the camera stub. Mutated copies live in a temporary directory under build/;
 the originals are only read and their SHA-256 is checked before and after.
 """
 import hashlib
 import os
 import re
 import shutil
+import socket
 from pathlib import Path
 import struct
 import subprocess
@@ -750,6 +752,211 @@ class Zire72StorageTest(unittest.TestCase):
                                     timeout=60, env={**os.environ, 'SDL_VIDEODRIVER': 'dummy'})
             self.assertEqual(result.returncode, 1, name)
             self.assertNotIn('palm-zire-72 (Zire 72)', result.stdout + result.stderr, name)
+
+
+KEYBOARD_DRIVER = ROOT / 'build/keyboard-baseline/Keyboard_v113.prc'  # Palm Universal Wireless Keyboard 1.13
+PILOT = all(shutil.which(t) for t in ('pilot-xfer',))
+
+
+def small_pdb(path, name):
+    """An empty record database to install over HotSync."""
+    header = name.encode().ljust(32, b'\0') + struct.pack('>HHIIIIII4s4sI', 0, 1, 0xb6000000, 0xb6000000, 0, 0, 0, 0,
+                                                           b'DATA', b'FrUs', 0)
+    path.write_bytes(header + struct.pack('>IH', 0, 0) + b'\0\0')
+    return path
+
+
+def records(path, name):
+    """The records of database name in a db-export archive, as strings."""
+    with zipfile.ZipFile(path) as archive:
+        data = next((archive.read(n) for n in archive.namelist() if n.startswith(name)), b'')
+    if len(data) < 78:
+        return []
+    count = struct.unpack('>H', data[76:78])[0]
+    offsets = [struct.unpack('>I', data[78 + 8 * i:82 + 8 * i])[0] for i in range(count)] + [len(data)]
+    return [data[offsets[i]:offsets[i + 1]].split(b'\0')[0].decode() for i in range(count)]
+
+
+@unittest.skipUnless(ZIRE.is_file() and CORE.is_file() and os.environ.get('FROND_ZIRE_PERIPHERALS') and PROBE_READY and PILOT,
+                     'set FROND_ZIRE_PERIPHERALS=1 with the Zire 72 firmware, the Palm OS SDK and pilot-link for the '
+                     '8 minute peripheral run')
+class Zire72PeripheralsTest(unittest.TestCase):
+    """USB HotSync both ways, IrDA beaming between two Zires, the infrared keyboard driver and the camera stub."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.before = sha(ZIRE)
+        assert cls.before == ZIRE_SHA, 'Zire 72 NOR is not the inventoried image'
+        cls.temp = tempfile.TemporaryDirectory(prefix='zire72-peripherals-', dir=ROOT / 'build')
+        cls.root = Path(cls.temp.name)
+        cls.probes = {}
+        for probe, name in (('irda', 'FrondIRProbe'), ('keyboard', 'FrondKeyboardProbe')):
+            subprocess.run(['python3', str(ROOT / 'tools/build-palm-probe.py'), '--sdk', str(SDK), '--probe', probe,
+                            '--output', str(cls.root / probe)], cwd=ROOT, check=True, capture_output=True)
+            cls.probes[probe] = cls.root / probe / f'{name}.prc'
+        cls.session = boot_to_launcher(cls.root)
+
+    @classmethod
+    def tearDownClass(cls):
+        if os.environ.get('FROND_ZIRE_EVIDENCE'):
+            out = Path(os.environ['FROND_ZIRE_EVIDENCE'])
+            out.mkdir(parents=True, exist_ok=True)
+            for path in [*cls.root.glob('*.png'), *cls.root.glob('*.log')]:
+                (out / path.name).write_bytes(path.read_bytes())
+        cls.temp.cleanup()
+        assert sha(ZIRE) == cls.before, 'Zire 72 NOR changed'
+
+    def core(self, image, name, *args):
+        core = Core([image], self.root / f'{name}.log', *args)
+        self.addCleanup(lambda: self.assertNotIn('failed (pc=', core.output()))
+        return core
+
+    def export(self, core, name):
+        path = self.root / f'{name}.zip'
+        path.unlink(missing_ok=True)
+        core.until(f'db-export "{path}"', ('export written', 'not ready'), 'written')
+        return path
+
+    def sleep_and_wake(self, core, name):
+        core.key(self.root, 'power')
+        core.wait_frame(self.root / f'{name}-asleep.png', lambda rows: rows is None, 20)
+        core.key(self.root, 'power')
+        core.wait_frame(self.root / f'{name}-awake.png', lambda rows: rows is not None, 10)
+
+    def usb_pty(self, core):
+        end = time.monotonic() + 30
+        while time.monotonic() < end:
+            if match := re.search(r'usb: pty (\S+)', core.output()):
+                return match.group(1)
+            time.sleep(0.2)
+        raise AssertionError('no USB PTY')
+
+    def hotsync(self, core, pty, *argv, stdin=None):
+        """Taps the HotSync button and runs one pilot-link command on the USB endpoint."""
+        process = subprocess.Popen([*argv[:1], '-p', pty, *argv[1:]], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, text=True, cwd=self.root)
+        time.sleep(1)
+        core.tap(self.root, 160, 165)
+        try:
+            out = process.communicate(stdin, timeout=90)[0]
+        except subprocess.TimeoutExpired:
+            process.kill()
+            out = process.communicate()[0]
+        # Back on the HotSync app's main screen before the next one.
+        time.sleep(6)
+        return out
+
+    def test_usb_hotsync(self):
+        pdb = small_pdb(self.root / 'FrondUsbTest.pdb', 'FrondUsbTest')
+        core = self.core(self.session, 'usb', '--usb', 'pty')
+        try:
+            pty = self.usb_pty(core)
+            core.launch('HotSync')
+            self.assertRegex(self.hotsync(core, pty, 'pilot-xfer', '-l'), r'List complete\. \d+ files found')
+            self.assertIn('enumerated 0830:0061', core.output())
+            self.assertRegex(self.hotsync(core, pty, 'pilot-xfer', '-f', 'MemosDB-PMem'), r'complete')
+            self.assertGreater((self.root / 'MemosDB-PMem.pdb').stat().st_size, 78)
+            self.hotsync(core, pty, 'pilot-xfer', '-i', str(pdb))
+            self.sleep_and_wake(core, 'usb')
+            self.assertIn('FrondUsbTest', self.hotsync(core, pty, 'pilot-xfer', '-l'))
+            core.send(f'save-session "{self.root / "usb.session"}"', 'wrote session')
+        finally:
+            self.assertEqual(core.close(), 0)
+        core = self.core(self.root / 'usb.session', 'usb-restored', '--usb', 'pty')
+        try:
+            pty = self.usb_pty(core)
+            self.assertIn('FrondUsbTest', self.hotsync(core, pty, 'pilot-xfer', '-l'))
+        finally:
+            self.assertEqual(core.close(), 0)
+
+    def beam(self, cores, name, runs):
+        """Beams the IR probe's payload from the first core to the second and checks both logs."""
+        before = [self.export(core, f'{name}-before{i}') for i, core in enumerate(cores)]
+        cores[0].tap(self.root, 40, 132)
+        end = time.monotonic() + 60
+        while time.monotonic() < end:
+            time.sleep(3)
+            after = [self.export(core, f'{name}-after{i}') for i, core in enumerate(cores)]
+            sent, received = (records(path, 'FrondIRLog') for path in after)
+            if sent.count('send-complete') >= runs and received.count('receive-complete') >= runs:
+                break
+        result = subprocess.run(['python3', str(ROOT / 'tools/check-irda-probe.py'), *map(str, after),
+                                 '--sender-before', str(before[0]), '--receiver-before', str(before[1])],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('"status": "pass"', result.stdout)
+
+    def test_irda_beam(self):
+        ports = []
+        for _ in range(2):
+            with socket.socket() as probe:
+                probe.bind(('127.0.0.1', 0))
+                ports.append(probe.getsockname()[1])
+        cores = [self.core(self.session, f'ir{i}', '--irda', f'tcp:{port}') for i, port in enumerate(ports)]
+        link = None
+        try:
+            for core in cores:
+                core.until(f'install "{self.probes["irda"]}"', ('installation', 'not'), 'successful')
+                core.launch('Frond IR probe')
+            link = subprocess.Popen(['python3', str(ROOT / 'tools/link-irda.py'), *map(str, ports)],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.beam(cores, 'ir', 1)
+            for i, core in enumerate(cores):
+                self.sleep_and_wake(core, f'ir{i}')
+            # link-irda.py connects again to a port that closed while its Palm slept.
+            self.beam(cores, 'ir-woken', 2)
+        finally:
+            if link:
+                link.terminate()
+                link.wait()
+            for core in cores:
+                self.assertEqual(core.close(), 0)
+
+    @unittest.skipUnless(KEYBOARD_DRIVER.is_file(), 'needs the Palm Universal Wireless Keyboard 1.13 PRC')
+    def test_ir_keyboard(self):
+        # The Zire's ROM has no keyboard driver; the 1.13 add-on driver is installed as on the E2.
+        core = self.core(self.session, 'keyboard')
+        try:
+            core.until(f'install "{KEYBOARD_DRIVER}"', ('installation', 'not'), 'successful')
+            time.sleep(3)
+            core.replay(self.root, ['0 keyboard-attach'])
+            core.send('reset')
+            core.wait_frame(self.root / 'keyboard-reset.png', lambda rows: rows is not None and date_time_prefs(rows), 60)
+            core.launch('Keyboard')
+            time.sleep(3)
+            core.tap(self.root, 150, 50)  # driver on
+            time.sleep(2)
+            core.key(self.root, 'hard1')
+            core.until(f'install "{self.probes["keyboard"]}"', ('installation', 'not'), 'successful')
+            core.launch('Frond keyboard probe')
+            time.sleep(2)
+            core.replay(self.root, ['500 keyboard-down Z', '650 keyboard-up Z', '1000 keyboard-down X', '1150 keyboard-up X',
+                                    '1500 keyboard-down "Left Shift"', '1600 keyboard-down Z', '1750 keyboard-up Z',
+                                    '1850 keyboard-up "Left Shift"', '2200 keyboard-down Z', '2350 keyboard-up Z'])
+            time.sleep(5)
+            typed = records(self.export(core, 'keyboard'), 'FrondKeyboardLog')
+        finally:
+            self.assertEqual(core.close(), 0)
+        chars = ''.join(chr(int(m[1], 16)) for line in typed if (m := re.search(r'event=4 chr=([0-9A-Fa-f]+)', line))
+                        and chr(int(m[1], 16)) in 'zxZ')
+        self.assertEqual(chars, 'zxZz')
+
+    def test_camera_stub(self):
+        # No sensor answers on I2C: Camera shows a blank screen while its driver looks, then goes back to the
+        # launcher. Before the capture interface stub it faulted in CameraDriver.
+        launcher = png_rows(self.root / 'launcher.png')
+        core = self.core(self.session, 'camera')
+        try:
+            core.key(self.root, 'hard4')
+            core.wait_frame(self.root / 'camera-blank.png',
+                            lambda rows: rows is not None and all(min(row[4 * x:4 * x + 3]) > 240
+                                                                  for row in rows[40:300:20] for x in range(0, 320, 20)), 15)
+            core.wait_frame(self.root / 'camera-back.png', lambda rows: rows is not None and rows[30:] == launcher[30:], 40)
+            core.key(self.root, 'hard1')
+            core.wait_frame(self.root / 'camera-hard1.png', lambda rows: rows is not None and rows[30:] != launcher[30:], 15)
+        finally:
+            self.assertEqual(core.close(), 0)
+        self.assertNotIn('Fatal', core.output())
 
 
 def probe_log(path):

@@ -27,7 +27,7 @@ def read_database(path,name,required=True):
             if entry.is_dir() or entry.file_size<78:continue
             # Exported names are incidental; identify the actual Palm database header.
             with archive.open(entry) as source:header=source.read(32)
-            if header.rstrip(b'\0')==name.encode():matches.append(entry)
+            if header.split(b'\0',1)[0]==name.encode():matches.append(entry)
         if not matches and not required:return None
         if len(matches)!=1:raise ValueError('need exactly one '+name+' database')
         if matches[0].file_size>1024*1024:raise ValueError('probe database is unexpectedly large')

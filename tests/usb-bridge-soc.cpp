@@ -1,4 +1,4 @@
-// UsbHostBridge on a synthetic TX SoC (no firmware): the cable is plugged on emulated
+// UsbHostBridge on synthetic TX, E2 and Zire 72 SoCs (no firmware): the cable is plugged on emulated
 // time inside Run, the host sleeps while the UDC is off, a read-only checkpoint restore
 // leaves the bridge alone, a load replugs, and off puts back a cable a save left out.
 #include <cassert>
@@ -23,16 +23,17 @@ static std::vector<uint8_t> saved(SoC& soc) {
 }
 
 static void exercise(DeviceType5 type) {
-    const bool tx=type==deviceTypeTX;
-    std::vector<uint8_t> rom((tx?16:8) * 1024 * 1024), nand(tx?132 * 1024 * 1024:34603008, 0xff);
-    SocPXA soc(type, (tx?32:16) * 1024 * 1024, rom.data(), rom.size(), nand.data(), nand.size(), -1, tx?2:0);
+    const bool tx=type==deviceTypeTX, zire=type==deviceTypeZire72, pxa270=tx || zire;
+    std::vector<uint8_t> rom(zire?14942208:(tx?16:8) * 1024 * 1024), nand(zire?0:tx?132 * 1024 * 1024:34603008, 0xff);
+    SocPXA soc(type, (pxa270?32:16) * 1024 * 1024, rom.data(), rom.size(), zire?nullptr:nand.data(), nand.size(), -1,
+               pxa270?2:0);
     auto* cpu = soc.GetCpu();
     const uint32_t branch = 0xeafffffe;
     std::memcpy(static_cast<uint8_t*>(soc.GetMemoryData().data) + 0x3000, &branch, 4);
     cpuSetReg(cpu, 15, 0xa0003000);
     auto run = [&](unsigned ms) { for (unsigned i = 0; i < ms; ++i) assert(soc.Run(100000, 100000000) >= 100000); };
     auto udc = [&](unsigned offset, uint32_t value) { assert(cpuMemOpExternal(cpu, &value, 0x40600000 + offset, 4, true)); };
-    assert(soc.UsbTestCableAttached()==tx); // TX cable in by default, E2 cable out.
+    assert(soc.UsbTestCableAttached()==tx); // TX cable in by default, E2 and Zire cable out.
     assert(soc.SetUsbTestCable(true));
 
     UsbHostBridge bridge;
@@ -53,11 +54,11 @@ static void exercise(DeviceType5 type) {
     puts("PASS: the cable goes in on emulated time inside Run; the host sleeps while the UDC is off");
 
     // EP1 IN, UDE, then the EP0 and reset interrupts: connect wait, reset, first SETUP.
-    if(tx)udc(0x404, 1u | 64u << 2 | 1u << 12 | 2u << 13 | 1u << 15 | 1u << 25);
+    if(pxa270)udc(0x404, 1u | 64u << 2 | 1u << 12 | 2u << 13 | 1u << 15 | 1u << 25);
     udc(0, 1);
     run(200);
     assert(host->GetPhase() == UsbBusHost::Phase::waitEnable);  // no UDCICR write yet
-    if(tx){udc(4, 1);udc(8, 1u << 27);}
+    if(pxa270){udc(4, 1);udc(8, 1u << 27);}
     else udc(0x50,0xfe);
     run(50);
     assert(host->GetPhase() == UsbBusHost::Phase::connect);
@@ -93,7 +94,7 @@ static void exercise(DeviceType5 type) {
     bridge.Service();
     run(1);
     assert(!soc.UsbTestCableAttached() && host->GetPhase() == UsbBusHost::Phase::detached);
-    const auto unplugged = saved(soc);  // saved in the replug window: GPIO13 high
+    const auto unplugged = saved(soc);  // saved in the replug window: cable out
     run(497);
     assert(!soc.UsbTestCableAttached());
     run(4);
@@ -141,4 +142,4 @@ static void exercise(DeviceType5 type) {
     puts("PASS: a port in use leaves USB off and the cable in, also after a load");
 }
 
-int main(){exercise(deviceTypeTX);exercise(deviceTypeE2);}
+int main(){exercise(deviceTypeTX);exercise(deviceTypeE2);exercise(deviceTypeZire72);}
