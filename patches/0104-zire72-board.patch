@@ -1,0 +1,232 @@
+diff --git a/src/common/device_profile5.h b/src/common/device_profile5.h
+--- a/src/common/device_profile5.h
++++ b/src/common/device_profile5.h
+@@ -65,7 +65,7 @@
+      DeviceSupport5::inheritedUnverified, DeviceDetect5::cardHeader, 0, 0x50765076 /* PvPv */,
+      DeviceBoard5::paravirtual, DeviceArt::none, {},
+      0, 0, 8u << 20, 1u << 31, DisplayMode::mode_320x480, 0x1fe, false},
+-    // XIP NOR with a small and a big card like the E2, on a PXA270; no NAND. The board isn't built yet.
++    // XIP NOR with a small and a big card like the E2, on a PXA270; no NAND. Boots to the launcher; peripherals are off.
+     {deviceTypeZire72, "palm-zire-72", "Zire 72", DeviceCohort5::zire72Nor,
+      DeviceSupport5::inheritedUnverified, DeviceDetect5::cardHeader, deviceCompanyPalm5,
+      0x615a3732 /* aZ72 */, DeviceBoard5::pxa270Zire72, DeviceArt::zire72,
+diff --git a/src/uarm/native/main.cpp b/src/uarm/native/main.cpp
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -406,12 +406,6 @@
+             return false;
+         }
+ 
+-        // The Zire 72 has a profile and passes validation, but has no board yet.
+-        if (deviceType == deviceTypeZire72) {
+-            cerr << "the Zire 72 isn't supported yet" << endl;
+-            return false;
+-        }
+-
+         size_t sdLen{0};
+         unique_ptr<uint8_t[]> sdData;
+         if (options.sd && !util::ReadFile(options.sd, sdData, sdLen)) return false;
+diff --git a/src/uarm/uarm/devicePalmTungstenE2.cpp b/src/uarm/uarm/devicePalmTungstenE2.cpp
+--- a/src/uarm/uarm/devicePalmTungstenE2.cpp
++++ b/src/uarm/uarm/devicePalmTungstenE2.cpp
+@@ -1,6 +1,7 @@
+ //(c) uARM project    https://github.com/uARM-Palm/uARM    uARM@dmitry.gr
+ 
+ #include <cstdlib>
++#include <cstring>
+ 
+ #include "ac97dev_WM9712L.h"
+ #include "cputil.h"
+@@ -129,6 +130,13 @@
+     return true;
+ }
+ 
++// Nothing answers on the Zire 72's chip select 1. Its small ROM clears the RTC registers
++// at 0x04090000 there (a mistyped 0x40900000), so the bus takes writes and reads zero.
++static bool zireEmptyBusAccess(void *, uint32_t, uint_fast8_t size, bool write, void *buf) {
++    if (!write) memset(buf, 0, size);
++    return true;
++}
++
+ enum RamTermination deviceGetRamTerminationStyle(void) { return RamTerminationMirror; }
+ 
+ uint_fast8_t deviceGetSocRev(void) {
+@@ -210,6 +218,33 @@
+         return dev;
+     }
+ 
++    if (type == DeviceType5::deviceTypeZire72) {
++        // XIP NOR, no NAND, Wi-Fi or serial. Pins from the small ROM's GPIO table and Linux palmz72.
++        // BCM2035 on the BTUART with power and reset on GPIO17 and 83, as on the TX.
++        dev->bcm2035 = bcm2035Init(getTime, sp->gpio, true);
++        sp->btUart = sp->uarts[3];
++        bcm2035RegisterWithUart(dev->bcm2035, sp->btUart);
++        for (unsigned pin : {17u, 83u})
++            pxaGpioSetNotif(sp->gpio, pin, [](void* context, uint32_t, bool, bool) {
++                bcm2035PowerChanged(static_cast<Bcm2035*>(context));
++            }, dev->bcm2035);
++        dev->kpc = static_cast<PxaKpc *>(sp->kpc);
++        dev->noRamMarker = 0;
++        dev->nand = nullptr;
++        if (!memRegionAdd(sp->mem, 0x04000000, 0x04000000, zireEmptyBusAccess, dev))
++            ERR("cannot map Zire 72 chip select 1");
++        dev->wm9712L = wm9712LInit(sp->ac97, sp->gpio, -1, 27);
++        if (!dev->wm9712L || !dev->kpc) ERR("cannot initialize Zire 72 board");
++        wm9712LsetAuxVoltage(dev->wm9712L, WM9712LauxPinBmon, 4200 / 3);
++        pxaGpioSetState(sp->gpio, 1, true);   // reset button up
++        pxaGpioSetState(sp->gpio, 14, true);  // SD absent
++        pxaGpioSetState(sp->gpio, 15, true);  // USB cable absent
++        pxaGpioSetState(sp->gpio, 37, true);  // low starts MfgTestExt's serial test loop
++        pxaGpioSetState(sp->gpio, 94, false); // 32 MiB RAM
++        sp->nand = nullptr;
++        return dev;
++    }
++
+     dev->wm9712L = wm9712LInit(sp->ac97, sp->gpio, 50);
+     if (!dev->wm9712L) ERR("Cannot init WM9712L");
+ 
+@@ -273,7 +308,7 @@
+ }
+ 
+ void devicePeriodic(struct Device *dev, uint32_t tier) {
+-    if (tier == DEVICE_PERIODIC_TIER0) {directNandPeriodic(dev->nand);
++    if (tier == DEVICE_PERIODIC_TIER0) {if(dev->nand)directNandPeriodic(dev->nand);
+ #ifndef __EMSCRIPTEN__
+ if(dev->wifi)dev->wifi->Tick();
+ #endif
+@@ -296,17 +331,32 @@
+         }
+         return;
+     }
++    if (dev->type == DeviceType5::deviceTypeZire72) {
++        // Same panel scheme as the TX on a 320x320 screen; Palm OS calibrates it.
++        if (x < 0 || y < 0) wm9712LsetPen(dev->wm9712L, -1, -1, 0);
++        else wm9712LsetPen(dev->wm9712L, 3800 - (3480 * x + 159) / 319,
++                           3800 - (3480 * y + 159) / 319, 100);
++        return;
++    }
+     wm9712LsetPen(dev->wm9712L, (x >= 0 && y >= 0) ? 280 + 10 * x : -1,
+                   (x >= 0 && y >= 0) ? 210 + 7 * y : -1, 1000);
+ }
+ 
+ void deviceKey(struct Device *dev, uint32_t key, bool down) {
+-    if (dev->type != DeviceType5::deviceTypeTX) return;
+-    static const KeyId matrix[3][4] = {
++    if (dev->type != DeviceType5::deviceTypeTX && dev->type != DeviceType5::deviceTypeZire72) return;
++    // [MKOUT column][MKIN row]
++    static const KeyId txMatrix[3][4] = {
+         {keyIdPower, keyIdHard2, keyIdUp, keyIdRight},
+         {keyIdHard1, keyIdHard3, keyInvalid, keyInvalid},
+         {keyIdSelect, keyIdHard4, keyIdDown, keyIdLeft},
+     };
++    // Zire 72 keyBits table at NOR 0x6028.
++    static const KeyId zireMatrix[3][4] = {
++        {keyIdPower, keyIdHard1, keyIdUp, keyIdRight},
++        {keyIdHard4, keyIdHard2, keyInvalid, keyInvalid},
++        {keyIdSelect, keyIdHard3, keyIdDown, keyIdLeft},
++    };
++    const auto& matrix = dev->type == DeviceType5::deviceTypeTX ? txMatrix : zireMatrix;
+     for (uint8_t col = 0; col < 3; col++)
+         for (uint8_t row = 0; row < 4; row++)
+             if (matrix[col][row] != keyInvalid && matrix[col][row] == key)
+@@ -315,7 +365,7 @@
+ 
+ bool deviceTaskRequired(struct Device *dev, uint32_t tier) {
+     if (tier == DEVICE_PERIODIC_TIER0) {
+-        return directNandTaskRequired(dev->nand)
++        return (dev->nand && directNandTaskRequired(dev->nand))
+ #ifndef __EMSCRIPTEN__
+             || (dev->wifi && dev->wifi->NeedsTick())
+ #endif
+@@ -332,7 +382,8 @@
+ bool deviceI2sConnected() { return false; }
+ 
+ void deviceSetSdCardInserted(struct Device *dev, bool inserted) {
+-    pxaGpioSetState(dev->gpio, dev->type == DeviceType5::deviceTypeTX ? 14 : 10, !inserted);
++    pxaGpioSetState(dev->gpio, dev->type == DeviceType5::deviceTypeTX ||
++                    dev->type == DeviceType5::deviceTypeZire72 ? 14 : 10, !inserted);
+ }
+ 
+ enum DeviceType5 deviceGetType(struct Device *dev) { return dev->type; }
+@@ -349,7 +400,7 @@
+     if(dev->wifi)dev->wifi->Save(savestate);
+ #endif
+     wm9712Lsave(dev->wm9712L, savestate);
+-    directNandSave(dev->nand, savestate);
++    if (dev->nand) directNandSave(dev->nand, savestate);
+     if (dev->bcm2035) bcm2035Save(dev->bcm2035, savestate);
+ }
+ 
+@@ -370,7 +421,7 @@
+     if(dev->wifi)dev->wifi->Load(loader);
+ #endif
+     wm9712Load(dev->wm9712L, loader, preserveInput);
+-    directNandLoad(dev->nand, loader);
++    if (dev->nand) directNandLoad(dev->nand, loader);
+     if (dev->bcm2035) bcm2035Load(dev->bcm2035, loader);
+ }
+ 
+@@ -398,7 +449,7 @@
+ void deviceBluetoothStateReplaced(Device* dev){bcm2035Suspend(dev->bcm2035);}
+ void deviceStopBluetooth(Device* dev){
+     if(!dev->bcm2035)return;
+-    const bool tx=dev->type==deviceTypeTX;
++    const bool tx=dev->type==deviceTypeTX || dev->type==deviceTypeZire72;
+     for(unsigned pin:{tx?17u:32u,tx?83u:80u})pxaGpioSetNotif(dev->gpio,pin,nullptr,nullptr);
+     bcm2035Stop(dev->bcm2035);dev->bcm2035=nullptr;
+ }
+diff --git a/src/uarm/uarm/soc_PXA.cpp b/src/uarm/uarm/soc_PXA.cpp
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -101,7 +101,8 @@
+     // TX boots through IPL/NAND. E2 ROM patches are not validated for this layout.
+     // The E2 sleeps through the PXA25x power manager below, so it keeps SysSleep and
+     // auto-off; the patched FrankenE2 ROM keeps the inherited no-sleep patch.
+-    if (deviceType != DeviceType5::deviceTypeTX)
++    // The Zire 72's 5.2.8 ROM runs unpatched, like the TX.
++    if (deviceType != DeviceType5::deviceTypeTX && deviceType != DeviceType5::deviceTypeZire72)
+         patchContext = registerPatches(patchDispatch, syscallDispatch, cpu, systemState,
+             deviceType == DeviceType5::deviceTypeE2 ? PATCH_FEATURE_ALL & ~PATCH_FEATURE_NO_SLEEP
+                                                      : PATCH_FEATURE_ALL);
+@@ -111,7 +112,7 @@
+ 
+     void *peepholeBuffer = romGetPeepholeBuffer(rom);
+ 
+-    if (deviceType != DeviceType5::deviceTypeTX) {
++    if (deviceType != DeviceType5::deviceTypeTX && deviceType != DeviceType5::deviceTypeZire72) {
+         pacePatchInit(pacePatch, ROM_BASE, peepholeBuffer, romSize);
+         peepholeOptimize((uint32_t *)peepholeBuffer, romSize);
+     }
+@@ -578,7 +579,7 @@
+ 
+ void SocPXA::OnReset() {
+     pxaLcdResetPaletteBuffer(lcd);
+-    nandResetPageBuffer(nand);
++    if (nand) nandResetPageBuffer(nand);
+ }
+ 
+ void SocPXA::OnLoad(SavestateLoader<ChunkType> &loader) {
+@@ -672,7 +673,7 @@
+         penEventQueue->Clear();
+         keyEventQueue->Clear();
+         penDown = false;
+-        if (GetDeviceType() == DeviceType5::deviceTypeTX)
++        if (GetDeviceType() == DeviceType5::deviceTypeTX || GetDeviceType() == DeviceType5::deviceTypeZire72)
+             for (unsigned key = keyIdHard1; key <= keyIdPower; ++key)
+                 deviceKey(dev, key, false);
+     }
+diff --git a/src/uarm/web/uarm.cpp b/src/uarm/web/uarm.cpp
+--- a/src/uarm/web/uarm.cpp
++++ b/src/uarm/web/uarm.cpp
+@@ -85,6 +85,11 @@
+         return false;
+     }
+     deviceType = romInfo.GetDeviceType();
++    // The web build runs PXA255 boards only.
++    if (deviceType == deviceTypeZire72) {
++        cerr << "the Zire 72 isn't supported in the web build" << endl;
++        return false;
++    }
+ 
+     if (sdSize > 0) sdCardInitializeWithData(sdSize / SD_SECTOR_SIZE, sdData, sdId.c_str());
+ 

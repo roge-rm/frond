@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Zire 72 detection and rejection checks on the private Zire NOR, plus the E2 and TX still loading.
+"""Zire 72 detection, rejection and boot checks on the private Zire NOR, plus the E2 and TX still loading.
 
 Skipped when the firmware isn't there. Mutated copies live in a temporary directory under build/;
 the originals are only read and their SHA-256 is checked before and after.
@@ -21,7 +21,6 @@ E2 = PALM / 'Palm/Tungsten-E2/Palm-Tungsten-E2-nor.bin'
 TX = PALM / 'Palm/TX/Palm-TX-5.4-nor.bin'
 TX_NAND = PALM / 'Palm/TX/Palm-TX-5.4-nand.bin'
 HSPR = struct.pack('<I', 0x68737072)  # HAL IDs are stored little endian
-REFUSED = "the Zire 72 isn't supported yet"
 
 
 def sha(path):
@@ -52,8 +51,7 @@ class Zire72RomTest(unittest.TestCase):
         result = self.run_core(args)
         self.assertNotEqual(result.returncode, 0, result.stderr)
         self.assertIn(message, result.stderr + result.stdout)
-        if message != REFUSED:
-            self.assertNotIn('supported yet', result.stderr)
+        self.assertNotIn('supported yet', result.stderr)
         return result
 
     def mutated(self, name, data):
@@ -67,12 +65,36 @@ class Zire72RomTest(unittest.TestCase):
             data[at:at + len(value)] = value
         return self.mutated(name, data)
 
-    def test_unchanged_image_is_recognised_then_refused(self):
+    def test_unchanged_image_boots(self):
         for args in ([ZIRE], [ZIRE, '--device', 'palm-zire-72']):
-            result = self.rejected(args, REFUSED)
+            result = self.run_core([*args, '--no-sound', '--run-for', '12'])
+            self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn('HAL ID: aZ72', result.stderr)
             self.assertIn('palm-zire-72 (Zire 72)', result.stderr)
             self.assertIn('using RAM size: 33554432 bytes', result.stderr)
+            self.assertIn('LCD=1', result.stdout)
+            self.assertNotIn('Invalid instr', result.stderr)
+            self.assertNotIn('failed (pc=', result.stderr)
+
+    @unittest.skipUnless(os.environ.get('FROND_ZIRE_LAUNCHER'), 'set FROND_ZIRE_LAUNCHER=1 for the 70 s launcher run')
+    def test_cold_boot_to_launcher_and_calc(self):
+        # Calibration (three targets), language OK, Welcome Next, Next, Not now, Done, then Calc.
+        out = Path(os.environ.get('FROND_ZIRE_EVIDENCE', self.root))
+        out.mkdir(parents=True, exist_ok=True)
+        taps = [(25500, 291, 292), (28500, 27, 27), (31500, 160, 160), (36000, 40, 300),
+                (39000, 280, 304), (42500, 280, 304), (45500, 45, 302), (48500, 35, 304), (61000, 268, 70)]
+        lines = []
+        for at, x, y in taps:
+            lines += [f'{at} pen-down {x} {y}', f'{at + 150} pen-up']
+        lines.insert(-2, f'60000 snapshot "{out / "zire72-launcher.png"}"')
+        lines.append(f'66000 snapshot "{out / "zire72-calc.png"}"')
+        replay = self.root / 'launcher.replay'
+        replay.write_text('\n'.join(lines) + '\n')
+        result = self.run_core([ZIRE, '--no-sound', '--run-for', '67', '--input-replay', replay], timeout=180)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('black frame', result.stderr)
+        launcher, calc = (out / 'zire72-launcher.png').read_bytes(), (out / 'zire72-calc.png').read_bytes()
+        self.assertNotEqual(launcher, calc)
 
     def test_nor_size(self):
         message = 'invalid NOR size; expected 14942208 bytes'
