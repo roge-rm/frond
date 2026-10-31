@@ -208,7 +208,7 @@ fun HomeScreen(model: HomeModel) {
                             colors = ListItemDefaults.colors(containerColor = Color.Transparent),
                             modifier = Modifier.clickableRow {
                                 adding = false
-                                if (ready) model.newSession(d) else model.openFirmware(thenStart = true)
+                                if (ready) model.newSession(d) else model.openFirmware(thenStart = d)
                             },
                         )
                     }

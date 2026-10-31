@@ -28,8 +28,8 @@ class HomeModel(private val activity: HomeActivity) {
     var alert by mutableStateOf<Pair<String, String>?>(null)
     var firmwareOpen by mutableStateOf(false)
         private set
-    // Whether the firmware screen was opened from Add device, so the imported device starts.
-    var startAfterImport by mutableStateOf(false)
+    // The device tapped in Add device, preselected on the firmware screen and started after a good import.
+    var startAfterImport by mutableStateOf<Device?>(null)
         private set
     var settingsOpen by mutableStateOf(false)
     var settings by mutableStateOf(Settings())
@@ -106,14 +106,14 @@ class HomeModel(private val activity: HomeActivity) {
 
     fun newSession(device: Device) = start(Sessions.create(activity, device))
 
-    fun openFirmware(thenStart: Boolean = false) {
+    fun openFirmware(thenStart: Device? = null) {
         startAfterImport = thenStart
         firmwareOpen = true
     }
 
     fun closeFirmware() {
         firmwareOpen = false
-        startAfterImport = false
+        startAfterImport = null
     }
 }
 

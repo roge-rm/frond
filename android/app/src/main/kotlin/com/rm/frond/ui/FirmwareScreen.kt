@@ -51,7 +51,7 @@ fun FirmwareScreen(model: HomeModel) {
     var nor by remember { mutableStateOf<Uri?>(null) }
     var nand by remember { mutableStateOf<Uri?>(null) }
     // The device picked from the menu, or null to detect it from the NOR.
-    var chosen by remember { mutableStateOf<Device?>(null) }
+    var chosen by remember { mutableStateOf(model.startAfterImport) }
     var detected by remember { mutableStateOf<Device?>(null) }
     var choosing by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -164,7 +164,7 @@ fun FirmwareScreen(model: HomeModel) {
                             error = result
                             return@launch
                         }
-                        val thenStart = model.startAfterImport
+                        val thenStart = model.startAfterImport != null
                         model.closeFirmware()
                         if (thenStart) model.newSession(d)
                     }
