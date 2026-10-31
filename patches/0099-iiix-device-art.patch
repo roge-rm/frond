@@ -1,0 +1,374 @@
+diff --git a/src/uarm/native/DeviceControls.cpp b/src/uarm/native/DeviceControls.cpp
+--- a/src/uarm/native/DeviceControls.cpp
++++ b/src/uarm/native/DeviceControls.cpp
+@@ -128,11 +128,32 @@
+             }
+             break;
+         }
++        case DeviceControlIcon::memo: {
++            // A note pad with lines of writing and a pencil across its corner.
++            const float px0=7.8f,py0=-7.8f,px1=1.2f,py1=0.6f;
++            const float pencil=segment(x,y,px0,py0,px1,py1);
++            if(pencil>2.4f) {
++                d=std::fabs(box(x,y,-7,-5.6f,3.4f,7.4f));
++                line(-7,-5.6f,3.4f,-5.6f);line(-7,-4.4f,3.4f,-4.4f);
++                for(float row:{-1.6f,1.4f,4.4f})line(-5,row,1.6f,row);
++            }
++            d=std::min(d,pencil-0.9f);
++            const std::array<std::array<float,2>,3> tip{{{0.2f,-0.6f},{2.4f,1.6f},{-0.8f,2.6f}}};
++            d=std::min(d,polygon(x,y,tip));
++            break;
++        }
+         default: break;
+     }
+     return d;
+ }
+ 
++// Fine printed or moulded speckle, -0.5 to 0.5, on a half-unit grid.
++float speckle(float x, float y) {
++    uint32_t h=uint32_t(int(std::floor(x*2)))*73856093u^uint32_t(int(std::floor(y*2)))*19349663u;
++    h^=h>>13;h*=0x5bd1e995u;h^=h>>15;
++    return (h&1023u)/1023.f-0.5f;
++}
++
+ // Float RGB image of the strip at device pixels; shapes are given in strip units.
+ class Canvas {
+  public:
+@@ -590,6 +611,149 @@
+     }
+ }
+ 
++// The peanut-shaped IIIx scroll rocker: two round lobes joined by a narrower waist.
++float iiixRocker(float x, float y, float cx, float top, float bottom, float grow) {
++    const float r=15+grow,waist=8.5f+grow;
++    const float a=std::hypot(x-cx,y-top)-r,b=std::hypot(x-cx,y-bottom)-r,c=segment(x,y,cx,top,cx,bottom)-waist;
++    // Smooth union rounds the waist into the lobes.
++    const float k=9,m=std::min(a,b),h=std::max(k-std::fabs(m-c),0.f)/k;
++    return std::min(m,c)-h*h*k*0.25f;
++}
++
++void paintIIIxControls(Canvas& canvas, const DeviceControlProfile& profile, int width, uint32_t pressed) {
++    const float H=profile.height;
++    const int ox=(width-profile.width)/2;
++    auto down=[&](KeyId key) {return (pressed&(1u<<key))!=0;};
++    auto all=[&](float,float) {return 1.f;};
++    auto shifted=[&](SDL_Rect r) {r.x+=ox;return r;};
++    // Dark charcoal textured plastic, lit from above.
++    const Rgb body{60,64,61};
++    canvas.paint(0,0,width,H,all,[&](float x,float y,Rgb) {
++        Rgb c=mix(body*1.08f,body*0.78f,std::pow(y/H,1.2f));
++        c=c+Rgb{7,7,7}*speckle(x,y);
++        const float t=std::fabs(x-width*0.5f)/(width*0.5f);
++        return c*(1-0.16f*t*t);
++    });
++    // The lower edge of the screen window, then the rounded lip of the bezel.
++    canvas.paint(0,0,width,3,[&](float,float y) {return canvas.edge(y-1.2f);},[](float,float,Rgb) {return Rgb{18,19,18};});
++    canvas.paint(0,0,width,9,[&](float,float y) {return canvas.edge(std::fabs(y-3.6f)-1.2f)*0.55f;},
++                 [](float,float,Rgb) {return Rgb{104,109,105};});
++
++    for(size_t i=0;i<profile.count;++i) {
++        const auto& button=profile.buttons[i];
++        if(button.key==keyIdUp || button.key==keyIdDown || button.key==keyIdPower)continue;
++        const bool held=down(button.key);
++        // Dark oval pocket, the hit area, lit along its lower outer lip.
++        const SDL_Rect pocket=shifted(button.bounds);
++        const float corner=deviceButtonCorner(profile,button);
++        auto dp=[&](float x,float y) {return deviceRoundedDistance(pocket,corner,x,y);};
++        const float x0=pocket.x-3,y0=pocket.y-3,x1=pocket.x+pocket.w+3,y1=pocket.y+pocket.h+4;
++        canvas.paint(x0,y0,x1,y1,[&](float x,float y) {
++            return canvas.edge(std::fabs(dp(x,y)-0.9f)-0.7f)*clamp01((y-pocket.y)/pocket.h-0.15f)*0.8f;
++        },[](float,float,Rgb) {return Rgb{104,109,105};});
++        canvas.paint(x0,y0,x1,y1,[&](float x,float y) {return canvas.edge(dp(x,y));},[&](float x,float y,Rgb) {
++            return mix(Rgb{24,26,25},Rgb{38,41,39},clamp01((y-pocket.y)/pocket.h))+Rgb{4,4,4}*speckle(x,y);
++        });
++        // Grey dome; holding it presses it into the pocket.
++        const float sink=held ? 0.8f : 0;
++        const SDL_Rect key{pocket.x+5,pocket.y+4,pocket.w-10,pocket.h-8};
++        const float kcorner=std::min(key.w,key.h)*0.5f,kcx=key.x+key.w*0.5f,kcy=key.y+key.h*0.5f+sink;
++        auto dk=[&](float x,float y) {return deviceRoundedDistance(key,kcorner,x,y-sink);};
++        canvas.paint(x0,y0,x1,y1,[&](float x,float y) {return canvas.edge(dk(x,y-1.6f))*(held?0.3f:0.75f);},
++                     [](float,float,Rgb) {return Rgb{8,9,8};});
++        canvas.paint(x0,y0,x1,y1,[&](float x,float y) {return canvas.edge(dk(x,y));},[&](float x,float y,Rgb) {
++            const float r=std::hypot((x-kcx+key.w*0.12f)/(key.w*0.5f),(y-kcy+key.h*0.22f)/(key.h*0.55f));
++            Rgb c=Rgb{50,54,52}+Rgb{34,36,35}*std::pow(clamp01(1-r),1.6f)+Rgb{3,3,3}*speckle(x,y);
++            c=mix(Rgb{30,32,31},c,clamp01(-dk(x,y)/3));
++            // Held: darker, with a shadow under the pocket's top lip.
++            return held ? c*(0.55f+0.2f*clamp01(-dk(x,y-1.8f)/3)) : c;
++        });
++        canvas.paint(x0,y0,x1,y1,[&](float x,float y) {
++            return canvas.edge(std::fabs(dk(x,y)+0.8f)-0.35f)*(held?0.1f:0.45f)*clamp01((kcy-y)/(key.h*0.5f));
++        },[](float,float,Rgb) {return Rgb{116,121,117};});
++        const Rgb ink=held ? Rgb{110,114,110} : Rgb{196,200,194};
++        const float k=1.45f,reach=11*k;
++        canvas.paint(kcx-reach,kcy-reach,kcx+reach,kcy+reach,[&](float x,float y) {
++            return canvas.edge(iconDistance(button.icon,(x-kcx)/k,(y-kcy)/k)*k-0.6f*k);
++        },[&](float,float,Rgb) {return ink;});
++    }
++
++    // Scroll rocker: one peanut-shaped key in a matching groove, its top lobe rocking up and its
++    // bottom lobe down.
++    const DeviceButton* up=nullptr;const DeviceButton* dn=nullptr;const DeviceButton* power=nullptr;
++    for(size_t i=0;i<profile.count;++i) {
++        if(profile.buttons[i].key==keyIdUp)up=&profile.buttons[i];
++        if(profile.buttons[i].key==keyIdDown)dn=&profile.buttons[i];
++        if(profile.buttons[i].key==keyIdPower)power=&profile.buttons[i];
++    }
++    if(up && dn) {
++        const SDL_Rect a=shifted(up->bounds),b=shifted(dn->bounds);
++        const float cx=a.x+a.w*0.5f,top=a.y+15.5f,bottom=b.y+b.h-15.5f,split=b.y;
++        const bool upHeld=down(keyIdUp),dnHeld=down(keyIdDown);
++        auto dr=[&](float x,float y,float grow) {return iiixRocker(x,y,cx,top,bottom,grow);};
++        // How far a point belongs to the held lobe, blended across the waist.
++        auto heldAt=[&](float y) {
++            const float t=clamp01(0.5f+(y-split)/6);
++            return (1-t)*float(upHeld)+t*float(dnHeld);
++        };
++        const float x0=cx-22,y0=a.y-2,x1=cx+22,y1=b.y+b.h+2;
++        canvas.paint(x0,y0,x1,y1,[&](float x,float y) {
++            return canvas.edge(std::fabs(dr(x,y,1.2f))-0.6f)*clamp01((y-a.y)/(b.y+b.h-a.y))*0.7f;
++        },[](float,float,Rgb) {return Rgb{100,105,101};});
++        canvas.paint(x0,y0,x1,y1,[&](float x,float y) {return canvas.edge(dr(x,y,0.4f));},[](float,float,Rgb) {return Rgb{16,17,16};});
++        auto face=[&](float x,float y) {return dr(x,y-0.7f*heldAt(y),-1.4f);};
++        canvas.paint(x0,y0,x1,y1,[&](float x,float y) {return canvas.edge(face(x,y));},[&](float x,float y,Rgb) {
++            // Each lobe is domed with its own highlight; the waist dips.
++            const float ly=y<split ? top : bottom;
++            const float r=std::hypot((x-cx+3)/15,(y-ly+5)/15);
++            Rgb c=Rgb{54,58,56}+Rgb{36,38,37}*std::pow(clamp01(1-r),1.6f)+Rgb{3,3,3}*speckle(x,y);
++            c=c*(1-0.25f*std::exp(-std::pow((y-split)/5,2.f)));
++            c=mix(Rgb{30,32,31},c,clamp01(-face(x,y)/3));
++            return c*(1-0.42f*heldAt(y));
++        });
++        canvas.paint(x0,y0,x1,y1,[&](float x,float y) {
++            const float ly=y<split ? top : bottom;
++            return canvas.edge(std::fabs(face(x,y)+0.8f)-0.35f)*0.45f*clamp01((ly-y)/10)*(1-0.8f*heldAt(y));
++        },[](float,float,Rgb) {return Rgb{120,125,121};});
++        // Small moulded chevrons on the lobes.
++        for(int i=0;i<2;++i) {
++            const float dir=i ? 1 : -1,yy=(i ? bottom : top)+dir*6.5f+0.7f*float(i ? dnHeld : upHeld);
++            canvas.paint(cx-5,yy-4,cx+5,yy+4,[&](float x,float y) {
++                return canvas.edge(std::min(segment(x,y,cx-2.6f,yy-dir*1.3f,cx,yy+dir*1.3f),
++                                            segment(x,y,cx+2.6f,yy-dir*1.3f,cx,yy+dir*1.3f))-0.5f)*0.6f;
++            },[](float,float,Rgb) {return Rgb{118,123,119};});
++        }
++    }
++
++    // Teal power key at the far left, with a small sun for the backlight.
++    if(power) {
++        const SDL_Rect r=shifted(power->bounds);
++        const bool held=down(keyIdPower);
++        const float corner=deviceButtonCorner(profile,*power),sink=held ? 0.8f : 0;
++        auto dp=[&](float x,float y) {return deviceRoundedDistance(r,corner,x,y);};
++        const float x0=r.x-3,y0=r.y-3,x1=r.x+r.w+3,y1=r.y+r.h+4;
++        const float cx=r.x+r.w*0.5f,cy=r.y+r.h*0.38f+sink;
++        canvas.paint(x0,y0,x1,y1,[&](float x,float y) {return canvas.edge(dp(x,y)-1.2f);},[](float,float,Rgb) {return Rgb{16,17,16};});
++        auto face=[&](float x,float y) {return dp(x,y-sink)+0.2f;};
++        canvas.paint(x0,y0,x1,y1,[&](float x,float y) {return canvas.edge(face(x,y));},[&](float x,float y,Rgb) {
++            const float t=clamp01((y-r.y-sink)/r.h);
++            Rgb c=mix(Rgb{44,170,150},Rgb{22,118,104},t);
++            c=c+Rgb{30,30,30}*std::pow(clamp01(1-std::fabs(x-cx+1.5f)/4),2.f)*(1-t);
++            c=mix(c*0.7f,c,clamp01(-face(x,y)/1.6f));
++            return held ? c*(0.6f+0.15f*clamp01(-face(x,y-1.5f)/3)) : c;
++        });
++        const Rgb ink=held ? Rgb{40,110,98} : Rgb{150,220,206};
++        canvas.paint(cx-5,cy-5,cx+5,cy+5,[&](float x,float y) {
++            float d=ring(x,y,cx,cy,1.5f)-0.5f;
++            for(int n=0;n<8;++n) {
++                const float c=std::cos(degrees(45*n)),sn=std::sin(degrees(45*n));
++                d=std::min(d,segment(x,y,cx+2.9f*c,cy+2.9f*sn,cx+4*c,cy+4*sn)-0.4f);
++            }
++            return canvas.edge(d);
++        },[&](float,float,Rgb) {return ink;});
++    }
++}
++
+ // Glyphs on the silkscreen discs, filled: signed distance in LCD pixels from the disc centre.
+ float silkscreenDiscGlyph(SilkscreenIcon icon, float x, float y) {
+     switch(icon) {
+@@ -645,26 +809,32 @@
+ void paintSilkscreen(Canvas& canvas, const DeviceSilkscreen& silk) {
+     const float W=silk.width,H=silk.height;
+     // E2: dark grey print with light grey discs. Zire 72: a bluer grey with silver discs.
+-    // m515: light grey-green print with pale discs and one Graffiti box.
++    // m515: light grey-green print with pale discs and one Graffiti box. IIIx: pale speckled
++    // sage with dark discs and a narrower box.
++    const bool iiix=silk.style==SilkscreenStyle::iiix;
+     const SilkscreenLook look=
++        iiix ? SilkscreenLook{Rgb{178,188,164},Rgb{166,176,152},Rgb{60,64,58},Rgb{34,37,34},
++                              Rgb{58,62,60},Rgb{34,37,36},Rgb{188,198,176},0.07f,0.8f,6,1.25f} :
+         silk.style==SilkscreenStyle::zire72 ? SilkscreenLook{Rgb{82,87,100},Rgb{74,79,92},Rgb{36,39,46},Rgb{178,183,194},
+                                                              Rgb{196,200,208},Rgb{170,175,184},Rgb{50,54,64},0.08f,0.5f,4,1}
+       : silk.style==SilkscreenStyle::m515 ? SilkscreenLook{Rgb{132,139,128},Rgb{122,129,118},Rgb{70,74,68},Rgb{236,240,232},
+                                                            Rgb{228,231,224},Rgb{204,208,200},Rgb{70,75,68},0.06f,1,2,1.4f}
+       : SilkscreenLook{Rgb{68,72,76},Rgb{62,66,70},Rgb{38,40,43},Rgb{158,162,165},
+                        Rgb{172,175,177},Rgb{156,159,161},Rgb{72,76,80},0.06f,0.45f,4,1};
+-    const bool oneBox=silk.style==SilkscreenStyle::m515;
++    const bool oneBox=silk.style==SilkscreenStyle::m515 || iiix;
+     const Rgb ink=look.ink;
+     // Printed panel over the digitizer.
+     canvas.paint(0,0,W,H,[](float,float) {return 1.f;},[&](float x,float y,Rgb) {
+-        const Rgb c=mix(look.panelTop,look.panelBottom,y/H);
++        Rgb c=mix(look.panelTop,look.panelBottom,y/H);
++        if(iiix)c=c+Rgb{12,12,12}*speckle(x,y);
+         const float t=std::fabs(x-W*0.5f)/(W*0.5f);
+         return c*(1-look.vignette*t*t);
+     });
+     canvas.paint(0,0,W,1.5f*silk.unit,[&](float,float y) {return canvas.edge(y-0.6f*silk.unit);},[&](float,float,Rgb) {return look.edge;});
+     // Graffiti box, the printed bounds of the letter and number areas.
+     // Box lines on odd units sit on LCD pixel centres at 2 units per pixel.
+-    const float bx0=silk.letters.x-5,bx1=silk.numbers.x+silk.numbers.w+5,by0=3,by1=H-3,bc=9;
++    const float inset=iiix ? -7 : 5;
++    const float bx0=silk.letters.x-inset,bx1=silk.numbers.x+silk.numbers.w+inset,by0=3,by1=H-3,bc=iiix ? 6 : 9;
+     if(oneBox) {
+         // One rounded box with triangles at the top and bottom marking the split.
+         const SDL_Rect frame{int(bx0),int(by0),int(bx1-bx0),int(by1-by0)};
+@@ -716,13 +886,14 @@
+                 const bool letters=button.icon==SilkscreenIcon::letters;
+                 const char* text=letters ? (oneBox ? "abc" : "ABC") : "123";
+                 // The m515 sets its labels in the box's lower corners, each with a dot.
+-                const float tx=oneBox ? (letters ? bx0+20 : bx1-20) : cx;
+-                const float base=oneBox ? by1-6 : r.y+r.h-6;
++                // The IIIx sets them a little smaller, with the dot below the first character.
++                const float tx=oneBox ? (letters ? bx0+(iiix ? 17 : 20) : bx1-(iiix ? 17 : 20)) : cx;
++                const float base=oneBox ? by1-(iiix ? 8 : 6) : r.y+r.h-6;
+                 canvas.paint(tx-12*k,base-9*k,tx+12*k,base+2*k,[&](float x,float y) {
+                     return canvas.edge(textDistance(text,(x-tx)/k,(y-base)/k)*k-0.75f*k);
+                 },[&](float,float,Rgb) {return ink;});
+                 if(oneBox) {
+-                    const float dx=letters ? bx0+6 : bx1-6,dy=by1-6;
++                    const float dx=letters ? bx0+(iiix ? 7 : 6) : bx1-(iiix ? 7 : 6),dy=by1-(iiix ? 4.5f : 6);
+                     canvas.paint(dx-3,dy-3,dx+3,dy+3,[&](float x,float y) {return canvas.edge(std::hypot(x-dx,y-dy)-1.8f);},
+                                  [&](float,float,Rgb) {return ink;});
+                 }
+@@ -755,6 +926,7 @@
+         case DeviceControlStyle::e2: paintE2Controls(canvas,profile,width*u,pressed);break;
+         case DeviceControlStyle::zire72: paintZire72Controls(canvas,profile,width*u,pressed);break;
+         case DeviceControlStyle::m515: paintM515Controls(canvas,profile,width*u,pressed);break;
++        case DeviceControlStyle::iiix: paintIIIxControls(canvas,profile,width*u,pressed);break;
+         default: paintTxControls(canvas,profile,width*u,pressed);
+     }
+     if(auto* texture=canvasTexture(renderer,canvas)) {
+diff --git a/src/uarm/native/DeviceControls.h b/src/uarm/native/DeviceControls.h
+--- a/src/uarm/native/DeviceControls.h
++++ b/src/uarm/native/DeviceControls.h
+@@ -9,13 +9,15 @@
+ #include "keys.h"
+ 
+ enum class DeviceControlIcon { home, calendar, contacts, web, up, down, left, right, select, power, tasks, notes,
+-                               media, music, phone };
+-enum class DeviceControlStyle { tx, e2, zire72, m515 };
++                               media, music, phone, memo };
++enum class DeviceControlStyle { tx, e2, zire72, m515, iiix };
+ struct DeviceButton {
+     KeyId key;
+     SDL_Rect bounds;
+     const char* label;
+     DeviceControlIcon icon;
++    // Corner radius in strip units; 0 takes the profile's.
++    float corner{0};
+ };
+ struct DeviceControlProfile {
+     int width, height;
+@@ -33,9 +35,9 @@
+     // Select key corner radius in strip units; 0 for a pill.
+     float selectCorner{0};
+ };
+-// Which button bar and silkscreen art a device gets. Zire 72 and m515 have no DeviceType5 yet,
+-// so only tests and renders reach them until those boards exist.
+-enum class DeviceArt { none, tx, e2, zire72, m515 };
++// Which button bar and silkscreen art a device gets. Zire 72, m515 and IIIx have no DeviceType5
++// yet, so only tests and renders reach them until those boards exist.
++enum class DeviceArt { none, tx, e2, zire72, m515, iiix };
+ inline DeviceArt deviceArt(DeviceType5 device) {
+     return device == deviceTypeTX ? DeviceArt::tx : device == deviceTypeE2 ? DeviceArt::e2 : DeviceArt::none;
+ }
+@@ -92,17 +94,34 @@
+         {keyIdHard2, {68,18,52,52}, "Address", DeviceControlIcon::phone},
+         {keyIdHard3, {200,18,52,52}, "To Do", DeviceControlIcon::tasks},
+         {keyIdHard4, {264,12,52,52}, "Note Pad", DeviceControlIcon::notes},
+-        {keyIdUp, {144,6,32,32}, "Up", DeviceControlIcon::up},
+-        {keyIdDown, {144,40,32,32}, "Down", DeviceControlIcon::down},
++        {keyIdUp, {146,13,28,28}, "Up", DeviceControlIcon::up},
++        {keyIdDown, {146,43,28,28}, "Down", DeviceControlIcon::down},
+     };
+     static const DeviceControlProfile m515Profile{320,80,m515,std::size(m515),{0,0,0,0},0,{0,0,0,0},
+                                                   DeviceControlStyle::m515,0.5f,2};
++    // Palm IIIx on a 160-wide screen, 2 units per pixel: four round app keys in dark oval
++    // pockets (Date Book, Address, To Do, Memo Pad), the outer ones a little lower, round a
++    // peanut-shaped scroll rocker that rocks up and down; its halves meet across the whole
++    // drawn waist. The teal power key sits at the far left; the real one is outside the
++    // screen's width, so the row is pulled in to fit.
++    static const DeviceButton iiix[] = {
++        {keyIdHard1, {19,24,50,44}, "Date Book", DeviceControlIcon::calendar},
++        {keyIdHard2, {78,21,50,44}, "Address", DeviceControlIcon::phone},
++        {keyIdHard3, {192,21,50,44}, "To Do", DeviceControlIcon::tasks},
++        {keyIdHard4, {251,24,50,44}, "Memo Pad", DeviceControlIcon::memo},
++        {keyIdUp, {144,8,32,37}, "Up", DeviceControlIcon::up, 8},
++        {keyIdDown, {144,45,32,37}, "Down", DeviceControlIcon::down, 8},
++        {keyIdPower, {2,32,13,38}, "Power", DeviceControlIcon::power, 3},
++    };
++    static const DeviceControlProfile iiixProfile{320,88,iiix,std::size(iiix),{0,0,0,0},0,{0,0,0,0},
++                                                  DeviceControlStyle::iiix,0.5f,2};
+     static const DeviceControlProfile empty{0,0,nullptr,0,{0,0,0,0},0,{0,0,0,0}};
+     switch(art) {
+         case DeviceArt::tx: return txProfile;
+         case DeviceArt::e2: return e2Profile;
+         case DeviceArt::zire72: return zire72Profile;
+         case DeviceArt::m515: return m515Profile;
++        case DeviceArt::iiix: return iiixProfile;
+         default: return empty;
+     }
+ }
+@@ -136,6 +155,9 @@
+ inline float deviceButtonCorner(const DeviceControlProfile& profile, const SDL_Rect& r) {
+     return std::min(r.w,r.h)*profile.buttonCorner;
+ }
++inline float deviceButtonCorner(const DeviceControlProfile& profile, const DeviceButton& button) {
++    return button.corner>0 ? button.corner : deviceButtonCorner(profile,button.bounds);
++}
+ inline bool deviceNavigatorButton(const DeviceControlProfile& profile, const DeviceButton& button) {
+     return profile.navigator.w>0 && button.icon>=DeviceControlIcon::up &&
+            button.icon<=DeviceControlIcon::select;
+@@ -150,7 +172,7 @@
+     for(size_t i=0;i<profile.count;++i) {
+         if(deviceNavigatorButton(profile,profile.buttons[i]))continue;
+         const auto& r=profile.buttons[i].bounds;
+-        if(deviceRoundedDistance(r,deviceButtonCorner(profile,r),sx,sy)<=0)
++        if(deviceRoundedDistance(r,deviceButtonCorner(profile,profile.buttons[i]),sx,sy)<=0)
+             return profile.buttons[i].key;
+     }
+     return keyInvalid;
+@@ -161,8 +183,8 @@
+ // Printed silkscreen under the LCD. Taps on it reach the guest as pen input; these
+ // rectangles only place the artwork.
+ enum class SilkscreenIcon { home, menu, favorites, find, clock, brightness, letters, numbers, calc };
+-// E2 and Zire 72: two Graffiti areas between full-height lines; m515: one rounded box.
+-enum class SilkscreenStyle { e2, zire72, m515 };
++// E2 and Zire 72: two Graffiti areas between full-height lines; m515 and IIIx: one rounded box.
++enum class SilkscreenStyle { e2, zire72, m515, iiix };
+ struct SilkscreenButton {
+     SDL_Rect bounds;
+     const char* label;
+@@ -222,11 +244,23 @@
+     };
+     static const DeviceSilkscreen m515Silkscreen{320,120,m515,std::size(m515),{54,8,124,112},{178,8,88,112},
+                                                  SilkscreenStyle::m515,2};
++    // IIIx: System 'silk' 10000 of the ROM, doubled from row 160 as for the m515.
++    static const SilkscreenButton iiix[] = {
++        {{0,8,54,56}, "Home", SilkscreenIcon::home},
++        {{0,64,54,56}, "Menu", SilkscreenIcon::menu},
++        {{266,8,54,56}, "Calc", SilkscreenIcon::calc},
++        {{266,64,54,56}, "Find", SilkscreenIcon::find},
++        {{54,92,36,28}, "Letter keyboard", SilkscreenIcon::letters},
++        {{230,92,36,28}, "Number keyboard", SilkscreenIcon::numbers},
++    };
++    static const DeviceSilkscreen iiixSilkscreen{320,120,iiix,std::size(iiix),{54,8,124,112},{178,8,88,112},
++                                                 SilkscreenStyle::iiix,2};
+     static const DeviceSilkscreen none{0,0,nullptr,0,{0,0,0,0},{0,0,0,0}};
+     switch(art) {
+         case DeviceArt::e2: return e2Silkscreen;
+         case DeviceArt::zire72: return zire72Silkscreen;
+         case DeviceArt::m515: return m515Silkscreen;
++        case DeviceArt::iiix: return iiixSilkscreen;
+         default: return none;
+     }
+ }
