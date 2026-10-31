@@ -342,8 +342,23 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     auto* saveButton = button(tr("Save"), "save");
     auto* copyButton = button(tr("Save a copy…"), "saveCopy");
     auto* logButton = button(tr("Emulator log"), "emulatorLog", true);
-    for (auto* b : {saveButton, copyButton, logButton}) { b->setParent(sessionBar); sessionButtons->addWidget(b); }
+    auto* hardReset = button(tr("Hard reset"), "hardReset");
+    for (auto* b : {saveButton, copyButton, logButton, hardReset}) { b->setParent(sessionBar); sessionButtons->addWidget(b); }
     connect(saveButton, &QPushButton::clicked, this, [this] { save(); });
+    connect(hardReset, &QPushButton::clicked, this, [this] {
+        QMessageBox box(QMessageBox::Warning, tr("Hard reset"), tr("Erase everything on the %1?").arg(deviceLabel()),
+                        QMessageBox::NoButton, this);
+        auto* erase = box.addButton(tr("Erase"), QMessageBox::DestructiveRole);
+        auto* saveFirst = box.addButton(tr("Save first"), QMessageBox::AcceptRole);
+        box.setDefaultButton(box.addButton(QMessageBox::Cancel));
+        box.exec();
+        if (box.clickedButton() == erase) send("hard-reset");
+        else if (box.clickedButton() == saveFirst) {
+            // Erases once the working copy saves; a failed save leaves the Palm as it is.
+            save();
+            hardResetAfterSave = !savingPath.isEmpty();
+        }
+    });
     connect(copyButton, &QPushButton::clicked, this, [this] { save(true); });
     auto* saveShortcut = new QShortcut(QKeySequence::Save, this);
     connect(saveShortcut, &QShortcut::activated, this, [this] {
@@ -437,6 +452,7 @@ MainWindow::MainWindow(const QString& core) : core(core) {
         busy = false; forceButton->hide(); refresh();
         if (!ok && exchangeStage != ExchangeStage::None) { exchangeResult(false, message); return; }
         if (!ok) {
+            hardResetAfterSave = false;
             log->appendPlainText(command + ": " + message);
             if (command == "sd-state") sdKnown = false;
             if (command == "serial-mode") showSerial("off " + message);  // the core is now off
@@ -499,6 +515,10 @@ MainWindow::MainWindow(const QString& core) : core(core) {
                 QFile::remove(frondSessions::markerPath(sessionPath)); refreshSessions();
             }
             savingPath.clear();
+        }
+        if (command == "save" && hardResetAfterSave && !stopping) {
+            hardResetAfterSave = false;
+            if (savedWorkingCopy) { send("hard-reset"); return; }
         }
         if (stopping && command != "quit") {
             if (savedWorkingCopy) send("quit");

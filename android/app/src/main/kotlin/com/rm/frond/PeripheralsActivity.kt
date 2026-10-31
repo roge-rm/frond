@@ -307,6 +307,13 @@ class PeripheralsModel(
 
     fun rotate() = device("Rotating", "Couldn't rotate", true) { send(it, "rotate") }
 
+    // Erases the Palm, after saving the running session when saveFirst is set.
+    fun hardReset(saveFirst: Boolean) = device(if (saveFirst) "Saving" else "Resetting", "Couldn't hard reset", true) { l ->
+        runHardReset(FrondActivity.running?.session, saveFirst) { command, argument ->
+            l.request(command, argument, timeoutSeconds = if (command == "save") 120 else 30)
+        }
+    }
+
     fun saveCopy(to: android.net.Uri) = device("Saving", "Couldn't save a copy", false) { l ->
         Sessions.saveCopy(activity.applicationContext, l, to).also { if (it == null) activity.runOnUiThread { note = "Copy saved" } }
     }
@@ -317,6 +324,20 @@ class PeripheralsModel(
     fun showLog() {
         activity.lifecycleScope.launch {
             log = withContext(Dispatchers.IO) { CoreLog.read(activity.applicationContext) }
+        }
+    }
+
+    companion object {
+        // Sends hard-reset, after a save of path when saveFirst is set; a failed save erases nothing.
+        // Returns an error message or null.
+        fun runHardReset(path: String?, saveFirst: Boolean, request: (String, String) -> ControlLink.Reply): String? {
+            if (saveFirst) {
+                if (path == null) return "There's no session to save."
+                val saved = request("save", path)
+                if (!saved.ok) return saved.message
+            }
+            val reply = request("hard-reset", "")
+            return if (reply.ok) null else reply.message
         }
     }
 

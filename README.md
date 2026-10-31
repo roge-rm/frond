@@ -68,7 +68,8 @@ listed on the home screen (Devices) and can be renamed, exported, imported and d
 On Linux, closing the window saves it and Frond offers to resume it next time, **Save and
 Stop** goes back to the list and **Save a copy…** keeps a separate snapshot. There's no autosave,
 so a crash loses what changed since the last save. Sessions hold your firmware and
-personal data, so keep them private.
+personal data, so keep them private. **Hard reset** in the session controls erases the Palm
+(**Save first** saves the session before); the TX and E2 ask first, press up to erase.
 
 **Screen.** On Linux choose a scale from 1× to 2× in 0.25 steps before starting; Frond
 defaults to the largest that fits. LCD pixels stay sharp, and **Smooth LCD scaling**

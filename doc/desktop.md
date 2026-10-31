@@ -71,9 +71,10 @@ since the last save. There is no periodic autosave in this release.
 ## Running page
 
 While a Palm runs, the window shows its sections instead of the list, and the title is
-the session name. **Save**, **Save a copy…**, **Emulator log** and **Save and Stop**
+the session name. **Save**, **Save a copy…**, **Emulator log**, **Hard reset** and **Save and Stop**
 stay at the bottom of the window. **Force Stop…** appears there if the emulator stops
-answering. Ctrl+S saves.
+answering. Ctrl+S saves. **Hard reset** erases everything on the Palm, after saving the session if
+you choose **Save first**. The TX and E2 then ask "Erase all data?": press up to erase.
 
 - **Applications:** **Install application** (PRC/PDB, after Palm OS has started),
   **Launch application** (by its Palm database name), **Export RAM databases** (a ZIP

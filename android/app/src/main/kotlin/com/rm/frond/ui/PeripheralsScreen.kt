@@ -81,6 +81,7 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
     var naming by remember { mutableStateOf(false) }
     var exporting by remember { mutableStateOf<FatImage.Entry?>(null) }
     var confirmReset by remember { mutableStateOf(false) }
+    var confirmHardReset by remember { mutableStateOf(false) }
     var choosingNetwork by remember { mutableStateOf(false) }
     var choosingBeam by remember { mutableStateOf(false) }
     var choosingBluetooth by remember { mutableStateOf(false) }
@@ -309,6 +310,7 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                 item { Header("Session", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp)) }
                 action("Save a copy") { saveCopy.launch("${model.name}.frond") }
                 action("Emulator log") { model.showLog() }
+                action("Hard reset") { confirmHardReset = true }
                 item { Spacer(Modifier.size(16.dp)) }
             }
         }
@@ -472,6 +474,20 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                 TextButton(onClick = { confirmReset = false; model.reset() }) { Text("Reset") }
             },
             dismissButton = { TextButton(onClick = { confirmReset = false }) { Text("Cancel") } },
+        )
+    }
+    if (confirmHardReset) {
+        AlertDialog(
+            onDismissRequest = { confirmHardReset = false },
+            title = { Text("Hard reset") },
+            text = { Text("Erase everything on the ${model.device.label}?") },
+            confirmButton = {
+                Row {
+                    TextButton(onClick = { confirmHardReset = false; model.hardReset(saveFirst = true) }) { Text("Save first") }
+                    TextButton(onClick = { confirmHardReset = false; model.hardReset(saveFirst = false) }) { Text("Erase") }
+                }
+            },
+            dismissButton = { TextButton(onClick = { confirmHardReset = false }) { Text("Cancel") } },
         )
     }
     if (model.askingLeave) {

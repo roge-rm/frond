@@ -1,0 +1,116 @@
+diff --git a/src/uarm/uarm/SoC.h b/src/uarm/uarm/SoC.h
+--- a/src/uarm/uarm/SoC.h
++++ b/src/uarm/uarm/SoC.h
+@@ -57,6 +57,9 @@
+     virtual void Reset();
+     // Next Reset() is a power-on reset; the Zire uses it for a hard reset (clean boot).
+     void RequestPowerOnReset() { powerOnReset = true; }
++    // A power-on reset on the Zire; on the TX and E2 power held through a reset, which brings up
++    // the erase prompt.
++    void HardReset();
+ 
+     virtual uint64_t Run(uint64_t maxCycles, uint64_t cyclesPerSecond) = 0;
+     virtual bool RunToPaceSyscall(uint16_t syscall, uint64_t maxCycles,
+diff --git a/src/uarm/uarm/SoC.cpp b/src/uarm/uarm/SoC.cpp
+--- a/src/uarm/uarm/SoC.cpp
++++ b/src/uarm/uarm/SoC.cpp
+@@ -185,6 +185,16 @@
+ 
+ bool SoC::IsPacePatched() { return pacePatch->enterPace; }
+ 
++void SoC::HardReset() {
++    // The Zire's DAL only checks the power key after it's released, so its hard reset is a
++    // power-on reset: the small ROM marks the RAM store invalid and Palm OS boots clean.
++    // The TX and E2 ask "Erase all data?" when power is released after the Palm Powered logo,
++    // which shows about 7.5 s into the boot, so power is held for 9 s.
++    if (GetDeviceType() == DeviceType5::deviceTypeZire72) RequestPowerOnReset();
++    else JamKey(keyIdPower, 9000);
++    Reset();
++}
++
+ void SoC::Reset() {
+     penEventQueue->Clear();
+     keyEventQueue->Clear();
+diff --git a/src/uarm/native/Commands.cpp b/src/uarm/native/Commands.cpp
+--- a/src/uarm/native/Commands.cpp
++++ b/src/uarm/native/Commands.cpp
+@@ -126,13 +126,7 @@
+     }
+ 
+     void CmdResetHard(vector<string> args, cli::CommandEnvironment& env, void* context) {
+-        auto ctx = reinterpret_cast<commands::Context*>(context);
+-
+-        // The Zire's DAL only checks the power key after it's released, so its hard reset is a
+-        // power-on reset: the small ROM marks the RAM store invalid and Palm OS boots clean.
+-        if (ctx->soc->GetDeviceType() == DeviceType5::deviceTypeZire72) ctx->soc->RequestPowerOnReset();
+-        else ctx->soc->JamKey(keyIdPower, 2000);
+-        ctx->soc->Reset();
++        reinterpret_cast<commands::Context*>(context)->soc->HardReset();
+     }
+ 
+     void CmdRotate(vector<string> args, cli::CommandEnvironment& env, void* context) {
+diff --git a/src/uarm/native/DesktopControl.h b/src/uarm/native/DesktopControl.h
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -106,7 +106,7 @@
+                 return true;
+             std::string argument;
+             if (!decode(line.substr(second + 1), argument)) return true;
+-            const bool work = command == "guest-ready" || command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "db-list" || command == "reset" || command == "launch-app" || command == "input-replay" || (command.rfind("sd-", 0) == 0 && command != "sd-state");
++            const bool work = command == "guest-ready" || command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "db-list" || command == "reset" || command == "hard-reset" || command == "launch-app" || command == "input-replay" || (command.rfind("sd-", 0) == 0 && command != "sd-state");
+             if (work) ctx.audioDriver.Pause();
+             Reply result;
+             try {
+@@ -460,6 +460,7 @@
+             return {true, "sound", state};
+         }
+         if (command == "reset") ctx.soc->Reset();
++        else if (command == "hard-reset") ctx.soc->HardReset();
+         else if (command == "rotate") ctx.rotation = Rotation((int(ctx.rotation) + 1) % 4);
+         else if (command == "audio-on") { ctx.audioDriver.SetMuted(false); ctx.audioDriver.Start(); sound = true; }
+         else if (command == "audio-off") { ctx.audioDriver.Pause(); sound = false; }
+diff --git a/src/uarm/web/uarm.h b/src/uarm/web/uarm.h
+--- a/src/uarm/web/uarm.h
++++ b/src/uarm/web/uarm.h
+@@ -85,6 +85,7 @@
+     bool SdCardInitialized();
+     const char* GetSdCardId();
+     void Reset();
++    void HardReset();
+ 
+     void Save();
+     uint32_t GetSavestateSize();
+diff --git a/src/uarm/web/uarm.cpp b/src/uarm/web/uarm.cpp
+--- a/src/uarm/web/uarm.cpp
++++ b/src/uarm/web/uarm.cpp
+@@ -262,6 +262,8 @@
+ 
+ void Uarm::Reset() { soc->Reset(); }
+ 
++void Uarm::HardReset() { soc->HardReset(); }
++
+ void Uarm::Save() { soc->Save(); }
+ 
+ uint32_t Uarm::GetSavestateSize() { return soc->GetSavestate().size; }
+diff --git a/src/uarm/web/binding/uarm.idl b/src/uarm/web/binding/uarm.idl
+--- a/src/uarm/web/binding/uarm.idl
++++ b/src/uarm/web/binding/uarm.idl
+@@ -66,6 +66,7 @@
+     boolean SdCardInitialized();
+     [Const] DOMString GetSdCardId();
+     void Reset();
++    void HardReset();
+ 
+     void Save();
+     unsigned long GetSavestateSize();
+diff --git a/src/uarm/web/binding/binding.d.ts b/src/uarm/web/binding/binding.d.ts
+--- a/src/uarm/web/binding/binding.d.ts
++++ b/src/uarm/web/binding/binding.d.ts
+@@ -120,6 +120,7 @@
+     SdCardInitialized(): boolean;
+     GetSdCardId(): string;
+     Reset(): void;
++    HardReset(): void;
+ 
+     Save(): void;
+     GetSavestateSize(): number;

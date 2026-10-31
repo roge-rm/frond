@@ -75,6 +75,7 @@ class MainWindow : public QMainWindow {
     DesktopClient client;
     QSettings settings;
     QString core, sessionPath, savingPath;
+    bool hardResetAfterSave{false};
     std::unique_ptr<QLockFile> sessionLock;
     QComboBox *network, *serial, *usb, *irda;
     QSpinBox* serialPort;
