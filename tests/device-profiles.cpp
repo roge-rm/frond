@@ -20,7 +20,7 @@ int main() {
     std::set<std::string> names;
     std::set<int> types;
     unsigned desktopCount = 0;
-    const std::vector<std::string> reserved{"palm-zire-72", "sony-clie-tg50", "palm-iiix", "palm-m515"};
+    const std::vector<std::string> reserved{"sony-clie-tg50", "palm-iiix", "palm-m515"};
     for (const auto& p : deviceProfiles5) {
         // Names are unique, short and plain; they go into session headers.
         assert(names.insert(p.name).second && std::strlen(p.name) <= deviceNameMax5);
@@ -38,12 +38,13 @@ int main() {
         assert(deviceTypeNamed5(p.name) == p.deviceType && std::string(deviceName5(deviceTypeNamed5(p.name))) == p.name);
         desktopCount += deviceProfileSupportsDesktop5(p.deviceType);
         assert(deviceProfileSupportsDesktop5(p.deviceType) == (p.deviceType == deviceTypeTX || p.deviceType == deviceTypeE2));
+        assert((p.deviceType == deviceTypeZire72) == (p.board == DeviceBoard5::pxa270Zire72));
         assert(deviceConfigurationGetNandSize(p.deviceType) == p.nandSize);
         assert(deviceConfigurationDefaultDisplayMode(p.deviceType) == p.defaultDisplay);
         for (uint32_t ram : {0u, 1u, 8u << 20, 16u << 20, 24u << 20, 32u << 20, 64u << 20, 1u << 31, UINT32_MAX}) {
             const bool expected = p.deviceType == deviceTypePV
                 ? ram >= (8u << 20) && (ram & (ram - 1)) == 0
-                : ram == (32u << 20) || (p.deviceType != deviceTypeTX && ram == (16u << 20));
+                : ram == (32u << 20) || (p.deviceType != deviceTypeTX && p.deviceType != deviceTypeZire72 && ram == (16u << 20));
             assert(deviceConfigurationSupportsRamSize(p.deviceType, ram) == expected);
         }
         for (int mode : {INT_MIN, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, INT_MAX}) {
@@ -56,7 +57,7 @@ int main() {
         assert(deviceProfileValidateFirmware5(p.deviceType, 0, p.nandSize, false, true) == DeviceFirmwareError5::norSize);
         assert(deviceProfileValidateFirmware5(p.deviceType, nor, p.nandSize + 1, true, false) == DeviceFirmwareError5::nandSize);
     }
-    assert(desktopCount == 2 && names.size() == 8 && types.size() == 4);
+    assert(desktopCount == 2 && names.size() == 8 && types.size() == 5);
     assert(std::string(deviceName5(deviceTypeTX)) == "palm-tx" && std::string(deviceName5(deviceTypeE2)) == "palm-e2");
     assert(deviceProfileNamed5("palm-tx")->capabilities.serial && !deviceProfileNamed5("palm-e2")->capabilities.serial);
     // Unknown names are refused, including numbers, old ids, case and prefixes.
@@ -64,7 +65,7 @@ int main() {
         assert(!deviceProfileNamed5(name) && deviceTypeNamed5(name) == deviceTypeInvalid);
     }
     assert(!deviceProfileNamed5(nullptr) && !deviceName5(deviceTypeInvalid) && !deviceName5(99));
-    for (int id : {INT_MIN, -1, 4, 99, INT_MAX}) {
+    for (int id : {INT_MIN, -1, 5, 99, INT_MAX}) {
         assert(!deviceProfile5(id) && !deviceProfileSupportsDesktop5(id));
         assert(!deviceProfileSupportsRam5(id, 32u << 20));
         assert(!deviceProfileSupportsDisplay5(id, 6));
@@ -82,6 +83,18 @@ int main() {
     for (size_t at : {size_t(0), size_t(0x8000), size_t(0x40000)})
         assert(deviceProfileValidateNorLayout5(0, at, false) == DeviceFirmwareError5::norLayout);
     for (int other : {1, 2, 3}) assert(deviceProfileValidateNorLayout5(other, 0, false) == DeviceFirmwareError5::none);
+    // Zire 72 NOR: small card at 0x0 and a matching big card at 0x20000, sessions included.
+    assert(deviceProfileValidateFirmware5(deviceTypeZire72, 14942208, 0, false, false) == DeviceFirmwareError5::none);
+    for (size_t nor : {size_t(14942207), size_t(14876672), size_t(8u << 20), size_t(16u << 20), size_t(0x20000)})
+        assert(deviceProfileValidateFirmware5(deviceTypeZire72, nor, 0, false, false) == DeviceFirmwareError5::norSize);
+    assert(deviceProfileValidateFirmware5(deviceTypeZire72, 14942208, 1, false, true) == DeviceFirmwareError5::nandSize);
+    assert(deviceProfileValidateNorLayout5(deviceTypeZire72, 0, false, true) == DeviceFirmwareError5::none);
+    assert(deviceProfileValidateNorLayout5(deviceTypeZire72, 0, true, true) == DeviceFirmwareError5::none);
+    for (bool session : {false, true}) {
+        assert(deviceProfileValidateNorLayout5(deviceTypeZire72, 0, session, false) == DeviceFirmwareError5::norLayout);
+        for (size_t at : {size_t(0x8000), size_t(0x20000)})
+            assert(deviceProfileValidateNorLayout5(deviceTypeZire72, at, session, true) == DeviceFirmwareError5::norLayout);
+    }
     // E2 sessions from builds before the size and layout checks still load; TX sessions don't.
     for (size_t nor : {size_t(4u << 20), size_t(16u << 20)})
         assert(deviceProfileValidateFirmware5(0, nor, 34603008, true, false) == DeviceFirmwareError5::none);
@@ -97,15 +110,75 @@ int main() {
         assert(info.IsValid() && info.GetDeviceType() == deviceTypeE2 && info.GetHeaderOffset() == 0x20000);
     }
 
+    // Zire 72 layout from synthetic cards: small card at 0x0, big card at 0x20000 to the end.
+    {
+        constexpr uint32_t palm = 0x50616c6d, aZ72 = 0x615a3732, hspr = 0x68737072;
+        constexpr size_t zireSize = 14942208;
+        auto card = [](std::vector<uint8_t>& nor, size_t at, uint32_t hal, size_t length) {
+            put32(nor, at + 8, 0xfeedbeef);
+            std::memcpy(nor.data() + at + 0x10, "PalmCard", 9);
+            put32(nor, at + 0x6c, length);
+            put32(nor, at + 0x80, palm);
+            put32(nor, at + 0x84, hal);
+            std::memcpy(nor.data() + at + 0x8c, "Synthetic", 10);
+        };
+        auto zire = [&](uint32_t smallHal, uint32_t bigHal, size_t bigLength) {
+            std::vector<uint8_t> nor(zireSize);
+            card(nor, 0, smallHal, 0x10000);
+            card(nor, 0x20000, bigHal, bigLength);
+            return nor;
+        };
+        auto check = [](const std::vector<uint8_t>& nor, DeviceType5 type, bool layout) {
+            const RomInfo5 info(nor.data(), nor.size());
+            assert(info.IsValid() && info.GetDeviceType() == type && info.HasSmallAndBigCards() == layout);
+            return info.GetHeaderOffset();
+        };
+        auto good = zire(aZ72, aZ72, zireSize - 0x20000);
+        assert(check(good, deviceTypeZire72, true) == 0);
+        {
+            const RomInfo5 info(good.data(), good.size());
+            assert(!info.NeedsNand() && !info.NeedsNandPatch() && info.GetRecommendedRamSize() == (32u << 20));
+        }
+        // Cards that disagree, a wrong big card size, or a damaged small card are not the layout.
+        assert(check(zire(aZ72, hspr, zireSize - 0x20000), deviceTypeZire72, false) == 0);
+        assert(check(zire(aZ72, 0x12345678, zireSize - 0x20000), deviceTypeZire72, false) == 0);
+        assert(check(zire(aZ72, aZ72, zireSize - 0x20000 - 1), deviceTypeZire72, false) == 0);
+        assert(check(zire(aZ72, aZ72, zireSize - 0x20000 + 1), deviceTypeZire72, false) == 0);
+        assert(check(zire(0x12345678, aZ72, zireSize - 0x20000), deviceTypeInvalid, false) == 0);
+        auto noSmall = good;
+        put32(noSmall, 8, 0);
+        assert(check(noSmall, deviceTypeZire72, false) == 0x20000);
+        auto otherName = good;
+        std::memcpy(otherName.data() + 0x20010, "OtherCard", 10);
+        assert(check(otherName, deviceTypeZire72, false) == 0);
+        auto otherCompany = good;
+        put32(otherCompany, 0x20080, 0x58585858);
+        assert(check(otherCompany, deviceTypeZire72, false) == 0);
+        // Both cards changed to the E2 or an unknown HAL: not a Zire, and no Zire layout.
+        assert(check(zire(hspr, hspr, zireSize - 0x20000), deviceTypeE2, true) == 0);
+        assert(check(zire(0x12345678, 0x12345678, zireSize - 0x20000), deviceTypeInvalid, true) == 0);
+        // The E2 layout (small card at 0x60, big at 0x20000) is not the Zire's.
+        std::vector<uint8_t> e2(8u << 20);
+        card(e2, 0x20000, hspr, (8u << 20) - 0x20000);
+        assert(check(e2, deviceTypeE2, false) == 0x20000);
+        // A session holding another device's NOR is for a different device than the ROM says.
+        assert(RomInfo5(e2.data(), e2.size()).GetDeviceType() != deviceTypeZire72);
+        assert(RomInfo5(good.data(), good.size()).GetDeviceType() != deviceTypeE2);
+        assert(!RomInfo5(good.data(), 0).IsValid());
+        assert(!RomInfo5(good.data(), 0x20000).HasSmallAndBigCards());
+        assert(deviceProfileNamed5("palm-zire-72")->deviceType == deviceTypeZire72 &&
+               !deviceProfileNamed5("palm-zire-72")->capabilities.fastAudio);
+    }
+
     // Public header layout and IDs from RomInfo5, no dump data.
-    for (auto hal : {0x68737072u, 0x446d4752u, 0x50765076u, 0x12345678u}) {
+    for (auto hal : {0x68737072u, 0x446d4752u, 0x50765076u, 0x615a3732u, 0x12345678u}) {
         std::vector<uint8_t> header(256);
         put32(header, 8, 0xfeedbeef);
         put32(header, 0x80, 0x50616c6d); // Palm
         put32(header, 0x84, hal);
         std::memcpy(header.data() + 0x8c, "Synthetic", 10);
         const DeviceType5 expected = hal == 0x68737072 ? deviceTypeE2 : hal == 0x446d4752 ? deviceTypeFrankenE2
-            : hal == 0x50765076 ? deviceTypePV : deviceTypeInvalid;
+            : hal == 0x50765076 ? deviceTypePV : hal == 0x615a3732 ? deviceTypeZire72 : deviceTypeInvalid;
         for (size_t size = 0; size <= header.size(); ++size) {
             const std::vector<uint8_t> truncated(header.begin(), header.begin() + size);
             RomInfo5 info(truncated.data(), truncated.size());
