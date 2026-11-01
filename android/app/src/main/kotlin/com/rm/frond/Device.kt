@@ -50,6 +50,9 @@ enum class Device(
 
     val hasNand: Boolean get() = nandSize > 0
 
+    // Low-latency audio needs a qualified NOR; the Zire 72 has none.
+    val fastAudio: Boolean get() = fastAudioNorMd5 != null
+
     // Arguments the core needs before a raw NOR image for this device.
     val coreFlags: List<String> get() = listOf("--device", id)
 

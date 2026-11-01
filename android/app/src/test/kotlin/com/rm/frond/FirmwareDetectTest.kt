@@ -93,10 +93,10 @@ class FirmwareDetectTest {
         assertEquals("The Zire 72 has no NAND. Leave the NAND image empty.", Firmware.check(Device.ZIRE72, zire(), nand))
         assertEquals("This is a Zire 72 NOR image. Choose a Palm TX one.", Firmware.check(Device.TX, zire(), nand))
         assertEquals("This is a Zire 72 NOR image. Choose a Tungsten E2 one.", Firmware.check(Device.E2, zire(), null))
-        assertEquals("This is a Tungsten E2 NOR image. Choose a Zire 72 one.", Firmware.check(Device.ZIRE72, nor(8L shl 20, 0x20000), null))
-        assertEquals("This looks like a Palm TX NOR image. Choose a Zire 72 one.", Firmware.check(Device.ZIRE72, nor(16L shl 20), null))
-        // The big card runs to the end, so a trimmed image has the wrong layout and says the size.
-        assertEquals("The Zire 72 NOR image must be 14,942,208 bytes. This one is 16 MiB.",
+        assertEquals("Choose a 14,942,208-byte NOR image for the Zire 72.", Firmware.check(Device.ZIRE72, nor(8L shl 20, 0x20000), null))
+        assertEquals("Choose a 14,942,208-byte NOR image for the Zire 72.", Firmware.check(Device.ZIRE72, nor(16L shl 20), null))
+        // The big card runs to the end, so a wrong size is reported before the header.
+        assertEquals("Choose a 14,942,208-byte NOR image for the Zire 72.",
             Firmware.check(Device.ZIRE72, zire(16L shl 20, big = false), null))
     }
 
