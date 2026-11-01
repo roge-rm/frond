@@ -81,6 +81,18 @@ personal data deliberately embedded in an otherwise approved executable or
 document, so build only from reviewed source and keep private inputs outside
 that inventory.
 
+## Smoke test
+
+`make smoke` is a quick real-firmware check for the TX, E2 and Zire 72, about 1.5 minutes in all. Run it after shared core changes, once `make` has built the core. Per device it restores a ready session at the launcher, then checks:
+
+- Date Book opens and a tap in it changes the screen, the session is saved, and a new core process loads it with the same screen.
+- An inserted SD card's HOST.TXT is read by the SD probe app.
+- The audio probe app plays PCM that isn't silent (SDL's disk audio driver captures it).
+
+`make smoke-sessions` makes the ready sessions by cold booting each device through setup (about 2 minutes). They and the probe apps are private and stay under `build/smoke/`; never commit them. A device without its session or firmware is skipped and the command says how to make it. The SD and audio probes need the Palm OS SDK, as for the other probe tests.
+
+A new device is an entry in `SMOKE` in `tests/smoke.py` (firmware, the setup function in `tools/palm_boot.py`, the app and tap). Each run's frames and logs are in `build/smoke/work/DEVICE/`.
+
 ## Automated coverage and limits
 
 `.github/workflows/validate.yml` currently runs manually with `workflow_dispatch`
