@@ -68,11 +68,10 @@ fun HomeScreen(model: HomeModel) {
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
     var menu by remember { mutableStateOf(false) }
-    var busy by remember { mutableStateOf(false) }
+    var busy by model::copying
     var renaming by remember { mutableStateOf<Session?>(null) }
     var deleting by remember { mutableStateOf<Session?>(null) }
     var exporting by remember { mutableStateOf<Session?>(null) }
-    var adding by remember { mutableStateOf(false) }
 
     val importSession = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
@@ -130,14 +129,14 @@ fun HomeScreen(model: HomeModel) {
                 icon = { Icon(Icons.Default.Add, contentDescription = null) },
                 containerColor = MaterialTheme.colorScheme.primary,
                 contentColor = MaterialTheme.colorScheme.onPrimary,
-                onClick = { adding = true },
+                onClick = { model.addMachine() },
             )
         },
     ) { padding ->
         LazyColumn(Modifier.padding(padding).fillMaxSize()) {
             item(key = "header") { Header("Devices", Modifier.padding(start = 16.dp, top = 8.dp)) }
             items(model.sessions, key = { it.id }) { s ->
-                SessionRow(s, onOpen = { model.start(s) }, onRename = { renaming = it }, onDelete = { deleting = it }, onExport = {
+                SessionRow(s, onMenu = { model.refreshRunning() }, editable = !busy && !model.running, onEdit = { model.edit(it) }, onOpen = { model.start(s) }, onRename = { renaming = it }, onDelete = { deleting = it }, onExport = {
                     exporting = it
                     exportSession.launch("${it.name}.frond")
                 })
@@ -193,36 +192,15 @@ fun HomeScreen(model: HomeModel) {
             dismissButton = { TextButton(onClick = { deleting = null }) { Text("Cancel") } },
         )
     }
-    if (adding) {
-        AlertDialog(
-            onDismissRequest = { adding = false },
-            title = { Text("Add device") },
-            text = {
-                LazyColumn {
-                    items(Device.shown) { d ->
-                        val ready = model.firmwareReady[d] == true
-                        ListItem(
-                            headlineContent = { Text(d.label) },
-                            supportingContent = { Text(if (ready) "Ready" else "Needs firmware") },
-                            leadingContent = { Marker(if (ready) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant) },
-                            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                            modifier = Modifier.clickableRow {
-                                adding = false
-                                if (ready) model.newSession(d) else model.openFirmware(thenStart = d)
-                            },
-                        )
-                    }
-                }
-            },
-            confirmButton = {},
-            dismissButton = { TextButton(onClick = { adding = false }) { Text("Cancel") } },
-        )
-    }
+
 }
 
 @Composable
 private fun SessionRow(
     s: Session,
+    editable: Boolean,
+    onMenu: () -> Unit,
+    onEdit: (Session) -> Unit,
     onOpen: () -> Unit,
     onRename: (Session) -> Unit,
     onDelete: (Session) -> Unit,
@@ -245,8 +223,9 @@ private fun SessionRow(
         leadingContent = { Marker(if (s.saved && !s.old) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant) },
         trailingContent = {
             Box {
-                IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, contentDescription = "More") }
+                IconButton(onClick = { onMenu(); menu = true }) { Icon(Icons.Default.MoreVert, contentDescription = "More") }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                    DropdownMenuItem(text = { Text("Edit settings") }, enabled = editable && !s.old, onClick = { menu = false; onEdit(s) })
                     DropdownMenuItem(text = { Text("Rename") }, enabled = !s.old, onClick = { menu = false; onRename(s) })
                     DropdownMenuItem(text = { Text("Export") }, enabled = s.saved && !s.old, onClick = { menu = false; onExport(s) })
                     DropdownMenuItem(text = { Text("Delete") }, onClick = { menu = false; onDelete(s) })

@@ -191,9 +191,9 @@ class DeveloperRunTest(unittest.TestCase):
                          [str(self.output / 'working.frond'), '--device', 'palm-e2'])
 
     def test_device_specific_flash_and_boot_helpers(self):
-        for device, nor_size, nand_size, helper in [
-                ('palm-e2', 8 << 20, 34603008, 'e2_setup'),
-                ('palm-zire-72', 14942208, 0, 'zire_setup')]:
+        for device, nor_size, nand_size in [
+                ('palm-e2', 8 << 20, 34603008),
+                ('palm-zire-72', 14942208, 0)]:
             output = self.root / device
             nor, nand = self.root / (device + '-nor'), self.root / (device + '-nand')
             with nor.open('wb') as stream:
@@ -206,10 +206,11 @@ class DeveloperRunTest(unittest.TestCase):
             args = runner.parser().parse_args(['--core', str(self.core), '--device', device,
                 '--nor', str(nor), *extra, '--resume-app', '--output', str(output),
                 '--settle', '0', '--timeout', '5'])
-            with patch.object(runner.shutil, 'which', return_value=None), patch.object(runner, helper) as setup:
+            with patch.object(runner.shutil, 'which', return_value=None), patch.object(runner, 'setup_device') as setup:
                 result = runner.run(args)
             self.assertEqual(result['status'], 'ok', result)
             setup.assert_called_once()
+            self.assertEqual(setup.call_args.args[0], device)
             self.assertEqual(result['command'][2], device)
             self.assertEqual(len(result['inputs']), 3 if nand_size else 2)
             self.assertIn('guest-ready', [r['command'] for r in result['steps']])

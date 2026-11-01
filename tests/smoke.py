@@ -2,7 +2,7 @@
 """Quick real-firmware check per device, for after shared core changes.
 
   tests/smoke.py sessions [DEVICE...]   cold boot through setup, save build/smoke/DEVICE.session
-  tests/smoke.py run [DEVICE...]        per device: app and tap, save and reload, SD file, sound
+  tests/smoke.py run [DEVICE...]        per device: app and tap, save and reload, supported media and sound
 
 Sessions, firmware copies and everything made here stay private under build/smoke/. A device without a
 ready session or firmware is skipped with the command that makes it. A new device is an entry in SMOKE.
@@ -45,6 +45,10 @@ SMOKE = {
                 'setup': 'e2_setup', 'app': 'Date Book', 'taps': [(100, 100)], 'area': (0, 0, 320, 320)},
     'palm-zire-72': {'nor': 'Zire-72/Palm-Zire72-nor.bin', 'nand': None, 'setup': 'zire_setup',
                      'app': 'Calculator', 'taps': [(60, 200)], 'area': (0, 0, 320, 320)},
+    'sony-clie-tg50': {'nor': PALM.parent / 'Sony/CLIE-TG50/Sony-Clie-TG50-nor.bin',
+                       'nand': None, 'setup': 'tg50_setup', 'app': 'Date Book',
+                       'taps': [(100, 100)], 'area': (0, 0, 320, 320),
+                       'media': 'memory-stick-unavailable', 'audio': 'sony-general'},
 }
 PROBES = {'sd': 'FrondSDProbe.prc', 'audio': 'FrondAudioProbe.prc'}
 SD_MIB = 32
@@ -57,6 +61,14 @@ class Fail(Exception):
 def need(condition, message):
     if not condition:
         raise Fail(message)
+
+
+class SmokeBoot(frond_run.SocketBoot):
+    def tap(self, root, x, y, hold_ms=150):
+        self.replay([f'0 pen-down {x} {y}', f'{hold_ms} pen-up'])
+
+    def key(self, root, name, hold_ms=200):
+        self.replay([f'0 key-down {name}', f'{hold_ms} key-up {name}'])
 
 
 class Run:
@@ -91,7 +103,7 @@ class Run:
             listener.close()
         self.control = frond_run.Control(self.connection, self.process, self.deadline, 60, [])
         need(self.control.line(self.deadline) == ['0', 'event', 'ready', ''], 'no ready event')
-        self.boot = frond_run.SocketBoot(self.control, work)
+        self.boot = SmokeBoot(self.control, work)
         self.tap, self.wait_frame, self.frame = self.boot.tap, self.boot.wait_frame, self.boot.frame
 
     def ready(self, seconds=60):
@@ -190,6 +202,30 @@ def pcm_check(path):
     return peak
 
 
+def sony_general(rows):
+    # The fixed General heading in the measured Sony Preferences page.
+    return (rows is not None and len(rows) == 320 and
+            [sum(max(rows[y][4*x:4*x+3]) < 80 for x in range(250, 318))
+             for y in (6, 8, 10, 12, 14)] == [1, 5, 3, 13, 18])
+
+
+def sony_beeper(run, work):
+    run.boot.key(work, 'hard1', hold_ms=600)
+    run.wait_frame(work / 'sound-datebook.png', palm_boot.tg50_datebook, 30)
+    run.control.retry_ready('launch-app', 'Preferences', 60)
+    run.wait_frame(work / 'sound-prefs.png',
+                   lambda rows: sony_general(rows) or palm_boot.tg50_date_time_prefs(rows) or palm_boot.tg50_formats(rows), 30)
+    run.boot.tap(work, 245, 12, hold_ms=300)
+    run.wait_frame(work / 'sound-pref-menu.png', palm_boot.tg50_pref_menu, 30)
+    run.boot.tap(work, 240, 145, hold_ms=300)
+    run.wait_frame(work / 'sound-general.png', sony_general, 30)
+    run.boot.replay(['1000 pen-down 189 114', '1300 pen-up',
+                     '3000 pen-down 213 137', '3300 pen-up',
+                     '6000 pen-down 189 146', '6300 pen-up',
+                     '8000 pen-down 210 170', '8300 pen-up'])
+    run.wait_frame(work / 'sound-selected.png', sony_general, 30)
+
+
 def missing(device):
     cfg = SMOKE[device]
     for name in (cfg['nor'], cfg['nand']):
@@ -226,28 +262,35 @@ def smoke(device, probes):
     session = OUT / f'{device}.session'
     steps = []
 
-    # A card holding HOST.TXT, read by the SD probe app.
-    run = Run(device, work, session)
-    try:
-        host = work / 'HOST.TXT'
-        host.write_bytes(b'Hello from host\n')
-        card = work / 'card.img'
-        card_image(card, host)
-        run.ready()
-        run.require('sd-insert', card)
-        time.sleep(3)
-        run.install_and_launch(probes['sd'], 'Frond SD probe')
-        time.sleep(3)
-        sd_probe(run, work / 'sd.zip')
-        steps.append('sd')
-    finally:
-        run.close()
+    if cfg.get('media', 'sd') == 'sd':
+        # A card holding HOST.TXT, read by the SD probe app.
+        run = Run(device, work, session)
+        try:
+            host = work / 'HOST.TXT'
+            host.write_bytes(b'Hello from host\n')
+            card = work / 'card.img'
+            card_image(card, host)
+            run.ready()
+            run.require('sd-insert', card)
+            time.sleep(3)
+            run.install_and_launch(probes['sd'], 'Frond SD probe')
+            time.sleep(3)
+            sd_probe(run, work / 'sd.zip')
+            steps.append('sd')
+        finally:
+            run.close()
+
+    else:
+        steps.append('media skipped (Memory Stick unavailable)')
 
     # Sound, captured from SDL's disk audio driver.
     pcm = work / 'audio.raw'
     run = Run(device, work, session, sound=pcm)
     try:
-        run.install_and_launch(probes['audio'], 'Frond audio probe')
+        if cfg.get('audio', 'sndstream') == 'sony-general':
+            sony_beeper(run, work)
+        else:
+            run.install_and_launch(probes['audio'], 'Frond audio probe')
         end = time.monotonic() + 40
         while True:
             time.sleep(2)
@@ -257,17 +300,23 @@ def smoke(device, probes):
             except Fail:
                 if time.monotonic() > end:
                     raise
-        steps.append(f'sound (peak {peak})')
+        source = 'Sony General beeper' if cfg.get('audio') == 'sony-general' else 'sound'
+        steps.append(f'{source} (peak {peak})')
     finally:
         run.close()
 
     # An app, a tap in it, save, then reload in a new process. A running app may not answer guest-ready.
     run = Run(device, work, session)
     try:
-        run.ready()
         launcher = run.frame(work / 'launcher.png')
-        run.control.retry_ready('launch-app', cfg['app'], 60)
-        time.sleep(3)
+        if device == 'sony-clie-tg50':
+            run.boot.key(work, 'hard1', hold_ms=600)
+            run.wait_frame(work / 'datebook-ready.png', palm_boot.tg50_datebook, 30)
+            run.ready()
+        else:
+            run.ready()
+            run.control.retry_ready('launch-app', cfg['app'], 60)
+            time.sleep(3)
         opened = run.frame(work / 'app.png')
         need(opened and differing(launcher, opened, cfg['area']) > .05, f'{cfg["app"]} did not open')
         for x, y in cfg['taps']:
@@ -314,8 +363,10 @@ def main():
             if not (OUT / f'{device}.session').is_file():
                 print(f'SKIP {device}: no ready session, make it with: make smoke-sessions')
                 continue
-            probes = probes or build_probes()
-            steps = smoke(device, probes)
+            cfg = SMOKE[device]
+            if cfg.get('media', 'sd') == 'sd' or cfg.get('audio', 'sndstream') == 'sndstream':
+                probes = probes or build_probes()
+            steps = smoke(device, probes or {})
             print(f'ok   {device}: {", ".join(steps)} ({time.monotonic() - started:.0f} s)', flush=True)
         except (Fail, ControlError, frond_run.RunError, AssertionError, OSError, subprocess.CalledProcessError) as error:
             print(f'FAIL {device}: {error} ({time.monotonic() - started:.0f} s; see build/smoke/work/{device}/)', flush=True)

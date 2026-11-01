@@ -69,8 +69,11 @@ data class Settings(
             return device.fastAudio && p.getBoolean(FAST_AUDIO_PREFIX + device.id, false)
         }
 
-        fun setFastAudio(context: Context, device: Device, on: Boolean) {
-            context.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putBoolean(FAST_AUDIO_PREFIX + device.id, on).apply()
+        fun legacyMachine(context: Context, device: Device?): MachineSettings {
+            migrateFastAudio(context)
+            val saved = load(context)
+            return MachineSettings(saved.size, saved.smoothing, saved.sound,
+                device?.let { fastAudio(context, it) } ?: false)
         }
 
         // Once: a global switch left on turns on every device that can use it, and the old key goes.
@@ -84,10 +87,7 @@ data class Settings(
 
         fun save(context: Context, settings: Settings) {
             context.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit()
-                .putString(EXTRA_SIZE, settings.size.name)
-                .putBoolean(EXTRA_SMOOTHING, settings.smoothing)
                 .putString(EXTRA_ORIENTATION, settings.orientation.name)
-                .putBoolean(EXTRA_SOUND, settings.sound)
                 .putBoolean(EXTRA_DEBUGGER, settings.debugger)
                 .putInt(EXTRA_DEBUGGER_PORT, settings.debuggerPort)
                 .apply()

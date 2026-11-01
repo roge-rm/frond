@@ -44,6 +44,13 @@ val prepareCore = tasks.register<Exec>("prepareCore") {
     commandLine("python3", "tools/prepare.py")
 }
 
+val checkDeviceData = tasks.register<Exec>("checkDeviceData") {
+    dependsOn(prepareCore)
+    workingDir(repoRoot)
+    commandLine("python3", "tools/generate-device-data.py", "--check")
+}
+tasks.named("preBuild") { dependsOn(checkDeviceData) }
+
 // Downloads a release tarball into sdlRoot, checks its SHA-256 and unpacks it.
 fun registerFetch(name: String, url: String, sha256: String, source: File) = tasks.register(name) {
     group = "build"
@@ -132,8 +139,9 @@ android {
         applicationId = "com.rm.frond"
         minSdk = 26
         targetSdk = 37
-        versionCode = 4
-        versionName = "0.7.0"
+        testInstrumentationRunner = "com.rm.frond.MachineSettingsInstrumentation"
+        versionCode = 5
+        versionName = "0.8.0"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
         externalNativeBuild {
             cmake {
@@ -206,6 +214,7 @@ dependencies {
     implementation(libs.compose.material.icons)
     implementation(libs.kotlinx.coroutines.android)
     testImplementation(libs.junit)
+    testImplementation("org.json:json:20250517")
 }
 
 tasks.named("preBuild") { dependsOn(prepareCore, fetchSdl, fetchSdlImage) }

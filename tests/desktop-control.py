@@ -80,6 +80,9 @@ with tempfile.TemporaryDirectory(prefix='desktop-control-', dir='build') as dire
                 assert hashlib.sha256(saved.read_bytes()).digest() == saved_hash
                 request('rotate')
                 request('audio-off'); request('audio-on')
+                request('hold-state')
+                request('hold', 'on', ok=False); request('hold', 'off', ok=False)
+                request('hold', 'invalid', ok=False); request('hold-state', 'on', ok=False)
                 replay = root / 'capture.replay'
                 screenshot = root / 'replay screenshot.png'
                 replay.write_text('1000 snapshot "' + str(screenshot) + '"\n')

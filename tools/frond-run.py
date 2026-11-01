@@ -21,7 +21,7 @@ import struct
 import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from palm_boot import DEVICES, png_rows, zire_setup, e2_setup
+from palm_boot import FRONTEND_DEVICES as DEVICES, png_rows, setup_device
 
 
 class RunError(Exception):
@@ -377,10 +377,7 @@ def run(args):
                 if not args.session and args.device != 'palm-tx':
                     result['stage'] = 'setup'
                     setup = SocketBoot(control, root)
-                    if args.device == 'palm-zire-72':
-                        zire_setup(setup, root)
-                    else:
-                        e2_setup(setup, root)
+                    setup_device(args.device, setup, root)
                     control.retry_ready('guest-ready', '', args.ready_timeout)
                 if installs or args.app is not None:
                     control.retry_ready('guest-ready', '', args.ready_timeout)

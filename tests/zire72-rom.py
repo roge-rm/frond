@@ -23,7 +23,8 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
-from palm_boot import png_rows, date_time_prefs, zire_setup
+from guest_process import run_guest
+from palm_boot import Core, png_rows, date_time_prefs, zire_setup
 CORE = ROOT / 'out/frond'
 PALM = Path('firmware/palm')
 ZIRE = PALM / 'Palm/Zire-72/Palm-Zire72-nor.bin'
@@ -36,131 +37,6 @@ HSPR = struct.pack('<I', 0x68737072)  # HAL IDs are stored little endian
 
 def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-class Core:
-    """A core process driven over its console; waits on its output and frames, not on the clock."""
-
-    def __init__(self, image, log, *args):
-        self.lines, self.log = [], log.open('w')
-        self.process = subprocess.Popen([str(CORE), *map(str, image), '--no-sound', *map(str, args)],
-                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                        text=True, errors='replace',
-                                        env={**os.environ, 'SDL_VIDEODRIVER': 'dummy', 'SDL_AUDIODRIVER': 'dummy'})
-        self.reader = threading.Thread(target=self.read, daemon=True)
-        self.reader.start()
-        self.snaps = 0
-
-    def read(self):
-        for line in self.process.stdout:
-            self.lines.append(line)
-            self.log.write(line)
-
-    def send(self, command, expect=None, timeout=30):
-        """Sends a console command; with expect, returns the first later line holding one of its strings."""
-        mark = len(self.lines)
-        self.process.stdin.write(command + '\n')
-        self.process.stdin.flush()
-        if expect is None:
-            return None
-        expect = (expect,) if isinstance(expect, str) else expect
-        end = time.monotonic() + timeout
-        while time.monotonic() < end:
-            for line in self.lines[mark:]:
-                if any(e in line for e in expect):
-                    return line
-            if self.process.poll() is not None:
-                break
-            time.sleep(0.1)
-        raise AssertionError(f'no {expect} after {command}')
-
-    def until(self, command, expect, done='', timeout=60):
-        """Repeats a command until its reply holds done, e.g. while Palm OS isn't ready for host calls."""
-        end = time.monotonic() + timeout
-        while True:
-            line = self.send(command, expect)
-            if done in line:
-                return line
-            if time.monotonic() > end:
-                raise AssertionError(f'{command}: no {done!r} after {timeout} s; last reply {line.strip()!r}')
-            time.sleep(1)
-
-    def launch(self, name, timeout=60):
-        """Launches an app by database name, retrying while Palm OS isn't at a point that takes host calls."""
-        end = time.monotonic() + timeout
-        while time.monotonic() < end:
-            mark = len(self.lines)
-            self.send(f'launch "{name}"')
-            time.sleep(3)
-            if not any('launch' in line and ('could not' in line or 'failed' in line) for line in self.lines[mark:]):
-                return
-        raise AssertionError(f'{name} did not launch')
-
-    def replay(self, root, lines):
-        self.snaps += 1
-        path = root / f'console-{self.snaps}.replay'
-        path.write_text('\n'.join(lines) + '\n')
-        return self.send(f'input-replay "{path}"', 'input replay loaded')
-
-    # A new replay replaces the running one, so these wait for their release to go out.
-    def released(self, mark):
-        end = time.monotonic() + 10
-        while time.monotonic() < end:
-            if any('replay event 2 ' in line for line in self.lines[mark:]):
-                return
-            time.sleep(0.05)
-        raise AssertionError('replay release not sent')
-
-    def key(self, root, name):
-        mark = len(self.lines)
-        self.replay(root, [f'0 key-down {name}', f'200 key-up {name}'])
-        self.released(mark)
-
-    def tap(self, root, x, y):
-        mark = len(self.lines)
-        self.replay(root, [f'0 pen-down {x} {y}', f'150 pen-up'])
-        self.released(mark)
-
-    def frame(self, path, timeout=10):
-        """Saves a frame and returns its rows, or None with the LCD off."""
-        path.unlink(missing_ok=True)
-        mark = len(self.lines)
-        self.replay(path.parent, [f'0 snapshot "{path}"'])
-        end = time.monotonic() + timeout
-        while time.monotonic() < end:
-            if any('lcd-off' in line for line in self.lines[mark:]):
-                return None
-            if path.is_file():
-                time.sleep(0.2)
-                return png_rows(path)
-            time.sleep(0.1)
-        raise AssertionError('no frame')
-
-    def wait_frame(self, path, check, timeout=60):
-        """Polls frames until check(rows) holds; rows is None while the LCD is off."""
-        end = time.monotonic() + timeout
-        while time.monotonic() < end:
-            rows = self.frame(path)
-            if check(rows):
-                return rows
-            time.sleep(1)
-        raise AssertionError(f'{path.name}: frame never matched')
-
-    def output(self):
-        return ''.join(self.lines)
-
-    def close(self):
-        try:
-            if self.process.poll() is None:
-                self.process.stdin.write('quit\n')
-                self.process.stdin.flush()
-                self.process.wait(timeout=30)
-        except (BrokenPipeError, subprocess.TimeoutExpired):
-            self.process.kill()
-            self.process.wait()
-        self.reader.join(timeout=5)
-        self.log.close()
-        return self.process.returncode
 
 
 def boot_to_launcher(root):
@@ -198,7 +74,7 @@ class Zire72RomTest(unittest.TestCase):
         assert sha(ZIRE) == cls.before, 'Zire 72 NOR changed'
 
     def run_core(self, args, timeout=60):
-        return subprocess.run([str(CORE), *map(str, args)], capture_output=True, text=True, timeout=timeout,
+        return run_guest([str(CORE), *map(str, args)], capture_output=True, text=True, timeout=timeout,
                               env={**os.environ, 'SDL_VIDEODRIVER': 'dummy', 'SDL_AUDIODRIVER': 'dummy'})
 
     def rejected(self, args, message):
@@ -353,7 +229,7 @@ class Zire72KeysTest(unittest.TestCase):
             lines += [f'{at} key-down {key}', f'{at + 200} key-up {key}'] if key else []
         lines += [f'{at} snapshot "{self.root / f"{name}-{at}.png"}"' for at, key in events if not key]
         lines.sort(key=lambda line: int(line.split()[0]))
-        result = subprocess.run([str(CORE), self.session, '--no-sound', '--run-for', str(until), '--input-replay',
+        result = run_guest([str(CORE), self.session, '--no-sound', '--run-for', str(until), '--input-replay',
                                  str(self.replay(name, lines))], capture_output=True, text=True, timeout=120,
                                 env={**os.environ, 'SDL_VIDEODRIVER': 'dummy', 'SDL_AUDIODRIVER': 'dummy'})
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -681,7 +557,7 @@ class Zire72StorageTest(unittest.TestCase):
                                                            + data[len(data) // 2 + 1:])]:
             path = self.root / f'bad-{name}.session'
             path.write_bytes(bad)
-            result = subprocess.run([str(CORE), path, '--no-sound', '--run-for', '1'], capture_output=True, text=True,
+            result = run_guest([str(CORE), path, '--no-sound', '--run-for', '1'], capture_output=True, text=True,
                                     timeout=60, env={**os.environ, 'SDL_VIDEODRIVER': 'dummy'})
             self.assertEqual(result.returncode, 1, name)
             self.assertNotIn('palm-zire-72 (Zire 72)', result.stdout + result.stderr, name)

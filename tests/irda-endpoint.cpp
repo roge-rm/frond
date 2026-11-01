@@ -22,9 +22,9 @@
 struct Machine {
     std::vector<uint8_t> nor,nand;
     SocPXA soc;
-    Machine(DeviceType5 type):nor((type==deviceTypeTX?16:8)*1024*1024),
-      nand(type==deviceTypeTX?132*1024*1024:34603008,0xff),
-      soc(type,32*1024*1024,nor.data(),nor.size(),nand.data(),nand.size(),-1,type==deviceTypeTX?2:0) {
+    Machine(DeviceType5 type):nor(type==deviceTypeTG50?4096:(type==deviceTypeTX?16:8)*1024*1024),
+      nand(type==deviceTypeTG50?0:type==deviceTypeTX?132*1024*1024:34603008,0xff),
+      soc(type,(type==deviceTypeTG50?16:32)*1024*1024,nor.data(),nor.size(),nand.data(),nand.size(),-1,type==deviceTypeTX?2:0) {
         uint32_t loop=0xeafffffe;
         std::memcpy(static_cast<uint8_t*>(soc.GetMemoryData().data)+0x3000,&loop,4);
         cpuSetReg(soc.GetCpu(),ARM_REG_NUM_CPSR,ARM_SR_MODE_SVC|ARM_SR_I|ARM_SR_F);
@@ -37,10 +37,20 @@ struct Machine {
                 assert(memAccess(cpuGetMem(soc.GetCpu()),bases[channel]+4*reg,4,true,&value));
             }
     }
-    void write(unsigned reg,uint32_t value){assert(memAccess(cpuGetMem(soc.GetCpu()),PXA_STUART_BASE+4*reg,4,true,&value));}
-    uint32_t read(unsigned reg){uint32_t value=0;assert(memAccess(cpuGetMem(soc.GetCpu()),PXA_STUART_BASE+4*reg,4,false,&value));return value;}
+    uint32_t uartBase() { return soc.GetDeviceType()==deviceTypeTG50 ? PXA_FFUART_BASE : PXA_STUART_BASE; }
+    void write(unsigned reg,uint32_t value){assert(memAccess(cpuGetMem(soc.GetCpu()),uartBase()+4*reg,4,true,&value));}
+    uint32_t read(unsigned reg){uint32_t value=0;assert(memAccess(cpuGetMem(soc.GetCpu()),uartBase()+4*reg,4,false,&value));return value;}
     void run(unsigned ms=1){assert(soc.Run(uint64_t(ms)*100000,100000000)>=uint64_t(ms)*100000);}
     void power(bool enabled){
+        if (soc.GetDeviceType()==deviceTypeTG50) {
+            auto* mem=cpuGetMem(soc.GetCpu());
+            uint32_t v=1u<<10;
+            assert(memAccess(mem,0x08000020,4,true,&v));
+            assert(memAccess(mem,enabled?0x08000040:0x08000060,4,true,&v));
+            v=1u<<27;assert(memAccess(mem,0x40e0000c,4,true,&v));
+            assert(memAccess(mem,0x40e00024,4,true,&v));
+            return;
+        }
         uint32_t mask=1u<<((soc.GetDeviceType()==deviceTypeTX?40:48)-32);
         uint32_t dir=0;assert(memAccess(cpuGetMem(soc.GetCpu()),0x40e00010,4,false,&dir));dir|=mask;
         assert(memAccess(cpuGetMem(soc.GetCpu()),0x40e00010,4,true,&dir));
@@ -74,7 +84,7 @@ struct FakePeer {
 };
 static void models(DeviceType5 type){
     Machine m(type);FakePeer peer;auto hooks=peer.hooks();
-    m.soc.AttachKeyboard(true);assert(!m.soc.SetIrHostHooks(&hooks));
+    if(type!=deviceTypeTG50){m.soc.AttachKeyboard(true);assert(!m.soc.SetIrHostHooks(&hooks));}
     m.soc.AttachKeyboard(false);assert(m.soc.SetIrHostHooks(&hooks));
     m.soc.AttachKeyboard(true);assert(!m.soc.KeyboardAttached());
     peer.rx={0xc0};m.run(5);assert(!peer.reads && !peer.tx.size());
@@ -91,7 +101,7 @@ static void models(DeviceType5 type){
     peer.rx={0x7d,0xe0,0xff};
     for(auto value:{0x7d,0xe0,0xff})assert(m.receive()==value);
     auto saved=m.save();auto reads=peer.reads,polls=peer.polls;const auto sent=peer.tx.size();
-    {
+    if(type!=deviceTypeTG50) {
         ReadOnlyGuest scope(m.soc);m.write(0,0x55);m.run(10);
         assert(peer.reads==reads && peer.polls==polls && peer.tx.size()==sent);
     }
@@ -101,17 +111,19 @@ static void models(DeviceType5 type){
     peer.rx={0x31};pxaUartKick(m.soc.GetIrUart());assert(m.receive()==0x31);
     assert(m.soc.Load(saved.size(),saved.data()) && peer.replaced==1);
     m.soc.SetIrHostHooks(nullptr);assert(!m.soc.IrHostAttached());
+    if(type!=deviceTypeTG50){
     m.soc.AttachKeyboard(true);assert(m.soc.KeyboardAttached());
     m.configure(2);assert(m.soc.KeyboardKey(0x1a,true));
     for(auto c:{0xff,0xc0,0x1a,0xe5,0x7d,0xc1})assert(m.receive()==c);
     m.soc.AttachKeyboard(false);for(auto c:{0xff,0xc0,0x9a,0x65,0xfd,0xc1})assert(m.receive()==c);
+    }
     assert(m.soc.SetIrHostHooks(&hooks));auto replacements=peer.replaced;
     m.soc.Reset();assert(peer.replaced==replacements+1);
     m.sleep();assert(peer.replaced==replacements+2);
     auto frozenReads=peer.reads,frozenPolls=peer.polls;const auto frozenTx=peer.tx.size();m.run(20);
     assert(peer.reads==frozenReads && peer.polls==frozenPolls && peer.tx.size()==frozenTx);
     m.soc.SetIrHostHooks(nullptr);
-    printf("PASS %s SIR UART direction, pacing, bytes, exclusive accessory, checkpoint and load ownership\n",type==deviceTypeTX?"TX":"E2");
+    printf("PASS %s SIR UART direction, pacing, bytes, exclusive accessory, checkpoint and load ownership\n",type==deviceTypeTG50?"TG50":type==deviceTypeTX?"TX":"E2");
 }
 static int connectTo(const std::string& endpoint){
     auto colon=endpoint.rfind(':');assert(colon!=std::string::npos);
@@ -233,4 +245,4 @@ static void endpoints(){
     assert(!a.soc.IrHostAttached() && !b.soc.IrHostAttached());
     puts("PASS live loopback SIR byte relay TX->E2, reconnect and checkpoint/refused-load peer retention");
 }
-int main(){models(deviceTypeTX);models(deviceTypeE2);endpoints();}
+int main(){models(deviceTypeTX);models(deviceTypeE2);models(deviceTypeTG50);endpoints();}

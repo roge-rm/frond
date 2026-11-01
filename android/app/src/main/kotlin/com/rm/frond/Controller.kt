@@ -35,18 +35,10 @@ enum class PalmButton(val id: String) {
 
         // The four app buttons hard1-4, as the core's DeviceControls.h names them: left to right on the
         // TX and E2, the left pair top to bottom then the right pair bottom to top on the Zire 72.
-        fun appNames(device: Device) = when (device) {
-            Device.TX -> listOf("Home", "Calendar", "Contacts", "Web")
-            Device.E2 -> listOf("Calendar", "Contacts", "Tasks", "Note Pad")
-            Device.ZIRE72 -> listOf("Calendar", "Contacts", "Music", "Camera")
-        }
+        fun appNames(device: Device) = device.appNames
 
         // The buttons a device has, in the order the settings list them.
-        fun on(device: Device): List<PalmButton> = when (device) {
-            Device.TX -> listOf(UP, DOWN, LEFT, RIGHT, CENTRE, APP1, APP2, APP3, APP4, MENU, POWER)
-            Device.E2 -> listOf(UP, DOWN, LEFT, RIGHT, CENTRE, APP1, APP2, APP3, APP4, HOME, MENU, POWER)
-            Device.ZIRE72 -> listOf(UP, DOWN, LEFT, RIGHT, CENTRE, APP1, APP2, APP3, APP4, HOME, MENU, VOICE, POWER)
-        }
+        fun on(device: Device): List<PalmButton> = device.buttons.mapNotNull { byId(it) }
     }
 }
 
@@ -85,8 +77,9 @@ data class ControllerMap(val keys: Map<Int, PalmButton>) {
                 KeyEvent.KEYCODE_BUTTON_SELECT to PalmButton.MENU,
             )
             // The TX's Home is a hardware button, its first app button.
-            keys[KeyEvent.KEYCODE_BUTTON_START] = if (device == Device.TX) PalmButton.APP1 else PalmButton.HOME
-            return ControllerMap(keys)
+            keys[KeyEvent.KEYCODE_BUTTON_START] = if ("home" in device.buttons) PalmButton.HOME else PalmButton.APP1
+            val allowed = PalmButton.on(device)
+            return ControllerMap(keys.filterValues { it in allowed })
         }
 
         // Unknown or malformed entries are skipped; null or blank gives the defaults.

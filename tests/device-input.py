@@ -121,9 +121,9 @@ class DeviceInputTest(unittest.TestCase):
         self.assertEqual((zire['ram_min_bytes'], zire['ram_max_bytes'], zire['default_display_mode'],
                           zire['display_mode_mask']), (32 << 20, 32 << 20, 5, 1 << 5))
         self.assertEqual({p['cohort'] for p in data['profiles']},
-                         {'tx-nor-nand', 'e2-nor-nand', 'patched-e2', 'paravirtual', 'zire72-nor', 'reserved'})
+                         {'tx-nor-nand', 'e2-nor-nand', 'patched-e2', 'paravirtual', 'zire72-nor', 'tg50-nor', 'reserved'})
         self.assertTrue(all(p['status'] == 'inherited-unverified' for p in data['profiles'][2:4]))
-        self.assertTrue(all(p['status'] == 'reserved' for p in data['profiles'][5:]))
+        self.assertTrue(all(p['status'] == 'reserved' for p in data['profiles'][6:]))
 
     def test_tx_raw_geometry_and_options(self):
         base = [self.nor, '--device', 'palm-tx']
@@ -180,7 +180,7 @@ class DeviceInputTest(unittest.TestCase):
                           'invalid replay event')
 
     def test_unknown_and_mismatched_session_names(self):
-        for device in ('palm-tx2', 'tungsten-e2', 'sony-clie-tg50'):
+        for device in ('palm-tx2', 'tungsten-e2', 'palm-iiix'):
             with self.subTest(device=device):
                 path = session(self.root / 'unknown', device)
                 self.rejected([path], f"this session is for {device}, which Frond can't run")
@@ -310,7 +310,7 @@ class DeviceInputTest(unittest.TestCase):
     def test_device_option_names(self):
         self.rejected([self.nor, '--device', 'tx'], 'unknown device tx')
         self.rejected([self.nor, '--device', '3'], 'unknown device 3')
-        self.rejected([self.nor, '--device', 'sony-clie-tg50'], "sony-clie-tg50 isn't supported yet")
+        self.rejected([self.nor, '--device', 'sony-clie-tg50'], 'neither a supported ROM nor a session image')
         self.rejected([self.nor], 'neither a supported ROM nor a session image')
         self.rejected([self.nor, '--device', 'palm-e2'], 'neither a supported ROM nor a session image')
         self.rejected([self.e2, '--device', 'palm-e2', '--nand', self.nand], 'invalid NAND size')

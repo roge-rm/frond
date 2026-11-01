@@ -94,7 +94,7 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
         wasInserted = inserted
         try {
             if (inserted) eject()
-            Sessions.saveRecovery(context, link, owner?.name ?: device.label)?.let {
+            Sessions.saveRecovery(context, link, owner?.name ?: device.label, session)?.let {
                 throw Failed("Couldn't save a recovery session, so the exchange didn't start. $it")
             }
         } catch (e: Exception) {

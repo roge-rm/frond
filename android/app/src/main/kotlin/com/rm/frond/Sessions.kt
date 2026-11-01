@@ -20,6 +20,7 @@ data class Session(
     val used: Long,
     val file: File,
     val old: Boolean = false,
+    val settings: MachineSettings = MachineSettings(),
 ) {
     val saved: Boolean get() = file.isFile
     val savedAt: Long get() = file.lastModified()
@@ -94,11 +95,15 @@ object Sessions {
     }
 
     fun read(context: Context, id: String): Session? = try {
-        val json = JSONObject(meta(context, id).readText())
+        val json = SessionMetadata.read(meta(context, id)) {
+            val device = Device.byId(JSONObject(meta(context, id).readText()).optString("device"))
+            Settings.legacyMachine(context, device)
+        }
         val device = Device.byId(json.getString("device"))
         val file = data(context, id)
         val old = device == null || (file.isFile && (header(file)?.version ?: 0L) < FIRST_NAMED_VERSION)
-        Session(id, json.getString("name"), device, json.getLong("created"), json.optLong("used"), file, old)
+        Session(id, json.getString("name"), device, json.getLong("created"), json.optLong("used"), file, old,
+            MachineSettings.from(json.optJSONObject("settings")))
     } catch (e: Exception) {
         null
     }
@@ -107,11 +112,8 @@ object Sessions {
         val device = s.device ?: throw IOException("old session")
         val json = JSONObject()
             .put("name", s.name).put("device", device.id)
-            .put("created", s.created).put("used", s.used)
-        val file = meta(context, s.id)
-        val temporary = File(file.path + ".tmp")
-        temporary.writeText(json.toString())
-        if (!temporary.renameTo(file)) throw IOException("can't write ${file.name}")
+            .put("created", s.created).put("used", s.used).put("settings", s.settings.json())
+        SessionMetadata.write(meta(context, s.id), json)
     }
 
     // "Palm TX", then "Palm TX 2" and so on.
@@ -123,19 +125,38 @@ object Sessions {
         return "$base $n"
     }
 
-    fun create(context: Context, device: Device, name: String = freeName(context, device.label)): Session {
+    fun create(context: Context, device: Device, name: String = freeName(context, device.label), settings: MachineSettings = MachineSettings()): Session {
         val id = UUID.randomUUID().toString()
         val now = System.currentTimeMillis()
-        return Session(id, name, device, now, 0L, data(context, id)).also { write(context, it) }
+        return Session(id, name, device, now, 0L, data(context, id), settings = settings).also { write(context, it) }
     }
 
-    fun rename(context: Context, s: Session, name: String) = write(context, s.copy(name = name.trim().ifEmpty { s.name }))
+    fun rename(context: Context, s: Session, name: String) = SessionMetadata.update(meta(context, s.id)) {
+        if (name.isNotBlank()) it.put("name", name.trim())
+    }
 
-    fun markUsed(context: Context, s: Session) = write(context, s.copy(used = System.currentTimeMillis()))
+    fun markUsed(context: Context, s: Session) = SessionMetadata.update(meta(context, s.id)) {
+        it.put("used", System.currentTimeMillis())
+    }
+
+    fun updateSettings(context: Context, id: String, change: (MachineSettings) -> MachineSettings) {
+        read(context, id) ?: throw IOException("session no longer exists")
+        SessionMetadata.update(meta(context, id)) { json ->
+            json.put("settings", change(MachineSettings.from(json.optJSONObject("settings"))).json())
+        }
+    }
+
+    fun forPath(context: Context, path: String?): Session? {
+        val file = path?.let(::File) ?: return null
+        if (file.parentFile?.canonicalFile != folder(context).canonicalFile || file.extension != "frond") return null
+        return read(context, file.nameWithoutExtension)
+    }
 
     fun delete(context: Context, s: Session) {
-        s.file.delete()
-        meta(context, s.id).delete()
+        SessionMetadata.locked(meta(context, s.id)) {
+            s.file.delete()
+            meta(context, s.id).delete()
+        }
     }
 
     fun export(context: Context, s: Session, to: Uri): String? = try {
@@ -180,7 +201,7 @@ object Sessions {
         else device.norSize + device.nandSize + (64L shl 20)
 
     // Saves the running session as the recovery copy. Returns an error message or null.
-    fun saveRecovery(context: Context, link: ControlLink, name: String): String? {
+    fun saveRecovery(context: Context, link: ControlLink, name: String, session: String? = null): String? {
         dropRecovery(context)
         recoveryFolder(context).mkdirs()
         val reply = link.request("save", recoveryFile(context).path, timeoutSeconds = 120)
@@ -191,7 +212,8 @@ object Sessions {
         try {
             val meta = recoveryMeta(context)
             val temporary = File(meta.path + ".tmp")
-            temporary.writeText(JSONObject().put("name", name).toString())
+            temporary.writeText(JSONObject().put("name", name)
+                .put("settings", forPath(context, session)?.settings?.json()).toString())
             if (!temporary.renameTo(meta)) throw IOException("can't write ${meta.name}")
         } catch (e: Exception) {
             dropRecovery(context)
@@ -212,13 +234,15 @@ object Sessions {
         try {
             if (!file.isFile || !meta.isFile) return null
             val device = Device.byId(header(file)?.device) ?: return null
-            val from = try { JSONObject(meta.readText()).getString("name") } catch (e: Exception) { device.label }
+            val recovery = try { JSONObject(meta.readText()) } catch (e: Exception) { JSONObject() }
+            val from = recovery.optString("name", device.label)
+            val settings = MachineSettings.from(recovery.optJSONObject("settings"), Settings.legacyMachine(context, device))
             val id = UUID.randomUUID().toString()
             if (!file.renameTo(data(context, id))) return null
             // A recovery of a recovery keeps one "before exchange"; freeName numbers it.
             val name = freeName(context, "${from.removeSuffix(" before exchange")} before exchange")
             try {
-                write(context, Session(id, name, device, System.currentTimeMillis(), 0L, data(context, id)))
+                write(context, Session(id, name, device, System.currentTimeMillis(), 0L, data(context, id), settings = settings))
             } catch (e: IOException) {
                 data(context, id).delete()
                 return null

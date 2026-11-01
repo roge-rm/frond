@@ -16,15 +16,19 @@
 #include "Dialogs.h"
 #include "FirmwareStore.h"
 #include "SessionStore.h"
+#include "AudioQualification.h"
 #include <QMessageBox>
 #include <QMenuBar>
 #include <QTimer>
 #include <QAction>
 #include <QDialog>
+#include <QFileDialog>
 #include "SdImage.h"
 #include <QSettings>
 #include <QSpinBox>
 #include <QSlider>
+#include <QProcess>
+#include <QImage>
 #include "MainWindow.h"
 
 static QByteArray digest(const QString& path) {
@@ -56,30 +60,24 @@ for line in s.makefile('rb'):
     if cmd==b'quit': break
 )PY");
         core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        QSettings().setValue("fastAudio", true);
+        QSettings().setValue("windowScale", 7);
+        QSettings().setValue("smoothLcd", true);
         {
             MainWindow window(core.fileName()); window.show();
-            auto* option = window.findChild<QCheckBox*>("fastAudio"); QVERIFY(option);
-            QVERIFY(!option->isChecked()); option->setChecked(true);
-            auto* scale = window.findChild<QSlider*>("windowScale"); QVERIFY(scale);
-            QCOMPARE(scale->minimum(), 4); QCOMPARE(scale->maximum(), 8);
-            scale->setValue(7);
-            auto* smooth = window.findChild<QCheckBox*>("smoothLcd"); QVERIFY(smooth);
-            QVERIFY(!smooth->isChecked()); smooth->setChecked(true);
             window.openSession(source.fileName(), true);
             QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("stop")->isEnabled(), 5000);
-            QVERIFY(!option->isEnabled());
             QFile args(source.fileName()+".args"); QVERIFY(args.open(QIODevice::ReadOnly));
             const auto arguments = args.readAll();
-            QVERIFY(arguments.contains("--fast-audio"));
+            QVERIFY(!arguments.contains("--fast-audio"));
             QVERIFY(arguments.contains("--window-scale\n1.75"));
             QVERIFY(arguments.contains("--smooth-lcd"));
-            QVERIFY(!scale->isEnabled()); QVERIFY(!smooth->isEnabled());
             window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
         }
         MainWindow next(core.fileName());
-        QVERIFY(next.findChild<QCheckBox*>("fastAudio")->isChecked());
-        QCOMPARE(next.findChild<QSlider*>("windowScale")->value(), 7);
-        QVERIFY(next.findChild<QCheckBox*>("smoothLcd")->isChecked());
+        frondSessions::Preferences prefs;
+        QVERIFY(frondSessions::readPreferences(QSettings().value("lastSession").toString(), &prefs));
+        QCOMPARE(prefs.scale, 7); QVERIFY(prefs.smooth && prefs.fastAudio);
         QSettings().clear();
     }
     void serialSetting() {
@@ -367,20 +365,21 @@ for line in s.makefile('rb'):
         MainWindow window(core.fileName()); window.show();
         auto* stop = window.findChild<QPushButton*>("stop");
         QVERIFY(window.findChild<QLabel*>("emptyNote")->isVisible());
-        // Add device lists the E2 as needing firmware, opens Firmware with it chosen, and starts it
-        // once the firmware is imported. Detecting the device from the NOR picks the E2 by name.
-        QString addText, firmwareDevice;
+        // Add device opens firmware import directly; NOR detection chooses and starts the E2.
+        QString firmwareDevice;
+        int firmwareDialogs = 0;
         QTimer dialogPoll;
         dialogPoll.setInterval(50);
         connect(&dialogPoll, &QTimer::timeout, &window, [&] {
-            if (auto* add = window.findChild<AddDeviceDialog*>(); add && add->isVisible()) {
-                auto* devices = add->findChild<QListWidget*>("devices");
-                addText = devices->item(1)->text();
-                devices->setCurrentRow(1);
-                emit devices->itemActivated(devices->item(1));
-            } else if (auto* firmware = window.findChild<FirmwareDialog*>(); firmware && firmware->isVisible()) {
+            if (auto* firmware = window.findChild<FirmwareDialog*>(); firmware && firmware->isVisible()) {
+                QCOMPARE(QApplication::activeModalWidget(), firmware);
+                ++firmwareDialogs;
                 firmwareDevice = firmware->findChild<QComboBox*>("device")->currentData().toString();
                 firmware->findChild<QLineEdit*>("nor")->setText(norPath);
+                QVERIFY(firmware->machineSettings);
+                firmware->machineSettings->windowScale->setValue(7);
+                firmware->machineSettings->smoothLcd->setChecked(true);
+                firmware->machineSettings->audio->setChecked(false);
                 firmware->findChild<QPushButton*>("import")->click();
             }
         });
@@ -388,8 +387,8 @@ for line in s.makefile('rb'):
         window.findChild<QPushButton*>("addDevice")->click();
         QTRY_VERIFY_WITH_TIMEOUT(stop->isEnabled(), 5000);
         dialogPoll.stop();
-        QCOMPARE(addText, QString("Tungsten E2\nNeeds firmware"));
-        QCOMPARE(firmwareDevice, QString("palm-e2"));
+        QCOMPARE(firmwareDialogs, 1);
+        QCOMPARE(firmwareDevice, QString());
         QVERIFY(QFileInfo::exists(firmwareRoot + "/palm-e2/nor.bin"));
         QVERIFY(!QFileInfo::exists(firmwareRoot + "/palm-e2/nand.bin"));
         const auto args = read(".args").split('\n');
@@ -397,9 +396,12 @@ for line in s.makefile('rb'):
         QCOMPARE(args.value(1), QString("palm-e2"));
         QCOMPARE(args.value(2), firmwareRoot + "/palm-e2/nor.bin");
         QVERIFY(!args.contains("--nand"));
-        QVERIFY(args.contains("--fast-audio"));
-        // Leave automatic sizing to the core, which knows the restored device and display.
-        QVERIFY(!args.contains("--window-scale") && !args.contains("--smooth-lcd"));
+        QVERIFY(!args.contains("--fast-audio"));
+        QVERIFY(read(".args").contains("--window-scale\n1.75"));
+        QVERIFY(args.contains("--smooth-lcd") && args.contains("--no-sound"));
+        frondSessions::Preferences added;
+        QVERIFY(frondSessions::readPreferences(managedFolder() + "/Tungsten E2.frond", &added));
+        QCOMPARE(added.scale, 7); QVERIFY(added.smooth && !added.audio && added.fastAudio);
         QVERIFY(!QSettings().contains("windowScale"));
         QCOMPARE(window.windowTitle(), QString("Tungsten E2"));
         QTRY_VERIFY_WITH_TIMEOUT(read(".commands").contains("sd-state"), 5000);
@@ -421,7 +423,7 @@ for line in s.makefile('rb'):
         QVERIFY(!window.findChild<QComboBox*>("usbMode")->toolTip().contains("Not available"));
         // A NAND file is passed on when given.
         window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
-        // With firmware stored the E2 is Ready, and a NAND file is stored and passed on when given.
+        // A NAND file is stored and passed on when given.
         {
             FirmwareDialog dialog(firmwareRoot, frondFirmware::Device::e2);
             dialog.findChild<QLineEdit*>("nor")->setText(norPath);
@@ -433,22 +435,23 @@ for line in s.makefile('rb'):
         QCOMPARE(second.findChild<QListWidget*>("sessionList")->count(), 1);
         QCOMPARE(second.findChild<QListWidget*>("sessionList")->currentItem()->data(Qt::UserRole + 1).toBool(), true);
         QVERIFY(!second.findChild<QPushButton*>("start")->isEnabled());
-        QString secondText;
+        QString secondDevice;
         QTimer secondPoll;
         secondPoll.setInterval(50);
         connect(&secondPoll, &QTimer::timeout, &second, [&] {
-            if (auto* add = second.findChild<AddDeviceDialog*>(); add && add->isVisible()) {
-                auto* devices = add->findChild<QListWidget*>("devices");
-                secondText = devices->item(1)->text();
-                devices->setCurrentRow(1);
-                emit devices->itemActivated(devices->item(1));
+            if (auto* firmware = second.findChild<FirmwareDialog*>(); firmware && firmware->isVisible()) {
+                secondDevice = firmware->findChild<QComboBox*>("device")->currentData().toString();
+                firmware->findChild<QLineEdit*>("nor")->setText(norPath);
+                firmware->findChild<QLineEdit*>("nand")->setText(nandPath);
+                firmware->findChild<QPushButton*>("import")->click();
             }
         });
         secondPoll.start();
         second.findChild<QPushButton*>("addDevice")->click();
         QTRY_VERIFY_WITH_TIMEOUT(second.findChild<QPushButton*>("stop")->isEnabled(), 5000);
         secondPoll.stop();
-        QCOMPARE(secondText, QString("Tungsten E2\nReady"));
+        // The fake saved file has no readable identity, so import starts with Detect.
+        QCOMPARE(secondDevice, QString());
         QVERIFY(read(".args").contains("--nand\n" + firmwareRoot + "/palm-e2/nand.bin"));
         QVERIFY(read(".args").contains("--device\npalm-e2\n"));
         QCOMPARE(second.windowTitle(), QString("Tungsten E2 2"));
@@ -460,7 +463,7 @@ for line in s.makefile('rb'):
         MainWindow third(core.fileName()); third.show();
         QCOMPARE(third.findChild<QComboBox*>("serialMode")->currentData().toString(), QString("tcp"));
         QCOMPARE(third.findChild<QComboBox*>("usbMode")->currentData().toString(), QString("pty"));
-        QVERIFY(third.findChild<QCheckBox*>("fastAudio")->isChecked());
+        QVERIFY(QSettings().value("fastAudio").toBool());
         QSettings().clear();
     }
     void zire72NewSession() {
@@ -528,20 +531,23 @@ for line in s.makefile('rb'):
         }
         MainWindow window(core.fileName()); window.show();
         auto* stop = window.findChild<QPushButton*>("stop");
-        // Add device lists the Zire 72 third, needing firmware; Firmware opens with it chosen.
-        QString addText, firmwareDevice;
+        // The import dialog is the first modal window, with the device choice kept there.
+        QString firmwareDevice;
+        int firmwareDialogs = 0;
         QTimer dialogPoll;
         dialogPoll.setInterval(50);
         connect(&dialogPoll, &QTimer::timeout, &window, [&] {
-            if (auto* add = window.findChild<AddDeviceDialog*>(); add && add->isVisible()) {
-                auto* devices = add->findChild<QListWidget*>("devices");
-                QCOMPARE(devices->count(), 3);
-                addText = devices->item(2)->text();
-                devices->setCurrentRow(2);
-                emit devices->itemActivated(devices->item(2));
-            } else if (auto* firmware = window.findChild<FirmwareDialog*>(); firmware && firmware->isVisible()) {
+            if (auto* firmware = window.findChild<FirmwareDialog*>(); firmware && firmware->isVisible()) {
+                QCOMPARE(QApplication::activeModalWidget(), firmware);
+                ++firmwareDialogs;
+                auto* devices = firmware->findChild<QComboBox*>("device");
+                QCOMPARE(devices->count(), int(frondFirmware::devices.size()) + 1);
+                devices->setCurrentIndex(devices->findData("palm-zire-72"));
                 firmwareDevice = firmware->findChild<QComboBox*>("device")->currentData().toString();
                 firmware->findChild<QLineEdit*>("nor")->setText(norPath);
+                QVERIFY(firmware->machineSettings);
+                QVERIFY(!firmware->machineSettings->fastAudio->isEnabled());
+                QCOMPARE(firmware->machineSettings->fastAudio->toolTip(), QString("Not available on the Zire 72 yet"));
                 firmware->findChild<QPushButton*>("import")->click();
             }
         });
@@ -549,7 +555,7 @@ for line in s.makefile('rb'):
         window.findChild<QPushButton*>("addDevice")->click();
         QTRY_VERIFY_WITH_TIMEOUT(stop->isEnabled(), 5000);
         dialogPoll.stop();
-        QCOMPARE(addText, QString("Zire 72\nNeeds firmware"));
+        QCOMPARE(firmwareDialogs, 1);
         QCOMPARE(firmwareDevice, QString("palm-zire-72"));
         QVERIFY(QFileInfo::exists(firmwareRoot + "/palm-zire-72/nor.bin"));
         QVERIFY(!QFileInfo::exists(firmwareRoot + "/palm-zire-72/nand.bin"));
@@ -569,8 +575,7 @@ for line in s.makefile('rb'):
             QCOMPARE(box->toolTip(), QString("Not available on the Zire 72 yet"));
         }
         QVERIFY(!window.findChild<QSpinBox*>("serialPort")->isEnabled());
-        QVERIFY(!window.findChild<QCheckBox*>("fastAudio")->isEnabled());
-        QCOMPARE(window.findChild<QCheckBox*>("fastAudio")->toolTip(), QString("Not available on the Zire 72 yet"));
+
         QTRY_VERIFY(window.findChild<QComboBox*>("usbMode")->isEnabled());
         QVERIFY(window.findChild<QComboBox*>("irdaMode")->isEnabled());
         QVERIFY(window.findChild<QCheckBox*>("bluetoothEnabled")->isEnabled());
@@ -1173,7 +1178,10 @@ for line in s.makefile('rb'):
         auto* sound = window.findChild<QCheckBox*>("sound");
         QVERIFY(sound->isChecked());
         sound->click();
-        QVERIFY(!QSettings().value("audio").toBool() && !window.findChild<SettingsDialog*>()->audio->isChecked());
+        frondSessions::Preferences prefs;
+        QVERIFY(frondSessions::readPreferences(managedFolder() + "/Trip.frond", &prefs));
+        QVERIFY(!prefs.audio);
+        QVERIFY(!QSettings().contains("audio"));
         QTimer answer;
         answer.setInterval(30);
         connect(&answer, &QTimer::timeout, &window, [&] {
@@ -1188,6 +1196,234 @@ for line in s.makefile('rb'):
         window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
         QDir(managedFolder()).removeRecursively();
         QSettings().clear();
+    }
+    void qualifiedFirmwareSettings() {
+        const auto norPath = qEnvironmentVariable("FROND_TEST_QUALIFIED_NOR");
+        if (norPath.isEmpty()) QSKIP("FROND_TEST_QUALIFIED_NOR not set");
+        const auto original = digest(norPath);
+        const auto device = frondFirmware::detectDevice(norPath);
+        QVERIFY(frondAudio::qualified(device, {}, norPath));
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        const auto firmwareRoot = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/frond/firmware";
+        QDir(firmwareRoot).removeRecursively();
+        QTemporaryDir files;
+        QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly));
+        core.write(R"PY(#!/usr/bin/python3
+import pathlib,socket,struct,sys,zlib
+pathlib.Path(sys.argv[0]+'.args').write_text('\n'.join(sys.argv[1:]))
+if sys.argv[1]=='--device':
+    device=sys.argv[2]; nor=pathlib.Path(sys.argv[3]).read_bytes()
+    data=struct.pack('<II',0x19800819,6)+device.encode().ljust(32,b'\0')+struct.pack('<8I',0,0,0,len(nor),0,0,0,0)+zlib.compress(nor)
+else:
+    data=pathlib.Path(sys.argv[1]).read_bytes(); device=data[8:40].split(b'\0')[0].decode()
+s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+for line in s.makefile('rb'):
+    i,cmd,arg=line.rstrip(b'\n').split(b'\t')
+    if cmd==b'save': pathlib.Path(bytes.fromhex(arg.decode()).decode()).write_bytes(data)
+    message={b'device-state':device.encode(),b'keyboard-state':b'detached',b'network-state':b'disabled',b'sd-state':b'none'}.get(cmd,b'done')
+    s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
+    if cmd==b'quit': break
+)PY");
+        core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        const auto path = frondSessions::filePath(managedFolder(), frondFirmware::deviceName(device));
+        {
+            MainWindow window(core.fileName()); window.show();
+            QTimer poll; poll.setInterval(20);
+            connect(&poll, &QTimer::timeout, &window, [&] {
+                auto* dialog = window.findChild<FirmwareDialog*>();
+                if (!dialog || !dialog->isVisible()) return;
+                dialog->findChild<QLineEdit*>("nor")->setText(norPath);
+                QVERIFY(dialog->machineSettings->fastAudio->isEnabled());
+                dialog->machineSettings->fastAudio->click();
+                dialog->findChild<QPushButton*>("import")->click();
+            });
+            poll.start(); window.findChild<QPushButton*>("addDevice")->click();
+            QTRY_VERIFY(window.findChild<QCheckBox*>("sound")->isEnabled()); poll.stop();
+            QFile args(core.fileName() + ".args"); QVERIFY(args.open(QIODevice::ReadOnly));
+            QVERIFY(args.readAll().contains("--fast-audio"));
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        }
+        QVERIFY(frondAudio::qualified(device, path, {}));
+        {
+            MainWindow next(core.fileName()); next.show();
+            bool edited = false;
+            QTimer poll; poll.setInterval(20);
+            connect(&poll, &QTimer::timeout, &next, [&] {
+                if (auto* dialog = next.findChild<MachineSettingsDialog*>(); dialog && dialog->isVisible()) {
+                    QVERIFY(dialog->controls->fastAudio->isEnabled());
+                    QVERIFY(dialog->controls->fastAudio->isChecked());
+                    edited = true; dialog->reject();
+                }
+            });
+            poll.start(); rowAction(next, 0, "editSession"); QTRY_VERIFY(edited); poll.stop();
+            next.openSession(path, true);
+            QTRY_VERIFY(next.findChild<QCheckBox*>("sound")->isEnabled());
+            QFile args(core.fileName() + ".args"); QVERIFY(args.open(QIODevice::ReadOnly));
+            QVERIFY(args.readAll().contains("--fast-audio"));
+            next.close(); QTRY_VERIFY_WITH_TIMEOUT(!next.isVisible(), 5000);
+        }
+        QCOMPARE(digest(norPath), original);
+        QDir(managedFolder()).removeRecursively(); QDir(firmwareRoot).removeRecursively(); QSettings().clear();
+    }
+    void machineLaunchPreferences() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        putSession("One", 6, "palm-tx", 0); putSession("Two", 6, "palm-tx", 1);
+        const auto one = managedFolder() + "/One.frond", two = managedFolder() + "/Two.frond";
+        QVERIFY(frondSessions::writePreferences(one, {7, true, false, true}).isEmpty());
+        QVERIFY(frondSessions::writePreferences(two, {4, false, true, false}).isEmpty());
+        QTemporaryDir files;
+        QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly));
+        core.write(R"PY(#!/usr/bin/python3
+import pathlib,socket,sys
+pathlib.Path(sys.argv[0]+'.args').write_text('\n'.join(sys.argv[1:]))
+data=pathlib.Path(sys.argv[1]).read_bytes()
+s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+for line in s.makefile('rb'):
+    i,cmd,arg=line.rstrip(b'\n').split(b'\t')
+    with open(sys.argv[0]+'.commands','ab') as trace: trace.write(cmd+b'\n')
+    if cmd==b'save': pathlib.Path(bytes.fromhex(arg.decode()).decode()).write_bytes(data)
+    message={b'device-state':b'palm-tx',b'keyboard-state':b'detached',b'network-state':b'disabled',b'sd-state':b'none'}.get(cmd,b'done')
+    s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
+    if cmd==b'quit': break
+)PY");
+        core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        auto read = [&](const QString& suffix) {
+            QFile file(core.fileName() + suffix); return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
+        };
+        const auto copy = files.filePath("copy.frond");
+        {
+            MainWindow window(core.fileName()); window.show(); window.openSession(one, true);
+            auto* sound = window.findChild<QCheckBox*>("sound");
+            QTRY_VERIFY(sound->isEnabled()); QVERIFY(!sound->isChecked());
+            QVERIFY(read(".args").contains("--window-scale\n1.75"));
+            QVERIFY(read(".args").contains("--no-sound") && read(".args").contains("--smooth-lcd") && !read(".args").contains("--fast-audio"));
+            sound->click(); QTRY_VERIFY(read(".commands").contains("audio-on"));
+            frondSessions::Preferences prefs;
+            QVERIFY(frondSessions::readPreferences(one, &prefs)); QVERIFY(prefs.audio);
+            QVERIFY(frondSessions::readPreferences(two, &prefs)); QCOMPARE(prefs.scale, 4); QVERIFY(!prefs.smooth && !prefs.fastAudio && prefs.audio);
+            const auto settingsBeforeCopy = digest(frondSessions::preferencesPath(one));
+            const auto guestBeforeCopy = digest(one);
+            QString chosenCopy, emittedCopy, fixtureError;
+            QTimer deadline; deadline.setSingleShot(true); deadline.setInterval(5000);
+            connect(&deadline, &QTimer::timeout, &window, [&] {
+                fixtureError = "SaveCopy dialog deadline expired";
+                for (auto* dialog : window.findChildren<QFileDialog*>())
+                    if (dialog->parentWidget() == &window && dialog->windowTitle() == "Save a Copy" && dialog->isVisible()) dialog->reject();
+            });
+            QTRY_VERIFY(window.findChild<QPushButton*>("saveCopy")->isEnabled());
+            deadline.start();
+            QMetaObject::invokeMethod(&window, [&] {
+                auto* dialog = qobject_cast<QFileDialog*>(QApplication::activeModalWidget());
+                if (!dialog || dialog->parentWidget() != &window || dialog->windowTitle() != "Save a Copy") {
+                    fixtureError = "Queued SaveCopy action ran without the owned dialog"; return;
+                }
+                connect(dialog, &QFileDialog::fileSelected, &window, [&](const QString& path) { emittedCopy = path; });
+                auto* filename = dialog->findChild<QLineEdit*>("fileNameEdit");
+                if (!filename) { fixtureError = "SaveCopy filename field missing"; dialog->reject(); return; }
+                filename->setText(copy);
+                chosenCopy = dialog->selectedFiles().value(0);
+                if (chosenCopy != copy) { fixtureError = "SaveCopy selected the wrong path"; dialog->reject(); return; }
+                if (!QMetaObject::invokeMethod(dialog, "accept")) {
+                    fixtureError = "SaveCopy accept method missing"; dialog->reject();
+                }
+            }, Qt::QueuedConnection);
+            window.findChild<QPushButton*>("saveCopy")->click();
+            deadline.stop();
+            QVERIFY2(fixtureError.isEmpty(), qPrintable(fixtureError));
+            QCOMPARE(chosenCopy, copy); QCOMPARE(emittedCopy, copy);
+            QTRY_VERIFY(read(".commands").contains("save"));
+            QTRY_VERIFY(QFileInfo::exists(frondSessions::preferencesPath(copy)));
+            QCOMPARE(digest(copy), guestBeforeCopy); QCOMPARE(digest(one), guestBeforeCopy);
+            QCOMPARE(digest(frondSessions::preferencesPath(one)), settingsBeforeCopy);
+            QVERIFY(frondSessions::readPreferences(copy, &prefs));
+            QCOMPARE(prefs.scale, 7); QVERIFY(prefs.smooth && prefs.fastAudio && prefs.audio);
+            QVERIFY(!QSettings().contains("lastSession"));
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+            QCOMPARE(QSettings().value("lastSession").toString(), QFileInfo(one).canonicalFilePath());
+        }
+        {
+            MainWindow next(core.fileName()); next.show(); next.openSession(two, true);
+            auto* sound = next.findChild<QCheckBox*>("sound"); QTRY_VERIFY(sound->isEnabled()); QVERIFY(sound->isChecked());
+            QVERIFY(read(".args").contains("--window-scale\n1"));
+            QVERIFY(!read(".args").contains("--no-sound") && !read(".args").contains("--smooth-lcd") && !read(".args").contains("--fast-audio"));
+            sound->click(); QTRY_VERIFY(read(".commands").contains("audio-off"));
+            frondSessions::Preferences prefs;
+            QVERIFY(frondSessions::readPreferences(two, &prefs)); QVERIFY(!prefs.audio);
+            QVERIFY(frondSessions::readPreferences(one, &prefs)); QVERIFY(prefs.audio);
+            next.close(); QTRY_VERIFY_WITH_TIMEOUT(!next.isVisible(), 5000);
+        }
+        QDir(managedFolder()).removeRecursively(); QSettings().clear();
+    }
+    void machinePreferences() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QSettings().setValue("windowScale", 6); QSettings().setValue("audio", false);
+        QSettings().setValue("smoothLcd", true); QSettings().setValue("fastAudio", true);
+        QDir(managedFolder()).removeRecursively();
+        putSession("One", 6, "palm-tx", 0); putSession("Two", 6, "palm-tx", 1);
+        const auto one = managedFolder() + "/One.frond", two = managedFolder() + "/Two.frond";
+        QTemporaryDir files;
+        QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly));
+        core.write("#!/bin/sh\ntouch \"$0.started\"\n"); core.close();
+        QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        const auto guest = digest(one); const auto when = QFileInfo(one).lastModified();
+        {
+            MainWindow window(core.fileName()); window.show();
+            frondSessions::Preferences prefs;
+            QVERIFY(frondSessions::readPreferences(one, &prefs));
+            QCOMPARE(prefs.scale, 6); QVERIFY(prefs.smooth && !prefs.audio && prefs.fastAudio);
+            const auto metadata = digest(frondSessions::preferencesPath(one));
+            bool accept = false, shown = false;
+            QTimer poll; poll.setInterval(20);
+            connect(&poll, &QTimer::timeout, &window, [&] {
+                auto* dialog = window.findChild<MachineSettingsDialog*>();
+                if (!dialog || !dialog->isVisible()) return;
+                shown = true;
+                QVERIFY(!dialog->controls->fastAudio->isEnabled());
+                QCOMPARE(dialog->controls->fastAudio->toolTip(), QString("Requires qualified firmware"));
+                QVERIFY(dialog->controls->fastAudio->isChecked() || accept);
+                QLockFile contender(one + ".lock"); contender.setStaleLockTime(0);
+                QVERIFY(!contender.tryLock());
+                dialog->controls->windowScale->setValue(8);
+                dialog->controls->smoothLcd->setChecked(false);
+                dialog->controls->audio->setChecked(true);
+                dialog->controls->fastAudio->setChecked(false);
+                if (accept) dialog->accept(); else dialog->reject();
+            });
+            poll.start(); rowAction(window, 0, "editSession");
+            QTRY_VERIFY(shown); QCOMPARE(digest(frondSessions::preferencesPath(one)), metadata);
+            accept = true; shown = false; rowAction(window, 0, "editSession"); QTRY_VERIFY(shown);
+            QVERIFY(frondSessions::readPreferences(one, &prefs));
+            QCOMPARE(prefs.scale, 8); QVERIFY(!prefs.smooth && prefs.audio && !prefs.fastAudio);
+            QVERIFY(frondSessions::readPreferences(two, &prefs));
+            QCOMPARE(prefs.scale, 6); QVERIFY(prefs.smooth && !prefs.audio && prefs.fastAudio);
+            poll.stop();
+            QCOMPARE(digest(one), guest); QCOMPARE(QFileInfo(one).lastModified(), when);
+            QVERIFY(!QFileInfo::exists(core.fileName() + ".started"));
+            QVERIFY(frondSessions::rename(managedFolder(), frondSessions::describe(one), "Renamed").isEmpty());
+        }
+        QSettings().setValue("windowScale", 4); QSettings().setValue("audio", true);
+        {
+            MainWindow next(core.fileName()); next.show();
+            frondSessions::Preferences prefs;
+            const auto renamed = managedFolder() + "/Renamed.frond";
+            QVERIFY(frondSessions::readPreferences(renamed, &prefs)); QCOMPARE(prefs.scale, 8);
+            QVERIFY(frondSessions::readPreferences(two, &prefs)); QCOMPARE(prefs.scale, 6); QVERIFY(!prefs.audio);
+            QLockFile lock(renamed + ".lock"); QVERIFY(lock.tryLock());
+            QString error;
+            QTimer poll; poll.setInterval(20);
+            connect(&poll, &QTimer::timeout, &next, [&] {
+                if (auto* box = next.findChild<QMessageBox*>(); box && box->isVisible()) { error = box->text(); box->accept(); }
+            });
+            poll.start(); rowAction(next, 0, "editSession");
+            QTRY_VERIFY(error.contains("another Frond")); poll.stop();
+            QVERIFY(!next.findChild<MachineSettingsDialog*>());
+            QVERIFY(!QFileInfo::exists(core.fileName() + ".started"));
+        }
+        QDir(managedFolder()).removeRecursively(); QSettings().clear();
     }
     void sessionRenameDelete() {
         QSettings().clear(); QSettings().setValue("resume", false);
@@ -1299,21 +1535,21 @@ for line in s.makefile('rb'):
         poll.setInterval(30);
         connect(&poll, &QTimer::timeout, &window, [&] {
             if (auto* box = window.findChild<QMessageBox*>(); box && box->isVisible()) { message = box->text(); box->accept(); }
-            else if (auto* add = window.findChild<AddDeviceDialog*>(); add && add->isVisible()) {
-                auto* devices = add->findChild<QListWidget*>("devices");
-                devices->setCurrentRow(0);  // the TX
-                emit devices->itemActivated(devices->item(0));
-            } else if (auto* firmware = window.findChild<FirmwareDialog*>(); firmware && firmware->isVisible()) {
-                firmware->findChild<QComboBox*>("device")->setCurrentIndex(0);  // detect: finds the E2
+            else if (auto* firmware = window.findChild<FirmwareDialog*>(); firmware && firmware->isVisible()) {
+                if (!message.isEmpty()) { firmware->reject(); return; }
+                auto* devices = firmware->findChild<QComboBox*>("device");
+                devices->setCurrentIndex(devices->findData("palm-tx"));
                 firmware->findChild<QLineEdit*>("nor")->setText(norPath);
-                firmware->findChild<QPushButton*>("import")->click();
+                QTimer::singleShot(0, firmware, [firmware] {
+                    firmware->findChild<QPushButton*>("import")->click();
+                });
             }
         });
         poll.start();
         window.findChild<QPushButton*>("addDevice")->click();
         QTRY_VERIFY_WITH_TIMEOUT(!message.isEmpty(), 5000);
         poll.stop();
-        QVERIFY(message.contains("for the Tungsten E2") && message.contains("Palm TX"));
+        QVERIFY(message.contains("Tungsten E2") && message.contains("Choose Tungsten E2"));
         QCOMPARE(window.findChild<QListWidget*>("sessionList")->count(), 0);
         QVERIFY(QDir(managedFolder()).entryList(QDir::Files).isEmpty());
         QDir(firmwareRoot).removeRecursively();
@@ -1395,17 +1631,201 @@ for line in s.makefile('rb'):
         QDir(managedFolder()).removeRecursively();
         QSettings().clear();
     }
+    void unsupportedSoundKeepsMachinePreference() {
+        frondSessions::Preferences prefs;
+        prefs.audio = true;
+        prefs.fastAudio = true;
+        MachineSettings widget(prefs, false);
+        widget.setDevice(frondFirmware::Device::automatic);
+        QVERIFY(!widget.audio->isEnabled());
+        QVERIFY(!widget.fastAudio->isEnabled());
+        QVERIFY(widget.values().audio && widget.values().fastAudio);
+        for (const auto& profile : deviceProfiles5) {
+            if (profile.deviceType == deviceTypeInvalid || profile.capabilities.sound) continue;
+            widget.setDevice(static_cast<frondFirmware::Device>(profile.deviceType));
+            QVERIFY(!widget.audio->isEnabled());
+            QVERIFY(widget.values().audio);
+        }
+        widget.setDevice(frondFirmware::Device::tx);
+        QVERIFY(widget.audio->isEnabled());
+        QVERIFY(widget.audio->isChecked());
+    }
     void settingsDialog() {
         QSettings().clear(); QSettings().setValue("resume", false);
         MainWindow window{QString()}; window.show();
         auto* dialog = window.findChild<SettingsDialog*>(); QVERIFY(dialog);
-        QVERIFY(dialog->windowScale && dialog->smoothLcd && dialog->audio && dialog->fastAudio && dialog->resume);
-        QVERIFY(dialog->audio->isChecked() && !dialog->resume->isChecked());
-        QCOMPARE(dialog->audio->text(), QString("Sound"));
-        QCOMPARE(dialog->smoothLcd->text(), QString("Smooth pixels"));
-        dialog->audio->setChecked(false);
-        QVERIFY(!QSettings().value("audio").toBool());
+        QVERIFY(dialog->resume && !dialog->resume->isChecked());
+        QVERIFY(!dialog->findChild<QSlider*>("windowScale"));
+        QVERIFY(!dialog->findChild<QCheckBox*>("audio"));
+        dialog->resume->setChecked(true);
+        QVERIFY(QSettings().value("resume").toBool());
         QSettings().clear();
+    }
+    // Optional actual frontend run; private firmware/session and captures stay outside the repo.
+    void tg50Acceptance() {
+        const auto core = qEnvironmentVariable("FROND_TEST_TG50_CORE");
+        const auto nor = qEnvironmentVariable("FROND_TEST_TG50_NOR");
+        const auto source = qEnvironmentVariable("FROND_TEST_TG50_SESSION");
+        const auto shots = qEnvironmentVariable("FROND_TEST_TG50_SHOTS");
+        if (core.isEmpty() || nor.isEmpty() || source.isEmpty() || shots.isEmpty()) QSKIP("TG50 acceptance inputs not set");
+        QVERIFY(QDir().mkpath(shots));
+        const auto original = digest(source), originalNor = digest(nor);
+        QSettings().clear(); QSettings().setValue("resume", false);
+        auto command = [](const QString& program, const QStringList& args) {
+            QProcess process; process.start(program, args);
+            if (!process.waitForFinished(15000) || process.exitCode()) return QString();
+            return QString::fromUtf8(process.readAllStandardOutput()).trimmed();
+        };
+        auto xd = [&](const QStringList& args) { return command("xdotool", args); };
+        auto nativeWindow = [&] { return xd({"search", "--name", "Frond.*TG50"}).split('\n').last(); };
+        auto capture = [&](MainWindow& window, const QString& id, const QString& name) {
+            window.grab().save(shots + '/' + name + "-menu.png");
+            command("import", {"-window", id, shots + '/' + name + "-guest.png"});
+        };
+        auto focus = [&](const QString& id) { xd({"windowraise", id}); xd({"windowfocus", "--sync", id}); };
+        auto tap = [&](const QString& id, int x, int y) { xd({"mousemove", "--window", id, QString::number(x), QString::number(y), "mousedown", "1"}); QTest::qWait(200); xd({"mouseup", "1"}); QTest::qWait(400); };
+        auto key = [&](const QString& name) { xd({"keydown", name}); QTest::qWait(name == "F6" ? 600 : 180); xd({"keyup", name}); QTest::qWait(250); };
+        int panelProbes = 0;
+        auto panelBlack = [&](const QString& id) {
+            const auto path = shots + "/panel-probe-" + QString::number(++panelProbes) + ".png";
+            command("import", {"-window", id, path});
+            const QImage frame(path);
+            return !frame.isNull() && frame.pixelColor(160,160) == QColor(Qt::black);
+        };
+        QString working;
+        {
+            MainWindow window(core); window.show();
+            QTimer import; import.setInterval(40);
+            int added = 0;
+            connect(&import, &QTimer::timeout, &window, [&] {
+                auto* dialog = window.findChild<FirmwareDialog*>();
+                if (!dialog || !dialog->isVisible()) return;
+                dialog->findChild<QLineEdit*>("nor")->setText(nor);
+                dialog->machineSettings->windowScale->setValue(added ? 5 : 4);
+                dialog->machineSettings->smoothLcd->setChecked(!added);
+                dialog->machineSettings->audio->setChecked(!added);
+                QVERIFY(dialog->machineSettings->audio->isEnabled());
+                QVERIFY(!dialog->machineSettings->fastAudio->isEnabled());
+                ++added; dialog->findChild<QPushButton*>("import")->click();
+            });
+            import.start(); window.findChild<QPushButton*>("addDevice")->click(); import.stop();
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QCheckBox*>("hold")->isEnabled(), 30000);
+            QCOMPARE(added, 1);
+            window.grab().save(shots + "/firmware-added.png");
+            window.findChild<QPushButton*>("stop")->click();
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("addDevice")->isEnabled(), 60000);
+            import.start(); window.findChild<QPushButton*>("addDevice")->click(); import.stop();
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QCheckBox*>("hold")->isEnabled(), 30000);
+            QCOMPARE(added, 2);
+            window.findChild<QPushButton*>("stop")->click();
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("addDevice")->isEnabled(), 60000);
+            const auto machines = frondSessions::list(managedFolder());
+            QCOMPARE(machines.size(), 2);
+            const auto editedPath = window.findChild<QListWidget*>("sessionList")->item(0)->data(Qt::UserRole).toString();
+            const auto otherPath = machines[0].path == editedPath ? machines[1].path : machines[0].path;
+            frondSessions::Preferences first, second;
+            QVERIFY(frondSessions::readPreferences(editedPath, &first));
+            QVERIFY(frondSessions::readPreferences(otherPath, &second));
+            QVERIFY(first.scale != second.scale && first.smooth != second.smooth && first.audio != second.audio);
+            const auto before = digest(frondSessions::preferencesPath(editedPath));
+            bool saveEdit = false;
+            int editsShown = 0;
+            QTimer edit; edit.setInterval(30);
+            connect(&edit, &QTimer::timeout, &window, [&] {
+                auto* dialog = window.findChild<MachineSettingsDialog*>();
+                if (!dialog || !dialog->isVisible()) return;
+                QVERIFY(!dialog->controls->fastAudio->isEnabled());
+                dialog->controls->windowScale->setValue(8);
+                ++editsShown;
+                if (saveEdit) dialog->accept(); else dialog->reject();
+            });
+            edit.start(); rowAction(window, 0, "editSession");
+            QTRY_COMPARE(editsShown, 1);
+            QCOMPARE(digest(frondSessions::preferencesPath(editedPath)), before);
+            saveEdit = true; rowAction(window, 0, "editSession"); QTRY_COMPARE(editsShown, 2); edit.stop();
+            QVERIFY(frondSessions::readPreferences(editedPath, &first)); QCOMPARE(first.scale, 8);
+            frondSessions::Preferences unchanged;
+            QVERIFY(frondSessions::readPreferences(otherPath, &unchanged)); QCOMPARE(unchanged.scale, second.scale);
+            QSettings().setValue("windowScale", 4);
+            window.openSession(source, true);
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QCheckBox*>("hold")->isEnabled(), 30000);
+            working = QSettings().value("lastSession").toString();
+            const auto id = nativeWindow(); QVERIFY(!id.isEmpty());
+            QTest::qWait(2000); focus(id); key("F6"); QTest::qWait(1500);
+            capture(window, id, "launcher");
+            QCOMPARE(window.findChild<QLabel*>("storageHeading")->text(), QString("Memory Stick"));
+            QVERIFY(!window.findChild<QPushButton*>("sdNew")->isVisible());
+            QVERIFY(!window.findChild<QComboBox*>("usbMode")->isEnabled());
+            QVERIFY(!window.findChild<QCheckBox*>("bluetoothEnabled")->isEnabled());
+            QVERIFY(!window.findChild<QCheckBox*>("keyboardAttached")->isEnabled());
+            focus(id); key("F4"); QTest::qWait(1200); tap(id, 20, 306);
+            key("q"); xd({"keydown", "Shift_L"}); key("a"); xd({"keyup", "Shift_L"});
+            xd({"keydown", "Alt_L"}); key("q"); xd({"keyup", "Alt_L"}); QTest::qWait(600);
+            capture(window, id, "typed-qA1");
+            xd({"keydown", "Shift_L"}); xd({"windowfocus", QString::number(window.winId())}); QTest::qWait(200);
+            xd({"keyup", "Shift_L"}); QTest::qWait(150);
+            focus(id); key("b"); QTest::qWait(400); capture(window, id, "focus-release-b");
+            key("F6"); QTest::qWait(800); capture(window, id, "home-before-jog");
+            tap(id, 337, 394); capture(window, id, "jog-down");
+            tap(id, 337, 368); capture(window, id, "jog-press");
+            window.findChild<QCheckBox*>("sound")->click();
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QCheckBox*>("sound")->isEnabled(), 10000);
+            window.findChild<QCheckBox*>("sound")->click();
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QCheckBox*>("sound")->isEnabled(), 10000);
+            focus(id); key("F6"); key("F4"); tap(id, 80, 46);
+            auto* hold = window.findChild<QCheckBox*>("hold"); hold->click();
+            QTRY_VERIFY_WITH_TIMEOUT(hold->isEnabled() && hold->isChecked(), 10000);
+            QTRY_VERIFY_WITH_TIMEOUT(panelBlack(id), 5000);
+            focus(id); key("z"); tap(id, 100, 100);
+            QTest::qWait(600); capture(window, id, "hold-on");
+            const QImage black(shots + "/hold-on-guest.png"); QVERIFY(!black.isNull());
+            QCOMPARE(black.pixelColor(160, 160), QColor(Qt::black));
+            window.findChild<QPushButton*>("stop")->click();
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("addDevice")->isEnabled(), 60000);
+            working = QSettings().value("lastSession").toString(); QVERIFY(QFileInfo::exists(working));
+            QVERIFY(QFile::copy(working, shots + "/held.frond"));
+            QVERIFY(QFile::copy(frondSessions::preferencesPath(working), shots + "/held.frond.settings.json"));
+            window.close();
+        }
+        {
+            MainWindow fresh(core); fresh.show(); fresh.openSession(working, true);
+            auto* hold = fresh.findChild<QCheckBox*>("hold");
+            QTRY_VERIFY_WITH_TIMEOUT(hold->isEnabled() && hold->isChecked(), 30000);
+            const auto id = nativeWindow(); QVERIFY(!id.isEmpty()); QTest::qWait(800);
+            capture(fresh, id, "fresh-held"); hold->click();
+            QTRY_VERIFY_WITH_TIMEOUT(hold->isEnabled() && !hold->isChecked(), 10000);
+            QTest::qWait(500); capture(fresh, id, "fresh-released-memo");
+            focus(id); key("c"); capture(fresh, id, "first-typing-after-hold");
+            key("F6"); QTest::qWait(1000); capture(fresh, id, "fresh-released-home");
+            fresh.findChild<QPushButton*>("stop")->click();
+            QTRY_VERIFY_WITH_TIMEOUT(fresh.findChild<QPushButton*>("addDevice")->isEnabled(), 60000);
+            fresh.close();
+        }
+        const auto tone = qEnvironmentVariable("FROND_TEST_TG50_TONE_SESSION");
+        if (!tone.isEmpty()) {
+            MainWindow player(core); player.show(); player.openSession(tone, true);
+            auto* hold = player.findChild<QCheckBox*>("hold");
+            QTRY_VERIFY_WITH_TIMEOUT(hold->isEnabled(), 30000);
+            const auto id = nativeWindow(); QVERIFY(!id.isEmpty()); focus(id); QTest::qWait(500);
+            tap(id, 32, 250); hold->click();
+            QTRY_VERIFY_WITH_TIMEOUT(hold->isEnabled() && hold->isChecked(), 10000);
+            QTRY_VERIFY_WITH_TIMEOUT(panelBlack(id), 5000);
+            const auto files = QDir(shots).entryInfoList({"audio-*.raw"}, QDir::Files, QDir::Time);
+            QVERIFY(!files.isEmpty()); QFile audio(files.first().absoluteFilePath());
+            QVERIFY(audio.open(QIODevice::ReadOnly)); const auto offset = audio.size(); QTest::qWait(400);
+            QVERIFY(audio.seek(offset)); const auto pcm = audio.readAll();
+            bool signal = false;
+            for (int i = 0; i + 1 < pcm.size(); i += 2) {
+                const auto sample = qint16(quint8(pcm[i]) | (quint16(quint8(pcm[i+1])) << 8));
+                signal |= std::abs(int(sample)) > 256;
+            }
+            QVERIFY(signal); capture(player, id, "hold-audio-playing");
+            hold->click(); QTRY_VERIFY_WITH_TIMEOUT(hold->isEnabled() && !hold->isChecked(), 10000);
+            player.findChild<QPushButton*>("stop")->click();
+            QTRY_VERIFY_WITH_TIMEOUT(player.findChild<QPushButton*>("addDevice")->isEnabled(), 60000);
+            player.close();
+        }
+        QCOMPARE(digest(source), original); QCOMPARE(digest(nor), originalNor);
     }
     // Not run by ctest: FROND_TEST_SHOTS=<folder> saves pictures of the home window and Settings.
     void screenshots() {

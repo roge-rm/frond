@@ -22,6 +22,10 @@ class FakeSoC : public SoC {
     uint32_t frame[320 * 320]{};
     bool framePending{false};
     unsigned keyDowns{0};
+    KeyId nextKey() {
+        assert(keyEventQueue->GetSize());
+        return keyEventQueue->Pop().key;
+    }
 
     uint64_t Run(uint64_t, uint64_t) override { return 0; }
     bool RunToPaceSyscall(uint16_t, uint64_t, uint64_t) override { return false; }
@@ -106,12 +110,62 @@ int main() {
         renderer.Draw(false);
         replay.Dispatch(30, soc, renderer);
         assert(replay.Finished());
+        assert(soc.nextKey() == keyIdHard1); // Legacy home alias.
+        std::ofstream(replayPath) << "0 key-down home-key\n";
+        InputReplay physicalHome;
+        assert(physicalHome.Load(replayPath, 320, 320, error));
+        physicalHome.Dispatch(0, soc, renderer);
+        assert(soc.nextKey() == keyIdHome);
+        for (KeyId key : {keyIdJogUp, keyIdJogDown, keyIdJogPress, keyIdBack,
+                          keyIdGraffiti, keyIdHold, tg50Key(2, 0), tg50Key(7, 6)}) {
+            std::ofstream(replayPath) << "0 key-down " << unsigned(key) << "\n";
+            InputReplay physical;
+            assert(physical.Load(replayPath, 320, 320, error));
+            physical.Dispatch(0, soc, renderer);
+            assert(soc.nextKey() == key);
+        }
+        for (const auto* invalid : {"0", "61", "-1", "18x", "18446744073709551616"}) {
+            std::ofstream(replayPath) << "0 key-down " << invalid << "\n";
+            InputReplay physical;
+            assert(!physical.Load(replayPath, 320, 320, error));
+        }
+        const auto panel = deviceConfigurationDisplayConfigForDevice(deviceTypeTG50, DisplayMode::mode_320x320);
+        std::ofstream(replayPath) << "0 pen-down 160 320\n";
+        InputReplay bounds;
+        assert(!bounds.Load(replayPath, panel.width, panel.height + panel.graffitiHeight, error));
+        std::ofstream(replayPath) << "0 pen-down 160 319\n";
+        assert(bounds.Load(replayPath, panel.width, panel.height + panel.graffitiHeight, error));
 
         const auto& results = replay.SnapshotResults();
         assert(results.size() == 3);
         assert(results[0] == "ok" && results[1] == "lcd-off" && results[2] == "failed");
         checkPng(root + "/lit.png", 320, 320, false);
         checkPng(root + "/off.png", 320, 320, true);
+        // Panel transitions must present black and retain newly arriving pixels.
+        uint32_t pixel = 0;
+        SDL_Rect sample{100, 100, 1, 1};
+        auto presented = [&] {
+            assert(SDL_RenderReadPixels(SDL_GetRenderer(window), &sample,
+                                        SDL_PIXELFORMAT_ABGR8888, &pixel, 4) == 0);
+            return pixel;
+        };
+        assert(presented() == 0xff000000u);
+        for (auto& value : soc.frame) value = 0xff12ab34u;
+        soc.framePending = true;
+        renderer.Draw(false);
+        assert(presented() == 0xff000000u);
+        bool blank = false;
+        assert(renderer.SaveFramebuffer((root + "/hidden.png").c_str(), blank) && blank);
+        checkPng(root + "/hidden.png", 320, 320, true);
+        // Exhaust the ordinary redraw tail, then release without a new frame.
+        for (int i=0; i<8; ++i) renderer.Draw(false);
+        soc.lcd = true;
+        renderer.Draw(false);
+        assert(presented() == 0xff12ab34u);
+        assert(renderer.SaveFramebuffer((root + "/revealed.png").c_str(), blank) && !blank);
+        checkPng(root + "/revealed.png", 320, 320, false);
+        unlink((root + "/hidden.png").c_str());
+        unlink((root + "/revealed.png").c_str());
         assert(access((root + "/missing/dir.png").c_str(), F_OK) != 0);
 
         // Before any frame has been drawn the snapshot is black too, labelled no-frame.

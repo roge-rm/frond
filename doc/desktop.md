@@ -1,8 +1,8 @@
-# Frond 0.6.0 desktop
+# Frond 0.8.0 desktop
 
 Frond's Qt 6 launcher provides desktop controls alongside the SDL Palm display.
 The Palm display remains a separate window in this release. Firmware is supplied
-by the user. Palm TX, Tungsten E2 and Zire 72 support is experimental. Virtual SD cards and experimental virtual Wi-Fi are supported;
+by the user. Palm TX, Tungsten E2, Zire 72 and Sony CLIÉ TG50 support is experimental. Virtual SD cards and experimental virtual Wi-Fi are supported;
 Infrared beaming links two Frond instances; detach the infrared keyboard and
 choose **Infrared beaming: Wait for a peer** with a different port for each instance, then
 connect them with [the relay](infrared.md). All three devices also offer an opt-in
@@ -16,7 +16,7 @@ a connected controller. Bluetooth is off by default. See [peripherals](periphera
 Install the locally built package:
 
 ```sh
-sudo apt install ./frond_0.6.0-1_amd64.deb
+sudo apt install ./frond_0.8.0-1_amd64.deb
 ```
 
 Launch **Frond** from Plasma's application menu. The window opens on **Devices**, a
@@ -24,11 +24,12 @@ list of your saved sessions. Each row shows the session name and a second line l
 "Tungsten E2 · Saved Oct 31 · 12 MB", "Tungsten E2 · Not saved" or "Saved by an older
 Frond" (greyed, it can only be deleted). Double-click a row, press Enter or click
 **Start** to start it. Right-click a row, or use its **…** button, for **Rename**,
-**Export…** and **Delete**.
+**Edit settings…**, **Export…** and **Delete**. Edit settings is available while the
+machine is stopped.
 
-**Add device** lists the Palm TX, the Tungsten E2 and the Zire 72 with "Ready" or "Needs
-firmware". A ready device starts a new session at once. For the others the Firmware dialog
-opens first and the device starts after the import.
+**Add device** opens Import firmware. Choose the device there or let the NOR image
+identify it, then set the display size, smoothing, sound and low-latency audio.
+Importing the firmware starts a new session with those settings.
 
 **File → Firmware…** (Import firmware) takes a NOR image and, for the E2, an optional
 NAND image. The TX needs a 16 MiB NOR image and a 132 MiB raw NAND image. The Tungsten
@@ -41,10 +42,11 @@ one chosen. The images are copied into `~/.local/share/frond/firmware/<device na
 so you can move the originals. Complete Palm OS setup in the Palm window when starting
 from raw firmware.
 
-**File → Settings…** has Display (Size from 1× to 2×, **Smooth pixels**), Audio
-(**Sound**, **Low-latency audio**) and **Resume last session on startup**. Size and
-Smooth pixels apply on the next start. Sound is the same setting as Sound on the
-running page.
+Each machine has its own Size (1× to 2× in quarter steps), **Smooth pixels**,
+**Sound** and **Low-latency audio**. Change these in **Edit settings…** before
+starting the machine. Cancel keeps the saved settings. Sound on the running page
+also saves that machine's sound setting. You can give two machines of the same
+model different settings. **File → Settings…** has **Resume last session on startup**.
 
 **File → Import session…** copies a `.frond` file into the list. Close Frond or its
 Palm window to save the running device automatically. The next launch resumes that
@@ -53,13 +55,18 @@ Palm and returns to the list.
 
 **Low-latency audio** can reduce the delay between a tap and sound.
 It is off by default. Set it before starting the Palm. It supports one 44.1 kHz
-stereo stream with qualified TX or Tungsten E2 firmware (not the Zire 72 yet); unsupported playback
+stereo stream with qualified TX or Tungsten E2 firmware (not the Zire 72 yet).
+The control greys out when the machine's NOR image is unqualified; unsupported playback
 falls back to normal audio and may briefly pause. See [fast audio](fast-audio.md) for the limitations.
 
 Sessions are stored under `$XDG_DATA_HOME/frond/sessions`, normally
 `~/.local/share/frond/sessions`, one `<name>.frond` file each. A device that was never
-saved is a small `<name>.frond.new` marker until its first save. Imported and exported
-files are copies. A session names its device, `palm-tx`, `palm-e2` or `palm-zire-72`. Sessions from
+saved is a small `<name>.frond.new` marker until its first save. Host settings are
+in `<name>.frond.settings.json` beside it. Renaming or deleting a machine also
+renames or deletes its settings. Existing machines take their initial values from
+the previous global settings. Imported and exported files are copies; keep the
+settings file beside an exported session or **Save a copy…** file to carry its
+settings when importing it. Editing settings leaves Palm user data unchanged. A session names its device, `palm-tx`, `palm-e2`, `palm-zire-72` or `sony-clie-tg50`. Sessions from
 earlier Frond versions stored a number instead and won't open; start again from firmware.
 Session files contain firmware, installed applications and Palm user data.
 
@@ -92,7 +99,7 @@ Zire 72 erases at once and starts again from calibration.
   [file exchange guide](peripherals.md#hostpalm-file-exchange). Close Palm files before
   ejecting and export an image before replacing a card you want to keep. Cards are
   32 to 128 MiB FAT16.
-- **Device:** Sound, Network, Infrared keyboard, Serial port, USB HotSync, Infrared
+- **Device:** Sound, Hold where fitted, Network, Infrared keyboard, Serial port, USB HotSync, Infrared
   beaming, Bluetooth, **Reset** and **Rotate**. A control the device doesn't have yet
   is greyed: Network and Serial port on the E2 and Zire 72, and Low-latency audio in
   Settings on the Zire 72. All of them grey while the emulator is busy.
@@ -135,7 +142,7 @@ scale in either mode. A session is locked while open to prevent two Frond window
 overwriting it. Errors appear in the window; **Emulator log** shows diagnostic details.
 
 `.frond` files can be brought in with **File → Import session…**. A GUI-controlled
-session supports the Palm TX, the Tungsten E2 and the Zire 72. See the
+session supports the Palm TX, the Tungsten E2, the Zire 72 and the TG50. See the
 [device profile inventory](device-profiles.md) for the inherited models and staged
 support limits.
 
@@ -179,6 +186,34 @@ The native runner uses the same automatic default. Set `--window-scale 1.25`
 (or `1`, `1.5`, `1.75`, `2`) to request a particular scale, and add `--smooth-lcd`
 for smoothing. `--small-window` remains an alias for 1×. An explicit scale can
 exceed the screen size; automatic sizing checks both width and height.
+
+## Sony CLIÉ TG50
+
+The TG50 uses
+its 13,041,664-byte NOR image, has 16 MiB RAM, no NAND and a 320 × 320 screen.
+It has no Graffiti silkscreen. Memory Stick is shown greyed out; card images,
+Memory Stick applications and Memory Stick audio are unavailable.
+
+The button strip includes its 42-key keyboard, application buttons, scroll rocker,
+Home and Graffiti buttons. A side tab shows the jog wheel, jog press and Back.
+Type with the computer keyboard; left Alt is Blue and right Alt is Red. The
+infrared keyboard control is for a separate accessory and remains independent.
+F1–F4 operate Date Book, Address, To Do and Memo Pad. F6 is physical Home and Escape is Power.
+Keyboard and pointer holds release when the Palm window loses focus.
+
+**Hold** on the running page latches the device's physical switch when supported.
+The switch stays set across focus changes and is saved in the session. Its control
+reads the state from the Palm after loading or changing it. Unsupported Hold is
+greyed out. Power sleep/wake, auto-off and RTC alarm wake are supported; changing display or sound settings leaves those guest settings intact.
+
+Sound covers the original system/alarm beeper and Sony Voice Recorder mono
+22,050 Hz SP playback, including mute/unmute and resuming active playback from a
+saved session. Standard Palm SndStream audio, stereo Sony playback, live 8 kHz
+playback, microphone input and low-latency audio remain unqualified. Bluetooth and
+Memory Stick remain unavailable. Ordinary infrared beaming works through the peer relay. USB HotSync, raw serial,
+the external infrared keyboard and high-power remote-control infrared remain
+unavailable. USB still needs the Sony driver’s reserved register access and
+endpoint DMA support.
 
 ## Audio scheduling
 
@@ -232,7 +267,7 @@ make deb
 `out/frond-desktop` finds `out/frond` beside it. The installed launcher uses
 `/usr/lib/frond/frond-core`. For development, `--core /absolute/path/to/frond`
 selects another binary. `frond-desktop /path/to/file.frond` opens that session;
-`--version` reports 0.6.0. `make out/frond` builds only the SDL emulator.
+`--version` reports 0.8.0. `make out/frond` builds only the SDL emulator.
 
 The Debian package derives shared-library dependencies from the binaries and
 includes Qt's platform and Wayland plugins. It contains no firmware, PRC,

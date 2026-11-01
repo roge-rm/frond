@@ -153,8 +153,9 @@ class FirmwareInputTest : public QObject {
         QCOMPARE(frondFirmware::deviceId(Device::tx), QString("palm-tx"));
         QCOMPARE(frondFirmware::deviceId(Device::e2), QString("palm-e2"));
         QVERIFY(frondFirmware::deviceId(Device::automatic).isEmpty());
-        for (const char* other : {"", "1", "tungsten-e2", "palm-zire72", "sony-clie-tg50"})
+        for (const char* other : {"", "1", "tungsten-e2", "palm-zire72", "staged-fixture"})
             QCOMPARE(frondFirmware::deviceFromId(other), Device::automatic);
+        QCOMPARE(frondFirmware::deviceId(frondFirmware::deviceFromId("sony-clie-tg50")), QString("sony-clie-tg50"));
         QVERIFY(!frondFirmware::capabilities(Device::e2).serial && frondFirmware::capabilities(Device::tx).network);
         // The Zire 72 has no serial port, network or low-latency audio; its camera isn't a setting.
         const auto zire = frondFirmware::capabilities(Device::zire72);

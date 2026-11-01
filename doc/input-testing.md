@@ -41,7 +41,8 @@ already exist. Key names are `home`, `calendar`, `contacts`, `web`, `up`, `down`
 `left`, `right`, `center`, and `power`. Physical app-button names `hard1` through
 `hard4` are also accepted. The names `home`, `calendar`, `contacts`, and `web`
 remain TX aliases for those positions, in that order; they do not describe E2
-app assignments. E2 replay coordinates include its 120-pixel silkscreen area,
+app assignments. `home-key` sends the separate physical Home key on devices that
+have one. E2 replay coordinates include its 120-pixel silkscreen area,
 so the full surface is 320×440 while the LCD is 320×320. Short host-time presses
 can be missed when guest execution is slow. Hold Home on TX to open the
 recent-apps menu.
@@ -137,3 +138,9 @@ check that controls respond through normal guest input handling.
 ![TX touchscreen calibration](images/tx-touch-calibrated.png)
 
 ![TX brightness slider after a pen drag](images/tx-touch-drag.png)
+
+The TG50's built-in keyboard also takes physical host keys. Left Alt is Blue and
+right Alt is Red, Shift and Ctrl use either host key. Digits use the Blue legends
+on QWERTY. Physical arrows use the keyboard cursor keys; controller arrows use the
+rocker. F1–F4 are the application buttons, F6 is Home. Losing focus releases
+momentary keys and keeps the physical Hold switch in its selected position.

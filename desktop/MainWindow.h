@@ -40,6 +40,9 @@ class MainWindow : public QMainWindow {
     void showFirmware(frondFirmware::Device device = frondFirmware::Device::automatic);
     void refreshSessions(const QString& select = {});
     void renameSession(const QString& path);
+    void editSession(const QString& path);
+    frondSessions::Preferences defaultPreferences(frondFirmware::Device device) const;
+    QString loadPreferences(const QString& path, frondFirmware::Device device, frondSessions::Preferences* prefs);
     void exportSession(const QString& path);
     void deleteSession(const QString& path);
     QMenu* rowMenu(const QString& path, QWidget* parent);
@@ -76,7 +79,7 @@ class MainWindow : public QMainWindow {
     QSettings settings;
     QString core, sessionPath, savingPath;
     bool hardResetAfterSave{false};
-    std::unique_ptr<QLockFile> sessionLock;
+    std::unique_ptr<QLockFile> sessionLock, copyLock;
     QComboBox *network, *serial, *usb, *irda;
     QSpinBox* serialPort;
     QSpinBox* usbPort;
@@ -92,15 +95,16 @@ class MainWindow : public QMainWindow {
     QPushButton* addButton;
     SettingsDialog* settingsDialog;
     QPushButton *startButton, *stopButton, *forceButton;
-    QCheckBox *audio, *fastAudio, *smoothLcd, *keyboard;
-    QSlider* windowScale;
-    QLabel* scaleLabel;
+    QCheckBox* keyboard;
+    frondSessions::Preferences runningPreferences;
     QPlainTextEdit* log;
     QList<QWidget*> runningButtons;
     QAction* importAction;
     QPushButton *sdCreate, *sdImport, *sdEject, *sdReinsert, *sdExport, *sdExchange, *sdRetry;
-    QCheckBox* soundToggle;
-    QLabel* sdStatus;
+    QCheckBox *soundToggle, *holdToggle;
+    QLabel* holdLabel;
+    bool holdKnown{false}, holdOn{false};
+    QLabel *sdStatus, *storageHeading;
     enum class ExchangeStage { None, Eject, Backup, Export, Insert };
     ExchangeStage exchangeStage{ExchangeStage::None};
     std::unique_ptr<QTemporaryDir> exchangeFiles, exchangeRecovery;
@@ -110,7 +114,7 @@ class MainWindow : public QMainWindow {
     bool cardPresent{false}, cardInserted{false}, sdKnown{false};
     // The running device selects the available peripheral controls.
     frondFirmware::Device runningDevice{frondFirmware::Device::tx};
-    QString networkTip, keyboardTip, serialTip, usbTip, irdaTip, fastAudioTip;
+    QString networkTip, keyboardTip, serialTip, usbTip, irdaTip;
     QWidget *home, *runningPage, *sessionBar = nullptr;
     bool startupHandled{false}, busy{false}, stopping{false}, closeAfterStop{false}, allowClose{false};
 };

@@ -15,51 +15,45 @@ enum class NetworkMode(val id: String, val label: String) {
     }
 }
 
-// A Palm the app can run. id is the device's fixed name from the core's deviceProfiles5 in
-// common/device_profile5.h; it's what session files, saved settings and the core's --device use.
-// Sizes match that table too.
-enum class Device(
+// Generated inventory values come from deviceProfiles5. IDs are saved in sessions and settings.
+data class Device internal constructor(
     val id: String,
     val label: String,
     val norSize: Long,
     val nandSize: Long,
     val nandRequired: Boolean,
-    // MD5 of the one NOR image the core allows low-latency audio with (native/main.cpp).
     val fastAudioNorMd5: String?,
-    val sdSlot: Boolean = true,
-    // Virtual Wi-Fi and the other network modes; the core refuses them on other devices.
-    val network: Boolean = false,
-    // The cradle serial port (serial-mode); the core refuses it on other devices.
-    val serialPort: Boolean = false,
-    // A camera the core doesn't emulate yet; shown greyed out.
-    val camera: Boolean = false,
+    val sound: Boolean,
+    val storageSlot: String,
+    val sdSlot: Boolean,
+    val network: Boolean,
+    val serialPort: Boolean,
+    val camera: Boolean,
+    val keyboard: Boolean, val usb: Boolean, val infrared: Boolean, val bluetooth: Boolean,
+    val detectKind: Int, val companyId: Long, val halId: Long,
+    val norLayout: Int, val headerOffset: Long, val bigCardOffset: Long,
+    val width: Int, val height: Int, val silkscreenHeight: Int,
+    internal val appNamesText: String, internal val buttonsText: String,
+    val homeX: Int, val homeY: Int, val menuX: Int, val menuY: Int,
+    val rotatingStatusBar: Boolean,
+    val sdMin: Long, val sdMax: Long,
+    val sideTabWidth: Int = 0,
+    val homeKey: Int = 0,
+    val holdPresent: Boolean = false, val holdSupported: Boolean = false,
 ) {
-    TX(
-        "palm-tx", "Palm TX", 16L shl 20, 2112L * 64 * 1024, true,
-        "85b048a692aa317763a7077ea72da6cb", network = true, serialPort = true,
-    ),
-
-    // The E2's NAND is optional, as on the desktop.
-    E2(
-        "palm-e2", "Tungsten E2", 8L shl 20, 34_603_008L, false,
-        "2a9faf69b43ba590cfb9ba78e4eef11c",
-    ),
-
-    // NOR only, no NAND.
-    ZIRE72("palm-zire-72", "Zire 72", 14_942_208L, 0L, false, null, camera = true);
-
     val hasNand: Boolean get() = nandSize > 0
-
-    // Low-latency audio needs a qualified NOR; the Zire 72 has none.
     val fastAudio: Boolean get() = fastAudioNorMd5 != null
-
-    // Arguments the core needs before a raw NOR image for this device.
     val coreFlags: List<String> get() = listOf("--device", id)
+    val appNames: List<String> get() = appNamesText.split('|')
+    val buttons: List<String> get() = buttonsText.split('|')
 
     companion object {
-        // Devices shown on the home screen, in order.
-        val shown = listOf(TX, E2, ZIRE72)
-
+        val entries: List<Device> get() = deviceInventory
+        val shown: List<Device> get() = entries
         fun byId(id: String?) = entries.firstOrNull { it.id == id }
+        // Compatibility names for callers and saved-setting migrations.
+        val TX: Device get() = byId("palm-tx")!!
+        val E2: Device get() = byId("palm-e2")!!
+        val ZIRE72: Device get() = byId("palm-zire-72")!!
     }
 }

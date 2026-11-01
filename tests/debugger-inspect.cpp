@@ -79,6 +79,24 @@ int main() {
     put(0x4000, 2);
     assert(cpuInspectRamRange(cpu, 0x100, sizeof(buffer)));
     assert(!MMU_TRANSLATE_RESULT_OK(mmuTranslateInspect(cpuMmu, 0x100, true)));
+    std::vector<uint8_t> readOnlyMmu(sizeof(*cpuMmu));
+    for (unsigned ap = 0; ap < 4; ++ap) {
+        mmuSetTTP(cpuMmu, 0x4000);
+        put(0x4000, 2 | (ap << 10));
+        for (bool cached : {false, true}) {
+            if (cached) mmuTranslate(cpuMmu, 0x100, true, false);
+            std::memcpy(readOnlyMmu.data(), cpuMmu, sizeof(*cpuMmu));
+            assert(cpuInspectWritableRamRange(cpu, 0x100, sizeof(buffer), false) == (ap == 3));
+            assert(cpuInspectWritableRamRange(cpu, 0x100, sizeof(buffer), true) == (ap != 0));
+            assert(MMU_TRANSLATE_RESULT_OK(mmuTranslateInspect(cpuMmu, 0x100, true)) == (ap != 0));
+            assert(!std::memcmp(readOnlyMmu.data(), cpuMmu, sizeof(*cpuMmu)));
+        }
+        if (ap != 3) {
+            std::vector<uint8_t> readOnlyRam(backing.buffer, backing.buffer + backing.size);
+            assert(!cpuNativeBuffer(cpu, 0x100, buffer, sizeof(buffer), true, false));
+            assert(!std::memcmp(readOnlyRam.data(), backing.buffer, backing.size));
+        }
+    }
     mmuSetTTP(cpuMmu, 0x40004000);
     mmuSetDomainCfg(cpuMmu, 3);
     std::vector<uint8_t> state(sizeof(*cpuMmu));
