@@ -1,0 +1,4 @@
+400 snapshot "start.png"
+500 pen-down 38 302
+600 pen-up
+39900 snapshot "end.png"

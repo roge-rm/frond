@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
@@ -128,6 +129,13 @@ int main(int argc, char** argv) {
         unsigned peak=0, snapshots=0;
         bool haveFrame=false;
         size_t next=0;
+        // BENCH_DUMP_RAM=1 writes guest RAM at the start and end, for tools that read guest data.
+        const bool dumpRam=std::getenv("BENCH_DUMP_RAM")!=nullptr;
+        auto dump=[&](const char* name) {
+            std::ofstream out(output/name,std::ios::binary);
+            out.write(reinterpret_cast<const char*>(soc.GetMemoryData().data),soc.GetMemoryData().size);
+        };
+        if (dumpRam) dump("ram-start.bin");
         HostProfile hostProfile(output);
         const auto start=std::chrono::steady_clock::now();
         const auto cpuStart=std::clock();
@@ -180,6 +188,7 @@ int main(int argc, char** argv) {
         }
         const double wall=wallNs()/1e9, cpu=cpuSeconds();
         hostProfile.Stop();
+        if (dumpRam) dump("ram-end.bin");
         frames.flush(); inputs.flush();
         if (!frames || !inputs) throw std::runtime_error("trace write failed");
         std::ofstream result(output/"summary.json");
