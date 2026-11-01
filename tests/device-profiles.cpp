@@ -166,8 +166,11 @@ int main() {
         assert(RomInfo5(good.data(), good.size()).GetDeviceType() != deviceTypeE2);
         assert(!RomInfo5(good.data(), 0).IsValid());
         assert(!RomInfo5(good.data(), 0x20000).HasSmallAndBigCards());
-        assert(deviceProfileNamed5("palm-zire-72")->deviceType == deviceTypeZire72 &&
-               !deviceProfileNamed5("palm-zire-72")->capabilities.fastAudio);
+        const auto* zire72 = deviceProfileNamed5("palm-zire-72");
+        assert(zire72->deviceType == deviceTypeZire72);
+        const auto& caps = zire72->capabilities;
+        assert(caps.keyboard && caps.usb && caps.infrared && caps.bluetooth);
+        assert(!caps.serial && !caps.network && !caps.fastAudio);
     }
 
     // Public header layout and IDs from RomInfo5, no dump data.

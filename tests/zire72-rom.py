@@ -960,7 +960,7 @@ class Zire72PeripheralsTest(unittest.TestCase):
         core.frame(self.root / f'{name}-passkey.png')
         core.tap(self.root, 50, 294)
 
-    @unittest.skipUnless(BTVIRT.is_file(), 'needs btvirt from tools/build-bluetooth-provider.py')
+    @unittest.skipUnless(BTVIRT.is_file() and os.access(BTVIRT, os.X_OK), 'needs btvirt from tools/build-bluetooth-provider.py')
     def test_bluetooth_pairing(self):
         # Two Zires on one virtual controller network: Trusted Devices > Add Device on the first finds the second,
         # both take the passkey and the second shows up as a trusted device. Each session turns Bluetooth on for
@@ -974,7 +974,8 @@ class Zire72PeripheralsTest(unittest.TestCase):
             while not (sockets / 'bt-server-bredr').exists():
                 self.assertLess(time.monotonic(), end, 'btvirt did not start')
                 time.sleep(0.1)
-            cores = [self.core(self.session, f'bt{i}', '--bluetooth', sockets / 'bt-server-bredr') for i in range(2)]
+            for i in range(2):
+                cores.append(self.core(self.session, f'bt{i}', '--bluetooth', sockets / 'bt-server-bredr'))
             for i, core in enumerate(cores):
                 core.launch('BtManPnl')
                 core.tap(self.root, 178, 60)  # On
@@ -999,11 +1000,23 @@ class Zire72PeripheralsTest(unittest.TestCase):
             # The second Zire, selected in the first one's Trusted Devices list.
             first.wait_frame(self.root / 'bt-trusted.png', lambda rows: rows is not None and blue(rows, 250, 80)
                              and not blue(rows, 20, 151), 60)
+            # The first Zire in the second one's Trusted Devices list: a row of text, selected or not, in the
+            # list's grey box (Setup Devices behind it is white there).
+            def grey(rows, x, y):
+                r, g, b = rows[y][4 * x:4 * x + 3]
+                return 200 < r < 240 and max(r, g, b) - min(r, g, b) < 8
+            second.tap(self.root, 70, 305)  # Setup Devices
+            second.wait_frame(self.root / 'bt-setup-second.png', lambda rows: rows is not None and blue(rows, 200, 8)
+                              and rows[150][4 * 250] > 240, 30)
+            second.tap(self.root, 175, 295)  # Trusted Devices
+            second.wait_frame(self.root / 'bt-trusted-second.png', lambda rows: rows is not None and all(
+                grey(rows, x, y) for x, y in [(100, 200), (250, 150), (250, 240)]) and (blue(rows, 250, 80) or any(
+                    rows[y][4 * x] < 80 for x in range(20, 200) for y in range(74, 90))), 30)
         finally:
-            for core in cores:
-                self.assertEqual(core.close(), 0)
+            codes = [core.close() for core in cores]
             provider.terminate()
             provider.wait()
+        self.assertEqual(codes, [0] * len(cores))
 
     def test_camera_stub(self):
         # No sensor answers on I2C: Camera shows a blank screen while its driver looks, then goes back to the
