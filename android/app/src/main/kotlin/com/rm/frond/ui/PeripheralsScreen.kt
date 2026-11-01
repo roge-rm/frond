@@ -244,6 +244,9 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                         headlineContent = {
                             Text("Low-latency audio", color = if (usable) Color.Unspecified else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f))
                         },
+                        supportingContent = if (usable) {
+                            { Text("Applies at next start") }
+                        } else null,
                         trailingContent = {
                             Switch(checked = usable && model.fastAudio, enabled = usable, onCheckedChange = { model.changeFastAudio(it) })
                         },
