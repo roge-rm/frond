@@ -744,3 +744,62 @@ test-tg50-serial-configuration: out/frond
 		tests/tg50-serial-configuration.cpp @build/tg50-serial-core.rsp build/source/src/common/libcommon.a \
 		$(CPU_TEST_LDLIBS) -o build/test-tg50-serial-configuration
 	./build/test-tg50-serial-configuration
+
+# FrondBench, a Palm benchmark for calibrating emulated CPU speed.
+PALM_SDK ?= $(HOME)/Projects/palm/palm-os-sdk/sdk-5r3
+FRONDBENCH_DIR := build/frondbench
+FRONDBENCH_SRC := tools/frondbench
+.PHONY: frondbench
+frondbench: $(FRONDBENCH_DIR)/FrondBench.prc
+$(FRONDBENCH_DIR)/FrondBench.prc: $(FRONDBENCH_SRC)/frondbench.c $(FRONDBENCH_SRC)/frondbench.h $(FRONDBENCH_SRC)/frondbench.rcp $(FRONDBENCH_SRC)/frondbench.def
+	mkdir -p $(FRONDBENCH_DIR)
+	m68k-palmos-gcc -O2 -Wall -Wno-unknown-pragmas -I$(PALM_SDK)/include \
+		$(addprefix -I,$(shell find $(PALM_SDK)/include -mindepth 1 -type d)) \
+		-c $(FRONDBENCH_SRC)/frondbench.c -o $(FRONDBENCH_DIR)/frondbench.o
+	m68k-palmos-gcc -L$(PALM_SDK)/lib/m68k-palmos-coff $(FRONDBENCH_DIR)/frondbench.o -o $(FRONDBENCH_DIR)/frondbench
+	cd $(FRONDBENCH_SRC) && pilrc -q -ro frondbench.rcp $(CURDIR)/$(FRONDBENCH_DIR)/frondbench.ro
+	build-prc -o $@ $(FRONDBENCH_SRC)/frondbench.def $(FRONDBENCH_DIR)/frondbench $(FRONDBENCH_DIR)/frondbench.ro
+
+# Emulation speed: Bike or Die replay and FrondBench through benchmark-replay.
+# SPEED_HOST=test-host runs on test-host in ~/frond-speed/.
+BIKE_SESSION ?= debug/mips-cap/level1-paused.frond
+FRONDBENCH_SESSION ?= debug/frondbench/run-04/working.frond
+SPEED_MIPS ?= 100
+SPEED_HOST ?=
+.PHONY: speed-check
+speed-check: benchmark-replay
+	BIKE_SESSION=$(BIKE_SESSION) FRONDBENCH_SESSION=$(FRONDBENCH_SESSION) SPEED_MIPS=$(SPEED_MIPS) SPEED_HOST=$(SPEED_HOST) SPEED_BENCH=$(SPEED_BENCH) python3 tools/speed-check.py
+
+# dynarmic JIT trial, off by default: build/benchmark-replay-jit only. DYNARMIC_SRC is a
+# dynarmic checkout with patches/dynarmic/*.patch applied. FROND_JIT=0 turns it off at run time.
+DYNARMIC_SRC ?= build/dynarmic-trial/src
+JIT_CXXFLAGS = -Wall -Wno-unused-parameter -Wno-unknown-pragmas -D_FILE_OFFSET_BITS=64 -O2 -g \
+	$(shell sdl2-config --cflags) $(shell pkg-config --cflags slirp) -pthread -DFROND_DYNARMIC \
+	-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+	-Ibuild/source/src/common/zip -Ibuild/source/src/argparse
+JIT_LIBS = build/dynarmic/src/dynarmic/libdynarmic.a build/dynarmic/externals/mcl/src/libmcl.a \
+	build/dynarmic/externals/fmt/libfmt.a build/dynarmic/externals/zydis/libZydis.a \
+	build/dynarmic/externals/zydis/zycore/libZycore.a
+
+build/dynarmic/.built:
+	cmake -S $(DYNARMIC_SRC) -B build/dynarmic -G Ninja -DCMAKE_BUILD_TYPE=Release \
+		-DDYNARMIC_TESTS=OFF -DDYNARMIC_USE_BUNDLED_EXTERNALS=ON -DDYNARMIC_WARNINGS_AS_ERRORS=OFF \
+		-DDYNARMIC_FRONTENDS=A32 -DDYNARMIC_USE_PRECOMPILED_HEADERS=OFF
+	ninja -C build/dynarmic -j$(BUILD_JOBS) dynarmic
+	touch $@
+
+.PHONY: benchmark-replay-jit
+benchmark-replay-jit: out/frond build/dynarmic/.built
+	mkdir -p build/jit
+	$(CXX) -std=c++17 $(JIT_CXXFLAGS) -c build/source/src/uarm/uarm/CPU.cpp -o build/jit/CPU.o
+	$(CXX) -std=c++17 $(JIT_CXXFLAGS) -c build/source/src/uarm/uarm/icache.cpp -o build/jit/icache.o
+	$(CXX) -std=c++20 -O2 -g -Wall -I$(DYNARMIC_SRC)/src -I$(DYNARMIC_SRC)/externals/mcl/include -I$(DYNARMIC_SRC)/externals/fmt/include \
+		-c build/source/src/uarm/uarm/jit_dynarmic.cpp -o build/jit/jit_dynarmic.o
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' ! -name timeutil.o \
+		! -name CPU.o ! -name icache.o > build/jit/core.rsp
+	echo build/jit/CPU.o build/jit/icache.o build/jit/jit_dynarmic.o >> build/jit/core.rsp
+	$(CXX) -std=c++17 -O2 -g $(shell sdl2-config --cflags) \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tools/benchmark-replay.cpp @build/jit/core.rsp build/source/src/common/libcommon.a \
+		$(JIT_LIBS) $(CPU_TEST_LDLIBS) $(shell pkg-config --libs sdl2 SDL2_image) \
+		-o build/benchmark-replay-jit

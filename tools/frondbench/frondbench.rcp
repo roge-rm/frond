@@ -1,0 +1,17 @@
+#include "frondbench.h"
+
+FORM ID MainForm AT (0 0 160 160) NOFRAME USABLE
+BEGIN
+ TITLE "FrondBench"
+ BUTTON "Run" ID RunButton AT (1 145 36 12)
+END
+
+ALERT ID OldOSAlert
+ERROR
+BEGIN
+ TITLE "FrondBench"
+ MESSAGE "FrondBench needs Palm OS 3.5 or later."
+ BUTTONS "OK"
+END
+
+VERSION ID 1 "1.0"
