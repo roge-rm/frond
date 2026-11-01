@@ -17,6 +17,7 @@ import sys
 import tempfile
 import time
 import zipfile
+import struct
 import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -220,7 +221,12 @@ class SocketBoot:
     def frame(self, path):
         path.unlink(missing_ok=True)
         self.replay([f'0 snapshot {quote_replay_path(path)}'])
-        return png_rows(path) if path.is_file() else None
+        if not path.is_file():
+            return None
+        try:
+            return png_rows(path)
+        except (OSError, ValueError, zlib.error, struct.error):
+            return None  # snapshot still being written; wait_frame tries again
 
     def wait_frame(self, path, check, timeout=60):
         deadline = min(self.control.deadline, time.monotonic() + timeout)
@@ -340,7 +346,7 @@ def run(args):
                     if args.device != 'palm-tx' else [])] if args.session else [
                     '--device', args.device, str(root / 'input-nor.bin'),
                     *(['--nand', str(root / 'input-nand.bin')] if args.nand else [])]
-                command = (['heavy', 'build'] if shutil.which('heavy') else []) + [
+                command = (['heavy', 'emulator'] if shutil.which('heavy') else []) + [
                     str(root / 'core'), *boot, '--desktop-socket', address]
                 if not args.sound:
                     command.append('--no-sound')
