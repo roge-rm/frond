@@ -2,7 +2,7 @@
 
 Frond is a Palm OS emulator for Linux and Android, based on [CloudpilotEmu](https://github.com/cloudpilot-emu/cloudpilot-emu), made for running and developing Palm apps and games.
 
-Currently it emulates the Palm T|X, the Tungsten E2 and the Zire 72 (Linux only for now), with sound, SD support, networking, saved sessions and more. 
+Currently it emulates the Palm T|X, the Tungsten E2 and the Zire 72, with sound, SD support, networking, saved sessions and more. 
 Look below to see the features in more detail. More devices are planned.
 
 To run this you will need to provide a Palm T|X, E2 or Zire 72 device firmware - none are included.
@@ -70,7 +70,7 @@ On Linux, closing the window saves it and Frond offers to resume it next time, *
 Stop** goes back to the list and **Save a copy…** keeps a separate snapshot. There's no autosave,
 so a crash loses what changed since the last save. Sessions hold your firmware and
 personal data, so keep them private. **Hard reset** in the session controls erases the Palm
-(**Save first** saves the session before); the TX and E2 ask first, press up to erase.
+(**Save first** saves the session before); the TX and E2 ask first, press up to erase; the Zire erases straight away.
 
 **Screen.** On Linux choose a scale from 1× to 2× in 0.25 steps before starting; Frond
 defaults to the largest that fits. LCD pixels stay sharp, and **Smooth LCD scaling**
@@ -81,7 +81,7 @@ filling it, and follows the phone or stays in portrait or landscape.
 tapped. On a keyboard the arrow keys work the five-way, Enter selects and F1 to F4 are
 the app buttons; **Help → Hardware Keyboard Controls** lists them all. On Android game
 controllers press the Palm's buttons, and you can change which button does what in
-Settings. Either device can also have an emulated Palm infrared keyboard for typing,
+Settings. Each device can also have an emulated Palm infrared keyboard for typing,
 which needs Palm's keyboard driver.
 
 **Apps and SD cards.** Install PRC and PDB files with **File → Install Application**
@@ -89,7 +89,7 @@ on Linux, or **Install application** on the Peripherals screen on Android. Frond
 copies files between your computer or phone and an ejected card (**SD Card →
 Exchange Files…** on Linux). Close files on the Palm before ejecting.
 
-**Peripherals.** The E2's and Zire 72's networking and serial stay greyed out.
+**Peripherals.** The E2's and Zire 72's networking and serial stay greyed out, and so does the Zire's camera.
 
 | | T\|X | E2 | Zire 72 |
 |---|---|---|---|
