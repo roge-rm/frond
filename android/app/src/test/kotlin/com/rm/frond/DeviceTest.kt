@@ -44,3 +44,22 @@ class DeviceTest {
         assertTrue(Device.ZIRE72 in Device.shown)
     }
 }
+
+class FastAudioQualifiedTest {
+    private fun nor(content: String) = java.io.File.createTempFile("nor", ".bin").apply { writeText(content); deleteOnExit() }
+
+    @Test
+    fun zireNeverQualifies() {
+        assertFalse(Firmware.fastAudioQualified(Device.ZIRE72, null, nor("x")))
+    }
+
+    @Test
+    fun otherNorDoesNotQualify() {
+        assertFalse(Firmware.fastAudioQualified(Device.TX, null, nor("not the qualified image")))
+    }
+
+    @Test
+    fun missingNorDoesNotQualify() {
+        assertFalse(Firmware.fastAudioQualified(Device.E2, null, java.io.File("/nonexistent/nor.bin")))
+    }
+}

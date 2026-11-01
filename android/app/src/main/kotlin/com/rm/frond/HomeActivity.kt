@@ -73,6 +73,7 @@ class HomeModel(private val activity: HomeActivity) {
     }
 
     fun reload() {
+        Settings.migrateFastAudio(activity)
         Firmware.recover(activity)
         // A recovery session left by an SD exchange that never finished, once the emulator is gone.
         if (!emulatorRunning()) Sessions.adoptRecovery(activity)?.let {

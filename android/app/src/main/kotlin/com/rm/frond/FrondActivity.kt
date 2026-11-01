@@ -119,7 +119,7 @@ class FrondActivity : SDLActivity() {
         arguments += listOf("--window-fit", settings.size.arg, "--window-background", BACKGROUND_HEX)
         if (settings.smoothing) arguments += "--smooth-lcd"
         if (!settings.sound) arguments += "--no-sound"
-        if (settings.fastAudio && fastAudioQualified()) {
+        if (Settings.fastAudio(this, launchDevice()) && fastAudioQualified()) {
             arguments += "--fast-audio"
         } else {
             arguments += listOf("--audio-period", audioPeriod().toString())
@@ -129,13 +129,14 @@ class FrondActivity : SDLActivity() {
         return arguments.toTypedArray()
     }
 
+    private fun launchDevice() = Device.byId(intent?.getStringExtra(EXTRA_DEVICE)) ?: Device.TX
+
     // The core refuses to start with --fast-audio unless the NOR it runs is the qualified one for its
-    // device: the one inside a saved session, else the installed firmware. Runs on SDL's thread.
+    // device. Runs on SDL's thread.
     private fun fastAudioQualified(): Boolean {
-        val session = sessionPath?.let { File(it) }?.takeIf { it.isFile }
-        val device = Device.byId(intent?.getStringExtra(EXTRA_DEVICE)) ?: Device.TX
-        val md5 = if (session != null) Sessions.norMd5(session) else Firmware.md5(File(intent?.getStringExtra(EXTRA_NOR) ?: Firmware.nor(this, device).path))
-        return md5 != null && Device.entries.any { it.fastAudioNorMd5 == md5 }
+        val device = launchDevice()
+        val nor = File(intent?.getStringExtra(EXTRA_NOR) ?: Firmware.nor(this, device).path)
+        return Firmware.fastAudioQualified(device, sessionPath?.let { File(it) }, nor)
     }
 
     // Draws edge to edge in the colour around the device and keeps SDL's surface inside the system

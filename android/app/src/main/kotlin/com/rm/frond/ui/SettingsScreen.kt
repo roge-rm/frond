@@ -32,7 +32,6 @@ import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
@@ -83,8 +82,6 @@ private fun SettingsList(model: HomeModel) {
             }
             Header("Audio", Modifier.padding(top = 16.dp))
             SwitchRow("Sound", s.sound) { v -> model.update(s.copy(sound = v)) }
-            val fastAudioUsable = model.added.any { it.fastAudio }
-            SwitchRow("Low-latency audio", s.fastAudio && fastAudioUsable, enabled = fastAudioUsable) { v -> model.update(s.copy(fastAudio = v)) }
             Header("Debugger", Modifier.padding(top = 16.dp))
             SwitchRow("gdb server", s.debugger) { v -> model.update(s.copy(debugger = v)) }
             if (s.debugger) DebuggerPort(s.debuggerPort) { v -> model.update(s.copy(debuggerPort = v)) }
@@ -179,16 +176,13 @@ private fun ControllerButtons(model: HomeModel, device: Device) {
 }
 
 @Composable
-fun SwitchRow(label: String, checked: Boolean, enabled: Boolean = true, onChange: (Boolean) -> Unit) {
+fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
     Row(
-        Modifier.fillMaxWidth().toggleable(checked, enabled = enabled, role = Role.Switch, onValueChange = onChange).padding(vertical = 8.dp),
+        Modifier.fillMaxWidth().toggleable(checked, role = Role.Switch, onValueChange = onChange).padding(vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(
-            label, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge,
-            color = if (enabled) Color.Unspecified else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
-        )
-        Switch(checked = checked, onCheckedChange = null, enabled = enabled)
+        Text(label, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
+        Switch(checked = checked, onCheckedChange = null)
     }
 }
 

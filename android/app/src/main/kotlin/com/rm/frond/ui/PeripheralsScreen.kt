@@ -238,6 +238,18 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                         modifier = Modifier.clickableRow { model.changeSound(!model.sound) },
                     )
                 }
+                item(key = "fastAudio") {
+                    val usable = model.fastAudioUsable == true
+                    ListItem(
+                        headlineContent = {
+                            Text("Low-latency audio", color = if (usable) Color.Unspecified else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f))
+                        },
+                        trailingContent = {
+                            Switch(checked = usable && model.fastAudio, enabled = usable, onCheckedChange = { model.changeFastAudio(it) })
+                        },
+                        modifier = if (usable) Modifier.clickableRow { model.changeFastAudio(!model.fastAudio) } else Modifier,
+                    )
+                }
                 item(key = "keyboard") {
                     val attached = model.keyboard
                     // The keyboard and beaming share the Palm's infrared port.

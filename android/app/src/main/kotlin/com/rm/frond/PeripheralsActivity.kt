@@ -202,6 +202,27 @@ class PeripheralsModel(
         sound = on
     }
 
+    // Low-latency audio for this device. The core takes it at start-up, so a change applies at the next start.
+    var fastAudio by mutableStateOf(Settings.fastAudio(activity, device))
+        private set
+    // Null while the NOR is being checked; false when the device or its firmware can't use it.
+    var fastAudioUsable by mutableStateOf<Boolean?>(if (device.fastAudio) null else false)
+        private set
+
+    fun checkFastAudio(session: String?) {
+        if (!device.fastAudio) return
+        activity.lifecycleScope.launch {
+            fastAudioUsable = withContext(Dispatchers.IO) {
+                Firmware.fastAudioQualified(device, session?.let { java.io.File(it) }, Firmware.nor(activity, device))
+            }
+        }
+    }
+
+    fun changeFastAudio(on: Boolean) {
+        Settings.setFastAudio(activity, device, on)
+        fastAudio = on
+    }
+
     fun attachKeyboard(on: Boolean) =
         device(if (on) "Attaching" else "Detaching", if (on) "Couldn't attach the keyboard" else "Couldn't detach the keyboard", false) { l ->
             val reply = l.request("keyboard-attach", if (on) "on" else "off", timeoutSeconds = 30)
@@ -432,6 +453,7 @@ class PeripheralsActivity : ComponentActivity() {
             return
         }
         model.watchGdb()
+        model.checkFastAudio(emulator.session)
         if (!model.waitingForGdb) model.refresh()
         model.readKeyboard()
         model.readNetwork()

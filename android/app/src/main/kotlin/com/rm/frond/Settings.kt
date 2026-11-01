@@ -22,7 +22,6 @@ data class Settings(
     val smoothing: Boolean = false,
     val orientation: Orientation = Orientation.PHONE,
     val sound: Boolean = true,
-    val fastAudio: Boolean = false,
     // The core's gdb server, relayed by DebugLink on debuggerPort. The Palm waits for gdb before it runs.
     val debugger: Boolean = false,
     val debuggerPort: Int = DebugLink.DEFAULT_PORT,
@@ -33,7 +32,6 @@ data class Settings(
         .putExtra(EXTRA_SMOOTHING, smoothing)
         .putExtra(EXTRA_ORIENTATION, orientation.name)
         .putExtra(EXTRA_SOUND, sound)
-        .putExtra(EXTRA_FAST_AUDIO, fastAudio)
         .putExtra(EXTRA_DEBUGGER, debugger)
         .putExtra(EXTRA_DEBUGGER_PORT, debuggerPort)
 
@@ -44,6 +42,8 @@ data class Settings(
         private const val EXTRA_ORIENTATION = "orientation"
         private const val EXTRA_SOUND = "sound"
         private const val EXTRA_FAST_AUDIO = "fastAudio"
+        private const val FAST_AUDIO_PREFIX = "fastAudio."
+        private const val FAST_AUDIO_MIGRATED = "fastAudioPerDevice"
         private const val EXTRA_DEBUGGER = "debugger"
         private const val EXTRA_DEBUGGER_PORT = "debuggerPort"
 
@@ -57,10 +57,29 @@ data class Settings(
                 smoothing = p.getBoolean(EXTRA_SMOOTHING, false),
                 orientation = enumOr(p.getString(EXTRA_ORIENTATION, null), Orientation.PHONE),
                 sound = p.getBoolean(EXTRA_SOUND, true),
-                fastAudio = p.getBoolean(EXTRA_FAST_AUDIO, false),
                 debugger = p.getBoolean(EXTRA_DEBUGGER, false),
                 debuggerPort = NetRelay.port(p.getInt(EXTRA_DEBUGGER_PORT, DebugLink.DEFAULT_PORT).toString()) ?: DebugLink.DEFAULT_PORT,
             )
+        }
+
+        // Low-latency audio per device. Read at each start: the core takes it as a start-up argument.
+        @Suppress("DEPRECATION")
+        fun fastAudio(context: Context, device: Device): Boolean {
+            val p = context.getSharedPreferences(FILE, Context.MODE_MULTI_PROCESS)
+            return device.fastAudio && p.getBoolean(FAST_AUDIO_PREFIX + device.id, false)
+        }
+
+        fun setFastAudio(context: Context, device: Device, on: Boolean) {
+            context.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit().putBoolean(FAST_AUDIO_PREFIX + device.id, on).apply()
+        }
+
+        // Once: a global switch left on turns on every device that can use it, and the old key goes.
+        fun migrateFastAudio(context: Context) {
+            val p = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+            if (p.getBoolean(FAST_AUDIO_MIGRATED, false)) return
+            val edit = p.edit().putBoolean(FAST_AUDIO_MIGRATED, true).remove(EXTRA_FAST_AUDIO)
+            if (p.getBoolean(EXTRA_FAST_AUDIO, false)) Device.entries.filter { it.fastAudio }.forEach { edit.putBoolean(FAST_AUDIO_PREFIX + it.id, true) }
+            edit.apply()
         }
 
         fun save(context: Context, settings: Settings) {
@@ -69,7 +88,6 @@ data class Settings(
                 .putBoolean(EXTRA_SMOOTHING, settings.smoothing)
                 .putString(EXTRA_ORIENTATION, settings.orientation.name)
                 .putBoolean(EXTRA_SOUND, settings.sound)
-                .putBoolean(EXTRA_FAST_AUDIO, settings.fastAudio)
                 .putBoolean(EXTRA_DEBUGGER, settings.debugger)
                 .putInt(EXTRA_DEBUGGER_PORT, settings.debuggerPort)
                 .apply()
@@ -84,7 +102,6 @@ data class Settings(
                 smoothing = extras.getBoolean(EXTRA_SMOOTHING, saved.smoothing),
                 orientation = enumOr(extras.getString(EXTRA_ORIENTATION), saved.orientation),
                 sound = extras.getBoolean(EXTRA_SOUND, saved.sound),
-                fastAudio = extras.getBoolean(EXTRA_FAST_AUDIO, saved.fastAudio),
                 debugger = extras.getBoolean(EXTRA_DEBUGGER, saved.debugger),
                 debuggerPort = extras.getInt(EXTRA_DEBUGGER_PORT, saved.debuggerPort),
             )
