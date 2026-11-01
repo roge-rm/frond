@@ -191,8 +191,10 @@ exceed the screen size; automatic sizing checks both width and height.
 
 The TG50 uses
 its 13,041,664-byte NOR image, has 16 MiB RAM, no NAND and a 320 × 320 screen.
-It has no Graffiti silkscreen. Memory Stick is shown greyed out; card images,
-Memory Stick applications and Memory Stick audio are unavailable.
+It has no Graffiti silkscreen. Classic 128 MB Memory Stick cards support image
+creation, import/export and Files through Palm OS. Applications in `/PALM/Launcher`
+appear in Sony Launcher's Card category. See [Memory Stick storage](memory-stick.md).
+Memory Stick Pro, MagicGate and Memory Stick audio remain unavailable.
 
 The button strip includes its 42-key keyboard, application buttons, scroll rocker,
 Home and Graffiti buttons. A side tab shows the jog wheel, jog press and Back.
@@ -209,8 +211,8 @@ greyed out. Power sleep/wake, auto-off and RTC alarm wake are supported; changin
 Sound covers the original system/alarm beeper and Sony Voice Recorder mono
 22,050 Hz SP playback, including mute/unmute and resuming active playback from a
 saved session. Standard Palm SndStream audio, stereo Sony playback, live 8 kHz
-playback, microphone input and low-latency audio remain unqualified. Bluetooth and
-Memory Stick remain unavailable. Ordinary infrared beaming works through the peer relay. USB HotSync, raw serial,
+playback, microphone input and low-latency audio remain unqualified. Bluetooth
+remains unavailable. Ordinary infrared beaming works through the peer relay. USB HotSync, raw serial,
 the external infrared keyboard and high-power remote-control infrared remain
 unavailable. USB still needs the Sony driver’s reserved register access and
 endpoint DMA support.

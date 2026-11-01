@@ -235,6 +235,7 @@ int main(){
         // TX DMA: DRCMR7 -> channel 3, requests while the TX FIFO is under half (or empty with TIL).
         for(uint32_t fcr : {0x37u,0x3fu}){
             dmaConfig(fcr);write(0x4000011c,0x83);
+            assert(line.in.empty() && pxaUartDmaValidBytes(uart)==0);
             for(unsigned i=0;i<21;++i)ram[0x5000+i]=0x30+i;
             channel(3,0xa0005000,PXA_FFUART_BASE,0x9001c000|21,0);
             runFor(400);

@@ -1,0 +1,150 @@
+--- /dev/null
++++ b/src/uarm/uarm/MemoryStickMedia.h
+@@ -0,0 +1,147 @@
++#ifndef FROND_MEMORY_STICK_MEDIA_H
++#define FROND_MEMORY_STICK_MEDIA_H
++
++#include <array>
++#include <cstddef>
++#include <cstdint>
++#include <cstring>
++#include <memory>
++#include <unordered_map>
++#include <vector>
++
++// Physical classic 128 MB flash. The card/controller layer supplies boot blocks and FTL metadata.
++// This is a page-data/extra-byte stream, with no host ECC bytes or FAT-sector translation.
++class MemoryStickMedia {
++   public:
++    static constexpr uint32_t blocks = 8192, pagesPerBlock = 32;
++    static constexpr uint32_t dataBytes = 512, extraBytes = 9, recordBytes = dataBytes + extraBytes;
++    static constexpr uint32_t pageCount = blocks * pagesPerBlock;
++    static constexpr size_t imageBytes = size_t(pageCount) * recordBytes;
++    using Page = std::array<uint8_t, recordBytes>;
++    enum class Result { ok, absent, address, writeProtected, invalidImage };
++
++    MemoryStickMedia() = default;
++    MemoryStickMedia(const MemoryStickMedia&) = delete;
++    MemoryStickMedia& operator=(const MemoryStickMedia&) = delete;
++    MemoryStickMedia(MemoryStickMedia&&) = delete;
++    MemoryStickMedia& operator=(MemoryStickMedia&&) = delete;
++
++   private:
++    using Image = std::vector<uint8_t>;
++    using Changes = std::unordered_map<uint32_t, Page>;
++
++   public:
++    // Only valid on the same attachment. Portable session encoding belongs to the card layer.
++    struct Checkpoint {
++        std::shared_ptr<const Image> base;
++        Changes changes;
++        bool writeProtected{};
++    };
++
++    Result Attach(const std::vector<uint8_t>& image, bool protect) {
++        if (image.size() != imageBytes) return Result::invalidImage;
++        // Copy before changing the live attachment; the caller may retain mutable aliases.
++        auto owned = std::make_shared<const Image>(image);
++        base_ = std::move(owned);
++        changes_.clear();
++        writeProtected_ = protect;
++        return Result::ok;
++    }
++
++    void Detach() {
++        base_.reset();
++        changes_.clear();
++        writeProtected_ = false;
++    }
++
++    bool Present() const { return bool(base_); }
++    bool Dirty() const { return !changes_.empty(); }
++    size_t ChangedPages() const { return changes_.size(); }
++    void SetWriteProtected(bool protect) { writeProtected_ = protect; }
++    bool WriteProtected() const { return writeProtected_; }
++
++    Result Read(uint32_t block, uint32_t page, Page& result) const {
++        uint32_t index;
++        const auto status = Address(block, page, index);
++        if (status != Result::ok) return status;
++        const auto it = changes_.find(index);
++        if (it != changes_.end()) result = it->second;
++        else ReadBase(index, result);
++        return Result::ok;
++    }
++
++    Result Program(uint32_t block, uint32_t page, const Page& incoming, bool data, bool extra) {
++        Page result;
++        const auto status = Read(block, page, result);
++        if (status != Result::ok) return status;
++        if (writeProtected_) return Result::writeProtected;
++        if (!data && !extra) return Result::ok;
++        if (data)
++            for (unsigned i = 0; i < dataBytes; ++i) result[i] &= incoming[i];
++        if (extra)
++            for (unsigned i = dataBytes; i < recordBytes; ++i) result[i] &= incoming[i];
++        Store(changes_, block * pagesPerBlock + page, result);
++        return Result::ok;
++    }
++
++    Result Erase(uint32_t block) {
++        uint32_t index;
++        const auto status = Address(block, 0, index);
++        if (status != Result::ok) return status;
++        if (writeProtected_) return Result::writeProtected;
++        // Allocation failure must leave the entire block, including extra bytes, unchanged.
++        auto candidate = changes_;
++        Page empty;
++        empty.fill(0xff);
++        for (unsigned page = 0; page < pagesPerBlock; ++page) Store(candidate, index + page, empty);
++        changes_.swap(candidate);
++        return Result::ok;
++    }
++
++    Result CopyImage(std::vector<uint8_t>& result) const {
++        if (!base_) return Result::absent;
++        auto candidate = *base_;
++        for (const auto& entry : changes_)
++            std::memcpy(candidate.data() + size_t(entry.first) * recordBytes, entry.second.data(), recordBytes);
++        result.swap(candidate);
++        return Result::ok;
++    }
++
++    Checkpoint SaveCheckpoint() const { return {base_, changes_, writeProtected_}; }
++
++    Result RestoreCheckpoint(const Checkpoint& checkpoint) {
++        if (!base_) return Result::absent;
++        if (checkpoint.base != base_) return Result::invalidImage;
++        for (const auto& entry : checkpoint.changes)
++            if (entry.first >= pageCount) return Result::invalidImage;
++        auto candidate = checkpoint.changes;
++        changes_.swap(candidate);
++        writeProtected_ = checkpoint.writeProtected;
++        return Result::ok;
++    }
++
++   private:
++    Result Address(uint32_t block, uint32_t page, uint32_t& index) const {
++        if (!base_) return Result::absent;
++        if (block >= blocks || page >= pagesPerBlock) return Result::address;
++        index = block * pagesPerBlock + page;
++        return Result::ok;
++    }
++
++    void ReadBase(uint32_t index, Page& result) const {
++        std::memcpy(result.data(), base_->data() + size_t(index) * recordBytes, recordBytes);
++    }
++
++    void Store(Changes& changes, uint32_t index, const Page& page) const {
++        Page original;
++        ReadBase(index, original);
++        if (page == original) changes.erase(index);
++        else changes.insert_or_assign(index, page);
++    }
++
++    std::shared_ptr<const Image> base_;
++    Changes changes_;
++    bool writeProtected_{};
++};
++
++#endif

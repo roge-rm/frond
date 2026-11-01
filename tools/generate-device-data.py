@@ -14,7 +14,7 @@ def outputs(profiles):
     fields = {
         'id': 'name', 'label': 'display_name', 'norSize': 'nor_bytes', 'nandSize': 'raw_nand_bytes',
         'nandRequired': 'explicit_raw_nand', 'fastAudioNorMd5': 'fast_audio_md5',
-        'sound': 'sound', 'storageSlot': 'storage_slot', 'sdSlot': 'sd_slot', 'network': 'network', 'serialPort': 'serial', 'camera': 'camera',
+        'sound': 'sound', 'storageSlot': 'storage_slot', 'sdSlot': 'sd_slot', 'memoryStick': 'memory_stick_supported', 'network': 'network', 'serialPort': 'serial', 'camera': 'camera',
         'keyboard': 'keyboard', 'usb': 'usb', 'infrared': 'infrared', 'bluetooth': 'bluetooth',
         'detectKind': 'detect', 'companyId': 'company_id', 'halId': 'hal_id',
         'norLayout': 'nor_layout', 'headerOffset': 'header_offset', 'bigCardOffset': 'big_card_offset',

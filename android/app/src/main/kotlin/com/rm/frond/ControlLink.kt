@@ -26,6 +26,11 @@ class ControlLink(val path: File, private val onEvent: (String, String) -> Unit)
     private val connected = CompletableFuture<Unit>()
     private val pending = ConcurrentHashMap<String, CompletableFuture<Reply>>()
     private val nextId = AtomicInteger(1)
+    private val fileJobs = ConcurrentHashMap.newKeySet<String>()
+    private val panelState = Object()
+    private var panelDesired = false
+    private var panelPending = false
+    private var panelWorkerStarted = false
     @Volatile private var closed = false
     // Set once the reader has stopped; later requests fail at once.
     @Volatile private var finished = false
@@ -52,6 +57,7 @@ class ControlLink(val path: File, private val onEvent: (String, String) -> Unit)
             if (!closed) Log.w(TAG, "control link: $e")
         } finally {
             finished = true
+            synchronized(panelState) { panelState.notifyAll() }
             connected.complete(Unit)
             drain()
         }
@@ -75,7 +81,8 @@ class ControlLink(val path: File, private val onEvent: (String, String) -> Unit)
 
     // Sends a command and waits for its reply. Never call this on the core's own thread.
     // Never throws: a core that isn't there or stops answers closed or timeout.
-    fun request(command: String, argument: String = "", timeoutSeconds: Long = 120): Reply {
+    fun request(command: String, argument: String = "", timeoutSeconds: Long = 120,
+                cancelRequested: (() -> Boolean)? = null): Reply {
         val id = nextId.getAndIncrement().toString()
         val reply = CompletableFuture<Reply>()
         return try {
@@ -86,6 +93,10 @@ class ControlLink(val path: File, private val onEvent: (String, String) -> Unit)
             if (finished) drain()
             synchronized(this) {
                 out.write("$id\t$command\t${encode(argument)}\n".toByteArray(Charsets.US_ASCII))
+                if (command in FILE_COMMANDS) {
+                    fileJobs.add(id)
+                    if (cancelRequested?.invoke() == true) out.write(cancelLine(id))
+                }
                 out.flush()
             }
             reply.get(timeoutSeconds, TimeUnit.SECONDS)
@@ -95,8 +106,51 @@ class ControlLink(val path: File, private val onEvent: (String, String) -> Unit)
             CLOSED
         } finally {
             pending.remove(id)
+            fileJobs.remove(id)
         }
     }
+
+    // One pending visibility state per connection; lifecycle callbacks never wait for the core.
+    fun setPanelVisible(visible: Boolean) = synchronized(panelState) {
+        if (closed || finished) return@synchronized
+        panelDesired = visible
+        panelPending = true
+        if (!panelWorkerStarted) {
+            panelWorkerStarted = true
+            Thread(::sendPanelStates, "FrondPanel").apply { isDaemon = true }.start()
+        }
+        panelState.notifyAll()
+    }
+
+    private fun sendPanelStates() {
+        try {
+            connected.get()
+            val out = output ?: return
+            while (true) {
+                val visible = synchronized(panelState) {
+                    while (!panelPending && !closed && !finished) panelState.wait()
+                    if (closed || finished) return
+                    panelPending = false
+                    panelDesired
+                }
+                synchronized(this) {
+                    if (closed || finished) return
+                    out.write("0\tpanel-visible\t${encode(if (visible) "on" else "off")}\n".toByteArray(Charsets.US_ASCII))
+                    out.flush()
+                }
+            }
+        } catch (_: Exception) { }
+    }
+
+    fun cancelFiles(): Boolean = try {
+        val out = output
+        if (out == null) false else synchronized(this) {
+            val jobs = fileJobs.toList()
+            jobs.forEach { out.write(cancelLine(it)) }
+            out.flush()
+            jobs.isNotEmpty()
+        }
+    } catch (_: Exception) { false }
 
     private fun drain() {
         pending.values.forEach { it.complete(CLOSED) }
@@ -104,6 +158,7 @@ class ControlLink(val path: File, private val onEvent: (String, String) -> Unit)
 
     fun close() {
         closed = true
+        synchronized(panelState) { panelState.notifyAll() }
         try { client?.close() } catch (_: Exception) {}
         try { server.close() } catch (_: Exception) {}
         try { bound.close() } catch (_: Exception) {}
@@ -112,6 +167,8 @@ class ControlLink(val path: File, private val onEvent: (String, String) -> Unit)
 
     private companion object {
         const val TAG = "Frond"
+        val FILE_COMMANDS = setOf("ms-files", "ms-get", "ms-put", "ms-mkdir", "ms-delete", "ms-rename")
+        fun cancelLine(id: String) = "0\tcancel-files\t${encode(id)}\n".toByteArray(Charsets.US_ASCII)
         val CLOSED = Reply(false, "closed", "The emulator stopped.")
 
         fun encode(text: String) = text.toByteArray(Charsets.UTF_8).joinToString("") { "%02x".format(it) }

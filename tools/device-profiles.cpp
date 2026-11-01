@@ -55,6 +55,7 @@ int main() {
                   << ",\"width\":" << f.width << ",\"height\":" << f.height
                   << ",\"silkscreen_height\":" << f.silkscreenHeight << ",\"strip_height\":" << f.stripHeight
                   << ",\"app_names\":" << std::quoted(f.appNames) << ",\"buttons\":" << std::quoted(f.buttons)
+                  << ",\"memory_stick_supported\":" << (f.memoryStick ? "true" : "false")
                   << ",\"hold_present\":" << (f.holdPresent ? "true" : "false")
                   << ",\"hold_supported\":" << (f.holdSupported ? "true" : "false")
                   << ",\"side_tab_width\":" << f.sideTabWidth

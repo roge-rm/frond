@@ -44,8 +44,9 @@ all use it. The core's internal device numbers are never saved or sent.
 - `sony-clie-tg50`: Sony/vrna card headers, 13,041,664-byte NOR with small and big
   cards, no NAND, 16 MiB RAM and 320×320 display. Available in both frontends
   (`experimental-desktop`). Built-in keyboard, jog controls, Hold, power/RTC,
-  beeper, Sony mono 22,050 Hz playback and ordinary infrared are supported.
-  Memory Stick, USB HotSync, Bluetooth, microphone, high-power remote IR and the
+  beeper, Sony mono 22,050 Hz playback, ordinary infrared and classic 128 MB
+  [Memory Stick storage](memory-stick.md) are supported. Memory Stick Pro, MagicGate,
+  card audio, USB HotSync, Bluetooth, microphone, high-power remote IR and the
   external infrared keyboard remain unavailable. See [desktop controls](desktop.md#sony-clié-tg50).
 - `palm-iiix` and `palm-m515`: reserved names with button bar art and no board.
   The core refuses them.

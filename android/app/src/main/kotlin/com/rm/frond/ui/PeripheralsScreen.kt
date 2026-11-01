@@ -4,6 +4,7 @@ import android.text.format.Formatter
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -18,8 +19,11 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -80,6 +84,8 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
     var confirmReplace by remember { mutableStateOf<String?>(null) }
     var naming by remember { mutableStateOf(false) }
     var exporting by remember { mutableStateOf<FatImage.Entry?>(null) }
+    var renaming by remember { mutableStateOf<FatImage.Entry?>(null) }
+    var deleting by remember { mutableStateOf<FatImage.Entry?>(null) }
     var confirmReset by remember { mutableStateOf(false) }
     var confirmHardReset by remember { mutableStateOf(false) }
     var choosingNetwork by remember { mutableStateOf(false) }
@@ -124,11 +130,15 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
         }
     }
 
+    val createCard: () -> Unit = {
+        if (model.device.memoryStick) model.job("Making the card", "Couldn't make the card") { it.create(128) }
+        else choosingSize = true
+    }
     val path = model.path
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(if (path == null) model.device.label else "SD card $path", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                title = { Text(if (path == null) model.device.label else "${model.device.cardLabel} $path", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                 navigationIcon = {
                     IconButton(onClick = { if (path == null) onClose() else if (path == "/") model.leaveFiles() else model.up() }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
@@ -145,15 +155,15 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         val pad = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
-                        OutlinedButton(onClick = { naming = true }, shape = MaterialTheme.shapes.small, contentPadding = pad) {
+                        OutlinedButton(onClick = { naming = true }, enabled = !model.device.memoryStick || model.writeProtected == false, shape = MaterialTheme.shapes.small, contentPadding = pad) {
                             Text("New folder", maxLines = 1, softWrap = false)
                         }
-                        OutlinedButton(onClick = { pickFile.launch(arrayOf("*/*")) }, shape = MaterialTheme.shapes.small, contentPadding = pad) {
+                        OutlinedButton(onClick = { pickFile.launch(arrayOf("*/*")) }, enabled = !model.device.memoryStick || model.writeProtected == false, shape = MaterialTheme.shapes.small, contentPadding = pad) {
                             Text("Add file", maxLines = 1, softWrap = false)
                         }
                         Spacer(Modifier.weight(1f))
                         Button(onClick = { model.insertEdited() }, shape = MaterialTheme.shapes.small, contentPadding = pad) {
-                            Text("Insert", maxLines = 1, softWrap = false)
+                            Text(if (model.device.memoryStick) "Done" else "Insert", maxLines = 1, softWrap = false)
                         }
                     }
                 }
@@ -172,12 +182,24 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                 }
                 if (model.entries.isEmpty()) item { EmptyNote("Empty folder") }
                 items(model.entries, key = { it.shortName }) { e ->
+                    var menu by remember { mutableStateOf(false) }
                     ListItem(
                         headlineContent = { Text(e.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                         supportingContent = { Text(if (e.directory) "Folder" else Formatter.formatShortFileSize(context, e.size)) },
                         leadingContent = {
                             Marker(if (e.directory) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.outlineVariant)
                         },
+                        trailingContent = if (model.device.memoryStick) ({
+                            Box {
+                                IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, contentDescription = "More") }
+                                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                                    DropdownMenuItem(text = { Text("Rename") }, enabled = model.writeProtected == false && model.busy == null,
+                                        onClick = { menu = false; renaming = e })
+                                    DropdownMenuItem(text = { Text("Delete") }, enabled = model.writeProtected == false && model.busy == null,
+                                        onClick = { menu = false; deleting = e })
+                                }
+                            }
+                        }) else null,
                         modifier = Modifier.clickableRow {
                             if (e.directory) model.open(SdCard.joined(path, e.name))
                             else {
@@ -202,7 +224,7 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                     saveZip.launch("Palm databases.zip")
                 }
                 action("Export database") { model.askName("export") }
-                if (model.device.storageSlot == "memory-stick") {
+                if (model.device.storageSlot == "memory-stick" && !model.device.memoryStick) {
                     item(key = "memoryStick") {
                         ListItem(
                             headlineContent = { Text("Memory Stick", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)) },
@@ -210,8 +232,8 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                         )
                     }
                 }
-                if (model.device.sdSlot) {
-                item { Header("SD card", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp)) }
+                if (model.device.cardSupported) {
+                item { Header(model.device.cardLabel, Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp)) }
                 item {
                     val (label, colour) = when (model.state) {
                         SdCard.State.INSERTED -> "Inserted" to MaterialTheme.colorScheme.primary
@@ -228,16 +250,26 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                     }
                     SdCard.State.EJECTED -> {
                         action("Insert") { model.job("Inserting", "Couldn't insert the card") { it.reinsert() } }
-                        action("Files") { model.openFiles() }
-                        action("Export image") { saveImage.launch("SD card.img") }
+                        if (model.device.sdSlot) action("Files") { model.openFiles() }
+                        action("Export image") { saveImage.launch(if (model.device.memoryStick) "Memory Stick.frondms" else "SD card.img") }
                         action("New card") { confirmReplace = "create" }
                         action("Insert image") { confirmReplace = "image" }
                     }
                     SdCard.State.NONE -> {
-                        action("New card") { choosingSize = true }
+                        action("New card", createCard)
                         action("Insert image") { pickImage.launch(arrayOf("*/*")) }
                     }
                     SdCard.State.UNKNOWN -> action("Try again") { model.refresh() }
+                }
+                if (model.device.memoryStick && model.state != SdCard.State.NONE && model.state != SdCard.State.UNKNOWN) item {
+                    val on = model.writeProtected
+                    val usable = on != null && model.busy == null && model.state == SdCard.State.EJECTED
+                    ListItem(
+                        headlineContent = { Text("Write protected") },
+                        trailingContent = { Switch(checked = on == true, enabled = usable, onCheckedChange = { value ->
+                            model.job("Changing protection", "Couldn't change write protection") { it.protect(value) }
+                        }) },
+                    )
                 }
                 }
                 item { Header("Device", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp)) }
@@ -360,7 +392,11 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
     }
 
     model.busy?.let { label ->
-        AlertDialog(onDismissRequest = {}, confirmButton = {}, title = { Text(label) }, text = { Progress() })
+        AlertDialog(onDismissRequest = {}, confirmButton = {
+            if (model.canCancelFiles) TextButton(onClick = { model.cancelFiles() }, enabled = !model.cancellingFiles) {
+                Text(if (model.cancellingFiles) "Cancelling" else "Cancel")
+            }
+        }, title = { Text(label) }, text = { Progress() })
     }
     model.alert?.let { (title, text) ->
         AlertDialog(
@@ -467,7 +503,7 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
             title = { Text("New card") },
             text = {
                 LazyColumn {
-                    items(SIZES.filter { (it.toLong() shl 20) in model.device.sdMin..model.device.sdMax }) { mib ->
+                    items(if (model.device.memoryStick) listOf(128) else SIZES.filter { (it.toLong() shl 20) in model.device.sdMin..model.device.sdMax }) { mib ->
                         ListItem(headlineContent = { Text("$mib MB") }, modifier = Modifier.clickableRow {
                             choosingSize = false
                             model.job("Making the card", "Couldn't make the card") { it.create(mib) }
@@ -483,14 +519,15 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
         val files = confirmFiles
         AlertDialog(
             onDismissRequest = { confirmEject = false; confirmFiles = false },
-            title = { Text("Eject the card?") },
-            text = { Text(if (files) "Close any files open on the Palm first. Frond saves a recovery session before the exchange." else "Close any files open on the Palm first.") },
+            title = { Text(if (files && model.device.memoryStick) "Open Memory Stick files?" else "Eject the card?") },
+            text = { Text(if (files && model.device.memoryStick) "Close files on the Palm first; changes are saved immediately."
+                else if (files) "Close any files open on the Palm first. Frond saves a recovery session before the exchange." else "Close any files open on the Palm first.") },
             confirmButton = {
                 TextButton(onClick = {
                     confirmEject = false
                     confirmFiles = false
                     if (files) model.openFiles() else model.job("Ejecting", "Couldn't eject the card") { it.eject() }
-                }) { Text("Eject") }
+                }) { Text(if (files && model.device.memoryStick) "Open" else "Eject") }
             },
             dismissButton = { TextButton(onClick = { confirmEject = false; confirmFiles = false }) { Text("Cancel") } },
         )
@@ -503,7 +540,7 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
             confirmButton = {
                 TextButton(onClick = {
                     confirmReplace = null
-                    if (what == "create") choosingSize = true else pickImage.launch(arrayOf("*/*"))
+                    if (what == "create") createCard() else pickImage.launch(arrayOf("*/*"))
                 }) { Text("Replace") }
             },
             dismissButton = { TextButton(onClick = { confirmReplace = null }) { Text("Cancel") } },
@@ -560,6 +597,24 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                     saveZip.launch("$name.zip")
                 }
             },
+        )
+    }
+    renaming?.let { entry ->
+        var name by remember(entry) { mutableStateOf(entry.name) }
+        AlertDialog(
+            onDismissRequest = { renaming = null },
+            title = { Text("Rename card entry") },
+            text = { OutlinedTextField(name, { name = it }, singleLine = true, modifier = Modifier.fillMaxWidth()) },
+            confirmButton = { TextButton(onClick = { renaming = null; model.renameEntry(entry, name) }) { Text("Rename") } },
+            dismissButton = { TextButton(onClick = { renaming = null }) { Text("Cancel") } },
+        )
+    }
+    deleting?.let { entry ->
+        AlertDialog(
+            onDismissRequest = { deleting = null },
+            title = { Text("Delete ${entry.name}?") },
+            confirmButton = { TextButton(onClick = { deleting = null; model.deleteEntry(entry) }) { Text("Delete") } },
+            dismissButton = { TextButton(onClick = { deleting = null }) { Text("Cancel") } },
         )
     }
     if (naming) {

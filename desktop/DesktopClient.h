@@ -13,6 +13,7 @@ class DesktopClient : public QObject {
     ~DesktopClient();
     bool start(const QString& core, const QStringList& arguments);
     bool request(const QString& command, const QString& argument = {});
+    bool cancelFiles();
     bool running() const { return process.state() != QProcess::NotRunning; }
     bool available() const { return ready && pending.isEmpty(); }
     void forceStop();

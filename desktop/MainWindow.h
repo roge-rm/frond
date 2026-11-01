@@ -53,11 +53,14 @@ class MainWindow : public QMainWindow {
     void stop(bool closeApp);
     void askStop(const QString& message);
     void refresh();
+    bool memoryStick() const;
+    bool storageSupported() const;
+    QString cardCommand(const char* operation) const;
     void beginExchange();
     void exchangeResult(bool ok, const QString& message);
     void endExchange();
     QString sessionFile() const;
-    void send(const QString& command, const QString& argument = {});
+    bool send(const QString& command, const QString& argument = {});
     QString serialArgument() const;
     void showSerial(const QString& state);
     void loadSerialSettings();
@@ -101,7 +104,8 @@ class MainWindow : public QMainWindow {
     QList<QWidget*> runningButtons;
     QAction* importAction;
     QPushButton *sdCreate, *sdImport, *sdEject, *sdReinsert, *sdExport, *sdExchange, *sdRetry;
-    QCheckBox *soundToggle, *holdToggle;
+    QCheckBox *soundToggle, *holdToggle, *cardReadOnly;
+    bool protectionKnown{false};
     QLabel* holdLabel;
     bool holdKnown{false}, holdOn{false};
     QLabel *sdStatus, *storageHeading;
@@ -110,6 +114,7 @@ class MainWindow : public QMainWindow {
     std::unique_ptr<QTemporaryDir> exchangeFiles, exchangeRecovery;
     std::unique_ptr<SdExchange> exchange;
     QDialog* exchangeDialog{nullptr};
+    QDialog* memoryStickFiles{nullptr};
     QString exchangeBackup;
     bool cardPresent{false}, cardInserted{false}, sdKnown{false};
     // The running device selects the available peripheral controls.

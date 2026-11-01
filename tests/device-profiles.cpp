@@ -220,7 +220,7 @@ int main() {
         assert(p->frontend.sideTabWidth == 36 && p->frontend.stripHeight == 224 && p->frontend.holdPresent && p->frontend.holdSupported);
         assert(p->frontend.homeKey == 1073741887 && p->frontend.homeX == -1 && p->frontend.homeY == -1);
         assert(deviceProfileStorageSlot5(*p) == DeviceStorageSlot5::memoryStick);
-        assert(!p->frontend.sdSlot && !p->frontend.camera && p->capabilities.sound);
+        assert(p->frontend.memoryStick && !p->frontend.sdSlot && !p->frontend.camera && p->capabilities.sound);
         const auto& caps = p->capabilities;
         assert(!caps.network && !caps.keyboard && !caps.serial && !caps.usb &&
                !caps.fastAudio && caps.infrared && !caps.bluetooth);

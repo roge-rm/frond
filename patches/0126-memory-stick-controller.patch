@@ -1,0 +1,865 @@
+--- /dev/null
++++ b/src/uarm/uarm/MemoryStickCard.h
+@@ -0,0 +1,124 @@
++#ifndef FROND_MEMORY_STICK_CARD_H
++#define FROND_MEMORY_STICK_CARD_H
++#include "MemoryStickMedia.h"
++#include <algorithm>
++#include <array>
++#include <stdexcept>
++
++// Classic serial Memory Stick registers and flash commands. The guest owns the FTL.
++class MemoryStickCard {
++ public:
++    enum : uint32_t { Cached=1, WriteReady=2 };
++    struct State {
++        std::array<uint8_t, 32> reg{};
++        std::array<uint8_t, 512> page{};
++        uint32_t readStart{}, readSize{30}, writeStart{16}, writeSize{15};
++        uint32_t operation{}, bufferFlags{};
++    } state;
++    MemoryStickMedia media;
++    void Reset() {
++        state = {};
++        state.readSize=30; state.writeStart=16;state.writeSize=15;
++        state.reg[4]=0xff; state.reg[5]=0; state.reg[6]=0xff;state.reg[7]=0xff;
++        state.reg[16]=0x80;
++        state.reg[2]=media.WriteProtected()?1:0;
++        state.reg[1]=0x80;
++    }
++    uint32_t Block() const { return (uint32_t(state.reg[17])<<16)|(uint32_t(state.reg[18])<<8)|state.reg[19]; }
++    uint8_t Interrupt() const { return state.reg[1]; }
++    void Interrupt(uint8_t value) { state.reg[1]=value; }
++    bool PageRead(bool extraOnly) {
++        MemoryStickMedia::Page page;
++        if(media.Read(Block(),state.reg[21],page)!=MemoryStickMedia::Result::ok) return false;
++        std::copy(page.begin()+512,page.end(),state.reg.begin()+22);
++        if(!extraOnly){std::copy_n(page.begin(),512,state.page.begin());state.bufferFlags=Cached|WriteReady;}
++        return true;
++    }
++    bool PageWrite(bool data, bool extra) {
++        MemoryStickMedia::Page page;page.fill(0xff);
++        if(data)std::copy(state.page.begin(),state.page.end(),page.begin());
++        if(extra)std::copy_n(state.reg.begin()+22,9,page.begin()+512);
++        return media.Program(Block(),state.reg[21],page,data,extra)==MemoryStickMedia::Result::ok;
++    }
++    bool Command(uint8_t command) {
++        if(!media.Present())return false;
++        const auto operation=state.operation;state.operation=0;
++        switch(command) {
++         case 0x3c:{
++            const auto old=state;Reset();state.readStart=old.readStart;state.readSize=old.readSize;
++            state.writeStart=old.writeStart;state.writeSize=old.writeSize;return true;
++         }
++         case 0xcc:Interrupt(0x80);return true;
++         case 0xc3:state.bufferFlags=0;state.page.fill(0xff);Interrupt(0x80);return true;
++         case 0x33:state.operation=operation==2?1:operation==4?3:0;Interrupt(0x80);return true;
++         case 0x99:Interrupt(media.Erase(Block())==MemoryStickMedia::Result::ok?0x80:0xc0);return true;
++         case 0xaa:
++            if((state.reg[20]&0xc0)==0xc0){Interrupt(0xc0);return true;}
++            if(!PageRead(state.reg[20]&0xc0)){Interrupt(0xc0);return true;}
++            if(state.reg[20]&0xc0)Interrupt(0x80);
++            else {state.operation=(state.reg[20]&0x20)?1:2;Interrupt(state.operation==1?0xa0:0x20);}
++            return true;
++         case 0x55:
++            if(media.WriteProtected()||Block()>=MemoryStickMedia::blocks||state.reg[21]>=32){Interrupt(0xc0);return true;}
++            if((state.reg[20]&0xc0)==0xc0){Interrupt(0xc0);return true;}
++            if(state.reg[20]&0x80){
++                MemoryStickMedia::Page page;page.fill(0xff);page[512]=state.reg[22];
++                Interrupt(media.Program(Block(),state.reg[21],page,false,true)==MemoryStickMedia::Result::ok?0x80:0xc0);
++            } else if(state.reg[20]&0x40)Interrupt(PageWrite(false,true)?0x80:0xc0);
++            else if((state.reg[20]&0x20)&&(state.bufferFlags&WriteReady)) {
++                Interrupt(PageWrite(true,true)?0x80:0xc0);state.bufferFlags&=~WriteReady;
++            } else {state.operation=(state.reg[20]&0x20)?3:4;state.bufferFlags&=~WriteReady;Interrupt(0x20);}
++            return true;
++         default:Interrupt(0x81);return true;
++        }
++    }
++    bool TpcWrite(uint8_t tpc,const uint8_t* in,size_t size) {
++        switch(tpc) {
++         case 8:
++            if(size!=4||in[0]+unsigned(in[1])>32||in[2]+unsigned(in[3])>32)return false;
++            state.readStart=in[0];state.readSize=in[1];state.writeStart=in[2];state.writeSize=in[3];return true;
++         case 0xb:
++            if(size!=state.writeSize||state.writeStart>32||size>32-state.writeStart)return false;
++            // Identification/status registers ignore writes; the transport still completes.
++            for(size_t i=0;i<size;++i)if(state.writeStart+i>=16&&state.writeStart+i<31)state.reg[state.writeStart+i]=in[i];
++            return true;
++         case 0xe:return size==1&&Command(*in);
++         case 0xd:
++            if(size!=512)return false;
++            std::copy_n(in,512,state.page.begin());state.bufferFlags=Cached|WriteReady;
++            if(state.operation==3||state.operation==4) {
++                if(!PageWrite(true,true)){Interrupt(0xc0);state.operation=0;return true;}
++                state.bufferFlags&=~WriteReady;
++                if(state.operation==4&&++state.reg[21]<32)Interrupt(0x20);
++                else {state.operation=0;Interrupt(0x80);}
++            } else {state.bufferFlags=Cached|WriteReady;Interrupt(0x80);}
++            return true;
++         default:return false;
++        }
++    }
++    bool TpcRead(uint8_t tpc,uint8_t* out,size_t size) {
++        switch(tpc) {
++         case 4:
++            if(size!=state.readSize||state.readStart>32||size>32-state.readStart)return false;
++            state.reg[2]=(state.reg[2]&~0x31)|(media.WriteProtected()?1:0)|((state.bufferFlags&WriteReady)?0x10:0x20);
++            std::copy_n(state.reg.begin()+state.readStart,size,out);return true;
++         case 7:if(size!=1)return false;*out=Interrupt();return true;
++         case 2:
++            if(size!=512||(state.operation!=1&&state.operation!=2))return false;
++            std::copy(state.page.begin(),state.page.end(),out);state.bufferFlags&=~WriteReady;return true;
++         default:return false;
++        }
++    }
++    void FinishRead(uint8_t tpc) {
++        if(tpc!=2)return;
++        if(state.operation==2&&++state.reg[21]<32&&PageRead(false))Interrupt(0x20);
++        else {state.operation=0;Interrupt(0x80);}
++    }
++    static bool Valid(const State& s) {
++        return s.readStart<=32&&s.readSize<=32-s.readStart&&
++            s.writeStart<=32&&s.writeSize<=32-s.writeStart&&
++            s.operation<=4&&s.bufferFlags<=3&&s.reg[4]==0xff&&s.reg[5]==0&&s.reg[6]==0xff&&s.reg[7]==0xff&&
++            (!s.operation||(s.reg[21]<32&&((uint32_t(s.reg[17])<<16)|(uint32_t(s.reg[18])<<8)|s.reg[19])<8192));
++    }
++};
++#endif
+--- /dev/null
++++ b/src/uarm/uarm/MemoryStickImage.h
+@@ -0,0 +1,58 @@
++#ifndef FROND_MEMORY_STICK_IMAGE_H
++#define FROND_MEMORY_STICK_IMAGE_H
++#include "MemoryStickMedia.h"
++#include <algorithm>
++#include <cstring>
++#include <stdexcept>
++#define MINIZ_NO_ZLIB_COMPATIBLE_NAMES
++#include "zip/miniz.h"
++namespace frondMs {
++constexpr size_t headerBytes=64, fileBytes=headerBytes+MemoryStickMedia::imageBytes;
++inline uint32_t get32(const uint8_t* p) {return p[0]|(uint32_t(p[1])<<8)|(uint32_t(p[2])<<16)|(uint32_t(p[3])<<24);}
++inline void put32(uint8_t* p,uint32_t n){for(unsigned i=0;i<4;++i)p[i]=n>>(8*i);}
++inline void be16(uint8_t* p,uint16_t n){p[0]=n>>8;p[1]=n;}
++inline uint32_t crc32(const uint8_t* bytes,size_t size) { return mz_crc32(0,bytes,size); }
++inline bool validBoot(const std::vector<uint8_t>& image) {
++    if(image.size()!=MemoryStickMedia::imageBytes)return false;
++    for(unsigned block=0;block<2;++block){
++        const auto* b=image.data()+size_t(block)*32*521;
++        if(b[0]||b[1]!=1||b[2]!=1||b[3]!=0||b[0xbc]!=2||b[0x178]!=1||
++           b[0x170]||b[0x171]||b[0x172]||b[0x173]||b[0x174]||b[0x175]||b[0x176]||!b[0x177]||
++           b[0x1a0]!=1||b[0x1a1]!=2||b[0x1a2]||b[0x1a3]!=16||b[0x1a4]!=0x20||b[0x1a5]||
++           b[0x1a6]!=0x1f||b[0x1a7]!=0||b[0x1a8]!=2||b[0x1a9]||b[0x1aa]!=16||b[0x1d6]!=1||
++           !(b[512]&0x80)||(b[513]&4))return false;
++    }
++    return true;
++}
++inline std::vector<uint8_t> create() {
++    std::vector<uint8_t> image(MemoryStickMedia::imageBytes,0xff);
++    for(unsigned block=0;block<2;++block)for(unsigned page=0;page<32;++page){
++        auto* b=image.data()+(size_t(block)*32+page)*521;
++        std::fill_n(b,512,0);b[512]=0xff;b[513]=0xfb;b[514]=b[515]=0;
++        if(page==0){be16(b,1);be16(b+2,0x0100);b[0xbc]=2;b[0x177]=2;b[0x178]=1;
++            b[0x1a0]=1;b[0x1a1]=2;be16(b+0x1a2,16);be16(b+0x1a4,8192);be16(b+0x1a6,7936);
++            be16(b+0x1a8,512);b[0x1aa]=16;b[0x1ad]=20;b[0x1ae]=26;b[0x1af]=11;b[0x1b0]=1;
++            b[0x1b8]=1;b[0x1d6]=1;
++        }else if(page==1)b[0]=b[1]=0xff;
++    }
++    return image;
++}
++inline std::vector<uint8_t> encode(const std::vector<uint8_t>& physical) {
++    if(!validBoot(physical))throw std::runtime_error("Invalid classic Memory Stick boot blocks.");
++    std::vector<uint8_t> file(fileBytes);
++    std::memcpy(file.data(),"FRONDMS",7);put32(file.data()+8,1);put32(file.data()+12,8192);
++    put32(file.data()+16,32);put32(file.data()+20,512);put32(file.data()+24,9);
++    put32(file.data()+28,crc32(physical.data(),physical.size()));
++    std::copy(physical.begin(),physical.end(),file.begin()+headerBytes);return file;
++}
++inline bool decode(const uint8_t* file,size_t size,std::vector<uint8_t>& physical) {
++    if(size!=fileBytes||std::memcmp(file,"FRONDMS\0",8)||get32(file+8)!=1||get32(file+12)!=8192||
++       get32(file+16)!=32||get32(file+20)!=512||get32(file+24)!=9)return false;
++    for(unsigned i=32;i<64;++i)if(file[i])return false;
++    if(get32(file+28)!=crc32(file+64,size-64))return false;
++    std::vector<uint8_t> candidate(file+64,file+size);
++    if(!validBoot(candidate))return false;
++    physical.swap(candidate);return true;
++}
++}
++#endif
+--- a/src/uarm/uarm/mmiodev_MemoryStickController.cpp
++++ b/src/uarm/uarm/mmiodev_MemoryStickController.cpp
+@@ -12,7 +12,7 @@
+ #define MS_CONTROLLER_SIZE 	0x400
+ 
+ 
+-struct MemoryStickController {
++struct LegacyMsRegisters {
+ 
+ 	uint16_t systemReg;
+ 
+@@ -27,7 +27,136 @@
+ 
+ };
+ 
+-//reg 0x08 seems to be "system register" top 16 bits (IP calls it system reg 0x18)
++
++#include "MemoryStickCard.h"
++#include "MemoryStickImage.h"
++#include "pxa_GPIO.h"
++#include "pxa_DMA.h"
++#include <cstdio>
++#include <memory>
++#include <type_traits>
++
++struct MemoryStickController : LegacyMsRegisters {
++    struct State {
++        uint32_t inserted{}, command{}, length{}, offset{}, status{}, control{}, dmaCount{}, config{}, irqPending{}, cardPending{}, credit{}, fifoPending{};
++        std::array<uint8_t,1024> buffer{};
++    } state;
++    MemoryStickCard card;
++    PxaGpio* gpio{};
++    PxaDma* dma{};
++    Reschedule reschedule{};
++    std::vector<uint8_t> savedImage;
++    uint32_t imageCrc{};
++    FILE* trace{};
++    uint32_t traceLines{},lastStatus{~0u};
++};
++static void msTrace(MemoryStickController* m,const char* what,uint32_t a,uint32_t v) {
++    if(m->trace&&!std::getenv("FROND_MS_SUMMARY")&&m->traceLines++<200000){std::fprintf(m->trace,"%s %04x %08x\n",what,a,v);std::fflush(m->trace);}
++}
++void msCtrlrRefresh(MemoryStickController* m) {
++    const bool inserted=m->state.inserted&&m->card.media.Present();
++    // Ordinary TPC/card interrupts are separately latched and enabled.
++    const bool irq=inserted&&((m->state.irqPending&1&&m->state.control&0x400)||(m->state.irqPending&2&&m->state.control&0x2000));
++    if(m->gpio){pxaGpioSetState(m->gpio,7,!inserted);pxaGpioSetState(m->gpio,10,!irq);}
++    if(m->dma){
++        const bool active=inserted&&(m->state.dmaCount&0x8000)&&m->state.offset<m->state.length&&m->state.credit;
++        pxaDmaExternalReq(m->dma,DMA_CMR_DREQ_0,active);
++    }
++}
++static void msCardInt(MemoryStickController* m) {
++    const auto i=m->card.Interrupt();
++    m->state.status=(m->state.status&~0x200f)|0x2000|(i&1)|((i&0xe0)>>4);
++}
++static void msComplete(MemoryStickController* m,bool ok,bool cardEvent) {
++    m->state.status|=0x1000|(ok?0:0x100);m->state.irqPending|=1;
++    m->state.cardPending=cardEvent;
++    if(cardEvent&&m->reschedule.rescheduleCb)m->reschedule.rescheduleCb(m->reschedule.ctx,RESCHEDULE_TASK_DEVICE_TIER0);
++    msCtrlrRefresh(m);
++}
++bool msCtrlrTaskRequired(MemoryStickController* m){return m->state.cardPending||m->state.fifoPending||(m->state.inserted&&(m->state.dmaCount&0x8000));}
++void msCtrlrPeriodic(MemoryStickController* m){
++    if(m->state.fifoPending){m->state.fifoPending=0;m->state.credit=8;msCtrlrRefresh(m);}
++    if(m->state.cardPending&&!m->state.irqPending){
++        m->state.cardPending=0;msCardInt(m);m->state.irqPending=2;
++    }
++    msCtrlrRefresh(m);
++}
++static void msStart(MemoryStickController* m,uint16_t command) {
++    m->savedImage.clear();
++    auto& s=m->state;s.command=command;s.length=command&0x3ff;if(!s.length)s.length=1024;
++    s.offset=0;s.status=0;s.irqPending=0;s.cardPending=0;s.credit=8;s.fifoPending=0;s.buffer.fill(0);
++    if(!s.inserted||!m->card.media.Present()){s.status=0x1100;msCtrlrRefresh(m);return;}
++    const uint8_t tpc=command>>12;
++    if(!(s.control&0x100)) {
++        if(!m->card.TpcRead(tpc,s.buffer.data(),s.length)){
++            s.offset=(s.length+7)&~7u;s.credit=0;msComplete(m,false,false);
++            if(m->trace&&std::getenv("FROND_MS_SUMMARY"))std::fprintf(m->trace,"FAIL TPC=%x len=%u op=%u buffer=%u block=%u page=%u\n",tpc,s.length,m->card.state.operation,m->card.state.bufferFlags,m->card.Block(),m->card.state.reg[21]);
++        }
++    }
++    msCtrlrRefresh(m);
++}
++static bool msOrdinary(MemoryStickController* m,uint32_t pa,unsigned size,bool write,void* buf) {
++    auto& s=m->state;
++    if(pa==0x90&&(size==1||size==2||size==4)) {
++        uint32_t value=0;if(write)std::memcpy(&value,buf,size);
++        if(size>s.credit){s.status|=0x100;if(!write)std::memset(buf,0,size);return true;}
++        if(s.offset<((s.length+7)&~7u)) {
++            s.credit-=size;
++            for(unsigned i=0;i<size;++i){
++                if(s.offset<s.length){if(write)s.buffer[s.offset]=value>>(8*i);else value|=uint32_t(s.buffer[s.offset])<<(8*i);}
++                ++s.offset;
++            }
++            if(s.offset>=((s.length+7)&~7u)) {
++                bool ok=true;const auto tpc=s.command>>12;
++                const auto beforeOp=m->card.state.operation,beforeBuffer=m->card.state.bufferFlags;
++                const auto cacheCrc=frondMs::crc32(m->card.state.page.data(),512);
++                const bool cardEvent=tpc==0xe||tpc==2||(tpc==0xd&&(m->card.state.operation==3||m->card.state.operation==4));
++                if(write){m->savedImage.clear();ok=m->card.TpcWrite(tpc,s.buffer.data(),s.length);}
++                else m->card.FinishRead(tpc);
++                msComplete(m,ok,cardEvent);
++                if(m->trace&&std::getenv("FROND_MS_SUMMARY")&&m->traceLines++<200000){
++                    std::fprintf(m->trace,"TPC=%x len=%u arg=%02x block=%u page=%u mode=%02x extra=%02x%02x%02x%02x op=%u->%u buffer=%u->%u cache=%08x data=%08x int=%02x ok=%u\n",unsigned(tpc),s.length,s.buffer[0],m->card.Block(),m->card.state.reg[21],m->card.state.reg[20],m->card.state.reg[22],m->card.state.reg[23],m->card.state.reg[24],m->card.state.reg[25],beforeOp,m->card.state.operation,beforeBuffer,m->card.state.bufferFlags,cacheCrc,frondMs::crc32(s.buffer.data(),std::min(s.length,512u)),m->card.Interrupt(),ok);std::fflush(m->trace);
++                }
++            }
++            if(!s.credit&&s.offset<((s.length+7)&~7u)){
++                s.fifoPending=1;if(m->reschedule.rescheduleCb)m->reschedule.rescheduleCb(m->reschedule.ctx,RESCHEDULE_TASK_DEVICE_TIER0);
++            }
++            if(s.dmaCount&0x8000){
++                const auto left=((s.length+7)&~7u)-std::min(s.offset,((s.length+7)&~7u));
++                s.dmaCount=left?(0x8000|(((left+7)/8)&0x1ff)):0;
++            }
++        }
++        if(!write)std::memcpy(buf,&value,size);
++        msTrace(m,write?"W":"R",pa,value);msCtrlrRefresh(m);return true;
++    }
++    if(size!=2)return false;
++    uint16_t value=0;if(write)std::memcpy(&value,buf,2);
++    switch(pa) {
++     case 0x20:if(write)s.config=value;else value=s.config;break;
++     case 0x10:if(write)return false;value=s.irqPending?1:0;break;
++     case 0x48:
++        if(write){s.dmaCount=value;if((value&0x8000)&&m->reschedule.rescheduleCb)m->reschedule.rescheduleCb(m->reschedule.ctx,RESCHEDULE_TASK_DEVICE_TIER0);}
++        else value=s.dmaCount;
++        break;
++     case 0x80:if(write)msStart(m,value);else value=s.command;break;
++     case 0xa0:
++        if(write)return false;
++        value=s.status|((s.control&0x100)?(!s.credit?0x10:0):((!s.credit||s.offset>=s.length)?0x20:0));break;
++     case 0xb0:
++        if(write){
++            if(value&0x8000){s.command=s.length=s.offset=s.status=s.irqPending=s.cardPending=s.dmaCount=s.credit=s.fifoPending=0;}
++            if(value&0x200){s.offset=s.length=s.credit=s.fifoPending=0;}
++            // The original driver's context supplies acknowledgement bit0x0800.
++            if(value&0x800)s.irqPending=0;
++            s.control=value&~0x8a00u;
++        }else value=s.control;
++        break;
++     default:return false;
++    }
++    if(!write)std::memcpy(buf,&value,2);
++    if(write||pa!=0xa0||m->lastStatus!=value){msTrace(m,write?"W":"R",pa,value);if(pa==0xa0)m->lastStatus=value;}
++    msCtrlrRefresh(m);return true;
++}
+ 
+ static bool msCtrlrPrvMemAccessF(void* userData, uint32_t pa, uint_fast8_t size, bool write, void* buf)
+ {
+@@ -36,6 +165,7 @@
+ 	bool ret = true;
+ 
+ 	pa %= MS_CONTROLLER_SIZE;
++    if(pa==0x10||pa==0x20||pa==0x48||pa==0x80||pa==0x90||pa==0xa0||pa==0xb0) return msOrdinary(msc,pa,size,write,buf);
+ 
+ 	if (size == 4 && !write && (pa == 0x2f0 || pa == 0x2f8)) {
+ 
+@@ -142,47 +272,106 @@
+ 	return ret;
+ }
+ 
+-struct MemoryStickController* msCtrlrInit(struct ArmMem *physMem, uint32_t baseAddr)
+-{
+-	struct MemoryStickController *msc = (struct MemoryStickController*)malloc(sizeof(*msc));
+-
+-	if (!msc)
+-		ERR("cannot alloc MSC");
+-
+-	memset(msc, 0, sizeof (*msc));
+-
+-	msCtrlrReset(msc);
+-
+-	if (!memRegionAdd(physMem, baseAddr, MS_CONTROLLER_SIZE, msCtrlrPrvMemAccessF, msc))
+-		ERR("cannot add MSC to MEM\n");
+-
+-	return msc;
+-}
+-
+-
+-void msCtrlrReset(MemoryStickController *msc) { *msc = {}; msc->systemReg = 0x4455; }
+-void msCtrlrDestroy(MemoryStickController *msc) { free(msc); }
+-
+-template <typename H> static void msCtrlrState(MemoryStickController &state, H &h) {
+-    h.Do16(state.systemReg).Do16(state.reg_0).Do16(state.reg_40).Do16(state.reg_50).Do16(state.reg_2c0).Do16(state.reg_2d0).Do16(state.reg_2e0).Do16(state.reg_2f0).Do16(state.reg_188).Do16(state.reg_180).Do32(state.reply_lo_2f0).Do32(state.reply_hi_2f8);
+-}
+-template <typename T> void msCtrlrSave(MemoryStickController *msc, T &savestate) {
+-    auto *chunk = savestate.GetChunk(tg50MsChunk, 0);
+-    if (!chunk) ERR("cannot allocate TG50 model state");
+-    SaveChunkHelper h(*chunk);
+-    msCtrlrState(*msc, h);
+-}
+-template <typename T> bool msCtrlrLoad(MemoryStickController *msc, T &loader, bool preserveInput) {
+-    auto *chunk = loader.GetChunkOrFail(tg50MsChunk, 0, "TG50 msCtrlr");
+-    if (!chunk) return false;
+-    auto next = *msc;
+-    LoadChunkHelper h(*chunk);
+-    msCtrlrState(next, h);
+-    if (chunk->HasError()) { loader.NotifyError(); return false; }
+-    *msc = next;
+-    // Board refreshes output pins after GPIO, IC and all models have loaded.
+-    return true;
+-}
+-template void msCtrlrSave<Savestate<ChunkType>>(MemoryStickController*, Savestate<ChunkType>&);
+-template void msCtrlrSave<SavestateProbe<ChunkType>>(MemoryStickController*, SavestateProbe<ChunkType>&);
+-template bool msCtrlrLoad<SavestateLoader<ChunkType>>(MemoryStickController*, SavestateLoader<ChunkType>&, bool);
++
++static uint_fast8_t msDmaValid(void* context){
++    auto* m=static_cast<MemoryStickController*>(context);
++    if(!m->state.inserted||!(m->state.dmaCount&0x8000))return 0;
++    const auto left=((m->state.length+7)&~7u)-std::min(m->state.offset,((m->state.length+7)&~7u));
++    return std::min(m->state.credit,left);
++}
++struct MemoryStickController* msCtrlrInit(ArmMem *physMem,uint32_t baseAddr,PxaGpio* gpio,PxaDma* dma,Reschedule reschedule) {
++    auto* m=new MemoryStickController{};m->gpio=gpio;m->dma=dma;m->reschedule=reschedule;
++    if(const char* path=std::getenv("FROND_MS_TRACE"))m->trace=std::fopen(path,"w");
++    msCtrlrReset(m);
++    if(dma){const PxaDmaPeripheral fifo{msDmaValid,nullptr,nullptr,m,baseAddr+0x90};
++        pxaDmaSetPeripheral(dma,DMA_CMR_DREQ_0,&fifo);}
++    if(!memRegionAdd(physMem,baseAddr,MS_CONTROLLER_SIZE,msCtrlrPrvMemAccessF,m))ERR("cannot add MSC");
++    return m;
++}
++void msCtrlrReset(MemoryStickController* m) {
++    static_cast<LegacyMsRegisters&>(*m)={};m->systemReg=0x4455;
++    const auto inserted=m->state.inserted;m->state={};m->state.inserted=inserted;
++    m->savedImage.clear();m->card.Reset();msCtrlrRefresh(m);
++}
++void msCtrlrDestroy(MemoryStickController* m){if(m->dma){pxaDmaSetPeripheral(m->dma,DMA_CMR_DREQ_0,nullptr);}if(m->trace)std::fclose(m->trace);delete m;}
++bool msCtrlrPresent(MemoryStickController* m){return m&&m->card.media.Present();}
++bool msCtrlrInserted(MemoryStickController* m){return m&&m->state.inserted;}
++bool msCtrlrReadOnly(MemoryStickController* m){return m&&m->card.media.WriteProtected();}
++bool msCtrlrProtect(MemoryStickController* m,bool protect){if(!msCtrlrPresent(m)||msCtrlrInserted(m))return false;m->card.media.SetWriteProtected(protect);return true;}
++bool msCtrlrAttach(MemoryStickController* m,const std::vector<uint8_t>& physical) {
++    if(!m||m->state.inserted||!frondMs::validBoot(physical))return false;
++    if(m->card.media.Attach(physical,false)!=MemoryStickMedia::Result::ok)return false;
++    m->savedImage.clear();m->card.Reset();m->state={};m->state.inserted=1;msCtrlrRefresh(m);return true;
++}
++bool msCtrlrInsert(MemoryStickController* m,bool inserted){
++    if(!msCtrlrPresent(m))return false;
++    if(bool(m->state.inserted)==inserted)return false;
++    m->state={};m->state.inserted=inserted;m->savedImage.clear();m->card.Reset();msCtrlrRefresh(m);return true;
++}
++bool msCtrlrExport(MemoryStickController* m,std::vector<uint8_t>& physical){return msCtrlrPresent(m)&&m->card.media.CopyImage(physical)==MemoryStickMedia::Result::ok;}
++
++template<typename H>static void msCtrlrState(LegacyMsRegisters& s,H& h){
++    h.Do16(s.systemReg).Do16(s.reg_0).Do16(s.reg_40).Do16(s.reg_50).Do16(s.reg_2c0).Do16(s.reg_2d0).Do16(s.reg_2e0).Do16(s.reg_2f0).Do16(s.reg_188).Do16(s.reg_180).Do32(s.reply_lo_2f0).Do32(s.reply_hi_2f8);
++}
++template<typename H>static void msProtocol(MemoryStickController::State& s,MemoryStickCard::State& c,H& h){
++    h.Do32(s.inserted).Do32(s.command).Do32(s.length).Do32(s.offset).Do32(s.status).Do32(s.control).Do32(s.dmaCount)
++     .DoBuffer(s.buffer.data(),s.buffer.size()).DoBuffer(c.reg.data(),c.reg.size()).DoBuffer(c.page.data(),c.page.size())
++     .Do32(c.readStart).Do32(c.readSize).Do32(c.writeStart).Do32(c.writeSize).Do32(c.operation).Do32(c.bufferFlags).Do32(s.config).Do32(s.irqPending).Do32(s.cardPending).Do32(s.credit).Do32(s.fifoPending);
++}
++template<typename T>void msCtrlrSave(MemoryStickController* m,T& savestate){
++    auto* old=savestate.GetChunk(tg50MsChunk,0);if(!old){savestate.NotifyError();return;}
++    SaveChunkHelper h(*old);msCtrlrState(*m,h);
++    auto* chunk=savestate.GetChunk(ChunkType::sonyTg50MsCard,0);if(!chunk){savestate.NotifyError();return;}
++    SaveChunkHelper card(*chunk);auto state=m->state;auto cs=m->card.state;
++    msProtocol(state,cs,card);card.Do32(m->card.media.Present()).Do32(m->card.media.WriteProtected());
++    if(m->card.media.Present()){
++        if(m->savedImage.empty()) {
++            std::vector<uint8_t> physical;m->card.media.CopyImage(physical);
++            m->imageCrc=frondMs::crc32(physical.data(),physical.size());
++            mz_ulong size=mz_compressBound(physical.size());m->savedImage.resize(size);
++            std::vector<uint8_t>(m->savedImage.begin(),m->savedImage.end()).swap(m->savedImage);
++            if(mz_compress2(m->savedImage.data(),&size,physical.data(),physical.size(),1)!=MZ_OK){m->savedImage.clear();savestate.NotifyError();return;}
++            m->savedImage.resize(size);
++            std::vector<uint8_t>(m->savedImage.begin(),m->savedImage.end()).swap(m->savedImage);
++        }
++        card.Do32(m->savedImage.size()).Do32(m->imageCrc).DoBuffer(m->savedImage.data(),m->savedImage.size());
++    }
++}
++template<typename T>bool msCtrlrLoad(MemoryStickController* m,T& loader,bool preserveInput){
++    auto* old=loader.GetChunkOrFail(tg50MsChunk,0,"TG50 Memory Stick");if(!old)return false;
++    LegacyMsRegisters legacy{};LoadChunkHelper h(*old);msCtrlrState(legacy,h);
++    if(old->HasError()){loader.NotifyError();return false;}
++    MemoryStickController::State state{};MemoryStickCard::State cs{};
++    uint32_t present=0,protect=0;std::vector<uint8_t> physical;
++    if(loader.GetChunk(ChunkType::sonyTg50MsCard)){
++        auto* chunk=loader.GetChunkOrFail(ChunkType::sonyTg50MsCard,0,"TG50 classic card");
++        if(!chunk)return false;
++        LoadChunkHelper card(*chunk);msProtocol(state,cs,card);card.Do32(present).Do32(protect);
++        if(chunk->HasError()||present>1||protect>1||state.inserted>1||(!present&&(state.inserted||protect))||
++           state.command>0xffff||state.length>1024||state.offset>((state.length+7)&~7u)||state.control>0xffff||
++           state.status>0xffff||state.dmaCount>0xffff||state.config>0xffff||state.irqPending>3||state.cardPending>1||state.credit>8||state.fifoPending>1||(state.fifoPending&&state.credit)||!MemoryStickCard::Valid(cs)){loader.NotifyError();return false;}
++        if(present){
++            uint32_t size=0,crc=0;card.Do32(size).Do32(crc);
++            if(chunk->HasError()||!size||size>mz_compressBound(MemoryStickMedia::imageBytes)){loader.NotifyError();return false;}
++            std::vector<uint8_t> compressed(size);card.DoBuffer(compressed.data(),size);
++            if(chunk->HasError()){loader.NotifyError();return false;}
++            physical.resize(MemoryStickMedia::imageBytes);mz_stream stream{};
++            stream.next_in=compressed.data();stream.avail_in=compressed.size();
++            stream.next_out=physical.data();stream.avail_out=physical.size();
++            if(mz_inflateInit(&stream)!=MZ_OK){loader.NotifyError();return false;}
++            const auto result=mz_inflate(&stream,MZ_FINISH);
++            const bool valid=result==MZ_STREAM_END&&stream.total_in==compressed.size()&&stream.total_out==physical.size();
++            mz_inflateEnd(&stream);
++            if(!valid||
++               frondMs::crc32(physical.data(),physical.size())!=crc){loader.NotifyError();return false;}
++        }
++    }else {MemoryStickCard card;card.Reset();cs=card.state;}
++    // Parsing and allocation complete before replacing the card or its transfer state.
++    if(present){if(m->card.media.Attach(physical,protect)!=MemoryStickMedia::Result::ok){loader.NotifyError();return false;}}
++    else m->card.media.Detach();
++    m->savedImage.clear();static_cast<LegacyMsRegisters&>(*m)=legacy;m->state=state;m->card.state=cs;
++    (void)preserveInput;return true;
++}
++template void msCtrlrSave<Savestate<ChunkType>>(MemoryStickController*,Savestate<ChunkType>&);
++template void msCtrlrSave<SavestateProbe<ChunkType>>(MemoryStickController*,SavestateProbe<ChunkType>&);
++template bool msCtrlrLoad<SavestateLoader<ChunkType>>(MemoryStickController*,SavestateLoader<ChunkType>&,bool);
+--- a/src/uarm/uarm/mmiodev_MemoryStickController.h
++++ b/src/uarm/uarm/mmiodev_MemoryStickController.h
+@@ -5,12 +5,15 @@
+ 
+ 
+ #include "mem.h"
++#include <vector>
++#include "reschedule.h"
++struct PxaGpio;struct PxaDma;
+ 
+ 
+ struct MemoryStickController;
+ 
+ 
+-struct MemoryStickController* msCtrlrInit(struct ArmMem *physMem, uint32_t baseAddr);
++struct MemoryStickController* msCtrlrInit(struct ArmMem *physMem, uint32_t baseAddr,PxaGpio* gpio=nullptr,PxaDma* dma=nullptr,Reschedule reschedule={});
+ 
+ 
+ 
+@@ -19,4 +22,14 @@
+ void msCtrlrDestroy(MemoryStickController *);
+ template <typename T> void msCtrlrSave(MemoryStickController *, T &);
+ template <typename T> bool msCtrlrLoad(MemoryStickController *, T &, bool preserveInput = false);
++bool msCtrlrTaskRequired(MemoryStickController*);
++void msCtrlrPeriodic(MemoryStickController*);
++void msCtrlrRefresh(MemoryStickController*);
++bool msCtrlrPresent(MemoryStickController*);
++bool msCtrlrInserted(MemoryStickController*);
++bool msCtrlrReadOnly(MemoryStickController*);
++bool msCtrlrProtect(MemoryStickController*,bool);
++bool msCtrlrAttach(MemoryStickController*,const std::vector<uint8_t>&);
++bool msCtrlrInsert(MemoryStickController*,bool);
++bool msCtrlrExport(MemoryStickController*,std::vector<uint8_t>&);
+ #endif
+--- a/src/uarm/uarm/savestate/ChunkTypeUarm.h
++++ b/src/uarm/uarm/savestate/ChunkTypeUarm.h
+@@ -36,6 +36,7 @@
+     sonyTg50Ms = 0x01f0,
+     sonyTg50Board = 0x0200,
+     sonyTg50Audio = 0x0210,
++    sonyTg50MsCard = 0x0220,
+ 
+     pvIc = 0x1000,
+     pvTimer = 0x1010,
+--- a/src/uarm/uarm/device.h
++++ b/src/uarm/uarm/device.h
+@@ -28,11 +28,14 @@
+ #define DEVICE_PERIODIC_TIER1 1
+ 
+ struct AudioQueue;
++struct MemoryStickController;
++struct PxaDma;
+ 
+ struct SocPeriphs {
+     // in to deviceSetup
+     struct PxaAC97 *ac97;
+     struct PxaGpio *gpio;
++    struct PxaDma *dma;
+     struct PxaI2c *i2c;
+     struct PxaI2s *i2s;
+     struct PxaPwm *pwm0;
+@@ -120,4 +123,5 @@
+ void deviceStopBluetooth(Device*);
+ 
+ 
++MemoryStickController* deviceMemoryStick(Device*);
+ #endif
+--- a/src/uarm/uarm/deviceSonyTG50.h
++++ b/src/uarm/uarm/deviceSonyTG50.h
+@@ -9,11 +9,12 @@
+ // The extra MiB and the mirror reproduce uARM's RAM-probe workaround.
+ constexpr uint32_t tg50RamBackingSize = 17u << 20;
+ 
+-Tg50Board *tg50BoardSetup(SocPeriphs *, Keypad *);
++Tg50Board *tg50BoardSetup(SocPeriphs *, Keypad *,Reschedule);
+ void tg50BoardTouch(Tg50Board *, int x, int y);
+ void tg50BoardKey(Tg50Board *, uint32_t key, bool down);
+ bool tg50BoardHoldSwitchOn(const Tg50Board *);
+ bool tg50BoardPanelEnabled(const Tg50Board *);
++bool tg50BoardTaskRequired(Tg50Board*);
+ void tg50BoardPeriodic(Tg50Board *);
+ void tg50BoardReset(Tg50Board *, bool clearSram);
+ void tg50BoardBeginReset(Tg50Board *);
+@@ -31,4 +32,6 @@
+ void tg50BoardAudioSleepReset(Tg50Board *);
+ void tg50BoardAudioAdvance(Tg50Board *, uint64_t ns);
+ void tg50BoardSetAudioQueue(Tg50Board *, AudioQueue *);
++struct MemoryStickController;
++MemoryStickController* tg50BoardMemoryStick(Tg50Board*);
+ #endif
+--- a/src/uarm/uarm/deviceSonyTG50.cpp
++++ b/src/uarm/uarm/deviceSonyTG50.cpp
+@@ -94,7 +94,7 @@
+     return keys;
+ }
+ 
+-Tg50Board *tg50BoardSetup(SocPeriphs *sp, Keypad *kp) {
++Tg50Board *tg50BoardSetup(SocPeriphs *sp, Keypad *kp,Reschedule reschedule) {
+     auto *board = new Tg50Board{};
+     board->mem = sp->mem;
+     board->gpio = sp->gpio;
+@@ -110,7 +110,7 @@
+     board->pmic = an32502aInit(board->i2c);
+     const auto keys = tg50KeyMap();
+     board->uc = tg50ucInit(board->mem, board->gpio, 14, keys.data(), 13);
+-    board->ms = msCtrlrInit(board->mem, tg50MsBase);
++    board->ms = msCtrlrInit(board->mem, tg50MsBase,board->gpio,sp->dma,reschedule);
+     // MemoryBuffer owns whole pages, only the physical 1 KiB is mapped and saved.
+     if (!memoryBufferAllocate(&board->sramBuffer, MEMORY_BUFFER_GRANULARITY))
+         ERR("cannot allocate TG50 SRAM");
+@@ -137,6 +137,7 @@
+     pxaGpioSetState(board->gpio, 21, true);
+     pxaGpioSetState(board->gpio, 22, true);
+     for (unsigned pin : {0u, 1u, 3u, 7u, 10u, 13u}) pxaGpioSetState(board->gpio, pin, true);
++    msCtrlrRefresh(board->ms);
+     if (clearSram) {
+         memset(board->sramBuffer.buffer, 0, tg50SramSize);
+         memoryBufferMarkRangeDirty(&board->sramBuffer, 0, tg50SramSize);
+@@ -174,7 +175,8 @@
+ bool tg50BoardPanelEnabled(const Tg50Board *board) {
+     return tg50ucGpioState(board->uc, 1, 9);
+ }
+-void tg50BoardPeriodic(Tg50Board *board) { ad7873Periodic(board->touch); }
++void tg50BoardPeriodic(Tg50Board *board) { ad7873Periodic(board->touch);msCtrlrPeriodic(board->ms); }
++bool tg50BoardTaskRequired(Tg50Board* b){return msCtrlrTaskRequired(b->ms);}
+ std::function<void()> tg50BoardCaptureInput(Tg50Board *board) {
+     auto touch = ad7873CaptureInput(board->touch);
+     auto keys = tg50ucCaptureInput(board->uc);
+@@ -220,7 +222,7 @@
+         !ad7873Load(board->touch, loader, preserveInput) ||
+         !ak4534Load(board->codec, loader, preserveInput) ||
+         !an32502aLoad(board->pmic, loader, preserveInput) ||
+-        !msCtrlrLoad(board->ms, loader, preserveInput)) return false;
++        !(board->restoringReset ? (msCtrlrReset(board->ms),true) : msCtrlrLoad(board->ms, loader, preserveInput))) return false;
+     if (!board->restoringReset) {
+         memcpy(board->sramBuffer.buffer, sram.data(), sram.size());
+         memoryBufferMarkRangeDirty(&board->sramBuffer, 0, tg50SramSize);
+@@ -249,6 +251,7 @@
+     if (!preserveInput) board->jogHeld[0] = board->jogHeld[1] = false;
+     // GPIO and interrupt-controller state must be loaded before these outputs.
+     tg50ucRefreshIrq(board->uc);
++    msCtrlrRefresh(board->ms);
+     ad7873Periodic(board->touch);
+     return true;
+ }
+@@ -317,3 +320,5 @@
+     return tg50ucGpioIsOutput(board->uc, 1, 3) && !tg50ucGpioState(board->uc, 1, 3) &&
+            tg50ucGpioIsOutput(board->uc, 1, 4) && tg50ucGpioState(board->uc, 1, 4);
+ }
++
++MemoryStickController* tg50BoardMemoryStick(Tg50Board* b){return b->ms;}
+--- a/src/uarm/uarm/devicePalmTungstenE2.cpp
++++ b/src/uarm/uarm/devicePalmTungstenE2.cpp
+@@ -184,7 +184,7 @@
+     dev->reschedule = reschedule;
+ 
+     if (type == deviceTypeTG50) {
+-        dev->tg50 = tg50BoardSetup(sp, kp);
++        dev->tg50 = tg50BoardSetup(sp, kp,reschedule);
+         return dev;
+     }
+ 
+@@ -401,7 +401,7 @@
+ }
+ 
+ bool deviceTaskRequired(struct Device *dev, uint32_t tier) {
+-    if (dev->tg50) return false;
++    if (dev->tg50) return tier==DEVICE_PERIODIC_TIER0&&tg50BoardTaskRequired(dev->tg50);
+     if (tier == DEVICE_PERIODIC_TIER0) {
+         return (dev->nand && directNandTaskRequired(dev->nand))
+ #ifndef __EMSCRIPTEN__
+@@ -540,3 +540,5 @@
+ bool deviceTg50UsbListening(Device *dev) {
+     return dev && dev->tg50 && tg50BoardUsbListening(dev->tg50);
+ }
++
++MemoryStickController* deviceMemoryStick(Device* d){return d&&d->tg50?tg50BoardMemoryStick(d->tg50):nullptr;}
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -258,6 +258,7 @@
+     sp.mem = mem;
+     sp.soc = this;
+     sp.gpio = gpio;
++    sp.dma = dma;
+     sp.i2c = i2c;
+     sp.i2s = i2s;
+     sp.pwm0 = pwm[0];
+@@ -1271,3 +1272,5 @@
+     if (!soc.usbHostPaused && !soc.irReplacementDepth && soc.usbHostHooks.pinsChanged)
+         soc.usbHostHooks.pinsChanged(soc.usbHostHooks.context);
+ }
++
++MemoryStickController* SocPXA::GetMemoryStick(){return deviceMemoryStick(dev);}
+--- a/src/uarm/uarm/soc_PXA.h
++++ b/src/uarm/uarm/soc_PXA.h
+@@ -26,6 +26,7 @@
+ struct PxaGpio;
+ struct PxaAC97;
+ struct PxaDma;
++struct MemoryStickController;
+ struct PxaI2s;
+ struct PxaI2c;
+ struct PxaIc;
+@@ -61,6 +62,7 @@
+ 
+    public:
+     ~SocPXA();
++    MemoryStickController* GetMemoryStick();
+     void RestoreFastAudioRoute();
+     FastAudio::EarlyDiagnostics AudioDiagnostics() const { return fastAudio?fastAudio->EarlyStatus():FastAudio::EarlyDiagnostics{}; }
+     bool AudioOutputFenced() const { return fastAudio && fastAudio->OutputFenced(); }
+--- a/src/uarm/uarm/soc_generic_impl.h
++++ b/src/uarm/uarm/soc_generic_impl.h
+@@ -124,6 +124,7 @@
+ 
+ template <class T>
+ bool SocGeneric<T>::Save() {
++    if (GetDeviceType()==deviceTypeTG50) savestate->Reset();
+     return savestate->Save(*this);
+ }
+ 
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -6,6 +6,7 @@
+ #include <cstring>
+ #include <fcntl.h>
+ #include <iostream>
++#include <fstream>
+ #include <stdexcept>
+ #include <sys/socket.h>
+ #include <sys/un.h>
+@@ -22,6 +23,8 @@
+ #include "native_boundary.h"
+ #include "CPU.h"
+ #include "SdImage.h"
++#include "MemoryStickImage.h"
++#include "mmiodev_MemoryStickController.h"
+ #include "app_launcher.h"
+ #include "md5.h"
+ #include "GuestExport.h"
+@@ -106,7 +109,7 @@
+                 return true;
+             std::string argument;
+             if (!decode(line.substr(second + 1), argument)) return true;
+-            const bool work = command == "guest-ready" || command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "db-list" || command == "reset" || command == "hard-reset" || command == "launch-app" || command == "input-replay" || (command.rfind("sd-", 0) == 0 && command != "sd-state");
++            const bool work = command == "guest-ready" || command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "db-list" || command == "reset" || command == "hard-reset" || command == "launch-app" || command == "input-replay" || (command.rfind("sd-", 0) == 0 && command != "sd-state") || (command.rfind("ms-",0)==0&&command!="ms-state"&&command!="ms-protection");
+             if (work) ctx.audioDriver.Pause();
+             Reply result;
+             try {
+@@ -221,9 +224,9 @@
+         }
+     }
+     Reply dispatch(commands::Context& ctx, const std::string& command, const std::string& path) {
+-        const bool fileCommand = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "input-replay";
++        const bool fileCommand = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "ms-insert" || command == "ms-export" || command == "input-replay";
+         if (fileCommand && (path.empty() || path.front() != '/')) return {false, "argument", "An absolute file path is required."};
+-        if (!fileCommand && command != "sd-create" && command != "launch-app" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "bluetooth-mode" && command != "sound-mode" && command != "hold" && !path.empty()) return {false, "argument", "This command takes no argument."};
++        if (!fileCommand && command != "sd-create" && command != "ms-create" && command != "ms-read-only" && command != "launch-app" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "bluetooth-mode" && command != "sound-mode" && command != "hold" && !path.empty()) return {false, "argument", "This command takes no argument."};
+         if (command == "guest-ready") {
+             if (!GuestDatabaseOps::Ready(*ctx.soc))
+                 return {false, "not-ready", "Palm OS has not reached a supported application boundary."};
+@@ -337,6 +340,46 @@
+             if (ctx.soc->wirelessDevice) ctx.soc->wirelessDevice->Poll();
+             return {true, "network", ctx.soc->networkSimulation.GetModeName()};
+         }
++        if (command.rfind("ms-",0)==0) {
++            auto* pxa=dynamic_cast<SocPXA*>(ctx.soc);
++            auto* ms=pxa?pxa->GetMemoryStick():nullptr;
++            if(!ms)return {false,"unsupported","This device has no Memory Stick slot."};
++            if(command=="ms-state")return {true,"card",!msCtrlrPresent(ms)?"none":msCtrlrInserted(ms)?"inserted":"ejected"};
++            if(command=="ms-protection")return {true,"protection",msCtrlrReadOnly(ms)?"read-only":"writable"};
++            if(command=="ms-create"||command=="ms-insert") {
++                if(msCtrlrInserted(ms))return {false,"busy","Eject the current Memory Stick before replacing it."};
++                std::vector<uint8_t> image;
++                if(command=="ms-create") {
++                    if(path!="128")return {false,"size","Choose a classic 128 MB Memory Stick."};
++                    image=frondMs::create();
++                }else {
++                    std::ifstream input(path,std::ios::binary|std::ios::ate);
++                    if(!input||input.tellg()!=std::streamoff(frondMs::fileBytes))return {false,"size","Use a Frond classic 128 MB Memory Stick image."};
++                    input.seekg(0);std::vector<uint8_t> bytes(frondMs::fileBytes);
++                    if(!input.read(reinterpret_cast<char*>(bytes.data()),bytes.size())||input.peek()!=std::char_traits<char>::eof())return {false,"read","Could not read the Memory Stick image."};
++                    if(!frondMs::decode(bytes.data(),bytes.size(),image))return {false,"image","Use a valid Frond classic 128 MB Memory Stick image."};
++                }
++                if(!msCtrlrAttach(ms,image))return {false,"image","Could not attach the Memory Stick image."};
++                return {true,"inserted","Memory Stick inserted."};
++            }
++            if(command=="ms-eject"||command=="ms-reinsert") {
++                if(!msCtrlrInsert(ms,command=="ms-reinsert"))return {false,"empty","No Memory Stick is available in that state."};
++                return {true,command=="ms-eject"?"ejected":"inserted",command=="ms-eject"?"Memory Stick ejected. Its contents remain in this session.":"Memory Stick inserted."};
++            }
++            if(command=="ms-read-only") {
++                if(path!="on"&&path!="off")return {false,"argument","Use on or off."};
++                if(!msCtrlrProtect(ms,path=="on"))return {false,"busy","Eject the Memory Stick before changing write protection."};
++                return {true,"protection",msCtrlrReadOnly(ms)?"read-only":"writable"};
++            }
++            if(command=="ms-export") {
++                if(msCtrlrInserted(ms))return {false,"busy","Eject the Memory Stick before exporting its image."};
++                std::vector<uint8_t> image;
++                if(!msCtrlrExport(ms,image))return {false,"empty","This session has no Memory Stick."};
++                const auto file=frondMs::encode(image);writeAtomic(path,file.data(),file.size());
++                return {true,"exported","Memory Stick image exported."};
++            }
++            return {false,"command","Unknown Memory Stick command."};
++        }
+         if (command == "sd-state") return {true, "card", !sdCardInitialized() ? "none" : ctx.soc->SdInserted() ? "inserted" : "ejected"};
+         if (command == "sd-create" || command == "sd-insert") {
+             if (ctx.soc->SdInserted()) return {false, "busy", "Eject the current card before replacing it."};
+--- a/src/common/device_profile5.h
++++ b/src/common/device_profile5.h
+@@ -41,6 +41,7 @@
+     int homeKey{0}; // SDL keycode for a physical Home button.
+     bool holdPresent{false}, holdSupported{false};
+     int sideTabWidth{0};
++    bool memoryStick{false};
+ };
+ 
+ struct DeviceProfile5 {
+--- a/src/common/savestate/Savestate.h
++++ b/src/common/savestate/Savestate.h
+@@ -90,7 +90,7 @@
+ 
+     for (auto& [chunkType, chunk] : probeMap) size = size + chunk.GetSize() * 4 + 8;
+ 
+-    buffer = std::make_unique<uint32_t[]>(size);
++    buffer = std::make_unique<uint32_t[]>(size / sizeof(uint32_t));
+ 
+     uint32_t* nextTocEntry = buffer.get();
+     *(nextTocEntry++) = chunkCount;
+--- a/src/uarm/uarm/pxa_DMA.cpp
++++ b/src/uarm/uarm/pxa_DMA.cpp
+@@ -216,7 +216,7 @@
+         (ch->CR & 0x30000000u) ? pxaDmaPrvPeripheral(dma, channel) : nullptr;
+     const bool fromPeripheral = peripheral && (ch->CR & 0x20000000u);
+     const bool toPeripheral = peripheral && !fromPeripheral && (ch->CR & 0x10000000u);
+-    if (fromPeripheral) {
++    if (fromPeripheral || (toPeripheral && peripheral->externalBusAddress)) {
+         const uint32_t valid = peripheral->validBytes(peripheral->ctx);
+         if (num > valid) num = valid;
+     }
+@@ -224,9 +224,14 @@
+         memIsBufferRange(dma->mem, ch->SAR, num, false) &&
+         memIsBufferRange(dma->mem, ch->TAR, num, true);
+     const uint32_t width = (ch->CR >> 14) & 3;
+-    // PXA27x table 5-6/5-14: WIDTH=00 is required for memory moves,
+-    // but reserved for on-chip peripheral transactions. Use word memory beats.
+-    if (!width && !memoryMove) return pxaDmaPrvBusError(dma, ch);
++    // PXA255 DCMD: WIDTH=00 is required for memory and companion-chip transfers.
++    // On-chip peripherals keep their documented nonzero widths.
++    const bool externalMemory = peripheral && peripheral->externalBusAddress &&
++        ((fromPeripheral && !(ch->CR&0x80000000u) && ch->SAR == peripheral->externalBusAddress &&
++          memIsBufferRange(dma->mem,ch->TAR,num,true)) ||
++         (toPeripheral && !(ch->CR&0x40000000u) && ch->TAR == peripheral->externalBusAddress &&
++          memIsBufferRange(dma->mem,ch->SAR,num,false)));
++    if (!width && !memoryMove && !externalMemory) return pxaDmaPrvBusError(dma, ch);
+     const uint32_t each = width ? 1u << (width - 1) : 4;
+ 
+     // A short memory-to-memory tail can be split into byte lanes. Never do
+--- a/src/uarm/uarm/pxa_DMA.h
++++ b/src/uarm/uarm/pxa_DMA.h
+@@ -120,6 +120,8 @@
+     bool (*endOfReceive)(void* ctx);
+     void (*endOfChain)(void* ctx);
+     void* ctx;
++    // A companion-chip FIFO on the external memory bus uses WIDTH=00.
++    uint32_t externalBusAddress{0};
+ };
+ void pxaDmaSetPeripheral(struct PxaDma* dma, uint_fast8_t chNum, const struct PxaDmaPeripheral* peripheral);
+ 

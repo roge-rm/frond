@@ -626,7 +626,9 @@ infrared beaming uses the same peer relay as the other models.
 System/alarm beeps and Sony Voice Recorder mono 22,050 Hz SP playback work,
 including normal mute and saved-session continuation. Standard Palm SndStream,
 stereo Sony playback, live 8 kHz audio, microphone input and low-latency audio
-remain unqualified. Memory Stick, USB HotSync, Bluetooth, raw serial, the external
-infrared keyboard and high-power remote-control infrared remain unavailable.
-The Memory Stick slot stays visible and greyed out, with no SD image controls.
+remain unqualified. Classic 128 MB Memory Stick storage supports card images,
+Files and applications in Sony Launcher's Card category; see
+[Memory Stick storage](memory-stick.md). Memory Stick Pro, MagicGate, Memory Stick
+audio, USB HotSync, Bluetooth, raw serial, the external infrared keyboard and
+high-power remote-control infrared remain unavailable.
 USB needs further reserved-register and endpoint DMA work before HotSync can run.

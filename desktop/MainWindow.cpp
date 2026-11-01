@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 #include "FirmwareInput.h"
 #include "SdExchangeDialog.h"
+#include "MemoryStickFilesDialog.h"
 #include "Dialogs.h"
 #include "FirmwareStore.h"
 #include "AudioQualification.h"
@@ -165,26 +166,33 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     };
     connect(sdCreate, &QPushButton::clicked, this, [this, replaceCard] {
         if (!replaceCard()) return;
+        if (memoryStick()) { send(cardCommand("create"), "128"); return; }
         bool ok;
         const auto size = QInputDialog::getItem(this, tr("New card"), tr("Size"), {"32 MB", "64 MB", "128 MB"}, 0, false, &ok);
         if (ok) send("sd-create", size.section(' ', 0, 0));
     });
     connect(sdImport, &QPushButton::clicked, this, [this, replaceCard] {
         if (!replaceCard()) return;
-        const auto file = QFileDialog::getOpenFileName(this, tr("Insert image"), {}, tr("SD images (*.img *.bin);;All files (*)"));
-        if (!file.isEmpty()) send("sd-insert", QFileInfo(file).absoluteFilePath());
+        const auto file = QFileDialog::getOpenFileName(this, tr("Insert image"), {}, memoryStick() ? tr("Memory Stick images (*.frondms);;All files (*)") : tr("SD images (*.img *.bin);;All files (*)"));
+        if (!file.isEmpty()) send(cardCommand("insert"), QFileInfo(file).absoluteFilePath());
     });
     connect(sdEject, &QPushButton::clicked, this, [this] {
         if (QMessageBox::question(this, tr("Eject the card?"), tr("Close any files open on the Palm first."),
-                                  QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes) send("sd-eject");
+                                  QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes) send(cardCommand("eject"));
     });
-    connect(sdReinsert, &QPushButton::clicked, this, [this] { send("sd-reinsert"); });
+    connect(sdReinsert, &QPushButton::clicked, this, [this] { send(cardCommand("reinsert")); });
     connect(sdExport, &QPushButton::clicked, this, [this] {
-        const auto file = outputFile(tr("Export image"), tr("SD images (*.img)"), "SD card.img");
-        if (!file.isEmpty()) send("sd-export", file);
+        const auto file = outputFile(tr("Export image"), memoryStick() ? tr("Memory Stick images (*.frondms)") : tr("SD images (*.img)"),
+                                     memoryStick() ? "Memory Stick.frondms" : "SD card.img");
+        if (!file.isEmpty()) send(cardCommand("export"), file);
     });
     connect(sdExchange, &QPushButton::clicked, this, &MainWindow::beginExchange);
-    connect(sdRetry, &QPushButton::clicked, this, [this] { send("sd-state"); });
+    connect(sdRetry, &QPushButton::clicked, this, [this] { send(cardCommand("state")); });
+
+    cardReadOnly = new QCheckBox(tr("Write protected"), root);
+    cardReadOnly->setObjectName("cardReadOnly");
+    layout->addWidget(cardReadOnly);
+    connect(cardReadOnly, &QCheckBox::clicked, this, [this](bool on) { send("ms-read-only", on ? "on" : "off"); });
 
     section(tr("Device"));
     auto* grid = new QGridLayout;
@@ -423,7 +431,7 @@ MainWindow::MainWindow(const QString& core) : core(core) {
                "Palm OS button assignments may change what the application buttons do."));
     });
     help->addAction(tr("&About Frond"), this, [this] {
-        QMessageBox::about(this, tr("About Frond"), tr("Frond 0.8.0\nExperimental Palm TX, Tungsten E2, Zire 72 and Sony CLIÉ TG50 emulator\nGPL-3.0-or-later"));
+        QMessageBox::about(this, tr("About Frond"), tr("Frond 0.8.1\nExperimental Palm TX, Tungsten E2, Zire 72 and Sony CLIÉ TG50 emulator\nGPL-3.0-or-later"));
     });
     connect(&client, &DesktopClient::diagnostic, this, [this](const QString& text) {
         log->moveCursor(QTextCursor::End); log->insertPlainText(text);
@@ -441,10 +449,11 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     connect(&client, &DesktopClient::finished, this, [this] {
         if (exchangeDialog) exchangeDialog->reject();
         else endExchange();
+        if (memoryStickFiles) memoryStickFiles->reject();
         holdKnown = holdOn = false;
         busy = false; stopping = false; hardResetAfterSave = false; cardPresent = cardInserted = false; runningDevice = frondFirmware::Device::tx;
         copyLock.reset(); savingPath.clear();
-        sdKnown = false; showSerial({}); loadSerialSettings(); showUsb({}); loadUsbSettings(); showIrda({}); loadIrdaSettings(); showBluetooth({}); loadBluetoothSettings(); sessionLock.reset(); forceButton->hide(); refreshSessions();
+        sdKnown = protectionKnown = false; showSerial({}); loadSerialSettings(); showUsb({}); loadUsbSettings(); showIrda({}); loadIrdaSettings(); showBluetooth({}); loadBluetoothSettings(); sessionLock.reset(); forceButton->hide(); refreshSessions();
         if (closeAfterStop) { allowClose = true; close(); }
         else statusBar()->showMessage(tr("Stopped."));
     });
@@ -455,13 +464,16 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     connect(&client,&DesktopClient::infraredState,this,[this](const QString& state){showIrda(state);});
     connect(&client, &DesktopClient::result, this, [this](const QString& command, bool ok, const QString& code, const QString& message) {
         busy = false; forceButton->hide(); refresh();
+        if (memoryStickFiles && QStringList({"ms-files", "ms-get", "ms-put", "ms-mkdir", "ms-delete", "ms-rename"}).contains(command)) return;
         if (!ok && exchangeStage != ExchangeStage::None) { exchangeResult(false, message); return; }
         if (!ok) {
+            if (code == "cancelled" && !stopping) { statusBar()->showMessage(tr("Cancelled.")); return; }
             if (command == "save") copyLock.reset();
             hardResetAfterSave = false;
             log->appendPlainText(command + ": " + message);
             if (command == "hold-state" || command == "hold") { holdKnown = false; refresh(); }
-            if (command == "sd-state") sdKnown = false;
+            if (command == "sd-state" || command == "ms-state") sdKnown = false;
+            if (command == "ms-protection" || command == "ms-read-only") { protectionKnown = false; refresh(); }
             if (command == "serial-mode") showSerial("off " + message);  // the core is now off
             if (command == "usb-mode") showUsb("off " + message);
             if(command=="irda-mode")showIrda("off error: "+message);
@@ -474,13 +486,14 @@ MainWindow::MainWindow(const QString& core) : core(core) {
                 failure(message + tr("\n\nWait for Palm OS to finish its current activity, then try again."));
             else failure(message);
             if (command == "hold" && !stopping) send("hold-state");
+            if (command == "ms-read-only" && !stopping) send("ms-protection");
             return;
         }
         if (command == "device-state") {
             showDevice(message);
             if (stopping) save();
             else send(frondFirmware::profile(runningDevice).frontend.holdPresent ? "hold-state" :
-                frondFirmware::profile(runningDevice).frontend.sdSlot ? "sd-state" : "network-state");
+                storageSupported() ? cardCommand("state") : "network-state");
             return;
         }
         if (command == "hold-state") {
@@ -488,7 +501,7 @@ MainWindow::MainWindow(const QString& core) : core(core) {
             holdOn = message == "on";
             refresh();
             if (stopping) save();
-            else send(frondFirmware::profile(runningDevice).frontend.sdSlot ? "sd-state" : "network-state");
+            else send(storageSupported() ? cardCommand("state") : "network-state");
             return;
         }
         if ((command == "hold" || command == "reset" || command == "hard-reset") &&
@@ -496,10 +509,20 @@ MainWindow::MainWindow(const QString& core) : core(core) {
             send("hold-state");
             return;
         }
-        if (command == "sd-state") { cardPresent = message != "none"; cardInserted = message == "inserted"; }
-        else if (command == "sd-create" || command == "sd-insert" || command == "sd-reinsert") cardPresent = cardInserted = true;
-        else if (command == "sd-eject") cardInserted = false;
-        if (command.startsWith("sd-")) sdKnown = true;
+        if (command == "sd-state" || command == "ms-state") {
+            sdKnown = message == "none" || message == "inserted" || message == "ejected";
+            cardPresent = sdKnown && message != "none";
+            cardInserted = message == "inserted";
+        }
+        else if (command == "sd-create" || command == "sd-insert" || command == "sd-reinsert" ||
+                 command == "ms-create" || command == "ms-insert" || command == "ms-reinsert") cardPresent = cardInserted = true;
+        else if (command == "sd-eject" || command == "ms-eject") cardInserted = false;
+        if ((command.startsWith("sd-") || command.startsWith("ms-")) &&
+            command != "sd-state" && command != "ms-state") sdKnown = true;
+        if (command == "ms-protection" || command == "ms-read-only") {
+            protectionKnown = message == "read-only" || message == "writable";
+            cardReadOnly->setChecked(message == "read-only");
+        }
         if (exchangeStage != ExchangeStage::None) { exchangeResult(true, message); return; }
         if (command == "network-state" || command == "network-mode") {
             const auto index = network->findData(message);
@@ -528,7 +551,11 @@ MainWindow::MainWindow(const QString& core) : core(core) {
         if (command == "network-state" && !stopping) { send("keyboard-state"); return; }
         if (command == "keyboard-state" && !stopping && frondFirmware::capabilities(runningDevice).serial && serialArgument() != "off") { send("serial-state"); return; }
         if ((command == "keyboard-state" || command == "serial-state") && !stopping && usbArgument() != "off") { send("usb-state"); return; }
-        if (command == "sd-state" && !stopping) { send("network-state"); return; }
+        if ((command == "sd-state" || command == "ms-state") && !stopping) {
+            send(command == "ms-state" && cardPresent ? "ms-protection" : "network-state"); return;
+        }
+        if (command == "ms-protection" && !stopping) { send("network-state"); return; }
+        if ((command == "ms-create" || command == "ms-insert" || command == "ms-reinsert") && !stopping) { send("ms-protection"); return; }
         statusBar()->showMessage(command == "save" ? tr("Saved.") : tr("Running. Sessions save automatically on close."));
         const bool savedWorkingCopy = command == "save" && savingPath == sessionPath;
         if (command == "save") {
@@ -607,22 +634,25 @@ void MainWindow::refresh() {
     bluetoothSocket->setEnabled(editable && caps.bluetooth && bluetooth->isChecked());
     bluetooth->setToolTip(caps.bluetooth ? tr("See doc/bluetooth-provider.md for controller setup.") : reason);
     // Which card buttons show follows the card's state, as on Android.
-    const bool memoryStick = deviceProfileStorageSlot5(frondFirmware::profile(currentDevice())) == DeviceStorageSlot5::memoryStick;
+    const bool memoryStick = this->memoryStick();
+    const bool supported = storageSupported();
     storageHeading->setText(memoryStick ? tr("Memory Stick") : tr("SD card"));
-    storageHeading->setEnabled(!memoryStick);
-    sdStatus->setEnabled(!memoryStick);
-    const bool known = sdKnown && running;
-    sdStatus->setText(memoryStick ? tr("Not available yet") : !known ? tr("Not known") : !cardPresent ? tr("No card") : cardInserted ? tr("Inserted") : tr("Ejected"));
+    storageHeading->setEnabled(supported);
+    sdStatus->setEnabled(supported);
+    const bool known = sdKnown && running && supported;
+    sdStatus->setText(!supported ? tr("Not available yet") : !known ? tr("Not known") : !cardPresent ? tr("No card") : cardInserted ? tr("Inserted") : tr("Ejected"));
     sdReinsert->setVisible(known && cardPresent && !cardInserted);
-    sdExchange->setVisible(known && cardPresent);
+    sdExchange->setVisible(known && cardPresent && (!memoryStick || cardInserted));
     sdEject->setVisible(known && cardInserted);
     sdExport->setVisible(known && cardPresent && !cardInserted);
     sdCreate->setVisible(known && !cardInserted); sdImport->setVisible(known && !cardInserted);
-    sdRetry->setVisible(!known);
+    sdRetry->setVisible(!known || (memoryStick && cardPresent && !protectionKnown));
     for (auto* b : {sdReinsert, sdExchange, sdEject, sdExport, sdCreate, sdImport, sdRetry}) {
-        if (memoryStick) b->setVisible(false);
-        b->setEnabled(enabled && frondFirmware::profile(currentDevice()).frontend.sdSlot);
+        if (!supported) b->setVisible(false);
+        b->setEnabled(enabled && supported);
     }
+    cardReadOnly->setVisible(memoryStick && supported && known && cardPresent);
+    cardReadOnly->setEnabled(enabled && protectionKnown && !cardInserted);
 }
 QString MainWindow::sessionFolder() const {
     return QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/frond/sessions";
@@ -1029,7 +1059,7 @@ void MainWindow::loadUsbSettings() {
 QString MainWindow::outputFile(const QString& title, const QString& filter, const QString& defaultName) {
     QFileDialog dialog(this, title, QDir::homePath() + '/' + defaultName, filter);
     dialog.setAcceptMode(QFileDialog::AcceptSave);
-    dialog.setDefaultSuffix(filter.contains("*.frond") ? "frond" : filter.contains("*.img") ? "img" : "zip");
+    dialog.setDefaultSuffix(filter.contains("*.frondms") ? "frondms" : filter.contains("*.frond") ? "frond" : filter.contains("*.img") ? "img" : "zip");
     if (dialog.exec() != QDialog::Accepted || dialog.selectedFiles().isEmpty()) return {};
     return QFileInfo(dialog.selectedFiles().first()).absoluteFilePath();
 }
@@ -1043,15 +1073,18 @@ void MainWindow::save(bool saveAs) {
     }
     savingPath = path; send("save", path);
 }
-void MainWindow::send(const QString& command, const QString& argument) {
-    if (client.request(command, argument)) { busy = true; refresh(); statusBar()->showMessage(tr("Working…")); }
+bool MainWindow::send(const QString& command, const QString& argument) {
+    if (!client.request(command, argument)) return false;
+    busy = true; refresh(); statusBar()->showMessage(tr("Working…"));
+    return true;
 }
 void MainWindow::stop(bool closeApp) {
     closeAfterStop = closeAfterStop || closeApp;
     if (!client.running()) { if (closeApp) { allowClose = true; close(); } return; }
     if (stopping) return;
-    stopping = true; refresh();
+    stopping = true; client.cancelFiles(); refresh();
     if (exchangeDialog) exchangeDialog->reject();
+    else if (memoryStickFiles) memoryStickFiles->reject();
     else if (client.available() && exchangeStage == ExchangeStage::None) save();
     else statusBar()->showMessage(tr("Waiting to save the session…"));
 }
@@ -1085,7 +1118,28 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     event->ignore(); stop(true);
 }
 
+bool MainWindow::memoryStick() const {
+    return deviceProfileStorageSlot5(frondFirmware::profile(currentDevice())) == DeviceStorageSlot5::memoryStick;
+}
+bool MainWindow::storageSupported() const {
+    const auto& frontend = frondFirmware::profile(currentDevice()).frontend;
+    return memoryStick() ? frontend.memoryStick : frontend.sdSlot;
+}
+QString MainWindow::cardCommand(const char* operation) const {
+    return (memoryStick() ? QStringLiteral("ms-") : QStringLiteral("sd-")) + QLatin1String(operation);
+}
 void MainWindow::beginExchange() {
+    if (memoryStick()) {
+        if (!client.available() || stopping || !cardInserted || memoryStickFiles) return;
+        if (QMessageBox::question(this, tr("Open Memory Stick files?"), tr("Close files on the Palm first; changes are saved immediately."),
+                                  QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) return;
+        if (!client.available() || stopping || !cardInserted) return;
+        MemoryStickFilesDialog dialog(client, [this](const QString& command, const QString& argument) { return send(command, argument); },
+                                      cardReadOnly->isChecked(), this);
+        memoryStickFiles = &dialog; dialog.exec(); memoryStickFiles = nullptr;
+        if (stopping && client.running() && client.available()) save();
+        return;
+    }
     if (!client.available() || stopping || !cardPresent || exchangeStage != ExchangeStage::None) return;
     if (!SdExchange::available()) return failure(tr("Install mtools to exchange files (Debian: sudo apt install mtools)."));
     if (QMessageBox::question(this, tr("Close Palm Files Before Exchange"),

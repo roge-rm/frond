@@ -3,6 +3,13 @@ BUILD_JOBS ?= 4
 CPU_TEST_LDLIBS ?= -lcurl -lpthread -lresolv $(shell pkg-config --libs slirp)
 all: out/frond desktop
 
+.PHONY: test-memory-stick-media
+test: test-memory-stick-controller test-memory-stick-media
+test-memory-stick-media: prepare
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Ibuild/source/src/uarm/uarm tests/memory-stick-media.cpp -o build/test-memory-stick-media
+	./build/test-memory-stick-media
+
 prepare: build/source/.prepared
 
 # Check input content on every invocation, including removed patches and the gitlink.
@@ -187,11 +194,13 @@ benchmark-menu: out/frond
 .PHONY: desktop test-desktop deb
 desktop: out/frond
 	cmake -S desktop -B build/desktop -DCMAKE_BUILD_TYPE=RelWithDebInfo
-	+cmake --build build/desktop --parallel $(BUILD_JOBS)
+	+cmake --build build/desktop --target frond-desktop --parallel $(BUILD_JOBS)
 	cp build/desktop/frond-desktop out/frond-desktop.new
 	mv -f out/frond-desktop.new out/frond-desktop
 
 test-desktop: desktop
+	cmake -S desktop -B build/desktop -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=ON
+	+cmake --build build/desktop --parallel $(BUILD_JOBS)
 	ctest --test-dir build/desktop --output-on-failure
 
 deb: desktop
@@ -712,3 +721,26 @@ test: test-tg50-call-budget
 test-tg50-call-budget: prepare
 	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm tests/tg50-call-budget.cpp -o build/test-tg50-call-budget
 	./build/test-tg50-call-budget
+
+.PHONY: test-memory-stick-controller
+test-memory-stick-controller: prepare
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/memory-stick-controller.cpp build/source/src/uarm/uarm/mmiodev_MemoryStickController.cpp \
+		build/source/src/common/libcommon.a -lz -o build/test-memory-stick-controller
+	./build/test-memory-stick-controller
+
+.PHONY: test-tg50-serial-configuration test-microwire64x16
+test: test-tg50-serial-configuration test-microwire64x16
+test-microwire64x16: prepare
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Ibuild/source/src/uarm/uarm tests/microwire64x16.cpp -o build/test-microwire64x16
+	./build/test-microwire64x16
+
+test-tg50-serial-configuration: out/frond
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/tg50-serial-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/tg50-serial-configuration.cpp @build/tg50-serial-core.rsp build/source/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-tg50-serial-configuration
+	./build/test-tg50-serial-configuration
