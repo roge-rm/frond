@@ -150,16 +150,13 @@ object Firmware {
                     return "The Tungsten E2 NAND image must be a raw ${mib(device.nandSize)} file. This one is ${mib(nandSize)}."
             }
             Device.ZIRE72 -> {
+                if (norSize != device.norSize) return "Choose a 14,942,208-byte NOR image for the Zire 72."
                 when (header) {
                     Header.ZIRE72 -> {}
-                    Header.E2, Header.E2_WRONG_PLACE -> return "This is a Tungsten E2 NOR image. Choose a Zire 72 one."
-                    Header.ZIRE72_BAD_LAYOUT -> return if (norSize != device.norSize) "The Zire 72 NOR image must be ${mib(device.norSize)}. This one is ${mib(norSize)}."
-                        else "This Zire 72 NOR image doesn't have a small card at 0x0 and a big card at 0x20000."
-                    Header.OTHER -> return "This NOR image isn't for a Zire 72."
-                    Header.NONE -> return if (norSize == Device.TX.norSize) "This looks like a Palm TX NOR image. Choose a Zire 72 one."
-                        else "This NOR image has no Zire 72 header."
+                    Header.ZIRE72_BAD_LAYOUT -> return "This Zire 72 NOR image doesn't have a small card at 0x0 and a big card at 0x20000."
+                    Header.NONE -> return "This NOR image has no Zire 72 header. Check the device choice."
+                    else -> return "This NOR image is not for a Zire 72."
                 }
-                if (norSize != device.norSize) return "The Zire 72 NOR image must be ${mib(device.norSize)}. This one is ${mib(norSize)}."
                 if (nand != null) return "The Zire 72 has no NAND. Leave the NAND image empty."
             }
         }
