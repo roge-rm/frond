@@ -1,8 +1,8 @@
 # Infrared beaming endpoint
 
 The optional native SIR endpoint connects the original TX or E2 IrDA stack to
-another Frond instance. The TX and E2 desktop controls and native CLI support this endpoint, and the Zire 72's
-native CLI (IR disable GPIO49). The default
+another Frond instance. The TX, E2 and Zire 72 desktop and Android controls and the native CLI support this
+endpoint (the Zire's IR disable is GPIO49). The default
 is off. Select **Infrared beaming: TCP** and choose a different local port for
 each instance, or use the native commands below.
 
