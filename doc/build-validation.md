@@ -89,6 +89,8 @@ that inventory.
 - An inserted SD card's HOST.TXT is read by the SD probe app.
 - The audio probe app plays PCM that isn't silent (SDL's disk audio driver captures it).
 
+The Zire 72's setup sets a one-time Reminder alarm an hour after it finishes ("Install software on the palmOne CD"). The guest clock follows the host's, so it comes due as soon as an older Zire session loads, as on a real device. The smoke test taps OK on it first, which leaves no further alarm, and uses that state for the rest of the run.
+
 `make smoke-sessions` makes the ready sessions by cold booting each device through setup (about 2 minutes). They and the probe apps are private and stay under `build/smoke/`; never commit them. A device without its session or firmware is skipped and the command says how to make it. The SD and audio probes need the Palm OS SDK, as for the other probe tests.
 
 A new device is an entry in `SMOKE` in `tests/smoke.py` (firmware, the setup function in `tools/palm_boot.py`, the app and tap). Each run's frames and logs are in `build/smoke/work/DEVICE/`.

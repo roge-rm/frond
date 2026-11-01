@@ -267,6 +267,21 @@ def zire_setup(core, root):
     factory_setup(core, root, [(40, 300), (280, 304), (280, 304), (45, 302), (35, 304)], launcher_wallpaper)
 
 
+def zire_reminder(rows):
+    """The Zire's setup Reminder: a full-width blue title bar, a white body and OK, Snooze and Go To buttons.
+
+    Setup sets it as a one-time alarm an hour after Done; OK at (50, 280) clears it with no further alarm."""
+    if rows is None or len(rows) != 320:
+        return False
+    def px(x, y):
+        return tuple(rows[y][4 * x:4 * x + 3])
+    title = sum(1 for x in range(320) if px(x, 26) == (0, 101, 206))
+    white = sum(1 for x in range(0, 320, 4) for y in range(40, 250, 4) if min(px(x, y)) > 230)
+    # The left and right outlines of the three buttons on y = 280, and the OK button's top and bottom.
+    outline = [sum(px(x, 280)) < 300 for x in (12, 104, 114, 238)] + [sum(px(60, y)) < 300 for y in (256, 306)]
+    return title == 320 and white > 0.7 * 80 * 53 and all(outline)
+
+
 def e2_setup(core, root):
     """Finish factory setup on blank NAND, or Date & Time on configured NAND."""
     rows = core.wait_frame(root / 'boot-frame.png', lambda rows: calibration_target(rows, 291, 292) or
