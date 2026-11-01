@@ -486,7 +486,7 @@ USB/HotSync through its Multi-connector, SD/MMC/SDIO cards, and stereo headphone
 See the [Palm TX user guide](https://palmdr.com/eBay%20Photos/tx_ug.pdf). Frond
 currently supplies virtual SD storage, audio, the infrared keyboard attachment,
 the cradle serial port on a host PTY or a 127.0.0.1 TCP port and USB HotSync to
-the same kinds of endpoint. Both TX and E2 also support
+the same kinds of endpoint. The TX, E2 and Zire 72 also support
 [IrDA beaming between instances](infrared.md) and an opt-in
 [virtual Bluetooth controller](bluetooth-provider.md). Arbitrary SDIO accessories
 remain outstanding. Serial HotSync over
@@ -494,7 +494,8 @@ the host serial endpoint has not been tested.
 
 The Bluetooth endpoint uses the original Palm driver and a separately started
 local H4 provider. Original OPP send/receive, SPP/RFCOMM and L2CAP data, PIN/security
-APIs and lifecycle recovery are qualified on both boards. It defaults to off;
+APIs and lifecycle recovery are qualified on the TX and E2; on the Zire 72 OPP, PIN entry
+and Trusted Devices pass. It defaults to off;
 physical adapters and arbitrary Bluetooth profiles are not qualified.
 
 The [serial support and tests](tx-serial.md) covers the UART model, the host
