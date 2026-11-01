@@ -19,13 +19,16 @@ object Firmware {
     }
 
     // What the NOR's Palm card header says, found the way the core looks for it: every 32 KiB.
-    enum class Header { NONE, E2, E2_WRONG_PLACE, OTHER }
+    // A Zire 72 NOR has a small card at 0x0 and a big card at 0x20000 to the end, both PalmCard aZ72.
+    enum class Header { NONE, E2, E2_WRONG_PLACE, ZIRE72, ZIRE72_BAD_LAYOUT, OTHER }
 
     private const val E2_HEADER_OFFSET = 0x20000L
+    private const val ZIRE72_BIG_CARD = 0x20000L
 
     fun header(nor: File): Header {
         val palm = 0x50616c6dL
         val hspr = 0x68737072L
+        val az72 = 0x615a3732L
         val signature = 0xfeedbeefL
         RandomAccessFile(nor, "r").use { file ->
             fun read32(at: Long): Long? {
@@ -36,12 +39,27 @@ object Firmware {
                 return (b[0].toLong() and 0xff) or ((b[1].toLong() and 0xff) shl 8) or
                     ((b[2].toLong() and 0xff) shl 16) or ((b[3].toLong() and 0xff) shl 24)
             }
+            fun palmCard(at: Long): Boolean {
+                if (at + 0x10 + 9 > file.length()) return false
+                file.seek(at + 0x10)
+                val b = ByteArray(9)
+                file.readFully(b)
+                return b.contentEquals("PalmCard\u0000".toByteArray(Charsets.US_ASCII))
+            }
             var at = 0L
             while (at + 12 <= file.length()) {
                 if (read32(at + 8) == signature) {
                     val company = read32(at + 0x80) ?: return Header.NONE
                     val hal = read32(at + 0x84) ?: return Header.NONE
                     if (company == palm && hal == hspr) return if (at == E2_HEADER_OFFSET) Header.E2 else Header.E2_WRONG_PLACE
+                    if (company == palm && hal == az72) {
+                        val big = ZIRE72_BIG_CARD
+                        val length = read32(big + 0x6c)
+                        val cards = at == 0L && palmCard(0) && read32(big + 8) == signature && palmCard(big) &&
+                            read32(big + 0x80) == palm && read32(big + 0x84) == az72 &&
+                            length != null && big + length == file.length()
+                        return if (cards) Header.ZIRE72 else Header.ZIRE72_BAD_LAYOUT
+                    }
                     return Header.OTHER
                 }
                 at += 32 * 1024
@@ -50,16 +68,17 @@ object Firmware {
         return Header.NONE
     }
 
-    // Picks the device from the NOR like desktop/FirmwareInput.h detectDevice: an E2 card header,
-    // else the Palm TX size. Null when it can't tell.
+    // Picks the device from the NOR like desktop/FirmwareInput.h detectDevice: an E2 or Zire 72 card
+    // header, else the Palm TX size. Null when it can't tell.
     fun detect(nor: File): Device? {
         val header = try { header(nor) } catch (e: IOException) { return null }
         if (header == Header.E2 || header == Header.E2_WRONG_PLACE) return Device.E2
+        if (header == Header.ZIRE72 || header == Header.ZIRE72_BAD_LAYOUT) return Device.ZIRE72
         if (nor.length() == Device.TX.norSize) return Device.TX
         return null
     }
 
-    const val NOT_DETECTED = "This isn't a Palm TX or Tungsten E2 NOR image."
+    const val NOT_DETECTED = "This isn't a Palm TX, Tungsten E2 or Zire 72 NOR image."
 
     // A picked NOR is copied here first, so the device can be found before the import.
     fun picked(context: Context) = File(File(context.filesDir, "firmware"), "picked-nor.bin")
@@ -109,6 +128,8 @@ object Firmware {
             Device.TX -> {
                 if (header == Header.E2 || header == Header.E2_WRONG_PLACE)
                     return "This is a Tungsten E2 NOR image. Choose a Palm TX one."
+                if (header == Header.ZIRE72 || header == Header.ZIRE72_BAD_LAYOUT)
+                    return "This is a Zire 72 NOR image. Choose a Palm TX one."
                 if (nand == null) return "Choose a NAND image for the Palm TX."
                 if (norSize == device.nandSize && nandSize == device.norSize)
                     return "The NOR and NAND images are the wrong way round."
@@ -119,6 +140,7 @@ object Firmware {
                 when (header) {
                     Header.E2 -> {}
                     Header.E2_WRONG_PLACE -> return "This E2 NOR image doesn't have its header at 0x20000."
+                    Header.ZIRE72, Header.ZIRE72_BAD_LAYOUT -> return "This is a Zire 72 NOR image. Choose a Tungsten E2 one."
                     Header.OTHER -> return "This NOR image isn't for a Tungsten E2."
                     Header.NONE -> return if (norSize == Device.TX.norSize) "This looks like a Palm TX NOR image. Choose a Tungsten E2 one."
                         else "This NOR image has no Tungsten E2 header."
@@ -126,6 +148,19 @@ object Firmware {
                 if (norSize != device.norSize) return "The Tungsten E2 NOR image must be ${mib(device.norSize)}. This one is ${mib(norSize)}."
                 if (nandSize != null && nandSize != device.nandSize)
                     return "The Tungsten E2 NAND image must be a raw ${mib(device.nandSize)} file. This one is ${mib(nandSize)}."
+            }
+            Device.ZIRE72 -> {
+                when (header) {
+                    Header.ZIRE72 -> {}
+                    Header.E2, Header.E2_WRONG_PLACE -> return "This is a Tungsten E2 NOR image. Choose a Zire 72 one."
+                    Header.ZIRE72_BAD_LAYOUT -> return if (norSize != device.norSize) "The Zire 72 NOR image must be ${mib(device.norSize)}. This one is ${mib(norSize)}."
+                        else "This Zire 72 NOR image doesn't have a small card at 0x0 and a big card at 0x20000."
+                    Header.OTHER -> return "This NOR image isn't for a Zire 72."
+                    Header.NONE -> return if (norSize == Device.TX.norSize) "This looks like a Palm TX NOR image. Choose a Zire 72 one."
+                        else "This NOR image has no Zire 72 header."
+                }
+                if (norSize != device.norSize) return "The Zire 72 NOR image must be ${mib(device.norSize)}. This one is ${mib(norSize)}."
+                if (nand != null) return "The Zire 72 has no NAND. Leave the NAND image empty."
             }
         }
         return null

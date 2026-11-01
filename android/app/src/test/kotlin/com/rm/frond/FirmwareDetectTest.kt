@@ -53,6 +53,53 @@ class FirmwareDetectTest {
         assertEquals(Device.E2, Firmware.detect(nor(16L shl 20, 0x20000)))
     }
 
+    private fun card(file: RandomAccessFile, at: Long, length: Long) {
+        le32(file, at + 8, 0xfeedbeefL)
+        file.seek(at + 0x10)
+        file.write("PalmCard\u0000".toByteArray(Charsets.US_ASCII))
+        le32(file, at + 0x6c, length)
+        le32(file, at + 0x80, 0x50616c6dL)
+        le32(file, at + 0x84, 0x615a3732L)
+    }
+
+    // A Zire 72 NOR: a small card at 0 and a big card at 0x20000 to the end.
+    private fun zire(size: Long = Device.ZIRE72.norSize, big: Boolean = true): File {
+        val f = tmp.newFile()
+        RandomAccessFile(f, "rw").use { file ->
+            file.setLength(size)
+            card(file, 0, 0x20000)
+            if (big) card(file, 0x20000, size - 0x20000)
+        }
+        return f
+    }
+
+    @Test fun zireCardsAreZire() {
+        val f = zire()
+        assertEquals(Firmware.Header.ZIRE72, Firmware.header(f))
+        assertEquals(Device.ZIRE72, Firmware.detect(f))
+        assertNull(Firmware.check(Device.ZIRE72, f, null))
+    }
+
+    @Test fun zireWithoutItsBigCardIsRefused() {
+        val f = zire(big = false)
+        assertEquals(Firmware.Header.ZIRE72_BAD_LAYOUT, Firmware.header(f))
+        assertEquals(Device.ZIRE72, Firmware.detect(f))
+        assertEquals("This Zire 72 NOR image doesn't have a small card at 0x0 and a big card at 0x20000.",
+            Firmware.check(Device.ZIRE72, f, null))
+    }
+
+    @Test fun zireChecks() {
+        val nand = tmp.newFile().apply { writeBytes(ByteArray(16)) }
+        assertEquals("The Zire 72 has no NAND. Leave the NAND image empty.", Firmware.check(Device.ZIRE72, zire(), nand))
+        assertEquals("This is a Zire 72 NOR image. Choose a Palm TX one.", Firmware.check(Device.TX, zire(), nand))
+        assertEquals("This is a Zire 72 NOR image. Choose a Tungsten E2 one.", Firmware.check(Device.E2, zire(), null))
+        assertEquals("This is a Tungsten E2 NOR image. Choose a Zire 72 one.", Firmware.check(Device.ZIRE72, nor(8L shl 20, 0x20000), null))
+        assertEquals("This looks like a Palm TX NOR image. Choose a Zire 72 one.", Firmware.check(Device.ZIRE72, nor(16L shl 20), null))
+        // The big card runs to the end, so a trimmed image has the wrong layout and says the size.
+        assertEquals("The Zire 72 NOR image must be 14,942,208 bytes. This one is 16 MiB.",
+            Firmware.check(Device.ZIRE72, zire(16L shl 20, big = false), null))
+    }
+
     @Test fun otherFilesAreNotDetected() {
         assertNull(Firmware.detect(nor(8L shl 20)))
         assertNull(Firmware.detect(nor(8L shl 20, 0x20000, palm = false)))

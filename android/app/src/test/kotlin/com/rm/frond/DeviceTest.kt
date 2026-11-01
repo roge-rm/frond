@@ -1,6 +1,8 @@
 package com.rm.frond
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Assert.assertNull
 import org.junit.Test
 
@@ -9,17 +11,33 @@ class DeviceTest {
     fun namesMatchTheCoreTable() {
         assertEquals("palm-tx", Device.TX.id)
         assertEquals("palm-e2", Device.E2.id)
+        assertEquals("palm-zire-72", Device.ZIRE72.id)
         for (device in Device.entries) assertEquals(device, Device.byId(device.id))
     }
 
     @Test
     fun unknownNamesAreRefused() {
-        for (name in listOf(null, "", "3", "0", "tungsten-e2", "palm-zire-72", "Palm-TX")) assertNull(Device.byId(name))
+        for (name in listOf(null, "", "3", "0", "tungsten-e2", "zire-72", "palm-zire72", "Palm-TX")) assertNull(Device.byId(name))
     }
 
     @Test
     fun coreGetsTheName() {
         assertEquals(listOf("--device", "palm-tx"), Device.TX.coreFlags)
         assertEquals(listOf("--device", "palm-e2"), Device.E2.coreFlags)
+        assertEquals(listOf("--device", "palm-zire-72"), Device.ZIRE72.coreFlags)
+    }
+
+    // Sizes and capabilities from the core's deviceProfiles5 entry for the Zire 72.
+    @Test
+    fun zireIsNorOnlyWithNoNetworkOrSerial() {
+        assertEquals(14_942_208L, Device.ZIRE72.norSize)
+        assertFalse(Device.ZIRE72.hasNand)
+        assertFalse(Device.ZIRE72.nandRequired)
+        assertFalse(Device.ZIRE72.network)
+        assertFalse(Device.ZIRE72.serialPort)
+        assertNull(Device.ZIRE72.fastAudioNorMd5)
+        assertTrue(Device.ZIRE72.camera)
+        assertFalse(Device.E2.camera)
+        assertTrue(Device.ZIRE72 in Device.shown)
     }
 }

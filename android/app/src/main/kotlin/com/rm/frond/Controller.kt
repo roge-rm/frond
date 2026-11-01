@@ -13,7 +13,9 @@ enum class PalmButton(val id: String) {
     HOME("home"),
     // Silkscreen Menu on the E2, the status bar's Menu on the TX.
     MENU("menu"),
-    POWER("power");
+    POWER("power"),
+    // The Zire 72's side voice button.
+    VOICE("voice");
 
     fun label(device: Device): String = when (this) {
         UP -> "Up"
@@ -25,21 +27,25 @@ enum class PalmButton(val id: String) {
         HOME -> "Home"
         MENU -> "Menu"
         POWER -> "Power"
+        VOICE -> "Voice"
     }
 
     companion object {
         fun byId(id: String) = entries.firstOrNull { it.id == id }
 
-        // The four app buttons left to right, as the core's DeviceControls.h names them.
+        // The four app buttons hard1-4, as the core's DeviceControls.h names them: left to right on the
+        // TX and E2, the left pair top to bottom then the right pair bottom to top on the Zire 72.
         fun appNames(device: Device) = when (device) {
             Device.TX -> listOf("Home", "Calendar", "Contacts", "Web")
             Device.E2 -> listOf("Calendar", "Contacts", "Tasks", "Note Pad")
+            Device.ZIRE72 -> listOf("Calendar", "Contacts", "Music", "Camera")
         }
 
         // The buttons a device has, in the order the settings list them.
         fun on(device: Device): List<PalmButton> = when (device) {
             Device.TX -> listOf(UP, DOWN, LEFT, RIGHT, CENTRE, APP1, APP2, APP3, APP4, MENU, POWER)
             Device.E2 -> listOf(UP, DOWN, LEFT, RIGHT, CENTRE, APP1, APP2, APP3, APP4, HOME, MENU, POWER)
+            Device.ZIRE72 -> listOf(UP, DOWN, LEFT, RIGHT, CENTRE, APP1, APP2, APP3, APP4, HOME, MENU, VOICE, POWER)
         }
     }
 }

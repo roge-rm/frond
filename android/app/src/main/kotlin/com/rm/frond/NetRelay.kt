@@ -565,7 +565,7 @@ object SerialLink : NetRelay(5033, "serial-mode", "serial-state", "serial", "ser
         tcpLeftReason(state, port, "The emulator's serial port stopped.")
 }
 
-// USB HotSync on the TX and E2. usb-state is "tcp 127.0.0.1:PORT waiting|connected PHASE" or "off[ reason]"; the
+// USB HotSync on the TX, E2 and Zire 72. usb-state is "tcp 127.0.0.1:PORT waiting|connected PHASE" or "off[ reason]"; the
 // core keeps the client through reset, Palm sleep and loads, which only replug the cable.
 object UsbLink : NetRelay(5034, "usb-mode", "usb-state", "usb", "usb") {
     const val DEFAULT_PORT = 5034

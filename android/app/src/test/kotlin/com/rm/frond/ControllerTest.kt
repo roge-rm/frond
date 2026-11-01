@@ -31,6 +31,23 @@ class ControllerTest {
     }
 
     @Test
+    fun defaultsForTheZire() {
+        val map = ControllerMap.defaults(Device.ZIRE72)
+        assertEquals(PalmButton.HOME, map.keys[KeyEvent.KEYCODE_BUTTON_START])
+        assertEquals(PalmButton.MENU, map.keys[KeyEvent.KEYCODE_BUTTON_SELECT])
+        assertTrue(map.keys.values.all { it in PalmButton.on(Device.ZIRE72) })
+        assertEquals(listOf("Calendar", "Contacts", "Music", "Camera"),
+            listOf(PalmButton.APP1, PalmButton.APP2, PalmButton.APP3, PalmButton.APP4).map { it.label(Device.ZIRE72) })
+        // Only the Zire has the voice button.
+        assertTrue(PalmButton.VOICE in PalmButton.on(Device.ZIRE72))
+        assertFalse(PalmButton.VOICE in PalmButton.on(Device.E2))
+        assertFalse(PalmButton.VOICE in PalmButton.on(Device.TX))
+        val voice = map.assign(PalmButton.VOICE, KeyEvent.KEYCODE_BUTTON_L2)
+        assertEquals(voice, ControllerMap.decode(voice.encode(), Device.ZIRE72))
+        assertEquals(emptyMap<Int, PalmButton>(), ControllerMap.decode("104:voice", Device.E2).keys)
+    }
+
+    @Test
     fun encodeAndDecode() {
         val map = ControllerMap.defaults(Device.E2).assign(PalmButton.POWER, KeyEvent.KEYCODE_BUTTON_B)
         assertEquals(map, ControllerMap.decode(map.encode(), Device.E2))
@@ -130,6 +147,8 @@ class ControllerTest {
         assertEquals(0x40000052, PalmButtons.sdlKey(PalmButton.UP))
         assertEquals(0x40000077, PalmButtons.sdlKey(PalmButton.CENTRE))
         assertEquals(27, PalmButtons.sdlKey(PalmButton.POWER))
+        // F5, the core's keyIdVoice.
+        assertEquals(0x4000003E, PalmButtons.sdlKey(PalmButton.VOICE))
         assertEquals(0, PalmButtons.sdlKey(PalmButton.MENU))
     }
 }
