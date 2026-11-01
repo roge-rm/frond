@@ -25,7 +25,7 @@ FirmwareDialog::FirmwareDialog(const QString& root, Device preselect, QWidget* p
     device->setObjectName("device");
     // Items hold the device's fixed name; empty detects.
     device->addItem(tr("Detect from the NOR image"), QString());
-    for (auto d : {Device::tx, Device::e2}) device->addItem(frondFirmware::deviceName(d), frondFirmware::deviceId(d));
+    for (auto d : frondFirmware::devices) device->addItem(frondFirmware::deviceName(d), frondFirmware::deviceId(d));
     device->setCurrentIndex(std::max(0, device->findData(frondFirmware::deviceId(preselect))));
     form->addRow(tr("Device"), device);
     auto field = [&](const QString& label, const QString& key) {
@@ -45,6 +45,14 @@ FirmwareDialog::FirmwareDialog(const QString& root, Device preselect, QWidget* p
     };
     nor = field(tr("NOR image"), "nor");
     nand = field(tr("NAND image (optional for the E2)"), "nand");
+    // The Zire 72 has no NAND.
+    auto nandShown = [this] {
+        const bool none = frondFirmware::deviceFromId(device->currentData().toString()) == Device::zire72;
+        nand->setEnabled(!none);
+        if (auto* choose = findChild<QPushButton*>("nandChoose")) choose->setEnabled(!none);
+    };
+    connect(device, &QComboBox::currentIndexChanged, this, nandShown);
+    nandShown();
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, this);
     auto* import = buttons->addButton(tr("Import"), QDialogButtonBox::AcceptRole);
     import->setObjectName("import");
@@ -62,7 +70,7 @@ FirmwareDialog::FirmwareDialog(const QString& root, Device preselect, QWidget* p
 
 QString FirmwareDialog::importImages() {
     auto chosen = frondFirmware::deviceFromId(device->currentData().toString());
-    const auto error = frondFirmware::importImages(root, chosen, nor->text(), nand->text(), &chosen);
+    const auto error = frondFirmware::importImages(root, chosen, nor->text(), nand->isEnabled() ? nand->text() : QString(), &chosen);
     if (error.isEmpty()) stored = chosen;
     return error;
 }
@@ -72,13 +80,15 @@ AddDeviceDialog::AddDeviceDialog(const QString& root, QWidget* parent) : QDialog
     setObjectName("addDeviceDialog");
     devices = new QListWidget(this);
     devices->setObjectName("devices");
-    for (auto d : {Device::tx, Device::e2}) {
+    for (auto d : frondFirmware::devices) {
         auto* item = new QListWidgetItem(tr("%1\n%2").arg(frondFirmware::deviceName(d),
                                                          frondFirmware::ready(root, d) ? tr("Ready") : tr("Needs firmware")), devices);
         item->setData(Qt::UserRole, frondFirmware::deviceId(d));
     }
     devices->setCurrentRow(0);
     devices->setMinimumWidth(260);
+    // Every device shows without scrolling.
+    devices->setMinimumHeight(devices->sizeHintForRow(0) * devices->count() + 2 * devices->frameWidth());
     auto choose = [this] {
         if (!devices->currentItem()) return;
         chosen = frondFirmware::deviceFromId(devices->currentItem()->data(Qt::UserRole).toString());

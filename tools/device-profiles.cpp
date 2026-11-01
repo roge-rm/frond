@@ -25,6 +25,7 @@ int main() {
                   << "\",\"status\":\""
                   << (p.support == DeviceSupport5::txDesktop ? "tx-desktop"
                       : p.support == DeviceSupport5::e2Desktop ? "e2-desktop"
+                      : p.support == DeviceSupport5::zire72Desktop ? "zire72-desktop"
                       : p.support == DeviceSupport5::reserved ? "reserved" : "inherited-unverified")
                   << "\",\"nor_bytes\":";
         if (p.norSize) std::cout << p.norSize; else std::cout << "null";

@@ -15,9 +15,11 @@
 class Guest : public SoC {
  public:
     explicit Guest(DeviceType5 device=deviceTypeTX) : device(device) {
-        displayConfiguration=device==deviceTypeE2 ? DisplayConfiguration{320,320,120,144} : DisplayConfiguration{320,480,0,160};
+        displayConfiguration=square() ? DisplayConfiguration{320,320,120,144} : DisplayConfiguration{320,480,0,160};
     }
     DeviceType5 device;
+    // The E2 and Zire 72 have a 320x320 LCD over a 120-row silkscreen.
+    bool square() const {return device==deviceTypeE2 || device==deviceTypeZire72;}
     DisplayConfiguration display() const {return displayConfiguration;}
     void setDisplay(DisplayConfiguration c) {displayConfiguration=c;}
     bool attached=false;
@@ -49,7 +51,7 @@ class Guest : public SoC {
     }
     void ResetPendingFrame() override{}
     DeviceType5 GetDeviceType() override{return device;}
-    DisplayMode GetDisplayMode() override{return device==deviceTypeE2 ? DisplayMode::mode_320x320 : DisplayMode::mode_320x480;}
+    DisplayMode GetDisplayMode() override{return square() ? DisplayMode::mode_320x320 : DisplayMode::mode_320x480;}
     void SuspendTimerInterrupts(bool) override{}
     bool LcdEnabled() override{return true;}
  protected:
@@ -93,8 +95,12 @@ static SDL_Color readPixel(SDL_Surface* s,int x,int y) {
 }
 static int brightness(SDL_Color c) {return c.r+c.g+c.b;}
 // The E2 silkscreen is drawn on the ROM's own rectangles, and taps on it reach the guest there.
-static void silkscreen() {
-    const auto& silk=deviceSilkscreen(deviceTypeE2);
+// The window's silkscreen at every scale and rotation: the art drawn where a click sends the pen,
+// for every button and down to the last digitizer row. The Zire 72's ROM rectangles are checked
+// in artSilkscreen.
+static void silkscreen(DeviceType5 device) {
+    const bool e2=device==deviceTypeE2;
+    const auto& silk=deviceSilkscreen(device);
     assert(silk.count==8 && silk.width==320 && silk.height==120);
     assert(!deviceSilkscreen(deviceTypeTX).count && !deviceSilkscreen(deviceTypePV).count);
     // 'aslk' 19000 in the E2 NOR, in Palm OS coordinates; the art uses them doubled from row 320.
@@ -104,6 +110,7 @@ static void silkscreen() {
         {SilkscreenIcon::clock,{25,164,11,19}},{SilkscreenIcon::brightness,{125,164,11,19}},
         {SilkscreenIcon::letters,{25,210,18,20}},{SilkscreenIcon::numbers,{118,210,18,20}}};
     for(auto [icon,r]:rom) {
+        if(!e2)break;
         size_t found=0;
         for(size_t i=0;i<silk.count;++i)if(silk.buttons[i].icon==icon) {
             const auto& b=silk.buttons[i].bounds;++found;
@@ -112,8 +119,10 @@ static void silkscreen() {
         assert(found==1);
     }
     auto same=[](SDL_Rect a,SDL_Rect b) {return a.x==b.x && a.y==b.y && a.w==b.w && a.h==b.h;};
-    assert(same(silk.letters,{27*2,162*2-320,62*2,56*2}) && same(silk.numbers,{89*2,162*2-320,44*2,56*2}));
-    const auto& controls=deviceControls(deviceTypeE2);
+    if(e2)assert(same(silk.letters,{27*2,162*2-320,62*2,56*2}) && same(silk.numbers,{89*2,162*2-320,44*2,56*2}));
+    // Every button has reachable rows, and its drawn mark sits inside them.
+    for(size_t i=0;i<silk.count;++i)assert(silk.buttons[i].bounds.y+16<=120);
+    const auto& controls=deviceControls(device);
     for(float scale:{1.f,1.25f,1.5f,1.75f,2.f}) {
         // Unrotated reference art at this scale.
         auto* ref=SDL_CreateRGBSurfaceWithFormat(0,320*scale,120*scale,32,SDL_PIXELFORMAT_RGBA32);
@@ -134,12 +143,18 @@ static void silkscreen() {
             }
             // Lines between the columns and Graffiti areas; the letter/number split shows as ticks only.
             const int panel=brightness(at(120,60));
+            // ABC and 123 are printed inside the reachable part of their ROM areas.
+            for(size_t i=6;i<8;++i) {
+                const auto& b=silk.buttons[i].bounds;int ink=0;
+                for(int y=b.y;y<std::min(b.y+b.h,120);++y)for(int x=b.x;x<b.x+b.w;++x)ink+=brightness(at(x+0.5f,y+0.5f))>panel+150;
+                assert(ink>20);
+            }
             for(float x:{48.f,273.f})assert(brightness(at(x,60))>panel+120 && brightness(at(x+2,60))<panel+12);
             for(float y:{4.f,116.f})assert(brightness(at(silk.numbers.x,y))>panel+120);
             assert(brightness(at(silk.numbers.x,60))<panel+12);
         }
         for(auto rotation:{Rotation::portrait_0,Rotation::landscape_90,Rotation::portrait_180,Rotation::landscape_270}) {
-            Guest guest(deviceTypeE2);DisplayConfiguration display=guest.display();
+            Guest guest(device);DisplayConfiguration display=guest.display();
             const bool landscape=rotation==Rotation::landscape_90 || rotation==Rotation::landscape_270;
             const int width=landscape?440:320,height=landscape?320:440;
             auto* window=SDL_CreateWindow("e2",0,0,width*scale,(height+controls.height)*scale,0);assert(window);
@@ -241,7 +256,7 @@ static void exercise(DeviceType5 device) {
         for (auto [host, palm] : {std::pair<SDL_Keycode,KeyId>{SDLK_LEFT,keyIdLeft},
                 {SDLK_RIGHT,keyIdRight}, {SDLK_UP,keyIdUp}, {SDLK_DOWN,keyIdDown},
                 {SDLK_RETURN,keyIdSelect}, {SDLK_F1,keyIdHard1}, {SDLK_F2,keyIdHard2},
-                {SDLK_F3,keyIdHard3}, {SDLK_F4,keyIdHard4}, {SDLK_ESCAPE,keyIdPower}}) {
+                {SDLK_F3,keyIdHard3}, {SDLK_F4,keyIdHard4}, {SDLK_F5,keyIdVoice}, {SDLK_ESCAPE,keyIdPower}}) {
             key(host,true); input.HandleEvents(); guest.expect({{palm,true}});
             key(host,false); input.HandleEvents(); guest.expect({{palm,false}});
         }
@@ -321,13 +336,14 @@ static void artDevice(DeviceArt art) {
         assert(at(k.x+k.w*0.5f,k.y-2)==keyInvalid && at(k.x+k.w*0.5f,k.y+k.h+1)==keyInvalid);
     }
     if(zire) {
-        // Calendar over Contacts on the left, Media over Music on the right.
+        // Calendar over Contacts on the left, Camera (hard4) over Music (hard3) on the right.
         const auto& b=p.buttons;
         assert(b[0].bounds.x==b[1].bounds.x && b[0].bounds.y<b[1].bounds.y && b[2].bounds.x==b[3].bounds.x);
+        assert(b[3].bounds.y<b[2].bounds.y && b[3].icon==DeviceControlIcon::media && b[2].icon==DeviceControlIcon::music);
         assert(b[1].bounds.x+b[1].bounds.w<p.navigator.x && b[2].bounds.x>p.navigator.x+p.navigator.w);
         // Gaps between the stacked pills and between the pills and the five-way.
         assert(at(50,(b[0].bounds.y+b[0].bounds.h+b[1].bounds.y)*0.5f)==keyInvalid);
-        assert(at(270,(b[2].bounds.y+b[2].bounds.h+b[3].bounds.y)*0.5f)==keyInvalid);
+        assert(at(270,(b[3].bounds.y+b[3].bounds.h+b[2].bounds.y)*0.5f)==keyInvalid);
         assert(at((b[0].bounds.x+b[0].bounds.w+p.navigator.x)*0.5f,52)==keyInvalid);
         assert(at((b[2].bounds.x+p.navigator.x+p.navigator.w)*0.5f,52)==keyInvalid);
         // Five-way: a rounded square split on its diagonals round a rounded-rectangle select key.
@@ -579,7 +595,7 @@ static void tg50Art() {
     // Every key once: the app row, all 42 keyboard keys and the tab's four.
     std::vector<int> seen(keyIdCount,0);
     for(size_t i=0;i<p.count;++i)++seen[p.buttons[i].key];
-    for(int k=keyIdHard1;k<keyIdCount;++k)assert(seen[k]==(k==keyIdLeft || k==keyIdRight || k==keyIdSelect || k==keyIdPower ? 0 : 1));
+    for(int k=keyIdHard1;k<keyIdCount;++k)assert(seen[k]==(k==keyIdLeft || k==keyIdRight || k==keyIdSelect || k==keyIdPower || k==keyIdVoice ? 0 : 1));
     auto at=[&](float x,float y,const DeviceControlView& view) {
         return deviceControlAt(p,width,height,int(std::floor(x)),height+int(std::floor(y)),view);
     };
@@ -624,7 +640,7 @@ static void tg50Art() {
         abort();
     };
     auto key=[&](int drive,int column) -> const SDL_Rect& {return button(tg50Key(drive,column)).bounds;};
-    assert(tg50Key(2,0)==keyIdKeyboard && tg50Key(7,6)==keyIdCount-1);
+    assert(tg50Key(2,0)==keyIdKeyboard && tg50Key(7,6)==keyIdVoice-1);
     const std::pair<std::pair<int,int>,const char*> named[]={
         {{2,1},"Q"},{{3,5},"P"},{{2,6},"H"},{{5,6},"L"},{{3,0},"Tab"},{{6,1},"N"},{{6,3},"Comma"},
         {{6,4},"Full stop"},{{6,5},"Up"},{{6,6},"Down"},{{7,1},"Space"},{{7,2},"Minus"},{{7,3},"Left"},
@@ -681,7 +697,7 @@ static void tg50Art() {
             abort();
         };
         const KeyId z=tg50Key(5,1),bs=tg50Key(7,6);
-        assert(z>31 && bs==keyIdCount-1);
+        assert(z>31 && bs==keyIdVoice-1);
         auto [zx,zy]=centre(z);
         mouse(SDL_MOUSEBUTTONDOWN,zx,zy);input.HandleEvents();guest.expect({{z,true}});
         assert(input.PressedButtons()==deviceKeyBit(z) && (input.PressedButtons()>>32)!=0);
@@ -768,7 +784,7 @@ static void viewsLeaveOlderDevices() {
             auto* ra=SDL_CreateSoftwareRenderer(a);auto* rb=SDL_CreateSoftwareRenderer(b);
             const DeviceKeyMask held=deviceKeyBit(keyIdHard2)|deviceKeyBit(keyIdDown);
             drawDeviceControls(ra,p,width,0,scale,held);
-            drawDeviceControls(rb,p,width,0,scale,held|deviceKeyBit(KeyId(keyIdKeyboard+20))|deviceKeyBit(KeyId(keyIdCount-1)),
+            drawDeviceControls(rb,p,width,0,scale,held|deviceKeyBit(KeyId(keyIdKeyboard+20))|deviceKeyBit(KeyId(keyIdVoice-1)),
                                views[2]);
             for(int y=0;y<h;++y)assert(std::memcmp(static_cast<Uint8*>(a->pixels)+y*a->pitch,
                                                    static_cast<Uint8*>(b->pixels)+y*b->pitch,size_t(w)*4)==0);
@@ -859,8 +875,10 @@ int main() {
     assert(deviceControlAt(other,160,200,50,215)==keyIdUp);
     exercise(deviceTypeTX);
     exercise(deviceTypeE2);
+    exercise(deviceTypeZire72);
     zireAndM515();
-    silkscreen();
+    silkscreen(deviceTypeE2);
+    silkscreen(deviceTypeZire72);
     lcdScaling();
-    SDL_Quit();puts("PASS: TX and E2 device buttons, holds/chords, focus/drag/rotation release, touch isolation, scales, pressed rendering and E2 silkscreen; Zire 72, m515, IIIx and TG50 hit areas, pressed art and silkscreens; TG50 keyboard and side tab hiding");
+    SDL_Quit();puts("PASS: TX, E2 and Zire 72 device buttons, holds/chords, focus/drag/rotation release, touch isolation, scales, pressed rendering and E2 and Zire 72 silkscreens; Zire 72, m515, IIIx and TG50 hit areas, pressed art and silkscreens; TG50 keyboard and side tab hiding");
 }

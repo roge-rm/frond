@@ -417,11 +417,12 @@ MainWindow::MainWindow(const QString& core) : core(core) {
                "Arrow keys: five-way navigation\nEnter: centre select\n"
                "F1: Home\nF2: Calendar\nF3: Contacts\nF4: Web\n"
                "On the Tungsten E2, F1 to F4 are Calendar, Contacts, Tasks and Note Pad.\n"
+               "On the Zire 72, F1 to F4 are Calendar, Contacts, Music and Camera, and F5 is the side voice button.\n"
                "Escape: Power (sleep and wake are experimental)\n\n"
                "Palm OS button assignments may change what the application buttons do."));
     });
     help->addAction(tr("&About Frond"), this, [this] {
-        QMessageBox::about(this, tr("About Frond"), tr("Frond 0.7.0\nExperimental Palm TX and Tungsten E2 emulator\nGPL-3.0-or-later"));
+        QMessageBox::about(this, tr("About Frond"), tr("Frond 0.7.0\nExperimental Palm TX, Tungsten E2 and Zire 72 emulator\nGPL-3.0-or-later"));
     });
     connect(&client, &DesktopClient::diagnostic, this, [this](const QString& text) {
         log->moveCursor(QTextCursor::End); log->insertPlainText(text);
@@ -439,7 +440,7 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     connect(&client, &DesktopClient::finished, this, [this] {
         if (exchangeDialog) exchangeDialog->reject();
         else endExchange();
-        busy = false; stopping = false; hardResetAfterSave = false; cardPresent = cardInserted = false; runningE2 = false;
+        busy = false; stopping = false; hardResetAfterSave = false; cardPresent = cardInserted = false; runningDevice = frondFirmware::Device::tx;
         sdKnown = false; showSerial({}); loadSerialSettings(); showUsb({}); loadUsbSettings(); showIrda({}); loadIrdaSettings(); showBluetooth({}); loadBluetoothSettings(); sessionLock.reset(); forceButton->hide(); refreshSessions();
         if (closeAfterStop) { allowClose = true; close(); }
         else statusBar()->showMessage(tr("Stopped."));
@@ -505,7 +506,7 @@ MainWindow::MainWindow(const QString& core) : core(core) {
         }
         refresh();
         if (command == "network-state" && !stopping) { send("keyboard-state"); return; }
-        if (command == "keyboard-state" && !stopping && !runningE2 && serialArgument() != "off") { send("serial-state"); return; }
+        if (command == "keyboard-state" && !stopping && frondFirmware::capabilities(runningDevice).serial && serialArgument() != "off") { send("serial-state"); return; }
         if ((command == "keyboard-state" || command == "serial-state") && !stopping && usbArgument() != "off") { send("usb-state"); return; }
         if (command == "sd-state" && !stopping) { send("network-state"); return; }
         statusBar()->showMessage(command == "save" ? tr("Saved.") : tr("Running. Sessions save automatically on close."));
@@ -566,7 +567,8 @@ void MainWindow::refresh() {
         const auto available = display ? display->availableGeometry().size() : QSize(0, 0);
         const QSignalBlocker blocked(windowScale);
         windowScale->setValue(int(4 * fittingWindowScale(320,
-            currentDevice() == frondFirmware::Device::e2 ? 520 : 564,
+            // Screen, silkscreen and button strip: E2 80 rows, Zire 72 96, TX 84 under 480.
+            currentDevice() == frondFirmware::Device::e2 ? 520 : currentDevice() == frondFirmware::Device::zire72 ? 536 : 564,
             available.width(), available.height())));
     }
     scaleLabel->setText(tr("Size: %1×").arg(windowScale->value() / 4.0));
@@ -970,15 +972,16 @@ void MainWindow::askStop(const QString& message) {
 }
 // The device the controls follow: the running one, else the TX (nothing greyed).
 frondFirmware::Device MainWindow::currentDevice() const {
-    if (client.running()) return runningE2 ? frondFirmware::Device::e2 : frondFirmware::Device::tx;
+    if (client.running()) return runningDevice;
     return frondFirmware::Device::tx;
 }
 QString MainWindow::deviceLabel() const {
-    return frondFirmware::deviceName(runningE2 ? frondFirmware::Device::e2 : frondFirmware::Device::tx);
+    return frondFirmware::deviceName(runningDevice);
 }
 void MainWindow::showDevice(const QString& id) {
-    runningE2 = frondFirmware::deviceFromId(id) == frondFirmware::Device::e2;
-    if (runningE2) showSerial("off");
+    runningDevice = frondFirmware::deviceFromId(id);
+    if (runningDevice == frondFirmware::Device::automatic) runningDevice = frondFirmware::Device::tx;
+    if (!frondFirmware::capabilities(runningDevice).serial) showSerial("off");
     refresh();
 }
 void MainWindow::failure(const QString& message) {

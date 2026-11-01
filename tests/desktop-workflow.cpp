@@ -463,10 +463,149 @@ for line in s.makefile('rb'):
         QVERIFY(third.findChild<QCheckBox*>("fastAudio")->isChecked());
         QSettings().clear();
     }
+    void zire72NewSession() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QSettings().setValue("serialMode", "tcp"); QSettings().setValue("usbMode", "pty");
+        QSettings().setValue("fastAudio", true); QSettings().setValue("irdaMode", "pty");
+        QTemporaryDir files;
+        const auto norPath = files.filePath("zire-nor"), e2Nor = files.filePath("e2-nor");
+        {
+            // Sparse synthetic Zire 72 NOR: PalmCard aZ72 small card at 0x0, big card at 0x20000 to the end.
+            QFile nor(norPath); QVERIFY(nor.open(QIODevice::WriteOnly)); QVERIFY(nor.resize(14942208));
+            auto card = [&](qint64 at, quint32 length) {
+                const char signature[] = {char(0xef), char(0xbe), char(0xed), char(0xfe)};
+                nor.seek(at + 8); nor.write(signature, 4);
+                nor.seek(at + 0x10); nor.write("PalmCard", 9);
+                const char bytes[] = {char(length), char(length >> 8), char(length >> 16), char(length >> 24)};
+                nor.seek(at + 0x6c); nor.write(bytes, 4);
+                const char palm[] = {'m', 'l', 'a', 'P'}, hal[] = {'2', '7', 'Z', 'a'};
+                nor.seek(at + 0x80); nor.write(palm, 4); nor.write(hal, 4);
+            };
+            card(0, 0x10000); card(0x20000, 14942208 - 0x20000);
+            QFile e2(e2Nor); QVERIFY(e2.open(QIODevice::WriteOnly)); QVERIFY(e2.resize(8 << 20));
+            const char signature[] = {char(0xef), char(0xbe), char(0xed), char(0xfe)};
+            e2.seek(0x20008); e2.write(signature, 4);
+            const char palm[] = {'m', 'l', 'a', 'P'}, hal[] = {'r', 'p', 's', 'h'};
+            e2.seek(0x20080); e2.write(palm, 4); e2.write(hal, 4);
+        }
+        QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly));
+        core.write(R"PY(#!/usr/bin/python3
+import pathlib,socket,sys
+pathlib.Path(sys.argv[0]+'.args').write_text('\n'.join(sys.argv[1:]))
+trace=pathlib.Path(sys.argv[0]+'.commands')
+s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+for line in s.makefile('rb'):
+    i,cmd,arg=line.rstrip(b'\n').split(b'\t')
+    with trace.open('ab') as t: t.write(cmd+b'\n')
+    message={b'device-state':b'palm-zire-72',b'keyboard-state':b'detached',b'network-state':b'disabled',b'sd-state':b'none',b'usb-state':b'pty /dev/pts/9 connected running'}.get(cmd,b'done')
+    if cmd==b'save': pathlib.Path(bytes.fromhex(arg.decode()).decode()).write_text('saved')
+    s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
+    if cmd==b'quit': break
+)PY");
+        core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        const auto read = [&](const QString& suffix) {
+            QFile file(core.fileName() + suffix);
+            return file.open(QIODevice::ReadOnly) ? QString::fromUtf8(file.readAll()) : QString();
+        };
+        const auto firmwareRoot = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/frond/firmware";
+        {
+            // The E2 and TX refuse a Zire NOR, and the Zire an E2 NOR; nothing is stored.
+            for (auto device : {frondFirmware::Device::tx, frondFirmware::Device::e2}) {
+                FirmwareDialog dialog(firmwareRoot, device);
+                dialog.findChild<QLineEdit*>("nor")->setText(norPath);
+                QVERIFY(dialog.importImages().contains("Choose Zire 72"));
+            }
+            FirmwareDialog dialog(firmwareRoot, frondFirmware::Device::zire72);
+            QVERIFY(!dialog.findChild<QLineEdit*>("nand")->isEnabled());
+            dialog.findChild<QLineEdit*>("nor")->setText(e2Nor);
+            QVERIFY(dialog.importImages().contains("Zire 72"));
+            QVERIFY(!QFileInfo::exists(firmwareRoot + "/palm-zire-72"));
+            // Detecting picks the Zire from its cards.
+            dialog.findChild<QComboBox*>("device")->setCurrentIndex(0);
+            QVERIFY(dialog.findChild<QLineEdit*>("nand")->isEnabled());
+            QCOMPARE(frondFirmware::detectDevice(norPath), frondFirmware::Device::zire72);
+        }
+        MainWindow window(core.fileName()); window.show();
+        auto* stop = window.findChild<QPushButton*>("stop");
+        // Add device lists the Zire 72 third, needing firmware; Firmware opens with it chosen.
+        QString addText, firmwareDevice;
+        QTimer dialogPoll;
+        dialogPoll.setInterval(50);
+        connect(&dialogPoll, &QTimer::timeout, &window, [&] {
+            if (auto* add = window.findChild<AddDeviceDialog*>(); add && add->isVisible()) {
+                auto* devices = add->findChild<QListWidget*>("devices");
+                QCOMPARE(devices->count(), 3);
+                addText = devices->item(2)->text();
+                devices->setCurrentRow(2);
+                emit devices->itemActivated(devices->item(2));
+            } else if (auto* firmware = window.findChild<FirmwareDialog*>(); firmware && firmware->isVisible()) {
+                firmwareDevice = firmware->findChild<QComboBox*>("device")->currentData().toString();
+                firmware->findChild<QLineEdit*>("nor")->setText(norPath);
+                firmware->findChild<QPushButton*>("import")->click();
+            }
+        });
+        dialogPoll.start();
+        window.findChild<QPushButton*>("addDevice")->click();
+        QTRY_VERIFY_WITH_TIMEOUT(stop->isEnabled(), 5000);
+        dialogPoll.stop();
+        QCOMPARE(addText, QString("Zire 72\nNeeds firmware"));
+        QCOMPARE(firmwareDevice, QString("palm-zire-72"));
+        QVERIFY(QFileInfo::exists(firmwareRoot + "/palm-zire-72/nor.bin"));
+        QVERIFY(!QFileInfo::exists(firmwareRoot + "/palm-zire-72/nand.bin"));
+        const auto args = read(".args").split('\n');
+        QCOMPARE(args.mid(0, 3), QStringList({"--device", "palm-zire-72", firmwareRoot + "/palm-zire-72/nor.bin"}));
+        // No NAND, low-latency audio or serial port; USB and infrared settings carry over.
+        QVERIFY(!args.contains("--nand") && !args.contains("--fast-audio") && !args.contains("--serial"));
+        QVERIFY(read(".args").contains("--usb\npty") && read(".args").contains("--irda\npty"));
+        QCOMPARE(window.windowTitle(), QString("Zire 72"));
+        QTRY_VERIFY_WITH_TIMEOUT(read(".commands").contains("network-state"), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(read(".commands").contains("usb-state"), 5000);
+        QVERIFY(!read(".commands").contains("serial-state"));
+        // Network, serial and low-latency audio grey out with the shared wording; the rest stay.
+        for (const char* name : {"networkMode", "serialMode"}) {
+            auto* box = window.findChild<QComboBox*>(name);
+            QVERIFY(!box->isEnabled());
+            QCOMPARE(box->toolTip(), QString("Not available on the Zire 72 yet"));
+        }
+        QVERIFY(!window.findChild<QSpinBox*>("serialPort")->isEnabled());
+        QVERIFY(!window.findChild<QCheckBox*>("fastAudio")->isEnabled());
+        QCOMPARE(window.findChild<QCheckBox*>("fastAudio")->toolTip(), QString("Not available on the Zire 72 yet"));
+        QTRY_VERIFY(window.findChild<QComboBox*>("usbMode")->isEnabled());
+        QVERIFY(window.findChild<QComboBox*>("irdaMode")->isEnabled());
+        QVERIFY(window.findChild<QCheckBox*>("bluetoothEnabled")->isEnabled());
+        QVERIFY(!window.findChild<QCheckBox*>("keyboardAttached")->isEnabled());  // infrared beaming has the port
+        QTRY_VERIFY(window.findChild<QLabel*>("usbState")->text().contains("Zire 72 enumerated"));
+        // Hard reset names the Zire and sends hard-reset.
+        QString text;
+        QTimer poll; poll.setInterval(30);
+        connect(&poll, &QTimer::timeout, &window, [&] {
+            auto* box = window.findChild<QMessageBox*>();
+            if (!box || !box->isVisible()) return;
+            text = box->text();
+            for (auto* b : box->buttons()) if (b->text() == "Erase") { b->click(); return; }
+        });
+        poll.start();
+        auto* hard = window.findChild<QPushButton*>("hardReset");
+        QTRY_VERIFY(hard->isEnabled());
+        hard->click();
+        QCOMPARE(text, QString("Erase everything on the Zire 72?"));
+        QTRY_VERIFY_WITH_TIMEOUT(read(".commands").contains("hard-reset"), 3000);
+        poll.stop();
+        window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        // The saved session is a Zire 72 row, and the settings made before it are kept.
+        MainWindow second(core.fileName()); second.show();
+        auto* list = second.findChild<QListWidget*>("sessionList");
+        QCOMPARE(list->count(), 1);
+        QCOMPARE(QSettings().value("serialMode").toString(), QString("tcp"));
+        QVERIFY(QSettings().value("fastAudio").toBool());
+        QSettings().clear();
+    }
     void infraredSetting_data() {
         QTest::addColumn<QByteArray>("deviceId");
         QTest::newRow("tx") << QByteArray("palm-tx");
         QTest::newRow("e2") << QByteArray("palm-e2");
+        QTest::newRow("zire72") << QByteArray("palm-zire-72");
     }
     void infraredSetting() {
         QFETCH(QByteArray, deviceId);
@@ -521,6 +660,7 @@ for line in s.makefile('rb'):
         QTest::addColumn<QByteArray>("deviceId");
         QTest::newRow("tx") << QByteArray("palm-tx");
         QTest::newRow("e2") << QByteArray("palm-e2");
+        QTest::newRow("zire72") << QByteArray("palm-zire-72");
     }
     void bluetoothSetting() {
         QFETCH(QByteArray, deviceId);

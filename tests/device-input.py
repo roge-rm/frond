@@ -111,12 +111,13 @@ class DeviceInputTest(unittest.TestCase):
         data = json.loads(subprocess.check_output([ROOT / 'out/frond-device-profiles']))
         self.assertEqual([p['name'] for p in data['profiles'] if p['status'] == 'tx-desktop'], ['palm-tx'])
         self.assertEqual([p['name'] for p in data['profiles'] if p['status'] == 'e2-desktop'], ['palm-e2'])
+        self.assertEqual([p['name'] for p in data['profiles'] if p['status'] == 'zire72-desktop'], ['palm-zire-72'])
         self.assertEqual([p['name'] for p in data['profiles']],
                          ['palm-tx', 'palm-e2', 'palm-e2-franken', 'repalm',
                           'palm-zire-72', 'sony-clie-tg50', 'palm-iiix', 'palm-m515'])
         zire = data['profiles'][4]
         self.assertEqual((zire['cohort'], zire['status'], zire['nor_bytes'], zire['raw_nand_bytes']),
-                         ('zire72-nor', 'inherited-unverified', ZIRE_SIZE, 0))
+                         ('zire72-nor', 'zire72-desktop', ZIRE_SIZE, 0))
         self.assertEqual((zire['ram_min_bytes'], zire['ram_max_bytes'], zire['default_display_mode'],
                           zire['display_mode_mask']), (32 << 20, 32 << 20, 5, 1 << 5))
         self.assertEqual({p['cohort'] for p in data['profiles']},
@@ -159,14 +160,14 @@ class DeviceInputTest(unittest.TestCase):
             with self.subTest(hal=hal):
                 rom = self.root / 'inherited'
                 rom.write_bytes(header(hal))
-                self.rejected([rom, '--desktop-socket', self.root / 'unused'], 'Palm TX and Tungsten E2 only')
+                self.rejected([rom, '--desktop-socket', self.root / 'unused'], 'Palm TX, Tungsten E2 and Zire 72 only')
 
     def test_e2_replay_bounds_and_physical_app_buttons(self):
         replay = self.root / 'e2.replay'
         # A duration rejection proves parsing succeeded, without executing synthetic ROM.
         # Existing aliases keep their TX meaning; physical names avoid claiming an E2 Home key.
         for key in ('hard1', 'hard2', 'hard3', 'hard4', 'home', 'calendar', 'contacts', 'web',
-                    'up', 'down', 'left', 'right', 'center', 'power'):
+                    'up', 'down', 'left', 'right', 'center', 'power', 'voice'):
             replay.write_text(f'0 key-down {key}\n1000 key-up {key}\n')
             self.rejected([self.e2, '--input-replay', replay, '--run-for', '1'],
                           'input replay extends beyond')

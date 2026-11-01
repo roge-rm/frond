@@ -1,8 +1,13 @@
-# Palm TX and Tungsten E2 peripherals
+# Palm TX, Tungsten E2 and Zire 72 peripherals
 
 See [repeatable peripheral qualification](peripheral-qualification.md) for the
 private session runner, readiness barriers and independent evidence checks used
 when qualifying devices.
+
+On the desktop a control a device doesn't have is greyed, with "Not available on the
+<device> yet". The E2 and Zire 72 have no Wi-Fi, network fixtures or cradle serial port,
+and the Zire 72 has no low-latency audio. The Zire 72's camera answers no sensor: Camera
+shows a white screen and goes back to the launcher.
 
 ## Virtual SD cards
 
@@ -190,7 +195,7 @@ SDHC/SDXC, arbitrary high-speed modes or an SDIO Wi-Fi card.
 ## Computer keyboard
 
 Check **Attach Palm infrared keyboard** in the desktop launcher to connect the
-host keyboard as a Palm Universal Wireless Keyboard (3169WW) on the TX or E2.
+host keyboard as a Palm Universal Wireless Keyboard (3169WW) on the TX, E2 or Zire 72.
 Install its Palm OS driver separately, reset the Palm if installation requests
 it, then open
 **Keyboard** on the Palm and turn its status **ON**. The 1.13 driver is available
@@ -503,10 +508,10 @@ endpoint, firmware-free regressions and the Palm Serial Manager probes.
 
 ## USB HotSync
 
-`--usb pty` or `--usb tcp:PORT` plugs the TX or E2 into an emulated USB host and moves
+`--usb pty` or `--usb tcp:PORT` plugs the TX, E2 or Zire 72 into an emulated USB host and moves
 the bytes of its HotSync port to a host PTY or a TCP listener on 127.0.0.1, one
 client at a time. pilot-link and the like talk to it as they would to a serial
-cradle. It is off by default and supports the Palm TX, Tungsten E2 and Zire 72 (command line only for now). The desktop app has the same
+cradle. It is off by default and supports the Palm TX, Tungsten E2 and Zire 72. The desktop app has the same
 choice under **USB**.
 
 ```sh

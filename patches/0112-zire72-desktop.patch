@@ -1,0 +1,168 @@
+diff --git a/src/common/device_profile5.h b/src/common/device_profile5.h
+--- a/src/common/device_profile5.h
++++ b/src/common/device_profile5.h
+@@ -12,7 +12,7 @@ enum class DisplayMode {
+ };
+ 
+ enum class DeviceCohort5 { txNand, e2Nand, patchedE2, paravirtual, zire72Nor, reserved };
+-enum class DeviceSupport5 { txDesktop, e2Desktop, inheritedUnverified, reserved };
++enum class DeviceSupport5 { txDesktop, e2Desktop, zire72Desktop, inheritedUnverified, reserved };
+ // How a device is told from its firmware: the card header's company and HAL IDs, or the NOR size.
+ enum class DeviceDetect5 { cardHeader, norSize, none };
+ // Which board model runs it.
+@@ -68,7 +68,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
+     // XIP NOR with a small and a big card like the E2, on a PXA270; no NAND, Wi-Fi or serial. The camera stays
+     // off until it's emulated.
+     {deviceTypeZire72, "palm-zire-72", "Zire 72", DeviceCohort5::zire72Nor,
+-     DeviceSupport5::inheritedUnverified, DeviceDetect5::cardHeader, deviceCompanyPalm5,
++     DeviceSupport5::zire72Desktop, DeviceDetect5::cardHeader, deviceCompanyPalm5,
+      0x615a3732 /* aZ72 */, DeviceBoard5::pxa270Zire72, DeviceArt::zire72,
+      {false, true, false, true, false, true, true},
+      14942208, 0, 32u << 20, 32u << 20, DisplayMode::mode_320x320, 1u << 5, false},
+@@ -132,7 +132,8 @@ inline bool deviceProfileSdSizeValid5(int32_t deviceType, uint64_t bytes) {
+ inline bool deviceProfileSupportsDesktop5(int32_t deviceType) {
+     const auto* profile = deviceProfile5(deviceType);
+     return profile && (profile->support == DeviceSupport5::txDesktop ||
+-                       profile->support == DeviceSupport5::e2Desktop);
++                       profile->support == DeviceSupport5::e2Desktop ||
++                       profile->support == DeviceSupport5::zire72Desktop);
+ }
+ 
+ inline bool deviceProfileSupportsRam5(int32_t deviceType, uint32_t bytes) {
+diff --git a/src/uarm/native/DeviceControls.h b/src/uarm/native/DeviceControls.h
+--- a/src/uarm/native/DeviceControls.h
++++ b/src/uarm/native/DeviceControls.h
+@@ -56,8 +56,8 @@ struct DeviceControlView {
+ using DeviceKeyMask=uint64_t;
+ static_assert(keyIdCount<=64,"DeviceKeyMask has a bit per key");
+ inline DeviceKeyMask deviceKeyBit(KeyId key) {return DeviceKeyMask(1)<<key;}
+-// Button bar and silkscreen art from the device table. Reserved names (Zire 72, m515, IIIx and
+-// TG50) have art but no board yet, so only tests and renders reach them by name.
++// Button bar and silkscreen art from the device table. Reserved names (m515, IIIx and TG50) have
++// art but no board yet, so only tests and renders reach them by name.
+ inline DeviceArt deviceArt(DeviceType5 device) { return deviceArtFor5(device); }
+ inline DeviceArt deviceArt(const char* name) {
+     const auto* profile = deviceProfileNamed5(name);
+@@ -93,13 +93,13 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art) {
+     static const DeviceControlProfile e2Profile{320,80,e2,std::size(e2),{112,6,96,64},22,{136,27,48,22},
+                                                 DeviceControlStyle::e2,0.27f};
+     // Zire 72: pill-shaped app keys in stacked pairs, Calendar over Contacts on the left and
+-    // Media (camera) over Music on the right, round a rounded-square five-way with a
+-    // rounded-rectangle select key.
++    // Camera over Music on the right, round a rounded-square five-way with a rounded-rectangle
++    // select key. The ROM opens RealOne on hard3 and Camera on hard4.
+     static const DeviceButton zire72[] = {
+         {keyIdHard1, {10,19,82,28}, "Calendar", DeviceControlIcon::calendar},
+         {keyIdHard2, {10,57,82,28}, "Contacts", DeviceControlIcon::contacts},
+-        {keyIdHard3, {228,19,82,28}, "Media", DeviceControlIcon::media},
+-        {keyIdHard4, {228,57,82,28}, "Music", DeviceControlIcon::music},
++        {keyIdHard3, {228,57,82,28}, "Music", DeviceControlIcon::music},
++        {keyIdHard4, {228,19,82,28}, "Camera", DeviceControlIcon::media},
+         {keyIdUp, {150,15,20,14}, "Up", DeviceControlIcon::up},
+         {keyIdDown, {150,76,20,12}, "Down", DeviceControlIcon::down},
+         {keyIdLeft, {108,42,18,20}, "Left", DeviceControlIcon::left},
+diff --git a/src/uarm/native/InputReplay.cpp b/src/uarm/native/InputReplay.cpp
+--- a/src/uarm/native/InputReplay.cpp
++++ b/src/uarm/native/InputReplay.cpp
+@@ -25,7 +25,7 @@ bool InputReplay::Load(const std::string& path, int width, int height, std::stri
+         {"home", keyIdHard1}, {"calendar", keyIdHard2}, {"contacts", keyIdHard3},
+         {"web", keyIdHard4}, {"up", keyIdUp}, {"down", keyIdDown},
+         {"left", keyIdLeft}, {"right", keyIdRight}, {"center", keyIdSelect},
+-        {"power", keyIdPower}};
++        {"power", keyIdPower}, {"voice", keyIdVoice}};
+     std::string line;
+     size_t number = 0;
+     while (std::getline(file, line)) {
+diff --git a/src/uarm/native/SdlEventHandler.cpp b/src/uarm/native/SdlEventHandler.cpp
+--- a/src/uarm/native/SdlEventHandler.cpp
++++ b/src/uarm/native/SdlEventHandler.cpp
+@@ -22,6 +22,10 @@ namespace {
+             case SDLK_F4:
+                 return keyIdHard4;
+ 
++            // Boards without a voice button ignore it.
++            case SDLK_F5:
++                return keyIdVoice;
++
+             case SDLK_LEFT:
+                 return keyIdLeft;
+ 
+diff --git a/src/uarm/native/main.cpp b/src/uarm/native/main.cpp
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -320,7 +320,7 @@ namespace {
+             return false;
+         }
+         const bool isTx = deviceType == DeviceType5::deviceTypeTX;
+-        // The desktop passes its saved TX-only settings to every device; the E2 skips them.
++        // The desktop passes its saved TX-only settings to every device; the others skip them.
+         if (options.desktopSocket && !isTx) {
+             serialConfig = HostSerial::Config{};
+ 
+@@ -426,7 +426,7 @@ namespace {
+         const int gdbPort = options.gdbPort ? static_cast<int>(*options.gdbPort) : -1;
+ 
+         if (options.desktopSocket && !deviceProfileSupportsDesktop5(deviceType)) {
+-            cerr << "desktop sessions currently support Palm TX and Tungsten E2 only" << endl;
++            cerr << "desktop sessions currently support Palm TX, Tungsten E2 and Zire 72 only" << endl;
+             return false;
+         }
+         DisplayConfiguration displayConfiguration =
+diff --git a/src/uarm/uarm/devicePalmTungstenE2.cpp b/src/uarm/uarm/devicePalmTungstenE2.cpp
+--- a/src/uarm/uarm/devicePalmTungstenE2.cpp
++++ b/src/uarm/uarm/devicePalmTungstenE2.cpp
+@@ -376,6 +376,10 @@ void deviceKey(struct Device *dev, uint32_t key, bool down) {
+         {keyIdHard4, keyIdHard2, keyInvalid, keyInvalid},
+         {keyIdSelect, keyIdHard3, keyIdDown, keyIdLeft},
+     };
++    if (dev->type == DeviceType5::deviceTypeZire72 && key == keyIdVoice) {
++        pxaKpcDirectKeyChange(dev->kpc, 7, down);
++        return;
++    }
+     const auto& matrix = dev->type == DeviceType5::deviceTypeTX ? txMatrix : zireMatrix;
+     for (uint8_t col = 0; col < 3; col++)
+         for (uint8_t row = 0; row < 4; row++)
+diff --git a/src/uarm/uarm/keys.h b/src/uarm/uarm/keys.h
+--- a/src/uarm/uarm/keys.h
++++ b/src/uarm/uarm/keys.h
+@@ -31,7 +31,9 @@ enum KeyId {
+     keyIdJogPress = 15,
+     keyIdBack = 16,
+     keyIdKeyboard = 17,
+-    keyIdCount = keyIdKeyboard + 42
++    // Zire 72 side voice button (KPC direct key 7), after the TG50's keyboard keys.
++    keyIdVoice = keyIdKeyboard + 42,
++    keyIdCount = keyIdVoice + 1
+ };
+ 
+ // TG50 keyboard key at drive line 2-7 and column 0-6 of the ROM's keyboard code table; column c
+diff --git a/src/uarm/uarm/pxa270_KPC.cpp b/src/uarm/uarm/pxa270_KPC.cpp
+--- a/src/uarm/uarm/pxa270_KPC.cpp
++++ b/src/uarm/uarm/pxa270_KPC.cpp
+@@ -284,9 +284,8 @@ void pxaKpcDirectKeyChange(struct PxaKpc *kpc, uint_fast8_t keyIdx, bool isDown)
+ 
+     if (keyIdx >= 8) ERR("only eight direct keys exist\n");
+ 
+-    if (!(kpc->kpc & 2)) fprintf(stderr, "setting direct keys when direct keypad is disabled\n");
+-
+     if (!cur != !isDown) {  // change
++        if (!(kpc->kpc & 2)) fprintf(stderr, "setting direct keys when direct keypad is disabled\n");
+ 
+         kpc->directKeys ^= 1 << keyIdx;
+         pxaKpcPrvDirectKeysRecalc(kpc);
+diff --git a/src/uarm/uarm/soc_PXA.cpp b/src/uarm/uarm/soc_PXA.cpp
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -715,9 +715,11 @@ void SocPXA::OnLoad(SavestateLoader<ChunkType> &loader) {
+         penEventQueue->Clear();
+         keyEventQueue->Clear();
+         penDown = false;
+-        if (GetDeviceType() == DeviceType5::deviceTypeTX || GetDeviceType() == DeviceType5::deviceTypeZire72)
++        if (GetDeviceType() == DeviceType5::deviceTypeTX || GetDeviceType() == DeviceType5::deviceTypeZire72) {
+             for (unsigned key = keyIdHard1; key <= keyIdPower; ++key)
+                 deviceKey(dev, key, false);
++            deviceKey(dev, keyIdVoice, false);
++        }
+     }
+     if (audioQueue) audioQueueClear(audioQueue);
+     if (fastAudio) {

@@ -14,6 +14,23 @@ static void e2Nor(QFile& nor, qint64 size, qint64 at, quint32 hal = 0x68737072) 
     nor.flush();
 }
 
+// Sparse synthetic Zire 72 NOR: PalmCard small card at 0x0 and big card at 'bigAt' running
+// 'bigLength' bytes, both with the Palm company id and 'hal'.
+static void zireNor(QFile& nor, qint64 size = 14942208, quint32 hal = 0x615a3732, qint64 smallAt = 0,
+                    qint64 bigAt = 0x20000, qint64 bigLength = 14942208 - 0x20000) {
+    nor.resize(0); nor.resize(size);
+    auto put = [&](qint64 offset, quint32 value) {
+        const char bytes[4] = {char(value), char(value >> 8), char(value >> 16), char(value >> 24)};
+        nor.seek(offset); nor.write(bytes, 4);
+    };
+    for (auto [at, length] : {std::pair<qint64, qint64>{smallAt, 0x10000}, {bigAt, bigLength}}) {
+        if (at + 0x90 > size) continue;
+        put(at + 8, 0xfeedbeef); nor.seek(at + 0x10); nor.write("PalmCard", 9);
+        put(at + 0x6c, quint32(length)); put(at + 0x80, 0x50616c6d); put(at + 0x84, hal);
+    }
+    nor.flush();
+}
+
 class FirmwareInputTest : public QObject {
     Q_OBJECT
  private slots:
@@ -70,6 +87,43 @@ class FirmwareInputTest : public QObject {
         e2Nor(nor, 8 << 20, 0x20000, 0x446d4752);
         QVERIFY(!frondFirmware::validateFiles(Device::e2, norPath, {}).isEmpty());
     }
+    void zire72Files() {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const auto norPath = dir.filePath("zire-nor"), nandPath = dir.filePath("nand");
+        QFile nor(norPath), nand(nandPath);
+        QVERIFY(nor.open(QIODevice::ReadWrite)); QVERIFY(nand.open(QIODevice::ReadWrite)); QVERIFY(nand.resize(34603008));
+        zireNor(nor);
+        Device device = Device::automatic;
+        QVERIFY(frondFirmware::validateFiles(Device::zire72, norPath, {}, &device).isEmpty());
+        QCOMPARE(device, Device::zire72);
+        device = Device::automatic;
+        QVERIFY(frondFirmware::validateFiles(Device::automatic, norPath, {}, &device).isEmpty());
+        QCOMPARE(device, Device::zire72);
+        QCOMPARE(frondFirmware::detectDevice(norPath), Device::zire72);
+        // No NAND, and no other device takes it.
+        QVERIFY(frondFirmware::validateFiles(Device::zire72, norPath, nandPath).contains("no NAND"));
+        QVERIFY(frondFirmware::validateFiles(Device::tx, norPath, nandPath).contains("Choose Zire 72"));
+        QVERIFY(frondFirmware::validateFiles(Device::e2, norPath, {}).contains("Choose Zire 72"));
+        // Wrong sizes, a misplaced small card, a big card that doesn't reach the end or isn't
+        // there, and another device's HAL are refused.
+        zireNor(nor, 14942208 - 0x10000);
+        QVERIFY(frondFirmware::validateFiles(Device::zire72, norPath, {}).contains("14,942,208"));
+        zireNor(nor, 16 << 20);
+        QVERIFY(!frondFirmware::validateFiles(Device::zire72, norPath, {}).isEmpty());
+        zireNor(nor, 14942208, 0x615a3732, 0x8000);
+        QVERIFY(frondFirmware::validateFiles(Device::zire72, norPath, {}).contains("0x20000"));
+        zireNor(nor, 14942208, 0x615a3732, 0, 0x20000, 0x10000);
+        QVERIFY(frondFirmware::validateFiles(Device::zire72, norPath, {}).contains("0x20000"));
+        zireNor(nor, 14942208, 0x615a3732, 0, 0x40000);
+        QVERIFY(!frondFirmware::validateFiles(Device::zire72, norPath, {}).isEmpty());
+        zireNor(nor, 14942208, 0x68737072);
+        QVERIFY(!frondFirmware::validateFiles(Device::zire72, norPath, {}).isEmpty());
+        // An E2 NOR isn't a Zire's.
+        e2Nor(nor, 8 << 20, 0x20000);
+        QVERIFY(!frondFirmware::validateFiles(Device::zire72, norPath, {}).isEmpty());
+        QCOMPARE(frondFirmware::detectDevice(norPath), Device::e2);
+    }
     void noFallbackBetweenDevices() {
         QTemporaryDir dir;
         QVERIFY(dir.isValid());
@@ -93,14 +147,18 @@ class FirmwareInputTest : public QObject {
     }
     void deviceNames() {
         // Settings and the core get the fixed name; it round-trips, and other names detect.
-        for (auto device : {Device::tx, Device::e2})
+        for (auto device : {Device::tx, Device::e2, Device::zire72})
             QCOMPARE(frondFirmware::deviceFromId(frondFirmware::deviceId(device)), device);
+        QCOMPARE(frondFirmware::deviceId(Device::zire72), QString("palm-zire-72"));
         QCOMPARE(frondFirmware::deviceId(Device::tx), QString("palm-tx"));
         QCOMPARE(frondFirmware::deviceId(Device::e2), QString("palm-e2"));
         QVERIFY(frondFirmware::deviceId(Device::automatic).isEmpty());
-        for (const char* other : {"", "1", "tungsten-e2", "palm-zire-72"})
+        for (const char* other : {"", "1", "tungsten-e2", "palm-zire72", "sony-clie-tg50"})
             QCOMPARE(frondFirmware::deviceFromId(other), Device::automatic);
         QVERIFY(!frondFirmware::capabilities(Device::e2).serial && frondFirmware::capabilities(Device::tx).network);
+        // The Zire 72 has no serial port, network or low-latency audio; its camera isn't a setting.
+        const auto zire = frondFirmware::capabilities(Device::zire72);
+        QVERIFY(!zire.serial && !zire.network && !zire.fastAudio && zire.usb && zire.infrared && zire.keyboard && zire.bluetooth);
     }
 };
 QTEST_GUILESS_MAIN(FirmwareInputTest)
