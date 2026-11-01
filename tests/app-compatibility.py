@@ -70,7 +70,7 @@ class MatrixTests(unittest.TestCase):
         self.calls += 1
         root = args.output
         root.mkdir(parents=True, mode=0o700)
-        origins = [args.session] if args.session else [args.nor, args.nand]
+        origins = [args.session] if args.session else [p for p in (args.nor, args.nand) if p]
         sources = [args.core, *origins, *args.install, *([args.replay] if args.replay else [])]
         result = {'status': 'ok', 'stage': 'complete', 'core_exit_code': 0,
                   'inputs': [self.ident(p) for p in sources],
@@ -109,10 +109,72 @@ class MatrixTests(unittest.TestCase):
             result['extra'] = 'not on disk'
         return result
 
-    def run_case(self):
+    def run_case(self, device='palm-tx'):
         self.manifest.write_text(json.dumps(self.raw))
         with patch.object(matrix.runner, 'run', self.fake_run):
-            return matrix.run(self.manifest, self.output, 1)
+            return matrix.run(self.manifest, self.output, 1, device)
+
+    def test_e2_launcher_checks_upper_wallpaper(self):
+        from unittest.mock import Mock
+        core = Mock()
+        matrix.runner.e2_setup(core, self.root)
+        check = core.wait_frame.call_args_list[-1].args[1]
+        blank = [bytes([255, 255, 255, 255]) * 320 for _ in range(320)]
+        launcher = blank.copy()
+        for y in range(40, 144):
+            launcher[y] = bytes([100, 160, 220, 255]) * 320
+        self.assertFalse(check(None))
+        self.assertFalse(check(blank))
+        self.assertTrue(check(launcher))
+        self.assertEqual(core.tap.call_args_list[-1].args, (self.root, 27, 352))
+
+    def test_device_names_and_silkscreen_coordinates(self):
+        for device in ('palm-e2', 'palm-zire-72'):
+            self.replay.write_text('0 pen-down 27 352\n10 pen-up\n')
+            self.assertEqual(matrix.validate_replay(self.replay, device), 2)
+            for x, y in [(320, 100), (10, 440)]:
+                self.replay.write_text(f'0 pen-down {x} {y}\n')
+                with self.assertRaises(ValueError):
+                    matrix.validate_replay(self.replay, device)
+        self.replay.write_text('0 pen-down 479 479\n')
+        self.assertEqual(matrix.validate_replay(self.replay), 1)
+        with self.assertRaises(ValueError):
+            matrix.validate_manifest(self.raw, self.root, 'palm-m515')
+
+    def test_zire_nor_only_cold_fixture_and_device_forwarding(self):
+        app = self.raw['apps'][0]
+        app['fixture'] = {'mode': 'cold-boot', 'nor': self.ident(self.fixture)}
+        visual = {'run_for': 0, 'assertions': [
+            {'kind': 'visual-review', 'expected': 'launcher', 'at_ms': [0]}]}
+        app['stages']['cold-boot'] = visual
+        for label in matrix.STAGES[1:]:
+            app['stages'][label] = copy.deepcopy(visual)
+        app['stages']['interaction']['replay'] = self.ident(self.replay)
+        seen = []
+        original = self.fake_run
+        def fake(args):
+            seen.append(args.device)
+            return original(args)
+        self.fake_run = fake
+        report = self.run_case('palm-zire-72')
+        self.assertEqual(report['execution_status'], 'ok', report)
+        self.assertEqual(seen, ['palm-zire-72'] * 5)
+        self.assertEqual(report['plan']['device'], 'palm-zire-72')
+        self.assertEqual(len(report['input_preservation']), 4)
+
+    def test_device_specific_nand_schema(self):
+        app = self.raw['apps'][0]
+        app['fixture'] = {'mode': 'cold-boot', 'nor': self.ident(self.fixture)}
+        app['stages']['cold-boot'] = {'run_for': 0, 'assertions': [
+            {'kind': 'visual-review', 'expected': 'launcher', 'at_ms': [0]}]}
+        with self.assertRaises(ValueError):
+            matrix.validate_manifest(self.raw, self.root, 'palm-e2')
+        with self.assertRaises(ValueError):
+            matrix.validate_manifest(self.raw, self.root)
+        app['fixture']['nand'] = self.ident(self.prc)
+        matrix.validate_manifest(self.raw, self.root, 'palm-e2')
+        with self.assertRaises(ValueError):
+            matrix.validate_manifest(self.raw, self.root, 'palm-zire-72')
 
     def test_exact_records_and_session_chain_are_narrow_evidence(self):
         report = self.run_case()

@@ -25,7 +25,7 @@ spec.loader.exec_module(runner)
 def fake_core():
     print(os.getpid(), flush=True)
     raw = sys.argv[1] == '--device'
-    session = Path(sys.argv[5] if raw else sys.argv[1])
+    session = Path(sys.argv[3] if raw else sys.argv[1])
     config = json.loads(session.open().readline() if raw else session.read_text())
     if config.get('mutate_core'):
         Path(config['mutate_core']).write_text('changed original executable')
@@ -183,6 +183,36 @@ class DeveloperRunTest(unittest.TestCase):
         self.assertTrue((self.output / 'working.frond').is_file())
         self.assertEqual(nor.stat().st_size, 16 << 20)
         self.assertEqual(nand.stat().st_size, 132 << 20)
+
+    def test_selected_device_is_checked_when_restoring_session(self):
+        result = self.run_case(extra=['--device', 'palm-e2'])
+        self.assertEqual(result['status'], 'ok', result)
+        self.assertEqual(result['command'][1:4],
+                         [str(self.output / 'working.frond'), '--device', 'palm-e2'])
+
+    def test_device_specific_flash_and_boot_helpers(self):
+        for device, nor_size, nand_size, helper in [
+                ('palm-e2', 8 << 20, 34603008, 'e2_setup'),
+                ('palm-zire-72', 14942208, 0, 'zire_setup')]:
+            output = self.root / device
+            nor, nand = self.root / (device + '-nor'), self.root / (device + '-nand')
+            with nor.open('wb') as stream:
+                stream.write(b'{}\n'); stream.truncate(nor_size)
+            extra = []
+            if nand_size:
+                with nand.open('wb') as stream:
+                    stream.write(b'{}\n'); stream.truncate(nand_size)
+                extra = ['--nand', str(nand)]
+            args = runner.parser().parse_args(['--core', str(self.core), '--device', device,
+                '--nor', str(nor), *extra, '--resume-app', '--output', str(output),
+                '--settle', '0', '--timeout', '5'])
+            with patch.object(runner.shutil, 'which', return_value=None), patch.object(runner, helper) as setup:
+                result = runner.run(args)
+            self.assertEqual(result['status'], 'ok', result)
+            setup.assert_called_once()
+            self.assertEqual(result['command'][2], device)
+            self.assertEqual(len(result['inputs']), 3 if nand_size else 2)
+            self.assertIn('guest-ready', [r['command'] for r in result['steps']])
 
     def test_raw_flash_requires_pair_and_exact_sizes(self):
         for extra in [[], ['--nand', str(self.session)]]:

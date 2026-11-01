@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a Palm TX app in a private session copy and print one JSON result."""
+"""Run a Palm app in a private session copy and print one JSON result."""
 
 import argparse
 import hashlib
@@ -18,6 +18,9 @@ import tempfile
 import time
 import zipfile
 import zlib
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from palm_boot import DEVICES, png_rows, zire_setup, e2_setup
 
 
 class RunError(Exception):
@@ -48,10 +51,11 @@ def nonnegative(value):
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--core', type=Path, default=Path(__file__).resolve().parents[1] / 'out/frond')
+    p.add_argument('--device', choices=DEVICES, default='palm-tx')
     origin = p.add_mutually_exclusive_group(required=True)
     origin.add_argument('--session', type=Path, help='restore a complete saved session')
-    origin.add_argument('--nor', type=Path, help='cold boot TX from this NOR and --nand, without saved RAM/CPU')
-    p.add_argument('--nand', type=Path, help='TX NAND paired with --nor; copied before execution')
+    origin.add_argument('--nor', type=Path, help='cold boot from this NOR without saved RAM/CPU')
+    p.add_argument('--nand', type=Path, help='NAND paired with --nor (required for TX and E2, absent on Zire)')
     p.add_argument('--output', type=Path, required=True, help='new private result directory')
     p.add_argument('--install', type=Path, action='append', default=[], help='PRC/PDB; repeat in install order')
     launch = p.add_mutually_exclusive_group(required=True)
@@ -198,6 +202,36 @@ class Control:
                                'An app waiting indefinitely for input may need normal user interaction.') from error
 
 
+class SocketBoot:
+    """The boot helper's frame and tap interface on the desktop control socket."""
+    def __init__(self, control, root):
+        self.control, self.root = control, root
+
+    def replay(self, lines):
+        path = self.root / 'boot.replay'
+        path.write_text(''.join(line + '\n' for line in lines))
+        self.control.require('input-replay', path)
+        while self.control.require('replay-state')['code'] != 'finished':
+            pause(.1, self.control.deadline)
+
+    def tap(self, root, x, y):
+        self.replay([f'0 pen-down {x} {y}', '150 pen-up'])
+
+    def frame(self, path):
+        path.unlink(missing_ok=True)
+        self.replay([f'0 snapshot {quote_replay_path(path)}'])
+        return png_rows(path) if path.is_file() else None
+
+    def wait_frame(self, path, check, timeout=60):
+        deadline = min(self.control.deadline, time.monotonic() + timeout)
+        while True:
+            check_deadline(deadline)
+            rows = self.frame(path)
+            if check(rows):
+                return rows
+            pause(1, deadline)
+
+
 def check_deadline(deadline):
     if time.monotonic() >= deadline:
         raise RunError('timeout', 'Wall time budget exhausted')
@@ -233,15 +267,19 @@ def run(args):
               'artifacts': {}, 'inputs': [], 'error': None}
     root = process = connection = None
     try:
-        if bool(args.nor) != bool(args.nand):
-            raise RunError('argument', '--nor and --nand must be supplied together')
+        device = DEVICES[args.device]
+        if args.nand and not args.nor or args.nor and args.device in ('palm-tx', 'palm-e2') and not args.nand:
+            raise RunError('argument', '--nor and --nand must be supplied together'
+                           if args.device == 'palm-tx' else '--nor and --nand must be supplied together for E2')
+        if args.nand and not device['nand']:
+            raise RunError('argument', 'This device has no NAND')
         for name in ([args.app] if args.app is not None else []) + args.export_db:
             if not name or len(name.encode()) > 31 or '\n' in name or '\0' in name:
                 raise RunError('argument', 'Palm database names must be 1–31 UTF-8 bytes without newline/NUL')
         output = args.output.resolve()
         if any(c in str(output) for c in ('\n', '\r', '\0')):
             raise RunError('argument', 'Output paths cannot contain newline/NUL')
-        origins = [args.session.resolve()] if args.session else [args.nor.resolve(), args.nand.resolve()]
+        origins = [args.session.resolve()] if args.session else [args.nor.resolve(), *([args.nand.resolve()] if args.nand else [])]
         paths = [args.core.resolve(), *origins, *[p.resolve() for p in args.install]]
         install_start = 1 + len(origins)
         if args.replay:
@@ -249,9 +287,10 @@ def run(args):
         for path in paths:
             if not path.is_file():
                 raise RunError('input', f'Input file does not exist: {path}')
-        if not args.session and (origins[0].stat().st_size != 16 * 1024 * 1024 or
-                                 origins[1].stat().st_size != 132 * 1024 * 1024):
-            raise RunError('input', 'Cold boot requires 16 MiB TX NOR and 132 MiB raw NAND')
+        if not args.session and (origins[0].stat().st_size != device['nor'] or
+                                 args.nand and origins[1].stat().st_size != device['nand']):
+            raise RunError('input', 'Cold boot requires 16 MiB TX NOR and 132 MiB raw NAND'
+                           if args.device == 'palm-tx' else f'Wrong NOR/NAND size for {args.device}')
         if not os.access(paths[0], os.X_OK):
             raise RunError('input', 'Core is not executable')
         for path in args.install:
@@ -297,9 +336,11 @@ def run(args):
                 address = str(Path(socket_dir) / 'control')
                 listener.bind(address)
                 listener.listen(1)
-                boot = [str(root / 'working.frond')] if args.session else [
-                    '--device', 'palm-tx', str(root / 'input-nor.bin'), '--nand', str(root / 'input-nand.bin')]
-                command = (['heavy', 'emulator'] if shutil.which('heavy') else []) + [
+                boot = [str(root / 'working.frond'), *(['--device', args.device]
+                    if args.device != 'palm-tx' else [])] if args.session else [
+                    '--device', args.device, str(root / 'input-nor.bin'),
+                    *(['--nand', str(root / 'input-nand.bin')] if args.nand else [])]
+                command = (['heavy', 'build'] if shutil.which('heavy') else []) + [
                     str(root / 'core'), *boot, '--desktop-socket', address]
                 if not args.sound:
                     command.append('--no-sound')
@@ -324,6 +365,14 @@ def run(args):
                 if control.line(startup) != ['0', 'event', 'ready', '']:
                     raise RunError('protocol', 'Missing desktop ready event')
                 result['stage'] = 'ready'
+                if not args.session and args.device != 'palm-tx':
+                    result['stage'] = 'setup'
+                    setup = SocketBoot(control, root)
+                    if args.device == 'palm-zire-72':
+                        zire_setup(setup, root)
+                    else:
+                        e2_setup(setup, root)
+                    control.retry_ready('guest-ready', '', args.ready_timeout)
                 if installs or args.app is not None:
                     control.retry_ready('guest-ready', '', args.ready_timeout)
                 for path in installs:
