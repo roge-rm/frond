@@ -31,6 +31,8 @@ enum class Device(
     val network: Boolean = false,
     // The cradle serial port (serial-mode); the core refuses it on other devices.
     val serialPort: Boolean = false,
+    // A camera the core doesn't emulate yet; shown greyed out.
+    val camera: Boolean = false,
 ) {
     TX(
         "palm-tx", "Palm TX", 16L shl 20, 2112L * 64 * 1024, true,
@@ -41,14 +43,19 @@ enum class Device(
     E2(
         "palm-e2", "Tungsten E2", 8L shl 20, 34_603_008L, false,
         "2a9faf69b43ba590cfb9ba78e4eef11c",
-    );
+    ),
+
+    // NOR only, no NAND.
+    ZIRE72("palm-zire-72", "Zire 72", 14_942_208L, 0L, false, null, camera = true);
+
+    val hasNand: Boolean get() = nandSize > 0
 
     // Arguments the core needs before a raw NOR image for this device.
     val coreFlags: List<String> get() = listOf("--device", id)
 
     companion object {
         // Devices shown on the home screen, in order.
-        val shown = listOf(TX, E2)
+        val shown = listOf(TX, E2, ZIRE72)
 
         fun byId(id: String?) = entries.firstOrNull { it.id == id }
     }

@@ -16,4 +16,11 @@ class PalmButtonsTest {
         assertEquals(27 to 405, PalmButtons.tapPoint(Device.E2, PalmButton.MENU, PalmButtons.REVERSE_LANDSCAPE))
         assertEquals(27 to 351, PalmButtons.tapPoint(Device.E2, PalmButton.HOME, PalmButtons.PORTRAIT))
     }
+
+    // The middle of the ROM's Home and Menu areas, inside the 120 rows the digitizer reaches.
+    @Test fun zireSilkscreenHomeAndMenu() {
+        assertEquals(23 to 352, PalmButtons.tapPoint(Device.ZIRE72, PalmButton.HOME, PalmButtons.PORTRAIT))
+        assertEquals(23 to 412, PalmButtons.tapPoint(Device.ZIRE72, PalmButton.MENU, PalmButtons.REVERSE_LANDSCAPE))
+        assertNull(PalmButtons.tapPoint(Device.ZIRE72, PalmButton.VOICE, PalmButtons.PORTRAIT))
+    }
 }

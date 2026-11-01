@@ -141,7 +141,8 @@ fun FirmwareScreen(model: HomeModel) {
                 supportingContent = { Text(name(nor) ?: "Not chosen", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                 trailingContent = { TextButton(onClick = { pickNor.launch(arrayOf("*/*")) }, enabled = !busy) { Text("Choose") } },
             )
-            ListItem(
+            // A device with no NAND, like the Zire 72, doesn't show the row.
+            if (device?.hasNand != false) ListItem(
                 headlineContent = { Text(if (device?.nandRequired == false) "NAND image (optional)" else "NAND image") },
                 supportingContent = { Text(name(nand) ?: "Not chosen", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                 trailingContent = { TextButton(onClick = { pickNand.launch(arrayOf("*/*")) }, enabled = !busy) { Text("Choose") } },
@@ -157,7 +158,7 @@ fun FirmwareScreen(model: HomeModel) {
                     busy = true
                     error = null
                     scope.launch {
-                        val result = withContext(Dispatchers.IO) { Firmware.import(context, d, nand) }
+                        val result = withContext(Dispatchers.IO) { Firmware.import(context, d, nand.takeIf { d.hasNand }) }
                         busy = false
                         model.reload()
                         if (result != null) {

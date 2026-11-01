@@ -64,11 +64,13 @@ class PalmButtons(private val device: Device, private val link: ControlLink, pri
             PalmButton.UP -> scancodeKey(82)
             PalmButton.CENTRE -> scancodeKey(119) // SDLK_SELECT
             PalmButton.POWER -> SDLK_ESCAPE
+            PalmButton.VOICE -> scancodeKey(62) // F5
             PalmButton.HOME, PalmButton.MENU -> 0
         }
 
         // Where Home and Menu are in the core's pen coordinates (screen pixels, the silkscreen below
-        // the screen), for the guest's orientation. E2: the left column of its 320x120 silkscreen.
+        // the screen), for the guest's orientation. E2 and Zire 72: the left column of the 320x120
+        // silkscreen, the middle of the ROM's Home and Menu areas.
         // TX: Menu is the second icon of the status bar, along the bottom of its 320x480 screen in
         // portrait. The status bar's rotate icon turns it to reverse landscape, which puts the bar
         // along the top, its icons in reverse. Other orientations aren't measured, so no tap.
@@ -76,6 +78,11 @@ class PalmButtons(private val device: Device, private val link: ControlLink, pri
             Device.E2 -> when (button) {
                 PalmButton.HOME -> 27 to 351
                 PalmButton.MENU -> 27 to 405
+                else -> null
+            }
+            Device.ZIRE72 -> when (button) {
+                PalmButton.HOME -> 23 to 352
+                PalmButton.MENU -> 23 to 412
                 else -> null
             }
             Device.TX -> when {

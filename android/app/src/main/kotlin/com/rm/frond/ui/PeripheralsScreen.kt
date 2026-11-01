@@ -287,6 +287,10 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                     )
                 }
                 if (model.usb.phase == NetRelay.Phase.DISCONNECTED) action("Connect again") { UsbLink.retry() }
+                // The core doesn't emulate the camera yet.
+                if (model.device.camera) item(key = "camera") {
+                    ListItem(headlineContent = { Text("Camera", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)) })
+                }
                 if (model.debugger.phase != NetRelay.Phase.OFF || model.debugger.error != null) {
                     item(key = "debugger") {
                         ListItem(
