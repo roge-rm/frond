@@ -60,6 +60,13 @@ class SessionStoreTest : public QObject {
         // Saving replaces the marker; the session is listed once.
         write(folder() + "/Fresh.frond", header(6, "palm-e2"));
         QCOMPARE(list(folder()).size(), 3);
+        // A Zire 72 session opens; a reserved device's doesn't.
+        write(folder() + "/Zire.frond", header(6, "palm-zire-72"));
+        write(folder() + "/Clie.frond", header(6, "sony-clie-tg50"));
+        for (const auto& info : list(folder())) {
+            if (info.name == "Zire") QVERIFY(info.saved && !info.old && info.device == "palm-zire-72");
+            if (info.name == "Clie") QVERIFY(info.old);
+        }
     }
     void names() {
         QCOMPARE(freeName(folder(), "Palm TX"), QString("Palm TX"));

@@ -1,6 +1,6 @@
 # Device profiles and staged support
 
-The desktop starts the Palm TX and the Tungsten E2. The native core inherits two
+The desktop starts the Palm TX, the Tungsten E2 and the Zire 72. The native core inherits two
 other models from the pinned Cloudpilot source. Listing a model does not establish
 that a particular firmware, peripheral or application works in Frond.
 
@@ -14,8 +14,8 @@ heavy build make device-profiles
 The JSON contains each device's fixed name, display name, geometry and support status.
 It never scans firmware, sessions or a private ROM collection. `nor_bytes: null`
 means that the profile has no established fixed NOR size. It is not an invitation
-to load arbitrary firmware. `tx-desktop` names the experimental TX path and `e2-desktop` the Tungsten E2
-path in the desktop. `inherited-unverified` does not enable another desktop device.
+to load arbitrary firmware. `tx-desktop` names the experimental TX path, `e2-desktop` the Tungsten E2
+path and `zire72-desktop` the Zire 72 path in the desktop. `inherited-unverified` does not enable another desktop device.
 
 ## Device names
 
@@ -37,8 +37,9 @@ all use it. The core's internal device numbers are never saved or sent.
   sizes starting at 8 MiB and the eight inherited display modes. It requires
   matching paravirtualized firmware. Desktop qualification is pending.
 - `palm-zire-72`: found from its card header (Palm, HAL aZ72, small card at 0x0 and big
-  card at 0x20000), 14,942,208-byte NOR, no NAND, 32 MiB RAM and 320×320 display. The core
-  checks the firmware and then says the Zire 72 isn't supported yet.
+  card at 0x20000), 14,942,208-byte NOR, no NAND, 32 MiB RAM and 320×320 display over a
+  120-row silkscreen. Available in the desktop (`zire72-desktop`); `--device palm-zire-72` is
+  optional. Its camera has no sensor and stays off.
 - `sony-clie-tg50`, `palm-iiix` and `palm-m515`: reserved for
   coming devices. They have button bar art but no board, and the core refuses them.
 
@@ -94,8 +95,8 @@ Keep private ROMs, metadata, identifying dump hashes, sessions, screenshots and
 capture logs outside Git. Public tests should build synthetic headers, flash
 geometry and session envelopes. The shared-profile inventory itself establishes
 no non-TX boot or peripheral results. The [E2 qualification workflow](e2-qualification.md) adds synthetic board
-and session regressions plus an optional private firmware runner; the E2 is
-available in the desktop and the other inherited cohorts are not.
+and session regressions plus an optional private firmware runner; the E2 and
+Zire 72 are available in the desktop and the other inherited cohorts are not.
 
 ## Tests
 
@@ -108,6 +109,6 @@ unknown names and numbered sessions, invalid internal IDs, zero and
 non-power-of-two RAM, overflow, display ranges, raw NAND with and without spare
 bytes, mismatched profile tags, truncated ROM headers and named sessions with and
 without an SD card. The Qt
-file validator uses sparse synthetic files, including E2 header detection and
-refusal of a NOR image for the other device. CLI rejection tests stop before
+file validator uses sparse synthetic files, including E2 and Zire 72 header detection,
+the Zire's two-card layout and refusal of a NOR image for another device. CLI rejection tests stop before
 SoC construction or SDL startup. No firmware or proprietary app is needed.

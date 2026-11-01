@@ -109,7 +109,7 @@ class MainWindow : public QMainWindow {
     QString exchangeBackup;
     bool cardPresent{false}, cardInserted{false}, sdKnown{false};
     // The running device selects the available peripheral controls.
-    bool runningE2{false};
+    frondFirmware::Device runningDevice{frondFirmware::Device::tx};
     QString networkTip, keyboardTip, serialTip, usbTip, irdaTip, fastAudioTip;
     QWidget *home, *runningPage, *sessionBar = nullptr;
     bool startupHandled{false}, busy{false}, stopping{false}, closeAfterStop{false}, allowClose{false};

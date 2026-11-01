@@ -2,10 +2,10 @@
 
 Frond is a Palm OS emulator for Linux and Android, based on [CloudpilotEmu](https://github.com/cloudpilot-emu/cloudpilot-emu), made for running and developing Palm apps and games.
 
-Currently it emulates the Palm T|X and the Tungsten E2, with sound, SD support, networking, saved sessions and more. 
+Currently it emulates the Palm T|X, the Tungsten E2 and the Zire 72 (Linux only for now), with sound, SD support, networking, saved sessions and more. 
 Look below to see the features in more detail. More devices are planned.
 
-To run this you will need to provide a Palm T|X or E2 device firmware - none are included.
+To run this you will need to provide a Palm T|X, E2 or Zire 72 device firmware - none are included.
 
 Let me know what works, what doesn't and what you'd like in #frond [on my discord](https://discord.gg/9Wun47jGC6).. or open an issue here.
 
@@ -55,6 +55,7 @@ the APK include firmware or Palm apps.
 |---|---|---|
 | Palm TX | 16 MiB | 132 MiB raw dump, with spare bytes |
 | Tungsten E2 | 8 MiB | 34,603,008 bytes raw dump, optional |
+| Zire 72 | 14,942,208 bytes | none |
 
 Frond detects the device from the NOR and reads the files without changing them. On
 Linux use **File → Firmware…** or click **Add device**; on Android import them when you
@@ -76,7 +77,7 @@ defaults to the largest that fits. LCD pixels stay sharp, and **Smooth LCD scali
 softens them if you prefer. On Android the screen fits the phone, in whole steps or
 filling it, and follows the phone or stays in portrait or landscape.
 
-**Buttons.** The buttons under the screen and the E2's silkscreen can be clicked or
+**Buttons.** The buttons under the screen and the E2's and Zire's silkscreens can be clicked or
 tapped. On a keyboard the arrow keys work the five-way, Enter selects and F1 to F4 are
 the app buttons; **Help → Hardware Keyboard Controls** lists them all. On Android game
 controllers press the Palm's buttons, and you can change which button does what in
@@ -88,22 +89,22 @@ on Linux, or **Install application** on the Peripherals screen on Android. Frond
 copies files between your computer or phone and an ejected card (**SD Card →
 Exchange Files…** on Linux). Close files on the Palm before ejecting.
 
-**Peripherals.** The E2's networking and serial stay greyed out.
+**Peripherals.** The E2's and Zire 72's networking and serial stay greyed out.
 
-| | T\|X | E2 |
-|---|---|---|
-| Virtual Wi-Fi, onto the internet through your computer or phone, no adapter needed | yes | |
-| Cradle serial port, to a PTY or TCP port for terminal programs and pilot-link | yes | |
-| USB HotSync over a PTY or TCP port | yes | yes |
-| [Infrared beaming](doc/infrared.md) between Frond instances | yes | yes |
-| [Virtual Bluetooth](doc/bluetooth-provider.md), with a separately started local provider, off by default | yes | yes |
+| | T\|X | E2 | Zire 72 |
+|---|---|---|---|
+| Virtual Wi-Fi, onto the internet through your computer or phone, no adapter needed | yes | | |
+| Cradle serial port, to a PTY or TCP port for terminal programs and pilot-link | yes | | |
+| USB HotSync over a PTY or TCP port | yes | yes | yes |
+| [Infrared beaming](doc/infrared.md) between Frond instances | yes | yes | yes |
+| [Virtual Bluetooth](doc/bluetooth-provider.md), with a separately started local provider, off by default | yes | yes | yes |
 
 The infrared keyboard and beaming share the infrared port, so detach the keyboard
 before turning beaming on. On Android infrared, Bluetooth, serial, USB HotSync and the
 gdb server go over the network, to another Frond or to the desktop tools
 `tools/link-irda.py`, `tools/link-bluetooth.py` and `tools/link-pty.py` (for pilot-link).
 
-**Low-latency audio.** Off by default on both devices. It plays one 44.1 kHz stereo
+**Low-latency audio.** Off by default on the T|X and E2; the Zire 72 doesn't have it yet. It plays one 44.1 kHz stereo
 stream with less delay, for music apps like SunVox, and goes back to the normal path
 when the computer or phone can't keep up. See the [audio limits](doc/fast-audio.md).
 

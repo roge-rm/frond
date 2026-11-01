@@ -2,10 +2,10 @@
 
 Frond's Qt 6 launcher provides desktop controls alongside the SDL Palm display.
 The Palm display remains a separate window in this release. Firmware is supplied
-by the user. Palm TX and Tungsten E2 support is experimental. Virtual SD cards and experimental virtual Wi-Fi are supported;
+by the user. Palm TX, Tungsten E2 and Zire 72 support is experimental. Virtual SD cards and experimental virtual Wi-Fi are supported;
 Infrared beaming links two Frond instances; detach the infrared keyboard and
 choose **Infrared beaming: Wait for a peer** with a different port for each instance, then
-connect them with [the relay](infrared.md). Both devices also offer an opt-in
+connect them with [the relay](infrared.md). All three devices also offer an opt-in
 **Bluetooth virtual controller**: start the [optional provider](bluetooth-provider.md),
 enter its absolute BR/EDR socket path and turn on Bluetooth on the running page. Then turn Bluetooth
 off and on in Palm OS. The live status distinguishes a configured endpoint from
@@ -26,16 +26,17 @@ Frond" (greyed, it can only be deleted). Double-click a row, press Enter or clic
 **Start** to start it. Right-click a row, or use its **…** button, for **Rename**,
 **Export…** and **Delete**.
 
-**Add device** lists the Palm TX and the Tungsten E2 with "Ready" or "Needs firmware".
-A ready device starts a new session at once. For the other one the Firmware dialog
+**Add device** lists the Palm TX, the Tungsten E2 and the Zire 72 with "Ready" or "Needs
+firmware". A ready device starts a new session at once. For the others the Firmware dialog
 opens first and the device starts after the import.
 
 **File → Firmware…** (Import firmware) takes a NOR image and, for the E2, an optional
 NAND image. The TX needs a 16 MiB NOR image and a 132 MiB raw NAND image. The Tungsten
 E2 needs an 8 MiB NOR image and can take a 34,603,008-byte raw NAND image; with no NAND
-it starts from blank flash and you set it up again. **Device** can detect the device
-from the NOR image (the E2 from its card header at 0x20000, the TX from its size) or
-you can choose it. Frond refuses a NOR image that belongs to another device than the
+it starts from blank flash and you set it up again. The Zire 72 needs its 14,942,208-byte
+NOR image and has no NAND; the NAND field greys out for it. **Device** can detect the device
+from the NOR image (the E2 from its card header at 0x20000, the Zire 72 from its small card
+at 0x0 and big card at 0x20000, the TX from its size) or you can choose it. Frond refuses a NOR image that belongs to another device than the
 one chosen. The images are copied into `~/.local/share/frond/firmware/<device name>/`,
 so you can move the originals. Complete Palm OS setup in the Palm window when starting
 from raw firmware.
@@ -52,13 +53,13 @@ Palm and returns to the list.
 
 **Low-latency audio** can reduce the delay between a tap and sound.
 It is off by default. Set it before starting the Palm. It supports one 44.1 kHz
-stereo stream with qualified TX or Tungsten E2 firmware; unsupported playback
+stereo stream with qualified TX or Tungsten E2 firmware (not the Zire 72 yet); unsupported playback
 falls back to normal audio and may briefly pause. See [fast audio](fast-audio.md) for the limitations.
 
 Sessions are stored under `$XDG_DATA_HOME/frond/sessions`, normally
 `~/.local/share/frond/sessions`, one `<name>.frond` file each. A device that was never
 saved is a small `<name>.frond.new` marker until its first save. Imported and exported
-files are copies. A session names its device, `palm-tx` or `palm-e2`. Sessions from
+files are copies. A session names its device, `palm-tx`, `palm-e2` or `palm-zire-72`. Sessions from
 earlier Frond versions stored a number instead and won't open; start again from firmware.
 Session files contain firmware, installed applications and Palm user data.
 
@@ -74,7 +75,8 @@ While a Palm runs, the window shows its sections instead of the list, and the ti
 the session name. **Save**, **Save a copy…**, **Emulator log**, **Hard reset** and **Save and Stop**
 stay at the bottom of the window. **Force Stop…** appears there if the emulator stops
 answering. Ctrl+S saves. **Hard reset** erases everything on the Palm, after saving the session if
-you choose **Save first**. The TX and E2 then ask "Erase all data?": press up to erase.
+you choose **Save first**. The TX and E2 then ask "Erase all data?": press up to erase. The
+Zire 72 erases at once and starts again from calibration.
 
 - **Applications:** **Install application** (PRC/PDB, after Palm OS has started),
   **Launch application** (by its Palm database name), **Export RAM databases** (a ZIP
@@ -92,7 +94,8 @@ you choose **Save first**. The TX and E2 then ask "Erase all data?": press up to
   32 to 128 MiB FAT16.
 - **Device:** Sound, Network, Infrared keyboard, Serial port, USB HotSync, Infrared
   beaming, Bluetooth, **Reset** and **Rotate**. A control the device doesn't have yet
-  is greyed. All of them grey while the emulator is busy.
+  is greyed: Network and Serial port on the E2 and Zire 72, and Low-latency audio in
+  Settings on the Zire 72. All of them grey while the emulator is busy.
 
 For Internet access, select **Network: Virtual Wi-Fi (Frond)** before turning on
 Wi-Fi in Palm OS. Scan and connect to the open **Frond** network. Its virtual
@@ -117,7 +120,7 @@ listens on 127.0.0.1) and connect one client at a time, for example
 `nc 127.0.0.1 5023`. It is off by default, the choice is kept between runs and changing
 it while running closes the old connection. See [host serial](tx-serial.md#host-endpoint).
 
-**USB HotSync** plugs the TX or E2 USB port into the computer for HotSync with
+**USB HotSync** plugs the TX, E2 or Zire 72 USB port into the computer for HotSync with
 pilot-link and the like. Choose **Terminal (PTY)** or **Wait for a peer** as for the
 serial port. The line under it shows the endpoint, whether a client is connected and
 how far the Palm got on the bus (enumerated once it is ready). Start HotSync on the
@@ -127,12 +130,12 @@ is off by default and the choice is kept between runs. See
 
 LCD pixels stay sharp by default; **Smooth pixels** in Settings turns on linear
 filtering. The default size is the largest that fits the screen, including the button
-strip and window frame. The button strip and E2 silkscreen are drawn at the selected
+strip and window frame. The button strip and the E2 and Zire 72 silkscreens are drawn at the selected
 scale in either mode. A session is locked while open to prevent two Frond windows
 overwriting it. Errors appear in the window; **Emulator log** shows diagnostic details.
 
 `.frond` files can be brought in with **File → Import session…**. A GUI-controlled
-session supports the Palm TX and the Tungsten E2. See the
+session supports the Palm TX, the Tungsten E2 and the Zire 72. See the
 [device profile inventory](device-profiles.md) for the inherited models and staged
 support limits.
 
@@ -144,6 +147,13 @@ with the Graffiti area, Home, Menu, Favorites, Find, clock, brightness and the A
 and 123 keyboards. Click the silkscreen buttons and the strip like the TX buttons;
 F1 to F4 are the four application buttons and Escape is Power. Scaling and
 rotation work as on the TX.
+
+The Zire 72 window has Calendar over Contacts on the left, a rounded-square five-way
+with its select key in the middle, and Camera over Music on the right, under the Zire's
+silkscreen (Home, Menu, Favorites, Find, clock, brightness, ABC and 123). F1 to F4 are
+Calendar, Contacts, Music and Camera, and F5 is the side voice button (hold it to record
+a voice memo). Its silkscreen's ABC and 123 areas run past the 120 rows Frond's digitizer
+covers, so their labels are drawn and tapped inside those rows.
 
 The TX window includes a button strip beneath its display: Home, Calendar,
 five-way navigation with centre select, Contacts and Web. Click and hold
