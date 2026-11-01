@@ -32,6 +32,12 @@ class PeripheralsModel(
 ) {
     var state by mutableStateOf(SdCard.State.UNKNOWN)
         private set
+    var writeProtected by mutableStateOf<Boolean?>(null)
+        private set
+    var canCancelFiles by mutableStateOf(false)
+        private set
+    var cancellingFiles by mutableStateOf(false)
+        private set
     var busy by mutableStateOf<String?>(null)
         private set
     var alert by mutableStateOf<Pair<String, String>?>(null)
@@ -80,9 +86,12 @@ class PeripheralsModel(
         return waitingForGdb
     }
 
-    fun job(label: String, failTitle: String, work: (SdCard) -> Unit) {
+    fun job(label: String, failTitle: String, cancellable: Boolean = false, work: (SdCard) -> Unit) {
         val c = card ?: return
         if (busy != null || waiting()) return
+        c.beginJob()
+        canCancelFiles = device.memoryStick && cancellable
+        cancellingFiles = false
         busy = label
         activity.lifecycleScope.launch {
             val error = withContext(Dispatchers.IO) {
@@ -90,15 +99,29 @@ class PeripheralsModel(
                     work(c)
                     null
                 } catch (e: Exception) {
-                    SdCard.message(e)
+                    if (e is SdCard.Failed && e.code == "cancelled") {
+                        activity.runOnUiThread { note = "Cancelled" }; null
+                    } else SdCard.message(e)
                 }
             }
             val s = withContext(Dispatchers.IO) { c.state() }
+            val protection = withContext(Dispatchers.IO) { c.protection() }
             state = s
+            writeProtected = protection
             changed = c.changed
             busy = null
+            canCancelFiles = false
+            cancellingFiles = false
             if (error != null) alert = failTitle to error
         }
+    }
+
+    fun cancelFiles() {
+        if (!canCancelFiles || cancellingFiles) return
+        val cancellation = card?.cancelJob()
+        if (cancellation == null) { canCancelFiles = false; return }
+        cancellingFiles = true
+        activity.lifecycleScope.launch(Dispatchers.IO) { try { cancellation.input?.close() } catch (_: Exception) { } }
     }
 
     // Database work through the control link; leaves the card state alone.
@@ -403,12 +426,15 @@ class PeripheralsModel(
     }
 
     fun refresh() {
-        if (device.sdSlot) job("Reading", "Couldn't read the card") { }
+        if (device.cardSupported) job("Reading", "Couldn't read the card") { }
     }
 
     // Lists the open folder again after a change.
     private fun relist(c: SdCard, at: String) {
-        val (list, space) = c.read { it.list(at) to it.freeBytes }
+        val (list, space) = try { c.list(at) } catch (error: Exception) {
+            if (device.memoryStick) activity.runOnUiThread { entries = emptyList(); free = 0 }
+            throw error
+        }
         activity.runOnUiThread {
             path = at
             entries = list
@@ -416,12 +442,12 @@ class PeripheralsModel(
         }
     }
 
-    fun openFiles() = job("Ejecting", "Couldn't open the card") { c ->
+    fun openFiles() = job(if (device.memoryStick) "Reading" else "Ejecting", "Couldn't open the card", cancellable = true) { c ->
         c.beginEdit()
         relist(c, "/")
     }
 
-    fun open(at: String) = job("Reading", "Couldn't open the folder") { c -> relist(c, at) }
+    fun open(at: String) = job("Reading", "Couldn't open the folder", cancellable = true) { c -> relist(c, at) }
 
     fun up() {
         val p = path ?: return
@@ -429,10 +455,16 @@ class PeripheralsModel(
         open(p.substringBeforeLast('/').ifEmpty { "/" })
     }
 
+    private fun finishMutation(c: SdCard) {
+        c.finishMutation()
+        activity.runOnUiThread { canCancelFiles = false; cancellingFiles = false }
+    }
+
     fun addFile(uri: android.net.Uri) {
         val at = path ?: return
-        job("Copying", "Couldn't add the file") { c ->
+        job("Copying", "Couldn't add the file", cancellable = true) { c ->
             val name = c.addFile(at, uri)
+            finishMutation(c)
             relist(c, at)
             activity.runOnUiThread { note = "$name added" }
         }
@@ -440,15 +472,28 @@ class PeripheralsModel(
 
     fun makeFolder(name: String) {
         val at = path ?: return
-        job("Copying", "Couldn't make the folder") { c ->
+        job("Copying", "Couldn't make the folder", cancellable = true) { c ->
             c.makeFolder(at, name)
+            finishMutation(c)
             relist(c, at)
         }
     }
 
+    fun renameEntry(entry: FatImage.Entry, newName: String) {
+        val at = path ?: return
+        job("Renaming", "Couldn't rename the entry", cancellable = true) { c -> c.renameEntry(at, entry.name, newName); finishMutation(c); relist(c, at) }
+    }
+
+    fun deleteEntry(entry: FatImage.Entry) {
+        val at = path ?: return
+        job("Deleting", "Couldn't delete the entry", cancellable = true) { c -> c.deleteEntry(at, entry.name); finishMutation(c); relist(c, at) }
+    }
+
     fun exportFile(entry: FatImage.Entry, to: android.net.Uri) =
-        job("Copying", "Couldn't export the file") { c ->
-            c.exportFile(entry, to)
+        job("Copying", "Couldn't export the file", cancellable = true) { c ->
+            c.exportFile(entry, to, path ?: "/") {
+                activity.runOnUiThread { canCancelFiles = false; busy = "Saving exported document" }
+            }
             activity.runOnUiThread { note = "${entry.name} exported" }
         }
 
@@ -458,7 +503,7 @@ class PeripheralsModel(
     }
 
     // Closes the file view and puts the card back in the Palm, edited or not.
-    fun insertEdited() = job("Inserting", "Couldn't insert the card") { c ->
+    fun insertEdited() = job(if (device.memoryStick) "Closing files" else "Inserting", "Couldn't insert the card") { c ->
         c.finishEdit()
         activity.runOnUiThread { path = null }
     }
@@ -471,10 +516,11 @@ class PeripheralsModel(
 }
 
 // The emulator's menu: applications and databases, the SD card and the other peripherals of the running Palm. Runs in the emulator's process and uses
-// FrondActivity's control link. While it's open the emulator is in the background and the guest is
-// paused; Home from here saves the session like it does from the emulator.
+// FrondActivity's control link. The TG50 keeps running without drawing while this menu is visible.
+// Other devices stay paused; Home saves the session like it does from the emulator.
 class PeripheralsActivity : ComponentActivity() {
     private lateinit var model: PeripheralsModel
+    private var panelControl: ControlLink? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -484,7 +530,7 @@ class PeripheralsActivity : ComponentActivity() {
         model = PeripheralsModel(
             this,
             device,
-            emulator?.let { SdCard(applicationContext, it.control, it.session) },
+            emulator?.let { SdCard(applicationContext, it.control, it.session, device) },
             emulator?.let { PalmDatabases(applicationContext, it.control) },
             emulator?.control,
             emulator?.session?.let { Sessions.read(this, java.io.File(it).name.removeSuffix(".frond"))?.name } ?: device.label,
@@ -494,6 +540,7 @@ class PeripheralsActivity : ComponentActivity() {
             finish()
             return
         }
+        if (device.memoryStick) panelControl = emulator.control
         model.watchGdb()
         model.checkFastAudio(emulator.session)
         if (!model.waitingForGdb) model.refresh()
@@ -516,6 +563,16 @@ class PeripheralsActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        panelControl?.setPanelVisible(true)
+    }
+
+    override fun onPause() {
+        panelControl?.setPanelVisible(false)
+        super.onPause()
     }
 
     override fun onStop() {

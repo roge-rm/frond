@@ -48,7 +48,7 @@ SMOKE = {
     'sony-clie-tg50': {'nor': PALM.parent / 'Sony/CLIE-TG50/Sony-Clie-TG50-nor.bin',
                        'nand': None, 'setup': 'tg50_setup', 'app': 'Date Book',
                        'taps': [(100, 100)], 'area': (0, 0, 320, 320),
-                       'media': 'memory-stick-unavailable', 'audio': 'sony-general'},
+                       'media': 'memory-stick-focused-qualification', 'audio': 'sony-general'},
 }
 PROBES = {'sd': 'FrondSDProbe.prc', 'audio': 'FrondAudioProbe.prc'}
 SD_MIB = 32
@@ -281,7 +281,7 @@ def smoke(device, probes):
             run.close()
 
     else:
-        steps.append('media skipped (Memory Stick unavailable)')
+        steps.append('Memory Stick not exercised (covered by focused storage qualification)')
 
     # Sound, captured from SDL's disk audio driver.
     pcm = work / 'audio.raw'

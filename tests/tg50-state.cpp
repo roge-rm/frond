@@ -10,6 +10,8 @@
 #include "pxa_GPIO.h"
 #include "mmiodev_TG50uc.h"
 #include "soc_PXA.h"
+#include "MemoryStickImage.h"
+#include "mmiodev_MemoryStickController.h"
 
 static uint32_t read(ArmMem *mem, uint32_t address, unsigned size = 4) {
     uint32_t value{};
@@ -362,7 +364,43 @@ static void holdAndPanel() {
     puts("TG50 independent UC IRQs, persistent Hold and external panel power passed");
 }
 
+static void memoryStickDma() {
+    std::vector<uint8_t> rom(4096);SocPXA soc(deviceTypeTG50,16u<<20,rom.data(),rom.size(),nullptr,0,-1,0);
+    auto* mem=cpuGetMem(soc.GetCpu());auto* ms=soc.GetMemoryStick();auto image=frondMs::create();assert(msCtrlrAttach(ms,image));
+    write(mem,0xa0001000,0xeafffffe);cpuSetReg(soc.GetCpu(),15,0xa0001000);
+    auto tpc=[&](unsigned id,const std::vector<uint8_t>& bytes){
+        write(mem,0x140000b0,0x100,2);write(mem,0x14000080,(id<<12)|bytes.size(),2);
+        for(size_t i=0;i<((bytes.size()+7)&~size_t(7));i+=4){uint32_t v=0;for(unsigned b=0;b<4&&i+b<bytes.size();++b)v|=uint32_t(bytes[i+b])<<(b*8);write(mem,0x14000090,v);if((i&7)==4)msCtrlrPeriodic(ms);}
+    };
+    auto prepare=[&] {
+        msCtrlrReset(ms);tpc(8,{0,31,16,15});std::vector<uint8_t> p(15,0xff);p[0]=0x80;p[1]=p[2]=p[3]=0;p[4]=0x20;p[5]=0;
+        tpc(0xb,p);tpc(0xe,{0xaa});write(mem,0x140000b0,0,2);write(mem,0x14000080,0x2200,2);write(mem,0x14000048,0x8040,2);
+        for(unsigned i=0;i<512;i+=4)write(mem,0xa0003000+i,0x5a5a5a5a);
+    };
+    auto start=[&](uint32_t source,uint32_t target,uint32_t cmd) {
+        write(mem,0x4000003c,0);write(mem,0xa0002000,1);write(mem,0xa0002004,source);write(mem,0xa0002008,target);write(mem,0xa000200c,cmd);
+        write(mem,0x40000100,0x8f);write(mem,0x40000104,0);write(mem,0x400002f0,0xa0002000);write(mem,0x4000003c,0x80000000);
+    };
+    prepare();start(0x14000090,0xa0003000,0x60210200);auto pending=state(soc);
+    soc.Run(200000,100000000);if(read(mem,0x4000003c)&0x80000001)fprintf(stderr,"MS DMA failure CSR=%08x CR=%08x count=%04x status=%04x\n",read(mem,0x4000003c),read(mem,0x400002fc),read(mem,0x14000048,2),read(mem,0x140000a0,2));assert(!(read(mem,0x4000003c)&0x80000001));assert(!read(mem,0x14000048,2));
+    for(unsigned i=0;i<512;++i){uint8_t value=0;assert(memAccess(mem,0xa0003000+i,1,false,&value));assert(value==image[i]);}
+    assert(soc.Load(pending.size(),pending.data()));for(unsigned i=0;i<512;i+=4)write(mem,0xa0003000+i,0x5a5a5a5a);
+    soc.Run(200000,100000000);for(unsigned i=0;i<512;i+=4){uint32_t expected=0;memcpy(&expected,image.data()+i,4);assert(read(mem,0xa0003000+i)==expected);}
+    msCtrlrReset(ms);tpc(8,{0,31,16,15});std::vector<uint8_t> params(15,0xff);params[0]=0x80;params[1]=params[2]=0;params[3]=2;params[4]=0x20;params[5]=0;
+    tpc(0xb,params);tpc(0xe,{0x55});write(mem,0x140000b0,0x100,2);write(mem,0x14000080,0xd200,2);write(mem,0x14000048,0x8040,2);
+    for(unsigned i=0;i<512;i+=4)write(mem,0xa0004000+i,0x193a5c7e);
+    start(0xa0004000,0x14000090,0x90210200);auto writePending=state(soc);soc.Run(200000,100000000);
+    assert(!(read(mem,0x4000003c)&0x80000001));assert(!read(mem,0x14000048,2));
+    std::vector<uint8_t> written;assert(msCtrlrExport(ms,written));const auto pageAt=size_t(2)*32*521;
+    for(unsigned i=0;i<512;i+=4){uint32_t value;memcpy(&value,written.data()+pageAt+i,4);assert(value==0x193a5c7e);}
+    assert(soc.Load(writePending.size(),writePending.data()));soc.Run(200000,100000000);std::vector<uint8_t> repeated;assert(msCtrlrExport(ms,repeated));assert(repeated==written);
+    for(auto example:std::array<std::array<uint32_t,3>,3>{{{{0x14000094,0xa0003000,0x60210200}},{{0x14000090,0xa0003000,0xe0210200}},{{0x14000090,0x40100000,0x60210200}}}}){
+        prepare();start(example[0],example[1],example[2]);soc.Run(20000,100000000);assert(read(mem,0x4000003c)&1);assert(read(mem,0x14000048,2)==0x8040);assert(read(mem,0xa0003000)==0x5a5a5a5a);
+    }
+    puts("TG50 observed external WIDTH00 descriptor, pending reload and scoped DMA rejection passed");
+}
 int main() {
+    memoryStickDma();
     controls();
     holdAndPanel();
     audioBoard();

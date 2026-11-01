@@ -62,16 +62,21 @@ bool DesktopClient::request(const QString& command, const QString& argument) {
     pending = command;
     if (command == "quit") expectingExit = true;
     const auto line = QByteArray::number(++serial) + '\t' + command.toUtf8() + '\t' + argument.toUtf8().toHex() + '\n';
-    if (line.size() > 16384 || socket->write(line) != line.size()) {
+    if (line.size() > 32768 || socket->write(line) != line.size()) {
         pending.clear(); emit error(tr("Could not send the emulator command.")); return false;
     }
-    deadline.start(120000);
+    deadline.start(command == "ms-get" || command == "ms-put" ? 240000 : 120000);
     return true;
+}
+bool DesktopClient::cancelFiles() {
+    if (!socket || !QStringList({"ms-files", "ms-get", "ms-put", "ms-mkdir", "ms-delete", "ms-rename"}).contains(pending)) return false;
+    const auto line = QByteArray("0\tcancel-files\t") + QByteArray::number(serial).toHex() + '\n';
+    return socket->write(line) == line.size();
 }
 void DesktopClient::receive() {
     if (!socket) return;
     input += socket->readAll();
-    if (input.size() > 65536) return fail(tr("The emulator sent an oversized control response."));
+    if (input.size() > 1024 * 1024) return fail(tr("The emulator sent an oversized control response."));
     while (input.contains('\n')) {
         const auto at = input.indexOf('\n');
         const auto fields = input.first(at).split('\t');

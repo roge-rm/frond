@@ -40,7 +40,10 @@ data class Device internal constructor(
     val sideTabWidth: Int = 0,
     val homeKey: Int = 0,
     val holdPresent: Boolean = false, val holdSupported: Boolean = false,
+    val memoryStick: Boolean = false,
 ) {
+    val cardSupported: Boolean get() = sdSlot || memoryStick
+    val cardLabel: String get() = if (storageSlot == "memory-stick") "Memory Stick" else "SD card"
     val hasNand: Boolean get() = nandSize > 0
     val fastAudio: Boolean get() = fastAudioNorMd5 != null
     val coreFlags: List<String> get() = listOf("--device", id)

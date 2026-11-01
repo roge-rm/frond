@@ -261,6 +261,7 @@ class FrondActivity : SDLActivity() {
     private fun leave() {
         if (leaving) return
         leaving = true
+        link.cancelFiles()
         runOnUiThread {
             controller.releaseAll()
             hideKeyboard()

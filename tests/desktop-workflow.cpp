@@ -1197,6 +1197,76 @@ for line in s.makefile('rb'):
         QDir(managedFolder()).removeRecursively();
         QSettings().clear();
     }
+    void memoryStickControls() {
+        const auto device = frondFirmware::deviceFromId("sony-clie-tg50");
+        if (!frondFirmware::profile(device).frontend.memoryStick) QSKIP("Memory Stick is not qualified yet");
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        putSession("Stick", 6, "sony-clie-tg50", 1);
+        QTemporaryDir files;
+        const auto tracePath = files.filePath("commands");
+        QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly));
+        auto script = QByteArray(R"PY(#!/usr/bin/python3
+import pathlib,socket,sys
+trace=pathlib.Path(__file__).with_name('commands')
+s=socket.socket(socket.AF_UNIX);s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+card='none'; protection='writable'
+for line in s.makefile('rb'):
+    i,raw,arg=line.rstrip(b'\n').split(b'\t'); cmd=raw.decode(); arg=bytes.fromhex(arg.decode()).decode()
+    with trace.open('a') as f: f.write(cmd+'\t'+arg+'\n')
+    message='done'
+    if cmd.startswith('sd-'): raise AssertionError('Memory Stick used SD command')
+    if cmd=='device-state': message='sony-clie-tg50'
+    elif cmd=='hold-state': message='off'
+    elif cmd=='network-state': message='disabled'
+    elif cmd=='keyboard-state': message='detached'
+    elif cmd=='ms-state': message=card
+    elif cmd=='ms-protection': message=protection
+    elif cmd=='ms-create':
+        assert arg=='128' and card!='inserted';card='inserted'
+    elif cmd=='ms-eject': assert card=='inserted';card='ejected'
+    elif cmd=='ms-reinsert': assert card=='ejected';card='inserted'
+    elif cmd=='ms-read-only':
+        assert card=='ejected';protection='read-only' if arg=='on' else 'writable';message=protection
+    s.sendall(i+b'\tok\tresult\t'+message.encode().hex().encode()+b'\n')
+    if cmd=='quit': break
+)PY");
+        core.write(script); core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        MainWindow window(core.fileName()); window.show();
+        window.openSession(managedFolder() + "/Stick.frond", true);
+        auto* state = window.findChild<QLabel*>("sdState");
+        auto* create = window.findChild<QPushButton*>("sdNew");
+        auto* protection = window.findChild<QCheckBox*>("cardReadOnly");
+        QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("No card"), 5000);
+        QVERIFY(create->isVisible() && create->isEnabled());
+        QCOMPARE(window.findChild<QLabel*>("storageHeading")->text(), QString("Memory Stick"));
+        QVERIFY(!window.findChild<QPushButton*>("sdExchange")->isVisible());
+        create->click();
+        QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Inserted"), 5000);
+        QTRY_VERIFY(protection->isVisible()); QVERIFY(!protection->isEnabled());
+        QTimer answer; answer.setInterval(10);
+        connect(&answer, &QTimer::timeout, &window, [&] {
+            if (auto* box = window.findChild<QMessageBox*>(); box && box->isVisible()) box->button(QMessageBox::Yes)->click();
+        });
+        answer.start();
+        window.findChild<QPushButton*>("sdEject")->click();
+        QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Ejected"), 5000);
+        QTRY_VERIFY(protection->isEnabled()); protection->click();
+        QTRY_VERIFY(protection->isChecked() && protection->isEnabled());
+        window.findChild<QPushButton*>("sdInsert")->click();
+        QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Inserted"), 5000);
+        QVERIFY(protection->isChecked() && !protection->isEnabled());
+        QVERIFY(window.findChild<QPushButton*>("sdExchange")->isVisible());
+        answer.stop(); window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        QFile trace(tracePath); QVERIFY(trace.open(QIODevice::ReadOnly));
+        const auto commands = trace.readAll();
+        QVERIFY(commands.contains("ms-create\t128\n"));
+        QVERIFY(commands.contains("ms-read-only\ton\n"));
+        QVERIFY(commands.contains("ms-reinsert\t\n"));
+        QVERIFY(!commands.contains("sd-"));
+        QDir(managedFolder()).removeRecursively(); QSettings().clear();
+    }
     void qualifiedFirmwareSettings() {
         const auto norPath = qEnvironmentVariable("FROND_TEST_QUALIFIED_NOR");
         if (norPath.isEmpty()) QSKIP("FROND_TEST_QUALIFIED_NOR not set");
@@ -1754,7 +1824,8 @@ for line in s.makefile('rb'):
             QTest::qWait(2000); focus(id); key("F6"); QTest::qWait(1500);
             capture(window, id, "launcher");
             QCOMPARE(window.findChild<QLabel*>("storageHeading")->text(), QString("Memory Stick"));
-            QVERIFY(!window.findChild<QPushButton*>("sdNew")->isVisible());
+            QCOMPARE(window.findChild<QPushButton*>("sdNew")->isVisible(), frondFirmware::profile(frondFirmware::deviceFromId("sony-clie-tg50")).frontend.memoryStick);
+            QVERIFY(!window.findChild<QPushButton*>("sdExchange")->isVisible());
             QVERIFY(!window.findChild<QComboBox*>("usbMode")->isEnabled());
             QVERIFY(!window.findChild<QCheckBox*>("bluetoothEnabled")->isEnabled());
             QVERIFY(!window.findChild<QCheckBox*>("keyboardAttached")->isEnabled());

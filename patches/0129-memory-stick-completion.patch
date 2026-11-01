@@ -1,0 +1,401 @@
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -96,7 +96,7 @@
+         const auto n = recv(fd, data, sizeof(data), 0);
+         if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) return true;
+         if (n > 0) input.append(data, n);
+-        if (input.size() > 16384 || !flush()) return true;
++        if (input.size() > 32768 || !flush()) return true;
+         // Take the next command only once the last reply is sent, so a large reply like db-list stays
+         // the only thing queued and a slow reader can't grow the output without limit.
+         const auto end = output.empty() ? input.find('\n') : std::string::npos;
+@@ -106,6 +106,7 @@
+             const auto first = line.find('\t'), second = line.find('\t', first == std::string::npos ? 0 : first + 1);
+             if (first == std::string::npos || second == std::string::npos) return true;
+             const auto id = line.substr(0, first), command = line.substr(first + 1, second - first - 1);
++            if (id == "0" && command == "cancel-files") return false;
+             if (id.empty() || id.size() > 20 || id == "0" || id.find_first_not_of("0123456789") != std::string::npos)
+                 return true;
+             std::string argument;
+@@ -114,7 +115,9 @@
+             if (work) ctx.audioDriver.Pause();
+             Reply result;
+             try {
+-                result = dispatch(ctx, command, argument);
++                result = dispatch(ctx, command, argument, id);
++            } catch (const GuestFiles::Cancelled& error) {
++                result = {false, "cancelled", error.what()};
+             } catch (const InjectedCallError& error) {
+                 result = {false, "timeout", error.what()};
+             } catch (const std::exception& error) {
+@@ -196,7 +199,34 @@
+         }
+         return true;
+     }
+-    static void writeAtomic(const std::string& path, const void* bytes, size_t size) {
++    bool cancelFiles(const std::string& job) {
++        char bytes[4096];
++        while (true) {
++            const auto received = recv(fd, bytes, sizeof(bytes), MSG_DONTWAIT);
++            if (received == 0) throw GuestFiles::Cancelled();
++            if (received < 0) {
++                if (errno == EINTR) continue;
++                if (errno == EAGAIN || errno == EWOULDBLOCK) break;
++                throw GuestFiles::Cancelled();
++            }
++            input.append(bytes, received);
++            if (input.size() > 32768) throw std::runtime_error("Control input exceeds its bounded queue");
++        }
++        const std::string matching = "0\tcancel-files\t" + encode(job);
++        bool cancelled = false;
++        size_t start = 0;
++        while (true) {
++            const auto end = input.find('\n', start);
++            if (end == std::string::npos) break;
++            const auto line = input.substr(start, end - start);
++            if (line == matching) {
++                cancelled = true;
++                input.erase(start, end - start + 1);
++            } else start = end + 1;
++        }
++        return cancelled;
++    }
++    static void writeAtomic(const std::string& path, const void* bytes, size_t size, const GuestFiles::Cancel& cancel = {}) {
+         std::string temporary = path + ".tmp-XXXXXX";
+         const int file = mkstemp(temporary.data());
+         if (file < 0) throw std::runtime_error("cannot create output file: " + std::string(strerror(errno)));
+@@ -211,8 +241,9 @@
+             }
+             if (fsync(file) < 0) throw std::runtime_error("cannot flush output file");
+             const auto closed = close(file); open = false;
+-            if (closed < 0 || rename(temporary.c_str(), path.c_str()) < 0)
+-                throw std::runtime_error("cannot replace output file");
++            if (closed < 0) throw std::runtime_error("cannot close output file");
++            GuestFiles::CheckCancel(cancel);
++            if (rename(temporary.c_str(), path.c_str()) < 0) throw std::runtime_error("cannot replace output file");
+             // Makes the rename itself durable; a failure here leaves the new file in place.
+             const auto slash = path.rfind('/');
+             const int folder = ::open(slash == std::string::npos ? "." : slash == 0 ? "/" : path.substr(0, slash).c_str(),
+@@ -224,7 +255,7 @@
+             throw;
+         }
+     }
+-    Reply dispatch(commands::Context& ctx, const std::string& command, const std::string& path) {
++    Reply dispatch(commands::Context& ctx, const std::string& command, const std::string& path, const std::string& job) {
+         const bool msFilesCommand = command == "ms-files" || command == "ms-get" || command == "ms-put" ||
+             command == "ms-mkdir" || command == "ms-delete" || command == "ms-rename";
+         const bool fileCommand = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "ms-insert" || command == "ms-export" || command == "input-replay";
+@@ -348,6 +379,8 @@
+             auto* ms=pxa?pxa->GetMemoryStick():nullptr;
+             if(!ms)return {false,"unsupported","This device has no Memory Stick slot."};
+             if (msFilesCommand) {
++                const GuestFiles::Cancel cancel = [this, job] { return cancelFiles(job); };
++                GuestFiles::CheckCancel(cancel);
+                 if (!msCtrlrInserted(ms)) return {false, "empty", "Insert the Memory Stick before opening its files."};
+                 const bool writing = command == "ms-put" || command == "ms-mkdir" || command == "ms-delete" || command == "ms-rename";
+                 if (writing && msCtrlrReadOnly(ms)) return {false, "protected", "The Memory Stick is write protected."};
+@@ -378,21 +411,21 @@
+                 if (!GuestDatabaseOps::Ready(*ctx.soc))
+                     return {false, "not-ready", "Wait for Palm OS to reach a supported application boundary."};
+                 if (command == "ms-files") {
+-                    const auto listing = GuestFiles::List(*ctx.soc, cardPath);
++                    const auto listing = GuestFiles::List(*ctx.soc, cardPath, cancel);
+                     std::string text = "space\t" + std::to_string(listing.used) + "\t" + std::to_string(listing.total) + "\n";
+                     for (const auto& entry : listing.entries)
+                         text += std::string(entry.directory ? "d\t" : "f\t") + std::to_string(entry.size) + "\t" + encode(entry.name) + "\n";
+                     return {true, "files", text};
+                 }
+                 if (command == "ms-get") {
+-                    contents = GuestFiles::Get(*ctx.soc, cardPath);
+-                    writeAtomic(other, contents.data(), contents.size());
++                    contents = GuestFiles::Get(*ctx.soc, cardPath, cancel);
++                    writeAtomic(other, contents.data(), contents.size(), cancel);
+                     return {true, "exported", "Card file exported."};
+                 }
+-                if (command == "ms-put") GuestFiles::Put(*ctx.soc, cardPath, contents);
+-                else if (command == "ms-mkdir") GuestFiles::Mkdir(*ctx.soc, cardPath);
+-                else if (command == "ms-delete") GuestFiles::Delete(*ctx.soc, cardPath);
+-                else if (command == "ms-rename") GuestFiles::Rename(*ctx.soc, cardPath, other);
++                if (command == "ms-put") GuestFiles::Put(*ctx.soc, cardPath, contents, cancel);
++                else if (command == "ms-mkdir") GuestFiles::Mkdir(*ctx.soc, cardPath, cancel);
++                else if (command == "ms-delete") GuestFiles::Delete(*ctx.soc, cardPath, cancel);
++                else if (command == "ms-rename") GuestFiles::Rename(*ctx.soc, cardPath, other, cancel);
+                 return {true, "changed", "Memory Stick updated."};
+             }
+             if(command=="ms-state")return {true,"card",!msCtrlrPresent(ms)?"none":msCtrlrInserted(ms)?"inserted":"ejected"};
+--- a/src/uarm/uarm/tg50_call_budget.h
++++ b/src/uarm/uarm/tg50_call_budget.h
+@@ -10,14 +10,33 @@
+  public:
+     using Clock = std::chrono::steady_clock;
+     explicit Budget(uint64_t guestTime, Clock::time_point now = Clock::now())
+-        : started(now), startedGuest(guestTime) {}
++        : started(now), lastProgress(now), startedGuest(guestTime) {}
+ 
+     void Check(uint64_t guestTime, Clock::time_point now = Clock::now()) const {
+-        Require(now >= started && now - started < std::chrono::seconds(30),
++        constexpr uint64_t bytesPerSecond = 96 * 1024;
++        const uint64_t extraSeconds = plannedBytes / bytesPerSecond + (plannedBytes % bytesPerSecond != 0);
++        Require(now >= started && now - started < std::chrono::seconds(30 + extraSeconds),
+                 "TG50 transaction host deadline exceeded");
+-        Require(guestTime >= startedGuest && guestTime - startedGuest < 20000000000ull,
++        Require(now >= lastProgress && now - lastProgress < std::chrono::seconds(30),
++                "TG50 transaction made no verified progress for 30 seconds");
++        Require(guestTime >= startedGuest && guestTime - startedGuest < 20000000000ull + plannedBytes * 2560ull,
+                 "TG50 transaction guest deadline exceeded");
+-        Require(cycles < 1000000000ull, "TG50 transaction cycle limit exceeded");
++        Require(cycles < CycleLimit(), "TG50 transaction cycle limit exceeded");
++    }
++    void BeginFileTransfer(uint32_t bytes, uint64_t guestTime, Clock::time_point now = Clock::now()) {
++        Check(guestTime, now);
++        Require(!fileDeclared && bytes <= 16 * 1024 * 1024, "TG50 invalid file-transfer byte plan");
++        fileDeclared = true;
++        plannedBytes = bytes;
++    }
++    void FileProgress(uint32_t bytes, uint64_t guestTime, Clock::time_point now = Clock::now()) {
++        Check(guestTime, now);
++        Require(fileDeclared && bytes && bytes <= plannedBytes - completedBytes, "TG50 invalid file-transfer progress");
++        completedBytes += bytes;
++        lastProgress = now;
++    }
++    void RequireFileComplete() const {
++        Require(!fileDeclared || completedBytes == plannedBytes, "TG50 file transfer is incomplete");
+     }
+     void EnterCall(uint64_t guestTime) {
+         Check(guestTime);
+@@ -28,22 +47,26 @@
+         Require(++callbacks <= 65536, "TG50 transaction callback limit exceeded");
+     }
+     void Charge(uint64_t completedCycles, uint64_t guestTime) {
+-        Require(completedCycles <= 1000000000ull - cycles,
++        Require(completedCycles <= CycleLimit() - cycles,
+                 "TG50 transaction cycle limit exceeded");
+         cycles += completedCycles;
+         Check(guestTime);
+     }
+     uint64_t Slice(uint64_t guestTime) const {
+         Check(guestTime);
+-        const uint64_t remaining = 1000000000ull - cycles;
++        const uint64_t remaining = CycleLimit() - cycles;
+         return remaining < 1000000 ? remaining : 1000000;
+     }
+ 
+  private:
++    // Extra work is bounded by declared IO bytes; model accounting uses 10 ns per cycle.
++    uint64_t CycleLimit() const { return 1000000000ull + plannedBytes * 256ull; }
+     static void Require(bool ok, const char* why) {
+         if (!ok) throw std::runtime_error(why);
+     }
+-    Clock::time_point started;
++    Clock::time_point started, lastProgress;
++    bool fileDeclared{false};
++    uint64_t plannedBytes{0}, completedBytes{0};
+     uint64_t startedGuest, cycles{0};
+     uint32_t calls{0}, callbacks{0};
+ };
+--- a/src/uarm/uarm/tg50_pace_session.h
++++ b/src/uarm/uarm/tg50_pace_session.h
+@@ -131,9 +131,16 @@
+         activeCallbacks.clear();
+         failed = true;
+     }
++    void BeginFileTransfer(uint32_t bytes) {
++        FailureScope failure(*this); CheckOwner(); budget.BeginFileTransfer(bytes, soc.GetInjectedTimeNsec());
++    }
++    void FileProgress(uint32_t bytes) {
++        FailureScope failure(*this); CheckOwner(); budget.FileProgress(bytes, soc.GetInjectedTimeNsec());
++    }
+     void Close() {
+         FailureScope failure(*this);
+         CheckOwner();
++        budget.RequireFileComplete();
+         Require(stubs.empty() && allocations.empty() && activeCallbacks.empty(), "TG50 temporary guest objects remain live");
+         const auto current = Boundary::Capture(soc, false);
+         Require(current.frameSp == anchor.frameSp && current.m68kSp == anchor.m68kSp &&
+--- a/src/uarm/uarm/syscall_dispatch.h
++++ b/src/uarm/uarm/syscall_dispatch.h
+@@ -21,6 +21,8 @@
+ void syscallDispatchEndRecovery(struct SyscallDispatch* sd);
+ void syscallDispatchValidateCommit(struct SyscallDispatch* sd);
+ bool syscallDispatchRecoveryActive(struct SyscallDispatch* sd);
++void syscallDispatchBeginFileTransfer(struct SyscallDispatch* sd, uint32_t bytes);
++void syscallDispatchFileProgress(struct SyscallDispatch* sd, uint32_t bytes);
+ #endif
+ 
+ struct SyscallDispatch;
+--- a/src/uarm/uarm/syscall_dispatch.cpp
++++ b/src/uarm/uarm/syscall_dispatch.cpp
+@@ -123,6 +123,14 @@
+         sd->tg50 = std::make_unique<Tg50Pace::Session>(*sd->soc);
+     sd->recoverable = true;
+     sd->failed = false;
++}
++void syscallDispatchBeginFileTransfer(struct SyscallDispatch* sd, uint32_t bytes) {
++    if (!sd->recoverable || !sd->tg50) throw std::runtime_error("File transfer needs an active TG50 transaction");
++    sd->tg50->BeginFileTransfer(bytes);
++}
++void syscallDispatchFileProgress(struct SyscallDispatch* sd, uint32_t bytes) {
++    if (!sd->recoverable || !sd->tg50) throw std::runtime_error("File progress needs an active TG50 transaction");
++    sd->tg50->FileProgress(bytes);
+ }
+ bool syscallDispatchRecoveryActive(struct SyscallDispatch* sd) { return sd->recoverable; }
+ void syscallDispatchValidateCommit(struct SyscallDispatch* sd) {
+--- a/src/uarm/native/GuestFiles.h
++++ b/src/uarm/native/GuestFiles.h
+@@ -6,6 +6,8 @@
+ #include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
++#include <functional>
++#include <utility>
+ #include <set>
+ #include <stdexcept>
+ #include <string>
+@@ -13,6 +15,11 @@
+ #include "GuestDatabaseOps.h"
+ 
+ namespace GuestFiles {
++using Cancel = std::function<bool()>;
++class Cancelled : public std::runtime_error {
++ public: Cancelled() : std::runtime_error("File transfer cancelled.") {}
++};
++inline void CheckCancel(const Cancel& cancel) { if (cancel && cancel()) throw Cancelled(); }
+ constexpr size_t maxFileBytes = 8 * 1024 * 1024;
+ constexpr size_t maxEntries = 512;
+ inline void Require(bool ok, const char* message) { if (!ok) throw std::runtime_error(message); }
+@@ -46,7 +53,8 @@
+ 
+ class Session {
+  public:
+-    explicit Session(SoC& soc) : sd(soc.GetSyscallDispatch()) {
++    explicit Session(SoC& soc, Cancel cancel = {}) : sd(soc.GetSyscallDispatch()), cancel(std::move(cancel)) {
++        CheckCancel(this->cancel);
+         if (std::getenv("FROND_VFS_TRACE")) std::fprintf(stderr, "VFS allocate %u begin\n", unsigned(scratchBytes));
+         scratch = syscall68k_MemPtrNew(sd, SC_EXECUTE_PURE, scratchBytes);
+         if (std::getenv("FROND_VFS_TRACE")) std::fprintf(stderr, "VFS allocate result %08x\n", unsigned(scratch));
+@@ -55,6 +63,7 @@
+         volume = FindVolume();
+     }
+     void Finish() {
++        CheckCancel(cancel);
+         Require(files.empty(), "A Palm file reference is still open.");
+         Check(syscall68k_MemPtrFree(sd, SC_EXECUTE_PURE, scratch), "Free file-transfer memory");
+         scratch = 0;
+@@ -68,6 +77,7 @@
+         SetWord(iteratorAt, 0);
+         for (size_t count = 0; ; ++count) {
+             Require(count <= maxEntries, "This folder has more than 512 entries.");
++            CheckCancel(cancel);
+             const uint32_t prior = Word(iteratorAt);
+             if (prior == 0xffffffffu) break;
+             std::array<uint8_t, 10> info{};
+@@ -96,19 +106,10 @@
+         });
+         return result;
+     }
+-    std::vector<uint8_t> Get(const std::string& path) {
+-        const auto file = Open(path, 2);
+-        Require(!(Attributes(file) & 0x10), "Choose a regular file.");
+-        const uint32_t size = Size(file);
+-        Require(size <= maxFileBytes, "File exchange supports files up to 8 MB.");
+-        std::vector<uint8_t> result(size);
+-        ReadFile(file, result);
+-        Require(Size(file) == size, "The Palm file changed size during the transfer.");
+-        Close(file);
+-        return result;
+-    }
++    std::vector<uint8_t> Get(const std::string& path) { return ReadContents(path, true); }
+     void Put(const std::string& path, const std::vector<uint8_t>& bytes) {
+         Require(bytes.size() <= maxFileBytes, "File exchange supports files up to 8 MB.");
++        syscallDispatchBeginFileTransfer(sd, uint32_t(bytes.size() * 2));
+         Missing(path);
+         const auto slash = path.rfind('/'); const auto folder = slash == 0 ? "/" : path.substr(0, slash);
+         std::string temporary;
+@@ -121,14 +122,16 @@
+         Require(!temporary.empty(), "No temporary filename is available in this folder.");
+         const auto file = Open(temporary, 0x0d);
+         for (size_t at = 0; at < bytes.size(); ) {
++            CheckCancel(cancel);
+             const auto count = std::min(chunkBytes, bytes.size() - at);
+             Write(dataAt, bytes.data() + at, count); SetWord(countAt, 0);
+             Check(syscall68k_VFSFileWrite(sd, SC_EXECUTE_FULL, file, count, scratch + dataAt, scratch + countAt), "Write card file");
+             Require(Word(countAt) == count, "Palm OS wrote fewer bytes than requested.");
++            syscallDispatchFileProgress(sd, uint32_t(count));
+             at += count;
+         }
+         Close(file);
+-        const auto verify = Get(temporary);
++        const auto verify = ReadContents(temporary, false);
+         Require(verify == bytes, "The copy on the Memory Stick does not match the source.");
+         Missing(path);
+         Rename(temporary, path.substr(slash + 1));
+@@ -155,6 +158,7 @@
+     static constexpr uint32_t pathAt = 0, otherPathAt = 512, nameAt = 1024, infoAt = 1280;
+     static constexpr uint32_t iteratorAt = 1320, volumeAt = 1324, countAt = 1328, usedAt = 1332, totalAt = 1336;
+     SyscallDispatch* sd;
++    Cancel cancel;
+     uint32_t scratch = 0; uint16_t volume = 0; std::set<uint32_t> files;
+     static void Be16(uint8_t* p, uint16_t v) { p[0] = v >> 8; p[1] = v; }
+     static void Be32(uint8_t* p, uint32_t v) { Be16(p, v >> 16); Be16(p + 2, v); }
+@@ -201,30 +205,45 @@
+         const auto file = Word(countAt); Require(file && !files.count(file), "Palm OS returned an invalid file reference."); files.insert(file); Close(file); return true;
+     }
+     void Missing(const std::string& path) { Require(!Exists(path), "That name already exists on the Memory Stick."); }
++    std::vector<uint8_t> ReadContents(const std::string& path, bool ownPlan) {
++        const auto file = Open(path, 2);
++        Require(!(Attributes(file) & 0x10), "Choose a regular file.");
++        const uint32_t size = Size(file);
++        Require(size <= maxFileBytes, "File exchange supports files up to 8 MB.");
++        if (ownPlan) syscallDispatchBeginFileTransfer(sd, size);
++        std::vector<uint8_t> result(size);
++        ReadFile(file, result);
++        Require(Size(file) == size, "The Palm file changed size during the transfer.");
++        Close(file);
++        return result;
++    }
+     void ReadFile(uint32_t file, std::vector<uint8_t>& bytes) {
+         for (size_t at = 0; at < bytes.size(); ) {
++            CheckCancel(cancel);
+             const auto count = std::min(chunkBytes, bytes.size() - at); SetWord(countAt, 0);
+             const auto error = syscall68k_VFSFileRead(sd, SC_EXECUTE_FULL, file, count, scratch + dataAt, scratch + countAt);
+             if (error != 0x2a07) Check(error, "Read card file");
+             Require(Word(countAt) == count, "Palm OS returned fewer bytes than requested.");
+-            Read(dataAt, bytes.data() + at, count); at += count;
++            Read(dataAt, bytes.data() + at, count);
++            syscallDispatchFileProgress(sd, uint32_t(count));
++            at += count;
+         }
+     }
+ };
+-inline Listing List(SoC& soc, const std::string& path) {
+-    Path(path); ReadOnlyGuest transaction(soc); Session files(soc);
+-    auto result = files.List(path); files.Finish(); syscallDispatchValidateCommit(soc.GetSyscallDispatch()); return result;
+-}
+-inline std::vector<uint8_t> Get(SoC& soc, const std::string& path) {
+-    Path(path, false); ReadOnlyGuest transaction(soc); Session files(soc);
+-    auto result = files.Get(path); files.Finish(); syscallDispatchValidateCommit(soc.GetSyscallDispatch()); return result;
+-}
+-inline void Put(SoC& soc, const std::string& path, const std::vector<uint8_t>& bytes) {
+-    Path(path, false); Require(bytes.size() <= maxFileBytes, "File exchange supports files up to 8 MB.");
+-    ReadOnlyGuest transaction(soc); Session files(soc); files.Put(path, bytes); files.Finish(); transaction.Commit();
+-}
+-inline void Mkdir(SoC& soc, const std::string& path) { Path(path, false); ReadOnlyGuest transaction(soc); Session files(soc); files.Mkdir(path); files.Finish(); transaction.Commit(); }
+-inline void Delete(SoC& soc, const std::string& path) { Path(path, false); ReadOnlyGuest transaction(soc); Session files(soc); files.Delete(path); files.Finish(); transaction.Commit(); }
+-inline void Rename(SoC& soc, const std::string& path, const std::string& name) { Path(path, false); Name(name); ReadOnlyGuest transaction(soc); Session files(soc); files.Rename(path, name); files.Finish(); transaction.Commit(); }
++inline Listing List(SoC& soc, const std::string& path, const Cancel& cancel = {}) {
++    Path(path); CheckCancel(cancel); ReadOnlyGuest transaction(soc); Session files(soc, cancel);
++    auto result = files.List(path); files.Finish(); CheckCancel(cancel); syscallDispatchValidateCommit(soc.GetSyscallDispatch()); return result;
++}
++inline std::vector<uint8_t> Get(SoC& soc, const std::string& path, const Cancel& cancel = {}) {
++    Path(path, false); CheckCancel(cancel); ReadOnlyGuest transaction(soc); Session files(soc, cancel);
++    auto result = files.Get(path); files.Finish(); CheckCancel(cancel); syscallDispatchValidateCommit(soc.GetSyscallDispatch()); return result;
++}
++inline void Put(SoC& soc, const std::string& path, const std::vector<uint8_t>& bytes, const Cancel& cancel = {}) {
++    Path(path, false); CheckCancel(cancel); Require(bytes.size() <= maxFileBytes, "File exchange supports files up to 8 MB.");
++    ReadOnlyGuest transaction(soc); Session files(soc, cancel); files.Put(path, bytes); files.Finish(); CheckCancel(cancel); transaction.Commit();
++}
++inline void Mkdir(SoC& soc, const std::string& path, const Cancel& cancel = {}) { Path(path, false); CheckCancel(cancel); ReadOnlyGuest transaction(soc); Session files(soc, cancel); files.Mkdir(path); files.Finish(); CheckCancel(cancel); transaction.Commit(); }
++inline void Delete(SoC& soc, const std::string& path, const Cancel& cancel = {}) { Path(path, false); CheckCancel(cancel); ReadOnlyGuest transaction(soc); Session files(soc, cancel); files.Delete(path); files.Finish(); CheckCancel(cancel); transaction.Commit(); }
++inline void Rename(SoC& soc, const std::string& path, const std::string& name, const Cancel& cancel = {}) { Path(path, false); Name(name); CheckCancel(cancel); ReadOnlyGuest transaction(soc); Session files(soc, cancel); files.Rename(path, name); files.Finish(); CheckCancel(cancel); transaction.Commit(); }
+ }
+ #endif
