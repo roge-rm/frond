@@ -35,6 +35,7 @@ class FrondActivity : SDLActivity() {
     @Volatile private var leaving = false
     @Volatile private var quitSent = false
     private lateinit var settings: Settings
+    private var machineSettings = MachineSettings()
     private var savingNote: TextView? = null
     // The core's loopback gdb port while the debugger is on (Settings), else null, and the socket holding it.
     private var debugPort: Int? = null
@@ -66,8 +67,9 @@ class FrondActivity : SDLActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         sessionPath = intent?.getStringExtra(EXTRA_SESSION)
-        settings = Settings.from(this, intent)
-        sound = settings.sound
+        machineSettings = Sessions.forPath(this, sessionPath)?.settings ?: MachineSettings()
+        settings = machineSettings.applyTo(Settings.from(this, intent))
+        sound = launchDevice().sound && settings.sound
         requestedOrientation = settings.orientation.request
         File(filesDir, START_ERROR).delete()
         link = ControlLink(File(filesDir, "control.sock")) { name, _ -> if (name == "close") leave() }
@@ -116,10 +118,9 @@ class FrondActivity : SDLActivity() {
             arguments += nor
             if (File(nand).isFile) arguments += listOf("--nand", nand)
         }
-        arguments += listOf("--window-fit", settings.size.arg, "--window-background", BACKGROUND_HEX)
-        if (settings.smoothing) arguments += "--smooth-lcd"
-        if (!settings.sound) arguments += "--no-sound"
-        if (Settings.fastAudio(this, launchDevice()) && fastAudioQualified()) {
+        arguments += machineSettings.arguments(soundSupported = launchDevice().sound)
+        arguments += listOf("--window-background", BACKGROUND_HEX)
+        if (machineSettings.fastAudio && fastAudioQualified()) {
             arguments += "--fast-audio"
         } else {
             arguments += listOf("--audio-period", audioPeriod().toString())
@@ -378,10 +379,10 @@ class FrondActivity : SDLActivity() {
         SDLActivity.mSurface?.requestFocus()
     }
 
-    // Turns sound on or off in the running core when Settings or the Peripherals screen changed it. Off mutes the output and keeps the
+    // Applies the running machine's sound preference. Off mutes the output and keeps the
     // guest's audio timing; on after a start with --no-sound opens the audio device.
     private fun applySound() {
-        val wanted = Settings.load(this).sound
+        val wanted = launchDevice().sound && (Sessions.forPath(this, sessionPath)?.settings?.sound ?: sound)
         if (wanted == sound) return
         sound = wanted
         link.whenConnected {

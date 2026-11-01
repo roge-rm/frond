@@ -20,7 +20,7 @@ int main() {
     std::set<std::string> names;
     std::set<int> types;
     unsigned desktopCount = 0;
-    const std::vector<std::string> reserved{"sony-clie-tg50", "palm-iiix", "palm-m515"};
+    const std::vector<std::string> reserved{"palm-iiix", "palm-m515"};
     for (const auto& p : deviceProfiles5) {
         // Names are unique, short and plain; they go into session headers.
         assert(names.insert(p.name).second && std::strlen(p.name) <= deviceNameMax5);
@@ -38,13 +38,14 @@ int main() {
         assert(deviceTypeNamed5(p.name) == p.deviceType && std::string(deviceName5(deviceTypeNamed5(p.name))) == p.name);
         desktopCount += deviceProfileSupportsDesktop5(p.deviceType);
         assert(deviceProfileSupportsDesktop5(p.deviceType) ==
-               (p.deviceType == deviceTypeTX || p.deviceType == deviceTypeE2 || p.deviceType == deviceTypeZire72));
+               (p.deviceType == deviceTypeTX || p.deviceType == deviceTypeE2 || p.deviceType == deviceTypeZire72 || p.deviceType == deviceTypeTG50));
         assert((p.deviceType == deviceTypeZire72) == (p.board == DeviceBoard5::pxa270Zire72));
         assert(deviceConfigurationGetNandSize(p.deviceType) == p.nandSize);
         assert(deviceConfigurationDefaultDisplayMode(p.deviceType) == p.defaultDisplay);
         for (uint32_t ram : {0u, 1u, 8u << 20, 16u << 20, 24u << 20, 32u << 20, 64u << 20, 1u << 31, UINT32_MAX}) {
             const bool expected = p.deviceType == deviceTypePV
                 ? ram >= (8u << 20) && (ram & (ram - 1)) == 0
+                : p.deviceType == deviceTypeTG50 ? ram == (16u << 20)
                 : ram == (32u << 20) || (p.deviceType != deviceTypeTX && p.deviceType != deviceTypeZire72 && ram == (16u << 20));
             assert(deviceConfigurationSupportsRamSize(p.deviceType, ram) == expected);
         }
@@ -58,7 +59,39 @@ int main() {
         assert(deviceProfileValidateFirmware5(p.deviceType, 0, p.nandSize, false, true) == DeviceFirmwareError5::norSize);
         assert(deviceProfileValidateFirmware5(p.deviceType, nor, p.nandSize + 1, true, false) == DeviceFirmwareError5::nandSize);
     }
-    assert(desktopCount == 3 && names.size() == 8 && types.size() == 5);
+    // The frontend reader recognises every card-header profile from the same public metadata.
+    for (const auto& p : deviceProfiles5) {
+        if (p.detect != DeviceDetect5::cardHeader) continue;
+        std::vector<uint8_t> nor(std::max(size_t(0x40000), p.norSize));
+        const size_t at = p.headerOffset;
+        put32(nor, at + 8, 0xfeedbeef);
+        put32(nor, at + 0x80, p.companyId);
+        put32(nor, at + 0x84, p.halId);
+        if (p.norLayout == DeviceNorLayout5::smallAndBigCards) {
+            std::memcpy(nor.data() + at + 0x10, "PalmCard", 9);
+            const auto big = p.bigCardOffset;
+            std::memcpy(nor.data() + big + 0x10, "PalmCard", 9);
+            put32(nor, big + 8, 0xfeedbeef);
+            put32(nor, big + 0x80, p.companyId);
+            put32(nor, big + 0x84, p.halId);
+            put32(nor, big + 0x6c, nor.size() - big);
+        }
+        auto inspect = [&] {
+            return deviceProfileInspectNor5(nor.size(), [&](uint64_t offset, uint8_t* out, size_t count) {
+                if (offset > nor.size() || count > nor.size() - offset) return false;
+                std::memcpy(out, nor.data() + offset, count);
+                return true;
+            });
+        };
+        assert(inspect().profile == &p && inspect().hasHeader && inspect().validLayout);
+        if (p.norLayout == DeviceNorLayout5::smallAndBigCards) {
+            nor[p.bigCardOffset + 0x84] ^= 1;
+            assert(inspect().profile == &p && !inspect().validLayout);
+        }
+        nor.resize(at + 12);
+        assert(!inspect().profile && !inspect().hasHeader);
+    }
+    assert(desktopCount == 4 && names.size() == 8 && types.size() == 6);
     assert(std::string(deviceName5(deviceTypeTX)) == "palm-tx" && std::string(deviceName5(deviceTypeE2)) == "palm-e2");
     assert(deviceProfileNamed5("palm-tx")->capabilities.serial && !deviceProfileNamed5("palm-e2")->capabilities.serial);
     // Unknown names are refused, including numbers, old ids, case and prefixes.
@@ -66,7 +99,7 @@ int main() {
         assert(!deviceProfileNamed5(name) && deviceTypeNamed5(name) == deviceTypeInvalid);
     }
     assert(!deviceProfileNamed5(nullptr) && !deviceName5(deviceTypeInvalid) && !deviceName5(99));
-    for (int id : {INT_MIN, -1, 5, 99, INT_MAX}) {
+    for (int id : {INT_MIN, -1, 6, 99, INT_MAX}) {
         assert(!deviceProfile5(id) && !deviceProfileSupportsDesktop5(id));
         assert(!deviceProfileSupportsRam5(id, 32u << 20));
         assert(!deviceProfileSupportsDisplay5(id, 6));
@@ -172,6 +205,54 @@ int main() {
         const auto& caps = zire72->capabilities;
         assert(caps.keyboard && caps.usb && caps.infrared && caps.bluetooth);
         assert(!caps.serial && !caps.network && !caps.fastAudio);
+    }
+
+    // TG50 has NOR-only firmware, physical 16 MiB RAM and a qualified native board.
+    {
+        const auto* p = deviceProfileNamed5("sony-clie-tg50");
+        assert(p && p->deviceType == deviceTypeTG50 && p->support == DeviceSupport5::experimentalDesktop);
+        auto tg = deviceConfigurationDisplayConfigForDevice(p->deviceType, p->defaultDisplay);
+        assert(tg.width == 320 && tg.height == 320 && tg.graffitiHeight == 0);
+        assert(deviceConfigurationDisplayConfigForDevice(deviceTypeE2, DisplayMode::mode_320x320).graffitiHeight == 120);
+        assert(deviceConfigurationDisplayConfigForDevice(deviceTypePV, DisplayMode::mode_320x320).graffitiHeight == 120);
+        assert(p->art == DeviceArt::tg50 && p->board == DeviceBoard5::pxa250SonyTG50);
+        assert(p->frontend.available && deviceProfileRunnerEligible5(p->deviceType));
+        assert(p->frontend.sideTabWidth == 36 && p->frontend.stripHeight == 224 && p->frontend.holdPresent && p->frontend.holdSupported);
+        assert(p->frontend.homeKey == 1073741887 && p->frontend.homeX == -1 && p->frontend.homeY == -1);
+        assert(deviceProfileStorageSlot5(*p) == DeviceStorageSlot5::memoryStick);
+        assert(!p->frontend.sdSlot && !p->frontend.camera && p->capabilities.sound);
+        const auto& caps = p->capabilities;
+        assert(!caps.network && !caps.keyboard && !caps.serial && !caps.usb &&
+               !caps.fastAudio && caps.infrared && !caps.bluetooth);
+        assert(!deviceProfileSdSizeValid5(p->deviceType, 512));
+        std::vector<uint8_t> nor(p->norSize);
+        for (size_t at : {size_t(0), size_t(0x20000)}) {
+            put32(nor, at + 8, 0xfeedbeef);
+            std::memcpy(nor.data() + at + 0x10, "PalmCard", 9);
+            put32(nor, at + 0x80, p->companyId);
+            put32(nor, at + 0x84, p->halId);
+            put32(nor, at + 0x6c, nor.size() - at);
+        }
+        const RomInfo5 info(nor.data(), nor.size());
+        assert(info.IsValid() && info.GetDeviceType() == deviceTypeTG50 && info.HasSmallAndBigCards());
+        assert(!info.NeedsNand() && !info.NeedsNandPatch() && !info.SupportsNand());
+        assert(info.GetRecommendedRamSize() == (16u << 20));
+        for (bool session : {false, true}) {
+            for (size_t size : {size_t(0xc6ffff), size_t(0xc70001), size_t(16u << 20)})
+                assert(deviceProfileValidateFirmware5(p->deviceType, size, 0, session, false) == DeviceFirmwareError5::norSize);
+            assert(deviceProfileValidateFirmware5(p->deviceType, p->norSize, 1, session, true) == DeviceFirmwareError5::nandSize);
+            assert(deviceProfileValidateNorLayout5(p->deviceType, 0x20000, session, true) == DeviceFirmwareError5::norLayout);
+            assert(deviceProfileValidateNorLayout5(p->deviceType, 0, session, false) == DeviceFirmwareError5::norLayout);
+        }
+        // Unknown Sony identities and Sony/Palm HAL mismatches cannot select the E2.
+        for (uint32_t hal : {0x12345678u, 0x68737072u, 0x615a3732u}) {
+            put32(nor, 0x84, hal);
+            assert(RomInfo5(nor.data(), nor.size()).GetDeviceType() == deviceTypeInvalid);
+        }
+        for (int type : {deviceTypeE2, deviceTypeTX, deviceTypeZire72, deviceTypeFrankenE2, deviceTypePV})
+            assert(deviceProfileRunnerEligible5(type));
+        for (const char* name : {"palm-iiix", "palm-m515"})
+            assert(!deviceProfileRunnerEligible5(deviceProfileNamed5(name)->deviceType));
     }
 
     // Public header layout and IDs from RomInfo5, no dump data.

@@ -616,3 +616,17 @@ software, and their status stage honors UDCCFR acknowledgement gating. Its
 versioned controller state retains packets and loads the earlier register-only
 state. USB DMA and isochronous transfers are unsupported. E2 cable detection uses
 active-low GPIO35, as defined in the [Linux E2 board header](https://github.com/torvalds/linux/blob/v3.12/arch/arm/mach-pxa/include/mach/palmte2.h).
+
+## Sony CLIÉ TG50
+
+The TG50 has a built-in keyboard, scroll rocker, jog wheel, Home, Back and Hold.
+Its keyboard is separate from the external infrared keyboard accessory. Ordinary
+infrared beaming uses the same peer relay as the other models.
+
+System/alarm beeps and Sony Voice Recorder mono 22,050 Hz SP playback work,
+including normal mute and saved-session continuation. Standard Palm SndStream,
+stereo Sony playback, live 8 kHz audio, microphone input and low-latency audio
+remain unqualified. Memory Stick, USB HotSync, Bluetooth, raw serial, the external
+infrared keyboard and high-power remote-control infrared remain unavailable.
+The Memory Stick slot stays visible and greyed out, with no SD image controls.
+USB needs further reserved-register and endpoint DMA work before HotSync can run.

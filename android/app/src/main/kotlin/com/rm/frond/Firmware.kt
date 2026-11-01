@@ -22,60 +22,57 @@ object Firmware {
     // A Zire 72 NOR has a small card at 0x0 and a big card at 0x20000 to the end, both PalmCard aZ72.
     enum class Header { NONE, E2, E2_WRONG_PLACE, ZIRE72, ZIRE72_BAD_LAYOUT, OTHER }
 
-    private const val E2_HEADER_OFFSET = 0x20000L
-    private const val ZIRE72_BIG_CARD = 0x20000L
+    data class NorInfo(val device: Device? = null, val hasHeader: Boolean = false, val validLayout: Boolean = true)
 
-    fun header(nor: File): Header {
-        val palm = 0x50616c6dL
-        val hspr = 0x68737072L
-        val az72 = 0x615a3732L
-        val signature = 0xfeedbeefL
-        RandomAccessFile(nor, "r").use { file ->
-            fun read32(at: Long): Long? {
-                if (at + 4 > file.length()) return null
-                file.seek(at)
-                val b = ByteArray(4)
-                file.readFully(b)
-                return (b[0].toLong() and 0xff) or ((b[1].toLong() and 0xff) shl 8) or
-                    ((b[2].toLong() and 0xff) shl 16) or ((b[3].toLong() and 0xff) shl 24)
-            }
-            fun palmCard(at: Long): Boolean {
-                if (at + 0x10 + 9 > file.length()) return false
-                file.seek(at + 0x10)
-                val b = ByteArray(9)
-                file.readFully(b)
-                return b.contentEquals("PalmCard\u0000".toByteArray(Charsets.US_ASCII))
-            }
-            var at = 0L
-            while (at + 12 <= file.length()) {
-                if (read32(at + 8) == signature) {
-                    val company = read32(at + 0x80) ?: return Header.NONE
-                    val hal = read32(at + 0x84) ?: return Header.NONE
-                    if (company == palm && hal == hspr) return if (at == E2_HEADER_OFFSET) Header.E2 else Header.E2_WRONG_PLACE
-                    if (company == palm && hal == az72) {
-                        val big = ZIRE72_BIG_CARD
-                        val length = read32(big + 0x6c)
-                        val cards = at == 0L && palmCard(0) && read32(big + 8) == signature && palmCard(big) &&
-                            read32(big + 0x80) == palm && read32(big + 0x84) == az72 &&
-                            length != null && big + length == file.length()
-                        return if (cards) Header.ZIRE72 else Header.ZIRE72_BAD_LAYOUT
-                    }
-                    return Header.OTHER
-                }
-                at += 32 * 1024
-            }
+    fun inspect(nor: File, devices: List<Device> = Device.entries): NorInfo = RandomAccessFile(nor, "r").use { file ->
+        fun read32(at: Long): Long? {
+            if (at < 0 || at > file.length() - 4) return null
+            file.seek(at)
+            return Integer.reverseBytes(file.readInt()).toLong() and 0xffffffffL
         }
-        return Header.NONE
+        fun palmCard(at: Long): Boolean {
+            if (at < 0 || at > file.length() - 0x19) return false
+            file.seek(at + 0x10)
+            val bytes = ByteArray(9)
+            file.readFully(bytes)
+            return bytes.contentEquals("PalmCard\u0000".toByteArray(Charsets.US_ASCII))
+        }
+        var at = 0L
+        while (at + 12 <= file.length()) {
+            if (read32(at + 8) == 0xfeedbeefL) {
+                val company = read32(at + 0x80) ?: return@use NorInfo()
+                val hal = read32(at + 0x84) ?: return@use NorInfo()
+                val device = devices.firstOrNull {
+                    it.detectKind == 0 && (it.companyId == 0L || it.companyId == company) && it.halId == hal
+                } ?: return@use NorInfo(hasHeader = true)
+                var valid = device.norLayout == 0 || at == device.headerOffset
+                if (device.norLayout == 2) {
+                    val big = device.bigCardOffset
+                    val length = read32(big + 0x6c)
+                    valid = valid && palmCard(at) && palmCard(big) && read32(big + 8) == 0xfeedbeefL &&
+                        read32(big + 0x80) == company && read32(big + 0x84) == hal &&
+                        length != null && big + length == file.length()
+                }
+                return@use NorInfo(device, true, valid)
+            }
+            at += 32768
+        }
+        NorInfo()
     }
 
-    // Picks the device from the NOR like desktop/FirmwareInput.h detectDevice: an E2 or Zire 72 card
-    // header, else the Palm TX size. Null when it can't tell.
+    // Compatibility diagnostics for the original devices; detection uses the profile inventory.
+    fun header(nor: File): Header {
+        val info = inspect(nor)
+        return when (info.device) {
+            Device.E2 -> if (info.validLayout) Header.E2 else Header.E2_WRONG_PLACE
+            Device.ZIRE72 -> if (info.validLayout) Header.ZIRE72 else Header.ZIRE72_BAD_LAYOUT
+            else -> if (info.hasHeader) Header.OTHER else Header.NONE
+        }
+    }
+
     fun detect(nor: File): Device? {
-        val header = try { header(nor) } catch (e: IOException) { return null }
-        if (header == Header.E2 || header == Header.E2_WRONG_PLACE) return Device.E2
-        if (header == Header.ZIRE72 || header == Header.ZIRE72_BAD_LAYOUT) return Device.ZIRE72
-        if (nor.length() == Device.TX.norSize) return Device.TX
-        return null
+        val info = try { inspect(nor) } catch (e: IOException) { return null }
+        return info.device ?: Device.entries.firstOrNull { it.detectKind == 1 && nor.length() == it.norSize }
     }
 
     const val NOT_DETECTED = "This isn't a Palm TX, Tungsten E2 or Zire 72 NOR image."
@@ -122,6 +119,9 @@ object Firmware {
     fun check(device: Device, nor: File, nand: File?): String? {
         if (!nor.canRead()) return "Couldn't read the NOR image."
         val header = try { header(nor) } catch (e: IOException) { return "Couldn't read the NOR image." }
+        val info = try { inspect(nor, Device.entries + device) } catch (e: IOException) { return "Couldn't read the NOR image." }
+        if (info.device != null && info.device != device && info.device != Device.E2 && info.device != Device.ZIRE72)
+            return "This is a ${info.device.label} NOR image. Choose a ${device.label} one."
         val norSize = nor.length()
         val nandSize = nand?.length()
         when (device) {
@@ -158,6 +158,14 @@ object Firmware {
                     else -> return "This NOR image is not for a Zire 72."
                 }
                 if (nand != null) return "The Zire 72 has no NAND. Leave the NAND image empty."
+            }
+            else -> {
+                if (norSize != device.norSize) return "The ${device.label} NOR image must be ${mib(device.norSize)}."
+                if (device.detectKind == 0 && info.device != device) return "This NOR image has no ${device.label} header."
+                if (!info.validLayout) return "This ${device.label} NOR image has an invalid card layout."
+                if (!device.hasNand && nand != null) return "This device has no NAND. Leave the NAND image empty."
+                if (device.nandRequired && nand == null) return "Choose a NAND image for the ${device.label}."
+                if (nand != null && nandSize != device.nandSize) return "The ${device.label} NAND image must be a raw ${mib(device.nandSize)} file."
             }
         }
         return null

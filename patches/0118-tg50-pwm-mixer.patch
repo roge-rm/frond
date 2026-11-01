@@ -1,0 +1,515 @@
+--- a/src/uarm/uarm/device.h
++++ b/src/uarm/uarm/device.h
+@@ -35,6 +35,8 @@
+     struct PxaGpio *gpio;
+     struct PxaI2c *i2c;
+     struct PxaI2s *i2s;
++    struct PxaPwm *pwm0;
++    struct PxaPwrClk *pwrClk;
+     struct PxaSsp *ssp;
+     struct PxaSsp *ssp2;  // assp for xscale
+     struct PxaSsp *ssp3;  // nssp for scale
+@@ -78,6 +80,8 @@
+ void deviceKey(struct Device *dev, uint32_t key, bool down);
+ void devicePeriodic(struct Device *dev, uint32_t tier);
+ void deviceNetworkPeriodic(Device* dev);
++void deviceAudioSleepReset(Device *);
++void deviceAudioAdvance(Device *, uint64_t ns);
+ void devicePcmPeriodic(struct Device *dev);
+ void deviceTouch(struct Device *dev, int x, int y);
+ 
+--- a/src/uarm/uarm/devicePalmTungstenE2.cpp
++++ b/src/uarm/uarm/devicePalmTungstenE2.cpp
+@@ -512,3 +512,7 @@
+ 
+ void deviceBeginReset(Device *dev) { if (dev->tg50) tg50BoardBeginReset(dev->tg50); }
+ void deviceEndReset(Device *dev) { if (dev->tg50) tg50BoardEndReset(dev->tg50); }
++
++void deviceAudioAdvance(Device *dev, uint64_t ns) { if (dev->tg50) tg50BoardAudioAdvance(dev->tg50, ns); }
++
++void deviceAudioSleepReset(Device *dev) { if (dev->tg50) tg50BoardAudioSleepReset(dev->tg50); }
+--- a/src/uarm/uarm/deviceSonyTG50.cpp
++++ b/src/uarm/uarm/deviceSonyTG50.cpp
+@@ -17,6 +17,10 @@
+ #include "savestate/savestateAll.h"
+ #include "sspdev_AD7873.h"
+ #include "Tg50Chunks.h"
++#include "Tg50Audio.h"
++#include "audio_queue.h"
++#include "pxa_PWM.h"
++#include "pxa_PwrClk.h"
+ 
+ constexpr uint32_t tg50UcBase = 0x08000000;
+ constexpr uint32_t tg50UcSize = 0x220;
+@@ -26,6 +30,10 @@
+ constexpr uint32_t tg50SramSize = 1024;
+ 
+ struct Tg50Board {
++    Tg50Audio audio{};
++    AudioQueue *queue{};
++    PxaPwm *pwm{};
++    PxaPwrClk *pwrClk{};
+     bool restoringReset{};
+     ArmMem *mem{};
+     PxaGpio *gpio{};
+@@ -40,6 +48,35 @@
+     ArmRam *sram{};
+ };
+ 
++static void tg50AudioRegisters(void *context) {
++    auto *b = static_cast<Tg50Board *>(context);
++    const auto pwm = pxaPwmRegisters(b->pwm);
++    b->audio.WritePwm({pwm.control, pwm.duty, pwm.period});
++    b->audio.Clock(pxaPwrClkClockMask(b->pwrClk) & 1);
++}
++static void tg50AudioBoundary(void *context) {
++    auto *b = static_cast<Tg50Board *>(context);
++    b->audio.CodecBoundary();
++    if (b->queue) audioQueueClear(b->queue);
++}
++static void tg50AudioDac(void *context, uint32_t frame) {
++    auto *b = static_cast<Tg50Board *>(context);
++    if (!b->audio.PushDac(frame)) ERR("TG50 DAC mixer overflow");
++}
++void tg50BoardAudioAdvance(Tg50Board *b, uint64_t ns) {
++    b->audio.SetMuxOutput(!pxaGpioIsInput(b->gpio, 16) &&
++                          pxaGpioAlternateFunction(b->gpio, 16) == 2);
++    b->audio.Advance(ns, [b](uint32_t frame) { if (b->queue) audioQueuePush(b->queue, frame); });
++}
++
++template <typename H> static void tg50AudioFields(H &h, Tg50Audio::State &s) {
++    h.Do32(s.programmed.control).Do32(s.programmed.duty).Do32(s.programmed.period)
++        .Do32(s.active.control).Do32(s.active.duty).Do32(s.active.period)
++        .Do64(s.pwmPhase).Do64(s.hostPhase)
++        .Do32(s.clock).Do32(s.running).Do32(s.stopping).Do32(s.dacCount);
++    for (auto &frame : s.dac) h.Do32(frame);
++}
++
+ static std::array<uint32_t, 64> tg50KeyMap() {
+     std::array<uint32_t, 64> keys{};
+     const KeyId hard[16] = {
+@@ -60,10 +97,15 @@
+     auto *board = new Tg50Board{};
+     board->mem = sp->mem;
+     board->gpio = sp->gpio;
++    board->pwm = sp->pwm0;
++    board->pwrClk = sp->pwrClk;
+     board->ssp = sp->ssp;
+     board->i2c = sp->i2c;
+     board->touch = ad7873Init(board->ssp, board->gpio, 9);
+     board->codec = ak4534Init(board->i2c, sp->i2s, board->gpio);
++    ak4534SetOutput(board->codec, board, tg50AudioDac, tg50AudioBoundary);
++    pxaPwmSetObserver(board->pwm, board, tg50AudioRegisters);
++    pxaPwrClkSetClockObserver(board->pwrClk, board, tg50AudioRegisters);
+     board->pmic = an32502aInit(board->i2c);
+     const auto keys = tg50KeyMap();
+     board->uc = tg50ucInit(board->mem, board->gpio, 14, keys.data());
+@@ -86,6 +128,8 @@
+     ad7873Reset(board->touch);
+     ad7873setVbatt(board->touch, 4200);
+     ak4534Reset(board->codec);
++    board->audio.Reset();
++    tg50AudioRegisters(board);
+     an32502aReset(board->pmic);
+     msCtrlrReset(board->ms);
+     tg50ucReset(board->uc);
+@@ -122,6 +166,11 @@
+     ak4534Save(board->codec, savestate);
+     an32502aSave(board->pmic, savestate);
+     msCtrlrSave(board->ms, savestate);
++    auto *audioChunk = savestate.GetChunk(ChunkType::sonyTg50Audio, 0);
++    if (!audioChunk) ERR("cannot allocate TG50 mixer state");
++    SaveChunkHelper audioHelper(*audioChunk);
++    auto audioState = board->audio.GetState();
++    tg50AudioFields(audioHelper, audioState);
+ }
+ 
+ template <typename T> bool tg50BoardLoad(Tg50Board *board, T &loader, bool preserveInput) {
+@@ -145,6 +194,27 @@
+         memcpy(board->sramBuffer.buffer, sram.data(), sram.size());
+         memoryBufferMarkRangeDirty(&board->sramBuffer, 0, tg50SramSize);
+     }
++    Tg50Audio::State audioState{};
++    if (loader.GetChunk(ChunkType::sonyTg50Audio)) {
++        auto *audioChunk = loader.GetChunkOrFail(ChunkType::sonyTg50Audio, 0, "TG50 mixer");
++        if (!audioChunk) return false;
++        LoadChunkHelper audioHelper(*audioChunk);
++        tg50AudioFields(audioHelper, audioState);
++        const auto pwm = pxaPwmRegisters(board->pwm);
++        if (audioChunk->HasError() || !Tg50Audio::Valid(audioState) ||
++            bool(audioState.clock) != bool(pxaPwrClkClockMask(board->pwrClk) & 1) ||
++            audioState.programmed.control != (pwm.control & 0x7f) ||
++            audioState.programmed.duty != (pwm.duty & 0x7ff) ||
++            audioState.programmed.period != (pwm.period & 0x3ff)) {
++            loader.NotifyError(); return false;
++        }
++        board->audio.Load(audioState);
++    } else {
++        // Older TG50 sessions start an empty host timeline from the saved PWM registers.
++        board->audio.Reset();
++        tg50AudioRegisters(board);
++    }
++    if (board->queue) audioQueueClear(board->queue);
+     // GPIO and interrupt-controller state must be loaded before these outputs.
+     tg50ucRefreshIrq(board->uc);
+     ad7873Periodic(board->touch);
+@@ -161,6 +231,8 @@
+         !memRegionRemove(board->mem, tg50MsBase, tg50MsSize, board->ms) ||
+         !memRegionRemove(board->mem, tg50SramBase, tg50SramSize, board->sram))
+         ERR("cannot detach TG50 bus callbacks");
++    pxaPwmSetObserver(board->pwm, nullptr, nullptr);
++    pxaPwrClkSetClockObserver(board->pwrClk, nullptr, nullptr);
+     ad7873Destroy(board->touch);
+     ak4534Destroy(board->codec);
+     an32502aDestroy(board->pmic);
+@@ -178,4 +250,16 @@
+ void tg50BoardBeginReset(Tg50Board *board) { board->restoringReset = true; }
+ void tg50BoardEndReset(Tg50Board *board) { board->restoringReset = false; }
+ 
+-void tg50BoardSetAudioQueue(Tg50Board *board, AudioQueue *queue) { ak4534SetAudioQueue(board->codec, queue); }
++void tg50BoardSetAudioQueue(Tg50Board *board, AudioQueue *queue) {
++    if (board->queue == queue) return;
++    if (board->queue) audioQueueClear(board->queue);
++    board->queue = queue;
++    if (queue) audioQueueClear(queue);
++}
++
++void tg50BoardAudioSleepReset(Tg50Board *board) {
++    // The external codec keeps its registers; the reset PXA domains discard the old stream.
++    ak4534ResetOutput(board->codec);
++    board->audio.Reset();
++    tg50AudioRegisters(board);
++}
+--- a/src/uarm/uarm/deviceSonyTG50.h
++++ b/src/uarm/uarm/deviceSonyTG50.h
+@@ -21,5 +21,7 @@
+ void tg50BoardDestroy(Tg50Board *);
+ template <typename T> void tg50BoardSave(Tg50Board *, T &);
+ template <typename T> bool tg50BoardLoad(Tg50Board *, T &, bool preserveInput);
++void tg50BoardAudioSleepReset(Tg50Board *);
++void tg50BoardAudioAdvance(Tg50Board *, uint64_t ns);
+ void tg50BoardSetAudioQueue(Tg50Board *, AudioQueue *);
+ #endif
+--- a/src/uarm/uarm/i2sdev_AK4534.cpp
++++ b/src/uarm/uarm/i2sdev_AK4534.cpp
+@@ -19,6 +19,9 @@
+     bool trace{};
+     PxaI2s *i2s{};
+     AudioQueue *queue{};
++    void *outputContext{};
++    Ak4534Output output{};
++    void (*outputBoundary)(void *){};
+     void *observerContext{};
+     Ak4534Observe observer{};
+     // Guest digital state survives host queue discontinuities.
+@@ -60,6 +63,7 @@
+ 
+ static void ak4534Boundary(void *context) {
+     auto *ak = static_cast<AK4534 *>(context);
++    if (ak->outputBoundary) ak->outputBoundary(ak->outputContext);
+     ak->outPhase = 0;
+     ak->outSum[0] = ak->outSum[1] = 0;
+     ak->wireNumerator = ak->wireDenominator = 0;
+@@ -99,7 +103,8 @@
+             const auto r = static_cast<int16_t>(ak->outSum[1] / numerator);
+             const uint32_t packed = uint16_t(l) | (uint32_t(uint16_t(r)) << 16);
+             if (ak->observer) ak->observer(ak->observerContext, Ak4534Tap::hostOutput, packed, 44100, 1);
+-            if (ak->queue) audioQueuePush(ak->queue, packed);
++            if (ak->output) ak->output(ak->outputContext, packed);
++            else if (ak->queue) audioQueuePush(ak->queue, packed);
+             ak->outPhase = 0;
+             ak->outSum[0] = ak->outSum[1] = 0;
+         }
+@@ -372,3 +377,9 @@
+     ak->observerContext = context;
+     ak->observer = observer;
+ }
++
++void ak4534SetOutput(AK4534 *ak, void *ctx, Ak4534Output output, void (*boundary)(void *)) {
++    ak->outputContext = ctx; ak->output = output; ak->outputBoundary = boundary;
++}
++
++void ak4534ResetOutput(AK4534 *ak) { ak4534Boundary(ak); }
+--- a/src/uarm/uarm/i2sdev_AK4534.h
++++ b/src/uarm/uarm/i2sdev_AK4534.h
+@@ -25,10 +25,13 @@
+ enum class Ak4534Tap { serialTx, digitalDac, hostOutput };
+ using Ak4534Observe = void (*)(void *, Ak4534Tap, uint32_t packed,
+                               uint32_t rateNumerator, uint32_t rateDenominator);
++using Ak4534Output = void (*)(void *, uint32_t);
++void ak4534SetOutput(AK4534 *, void *, Ak4534Output, void (*boundary)(void *));
+ void ak4534SetObserver(AK4534 *, void *, Ak4534Observe);
+ void ak4534SetAudioQueue(AK4534 *, AudioQueue *);
+ // Test-only serial input injection, never connected to a host microphone.
+ void ak4534TestInput(AK4534 *, bool enabled, uint32_t frame);
++void ak4534ResetOutput(AK4534 *);
+ void ak4534Reset(AK4534 *);
+ // Destroy only after the owning SoC can no longer dispatch its bus callbacks.
+ void ak4534Destroy(AK4534 *);
+--- a/src/uarm/uarm/pxa_PWM.cpp
++++ b/src/uarm/uarm/pxa_PWM.cpp
+@@ -14,6 +14,8 @@
+ #define SAVESTATE_VERSION 0
+ 
+ struct PxaPwm {
++    void *context;
++    void (*notify)(void *);
+     uint32_t duty;
+     uint32_t per;
+     uint32_t ctrl;
+@@ -64,6 +66,7 @@
+     }
+ 
+     if (!write) *(uint32_t*)buf = val;
++    else if (pwm->notify) pwm->notify(pwm->context);
+ 
+     return true;
+ }
+@@ -107,3 +110,6 @@
+ template void pxaPwmLoad<SavestateLoader<ChunkType>>(PxaPwm* pwm,
+                                                      SavestateLoader<ChunkType>& loader,
+                                                      uint32_t index);
++
++PxaPwmRegisters pxaPwmRegisters(const PxaPwm *p) { return {p->ctrl,p->duty,p->per}; }
++void pxaPwmSetObserver(PxaPwm *p, void *c, void (*f)(void *)) { p->context=c; p->notify=f; }
+--- a/src/uarm/uarm/pxa_PWM.h
++++ b/src/uarm/uarm/pxa_PWM.h
+@@ -13,6 +13,10 @@
+ #define PXA_PWM3_BASE 0x40C00010UL
+ 
+ struct PxaPwm;
++struct PxaPwmRegisters { uint32_t control, duty, period; };
++PxaPwmRegisters pxaPwmRegisters(const PxaPwm *);
++// Quiesced board observer, called after a guest PWM write.
++void pxaPwmSetObserver(PxaPwm *, void *, void (*)(void *));
+ 
+ struct PxaPwm* pxaPwmInit(struct ArmMem* physMem, uint32_t base);
+ 
+--- a/src/uarm/uarm/pxa_PwrClk.cpp
++++ b/src/uarm/uarm/pxa_PwrClk.cpp
+@@ -23,6 +23,8 @@
+ 
+ struct PxaPwrClk {
+     PxaI2s *i2s;
++    void *clockContext;
++    void (*clockObserver)(void *);
+     struct ArmCpu *cpu;
+     class SoC *soc;
+     uint32_t CCCR, CKEN, OSCR;  // clocks manager regs
+@@ -167,6 +169,7 @@
+         case 1:  // CKEN
+             if (write)
+                 { pc->CKEN = val;
++                  if (pc->clockObserver) pc->clockObserver(pc->clockContext);
+                   if (pc->i2s) pxaI2sSetClockEnabled(pc->i2s, !!(val & 0x100)); }
+             else
+                 val = pc->CKEN;
+@@ -533,3 +536,6 @@
+     pc->i2s = i2s;
+     pxaI2sSetClockEnabled(i2s, pxaPwrClkI2sClock(pc));
+ }
++
++uint32_t pxaPwrClkClockMask(const PxaPwrClk *p) { return p->CKEN; }
++void pxaPwrClkSetClockObserver(PxaPwrClk *p, void *c, void (*f)(void *)) { p->clockContext=c; p->clockObserver=f; }
+--- a/src/uarm/uarm/pxa_PwrClk.h
++++ b/src/uarm/uarm/pxa_PwrClk.h
+@@ -32,6 +32,8 @@
+ template <typename T>
+ void pxaPwrClkLoad(struct PxaPwrClk* pc, T& loader);
+ 
++uint32_t pxaPwrClkClockMask(const PxaPwrClk *);
++void pxaPwrClkSetClockObserver(PxaPwrClk *, void *, void (*)(void *));
+ bool pxaPwrClkI2sClock(const PxaPwrClk *);
+ struct PxaI2s;
+ void pxaPwrClkConnectI2s(PxaPwrClk *, PxaI2s *);
+--- a/src/uarm/uarm/savestate/ChunkTypeUarm.h
++++ b/src/uarm/uarm/savestate/ChunkTypeUarm.h
+@@ -35,6 +35,7 @@
+     sonyTg50Power = 0x01e0,
+     sonyTg50Ms = 0x01f0,
+     sonyTg50Board = 0x0200,
++    sonyTg50Audio = 0x0210,
+ 
+     pvIc = 0x1000,
+     pvTimer = 0x1010,
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -260,6 +260,8 @@
+     sp.gpio = gpio;
+     sp.i2c = i2c;
+     sp.i2s = i2s;
++    sp.pwm0 = pwm[0];
++    sp.pwrClk = pwrClk;
+     sp.ac97 = ac97;
+     sp.ssp = ssp[0];
+     sp.ssp2 = ssp[1];
+@@ -352,7 +354,12 @@
+             return 1;
+ 
+         case SCHEDULER_TASK_I2S:
+-            if (pxaI2sHasCodec(i2s)) pxaI2sAdvance(i2s, uint64_t(batchedTicks) * 20000);
++            if (pxaI2sHasCodec(i2s)) {
++                for (uint32_t i = 0; i < batchedTicks; ++i) {
++                    pxaI2sAdvance(i2s, 20000);
++                    deviceAudioAdvance(dev, 20000);
++                }
++            }
+             else pxaI2sPeriodic(i2s);
+             return 1;
+ 
+@@ -510,6 +517,7 @@
+     pxaMemCtrlrLoad(memCtrl, loader);
+     pxaPwmLoad(pwm[0], loader, 0);
+     pxaPwmLoad(pwm[1], loader, 1);
++    deviceAudioSleepReset(dev);
+     pxaTimrLoad(tmr, loader);
+     pxaMmcLoad(mmc, loader);
+     pxaLcdLoad(lcd, loader);
+--- /dev/null
++++ b/src/uarm/uarm/Tg50Audio.h
+@@ -0,0 +1,145 @@
++#ifndef FROND_TG50_AUDIO_H
++#define FROND_TG50_AUDIO_H
++#include <algorithm>
++#include <array>
++#include <cstdint>
++
++// Digital PWM and codec mixing, with one 44100 Hz output timeline.
++class Tg50Audio {
++public:
++    static constexpr uint32_t rate = 44100;
++    static constexpr uint32_t pwmClock = 3686400;
++    static constexpr int32_t pwmGain = 8192;
++    struct PwmRegisters {
++        uint32_t control{}, duty{}, period{};
++    };
++    struct State {
++        PwmRegisters programmed{}, active{};
++        uint64_t pwmPhase{}, hostPhase{};
++        uint32_t clock{}, running{}, stopping{};
++        uint32_t dacCount{};
++        std::array<uint32_t, 16> dac{};
++    };
++
++    void WritePwm(PwmRegisters next) {
++        state.programmed = {next.control & 0x7f, next.duty & 0x7ff, next.period & 0x3ff};
++        if (!state.running || !state.active.period) Latch();
++    }
++    void Clock(bool enabled) {
++        if (enabled == bool(state.clock)) return;
++        state.clock = enabled;
++        if (enabled) {
++            if (!state.running) { state.pwmPhase = 0; Latch(); }
++            state.running = 1;
++            state.stopping = 0;
++        } else if (state.programmed.control & 0x40) {
++            state.running = state.stopping = 0;
++            state.pwmPhase = 0;
++        } else {
++            state.stopping = state.running;
++        }
++    }
++    void SetMuxOutput(bool enabled) { muxOutput = enabled; }
++    bool PushDac(uint32_t frame) {
++        if (state.dacCount == state.dac.size()) return false;
++        state.dac[state.dacCount++] = frame;
++        return true;
++    }
++    void CodecBoundary() {
++        state.dacCount = 0;
++        state.dac.fill(0);
++    }
++    void Reset() { state = {}; muxOutput = false; }
++    const State &GetState() const { return state; }
++    bool Load(const State &next) {
++        if (!Valid(next)) return false;
++        state = next;
++        return true;
++    }
++    static bool Valid(const State &next) {
++        const auto regsValid = [](const PwmRegisters &r) {
++            return r.control <= 0x7f && r.duty <= 0x7ff && r.period <= 0x3ff;
++        };
++        for (size_t i = next.dacCount; i < next.dac.size(); ++i)
++            if (next.dac[i]) return false;
++        const uint64_t period = Period(next.active);
++        return regsValid(next.programmed) && regsValid(next.active) &&
++            next.pwmPhase < period && next.hostPhase < 1000000000 &&
++            next.clock <= 1 && next.running <= 1 && next.stopping <= 1 &&
++            next.dacCount <= next.dac.size() && (!next.clock || next.running) &&
++            (!next.stopping || (!next.clock && next.running)) &&
++            (!next.running || next.clock || next.stopping) &&
++            (next.running || !next.pwmPhase);
++    }
++    template <typename Emit> void Advance(uint64_t ns, Emit emit) {
++        // Scheduler quanta are 20 us; bounding slices also makes direct tests safe.
++        while (ns) {
++            const auto slice = std::min<uint64_t>(ns, 1000000);
++            ns -= slice;
++            state.hostPhase += slice * rate;
++            while (state.hostPhase >= 1000000000) {
++                state.hostPhase -= 1000000000;
++                const int32_t beep = NextPwmSample();
++                uint32_t dac{};
++                if (state.dacCount) {
++                    dac = state.dac[0];
++                    for (unsigned i = 1; i < state.dacCount; ++i) state.dac[i-1] = state.dac[i];
++                    state.dac[--state.dacCount] = 0;
++                }
++                const auto left = Saturate(int32_t(int16_t(dac)) + beep);
++                const auto right = Saturate(int32_t(int16_t(dac >> 16)) + beep);
++                emit(uint16_t(left) | (uint32_t(uint16_t(right)) << 16));
++            }
++        }
++    }
++
++private:
++    static int16_t Saturate(int32_t value) {
++        return static_cast<int16_t>(std::clamp(value, -32768, 32767));
++    }
++    static uint64_t Period(const PwmRegisters &r) {
++        return uint64_t((r.control & 63) + 1) * (r.period + 1) * rate;
++    }
++    static uint64_t High(const PwmRegisters &r) {
++        const auto count = (r.duty & 0x400) ? r.period + 1 : std::min(r.duty & 0x3ff, r.period + 1);
++        return uint64_t((r.control & 63) + 1) * count * rate;
++    }
++    static uint64_t Integral(uint64_t position, uint64_t period, uint64_t high) {
++        return (position / period) * high + std::min(position % period, high);
++    }
++    void Latch() {
++        state.active = state.programmed;
++        state.pwmPhase = 0;
++    }
++    int32_t NextPwmSample() {
++        if (!state.running) return 0;
++        uint64_t remaining = pwmClock;
++        int64_t weighted{};
++        while (remaining && state.running) {
++            const uint64_t period = Period(state.active), high = High(state.active);
++            // Only one pending register update or graceful stop can split this frame.
++            const bool boundary = state.stopping ||
++                state.active.control != state.programmed.control ||
++                state.active.duty != state.programmed.duty || state.active.period != state.programmed.period;
++            const uint64_t span = boundary ? std::min(remaining, period-state.pwmPhase) : remaining;
++            if (state.active.period && high && high < period) {
++                const uint64_t highs = Integral(state.pwmPhase + span, period, high) -
++                                       Integral(state.pwmPhase, period, high);
++                // Remove the digital duty-cycle mean. This models no analogue filter or gain.
++                weighted += int64_t(2 * pwmGain) * int64_t(highs) -
++                    int64_t(2 * pwmGain) * int64_t(high * span / period);
++            }
++            state.pwmPhase = (state.pwmPhase + span) % period;
++            remaining -= span;
++            if (boundary && !state.pwmPhase) {
++                if (state.stopping) { state.running = state.stopping = 0; break; }
++                Latch();
++            }
++        }
++        return muxOutput ? static_cast<int32_t>(weighted / pwmClock) : 0;
++    }
++
++    State state{};
++    bool muxOutput{}; // Derived from GPIO16 direction/alternate function after load.
++};
++#endif

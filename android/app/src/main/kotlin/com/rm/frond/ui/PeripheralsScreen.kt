@@ -202,6 +202,15 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                     saveZip.launch("Palm databases.zip")
                 }
                 action("Export database") { model.askName("export") }
+                if (model.device.storageSlot == "memory-stick") {
+                    item(key = "memoryStick") {
+                        ListItem(
+                            headlineContent = { Text("Memory Stick", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)) },
+                            supportingContent = { Text("Not available yet") },
+                        )
+                    }
+                }
+                if (model.device.sdSlot) {
                 item { Header("SD card", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp)) }
                 item {
                     val (label, colour) = when (model.state) {
@@ -230,12 +239,13 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                     }
                     SdCard.State.UNKNOWN -> action("Try again") { model.refresh() }
                 }
+                }
                 item { Header("Device", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp)) }
                 item(key = "sound") {
                     ListItem(
-                        headlineContent = { Text("Sound") },
-                        trailingContent = { Switch(checked = model.sound, onCheckedChange = { model.changeSound(it) }) },
-                        modifier = Modifier.clickableRow { model.changeSound(!model.sound) },
+                        headlineContent = { Text("Sound", color = if (model.device.sound) Color.Unspecified else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)) },
+                        trailingContent = { Switch(checked = model.device.sound && model.sound, enabled = model.device.sound, onCheckedChange = { model.changeSound(it) }) },
+                        modifier = if (model.device.sound) Modifier.clickableRow { model.changeSound(!model.sound) } else Modifier,
                     )
                 }
                 item(key = "fastAudio") {
@@ -253,10 +263,20 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                         modifier = if (usable) Modifier.clickableRow { model.changeFastAudio(!model.fastAudio) } else Modifier,
                     )
                 }
+                if (model.device.holdPresent) item(key = "hold") {
+                    val on = model.hold
+                    val usable = model.device.holdSupported && on != null && model.busy == null
+                    val faded = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                    ListItem(
+                        headlineContent = { Text("Hold", color = if (usable) Color.Unspecified else faded) },
+                        trailingContent = { Switch(checked = on == true, enabled = usable, onCheckedChange = { model.changeHold(it) }) },
+                        modifier = if (usable) Modifier.clickableRow { model.changeHold(on != true) } else Modifier,
+                    )
+                }
                 item(key = "keyboard") {
                     val attached = model.keyboard
                     // The keyboard and beaming share the Palm's infrared port.
-                    val usable = attached != null && model.beam.phase == NetRelay.Phase.OFF
+                    val usable = model.device.keyboard && attached != null && model.beam.phase == NetRelay.Phase.OFF
                     val faded = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
                     ListItem(
                         headlineContent = { Text("Infrared keyboard", color = if (usable) Color.Unspecified else faded) },
@@ -268,7 +288,7 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                 }
                 item(key = "beam") {
                     val beam = model.beam
-                    val usable = model.keyboard == false
+                    val usable = model.device.infrared && model.keyboard == false
                     val faded = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
                     ListItem(
                         headlineContent = { Text("Infrared beaming", color = if (usable) Color.Unspecified else faded) },
@@ -278,10 +298,12 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                 }
                 if (model.beam.phase == NetRelay.Phase.DISCONNECTED) action("Connect again") { model.retryBeam() }
                 item(key = "bluetooth") {
+                    val usable = model.device.bluetooth
+                    val faded = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
                     ListItem(
-                        headlineContent = { Text("Bluetooth") },
-                        supportingContent = { Text(bluetoothText(model.bluetooth, model.radio)) },
-                        modifier = Modifier.clickableRow { choosingBluetooth = true },
+                        headlineContent = { Text("Bluetooth", color = if (usable) Color.Unspecified else faded) },
+                        supportingContent = if (usable) ({ Text(bluetoothText(model.bluetooth, model.radio)) }) else null,
+                        modifier = if (usable) Modifier.clickableRow { choosingBluetooth = true } else Modifier,
                     )
                 }
                 item(key = "serial") {
@@ -295,13 +317,15 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                 }
                 if (model.device.serialPort && model.serial.phase == NetRelay.Phase.DISCONNECTED) action("Connect again") { SerialLink.retry() }
                 item(key = "usb") {
+                    val usable = model.device.usb
+                    val faded = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
                     ListItem(
-                        headlineContent = { Text("USB HotSync") },
-                        supportingContent = { Text(relayText(model.usb)) },
-                        modifier = Modifier.clickableRow { choosingUsb = true },
+                        headlineContent = { Text("USB HotSync", color = if (usable) Color.Unspecified else faded) },
+                        supportingContent = if (usable) ({ Text(relayText(model.usb)) }) else null,
+                        modifier = if (usable) Modifier.clickableRow { choosingUsb = true } else Modifier,
                     )
                 }
-                if (model.usb.phase == NetRelay.Phase.DISCONNECTED) action("Connect again") { UsbLink.retry() }
+                if (model.device.usb && model.usb.phase == NetRelay.Phase.DISCONNECTED) action("Connect again") { UsbLink.retry() }
                 // The core doesn't emulate the camera yet.
                 if (model.device.camera) item(key = "camera") {
                     ListItem(headlineContent = { Text("Camera", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)) })
@@ -443,7 +467,7 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
             title = { Text("New card") },
             text = {
                 LazyColumn {
-                    items(SIZES) { mib ->
+                    items(SIZES.filter { (it.toLong() shl 20) in model.device.sdMin..model.device.sdMax }) { mib ->
                         ListItem(headlineContent = { Text("$mib MB") }, modifier = Modifier.clickableRow {
                             choosingSize = false
                             model.job("Making the card", "Couldn't make the card") { it.create(mib) }

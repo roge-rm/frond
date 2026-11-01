@@ -1,6 +1,6 @@
 # Device profiles and staged support
 
-The desktop and Android app start the Palm TX, the Tungsten E2 and the Zire 72. The native core inherits two
+The desktop and Android app start the Palm TX, Tungsten E2, Zire 72 and Sony CLIÉ TG50. The native core inherits two
 other models from the pinned Cloudpilot source. Listing a model does not establish
 that a particular firmware, peripheral or application works in Frond.
 
@@ -15,7 +15,8 @@ The JSON contains each device's fixed name, display name, geometry and support s
 It never scans firmware, sessions or a private ROM collection. `nor_bytes: null`
 means that the profile has no established fixed NOR size. It is not an invitation
 to load arbitrary firmware. `tx-desktop` names the experimental TX path, `e2-desktop` the Tungsten E2
-path and `zire72-desktop` the Zire 72 path in the desktop. `inherited-unverified` does not enable another desktop device.
+path and `zire72-desktop` the Zire 72 path in the desktop. `experimental-desktop`
+marks another qualified frontend with experimental hardware support. `inherited-unverified` does not enable another desktop device.
 
 ## Device names
 
@@ -40,8 +41,14 @@ all use it. The core's internal device numbers are never saved or sent.
   card at 0x20000), 14,942,208-byte NOR, no NAND, 32 MiB RAM and 320×320 display over a
   120-row silkscreen. Available in the desktop (`zire72-desktop`) and on Android; `--device palm-zire-72` is
   optional. Its camera has no sensor and stays off.
-- `sony-clie-tg50`, `palm-iiix` and `palm-m515`: reserved for
-  coming devices. They have button bar art but no board, and the core refuses them.
+- `sony-clie-tg50`: Sony/vrna card headers, 13,041,664-byte NOR with small and big
+  cards, no NAND, 16 MiB RAM and 320×320 display. Available in both frontends
+  (`experimental-desktop`). Built-in keyboard, jog controls, Hold, power/RTC,
+  beeper, Sony mono 22,050 Hz playback and ordinary infrared are supported.
+  Memory Stick, USB HotSync, Bluetooth, microphone, high-power remote IR and the
+  external infrared keyboard remain unavailable. See [desktop controls](desktop.md#sony-clié-tg50).
+- `palm-iiix` and `palm-m515`: reserved names with button bar art and no board.
+  The core refuses them.
 
 Other Palm OS devices have no native profile here. Sharing an ARM CPU, screen
 size or Palm OS version does not establish matching board wiring, flash layout,

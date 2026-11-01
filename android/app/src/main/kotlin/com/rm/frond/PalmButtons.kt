@@ -5,13 +5,14 @@ import java.io.File
 import java.util.concurrent.Executors
 
 // Presses Palm buttons for a controller. Hardware buttons go to the core as SDL key events
-// (android_main.cpp), the same keys the desktop maps in SdlEventHandler. Home and Menu, which are
-// silkscreen or status bar icons, are a pen tap sent as a one-off input replay on the control link.
+// (android_main.cpp), the same keys the desktop maps in SdlEventHandler. Silkscreen and
+// status bar icons use a one-off pen replay on the control link.
 class PalmButtons(private val device: Device, private val link: ControlLink, private val dir: File) {
     private val taps = Executors.newSingleThreadExecutor { Thread(it, "FrondTap").apply { isDaemon = true } }
 
     fun press(button: PalmButton, down: Boolean) {
-        val key = sdlKey(button)
+        if (button.id !in device.buttons) return
+        val key = sdlKey(button, device)
         if (key != 0) {
             push(key, down)
             return
@@ -31,7 +32,7 @@ class PalmButtons(private val device: Device, private val link: ControlLink, pri
     // The guest's own screen orientation, which moves the TX's status bar, or null when the core can't
     // read it. Then there's no tap, as a guess could land inside the running app.
     private fun orientation(): String? {
-        if (device != Device.TX) return PORTRAIT
+        if (!device.rotatingStatusBar) return PORTRAIT
         val reply = link.request("guest-orientation", timeoutSeconds = 5)
         if (reply.ok) return reply.message
         Log.w(FrondActivity.TAG, "guest-orientation: ${reply.code} ${reply.message}")
@@ -53,7 +54,7 @@ class PalmButtons(private val device: Device, private val link: ControlLink, pri
         private const val SDLK_ESCAPE = 27
         private fun scancodeKey(scancode: Int) = scancode or (1 shl 30)
 
-        fun sdlKey(button: PalmButton): Int = when (button) {
+        fun sdlKey(button: PalmButton, device: Device? = null): Int = when (button) {
             PalmButton.APP1 -> scancodeKey(58) // F1
             PalmButton.APP2 -> scancodeKey(59)
             PalmButton.APP3 -> scancodeKey(60)
@@ -65,7 +66,8 @@ class PalmButtons(private val device: Device, private val link: ControlLink, pri
             PalmButton.CENTRE -> scancodeKey(119) // SDLK_SELECT
             PalmButton.POWER -> SDLK_ESCAPE
             PalmButton.VOICE -> scancodeKey(62) // F5
-            PalmButton.HOME, PalmButton.MENU -> 0
+            PalmButton.HOME -> device?.homeKey ?: 0
+            PalmButton.MENU -> 0
         }
 
         // Where Home and Menu are in the core's pen coordinates (screen pixels, the silkscreen below
@@ -74,21 +76,17 @@ class PalmButtons(private val device: Device, private val link: ControlLink, pri
         // TX: Menu is the second icon of the status bar, along the bottom of its 320x480 screen in
         // portrait. The status bar's rotate icon turns it to reverse landscape, which puts the bar
         // along the top, its icons in reverse. Other orientations aren't measured, so no tap.
-        fun tapPoint(device: Device, button: PalmButton, orientation: String): Pair<Int, Int>? = when (device) {
-            Device.E2 -> when (button) {
-                PalmButton.HOME -> 27 to 351
-                PalmButton.MENU -> 27 to 405
-                else -> null
-            }
-            Device.ZIRE72 -> when (button) {
-                PalmButton.HOME -> 23 to 352
-                PalmButton.MENU -> 23 to 412
-                else -> null
-            }
-            Device.TX -> when {
+        fun tapPoint(device: Device, button: PalmButton, orientation: String): Pair<Int, Int>? {
+            if (button == PalmButton.HOME && device.homeKey != 0) return null
+            if (device.rotatingStatusBar) return when {
                 button != PalmButton.MENU -> null
-                orientation == PORTRAIT -> 54 to 466
-                orientation == REVERSE_LANDSCAPE -> 266 to 14
+                orientation == PORTRAIT -> device.menuX to device.menuY
+                orientation == REVERSE_LANDSCAPE -> device.width - device.menuX to device.height - device.menuY
+                else -> null
+            }
+            return when {
+                button == PalmButton.HOME && device.homeX >= 0 -> device.homeX to device.homeY
+                button == PalmButton.MENU && device.menuX >= 0 -> device.menuX to device.menuY
                 else -> null
             }
         }

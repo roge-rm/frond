@@ -1,0 +1,1993 @@
+--- a/src/common/device_profile5.h
++++ b/src/common/device_profile5.h
+@@ -16,7 +16,7 @@
+ // How a device is told from its firmware: the card header's company and HAL IDs, or the NOR size.
+ enum class DeviceDetect5 { cardHeader, norSize, none };
+ // Which board model runs it.
+-enum class DeviceBoard5 { pxa255E2, pxa270Tx, pxa270Zire72, paravirtual, none };
++enum class DeviceBoard5 { pxa255E2, pxa270Tx, pxa270Zire72, paravirtual, none, pxa250SonyTG50 };
+ // Which button bar and silkscreen art a device gets (native/DeviceControls.h draws them).
+ enum class DeviceArt { none, tx, e2, zire72, m515, iiix, tg50 };
+ // Settings and peripherals a device supports; the desktop and core gate on these.
+@@ -104,13 +104,13 @@
+      DeviceNorLayout5::smallAndBigCards, 0, 0x20000, false, 32u << 20, 128u << 20,
+      {true, "zire", 320, 320, 120, 96, "Calendar|Contacts|Music|Camera",
+       "up|down|left|right|centre|app1|app2|app3|app4|home|menu|voice|power", 23, 352, 23, 412, false, true, true, "", "wallpaper"}},
+-    // Inventory only. T2 supplies and qualifies the native board before runner use.
++    // Staged PXA250 board, frontend and peripherals await qualification.
+     {deviceTypeTG50, "sony-clie-tg50", "Sony CLIÉ TG50", DeviceCohort5::tg50Nor, DeviceSupport5::staged,
+      DeviceDetect5::cardHeader, 0x736f6e79 /* sony */, 0x76726e61 /* vrna */,
+-     DeviceBoard5::none, DeviceArt::tg50, {},
++     DeviceBoard5::pxa250SonyTG50, DeviceArt::tg50, {},
+      0xc70000, 0, 16u << 20, 16u << 20, DisplayMode::mode_320x320, 1u << 5, false,
+      DeviceNorLayout5::smallAndBigCards, 0, 0x20000, false, 0, 0,
+-     {false, "", 320, 320, 0, 0, "", "", -1, -1, -1, -1, false, false, false, "", "",
++     {false, "tg50", 320, 320, 0, 0, "", "", -1, -1, -1, -1, false, false, false, "", "tg50-clie",
+       DeviceStorageSlot5::memoryStick}},
+     // Reserved names: art only, no board yet.
+     {deviceTypeInvalid, "palm-iiix", "Palm IIIx", DeviceCohort5::reserved, DeviceSupport5::reserved,
+--- a/src/uarm/Makefile
++++ b/src/uarm/Makefile
+@@ -108,6 +108,12 @@
+ 	uarm/uartdev_bcm2035.cpp			\
+ 	uarm/vSD.cpp						\
+ 	uarm/devicePalmTungstenE2.cpp 		\
++	uarm/deviceSonyTG50.cpp \
++	uarm/mmiodev_TG50uc.cpp \
++	uarm/sspdev_AD7873.cpp \
++	uarm/i2sdev_AK4534.cpp \
++	uarm/i2cdev_AN32502A.cpp \
++	uarm/mmiodev_MemoryStickController.cpp \
+ 	uarm/cp15mmu.cpp 					\
+ 	uarm/cp15mpu.cpp 					\
+ 	uarm/memcpy.cpp						\
+--- a/src/uarm/native/InputReplay.cpp
++++ b/src/uarm/native/InputReplay.cpp
+@@ -22,7 +22,7 @@
+         // Physical app-button positions work across boards; older names are TX aliases.
+         {"hard1", keyIdHard1}, {"hard2", keyIdHard2},
+         {"hard3", keyIdHard3}, {"hard4", keyIdHard4},
+-        {"home", keyIdHard1}, {"calendar", keyIdHard2}, {"contacts", keyIdHard3},
++        {"home", keyIdHard1}, {"home-key", keyIdHome}, {"calendar", keyIdHard2}, {"contacts", keyIdHard3},
+         {"web", keyIdHard4}, {"up", keyIdUp}, {"down", keyIdDown},
+         {"left", keyIdLeft}, {"right", keyIdRight}, {"center", keyIdSelect},
+         {"power", keyIdPower}, {"voice", keyIdVoice}};
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -39,6 +39,7 @@
+ #include "buffer.h"
+ #include "cputil.h"
+ #include "device.h"
++#include "deviceSonyTG50.h"
+ #include "device_configuration.h"
+ #include "device_type5.h"
+ #include "md5.h"
+@@ -446,7 +447,7 @@
+             return false;
+         }
+         DisplayConfiguration displayConfiguration =
+-            deviceConfigurationDisplayConfigForMode(*displayMode);
++            deviceConfigurationDisplayConfigForDevice(deviceType, *displayMode);
+ 
+         InputReplay replay;
+         string replayError;
+@@ -465,6 +466,11 @@
+ 
+         const auto board = deviceProfile5(deviceType)->board;
+         const bool pxa270 = board == DeviceBoard5::pxa270Tx || board == DeviceBoard5::pxa270Zire72;
++        if (sessionDevice == deviceTypeTG50 &&
++            (memory.size != tg50RamBackingSize + 2 * MEMORY_BUFFER_GRANULARITY || !savestate.size)) {
++            cerr << "TG50 session requires complete RAM and CPU/peripheral state" << endl;
++            return false;
++        }
+         SoC* soc =
+             (board == DeviceBoard5::paravirtual)
+                 ? static_cast<SoC*>(new SocPV(ramSize, nor.data, nor.size, *displayMode, gdbPort))
+--- /dev/null
++++ b/src/uarm/uarm/Tg50Chunks.h
+@@ -0,0 +1,11 @@
++// TG50 board and chip state use separate versioned chunks.
++#ifndef FROND_TG50_CHUNKS_H
++#define FROND_TG50_CHUNKS_H
++#include "savestate/ChunkTypeUarm.h"
++constexpr ChunkType tg50UcChunk = ChunkType::sonyTg50Uc;
++constexpr ChunkType tg50TouchChunk = ChunkType::sonyTg50Touch;
++constexpr ChunkType tg50CodecChunk = ChunkType::sonyTg50Codec;
++constexpr ChunkType tg50PowerChunk = ChunkType::sonyTg50Power;
++constexpr ChunkType tg50MsChunk = ChunkType::sonyTg50Ms;
++constexpr ChunkType tg50BoardChunk = ChunkType::sonyTg50Board;
++#endif
+--- /dev/null
++++ b/src/uarm/uarm/Tg50Trace.h
+@@ -0,0 +1,9 @@
++#ifndef FROND_TG50_TRACE_H
++#define FROND_TG50_TRACE_H
++#ifdef FROND_TG50_TRACE
++#include <cstdio>
++#define TG50_TRACE(...) std::fprintf(stderr, __VA_ARGS__)
++#else
++#define TG50_TRACE(...) ((void)0)
++#endif
++#endif
+--- a/src/uarm/uarm/device.h
++++ b/src/uarm/uarm/device.h
+@@ -67,6 +67,10 @@
+ uint_fast8_t deviceGetSocRev(void);
+ 
+ // device handling
++// Stop execution and finish all bus dispatch before destroying a board.
++void deviceDestroy(struct Device *dev);
++void deviceBeginReset(struct Device *dev);
++void deviceEndReset(struct Device *dev);
+ struct Device *deviceSetup(enum DeviceType5 type, struct SocPeriphs *sp,
+                            struct Reschedule reschedule, struct GetEmuTime getEmuTime,
+                            struct Keypad *kp, struct VSD *vsd, uint8_t *nandContent,
+--- a/src/uarm/uarm/devicePalmTungstenE2.cpp
++++ b/src/uarm/uarm/devicePalmTungstenE2.cpp
+@@ -6,6 +6,7 @@
+ #include "ac97dev_WM9712L.h"
+ #include "cputil.h"
+ #include "device.h"
++#include "deviceSonyTG50.h"
+ #include "device_type5.h"
+ #include "mmiodev_DirectNAND.h"
+ #include "savestate/savestateAll.h"
+@@ -106,6 +107,7 @@
+ // clang-format on
+ 
+ struct Device {
++    Tg50Board *tg50;
+     struct WM9712L *wm9712L;
+     struct DirectNAND *nand;
+     struct Bcm2035 *bcm2035;
+@@ -166,7 +168,7 @@
+ 
+     struct Device *dev;
+ 
+-    dev = (struct Device *)malloc(sizeof(*dev));
++    dev = (struct Device *)calloc(1, sizeof(*dev));
+     if (!dev) ERR("cannot alloc device");
+ 
+     dev->type = type;
+@@ -180,6 +182,11 @@
+     struct Reschedule deviceReschedule = {.rescheduleCb = devicePrvReschedule, .ctx = dev};
+ 
+     dev->reschedule = reschedule;
++
++    if (type == deviceTypeTG50) {
++        dev->tg50 = tg50BoardSetup(sp, kp);
++        return dev;
++    }
+ 
+     if (type == DeviceType5::deviceTypeTX) {
+         // Board wiring and flash geometry from upstream uARM's devicePalmTX.c.
+@@ -327,6 +334,10 @@
+ }
+ 
+ void devicePeriodic(struct Device *dev, uint32_t tier) {
++    if (dev->tg50) {
++        if (tier == DEVICE_PERIODIC_TIER0) tg50BoardPeriodic(dev->tg50);
++        return;
++    }
+     if (tier == DEVICE_PERIODIC_TIER0) {if(dev->nand)directNandPeriodic(dev->nand);
+ #ifndef __EMSCRIPTEN__
+ if(dev->wifi)dev->wifi->Tick();
+@@ -334,9 +345,10 @@
+ }
+ }
+ 
+-void devicePcmPeriodic(struct Device *dev) { wm9712Lperiodic(dev->wm9712L); }
++void devicePcmPeriodic(struct Device *dev) { if (!dev->tg50) wm9712Lperiodic(dev->wm9712L); }
+ 
+ void deviceTouch(struct Device *dev, int x, int y) {
++    if (dev->tg50) { tg50BoardTouch(dev->tg50, x, y); return; }
+     if (dev->type == DeviceType5::deviceTypeTX) {
+         if (x < 0 || y < 0) {
+             wm9712LsetPen(dev->wm9712L, -1, -1, 0);
+@@ -363,6 +375,7 @@
+ }
+ 
+ void deviceKey(struct Device *dev, uint32_t key, bool down) {
++    if (dev->tg50) { tg50BoardKey(dev->tg50, key, down); return; }
+     if (dev->type != DeviceType5::deviceTypeTX && dev->type != DeviceType5::deviceTypeZire72) return;
+     // [MKOUT column][MKIN row]
+     static const KeyId txMatrix[3][4] = {
+@@ -388,6 +401,7 @@
+ }
+ 
+ bool deviceTaskRequired(struct Device *dev, uint32_t tier) {
++    if (dev->tg50) return false;
+     if (tier == DEVICE_PERIODIC_TIER0) {
+         return (dev->nand && directNandTaskRequired(dev->nand))
+ #ifndef __EMSCRIPTEN__
+@@ -400,12 +414,14 @@
+ }
+ 
+ void deviceSetAudioQueue(struct Device *dev, struct AudioQueue *audioQueue) {
++    if (dev->tg50) return;
+     wm9712LsetAudioQueue(dev->wm9712L, audioQueue);
+ }
+ 
+ bool deviceI2sConnected() { return false; }
+ 
+ void deviceSetSdCardInserted(struct Device *dev, bool inserted) {
++    if (dev->tg50) return;
+     pxaGpioSetState(dev->gpio, dev->type == DeviceType5::deviceTypeTX ||
+                     dev->type == DeviceType5::deviceTypeZire72 ? 14 : 10, !inserted);
+ }
+@@ -414,6 +430,7 @@
+ 
+ template <typename T>
+ void deviceSave(struct Device *dev, T &savestate) {
++    if (dev->tg50) { tg50BoardSave(dev->tg50, savestate); return; }
+     if (dev->type == DeviceType5::deviceTypeTX) {
+         auto chunk = savestate.GetChunk(ChunkType::palmTx, 0);
+         if (!chunk) ERR("cannot allocate TX board state");
+@@ -429,12 +446,14 @@
+ }
+ 
+ std::function<void()> deviceCaptureInput(struct Device *dev) {
++    if (dev->tg50) return tg50BoardCaptureInput(dev->tg50);
+     auto touch=wm9712CaptureInput(dev->wm9712L);auto radio=bcm2035CaptureInput(dev->bcm2035);
+     return [touch,radio]{touch();if(radio)radio();};
+ }
+ 
+ template <typename T>
+ void deviceLoad(struct Device *dev, T &loader, bool preserveInput) {
++    if (dev->tg50) { tg50BoardLoad(dev->tg50, loader, preserveInput); return; }
+     if (dev->type == DeviceType5::deviceTypeTX) {
+         auto chunk = loader.GetChunkOrFail(ChunkType::palmTx, 0, "Palm TX board");
+         if (!chunk) return;
+@@ -483,3 +502,13 @@
+     for(unsigned pin:{tx?17u:32u,tx?83u:80u})pxaGpioSetNotif(dev->gpio,pin,nullptr,nullptr);
+     bcm2035Stop(dev->bcm2035);dev->bcm2035=nullptr;
+ }
++
++void deviceDestroy(Device *dev) {
++    // Existing boards keep their lifetime policy; TG50 unregisters its new contexts.
++    if (!dev || !dev->tg50) return;
++    tg50BoardDestroy(dev->tg50);
++    free(dev);
++}
++
++void deviceBeginReset(Device *dev) { if (dev->tg50) tg50BoardBeginReset(dev->tg50); }
++void deviceEndReset(Device *dev) { if (dev->tg50) tg50BoardEndReset(dev->tg50); }
+--- /dev/null
++++ b/src/uarm/uarm/deviceSonyTG50.cpp
+@@ -0,0 +1,179 @@
++//(c) uARM project    https://github.com/uARM-Palm/uARM    uARM@dmitry.gr
++
++// Board wiring adapted from Dmitry Grinberg's uARM deviceSonyTG50.c.
++#include "deviceSonyTG50.h"
++
++#include <array>
++#include <cstdlib>
++#include <cstring>
++
++#include "RAM.h"
++#include "cputil.h"
++#include "i2cdev_AN32502A.h"
++#include "i2sdev_AK4534.h"
++#include "memory_buffer.h"
++#include "mmiodev_MemoryStickController.h"
++#include "mmiodev_TG50uc.h"
++#include "savestate/savestateAll.h"
++#include "sspdev_AD7873.h"
++#include "Tg50Chunks.h"
++
++constexpr uint32_t tg50UcBase = 0x08000000;
++constexpr uint32_t tg50UcSize = 0x220;
++constexpr uint32_t tg50MsBase = 0x14000000;
++constexpr uint32_t tg50MsSize = 0x400;
++constexpr uint32_t tg50SramBase = 0xac000000;
++constexpr uint32_t tg50SramSize = 1024;
++
++struct Tg50Board {
++    bool restoringReset{};
++    ArmMem *mem{};
++    PxaGpio *gpio{};
++    PxaSsp *ssp{};
++    PxaI2c *i2c{};
++    Ad7873 *touch{};
++    AK4534 *codec{};
++    An32502A *pmic{};
++    TG50uc *uc{};
++    MemoryStickController *ms{};
++    MemoryBuffer sramBuffer{};
++    ArmRam *sram{};
++};
++
++static std::array<uint32_t, 64> tg50KeyMap() {
++    std::array<uint32_t, 64> keys{};
++    const KeyId hard[16] = {
++        keyIdPower, keyIdHard1, keyIdHard2, keyInvalid,
++        keyIdHard3, keyInvalid, keyIdHard4, keyIdVoice,
++        keyInvalid, keyInvalid, keyIdHome, keyIdBack,
++        keyInvalid, keyIdJogPress, keyIdGraffiti, keyInvalid,
++    };
++    for (unsigned i = 0; i < 16; ++i) keys[i] = hard[i];
++    // The UI's first column contains modifiers, the UC's first sense bit contains letters.
++    for (unsigned row = 2; row < 8; ++row)
++        for (unsigned sense = 0; sense < 7; ++sense)
++            keys[row * 8 + sense] = tg50Key(row, sense == 0 ? 1 : sense == 1 ? 0 : sense);
++    return keys;
++}
++
++Tg50Board *tg50BoardSetup(SocPeriphs *sp, Keypad *kp) {
++    auto *board = new Tg50Board{};
++    board->mem = sp->mem;
++    board->gpio = sp->gpio;
++    board->ssp = sp->ssp;
++    board->i2c = sp->i2c;
++    board->touch = ad7873Init(board->ssp, board->gpio, 9);
++    board->codec = ak4534Init(board->i2c, sp->i2s, board->gpio);
++    board->pmic = an32502aInit(board->i2c);
++    const auto keys = tg50KeyMap();
++    board->uc = tg50ucInit(board->mem, board->gpio, 14, keys.data());
++    board->ms = msCtrlrInit(board->mem, tg50MsBase);
++    // MemoryBuffer owns whole pages, only the physical 1 KiB is mapped and saved.
++    if (!memoryBufferAllocate(&board->sramBuffer, MEMORY_BUFFER_GRANULARITY))
++        ERR("cannot allocate TG50 SRAM");
++    board->sram = ramInit(board->mem, sp->soc, tg50SramBase, tg50SramSize,
++                         &board->sramBuffer, false);
++    ramSetNoFramebuffer(board->sram);
++    if (!keypadAddGpioKey(kp, keyIdPower, 0, false)) ERR("cannot add TG50 power key");
++    tg50BoardReset(board, true);
++    sp->nand = nullptr;
++    sp->btUart = nullptr;
++    sp->dbgUart = sp->uarts[0];
++    return board;
++}
++
++void tg50BoardReset(Tg50Board *board, bool clearSram) {
++    ad7873Reset(board->touch);
++    ad7873setVbatt(board->touch, 4200);
++    ak4534Reset(board->codec);
++    an32502aReset(board->pmic);
++    msCtrlrReset(board->ms);
++    tg50ucReset(board->uc);
++    for (unsigned pin : {0u, 1u, 3u, 7u, 10u, 13u}) pxaGpioSetState(board->gpio, pin, true);
++    if (clearSram) {
++        memset(board->sramBuffer.buffer, 0, tg50SramSize);
++        memoryBufferMarkRangeDirty(&board->sramBuffer, 0, tg50SramSize);
++    }
++}
++
++void tg50BoardTouch(Tg50Board *board, int x, int y) {
++    const bool down = x >= 0 && y >= 0;
++    ad7873PenInput(board->touch, down ? 3200 - 10 * x : -1, down ? 3200 - 10 * y : -1);
++    ad7873Periodic(board->touch);
++}
++void tg50BoardKey(Tg50Board *board, uint32_t key, bool down) {
++    tg50ucSetKeyPressed(board->uc, key, down);
++}
++void tg50BoardPeriodic(Tg50Board *board) { ad7873Periodic(board->touch); }
++std::function<void()> tg50BoardCaptureInput(Tg50Board *board) {
++    auto touch = ad7873CaptureInput(board->touch);
++    auto keys = tg50ucCaptureInput(board->uc);
++    return [touch, keys] { touch(); keys(); };
++}
++
++template <typename T> void tg50BoardSave(Tg50Board *board, T &savestate) {
++    auto *chunk = savestate.GetChunk(tg50BoardChunk, 0);
++    if (!chunk) ERR("cannot allocate TG50 board state");
++    SaveChunkHelper h(*chunk);
++    h.Do32(tg50PhysicalRamSize).Do32(tg50RamBackingSize).Do32(tg50SramSize)
++        .DoBuffer(board->sramBuffer.buffer, tg50SramSize);
++    tg50ucSave(board->uc, savestate);
++    ad7873Save(board->touch, savestate);
++    ak4534Save(board->codec, savestate);
++    an32502aSave(board->pmic, savestate);
++    msCtrlrSave(board->ms, savestate);
++}
++
++template <typename T> bool tg50BoardLoad(Tg50Board *board, T &loader, bool preserveInput) {
++    auto *chunk = loader.GetChunkOrFail(tg50BoardChunk, 0, "TG50 board");
++    if (!chunk) return false;
++    uint32_t physical{}, backing{}, sramSize{};
++    std::array<uint8_t, tg50SramSize> sram{};
++    LoadChunkHelper h(*chunk);
++    h.Do32(physical).Do32(backing).Do32(sramSize).DoBuffer(sram.data(), sram.size());
++    if (chunk->HasError() || physical != tg50PhysicalRamSize ||
++        backing != tg50RamBackingSize || sramSize != tg50SramSize) {
++        loader.NotifyError();
++        return false;
++    }
++    if (!tg50ucLoad(board->uc, loader, preserveInput) ||
++        !ad7873Load(board->touch, loader, preserveInput) ||
++        !ak4534Load(board->codec, loader, preserveInput) ||
++        !an32502aLoad(board->pmic, loader, preserveInput) ||
++        !msCtrlrLoad(board->ms, loader, preserveInput)) return false;
++    if (!board->restoringReset) {
++        memcpy(board->sramBuffer.buffer, sram.data(), sram.size());
++        memoryBufferMarkRangeDirty(&board->sramBuffer, 0, tg50SramSize);
++    }
++    // GPIO and interrupt-controller state must be loaded before these outputs.
++    tg50ucRefreshIrq(board->uc);
++    ad7873Periodic(board->touch);
++    return true;
++}
++
++void tg50BoardDestroy(Tg50Board *board) {
++    if (!board) return;
++    // The SoC is stopped; removing each callback prevents a stale context in the retained buses.
++    if (!pxaSspRemoveClient(board->ssp, board->touch) ||
++        !pxaI2cDeviceRemove(board->i2c, board->codec) ||
++        !pxaI2cDeviceRemove(board->i2c, board->pmic) ||
++        !memRegionRemove(board->mem, tg50UcBase, tg50UcSize, board->uc) ||
++        !memRegionRemove(board->mem, tg50MsBase, tg50MsSize, board->ms) ||
++        !memRegionRemove(board->mem, tg50SramBase, tg50SramSize, board->sram))
++        ERR("cannot detach TG50 bus callbacks");
++    ad7873Destroy(board->touch);
++    ak4534Destroy(board->codec);
++    an32502aDestroy(board->pmic);
++    tg50ucDestroy(board->uc);
++    msCtrlrDestroy(board->ms);
++    free(board->sram);
++    memoryBufferRelease(&board->sramBuffer);
++    delete board;
++}
++
++template void tg50BoardSave<Savestate<ChunkType>>(Tg50Board *, Savestate<ChunkType> &);
++template void tg50BoardSave<SavestateProbe<ChunkType>>(Tg50Board *, SavestateProbe<ChunkType> &);
++template bool tg50BoardLoad<SavestateLoader<ChunkType>>(Tg50Board *, SavestateLoader<ChunkType> &, bool);
++
++void tg50BoardBeginReset(Tg50Board *board) { board->restoringReset = true; }
++void tg50BoardEndReset(Tg50Board *board) { board->restoringReset = false; }
+--- /dev/null
++++ b/src/uarm/uarm/deviceSonyTG50.h
+@@ -0,0 +1,24 @@
++//(c) uARM project    https://github.com/uARM-Palm/uARM    uARM@dmitry.gr
++#ifndef FROND_DEVICE_SONY_TG50_H
++#define FROND_DEVICE_SONY_TG50_H
++#include <functional>
++#include "device.h"
++
++struct Tg50Board;
++constexpr uint32_t tg50PhysicalRamSize = 16u << 20;
++// The extra MiB and the mirror reproduce uARM's RAM-probe workaround.
++constexpr uint32_t tg50RamBackingSize = 17u << 20;
++
++Tg50Board *tg50BoardSetup(SocPeriphs *, Keypad *);
++void tg50BoardTouch(Tg50Board *, int x, int y);
++void tg50BoardKey(Tg50Board *, uint32_t key, bool down);
++void tg50BoardPeriodic(Tg50Board *);
++void tg50BoardReset(Tg50Board *, bool clearSram);
++void tg50BoardBeginReset(Tg50Board *);
++void tg50BoardEndReset(Tg50Board *);
++std::function<void()> tg50BoardCaptureInput(Tg50Board *);
++// Called on the stopped SoC's thread, removes all bus registrations before freeing.
++void tg50BoardDestroy(Tg50Board *);
++template <typename T> void tg50BoardSave(Tg50Board *, T &);
++template <typename T> bool tg50BoardLoad(Tg50Board *, T &, bool preserveInput);
++#endif
+--- a/src/uarm/uarm/device_configuration.cpp
++++ b/src/uarm/uarm/device_configuration.cpp
+@@ -48,3 +48,12 @@
+             return DisplayConfiguration{};
+     }
+ }
++
++DisplayConfiguration deviceConfigurationDisplayConfigForDevice(DeviceType5 type, DisplayMode mode) {
++    auto config = deviceConfigurationDisplayConfigForMode(mode);
++    const auto *profile = deviceProfile5(type);
++    if (profile && profile->frontend.width > 0 && profile->frontend.width == config.width &&
++        profile->frontend.height == config.height)
++        config.graffitiHeight = profile->frontend.silkscreenHeight;
++    return config;
++}
+--- a/src/uarm/uarm/device_configuration.h
++++ b/src/uarm/uarm/device_configuration.h
+@@ -19,6 +19,7 @@
+ DisplayMode deviceConfigurationDefaultDisplayMode(DeviceType5 deviceType);
+ 
+ DisplayConfiguration deviceConfigurationDisplayConfigForMode(DisplayMode mode);
++DisplayConfiguration deviceConfigurationDisplayConfigForDevice(DeviceType5 type, DisplayMode mode);
+ 
+ bool deviceConfigurationSupportsRamSize(DeviceType5 deviceType, uint32_t ramSize);
+ 
+--- /dev/null
++++ b/src/uarm/uarm/i2cdev_AN32502A.cpp
+@@ -0,0 +1,150 @@
++//(c) uARM project    https://github.com/uARM-Palm/uARM    uARM@dmitry.gr
++
++#include "i2cdev_AN32502A.h"
++#include <string.h>
++#include <stdlib.h>
++#include "cputil.h"
++#include "Tg50Chunks.h"
++#include "Tg50Trace.h"
++#include "savestate/savestateAll.h"
++
++
++struct An32502A {
++
++	uint8_t inTransaction;
++	uint8_t addrSeen;
++	uint8_t ourAddr;
++	uint8_t isRead;
++	uint8_t regAddrSeen;
++	uint8_t reg;
++};
++
++static bool an32502aPrvDoRegWrite(struct An32502A *an, uint8_t reg, uint8_t val)
++{
++	TG50_TRACE( "AN: writing 0x%02x -> 0x%02x\n", val, reg);
++
++	if (reg > 2)
++		return false;
++
++	//value not needed for emulated system
++
++	return true;
++}
++
++static uint8_t an32502aPrvDoRegRead(struct An32502A *an, uint8_t reg)
++{
++	TG50_TRACE( "AN32502A does not support register reading\n");
++
++	return 0;
++}
++
++static uint_fast8_t an32502aPrvI2cHandler(void *userData, enum ActionI2C stimulus, uint_fast8_t value)
++{
++	struct An32502A *an = (struct An32502A*)userData;
++
++	switch (stimulus) {
++		case i2cStart:
++			an->inTransaction = 1;
++			an->regAddrSeen = 0;
++			//fallthrough
++
++		case i2cRestart:
++			an->addrSeen = 0;
++			an->ourAddr = 0;
++			return 0;
++
++		case i2cStop:
++			an->inTransaction = 0;
++			return 0;
++
++		case i2cTx:
++			if (!an->inTransaction)
++				return 0;
++			if (!an->addrSeen) {
++				an->addrSeen = 1;
++				if ((value >> 1) != 0x73)
++					return 0;
++				an->ourAddr = 1;
++				an->isRead = value & 1;
++				return 1;
++			}
++			if (!an->ourAddr)
++				return 0;
++			if (an->isRead) {
++
++				TG50_TRACE( "unexpected write in read mode\n");
++				return 0;
++			}
++			//write to us
++			if (!an->regAddrSeen) {
++				an->regAddrSeen = 1;
++				an->reg = value;
++
++				return 1;
++			}
++			//write to a reg
++			return an32502aPrvDoRegWrite(an, an->reg++, value) ? 1 : 0;
++
++		case i2cRx:
++			if (!an->inTransaction || !an->addrSeen || !an->ourAddr)
++				return 0;
++			if (!an->isRead) {
++
++				TG50_TRACE( "unexpected read in write mode\n");
++				return 0;
++			}
++			if (!an->regAddrSeen) {
++
++				TG50_TRACE( "unexpected read before register specified\n");
++				return 0;
++			}
++			return an32502aPrvDoRegRead(an, an->reg++);
++
++		default:
++			return 0;
++	}
++}
++
++struct An32502A* an32502aInit(struct PxaI2c* i2c)
++{
++	struct An32502A *an = (struct An32502A*)malloc(sizeof(*an));
++
++	if (!an)
++		ERR("cannot alloc AN32502A");
++
++	memset(an, 0, sizeof (*an));
++
++	if (!pxaI2cDeviceAdd(i2c, an32502aPrvI2cHandler, an))
++		ERR("cannot add AN32502A to I2C\n");
++
++	return an;
++}
++
++
++void an32502aReset(An32502A *an) { *an = {}; }
++void an32502aDestroy(An32502A *an) { free(an); }
++
++template <typename H> static void an32502aState(An32502A &state, H &h) {
++    h.Do8(state.inTransaction).Do8(state.addrSeen).Do8(state.ourAddr).Do8(state.isRead).Do8(state.regAddrSeen).Do8(state.reg);
++}
++template <typename T> void an32502aSave(An32502A *an, T &savestate) {
++    auto *chunk = savestate.GetChunk(tg50PowerChunk, 0);
++    if (!chunk) ERR("cannot allocate TG50 model state");
++    SaveChunkHelper h(*chunk);
++    an32502aState(*an, h);
++}
++template <typename T> bool an32502aLoad(An32502A *an, T &loader, bool preserveInput) {
++    auto *chunk = loader.GetChunkOrFail(tg50PowerChunk, 0, "TG50 an32502a");
++    if (!chunk) return false;
++    auto next = *an;
++    LoadChunkHelper h(*chunk);
++    an32502aState(next, h);
++    if (chunk->HasError()) { loader.NotifyError(); return false; }
++    if (next.inTransaction > 1 || next.addrSeen > 1 || next.ourAddr > 1 || next.isRead > 1 || next.regAddrSeen > 1) { loader.NotifyError(); return false; }
++    *an = next;
++    // Board refreshes output pins after GPIO, IC and all models have loaded.
++    return true;
++}
++template void an32502aSave<Savestate<ChunkType>>(An32502A*, Savestate<ChunkType>&);
++template void an32502aSave<SavestateProbe<ChunkType>>(An32502A*, SavestateProbe<ChunkType>&);
++template bool an32502aLoad<SavestateLoader<ChunkType>>(An32502A*, SavestateLoader<ChunkType>&, bool);
+--- /dev/null
++++ b/src/uarm/uarm/i2cdev_AN32502A.h
+@@ -0,0 +1,19 @@
++//(c) uARM project    https://github.com/uARM-Palm/uARM    uARM@dmitry.gr
++
++#ifndef _AN32502A_H_
++#define _AN32502A_H_
++
++#include "pxa_I2C.h"
++
++struct An32502A;
++
++
++struct An32502A* an32502aInit(struct PxaI2c* i2c);
++
++
++void an32502aReset(An32502A *);
++// Destroy only after the owning SoC can no longer dispatch its bus callbacks.
++void an32502aDestroy(An32502A *);
++template <typename T> void an32502aSave(An32502A *, T &);
++template <typename T> bool an32502aLoad(An32502A *, T &, bool preserveInput = false);
++#endif
+--- /dev/null
++++ b/src/uarm/uarm/i2sdev_AK4534.cpp
+@@ -0,0 +1,176 @@
++//(c) uARM project    https://github.com/uARM-Palm/uARM    uARM@dmitry.gr
++
++#include "i2sdev_AK4534.h"
++#include <string.h>
++#include <stdlib.h>
++#include "cputil.h"
++#include "Tg50Chunks.h"
++#include "Tg50Trace.h"
++#include "savestate/savestateAll.h"
++
++
++
++
++struct AK4534 {
++
++	struct PxaGpio *gpio;
++
++	//regs
++	uint8_t regs[16];	//last two forced to zero
++
++	//i2c state machine state
++	struct {
++		uint8_t inTransaction;
++		uint8_t addrSeen;
++		uint8_t ourAddr;
++		uint8_t isRead;
++		uint8_t regAddrSeen;
++		uint8_t reg;
++	} i2c;
++};
++
++static bool ak4534prvDoRegWrite(struct AK4534 *ak, uint8_t reg, uint8_t val)
++{
++	//TG50_TRACE( "AK4534: writing 0x%02x -> [0x%02x]\n", val, reg);
++
++	if (reg < sizeof(ak->regs) / sizeof(*ak->regs)) {
++		ak->regs[reg] = val;
++		return true;
++	}
++
++	TG50_TRACE( "UNKNOWN REG WRITTEN  0x%02x -> [0x%02x]\n", val, reg);
++	return false;
++}
++
++static uint8_t ak4534prvDoRegRead(struct AK4534 *ak, uint8_t reg)
++{
++	//TG50_TRACE( "AK4534: reading [0x%02x]\n", reg);
++
++	if (reg < sizeof(ak->regs) / sizeof(*ak->regs))
++		return ak->regs[reg];
++
++	TG50_TRACE( "UNKNOWN REG READ: 0x%02x\n", reg);
++	return 0;
++}
++
++static uint_fast8_t ak4534prvI2cHandler(void *userData, enum ActionI2C stimulus, uint_fast8_t value)
++{
++	struct AK4534 *ak = (struct AK4534*)userData;
++
++	switch (stimulus) {
++		case i2cStart:
++			ak->i2c.inTransaction = 1;
++			ak->i2c.regAddrSeen = 0;
++			//fallthrough
++
++		case i2cRestart:
++			ak->i2c.addrSeen = 0;
++			ak->i2c.ourAddr = 0;
++			return 0;
++
++		case i2cStop:
++			ak->i2c.inTransaction = 0;
++			return 0;
++
++		case i2cTx:
++			if (!ak->i2c.inTransaction)
++				return 0;
++			if (!ak->i2c.addrSeen) {
++				ak->i2c.addrSeen = 1;
++				if ((value >> 1) != 0x10)
++					return 0;
++				ak->i2c.ourAddr = 1;
++				ak->i2c.isRead = value & 1;
++				return 1;
++			}
++			if (!ak->i2c.ourAddr)
++				return 0;
++			if (ak->i2c.isRead) {
++
++				TG50_TRACE( "unexpected write in read mode\n");
++				return 0;
++			}
++			//write to us
++			if (!ak->i2c.regAddrSeen) {
++				ak->i2c.regAddrSeen = 1;
++				ak->i2c.reg = value;
++
++				return 1;
++			}
++			//write to a reg
++			return ak4534prvDoRegWrite(ak, ak->i2c.reg++, value) ? 1 : 0;
++
++		case i2cRx:
++			if (!ak->i2c.inTransaction || !ak->i2c.addrSeen || !ak->i2c.ourAddr)
++				return 0;
++			if (!ak->i2c.isRead) {
++
++				TG50_TRACE( "unexpected read in write mode\n");
++				return 0;
++			}
++			return ak4534prvDoRegRead(ak, ak->i2c.reg++);
++
++		default:
++			return 0;
++	}
++}
++
++
++void ak4534Reset(AK4534 *ak) {
++    memset(ak->regs, 0, sizeof(ak->regs));
++    ak->i2c = {};
++	ak->regs[1] = 0x80;
++	ak->regs[3] = 0x03;
++	ak->regs[4] = 0x02;
++	ak->regs[6] = 0x11;
++	ak->regs[7] = 0x01;
++	ak->regs[9] = 0x40;
++	ak->regs[10] = 0x36;
++	ak->regs[11] = 0x10;
++
++}
++
++struct AK4534* ak4534Init(struct PxaI2c *i2c, struct PxaI2s *i2s, struct PxaGpio *gpio)
++{
++	struct AK4534 *ak = (struct AK4534*)malloc(sizeof(*ak));
++
++	if (!ak)
++		ERR("cannot alloc AK4534");
++
++	memset(ak, 0, sizeof (*ak));
++
++    ak4534Reset(ak);
++
++	if (!pxaI2cDeviceAdd(i2c, ak4534prvI2cHandler, ak))
++		ERR("cannot add AK4534 to I2C\n");
++
++	return ak;
++}
++
++void ak4534Destroy(AK4534 *ak) { free(ak); }
++
++template <typename H> static void ak4534State(AK4534 &state, H &h) {
++    for (auto &reg : state.regs) h.Do8(reg);
++    h.Do8(state.i2c.inTransaction).Do8(state.i2c.addrSeen).Do8(state.i2c.ourAddr).Do8(state.i2c.isRead).Do8(state.i2c.regAddrSeen).Do8(state.i2c.reg);
++}
++template <typename T> void ak4534Save(AK4534 *ak, T &savestate) {
++    auto *chunk = savestate.GetChunk(tg50CodecChunk, 0);
++    if (!chunk) ERR("cannot allocate TG50 model state");
++    SaveChunkHelper h(*chunk);
++    ak4534State(*ak, h);
++}
++template <typename T> bool ak4534Load(AK4534 *ak, T &loader, bool preserveInput) {
++    auto *chunk = loader.GetChunkOrFail(tg50CodecChunk, 0, "TG50 ak4534");
++    if (!chunk) return false;
++    auto next = *ak;
++    LoadChunkHelper h(*chunk);
++    ak4534State(next, h);
++    if (chunk->HasError()) { loader.NotifyError(); return false; }
++    if (next.i2c.inTransaction > 1 || next.i2c.addrSeen > 1 || next.i2c.ourAddr > 1 || next.i2c.isRead > 1 || next.i2c.regAddrSeen > 1) { loader.NotifyError(); return false; }
++    *ak = next;
++    // Board refreshes output pins after GPIO, IC and all models have loaded.
++    return true;
++}
++template void ak4534Save<Savestate<ChunkType>>(AK4534*, Savestate<ChunkType>&);
++template void ak4534Save<SavestateProbe<ChunkType>>(AK4534*, SavestateProbe<ChunkType>&);
++template bool ak4534Load<SavestateLoader<ChunkType>>(AK4534*, SavestateLoader<ChunkType>&, bool);
+--- /dev/null
++++ b/src/uarm/uarm/i2sdev_AK4534.h
+@@ -0,0 +1,28 @@
++//(c) uARM project    https://github.com/uARM-Palm/uARM    uARM@dmitry.gr
++
++#ifndef _AK4534_H_
++#define _AK4534_H_
++
++#include <stdbool.h>
++#include <stdint.h>
++
++#include "pxa_I2C.h"
++#include "pxa_I2S.h"
++#include "pxa_GPIO.h"
++
++
++struct AK4534;
++
++
++
++struct AK4534* ak4534Init(struct PxaI2c *i2c, struct PxaI2s *i2s, struct PxaGpio *gpio);
++
++
++
++
++void ak4534Reset(AK4534 *);
++// Destroy only after the owning SoC can no longer dispatch its bus callbacks.
++void ak4534Destroy(AK4534 *);
++template <typename T> void ak4534Save(AK4534 *, T &);
++template <typename T> bool ak4534Load(AK4534 *, T &, bool preserveInput = false);
++#endif
+--- a/src/uarm/uarm/mem.cpp
++++ b/src/uarm/uarm/mem.cpp
+@@ -119,6 +119,17 @@
+     return false;
+ }
+ 
++bool memRegionRemove(struct ArmMem *mem, uint32_t pa, uint32_t size, void *context) {
++    if (!context || !size || !memRegionFits(pa, size)) return false;
++    for (unsigned i = REGION_BASE; i < NUM_MEM_REGIONS; ++i) {
++        auto &region = mem->regions[i];
++        if (region.pa != pa || region.ub != pa + size || region.uD != context) continue;
++        region = {};
++        return true;
++    }
++    return false;
++}
++
+ bool memRegionAddRom(struct ArmMem *mem, uint32_t pa, uint32_t sz, ArmMemAccessF af, void *uD) {
+     return memRegionAddFixed(mem, REGION_ROM, pa, sz, af, uD);
+ }
+--- a/src/uarm/uarm/mem.h
++++ b/src/uarm/uarm/mem.h
+@@ -14,6 +14,8 @@
+ void memDeinit(struct ArmMem* mem);
+ 
+ bool memRegionAdd(struct ArmMem* mem, uint32_t pa, uint32_t sz, ArmMemAccessF af, void* uD);
++// Quiesced bus only, removes one matching device region without freeing its context.
++bool memRegionRemove(struct ArmMem* mem, uint32_t pa, uint32_t sz, void* uD);
+ bool memRegionAddRam(struct ArmMem* mem, uint32_t pa, uint32_t sz, ArmMemAccessF af, void* uD);
+ bool memRegionAddRom(struct ArmMem* mem, uint32_t pa, uint32_t sz, ArmMemAccessF af, void* uD);
+ 
+--- /dev/null
++++ b/src/uarm/uarm/mmiodev_MemoryStickController.cpp
+@@ -0,0 +1,188 @@
++//(c) uARM project    https://github.com/uARM-Palm/uARM    uARM@dmitry.gr
++
++#include "mmiodev_MemoryStickController.h"
++#include <string.h>
++#include <stdlib.h>
++#include "cputil.h"
++#include "Tg50Chunks.h"
++#include "Tg50Trace.h"
++#include "savestate/savestateAll.h"
++
++
++#define MS_CONTROLLER_SIZE 	0x400
++
++
++struct MemoryStickController {
++
++	uint16_t systemReg;
++
++	//not sure
++	uint16_t reg_0, reg_40, reg_50, reg_2c0, reg_2d0, reg_2e0, reg_2f0;
++
++	//some sort of flags. w1c i think
++	uint16_t reg_188, reg_180;
++
++	//seems to be command results (64 bits in 2 32-bit regs)
++	uint32_t reply_lo_2f0, reply_hi_2f8;
++
++};
++
++//reg 0x08 seems to be "system register" top 16 bits (IP calls it system reg 0x18)
++
++static bool msCtrlrPrvMemAccessF(void* userData, uint32_t pa, uint_fast8_t size, bool write, void* buf)
++{
++	struct MemoryStickController *msc = (struct MemoryStickController*)userData;
++	uint32_t val = 0;
++	bool ret = true;
++
++	pa %= MS_CONTROLLER_SIZE;
++
++	if (size == 4 && !write && (pa == 0x2f0 || pa == 0x2f8)) {
++
++		*(uint32_t*)buf = (pa  == 0x2f0) ? msc->reply_lo_2f0 : msc->reply_hi_2f8;
++		TG50_TRACE( "MSC %c [%04lx] == 0x%08lx\n", (char)(write ? 'W' : 'R'), (unsigned long)pa, (unsigned long)*(uint32_t*)buf);
++		return true;
++	}
++
++	if (size != 2) {
++		TG50_TRACE( "%s: Unexpected %s of %u bytes to 0x%08lx\n", __func__, write ? "write" : "read", size, (unsigned long)pa);
++		return false;
++	}
++
++	if (write)
++		val = *(uint16_t*)buf;
++
++	switch (pa) {
++
++		case 0x00:
++			if (write)
++				msc->reg_0 = val;
++			else
++				val = msc->reg_0;
++			break;
++
++		case 0x08:	//system reg top 16 bits?
++			if (write)
++				msc->systemReg = (msc->systemReg & 0x8a00) | (val & 0x75ff);
++				//XXX: writing 0x0800 clears XINT too
++			else
++				val = msc->systemReg;
++			break;
++
++		case 0x40:
++			if (write)
++				msc->reg_40 = val;
++			else
++				val = msc->reg_40;
++			break;
++
++		case 0x50:
++			if (write)
++				msc->reg_50 = val;
++			else
++				val = msc->reg_50;
++			break;
++
++		case 0x180:
++			if (write)
++				msc->reg_180 &=~ val;
++			else
++				val = msc->reg_180;
++			break;
++
++		case 0x188:
++			if (write)
++				msc->reg_188 &=~ val;
++			else
++				val = msc->reg_188;
++			break;
++
++		case 0x2c0:
++			if (write)
++				msc->reg_2c0 = val;
++			else
++				val = msc->reg_2c0;
++			break;
++
++		case 0x2d0:
++			if (write)
++				msc->reg_2d0 = val &~ 1;
++			else
++				val = msc->reg_2d0;
++			break;
++
++		case 0x2e0:	//some sort of command, assembled from 2 bytes in 3452MGLib@7f0
++			if (write)
++				msc->reg_2e0 = val;
++			else
++				val = msc->reg_2e0;
++			break;
++
++		case 0x2f0:
++			if (write)
++				msc->reg_2f0 = val;
++			else
++				val = msc->reg_2f0;
++			break;
++
++		default:
++			TG50_TRACE( "unknown reg 0x%08lx\n", (unsigned long)pa);
++			ret = false;
++			break;
++	}
++
++	if (ret)
++		TG50_TRACE( "MSC %c [%04lx] == 0x%04lx\n", (char)(write ? 'W' : 'R'), (unsigned long)pa, (unsigned long)val);
++	else
++		TG50_TRACE( "MSC %c [%04lx] FAILED\n", (char)(write ? 'W' : 'R'), (unsigned long)pa);
++
++	if (!write)
++		*(uint16_t*)buf = val;
++
++	return ret;
++}
++
++struct MemoryStickController* msCtrlrInit(struct ArmMem *physMem, uint32_t baseAddr)
++{
++	struct MemoryStickController *msc = (struct MemoryStickController*)malloc(sizeof(*msc));
++
++	if (!msc)
++		ERR("cannot alloc MSC");
++
++	memset(msc, 0, sizeof (*msc));
++
++	msCtrlrReset(msc);
++
++	if (!memRegionAdd(physMem, baseAddr, MS_CONTROLLER_SIZE, msCtrlrPrvMemAccessF, msc))
++		ERR("cannot add MSC to MEM\n");
++
++	return msc;
++}
++
++
++void msCtrlrReset(MemoryStickController *msc) { *msc = {}; msc->systemReg = 0x4455; }
++void msCtrlrDestroy(MemoryStickController *msc) { free(msc); }
++
++template <typename H> static void msCtrlrState(MemoryStickController &state, H &h) {
++    h.Do16(state.systemReg).Do16(state.reg_0).Do16(state.reg_40).Do16(state.reg_50).Do16(state.reg_2c0).Do16(state.reg_2d0).Do16(state.reg_2e0).Do16(state.reg_2f0).Do16(state.reg_188).Do16(state.reg_180).Do32(state.reply_lo_2f0).Do32(state.reply_hi_2f8);
++}
++template <typename T> void msCtrlrSave(MemoryStickController *msc, T &savestate) {
++    auto *chunk = savestate.GetChunk(tg50MsChunk, 0);
++    if (!chunk) ERR("cannot allocate TG50 model state");
++    SaveChunkHelper h(*chunk);
++    msCtrlrState(*msc, h);
++}
++template <typename T> bool msCtrlrLoad(MemoryStickController *msc, T &loader, bool preserveInput) {
++    auto *chunk = loader.GetChunkOrFail(tg50MsChunk, 0, "TG50 msCtrlr");
++    if (!chunk) return false;
++    auto next = *msc;
++    LoadChunkHelper h(*chunk);
++    msCtrlrState(next, h);
++    if (chunk->HasError()) { loader.NotifyError(); return false; }
++    *msc = next;
++    // Board refreshes output pins after GPIO, IC and all models have loaded.
++    return true;
++}
++template void msCtrlrSave<Savestate<ChunkType>>(MemoryStickController*, Savestate<ChunkType>&);
++template void msCtrlrSave<SavestateProbe<ChunkType>>(MemoryStickController*, SavestateProbe<ChunkType>&);
++template bool msCtrlrLoad<SavestateLoader<ChunkType>>(MemoryStickController*, SavestateLoader<ChunkType>&, bool);
+--- /dev/null
++++ b/src/uarm/uarm/mmiodev_MemoryStickController.h
+@@ -0,0 +1,22 @@
++//(c) uARM project    https://github.com/uARM-Palm/uARM    uARM@dmitry.gr
++
++#ifndef _MMIO_MS_CTRLR_H_
++#define _MMIO_MS_CTRLR_H_
++
++
++#include "mem.h"
++
++
++struct MemoryStickController;
++
++
++struct MemoryStickController* msCtrlrInit(struct ArmMem *physMem, uint32_t baseAddr);
++
++
++
++void msCtrlrReset(MemoryStickController *);
++// Destroy only after the owning SoC can no longer dispatch its bus callbacks.
++void msCtrlrDestroy(MemoryStickController *);
++template <typename T> void msCtrlrSave(MemoryStickController *, T &);
++template <typename T> bool msCtrlrLoad(MemoryStickController *, T &, bool preserveInput = false);
++#endif
+--- /dev/null
++++ b/src/uarm/uarm/mmiodev_TG50uc.cpp
+@@ -0,0 +1,422 @@
++//(c) uARM project    https://github.com/uARM-Palm/uARM    uARM@dmitry.gr
++
++#include "mmiodev_TG50uc.h"
++#include <string.h>
++#include <array>
++#include <functional>
++#include <stdlib.h>
++#include "cputil.h"
++#include "Tg50Chunks.h"
++#include "Tg50Trace.h"
++#include "savestate/savestateAll.h"
++
++
++// TG50 enables +0xa8 for active-low key presses; +0x80 selects rising edges.
++//0x100 seems to need to contain 'GA' (it contains 'IO' when an io interrupt has ben triggered it seems)
++//0x0c (gpioD lower 4 bits) seems to be device revision id in lower 4 bits. nonzero is required to consider reading battery voltage at all
++
++//164 is also likely an interrupt status word, with mask at 0x140 (or reversed)
++
++//if 100 has 'IO' then irqs are masked by writing 1 to 0x170. unmasked by setting bit 0x0002 in 0x170
++// in all cases, also 0x120 has mask which can be read and set (more than bit)
++
++//184, 188, 18c is IRC stuff
++
++//state on a normal clie:
++/*	GPIO PORT/REG	00		20		40		60		80		a0		c0		120
++	0				e13d	1e40	0000	0000	a010	a110	0000	a110
++	1				aaec	9fef	0000	0000	0000	0000	0000	0000
++	2				ff00	00ff	0000	0000	ff00	ff00	0000	ff00
++	3				0004	0000	0000	0000	0000	0000	0000	0000
++
++	it is thus clear that each gpio port has 8 registers controlling it
++	@0x000 is readable input state reg
++	@0x020 is direction (1 = out)
++	@0x040 is w1 "set hi" reg
++	@0x060 is w1 "set lo" reg
++	@0x080 is rising edge detect
++	@0x0a0 is falling edge detect
++	@0x0c0 is accumulates triggered edges, w1c
++	@0x120 is whether triggered edges interrupt the main cpu!
++*/
++
++
++#define TG50_UC_BASE	0x08000000ul
++#define TG50_UC_SIZE 	0x0220
++
++
++struct TG50ucGpioPort {
++	//sure
++	uint16_t latches;
++	uint16_t inputs;
++	uint16_t direction;
++	uint16_t detectRise;
++	uint16_t detectFall;
++	uint16_t edgesDetected;
++	uint16_t edgesCausingIrq;
++
++	//calced
++	uint16_t curState, prevState;
++};
++
++
++struct TG50uc {
++
++	struct PxaGpio *gpio;
++	int8_t gpioChangeIrqNo;
++
++	struct TG50ucGpioPort port[4];			//gpio[3] has revision straps on low 4 bits
++
++	bool keys[8][8];
++	uint32_t keyVals[8][8];
++};
++
++
++
++static void tg50ucPrvRecalcGpioVals(struct TG50uc *uc, struct TG50ucGpioPort *port);
++
++static uint16_t tg50ucPrvMatrixInputs(const struct TG50uc *uc)
++{
++    uint16_t senses = 0xff00;
++    for (unsigned col = 0; col < 8; ++col) {
++        bool drivenLow = false, drivenHigh = false;
++        for (unsigned row = 0; row < 8; ++row) {
++            if (!(uc->port[2].direction & (1u << row)) || !uc->keys[row][col]) continue;
++            if (uc->port[2].latches & (1u << row)) drivenHigh = true;
++            else drivenLow = true;
++        }
++        // Keep uARM's high result for conflicting row drivers.
++        if (drivenLow && !drivenHigh) senses &= ~(1u << (col + 8));
++    }
++    return (uc->port[2].inputs & 0x00ff) | senses;
++}
++
++static void tg50ucPrvRecalcKeypadMatrix(struct TG50uc *uc) {
++    uc->port[2].inputs = tg50ucPrvMatrixInputs(uc);
++    tg50ucPrvRecalcGpioVals(uc, &uc->port[2]);
++}
++
++static void tg50ucPrvRecalcGpioIrqs(struct TG50uc *uc)
++{
++    bool irq = false;
++    for (const auto &port : uc->port)
++        irq = irq || (port.edgesDetected & port.edgesCausingIrq);
++
++	if (uc->gpioChangeIrqNo >= 0)
++		pxaGpioSetState(uc->gpio, uc->gpioChangeIrqNo, !irq);
++}
++
++static void tg50ucPrvRecalcGpioVals(struct TG50uc *uc, struct TG50ucGpioPort *port)
++{
++	uint16_t diff, wentHi, wentLo;
++
++	port->prevState = port->curState;
++	port->curState = (port->latches & port->direction) | (port->inputs & ~port->direction);
++
++	diff = port->prevState ^ port->curState;
++	wentHi = diff & port->curState;
++	wentLo = diff & port->prevState;
++
++	port->edgesDetected |= wentLo & port->detectFall;
++	port->edgesDetected |= wentHi & port->detectRise;
++	tg50ucPrvRecalcGpioIrqs(uc);
++}
++
++void tg50ucReset(struct TG50uc *uc)
++{
++    for (auto &port : uc->port) {
++        port.direction = port.latches = port.detectRise = port.detectFall = 0;
++        port.edgesDetected = port.edgesCausingIrq = 0;
++    }
++    // Reset keeps the external switches and keys, but releases all row drivers.
++    tg50ucPrvRecalcKeypadMatrix(uc);
++    for (auto &port : uc->port)
++        port.prevState = port.curState = port.inputs;
++    tg50ucPrvRecalcGpioIrqs(uc);
++}
++
++static bool tg50ucPrvMemAccessF(void* userData, uint32_t pa, uint_fast8_t size, bool write, void* buf)
++{
++	struct TG50uc *uc = (struct TG50uc*)userData;
++	bool handled = true;
++	uint32_t val = 0;
++
++	pa -= TG50_UC_BASE;
++
++
++	if (size == 4) {
++
++		if (write)
++			val = *(uint32_t*)buf;
++
++		switch (pa) {
++			case 0x00:	//GPIOA state (RO)
++			case 0x04:	//GPIOB state (RO)
++			case 0x08:	//GPIOC state (RO)
++			case 0x0c:	//GPIOD state (RO)
++				if (write)
++					handled = false;
++				else
++					val = uc->port[(pa >> 2) & 3].curState;
++				break;
++
++			case 0x20:	//GPIOA direction (RW)
++			case 0x24:	//GPIOD direction (RW)
++			case 0x28:	//GPIOC direction (RW)
++			case 0x2c:	//GPIOD direction (RW)
++                if (write) {
++                    auto &port = uc->port[(pa >> 2) & 3];
++                    port.direction = val;
++                    if (((pa >> 2) & 3) == 2) tg50ucPrvRecalcKeypadMatrix(uc);
++                    else tg50ucPrvRecalcGpioVals(uc, &port);
++                } else val = uc->port[(pa >> 2) & 3].direction;
++				break;
++
++			case 0x40:	//GPIOA set (WO)
++			case 0x44:	//GPIOB set (WO)
++			case 0x48:	//GPIOC set (WO)
++			case 0x4c:	//GPIOD set (WO)
++				if (!write)
++					handled = false;
++				else {
++					uc->port[(pa >> 2) & 3].latches |= val;
++					tg50ucPrvRecalcKeypadMatrix(uc);
++					tg50ucPrvRecalcGpioVals(uc, &uc->port[(pa >> 2) & 3]);
++				}
++				break;
++
++			case 0x60:	//GPIOA clear (WO)
++			case 0x64:	//GPIOB clear (WO)
++			case 0x68:	//GPIOC clear (WO)
++			case 0x6c:	//GPIOD clear (WO)
++				if (!write)
++					handled = false;
++				else {
++					uc->port[(pa >> 2) & 3].latches &=~ val;
++					tg50ucPrvRecalcKeypadMatrix(uc);
++					tg50ucPrvRecalcGpioVals(uc, &uc->port[(pa >> 2) & 3]);
++				}
++				break;
++
++			case 0x80:	//GPIOA risingEdgeDetect (RW)
++			case 0x84:	//GPIOA risingEdgeDetect (RW)
++			case 0x88:	//GPIOA risingEdgeDetect (RW)
++			case 0x8c:	//GPIOA risingEdgeDetect (RW)
++				if (write)
++					uc->port[(pa >> 2) & 3].detectRise = val;
++				else
++					val = uc->port[(pa >> 2) & 3].detectRise;
++				break;
++
++			case 0xa0:	//GPIOA fallingEdgeDetect (RW)
++			case 0xa4:	//GPIOA fallingEdgeDetect (RW)
++			case 0xa8:	//GPIOA fallingEdgeDetect (RW)
++			case 0xac:	//GPIOA fallingEdgeDetect (RW)
++				if (write)
++					uc->port[(pa >> 2) & 3].detectFall = val;
++				else
++					val = uc->port[(pa >> 2) & 3].detectFall;
++				break;
++
++			case 0xc0:	//GPIOA edgesDetected (R, w1c)
++			case 0xc4:	//GPIOB edgesDetected (R, w1c)
++			case 0xc8:	//GPIOC edgesDetected (R, w1c)
++			case 0xcc:	//GPIOD edgesDetected (R, w1c)
++				if (write) {
++					uc->port[(pa >> 2) & 3].edgesDetected &=~ val;
++					tg50ucPrvRecalcGpioIrqs(uc);
++				}
++				else
++					val = uc->port[(pa >> 2) & 3].edgesDetected;
++				break;
++
++			case 0x100:	//version query?
++				if (write)
++					handled = false;
++				else
++					val = 0x4741;	//'GA'
++				break;
++
++			case 0x120:	//GPIOA edgeDetectCausesIrq (RW)
++			case 0x124:	//GPIOB edgeDetectCausesIrq (RW)
++			case 0x128:	//GPIOC edgeDetectCausesIrq (RW)
++			case 0x12c:	//GPIOD edgeDetectCausesIrq (RW)
++				if (write) {
++					uc->port[(pa >> 2) & 3].edgesCausingIrq = val;
++					tg50ucPrvRecalcGpioIrqs(uc);
++				}
++				else
++					val = uc->port[(pa >> 2) & 3].edgesCausingIrq;
++				break;
++
++			//high-power ir things
++			case 0x180:
++			case 0x184:
++			case 0x188:
++			case 0x18c:
++			case 0x194:
++				//fallthrough
++
++			case 0x140:
++			case 0x164:
++			case 0x200:
++			case 0x204:
++			case 0x210:		//same as reset ???
++				break;
++
++			default:
++				handled = false;
++				break;
++		}
++
++		if (!write)
++			*(uint32_t*)buf = val;
++
++		if (handled) {
++
++			if (write)
++				TG50_TRACE( " * UC 0x%08lx -> [0x%08lx]\n", (unsigned long)val, (unsigned long)pa);
++			else
++				TG50_TRACE( " * UC [0x%08lx] -> 0x%08lx\n", (unsigned long)pa, (unsigned long)val);
++		}
++		else {
++
++			if (write)
++				TG50_TRACE( " * UC 0x%08lx -> [0x%08lx] FAILED\n", (unsigned long)val, (unsigned long)pa);
++			else
++				TG50_TRACE( " * UC [0x%08lx] -> (4 bytes) FAILED\n", (unsigned long)pa);
++		}
++
++		return handled;
++	}
++	else if (size == 1) {
++
++		if (pa == 0x210 && write && *(uint8_t*)buf == 0xff) {	//reset
++
++			tg50ucReset(uc);
++			TG50_TRACE( " * UC reset\n");
++			return true;
++		}
++
++		if (write)
++			TG50_TRACE( " * UC 0x%02x -> [0x%08x] FAILED\n", *(uint8_t*)buf, pa);
++		else
++			TG50_TRACE( " * UC [0x%08x] -> (1 byte) FAILED\n", pa);
++
++		return false;
++	}
++	else {
++
++		TG50_TRACE( "%s: Unexpected %s of %u bytes to 0x%08lx\n", __func__, write ? "write" : "read", size, (unsigned long)pa);
++		return false;
++	}
++
++	return true;
++}
++
++struct TG50uc* tg50ucInit(struct ArmMem *physMem, struct PxaGpio *gpio, int8_t gpioChangeIrqNo, const uint32_t *keyMap)
++{
++	struct TG50uc *uc = (struct TG50uc*)malloc(sizeof(*uc));
++	unsigned r, c;
++
++	if (!uc)
++		ERR("cannot alloc TG50's UC");
++
++	memset(uc, 0, sizeof (*uc));
++
++	uc->gpio = gpio;
++	uc->gpioChangeIrqNo = gpioChangeIrqNo;
++
++	tg50ucReset(uc);
++
++	tg50ucGpioSetInState(uc, 0, 4, true);	//hold switch off
++	tg50ucGpioSetInState(uc, 0, 13, true);	//in cradle
++	tg50ucGpioSetInState(uc, 0, 14, true);	//charging
++	tg50ucGpioSetInState(uc, 0, 15, true);	//headphones removed
++	tg50ucGpioSetInState(uc, 3, 2, true);	//revision 4 (0100)
++
++	for (r = 0; r < 8; r++) {
++		for (c = 0; c < 8; c++)
++			uc->keyVals[r][c] = *keyMap++;
++	}
++
++	if (!memRegionAdd(physMem, TG50_UC_BASE, TG50_UC_SIZE, tg50ucPrvMemAccessF, uc))
++		ERR("cannot add TG50's UC to MEM\n");
++
++	return uc;
++}
++
++void tg50ucGpioSetInState(struct TG50uc *uc, unsigned port, unsigned pin, bool hi)
++{
++	if (port >= 4 || pin >= 16) return;
++	if (hi)
++		uc->port[port].inputs |= 1 << pin;
++	else
++		uc->port[port].inputs &=~ (1 << pin);
++
++	tg50ucPrvRecalcGpioVals(uc, &uc->port[port]);
++}
++
++void tg50ucSetKeyPressed(struct TG50uc *uc, uint32_t sdlKey, bool pressed)
++{
++	bool changed = false;
++	unsigned r, c;
++
++	for (r = 0; r < 8; r++) {
++		for (c = 0; c < 8; c++) {
++			if (sdlKey && uc->keyVals[r][c] == sdlKey) {
++				if (!uc->keys[r][c] != !pressed) {
++
++					changed = true;
++					uc->keys[r][c] = pressed;
++				}
++			}
++		}
++	}
++
++	if (changed)
++		tg50ucPrvRecalcKeypadMatrix(uc);
++}
++
++void tg50ucDestroy(TG50uc *uc) { free(uc); }
++void tg50ucRefreshIrq(TG50uc *uc) { tg50ucPrvRecalcGpioIrqs(uc); }
++std::function<void()> tg50ucCaptureInput(TG50uc *uc) {
++    std::array<bool, 64> keys{};
++    for (unsigned i = 0; i < 64; ++i) keys[i] = uc->keys[i / 8][i % 8];
++    return [uc, keys] {
++        for (unsigned i = 0; i < 64; ++i) uc->keys[i / 8][i % 8] = keys[i];
++    };
++}
++
++template <typename H> static void tg50ucState(TG50uc &state, H &h) {
++    for (auto &p : state.port) { h.Do16(p.latches).Do16(p.inputs).Do16(p.direction).Do16(p.detectRise).Do16(p.detectFall).Do16(p.edgesDetected).Do16(p.edgesCausingIrq).Do16(p.curState).Do16(p.prevState); }
++    for (auto &row : state.keys) for (auto &key : row) h.DoBool(key);
++}
++template <typename T> void tg50ucSave(TG50uc *uc, T &savestate) {
++    auto *chunk = savestate.GetChunk(tg50UcChunk, 0);
++    if (!chunk) ERR("cannot allocate TG50 model state");
++    SaveChunkHelper h(*chunk);
++    tg50ucState(*uc, h);
++}
++template <typename T> bool tg50ucLoad(TG50uc *uc, T &loader, bool preserveInput) {
++    auto *chunk = loader.GetChunkOrFail(tg50UcChunk, 0, "TG50 tg50uc");
++    if (!chunk) return false;
++    auto next = *uc;
++    LoadChunkHelper h(*chunk);
++    tg50ucState(next, h);
++    if (chunk->HasError()) { loader.NotifyError(); return false; }
++    // Host input is restored separately before rollback loading.
++    if (preserveInput) memcpy(next.keys, uc->keys, sizeof(next.keys));
++    else memset(next.keys, 0, sizeof(next.keys));
++    *uc = next;
++    if (!preserveInput) {
++        auto &port = uc->port[2];
++        port.inputs = tg50ucPrvMatrixInputs(uc);
++        port.prevState = port.curState = (port.latches & port.direction) | (port.inputs & ~port.direction);
++    }
++    // Board refreshes output pins after GPIO, IC and all models have loaded.
++    return true;
++}
++template void tg50ucSave<Savestate<ChunkType>>(TG50uc*, Savestate<ChunkType>&);
++template void tg50ucSave<SavestateProbe<ChunkType>>(TG50uc*, SavestateProbe<ChunkType>&);
++template bool tg50ucLoad<SavestateLoader<ChunkType>>(TG50uc*, SavestateLoader<ChunkType>&, bool);
+--- /dev/null
++++ b/src/uarm/uarm/mmiodev_TG50uc.h
+@@ -0,0 +1,27 @@
++//(c) uARM project    https://github.com/uARM-Palm/uARM    uARM@dmitry.gr
++
++#ifndef _MMIO_TG50_UC_H_
++#define _MMIO_TG50_UC_H_
++
++
++#include <functional>
++#include "pxa_GPIO.h"
++#include "mem.h"
++
++struct TG50uc;
++
++
++struct TG50uc* tg50ucInit(struct ArmMem *physMem, struct PxaGpio *gpio, int8_t gpioChangeIrqNo, const uint32_t *keyMap);
++void tg50ucGpioSetInState(struct TG50uc* uc, unsigned port, unsigned pin, bool hi);
++void tg50ucSetKeyPressed(struct TG50uc* uc, uint32_t sdlKey, bool pressed);
++
++
++
++void tg50ucReset(TG50uc *);
++// Destroy only after the owning SoC can no longer dispatch its bus callbacks.
++void tg50ucDestroy(TG50uc *);
++template <typename T> void tg50ucSave(TG50uc *, T &);
++template <typename T> bool tg50ucLoad(TG50uc *, T &, bool preserveInput = false);
++void tg50ucRefreshIrq(TG50uc *);
++std::function<void()> tg50ucCaptureInput(TG50uc *);
++#endif
+--- a/src/uarm/uarm/pxa_I2C.cpp
++++ b/src/uarm/uarm/pxa_I2C.cpp
+@@ -58,6 +58,16 @@
+         return true;
+     }
+ 
++    return false;
++}
++
++bool pxaI2cDeviceRemove(struct PxaI2c *i2c, void *userData) {
++    if (!userData) return false;
++    for (auto &device : i2c->devs) {
++        if (!device.actF || device.userData != userData) continue;
++        device = {};
++        return true;
++    }
+     return false;
+ }
+ 
+--- a/src/uarm/uarm/pxa_I2C.h
++++ b/src/uarm/uarm/pxa_I2C.h
+@@ -21,6 +21,8 @@
+ struct PxaI2c *pxaI2cInit(struct ArmMem *physMem, struct PxaIc *ic, struct PxaDma *dma,
+                           uint32_t base, uint32_t irqNo);
+ bool pxaI2cDeviceAdd(struct PxaI2c *i2c, I2cDeviceActionF actF, void *userData);
++// Quiesced bus only, not from inside a device action.
++bool pxaI2cDeviceRemove(struct PxaI2c *i2c, void *userData);
+ 
+ template <typename T>
+ void pxaI2cSave(struct PxaI2c *i2c, T &savestate, uint32_t index = 0);
+--- a/src/uarm/uarm/pxa_SSP.cpp
++++ b/src/uarm/uarm/pxa_SSP.cpp
+@@ -226,6 +226,17 @@
+     return false;
+ }
+ 
++bool pxaSspRemoveClient(struct PxaSsp *ssp, void *userData) {
++    if (!userData) return false;
++    for (unsigned i = 0; i < sizeof(ssp->procF) / sizeof(*ssp->procF); ++i) {
++        if (!ssp->procF[i] || ssp->procD[i] != userData) continue;
++        ssp->procF[i] = nullptr;
++        ssp->procD[i] = nullptr;
++        return true;
++    }
++    return false;
++}
++
+ bool pxaSspTaskRequired(struct PxaSsp *ssp) { return ssp->sr & 0x10; }
+ 
+ template <typename T>
+--- a/src/uarm/uarm/pxa_SSP.h
++++ b/src/uarm/uarm/pxa_SSP.h
+@@ -35,6 +35,8 @@
+                           uint_fast8_t dmaReqNoBase);
+ void pxaSspPeriodic(struct PxaSsp* ssp);
+ bool pxaSspAddClient(struct PxaSsp* ssp, SspClientProcF procF, void* userData);
++// Quiesced bus only, not from inside a client callback.
++bool pxaSspRemoveClient(struct PxaSsp* ssp, void* userData);
+ 
+ bool pxaSspTaskRequired(struct PxaSsp* ssp);
+ 
+--- a/src/uarm/uarm/savestate/ChunkTypeUarm.h
++++ b/src/uarm/uarm/savestate/ChunkTypeUarm.h
+@@ -29,6 +29,12 @@
+     pxa270udc = 0x0180,
+     pxa270wmmx = 0x0190,
+     palmTx = 0x01a0,
++    sonyTg50Uc = 0x01b0,
++    sonyTg50Touch = 0x01c0,
++    sonyTg50Codec = 0x01d0,
++    sonyTg50Power = 0x01e0,
++    sonyTg50Ms = 0x01f0,
++    sonyTg50Board = 0x0200,
+ 
+     pvIc = 0x1000,
+     pvTimer = 0x1010,
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -48,10 +48,12 @@
+ #include "reschedule.h"
+ #include "rom_info5.h"
+ #include "syscall_dispatch.h"
++#include "deviceSonyTG50.h"
+ #include "audio_queue.h"
+ 
+ #define SAVESTATE_VERSION 2
+ 
++#define CPUID_PXA250 0x69052902ul
+ #define CPUID_PXA255 0x69052D06ul  // spepping A0
+ #define CPUID_PXA260 0x69052D06ul  // spepping B1
+ #define CPUID_PXA270 0x69054114ul  // stepping C0
+@@ -82,13 +84,16 @@
+         ERR("unsupported RAM size %u\n", ramSize);
+ 
+     this->ramSize = ramSize;
++    // TG50 has 16 MiB fitted; uARM uses 17 MiB of backing for its RAM probe.
++    ramBackingSize = deviceType == deviceTypeTG50 ? tg50RamBackingSize : ramSize;
+     this->ramBase = RAM_BASE;
+ 
+     AllocateBuffers();
+     SetupScheduler();
+ 
+     cpu = cpuInit(ROM_BASE, mem, ARM_MEMORY_SYSTEM_MMU, true /* xscale */, false /* omap */,
+-                  gdbPort, socRev ? ((socRev == 1) ? CPUID_PXA260 : CPUID_PXA270) : CPUID_PXA255,
++                  gdbPort, deviceType == deviceTypeTG50 ? CPUID_PXA250
++                      : socRev ? ((socRev == 1) ? CPUID_PXA260 : CPUID_PXA270) : CPUID_PXA255,
+                   0x0B16A16AUL, patchDispatch, pacePatch, systemState);
+ 
+ #ifndef __EMSCRIPTEN__
+@@ -102,24 +107,24 @@
+     // The E2 sleeps through the PXA25x power manager below, so it keeps SysSleep and
+     // auto-off; the patched FrankenE2 ROM keeps the inherited no-sleep patch.
+     // The Zire 72's 5.2.8 ROM runs unpatched, like the TX.
+-    if (deviceType != DeviceType5::deviceTypeTX && deviceType != DeviceType5::deviceTypeZire72)
++    if (deviceType != deviceTypeTG50 && deviceType != DeviceType5::deviceTypeTX && deviceType != DeviceType5::deviceTypeZire72)
+         patchContext = registerPatches(patchDispatch, syscallDispatch, cpu, systemState,
+             deviceType == DeviceType5::deviceTypeE2 ? PATCH_FEATURE_ALL & ~PATCH_FEATURE_NO_SLEEP
+                                                      : PATCH_FEATURE_ALL);
+ 
+-    ram = ramInit(mem, this, RAM_BASE, ramSize, &bufferMemory, true);
++    ram = ramInit(mem, this, RAM_BASE, ramBackingSize, &bufferMemory, true);
+     rom = romInit(mem, ROM_BASE, romData, romSize);
+ 
+     void *peepholeBuffer = romGetPeepholeBuffer(rom);
+ 
+-    if (deviceType != DeviceType5::deviceTypeTX && deviceType != DeviceType5::deviceTypeZire72) {
++    if (deviceType != deviceTypeTG50 && deviceType != DeviceType5::deviceTypeTX && deviceType != DeviceType5::deviceTypeZire72) {
+         pacePatchInit(pacePatch, ROM_BASE, peepholeBuffer, romSize);
+         peepholeOptimize((uint32_t *)peepholeBuffer, romSize);
+     }
+     // The Zire's 5.2.8 PACE has the E2's layout. Patched from boot, 68k code runs natively and
+     // host tools (install, launch, export) can call into Palm OS from the first app event.
+     if (deviceType == DeviceType5::deviceTypeZire72) pacePatchInit(pacePatch, ROM_BASE, peepholeBuffer, romSize);
+-    patch68kInit(deviceType != DeviceType5::deviceTypeTX && romInfo.NeedsNandPatch()
++    patch68kInit(deviceType != deviceTypeTG50 && deviceType != DeviceType5::deviceTypeTX && romInfo.NeedsNandPatch()
+                      ? PATCH_68K_NVFS : 0);
+ 
+     vSD = vsdInit(sdCardRead, sdCardWrite, 0);
+@@ -128,7 +133,7 @@
+         case RamTerminationMirror:
+ 
+             // ram mirror for ram probe code
+-            ramMirror = ramInit(mem, this, RAM_BASE + ramSize, ramSize, &bufferMemory, false);
++            ramMirror = ramInit(mem, this, RAM_BASE + ramBackingSize, ramBackingSize, &bufferMemory, false);
+             break;
+ 
+         case RamTerminationWriteIgnore:
+@@ -239,7 +244,7 @@
+     mmc = pxaMmcInit(mem, ic, dma, socRev == 2);
+ 
+     displayConfiguration =
+-        deviceConfigurationDisplayConfigForMode(deviceConfigurationDefaultDisplayMode(deviceType));
++        deviceConfigurationDisplayConfigForDevice(deviceType, deviceConfigurationDefaultDisplayMode(deviceType));
+ 
+     lcd = pxaLcdInit(mem, this, ic, &bufferLcd, displayConfiguration.width,
+                      displayConfiguration.height);
+@@ -607,14 +612,15 @@
+     keypadKeyEvt(kp, key, down);
+ }
+ 
+-void SocPXA::OnBeforeReset() { resetRtc = pxaRtcRetained(rtc); }
++void SocPXA::OnBeforeReset() { resetRtc = pxaRtcRetained(rtc); deviceBeginReset(dev); }
+ 
+ void SocPXA::OnReset() {
++    deviceEndReset(dev);
+     pxaLcdResetPaletteBuffer(lcd);
+     if (nand) nandResetPageBuffer(nand);
+-    // The Zire keeps its store in RAM, so its reset is the reset pin's GPIO reset; on a
+-    // power-on cause its small ROM marks the store invalid. The RTC keeps running either way.
+-    if (GetDeviceType() == DeviceType5::deviceTypeZire72) {
++    // RAM-backed stores retain their reset-pin cause and running RTC. A power-on
++    // cause lets the small ROM invalidate the store on boards that request it.
++    if (GetDeviceType() == deviceTypeZire72 || GetDeviceType() == deviceTypeTG50) {
+         pxaPwrClkSetResetCause(pwrClk, powerOnReset ? 1 : 8);
+         pxaRtcRestoreRetained(rtc, resetRtc);
+     }
+@@ -786,12 +792,12 @@
+ }
+ 
+ void SocPXA::AllocateBuffers() {
+-    size_t memoryBufferSize = ramSize + 2 * MEMORY_BUFFER_GRANULARITY;
++    size_t memoryBufferSize = ramBackingSize + 2 * MEMORY_BUFFER_GRANULARITY;
+     if (socRev == 2) memoryBufferSize += SRAM_SIZE;
+ 
+     bool success = memoryBufferAllocate(&bufferMemory, memoryBufferSize);
+ 
+-    size_t offset = ramSize;
++    size_t offset = ramBackingSize;
+ 
+     success = success && memoryBufferGetSubBuffer(&bufferMemory, &bufferNand, offset,
+                                                   MEMORY_BUFFER_GRANULARITY);
+@@ -1167,7 +1173,11 @@
+ 
+ bool SocPXA::SetBluetooth(const std::string& path,std::string& error) {return deviceSetBluetooth(dev,path,error);}
+ std::string SocPXA::BluetoothState() {return deviceBluetoothState(dev);}
+-SocPXA::~SocPXA() { deviceStopBluetooth(dev);cpuSetEarlyAudioHook(cpu,nullptr,nullptr,0,0); }
++SocPXA::~SocPXA() {
++    deviceStopBluetooth(dev);
++    cpuSetEarlyAudioHook(cpu,nullptr,nullptr,0,0);
++    deviceDestroy(dev);
++}
+ 
+ void SocPXA::RestoreFastAudioRoute() {
+     fastAudioRouted=fastAudio && fastAudio->Bypass();
+--- a/src/uarm/uarm/soc_PXA.h
++++ b/src/uarm/uarm/soc_PXA.h
+@@ -168,6 +168,7 @@
+     void UpdateFastAudioRoute();
+     std::unique_ptr<FastAudio> fastAudio;
+     bool fastAudioRouted{false};
++    uint32_t ramBackingSize{0};
+     void AllocateBuffers();
+     void SetupScheduler();
+     void SchedulePcmTask();
+--- /dev/null
++++ b/src/uarm/uarm/sspdev_AD7873.cpp
+@@ -0,0 +1,164 @@
++//(c) uARM project    https://github.com/uARM-Palm/uARM    uARM@dmitry.gr
++
++#include "sspdev_AD7873.h"
++#include <string.h>
++#include <stdlib.h>
++#include "cputil.h"
++#include "Tg50Chunks.h"
++#include "Tg50Trace.h"
++#include "savestate/savestateAll.h"
++
++
++
++struct Ad7873 {
++
++	struct PxaGpio *gpio;
++	int8_t penIntGpio;
++
++	uint16_t prevVal;
++
++	bool penDown;
++	int16_t penX, penY;
++
++	uint16_t vBattAdcVal, vAuxAdcVal;
++};
++
++
++
++static uint_fast16_t ad7873prvSspClientProc(void* userData, uint_fast8_t nBits, uint_fast16_t got)
++{
++	struct Ad7873 *ad = (struct Ad7873*)userData;
++	uint16_t ret = ad->prevVal;
++
++
++	//sometimes frame gpio is gpio, sometimes frame. in this system we act like we're always selected
++	if (nBits != 12) {
++		TG50_TRACE( "expecting 12-bit format!\n");
++		return 0;
++	}
++
++	switch (got) {
++
++		case 0x93:	//X+
++			ad->prevVal = ad->penX;
++			break;
++
++		case 0xA6:	//Vbatt
++			ad->prevVal = ad->vBattAdcVal;
++			break;
++
++		case 0xB8:	//Z1
++			ad->prevVal = ad->penDown ? 0x7ff : 0x0000;
++			break;
++
++		case 0xE6:	//AUX (PD0 = 0)	(not sure how these differ)
++		case 0xE7:	//AUX (PD0 = 1)
++			ad->prevVal = ad->vAuxAdcVal;
++			break;
++
++		case 0xD3:	//Y+
++		case 0xD0:
++			ad->prevVal = ad->penY;
++			break;
++
++		default:
++			TG50_TRACE( "AD7873: not sure how to deal with command 0x%04x\n", (unsigned)got);
++			ad->prevVal = 0;
++			break;
++	}
++
++	return ret;
++}
++
++void ad7873Reset(Ad7873 *ad) {
++    ad->prevVal = 0;
++    ad->penDown = false;
++    ad->penX = ad->penY = -1;
++    ad->vBattAdcVal = ad->vAuxAdcVal = 0;
++    ad7873Periodic(ad);
++}
++
++struct Ad7873* ad7873Init(struct PxaSsp* ssp, struct PxaGpio* gpio, int8_t penIntGpio /* negative for none */)
++{
++	struct Ad7873 *ad = (struct Ad7873*)malloc(sizeof(*ad));
++
++	if (!ad)
++		ERR("cannot alloc AD7873");
++
++	memset(ad, 0, sizeof (*ad));
++
++	ad->gpio = gpio;
++	ad->penIntGpio = penIntGpio;
++    ad7873Reset(ad);
++
++	//connect to the SSP
++	if (!pxaSspAddClient(ssp, ad7873prvSspClientProc, ad))
++		ERR("cannot add AD7873 to SSP\n");
++
++	return ad;
++}
++
++void ad7873Periodic(struct Ad7873 *ad)
++{
++	if (ad->penIntGpio >= 0)
++		pxaGpioSetState(ad->gpio, ad->penIntGpio, !ad->penDown);
++}
++
++void ad7873PenInput(struct Ad7873 *ad, int16_t x, int16_t y)
++{
++	ad->penDown = x >= 0 && y >= 0;
++
++	if (ad->penDown) {
++		ad->penY = x;		//yes they are cross-wired in the TG50
++		ad->penX = y;
++	}
++	else {
++		ad->penX = -1;
++		ad->penY = -1;
++	}
++}
++
++void ad7873setVbatt(struct Ad7873 *ad, uint16_t mV)	//Vref is 2.5V
++{
++	ad->vBattAdcVal = (mV / 4) * 4096 / 2500;
++}
++
++void ad7873setVaux(struct Ad7873 *ad, uint16_t mV)
++{
++	ad->vAuxAdcVal = mV * 4096 / 2500;
++}
++
++
++void ad7873Destroy(Ad7873 *ad) { free(ad); }
++std::function<void()> ad7873CaptureInput(Ad7873 *ad) {
++    const auto down = ad->penDown;
++    const auto x = ad->penX, y = ad->penY;
++    return [ad, down, x, y] { ad->penDown = down; ad->penX = x; ad->penY = y; };
++}
++
++template <typename H> static void ad7873State(Ad7873 &state, H &h) {
++    h.Do16(state.prevVal).DoBool(state.penDown).Do16(state.penX).Do16(state.penY).Do16(state.vBattAdcVal).Do16(state.vAuxAdcVal);
++}
++template <typename T> void ad7873Save(Ad7873 *ad, T &savestate) {
++    auto *chunk = savestate.GetChunk(tg50TouchChunk, 0);
++    if (!chunk) ERR("cannot allocate TG50 model state");
++    SaveChunkHelper h(*chunk);
++    ad7873State(*ad, h);
++}
++template <typename T> bool ad7873Load(Ad7873 *ad, T &loader, bool preserveInput) {
++    auto *chunk = loader.GetChunkOrFail(tg50TouchChunk, 0, "TG50 ad7873");
++    if (!chunk) return false;
++    auto next = *ad;
++    LoadChunkHelper h(*chunk);
++    ad7873State(next, h);
++    if (chunk->HasError()) { loader.NotifyError(); return false; }
++    if (preserveInput) {
++        next.penDown = ad->penDown; next.penX = ad->penX; next.penY = ad->penY;
++    } else { next.penDown = false; next.penX = next.penY = -1; }
++    *ad = next;
++    // Board refreshes output pins after GPIO, IC and all models have loaded.
++    return true;
++}
++template void ad7873Save<Savestate<ChunkType>>(Ad7873*, Savestate<ChunkType>&);
++template void ad7873Save<SavestateProbe<ChunkType>>(Ad7873*, SavestateProbe<ChunkType>&);
++template bool ad7873Load<SavestateLoader<ChunkType>>(Ad7873*, SavestateLoader<ChunkType>&, bool);
+--- /dev/null
++++ b/src/uarm/uarm/sspdev_AD7873.h
+@@ -0,0 +1,34 @@
++//(c) uARM project    https://github.com/uARM-Palm/uARM    uARM@dmitry.gr
++
++#ifndef _AD7873_H_
++#define _AD7873_H_
++
++#include <functional>
++#include <stdbool.h>
++#include <stdint.h>
++
++#include "pxa_SSP.h"
++#include "pxa_GPIO.h"
++
++struct Ad7873;
++
++
++
++struct Ad7873* ad7873Init(struct PxaSsp* ssp, struct PxaGpio* gpio, int8_t penIntGpio /* negative for none */);
++void ad7873Periodic(struct Ad7873 *ad);
++
++//external
++void ad7873PenInput(struct Ad7873 *ad, int16_t x, int16_t y);	//negative for pen up
++
++void ad7873setVbatt(struct Ad7873 *ad, uint16_t mV);
++void ad7873setVaux(struct Ad7873 *ad, uint16_t mV);
++
++
++
++void ad7873Reset(Ad7873 *);
++// Destroy only after the owning SoC can no longer dispatch its bus callbacks.
++void ad7873Destroy(Ad7873 *);
++template <typename T> void ad7873Save(Ad7873 *, T &);
++template <typename T> bool ad7873Load(Ad7873 *, T &, bool preserveInput = false);
++std::function<void()> ad7873CaptureInput(Ad7873 *);
++#endif

@@ -6,6 +6,9 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QList>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QSaveFile>
 #include <QLockFile>
 #include <QString>
 #include <algorithm>
@@ -18,6 +21,34 @@
 // the file name, so renaming a session renames the file.
 namespace frondSessions {
 constexpr quint32 magic = 0x19800819, newestVersion = 6, firstNamedVersion = 6;
+
+// Host preferences stay beside the guest file, including before its first save.
+struct Preferences {
+    int scale{4};  // quarter steps
+    bool smooth{false}, audio{true}, fastAudio{false};
+};
+inline QString preferencesPath(const QString& path) { return path + ".settings.json"; }
+inline bool readPreferences(const QString& path, Preferences* result) {
+    QFile file(preferencesPath(path));
+    if (!file.open(QIODevice::ReadOnly)) return false;
+    const auto object = QJsonDocument::fromJson(file.readAll()).object();
+    if (object.value("version").toInt() != 1 || !object.value("scale").isDouble() ||
+        !object.value("smooth").isBool() || !object.value("audio").isBool() || !object.value("fastAudio").isBool()) return false;
+    const auto scale = object.value("scale").toInt();
+    if (scale < 4 || scale > 8) return false;
+    *result = {scale, object.value("smooth").toBool(), object.value("audio").toBool(), object.value("fastAudio").toBool()};
+    return true;
+}
+// The caller holds the session lock, or has just reserved a new machine.
+inline QString writePreferences(const QString& path, const Preferences& prefs) {
+    QSaveFile file(preferencesPath(path));
+    const QJsonObject object{{"version", 1}, {"scale", std::clamp(prefs.scale, 4, 8)},
+                             {"smooth", prefs.smooth}, {"audio", prefs.audio}, {"fastAudio", prefs.fastAudio}};
+    const auto bytes = QJsonDocument(object).toJson(QJsonDocument::Compact);
+    if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit())
+        return QStringLiteral("Couldn't save the machine settings.");
+    return {};
+}
 
 struct Header {
     bool readable{false};
@@ -78,7 +109,7 @@ inline QString filePath(const QString& folder, const QString& name) { return fol
 inline QString markerPath(const QString& path) { return path + ".new"; }
 inline bool taken(const QString& folder, const QString& name) {
     const auto path = filePath(folder, name);
-    return QFileInfo::exists(path) || QFileInfo::exists(markerPath(path));
+    return QFileInfo::exists(path) || QFileInfo::exists(markerPath(path)) || QFileInfo::exists(preferencesPath(path));
 }
 
 // "Palm TX", then "Palm TX 2" and so on.
@@ -164,11 +195,18 @@ inline QString rename(const QString& folder, const Info& info, const QString& wa
     lock.setStaleLockTime(0);
     if (!lock.tryLock()) return QStringLiteral("This session is open in another Frond.");
     const auto target = filePath(folder, name);
+    QLockFile targetLock(target + ".lock"); targetLock.setStaleLockTime(0);
+    if (!targetLock.tryLock()) return QStringLiteral("This session is open in another Frond.");
     const bool hasFile = QFileInfo::exists(info.path), hasMarker = QFileInfo::exists(markerPath(info.path));
     if (hasFile && !QFile::rename(info.path, target)) return QStringLiteral("Couldn't rename the session.");
     if (hasMarker && !QFile::rename(markerPath(info.path), markerPath(target))) {
         if (hasFile) QFile::rename(target, info.path);
         return QStringLiteral("Couldn't rename the session.");
+    }
+    if (QFileInfo::exists(preferencesPath(info.path)) && !QFile::rename(preferencesPath(info.path), preferencesPath(target))) {
+        if (hasMarker) QFile::rename(markerPath(target), markerPath(info.path));
+        if (hasFile) QFile::rename(target, info.path);
+        return QStringLiteral("Couldn't rename the machine settings.");
     }
     return {};
 }
@@ -177,7 +215,7 @@ inline QString remove(const Info& info) {
     QLockFile lock(info.path + ".lock");
     lock.setStaleLockTime(0);
     if (!lock.tryLock()) return QStringLiteral("This session is open in another Frond.");
-    for (const auto& path : {info.path, markerPath(info.path)})
+    for (const auto& path : {info.path, markerPath(info.path), preferencesPath(info.path)})
         if (QFileInfo::exists(path) && !QFile::remove(path)) return QStringLiteral("Couldn't delete the session.");
     return {};  // the lock file goes when 'lock' unlocks
 }
@@ -202,6 +240,12 @@ inline QString importFile(const QString& folder, const QString& from, QString* n
     QFile::remove(target + ".part");
     if (!QFile::copy(from, target + ".part")) return fail();
     if (!QFile::rename(target + ".part", target)) return fail();
+    Preferences prefs;
+    if (readPreferences(from, &prefs)) {
+        if (const auto error = writePreferences(target, prefs); !error.isEmpty()) {
+            QFile::remove(target); return fail();
+        }
+    }
     QFile::remove(markerPath(target));
     if (newName) *newName = name;
     return {};
@@ -216,12 +260,18 @@ inline QString exportFile(const Info& info, const QString& to) {
     if (target.exists() && target.canonicalFilePath() == source) return QStringLiteral("That is the session itself.");
     if (target.suffix() == "frond" && QFileInfo::exists(to + ".lock") && inUse(to))
         return QStringLiteral("That session is open in another Frond.");
+    QLockFile targetLock(to + ".lock"); targetLock.setStaleLockTime(0);
+    if (!targetLock.tryLock()) return QStringLiteral("That session is open in another Frond.");
     const auto part = to + ".part";
     QFile::remove(part);
     if (!QFile::copy(info.path, part)) { QFile::remove(part); return QStringLiteral("Couldn't export the session."); }
     std::error_code error;
     std::filesystem::rename(part.toStdString(), to.toStdString(), error);  // replaces the target in one step
     if (error) { QFile::remove(part); return QStringLiteral("Couldn't export the session."); }
+    Preferences prefs;
+    if (readPreferences(info.path, &prefs)) return writePreferences(to, prefs);
+    if (QFileInfo::exists(preferencesPath(to)) && !QFile::remove(preferencesPath(to)))
+        return QStringLiteral("Couldn't remove the old machine settings.");
     return {};
 }
 }

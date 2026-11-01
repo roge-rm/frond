@@ -1,0 +1,600 @@
+--- a/src/common/device_profile5.h
++++ b/src/common/device_profile5.h
+@@ -39,6 +39,7 @@
+     const char* launcher{""}; // Frame predicate in tools/palm_boot.py.
+     DeviceStorageSlot5 storageSlot{DeviceStorageSlot5::none};
+     int homeKey{0}; // SDL keycode for a physical Home button.
++    bool holdPresent{false}, holdSupported{false};
+ };
+ 
+ struct DeviceProfile5 {
+@@ -112,7 +113,7 @@
+      0xc70000, 0, 16u << 20, 16u << 20, DisplayMode::mode_320x320, 1u << 5, false,
+      DeviceNorLayout5::smallAndBigCards, 0, 0x20000, false, 0, 0,
+      {false, "tg50", 320, 320, 0, 0, "", "", -1, -1, -1, -1, false, false, false, "", "tg50-clie",
+-      DeviceStorageSlot5::memoryStick, 1073741887}},
++      DeviceStorageSlot5::memoryStick, 1073741887, true, true}},
+     // Reserved names: art only, no board yet.
+     {deviceTypeInvalid, "palm-iiix", "Palm IIIx", DeviceCohort5::reserved, DeviceSupport5::reserved,
+      DeviceDetect5::none, 0, 0, DeviceBoard5::none, DeviceArt::iiix, {},
+--- /dev/null
++++ b/src/uarm/native/BuiltInKeyboardMapping.h
+@@ -0,0 +1,53 @@
++#ifndef FROND_BUILT_IN_KEYBOARD_MAPPING_H
++#define FROND_BUILT_IN_KEYBOARD_MAPPING_H
++#include "DeviceControls.h"
++
++inline KeyId builtInKeyboardKey(const DeviceControlProfile& profile, SDL_Scancode scan) {
++    if (profile.style != DeviceControlStyle::tg50) return keyInvalid;
++    switch (scan) {
++        case SDL_SCANCODE_CAPSLOCK: return tg50Key(2,0);
++        case SDL_SCANCODE_TAB: return tg50Key(3,0);
++        case SDL_SCANCODE_LSHIFT: case SDL_SCANCODE_RSHIFT: return tg50Key(4,0);
++        case SDL_SCANCODE_LCTRL: case SDL_SCANCODE_RCTRL: return tg50Key(5,0);
++        case SDL_SCANCODE_LALT: return tg50Key(6,0);
++        case SDL_SCANCODE_RALT: return tg50Key(7,0);
++        case SDL_SCANCODE_Q: return tg50Key(2,1);
++        case SDL_SCANCODE_W: return tg50Key(2,2);
++        case SDL_SCANCODE_E: return tg50Key(2,3);
++        case SDL_SCANCODE_R: return tg50Key(2,4);
++        case SDL_SCANCODE_T: return tg50Key(2,5);
++        case SDL_SCANCODE_Y: return tg50Key(3,1);
++        case SDL_SCANCODE_U: return tg50Key(3,2);
++        case SDL_SCANCODE_I: return tg50Key(3,3);
++        case SDL_SCANCODE_O: return tg50Key(3,4);
++        case SDL_SCANCODE_P: return tg50Key(3,5);
++        case SDL_SCANCODE_A: return tg50Key(4,1);
++        case SDL_SCANCODE_S: return tg50Key(4,2);
++        case SDL_SCANCODE_D: return tg50Key(4,3);
++        case SDL_SCANCODE_F: return tg50Key(4,4);
++        case SDL_SCANCODE_G: return tg50Key(4,5);
++        case SDL_SCANCODE_H: return tg50Key(2,6);
++        case SDL_SCANCODE_J: return tg50Key(3,6);
++        case SDL_SCANCODE_K: return tg50Key(4,6);
++        case SDL_SCANCODE_L: return tg50Key(5,6);
++        case SDL_SCANCODE_Z: return tg50Key(5,1);
++        case SDL_SCANCODE_X: return tg50Key(5,2);
++        case SDL_SCANCODE_C: return tg50Key(5,3);
++        case SDL_SCANCODE_V: return tg50Key(5,4);
++        case SDL_SCANCODE_B: return tg50Key(5,5);
++        case SDL_SCANCODE_N: return tg50Key(6,1);
++        case SDL_SCANCODE_M: return tg50Key(6,2);
++        case SDL_SCANCODE_SPACE: return tg50Key(7,1);
++        case SDL_SCANCODE_MINUS: return tg50Key(7,2);
++        case SDL_SCANCODE_COMMA: return tg50Key(6,3);
++        case SDL_SCANCODE_PERIOD: return tg50Key(6,4);
++        case SDL_SCANCODE_UP: return tg50Key(6,5);
++        case SDL_SCANCODE_DOWN: return tg50Key(6,6);
++        case SDL_SCANCODE_LEFT: return tg50Key(7,3);
++        case SDL_SCANCODE_RIGHT: return tg50Key(7,4);
++        case SDL_SCANCODE_RETURN: case SDL_SCANCODE_KP_ENTER: return tg50Key(7,5);
++        case SDL_SCANCODE_BACKSPACE: return tg50Key(7,6);
++        default: return keyInvalid;
++    }
++}
++#endif
+--- a/src/uarm/native/Commands.cpp
++++ b/src/uarm/native/Commands.cpp
+@@ -110,6 +110,19 @@
+         memcpy(owned, data.get(), len);
+         sdCardInitializeWithData(len / SD_SECTOR_SIZE, owned, key.c_str());
+         ctx->soc->SdInsert();
++    }
++
++    void CmdHoldState(vector<string> args, cli::CommandEnvironment& env, void* context) {
++        if (!args.empty()) return env.PrintUsage();
++        auto *soc = reinterpret_cast<commands::Context*>(context)->soc;
++        cout << "hold: " << (!soc->HoldSwitchSupported() ? "unavailable" :
++                            soc->HoldSwitchOn() ? "on" : "off") << endl;
++    }
++    void CmdHold(vector<string> args, cli::CommandEnvironment& env, void* context) {
++        if (args.size() != 1 || (args[0] != "on" && args[0] != "off")) return env.PrintUsage();
++        auto *soc = reinterpret_cast<commands::Context*>(context)->soc;
++        if (!soc->SetHoldSwitch(args[0] == "on")) cout << "Hold is unavailable for this device" << endl;
++        else cout << "hold: " << (soc->HoldSwitchOn() ? "on" : "off") << endl;
+     }
+ 
+     void CmdReset(vector<string> args, cli::CommandEnvironment& env, void* context) {
+@@ -445,6 +458,8 @@
+           .usage = "save-nand <new NAND image>",
+           .description = "Export the current raw NAND, including spare bytes.",
+           .cmd = CmdSaveNand},
++         {.name = "hold-state", .description = "Show the Hold switch.", .cmd = CmdHoldState},
++         {.name = "hold", .usage = "hold <on|off>", .description = "Set the Hold switch.", .cmd = CmdHold},
+          {.name = "audio-on", .description = "Enable audio.", .cmd = CmdEnableAudio},
+          {.name = "audio-off", .description = "Disable audio.", .cmd = CmdDisableAudio},
+          {.name = "unmount", .description = "Unmount SD card.", .cmd = CmdUnmount},
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -223,7 +223,7 @@
+     Reply dispatch(commands::Context& ctx, const std::string& command, const std::string& path) {
+         const bool fileCommand = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "input-replay";
+         if (fileCommand && (path.empty() || path.front() != '/')) return {false, "argument", "An absolute file path is required."};
+-        if (!fileCommand && command != "sd-create" && command != "launch-app" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "bluetooth-mode" && command != "sound-mode" && !path.empty()) return {false, "argument", "This command takes no argument."};
++        if (!fileCommand && command != "sd-create" && command != "launch-app" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "bluetooth-mode" && command != "sound-mode" && command != "hold" && !path.empty()) return {false, "argument", "This command takes no argument."};
+         if (command == "guest-ready") {
+             if (!GuestDatabaseOps::Ready(*ctx.soc))
+                 return {false, "not-ready", "Palm OS has not reached a supported application boundary."};
+@@ -289,6 +289,15 @@
+             const bool ok=ctx.infrared->Start(static_cast<SocPXA*>(ctx.soc),config,ctx.infraredError);
+             return {ok,"infrared",ok?ctx.infrared->Describe():ctx.infraredError};
+         }
++        if (command == "hold-state")
++            return {true, "hold", !ctx.soc->HoldSwitchSupported() ? "unavailable" :
++                    ctx.soc->HoldSwitchOn() ? "on" : "off"};
++        if (command == "hold") {
++            if (path != "on" && path != "off") return {false, "argument", "Use on or off."};
++            if (!ctx.soc->SetHoldSwitch(path == "on"))
++                return {false, "unsupported", "This device has no supported Hold switch."};
++            return {true, "hold", ctx.soc->HoldSwitchOn() ? "on" : "off"};
++        }
+         if (command == "keyboard-state") return {true,"keyboard",ctx.soc->KeyboardAttached()?"attached":"detached"};
+         if (command == "keyboard-attach") {
+             if (path!="on" && path!="off") return {false,"argument","Use on or off."};
+--- a/src/uarm/native/SdlEventHandler.cpp
++++ b/src/uarm/native/SdlEventHandler.cpp
+@@ -3,9 +3,11 @@
+ #include <SDL.h>
+ 
+ #include <cmath>
++#include <algorithm>
+ 
+ #include "keys.h"
+ #include "IrKeyboardMapping.h"
++#include "BuiltInKeyboardMapping.h"
+ 
+ namespace {
+     enum KeyId mapKey(SDL_Keycode keysym) {
+@@ -80,8 +82,16 @@
+                 quitRequested = true;
+                 break;
+ 
++            case SDL_FINGERDOWN:
++            case SDL_FINGERMOTION:
++            case SDL_FINGERUP:
++                if (controls.style == DeviceControlStyle::tg50) HandleFinger(event.tfinger);
++                break;
++
+             case SDL_MOUSEBUTTONDOWN:
++                if (controls.style == DeviceControlStyle::tg50 && event.button.which == SDL_TOUCH_MOUSEID) break;
+                 if (event.button.button != SDL_BUTTON_LEFT) break;
++                if (std::any_of(fingers.begin(), fingers.end(), [](const Finger& f) { return f.active && f.pen; })) break;
+                 MapPointer(event.button.x, event.button.y);
+                 ReleasePointer();
+                 if (OnScreen(event.button.x,event.button.y)) {
+@@ -91,7 +101,7 @@
+                 } else if (event.button.x>=0 && event.button.y>=0) {
+                     pointerKey=deviceControlAt(controls,ScreenWidth(),ScreenHeight(),
+                                                 int((event.button.x + 0.5f)/scale),int((event.button.y + 0.5f)/scale));
+-                    if (pointerKey && !hardKeys[pointerKey]) soc->KeyDown(pointerKey);
++                    if (pointerKey && !hardKeys[pointerKey] && !builtInHolds[pointerKey]) soc->KeyDown(pointerKey);
+                     redrawRequested=true;
+                 }
+                 if (penDown || pointerKey) Capture(true);
+@@ -99,12 +109,14 @@
+                 break;
+ 
+             case SDL_MOUSEBUTTONUP:
++                if (controls.style == DeviceControlStyle::tg50 && event.button.which == SDL_TOUCH_MOUSEID) break;
+                 if (event.button.button != SDL_BUTTON_LEFT) break;
+                 ReleasePointer();
+ 
+                 break;
+ 
+             case SDL_MOUSEMOTION:
++                if (controls.style == DeviceControlStyle::tg50 && event.motion.which == SDL_TOUCH_MOUSEID) break;
+                 MapPointer(event.motion.x, event.motion.y);
+                 if (pointerKey) {
+                     if (event.motion.x<0 || event.motion.y<0 ||
+@@ -123,6 +135,17 @@
+ 
+             case SDL_KEYDOWN: {
+                 if (event.key.repeat) break;
++                const auto scan = event.key.keysym.scancode;
++                const KeyId builtIn = builtInKeyboardKey(controls, scan);
++                if (scan > SDL_SCANCODE_UNKNOWN && size_t(scan) < builtInHeld.size() && builtIn) {
++                    if (!builtInHeld[scan]) {
++                        builtInHeld[scan] = builtIn;
++                        if (++builtInHolds[builtIn] == 1 && !hardKeys[builtIn] && pointerKey != builtIn)
++                            soc->KeyDown(builtIn);
++                        redrawRequested = true;
++                    }
++                    break;
++                }
+                 const auto code=irKeyboardCode(event.key.keysym.scancode);
+                 if (soc->KeyboardAttached() && code) {
+                     const auto scan=event.key.keysym.scancode;
+@@ -132,20 +155,27 @@
+                 enum KeyId key = mapKey(event.key.keysym.sym);
+                 if (key && !hardKeys[key]) {
+                     hardKeys[key]=true;
+-                    if (pointerKey!=key) soc->KeyDown(key);
++                    if (pointerKey!=key && !builtInHolds[key]) soc->KeyDown(key);
+                     redrawRequested=true;
+                 }
+                 break;
+             }
+ 
+             case SDL_KEYUP: {
++                const auto scan = event.key.keysym.scancode;
++                if (scan > SDL_SCANCODE_UNKNOWN && size_t(scan) < builtInHeld.size() && builtInHeld[scan]) {
++                    const KeyId key = builtInHeld[scan];
++                    builtInHeld[scan] = keyInvalid;
++                    if (--builtInHolds[key] == 0 && !hardKeys[key] && pointerKey != key) soc->KeyUp(key);
++                    redrawRequested = true;
++                    break;
++                }
+                 const auto code=irKeyboardCode(event.key.keysym.scancode);
+-                const auto scan=event.key.keysym.scancode;
+                 if (code && hostKeys[scan]) { hostKeys[scan]=false; if (--codeHolds[code]==0) soc->KeyboardKey(code,false); }
+                 enum KeyId key = mapKey(event.key.keysym.sym);
+                 if (key && hardKeys[key]) {
+                     hardKeys[key]=false;
+-                    if (pointerKey!=key) soc->KeyUp(key);
++                    if (pointerKey!=key && !builtInHolds[key]) soc->KeyUp(key);
+                     redrawRequested=true;
+                 }
+                 break;
+@@ -170,7 +200,7 @@
+                 if (event.window.event==SDL_WINDOWEVENT_FOCUS_LOST ||
+                     event.window.event==SDL_WINDOWEVENT_HIDDEN ||
+                     event.window.event==SDL_WINDOWEVENT_MINIMIZED) ReleaseInputs();
+-                if (event.window.event==SDL_WINDOWEVENT_SIZE_CHANGED) { ReleasePointer(); resized=true; }
++                if (event.window.event==SDL_WINDOWEVENT_SIZE_CHANGED) { ReleaseFingers(); ReleasePointer(); resized=true; }
+                 if (event.window.event==SDL_WINDOWEVENT_LEAVE) ReleasePointer();
+                 if (event.window.event==SDL_WINDOWEVENT_EXPOSED) redrawRequested=true;
+                 break;
+@@ -186,10 +216,10 @@
+ void SdlEventHandler::ClearRedrawRequested() { redrawRequested = false; }
+ 
+ void SdlEventHandler::SetRotation(Rotation rotation) {
+-    ReleasePointer(); this->rotation = rotation; redrawRequested=true;
++    ReleaseFingers(); ReleasePointer(); this->rotation = rotation; redrawRequested=true;
+ }
+ void SdlEventHandler::SetLayout(const WindowLayout& layout, bool fitted) {
+-    ReleasePointer(); this->layout = layout; this->fitted = fitted;
++    ReleaseFingers(); ReleasePointer(); this->layout = layout; this->fitted = fitted;
+     if (fitted) scale = 1;
+     redrawRequested=true;
+ }
+@@ -212,7 +242,7 @@
+ }
+ void SdlEventHandler::ReleasePointer() {
+     if (pointerKey) {
+-        if (!hardKeys[pointerKey]) soc->KeyUp(pointerKey);
++        if (!hardKeys[pointerKey] && !builtInHolds[pointerKey]) soc->KeyUp(pointerKey);
+         pointerKey=keyInvalid; redrawRequested=true;
+     }
+     if (penDown) { soc->PenUp();penDown=false; }
+@@ -222,19 +252,73 @@
+     capture.store(on, std::memory_order_relaxed);
+     if (directCapture) SDL_CaptureMouse(on ? SDL_TRUE : SDL_FALSE);
+ }
++// Track at most sixteen accepted contacts; excess contacts wait for a new down.
++void SdlEventHandler::HandleFinger(const SDL_TouchFingerEvent& event) {
++    Finger* finger = nullptr;
++    for (auto& item : fingers)
++        if (item.active && item.touch == event.touchId && item.id == event.fingerId) finger = &item;
++    int windowWidth = int(scale * ScreenWidth());
++    int windowHeight = int(scale * (ScreenHeight() + deviceControlsHeight(controls)));
++    if (auto* window = SDL_GetWindowFromID(event.windowID)) SDL_GetWindowSize(window, &windowWidth, &windowHeight);
++    int x = int(std::floor(event.x * windowWidth)), y = int(std::floor(event.y * windowHeight));
++    MapPointer(x, y);
++    auto release = [&] {
++        if (finger->key && --builtInHolds[finger->key] == 0 && !hardKeys[finger->key] && pointerKey != finger->key)
++            soc->KeyUp(finger->key);
++        if (finger->pen) soc->PenUp();
++        *finger = {}; redrawRequested = true;
++    };
++    if (event.type == SDL_FINGERUP) { if (finger) release(); return; }
++    if (event.type == SDL_FINGERDOWN) {
++        if (finger) return;
++        for (auto& item : fingers) if (!item.active) { finger = &item; break; }
++        if (!finger) return;
++        const KeyId key = x >= 0 && y >= 0 ? deviceControlAt(controls, ScreenWidth(), ScreenHeight(),
++                                  int((x + 0.5f)/scale), int((y + 0.5f)/scale)) : keyInvalid;
++        const bool pen = OnScreen(x,y);
++        if (!key && !pen) return;
++        if (pen) {
++            if (penDown) return;
++            for (const auto& item : fingers) if (item.active && item.pen) return;
++        }
++        *finger = {true, pen, event.touchId, event.fingerId, key};
++        if (key && ++builtInHolds[key] == 1 && !hardKeys[key] && pointerKey != key) soc->KeyDown(key);
++        redrawRequested = true;
++    }
++    if (!finger || !finger->active) return;
++    if (finger->pen) {
++        if (OnScreen(x,y)) soc->PenDown(RotateX(x,y), RotateY(x,y));
++        else release();
++    } else if (deviceControlAt(controls, ScreenWidth(), ScreenHeight(),
++                    int((x + 0.5f)/scale), int((y + 0.5f)/scale)) != finger->key || x < 0 || y < 0) release();
++}
++void SdlEventHandler::ReleaseFingers() {
++    for (auto& finger : fingers) {
++        if (!finger.active) continue;
++        if (finger.key && --builtInHolds[finger.key] == 0 && !hardKeys[finger.key] && pointerKey != finger.key)
++            soc->KeyUp(finger.key);
++        if (finger.pen) soc->PenUp();
++        finger = {};
++    }
++    redrawRequested = true;
++}
++
+ void SdlEventHandler::ReleaseInputs() {
++    ReleaseFingers();
+     ReleasePointer();
+     soc->ReleaseKeyboard();
+     hostKeys.fill(false); codeHolds.fill(0);
+     for (unsigned key=1;key<hardKeys.size();++key) {
+-        if (hardKeys[key]) soc->KeyUp(static_cast<KeyId>(key));
++        if (hardKeys[key] || builtInHolds[key]) soc->KeyUp(static_cast<KeyId>(key));
+         hardKeys[key]=false;
+     }
++    builtInHolds.fill(0);
++    builtInHeld.fill(keyInvalid);
+     redrawRequested=true;
+ }
+ uint64_t SdlEventHandler::PressedButtons() const {
+     uint64_t pressed=pointerKey ? deviceKeyBit(pointerKey) : 0;
+-    for (unsigned key=1;key<hardKeys.size();++key) if(hardKeys[key])pressed|=deviceKeyBit(KeyId(key));
++    for (unsigned key=1;key<hardKeys.size();++key) if(hardKeys[key] || builtInHolds[key])pressed|=deviceKeyBit(KeyId(key));
+     return pressed;
+ }
+ 
+--- a/src/uarm/native/SdlEventHandler.h
++++ b/src/uarm/native/SdlEventHandler.h
+@@ -43,6 +43,8 @@
+ 
+    private:
+     void ReleasePointer();
++    void HandleFinger(const SDL_TouchFingerEvent& event);
++    void ReleaseFingers();
+     void Capture(bool on);
+     void ReleaseInputs();
+     bool OnScreen(int x, int y) const;
+@@ -58,6 +60,15 @@
+     std::array<bool,512> hostKeys{};
+     std::array<uint8_t,128> codeHolds{};
+     std::array<bool,keyIdCount> hardKeys{};
++    std::array<KeyId,512> builtInHeld{};
++    std::array<unsigned,keyIdCount> builtInHolds{};
++    struct Finger {
++        bool active{false}, pen{false};
++        SDL_TouchID touch{};
++        SDL_FingerID id{};
++        KeyId key{keyInvalid};
++    };
++    std::array<Finger,16> fingers{};
+     const DeviceControlProfile& controls;
+     KeyId pointerKey{keyInvalid};
+     bool penDown{false};
+--- a/src/uarm/native/SdlRenderer.cpp
++++ b/src/uarm/native/SdlRenderer.cpp
+@@ -266,10 +266,11 @@
+     SDL_RenderPresent(renderer);
+ }
+ 
+-// A fitted window clears to the background colour and the screen area to white.
++// Clear the visible panel on every draw, including power transitions.
+ void SdlRenderer::ClearWindow() {
+     if (fit == WindowFit::none) {
+-        SDL_SetRenderDrawColor(renderer, 0xff, 0xff, 0xff, 0xff);
++        const uint8_t panel = lcdEnabled ? 0xff : 0;
++        SDL_SetRenderDrawColor(renderer, panel, panel, panel, 0xff);
+         SDL_RenderClear(renderer);
+         return;
+     }
+@@ -279,7 +280,8 @@
+     const int screenHeight = displayConfiguration.height + displayConfiguration.graffitiHeight;
+     const SDL_Rect screen{0, 0, landscape ? screenHeight : displayConfiguration.width,
+                           landscape ? displayConfiguration.width : screenHeight};
+-    SDL_SetRenderDrawColor(renderer, 0xff, 0xff, 0xff, 0xff);
++    const uint8_t panel = lcdEnabled ? 0xff : 0;
++    SDL_SetRenderDrawColor(renderer, panel, panel, panel, 0xff);
+     SDL_RenderFillRect(renderer, &screen);
+ }
+ 
+--- a/src/uarm/uarm/SoC.h
++++ b/src/uarm/uarm/SoC.h
+@@ -50,6 +50,9 @@
+         SoC& soc;
+         bool active{true};
+     };
++    virtual bool HoldSwitchSupported() const { return false; }
++    virtual bool HoldSwitchOn() const { return false; }
++    virtual bool SetHoldSwitch(bool) { return false; }
+     virtual bool KeyboardAttached() const { return false; }
+     virtual void AttachKeyboard(bool) {}
+     virtual bool KeyboardKey(uint8_t, bool) { return false; }
+--- a/src/uarm/uarm/device.h
++++ b/src/uarm/uarm/device.h
+@@ -78,6 +78,8 @@
+                            struct Keypad *kp, struct VSD *vsd, uint8_t *nandContent,
+                            size_t nandSize, const struct MemoryBuffer *nandPageBuffer);
+ void deviceKey(struct Device *dev, uint32_t key, bool down);
++bool devicePanelEnabled(Device*);
++bool deviceHoldSwitchOn(Device*);
+ void devicePeriodic(struct Device *dev, uint32_t tier);
+ void deviceNetworkPeriodic(Device* dev);
+ void deviceAudioSleepReset(Device *);
+--- a/src/uarm/uarm/devicePalmTungstenE2.cpp
++++ b/src/uarm/uarm/devicePalmTungstenE2.cpp
+@@ -426,6 +426,13 @@
+                     dev->type == DeviceType5::deviceTypeZire72 ? 14 : 10, !inserted);
+ }
+ 
++bool devicePanelEnabled(Device *dev) {
++    return !dev->tg50 || tg50BoardPanelEnabled(dev->tg50);
++}
++bool deviceHoldSwitchOn(Device *dev) {
++    return dev->tg50 && tg50BoardHoldSwitchOn(dev->tg50);
++}
++
+ enum DeviceType5 deviceGetType(struct Device *dev) { return dev->type; }
+ 
+ template <typename T>
+--- a/src/uarm/uarm/deviceSonyTG50.cpp
++++ b/src/uarm/uarm/deviceSonyTG50.cpp
+@@ -109,7 +109,7 @@
+     pxaPwrClkSetClockObserver(board->pwrClk, board, tg50AudioRegisters);
+     board->pmic = an32502aInit(board->i2c);
+     const auto keys = tg50KeyMap();
+-    board->uc = tg50ucInit(board->mem, board->gpio, 14, keys.data());
++    board->uc = tg50ucInit(board->mem, board->gpio, 14, keys.data(), 13);
+     board->ms = msCtrlrInit(board->mem, tg50MsBase);
+     // MemoryBuffer owns whole pages, only the physical 1 KiB is mapped and saved.
+     if (!memoryBufferAllocate(&board->sramBuffer, MEMORY_BUFFER_GRANULARITY))
+@@ -167,6 +167,12 @@
+         return;
+     }
+     tg50ucSetKeyPressed(board->uc, key, down);
++}
++bool tg50BoardHoldSwitchOn(const Tg50Board *board) {
++    return !tg50ucGpioInState(board->uc, 0, 4);
++}
++bool tg50BoardPanelEnabled(const Tg50Board *board) {
++    return tg50ucGpioState(board->uc, 1, 9);
+ }
+ void tg50BoardPeriodic(Tg50Board *board) { ad7873Periodic(board->touch); }
+ std::function<void()> tg50BoardCaptureInput(Tg50Board *board) {
+--- a/src/uarm/uarm/deviceSonyTG50.h
++++ b/src/uarm/uarm/deviceSonyTG50.h
+@@ -12,6 +12,8 @@
+ Tg50Board *tg50BoardSetup(SocPeriphs *, Keypad *);
+ void tg50BoardTouch(Tg50Board *, int x, int y);
+ void tg50BoardKey(Tg50Board *, uint32_t key, bool down);
++bool tg50BoardHoldSwitchOn(const Tg50Board *);
++bool tg50BoardPanelEnabled(const Tg50Board *);
+ void tg50BoardPeriodic(Tg50Board *);
+ void tg50BoardReset(Tg50Board *, bool clearSram);
+ void tg50BoardBeginReset(Tg50Board *);
+--- a/src/uarm/uarm/mmiodev_TG50uc.cpp
++++ b/src/uarm/uarm/mmiodev_TG50uc.cpp
+@@ -64,6 +64,7 @@
+ 
+ 	struct PxaGpio *gpio;
+ 	int8_t gpioChangeIrqNo;
++    int8_t gpioIoIrqNo;
+ 
+ 	struct TG50ucGpioPort port[4];			//gpio[3] has revision straps on low 4 bits
+ 
+@@ -98,12 +99,13 @@
+ 
+ static void tg50ucPrvRecalcGpioIrqs(struct TG50uc *uc)
+ {
+-    bool irq = false;
+-    for (const auto &port : uc->port)
+-        irq = irq || (port.edgesDetected & port.edgesCausingIrq);
+-
+-	if (uc->gpioChangeIrqNo >= 0)
+-		pxaGpioSetState(uc->gpio, uc->gpioChangeIrqNo, !irq);
++    const bool keys = uc->port[2].edgesDetected & uc->port[2].edgesCausingIrq;
++    const bool io = (uc->port[0].edgesDetected & uc->port[0].edgesCausingIrq) ||
++                    (uc->port[1].edgesDetected & uc->port[1].edgesCausingIrq);
++    if (uc->gpioChangeIrqNo >= 0)
++        pxaGpioSetState(uc->gpio, uc->gpioChangeIrqNo, !keys);
++    if (uc->gpioIoIrqNo >= 0)
++        pxaGpioSetState(uc->gpio, uc->gpioIoIrqNo, !io);
+ }
+ 
+ static void tg50ucPrvRecalcGpioVals(struct TG50uc *uc, struct TG50ucGpioPort *port)
+@@ -312,7 +314,7 @@
+ 	return true;
+ }
+ 
+-struct TG50uc* tg50ucInit(struct ArmMem *physMem, struct PxaGpio *gpio, int8_t gpioChangeIrqNo, const uint32_t *keyMap)
++struct TG50uc* tg50ucInit(struct ArmMem *physMem, struct PxaGpio *gpio, int8_t gpioChangeIrqNo, const uint32_t *keyMap, int8_t gpioIoIrqNo)
+ {
+ 	struct TG50uc *uc = (struct TG50uc*)malloc(sizeof(*uc));
+ 	unsigned r, c;
+@@ -324,6 +326,7 @@
+ 
+ 	uc->gpio = gpio;
+ 	uc->gpioChangeIrqNo = gpioChangeIrqNo;
++    uc->gpioIoIrqNo = gpioIoIrqNo;
+ 
+ 	tg50ucReset(uc);
+ 
+@@ -353,6 +356,13 @@
+ 		uc->port[port].inputs &=~ (1 << pin);
+ 
+ 	tg50ucPrvRecalcGpioVals(uc, &uc->port[port]);
++}
++
++bool tg50ucGpioInState(const TG50uc *uc, unsigned port, unsigned pin) {
++    return port < 4 && pin < 16 && (uc->port[port].inputs & (1u << pin));
++}
++bool tg50ucGpioState(const TG50uc *uc, unsigned port, unsigned pin) {
++    return port < 4 && pin < 16 && (uc->port[port].curState & (1u << pin));
+ }
+ 
+ void tg50ucSetKeyPressed(struct TG50uc *uc, uint32_t sdlKey, bool pressed)
+--- a/src/uarm/uarm/mmiodev_TG50uc.h
++++ b/src/uarm/uarm/mmiodev_TG50uc.h
+@@ -11,8 +11,10 @@
+ struct TG50uc;
+ 
+ 
+-struct TG50uc* tg50ucInit(struct ArmMem *physMem, struct PxaGpio *gpio, int8_t gpioChangeIrqNo, const uint32_t *keyMap);
++struct TG50uc* tg50ucInit(struct ArmMem *physMem, struct PxaGpio *gpio, int8_t gpioChangeIrqNo, const uint32_t *keyMap, int8_t gpioIoIrqNo = -1);
+ void tg50ucGpioSetInState(struct TG50uc* uc, unsigned port, unsigned pin, bool hi);
++bool tg50ucGpioInState(const TG50uc*, unsigned port, unsigned pin);
++bool tg50ucGpioState(const TG50uc*, unsigned port, unsigned pin);
+ void tg50ucSetKeyPressed(struct TG50uc* uc, uint32_t sdlKey, bool pressed);
+ 
+ 
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -329,7 +329,17 @@
+     pxaTimrSuspendInterrupts(tmr, suspendInterrupts);
+ }
+ 
+-bool SocPXA::LcdEnabled() { return pxaLcdIsEnabled(lcd); }
++bool SocPXA::LcdEnabled() { return pxaLcdIsEnabled(lcd) && devicePanelEnabled(dev); }
++bool SocPXA::HoldSwitchSupported() const {
++    return deviceProfile5(deviceGetType(dev))->frontend.holdSupported;
++}
++bool SocPXA::HoldSwitchOn() const { return deviceHoldSwitchOn(dev); }
++bool SocPXA::SetHoldSwitch(bool on) {
++    if (!HoldSwitchSupported()) return false;
++    // Host commands run on the owning SoC thread; this is a persistent external switch.
++    deviceKey(dev, keyIdHold, on);
++    return true;
++}
+ 
+ uint32_t SocPXA::DispatchTicks(uint32_t clientType, uint32_t batchedTicks) {
+     // Sleep stops the peripheral clocks. RTC and external input delivery remain live.
+@@ -639,10 +649,11 @@
+     keypadKeyEvt(kp, key, down);
+ }
+ 
+-void SocPXA::OnBeforeReset() { resetRtc = pxaRtcRetained(rtc); deviceBeginReset(dev); }
++void SocPXA::OnBeforeReset() { resetRtc = pxaRtcRetained(rtc); resetHold = deviceHoldSwitchOn(dev); deviceBeginReset(dev); }
+ 
+ void SocPXA::OnReset() {
+     deviceEndReset(dev);
++    if (resetHold) deviceKey(dev, keyIdHold, true);
+     pxaLcdResetPaletteBuffer(lcd);
+     if (nand) nandResetPageBuffer(nand);
+     // RAM-backed stores retain their reset-pin cause and running RTC. A power-on
+--- a/src/uarm/uarm/soc_PXA.h
++++ b/src/uarm/uarm/soc_PXA.h
+@@ -77,6 +77,9 @@
+     DisplayMode GetDisplayMode() override;
+     void SuspendTimerInterrupts(bool suspendInterrupts) override;
+     bool LcdEnabled() override;
++    bool HoldSwitchSupported() const override;
++    bool HoldSwitchOn() const override;
++    bool SetHoldSwitch(bool on) override;
+     bool PowerSleeping() const;
+     void Wakeup(uint8_t wakeupSource) override;
+     bool PrepareM68kSupport() override;
+@@ -160,6 +163,7 @@
+ 
+    private:
+     PxaRtcRetained resetRtc{};
++    bool resetHold{false};
+     void ResumePowerSleep();
+     void LoadSleepReset(SavestateLoader<ChunkType>& loader);
+     void ResumePowerSleep25x();

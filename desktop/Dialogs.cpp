@@ -1,5 +1,6 @@
 #include "Dialogs.h"
 #include "FirmwareStore.h"
+#include "AudioQualification.h"
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDialogButtonBox>
@@ -9,15 +10,19 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
-#include <QListWidget>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSlider>
 #include <QVBoxLayout>
+#include <QGuiApplication>
+#include <QScreen>
+#include <QSignalBlocker>
+#include "WindowScale.h"
 
 using frondFirmware::Device;
 
-FirmwareDialog::FirmwareDialog(const QString& root, Device preselect, QWidget* parent) : QDialog(parent), root(root) {
+FirmwareDialog::FirmwareDialog(const QString& root, Device preselect, QWidget* parent,
+                               const frondSessions::Preferences* initialSettings, bool automaticScale) : QDialog(parent), root(root) {
     setWindowTitle(tr("Import firmware"));
     setObjectName("firmwareDialog");
     auto* form = new QFormLayout;
@@ -47,7 +52,7 @@ FirmwareDialog::FirmwareDialog(const QString& root, Device preselect, QWidget* p
     nand = field(tr("NAND image (optional for the E2)"), "nand");
     // The Zire 72 has no NAND.
     auto nandShown = [this] {
-        const bool none = frondFirmware::deviceFromId(device->currentData().toString()) == Device::zire72;
+        const bool none = frondFirmware::profile(frondFirmware::deviceFromId(device->currentData().toString())).nandSize == 0;
         nand->setEnabled(!none);
         if (auto* choose = findChild<QPushButton*>("nandChoose")) choose->setEnabled(!none);
     };
@@ -65,6 +70,18 @@ FirmwareDialog::FirmwareDialog(const QString& root, Device preselect, QWidget* p
     });
     auto* layout = new QVBoxLayout(this);
     layout->addLayout(form);
+    if (initialSettings) {
+        machineSettings = new MachineSettings(*initialSettings, automaticScale, this);
+        auto update = [this] {
+            auto selected = frondFirmware::deviceFromId(device->currentData().toString());
+            if (selected == Device::automatic) selected = frondFirmware::detectDevice(nor->text());
+            machineSettings->setDevice(selected, frondAudio::qualified(selected, {}, nor->text()));
+        };
+        connect(device, &QComboBox::currentIndexChanged, this, update);
+        connect(nor, &QLineEdit::textChanged, this, update);
+        update();
+        layout->addWidget(machineSettings);
+    }
     layout->addWidget(buttons);
 }
 
@@ -75,39 +92,8 @@ QString FirmwareDialog::importImages() {
     return error;
 }
 
-AddDeviceDialog::AddDeviceDialog(const QString& root, QWidget* parent) : QDialog(parent) {
-    setWindowTitle(tr("Add device"));
-    setObjectName("addDeviceDialog");
-    devices = new QListWidget(this);
-    devices->setObjectName("devices");
-    for (auto d : frondFirmware::devices) {
-        auto* item = new QListWidgetItem(tr("%1\n%2").arg(frondFirmware::deviceName(d),
-                                                         frondFirmware::ready(root, d) ? tr("Ready") : tr("Needs firmware")), devices);
-        item->setData(Qt::UserRole, frondFirmware::deviceId(d));
-    }
-    devices->setCurrentRow(0);
-    devices->setMinimumWidth(260);
-    // Every device shows without scrolling.
-    devices->setMinimumHeight(devices->sizeHintForRow(0) * devices->count() + 2 * devices->frameWidth());
-    auto choose = [this] {
-        if (!devices->currentItem()) return;
-        chosen = frondFirmware::deviceFromId(devices->currentItem()->data(Qt::UserRole).toString());
-        accept();
-    };
-    connect(devices, &QListWidget::itemActivated, this, choose);
-    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, this);
-    auto* add = buttons->addButton(tr("Add"), QDialogButtonBox::AcceptRole);
-    add->setDefault(true);
-    connect(add, &QPushButton::clicked, this, choose);
-    connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
-    auto* layout = new QVBoxLayout(this);
-    layout->addWidget(devices);
-    layout->addWidget(buttons);
-}
-
-SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
-    setWindowTitle(tr("Settings"));
-    setObjectName("settingsDialog");
+MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool automaticScale, QWidget* parent)
+    : QWidget(parent), automaticScale(automaticScale) {
     auto* layout = new QVBoxLayout(this);
     auto* display = new QGroupBox(tr("Display"), this);
     auto* displayLayout = new QVBoxLayout(display);
@@ -117,10 +103,10 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     windowScale->setRange(4, 8);
     windowScale->setTickInterval(1);
     windowScale->setTickPosition(QSlider::TicksBelow);
-    windowScale->setToolTip(tr("1× to 2× in 0.25 steps. Applies on the next start."));
+    windowScale->setToolTip(tr("1× to 2× in 0.25 steps."));
     smoothLcd = new QCheckBox(tr("Smooth pixels"), display);
     smoothLcd->setObjectName("smoothLcd");
-    smoothLcd->setToolTip(tr("Applies on the next start."));
+
     displayLayout->addWidget(scaleLabel);
     displayLayout->addWidget(windowScale);
     displayLayout->addWidget(smoothLcd);
@@ -134,6 +120,59 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     soundLayout->addWidget(audio);
     soundLayout->addWidget(fastAudio);
     layout->addWidget(sound);
+    windowScale->setValue(prefs.scale);
+    smoothLcd->setChecked(prefs.smooth);
+    audio->setChecked(prefs.audio);
+    fastAudio->setChecked(prefs.fastAudio);
+    connect(windowScale, &QSlider::valueChanged, this, [this](int value) {
+        this->automaticScale = false;
+        scaleLabel->setText(tr("Size: %1×").arg(value / 4.0));
+    });
+    scaleLabel->setText(tr("Size: %1×").arg(windowScale->value() / 4.0));
+}
+
+frondSessions::Preferences MachineSettings::values() const {
+    return {windowScale->value(), smoothLcd->isChecked(), audio->isChecked(), fastAudio->isChecked()};
+}
+void MachineSettings::setDevice(Device device, bool qualified) {
+    const bool soundSupported = device != Device::automatic && frondFirmware::capabilities(device).sound;
+    audio->setEnabled(soundSupported);
+    audio->setToolTip(soundSupported ? QString() : device == Device::automatic ? tr("Choose firmware first") :
+        tr("Not available on the %1 yet").arg(frondFirmware::deviceName(device)));
+    const bool supported = soundSupported && frondFirmware::capabilities(device).fastAudio && qualified;
+    fastAudio->setEnabled(supported);
+    fastAudio->setToolTip(supported ? QString() : device == Device::automatic ? tr("Choose firmware first") :
+        frondFirmware::capabilities(device).fastAudio ? tr("Requires qualified firmware") :
+        tr("Not available on the %1 yet").arg(frondFirmware::deviceName(device)));
+    if (automaticScale && device != Device::automatic) {
+        const auto& display = frondFirmware::profile(device).frontend;
+        const auto* screen = QGuiApplication::primaryScreen();
+        const auto available = screen ? screen->availableGeometry().size() : QSize();
+        const QSignalBlocker blocked(windowScale);
+        windowScale->setValue(int(4 * fittingWindowScale(display.width + display.sideTabWidth,
+            display.height + display.silkscreenHeight + display.stripHeight, available.width(), available.height())));
+        scaleLabel->setText(tr("Size: %1×").arg(windowScale->value() / 4.0));
+    }
+}
+
+MachineSettingsDialog::MachineSettingsDialog(Device device, const frondSessions::Preferences& prefs, bool qualified, QWidget* parent)
+    : QDialog(parent) {
+    setWindowTitle(tr("Edit settings"));
+    setObjectName("machineSettingsDialog");
+    auto* layout = new QVBoxLayout(this);
+    controls = new MachineSettings(prefs, false, this);
+    controls->setDevice(device, qualified);
+    layout->addWidget(controls);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, this);
+    connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+    layout->addWidget(buttons);
+}
+
+SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
+    setWindowTitle(tr("Settings"));
+    setObjectName("settingsDialog");
+    auto* layout = new QVBoxLayout(this);
     resume = new QCheckBox(tr("Resume last session on startup"), this);
     resume->setObjectName("resume");
     layout->addWidget(resume);

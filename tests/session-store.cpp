@@ -1,6 +1,7 @@
 #include <QtTest>
 #include "FirmwareStore.h"
 #include "SessionStore.h"
+#include "AudioQualification.h"
 
 using namespace frondSessions;
 
@@ -60,12 +61,14 @@ class SessionStoreTest : public QObject {
         // Saving replaces the marker; the session is listed once.
         write(folder() + "/Fresh.frond", header(6, "palm-e2"));
         QCOMPARE(list(folder()).size(), 3);
-        // A Zire 72 session opens; a reserved device's doesn't.
+        // Available sessions open; a reserved device stays unavailable.
         write(folder() + "/Zire.frond", header(6, "palm-zire-72"));
         write(folder() + "/Clie.frond", header(6, "sony-clie-tg50"));
+        write(folder() + "/Reserved.frond", header(6, "palm-iiix"));
         for (const auto& info : list(folder())) {
             if (info.name == "Zire") QVERIFY(info.saved && !info.old && info.device == "palm-zire-72");
-            if (info.name == "Clie") QVERIFY(info.old);
+            if (info.name == "Clie") QVERIFY(info.saved && !info.old && info.device == "sony-clie-tg50");
+            if (info.name == "Reserved") QVERIFY(info.old);
         }
     }
     void names() {
@@ -161,6 +164,58 @@ class SessionStoreTest : public QObject {
         lock.unlock();
         QVERIFY(remove(describe(folder() + "/Busy.frond")).isEmpty());
         QVERIFY(!QFileInfo::exists(folder() + "/Busy.frond.lock"));
+    }
+    void sessionNorDigest() {
+        const QByteArray nor(16 << 20, char(0x61));
+        auto bytes = header(6, "palm-tx").left(40);
+        auto append = [&](quint32 value) { for (int i = 0; i < 4; ++i) bytes.append(char(value >> (8 * i))); };
+        for (quint32 value : {0u, 0u, 4u, quint32(nor.size()), 0u, 0u, 0u, 0u}) append(value);
+        const auto prefix = bytes;
+        bytes += qCompress("meta" + nor + "trailing guest data").mid(4);
+        const auto path = filePath(folder(), "Digest"); write(path, bytes);
+        QCOMPARE(frondAudio::sessionNorMd5(path), QCryptographicHash::hash(nor, QCryptographicHash::Md5).toHex());
+        QVERIFY(!frondAudio::qualified(frondFirmware::Device::tx, path, {}));
+        write(path, bytes.left(bytes.size() / 2)); QVERIFY(frondAudio::sessionNorMd5(path).isEmpty());
+        bytes = prefix; bytes[50] = char(0x20); write(path, bytes);
+        QVERIFY(frondAudio::sessionNorMd5(path).isEmpty());
+        bytes = prefix; bytes[52] = 1; write(path, bytes);
+        QVERIFY(frondAudio::sessionNorMd5(path).isEmpty());
+        write(path, prefix + QByteArray(65536, 'x')); QVERIFY(frondAudio::sessionNorMd5(path).isEmpty());
+        const auto raw = directory.filePath("nor.bin"); write(raw, nor);
+        QVERIFY(!frondAudio::qualified(frondFirmware::Device::tx, {}, raw));
+    }
+    void machinePreferences() {
+        const auto one = filePath(folder(), "One"), two = filePath(folder(), "Two");
+        write(one, header(6, "palm-tx"));
+        QVERIFY(create(folder(), "Two", "palm-tx"));
+        Preferences prefs{7, true, false, true}, loaded;
+        QVERIFY(writePreferences(one, prefs).isEmpty());
+        QVERIFY(writePreferences(two, Preferences{}).isEmpty());
+        QVERIFY(readPreferences(one, &loaded)); QCOMPARE(loaded.scale, 7);
+        QVERIFY(loaded.smooth && !loaded.audio && loaded.fastAudio);
+        QVERIFY(rename(folder(), describe(one), "Moved").isEmpty());
+        const auto moved = filePath(folder(), "Moved");
+        QVERIFY(!QFileInfo::exists(preferencesPath(one)));
+        QVERIFY(readPreferences(moved, &loaded)); QCOMPARE(loaded.scale, 7);
+        QVERIFY(readPreferences(two, &loaded)); QCOMPARE(loaded.scale, 4); QVERIFY(loaded.audio);
+        QLockFile lock(moved + ".lock"); QVERIFY(lock.tryLock());
+        QVERIFY(!remove(describe(moved)).isEmpty());
+        QVERIFY(QFileInfo::exists(preferencesPath(moved))); lock.unlock();
+        const auto copy = directory.filePath("copy.frond");
+        QVERIFY(exportFile(describe(moved), copy).isEmpty());
+        QVERIFY(readPreferences(copy, &loaded)); QCOMPARE(loaded.scale, 7);
+        QString imported;
+        QVERIFY(importFile(folder(), copy, &imported).isEmpty());
+        QVERIFY(readPreferences(filePath(folder(), imported), &loaded));
+        QCOMPARE(loaded.scale, 7); QVERIFY(!loaded.audio);
+        QVERIFY(remove(describe(moved)).isEmpty());
+        QVERIFY(!QFileInfo::exists(preferencesPath(moved)));
+        QVERIFY(rename(folder(), describe(two), "Pending").isEmpty());
+        QVERIFY(readPreferences(filePath(folder(), "Pending"), &loaded));
+        QVERIFY(remove(describe(filePath(folder(), "Pending"))).isEmpty());
+        QVERIFY(!QFileInfo::exists(preferencesPath(filePath(folder(), "Pending"))));
+        write(preferencesPath(filePath(folder(), imported)), "{}");
+        QVERIFY(!readPreferences(filePath(folder(), imported), &loaded));
     }
     void firmwareCopy() {
         using frondFirmware::Device;

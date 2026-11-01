@@ -117,7 +117,8 @@ class MatrixTests(unittest.TestCase):
     def test_e2_launcher_checks_upper_wallpaper(self):
         from unittest.mock import Mock
         core = Mock()
-        matrix.runner.e2_setup(core, self.root)
+        core.wait_frame.return_value = None
+        matrix.runner.setup_device('palm-e2', core, self.root)
         check = core.wait_frame.call_args_list[-1].args[1]
         blank = [bytes([255, 255, 255, 255]) * 320 for _ in range(320)]
         launcher = blank.copy()

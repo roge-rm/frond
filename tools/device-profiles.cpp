@@ -1,5 +1,6 @@
 // Public model inventory. This tool never opens firmware or session files.
 #include <iostream>
+#include <iomanip>
 #include "device_profile5.h"
 
 static const char* cohortName(DeviceCohort5 cohort) {
@@ -9,6 +10,7 @@ static const char* cohortName(DeviceCohort5 cohort) {
         case DeviceCohort5::patchedE2: return "patched-e2";
         case DeviceCohort5::paravirtual: return "paravirtual";
         case DeviceCohort5::zire72Nor: return "zire72-nor";
+        case DeviceCohort5::tg50Nor: return "tg50-nor";
         case DeviceCohort5::reserved: return "reserved";
     }
     return "unknown";
@@ -26,6 +28,8 @@ int main() {
                   << (p.support == DeviceSupport5::txDesktop ? "tx-desktop"
                       : p.support == DeviceSupport5::e2Desktop ? "e2-desktop"
                       : p.support == DeviceSupport5::zire72Desktop ? "zire72-desktop"
+                      : p.support == DeviceSupport5::experimentalDesktop ? "experimental-desktop"
+                      : p.support == DeviceSupport5::staged ? "staged"
                       : p.support == DeviceSupport5::reserved ? "reserved" : "inherited-unverified")
                   << "\",\"nor_bytes\":";
         if (p.norSize) std::cout << p.norSize; else std::cout << "null";
@@ -33,7 +37,40 @@ int main() {
                   << ",\"ram_min_bytes\":" << p.minRam << ",\"ram_max_bytes\":" << p.maxRam
                   << ",\"default_display_mode\":" << int(p.defaultDisplay)
                   << ",\"display_mode_mask\":" << p.displayModes
-                  << ",\"explicit_raw_nand\":" << (p.requiresExplicitNand ? "true" : "false") << '}';
+                  << ",\"explicit_raw_nand\":" << (p.requiresExplicitNand ? "true" : "false");
+        std::cout << ",\"runner_eligible\":" << (deviceProfileRunnerEligible5(p.deviceType) ? "true" : "false")
+                  << ",\"sound\":" << (p.capabilities.sound ? "true" : "false")
+                  << ",\"storage_slot\":" << std::quoted(deviceProfileStorageSlot5(p) == DeviceStorageSlot5::memoryStick ? "memory-stick"
+                        : deviceProfileStorageSlot5(p) == DeviceStorageSlot5::sd ? "sd" : "none");
+        const auto& f = p.frontend;
+        std::cout << ",\"device_type\":" << int(p.deviceType)
+                  << ",\"detect\":" << int(p.detect)
+                  << ",\"company_id\":" << p.companyId << ",\"hal_id\":" << p.halId
+                  << ",\"nor_layout\":" << int(p.norLayout)
+                  << ",\"header_offset\":" << p.headerOffset << ",\"big_card_offset\":" << p.bigCardOffset
+                  << ",\"sd_min_bytes\":" << p.sdMin << ",\"sd_max_bytes\":" << p.sdMax
+                  << ",\"available\":" << (f.available ? "true" : "false")
+                  << ",\"setup\":" << std::quoted(f.setup)
+                  << ",\"launcher\":" << std::quoted(f.launcher)
+                  << ",\"width\":" << f.width << ",\"height\":" << f.height
+                  << ",\"silkscreen_height\":" << f.silkscreenHeight << ",\"strip_height\":" << f.stripHeight
+                  << ",\"app_names\":" << std::quoted(f.appNames) << ",\"buttons\":" << std::quoted(f.buttons)
+                  << ",\"hold_present\":" << (f.holdPresent ? "true" : "false")
+                  << ",\"hold_supported\":" << (f.holdSupported ? "true" : "false")
+                  << ",\"side_tab_width\":" << f.sideTabWidth
+                  << ",\"home_key\":" << f.homeKey
+                  << ",\"home_x\":" << f.homeX << ",\"home_y\":" << f.homeY
+                  << ",\"menu_x\":" << f.menuX << ",\"menu_y\":" << f.menuY
+                  << ",\"rotating_status_bar\":" << (f.rotatingStatusBar ? "true" : "false")
+                  << ",\"sd_slot\":" << (f.sdSlot ? "true" : "false")
+                  << ",\"camera\":" << (f.camera ? "true" : "false")
+                  << ",\"fast_audio_md5\":" << std::quoted(f.fastAudioNorMd5)
+                  << ",\"network\":" << (p.capabilities.network ? "true" : "false")
+                  << ",\"serial\":" << (p.capabilities.serial ? "true" : "false")
+                  << ",\"keyboard\":" << (p.capabilities.keyboard ? "true" : "false")
+                  << ",\"usb\":" << (p.capabilities.usb ? "true" : "false")
+                  << ",\"infrared\":" << (p.capabilities.infrared ? "true" : "false")
+                  << ",\"bluetooth\":" << (p.capabilities.bluetooth ? "true" : "false") << '}';
     }
     std::cout << "]}\n";
 }

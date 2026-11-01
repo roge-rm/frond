@@ -18,7 +18,7 @@ out/frond: build/source/.prepared build/source/src/common/libcommon.a
 	cp build/source/src/uarm/cp-uarm out/frond.new
 	mv -f out/frond.new out/frond
 
-test: test-build-tools test-audio-results test-earlier-audio prepare test-pxa255-udc test-pxa270-udc test-usb-host-fixture test-usb-enumeration test-usb-bridge test-usb-bridge-soc test-e2-state test-device-profiles test-uart-lifecycle test-uart-checkpoint test-uart-flow test-uart-dma-peer test-tx-serial test-gameplay-metrics test-mmu-fast-path test-mem-region-bounds test-pxa-power test-compatibility test-developer-run test-xscale-prefetch test-device-controls test-scheduler test-wifi test-host-network test-network-reliability test-keyboard test-network test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pace-debug test-pace-step test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup test-checkpoint-input test-native-database
+test: test-tg50-pwm-audio test-pxa-i2s-audio test-build-tools test-audio-results test-earlier-audio prepare test-pxa255-udc test-pxa270-udc test-usb-host-fixture test-usb-enumeration test-usb-bridge test-usb-bridge-soc test-e2-state test-tg50-state test-device-profiles test-uart-lifecycle test-uart-checkpoint test-uart-flow test-uart-dma-peer test-tx-serial test-gameplay-metrics test-mmu-fast-path test-mem-region-bounds test-pxa-power test-compatibility test-developer-run test-xscale-prefetch test-device-controls test-scheduler test-wifi test-host-network test-network-reliability test-keyboard test-network test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pace-debug test-pace-step test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup test-checkpoint-input test-native-database
 	python3 tests/audio-metrics.py
 	python3 tests/audio-timing.py
 	python3 tests/tx-baseline.py
@@ -384,8 +384,13 @@ test-device-profiles: out/frond device-profiles
 		tests/device-profiles.cpp build/source/src/uarm/uarm/device_configuration.cpp \
 		build/source/src/common/libcommon.a -o build/test-device-profiles
 	./build/test-device-profiles
+	python3 tests/device-rom.py --device sony-clie-tg50 --synthetic-rejection
 	python3 tests/device-input.py
-	python3 tests/zire72-rom.py
+	python3 tools/generate-device-data.py --check
+	python3 tests/device-data.py
+	python3 tests/device-rom-harness.py
+	python3 tests/guest-faults.py
+	python3 tests/device-rom.py --device palm-zire-72
 
 # Firmware-free build/package policy and independently reconstructed source.
 .PHONY: test-build-tools check-reconstruction
@@ -649,3 +654,61 @@ smoke:
 	python3 tests/smoke.py run
 smoke-sessions:
 	python3 tests/smoke.py sessions
+
+.PHONY: generate-device-data check-device-data
+generate-device-data: prepare
+	python3 tools/generate-device-data.py
+check-device-data: prepare
+	python3 tools/generate-device-data.py --check
+
+.PHONY: test-tg50-state
+test-tg50-state: out/frond
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/tg50-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/tg50-state.cpp @build/tg50-core.rsp build/source/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-tg50-state
+	./build/test-tg50-state
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/tg50-touch.cpp build/source/src/uarm/uarm/sspdev_AD7873.cpp \
+		build/source/src/uarm/.build/cputil.o build/source/src/common/libcommon.a -lz -o build/test-tg50-touch
+	./build/test-tg50-touch
+
+.PHONY: device-session-probe
+device-session-probe: out/frond
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/device-session-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/device-session.cpp @build/device-session-core.rsp build/source/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-device-session
+
+.PHONY: test-pxa-i2s-audio
+test-pxa-i2s-audio: prepare
+	$(CXX) -std=c++17 -O1 -g -ffunction-sections -fdata-sections \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/pxa-i2s-audio.cpp build/source/src/uarm/uarm/pxa_I2S.cpp \
+		build/source/src/uarm/uarm/i2sdev_AK4534.cpp build/source/src/uarm/uarm/audio_queue.cpp \
+		build/source/src/common/savestate/Chunk.cpp build/source/src/common/savestate/ChunkProbe.cpp \
+		build/source/src/common/Logging.cpp -Wl,--gc-sections -o build/test-pxa-i2s-audio
+	./build/test-pxa-i2s-audio
+	$(CXX) -std=c++17 -O1 -g -ffunction-sections -fdata-sections \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/pxa-i2s-dma.cpp build/source/src/uarm/uarm/pxa_I2S.cpp \
+		build/source/src/uarm/uarm/pxa_DMA.cpp -Wl,--gc-sections -o build/test-pxa-i2s-dma
+	./build/test-pxa-i2s-dma
+
+.PHONY: test-tg50-pace
+test: test-tg50-pace
+test-tg50-pace: prepare
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm \
+		tests/tg50-pace.cpp build/source/src/uarm/uarm/pace_patch.cpp -o build/test-tg50-pace
+	./build/test-tg50-pace
+
+.PHONY: test-tg50-pwm-audio
+test-tg50-pwm-audio: prepare
+	$(CXX) -std=c++17 -O2 -Ibuild/source/src/uarm/uarm tests/tg50-pwm-audio.cpp -o build/test-tg50-pwm-audio
+	./build/test-tg50-pwm-audio
+
+.PHONY: test-tg50-call-budget
+test: test-tg50-call-budget
+test-tg50-call-budget: prepare
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm tests/tg50-call-budget.cpp -o build/test-tg50-call-budget
+	./build/test-tg50-call-budget

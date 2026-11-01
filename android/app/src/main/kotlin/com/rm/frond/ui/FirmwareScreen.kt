@@ -165,9 +165,7 @@ fun FirmwareScreen(model: HomeModel) {
                             error = result
                             return@launch
                         }
-                        val thenStart = model.startAfterImport != null
-                        model.closeFirmware()
-                        if (thenStart) model.newSession(d)
+                        model.firmwareImported(d)
                     }
                 },
                 modifier = Modifier.fillMaxWidth().padding(16.dp),

@@ -1,0 +1,1393 @@
+--- a/src/uarm/native/Commands.cpp
++++ b/src/uarm/native/Commands.cpp
+@@ -223,28 +223,26 @@
+             return;
+         }
+ 
+-        if (!syscallDispatchPrepare(sd)) {
+-            cout << "unable to prepare save environment for syscalls" << endl;
+-            return;
+-        }
+-
+-        char version[32];
+-        const uint32_t ptr = syscall68k_SysGetOsVersionString(sd, SC_EXECUTE_FULL);
+-
+-        if (!ptr) {
+-            cout << "failed to retrieve OS version string" << endl;
+-            return;
+-        }
+-
+-        syscallDispatch_strncpy_toHost(sd, version, ptr, sizeof(version));
+-        version[sizeof(version) - 1] = '\0';
+-
+-        if (syscall68k_MemPtrFree(sd, SC_EXECUTE_PURE, ptr) != 0) {
+-            cout << "very bad: failed to release m68k pointer" << endl;
+-            return;
+-        }
+-
+-        cout << version << endl;
++        try {
++            GuestExport guest(*ctx->soc);
++            if (!guest.Ready()) {
++                cout << "Palm OS is not ready for the OS version" << endl;
++                return;
++            }
++            char version[32];
++            const uint32_t ptr = syscall68k_SysGetOsVersionString(sd, SC_EXECUTE_FULL);
++            if (!ptr || !syscallDispatch_strncpy_toHost(sd, version, ptr, sizeof(version)))
++                throw std::runtime_error("could not read OS version");
++            version[sizeof(version) - 1] = '\0';
++            // The read-only checkpoint reclaims the version string on TG50.
++            if (ctx->soc->GetDeviceType() != deviceTypeTG50 &&
++                syscall68k_MemPtrFree(sd, SC_EXECUTE_PURE, ptr) != 0)
++                throw std::runtime_error("could not free OS version string");
++            guest.Finish();
++            cout << version << endl;
++        } catch (const std::exception& error) {
++            cout << "OS version failed: " << error.what() << "; guest restored" << endl;
++        }
+     }
+ 
+     void CmdSetAutoOff(vector<string> args, cli::CommandEnvironment& env, void* context) {
+@@ -257,6 +255,10 @@
+         }
+ 
+         auto ctx = reinterpret_cast<commands::Context*>(context);
++        if (ctx->soc->GetDeviceType() == deviceTypeTG50) {
++            cout << "set-auto-off is not supported on TG50" << endl;
++            return;
++        }
+         SyscallDispatch* sd = ctx->soc->GetSyscallDispatch();
+ 
+         if (!syscallDispatchM68kSupport(sd)) {
+@@ -333,7 +335,18 @@
+         SyscallDispatch* sd = ctx->soc->GetSyscallDispatch();
+ 
+         DbMetadataList metadataList;
+-        if (!dbListGet(sd, metadataList)) return;
++        std::unique_ptr<GuestExport> guest;
++        try {
++            guest = std::make_unique<GuestExport>(*ctx->soc);
++            if (!guest->Ready() || !dbListGet(sd, metadataList)) {
++                cout << "Palm OS is not ready for the database list" << endl;
++                return;
++            }
++            guest->Finish();
++        } catch (const std::exception& error) {
++            cout << "database list failed: " << error.what() << "; guest restored" << endl;
++            return;
++        }
+ 
+         for (const auto& meta : metadataList) {
+             union {
+--- a/src/uarm/native/GuestDatabaseOps.h
++++ b/src/uarm/native/GuestDatabaseOps.h
+@@ -72,6 +72,7 @@
+     if (!guest.Ready()) return false;
+     DbMetadataList all;
+     if (!dbListGet(soc.GetSyscallDispatch(), all)) throw std::runtime_error("Could not read the Palm database list");
++    guest.Finish();
+     list.clear();
+     for (const auto& db : all)
+         if (!db.isRom && db.creator != 0x6136386bu) list.push_back(db);
+@@ -100,7 +101,9 @@
+     if (backup.GetState() != DbBackup::STATE_DONE || !backup.GetArchiveData() || !backup.GetArchiveSize())
+         throw std::runtime_error("Database export failed; no archive was written");
+     const auto* data = static_cast<const uint8_t*>(backup.GetArchiveData());
+-    bytes.assign(data, data + backup.GetArchiveSize());
++    std::vector<uint8_t> result(data, data + backup.GetArchiveSize());
++    guest.Finish();
++    bytes = std::move(result);
+     return true;
+ }
+ }
+--- a/src/uarm/native/GuestExport.h
++++ b/src/uarm/native/GuestExport.h
+@@ -11,13 +11,17 @@
+ // successful preparation is checkpointed and rolled back.
+ class GuestExport {
+  public:
+-    explicit GuestExport(SoC& soc) {
++    explicit GuestExport(SoC& soc) : soc(soc) {
+         if (syscallDispatchPrepare(soc.GetSyscallDispatch()))
+             checkpoint = std::make_unique<ReadOnlyGuest>(soc);
+     }
+     bool Ready() const { return bool(checkpoint); }
++    void Finish() {
++        if (checkpoint) syscallDispatchValidateCommit(soc.GetSyscallDispatch());
++    }
+ 
+  private:
++    SoC& soc;
+     std::unique_ptr<ReadOnlyGuest> checkpoint;
+ };
+ #endif
+--- a/src/uarm/native/ReadOnlyGuest.h
++++ b/src/uarm/native/ReadOnlyGuest.h
+@@ -34,6 +34,7 @@
+         if (!active) return;
+         if (syscallDispatchInProgress(soc.GetSyscallDispatch()))
+             throw std::runtime_error("cannot commit an unfinished injected call");
++        syscallDispatchValidateCommit(soc.GetSyscallDispatch());
+         syscallDispatchEndRecovery(soc.GetSyscallDispatch());
+         active = false;
+         serialCheckpoint.Finish();
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -3403,24 +3403,24 @@
+ 
+ // Validate each 1KB mapping segment before any transfer. Virtual buffers may
+ // span discontiguous physical pages. MMIO is never read as a side effect.
+-static bool nativeSegment(ArmCpu* cpu, uint32_t address, uint32_t size, bool write, uint32_t& pa, bool inspect = false) {
++static bool nativeSegment(ArmCpu* cpu, uint32_t address, uint32_t size, bool write, uint32_t& pa, bool inspect = false, bool privileged = true) {
+     if (cpu->memorySystemKind != ARM_MEMORY_SYSTEM_MMU) return false;
+ #ifdef SUPPORT_FCSE
+     if (address < 0x02000000u) address |= cpu->pid;
+ #endif
+-    auto t = inspect ? mmuTranslateInspect(cpu->memorySystem.mmu,address,write) :
+-                       mmuTranslate(cpu->memorySystem.mmu,address,true,write);
++    auto t = inspect ? mmuTranslateInspectAccess(cpu->memorySystem.mmu,address,privileged,write) :
++                       mmuTranslate(cpu->memorySystem.mmu,address,privileged,write);
+     if (!MMU_TRANSLATE_RESULT_OK(t)) return false;
+     pa = MMU_TRANSLATE_RESULT_PA(t);
+     return memIsBufferRange(cpu->mem,pa,size,write);
+ }
+-static bool nativeRange(ArmCpu* cpu, uint32_t address, uint32_t size, bool write, bool inspect = false) {
++static bool nativeRange(ArmCpu* cpu, uint32_t address, uint32_t size, bool write, bool inspect = false, bool privileged = true) {
+     if (!size) return true;
+     if (uint64_t(address)+size>0x100000000ull) return false;
+     for (uint64_t va=address; va<uint64_t(address)+size;) {
+         const uint32_t count=std::min<uint64_t>(0x400-(va&0x3ff),uint64_t(address)+size-va);
+         uint32_t pa;
+-        if (!nativeSegment(cpu,va,count,write,pa,inspect)) return false;
++        if (!nativeSegment(cpu,va,count,write,pa,inspect,privileged)) return false;
+         va+=count;
+     }
+     return true;
+@@ -3428,13 +3428,13 @@
+ bool cpuNativeRamRange(ArmCpu* cpu, uint32_t address, uint32_t size) {
+     return nativeRange(cpu,address,size,true);
+ }
+-bool cpuNativeBuffer(ArmCpu* cpu, uint32_t address, void* data, uint32_t size, bool write) {
++bool cpuNativeBuffer(ArmCpu* cpu, uint32_t address, void* data, uint32_t size, bool write, bool privileged) {
+     if (!size) return true;
+-    if (!data || !nativeRange(cpu,address,size,write)) return false;
++    if (!data || !nativeRange(cpu,address,size,write,false,privileged)) return false;
+     for (uint32_t offset=0; offset<size;) {
+         const uint32_t count=std::min<uint32_t>(0x400-((address+offset)&0x3ff),size-offset);
+         uint32_t pa;
+-        if (!nativeSegment(cpu,address+offset,count,write,pa)) return false;
++        if (!nativeSegment(cpu,address+offset,count,write,pa,false,privileged)) return false;
+         for (uint32_t i=0;i<count;++i) {
+             auto* byte=static_cast<uint8_t*>(data)+offset+i;
+             if (write ? !memAccess<1,true>(cpu->mem,pa+i,byte) : !memAccess<1,false>(cpu->mem,pa+i,byte)) return false;
+@@ -3444,14 +3444,20 @@
+     return true;
+ }
+ 
+-bool cpuInspectRamRange(ArmCpu* cpu,uint32_t address,uint32_t size) {
++static bool inspectRamRange(ArmCpu* cpu,uint32_t address,uint32_t size,bool write,bool privileged = true) {
+     if (!size || uint64_t(address)+size>0x100000000ull) return false;
+     for (uint64_t va=address;va<uint64_t(address)+size;) {
+         uint32_t count=std::min<uint64_t>(0x400-(va&0x3ff),uint64_t(address)+size-va),pa;
+-        if (!nativeSegment(cpu,va,count,false,pa,true) || !memIsBufferRange(cpu->mem,pa,count,true)) return false;
++        if (!nativeSegment(cpu,va,count,write,pa,true,privileged) || !memIsBufferRange(cpu->mem,pa,count,true)) return false;
+         va+=count;
+     }
+     return true;
++}
++bool cpuInspectRamRange(ArmCpu* cpu,uint32_t address,uint32_t size) {
++    return inspectRamRange(cpu,address,size,false);
++}
++bool cpuInspectWritableRamRange(ArmCpu* cpu,uint32_t address,uint32_t size,bool privileged) {
++    return inspectRamRange(cpu,address,size,true,privileged);
+ }
+ bool cpuInspectRead(ArmCpu* cpu,uint32_t address,void* dest,uint32_t size) {
+     if (!size || size>1048576 || !dest || !nativeRange(cpu,address,size,false,true)) return false;
+--- a/src/uarm/uarm/CPU.h
++++ b/src/uarm/uarm/CPU.h
+@@ -90,6 +90,7 @@
+ class SoC;
+ bool cpuInspectRead(ArmCpu*,uint32_t,void*,uint32_t);
+ bool cpuInspectRamRange(ArmCpu*,uint32_t,uint32_t);
++bool cpuInspectWritableRamRange(ArmCpu*,uint32_t,uint32_t,bool privileged = true);
+ void cpuSetDebugSoc(ArmCpu*,SoC*);
+ struct ArmCpu *cpuInit(uint32_t pc, struct ArmMem *mem, uint8_t memorySystemKind, bool xscale,
+                        bool omap, int debugPort, uint32_t cpuid, uint32_t cacheId,
+@@ -173,7 +174,8 @@
+ void cpuSetNativeStackBounds(ArmCpu*, uint32_t lower, uint32_t upper,
+                              uint32_t ownerAddress = 0, uint32_t ownerValue = 0);
+ // Side-effect-free RAM/ROM access: rejects MMIO, wrap and invalid mappings.
+-bool cpuNativeBuffer(ArmCpu*, uint32_t address, void* data, uint32_t size, bool write);
++bool cpuNativeBuffer(ArmCpu*, uint32_t address, void* data, uint32_t size, bool write,
++                     bool privileged = true);
+ bool cpuNativeRamRange(ArmCpu*, uint32_t address, uint32_t size);
+ // Temporary host-owned bootstrap stack, accepted only over unmapped virtual pages.
+ bool cpuSetNativeScratch(ArmCpu*, uint32_t base, void* data, uint32_t size);
+--- a/src/uarm/uarm/MMU.cpp
++++ b/src/uarm/uarm/MMU.cpp
+@@ -211,15 +211,18 @@
+     return result;
+ }
+ 
+-MMUTranslateResult mmuTranslateInspect(ArmMmu* mmu, uint32_t addr, bool write) {
++MMUTranslateResult mmuTranslateInspectAccess(ArmMmu* mmu, uint32_t addr, bool privileged, bool write) {
+     if (mmu->transTablPA == MMU_DISABLED_TTP) return addr;
+     const auto& entry=mmu->tlb[addr >> 12];
+-    if (entry.revision != mmu->revision) return translateAndCache(mmu,addr,true,write,true);
++    if (entry.revision != mmu->revision) return translateAndCache(mmu,addr,privileged,write,true);
+     if (write) {
+-        auto fsr=checkPermissionsForWrite(mmu,entry.ap,entry.domain,entry.section,true);
++        auto fsr=checkPermissionsForWrite(mmu,entry.ap,entry.domain,entry.section,privileged);
+         if (fsr) return TRANSLATE_RESULT_FAULT(fsr);
+     }
+     return uint64_t((addr & 0xfff) | (entry.pa << 12));
++}
++MMUTranslateResult mmuTranslateInspect(ArmMmu* mmu, uint32_t addr, bool write) {
++    return mmuTranslateInspectAccess(mmu, addr, true, write);
+ }
+ 
+ uint32_t mmuGetTTP(struct ArmMmu *mmu) { return mmu->transTablPA; }
+--- a/src/uarm/uarm/MMU.h
++++ b/src/uarm/uarm/MMU.h
+@@ -28,6 +28,7 @@
+ bool mmuIsOn(struct ArmMmu *mmu);
+ 
+ MMUTranslateResult mmuTranslateInspect(ArmMmu*, uint32_t, bool write);
++MMUTranslateResult mmuTranslateInspectAccess(ArmMmu*, uint32_t, bool privileged, bool write);
+ uint32_t mmuGetTTP(struct ArmMmu *mmu);
+ void mmuSetTTP(struct ArmMmu *mmu, uint32_t ttp);
+ 
+--- a/src/uarm/uarm/db_backup.cpp
++++ b/src/uarm/uarm/db_backup.cpp
+@@ -5,6 +5,7 @@
+ #include <cstdlib>
+ #include <cstring>
+ #include <iostream>
++#include <stdexcept>
+ 
+ #include "Defer.h"
+ #include "cputil.h"
+@@ -111,7 +112,9 @@
+     const uint32_t writeProcP = scratch;
+     const uint32_t nameP = scratch + 2;
+ 
+-    paceSet8(nameP, 0);
++    const uint8_t emptyName = 0;
++    if (!syscallDispatch_memcpy_fromHost(sd, nameP, &emptyName, 1))
++        throw std::runtime_error("could not initialise DB name");
+ 
+     syscallDispatchRegisterM68kStub(
+         sd, writeProcP,
+@@ -122,8 +125,10 @@
+ 
+             uint32_t dataP = paceGet32(parameterBase);
+             const uint32_t sizeP = paceGet32(parameterBase + 4);
++            syscallDispatchValidateMemory(sd, sizeP, 4, false);
+             uint32_t size = paceGet32(sizeP);
+ 
++            syscallDispatchValidateMemory(sd, dataP, size, false);
+             while (size > 0) {
+                 const uint32_t transferSize = min(size, MAX_CHUNK_SIZE);
+ 
+@@ -144,7 +149,7 @@
+             }
+ 
+             paceSetDreg(0, 0);
+-        });
++        }, 12);
+ 
+     Defer unregisterStub([=]() { syscallDispatchUnregisterM68kStub(sd, writeProcP); });
+ 
+--- a/src/uarm/uarm/db_installer.cpp
++++ b/src/uarm/uarm/db_installer.cpp
+@@ -2,6 +2,7 @@
+ 
+ #include <cstdio>
+ #include <functional>
++#include <stdexcept>
+ 
+ #include "CPU.h"
+ #include "Defer.h"
+@@ -42,7 +43,7 @@
+             couldNotOverwrite = couldNotOverwrite || err;
+ 
+             paceSetDreg(0, !err);
+-        });
++        }, 12);
+ 
+     syscallDispatchRegisterM68kStub(
+         sd, readProcP,
+@@ -53,20 +54,24 @@
+ 
+             const uint32_t dataP = paceGet32(parameterBase);
+             const uint32_t sizeP = paceGet32(parameterBase + 4);
++            syscallDispatchValidateMemory(sd, sizeP, 4);
+             uint32_t size = paceGet32(sizeP);
++            if (bytesRead > len) throw std::runtime_error("database callback exceeded input");
+ 
+             if (size > len - bytesRead) size = len - bytesRead;
+ 
+             if (!syscallDispatch_memcpy_fromHost(
+                     sd, dataP, reinterpret_cast<uint8_t*>(data) + bytesRead, size)) {
+-                ERR("memory error copying DB data");
++                throw std::runtime_error("memory error copying DB data");
+             }
+ 
+-            paceSet32(sizeP, size);
++            const uint8_t sizeBytes[]{uint8_t(size >> 24), uint8_t(size >> 16), uint8_t(size >> 8), uint8_t(size)};
++            if (!syscallDispatch_memcpy_fromHost(sd, sizeP, sizeBytes, sizeof(sizeBytes)))
++                throw std::runtime_error("memory error returning DB read size");
+ 
+             bytesRead += size;
+             paceSetDreg(0, 0);
+-        });
++        }, 12);
+ 
+     Defer unregisterStubs([=]() {
+         syscallDispatchUnregisterM68kStub(sd, readProcP);
+@@ -77,8 +82,10 @@
+                                         needsResetP, true);
+     bool needsReset = paceGet8(needsResetP);
+ 
++    syscallDispatchUnregisterM68kStub(sd, readProcP);
++    syscallDispatchUnregisterM68kStub(sd, deleteProcP);
+     if (syscall68k_MemPtrFree(sd, SC_EXECUTE_PURE, scratch) != 0)
+-        ERR("failed to release scratch memory");
++        throw std::runtime_error("failed to release scratch memory");
+ 
+     if (couldNotOverwrite) return DB_INSTALL_RESULT_ERR_COULD_NOT_OVERWRITE;
+ 
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -540,6 +540,9 @@
+         ERR("failed to restore sleep-reset domains");
+ 
+     pxaPwrClkFinishSleep(pwrClk);
++    if (GetDeviceType() == DeviceType5::deviceTypeTG50)
++        pacePatchInitTg50(pacePatch, ROM_BASE, romGetData(rom),
++                         romGetPeepholeBuffer(rom), romGetSize(rom));
+     // The boot code clears RAM before it enables SDRAM; on hardware those writes are
+     // lost while SDRAM is still in self-refresh.
+     pxaMemCtrlrHoldSdram(memCtrl);
+@@ -561,7 +564,7 @@
+ 
+ void SocPXA::OnSetAudioQueue(struct AudioQueue *audioQueue) {
+     if (fastAudio) fastAudio->SetQueue(audioQueue);
+-    deviceSetAudioQueue(dev, (fastAudioRouted || (fastAudio && fastAudio->OutputFenced())) ? nullptr : audioQueue);
++    deviceSetAudioQueue(dev, (tg50AudioCheckpointDepth || fastAudioRouted || (fastAudio && fastAudio->OutputFenced())) ? nullptr : audioQueue);
+ }
+ 
+ void SocPXA::OnSetPcmOutputEnabled() {
+@@ -905,8 +908,22 @@
+     };
+     std::shared_ptr<AudioScope> audio;
+     if(fastAudio)audio=std::make_shared<AudioScope>(*this,*fastAudio);
++    struct Tg50AudioScope {
++        SocPXA& soc;
++        explicit Tg50AudioScope(SocPXA& soc) : soc(soc) {
++            ++soc.tg50AudioCheckpointDepth;
++            soc.RestoreFastAudioRoute();
++        }
++        ~Tg50AudioScope() {
++            --soc.tg50AudioCheckpointDepth;
++            soc.RestoreFastAudioRoute();
++        }
++    };
++    std::shared_ptr<Tg50AudioScope> tg50Audio;
++    if (GetDeviceType() == DeviceType5::deviceTypeTG50)
++        tg50Audio = std::make_shared<Tg50AudioScope>(*this);
+     const uint64_t keyDownAt=powerKeyDownAt, heldSince=powerPressHeldSince;
+-    return [this, keypad, device, audio, keyDownAt, heldSince] {
++    return [this, keypad, device, audio, tg50Audio, keyDownAt, heldSince] {
+         if(audio)audio->Restore();keypad();device();
+         powerKeyDownAt=keyDownAt;powerPressHeldSince=heldSince;
+     };
+@@ -1167,7 +1184,7 @@
+     const bool bypass = fastAudio && fastAudio->Bypass();
+     if (bypass == fastAudioRouted) return;
+     fastAudioRouted = bypass;
+-    deviceSetAudioQueue(dev,(bypass || (fastAudio && fastAudio->OutputFenced())) ? nullptr : audioQueue);
++    deviceSetAudioQueue(dev,(tg50AudioCheckpointDepth || bypass || (fastAudio && fastAudio->OutputFenced())) ? nullptr : audioQueue);
+     UpdateSchedulePcm();
+     cpuSetSlowPath(cpu,SLOW_PATH_REASON_RESCHEDULE);
+ }
+@@ -1227,5 +1244,5 @@
+ 
+ void SocPXA::RestoreFastAudioRoute() {
+     fastAudioRouted=fastAudio && fastAudio->Bypass();
+-    deviceSetAudioQueue(dev,(fastAudioRouted || (fastAudio && fastAudio->OutputFenced())) ? nullptr : audioQueue);
+-}
++    deviceSetAudioQueue(dev,(tg50AudioCheckpointDepth || fastAudioRouted || (fastAudio && fastAudio->OutputFenced())) ? nullptr : audioQueue);
++}
+--- a/src/uarm/uarm/soc_PXA.h
++++ b/src/uarm/uarm/soc_PXA.h
+@@ -194,6 +194,7 @@
+     uint8_t socRev{0};
+     UsbHostHooks usbHostHooks{};
+     unsigned usbHostPaused{0};
++    unsigned tg50AudioCheckpointDepth{0};
+     bool serialResumePending{false};
+ 
+     PxaUart *ffUart{nullptr}, *hwUart{nullptr}, *stUart{nullptr}, *btUart{nullptr};
+--- a/src/uarm/uarm/syscall_dispatch.cpp
++++ b/src/uarm/uarm/syscall_dispatch.cpp
+@@ -5,6 +5,11 @@
+ #include <cstring>
+ #include <iostream>
+ #include <stdexcept>
++#include <exception>
++#include <memory>
++#ifndef __EMSCRIPTEN__
++#include "tg50_pace_session.h"
++#endif
+ 
+ #include "CPU.h"
+ #include "Defer.h"
+@@ -97,6 +102,8 @@
+ #ifndef __EMSCRIPTEN__
+     bool recoverable{false};
+     bool failed{false};
++    std::unique_ptr<Tg50Pace::Session> tg50;
++    std::exception_ptr tg50CallbackError;
+ #endif
+ };
+ 
+@@ -112,11 +119,23 @@
+ #ifndef __EMSCRIPTEN__
+ void syscallDispatchBeginRecovery(struct SyscallDispatch* sd) {
+     if (sd->nestLevel || sd->recoverable) ERR("nested injected-call recovery scope");
++    if (sd->soc->GetDeviceType() == DeviceType5::deviceTypeTG50)
++        sd->tg50 = std::make_unique<Tg50Pace::Session>(*sd->soc);
+     sd->recoverable = true;
+     sd->failed = false;
+ }
+ bool syscallDispatchRecoveryActive(struct SyscallDispatch* sd) { return sd->recoverable; }
++void syscallDispatchValidateCommit(struct SyscallDispatch* sd) {
++    if (sd->tg50) {
++        if (sd->failed || sd->nestLevel || sd->tg50CallbackError)
++            throw std::runtime_error("TG50 transaction is unfinished or failed");
++        sd->tg50->Close();
++    }
++}
+ void syscallDispatchEndRecovery(struct SyscallDispatch* sd) {
++    if (sd->tg50) sd->tg50->AbortHandlers();
++    sd->tg50.reset();
++    sd->tg50CallbackError = nullptr;
+     cpuClearNativeRuntime(sd->soc->GetCpu());
+     sd->recoverable = false;
+     sd->failed = false;
+@@ -140,8 +159,22 @@
+ bool syscallDispatchM68kSupport(struct SyscallDispatch* sd) { return sd->soc->PrepareM68kSupport(); }
+ 
+ bool syscallDispatchPrepare(struct SyscallDispatch* sd) {
+-    // Interpreter layout does not establish Sony UI task and stack ownership.
+-    if (sd->soc->GetDeviceType() == DeviceType5::deviceTypeTG50) return false;
++    if (sd->soc->GetDeviceType() == DeviceType5::deviceTypeTG50) {
++#ifndef __EMSCRIPTEN__
++        try {
++            if (!Tg50Pace::OriginalLayout(*sd->soc)) return false;
++            if (sd->tg50) { sd->tg50->CheckOwner(); return true; }
++            if (sd->nestLevel || !syscallDispatchM68kSupport(sd)) return false;
++            if (!sd->soc->RunToPaceSyscall(SYSCALL_68K_EVT_GET_EVENT,
++                    PREPARE_INJECTED_CALL_TIMEOUT_SEC * PREPARE_INJECTED_CALL_IPS,
++                    PREPARE_INJECTED_CALL_IPS)) return false;
++            Tg50Pace::Boundary::Capture(*sd->soc, true);
++            return true;
++        } catch (const std::runtime_error&) { return false; }
++#else
++        return false;
++#endif
++    }
+     if (!syscallDispatchM68kSupport(sd)) return false;
+     if (sd->nestLevel > 0) ERR("syscallDispatchPrepare is only allowed on top level\n");
+ 
+@@ -150,9 +183,26 @@
+                                      PREPARE_INJECTED_CALL_IPS);
+ }
+ 
++void syscallDispatchValidateMemory(struct SyscallDispatch* sd, uint32_t address, size_t size, bool write) {
++#ifndef __EMSCRIPTEN__
++    if (sd->soc->GetDeviceType() == DeviceType5::deviceTypeTG50) {
++        if (!sd->tg50 || !sd->recoverable || size > UINT32_MAX) {
++            if (sd->tg50) sd->tg50->Fail();
++            sd->failed = true;
++            throw std::runtime_error("TG50 transfer needs an active guest transaction");
++        }
++        sd->tg50->BeforeTransfer(address, uint32_t(size), write);
++    }
++#else
++    if (sd->soc->GetDeviceType() == DeviceType5::deviceTypeTG50)
++        throw std::runtime_error("TG50 guest transfers are unavailable in this build");
++#endif
++}
++
+ bool syscallDispatch_strncpy_toHost(struct SyscallDispatch* sd, void* dest, uint32_t src,
+                                     size_t maxLen) {
+     struct ArmCpu* cpu = sd->soc->GetCpu();
++    syscallDispatchValidateMemory(sd, src, maxLen, false);
+     memset(dest, 0, maxLen);
+ 
+     for (size_t i = 0; i < maxLen; i++) {
+@@ -170,6 +220,17 @@
+                                      size_t size) {
+     struct ArmCpu* cpu = sd->soc->GetCpu();
+     MemcpyResult memcpyResult;
++    syscallDispatchValidateMemory(sd, dest, size);
++#ifndef __EMSCRIPTEN__
++    if (sd->tg50) {
++        if (!cpuNativeBuffer(cpu, dest, const_cast<void*>(src), size, true, false)) {
++            sd->failed = true;
++            sd->tg50->Fail();
++            throw std::runtime_error("TG50 guest write failed");
++        }
++        return true;
++    }
++#endif
+     memcpy_hostToArm(dest, reinterpret_cast<const uint8_t*>(src), size, true, cpu, &memcpyResult);
+ 
+     return memcpyResult.ok;
+@@ -179,6 +240,17 @@
+                                    size_t size) {
+     struct ArmCpu* cpu = sd->soc->GetCpu();
+     MemcpyResult memcpyResult;
++    syscallDispatchValidateMemory(sd, src, size, false);
++#ifndef __EMSCRIPTEN__
++    if (sd->tg50) {
++        if (!cpuNativeBuffer(cpu, src, dest, size, false, false)) {
++            sd->failed = true;
++            sd->tg50->Fail();
++            throw std::runtime_error("TG50 guest read failed");
++        }
++        return true;
++    }
++#endif
+     memcpy_armToHost(reinterpret_cast<uint8_t*>(dest), src, size, true, cpu, &memcpyResult);
+ 
+     return memcpyResult.ok;
+@@ -186,11 +258,25 @@
+ 
+ static size_t pushState(struct SyscallDispatch* sd, ScratchState::Type type) {
+ #ifndef __EMSCRIPTEN__
++    if (sd->soc->GetDeviceType() == DeviceType5::deviceTypeTG50) {
++        if (!sd->tg50 || !sd->recoverable)
++            throw std::runtime_error("TG50 call needs an active guest transaction");
++        sd->tg50->BeforeCall();
++    }
++#else
+     if (sd->soc->GetDeviceType() == DeviceType5::deviceTypeTG50)
+-        throw std::runtime_error("TG50 UI call boundary is unqualified");
+-#endif
+-    if (sd->nestLevel >= MAX_NEST_LEVEL)
++        throw std::runtime_error("TG50 guest calls are unavailable in this build");
++#endif
++    if (sd->nestLevel >= MAX_NEST_LEVEL) {
++#ifndef __EMSCRIPTEN__
++        if (sd->tg50) {
++            sd->failed = true;
++            sd->tg50->Fail();
++            throw std::runtime_error("TG50 injected call nesting limit exceeded");
++        }
++#endif
+         ERR("unable to dispatch syscall: max nest level reached\n");
++    }
+ 
+     const uint32_t nestLevel = sd->nestLevel++;
+     sd->scratchStates[nestLevel].Save(type);
+@@ -199,40 +285,118 @@
+ }
+ 
+ static void popState(struct SyscallDispatch* sd, size_t nestLevel) {
+-    if (sd->nestLevel != nestLevel + 1) ERR("bad nest level\n");
++    if (sd->nestLevel != nestLevel + 1) {
++#ifndef __EMSCRIPTEN__
++        if (sd->tg50) {
++            sd->failed = true;
++            sd->tg50->Fail();
++            throw std::runtime_error("TG50 injected call nesting state changed");
++        }
++#endif
++        ERR("bad nest level\n");
++    }
+ 
+     sd->scratchStates[nestLevel].Restore();
+     sd->nestLevel--;
+ }
+ 
+ void syscallDispatchRegisterM68kStub(struct SyscallDispatch* sd, uint32_t trampoline,
+-                                     M68kStub stub) {
+-#ifndef __EMSCRIPTEN__
++                                     M68kStub stub, uint32_t argumentBytes) {
++#ifndef __EMSCRIPTEN__
++    if (sd->soc->GetDeviceType() == DeviceType5::deviceTypeTG50) {
++        if (!sd->tg50 || !sd->recoverable)
++            throw std::runtime_error("TG50 callback needs an active guest transaction");
++        sd->tg50->Register(trampoline, argumentBytes);
++    }
++#else
+     if (sd->soc->GetDeviceType() == DeviceType5::deviceTypeTG50)
+-        throw std::runtime_error("TG50 UI call boundary is unqualified");
++        throw std::runtime_error("TG50 guest callbacks are unavailable in this build");
+ #endif
+     M68kTrapHandler trapHandler = [=](struct ArmCpu* cpu, uint32_t address) -> bool {
++#ifndef __EMSCRIPTEN__
++        if (sd->tg50) {
++            try {
++                const uint32_t sp = sd->tg50->BeforeCallback(address);
++                stub(cpu, sp + 4, [=]() { sd->deadMansSwitch = true; });
++                sd->tg50->AfterCallback(address, sp);
++                paceSetAreg(7, sp + 4);
++                paceSetPC(PACE_RETURN_MAGIC_PC);
++            } catch (...) {
++                sd->tg50CallbackError = std::current_exception();
++                sd->failed = true;
++                sd->tg50->Fail();
++                cpuSetSlowPath(cpu, SLOW_PATH_REASON_NATIVE_FAULT);
++            }
++            return true;
++        }
++#endif
+         const uint32_t sp = paceGetAreg(7);
+         const uint32_t returnAddress = paceGet32(sp);
+-
+         stub(cpu, sp + 4, [=]() { sd->deadMansSwitch = true; });
+-
+         paceSetAreg(7, sp + 4);
+         paceSetPC(returnAddress);
+-
+         return true;
+     };
+-
+-    paceSet16(trampoline, INSTRUCTION_M68K_TRAP0);
++#ifndef __EMSCRIPTEN__
++    if (sd->tg50) {
++        const uint8_t instruction[]{0x4e, 0x40};
++        syscallDispatch_memcpy_fromHost(sd, trampoline, instruction, sizeof(instruction));
++    } else
++#endif
++        paceSet16(trampoline, INSTRUCTION_M68K_TRAP0);
+     cpuAddM68kTrap0Handler(sd->soc->GetCpu(), trampoline, trapHandler);
+ }
+ 
+ void syscallDispatchUnregisterM68kStub(struct SyscallDispatch* sd, uint32_t trampoline) {
++#ifndef __EMSCRIPTEN__
++    if (sd->tg50) {
++        if (sd->failed || std::uncaught_exceptions()) sd->tg50->Fail();
++        sd->tg50->Unregister(trampoline);
++        return;
++    }
++#endif
+     cpuRemoveM68kTrap0Handler(sd->soc->GetCpu(), trampoline);
+ }
+ 
+-static bool executeInjectedCall(class SoC* soc, uint32_t flags) {
++static bool executeInjectedCall(struct SyscallDispatch* sd, uint32_t flags) {
++    auto* soc = sd->soc;
+     struct ArmCpu* cpu = soc->GetCpu();
++#ifndef __EMSCRIPTEN__
++    if (sd->tg50) {
++        auto& budget = sd->tg50->ExecutionBudget();
++        const uint64_t localStart = soc->GetInjectedTimeNsec();
++        uint64_t pureCycles = 0;
++        while (true) {
++            const uint64_t slice = budget.Slice(soc->GetInjectedTimeNsec());
++            bool complete = false;
++            if (flags & SC_EXECUTE_FULL) {
++                const uint64_t before = soc->GetInjectedTimeNsec();
++                complete = soc->ExecuteInjected(slice, INJECTED_CALL_IPS);
++                const uint64_t elapsed = soc->GetInjectedTimeNsec() - before;
++                // At 100 MHz each completed cycle contributes exactly10 ns.
++                // Nested execution is conservatively counted by both scopes.
++                budget.Charge(elapsed / 10, soc->GetInjectedTimeNsec());
++            } else {
++                uint64_t cycles = 0;
++                uint32_t instructions = 0;
++                do {
++                    cycles += cpuCyclePure(cpu);
++                    if (cpuGetSlowPathReason(cpu) &
++                        (SLOW_PATH_REASON_INJECTED_CALL_DONE | SLOW_PATH_REASON_NATIVE_FAULT)) break;
++                    if (!(++instructions & 1023)) budget.Check(soc->GetInjectedTimeNsec());
++                } while (cycles < slice);
++                pureCycles += cycles;
++                budget.Charge(cycles, soc->GetInjectedTimeNsec());
++                complete = cpuGetSlowPathReason(cpu) & SLOW_PATH_REASON_INJECTED_CALL_DONE;
++            }
++            if (sd->tg50CallbackError) std::rethrow_exception(sd->tg50CallbackError);
++            if (complete) return true;
++            budget.Check(soc->GetInjectedTimeNsec());
++            if (soc->GetInjectedTimeNsec() - localStart >= 4000000000ull ||
++                pureCycles >= INJECTED_CALL_TIMEOUT_SEC * INJECTED_CALL_IPS) return false;
++        }
++    }
++#endif
+ 
+     if (flags & SC_EXECUTE_FULL) {
+         if (soc->ExecuteInjected(INJECTED_CALL_TIMEOUT_SEC * INJECTED_CALL_IPS,
+@@ -251,10 +415,20 @@
+     return false;
+ }
+ 
++static void rejectTg50NativeCall(struct SyscallDispatch* sd) {
++    if (sd->soc->GetDeviceType() != DeviceType5::deviceTypeTG50) return;
++#ifndef __EMSCRIPTEN__
++    if (sd->tg50) sd->tg50->Fail();
++    sd->failed = true;
++#endif
++    throw std::runtime_error("TG50 native ARM injection is unqualified");
++}
++
+ static void executeInjectedSyscall(struct SyscallDispatch* sd, uint32_t flags, uint16_t syscall) {
++    rejectTg50NativeCall(sd);
+     cpuStartInjectedSyscall(sd->soc->GetCpu(), syscall);
+ 
+-    if (!executeInjectedCall(sd->soc, flags)) {
++    if (!executeInjectedCall(sd, flags)) {
+         injectedCallTimeout(sd);
+     }
+ }
+@@ -271,7 +445,7 @@
+         const uint32_t nandWriteCnt = nand ? nandGetWriteCnt(nand) : 0;
+         sd->deadMansSwitch = false;
+ 
+-        if (executeInjectedCall(sd->soc, flags)) break;
++        if (executeInjectedCall(sd, flags)) break;
+         if (sd->deadMansSwitch || (nand && nandGetWriteCnt(nand) != nandWriteCnt)) continue;
+ 
+         injectedCallTimeout(sd);
+@@ -287,6 +461,7 @@
+ }
+ 
+ uint16_t syscall_SysSetAutoOffTime(struct SyscallDispatch* sd, uint32_t flags, uint32_t timeout) {
++    rejectTg50NativeCall(sd);
+     const size_t nestLevel = pushState(sd, nativeCallPushType(flags));
+     uint32_t* registers = cpuGetRegisters(sd->soc->GetCpu());
+ 
+@@ -300,6 +475,7 @@
+ }
+ 
+ uint16_t syscall_MemPtrNew(struct SyscallDispatch* sd, uint32_t flags, uint32_t size) {
++    rejectTg50NativeCall(sd);
+     const size_t nestLevel = pushState(sd, nativeCallPushType(flags));
+     uint32_t* registers = cpuGetRegisters(sd->soc->GetCpu());
+ 
+@@ -313,6 +489,7 @@
+ }
+ 
+ uint16_t syscall_MemPtrFree(struct SyscallDispatch* sd, uint32_t flags, uint32_t ptr) {
++    rejectTg50NativeCall(sd);
+     const size_t nestLevel = pushState(sd, nativeCallPushType(flags));
+     uint32_t* registers = cpuGetRegisters(sd->soc->GetCpu());
+ 
+@@ -327,6 +504,7 @@
+ 
+ uint16_t syscall_FtrGet(struct SyscallDispatch* sd, uint32_t flags, uint32_t creator,
+                         uint16_t ftrNum, uint32_t valueP) {
++    rejectTg50NativeCall(sd);
+     const size_t nestLevel = pushState(sd, nativeCallPushType(flags));
+     uint32_t* registers = cpuGetRegisters(sd->soc->GetCpu());
+ 
+@@ -343,6 +521,7 @@
+ 
+ uint16_t syscall_FtrSet(struct SyscallDispatch* sd, uint32_t flags, uint32_t creator,
+                         uint16_t ftrNum, uint32_t value) {
++    rejectTg50NativeCall(sd);
+     const size_t nestLevel = pushState(sd, nativeCallPushType(flags));
+     uint32_t* registers = cpuGetRegisters(sd->soc->GetCpu());
+ 
+@@ -371,13 +550,22 @@
+         if (flags & SC_EXECUTE_FULL) sd->soc->SuspendTimerInterrupts(false);
+     });
+ 
+-    setupStack();
+-    executeInjectedSyscall68k(sd, flags, syscall);
+-    const uint32_t result = returnPtr ? paceGetAreg(0) : paceGetDreg(0);
+-
+-    popState(sd, nestLevel);
+-
+-    return result;
++    try {
++        setupStack();
++        executeInjectedSyscall68k(sd, flags, syscall);
++        const uint32_t result = returnPtr ? paceGetAreg(0) : paceGetDreg(0);
++        popState(sd, nestLevel);
++#ifndef __EMSCRIPTEN__
++        if (sd->tg50) sd->tg50->AfterCall();
++#endif
++        return result;
++    } catch (...) {
++#ifndef __EMSCRIPTEN__
++        sd->failed = true;
++        if (sd->tg50) sd->tg50->Fail();
++#endif
++        throw;
++    }
+ }
+ 
+ uint32_t syscall68k_SysGetOsVersionString(struct SyscallDispatch* sd, uint32_t flags) {
+@@ -385,11 +573,38 @@
+ }
+ 
+ uint32_t syscall68k_MemPtrNew(struct SyscallDispatch* sd, uint32_t flags, uint32_t size) {
+-    return syscall68k(sd, flags, SYSCALL_68K_MEM_PTR_NEW, true, [=]() { pacePush32(size); });
++    const uint32_t result = syscall68k(sd, flags, SYSCALL_68K_MEM_PTR_NEW, true, [=]() { pacePush32(size); });
++#ifndef __EMSCRIPTEN__
++    if (sd->tg50) sd->tg50->AddAllocation(result, size);
++#endif
++    return result;
+ }
+ 
+ uint16_t syscall68k_MemPtrFree(struct SyscallDispatch* sd, uint32_t flags, uint32_t memPtr) {
+-    return syscall68k(sd, flags, SYSCALL_68K_MEM_CHUNK_FREE, false, [=]() { pacePush32(memPtr); });
++#ifndef __EMSCRIPTEN__
++    if (sd->failed) return 0;
++    if (sd->tg50) {
++        if (std::uncaught_exceptions()) {
++            sd->failed = true;
++            sd->tg50->Fail();
++            return 0;
++        }
++        try {
++            sd->tg50->BeforeFree(memPtr);
++            const uint16_t result = syscall68k(sd, flags, SYSCALL_68K_MEM_CHUNK_FREE,
++                                               false, [=]() { pacePush32(memPtr); });
++            sd->tg50->AfterFree(memPtr, result);
++            return result;
++        } catch (...) {
++            // Defer cleanup cannot throw. Close reports the latched failure before publication.
++            sd->failed = true;
++            sd->tg50->Fail();
++            return 0;
++        }
++    }
++#endif
++    return syscall68k(sd, flags, SYSCALL_68K_MEM_CHUNK_FREE, false,
++                       [=]() { pacePush32(memPtr); });
+ }
+ 
+ uint16_t syscall68k_MemNumCards(struct SyscallDispatch* sd, uint32_t flags) {
+--- a/src/uarm/uarm/syscall_dispatch.h
++++ b/src/uarm/uarm/syscall_dispatch.h
+@@ -2,6 +2,7 @@
+ #define _SYSCALL_DISPATCH_H_
+ 
+ #include <cstdint>
++#include <cstddef>
+ #include <functional>
+ 
+ #define SC_EXECUTE_PURE 0
+@@ -16,6 +17,7 @@
+ };
+ void syscallDispatchBeginRecovery(struct SyscallDispatch* sd);
+ void syscallDispatchEndRecovery(struct SyscallDispatch* sd);
++void syscallDispatchValidateCommit(struct SyscallDispatch* sd);
+ bool syscallDispatchRecoveryActive(struct SyscallDispatch* sd);
+ #endif
+ 
+@@ -29,6 +31,8 @@
+ 
+ bool syscallDispatchM68kSupport(struct SyscallDispatch* sd);
+ bool syscallDispatchPrepare(struct SyscallDispatch* sd);
++
++void syscallDispatchValidateMemory(struct SyscallDispatch*, uint32_t address, size_t size, bool write = true);
+ 
+ bool syscallDispatch_strncpy_toHost(struct SyscallDispatch* sd, void* dest, uint32_t src,
+                                     size_t maxlen);
+@@ -78,7 +82,7 @@
+ using M68kStub = std::function<void(struct ArmCpu*, uint32_t parameterBase,
+                                     std::function<void()> deadMansSwitch)>;
+ void syscallDispatchRegisterM68kStub(struct SyscallDispatch* sd, uint32_t trampoline,
+-                                     M68kStub stub);
++                                     M68kStub stub, uint32_t argumentBytes = 0);
+ void syscallDispatchUnregisterM68kStub(struct SyscallDispatch* sd, uint32_t trampoline);
+ 
+ #endif  // _SYSCALL_DISPATCH_H_
+--- /dev/null
++++ b/src/uarm/uarm/tg50_call_budget.h
+@@ -0,0 +1,51 @@
++#ifndef FROND_TG50_CALL_BUDGET_H
++#define FROND_TG50_CALL_BUDGET_H
++
++#include <chrono>
++#include <cstdint>
++#include <stdexcept>
++
++namespace Tg50Pace {
++class Budget {
++ public:
++    using Clock = std::chrono::steady_clock;
++    explicit Budget(uint64_t guestTime, Clock::time_point now = Clock::now())
++        : started(now), startedGuest(guestTime) {}
++
++    void Check(uint64_t guestTime, Clock::time_point now = Clock::now()) const {
++        Require(now >= started && now - started < std::chrono::seconds(30),
++                "TG50 transaction host deadline exceeded");
++        Require(guestTime >= startedGuest && guestTime - startedGuest < 20000000000ull,
++                "TG50 transaction guest deadline exceeded");
++        Require(cycles < 1000000000ull, "TG50 transaction cycle limit exceeded");
++    }
++    void EnterCall(uint64_t guestTime) {
++        Check(guestTime);
++        Require(++calls <= 100000, "TG50 transaction call limit exceeded");
++    }
++    void EnterCallback(uint64_t guestTime) {
++        Check(guestTime);
++        Require(++callbacks <= 65536, "TG50 transaction callback limit exceeded");
++    }
++    void Charge(uint64_t completedCycles, uint64_t guestTime) {
++        Require(completedCycles <= 1000000000ull - cycles,
++                "TG50 transaction cycle limit exceeded");
++        cycles += completedCycles;
++        Check(guestTime);
++    }
++    uint64_t Slice(uint64_t guestTime) const {
++        Check(guestTime);
++        const uint64_t remaining = 1000000000ull - cycles;
++        return remaining < 1000000 ? remaining : 1000000;
++    }
++
++ private:
++    static void Require(bool ok, const char* why) {
++        if (!ok) throw std::runtime_error(why);
++    }
++    Clock::time_point started;
++    uint64_t startedGuest, cycles{0};
++    uint32_t calls{0}, callbacks{0};
++};
++}
++#endif
+--- /dev/null
++++ b/src/uarm/uarm/tg50_pace_boundary.h
+@@ -0,0 +1,271 @@
++#ifndef FROND_TG50_PACE_BOUNDARY_H
++#define FROND_TG50_PACE_BOUNDARY_H
++
++#include <array>
++#include <cstdint>
++#include <cstring>
++#include <stdexcept>
++#include "CPU.h"
++#include "MMU.h"
++#include "SoC.h"
++#include "pace.h"
++#include "pace_patch.h"
++
++namespace Tg50Pace {
++inline void Require(bool ok, const char* why) {
++    if (!ok) throw std::runtime_error(why);
++}
++inline uint32_t Word(ArmCpu* cpu, uint32_t address) {
++    uint32_t value;
++    Require(cpuInspectRead(cpu, address, &value, 4), "TG50 unmapped context word");
++    return value;
++}
++inline uint32_t BigWord(ArmCpu* cpu, uint32_t address) {
++    uint8_t bytes[4];
++    Require(cpuInspectRead(cpu, address, bytes, 4), "TG50 unmapped 68k context word");
++    return uint32_t(bytes[0]) << 24 | uint32_t(bytes[1]) << 16 |
++           uint32_t(bytes[2]) << 8 | bytes[3];
++}
++inline uint8_t Byte(ArmCpu* cpu, uint32_t address) {
++    uint8_t value;
++    Require(cpuInspectRead(cpu, address, &value, 1), "TG50 unmapped context byte");
++    return value;
++}
++inline uint32_t Pointer(ArmCpu* cpu, uint32_t address, uint32_t bytes) {
++    uint32_t value = Word(cpu, address);
++    Require(value && !(value & 3) && cpuInspectRamRange(cpu, value, bytes),
++            "TG50 invalid context pointer");
++    return value;
++}
++struct Range {
++    uint32_t first{}, last{};
++    bool Contains(uint32_t address, uint32_t bytes) const {
++        return bytes && address >= first && uint64_t(address) + bytes <= uint64_t(last) + 1;
++    }
++    void Validate(ArmCpu* cpu) const {
++        Require(first && !(first & 3) && first < last &&
++                uint64_t(last) - first < 16 * 1024 * 1024 &&
++                cpuInspectWritableRamRange(cpu, first, last - first + 1, false), "TG50 invalid owned stack");
++    }
++    bool operator==(const Range& r) const { return first == r.first && last == r.last; }
++};
++
++// These instruction paths establish the original context and stack fields.
++inline bool OriginalLayout(SoC& soc) {
++    const Buffer rom = soc.GetRomData();
++    if (!rom.data || rom.size != 0xc70000) return false;
++    const auto* original = static_cast<const uint8_t*>(rom.data);
++    static const uint8_t currentContext[] = {
++        0x38,0x40,0x2d,0xe9,0x01,0x50,0xa0,0xe1,0x00,0x40,0xa0,0xe1,0xed,0x22,0x00,0xeb,
++        0x3c,0x10,0x90,0xe5,0x00,0x00,0x51,0xe3,0x00,0x10,0x84,0x15,0x00,0x00,0x85,0x15,
++        0x00,0x10,0xa0,0x03,0x00,0x10,0x85,0x05,0x00,0x00,0x84,0x05,0x38,0x40,0xbd,0xe8,
++        0x1e,0xff,0x2f,0xe1,
++    };
++    if (memcmp(original + 0x96908, currentContext, sizeof(currentContext))) return false;
++    static const uint8_t tlsInfo[] = {
++        0x04,0xe0,0x2d,0xe5,0x2c,0xd0,0x4d,0xe2,0x28,0x00,0x8d,0xe2,0xe5,0x35,0x00,0xeb,
++        0x04,0x10,0x8d,0xe2,0x28,0x00,0x9d,0xe5,0xe4,0x35,0x00,0xeb,0x04,0x00,0x9d,0xe5,
++        0x2c,0xd0,0x8d,0xe2,0x04,0xe0,0x9d,0xe4,0x1e,0xff,0x2f,0xe1,
++    };
++    if (memcmp(original + 0x9f1c4, tlsInfo, sizeof(tlsInfo))) return false;
++    static const uint8_t tlsSlot[] = {
++        0x38,0x40,0x2d,0xe9,0x00,0x40,0xa0,0xe1,0x51,0xff,0xff,0xeb,0x00,0x50,0xb0,0xe1,
++        0x0b,0x00,0x00,0x0a,0x01,0x00,0x74,0xe3,0x04,0x00,0x95,0x05,0x09,0x00,0x00,0x0a,
++        0x04,0x00,0xa0,0xe1,0x84,0x00,0x00,0xeb,0x00,0x00,0x50,0xe3,0x00,0x00,0x95,0x15,
++        0x00,0x10,0x90,0x15,0x04,0x00,0x51,0x11,0x04,0x01,0x80,0x80,0x04,0x00,0x90,0x85,
++        0x00,0x00,0x00,0x8a,0x00,0x00,0xa0,0xe3,0x38,0x40,0xbd,0xe8,0x1e,0xff,0x2f,0xe1,
++        0x20,0x00,0x50,0xe3,0xe9,0xff,0xff,0x3a,0x00,0x00,0xa0,0x23,0x1e,0xff,0x2f,0xe1,
++        0x00,0x00,0xe0,0xe3,0xe5,0xff,0xff,0xea,
++    };
++    if (memcmp(original + 0x9f470, tlsSlot, sizeof(tlsSlot))) return false;
++    static const uint8_t currentId[] = {
++        0x10,0xb5,0x04,0x1c,0x30,0xd0,0x49,0x46,0x09,0x68,0x09,0x68,0x6d,0x48,0x40,0x18,
++        0x40,0x69,0x6c,0x49,0x40,0x18,0x00,0x78,0x04,0x28,0x02,0xd1,0x00,0x20,0x20,0x80,
++        0x22,0xe0,0x00,0x20,0x4a,0x46,0x12,0x68,0x12,0x68,0x65,0x49,0x89,0x18,0x49,0x69,
++        0x87,0x22,0x92,0x01,0x89,0x18,0x49,0x68,0x00,0x29,0x14,0xd0,0x4a,0x46,0x12,0x68,
++        0x12,0x68,0x5f,0x48,0x80,0x18,0x40,0x69,0x87,0x22,0x92,0x01,0x80,0x18,0x40,0x68,
++        0x4b,0x46,0x1b,0x68,0x1b,0x68,0x5a,0x4a,0xd2,0x18,0x52,0x69,0x81,0x1a,0x90,0x20,
++        0x01,0xf0,0x6d,0xfd,0x01,0x30,0x20,0x80,0x00,0x20,0x10,0xbc,0x08,0xbc,0x18,0x47,
++    };
++    if (memcmp(original + 0x3af6e, currentId, sizeof(currentId))) return false;
++    static const uint8_t taskInfo[] = {
++        0x49,0x46,0x09,0x68,0x09,0x68,0x2f,0x48,0x40,0x18,0x40,0x69,0x90,0x21,0x71,0x43,
++        0x40,0x18,0x05,0x1c,0x90,0x3d,0x68,0x7e,0x00,0x28,0x02,0xd1,0x0b,0x20,0xc0,0x43,
++        0xad,0xe7,0x28,0x68,0x20,0x60,0x68,0x68,0x60,0x60,0xa8,0x68,0xa0,0x60,0xe8,0x68,
++        0xe0,0x60,0x28,0x69,0x20,0x61,0x28,0x7d,0x20,0x75,0x68,0x7d,0x60,0x75,0x28,0x7e,
++        0xe0,0x82,0xe8,0x8a,0x20,0x83,0x68,0x7e,0xa0,0x76,0xa8,0x7e,0xe0,0x76,0xe8,0x7e,
++        0x20,0x77,0x00,0x20,0x93,0xe7,
++    };
++    if (memcmp(original + 0x3b06a, taskInfo, sizeof(taskInfo))) return false;
++    static const uint8_t kernelLiterals[] = {
++        0x98,0x00,0x00,0x00,0xd0,0x21,0x00,0x00,
++    };
++    if (memcmp(original + 0x3b130, kernelLiterals, sizeof(kernelLiterals))) return false;
++    static const uint8_t paceGetContext[] = {
++        0x0e,0x40,0x2d,0xe9,0x08,0x10,0x8d,0xe2,0x04,0x00,0x8d,0xe2,0x3c,0xb0,0x00,0xeb,
++        0x04,0x00,0x9d,0xe5,0x0c,0x00,0x90,0xe5,0x00,0x00,0x50,0xe3,0xe3,0xff,0xff,0x0b,
++        0x0e,0x40,0xbd,0xe8,0x1e,0xff,0x2f,0xe1,
++    };
++    if (memcmp(original + 0xde100, paceGetContext, sizeof(paceGetContext))) return false;
++    static const uint8_t paceStack[] = {
++        0xfe,0x00,0xa0,0xe3,0x00,0x00,0xc4,0xe5,0x94,0x00,0x86,0xe2,0x04,0x20,0xa0,0xe1,
++        0x00,0x10,0xa0,0xe3,0x69,0xbd,0xff,0xeb,0x05,0x50,0x84,0xe0,0x01,0x20,0x45,0xe2,
++        0x00,0x10,0xa0,0xe3,0xac,0x00,0x86,0xe2,0x64,0xbd,0xff,0xeb,0x40,0x50,0x86,0xe5,
++        0x00,0x40,0x87,0xe5,0x00,0x00,0xa0,0xe3,
++    };
++    if (memcmp(original + 0xee0dc, paceStack, sizeof(paceStack))) return false;
++    static const uint8_t nativeStack[] = {
++        0x80,0x2f,0xa0,0xe3,0x00,0x00,0xa0,0xe3,0x54,0x10,0x9d,0xe5,0x22,0x5b,0x00,0xeb,
++        0x3c,0x10,0x9d,0xe5,0x00,0x50,0xb0,0xe1,0x18,0x00,0x81,0xe5,0x01,0x00,0x00,0x1a,
++        0x24,0x79,0x1f,0xe5,0xb3,0x00,0x00,0xea,0x54,0x00,0x9d,0xe5,0x05,0x00,0x80,0xe0,
++        0x01,0x00,0x40,0xe2,0x34,0x00,0x81,0xe5,
++    };
++    if (memcmp(original + 0x96ba4, nativeStack, sizeof(nativeStack))) return false;
++    static const uint8_t paceWrapper[] = {
++        0x70,0x40,0x2d,0xe9,0x80,0xd0,0x4d,0xe2,0x74,0x60,0x90,0xe5,0x74,0xd0,0x80,0xe5,
++        0x00,0x40,0xa0,0xe1,0x01,0x00,0xa0,0xe3,0x70,0x00,0xc4,0xe5,0x0d,0x00,0xa0,0xe1,
++        0x33,0x07,0x00,0xeb,0x00,0x50,0xb0,0xe1,0x00,0x00,0xa0,0x13,0x70,0x00,0xc4,0x15,
++        0x01,0x00,0x00,0x1a,0x04,0x00,0xa0,0xe1,0xfe,0xe6,0xff,0xeb,0x05,0x08,0xa0,0xe1,
++        0x74,0x60,0x84,0xe5,0x80,0xd0,0x8d,0xe2,0x70,0x40,0xbd,0xe8,0x20,0x08,0xa0,0xe1,
++        0x1e,0xff,0x2f,0xe1,
++    };
++    if (memcmp(original + 0x10642c, paceWrapper, sizeof(paceWrapper))) return false;
++    static const uint8_t contextVeneer[] = {
++        0x11,0xdf,0x00,0xea,
++    };
++    if (memcmp(original + 0x5ecbc, contextVeneer, sizeof(contextVeneer))) return false;
++    static const uint8_t kalVeneers[] = {
++        0x32,0x91,0x00,0xea,0x35,0x91,0x00,0xea,
++    };
++    if (memcmp(original + 0x209d8, kalVeneers, sizeof(kalVeneers))) return false;
++    static const uint8_t kalArmSwitch[] = {
++        0x04,0xc0,0x9f,0xe5,0x0f,0xc0,0x8c,0xe0,0x1c,0xff,0x2f,0xe1,0xc5,0x70,0xff,0xff,
++        0x04,0xc0,0x9f,0xe5,0x0f,0xc0,0x8c,0xe0,0x1c,0xff,0x2f,0xe1,0xcd,0x70,0xff,0xff,
++    };
++    if (memcmp(original + 0x44ea8, kalArmSwitch, sizeof(kalArmSwitch))) return false;
++    static const uint8_t kalCurrentInfo[] = {
++        0x98,0xb5,0x04,0x1c,0x68,0x46,0x11,0xdf,0x00,0xab,0x00,0x20,0x18,0x5e,0x20,0x60,
++        0x00,0x20,0x98,0xbc,0x08,0xbc,0x18,0x47,0x70,0xb5,0x88,0xb0,0x06,0x1c,0x0c,0x1c,
++        0x69,0x46,0x30,0x04,0x00,0x14,0x0d,0xdf,0x05,0x1c,0x43,0xd1,
++    };
++    if (memcmp(original + 0x3bf78, kalCurrentInfo, sizeof(kalCurrentInfo))) return false;
++    static const uint8_t swiDispatch[] = {
++        0x00,0xc0,0x4f,0xe1,0x00,0x50,0x2d,0xe9,0x20,0xc0,0x1c,0xe2,0x08,0x00,0x00,0x1a,
++        0x04,0xc0,0x1e,0xe5,0xff,0xc4,0xcc,0xe3,0x48,0xe9,0x4c,0xe2,0xd1,0xed,0x4e,0xe2,
++        0x16,0x00,0x5e,0xe3,0x0c,0x00,0x00,0x0a,0x17,0x00,0x5e,0xe3,0x0d,0x00,0x00,0x1a,
++        0x05,0x00,0x00,0xea,0xb2,0xc0,0x5e,0xe1,0xff,0xc0,0x0c,0xe2,0xab,0x00,0x5c,0xe3,
++        0x05,0x00,0x00,0x0a,0xac,0x00,0x5c,0xe3,0x06,0x00,0x00,0x1a,0x00,0x00,0xa0,0xe3,
++        0x00,0x50,0xbd,0xe8,0x0c,0xf0,0x61,0xe1,0x0e,0xf0,0xb0,0xe1,0x00,0x50,0xbd,0xe8,
++        0x0c,0xf0,0x61,0xe1,0x14,0xf0,0xa0,0xe3,0x53,0xef,0x8f,0xe2,0x3c,0x00,0x5c,0xe3,
++        0x0c,0xf1,0x8f,0xd0,0x3c,0x00,0x00,0xea,0x52,0x04,0x00,0xea,0x61,0x00,0x00,0xea,
++        0x5e,0x00,0x00,0xea,0x53,0x04,0x00,0xea,0x56,0x04,0x00,0xea,0x59,0x04,0x00,0xea,
++        0x5c,0x04,0x00,0xea,0x5f,0x04,0x00,0xea,0x62,0x04,0x00,0xea,0xa2,0x74,0xff,0xea,
++        0x64,0x04,0x00,0xea,0x67,0x04,0x00,0xea,0x6a,0x04,0x00,0xea,0x6d,0x04,0x00,0xea,
++        0x70,0x04,0x00,0xea,0x73,0x04,0x00,0xea,0x76,0x04,0x00,0xea,0x79,0x04,0x00,0xea,
++    };
++    if (memcmp(original + 0x43e90, swiDispatch, sizeof(swiDispatch))) return false;
++    static const uint8_t swiSwitch[] = {
++        0x04,0xc0,0x9f,0xe5,0x0f,0xc0,0x8c,0xe0,0x1c,0xff,0x2f,0xe1,0xdb,0x5e,0xff,0xff,
++        0x04,0xc0,0x9f,0xe5,0x0f,0xc0,0x8c,0xe0,0x1c,0xff,0x2f,0xe1,0x35,0x5a,0xff,0xff,
++        0x04,0xc0,0x9f,0xe5,0x0f,0xc0,0x8c,0xe0,0x1c,0xff,0x2f,0xe1,0x61,0x5a,0xff,0xff,
++        0x04,0xc0,0x9f,0xe5,0x0f,0xc0,0x8c,0xe0,0x1c,0xff,0x2f,0xe1,0xa9,0x59,0xff,0xff,
++        0x04,0xc0,0x9f,0xe5,0x0f,0xc0,0x8c,0xe0,0x1c,0xff,0x2f,0xe1,0x2b,0x5e,0xff,0xff,
++    };
++    if (memcmp(original + 0x450f8, swiSwitch, sizeof(swiSwitch))) return false;
++    return true;
++}
++
++struct Boundary {
++    uint32_t r9{}, root{}, kernel{}, task{}, tls{}, app{}, state{}, paceRoot{};
++    uint32_t frameSp{}, entryVa{}, m68kSp{};
++    Range armStack, m68kStack;
++    std::array<uint32_t, 10> frame{};
++
++    static Boundary Capture(SoC& soc, bool event) {
++        Require(soc.GetDeviceType() == DeviceType5::deviceTypeTG50 &&
++                soc.PrepareM68kSupport(), "TG50 interpreter descriptor unavailable");
++        auto* cpu = soc.GetCpu();
++        Require(cpuIsModePace(cpu) && !cpuIsThumb(cpu) &&
++                (cpuGetRegExternal(cpu, ARM_REG_NUM_CPSR) & 0xff) == 0x10,
++                "TG50 interpreter is not active in the app");
++        auto* r = cpuGetRegisters(cpu);
++        const auto pace = paceDebugState();
++        Boundary b;
++        b.r9 = r[9];
++        Require(b.r9 >= 16 && !(b.r9 & 3) && cpuInspectRamRange(cpu, b.r9 - 16, 20),
++                "TG50 invalid interpreter r9");
++        b.root = Pointer(cpu, b.r9, 0x100);
++        Require(Word(cpu, b.root + 4) == b.r9, "TG50 canonical r9 link changed");
++        const uint32_t kernelRoot = Pointer(cpu, b.root, 0xb0);
++        b.kernel = Pointer(cpu, kernelRoot + 0xac, 0x2200);
++        Require(Byte(cpu, b.kernel + 0x21d0) != 4, "TG50 current task is unavailable");
++        b.task = Pointer(cpu, b.kernel + 0x21c4, 144);
++        Require(b.task >= b.kernel && b.task - b.kernel < 32 * 144 &&
++                (b.task - b.kernel) % 144 == 0 && Byte(cpu, b.task + 25),
++                "TG50 invalid current task");
++        const uint32_t reserved = Pointer(cpu, b.task, 8);
++        b.tls = Pointer(cpu, reserved, 8);
++        uint32_t child = Pointer(cpu, b.tls + 4, 64);
++        b.app = Word(cpu, child + 60);
++        if (b.app) {
++            Require(!(b.app & 3) && cpuInspectRamRange(cpu, b.app, 64),
++                    "TG50 invalid root app context");
++        } else b.app = child;
++        b.state = Pointer(cpu, b.app + 12, 404);
++        Require(pace.statePtr == b.state && r[0] == b.state,
++                "TG50 current task does not own the interpreter state");
++        b.paceRoot = Pointer(cpu, b.state + 0xcc, 404);
++        b.armStack = {Word(cpu, b.app + 0x18), Word(cpu, b.app + 0x34)};
++        b.m68kStack = {BigWord(cpu, b.state + 0x94), BigWord(cpu, b.state + 0xac)};
++        b.armStack.Validate(cpu);
++        b.m68kStack.Validate(cpu);
++        Require(b.armStack.last < b.m68kStack.first || b.m68kStack.last < b.armStack.first,
++                "TG50 app stacks overlap");
++        b.frameSp = r[13];
++        b.m68kSp = pace.a[7];
++        Require(!(b.frameSp & 3) && b.armStack.Contains(b.frameSp, sizeof(b.frame)) &&
++                !(b.m68kSp & 1) && b.m68kStack.Contains(b.m68kSp, 4),
++                "TG50 active interpreter stack is outside its app");
++        Require(cpuInspectRead(cpu, b.frameSp, b.frame.data(), sizeof(b.frame)) &&
++                b.frame[0] == b.state && b.frame[1] == b.state && b.frame[6] == b.r9 &&
++                Word(cpu, b.state + 0x74) == b.frameSp + 40,
++                "TG50 interpreter frame does not match its state");
++        Require(r[15] >= 4, "TG50 invalid interpreter entry");
++        b.entryVa = r[15] - 4;
++        PacePatch descriptor{};
++        const Buffer rom = soc.GetRomData();
++        Require(pacePatchDiscoverTg50(&descriptor, 0, rom.data, rom.size),
++                "TG50 original interpreter layout changed");
++        const auto mapping = mmuTranslateInspect(cpuGetMMU(cpu), b.entryVa, false);
++        Require(MMU_TRANSLATE_RESULT_OK(mapping) &&
++                MMU_TRANSLATE_RESULT_PA(mapping) == descriptor.enterPace &&
++                b.frame[9] == b.entryVa + 0x6404,
++                "TG50 interpreter mapping or return changed");
++        const uint32_t table = Pointer(cpu, b.r9 - 8, 0x838);
++        const uint32_t kal = Pointer(cpu, b.r9 - 4, 0x284);
++        Require(Word(cpu, table + 0x834) == 0x2005ecbc &&
++                Word(cpu, kal + 0x27c) == 0x200209d8 &&
++                Word(cpu, kal + 0x280) == 0x200209dc,
++                "TG50 context dispatch tables changed");
++        if (event) {
++            Require(child == b.app && (Word(cpu, b.app) & 0xffff) == 0 &&
++                    (Word(cpu, b.app + 8) & 0x1e) == 0x0e,
++                    "TG50 event does not belong to the root UI app");
++            uint8_t instruction[4];
++            static const uint8_t getEvent[] = {0x4e, 0x4f, 0xa1, 0x1d};
++            Require(cpuInspectRead(cpu, pace.pc, instruction, 4) &&
++                    !memcmp(instruction, getEvent, 4) &&
++                    b.m68kStack.Contains(b.m68kSp, 8),
++                    "TG50 app is not at its event syscall");
++        }
++        return b;
++    }
++
++    bool SameOwner(const Boundary& b) const {
++        return r9 == b.r9 && root == b.root && kernel == b.kernel && task == b.task &&
++               tls == b.tls && app == b.app && state == b.state && paceRoot == b.paceRoot &&
++               armStack == b.armStack && m68kStack == b.m68kStack && entryVa == b.entryVa;
++    }
++};
++}
++#endif
+--- /dev/null
++++ b/src/uarm/uarm/tg50_pace_session.h
+@@ -0,0 +1,159 @@
++#ifndef FROND_TG50_PACE_SESSION_H
++#define FROND_TG50_PACE_SESSION_H
++
++#include <map>
++#include <exception>
++#include <vector>
++#include "tg50_call_budget.h"
++#include "tg50_pace_boundary.h"
++
++namespace Tg50Pace {
++class Session {
++    class FailureScope {
++        Session& session;
++        int exceptions = std::uncaught_exceptions();
++     public:
++        explicit FailureScope(Session& session) : session(session) {}
++        ~FailureScope() { if (std::uncaught_exceptions() > exceptions) session.failed = true; }
++    };
++ public:
++    explicit Session(SoC& soc)
++        : soc(soc), budget(soc.GetInjectedTimeNsec()), anchor(Boundary::Capture(soc, true)) {
++        Require(OriginalLayout(soc), "TG50 original context layout changed");
++    }
++    void CheckOwner() {
++        FailureScope failure(*this);
++        budget.Check(soc.GetInjectedTimeNsec());
++        Require(!failed, "TG50 transaction has failed");
++        Require(anchor.SameOwner(Boundary::Capture(soc, false)),
++                "TG50 injected call lost its app context");
++    }
++    void BeforeCall() {
++        FailureScope failure(*this);
++        CheckOwner();
++        budget.EnterCall(soc.GetInjectedTimeNsec());
++        Require(anchor.m68kStack.Contains(paceGetAreg(7) - 64, 64),
++                "TG50 syscall arguments exceed its app stack");
++    }
++    void AfterCall() { CheckOwner(); }
++    void AddAllocation(uint32_t address, uint32_t size) {
++        FailureScope failure(*this);
++        if (!address) return;
++        CheckOwner();
++        Require(size && !(address & 1) && uint64_t(address) + size <= 0x100000000ull &&
++                cpuInspectWritableRamRange(soc.GetCpu(), address, size, false), "TG50 allocation is not writable RAM");
++        for (const auto& item : allocations)
++            Require(uint64_t(address) + size <= item.first ||
++                    uint64_t(item.first) + item.second <= address, "TG50 scratch allocations overlap");
++        allocations.emplace(address, size);
++    }
++    void BeforeFree(uint32_t address) {
++        FailureScope failure(*this);
++        CheckOwner();
++        auto item = allocations.find(address);
++        Require(item != allocations.end(), "TG50 free does not own its allocation");
++        for (const auto& stub : stubs)
++            Require(stub.first < address || stub.first - address >= item->second,
++                    "TG50 callback must close before freeing its allocation");
++    }
++    void AfterFree(uint32_t address, uint16_t error) {
++        FailureScope failure(*this);
++        Require(!error, "TG50 could not free temporary allocation");
++        allocations.erase(address);
++    }
++    void BeforeTransfer(uint32_t address, uint32_t size, bool write = true) {
++        FailureScope failure(*this);
++        CheckOwner();
++        Require(!size || (uint64_t(address) + size <= 0x100000000ull &&
++                         (write ? cpuInspectWritableRamRange(soc.GetCpu(), address, size, false) :
++                                  cpuInspectRamRange(soc.GetCpu(), address, size))),
++                "TG50 transfer is not entirely writable RAM");
++    }
++    void Register(uint32_t address, uint32_t argumentBytes) {
++        FailureScope failure(*this);
++        CheckOwner();
++        Require(!(address & 1) && argumentBytes && argumentBytes <= 64,
++                "TG50 invalid callback extent");
++        bool owned = false;
++        for (const auto& item : allocations)
++            owned |= address >= item.first && uint64_t(address) + 2 <= uint64_t(item.first) + item.second;
++        Require(owned && cpuInspectWritableRamRange(soc.GetCpu(), address, 2, false) && !stubs.count(address), "TG50 callback is outside owned scratch");
++        uint8_t old[2];
++        Require(cpuInspectRead(soc.GetCpu(), address, old, 2), "TG50 callback is unreadable");
++        stubs.emplace(address, Stub{argumentBytes, uint16_t(old[0] << 8 | old[1])});
++    }
++    uint32_t BeforeCallback(uint32_t address) {
++        FailureScope failure(*this);
++        CheckOwner();
++        budget.EnterCallback(soc.GetInjectedTimeNsec());
++        auto stub = stubs.find(address);
++        Require(stub != stubs.end() && paceGetPC() == address + 2 &&
++                Byte(soc.GetCpu(), address) == 0x4e && Byte(soc.GetCpu(), address + 1) == 0x40,
++                "TG50 callback entry changed");
++        const uint32_t sp = paceGetAreg(7);
++        Require(!(sp & 1) && anchor.m68kStack.Contains(sp, stub->second.argumentBytes + 4),
++                "TG50 callback arguments exceed its app stack");
++        Require(BigWord(soc.GetCpu(), sp) == PACE_RETURN_MAGIC_PC,
++                "TG50 callback return is unqualified");
++        activeCallbacks.push_back({address, sp, Boundary::Capture(soc, false)});
++        return sp;
++    }
++    void AfterCallback(uint32_t address, uint32_t sp) {
++        FailureScope failure(*this);
++        CheckOwner();
++        const auto current = Boundary::Capture(soc, false);
++        Require(!activeCallbacks.empty() && activeCallbacks.back().address == address &&
++                activeCallbacks.back().sp == sp &&
++                current.frameSp == activeCallbacks.back().boundary.frameSp &&
++                current.frame == activeCallbacks.back().boundary.frame &&
++                stubs.count(address) && paceGetAreg(7) == sp &&
++                BigWord(soc.GetCpu(), sp) == PACE_RETURN_MAGIC_PC,
++                "TG50 callback changed its return frame");
++        activeCallbacks.pop_back();
++    }
++    void Unregister(uint32_t address) noexcept {
++        auto stub = stubs.find(address);
++        if (stub == stubs.end()) return;
++        cpuRemoveM68kTrap0Handler(soc.GetCpu(), address);
++        if (!failed) {
++            try {
++                CheckOwner();
++                BeforeTransfer(address, 2);
++                uint8_t bytes[]{uint8_t(stub->second.original >> 8), uint8_t(stub->second.original)};
++                Require(cpuNativeBuffer(soc.GetCpu(), address, bytes, 2, true, false), "TG50 callback restore failed");
++            } catch (...) { failed = true; }
++        }
++        stubs.erase(stub);
++    }
++    void AbortHandlers() {
++        for (const auto& stub : stubs) cpuRemoveM68kTrap0Handler(soc.GetCpu(), stub.first);
++        stubs.clear();
++        activeCallbacks.clear();
++        failed = true;
++    }
++    void Close() {
++        FailureScope failure(*this);
++        CheckOwner();
++        Require(stubs.empty() && allocations.empty() && activeCallbacks.empty(), "TG50 temporary guest objects remain live");
++        const auto current = Boundary::Capture(soc, false);
++        Require(current.frameSp == anchor.frameSp && current.m68kSp == anchor.m68kSp &&
++                current.frame == anchor.frame, "TG50 original app frame was not restored");
++        closed = true;
++    }
++    bool Closed() const { return closed; }
++    Budget& ExecutionBudget() { return budget; }
++    void Fail() { failed = true; }
++
++ private:
++    struct Stub { uint32_t argumentBytes; uint16_t original; };
++    struct CallbackFrame { uint32_t address, sp; Boundary boundary; };
++    SoC& soc;
++    Budget budget;
++    Boundary anchor;
++    std::map<uint32_t, uint32_t> allocations;
++    std::map<uint32_t, Stub> stubs;
++    std::vector<CallbackFrame> activeCallbacks;
++    bool failed{false}, closed{false};
++};
++}
++#endif

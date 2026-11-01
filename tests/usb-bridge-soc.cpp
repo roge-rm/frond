@@ -23,9 +23,9 @@ static std::vector<uint8_t> saved(SoC& soc) {
 }
 
 static void exercise(DeviceType5 type) {
-    const bool tx=type==deviceTypeTX, zire=type==deviceTypeZire72, pxa270=tx || zire;
-    std::vector<uint8_t> rom(zire?14942208:(tx?16:8) * 1024 * 1024), nand(zire?0:tx?132 * 1024 * 1024:34603008, 0xff);
-    SocPXA soc(type, (pxa270?32:16) * 1024 * 1024, rom.data(), rom.size(), zire?nullptr:nand.data(), nand.size(), -1,
+    const bool tg50=type==deviceTypeTG50, tx=type==deviceTypeTX, zire=type==deviceTypeZire72, pxa270=tx || zire;
+    std::vector<uint8_t> rom(tg50?4096:zire?14942208:(tx?16:8) * 1024 * 1024), nand(zire||tg50?0:tx?132 * 1024 * 1024:34603008, 0xff);
+    SocPXA soc(type, (pxa270?32:16) * 1024 * 1024, rom.data(), rom.size(), zire||tg50?nullptr:nand.data(), nand.size(), -1,
                pxa270?2:0);
     auto* cpu = soc.GetCpu();
     const uint32_t branch = 0xeafffffe;
@@ -55,6 +55,10 @@ static void exercise(DeviceType5 type) {
 
     // EP1 IN, UDE, then the EP0 and reset interrupts: connect wait, reset, first SETUP.
     if(pxa270)udc(0x404, 1u | 64u << 2 | 1u << 12 | 2u << 13 | 1u << 15 | 1u << 25);
+    if(tg50) {
+        uint32_t v=0x18;assert(cpuMemOpExternal(cpu,&v,0x08000024,4,true));
+        v=0x10;assert(cpuMemOpExternal(cpu,&v,0x08000044,4,true));
+    }
     udc(0, 1);
     run(200);
     assert(host->GetPhase() == UsbBusHost::Phase::waitEnable);  // no UDCICR write yet
@@ -74,11 +78,12 @@ static void exercise(DeviceType5 type) {
 
     // A read-only checkpoint (database list, export) restores without a replug.
     const auto phase = host->GetPhase();
-    { ReadOnlyGuest guest(soc); run(5); }
+    if(!tg50) { ReadOnlyGuest guest(soc); run(5); }
     bridge.Service();
     run(1);
     assert(soc.UsbTestCableAttached() && host->GetPhase() == phase);
-    puts("PASS: a read-only checkpoint restore leaves the cable and the host as they were");
+    if(!tg50) puts("PASS: a read-only checkpoint restore leaves the cable and the host as they were");
+    else puts("PASS: TG50 cable/host idle; blank ROM excludes interpreter checkpoint");
 
     // A load that fails and is rolled back leaves it too.
     std::vector<uint8_t> junk(256, 0x5a);
@@ -142,4 +147,4 @@ static void exercise(DeviceType5 type) {
     puts("PASS: a port in use leaves USB off and the cable in, also after a load");
 }
 
-int main(){exercise(deviceTypeTX);exercise(deviceTypeE2);exercise(deviceTypeZire72);}
+int main(){exercise(deviceTypeTX);exercise(deviceTypeE2);exercise(deviceTypeZire72);exercise(deviceTypeTG50);}

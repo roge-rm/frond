@@ -3,6 +3,7 @@
 #include "SdExchangeDialog.h"
 #include "Dialogs.h"
 #include "FirmwareStore.h"
+#include "AudioQualification.h"
 #include <QListWidget>
 #include <QMenu>
 #include <QPainter>
@@ -93,26 +94,6 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     layout->setContentsMargins(0, 0, 0, 0);
     outerLayout->addWidget(runningPage);
     settingsDialog = new SettingsDialog(this);
-    windowScale = settingsDialog->windowScale;
-    scaleLabel = settingsDialog->scaleLabel;
-    smoothLcd = settingsDialog->smoothLcd;
-    audio = settingsDialog->audio;
-    fastAudio = settingsDialog->fastAudio;
-    windowScale->setValue(std::clamp(settings.value("windowScale", 4).toInt(), 4, 8));
-    connect(windowScale, &QSlider::valueChanged, this, [this](int quarters) {
-        settings.setValue("windowScale", quarters);
-        scaleLabel->setText(tr("Size: %1×").arg(quarters / 4.0));
-    });
-    smoothLcd->setChecked(settings.value("smoothLcd", false).toBool());
-    connect(smoothLcd, &QCheckBox::toggled, this, [this](bool enabled) { settings.setValue("smoothLcd", enabled); });
-    audio->setChecked(settings.value("audio", true).toBool());
-    connect(audio, &QCheckBox::toggled, this, [this](bool enabled) {
-        settings.setValue("audio", enabled);
-        if (client.available()) send(enabled ? "audio-on" : "audio-off");
-    });
-    fastAudio->setToolTip(tr("Applies on the next start."));
-    fastAudio->setChecked(settings.value("fastAudio", false).toBool());
-    connect(fastAudio, &QCheckBox::toggled, this, [this](bool enabled) { settings.setValue("fastAudio", enabled); });
     settingsDialog->resume->setChecked(settings.value("resume", true).toBool());
     connect(settingsDialog->resume, &QCheckBox::toggled, this, [this](bool enabled) { settings.setValue("resume", enabled); });
     // The running page follows the Android Menu screen: Applications, SD card, Device, Session.
@@ -122,6 +103,7 @@ MainWindow::MainWindow(const QString& core) : core(core) {
         heading->setFont(font);
         if (!first) layout->addSpacing(8);
         layout->addWidget(heading);
+        return heading;
     };
     auto button = [&](const QString& text, const char* name, bool plain = false) {
         auto* b = new QPushButton(text, root);
@@ -160,7 +142,8 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     });
 
     // The buttons shown depend on the card's state; refresh() picks them.
-    section(tr("SD card"));
+    storageHeading = section(tr("SD card"));
+    storageHeading->setObjectName("storageHeading");
     sdStatus = new QLabel(tr("Not known"), root);
     sdStatus->setObjectName("sdState");
     layout->addWidget(sdStatus);
@@ -323,6 +306,15 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     grid->setColumnMinimumWidth(2, 110);
     for (auto* c : {static_cast<QWidget*>(network), static_cast<QWidget*>(serial), static_cast<QWidget*>(usb), static_cast<QWidget*>(irda)})
         c->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    holdLabel = new QLabel(tr("Hold"), root);
+    holdToggle = new QCheckBox(tr("On"), root);
+    holdToggle->setObjectName("hold");
+    grid->addWidget(holdLabel, 12, 0);
+    grid->addWidget(holdToggle, 12, 1, 1, 2);
+    connect(holdToggle, &QCheckBox::clicked, this, [this](bool on) {
+        if (frondFirmware::profile(runningDevice).frontend.holdSupported && holdKnown)
+            send("hold", on ? "on" : "off");
+    });
     auto* reset = button(tr("Reset"), "reset");
     auto* rotate = button(tr("Rotate"), "rotate");
     auto* deviceButtons = new QHBoxLayout;
@@ -332,9 +324,18 @@ MainWindow::MainWindow(const QString& core) : core(core) {
         if (QMessageBox::question(this, tr("Reset"), tr("Reset the %1 now?").arg(deviceLabel())) == QMessageBox::Yes) send("reset");
     });
     connect(rotate, &QPushButton::clicked, this, [this] { send("rotate"); });
-    connect(soundToggle, &QCheckBox::clicked, this, [this](bool enabled) { audio->setChecked(enabled); });
-    connect(audio, &QCheckBox::toggled, soundToggle, &QCheckBox::setChecked);
-    soundToggle->setChecked(audio->isChecked());
+    connect(soundToggle, &QCheckBox::clicked, this, [this](bool enabled) {
+        if (!frondFirmware::capabilities(runningDevice).sound) return;
+        auto prefs = runningPreferences;
+        prefs.audio = enabled;
+        const auto error = frondSessions::writePreferences(sessionPath, prefs);
+        if (!error.isEmpty()) {
+            soundToggle->setChecked(runningPreferences.audio);
+            return failure(error);
+        }
+        runningPreferences = prefs;
+        send(enabled ? "audio-on" : "audio-off");
+    });
 
     // Pinned under the scroll area, shown while a Palm runs.
     sessionBar = new QWidget(this);
@@ -422,7 +423,7 @@ MainWindow::MainWindow(const QString& core) : core(core) {
                "Palm OS button assignments may change what the application buttons do."));
     });
     help->addAction(tr("&About Frond"), this, [this] {
-        QMessageBox::about(this, tr("About Frond"), tr("Frond 0.7.0\nExperimental Palm TX, Tungsten E2 and Zire 72 emulator\nGPL-3.0-or-later"));
+        QMessageBox::about(this, tr("About Frond"), tr("Frond 0.8.0\nExperimental Palm TX, Tungsten E2, Zire 72 and Sony CLIÉ TG50 emulator\nGPL-3.0-or-later"));
     });
     connect(&client, &DesktopClient::diagnostic, this, [this](const QString& text) {
         log->moveCursor(QTextCursor::End); log->insertPlainText(text);
@@ -440,7 +441,9 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     connect(&client, &DesktopClient::finished, this, [this] {
         if (exchangeDialog) exchangeDialog->reject();
         else endExchange();
+        holdKnown = holdOn = false;
         busy = false; stopping = false; hardResetAfterSave = false; cardPresent = cardInserted = false; runningDevice = frondFirmware::Device::tx;
+        copyLock.reset(); savingPath.clear();
         sdKnown = false; showSerial({}); loadSerialSettings(); showUsb({}); loadUsbSettings(); showIrda({}); loadIrdaSettings(); showBluetooth({}); loadBluetoothSettings(); sessionLock.reset(); forceButton->hide(); refreshSessions();
         if (closeAfterStop) { allowClose = true; close(); }
         else statusBar()->showMessage(tr("Stopped."));
@@ -454,8 +457,10 @@ MainWindow::MainWindow(const QString& core) : core(core) {
         busy = false; forceButton->hide(); refresh();
         if (!ok && exchangeStage != ExchangeStage::None) { exchangeResult(false, message); return; }
         if (!ok) {
+            if (command == "save") copyLock.reset();
             hardResetAfterSave = false;
             log->appendPlainText(command + ": " + message);
+            if (command == "hold-state" || command == "hold") { holdKnown = false; refresh(); }
             if (command == "sd-state") sdKnown = false;
             if (command == "serial-mode") showSerial("off " + message);  // the core is now off
             if (command == "usb-mode") showUsb("off " + message);
@@ -468,12 +473,27 @@ MainWindow::MainWindow(const QString& core) : core(core) {
             if (code == "not-ready" && (command == "export" || command == "export-db" || command == "install" || command == "launch-app"))
                 failure(message + tr("\n\nWait for Palm OS to finish its current activity, then try again."));
             else failure(message);
+            if (command == "hold" && !stopping) send("hold-state");
             return;
         }
         if (command == "device-state") {
             showDevice(message);
             if (stopping) save();
-            else send("sd-state");
+            else send(frondFirmware::profile(runningDevice).frontend.holdPresent ? "hold-state" :
+                frondFirmware::profile(runningDevice).frontend.sdSlot ? "sd-state" : "network-state");
+            return;
+        }
+        if (command == "hold-state") {
+            holdKnown = message == "on" || message == "off";
+            holdOn = message == "on";
+            refresh();
+            if (stopping) save();
+            else send(frondFirmware::profile(runningDevice).frontend.sdSlot ? "sd-state" : "network-state");
+            return;
+        }
+        if ((command == "hold" || command == "reset" || command == "hard-reset") &&
+            !stopping && frondFirmware::profile(runningDevice).frontend.holdPresent) {
+            send("hold-state");
             return;
         }
         if (command == "sd-state") { cardPresent = message != "none"; cardInserted = message == "inserted"; }
@@ -516,6 +536,11 @@ MainWindow::MainWindow(const QString& core) : core(core) {
                 settings.setValue("lastSession", sessionPath); settings.sync();
                 QFile::remove(frondSessions::markerPath(sessionPath)); refreshSessions();
             }
+            if (!savedWorkingCopy) {
+                const auto error = frondSessions::writePreferences(savingPath, runningPreferences);
+                if (!error.isEmpty()) failure(error);
+            }
+            copyLock.reset();
             savingPath.clear();
         }
         if (command == "save" && hardResetAfterSave && !stopping) {
@@ -529,7 +554,6 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     });
     networkTip = network->toolTip(); keyboardTip = keyboard->toolTip(); serialTip = serial->toolTip();
     usbTip = usb->toolTip(); irdaTip=irda->toolTip();
-    fastAudioTip = fastAudio->toolTip();
     refreshSessions();
     statusBar()->showMessage(tr("Ready. Sessions are saved automatically when you close Frond."));
     QTimer::singleShot(0, this, [this] {
@@ -550,7 +574,6 @@ void MainWindow::refresh() {
     startButton->setEnabled(!running && !busy && current && !current->data(Qt::UserRole + 1).toBool());
     addButton->setEnabled(!running && !busy);
     stopButton->setEnabled(running && !busy && !stopping);
-    audio->setEnabled(!busy && !stopping);
     const auto caps = frondFirmware::capabilities(currentDevice());
     const auto reason = tr("Not available on the %1 yet").arg(frondFirmware::deviceName(currentDevice()));
     auto note = [&](QWidget* w, bool supported, const QString& tip) { w->setToolTip(supported ? tip : reason); };
@@ -558,23 +581,18 @@ void MainWindow::refresh() {
     note(serial, caps.serial, serialTip); note(serialPort, caps.serial, {});
     note(usb, caps.usb, usbTip); note(usbPort, caps.usb, {});
     note(irda,caps.infrared,irdaTip);note(irdaPort,caps.infrared,{});
-    note(fastAudio, caps.fastAudio, fastAudioTip);
-    fastAudio->setEnabled(!running && !busy && caps.fastAudio);
-    windowScale->setEnabled(!running && !busy);
-    smoothLcd->setEnabled(!running && !busy);
-    if (!settings.contains("windowScale")) {
-        const auto* display = QGuiApplication::primaryScreen();
-        const auto available = display ? display->availableGeometry().size() : QSize(0, 0);
-        const QSignalBlocker blocked(windowScale);
-        windowScale->setValue(int(4 * fittingWindowScale(320,
-            // Screen, silkscreen and button strip: E2 80 rows, Zire 72 96, TX 84 under 480.
-            currentDevice() == frondFirmware::Device::e2 ? 520 : currentDevice() == frondFirmware::Device::zire72 ? 536 : 564,
-            available.width(), available.height())));
-    }
-    scaleLabel->setText(tr("Size: %1×").arg(windowScale->value() / 4.0));
     const bool enabled = client.available() && !busy && !stopping && exchangeStage == ExchangeStage::None;
     for (auto* w : runningButtons) w->setEnabled(enabled);
-    soundToggle->setEnabled(enabled);
+    soundToggle->setEnabled(enabled && caps.sound);
+    soundToggle->setChecked(caps.sound && runningPreferences.audio);
+    note(soundToggle, caps.sound, {});
+    const auto& frontend = frondFirmware::profile(currentDevice()).frontend;
+    holdLabel->setVisible(frontend.holdPresent);
+    holdToggle->setVisible(frontend.holdPresent);
+    holdLabel->setEnabled(frontend.holdSupported);
+    holdToggle->setEnabled(enabled && frontend.holdSupported && holdKnown);
+    holdToggle->setChecked(holdKnown && holdOn);
+    note(holdToggle, frontend.holdSupported, {});
     importAction->setEnabled(!running && !busy);
     network->setEnabled(enabled && caps.network);
     keyboard->setEnabled(enabled && caps.keyboard && irda->currentData()=="off");
@@ -589,15 +607,22 @@ void MainWindow::refresh() {
     bluetoothSocket->setEnabled(editable && caps.bluetooth && bluetooth->isChecked());
     bluetooth->setToolTip(caps.bluetooth ? tr("See doc/bluetooth-provider.md for controller setup.") : reason);
     // Which card buttons show follows the card's state, as on Android.
+    const bool memoryStick = deviceProfileStorageSlot5(frondFirmware::profile(currentDevice())) == DeviceStorageSlot5::memoryStick;
+    storageHeading->setText(memoryStick ? tr("Memory Stick") : tr("SD card"));
+    storageHeading->setEnabled(!memoryStick);
+    sdStatus->setEnabled(!memoryStick);
     const bool known = sdKnown && running;
-    sdStatus->setText(!known ? tr("Not known") : !cardPresent ? tr("No card") : cardInserted ? tr("Inserted") : tr("Ejected"));
+    sdStatus->setText(memoryStick ? tr("Not available yet") : !known ? tr("Not known") : !cardPresent ? tr("No card") : cardInserted ? tr("Inserted") : tr("Ejected"));
     sdReinsert->setVisible(known && cardPresent && !cardInserted);
     sdExchange->setVisible(known && cardPresent);
     sdEject->setVisible(known && cardInserted);
     sdExport->setVisible(known && cardPresent && !cardInserted);
     sdCreate->setVisible(known && !cardInserted); sdImport->setVisible(known && !cardInserted);
     sdRetry->setVisible(!known);
-    for (auto* b : {sdReinsert, sdExchange, sdEject, sdExport, sdCreate, sdImport, sdRetry}) b->setEnabled(enabled);
+    for (auto* b : {sdReinsert, sdExchange, sdEject, sdExport, sdCreate, sdImport, sdRetry}) {
+        if (memoryStick) b->setVisible(false);
+        b->setEnabled(enabled && frondFirmware::profile(currentDevice()).frontend.sdSlot);
+    }
 }
 QString MainWindow::sessionFolder() const {
     return QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/frond/sessions";
@@ -640,6 +665,13 @@ void MainWindow::refreshSessions(const QString& select) {
     sessionList->clear();
     int row = 0, selectRow = -1;
     for (const auto& info : frondSessions::list(sessionFolder())) {
+        if (!info.old && !QFileInfo::exists(frondSessions::preferencesPath(info.path))) {
+            QLockFile lock(info.path + ".lock"); lock.setStaleLockTime(0);
+            if (lock.tryLock()) {
+                frondSessions::Preferences prefs;
+                loadPreferences(info.path, frondFirmware::deviceFromId(info.device), &prefs);
+            }
+        }
         const auto device = frondFirmware::deviceFromId(info.device);
         const auto label = info.old && device == frondFirmware::Device::automatic ? QString() : frondFirmware::deviceName(device);
         QStringList parts;
@@ -691,6 +723,9 @@ void MainWindow::refreshSessions(const QString& select) {
 QMenu* MainWindow::rowMenu(const QString& path, QWidget* parent) {
     const auto info = infoFor(path);
     auto* menu = new QMenu(parent);
+    auto* edit = menu->addAction(tr("Edit settings…"), this, [this, path] { QTimer::singleShot(0, this, [this, path] { editSession(path); }); });
+    edit->setObjectName("editSession");
+    edit->setEnabled(!info.old && !client.running() && !busy && !frondSessions::inUse(path));
     auto* rename = menu->addAction(tr("Rename…"), this, [this, path] { QTimer::singleShot(0, this, [this, path] { renameSession(path); }); });
     rename->setObjectName("renameSession"); rename->setEnabled(!info.old);
     auto* exportAction = menu->addAction(tr("Export…"), this, [this, path] { QTimer::singleShot(0, this, [this, path] { exportSession(path); }); });
@@ -698,6 +733,36 @@ QMenu* MainWindow::rowMenu(const QString& path, QWidget* parent) {
     auto* remove = menu->addAction(tr("Delete"), this, [this, path] { QTimer::singleShot(0, this, [this, path] { deleteSession(path); }); });
     remove->setObjectName("deleteSession");
     return menu;
+}
+frondSessions::Preferences MainWindow::defaultPreferences(frondFirmware::Device device) const {
+    const auto& display = frondFirmware::profile(device).frontend;
+    const auto* screen = QGuiApplication::primaryScreen();
+    const auto available = screen ? screen->availableGeometry().size() : QSize();
+    const auto scale = int(4 * fittingWindowScale(display.width + display.sideTabWidth,
+        display.height + display.silkscreenHeight + display.stripHeight, available.width(), available.height()));
+    return {std::clamp(settings.value("windowScale", scale).toInt(), 4, 8),
+            settings.value("smoothLcd", false).toBool(), settings.value("audio", true).toBool(),
+            settings.value("fastAudio", false).toBool()};
+}
+QString MainWindow::loadPreferences(const QString& path, frondFirmware::Device device, frondSessions::Preferences* prefs) {
+    if (frondSessions::readPreferences(path, prefs)) return {};
+    if (QFileInfo::exists(frondSessions::preferencesPath(path))) return tr("Couldn't read the machine settings.");
+    *prefs = defaultPreferences(device);
+    return frondSessions::writePreferences(path, *prefs);
+}
+void MainWindow::editSession(const QString& path) {
+    if (client.running() || busy) return;
+    const auto info = infoFor(path);
+    if (info.old) return;
+    QLockFile lock(path + ".lock"); lock.setStaleLockTime(0);
+    if (!lock.tryLock()) return failure(tr("This session is open in another Frond."));
+    frondSessions::Preferences prefs;
+    const auto device = frondFirmware::deviceFromId(info.device);
+    if (const auto error = loadPreferences(path, device, &prefs); !error.isEmpty()) return failure(error);
+    MachineSettingsDialog dialog(device, prefs, frondAudio::qualified(device, info.saved ? path : QString(),
+        frondFirmware::storedNor(firmwareRoot(), device)), this);
+    if (dialog.exec() != QDialog::Accepted) return;
+    if (const auto error = frondSessions::writePreferences(path, dialog.controls->values()); !error.isEmpty()) failure(error);
 }
 void MainWindow::renameSession(const QString& path) {
     const auto info = infoFor(path);
@@ -760,14 +825,23 @@ bool MainWindow::ensureFirmware(frondFirmware::Device device) {
 }
 void MainWindow::addDevice() {
     if (client.running() || busy) return;
-    AddDeviceDialog dialog(firmwareRoot(), this);
+    const auto selected = sessionFile().isEmpty() ? frondFirmware::Device::automatic
+        : frondFirmware::deviceFromId(infoFor(sessionFile()).device);
+    const auto prefs = defaultPreferences(selected);
+    FirmwareDialog dialog(firmwareRoot(), selected, this, &prefs, !settings.contains("windowScale"));
     if (dialog.exec() != QDialog::Accepted) return;
-    const auto device = dialog.device();
-    if (!ensureFirmware(device)) return;
+    const auto device = dialog.imported();
     const auto name = frondSessions::reserve(sessionFolder(), frondFirmware::deviceName(device), frondFirmware::deviceId(device));
     if (name.isEmpty())
         return failure(tr("Could not create the session storage directory."));
     const auto path = frondSessions::filePath(sessionFolder(), name);
+    QLockFile lock(path + ".lock"); lock.setStaleLockTime(0);
+    if (!lock.tryLock()) return failure(tr("This session is open in another Frond."));
+    if (const auto error = frondSessions::writePreferences(path, dialog.machineSettings->values()); !error.isEmpty()) {
+        QFile::remove(frondSessions::markerPath(path));
+        return failure(error);
+    }
+    lock.unlock();
     refreshSessions(path);
     startSession(infoFor(path));
 }
@@ -800,7 +874,10 @@ void MainWindow::openSession(const QString& path, bool launchNow) {
         reserved = true;
     }
     launch(target, {source}, device);
-    if (reserved && !busy) QFile::remove(frondSessions::markerPath(target));  // it didn't start
+    if (reserved && !busy) {
+        QFile::remove(frondSessions::markerPath(target));
+        QFile::remove(frondSessions::preferencesPath(target));
+    }
     refreshSessions();
 }
 void MainWindow::start() {
@@ -832,12 +909,8 @@ void MainWindow::startSession(const frondSessions::Info& info) {
 // Starts the core on 'arguments' (the session file or the firmware) and saves to 'target'.
 void MainWindow::launch(const QString& target, QStringList arguments, frondFirmware::Device startDevice) {
     sessionPath = target;
-    if (!audio->isChecked()) arguments << "--no-sound";
+    holdKnown = holdOn = false;
     const auto caps = frondFirmware::capabilities(startDevice);
-    if (fastAudio->isChecked() && caps.fastAudio) arguments << "--fast-audio";
-    if (settings.contains("windowScale"))
-        arguments << "--window-scale" << QString::number(windowScale->value() / 4.0);
-    if (smoothLcd->isChecked()) arguments << "--smooth-lcd";
     if (caps.serial && serialArgument() != "off") arguments << "--serial" << serialArgument();
     if (caps.usb && usbArgument() != "off") arguments << "--usb" << usbArgument();
     if(caps.infrared && irdaArgument()!="off")arguments << "--irda" << irdaArgument();
@@ -848,6 +921,22 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
         sessionLock.reset();
         return failure(tr("This working session is already open, or its lock file could not be created."));
     }
+    if (!QFileInfo::exists(frondSessions::preferencesPath(target)) && !arguments.isEmpty() &&
+        frondSessions::readPreferences(arguments.first(), &runningPreferences)) {
+        if (const auto error = frondSessions::writePreferences(target, runningPreferences); !error.isEmpty()) {
+            sessionLock.reset(); return failure(error);
+        }
+    }
+    if (const auto error = loadPreferences(target, startDevice, &runningPreferences); !error.isEmpty()) {
+        sessionLock.reset(); return failure(error);
+    }
+    soundToggle->setChecked(caps.sound && runningPreferences.audio);
+    if (!caps.sound || !runningPreferences.audio) arguments << "--no-sound";
+    const auto sourceSession = !arguments.isEmpty() && !arguments.first().startsWith("--") ? arguments.first() : QString();
+    if (runningPreferences.fastAudio && frondAudio::qualified(startDevice, sourceSession,
+        frondFirmware::storedNor(firmwareRoot(), startDevice))) arguments << "--fast-audio";
+    arguments << "--window-scale" << QString::number(runningPreferences.scale / 4.0);
+    if (runningPreferences.smooth) arguments << "--smooth-lcd";
     stopping = closeAfterStop = allowClose = false;
     log->clear(); busy = true;
     const bool launched = client.start(core, arguments);
@@ -948,6 +1037,10 @@ void MainWindow::save(bool saveAs) {
     if (!client.available()) return;
     const auto path = saveAs ? outputFile(tr("Save a Copy"), tr("Frond sessions (*.frond)"), deviceLabel() + ".frond") : sessionPath;
     if (path.isEmpty()) return;
+    if (canonicalSession(path) != canonicalSession(sessionPath)) {
+        copyLock = std::make_unique<QLockFile>(path + ".lock"); copyLock->setStaleLockTime(0);
+        if (!copyLock->tryLock()) { copyLock.reset(); return failure(tr("This session is open in another Frond.")); }
+    }
     savingPath = path; send("save", path);
 }
 void MainWindow::send(const QString& command, const QString& argument) {

@@ -67,6 +67,7 @@ class PeripheralsModel(
                 waitingForGdb = false
                 refresh()
                 readKeyboard()
+                readHold()
                 readNetwork()
                 readRadio()
             }
@@ -193,17 +194,50 @@ class PeripheralsModel(
         }
     }
 
+    private val sessionId = Sessions.forPath(activity, FrondActivity.running?.session)?.id
+    private fun machineSettings() = sessionId?.let { Sessions.read(activity, it)?.settings } ?: MachineSettings()
+
+    // The physical switch is part of the guest session, independent of machine preferences.
+    var hold by mutableStateOf<Boolean?>(null)
+        private set
+
+    fun readHold() {
+        val l = link ?: return
+        if (!device.holdPresent || waitingForGdb) return
+        activity.lifecycleScope.launch {
+            val reply = withContext(Dispatchers.IO) { l.request("hold-state", timeoutSeconds = 30) }
+            hold = if (reply.ok) when (reply.message) { "on" -> true; "off" -> false; else -> null } else null
+        }
+    }
+
+    fun changeHold(on: Boolean) {
+        if (!device.holdSupported || hold == null) return
+        device("Changing Hold", "Couldn't change Hold", false) { l ->
+            val changed = l.request("hold", if (on) "on" else "off", timeoutSeconds = 30)
+            val current = l.request("hold-state", timeoutSeconds = 30)
+            val actual = if (current.ok) when (current.message) { "on" -> true; "off" -> false; else -> null } else null
+            activity.runOnUiThread { hold = actual }
+            if (!changed.ok) changed.message else if (!current.ok) current.message else null
+        }
+    }
+
     // The saved Sound setting. FrondActivity applies it to the core when the Palm shows again.
-    var sound by mutableStateOf(Settings.load(activity).sound)
+    var sound by mutableStateOf(machineSettings().sound)
         private set
 
     fun changeSound(on: Boolean) {
-        Settings.save(activity, Settings.load(activity).copy(sound = on))
-        sound = on
+        if (!device.sound) return
+        val id = sessionId ?: return
+        try {
+            Sessions.updateSettings(activity, id) { it.copy(sound = on) }
+            sound = on
+        } catch (e: Exception) {
+            alert = "Couldn't save settings" to "Couldn't write the machine settings."
+        }
     }
 
     // Low-latency audio for this device. The core takes it at start-up, so a change applies at the next start.
-    var fastAudio by mutableStateOf(Settings.fastAudio(activity, device))
+    var fastAudio by mutableStateOf(machineSettings().fastAudio)
         private set
     // Null while the NOR is being checked; false when the device or its firmware can't use it.
     var fastAudioUsable by mutableStateOf<Boolean?>(if (device.fastAudio) null else false)
@@ -219,8 +253,14 @@ class PeripheralsModel(
     }
 
     fun changeFastAudio(on: Boolean) {
-        Settings.setFastAudio(activity, device, on)
-        fastAudio = on
+        if (fastAudioUsable != true) return
+        val id = sessionId ?: return
+        try {
+            Sessions.updateSettings(activity, id) { it.copy(fastAudio = on) }
+            fastAudio = on
+        } catch (e: Exception) {
+            alert = "Couldn't save settings" to "Couldn't write the machine settings."
+        }
     }
 
     fun attachKeyboard(on: Boolean) =
@@ -362,7 +402,9 @@ class PeripheralsModel(
         }
     }
 
-    fun refresh() = job("Reading", "Couldn't read the card") { }
+    fun refresh() {
+        if (device.sdSlot) job("Reading", "Couldn't read the card") { }
+    }
 
     // Lists the open folder again after a change.
     private fun relist(c: SdCard, at: String) {
@@ -456,6 +498,7 @@ class PeripheralsActivity : ComponentActivity() {
         model.checkFastAudio(emulator.session)
         if (!model.waitingForGdb) model.refresh()
         model.readKeyboard()
+        model.readHold()
         model.readNetwork()
         model.watchBeam()
         model.watchBluetooth()

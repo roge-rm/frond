@@ -595,7 +595,7 @@ static void tg50Art() {
     // Every key once: the app row, all 42 keyboard keys and the tab's four.
     std::vector<int> seen(keyIdCount,0);
     for(size_t i=0;i<p.count;++i)++seen[p.buttons[i].key];
-    for(int k=keyIdHard1;k<keyIdCount;++k)assert(seen[k]==(k==keyIdLeft || k==keyIdRight || k==keyIdSelect || k==keyIdPower || k==keyIdVoice ? 0 : 1));
+    for(int k=keyIdHard1;k<keyIdCount;++k)assert(seen[k]==(k==keyIdLeft || k==keyIdRight || k==keyIdSelect || k==keyIdPower || k==keyIdVoice || k==keyIdHold ? 0 : 1));
     auto at=[&](float x,float y,const DeviceControlView& view) {
         return deviceControlAt(p,width,height,int(std::floor(x)),height+int(std::floor(y)),view);
     };
@@ -714,6 +714,14 @@ static void tg50Art() {
             assert(input.PressedButtons()==deviceKeyBit(id));
             mouse(SDL_MOUSEBUTTONUP,x,y);input.HandleEvents();guest.expect({{id,false}});assert(!input.PressedButtons());
         }
+        SDL_Event home{};
+        home.type = SDL_KEYDOWN; home.key.keysym.sym = SDLK_F6;
+        input.HandleEvent(home); guest.expect({{keyIdHome,true}});
+        home.key.repeat = 1; input.HandleEvent(home); guest.expect({});
+        window(SDL_WINDOWEVENT_FOCUS_LOST); input.HandleEvents();
+        guest.expect({{keyIdHome,false}});
+        home.type = SDL_KEYUP; home.key.repeat = 0; input.HandleEvent(home);
+        guest.expect({});
         guest.noPen();
     }
 
@@ -793,6 +801,7 @@ static void viewsLeaveOlderDevices() {
     }
 }
 
+static void tg50HostKeyboard();
 static void zireAndM515() {
     // Art comes from the device table, by internal type for built devices and by name for all.
     assert(deviceArt(deviceTypeTX)==DeviceArt::tx && deviceArt(deviceTypeE2)==DeviceArt::e2);
@@ -809,7 +818,27 @@ static void zireAndM515() {
     }
     iiixArt();
     tg50Art();
+    tg50HostKeyboard();
     viewsLeaveOlderDevices();
+}
+
+static void tg50RuntimeTab() {
+    for (auto fit : {WindowFit::none, WindowFit::fit}) {
+        Guest guest(deviceTypeTG50); guest.setDisplay({320,320,0,224});
+        auto display = guest.display(); guest.frame.assign(320*320, 0xffffffff);
+        auto* window = SDL_CreateWindow("TG50 tab",0,0,356,544,0); assert(window);
+        {
+            SdlRenderer renderer(window,&guest,1,display,Rotation::portrait_0,false,fit);
+            assert(renderer.Valid()); renderer.Draw(true);
+            auto* shot = SDL_CreateRGBSurfaceWithFormat(0,356,544,32,SDL_PIXELFORMAT_RGBA32); assert(shot);
+            assert(SDL_RenderReadPixels(SDL_GetRenderer(window),nullptr,shot->format->format,shot->pixels,shot->pitch)==0);
+            const auto jog = readPixel(shot,337,368);
+            assert(std::max({jog.r,jog.g,jog.b}) > 20 && std::max({jog.r,jog.g,jog.b}) < 250);
+            if (fit != WindowFit::none) assert(renderer.Layout().width == 356);
+            SDL_FreeSurface(shot);
+        }
+        SDL_DestroyWindow(window);
+    }
 }
 
 static void lcdScaling() {
@@ -858,6 +887,91 @@ static void lcdScaling() {
     assert(fittingWindowScale(320,564,300,500)==1.f);
 }
 
+// Add beside tg50Art() in tests/device-controls.cpp, call from main.
+static void tg50HostKeyboard() {
+    Guest guest(deviceTypeTG50); guest.setDisplay({320,320,0,224});
+    auto display = guest.display();
+    SdlEventHandler input(&guest,1,display,Rotation::portrait_0);
+    auto physical = [&](SDL_Scancode scan, bool down, bool repeat=false) {
+        SDL_Event e{}; e.type = down ? SDL_KEYDOWN : SDL_KEYUP;
+        e.key.keysym.scancode = scan; e.key.keysym.sym = SDL_GetKeyFromScancode(scan);
+        e.key.repeat = repeat; input.HandleEvent(e);
+    };
+    physical(SDL_SCANCODE_LSHIFT,true); guest.expect({{tg50Key(4,0),true}});
+    physical(SDL_SCANCODE_RSHIFT,true); guest.expect({});
+    physical(SDL_SCANCODE_Q,true); guest.expect({{tg50Key(2,1),true}});
+    physical(SDL_SCANCODE_Q,true,true); guest.expect({});
+    physical(SDL_SCANCODE_LSHIFT,false); guest.expect({});
+    physical(SDL_SCANCODE_RSHIFT,false); guest.expect({{tg50Key(4,0),false}});
+    physical(SDL_SCANCODE_Q,false); guest.expect({{tg50Key(2,1),false}});
+    physical(SDL_SCANCODE_LALT,true); physical(SDL_SCANCODE_RALT,true);
+    guest.expect({{tg50Key(6,0),true},{tg50Key(7,0),true}});
+    physical(SDL_SCANCODE_LCTRL,true); physical(SDL_SCANCODE_RCTRL,true);
+    guest.expect({{tg50Key(5,0),true}});
+    physical(SDL_SCANCODE_LCTRL,false); guest.expect({});
+    SDL_Event lost{}; lost.type=SDL_WINDOWEVENT; lost.window.event=SDL_WINDOWEVENT_FOCUS_LOST;
+    input.HandleEvent(lost);
+    guest.expect({{tg50Key(5,0),false},{tg50Key(6,0),false},{tg50Key(7,0),false}});
+    physical(SDL_SCANCODE_RCTRL,false); physical(SDL_SCANCODE_LALT,false); physical(SDL_SCANCODE_RALT,false);
+    guest.expect({}); assert(!input.PressedButtons());
+    // Physical arrows move the keyboard cursor, controller scancode0 keeps the rocker.
+    physical(SDL_SCANCODE_DOWN,true); physical(SDL_SCANCODE_DOWN,false);
+    guest.expect({{tg50Key(6,6),true},{tg50Key(6,6),false}});
+    SDL_Event controller{}; controller.type=SDL_KEYDOWN; controller.key.keysym.sym=SDLK_DOWN;
+    input.HandleEvent(controller); controller.type=SDL_KEYUP; input.HandleEvent(controller);
+    guest.expect({{keyIdDown,true},{keyIdDown,false}});
+    // A pointer and physical keyboard can own the same switch independently.
+    auto pointer = [&](Uint32 type) {
+        SDL_Event e{}; e.type=type; e.button.button=SDL_BUTTON_LEFT;
+        e.button.x=20; e.button.y=384; input.HandleEvent(e);
+    };
+    physical(SDL_SCANCODE_Q,true); guest.expect({{tg50Key(2,1),true}});
+    pointer(SDL_MOUSEBUTTONDOWN); guest.expect({});
+    physical(SDL_SCANCODE_Q,false); guest.expect({});
+    pointer(SDL_MOUSEBUTTONUP); guest.expect({{tg50Key(2,1),false}});
+    pointer(SDL_MOUSEBUTTONDOWN); guest.expect({{tg50Key(2,1),true}});
+    physical(SDL_SCANCODE_Q,true); guest.expect({});
+    pointer(SDL_MOUSEBUTTONUP); guest.expect({});
+    physical(SDL_SCANCODE_Q,false); guest.expect({{tg50Key(2,1),false}});
+    auto finger = [&](Uint32 type, SDL_FingerID id, int x, int y) {
+        SDL_Event e{}; e.type=type; e.tfinger.type=type; e.tfinger.touchId=7;
+        e.tfinger.fingerId=id; e.tfinger.x=(x+0.5f)/320; e.tfinger.y=(y+0.5f)/544;
+        input.HandleEvent(e);
+    };
+    finger(SDL_FINGERDOWN,1,85,485); guest.expect({{tg50Key(6,0),true}});
+    finger(SDL_FINGERDOWN,2,20,384); guest.expect({{tg50Key(2,1),true}});
+    // SDL's duplicate mouse copy must not replace the first finger's modifier.
+    SDL_Event duplicate{}; duplicate.type=SDL_MOUSEBUTTONDOWN;
+    duplicate.button.which=SDL_TOUCH_MOUSEID; duplicate.button.button=SDL_BUTTON_LEFT;
+    duplicate.button.x=20; duplicate.button.y=384; input.HandleEvent(duplicate);
+    guest.expect({});
+    finger(SDL_FINGERUP,2,20,384); guest.expect({{tg50Key(2,1),false}});
+    finger(SDL_FINGERUP,1,85,485); guest.expect({{tg50Key(6,0),false}});
+    finger(SDL_FINGERDOWN,3,40,520); guest.expect({{tg50Key(4,0),true}});
+    physical(SDL_SCANCODE_LSHIFT,true); guest.expect({});
+    finger(SDL_FINGERUP,3,40,520); guest.expect({});
+    physical(SDL_SCANCODE_LSHIFT,false); guest.expect({{tg50Key(4,0),false}});
+    finger(SDL_FINGERDOWN,4,40,520); finger(SDL_FINGERDOWN,5,20,384);
+    guest.expect({{tg50Key(4,0),true},{tg50Key(2,1),true}});
+    input.HandleEvent(lost);
+    guest.expect({{tg50Key(4,0),false},{tg50Key(2,1),false}});
+    finger(SDL_FINGERUP,4,40,520); finger(SDL_FINGERUP,5,20,384); guest.expect({});
+    finger(SDL_FINGERDOWN,6,20,384); guest.expect({{tg50Key(2,1),true}});
+    SDL_Event resize{}; resize.type=SDL_WINDOWEVENT; resize.window.event=SDL_WINDOWEVENT_SIZE_CHANGED;
+    input.HandleEvent(resize); guest.expect({{tg50Key(2,1),false}});
+    finger(SDL_FINGERDOWN,7,20,384); guest.expect({{tg50Key(2,1),true}});
+    input.SetRotation(Rotation::portrait_180); guest.expect({{tg50Key(2,1),false}});
+    input.SetRotation(Rotation::portrait_0);
+    finger(SDL_FINGERDOWN,8,100,100); guest.pen(true,100,100);
+    finger(SDL_FINGERDOWN,9,120,120); guest.noPen();
+    finger(SDL_FINGERUP,9,120,120); guest.noPen();
+    finger(SDL_FINGERUP,8,100,100); guest.pen(false);
+    // Built-in typing does not enter the external infrared keyboard path.
+    guest.attached=true; guest.events.clear();
+    physical(SDL_SCANCODE_A,true); physical(SDL_SCANCODE_A,false);
+    guest.expect({{tg50Key(4,1),true},{tg50Key(4,1),false}}); assert(guest.events.empty());
+}
+
 int main() {
     SDL_setenv("SDL_VIDEODRIVER","dummy",1);assert(SDL_Init(SDL_INIT_VIDEO|SDL_INIT_EVENTS)==0);
     const auto& profile=deviceControls(deviceTypeTX);
@@ -880,5 +994,6 @@ int main() {
     silkscreen(deviceTypeE2);
     silkscreen(deviceTypeZire72);
     lcdScaling();
+    tg50RuntimeTab();
     SDL_Quit();puts("PASS: TX, E2 and Zire 72 device buttons, holds/chords, focus/drag/rotation release, touch isolation, scales, pressed rendering and E2 and Zire 72 silkscreens; Zire 72, m515, IIIx and TG50 hit areas, pressed art and silkscreens; TG50 keyboard and side tab hiding");
 }

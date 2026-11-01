@@ -75,13 +75,9 @@ private fun SettingsList(model: HomeModel) {
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
             Header("Display")
-            Choice("Size", s.size, ScreenSize.entries, { it.label }) { v -> model.update(s.copy(size = v)) }
-            SwitchRow("Smooth pixels", s.smoothing) { v -> model.update(s.copy(smoothing = v)) }
             Choice("Orientation", s.orientation, Orientation.entries, { it.label }) { v ->
                 model.update(s.copy(orientation = v))
             }
-            Header("Audio", Modifier.padding(top = 16.dp))
-            SwitchRow("Sound", s.sound) { v -> model.update(s.copy(sound = v)) }
             Header("Debugger", Modifier.padding(top = 16.dp))
             SwitchRow("gdb server", s.debugger) { v -> model.update(s.copy(debugger = v)) }
             if (s.debugger) DebuggerPort(s.debuggerPort) { v -> model.update(s.copy(debuggerPort = v)) }
@@ -176,13 +172,13 @@ private fun ControllerButtons(model: HomeModel, device: Device) {
 }
 
 @Composable
-fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+fun SwitchRow(label: String, checked: Boolean, enabled: Boolean = true, onChange: (Boolean) -> Unit) {
     Row(
-        Modifier.fillMaxWidth().toggleable(checked, role = Role.Switch, onValueChange = onChange).padding(vertical = 8.dp),
+        Modifier.fillMaxWidth().toggleable(checked, enabled = enabled, role = Role.Switch, onValueChange = onChange).padding(vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(label, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
-        Switch(checked = checked, onCheckedChange = null)
+        Switch(checked = checked, enabled = enabled, onCheckedChange = null)
     }
 }
 

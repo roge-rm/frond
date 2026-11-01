@@ -26,7 +26,10 @@ uint32_t syscall68k_MemPtrNew(SyscallDispatch*, uint32_t, uint32_t) {
 uint16_t syscall68k_MemPtrFree(SyscallDispatch*, uint32_t, uint32_t p) {
     assert(p == 0x1000); return 0;
 }
-void paceSet8(uint32_t p, uint8_t) { assert(p == 0x1002); }
+bool syscallDispatch_memcpy_fromHost(SyscallDispatch*, uint32_t p, const void* bytes, size_t n) {
+    assert(p == 0x1002 && n == 1 && *static_cast<const uint8_t*>(bytes) == 0);
+    return true;
+}
 void paceSetDreg(uint8_t reg, uint32_t value) { assert(reg == 0); result = value; }
 uint32_t paceGet32(uint32_t p) {
     if (p == 0x2000) return 0x3000;
@@ -37,7 +40,13 @@ bool syscallDispatch_memcpy_toHost(SyscallDispatch*, void* out, uint32_t p, size
     assert(p == 0x3000 && n == 8);
     std::memset(out, 1, n); return !copyFails;
 }
-void syscallDispatchRegisterM68kStub(SyscallDispatch*, uint32_t, M68kStub fn) { stub = fn; }
+void syscallDispatchValidateMemory(SyscallDispatch*, uint32_t p, size_t n, bool write) {
+    assert(!write);
+    assert((p == 0x4000 && n == 4) || (p == 0x3000 && n == 8));
+}
+void syscallDispatchRegisterM68kStub(SyscallDispatch*, uint32_t, M68kStub fn, uint32_t n) {
+    assert(n == 12); stub = fn;
+}
 void syscallDispatchUnregisterM68kStub(SyscallDispatch*, uint32_t) { stub = {}; }
 uint16_t syscall68k_ExgDBWrite(SyscallDispatch*, uint32_t, uint32_t, uint32_t,
                               uint32_t, uint32_t id, uint16_t) {

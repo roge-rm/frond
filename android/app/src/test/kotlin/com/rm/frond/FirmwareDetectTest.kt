@@ -108,4 +108,17 @@ class FirmwareDetectTest {
         assertNull(Firmware.detect(text))
         assertNull(Firmware.detect(File(tmp.root, "missing.bin")))
     }
+    @Test fun profileHeaderAndLayoutDoNotRequireADeviceBranch() {
+        val fixture = Device.E2.copy(id = "test-fixture", label = "Fixture", halId = 0x12345678L, headerOffset = 0x40000)
+        val f = nor(fixture.norSize, 0x40000)
+        RandomAccessFile(f, "rw").use { le32(it, 0x40084, fixture.halId) }
+        val info = Firmware.inspect(f, listOf(fixture))
+        assertEquals(fixture, info.device)
+        assertEquals(true, info.validLayout)
+        assertNull(Firmware.check(fixture, f, null))
+        val wrongOffset = fixture.copy(headerOffset = 0x20000)
+        assertEquals(false, Firmware.inspect(f, listOf(wrongOffset)).validLayout)
+        assertEquals("This Fixture NOR image has an invalid card layout.", Firmware.check(wrongOffset, f, null))
+    }
+
 }
