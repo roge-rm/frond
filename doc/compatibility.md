@@ -137,6 +137,23 @@ python3 tools/app-compatibility.py --manifest /private/apps.json \
   --output build/app-matrix-01
 ```
 
+TX is the default. Use a manifest for each device:
+
+```sh
+python3 tools/app-compatibility.py --device palm-e2 --manifest /private/e2.json \
+  --output build/app-matrix-e2
+python3 tools/app-compatibility.py --device palm-zire-72 --manifest /private/zire72.json \
+  --output build/app-matrix-zire72
+```
+
+Cold fixtures use `{mode:"cold-boot",nor:{path,sha256},nand:{path,sha256}}`
+for TX and E2. TX needs 16 MiB NOR and 132 MiB raw NAND; E2 needs 8 MiB NOR
+and 34,603,008-byte raw NAND. Zire 72 takes a 14,942,208-byte NOR and omits
+`nand`. The runner completes Zire calibration and setup, or the E2's Date & Time
+form, then waits for the launcher. TX keeps its existing boot and replay flow.
+E2 and Zire screens are 320×320, with silkscreen taps at rows 320–439; TX is
+320×480. Supply replay coordinates for the selected device and app layout.
+
 Keep the manifest and all results private. `--help` describes manifest version 1.
 Each manifest pins the executable, session or raw flash, PRC/PDB installs and
 replays by SHA-256. Paths are relative to the manifest. App version strings are

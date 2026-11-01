@@ -12,6 +12,10 @@ Paths are relative to the manifest. All hashes are required. Unknown keys fail.
 Launch installs and launches; subsequent stages resume the previous saved state.
 Database interaction evidence must differ from launch; persistence/restore must
 retain the preceding exact records. Visual assertions always need human review.
+Use --device palm-tx (default), palm-e2 or palm-zire-72.
+E2 cold fixtures take nor and nand; Zire fixtures take nor only. Their
+cold boot completes calibration/setup before replay, using 320x320 screens and
+the 120-row silkscreen for input; TX keeps its existing 320x480 boot/replay flow.
 A fixture may instead be {mode:'cold-boot',nor:{path,sha256},nand:{path,sha256}}.
 Its cold-boot stage must request visual review; a restored session skips cold boot.
 launch.resume_app:true resumes a foreground fixture without installs or switching;
@@ -117,7 +121,7 @@ def read_database(path, oracle):
     return [hashlib.sha256(raw[a:b]).hexdigest() for a, b in zip(offsets, offsets[1:])]
 
 
-def validate_replay(path):
+def validate_replay(path, device='palm-tx'):
     """Restrict matrix inputs to bounded physical controls and remapped snapshots."""
     require(path.stat().st_size <= 1024 * 1024, 'Oversized replay')
     previous, controls = 0, 0
@@ -141,7 +145,10 @@ def validate_replay(path):
         elif command in ('pen-down', 'pen-move'):
             require(re.fullmatch(r'[0-9]{1,3} [0-9]{1,3}', argument) is not None,
                     'Invalid pen coordinates')
-            require(all(int(x) <= 479 for x in argument.split()), 'Pen coordinates out of bounds')
+            x, y = map(int, argument.split())
+            require((x <= 479 and y <= 479) if device == 'palm-tx' else
+                    (x < 320 and y < runner.DEVICES[device]['input_height']),
+                    'Pen coordinates out of bounds')
             controls += 1
         elif command in ('key-down', 'key-up'):
             require(argument in ('up', 'down', 'left', 'right', 'center', 'power', 'calendar',
@@ -162,10 +169,13 @@ def strict_json(raw):
     return json.loads(raw, object_pairs_hook=unique)
 
 
-def validate_manifest(raw, base):
+def validate_manifest(raw, base, device='palm-tx'):
+    require(device in runner.DEVICES, 'Unsupported device')
     keys(raw, ('version', 'core', 'apps'))
     require(type(raw['version']) is int and raw['version'] == 1, 'Unsupported manifest version')
     plan = {'version': 1, 'core': identity(raw['core'], base), 'apps': []}
+    if device != 'palm-tx':
+        plan['device'] = device
     require(type(raw['apps']) is list and 1 <= len(raw['apps']) <= 16, 'Expected 1–16 apps')
     ids = set()
     for app in raw['apps']:
@@ -177,9 +187,10 @@ def validate_manifest(raw, base):
                 'installs': [], 'stages': {}}
         fixture = app['fixture']
         if type(fixture) is dict and fixture.get('mode') == 'cold-boot':
-            keys(fixture, ('mode', 'nor', 'nand'))
-            item['fixture'] = {'mode': 'cold-boot', 'nor': identity(fixture['nor'], base),
-                               'nand': identity(fixture['nand'], base)}
+            keys(fixture, ('mode', 'nor') if device == 'palm-zire-72' else ('mode', 'nor', 'nand'))
+            item['fixture'] = {'mode': 'cold-boot', 'nor': identity(fixture['nor'], base)}
+            if 'nand' in fixture:
+                item['fixture']['nand'] = identity(fixture['nand'], base)
         else:
             item['fixture'] = identity(fixture, base)
         raw_boot = item['fixture'].get('mode') == 'cold-boot'
@@ -206,7 +217,7 @@ def validate_manifest(raw, base):
                 require(not stage['resume_app'] or not item['installs'], 'Fixture resume cannot install apps')
             if 'replay' in stage:
                 checked['replay'] = identity(stage['replay'], base)
-                controls = validate_replay(Path(checked['replay']['path']))
+                controls = validate_replay(Path(checked['replay']['path']), device)
             else:
                 controls = 0
             require(label != 'interaction' or controls > 0, 'Interaction requires a physical input replay')
@@ -250,7 +261,8 @@ def all_inputs(plan):
     for app in plan['apps']:
         if app['fixture'].get('mode') == 'cold-boot':
             yield app['fixture']['nor']
-            yield app['fixture']['nand']
+            if 'nand' in app['fixture']:
+                yield app['fixture']['nand']
         else:
             yield app['fixture']
         yield from app['installs']
@@ -307,10 +319,12 @@ def execute_stage(plan, app, label, stage, source, directory, timeout, previous)
     argv = ['--core', plan['core']['snapshot'], '--output', str(directory),
             '--run-for', str(stage['run_for']), '--timeout', str(timeout),
             '--startup-timeout', str(timeout), '--headless']
+    if 'device' in plan:
+        argv += ['--device', plan['device']]
     argv += ['--app', app['app']] if label == 'launch' and not resume else ['--resume-app']
     expected = [{'path': plan['core']['snapshot'], 'sha256': plan['core']['sha256']}]
     if label == 'cold-boot':
-        for field in ('nor', 'nand'):
+        for field in (f for f in ('nor', 'nand') if f in app['fixture']):
             item = app['fixture'][field]
             argv += ['--' + field, item['snapshot']]
             expected.append({'path': item['snapshot'], 'sha256': item['sha256']})
@@ -374,7 +388,7 @@ def execute_stage(plan, app, label, stage, source, directory, timeout, previous)
     return row
 
 
-def run(manifest, output, timeout=180):
+def run(manifest, output, timeout=180, device='palm-tx'):
     report = {'version': 1, 'run_id': uuid.uuid4().hex, 'execution_status': 'error', 'coverage_status': 'incomplete', 'apps': [],
               'started_at': datetime.now(timezone.utc).isoformat(),
               'limits': ['Session restores are not cold boots.',
@@ -393,7 +407,7 @@ def run(manifest, output, timeout=180):
         manifest = manifest.resolve(strict=True)
         require(manifest.stat().st_size <= 2 * 1024 * 1024, 'Oversized manifest')
         raw = manifest.read_bytes()
-        plan = validate_manifest(strict_json(raw), manifest.parent)
+        plan = validate_manifest(strict_json(raw), manifest.parent, device)
         output.mkdir(parents=True, mode=0o700)
         root = output
         (root / 'manifest.json').write_bytes(raw)
@@ -489,6 +503,7 @@ def run(manifest, output, timeout=180):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--device', choices=runner.DEVICES, default='palm-tx')
     parser.add_argument('--manifest', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--timeout', type=runner.positive, default=180)
@@ -496,7 +511,7 @@ def main():
     def interrupted(signum, frame):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, interrupted)
-    result = run(args.manifest, args.output, args.timeout)
+    result = run(args.manifest, args.output, args.timeout, args.device)
     print(json.dumps(result))
     # Successful execution is separate from incomplete/review-required coverage.
     return 0 if result['execution_status'] == 'ok' else 1
