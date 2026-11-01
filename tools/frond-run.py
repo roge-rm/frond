@@ -218,6 +218,9 @@ class SocketBoot:
     def tap(self, root, x, y):
         self.replay([f'0 pen-down {x} {y}', '150 pen-up'])
 
+    def key(self, root, name):
+        self.replay([f'0 key-down {name}', f'200 key-up {name}'])
+
     def frame(self, path):
         path.unlink(missing_ok=True)
         self.replay([f'0 snapshot {quote_replay_path(path)}'])

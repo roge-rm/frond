@@ -643,3 +643,9 @@ test-bluetooth-results:
 test: test-peripheral-qualification
 test-peripheral-qualification:
 	python3 tests/peripheral-qualification.py
+
+.PHONY: smoke smoke-sessions
+smoke:
+	python3 tests/smoke.py run
+smoke-sessions:
+	python3 tests/smoke.py sessions

@@ -1,5 +1,6 @@
 """Frame checks and setup taps shared by ROM tests and the private app runner."""
 import struct
+import time
 import zlib
 
 DEVICES = {
@@ -93,3 +94,21 @@ def e2_setup(core, root):
     core.tap(root, 35, 305)
     core.tap(root, 27, 352)
     core.wait_frame(root / 'launcher.png', lambda rows: launcher_wallpaper(rows, 40), 60)
+
+
+def tx_setup(core, root):
+    """Finish the TX's Date & Time form, then open the launcher with the Home key."""
+    def prefs(rows):
+        # The blue Preferences tab at the top left, the Date & Time title and a white form body.
+        if rows is None:
+            return False
+        title = sum(1 for x in range(200, 316) for y in range(6, 20) if sum(rows[y][4 * x:4 * x + 3]) < 200)
+        blue = sum(1 for x in range(10, 120) if rows[12][4 * x + 2] > 150 and rows[12][4 * x] < 80)
+        white = sum(1 for x in range(0, 320, 4) for y in range(100, 180, 4) if min(rows[y][4 * x:4 * x + 3]) > 230)
+        return 400 <= title <= 600 and blue >= 40 and white > 0.7 * 80 * 20
+    core.wait_frame(root / 'boot-frame.png', prefs, 120)
+    core.tap(root, 35, 305)
+    core.wait_frame(root / 'setup-frame.png', lambda rows: rows is not None and not prefs(rows), 30)
+    time.sleep(2)
+    core.key(root, 'home')
+    core.wait_frame(root / 'launcher.png', launcher_wallpaper, 60)
