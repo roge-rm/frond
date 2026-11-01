@@ -3,7 +3,7 @@
 
 Skipped when the firmware isn't there. FROND_ZIRE_LAUNCHER=1 adds the launcher and key runs, FROND_ZIRE_STORAGE=1
 the SD card, session and memo runs, FROND_HARD_RESET=1 the TX and E2 erase prompt after reset-hard,
-FROND_ZIRE_PERIPHERALS=1 USB HotSync, IrDA beaming, the infrared keyboard and the camera stub. Mutated copies live in a temporary directory under build/;
+FROND_ZIRE_PERIPHERALS=1 USB HotSync, IrDA beaming, the infrared keyboard, Bluetooth pairing and the camera stub. Mutated copies live in a temporary directory under build/;
 the originals are only read and their SHA-256 is checked before and after.
 """
 import hashlib
@@ -756,6 +756,13 @@ class Zire72StorageTest(unittest.TestCase):
 
 KEYBOARD_DRIVER = ROOT / 'build/keyboard-baseline/Keyboard_v113.prc'  # Palm Universal Wireless Keyboard 1.13
 PILOT = all(shutil.which(t) for t in ('pilot-xfer',))
+BTVIRT = Path(os.environ.get('FROND_BTVIRT', ROOT / 'build/bluetooth-provider/emulator/btvirt'))  # tools/build-bluetooth-provider.py
+
+
+def blue(rows, x, y):
+    """A form title or selection colour, not grey or white."""
+    r, g, b = rows[y][4 * x:4 * x + 3]
+    return b > 150 and r < 100
 
 
 def small_pdb(path, name):
@@ -781,7 +788,8 @@ def records(path, name):
                      'set FROND_ZIRE_PERIPHERALS=1 with the Zire 72 firmware, the Palm OS SDK and pilot-link for the '
                      '8 minute peripheral run')
 class Zire72PeripheralsTest(unittest.TestCase):
-    """USB HotSync both ways, IrDA beaming between two Zires, the infrared keyboard driver and the camera stub."""
+    """USB HotSync both ways, IrDA beaming and Bluetooth pairing between two Zires, the infrared keyboard driver and the
+    camera stub."""
 
     @classmethod
     def setUpClass(cls):
@@ -940,6 +948,62 @@ class Zire72PeripheralsTest(unittest.TestCase):
         chars = ''.join(chr(int(m[1], 16)) for line in typed if (m := re.search(r'event=4 chr=([0-9A-Fa-f]+)', line))
                         and chr(int(m[1], 16)) in 'zxZ')
         self.assertEqual(chars, 'zxZz')
+
+    def passkey(self, core, name):
+        """Types 1234 into the open passkey dialog with the silkscreen's number keyboard, then taps OK."""
+        core.tap(self.root, 90, 229)
+        core.tap(self.root, 253, 430)  # 123 on the silkscreen
+        core.wait_frame(self.root / f'{name}-keyboard.png', lambda rows: rows is not None and blue(rows, 20, 40), 15)
+        for x, y in [(120, 160), (160, 160), (198, 160), (120, 193), (50, 294)]:
+            core.tap(self.root, x, y)
+            time.sleep(1)
+        core.frame(self.root / f'{name}-passkey.png')
+        core.tap(self.root, 50, 294)
+
+    @unittest.skipUnless(BTVIRT.is_file(), 'needs btvirt from tools/build-bluetooth-provider.py')
+    def test_bluetooth_pairing(self):
+        # Two Zires on one virtual controller network: Trusted Devices > Add Device on the first finds the second,
+        # both take the passkey and the second shows up as a trusted device. Each session turns Bluetooth on for
+        # the first time here, so each makes up its own address.
+        sockets = self.root / 'bt-sockets'
+        sockets.mkdir(mode=0o700)
+        provider = subprocess.Popen([str(BTVIRT), f'-s{sockets}'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        cores = []
+        try:
+            end = time.monotonic() + 10
+            while not (sockets / 'bt-server-bredr').exists():
+                self.assertLess(time.monotonic(), end, 'btvirt did not start')
+                time.sleep(0.1)
+            cores = [self.core(self.session, f'bt{i}', '--bluetooth', sockets / 'bt-server-bredr') for i in range(2)]
+            for i, core in enumerate(cores):
+                core.launch('BtManPnl')
+                core.tap(self.root, 178, 60)  # On
+            for i, core in enumerate(cores):
+                # Discoverable: Yes once the radio is up, with no Please wait over it.
+                core.wait_frame(self.root / f'bt{i}-on.png', lambda rows: rows is not None and not blue(rows, 89, 160)
+                                and any(rows[y][4 * x] < 80 for x in range(176, 206) for y in range(158, 172)), 90)
+            first, second = cores
+            first.tap(self.root, 70, 305)  # Setup Devices
+            time.sleep(3)
+            first.tap(self.root, 175, 295)  # Trusted Devices
+            time.sleep(3)
+            first.tap(self.root, 252, 294)  # Add Device
+            first.wait_frame(self.root / 'bt-found.png', lambda rows: rows is not None and any(
+                rows[y][4 * x] < 80 for x in range(40, 200) for y in range(100, 114)), 90)
+            first.tap(self.root, 100, 107)
+            first.tap(self.root, 35, 294)  # OK
+            first.wait_frame(self.root / 'bt0-pin.png', lambda rows: rows is not None and blue(rows, 20, 151), 60)
+            self.passkey(first, 'bt0')
+            second.wait_frame(self.root / 'bt1-pin.png', lambda rows: rows is not None and blue(rows, 20, 151), 60)
+            self.passkey(second, 'bt1')
+            # The second Zire, selected in the first one's Trusted Devices list.
+            first.wait_frame(self.root / 'bt-trusted.png', lambda rows: rows is not None and blue(rows, 250, 80)
+                             and not blue(rows, 20, 151), 60)
+        finally:
+            for core in cores:
+                self.assertEqual(core.close(), 0)
+            provider.terminate()
+            provider.wait()
 
     def test_camera_stub(self):
         # No sensor answers on I2C: Camera shows a blank screen while its driver looks, then goes back to the
