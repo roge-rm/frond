@@ -37,14 +37,16 @@ SDK = ROOT.parent / 'palm-os-sdk/sdk-5r3'
 
 # nor, nand: read-only firmware under PALM. setup: function in tools/palm_boot.py that takes a cold boot to
 # the launcher. app: database name launched from the launcher, taps: pen taps inside it, area: the part of
-# the screen (x0, y0, x1, y1) the app and the taps change.
+# the screen (x0, y0, x1, y1) the app and the taps change. reminder: a check in tools/palm_boot.py for a
+# one-time setup reminder that comes due once the session is old enough, dismissed with OK before the steps.
 SMOKE = {
     'palm-tx': {'nor': 'TX/Palm-TX-5.4-nor.bin', 'nand': 'TX/Palm-TX-5.4-nand.bin', 'setup': 'tx_setup',
                 'app': 'Date Book', 'taps': [(100, 100)], 'area': (0, 0, 320, 448)},
     'palm-e2': {'nor': 'Tungsten-E2/Palm-Tungsten-E2-nor.bin', 'nand': 'Tungsten-E2/Palm-Tungsten-E2-nand.bin',
                 'setup': 'e2_setup', 'app': 'Date Book', 'taps': [(100, 100)], 'area': (0, 0, 320, 320)},
     'palm-zire-72': {'nor': 'Zire-72/Palm-Zire72-nor.bin', 'nand': None, 'setup': 'zire_setup',
-                     'app': 'Calculator', 'taps': [(60, 200)], 'area': (0, 0, 320, 320)},
+                     'app': 'Calculator', 'taps': [(60, 200)], 'area': (0, 0, 320, 320),
+                     'reminder': 'zire_reminder'},
     'sony-clie-tg50': {'nor': PALM.parent / 'Sony/CLIE-TG50/Sony-Clie-TG50-nor.bin',
                        'nand': None, 'setup': 'tg50_setup', 'app': 'Date Book',
                        'taps': [(100, 100)], 'area': (0, 0, 320, 320),
@@ -256,11 +258,36 @@ def make_session(device):
         run.close()
 
 
+def clear_reminder(device, work, session):
+    """Dismisses a due setup reminder and returns a session without it, or the session unchanged.
+
+    The RTC follows the host clock, so an alarm set during setup comes due as soon as an older session loads,
+    within a second, as it would on the real device."""
+    run = Run(device, work, session)
+    try:
+        check = getattr(palm_boot, SMOKE[device]['reminder'])
+        time.sleep(3)
+        if not check(run.frame(work / 'reminder.png')):
+            return session, None
+        run.tap(work, 50, 280)
+        run.wait_frame(work / 'reminder-cleared.png', lambda rows: rows is not None and not check(rows), 30)
+        run.ready()
+        cleared = work / 'cleared.session'
+        run.require('save', cleared)
+        return cleared, 'setup reminder dismissed'
+    finally:
+        run.close()
+
+
 def smoke(device, probes):
     cfg = SMOKE[device]
     work = workdir(device)
     session = OUT / f'{device}.session'
     steps = []
+    if cfg.get('reminder'):
+        session, cleared = clear_reminder(device, work, session)
+        if cleared:
+            steps.append(cleared)
 
     if cfg.get('media', 'sd') == 'sd':
         # A card holding HOST.TXT, read by the SD probe app.
