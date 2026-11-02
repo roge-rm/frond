@@ -7,6 +7,7 @@ import org.junit.rules.TemporaryFolder
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.util.zip.CRC32
 
 class SessionsLayoutTest {
     @get:Rule val tmp = TemporaryFolder()
@@ -50,5 +51,40 @@ class SessionsLayoutTest {
         assertEquals(File(dir, "session.frond"), sessionFile(dir))
         File(dir, "Trip.frond").writeText("c")
         assertEquals(File(dir, "Trip.frond"), sessionFile(dir))
+    }
+
+    private fun put32(n: Long) = byteArrayOf(
+        (n and 0xff).toByte(), ((n shr 8) and 0xff).toByte(),
+        ((n shr 16) and 0xff).toByte(), ((n shr 24) and 0xff).toByte(),
+    )
+    private fun put64(n: Long) = put32(n) + put32(n ushr 32)
+    private fun v7WithSd(): ByteArray {
+        val name = "palm-tx".toByteArray(Charsets.US_ASCII).copyOf(32)
+        val sdName = "sd.frondsd".toByteArray(Charsets.US_ASCII).copyOf(32)
+        return put32(0x19800819) + put32(7) + name +
+            put32(0) + put32(0) + ByteArray(40) + put32(1) +
+            put32(1) + sdName + put32(1) + put32(0) + ByteArray(32) + put64(512) + put64(512)
+    }
+    private fun tinyFrondsd(): ByteArray {
+        val payload = ByteArray(512) { 0xa5.toByte() }
+        val crc = CRC32().also { it.update(payload) }.value
+        return "FRONDSD".toByteArray(Charsets.US_ASCII) + byteArrayOf(0) + put32(1) + put32(512) +
+            put64(512) + put32(crc) + ByteArray(36) + payload
+    }
+
+    @Test fun v7MissingSiblingIsRefused() {
+        val dir = tmp.newFolder("machine")
+        val frond = File(dir, "session.frond").also { it.writeBytes(v7WithSd()) }
+        assertEquals("That session's card files don't match.", checkImportedSiblings(dir, frond))
+        File(dir, "sd.frondsd").writeBytes(tinyFrondsd())
+        assertNull(checkImportedSiblings(dir, frond))
+    }
+
+    @Test fun v7StubWithoutMediaImports() {
+        val dir = tmp.newFolder("stub")
+        val header = put32(0x19800819) + put32(7) + "palm-tx".toByteArray(Charsets.US_ASCII).copyOf(32) +
+            "body".toByteArray()
+        val frond = File(dir, "session.frond").also { it.writeBytes(header) }
+        assertNull(checkImportedSiblings(dir, frond))
     }
 }

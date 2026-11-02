@@ -7,6 +7,7 @@ import org.json.JSONObject
 import java.io.File
 import java.io.IOException
 import java.util.UUID
+import java.util.zip.CRC32
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
@@ -384,6 +385,9 @@ object Sessions {
                 else -> null
             }
             if (error != null) return error
+            if (header.version == VERSION) {
+                checkImportedSiblings(staged, frond)?.let { return it }
+            }
             if (frond != File(dest, "session.frond") && !frond.renameTo(File(dest, "session.frond")))
                 return "Couldn't save the session."
             for (sibling in listOf("sd.frondsd", "ms.frondms")) {
@@ -409,6 +413,102 @@ object Sessions {
     } catch (e: Exception) {
         null
     }
+}
+
+internal fun le32(bytes: ByteArray, i: Int): Long =
+    (bytes[i].toLong() and 0xff) or ((bytes[i + 1].toLong() and 0xff) shl 8) or
+        ((bytes[i + 2].toLong() and 0xff) shl 16) or ((bytes[i + 3].toLong() and 0xff) shl 24)
+
+internal fun le64(bytes: ByteArray, i: Int): Long = le32(bytes, i) or (le32(bytes, i + 4) shl 32)
+
+private fun java.io.InputStream.readExact(n: Int): ByteArray {
+    val out = ByteArray(n)
+    var got = 0
+    while (got < n) {
+        val r = read(out, got, n - got)
+        if (r < 0) return out.copyOf(got)
+        got += r
+    }
+    return out
+}
+
+// Header, size and CRC of each v7 sibling. A stub shorter than the TOC is no media.
+internal fun checkImportedSiblings(dir: File, frond: File): String? {
+    val mismatch = "That session's card files don't match."
+    val bytes = try { frond.readBytes() } catch (e: IOException) { return "Couldn't read that file." }
+    if (bytes.size < 8) return "Couldn't read that file."
+    if (le32(bytes, 4) != 7L) return null
+    data class Card(val kind: Long, val physical: Long)
+    val cards = mutableListOf<Card>()
+    if (bytes.size >= 40 + 52) {
+        val mediaCount = le32(bytes, 88)
+        val descBytes = mediaCount * 92
+        if (mediaCount > 2L || (mediaCount != 0L && (descBytes / 92 != mediaCount || bytes.size < 40 + 52 + descBytes)))
+            return mismatch
+        for (i in 0 until mediaCount.toInt()) {
+            val at = 40 + 52 + i * 92
+            val kind = le32(bytes, at)
+            val nameBytes = bytes.copyOfRange(at + 4, at + 36)
+            val nameEnd = nameBytes.indexOf(0).let { if (it < 0) 32 else it }
+            val name = String(nameBytes, 0, nameEnd, Charsets.US_ASCII)
+            val logical = le64(bytes, at + 76)
+            val physical = le64(bytes, at + 84)
+            when (kind) {
+                1L -> if (name != "sd.frondsd" || logical != physical || physical < 512 || physical % 512 != 0L)
+                    return mismatch
+                2L -> if (name != "ms.frondms" || logical != (128L shl 20) || physical != 136577024L)
+                    return mismatch
+                else -> return mismatch
+            }
+            cards.add(Card(kind, physical))
+        }
+    }
+    var expectSd = false
+    var expectMs = false
+    for (card in cards) {
+        if (card.kind == 1L) {
+            if (expectSd) return mismatch
+            expectSd = true
+            val sd = File(dir, "sd.frondsd")
+            if (!sd.isFile) return mismatch
+            sd.inputStream().use { input ->
+                val hdr = input.readExact(64)
+                if (hdr.size != 64 || !hdr.copyOfRange(0, 8).contentEquals("FRONDSD\u0000".toByteArray(Charsets.US_ASCII)))
+                    return mismatch
+                if (le32(hdr, 8) != 1L || le32(hdr, 12) != 512L) return mismatch
+                val payload = le64(hdr, 16)
+                if (payload != card.physical || sd.length() != 64 + payload) return mismatch
+                if (hdr.copyOfRange(28, 64).any { it != 0.toByte() }) return mismatch
+                val crc = CRC32()
+                val buf = ByteArray(65536)
+                var left = payload
+                while (left > 0) {
+                    val n = input.read(buf, 0, minOf(buf.size.toLong(), left).toInt())
+                    if (n <= 0) return mismatch
+                    crc.update(buf, 0, n)
+                    left -= n
+                }
+                if (crc.value != le32(hdr, 24)) return mismatch
+            }
+        } else {
+            if (expectMs) return mismatch
+            expectMs = true
+            val ms = File(dir, "ms.frondms")
+            if (!ms.isFile) return mismatch
+            ms.inputStream().use { input ->
+                val hdr = input.readExact(64)
+                if (hdr.size != 64 || !hdr.copyOfRange(0, 8).contentEquals("FRONDMS\u0000".toByteArray(Charsets.US_ASCII)))
+                    return mismatch
+                if (le32(hdr, 8) != 1L || le32(hdr, 12) != 8192L || le32(hdr, 16) != 32L ||
+                    le32(hdr, 20) != 512L || le32(hdr, 24) != 9L)
+                    return mismatch
+                if (ms.length() != 64 + card.physical) return mismatch
+            }
+        }
+    }
+    if (!expectSd && File(dir, "sd.frondsd").isFile) return mismatch
+    if (!expectMs && File(dir, "ms.frondms").isFile) return mismatch
+    return null
 }
 
 internal fun ignoredName(name: String) =

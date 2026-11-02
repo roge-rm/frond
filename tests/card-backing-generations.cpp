@@ -239,6 +239,26 @@ static void CompactKeepsPin() {
     assert(pin->Read(512, 512, got.data()) && got == Filled(512, 0xa5));
 }
 
+static void IndexReadErrorFails() {
+    const auto dir = GenDir();
+    const auto path = dir / "card.bin";
+    WriteAll(path, Filled(2048, 0xa5));
+    {
+        auto card = OpenRaw(path, 2048, 512, 512);
+        std::vector<uint8_t> poke(512, 0x11);
+        assert(card->Write(0, 512, poke.data()));
+        assert(card->Commit());
+    }
+    FileCardIoHooks hooks;
+    auto card = OpenRaw(path, 2048, 512, 512, &hooks);
+    assert(card);
+    hooks.failReadAfter = hooks.reads;
+    uint8_t buf[512];
+    std::memset(buf, 0x3c, sizeof(buf));
+    assert(!card->Read(0, 512, buf));
+    assert(buf[0] == 0x3c);
+}
+
 void CardBackingGenerations() {
     RamGenerations();
     FileSectorsAndRecords();
@@ -246,4 +266,5 @@ void CardBackingGenerations() {
     SnapshotDoesNotClone();
     FailuresKeepRoot();
     CompactKeepsPin();
+    IndexReadErrorFails();
 }
