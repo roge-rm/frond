@@ -1809,19 +1809,27 @@ for line in s.makefile('rb'):
         QDir(managedFolder()).removeRecursively();
         QSettings().clear();
     }
-    // A session opened from outside the folder takes its name at once.
+    // A session opened from outside the folder takes its name at once and runs from that folder.
     void openOutsideReservesName() {
         QSettings().clear(); QSettings().setValue("resume", false);
         QDir(managedFolder()).removeRecursively();
         QTemporaryDir files;
-        QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly)); core.write("#!/bin/sh\nsleep 5\n"); core.close();
+        QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly)); core.write("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\nsleep 5\n"); core.close();
         QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
         QFile source(files.filePath("Outside.frond")); QVERIFY(source.open(QIODevice::WriteOnly));
         source.write(sessionBytes(6, "palm-tx")); source.close();
+        const auto before = QDir(files.path()).entryList(QDir::AllEntries | QDir::Hidden | QDir::NoDotAndDotDot);
         MainWindow window(core.fileName()); window.show();
         window.openSession(source.fileName(), true);
         QVERIFY(QFileInfo::exists(frondSessions::markerPath(managedSession("Palm TX"))));
         QCOMPARE(frondSessions::freeName(managedFolder(), "Palm TX"), QString("Palm TX 2"));
+        // The core runs from the new folder, and nothing is written beside the original.
+        QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(core.fileName() + ".args"), 3000);
+        QFile args(core.fileName() + ".args"); QVERIFY(args.open(QIODevice::ReadOnly));
+        QVERIFY(QString::fromUtf8(args.readAll()).contains("--work-folder\n" + QFileInfo(frondSessions::machineDirOf(managedSession("Palm TX"))).canonicalFilePath()));
+        auto expected = before + QStringList{"core.args"};
+        expected.sort();
+        QCOMPARE(QDir(files.path()).entryList(QDir::AllEntries | QDir::Hidden | QDir::NoDotAndDotDot, QDir::Name), expected);
         window.close();
         QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 8000);
         QDir(managedFolder()).removeRecursively();

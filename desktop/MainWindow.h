@@ -50,6 +50,7 @@ class MainWindow : public QMainWindow {
     QString firmwareRoot() const;
     frondSessions::Info infoFor(const QString& path) const;
     void save(bool saveAs = false);
+    bool confirmReplace(const QString& dest);
     void stop(bool closeApp);
     void askStop(const QString& message);
     void refresh();
@@ -80,7 +81,7 @@ class MainWindow : public QMainWindow {
     QString outputFile(const QString& title, const QString& filter, const QString& defaultName);
     DesktopClient client;
     QSettings settings;
-    QString core, sessionPath, savingPath, pendingCopy;
+    QString core, sessionPath, savingPath, pendingCopy, copyStaging;
     bool hardResetAfterSave{false};
     std::unique_ptr<QLockFile> sessionLock, copyLock;
     QComboBox *network, *serial, *usb, *irda;
