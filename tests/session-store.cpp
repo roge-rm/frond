@@ -13,6 +13,7 @@ static QByteArray header(quint32 version, const QByteArray& device, quint32 magi
     return bytes + "body";
 }
 static void write(const QString& path, const QByteArray& data) {
+    QDir().mkpath(QFileInfo(path).absolutePath());
     QFile file(path);
     QVERIFY(file.open(QIODevice::WriteOnly));
     file.write(data);
@@ -58,8 +59,9 @@ class SessionStoreTest : public QObject {
         QCOMPARE(sessions[1].size, qint64(header(6, "palm-tx").size()));
         QCOMPARE(sessions[2].name, QString("Old"));
         QVERIFY(sessions[2].old);
+        QVERIFY(QFileInfo::exists(filePath(folder(), "Tx")) && !QFileInfo::exists(folder() + "/Tx.frond"));
         // Saving replaces the marker; the session is listed once.
-        write(folder() + "/Fresh.frond", header(6, "palm-e2"));
+        write(filePath(folder(), "Fresh"), header(6, "palm-e2"));
         QCOMPARE(list(folder()).size(), 3);
         // Available sessions open; a reserved device stays unavailable.
         write(folder() + "/Zire.frond", header(6, "palm-zire-72"));
@@ -75,28 +77,28 @@ class SessionStoreTest : public QObject {
         QCOMPARE(freeName(folder(), "Palm TX"), QString("Palm TX"));
         QVERIFY(create(folder(), "Palm TX", "palm-tx"));
         QCOMPARE(freeName(folder(), "Palm TX"), QString("Palm TX 2"));
-        write(folder() + "/Palm TX 2.frond", header(6, "palm-tx"));
+        write(filePath(folder(), "Palm TX 2"), header(6, "palm-tx"));
         QCOMPARE(freeName(folder(), "Palm TX"), QString("Palm TX 3"));
         QCOMPARE(cleanName("  a/b  "), QString("a-b"));
         QCOMPARE(cleanName(" .. "), QString());
     }
     void renameAndRemove() {
-        write(folder() + "/One.frond", header(6, "palm-tx"));
+        write(filePath(folder(), "One"), header(6, "palm-tx"));
         QVERIFY(create(folder(), "Two", "palm-e2"));
-        QVERIFY(!rename(folder(), describe(folder() + "/One.frond"), "Two").isEmpty());
-        QVERIFY(!rename(folder(), describe(folder() + "/One.frond"), "  ").isEmpty());
-        QVERIFY(rename(folder(), describe(folder() + "/One.frond"), " Uno ").isEmpty());
-        QVERIFY(QFileInfo::exists(folder() + "/Uno.frond") && !QFileInfo::exists(folder() + "/One.frond"));
-        QVERIFY(rename(folder(), describe(folder() + "/Two.frond"), "Dos").isEmpty());
-        QVERIFY(QFileInfo::exists(folder() + "/Dos.frond.new"));
-        QCOMPARE(describe(folder() + "/Dos.frond").device, QString("palm-e2"));
+        QVERIFY(!rename(folder(), describe(filePath(folder(), "One")), "Two").isEmpty());
+        QVERIFY(!rename(folder(), describe(filePath(folder(), "One")), "  ").isEmpty());
+        QVERIFY(rename(folder(), describe(filePath(folder(), "One")), " Uno ").isEmpty());
+        QVERIFY(QFileInfo::exists(filePath(folder(), "Uno")) && !QFileInfo::exists(filePath(folder(), "One")));
+        QVERIFY(rename(folder(), describe(filePath(folder(), "Two")), "Dos").isEmpty());
+        QVERIFY(QFileInfo::exists(markerPath(filePath(folder(), "Dos"))));
+        QCOMPARE(describe(filePath(folder(), "Dos")).device, QString("palm-e2"));
         // A session another Frond has open is left alone.
-        QLockFile lock(folder() + "/Uno.frond.lock"); QVERIFY(lock.tryLock());
-        QVERIFY(!remove(describe(folder() + "/Uno.frond")).isEmpty());
-        QVERIFY(!rename(folder(), describe(folder() + "/Uno.frond"), "Three").isEmpty());
+        QLockFile lock(filePath(folder(), "Uno") + ".lock"); QVERIFY(lock.tryLock());
+        QVERIFY(!remove(describe(filePath(folder(), "Uno"))).isEmpty());
+        QVERIFY(!rename(folder(), describe(filePath(folder(), "Uno")), "Three").isEmpty());
         lock.unlock();
-        QVERIFY(remove(describe(folder() + "/Uno.frond")).isEmpty());
-        QVERIFY(remove(describe(folder() + "/Dos.frond")).isEmpty());
+        QVERIFY(remove(describe(filePath(folder(), "Uno"))).isEmpty());
+        QVERIFY(remove(describe(filePath(folder(), "Dos"))).isEmpty());
         QCOMPARE(list(folder()).size(), 0);
     }
     void importing() {
@@ -113,57 +115,99 @@ class SessionStoreTest : public QObject {
         QCOMPARE(importFile(folder(), outside + "/text.frond"), QString("That isn't a Frond session."));
         write(outside + "/old.frond", header(5, "palm-tx"));
         QVERIFY(importFile(folder(), outside + "/old.frond").contains("older Frond"));
-        write(outside + "/new.frond", header(7, "palm-tx"));
+        write(outside + "/new.frond", header(8, "palm-tx"));
         QVERIFY(importFile(folder(), outside + "/new.frond").contains("newer Frond"));
+        write(outside + "/v7.frond", header(7, "palm-tx"));
+        QVERIFY(importFile(folder(), outside + "/v7.frond").isEmpty());
         write(outside + "/other.frond", header(6, "palm-zzz"));
         QVERIFY(importFile(folder(), outside + "/other.frond").contains("can't run"));
         QVERIFY(importFile(folder(), outside + "/none.frond").contains("read"));
-        QCOMPARE(list(folder()).size(), 2);
+        QCOMPARE(list(folder()).size(), 3);
         QVERIFY(QDir(folder()).entryList({"*.part"}).isEmpty());
-        // Export replaces what is there.
+        // Export copies the folder; a .frond path names the destination folder by its stem.
         write(outside + "/out.frond", "old");
-        QVERIFY(exportFile(describe(folder() + "/Trip.frond"), outside + "/out.frond").isEmpty());
-        QCOMPARE(readHeader(outside + "/out.frond").device, QString("palm-e2"));
+        QVERIFY(exportFile(describe(filePath(folder(), "Trip")), outside + "/out.frond").isEmpty());
+        QCOMPARE(readHeader(outside + "/out/out.frond").device, QString("palm-e2"));
     }
     void exportSafety() {
-        write(folder() + "/Trip.frond", header(6, "palm-tx"));
-        write(folder() + "/Other.frond", header(6, "palm-e2"));
-        const auto trip = describe(folder() + "/Trip.frond");
+        write(filePath(folder(), "Trip"), header(6, "palm-tx"));
+        write(filePath(folder(), "Other"), header(6, "palm-e2"));
+        const auto trip = describe(filePath(folder(), "Trip"));
         const auto size = QFileInfo(trip.path).size();
         // Onto itself, also through a link: refused and nothing lost.
-        QVERIFY(!exportFile(trip, folder() + "/Trip.frond").isEmpty());
+        QVERIFY(!exportFile(trip, filePath(folder(), "Trip")).isEmpty());
         QVERIFY(QFile::link(trip.path, directory.filePath("link.frond")));
         QVERIFY(!exportFile(trip, directory.filePath("link.frond")).isEmpty());
         QCOMPARE(QFileInfo(trip.path).size(), size);
         // Onto a session that is open elsewhere.
-        QLockFile lock(folder() + "/Other.frond.lock"); QVERIFY(lock.tryLock());
-        QVERIFY(!exportFile(trip, folder() + "/Other.frond").isEmpty());
-        QCOMPARE(readHeader(folder() + "/Other.frond").device, QString("palm-e2"));
+        QLockFile lock(filePath(folder(), "Other") + ".lock"); QVERIFY(lock.tryLock());
+        QVERIFY(!exportFile(trip, filePath(folder(), "Other")).isEmpty());
+        QCOMPARE(readHeader(filePath(folder(), "Other")).device, QString("palm-e2"));
         lock.unlock();
         // A copy that fails keeps the old target.
         write(directory.filePath("keep.frond"), "keep");
-        QVERIFY(!exportFile(describe(folder() + "/Missing.frond"), directory.filePath("keep.frond")).isEmpty());
+        QVERIFY(!exportFile(describe(filePath(folder(), "Missing")), directory.filePath("keep.frond")).isEmpty());
         QFile keep(directory.filePath("keep.frond")); QVERIFY(keep.open(QIODevice::ReadOnly));
         QCOMPARE(keep.readAll(), QByteArray("keep"));
         QVERIFY(QDir(directory.path()).entryList({"*.part"}).isEmpty());
         // Onto an idle managed session replaces it.
-        QVERIFY(exportFile(trip, folder() + "/Other.frond").isEmpty());
-        QCOMPARE(readHeader(folder() + "/Other.frond").device, QString("palm-tx"));
+        QVERIFY(exportFile(trip, filePath(folder(), "Other")).isEmpty());
+        QCOMPARE(readHeader(filePath(folder(), "Other")).device, QString("palm-tx"));
     }
     void reserving() {
         QCOMPARE(reserve(folder(), "Palm TX", "palm-tx"), QString("Palm TX"));
         QCOMPARE(reserve(folder(), "Palm TX", "palm-tx"), QString("Palm TX 2"));
         QVERIFY(!create(folder(), "Palm TX", "palm-tx"));  // never takes a held name
-        QCOMPARE(describe(folder() + "/Palm TX.frond").device, QString("palm-tx"));
+        QCOMPARE(describe(filePath(folder(), "Palm TX")).device, QString("palm-tx"));
+    }
+    void migrateLooseV6() {
+        write(folder() + "/Trip.frond", header(6, "palm-tx"));
+        write(folder() + "/Trip.frond.settings.json",
+              R"({"version":1,"scale":5,"smooth":false,"audio":true,"fastAudio":false})");
+        QCOMPARE(list(folder()).size(), 1);
+        QVERIFY(QFileInfo::exists(filePath(folder(), "Trip")));
+        QVERIFY(!QFileInfo::exists(folder() + "/Trip.frond"));
+        QVERIFY(QFileInfo::exists(preferencesPath(filePath(folder(), "Trip"))));
+        Preferences loaded;
+        QVERIFY(readPreferences(filePath(folder(), "Trip"), &loaded));
+        QCOMPARE(loaded.scale, 5);
+        QCOMPARE(locate(folder(), folder() + "/Trip.frond"), filePath(folder(), "Trip"));
+    }
+    void copyFolderWithCardIgnoresTemps() {
+        write(filePath(folder(), "Trip"), header(7, "palm-tx"));
+        write(machineDir(folder(), "Trip") + "/sd.frondsd", "card-bytes");
+        write(machineDir(folder(), "Trip") + "/.frond.tmp-leftover", "tmp");
+        write(machineDir(folder(), "Trip") + "/.gen-sd.frondsd-1", "gen");
+        QString name;
+        QVERIFY(importFile(folder(), machineDir(folder(), "Trip"), &name).isEmpty());
+        QCOMPARE(name, QString("Trip 2"));
+        QVERIFY(QFileInfo::exists(filePath(folder(), "Trip 2")));
+        QVERIFY(QFileInfo::exists(machineDir(folder(), "Trip 2") + "/sd.frondsd"));
+        QCOMPARE(describe(filePath(folder(), "Trip 2")).size,
+                 qint64(header(7, "palm-tx").size() + QByteArray("card-bytes").size()));
+        QVERIFY(!QFileInfo::exists(machineDir(folder(), "Trip 2") + "/.frond.tmp-leftover"));
+        QVERIFY(!QFileInfo::exists(machineDir(folder(), "Trip 2") + "/.gen-sd.frondsd-1"));
+        QVERIFY(exportFile(describe(filePath(folder(), "Trip")), directory.filePath("out")).isEmpty());
+        QVERIFY(QFileInfo::exists(directory.filePath("out/out.frond")));
+        QVERIFY(QFileInfo::exists(directory.filePath("out/sd.frondsd")));
+        QVERIFY(!QFileInfo::exists(directory.filePath("out/.frond.tmp-leftover")));
+        QVERIFY(rename(folder(), describe(filePath(folder(), "Trip")), "Moved").isEmpty());
+        QVERIFY(QFileInfo::exists(filePath(folder(), "Moved")));
+        QVERIFY(QFileInfo::exists(machineDir(folder(), "Moved") + "/sd.frondsd"));
+        QVERIFY(!QFileInfo::exists(machineDir(folder(), "Trip")));
+        QVERIFY(remove(describe(filePath(folder(), "Moved"))).isEmpty());
+        QVERIFY(!QFileInfo::exists(machineDir(folder(), "Moved")));
+        QVERIFY(QFileInfo::exists(filePath(folder(), "Trip 2")));
     }
     void removeKeepsOthersLock() {
-        write(folder() + "/Busy.frond", header(6, "palm-tx"));
-        QLockFile lock(folder() + "/Busy.frond.lock"); QVERIFY(lock.tryLock());
-        QVERIFY(!remove(describe(folder() + "/Busy.frond")).isEmpty());
-        QVERIFY(QFileInfo::exists(folder() + "/Busy.frond") && QFileInfo::exists(folder() + "/Busy.frond.lock"));
+        write(filePath(folder(), "Busy"), header(6, "palm-tx"));
+        QLockFile lock(filePath(folder(), "Busy") + ".lock"); QVERIFY(lock.tryLock());
+        QVERIFY(!remove(describe(filePath(folder(), "Busy"))).isEmpty());
+        QVERIFY(QFileInfo::exists(filePath(folder(), "Busy")) && QFileInfo::exists(filePath(folder(), "Busy") + ".lock"));
         lock.unlock();
-        QVERIFY(remove(describe(folder() + "/Busy.frond")).isEmpty());
-        QVERIFY(!QFileInfo::exists(folder() + "/Busy.frond.lock"));
+        QVERIFY(remove(describe(filePath(folder(), "Busy"))).isEmpty());
+        QVERIFY(!QFileInfo::exists(filePath(folder(), "Busy") + ".lock"));
+        QVERIFY(!QFileInfo::exists(machineDir(folder(), "Busy")));
     }
     void sessionNorDigest() {
         const QByteArray nor(16 << 20, char(0x61));
@@ -228,9 +272,9 @@ class SessionStoreTest : public QObject {
         QVERIFY(QFileInfo::exists(preferencesPath(moved))); lock.unlock();
         const auto copy = directory.filePath("copy.frond");
         QVERIFY(exportFile(describe(moved), copy).isEmpty());
-        QVERIFY(readPreferences(copy, &loaded)); QCOMPARE(loaded.scale, 7);
+        QVERIFY(readPreferences(directory.filePath("copy/copy.frond"), &loaded)); QCOMPARE(loaded.scale, 7);
         QString imported;
-        QVERIFY(importFile(folder(), copy, &imported).isEmpty());
+        QVERIFY(importFile(folder(), directory.filePath("copy"), &imported).isEmpty());
         QVERIFY(readPreferences(filePath(folder(), imported), &loaded));
         QCOMPARE(loaded.scale, 7); QVERIFY(!loaded.audio);
         QVERIFY(remove(describe(moved)).isEmpty());

@@ -198,7 +198,7 @@ int main() {
                 .SetNor(rom.size(),rom.data()).SetNand(flash.size,flash.data)
                 .SetMemory(memory.size,memory.data).SetSavestate(saved.size(),saved.data());
             if (card) envelope.SetSd(sdCardData().size,sdCardData().data);
-            assert(envelope.Serialize());
+            assert(envelope.SerializeAs(6));
             SessionFile5 decoded;
             assert(decoded.Deserialize(envelope.GetSerializedSessionSize(),envelope.GetSerializedSession()));
             assert(decoded.GetVersion() == 6u);

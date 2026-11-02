@@ -124,10 +124,10 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
         }
         discard()
         Sessions.adoptRecovery(context)
-        val owner = session?.let { Sessions.read(context, File(it).name.removeSuffix(".frond")) }
+        val owner = Sessions.forPath(context, session)
         val device = owner?.device ?: Device.TX
         // The recovery copy, plus the card's working copy and the copy each edit makes.
-        val needs = Sessions.recoveryNeeds(owner?.file?.takeIf { it.isFile }?.length(), device) + 2 * FatImage.MAX_BYTES
+        val needs = Sessions.recoveryNeeds(owner?.takeIf { it.saved }?.size, device) + 2 * FatImage.MAX_BYTES
         val free = context.filesDir.usableSpace
         if (free < needs) {
             throw Failed("There isn't room to save a recovery session before the exchange. Free up about ${(needs - free + (1L shl 20) - 1) shr 20} MB and try again.")

@@ -115,7 +115,7 @@ class FrondActivity : SDLActivity() {
         val extras = intent?.extras
         val arguments = mutableListOf<String>()
         val session = sessionPath
-        if (session != null && File(session).isFile) {
+        if (session != null && (File(session).isFile || File(session).isDirectory)) {
             arguments += session
         } else {
             val device = Device.byId(extras?.getString(EXTRA_DEVICE)) ?: Device.TX

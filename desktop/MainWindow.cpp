@@ -484,7 +484,7 @@ MainWindow::MainWindow(const QString& core) : core(core) {
         if (!ok && exchangeStage != ExchangeStage::None) { exchangeResult(false, message); return; }
         if (!ok) {
             if (code == "cancelled" && !stopping) { statusBar()->showMessage(tr("Cancelled.")); return; }
-            if (command == "save") copyLock.reset();
+            if (command == "save") { copyLock.reset(); pendingCopy.clear(); }
             hardResetAfterSave = false;
             log->appendPlainText(command + ": " + message);
             if (command == "hold-state" || command == "hold") { holdKnown = false; refresh(); }
@@ -586,7 +586,19 @@ MainWindow::MainWindow(const QString& core) : core(core) {
         if (command == "save") {
             if (savedWorkingCopy) {
                 settings.setValue("lastSession", sessionPath); settings.sync();
-                QFile::remove(frondSessions::markerPath(sessionPath)); refreshSessions();
+                QFile::remove(frondSessions::markerPath(sessionPath));
+                if (!pendingCopy.isEmpty()) {
+                    const auto name = QFileInfo(pendingCopy).fileName();
+                    const auto error = frondSessions::copyPackable(frondSessions::machineDirOf(sessionPath),
+                                                                  pendingCopy, name);
+                    if (error.isEmpty()) {
+                        const auto destFrond = pendingCopy + '/' + name + ".frond";
+                        if (const auto prefsError = frondSessions::writePreferences(destFrond, runningPreferences);
+                            !prefsError.isEmpty()) failure(prefsError);
+                    } else failure(error);
+                    pendingCopy.clear();
+                }
+                refreshSessions();
             }
             if (!savedWorkingCopy) {
                 const auto error = frondSessions::writePreferences(savingPath, runningPreferences);
@@ -840,7 +852,7 @@ void MainWindow::exportSession(const QString& path) {
     if (target.isEmpty()) return;
     const auto error = frondSessions::exportFile(info, target);
     if (!error.isEmpty()) failure(error);
-    else statusBar()->showMessage(tr("Session exported."));
+    else statusBar()->showMessage(tr("Session exported to %1.").arg(frondSessions::exportDestDir(target)));
 }
 void MainWindow::deleteSession(const QString& path) {
     const auto info = infoFor(path);
@@ -913,15 +925,18 @@ void MainWindow::openSession(const QString& path, bool launchNow) {
         return;
     }
     if (!QFileInfo(core).isExecutable()) return failure(tr("The Frond emulator executable could not be found. Reinstall Frond or build both desktop and core targets."));
-    const auto source = QFileInfo(QFileInfo(path).absoluteFilePath()).canonicalFilePath();
-    if (source.isEmpty() || !QFileInfo(source).isFile()) return failure(tr("Choose an existing session file."));
     if (!QDir().mkpath(sessionFolder())) return failure(tr("Could not create the session storage directory."));
+    const auto resolved = frondSessions::locate(sessionFolder(), QFileInfo(path).absoluteFilePath());
+    const auto source = QFileInfo(resolved).canonicalFilePath();
+    if (source.isEmpty() || !(QFileInfo(source).isFile() || QFileInfo(source).isDir()))
+        return failure(tr("Choose an existing session file."));
     // Compare canonical paths so an XDG data directory symlink does not clone on every resume.
     const auto managedRoot = QFileInfo(sessionFolder()).canonicalFilePath();
-    const auto header = frondSessions::readHeader(source);
+    const auto load = QFileInfo(source).isDir() ? frondSessions::sessionFrondIn(source) : source;
+    const auto header = frondSessions::readHeader(load);
     auto device = frondFirmware::deviceFromId(header.device);
     if (device == frondFirmware::Device::automatic) device = frondFirmware::Device::tx;
-    QString target = source;
+    QString target = load;
     bool reserved = false;
     if (!source.startsWith(managedRoot + '/')) {
         // The marker holds the new name until the first save, so no other Frond takes it.
@@ -930,7 +945,7 @@ void MainWindow::openSession(const QString& path, bool launchNow) {
         target = frondSessions::filePath(managedRoot, name);
         reserved = true;
     }
-    launch(target, {source}, device);
+    launch(target, {load}, device);
     if (reserved && !busy) {
         QFile::remove(frondSessions::markerPath(target));
         QFile::remove(frondSessions::preferencesPath(target));
@@ -961,7 +976,7 @@ void MainWindow::startSession(const frondSessions::Info& info) {
             arguments << "--nand" << frondFirmware::storedNand(firmwareRoot(), device);
     }
     if (!QDir().mkpath(sessionFolder())) return failure(tr("Could not create the session storage directory."));
-    launch(QFileInfo(sessionFolder()).canonicalFilePath() + '/' + QFileInfo(info.path).fileName(), arguments, device);
+    launch(QFileInfo(info.path).absoluteFilePath(), arguments, device);
 }
 // Starts the core on 'arguments' (the session file or the firmware) and saves to 'target'.
 void MainWindow::launch(const QString& target, QStringList arguments, frondFirmware::Device startDevice) {
@@ -1097,13 +1112,21 @@ QString MainWindow::outputFile(const QString& title, const QString& filter, cons
 }
 void MainWindow::save(bool saveAs) {
     if (!client.available()) return;
-    const auto path = saveAs ? outputFile(tr("Save a Copy"), tr("Frond sessions (*.frond)"), deviceLabel() + ".frond") : sessionPath;
-    if (path.isEmpty()) return;
-    if (canonicalSession(path) != canonicalSession(sessionPath)) {
-        copyLock = std::make_unique<QLockFile>(path + ".lock"); copyLock->setStaleLockTime(0);
-        if (!copyLock->tryLock()) { copyLock.reset(); return failure(tr("This session is open in another Frond.")); }
+    if (!saveAs) {
+        savingPath = sessionPath; send("save", sessionPath);
+        return;
     }
-    savingPath = path; send("save", path);
+    const auto path = outputFile(tr("Save a Copy"), tr("Frond sessions (*.frond)"), deviceLabel() + ".frond");
+    if (path.isEmpty()) return;
+    const auto dest = frondSessions::exportDestDir(path);
+    if (QFileInfo(dest).canonicalFilePath() == QFileInfo(frondSessions::machineDirOf(sessionPath)).canonicalFilePath() &&
+        QFileInfo(dest).exists())
+        return failure(tr("That is the session itself."));
+    const auto destFrond = dest + '/' + QFileInfo(dest).fileName() + ".frond";
+    copyLock = std::make_unique<QLockFile>(destFrond + ".lock"); copyLock->setStaleLockTime(0);
+    if (QFileInfo::exists(dest) && !copyLock->tryLock()) { copyLock.reset(); return failure(tr("This session is open in another Frond.")); }
+    pendingCopy = dest;
+    savingPath = sessionPath; send("save", sessionPath);
 }
 bool MainWindow::send(const QString& command, const QString& argument) {
     if (!client.request(command, argument)) return false;
@@ -1189,7 +1212,7 @@ void MainWindow::beginExchange() {
     if (!exchangeRecovery->isValid() || !exchangeFiles->isValid()) {
         endExchange(); return failure(tr("Could not create private SD exchange storage."));
     }
-    exchangeBackup = exchangeRecovery->path() + "/Before exchange.frond";
+    exchangeBackup = exchangeRecovery->path() + "/before-exchange";
     if (cardInserted) { exchangeStage = ExchangeStage::Eject; send("sd-eject"); }
     else { exchangeStage = ExchangeStage::Backup; send("save", exchangeBackup); }
 }

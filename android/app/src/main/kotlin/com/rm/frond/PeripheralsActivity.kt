@@ -565,7 +565,7 @@ class PeripheralsActivity : ComponentActivity() {
             emulator?.let { SdCard(applicationContext, it.control, it.session, device) },
             emulator?.let { PalmDatabases(applicationContext, it.control) },
             emulator?.control,
-            emulator?.session?.let { Sessions.read(this, java.io.File(it).name.removeSuffix(".frond"))?.name } ?: device.label,
+            emulator?.session?.let { Sessions.forPath(this, it)?.name } ?: device.label,
         )
         // Without the emulator (the process was restarted here) there's nothing to show.
         if (emulator == null) {

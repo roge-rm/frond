@@ -240,6 +240,19 @@ static void LegacyV6() {
     assert(frondSession::loadPath(none, loadedNone, noneFolder));
     assert(loadedNone.media.empty());
     assert(!fs::exists(noneFolder / frondMachine::sdSibling));
+
+    const auto android = dir / "android-id";
+    fs::create_directories(android);
+    WriteFile(android / frondMachine::androidSession, std::vector<uint8_t>(data, data + size));
+    frondSession::Contents fromAndroid;
+    fs::path androidFolder;
+    assert(frondSession::loadPath(android / frondMachine::androidSession, fromAndroid, androidFolder));
+    assert(androidFolder == android);
+    assert(fromAndroid.media.size() == 1 && fromAndroid.media[0].kind == frondMachine::kindSd);
+    assert(frondMachine::readBytes(android / frondMachine::sdSibling, extracted));
+    assert(frondSdFile::decode(extracted.data(), extracted.size(), decoded) && decoded == payload);
+    auto androidSession = ReadAll(android / frondMachine::androidSession);
+    assert(androidSession[4] == 7);
     fs::remove_all(dir);
 }
 

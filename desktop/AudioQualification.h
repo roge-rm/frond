@@ -6,17 +6,35 @@
 namespace frondAudio {
 // Read only the compressed metadata and NOR prefix, with fixed-size buffers and bounded input.
 inline QByteArray sessionNorMd5(const QString& path) {
-    const auto header = frondSessions::readHeader(path);
+    const auto frond = QFileInfo(path).isDir() ? frondSessions::sessionFrondIn(path) : path;
+    const auto header = frondSessions::readHeader(frond);
     if (!frondSessions::openable(header)) return {};
-    QFile file(path);
+    QFile file(frond);
     if (!file.open(QIODevice::ReadOnly) || !file.seek(48)) return {};
-    const auto sizes = file.read(24);
-    if (sizes.size() != 24) return {};
-    auto sizeAt = [&](int offset) {
-        return quint32(uchar(sizes[offset])) | (quint32(uchar(sizes[offset + 1])) << 8) |
-               (quint32(uchar(sizes[offset + 2])) << 16) | (quint32(uchar(sizes[offset + 3])) << 24);
-    };
-    quint64 skip = sizeAt(0), left = sizeAt(4);
+    quint64 skip = 0, left = 0;
+    if (header.version >= 7) {
+        const auto sizes = file.read(40);
+        if (sizes.size() != 40) return {};
+        auto size64 = [&](int offset) {
+            quint64 n = 0;
+            for (int i = 0; i < 8; ++i) n |= quint64(uchar(sizes[offset + i])) << (8 * i);
+            return n;
+        };
+        skip = size64(0); left = size64(8);
+        const auto count = file.read(4);
+        if (count.size() != 4) return {};
+        const quint32 media = quint32(uchar(count[0])) | (quint32(uchar(count[1])) << 8) |
+                              (quint32(uchar(count[2])) << 16) | (quint32(uchar(count[3])) << 24);
+        if (media && !file.seek(file.pos() + qint64(media) * 92)) return {};
+    } else {
+        const auto sizes = file.read(24);
+        if (sizes.size() != 24) return {};
+        auto sizeAt = [&](int offset) {
+            return quint32(uchar(sizes[offset])) | (quint32(uchar(sizes[offset + 1])) << 8) |
+                   (quint32(uchar(sizes[offset + 2])) << 16) | (quint32(uchar(sizes[offset + 3])) << 24);
+        };
+        skip = sizeAt(0); left = sizeAt(4);
+    }
     const auto& profile = frondFirmware::profile(frondFirmware::deviceFromId(header.device));
     if (skip > (1u << 20) || left != profile.norSize || !left) return {};
     quint64 inputLeft = 2 * (skip + left) + 65536;

@@ -111,7 +111,7 @@ struct Machine {
             .SetNand(flash.size, flash.data).SetMemory(memory.size, memory.data)
             .SetSavestate(state.size, state.data).SetSd(sd.size, sd.data)
             .SetMetadata(metadata.size(), metadata.data());
-        require(session.Serialize(), "session serialization failed");
+        require(session.SerializeAs(6), "session serialization failed");
         return copy(session.GetSerializedSession(), session.GetSerializedSessionSize());
     }
     void roundtrip(const std::string& phase) {

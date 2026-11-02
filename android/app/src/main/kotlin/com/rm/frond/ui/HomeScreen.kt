@@ -84,7 +84,7 @@ fun HomeScreen(model: HomeModel) {
             else snackbar.showSnackbar("Session imported")
         }
     }
-    val exportSession = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
+    val exportSession = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
         val s = exporting
         exporting = null
         if (uri == null || s == null) return@rememberLauncherForActivityResult
@@ -138,7 +138,7 @@ fun HomeScreen(model: HomeModel) {
             items(model.sessions, key = { it.id }) { s ->
                 SessionRow(s, onMenu = { model.refreshRunning() }, editable = !busy && !model.running, onEdit = { model.edit(it) }, onOpen = { model.start(s) }, onRename = { renaming = it }, onDelete = { deleting = it }, onExport = {
                     exporting = it
-                    exportSession.launch("${it.name}.frond")
+                    exportSession.launch("${it.name}.zip")
                 })
             }
             if (model.sessions.isEmpty()) item(key = "empty") { EmptyNote("No devices yet. Tap Add device to set one up.") }

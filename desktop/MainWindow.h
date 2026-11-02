@@ -80,7 +80,7 @@ class MainWindow : public QMainWindow {
     QString outputFile(const QString& title, const QString& filter, const QString& defaultName);
     DesktopClient client;
     QSettings settings;
-    QString core, sessionPath, savingPath;
+    QString core, sessionPath, savingPath, pendingCopy;
     bool hardResetAfterSave{false};
     std::unique_ptr<QLockFile> sessionLock, copyLock;
     QComboBox *network, *serial, *usb, *irda;

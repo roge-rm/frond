@@ -402,7 +402,7 @@ for line in s.makefile('rb'):
         QVERIFY(read(".args").contains("--window-scale\n1.75"));
         QVERIFY(args.contains("--smooth-lcd") && args.contains("--no-sound"));
         frondSessions::Preferences added;
-        QVERIFY(frondSessions::readPreferences(managedFolder() + "/Tungsten E2.frond", &added));
+        QVERIFY(frondSessions::readPreferences(managedSession("Tungsten E2"), &added));
         QCOMPARE(added.scale, 7); QVERIFY(added.smooth && !added.audio && added.fastAudio);
         QVERIFY(!QSettings().contains("windowScale"));
         QCOMPARE(window.windowTitle(), QString("Tungsten E2"));
@@ -894,7 +894,12 @@ for line in s.makefile('rb'):
         else: state='ejected'
     elif cmd=='save':
         if mode=='save-fail' and 'sd-exchange' in arg: ok=False
-        else: pathlib.Path(arg).write_text('recovery '+state)
+        else:
+            p=pathlib.Path(arg)
+            if p.suffix!='.frond':
+                p.mkdir(parents=True, exist_ok=True)
+                p=p/'session.frond'
+            p.write_text('recovery '+state)
     elif cmd=='sd-export':
         assert state=='ejected'
         if mode=='export-fail': ok=False
@@ -956,7 +961,8 @@ for line in s.makefile('rb'):
                 expected << "sd-export";
                 if (mode == "apply" || mode == "insert-fail" || mode == "already-ejected") expected << "sd-insert";
                 if (mode == "close-edit") expected << "save" << "quit";
-                QFile saved(backup); QVERIFY(saved.open(QIODevice::ReadOnly)); QCOMPARE(saved.readAll(), QByteArray("recovery ejected"));
+                const auto savedPath = QFileInfo(backup).isDir() ? backup + "/session.frond" : backup;
+                QFile saved(savedPath); QVERIFY(saved.open(QIODevice::ReadOnly)); QCOMPARE(saved.readAll(), QByteArray("recovery ejected"));
                 const auto permissions = QFileInfo(QFileInfo(backup).absolutePath()).permissions();
                 QVERIFY(!(permissions & (QFile::ReadGroup | QFile::ReadOther)));
             } else QVERIFY(!QFileInfo::exists(backup));
@@ -981,9 +987,13 @@ for line in s.makefile('rb'):
     static QString managedFolder() {
         return QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/frond/sessions";
     }
+    static QString managedSession(const QString& name) {
+        return frondSessions::filePath(managedFolder(), name);
+    }
     static void putSession(const QString& name, quint32 version, const QByteArray& device, int daysAgo) {
-        QDir().mkpath(managedFolder());
-        QFile file(managedFolder() + "/" + name + ".frond");
+        const auto path = managedSession(name);
+        QDir().mkpath(QFileInfo(path).absolutePath());
+        QFile file(path);
         QVERIFY(file.open(QIODevice::WriteOnly)); file.write(sessionBytes(version, device)); file.close();
         QVERIFY(file.open(QIODevice::ReadWrite));
         QVERIFY(file.setFileTime(QDateTime::currentDateTime().addDays(-daysAgo), QFileDevice::FileModificationTime));
@@ -1007,7 +1017,7 @@ for line in s.makefile('rb'):
         putSession("Work", 6, "palm-e2", 0);
         putSession("Ancient", 5, "palm-tx", 2);
         QVERIFY(frondSessions::create(managedFolder(), "Fresh", "palm-tx"));
-        QFile marker(managedFolder() + "/Fresh.frond.new");
+        QFile marker(frondSessions::markerPath(managedSession("Fresh")));
         QVERIFY(marker.open(QIODevice::ReadWrite)); marker.setFileTime(QDateTime::currentDateTime().addSecs(60), QFileDevice::FileModificationTime);
         MainWindow window{QString()}; window.show();
         auto* list = window.findChild<QListWidget*>("sessionList");
@@ -1062,14 +1072,14 @@ for line in s.makefile('rb'):
         emit list->itemActivated(list->item(0));
         QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("stop")->isEnabled(), 5000);
         QFile args(core.fileName() + ".args"); QVERIFY(args.open(QIODevice::ReadOnly));
-        QCOMPARE(QString::fromUtf8(args.readAll()).split('\n').value(0), QFileInfo(managedFolder() + "/Trip.frond").canonicalFilePath());
-        QVERIFY(QFileInfo::exists(managedFolder() + "/Trip.frond.lock"));
+        QCOMPARE(QString::fromUtf8(args.readAll()).split('\n').value(0), QFileInfo(managedSession("Trip")).canonicalFilePath());
+        QVERIFY(QFileInfo::exists(managedSession("Trip") + ".lock"));
         QVERIFY(!window.findChild<QWidget*>("home")->isVisible());
         QVERIFY(window.findChild<QWidget*>("running")->isVisible());
         QCOMPARE(window.windowTitle(), QString("Trip"));
         window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
         // The core's save went into the same session, and it is the one that resumes.
-        QCOMPARE(QSettings().value("lastSession").toString(), QFileInfo(managedFolder() + "/Trip.frond").canonicalFilePath());
+        QCOMPARE(QSettings().value("lastSession").toString(), QFileInfo(managedSession("Trip")).canonicalFilePath());
         QDir(managedFolder()).removeRecursively();
         QSettings().clear();
     }
@@ -1253,7 +1263,7 @@ for line in s.makefile('rb'):
         QVERIFY(sound->isChecked());
         sound->click();
         frondSessions::Preferences prefs;
-        QVERIFY(frondSessions::readPreferences(managedFolder() + "/Trip.frond", &prefs));
+        QVERIFY(frondSessions::readPreferences(managedSession("Trip"), &prefs));
         QVERIFY(!prefs.audio);
         QVERIFY(!QSettings().contains("audio"));
         QTimer answer;
@@ -1308,7 +1318,7 @@ for line in s.makefile('rb'):
 )PY");
         core.write(script); core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
         MainWindow window(core.fileName()); window.show();
-        window.openSession(managedFolder() + "/Stick.frond", true);
+        window.openSession(managedSession("Stick"), true);
         auto* state = window.findChild<QLabel*>("sdState");
         auto* create = window.findChild<QPushButton*>("sdNew");
         auto* protection = window.findChild<QCheckBox*>("cardReadOnly");
@@ -1415,7 +1425,7 @@ for line in s.makefile('rb'):
         QSettings().clear(); QSettings().setValue("resume", false);
         QDir(managedFolder()).removeRecursively();
         putSession("One", 6, "palm-tx", 0); putSession("Two", 6, "palm-tx", 1);
-        const auto one = managedFolder() + "/One.frond", two = managedFolder() + "/Two.frond";
+        const auto one = managedSession("One"), two = managedSession("Two");
         QVERIFY(frondSessions::writePreferences(one, {7, true, false, true}).isEmpty());
         QVERIFY(frondSessions::writePreferences(two, {4, false, true, false}).isEmpty());
         QTemporaryDir files;
@@ -1439,6 +1449,7 @@ for line in s.makefile('rb'):
             QFile file(core.fileName() + suffix); return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
         };
         const auto copy = files.filePath("copy.frond");
+        const auto copyFrond = files.filePath("copy/copy.frond");
         {
             MainWindow window(core.fileName()); window.show(); window.openSession(one, true);
             auto* sound = window.findChild<QCheckBox*>("sound");
@@ -1480,10 +1491,10 @@ for line in s.makefile('rb'):
             QVERIFY2(fixtureError.isEmpty(), qPrintable(fixtureError));
             QCOMPARE(chosenCopy, copy); QCOMPARE(emittedCopy, copy);
             QTRY_VERIFY(read(".commands").contains("save"));
-            QTRY_VERIFY(QFileInfo::exists(frondSessions::preferencesPath(copy)));
-            QCOMPARE(digest(copy), guestBeforeCopy); QCOMPARE(digest(one), guestBeforeCopy);
+            QTRY_VERIFY(QFileInfo::exists(copyFrond));
+            QCOMPARE(digest(copyFrond), guestBeforeCopy); QCOMPARE(digest(one), guestBeforeCopy);
             QCOMPARE(digest(frondSessions::preferencesPath(one)), settingsBeforeCopy);
-            QVERIFY(frondSessions::readPreferences(copy, &prefs));
+            QVERIFY(frondSessions::readPreferences(copyFrond, &prefs));
             QCOMPARE(prefs.scale, 7); QVERIFY(prefs.smooth && prefs.fastAudio && prefs.audio);
             QVERIFY(!QSettings().contains("lastSession"));
             window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
@@ -1506,7 +1517,7 @@ for line in s.makefile('rb'):
         QSettings().clear(); QSettings().setValue("resume", false);
         QDir(managedFolder()).removeRecursively();
         putSession("TG50", 6, "sony-clie-tg50", 0);
-        const auto path = managedFolder() + "/TG50.frond";
+        const auto path = managedSession("TG50");
         const auto guest = digest(path);
         QTemporaryDir files;
         QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly));
@@ -1569,7 +1580,7 @@ for line in s.makefile('rb'):
         QSettings().setValue("smoothLcd", true); QSettings().setValue("fastAudio", true);
         QDir(managedFolder()).removeRecursively();
         putSession("One", 6, "palm-tx", 0); putSession("Two", 6, "palm-tx", 1);
-        const auto one = managedFolder() + "/One.frond", two = managedFolder() + "/Two.frond";
+        const auto one = managedSession("One"), two = managedSession("Two");
         QTemporaryDir files;
         QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly));
         core.write("#!/bin/sh\ntouch \"$0.started\"\n"); core.close();
@@ -1614,7 +1625,7 @@ for line in s.makefile('rb'):
         {
             MainWindow next(core.fileName()); next.show();
             frondSessions::Preferences prefs;
-            const auto renamed = managedFolder() + "/Renamed.frond";
+            const auto renamed = managedSession("Renamed");
             QVERIFY(frondSessions::readPreferences(renamed, &prefs)); QCOMPARE(prefs.scale, 8);
             QVERIFY(frondSessions::readPreferences(two, &prefs)); QCOMPARE(prefs.scale, 6); QVERIFY(!prefs.audio);
             QLockFile lock(renamed + ".lock"); QVERIFY(lock.tryLock());
@@ -1655,23 +1666,23 @@ for line in s.makefile('rb'):
         rowAction(window, 0, "renameSession");
         QTRY_COMPARE(rowTexts(window, "sessionName"), QStringList({"Journal", "Trip"}));
         QCOMPARE(name, QString("Work"));
-        QVERIFY(QFileInfo::exists(managedFolder() + "/Journal.frond") && !QFileInfo::exists(managedFolder() + "/Work.frond"));
-        QCOMPARE(list->currentItem()->data(Qt::UserRole).toString(), managedFolder() + "/Journal.frond");
+        QVERIFY(QFileInfo::exists(managedSession("Journal")) && !QFileInfo::exists(managedSession("Work")));
+        QCOMPARE(list->currentItem()->data(Qt::UserRole).toString(), managedSession("Journal"));
         // A name in use is refused and says so.
         text = "Trip"; name.clear();
         rowAction(window, 0, "renameSession");
         QTRY_VERIFY(name.contains("already a session called Trip"));
-        QVERIFY(QFileInfo::exists(managedFolder() + "/Journal.frond"));
+        QVERIFY(QFileInfo::exists(managedSession("Journal")));
         // Delete asks first.
         name.clear(); answer = QMessageBox::Cancel;
         rowAction(window, 1, "deleteSession");
         QTRY_COMPARE(name, QString("Delete Trip?"));
         QCOMPARE(list->count(), 2);
-        QVERIFY(QFileInfo::exists(managedFolder() + "/Trip.frond"));
+        QVERIFY(QFileInfo::exists(managedSession("Trip")));
         answer = QMessageBox::Yes;
         rowAction(window, 1, "deleteSession");
         QTRY_COMPARE(list->count(), 1);
-        QVERIFY(!QFileInfo::exists(managedFolder() + "/Trip.frond"));
+        QVERIFY(!QFileInfo::exists(managedSession("Trip")));
         poll.stop();
         QDir(managedFolder()).removeRecursively();
         QSettings().clear();
@@ -1767,7 +1778,7 @@ for line in s.makefile('rb'):
         putSession("Trip", 6, "palm-tx", 1);
         putSession("Work", 6, "palm-e2", 0);
         const auto canonical = [](const QString& name) {
-            return QFileInfo(managedFolder()).canonicalFilePath() + "/" + name + ".frond";
+            return QFileInfo(managedSession(name)).canonicalFilePath();
         };
         QSettings().setValue("lastSession", canonical("Work"));
         MainWindow window{QString()}; window.show();
@@ -1784,11 +1795,11 @@ for line in s.makefile('rb'):
         QTRY_COMPARE(rowTexts(window, "sessionName"), QStringList({"Journal", "Trip"}));
         QCOMPARE(QSettings().value("lastSession").toString(), canonical("Journal"));
         // The session is open in another Frond: Delete says no and keeps the setting.
-        QLockFile lock(managedFolder() + "/Journal.frond.lock"); QVERIFY(lock.tryLock());
+        QLockFile lock(managedSession("Journal") + ".lock"); QVERIFY(lock.tryLock());
         answer = QMessageBox::Yes;
         rowAction(window, 0, "deleteSession");
         QTest::qWait(300);
-        QVERIFY(QFileInfo::exists(managedFolder() + "/Journal.frond"));
+        QVERIFY(QFileInfo::exists(managedSession("Journal")));
         QCOMPARE(QSettings().value("lastSession").toString(), canonical("Journal"));
         lock.unlock();
         rowAction(window, 0, "deleteSession");
@@ -1809,7 +1820,7 @@ for line in s.makefile('rb'):
         source.write(sessionBytes(6, "palm-tx")); source.close();
         MainWindow window(core.fileName()); window.show();
         window.openSession(source.fileName(), true);
-        QVERIFY(QFileInfo::exists(managedFolder() + "/Palm TX.frond.new"));
+        QVERIFY(QFileInfo::exists(frondSessions::markerPath(managedSession("Palm TX"))));
         QCOMPARE(frondSessions::freeName(managedFolder(), "Palm TX"), QString("Palm TX 2"));
         window.close();
         QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 8000);
@@ -1829,10 +1840,22 @@ for line in s.makefile('rb'):
         QVERIFY(window.importSession(good).isEmpty());
         { const auto names = rowTexts(window, "sessionName"); QCOMPARE(QSet<QString>(names.begin(), names.end()), QSet<QString>({"Holiday", "Holiday 2"})); }
         // The copy is in the managed folder and the original stays where it was.
-        QVERIFY(QFileInfo::exists(managedFolder() + "/Holiday.frond") && QFileInfo::exists(good));
+        QVERIFY(QFileInfo::exists(managedSession("Holiday")) && QFileInfo::exists(good));
+        const auto packed = files.filePath("Packed");
+        QDir().mkpath(packed);
+        QFile packedFrond(packed + "/Packed.frond"); QVERIFY(packedFrond.open(QIODevice::WriteOnly));
+        packedFrond.write(sessionBytes(6, "palm-tx")); packedFrond.close();
+        QFile packedCard(packed + "/sd.frondsd"); QVERIFY(packedCard.open(QIODevice::WriteOnly));
+        packedCard.write("card"); packedCard.close();
+        QFile packedTemp(packed + "/.frond.tmp-x"); QVERIFY(packedTemp.open(QIODevice::WriteOnly));
+        packedTemp.write("tmp"); packedTemp.close();
+        QVERIFY(window.importSession(packed).isEmpty());
+        QVERIFY(QFileInfo::exists(managedSession("Packed")));
+        QVERIFY(QFileInfo::exists(frondSessions::machineDir(managedFolder(), "Packed") + "/sd.frondsd"));
+        QVERIFY(!QFileInfo::exists(frondSessions::machineDir(managedFolder(), "Packed") + "/.frond.tmp-x"));
         QCOMPARE(window.importSession(put("text.frond", "not a session")), QString("That isn't a Frond session."));
         QVERIFY(window.importSession(put("old.frond", sessionBytes(5, "palm-tx"))).contains("older Frond"));
-        QCOMPARE(window.findChild<QListWidget*>("sessionList")->count(), 2);
+        QCOMPARE(window.findChild<QListWidget*>("sessionList")->count(), 3);
         QDir(managedFolder()).removeRecursively();
         QSettings().clear();
     }

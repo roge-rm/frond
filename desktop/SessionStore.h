@@ -15,10 +15,8 @@
 #include <filesystem>
 #include "FirmwareInput.h"
 
-// The managed session folder. A saved session is <name>.frond, written by the core (session
-// file version 7 starts with the magic, the version and the 32-byte device name). One that was
-// created but not saved yet is <name>.frond.new, holding the device's fixed name. The name is
-// the file name, so renaming a session renames the file.
+// Each machine is a folder: sessions/<name>/ holds <name>.frond, <name>.frond.settings.json,
+// the lock, sd.frondsd / ms.frondms, and <name>.frond.new until the first save.
 namespace frondSessions {
 constexpr quint32 magic = 0x19800819, newestVersion = 7, firstNamedVersion = 6;
 
@@ -108,11 +106,45 @@ inline QString cleanName(QString name) {
     while (name.startsWith('.')) name.remove(0, 1);
     return name.trimmed();
 }
-inline QString filePath(const QString& folder, const QString& name) { return folder + '/' + name + ".frond"; }
+inline bool ignoredName(const QString& name) {
+    return name.contains(".frond.tmp-") || name.contains(".frondsd.tmp-") ||
+           name.contains(".frondms.tmp-") || name.contains(".gen-");
+}
+inline bool packableName(const QString& name) {
+    if (ignoredName(name) || name.contains('/')) return false;
+    return name == "sd.frondsd" || name == "ms.frondms" || name.endsWith(".frond.settings.json") ||
+           (name.endsWith(".frond") && !name.endsWith(".frond.new"));
+}
+inline QString packableDestName(const QString& name, const QString& sessionName) {
+    if (name.endsWith(".frond.settings.json")) return sessionName + ".frond.settings.json";
+    if (name.endsWith(".frond")) return sessionName + ".frond";
+    return name;
+}
+inline QString machineDir(const QString& folder, const QString& name) { return folder + '/' + name; }
+inline QString filePath(const QString& folder, const QString& name) { return machineDir(folder, name) + '/' + name + ".frond"; }
 inline QString markerPath(const QString& path) { return path + ".new"; }
+inline QString machineDirOf(const QString& path) { return QFileInfo(path).absolutePath(); }
+inline QString machineNameOf(const QString& path) { return QFileInfo(machineDirOf(path)).fileName(); }
+
+inline QString sessionFrondIn(const QString& dir) {
+    const auto named = dir + '/' + QFileInfo(dir).fileName() + ".frond";
+    if (QFileInfo::exists(named) || QFileInfo::exists(markerPath(named))) return named;
+    const auto android = dir + "/session.frond";
+    if (QFileInfo::exists(android)) return android;
+    QString found;
+    int count = 0;
+    for (const auto& entry : QDir(dir).entryInfoList(QDir::Files)) {
+        if (!packableName(entry.fileName()) || !entry.fileName().endsWith(".frond")) continue;
+        found = entry.absoluteFilePath();
+        ++count;
+    }
+    return count == 1 ? found : named;
+}
+
 inline bool taken(const QString& folder, const QString& name) {
-    const auto path = filePath(folder, name);
-    return QFileInfo::exists(path) || QFileInfo::exists(markerPath(path)) || QFileInfo::exists(preferencesPath(path));
+    if (QFileInfo(machineDir(folder, name)).isDir()) return true;
+    const auto loose = folder + '/' + name + ".frond";
+    return QFileInfo::exists(loose) || QFileInfo::exists(markerPath(loose)) || QFileInfo::exists(preferencesPath(loose));
 }
 
 // "Palm TX", then "Palm TX 2" and so on.
@@ -123,19 +155,36 @@ inline QString freeName(const QString& folder, const QString& base) {
     return base + ' ' + QString::number(n);
 }
 
+inline qint64 packableSize(const QString& dir) {
+    qint64 n = 0;
+    for (const auto& entry : QDir(dir).entryInfoList(QDir::Files))
+        if (packableName(entry.fileName())) n += entry.size();
+    return n;
+}
+
+inline QString resolveFrond(const QString& path) {
+    if (QFileInfo(path).isDir()) return sessionFrondIn(path);
+    return path;
+}
+
 inline Info describe(const QString& path) {
     Info info;
-    info.path = path;
-    info.name = QFileInfo(path).completeBaseName();
-    QFileInfo file(path);
+    const auto frond = resolveFrond(path);
+    info.path = frond;
+    info.name = QFileInfo(frond).completeBaseName();
+    const auto parent = machineDirOf(frond);
+    const auto parentName = QFileInfo(parent).fileName();
+    if (QFileInfo(frond).fileName() == parentName + ".frond" || QFileInfo(frond).fileName() == "session.frond")
+        info.name = parentName;
+    QFileInfo file(frond);
     if (file.isFile()) {
-        const auto header = readHeader(path);
-        info.saved = true; info.when = file.lastModified(); info.size = file.size();
+        const auto header = readHeader(frond);
+        info.saved = true; info.when = file.lastModified(); info.size = packableSize(machineDirOf(frond));
         info.old = !openable(header);
         if (!info.old) info.device = header.device;
         return info;
     }
-    QFile marker(markerPath(path));
+    QFile marker(markerPath(frond));
     if (marker.open(QIODevice::ReadOnly)) {
         info.device = QString::fromUtf8(marker.readAll()).trimmed();
         info.when = QFileInfo(marker).lastModified();
@@ -145,16 +194,58 @@ inline Info describe(const QString& path) {
     return info;
 }
 
+inline bool inUse(const QString& path) {
+    QLockFile lock(resolveFrond(path) + ".lock");
+    lock.setStaleLockTime(0);
+    if (!lock.tryLock()) return true;
+    lock.unlock();
+    return false;
+}
+
+inline bool moveInto(const QString& from, const QString& to) {
+    if (!QFileInfo::exists(from)) return true;
+    if (QFileInfo::exists(to)) return true;
+    return QFile::rename(from, to);
+}
+
+// Loose sessions/<name>.frond (and .new / .settings.json / .lock) become sessions/<name>/.
+inline void migrateLoose(const QString& folder) {
+    QDir dir(folder);
+    QStringList stems;
+    for (const auto& entry : dir.entryInfoList(QDir::Files)) {
+        const auto name = entry.fileName();
+        if (ignoredName(name)) continue;
+        QString stem;
+        if (name.endsWith(".frond.new")) stem = name.chopped(int(sizeof(".frond.new") - 1));
+        else if (name.endsWith(".frond.settings.json")) stem = name.chopped(int(sizeof(".frond.settings.json") - 1));
+        else if (name.endsWith(".frond.lock")) stem = name.chopped(int(sizeof(".frond.lock") - 1));
+        else if (name.endsWith(".frond")) stem = name.chopped(int(sizeof(".frond") - 1));
+        else continue;
+        if (stem.isEmpty() || stems.contains(stem)) continue;
+        stems << stem;
+    }
+    for (const auto& stem : stems) {
+        const auto loose = folder + '/' + stem + ".frond";
+        if (inUse(loose)) continue;
+        const auto dest = machineDir(folder, stem);
+        if (QFileInfo(dest).isFile()) continue;
+        if (!QDir().mkpath(dest)) continue;
+        moveInto(loose, dest + '/' + stem + ".frond");
+        moveInto(markerPath(loose), dest + '/' + stem + ".frond.new");
+        moveInto(preferencesPath(loose), dest + '/' + stem + ".frond.settings.json");
+        moveInto(loose + ".lock", dest + '/' + stem + ".frond.lock");
+    }
+}
+
 // Newest first.
 inline QList<Info> list(const QString& folder) {
+    migrateLoose(folder);
     QList<Info> sessions;
-    QStringList seen;
-    for (const auto& entry : QDir(folder).entryInfoList({"*.frond", "*.frond.new"}, QDir::Files)) {
-        auto path = entry.absoluteFilePath();
-        if (path.endsWith(".new")) path.chop(4);
-        if (seen.contains(path)) continue;
-        seen << path;
-        sessions << describe(path);
+    for (const auto& entry : QDir(folder).entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot)) {
+        if (ignoredName(entry.fileName())) continue;
+        const auto frond = sessionFrondIn(entry.absoluteFilePath());
+        if (!QFileInfo::exists(frond) && !QFileInfo::exists(markerPath(frond))) continue;
+        sessions << describe(frond);
     }
     std::stable_sort(sessions.begin(), sessions.end(), [](const Info& a, const Info& b) { return a.when > b.when; });
     return sessions;
@@ -162,9 +253,13 @@ inline QList<Info> list(const QString& folder) {
 
 // A session that has not been saved yet. Returns false if the marker couldn't be written or already exists.
 inline bool create(const QString& folder, const QString& name, const QString& deviceId) {
-    if (!QDir().mkpath(folder)) return false;
+    const auto dir = machineDir(folder, name);
+    if (!QDir().mkpath(dir)) return false;
     QFile marker(markerPath(filePath(folder, name)));
-    if (!marker.open(QIODevice::WriteOnly | QIODevice::NewOnly)) return false;  // NewOnly: never takes a name another Frond holds
+    if (!marker.open(QIODevice::WriteOnly | QIODevice::NewOnly)) {
+        QDir().rmdir(dir);
+        return false;
+    }
     return marker.write(deviceId.toUtf8()) >= 0;
 }
 
@@ -178,38 +273,52 @@ inline QString reserve(const QString& folder, const QString& base, const QString
     return {};
 }
 
-// True if another Frond has the session open.
-inline bool inUse(const QString& path) {
-    QLockFile lock(path + ".lock");
-    lock.setStaleLockTime(0);
-    if (!lock.tryLock()) return true;
-    lock.unlock();
-    return false;
+inline QString copyPackable(const QString& fromDir, const QString& toDir, const QString& newName) {
+    if (!QDir().mkpath(toDir)) return QStringLiteral("Couldn't save the session.");
+    bool any = false;
+    for (const auto& entry : QDir(fromDir).entryInfoList(QDir::Files)) {
+        if (!packableName(entry.fileName())) continue;
+        const auto dest = toDir + '/' + packableDestName(entry.fileName(), newName);
+        QFile::remove(dest);
+        if (!QFile::copy(entry.absoluteFilePath(), dest)) return QStringLiteral("Couldn't save the session.");
+        any = true;
+    }
+    if (!any) return QStringLiteral("Couldn't save the session.");
+    return {};
 }
 
-// Returns an error message, or empty when done. The session's lock is held meanwhile, so another
-// Frond can't open it half way.
+inline QString locate(const QString& folder, const QString& path) {
+    migrateLoose(folder);
+    if (QFileInfo::exists(path) || QFileInfo::exists(markerPath(path))) return path;
+    if (QFileInfo(path).isDir()) {
+        const auto frond = sessionFrondIn(path);
+        if (QFileInfo::exists(frond) || QFileInfo::exists(markerPath(frond))) return frond;
+    }
+    const auto name = QFileInfo(path).completeBaseName();
+    const auto moved = filePath(folder, name);
+    if (QFileInfo::exists(moved) || QFileInfo::exists(markerPath(moved))) return moved;
+    return path;
+}
+
 inline QString rename(const QString& folder, const Info& info, const QString& wanted) {
     const auto name = cleanName(wanted);
     if (name.isEmpty()) return QStringLiteral("Type a name.");
     if (name == info.name) return {};
     if (taken(folder, name)) return QStringLiteral("There is already a session called %1.").arg(name);
+    const auto oldDir = machineDirOf(info.path);
+    const auto newDir = machineDir(folder, name);
     QLockFile lock(info.path + ".lock");
     lock.setStaleLockTime(0);
     if (!lock.tryLock()) return QStringLiteral("This session is open in another Frond.");
-    const auto target = filePath(folder, name);
-    QLockFile targetLock(target + ".lock"); targetLock.setStaleLockTime(0);
-    if (!targetLock.tryLock()) return QStringLiteral("This session is open in another Frond.");
-    const bool hasFile = QFileInfo::exists(info.path), hasMarker = QFileInfo::exists(markerPath(info.path));
-    if (hasFile && !QFile::rename(info.path, target)) return QStringLiteral("Couldn't rename the session.");
-    if (hasMarker && !QFile::rename(markerPath(info.path), markerPath(target))) {
-        if (hasFile) QFile::rename(target, info.path);
-        return QStringLiteral("Couldn't rename the session.");
-    }
-    if (QFileInfo::exists(preferencesPath(info.path)) && !QFile::rename(preferencesPath(info.path), preferencesPath(target))) {
-        if (hasMarker) QFile::rename(markerPath(target), markerPath(info.path));
-        if (hasFile) QFile::rename(target, info.path);
-        return QStringLiteral("Couldn't rename the machine settings.");
+    lock.unlock();
+    if (!QDir().rename(oldDir, newDir)) return QStringLiteral("Couldn't rename the session.");
+    const auto oldFrond = QFileInfo(info.path).fileName();
+    const auto newFrond = name + ".frond";
+    if (oldFrond != newFrond) {
+        QFile::rename(newDir + '/' + oldFrond, newDir + '/' + newFrond);
+        QFile::rename(newDir + '/' + oldFrond + ".new", newDir + '/' + newFrond + ".new");
+        QFile::rename(newDir + '/' + oldFrond + ".settings.json", newDir + '/' + newFrond + ".settings.json");
+        QFile::rename(newDir + '/' + oldFrond + ".lock", newDir + '/' + newFrond + ".lock");
     }
     return {};
 }
@@ -218,63 +327,125 @@ inline QString remove(const Info& info) {
     QLockFile lock(info.path + ".lock");
     lock.setStaleLockTime(0);
     if (!lock.tryLock()) return QStringLiteral("This session is open in another Frond.");
+    const auto dir = machineDirOf(info.path);
+    if (QFileInfo(dir).isDir() && QFileInfo(dir).fileName() == info.name) {
+        lock.unlock();
+        if (!QDir(dir).removeRecursively()) return QStringLiteral("Couldn't delete the session.");
+        return {};
+    }
     for (const auto& path : {info.path, markerPath(info.path), preferencesPath(info.path)})
         if (QFileInfo::exists(path) && !QFile::remove(path)) return QStringLiteral("Couldn't delete the session.");
-    return {};  // the lock file goes when 'lock' unlocks
+    return {};
 }
 
-// Copies a session file in as a new session. Returns an error message, or empty and the new name.
+inline QString importFolder(const QString& folder, const QString& from, QString* newName = nullptr) {
+    const auto frond = sessionFrondIn(from);
+    const auto header = readHeader(frond);
+    if (const auto error = importError(header); !error.isEmpty()) return error;
+    if (!QDir().mkpath(folder)) return QStringLiteral("Couldn't save the session.");
+    auto base = cleanName(QFileInfo(from).fileName());
+    if (base.isEmpty()) base = frondFirmware::deviceName(frondFirmware::deviceFromId(header.device));
+    const auto name = reserve(folder, base, header.device);
+    if (name.isEmpty()) return QStringLiteral("Couldn't save the session.");
+    const auto dest = machineDir(folder, name);
+    QFile::remove(markerPath(filePath(folder, name)));
+    if (const auto error = copyPackable(from, dest, name); !error.isEmpty()) {
+        QDir(dest).removeRecursively();
+        return error;
+    }
+    if (newName) *newName = name;
+    return {};
+}
+
+// Copies a session file or machine folder in as a new session. Returns an error message, or empty and the new name.
 inline QString importFile(const QString& folder, const QString& from, QString* newName = nullptr) {
+    if (QFileInfo(from).isDir()) return importFolder(folder, from, newName);
     const auto header = readHeader(from);
     if (const auto error = importError(header); !error.isEmpty()) return error;
     if (!QDir().mkpath(folder)) return QStringLiteral("Couldn't save the session.");
     auto base = cleanName(QFileInfo(from).completeBaseName());
     if (base.isEmpty()) base = frondFirmware::deviceName(frondFirmware::deviceFromId(header.device));
-    // The name is held with a marker while the file lands, so no other Frond takes it meanwhile.
     const auto name = reserve(folder, base, header.device);
     if (name.isEmpty()) return QStringLiteral("Couldn't save the session.");
+    const auto destDir = machineDir(folder, name);
     const auto target = filePath(folder, name);
     const auto fail = [&] {
-        QFile::remove(target + ".part");
-        QFile::remove(markerPath(target));
+        QDir(destDir).removeRecursively();
         return QStringLiteral("Couldn't save the session.");
     };
-    // Copied to .part and renamed after the check, so a stopped import leaves no session behind.
-    QFile::remove(target + ".part");
-    if (!QFile::copy(from, target + ".part")) return fail();
-    if (!QFile::rename(target + ".part", target)) return fail();
+    QFile::remove(markerPath(target));
+    const auto part = target + ".part";
+    QFile::remove(part);
+    if (!QFile::copy(from, part) || !QFile::rename(part, target)) return fail();
+    const auto sourceDir = QFileInfo(from).absolutePath();
+    for (const auto* sibling : {"sd.frondsd", "ms.frondms"}) {
+        const auto src = sourceDir + '/' + sibling;
+        if (QFileInfo::exists(src) && !QFile::copy(src, destDir + '/' + sibling)) return fail();
+    }
     Preferences prefs;
     if (readPreferences(from, &prefs)) {
-        if (const auto error = writePreferences(target, prefs); !error.isEmpty()) {
-            QFile::remove(target); return fail();
-        }
+        if (const auto error = writePreferences(target, prefs); !error.isEmpty()) return fail();
     }
-    QFile::remove(markerPath(target));
     if (newName) *newName = name;
     return {};
 }
 
-// Copies a saved session out; replaces the target. Refuses the session itself and any other
-// session of the folder that is open. The copy goes to a .part file first, so a failure keeps the old target.
-// Returns an error message or empty.
-inline QString exportFile(const Info& info, const QString& to) {
-    const auto source = QFileInfo(info.path).canonicalFilePath();
+inline QString exportDestDir(const QString& to) {
     const QFileInfo target(to);
-    if (target.exists() && target.canonicalFilePath() == source) return QStringLiteral("That is the session itself.");
-    if (target.suffix() == "frond" && QFileInfo::exists(to + ".lock") && inUse(to))
+    if (target.suffix() == "frond") return target.absolutePath() + '/' + target.completeBaseName();
+    return target.absoluteFilePath();
+}
+
+// Copies packable files out as a machine folder. `to` is a directory, or a .frond path whose stem is the folder.
+inline QString exportFile(const Info& info, const QString& to) {
+    const auto destDir = exportDestDir(to);
+    const auto destName = QFileInfo(destDir).fileName();
+    const auto sourceDir = machineDirOf(info.path);
+    const auto sourceCanon = QFileInfo(sourceDir).canonicalFilePath();
+    const auto sourceFrond = QFileInfo(info.path).canonicalFilePath();
+    const QFileInfo toInfo(to);
+    if (toInfo.exists() && !sourceFrond.isEmpty() && toInfo.canonicalFilePath() == sourceFrond)
+        return QStringLiteral("That is the session itself.");
+    const QFileInfo destInfo(destDir);
+    if (destInfo.exists() && destInfo.canonicalFilePath() == sourceCanon) return QStringLiteral("That is the session itself.");
+    const auto destFrond = destDir + '/' + destName + ".frond";
+    if (QFileInfo::exists(destFrond + ".lock") && inUse(destFrond))
         return QStringLiteral("That session is open in another Frond.");
-    QLockFile targetLock(to + ".lock"); targetLock.setStaleLockTime(0);
-    if (!targetLock.tryLock()) return QStringLiteral("That session is open in another Frond.");
-    const auto part = to + ".part";
-    QFile::remove(part);
-    if (!QFile::copy(info.path, part)) { QFile::remove(part); return QStringLiteral("Couldn't export the session."); }
+    QLockFile targetLock(destFrond + ".lock"); targetLock.setStaleLockTime(0);
+    if (QFileInfo::exists(destDir) && !targetLock.tryLock()) return QStringLiteral("That session is open in another Frond.");
+    const auto part = destDir + ".part";
+    QDir(part).removeRecursively();
+    if (const auto error = copyPackable(sourceDir, part, destName); !error.isEmpty()) {
+        QDir(part).removeRecursively();
+        return error;
+    }
+    if (QFileInfo::exists(preferencesPath(info.path))) {
+        Preferences prefs;
+        if (readPreferences(info.path, &prefs)) {
+            if (const auto error = writePreferences(part + '/' + destName + ".frond", prefs); !error.isEmpty()) {
+                QDir(part).removeRecursively();
+                return error;
+            }
+        }
+    }
     std::error_code error;
-    std::filesystem::rename(part.toStdString(), to.toStdString(), error);  // replaces the target in one step
-    if (error) { QFile::remove(part); return QStringLiteral("Couldn't export the session."); }
-    Preferences prefs;
-    if (readPreferences(info.path, &prefs)) return writePreferences(to, prefs);
-    if (QFileInfo::exists(preferencesPath(to)) && !QFile::remove(preferencesPath(to)))
-        return QStringLiteral("Couldn't remove the old machine settings.");
+    if (QFileInfo::exists(destDir)) {
+        const auto old = destDir + ".old";
+        QDir(old).removeRecursively();
+        std::filesystem::rename(destDir.toStdString(), old.toStdString(), error);
+        if (error) { QDir(part).removeRecursively(); return QStringLiteral("Couldn't export the session."); }
+        std::filesystem::rename(part.toStdString(), destDir.toStdString(), error);
+        if (error) {
+            std::error_code back;
+            std::filesystem::rename(old.toStdString(), destDir.toStdString(), back);
+            QDir(part).removeRecursively();
+            return QStringLiteral("Couldn't export the session.");
+        }
+        QDir(old).removeRecursively();
+    } else {
+        std::filesystem::rename(part.toStdString(), destDir.toStdString(), error);
+        if (error) { QDir(part).removeRecursively(); return QStringLiteral("Couldn't export the session."); }
+    }
     return {};
 }
 }
