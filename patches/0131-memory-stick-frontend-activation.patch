@@ -16,7 +16,7 @@
  
  int main(int argc, char** argv) {
 -    argparse::ArgumentParser program("frond-core", "0.8.0");
-+    argparse::ArgumentParser program("frond-core", "0.8.1");
++    argparse::ArgumentParser program("frond-core", "0.8.0");
  
      program.add_description("Frond Palm OS emulator");
  
