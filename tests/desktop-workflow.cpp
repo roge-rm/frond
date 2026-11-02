@@ -28,6 +28,8 @@
 #include <QSpinBox>
 #include <QSlider>
 #include <QProcess>
+#include <QTcpServer>
+#include <QTcpSocket>
 #include <QImage>
 #include "MainWindow.h"
 
@@ -730,6 +732,78 @@ for line in s.makefile('rb'):
         QCOMPARE(next.findChild<QLineEdit*>("bluetoothSocket")->text(),socketPath);
         QSettings().clear();
     }
+    void deviceWindowCloseReturnsHome_data() {
+        QTest::addColumn<bool>("failFirstSave");
+        QTest::newRow("saved") << false;
+        QTest::newRow("cancel-failed-save") << true;
+    }
+    void deviceWindowCloseReturnsHome() {
+        QFETCH(bool, failFirstSave);
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QTemporaryDir files;
+        QFile source(files.filePath("input.frond"));
+        QVERIFY(source.open(QIODevice::WriteOnly)); source.write("unchanged import"); source.close();
+        QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly));
+        auto script = QByteArray(R"PY(#!/usr/bin/python3
+import pathlib,socket,sys
+trace=pathlib.Path(sys.argv[0]+'.commands')
+s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+saves=0
+for line in s.makefile('rb'):
+    i,cmd,arg=line.rstrip(b'\n').split(b'\t')
+    with trace.open('ab') as f: f.write(cmd+b'\n')
+    message={b'device-state':b'palm-tx',b'keyboard-state':b'detached',b'network-state':b'disabled',b'sd-state':b'none'}.get(cmd,b'done')
+    if cmd==b'save':
+        saves+=1
+        if FAIL_FIRST and saves==1:
+            s.sendall(i+b'\terror\twrite\t'+b'Disk full'.hex().encode()+b'\n'); continue
+        pathlib.Path(bytes.fromhex(arg.decode()).decode()).write_bytes(b'saved guest changes')
+    s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
+    if cmd==b'keyboard-state': s.sendall(b'0\tevent\tclose\t\n')
+    if cmd==b'quit': break
+)PY");
+        script.replace("FAIL_FIRST", failFirstSave ? "True" : "False");
+        core.write(script); core.close();
+        QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        const auto commands = [&] {
+            QFile trace(core.fileName() + ".commands");
+            return trace.open(QIODevice::ReadOnly) ? trace.readAll().split('\n') : QList<QByteArray>();
+        };
+        MainWindow window(core.fileName()); window.show();
+        auto* stop = window.findChild<QPushButton*>("stop");
+        auto* start = window.findChild<QPushButton*>("start");
+        auto* sessions = window.findChild<QListWidget*>("sessionList");
+        QVERIFY(stop && start && sessions);
+        bool prompted = false;
+        QTimer dialogs; dialogs.setInterval(20);
+        connect(&dialogs, &QTimer::timeout, &window, [&] {
+            if (auto* box = window.findChild<QMessageBox*>(); box && box->isVisible()) {
+                prompted = box->text().contains("Disk full");
+                box->button(QMessageBox::Cancel)->click();
+            }
+        });
+        dialogs.start(); window.openSession(source.fileName(), true);
+        if (failFirstSave) {
+            QTRY_VERIFY_WITH_TIMEOUT(prompted && stop->isEnabled(), 5000);
+            QVERIFY(window.isVisible()); QVERIFY(!sessions->isVisible());
+            QCOMPARE(commands().count("save"), 1); QCOMPARE(commands().count("quit"), 0);
+            stop->click();
+        }
+        QTRY_VERIFY_WITH_TIMEOUT(!stop->isEnabled() && sessions->isVisible(), 5000);
+        dialogs.stop();
+        QVERIFY(window.isVisible()); QVERIFY(!stop->isEnabled());
+        QCOMPARE(prompted, failFirstSave);
+        QCOMPARE(commands().count("save"), failFirstSave ? 2 : 1);
+        QCOMPARE(commands().count("quit"), 1);
+        const auto savedPath = QSettings().value("lastSession").toString();
+        QVERIFY(savedPath != source.fileName());
+        QFile saved(savedPath); QVERIFY(saved.open(QIODevice::ReadOnly));
+        QCOMPARE(saved.readAll(), QByteArray("saved guest changes"));
+        QCOMPARE(digest(source.fileName()), QCryptographicHash::hash("unchanged import", QCryptographicHash::Sha256));
+        QVERIFY(window.close()); QVERIFY(!window.isVisible());
+        QSettings().clear();
+    }
     void failedSaveStaysOpen() {
         QTemporaryDir files;
         QFile source(files.path() + "/import.frond");
@@ -1428,6 +1502,67 @@ for line in s.makefile('rb'):
         }
         QDir(managedFolder()).removeRecursively(); QSettings().clear();
     }
+    void machineControlVisibilityLaunch() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        putSession("TG50", 6, "sony-clie-tg50", 0);
+        const auto path = managedFolder() + "/TG50.frond";
+        const auto guest = digest(path);
+        QTemporaryDir files;
+        QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly));
+        core.write(R"PY(#!/usr/bin/python3
+import pathlib,socket,sys
+pathlib.Path(sys.argv[0]+'.args').write_text('\n'.join(sys.argv[1:]))
+data=pathlib.Path(sys.argv[1]).read_bytes()
+s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+for line in s.makefile('rb'):
+    i,cmd,arg=line.rstrip(b'\n').split(b'\t')
+    if cmd==b'save': pathlib.Path(bytes.fromhex(arg.decode()).decode()).write_bytes(data)
+    message={b'device-state':b'sony-clie-tg50',b'keyboard-state':b'detached',b'network-state':b'disabled',b'sd-state':b'none'}.get(cmd,b'done')
+    s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
+    if cmd==b'quit': break
+)PY");
+        core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        for (bool keyboard : {false, true}) for (bool jog : {false, true}) {
+            frondSessions::Preferences prefs;
+            prefs.showKeyboard = keyboard; prefs.showJogControls = jog; prefs.microphone = true;
+            QVERIFY(frondSessions::writePreferences(path, prefs).isEmpty());
+            QFile::remove(core.fileName() + ".args");
+            MainWindow window(core.fileName()); window.show(); window.openSession(path, true);
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("stop")->isEnabled(), 5000);
+            QFile args(core.fileName() + ".args"); QVERIFY(args.open(QIODevice::ReadOnly));
+            const auto arguments = args.readAll().split('\n');
+            QCOMPARE(arguments.contains("--hide-keyboard"), !keyboard);
+            QCOMPARE(arguments.contains("--hide-jog-controls"), !jog);
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+            QVERIFY(frondSessions::readPreferences(path, &prefs));
+            QCOMPARE(prefs.showKeyboard, keyboard); QCOMPARE(prefs.showJogControls, jog);
+            QVERIFY(prefs.microphone);
+            QCOMPARE(digest(path), guest);
+        }
+        QDir(managedFolder()).removeRecursively(); QSettings().clear();
+    }
+    void machineControlVisibilitySettings() {
+        frondSessions::Preferences original{7, true, false, true, true, false, true};
+        MachineSettings controls(original, false);
+        controls.setDevice(frondFirmware::deviceFromId("sony-clie-tg50"));
+        QVERIFY(!controls.showKeyboard->isHidden());
+        QVERIFY(!controls.showJogControls->isHidden());
+        QVERIFY(!controls.showKeyboard->isChecked());
+        QVERIFY(controls.showJogControls->isChecked());
+        for (bool keyboard : {false, true}) for (bool jog : {false, true}) {
+            controls.showKeyboard->setChecked(keyboard); controls.showJogControls->setChecked(jog);
+            const auto saved = controls.values();
+            QCOMPARE(saved.showKeyboard, keyboard); QCOMPARE(saved.showJogControls, jog);
+            QCOMPARE(saved.scale, original.scale);
+            QVERIFY(saved.smooth && !saved.audio && saved.fastAudio && saved.microphone);
+        }
+        controls.setDevice(frondFirmware::Device::tx);
+        QVERIFY(controls.showKeyboard->isHidden());
+        QVERIFY(controls.showJogControls->isHidden());
+        QVERIFY(controls.values().microphone);
+    }
     void machinePreferences() {
         QSettings().clear(); QSettings().setValue("resume", false);
         QSettings().setValue("windowScale", 6); QSettings().setValue("audio", false);
@@ -1732,6 +1867,90 @@ for line in s.makefile('rb'):
         QSettings().clear();
     }
     // Optional actual frontend run; private firmware/session and captures stay outside the repo.
+    void tg50BluetoothControls() {
+        const auto core = qEnvironmentVariable("FROND_TEST_TG50_CORE");
+        const auto source = qEnvironmentVariable("FROND_TEST_TG50_HOST_SESSION");
+        const auto endpoint = qEnvironmentVariable("FROND_TEST_TG50_BT_SOCKET");
+        if (core.isEmpty() || source.isEmpty() || endpoint.isEmpty()) QSKIP("TG50 Bluetooth inputs not set");
+        qputenv("SDL_AUDIODRIVER", "dummy"); qputenv("SDL_VIDEODRIVER", "dummy");
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QSettings().setValue("bluetoothEnabled", true); QSettings().setValue("bluetoothSocket", endpoint);
+        const auto original = digest(source);
+        MainWindow window(core); window.show(); window.openSession(source, true);
+        auto* enabled = window.findChild<QCheckBox*>("bluetoothEnabled");
+        auto* path = window.findChild<QLineEdit*>("bluetoothSocket");
+        auto* state = window.findChild<QLabel*>("bluetoothState");
+        auto* stop = window.findChild<QPushButton*>("stop");
+        QTRY_VERIFY_WITH_TIMEOUT(stop->isEnabled() && enabled->isEnabled(), 20000);
+        QVERIFY(!enabled->isChecked()); QVERIFY(!path->isEnabled());
+        enabled->click(); QTRY_VERIFY_WITH_TIMEOUT(state->text().contains("provider connected"), 5000);
+        QString shown; QTimer dismiss; dismiss.setInterval(20);
+        connect(&dismiss, &QTimer::timeout, &window, [&] {
+            if (auto* box = window.findChild<QMessageBox*>(); box && box->isVisible()) { shown = box->text(); box->done(QMessageBox::Ok); }
+        }); dismiss.start();
+        path->setText("relative"); emit path->editingFinished();
+        QTRY_VERIFY_WITH_TIMEOUT(!shown.isEmpty(), 5000);
+        QCOMPARE(QSettings().value("bluetoothSocket").toString(), endpoint);
+        path->setText(endpoint); enabled->click();
+        QTRY_VERIFY_WITH_TIMEOUT(enabled->isEnabled() && state->text().isEmpty(), 5000);
+        enabled->click(); QTRY_VERIFY_WITH_TIMEOUT(state->text().contains("provider connected"), 5000);
+        stop->click(); QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("addDevice")->isEnabled(), 15000);
+        QVERIFY(!enabled->isChecked());
+        const auto saved = QSettings().value("lastSession").toString(); QVERIFY(QFileInfo::exists(saved));
+        window.openSession(saved, true);
+        QTRY_VERIFY_WITH_TIMEOUT(stop->isEnabled() && enabled->isEnabled(), 20000); QVERIFY(!enabled->isChecked());
+        stop->click(); QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("addDevice")->isEnabled(), 15000);
+        QCOMPARE(digest(source), original); QSettings().clear();
+    }
+    void tg50HostControls() {
+        const auto core = qEnvironmentVariable("FROND_TEST_TG50_CORE");
+        const auto source = qEnvironmentVariable("FROND_TEST_TG50_HOST_SESSION");
+        if (core.isEmpty() || source.isEmpty()) QSKIP("TG50 host inputs not set");
+        qputenv("SDL_AUDIODRIVER", "dummy"); qputenv("SDL_VIDEODRIVER", "dummy");
+        QSettings().clear(); QSettings().setValue("resume", false);
+        const auto original = digest(source);
+        MainWindow window(core); window.show(); window.openSession(source, true);
+        auto* mic = window.findChild<QCheckBox*>("microphone");
+        auto* sound = window.findChild<QCheckBox*>("sound");
+        auto* mode = window.findChild<QComboBox*>("serialMode");
+        auto* port = window.findChild<QSpinBox*>("serialPort");
+        auto* state = window.findChild<QLabel*>("serialState");
+        auto* stop = window.findChild<QPushButton*>("stop");
+        QTRY_VERIFY_WITH_TIMEOUT(mic->isEnabled(), 20000); QVERIFY(!mic->isChecked());
+        mic->click(); QTRY_VERIFY_WITH_TIMEOUT(mic->isEnabled() && mic->isChecked(), 5000);
+        sound->click(); QTRY_VERIFY_WITH_TIMEOUT(mic->isEnabled(), 5000); QVERIFY(mic->isChecked());
+        mode->setCurrentIndex(mode->findData("pty"));
+        QMetaObject::invokeMethod(mode, "activated", Q_ARG(int, mode->currentIndex()));
+        QTRY_VERIFY_WITH_TIMEOUT(state->text().contains("/dev/pts/"), 5000);
+        mode->setCurrentIndex(mode->findData("off"));
+        QMetaObject::invokeMethod(mode, "activated", Q_ARG(int, mode->currentIndex()));
+        QTRY_VERIFY_WITH_TIMEOUT(state->text().isEmpty(), 5000);
+        QTcpServer reservation; QVERIFY(reservation.listen(QHostAddress::LocalHost, 0));
+        const auto chosen = reservation.serverPort(); reservation.close(); port->setValue(chosen);
+        mode->setCurrentIndex(mode->findData("tcp"));
+        QMetaObject::invokeMethod(mode, "activated", Q_ARG(int, mode->currentIndex()));
+        QTRY_VERIFY_WITH_TIMEOUT(state->text().contains("waiting"), 5000);
+        QTcpSocket peer; peer.connectToHost(QHostAddress::LocalHost, chosen); QVERIFY(peer.waitForConnected(5000));
+        QTRY_VERIFY_WITH_TIMEOUT(state->text().contains("connected") && !state->text().contains("waiting"), 5000);
+        peer.disconnectFromHost(); QTRY_VERIFY_WITH_TIMEOUT(state->text().contains("waiting"), 5000);
+        stop->click(); QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("addDevice")->isEnabled(), 15000);
+        QVERIFY(!mic->isChecked());
+        const auto saved = QSettings().value("lastSession").toString(); QVERIFY(QFileInfo::exists(saved));
+        window.openSession(saved, true);
+        QTRY_VERIFY_WITH_TIMEOUT(mic->isEnabled(), 20000); QVERIFY(!mic->isChecked());
+        mic->click(); QTRY_VERIFY_WITH_TIMEOUT(mic->isEnabled() && mic->isChecked(), 5000);
+        QTimer confirm; confirm.setInterval(20);
+        connect(&confirm, &QTimer::timeout, &window, [&] {
+            if (auto* box = window.findChild<QMessageBox*>(); box && box->isVisible()) box->button(QMessageBox::Discard)->click();
+        });
+        confirm.start(); window.findChild<QPushButton*>("forceStop")->click();
+        QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("addDevice")->isEnabled(), 15000); confirm.stop();
+        QVERIFY(!mic->isChecked());
+        window.openSession(saved, true);
+        QTRY_VERIFY_WITH_TIMEOUT(mic->isEnabled(), 20000); QVERIFY(!mic->isChecked());
+        stop->click(); QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("addDevice")->isEnabled(), 15000);
+        QCOMPARE(digest(source), original); QVERIFY(window.close()); QSettings().clear();
+    }
     void tg50Acceptance() {
         const auto core = qEnvironmentVariable("FROND_TEST_TG50_CORE");
         const auto nor = qEnvironmentVariable("FROND_TEST_TG50_NOR");
@@ -1827,8 +2046,8 @@ for line in s.makefile('rb'):
             QCOMPARE(window.findChild<QPushButton*>("sdNew")->isVisible(), frondFirmware::profile(frondFirmware::deviceFromId("sony-clie-tg50")).frontend.memoryStick);
             QVERIFY(!window.findChild<QPushButton*>("sdExchange")->isVisible());
             QVERIFY(!window.findChild<QComboBox*>("usbMode")->isEnabled());
-            QVERIFY(!window.findChild<QCheckBox*>("bluetoothEnabled")->isEnabled());
-            QVERIFY(!window.findChild<QCheckBox*>("keyboardAttached")->isEnabled());
+            QVERIFY(window.findChild<QCheckBox*>("bluetoothEnabled")->isEnabled());
+            QVERIFY(window.findChild<QCheckBox*>("keyboardAttached")->isEnabled());
             focus(id); key("F4"); QTest::qWait(1200); tap(id, 20, 306);
             key("q"); xd({"keydown", "Shift_L"}); key("a"); xd({"keyup", "Shift_L"});
             xd({"keydown", "Alt_L"}); key("q"); xd({"keyup", "Alt_L"}); QTest::qWait(600);

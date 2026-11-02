@@ -1,0 +1,82 @@
+--- a/emulator/bthost.c
++++ b/emulator/bthost.c
+@@ -194,6 +194,10 @@
+ 	uint16_t data_len;
+ 	uint16_t recv_len;
+ 	void *recv_data;
++	bool config_local_done;
++	bool config_remote_done;
++	bool config_failed;
++	bool rfcomm_started;
+ };
+ 
+ struct rcconn {
+@@ -229,6 +233,7 @@
+ 
+ struct rfcomm_connection_data {
+ 	uint8_t channel;
++	uint16_t scid;
+ 	struct btconn *conn;
+ 	bthost_rfcomm_connect_cb cb;
+ 	void *user_data;
+@@ -2164,6 +2169,21 @@
+ 	send_acl(bthost, conn->handle, l2conn->dcid, 0, &cmd, sizeof(cmd));
+ }
+ 
++static void rfcomm_start_configured(struct bthost *bthost,
++                        struct btconn *conn, struct l2conn *l2conn)
++{
++    if (l2conn->psm != 0x0003 || l2conn->config_failed ||
++            !l2conn->config_local_done || !l2conn->config_remote_done ||
++            l2conn->rfcomm_started || !bthost->rfcomm_conn_data ||
++            bthost->rfcomm_conn_data->conn != conn ||
++            bthost->rfcomm_conn_data->scid != l2conn->scid)
++        return;
++
++    /* RFCOMM starts after both L2CAP configuration exchanges complete. */
++    l2conn->rfcomm_started = true;
++    rfcomm_sabm_send(bthost, conn, l2conn, 1, 0);
++}
++
+ static bool l2cap_conn_rsp(struct bthost *bthost, struct btconn *conn,
+ 				uint8_t ident, const void *data, uint16_t len)
+ {
+@@ -2216,6 +2236,9 @@
+ 	l2cap_sig_send(bthost, conn, BT_L2CAP_PDU_CONFIG_RSP, ident, &rsp,
+ 								sizeof(rsp));
+ 
++	if (!(le16_to_cpu(req->flags) & 1))
++		l2conn->config_remote_done = true;
++	rfcomm_start_configured(bthost, conn, l2conn);
+ 	return true;
+ }
+ 
+@@ -2228,12 +2251,15 @@
+ 	if (len < sizeof(*rsp))
+ 		return false;
+ 
+-	l2conn = btconn_find_l2cap_conn_by_scid(conn, rsp->scid);
++	l2conn = btconn_find_l2cap_conn_by_scid(conn, le16_to_cpu(rsp->scid));
+ 	if (!l2conn)
+ 		return false;
+ 
+-	if (l2conn->psm == 0x0003 && !rsp->result && bthost->rfcomm_conn_data)
+-		rfcomm_sabm_send(bthost, conn, l2conn, 1, 0);
++	if (rsp->result)
++		l2conn->config_failed = true;
++	else if (!(le16_to_cpu(rsp->flags) & 1))
++		l2conn->config_local_done = true;
++	rfcomm_start_configured(bthost, conn, l2conn);
+ 
+ 	return true;
+ }
+@@ -4212,7 +4238,8 @@
+ 	bthost->rfcomm_conn_data = data;
+ 
+ 	req.psm = cpu_to_le16(0x0003);
+-	req.scid = cpu_to_le16(conn->next_cid++);
++	data->scid = conn->next_cid++;
++	req.scid = cpu_to_le16(data->scid);
+ 
+ 	return bthost_l2cap_req(bthost, handle, BT_L2CAP_PDU_CONN_REQ,
+ 					&req, sizeof(req), NULL, NULL);

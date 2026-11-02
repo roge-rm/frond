@@ -25,7 +25,8 @@ constexpr quint32 magic = 0x19800819, newestVersion = 6, firstNamedVersion = 6;
 // Host preferences stay beside the guest file, including before its first save.
 struct Preferences {
     int scale{4};  // quarter steps
-    bool smooth{false}, audio{true}, fastAudio{false};
+    bool smooth{false}, audio{true}, fastAudio{false}, microphone{false};
+    bool showKeyboard{true}, showJogControls{true};
 };
 inline QString preferencesPath(const QString& path) { return path + ".settings.json"; }
 inline bool readPreferences(const QString& path, Preferences* result) {
@@ -36,14 +37,16 @@ inline bool readPreferences(const QString& path, Preferences* result) {
         !object.value("smooth").isBool() || !object.value("audio").isBool() || !object.value("fastAudio").isBool()) return false;
     const auto scale = object.value("scale").toInt();
     if (scale < 4 || scale > 8) return false;
-    *result = {scale, object.value("smooth").toBool(), object.value("audio").toBool(), object.value("fastAudio").toBool()};
+    *result = {scale, object.value("smooth").toBool(), object.value("audio").toBool(), object.value("fastAudio").toBool(), object.value("microphone").toBool(false),
+               object.value("showKeyboard").toBool(true), object.value("showJogControls").toBool(true)};
     return true;
 }
 // The caller holds the session lock, or has just reserved a new machine.
 inline QString writePreferences(const QString& path, const Preferences& prefs) {
     QSaveFile file(preferencesPath(path));
     const QJsonObject object{{"version", 1}, {"scale", std::clamp(prefs.scale, 4, 8)},
-                             {"smooth", prefs.smooth}, {"audio", prefs.audio}, {"fastAudio", prefs.fastAudio}};
+                             {"smooth", prefs.smooth}, {"audio", prefs.audio}, {"fastAudio", prefs.fastAudio}, {"microphone", prefs.microphone},
+                             {"showKeyboard", prefs.showKeyboard}, {"showJogControls", prefs.showJogControls}};
     const auto bytes = QJsonDocument(object).toJson(QJsonDocument::Compact);
     if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit())
         return QStringLiteral("Couldn't save the machine settings.");

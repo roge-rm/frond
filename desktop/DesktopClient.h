@@ -23,6 +23,7 @@ class DesktopClient : public QObject {
     void result(const QString& command, bool ok, const QString& code, const QString& message);
     void error(const QString& message);
     void closeRequested();
+    void microphoneState(const QString& state);
     void serialState(const QString& state);  // pushed by the core on a change
     void usbState(const QString& state);
     void infraredState(const QString& state);

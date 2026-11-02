@@ -41,6 +41,7 @@ data class Device internal constructor(
     val homeKey: Int = 0,
     val holdPresent: Boolean = false, val holdSupported: Boolean = false,
     val memoryStick: Boolean = false,
+    val microphone: Boolean = false,
 ) {
     val cardSupported: Boolean get() = sdSlot || memoryStick
     val cardLabel: String get() = if (storageSlot == "memory-stick") "Memory Stick" else "SD card"

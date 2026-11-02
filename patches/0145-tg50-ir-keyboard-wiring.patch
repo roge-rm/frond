@@ -1,0 +1,82 @@
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -273,12 +273,13 @@
+     if (deviceType==DeviceType5::deviceTypeTX || deviceType==DeviceType5::deviceTypeE2 ||
+         deviceType==DeviceType5::deviceTypeZire72 || deviceType==deviceTypeTG50) {
+         pxaUartSetPacing(irUart,true);
+-        pxaUartSetModeObserver(irUart,RefreshIrMode,this);
+-        pxaGpioSetConfigurationObserver(gpio,RefreshIrMode,this);
++        pxaUartSetModeObserver(irUart,RefreshIrConfiguration,this);
++        pxaGpioSetConfigurationObserver(gpio,RefreshIrConfiguration,this);
+         pxaUartSetFuncs(irUart,
+             [](void* ctx) -> uint_fast16_t {
+                 auto* soc=static_cast<SocPXA*>(ctx);
+-                if (!pxaUartIrReceiveEnabled(soc->irUart)) return UART_CHAR_NONE;
++                if (!pxaUartIrReceiveEnabled(soc->irUart) ||
++                    (soc->GetDeviceType()==deviceTypeTG50 && !soc->IrPowerEnabled())) return UART_CHAR_NONE;
+                 if (soc->irHostHooks.read) return soc->IrPowerEnabled() ? soc->irHostHooks.read(soc->irHostHooks.context) : UART_CHAR_NONE;
+                 return soc->irKeyboard.Read(soc->GetTime());
+             }, [](uint_fast16_t value,void* ctx) {
+@@ -288,7 +289,8 @@
+             },
+             [](void* ctx) {
+                 auto* soc=static_cast<SocPXA*>(ctx);
+-                if (!pxaUartIrReceiveEnabled(soc->irUart)) return false;
++                if (!pxaUartIrReceiveEnabled(soc->irUart) ||
++                    (soc->GetDeviceType()==deviceTypeTG50 && !soc->IrPowerEnabled())) return false;
+                 return soc->irHostHooks.pending ? soc->IrPowerEnabled() && soc->irHostHooks.pending(soc->irHostHooks.context) : soc->irKeyboard.Pending();
+             },
+             nullptr, this);
+@@ -1217,6 +1219,14 @@
+         soc.irHostHooks.modeChanged(soc.irHostHooks.context);
+ }
+ 
++void SocPXA::RefreshIrConfiguration(void* context) {
++    RefreshIrMode(context);
++    auto& soc=*static_cast<SocPXA*>(context);
++    if (!soc.restoringPowerState && !soc.irReplacementDepth && soc.GetDeviceType()==deviceTypeTG50 &&
++        soc.irKeyboard.Pending() && soc.IrPowerEnabled())
++        RescheduleCB(&soc,RESCHEDULE_TASK_UART);
++}
++
+ bool SocPXA::IrPowerEnabled() {
+     // Active-high transceiver shutdown: Linux palmte2.h, mach/palmtx.h, palmz72.h.
+     // An input/alternate-function pin has not explicitly powered this link on.
+@@ -1240,14 +1250,15 @@
+ void SocPXA::AttachKeyboard(bool value) {
+     if (value && IrHostAttached()) return;
+     if (GetDeviceType()!=DeviceType5::deviceTypeTX && GetDeviceType()!=DeviceType5::deviceTypeE2 &&
+-        GetDeviceType()!=DeviceType5::deviceTypeZire72) return;
++        GetDeviceType()!=DeviceType5::deviceTypeZire72 && GetDeviceType()!=deviceTypeTG50) return;
+     irKeyboard.Attach(value);
+     RescheduleCB(this,RESCHEDULE_TASK_UART);
+ }
+ bool SocPXA::KeyboardKey(uint8_t code,bool down) {
+     const bool accepted=(GetDeviceType()==DeviceType5::deviceTypeTX || GetDeviceType()==DeviceType5::deviceTypeE2 ||
+-                         GetDeviceType()==DeviceType5::deviceTypeZire72) &&
+-        (!down || pxaUartIrReceiveEnabled(stUart)) && irKeyboard.Key(code,down);
++                         GetDeviceType()==DeviceType5::deviceTypeZire72 || GetDeviceType()==deviceTypeTG50) &&
++        (!down || (pxaUartIrReceiveEnabled(irUart) &&
++                   (GetDeviceType()!=deviceTypeTG50 || IrPowerEnabled()))) && irKeyboard.Key(code,down);
+     if (accepted) RescheduleCB(this,RESCHEDULE_TASK_UART);
+     return accepted;
+ }
+@@ -1273,7 +1284,7 @@
+ 
+ void SocPXA::RefreshTransportPins(void* context) {
+     auto& soc = *static_cast<SocPXA*>(context);
+-    RefreshIrMode(context);
++    RefreshIrConfiguration(context);
+     if (!soc.usbHostPaused && !soc.irReplacementDepth && soc.usbHostHooks.pinsChanged)
+         soc.usbHostHooks.pinsChanged(soc.usbHostHooks.context);
+ }
+--- a/src/uarm/uarm/soc_PXA.h
++++ b/src/uarm/uarm/soc_PXA.h
+@@ -202,6 +202,7 @@
+     IrHostHooks irHostHooks{};
+     unsigned irReplacementDepth{};
+     static void RefreshIrMode(void* context);
++    static void RefreshIrConfiguration(void* context);
+     static void RefreshTransportPins(void* context);
+     uint8_t socRev{0};
+     UsbHostHooks usbHostHooks{};

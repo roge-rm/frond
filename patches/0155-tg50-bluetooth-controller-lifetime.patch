@@ -1,0 +1,548 @@
+--- a/src/uarm/uarm/BcspH4Bridge.h
++++ b/src/uarm/uarm/BcspH4Bridge.h
+@@ -18,6 +18,15 @@
+     // Caller freezes this object and the UART together for checkpoints.
+     void Pump(uint64_t now) {
+         if(!error.empty() || transport.State()!=BcspTransport::Link::active)return;
++        if(resetFailed && host.empty()) {
++            // Retain the genuine failure event until its reliable delivery is ACKed.
++            if(!transport.Outstanding() && !transport.HasWire())Fail("Controller HCI Reset failed; radio restart required");
++            return;
++        }
++        // This bridge is the only producer. Check the saved frame before any
++        // Queue can reuse its three-bit sequence after a cumulative ACK.
++        if(resetReply>=0 && !transport.ReliablePending(uint8_t(resetReply))){resetReply=-1;resetAcknowledged=true;}
++        if(resetPending && now-resetAt>=3000000000ull){Fail("Controller HCI Reset timed out");return;}
+         // UART-to-controller ownership transfers once per reliable delivery.
+         if(const auto* packet=transport.Peek()) {
+             if(packet->channel==2) {
+@@ -44,7 +53,10 @@
+                 }
+                 Bytes h4{uint8_t(command?1:2)};h4.insert(h4.end(),p.begin(),p.end());
+                 const unsigned op=command?unsigned(p[0]|(unsigned(p[1])<<8)):0;
+-                ReceiveDebt completed;unsigned remaining=rxOutstanding;
++                if(op==0x0c03 && p.size()!=3){Fail("Malformed HCI Reset request");return;}
++                // Only late host completions may cross an admitted reset boundary.
++                if((resetPending || resetFailed || (resetEpoch && !resetAcknowledged)) && op!=0x0c35)goto receive;
++                ReceiveDebt completed;unsigned remaining=rxOutstanding,active=rxActive;
+                 if(op==0x0c35) {
+                     completed=rxDebt;
+                     if(p.size()<4 || p.size()!=size_t(4+4*p[3])){Fail("Malformed host ACL completion");return;}
+@@ -55,7 +67,7 @@
+                         if(count && (i==completed.end() || count>i->second.size() || count>remaining)) {
+                             Fail("Host completed unsubmitted ACL fragments");return;
+                         }
+-                        for(unsigned j=0;j<count;++j){originals+=((i->second.front()&3)==1);i->second.pop_front();}
++                        for(unsigned j=0;j<count;++j){const auto token=i->second.front();originals+=((token&3)==1);active-=!(token&2);i->second.pop_front();}
+                         if(i!=completed.end() && i->second.empty())completed.erase(i);
+                         remaining-=count;
+                         if(originals){++h4[4];h4.insert(h4.end(),{uint8_t(handle),uint8_t(handle>>8),uint8_t(originals),uint8_t(originals>>8)});}
+@@ -63,21 +75,30 @@
+                     h4[3]=uint8_t(h4.size()-4);
+                     // Host completions have no HCI response. Return one provider
+                     // packet only after all of its serial fragments are released.
+-                    if(!h4[4]){rxDebt=std::move(completed);rxOutstanding=remaining;transport.Pop();goto receive;}
+-                }
+-                if(op==0x0c31 && (p.size()!=4 || p[3]>1 || flowRequest>=0 || rxOutstanding || hostAt)) {
++                    if(!h4[4]){rxDebt=std::move(completed);rxOutstanding=remaining;rxActive=active;transport.Pop();goto receive;}
++                }
++                if(op==0x0c31 && (p.size()!=4 || p[3]>1 || flowRequest>=0 || rxActive || hostAt)) {
+                     Fail("Unsupported host flow-control transition");return;
+                 }
+                 if(op==0x0c33 && (p.size()!=10 || !Word(p,3) || !Word(p,6) ||
+-                   Word(p,6)>4096 || bufferRequest || rxOutstanding || hostAt)) {
++                   Word(p,6)>4096 || bufferRequest || rxActive || hostAt)) {
+                     Fail("Unsupported host ACL buffer contract");return;
+                 }
++                if(command && op!=0x0c35 && commandsPending.size()==64){Fail("Too many pending HCI commands");return;}
+                 if(!backend.Connected()){Fail("Bluetooth controller disconnected");return;}
+                 // Write closes its endpoint on overflow, so test capacity first.
+                 if(h4.size()<=Backend::capacity-backend.Queued()) {
+                     if(!backend.Write(h4.data(),h4.size())){Fail("Bluetooth controller write failed");return;}
++                    if(command && op!=0x0c35){commandsPending.push_back(uint16_t(op));if(commandCredit)--commandCredit;}
+                     if(!command){++aclOutstanding;++debt[uint16_t(p[0]|((p[1]&15)<<8))];}
+-                    if(op==0x0c35){rxDebt=std::move(completed);rxOutstanding=remaining;}
++                    if(op==0x0c35){rxDebt=std::move(completed);rxOutstanding=remaining;rxActive=active;}
++                    if(op==0x0c03) {
++                        resetPending=true;resetAt=now;resetEpoch=resetAcknowledged=false;resetReply=-1;
++                        // Submitted BCSP fragments remain ordered and retain late-ACK
++                        // tokens. The unsubmitted ACL suffix creates no credit.
++                        RetireHostCredits();
++                        if(!host.empty() && host[0]==2)ClearHost();
++                    }
+                     if(op==0x0c31)flowRequest=p[3];
+                     if(op==0x0c33){bufferRequest=true;requestedMtu=Word(p,3);requestedPackets=Word(p,6);}
+                     transport.Pop();
+@@ -108,28 +129,41 @@
+         }
+         if(!host.empty()) {
+             if(host[0]==3){Fail("TG50 SCO transport is unqualified");return;}
++            // Consume at most one cancelled old-generation original per pump.
++            // Events still reach the guest in their original stream order.
++            if(host[0]==2 && resetPending){ClearHost();return;}
+             if(host[0]==4) {
+-                if(!hostObserved){if(!ObserveEvent())return;hostObserved=true;}
+-                if(transport.Queue(5,host.data()+1,host.size()-1))ClearHost();
++                if(!hostObserved){if(!ObserveEvent(now))return;hostObserved=true;}
++                uint8_t sequence=0;
++                if(transport.Queue(5,host.data()+1,host.size()-1,false,&sequence)) {
++                    if(host.size()==7 && host[1]==14 && host[4]==3 && host[5]==0x0c && !host[6])resetReply=sequence;
++                    ClearHost();
++                }
+             } else {
+                 const uint8_t pb=(host[2]>>4)&3,bc=host[2]>>6;
+                 if((pb!=1 && pb!=2) || bc==3){Fail("Unsupported controller ACL packet flags");return;}
+-                if(hostFlow && (!hostPackets || rxOutstanding>=hostPackets))return;
++                if(hostFlow && (!hostMtu || !hostPackets)){Fail("Controller ACL received before a successful host buffer declaration");return;}
++                if(hostFlow && rxActive>=hostPackets)return;
+                 const size_t limit=hostFlow?std::min(size_t(hostMtu),BcspTransport::maxPayload-4):BcspTransport::maxPayload-4;
+                 const size_t count=std::min(limit,host.size()-5-hostAt);
+                 Bytes fragment{host[1],uint8_t((host[2]&0xcf)|(hostAt?0x10:(pb<<4))),
+                                uint8_t(count),uint8_t(count>>8)};
+                 fragment.insert(fragment.end(),host.begin()+5+hostAt,host.begin()+5+hostAt+count);
++                // Keep one current and one retired maximum host-buffer pool.
++                if(hostFlow && rxOutstanding>=8192){Fail("Host ACL completion history exhausted; radio restart required");return;}
+                 if(transport.Queue(6,fragment.data(),fragment.size())) {
+                     hostAt+=count;
+-                    if(hostFlow){++rxOutstanding;rxDebt[uint16_t(host[1]|((host[2]&15)<<8))].push_back(hostAt==host.size()-5);}
++                    if(hostFlow){++rxOutstanding;++rxActive;rxDebt[uint16_t(host[1]|((host[2]&15)<<8))].push_back(hostAt==host.size()-5);}
+                     if(hostAt==host.size()-5)ClearHost();
+                 }
+             }
+         }
+     }
+     bool UnsupportedControl() const{return unsupportedControl;}
+-    void ClearLocal() {ClearHost();debt.clear();aclOutstanding=aclPackets=aclMtu=0;ClearHostCredits();error.clear();unsupportedControl=false;}
++    int ResetStatus() const{return resetStatus;}
++    const std::vector<uint16_t>& CommandsPending() const{return commandsPending;}
++    unsigned CommandCredit() const{return commandCredit;}
++    void ClearLocal() {ClearHost();commandsPending.clear();commandCredit=1;debt.clear();aclOutstanding=aclPackets=aclMtu=0;ClearHostCredits();error.clear();unsupportedControl=false;resetPending=resetFailed=resetEpoch=resetAcknowledged=false;resetReply=-1;resetStatus=-1;}
+     void Reset() {
+         backend.Close();ClearLocal();
+         // Diagnostic observations survive reset until explicitly exported.
+@@ -138,31 +172,63 @@
+     BcspTransport& transport;Backend& backend;
+     Bytes host;
+     size_t hostAt{};
+-    bool hostObserved{};
++    bool hostObserved{},resetPending{},resetFailed{},resetEpoch{},resetAcknowledged{};
++    int resetReply{-1};
++    uint64_t resetAt{};
++    int resetStatus{-1};
+     uint16_t aclMtu{},aclPackets{};
+     unsigned aclOutstanding{};
+     std::map<uint16_t,unsigned> debt;
++    std::vector<uint16_t> commandsPending;
++    unsigned commandCredit{1};
+     using ReceiveDebt=std::map<uint16_t,std::deque<uint8_t>>;
+     ReceiveDebt rxDebt;
+-    unsigned rxOutstanding{};
++    unsigned rxOutstanding{},rxActive{};
+     bool hostFlow{},bufferRequest{};
+     int flowRequest{-1};
+     uint16_t hostMtu{},hostPackets{},requestedMtu{},requestedPackets{};
+     static unsigned Word(const Bytes& p,size_t at){return p[at]|(unsigned(p[at+1])<<8);}
+-    void ClearHostCredits(bool retire=false){if(retire){for(auto& row:rxDebt)for(auto& token:row.second)token|=2;}else{rxDebt.clear();rxOutstanding=0;}hostFlow=false;hostMtu=hostPackets=0;bufferRequest=false;flowRequest=-1;}
++    void RetireHostCredits(){for(auto& row:rxDebt)for(auto& token:row.second)token|=2;rxActive=0;}
++    void ClearHostCredits(bool retire=false){if(retire)RetireHostCredits();else{rxDebt.clear();rxOutstanding=rxActive=0;}hostFlow=false;hostMtu=hostPackets=0;bufferRequest=false;flowRequest=-1;}
+     void ClearHost(){host.clear();hostAt=0;hostObserved=false;}
+-    bool ObserveEvent() {
++    void CommitHostEpoch(){
++        if(!resetEpoch || !resetAcknowledged)return;
++        // The real reset invalidates controller debt. The host has received that
++        // result and successfully declared its new receive epoch, so no old
++        // completion token can credit a packet in the new pool.
++        rxDebt.clear();rxOutstanding=rxActive=0;resetEpoch=resetAcknowledged=false;
++    }
++    bool ObserveEvent(uint64_t) {
+         const auto* p=host.data()+1;const size_t n=host.size()-1;
++        if((p[0]==0x0e && n>=5) || (p[0]==0x0f && n==6)) {
++            const size_t at=p[0]==0x0e?3:4;
++            const unsigned op=p[at]|(unsigned(p[at+1])<<8);
++            commandCredit=p[p[0]==0x0e?2:3];
++            const auto i=std::find(commandsPending.begin(),commandsPending.end(),op);
++            if(i!=commandsPending.end())commandsPending.erase(i);
++        }
+         if(p[0]==0x0e && n>=6) {
+             const unsigned op=p[3]|(unsigned(p[4])<<8);
+-            if(op==0x0c31 && flowRequest>=0){if(!p[5])hostFlow=flowRequest;flowRequest=-1;}
+-            if(op==0x0c33 && bufferRequest){if(!p[5]){hostMtu=requestedMtu;hostPackets=requestedPackets;}bufferRequest=false;}
++            if(op==0x0c31 && flowRequest>=0){if(!p[5]){CommitHostEpoch();hostFlow=flowRequest;}flowRequest=-1;}
++            if(op==0x0c33 && bufferRequest){if(!p[5]){CommitHostEpoch();hostMtu=requestedMtu;hostPackets=requestedPackets;}bufferRequest=false;}
+             if(op==0x1005 && !p[5]) {
+                 if(n!=13){Fail("Malformed Read Buffer Size completion");return false;}
+                 const unsigned mtu=p[6]|(unsigned(p[7])<<8),packets=p[9]|(unsigned(p[10])<<8);
+                 if(!mtu || !packets || aclOutstanding){Fail("Unsupported controller ACL buffer contract");return false;}
+                 aclMtu=mtu;aclPackets=packets;
+-            } else if(op==0x0c03 && !p[5]){debt.clear();aclOutstanding=0;ClearHostCredits(true);}
++            } else if(op==0x0c03) {
++                if(n!=6){Fail("Malformed HCI Reset completion");return false;}
++                resetStatus=p[5];
++                if(resetPending && p[5])resetFailed=true;
++                resetPending=false;
++                if(!p[5]){
++                    debt.clear();aclOutstanding=0;RetireHostCredits();
++                    // Keep only actual announced host capacity; flow and credit
++                    // epochs reset. A successful new declaration can replace it.
++                    hostFlow=false;bufferRequest=false;flowRequest=-1;
++                    resetEpoch=true;resetAcknowledged=false;resetReply=-1;
++                }
++            }
+         }
+         if(p[0]==0x13) {
+             if(n<3 || n!=size_t(3+4*p[2])){Fail("Malformed controller ACL completion");return false;}
+@@ -181,7 +247,7 @@
+             const unsigned handle=p[3]|(unsigned(p[4])<<8);auto i=debt.find(handle);
+             if(i!=debt.end()){aclOutstanding-=i->second;debt.erase(i);}
+             // Retired tokens still occupy guest buffers, but cannot credit a new link.
+-            auto r=rxDebt.find(handle);if(r!=rxDebt.end())for(auto& token:r->second)token|=2;
++            auto r=rxDebt.find(handle);if(r!=rxDebt.end())for(auto& token:r->second){rxActive-=!(token&2);token|=2;}
+         }
+         return true;
+     }
+--- a/src/uarm/uarm/CsrBcspRadio.cpp
++++ b/src/uarm/uarm/CsrBcspRadio.cpp
+@@ -10,7 +10,7 @@
+     pxaUartSetFuncs(uart,
+         [](void* p)->uint_fast16_t{return static_cast<CsrBcspRadio*>(p)->Read();},
+         [](uint_fast16_t c,void* p){static_cast<CsrBcspRadio*>(p)->Write(c);},
+-        [](void* p){auto* r=static_cast<CsrBcspRadio*>(p);return !r->checkpoints && r->powered && !r->needsRestart;},
++        [](void* p){auto* r=static_cast<CsrBcspRadio*>(p);return !r->checkpoints && (r->controllerReset.Pending() || (r->powered && !r->needsRestart));},
+         [](void* p){static_cast<CsrBcspRadio*>(p)->Tick();},this);
+     pxaUartSetModeObserver(uart,[](void* p){static_cast<CsrBcspRadio*>(p)->PinsChanged();},this);
+     pxaUartSetModemInputs(uart,0);
+@@ -29,9 +29,15 @@
+     return pxaUartReceiverEnabled(uart) && pxaUartPlainEnabled(uart) &&
+         mode.baud==921600 && (mode.lcr&0x3f)==0x1b;
+ }
+-void CsrBcspRadio::Fence(bool restart){
+-    backend.Close();bridge.ClearLocal();transport.Stop();started=false;
+-    needsRestart=restart;lastPoll=0;
++void CsrBcspRadio::Fence(bool restart,bool retainController){
++    TG50_TRACE("CSR fence t=%llu A6=%u connected=%u retain=%u restart=%u\n",(unsigned long long)Now(),Powered(),backend.Connected(),retainController,restart);
++    if(retainController && backend.Connected() && !controllerFailed){
++        controllerReset.Begin(Now(),bridge.CommandsPending(),bridge.CommandCredit());controllerReset.Pump(backend,Now());
++        if(!controllerReset.Error().empty()){error=controllerReset.Error();controllerFailed=true;}
++    }
++    else{backend.Close();controllerReset.Clear();}
++    bridge.ClearLocal();transport.Stop();started=false;
++    needsRestart=restart || controllerFailed;lastPoll=0;
+     pxaUartSetModemInputs(uart,0);
+ }
+ void CsrBcspRadio::PinsChanged(){
+@@ -39,32 +45,44 @@
+     if(checkpoints){if(on!=powered)deferredReset=true;return;}
+     const bool changed=on!=powered || deferredReset;
+     if(changed){
+-        Fence(on);powered=on;
+-        if(!on){needsRestart=false;error.clear();}
+-        else if(!deferredReset){needsRestart=false;error.clear();}
++        if(deferredExternal){controllerFailed=false;error.clear();}
++        Fence(on,!deferredExternal);powered=on;
++        if(!on && !controllerFailed){needsRestart=false;error.clear();}
++        else if(!deferredReset && !controllerFailed){needsRestart=false;error.clear();}
+     }
+-    deferredReset=false;
++    deferredReset=deferredExternal=false;
+     const auto mode=pxaUartIrState(uart);
+     (void)mode;
+     TG50_TRACE("CSR pins t=%llu A6=%u A0out=%u A0=%u A14=%u baud=%u lcr=%02x rts=%u\n",
+         (unsigned long long)Now(),on,tg50ucGpioIsOutput(uc,0,0),tg50ucGpioState(uc,0,0),
+         tg50ucGpioState(uc,0,14),mode.baud,mode.lcr,pxaUartGetModemOutputs(uart));
+     if(changed){
+-        pxaUartSetModemInputs(uart,on && !needsRestart ? PXA_UART_CTS:0);
++        pxaUartSetModemInputs(uart,on && !needsRestart && !controllerReset.Pending() ? PXA_UART_CTS:0);
+         pxaUartKick(uart);
+     }
+ }
++void CsrBcspRadio::ServiceReset(){
++    if(checkpoints || controllerFailed || !controllerReset.Pending())return;
++    controllerReset.Pump(backend,Now());
++    if(!controllerReset.Error().empty()){error=controllerReset.Error();controllerFailed=true;Fence(true);return;}
++    if(controllerReset.Pending())return;
++    pxaUartSetModemInputs(uart,powered && !needsRestart ? PXA_UART_CTS:0);pxaUartKick(uart);
++    TG50_TRACE("CSR reset-complete t=%llu A6=%u connected=%u\n",(unsigned long long)Now(),Powered(),backend.Connected());
++}
+ void CsrBcspRadio::Tick(){
+-    if(checkpoints || !powered || needsRestart || !Ready())return;
+-    clock=Now();
++    if(checkpoints || controllerFailed)return;
++    clock=Now();ServiceReset();
++    if(controllerReset.Pending() || controllerFailed)return;
++    if(!powered || needsRestart || !Ready())return;
+     if(!started){
+         transport.Start(clock);started=true;
+         if(!path.empty() && !backend.Connected() && !backend.Open(path,error)){
+             Fence(true);return;
+         }
++        TG50_TRACE("CSR start t=%llu A6=%u connected=%u\n",(unsigned long long)clock,Powered(),backend.Connected());
+     }
+     transport.Tick(clock);
+-    if(transport.Failed()){error="BCSP retry exhausted; turn Bluetooth off and on in Palm OS.";Fence(true);return;}
++    if(transport.Failed()){error="BCSP retry exhausted; turn Bluetooth off and on in Palm OS.";Fence(true,true);return;}
+     if(clock-lastPoll<1000000)return;
+     lastPoll=clock;
+     if(!backend.Connected()){
+@@ -77,17 +95,17 @@
+         return;
+     }
+     bridge.Pump(clock);
+-    if(!bridge.Error().empty()){error=bridge.Error();Fence(true);}
++    if(!bridge.Error().empty()){error=bridge.Error()+"; select the Bluetooth controller again.";controllerFailed=true;Fence(true);}
+ }
+ void CsrBcspRadio::Write(uint_fast16_t c){
+     if(checkpoints || !powered || needsRestart || !Ready())return;
+     Tick();if(!started)return;
+     if(traceBytes++<8192)TG50_TRACE("CSR byte t=%llu guest=%03x\n",(unsigned long long)clock,unsigned(c));
+-    if(c&~0xffu){error="Errored BTUART frame.";Fence(true);return;}
++    if(c&~0xffu){error="Errored BTUART frame.";Fence(true,true);return;}
+     const auto generation=transport.Generation();const auto old=transport.State();
+     transport.Write(c,clock);
+     if(old==csr::BcspTransport::Link::active && generation!=transport.Generation()){
+-        error="BCSP peer reset; turn Bluetooth off and on in Palm OS.";Fence(true);
++        error="BCSP peer reset; turn Bluetooth off and on in Palm OS.";Fence(true,true);
+     }
+ }
+ uint_fast16_t CsrBcspRadio::Read(){
+@@ -98,9 +116,9 @@
+ }
+ bool CsrBcspRadio::SetBackend(const std::string& candidate,std::string& problem){
+     if(checkpoints){problem="Bluetooth is busy with a state operation.";return false;}
+-    if(candidate.empty()){path.clear();error.clear();Fence(true);problem.clear();return true;}
++    if(candidate.empty()){path.clear();error.clear();controllerFailed=false;Fence(true);problem.clear();return true;}
+     if(!backend.Open(candidate,problem))return false;
+-    path=candidate;error.clear();transport.Stop();bridge.ClearLocal();started=false;
++    path=candidate;error.clear();controllerFailed=false;controllerReset.Clear();transport.Stop();bridge.ClearLocal();started=false;
+     needsRestart=Powered();powered=Powered();lastPoll=0;problem.clear();PinsChanged();return true;
+ }
+ std::string CsrBcspRadio::State() const{
+@@ -109,6 +127,7 @@
+     if(bridge.UnsupportedControl())return "error: Unsupported CSR channel 2 request.";
+     std::ostringstream out;out<<"radio="<<(powered?"on":"off")<<"; BCSP="<<unsigned(transport.State());
+     if(needsRestart)out<<"; radio restart required";
++    if(controllerReset.Pending())out<<"; controller reset pending";
+     if(backend.Connected())out<<"; provider connected";
+     return out.str();
+ }
+@@ -126,37 +145,41 @@
+     };
+     auto scope=std::make_shared<Scope>(*this);
+     const auto saved=transport;const auto savedClock=clock,savedPoll=lastPoll;
+-    const auto savedPowered=powered,savedStarted=started,savedRestart=needsRestart,savedDeferred=deferredReset;
+-    return [this,scope,saved,savedClock,savedPoll,savedPowered,savedStarted,savedRestart,savedDeferred]{
++    const auto savedPowered=powered,savedStarted=started,savedRestart=needsRestart,savedDeferred=deferredReset,savedExternal=deferredExternal;
++    return [this,scope,saved,savedClock,savedPoll,savedPowered,savedStarted,savedRestart,savedDeferred,savedExternal]{
+         if(!*scope->alive)return;
+         transport=saved;clock=savedClock;lastPoll=savedPoll;powered=savedPowered;started=savedStarted;
+-        needsRestart=savedRestart;deferredReset=savedDeferred;
++        needsRestart=savedRestart;deferredReset=savedDeferred;deferredExternal=savedExternal;
+     };
+ }
+-void CsrBcspRadio::Suspend(){if(checkpoints){deferredReset=true;return;}Fence(true);}
++void CsrBcspRadio::Suspend(){if(checkpoints){deferredReset=true;return;}Fence(true,true);}
+ void CsrBcspRadio::Reset(){
+-    if(checkpoints){deferredReset=true;return;}
+-    Fence(true);powered=Powered();needsRestart=powered;error.clear();
++    if(checkpoints){deferredReset=deferredExternal=true;return;}
++    controllerFailed=false;Fence(true);powered=Powered();needsRestart=powered;error.clear();
+ }
+ csr::BcspTransport::Bytes CsrBcspRadio::Save() const{
+     auto data=transport.Save(clock);
+-    data.insert(data.begin(),{2,uint8_t(powered),uint8_t(started),uint8_t(needsRestart),uint8_t(Powered()),uint8_t(deferredReset || Powered()!=powered)});
++    data.insert(data.begin(),{3,uint8_t(powered),uint8_t(started),uint8_t(needsRestart),uint8_t(Powered()),uint8_t(deferredReset || Powered()!=powered),uint8_t(deferredExternal)});
+     return data;
+ }
+ bool CsrBcspRadio::Load(const csr::BcspTransport::Bytes& data){
+     if(data.empty()){
+-        transport.Stop();started=false;clock=Now();powered=Powered();needsRestart=powered;deferredReset=false;return true;
++        transport.Stop();started=false;clock=Now();powered=Powered();needsRestart=powered;
++        deferredExternal=checkpoints && deferredExternal;deferredReset=deferredExternal;return true;
+     }
+-    if(data.size()<4 || (data[0]!=1 && data[0]!=2) || data[1]>1 || data[2]>1 || data[3]>1)return false;
+-    const size_t header=data[0]==1?4:6;
+-    if(data.size()<header || (data[0]==2 && (data[4]>1 || data[5]>1)))return false;
++    if(data.size()<4 || (data[0]!=1 && data[0]!=2 && data[0]!=3) || data[1]>1 || data[2]>1 || data[3]>1)return false;
++    const size_t header=data[0]==1?4:data[0]==2?6:7;
++    if(data.size()<header || (data[0]>=2 && (data[4]>1 || data[5]>1)) || (data[0]==3 && (data[6]>1 || (data[6] && !data[5]))))return false;
+     const bool actual=data[0]==1?bool(data[1]):bool(data[4]);
+-    const bool deferred=data[0]==2 && data[5];
++    const bool deferred=data[0]>=2 && data[5];
++    const bool external=data[0]==3 && data[6];
+     if(actual!=Powered() || (bool(data[1])!=actual && !deferred))return false;
+     auto candidate=transport;uint64_t candidateClock=0;
+     if(!candidate.Load({data.begin()+header,data.end()},candidateClock) ||
+        (data[2] && (!data[1] || data[3])) ||
+        (bool(data[2])!=(candidate.State()!=csr::BcspTransport::Link::off && candidate.State()!=csr::BcspTransport::Link::failed)))return false;
+-    transport=std::move(candidate);clock=candidateClock;powered=data[1];started=data[2];needsRestart=data[3];deferredReset=deferred;
++    transport=std::move(candidate);clock=candidateClock;powered=data[1];started=data[2];needsRestart=data[3];// A core reset loads power-on state after requesting its external fence.
++    // Checkpoint restoration first restores this host-side ownership marker.
++    deferredExternal=external || (checkpoints && deferredExternal);deferredReset=deferred || deferredExternal;
+     return true;
+ }
+--- a/src/uarm/uarm/CsrBcspRadio.h
++++ b/src/uarm/uarm/CsrBcspRadio.h
+@@ -2,6 +2,7 @@
+ #define FROND_CSR_BCSP_RADIO_H
+ #include "BcspH4Bridge.h"
+ #include "BluetoothBackend.h"
++#include "CsrControllerReset.h"
+ #include "get_emu_time.h"
+ #include "pxa_UART.h"
+ #include <functional>
+@@ -15,6 +16,7 @@
+     bool SetBackend(const std::string&,std::string&);
+     std::string State() const;
+     void PinsChanged();
++    void ServiceReset();
+     void BeginCheckpoint();
+     void EndCheckpoint(bool sleeping);
+     std::function<void()> CaptureInput();
+@@ -29,10 +31,11 @@
+     TG50uc* uc;
+     PxaUart* uart;
+     BluetoothBackend backend;
++    csr::ControllerReset<BluetoothBackend> controllerReset;
+     csr::BcspTransport transport{{250000000,250000000,12}};
+     csr::BcspH4Bridge<BluetoothBackend> bridge{transport,backend};
+     uint64_t clock{},lastPoll{};
+-    bool powered{},started{},needsRestart{},deferredReset{};
++    bool powered{},started{},needsRestart{},deferredReset{},deferredExternal{},controllerFailed{};
+     unsigned checkpoints{},traceBytes{};
+     std::string path,error;
+     bool Powered() const;
+@@ -41,6 +44,6 @@
+     void Tick();
+     void Write(uint_fast16_t);
+     uint_fast16_t Read();
+-    void Fence(bool restart);
++    void Fence(bool restart,bool retainController=false);
+ };
+ #endif
+--- /dev/null
++++ b/src/uarm/uarm/CsrControllerReset.h
+@@ -0,0 +1,59 @@
++// Genuine HCI reset of one retained virtual controller, outside guest transport.
++#ifndef FROND_CSR_CONTROLLER_RESET_H
++#define FROND_CSR_CONTROLLER_RESET_H
++#include <cstdint>
++#include <string>
++#include <algorithm>
++#include <vector>
++namespace csr {
++template<class Backend> class ControllerReset {
++ public:
++    bool Pending() const{return pending;}
++    const std::string& Error() const{return error;}
++    void Clear(){pending=sent=false;error.clear();}
++    void Begin(uint64_t now,const std::vector<uint16_t>& oldCommands,unsigned credit){
++        if(pending)return;
++        pending=true;sent=false;started=now;commands=oldCommands;commandCredit=credit;error.clear();
++    }
++    void Pump(Backend& backend,uint64_t now){
++        if(!pending)return;
++        // Reserve one receive syscall batch; old complete frames are drained below.
++        backend.Poll(backend.Pending()<=Backend::capacity-(Backend::maxFrame+16384-1));
++        if(!backend.Connected()){Fail(backend,"Bluetooth controller disconnected during radio reset");return;}
++        if(!sent && commands.empty() && commandCredit && Backend::capacity-backend.Queued()>=4){
++            const uint8_t command[]{1,3,0x0c,0};
++            if(!backend.Write(command,sizeof(command))){Fail(backend,"Bluetooth controller reset write failed");return;}
++            sent=true;backend.Poll(false);
++        }
++        // Discard only this fenced transport generation. No guest events or
++        // completion credits are manufactured, and no ACL suffix is replayed.
++        for(unsigned i=0;i<32 && backend.Pending();++i){
++            const auto type=backend.Read();
++            const unsigned header=type==4?2:type==2?4:type==3?3:0;
++            if(!header){Fail(backend,"Invalid controller packet during radio reset");return;}
++            uint8_t h[4]{};for(unsigned j=0;j<header;++j)h[j]=uint8_t(backend.Read());
++            const unsigned n=type==4?h[1]:type==2?h[2]+(unsigned(h[3])<<8):h[2];
++            uint8_t event[4]{};
++            for(unsigned j=0;j<n;++j){const auto c=backend.Read();if(c==0x100){Fail(backend,"Incomplete controller packet during radio reset");return;}if(j<4)event[j]=uint8_t(c);}
++            if(type==4 && ((h[0]==14 && n>=3) || (h[0]==15 && n==4))){
++                const unsigned op=h[0]==14?event[1]+(unsigned(event[2])<<8):event[2]+(unsigned(event[3])<<8);
++                commandCredit=event[h[0]==14?0:1];
++                const auto old=std::find(commands.begin(),commands.end(),op);
++                if(old!=commands.end()){
++                    if(op==0x0c03 && (h[0]!=14 || n!=4 || event[3])){Fail(backend,"Controller rejected prior radio reset");return;}
++                    commands.erase(old);
++                }else if(op==0x0c03){
++                    if(!sent){Fail(backend,"Unexpected controller reset completion");return;}
++                    if(h[0]!=14 || n!=4 || event[3]){Fail(backend,"Controller rejected radio reset");return;}
++                    pending=false;return;
++                }
++            }
++        }
++        if(now-started>=3000000000ull)Fail(backend,"Controller radio reset timed out");
++    }
++ private:
++    bool pending{},sent{};uint64_t started{};unsigned commandCredit{};std::vector<uint16_t> commands;std::string error;
++    void Fail(Backend& backend,const char* message){error=message;pending=false;backend.Close();}
++};
++}
++#endif
+--- a/src/uarm/uarm/devicePalmTungstenE2.cpp
++++ b/src/uarm/uarm/devicePalmTungstenE2.cpp
+@@ -502,11 +502,12 @@
+ std::string deviceBluetoothState(Device* dev){if(dev->tg50){return tg50BoardBluetooth(dev->tg50)->State();}return bcm2035BackendState(dev->bcm2035);}
+ void deviceBeginBluetoothCheckpoint(Device* dev){if(dev->tg50){tg50BoardBluetooth(dev->tg50)->BeginCheckpoint();return;}bcm2035BeginCheckpoint(dev->bcm2035);}
+ void deviceEndBluetoothCheckpoint(Device* dev,bool sleeping){if(dev->tg50){tg50BoardBluetooth(dev->tg50)->EndCheckpoint(sleeping);return;}bcm2035EndCheckpoint(dev->bcm2035,sleeping);}
++void deviceServiceBluetoothReset(Device* dev){if(dev->tg50)tg50BoardBluetooth(dev->tg50)->ServiceReset();}
+ void deviceSuspendBluetooth(Device* dev){if(dev->tg50){tg50BoardBluetooth(dev->tg50)->Suspend();return;}bcm2035Suspend(dev->bcm2035);}
+ void deviceBluetoothPinsChanged(Device* dev){if(dev->tg50){tg50BoardBluetooth(dev->tg50)->PinsChanged();return;}bcm2035PowerChanged(dev->bcm2035);}
+-void deviceBluetoothStateReplaced(Device* dev){if(dev->tg50){tg50BoardBluetooth(dev->tg50)->Suspend();return;}bcm2035Suspend(dev->bcm2035);}
++void deviceBluetoothStateReplaced(Device* dev){if(dev->tg50){tg50BoardBluetooth(dev->tg50)->Reset();return;}bcm2035Suspend(dev->bcm2035);}
+ void deviceStopBluetooth(Device* dev){
+-    if(dev->tg50){tg50BoardBluetooth(dev->tg50)->Suspend();return;}
++    if(dev->tg50){tg50BoardBluetooth(dev->tg50)->Reset();return;}
+     if(!dev->bcm2035)return;
+     const bool tx=dev->type==deviceTypeTX || dev->type==deviceTypeZire72;
+     for(unsigned pin:{tx?17u:32u,tx?83u:80u})pxaGpioSetNotif(dev->gpio,pin,nullptr,nullptr);
+--- a/src/uarm/uarm/device.h
++++ b/src/uarm/uarm/device.h
+@@ -125,6 +125,7 @@
+ void deviceEndBluetoothCheckpoint(Device*,bool sleeping=false);
+ void deviceBluetoothStateReplaced(Device*);
+ void deviceSuspendBluetooth(Device*);
++void deviceServiceBluetoothReset(Device*);
+ void deviceBluetoothPinsChanged(Device*);
+ void deviceStopBluetooth(Device*);
+ 
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -393,6 +393,8 @@
+             return Batch0Ticks();
+ 
+         case SCHEDULER_TASK_AUX_2:
++            // Complete controller fences even while the guest UART clock is off.
++            deviceServiceBluetoothReset(dev);
+             PumpEventQueues();
+             if (PowerSleeping()) {
+                 if (pxaPwrClkWakePending(pwrClk)) ResumePowerSleep();
+--- a/src/uarm/uarm/BcspTransport.h
++++ b/src/uarm/uarm/BcspTransport.h
+@@ -29,6 +29,10 @@
+     const Counts& Statistics() const {return counts;}
+     size_t Outstanding() const {return flight.size();}
+     size_t Received() const {return inbox.size();}
++    bool ReliablePending(uint8_t sequence) const {
++        for(const auto& packet:flight)if(packet.seq==sequence)return true;
++        return false;
++    }
+     uint8_t Expected() const {return rxNext;}
+     bool HasWire() const {return wireAt<wireSize;}
+     bool Failed() const {return link==Link::failed;}
+@@ -38,12 +42,12 @@
+         if(!timing.linkRetry || !timing.dataRetry || !timing.maxAttempts)Fail();
+     }
+     // Whole payload ownership transfers only on true. A full window is retryable.
+-    bool Queue(uint8_t channel,const uint8_t* p,size_t n,bool crc=false) {
++    bool Queue(uint8_t channel,const uint8_t* p,size_t n,bool crc=false,uint8_t* sequence=nullptr) {
+         if(link!=Link::active || n>maxPayload || (!p && n) ||
+            (channel!=2 && channel!=5 && channel!=6) || flight.size()==window)return false;
+         Pending q;q.channel=channel;q.seq=txNext;q.crc=crc;
+         if(n)q.payload.assign(p,p+n);
+-        flight.push_back(q);txNext=(txNext+1)&7;return true;
++        flight.push_back(q);if(sequence)*sequence=q.seq;txNext=(txNext+1)&7;return true;
+     }
+     const Packet* Peek() const {return inbox.empty()?nullptr:&inbox.front();}
+     void Pop() {if(!inbox.empty())inbox.pop_front();}

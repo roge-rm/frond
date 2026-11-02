@@ -1,0 +1,369 @@
+--- a/src/common/device_profile5.h
++++ b/src/common/device_profile5.h
+@@ -117,7 +117,7 @@
+      DeviceNorLayout5::smallAndBigCards, 0, 0x20000, false, 0, 0,
+      {true, "tg50", 320, 320, 0, 224, "Date Book|Address|To Do|Memo Pad",
+       "up|down|app1|app2|app3|app4|home|power", -1, -1, -1, -1, false, false, false, "", "tg50-clie",
+-      DeviceStorageSlot5::memoryStick, 1073741887, true, true, 36, true}},
++      DeviceStorageSlot5::memoryStick, 1073741887, true, true, 34, true}},
+     // Reserved names: art only, no board yet.
+     {deviceTypeInvalid, "palm-iiix", "Palm IIIx", DeviceCohort5::reserved, DeviceSupport5::reserved,
+      DeviceDetect5::none, 0, 0, DeviceBoard5::none, DeviceArt::iiix, {},
+--- a/src/uarm/native/DeviceControls.h
++++ b/src/uarm/native/DeviceControls.h
+@@ -43,7 +43,7 @@
+     float selectCorner{0};
+     // Strip units at the bottom that belong to the keyboard; hiding it takes them off.
+     int keyboardHeight{0};
+-    // Side tab panel right of the screen, and the strip units it adds to the window's width.
++    // Side panel left of the screen, and the strip units it adds to the window's width.
+     SDL_Rect sideTab{0,0,0,0};
+     int sideTabWidth{0};
+ };
+@@ -138,8 +138,8 @@
+                                                   DeviceControlStyle::iiix,0.5f,2};
+     // CLIE PEG-TG50: round Home and Graffiti keys at the ends of the app row, five slim keys in
+     // a raised bar between them (Date Book, Address, the scroll rocker split across its middle,
+-    // To Do, Memo Pad), then the QWERTY keyboard. The Jog Dial and Back sit on a tab right of
+-    // the screen, level with the app row; the real ones are on the left side of the body.
++    // To Do, Memo Pad), then the QWERTY keyboard. The Jog Dial and Back sit beside
++    // the middle of the LCD on the left side of the body.
+     constexpr auto kb=DeviceControlSection::keyboard;
+     constexpr auto tab=DeviceControlSection::sideTab;
+     static const DeviceButton tg50[] = {
+@@ -197,13 +197,13 @@
+         {tg50Key(7,4), {240,188,27,24}, "Right", DeviceControlIcon::legend, 0, kb},
+         {tg50Key(2,0), {271,188,27,24}, "Caps lock", DeviceControlIcon::legend, 0, kb},
+         // Side tab: the Jog Dial rolls up and down either side of its press, then Back.
+-        {keyIdJogUp, {325,9,24,26}, "Jog up", DeviceControlIcon::up, 6, tab},
+-        {keyIdJogPress, {325,37,24,22}, "Jog press", DeviceControlIcon::select, 11, tab},
+-        {keyIdJogDown, {325,61,24,26}, "Jog down", DeviceControlIcon::down, 6, tab},
+-        {keyIdBack, {325,98,24,22}, "Back", DeviceControlIcon::back, 6, tab},
++        {keyIdJogUp, {-32,-230,30,26}, "Jog up", DeviceControlIcon::up, 6, tab},
++        {keyIdJogPress, {-32,-198,30,64}, "Jog press", DeviceControlIcon::select, 6, tab},
++        {keyIdJogDown, {-32,-128,30,26}, "Jog down", DeviceControlIcon::down, 6, tab},
++        {keyIdBack, {-32,-86,30,26}, "Back", DeviceControlIcon::back, 6, tab},
+     };
+     static const DeviceControlProfile tg50Profile{320,224,tg50,std::size(tg50),{0,0,0,0},0,{0,0,0,0},
+-                                                  DeviceControlStyle::tg50,0.3f,1,0,176,{320,4,34,124},36};
++                                                  DeviceControlStyle::tg50,0.3f,1,0,176,{-34,-236,34,208},34};
+     static const DeviceControlProfile empty{0,0,nullptr,0,{0,0,0,0},0,{0,0,0,0}};
+     switch(art) {
+         case DeviceArt::tx: return txProfile;
+@@ -223,14 +223,17 @@
+ // Strip height in strip units: without the keyboard, down to the side tab's foot if that's lower.
+ inline int deviceControlsUnits(const DeviceControlProfile& profile, const DeviceControlView& view) {
+     int h=view.keyboard ? profile.height : profile.height-profile.keyboardHeight;
+-    if(view.sideTab && profile.sideTabWidth>0)h=std::max(h,profile.sideTab.y+profile.sideTab.h+4);
+     return h;
+ }
+ // Strip height in screen pixels.
+ inline int deviceControlsHeight(const DeviceControlProfile& profile, const DeviceControlView& view={}) {
+     return deviceControlsUnits(profile,view)/profile.unit;
+ }
+-// Window width the strip needs under a screen, in screen pixels, with the side tab to the right.
++// The LCD and main controls sit to the right of a visible side panel.
++inline int deviceScreenLeft(const DeviceControlProfile& profile, const DeviceControlView& view={}) {
++    return view.sideTab ? profile.sideTabWidth/profile.unit : 0;
++}
++// Window width including the side panel.
+ inline int deviceControlsWidth(const DeviceControlProfile& profile, int screenWidth, const DeviceControlView& view={}) {
+     return screenWidth+(view.sideTab ? profile.sideTabWidth/profile.unit : 0);
+ }
+@@ -254,7 +257,7 @@
+                                 const DeviceButton& button, int screenWidth, int screenHeight) {
+     // Screen pixels; strip units divide by the unit.
+     const int u=profile.unit;
+-    auto r=button.bounds; r.x=(r.x+(screenWidth*u-profile.width)/2)/u; r.y=r.y/u+screenHeight; r.w/=u; r.h/=u;
++    auto r=button.bounds; r.x=(r.x+(screenWidth*u-profile.width)/2)/u+deviceScreenLeft(profile); r.y=r.y/u+screenHeight; r.w/=u; r.h/=u;
+     return r;
+ }
+ // App keys are rounded rectangles; their pockets share this corner.
+@@ -272,7 +275,7 @@
+                              int screenHeight, int x, int y, const DeviceControlView& view={}) {
+     // Integer window points hit-test at their pixel centre, in strip units.
+     const int u=profile.unit;
+-    const float sx=(x+0.5f)*u-(screenWidth*u-profile.width)/2,sy=(y-screenHeight+0.5f)*u;
++    const float sx=(x-deviceScreenLeft(profile,view)+0.5f)*u-(screenWidth*u-profile.width)/2,sy=(y-screenHeight+0.5f)*u;
+     const auto part=deviceNavigatorAt(profile,sx,sy);
+     if(part!=keyInvalid)return part;
+     for(size_t i=0;i<profile.count;++i) {
+@@ -292,6 +295,9 @@
+                         int screenWidth, int screenHeight, float scale, DeviceKeyMask pressed,
+                         const DeviceControlView& view={});
+ 
++void drawDeviceSidebar(SDL_Renderer* renderer, const DeviceControlProfile& profile,
++                       int screenWidth, int screenHeight, float scale, DeviceKeyMask pressed);
++
+ // Printed silkscreen under the LCD. Taps on it reach the guest as pen input; these
+ // rectangles only place the artwork.
+ enum class SilkscreenIcon { home, menu, favorites, find, clock, brightness, letters, numbers, calc };
+--- a/src/uarm/native/DeviceControls.cpp
++++ b/src/uarm/native/DeviceControls.cpp
+@@ -176,16 +176,18 @@
+     float edge(float distance) const {return clamp01(0.5f-distance*s);}
+     template <class Cover, class Colour>
+     void paint(float x0, float y0, float x1, float y1, Cover cover, Colour colour) {
+-        const int X0=std::max(0,int(std::floor(x0*s))),X1=std::min(w,int(std::ceil(x1*s)));
+-        const int Y0=std::max(0,int(std::floor(y0*s))),Y1=std::min(h,int(std::ceil(y1*s)));
++        const int X0=std::max(0,int(std::floor((std::max(x0,clipLeft)+originX)*s))),X1=std::min(w,int(std::ceil((std::min(x1,clipRight)+originX)*s)));
++        const int Y0=std::max(0,int(std::floor((y0+originY)*s))),Y1=std::min(h,int(std::ceil((y1+originY)*s)));
+         for(int Y=Y0;Y<Y1;++Y)for(int X=X0;X<X1;++X) {
+-            const float x=(X+0.5f)/s,y=(Y+0.5f)/s,c=cover(x,y);
++            const float x=(X+0.5f)/s-originX,y=(Y+0.5f)/s-originY,c=cover(x,y);
+             if(c<=0)continue;
+             auto& p=pixels[size_t(Y)*w+X];p=mix(p,colour(x,y,p),std::min(c,1.f));
+         }
+     }
+     int w, h;
+     float s;
++    float originX{0},originY{0};
++    float clipLeft{-1e9f},clipRight{1e9f};
+     std::vector<Rgb> pixels;
+ };
+ 
+@@ -1087,16 +1089,16 @@
+ const Rgb tg50Blue{38,78,178},tg50Red{196,44,40};
+ 
+ // CLIE PEG-TG50: brushed champagne-silver body, an app row of round and slim silver keys, a
+-// silver QWERTY with printed legends and the Jog Dial tab to the right.
++// silver QWERTY with printed legends and a left-side Jog Dial.
+ void paintTg50Controls(Canvas& canvas, const DeviceControlProfile& profile, int width, DeviceKeyMask pressed,
+-                       const DeviceControlView& view) {
++                       const DeviceControlView& view, int screenHeight=0) {
+     const int ox=(width-profile.width)/2;
+     const float H=view.keyboard ? profile.height : profile.height-profile.keyboardHeight;
+     auto down=[&](KeyId key) {return (pressed&deviceKeyBit(key))!=0;};
+     auto shifted=[&](SDL_Rect r) {r.x+=ox;return r;};
+     const Rgb background{26,26,28},body{184,180,171};
+     // Window background round the body: beside the side tab, and below a hidden keyboard.
+-    canvas.paint(0,0,canvas.w/canvas.s,canvas.h/canvas.s,[](float,float) {return 1.f;},
++    canvas.paint(-canvas.originX,-canvas.originY,canvas.w/canvas.s-canvas.originX,canvas.h/canvas.s-canvas.originY,[](float,float) {return 1.f;},
+                  [&](float,float,Rgb) {return background;});
+     // Brushed metal: lit from above with fine horizontal streaks.
+     auto brushed=[&](float x,float y,float top,float bottom,Rgb base) {
+@@ -1104,15 +1106,16 @@
+         c=c+Rgb{5,5,5}*speckle(x*0.05f,y*1.5f)+Rgb{2,2,2}*std::sin(y*5.3f+std::sin(x*0.07f)*1.4f);
+         return c;
+     };
+-    canvas.paint(0,0,width,H,[](float,float) {return 1.f;},[&](float x,float y,Rgb) {
+-        const float t=std::fabs(x-width*0.5f)/(width*0.5f);
++    const float left=-deviceScreenLeft(profile,view)*profile.unit;
++    canvas.paint(left,-screenHeight,width,H,[](float,float) {return 1.f;},[&](float x,float y,Rgb) {
++        const float t=std::fabs(x-(width+left)*0.5f)/((width-left)*0.5f);
+         return brushed(x,y,0,H,body)*(1-0.12f*t*t);
+     });
+     // The screen bezel's lower edge, then the body's foot.
+     canvas.paint(0,0,width,3,[&](float,float y) {return canvas.edge(y-1.2f);},[](float,float,Rgb) {return Rgb{40,40,42};});
+     canvas.paint(0,0,width,5,[&](float,float y) {return canvas.edge(std::fabs(y-2.2f)-0.6f)*0.8f;},
+                  [](float,float,Rgb) {return Rgb{238,236,230};});
+-    canvas.paint(0,H-3,width,H,[&](float,float y) {return canvas.edge(std::fabs(y-H+0.8f)-0.8f)*0.6f;},
++    canvas.paint(left,H-3,width,H,[&](float,float y) {return canvas.edge(std::fabs(y-H+0.8f)-0.8f)*0.6f;},
+                  [](float,float,Rgb) {return Rgb{96,92,86};});
+ 
+     const SilverKeyLook keys{Rgb{92,90,88},Rgb{240,239,236},Rgb{196,194,190},Rgb{14,14,14},Rgb{226,223,216},
+@@ -1292,24 +1295,10 @@
+         }
+     }
+ 
+-    // Side tab: a silver panel off the body's right edge holding the Jog Dial and Back.
++    // The side controls use the same body paint and texture coordinates as the keyboard.
+     if(view.sideTab && profile.sideTabWidth>0) {
+-        const SDL_Rect panel=shifted(profile.sideTab);
+-        const SDL_Rect outline{panel.x-12,panel.y,panel.w+12,panel.h};
+-        auto dp=[&](float x,float y) {return deviceRoundedDistance(outline,9,x,y);};
+-        const float px0=panel.x,px1=panel.x+panel.w+3,py0=panel.y-2,py1=panel.y+panel.h+4;
+-        canvas.paint(px0,py0,px1,py1,[&](float x,float y) {return clamp01((2-dp(x-1,y-1.5f))/4)*0.6f;},
+-                     [](float,float,Rgb) {return Rgb{8,8,8};});
+-        canvas.paint(px0,py0,px1,py1,[&](float x,float y) {return canvas.edge(dp(x,y));},[&](float x,float y,Rgb) {
+-            const float t=clamp01((x-panel.x)/panel.w);
+-            return brushed(x,y,panel.y,panel.y+panel.h,body*0.92f)*(1.04f-0.16f*t*t);
+-        });
+-        canvas.paint(px0,py0,px1,py1,[&](float x,float y) {
+-            return canvas.edge(std::fabs(dp(x,y)+0.7f)-0.35f)*0.6f*clamp01((panel.y+40-y)/40);
+-        },[](float,float,Rgb) {return Rgb{244,242,236};});
+-        // The seam where the tab meets the body.
+-        canvas.paint(panel.x,panel.y,panel.x+2,panel.y+panel.h,[&](float x,float) {return canvas.edge(std::fabs(x-panel.x-0.5f)-0.5f)*0.7f;},
+-                     [](float,float,Rgb) {return Rgb{70,68,64};});
++        canvas.clipLeft=profile.sideTab.x+2;
++        canvas.clipRight=profile.sideTab.x+profile.sideTab.w-2;
+         const DeviceButton* jog[3]={nullptr,nullptr,nullptr};const DeviceButton* back=nullptr;
+         for(size_t i=0;i<profile.count;++i) {
+             const auto& b=profile.buttons[i];
+@@ -1319,48 +1308,30 @@
+             if(b.key==keyIdBack)back=&b;
+         }
+         if(jog[0] && jog[1] && jog[2]) {
+-            // Dark slot with the ribbed wheel showing above and below its press key.
+-            const SDL_Rect a=shifted(jog[0]->bounds),c=shifted(jog[2]->bounds);
+-            const SDL_Rect slot{a.x-2,a.y-2,a.w+4,c.y+c.h-a.y+4};
+-            const float sc=8;
+-            canvas.paint(slot.x-1,slot.y-1,slot.x+slot.w+1,slot.y+slot.h+2,[&](float x,float y) {
+-                return canvas.edge(deviceRoundedDistance(slot,sc,x,y));
+-            },[&](float,float y,Rgb) {return mix(Rgb{30,30,32},Rgb{52,52,54},clamp01((y-slot.y)/slot.h));});
+-            canvas.paint(slot.x-1,slot.y-1,slot.x+slot.w+1,slot.y+slot.h+2,[&](float x,float y) {
+-                return canvas.edge(std::fabs(deviceRoundedDistance(slot,sc,x,y)-0.6f)-0.4f)*0.7f*clamp01((y-slot.y)/slot.h);
+-            },[](float,float,Rgb) {return Rgb{232,230,224};});
+-            const float wheelTop=a.y,wheelBottom=c.y+c.h,wcy=(wheelTop+wheelBottom)*0.5f,wr=(wheelBottom-wheelTop)*0.5f;
+-            for(int part=0;part<3;part+=2) {
++            for(int part : {0,2}) {
+                 const auto& button=*jog[part];
+                 const SDL_Rect r=shifted(button.bounds);
+-                const bool held=down(button.key);
+-                const float corner=deviceButtonCorner(profile,button);
+-                auto d=[&](float x,float y) {return deviceRoundedDistance(r,corner,x,y);};
+-                canvas.paint(r.x,r.y,r.x+r.w,r.y+r.h,[&](float x,float y) {return canvas.edge(d(x,y));},[&](float x,float y,Rgb) {
+-                    // A wheel seen edge on: brightest where it faces out, with ribs across.
+-                    const float s=clamp01(std::fabs(y-wcy)/wr),facing=std::sqrt(std::max(0.f,1-s*s));
+-                    Rgb col=mix(Rgb{70,70,74},Rgb{198,196,192},facing);
+-                    const float rib=std::asin(std::min(1.f,(y-wcy)/wr))*wr;
+-                    col=col*(0.86f+0.14f*std::cos(rib*2.4f));
+-                    col=col*(1-0.22f*std::pow(std::fabs(x-r.x-r.w*0.5f)/(r.w*0.5f),3.f));
+-                    return held ? col*0.62f : col;
++                paintSilverKey(canvas,r,6,down(button.key),button.icon,0.62f,keys,false);
++                const float cx=r.x+r.w*0.5f,cy=r.y+r.h*0.5f,dir=part ? 1.f : -1.f;
++                canvas.paint(cx-6,cy-4,cx+6,cy+4,[&](float x,float y) {
++                    return canvas.edge(std::min(segment(x,y,cx-4,cy-dir*2,cx,cy+dir*2),
++                                                segment(x,y,cx+4,cy-dir*2,cx,cy+dir*2))-0.7f);
++                },[&](float,float,Rgb) {return down(button.key) ? glow : ink;});
++            }
++            const SDL_Rect wheel=shifted(jog[1]->bounds);
++            const bool held=down(keyIdJogPress);
++            auto d=[&](float x,float y) {return deviceRoundedDistance(wheel,deviceButtonCorner(profile,*jog[1]),x,y);};
++            canvas.paint(wheel.x,wheel.y,wheel.x+wheel.w,wheel.y+wheel.h,
++                [&](float x,float y) {return canvas.edge(d(x,y));},[&](float x,float y,Rgb) {
++                    const float across=clamp01((x-wheel.x)/wheel.w);
++                    const float end=clamp01(std::min(y-wheel.y,wheel.y+wheel.h-y)/9);
++                    const float ridge=0.82f+0.18f*std::cos(y*2.4f);
++                    Rgb col=mix(Rgb{54,62,52},Rgb{170,179,159},std::sin(across*3.14159265f));
++                    return col*(ridge*(0.65f+0.35f*end)*(held ? 0.62f : 1.f));
+                 });
+-                const float dir=part ? 1 : -1,ty=r.y+r.h*0.5f-dir*1.2f;
+-                const float tx=r.x+r.w*0.5f;
+-                canvas.paint(tx-5,ty-5,tx+5,ty+5,[&](float x,float y) {
+-                    return canvas.edge(std::min(segment(x,y,tx-3.2f,ty-dir*1.6f,tx,ty+dir*1.6f),
+-                                                segment(x,y,tx+3.2f,ty-dir*1.6f,tx,ty+dir*1.6f))-0.6f);
+-                },[&](float,float,Rgb) {return held ? Rgb{40,40,44} : Rgb{52,52,58};});
+-            }
+-            // The press key: a silver dome between the rolling halves.
+-            const auto& press=*jog[1];
+-            const SDL_Rect r=shifted(press.bounds);
+-            const bool held=down(press.key);
+-            const SDL_Rect dome{r.x+2,r.y+1,r.w-4,r.h-2};
+-            paintSilverKey(canvas,dome,dome.h*0.5f,held,press.icon,1,keys,false);
+-            const float cx=dome.x+dome.w*0.5f,cy=dome.y+dome.h*0.5f+(held?0.7f:0);
+-            canvas.paint(cx-4,cy-4,cx+4,cy+4,[&](float x,float y) {return canvas.edge(std::hypot(x-cx,y-cy)-1.8f);},
+-                         [&](float,float,Rgb) {return held ? glow : ink;});
++            canvas.paint(wheel.x,wheel.y,wheel.x+wheel.w,wheel.y+wheel.h,
++                [&](float x,float y) {return canvas.edge(std::fabs(d(x,y)+0.8f)-0.4f)*0.65f;},
++                [](float,float,Rgb) {return Rgb{55,59,51};});
+         }
+         if(back) {
+             const SDL_Rect r=shifted(back->bounds);
+@@ -1377,6 +1348,7 @@
+     // The canvas is in strip units, scale/unit device pixels each; the side tab widens it.
+     const int u=profile.unit;
+     Canvas canvas(deviceControlsWidth(profile,width,view)*u,deviceControlsUnits(profile,view),scale/u);
++    canvas.originX=deviceScreenLeft(profile,view)*u;
+     switch(profile.style) {
+         case DeviceControlStyle::e2: paintE2Controls(canvas,profile,width*u,pressed);break;
+         case DeviceControlStyle::zire72: paintZire72Controls(canvas,profile,width*u,pressed);break;
+@@ -1392,6 +1364,24 @@
+     }
+ }
+ 
++void drawDeviceSidebar(SDL_Renderer* renderer, const DeviceControlProfile& profile,
++                       int screenWidth, int screenHeight, float scale, DeviceKeyMask pressed) {
++    const int left=deviceScreenLeft(profile);
++    if(!left)return;
++    Canvas canvas(left*profile.unit,screenHeight*profile.unit,scale/profile.unit);
++    // Match the LCD's integer left edge at fractional scales.
++    canvas.w=int(left*scale);
++    canvas.pixels.resize(size_t(canvas.w)*canvas.h);
++    canvas.originX=left*profile.unit;
++    canvas.originY=screenHeight*profile.unit;
++    paintTg50Controls(canvas,profile,screenWidth*profile.unit,pressed,{},screenHeight*profile.unit);
++    if(auto* texture=canvasTexture(renderer,canvas)) {
++        const SDL_Rect dest{0,0,canvas.w,canvas.h};
++        SDL_RenderCopy(renderer,texture,nullptr,&dest);
++        SDL_DestroyTexture(texture);
++    }
++}
++
+ SDL_Texture* createDeviceSilkscreen(SDL_Renderer* renderer, const DeviceSilkscreen& silkscreen, float scale) {
+     if(!silkscreen.count)return nullptr;
+     Canvas canvas(silkscreen.width,silkscreen.height,scale/silkscreen.unit);
+--- a/src/uarm/native/SdlRenderer.cpp
++++ b/src/uarm/native/SdlRenderer.cpp
+@@ -196,7 +196,7 @@
+     DrawSilkscreen();
+ 
+     if (frameTextureValid && lcdEnabled) {
+-        SDL_Rect dest = {.x = 0,
++        SDL_Rect dest = {.x = int(scale * deviceScreenLeft(deviceControls(deviceType))),
+                          .y = 0,
+                          .w = int(scale * displayConfiguration.width),
+                          .h = int(scale * displayConfiguration.height)};
+@@ -221,7 +221,7 @@
+                 break;
+ 
+             case Rotation::landscape_270:
+-                dest.x = int(scale * (displayConfiguration.height +
++                dest.x += int(scale * (displayConfiguration.height +
+                                   displayConfiguration.graffitiHeight - displayConfiguration.width));
+                 dest.y = int(scale * displayConfiguration.width);
+ 
+@@ -245,6 +245,7 @@
+     const int screenHeight=landscape ? displayConfiguration.width : displayConfiguration.height+displayConfiguration.graffitiHeight;
+     const auto& controls=deviceControls(deviceType);
+     if(controls.count) {
++        drawDeviceSidebar(renderer,controls,screenWidth,screenHeight,scale,buttons);
+         if(!controlsTexture)
+             controlsTexture=SDL_CreateTexture(renderer,SDL_PIXELFORMAT_ABGR8888,
+                 SDL_TEXTUREACCESS_TARGET,int(deviceControlsWidth(controls,screenWidth)*artworkScale),int(deviceControlsHeight(controls)*artworkScale));
+@@ -279,7 +280,7 @@
+     SDL_RenderClear(renderer);
+     const bool landscape = rotation == Rotation::landscape_90 || rotation == Rotation::landscape_270;
+     const int screenHeight = displayConfiguration.height + displayConfiguration.graffitiHeight;
+-    const SDL_Rect screen{0, 0, landscape ? screenHeight : displayConfiguration.width,
++    const SDL_Rect screen{deviceScreenLeft(deviceControls(deviceType)), 0, landscape ? screenHeight : displayConfiguration.width,
+                           landscape ? displayConfiguration.width : screenHeight};
+     const uint8_t panel = lcdEnabled ? 0xff : 0;
+     SDL_SetRenderDrawColor(renderer, panel, panel, panel, 0xff);
+--- a/src/uarm/native/SdlEventHandler.cpp
++++ b/src/uarm/native/SdlEventHandler.cpp
+@@ -244,7 +244,8 @@
+     return rotation==Rotation::landscape_90 || rotation==Rotation::landscape_270 ? width : height;
+ }
+ bool SdlEventHandler::OnScreen(int x,int y) const {
+-    return x>=0 && y>=0 && x<scale*ScreenWidth() && y<scale*ScreenHeight();
++    const int left=int(scale*deviceScreenLeft(controls));
++    return x>=left && y>=0 && x<left+int(scale*ScreenWidth()) && y<int(scale*ScreenHeight());
+ }
+ void SdlEventHandler::ReleasePointer() {
+     if (pointerKey) {
+@@ -263,7 +264,7 @@
+     Finger* finger = nullptr;
+     for (auto& item : fingers)
+         if (item.active && item.touch == event.touchId && item.id == event.fingerId) finger = &item;
+-    int windowWidth = int(scale * ScreenWidth());
++    int windowWidth = int(scale * deviceControlsWidth(controls,ScreenWidth()));
+     int windowHeight = int(scale * (ScreenHeight() + deviceControlsHeight(controls)));
+     if (auto* window = SDL_GetWindowFromID(event.windowID)) SDL_GetWindowSize(window, &windowWidth, &windowHeight);
+     int x = int(std::floor(event.x * windowWidth)), y = int(std::floor(event.y * windowHeight));
+@@ -330,6 +331,7 @@
+ 
+ // Map pixel centres before truncation so fractional scales keep taps on the drawn pixel.
+ int SdlEventHandler::RotateX(int x, int y) {
++    x-=int(scale*deviceScreenLeft(controls));
+     switch (rotation) {
+         case Rotation::landscape_90:
+             return int((scale * width - 0.5f - y) / scale);
+@@ -346,6 +348,7 @@
+ }
+ 
+ int SdlEventHandler::RotateY(int x, int y) {
++    x-=int(scale*deviceScreenLeft(controls));
+     switch (rotation) {
+         case Rotation::landscape_90:
+             return int((x + 0.5f) / scale);

@@ -195,7 +195,7 @@ SDHC/SDXC, arbitrary high-speed modes or an SDIO Wi-Fi card.
 ## Computer keyboard
 
 Check **Attach Palm infrared keyboard** in the desktop launcher to connect the
-host keyboard as a Palm Universal Wireless Keyboard (3169WW) on the TX, E2 or Zire 72.
+host keyboard as a Palm Universal Wireless Keyboard (3169WW) on the TX, E2, Zire 72 or TG50.
 Install its Palm OS driver separately, reset the Palm if installation requests
 it, then open
 **Keyboard** on the Palm and turn its status **ON**. The 1.13 driver is available
@@ -220,8 +220,8 @@ driver enables the infrared port. Attachment state and in-flight packets persist
 with the session. Host focus loss, detachment and session startup release held
 keys so modifiers do not remain stuck after switching windows or resuming.
 
-The model sends press/release packets to the PXA270/PXA255 STUART at 9600 baud, 8N2,
-with guest-time byte spacing. The E2 Palm 1.13 driver configures 8N1 reception;
+The model sends press/release packets to the PXA270/PXA255 STUART or the TG50’s PXA250 FFUART at 9600 baud, 8N2,
+with guest-time byte spacing. The E2 and TG50 Palm 1.13 drivers configure 8N1 reception;
 the accessory's extra stop time is idle receive time. This implements the keyboard's UART byte protocol,
 not optical pulses, IrLAP beaming or Bluetooth. The packet format and scan codes
 are documented in the author's [p1keyboard protocol notes](https://github.com/arpruss/p1keyboard/blob/master/p1notes.txt).
@@ -230,7 +230,7 @@ timeout follow chapter 10 of the
 [Intel PXA27x manual](https://support.eurotech-inc.com/developers/datasheets/PXA270_DeveloperManual.pdf).
 
 `make test-keyboard` checks packet framing, timing, overflow/release handling,
-partial-packet restore, UART reception on both boards and SDL focus handling.
+partial-packet restore, UART reception on the supported boards and SDL focus handling.
 An optional SDK probe checks the real Palm driver:
 
 ```sh
@@ -620,15 +620,38 @@ active-low GPIO35, as defined in the [Linux E2 board header](https://github.com/
 ## Sony CLIÉ TG50
 
 The TG50 has a built-in keyboard, scroll rocker, jog wheel, Home, Back and Hold.
-Its keyboard is separate from the external infrared keyboard accessory. Ordinary
-infrared beaming uses the same peer relay as the other models.
+The external Palm infrared keyboard also works with the 1.13 driver. Detach it
+before ordinary infrared beaming, which uses the same peer relay as the other models.
 
-System/alarm beeps and Sony Voice Recorder mono 22,050 Hz SP playback work,
-including normal mute and saved-session continuation. Standard Palm SndStream,
-stereo Sony playback, live 8 kHz audio, microphone input and low-latency audio
-remain unqualified. Classic 128 MB Memory Stick storage supports card images,
+System/alarm beeps and Sony Voice Recorder mono/stereo 8 kHz and mono 22,050 Hz
+playback work, including normal mute and saved-session continuation. Standard
+Palm SndStream and low-latency audio remain unavailable.
+
+Microphone is off at each start. Turn it on in the running machine's Device controls;
+Android asks for recording permission, then arms it when you return to the device.
+A saved preference never arms capture. Save, file work, Stop, reset, sleep, state
+replacement and Android Activity pause turn it off. Hiding or minimising the desktop
+device window also turns it off; switching focus to the launcher controls keeps it on.
+Returning to the device needs another explicit arm. Muting Sound keeps capture on.
+
+Raw serial uses a PTY or TCP endpoint on desktop and the normal serial relay on Android.
+Original Serial Manager byte transfers work at 9600, 57600 and 115200 baud. Sony reports
+CTS but no DSR. Original serial sleep/wake, serial HotSync and physical RS-232
+remain unqualified. The synchronous receive probe did not enter sleep; a separate
+completed-probe sleep attempt faulted in PACE before reaching sleep, including
+with serial detached.
+
+Classic 128 MB Memory Stick storage supports card images,
 Files and applications in Sony Launcher's Card category; see
 [Memory Stick storage](memory-stick.md). Memory Stick Pro, MagicGate, Memory Stick
-audio, USB HotSync, Bluetooth, raw serial, the external infrared keyboard and
-high-power remote-control infrared remain unavailable.
-USB needs further reserved-register and endpoint DMA work before HotSync can run.
+audio, USB HotSync and high-power remote-control infrared
+remain unavailable.
+USB HotSync remains blocked by the original reserved-register access.
+
+TG50 Bluetooth is an experimental opt-in [virtual controller endpoint](bluetooth-provider.md#sony-clié-tg50).
+Original discovery, Memo sending and PIN/trusted-device setup have virtual peer
+coverage. Original Exchange Manager receives an exact 4096-byte object on native
+desktop; an interrupted object is not delivered and a retry after rearming
+Preferences passes. Automatic recovery, other profiles, Android payload transfers
+and live saved-link continuation remain unqualified. It starts off for each
+running machine.

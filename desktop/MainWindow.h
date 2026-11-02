@@ -104,7 +104,7 @@ class MainWindow : public QMainWindow {
     QList<QWidget*> runningButtons;
     QAction* importAction;
     QPushButton *sdCreate, *sdImport, *sdEject, *sdReinsert, *sdExport, *sdExchange, *sdRetry;
-    QCheckBox *soundToggle, *holdToggle, *cardReadOnly;
+    QCheckBox *microphoneToggle, *soundToggle, *holdToggle, *cardReadOnly;
     bool protectionKnown{false};
     QLabel* holdLabel;
     bool holdKnown{false}, holdOn{false};
@@ -119,6 +119,8 @@ class MainWindow : public QMainWindow {
     bool cardPresent{false}, cardInserted{false}, sdKnown{false};
     // The running device selects the available peripheral controls.
     frondFirmware::Device runningDevice{frondFirmware::Device::tx};
+    bool microphoneArmed{false};
+    QLabel* microphoneState;
     QString networkTip, keyboardTip, serialTip, usbTip, irdaTip;
     QWidget *home, *runningPage, *sessionBar = nullptr;
     bool startupHandled{false}, busy{false}, stopping{false}, closeAfterStop{false}, allowClose{false};

@@ -6,6 +6,8 @@
 #include "pxa255_UDC.cpp"
 static ArmMemAccessF mmio;
 static bool interrupt;
+void pxaDmaExternalReq(PxaDma*,uint_fast8_t,bool){}
+void pxaDmaSetPeripheral(PxaDma*,uint_fast8_t,const PxaDmaPeripheral*){}
 extern "C" void uarmAbort(){std::abort();}
 bool memRegionAdd(ArmMem*,uint32_t base,uint32_t size,ArmMemAccessF fn,void*){
     assert(base==0x40600000 && size==0x1000);mmio=fn;return true;

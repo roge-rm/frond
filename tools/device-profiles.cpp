@@ -67,6 +67,7 @@ int main() {
                   << ",\"camera\":" << (f.camera ? "true" : "false")
                   << ",\"fast_audio_md5\":" << std::quoted(f.fastAudioNorMd5)
                   << ",\"network\":" << (p.capabilities.network ? "true" : "false")
+                  << ",\"microphone\":" << (p.capabilities.microphone ? "true" : "false")
                   << ",\"serial\":" << (p.capabilities.serial ? "true" : "false")
                   << ",\"keyboard\":" << (p.capabilities.keyboard ? "true" : "false")
                   << ",\"usb\":" << (p.capabilities.usb ? "true" : "false")
