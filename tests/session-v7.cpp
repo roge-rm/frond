@@ -1,5 +1,8 @@
+#include "CardSave.h"
 #include "SessionIo.h"
+#include "sdcard.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
@@ -209,15 +212,23 @@ static void LegacyV6() {
     assert(frondMachine::readBytes(folder / frondMachine::sdSibling, extracted));
     assert(frondSdFile::decode(extracted.data(), extracted.size(), decoded) && decoded == payload);
 
+    // Opening the lone file never reuses or overwrites the folder beside it.
+    fs::path existingSession;
+    assert(frondMachine::sessionFile(folder, existingSession));
+    const auto existingBytes = ReadAll(existingSession);
+    WriteFile(folder / "notes.txt", {'k', 'e', 'e', 'p'});
+    const auto loneBytes = ReadAll(lone);
     frondSession::Contents loaded;
     fs::path got;
     assert(frondSession::loadPath(lone, loaded, got));
-    assert(got == folder);
+    assert(got == dir / "old 2");
+    assert(ReadAll(existingSession) == existingBytes && ReadAll(folder / "notes.txt").size() == 4);
+    assert(ReadAll(lone) == loneBytes);
     assert(loaded.nor == std::vector<uint8_t>(nor, nor + sizeof(nor)));
     assert(loaded.memory == std::vector<uint8_t>(ram, ram + sizeof(ram)));
     assert(loaded.media.size() == 1 && loaded.media[0].kind == frondMachine::kindSd);
     fs::path session;
-    assert(frondMachine::sessionFile(folder, session));
+    assert(frondMachine::sessionFile(got, session));
     auto v7 = ReadAll(session);
     assert(v7[4] == 7);
     SessionFile5 v7file;
@@ -430,7 +441,9 @@ static void LoneV6Bin() {
                                             withSd.GetSerializedSessionSize()));
     frondSession::Contents loadedSd;
     assert(frondSession::loadPath(lone, loadedSd, got));
+    assert(got == dir / "synthetic 2");
     assert(loadedSd.media.size() == 1 && fs::is_regular_file(got / frondMachine::sdSibling));
+    assert(!fs::exists(dir / "synthetic" / frondMachine::sdSibling));
     WriteFile(lone, std::vector<uint8_t>(data, data + size));
     frondSession::Contents loadedAgain;
     assert(frondSession::loadPath(lone, loadedAgain, got));
@@ -455,6 +468,195 @@ static void LoneV6Bin() {
     fs::remove_all(dir);
 }
 
+static std::vector<uint8_t> SdSector(uint8_t v) { return std::vector<uint8_t>(SD_SECTOR_SIZE, v); }
+
+static std::vector<uint8_t> SidecarPayload(const fs::path& path) {
+    std::vector<uint8_t> file, payload;
+    assert(frondMachine::readBytes(path, file));
+    assert(frondSdFile::decode(file.data(), file.size(), payload));
+    return payload;
+}
+
+static bool HasGenerations(const fs::path& dir) {
+    for (const auto& entry : fs::directory_iterator(dir))
+        if (entry.path().filename().string().rfind(".gen-", 0) == 0) return true;
+    return false;
+}
+
+// Runs the card part of frondNative::saveMachine against `folder`.
+static bool SaveCard(const fs::path& folder) {
+    auto contents = TinyContents();
+    std::vector<fs::path> temps;
+    if (sdCardInitialized()) {
+        frondMachine::Media media;
+        fs::path temp;
+        if (!frondNative::publishSd(folder, media, true, temp)) return false;
+        temps.push_back(temp);
+        contents.media.push_back(media);
+    }
+    if (!frondSession::saveFolderFromTemps(folder, contents, temps)) return false;
+    frondNative::afterSdPublish(folder);
+    return true;
+}
+
+static void SavesKeepCardsConsistent() {
+    const auto dir = FixtureDir();
+    const auto machine = dir / "machine";
+    const auto other = dir / "other";
+    fs::create_directories(machine);
+    fs::create_directories(other);
+    const size_t sectors = 8;
+    std::vector<uint8_t> base(sectors * SD_SECTOR_SIZE, 0xa5);
+    std::vector<uint8_t> sdFile;
+    assert(frondSdFile::encode(base, sdFile));
+    WriteFile(machine / frondMachine::sdSibling, sdFile);
+    // Generations of a card this sidecar replaced: a v1 root and a page of other bytes.
+    {
+        auto old = FileCardBacking::Open(machine / frondMachine::sdSibling, base.size(),
+                                         frondSdFile::headerBytes);
+        assert(old);
+        const auto stale = SdSector(0xee);
+        assert(old->Write(0, stale.size(), stale.data()) && old->Commit());
+    }
+    WriteFile(machine / frondMachine::sdSibling, sdFile);  // the replacement card, same size
+    {
+        std::vector<uint8_t> v1(32, 0);
+        std::memcpy(v1.data(), "FRONDRT\0", 8);
+        v1[8] = 1;
+        v1[12] = 1;
+        WriteFile(machine / ".gen-sd.frondsd-root", v1);
+    }
+    assert(HasGenerations(machine));
+    auto contents = TinyContents();
+    contents.media.push_back(TinySd(base.size()));
+    assert(frondSession::saveFolder(machine, contents));
+
+    // The replaced card's pages are never laid over the new one, and are discarded.
+    assert(sdCardInitializeFromFile((machine / frondMachine::sdSibling).c_str(), base.size(),
+                                    frondSdFile::headerBytes, "card-one"));
+    std::vector<uint8_t> got(SD_SECTOR_SIZE);
+    assert(sdCardRead(0, got.data()) && got == SdSector(0xa5));
+    assert(!HasGenerations(machine));
+
+    const auto written = SdSector(0x42);
+    assert(sdCardWrite(0, written.data()));
+
+    // Saving elsewhere leaves this folder's card and root alone.
+    assert(SaveCard(other));
+    assert(SidecarPayload(other / frondMachine::sdSibling)[0] == 0x42);
+    assert(SidecarPayload(machine / frondMachine::sdSibling) == base);
+    assert(!fs::exists(machine / ".gen-sd.frondsd-root"));
+
+    // A failed save leaves the old .frond and card files as a pair.
+    fs::path session;
+    assert(frondMachine::sessionFile(machine, session));
+    const auto oldFrond = ReadAll(session);
+    fs::rename(session, dir / "kept.frond");
+    fs::create_directories(session);
+    assert(!SaveCard(machine));
+    fs::remove(session);
+    fs::rename(dir / "kept.frond", session);
+    assert(ReadAll(session) == oldFrond);
+    assert(SidecarPayload(machine / frondMachine::sdSibling) == base);
+    assert(!fs::exists(machine / ".gen-sd.frondsd-root"));
+    assert(sdCardRead(0, got.data()) && got == written);
+
+    // A save in place moves the live card onto the new sidecar and leaves no generations.
+    assert(SaveCard(machine));
+    assert(SidecarPayload(machine / frondMachine::sdSibling)[0] == 0x42);
+    assert(sdCardBackedBy((machine / frondMachine::sdSibling).c_str()));
+    assert(!HasGenerations(machine));
+    assert(sdCardRead(0, got.data()) && got == written);
+    const auto later = SdSector(0x43);
+    assert(sdCardWrite(1, later.data()));
+    assert(SaveCard(machine));
+    {
+        frondSession::Contents loaded;
+        fs::path folder;
+        assert(frondSession::loadPath(machine, loaded, folder));
+        const auto payload = SidecarPayload(machine / frondMachine::sdSibling);
+        assert(payload[0] == 0x42 && payload[SD_SECTOR_SIZE] == 0x43);
+    }
+
+    // A replaced card writes a fresh sidecar; the old card's generations go.
+    sdCardInitialize(sectors, "card-two");
+    assert(SaveCard(machine));
+    assert(SidecarPayload(machine / frondMachine::sdSibling) == std::vector<uint8_t>(base.size(), 0));
+    assert(!HasGenerations(machine));
+
+    // After an unmount the sidecar goes too, so the folder still loads.
+    sdCardReset();
+    assert(SaveCard(machine));
+    assert(!fs::exists(machine / frondMachine::sdSibling));
+    {
+        frondSession::Contents loaded;
+        fs::path folder;
+        assert(frondSession::loadPath(machine, loaded, folder));
+        assert(loaded.media.empty());
+    }
+    fs::remove_all(dir);
+}
+
+static std::vector<std::string> Listing(const fs::path& dir) {
+    std::vector<std::string> names;
+    for (const auto& entry : fs::recursive_directory_iterator(dir)) names.push_back(entry.path().string());
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
+// A session from outside the sessions folder runs from a work folder and leaves its own alone.
+static void OutsideRunsFromWorkFolder() {
+    const auto dir = FixtureDir();
+    const auto outside = dir / "outside";
+    const auto trip = outside / "Trip";
+    fs::create_directories(trip);
+    std::vector<uint8_t> sdFile;
+    assert(frondSdFile::encode(TinyPayload(), sdFile));
+    WriteFile(trip / frondMachine::sdSibling, sdFile);
+    auto contents = TinyContents();
+    contents.media.push_back(TinySd(TinyPayload().size()));
+    assert(frondSession::saveFolder(trip, contents));
+
+    uint8_t nor[] = {1, 2, 3}, ram[] = {4, 5, 6, 7}, state[] = {8, 9};
+    const auto card = TinyPayload();
+    SessionFile5 v6;
+    v6.SetDeviceName("palm-tx").SetRamSize(32u << 20).SetDisplayMode(1)
+        .SetNor(sizeof(nor), nor).SetMemory(sizeof(ram), ram).SetSavestate(sizeof(state), state)
+        .SetSd(card.size(), card.data());
+    assert(v6.SerializeAs(6));
+    const auto* data = static_cast<const uint8_t*>(v6.GetSerializedSession());
+    WriteFile(outside / "old.frond", std::vector<uint8_t>(data, data + v6.GetSerializedSessionSize()));
+    const auto before = Listing(outside);
+    std::vector<std::vector<uint8_t>> bytes;
+    for (const auto& name : before)
+        if (fs::is_regular_file(name)) bytes.push_back(ReadAll(name));
+
+    const auto work = dir / "sessions" / "Palm TX";
+    fs::create_directories(work);
+    frondSession::Contents loaded;
+    fs::path folder;
+    assert(frondSession::loadPath(trip, loaded, folder, frondSession::msPhysicalBytes, work));
+    assert(folder == work && loaded.media.size() == 1);
+    assert(SidecarPayload(work / frondMachine::sdSibling) == TinyPayload());
+
+    const auto work2 = dir / "sessions" / "Palm TX 2";
+    fs::create_directories(work2);
+    assert(frondSession::loadPath(outside / "old.frond", loaded, folder, frondSession::msPhysicalBytes, work2));
+    assert(folder == work2 && loaded.media.size() == 1);
+    assert(SidecarPayload(work2 / frondMachine::sdSibling) == TinyPayload());
+
+    // The source folder and the lone file are byte for byte as they were, with nothing added.
+    assert(Listing(outside) == before);
+    size_t i = 0;
+    for (const auto& name : before)
+        if (fs::is_regular_file(name)) assert(ReadAll(name) == bytes[i++]);
+
+    // Its own folder as the work folder loads in place.
+    assert(frondSession::loadPath(work2, loaded, folder, frondSession::msPhysicalBytes, work2));
+    assert(folder == work2);
+    fs::remove_all(dir);
+}
+
 static void NewWritesAreV7() {
     uint8_t nor[] = {1};
     SessionFile5 session;
@@ -474,6 +676,8 @@ int main() {
     LoneV6Bin();
     MsExtractStub();
     IdentityAndFailedPublish();
+    SavesKeepCardsConsistent();
+    OutsideRunsFromWorkFolder();
     NewWritesAreV7();
     std::puts("Session v7 and streamed v6 extraction checks passed");
 }

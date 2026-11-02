@@ -29,7 +29,7 @@ test-session-v7: prepare
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
 		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/common \
 		tests/session-v7.cpp build/source/src/common/session/session_file5.cpp \
-		build/source/src/common/md5.cpp build/miniz-session-v7.o \
+		build/source/src/common/md5.cpp build/source/src/uarm/uarm/sdcard.cpp build/miniz-session-v7.o \
 		-o build/test-session-v7
 	./build/test-session-v7
 

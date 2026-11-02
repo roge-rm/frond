@@ -259,6 +259,69 @@ static void IndexReadErrorFails() {
     assert(buf[0] == 0x3c);
 }
 
+// Generations only apply to the file and card they were written for.
+static void GenerationsFollowCard() {
+    const auto dir = GenDir();
+    const auto path = dir / "card.bin";
+    WriteAll(path, Filled(2048, 0xa5));
+    auto open = [&](const std::string& identity) {
+        FileCardOptions opt;
+        opt.pageSize = 512;
+        opt.cacheBytes = 512;
+        opt.identity = identity;
+        return FileCardBacking::Open(path, 2048, 0, opt);
+    };
+    auto hasGenerations = [&] {
+        for (const auto& entry : fs::directory_iterator(dir))
+            if (entry.path().filename().string().rfind(".gen-", 0) == 0) return true;
+        return false;
+    };
+    const auto poke = Filled(512, 0x11);
+    {
+        auto card = open("one");
+        assert(card->Write(0, 512, poke.data()) && card->Commit());
+    }
+    {
+        auto card = open("one");
+        ExpectRange(*card, 0, poke);
+    }
+    {
+        // Another card in the same file: its generations are dropped, not applied.
+        auto card = open("two");
+        ExpectRange(*card, 0, Filled(512, 0xa5));
+        assert(!hasGenerations());
+    }
+    {
+        auto card = open("one");
+        assert(card->Write(0, 512, poke.data()) && card->Commit());
+    }
+    // The file replaced by a new one of the same size and card.
+    const auto replacement = dir / "replacement.bin";
+    WriteAll(replacement, Filled(2048, 0x5a));
+    fs::rename(replacement, path);
+    {
+        auto card = open("one");
+        ExpectRange(*card, 0, Filled(512, 0x5a));
+        assert(!hasGenerations());
+    }
+    // A different size discards instead of refusing the card.
+    {
+        auto card = open("one");
+        assert(card->Write(0, 512, poke.data()) && card->Commit());
+    }
+    const auto bigger = dir / "bigger.bin";
+    WriteAll(bigger, Filled(4096, 0x77));
+    fs::rename(bigger, path);
+    {
+        FileCardOptions opt;
+        opt.pageSize = 512;
+        opt.identity = "one";
+        auto card = FileCardBacking::Open(path, 4096, 0, opt);
+        assert(card);
+        ExpectRange(*card, 0, Filled(512, 0x77));
+    }
+}
+
 void CardBackingGenerations() {
     RamGenerations();
     FileSectorsAndRecords();
@@ -267,4 +330,5 @@ void CardBackingGenerations() {
     FailuresKeepRoot();
     CompactKeepsPin();
     IndexReadErrorFails();
+    GenerationsFollowCard();
 }
