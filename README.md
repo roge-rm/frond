@@ -2,10 +2,10 @@
 
 Frond is a Palm OS emulator for Linux and Android, based on [CloudpilotEmu](https://github.com/cloudpilot-emu/cloudpilot-emu), made for running and developing Palm apps and games.
 
-Currently it emulates the Palm T|X, the Tungsten E2 and the Zire 72, with sound, SD support, networking, saved sessions and more. 
+Currently it emulates the Palm T|X, the Tungsten E2 and the Zire 72, with sound, SD support, networking, saved sessions and more. The Sony CLIÉ TG50 is experimental, with its built-in keyboard, infrared beaming and Memory Stick storage.
 Look below to see the features in more detail. More devices are planned.
 
-To run this you will need to provide a Palm T|X, E2 or Zire 72 device firmware - none are included.
+To run this you will need to provide Palm T|X, E2, Zire 72 or Sony CLIÉ TG50 device firmware - none are included.
 
 Let me know what works, what doesn't and what you'd like in #frond [on my discord](https://discord.gg/9Wun47jGC6).. or open an issue here.
 
@@ -46,7 +46,7 @@ make -j4
 ```
 
 `make deb` builds a Debian package instead (also needs `dpkg-dev` and `binutils`), which
-installs with `sudo apt install ./out/frond_0.7.0-1_amd64.deb`. Neither the packages nor
+installs with `sudo apt install ./out/frond_0.8.0-1_amd64.deb`. Neither the packages nor
 the APK include firmware or Palm apps.
 
 ## Firmware
@@ -56,6 +56,7 @@ the APK include firmware or Palm apps.
 | Palm TX | 16 MiB | 132 MiB raw dump, with spare bytes |
 | Tungsten E2 | 8 MiB | 34,603,008 bytes raw dump, optional |
 | Zire 72 | 14,942,208 bytes | none |
+| Sony CLIÉ TG50 | 13,041,664 bytes | none |
 
 Frond detects the device from the NOR and reads the files without changing them. On
 Linux use **File → Firmware…** or click **Add device**; on Android import them when you
@@ -72,6 +73,9 @@ so a crash loses what changed since the last save. Sessions hold your firmware a
 personal data, so keep them private. **Hard reset** in the session controls erases the Palm
 (**Save first** saves the session before); the TX and E2 ask first, press up to erase; the Zire erases straight away.
 
+Each machine keeps its own display, smoothing and sound settings. Set them when adding
+a machine, or use **Edit settings** while it is stopped.
+
 **Screen.** On Linux choose a scale from 1× to 2× in 0.25 steps before starting; Frond
 defaults to the largest that fits. LCD pixels stay sharp, and **Smooth LCD scaling**
 softens them if you prefer. On Android the screen fits the phone, in whole steps or
@@ -81,30 +85,42 @@ filling it, and follows the phone or stays in portrait or landscape.
 tapped. On a keyboard the arrow keys work the five-way, Enter selects and F1 to F4 are
 the app buttons; **Help → Hardware Keyboard Controls** lists them all. On Android game
 controllers press the Palm's buttons, and you can change which button does what in
-Settings. Each device can also have an emulated Palm infrared keyboard for typing,
-which needs Palm's keyboard driver.
+Settings. The TG50 has its built-in keyboard, jog wheel, Home, Back and Hold controls.
+Hold locks the controls and turns off its panel while audio can keep playing. The
+other models can use an emulated Palm infrared keyboard for typing, which needs
+Palm's keyboard driver.
 
 **Apps and SD cards.** Install PRC and PDB files with **File → Install Application**
 on Linux, or **Install application** on the Peripherals screen on Android. Frond makes and imports SD card images and
 copies files between your computer or phone and an ejected card (**SD Card →
 Exchange Files…** on Linux). Close files on the Palm before ejecting.
 
+The TG50 uses a classic 128 MB Memory Stick, with card image import/export and
+**Files** for folders and file transfers. File names use printable ASCII and transfers
+are limited to 8 MiB each. Sony Launcher can run applications from its Card category.
+See [Memory Stick storage](doc/memory-stick.md) for the controls and image format.
+
 **Peripherals.** The E2's and Zire 72's networking and serial stay greyed out, and so does the Zire's camera.
 
-| | T\|X | E2 | Zire 72 |
-|---|---|---|---|
-| Virtual Wi-Fi, onto the internet through your computer or phone, no adapter needed | yes | | |
-| Cradle serial port, to a PTY or TCP port for terminal programs and pilot-link | yes | | |
-| USB HotSync over a PTY or TCP port | yes | yes | yes |
-| [Infrared beaming](doc/infrared.md) between Frond instances | yes | yes | yes |
-| [Virtual Bluetooth](doc/bluetooth-provider.md), with a separately started local provider, off by default | yes | yes | yes |
+| | T\|X | E2 | Zire 72 | TG50 |
+|---|---|---|---|---|
+| Virtual Wi-Fi, onto the internet through your computer or phone, no adapter needed | yes | | | |
+| Cradle serial port, to a PTY or TCP port for terminal programs and pilot-link | yes | | | |
+| USB HotSync over a PTY or TCP port | yes | yes | yes | |
+| [Infrared beaming](doc/infrared.md) between Frond instances | yes | yes | yes | yes |
+| [Virtual Bluetooth](doc/bluetooth-provider.md), with a separately started local provider, off by default | yes | yes | yes | |
 
 The infrared keyboard and beaming share the infrared port, so detach the keyboard
 before turning beaming on. On Android infrared, Bluetooth, serial, USB HotSync and the
 gdb server go over the network, to another Frond or to the desktop tools
 `tools/link-irda.py`, `tools/link-bluetooth.py` and `tools/link-pty.py` (for pilot-link).
 
-**Low-latency audio.** Off by default on the T|X and E2; the Zire 72 doesn't have it yet. It plays one 44.1 kHz stereo
+The TG50 plays system/alarm beeps and Sony Voice Recorder 22,050 Hz mono SP audio.
+Standard Palm SndStream, stereo Sony playback, live 8 kHz audio and microphone input
+remain unqualified. USB HotSync, Bluetooth, raw serial, the external infrared keyboard,
+remote-control infrared, Memory Stick Pro, MagicGate and Memory Stick audio stay disabled.
+
+**Low-latency audio.** Off by default on the T|X and E2; the Zire 72 and TG50 don't have it yet. It plays one 44.1 kHz stereo
 stream with less delay, for music apps like SunVox, and goes back to the normal path
 when the computer or phone can't keep up. See the [audio limits](doc/fast-audio.md).
 
