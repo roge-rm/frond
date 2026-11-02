@@ -464,6 +464,7 @@ MainWindow::MainWindow(const QString& core) : core(core) {
         const bool stoppedTg50 = runningDevice == frondFirmware::deviceFromId("sony-clie-tg50");
         busy = false; stopping = false; hardResetAfterSave = false; cardPresent = cardInserted = false; runningDevice = frondFirmware::Device::tx;
         copyLock.reset(); savingPath.clear();
+        frondSessions::removeStaging(copyStaging); copyStaging.clear(); pendingCopy.clear();
         sdKnown = protectionKnown = false; showSerial({}); loadSerialSettings(); showUsb({}); loadUsbSettings(); showIrda({}); loadIrdaSettings(); showBluetooth({}); loadBluetoothSettings(); if (stoppedTg50) bluetooth->setChecked(false); sessionLock.reset(); forceButton->hide(); refreshSessions();
         if (closeAfterStop) { allowClose = true; close(); }
         else statusBar()->showMessage(tr("Stopped."));
@@ -484,7 +485,7 @@ MainWindow::MainWindow(const QString& core) : core(core) {
         if (!ok && exchangeStage != ExchangeStage::None) { exchangeResult(false, message); return; }
         if (!ok) {
             if (code == "cancelled" && !stopping) { statusBar()->showMessage(tr("Cancelled.")); return; }
-            if (command == "save") { copyLock.reset(); pendingCopy.clear(); }
+            if (command == "save") { copyLock.reset(); pendingCopy.clear(); frondSessions::removeStaging(copyStaging); copyStaging.clear(); }
             hardResetAfterSave = false;
             log->appendPlainText(command + ": " + message);
             if (command == "hold-state" || command == "hold") { holdKnown = false; refresh(); }
@@ -587,21 +588,14 @@ MainWindow::MainWindow(const QString& core) : core(core) {
             if (savedWorkingCopy) {
                 settings.setValue("lastSession", sessionPath); settings.sync();
                 QFile::remove(frondSessions::markerPath(sessionPath));
-                if (!pendingCopy.isEmpty()) {
-                    const auto name = QFileInfo(pendingCopy).fileName();
-                    const auto error = frondSessions::copyPackable(frondSessions::machineDirOf(sessionPath),
-                                                                  pendingCopy, name);
-                    if (error.isEmpty()) {
-                        const auto destFrond = pendingCopy + '/' + name + ".frond";
-                        if (const auto prefsError = frondSessions::writePreferences(destFrond, runningPreferences);
-                            !prefsError.isEmpty()) failure(prefsError);
-                    } else failure(error);
-                    pendingCopy.clear();
-                }
                 refreshSessions();
             }
             if (!savedWorkingCopy) {
-                const auto error = frondSessions::writePreferences(savingPath, runningPreferences);
+                auto error = frondSessions::writePreferences(savingPath, runningPreferences);
+                // Save a Copy wrote into a staging folder; it replaces the destination only now.
+                if (error.isEmpty() && !pendingCopy.isEmpty()) error = frondSessions::publishStaged(copyStaging, pendingCopy);
+                if (!pendingCopy.isEmpty()) frondSessions::removeStaging(copyStaging);
+                pendingCopy.clear(); copyStaging.clear();
                 if (!error.isEmpty()) failure(error);
             }
             copyLock.reset();
@@ -850,6 +844,7 @@ void MainWindow::exportSession(const QString& path) {
     if (!info.saved) return;
     const auto target = outputFile(tr("Export"), tr("Frond sessions (*.frond)"), info.name + ".frond");
     if (target.isEmpty()) return;
+    if (!confirmReplace(frondSessions::exportDestDir(target))) return;
     const auto error = frondSessions::exportFile(info, target);
     if (!error.isEmpty()) failure(error);
     else statusBar()->showMessage(tr("Session exported to %1.").arg(frondSessions::exportDestDir(target)));
@@ -914,8 +909,8 @@ void MainWindow::addDevice() {
     refreshSessions(path);
     startSession(infoFor(path));
 }
-// The command line and resume: a session file anywhere. One outside the managed folder is
-// opened as it is and saved as a new session in the folder.
+// The command line and resume: a session file anywhere. One outside the managed folder runs
+// from a new folder in it and is saved there.
 void MainWindow::openSession(const QString& path, bool launchNow) {
     startupHandled = true;
     if (client.running()) return;
@@ -937,18 +932,23 @@ void MainWindow::openSession(const QString& path, bool launchNow) {
     auto device = frondFirmware::deviceFromId(header.device);
     if (device == frondFirmware::Device::automatic) device = frondFirmware::Device::tx;
     QString target = load;
+    QStringList arguments{load};
     bool reserved = false;
     if (!source.startsWith(managedRoot + '/')) {
-        // The marker holds the new name until the first save, so no other Frond takes it.
+        // The marker holds the new name until the first save, so no other Frond takes it. The core
+        // copies or extracts the cards into that folder and runs from there, so the original
+        // and the folder around it stay as they were.
         const auto name = frondSessions::reserve(managedRoot, frondFirmware::deviceName(device), frondFirmware::deviceId(device));
         if (name.isEmpty()) return failure(tr("Could not create the session storage directory."));
         target = frondSessions::filePath(managedRoot, name);
+        arguments << "--work-folder" << frondSessions::machineDir(managedRoot, name);
         reserved = true;
     }
-    launch(target, {load}, device);
+    launch(target, arguments, device);
     if (reserved && !busy) {
         QFile::remove(frondSessions::markerPath(target));
         QFile::remove(frondSessions::preferencesPath(target));
+        frondSessions::removeMachineFolder(frondSessions::machineDirOf(target));
     }
     refreshSessions();
 }
@@ -1122,11 +1122,33 @@ void MainWindow::save(bool saveAs) {
     if (QFileInfo(dest).canonicalFilePath() == QFileInfo(frondSessions::machineDirOf(sessionPath)).canonicalFilePath() &&
         QFileInfo(dest).exists())
         return failure(tr("That is the session itself."));
-    const auto destFrond = dest + '/' + QFileInfo(dest).fileName() + ".frond";
+    if (!confirmReplace(dest)) return;
+    const auto name = QFileInfo(dest).fileName();
+    const auto destFrond = dest + '/' + name + ".frond";
     copyLock = std::make_unique<QLockFile>(destFrond + ".lock"); copyLock->setStaleLockTime(0);
     if (QFileInfo::exists(dest) && !copyLock->tryLock()) { copyLock.reset(); return failure(tr("This session is open in another Frond.")); }
+    // The core saves the copy into a staging folder; the working session's files stay as they are.
+    copyStaging = frondSessions::makeStaging(dest);
+    if (copyStaging.isEmpty() || !QDir().mkdir(copyStaging + '/' + name)) {
+        frondSessions::removeStaging(copyStaging); copyStaging.clear(); copyLock.reset();
+        return failure(tr("Couldn't save the session."));
+    }
     pendingCopy = dest;
-    savingPath = sessionPath; send("save", sessionPath);
+    savingPath = copyStaging + '/' + name + '/' + name + ".frond";
+    if (!send("save", savingPath)) {
+        frondSessions::removeStaging(copyStaging); copyStaging.clear(); pendingCopy.clear(); savingPath.clear(); copyLock.reset();
+    }
+}
+// False when `dest` can't be written, or is a session the user doesn't want replaced.
+bool MainWindow::confirmReplace(const QString& dest) {
+    bool existing = false;
+    if (const auto error = frondSessions::exportTargetError(dest, &existing); !error.isEmpty()) {
+        failure(error);
+        return false;
+    }
+    if (!existing) return true;
+    return QMessageBox::question(this, tr("Replace"), tr("Replace the session %1?").arg(QFileInfo(dest).fileName()),
+                                 QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) == QMessageBox::Yes;
 }
 bool MainWindow::send(const QString& command, const QString& argument) {
     if (!client.request(command, argument)) return false;

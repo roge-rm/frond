@@ -196,6 +196,85 @@ class SessionStoreTest : public QObject {
         QVERIFY(exportFile(trip, filePath(folder(), "Other")).isEmpty());
         QCOMPARE(readHeader(filePath(folder(), "Other")).device, QString("palm-tx"));
     }
+    // Export and Save a Copy replace only a Frond session, never any other folder.
+    void exportKeepsOtherFolders() {
+        write(filePath(folder(), "Trip"), header(6, "palm-tx"));
+        const auto trip = describe(filePath(folder(), "Trip"));
+        const auto photos = directory.filePath("Photos");
+        write(photos + "/a.jpg", "jpeg");
+        bool existing = true;
+        QVERIFY(!exportTargetError(photos, &existing).isEmpty());
+        QVERIFY(!existing);
+        QVERIFY(!exportFile(trip, directory.filePath("Photos.frond")).isEmpty());
+        QVERIFY(QFileInfo::exists(photos + "/a.jpg"));
+        // A folder that only looks like one: a .frond that isn't a session.
+        const auto fake = directory.filePath("Fake");
+        write(fake + "/Fake.frond", "text");
+        QVERIFY(!exportFile(trip, fake).isEmpty());
+        QVERIFY(QFileInfo::exists(fake + "/Fake.frond"));
+        for (const auto& name : QDir(directory.path()).entryList(QDir::AllEntries | QDir::Hidden | QDir::NoDotAndDotDot))
+            QVERIFY2(!name.contains(".frond.tmp-") && !name.endsWith(".old") && !name.endsWith(".part"), qPrintable(name));
+        // A real session is replaced whole, without its old card.
+        const auto old = directory.filePath("Old");
+        write(old + "/Old.frond", v7WithSd());
+        write(old + "/sd.frondsd", tinyFrondsd());
+        QVERIFY(exportTargetError(old, &existing).isEmpty());
+        QVERIFY(existing);
+        QVERIFY(exportFile(trip, old).isEmpty());
+        QCOMPARE(readHeader(old + "/Old.frond").version, quint32(6));
+        QVERIFY(!QFileInfo::exists(old + "/sd.frondsd"));
+        // Copying into an existing folder drops a card the source doesn't have.
+        write(old + "/sd.frondsd", tinyFrondsd());
+        QVERIFY(copyPackable(machineDirOf(trip.path), old, "Old").isEmpty());
+        QVERIFY(!QFileInfo::exists(old + "/sd.frondsd"));
+        // Save a Copy stages its folder and publishes it the same way.
+        write(old + "/sd.frondsd", tinyFrondsd());
+        const auto staging = makeStaging(old);
+        QVERIFY(!staging.isEmpty());
+        write(staging + "/Old/Old.frond", header(7, "palm-e2"));
+        QVERIFY(publishStaged(staging, old).isEmpty());
+        QCOMPARE(readHeader(old + "/Old.frond").device, QString("palm-e2"));
+        QVERIFY(!QFileInfo::exists(old + "/sd.frondsd"));
+        QVERIFY(!QFileInfo::exists(staging));
+        const auto refused = makeStaging(photos);
+        write(refused + "/Photos/Photos.frond", header(7, "palm-e2"));
+        QVERIFY(!publishStaged(refused, photos).isEmpty());
+        QVERIFY(QFileInfo::exists(photos + "/a.jpg") && !QFileInfo::exists(photos + "/Photos.frond"));
+        removeStaging(refused);
+        QVERIFY(!QFileInfo::exists(refused));
+    }
+    // Rename holds the lock through the move and leaves the session free afterwards.
+    void renameKeepsLock() {
+        write(filePath(folder(), "Trip"), header(6, "palm-tx"));
+        QVERIFY(rename(folder(), describe(filePath(folder(), "Trip")), "Moved").isEmpty());
+        QVERIFY(!inUse(filePath(folder(), "Moved")));
+        QVERIFY(!QFileInfo::exists(filePath(folder(), "Moved") + ".lock"));
+        QVERIFY(!QFileInfo::exists(machineDir(folder(), "Moved") + "/Trip.frond.lock"));
+    }
+    // Card and session temps left by a killed save go once they are old, unless the session is open.
+    void staleTempsRemoved() {
+        write(filePath(folder(), "Trip"), header(6, "palm-tx"));
+        const auto dir = machineDir(folder(), "Trip");
+        const auto old = QDateTime::currentDateTime().addSecs(-3600);
+        for (const auto& name : {".frondsd.tmp-a", ".frondms.tmp-b", ".frond.tmp-c", ".gen-sd.frondsd-tmp-1-2"}) {
+            write(dir + '/' + name, "tmp");
+            QFile file(dir + '/' + name);
+            QVERIFY(file.open(QIODevice::ReadWrite));
+            QVERIFY(file.setFileTime(old, QFileDevice::FileModificationTime));
+        }
+        write(dir + "/.frondsd.tmp-fresh", "tmp");
+        write(dir + "/.gen-sd.frondsd-root", "root");
+        {
+            QLockFile lock(filePath(folder(), "Trip") + ".lock"); QVERIFY(lock.tryLock());
+            list(folder());
+            QVERIFY(QFileInfo::exists(dir + "/.frondsd.tmp-a"));
+        }
+        list(folder());
+        for (const auto& name : {".frondsd.tmp-a", ".frondms.tmp-b", ".frond.tmp-c", ".gen-sd.frondsd-tmp-1-2"})
+            QVERIFY2(!QFileInfo::exists(dir + '/' + name), name);
+        QVERIFY(QFileInfo::exists(dir + "/.frondsd.tmp-fresh"));
+        QVERIFY(QFileInfo::exists(dir + "/.gen-sd.frondsd-root"));
+    }
     void reserving() {
         QCOMPARE(reserve(folder(), "Palm TX", "palm-tx"), QString("Palm TX"));
         QCOMPARE(reserve(folder(), "Palm TX", "palm-tx"), QString("Palm TX 2"));
