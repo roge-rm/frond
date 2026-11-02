@@ -18,6 +18,14 @@ static void write(const QString& path, const QByteArray& data) {
     QVERIFY(file.open(QIODevice::WriteOnly));
     file.write(data);
 }
+// Backdates a file or a folder and everything in it by an hour.
+static void age(const QString& path) {
+    namespace fs = std::filesystem;
+    const auto when = fs::file_time_type::clock::now() - std::chrono::hours(1);
+    if (fs::is_directory(path.toStdString()))
+        for (const auto& entry : fs::recursive_directory_iterator(path.toStdString())) fs::last_write_time(entry.path(), when);
+    fs::last_write_time(path.toStdString(), when);
+}
 static void put32(QByteArray& bytes, quint32 n) {
     for (int i = 0; i < 4; i++) bytes.append(char(n >> (8 * i)));
 }
@@ -242,6 +250,91 @@ class SessionStoreTest : public QObject {
         QVERIFY(QFileInfo::exists(photos + "/a.jpg") && !QFileInfo::exists(photos + "/Photos.frond"));
         removeStaging(refused);
         QVERIFY(!QFileInfo::exists(refused));
+    }
+    // A folder holding other sessions isn't one session, so it is never replaced.
+    void exportRefusesSessionsFolder() {
+        write(filePath(folder(), "Trip"), header(6, "palm-tx"));
+        const auto trip = describe(filePath(folder(), "Trip"));
+        const auto palm = directory.filePath("Palm");
+        write(palm + "/TX.frond", header(7, "palm-tx"));
+        write(palm + "/T3.frond", header(7, "palm-t3"));
+        QVERIFY(!exportTargetError(palm).isEmpty());
+        QVERIFY(!exportFile(trip, directory.filePath("Palm.frond")).isEmpty());
+        QVERIFY(!exportFile(trip, palm + "/Palm.frond").isEmpty());
+        const auto staging = makeStaging(palm);
+        write(staging + "/Palm/Palm.frond", header(7, "palm-e2"));
+        QVERIFY(!publishStaged(staging, palm).isEmpty());
+        removeStaging(staging);
+        QCOMPARE(QDir(palm).entryList(QDir::Files | QDir::Hidden), QStringList({"T3.frond", "TX.frond"}));
+        // One session plus another session's file isn't one either.
+        write(palm + "/Palm.frond", header(7, "palm-tx"));
+        QVERIFY(!exportTargetError(palm).isEmpty());
+        QVERIFY(QFileInfo::exists(palm + "/TX.frond"));
+    }
+    // An empty folder becomes the session folder, and a session can be called "old".
+    void exportIntoEmptyFolder() {
+        write(filePath(folder(), "Trip"), header(6, "palm-tx"));
+        const auto trip = describe(filePath(folder(), "Trip"));
+        const auto foo = directory.filePath("Foo");
+        QVERIFY(QDir().mkpath(foo));
+        QVERIFY(exportTargetError(foo).isEmpty());
+        QVERIFY(exportFile(trip, foo + "/Foo.frond").isEmpty());
+        QCOMPARE(readHeader(foo + "/Foo.frond").device, QString("palm-tx"));
+        const auto old = directory.filePath("old");
+        write(old + "/old.frond", header(7, "palm-e2"));
+        QVERIFY(exportFile(trip, old).isEmpty());
+        QCOMPARE(readHeader(old + "/old.frond").device, QString("palm-tx"));
+    }
+    // A replaced session waiting in a staging folder is never deleted with it, and one a stopped
+    // Frond left behind goes back in place.
+    void stagingKeepsOriginal() {
+        const auto dest = directory.filePath("Keep");
+        auto staging = makeStaging(dest);
+        write(stagedOriginal(staging, dest) + "/Keep.frond", header(7, "palm-tx"));
+        write(staging + "/Keep/Keep.frond", header(7, "palm-e2"));
+        removeStaging(staging);
+        QVERIFY(QFileInfo::exists(stagedOriginal(staging, dest) + "/Keep.frond"));
+        QVERIFY(!QFileInfo::exists(staging + "/Keep"));
+        const auto fresh = makeStaging(dest);  // too new to touch
+        QVERIFY(QFileInfo::exists(stagedOriginal(staging, dest) + "/Keep.frond"));
+        removeStaging(fresh);
+        age(staging);
+        removeStaging(makeStaging(directory.filePath("Other")));  // another name's staging leaves it alone
+        QVERIFY(QFileInfo::exists(stagedOriginal(staging, dest) + "/Keep.frond"));
+        const auto next = makeStaging(dest);
+        QCOMPARE(readHeader(dest + "/Keep.frond").device, QString("palm-tx"));
+        QVERIFY(!QFileInfo::exists(staging));
+        removeStaging(next);
+        // A plain leftover copy goes too.
+        const auto left = makeStaging(dest);
+        write(left + "/Keep/Keep.frond", header(7, "palm-e2"));
+        age(left);
+        removeStaging(makeStaging(dest));
+        QVERIFY(!QFileInfo::exists(left));
+        QCOMPARE(readHeader(dest + "/Keep.frond").device, QString("palm-tx"));
+    }
+    // An outside session's work folder left by a stopped Frond goes once it is old and free.
+    void staleWorkRemoved() {
+        const auto make = [&](const QString& name) {
+            QVERIFY(create(folder(), name, "palm-tx"));
+            write(workPath(filePath(folder(), name)), {});
+            write(machineDir(folder(), name) + "/sd.frondsd", tinyFrondsd());
+        };
+        make("Crashed"); make("Running"); make("Fresh"); make("Saved");
+        write(filePath(folder(), "Saved"), header(7, "palm-tx"));
+        for (const auto& name : {"Crashed", "Running", "Saved"}) age(machineDir(folder(), name));
+        {
+            QLockFile lock(filePath(folder(), "Running") + ".lock"); QVERIFY(lock.tryLock());
+            QStringList names;
+            for (const auto& info : list(folder())) names << info.name;
+            QVERIFY(!names.contains("Crashed"));
+            QVERIFY(names.contains("Running") && names.contains("Fresh") && names.contains("Saved"));
+        }
+        QVERIFY(!QFileInfo::exists(machineDir(folder(), "Crashed")));
+        QVERIFY(QFileInfo::exists(machineDir(folder(), "Running") + "/sd.frondsd"));
+        QVERIFY(QFileInfo::exists(machineDir(folder(), "Fresh") + "/sd.frondsd"));
+        QVERIFY(!QFileInfo::exists(workPath(filePath(folder(), "Saved"))));
+        QVERIFY(QFileInfo::exists(machineDir(folder(), "Saved") + "/sd.frondsd"));
     }
     // Rename holds the lock through the move and leaves the session free afterwards.
     void renameKeepsLock() {

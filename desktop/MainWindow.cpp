@@ -588,6 +588,7 @@ MainWindow::MainWindow(const QString& core) : core(core) {
             if (savedWorkingCopy) {
                 settings.setValue("lastSession", sessionPath); settings.sync();
                 QFile::remove(frondSessions::markerPath(sessionPath));
+                QFile::remove(frondSessions::workPath(sessionPath));
                 refreshSessions();
             }
             if (!savedWorkingCopy) {
@@ -942,6 +943,12 @@ void MainWindow::openSession(const QString& path, bool launchNow) {
         if (name.isEmpty()) return failure(tr("Could not create the session storage directory."));
         target = frondSessions::filePath(managedRoot, name);
         arguments << "--work-folder" << frondSessions::machineDir(managedRoot, name);
+        QFile work(frondSessions::workPath(target));
+        if (!work.open(QIODevice::WriteOnly)) {
+            QFile::remove(frondSessions::markerPath(target));
+            frondSessions::removeMachineFolder(frondSessions::machineDirOf(target));
+            return failure(tr("Could not create the session storage directory."));
+        }
         reserved = true;
     }
     launch(target, arguments, device);
@@ -1126,7 +1133,7 @@ void MainWindow::save(bool saveAs) {
     const auto name = QFileInfo(dest).fileName();
     const auto destFrond = dest + '/' + name + ".frond";
     copyLock = std::make_unique<QLockFile>(destFrond + ".lock"); copyLock->setStaleLockTime(0);
-    if (QFileInfo::exists(dest) && !copyLock->tryLock()) { copyLock.reset(); return failure(tr("This session is open in another Frond.")); }
+    if (frondSessions::isMachineFolder(dest) && !copyLock->tryLock()) { copyLock.reset(); return failure(tr("This session is open in another Frond.")); }
     // The core saves the copy into a staging folder; the working session's files stay as they are.
     copyStaging = frondSessions::makeStaging(dest);
     if (copyStaging.isEmpty() || !QDir().mkdir(copyStaging + '/' + name)) {
