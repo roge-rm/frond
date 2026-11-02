@@ -1,0 +1,682 @@
+diff --git a/src/uarm/native/MachineSession.h b/src/uarm/native/MachineSession.h
+index 84341f1..18e4a9f 100644
+--- a/src/uarm/native/MachineSession.h
++++ b/src/uarm/native/MachineSession.h
+@@ -2,6 +2,7 @@
+ #define FROND_MACHINE_SESSION_H
+ 
+ #include "CardBacking.h"
++#include "CardSave.h"
+ #include "SessionIo.h"
+ #include "SoC.h"
+ #include "device_profile5.h"
+@@ -51,32 +52,7 @@ inline void fillState(SoC& soc, frondSession::Contents& contents) {
+     contents.savestate = copy(soc.GetSavestate());
+ }
+ 
+-inline bool publishSd(const std::filesystem::path& folder, frondMachine::Media& media, bool inserted,
+-                      std::filesystem::path& temp) {
+-    media.kind = frondMachine::kindSd;
+-    media.name = frondMachine::sdSibling;
+-    media.inserted = inserted;
+-    media.writeProtected = false;
+-    const uint64_t bytes = uint64_t(sdCardSectorCount()) * SD_SECTOR_SIZE;
+-    media.logicalSize = bytes;
+-    media.physicalSize = bytes;
+-    const char* id = sdCardGetId();
+-    media.identity.fill(0);
+-    if (id && *id) std::memcpy(media.identity.data(), id, std::min(size_t(32), std::strlen(id)));
+-    if (!sdCardCommit()) return false;
+-    auto pin = sdCardSnapshot();
+-    if (!pin) return false;
+-    if (!frondSession::createTemp(folder, ".frondsd.tmp-", temp)) return false;
+-    if (!frondSession::writeSdFromReader(
+-            temp, bytes, [&](uint64_t off, uint64_t n, void* dest) { return pin->Read(off, n, dest); },
+-            media.identity)) {
+-        frondSession::removePath(temp);
+-        temp.clear();
+-        return false;
+-    }
+-    return true;
+-}
+-
++// Streams the stick from a pinned checkpoint, so the save holds no second image.
+ inline bool publishMs(const std::filesystem::path& folder, MemoryStickController* ms,
+                       frondMachine::Media& media, std::filesystem::path& temp) {
+     media.kind = frondMachine::kindMs;
+@@ -85,10 +61,13 @@ inline bool publishMs(const std::filesystem::path& folder, MemoryStickController
+     media.writeProtected = msCtrlrReadOnly(ms);
+     media.logicalSize = frondMachine::msLogicalBytes;
+     media.physicalSize = frondMachine::msPhysicalBytes;
++    std::shared_ptr<const CardSnapshot> pin;
++    bool protect = false;
++    if (!msCtrlrSaveCheckpoint(ms, pin, protect) || !pin || pin->Size() != media.physicalSize) return false;
+     if (!frondSession::createTemp(folder, ".frondms.tmp-", temp)) return false;
+-    std::vector<uint8_t> physical;
+-    if (!msCtrlrExport(ms, physical) ||
+-        !frondSession::writeMsFile(temp, physical.data(), physical.size())) {
++    if (!frondSession::writeMsFromReader(
++            temp, media.physicalSize,
++            [&](uint64_t off, uint64_t n, void* dest) { return pin->Read(off, n, dest); })) {
+         frondSession::removePath(temp);
+         temp.clear();
+         return false;
+@@ -122,7 +101,9 @@ inline bool saveMachine(const std::filesystem::path& path, SoC& soc) {
+             contents.media.push_back(std::move(media));
+         }
+     }
+-    return frondSession::saveFolderFromTemps(folder, contents, temps);
++    if (!frondSession::saveFolderFromTemps(folder, contents, temps)) return false;
++    afterSdPublish(folder);
++    return true;
+ }
+ 
+ inline bool attachFolderMedia(const frondSession::Contents& contents, const std::filesystem::path& folder) {
+diff --git a/src/uarm/native/main.cpp b/src/uarm/native/main.cpp
+index 15a03a5..a63c65e 100644
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -80,6 +80,7 @@ struct Options {
+     optional<string> framebufferOutput;
+     optional<string> inputReplay;
+     optional<string> desktopSocket;
++    optional<string> workFolder;
+     optional<string> serial;
+     optional<string> infrared;
+     optional<string> usb;
+@@ -221,7 +222,8 @@ namespace {
+         const std::filesystem::path path(options.norOrSession);
+         frondSession::Contents contents;
+         std::filesystem::path folder;
+-        if (frondSession::loadPath(path, contents, folder)) {
++        const std::filesystem::path work = options.workFolder ? *options.workFolder : std::string();
++        if (frondSession::loadPath(path, contents, folder, frondSession::msPhysicalBytes, work)) {
+             sessionFolder = folder.string();
+             return applySession(contents, folder, nor, nand, ram, savestate, ramSize, romInfo,
+                                 displayMode, requestedDevice, sessionDevice, embeddedCard, options);
+@@ -528,9 +530,8 @@ namespace {
+             if (std::filesystem::is_regular_file(msPath, ec)) {
+                 auto* pxa = dynamic_cast<SocPXA*>(soc);
+                 auto* ms = pxa ? pxa->GetMemoryStick() : nullptr;
+-                std::vector<uint8_t> file, physical;
+-                if (!ms || !frondMachine::readBytes(msPath, file) ||
+-                    !frondMs::decode(file.data(), file.size(), physical) || !msCtrlrAttach(ms, physical)) {
++                std::vector<uint8_t> physical;
++                if (!ms || !frondMs::decodeFile(msPath, physical) || !msCtrlrAttach(ms, std::move(physical))) {
+                     cerr << "session Memory Stick sidecar is missing or unreadable" << endl;
+                     return false;
+                 }
+@@ -1137,6 +1138,10 @@ int main(int argc, char** argv) {
+ 
+     program.add_argument("--desktop-socket").help("private desktop control socket");
+ 
++    program.add_argument("--work-folder")
++        .help("run a session from elsewhere in this empty machine folder; its cards are copied there")
++        .metavar("<folder>");
++
+     program.add_argument("--serial")
+         .help("connect the TX serial port to a host PTY (pty) or a TCP listener on 127.0.0.1 "
+               "(tcp:PORT, one client at a time); default off")
+@@ -1194,6 +1199,7 @@ int main(int argc, char** argv) {
+                        .framebufferOutput = program.present("--framebuffer-output"),
+                        .inputReplay = program.present("--input-replay"),
+                        .desktopSocket = program.present("--desktop-socket"),
++                       .workFolder = program.present("--work-folder"),
+                        .serial = program.present("--serial"),
+                        .infrared = program.present("--irda"),
+                        .usb = program.present("--usb"),
+diff --git a/src/uarm/uarm/FileCardBacking.h b/src/uarm/uarm/FileCardBacking.h
+index 2fc9181..941d740 100644
+--- a/src/uarm/uarm/FileCardBacking.h
++++ b/src/uarm/uarm/FileCardBacking.h
+@@ -24,6 +24,7 @@ struct FileCardOptions {
+     size_t cacheBytes = 16u << 20;
+     size_t indexCacheEntries = 4096;
+     uint32_t maxGenerations = 8;
++    std::string identity;  // card identity; generations only apply to the same card and file
+ };
+ 
+ struct FileCardIoHooks {
+@@ -38,7 +39,7 @@ class FileCardBacking : public CardBacking {
+    public:
+     static constexpr uint64_t kTomb = ~uint64_t{0};
+     static constexpr uint32_t kHeaderBytes = 64;
+-    static constexpr uint32_t kRootBytes = 32;
++    static constexpr uint32_t kRootBytes = 64;
+     static constexpr uint32_t kIndexRecBytes = 16;
+ 
+     static std::unique_ptr<FileCardBacking> Open(const std::filesystem::path& durable,
+@@ -58,6 +59,24 @@ class FileCardBacking : public CardBacking {
+     uint64_t RootGenerationId() const { return impl_->root->id; }
+     uint64_t WorkingGenerationId() const { return impl_->working->id; }
+     std::vector<std::filesystem::path> OwnedPaths() const { return impl_->ownedPaths(); }
++    const std::filesystem::path& DurablePath() const { return impl_->durablePath; }
++    // A snapshot handle still refers to this backing.
++    bool Pinned() const { return impl_.use_count() > 1; }
++
++    // Removes the root pointer and every generation file of `durable`. Only for a sidecar no
++    // backing has open, such as one a save has just replaced.
++    static void DiscardGenerations(const std::filesystem::path& durable) {
++        auto dir = durable.parent_path();
++        if (dir.empty()) dir = ".";
++        const auto prefix = ".gen-" + durable.filename().string() + "-";
++        std::error_code ec;
++        std::vector<std::filesystem::path> doomed;
++        for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
++            const auto name = it->path().filename().string();
++            if (name.compare(0, prefix.size(), prefix) == 0) doomed.push_back(it->path());
++        }
++        for (const auto& path : doomed) std::filesystem::remove(path, ec);
++    }
+ 
+     std::shared_ptr<const CardSnapshot> Snapshot() override {
+         if (!impl_->flushWorking()) return nullptr;
+@@ -173,6 +192,7 @@ class FileCardBacking : public CardBacking {
+         FileCardIoHooks* hooks{};
+         uint64_t nextId{1};
+         int durableFd{-1};
++        uint64_t bindDev{}, bindIno{}, bindMtime{}, bindKey{};
+         std::shared_ptr<Gen> root;
+         std::shared_ptr<Gen> working;
+         std::list<CacheEnt> lru;
+@@ -343,25 +363,18 @@ class FileCardBacking : public CardBacking {
+             base->owner = this;
+             root = base;
+             working = base;
+-            const auto rootPath = genPath("root");
+-            if (std::filesystem::is_regular_file(rootPath, ec)) {
+-                uint8_t buf[kRootBytes]{};
+-                const int rfd = ::open(rootPath.c_str(), O_RDONLY | O_CLOEXEC);
+-                if (rfd < 0 || !ioRead(rfd, buf, kRootBytes, 0)) {
+-                    if (rfd >= 0) ::close(rfd);
+-                    return false;
+-                }
+-                ::close(rfd);
+-                if (std::memcmp(buf, "FRONDRT\0", 8) != 0) return false;
+-                const uint32_t ver = frondSdFile::get32(buf + 8);
+-                if (ver != 1) return false;
+-                const uint64_t id = frondSdFile::get64(buf + 12);
+-                if (id != 0) {
+-                    auto loaded = loadChain(id);
+-                    if (!loaded) return false;
+-                    root = loaded;
+-                    working = loaded;
+-                }
++            struct stat st {};
++            if (fstat(durableFd, &st) != 0) return false;
++            bindDev = uint64_t(st.st_dev);
++            bindIno = uint64_t(st.st_ino);
++            bindMtime = uint64_t(st.st_mtim.tv_sec) * 1000000000ull + uint64_t(st.st_mtim.tv_nsec);
++            if (!bindingKey(options.identity, bindKey)) return false;
++            // A root only applies to the exact file and card it was written for. Anything else,
++            // including a v1 root or a broken chain, belongs to a replaced card and is discarded.
++            if (!loadRoot()) {
++                root = base;
++                working = base;
++                DiscardGenerations(durablePath);
+             }
+             nextId = 1;
+             for (auto* g = working.get(); g; g = g->parent.get()) {
+@@ -371,6 +384,49 @@ class FileCardBacking : public CardBacking {
+             return true;
+         }
+ 
++        // FNV-1a of the card identity and the durable file's header bytes before the payload.
++        bool bindingKey(const std::string& identity, uint64_t& key) {
++            key = 1469598103934665603ull;
++            auto mix = [&](const uint8_t* p, size_t n) {
++                for (size_t i = 0; i < n; ++i) key = (key ^ p[i]) * 1099511628211ull;
++            };
++            mix(reinterpret_cast<const uint8_t*>(identity.data()), identity.size());
++            const uint8_t sep = 0;
++            mix(&sep, 1);
++            uint8_t chunk[64];
++            for (uint64_t off = 0; off < payloadOffset;) {
++                const size_t n = size_t(std::min<uint64_t>(sizeof(chunk), payloadOffset - off));
++                if (!ioRead(durableFd, chunk, n, off)) return false;
++                mix(chunk, n);
++                off += n;
++            }
++            return true;
++        }
++
++        bool loadRoot() {
++            std::error_code ec;
++            const auto rootPath = genPath("root");
++            if (!std::filesystem::is_regular_file(rootPath, ec)) return false;
++            uint8_t buf[kRootBytes]{};
++            const int rfd = ::open(rootPath.c_str(), O_RDONLY | O_CLOEXEC);
++            if (rfd < 0) return false;
++            const bool read = std::filesystem::file_size(rootPath, ec) == kRootBytes && !ec &&
++                              ioRead(rfd, buf, kRootBytes, 0);
++            ::close(rfd);
++            if (!read || std::memcmp(buf, "FRONDRT\0", 8) != 0 || frondSdFile::get32(buf + 8) != 2) return false;
++            if (frondSdFile::get64(buf + 20) != payloadSize || frondSdFile::get64(buf + 28) != bindDev ||
++                frondSdFile::get64(buf + 36) != bindIno || frondSdFile::get64(buf + 44) != bindMtime ||
++                frondSdFile::get64(buf + 52) != bindKey || frondSdFile::get32(buf + 60) != pageSize)
++                return false;
++            const uint64_t id = frondSdFile::get64(buf + 12);
++            if (id == 0) return true;
++            auto loaded = loadChain(id);
++            if (!loaded) return false;
++            root = loaded;
++            working = loaded;
++            return true;
++        }
++
+         std::shared_ptr<Gen> loadChain(uint64_t id) {
+             if (id == 0) return root;
+             std::shared_ptr<Gen> child;
+@@ -740,8 +796,14 @@ class FileCardBacking : public CardBacking {
+         bool publishRoot(const std::shared_ptr<Gen>& g) {
+             uint8_t buf[kRootBytes]{};
+             std::memcpy(buf, "FRONDRT\0", 8);
+-            frondSdFile::put32(buf + 8, 1);
++            frondSdFile::put32(buf + 8, 2);
+             frondSdFile::put64(buf + 12, g->id);
++            frondSdFile::put64(buf + 20, payloadSize);
++            frondSdFile::put64(buf + 28, bindDev);
++            frondSdFile::put64(buf + 36, bindIno);
++            frondSdFile::put64(buf + 44, bindMtime);
++            frondSdFile::put64(buf + 52, bindKey);
++            frondSdFile::put32(buf + 60, pageSize);
+             const auto tmp = tempName("tmp-root-");
+             const int fd = ::open(tmp.c_str(), O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+             if (fd < 0) return false;
+diff --git a/src/uarm/uarm/MemoryStickImage.h b/src/uarm/uarm/MemoryStickImage.h
+index 3a3d765..972af5e 100644
+--- a/src/uarm/uarm/MemoryStickImage.h
++++ b/src/uarm/uarm/MemoryStickImage.h
+@@ -3,6 +3,8 @@
+ #include "MemoryStickMedia.h"
+ #include <algorithm>
+ #include <cstring>
++#include <filesystem>
++#include <fstream>
+ #include <stdexcept>
+ #define MINIZ_NO_ZLIB_COMPATIBLE_NAMES
+ #include "zip/miniz.h"
+@@ -54,5 +56,20 @@ inline bool decode(const uint8_t* file,size_t size,std::vector<uint8_t>& physica
+     if(!validBoot(candidate))return false;
+     physical.swap(candidate);return true;
+ }
++// decode() of a .frondms on disk, reading the payload straight into one image-sized vector.
++inline bool decodeFile(const std::filesystem::path& path,std::vector<uint8_t>& physical) {
++    std::ifstream in(path,std::ios::binary);
++    if(!in)return false;
++    uint8_t h[headerBytes];
++    if(!in.read(reinterpret_cast<char*>(h),headerBytes))return false;
++    if(std::memcmp(h,"FRONDMS\0",8)||get32(h+8)!=1||get32(h+12)!=8192||get32(h+16)!=32||
++       get32(h+20)!=512||get32(h+24)!=9)return false;
++    for(unsigned i=32;i<64;++i)if(h[i])return false;
++    std::vector<uint8_t> candidate(MemoryStickMedia::imageBytes);
++    if(!in.read(reinterpret_cast<char*>(candidate.data()),std::streamsize(candidate.size())))return false;
++    if(in.peek()!=std::char_traits<char>::eof())return false;
++    if(get32(h+28)!=crc32(candidate.data(),candidate.size())||!validBoot(candidate))return false;
++    physical.swap(candidate);return true;
++}
+ }
+ #endif
+diff --git a/src/uarm/uarm/MemoryStickMedia.h b/src/uarm/uarm/MemoryStickMedia.h
+index c29cea6..42317d0 100644
+--- a/src/uarm/uarm/MemoryStickMedia.h
++++ b/src/uarm/uarm/MemoryStickMedia.h
+@@ -38,6 +38,7 @@ class MemoryStickMedia {
+         if (image.size() != imageBytes) return Result::invalidImage;
+         return AttachOwned(std::vector<uint8_t>(image), protect);
+     }
++    Result Attach(std::vector<uint8_t>&& image, bool protect) { return AttachOwned(std::move(image), protect); }
+ 
+     void Detach() {
+         backing_.reset();
+diff --git a/src/uarm/uarm/SessionIo.h b/src/uarm/uarm/SessionIo.h
+index 38bb260..3db6866 100644
+--- a/src/uarm/uarm/SessionIo.h
++++ b/src/uarm/uarm/SessionIo.h
+@@ -1,6 +1,7 @@
+ #ifndef FROND_SESSION_IO_H
+ #define FROND_SESSION_IO_H
+ 
++#include "FileCardBacking.h"
+ #include "MachineFolder.h"
+ #include "md5.h"
+ #include "session/session_file5.h"
+@@ -253,6 +254,57 @@ inline bool writeSdFromReader(const std::filesystem::path& path, uint64_t size,
+     return true;
+ }
+ 
++// Streams a classic Memory Stick image to a .frondms in 64 KiB chunks.
++template <typename ReadFn>
++inline bool writeMsFromReader(const std::filesystem::path& path, uint64_t size, ReadFn read) {
++    auto dir = path.parent_path();
++    if (dir.empty()) dir = ".";
++    std::string tmpl = (dir / ".frondms.tmp-XXXXXX").string();
++    std::vector<char> name(tmpl.begin(), tmpl.end());
++    name.push_back(0);
++    const int fd = mkstemp(name.data());
++    if (fd < 0) return false;
++    auto fail = [&] {
++        close(fd);
++        unlink(name.data());
++        return false;
++    };
++    auto put = [&](const uint8_t* p, size_t n) {
++        while (n) {
++            const auto w = write(fd, p, n);
++            if (w < 0 && errno == EINTR) continue;
++            if (w <= 0) return false;
++            p += w;
++            n -= size_t(w);
++        }
++        return true;
++    };
++    uint8_t header[frondSdFile::headerBytes]{};
++    if (!put(header, sizeof(header))) return fail();
++    std::vector<uint8_t> chunk(inflateChunk);
++    uint32_t crc = 0;
++    for (uint64_t off = 0; off < size;) {
++        const size_t n = size_t(std::min<uint64_t>(chunk.size(), size - off));
++        if (!read(off, n, chunk.data())) return fail();
++        crc = mz_crc32(crc, chunk.data(), n);
++        if (!put(chunk.data(), n)) return fail();
++        off += n;
++    }
++    std::memcpy(header, "FRONDMS", 8);
++    frondSdFile::put32(header + 8, 1);
++    frondSdFile::put32(header + 12, 8192);
++    frondSdFile::put32(header + 16, 32);
++    frondSdFile::put32(header + 20, 512);
++    frondSdFile::put32(header + 24, 9);
++    frondSdFile::put32(header + 28, crc);
++    if (lseek(fd, 0, SEEK_SET) < 0 || !put(header, sizeof(header)) || fsync(fd) < 0) return fail();
++    if (close(fd) < 0 || rename(name.data(), path.c_str()) < 0) {
++        unlink(name.data());
++        return false;
++    }
++    return true;
++}
++
+ inline bool writeMsFile(const std::filesystem::path& path, const uint8_t* payload, uint64_t size) {
+     if (!payload || size > std::numeric_limits<size_t>::max()) return false;
+     const auto n = static_cast<size_t>(size);
+@@ -508,6 +560,17 @@ inline bool saveFolderFromTemps(const std::filesystem::path& folder, const Conte
+             return false;
+         }
+     }
++    // A card the new .frond no longer describes, after an unmount or detach, goes with its
++    // generations, or the folder would refuse to load.
++    for (const auto* sibling : {frondMachine::sdSibling, frondMachine::msSibling}) {
++        const bool described = std::any_of(contents.media.begin(), contents.media.end(),
++                                           [&](const frondMachine::Media& m) { return m.name == sibling; });
++        if (described) continue;
++        std::error_code ec;
++        if (std::filesystem::exists(folder / sibling, ec) && !std::filesystem::remove(folder / sibling, ec))
++            return false;
++        FileCardBacking::DiscardGenerations(folder / sibling);
++    }
+     return true;
+ }
+ 
+@@ -567,6 +630,23 @@ inline std::filesystem::path loneExtractFolder(const std::filesystem::path& file
+     return dest;
+ }
+ 
++// A new folder for a lone v6 file: <stem>/, or <stem> 2/ and so on when that exists. An existing
++// folder is never reused, so opening never overwrites anything beside the file.
++inline bool createLoneExtractFolder(const std::filesystem::path& file, std::filesystem::path& folder) {
++    const auto base = loneExtractFolder(file);
++    for (int n = 1; n < 1000; ++n) {
++        auto candidate = base;
++        if (n > 1) candidate += " " + std::to_string(n);
++        std::error_code ec;
++        if (std::filesystem::create_directory(candidate, ec)) {
++            folder = candidate;
++            return true;
++        }
++        if (ec) return false;
++    }
++    return false;
++}
++
+ // A lone v6 file extracts into <stem>/ next to it. destFolder overrides that.
+ inline bool extractLoneV6(const std::filesystem::path& frondFile, std::vector<uint8_t>& bytes,
+                           std::filesystem::path destFolder = {},
+@@ -599,9 +679,68 @@ inline bool frondInFolder(const std::filesystem::path& file) {
+            std::filesystem::is_regular_file(parent / frondMachine::msSibling, ec);
+ }
+ 
++// Copies a sidecar into `dest` through a temp, so a partial copy never takes the real name.
++inline bool copySidecar(const std::filesystem::path& from, const std::filesystem::path& dest, const char* prefix) {
++    std::filesystem::path temp;
++    if (!createTemp(dest.parent_path(), prefix, temp)) return false;
++    std::error_code ec;
++    std::filesystem::copy_file(from, temp, std::filesystem::copy_options::overwrite_existing, ec);
++    if (ec || rename(temp.c_str(), dest.c_str()) < 0) {
++        removePath(temp);
++        return false;
++    }
++    return true;
++}
++
++// Loads a session that lives somewhere else into the empty machine folder `work`: a v6 file is
++// extracted there and a v7 session's cards are copied there. Nothing is written beside the source.
++inline bool loadIntoWorkFolder(const std::filesystem::path& path, const std::filesystem::path& work, Contents& out,
++                               std::filesystem::path& folder, uint64_t msImageBytes) {
++    std::error_code ec;
++    if (!std::filesystem::is_directory(work, ec)) return false;
++    std::filesystem::path session = path, source = path.parent_path();
++    if (isMachineFolder(path)) {
++        source = path;
++        if (!frondMachine::sessionFile(path, session)) return false;
++    } else if (!std::filesystem::is_regular_file(path, ec)) {
++        return false;
++    }
++    if (source.empty()) source = ".";
++    std::vector<uint8_t> bytes;
++    if (!frondMachine::readBytes(session, bytes)) return false;
++    uint32_t version = 0;
++    std::string device;
++    if (!peekHeader(bytes.data(), bytes.size(), version, device)) return false;
++    if (version == SessionFile5::kVersionV6) {
++        std::filesystem::path extracted;
++        if (!extractV6ToFolder(bytes.data(), bytes.size(), work, msImageBytes) ||
++            !frondMachine::sessionFile(work, extracted) || !frondMachine::readBytes(extracted, bytes))
++            return false;
++        folder = work;
++        return loadV7Bytes(bytes.data(), bytes.size(), work, out);
++    }
++    if (version != SessionFile5::kVersionV7) return false;
++    Contents parsed;
++    if (!loadV7Bytes(bytes.data(), bytes.size(), source, parsed)) return false;
++    for (const auto& media : parsed.media) {
++        const char* prefix = media.kind == frondMachine::kindSd ? ".frondsd.tmp-" : ".frondms.tmp-";
++        if (!copySidecar(source / media.name, work / media.name, prefix)) return false;
++    }
++    if (frondMachine::checkSiblings(work, parsed.media) != frondMachine::SiblingStatus::ok) return false;
++    folder = work;
++    out = std::move(parsed);
++    return true;
++}
++
++// `work`, when given and not the session's own folder, is where an outside session runs from.
+ inline bool loadPath(const std::filesystem::path& path, Contents& out, std::filesystem::path& folder,
+-                     uint64_t msImageBytes = msPhysicalBytes) {
++                     uint64_t msImageBytes = msPhysicalBytes, const std::filesystem::path& work = {}) {
+     std::error_code ec;
++    if (!work.empty()) {
++        const auto own = isMachineFolder(path) ? path : path.parent_path();
++        if (!std::filesystem::equivalent(own.empty() ? std::filesystem::path(".") : own, work, ec))
++            return loadIntoWorkFolder(path, work, out, folder, msImageBytes);
++    }
+     if (isMachineFolder(path)) {
+         folder = path;
+         std::filesystem::path session;
+@@ -639,11 +778,13 @@ inline bool loadPath(const std::filesystem::path& path, Contents& out, std::file
+             return loadV7Bytes(bytes.data(), bytes.size(), folder, out);
+         }
+         if (version == SessionFile5::kVersionV6) {
+-            folder = loneExtractFolder(path);
+-            if (!extractLoneV6(path, bytes, folder, msImageBytes)) return false;
++            if (!createLoneExtractFolder(path, folder)) return false;
+             std::filesystem::path session;
+-            if (!frondMachine::sessionFile(folder, session)) return false;
+-            if (!frondMachine::readBytes(session, bytes)) return false;
++            if (!extractV6ToFolder(bytes.data(), bytes.size(), folder, msImageBytes) ||
++                !frondMachine::sessionFile(folder, session) || !frondMachine::readBytes(session, bytes)) {
++                std::filesystem::remove_all(folder, ec);
++                return false;
++            }
+             return loadV7Bytes(bytes.data(), bytes.size(), folder, out);
+         }
+         if (version == SessionFile5::kVersionV7) {
+diff --git a/src/uarm/uarm/mmiodev_MemoryStickController.cpp b/src/uarm/uarm/mmiodev_MemoryStickController.cpp
+index ea063ee..6faff32 100644
+--- a/src/uarm/uarm/mmiodev_MemoryStickController.cpp
++++ b/src/uarm/uarm/mmiodev_MemoryStickController.cpp
+@@ -311,7 +311,12 @@ bool msCtrlrReadOnly(MemoryStickController* m){return m&&m->card.media.WriteProt
+ bool msCtrlrProtect(MemoryStickController* m,bool protect){if(!msCtrlrPresent(m)||msCtrlrInserted(m))return false;m->card.media.SetWriteProtected(protect);return true;}
+ bool msCtrlrAttach(MemoryStickController* m,const std::vector<uint8_t>& physical) {
+     if(!m||m->state.inserted||!frondMs::validBoot(physical))return false;
+-    if(m->card.media.Attach(physical,false)!=MemoryStickMedia::Result::ok)return false;
++    return msCtrlrAttach(m,std::vector<uint8_t>(physical));
++}
++// Takes the image without copying it.
++bool msCtrlrAttach(MemoryStickController* m,std::vector<uint8_t>&& physical) {
++    if(!m||m->state.inserted||!frondMs::validBoot(physical))return false;
++    if(m->card.media.Attach(std::move(physical),false)!=MemoryStickMedia::Result::ok)return false;
+     msCtrlrDiscardSaveImage(m);m->card.Reset();m->state={};m->state.inserted=1;msCtrlrRefresh(m);return true;
+ }
+ bool msCtrlrInsert(MemoryStickController* m,bool inserted){
+diff --git a/src/uarm/uarm/mmiodev_MemoryStickController.h b/src/uarm/uarm/mmiodev_MemoryStickController.h
+index 1d8da19..d4953b9 100644
+--- a/src/uarm/uarm/mmiodev_MemoryStickController.h
++++ b/src/uarm/uarm/mmiodev_MemoryStickController.h
+@@ -33,6 +33,7 @@ bool msCtrlrInserted(MemoryStickController*);
+ bool msCtrlrReadOnly(MemoryStickController*);
+ bool msCtrlrProtect(MemoryStickController*,bool);
+ bool msCtrlrAttach(MemoryStickController*,const std::vector<uint8_t>&);
++bool msCtrlrAttach(MemoryStickController*,std::vector<uint8_t>&&);
+ bool msCtrlrInsert(MemoryStickController*,bool);
+ bool msCtrlrExport(MemoryStickController*,std::vector<uint8_t>&);
+ bool msCtrlrSaveCheckpoint(MemoryStickController*, std::shared_ptr<const CardSnapshot>&, bool& protect);
+diff --git a/src/uarm/uarm/sdcard.cpp b/src/uarm/uarm/sdcard.cpp
+index 45dfa44..9a6d66f 100644
+--- a/src/uarm/uarm/sdcard.cpp
++++ b/src/uarm/uarm/sdcard.cpp
+@@ -97,7 +97,9 @@ size_t sdCardSectorCount() { return sectorsTotal; }
+ bool sdCardInitializeFromFile(const char* path, uint64_t payloadBytes, uint64_t payloadOffset,
+                               const char* id) {
+     if (!path || payloadBytes % SD_SECTOR_SIZE || !payloadBytes) return false;
+-    auto file = FileCardBacking::Open(path, payloadBytes, payloadOffset);
++    FileCardOptions options;
++    options.identity = id ? id : "";
++    auto file = FileCardBacking::Open(path, payloadBytes, payloadOffset, options);
+     if (!file) return false;
+     sdCardReset();
+     const size_t sectors = static_cast<size_t>(payloadBytes / SD_SECTOR_SIZE);
+@@ -118,6 +120,25 @@ bool sdCardCommit() { return backing && backing->Commit(); }
+ 
+ bool sdCardFileBacked() { return dynamic_cast<FileCardBacking*>(backing.get()) != nullptr; }
+ 
++bool sdCardBackedBy(const char* path) {
++    auto* file = dynamic_cast<FileCardBacking*>(backing.get());
++    if (!file || !path) return false;
++    std::error_code ec;
++    return std::filesystem::equivalent(file->DurablePath(), path, ec) && !ec;
++}
++
++bool sdCardAdoptSaved(const char* path, uint64_t payloadBytes, uint64_t payloadOffset) {
++    auto* file = dynamic_cast<FileCardBacking*>(backing.get());
++    if (!file || file->Pinned() || payloadBytes != file->Size()) return false;
++    FileCardOptions options;
++    options.identity = cardId;
++    auto fresh = FileCardBacking::Open(path, payloadBytes, payloadOffset, options);
++    if (!fresh) return false;
++    backing = std::move(fresh);
++    dataViewValid = false;
++    return true;
++}
++
+ struct Buffer sdCardData() {
+     if (!backing) return (struct Buffer){.size = 0, .data = NULL};
+     if (auto* ram = dynamic_cast<RamCardBacking*>(backing.get())) {
+diff --git a/src/uarm/uarm/sdcard.h b/src/uarm/uarm/sdcard.h
+index 4763f3e..b972015 100644
+--- a/src/uarm/uarm/sdcard.h
++++ b/src/uarm/uarm/sdcard.h
+@@ -23,6 +23,11 @@ bool sdCardInitializeFromFile(const char* path, uint64_t payloadBytes, uint64_t
+ void sdCardRekey(const char* id);
+ bool sdCardCommit();
+ bool sdCardFileBacked();
++// True when the live card is file-backed on the sidecar at `path`.
++bool sdCardBackedBy(const char* path);
++// Moves a file-backed card onto the sidecar a save has just published, with the same bytes.
++// Its old generations are dropped. Refused while a snapshot is pinned.
++bool sdCardAdoptSaved(const char* path, uint64_t payloadBytes, uint64_t payloadOffset);
+ 
+ void sdCardReset();
+ 
+diff --git a/src/uarm/uarm/CardSave.h b/src/uarm/uarm/CardSave.h
+new file mode 100644
+index 0000000..a86d0d4
+--- /dev/null
++++ b/src/uarm/uarm/CardSave.h
+@@ -0,0 +1,58 @@
++#ifndef FROND_CARD_SAVE_H
++#define FROND_CARD_SAVE_H
++
++#include "FileCardBacking.h"
++#include "SessionIo.h"
++#include "sdcard.h"
++
++#include <algorithm>
++#include <cstring>
++#include <filesystem>
++
++// The SD card's part of a machine-folder save, apart from the SoC.
++namespace frondNative {
++
++// Writes the live card to a sidecar temp from a pinned snapshot. The card's own root does not
++// move: a save that fails, or one to another folder, leaves the live session as it was.
++inline bool publishSd(const std::filesystem::path& folder, frondMachine::Media& media, bool inserted,
++                      std::filesystem::path& temp) {
++    media.kind = frondMachine::kindSd;
++    media.name = frondMachine::sdSibling;
++    media.inserted = inserted;
++    media.writeProtected = false;
++    const uint64_t bytes = uint64_t(sdCardSectorCount()) * SD_SECTOR_SIZE;
++    media.logicalSize = bytes;
++    media.physicalSize = bytes;
++    const char* id = sdCardGetId();
++    media.identity.fill(0);
++    if (id && *id) std::memcpy(media.identity.data(), id, std::min(size_t(32), std::strlen(id)));
++    auto pin = sdCardSnapshot();
++    if (!pin) return false;
++    if (!frondSession::createTemp(folder, ".frondsd.tmp-", temp)) return false;
++    if (!frondSession::writeSdFromReader(
++            temp, bytes, [&](uint64_t off, uint64_t n, void* dest) { return pin->Read(off, n, dest); },
++            media.identity)) {
++        frondSession::removePath(temp);
++        temp.clear();
++        return false;
++    }
++    return true;
++}
++
++// After a published save. A live card file-backed on this folder's sidecar moves onto the new
++// file; otherwise generations left beside the sidecar belong to a card it replaced.
++inline void afterSdPublish(const std::filesystem::path& folder) {
++    const auto sidecar = folder / frondMachine::sdSibling;
++    std::error_code ec;
++    if (!std::filesystem::is_regular_file(sidecar, ec)) return;
++    if (sdCardBackedBy(sidecar.c_str())) {
++        sdCardAdoptSaved(sidecar.c_str(), uint64_t(sdCardSectorCount()) * SD_SECTOR_SIZE,
++                         frondSdFile::headerBytes);
++        return;
++    }
++    FileCardBacking::DiscardGenerations(sidecar);
++}
++
++}  // namespace frondNative
++
++#endif
