@@ -18,6 +18,8 @@
 
 static ArmMemAccessF mmio;
 static bool irq;
+void pxaDmaExternalReq(PxaDma*,uint_fast8_t,bool){}
+void pxaDmaSetPeripheral(PxaDma*,uint_fast8_t,const PxaDmaPeripheral*){}
 extern "C" void uarmAbort() { std::abort(); }
 bool memRegionAdd(ArmMem*, uint32_t, uint32_t, ArmMemAccessF f, void*) { mmio = f; return true; }
 void pxaIcInt(PxaIc*, uint_fast8_t n, bool level) { assert(n == PXA_I_USB); irq = level; }

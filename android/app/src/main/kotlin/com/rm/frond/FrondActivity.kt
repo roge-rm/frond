@@ -47,6 +47,10 @@ class FrondActivity : SDLActivity() {
     @Volatile private var destroyed = false
     private var menuButton: View? = null
     private var keyboardButton: View? = null
+    @Volatile private var pendingMicrophone = false
+    @Volatile private var foreground = false
+    @Volatile private var microphoneResume = 0L
+    fun microphoneOnReturn(on: Boolean) { pendingMicrophone = on }
     private var keyboard: PalmKeyboard? = null
     // The Palm infrared keyboard, as the core last said.
     @Volatile private var keyboardAttached = false
@@ -72,7 +76,10 @@ class FrondActivity : SDLActivity() {
         sound = launchDevice().sound && settings.sound
         requestedOrientation = settings.orientation.request
         File(filesDir, START_ERROR).delete()
-        link = ControlLink(File(filesDir, "control.sock")) { name, _ -> if (name == "close") leave() }
+        link = ControlLink(File(filesDir, "control.sock")) { name, state ->
+            if (name == "close") leave()
+            if (name == "microphone") Log.i(TAG, "microphone: $state")
+        }
         chooseAudioDriver()
         // SDL keeps its thread running while paused; the core idles itself in the background and
         // still answers the control socket, so it can save. SDL pauses the audio device.
@@ -118,7 +125,8 @@ class FrondActivity : SDLActivity() {
             arguments += nor
             if (File(nand).isFile) arguments += listOf("--nand", nand)
         }
-        arguments += machineSettings.arguments(soundSupported = launchDevice().sound)
+        arguments += machineSettings.arguments(soundSupported = launchDevice().sound,
+            tg50Controls = launchDevice().id == "sony-clie-tg50")
         arguments += listOf("--window-background", BACKGROUND_HEX)
         if (machineSettings.fastAudio && fastAudioQualified()) {
             arguments += "--fast-audio"
@@ -252,6 +260,13 @@ class FrondActivity : SDLActivity() {
     }
 
     override fun onPause() {
+        foreground = false
+        microphoneResume++
+        pendingMicrophone = false
+        if (launchDevice().microphone && link.connectedOnce) {
+            Thread { link.request("microphone-mode", "off", timeoutSeconds = 2) }
+                .apply { isDaemon = true }.start()
+        }
         controller.releaseAll()
         super.onPause()
     }
@@ -418,6 +433,17 @@ class FrondActivity : SDLActivity() {
 
     override fun onResume() {
         super.onResume()
+        foreground = true
+        if (!leaving && pendingMicrophone) {
+            pendingMicrophone = false
+            val owner = this
+            val resume = microphoneResume
+            Thread {
+                val epoch = link.request("microphone-epoch", timeoutSeconds = 10)
+                if (epoch.ok && running === owner && foreground && !leaving && microphoneResume == resume)
+                    link.request("microphone-mode", "on-return:${epoch.message}", timeoutSeconds = 10)
+            }.apply { isDaemon = true }.start()
+        }
         if (!leaving) readKeyboard()
         if (!leaving) applySound()
     }

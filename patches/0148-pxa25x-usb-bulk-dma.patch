@@ -1,0 +1,145 @@
+diff --git a/src/uarm/uarm/pxa_DMA.h b/src/uarm/uarm/pxa_DMA.h
+--- a/src/uarm/uarm/pxa_DMA.h
++++ b/src/uarm/uarm/pxa_DMA.h
+@@ -122,6 +122,8 @@
+     void* ctx;
+     // A companion-chip FIFO on the external memory bus uses WIDTH=00.
+     uint32_t externalBusAddress{0};
++    // Optional physical request level, sampled when this line is mapped/rebound.
++    bool (*requested)(void* ctx){nullptr};
+ };
+ void pxaDmaSetPeripheral(struct PxaDma* dma, uint_fast8_t chNum, const struct PxaDmaPeripheral* peripheral);
+ 
+diff --git a/src/uarm/uarm/pxa_DMA.cpp b/src/uarm/uarm/pxa_DMA.cpp
+--- a/src/uarm/uarm/pxa_DMA.cpp
++++ b/src/uarm/uarm/pxa_DMA.cpp
+@@ -488,6 +488,13 @@
+         dma->peripherals[chNum] = PxaDmaPeripheral{};
+ }
+ 
++// PXA250 5.1.2.1: internal PREQs are level sensitive. Query-backed lines
++// can assert while unmapped; sampling a new mapping must not lose that level.
++static void pxaDmaPrvRefreshRequest(PxaDma* dma, unsigned line) {
++    const auto& p = dma->peripherals[line];
++    if (p.requested) pxaDmaExternalReq(dma, line, p.requested(p.ctx));
++}
++
+ void pxaDmaPeriodic(struct PxaDma* dma) {
+     uint32_t i;
+ 
+@@ -538,7 +545,10 @@
+             case 1:
+                 pa -= 64;
+                 if (pa >= 75) return false;
++                if (dma->peripherals[pa].requested && (dma->CMR[pa] & 0x80))
++                    pxaDmaExternalReq(dma, pa, false);
+                 dma->CMR[pa] = val;
++                pxaDmaPrvRefreshRequest(dma, pa);
+                 break;
+ 
+             case 2:
+diff --git a/src/uarm/uarm/pxa255_UDC.cpp b/src/uarm/uarm/pxa255_UDC.cpp
+--- a/src/uarm/uarm/pxa255_UDC.cpp
++++ b/src/uarm/uarm/pxa255_UDC.cpp
+@@ -45,7 +45,32 @@
+ bool inEp(unsigned ep) {return ep && (ep%5==1 || ep%5==0);}
+ bool outEp(unsigned ep) {return ep && ep%5==2;}
+ unsigned packetSize(unsigned ep) {return ep%5==0?8:64;}
++constexpr unsigned bulkEp[]={1,2,6,7,11,12};
++constexpr unsigned bulkRequest[]={25,26,30,31,35,36};
++bool dmaRequested(Pxa255Udc* u,unsigned ep) {
++    if(!(u->ccr&1))return false;
++    const auto& f=u->fifo[ep];
++    if(inEp(ep))return f.count<2 && 64-f.fill>=32;
++    return f.count && f.size[f.head]-f.pos>=32;
++}
++void refreshDma(Pxa255Udc* u) {
++    if(u->dma)for(unsigned i=0;i<6;++i)
++        pxaDmaExternalReq(u->dma,bulkRequest[i],dmaRequested(u,bulkEp[i]));
++}
++template<unsigned Ep>bool dmaLevel(void* context) {
++    return dmaRequested(static_cast<Pxa255Udc*>(context),Ep);
++}
++template<unsigned Ep>uint_fast8_t dmaBytes(void* context) {
++    auto* u=static_cast<Pxa255Udc*>(context);
++    if(!dmaRequested(u,Ep))return 0;
++    const auto& f=u->fifo[Ep];
++    return inEp(Ep)?64-f.fill:f.size[f.head]-f.pos;
++}
++// DME delays the packet interrupt until fewer than 32 bytes remain. RPC
++// remains set until software acknowledges it and exposes the next buffer.
++void receiveEvent(Pxa255Udc* u,unsigned ep);
+ void irq(Pxa255Udc* u) {
++    refreshDma(u);
+     pxaIcInt(u->ic,PXA_I_USB, (u->sir[0]&~u->uicr0) || (u->sir[1]&~u->uicr1) ||
+         ((u->ccr&0x40) && !(u->ccr&0x80)) || ((u->ccr&0x18) && !(u->ccr&0x20)) ||
+         ((u->fnHigh&0x80) && !(u->fnHigh&0x40)));
+@@ -54,6 +79,10 @@
+     const uint8_t mask=ep<8?u->uicr0:u->uicr1;
+     if(!(mask&(1u<<(ep%8))))u->sir[ep/8]|=1u<<(ep%8);
+     irq(u);
++}
++void receiveEvent(Pxa255Udc* u,unsigned ep) {
++    const auto& f=u->fifo[ep];
++    if(f.count && (!(u->csr[ep]&8) || f.size[f.head]-f.pos<32))event(u,ep);
+ }
+ void clearPackets(Pxa255Udc* u) {
+     for(auto& f:u->fifo)f={};
+@@ -117,7 +146,11 @@
+                     f.data[(f.head+f.count)&1][f.fill++]=value;
+                     if(f.fill==packetSize(ep))commit(f);
+                 }
+-            } else if(!write)value=outEp(ep) && f.count && f.pos<f.size[f.head]?f.data[f.head][f.pos++]:0;
++            } else if(!write) {
++                const unsigned remaining=f.count?f.size[f.head]-f.pos:0;
++                value=outEp(ep) && remaining?f.data[f.head][f.pos++]:0;
++                if(outEp(ep) && (u->csr[ep]&8) && remaining==32)receiveEvent(u,ep);
++            }
+         }
+     } else if(off==0) {
+         if(write) {
+@@ -146,8 +179,10 @@
+                 if(value&4)f={};
+                 if(value&0x80)commit(f);
+             } else if(outEp(e)) {
++                const bool wasDma=u->csr[e]&8;
+                 u->csr[e]=(u->csr[e]&~0x38)|(value&0x28)|(u->csr[e]&0x10&~value);
+                 if(value&2)consume(f);
++                if((value&2) || wasDma!=bool(u->csr[e]&8))receiveEvent(u,e);
+             }
+         } else if(!write)value=status(u,e);
+     } else if(off==0x50 || off==0x54) {
+@@ -162,6 +197,7 @@
+         constexpr unsigned eps[]={2,4,7,9,12,14};const auto& f=u->fifo[eps[(off-0x68)/4]];
+         if(!write)value=f.count && f.pos<f.size[f.head]?f.size[f.head]-f.pos-1:0;
+     } else return false;
++    refreshDma(u);
+     if(write){irq(u);if(u->notify)u->notify(u->notifyContext);}
+     else std::memcpy(buf,&value,size);
+     return true;
+@@ -171,6 +207,16 @@
+ Pxa255Udc* pxa255UdcInit(ArmMem* mem,PxaIc* ic,PxaDma* dma) {
+     auto* u=new Pxa255Udc{};u->ic=ic;u->dma=dma;
+     if(!memRegionAdd(mem,0x40600000,0x1000,access,u))ERR("cannot add UDC to MEM");
++    if(dma) {
++        const PxaDmaPeripheral bulk[]={
++            {dmaBytes<1>,nullptr,nullptr,u,0,dmaLevel<1>},
++            {dmaBytes<2>,nullptr,nullptr,u,0,dmaLevel<2>},
++            {dmaBytes<6>,nullptr,nullptr,u,0,dmaLevel<6>},
++            {dmaBytes<7>,nullptr,nullptr,u,0,dmaLevel<7>},
++            {dmaBytes<11>,nullptr,nullptr,u,0,dmaLevel<11>},
++            {dmaBytes<12>,nullptr,nullptr,u,0,dmaLevel<12>}};
++        for(unsigned i=0;i<6;++i)pxaDmaSetPeripheral(dma,bulkRequest[i],&bulk[i]);
++    }
+     return u;
+ }
+ bool pxa255UdcHostEnabled(const Pxa255Udc* u){return u && (u->ccr&1);}
+@@ -245,7 +291,7 @@
+     if(u->csr[ep]&0x20)return stall(u,ep);
+     auto& f=u->fifo[ep];if(f.count==2)return R::Nak;
+     const unsigned tail=(f.head+f.count)&1;if(size)std::memcpy(f.data[tail],data,size);
+-    f.size[tail]=size;++f.count;event(u,ep);return R::Ack;
++    f.size[tail]=size;++f.count;receiveEvent(u,ep);refreshDma(u);return R::Ack;
+ }
+ template<class T>void pxa255UdcSave(Pxa255Udc* u,T& state){
+     auto* chunk=state.GetChunk(ChunkType::pxa255udc,1);if(!chunk)ERR("cannot allocate UDC state");

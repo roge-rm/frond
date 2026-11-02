@@ -11,15 +11,21 @@ data class MachineSettings(
     val smoothing: Boolean = false,
     val sound: Boolean = true,
     val fastAudio: Boolean = false,
+    val microphone: Boolean = false,
+    val showKeyboard: Boolean = true,
+    val showJogControls: Boolean = true,
 ) {
     fun json(): JSONObject = JSONObject().put("size", size.name).put("smoothing", smoothing)
-        .put("sound", sound).put("fastAudio", fastAudio)
+        .put("sound", sound).put("fastAudio", fastAudio).put("microphone", microphone)
+        .put("showKeyboard", showKeyboard).put("showJogControls", showJogControls)
 
     fun applyTo(settings: Settings) = settings.copy(size = size, smoothing = smoothing, sound = sound)
 
-    fun arguments(soundSupported: Boolean = true): List<String> = buildList {
+    fun arguments(soundSupported: Boolean = true, tg50Controls: Boolean = false): List<String> = buildList {
         addAll(listOf("--window-fit", this@MachineSettings.size.arg))
         if (smoothing) add("--smooth-lcd")
+        if (tg50Controls && !showKeyboard) add("--hide-keyboard")
+        if (tg50Controls && !showJogControls) add("--hide-jog-controls")
         if (!soundSupported || !sound) add("--no-sound")
     }
 
@@ -31,6 +37,9 @@ data class MachineSettings(
                 json.optBoolean("smoothing", fallback.smoothing),
                 json.optBoolean("sound", fallback.sound),
                 json.optBoolean("fastAudio", fallback.fastAudio),
+                json.optBoolean("microphone", fallback.microphone),
+                json.optBoolean("showKeyboard", true),
+                json.optBoolean("showJogControls", true),
             )
         }
     }

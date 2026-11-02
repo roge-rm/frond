@@ -259,6 +259,38 @@ class PeripheralsModel(
         }
     }
 
+    var microphone by mutableStateOf("off")
+        private set
+    private val microphoneOwner = FrondActivity.running
+
+    fun readMicrophone() {
+        if (!device.microphone) return
+        activity.lifecycleScope.launch {
+            val state = withContext(Dispatchers.IO) { link?.request("microphone-state", timeoutSeconds = 10) }
+            if (state?.ok == true && microphone != "pending") microphone = state.message
+        }
+    }
+
+    fun changeMicrophone(on: Boolean) {
+        if (!device.microphone || FrondActivity.running !== microphoneOwner) return
+        microphoneOwner?.microphoneOnReturn(on)
+        val id = sessionId ?: return
+        try { Sessions.updateSettings(activity, id) { it.copy(microphone = on) } }
+        catch (e: Exception) { alert = "Couldn't save settings" to "Couldn't write the machine settings." }
+        if (on) microphone = "pending"
+        else {
+            microphone = "off"
+            activity.lifecycleScope.launch { withContext(Dispatchers.IO) { link?.request("microphone-mode", "off", timeoutSeconds = 10) } }
+        }
+    }
+
+    fun cancelMicrophoneRequest() {
+        microphoneOwner?.microphoneOnReturn(false)
+        if (microphone == "pending") microphone = "off"
+    }
+
+    fun microphoneDenied() { changeMicrophone(false); microphone = "off Permission denied" }
+
     // Low-latency audio for this device. The core takes it at start-up, so a change applies at the next start.
     var fastAudio by mutableStateOf(machineSettings().fastAudio)
         private set
@@ -568,15 +600,20 @@ class PeripheralsActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         panelControl?.setPanelVisible(true)
+        model.readMicrophone()
     }
 
     override fun onPause() {
+        if (!isFinishing) model.cancelMicrophoneRequest()
         panelControl?.setPanelVisible(false)
         super.onPause()
     }
 
     override fun onStop() {
         super.onStop()
-        if (!isFinishing && !isChangingConfigurations) FrondActivity.running?.saveInBackground()
+        if (!isFinishing) FrondActivity.running?.microphoneOnReturn(false)
+        if (!isFinishing && !isChangingConfigurations) {
+            FrondActivity.running?.saveInBackground()
+        }
     }
 }

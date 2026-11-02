@@ -803,3 +803,152 @@ benchmark-replay-jit: out/frond build/dynarmic/.built
 		tools/benchmark-replay.cpp @build/jit/core.rsp build/source/src/common/libcommon.a \
 		$(JIT_LIBS) $(CPU_TEST_LDLIBS) $(shell pkg-config --libs sdl2 SDL2_image) \
 		-o build/benchmark-replay-jit
+
+.PHONY: test-tg50-serial-board
+test: test-tg50-serial-board
+test-tg50-serial-board: out/frond
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/tg50-serial-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common tests/tg50-serial-board.cpp @build/tg50-serial-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-tg50-serial-board
+	./build/test-tg50-serial-board
+
+test: test-pxa255-udc-dma test-pxa255-udc-dma-state
+
+.PHONY: test-pxa255-udc-dma
+test-pxa255-udc-dma: build/source/src/common/libcommon.a
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter -Wno-class-memaccess -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/pxa255-udc-dma.cpp build/source/src/common/libcommon.a -o build/test-pxa255-udc-dma
+	./build/test-pxa255-udc-dma
+
+.PHONY: test-pxa255-udc-dma-state
+test-pxa255-udc-dma-state: out/frond
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/pxa255-udc-dma-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/pxa255-udc-dma-state.cpp @build/pxa255-udc-dma-core.rsp build/source/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-pxa255-udc-dma-state
+	./build/test-pxa255-udc-dma-state
+
+.PHONY: test-pxa255-udc-clock
+test: test-pxa255-udc-clock
+test-pxa255-udc-clock: out/frond
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/pxa255-udc-clock-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/pxa255-udc-clock.cpp @build/pxa255-udc-clock-core.rsp build/source/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-pxa255-udc-clock
+	./build/test-pxa255-udc-clock
+
+.PHONY: test-tg50-microphone-adc
+test-tg50-microphone-adc: prepare
+	$(CXX) -std=c++17 -O1 -g -ffunction-sections -fdata-sections \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/tg50-microphone-adc.cpp build/source/src/uarm/uarm/pxa_I2S.cpp \
+		build/source/src/uarm/uarm/i2sdev_AK4534.cpp build/source/src/uarm/uarm/audio_queue.cpp \
+		build/source/src/common/savestate/Chunk.cpp build/source/src/common/savestate/ChunkProbe.cpp \
+		build/source/src/common/Logging.cpp -Wl,--gc-sections -o build/test-tg50-microphone-adc
+	./build/test-tg50-microphone-adc
+
+.PHONY: test-tg50-microphone-state
+test-tg50-microphone-state: out/frond
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/tg50-microphone-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common tests/tg50-microphone-state.cpp @build/tg50-microphone-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-tg50-microphone-state
+	./build/test-tg50-microphone-state
+
+.PHONY: test-tg50-microphone-dma
+test-tg50-microphone-dma: prepare
+	$(CXX) -std=c++17 -O1 -g -ffunction-sections -fdata-sections \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/tg50-microphone-dma.cpp build/source/src/uarm/uarm/pxa_I2S.cpp \
+		build/source/src/uarm/uarm/pxa_DMA.cpp build/source/src/uarm/uarm/i2sdev_AK4534.cpp \
+		build/source/src/uarm/uarm/audio_queue.cpp build/source/src/common/savestate/Chunk.cpp \
+		build/source/src/common/savestate/ChunkProbe.cpp build/source/src/common/Logging.cpp \
+		-Wl,--gc-sections -o build/test-tg50-microphone-dma
+	./build/test-tg50-microphone-dma
+
+test: test-tg50-microphone-adc test-tg50-microphone-state test-tg50-microphone-dma
+
+.PHONY: test-host-microphone
+test-host-microphone: prepare
+	$(CXX) -std=c++17 -O2 -g -Ibuild/source/src/uarm/native -Ibuild/source/src/uarm/uarm \
+		$(shell sdl2-config --cflags) tests/host-microphone.cpp $(shell sdl2-config --libs) -pthread -o build/test-host-microphone
+	SDL_AUDIODRIVER=dummy ./build/test-host-microphone
+
+.PHONY: test-host-microphone-state
+test-host-microphone-state: out/frond
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/host-microphone-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/native -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		$(shell sdl2-config --cflags) tests/host-microphone-state.cpp @build/host-microphone-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-host-microphone-state
+	./build/test-host-microphone-state
+
+.PHONY: test-sony-dac-preview
+test-sony-dac-preview: prepare
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Ibuild/source/src/uarm/uarm tests/sony-dac-preview.cpp -o build/test-sony-dac-preview
+	./build/test-sony-dac-preview
+
+.PHONY: test-sony-dac-host
+test-sony-dac-host: prepare
+	$(CXX) -std=c++17 -O1 -g -ffunction-sections -fdata-sections -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common tests/sony-dac-host.cpp build/source/src/uarm/uarm/pxa_I2S.cpp build/source/src/uarm/uarm/pxa_DMA.cpp build/source/src/uarm/uarm/i2sdev_AK4534.cpp build/source/src/uarm/uarm/audio_queue.cpp build/source/src/common/savestate/Chunk.cpp build/source/src/common/savestate/ChunkProbe.cpp build/source/src/common/Logging.cpp -Wl,--gc-sections -o build/test-sony-dac-host
+	./build/test-sony-dac-host
+
+.PHONY: test-csr-bcsp
+test: test-csr-bcsp
+test-csr-bcsp: out/frond
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -pedantic -Ibuild/source/src/uarm/uarm tests/bcsp-transport.cpp build/source/src/uarm/uarm/BcspTransport.cpp -o build/test-csr-bcsp-transport
+	./build/test-csr-bcsp-transport
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -pedantic -Ibuild/source/src/uarm/uarm tests/csr-backpressure.cpp build/source/src/uarm/uarm/BluetoothBackend.cpp -o build/test-csr-backpressure
+	./build/test-csr-backpressure
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/csr-bcsp-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common tests/csr-bcsp-board.cpp @build/csr-bcsp-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-csr-bcsp-board
+	./build/test-csr-bcsp-board
+	./build/test-csr-bcsp-board --lifecycle
+
+.PHONY: test-csr-bcsp-lifetime
+test-csr-bcsp-lifetime: prepare
+	$(CXX) -std=c++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Ibuild/source/src/uarm/uarm tests/csr-bcsp-lifetime.cpp build/source/src/uarm/uarm/CsrBcspRadio.cpp build/source/src/uarm/uarm/BcspTransport.cpp build/source/src/uarm/uarm/BluetoothBackend.cpp -o build/test-csr-bcsp-lifetime
+	./build/test-csr-bcsp-lifetime
+
+.PHONY: test-csr-peer-services
+test: test-csr-peer-services
+test-csr-peer-services: out/frond
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -pedantic -Ibuild/source/src/uarm/uarm tests/csr-peer-services.cpp build/source/src/uarm/uarm/BcspTransport.cpp -o build/test-csr-peer-services
+	./build/test-csr-peer-services
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm tests/csr-peer-radio-state.cpp build/source/src/uarm/uarm/CsrBcspRadio.cpp build/source/src/uarm/uarm/BcspTransport.cpp build/source/src/uarm/uarm/BluetoothBackend.cpp -o build/test-csr-peer-radio-state
+	./build/test-csr-peer-radio-state
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/csr-peer-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common tests/csr-peer-state.cpp @build/csr-peer-core.rsp build/source/src/common/libcommon.a -lSDL2 -lSDL2_image -lreadline $(CPU_TEST_LDLIBS) -o build/test-csr-peer-state
+	./build/test-csr-peer-state
+
+.PHONY: bluetooth-opp-peer test-bluetooth-opp-peer
+bluetooth-opp-peer:
+	python3 tools/build-bluetooth-opp-peer.py
+
+test-bluetooth-opp-peer:
+	python3 tools/build-bluetooth-opp-peer.py --test
+
+.PHONY: test-csr-controller-lifecycle
+test: test-csr-controller-lifecycle
+test-csr-controller-lifecycle: out/frond
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Ibuild/source/src/uarm/uarm tests/csr-controller-reset.cpp -o build/test-csr-controller-reset
+	./build/test-csr-controller-reset
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Ibuild/source/src/uarm/uarm tests/csr-controller-lifecycle.cpp build/source/src/uarm/uarm/CsrBcspRadio.cpp build/source/src/uarm/uarm/BcspTransport.cpp build/source/src/uarm/uarm/BluetoothBackend.cpp -o build/test-csr-controller-lifecycle
+	./build/test-csr-controller-lifecycle
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Ibuild/source/src/uarm/uarm tests/csr-peer-services.cpp build/source/src/uarm/uarm/BcspTransport.cpp -o build/test-csr-peer-services
+	./build/test-csr-peer-services
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm tests/csr-peer-radio-state.cpp build/source/src/uarm/uarm/CsrBcspRadio.cpp build/source/src/uarm/uarm/BcspTransport.cpp build/source/src/uarm/uarm/BluetoothBackend.cpp -o build/test-csr-peer-radio-state
+	./build/test-csr-peer-radio-state
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/csr-controller-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common tests/csr-peer-state.cpp @build/csr-controller-core.rsp build/source/src/common/libcommon.a -lSDL2 -lSDL2_image -lreadline $(CPU_TEST_LDLIBS) -o build/test-csr-peer-state
+	./build/test-csr-peer-state
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common tests/csr-bcsp-board.cpp @build/csr-controller-core.rsp build/source/src/common/libcommon.a -lSDL2 -lSDL2_image -lreadline $(CPU_TEST_LDLIBS) -o build/test-csr-bcsp-board
+	./build/test-csr-bcsp-board --lifecycle
+	./build/test-csr-bcsp-board
+
+.PHONY: test-tg50-audio-queue
+test-tg50-audio-queue: out/frond
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/tg50-audio-queue-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common tests/tg50-audio-queue.cpp @build/tg50-audio-queue-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-tg50-audio-queue
+	ulimit -c 0; ./build/test-tg50-audio-queue
+
+.PHONY: test-tg50-audio-lifecycle
+test-tg50-audio-lifecycle: out/frond
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/tg50-audio-lifecycle-core.rsp
+	$(CXX) -std=c++17 -O1 -g $(shell sdl2-config --cflags) -Ibuild/source/src/uarm/native -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common tests/tg50-audio-lifecycle.cpp build/source/src/uarm/native/SdlAudioDriver.cpp @build/tg50-audio-lifecycle-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-tg50-audio-lifecycle
+	ulimit -c 0; ./build/test-tg50-audio-lifecycle

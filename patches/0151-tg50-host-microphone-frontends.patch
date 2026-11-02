@@ -1,0 +1,394 @@
+--- a/src/common/device_profile5.h
++++ b/src/common/device_profile5.h
+@@ -20,7 +20,7 @@
+ // Which button bar and silkscreen art a device gets (native/DeviceControls.h draws them).
+ enum class DeviceArt { none, tx, e2, zire72, m515, iiix, tg50 };
+ // Settings and peripherals a device supports; the desktop and core gate on these.
+-struct DeviceCapabilities5 { bool network, keyboard, serial, usb, fastAudio, infrared, bluetooth; bool sound{false}; };
++struct DeviceCapabilities5 { bool network, keyboard, serial, usb, fastAudio, infrared, bluetooth; bool sound{false}; bool microphone{false}; };
+ 
+ // A device's fixed name is what sessions, settings, the control socket and command line use.
+ // DeviceType5 is internal only and never saved.
+@@ -112,7 +112,7 @@
+     {deviceTypeTG50, "sony-clie-tg50", "Sony CLIÉ TG50", DeviceCohort5::tg50Nor, DeviceSupport5::experimentalDesktop,
+      DeviceDetect5::cardHeader, 0x736f6e79 /* sony */, 0x76726e61 /* vrna */,
+      DeviceBoard5::pxa250SonyTG50, DeviceArt::tg50,
+-     {false, true, false, false, false, true, false, true},
++     {false, true, true, false, false, true, false, true, true},
+      0xc70000, 0, 16u << 20, 16u << 20, DisplayMode::mode_320x320, 1u << 5, false,
+      DeviceNorLayout5::smallAndBigCards, 0, 0x20000, false, 0, 0,
+      {true, "tg50", 320, 320, 0, 224, "Date Book|Address|To Do|Memo Pad",
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -29,6 +29,7 @@
+ #include "RenderThread.h"
+ #include "Rotation.h"
+ #include "SdlAudioDriver.h"
++#include "SdlMicrophone.h"
+ #include "SdlEventHandler.h"
+ #include "DeviceControls.h"
+ #include "SdlRenderer.h"
+@@ -558,6 +559,16 @@
+             .screenHeight = displayConfiguration.height + displayConfiguration.graffitiHeight};
+ 
+         // The endpoint opens after the session loads, so a restore starts detached.
++        SdlMicrophone microphone;
++        commandContext.microphone = &microphone;
++        microphone.detach = [&] { if (deviceType == deviceTypeTG50) static_cast<SocPXA*>(soc)->SetMicrophoneSource(nullptr); };
++        const auto microphoneSource = microphone.Source();
++        microphone.prepare = [&] {
++            if (deviceType != deviceTypeTG50) return false;
++            auto* machine = static_cast<SocPXA*>(soc);
++            machine->SetMicrophoneSource(&microphoneSource);
++            return !machine->PowerSleeping();
++        };
+         HostSerial serial;
+         commandContext.serial = &serial;
+         const auto& capabilities = deviceProfile5(deviceType)->capabilities;
+@@ -633,8 +644,21 @@
+         // on it in the same order and at the same points as with one thread. RenderLink
+         // carries SDL events to it in order and its LCD frames back.
+         RenderLink link(displayConfiguration.width, displayConfiguration.height);
++        link.beforeEvent = [&](const SDL_Event& event) {
++            microphone.AppEventOnDeviceThread(event.type);
++#ifndef __ANDROID__
++            if (event.type == SDL_WINDOWEVENT) {
++                if (event.window.event == SDL_WINDOWEVENT_MINIMIZED || event.window.event == SDL_WINDOWEVENT_HIDDEN)
++                    microphone.AppEventOnDeviceThread(SDL_APP_WILLENTERBACKGROUND);
++                if (event.window.event == SDL_WINDOWEVENT_RESTORED || event.window.event == SDL_WINDOWEVENT_SHOWN)
++                    microphone.AppEventOnDeviceThread(SDL_APP_DIDENTERFOREGROUND);
++            }
++#endif
++        };
+         sdlEventHandler.SetDirectCapture(false);
+         audioDriver.SetDeviceThread([&](const function<void()>& work) { link.Call(work); });
++
++        microphone.SetDeviceThread([&](const function<void()>& work) { link.Call(work); });
+ 
+         // SDL thread state: what it drew last, whether the app is hidden, and whether the
+         // window needs drawing again (redraw) or the whole frame uploaded again (redrawAll).
+@@ -695,6 +719,8 @@
+                 link.TakeInputs(inputs);
+                 for (const auto& input : inputs) {
+                     if (!input.layout) {
++                        if (input.event.type == SDL_AUDIODEVICEREMOVED && input.event.adevice.iscapture)
++                            microphone.Removed(input.event.adevice.which);
+                         sdlEventHandler.HandleEvent(input.event);
+                         continue;
+                     }
+@@ -711,6 +737,7 @@
+                     sdlEventHandler.ClearQuitRequested();
+                 }
+ 
++                if (desktop) desktop->microphoneChanged(commandContext);
+                 // The TG50 menu lets Palm OS finish card notifications without drawing.
+                 // Leaving that menu for another app still pauses every guest clock.
+                 const bool headless = sdlEventHandler.InBackground() && deviceType == deviceTypeTG50 &&
+@@ -743,6 +770,7 @@
+                     if (!waitForPreviewAudio && pending > 3072) waitForPreviewAudio = true;
+                     if (waitForPreviewAudio && pending < 2048) waitForPreviewAudio = false;
+                 } else waitForPreviewAudio = false;
++                if (deviceType == deviceTypeTG50) microphone.Service(static_cast<SocPXA*>(soc)->MicrophoneDemand());
+                 serial.Service();
+                 usb.Service();
+                 infrared.Service();
+@@ -788,7 +816,7 @@
+                     if (options.runFor) cout << s.str();
+                 }
+ 
+-                if (desktop) desktop->serialChanged(commandContext);
++                if (desktop) { desktop->microphoneChanged(commandContext); desktop->serialChanged(commandContext); }
+                 if (desktop) desktop->usbChanged(commandContext);
+                 if (desktop) desktop->infraredChanged(commandContext);
+                 if (desktop) desktop->bluetoothChanged(commandContext);
+@@ -914,6 +942,9 @@
+         link.Stop();
+         guest.join();
+         SDL_SetEventFilter(nullptr, nullptr);
++        microphone.SetDeviceThread({});
++        microphone.CloseOnDeviceThread();
++        if (deviceType == deviceTypeTG50) static_cast<SocPXA*>(soc)->SetMicrophoneSource(nullptr);
+         if (renderError) rethrow_exception(renderError);
+         if (guestError) rethrow_exception(guestError);
+         // The last frame the guest thread published, as the one-thread loop drew it.
+--- a/src/uarm/native/Commands.h
++++ b/src/uarm/native/Commands.h
+@@ -9,6 +9,7 @@
+ #include "InputReplay.h"
+ #include "Rotation.h"
+ #include "SdlAudioDriver.h"
++#include "SdlMicrophone.h"
+ #include "SoC.h"
+ #include "SerialHostRoute.h"
+ 
+@@ -30,6 +31,7 @@
+         HostInfrared* infrared{nullptr};
+         std::string infraredError{};
+         std::string bluetoothError{};
++        SdlMicrophone* microphone{nullptr};
+         HostSerial* serial{nullptr};      // live host endpoint, never session state
+         SerialHostRoute serialRoute{};
+         PxaUart* serialUart{nullptr};     // TX FFUART for serial-mode changes
+--- a/src/uarm/native/RenderThread.h
++++ b/src/uarm/native/RenderThread.h
+@@ -95,6 +95,8 @@
+         for (auto& stale : staleLines) stale = {0, uint32_t(height - 1)};
+     }
+ 
++    std::function<void(const SDL_Event&)> beforeEvent;
++
+     // SDL thread: a new layout, queued behind the events so far.
+     void PushLayout(const WindowLayout& layout, std::optional<Rotation> rotation = std::nullopt) {
+         std::lock_guard<std::mutex> lock(mutex);
+@@ -126,6 +128,7 @@
+     // it can lay out, redraw or pump.
+     static int SDLCALL Filter(void* userdata, SDL_Event* event) {
+         auto& link = *static_cast<RenderLink*>(userdata);
++        if (link.beforeEvent) link.beforeEvent(*event);
+         std::lock_guard<std::mutex> lock(link.mutex);
+         link.ReleaseHeld();
+         link.Take(*event);
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -58,6 +58,11 @@
+     void event(const char* name, const std::string& message = {}) {
+         output += std::string("0\tevent\t") + name + "\t" + encode(message) + "\n";
+     }
++    void microphoneChanged(commands::Context& ctx) {
++        const auto state = ctx.microphone ? ctx.microphone->State() : "off";
++        if (state == lastMicrophone || (state == "off" && lastMicrophone.empty())) return;
++        lastMicrophone = state; event("microphone", state);
++    }
+     // Pushes the serial state when it changes, for example on a peer connect or hangup.
+     void serialChanged(commands::Context& ctx) {
+         // Clients that never use serial never see the event.
+@@ -123,7 +128,7 @@
+             std::string argument;
+             if (!decode(line.substr(second + 1), argument)) return true;
+             const bool work = command == "guest-ready" || command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "db-list" || command == "reset" || command == "hard-reset" || command == "launch-app" || command == "input-replay" || (command.rfind("sd-", 0) == 0 && command != "sd-state") || (command.rfind("ms-",0)==0&&command!="ms-state"&&command!="ms-protection");
+-            if (work) ctx.audioDriver.Pause();
++            if (work) { if (ctx.microphone) ctx.microphone->Disarm(); ctx.audioDriver.Pause(); }
+             Reply result;
+             try {
+                 result = dispatch(ctx, command, argument, id);
+@@ -153,7 +158,7 @@
+         if (sent > 0) output.erase(0, sent);
+         return sent >= 0 || errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR;
+     }
+-    std::string lastSerial, lastUsb, lastInfrared, lastBluetooth;
++    std::string lastMicrophone, lastSerial, lastUsb, lastInfrared, lastBluetooth;
+     static std::string UsbState(commands::Context& ctx) {
+         if (!ctx.usb) return "off";
+         const auto state = ctx.usb->Describe();
+@@ -271,7 +276,7 @@
+             command == "ms-mkdir" || command == "ms-delete" || command == "ms-rename";
+         const bool fileCommand = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "ms-insert" || command == "ms-export" || command == "input-replay";
+         if (fileCommand && (path.empty() || path.front() != '/')) return {false, "argument", "An absolute file path is required."};
+-        if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "ms-read-only" && command != "launch-app" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "bluetooth-mode" && command != "sound-mode" && command != "hold" && !path.empty()) return {false, "argument", "This command takes no argument."};
++        if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "ms-read-only" && command != "launch-app" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "bluetooth-mode" && command != "sound-mode" && command != "microphone-mode" && command != "hold" && !path.empty()) return {false, "argument", "This command takes no argument."};
+         if (command == "guest-ready") {
+             if (!GuestDatabaseOps::Ready(*ctx.soc))
+                 return {false, "not-ready", "Palm OS has not reached a supported application boundary."};
+@@ -593,6 +598,23 @@
+                           static_cast<unsigned long long>(ctx.audioDriver.GetUnderrunCount()));
+             return {true, "speed", text};
+         }
++        if (command == "microphone-epoch") return {true, "microphone", ctx.microphone ? std::to_string(ctx.microphone->Epoch()) : "0"};
++        if (command == "microphone-state") return {true, "microphone", ctx.microphone ? ctx.microphone->State() : "off"};
++        if (command == "microphone-mode") {
++            if (!caps.microphone || !ctx.microphone)
++                return {false, "unsupported", "This device has no emulated microphone."};
++            if (path.rfind("on-return:", 0) == 0) {
++                const auto number = path.substr(10);
++                if (number.empty() || number.size() > 19 || number.find_first_not_of("0123456789") != std::string::npos)
++                    return {false, "argument", "Invalid capture request."};
++                if (!ctx.microphone->ArmOnForeground(std::stoull(number))) return {false, "expired", "Capture request expired."};
++                return {true, "microphone", "pending"};
++            }
++            if (path != "on" && path != "off") return {false, "argument", "Use on or off."};
++            if (path == "off") ctx.microphone->Disarm();
++            else if (!ctx.microphone->Arm()) return {false, "microphone", ctx.microphone->State()};
++            return {true, "microphone", ctx.microphone->State()};
++        }
+         if (command == "sound-state") return {true, "sound", SoundState(ctx)};
+         if (command == "sound-mode") {
+             // Off mutes a playing device; on unmutes it, or starts it after --no-sound or audio-off.
+@@ -608,7 +630,7 @@
+         else if (command == "rotate") ctx.rotation = Rotation((int(ctx.rotation) + 1) % 4);
+         else if (command == "audio-on") { ctx.audioDriver.SetMuted(false); ctx.audioDriver.Start(); sound = true; }
+         else if (command == "audio-off") { ctx.audioDriver.Pause(); sound = false; }
+-        else if (command == "quit") quit = true;
++        else if (command == "quit") { if (ctx.microphone) ctx.microphone->Disarm(); quit = true; }
+         else return {false, "command", "Unknown desktop command."};
+         return {true, "done", "Done."};
+     }
+--- /dev/null
++++ b/src/uarm/native/SdlMicrophone.h
+@@ -0,0 +1,167 @@
++#ifndef FROND_SDL_MICROPHONE_H
++#define FROND_SDL_MICROPHONE_H
++#include <SDL.h>
++#include <array>
++#include <atomic>
++#include <algorithm>
++#include <cmath>
++#include <functional>
++#include <mutex>
++#include <string>
++#include "i2sdev_AK4534.h"
++
++// Callback frames are mono signed16 at 48 kHz. The emulator never waits for input.
++// A fixed 250 ms ring drops oldest frames on overflow. Guest time consumes at its
++// declared rate, with zero on underrun; no correction changes the guest clock.
++class MicrophoneQueue {
++public:
++    static constexpr size_t capacity = 12000;
++    void Fence(bool value) { std::lock_guard<std::mutex> lock(mutex); fenced = value; }
++    void Configure(const Ak4534InputDemand& d) {
++        std::lock_guard<std::mutex> lock(mutex);
++        if (fenced) return;
++        if (active != d.active || route != d.route || numerator != d.rateNumerator || denominator != d.rateDenominator) {
++            Clear(); ++generation; active = d.active; route = d.route; numerator = d.rateNumerator; denominator = d.rateDenominator;
++            // 48-tap windowed sinc, cutoff follows the lower Nyquist frequency.
++            const double rate = denominator ? double(numerator) / denominator : 0;
++            const double cutoff = std::min(0.45, rate / 48000 * 0.45);
++            double sum = 0;
++            for (size_t i = 0; i < filter.size(); ++i) {
++                const double x = double(i) - 23.5;
++                filter[i] = std::sin(2 * 3.141592653589793 * cutoff * x) / (3.141592653589793 * x) *
++                            (0.54 - 0.46 * std::cos(2 * 3.141592653589793 * i / 47));
++                sum += filter[i];
++            }
++            if (sum) for (auto& c : filter) c /= sum;
++        }
++    }
++    void Reset() {
++        std::lock_guard<std::mutex> lock(mutex);
++        Clear(); active = false; fenced = false; ++generation;
++    }
++    void Publish(const int16_t* input, size_t frames, uint64_t expectedGeneration) {
++        std::lock_guard<std::mutex> lock(mutex);
++        if (fenced || !active || expectedGeneration != generation) return;
++        for (size_t i = 0; i < frames; ++i) {
++            if (count == capacity) { read = (read + 1) % capacity; --count; ++dropped; }
++            samples[(read + count) % capacity] = input[i]; ++count;
++        }
++    }
++    int16_t Pull(Ak4534InputRoute requestedRoute, uint32_t n, uint32_t d) {
++        std::lock_guard<std::mutex> lock(mutex);
++        if (fenced || !active || requestedRoute != route || n != numerator || d != denominator || !n || !d) return 0;
++        // Linear interpolation follows the anti-alias filter. Phase is in host frames.
++        const size_t consumed = size_t(phase);
++        if (count < consumed + 2) { Clear(); ++underruns; return 0; }
++        for (size_t i = 0; i < consumed; ++i) {
++            history[historyAt] = samples[read]; historyAt = (historyAt + 1) % history.size();
++            read = (read + 1) % capacity; --count;
++        }
++        phase -= consumed;
++        double current = 0, next = 0;
++        for (size_t j = 0; j < filter.size(); ++j) {
++            current += filter[j] * history[(historyAt + j) % history.size()];
++            next += filter[j] * (j + 1 == filter.size() ? samples[read] : history[(historyAt + j + 1) % history.size()]);
++        }
++        const double value = current * (1 - phase) + next * phase;
++        phase += 48000.0 * d / n;
++        return int16_t(std::round(std::clamp(value, -32768.0, 32767.0)));
++    }
++    uint64_t Generation() const { std::lock_guard<std::mutex> lock(mutex); return generation; }
++    size_t Pending() const { std::lock_guard<std::mutex> lock(mutex); return count; }
++    uint64_t Dropped() const { std::lock_guard<std::mutex> lock(mutex); return dropped; }
++    uint64_t Underruns() const { std::lock_guard<std::mutex> lock(mutex); return underruns; }
++private:
++    void Clear() { read = count = historyAt = 0; phase = 0; history.fill(0); }
++    mutable std::mutex mutex;
++    std::array<double, capacity> samples{};
++    std::array<double, 48> filter{}, history{};
++    size_t read{}, count{}, historyAt{};
++    double phase{};
++    bool active{}, fenced{};
++    Ak4534InputRoute route{};
++    uint32_t numerator{}, denominator{};
++    uint64_t generation{}, dropped{}, underruns{};
++};
++
++class SdlMicrophone {
++public:
++    ~SdlMicrophone() {
++        deviceThread = {};
++        CloseOnDeviceThread();
++        if (detach) detach();
++    }
++    std::function<void()> detach;
++    std::function<bool()> prepare;
++    void SetDeviceThread(std::function<void(const std::function<void()>&)> run) { deviceThread = std::move(run); }
++    bool Arm(uint64_t expectedEpoch = UINT64_MAX) {
++        error.clear();
++        preparing = true;
++        const bool ready = !prepare || prepare();
++        preparing = false;
++        if (!ready) { error = "Wake the device to enable capture"; return false; }
++        OnDeviceThread([&] {
++            CloseOnDeviceThread();
++            if (expectedEpoch != UINT64_MAX && expectedEpoch != epoch.load()) { error = "Capture request expired"; return; }
++            if (background) { error = "Return to the device to enable capture"; return; }
++            SDL_AudioSpec wanted{}; wanted.freq = 48000; wanted.format = AUDIO_S16SYS;
++            wanted.channels = 1; wanted.samples = 512; wanted.callback = Callback; wanted.userdata = this;
++            SDL_AudioSpec actual{};
++            const auto opened = SDL_OpenAudioDevice(nullptr, 1, &wanted, &actual, SDL_AUDIO_ALLOW_SAMPLES_CHANGE);
++            if (!opened) { error = SDL_GetError(); return; }
++            device.store(opened);
++            SDL_PauseAudioDevice(opened, 0);
++        });
++        return device.load() != 0;
++    }
++    void Disarm() { pendingArm = false; OnDeviceThread([&] { if (!preparing) ++epoch; CloseOnDeviceThread(); }); }
++    uint64_t Epoch() const { return epoch.load(); }
++    bool ArmOnForeground(uint64_t expectedEpoch) {
++        bool accepted = false;
++        OnDeviceThread([&] {
++            if (expectedEpoch != epoch.load()) return;
++            pendingEpoch = expectedEpoch; pendingArm = true; accepted = true;
++        });
++        return accepted;
++    }
++    // SDL app events are emitted in the SDL pump before Android pauses device locks.
++    void AppEventOnDeviceThread(uint32_t type) {
++        if (type == SDL_APP_WILLENTERBACKGROUND) { background = true; ++epoch; pendingArm = false; CloseOnDeviceThread(); }
++        else if (type == SDL_APP_DIDENTERFOREGROUND) background = false;
++    }
++    void CloseOnDeviceThread() {
++        const auto closing = device.exchange(0);
++        queue.Reset();
++        if (closing) SDL_CloseAudioDevice(closing);
++    }
++    void Removed(SDL_AudioDeviceID id) { if (device.load() == id) { Disarm(); error = "Capture device disconnected"; } }
++    void Service(const Ak4534InputDemand& demand) {
++        if (pendingArm.load() && !background.load() && pendingArm.exchange(false)) Arm(pendingEpoch);
++        queue.Configure(demand);
++    }
++    std::string State() const { return device.load() ? "on" : error.empty() ? "off" : "off " + error; }
++    size_t Pending() const { return queue.Pending(); }
++    uint64_t Dropped() const { return queue.Dropped(); }
++    uint64_t Underruns() const { return queue.Underruns(); }
++    Ak4534InputSource Source() {
++        return {this, [](void* p, Ak4534InputRoute r, uint32_t n, uint32_t d) {
++                    return static_cast<SdlMicrophone*>(p)->queue.Pull(r, n, d); },
++                [](void* p, bool f) { static_cast<SdlMicrophone*>(p)->queue.Fence(f); },
++                [](void* p) { static_cast<SdlMicrophone*>(p)->Disarm(); }};
++    }
++private:
++    static void Callback(void* p, uint8_t* stream, int bytes) {
++        auto& self = *static_cast<SdlMicrophone*>(p);
++        self.queue.Publish(reinterpret_cast<int16_t*>(stream), size_t(bytes) / sizeof(int16_t), self.queue.Generation());
++    }
++    void OnDeviceThread(const std::function<void()>& work) { deviceThread ? deviceThread(work) : work(); }
++    MicrophoneQueue queue;
++    std::function<void(const std::function<void()>&)> deviceThread;
++    std::atomic<SDL_AudioDeviceID> device{0};
++    std::atomic<bool> background{false}, pendingArm{false};
++    std::atomic<uint64_t> epoch{0};
++    uint64_t pendingEpoch{};
++    bool preparing{}; // emulator thread, while attaching its source
++    std::string error;
++};
++#endif

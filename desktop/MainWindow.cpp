@@ -203,6 +203,13 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     soundToggle = new QCheckBox(tr("On"), root);
     soundToggle->setObjectName("sound");
     label(tr("Sound"), 0); grid->addWidget(soundToggle, 0, 1, 1, 2);
+    microphoneToggle = new QCheckBox(tr("On"), root);
+    microphoneToggle->setObjectName("microphone");
+    label(tr("Microphone"), 13); grid->addWidget(microphoneToggle, 13, 1, 1, 2);
+    microphoneState = new QLabel(root); grid->addWidget(microphoneState, 14, 1, 1, 2);
+    connect(microphoneToggle, &QCheckBox::clicked, this, [this](bool on) {
+        send("microphone-mode", on ? "on" : "off");
+    });
     network = new QComboBox(root);
     network->setObjectName("networkMode");
     network->addItem(tr("Disabled"), "disabled");
@@ -390,6 +397,7 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     stopButton = new QPushButton(tr("Save and Stop"), sessionBar);
     stopButton->setObjectName("stop");
     forceButton = new QPushButton(tr("Force Stop…"), sessionBar);
+    forceButton->setObjectName("forceStop");
     forceButton->hide();
     sessionButtons->addStretch(); sessionButtons->addWidget(forceButton); sessionButtons->addWidget(stopButton);
     layout->addStretch();
@@ -441,6 +449,7 @@ MainWindow::MainWindow(const QString& core) : core(core) {
         forceButton->show(); statusBar()->showMessage(tr("The emulator is not responding. Waiting for it to finish…"));
     });
     connect(&client, &DesktopClient::started, this, [this] {
+        microphoneArmed = false; microphoneState->clear();
         busy = false; hardResetAfterSave = false;
         statusBar()->showMessage(tr("Running. Your session will be saved when you close Frond.")); refresh();
         if (stopping) save();
@@ -451,13 +460,20 @@ MainWindow::MainWindow(const QString& core) : core(core) {
         else endExchange();
         if (memoryStickFiles) memoryStickFiles->reject();
         holdKnown = holdOn = false;
+        microphoneArmed = false; microphoneState->clear();
+        const bool stoppedTg50 = runningDevice == frondFirmware::deviceFromId("sony-clie-tg50");
         busy = false; stopping = false; hardResetAfterSave = false; cardPresent = cardInserted = false; runningDevice = frondFirmware::Device::tx;
         copyLock.reset(); savingPath.clear();
-        sdKnown = protectionKnown = false; showSerial({}); loadSerialSettings(); showUsb({}); loadUsbSettings(); showIrda({}); loadIrdaSettings(); showBluetooth({}); loadBluetoothSettings(); sessionLock.reset(); forceButton->hide(); refreshSessions();
+        sdKnown = protectionKnown = false; showSerial({}); loadSerialSettings(); showUsb({}); loadUsbSettings(); showIrda({}); loadIrdaSettings(); showBluetooth({}); loadBluetoothSettings(); if (stoppedTg50) bluetooth->setChecked(false); sessionLock.reset(); forceButton->hide(); refreshSessions();
         if (closeAfterStop) { allowClose = true; close(); }
         else statusBar()->showMessage(tr("Stopped."));
     });
-    connect(&client, &DesktopClient::closeRequested, this, [this] { stop(true); });
+    connect(&client, &DesktopClient::closeRequested, this, [this] { stop(false); });
+    connect(&client, &DesktopClient::microphoneState, this, [this](const QString& state) {
+        microphoneArmed = state == "on";
+        microphoneState->setText(state.startsWith("off ") ? state.mid(4) : QString());
+        refresh();
+    });
     connect(&client, &DesktopClient::serialState, this, [this](const QString& state) { showSerial(state); });
     connect(&client, &DesktopClient::usbState, this, [this](const QString& state) { showUsb(state); });
     connect(&client, &DesktopClient::bluetoothState, this, &MainWindow::showBluetooth);
@@ -474,6 +490,7 @@ MainWindow::MainWindow(const QString& core) : core(core) {
             if (command == "hold-state" || command == "hold") { holdKnown = false; refresh(); }
             if (command == "sd-state" || command == "ms-state") sdKnown = false;
             if (command == "ms-protection" || command == "ms-read-only") { protectionKnown = false; refresh(); }
+            if (command == "microphone-mode") { microphoneArmed = false; microphoneState->setText(message); }
             if (command == "serial-mode") showSerial("off " + message);  // the core is now off
             if (command == "usb-mode") showUsb("off " + message);
             if(command=="irda-mode")showIrda("off error: "+message);
@@ -527,6 +544,14 @@ MainWindow::MainWindow(const QString& core) : core(core) {
         if (command == "network-state" || command == "network-mode") {
             const auto index = network->findData(message);
             if (index >= 0) network->setCurrentIndex(index);
+        }
+        if (command == "microphone-state" || command == "microphone-mode") {
+            microphoneArmed = message == "on";
+            microphoneState->setText(message.startsWith("off ") ? message.mid(4) : QString());
+            if (command == "microphone-mode") {
+                runningPreferences.microphone = microphoneArmed;
+                frondSessions::writePreferences(sessionPath, runningPreferences);
+            }
         }
         if (command=="keyboard-state" || command=="keyboard-attach") keyboard->setChecked(message=="attached");
         if (command == "serial-mode") {
@@ -610,6 +635,8 @@ void MainWindow::refresh() {
     note(irda,caps.infrared,irdaTip);note(irdaPort,caps.infrared,{});
     const bool enabled = client.available() && !busy && !stopping && exchangeStage == ExchangeStage::None;
     for (auto* w : runningButtons) w->setEnabled(enabled);
+    microphoneToggle->setEnabled(enabled && caps.microphone);
+    microphoneToggle->setChecked(running && microphoneArmed);
     soundToggle->setEnabled(enabled && caps.sound);
     soundToggle->setChecked(caps.sound && runningPreferences.audio);
     note(soundToggle, caps.sound, {});
@@ -941,6 +968,7 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     sessionPath = target;
     holdKnown = holdOn = false;
     const auto caps = frondFirmware::capabilities(startDevice);
+    if (startDevice == frondFirmware::deviceFromId("sony-clie-tg50")) bluetooth->setChecked(false);
     if (caps.serial && serialArgument() != "off") arguments << "--serial" << serialArgument();
     if (caps.usb && usbArgument() != "off") arguments << "--usb" << usbArgument();
     if(caps.infrared && irdaArgument()!="off")arguments << "--irda" << irdaArgument();
@@ -967,6 +995,10 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
         frondFirmware::storedNor(firmwareRoot(), startDevice))) arguments << "--fast-audio";
     arguments << "--window-scale" << QString::number(runningPreferences.scale / 4.0);
     if (runningPreferences.smooth) arguments << "--smooth-lcd";
+    if (startDevice == frondFirmware::deviceFromId("sony-clie-tg50")) {
+        if (!runningPreferences.showKeyboard) arguments << "--hide-keyboard";
+        if (!runningPreferences.showJogControls) arguments << "--hide-jog-controls";
+    }
     stopping = closeAfterStop = allowClose = false;
     log->clear(); busy = true;
     const bool launched = client.start(core, arguments);

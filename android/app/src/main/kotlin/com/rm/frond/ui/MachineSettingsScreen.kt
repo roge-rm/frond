@@ -69,6 +69,14 @@ fun MachineSettingsScreen(model: HomeModel) {
             SwitchRow("Smooth pixels", draft.settings.smoothing) {
                 model.changeMachineSettings(draft.settings.copy(smoothing = it))
             }
+            if (draft.device.id == "sony-clie-tg50") {
+                SwitchRow("Show keyboard", draft.settings.showKeyboard) {
+                    model.changeMachineSettings(draft.settings.copy(showKeyboard = it))
+                }
+                SwitchRow("Show jog controls", draft.settings.showJogControls) {
+                    model.changeMachineSettings(draft.settings.copy(showJogControls = it))
+                }
+            }
             Header("Audio", Modifier.padding(top = 16.dp))
             SwitchRow("Sound", draft.device.sound && draft.settings.sound, enabled = draft.device.sound) {
                 model.changeMachineSettings(draft.settings.copy(sound = it))

@@ -25,6 +25,29 @@ class MachineSettingsTest {
 
     private fun settings(file: File) = MachineSettings.from(SessionMetadata.read(file) { legacy }.optJSONObject("settings"))
 
+    @Test fun independentControlVisibilityDefaultsAndRoundTrips() {
+        val old = MachineSettings.from(
+            legacy.json().apply { remove("showKeyboard"); remove("showJogControls") },
+            MachineSettings(showKeyboard = false, showJogControls = false),
+        )
+        assertTrue(old.showKeyboard)
+        assertTrue(old.showJogControls)
+        val first = metadata("visibility-first", legacy.copy(microphone = true))
+        val second = metadata("visibility-second", legacy)
+        for (keyboard in listOf(false, true)) for (jog in listOf(false, true)) {
+            val chosen = legacy.copy(microphone = true, showKeyboard = keyboard, showJogControls = jog)
+            SessionMetadata.update(first) { it.put("settings", chosen.json()) }
+            val loaded = settings(first)
+            assertEquals(chosen, loaded)
+            assertEquals(legacy, settings(second))
+            val arguments = loaded.arguments(tg50Controls = true)
+            assertEquals(!keyboard, "--hide-keyboard" in arguments)
+            assertEquals(!jog, "--hide-jog-controls" in arguments)
+            assertFalse("--hide-keyboard" in loaded.arguments())
+            assertFalse("--hide-jog-controls" in loaded.arguments())
+        }
+    }
+
     @Test fun unsupportedSoundMutesWithoutChangingTheSavedChoice() {
         val chosen = MachineSettings(sound = true)
         assertTrue("--no-sound" in chosen.arguments(soundSupported = false))

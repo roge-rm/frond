@@ -184,6 +184,31 @@ class SessionStoreTest : public QObject {
         const auto raw = directory.filePath("nor.bin"); write(raw, nor);
         QVERIFY(!frondAudio::qualified(frondFirmware::Device::tx, {}, raw));
     }
+    void machineControlVisibilityPreferences() {
+        const auto one = filePath(folder(), "TG50 One"), two = filePath(folder(), "TG50 Two");
+        write(one, header(6, "sony-clie-tg50"));
+        write(two, header(6, "sony-clie-tg50"));
+        const auto guest = QFileInfo(one).size();
+        Preferences loaded;
+        QVERIFY(!readPreferences(one, &loaded));
+        QVERIFY(loaded.showKeyboard && loaded.showJogControls);
+        write(preferencesPath(one), R"({"version":1,"scale":7,"smooth":true,"audio":false,"fastAudio":true,"microphone":true})");
+        QVERIFY(readPreferences(one, &loaded));
+        QVERIFY(loaded.showKeyboard && loaded.showJogControls && loaded.microphone);
+        QVERIFY(writePreferences(two, loaded).isEmpty());
+        for (bool keyboard : {false, true}) for (bool jog : {false, true}) {
+            loaded.showKeyboard = keyboard; loaded.showJogControls = jog;
+            QVERIFY(writePreferences(one, loaded).isEmpty());
+            Preferences roundTrip;
+            QVERIFY(readPreferences(one, &roundTrip));
+            QCOMPARE(roundTrip.showKeyboard, keyboard); QCOMPARE(roundTrip.showJogControls, jog);
+            QCOMPARE(roundTrip.scale, 7);
+            QVERIFY(roundTrip.smooth && !roundTrip.audio && roundTrip.fastAudio && roundTrip.microphone);
+            QVERIFY(readPreferences(two, &roundTrip));
+            QVERIFY(roundTrip.showKeyboard && roundTrip.showJogControls);
+            QCOMPARE(QFileInfo(one).size(), guest);
+        }
+    }
     void machinePreferences() {
         const auto one = filePath(folder(), "One"), two = filePath(folder(), "Two");
         write(one, header(6, "palm-tx"));

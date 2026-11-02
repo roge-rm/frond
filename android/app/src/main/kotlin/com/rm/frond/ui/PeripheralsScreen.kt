@@ -93,6 +93,15 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
     var choosingBluetooth by remember { mutableStateOf(false) }
     var choosingSerial by remember { mutableStateOf(false) }
     var choosingUsb by remember { mutableStateOf(false) }
+    val microphonePermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) model.changeMicrophone(true) else model.microphoneDenied()
+    }
+    val enableMicrophone: (Boolean) -> Unit = { on ->
+        if (!on) model.changeMicrophone(false)
+        else if (androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED)
+            model.changeMicrophone(true)
+        else microphonePermission.launch(android.Manifest.permission.RECORD_AUDIO)
+    }
     val saveCopy = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
         if (uri != null) model.saveCopy(uri)
     }
@@ -278,6 +287,20 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                         headlineContent = { Text("Sound", color = if (model.device.sound) Color.Unspecified else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)) },
                         trailingContent = { Switch(checked = model.device.sound && model.sound, enabled = model.device.sound, onCheckedChange = { model.changeSound(it) }) },
                         modifier = if (model.device.sound) Modifier.clickableRow { model.changeSound(!model.sound) } else Modifier,
+                    )
+                }
+                item(key = "microphone") {
+                    val supported = model.device.microphone
+                    val checked = model.microphone == "on" || model.microphone == "pending"
+                    ListItem(
+                        headlineContent = { Text("Microphone", color = if (supported) Color.Unspecified else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)) },
+                        supportingContent = when {
+                            model.microphone == "pending" -> ({ Text("Ready on return") })
+                            model.microphone.startsWith("off ") -> ({ Text(model.microphone.removePrefix("off ")) })
+                            else -> null
+                        },
+                        trailingContent = { Switch(checked = checked, enabled = supported, onCheckedChange = enableMicrophone) },
+                        modifier = if (supported) Modifier.clickableRow { enableMicrophone(!checked) } else Modifier,
                     )
                 }
                 item(key = "fastAudio") {

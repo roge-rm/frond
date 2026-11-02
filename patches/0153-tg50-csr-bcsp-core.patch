@@ -1,0 +1,851 @@
+--- a/src/uarm/Makefile
++++ b/src/uarm/Makefile
+@@ -128,6 +128,8 @@
+ 	uarm/HostNetwork.cpp			\
+ 	uarm/HostSerial.cpp			\
+ 	uarm/HostInfrared.cpp \
++	uarm/BcspTransport.cpp					\
++	uarm/CsrBcspRadio.cpp					\
+ 	uarm/BluetoothBackend.cpp \
+ 	uarm/UsbBusHost.cpp			\
+ 	uarm/UsbHostBridge.cpp			\
+--- /dev/null
++++ b/src/uarm/uarm/BcspH4Bridge.h
+@@ -0,0 +1,91 @@
++// Reliable BCSP payload ownership at the H4 provider boundary.
++#ifndef FROND_BCSP_H4_BRIDGE_H
++#define FROND_BCSP_H4_BRIDGE_H
++#include "BcspTransport.h"
++#include <string>
++
++namespace csr {
++template<class Backend> class BcspH4Bridge {
++ public:
++    using Bytes=BcspTransport::Bytes;
++    struct ControlObservation {Bytes request;uint64_t at;};
++    BcspH4Bridge(BcspTransport& transport,Backend& backend):transport(transport),backend(backend){}
++    const std::string& Error() const{return error;}
++    const std::deque<ControlObservation>& Controls() const{return controls;}
++    uint64_t UnretainedControls() const{return unretainedControls;}
++    // Caller freezes this object and the UART together for checkpoints.
++    void Pump(uint64_t now) {
++        if(!error.empty() || transport.State()!=BcspTransport::Link::active)return;
++        // UART-to-controller ownership transfers once per reliable delivery.
++        if(const auto* packet=transport.Peek()) {
++            if(packet->channel==2) {
++                if(controls.size()<8)controls.push_back({packet->payload,now});
++                else ++unretainedControls;
++                transport.Pop();
++                // Transport receipt is ACKed, no CSR semantic reply is emitted.
++                // No channel2 request has yet been proven safe to implement.
++                unsupportedControl=true;
++            } else {
++                const auto& p=packet->payload;
++                const bool command=packet->channel==5;
++                if((command && (p.size()<3 || p.size()!=size_t(3+p[2]))) ||
++                   (!command && (p.size()<4 || p.size()!=size_t(4+p[2]+(size_t(p[3])<<8))))) {
++                    Fail("Malformed TG50 HCI packet");return;
++                }
++                Bytes h4{uint8_t(command?1:2)};h4.insert(h4.end(),p.begin(),p.end());
++                if(!backend.Connected()){Fail("Bluetooth controller disconnected");return;}
++                // Write closes its endpoint on overflow, so test capacity first.
++                if(h4.size()<=Backend::capacity-backend.Queued()) {
++                    if(!backend.Write(h4.data(),h4.size())){Fail("Bluetooth controller write failed");return;}
++                    transport.Pop();
++                }
++            }
++        }
++        // Flush writes even when provider input is backpressured.
++        backend.Poll(backend.Pending()<=Backend::capacity-(Backend::maxFrame+4*4096-1));
++        if(!backend.Connected()){Fail("Bluetooth controller disconnected");return;}
++        // Assemble one complete H4 packet, retain it until Queue accepts it.
++        // Existing Consume guarantees complete H4 frames in Pending().
++        if(host.empty() && backend.Pending()) {
++            host.push_back(uint8_t(backend.Read()));
++            const size_t header=host[0]==4?3:host[0]==2?5:host[0]==3?4:0;
++            if(!header){Fail("Invalid controller H4 type");return;}
++            while(host.size()<header) {
++                const auto c=backend.Read();
++                if(c==0x100){Fail("Incomplete controller H4 header");return;}
++                host.push_back(uint8_t(c));
++            }
++            const size_t size=host[0]==4?3+host[2]:host[0]==2?5+host[3]+(size_t(host[4])<<8):4+host[3];
++            while(host.size()<size) {
++                const auto c=backend.Read();
++                if(c==0x100){Fail("Incomplete controller H4 packet");return;}
++                host.push_back(uint8_t(c));
++            }
++        }
++        if(!host.empty()) {
++            if(host[0]==3){Fail("TG50 SCO transport is unqualified");return;}
++            // ACL fragmentation and a truthful <=412-byte controller ACL buffer
++            // contract are an integration gate. Never truncate a large packet.
++            if(host.size()-1>BcspTransport::maxPayload) {
++                Fail("Controller packet exceeds TG50 BCSP receive limit");return;
++            }
++            if(transport.Queue(host[0]==4?5:6,host.data()+1,host.size()-1))host.clear();
++        }
++    }
++    bool UnsupportedControl() const{return unsupportedControl;}
++    void ClearLocal() {host.clear();error.clear();unsupportedControl=false;}
++    void Reset() {
++        backend.Close();host.clear();error.clear();unsupportedControl=false;
++        // Diagnostic observations survive reset until explicitly exported.
++    }
++ private:
++    BcspTransport& transport;Backend& backend;
++    Bytes host;
++    std::deque<ControlObservation> controls;
++    uint64_t unretainedControls{};
++    bool unsupportedControl{};
++    std::string error;
++    void Fail(const char* message){error=message;backend.Close();transport.Stop();}
++};
++}
++#endif
+--- /dev/null
++++ b/src/uarm/uarm/BcspTransport.cpp
+@@ -0,0 +1,104 @@
++#include "BcspTransport.h"
++#include <algorithm>
++
++namespace csr {
++namespace {
++struct Writer {
++    BcspTransport::Bytes bytes;
++    void Number(uint64_t n,unsigned count){for(unsigned i=0;i<count;++i){bytes.push_back(n);n>>=8;}}
++    void Data(const uint8_t* p,size_t n){if(n)bytes.insert(bytes.end(),p,p+n);}
++};
++struct Reader {
++    const BcspTransport::Bytes& bytes;size_t at{};bool good{true};
++    uint64_t Number(unsigned count){
++        if(count>bytes.size()-at){good=false;return 0;}
++        uint64_t n=0;for(unsigned i=0;i<count;++i)n|=uint64_t(bytes[at++])<<(8*i);return n;
++    }
++    bool Flag(){auto n=Number(1);if(n>1)good=false;return n!=0;}
++    void Data(uint8_t* p,size_t n){if(n>bytes.size()-at){good=false;return;}std::copy_n(bytes.data()+at,n,p);at+=n;}
++};
++}
++BcspTransport::Bytes BcspTransport::Save(uint64_t now) const {
++    Writer w;w.Number(1,4);w.Number(now,8);w.Number(unsigned(link),1);
++    w.Number(inFrame,1);w.Number(escape,1);w.Number(discard,1);
++    w.Number(ackPending,1);w.Number(wireReliable,1);w.Number(retrying,1);
++    w.Number(rxNext,1);w.Number(txNext,1);w.Number(wireSeq,1);w.Number(retrySeq,1);
++    w.Number(control,1);w.Number(linkAttempts,4);w.Number(now>=linkAt?now-linkAt:0,8);
++    w.Number(rawSize,2);w.Data(raw.data(),rawSize);
++    w.Number(wireSize,2);w.Number(wireAt,2);w.Data(wire.data(),wireSize);
++    w.Number(flight.size(),1);
++    for(const auto& q:flight){
++        w.Number(q.channel,1);w.Number(q.seq,1);w.Number(q.crc,1);w.Number(q.sent,1);
++        w.Number(q.attempts,4);w.Number(q.sent && now>=q.sentAt?now-q.sentAt:0,8);
++        w.Number(q.payload.size(),2);w.Data(q.payload.data(),q.payload.size());
++    }
++    w.Number(inbox.size(),1);
++    for(const auto& q:inbox){w.Number(q.channel,1);w.Number(q.payload.size(),2);w.Data(q.payload.data(),q.payload.size());}
++    return w.bytes;
++}
++bool BcspTransport::Load(const Bytes& bytes,uint64_t& clock) {
++    if(bytes.size()>8192)return false;
++    Reader r{bytes};if(r.Number(4)!=1)return false;
++    const auto epoch=r.Number(8);BcspTransport s(timing);
++    const auto phase=r.Number(1);if(phase>unsigned(Link::failed))return false;s.link=Link(phase);
++    s.inFrame=r.Flag();s.escape=r.Flag();s.discard=r.Flag();
++    s.ackPending=r.Flag();s.wireReliable=r.Flag();s.retrying=r.Flag();
++    s.rxNext=r.Number(1);s.txNext=r.Number(1);s.wireSeq=r.Number(1);s.retrySeq=r.Number(1);
++    s.control=r.Number(1);s.linkAttempts=r.Number(4);const auto linkAge=r.Number(8);
++    if(linkAge>epoch || s.rxNext>7 || s.txNext>7 || s.wireSeq>7 || s.retrySeq>7 ||
++       s.control>15 || s.linkAttempts>=timing.maxAttempts)return false;
++    s.linkAt=epoch-linkAge;s.rawSize=r.Number(2);if(s.rawSize>rawLimit)return false;
++    r.Data(s.raw.data(),s.rawSize);s.wireSize=r.Number(2);s.wireAt=r.Number(2);
++    if(s.wireSize>wireLimit || s.wireAt>s.wireSize)return false;
++    r.Data(s.wire.data(),s.wireSize);
++    const auto flights=r.Number(1);if(flights>window)return false;
++    bool unsent=false;
++    for(size_t i=0;i<flights;++i){
++        Pending q;q.channel=r.Number(1);q.seq=r.Number(1);q.crc=r.Flag();q.sent=r.Flag();
++        q.attempts=r.Number(4);const auto age=r.Number(8);const auto n=r.Number(2);
++        if(n>maxPayload || age>epoch || q.seq>7 ||
++           (q.channel!=2 && q.channel!=5 && q.channel!=6) ||
++           (i && q.seq!=((s.flight.back().seq+1)&7)) ||
++           q.attempts>timing.maxAttempts || (q.sent && (!q.attempts || unsent)) ||
++           (!q.sent && (q.attempts || age)))return false;
++        unsent|=!q.sent;q.sentAt=epoch-age;q.payload.resize(n);r.Data(q.payload.data(),n);s.flight.push_back(q);
++    }
++    if(!s.flight.empty() && s.txNext!=((s.flight.back().seq+1)&7))return false;
++    const auto received=r.Number(1);if(received>inboxLimit)return false;
++    for(size_t i=0;i<received;++i){
++        Packet q;q.channel=r.Number(1);const auto n=r.Number(2);
++        if(n>maxPayload || (q.channel!=2 && q.channel!=5 && q.channel!=6))return false;
++        q.payload.resize(n);r.Data(q.payload.data(),n);s.inbox.push_back(q);
++    }
++    if(!r.good || r.at!=bytes.size() || (!s.inFrame && (s.escape || s.discard || s.rawSize)) ||
++       (s.escape && s.discard) || (s.wireReliable && !s.HasWire()))return false;
++    if(s.wireSize){
++        if(s.wireSize<6 || s.wire[0]!=0xc0 || s.wire[s.wireSize-1]!=0xc0)return false;
++        Bytes decoded;
++        for(size_t i=1;i+1<s.wireSize;++i){
++            auto c=s.wire[i];if(c==0xc0)return false;
++            if(c==0xdb){if(++i+1>=s.wireSize)return false;c=s.wire[i];
++                if(c==0xdc)c=0xc0;else if(c==0xdd)c=0xdb;else return false;}
++            decoded.push_back(c);
++        }
++        if(decoded.size()<4)return false;
++        const auto n=(decoded[1]>>4)|(size_t(decoded[2])<<4);
++        const bool crc=decoded[0]&0x40,rel=decoded[0]&0x80;
++        if(n>maxPayload || decoded.size()!=4+n+(crc?2:0) ||
++           uint8_t(decoded[0]+decoded[1]+decoded[2]+decoded[3])!=0xff ||
++           (crc && Crc(decoded.data(),4+n)!=uint16_t((decoded[4+n]<<8)|decoded[5+n])))return false;
++        if(s.wireReliable){
++            bool found=false;
++            for(const auto& q:s.flight)if(q.seq==s.wireSeq && q.seq==(decoded[0]&7) &&
++                q.channel==(decoded[1]&15) && q.crc==crc && rel && q.payload.size()==n &&
++                std::equal(q.payload.begin(),q.payload.end(),decoded.begin()+4))found=true;
++            if(!found)return false;
++        }
++    }
++    if((s.link==Link::off || s.link==Link::failed) &&
++       (s.rawSize || s.wireSize || !s.flight.empty() || !s.inbox.empty() || s.inFrame ||
++        s.control || s.ackPending || s.retrying || s.rxNext || s.txNext))return false;
++    if(s.link!=Link::active && (!s.flight.empty() || !s.inbox.empty() || s.retrying))return false;
++    s.generation=generation;s.counts=counts;*this=std::move(s);clock=epoch;return true;
++}
++}
+--- /dev/null
++++ b/src/uarm/uarm/BcspTransport.h
+@@ -0,0 +1,224 @@
++// Bounded CSR BCSP framing and reliability, driven by emulator time.
++#ifndef FROND_BCSP_TRANSPORT_H
++#define FROND_BCSP_TRANSPORT_H
++#include <array>
++#include <cstddef>
++#include <cstdint>
++#include <deque>
++#include <vector>
++
++namespace csr {
++class BcspTransport {
++ public:
++    static constexpr size_t maxPayload=416, window=6, inboxLimit=8;
++    static constexpr size_t rawLimit=maxPayload+6, wireLimit=2*rawLimit+2;
++    using Bytes=std::vector<uint8_t>;
++    struct Packet {uint8_t channel{}; Bytes payload;};
++    enum class Link:uint8_t {off,sync,configure,active,failed};
++    struct Timing {
++        // Integration supplies emulator-time units, never wall clock time.
++        uint64_t linkRetry, dataRetry;
++        unsigned maxAttempts;
++    };
++    struct Counts {uint64_t malformed{},badAck{},duplicates{},backpressure{},unknown{};};
++    explicit BcspTransport(Timing timing):timing(timing){}
++    Link State() const {return link;}
++    uint64_t Generation() const {return generation;}
++    Bytes Save(uint64_t now) const;
++    bool Load(const Bytes& bytes, uint64_t& clock);
++    const Counts& Statistics() const {return counts;}
++    size_t Outstanding() const {return flight.size();}
++    size_t Received() const {return inbox.size();}
++    uint8_t Expected() const {return rxNext;}
++    bool HasWire() const {return wireAt<wireSize;}
++    bool Failed() const {return link==Link::failed;}
++    void Stop() {Clear();link=Link::off;}
++    void Start(uint64_t now) {
++        ++generation;Clear();link=Link::sync;linkAt=now;control|=syncBit;
++        if(!timing.linkRetry || !timing.dataRetry || !timing.maxAttempts)Fail();
++    }
++    // Whole payload ownership transfers only on true. A full window is retryable.
++    bool Queue(uint8_t channel,const uint8_t* p,size_t n,bool crc=false) {
++        if(link!=Link::active || n>maxPayload || (!p && n) ||
++           (channel!=2 && channel!=5 && channel!=6) || flight.size()==window)return false;
++        Pending q;q.channel=channel;q.seq=txNext;q.crc=crc;
++        if(n)q.payload.assign(p,p+n);
++        flight.push_back(q);txNext=(txNext+1)&7;return true;
++    }
++    const Packet* Peek() const {return inbox.empty()?nullptr:&inbox.front();}
++    void Pop() {if(!inbox.empty())inbox.pop_front();}
++    // The UART clocks bytes and owns RTS/CTS. Call only for accepted guest bytes.
++    void Write(uint8_t c,uint64_t now) {
++        if(link==Link::off || link==Link::failed)return;
++        if(c==0xc0) {
++            if(inFrame && rawSize && !discard && !escape)Frame(now);
++            else if(inFrame && (escape || discard))++counts.malformed;
++            inFrame=true;rawSize=0;escape=discard=false;return;
++        }
++        if(!inFrame || discard)return;
++        if(escape) {
++            escape=false;
++            if(c==0xdc)c=0xc0;
++            else if(c==0xdd)c=0xdb;
++            else {discard=true;return;}
++        } else if(c==0xdb) {escape=true;return;}
++        if(rawSize==raw.size()){discard=true;return;}
++        raw[rawSize++]=c;
++    }
++    void Tick(uint64_t now) {
++        if(link==Link::off || link==Link::failed)return;
++        if((link==Link::sync || link==Link::configure) && now-linkAt>=timing.linkRetry) {
++            if(++linkAttempts>=timing.maxAttempts){Fail();return;}
++            control|=link==Link::sync?syncBit:confBit;linkAt=now;
++        }
++        if(HasWire())return;
++        wireSize=wireAt=0;
++        // Keep link replies and ACKs independent of the reliable window.
++        for(unsigned bit:{syncRespBit,confRespBit,syncBit,confBit})if(control&bit) {
++            control&=~bit;
++            const auto& data=bit==syncRespBit?syncResponse:bit==confRespBit?confResponse:
++                             bit==syncBit?sync:conf;
++            Encode(1,data.data(),4,false,0,false);return;
++        }
++        if(link!=Link::active)return;
++        if(ackPending){Encode(0,nullptr,0,false,0,false);ackPending=false;return;}
++        // Go-back-N recovery is represented as a cursor across the outstanding
++        // window. ACKs can cull its prefix while the frame on wire stays owned.
++        if(!retrying && !flight.empty() && flight.front().sent &&
++           now-flight.front().sentAt>=timing.dataRetry) {
++            retrying=true;retrySeq=flight.front().seq;
++        }
++        if(retrying) {
++            for(auto& q:flight)if(q.seq==retrySeq && q.sent) {
++                if(q.attempts>=timing.maxAttempts){Fail();return;}
++                EncodePending(q);retrySeq=(retrySeq+1)&7;
++                if(retrySeq==txNext)retrying=false;
++                return;
++            }
++            retrying=false;
++        }
++        for(auto& q:flight)if(!q.sent){EncodePending(q);return;}
++    }
++    uint16_t Read(uint64_t now,bool receiveReady=true) {
++        Tick(now);
++        if(!receiveReady || !HasWire())return 0x100;
++        const auto c=wire[wireAt++];
++        if(wireAt==wireSize && wireReliable) {
++            for(auto& q:flight)if(q.seq==wireSeq) {
++                q.sent=true;q.sentAt=now;++q.attempts;break;
++            }
++            wireReliable=false;
++        }
++        return c;
++    }
++    // Exposed for independent frame vectors and corruption tests.
++    static Bytes FrameBytes(uint8_t channel,const Bytes& payload,bool reliable=false,
++                            uint8_t seq=0,uint8_t ack=0,bool crc=false) {
++        if(payload.size()>maxPayload || channel>15 || seq>7 || ack>7)return {};
++        Bytes raw(4);raw[0]=(reliable?0x80:0)|(crc?0x40:0)|(ack<<3)|seq;
++        raw[1]=uint8_t((payload.size()<<4)|channel);raw[2]=uint8_t(payload.size()>>4);
++        raw[3]=uint8_t(~(raw[0]+raw[1]+raw[2]));raw.insert(raw.end(),payload.begin(),payload.end());
++        if(crc){const auto c=Crc(raw.data(),raw.size());raw.push_back(c>>8);raw.push_back(c);}
++        Bytes bytes{0xc0};
++        for(auto c:raw) {
++            if(c==0xc0){bytes.push_back(0xdb);bytes.push_back(0xdc);}
++            else if(c==0xdb){bytes.push_back(0xdb);bytes.push_back(0xdd);}
++            else bytes.push_back(c);
++        }
++        bytes.push_back(0xc0);return bytes;
++    }
++    static uint16_t Crc(const uint8_t* p,size_t n) {
++        uint16_t crc=0xffff;
++        for(size_t i=0;i<n;++i) {
++            crc^=p[i];
++            for(unsigned b=0;b<8;++b)crc=(crc>>1)^((crc&1)?0x8408:0);
++        }
++        uint16_t reversed=0;
++        for(unsigned b=0;b<16;++b){reversed=uint16_t((reversed<<1)|(crc&1));crc>>=1;}
++        return reversed;
++    }
++    inline static constexpr std::array<uint8_t,4> sync{0xda,0xdc,0xed,0xed};
++    inline static constexpr std::array<uint8_t,4> syncResponse{0xac,0xaf,0xef,0xee};
++    inline static constexpr std::array<uint8_t,4> conf{0xad,0xef,0xac,0xed};
++    inline static constexpr std::array<uint8_t,4> confResponse{0xde,0xad,0xd0,0xd0};
++ private:
++    enum:unsigned {syncBit=1,syncRespBit=2,confBit=4,confRespBit=8};
++    struct Pending {
++        uint8_t channel{},seq{};bool crc{},sent{};
++        unsigned attempts{};uint64_t sentAt{};Bytes payload;
++    };
++    uint64_t generation{};
++    Timing timing;Link link{Link::off};Counts counts{};
++    std::array<uint8_t,rawLimit> raw{};
++    std::array<uint8_t,wireLimit> wire{};
++    size_t rawSize{},wireAt{},wireSize{};
++    bool inFrame{},escape{},discard{},ackPending{},wireReliable{},retrying{};
++    uint8_t rxNext{},txNext{},wireSeq{},retrySeq{};
++    uint64_t linkAt{};unsigned linkAttempts{},control{};
++    std::deque<Pending> flight;
++    std::deque<Packet> inbox;
++    void Clear() {
++        rawSize=wireAt=wireSize=0;inFrame=escape=discard=ackPending=wireReliable=retrying=false;
++        rxNext=txNext=wireSeq=retrySeq=0;linkAt=0;linkAttempts=control=0;
++        flight.clear();inbox.clear();
++    }
++    void Fail(){Clear();link=Link::failed;}
++    void Encode(uint8_t channel,const uint8_t* p,size_t n,bool rel,uint8_t seq,bool crc) {
++        Bytes payload;if(n)payload.assign(p,p+n);
++        const auto bytes=FrameBytes(channel,payload,rel,seq,rxNext,crc);
++        wireSize=bytes.size();wireAt=0;
++        for(size_t i=0;i<bytes.size();++i)wire[i]=bytes[i];
++        wireReliable=rel;wireSeq=seq;
++        // An unreliable link frame also carries the current cumulative ACK.
++        ackPending=false;
++    }
++    void EncodePending(Pending& q){Encode(q.channel,q.payload.data(),q.payload.size(),true,q.seq,q.crc);}
++    void Ack(uint8_t ack) {
++        if(flight.empty()){if(ack!=txNext)++counts.badAck;return;}
++        const unsigned count=(ack-flight.front().seq)&7;
++        if(count>flight.size()){++counts.badAck;return;}
++        for(unsigned i=0;i<count;++i)if(!flight[i].sent){++counts.badAck;return;}
++        for(unsigned i=0;i<count;++i) {
++            // An ACK can retire a retransmission while its UART suffix drains.
++            if(wireReliable && flight.front().seq==wireSeq)wireReliable=false;
++            flight.pop_front();
++        }
++    }
++    void LinkPacket(const uint8_t* p,uint64_t now) {
++        const auto same=[&](const auto& a){for(unsigned i=0;i<4;++i)if(a[i]!=p[i])return false;return true;};
++        if(same(sync)) {
++            if(link==Link::active){Start(now);}
++            control|=syncRespBit;
++            if(link==Link::sync)control|=syncBit;
++        } else if(same(syncResponse)) {
++            if(link==Link::sync){link=Link::configure;linkAttempts=0;linkAt=now;control&=~syncBit;control|=confBit;}
++        } else if(same(conf)) {
++            if(link==Link::configure || link==Link::active)control|=confRespBit;
++            if(link==Link::configure)control|=confBit;
++        } else if(same(confResponse)) {
++            if(link==Link::configure){link=Link::active;linkAttempts=0;control&=~(syncBit|confBit);}
++        } else ++counts.unknown;
++    }
++    void Frame(uint64_t now) {
++        if(rawSize<4 || uint8_t(raw[0]+raw[1]+raw[2]+raw[3])!=0xff){++counts.malformed;return;}
++        const size_t n=(raw[1]>>4)|(size_t(raw[2])<<4);
++        const bool crc=raw[0]&0x40,rel=raw[0]&0x80;
++        const uint8_t channel=raw[1]&15,seq=raw[0]&7,ack=(raw[0]>>3)&7;
++        if(n>maxPayload || rawSize!=4+n+(crc?2:0) ||
++           (crc && Crc(raw.data(),4+n)!=uint16_t((raw[4+n]<<8)|raw[5+n]))) {++counts.malformed;return;}
++        if(channel==1 && !rel && n==4){LinkPacket(raw.data()+4,now);return;}
++        if(link!=Link::active)return;
++        // Invalid frame classes never acknowledge or mutate a live data window.
++        if((channel==0 && (rel || n || seq)) ||
++           (channel!=0 && (!rel || (channel!=2 && channel!=5 && channel!=6)))) {++counts.unknown;return;}
++        Ack(ack);
++        if(channel==0)return;
++        if(seq!=rxNext){++counts.duplicates;ackPending=true;return;}
++        // Leave expected sequence unchanged when the consumer has no room.
++        if(inbox.size()==inboxLimit){++counts.backpressure;ackPending=true;return;}
++        Packet p;p.channel=channel;p.payload.assign(raw.begin()+4,raw.begin()+4+n);
++        inbox.push_back(p);rxNext=(rxNext+1)&7;ackPending=true;
++    }
++};
++}
++#endif
+--- a/src/uarm/uarm/BluetoothBackend.cpp
++++ b/src/uarm/uarm/BluetoothBackend.cpp
+@@ -57,7 +57,7 @@
+     }
+     return true;
+ }
+-void BluetoothBackend::Poll() {
++void BluetoothBackend::Poll(bool receive) {
+ #ifndef __EMSCRIPTEN__
+     if(!Connected())return;
+     // Bounded work per guest callback. A short write keeps its exact suffix.
+@@ -69,6 +69,7 @@
+         sentAt+=size_t(n);
+     }
+     if(sentAt==outgoing.size()){outgoing.clear();sentAt=0;}
++    if (!receive) return;
+     std::array<uint8_t,4096> bytes;
+     for(unsigned tries=0;tries<4;++tries) {
+         const auto n=recv(fd,bytes.data(),bytes.size(),MSG_DONTWAIT);
+--- a/src/uarm/uarm/BluetoothBackend.h
++++ b/src/uarm/uarm/BluetoothBackend.h
+@@ -19,7 +19,7 @@
+     void Close();
+     bool Connected() const {return fd>=0;}
+     bool Write(const uint8_t* data,size_t size);
+-    void Poll();
++    void Poll(bool receive = true);
+     uint16_t Read(); // 0x100 means no byte, same as UART_CHAR_NONE.
+     bool FrameInProgress() const {return frameRemaining!=0;}
+     size_t Pending() const {return received.size()-readAt;}
+--- /dev/null
++++ b/src/uarm/uarm/CsrBcspRadio.cpp
+@@ -0,0 +1,156 @@
++#include "CsrBcspRadio.h"
++#include "mmiodev_TG50uc.h"
++#include "Tg50Trace.h"
++#include <sstream>
++#include <memory>
++
++CsrBcspRadio::CsrBcspRadio(GetEmuTime t,TG50uc* pins,PxaUart* port):time(t),uc(pins),uart(port) {
++    clock=Now();powered=Powered();
++    pxaUartSetPacing(uart,true);
++    pxaUartSetFuncs(uart,
++        [](void* p)->uint_fast16_t{return static_cast<CsrBcspRadio*>(p)->Read();},
++        [](uint_fast16_t c,void* p){static_cast<CsrBcspRadio*>(p)->Write(c);},
++        [](void* p){auto* r=static_cast<CsrBcspRadio*>(p);return !r->checkpoints && r->powered && !r->needsRestart;},
++        [](void* p){static_cast<CsrBcspRadio*>(p)->Tick();},this);
++    pxaUartSetModeObserver(uart,[](void* p){static_cast<CsrBcspRadio*>(p)->PinsChanged();},this);
++    pxaUartSetModemInputs(uart,0);
++    PinsChanged();
++}
++CsrBcspRadio::~CsrBcspRadio(){
++    *alive=false;
++    pxaUartSetModeObserver(uart,nullptr,nullptr);
++    pxaUartSetFuncs(uart,nullptr,nullptr,nullptr,nullptr,nullptr);
++    pxaUartSetModemInputs(uart,0);
++}
++uint64_t CsrBcspRadio::Now() const{return time.getTimeF(time.userdata);}
++bool CsrBcspRadio::Powered() const{return tg50ucGpioIsOutput(uc,0,6) && tg50ucGpioState(uc,0,6);}
++bool CsrBcspRadio::Ready() const{
++    const auto mode=pxaUartIrState(uart);
++    return pxaUartReceiverEnabled(uart) && pxaUartPlainEnabled(uart) &&
++        mode.baud==921600 && (mode.lcr&0x3f)==0x1b;
++}
++void CsrBcspRadio::Fence(bool restart){
++    backend.Close();bridge.ClearLocal();transport.Stop();started=false;
++    needsRestart=restart;lastPoll=0;
++    pxaUartSetModemInputs(uart,0);
++}
++void CsrBcspRadio::PinsChanged(){
++    const bool on=Powered();
++    if(checkpoints){if(on!=powered)deferredReset=true;return;}
++    const bool changed=on!=powered || deferredReset;
++    if(changed){
++        Fence(on);powered=on;
++        if(!on){needsRestart=false;error.clear();}
++        else if(!deferredReset){needsRestart=false;error.clear();}
++    }
++    deferredReset=false;
++    const auto mode=pxaUartIrState(uart);
++    (void)mode;
++    TG50_TRACE("CSR pins t=%llu A6=%u A0out=%u A0=%u A14=%u baud=%u lcr=%02x rts=%u\n",
++        (unsigned long long)Now(),on,tg50ucGpioIsOutput(uc,0,0),tg50ucGpioState(uc,0,0),
++        tg50ucGpioState(uc,0,14),mode.baud,mode.lcr,pxaUartGetModemOutputs(uart));
++    if(changed){
++        pxaUartSetModemInputs(uart,on && !needsRestart ? PXA_UART_CTS:0);
++        pxaUartKick(uart);
++    }
++}
++void CsrBcspRadio::Tick(){
++    if(checkpoints || !powered || needsRestart || !Ready())return;
++    clock=Now();
++    if(!started){
++        transport.Start(clock);started=true;
++        if(!path.empty() && !backend.Connected() && !backend.Open(path,error)){
++            Fence(true);return;
++        }
++    }
++    transport.Tick(clock);
++    if(transport.Failed()){error="BCSP retry exhausted; turn Bluetooth off and on in Palm OS.";Fence(true);return;}
++    if(clock-lastPoll<1000000)return;
++    lastPoll=clock;
++    if(!backend.Connected()){
++        if(const auto* p=transport.Peek()){
++            TG50_TRACE("CSR unsupported channel=%u t=%llu bytes=",p->channel,(unsigned long long)clock);
++            for(auto c:p->payload){(void)c;TG50_TRACE("%02x",c);}TG50_TRACE("\n");
++            error=p->channel==2?"Unsupported CSR channel 2 request.":"No virtual Bluetooth controller selected.";
++            transport.Pop();
++        }
++        return;
++    }
++    bridge.Pump(clock);
++    if(!bridge.Error().empty()){error=bridge.Error();Fence(true);}
++}
++void CsrBcspRadio::Write(uint_fast16_t c){
++    if(checkpoints || !powered || needsRestart || !Ready())return;
++    Tick();if(!started)return;
++    if(traceBytes++<8192)TG50_TRACE("CSR byte t=%llu guest=%03x\n",(unsigned long long)clock,unsigned(c));
++    if(c&~0xffu){error="Errored BTUART frame.";Fence(true);return;}
++    const auto generation=transport.Generation();const auto old=transport.State();
++    transport.Write(c,clock);
++    if(old==csr::BcspTransport::Link::active && generation!=transport.Generation()){
++        error="BCSP peer reset; turn Bluetooth off and on in Palm OS.";Fence(true);
++    }
++}
++uint_fast16_t CsrBcspRadio::Read(){
++    Tick();if(checkpoints || !started || needsRestart || !Ready())return UART_CHAR_NONE;
++    const auto c=transport.Read(clock,pxaUartGetModemOutputs(uart)&PXA_UART_RTS);
++    if(c!=UART_CHAR_NONE && traceBytes++<8192)TG50_TRACE("CSR byte t=%llu controller=%03x\n",(unsigned long long)clock,unsigned(c));
++    return c;
++}
++bool CsrBcspRadio::SetBackend(const std::string& candidate,std::string& problem){
++    if(checkpoints){problem="Bluetooth is busy with a state operation.";return false;}
++    if(candidate.empty()){path.clear();error.clear();Fence(true);problem.clear();return true;}
++    if(!backend.Open(candidate,problem))return false;
++    path=candidate;error.clear();transport.Stop();bridge.ClearLocal();started=false;
++    needsRestart=Powered();powered=Powered();lastPoll=0;problem.clear();PinsChanged();return true;
++}
++std::string CsrBcspRadio::State() const{
++    if(!error.empty())return "unqualified: "+error;
++    if(bridge.UnsupportedControl())return "unqualified: Unsupported CSR channel 2 request.";
++    std::ostringstream out;out<<"unqualified; radio="<<(powered?"on":"off")<<"; BCSP="<<unsigned(transport.State());
++    if(needsRestart)out<<"; radio restart required";
++    if(backend.Connected())out<<"; provider connected";
++    return out.str();
++}
++void CsrBcspRadio::BeginCheckpoint(){++checkpoints;}
++void CsrBcspRadio::EndCheckpoint(bool sleeping){
++    if(!checkpoints)return;
++    if(!--checkpoints){PinsChanged();if(sleeping)Suspend();}
++}
++std::function<void()> CsrBcspRadio::CaptureInput(){
++    struct Scope {
++        CsrBcspRadio& radio;
++        std::shared_ptr<bool> alive;
++        explicit Scope(CsrBcspRadio& r):radio(r),alive(r.alive){radio.BeginCheckpoint();}
++        ~Scope(){if(*alive)radio.EndCheckpoint(false);}
++    };
++    auto scope=std::make_shared<Scope>(*this);
++    const auto saved=transport;const auto savedClock=clock,savedPoll=lastPoll;
++    const auto savedPowered=powered,savedStarted=started,savedRestart=needsRestart,savedDeferred=deferredReset;
++    return [this,scope,saved,savedClock,savedPoll,savedPowered,savedStarted,savedRestart,savedDeferred]{
++        if(!*scope->alive)return;
++        transport=saved;clock=savedClock;lastPoll=savedPoll;powered=savedPowered;started=savedStarted;
++        needsRestart=savedRestart;deferredReset=savedDeferred;
++    };
++}
++void CsrBcspRadio::Suspend(){if(checkpoints){deferredReset=true;return;}Fence(true);}
++void CsrBcspRadio::Reset(){
++    if(checkpoints){deferredReset=true;return;}
++    Fence(true);powered=Powered();needsRestart=powered;error.clear();
++}
++csr::BcspTransport::Bytes CsrBcspRadio::Save() const{
++    auto data=transport.Save(clock);
++    data.insert(data.begin(),{1,uint8_t(powered),uint8_t(started),uint8_t(needsRestart)});
++    return data;
++}
++bool CsrBcspRadio::Load(const csr::BcspTransport::Bytes& data){
++    if(data.empty()){
++        transport.Stop();started=false;clock=Now();powered=Powered();needsRestart=powered;return true;
++    }
++    if(data.size()<4 || data[0]!=1 || data[1]>1 || data[2]>1 || data[3]>1)return false;
++    auto candidate=transport;uint64_t candidateClock=0;
++    if(!candidate.Load({data.begin()+4,data.end()},candidateClock) || bool(data[1])!=Powered() ||
++       (data[2] && (!data[1] || data[3])) ||
++       (bool(data[2])!=(candidate.State()!=csr::BcspTransport::Link::off && candidate.State()!=csr::BcspTransport::Link::failed)))return false;
++    transport=std::move(candidate);clock=candidateClock;powered=data[1];started=data[2];needsRestart=data[3];
++    return true;
++}
+--- /dev/null
++++ b/src/uarm/uarm/CsrBcspRadio.h
+@@ -0,0 +1,46 @@
++#ifndef FROND_CSR_BCSP_RADIO_H
++#define FROND_CSR_BCSP_RADIO_H
++#include "BcspH4Bridge.h"
++#include "BluetoothBackend.h"
++#include "get_emu_time.h"
++#include "pxa_UART.h"
++#include <functional>
++#include <memory>
++struct TG50uc;
++
++class CsrBcspRadio {
++ public:
++    CsrBcspRadio(GetEmuTime,TG50uc*,PxaUart*);
++    ~CsrBcspRadio();
++    bool SetBackend(const std::string&,std::string&);
++    std::string State() const;
++    void PinsChanged();
++    void BeginCheckpoint();
++    void EndCheckpoint(bool sleeping);
++    std::function<void()> CaptureInput();
++    void Suspend();
++    void Reset();
++    csr::BcspTransport::Bytes Save() const;
++    bool Load(const csr::BcspTransport::Bytes&);
++ private:
++    // Emulator-thread token for checkpoint closures released after teardown.
++    std::shared_ptr<bool> alive{std::make_shared<bool>(true)};
++    GetEmuTime time;
++    TG50uc* uc;
++    PxaUart* uart;
++    BluetoothBackend backend;
++    csr::BcspTransport transport{{250000000,250000000,12}};
++    csr::BcspH4Bridge<BluetoothBackend> bridge{transport,backend};
++    uint64_t clock{},lastPoll{};
++    bool powered{},started{},needsRestart{},deferredReset{};
++    unsigned checkpoints{},traceBytes{};
++    std::string path,error;
++    bool Powered() const;
++    bool Ready() const;
++    uint64_t Now() const;
++    void Tick();
++    void Write(uint_fast16_t);
++    uint_fast16_t Read();
++    void Fence(bool restart);
++};
++#endif
+--- a/src/uarm/uarm/devicePalmTungstenE2.cpp
++++ b/src/uarm/uarm/devicePalmTungstenE2.cpp
+@@ -7,6 +7,7 @@
+ #include "cputil.h"
+ #include "device.h"
+ #include "deviceSonyTG50.h"
++#include "CsrBcspRadio.h"
+ #include "device_type5.h"
+ #include "mmiodev_DirectNAND.h"
+ #include "savestate/savestateAll.h"
+@@ -184,7 +185,7 @@
+     dev->reschedule = reschedule;
+ 
+     if (type == deviceTypeTG50) {
+-        dev->tg50 = tg50BoardSetup(sp, kp,reschedule);
++        dev->tg50 = tg50BoardSetup(sp, kp,reschedule,getTime);
+         return dev;
+     }
+ 
+@@ -494,16 +495,18 @@
+ }
+ 
+ bool deviceSetBluetooth(Device* dev,const std::string& path,std::string& error){
++    if(dev->tg50)return tg50BoardBluetooth(dev->tg50)->SetBackend(path,error);
+     if(!dev->bcm2035){error="No Bluetooth controller on this board.";return false;}
+     return bcm2035SetBackend(dev->bcm2035,path,error);
+ }
+-std::string deviceBluetoothState(Device* dev){return bcm2035BackendState(dev->bcm2035);}
+-void deviceBeginBluetoothCheckpoint(Device* dev){bcm2035BeginCheckpoint(dev->bcm2035);}
+-void deviceEndBluetoothCheckpoint(Device* dev,bool sleeping){bcm2035EndCheckpoint(dev->bcm2035,sleeping);}
+-void deviceSuspendBluetooth(Device* dev){bcm2035Suspend(dev->bcm2035);}
+-void deviceBluetoothPinsChanged(Device* dev){bcm2035PowerChanged(dev->bcm2035);}
+-void deviceBluetoothStateReplaced(Device* dev){bcm2035Suspend(dev->bcm2035);}
++std::string deviceBluetoothState(Device* dev){if(dev->tg50){return tg50BoardBluetooth(dev->tg50)->State();}return bcm2035BackendState(dev->bcm2035);}
++void deviceBeginBluetoothCheckpoint(Device* dev){if(dev->tg50){tg50BoardBluetooth(dev->tg50)->BeginCheckpoint();return;}bcm2035BeginCheckpoint(dev->bcm2035);}
++void deviceEndBluetoothCheckpoint(Device* dev,bool sleeping){if(dev->tg50){tg50BoardBluetooth(dev->tg50)->EndCheckpoint(sleeping);return;}bcm2035EndCheckpoint(dev->bcm2035,sleeping);}
++void deviceSuspendBluetooth(Device* dev){if(dev->tg50){tg50BoardBluetooth(dev->tg50)->Suspend();return;}bcm2035Suspend(dev->bcm2035);}
++void deviceBluetoothPinsChanged(Device* dev){if(dev->tg50){tg50BoardBluetooth(dev->tg50)->PinsChanged();return;}bcm2035PowerChanged(dev->bcm2035);}
++void deviceBluetoothStateReplaced(Device* dev){if(dev->tg50){tg50BoardBluetooth(dev->tg50)->Suspend();return;}bcm2035Suspend(dev->bcm2035);}
+ void deviceStopBluetooth(Device* dev){
++    if(dev->tg50){tg50BoardBluetooth(dev->tg50)->Suspend();return;}
+     if(!dev->bcm2035)return;
+     const bool tx=dev->type==deviceTypeTX || dev->type==deviceTypeZire72;
+     for(unsigned pin:{tx?17u:32u,tx?83u:80u})pxaGpioSetNotif(dev->gpio,pin,nullptr,nullptr);
+--- a/src/uarm/uarm/deviceSonyTG50.cpp
++++ b/src/uarm/uarm/deviceSonyTG50.cpp
+@@ -2,6 +2,7 @@
+ 
+ // Board wiring adapted from Dmitry Grinberg's uARM deviceSonyTG50.c.
+ #include "deviceSonyTG50.h"
++#include "CsrBcspRadio.h"
+ 
+ #include <array>
+ #include <cstdlib>
+@@ -31,6 +32,7 @@
+ constexpr uint32_t tg50SramSize = 1024;
+ 
+ struct Tg50Board {
++    CsrBcspRadio* radio{};
+     Tg50Audio audio{};
+     Microwire64x16 configuration{};
+     AudioQueue *queue{};
+@@ -121,7 +123,7 @@
+     return keys;
+ }
+ 
+-Tg50Board *tg50BoardSetup(SocPeriphs *sp, Keypad *kp,Reschedule reschedule) {
++Tg50Board *tg50BoardSetup(SocPeriphs *sp, Keypad *kp,Reschedule reschedule,GetEmuTime time) {
+     auto *board = new Tg50Board{};
+     board->mem = sp->mem;
+     board->gpio = sp->gpio;
+@@ -147,12 +149,14 @@
+     pxaGpioSetPeripheralObserver(board->gpio, tg50ConfigurationPins, board);
+     tg50BoardReset(board, true);
+     sp->nand = nullptr;
+-    sp->btUart = nullptr;
++    sp->btUart = sp->uarts[3];
++    board->radio = new CsrBcspRadio(time,board->uc,sp->btUart);
+     sp->dbgUart = sp->uarts[0];
+     return board;
+ }
+ 
+ void tg50BoardReset(Tg50Board *board, bool clearSram) {
++    if(board->radio)board->radio->Reset();
+     board->configuration.ResetPins();
+     tg50ConfigurationOutput(board);
+     ad7873Reset(board->touch);
+@@ -210,9 +214,10 @@
+ std::function<void()> tg50BoardCaptureInput(Tg50Board *board) {
+     auto touch = ad7873CaptureInput(board->touch);
+     auto keys = tg50ucCaptureInput(board->uc);
++    auto radio = board->radio->CaptureInput();
+     const bool up = board->jogHeld[0], down = board->jogHeld[1];
+-    return [board, touch, keys, up, down] {
+-        touch(); keys();
++    return [board, touch, keys, radio, up, down] {
++        touch(); keys();radio();
+         board->jogHeld[0] = up;
+         board->jogHeld[1] = down;
+     };
+@@ -239,6 +244,10 @@
+     SaveChunkHelper configurationHelper(*configurationChunk);
+     auto configurationState = board->configuration.Save();
+     tg50ConfigurationFields(configurationHelper, configurationState);
++    auto* radioChunk=savestate.GetChunk(ChunkType::sonyTg50Bluetooth,0);
++    if(!radioChunk)ERR("cannot allocate TG50 Bluetooth state");
++    SaveChunkHelper radioHelper(*radioChunk);auto radioState=board->radio->Save();
++    radioHelper.Do32(radioState.size()).DoBuffer(radioState.data(),radioState.size());
+ }
+ 
+ template <typename T> bool tg50BoardLoad(Tg50Board *board, T &loader, bool preserveInput) {
+@@ -273,6 +282,16 @@
+         !ak4534Load(board->codec, loader, preserveInput) ||
+         !an32502aLoad(board->pmic, loader, preserveInput) ||
+         !(board->restoringReset ? (msCtrlrReset(board->ms),true) : msCtrlrLoad(board->ms, loader, preserveInput))) return false;
++    csr::BcspTransport::Bytes radioState;
++    if(loader.GetChunk(ChunkType::sonyTg50Bluetooth)){
++        auto* radioChunk=loader.GetChunkOrFail(ChunkType::sonyTg50Bluetooth,0,"TG50 Bluetooth");
++        if(!radioChunk)return false;
++        uint32_t size=0;LoadChunkHelper radioHelper(*radioChunk);radioHelper.Do32(size);
++        if(size>8196){loader.NotifyError();return false;}
++        radioState.resize(size);radioHelper.DoBuffer(radioState.data(),size);
++        if(radioChunk->HasError() || !radioChunk->IsAtEnd()){loader.NotifyError();return false;}
++    }
++    if(!board->radio->Load(radioState)){loader.NotifyError();return false;}
+     if (!board->restoringReset) {
+         memcpy(board->sramBuffer.buffer, sram.data(), sram.size());
+         memoryBufferMarkRangeDirty(&board->sramBuffer, 0, tg50SramSize);
+@@ -312,6 +331,7 @@
+ 
+ void tg50BoardDestroy(Tg50Board *board) {
+     if (!board) return;
++    delete board->radio;board->radio=nullptr;
+     // The SoC is stopped; removing each callback prevents a stale context in the retained buses.
+     if (!pxaSspRemoveClient(board->ssp, board->touch) ||
+         !pxaI2cDeviceRemove(board->i2c, board->codec) ||
+@@ -359,7 +379,7 @@
+            pxaGpioGetState(board->gpio, 27) == PxaGpioStateLow;
+ }
+ void tg50BoardSetTransportObserver(Tg50Board *board, void (*observer)(void *), void *context) {
+-    const uint16_t masks[4] = {0x0400, 0x0018, 0, 0};
++    const uint16_t masks[4] = {0x0441, 0x0018, 0, 0};
+     tg50ucSetOutputObserver(board->uc, masks, observer, context);
+ }
+ 
+@@ -383,3 +403,5 @@
+ void tg50BoardDisarmInput(Tg50Board *b) { ak4534DisarmInput(b->codec); }
+ 
+ Ak4534InputDemand tg50BoardInputDemand(Tg50Board *b) { return ak4534InputDemand(b->codec); }
++
++CsrBcspRadio* tg50BoardBluetooth(Tg50Board* board){return board?board->radio:nullptr;}
+--- a/src/uarm/uarm/deviceSonyTG50.h
++++ b/src/uarm/uarm/deviceSonyTG50.h
+@@ -14,7 +14,9 @@
+ // The extra MiB and the mirror reproduce uARM's RAM-probe workaround.
+ constexpr uint32_t tg50RamBackingSize = 17u << 20;
+ 
+-Tg50Board *tg50BoardSetup(SocPeriphs *, Keypad *,Reschedule);
++Tg50Board *tg50BoardSetup(SocPeriphs *, Keypad *,Reschedule,GetEmuTime);
++class CsrBcspRadio;
++CsrBcspRadio* tg50BoardBluetooth(Tg50Board *);
+ void tg50BoardTouch(Tg50Board *, int x, int y);
+ void tg50BoardKey(Tg50Board *, uint32_t key, bool down);
+ bool tg50BoardHoldSwitchOn(const Tg50Board *);
+--- a/src/uarm/uarm/savestate/ChunkTypeUarm.h
++++ b/src/uarm/uarm/savestate/ChunkTypeUarm.h
+@@ -38,6 +38,7 @@
+     sonyTg50Audio = 0x0210,
+     sonyTg50MsCard = 0x0220,
+     sonyTg50Configuration = 0x0230,
++    sonyTg50Bluetooth = 0x0240,
+ 
+     pvIc = 0x1000,
+     pvTimer = 0x1010,

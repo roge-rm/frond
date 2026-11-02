@@ -17,9 +17,10 @@ class MachineSettings : public QWidget {
     void setDevice(frondFirmware::Device device, bool qualified = false);
     QSlider* windowScale;
     QLabel* scaleLabel;
-    QCheckBox *smoothLcd, *audio, *fastAudio;
+    QCheckBox *smoothLcd, *audio, *fastAudio, *showKeyboard, *showJogControls;
  private:
     bool automaticScale;
+    frondSessions::Preferences originalPreferences;
 };
 
 class MachineSettingsDialog : public QDialog {

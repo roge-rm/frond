@@ -93,7 +93,7 @@ QString FirmwareDialog::importImages() {
 }
 
 MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool automaticScale, QWidget* parent)
-    : QWidget(parent), automaticScale(automaticScale) {
+    : QWidget(parent), automaticScale(automaticScale), originalPreferences(prefs) {
     auto* layout = new QVBoxLayout(this);
     auto* display = new QGroupBox(tr("Display"), this);
     auto* displayLayout = new QVBoxLayout(display);
@@ -107,9 +107,17 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     smoothLcd = new QCheckBox(tr("Smooth pixels"), display);
     smoothLcd->setObjectName("smoothLcd");
 
+    showKeyboard = new QCheckBox(tr("Show keyboard"), display);
+    showKeyboard->setObjectName("showKeyboard");
+    showJogControls = new QCheckBox(tr("Show jog controls"), display);
+    showJogControls->setObjectName("showJogControls");
+    showKeyboard->setChecked(prefs.showKeyboard);
+    showJogControls->setChecked(prefs.showJogControls);
     displayLayout->addWidget(scaleLabel);
     displayLayout->addWidget(windowScale);
     displayLayout->addWidget(smoothLcd);
+    displayLayout->addWidget(showKeyboard);
+    displayLayout->addWidget(showJogControls);
     layout->addWidget(display);
     auto* sound = new QGroupBox(tr("Audio"), this);
     auto* soundLayout = new QVBoxLayout(sound);
@@ -132,9 +140,19 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
 }
 
 frondSessions::Preferences MachineSettings::values() const {
-    return {windowScale->value(), smoothLcd->isChecked(), audio->isChecked(), fastAudio->isChecked()};
+    auto prefs = originalPreferences;
+    prefs.scale = windowScale->value();
+    prefs.smooth = smoothLcd->isChecked();
+    prefs.audio = audio->isChecked();
+    prefs.fastAudio = fastAudio->isChecked();
+    prefs.showKeyboard = showKeyboard->isChecked();
+    prefs.showJogControls = showJogControls->isChecked();
+    return prefs;
 }
 void MachineSettings::setDevice(Device device, bool qualified) {
+    const bool tg50 = device == frondFirmware::deviceFromId("sony-clie-tg50");
+    showKeyboard->setVisible(tg50);
+    showJogControls->setVisible(tg50);
     const bool soundSupported = device != Device::automatic && frondFirmware::capabilities(device).sound;
     audio->setEnabled(soundSupported);
     audio->setToolTip(soundSupported ? QString() : device == Device::automatic ? tr("Choose firmware first") :
