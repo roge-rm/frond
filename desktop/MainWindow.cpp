@@ -833,10 +833,12 @@ void MainWindow::renameSession(const QString& path) {
     bool ok;
     const auto name = QInputDialog::getText(this, tr("Rename"), tr("Name"), QLineEdit::Normal, info.name, &ok);
     if (!ok) return;
+    // Resolved before the rename, while the session's folder still exists.
+    const auto before = canonicalSession(path);
     const auto error = frondSessions::rename(sessionFolder(), info, name);
     if (!error.isEmpty()) return failure(error);
     const auto renamed = frondSessions::filePath(sessionFolder(), frondSessions::cleanName(name));
-    if (settings.value("lastSession").toString() == canonicalSession(path))
+    if (settings.value("lastSession").toString() == before)
         settings.setValue("lastSession", canonicalSession(renamed));
     refreshSessions(renamed);
 }
@@ -983,7 +985,7 @@ void MainWindow::startSession(const frondSessions::Info& info) {
             arguments << "--nand" << frondFirmware::storedNand(firmwareRoot(), device);
     }
     if (!QDir().mkpath(sessionFolder())) return failure(tr("Could not create the session storage directory."));
-    launch(QFileInfo(info.path).absoluteFilePath(), arguments, device);
+    launch(canonicalSession(info.path), arguments, device);
 }
 // Starts the core on 'arguments' (the session file or the firmware) and saves to 'target'.
 void MainWindow::launch(const QString& target, QStringList arguments, frondFirmware::Device startDevice) {
