@@ -200,9 +200,12 @@ static void MachineFolder() {
     fs::remove_all(dir);
 }
 
+void CardBackingGenerations();
+
 int main() {
     RangeChecks();
     SdImageCodec();
     MachineFolder();
+    CardBackingGenerations();
     std::puts("Card backing and sidecar checks passed");
 }
