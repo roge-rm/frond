@@ -301,9 +301,17 @@ inline void removeStaleTemps(const QString& dir) {
 
 inline QString workPath(const QString& path) { return path + ".work"; }
 
-// A folder an outside session ran from is marked with <name>.frond.work until its first save.
-// If Frond stopped before that, the folder goes once it is 10 minutes old and nobody has it
-// open. True when it was removed.
+// A folder an outside session runs from is marked with <name>.frond.work until its first save.
+// The marker is touched once the core has copied the cards in, so a card file newer than the
+// marker holds the guest's writes.
+inline void touchWork(const QString& frond) {
+    QFile work(workPath(frond));
+    if (work.open(QIODevice::ReadWrite)) work.setFileTime(QDateTime::currentDateTime(), QFileDevice::FileModificationTime);
+}
+
+// If Frond stopped before the first save, the folder goes once it is 10 minutes old, nobody
+// has it open and its cards are still the copies. One whose cards changed stays and is listed,
+// so it can be opened or deleted. True when it was removed.
 inline bool removeStaleWork(const QString& frond) {
     const QFileInfo work(workPath(frond));
     if (!work.isFile()) return false;
@@ -313,11 +321,15 @@ inline bool removeStaleWork(const QString& frond) {
         return false;
     }
     if (work.lastModified() >= QDateTime::currentDateTime().addSecs(-10 * 60)) return false;
+    const auto dir = machineDirOf(frond);
+    QDir folder(dir);
+    const QStringList markers{work.fileName(), QFileInfo(markerPath(frond)).fileName(),
+                              QFileInfo(preferencesPath(frond)).fileName(), QFileInfo(frond).fileName() + ".lock"};
+    for (const auto& entry : folder.entryInfoList(QDir::Files | QDir::Hidden | QDir::System))
+        if (!markers.contains(entry.fileName()) && entry.lastModified() > work.lastModified()) return false;
     QFile::remove(markerPath(frond));
     QFile::remove(preferencesPath(frond));
     QFile::remove(work.absoluteFilePath());
-    const auto dir = machineDirOf(frond);
-    QDir folder(dir);
     for (const auto& entry : folder.entryInfoList(QDir::Files | QDir::Hidden | QDir::System))
         if (machineFileName(entry.fileName())) QFile::remove(entry.absoluteFilePath());
     QDir().rmdir(dir);
@@ -452,7 +464,7 @@ inline QString rename(const QString& folder, const Info& info, const QString& wa
         return QStringLiteral("Couldn't rename the session.");
     }
     const auto renamed = [&](const QString& file) {
-        for (const auto& suffix : {QString(), QStringLiteral(".new"), QStringLiteral(".settings.json")})
+        for (const auto& suffix : {QString(), QStringLiteral(".new"), QStringLiteral(".settings.json"), QStringLiteral(".work")})
             if (file == oldFrond + suffix) return newFrond + suffix;
         return file;
     };

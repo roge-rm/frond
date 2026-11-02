@@ -451,6 +451,7 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     connect(&client, &DesktopClient::started, this, [this] {
         microphoneArmed = false; microphoneState->clear();
         busy = false; hardResetAfterSave = false;
+        frondSessions::touchWork(sessionPath);
         statusBar()->showMessage(tr("Running. Your session will be saved when you close Frond.")); refresh();
         if (stopping) save();
         else send("device-state");
