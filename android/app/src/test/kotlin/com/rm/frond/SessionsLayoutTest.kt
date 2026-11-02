@@ -54,9 +54,15 @@ class SessionsLayoutTest {
         val killed = import("killed", 3_600_000, json = false)
         val running = import("running", 0, json = false)
         val listed = import("listed", 3_600_000, json = true)
-        removeStaleTemps(root, now)
+        val stalled = import("stalled", 3_600_000, json = false)
+        activeImports.add("stalled")
+        try {
+            removeStaleTemps(root, now)
+        } finally {
+            activeImports.remove("stalled")
+        }
         assertFalse(killed.exists())
-        assertTrue(running.exists() && listed.exists())
+        assertTrue(running.exists() && listed.exists() && stalled.exists())
     }
 
     @Test fun zipRoundTripCopiesPackableFilesAtArchiveRoot() {

@@ -348,6 +348,7 @@ object Sessions {
     // Copies a picked .frond or a zip of packable files in as a new session. Returns an error message or null.
     fun import(context: Context, from: Uri): String? {
         val id = UUID.randomUUID().toString()
+        activeImports.add(id)
         val dest = machine(context, id).also { it.mkdirs() }
         val staged = File(dest, ".import.part").also { it.mkdirs() }
         try {
@@ -394,6 +395,7 @@ object Sessions {
         } finally {
             File(dest, ".import.part").deleteRecursively()
             if (!data(context, id).isFile) dest.deleteRecursively()
+            activeImports.remove(id)
         }
     }
 
@@ -519,11 +521,16 @@ internal fun removeStaleTemps(root: File, now: Long) {
     removeStaleImports(root, now)
 }
 
+// Ids of the imports running in this process. Their folders are never stale, however long the
+// document takes to read.
+internal val activeImports: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
 // An import stages into <id>/.import.part and writes <id>.json last; a process killed before
-// that leaves a folder no session lists. Only old ones go, as a running import keeps writing.
+// that leaves a folder no session lists. Only old ones not being imported now go.
 internal fun removeStaleImports(root: File, now: Long) {
     val cutoff = now - 10 * 60 * 1000
     root.listFiles { it.isDirectory }.orEmpty().forEach { dir ->
+        if (dir.name in activeImports) return@forEach
         if (!File(dir, ".import.part").isDirectory || File(dir, "${dir.name}.json").exists()) return@forEach
         if (dir.walkTopDown().any { it.lastModified() >= cutoff }) return@forEach
         dir.deleteRecursively()
