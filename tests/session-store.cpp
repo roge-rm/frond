@@ -320,17 +320,26 @@ class SessionStoreTest : public QObject {
             write(workPath(filePath(folder(), name)), {});
             write(machineDir(folder(), name) + "/sd.frondsd", tinyFrondsd());
         };
-        make("Crashed"); make("Running"); make("Fresh"); make("Saved");
+        make("Crashed"); make("Running"); make("Fresh"); make("Saved"); make("Played"); make("Before");
         write(filePath(folder(), "Saved"), header(7, "palm-tx"));
-        for (const auto& name : {"Crashed", "Running", "Saved"}) age(machineDir(folder(), name));
+        for (const auto& name : {"Crashed", "Running", "Saved", "Played", "Before"}) age(machineDir(folder(), name));
+        // The guest wrote to Played's card after the core started; Before is renamed first.
+        std::filesystem::last_write_time((machineDir(folder(), "Played") + "/sd.frondsd").toStdString(),
+                                         std::filesystem::file_time_type::clock::now() - std::chrono::minutes(30));
+        QVERIFY(rename(folder(), describe(filePath(folder(), "Before")), "After").isEmpty());
+        QVERIFY(QFileInfo::exists(workPath(filePath(folder(), "After"))));
+        QVERIFY(!QFileInfo::exists(machineDir(folder(), "After") + "/Before.frond.work"));
+        age(machineDir(folder(), "After"));
         {
             QLockFile lock(filePath(folder(), "Running") + ".lock"); QVERIFY(lock.tryLock());
             QStringList names;
             for (const auto& info : list(folder())) names << info.name;
-            QVERIFY(!names.contains("Crashed"));
-            QVERIFY(names.contains("Running") && names.contains("Fresh") && names.contains("Saved"));
+            QVERIFY(!names.contains("Crashed") && !names.contains("After"));
+            QVERIFY(names.contains("Running") && names.contains("Fresh") && names.contains("Saved") && names.contains("Played"));
         }
         QVERIFY(!QFileInfo::exists(machineDir(folder(), "Crashed")));
+        QVERIFY(!QFileInfo::exists(machineDir(folder(), "After")));
+        QVERIFY(QFileInfo::exists(machineDir(folder(), "Played") + "/sd.frondsd"));
         QVERIFY(QFileInfo::exists(machineDir(folder(), "Running") + "/sd.frondsd"));
         QVERIFY(QFileInfo::exists(machineDir(folder(), "Fresh") + "/sd.frondsd"));
         QVERIFY(!QFileInfo::exists(workPath(filePath(folder(), "Saved"))));
