@@ -10,6 +10,16 @@ test-memory-stick-media: prepare
 		-Ibuild/source/src/uarm/uarm tests/memory-stick-media.cpp -o build/test-memory-stick-media
 	./build/test-memory-stick-media
 
+.PHONY: test-card-backing
+test: test-card-backing
+test-card-backing: prepare
+	$(CC) -std=gnu99 -O1 -g -Ibuild/source/src/common -c build/source/src/common/zip/miniz.c \
+		-o build/miniz-card-backing.o
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/common \
+		tests/card-backing.cpp build/miniz-card-backing.o -o build/test-card-backing
+	./build/test-card-backing
+
 prepare: build/source/.prepared
 
 # Check input content on every invocation, including removed patches and the gitlink.
