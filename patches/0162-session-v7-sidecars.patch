@@ -1,0 +1,1599 @@
+diff --git a/src/common/session/session_file5.cpp b/src/common/session/session_file5.cpp
+index 8cb2c22..12b29e2 100644
+--- a/src/common/session/session_file5.cpp
++++ b/src/common/session/session_file5.cpp
+@@ -19,17 +19,18 @@ using namespace std;
+ // * V5: Add an embedded SD image, committed atomically with the peripheral state
+ // * V6: The device is a fixed name in a 32-byte NUL-padded field, and the SD size is always present.
+ //       Earlier versions name the device by number and are refused.
++// * V7: 64-bit section lengths, 92-byte media descriptors, no embedded card payloads.
+ 
+ namespace {
+-    constexpr uint32_t MAGIC = 0x19800819;
+-    constexpr uint32_t CURRENT_VERSION = 6;
+-    constexpr uint32_t FIRST_NAMED_VERSION = 6;
+-    constexpr size_t SIZE_DEVICE_NAME = 32;
++    constexpr uint32_t MAGIC = SessionFile5::kMagic;
++    constexpr uint32_t CURRENT_VERSION = SessionFile5::kCurrentVersion;
++    constexpr uint32_t FIRST_NAMED_VERSION = SessionFile5::kVersionV6;
++    constexpr size_t SIZE_DEVICE_NAME = SessionFile5::kDeviceNameBytes;
+ 
+-    constexpr size_t SIZE_HEADER = 8 + SIZE_DEVICE_NAME;  // magic, version, device name
+-    constexpr size_t SIZE_TOC = 8 * 4;
++    constexpr size_t SIZE_HEADER = SessionFile5::kHeaderBytes;
++    constexpr size_t SIZE_TOC_V6 = 8 * 4;
+ 
+-    constexpr size_t BUFFER_MAX_SIZE = 512 * 1024 * 1024;
++    constexpr size_t BUFFER_MAX_SIZE = SessionFile5::kMaxInflatedBytes;
+     constexpr size_t BUFFER_MIN_SIZE = 1024;
+ 
+     // Lower-case letters, digits and dashes, 1 to 31 of them.
+@@ -132,7 +133,18 @@ SessionFile5& SessionFile5::SetSd(size_t size, const void* data) {
+     sdSize = size; sd = reinterpret_cast<const uint8_t*>(data); return *this;
+ }
+ 
+-size_t SessionFile5::GetRamSize() { return ramSize; }
++const void* SessionFile5::GetMedia() const { return media; }
++size_t SessionFile5::GetMediaSize() const { return mediaSize; }
++uint32_t SessionFile5::GetMediaCount() const {
++    return static_cast<uint32_t>(mediaSize / kMediaDescriptorBytes);
++}
++SessionFile5& SessionFile5::SetMedia(size_t size, const void* data) {
++    mediaSize = size;
++    media = reinterpret_cast<const uint8_t*>(data);
++    return *this;
++}
++
++size_t SessionFile5::GetRamSize() const { return ramSize; }
+ 
+ SessionFile5& SessionFile5::SetRamSize(uint32_t size) {
+     ramSize = size;
+@@ -140,26 +152,41 @@ SessionFile5& SessionFile5::SetRamSize(uint32_t size) {
+     return *this;
+ }
+ 
+-bool SessionFile5::Serialize() {
++bool SessionFile5::Serialize() { return SerializeAs(CURRENT_VERSION); }
++
++bool SessionFile5::SerializeAs(uint32_t writeVersion) {
+     serializedSessionSize = 0;
+     serializedSession = nullptr;
+ 
+-    const uint64_t sizeUncompressed = uint64_t(metadataSize) + norSize + nandSize + memorySize + savestateSize + sdSize;
+-    if (sizeUncompressed > BUFFER_MAX_SIZE || sdSize > (128u << 20) || sdSize % 512 || (sdSize && !sd)) return false;
++    if (writeVersion != kVersionV6 && writeVersion != kVersionV7) return false;
++    if (writeVersion == kVersionV7 && sdSize) {
++        cerr << "v7 sessions store cards as siblings" << endl;
++        return false;
++    }
++    if (mediaSize % kMediaDescriptorBytes) return false;
++    if (writeVersion == kVersionV6 && mediaSize) return false;
++
++    const uint64_t sizeUncompressed =
++        uint64_t(metadataSize) + norSize + nandSize + memorySize + savestateSize +
++        (writeVersion == kVersionV6 ? sdSize : 0);
++    if (sizeUncompressed > BUFFER_MAX_SIZE || sdSize > kMaxSdBytes || sdSize % 512 || (sdSize && !sd))
++        return false;
+     if (!validDeviceName(deviceName)) {
+         cerr << "session device name is missing or invalid" << endl;
+         return false;
+     }
+ 
++    const size_t tocExtra =
++        writeVersion == kVersionV7 ? (52 + mediaSize) : SIZE_TOC_V6;
+     bufferSize =
+-        max(static_cast<size_t>(BUFFER_MIN_SIZE), SIZE_HEADER + SIZE_TOC + size_t(sizeUncompressed) / 2);
++        max(static_cast<size_t>(BUFFER_MIN_SIZE), SIZE_HEADER + tocExtra + size_t(sizeUncompressed) / 2);
+     buffer = make_unique<uint8_t[]>(bufferSize);
+     cursor = buffer.get();
+ 
+     bool success = true;
+ 
+     success &= Write32(MAGIC);
+-    success &= Write32(CURRENT_VERSION);
++    success &= Write32(writeVersion);
+     if (success) {
+         memset(cursor, 0, SIZE_DEVICE_NAME);
+         memcpy(cursor, deviceName.data(), deviceName.size());
+@@ -168,12 +195,28 @@ bool SessionFile5::Serialize() {
+     success &= Write32(displayMode);
+     success &= Write32(ramSize);
+ 
+-    success &= Write32(metadataSize);
+-    success &= Write32(norSize);
+-    success &= Write32(nandSize);
+-    success &= Write32(memorySize);
+-    success &= Write32(savestateSize);
+-    success &= Write32(sdSize);
++    if (writeVersion == kVersionV7) {
++        success &= Write64(metadataSize);
++        success &= Write64(norSize);
++        success &= Write64(nandSize);
++        success &= Write64(memorySize);
++        success &= Write64(savestateSize);
++        success &= Write32(GetMediaCount());
++        if (success && mediaSize) {
++            if (cursor - buffer.get() + static_cast<ssize_t>(mediaSize) >
++                static_cast<ssize_t>(bufferSize))
++                return false;
++            memcpy(cursor, media, mediaSize);
++            cursor += mediaSize;
++        }
++    } else {
++        success &= Write32(static_cast<uint32_t>(metadataSize));
++        success &= Write32(static_cast<uint32_t>(norSize));
++        success &= Write32(static_cast<uint32_t>(nandSize));
++        success &= Write32(static_cast<uint32_t>(memorySize));
++        success &= Write32(static_cast<uint32_t>(savestateSize));
++        success &= Write32(static_cast<uint32_t>(sdSize));
++    }
+ 
+     if (!success) {
+         cerr << "failed to write header" << endl;
+@@ -217,7 +260,7 @@ bool SessionFile5::Serialize() {
+         return false;
+     }
+ 
+-    if (!AppendToCompressionStream(sdSize, sd, stream)) return false;
++    if (writeVersion == kVersionV6 && !AppendToCompressionStream(sdSize, sd, stream)) return false;
+ 
+     if (!Flush(stream)) {
+         cerr << "failed to flush" << endl;
+@@ -226,6 +269,7 @@ bool SessionFile5::Serialize() {
+ 
+     serializedSession = buffer.get();
+     serializedSessionSize = cursor - buffer.get();
++    version = writeVersion;
+ 
+     return true;
+ }
+@@ -241,6 +285,7 @@ bool SessionFile5::Deserialize(size_t size, const void* data) {
+     metadata = nor = nand = memory = savestate = nullptr;
+ 
+     sdSize = 0; sd = nullptr;
++    mediaSize = 0; media = nullptr;
+     serializedSession = reinterpret_cast<const uint8_t*>(data);
+     serializedSessionSize = size;
+ 
+@@ -269,6 +314,7 @@ bool SessionFile5::Deserialize(size_t size, const void* data) {
+         cerr << "unsupported session version " << version << endl;
+         return false;
+     }
++    if (version == kVersionV7) return Deserialize_v7();
+     return Deserialize_v6();
+ }
+ 
+@@ -283,6 +329,10 @@ bool SessionFile5::Write32(uint32_t data) {
+     return true;
+ }
+ 
++bool SessionFile5::Write64(uint64_t data) {
++    return Write32(static_cast<uint32_t>(data)) && Write32(static_cast<uint32_t>(data >> 32));
++}
++
+ uint32_t SessionFile5::Read32(bool& success) {
+     if (!serializedSession ||
+         ccursor - serializedSession + 4 > static_cast<ssize_t>(serializedSessionSize)) {
+@@ -298,6 +348,12 @@ uint32_t SessionFile5::Read32(bool& success) {
+     return result;
+ }
+ 
++uint64_t SessionFile5::Read64(bool& success) {
++    const uint32_t lo = Read32(success);
++    const uint32_t hi = Read32(success);
++    return uint64_t(lo) | (uint64_t(hi) << 32);
++}
++
+ bool SessionFile5::AppendToCompressionStream(size_t size, const uint8_t* data, mz_stream& stream) {
+     if (size == 0) return true;
+ 
+@@ -379,7 +435,7 @@ bool SessionFile5::Deserialize_v6() {
+     }
+ 
+     const uint64_t total = uint64_t(metadataSize) + norSize + nandSize + memorySize + savestateSize + sdSize;
+-    if (total > BUFFER_MAX_SIZE || sdSize > (128u << 20) || sdSize % 512) return false;
++    if (total > BUFFER_MAX_SIZE || sdSize > kMaxSdBytes || sdSize % 512) return false;
+     bufferSize = size_t(total);
+     if (bufferSize > BUFFER_MAX_SIZE) {
+         cerr << "session image: bad image size" << endl;
+@@ -422,3 +478,93 @@ bool SessionFile5::Deserialize_v6() {
+ 
+     return true;
+ }
++
++bool SessionFile5::Deserialize_v7() {
++    if (serializedSessionSize - (ccursor - serializedSession) < SIZE_DEVICE_NAME) {
++        cerr << "unable to read session device name" << endl;
++        return false;
++    }
++    const char* field = reinterpret_cast<const char*>(ccursor);
++    deviceName.assign(field, strnlen(field, SIZE_DEVICE_NAME));
++    ccursor += SIZE_DEVICE_NAME;
++    for (size_t i = deviceName.size(); i < SIZE_DEVICE_NAME; ++i)
++        if (field[i]) deviceName.clear();
++    if (!validDeviceName(deviceName)) {
++        cerr << "session device name is invalid" << endl;
++        return false;
++    }
++
++    bool success = true;
++    displayMode = Read32(success);
++    ramSize = Read32(success);
++
++    const uint64_t metadataLen = Read64(success);
++    const uint64_t norLen = Read64(success);
++    const uint64_t nandLen = Read64(success);
++    const uint64_t memoryLen = Read64(success);
++    const uint64_t savestateLen = Read64(success);
++    const uint32_t mediaCount = Read32(success);
++
++    if (!success) {
++        cerr << "failed to read session toc" << endl;
++        return false;
++    }
++
++    const uint64_t mediaBytes = uint64_t(mediaCount) * kMediaDescriptorBytes;
++    if (mediaCount && mediaBytes / kMediaDescriptorBytes != mediaCount) return false;
++    if (serializedSessionSize - (ccursor - serializedSession) < mediaBytes) {
++        cerr << "truncated v7 media descriptors" << endl;
++        return false;
++    }
++    media = mediaCount ? ccursor : nullptr;
++    mediaSize = size_t(mediaBytes);
++    ccursor += mediaBytes;
++
++    const uint64_t total = metadataLen + norLen + nandLen + memoryLen + savestateLen;
++    if (total > BUFFER_MAX_SIZE) return false;
++    if (metadataLen > BUFFER_MAX_SIZE || norLen > BUFFER_MAX_SIZE || nandLen > BUFFER_MAX_SIZE ||
++        memoryLen > BUFFER_MAX_SIZE || savestateLen > BUFFER_MAX_SIZE)
++        return false;
++
++    metadataSize = size_t(metadataLen);
++    norSize = size_t(norLen);
++    nandSize = size_t(nandLen);
++    memorySize = size_t(memoryLen);
++    savestateSize = size_t(savestateLen);
++
++    bufferSize = size_t(total);
++    buffer = make_unique<uint8_t[]>(bufferSize ? bufferSize : 1);
++
++    mz_ulong destLen = bufferSize;
++    const auto remaining = serializedSessionSize - (ccursor - serializedSession);
++    if (bufferSize == 0) {
++        if (remaining) {
++            cerr << "session image: bad size" << endl;
++            return false;
++        }
++        metadata = nor = nand = memory = savestate = nullptr;
++        return true;
++    }
++
++    const auto uncompressResult = uncompress(buffer.get(), &destLen, ccursor, remaining);
++    if (uncompressResult != Z_OK) {
++        cerr << "failed to uncompress session image" << endl;
++        return false;
++    }
++    if (destLen != bufferSize) {
++        cerr << "session image: bad size" << endl;
++        return false;
++    }
++
++    cursor = buffer.get();
++    metadata = cursor;
++    cursor += metadataSize;
++    nor = cursor;
++    cursor += norSize;
++    nand = cursor;
++    cursor += nandSize;
++    memory = cursor;
++    cursor += memorySize;
++    savestate = cursor;
++    return true;
++}
+diff --git a/src/common/session/session_file5.h b/src/common/session/session_file5.h
+index c398d24..0628484 100644
+--- a/src/common/session/session_file5.h
++++ b/src/common/session/session_file5.h
+@@ -13,6 +13,16 @@ class SessionFile5 {
+    public:
+     explicit SessionFile5() = default;
+ 
++    static constexpr uint32_t kMagic = 0x19800819;
++    static constexpr uint32_t kVersionV6 = 6;
++    static constexpr uint32_t kVersionV7 = 7;
++    static constexpr uint32_t kCurrentVersion = kVersionV7;
++    static constexpr size_t kDeviceNameBytes = 32;
++    static constexpr size_t kHeaderBytes = 8 + kDeviceNameBytes;
++    static constexpr size_t kMediaDescriptorBytes = 92;
++    static constexpr size_t kMaxInflatedBytes = 512 * 1024 * 1024;
++    static constexpr size_t kMaxSdBytes = 128u << 20;
++
+     static bool IsSessionFile(size_t size, const void* data);
+ 
+     // The device's fixed name from device_profile5.h, like "palm-tx".
+@@ -45,10 +55,16 @@ class SessionFile5 {
+     size_t GetSdSize() const;
+     SessionFile5& SetSd(size_t size, const void* data);
+ 
+-    size_t GetRamSize();
++    const void* GetMedia() const;
++    size_t GetMediaSize() const;
++    uint32_t GetMediaCount() const;
++    SessionFile5& SetMedia(size_t size, const void* data);
++
++    size_t GetRamSize() const;
+     SessionFile5& SetRamSize(uint32_t size);
+ 
+     bool Serialize();
++    bool SerializeAs(uint32_t version);
+     const void* GetSerializedSession() const;
+     size_t GetSerializedSessionSize() const;
+ 
+@@ -58,13 +74,16 @@ class SessionFile5 {
+ 
+    private:
+     bool Write32(uint32_t data);
++    bool Write64(uint64_t data);
+     uint32_t Read32(bool& success);
++    uint64_t Read64(bool& success);
+ 
+     bool AppendToCompressionStream(size_t size, const uint8_t* data, mz_stream_s& stream);
+     bool GrowBuffer(mz_stream_s& stream);
+     bool Flush(mz_stream_s& stream);
+ 
+     bool Deserialize_v6();
++    bool Deserialize_v7();
+ 
+    private:
+     std::string deviceName;
+@@ -88,6 +107,9 @@ class SessionFile5 {
+     size_t sdSize{0};
+     const uint8_t* sd{nullptr};
+ 
++    size_t mediaSize{0};
++    const uint8_t* media{nullptr};
++
+     size_t serializedSessionSize{0};
+     const uint8_t* serializedSession{nullptr};
+ 
+diff --git a/src/uarm/native/Commands.cpp b/src/uarm/native/Commands.cpp
+index 9783997..779c20f 100644
+--- a/src/uarm/native/Commands.cpp
++++ b/src/uarm/native/Commands.cpp
+@@ -23,6 +23,7 @@
+ #include "sdcard.h"
+ #include "device_profile5.h"
+ #include "session/session_file5.h"
++#include "MachineSession.h"
+ #include "syscall_dispatch.h"
+ #include "cputil.h"
+ 
+@@ -153,48 +154,18 @@ namespace {
+ 
+         auto ctx = reinterpret_cast<commands::Context*>(context);
+ 
+-        if (sdCardInitialized()) {
+-            string key = md5(reinterpret_cast<uint8_t*>(sdCardData().data), sdCardData().size);
+-            sdCardRekey(key.c_str());
+-        }
+-
+-        if (!ctx->soc->Save()) {
+-            cout << "failed to save state" << endl;
++        if (!frondNative::saveMachine(args[0], *ctx->soc)) {
++            cout << "failed to save session" << endl;
+             return;
+         }
+-
+-        SessionFile5 sessionFile;
+-
+-        const Buffer rom = ctx->soc->GetRomData();
+-        const Buffer nand = ctx->soc->GetNandData();
+-        const Buffer memory = ctx->soc->GetMemoryData();
+-        const Buffer savestate = ctx->soc->GetSavestate();
+-        const Buffer sd = sdCardData();
+-
+-        sessionFile.SetDeviceName(deviceProfile5(ctx->soc->GetDeviceType())->name)
+-            .SetDisplayMode(static_cast<int32_t>(ctx->soc->GetDisplayMode()))
+-            .SetRamSize(ctx->soc->GetRamSize())
+-            .SetNor(rom.size, reinterpret_cast<uint8_t*>(rom.data))
+-            .SetNand(nand.size, reinterpret_cast<uint8_t*>(nand.data))
+-            .SetMemory(memory.size, reinterpret_cast<uint8_t*>(memory.data))
+-            .SetSavestate(savestate.size, reinterpret_cast<uint8_t*>(savestate.data))
+-            .SetSd(sd.size, sd.data);
+-
+-        if (!sessionFile.Serialize()) {
+-            cout << "failed to serialize session" << endl;
+-            return;
+-        }
+-
+-        if (!util::WriteFile(args[0],
+-                             reinterpret_cast<const uint8_t*>(sessionFile.GetSerializedSession()),
+-                             sessionFile.GetSerializedSessionSize())) {
+-            cout << "failed to write session to " << args[0] << endl;
+-        } else {
+-            cout << "wrote session to " << args[0] << endl;
+-        }
++        cout << "wrote session to " << args[0] << endl;
+ 
+         if (args.size() == 2 && sdCardInitialized()) {
+-            if (!util::WriteFile(args[1], reinterpret_cast<uint8_t*>(sd.data), sd.size)) {
++            std::vector<uint8_t> raw(sdCardSectorCount() * SD_SECTOR_SIZE);
++            bool ok = true;
++            for (size_t i = 0; ok && i < sdCardSectorCount(); ++i)
++                ok = sdCardRead(uint32_t(i), raw.data() + i * SD_SECTOR_SIZE);
++            if (!ok || !util::WriteFile(args[1], raw.data(), raw.size())) {
+                 cout << "failed to write SD image to " << args[1] << endl;
+             } else {
+                 cout << "wrote SD image to " << args[1] << endl;
+diff --git a/src/uarm/native/DesktopControl.h b/src/uarm/native/DesktopControl.h
+index 8907da3..227e173 100644
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -34,6 +34,7 @@
+ #include "db_backup.h"
+ #include "db_installer.h"
+ #include "session/session_file5.h"
++#include "MachineSession.h"
+ 
+ // Private Unix socket, owned by the launcher. Only the emulation thread dispatches requests.
+ // Lines: id<TAB>command<TAB>hex UTF-8 argument. Replies: id<TAB>ok/error<TAB>code<TAB>hex text.
+@@ -519,21 +520,7 @@ class DesktopControl {
+             return {true, "exported", "SD image exported."};
+         }
+         if (command == "save") {
+-            if (sdCardInitialized()) {
+-                const auto image = sdCardData(); const auto id = md5(static_cast<uint8_t*>(image.data), image.size);
+-                sdCardRekey(id.c_str());
+-            }
+-            if (!ctx.soc->Save()) return {false, "save", "Could not save device state."};
+-            SessionFile5 session;
+-            const auto nor = ctx.soc->GetRomData(), nand = ctx.soc->GetNandData();
+-            const auto ram = ctx.soc->GetMemoryData(), state = ctx.soc->GetSavestate();
+-            session.SetDeviceName(deviceProfile5(ctx.soc->GetDeviceType())->name)
+-                .SetDisplayMode(int32_t(ctx.soc->GetDisplayMode())).SetRamSize(ctx.soc->GetRamSize())
+-                .SetNor(nor.size, static_cast<uint8_t*>(nor.data)).SetNand(nand.size, static_cast<uint8_t*>(nand.data))
+-                .SetMemory(ram.size, static_cast<uint8_t*>(ram.data)).SetSavestate(state.size, static_cast<uint8_t*>(state.data))
+-                .SetSd(sdCardData().size, sdCardData().data);
+-            if (!session.Serialize()) return {false, "save", "Could not serialize session."};
+-            writeAtomic(path, session.GetSerializedSession(), session.GetSerializedSessionSize());
++            if (!frondNative::saveMachine(path, *ctx.soc)) return {false, "save", "Could not save device state."};
+             return {true, "saved", "Session saved."};
+         }
+         if (command == "install") {
+diff --git a/src/uarm/native/MachineSession.h b/src/uarm/native/MachineSession.h
+new file mode 100644
+index 0000000..3c7c64d
+--- /dev/null
++++ b/src/uarm/native/MachineSession.h
+@@ -0,0 +1,125 @@
++#ifndef FROND_MACHINE_SESSION_H
++#define FROND_MACHINE_SESSION_H
++
++#include "SessionIo.h"
++#include "SoC.h"
++#include "device_profile5.h"
++#include "mmiodev_MemoryStickController.h"
++#include "sdcard.h"
++#include "soc_PXA.h"
++
++#include <algorithm>
++#include <cstring>
++#include <filesystem>
++#include <iostream>
++#include <string>
++
++// Native save/load of a machine folder. A lone v6 .frond extracts into <stem>/.
++namespace frondNative {
++
++inline std::filesystem::path machineFolderForSave(const std::filesystem::path& path) {
++    std::error_code ec;
++    if (std::filesystem::is_directory(path, ec) ||
++        (!std::filesystem::exists(path, ec) && !frondMachine::endsWith(path.filename().string(), ".frond"))) {
++        std::filesystem::create_directories(path, ec);
++        return path;
++    }
++    if (frondMachine::endsWith(path.filename().string(), ".frond")) {
++        if (frondSession::frondInFolder(path) || frondSession::isMachineFolder(path.parent_path()))
++            return path.parent_path();
++        const auto folder = path.parent_path() / path.stem();
++        std::filesystem::create_directories(folder, ec);
++        return folder;
++    }
++    std::filesystem::create_directories(path, ec);
++    return path;
++}
++
++inline void fillState(SoC& soc, frondSession::Contents& contents) {
++    const auto* profile = deviceProfile5(soc.GetDeviceType());
++    contents.deviceName = profile ? profile->name : "";
++    contents.displayMode = int32_t(soc.GetDisplayMode());
++    contents.ramSize = soc.GetRamSize();
++    auto copy = [](const Buffer& b) {
++        auto* p = static_cast<const uint8_t*>(b.data);
++        return b.size && p ? std::vector<uint8_t>(p, p + b.size) : std::vector<uint8_t>{};
++    };
++    contents.nor = copy(soc.GetRomData());
++    contents.nand = copy(soc.GetNandData());
++    contents.memory = copy(soc.GetMemoryData());
++    contents.savestate = copy(soc.GetSavestate());
++}
++
++inline bool publishSd(const std::filesystem::path& folder, frondMachine::Media& media, bool inserted) {
++    media.kind = frondMachine::kindSd;
++    media.name = frondMachine::sdSibling;
++    media.inserted = inserted;
++    media.writeProtected = false;
++    const uint64_t bytes = uint64_t(sdCardSectorCount()) * SD_SECTOR_SIZE;
++    media.logicalSize = bytes;
++    media.physicalSize = bytes;
++    const char* id = sdCardGetId();
++    media.identity.fill(0);
++    if (id && *id) std::memcpy(media.identity.data(), id, std::min(size_t(32), std::strlen(id)));
++    if (sdCardFileBacked()) return sdCardCommit();
++    return frondSession::writeSdFromReader(
++        folder / frondMachine::sdSibling, bytes,
++        [](uint64_t off, uint64_t n, void* dest) {
++            if (n != SD_SECTOR_SIZE || off % SD_SECTOR_SIZE) return false;
++            return sdCardRead(uint32_t(off / SD_SECTOR_SIZE), dest);
++        },
++        media.identity);
++}
++
++inline bool publishMs(const std::filesystem::path& folder, MemoryStickController* ms,
++                      frondMachine::Media& media) {
++    media.kind = frondMachine::kindMs;
++    media.name = frondMachine::msSibling;
++    media.inserted = msCtrlrInserted(ms);
++    media.writeProtected = msCtrlrReadOnly(ms);
++    media.logicalSize = frondMachine::msLogicalBytes;
++    media.physicalSize = frondMachine::msPhysicalBytes;
++    const auto path = folder / frondMachine::msSibling;
++    std::error_code ec;
++    if (std::filesystem::is_regular_file(path, ec)) return true;
++    std::vector<uint8_t> physical;
++    if (!msCtrlrExport(ms, physical)) return false;
++    return frondSession::writeMsFile(path, physical.data(), physical.size());
++}
++
++inline bool saveMachine(const std::filesystem::path& path, SoC& soc) {
++    if (!soc.Save()) return false;
++    const auto folder = machineFolderForSave(path);
++    frondSession::Contents contents;
++    fillState(soc, contents);
++    if (sdCardInitialized()) {
++        frondMachine::Media media;
++        if (!publishSd(folder, media, soc.SdInserted())) return false;
++        contents.media.push_back(std::move(media));
++    }
++    if (auto* pxa = dynamic_cast<SocPXA*>(&soc)) {
++        if (auto* ms = pxa->GetMemoryStick(); ms && msCtrlrPresent(ms)) {
++            frondMachine::Media media;
++            if (!publishMs(folder, ms, media)) return false;
++            contents.media.push_back(std::move(media));
++        }
++    }
++    return frondSession::saveFolder(folder, contents);
++}
++
++inline bool attachFolderMedia(const frondSession::Contents& contents, const std::filesystem::path& folder) {
++    for (const auto& media : contents.media) {
++        if (media.kind == frondMachine::kindSd) {
++            char id[SD_CARD_ID_MAX_LEN + 1]{};
++            std::memcpy(id, media.identity.data(), SD_CARD_ID_MAX_LEN);
++            if (!sdCardInitializeFromFile((folder / frondMachine::sdSibling).c_str(), media.physicalSize,
++                                          frondSdFile::headerBytes, id))
++                return false;
++        }
++    }
++    return true;
++}
++
++}  // namespace frondNative
++
++#endif
+diff --git a/src/uarm/native/main.cpp b/src/uarm/native/main.cpp
+index 60efc02..bd789c4 100644
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -49,6 +49,10 @@
+ #include "session/session_file5.h"
+ #include "soc_PXA.h"
+ #include "soc_pv.h"
++#include "MachineSession.h"
++#include "MemoryStickImage.h"
++
++#include <filesystem>
+ 
+ using namespace std;
+ 
+@@ -158,66 +162,78 @@ namespace {
+         memcpy(buffer.data, data, size);
+     }
+ 
+-    bool readSession(const Options& options, Buffer& nor, Buffer& nand, Buffer& ram,
+-                     Buffer& savestate, uint32_t& ramSize, RomInfo5& romInfo,
+-                     optional<DisplayMode>& displayMode, DeviceType5 requestedDevice,
+-                     DeviceType5& sessionDevice, bool& embeddedCard) {
+-        SessionFile5 sessionFile;
+-
+-        size_t norOrSessionLen{0};
+-        unique_ptr<uint8_t[]> norOrSessionData;
+-        if (!util::ReadFile(options.norOrSession, norOrSessionData, norOrSessionLen)) return false;
+-
+-        if (SessionFile5::IsSessionFile(norOrSessionLen, norOrSessionData.get())) {
+-            if (!sessionFile.Deserialize(norOrSessionLen, norOrSessionData.get())) {
+-                cerr << "invalid session image" << endl;
+-                return false;
+-            }
+-            const auto* profile = deviceProfileNamed5(sessionFile.GetDeviceName().c_str());
+-            if (!profile || profile->deviceType == deviceTypeInvalid) {
+-                cerr << "this session is for " << sessionFile.GetDeviceName()
+-                     << ", which Frond can't run" << endl;
++    bool applySession(const frondSession::Contents& contents, const std::filesystem::path& folder,
++                      Buffer& nor, Buffer& nand, Buffer& ram, Buffer& savestate, uint32_t& ramSize,
++                      RomInfo5& romInfo, optional<DisplayMode>& displayMode, DeviceType5 requestedDevice,
++                      DeviceType5& sessionDevice, bool& embeddedCard, const Options& options) {
++        const auto* profile = deviceProfileNamed5(contents.deviceName.c_str());
++        if (!profile || profile->deviceType == deviceTypeInvalid) {
++            cerr << "this session is for " << contents.deviceName << ", which Frond can't run" << endl;
++            return false;
++        }
++        sessionDevice = profile->deviceType;
++        if (requestedDevice != deviceTypeInvalid && sessionDevice != requestedDevice) {
++            cerr << "--device " << deviceName5(requestedDevice) << " doesn't match the session's device "
++                 << profile->name << endl;
++            return false;
++        }
++        if (options.nand) {
++            cerr << "separate NAND image cannot be used with session file" << endl;
++            return false;
++        }
++        ramSize = contents.ramSize;
++        if (ramSize == 0) ramSize = ramSizeFromMemorySize(contents.memory.size());
++        displayMode = static_cast<DisplayMode>(contents.displayMode);
++        copy(nor, contents.nor.size(), contents.nor.data());
++        copy(nand, contents.nand.size(), contents.nand.data());
++        copy(ram, contents.memory.size(), contents.memory.data());
++        copy(savestate, contents.savestate.size(), contents.savestate.data());
++        bool hasSd = false;
++        for (const auto& media : contents.media)
++            if (media.kind == frondMachine::kindSd) hasSd = true;
++        if (hasSd) {
++            if (profile->sdMax == 0) {
++                cerr << "session SD card is not supported by device profile" << endl;
+                 return false;
+             }
+-            sessionDevice = profile->deviceType;
+-            if (requestedDevice != deviceTypeInvalid && sessionDevice != requestedDevice) {
+-                cerr << "--device " << deviceName5(requestedDevice) << " doesn't match the session's device "
+-                     << profile->name << endl;
++            if (options.sd) {
++                cerr << "session already contains an SD card" << endl;
+                 return false;
+             }
+-            if (options.nand) {
+-                cerr << "separate NAND image cannot be used with session file" << endl;
++            if (!frondNative::attachFolderMedia(contents, folder)) {
++                cerr << "session SD sidecar is missing or unreadable" << endl;
+                 return false;
+             }
++            embeddedCard = true;
++        }
++        romInfo = RomInfo5(nor.data, nor.size);
++        if (sessionDevice != deviceTypeTX && romInfo.GetDeviceType() != sessionDevice) {
++            cerr << "session device profile does not match ROM" << endl;
++            return false;
++        }
++        return true;
++    }
+ 
+-            ramSize = sessionFile.GetRamSize();
+-            if (ramSize == 0) ramSize = ramSizeFromMemorySize(sessionFile.GetMemorySize());
++    bool readSession(const Options& options, Buffer& nor, Buffer& nand, Buffer& ram,
++                     Buffer& savestate, uint32_t& ramSize, RomInfo5& romInfo,
++                     optional<DisplayMode>& displayMode, DeviceType5 requestedDevice,
++                     DeviceType5& sessionDevice, bool& embeddedCard, std::string& sessionFolder) {
++        const std::filesystem::path path(options.norOrSession);
++        frondSession::Contents contents;
++        std::filesystem::path folder;
++        if (frondSession::loadPath(path, contents, folder)) {
++            sessionFolder = folder.string();
++            return applySession(contents, folder, nor, nand, ram, savestate, ramSize, romInfo,
++                                displayMode, requestedDevice, sessionDevice, embeddedCard, options);
++        }
+ 
+-            displayMode = static_cast<DisplayMode>(sessionFile.GetDisplayMode());
+-            copy(nor, sessionFile.GetNorSize(), sessionFile.GetNor());
+-            copy(nand, sessionFile.GetNandSize(), sessionFile.GetNand());
+-            copy(ram, sessionFile.GetMemorySize(), sessionFile.GetMemory());
+-            copy(savestate, sessionFile.GetSavestateSize(), sessionFile.GetSavestate());
++        size_t norOrSessionLen{0};
++        unique_ptr<uint8_t[]> norOrSessionData;
++        if (!util::ReadFile(options.norOrSession, norOrSessionData, norOrSessionLen)) return false;
+ 
+-            if (sessionFile.GetSdSize()) {
+-                if (profile->sdMax == 0) {
+-                    cerr << "session SD card is not supported by device profile" << endl;
+-                    return false;
+-                }
+-                if (options.sd) { cerr << "session already contains an SD card" << endl; return false; }
+-                const auto size = sessionFile.GetSdSize();
+-                auto* image = static_cast<uint8_t*>(malloc(size));
+-                if (!image) throw bad_alloc();
+-                memcpy(image, sessionFile.GetSd(), size);
+-                const auto id = md5(image, size);
+-                sdCardInitializeWithData(size / SD_SECTOR_SIZE, image, id.c_str());
+-                embeddedCard = true;
+-            }
+-            romInfo = RomInfo5(nor.data, nor.size);
+-            if (sessionDevice != deviceTypeTX && romInfo.GetDeviceType() != sessionDevice) {
+-                cerr << "session device profile does not match ROM" << endl;
+-                return false;
+-            }
++        if (SessionFile5::IsSessionFile(norOrSessionLen, norOrSessionData.get())) {
++            cerr << "invalid session image" << endl;
++            return false;
+         } else {
+             romInfo = RomInfo5(norOrSessionData.get(), norOrSessionLen);
+             // Devices without a card header are only started by name.
+@@ -316,8 +332,9 @@ namespace {
+ 
+         bool embeddedCard = false;
+         DeviceType5 sessionDevice = DeviceType5::deviceTypeInvalid;
++        string sessionFolder;
+         if (!readSession(options, nor, nand, memory, savestate, ramSize, romInfo, displayMode,
+-                         requestedDevice, sessionDevice, embeddedCard))
++                         requestedDevice, sessionDevice, embeddedCard, sessionFolder))
+             return false;
+         const DeviceType5 deviceType = sessionDevice != DeviceType5::deviceTypeInvalid
+             ? sessionDevice : requestedDevice != deviceTypeInvalid ? requestedDevice
+@@ -496,6 +513,21 @@ namespace {
+             free(memory.data);
+         }
+ 
++        if (!sessionFolder.empty()) {
++            const auto msPath = std::filesystem::path(sessionFolder) / frondMachine::msSibling;
++            std::error_code ec;
++            if (std::filesystem::is_regular_file(msPath, ec)) {
++                auto* pxa = dynamic_cast<SocPXA*>(soc);
++                auto* ms = pxa ? pxa->GetMemoryStick() : nullptr;
++                std::vector<uint8_t> file, physical;
++                if (!ms || !frondMachine::readBytes(msPath, file) ||
++                    !frondMs::decode(file.data(), file.size(), physical) || !msCtrlrAttach(ms, physical)) {
++                    cerr << "session Memory Stick sidecar is missing or unreadable" << endl;
++                    return false;
++                }
++            }
++        }
++
+         if (!soc->Load(savestate.size, savestate.data)) {
+             cerr << "failed to restore savestate" << endl;
+             return false;
+diff --git a/src/uarm/uarm/CardBacking.h b/src/uarm/uarm/CardBacking.h
+index 6d4bed8..8c70b39 100644
+--- a/src/uarm/uarm/CardBacking.h
++++ b/src/uarm/uarm/CardBacking.h
+@@ -25,12 +25,11 @@
+ // deviceSetSdCardInserted: SoC.cpp, soc_generic_impl.h, native/main.cpp,
+ // Commands.cpp, DesktopControl.h, web/uarm.cpp, device boards, tests.
+ //
+-// Memory Stick in savestate: msCtrlrSave embeds a compressed physical image
+-// (mmiodev_MemoryStickController.cpp); soc.Save reaches it through the TG50
+-// board OnSave. msCtrlrExport / MemoryStickMedia::CopyImage feed host export.
+-// ReadOnlyGuest does not copy MS separately; the whole-card bytes travel inside
+-// the savestate from soc.Save. GuestFiles/database work uses ReadOnlyGuest, so
+-// they inherit that savestate embedding and the separate SD sdCardData copy.
++// Memory Stick savestate v1 stores protocol state and a present/protect
++// reference (mmiodev_MemoryStickController.cpp). v0 still loads an embedded
++// compressed image for v6 extraction. Ordinary v7 save does not call
++// sdCardData(); sidecars hold card bytes. sdCardData remains a compatibility
++// view for older tests until milestone 4.
+ //
+ // Checked 64-bit card payload. offset+length is never formed until both fit.
+ 
+diff --git a/src/uarm/uarm/SessionIo.h b/src/uarm/uarm/SessionIo.h
+new file mode 100644
+index 0000000..9d262f9
+--- /dev/null
++++ b/src/uarm/uarm/SessionIo.h
+@@ -0,0 +1,581 @@
++#ifndef FROND_SESSION_IO_H
++#define FROND_SESSION_IO_H
++
++#include "MachineFolder.h"
++#include "md5.h"
++#include "session/session_file5.h"
++
++#include <algorithm>
++#include <array>
++#include <cerrno>
++#include <cstring>
++#include <fcntl.h>
++#include <filesystem>
++#include <fstream>
++#include <iostream>
++#include <limits>
++#include <string>
++#include <unistd.h>
++#include <vector>
++
++#define MINIZ_NO_ZLIB_COMPATIBLE_NAMES
++#include "zip/miniz.h"
++
++// v7 machine-folder I/O and streamed v6 extraction. Card payloads stay in
++// sd.frondsd / ms.frondms; the .frond holds bounded state and descriptors.
++namespace frondSession {
++constexpr uint32_t msCardChunk = 0x0220;
++constexpr size_t msV0SizeWord = 413;  // version + protocol + present + protect
++constexpr size_t inflateChunk = 65536;
++constexpr uint64_t msPhysicalBytes = frondMachine::msPhysicalBytes;
++
++struct Contents {
++    std::string deviceName;
++    int32_t displayMode{};
++    uint32_t ramSize{};
++    std::vector<uint8_t> metadata, nor, nand, memory, savestate;
++    std::vector<frondMachine::Media> media;
++};
++
++inline uint32_t le32(const uint8_t* p) {
++    return uint32_t(p[0]) | (uint32_t(p[1]) << 8) | (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
++}
++inline uint64_t le64(const uint8_t* p) { return uint64_t(le32(p)) | (uint64_t(le32(p + 4)) << 32); }
++
++inline bool peekHeader(const uint8_t* data, size_t size, uint32_t& version, std::string& device) {
++    if (!data || size < SessionFile5::kHeaderBytes) return false;
++    if (le32(data) != SessionFile5::kMagic) return false;
++    version = le32(data + 4);
++    if (version < SessionFile5::kVersionV6 || version > SessionFile5::kCurrentVersion) return false;
++    const char* field = reinterpret_cast<const char*>(data + 8);
++    device.assign(field, strnlen(field, SessionFile5::kDeviceNameBytes));
++    for (size_t i = device.size(); i < SessionFile5::kDeviceNameBytes; ++i)
++        if (field[i]) return false;
++    return !device.empty();
++}
++
++inline bool writeAtomicFrond(const std::filesystem::path& dest, const void* data, size_t size) {
++    std::error_code ec;
++    auto dir = dest.parent_path();
++    if (dir.empty()) dir = ".";
++    if (!std::filesystem::is_directory(dir, ec)) return false;
++    std::string tmpl = (dir / ".frond.tmp-XXXXXX").string();
++    std::vector<char> name(tmpl.begin(), tmpl.end());
++    name.push_back(0);
++    const int fd = mkstemp(name.data());
++    if (fd < 0) return false;
++    bool open = true;
++    auto fail = [&] {
++        if (open) close(fd);
++        unlink(name.data());
++        return false;
++    };
++    const auto* bytes = static_cast<const uint8_t*>(data);
++    size_t left = size;
++    while (left) {
++        const auto n = write(fd, bytes, left);
++        if (n < 0 && errno == EINTR) continue;
++        if (n <= 0) return fail();
++        bytes += n;
++        left -= static_cast<size_t>(n);
++    }
++    if (fsync(fd) < 0) return fail();
++    if (close(fd) < 0) {
++        open = false;
++        unlink(name.data());
++        return false;
++    }
++    open = false;
++    if (rename(name.data(), dest.c_str()) < 0) {
++        unlink(name.data());
++        return false;
++    }
++    const int folder = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY);
++    if (folder >= 0) {
++        fsync(folder);
++        ::close(folder);
++    }
++    return true;
++}
++
++inline bool encodeMedia(const std::vector<frondMachine::Media>& cards, std::vector<uint8_t>& out) {
++    out.clear();
++    for (const auto& card : cards) {
++        std::vector<uint8_t> one;
++        if (!frondMachine::encodeDescriptor(card, one)) return false;
++        out.insert(out.end(), one.begin(), one.end());
++    }
++    return true;
++}
++
++inline bool decodeMedia(const uint8_t* bytes, size_t size, std::vector<frondMachine::Media>& cards) {
++    cards.clear();
++    if (size % frondMachine::descriptorBytes) return false;
++    for (size_t off = 0; off < size; off += frondMachine::descriptorBytes) {
++        frondMachine::Media media;
++        if (!frondMachine::decodeDescriptor(bytes + off, frondMachine::descriptorBytes, media))
++            return false;
++        cards.push_back(std::move(media));
++    }
++    return true;
++}
++
++inline bool fromSession(const SessionFile5& session, Contents& out) {
++    auto copy = [](const void* p, size_t n) {
++        const auto* b = static_cast<const uint8_t*>(p);
++        return n && b ? std::vector<uint8_t>(b, b + n) : std::vector<uint8_t>{};
++    };
++    Contents parsed;
++    parsed.deviceName = session.GetDeviceName();
++    parsed.displayMode = session.GetDisplayMode();
++    parsed.ramSize = session.GetRamSize();
++    parsed.metadata = copy(session.GetMetadata(), session.GetMetadataSize());
++    parsed.nor = copy(session.GetNor(), session.GetNorSize());
++    parsed.nand = copy(session.GetNand(), session.GetNandSize());
++    parsed.memory = copy(session.GetMemory(), session.GetMemorySize());
++    parsed.savestate = copy(session.GetSavestate(), session.GetSavestateSize());
++    if (session.GetVersion() == SessionFile5::kVersionV7) {
++        if (!decodeMedia(static_cast<const uint8_t*>(session.GetMedia()), session.GetMediaSize(),
++                         parsed.media))
++            return false;
++    }
++    out = std::move(parsed);
++    return true;
++}
++
++inline bool saveV7(const std::filesystem::path& dest, const Contents& contents) {
++    std::vector<uint8_t> media;
++    if (!encodeMedia(contents.media, media)) return false;
++    SessionFile5 session;
++    session.SetDeviceName(contents.deviceName)
++        .SetDisplayMode(contents.displayMode)
++        .SetRamSize(contents.ramSize)
++        .SetMetadata(contents.metadata.size(), contents.metadata.data())
++        .SetNor(contents.nor.size(), contents.nor.data())
++        .SetNand(contents.nand.size(), contents.nand.data())
++        .SetMemory(contents.memory.size(), contents.memory.data())
++        .SetSavestate(contents.savestate.size(), contents.savestate.data())
++        .SetMedia(media.size(), media.data());
++    if (!session.Serialize()) return false;
++    return writeAtomicFrond(dest, session.GetSerializedSession(), session.GetSerializedSessionSize());
++}
++
++inline bool writeSdFile(const std::filesystem::path& path, const uint8_t* payload, uint64_t size) {
++    std::vector<uint8_t> file;
++    if (!frondSdFile::encode(payload, size, file)) return false;
++    return writeAtomicFrond(path, file.data(), file.size());
++}
++
++// Stream sectors to sd.frondsd without a whole-card vector.
++template <typename ReadFn>
++inline bool writeSdFromReader(const std::filesystem::path& path, uint64_t size, ReadFn read,
++                              std::array<uint8_t, frondMachine::identityBytes>& identity) {
++    if (!frondSdFile::validPayloadSize(size)) return false;
++    auto dir = path.parent_path();
++    if (dir.empty()) dir = ".";
++    std::string tmpl = (dir / ".frondsd.tmp-XXXXXX").string();
++    std::vector<char> name(tmpl.begin(), tmpl.end());
++    name.push_back(0);
++    const int fd = mkstemp(name.data());
++    if (fd < 0) return false;
++    uint8_t header[frondSdFile::headerBytes]{};
++    if (write(fd, header, sizeof(header)) != ssize_t(sizeof(header))) {
++        close(fd);
++        unlink(name.data());
++        return false;
++    }
++    uint8_t sector[frondSdFile::sectorBytes];
++    uint32_t crc = 0;
++    MD5Context digest{};
++    md5Init(&digest);
++    for (uint64_t off = 0; off < size; off += sizeof(sector)) {
++        if (!read(off, sizeof(sector), sector)) {
++            close(fd);
++            unlink(name.data());
++            return false;
++        }
++        crc = mz_crc32(crc, sector, sizeof(sector));
++        md5Update(&digest, sector, sizeof(sector));
++        size_t wrote = 0;
++        while (wrote < sizeof(sector)) {
++            const auto n = write(fd, sector + wrote, sizeof(sector) - wrote);
++            if (n < 0 && errno == EINTR) continue;
++            if (n <= 0) {
++                close(fd);
++                unlink(name.data());
++                return false;
++            }
++            wrote += size_t(n);
++        }
++    }
++    md5Finalize(&digest);
++    std::memcpy(header, "FRONDSD", 8);
++    frondSdFile::put32(header + 8, frondSdFile::version);
++    frondSdFile::put32(header + 12, frondSdFile::sectorBytes);
++    frondSdFile::put64(header + 16, size);
++    frondSdFile::put32(header + 24, crc);
++    if (lseek(fd, 0, SEEK_SET) < 0 || write(fd, header, sizeof(header)) != ssize_t(sizeof(header)) ||
++        fsync(fd) < 0 || close(fd) < 0 || rename(name.data(), path.c_str()) < 0) {
++        unlink(name.data());
++        return false;
++    }
++    identity.fill(0);
++    std::memcpy(identity.data(), digest.digest, 16);
++    return true;
++}
++
++inline bool writeMsFile(const std::filesystem::path& path, const uint8_t* payload, uint64_t size) {
++    if (!payload || size > std::numeric_limits<size_t>::max()) return false;
++    const auto n = static_cast<size_t>(size);
++    std::vector<uint8_t> file(frondSdFile::headerBytes + n);
++    std::memcpy(file.data(), "FRONDMS", 8);
++    frondSdFile::put32(file.data() + 8, 1);
++    frondSdFile::put32(file.data() + 12, 8192);
++    frondSdFile::put32(file.data() + 16, 32);
++    frondSdFile::put32(file.data() + 20, 512);
++    frondSdFile::put32(file.data() + 24, 9);
++    frondSdFile::put32(file.data() + 28, frondSdFile::crc32(payload, n));
++    std::memcpy(file.data() + frondSdFile::headerBytes, payload, n);
++    return writeAtomicFrond(path, file.data(), file.size());
++}
++
++inline uint32_t savestateWord(const uint8_t* data, size_t words, size_t index) {
++    if (index >= words) return 0;
++    return le32(data + index * 4);
++}
++
++// Test seam: imageBytes defaults to classic physical size. Tests inject a stub.
++inline bool extractMsFromSavestate(const uint8_t* data, size_t size, const std::filesystem::path& dest,
++                                   uint64_t imageBytes = msPhysicalBytes, bool* found = nullptr) {
++    if (found) *found = false;
++    if (!data || size < 4 || size % 4) return true;
++    const size_t words = size / 4;
++    const uint32_t count = savestateWord(data, words, 0);
++    if (uint64_t(1) + uint64_t(count) * 2 > words) return false;
++    size_t offset = 1 + size_t(count) * 2;
++    for (uint32_t i = 0; i < count; ++i) {
++        const uint32_t type = savestateWord(data, words, 1 + i * 2);
++        const uint32_t n = savestateWord(data, words, 2 + i * 2);
++        if (offset + n > words) return false;
++        if (type == msCardChunk) {
++            if (n < msV0SizeWord + 2) return true;
++            const uint32_t version = savestateWord(data, words, offset);
++            if (version != 0) return true;
++            const uint32_t present = savestateWord(data, words, offset + msV0SizeWord - 1);
++            if (!present) return true;
++            const uint32_t packed = savestateWord(data, words, offset + msV0SizeWord);
++            const uint32_t crc = savestateWord(data, words, offset + msV0SizeWord + 1);
++            if (!packed || offset + msV0SizeWord + 2 > words) return false;
++            const uint8_t* compressed = data + (offset + msV0SizeWord + 2) * 4;
++            const size_t packedBytes = packed;
++            if (compressed + packedBytes > data + size) return false;
++            if (imageBytes > std::numeric_limits<size_t>::max()) return false;
++            std::vector<uint8_t> physical(static_cast<size_t>(imageBytes));
++            mz_stream stream{};
++            stream.next_in = const_cast<uint8_t*>(compressed);
++            stream.avail_in = packedBytes;
++            stream.next_out = physical.data();
++            stream.avail_out = physical.size();
++            if (mz_inflateInit(&stream) != MZ_OK) return false;
++            const auto result = mz_inflate(&stream, MZ_FINISH);
++            const bool ok = result == MZ_STREAM_END && stream.total_in == packedBytes &&
++                            stream.total_out == physical.size();
++            mz_inflateEnd(&stream);
++            if (!ok || frondSdFile::crc32(physical.data(), physical.size()) != crc) return false;
++            if (found) *found = true;
++            return writeMsFile(dest, physical.data(), physical.size());
++        }
++        offset += n;
++    }
++    return true;
++}
++
++inline bool fillSection(mz_stream& stream, std::vector<uint8_t>& dest) {
++    if (dest.empty()) return true;
++    stream.next_out = dest.data();
++    stream.avail_out = dest.size();
++    while (stream.avail_out) {
++        const int r = mz_inflate(&stream, MZ_NO_FLUSH);
++        if (r == MZ_STREAM_END) break;
++        if (r != MZ_OK && r != MZ_BUF_ERROR) return false;
++        if (r == MZ_BUF_ERROR && stream.avail_in == 0) return false;
++    }
++    return stream.avail_out == 0;
++}
++
++inline bool parseV6Toc(const uint8_t* file, size_t size, Contents& parsed, uint32_t& sdSize) {
++    if (size < SessionFile5::kHeaderBytes + 32) return false;
++    uint32_t version = 0;
++    std::string device;
++    if (!peekHeader(file, size, version, device) || version != SessionFile5::kVersionV6) return false;
++    const uint8_t* p = file + SessionFile5::kHeaderBytes;
++    parsed.deviceName = std::move(device);
++    parsed.displayMode = int32_t(le32(p));
++    parsed.ramSize = le32(p + 4);
++    const uint32_t metadataSize = le32(p + 8);
++    const uint32_t norSize = le32(p + 12);
++    const uint32_t nandSize = le32(p + 16);
++    const uint32_t memorySize = le32(p + 20);
++    const uint32_t savestateSize = le32(p + 24);
++    sdSize = le32(p + 28);
++    const uint64_t bounded =
++        uint64_t(metadataSize) + norSize + nandSize + memorySize + savestateSize;
++    if (bounded > SessionFile5::kMaxInflatedBytes) return false;
++    if (sdSize > SessionFile5::kMaxSdBytes || sdSize % 512) return false;
++    parsed.metadata.resize(metadataSize);
++    parsed.nor.resize(norSize);
++    parsed.nand.resize(nandSize);
++    parsed.memory.resize(memorySize);
++    parsed.savestate.resize(savestateSize);
++    return true;
++}
++
++inline bool streamInflateV6(const uint8_t* file, size_t size, Contents& out, const std::filesystem::path& sdPath,
++                            std::string& sdIdentity) {
++    Contents parsed;
++    uint32_t sdSize = 0;
++    if (!parseV6Toc(file, size, parsed, sdSize)) return false;
++    if (sdSize && !frondSdFile::validPayloadSize(sdSize)) return false;
++
++    mz_stream stream{};
++    if (mz_inflateInit(&stream) != MZ_OK) return false;
++    stream.next_in = const_cast<uint8_t*>(file + SessionFile5::kHeaderBytes + 32);
++    stream.avail_in = size - (SessionFile5::kHeaderBytes + 32);
++    const bool sections = fillSection(stream, parsed.metadata) && fillSection(stream, parsed.nor) &&
++                          fillSection(stream, parsed.nand) && fillSection(stream, parsed.memory) &&
++                          fillSection(stream, parsed.savestate);
++    if (!sections) {
++        mz_inflateEnd(&stream);
++        return false;
++    }
++
++    if (sdSize) {
++        auto dir = sdPath.parent_path();
++        if (dir.empty()) dir = ".";
++        std::string tmpl = (dir / ".frondsd.tmp-XXXXXX").string();
++        std::vector<char> name(tmpl.begin(), tmpl.end());
++        name.push_back(0);
++        const int fd = mkstemp(name.data());
++        if (fd < 0) {
++            mz_inflateEnd(&stream);
++            return false;
++        }
++        uint8_t header[frondSdFile::headerBytes]{};
++        if (write(fd, header, sizeof(header)) != ssize_t(sizeof(header))) {
++            close(fd);
++            unlink(name.data());
++            mz_inflateEnd(&stream);
++            return false;
++        }
++        uint8_t chunk[inflateChunk];
++        uint32_t crc = 0;
++        MD5Context digest{};
++        md5Init(&digest);
++        size_t left = sdSize;
++        while (left) {
++            stream.next_out = chunk;
++            stream.avail_out = std::min(sizeof(chunk), left);
++            const int r = mz_inflate(&stream, stream.avail_in ? MZ_NO_FLUSH : MZ_FINISH);
++            const size_t produced = std::min(sizeof(chunk), left) - stream.avail_out;
++            if (!produced) {
++                close(fd);
++                unlink(name.data());
++                mz_inflateEnd(&stream);
++                return false;
++            }
++            crc = mz_crc32(crc, chunk, produced);
++            md5Update(&digest, chunk, produced);
++            size_t off = 0;
++            while (off < produced) {
++                const auto n = write(fd, chunk + off, produced - off);
++                if (n < 0 && errno == EINTR) continue;
++                if (n <= 0) {
++                    close(fd);
++                    unlink(name.data());
++                    mz_inflateEnd(&stream);
++                    return false;
++                }
++                off += size_t(n);
++            }
++            left -= produced;
++            if (r != MZ_OK && r != MZ_STREAM_END && r != MZ_BUF_ERROR) {
++                close(fd);
++                unlink(name.data());
++                mz_inflateEnd(&stream);
++                return false;
++            }
++        }
++        md5Finalize(&digest);
++        std::memcpy(header, "FRONDSD", 8);
++        frondSdFile::put32(header + 8, frondSdFile::version);
++        frondSdFile::put32(header + 12, frondSdFile::sectorBytes);
++        frondSdFile::put64(header + 16, sdSize);
++        frondSdFile::put32(header + 24, crc);
++        if (lseek(fd, 0, SEEK_SET) < 0 || write(fd, header, sizeof(header)) != ssize_t(sizeof(header)) ||
++            fsync(fd) < 0 || close(fd) < 0 || rename(name.data(), sdPath.c_str()) < 0) {
++            unlink(name.data());
++            mz_inflateEnd(&stream);
++            return false;
++        }
++        sdIdentity.assign(reinterpret_cast<const char*>(digest.digest), 16);
++        // Store the 16-byte digest in the 32-byte identity, rest zero.
++        frondMachine::Media media;
++        media.kind = frondMachine::kindSd;
++        media.name = frondMachine::sdSibling;
++        media.inserted = true;
++        media.logicalSize = sdSize;
++        media.physicalSize = sdSize;
++        std::memcpy(media.identity.data(), digest.digest, 16);
++        parsed.media.push_back(std::move(media));
++    }
++
++    uint8_t tail;
++    stream.next_out = &tail;
++    stream.avail_out = 1;
++    const int end = mz_inflate(&stream, MZ_FINISH);
++    mz_inflateEnd(&stream);
++    if (end != MZ_STREAM_END && stream.avail_in) return false;
++    out = std::move(parsed);
++    return true;
++}
++
++inline bool sessionPathIn(const std::filesystem::path& folder, std::filesystem::path& dest) {
++    if (frondMachine::sessionFile(folder, dest)) return true;
++    dest = folder / (folder.filename().string() + ".frond");
++    return true;
++}
++
++inline bool saveFolder(const std::filesystem::path& folder, const Contents& contents) {
++    std::error_code ec;
++    if (!std::filesystem::is_directory(folder, ec)) return false;
++    if (frondMachine::checkSiblings(folder, contents.media) != frondMachine::SiblingStatus::ok)
++        return false;
++    std::filesystem::path dest;
++    sessionPathIn(folder, dest);
++    return saveV7(dest, contents);
++}
++
++inline bool loadV7Bytes(const uint8_t* data, size_t size, const std::filesystem::path& folder,
++                        Contents& out) {
++    SessionFile5 session;
++    if (!session.Deserialize(size, data) || session.GetVersion() != SessionFile5::kVersionV7)
++        return false;
++    Contents parsed;
++    if (!fromSession(session, parsed)) return false;
++    if (frondMachine::checkSiblings(folder, parsed.media) != frondMachine::SiblingStatus::ok)
++        return false;
++    out = std::move(parsed);
++    return true;
++}
++
++inline bool extractV6ToFolder(const uint8_t* data, size_t size, const std::filesystem::path& folder,
++                              uint64_t msImageBytes = msPhysicalBytes) {
++    std::error_code ec;
++    if (!std::filesystem::is_directory(folder, ec) && !std::filesystem::create_directories(folder, ec))
++        return false;
++    Contents contents;
++    std::string sdIdentity;
++    if (!streamInflateV6(data, size, contents, folder / frondMachine::sdSibling, sdIdentity))
++        return false;
++    bool foundMs = false;
++    if (!contents.savestate.empty() &&
++        !extractMsFromSavestate(contents.savestate.data(), contents.savestate.size(),
++                                folder / frondMachine::msSibling, msImageBytes, &foundMs))
++        return false;
++    if (foundMs) {
++        frondMachine::Media media;
++        media.kind = frondMachine::kindMs;
++        media.name = frondMachine::msSibling;
++        media.inserted = true;
++        media.logicalSize = frondMachine::msLogicalBytes;
++        media.physicalSize = frondMachine::msPhysicalBytes;
++        contents.media.push_back(std::move(media));
++    }
++    std::filesystem::path dest;
++    sessionPathIn(folder, dest);
++    return saveV7(dest, contents);
++}
++
++// A lone v6 .frond extracts into <stem>/ next to it. destFolder overrides that.
++inline bool extractLoneV6(const std::filesystem::path& frondFile, std::vector<uint8_t>& bytes,
++                          std::filesystem::path destFolder = {},
++                          uint64_t msImageBytes = msPhysicalBytes) {
++    if (destFolder.empty()) destFolder = frondFile.parent_path() / frondFile.stem();
++    std::error_code ec;
++    if (std::filesystem::exists(destFolder, ec) && !std::filesystem::is_directory(destFolder, ec))
++        return false;
++    if (!std::filesystem::exists(destFolder, ec) && !std::filesystem::create_directories(destFolder, ec))
++        return false;
++    return extractV6ToFolder(bytes.data(), bytes.size(), destFolder, msImageBytes);
++}
++
++inline bool isMachineFolder(const std::filesystem::path& path) {
++    std::error_code ec;
++    if (!std::filesystem::is_directory(path, ec)) return false;
++    std::filesystem::path session;
++    if (frondMachine::sessionFile(path, session)) return true;
++    return std::filesystem::is_regular_file(path / frondMachine::sdSibling, ec) ||
++           std::filesystem::is_regular_file(path / frondMachine::msSibling, ec);
++}
++
++inline bool frondInFolder(const std::filesystem::path& file) {
++    const auto parent = file.parent_path();
++    const auto name = file.filename().string();
++    if (name == frondMachine::androidSession) return true;
++    if (name == parent.filename().string() + ".frond") return true;
++    std::error_code ec;
++    if (std::filesystem::is_regular_file(parent / frondMachine::sdSibling, ec) ||
++        std::filesystem::is_regular_file(parent / frondMachine::msSibling, ec))
++        return true;
++    std::filesystem::path session;
++    return frondMachine::sessionFile(parent, session) && session == file;
++}
++
++inline bool loadPath(const std::filesystem::path& path, Contents& out, std::filesystem::path& folder,
++                     uint64_t msImageBytes = msPhysicalBytes) {
++    std::error_code ec;
++    if (isMachineFolder(path)) {
++        folder = path;
++        std::filesystem::path session;
++        if (!frondMachine::sessionFile(path, session)) return false;
++        std::vector<uint8_t> bytes;
++        if (!frondMachine::readBytes(session, bytes)) return false;
++        uint32_t version = 0;
++        std::string device;
++        if (!peekHeader(bytes.data(), bytes.size(), version, device)) return false;
++        if (version == SessionFile5::kVersionV6) {
++            if (!extractV6ToFolder(bytes.data(), bytes.size(), path, msImageBytes)) return false;
++            if (!frondMachine::readBytes(session, bytes) &&
++                !(frondMachine::sessionFile(path, session) && frondMachine::readBytes(session, bytes)))
++                return false;
++        }
++        return loadV7Bytes(bytes.data(), bytes.size(), path, out);
++    }
++    if (std::filesystem::is_regular_file(path, ec) && frondMachine::endsWith(path.filename().string(), ".frond")) {
++        std::vector<uint8_t> bytes;
++        if (!frondMachine::readBytes(path, bytes)) return false;
++        uint32_t version = 0;
++        std::string device;
++        if (!peekHeader(bytes.data(), bytes.size(), version, device)) return false;
++        if (frondInFolder(path) && version == SessionFile5::kVersionV7) {
++            folder = path.parent_path();
++            return loadV7Bytes(bytes.data(), bytes.size(), folder, out);
++        }
++        if (version == SessionFile5::kVersionV6) {
++            folder = path.parent_path() / path.stem();
++            if (!extractLoneV6(path, bytes, folder, msImageBytes)) return false;
++            std::filesystem::path session;
++            if (!frondMachine::sessionFile(folder, session)) return false;
++            if (!frondMachine::readBytes(session, bytes)) return false;
++            return loadV7Bytes(bytes.data(), bytes.size(), folder, out);
++        }
++        if (version == SessionFile5::kVersionV7) {
++            folder = path.parent_path();
++            return loadV7Bytes(bytes.data(), bytes.size(), folder, out);
++        }
++    }
++    return false;
++}
++}  // namespace frondSession
++
++#endif
+diff --git a/src/uarm/uarm/mmiodev_MemoryStickController.cpp b/src/uarm/uarm/mmiodev_MemoryStickController.cpp
+index 8c33664..002ae7f 100644
+--- a/src/uarm/uarm/mmiodev_MemoryStickController.cpp
++++ b/src/uarm/uarm/mmiodev_MemoryStickController.cpp
+@@ -35,7 +35,6 @@ struct LegacyMsRegisters {
+ #include <cstdio>
+ #include <memory>
+ #include <type_traits>
+-#include "Defer.h"
+ 
+ struct MemoryStickController : LegacyMsRegisters {
+     struct State {
+@@ -62,37 +61,6 @@ void msCtrlrDiscardSaveImage(MemoryStickController* m) {
+     if (m) std::vector<uint8_t>().swap(m->savedImage);
+ }
+ 
+-static bool msCompressImage(MemoryStickController* m) {
+-    std::vector<uint8_t> compressed(mz_compressBound(MemoryStickMedia::imageBytes));
+-    mz_stream stream{};
+-    if (mz_deflateInit(&stream, 1) != MZ_OK) return false;
+-    Defer end([&] { mz_deflateEnd(&stream); });
+-    stream.next_out = compressed.data();
+-    stream.avail_out = compressed.size();
+-    uint32_t crc = 0;
+-    MemoryStickMedia::Page page;
+-    for (uint32_t block = 0; block < MemoryStickMedia::blocks; ++block) {
+-        for (uint32_t index = 0; index < MemoryStickMedia::pagesPerBlock; ++index) {
+-            if (m->card.media.Read(block, index, page) != MemoryStickMedia::Result::ok) return false;
+-            crc = mz_crc32(crc, page.data(), page.size());
+-            stream.next_in = page.data();
+-            stream.avail_in = page.size();
+-            while (stream.avail_in) {
+-                const auto before = stream.total_in;
+-                const auto beforeOut = stream.total_out;
+-                if (mz_deflate(&stream, MZ_NO_FLUSH) != MZ_OK ||
+-                    (stream.total_in == before && stream.total_out == beforeOut)) return false;
+-            }
+-        }
+-    }
+-    if (mz_deflate(&stream, MZ_FINISH) != MZ_STREAM_END ||
+-        stream.total_in != MemoryStickMedia::imageBytes) return false;
+-    compressed.resize(stream.total_out);
+-    m->savedImage.swap(compressed);
+-    m->imageCrc = crc;
+-    return true;
+-}
+-
+ static void msTrace(MemoryStickController* m,const char* what,uint32_t a,uint32_t v) {
+     if(m->trace&&!std::getenv("FROND_MS_SUMMARY")&&m->traceLines++<200000){std::fprintf(m->trace,"%s %04x %08x\n",what,a,v);std::fflush(m->trace);}
+ }
+@@ -362,56 +330,51 @@ template<typename H>static void msProtocol(MemoryStickController::State& s,Memor
+      .Do32(c.readStart).Do32(c.readSize).Do32(c.writeStart).Do32(c.writeSize).Do32(c.operation).Do32(c.bufferFlags).Do32(s.config).Do32(s.irqPending).Do32(s.cardPending).Do32(s.credit).Do32(s.fifoPending);
+ }
+ template<typename T>void msCtrlrSave(MemoryStickController* m,T& savestate){
+-    // Only the probe retains compressed bytes; the real callback owns their remaining lifetime.
+-    std::vector<uint8_t> image;
+-    using ChunkT = typename T::chunkT;
+-    if constexpr (!ChunkT::isProbe) image.swap(m->savedImage);
++    msCtrlrDiscardSaveImage(m);
+     auto* old=savestate.GetChunk(tg50MsChunk,0);if(!old){savestate.NotifyError();return;}
+     SaveChunkHelper h(*old);msCtrlrState(*m,h);
+-    auto* chunk=savestate.GetChunk(ChunkType::sonyTg50MsCard,0);if(!chunk){savestate.NotifyError();return;}
++    // Version 1 stores protocol state and a media reference, not a physical image.
++    auto* chunk=savestate.GetChunk(ChunkType::sonyTg50MsCard,1);if(!chunk){savestate.NotifyError();return;}
+     SaveChunkHelper card(*chunk);auto state=m->state;auto cs=m->card.state;
+     msProtocol(state,cs,card);card.Do32(m->card.media.Present()).Do32(m->card.media.WriteProtected());
+-    if(m->card.media.Present()){
+-        auto& compressed = ChunkT::isProbe ? m->savedImage : image;
+-        if(compressed.empty()) {
+-            if(!msCompressImage(m)){msCtrlrDiscardSaveImage(m);savestate.NotifyError();return;}
+-            if constexpr (!ChunkT::isProbe) image.swap(m->savedImage);
+-        }
+-        card.Do32(compressed.size()).Do32(m->imageCrc).DoBuffer(compressed.data(),compressed.size());
+-    }
+ }
+ template<typename T>bool msCtrlrLoad(MemoryStickController* m,T& loader,bool preserveInput){
+     auto* old=loader.GetChunkOrFail(tg50MsChunk,0,"TG50 Memory Stick");if(!old)return false;
+     LegacyMsRegisters legacy{};LoadChunkHelper h(*old);msCtrlrState(legacy,h);
+     if(old->HasError()){loader.NotifyError();return false;}
+     MemoryStickController::State state{};MemoryStickCard::State cs{};
+-    uint32_t present=0,protect=0;std::vector<uint8_t> physical;
++    uint32_t present=0,protect=0;std::vector<uint8_t> physical;bool haveImage=false;
+     if(loader.GetChunk(ChunkType::sonyTg50MsCard)){
+-        auto* chunk=loader.GetChunkOrFail(ChunkType::sonyTg50MsCard,0,"TG50 classic card");
++        uint32_t gotVersion=0;
++        auto* chunk=loader.GetChunkOrFail(ChunkType::sonyTg50MsCard,1,"TG50 classic card",gotVersion);
+         if(!chunk)return false;
+         LoadChunkHelper card(*chunk);msProtocol(state,cs,card);card.Do32(present).Do32(protect);
+         if(chunk->HasError()||present>1||protect>1||state.inserted>1||(!present&&(state.inserted||protect))||
+            state.command>0xffff||state.length>1024||state.offset>((state.length+7)&~7u)||state.control>0xffff||
+            state.status>0xffff||state.dmaCount>0xffff||state.config>0xffff||state.irqPending>3||state.cardPending>1||state.credit>8||state.fifoPending>1||(state.fifoPending&&state.credit)||!MemoryStickCard::Valid(cs)){loader.NotifyError();return false;}
+-        if(present){
++        if(gotVersion==0&&present){
+             uint32_t size=0,crc=0;card.Do32(size).Do32(crc);
+             if(chunk->HasError()||!size||size>mz_compressBound(MemoryStickMedia::imageBytes)){loader.NotifyError();return false;}
+             std::vector<uint8_t> compressed(size);card.DoBuffer(compressed.data(),size);
+             if(chunk->HasError()){loader.NotifyError();return false;}
+-            physical.resize(MemoryStickMedia::imageBytes);mz_stream stream{};
+-            stream.next_in=compressed.data();stream.avail_in=compressed.size();
+-            stream.next_out=physical.data();stream.avail_out=physical.size();
+-            if(mz_inflateInit(&stream)!=MZ_OK){loader.NotifyError();return false;}
+-            const auto result=mz_inflate(&stream,MZ_FINISH);
+-            const bool valid=result==MZ_STREAM_END&&stream.total_in==compressed.size()&&stream.total_out==physical.size();
+-            mz_inflateEnd(&stream);
+-            if(!valid||
+-               frondMs::crc32(physical.data(),physical.size())!=crc){loader.NotifyError();return false;}
+-        }
++            if(!m->card.media.Present()){
++                physical.resize(MemoryStickMedia::imageBytes);mz_stream stream{};
++                stream.next_in=compressed.data();stream.avail_in=compressed.size();
++                stream.next_out=physical.data();stream.avail_out=physical.size();
++                if(mz_inflateInit(&stream)!=MZ_OK){loader.NotifyError();return false;}
++                const auto result=mz_inflate(&stream,MZ_FINISH);
++                const bool valid=result==MZ_STREAM_END&&stream.total_in==compressed.size()&&stream.total_out==physical.size();
++                mz_inflateEnd(&stream);
++                if(!valid||
++                   frondMs::crc32(physical.data(),physical.size())!=crc){loader.NotifyError();return false;}
++                haveImage=true;
++            }
++        }else if(present&&!m->card.media.Present()){loader.NotifyError();return false;}
+     }else {MemoryStickCard card;card.Reset();cs=card.state;}
+     // Parsing and allocation complete before replacing the card or its transfer state.
+-    if(present){if(MemoryStickMediaStateAccess::Attach(m->card.media,std::move(physical),protect)!=MemoryStickMedia::Result::ok){loader.NotifyError();return false;}}
+-    else m->card.media.Detach();
++    if(haveImage){if(MemoryStickMediaStateAccess::Attach(m->card.media,std::move(physical),protect)!=MemoryStickMedia::Result::ok){loader.NotifyError();return false;}}
++    else if(!present) m->card.media.Detach();
++    else m->card.media.SetWriteProtected(protect);
+     msCtrlrDiscardSaveImage(m);static_cast<LegacyMsRegisters&>(*m)=legacy;m->state=state;m->card.state=cs;
+     (void)preserveInput;return true;
+ }
+diff --git a/src/uarm/uarm/sdcard.cpp b/src/uarm/uarm/sdcard.cpp
+index b5d532c..45dfa44 100644
+--- a/src/uarm/uarm/sdcard.cpp
++++ b/src/uarm/uarm/sdcard.cpp
+@@ -1,6 +1,7 @@
+ #include "sdcard.h"
+ 
+ #include "CardBacking.h"
++#include "FileCardBacking.h"
+ 
+ #include <cstdio>
+ #include <cstdlib>
+@@ -12,7 +13,7 @@ namespace {
+     size_t sectorsTotal = 0;
+     bool sdCardDirty = false;
+ 
+-    std::unique_ptr<RamCardBacking> backing;
++    std::unique_ptr<CardBacking> backing;
+     std::vector<uint8_t> dataView;
+     bool dataViewValid = false;
+ 
+@@ -93,11 +94,37 @@ bool sdCardWrite(uint32_t sector, const void* buf) {
+ 
+ size_t sdCardSectorCount() { return sectorsTotal; }
+ 
++bool sdCardInitializeFromFile(const char* path, uint64_t payloadBytes, uint64_t payloadOffset,
++                              const char* id) {
++    if (!path || payloadBytes % SD_SECTOR_SIZE || !payloadBytes) return false;
++    auto file = FileCardBacking::Open(path, payloadBytes, payloadOffset);
++    if (!file) return false;
++    sdCardReset();
++    const size_t sectors = static_cast<size_t>(payloadBytes / SD_SECTOR_SIZE);
++    size_t dirtyPagesSize4 = sectors / (16 * 32);
++    if ((dirtyPagesSize4 * 16 * 32) < sectors) dirtyPagesSize4++;
++    backing = std::move(file);
++    sectorsTotal = sectors;
++    dirtyPagesSize = dirtyPagesSize4 * 4;
++    sdCardDirty = false;
++    dataViewValid = false;
++    dirtyPages = reinterpret_cast<uint32_t*>(malloc(dirtyPagesSize));
++    memset(dirtyPages, 0, dirtyPagesSize);
++    sdCardRekey(id);
++    return true;
++}
++
++bool sdCardCommit() { return backing && backing->Commit(); }
++
++bool sdCardFileBacked() { return dynamic_cast<FileCardBacking*>(backing.get()) != nullptr; }
++
+ struct Buffer sdCardData() {
+     if (!backing) return (struct Buffer){.size = 0, .data = NULL};
+-    if (const uint8_t* p = backing->ContiguousData()) {
+-        return (struct Buffer){.size = static_cast<size_t>(backing->Size()),
+-                               .data = const_cast<uint8_t*>(p)};
++    if (auto* ram = dynamic_cast<RamCardBacking*>(backing.get())) {
++        if (const uint8_t* p = ram->ContiguousData()) {
++            return (struct Buffer){.size = static_cast<size_t>(backing->Size()),
++                                   .data = const_cast<uint8_t*>(p)};
++        }
+     }
+     if (!dataViewValid) {
+         dataView.resize(static_cast<size_t>(backing->Size()));
+diff --git a/src/uarm/uarm/sdcard.h b/src/uarm/uarm/sdcard.h
+index d6ed480..4763f3e 100644
+--- a/src/uarm/uarm/sdcard.h
++++ b/src/uarm/uarm/sdcard.h
+@@ -7,15 +7,22 @@
+ 
+ #include "buffer.h"
+ 
++#include <string>
++
+ #define SD_SECTOR_SIZE 512
+ #define SD_CARD_ID_MAX_LEN 32
+ 
++class CardBacking;
+ class CardSnapshot;
+ 
+ void sdCardInitialize(size_t sectors, const char* id);
+ void sdCardInitializeWithData(size_t sectors, void* buf, const char* id);
++bool sdCardInitializeFromFile(const char* path, uint64_t payloadBytes, uint64_t payloadOffset,
++                              const char* id);
+ 
+ void sdCardRekey(const char* id);
++bool sdCardCommit();
++bool sdCardFileBacked();
+ 
+ void sdCardReset();
+ 

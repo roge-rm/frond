@@ -16,11 +16,11 @@
 #include "FirmwareInput.h"
 
 // The managed session folder. A saved session is <name>.frond, written by the core (session
-// file version 6 starts with the magic, the version and the 32-byte device name). One that was
+// file version 7 starts with the magic, the version and the 32-byte device name). One that was
 // created but not saved yet is <name>.frond.new, holding the device's fixed name. The name is
 // the file name, so renaming a session renames the file.
 namespace frondSessions {
-constexpr quint32 magic = 0x19800819, newestVersion = 6, firstNamedVersion = 6;
+constexpr quint32 magic = 0x19800819, newestVersion = 7, firstNamedVersion = 6;
 
 // Host preferences stay beside the guest file, including before its first save.
 struct Preferences {

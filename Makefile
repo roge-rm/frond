@@ -21,6 +21,18 @@ test-card-backing: prepare
 		build/miniz-card-backing.o -o build/test-card-backing
 	./build/test-card-backing
 
+.PHONY: test-session-v7
+test: test-session-v7
+test-session-v7: prepare
+	$(CC) -std=gnu99 -O1 -g -Ibuild/source/src/common -c build/source/src/common/zip/miniz.c \
+		-o build/miniz-session-v7.o
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/common \
+		tests/session-v7.cpp build/source/src/common/session/session_file5.cpp \
+		build/source/src/common/md5.cpp build/miniz-session-v7.o \
+		-o build/test-session-v7
+	./build/test-session-v7
+
 prepare: build/source/.prepared
 
 # Check input content on every invocation, including removed patches and the gitlink.
