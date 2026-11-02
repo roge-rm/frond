@@ -76,17 +76,7 @@ object Sessions {
         }
     }
 
-    // The core saves to .frond.tmp-XXXXXX and renames it into place; a process killed mid-save
-    // leaves the temporary file. A running save keeps touching its file, so only old ones go.
-    private fun removeStaleSaves(context: Context) {
-        val cutoff = System.currentTimeMillis() - 10 * 60 * 1000
-        fun clean(dir: File) {
-            dir.listFiles { f -> f.name.contains(".frond.tmp-") && f.lastModified() < cutoff }.orEmpty().forEach { it.delete() }
-        }
-        val root = folder(context)
-        clean(root)
-        root.listFiles { it.isDirectory }.orEmpty().forEach { clean(it) }
-    }
+    private fun removeStaleSaves(context: Context) = removeStaleTemps(folder(context), System.currentTimeMillis())
 
     // MD5 of the NOR image stored in a session file, which the core checks before low-latency
     // audio (native/main.cpp). Reads the SessionFile5 header and inflates as far as the NOR.
@@ -509,6 +499,22 @@ internal fun checkImportedSiblings(dir: File, frond: File): String? {
     if (!expectSd && File(dir, "sd.frondsd").isFile) return mismatch
     if (!expectMs && File(dir, "ms.frondms").isFile) return mismatch
     return null
+}
+
+// The core saves to .frond.tmp-XXXXXX, .frondsd.tmp-XXXXXX and .frondms.tmp-XXXXXX and renames
+// them into place; a process killed mid-save leaves them. A running save keeps touching its
+// file, so only old ones go.
+internal fun saveTempName(name: String) =
+    name.contains(".frond.tmp-") || name.contains(".frondsd.tmp-") || name.contains(".frondms.tmp-") ||
+        (name.startsWith(".gen-") && name.contains("-tmp-"))
+
+internal fun removeStaleTemps(root: File, now: Long) {
+    val cutoff = now - 10 * 60 * 1000
+    fun clean(dir: File) {
+        dir.listFiles { f -> f.isFile && saveTempName(f.name) && f.lastModified() < cutoff }.orEmpty().forEach { it.delete() }
+    }
+    clean(root)
+    root.listFiles { it.isDirectory }.orEmpty().forEach { clean(it) }
 }
 
 internal fun ignoredName(name: String) =

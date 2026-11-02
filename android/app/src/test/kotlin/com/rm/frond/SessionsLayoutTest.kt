@@ -26,6 +26,20 @@ class SessionsLayoutTest {
         assertFalse(packableName("nested/sd.frondsd"))
     }
 
+    @Test fun staleCardTempsAreRemoved() {
+        val root = tmp.newFolder("sessions")
+        val dir = File(root, "id").apply { mkdirs() }
+        val now = System.currentTimeMillis()
+        val old = listOf(".frond.tmp-a", ".frondsd.tmp-b", ".frondms.tmp-c", ".gen-sd.frondsd-tmp-1-2")
+            .map { File(dir, it).apply { writeText("tmp"); setLastModified(now - 3_600_000) } }
+        val fresh = File(dir, ".frondsd.tmp-fresh").apply { writeText("tmp") }
+        val card = File(dir, "sd.frondsd").apply { writeText("card"); setLastModified(now - 3_600_000) }
+        val gen = File(dir, ".gen-sd.frondsd-root").apply { writeText("root"); setLastModified(now - 3_600_000) }
+        removeStaleTemps(root, now)
+        old.forEach { assertFalse(it.name, it.exists()) }
+        assertTrue(fresh.exists() && card.exists() && gen.exists())
+    }
+
     @Test fun zipRoundTripCopiesPackableFilesAtArchiveRoot() {
         val dir = tmp.newFolder("machine")
         File(dir, "session.frond").writeText("guest")
