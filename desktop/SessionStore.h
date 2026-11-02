@@ -92,6 +92,84 @@ inline QString importError(const Header& header) {
     return {};
 }
 
+inline quint32 le32(const QByteArray& bytes, int i) {
+    return quint32(uchar(bytes[i])) | (quint32(uchar(bytes[i + 1])) << 8) |
+           (quint32(uchar(bytes[i + 2])) << 16) | (quint32(uchar(bytes[i + 3])) << 24);
+}
+inline quint64 le64(const QByteArray& bytes, int i) {
+    return quint64(le32(bytes, i)) | (quint64(le32(bytes, i + 4)) << 32);
+}
+
+// Header, size and magic of each v7 sibling. A stub shorter than the TOC is no media.
+inline QString checkImportedSiblings(const QString& dir, const QString& frond) {
+    const auto mismatch = QStringLiteral("That session's card files don't match.");
+    QFile file(frond);
+    if (!file.open(QIODevice::ReadOnly)) return QStringLiteral("Couldn't read that file.");
+    const auto head = file.read(8 + 32);
+    if (head.size() < 8) return QStringLiteral("Couldn't read that file.");
+    if (le32(head, 4) != newestVersion) return {};
+    struct Card {
+        quint32 kind;
+        quint64 physical;
+    };
+    QList<Card> cards;
+    const auto toc = file.read(52);
+    if (toc.size() == 52) {
+        const auto mediaCount = le32(toc, 48);
+        const qint64 descBytes = qint64(mediaCount) * 92;
+        if (mediaCount && (descBytes / 92 != qint64(mediaCount) || file.size() < qint64(8 + 32 + 52) + descBytes))
+            return mismatch;
+        for (quint32 i = 0; i < mediaCount; ++i) {
+            const auto desc = file.read(92);
+            if (desc.size() != 92) return mismatch;
+            const auto kind = le32(desc, 0);
+            const auto name = QString::fromLatin1(desc.mid(4, 32).constData());
+            const auto logical = le64(desc, 76);
+            const auto physical = le64(desc, 84);
+            if (kind == 1) {
+                if (name != QLatin1String("sd.frondsd") || logical != physical || physical < 512 || physical % 512)
+                    return mismatch;
+            } else if (kind == 2) {
+                if (name != QLatin1String("ms.frondms") || logical != (128ull << 20) || physical != 136577024ull)
+                    return mismatch;
+            } else {
+                return mismatch;
+            }
+            cards.append({kind, physical});
+        }
+    }
+    bool expectSd = false, expectMs = false;
+    for (const auto& card : cards) {
+        if (card.kind == 1) {
+            if (expectSd) return mismatch;
+            expectSd = true;
+            QFile sd(dir + "/sd.frondsd");
+            if (!sd.open(QIODevice::ReadOnly)) return mismatch;
+            const auto hdr = sd.read(64);
+            if (hdr.size() != 64 || hdr.left(8) != QByteArray("FRONDSD\0", 8)) return mismatch;
+            if (le32(hdr, 8) != 1 || le32(hdr, 12) != 512) return mismatch;
+            const auto payload = le64(hdr, 16);
+            if (payload != card.physical || quint64(sd.size()) != 64 + payload) return mismatch;
+            for (int i = 28; i < 64; ++i)
+                if (hdr[i]) return mismatch;
+        } else {
+            if (expectMs) return mismatch;
+            expectMs = true;
+            QFile ms(dir + "/ms.frondms");
+            if (!ms.open(QIODevice::ReadOnly)) return mismatch;
+            const auto hdr = ms.read(64);
+            if (hdr.size() != 64 || hdr.left(8) != QByteArray("FRONDMS\0", 8)) return mismatch;
+            if (le32(hdr, 8) != 1 || le32(hdr, 12) != 8192 || le32(hdr, 16) != 32 || le32(hdr, 20) != 512 ||
+                le32(hdr, 24) != 9)
+                return mismatch;
+            if (quint64(ms.size()) != 64 + card.physical) return mismatch;
+        }
+    }
+    if (!expectSd && QFileInfo::exists(dir + "/sd.frondsd")) return mismatch;
+    if (!expectMs && QFileInfo::exists(dir + "/ms.frondms")) return mismatch;
+    return {};
+}
+
 struct Info {
     QString name, path;    // path is the .frond file, saved or not
     QString device;        // the fixed name; empty for one that can't be opened
@@ -353,6 +431,10 @@ inline QString importFolder(const QString& folder, const QString& from, QString*
         QDir(dest).removeRecursively();
         return error;
     }
+    if (const auto error = checkImportedSiblings(dest, dest + '/' + name + ".frond"); !error.isEmpty()) {
+        QDir(dest).removeRecursively();
+        return error;
+    }
     if (newName) *newName = name;
     return {};
 }
@@ -381,6 +463,10 @@ inline QString importFile(const QString& folder, const QString& from, QString* n
     for (const auto* sibling : {"sd.frondsd", "ms.frondms"}) {
         const auto src = sourceDir + '/' + sibling;
         if (QFileInfo::exists(src) && !QFile::copy(src, destDir + '/' + sibling)) return fail();
+    }
+    if (const auto error = checkImportedSiblings(destDir, target); !error.isEmpty()) {
+        QDir(destDir).removeRecursively();
+        return error;
     }
     Preferences prefs;
     if (readPreferences(from, &prefs)) {

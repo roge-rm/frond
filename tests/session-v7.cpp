@@ -270,7 +270,7 @@ static std::vector<uint8_t> TinySavestateWithMs(const std::vector<uint8_t>& phys
     words.push_back(chunkWords);
     words.resize(1 + 2 + chunkWords);
     words[3] = 0;  // version
-    words[3 + frondSession::msV0SizeWord - 1] = 1;  // present
+    words[3 + frondSession::msV0PresentWord] = 1;  // present
     words[3 + frondSession::msV0SizeWord] = uint32_t(compressed.size());
     words[3 + frondSession::msV0SizeWord + 1] = crc;
     std::memcpy(words.data() + 3 + frondSession::msV0SizeWord + 2, compressed.data(), compressed.size());
@@ -310,6 +310,88 @@ static void MsExtractStub() {
     assert(frondSession::extractV6ToFolder(bytes.data(), bytes.size(), folder, physical.size()));
     auto extracted = ReadAll(folder / frondMachine::msSibling);
     assert(std::vector<uint8_t>(extracted.begin() + 64, extracted.end()) == physical);
+
+    auto wrongSlot = TinySavestateWithMs(physical);
+    auto* wrongWords = reinterpret_cast<uint32_t*>(wrongSlot.data());
+    wrongWords[3 + frondSession::msV0PresentWord] = 0;
+    wrongWords[3 + frondSession::msV0PresentWord + 1] = 1;
+    bool wrongFound = true;
+    const auto wrongDest = dir / "wrong.frondms";
+    assert(frondSession::extractMsFromSavestate(wrongSlot.data(), wrongSlot.size(), wrongDest, physical.size(),
+                                               &wrongFound));
+    assert(!wrongFound);
+    fs::remove_all(dir);
+}
+
+static bool identityHex(const std::array<uint8_t, frondMachine::identityBytes>& id) {
+    for (auto b : id) {
+        const char c = char(b);
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+    }
+    return true;
+}
+
+static void IdentityAndFailedPublish() {
+    const auto dir = FixtureDir();
+    const auto machine = dir / "palm-tx";
+    fs::create_directories(machine);
+    auto payload = TinyPayload();
+    for (size_t i = 0; i < payload.size(); ++i) payload[i] = uint8_t(i * 17);
+    auto read = [&](uint64_t off, uint64_t n, void* dest) {
+        std::memcpy(dest, payload.data() + size_t(off), size_t(n));
+        return true;
+    };
+    std::array<uint8_t, frondMachine::identityBytes> identity{};
+    assert(frondSession::writeSdFromReader(machine / "out.frondsd", payload.size(), read, identity));
+    assert(identityHex(identity));
+    MD5Context digest{};
+    md5Init(&digest);
+    md5Update(&digest, payload.data(), payload.size());
+    md5Finalize(&digest);
+    std::array<uint8_t, frondMachine::identityBytes> want{};
+    frondSession::md5HexIdentity(digest.digest, want);
+    assert(identity == want);
+
+    std::array<uint8_t, frondMachine::identityBytes> kept{};
+    kept.fill('A');
+    assert(frondSession::writeSdFromReader(machine / "kept.frondsd", payload.size(), read, kept));
+    assert(kept[0] == 'A' && kept[31] == 'A');
+
+    uint8_t nor[] = {1, 2, 3}, ram[] = {4, 5, 6, 7}, state[] = {8, 9};
+    SessionFile5 source;
+    source.SetDeviceName("palm-tx").SetRamSize(32u << 20).SetDisplayMode(1)
+        .SetNor(sizeof(nor), nor).SetMemory(sizeof(ram), ram).SetSavestate(sizeof(state), state)
+        .SetSd(payload.size(), payload.data());
+    assert(source.SerializeAs(6));
+    const auto* data = static_cast<const uint8_t*>(source.GetSerializedSession());
+    const auto size = source.GetSerializedSessionSize();
+    const auto lone = dir / "id.frond";
+    WriteFile(lone, std::vector<uint8_t>(data, data + size));
+    std::vector<uint8_t> bytes(data, data + size);
+    assert(frondSession::extractLoneV6(lone, bytes));
+    frondSession::Contents loaded;
+    fs::path got;
+    assert(frondSession::loadPath(lone, loaded, got));
+    assert(loaded.media.size() == 1 && identityHex(loaded.media[0].identity));
+    assert(loaded.media[0].identity == want);
+
+    auto contents = TinyContents();
+    std::vector<uint8_t> sdFile;
+    assert(frondSdFile::encode(TinyPayload(), sdFile));
+    WriteFile(machine / frondMachine::sdSibling, sdFile);
+    contents.media.push_back(TinySd(TinyPayload().size()));
+    assert(frondSession::saveFolder(machine, contents));
+    fs::path session;
+    assert(frondMachine::sessionFile(machine, session));
+    const auto previousSd = ReadAll(machine / frondMachine::sdSibling);
+    fs::remove(session);
+    fs::create_directories(session);
+    std::filesystem::path temp;
+    assert(frondSession::createTemp(machine, ".frondsd.tmp-", temp));
+    WriteFile(temp, sdFile);
+    assert(!frondSession::saveFolderFromTemps(machine, contents, {temp}));
+    assert(ReadAll(machine / frondMachine::sdSibling) == previousSd);
+    assert(!fs::exists(temp));
     fs::remove_all(dir);
 }
 
@@ -330,6 +412,7 @@ int main() {
     TruncatedHeader();
     LegacyV6();
     MsExtractStub();
+    IdentityAndFailedPublish();
     NewWritesAreV7();
     std::puts("Session v7 and streamed v6 extraction checks passed");
 }

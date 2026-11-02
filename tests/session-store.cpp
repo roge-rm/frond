@@ -18,6 +18,45 @@ static void write(const QString& path, const QByteArray& data) {
     QVERIFY(file.open(QIODevice::WriteOnly));
     file.write(data);
 }
+static void put32(QByteArray& bytes, quint32 n) {
+    for (int i = 0; i < 4; i++) bytes.append(char(n >> (8 * i)));
+}
+static void put64(QByteArray& bytes, quint64 n) {
+    put32(bytes, quint32(n));
+    put32(bytes, quint32(n >> 32));
+}
+static QByteArray v7WithSd() {
+    QByteArray bytes;
+    for (quint32 value : {frondSessions::magic, 7u}) put32(bytes, value);
+    bytes.append(QByteArray("palm-tx").leftJustified(32, '\0', true));
+    put32(bytes, 0);
+    put32(bytes, 0);
+    put64(bytes, 0);
+    put64(bytes, 0);
+    put64(bytes, 0);
+    put64(bytes, 0);
+    put64(bytes, 0);
+    put32(bytes, 1);
+    put32(bytes, 1);
+    bytes.append(QByteArray("sd.frondsd").leftJustified(32, '\0', true));
+    put32(bytes, 1);
+    put32(bytes, 0);
+    bytes.append(QByteArray(32, '\0'));
+    put64(bytes, 512);
+    put64(bytes, 512);
+    return bytes;
+}
+static QByteArray tinyFrondsd() {
+    QByteArray file("FRONDSD");
+    file.append('\0');
+    put32(file, 1);
+    put32(file, 512);
+    put64(file, 512);
+    put32(file, 0);
+    file.append(QByteArray(36, '\0'));
+    file.append(QByteArray(512, '\xa5'));
+    return file;
+}
 
 class SessionStoreTest : public QObject {
     Q_OBJECT
@@ -119,6 +158,9 @@ class SessionStoreTest : public QObject {
         QVERIFY(importFile(folder(), outside + "/new.frond").contains("newer Frond"));
         write(outside + "/v7.frond", header(7, "palm-tx"));
         QVERIFY(importFile(folder(), outside + "/v7.frond").isEmpty());
+        write(outside + "/missing.frond", v7WithSd());
+        QVERIFY(!importFile(folder(), outside + "/missing.frond").isEmpty());
+        QVERIFY(!QFileInfo::exists(filePath(folder(), "missing")));
         write(outside + "/other.frond", header(6, "palm-zzz"));
         QVERIFY(importFile(folder(), outside + "/other.frond").contains("can't run"));
         QVERIFY(importFile(folder(), outside + "/none.frond").contains("read"));
@@ -174,8 +216,10 @@ class SessionStoreTest : public QObject {
         QCOMPARE(locate(folder(), folder() + "/Trip.frond"), filePath(folder(), "Trip"));
     }
     void copyFolderWithCardIgnoresTemps() {
-        write(filePath(folder(), "Trip"), header(7, "palm-tx"));
-        write(machineDir(folder(), "Trip") + "/sd.frondsd", "card-bytes");
+        const auto v7 = v7WithSd();
+        const auto sd = tinyFrondsd();
+        write(filePath(folder(), "Trip"), v7);
+        write(machineDir(folder(), "Trip") + "/sd.frondsd", sd);
         write(machineDir(folder(), "Trip") + "/.frond.tmp-leftover", "tmp");
         write(machineDir(folder(), "Trip") + "/.gen-sd.frondsd-1", "gen");
         QString name;
@@ -183,8 +227,7 @@ class SessionStoreTest : public QObject {
         QCOMPARE(name, QString("Trip 2"));
         QVERIFY(QFileInfo::exists(filePath(folder(), "Trip 2")));
         QVERIFY(QFileInfo::exists(machineDir(folder(), "Trip 2") + "/sd.frondsd"));
-        QCOMPARE(describe(filePath(folder(), "Trip 2")).size,
-                 qint64(header(7, "palm-tx").size() + QByteArray("card-bytes").size()));
+        QCOMPARE(describe(filePath(folder(), "Trip 2")).size, qint64(v7.size() + sd.size()));
         QVERIFY(!QFileInfo::exists(machineDir(folder(), "Trip 2") + "/.frond.tmp-leftover"));
         QVERIFY(!QFileInfo::exists(machineDir(folder(), "Trip 2") + "/.gen-sd.frondsd-1"));
         QVERIFY(exportFile(describe(filePath(folder(), "Trip")), directory.filePath("out")).isEmpty());

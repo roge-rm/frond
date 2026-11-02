@@ -120,6 +120,7 @@ static void audioBoard() {
     write(mem, 0x40b00008, 288);
     auto *queue = audioQueueCreate(8192);
     soc.SetAudioQueue(queue);
+    soc.SetPcmOutputEnabled(true);
     auto run = [&](SocPXA &owner) {
         audioQueueClear(queue);
         owner.Run(100000, 1000000);
@@ -159,6 +160,7 @@ static void audioBoard() {
     write(freshMem, 0xa0000000, 0xeafffffe);
     assert(fresh.Load(saved.size(),saved.data()));
     fresh.SetAudioQueue(queue);
+    fresh.SetPcmOutputEnabled(true);
     assert(run(fresh)==expected);
     // AF2 alone cannot route an input pin into the host speaker.
     write(freshMem, 0x40e0000c, 0);
