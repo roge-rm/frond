@@ -17,7 +17,8 @@ test-card-backing: prepare
 		-o build/miniz-card-backing.o
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
 		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/common \
-		tests/card-backing.cpp build/miniz-card-backing.o -o build/test-card-backing
+		tests/card-backing.cpp tests/card-backing-generations.cpp \
+		build/miniz-card-backing.o -o build/test-card-backing
 	./build/test-card-backing
 
 prepare: build/source/.prepared

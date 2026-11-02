@@ -55,7 +55,7 @@ int main() {
     card.SetWriteProtected(true);
     auto invalid = card.SaveCheckpoint();
     invalid.writeProtected = false;
-    invalid.changes[M::pageCount] = input;
+    invalid.pin.reset();
     assert(card.RestoreCheckpoint(invalid) == M::Result::invalidImage);
     assert(card.WriteProtected());
     std::vector<uint8_t> wrongSize(512, 0);
