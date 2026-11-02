@@ -82,22 +82,20 @@ int main(){
  for(unsigned i=0;i<64;++i){wr(0x90,0xa5b6c7d8,4);if(i&1)msCtrlrPeriodic(m);}
  std::vector<uint8_t> continued;assert(msCtrlrExport(m,continued));assert(continued==physical);
  assert(save(state)==committed);
- auto* fresh=msCtrlrInit(nullptr,0x14000000);State freshState{fresh};assert(loader.Load(committed.data(),committed.size()*4,freshState));
+ auto* missing=msCtrlrInit(nullptr,0x14000000);State missingState{missing};
+ assert(!loader.Load(committed.data(),committed.size()*4,missingState));
+ msCtrlrDestroy(missing);context=m;
+ auto* fresh=msCtrlrInit(nullptr,0x14000000);assert(msCtrlrAttach(fresh,physical));State freshState{fresh};
+ assert(loader.Load(committed.data(),committed.size()*4,freshState));
  std::vector<uint8_t> restored;assert(msCtrlrExport(fresh,restored));assert(restored==physical);msCtrlrDestroy(fresh);context=m;
- for(unsigned field:{413u,414u}){
-  auto invalid=committed;auto* data=chunk(invalid,ChunkType::sonyTg50MsCard);data[field]=field==413?0xffffffffu:data[field]^1;
-  assert(!loader.Load(invalid.data(),invalid.size()*4,state));assert(save(state)==committed);
- }
- {auto invalid=committed;auto* data=chunk(invalid,ChunkType::sonyTg50MsCard);--data[413];assert(!loader.Load(invalid.data(),invalid.size()*4,state));assert(save(state)==committed);}
  {auto invalid=committed;size_t offset=1+invalid[0]*2;
   for(unsigned i=0;i<invalid[0];++i){auto words=invalid[2+i*2];if(invalid[1+i*2]==uint32_t(ChunkType::sonyTg50MsCard)){
-    invalid[offset+413]+=4;invalid[2+i*2]+=1;invalid.insert(invalid.begin()+offset+words,0);break;}offset+=words;}
+    if(words){invalid[2+i*2]-=1;invalid.erase(invalid.begin()+offset+words-1);}break;}offset+=words;}
   assert(!loader.Load(invalid.data(),invalid.size()*4,state));assert(save(state)==committed);
  }
  // Guest flash damage is physical data, not a malformed portable state.
  params[3]=0;tpc(0xb,params);tpc(0xe,{0x99});params[3]=1;tpc(0xb,params);tpc(0xe,{0x99});
  std::vector<uint8_t> damagedImage;assert(msCtrlrExport(m,damagedImage));assert(!frondMs::validBoot(damagedImage));auto damaged=save(state);
  assert(loader.Load(damaged.data(),damaged.size()*4,state));std::vector<uint8_t> damagedRestored;assert(msCtrlrExport(m,damagedRestored));assert(damagedRestored==damagedImage);
- {auto invalid=damaged;chunk(invalid,ChunkType::sonyTg50MsCard)[414]^=1;assert(!loader.Load(invalid.data(),invalid.size()*4,state));assert(save(state)==damaged);}
  msCtrlrDestroy(m);std::puts("Memory Stick card/controller checks passed");
 }

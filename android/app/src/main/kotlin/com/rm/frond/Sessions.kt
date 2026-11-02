@@ -29,9 +29,10 @@ data class Session(
 
 object Sessions {
     // SessionFile5's magic and newest version, in common/session/session_file5.cpp. Version 6 is the
-    // first to name the device; earlier ones are refused.
+    // first to name the device; earlier ones are refused. Version 7 is readable here; folder
+    // list/rename/import wait for milestone 4.
     private const val MAGIC = 0x19800819L
-    private const val VERSION = 6L
+    private const val VERSION = 7L
     private const val FIRST_NAMED_VERSION = 6L
     private const val DEVICE_NAME_SIZE = 32
 
@@ -64,14 +65,29 @@ object Sessions {
                 return (b[0].toLong() and 0xff) or ((b[1].toLong() and 0xff) shl 8) or
                     ((b[2].toLong() and 0xff) shl 16) or ((b[3].toLong() and 0xff) shl 24)
             }
+            fun read64(): Long {
+                val lo = read32()
+                val hi = read32()
+                return lo or (hi shl 32)
+            }
             if (read32() != MAGIC) return null
             val version = read32()
             if (version !in FIRST_NAMED_VERSION..VERSION) return null
             input.readFully(ByteArray(DEVICE_NAME_SIZE)) // device name
             read32(); read32() // display mode, RAM size
-            val metadataSize = read32()
-            val norSize = read32()
-            read32(); read32(); read32(); read32() // NAND, memory, savestate, SD
+            val metadataSize: Long
+            val norSize: Long
+            if (version >= 7L) {
+                metadataSize = read64()
+                norSize = read64()
+                read64(); read64(); read64() // NAND, memory, savestate
+                val mediaBytes = read32() * 92L
+                if (mediaBytes > 0) input.skip(mediaBytes)
+            } else {
+                metadataSize = read32()
+                norSize = read32()
+                read32(); read32(); read32(); read32() // NAND, memory, savestate, SD
+            }
             val inflated = java.util.zip.InflaterInputStream(input, java.util.zip.Inflater(), 1 shl 16)
             val digest = java.security.MessageDigest.getInstance("MD5")
             val buffer = ByteArray(1 shl 16)
