@@ -40,6 +40,25 @@ class SessionsLayoutTest {
         assertTrue(fresh.exists() && card.exists() && gen.exists())
     }
 
+    @Test fun staleImportsAreRemoved() {
+        val root = tmp.newFolder("sessions")
+        val now = System.currentTimeMillis()
+        fun import(id: String, age: Long, json: Boolean): File {
+            val dir = File(root, id).apply { mkdirs() }
+            val part = File(dir, ".import.part").apply { mkdirs() }
+            File(part, "session.frond").writeText("guest")
+            if (json) File(dir, "$id.json").writeText("{}")
+            dir.walkTopDown().forEach { it.setLastModified(now - age) }
+            return dir
+        }
+        val killed = import("killed", 3_600_000, json = false)
+        val running = import("running", 0, json = false)
+        val listed = import("listed", 3_600_000, json = true)
+        removeStaleTemps(root, now)
+        assertFalse(killed.exists())
+        assertTrue(running.exists() && listed.exists())
+    }
+
     @Test fun zipRoundTripCopiesPackableFilesAtArchiveRoot() {
         val dir = tmp.newFolder("machine")
         File(dir, "session.frond").writeText("guest")

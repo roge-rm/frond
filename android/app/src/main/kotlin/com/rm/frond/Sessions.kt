@@ -223,7 +223,8 @@ object Sessions {
     // cannot promise atomic replacement of an existing document.
     fun saveCopy(context: Context, link: ControlLink, to: Uri): String? {
         val folder = File(context.cacheDir, "sessions").also { it.mkdirs() }
-        val copy = File(folder, "copy").also { it.mkdirs() }
+        // A copy left by a process killed mid-save would lend its old card to this one.
+        val copy = File(folder, "copy").also { it.deleteRecursively(); it.mkdirs() }
         try {
             val reply = link.request("save", copy.path, timeoutSeconds = 120)
             if (!reply.ok) throw IOException(reply.message)
@@ -515,6 +516,18 @@ internal fun removeStaleTemps(root: File, now: Long) {
     }
     clean(root)
     root.listFiles { it.isDirectory }.orEmpty().forEach { clean(it) }
+    removeStaleImports(root, now)
+}
+
+// An import stages into <id>/.import.part and writes <id>.json last; a process killed before
+// that leaves a folder no session lists. Only old ones go, as a running import keeps writing.
+internal fun removeStaleImports(root: File, now: Long) {
+    val cutoff = now - 10 * 60 * 1000
+    root.listFiles { it.isDirectory }.orEmpty().forEach { dir ->
+        if (!File(dir, ".import.part").isDirectory || File(dir, "${dir.name}.json").exists()) return@forEach
+        if (dir.walkTopDown().any { it.lastModified() >= cutoff }) return@forEach
+        dir.deleteRecursively()
+    }
 }
 
 internal fun ignoredName(name: String) =
