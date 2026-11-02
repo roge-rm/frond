@@ -285,7 +285,7 @@ int main() {
             .SetRamSize(32u << 20).SetNor(sizeof(synthetic), synthetic)
             .SetMemory(sizeof(synthetic), synthetic).SetSavestate(sizeof(synthetic), synthetic);
         if (sd) source.SetSd(card.size(), card.data());
-        assert(source.Serialize());
+        assert(source.SerializeAs(6));
         const auto* bytes = static_cast<const uint8_t*>(source.GetSerializedSession());
         assert(std::string(reinterpret_cast<const char*>(bytes + 8)) == p.name);
         SessionFile5 decoded;

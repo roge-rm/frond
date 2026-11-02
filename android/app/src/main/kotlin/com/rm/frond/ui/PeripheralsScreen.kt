@@ -102,7 +102,7 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
             model.changeMicrophone(true)
         else microphonePermission.launch(android.Manifest.permission.RECORD_AUDIO)
     }
-    val saveCopy = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
+    val saveCopy = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
         if (uri != null) model.saveCopy(uri)
     }
 
@@ -406,7 +406,7 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                 action("Reset") { confirmReset = true }
                 action("Rotate") { model.rotate() }
                 item { Header("Session", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp)) }
-                action("Save a copy") { saveCopy.launch("${model.name}.frond") }
+                action("Save a copy") { saveCopy.launch("${model.name}.zip") }
                 action("Emulator log") { model.showLog() }
                 action("Hard reset") { confirmHardReset = true }
                 item { Spacer(Modifier.size(16.dp)) }

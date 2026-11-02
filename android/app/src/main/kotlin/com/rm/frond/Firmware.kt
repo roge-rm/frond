@@ -257,7 +257,7 @@ object Firmware {
     // (inside a saved session, else the installed one) matches. Reads the NOR, so not on the UI thread.
     fun fastAudioQualified(device: Device, session: File?, nor: File): Boolean {
         val want = device.fastAudioNorMd5 ?: return false
-        val md5 = if (session != null && session.isFile) Sessions.norMd5(session) else md5(nor)
+        val md5 = if (session != null && (session.isFile || session.isDirectory)) Sessions.norMd5(session) else md5(nor)
         return md5 == want
     }
 
