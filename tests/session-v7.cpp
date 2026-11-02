@@ -395,6 +395,66 @@ static void IdentityAndFailedPublish() {
     fs::remove_all(dir);
 }
 
+static void LoneV6Bin() {
+    const auto dir = FixtureDir();
+    uint8_t nor[] = {1, 2, 3}, ram[] = {4}, state[] = {5};
+    SessionFile5 source;
+    source.SetDeviceName("sony-clie-tg50").SetRamSize(16u << 20).SetDisplayMode(5)
+        .SetNor(sizeof(nor), nor).SetMemory(sizeof(ram), ram).SetSavestate(sizeof(state), state);
+    assert(source.SerializeAs(6));
+    const auto* data = static_cast<const uint8_t*>(source.GetSerializedSession());
+    const auto size = source.GetSerializedSessionSize();
+    const auto lone = dir / "synthetic.bin";
+    WriteFile(lone, std::vector<uint8_t>(data, data + size));
+    frondSession::Contents loaded;
+    fs::path got;
+    assert(frondSession::loadPath(lone, loaded, got));
+    assert(got == dir / "synthetic");
+    assert(loaded.deviceName == "sony-clie-tg50");
+    assert(loaded.nor == std::vector<uint8_t>(nor, nor + sizeof(nor)));
+    assert(loaded.memory == std::vector<uint8_t>(ram, ram + sizeof(ram)));
+    assert(loaded.savestate == std::vector<uint8_t>(state, state + sizeof(state)));
+    fs::path session;
+    assert(frondMachine::sessionFile(got, session));
+    auto v7 = ReadAll(session);
+    assert(v7[4] == 7);
+
+    auto payload = TinyPayload();
+    SessionFile5 withSd;
+    withSd.SetDeviceName("palm-tx").SetRamSize(32u << 20).SetDisplayMode(1)
+        .SetNor(sizeof(nor), nor).SetMemory(sizeof(ram), ram).SetSavestate(sizeof(state), state)
+        .SetSd(payload.size(), payload.data());
+    assert(withSd.SerializeAs(6));
+    WriteFile(lone, std::vector<uint8_t>(static_cast<const uint8_t*>(withSd.GetSerializedSession()),
+                                        static_cast<const uint8_t*>(withSd.GetSerializedSession()) +
+                                            withSd.GetSerializedSessionSize()));
+    frondSession::Contents loadedSd;
+    assert(frondSession::loadPath(lone, loadedSd, got));
+    assert(loadedSd.media.size() == 1 && fs::is_regular_file(got / frondMachine::sdSibling));
+    WriteFile(lone, std::vector<uint8_t>(data, data + size));
+    frondSession::Contents loadedAgain;
+    assert(frondSession::loadPath(lone, loadedAgain, got));
+    assert(loadedAgain.media.empty());
+    assert(!fs::exists(got / frondMachine::sdSibling));
+
+    auto truncated = std::vector<uint8_t>(data, data + size);
+    truncated.resize(truncated.size() - 2);
+    const auto bad = dir / "truncated.bin";
+    WriteFile(bad, truncated);
+    frondSession::Contents failed;
+    fs::path failedFolder;
+    assert(!frondSession::loadPath(bad, failed, failedFolder));
+
+    const auto unnamed = dir / "unnamed";
+    WriteFile(unnamed, std::vector<uint8_t>(data, data + size));
+    frondSession::Contents loadedUnnamed;
+    fs::path unnamedFolder;
+    assert(frondSession::loadPath(unnamed, loadedUnnamed, unnamedFolder));
+    assert(unnamedFolder == dir / "unnamed-session");
+    assert(loadedUnnamed.nor == std::vector<uint8_t>(nor, nor + sizeof(nor)));
+    fs::remove_all(dir);
+}
+
 static void NewWritesAreV7() {
     uint8_t nor[] = {1};
     SessionFile5 session;
@@ -411,6 +471,7 @@ int main() {
     RefusedSiblingsLeaveBytes();
     TruncatedHeader();
     LegacyV6();
+    LoneV6Bin();
     MsExtractStub();
     IdentityAndFailedPublish();
     NewWritesAreV7();
