@@ -256,9 +256,16 @@ object Firmware {
     // Whether the core accepts low-latency audio: the device has a qualified NOR and the one it runs
     // (inside a saved session, else the installed one) matches. Reads the NOR, so not on the UI thread.
     fun fastAudioQualified(device: Device, session: File?, nor: File): Boolean {
+        if (device.id == "sony-clie-tg50") return false
         val want = device.fastAudioNorMd5 ?: return false
         val md5 = if (session != null && (session.isFile || session.isDirectory)) Sessions.norMd5(session) else md5(nor)
         return md5 == want
+    }
+
+    fun sonyPreviewEligible(device: Device, session: File?, nor: File): Boolean {
+        if (device.id != "sony-clie-tg50" || !device.fastAudio) return false
+        val digest = if (session != null && (session.isFile || session.isDirectory)) Sessions.norMd5(session) else md5(nor)
+        return digest == "4fcdb4d5f12c04a4969088a9ed839f41"
     }
 
     fun md5(file: File): String? = try {

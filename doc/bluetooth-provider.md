@@ -62,15 +62,30 @@ The controller keeps its real manufacturer, version, address and ACL buffer
 contract. Original device discovery, Memo OPP sending and standard PIN entry
 and Trusted Devices work against an independent virtual peer. Original Exchange
 Manager receives an exact 4096-byte object into a registered Palm application
-on native desktop. SPP, other profiles and portable continuation of a live link
-remain unqualified. Android payload transfers remain unqualified.
+on native desktop. SPP works both ways: an app connecting out to a peer's
+serial port, and an app listening that a peer connects to, each with exact
+4096-byte payloads in both directions, peer loss and a fresh reconnect.
+Other profiles and portable continuation of a live link remain unqualified.
+Android payload transfers remain unqualified.
 No physical radio or cryptography claim follows from these virtual tests.
 
-Bluetooth starts off in each TG50 desktop or Android session. Select the
+The TG50's Bluetooth setting works as on the other devices: the desktop keeps
+it between sessions and Android starts each session with it off. Select the
 endpoint in Device controls, then turn Bluetooth off and on in Sony Preferences.
-Stop and a fresh session start turn the host endpoint off. Bad or disconnected
-endpoints report an error. After reset, sleep or accepted session replacement,
-restart the original radio before another transfer.
+Bad or disconnected endpoints report an error. After reset or accepted session
+replacement, restart the original radio before another transfer. The radio
+stays powered while the TG50 sleeps, so Bluetooth carries on after wake; an
+open link is closed by the original library on sleep.
+
+The readout under the setting (desktop "Bluetooth: ...", Android's Bluetooth
+row) shows what the core sees: `radio=on` or `off`, the BCSP link state (3 is
+active), `provider connected` while the controller socket is open, and
+`ACL observed=N`, the ACL links the original stack has open. It goes to 1 on
+connect and back to 0 on peer loss or close. A core reset shows `radio=off`
+without the provider until the guest powers the radio again. `ACL history=unknown`
+means the count can miss links from before Frond last saw a controller reset,
+for example after a core reset until the radio restarts or the TG50 sleeps. The readout stays
+`radio=on` through sleep.
 
 The provider advertises 192-byte ACL payloads and one shared transmit credit.
 The bridge preserves real completions and splits received ACL data into at most
@@ -102,8 +117,8 @@ Size. The bridge keeps its last successfully declared capacity for this same
 guest; a successful new declaration replaces it. External controller or session
 replacement clears it. This compatibility follows the observed TG50 driver;
 HCI cannot identify an old buffer acknowledgement newly queued after the host
-has declared its new epoch on a reused handle. Original idle sleep/wake and
-automatic incoming service recovery remain unqualified.
+has declared its new epoch on a reused handle. Automatic incoming service
+recovery remains unqualified.
 
 The optional virtual OPP test peer uses the provider's pinned BlueZ test host.
 Build and check it with `heavy build make test-bluetooth-opp-peer`. Its separate

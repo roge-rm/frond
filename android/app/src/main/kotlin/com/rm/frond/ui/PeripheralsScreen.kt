@@ -730,12 +730,12 @@ private fun bluetoothText(s: BtLink.Status, radio: String?): String {
         is BtMode.Join -> if (s.links > 0) "Connected to ${NetRelay.hostPort(mode.host, mode.port)}"
         else s.error ?: "Joined to ${NetRelay.hostPort(mode.host, mode.port)}"
     }
-    // The core's word on the Palm's radio, where it needs something done.
+    // The core's live observation of the Palm's radio and ACL links.
     val note = when {
         radio == null -> null
         radio.contains("turn Bluetooth off and on") -> "Turn Bluetooth off and on in Palm OS."
         radio.startsWith("disconnected: ") -> radio.removePrefix("disconnected: ")
-        else -> null
+        else -> radio.takeUnless { it.isBlank() || it == "off" }
     }
     return if (note == null) link else "$link. $note"
 }

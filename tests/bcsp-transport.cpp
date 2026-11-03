@@ -169,7 +169,7 @@ static void Bridge() {
     b.occupied=FakeBackend::capacity;
     Feed(t,Command(2,1));bridge.Pump(0);assert(t.Received()==1 && b.connected);
     b.occupied=0;bridge.Pump(0);assert(!t.Received() && b.sent.size()==2);
-    b.Receive({2,1,0,2,0,0xaa,0xbb});bridge.Pump(0);Drain(t);assert(t.Outstanding()==1);
+    b.Receive({2,1,0x20,2,0,0xaa,0xbb});bridge.Pump(0);Drain(t);assert(t.Outstanding()==1);
     bridge.Reset();assert(!b.connected);
 }
 static void OversizedHost() {

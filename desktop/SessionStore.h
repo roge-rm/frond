@@ -27,6 +27,7 @@ struct Preferences {
     int scale{4};  // quarter steps
     bool smooth{false}, audio{true}, fastAudio{false}, microphone{false};
     bool showKeyboard{true}, showJogControls{true};
+    bool sonyAudioPreview{false};
 };
 inline QString preferencesPath(const QString& path) { return path + ".settings.json"; }
 inline bool readPreferences(const QString& path, Preferences* result) {
@@ -38,7 +39,7 @@ inline bool readPreferences(const QString& path, Preferences* result) {
     const auto scale = object.value("scale").toInt();
     if (scale < 4 || scale > 8) return false;
     *result = {scale, object.value("smooth").toBool(), object.value("audio").toBool(), object.value("fastAudio").toBool(), object.value("microphone").toBool(false),
-               object.value("showKeyboard").toBool(true), object.value("showJogControls").toBool(true)};
+               object.value("showKeyboard").toBool(true), object.value("showJogControls").toBool(true), object.value("sonyAudioPreview").toBool(false)};
     return true;
 }
 // The caller holds the session lock, or has just reserved a new machine.
@@ -46,7 +47,7 @@ inline QString writePreferences(const QString& path, const Preferences& prefs) {
     QSaveFile file(preferencesPath(path));
     const QJsonObject object{{"version", 1}, {"scale", std::clamp(prefs.scale, 4, 8)},
                              {"smooth", prefs.smooth}, {"audio", prefs.audio}, {"fastAudio", prefs.fastAudio}, {"microphone", prefs.microphone},
-                             {"showKeyboard", prefs.showKeyboard}, {"showJogControls", prefs.showJogControls}};
+                             {"showKeyboard", prefs.showKeyboard}, {"showJogControls", prefs.showJogControls}, {"sonyAudioPreview", prefs.sonyAudioPreview}};
     const auto bytes = QJsonDocument(object).toJson(QJsonDocument::Compact);
     if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit())
         return QStringLiteral("Couldn't save the machine settings.");

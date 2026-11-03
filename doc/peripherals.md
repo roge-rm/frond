@@ -508,10 +508,10 @@ endpoint, firmware-free regressions and the Palm Serial Manager probes.
 
 ## USB HotSync
 
-`--usb pty` or `--usb tcp:PORT` plugs the TX, E2 or Zire 72 into an emulated USB host and moves
+`--usb pty` or `--usb tcp:PORT` plugs the TX, E2, Zire 72 or Sony CLIÉ TG50 into an emulated USB host and moves
 the bytes of its HotSync port to a host PTY or a TCP listener on 127.0.0.1, one
 client at a time. pilot-link and the like talk to it as they would to a serial
-cradle. It is off by default and supports the Palm TX, Tungsten E2 and Zire 72. The desktop app has the same
+cradle. It is off by default and supports the Palm TX, Tungsten E2, Zire 72 and TG50. The desktop app has the same
 choice under **USB**.
 
 ```sh
@@ -644,9 +644,11 @@ with serial detached.
 Classic 128 MB Memory Stick storage supports card images,
 Files and applications in Sony Launcher's Card category; see
 [Memory Stick storage](memory-stick.md). Memory Stick Pro, MagicGate, Memory Stick
-audio, USB HotSync and high-power remote-control infrared
+audio and high-power remote-control infrared
 remain unavailable.
-USB HotSync remains blocked by the original reserved-register access.
+
+TG50 USB HotSync works over a PTY or TCP with pilot-link (list, fetch, install, backup);
+`make test-tg50-usb-hotsync` runs it.
 
 TG50 Bluetooth is an experimental opt-in [virtual controller endpoint](bluetooth-provider.md#sony-clié-tg50).
 Original discovery, Memo sending and PIN/trusted-device setup have virtual peer

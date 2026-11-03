@@ -11,6 +11,7 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicBoolean
 
 // The core's desktop control socket (native/DesktopControl.h), seen from the app's side.
 // The app listens on a Unix socket path and the core connects to it with --desktop-socket.
@@ -26,6 +27,7 @@ class ControlLink(val path: File, private val onEvent: (String, String) -> Unit)
     private val connected = CompletableFuture<Unit>()
     private val pending = ConcurrentHashMap<String, CompletableFuture<Reply>>()
     private val nextId = AtomicInteger(1)
+    private val bluetoothReading = AtomicBoolean(false)
     private val fileJobs = ConcurrentHashMap.newKeySet<String>()
     private val panelState = Object()
     private var panelDesired = false
@@ -107,6 +109,17 @@ class ControlLink(val path: File, private val onEvent: (String, String) -> Unit)
         } finally {
             pending.remove(id)
             fileJobs.remove(id)
+        }
+    }
+
+    // Shared by replacement Activities using this connection. A cancelled
+    // coroutine cannot release the slot before the blocking wait returns.
+    fun readBluetoothState(): Reply? {
+        if (!bluetoothReading.compareAndSet(false, true)) return null
+        return try {
+            request("bluetooth-state", timeoutSeconds = 3)
+        } finally {
+            bluetoothReading.set(false)
         }
     }
 

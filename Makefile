@@ -513,6 +513,11 @@ test-usb-bridge-soc: out/frond
 		$(CPU_TEST_LDLIBS) -o build/test-usb-bridge-soc
 	timeout 300 ./build/test-usb-bridge-soc
 
+# TG50 USB HotSync over a PTY with pilot-link; skips without the TG50 session (make smoke-sessions) or pilot-link.
+.PHONY: test-tg50-usb-hotsync
+test-tg50-usb-hotsync: out/frond
+	python3 tests/tg50-usb-hotsync.py
+
 .PHONY: test-usb-host-fixture test-tx-usb-rom
 test-usb-host-fixture: build/source/src/common/libcommon.a
 	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
@@ -975,3 +980,9 @@ test-tg50-audio-lifecycle: out/frond
 	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/tg50-audio-lifecycle-core.rsp
 	$(CXX) -std=c++17 -O1 -g $(shell sdl2-config --cflags) -Ibuild/source/src/uarm/native -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common tests/tg50-audio-lifecycle.cpp build/source/src/uarm/native/SdlAudioDriver.cpp @build/tg50-audio-lifecycle-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-tg50-audio-lifecycle
 	ulimit -c 0; ./build/test-tg50-audio-lifecycle
+
+.PHONY: test-sony-original-guards
+test-sony-original-guards: out/frond
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/sony-original-guards-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common tests/sony-original-guards.cpp @build/sony-original-guards-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-sony-original-guards
+	ulimit -c 0; ./build/test-sony-original-guards

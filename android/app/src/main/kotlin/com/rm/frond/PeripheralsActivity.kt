@@ -17,6 +17,9 @@ import com.rm.frond.ui.FrondTheme
 import com.rm.frond.ui.LogScreen
 import com.rm.frond.ui.PeripheralsScreen
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -395,22 +398,64 @@ class PeripheralsModel(
         private set
     var radio by mutableStateOf<String?>(null)
         private set
+    private var bluetoothWatcher: Job? = null
+    private var bluetoothRefresh: Job? = null
+    private var bluetoothForeground = false
+    private var bluetoothEpoch = 0L
+    private var radioReading = false
 
     fun watchBluetooth() {
-        activity.lifecycleScope.launch {
+        if (bluetoothWatcher != null) return
+        bluetoothWatcher = activity.lifecycleScope.launch {
             BtLink.status.collect {
                 bluetooth = it
+                ++bluetoothEpoch
+                radio = null
                 readRadio()
             }
         }
     }
 
+    fun startBluetoothRefresh() {
+        if (bluetoothForeground) return
+        bluetoothForeground = true
+        ++bluetoothEpoch
+        radio = null
+        bluetoothRefresh = activity.lifecycleScope.launch {
+            while (isActive) {
+                readRadio()
+                delay(1000)
+            }
+        }
+    }
+
+    fun stopBluetoothRefresh() {
+        bluetoothForeground = false
+        ++bluetoothEpoch
+        bluetoothRefresh?.cancel()
+        bluetoothRefresh = null
+    }
+
     fun readRadio() {
         val l = link ?: return
-        if (waitingForGdb) return
+        if (FrondActivity.running?.control !== l) {
+            radio = null
+            return
+        }
+        if (!device.bluetooth || !bluetoothForeground || waitingForGdb || radioReading) return
+        val epoch = bluetoothEpoch
+        radioReading = true
         activity.lifecycleScope.launch {
-            val reply = withContext(Dispatchers.IO) { l.request("bluetooth-state", timeoutSeconds = 30) }
-            radio = if (reply.ok) reply.message else null
+            try {
+                val reply = withContext(Dispatchers.IO) { l.readBluetoothState() }
+                if (reply != null && bluetoothForeground && epoch == bluetoothEpoch && FrondActivity.running?.control === l) {
+                    radio = if (reply.ok) reply.message else null
+                }
+            } finally {
+                // Pausing stops the scheduler; the blocking request keeps its
+                // single-flight slot until the control wait actually returns.
+                radioReading = false
+            }
         }
     }
 
@@ -601,15 +646,18 @@ class PeripheralsActivity : ComponentActivity() {
         super.onResume()
         panelControl?.setPanelVisible(true)
         model.readMicrophone()
+        model.startBluetoothRefresh()
     }
 
     override fun onPause() {
+        model.stopBluetoothRefresh()
         if (!isFinishing) model.cancelMicrophoneRequest()
         panelControl?.setPanelVisible(false)
         super.onPause()
     }
 
     override fun onStop() {
+        model.stopBluetoothRefresh()
         super.onStop()
         if (!isFinishing) FrondActivity.running?.microphoneOnReturn(false)
         if (!isFinishing && !isChangingConfigurations) {

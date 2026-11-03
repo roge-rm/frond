@@ -1,0 +1,257 @@
+--- a/src/common/device_profile5.h
++++ b/src/common/device_profile5.h
+@@ -115,7 +115,7 @@
+      {false, true, true, false, false, true, true, true, true},
+      0xc70000, 0, 16u << 20, 16u << 20, DisplayMode::mode_320x320, 1u << 5, false,
+      DeviceNorLayout5::smallAndBigCards, 0, 0x20000, false, 0, 0,
+-     {true, "tg50", 320, 320, 0, 224, "Date Book|Address|To Do|Memo Pad",
++     {true, "tg50", 320, 320, 0, 248, "Date Book|Address|To Do|Memo Pad",
+       "up|down|app1|app2|app3|app4|home|power", -1, -1, -1, -1, false, false, false, "", "tg50-clie",
+       DeviceStorageSlot5::memoryStick, 1073741887, true, true, 34, true}},
+     // Reserved names: art only, no board yet.
+--- a/src/uarm/native/DeviceControls.cpp
++++ b/src/uarm/native/DeviceControls.cpp
+@@ -1091,7 +1091,7 @@
+ // CLIE PEG-TG50: brushed champagne-silver body, an app row of round and slim silver keys, a
+ // silver QWERTY with printed legends and a left-side Jog Dial.
+ void paintTg50Controls(Canvas& canvas, const DeviceControlProfile& profile, int width, DeviceKeyMask pressed,
+-                       const DeviceControlView& view, int screenHeight=0) {
++                       const DeviceControlView& view, const DeviceControlTransform& transform, bool sidebar=false, int screenHeight=0) {
+     const int ox=(width-profile.width)/2;
+     const float H=view.keyboard ? profile.height : profile.height-profile.keyboardHeight;
+     auto down=[&](KeyId key) {return (pressed&deviceKeyBit(key))!=0;};
+@@ -1106,10 +1106,13 @@
+         c=c+Rgb{5,5,5}*speckle(x*0.05f,y*1.5f)+Rgb{2,2,2}*std::sin(y*5.3f+std::sin(x*0.07f)*1.4f);
+         return c;
+     };
+-    const float left=-deviceScreenLeft(profile,view)*profile.unit;
++    const float left=sidebar ? -deviceScreenLeft(profile,view)*profile.unit : 0;
+     canvas.paint(left,-screenHeight,width,H,[](float,float) {return 1.f;},[&](float x,float y,Rgb) {
+-        const float t=std::fabs(x-(width+left)*0.5f)/((width-left)*0.5f);
+-        return brushed(x,y,0,H,body)*(1-0.12f*t*t);
++        const float px=sidebar ? x/profile.unit+deviceScreenLeft(profile,view) : x*transform.scale;
++        const float py=sidebar ? y/profile.unit : y*transform.scale;
++        const float bodyWidth=profile.width*transform.scale;
++        const float t=std::fabs(px-bodyWidth*0.5f)/(bodyWidth*0.5f);
++        return brushed(px,py,0,H*transform.scale,body)*(1-0.12f*t*t);
+     });
+     // The screen bezel's lower edge, then the body's foot.
+     canvas.paint(0,0,width,3,[&](float,float y) {return canvas.edge(y-1.2f);},[](float,float,Rgb) {return Rgb{40,40,42};});
+@@ -1296,7 +1299,7 @@
+     }
+ 
+     // The side controls use the same body paint and texture coordinates as the keyboard.
+-    if(view.sideTab && profile.sideTabWidth>0) {
++    if(sidebar && view.sideTab && profile.sideTabWidth>0) {
+         canvas.clipLeft=profile.sideTab.x+2;
+         canvas.clipRight=profile.sideTab.x+profile.sideTab.w-2;
+         const DeviceButton* jog[3]={nullptr,nullptr,nullptr};const DeviceButton* back=nullptr;
+@@ -1347,14 +1350,23 @@
+     if(!profile.count)return;
+     // The canvas is in strip units, scale/unit device pixels each; the side tab widens it.
+     const int u=profile.unit;
+-    Canvas canvas(deviceControlsWidth(profile,width,view)*u,deviceControlsUnits(profile,view),scale/u);
+-    canvas.originX=deviceScreenLeft(profile,view)*u;
++    const DeviceControlTransform transform(profile,width,view);
++    const bool tg50=profile.style==DeviceControlStyle::tg50;
++    Canvas canvas(tg50 ? profile.width : deviceControlsWidth(profile,width,view)*u,
++                  deviceControlsUnits(profile,view),scale*transform.scale);
++    // Allocate the same integer device rectangle as the cached renderer target.
++    if(tg50) {
++        canvas.w=int(deviceControlsWidth(profile,width,view)*scale);
++        canvas.h=int(deviceControlsHeight(profile,width,view)*scale);
++        canvas.pixels.resize(size_t(canvas.w)*canvas.h);
++    }
++    canvas.originX=tg50 ? 0 : deviceScreenLeft(profile,view)*u;
+     switch(profile.style) {
+         case DeviceControlStyle::e2: paintE2Controls(canvas,profile,width*u,pressed);break;
+         case DeviceControlStyle::zire72: paintZire72Controls(canvas,profile,width*u,pressed);break;
+         case DeviceControlStyle::m515: paintM515Controls(canvas,profile,width*u,pressed);break;
+         case DeviceControlStyle::iiix: paintIIIxControls(canvas,profile,width*u,pressed);break;
+-        case DeviceControlStyle::tg50: paintTg50Controls(canvas,profile,width*u,pressed,view);break;
++        case DeviceControlStyle::tg50: paintTg50Controls(canvas,profile,profile.width,pressed,view,transform);break;
+         default: paintTxControls(canvas,profile,width*u,pressed);
+     }
+     if(auto* texture=canvasTexture(renderer,canvas)) {
+@@ -1375,7 +1387,8 @@
+     canvas.pixels.resize(size_t(canvas.w)*canvas.h);
+     canvas.originX=left*profile.unit;
+     canvas.originY=screenHeight*profile.unit;
+-    paintTg50Controls(canvas,profile,screenWidth*profile.unit,pressed,view,screenHeight*profile.unit);
++    const DeviceControlTransform transform(profile,screenWidth,view);
++    paintTg50Controls(canvas,profile,profile.width,pressed,view,transform,true,screenHeight*profile.unit);
+     if(auto* texture=canvasTexture(renderer,canvas)) {
+         const SDL_Rect dest{0,0,canvas.w,canvas.h};
+         SDL_RenderCopy(renderer,texture,nullptr,&dest);
+--- a/src/uarm/native/DeviceControls.h
++++ b/src/uarm/native/DeviceControls.h
+@@ -220,22 +220,35 @@
+     return button.section==DeviceControlSection::main ||
+            (button.section==DeviceControlSection::keyboard ? view.keyboard : view.sideTab);
+ }
+-// Strip height in strip units: without the keyboard, down to the side tab's foot if that's lower.
++// Visible lower controls keep their authored aspect ratio across the full TG50 body.
+ inline int deviceControlsUnits(const DeviceControlProfile& profile, const DeviceControlView& view) {
+-    int h=view.keyboard ? profile.height : profile.height-profile.keyboardHeight;
+-    return h;
++    return view.keyboard ? profile.height : profile.height-profile.keyboardHeight;
+ }
+-// Strip height in screen pixels.
+-inline int deviceControlsHeight(const DeviceControlProfile& profile, const DeviceControlView& view={}) {
+-    return deviceControlsUnits(profile,view)/profile.unit;
+-}
+-// The LCD and main controls sit to the right of a visible side panel.
+ inline int deviceScreenLeft(const DeviceControlProfile& profile, const DeviceControlView& view={}) {
+     return view.sideTab ? profile.sideTabWidth/profile.unit : 0;
+ }
+-// Window width including the side panel.
+ inline int deviceControlsWidth(const DeviceControlProfile& profile, int screenWidth, const DeviceControlView& view={}) {
+-    return screenWidth+(view.sideTab ? profile.sideTabWidth/profile.unit : 0);
++    return screenWidth+deviceScreenLeft(profile,view);
++}
++struct DeviceControlTransform {
++    const float scale;
++    const float left;
++    const float sidebarLeft;
++    DeviceControlTransform(const DeviceControlProfile& profile, int screenWidth, const DeviceControlView& view)
++        : scale(profile.style==DeviceControlStyle::tg50
++                    ? float(deviceControlsWidth(profile,screenWidth,view))/profile.width
++                    : 1.f/profile.unit),
++          left(profile.style==DeviceControlStyle::tg50 ? 0.f
++                    : deviceScreenLeft(profile,view)+float((screenWidth*profile.unit-profile.width)/2)/profile.unit),
++          sidebarLeft(deviceScreenLeft(profile,view)+(profile.style==DeviceControlStyle::tg50 ? 0
++                    : (screenWidth*profile.unit-profile.width)/2/profile.unit)) {}
++};
++// Rounded up once in device pixels; drawing and input share the unrounded uniform scale.
++inline int deviceControlsHeight(const DeviceControlProfile& profile, int screenWidth, const DeviceControlView& view={}) {
++    return int(std::ceil(deviceControlsUnits(profile,view)*DeviceControlTransform(profile,screenWidth,view).scale));
++}
++inline int deviceControlsHeight(const DeviceControlProfile& profile, const DeviceControlView& view={}) {
++    return deviceControlsHeight(profile,profile.width/profile.unit,view);
+ }
+ // Signed distance from (x,y) to a rounded rectangle; negative inside.
+ inline float deviceRoundedDistance(const SDL_Rect& r, float radius, float x, float y) {
+@@ -254,11 +267,23 @@
+     return dy<0 ? keyIdUp : keyIdDown;
+ }
+ inline SDL_Rect deviceButtonRect(const DeviceControlProfile& profile,
+-                                const DeviceButton& button, int screenWidth, int screenHeight) {
+-    // Screen pixels; strip units divide by the unit.
+-    const int u=profile.unit;
+-    auto r=button.bounds; r.x=(r.x+(screenWidth*u-profile.width)/2)/u+deviceScreenLeft(profile); r.y=r.y/u+screenHeight; r.w/=u; r.h/=u;
+-    return r;
++                                const DeviceButton& button, int screenWidth, int screenHeight,
++                                const DeviceControlView& view={}) {
++    if(profile.style!=DeviceControlStyle::tg50) {
++        const int u=profile.unit;
++        auto r=button.bounds;
++        r.x=(r.x+(screenWidth*u-profile.width)/2)/u+deviceScreenLeft(profile,view);
++        r.y=r.y/u+screenHeight;r.w/=u;r.h/=u;
++        return r;
++    }
++    const DeviceControlTransform transform(profile,screenWidth,view);
++    const bool sidebar=button.section==DeviceControlSection::sideTab;
++    const float scale=sidebar ? 1.f/profile.unit : transform.scale;
++    const float left=sidebar ? transform.sidebarLeft : transform.left;
++    const auto& r=button.bounds;
++    const int x=int(std::lround(left+r.x*scale)),y=int(std::lround(screenHeight+r.y*scale));
++    return {x,y,int(std::lround(left+(r.x+r.w)*scale))-x,
++                int(std::lround(screenHeight+(r.y+r.h)*scale))-y};
+ }
+ // App keys are rounded rectangles; their pockets share this corner.
+ inline float deviceButtonCorner(const DeviceControlProfile& profile, const SDL_Rect& r) {
+@@ -274,19 +299,22 @@
+ inline KeyId deviceControlAt(const DeviceControlProfile& profile, int screenWidth,
+                              int screenHeight, int x, int y, const DeviceControlView& view={}) {
+     // Integer window points hit-test at their pixel centre, in strip units.
+-    const int u=profile.unit;
+-    const float sx=(x-deviceScreenLeft(profile,view)+0.5f)*u-(screenWidth*u-profile.width)/2,sy=(y-screenHeight+0.5f)*u;
++    const DeviceControlTransform transform(profile,screenWidth,view);
++    const float sx=(x+0.5f-transform.left)/transform.scale,sy=(y-screenHeight+0.5f)/transform.scale;
+     const auto part=deviceNavigatorAt(profile,sx,sy);
+     if(part!=keyInvalid)return part;
+     for(size_t i=0;i<profile.count;++i) {
+         if(deviceNavigatorButton(profile,profile.buttons[i]) || !deviceControlShown(profile.buttons[i],view))continue;
+         const auto& b=profile.buttons[i];
+         const auto& r=b.bounds;
++        const bool sidebar=b.section==DeviceControlSection::sideTab;
++        const float bx=sidebar ? (x+0.5f-transform.sidebarLeft)*profile.unit : sx;
++        const float by=sidebar ? (y-screenHeight+0.5f)*profile.unit : sy;
+         if(b.shape.w>0) {
+-            if(sx>=r.x && sx<r.x+r.w && sy>=r.y && sy<r.y+r.h &&
+-               deviceRoundedDistance(b.shape,deviceButtonCorner(profile,b),sx,sy)<=0)
++            if(bx>=r.x && bx<r.x+r.w && by>=r.y && by<r.y+r.h &&
++               deviceRoundedDistance(b.shape,deviceButtonCorner(profile,b),bx,by)<=0)
+                 return b.key;
+-        } else if(deviceRoundedDistance(r,deviceButtonCorner(profile,b),sx,sy)<=0)
++        } else if(deviceRoundedDistance(r,deviceButtonCorner(profile,b),bx,by)<=0)
+             return b.key;
+     }
+     return keyInvalid;
+--- a/src/uarm/native/SdlEventHandler.cpp
++++ b/src/uarm/native/SdlEventHandler.cpp
+@@ -265,7 +265,7 @@
+     for (auto& item : fingers)
+         if (item.active && item.touch == event.touchId && item.id == event.fingerId) finger = &item;
+     int windowWidth = int(scale * deviceControlsWidth(controls,ScreenWidth(),controlView));
+-    int windowHeight = int(scale * (ScreenHeight() + deviceControlsHeight(controls,controlView)));
++    int windowHeight = int(scale * (ScreenHeight() + deviceControlsHeight(controls,ScreenWidth(),controlView)));
+     if (auto* window = SDL_GetWindowFromID(event.windowID)) SDL_GetWindowSize(window, &windowWidth, &windowHeight);
+     int x = int(std::floor(event.x * windowWidth)), y = int(std::floor(event.y * windowHeight));
+     MapPointer(x, y);
+--- a/src/uarm/native/SdlRenderer.cpp
++++ b/src/uarm/native/SdlRenderer.cpp
+@@ -59,7 +59,7 @@
+         const int deviceWidth = deviceControlsWidth(deviceControls(deviceType),
+             landscape ? screenHeight : displayConfiguration.width, controlView);
+         const int deviceHeight = (landscape ? displayConfiguration.width : screenHeight) +
+-                                 deviceControlsHeight(deviceControls(deviceType),controlView);
++                                 deviceControlsHeight(deviceControls(deviceType),landscape ? screenHeight : displayConfiguration.width,controlView);
+         layout = fitWindowLayout(fit, deviceWidth, deviceHeight, windowWidth, windowHeight);
+ 
+         // The viewport is in output pixels while the scale is 1, then the scale maps device
+@@ -249,7 +249,7 @@
+         drawDeviceSidebar(renderer,controls,screenWidth,screenHeight,scale,buttons,controlView);
+         if(!controlsTexture)
+             controlsTexture=SDL_CreateTexture(renderer,SDL_PIXELFORMAT_ABGR8888,
+-                SDL_TEXTUREACCESS_TARGET,int(deviceControlsWidth(controls,screenWidth,controlView)*artworkScale),int(deviceControlsHeight(controls,controlView)*artworkScale));
++                SDL_TEXTUREACCESS_TARGET,int(deviceControlsWidth(controls,screenWidth,controlView)*artworkScale),int(deviceControlsHeight(controls,screenWidth,controlView)*artworkScale));
+         if(controlsTexture && fit!=WindowFit::none) SDL_SetTextureScaleMode(controlsTexture,SDL_ScaleModeLinear);
+         if(controlsTexture && (!controlsPainted || controlsChanged)) {
+             float sx,sy;SDL_RenderGetScale(renderer,&sx,&sy);
+@@ -262,7 +262,7 @@
+             }
+         }
+         if(controlsPainted) {
+-            SDL_Rect dest{0,int(screenHeight*scale),int(deviceControlsWidth(controls,screenWidth,controlView)*scale),int(deviceControlsHeight(controls,controlView)*scale)};
++            SDL_Rect dest{0,int(screenHeight*scale),int(deviceControlsWidth(controls,screenWidth,controlView)*scale),int(deviceControlsHeight(controls,screenWidth,controlView)*scale)};
+             SDL_RenderCopy(renderer,controlsTexture,nullptr,&dest);
+         } else drawDeviceControls(renderer,controls,screenWidth,screenHeight,scale,buttons,controlView);
+     }
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -132,13 +132,13 @@
+         if (scale == 0) {
+             scale = SDL_GetDisplayUsableBounds(0, &usable) == 0
+                 ? fittingWindowScale(deviceControlsWidth(controls, windowWidth(displayConfiguration, rotation), controlView),
+-                                     windowHeight(displayConfiguration, rotation) + deviceControlsHeight(controls,controlView),
++                                     windowHeight(displayConfiguration, rotation) + deviceControlsHeight(controls,windowWidth(displayConfiguration,rotation),controlView),
+                                      usable.w, usable.h)
+                 : 1.f;
+         }
+         auto window = SDL_CreateWindow("cp-uarm", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+                                        scale * deviceControlsWidth(controls, windowWidth(displayConfiguration, rotation), controlView),
+-                                       scale * (windowHeight(displayConfiguration, rotation)+deviceControlsHeight(controls,controlView)),
++                                       scale * (windowHeight(displayConfiguration, rotation)+deviceControlsHeight(controls,windowWidth(displayConfiguration,rotation),controlView)),
+                                        SDL_WINDOW_ALLOW_HIGHDPI | (resizable ? SDL_WINDOW_RESIZABLE : 0));
+ 
+         return window;
+@@ -147,7 +147,7 @@
+     void sdlResizeWindow(SDL_Window* window, DisplayConfiguration& displayConfiguration, float scale,
+                          Rotation rotation, const DeviceControlProfile& controls, const DeviceControlView& controlView) {
+         SDL_SetWindowSize(window, scale * deviceControlsWidth(controls, windowWidth(displayConfiguration, rotation), controlView),
+-                          scale * (windowHeight(displayConfiguration, rotation)+deviceControlsHeight(controls,controlView)));
++                          scale * (windowHeight(displayConfiguration, rotation)+deviceControlsHeight(controls,windowWidth(displayConfiguration,rotation),controlView)));
+     }
+ 
+     void copy(Buffer& buffer, size_t size, const void* data) {

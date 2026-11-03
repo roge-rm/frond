@@ -14,10 +14,11 @@ data class MachineSettings(
     val microphone: Boolean = false,
     val showKeyboard: Boolean = true,
     val showJogControls: Boolean = true,
+    val sonyAudioPreview: Boolean = false,
 ) {
     fun json(): JSONObject = JSONObject().put("size", size.name).put("smoothing", smoothing)
         .put("sound", sound).put("fastAudio", fastAudio).put("microphone", microphone)
-        .put("showKeyboard", showKeyboard).put("showJogControls", showJogControls)
+        .put("showKeyboard", showKeyboard).put("showJogControls", showJogControls).put("sonyAudioPreview", sonyAudioPreview)
 
     fun applyTo(settings: Settings) = settings.copy(size = size, smoothing = smoothing, sound = sound)
 
@@ -40,6 +41,7 @@ data class MachineSettings(
                 json.optBoolean("microphone", fallback.microphone),
                 json.optBoolean("showKeyboard", true),
                 json.optBoolean("showJogControls", true),
+                json.optBoolean("sonyAudioPreview", false),
             )
         }
     }

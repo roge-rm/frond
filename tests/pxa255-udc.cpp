@@ -89,5 +89,20 @@ int main(){
     assert(f.load(legacyBytes) && f.u->reg4==123 && !f.u->fifo[2].count);
     f.u->fifo[2].head=9;auto corrupt=f.save();f.u->fifo[2].head=0;
     assert(!f.load(corrupt) && f.u->fifo[2].head==0);
-    puts("PASS: PXA255 EP0 hardware requests, fixed FIFOs, IRQ masks/W1C, backpressure, legacy/partial restore and corrupt-state refusal");
+    // Reserved space (Sony TG50 driver stores 0x12 at 0x210): aligned words read zero and ignore writes.
+    f.write(0,1);f.write(0x50,0xfe);const uint32_t ccr=f.read(0),cfr=f.read(8),uicr=f.read(0x50);
+    f.write(0x210,0x12);f.write(0xffc,0xffffffff);
+    assert(!f.read(0x210) && !f.read(0xffc));
+    // Sub-word, misaligned, odd-size and out-of-window accesses are refused.
+    {
+        uint32_t v=0;
+        assert(!mmio(f.u,0x40600210,1,true,&v) && !mmio(f.u,0x40600210,1,false,&v));
+        assert(!mmio(f.u,0x40600210,2,true,&v) && !mmio(f.u,0x40600210,2,false,&v));
+        assert(!mmio(f.u,0x40600210,3,true,&v) && !mmio(f.u,0x40600211,4,true,&v));
+        assert(!mmio(f.u,0x40600001,1,true,&v) && !mmio(f.u,0x40600051,1,false,&v));
+        assert(!mmio(f.u,0x40600011,1,true,&v) && !mmio(f.u,0x40600084,2,true,&v));
+        assert(!mmio(f.u,0x40601000,4,true,&v));
+    }
+    assert(f.read(0)==ccr && f.read(8)==cfr && f.read(0x50)==uicr && !f.read(0x58) && !f.read(0x5c));
+    puts("PASS: PXA255 EP0 hardware requests, fixed FIFOs, IRQ masks/W1C, backpressure, legacy/partial restore, corrupt-state refusal and reserved-space RAZ/WI");
 }

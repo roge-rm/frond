@@ -462,11 +462,10 @@ MainWindow::MainWindow(const QString& core) : core(core) {
         if (memoryStickFiles) memoryStickFiles->reject();
         holdKnown = holdOn = false;
         microphoneArmed = false; microphoneState->clear();
-        const bool stoppedTg50 = runningDevice == frondFirmware::deviceFromId("sony-clie-tg50");
         busy = false; stopping = false; hardResetAfterSave = false; cardPresent = cardInserted = false; runningDevice = frondFirmware::Device::tx;
         copyLock.reset(); savingPath.clear();
         frondSessions::removeStaging(copyStaging); copyStaging.clear(); pendingCopy.clear();
-        sdKnown = protectionKnown = false; showSerial({}); loadSerialSettings(); showUsb({}); loadUsbSettings(); showIrda({}); loadIrdaSettings(); showBluetooth({}); loadBluetoothSettings(); if (stoppedTg50) bluetooth->setChecked(false); sessionLock.reset(); forceButton->hide(); refreshSessions();
+        sdKnown = protectionKnown = false; showSerial({}); loadSerialSettings(); showUsb({}); loadUsbSettings(); showIrda({}); loadIrdaSettings(); showBluetooth({}); loadBluetoothSettings(); sessionLock.reset(); forceButton->hide(); refreshSessions();
         if (closeAfterStop) { allowClose = true; close(); }
         else statusBar()->showMessage(tr("Stopped."));
     });
@@ -824,8 +823,9 @@ void MainWindow::editSession(const QString& path) {
     frondSessions::Preferences prefs;
     const auto device = frondFirmware::deviceFromId(info.device);
     if (const auto error = loadPreferences(path, device, &prefs); !error.isEmpty()) return failure(error);
-    MachineSettingsDialog dialog(device, prefs, frondAudio::qualified(device, info.saved ? path : QString(),
-        frondFirmware::storedNor(firmwareRoot(), device)), this);
+    MachineSettingsDialog dialog(device, prefs,
+        frondAudio::qualified(device, info.saved ? path : QString(), frondFirmware::storedNor(firmwareRoot(), device)) ||
+        frondAudio::sonyPreviewEligible(device, info.saved ? path : QString(), frondFirmware::storedNor(firmwareRoot(), device)), this);
     if (dialog.exec() != QDialog::Accepted) return;
     if (const auto error = frondSessions::writePreferences(path, dialog.controls->values()); !error.isEmpty()) failure(error);
 }
@@ -993,7 +993,6 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     sessionPath = target;
     holdKnown = holdOn = false;
     const auto caps = frondFirmware::capabilities(startDevice);
-    if (startDevice == frondFirmware::deviceFromId("sony-clie-tg50")) bluetooth->setChecked(false);
     if (caps.serial && serialArgument() != "off") arguments << "--serial" << serialArgument();
     if (caps.usb && usbArgument() != "off") arguments << "--usb" << usbArgument();
     if(caps.infrared && irdaArgument()!="off")arguments << "--irda" << irdaArgument();
@@ -1016,8 +1015,11 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     soundToggle->setChecked(caps.sound && runningPreferences.audio);
     if (!caps.sound || !runningPreferences.audio) arguments << "--no-sound";
     const auto sourceSession = !arguments.isEmpty() && !arguments.first().startsWith("--") ? arguments.first() : QString();
-    if (runningPreferences.fastAudio && frondAudio::qualified(startDevice, sourceSession,
+    if (runningPreferences.fastAudio && startDevice != frondFirmware::deviceFromId("sony-clie-tg50") &&
+        frondAudio::qualified(startDevice, sourceSession,
         frondFirmware::storedNor(firmwareRoot(), startDevice))) arguments << "--fast-audio";
+    if (runningPreferences.sonyAudioPreview && frondAudio::sonyPreviewEligible(startDevice, sourceSession,
+        frondFirmware::storedNor(firmwareRoot(), startDevice))) arguments << "--sony-audio-preview";
     arguments << "--window-scale" << QString::number(runningPreferences.scale / 4.0);
     if (runningPreferences.smooth) arguments << "--smooth-lcd";
     if (startDevice == frondFirmware::deviceFromId("sony-clie-tg50")) {

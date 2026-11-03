@@ -128,10 +128,14 @@ class FrondActivity : SDLActivity() {
         arguments += machineSettings.arguments(soundSupported = launchDevice().sound,
             tg50Controls = launchDevice().id == "sony-clie-tg50")
         arguments += listOf("--window-background", BACKGROUND_HEX)
-        if (machineSettings.fastAudio && fastAudioQualified()) {
+        if (machineSettings.fastAudio && launchDevice().id != "sony-clie-tg50" && fastAudioQualified()) {
             arguments += "--fast-audio"
         } else {
             arguments += listOf("--audio-period", audioPeriod().toString())
+        }
+        if (machineSettings.sonyAudioPreview && Firmware.sonyPreviewEligible(launchDevice(),
+                sessionPath?.let { File(it) }, Firmware.nor(this, launchDevice()))) {
+            arguments += "--sony-audio-preview"
         }
         debugPort?.let { arguments += listOf("--gdb", it.toString()) }
         arguments += listOf("--desktop-socket", link.path.path)

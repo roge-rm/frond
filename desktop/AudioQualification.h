@@ -67,9 +67,10 @@ inline QByteArray sessionNorMd5(const QString& path) {
     return valid && !left ? digest.result().toHex() : QByteArray();
 }
 
-inline bool qualified(frondFirmware::Device device, const QString& session, const QString& nor) {
+inline bool matchesNor(frondFirmware::Device device, const QString& session, const QString& nor,
+                       const QByteArray& expected) {
     const auto& profile = frondFirmware::profile(device);
-    if (device == frondFirmware::Device::automatic || !profile.capabilities.fastAudio || !profile.frontend.fastAudioNorMd5[0]) return false;
+    if (device == frondFirmware::Device::automatic || expected.isEmpty()) return false;
     QByteArray md5;
     if (!session.isEmpty()) md5 = sessionNorMd5(session);
     else {
@@ -79,6 +80,16 @@ inline bool qualified(frondFirmware::Device device, const QString& session, cons
         if (!digest.addData(&file)) return false;
         md5 = digest.result().toHex();
     }
-    return md5 == profile.frontend.fastAudioNorMd5;
+    return md5 == expected;
+}
+inline bool qualified(frondFirmware::Device device, const QString& session, const QString& nor) {
+    const auto& profile = frondFirmware::profile(device);
+    return device != frondFirmware::deviceFromId("sony-clie-tg50") &&
+        profile.capabilities.fastAudio && matchesNor(device,session,nor,profile.frontend.fastAudioNorMd5);
+}
+inline bool sonyPreviewEligible(frondFirmware::Device device, const QString& session, const QString& nor) {
+    return device == frondFirmware::deviceFromId("sony-clie-tg50") &&
+        frondFirmware::capabilities(device).fastAudio &&
+        matchesNor(device,session,nor,"4fcdb4d5f12c04a4969088a9ed839f41");
 }
 }

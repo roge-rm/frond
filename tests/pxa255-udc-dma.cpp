@@ -174,7 +174,10 @@ static void mappingAndState(){
     // Controller reset removes its levels, without completing a waiting transfer.
     f.start(30,15,0xa0001000,0x40600600,128,false);f.ticks(1);
     f.uw(0,0);assert(!f.request(15));const auto left=f.left(15);f.ticks(3);assert(f.left(15)==left);
-    uint32_t value=0x12;assert(!memAccess(&f.mem,0x40600210,4,true,&value));
-    puts("PASS: request mapping/rebind, fresh partial FIFO+DMA restore, real descriptor chain, reset and unchanged reserved-register refusal");
+    // Reserved 0x210 (Sony's driver stores 0x12 there) is write-ignored and changes no levels.
+    uint32_t value=0x12;assert(memAccess(&f.mem,0x40600210,4,true,&value));
+    assert(!f.request(15) && f.left(15)==left);
+    value=1;assert(memAccess(&f.mem,0x40600210,4,false,&value) && !value);
+    puts("PASS: request mapping/rebind, fresh partial FIFO+DMA restore, real descriptor chain, reset and reserved-register RAZ/WI");
 }
 int main(){txChecks();rxChecks();mappingAndState();}
