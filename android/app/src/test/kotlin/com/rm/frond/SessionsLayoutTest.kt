@@ -35,12 +35,14 @@ class SessionsLayoutTest {
         val fresh = File(dir, ".frondsd.tmp-fresh").apply { writeText("tmp") }
         val card = File(dir, "sd.frondsd").apply { writeText("card"); setLastModified(now - 3_600_000) }
         val gen = File(dir, ".gen-sd.frondsd-root").apply { writeText("root"); setLastModified(now - 3_600_000) }
+        // An SD exchange journal waits to be replayed.
+        val journal = File(dir, "card.img.journal").apply { writeText("journal"); setLastModified(now - 3_600_000) }
         // A running machine's candidate card and its generation files stay however old they are.
         val live = listOf(".frondsd.tmp-live-Ab12Cd", ".gen-.frondsd.tmp-live-Ab12Cd-tmp-1-2")
             .map { File(dir, it).apply { writeText("live"); setLastModified(now - 3_600_000) } }
         removeStaleTemps(root, now)
         old.forEach { assertFalse(it.name, it.exists()) }
-        assertTrue(fresh.exists() && card.exists() && gen.exists())
+        assertTrue(fresh.exists() && card.exists() && gen.exists() && journal.exists())
         live.forEach { assertTrue(it.name, it.exists()) }
     }
 
