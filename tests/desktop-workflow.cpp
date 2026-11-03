@@ -1699,9 +1699,10 @@ for line in s.makefile('rb'):
     if cmd==b'quit': break
 )PY");
         core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
-        for (bool keyboard : {false, true}) for (bool jog : {false, true}) {
+        for (bool keyboard : {false, true})
+        for (auto jog : {frondSessions::JogControls::hidden, frondSessions::JogControls::screen, frondSessions::JogControls::keyboard}) {
             frondSessions::Preferences prefs;
-            prefs.showKeyboard = keyboard; prefs.showJogControls = jog; prefs.microphone = true;
+            prefs.showKeyboard = keyboard; prefs.jogControls = jog; prefs.microphone = true;
             QVERIFY(frondSessions::writePreferences(path, prefs).isEmpty());
             QFile::remove(core.fileName() + ".args");
             MainWindow window(core.fileName()); window.show(); window.openSession(path, true);
@@ -1709,34 +1710,64 @@ for line in s.makefile('rb'):
             QFile args(core.fileName() + ".args"); QVERIFY(args.open(QIODevice::ReadOnly));
             const auto arguments = args.readAll().split('\n');
             QCOMPARE(arguments.contains("--hide-keyboard"), !keyboard);
-            QCOMPARE(arguments.contains("--hide-jog-controls"), !jog);
+            const auto at = arguments.indexOf("--jog-controls");
+            QVERIFY(at >= 0 && at + 1 < arguments.size());
+            QCOMPARE(QString::fromUtf8(arguments.at(at + 1)), frondSessions::jogControlsName(jog));
+            QVERIFY(!arguments.contains("--hide-jog-controls"));
             window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
             QVERIFY(frondSessions::readPreferences(path, &prefs));
-            QCOMPARE(prefs.showKeyboard, keyboard); QCOMPARE(prefs.showJogControls, jog);
+            QCOMPARE(prefs.showKeyboard, keyboard); QCOMPARE(prefs.jogControls, jog);
             QVERIFY(prefs.microphone);
             QCOMPARE(digest(path), guest);
         }
         QDir(managedFolder()).removeRecursively(); QSettings().clear();
     }
     void machineControlVisibilitySettings() {
-        frondSessions::Preferences original{7, true, false, true, true, false, true};
+        frondSessions::Preferences original{7, true, false, true, true, false};
+        original.jogControls = frondSessions::JogControls::screen;
         MachineSettings controls(original, false);
         controls.setDevice(frondFirmware::deviceFromId("sony-clie-tg50"));
         QVERIFY(!controls.showKeyboard->isHidden());
-        QVERIFY(!controls.showJogControls->isHidden());
+        QVERIFY(!controls.jogControls->isHidden() && !controls.jogControlsLabel->isHidden());
+        QCOMPARE(controls.jogControlsLabel->text(), QString("Jog controls"));
         QVERIFY(!controls.showKeyboard->isChecked());
-        QVERIFY(controls.showJogControls->isChecked());
-        for (bool keyboard : {false, true}) for (bool jog : {false, true}) {
-            controls.showKeyboard->setChecked(keyboard); controls.showJogControls->setChecked(jog);
+        QCOMPARE(controls.jogControls->count(), 3);
+        QCOMPARE(controls.jogControls->itemText(0), QString("Hidden"));
+        QCOMPARE(controls.jogControls->itemText(1), QString("Left of screen"));
+        QCOMPARE(controls.jogControls->itemText(2), QString("Left of keyboard"));
+        QCOMPARE(controls.jogControls->currentText(), QString("Left of screen"));
+        QCOMPARE(MachineSettings(frondSessions::Preferences{}, false).jogControls->currentText(), QString("Left of keyboard"));
+        for (bool keyboard : {false, true})
+        for (auto jog : {frondSessions::JogControls::hidden, frondSessions::JogControls::screen, frondSessions::JogControls::keyboard}) {
+            controls.showKeyboard->setChecked(keyboard); controls.jogControls->setCurrentIndex(int(jog));
             const auto saved = controls.values();
-            QCOMPARE(saved.showKeyboard, keyboard); QCOMPARE(saved.showJogControls, jog);
+            QCOMPARE(saved.showKeyboard, keyboard); QCOMPARE(saved.jogControls, jog);
             QCOMPARE(saved.scale, original.scale);
             QVERIFY(saved.smooth && !saved.audio && saved.fastAudio && saved.microphone);
         }
         controls.setDevice(frondFirmware::Device::tx);
         QVERIFY(controls.showKeyboard->isHidden());
-        QVERIFY(controls.showJogControls->isHidden());
+        QVERIFY(controls.jogControls->isHidden() && controls.jogControlsLabel->isHidden());
         QVERIFY(controls.values().microphone);
+    }
+    void legacyTg50KeepsJogBesideScreen() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        putSession("TG", 6, "sony-clie-tg50", 0);
+        const auto tg = managedSession("TG");
+        QVERIFY(!QFileInfo::exists(frondSessions::preferencesPath(tg)));
+        {
+            MainWindow window(QString("/nonexistent")); window.show();
+            frondSessions::Preferences prefs;
+            QVERIFY(frondSessions::readPreferences(tg, &prefs));
+            QVERIFY(prefs.jogControls == frondSessions::JogControls::screen);
+        }
+        // The default size follows the layout: beside the keyboard is the smallest TG50 layout with a keyboard.
+        const auto tg50 = frondFirmware::deviceFromId("sony-clie-tg50");
+        using Jog = frondSessions::JogControls;
+        QVERIFY(fittingScaleQuarters(tg50, true, Jog::keyboard) >= fittingScaleQuarters(tg50, true, Jog::screen));
+        QVERIFY(fittingScaleQuarters(tg50, true, Jog::hidden) >= fittingScaleQuarters(tg50, true, Jog::screen));
+        QVERIFY(fittingScaleQuarters(tg50, false, Jog::screen) >= fittingScaleQuarters(tg50, true, Jog::screen));
     }
     void machinePreferences() {
         QSettings().clear(); QSettings().setValue("resume", false);

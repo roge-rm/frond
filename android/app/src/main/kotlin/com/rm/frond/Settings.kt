@@ -73,7 +73,7 @@ data class Settings(
             migrateFastAudio(context)
             val saved = load(context)
             return MachineSettings(saved.size, saved.smoothing, saved.sound,
-                device?.let { fastAudio(context, it) } ?: false)
+                device?.let { fastAudio(context, it) } ?: false, jogControls = JogControls.SCREEN)
         }
 
         // Once: a global switch left on turns on every device that can use it, and the old key goes.

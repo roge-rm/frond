@@ -9,6 +9,9 @@ class QLabel;
 class QLineEdit;
 class QSlider;
 
+// Window scale in quarters that fits the screen, from the layout the core draws for the device.
+int fittingScaleQuarters(frondFirmware::Device device, bool keyboard, frondSessions::JogControls jog);
+
 class MachineSettings : public QWidget {
     Q_OBJECT
  public:
@@ -17,7 +20,9 @@ class MachineSettings : public QWidget {
     void setDevice(frondFirmware::Device device, bool qualified = false);
     QSlider* windowScale;
     QLabel* scaleLabel;
-    QCheckBox *smoothLcd, *audio, *fastAudio, *showKeyboard, *showJogControls, *sonyAudioPreview;
+    QCheckBox *smoothLcd, *audio, *fastAudio, *showKeyboard, *sonyAudioPreview;
+    QComboBox* jogControls;
+    QLabel* jogControlsLabel;
  private:
     bool automaticScale;
     frondSessions::Preferences originalPreferences;

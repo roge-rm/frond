@@ -835,11 +835,8 @@ QMenu* MainWindow::rowMenu(const QString& path, QWidget* parent) {
     return menu;
 }
 frondSessions::Preferences MainWindow::defaultPreferences(frondFirmware::Device device) const {
-    const auto& display = frondFirmware::profile(device).frontend;
-    const auto* screen = QGuiApplication::primaryScreen();
-    const auto available = screen ? screen->availableGeometry().size() : QSize();
-    const auto scale = int(4 * fittingWindowScale(display.width + display.sideTabWidth,
-        display.height + display.silkscreenHeight + display.stripHeight, available.width(), available.height()));
+    const frondSessions::Preferences fresh;
+    const auto scale = fittingScaleQuarters(device, fresh.showKeyboard, fresh.jogControls);
     return {std::clamp(settings.value("windowScale", scale).toInt(), 4, 8),
             settings.value("smoothLcd", false).toBool(), settings.value("audio", true).toBool(),
             settings.value("fastAudio", false).toBool()};
@@ -848,6 +845,9 @@ QString MainWindow::loadPreferences(const QString& path, frondFirmware::Device d
     if (frondSessions::readPreferences(path, prefs)) return {};
     if (QFileInfo::exists(frondSessions::preferencesPath(path))) return tr("Couldn't read the machine settings.");
     *prefs = defaultPreferences(device);
+    // New machines write their settings when added, so a missing file is a machine from before the
+    // choice: it keeps the controls left of the screen.
+    prefs->jogControls = frondSessions::JogControls::screen;
     return frondSessions::writePreferences(path, *prefs);
 }
 void MainWindow::editSession(const QString& path) {
@@ -1067,7 +1067,7 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     if (runningPreferences.smooth) arguments << "--smooth-lcd";
     if (startDevice == frondFirmware::deviceFromId("sony-clie-tg50")) {
         if (!runningPreferences.showKeyboard) arguments << "--hide-keyboard";
-        if (!runningPreferences.showJogControls) arguments << "--hide-jog-controls";
+        arguments << "--jog-controls" << frondSessions::jogControlsName(runningPreferences.jogControls);
     }
     stopping = closeAfterStop = allowClose = false;
     log->clear(); busy = true;

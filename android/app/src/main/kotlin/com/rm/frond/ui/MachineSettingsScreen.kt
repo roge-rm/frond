@@ -20,6 +20,7 @@ import androidx.compose.ui.unit.dp
 import com.rm.frond.Device
 import com.rm.frond.Firmware
 import com.rm.frond.HomeModel
+import com.rm.frond.JogControls
 import com.rm.frond.ScreenSize
 import com.rm.frond.Sessions
 import kotlinx.coroutines.Dispatchers
@@ -75,8 +76,8 @@ fun MachineSettingsScreen(model: HomeModel) {
                 SwitchRow("Show keyboard", draft.settings.showKeyboard) {
                     model.changeMachineSettings(draft.settings.copy(showKeyboard = it))
                 }
-                SwitchRow("Show jog controls", draft.settings.showJogControls) {
-                    model.changeMachineSettings(draft.settings.copy(showJogControls = it))
+                Choice("Jog controls", draft.settings.jogControls, JogControls.entries, { it.label }) {
+                    model.changeMachineSettings(draft.settings.copy(jogControls = it))
                 }
             }
             Header("Audio", Modifier.padding(top = 16.dp))

@@ -583,21 +583,40 @@ class SessionStoreTest : public QObject {
         const auto guest = QFileInfo(one).size();
         Preferences loaded;
         QVERIFY(!readPreferences(one, &loaded));
-        QVERIFY(loaded.showKeyboard && loaded.showJogControls);
+        // New machines put the jog controls left of the keyboard.
+        QVERIFY(loaded.showKeyboard && loaded.jogControls == JogControls::keyboard);
+        // Settings from before the jog controls: shown, left of the LCD.
         write(preferencesPath(one), R"({"version":1,"scale":7,"smooth":true,"audio":false,"fastAudio":true,"microphone":true})");
         QVERIFY(readPreferences(one, &loaded));
-        QVERIFY(loaded.showKeyboard && loaded.showJogControls && loaded.microphone);
+        QVERIFY(loaded.showKeyboard && loaded.jogControls == JogControls::screen && loaded.microphone);
         QVERIFY(writePreferences(two, loaded).isEmpty());
-        for (bool keyboard : {false, true}) for (bool jog : {false, true}) {
-            loaded.showKeyboard = keyboard; loaded.showJogControls = jog;
+        // The old switch maps on to the choice: shown to left of screen, off to hidden.
+        for (bool shown : {false, true}) {
+            Preferences old;
+            write(preferencesPath(one), QByteArray(R"({"version":1,"scale":7,"smooth":true,"audio":false,"fastAudio":true,"showJogControls":)") +
+                                        (shown ? "true" : "false") + "}");
+            QVERIFY(readPreferences(one, &old));
+            QCOMPARE(old.jogControls, shown ? JogControls::screen : JogControls::hidden);
+            write(preferencesPath(one), R"({"version":1,"scale":7,"smooth":true,"audio":false,"fastAudio":true,"jogControls":"sideways","showJogControls":false})");
+            QVERIFY(readPreferences(one, &old));
+            QCOMPARE(old.jogControls, JogControls::hidden);
+        }
+        for (bool keyboard : {false, true})
+        for (auto jog : {JogControls::hidden, JogControls::screen, JogControls::keyboard}) {
+            loaded.showKeyboard = keyboard; loaded.jogControls = jog;
             QVERIFY(writePreferences(one, loaded).isEmpty());
             Preferences roundTrip;
             QVERIFY(readPreferences(one, &roundTrip));
-            QCOMPARE(roundTrip.showKeyboard, keyboard); QCOMPARE(roundTrip.showJogControls, jog);
+            QCOMPARE(roundTrip.showKeyboard, keyboard); QCOMPARE(roundTrip.jogControls, jog);
             QCOMPARE(roundTrip.scale, 7);
             QVERIFY(roundTrip.smooth && !roundTrip.audio && roundTrip.fastAudio && roundTrip.microphone);
+            // Older Frond versions still read the switch.
+            QFile saved(preferencesPath(one)); QVERIFY(saved.open(QIODevice::ReadOnly));
+            const auto object = QJsonDocument::fromJson(saved.readAll()).object();
+            QCOMPARE(object.value("jogControls").toString(), jogControlsName(jog));
+            QCOMPARE(object.value("showJogControls").toBool(), jog != JogControls::hidden);
             QVERIFY(readPreferences(two, &roundTrip));
-            QVERIFY(roundTrip.showKeyboard && roundTrip.showJogControls);
+            QVERIFY(roundTrip.showKeyboard && roundTrip.jogControls == JogControls::screen);
             QCOMPARE(QFileInfo(one).size(), guest);
         }
     }
