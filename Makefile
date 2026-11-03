@@ -229,6 +229,19 @@ test-desktop: desktop
 deb: desktop
 	python3 tools/package-deb.py
 
+# arm64 package for Raspberry Pi OS trixie, cross built in Docker. Needs Docker only.
+# The core is prepared fresh in build/arm64/source and mounted over build/source.
+ARM64_JOBS ?= 10
+.PHONY: deb-arm64
+deb-arm64:
+	rm -rf build/arm64/source
+	python3 tools/prepare.py --destination $(CURDIR)/build/arm64/source
+	docker build -t frond-arm64-cross tools/arm64
+	docker run --rm --user $$(id -u):$$(id -g) -e JOBS=$(ARM64_JOBS) \
+		-e SOURCE_DATE_EPOCH=$${SOURCE_DATE_EPOCH:-$$(git log -1 --format=%ct)} \
+		-v $(CURDIR):/src -v $(CURDIR)/build/arm64/source:/src/build/source \
+		-w /src frond-arm64-cross tools/arm64/build.sh
+
 .PHONY: test-sd
 test-sd: out/frond
 	python3 tests/sd-results.py

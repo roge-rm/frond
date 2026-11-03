@@ -2,7 +2,7 @@
 
 Frond is a Palm OS emulator for Linux and Android, based on [CloudpilotEmu](https://github.com/cloudpilot-emu/cloudpilot-emu), made for running and developing Palm apps and games.
 
-Currently it emulates the Palm T|X, the Tungsten E2 and the Zire 72, with sound, SD support, networking, saved sessions and more. The Sony CLIÉ TG50 is experimental, with its built-in keyboard, infrared beaming and Memory Stick storage.
+Currently it emulates the Palm T|X, the Tungsten E2 and the Zire 72, with sound, SD support, networking, saved sessions and more. The Sony CLIÉ TG50 is experimental, with its built-in keyboard, infrared beaming, Memory Stick storage, USB HotSync and Bluetooth.
 Look below to see the features in more detail. More devices are planned.
 
 To run this you will need to provide Palm T|X, E2, Zire 72 or Sony CLIÉ TG50 device firmware - none are included.
@@ -27,7 +27,7 @@ Dan
 
 ## Getting it
 
-On Linux, add my apt repo as shown on https://hunke.ws/apt/ and run `sudo apt install frond`.
+On Linux (amd64, or arm64 for a Raspberry Pi), add my apt repo as shown on https://hunke.ws/apt/ and run `sudo apt install frond`.
 The package adds Frond to the application menu.
 
 On Android 8 and up, phones and tablets, add my F-Droid repo https://hunke.ws/fdroid/repo
@@ -46,7 +46,7 @@ make -j4
 ```
 
 `make deb` builds a Debian package instead (also needs `dpkg-dev` and `binutils`), which
-installs with `sudo apt install ./out/frond_0.8.0-1_amd64.deb`. Neither the packages nor
+installs with `sudo apt install ./out/frond_0.9.0-1_amd64.deb`. Neither the packages nor
 the APK include firmware or Palm apps.
 
 ## Firmware
@@ -86,8 +86,8 @@ tapped. On a keyboard the arrow keys work the five-way, Enter selects and F1 to 
 the app buttons; **Help → Hardware Keyboard Controls** lists them all. On Android game
 controllers press the Palm's buttons, and you can change which button does what in
 Settings. The TG50 has its built-in keyboard, jog wheel, Home, Back and Hold controls.
-Hold locks the controls and turns off its panel while audio can keep playing. The
-other models can use an emulated Palm infrared keyboard for typing, which needs
+Hold locks the controls and turns off its panel while audio can keep playing. These
+models can also use an emulated Palm infrared keyboard for typing, which needs
 Palm's keyboard driver.
 
 **Apps and SD cards.** Install PRC and PDB files with **File → Install Application**
@@ -105,20 +105,23 @@ See [Memory Stick storage](doc/memory-stick.md) for the controls and image forma
 | | T\|X | E2 | Zire 72 | TG50 |
 |---|---|---|---|---|
 | Virtual Wi-Fi, onto the internet through your computer or phone, no adapter needed | yes | | | |
-| Cradle serial port, to a PTY or TCP port for terminal programs and pilot-link | yes | | | |
-| USB HotSync over a PTY or TCP port | yes | yes | yes | |
+| Cradle serial port, to a PTY or TCP port for terminal programs | yes | | | yes |
+| Microphone, enabled for the current session | | | | yes |
+| USB HotSync over a PTY or TCP port | yes | yes | yes | yes |
 | [Infrared beaming](doc/infrared.md) between Frond instances | yes | yes | yes | yes |
-| [Virtual Bluetooth](doc/bluetooth-provider.md), with a separately started local provider, off by default | yes | yes | yes | |
+| [Virtual Bluetooth](doc/bluetooth-provider.md), with a separately started local provider, off by default | yes | yes | yes | yes |
 
 The infrared keyboard and beaming share the infrared port, so detach the keyboard
 before turning beaming on. On Android infrared, Bluetooth, serial, USB HotSync and the
 gdb server go over the network, to another Frond or to the desktop tools
 `tools/link-irda.py`, `tools/link-bluetooth.py` and `tools/link-pty.py` (for pilot-link).
 
-The TG50 plays system/alarm beeps and Sony Voice Recorder 22,050 Hz mono SP audio.
-Standard Palm SndStream, stereo Sony playback, live 8 kHz audio and microphone input
-remain unqualified. USB HotSync, Bluetooth, raw serial, the external infrared keyboard,
-remote-control infrared, Memory Stick Pro, MagicGate and Memory Stick audio stay disabled.
+The TG50 plays system/alarm beeps and Sony Voice Recorder mono/stereo 8 kHz
+and mono 22,050 Hz audio. Its Microphone control is off at each start; Android asks for microphone
+permission when you turn it on. Saving, stopping or backgrounding turns capture off.
+Raw serial supports virtual PTY/TCP byte transfers; original serial sleep/wake,
+serial HotSync and physical RS-232 remain unqualified. Bluetooth is tested with serial (SPP)
+and object exchange to a virtual peer. Standard Palm SndStream, low-latency audio, remote-control infrared, Memory Stick Pro, MagicGate and Memory Stick audio stay disabled.
 
 **Low-latency audio.** Off by default on the T|X and E2; the Zire 72 and TG50 don't have it yet. It plays one 44.1 kHz stereo
 stream with less delay, for music apps like SunVox, and goes back to the normal path

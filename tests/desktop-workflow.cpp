@@ -1335,7 +1335,9 @@ for line in s.makefile('rb'):
             if (auto* box = window.findChild<QMessageBox*>(); box && box->isVisible()) box->button(QMessageBox::Yes)->click();
         });
         answer.start();
-        window.findChild<QPushButton*>("sdEject")->click();
+        auto* eject = window.findChild<QPushButton*>("sdEject");
+        QTRY_VERIFY(eject->isVisible() && eject->isEnabled());
+        eject->click();
         QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Ejected"), 5000);
         QTRY_VERIFY(protection->isEnabled()); protection->click();
         QTRY_VERIFY(protection->isChecked() && protection->isEnabled());
