@@ -1,6 +1,6 @@
 # Build and package checks
 
-Frond 0.6.0 targets Debian 13 (trixie) with KDE Plasma. Build tools are listed in
+Frond 0.9.0 targets Debian 13 (trixie) with KDE Plasma. Build tools are listed in
 [the README](../README.md). Packaging also needs `dpkg-dev` and `binutils`.
 The installed package uses `mtools` for SD exchange and `libslirp0` for virtual
 Wi-Fi; the latter must be found from the core's ELF dependencies. Qt's platform,
@@ -72,8 +72,10 @@ output across toolchain versions or checkout paths.
 An existing package can be checked without installing it:
 
 ```sh
-python3 tools/check-package.py out/frond_0.6.0-1_amd64.deb
+python3 tools/check-package.py out/frond_0.9.0-1_amd64.deb
 ```
+
+`make deb-arm64` builds the arm64 package for Raspberry Pi OS trixie with Docker only. It cross builds in the `frond-arm64-cross` image (`tools/arm64/`), from a fresh core in `build/arm64/source`, and runs the version checks under qemu. Check it with `python3 tools/check-package.py --architecture arm64 out/frond_0.9.0-1_arm64.deb`.
 
 The validator checks the version, architecture, required runtime dependencies,
 root ownership, modes and complete installed-file inventory. It cannot identify

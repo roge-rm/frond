@@ -15,7 +15,9 @@ from package_policy import check_deb, check_dependencies, check_stage
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def package(root=ROOT):
+def package(root=ROOT, core='out/frond', desktop='out/frond-desktop', architecture=None,
+            strip='strip', runner=()):
+    # A cross build passes its own binaries, architecture, strip tool and an emulator runner.
     version = (root / 'VERSION').read_text().strip()
     if not re.fullmatch(r'\d+\.\d+\.\d+', version):
         raise ValueError('VERSION must contain a release version such as 0.2.0')
@@ -30,15 +32,16 @@ def package(root=ROOT):
     if not re.fullmatch(r'[0-9]+', epoch):
         raise ValueError('SOURCE_DATE_EPOCH must be a non-negative integer')
     env = dict(os.environ, SOURCE_DATE_EPOCH=epoch, LC_ALL='C', TZ='UTC')
-    for executable in ('out/frond', 'out/frond-desktop'):
+    for executable in (core, desktop):
         binary = root / executable
         if binary.is_symlink() or not binary.is_file():
             raise ValueError(f'Expected regular built binary: {executable}')
-        reported = subprocess.check_output([str(binary), '--version'],
+        reported = subprocess.check_output([*runner, str(binary), '--version'],
             env=dict(env, QT_QPA_PLATFORM='offscreen'), text=True).strip()
         if not reported or reported.split()[-1] != version:
             raise ValueError(f'{executable} reports {reported!r}, expected {version}')
-    architecture = subprocess.check_output(['dpkg', '--print-architecture'], text=True).strip()
+    if architecture is None:
+        architecture = subprocess.check_output(['dpkg', '--print-architecture'], text=True).strip()
     work_parent = root / 'build'
     work_parent.mkdir(exist_ok=True)
     # Isolated staging preserves existing package trees and user files.
@@ -58,10 +61,10 @@ def package(root=ROOT):
             target.chmod(mode)
             return target
 
-        core = copy('out/frond', 'usr/lib/frond/frond-core', 0o755)
-        gui = copy('out/frond-desktop', 'usr/bin/frond-desktop', 0o755)
+        core = copy(core, 'usr/lib/frond/frond-core', 0o755)
+        gui = copy(desktop, 'usr/bin/frond-desktop', 0o755)
         for binary in (core, gui):
-            subprocess.run(['strip', '--strip-unneeded', str(binary)], check=True)
+            subprocess.run([strip, '--strip-unneeded', str(binary)], check=True)
         copy('packaging/org.frond.Frond.desktop', 'usr/share/applications/org.frond.Frond.desktop')
         copy('packaging/frond.svg', 'usr/share/icons/hicolor/scalable/apps/frond.svg')
         copy('packaging/frond-mime.xml', 'usr/share/mime/packages/frond.xml')
@@ -76,7 +79,8 @@ def package(root=ROOT):
         copy('doc/peripheral-qualification.md', 'usr/share/doc/frond/peripheral-qualification.md')
         (work / 'debian/control').write_text('Source: frond\n\nPackage: frond\nArchitecture: any\nDescription: Palm TX emulator\n')
         deps = subprocess.check_output(['dpkg-shlibdeps', '--warnings=1', '-O', '-e' + str(core),
-                                        '-e' + str(gui)], cwd=work, text=True)
+                                        '-e' + str(gui)], cwd=work, text=True,
+                                       env=dict(os.environ, DEB_HOST_ARCH=architecture))
         deps = next(line.removeprefix('shlibs:Depends=') for line in deps.splitlines()
                     if line.startswith('shlibs:Depends='))
         deps += ', mtools, qt6-qpa-plugins, qt6-wayland, libqt6svg6, hicolor-icon-theme'
@@ -117,8 +121,15 @@ Description: Native Palm TX and Tungsten E2 emulator
 
 
 if __name__ == '__main__':
-    argparse.ArgumentParser(description=__doc__).parse_args()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--core', default='out/frond', help='core binary, relative to the checkout')
+    parser.add_argument('--desktop', default='out/frond-desktop', help='desktop binary, relative to the checkout')
+    parser.add_argument('--architecture', help='Debian architecture; defaults to the host')
+    parser.add_argument('--strip', default='strip', help='strip tool for the binaries')
+    parser.add_argument('--runner', default='', help='emulator that runs the binaries for their version check')
+    args = parser.parse_args()
     try:
-        package()
+        package(core=args.core, desktop=args.desktop, architecture=args.architecture,
+                strip=args.strip, runner=args.runner.split())
     except (ValueError, OSError, subprocess.CalledProcessError) as error:
         raise SystemExit(str(error))
