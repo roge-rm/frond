@@ -12,7 +12,7 @@ import kotlin.random.Random
 
 class FatImageTest {
     // The same layout as the core's frondSd::layout (native/SdImage.h), written sparse.
-    private fun blank(mib: Int): File {
+    internal fun blank(mib: Int): File {
         val start = 63L
         val total = (mib.toLong() shl 20) / 512
         val sectors = total - start

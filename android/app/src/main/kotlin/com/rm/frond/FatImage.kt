@@ -1,17 +1,24 @@
 package com.rm.frond
 
 import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.io.RandomAccessFile
+import java.nio.channels.FileChannel
+import java.nio.file.StandardOpenOption
 import java.util.Calendar
+import java.util.TreeMap
+import java.util.zip.CRC32
 
 // Reads and edits a FAT16 SD card image in place: the card the core makes (one primary FAT16
 // partition) or a FAT16 superfloppy, 32 MiB to 2 GiB. It does what the desktop's SD exchange does with
 // mtools: list folders, copy files in and out, make folders. Nothing is ever overwritten or deleted.
-// Not thread safe; one editor per image file.
-class FatImage private constructor(private val file: RandomAccessFile) : AutoCloseable {
+// Each change is crash safe: new file data goes into free clusters, then the changed FAT and folder
+// sectors go through a journal next to the card (<card>.journal) before they're written in place.
+// open() replays a complete journal and drops a damaged one. Not thread safe; one editor per image file.
+class FatImage private constructor(private val image: File, private val file: RandomAccessFile) : AutoCloseable {
     class FatException(message: String) : IOException(message)
 
     data class Entry(
@@ -32,7 +39,18 @@ class FatImage private constructor(private val file: RandomAccessFile) : AutoClo
     private var dataStart = 0L
     private var clusterCount = 0
     private lateinit var fat: IntArray
-    private var fatDirty = false
+    // The FAT as it is on the card, to find the changed sectors and to roll back a failed change.
+    private lateinit var fatOnDisk: IntArray
+    // Metadata sectors changed by the current change, by byte offset in the image, until commit.
+    private val staged = TreeMap<Long, ByteArray>()
+
+    // Bytes written to the image and its journal, and whether any change was committed.
+    var bytesWritten = 0L
+        private set
+    var committed = false
+        private set
+    // Tests stop a change here: "data", "journal", "partly" and "applied".
+    internal var crashHook: ((String) -> Unit)? = null
 
     val clusterBytes get() = clusterSectors * SECTOR
 
@@ -76,6 +94,7 @@ class FatImage private constructor(private val file: RandomAccessFile) : AutoClo
         ) throw FatException("The card's FAT16 header is damaged.")
         val raw = read(fatStart, (clusterCount + 2) * 2)
         fat = IntArray(clusterCount + 2) { u16(raw, it * 2) }
+        fatOnDisk = fat.copyOf()
     }
 
     // A folder: the fixed root area, or a cluster chain.
@@ -89,7 +108,7 @@ class FatImage private constructor(private val file: RandomAccessFile) : AutoClo
             else {
                 val list = clusters()
                 val out = ByteArray(list.size * clusterBytes)
-                list.forEachIndexed { i, c -> file.seek(clusterAt(c)); file.readFully(out, i * clusterBytes, clusterBytes) }
+                list.forEachIndexed { i, c -> read(clusterAt(c), clusterBytes).copyInto(out, i * clusterBytes) }
                 out
             }
 
@@ -98,7 +117,7 @@ class FatImage private constructor(private val file: RandomAccessFile) : AutoClo
             for (slot in first until first + count) {
                 val at = slot * 32
                 val position = if (root) rootStart + at else clusterAt(list[at / clusterBytes]) + at % clusterBytes
-                write(position, bytes, at, 32)
+                stage(position, bytes, at, 32)
             }
         }
     }
@@ -196,7 +215,7 @@ class FatImage private constructor(private val file: RandomAccessFile) : AutoClo
     }
 
     // Copies size bytes from input into a new file in the folder at path.
-    fun add(path: String, name: String, input: InputStream, size: Long) {
+    fun add(path: String, name: String, input: InputStream, size: Long) = change {
         checkName(name)
         val folder = folder(path)
         val existing = slots(folder)
@@ -218,10 +237,9 @@ class FatImage private constructor(private val file: RandomAccessFile) : AutoClo
             left -= n
         }
         addEntry(folder, existing, name, 0x20, clusters.firstOrNull() ?: 0, size)
-        flush()
     }
 
-    fun makeFolder(path: String, name: String) {
+    fun makeFolder(path: String, name: String) = change {
         checkName(name)
         val parent = folder(path)
         val existing = slots(parent)
@@ -240,7 +258,6 @@ class FatImage private constructor(private val file: RandomAccessFile) : AutoClo
         dot(32, "..", parent.cluster)
         write(clusterAt(cluster), block, 0, clusterBytes)
         addEntry(parent, existing, name, 0x10, cluster, 0)
-        flush()
     }
 
     private fun refuseTaken(existing: List<Slot>, name: String) {
@@ -257,7 +274,6 @@ class FatImage private constructor(private val file: RandomAccessFile) : AutoClo
         }
         if (free.size < count) throw FatException("There isn't enough space on the card.")
         for (i in free.indices) fat[free[i]] = if (i + 1 < free.size) free[i + 1] else 0xffff
-        fatDirty = true
         return free
     }
 
@@ -324,28 +340,100 @@ class FatImage private constructor(private val file: RandomAccessFile) : AutoClo
         return bytes to found
     }
 
-    private fun flush() {
-        if (!fatDirty) return
-        val raw = ByteArray(fat.size * 2)
-        fat.forEachIndexed { i, v -> put16(raw, i * 2, v) }
-        for (copy in 0 until fatCount) write(fatStart + copy.toLong() * fatSectors * SECTOR, raw, 0, raw.size)
-        fatDirty = false
+    // Runs one change and commits it, or rolls the in-memory state back when it fails. Data
+    // already written went into clusters the card's FAT still calls free.
+    private fun change(block: () -> Unit) {
+        try {
+            block()
+            commit()
+        } catch (e: Throwable) {
+            fat = fatOnDisk.copyOf()
+            staged.clear()
+            throw e
+        }
+    }
+
+    // Stages the FAT sectors that differ from the card, in every FAT copy.
+    private fun stageFat() {
+        val sectors = sortedSetOf<Int>()
+        for (i in fat.indices) if (fat[i] != fatOnDisk[i]) sectors += i * 2 / SECTOR
+        for (s in sectors) {
+            val from = s * SECTOR / 2
+            val until = minOf(from + SECTOR / 2, fat.size)
+            val raw = ByteArray((until - from) * 2)
+            for (i in from until until) put16(raw, (i - from) * 2, fat[i])
+            for (copy in 0 until fatCount) stage(fatStart + copy.toLong() * fatSectors * SECTOR + s.toLong() * SECTOR, raw, 0, raw.size)
+        }
+    }
+
+    // Syncs the data, writes and syncs the journal, applies it in place, syncs and drops it.
+    private fun commit() {
+        stageFat()
+        if (staged.isEmpty()) return
+        file.fd.sync()
+        crashHook?.invoke("data")
+        val records = staged.entries.map { it.key to it.value }
+        val bytes = encodeJournal(records, file.length())
+        val journal = journalOf(image)
+        FileOutputStream(journal).use { it.write(bytes); it.fd.sync() }
+        syncDir(journal)
+        bytesWritten += bytes.size
+        crashHook?.invoke("journal")
+        records.forEachIndexed { i, (at, sector) ->
+            if (i == records.size / 2) crashHook?.invoke("partly")
+            write(at, sector, 0, SECTOR)
+        }
+        file.fd.sync()
+        crashHook?.invoke("applied")
+        journal.delete()
+        syncDir(journal)
+        fatOnDisk = fat.copyOf()
+        staged.clear()
+        committed = true
     }
 
     private fun read(at: Long, length: Int): ByteArray {
         val b = ByteArray(length)
         file.seek(at)
         file.readFully(b)
+        // Staged sectors that overlap, so a change sees its own edits.
+        val first = at / SECTOR * SECTOR
+        for ((sectorAt, sector) in staged.subMap(first, at + length)) {
+            val from = maxOf(at, sectorAt)
+            val until = minOf(at + length, sectorAt + SECTOR)
+            sector.copyInto(b, (from - at).toInt(), (from - sectorAt).toInt(), (until - sectorAt).toInt())
+        }
         return b
     }
 
+    // Writes straight to the image: new data in free clusters, or a journal being applied.
     private fun write(at: Long, b: ByteArray, from: Int, length: Int) {
         file.seek(at)
         file.write(b, from, length)
+        bytesWritten += length
+    }
+
+    // Keeps a metadata edit in memory, whole sectors, until commit.
+    private fun stage(at: Long, b: ByteArray, from: Int, length: Int) {
+        var done = 0
+        while (done < length) {
+            val position = at + done
+            val sectorAt = position / SECTOR * SECTOR
+            val sector = staged.getOrPut(sectorAt) { file.seek(sectorAt); ByteArray(SECTOR).also { file.readFully(it) } }
+            val inSector = (position - sectorAt).toInt()
+            val n = minOf(SECTOR - inSector, length - done)
+            b.copyInto(sector, inSector, from + done, from + done + n)
+            done += n
+        }
+    }
+
+    // Whether every FAT copy on the card matches the first.
+    internal fun fatCopiesMatch(): Boolean {
+        val first = read(fatStart, fatSectors * SECTOR)
+        return (1 until fatCount).all { read(fatStart + it.toLong() * fatSectors * SECTOR, fatSectors * SECTOR).contentEquals(first) }
     }
 
     override fun close() {
-        flush()
         file.close()
     }
 
@@ -359,14 +447,83 @@ class FatImage private constructor(private val file: RandomAccessFile) : AutoClo
         // Characters FAT refuses in long names, as the desktop's exchange does.
         private val FORBIDDEN = "\"*/:<>?\\|"
 
+        private val JOURNAL_MAGIC = "FRONDFJ1".toByteArray(Charsets.US_ASCII)
+        private val JOURNAL_END = "FJEND\u0000\u0000\u0000".toByteArray(Charsets.US_ASCII)
+        private const val JOURNAL_HEADER = 20
+        private const val JOURNAL_RECORD = 8 + SECTOR
+        private const val JOURNAL_TRAILER = 12
+        private const val JOURNAL_MAX_BYTES = 16L shl 20
+
+        fun journalOf(image: File) = File(image.path + ".journal")
+
+        // Opens a card, first replaying a journal left by a change that was cut off.
         fun open(image: File, writable: Boolean): FatImage {
+            recover(image)
             val raf = RandomAccessFile(image, if (writable) "rw" else "r")
             try {
-                return FatImage(raf).also { it.open() }
+                return FatImage(image, raf).also { it.open() }
             } catch (e: Exception) {
                 raf.close()
                 throw e
             }
+        }
+
+        // Applies a complete journal to its card and deletes it; deletes an incomplete or damaged one.
+        // Applying twice is harmless, so a crash while replaying just replays again.
+        fun recover(image: File) {
+            val journal = journalOf(image)
+            if (!journal.exists()) return
+            val records = if (journal.length() > JOURNAL_MAX_BYTES) null else decodeJournal(journal.readBytes(), image.length())
+            if (records != null) {
+                RandomAccessFile(image, "rw").use { raf ->
+                    for ((at, sector) in records) { raf.seek(at); raf.write(sector) }
+                    raf.fd.sync()
+                }
+            }
+            if (!journal.delete() && journal.exists()) throw FatException("Couldn't finish the last change to the card.")
+            syncDir(journal)
+        }
+
+        // Header: magic, record count (u32), image length (u64). Records: offset (u64), one sector.
+        // Trailer: end magic and the CRC-32 of everything before it. Big endian.
+        internal fun encodeJournal(records: List<Pair<Long, ByteArray>>, imageLength: Long): ByteArray {
+            val out = java.io.ByteArrayOutputStream(JOURNAL_HEADER + records.size * JOURNAL_RECORD + JOURNAL_TRAILER)
+            val data = java.io.DataOutputStream(out)
+            data.write(JOURNAL_MAGIC)
+            data.writeInt(records.size)
+            data.writeLong(imageLength)
+            for ((at, sector) in records) { data.writeLong(at); data.write(sector, 0, SECTOR) }
+            data.write(JOURNAL_END)
+            val crc = CRC32().also { it.update(out.toByteArray()) }
+            data.writeInt(crc.value.toInt())
+            data.flush()
+            return out.toByteArray()
+        }
+
+        // The records of a complete, undamaged journal for an image of imageLength bytes, or null.
+        internal fun decodeJournal(b: ByteArray, imageLength: Long): List<Pair<Long, ByteArray>>? {
+            if (b.size < JOURNAL_HEADER + JOURNAL_TRAILER) return null
+            val data = java.nio.ByteBuffer.wrap(b)
+            if (!b.copyOfRange(0, 8).contentEquals(JOURNAL_MAGIC)) return null
+            val count = data.getInt(8)
+            if (count < 0 || b.size.toLong() != JOURNAL_HEADER + count.toLong() * JOURNAL_RECORD + JOURNAL_TRAILER) return null
+            if (data.getLong(12) != imageLength) return null
+            val end = b.size - JOURNAL_TRAILER
+            if (!b.copyOfRange(end, end + 8).contentEquals(JOURNAL_END)) return null
+            val crc = CRC32().also { it.update(b, 0, end + 8) }
+            if (crc.value.toInt() != data.getInt(end + 8)) return null
+            return (0 until count).map { i ->
+                val at = JOURNAL_HEADER + i * JOURNAL_RECORD
+                val offset = data.getLong(at)
+                if (offset < 0 || offset % SECTOR != 0L || offset + SECTOR > imageLength) return null
+                offset to b.copyOfRange(at + 8, at + JOURNAL_RECORD)
+            }
+        }
+
+        // Makes a created or deleted journal's name durable. Best effort: not every file system allows it.
+        private fun syncDir(file: File) {
+            val dir = file.absoluteFile.parentFile ?: return
+            try { FileChannel.open(dir.toPath(), StandardOpenOption.READ).use { it.force(true) } } catch (_: Exception) { }
         }
 
         fun parts(path: String): List<String> = path.split('/').filter { it.isNotEmpty() }

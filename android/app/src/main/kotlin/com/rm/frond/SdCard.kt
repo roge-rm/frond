@@ -137,7 +137,7 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
         Sessions.adoptRecovery(context)
         val owner = Sessions.forPath(context, session)
         val device = owner?.device ?: Device.TX
-        // The recovery copy, plus the card's working copy and the copy each edit makes.
+        // The recovery copy, plus the card's working copy and room for its journal.
         val needs = exchangeNeeds(owner?.takeIf { it.saved }?.size, device, session?.let { File(it).parentFile })
         val free = context.filesDir.usableSpace
         if (free < needs) {
@@ -198,31 +198,16 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
         return FatImage.open(working, false).use(block)
     }
 
-    // Edits a copy of the working image and keeps it only when the edit checks out.
+    // Edits the working image in place; FatImage journals each change so a crash leaves the old or
+    // the new card. The check reads back only what changed.
     private fun edit(block: (FatImage) -> Unit, verify: (FatImage) -> Unit) {
         if (memoryStick) throw Failed("File exchange is not available for Memory Stick images.")
-        val candidate = File(folder, "candidate.img")
-        try {
-            working.inputStream().channel.use { from ->
-                candidate.outputStream().channel.use { to ->
-                    var at = 0L
-                    val size = from.size()
-                    while (at < size) {
-                        val n = from.transferTo(at, size - at, to)
-                        if (n <= 0) throw Failed("Couldn't copy the card image.")
-                        at += n
-                    }
-                }
-            }
-            FatImage.open(candidate, true).use(block)
-            FatImage.open(candidate, false).use(verify)
-            if (!candidate.renameTo(working)) throw Failed("Couldn't save the edited card.")
-            changed = true
-            // If the app is killed from here, the next start of this session puts the card back.
-            session?.let { File(folder, PENDING).writeText(it) }
-        } finally {
-            candidate.delete()
+        // If the app is killed from here, the next start of this session puts the card back.
+        session?.let { s -> File(folder, PENDING).let { if (!it.isFile || it.readText() != s) it.writeText(s) } }
+        FatImage.open(working, true).use { fat ->
+            try { block(fat) } finally { if (fat.committed) changed = true }
         }
+        FatImage.open(working, false).use(verify)
     }
 
     // Copies a picked file into a card folder under its own name and checks the bytes on the card.
@@ -238,7 +223,12 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
                 return name
             }
             val room = read { it.freeBytes }
-            if ((sizeOf(uri) ?: 0L) > room || !copyIn(uri, source, room)) throw Failed("There isn't room on the card for that file.")
+            val size = sizeOf(uri) ?: 0L
+            if (size > room) throw Failed("There isn't room on the card for that file.")
+            // The file is copied here first, then into the card.
+            val free = context.filesDir.usableSpace - JOURNAL_ROOM
+            if (size > free) throw Failed("There isn't room on this device for that file. Free up about ${(size - free + (1L shl 20) - 1) shr 20} MB and try again.")
+            if (!copyIn(uri, source, room)) throw Failed("There isn't room on the card for that file.")
             val expected = sha256(source)
             edit({ fat -> source.inputStream().buffered(1 shl 16).use { fat.add(path, name, it, source.length()) } }) { fat ->
                 val entry = fat.find(joined(path, name)) ?: throw Failed("The file didn't land on the card.")
@@ -300,7 +290,10 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
     fun finishEdit() {
         if (memoryStick) return
         try {
-            if (changed) run("sd-insert", working.path) else if (wasInserted) reinsert()
+            if (changed) {
+                FatImage.recover(working)
+                run("sd-insert", working.path)
+            } else if (wasInserted) reinsert()
         } catch (e: Failed) {
             throw Failed(message(e) + kept(Sessions.adoptRecovery(context)))
         }
@@ -399,6 +392,7 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
         // Keeps it when the insert fails.
         fun restorePending(context: Context, link: ControlLink, session: String?): Boolean {
             val card = pendingFor(context, session) ?: return true
+            try { FatImage.recover(card) } catch (_: IOException) { return false }
             val reply = link.request("sd-insert", card.path, timeoutSeconds = 120)
             if (!reply.ok) return false
             File(card.parentFile, PENDING).delete()
@@ -407,7 +401,7 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
         }
 
         // Removes private copies left by a process that stopped mid-edit. The edited card of a session
-        // that still exists stays until it has been inserted.
+        // that still exists, and its journal until it's replayed, stay until it has been inserted.
         fun clean(context: Context) {
             // A recovery session left by an exchange that never finished.
             Sessions.adoptRecovery(context)
@@ -416,8 +410,11 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
             val marker = File(folder, PENDING)
             val owner = if (marker.isFile) marker.readText() else null
             val keep = owner != null && File(owner).isFile
+            val card = File(folder, "card.img")
+            if (keep && card.isFile) try { FatImage.recover(card) } catch (_: IOException) { }
+            val journal = FatImage.journalOf(card).name
             folder.listFiles().orEmpty().forEach {
-                if (!(keep && (it.name == "card.img" || it.name == PENDING))) it.delete()
+                if (!(keep && (it.name == card.name || it.name == PENDING || it.name == journal))) it.delete()
             }
         }
 
@@ -431,12 +428,15 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
             return maxOf(live ?: 0L, saved ?: 0L, FatImage.SMALL_MAX_BYTES) to (live != null)
         }
 
+        // Room for one change's journal: at most every FAT sector in both copies plus folder sectors.
+        const val JOURNAL_ROOM = 1L shl 20
+
         // Room an exchange needs: the recovery save (with the card again when it isn't in the saved session
-        // yet), the exported working copy and the copy each edit makes.
+        // yet), the exported working copy and a journal. Each added file is checked when it's picked.
         fun exchangeNeeds(savedSize: Long?, device: Device, folder: File?): Long {
             val (card, live) = cardBytes(folder)
             val saved = savedSize?.takeIf { it > 0 }
-            return Sessions.recoveryNeeds(saved, device) + (if (live || saved == null) card else 0L) + 2 * card
+            return Sessions.recoveryNeeds(saved, device) + (if (live || saved == null) card else 0L) + card + JOURNAL_ROOM
         }
 
         fun kept(name: String?) = if (name == null) "" else "\n\nThe session from before the exchange is on the home screen as \"$name\"."
