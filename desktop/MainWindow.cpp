@@ -166,14 +166,34 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     };
     connect(sdCreate, &QPushButton::clicked, this, [this, replaceCard] {
         if (!replaceCard()) return;
-        if (memoryStick()) { send(cardCommand("create"), "128"); return; }
+        // SD: 32 MB to the device's largest card; "2 GB" is 1886 MiB like a real 2 GB card.
+        // Memory Stick: the classic sizes the device takes, 128 MB first, then Memory Stick Pro.
+        const auto& profile = frondFirmware::profile(runningDevice);
+        QStringList labels;
+        QList<int> sizes;
+        if (memoryStick()) {
+            for (int mb : {128, 64, 32, 16, 8, 4})
+                if (profile.msSizes & uint32_t(mb)) sizes << mb;
+            for (int mib : {256, 512, 1024, 1886})
+                if (uint32_t(mib) <= profile.msProMaxMib) sizes << mib;
+        } else {
+            for (int mib : {32, 64, 128, 256, 512, 1024, 1886}) {
+                const auto bytes = quint64(mib) << 20;
+                if (bytes >= profile.sdMin && bytes <= profile.sdMax) sizes << mib;
+            }
+        }
+        for (int mib : sizes) {
+            const auto label = mib >= 1024 ? tr("%1 GB").arg((mib + 512) / 1024) : tr("%1 MB").arg(mib);
+            labels << (memoryStick() && mib > 128 ? tr("%1 Pro").arg(label) : label);
+        }
+        if (sizes.isEmpty()) return;
         bool ok;
-        const auto size = QInputDialog::getItem(this, tr("New card"), tr("Size"), {"32 MB", "64 MB", "128 MB"}, 0, false, &ok);
-        if (ok) send("sd-create", size.section(' ', 0, 0));
+        const auto size = QInputDialog::getItem(this, tr("New card"), tr("Size"), labels, 0, false, &ok);
+        if (ok && labels.contains(size)) send(cardCommand("create"), QString::number(sizes.value(labels.indexOf(size))));
     });
     connect(sdImport, &QPushButton::clicked, this, [this, replaceCard] {
         if (!replaceCard()) return;
-        const auto file = QFileDialog::getOpenFileName(this, tr("Insert image"), {}, memoryStick() ? tr("Memory Stick images (*.frondms);;All files (*)") : tr("SD images (*.img *.bin);;All files (*)"));
+        const auto file = QFileDialog::getOpenFileName(this, tr("Insert image"), {}, memoryStick() ? tr("Memory Stick images (*.frondms *.img);;All files (*)") : tr("SD images (*.img *.bin);;All files (*)"));
         if (!file.isEmpty()) send(cardCommand("insert"), QFileInfo(file).absoluteFilePath());
     });
     connect(sdEject, &QPushButton::clicked, this, [this] {
@@ -182,6 +202,8 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     });
     connect(sdReinsert, &QPushButton::clicked, this, [this] { send(cardCommand("reinsert")); });
     connect(sdExport, &QPushButton::clicked, this, [this] {
+        // A Memory Stick Pro exports as a raw image; ask the core which kind is in the slot.
+        if (memoryStick()) { msExportPending = true; send("ms-type"); return; }
         const auto file = outputFile(tr("Export image"), memoryStick() ? tr("Memory Stick images (*.frondms)") : tr("SD images (*.img)"),
                                      memoryStick() ? "Memory Stick.frondms" : "SD card.img");
         if (!file.isEmpty()) send(cardCommand("export"), file);
@@ -460,6 +482,7 @@ MainWindow::MainWindow(const QString& core) : core(core) {
         if (exchangeDialog) exchangeDialog->reject();
         else endExchange();
         if (memoryStickFiles) memoryStickFiles->reject();
+        if (cardProgress) { cardProgress->hide(); cardProgress->deleteLater(); cardProgress = nullptr; }
         holdKnown = holdOn = false;
         microphoneArmed = false; microphoneState->clear();
         busy = false; stopping = false; hardResetAfterSave = false; cardPresent = cardInserted = false; runningDevice = frondFirmware::Device::tx;
@@ -479,7 +502,11 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     connect(&client, &DesktopClient::usbState, this, [this](const QString& state) { showUsb(state); });
     connect(&client, &DesktopClient::bluetoothState, this, &MainWindow::showBluetooth);
     connect(&client,&DesktopClient::infraredState,this,[this](const QString& state){showIrda(state);});
+    connect(&client, &DesktopClient::sdProgress, this, [this](qint64 done, qint64 total) {
+        if (cardProgress && total > 0) cardProgress->setValue(int(done * 1000 / total));
+    });
     connect(&client, &DesktopClient::result, this, [this](const QString& command, bool ok, const QString& code, const QString& message) {
+        if (cardProgress) { cardProgress->hide(); cardProgress->deleteLater(); cardProgress = nullptr; }
         busy = false; forceButton->hide(); refresh();
         if (memoryStickFiles && QStringList({"ms-files", "ms-get", "ms-put", "ms-mkdir", "ms-delete", "ms-rename"}).contains(command)) return;
         if (!ok && exchangeStage != ExchangeStage::None) { exchangeResult(false, message); return; }
@@ -490,6 +517,7 @@ MainWindow::MainWindow(const QString& core) : core(core) {
             log->appendPlainText(command + ": " + message);
             if (command == "hold-state" || command == "hold") { holdKnown = false; refresh(); }
             if (command == "sd-state" || command == "ms-state") sdKnown = false;
+            if (command == "ms-type") msExportPending = false;
             if (command == "ms-protection" || command == "ms-read-only") { protectionKnown = false; refresh(); }
             if (command == "microphone-mode") { microphoneArmed = false; microphoneState->setText(message); }
             if (command == "serial-mode") showSerial("off " + message);  // the core is now off
@@ -505,6 +533,14 @@ MainWindow::MainWindow(const QString& core) : core(core) {
             else failure(message);
             if (command == "hold" && !stopping) send("hold-state");
             if (command == "ms-read-only" && !stopping) send("ms-protection");
+            return;
+        }
+        if (command == "ms-type" && msExportPending) {
+            msExportPending = false;
+            const bool pro = message.startsWith("pro ");
+            const auto file = outputFile(tr("Export image"), pro ? tr("Memory Stick Pro images (*.img)") : tr("Memory Stick images (*.frondms)"),
+                                         pro ? "Memory Stick Pro.img" : "Memory Stick.frondms");
+            if (!file.isEmpty()) send("ms-export", file);
             return;
         }
         if (command == "device-state") {
@@ -986,6 +1022,13 @@ void MainWindow::startSession(const frondSessions::Info& info) {
             arguments << "--nand" << frondFirmware::storedNand(firmwareRoot(), device);
     }
     if (!QDir().mkpath(sessionFolder())) return failure(tr("Could not create the session storage directory."));
+    // A new machine runs in its own folder, where cards above 128 MB live until the first save.
+    if (!info.saved) {
+        const auto folder = frondSessions::machineDirOf(canonicalSession(info.path));
+        if (!QDir().mkpath(folder)) return failure(tr("Could not create the session storage directory."));
+        if (QFileInfo(folder).canonicalFilePath() != QFileInfo(sessionFolder()).canonicalFilePath())
+            arguments << "--work-folder" << folder;
+    }
     launch(canonicalSession(info.path), arguments, device);
 }
 // Starts the core on 'arguments' (the session file or the firmware) and saves to 'target'.
@@ -1165,6 +1208,21 @@ bool MainWindow::confirmReplace(const QString& dest) {
 bool MainWindow::send(const QString& command, const QString& argument) {
     if (!client.request(command, argument)) return false;
     busy = true; refresh(); statusBar()->showMessage(tr("Working…"));
+    const bool msCard = command == "ms-create" || command == "ms-insert" || command == "ms-export";
+    if (command == "sd-create" || command == "sd-insert" || command == "sd-export" || msCard) {
+        // Large cards take a while; the core reports each percent and stops on cancel.
+        delete cardProgress;
+        cardProgress = new QProgressDialog(command.endsWith("-create") ? tr("Making the card…") :
+                                           command.endsWith("-insert") ? tr("Inserting the image…") : tr("Exporting the image…"),
+                                           tr("Cancel"), 0, 1000, this);
+        cardProgress->setObjectName("cardProgress");
+        cardProgress->setWindowTitle(msCard ? tr("Memory Stick") : tr("SD card"));
+        cardProgress->setWindowModality(Qt::WindowModal);
+        cardProgress->setAutoClose(false); cardProgress->setAutoReset(false);
+        cardProgress->setMinimumDuration(500);
+        cardProgress->setValue(0);
+        connect(cardProgress, &QProgressDialog::canceled, this, [this] { client.cancelFiles(); });
+    }
     return true;
 }
 void MainWindow::stop(bool closeApp) {
@@ -1269,7 +1327,8 @@ void MainWindow::exchangeResult(bool ok, const QString& message) {
     } else if (exchangeStage == ExchangeStage::Export) {
         exchange = std::make_unique<SdExchange>(exchangeFiles->path() + "/edit-XXXXXX");
         QString error;
-        if (!exchange->open(exchangeFiles->path() + "/original.img", error)) {
+        const auto maxCard = qint64(std::min<quint64>(frondFirmware::profile(runningDevice).sdMax, quint64(2048) << 20));
+        if (!exchange->open(exchangeFiles->path() + "/original.img", error, maxCard)) {
             endExchange(); failure(error); return;
         }
         SdExchangeDialog dialog(*exchange, exchangeBackup, this);

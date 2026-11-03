@@ -124,6 +124,10 @@ class FrondActivity : SDLActivity() {
             arguments += device.coreFlags
             arguments += nor
             if (File(nand).isFile) arguments += listOf("--nand", nand)
+            // A new machine runs in its own folder, where cards above 128 MB live until the first save.
+            session?.let { File(it).parentFile }?.takeIf { (it.isDirectory || it.mkdirs()) && it.canonicalFile != Sessions.folder(this).canonicalFile }?.let {
+                arguments += listOf("--work-folder", it.path)
+            }
         }
         arguments += machineSettings.arguments(soundSupported = launchDevice().sound,
             tg50Controls = launchDevice().id == "sony-clie-tg50")

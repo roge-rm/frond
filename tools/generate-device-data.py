@@ -21,12 +21,14 @@ def outputs(profiles):
         'width': 'width', 'height': 'height', 'sideTabWidth': 'side_tab_width', 'silkscreenHeight': 'silkscreen_height',
         'appNamesText': 'app_names', 'buttonsText': 'buttons', 'holdPresent': 'hold_present', 'holdSupported': 'hold_supported', 'homeKey': 'home_key', 'homeX': 'home_x', 'homeY': 'home_y',
         'menuX': 'menu_x', 'menuY': 'menu_y', 'rotatingStatusBar': 'rotating_status_bar',
-        'sdMin': 'sd_min_bytes', 'sdMax': 'sd_max_bytes',
+        'sdMin': 'sd_min_bytes', 'sdMax': 'sd_max_bytes', 'msSizes': 'ms_sizes_mb', 'msProMax': 'ms_pro_max_mb',
     }
     longs = {'norSize', 'nandSize', 'companyId', 'halId', 'headerOffset', 'bigCardOffset', 'sdMin', 'sdMax'}
     def literal(key, value):
         if key == 'fastAudioNorMd5' and not value:
             return 'null'
+        if key == 'msSizes':
+            return 'listOf(' + ', '.join(map(str, value)) + ')'
         if key == 'sdMax':
             value = min(value, (1 << 63) - 1)
         return json.dumps(value, ensure_ascii=False) + ('L' if key in longs else '')

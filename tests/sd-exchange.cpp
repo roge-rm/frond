@@ -98,6 +98,30 @@ class ExchangeTest : public QObject {
         QVERIFY(QFileInfo::exists(files.filePath("export"))); QCOMPARE(QFileInfo(files.filePath("export")).size(), 0);
         QCOMPARE(digest(source), before);
     }
+    // A 256 MB card opens only when the device allows it. Built sparse beside the test binary, not in /tmp.
+    void largeCard() {
+        QTemporaryDir files(QCoreApplication::applicationDirPath() + "/large-card-XXXXXX");
+        QVERIFY(files.isValid());
+        const auto source = files.filePath("source.img"), input = files.filePath("input.bin");
+        {
+            QFile card(source); QVERIFY(card.open(QIODevice::WriteOnly)); QVERIFY(card.resize(256ll << 20));
+            for (const auto& sector : frondSd::layout(256)) {
+                QVERIFY(card.seek(qint64(sector.index) * 512));
+                QCOMPARE(card.write(reinterpret_cast<const char*>(sector.bytes.data()), 512), qint64(512));
+            }
+        }
+        QVERIFY(write(input, "large card payload"));
+        QString error;
+        SdExchange small(files.filePath("small-XXXXXX"));
+        QVERIFY(!small.open(source, error));
+        QVERIFY2(error.contains("128 MB"), qPrintable(error));
+        SdExchange exchange(files.filePath("work-XXXXXX"));
+        QVERIFY2(exchange.open(source, error, qint64(2048) << 20), qPrintable(error));
+        QVERIFY2(exchange.put(input, "/BIG.TXT", error), qPrintable(error));
+        QVERIFY2(exchange.get("/BIG.TXT", files.filePath("output.bin"), error), qPrintable(error));
+        QCOMPARE(read(files.filePath("output.bin")), QByteArray("large card payload"));
+        QCOMPARE(QFileInfo(exchange.image()).size(), qint64(256) << 20);
+    }
     void fullCardRollback() {
         QTemporaryDir files; QString error;
         const auto source = files.filePath("source.img"), large = files.filePath("large");

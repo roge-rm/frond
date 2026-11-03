@@ -70,8 +70,6 @@ import com.rm.frond.SdCard
 import com.rm.frond.SerialLink
 import com.rm.frond.UsbLink
 
-private val SIZES = listOf(32, 64, 128)
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
@@ -107,10 +105,10 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
     }
 
     val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) model.job("Inserting", "Couldn't insert the image") { it.insertImage(uri) }
+        if (uri != null) model.job("Inserting", "Couldn't insert the image", cancellable = true) { it.insertImage(uri) }
     }
     val saveImage = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
-        if (uri != null) model.job("Copying", "Couldn't export the image") {
+        if (uri != null) model.job("Copying", "Couldn't export the image", cancellable = true) {
             it.exportImage(uri)
             model.note = "Card image exported"
         }
@@ -140,8 +138,7 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
     }
 
     val createCard: () -> Unit = {
-        if (model.device.memoryStick) model.job("Making the card", "Couldn't make the card") { it.create(128) }
-        else choosingSize = true
+        choosingSize = true
     }
     val path = model.path
     Scaffold(
@@ -260,7 +257,7 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                     SdCard.State.EJECTED -> {
                         action("Insert") { model.job("Inserting", "Couldn't insert the card") { it.reinsert() } }
                         if (model.device.sdSlot) action("Files") { model.openFiles() }
-                        action("Export image") { saveImage.launch(if (model.device.memoryStick) "Memory Stick.frondms" else "SD card.img") }
+                        action("Export image") { saveImage.launch(if (model.memoryStickPro) "Memory Stick Pro.img" else if (model.device.memoryStick) "Memory Stick.frondms" else "SD card.img") }
                         action("New card") { confirmReplace = "create" }
                         action("Insert image") { confirmReplace = "image" }
                     }
@@ -419,7 +416,12 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
             if (model.canCancelFiles) TextButton(onClick = { model.cancelFiles() }, enabled = !model.cancellingFiles) {
                 Text(if (model.cancellingFiles) "Cancelling" else "Cancel")
             }
-        }, title = { Text(label) }, text = { Progress() })
+        }, title = { Text(label) }, text = {
+            val done = model.progress
+            if (done == null) Progress()
+            else androidx.compose.material3.LinearProgressIndicator(progress = { done },
+                modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp))
+        })
     }
     model.alert?.let { (title, text) ->
         AlertDialog(
@@ -526,10 +528,10 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
             title = { Text("New card") },
             text = {
                 LazyColumn {
-                    items(if (model.device.memoryStick) listOf(128) else SIZES.filter { (it.toLong() shl 20) in model.device.sdMin..model.device.sdMax }) { mib ->
-                        ListItem(headlineContent = { Text("$mib MB") }, modifier = Modifier.clickableRow {
+                    items(if (model.device.memoryStick) model.device.memoryStickSizes else model.device.sdSizes) { mib ->
+                        ListItem(headlineContent = { Text(com.rm.frond.Device.sizeLabel(mib) + if (model.device.memoryStick && mib > 128) " Pro" else "") }, modifier = Modifier.clickableRow {
                             choosingSize = false
-                            model.job("Making the card", "Couldn't make the card") { it.create(mib) }
+                            model.job("Making the card", "Couldn't make the card", cancellable = !model.device.memoryStick) { it.create(mib) }
                         })
                     }
                 }

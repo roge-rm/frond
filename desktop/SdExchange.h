@@ -7,7 +7,8 @@ class SdExchange {
  public:
     explicit SdExchange(const QString& scratchTemplate = {});
     static bool available();
-    bool open(const QString& source, QString& error);
+    // maxBytes is the device's largest card.
+    bool open(const QString& source, QString& error, qint64 maxBytes = qint64(128) << 20);
     QString image() const { return current; }
     bool list(const QString& path, QString& listing, QString& error);
     bool put(const QString& source, const QString& destination, QString& error);

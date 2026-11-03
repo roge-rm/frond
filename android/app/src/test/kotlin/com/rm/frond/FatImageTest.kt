@@ -7,48 +7,56 @@ import org.junit.Assert.fail
 import org.junit.Test
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.RandomAccessFile
 import kotlin.random.Random
 
 class FatImageTest {
-    // The same layout as the core's frondSd::create (native/SdImage.h).
+    // The same layout as the core's frondSd::layout (native/SdImage.h), written sparse.
     private fun blank(mib: Int): File {
-        val image = ByteArray(mib shl 20)
-        fun put16(at: Int, v: Int) { image[at] = v.toByte(); image[at + 1] = (v shr 8).toByte() }
-        fun put32(at: Int, v: Int) { put16(at, v and 0xffff); put16(at + 2, v ushr 16) }
-        val start = 63
-        val sectors = image.size / 512 - start
-        val cluster = if (mib > 64) 8 else 4
-        var fatSectors = 1
+        val start = 63L
+        val total = (mib.toLong() shl 20) / 512
+        val sectors = total - start
+        val cluster = when { mib <= 64 -> 4; mib <= 256 -> 8; mib == 512 -> 16; mib == 1024 -> 32; else -> 64 }
+        var fatSectors = 1L
+        var reserved = 1L
+        var clusters: Long
         while (true) {
-            val clusters = (sectors - 1 - 32 - 2 * fatSectors) / cluster
+            clusters = minOf((sectors - reserved - 32 - 2 * fatSectors) / cluster, 65524L)
             val required = ((clusters + 2) * 2 + 511) / 512
             if (fatSectors >= required) break
             fatSectors = required
         }
-        image[446 + 1] = 1; image[446 + 2] = 1; image[446 + 4] = 6
-        put32(446 + 8, start); put32(446 + 12, sectors)
-        image[510] = 0x55; image[511] = 0xaa.toByte()
-        val b = start * 512
-        image[b] = 0xeb.toByte(); image[b + 1] = 0x3c; image[b + 2] = 0x90.toByte()
-        "FROND001".toByteArray().copyInto(image, b + 3)
-        put16(b + 11, 512); image[b + 13] = cluster.toByte(); put16(b + 14, 1)
-        image[b + 16] = 2; put16(b + 17, 512)
-        if (sectors < 65536) put16(b + 19, sectors) else put32(b + 32, sectors)
-        image[b + 21] = 0xf8.toByte(); put16(b + 22, fatSectors); put16(b + 24, 63); put16(b + 26, 255)
-        put32(b + 28, start); image[b + 36] = 0x80.toByte(); image[b + 38] = 0x29
-        "FROND      ".toByteArray().copyInto(image, b + 43)
-        "FAT16   ".toByteArray().copyInto(image, b + 54)
-        image[b + 510] = 0x55; image[b + 511] = 0xaa.toByte()
-        for (f in 0 until 2) {
-            val d = (start + 1 + f * fatSectors) * 512
-            put16(d, 0xfff8); put16(d + 2, 0xffff)
-        }
-        val root = (start + 1 + 2 * fatSectors) * 512
-        "FROND      ".toByteArray().copyInto(image, root)
-        image[root + 11] = 8
+        if (mib > 128) reserved = total - clusters * cluster - start - 32 - 2 * fatSectors
+        fun sector() = ByteArray(512)
+        fun put16(b: ByteArray, at: Int, v: Long) { b[at] = v.toByte(); b[at + 1] = (v shr 8).toByte() }
+        fun put32(b: ByteArray, at: Int, v: Long) { put16(b, at, v and 0xffff); put16(b, at + 2, v ushr 16) }
+        val mbr = sector()
+        mbr[446 + 1] = 1; mbr[446 + 2] = 1; mbr[446 + 4] = 6
+        put32(mbr, 446 + 8, start); put32(mbr, 446 + 12, sectors)
+        mbr[510] = 0x55; mbr[511] = 0xaa.toByte()
+        val boot = sector()
+        boot[0] = 0xeb.toByte(); boot[1] = 0x3c; boot[2] = 0x90.toByte()
+        "FROND001".toByteArray().copyInto(boot, 3)
+        put16(boot, 11, 512); boot[13] = cluster.toByte(); put16(boot, 14, reserved)
+        boot[16] = 2; put16(boot, 17, 512)
+        if (sectors < 65536) put16(boot, 19, sectors) else put32(boot, 32, sectors)
+        boot[21] = 0xf8.toByte(); put16(boot, 22, fatSectors); put16(boot, 24, 63); put16(boot, 26, 255)
+        put32(boot, 28, start); boot[36] = 0x80.toByte(); boot[38] = 0x29
+        "FROND      ".toByteArray().copyInto(boot, 43)
+        "FAT16   ".toByteArray().copyInto(boot, 54)
+        boot[510] = 0x55; boot[511] = 0xaa.toByte()
+        val fat = sector().also { put16(it, 0, 0xfff8); put16(it, 2, 0xffff) }
+        val root = sector().also { "FROND      ".toByteArray().copyInto(it); it[11] = 8 }
         val out = File(System.getProperty("frond.fatTestDir") ?: "build/fat-test", "card-$mib.img")
         out.parentFile!!.mkdirs()
-        out.writeBytes(image)
+        out.delete()
+        RandomAccessFile(out, "rw").use { f ->
+            f.setLength(mib.toLong() shl 20)
+            for ((index, bytes) in listOf(0L to mbr, start to boot, start + reserved to fat, start + reserved + fatSectors to fat,
+                    start + reserved + 2 * fatSectors to root)) {
+                f.seek(index * 512); f.write(bytes)
+            }
+        }
         return out
     }
 
@@ -109,6 +117,56 @@ class FatImageTest {
                 assertTrue(e.message!!.contains("full"))
             }
             assertEquals(511, fat.list("/").size)
+        }
+    }
+
+    // Larger cards: bigger clusters, a data area that ends at the last sector, files at both ends.
+    private fun largeCard(mib: Int, clusterBytes: Int) {
+        val file = blank(mib)
+        try {
+            val random = Random(mib)
+            val first = random.nextBytes(1_000_003)
+            val small = random.nextBytes(77)
+            FatImage.open(file, true).use { fat ->
+                assertEquals(clusterBytes, fat.clusterBytes)
+                assertTrue(fat.totalBytes in (mib.toLong() shl 20) * 95 / 100..(mib.toLong() shl 20))
+                assertEquals(fat.totalBytes, fat.freeBytes)
+                fat.makeFolder("/", "PALM")
+                fat.put("/PALM", "first.bin", first)
+                fat.put("/", "small.txt", small)
+                for (i in 0 until 40) fat.put("/PALM", "File number $i.pdb", byteArrayOf(i.toByte()))
+            }
+            FatImage.open(file, false).use { fat ->
+                assertArrayEquals(first, fat.get("/PALM/first.bin"))
+                assertArrayEquals(small, fat.get("/small.txt"))
+                assertEquals(41, fat.list("/PALM").size)
+                for (i in 0 until 40) assertArrayEquals(byteArrayOf(i.toByte()), fat.get("/PALM/File number $i.pdb"))
+                val clustersUsed = (1_000_003 + clusterBytes - 1) / clusterBytes + 1 + 40 + 1
+                assertTrue(fat.totalBytes - fat.freeBytes >= clustersUsed.toLong() * clusterBytes - clusterBytes)
+            }
+            assertEquals(mib.toLong() shl 20, file.length())
+        } finally {
+            file.delete()
+        }
+    }
+
+    @Test fun card256() = largeCard(256, 8 * 512)
+
+    @Test fun card1886() = largeCard(1886, 64 * 512)
+
+    @Test fun card2048() = largeCard(2048, 64 * 512)
+
+    @Test fun tooLargeRefused() {
+        val file = File(System.getProperty("frond.fatTestDir") ?: "build/fat-test", "card-4096.img")
+        file.parentFile!!.mkdirs()
+        RandomAccessFile(file, "rw").use { it.setLength(4096L shl 20) }
+        try {
+            FatImage.open(file, false).use { }
+            fail("4 GB card opened")
+        } catch (e: FatImage.FatException) {
+            assertEquals("Use a 32 MB to 2 GB FAT16 card image.", e.message)
+        } finally {
+            file.delete()
         }
     }
 }

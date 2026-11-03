@@ -46,7 +46,7 @@ def zire_nor(size=ZIRE_SIZE, small=AZ72, big=AZ72, big_length=None, small_at=0, 
 def session(path, device, *, nor=None, nand=0, display=6, ram=32 << 20, sd=False):
     nor = header() if nor is None else nor
     # A hand-built v6 envelope, independent of the C++ writer: the device is a 32-byte name field.
-    memory, state, card = b'RAM', b'STATE', bytes(512) if sd else b''
+    memory, state, card = b'RAM', b'STATE', bytes(32 << 20) if sd else b''
     fields = [display, ram, 0, len(nor), nand, len(memory), len(state), len(card)]
     compressor = zlib.compressobj()
     with path.open('wb') as stream:

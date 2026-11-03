@@ -28,6 +28,7 @@ class DesktopClient : public QObject {
     void usbState(const QString& state);
     void infraredState(const QString& state);
     void bluetoothState(const QString& state);
+    void sdProgress(qint64 done, qint64 total);  // SD create, import and export
     void stalled();
     void diagnostic(const QString& text);
  private:

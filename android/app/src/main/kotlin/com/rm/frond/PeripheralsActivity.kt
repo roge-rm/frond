@@ -37,11 +37,17 @@ class PeripheralsModel(
         private set
     var writeProtected by mutableStateOf<Boolean?>(null)
         private set
+    // Whether the stick in the slot is a Memory Stick Pro, which exports as a raw image.
+    var memoryStickPro by mutableStateOf(false)
+        private set
     var canCancelFiles by mutableStateOf(false)
         private set
     var cancellingFiles by mutableStateOf(false)
         private set
     var busy by mutableStateOf<String?>(null)
+        private set
+    // How far a long SD job has got, 0 to 1, or null when it isn't known.
+    var progress by mutableStateOf<Float?>(null)
         private set
     var alert by mutableStateOf<Pair<String, String>?>(null)
     var note by mutableStateOf<String?>(null)
@@ -93,9 +99,11 @@ class PeripheralsModel(
         val c = card ?: return
         if (busy != null || waiting()) return
         c.beginJob()
-        canCancelFiles = device.memoryStick && cancellable
+        canCancelFiles = cancellable
         cancellingFiles = false
         busy = label
+        progress = null
+        link?.sdProgress = { done, total -> activity.runOnUiThread { if (busy != null) progress = done.toFloat() / total } }
         activity.lifecycleScope.launch {
             val error = withContext(Dispatchers.IO) {
                 try {
@@ -109,10 +117,14 @@ class PeripheralsModel(
             }
             val s = withContext(Dispatchers.IO) { c.state() }
             val protection = withContext(Dispatchers.IO) { c.protection() }
+            val pro = withContext(Dispatchers.IO) { c.memoryStickPro() }
             state = s
             writeProtected = protection
+            memoryStickPro = pro
             changed = c.changed
+            link?.sdProgress = null
             busy = null
+            progress = null
             canCancelFiles = false
             cancellingFiles = false
             if (error != null) alert = failTitle to error

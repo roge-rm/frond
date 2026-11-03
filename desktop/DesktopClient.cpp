@@ -69,7 +69,8 @@ bool DesktopClient::request(const QString& command, const QString& argument) {
     return true;
 }
 bool DesktopClient::cancelFiles() {
-    if (!socket || !QStringList({"ms-files", "ms-get", "ms-put", "ms-mkdir", "ms-delete", "ms-rename"}).contains(pending)) return false;
+    if (!socket || !QStringList({"ms-files", "ms-get", "ms-put", "ms-mkdir", "ms-delete", "ms-rename",
+                                 "sd-create", "sd-insert", "sd-export", "ms-create", "ms-insert", "ms-export"}).contains(pending)) return false;
     const auto line = QByteArray("0\tcancel-files\t") + QByteArray::number(serial).toHex() + '\n';
     return socket->write(line) == line.size();
 }
@@ -100,6 +101,17 @@ void DesktopClient::receive() {
             else if (fields[2] == "bluetooth" && ready && fields[3].size() % 2 == 0 &&
                      QByteArray::fromHex(fields[3]).toHex() == fields[3])
                 emit bluetoothState(QString::fromUtf8(QByteArray::fromHex(fields[3])));
+            else if (fields[2] == "sd-progress" && ready && fields[3].size() % 2 == 0 &&
+                     QByteArray::fromHex(fields[3]).toHex() == fields[3]) {
+                const auto parts = QString::fromUtf8(QByteArray::fromHex(fields[3])).split(' ');
+                bool doneOk = false, totalOk = false;
+                const auto done = parts.value(0).toLongLong(&doneOk), total = parts.value(1).toLongLong(&totalOk);
+                if (parts.size() != 2 || !doneOk || !totalOk || done < 0 || total < done)
+                    return fail(tr("The emulator sent an unexpected event."));
+                // A long card job is still working; give it a fresh deadline.
+                if (!pending.isEmpty()) deadline.start();
+                emit sdProgress(done, total);
+            }
             else return fail(tr("The emulator sent an unexpected event."));
             continue;
         }

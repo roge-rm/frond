@@ -132,7 +132,7 @@ void MemoryStickFilesDialog::result(const QString& command, bool ok, const QStri
     const auto used = space.value(1).toULongLong(&usedOk), total = space.value(2).toULongLong(&totalOk);
     QList<QTreeWidgetItem*> replacement;
     QSet<QByteArray> names;
-    bool valid = space.size() == 3 && space[0] == "space" && usedOk && totalOk && used <= total && total <= 128ull * 1024 * 1024 && lines.size() <= 513;
+    bool valid = space.size() == 3 && space[0] == "space" && usedOk && totalOk && used <= total && total <= 2048ull * 1024 * 1024 && lines.size() <= 513;
     for (const auto& line : lines.mid(1)) {
         const auto fields = line.split('\t'); bool sizeOk = false;
         const auto size = fields.value(1).toULongLong(&sizeOk);

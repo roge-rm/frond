@@ -28,12 +28,18 @@ original = hashlib.sha256(source.read_bytes()).hexdigest()
 
 @contextmanager
 def emulator(session, label):
+    # Each run works in its own machine folder, where cards above 128 MiB live until a save.
+    # A save to X.frond makes the machine folder X, which is what loads.
+    if not session.exists() and session.with_suffix('').is_dir():
+        session = session.with_suffix('')
+    work = root / ('work-' + label)
+    work.mkdir()
     with tempfile.TemporaryDirectory(prefix='frond-sd-') as directory, (root / (label + '.log')).open('wb') as log:
         listener = socket.socket(socket.AF_UNIX)
         address = str(Path(directory) / 'control')
         # A shared heavy emulator slot can be busy before the core starts.
         listener.bind(address); listener.listen(1); listener.settimeout(180)
-        process = subprocess.Popen((['heavy', 'emulator'] if shutil.which('heavy') else []) + [str(core), str(session), '--no-sound', '--desktop-socket', address],
+        process = subprocess.Popen((['heavy', 'emulator'] if shutil.which('heavy') else []) + [str(core), str(session), '--no-sound', '--work-folder', str(work), '--desktop-socket', address],
             stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
             env=dict(os.environ, SDL_VIDEODRIVER='dummy', SDL_AUDIODRIVER='dummy'))
         connection = stream = None
@@ -53,6 +59,8 @@ def emulator(session, label):
                 serial += 1
                 connection.sendall(f'{serial}\t{command}\t{str(argument).encode().hex()}\n'.encode())
                 fields = stream.readline().rstrip(b'\n').split(b'\t')
+                while fields[:3] == [b'0', b'event', b'sd-progress']:
+                    fields = stream.readline().rstrip(b'\n').split(b'\t')
                 assert len(fields) == 4 and fields[0] == str(serial).encode(), fields
                 message = bytes.fromhex(fields[3].decode()).decode()
                 print(label, command, fields[1].decode(), message, flush=True)
@@ -84,6 +92,7 @@ def emulator(session, label):
                 os.killpg(process.pid, signal.SIGTERM)
                 try: process.wait(timeout=5)
                 except subprocess.TimeoutExpired: os.killpg(process.pid, signal.SIGKILL); process.wait()
+            shutil.rmtree(work, ignore_errors=True)
 
 def seed(path):
     # Exercise the same rootless, transactional copy backend as the Qt dialog.
@@ -104,6 +113,7 @@ def check_image(path, size):
 with emulator(source, 'initial') as request:
     assert request('sd-state') == 'none'
     request('sd-create', '7', ok=False)
+    request('sd-create', '4096', ok=False)
     request('sd-create', '32'); time.sleep(3)
     request('sd-create', '64', ok=False)
     request('sd-eject'); time.sleep(2)
@@ -139,11 +149,35 @@ with emulator(root / 'ejected.frond', 'ejected') as request:
     request('sd-eject'); time.sleep(3)
     request('sd-create', '128'); time.sleep(3)
     request('launch-app', 'Frond SD probe'); time.sleep(3)
-    probe_results(request, root / 'large.zip', previous=reset, size=128, host=False)
+    large = probe_results(request, root / 'large.zip', previous=reset, size=128, host=False)
     request('save', root / 'large.frond')
 with emulator(root / 'large.frond', 'large-resumed') as request:
     assert request('sd-state') == 'inserted'
     request('sd-eject'); time.sleep(2)
     request('sd-export', root / 'large.img'); check_image(root / 'large.img', 128)
+    request('sd-reinsert'); time.sleep(3)
+    request('launch-app', 'Frond SD probe'); time.sleep(3)
+    previous = probe_results(request, root / 'large-resumed.zip', previous=large, size=128, host=False, prior=True)
+    request('save', root / 'large-resumed.frond')
+(root / 'large.img').unlink()
+# Cards above 128 MiB: made in the machine folder, probed, saved, then probed again in a fresh process.
+base = previous  # each size starts again from large-resumed
+for size in (256, 1886):
+    with emulator(root / 'large-resumed.frond', f'card-{size}') as request:
+        request('sd-eject'); time.sleep(2)
+        request('sd-create', str(size)); time.sleep(5)
+        request('launch-app', 'Frond SD probe'); time.sleep(3)
+        previous = probe_results(request, root / f'card-{size}.zip', previous=base, size=size, host=False)
+        request('save', root / f'card-{size}.frond')
+    with emulator(root / f'card-{size}.frond', f'card-{size}-resumed') as request:
+        assert request('sd-state') == 'inserted'
+        request('launch-app', 'Frond SD probe'); time.sleep(3)
+        previous = probe_results(request, root / f'card-{size}-resumed.zip', previous=previous, size=size, host=False, prior=True)
+        request('sd-eject'); time.sleep(2)
+        request('sd-export', root / f'card-{size}.img'); check_image(root / f'card-{size}.img', size)
+    (root / f'card-{size}.img').unlink()
+    # The saved machine folder holds the whole card.
+    for saved in (root / f'card-{size}', root / f'card-{size}.frond'):
+        shutil.rmtree(saved, ignore_errors=True)
 assert hashlib.sha256(source.read_bytes()).hexdigest() == original
-print('PASS: TX VFS file exchange, embedded card restore, ejected restore, reinsert and 128 MiB persistence; imports unchanged' + (' (reset explicitly skipped)' if a.skip_reset else '; reset verified'))
+print('PASS: TX VFS file exchange, embedded card restore, ejected restore, reinsert, 128 MiB, 256 MiB and 2 GB (1886 MiB) persistence; imports unchanged' + (' (reset explicitly skipped)' if a.skip_reset else '; reset verified'))

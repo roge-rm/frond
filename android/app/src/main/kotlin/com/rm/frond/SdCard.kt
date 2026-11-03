@@ -58,18 +58,24 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
     }
 
     private fun run(command: String, argument: String = "") {
-        if (memoryStick && jobCancelled) throw Failed("File transfer cancelled.", "cancelled")
+        if (jobCancelled) throw Failed("File transfer cancelled.", "cancelled")
         val reply = link.request(command, argument, timeoutSeconds = if (command == "ms-get" || command == "ms-put") 240 else 120,
-            cancelRequested = if (memoryStick) ({ jobCancelled }) else null)
+            cancelRequested = { jobCancelled })
         if (!reply.ok) throw Failed(if (reply.code == "not-ready") "Open Date Book on the Palm, then try again." else reply.message, reply.code)
     }
 
     fun create(mib: Int) {
-        if (memoryStick && mib != 128) throw Failed("Use a 128 MB Memory Stick.")
+        if (memoryStick && mib !in device.memoryStickSizes) throw Failed("Use a Memory Stick size from the list.")
         run(command("create"), mib.toString())
     }
     fun eject() = run(command("eject"))
     fun reinsert() = run(command("reinsert"))
+    // Whether the stick in the slot is a Memory Stick Pro ("pro N" from ms-type).
+    fun memoryStickPro(): Boolean {
+        if (!memoryStick) return false
+        val reply = link.request("ms-type", timeoutSeconds = 30)
+        return reply.ok && reply.message.startsWith("pro ")
+    }
     fun protection(): Boolean? {
         if (!memoryStick || state() == State.NONE) return null
         val reply = link.request("ms-protection", timeoutSeconds = 30)
@@ -89,12 +95,17 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
         folder.mkdirs()
         val copy = File(folder, "picked.img")
         try {
-            val limit = if (memoryStick) MEMORY_STICK_IMAGE_BYTES else FatImage.MAX_BYTES
-            val problem = if (memoryStick) "Use a Frond classic 128 MB Memory Stick image." else "Use a 32-128 MiB raw SD card image."
+            // Frond classic stick files, or raw Memory Stick Pro images.
+            val stickFiles = device.msSizes.map { MEMORY_STICK_HEADER_BYTES + Device.memoryStickPhysicalBytes(it) } +
+                Device.MEMORY_STICK_PRO_SIZES.filter { it <= device.msProMax }.map { it.toLong() shl 20 }
+            val limit = if (memoryStick) stickFiles.maxOrNull() ?: 0L else device.sdImageMax
+            val problem = if (memoryStick && device.msProMax > 0) "Use a Frond classic Memory Stick image or a raw Memory Stick Pro image."
+                else if (memoryStick) "Use a Frond classic Memory Stick image from 4 to 128 MB."
+                else "Use a 32 MB to ${Device.sizeLabel(device.sdImageMax)} raw SD card image."
             if (!copyIn(uri, copy, limit)) throw Failed(problem)
             val size = copy.length()
-            if (memoryStick && size != MEMORY_STICK_IMAGE_BYTES ||
-                !memoryStick && (size < FatImage.MIN_BYTES || size > FatImage.MAX_BYTES || size % 512 != 0L)) throw Failed(problem)
+            if (memoryStick && size !in stickFiles ||
+                !memoryStick && (size < FatImage.MIN_BYTES || size > limit || size % 512 != 0L)) throw Failed(problem)
             run(command("insert"), copy.path)
         } finally {
             copy.delete()
@@ -127,7 +138,7 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
         val owner = Sessions.forPath(context, session)
         val device = owner?.device ?: Device.TX
         // The recovery copy, plus the card's working copy and the copy each edit makes.
-        val needs = Sessions.recoveryNeeds(owner?.takeIf { it.saved }?.size, device) + 2 * FatImage.MAX_BYTES
+        val needs = exchangeNeeds(owner?.takeIf { it.saved }?.size, device, session?.let { File(it).parentFile })
         val free = context.filesDir.usableSpace
         if (free < needs) {
             throw Failed("There isn't room to save a recovery session before the exchange. Free up about ${(needs - free + (1L shl 20) - 1) shr 20} MB and try again.")
@@ -165,7 +176,7 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
         if (space.size != 3 || space[0] != "space") throw Failed("The Palm returned invalid card space.")
         val used = space[1].toLongOrNull() ?: throw Failed("The Palm returned invalid card space.")
         val total = space[2].toLongOrNull() ?: throw Failed("The Palm returned invalid card space.")
-        if (used < 0 || total < used || total > (128L shl 20)) throw Failed("The Palm returned invalid card space.")
+        if (used < 0 || total < used || total > (2048L shl 20)) throw Failed("The Palm returned invalid card space.")
         val entries = lines.drop(1).map { line ->
             val fields = line.split('\t')
             if (fields.size != 3 || fields[0] !in listOf("d", "f")) throw Failed("The Palm returned an invalid folder entry.")
@@ -323,10 +334,10 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
         try {
             val input = context.contentResolver.openInputStream(uri) ?: throw Failed("Couldn't read that file.")
             copyingInput = input
-            return input.use { BoundedCardImage.copy(it, to, limit) { memoryStick && jobCancelled } }
+            return input.use { BoundedCardImage.copy(it, to, limit) { jobCancelled } }
         } catch (e: IOException) {
             to.delete()
-            throw Failed(if (memoryStick && jobCancelled) "File transfer cancelled." else "Couldn't read that file.", if (memoryStick && jobCancelled) "cancelled" else null)
+            throw Failed(if (jobCancelled) "File transfer cancelled." else "Couldn't read that file.", if (jobCancelled) "cancelled" else null)
         } finally { copyingInput = null }
     }
 
@@ -340,8 +351,10 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
 
     companion object {
         // Versioned 64-byte header and classic physical page records; the core checks CRC and boot blocks.
-        private const val MEMORY_STICK_IMAGE_BYTES = 136_577_088L
+        private const val MEMORY_STICK_HEADER_BYTES = 64L
         private const val MEMORY_STICK_FILE_BYTES = 8L shl 20
+        // The core's candidate card file (uarm/SdCandidate.h), live while its machine runs.
+        const val LIVE_CANDIDATE = ".frondsd.tmp-live-"
         private fun hex(text: String) = text.toByteArray(Charsets.UTF_8).joinToString("") { "%02x".format(it) }
         private fun checkMemoryStickName(name: String) {
             if (name.isEmpty() || name.length > 255 || name in listOf(".", "..") ||
@@ -409,6 +422,23 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
         }
 
         // Says where the recovery session went, after a failed exchange.
+        // The running card's size from its machine folder: a live candidate (cards above 128 MB before
+        // their first save) or sd.frondsd, else the largest card kept in memory.
+        fun cardBytes(folder: File?): Pair<Long, Boolean> {
+            val files = folder?.listFiles().orEmpty()
+            val live = files.filter { it.isFile && it.name.startsWith(LIVE_CANDIDATE) }.maxOfOrNull { it.length() }
+            val saved = files.firstOrNull { it.isFile && it.name == "sd.frondsd" }?.length()
+            return maxOf(live ?: 0L, saved ?: 0L, FatImage.SMALL_MAX_BYTES) to (live != null)
+        }
+
+        // Room an exchange needs: the recovery save (with the card again when it isn't in the saved session
+        // yet), the exported working copy and the copy each edit makes.
+        fun exchangeNeeds(savedSize: Long?, device: Device, folder: File?): Long {
+            val (card, live) = cardBytes(folder)
+            val saved = savedSize?.takeIf { it > 0 }
+            return Sessions.recoveryNeeds(saved, device) + (if (live || saved == null) card else 0L) + 2 * card
+        }
+
         fun kept(name: String?) = if (name == null) "" else "\n\nThe session from before the exchange is on the home screen as \"$name\"."
 
         fun message(e: Exception): String = when (e) {

@@ -33,6 +33,24 @@ class DeviceDataTest(unittest.TestCase):
         kotlin = next(data for path, data in generator.outputs(inventory).items() if path.suffix == '.kt')
         self.assertNotIn('test-fixture', kotlin)
 
+    def test_sd_bounds(self):
+        profiles = {p['name']: p for p in json.loads((ROOT / 'tools/device-profiles.json').read_text())['profiles']}
+        mib = 1 << 20
+        self.assertEqual(profiles['palm-tx']['sd_max_bytes'], 2048 * mib)
+        self.assertEqual(profiles['palm-zire-72']['sd_max_bytes'], 2048 * mib)
+        self.assertEqual(profiles['palm-e2']['sd_max_bytes'], 1024 * mib)
+        self.assertEqual(profiles['palm-e2']['sd_min_bytes'], 512)
+        kotlin = (ROOT / 'android/app/src/main/kotlin/com/rm/frond/DeviceInventory.kt').read_text()
+        self.assertIn('sdMax = 2147483648L', kotlin)
+        self.assertIn('sdMax = 1073741824L', kotlin)
+
+    def test_memory_stick_sizes(self):
+        profiles = {p['name']: p for p in json.loads((ROOT / 'tools/device-profiles.json').read_text())['profiles']}
+        self.assertEqual(profiles['sony-clie-tg50']['ms_sizes_mb'], [4, 8, 16, 32, 64, 128])
+        self.assertEqual(profiles['palm-tx']['ms_sizes_mb'], [])
+        kotlin = (ROOT / 'android/app/src/main/kotlin/com/rm/frond/DeviceInventory.kt').read_text()
+        self.assertIn('msSizes = listOf(4, 8, 16, 32, 64, 128)', kotlin)
+
     def test_available_profiles_have_measured_recipes(self):
         self.assertEqual(list(palm_boot.DEVICES), ['palm-tx', 'palm-e2', 'palm-e2-franken', 'repalm', 'palm-zire-72', 'sony-clie-tg50'])
         for name, p in palm_boot.DEVICES.items():

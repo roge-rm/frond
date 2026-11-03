@@ -165,13 +165,19 @@ class Zire72RomTest(unittest.TestCase):
         self.rejected([ZIRE, '--device', 'palm-tx'], 'does not match ROM')
         self.rejected([ZIRE, '--device', 'palm-e2'], 'does not match ROM')
         self.rejected([ZIRE, '--experimental-tx'], 'Unknown argument: --experimental-tx')
-        # Sessions hold cards up to 128 MiB, so the Zire takes 32-128 MiB like the TX.
-        for mib in (16, 129, 256):
+        # The Zire takes 32 MiB to 2 GiB like the TX.
+        for mib in (16, 2049, 4096):
             card = self.root / f'card-{mib}.img'
             with card.open('wb') as f:
                 f.truncate(mib << 20)
             self.rejected([ZIRE, '--sd', card], 'sd card image has bad size')
             card.unlink()
+        # Cards above 128 MiB run from the machine folder, so a bare ROM start can't take one.
+        card = self.root / 'card-256.img'
+        with card.open('wb') as f:
+            f.truncate(256 << 20)
+        self.rejected([ZIRE, '--sd', card], 'SD cards above 128 MiB need a saved session')
+        card.unlink()
 
     @unittest.skipUnless(E2.is_file() and TX.is_file() and TX_NAND.is_file(), 'E2 or TX firmware missing')
     def test_e2_and_tx_unchanged(self):

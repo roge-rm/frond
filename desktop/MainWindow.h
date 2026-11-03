@@ -2,6 +2,7 @@
 #include <QMainWindow>
 #include <QSettings>
 #include <QLockFile>
+#include <QProgressDialog>
 #include "DesktopClient.h"
 #include "SdExchange.h"
 #include "FirmwareInput.h"
@@ -116,8 +117,10 @@ class MainWindow : public QMainWindow {
     std::unique_ptr<SdExchange> exchange;
     QDialog* exchangeDialog{nullptr};
     QDialog* memoryStickFiles{nullptr};
+    QProgressDialog* cardProgress{nullptr};  // shown while an SD create, import or export runs
     QString exchangeBackup;
     bool cardPresent{false}, cardInserted{false}, sdKnown{false};
+    bool msExportPending{false};
     // The running device selects the available peripheral controls.
     frondFirmware::Device runningDevice{frondFirmware::Device::tx};
     bool microphoneArmed{false};

@@ -37,6 +37,29 @@ static Err probe(void) {
     error = VFSVolumeSize(volume, &used, &total);
     logResult("volume-size", error, total);
     logResult("volume-used", error, used);
+    // With a FrondSDFormat database installed, the Palm formats the card once, then probes the new volume.
+    if (DmFindDatabase(0, "FrondSDFormat")) {
+        VolumeInfoType info;
+        VFSSlotMountParamType mount;
+        DmDeleteDatabase(0, DmFindDatabase(0, "FrondSDFormat"));
+        error = VFSVolumeInfo(volume, &info);
+        logResult("format-info", error, info.mountClass == vfsMountClass_SlotDriver ? info.slotRefNum : 0xffff);
+        if (!error) {
+            MemSet(&mount, sizeof(mount), 0);
+            mount.vfsMountParam.volRefNum = vfsInvalidVolRef;
+            mount.vfsMountParam.mountClass = vfsMountClass_SlotDriver;
+            mount.slotLibRefNum = info.slotLibRefNum;
+            mount.slotRefNum = info.slotRefNum;
+            error = VFSVolumeUnmount(volume);
+            logResult("format-unmount", error, volume);
+            error = VFSVolumeFormat(0, 0, (VFSAnyMountParamPtr)&mount);
+            logResult("format", error, mount.vfsMountParam.volRefNum);
+            if (!error) volume = mount.vfsMountParam.volRefNum;
+        }
+        error = VFSVolumeSize(volume, &used, &total);
+        logResult("format-size", error, total);
+        logResult("format-used", error, used);
+    }
     error = VFSFileOpen(volume, "/HOST.TXT", vfsModeRead, &file);
     logResult("host-open", error, 0);
     if (!error) {

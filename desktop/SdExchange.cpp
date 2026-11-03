@@ -1,4 +1,5 @@
 #include "SdExchange.h"
+#include <QStorageInfo>
 #include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
@@ -56,14 +57,23 @@ bool SdExchange::run(const QString& tool, const QString& image, const QStringLis
     return true;
 }
 
-bool SdExchange::open(const QString& source, QString& error) {
+bool SdExchange::open(const QString& source, QString& error, qint64 maxBytes) {
     if (!current.isEmpty()) { error = "An exchange is already open."; return false; }
     if (!directory.isValid()) { error = "Could not create private exchange storage."; return false; }
     QFile file(source);
     if (!file.open(QIODevice::ReadOnly)) { error = file.errorString(); return false; }
     auto boot = file.read(512);
-    if (boot.size() != 512 || file.size() < (32ll << 20) || file.size() > (128ll << 20) || file.size() % 512) {
-        error = "Use a 32–128 MiB FAT16 card image."; return false;
+    if (boot.size() != 512 || file.size() < (32ll << 20) || file.size() > maxBytes || file.size() % 512) {
+        error = QString("Use a 32 MB to %1 FAT16 card image.")
+            .arg(maxBytes >= (1ll << 30) ? QString("%1 GB").arg(maxBytes >> 30) : QString("%1 MB").arg(maxBytes >> 20));
+        return false;
+    }
+    // The working copy and the copy each edit makes.
+    const QStorageInfo storage(directory.path());
+    if (storage.bytesAvailable() < 2 * file.size() + (16ll << 20)) {
+        error = QString("There isn't room for the exchange copies. Free up about %1 MB and try again.")
+            .arg((2 * file.size() + (16ll << 20) - storage.bytesAvailable() + (1 << 20) - 1) >> 20);
+        return false;
     }
     auto word = [](const QByteArray& b, int at) { return qFromLittleEndian<quint16>(b.constData() + at); };
     auto dword = [](const QByteArray& b, int at) { return qFromLittleEndian<quint32>(b.constData() + at); };

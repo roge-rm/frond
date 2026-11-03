@@ -11,9 +11,21 @@ shows a white screen and goes back to the launcher.
 
 ## Virtual SD cards
 
-The desktop's **SD Card** menu creates 32, 64 or 128 MiB FAT16 cards, imports raw
-card images, ejects/reinserts the current card and exports an image. One card is
-kept per session. **Launch Application** in the File menu can start an installed
+The desktop's **SD Card** menu creates FAT16 cards, imports raw card images,
+ejects/reinserts the current card and exports an image. One card is kept per
+session. New cards come in 32 MB, 64 MB and so on up to the device's largest card:
+
+| Device | New card sizes | Images it takes |
+|---|---|---|
+| Palm TX | 32 MB to 2 GB | 32 MB to 2 GB |
+| Zire 72 | 32 MB to 2 GB | 32 MB to 2 GB |
+| Tungsten E2 | 32 MB to 1 GB | up to 1 GB (the real E2 doesn't see 2 GB cards) |
+
+None of them reads SDHC, so 2 GB is the top. A new 2 GB card is 1886 MB, the size of a
+real one, which Palm OS can format; it can't format a full 2 GiB image. Cards up to 128 MB are made in
+memory. Larger ones are made straight in the machine's folder and need room
+there for the whole card; making, inserting and exporting one shows its progress
+and can be cancelled. The Android app offers the same sizes. **Launch Application** in the File menu can start an installed
 Palm application by database name.
 
 A card is a private working copy in emulator memory. Importing an image does not
@@ -32,7 +44,9 @@ and open-file state, which raw image exports do not. No host filesystem mount or
 root privileges are required. Direct host-directory sharing is not implemented.
 
 The native CLI also accepts `--sd card.img`, `mount`, `unmount` and `save-sd`.
-TX images are limited to 32–128 MiB and must be aligned to 512-byte sectors.
+Images must fit the device (see the table above) and be aligned to 512-byte
+sectors. Cards above 128 MB need a session folder: a saved session, or
+`--work-folder` on a ROM start.
 Inputs remain unchanged unless explicitly selected as an export destination.
 Sessions with embedded cards reject a conflicting `--sd` argument.
 
@@ -92,7 +106,8 @@ normal completion. A crash can leave cache files, but does not change the
 recovery session or imported files. A crash after applying and before saving
 can lose the applied changes.
 
-Exchange supports 32–128 MiB FAT16 images with a primary FAT16 partition or a
+Exchange supports FAT16 images from 32 MB to the device's largest card, and
+needs room for two more copies of the card, with a primary FAT16 partition or a
 FAT16 superfloppy. Other image layouts may still import into the emulator but
 cannot be edited here. Use literal absolute card paths; wildcards, traversal
 components and ambiguous trailing spaces/dots are refused. Long names and
@@ -641,9 +656,9 @@ remain unqualified. The synchronous receive probe did not enter sleep; a separat
 completed-probe sleep attempt faulted in PACE before reaching sleep, including
 with serial detached.
 
-Classic 128 MB Memory Stick storage supports card images,
-Files and applications in Sony Launcher's Card category; see
-[Memory Stick storage](memory-stick.md). Memory Stick Pro, MagicGate, Memory Stick
+Classic Memory Stick storage, 4 to 128 MB, and Memory Stick Pro, 256 MB to 2 GB,
+support card images, Files and applications in Sony Launcher's Card category; see
+[Memory Stick storage](memory-stick.md). MagicGate, Memory Stick
 audio and high-power remote-control infrared
 remain unavailable.
 

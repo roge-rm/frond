@@ -76,7 +76,7 @@ class SmokeBoot(frond_run.SocketBoot):
 class Run:
     """One core process on the desktop control socket, run under a heavy emulator slot."""
 
-    def __init__(self, device, work, session=None, sound=None, timeout=900):
+    def __init__(self, device, work, session=None, sound=None, timeout=900, extra=()):
         self.work, self.deadline = work, time.monotonic() + timeout
         self.socket_dir = tempfile.mkdtemp(prefix='frond-smoke-')
         address = str(Path(self.socket_dir) / 'control')
@@ -89,7 +89,7 @@ class Run:
         else:
             boot = ['--device', device, str(PALM / cfg['nor'])] + (['--nand', str(PALM / cfg['nand'])] if cfg['nand'] else [])
         env = dict(os.environ, SDL_VIDEODRIVER='dummy', SDL_AUDIODRIVER='dummy')
-        command = ['heavy', 'emulator', str(CORE), *boot, '--desktop-socket', address]
+        command = ['heavy', 'emulator', str(CORE), *boot, *map(str, extra), '--desktop-socket', address]
         if sound:
             env.update(SDL_AUDIODRIVER='disk', SDL_DISKAUDIOFILE=str(sound))
         else:

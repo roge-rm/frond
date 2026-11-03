@@ -45,6 +45,40 @@ class DeviceTest {
     }
 }
 
+class SdBoundsTest {
+    // From the core's profiles: TX and Zire 72 take 32 MB to 2 GB (new cards 1886 MiB), the E2 up to 1 GB, the TG50 no SD.
+    @Test fun sizesFollowTheProfile() {
+        assertEquals(listOf(32, 64, 128, 256, 512, 1024, 1886), Device.TX.sdSizes)
+        assertEquals(listOf(32, 64, 128, 256, 512, 1024, 1886), Device.ZIRE72.sdSizes)
+        assertEquals(listOf(32, 64, 128, 256, 512, 1024), Device.E2.sdSizes)
+        assertEquals(emptyList<Int>(), Device.byId("sony-clie-tg50")!!.sdSizes)
+        assertEquals(2048L shl 20, Device.TX.sdImageMax)
+        assertEquals(1024L shl 20, Device.E2.sdImageMax)
+        assertEquals(2048L shl 20, Device.ZIRE72.sdImageMax)
+    }
+
+    @Test fun labels() {
+        assertEquals("32 MB", Device.sizeLabel(32))
+        assertEquals("512 MB", Device.sizeLabel(512))
+        assertEquals("1 GB", Device.sizeLabel(1024))
+        assertEquals("2 GB", Device.sizeLabel(1886))
+        assertEquals("1 GB", Device.sizeLabel(1L shl 30))
+    }
+}
+
+class MemoryStickSizesTest {
+    // The TG50 takes the six classic sizes, offered 128 MB first; SD devices have none.
+    @Test fun sizesFollowTheProfile() {
+        val tg50 = Device.byId("sony-clie-tg50")!!
+        assertEquals(listOf(4, 8, 16, 32, 64, 128), tg50.msSizes)
+        assertEquals(listOf(128, 64, 32, 16, 8, 4, 256, 512, 1024, 1886), tg50.memoryStickSizes)
+        assertEquals(emptyList<Int>(), Device.TX.memoryStickSizes)
+        assertEquals(listOf("128 MB", "4 MB"), listOf(128, 4).map { Device.sizeLabel(it) })
+        assertEquals(4_268_032L, Device.memoryStickPhysicalBytes(4))
+        assertEquals(136_577_024L, Device.memoryStickPhysicalBytes(128))
+    }
+}
+
 class FastAudioQualifiedTest {
     private fun nor(content: String) = java.io.File.createTempFile("nor", ".bin").apply { writeText(content); deleteOnExit() }
 

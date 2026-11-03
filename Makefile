@@ -48,7 +48,7 @@ out/frond: build/source/.prepared build/source/src/common/libcommon.a
 	cp build/source/src/uarm/cp-uarm out/frond.new
 	mv -f out/frond.new out/frond
 
-test: test-tg50-pwm-audio test-pxa-i2s-audio test-build-tools test-audio-results test-earlier-audio prepare test-pxa255-udc test-pxa270-udc test-usb-host-fixture test-usb-enumeration test-usb-bridge test-usb-bridge-soc test-e2-state test-tg50-state test-device-profiles test-uart-lifecycle test-uart-checkpoint test-uart-flow test-uart-dma-peer test-tx-serial test-gameplay-metrics test-mmu-fast-path test-mem-region-bounds test-pxa-power test-compatibility test-developer-run test-xscale-prefetch test-device-controls test-scheduler test-wifi test-host-network test-network-reliability test-keyboard test-network test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pace-debug test-pace-step test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup test-checkpoint-input test-native-database
+test: test-tg50-pwm-audio test-pxa-i2s-audio test-build-tools test-audio-results test-earlier-audio prepare test-pxa255-udc test-pxa270-udc test-usb-host-fixture test-usb-enumeration test-usb-bridge test-usb-bridge-soc test-e2-state test-tg50-state test-device-profiles test-uart-lifecycle test-uart-checkpoint test-uart-flow test-uart-dma-peer test-tx-serial test-gameplay-metrics test-mmu-fast-path test-mem-region-bounds test-pxa-power test-compatibility test-developer-run test-xscale-prefetch test-device-controls test-scheduler test-wifi test-host-network test-network-reliability test-keyboard test-network test-sd-image test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pace-debug test-pace-step test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup test-checkpoint-input test-native-database
 	python3 tests/audio-metrics.py
 	python3 tests/audio-timing.py
 	python3 tests/tx-baseline.py
@@ -242,11 +242,16 @@ deb-arm64:
 		-v $(CURDIR):/src -v $(CURDIR)/build/arm64/source:/src/build/source \
 		-w /src frond-arm64-cross tools/arm64/build.sh
 
-.PHONY: test-sd
+.PHONY: test-sd-image test-sd
+test-sd-image: prepare
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Ibuild/source/src/uarm/native tests/sd-image.cpp -o build/test-sd-image
+	./build/test-sd-image
+
 test-sd: out/frond
 	python3 tests/sd-results.py
-	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/common -Ibuild/source/src/uarm/native \
-		tests/sd-session.cpp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-sd-session
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/common -Ibuild/source/src/uarm/native -Ibuild/source/src/uarm/uarm \
+		tests/sd-session.cpp build/source/src/uarm/uarm/sdcard.cpp build/source/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-sd-session
 	./build/test-sd-session
 	$(CXX) -std=c++17 -O1 -g -ffunction-sections -fdata-sections \
 		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
@@ -770,6 +775,15 @@ test-memory-stick-controller: prepare
 		tests/memory-stick-controller.cpp build/source/src/uarm/uarm/mmiodev_MemoryStickController.cpp \
 		build/source/src/common/libcommon.a -lz -o build/test-memory-stick-controller
 	./build/test-memory-stick-controller
+
+.PHONY: test-memory-stick-pro
+test: test-memory-stick-pro
+test-memory-stick-pro: prepare
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/uarm/native -Ibuild/source/src/common \
+		tests/memory-stick-pro.cpp build/source/src/uarm/uarm/mmiodev_MemoryStickController.cpp \
+		build/source/src/common/libcommon.a -lz -o build/test-memory-stick-pro
+	./build/test-memory-stick-pro
 
 .PHONY: test-tg50-serial-configuration test-microwire64x16
 test: test-tg50-serial-configuration test-microwire64x16
