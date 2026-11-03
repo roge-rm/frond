@@ -94,7 +94,7 @@ class Rsp:
 class Debugger(unittest.TestCase):
     def setUp(self):
         self.log = tempfile.TemporaryFile()
-        self.target = subprocess.Popen([str(ROOT / 'build/test-gdbstub-target')] + getattr(self, 'target_args', []),
+        self.target = subprocess.Popen([os.environ.get('FROND_GDBSTUB_TARGET', str(ROOT / 'build/test-gdbstub-target'))] + getattr(self, 'target_args', []),
                                        stdout=self.log, stderr=self.log)
         self.addCleanup(self.cleanup_target)
         deadline = time.monotonic() + 5

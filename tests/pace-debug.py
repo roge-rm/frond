@@ -141,6 +141,30 @@ class PaceDebugger(unittest.TestCase):
         self.assertEqual(self.monitor('pace-last'), last)
         self.assertEqual(struct.unpack('<I', self.rsp.read(0x21004, 4))[0], 1)
 
+    def test_odd_word_read_retains_operand_address_and_direction(self):
+        self.rsp.write(0x30000 + 11 * 4, struct.pack('<I', 0x32001))
+        self.rsp.write(0x30000 + 16 * 4, struct.pack('<I', 0x34000))
+        self.rsp.write(0x33ffe, bytes.fromhex('1234'))
+        self.enter('3f2a001e')  # MOVE.W (001e,A2),-(A7)
+        self.monitor('pace-stop on')
+        self.assertEqual(self.rsp.request('c'), 'S05')
+        last = self.monitor('pace-last')
+        self.assertEqual(last['status'], 49)
+        self.assertEqual(last['fault_address'], 0x3201f)
+        self.assertFalse(last['fault_write'])
+        self.assertEqual(last['fault_status'], 10)
+        self.assertEqual(self.rsp.read(0x33ffe, 2).hex(), '1234')
+
+    def test_odd_word_write_retains_operand_address_and_direction(self):
+        self.enter('3080', a0=0x32001)  # MOVE.W D0,(A0)
+        self.monitor('pace-stop on')
+        self.assertEqual(self.rsp.request('c'), 'S05')
+        last = self.monitor('pace-last')
+        self.assertEqual(last['status'], 49)
+        self.assertEqual(last['fault_address'], 0x32001)
+        self.assertTrue(last['fault_write'])
+        self.assertEqual(last['fault_status'], 1)
+
     def test_fetch_fault_and_native_step_into_pace(self):
         self.enter(pc=0x200000)
         self.assertEqual(self.rsp.request('s'), 'S05')

@@ -301,7 +301,7 @@
       "width": 320,
       "height": 320,
       "silkscreen_height": 0,
-      "strip_height": 224,
+      "strip_height": 248,
       "app_names": "Date Book|Address|To Do|Memo Pad",
       "buttons": "up|down|app1|app2|app3|app4|home|power",
       "memory_stick_supported": true,
@@ -321,7 +321,7 @@
       "microphone": true,
       "serial": true,
       "keyboard": true,
-      "usb": false,
+      "usb": true,
       "infrared": true,
       "bluetooth": true
     },

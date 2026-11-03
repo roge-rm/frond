@@ -668,6 +668,7 @@ for line in s.makefile('rb'):
         QTest::newRow("tx") << QByteArray("palm-tx");
         QTest::newRow("e2") << QByteArray("palm-e2");
         QTest::newRow("zire72") << QByteArray("palm-zire-72");
+        QTest::newRow("tg50") << QByteArray("sony-clie-tg50");
     }
     void bluetoothSetting() {
         QFETCH(QByteArray, deviceId);

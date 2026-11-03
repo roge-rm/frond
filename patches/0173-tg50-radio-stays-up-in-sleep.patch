@@ -1,0 +1,16 @@
+--- a/src/uarm/uarm/CsrBcspRadio.cpp
++++ b/src/uarm/uarm/CsrBcspRadio.cpp
+@@ -156,7 +156,12 @@
+         needsRestart=savedRestart;deferredReset=savedDeferred;deferredExternal=savedExternal;
+     };
+ }
+-void CsrBcspRadio::Suspend(){if(checkpoints){deferredReset=true;return;}Fence(true,true);}
++// The radio's supply (A6 on the Sony microcontroller) stays on through PXA sleep, so a powered
++// radio keeps its BCSP link and controller, and the original driver carries on after wake.
++void CsrBcspRadio::Suspend(){
++    if(powered && Powered() && !controllerFailed)return;
++    if(checkpoints){deferredReset=true;return;}Fence(true,true);
++}
+ void CsrBcspRadio::Reset(){
+     if(checkpoints){deferredReset=deferredExternal=true;return;}
+     controllerFailed=false;Fence(true);powered=Powered();needsRestart=powered;error.clear();

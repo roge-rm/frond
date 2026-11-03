@@ -1,0 +1,9 @@
+--- a/src/common/device_profile5.h
++++ b/src/common/device_profile5.h
+@@ -113,5 +113,5 @@
+      DeviceDetect5::cardHeader, 0x736f6e79 /* sony */, 0x76726e61 /* vrna */,
+      DeviceBoard5::pxa250SonyTG50, DeviceArt::tg50,
+-     {false, true, true, false, false, true, true, true, true},
++     {false, true, true, true, false, true, true, true, true},
+      0xc70000, 0, 16u << 20, 16u << 20, DisplayMode::mode_320x320, 1u << 5, false,
+      DeviceNorLayout5::smallAndBigCards, 0, 0x20000, false, 0, 0,

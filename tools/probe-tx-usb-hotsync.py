@@ -4,7 +4,7 @@
 The core runs with --usb pty, or tcp:PORT with a PTY relayed to it here. A replay taps the HotSync
 button in the HotSync app (Local, Cradle/Cable) once per step; each step runs one
 pilot-link command on the endpoint: list, fetch MemoDB, install a PRC, list again
-and a few pilot-dlpsh commands. Needs pilot-xfer and pilot-dlpsh on PATH.
+and a few pilot-dlpsh commands, and with --only backup a full backup. Needs pilot-xfer and pilot-dlpsh on PATH.
 """
 import argparse
 import importlib.util
@@ -27,6 +27,7 @@ spec = importlib.util.spec_from_file_location('frond_run', ROOT / 'tools/frond-r
 runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
 FIRST_TAP_MS, STEP_MS = 12000, 30000
+MIN_STEP_SECONDS = 10  # Each listener starts 8 s before its tap and the short steps take about 10 s.
 BUTTON = (160, 160)  # HotSync button in the HotSync app at 320x320
 
 
@@ -54,6 +55,7 @@ def steps(install):
         {'name': 'list-after-install', 'argv': ['pilot-xfer', '-l'], 'expect': re.escape(name)},
         {'name': 'dlpsh', 'argv': ['pilot-dlpsh', '-i'], 'stdin': 'user\ndf\nls\nquit\n',
          'expect': r'(?s)Username.*Card0: RAM'},
+        {'name': 'backup', 'argv': ['pilot-xfer', '-b', 'backup'], 'expect': r'complete', 'optional': True},
     ]
 
 
@@ -142,11 +144,15 @@ class Pilot(threading.Thread):
 
 
 def main():
+    global BUTTON, STEP_MS
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--session', type=Path, required=True, help='user-supplied ready TX session')
     p.add_argument('--core', type=Path, default=ROOT / 'out/frond')
     p.add_argument('--install', type=Path, required=True, help='small PRC to install')
     p.add_argument('--endpoint', choices=['pty', 'tcp'], default='pty')
+    p.add_argument('--resume-app', action='store_true', help='session already shows the HotSync app')
+    p.add_argument('--button', default='160,160', help='HotSync button X,Y (TG50: 161,170)')
+    p.add_argument('--step-seconds', type=int, default=STEP_MS // 1000, help='time per step, at least %d; backup needs more (the default %d worked)' % (MIN_STEP_SECONDS, STEP_MS // 1000))
     p.add_argument('--only', help='comma-separated step names to run (default all)')
     p.add_argument('--output', type=Path, required=True, help='new private result directory')
     p.add_argument('--timeout', type=runner.positive, default=400)
@@ -167,6 +173,11 @@ def main():
             names = args.only.split(',')
             require(set(names) <= {step['name'] for step in plan}, 'Unknown step in --only')
             plan = [step for step in plan if step['name'] in names]
+        else:
+            plan = [step for step in plan if not step.get('optional')]
+        require(args.step_seconds >= MIN_STEP_SECONDS, f'--step-seconds must be at least {MIN_STEP_SECONDS}')
+        BUTTON = tuple(int(v) for v in args.button.split(','))
+        STEP_MS = args.step_seconds * 1000
         usb = 'pty' if args.endpoint == 'pty' else f'tcp:{free_port()}'
         report['usb'] = usb
         replay = root / 'taps.replay'
@@ -176,7 +187,7 @@ def main():
         pilot.start()
         run_for = (FIRST_TAP_MS + STEP_MS * len(plan)) // 1000
         argv = ['--core', str(args.core.resolve()), '--session', str(args.session.resolve()),
-                '--output', str(root / 'run'), '--app', 'HotSync', '--headless', '--replay', str(replay),
+                '--output', str(root / 'run'), *(['--resume-app'] if args.resume_app else ['--app', 'HotSync']), '--headless', '--replay', str(replay),
                 '--run-for', str(run_for), '--screenshot', str(run_for * 1000 - 500), '--usb', usb,
                 '--timeout', str(args.timeout), '--startup-timeout', str(args.timeout), '--ready-timeout', '45']
         result = runner.run(runner.parser().parse_args(argv))

@@ -42,7 +42,8 @@ static void success(){
  power=false;uint64_t now=0;CsrBcspRadio radio({[](void*p)->uint64_t{return *static_cast<uint64_t*>(p);},&now},nullptr,nullptr);Server s;std::string error;assert(radio.SetBackend(s.path,error));s.Accept();power=true;radio.PinsChanged();s.ResetCommand();
  power=false;radio.PinsChanged();power=true;radio.PinsChanged();s.NoNew();s.Reply();now=1;tick(context);assert(radio.State().find("error:")!=0&&radio.State().find("provider connected")!=std::string::npos);
  {auto cp=radio.CaptureInput();power=false;radio.PinsChanged();power=true;cp();}s.NoNew();
- radio.Suspend();s.ResetCommand();s.Reply();now=3000000001ull;tick(context);assert(radio.State().find("error:")!=0);s.NoNew();
+ // A powered radio keeps its controller through sleep: no reset goes to the provider.
+ radio.Suspend();{char b;assert(recv(s.peer,&b,1,MSG_DONTWAIT)<0&&errno==EAGAIN);}now=3000000001ull;tick(context);assert(radio.State().find("error:")!=0);s.NoNew();
  radio.Reset();char b;assert(recv(s.peer,&b,1,MSG_DONTWAIT)==0);
 }
 static void legacyExternal(unsigned version){

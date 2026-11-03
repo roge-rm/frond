@@ -1,0 +1,113 @@
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -1170,6 +1170,26 @@
+ #endif
+ }
+ 
++// TG50 automatic library Sleep/Wake, in place of "mov r3, #0" before "bl 200ec798".
++// r7 is the 68k state, r1 the library table index. The refnum goes in the free stack word
++// below A7; 200de128 then reserves argBytes + 4 under A7, so the library sees it at 8(A6)
++// after LINK, and A7 is back where it was when the call returns. If A7 is odd or the write
++// fails, the call keeps the firmware's zero-argument form.
++template <int memorySystemKind>
++static void execFn_tg50LibraryRefnum(struct ArmCpu *cpu, uint32_t instr) {
++    uint_fast8_t fsr = 0;
++    uint32_t a7 = 0;
++    cpu->regs[3] = 0;
++    if (!cpuPrvMemOpEx<memorySystemKind, 4, false>(cpu, &a7, cpu->regs[7] + 0x40,
++                                                   cpu->privileged, &fsr) ||
++        (a7 & 1) || a7 < 2)
++        return;
++    // 68k memory is big-endian.
++    uint16_t refnum = __builtin_bswap16(uint16_t(cpu->regs[1]));
++    if (cpuPrvMemOpEx<memorySystemKind, 2, true>(cpu, &refnum, a7 - 2, cpu->privileged, &fsr))
++        cpu->regs[3] = 2;
++}
++
+ static void execFn_peephole_ADC_udiv10(struct ArmCpu *cpu, uint32_t instr) {
+     const uint32_t num = cpuPrvGetRegNotPC(cpu, 0);
+ 
+@@ -2253,6 +2273,9 @@
+                 case INSTR_PACE_RETURN_FROM_CALLOUT:
+                     return PREFIX_EXEC_FN(execFn_paceReturnFromCallout<memorySystemKind>);
+ 
++                case INSTR_TG50_LIBRARY_REFNUM:
++                    return PREFIX_EXEC_FN(execFn_tg50LibraryRefnum<memorySystemKind>);
++
+                 case INSTR_PEEPHOLE_ADS_UDIVMOD:
+                     return PREFIX_EXEC_FN(execFn_peephole_ADC_udivmod<memorySystemKind>);
+ 
+--- a/src/uarm/uarm/pace_patch.cpp
++++ b/src/uarm/uarm/pace_patch.cpp
+@@ -168,6 +168,27 @@
+         if (readLe32(data, offset + 4 * i) != words[i]) return false;
+     return true;
+ }
++
++// The automatic Sleep/Wake walk (200ec8dc) calls each 68k library's Sleep or Wake through
++// 200ec798 with no stack arguments, so the library reads its refnum from whatever word sits
++// at the caller's A7. The hook replaces "mov r3, #0" with INSTR_TG50_LIBRARY_REFNUM, which
++// writes the table index (r1) below the 68k A7 and passes argBytes 2 in r3.
++constexpr size_t tg50RefnumSite = 0x0ec948;
++constexpr uint32_t tg50RefnumCode[] = {
++    0xe1a01804,  // 200ec940 mov r1, r4, lsl #16
++    0xe1a01821,  //          mov r1, r1, lsr #16
++    0xe3a03000,  // 200ec948 mov r3, #0 (hooked)
++    0xe1a02008,  //          mov r2, r8
++    0xe1a00007,  //          mov r0, r7 (state)
++    0xebffff8f   // 200ec954 bl 200ec798
++};
++constexpr size_t tg50RefnumStart = tg50RefnumSite - 8;
++constexpr size_t tg50RefnumEnd = tg50RefnumStart + sizeof(tg50RefnumCode);
++
++bool tg50RefnumHookable(const uint8_t* data) {
++    return tg50Words(data, tg50RefnumStart, tg50RefnumCode,
++                     sizeof(tg50RefnumCode) / sizeof(tg50RefnumCode[0]));
++}
+ }
+ 
+ bool pacePatchDiscoverTg50(PacePatch* patch, uint32_t romBase, const void* original, size_t size) {
+@@ -236,11 +257,23 @@
+                          readLe32(code, entry + 4) == replacement[1] &&
+                          readLe32(code, entry + 8) == replacement[2];
+     const size_t prefix = patched ? 12 : 0;
++    // The refnum hook word may already be in the shadow; everything else must be original.
++    const bool hookable = tg50RefnumHookable(data) && tg50RefnumEnd <= entry;
++    const bool hooked = hookable && readLe32(code, tg50RefnumSite) == INSTR_TG50_LIBRARY_REFNUM;
++    const size_t skip = hooked ? 4 : 0;
+     if (memcmp(code + tg50Database, data + tg50Database, tg50CodeStart - tg50Database) ||
+-        memcmp(code + tg50CodeStart, data + tg50CodeStart, entry - tg50CodeStart) ||
++        (hookable
++             ? memcmp(code + tg50CodeStart, data + tg50CodeStart, tg50RefnumSite - tg50CodeStart) ||
++                   memcmp(code + tg50RefnumSite + skip, data + tg50RefnumSite + skip,
++                          entry - tg50RefnumSite - skip)
++             : memcmp(code + tg50CodeStart, data + tg50CodeStart, entry - tg50CodeStart)) ||
+         memcmp(code + entry + prefix, data + entry + prefix, tg50CodeEnd - entry - prefix))
+         return false;
+     memcpy(code + entry, replacement, sizeof(replacement));
++    if (hookable) {
++        const uint32_t hook = INSTR_TG50_LIBRARY_REFNUM;
++        memcpy(code + tg50RefnumSite, &hook, sizeof(hook));
++    }
+     *patch = candidate;
+     return true;
+ }
+--- a/src/uarm/uarm/pace_patch.h
++++ b/src/uarm/uarm/pace_patch.h
+@@ -7,6 +7,8 @@
+ #define INSTR_PACE_ENTER 0xfff9ace0
+ #define INSTR_PACE_RESUME 0xfff9ace1
+ #define INSTR_PACE_RETURN_FROM_CALLOUT 0xfff9ace2
++// TG50 automatic library Sleep/Wake: passes the library's refnum to 68k libraries.
++#define INSTR_TG50_LIBRARY_REFNUM 0xfff9ace3
+ 
+ struct PacePatch {
+     uint32_t enterPace;
+@@ -30,6 +32,7 @@
+ 
+ // TG50 discovery reads original NOR. Applying changes only the instruction shadow.
+ // Both functions clear the output before validation and leave memory unchanged on failure.
++// Init also hooks the automatic library Sleep/Wake call when its code matches.
+ bool pacePatchDiscoverTg50(PacePatch* patch, uint32_t romBase, const void* original, size_t size);
+ bool pacePatchInitTg50(PacePatch* patch, uint32_t romBase, const void* original,
+                       void* shadow, size_t size);

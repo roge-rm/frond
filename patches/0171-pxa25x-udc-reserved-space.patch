@@ -1,0 +1,40 @@
+--- a/src/uarm/uarm/pxa255_UDC.cpp
++++ b/src/uarm/uarm/pxa255_UDC.cpp
+@@ -1,6 +1,7 @@
+ //(c) uARM project    https://github.com/uARM-Palm/uARM    uARM@dmitry.gr
+ #include "pxa255_UDC.h"
+ #include <algorithm>
++#include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
+ #include "cputil.h"
+@@ -19,6 +20,7 @@
+     struct Fifo { uint8_t data[2][64]{}, size[2]{}, head{}, count{}, fill{}, pos{}; } fifo[16];
+     uint8_t rx0[16]{}, tx0[16]{}, rxPos{}, rxSize{}, txSize{};
+     bool ready0{};
++    uint8_t reservedLogged[0x1000/32]{}; // Bitmap of reserved word offsets already logged.
+     bool clockEnabled{true}; // Derived from the connected clock manager, not portable UDC state.
+     uint8_t address{}, pendingAddress{}, configuration{}, remoteWake{};
+     // Hardware-decoded request: data IN, status IN, status OUT, or stall.
+@@ -197,7 +199,20 @@
+     else if(off>=0x68 && off<=0x7c && !(off&3)) {
+         constexpr unsigned eps[]={2,4,7,9,12,14};const auto& f=u->fifo[eps[(off-0x68)/4]];
+         if(!write)value=f.count && f.pos<f.size[f.head]?f.size[f.head]-f.pos-1:0;
+-    } else return false;
++    } else {
++        // Reserved UDC space. The manual (2.8) calls access unpredictable; Sony's TG50 USB
++        // driver stores to 0x40600210 and HotSyncs on real hardware, so as a judgement call
++        // aligned word accesses to offsets no register decodes read zero and ignore writes.
++        // Anything else is refused.
++        if(size!=4 || (off&3) || off>=0x1000)return false;
++        uint8_t& seen=u->reservedLogged[off>>5];const uint8_t bit=1u<<((off>>2)&7);
++        if(!(seen&bit)) {
++            seen|=bit;
++            fprintf(stderr,"UDC: ignoring %s at reserved 0x%08lx\n",write?"write":"read",(unsigned long)pa);
++        }
++        if(!write)std::memset(buf,0,size);
++        return true;
++    }
+     refreshDma(u);
+     if(write){irq(u);if(u->notify)u->notify(u->notifyContext);}
+     else std::memcpy(buf,&value,size);

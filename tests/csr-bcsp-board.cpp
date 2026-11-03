@@ -72,8 +72,8 @@ static void lifecycle(){
   {SoC::InputCheckpoint cp(m.soc);sleep(m);assert(!server.Eof());assert(cp.Restore(saved.size(),saved.data()));}
   assert(!m.soc.PowerSleeping() && m.Save()==saved && !server.Eof());
   m.wr(0x40f0000c,0x80000000);m.wr(0x40900008,0);m.wr(0x40900004,m.rd(0x40900000)+1);
-  sleep(m);assert(!server.Eof());server.ReceiveReset();server.NoNew();server.Send({4,14,4,1,3,0x0c,0});m.Run(40000);assert(m.soc.PowerSleeping()&&m.soc.BluetoothState().find("reset pending")==std::string::npos);
-  std::this_thread::sleep_for(std::chrono::milliseconds(1100));m.soc.Run(1100000,1000000);assert(!m.soc.PowerSleeping());m.wr(0x48000000,0x00001bcd);m.wr(0xa0003000,0xeafffffe);cpuInvalidateCodeCache(m.soc.GetCpu());cpuSetReg(m.soc.GetCpu(),ARM_REG_NUM_CPSR,ARM_SR_MODE_SVC|ARM_SR_I|ARM_SR_F);cpuSetReg(m.soc.GetCpu(),15,0xa0003000);m.Mode();m.Power(false);m.Power(true);server.ReceiveReset();
+  sleep(m);assert(!server.Eof());{char b;assert(recv(server.peer,&b,1,MSG_DONTWAIT)<0&&errno==EAGAIN);}server.NoNew();m.Run(40000);assert(m.soc.PowerSleeping()&&m.soc.BluetoothState().find("reset pending")==std::string::npos);
+  std::this_thread::sleep_for(std::chrono::milliseconds(1100));m.soc.Run(1100000,1000000);assert(!m.soc.PowerSleeping());m.wr(0x48000000,0x00001bcd);m.wr(0xa0003000,0xeafffffe);cpuInvalidateCodeCache(m.soc.GetCpu());cpuSetReg(m.soc.GetCpu(),ARM_REG_NUM_CPSR,ARM_SR_MODE_SVC|ARM_SR_I|ARM_SR_F);cpuSetReg(m.soc.GetCpu(),15,0xa0003000);m.Mode();for(unsigned i=0;i<200;++i)m.Step(peer);assert(peer.State()==BcspTransport::Link::active);{char b;assert(recv(server.peer,&b,1,MSG_DONTWAIT)<0&&errno==EAGAIN);}m.Power(false);m.Power(true);server.ReceiveReset();
   server.Send({4,14,4,1,3,0x0c,0});peer.Start(m.soc.GetTime());for(unsigned i=0;i<3000&&peer.State()!=BcspTransport::Link::active;++i)m.Step(peer);assert(peer.State()==BcspTransport::Link::active);server.NoNew();
  }
  {
@@ -83,6 +83,17 @@ static void lifecycle(){
   m.soc.Reset();assert(server.Eof());
  }
  {
+  // A full (non-checkpoint) save taken asleep with the radio powered and the link up loads fenced: peer closed, restart required.
+  Machine m;Server server;BcspTransport peer({250000000,250000000,12});connect(m,server,peer);
+  sleep(m);assert(!server.Eof() && peer.State()==BcspTransport::Link::active);
+  auto asleep=m.Save();assert(radio(asleep)[9] && radio(asleep)[10]);
+  assert(m.soc.Load(asleep.size(),asleep.data()));
+  assert(server.Eof());
+  const auto state=m.soc.BluetoothState();
+  assert(state.find("radio restart required")!=std::string::npos && state.find("BCSP=0")!=std::string::npos);
+  auto loaded=radio(m.Save());assert(!loaded[10] && loaded[11]);
+ }
+ {
   Machine m;Server server;BcspTransport peer({250000000,250000000,12});connect(m,server,peer);auto legacy=withoutRadio(m.Save());
   assert(m.soc.Load(legacy.size(),legacy.data()) && server.Eof());
   Machine fresh;assert(fresh.soc.Load(legacy.size(),legacy.data()));
@@ -90,7 +101,7 @@ static void lifecycle(){
   Machine off;auto offLegacy=withoutRadio(off.Save());assert(off.soc.Load(offLegacy.size(),offLegacy.data()));
   assert(off.soc.BluetoothState()=="off" && !radio(off.Save())[9] && !radio(off.Save())[11]);
  }
- puts("PASS real true-sleep retains controller/reset quarantines guest; external reset closes peer, both deferred+restored checkpoints preserve exact state/peer; absent optional Bluetooth chunk awake/off and fresh quarantine");
+ puts("PASS real true-sleep keeps a powered radio's controller and BCSP link; external reset closes peer, both deferred+restored checkpoints preserve exact state/peer; absent optional Bluetooth chunk awake/off and fresh quarantine");
 }
 int main(int argc,char**){
  if(argc>1){lifecycle();return 0;}

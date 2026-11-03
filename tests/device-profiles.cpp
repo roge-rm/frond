@@ -218,12 +218,12 @@ int main() {
         assert(deviceConfigurationDisplayConfigForDevice(deviceTypePV, DisplayMode::mode_320x320).graffitiHeight == 120);
         assert(p->art == DeviceArt::tg50 && p->board == DeviceBoard5::pxa250SonyTG50);
         assert(p->frontend.available && deviceProfileRunnerEligible5(p->deviceType));
-        assert(p->frontend.sideTabWidth == 34 && p->frontend.stripHeight == 224 && p->frontend.holdPresent && p->frontend.holdSupported);
+        assert(p->frontend.sideTabWidth == 34 && p->frontend.stripHeight == 248 && p->frontend.holdPresent && p->frontend.holdSupported);
         assert(p->frontend.homeKey == 1073741887 && p->frontend.homeX == -1 && p->frontend.homeY == -1);
         assert(deviceProfileStorageSlot5(*p) == DeviceStorageSlot5::memoryStick);
         assert(p->frontend.memoryStick && !p->frontend.sdSlot && !p->frontend.camera && p->capabilities.sound);
         const auto& caps = p->capabilities;
-        assert(!caps.network && caps.keyboard && caps.serial && caps.microphone && !caps.usb &&
+        assert(!caps.network && caps.keyboard && caps.serial && caps.microphone && caps.usb &&
                !caps.fastAudio && caps.infrared && caps.bluetooth);
         assert(!deviceProfileSdSizeValid5(p->deviceType, 512));
         std::vector<uint8_t> nor(p->norSize);

@@ -36,7 +36,9 @@ fun MachineSettingsScreen(model: HomeModel) {
         value = null
         value = withContext(Dispatchers.IO) {
             val session = draft.sessionId?.let { Sessions.read(context, it)?.file }
-            Firmware.fastAudioQualified(draft.device, session, Firmware.nor(context, draft.device))
+            if (draft.device.id == "sony-clie-tg50")
+                Firmware.sonyPreviewEligible(draft.device, session, Firmware.nor(context, draft.device))
+            else Firmware.fastAudioQualified(draft.device, session, Firmware.nor(context, draft.device))
         }
     }
     model.alert?.let { (title, text) ->
@@ -81,8 +83,14 @@ fun MachineSettingsScreen(model: HomeModel) {
             SwitchRow("Sound", draft.device.sound && draft.settings.sound, enabled = draft.device.sound) {
                 model.changeMachineSettings(draft.settings.copy(sound = it))
             }
-            SwitchRow("Low-latency audio", qualified == true && draft.settings.fastAudio, enabled = qualified == true) {
-                model.changeMachineSettings(draft.settings.copy(fastAudio = it))
+            if (draft.device.id == "sony-clie-tg50") {
+                SwitchRow("Sony audio preview", qualified == true && draft.settings.sonyAudioPreview, enabled = qualified == true) {
+                    model.changeMachineSettings(draft.settings.copy(sonyAudioPreview = it))
+                }
+            } else {
+                SwitchRow("Low-latency audio", qualified == true && draft.settings.fastAudio, enabled = qualified == true) {
+                    model.changeMachineSettings(draft.settings.copy(fastAudio = it))
+                }
             }
         }
     }
