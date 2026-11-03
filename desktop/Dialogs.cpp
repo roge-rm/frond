@@ -109,15 +109,23 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
 
     showKeyboard = new QCheckBox(tr("Show keyboard"), display);
     showKeyboard->setObjectName("showKeyboard");
-    showJogControls = new QCheckBox(tr("Show jog controls"), display);
-    showJogControls->setObjectName("showJogControls");
+    jogControlsLabel = new QLabel(tr("Jog controls"), display);
+    jogControls = new QComboBox(display);
+    jogControls->setObjectName("jogControls");
+    jogControls->addItem(tr("Hidden"), int(frondSessions::JogControls::hidden));
+    jogControls->addItem(tr("Left of screen"), int(frondSessions::JogControls::screen));
+    jogControls->addItem(tr("Left of keyboard"), int(frondSessions::JogControls::keyboard));
+    jogControlsLabel->setBuddy(jogControls);
     showKeyboard->setChecked(prefs.showKeyboard);
-    showJogControls->setChecked(prefs.showJogControls);
+    jogControls->setCurrentIndex(jogControls->findData(int(prefs.jogControls)));
     displayLayout->addWidget(scaleLabel);
     displayLayout->addWidget(windowScale);
     displayLayout->addWidget(smoothLcd);
     displayLayout->addWidget(showKeyboard);
-    displayLayout->addWidget(showJogControls);
+    auto* jogRow = new QHBoxLayout;
+    jogRow->addWidget(jogControlsLabel);
+    jogRow->addWidget(jogControls, 1);
+    displayLayout->addLayout(jogRow);
     layout->addWidget(display);
     auto* sound = new QGroupBox(tr("Audio"), this);
     auto* soundLayout = new QVBoxLayout(sound);
@@ -143,6 +151,20 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     scaleLabel->setText(tr("Size: %1×").arg(windowScale->value() / 4.0));
 }
 
+int fittingScaleQuarters(Device device, bool keyboard, frondSessions::JogControls jog) {
+    const auto& display = frondFirmware::profile(device).frontend;
+    int width = display.width + display.sideTabWidth, height = display.height + display.silkscreenHeight + display.stripHeight;
+    if (device == frondFirmware::deviceFromId("sony-clie-tg50")) {
+        // The TG50 sizes the core lays out: the jog tab adds 34 across unless it is hidden or beside the keyboard.
+        const bool hidden = jog == frondSessions::JogControls::hidden, beside = keyboard && jog == frondSessions::JogControls::keyboard;
+        width = hidden || beside ? 320 : 354;
+        height = keyboard ? (beside ? 521 : hidden ? 544 : 568) : (hidden ? 368 : 374);
+    }
+    const auto* screen = QGuiApplication::primaryScreen();
+    const auto available = screen ? screen->availableGeometry().size() : QSize();
+    return int(4 * fittingWindowScale(width, height, available.width(), available.height()));
+}
+
 frondSessions::Preferences MachineSettings::values() const {
     auto prefs = originalPreferences;
     prefs.scale = windowScale->value();
@@ -151,13 +173,14 @@ frondSessions::Preferences MachineSettings::values() const {
     prefs.fastAudio = fastAudio->isChecked();
     prefs.sonyAudioPreview = sonyAudioPreview->isChecked();
     prefs.showKeyboard = showKeyboard->isChecked();
-    prefs.showJogControls = showJogControls->isChecked();
+    prefs.jogControls = frondSessions::JogControls(jogControls->currentData().toInt());
     return prefs;
 }
 void MachineSettings::setDevice(Device device, bool qualified) {
     const bool tg50 = device == frondFirmware::deviceFromId("sony-clie-tg50");
     showKeyboard->setVisible(tg50);
-    showJogControls->setVisible(tg50);
+    jogControlsLabel->setVisible(tg50);
+    jogControls->setVisible(tg50);
     fastAudio->setVisible(!tg50);
     sonyAudioPreview->setVisible(tg50);
     sonyAudioPreview->setEnabled(tg50 && qualified);
@@ -171,12 +194,9 @@ void MachineSettings::setDevice(Device device, bool qualified) {
         frondFirmware::capabilities(device).fastAudio ? tr("Requires qualified firmware") :
         tr("Not available on the %1 yet").arg(frondFirmware::deviceName(device)));
     if (automaticScale && device != Device::automatic) {
-        const auto& display = frondFirmware::profile(device).frontend;
-        const auto* screen = QGuiApplication::primaryScreen();
-        const auto available = screen ? screen->availableGeometry().size() : QSize();
         const QSignalBlocker blocked(windowScale);
-        windowScale->setValue(int(4 * fittingWindowScale(display.width + display.sideTabWidth,
-            display.height + display.silkscreenHeight + display.stripHeight, available.width(), available.height())));
+        windowScale->setValue(fittingScaleQuarters(device, showKeyboard->isChecked(),
+            frondSessions::JogControls(jogControls->currentData().toInt())));
         scaleLabel->setText(tr("Size: %1×").arg(windowScale->value() / 4.0));
     }
 }

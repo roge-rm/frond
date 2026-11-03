@@ -26,25 +26,38 @@ class MachineSettingsTest {
     private fun settings(file: File) = MachineSettings.from(SessionMetadata.read(file) { legacy }.optJSONObject("settings"))
 
     @Test fun independentControlVisibilityDefaultsAndRoundTrips() {
+        // New machines put the jog controls left of the keyboard; settings from before the
+        // choice keep them left of the screen.
+        assertEquals(JogControls.KEYBOARD, MachineSettings().jogControls)
         val old = MachineSettings.from(
-            legacy.json().apply { remove("showKeyboard"); remove("showJogControls") },
-            MachineSettings(showKeyboard = false, showJogControls = false),
+            legacy.json().apply { remove("showKeyboard"); remove("showJogControls"); remove("jogControls") },
+            MachineSettings(showKeyboard = false, jogControls = JogControls.HIDDEN),
         )
         assertTrue(old.showKeyboard)
-        assertTrue(old.showJogControls)
+        assertEquals(JogControls.SCREEN, old.jogControls)
+        for (shown in listOf(false, true)) {
+            val switch = legacy.json().apply { remove("jogControls"); put("showJogControls", shown) }
+            assertEquals(if (shown) JogControls.SCREEN else JogControls.HIDDEN, MachineSettings.from(switch).jogControls)
+            switch.put("jogControls", "sideways")
+            assertEquals(if (shown) JogControls.SCREEN else JogControls.HIDDEN, MachineSettings.from(switch).jogControls)
+        }
+        assertEquals(listOf("Hidden", "Left of screen", "Left of keyboard"), JogControls.entries.map { it.label })
         val first = metadata("visibility-first", legacy.copy(microphone = true))
         val second = metadata("visibility-second", legacy)
-        for (keyboard in listOf(false, true)) for (jog in listOf(false, true)) {
-            val chosen = legacy.copy(microphone = true, showKeyboard = keyboard, showJogControls = jog)
+        for (keyboard in listOf(false, true)) for (jog in JogControls.entries) {
+            val chosen = legacy.copy(microphone = true, showKeyboard = keyboard, jogControls = jog)
             SessionMetadata.update(first) { it.put("settings", chosen.json()) }
             val loaded = settings(first)
             assertEquals(chosen, loaded)
             assertEquals(legacy, settings(second))
+            // Older Frond versions still read the switch.
+            assertEquals(jog != JogControls.HIDDEN, chosen.json().getBoolean("showJogControls"))
             val arguments = loaded.arguments(tg50Controls = true)
             assertEquals(!keyboard, "--hide-keyboard" in arguments)
-            assertEquals(!jog, "--hide-jog-controls" in arguments)
+            assertEquals(jog.arg, arguments[arguments.indexOf("--jog-controls") + 1])
+            assertFalse("--hide-jog-controls" in arguments)
             assertFalse("--hide-keyboard" in loaded.arguments())
-            assertFalse("--hide-jog-controls" in loaded.arguments())
+            assertFalse("--jog-controls" in loaded.arguments())
         }
     }
 

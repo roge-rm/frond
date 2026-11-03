@@ -823,6 +823,101 @@ static void viewsLeaveOlderDevices() {
     }
 }
 
+// Jog controls left of the keyboard: the LCD takes the full width, the strip narrows to fit
+// beside the tab and keeps its proportions; without the keyboard the tab goes back beside the LCD.
+static void tg50JogBesideKeyboard() {
+    const auto& p=deviceControls(DeviceArt::tg50);
+    const int width=320,height=320;
+    const auto beside=deviceControlView(true,JogPlacement::keyboard),screen=deviceControlView(true,JogPlacement::screen);
+    const auto hidden=deviceControlView(true,JogPlacement::hidden),fallback=deviceControlView(false,JogPlacement::keyboard);
+    assert(beside.keyboard && beside.sideTab && beside.sideTabBesideKeyboard && deviceSideTabBelowScreen(p,beside));
+    assert(screen.sideTab && !screen.sideTabBesideKeyboard && !hidden.sideTab && !deviceSideTabBelowScreen(p,fallback));
+    JogPlacement parsed;
+    assert(parseJogPlacement("hidden",parsed) && parsed==JogPlacement::hidden);
+    assert(parseJogPlacement("screen",parsed) && parsed==JogPlacement::screen);
+    assert(parseJogPlacement("keyboard",parsed) && parsed==JogPlacement::keyboard && !parseJogPlacement("left",parsed));
+    // Older devices ignore the placement.
+    assert(!deviceSideTabBelowScreen(deviceControls(DeviceArt::tx),beside) && deviceScreenLeft(deviceControls(DeviceArt::tx),beside)==0);
+    assert(deviceScreenLeft(p,beside)==0 && deviceControlsWidth(p,width,beside)==320 && deviceControlsHeight(p,beside)==201);
+    assert(deviceScreenLeft(p,fallback)==34 && deviceControlsWidth(p,width,fallback)==354 && deviceControlsHeight(p,fallback)==54);
+    assert(deviceControlsWidth(p,width,hidden)==320 && deviceControlsHeight(p,hidden)==224);
+    const DeviceControlTransform t(p,width,beside);
+    assert(t.left==34 && t.sidebarLeft==34 && std::fabs(t.scale-286.f/320)<1e-6f && t.sidebarTop==245);
+    const DeviceControlTransform ts(p,width,fallback);
+    assert(ts.sidebarTop==0 && ts.sidebarLeft==34);
+    const int strip=deviceControlsHeight(p,beside);
+    for(size_t i=0;i<p.count;++i) {
+        const auto& b=p.buttons[i];
+        const auto r=deviceButtonRect(p,b,width,height,beside);
+        if(b.section==DeviceControlSection::sideTab) {
+            // The tab keys stay 30 pixels wide with 2 pixel margins, inside the strip's height.
+            assert(r.x==2 && r.w==30 && r.h==b.bounds.h);
+            assert(r.y>height && r.y+r.h<height+strip);
+        } else {
+            // Everything else right of the tab, scaled the same both ways.
+            assert(r.x>=34 && r.x+r.w<=width && r.y>=height && r.y+r.h<=height+strip);
+            assert(std::abs(r.w-b.bounds.w*t.scale)<=1 && std::abs(r.h-b.bounds.h*t.scale)<=1);
+        }
+        // Hit areas line up with the drawn rectangles in every placement.
+        for(const auto& view : {beside,screen,fallback}) {
+            const auto k=deviceButtonRect(p,b,width,height,view);
+            if(!deviceControlShown(b,view))continue;
+            assert(deviceControlAt(p,width,height,k.x+k.w/2,k.y+k.h/2,view)==b.key);
+        }
+    }
+    // Every pixel that hits a key is inside that key's drawn rectangle.
+    for(const auto& view : {beside,screen,fallback,hidden}) {
+        const int w=deviceControlsWidth(p,width,view),top=deviceScreenLeft(p,view) ? 0 : height;
+        for(int y=top;y<height+deviceControlsHeight(p,view);++y)for(int x=0;x<w;++x) {
+            const KeyId key=deviceControlAt(p,width,height,x,y,view);
+            if(key==keyInvalid)continue;
+            bool inside=false;
+            for(size_t i=0;i<p.count;++i) {
+                if(p.buttons[i].key!=key)continue;
+                const auto k=deviceButtonRect(p,p.buttons[i],width,height,view);
+                inside=deviceControlShown(p.buttons[i],view) && x>=k.x-1 && x<=k.x+k.w && y>=k.y-1 && y<=k.y+k.h;
+            }
+            assert(inside);
+        }
+    }
+    // Drawn: no tab beside the LCD, held keys darken where they hit, the body runs the full width.
+    for(float scale:{1.f,1.25f,2.f}) {
+        const int sw=int(width*scale),sh=int((height+strip)*scale);
+        auto* surface=SDL_CreateRGBSurfaceWithFormat(0,sw,sh,32,SDL_PIXELFORMAT_RGBA32);
+        auto* renderer=SDL_CreateSoftwareRenderer(surface);assert(surface && renderer);
+        SDL_SetRenderDrawColor(renderer,255,0,255,255);SDL_RenderClear(renderer);
+        drawDeviceSidebar(renderer,p,width,height,scale,0,beside);
+        auto c=readPixel(surface,int(17*scale),int(154*scale));assert(c.r==255 && c.g==0 && c.b==255);
+        for(size_t i=0;i<p.count;++i) {
+            const auto& b=p.buttons[i];
+            if(b.section==DeviceControlSection::keyboard && b.key%5)continue;
+            const auto r=deviceButtonRect(p,b,width,height,beside);
+            // A spot clear of legends and icons, as in tg50Art.
+            float x=r.x+r.w*0.5f,y=r.y+r.h*0.85f;
+            if(b.key==keyIdHome || b.key==keyIdGraffiti)y=r.y+r.h-4.5f*t.scale;
+            if(b.key==keyIdUp || b.key==keyIdDown)x=r.x+10*t.scale,y=r.y+r.h*0.5f;
+            if(b.key==keyIdJogPress)x=r.x+r.w*0.5f+6,y=r.y+r.h*0.5f;
+            if(b.key==keyIdJogUp || b.key==keyIdJogDown)x=r.x+4,y=r.y+r.h*0.5f;
+            if(b.key>=keyIdKeyboard)x=r.x+5*t.scale;
+            const int px=int(x*scale),py=int(y*scale);
+            drawDeviceControls(renderer,p,width,height,scale,0,beside);
+            const int idle=brightness(readPixel(surface,px,py));
+            drawDeviceControls(renderer,p,width,height,scale,deviceKeyBit(b.key),beside);
+            const int held=brightness(readPixel(surface,px,py));
+            if(held>=idle-12)std::fprintf(stderr,"TG50 beside keyboard key %d at %d,%d scale %g: idle %d held %d\n",b.key,px,py,scale,idle,held);
+            assert(held<idle-12);
+        }
+        for(int x : {0,33,34,319}) {
+            const auto d=readPixel(surface,int(x*scale),int((height+strip-2)*scale));
+            assert(!(d.r==255 && d.g==0 && d.b==255));
+        }
+        // The bezel's dark lower edge runs across the tab too.
+        assert(brightness(readPixel(surface,int(10*scale),int((height+0.5f)*scale)))<
+               brightness(readPixel(surface,int(10*scale),int((height+6)*scale))));
+        SDL_DestroyRenderer(renderer);SDL_FreeSurface(surface);
+    }
+}
+
 static void tg50HostKeyboard();
 static void zireAndM515() {
     // Art comes from the device table, by internal type for built devices and by name for all.
@@ -840,6 +935,7 @@ static void zireAndM515() {
     }
     iiixArt();
     tg50Art();
+    tg50JogBesideKeyboard();
     tg50HostKeyboard();
     viewsLeaveOlderDevices();
 }
@@ -873,13 +969,17 @@ static void tg50ScreenBounds() {
 
 static void tg50Visibility() {
     const auto& controls=deviceControls(deviceTypeTG50);
-    for(bool keyboard : {false,true}) for(bool jog : {false,true})
+    for(bool keyboard : {false,true}) for(auto jog : {JogPlacement::hidden,JogPlacement::screen,JogPlacement::keyboard})
     for(auto rotation : {Rotation::portrait_0,Rotation::landscape_90,Rotation::portrait_180,Rotation::landscape_270})
     for(auto fit : {WindowFit::none,WindowFit::fit,WindowFit::whole,WindowFit::fill})
     for(float scale : {1.f,1.25f,1.75f,2.f}) {
         if(fit!=WindowFit::none && scale!=1)continue;
-        const DeviceControlView view{keyboard,jog};
-        const int deviceWidth=jog ? 354 : 320,deviceHeight=keyboard ? 544 : 368;
+        const DeviceControlView view=deviceControlView(keyboard,jog);
+        const bool beside=keyboard && jog==JogPlacement::keyboard;
+        const int deviceWidth=jog==JogPlacement::hidden || beside ? 320 : 354;
+        const int deviceHeight=keyboard ? (beside ? 521 : jog==JogPlacement::hidden ? 544 : 568)
+                                        : (jog==JogPlacement::hidden ? 368 : 374);
+        assert(deviceWidth==deviceControlsWidth(controls,320,view) && deviceHeight==320+deviceControlsHeight(controls,view));
         const int ww=fit==WindowFit::none ? int(deviceWidth*scale) : 521;
         const int wh=fit==WindowFit::none ? int(deviceHeight*scale) : 761;
         Guest guest(deviceTypeTG50);guest.setDisplay({320,320,0,224});auto display=guest.display();
@@ -906,8 +1006,8 @@ static void tg50Visibility() {
             };
             // All shown controls, including the app row, keep press/release and layout-release behaviour.
             for(size_t i=0;i<controls.count;++i) {
-                const auto& b=controls.buttons[i];const auto& r=b.bounds;
-                const auto [x,y]=pixel(deviceScreenLeft(controls,view)+r.x+r.w/2,320+r.y+r.h/2);
+                const auto& b=controls.buttons[i];const auto r=deviceButtonRect(controls,b,320,320,view);
+                const auto [x,y]=pixel(r.x+r.w/2,r.y+r.h/2);
                 pointer(SDL_MOUSEBUTTONDOWN,x,y);
                 const bool shown=deviceControlShown(b,view);
                 if(shown) {
@@ -938,8 +1038,8 @@ static void tg50Visibility() {
             // Touches use the selected device extent and release on focus loss.
             for(size_t i=0;i<controls.count;++i) {
                 const auto& b=controls.buttons[i];if(!deviceControlShown(b,view))continue;
-                const auto& r=b.bounds;
-                const auto [x,y]=pixel(deviceScreenLeft(controls,view)+r.x+r.w/2,320+r.y+r.h/2);
+                const auto r=deviceButtonRect(controls,b,320,320,view);
+                const auto [x,y]=pixel(r.x+r.w/2,r.y+r.h/2);
                 SDL_Event e{};e.type=SDL_FINGERDOWN;e.tfinger.type=e.type;e.tfinger.windowID=SDL_GetWindowID(win);
                 e.tfinger.touchId=1;e.tfinger.fingerId=1;e.tfinger.x=(x+0.5f)/ww;e.tfinger.y=(y+0.5f)/wh;
                 input.HandleEvent(e);guest.expect({{b.key,true}});
@@ -952,7 +1052,8 @@ static void tg50Visibility() {
             const auto white=readPixel(shot,lx,ly);assert(white.r==255 && white.g==255 && white.b==255);
             if(scale==1 && fit==WindowFit::none && rotation==Rotation::portrait_0) {
                 if(const char* directory=std::getenv("FROND_TG50_SCREENSHOT_DIR")) {
-                    const std::string path=std::string(directory)+"/tg50-visibility-keyboard"+(keyboard ? "1" : "0")+"-jog"+(jog ? "1" : "0")+".png";
+                    const char* placement=jog==JogPlacement::hidden ? "hidden" : jog==JogPlacement::screen ? "screen" : "keyboard";
+                    const std::string path=std::string(directory)+"/tg50-visibility-keyboard"+(keyboard ? "1" : "0")+"-jog-"+placement+".png";
                     assert(IMG_SavePNG(shot,path.c_str())==0);
                 }
             }
