@@ -171,6 +171,30 @@ int main(){
         dup2(saved,2);close(saved);fclose(sink);
         assert(bytes>0&&bytes<4096);assert(again>bytes);  // limited, then full lines again after reset
     }
+    // CSD v1 capacity for 128 MiB, 1 GiB, a real 2 GB card (1886 MiB) and 2 GiB; 2 GiB is still standard capacity.
+    for (uint32_t mib : {128u, 1024u, 1886u, 2048u}) {
+        const uint32_t sectors = mib << 11;
+        auto* big = vsdInit(readSector, writeSector, sectors);
+        uint8_t reply[17]{};
+        vsdCommand(big, 0, 0, reply);
+        for (int i = 0; i < 32; i++) {
+            vsdCommand(big, 55, 0, reply);
+            vsdCommand(big, 41, 0x00300000, reply);
+            if (reply[1] & 0x80) break;
+        }
+        assert(reply[1] & 0x80 && !(reply[1] & 0x40));  // ready, no high-capacity bit
+        vsdCommand(big, 2, 0, reply);
+        vsdCommand(big, 3, 0, reply);
+        uint8_t csd[17]{};
+        vsdCommand(big, 9, 3u << 16, csd);
+        const uint8_t* c = csd + 1;
+        const uint32_t blLen = c[5] & 15, cSize = ((c[6] & 3u) << 10) | (uint32_t(c[7]) << 2) | (c[8] >> 6);
+        const uint32_t mult = ((c[9] & 3u) << 1) | (c[10] >> 7);
+        assert((c[0] >> 6) == 0);
+        assert((uint64_t(cSize + 1) << (mult + 2) << blLen) == uint64_t(sectors) * 512);
+        if (mib == 1886) assert(blLen == 10 && cSize == 3771 && mult == 7);
+        if (mib == 2048) assert(blLen == 10 && cSize == 4095 && mult == 7);
+    }
     // PXA25x keeps its previous one-byte-per-word access behaviour.
     card=vsdInit(readSector,writeSector,65536);initCard(card);
     mmc=pxaMmcInit(nullptr,nullptr,nullptr);pxaMmcInsert(mmc,card);

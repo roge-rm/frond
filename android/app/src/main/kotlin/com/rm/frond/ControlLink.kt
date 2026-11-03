@@ -38,6 +38,10 @@ class ControlLink(val path: File, private val onEvent: (String, String) -> Unit)
     @Volatile private var finished = false
     @Volatile var connectedOnce = false
         private set
+    // Bytes done and the total of a running SD create, import or export, on the link's thread.
+    @Volatile var sdProgress: ((Long, Long) -> Unit)? = null
+    // Time of the last progress event, so a long card job's wait restarts with each one.
+    @Volatile private var lastProgressNanos = 0L
 
     init {
         path.delete()
@@ -68,7 +72,11 @@ class ControlLink(val path: File, private val onEvent: (String, String) -> Unit)
     private fun read(input: InputStream) {
         input.bufferedReader(Charsets.US_ASCII).forEachLine { line ->
             val parts = line.split('\t')
-            if (parts.size == 4 && parts[0] == "0" && parts[1] == "event") {
+            if (parts.size == 4 && parts[0] == "0" && parts[1] == "event" && parts[2] == "sd-progress") {
+                val numbers = decode(parts[3]).split(' ').mapNotNull { it.toLongOrNull() }
+                lastProgressNanos = System.nanoTime()
+                if (numbers.size == 2 && numbers[1] > 0) sdProgress?.invoke(numbers[0], numbers[1])
+            } else if (parts.size == 4 && parts[0] == "0" && parts[1] == "event") {
                 onEvent(parts[2], decode(parts[3]))
             } else if (parts.size == 4) {
                 pending.remove(parts[0])?.complete(Reply(parts[1] == "ok", parts[2], decode(parts[3])))
@@ -101,7 +109,11 @@ class ControlLink(val path: File, private val onEvent: (String, String) -> Unit)
                 }
                 out.flush()
             }
-            reply.get(timeoutSeconds, TimeUnit.SECONDS)
+            if (command in FILE_COMMANDS) {
+                awaitReply(reply, TimeUnit.SECONDS.toNanos(timeoutSeconds), { lastProgressNanos })
+            } else {
+                reply.get(timeoutSeconds, TimeUnit.SECONDS)
+            }
         } catch (e: java.util.concurrent.TimeoutException) {
             Reply(false, "timeout", "The emulator didn't answer.")
         } catch (e: Exception) {
@@ -178,9 +190,24 @@ class ControlLink(val path: File, private val onEvent: (String, String) -> Unit)
         path.delete()
     }
 
-    private companion object {
+    internal companion object {
+        // Waits for the reply; the timeout counts from the start or the last progress event, whichever is later.
+        fun <T> awaitReply(reply: CompletableFuture<T>, timeoutNanos: Long, lastProgress: () -> Long): T {
+            val started = System.nanoTime()
+            while (true) {
+                val last = maxOf(started, lastProgress())
+                val left = last + timeoutNanos - System.nanoTime()
+                if (left <= 0) throw java.util.concurrent.TimeoutException()
+                try {
+                    return reply.get(left, TimeUnit.NANOSECONDS)
+                } catch (_: java.util.concurrent.TimeoutException) {
+                    // Progress may have arrived meanwhile; the loop checks.
+                }
+            }
+        }
         const val TAG = "Frond"
-        val FILE_COMMANDS = setOf("ms-files", "ms-get", "ms-put", "ms-mkdir", "ms-delete", "ms-rename")
+        val FILE_COMMANDS = setOf("ms-files", "ms-get", "ms-put", "ms-mkdir", "ms-delete", "ms-rename",
+            "sd-create", "sd-insert", "sd-export", "ms-create", "ms-insert", "ms-export")
         fun cancelLine(id: String) = "0\tcancel-files\t${encode(id)}\n".toByteArray(Charsets.US_ASCII)
         val CLOSED = Reply(false, "closed", "The emulator stopped.")
 

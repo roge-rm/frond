@@ -42,7 +42,9 @@ internal val deviceInventory = listOf(
         menuY = 466,
         rotatingStatusBar = true,
         sdMin = 33554432L,
-        sdMax = 134217728L,
+        sdMax = 2147483648L,
+        msSizes = listOf(),
+        msProMax = 0,
     ),
     Device(
         id = "palm-e2",
@@ -84,7 +86,9 @@ internal val deviceInventory = listOf(
         menuY = 405,
         rotatingStatusBar = false,
         sdMin = 512L,
-        sdMax = 9223372036854775807L,
+        sdMax = 1073741824L,
+        msSizes = listOf(),
+        msProMax = 0,
     ),
     Device(
         id = "palm-zire-72",
@@ -126,7 +130,9 @@ internal val deviceInventory = listOf(
         menuY = 412,
         rotatingStatusBar = false,
         sdMin = 33554432L,
-        sdMax = 134217728L,
+        sdMax = 2147483648L,
+        msSizes = listOf(),
+        msProMax = 0,
     ),
     Device(
         id = "sony-clie-tg50",
@@ -169,5 +175,7 @@ internal val deviceInventory = listOf(
         rotatingStatusBar = false,
         sdMin = 0L,
         sdMax = 0L,
+        msSizes = listOf(4, 8, 16, 32, 64, 128),
+        msProMax = 1886,
     ),
 )

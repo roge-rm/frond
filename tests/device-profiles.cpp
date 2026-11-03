@@ -326,5 +326,15 @@ int main() {
         bytes.resize(20);
         assert(!decoded.Deserialize(bytes.size(), bytes.data()));
     }
+    {
+        const uint64_t MiB = 1u << 20;
+        for (auto type : {deviceTypeTX, deviceTypeZire72}) {
+            assert(deviceProfileSdSizeValid5(type, 32 * MiB) && deviceProfileSdSizeValid5(type, 2048 * MiB));
+            assert(!deviceProfileSdSizeValid5(type, 2048 * MiB + 512) && !deviceProfileSdSizeValid5(type, 4096 * MiB));
+            assert(!deviceProfileSdSizeValid5(type, 16 * MiB));
+        }
+        assert(deviceProfileSdSizeValid5(deviceTypeE2, 512) && deviceProfileSdSizeValid5(deviceTypeE2, 1024 * MiB));
+        assert(!deviceProfileSdSizeValid5(deviceTypeE2, 1024 * MiB + 512) && !deviceProfileSdSizeValid5(deviceTypeE2, 2048 * MiB));
+    }
     std::cout << "PASS: device names, cohort inventory, geometry, E2 NOR size/layout, header bounds and v6 named sessions\n";
 }

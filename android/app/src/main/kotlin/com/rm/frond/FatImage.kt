@@ -8,7 +8,7 @@ import java.io.RandomAccessFile
 import java.util.Calendar
 
 // Reads and edits a FAT16 SD card image in place: the card the core makes (one primary FAT16
-// partition) or a FAT16 superfloppy, 32-128 MiB. It does what the desktop's SD exchange does with
+// partition) or a FAT16 superfloppy, 32 MiB to 2 GiB. It does what the desktop's SD exchange does with
 // mtools: list folders, copy files in and out, make folders. Nothing is ever overwritten or deleted.
 // Not thread safe; one editor per image file.
 class FatImage private constructor(private val file: RandomAccessFile) : AutoCloseable {
@@ -41,7 +41,7 @@ class FatImage private constructor(private val file: RandomAccessFile) : AutoClo
 
     private fun open() {
         val size = file.length()
-        if (size < MIN_BYTES || size > MAX_BYTES || size % SECTOR != 0L) throw FatException("Use a 32-128 MiB FAT16 card image.")
+        if (size < MIN_BYTES || size > MAX_BYTES || size % SECTOR != 0L) throw FatException("Use a 32 MB to 2 GB FAT16 card image.")
         var boot = read(0, SECTOR)
         if (String(boot, 54, 8, Charsets.US_ASCII) != "FAT16   ") {
             // A single primary partition, as the core makes. Never guess offsets.
@@ -352,7 +352,9 @@ class FatImage private constructor(private val file: RandomAccessFile) : AutoClo
     companion object {
         const val SECTOR = 512
         const val MIN_BYTES = 32L shl 20
-        const val MAX_BYTES = 128L shl 20
+        const val MAX_BYTES = 2048L shl 20
+        // Cards up to this size live in the core's memory until they're saved.
+        const val SMALL_MAX_BYTES = 128L shl 20
         private val LONG_OFFSETS = intArrayOf(1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30)
         // Characters FAT refuses in long names, as the desktop's exchange does.
         private val FORBIDDEN = "\"*/:<>?\\|"

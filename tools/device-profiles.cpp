@@ -49,6 +49,10 @@ int main() {
                   << ",\"nor_layout\":" << int(p.norLayout)
                   << ",\"header_offset\":" << p.headerOffset << ",\"big_card_offset\":" << p.bigCardOffset
                   << ",\"sd_min_bytes\":" << p.sdMin << ",\"sd_max_bytes\":" << p.sdMax
+                  << ",\"ms_sizes_mb\":[";
+        for (uint32_t mb = 1, first = 1; mb <= 128; mb <<= 1)
+            if (p.msSizes & mb) std::cout << (first ? "" : ",") << mb, first = 0;
+        std::cout << "]" << ",\"ms_pro_max_mb\":" << p.msProMaxMib
                   << ",\"available\":" << (f.available ? "true" : "false")
                   << ",\"setup\":" << std::quoted(f.setup)
                   << ",\"launcher\":" << std::quoted(f.launcher)

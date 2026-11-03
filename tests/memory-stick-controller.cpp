@@ -24,17 +24,59 @@ struct State {
 };
 static std::vector<uint32_t> save(State& target){Savestate<ChunkType> s;assert(s.Save(target));auto* p=static_cast<uint32_t*>(s.GetBuffer());return {p,p+s.GetSize()/4};}
 static uint32_t* chunk(std::vector<uint32_t>& s,ChunkType type){auto* p=s.data()+1+s[0]*2;for(unsigned i=0;i<s[0];++i){if(s[1+i*2]==uint32_t(type))return p;p+=s[2+i*2];}std::abort();}
+// 8 KB blocks: a multi-page write or read stops after page 15, and blocks past 511 are refused.
+static void SmallBlocks(){
+ const auto& g=*frondMsGeometry::byMegabytes(4);
+ auto image=frondMs::create(g);assert(image.size()==4268032&&frondMs::validBoot(image));
+ {auto encoded=frondMs::encode(image);std::vector<uint8_t> decoded;
+  assert(encoded.size()==frondMs::fileBytes(g)&&frondMs::decode(encoded.data(),encoded.size(),decoded)&&decoded==image);
+  // The header's geometry must agree with the payload size.
+  encoded[12]=0;encoded[13]=4;assert(!frondMs::decode(encoded.data(),encoded.size(),decoded));}
+ // Boot attributes per size, as the TG50 driver's table has them.
+ for(const auto& each:frondMsGeometry::sizes){auto boot=frondMs::create(each);assert(frondMs::validBoot(boot));
+  for(unsigned block=0;block<2;++block){const auto* b=boot.data()+size_t(block)*each.pagesPerBlock*521;
+   assert(frondMs::getBe16(b+0x1a2)==each.BlockKib()&&frondMs::getBe16(b+0x1a4)==each.blocks&&frondMs::getBe16(b+0x1a6)==each.Effective());
+   assert(b[0x1a0]==1&&b[0x1a1]==2&&b[0x1d6]==1&&b[0xbc]==2&&b[0x178]==1&&b[0x177]==2&&frondMs::getBe16(b+2)==0x0100);}
+  // A boot block written for another size is refused.
+  auto wrong=boot;frondMs::be16(wrong.data()+0x1a4,each.blocks==8192?4096:8192);assert(!frondMs::validBoot(wrong));}
+ MemoryStickCard card;assert(card.media.Attach(image,false)==MemoryStickMedia::Result::ok);card.Reset();
+ assert(card.media.PagesPerBlock()==16&&card.media.Blocks()==512);
+ card.state.reg[17]=0;card.state.reg[18]=0;card.state.reg[19]=2;card.state.reg[20]=0;card.state.reg[21]=0;
+ assert(card.Command(0x55)&&card.state.operation==4&&card.Interrupt()==0x20);
+ std::array<uint8_t,512> data;
+ for(unsigned page=0;page<16;++page){
+  assert(MemoryStickCard::Valid(card.state,card.media.Shape()));
+  data.fill(uint8_t(page+1));assert(card.TpcWrite(0xd,data.data(),data.size()));
+  assert(card.Interrupt()==(page<15?0x20:0x80));
+ }
+ assert(card.state.operation==0&&card.state.reg[21]==16);
+ MemoryStickMedia::Page check;
+ for(unsigned page=0;page<16;++page){assert(card.media.Read(2,page,check)==MemoryStickMedia::Result::ok&&check[0]==page+1);}
+ assert(card.media.Read(3,0,check)==MemoryStickMedia::Result::ok&&check[0]==0xff);
+ card.state.reg[21]=0;assert(card.Command(0xaa)&&card.state.operation==2);
+ for(unsigned page=0;page<16;++page){
+  assert(card.TpcRead(2,data.data(),data.size())&&data[0]==page+1);card.FinishRead(2);
+  assert(card.state.operation==(page<15?2u:0u));
+ }
+ card.state.reg[18]=2;card.state.reg[19]=0;card.state.reg[21]=0;assert(card.Command(0x55)&&card.Interrupt()==0xc0);
+ card.state.reg[18]=0;card.state.reg[19]=2;card.state.reg[21]=16;assert(card.Command(0x55)&&card.Interrupt()==0xc0);
+ card.state.reg[21]=15;card.state.reg[20]=0x20;assert(card.Command(0xaa)&&card.Interrupt()==0xa0);
+ auto pending=card.state;pending.operation=1;pending.reg[21]=16;assert(!MemoryStickCard::Valid(pending,card.media.Shape()));
+ assert(MemoryStickCard::Valid(pending,frondMsGeometry::largest));
+}
+
 int main(){
+ SmallBlocks();
  auto image=frondMs::create();assert(frondMs::validBoot(image));
  {auto encoded=frondMs::encode(image);std::vector<uint8_t> decoded;assert(frondMs::decode(encoded.data(),encoded.size(),decoded));assert(decoded==image);encoded.back()^=1;assert(!frondMs::decode(encoded.data(),encoded.size(),decoded));assert(decoded==image);}
  MemoryStickCard card;assert(card.media.Attach(image,false)==MemoryStickMedia::Result::ok);card.Reset();
- const uint8_t idWindow[]={4,4,6,1};assert(card.TpcWrite(8,idWindow,4));assert(MemoryStickCard::Valid(card.state));
+ const uint8_t idWindow[]={4,4,6,1};assert(card.TpcWrite(8,idWindow,4));assert(MemoryStickCard::Valid(card.state,card.media.Shape()));
  uint8_t id[4]{};assert(card.TpcRead(4,id,4));assert(id[0]==0xff&&id[2]==0xff&&id[3]==0xff);
  const uint8_t category=0;assert(card.TpcWrite(0xb,&category,1));assert(card.TpcRead(4,id,4));assert(id[2]==0xff);
  card.Reset();
  for(auto value:{32u,0xfffffff0u,0xffffffffu})for(auto size:{16u,32u,0xffffffffu}){
-  auto s=card.state;s.writeStart=value;s.writeSize=size;assert(!MemoryStickCard::Valid(s));
-  s=card.state;s.readStart=value;s.readSize=size;assert(!MemoryStickCard::Valid(s));
+  auto s=card.state;s.writeStart=value;s.writeSize=size;assert(!MemoryStickCard::Valid(s,card.media.Shape()));
+  s=card.state;s.readStart=value;s.readSize=size;assert(!MemoryStickCard::Valid(s,card.media.Shape()));
  }
  card.state.reg[19]=2;card.state.reg[20]=0x40;card.state.reg[21]=0;
  std::fill_n(card.state.reg.begin()+22,9,0xf5);assert(card.Command(0x55));assert(card.Interrupt()==0x80);
@@ -97,5 +139,29 @@ int main(){
  params[3]=0;tpc(0xb,params);tpc(0xe,{0x99});params[3]=1;tpc(0xb,params);tpc(0xe,{0x99});
  std::vector<uint8_t> damagedImage;assert(msCtrlrExport(m,damagedImage));assert(!frondMs::validBoot(damagedImage));auto damaged=save(state);
  assert(loader.Load(damaged.data(),damaged.size()*4,state));std::vector<uint8_t> damagedRestored;assert(msCtrlrExport(m,damagedRestored));assert(damagedRestored==damagedImage);
- msCtrlrDestroy(m);std::puts("Memory Stick card/controller checks passed");
+ msCtrlrDestroy(m);
+ // Save and restore at each size; a pending page operation outside the attached stick is refused.
+ for(const auto& g:frondMsGeometry::sizes){
+  m=msCtrlrInit(nullptr,0x14000000);auto stick=frondMs::create(g);assert(msCtrlrAttach(m,stick));state.m=m;
+  tpc(8,{0,30,16,15});params[1]=0;params[2]=0;params[3]=2;params[4]=0x20;params[5]=0;tpc(0xb,params);tpc(0xe,{0xaa});
+  auto pendingRead=save(state);
+  std::vector<uint8_t> physical;assert(msCtrlrExport(m,physical)&&physical==stick);
+  auto* again=msCtrlrInit(nullptr,0x14000000);assert(msCtrlrAttach(again,stick));State againState{again};
+  assert(loader.Load(pendingRead.data(),pendingRead.size()*4,againState)&&save(againState)==pendingRead);
+  msCtrlrDestroy(again);msCtrlrDestroy(m);
+  // Block 600 exists only from 8 MB, page 20 only on 16 KB blocks.
+  for(auto [block,page]:{std::pair<unsigned,unsigned>{600,0},{2,20}}){
+   const bool fits=block<g.blocks&&page<g.pagesPerBlock;
+   auto* big=msCtrlrInit(nullptr,0x14000000);assert(msCtrlrAttach(big,frondMs::create()));m=big;State bigState{big};
+   tpc(8,{0,30,16,15});params[1]=0;params[2]=block>>8;params[3]=block&0xff;params[4]=0x20;params[5]=page;tpc(0xb,params);tpc(0xe,{0xaa});
+   auto far=save(bigState);msCtrlrDestroy(big);
+   auto* small=msCtrlrInit(nullptr,0x14000000);assert(msCtrlrAttach(small,stick));State smallState{small};m=small;
+   auto before=save(smallState);
+   assert(loader.Load(far.data(),far.size()*4,smallState)==fits);
+   if(!fits)assert(save(smallState)==before);
+   msCtrlrDestroy(small);
+  }
+  context=nullptr;m=nullptr;
+ }
+ std::puts("Memory Stick card/controller checks passed");
 }

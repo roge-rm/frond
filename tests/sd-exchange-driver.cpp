@@ -1,6 +1,7 @@
 // Firmware-free adapter also used by the optional real TX VFS acceptance run.
 #include <QCoreApplication>
 #include <QFile>
+#include <QFileInfo>
 #include <QTextStream>
 #include "SdExchange.h"
 int main(int argc, char** argv) {
@@ -10,9 +11,10 @@ int main(int argc, char** argv) {
         QTextStream(stderr) << "Usage: sd-exchange-driver put IMAGE HOST_FILE CARD_PATH NEW_IMAGE\n       sd-exchange-driver get IMAGE CARD_PATH HOST_FILE\n";
         return 2;
     }
-    SdExchange exchange;
+    // Scratch copies go beside the image, as cards can be 2 GB.
+    SdExchange exchange(QFileInfo(args[2]).absolutePath() + "/.sd-exchange-XXXXXX");
     QString error;
-    bool ok = exchange.open(args[2], error);
+    bool ok = exchange.open(args[2], error, qint64(2048) << 20);
     if (ok && args[1] == "put") {
         ok = exchange.put(args[3], args[4], error);
         if (ok && !QFile::copy(exchange.image(), args[5])) { error = "Choose a new writable image destination."; ok = false; }

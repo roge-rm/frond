@@ -13,6 +13,8 @@
 #include <QToolButton>
 #include <QMenu>
 #include <QInputDialog>
+#include <QProgressDialog>
+#include <QStatusBar>
 #include "Dialogs.h"
 #include "FirmwareStore.h"
 #include "SessionStore.h"
@@ -1282,6 +1284,153 @@ for line in s.makefile('rb'):
         QDir(managedFolder()).removeRecursively();
         QSettings().clear();
     }
+    void sdCreateSizes_data() {
+        QTest::addColumn<QString>("device");
+        QTest::addColumn<QString>("mode");
+        QTest::addColumn<QStringList>("labels");
+        const QStringList tx{"32 MB", "64 MB", "128 MB", "256 MB", "512 MB", "1 GB", "2 GB"};
+        QTest::newRow("tx") << "palm-tx" << "create" << tx;
+        QTest::newRow("tx-cancel") << "palm-tx" << "cancel" << tx;
+        QTest::newRow("e2") << "palm-e2" << "create" << QStringList{"32 MB", "64 MB", "128 MB", "256 MB", "512 MB", "1 GB"};
+    }
+    // The picker offers 32 MB to the device's largest card, and the progress dialog follows the core's
+    // sd-progress events and cancels through cancel-files.
+    void sdCreateSizes() {
+        QFETCH(QString, device); QFETCH(QString, mode); QFETCH(QStringList, labels);
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        putSession("Card", 6, device.toUtf8(), 1);
+        QTemporaryDir files;
+        QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly));
+        auto script = QByteArray(R"PY(#!/usr/bin/python3
+import pathlib,socket,sys,time
+trace=pathlib.Path(__file__).with_name('commands')
+s=socket.socket(socket.AF_UNIX);s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+card='none'; device='DEVICE'; mode='MODE'
+f=s.makefile('rb')
+def event(text): s.sendall(b'0\tevent\tsd-progress\t'+text.encode().hex().encode()+b'\n')
+for line in f:
+    i,raw,arg=line.rstrip(b'\n').split(b'\t'); cmd=raw.decode(); arg=bytes.fromhex(arg.decode()).decode()
+    with trace.open('a') as t: t.write(cmd+'\t'+arg+'\n')
+    ok=True; code='result'; message='done'
+    if cmd=='device-state': message=device
+    elif cmd=='sd-state': message=card
+    elif cmd=='network-state': message='disabled'
+    elif cmd=='keyboard-state': message='detached'
+    elif cmd=='sd-create':
+        total=int(arg)<<20
+        event('0 %d'%total); time.sleep(1); event('%d %d'%(total//2,total))
+        if mode=='cancel':
+            cancel=f.readline().rstrip(b'\n')
+            assert cancel==b'0\tcancel-files\t'+i.hex().encode(), cancel
+            with trace.open('a') as t: t.write('cancelled\n')
+            ok=False; code='cancelled'; message='Cancelled.'
+        else:
+            event('%d %d'%(total,total)); card='inserted'
+    s.sendall(i+b'\t'+(b'ok' if ok else b'error')+b'\t'+code.encode()+b'\t'+message.encode().hex().encode()+b'\n')
+    if cmd=='quit': break
+)PY");
+        script.replace("DEVICE", device.toUtf8()); script.replace("MODE", mode.toUtf8());
+        core.write(script); core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        MainWindow window(core.fileName()); window.show();
+        window.openSession(managedSession("Card"), true);
+        auto* state = window.findChild<QLabel*>("sdState");
+        auto* create = window.findChild<QPushButton*>("sdNew");
+        QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("No card"), 5000);
+        QTRY_VERIFY(create->isVisible() && create->isEnabled());
+        QStringList offered; bool sawProgress = false;
+        QTimer answer; answer.setInterval(10);
+        connect(&answer, &QTimer::timeout, &window, [&] {
+            if (auto* input = window.findChild<QInputDialog*>(); input && input->isVisible()) {
+                offered = input->comboBoxItems();
+                input->setTextValue(offered.last()); input->accept();
+            }
+            if (auto* progress = window.findChild<QProgressDialog*>("cardProgress"); progress && progress->isVisible()) {
+                sawProgress = true;
+                if (mode == "cancel" && progress->value() >= 500) progress->findChild<QPushButton*>()->click();
+            }
+        });
+        answer.start();
+        create->click();
+        QTRY_VERIFY_WITH_TIMEOUT(!offered.isEmpty(), 5000);
+        QCOMPARE(offered, labels);
+        const auto mib = labels.last() == "2 GB" ? "1886" : "1024";
+        if (mode == "cancel") QTRY_COMPARE_WITH_TIMEOUT(window.statusBar()->currentMessage(), QString("Cancelled."), 10000);
+        else QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Inserted"), 10000);
+        QVERIFY(sawProgress);
+        QTRY_VERIFY(!window.findChild<QProgressDialog*>("cardProgress"));
+        answer.stop(); window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        QFile trace(files.filePath("commands")); QVERIFY(trace.open(QIODevice::ReadOnly));
+        const auto commands = trace.readAll();
+        QVERIFY(commands.contains(QByteArray("sd-create\t") + mib + "\n"));
+        QCOMPARE(commands.contains("cancelled\n"), mode == "cancel");
+        QDir(managedFolder()).removeRecursively(); QSettings().clear();
+    }
+    // A Memory Stick Pro create shows the progress dialog and Cancel reaches the core.
+    void memoryStickCancel() {
+        const auto device = frondFirmware::deviceFromId("sony-clie-tg50");
+        if (!frondFirmware::profile(device).frontend.memoryStick) QSKIP("Memory Stick is not qualified yet");
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        putSession("Stick", 6, "sony-clie-tg50", 1);
+        QTemporaryDir files;
+        QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly));
+        QVERIFY(core.write(R"PY(#!/usr/bin/python3
+import pathlib,socket,sys,time
+trace=pathlib.Path(__file__).with_name('commands')
+s=socket.socket(socket.AF_UNIX);s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+f=s.makefile('rb')
+def event(text): s.sendall(b'0\tevent\tsd-progress\t'+text.encode().hex().encode()+b'\n')
+for line in f:
+    i,raw,arg=line.rstrip(b'\n').split(b'\t'); cmd=raw.decode(); arg=bytes.fromhex(arg.decode()).decode()
+    with trace.open('a') as t: t.write(cmd+'\t'+arg+'\n')
+    ok=True; code='result'; message='done'
+    if cmd=='device-state': message='sony-clie-tg50'
+    elif cmd=='hold-state': message='off'
+    elif cmd=='network-state': message='disabled'
+    elif cmd=='keyboard-state': message='detached'
+    elif cmd=='ms-state': message='none'
+    elif cmd=='ms-create':
+        total=int(arg)<<20
+        event('0 %d'%total); time.sleep(1); event('%d %d'%(total//2,total))
+        cancel=f.readline().rstrip(b'\n')
+        assert cancel==b'0\tcancel-files\t'+i.hex().encode(), cancel
+        with trace.open('a') as t: t.write('cancelled\n')
+        ok=False; code='cancelled'; message='Cancelled.'
+    s.sendall(i+b'\t'+(b'ok' if ok else b'error')+b'\t'+code.encode()+b'\t'+message.encode().hex().encode()+b'\n')
+    if cmd=='quit': break
+)PY") > 0);
+        core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        MainWindow window(core.fileName()); window.show();
+        window.openSession(managedSession("Stick"), true);
+        auto* state = window.findChild<QLabel*>("sdState");
+        auto* create = window.findChild<QPushButton*>("sdNew");
+        QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("No card"), 5000);
+        bool sawProgress = false;
+        QTimer answer; answer.setInterval(10);
+        connect(&answer, &QTimer::timeout, &window, [&] {
+            if (auto* input = window.findChild<QInputDialog*>(); input && input->isVisible()) {
+                input->setTextValue("256 MB Pro"); input->accept();
+            }
+            if (auto* progress = window.findChild<QProgressDialog*>("cardProgress"); progress && progress->isVisible()) {
+                sawProgress = true;
+                if (progress->value() >= 500) progress->findChild<QPushButton*>()->click();
+            }
+        });
+        answer.start();
+        create->click();
+        QTRY_COMPARE_WITH_TIMEOUT(window.statusBar()->currentMessage(), QString("Cancelled."), 10000);
+        QVERIFY(sawProgress);
+        QTRY_VERIFY(!window.findChild<QProgressDialog*>("cardProgress"));
+        answer.stop(); window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        QFile trace(files.filePath("commands")); QVERIFY(trace.open(QIODevice::ReadOnly));
+        const auto commands = trace.readAll();
+        QVERIFY(commands.contains("ms-create\t256\n"));
+        QVERIFY(commands.contains("cancelled\n"));
+        QDir(managedFolder()).removeRecursively(); QSettings().clear();
+    }
     void memoryStickControls() {
         const auto device = frondFirmware::deviceFromId("sony-clie-tg50");
         if (!frondFirmware::profile(device).frontend.memoryStick) QSKIP("Memory Stick is not qualified yet");
@@ -1309,7 +1458,7 @@ for line in s.makefile('rb'):
     elif cmd=='ms-state': message=card
     elif cmd=='ms-protection': message=protection
     elif cmd=='ms-create':
-        assert arg=='128' and card!='inserted';card='inserted'
+        assert arg=='4' and card!='inserted';card='inserted'
     elif cmd=='ms-eject': assert card=='inserted';card='ejected'
     elif cmd=='ms-reinsert': assert card=='ejected';card='inserted'
     elif cmd=='ms-read-only':
@@ -1327,8 +1476,20 @@ for line in s.makefile('rb'):
         QVERIFY(create->isVisible() && create->isEnabled());
         QCOMPARE(window.findChild<QLabel*>("storageHeading")->text(), QString("Memory Stick"));
         QVERIFY(!window.findChild<QPushButton*>("sdExchange")->isVisible());
+        // The picker offers the six classic sizes, 128 MB first, then the Pro sizes.
+        QStringList offered;
+        QTimer pick; pick.setInterval(10);
+        connect(&pick, &QTimer::timeout, &window, [&] {
+            if (auto* input = window.findChild<QInputDialog*>(); input && input->isVisible()) {
+                offered = input->comboBoxItems();
+                input->setTextValue("4 MB"); input->accept();
+            }
+        });
+        pick.start();
         create->click();
         QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Inserted"), 5000);
+        pick.stop();
+        QCOMPARE(offered, QStringList({"128 MB", "64 MB", "32 MB", "16 MB", "8 MB", "4 MB", "256 MB Pro", "512 MB Pro", "1 GB Pro", "2 GB Pro"}));
         QTRY_VERIFY(protection->isVisible()); QVERIFY(!protection->isEnabled());
         QTimer answer; answer.setInterval(10);
         connect(&answer, &QTimer::timeout, &window, [&] {
@@ -1348,7 +1509,7 @@ for line in s.makefile('rb'):
         answer.stop(); window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
         QFile trace(tracePath); QVERIFY(trace.open(QIODevice::ReadOnly));
         const auto commands = trace.readAll();
-        QVERIFY(commands.contains("ms-create\t128\n"));
+        QVERIFY(commands.contains("ms-create\t4\n"));
         QVERIFY(commands.contains("ms-read-only\ton\n"));
         QVERIFY(commands.contains("ms-reinsert\t\n"));
         QVERIFY(!commands.contains("sd-"));

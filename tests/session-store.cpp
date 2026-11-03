@@ -54,6 +54,29 @@ static QByteArray v7WithSd() {
     put64(bytes, 512);
     return bytes;
 }
+// v8: the v7 layout with 100-byte descriptors that end with the SD content generation.
+static QByteArray v8WithSd(quint64 generation) {
+    auto bytes = v7WithSd();
+    bytes[4] = 8;
+    put64(bytes, generation);
+    return bytes;
+}
+// .frondsd v2 of 512 bytes: header CRC, generation, table offset, 1 MiB chunks, one table entry.
+static QByteArray tinyFrondsdV2(quint64 generation) {
+    QByteArray file("FRONDSD");
+    file.append('\0');
+    put32(file, 2);
+    put32(file, 512);
+    put64(file, 512);
+    put32(file, 0);
+    put64(file, generation);
+    put64(file, 64 + 512);
+    put32(file, 1u << 20);
+    file.append(QByteArray(16, '\0'));
+    file.append(QByteArray(512, '\xa5'));
+    put32(file, 0);
+    return file;
+}
 static QByteArray tinyFrondsd() {
     QByteArray file("FRONDSD");
     file.append('\0');
@@ -64,6 +87,49 @@ static QByteArray tinyFrondsd() {
     file.append(QByteArray(36, '\0'));
     file.append(QByteArray(512, '\xa5'));
     return file;
+}
+
+// .frondsd v2 with real chunk and header CRCs.
+static QByteArray realFrondsdV2(quint64 generation, const QByteArray& payload) {
+    QByteArray table;
+    put32(table, quint32(crc32(0, reinterpret_cast<const Bytef*>(payload.constData()), uInt(payload.size()))));
+    QByteArray header("FRONDSD");
+    header.append('\0');
+    put32(header, 2);
+    put32(header, 512);
+    put64(header, quint64(payload.size()));
+    put32(header, 0);
+    put64(header, generation);
+    put64(header, 64 + quint64(payload.size()));
+    put32(header, 1u << 20);
+    header.append(QByteArray(16, '\0'));
+    uLong crc = crc32(0, reinterpret_cast<const Bytef*>(header.constData()), 64);
+    crc = crc32(crc, reinterpret_cast<const Bytef*>(table.constData()), uInt(table.size()));
+    QByteArray crcBytes;
+    put32(crcBytes, quint32(crc));
+    header.replace(24, 4, crcBytes);
+    return header + payload + table;
+}
+// A journal from `from` to from + 1 over a 512-byte card: one record, then the new table.
+static QByteArray journalTo(quint64 from, quint64 offset, const QByteArray& data, const QByteArray& newPayload) {
+    QByteArray j("FRONDJNL");
+    put32(j, 1);
+    put32(j, 0);
+    put64(j, 512);
+    put64(j, from);
+    put64(j, from + 1);
+    put64(j, 1);
+    put64(j, 1);
+    j.append(QByteArray(8, '\0'));
+    put64(j, offset);
+    put32(j, quint32(data.size()));
+    j.append(data);
+    put32(j, quint32(crc32(0, reinterpret_cast<const Bytef*>(newPayload.constData()), uInt(newPayload.size()))));
+    const auto crc = quint32(crc32(0, reinterpret_cast<const Bytef*>(j.constData()), uInt(j.size())));
+    j.append("FRONDEND");
+    put32(j, crc);
+    put32(j, 0);
+    return j;
 }
 
 class SessionStoreTest : public QObject {
@@ -162,22 +228,80 @@ class SessionStoreTest : public QObject {
         QCOMPARE(importFile(folder(), outside + "/text.frond"), QString("That isn't a Frond session."));
         write(outside + "/old.frond", header(5, "palm-tx"));
         QVERIFY(importFile(folder(), outside + "/old.frond").contains("older Frond"));
-        write(outside + "/new.frond", header(8, "palm-tx"));
+        write(outside + "/new.frond", header(9, "palm-tx"));
         QVERIFY(importFile(folder(), outside + "/new.frond").contains("newer Frond"));
         write(outside + "/v7.frond", header(7, "palm-tx"));
         QVERIFY(importFile(folder(), outside + "/v7.frond").isEmpty());
+        write(outside + "/v8/v8.frond", v8WithSd(3));
+        write(outside + "/v8/sd.frondsd", tinyFrondsdV2(3));
+        write(outside + "/v8/sd.frondsd.journal-4", "journal");
+        QVERIFY(importFile(folder(), outside + "/v8", &name).isEmpty());
+        QCOMPARE(name, QString("v8"));
+        QVERIFY(!QFileInfo::exists(machineDir(folder(), "v8") + "/sd.frondsd.journal-4"));
+        write(outside + "/v8/sd.frondsd", tinyFrondsdV2(2));
+        QVERIFY(!importFile(folder(), outside + "/v8").isEmpty());
+        write(outside + "/v8/sd.frondsd", tinyFrondsd());
+        QVERIFY(!importFile(folder(), outside + "/v8").isEmpty());
         write(outside + "/missing.frond", v7WithSd());
         QVERIFY(!importFile(folder(), outside + "/missing.frond").isEmpty());
         QVERIFY(!QFileInfo::exists(filePath(folder(), "missing")));
         write(outside + "/other.frond", header(6, "palm-zzz"));
         QVERIFY(importFile(folder(), outside + "/other.frond").contains("can't run"));
         QVERIFY(importFile(folder(), outside + "/none.frond").contains("read"));
-        QCOMPARE(list(folder()).size(), 3);
+        QCOMPARE(list(folder()).size(), 4);
         QVERIFY(QDir(folder()).entryList({"*.part"}).isEmpty());
         // Export copies the folder; a .frond path names the destination folder by its stem.
         write(outside + "/out.frond", "old");
         QVERIFY(exportFile(describe(filePath(folder(), "Trip")), outside + "/out.frond").isEmpty());
         QCOMPARE(readHeader(outside + "/out/out.frond").device, QString("palm-e2"));
+    }
+    // A save the core didn't finish: the copy gets sd.frondsd settled to the .frond's generation,
+    // from the journal or the full copy it needs, and no journals.
+    void copiesSettleUnfinishedSave() {
+        const auto outside = directory.filePath("unfinished");
+        const QByteArray oldPayload(512, '\xa5');
+        auto newPayload = oldPayload;
+        newPayload.replace(8, 4, "abcd");
+        write(outside + "/j/j.frond", v8WithSd(4));
+        write(outside + "/j/sd.frondsd", realFrondsdV2(3, oldPayload));
+        write(outside + "/j/sd.frondsd.journal-4", journalTo(3, 8, "abcd", newPayload));
+        write(outside + "/j/sd.frondsd.journal-9", "stale");
+        QString name;
+        QVERIFY(importFile(folder(), outside + "/j", &name).isEmpty());
+        const auto dest = machineDir(folder(), name);
+        QFile got(dest + "/sd.frondsd");
+        QVERIFY(got.open(QIODevice::ReadOnly));
+        QCOMPARE(got.readAll(), realFrondsdV2(4, newPayload));
+        QVERIFY(QDir(dest).entryList({"*journal*"}, QDir::Files | QDir::Hidden).isEmpty());
+        QVERIFY(exportFile(describe(filePath(folder(), name)), outside + "/out").isEmpty());
+        QFile exported(outside + "/out/sd.frondsd");
+        QVERIFY(exported.open(QIODevice::ReadOnly));
+        QCOMPARE(exported.readAll(), realFrondsdV2(4, newPayload));
+        // A damaged journal makes no copy.
+        auto damaged = journalTo(3, 8, "abcd", newPayload);
+        damaged[80] = 'x';
+        write(outside + "/j/sd.frondsd.journal-4", damaged);
+        QVERIFY(!importFile(folder(), outside + "/j").isEmpty());
+        // A first save's full copy, with no sd.frondsd yet.
+        write(outside + "/f/f.frond", v8WithSd(1));
+        write(outside + "/f/sd.frondsd.journal-1.full", realFrondsdV2(1, newPayload));
+        QVERIFY(importFile(folder(), outside + "/f", &name).isEmpty());
+        QFile full(machineDir(folder(), name) + "/sd.frondsd");
+        QVERIFY(full.open(QIODevice::ReadOnly));
+        QCOMPARE(full.readAll(), realFrondsdV2(1, newPayload));
+        QVERIFY(QDir(machineDir(folder(), name)).entryList({"*journal*"}, QDir::Files | QDir::Hidden).isEmpty());
+        // A loose X/X.frond picked as a file settles the same way, journal or full copy.
+        write(outside + "/j/sd.frondsd.journal-4", journalTo(3, 8, "abcd", newPayload));
+        QVERIFY(importFile(folder(), outside + "/j/j.frond", &name).isEmpty());
+        QFile loose(machineDir(folder(), name) + "/sd.frondsd");
+        QVERIFY(loose.open(QIODevice::ReadOnly));
+        QCOMPARE(loose.readAll(), realFrondsdV2(4, newPayload));
+        QVERIFY(importFile(folder(), outside + "/f/f.frond", &name).isEmpty());
+        QFile looseFull(machineDir(folder(), name) + "/sd.frondsd");
+        QVERIFY(looseFull.open(QIODevice::ReadOnly));
+        QCOMPARE(looseFull.readAll(), realFrondsdV2(1, newPayload));
+        write(outside + "/j/sd.frondsd.journal-4", damaged);
+        QVERIFY(!importFile(folder(), outside + "/j/j.frond").isEmpty());
     }
     void exportSafety() {
         write(filePath(folder(), "Trip"), header(6, "palm-tx"));
