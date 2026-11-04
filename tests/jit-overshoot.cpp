@@ -133,6 +133,7 @@ static uint32_t worst(Engine& e, const Program& p) {
 }
 
 int main() {
+    cpuSetJitSync(true);  // Fast compiles where asked for, so runs repeat
     const auto programs = build();
     struct Setup {
         const char* label;
