@@ -1,0 +1,46 @@
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -123,7 +123,7 @@
+         }
+     }
+ 
+-    SDL_Window* initSdl(DisplayConfiguration& displayConfiguration, float& scale, Rotation rotation,
++    SDL_Window* initSdl(const char* title, DisplayConfiguration& displayConfiguration, float& scale, Rotation rotation,
+                         const DeviceControlProfile& controls, const DeviceControlView& controlView, bool resizable) {
+         if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_AUDIO) < 0) {
+             cerr << "could not initialize SDL: " << SDL_GetError() << endl;
+@@ -142,7 +142,7 @@
+                                      usable.w, usable.h)
+                 : 1.f;
+         }
+-        auto window = SDL_CreateWindow("cp-uarm", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
++        auto window = SDL_CreateWindow(title, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+                                        scale * deviceControlsWidth(controls, windowWidth(displayConfiguration, rotation), controlView),
+                                        scale * (windowHeight(displayConfiguration, rotation)+deviceControlsHeight(controls,windowWidth(displayConfiguration,rotation),controlView)),
+                                        SDL_WINDOW_ALLOW_HIGHDPI | (resizable ? SDL_WINDOW_RESIZABLE : 0));
+@@ -626,7 +626,11 @@
+         DeviceControlView controlView = deviceType == deviceTypeTG50
+             ? deviceControlView(display.keyboard, display.jog) : DeviceControlView{};
+         bool fitted = options.windowFit != WindowFit::none;
+-        SDL_Window* window = initSdl(displayConfiguration, scale, rotation, deviceControls(deviceType), controlView, fitted);
++        // The window is named after the machine: its session file's name, or the device without one.
++        const string windowTitle = !sessionFolder.empty()
++            ? std::filesystem::path(options.norOrSession).stem().string()
++            : string(deviceProfile5(deviceType)->displayName);
++        SDL_Window* window = initSdl(windowTitle.c_str(), displayConfiguration, scale, rotation, deviceControls(deviceType), controlView, fitted);
+         if (!window) {
+             cerr << "failed to init SDL" << endl;
+             return false;
+@@ -719,11 +723,10 @@
+             usb.Start(static_cast<SocPXA*>(soc), usbConfig, commandContext.usbError);  // off: cable as without USB
+         }
+ 
+-        const string desktopTitle = string("Frond — ") + deviceProfile5(deviceType)->displayName;
+         unique_ptr<DesktopControl> desktop;
+         if (options.desktopSocket) {
+             desktop = make_unique<DesktopControl>(*options.desktopSocket, !options.disableAudio);
+-            SDL_SetWindowTitle(window, desktopTitle.c_str());
++            SDL_SetWindowTitle(window, windowTitle.c_str());
+         }
+ 
+         uint64_t lastSpeedDump = startedAt;
