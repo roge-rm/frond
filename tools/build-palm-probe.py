@@ -2,18 +2,20 @@
 """Build an optional Palm validation application with a locally installed SDK."""
 import argparse
 from pathlib import Path
+import shutil
 import subprocess
 
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--sdk', type=Path, default=Path('../palm-os-sdk/sdk-5r3'))
-p.add_argument('--probe', choices=['sd', 'network', 'keyboard', 'host-network', 'compatibility', 'serial', 'serial-host', 'idle', 'debugger', 'audio', 'irda', 'irda-db', 'bluetooth'], default='sd')
+p.add_argument('--probe', choices=['sd', 'network', 'keyboard', 'host-network', 'compatibility', 'serial', 'serial-host', 'idle', 'debugger', 'audio', 'irda', 'irda-db', 'bluetooth', 'timing68k'], default='sd')
 p.add_argument('--output', type=Path)
 a = p.parse_args()
 sdk, output = a.sdk.resolve(), (a.output or Path('build/' + a.probe + '-probe')).resolve()
 source = 'tests/palm/' + a.probe + '-probe'
 name = {'sd':'FrondSDProbe','network':'FrondNetProbe','keyboard':'FrondKeyboardProbe',
         'host-network':'FrondHostProbe', 'compatibility':'FrondCompatProbe', 'serial':'FrondSerialProbe', 'serial-host':'FrondSerialHostProbe',
-        'idle':'FrondIdleProbe', 'debugger':'FrondDebugProbe', 'audio':'FrondAudioProbe', 'irda':'FrondIRProbe', 'irda-db':'FrondDBBeam', 'bluetooth':'FrondBluetoothProbe'}[a.probe]
+        'idle':'FrondIdleProbe', 'debugger':'FrondDebugProbe', 'audio':'FrondAudioProbe', 'irda':'FrondIRProbe', 'irda-db':'FrondDBBeam', 'bluetooth':'FrondBluetoothProbe',
+        'timing68k':'FrondTiming68k'}[a.probe]
 if not (sdk / 'include/PalmOS.h').is_file():
     p.error('Supply the Palm OS 5 SDK directory with --sdk')
 output.mkdir(parents=True, exist_ok=True)
@@ -26,7 +28,12 @@ if a.probe == 'debugger':
     subprocess.run(['m68k-palmos-gcc', '-c', source + '-semantics.S', '-o', str(semantics)], check=True)
     objects.append(str(semantics))
 subprocess.run(['m68k-palmos-gcc', '-L' + str(sdk / 'lib/m68k-palmos-coff')] + objects + ['-o', str(output / 'probe')], check=True)
-subprocess.run(['pilrc', '-q', '-ro', source + '.rcp', str(output / 'probe.ro')], check=True)
+# A probe with no forms builds without PilRC where it isn't installed.
+ro = [str(output / 'probe.ro')]
+if a.probe == 'timing68k' and not shutil.which('pilrc'):
+    ro = []
+else:
+    subprocess.run(['pilrc', '-q', '-ro', source + '.rcp', ro[0]], check=True)
 resources = []
 if a.probe == 'compatibility':
     script = output / 'native.ld'
@@ -70,5 +77,5 @@ if a.probe in ('host-network', 'audio'):
     subprocess.run(['arm-palmos-objcopy', '-O', 'binary', '-j', '.text', str(arm_elf), str(arm_binary)], check=True)
     resources.append(str(arm_binary))
 subprocess.run(['build-prc', '-o', str(output / (name + '.prc')), source + '.def',
-                str(output / 'probe'), str(output / 'probe.ro')] + resources, check=True)
+                str(output / 'probe')] + ro + resources, check=True)
 print(output / (name + '.prc'))
