@@ -36,7 +36,7 @@ spec.loader.exec_module(frond_run)
 CORE = Path(os.environ.get('FROND_CORE') or ROOT / 'out/frond').absolute()
 OUT = ROOT / 'build/smoke'
 # FROND_DEVICE_IMAGES points at another copy of the firmware folder (deviceimages/palm).
-PALM = Path(os.environ.get('FROND_DEVICE_IMAGES') or '/nonexistent/set-FROND_DEVICE_IMAGES') / 'Palm'
+PALM = palm_boot.palm_images() / 'Palm'
 SDK = ROOT.parent / 'palm-os-sdk/sdk-5r3'
 
 # nor, nand: read-only firmware under PALM. setup: function in tools/palm_boot.py that takes a cold boot to
