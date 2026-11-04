@@ -13,7 +13,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 UPSTREAM = ROOT / 'vendor/cloudpilot'
 REVISION = '064d5d578bcd1f9072de384d05aa217f83db2f7f'
-SOURCE_PATHS = ('src/common', 'src/uarm', 'src/argparse', 'src/Makefile.common', 'LICENSE')
+SOURCE_PATHS = ('src/common', 'src/uarm', 'src/cloudpilot', 'src/argparse', 'src/Makefile.common', 'LICENSE')
 
 
 def inputs(root=ROOT, upstream=UPSTREAM, revision=REVISION):

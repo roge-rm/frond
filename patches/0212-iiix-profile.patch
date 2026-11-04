@@ -1,0 +1,140 @@
+diff --git a/src/common/device_profile5.h b/src/common/device_profile5.h
+index fbccf5b..db2f6f4 100644
+--- a/src/common/device_profile5.h
++++ b/src/common/device_profile5.h
+@@ -11,12 +11,13 @@ enum class DisplayMode {
+     mode_320x320 = 5, mode_320x480 = 6, mode_480x480 = 7, mode_480x720 = 8
+ };
+ 
+-enum class DeviceCohort5 { txNand, e2Nand, patchedE2, paravirtual, zire72Nor, tg50Nor, reserved };
++enum class DeviceCohort5 { txNand, e2Nand, patchedE2, paravirtual, zire72Nor, tg50Nor, reserved, ez68k };
+ enum class DeviceSupport5 { txDesktop, e2Desktop, zire72Desktop, inheritedUnverified, staged, reserved, experimentalDesktop };
+-// How a device is told from its firmware: the card header's company and HAL IDs, or the NOR size.
+-enum class DeviceDetect5 { cardHeader, norSize, none };
+-// Which board model runs it.
+-enum class DeviceBoard5 { pxa255E2, pxa270Tx, pxa270Zire72, paravirtual, none, pxa250SonyTG50 };
++// How a device is told from its firmware: the card header's company and HAL IDs, the NOR size, or a
++// big-endian 68k card header (deviceProfileInspect68kRom5).
++enum class DeviceDetect5 { cardHeader, norSize, none, romHeader68k };
++// Which board model runs it. ez328 runs in frond-68k, the others in frond.
++enum class DeviceBoard5 { pxa255E2, pxa270Tx, pxa270Zire72, paravirtual, none, pxa250SonyTG50, ez328 };
+ // Which button bar and silkscreen art a device gets (native/DeviceControls.h draws them).
+ enum class DeviceArt { none, tx, e2, zire72, m515, iiix, tg50 };
+ // Settings and peripherals a device supports; the desktop and core gate on these.
+@@ -75,6 +76,8 @@ struct DeviceProfile5 {
+     uint32_t msSizes{0};
+     // Largest Memory Stick Pro in MiB (256, 512, 1024 or 1886 for "2 GB"); 0 for none.
+     uint32_t msProMaxMib{0};
++    // Real CPU clock in Hz for the Original speed setting; 0 where the board works it out itself.
++    uint32_t cpuHz{0};
+ };
+ 
+ inline constexpr uint32_t deviceCompanyPalm5 = 0x50616c6d;  // 'Palm'
+@@ -128,15 +131,25 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
+       "up|down|app1|app2|app3|app4|home|power", -1, -1, -1, -1, false, false, false, "", "tg50-clie",
+       DeviceStorageSlot5::memoryStick, 1073741887, true, true, 38, true},
+      4 | 8 | 16 | 32 | 64 | 128, 1886},
++    // DragonBall EZ with 4 MiB RAM and a 2 MiB flash part, run by frond-68k. Takes the IIIx 3.1 ROMs, the
++    // generic OS 3.5 EZ ROMs and the IIIx/V 4.1 ROM. Not offered by the frontends yet.
++    {deviceTypeIIIx, "palm-iiix", "Palm IIIx", DeviceCohort5::ez68k, DeviceSupport5::staged,
++     DeviceDetect5::romHeader68k, 0x70616c6d /* palm */, 0x73756d6f /* sumo */, DeviceBoard5::ez328, DeviceArt::iiix,
++     {}, 0, 0, 4u << 20, 4u << 20, DisplayMode::mode_160x160, 1u << 1, false,
++     DeviceNorLayout5::any, 0, 0, false, 0, 0,
++     {false, "", 160, 160, 60, 44, "Date Book|Address|To Do List|Memo Pad",
++      "up|down|app1|app2|app3|app4|power"},
++     0, 0, 16580608},
+     // Reserved names: art only, no board yet.
+-    {deviceTypeInvalid, "palm-iiix", "Palm IIIx", DeviceCohort5::reserved, DeviceSupport5::reserved,
+-     DeviceDetect5::none, 0, 0, DeviceBoard5::none, DeviceArt::iiix, {},
+-     0, 0, 0, 0, DisplayMode::mode_160x160, 0, false},
+     {deviceTypeInvalid, "palm-m515", "Palm m515", DeviceCohort5::reserved, DeviceSupport5::reserved,
+      DeviceDetect5::none, 0, 0, DeviceBoard5::none, DeviceArt::m515, {},
+      0, 0, 0, 0, DisplayMode::mode_160x160, 0, false},
+ };
+ 
++// 68k ROMs: a big-endian card header at 0 with the reset vector inside the ROM at its base address.
++inline constexpr uint32_t rom68kEzBase5 = 0x10c00000;
++inline constexpr uint64_t rom68kMaxSize5 = 2u << 20; // The IIIx's flash part.
++
+ // Built devices only; reserved names have no internal type.
+ inline const DeviceProfile5* deviceProfile5(int32_t deviceType) {
+     if (deviceType < 0) return nullptr;
+@@ -197,6 +210,45 @@ inline DeviceNorInfo5 deviceProfileInspectNor5(uint64_t size, Reader read) {
+     return {};
+ }
+ 
++// Reads only the card header of a 68k ROM, so a ROM it accepts can still be one the board can't run;
++// frond-68k checks that properly. Header versions 1 and 2 (68328 ROMs) and 68328-only ROMs are refused.
++// Version 5 headers carry company and HAL IDs, which must match the profile's; older ones have none.
++struct Device68kRomInfo5 {
++    const DeviceProfile5* profile{nullptr};
++    bool hasHeader{false};
++    uint16_t headerVersion{0};
++    uint32_t companyId{0}, halId{0};
++};
++template <typename Reader>
++inline Device68kRomInfo5 deviceProfileInspect68kRom5(uint64_t size, Reader read) {
++    uint8_t h[0x100];
++    if (size < sizeof(h) || !read(0, h, sizeof(h))) return {};
++    auto be16 = [&](unsigned at) { return uint16_t((h[at] << 8) | h[at + 1]); };
++    auto be32 = [&](unsigned at) {
++        return uint32_t(h[at]) << 24 | uint32_t(h[at + 1]) << 16 | uint32_t(h[at + 2]) << 8 | h[at + 3];
++    };
++    const char name[] = "PalmCard";
++    for (unsigned i = 0; i < sizeof(name); ++i) if (h[0x10 + i] != uint8_t(name[i])) return {};
++    if (be32(8) != 0xfeedbeef) return {};
++    Device68kRomInfo5 info;
++    info.hasHeader = true;
++    info.headerVersion = be16(0x0c);
++    const uint16_t flags = be16(0x0e);
++    const uint32_t reset = be32(4), cardBytes = be32(0x6c);
++    if (info.headerVersion >= 5) info.companyId = be32(0x7e), info.halId = be32(0x82);
++    // Card flags: 0x0001 RAM only, 0x0020 runs on the 68EZ328.
++    if (info.headerVersion < 3 || info.headerVersion > 5 || (flags & 0x0001) || !(flags & 0x0020)) return info;
++    if (size > rom68kMaxSize5 || size % 0x1000 || cardBytes > size) return info;
++    if (reset < rom68kEzBase5 || reset - rom68kEzBase5 >= size) return info;
++    for (const auto& p : deviceProfiles5) {
++        if (p.detect != DeviceDetect5::romHeader68k) continue;
++        if (info.headerVersion >= 5 && (info.companyId != p.companyId || info.halId != p.halId)) continue;
++        info.profile = &p;
++        return info;
++    }
++    return info;
++}
++
+ // The internal type for a name Frond can run, or deviceTypeInvalid.
+ inline DeviceType5 deviceTypeNamed5(const char* name) {
+     const auto* profile = deviceProfileNamed5(name);
+@@ -214,11 +266,17 @@ inline DeviceArt deviceArtFor5(int32_t deviceType) {
+     return profile ? profile->art : DeviceArt::none;
+ }
+ 
+-// Native qualification can precede desktop/Android acceptance. Art reservations and
+-// inventory-only profiles have no board and cannot enter a runner.
++// Whether frond (the ARM runner) can start it. Native qualification can precede desktop/Android
++// acceptance. Art reservations and inventory-only profiles have no board and cannot enter a runner.
+ inline bool deviceProfileRunnerEligible5(int32_t deviceType) {
+     const auto* profile = deviceProfile5(deviceType);
+-    return profile && profile->board != DeviceBoard5::none;
++    return profile && profile->board != DeviceBoard5::none && profile->board != DeviceBoard5::ez328;
++}
++
++// Devices frond-68k runs instead of frond.
++inline bool deviceProfileRuns68k5(int32_t deviceType) {
++    const auto* profile = deviceProfile5(deviceType);
++    return profile && profile->board == DeviceBoard5::ez328;
+ }
+ 
+ inline DeviceStorageSlot5 deviceProfileStorageSlot5(const DeviceProfile5& profile) {
+diff --git a/src/common/device_type5.h b/src/common/device_type5.h
+index 48a6fdf..47a580f 100644
+--- a/src/common/device_type5.h
++++ b/src/common/device_type5.h
+@@ -8,6 +8,7 @@ enum DeviceType5 {
+     deviceTypeTX = 3,
+     deviceTypeZire72 = 4,
+     deviceTypeTG50 = 5,
++    deviceTypeIIIx = 6,
+     deviceTypeInvalid = -1
+ };
+ 

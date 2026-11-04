@@ -15,12 +15,14 @@ static void put32(std::vector<uint8_t>& data, size_t at, uint32_t value) {
     for (unsigned i = 0; i < 4; ++i) data[at + i] = value >> (i * 8);
 }
 
+static void palmIIIx();
+
 int main() {
     static_assert(int(DisplayMode::mode_320x320) == 5 && int(DisplayMode::mode_320x480) == 6);
     std::set<std::string> names;
     std::set<int> types;
     unsigned desktopCount = 0;
-    const std::vector<std::string> reserved{"palm-iiix", "palm-m515"};
+    const std::vector<std::string> reserved{"palm-m515"};
     for (const auto& p : deviceProfiles5) {
         // Names are unique, short and plain; they go into session headers.
         assert(names.insert(p.name).second && std::strlen(p.name) <= deviceNameMax5);
@@ -42,10 +44,11 @@ int main() {
         assert((p.deviceType == deviceTypeZire72) == (p.board == DeviceBoard5::pxa270Zire72));
         assert(deviceConfigurationGetNandSize(p.deviceType) == p.nandSize);
         assert(deviceConfigurationDefaultDisplayMode(p.deviceType) == p.defaultDisplay);
-        for (uint32_t ram : {0u, 1u, 8u << 20, 16u << 20, 24u << 20, 32u << 20, 64u << 20, 1u << 31, UINT32_MAX}) {
+        for (uint32_t ram : {0u, 1u, 4u << 20, 8u << 20, 16u << 20, 24u << 20, 32u << 20, 64u << 20, 1u << 31, UINT32_MAX}) {
             const bool expected = p.deviceType == deviceTypePV
                 ? ram >= (8u << 20) && (ram & (ram - 1)) == 0
                 : p.deviceType == deviceTypeTG50 ? ram == (16u << 20)
+                : p.deviceType == deviceTypeIIIx ? ram == (4u << 20)
                 : ram == (32u << 20) || (p.deviceType != deviceTypeTX && p.deviceType != deviceTypeZire72 && ram == (16u << 20));
             assert(deviceConfigurationSupportsRamSize(p.deviceType, ram) == expected);
         }
@@ -91,7 +94,7 @@ int main() {
         nor.resize(at + 12);
         assert(!inspect().profile && !inspect().hasHeader);
     }
-    assert(desktopCount == 4 && names.size() == 8 && types.size() == 6);
+    assert(desktopCount == 4 && names.size() == 8 && types.size() == 7);
     assert(std::string(deviceName5(deviceTypeTX)) == "palm-tx" && std::string(deviceName5(deviceTypeE2)) == "palm-e2");
     assert(deviceProfileNamed5("palm-tx")->capabilities.serial && !deviceProfileNamed5("palm-e2")->capabilities.serial);
     // Unknown names are refused, including numbers, old ids, case and prefixes.
@@ -99,7 +102,7 @@ int main() {
         assert(!deviceProfileNamed5(name) && deviceTypeNamed5(name) == deviceTypeInvalid);
     }
     assert(!deviceProfileNamed5(nullptr) && !deviceName5(deviceTypeInvalid) && !deviceName5(99));
-    for (int id : {INT_MIN, -1, 6, 99, INT_MAX}) {
+    for (int id : {INT_MIN, -1, 7, 99, INT_MAX}) {
         assert(!deviceProfile5(id) && !deviceProfileSupportsDesktop5(id));
         assert(!deviceProfileSupportsRam5(id, 32u << 20));
         assert(!deviceProfileSupportsDisplay5(id, 6));
@@ -257,6 +260,8 @@ int main() {
             assert(!deviceProfileRunnerEligible5(deviceProfileNamed5(name)->deviceType));
     }
 
+    palmIIIx();
+
     // Public header layout and IDs from RomInfo5, no dump data.
     for (auto hal : {0x68737072u, 0x446d4752u, 0x50765076u, 0x615a3732u, 0x12345678u}) {
         std::vector<uint8_t> header(256);
@@ -338,4 +343,125 @@ int main() {
         assert(!deviceProfileSdSizeValid5(deviceTypeE2, 1024 * MiB + 512) && !deviceProfileSdSizeValid5(deviceTypeE2, 2048 * MiB));
     }
     std::cout << "PASS: device names, cohort inventory, geometry, E2 NOR size/layout, header bounds and v6 named sessions\n";
+}
+
+// A synthetic 68k ROM: a big-endian card header at 0, the rest zero.
+static std::vector<uint8_t> rom68k(size_t size, uint16_t version, uint16_t flags, uint32_t company, uint32_t hal,
+                                   uint32_t reset, uint32_t cardBytes) {
+    std::vector<uint8_t> rom(size);
+    auto be = [&](size_t at, uint32_t value, unsigned bytes) {
+        for (unsigned i = 0; i < bytes; ++i) rom[at + i] = uint8_t(value >> (8 * (bytes - 1 - i)));
+    };
+    if (size < 0x100) return rom;
+    be(0, 0x3000, 4);
+    be(4, reset, 4);
+    be(8, 0xfeedbeef, 4);
+    be(0x0c, version, 2);
+    be(0x0e, flags, 2);
+    std::memcpy(rom.data() + 0x10, "PalmCard", 9);
+    std::memcpy(rom.data() + 0x30, "Synthetic", 10);
+    be(0x6c, cardBytes, 4);
+    if (version >= 5) be(0x7e, company, 4), be(0x82, hal, 4);
+    return rom;
+}
+
+static Device68kRomInfo5 inspect68k(const std::vector<uint8_t>& rom) {
+    return deviceProfileInspect68kRom5(rom.size(), [&](uint64_t at, uint8_t* out, size_t count) {
+        if (at > rom.size() || count > rom.size() - at) return false;
+        std::memcpy(out, rom.data() + at, count);
+        return true;
+    });
+}
+
+// Palm IIIx: a staged ez328 board for frond-68k, told from its ROM's big-endian card header alone.
+static void palmIIIx() {
+    const auto* p = deviceProfileNamed5("palm-iiix");
+    assert(p && p->deviceType == deviceTypeIIIx && deviceProfile5(deviceTypeIIIx) == p);
+    assert(p->board == DeviceBoard5::ez328 && p->detect == DeviceDetect5::romHeader68k && p->art == DeviceArt::iiix);
+    assert(p->support == DeviceSupport5::staged && !p->frontend.available && !deviceProfileSupportsDesktop5(p->deviceType));
+    assert(deviceProfileRuns68k5(p->deviceType) && !deviceProfileRunnerEligible5(p->deviceType));
+    for (const auto& other : deviceProfiles5)
+        if (&other != p) assert(!deviceProfileRuns68k5(other.deviceType));
+    assert(p->cpuHz == 16580608);
+    assert(deviceProfileSupportsRam5(p->deviceType, 4u << 20) && !deviceProfileSupportsRam5(p->deviceType, 8u << 20));
+    assert(p->defaultDisplay == DisplayMode::mode_160x160 && p->displayModes == (1u << 1));
+    const auto display = deviceConfigurationDisplayConfigForDevice(p->deviceType, p->defaultDisplay);
+    assert(display.width == 160 && display.height == 160 && display.graffitiHeight == 60);
+    assert(p->frontend.width == 160 && p->frontend.height == 160 && p->frontend.silkscreenHeight == 60);
+    assert(std::string(p->frontend.appNames) == "Date Book|Address|To Do List|Memo Pad");
+    assert(std::string(p->frontend.buttons) == "up|down|app1|app2|app3|app4|power");
+    assert(!p->nandSize && !p->norSize && !deviceProfileSdSizeValid5(p->deviceType, 512));
+    assert(deviceProfileStorageSlot5(*p) == DeviceStorageSlot5::none && !p->msSizes && !p->msProMaxMib);
+    const auto& caps = p->capabilities;
+    assert(!caps.network && !caps.keyboard && !caps.serial && !caps.usb && !caps.fastAudio && !caps.infrared &&
+           !caps.bluetooth && !caps.sound && !caps.microphone);
+    for (const auto& other : deviceProfiles5)
+        if (&other != p) assert(other.detect != DeviceDetect5::romHeader68k && other.board != DeviceBoard5::ez328);
+
+    constexpr uint32_t base = 0x10c00000, palm = 0x70616c6d, sumo = 0x73756d6f, ez = 0x0020;
+    // The shapes of the IIIx 3.1, generic OS 3.5 EZ and IIIx/V 4.1 ROMs.
+    const auto v31 = rom68k(0x128000, 3, ez, 0, 0, base + 0x822a, 0x128000);
+    const auto v35 = rom68k(0x178000, 4, ez, 0, 0, base + 0x90e0, 0x178000);
+    const auto v41 = rom68k(0x1a8000, 5, ez, palm, sumo, base + 0xc6ea, 0x1a8000);
+    for (const auto* rom : {&v31, &v35, &v41}) {
+        const auto info = inspect68k(*rom);
+        assert(info.profile == p && info.hasHeader);
+        // Not an ARM card header, so the ARM readers don't take it.
+        assert(RomInfo5(rom->data(), rom->size()).GetDeviceType() == deviceTypeInvalid);
+        const auto arm = deviceProfileInspectNor5(rom->size(), [&](uint64_t at, uint8_t* out, size_t count) {
+            if (at > rom->size() || count > rom->size() - at) return false;
+            std::memcpy(out, rom->data() + at, count);
+            return true;
+        });
+        assert(!arm.profile && !arm.hasHeader);
+    }
+    assert(inspect68k(v31).headerVersion == 3 && !inspect68k(v31).companyId);
+    assert(inspect68k(v41).companyId == palm && inspect68k(v41).halId == sumo);
+    // A ROM padded to the full 2 MiB part, or with a card smaller than the file, still reads.
+    assert(inspect68k(rom68k(2u << 20, 3, ez, 0, 0, base + 0x822a, 0x4000)).profile == p);
+
+    auto refused = [&](const std::vector<uint8_t>& rom, bool header) {
+        const auto info = inspect68k(rom);
+        assert(!info.profile && info.hasHeader == header);
+    };
+    // Wrong size: over 2 MiB, not whole 4 KiB pages, or shorter than its card says (truncated).
+    refused(rom68k((2u << 20) + 0x1000, 3, ez, 0, 0, base + 0x822a, 0x128000), true);
+    refused(rom68k(0x128001, 3, ez, 0, 0, base + 0x822a, 0x128000), true);
+    refused(rom68k(0x100000, 3, ez, 0, 0, base + 0x822a, 0x128000), true);
+    {
+        auto truncated = v31;
+        truncated.resize(0x127000);
+        refused(truncated, true);
+    }
+    // Truncated inside the header, or empty.
+    for (size_t size : {size_t(0), size_t(12), size_t(0xff)}) {
+        auto truncated = v31;
+        truncated.resize(size);
+        refused(truncated, false);
+    }
+    // A read that fails is no ROM at all.
+    assert(!deviceProfileInspect68kRom5(v31.size(), [](uint64_t, uint8_t*, size_t) { return false; }).hasHeader);
+    // A little-endian ARM card header (the E2's layout at 0) isn't a 68k ROM.
+    {
+        std::vector<uint8_t> arm(0x128000);
+        put32(arm, 8, 0xfeedbeef);
+        std::memcpy(arm.data() + 0x10, "PalmCard", 9);
+        put32(arm, 0x80, deviceCompanyPalm5);
+        put32(arm, 0x84, 0x68737072);
+        refused(arm, false);
+    }
+    // 68328-only, RAM-only, header versions 2 and 6, a reset vector outside the ROM, other 4.1 IDs.
+    refused(rom68k(0x128000, 3, 0x0010, 0, 0, base + 0x822a, 0x128000), true);
+    refused(rom68k(0x128000, 3, ez | 0x0001, 0, 0, base + 0x822a, 0x128000), true);
+    refused(rom68k(0x128000, 2, ez, 0, 0, base + 0x822a, 0x128000), true);
+    refused(rom68k(0x128000, 6, ez, palm, sumo, base + 0x822a, 0x128000), true);
+    refused(rom68k(0x128000, 3, ez, 0, 0, 0x00c0822a, 0x128000), true);
+    refused(rom68k(0x128000, 3, ez, 0, 0, base + 0x128000, 0x128000), true);
+    refused(rom68k(0x1a8000, 5, ez, palm, 0x6173746e /* astn */, base + 0xc6ea, 0x1a8000), true);
+    refused(rom68k(0x1a8000, 5, ez, 0, 0, base + 0xc6ea, 0x1a8000), true);
+    {
+        auto wrongName = v31;
+        wrongName[0x10] = 'X';
+        refused(wrongName, false);
+    }
 }

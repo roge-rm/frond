@@ -55,7 +55,8 @@ class PrepareTests(unittest.TestCase):
         self.upstream.mkdir(parents=True)
         git(self.root, 'init', '--quiet')
         git(self.upstream, 'init', '--quiet')
-        for name in ('common/value.txt', 'uarm/value.txt', 'argparse/LICENSE', 'Makefile.common'):
+        for name in ('common/value.txt', 'uarm/value.txt', 'cloudpilot/value.txt', 'argparse/LICENSE',
+                     'Makefile.common'):
             target = self.upstream / 'src' / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text('one\n')
