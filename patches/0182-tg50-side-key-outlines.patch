@@ -1,0 +1,15 @@
+--- a/src/uarm/native/DeviceControls.cpp
++++ b/src/uarm/native/DeviceControls.cpp
+@@ -1304,9 +1304,10 @@
+     }
+ 
+     // The side controls use the same body paint and texture coordinates as the keyboard.
++    // Clipped to the tab, so each key's groove and lip fit in its 2 unit margins.
+     if(sidebar && view.sideTab && profile.sideTabWidth>0) {
+-        canvas.clipLeft=profile.sideTab.x+2;
+-        canvas.clipRight=profile.sideTab.x+profile.sideTab.w-2;
++        canvas.clipLeft=profile.sideTab.x;
++        canvas.clipRight=profile.sideTab.x+profile.sideTab.w;
+         const DeviceButton* jog[3]={nullptr,nullptr,nullptr};const DeviceButton* back=nullptr;
+         for(size_t i=0;i<profile.count;++i) {
+             const auto& b=profile.buttons[i];
