@@ -496,6 +496,13 @@ test-frond-68k-peripherals: out/frond-68k build/test-frond-68k-sound
 	./build/test-frond-68k-sound
 	python3 tests/frond-68k-peripherals.py $(FROND_68K_ROMS)
 
+# m68k-palmos-gdb 5.3 and gdb-multiarch on the debug Hello app (build/hello-debug) on the private
+# OS 3.5 ROM; skips without them.
+.PHONY: test-frond-68k-gdb
+test-frond-68k-gdb: out/frond-68k
+	python3 tests/frond-68k-gdb.py
+	python3 tests/frond-68k-gdb.py --multiarch
+
 build/test-frond-68k-sound: tests/frond-68k-sound.cpp build/source/.prepared
 	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/cloudpilot/frond tests/frond-68k-sound.cpp -o $@
 
