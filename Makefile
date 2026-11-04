@@ -484,8 +484,16 @@ test-tx-serial: prepare build/source/src/common/libcommon.a
 
 .PHONY: test-frond-68k
 test: test-frond-68k
-test-frond-68k: out/frond-68k
+test-frond-68k: out/frond-68k build/test-cpu68k-timing
+	./build/test-cpu68k-timing
 	python3 tests/frond-68k.py
+
+CPU68K_UAE = build/source/src/cloudpilot/emulator/uae
+build/test-cpu68k-timing: tests/cpu68k-timing.cpp build/source/.prepared
+	$(CXX) -std=c++17 -O1 -g -I$(CPU68K_UAE) -Ibuild/source/src/cloudpilot/emulator/hardware \
+		-Ibuild/source/src/cloudpilot/emulator -Ibuild/source/src/common -DEMULATION_LEVEL=EMULATION_UNIX \
+		tests/cpu68k-timing.cpp $(CPU68K_UAE)/readcpu.cpp $(CPU68K_UAE)/cputiming.cpp \
+		-x c $(CPU68K_UAE)/cpudefs.c -x none -o $@
 
 .PHONY: device-profiles test-device-profiles
 device-profiles: prepare
