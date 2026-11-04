@@ -36,6 +36,9 @@ val sdlImageSource = File(sdlRoot, "SDL2_image-$sdlImageVersion")
 // Self-test build: -Pfrond.selfTest=true builds the M1 CPU self-test as libmain.so
 // instead of the emulator.
 val selfTest = providers.gradleProperty("frond.selfTest").map { it.toBoolean() }.getOrElse(false)
+// -Pfrond.jitDifferential=true also builds tests/jit-differential.cpp and tools/benchmark-replay.cpp
+// as programs (arm64-v8a and x86_64), to push to /data/local/tmp and run with adb shell.
+val jitDifferential = providers.gradleProperty("frond.jitDifferential").map { it.toBoolean() }.getOrElse(false)
 
 val prepareCore = tasks.register<Exec>("prepareCore") {
     group = "build"
@@ -169,9 +172,11 @@ android {
                     "-DSDL2_SOURCE=${sdlSource.absolutePath}",
                     "-DSDL2_IMAGE_SOURCE=${sdlImageSource.absolutePath}",
                     "-DFROND_SELF_TEST=${if (selfTest) "ON" else "OFF"}",
+                    "-DFROND_JIT_DIFFERENTIAL=${if (jitDifferential) "ON" else "OFF"}",
                     "-DFROND_DYNARMIC=${dynarmicSource.absolutePath}",
                     "-DFROND_BOOST_INCLUDE=$boostInclude",
                 )
+                if (jitDifferential) targets += listOf("main", "jit-differential", "benchmark-replay")
             }
         }
     }

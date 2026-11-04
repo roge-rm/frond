@@ -1,0 +1,874 @@
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -401,7 +401,10 @@
+     // User and system share a bank, but still change mode and privilege.
+ 
+     cpu->M = newMode;
+-    cpu->privileged = cpu->M != ARM_SR_MODE_USR;
++    const bool privileged = cpu->M != ARM_SR_MODE_USR;
++    // Fetches are checked for the mode: the I-cache fast paths check their line again.
++    if (privileged != cpu->privileged && cpu->ic) cpu->ic->epoch++;
++    cpu->privileged = privileged;
+ }
+ 
+ static FORCE_INLINE void cpuPrvSetPSRlo8(struct ArmCpu *cpu, uint_fast8_t val) {
+@@ -801,8 +804,8 @@
+ 
+ // After an access that went through the MMU to primary RAM or ROM, cache the page's
+ // host address. Only for pages the MMU TLB holds now, so a hit gives what
+-// mmuTranslateCached would. Writes are RAM only and keyed by privilege, since the
+-// permission check passed for that privilege and the current domains.
++// mmuTranslateCached would. Writes are RAM only. Both are keyed by privilege, since the
++// permission check passed for that privilege and the current domains, S and R.
+ template <bool write>
+ static __attribute__((noinline)) void cpuPrvHostTlbFill(struct ArmCpu *cpu, uint32_t va, uint32_t pa,
+                                             bool privileged) {
+@@ -833,7 +836,7 @@
+         } else {
+             return;
+         }
+-        hostTlb.read[(va >> 12) & (HOST_TLB_SIZE - 1)] = {hostTlbKey(hostTlb.gen, va, false),
++        hostTlb.read[(va >> 12) & (HOST_TLB_SIZE - 1)] = {hostTlbKey(hostTlb.gen, va, privileged),
+                                                           uintptr_t(host) - vpage};
+     }
+ }
+@@ -882,7 +885,7 @@
+                 return ramAccessInline<size, true>(hostTlb.ram, vaddr + uint32_t(e.addend), buf);
+         } else {
+             const struct HostTlbEntry &e = hostTlb.read[(vaddr >> 12) & (HOST_TLB_SIZE - 1)];
+-            if (likely(e.key == hostTlbKey(hostTlb.gen, vaddr, false))) {
++            if (likely(e.key == hostTlbKey(hostTlb.gen, vaddr, priviledged))) {
+                 cpuPrvHostRead<size>((const uint8_t *)(e.addend + vaddr), buf);
+                 return true;
+             }
+@@ -4037,12 +4040,13 @@
+ 
+ // After a fetch outside the fast path: remember pc's line for cpuPrvFetchSameLine if the
+ // cache holds it now, otherwise make the fast path miss until the next slow fetch.
+-static FORCE_INLINE void cpuPrvRememberLine(const struct icache* ic, uint32_t pc,
++static FORCE_INLINE void cpuPrvRememberLine(const struct icache* ic, uint32_t pc, uint32_t key,
+                                             const struct icacheline*& line, uint32_t& lineVa,
+                                             uint32_t& lineEpoch) {
+     line = ic->cache + calculateIndex(pc);
+-    lineVa = line->revision == ic->revision && line->tag == calculateTag(pc) ? maskLine(pc)
+-                                                                             : 0xffffffff;
++    lineVa = line->revision == ic->revision && line->tag == calculateTag(pc) && line->fetchKey == key
++                 ? maskLine(pc)
++                 : 0xffffffff;
+     lineEpoch = ic->epoch;
+ }
+ #endif
+@@ -4074,10 +4078,11 @@
+         uint32_t offset = calculateLineIndex(pc);
+         uint32_t cached = line->decoded[offset >> 1];
+         if (unlikely((pc & (size - 1)) || line->revision != ic->revision ||
+-                     line->tag != calculateTag(pc) || (cached & DECODED_BITS) != kind)) {
++                     line->tag != calculateTag(pc) || (cached & DECODED_BITS) != kind ||
++                     line->fetchKey != icacheFetchKey(ic, cpu->privileged))) {
+             uint32_t instr = 0, decoded = 0;
+             uint_fast8_t fsr;
+-            if (!icacheFetch<memorySystemKind, size, false>(ic, pc, &fsr, instr, decoded)) {
++            if (!icacheFetch<memorySystemKind, size, false>(ic, pc, cpu->privileged, &fsr, instr, decoded)) {
+                 cpuPrvHandleMemErr(cpu, pc, false, true, fsr);
+                 return acc;
+             }
+@@ -4164,16 +4169,17 @@
+         if (!ok) {
+             // Fetch through copies, so the fast path's values stay in registers.
+             uint32_t slowInstr = 0, slowDecoded = 0;
+-            ok = icacheFetchCached<2>(ic, pc, slowInstr, slowDecoded);
++            const uint32_t key = icacheFetchKey(ic, cpu->privileged);
++            ok = icacheFetchCached<2>(ic, pc, key, slowInstr, slowDecoded);
+             if (!ok)
+-                ok = icacheFetch<memorySystemKind, 2, injected>(ic, pc, &fsr, slowInstr,
++                ok = icacheFetch<memorySystemKind, 2, injected>(ic, pc, cpu->privileged, &fsr, slowInstr,
+                                                                 slowDecoded);
+             translatedInstr = slowInstr;
+             decoded = slowDecoded;
+-            cpuPrvRememberLine(ic, pc, line, lineVa, lineEpoch);
++            cpuPrvRememberLine(ic, pc, key, line, lineVa, lineEpoch);
+         }
+ #else
+-        ok = icacheFetch<memorySystemKind, 2, injected>(cpu->ic, cpu->curInstrPC, &fsr,
++        ok = icacheFetch<memorySystemKind, 2, injected>(cpu->ic, cpu->curInstrPC, cpu->privileged, &fsr,
+                                                         translatedInstr, decoded);
+ #endif
+ 
+@@ -4248,16 +4254,17 @@
+         if (!ok) {
+             // Fetch through copies, so the fast path's values stay in registers.
+             uint32_t slowInstr = 0, slowDecoded = 0;
+-            ok = icacheFetchCached<4>(ic, pc, slowInstr, slowDecoded);
++            const uint32_t key = icacheFetchKey(ic, cpu->privileged);
++            ok = icacheFetchCached<4>(ic, pc, key, slowInstr, slowDecoded);
+             if (!ok)
+-                ok = icacheFetch<memorySystemKind, 4, injected>(ic, pc, &fsr, slowInstr,
++                ok = icacheFetch<memorySystemKind, 4, injected>(ic, pc, cpu->privileged, &fsr, slowInstr,
+                                                                 slowDecoded);
+             instr = slowInstr;
+             decoded = slowDecoded;
+-            cpuPrvRememberLine(ic, pc, line, lineVa, lineEpoch);
++            cpuPrvRememberLine(ic, pc, key, line, lineVa, lineEpoch);
+         }
+ #else
+-        ok = icacheFetch<memorySystemKind, 4, injected>(cpu->ic, cpu->curInstrPC, &fsr, instr,
++        ok = icacheFetch<memorySystemKind, 4, injected>(cpu->ic, cpu->curInstrPC, cpu->privileged, &fsr, instr,
+                                                         decoded);
+ #endif
+ 
+@@ -4321,7 +4328,7 @@
+ uint8_t *cpuJitReadPage(ArmCpu *cpu, uint32_t va) {
+     const struct HostTlb &t = cpu->mem->hostTlb;
+     const struct HostTlbEntry &e = t.read[(va >> 12) & (HOST_TLB_SIZE - 1)];
+-    if (e.key != hostTlbKey(t.gen, va, false)) return nullptr;
++    if (e.key != hostTlbKey(t.gen, va, cpu->privileged)) return nullptr;
+     return (uint8_t *)(e.addend + (va & ~0xfffu));
+ }
+ 
+@@ -4360,13 +4367,23 @@
+     return memInstructionFetch<4>(cpu->mem, MMU_TRANSLATE_RESULT_PA(r), word);
+ }
+ 
+-bool cpuJitCodePa(ArmCpu *cpu, uint32_t va, uint32_t *pa) {
+-    const MMUTranslateResult r = mmuTranslateInspect(cpu->memorySystem.mmu, va, false);
++bool cpuJitCodePa(ArmCpu *cpu, uint32_t va, uint32_t *pa, uint32_t *access) {
++    const MMUTranslateResult r = mmuTranslateCodeAccess(cpu->memorySystem.mmu, va, access);
+     if (!MMU_TRANSLATE_RESULT_OK(r)) return false;
+     *pa = MMU_TRANSLATE_RESULT_PA(r);
+     return true;
+ }
+ 
++bool cpuJitAccessReadable(ArmCpu *cpu, uint32_t access) {
++    return mmuAccessReadable(cpu->memorySystem.mmu, access, cpu->privileged);
++}
++
++uint64_t cpuJitPermContext(ArmCpu *cpu) {
++    ArmMmu *mmu = cpu->memorySystem.mmu;
++    return uint64_t(mmuGetDomainCfg(mmu)) | (uint64_t(mmuGetS(mmu)) << 32) |
++           (uint64_t(mmuGetR(mmu)) << 33) | (uint64_t(cpu->privileged) << 34);
++}
++
+ static void cpuPrvJitCodeWritten(void *ctx, uint8_t *page) { jitCodeWritten(((ArmCpu *)ctx)->jit, page); }
+ 
+ uint8_t *cpuJitWatchCode(ArmCpu *cpu, uint32_t pa, uint8_t **lines) {
+@@ -4542,8 +4559,8 @@
+     uint32_t instr = 0, decoded = 0;
+     uint_fast8_t fsr;
+     const uint32_t size = cpu->T ? 2 : 4;
+-    const bool ok = cpu->T ? icacheFetch<memorySystemKind, 2, false>(cpu->ic, pc, &fsr, instr, decoded)
+-                           : icacheFetch<memorySystemKind, 4, false>(cpu->ic, pc, &fsr, instr, decoded);
++    const bool ok = cpu->T ? icacheFetch<memorySystemKind, 2, false>(cpu->ic, pc, cpu->privileged, &fsr, instr, decoded)
++                           : icacheFetch<memorySystemKind, 4, false>(cpu->ic, pc, cpu->privileged, &fsr, instr, decoded);
+     if (!ok) {
+         cpuPrvHandleMemErr(cpu, pc, false, true, fsr);
+         return;
+--- a/src/uarm/uarm/MMU.cpp
++++ b/src/uarm/uarm/MMU.cpp
+@@ -15,8 +15,18 @@
+ 
+ #define SAVESTATE_VERSION 0
+ 
+-void mmuTlbFlush(struct ArmMmu *mmu) {
++static void mmuPrvPermChanged(struct ArmMmu *mmu) {
+     hostTlbFlush(&mmu->mem->hostTlb);
++    if (mmu->permChanged) mmu->permChanged(mmu->permChangedCtx);
++}
++
++void mmuSetPermHook(struct ArmMmu *mmu, void (*hook)(void *), void *ctx) {
++    mmu->permChanged = hook;
++    mmu->permChangedCtx = ctx;
++}
++
++void mmuTlbFlush(struct ArmMmu *mmu) {
++    mmuPrvPermChanged(mmu);
+     mmu->flushes++;
+     mmu->revision = (mmu->revision + 1) & 0x0f;
+ 
+@@ -47,13 +57,18 @@
+ 
+ bool mmuIsOn(struct ArmMmu *mmu) { return mmu->transTablPA != MMU_DISABLED_TTP; }
+ 
++// checkRead false skips the permission check for reads (inspection). access, if given, gets
++// adr's domain << 2 | AP, and uniform whether the rest of its 4K page has the same AP.
+ static FORCE_INLINE MMUTranslateResult translateAndCache(struct ArmMmu *mmu, uint32_t adr,
+-                                                         bool priviledged, bool write, bool inspect = false) {
++                                                         bool priviledged, bool write, bool inspect = false,
++                                                         bool checkRead = true, uint8_t *access = nullptr,
++                                                         bool *uniformP = nullptr) {
+     bool c = false;
+     bool section = false, coarse = true, pxa_tex_page = false;
+     uint32_t va, paPage = 0, sz, t, pa;
+     int_fast16_t i;
+     uint_fast8_t dom, ap = 0;
++    bool uniform = true;
+     uint8_t fsr;
+     MMUTranslateResult result;
+ 
+@@ -144,6 +159,7 @@
+             ap = (t >> 4) & 3;  // in "ap" store the actual AP [and skip quarter-page resolution
+                                 // later using the goto]
+             sz = 1024;
++            uniform = false;
+             goto translated;
+     }
+ 
+@@ -157,6 +173,7 @@
+ 
+     else {  // take the quarter that is the one we need
+ 
++        uniform = false;
+         sz /= 4;
+         paPage += ((uint32_t)ap) * sz;
+         va += ((uint32_t)ap) * sz;
+@@ -180,8 +197,13 @@
+         }
+     }
+ 
+-    if (write) {
+-        fsr = checkPermissionsForWrite(mmu, ap, dom, section, priviledged);
++    if (access) {
++        *access = uint8_t((dom << 2) | ap);
++        *uniformP = uniform;
++    }
++
++    if (write || checkRead) {
++        fsr = checkPermissions(mmu, ap, dom, section, priviledged, write);
+         if (fsr) return TRANSLATE_RESULT_FAULT(fsr);
+     }
+ 
+@@ -201,12 +223,9 @@
+         return translateAndCache(mmu, addr, priviledged, write);
+     }
+ 
+-    if (write) {
+-        uint8_t fsr = checkPermissionsForWrite(mmu, tlbEntry->ap, tlbEntry->domain,
+-                                               tlbEntry->section, priviledged);
+-
+-        if (fsr) return TRANSLATE_RESULT_FAULT(fsr);
+-    }
++    uint8_t fsr = checkPermissions(mmu, tlbEntry->ap, tlbEntry->domain, tlbEntry->section,
++                                   priviledged, write);
++    if (fsr) return TRANSLATE_RESULT_FAULT(fsr);
+ 
+     uint64_t result = (addr & 0xfff) + (tlbEntry->pa << 12);
+ 
+@@ -219,14 +238,64 @@
+     if (mmu->transTablPA == MMU_DISABLED_TTP) return addr;
+     const auto& entry=mmu->tlb[addr >> 12];
+     if (entry.revision != mmu->revision) return translateAndCache(mmu,addr,privileged,write,true);
++    auto fsr=checkPermissions(mmu,entry.ap,entry.domain,entry.section,privileged,write);
++    if (fsr) return TRANSLATE_RESULT_FAULT(fsr);
++    return uint64_t((addr & 0xfff) | (entry.pa << 12));
++}
++// Privileged, and reads skip the permission check, so a debugger or the JIT's code map
++// sees every mapped page.
++MMUTranslateResult mmuTranslateInspect(ArmMmu* mmu, uint32_t addr, bool write) {
++    if (mmu->transTablPA == MMU_DISABLED_TTP) return addr;
++    const auto& entry=mmu->tlb[addr >> 12];
++    if (entry.revision != mmu->revision) return translateAndCache(mmu,addr,true,write,true,false);
+     if (write) {
+-        auto fsr=checkPermissionsForWrite(mmu,entry.ap,entry.domain,entry.section,privileged);
++        auto fsr=checkPermissions(mmu,entry.ap,entry.domain,entry.section,true,true);
+         if (fsr) return TRANSLATE_RESULT_FAULT(fsr);
+     }
+     return uint64_t((addr & 0xfff) | (entry.pa << 12));
+ }
+-MMUTranslateResult mmuTranslateInspect(ArmMmu* mmu, uint32_t addr, bool write) {
+-    return mmuTranslateInspectAccess(mmu, addr, true, write);
++
++MMUTranslateResult mmuTranslateCodeAccess(ArmMmu* mmu, uint32_t addr, uint32_t* access) {
++    if (mmu->transTablPA == MMU_DISABLED_TTP) {
++        *access = MMU_ACCESS_ANY;
++        return addr;
++    }
++    *access = 0;
++    const auto& entry=mmu->tlb[addr >> 12];
++    // TLB entries only hold 4K pages with one AP.
++    if (entry.revision == mmu->revision) {
++        *access = (uint32_t(entry.domain) << 8) | (entry.ap * 0x55u);
++        return uint64_t((addr & 0xfff) | (entry.pa << 12));
++    }
++    uint8_t a;
++    bool uniform;
++    const MMUTranslateResult r = translateAndCache(mmu,addr,true,false,true,false,&a,&uniform);
++    if (!MMU_TRANSLATE_RESULT_OK(r)) return r;
++    uint32_t acc = uint32_t(a >> 2) << 8;
++    if (uniform) {
++        acc |= (a & 3) * 0x55u;
++    } else {
++        for (uint32_t k = 0; k < 4; ++k) {
++            const uint32_t sub = (addr & ~0xfffu) | (k << 10);
++            if (MMU_TRANSLATE_RESULT_OK(translateAndCache(mmu,sub,true,false,true,false,&a,&uniform)))
++                acc |= uint32_t(a & 3) << (2 * k);
++            else
++                acc |= 0x1000u << k;
++        }
++    }
++    *access = acc;
++    return r;
++}
++
++bool mmuAccessReadable(struct ArmMmu *mmu, uint32_t access, bool privileged) {
++    if (access == MMU_ACCESS_ANY) return true;
++    const uint32_t domain = (access >> 8) & 15;
++    for (uint32_t k = 0; k < 4; ++k) {
++        if (access & (0x1000u << k)) continue;
++        if (checkPermissions(mmu, (access >> (2 * k)) & 3, domain, false, privileged, false))
++            return false;
++    }
++    return true;
+ }
+ 
+ uint32_t mmuGetTTP(struct ArmMmu *mmu) { return mmu->transTablPA; }
+@@ -238,9 +307,17 @@
+     mmu->transTablPA = ttp;
+ }
+ 
+-void mmuSetS(struct ArmMmu *mmu, bool on) { mmu->S = on; }
++void mmuSetS(struct ArmMmu *mmu, bool on) {
++    if (mmu->S == on) return;
++    mmu->S = on;
++    mmuPrvPermChanged(mmu);
++}
+ 
+-void mmuSetR(struct ArmMmu *mmu, bool on) { mmu->R = on; }
++void mmuSetR(struct ArmMmu *mmu, bool on) {
++    if (mmu->R == on) return;
++    mmu->R = on;
++    mmuPrvPermChanged(mmu);
++}
+ 
+ bool mmuGetS(struct ArmMmu *mmu) { return mmu->S; }
+ 
+@@ -249,8 +326,9 @@
+ uint32_t mmuGetDomainCfg(struct ArmMmu *mmu) { return mmu->domainCfg; }
+ 
+ void mmuSetDomainCfg(struct ArmMmu *mmu, uint32_t val) {
+-    if (val != mmu->domainCfg) hostTlbFlush(&mmu->mem->hostTlb);
++    if (val == mmu->domainCfg) return;
+     mmu->domainCfg = val;
++    mmuPrvPermChanged(mmu);
+ }
+ 
+ ///////////////////////////  debugging helpers  ///////////////////////////
+--- a/src/uarm/uarm/MMU.h
++++ b/src/uarm/uarm/MMU.h
+@@ -32,6 +32,18 @@
+ // maintenance, reset, load) goes through.
+ uint32_t mmuFlushCount(const struct ArmMmu *mmu);
+ MMUTranslateResult mmuTranslateInspectAccess(ArmMmu*, uint32_t, bool privileged, bool write);
++
++// The translation of a code address for the JIT's code map (as mmuTranslateInspect), and in
++// access its 4K page's domain and the AP of each 1K subpage, for mmuAccessReadable:
++// AP of subpage k in bits 2k-2k+1, the domain in bits 8-11, bit 12 + k set when subpage k
++// has no mapping. MMU_ACCESS_ANY with the MMU off.
++#define MMU_ACCESS_ANY 0x10000u
++MMUTranslateResult mmuTranslateCodeAccess(ArmMmu*, uint32_t va, uint32_t* access);
++// Whether reads of every mapped subpage of a page with that access are allowed now in
++// this mode.
++bool mmuAccessReadable(struct ArmMmu *mmu, uint32_t access, bool privileged);
++// hook(ctx) runs when the TLB, domains, S or R change.
++void mmuSetPermHook(struct ArmMmu *mmu, void (*hook)(void *), void *ctx);
+ uint32_t mmuGetTTP(struct ArmMmu *mmu);
+ void mmuSetTTP(struct ArmMmu *mmu, uint32_t ttp);
+ 
+--- a/src/uarm/uarm/MMU_internal.h
++++ b/src/uarm/uarm/MMU_internal.h
+@@ -26,18 +26,24 @@
+     struct TlbEntry tlb[TLB_SIZE];
+     uint16_t revision;
+     uint32_t flushes;  // counts mmuTlbFlush calls, for the JIT; not saved
++    // Called when the TLB, domains, S or R change, so anything that checked a permission
++    // before checks it again (the I-cache's fetch key). Not saved.
++    void (*permChanged)(void *ctx);
++    void *permChangedCtx;
+ 
+     template <typename T>
+     void DoSaveLoad(T &chunkHelper);
+ };
+ 
+-static inline uint8_t checkPermissionsForWrite(struct ArmMmu *mmu, uint_fast8_t ap,
+-                                               uint_fast8_t domain, bool section,
+-                                               bool priviledged) {
++// The fault status for an access in this mode, or 0 if it's allowed. Reads (and fetches)
++// follow AP and the control register's S and R bits; AP 0 with S and R both set is
++// unpredictable and treated as no access.
++static inline uint8_t checkPermissions(struct ArmMmu *mmu, uint_fast8_t ap, uint_fast8_t domain,
++                                       bool section, bool priviledged, bool write) {
+     switch ((mmu->domainCfg >> (domain * 2)) & 3) {
+         case 0:  // NO ACCESS:
+         case 2:  // RESERVED: unpredictable	(treat as no access)
+-            return (section ? 0x08 : 0xB) | (domain << 4);  // section or page domain fault
++            return (section ? 0x09 : 0x0B) | (domain << 4);  // section or page domain fault
+ 
+         case 1:  // CLIENT: check permissions
+             break;
+@@ -46,26 +52,26 @@
+             return 0;
+     }
+ 
+-    // check permissions
+-
++    bool allowed;
+     switch (ap) {
+         case 0:
++            allowed = !write && (mmu->R ? !mmu->S : (mmu->S && priviledged));
+             break;
+-
+         case 1:
++            allowed = priviledged;
++            break;
+         case 2:
+-            if (!priviledged) break;
+-            return 0;
+-
+-        case 3:
+-            return 0;
++            allowed = priviledged || !write;
++            break;
++        default:
++            allowed = true;
++            break;
+     }
+-
+-    // perm_err:
++    if (allowed) return 0;
+     return (section ? 0x0D : 0x0F) | (domain << 4);  // section or subpage permission fault
+ }
+ 
+-// Match mmuTranslate's cached translations and share its write-permission check.
++// Match mmuTranslate's cached translations and share its permission check.
+ // Misses keep the authoritative page walk. No new translation state.
+ template <bool write>
+ static FORCE_INLINE MMUTranslateResult mmuTranslateCached(ArmMmu* mmu, uint32_t addr,
+@@ -74,11 +80,8 @@
+     const auto& entry = mmu->tlb[addr >> 12];
+     if (entry.revision != mmu->revision)
+         return mmuTranslate(mmu, addr, privileged, write);
+-    if constexpr (write) {
+-        const auto fsr = checkPermissionsForWrite(mmu, entry.ap, entry.domain,
+-                                                  entry.section, privileged);
+-        if (fsr) return (1ull << 63) | (uint64_t(fsr) << 32);
+-    }
++    const auto fsr = checkPermissions(mmu, entry.ap, entry.domain, entry.section, privileged, write);
++    if (fsr) return (1ull << 63) | (uint64_t(fsr) << 32);
+     return uint64_t((addr & 0xfff) | (entry.pa << 12)) | (uint64_t(entry.c) << 62);
+ }
+ #endif
+--- a/src/uarm/uarm/icache.cpp
++++ b/src/uarm/uarm/icache.cpp
+@@ -28,16 +28,18 @@
+     for (auto& buffer : ic->fetchBuffers) {
+         buffer.base = *state++;
+         std::memcpy(buffer.words, state, sizeof(buffer.words));
++        buffer.fetchKey = 0;
+         state += 8;
+     }
+     return true;
+ }
+ 
+-static void icacheRememberFetch(struct icache* ic, uint32_t va, const void* data) {
++static void icacheRememberFetch(struct icache* ic, uint32_t va, uint32_t key, const void* data) {
+     if (!ic->xscale) return;
+     auto& buffer = ic->fetchBuffers[ic->nextFetchBuffer];
+     ic->nextFetchBuffer ^= 1;
+     buffer.base = maskLine(va);
++    buffer.fetchKey = key;
+     std::memcpy(buffer.words, data, sizeof(buffer.words));
+ }
+ 
+@@ -78,6 +80,7 @@
+     for (auto& buffer : ic->fetchBuffers) {
+         buffer.base = 0xffffffff;
+         std::memset(buffer.words, 0, sizeof(buffer.words));
++        buffer.fetchKey = 0;
+     }
+     ic->revision++;
+     ic->epoch++;
+@@ -100,15 +103,28 @@
+     memset(ic, 0, sizeof(*ic));
+ 
+     ic->mem = mem;
++    ic->permGen = 1;
+ 
+     icacheInval(ic);
+ 
+     return ic;
+ }
+ 
++static void icachePrvPermChanged(void* ctx) {
++    struct icache* ic = (struct icache*)ctx;
++    if (++ic->permGen >= 0x7fffffff) {
++        // Keys would come round again: forget every line's.
++        ic->permGen = 1;
++        for (auto& line : ic->cache) line.fetchKey = 0;
++        for (auto& buffer : ic->fetchBuffers) buffer.fetchKey = 0;
++    }
++    ic->epoch++;
++}
++
+ struct icache* icacheInit(struct ArmMem* mem, struct ArmMmu* mmu) {
+     struct icache* ic = icacheInitCommon(mem);
+     ic->memorySystem.mmu = mmu;
++    mmuSetPermHook(mmu, icachePrvPermChanged, ic);
+ 
+     return ic;
+ }
+@@ -143,20 +159,51 @@
+     }
+ }
+ 
++// Checks a fetch from a line or buffer that was fetched under another key: the
++// translation and permissions for this mode, as a refill would.
++template <int msys>
++static bool icachePrvCheckFetch(struct icache* ic, uint32_t va, bool privileged, uint_fast8_t* fsrP) {
++    if constexpr (msys == ARM_MEMORY_SYSTEM_MMU) {
++        const MMUTranslateResult r = mmuTranslate(ic->memorySystem.mmu, va, privileged, false);
++        if (!MMU_TRANSLATE_RESULT_OK(r)) {
++            *fsrP = MMU_TRANSLATE_RESULT_FSR(r);
++            return false;
++        }
++    } else {
++        if (!MPU_TEST_RESULT_OK(mpuTestAddress(ic->memorySystem.mpu, va, true, false))) {
++            *fsrP = 1;
++            return false;
++        }
++    }
++    return true;
++}
++
+ template <int msys, int sz, int tier>
+-bool icacheFetch(struct icache* ic, uint32_t va, uint_fast8_t* fsrP, uint32_t& instr,
+-                 uint32_t& decoded) {
++bool icacheFetch(struct icache* ic, uint32_t va, bool privileged, uint_fast8_t* fsrP,
++                 uint32_t& instr, uint32_t& decoded) {
+     if (va & (sz - 1)) {  // alignment issue
+ 
+         *fsrP = 3;
+         return false;
+     }
+ 
++    const uint32_t key = icacheFetchKey(ic, privileged);
++
+     // A buffer hit precedes translation. Enabling the MMU does not discard
+-    // instructions already fetched from the physical continuation address.
++    // instructions already fetched from the physical continuation address, so with
++    // another key only domain and permission faults are taken, not translation faults.
+     if (ic->xscale) {
+-        for (const auto& buffer : ic->fetchBuffers)
++        for (auto& buffer : ic->fetchBuffers)
+             if (buffer.base == maskLine(va)) {
++                if (buffer.fetchKey != key) {
++                    uint_fast8_t fsr = 0;
++                    if (!icachePrvCheckFetch<msys>(ic, va, privileged, &fsr) &&
++                        msys == ARM_MEMORY_SYSTEM_MMU && (fsr & 0x09) == 0x09) {
++                        *fsrP = fsr;
++                        return false;
++                    }
++                    buffer.fetchKey = key;
++                }
+                 icacheDecodeFetch<msys, sz>(buffer.words[(va & 31) / 4], va, instr, decoded);
+                 return true;
+             }
+@@ -165,6 +212,11 @@
+     struct icacheline* line = ic->cache + calculateIndex(va);
+     const CACHE_TAG_TYPE tag = calculateTag(va);
+ 
++    if (line->revision == ic->revision && line->tag == tag && line->fetchKey != key) {
++        if (!icachePrvCheckFetch<msys>(ic, va, privileged, fsrP)) return false;
++        line->fetchKey = key;
++    }
++
+     if (line->revision != ic->revision || line->tag != tag) {
+         uint8_t data[sizeof(line->data)];
+         bool cacheable;
+@@ -175,7 +227,7 @@
+ 
+             if (cacheable) {
+                 MMUTranslateResult translateResult =
+-                    mmuTranslate(ic->memorySystem.mmu, va, true, false);
++                    mmuTranslate(ic->memorySystem.mmu, va, privileged, false);
+                 if (!MMU_TRANSLATE_RESULT_OK(translateResult)) {
+                     *fsrP = MMU_TRANSLATE_RESULT_FSR(translateResult);
+                     return false;
+@@ -201,7 +253,7 @@
+                 *fsrP = 0x0d;
+                 return false;
+             }
+-            icacheRememberFetch(ic, va, words);
++            icacheRememberFetch(ic, va, key, words);
+             icacheDecodeFetch<msys, sz>(words[(va & 31) / 4], va, instr, decoded);
+             return true;
+         }
+@@ -233,7 +285,7 @@
+             return false;
+         };
+ 
+-        icacheRememberFetch(ic, va, data);
++        icacheRememberFetch(ic, va, key, data);
+         for (size_t i = 0; i < sizeof(data); i += 8) {
+             const uint64_t d = *(uint64_t*)(data + i);
+             if ((uint32_t)d != *(uint32_t*)(line->data + i))
+@@ -255,6 +307,7 @@
+ 
+         line->revision = ic->revision;
+         line->tag = tag;
++        line->fetchKey = key;
+         ic->epoch++;
+     }
+ 
+@@ -310,8 +363,9 @@
+ }
+ 
+ #define DEFINE_FETCH_MSYS_SZ_TIER(msys, sz, tier)                                                  \
+-    template bool icacheFetch<msys, sz, tier>(struct icache * ic, uint32_t va, uint_fast8_t* fsrP, \
+-                                              uint32_t& instr, uint32_t& decoded);
++    template bool icacheFetch<msys, sz, tier>(struct icache * ic, uint32_t va, bool privileged,   \
++                                              uint_fast8_t* fsrP, uint32_t& instr,               \
++                                              uint32_t& decoded);
+ 
+ #define DEFINE_FETCH_MSYS_SZ(msys, sz)      \
+     DEFINE_FETCH_MSYS_SZ_TIER(msys, sz, 0); \
+--- a/src/uarm/uarm/icache.h
++++ b/src/uarm/uarm/icache.h
+@@ -37,8 +37,9 @@
+ void icacheInvalAddr(struct icache* ic, uint32_t addr);
+ void icacheInvalRange(struct icache* ic, uint32_t addr, uint32_t size);
+ 
++// privileged is the mode the fetch is checked for (cpu->privileged).
+ template <int msys, int sz, int tier = 0>
+-bool icacheFetch(struct icache* ic, uint32_t va, uint_fast8_t* fsr, uint32_t& instr,
+-                 uint32_t& decoded);
++bool icacheFetch(struct icache* ic, uint32_t va, bool privileged, uint_fast8_t* fsr,
++                 uint32_t& instr, uint32_t& decoded);
+ 
+ #endif
+--- a/src/uarm/uarm/icache_internal.h
++++ b/src/uarm/uarm/icache_internal.h
+@@ -44,6 +44,10 @@
+ 
+     CACHE_TAG_TYPE tag;
+     uint32_t revision;
++    // icacheFetchKey when the line's fetch permission was last checked. A hit with another
++    // key checks it again, so a line filled in one mode or under other permissions still
++    // raises the prefetch abort a real fetch would.
++    uint32_t fetchKey;
+ } __attribute__((aligned(8)));
+ 
+ struct icache {
+@@ -54,14 +58,18 @@
+     struct ArmMem* mem;
+ 
+     uint32_t revision;
+-    // Bumped whenever any line can change validity or contents (invalidation, refill).
+-    // While it holds still, a line that was valid stays valid.
++    // Bumped whenever any line can change validity or contents (invalidation, refill), or
++    // the fetch key may change (permissions, privilege). While it holds still, a line that
++    // was valid stays valid and its fetch key current.
+     uint32_t epoch;
++    // Moves on when the MMU's TLB, domains, S or R change (mmuSetPermHook). Never 0.
++    uint32_t permGen;
+     bool xscale;
+     uint32_t nextFetchBuffer;
+     struct {
+         uint32_t base;
+         uint32_t words[8];
++        uint32_t fetchKey;  // as icacheline's; 0 matches no key
+     } fetchBuffers[2];
+     struct icacheline cache[1 << CACHE_INDEX_BITS];
+ #ifdef FROND_DYNARMIC
+@@ -71,14 +79,20 @@
+ #endif
+ };
+ 
++// Permissions and privilege a line's fetch was checked under.
++static inline uint32_t icacheFetchKey(const struct icache* ic, bool privileged) {
++    return (ic->permGen << 1) | (privileged ? 1 : 0);
++}
++
+ #ifndef __EMSCRIPTEN__
+-// Misses, invalidations, alignment faults and new decodes use icacheFetch.
++// Misses, invalidations, alignment faults, new decodes and stale fetch keys use icacheFetch.
+ template <int size>
+-static FORCE_INLINE bool icacheFetchCached(struct icache* ic, uint32_t va,
++static FORCE_INLINE bool icacheFetchCached(struct icache* ic, uint32_t va, uint32_t key,
+                                            uint32_t& instr, uint32_t& decoded) {
+     if (va & (size - 1)) return false;
+     const auto* line = ic->cache + calculateIndex(va);
+-    if (line->revision != ic->revision || line->tag != calculateTag(va)) return false;
++    if (line->revision != ic->revision || line->tag != calculateTag(va) || line->fetchKey != key)
++        return false;
+     const unsigned offset = calculateLineIndex(va);
+     const uint32_t cached = line->decoded[offset >> 1];
+     constexpr uint32_t kind = size == 4 ? DECODED_BITS_ARM : DECODED_BITS_THUMB;
+--- a/src/uarm/uarm/jit_dynarmic.cpp
++++ b/src/uarm/uarm/jit_dynarmic.cpp
+@@ -13,6 +13,7 @@
+ #include <unordered_map>
+ #include <vector>
+ 
++#include "MMU.h"
+ #include "dynarmic/frontend/A32/a32_ir_emitter.h"
+ #include "dynarmic/interface/A32/a32.h"
+ #include "dynarmic/interface/A32/config.h"
+@@ -29,9 +30,10 @@
+     uint64_t runs = 0, ran = 0, interpret = 0, halt = 0, fault = 0, invalAll = 0, invalRange = 0, clears = 0;
+     uint64_t psr = 0;  // MSR CPSR and MOVS PC calls from generated code
+     uint64_t cp15 = 0, cp15User = 0;  // MRC and MCR p15 c3 calls, and those in user mode
+-    // Code pages noted, dropped for a write, a changed mapping or a guest invalidation
+-    // (unwatched pages only), and how often the mappings were checked.
++    // Code pages noted, dropped for a write, a changed mapping, a guest invalidation
++    // (unwatched pages only) or lost fetch permission, and how often the mappings were checked.
+     uint64_t codePages = 0, unwatched = 0, pagesWritten = 0, mapChecks = 0, mapChanged = 0, unwatchedDropped = 0;
++    uint64_t fetchDropped = 0;
+     std::unordered_map<uint32_t, uint64_t> interpPc;
+     // Instruction at each interpreted PC (Thumb: the halfword), and the guest PC current
+     // at each whole-cache invalidation with the word there.
+@@ -57,9 +59,11 @@
+                 (unsigned long long)pageFills, (unsigned long long)reads, (unsigned long long)writes);
+         fprintf(stderr,
+                 "jit: codePages %llu unwatched %llu pagesWritten %llu mapChecks %llu mapChanged %llu "
+-                "unwatchedDropped %llu msrCpsr %llu writeMaps %llu writeProtects %llu cp15 %llu cp15User %llu\n",
++                "unwatchedDropped %llu fetchDropped %llu msrCpsr %llu writeMaps %llu writeProtects %llu cp15 %llu "
++                "cp15User %llu\n",
+                 (unsigned long long)codePages, (unsigned long long)unwatched, (unsigned long long)pagesWritten,
+                 (unsigned long long)mapChecks, (unsigned long long)mapChanged, (unsigned long long)unwatchedDropped,
++                (unsigned long long)fetchDropped,
+                 (unsigned long long)psr, (unsigned long long)writeMaps, (unsigned long long)writeProtects,
+                 (unsigned long long)cp15, (unsigned long long)cp15User);
+         std::vector<std::pair<uint64_t, uint32_t>> top;
+@@ -133,19 +137,26 @@
+     // vector page. ROM only changes from the host side, which
+     // clears everything. Pages that are neither (host null) can't be watched, so the
+     // guest's I-cache invalidations drop them instead.
++    // Dynarmic keeps blocks by PC and CPSR state, not privilege or permissions, so each
++    // code page also has its domain and AP (access). When the domains, S, R or the
++    // privilege change, the code of every page that can't be fetched now is dropped, and
++    // fetching it again takes the prefetch abort.
+     struct CodePage {
+         uint32_t pa;  // physical page, or ~0u when the page tables had no mapping
+         uint8_t *host;
+         uint8_t *lines;  // RAM code flags for the page, null for ROM and unwatched pages
++        uint32_t access;
+     };
++    std::unordered_map<uint32_t, uint32_t> accessPages;  // code pages by access
++    uint64_t permContext = ~0ull;
+     std::unordered_map<uint32_t, CodePage> code;
+     std::unordered_map<uint8_t *, std::vector<uint32_t>> byHost;
+     std::vector<uint32_t> unwatched;
+     uint32_t mapGen = 0;
+ 
+-    uint32_t CodePa(uint32_t page) {
++    uint32_t CodePa(uint32_t page, uint32_t &access) {
+         uint32_t pa;
+-        return cpuJitCodePa(cpu, page << 12, &pa) ? pa >> 12 : ~0u;
++        return cpuJitCodePa(cpu, page << 12, &pa, &access) ? pa >> 12 : ~0u;
+     }
+ 
+     void NoteCode(uint32_t va) {
+@@ -160,10 +171,12 @@
+     }
+ 
+     std::unordered_map<uint32_t, CodePage>::iterator NotePage(uint32_t page) {
+-        const uint32_t pa = CodePa(page);
++        uint32_t access;
++        const uint32_t pa = CodePa(page, access);
+         uint8_t *lines = nullptr;
+         uint8_t *host = pa == ~0u ? nullptr : cpuJitWatchCode(cpu, pa << 12, &lines);
+-        const auto it = code.emplace(page, CodePage{pa, host, lines}).first;
++        const auto it = code.emplace(page, CodePage{pa, host, lines, access}).first;
++        accessPages[access]++;
+         stats.codePages++;
+         if (host) {
+             byHost[host].push_back(page);
+@@ -176,7 +189,30 @@
+ 
+     void Drop(uint32_t page) {
+         jit->InvalidateCacheRange(page << 12, 4096);
+-        code.erase(page);
++        const auto it = code.find(page);
++        if (it == code.end()) return;
++        const auto n = accessPages.find(it->second.access);
++        if (!--n->second) accessPages.erase(n);
++        code.erase(it);
++    }
++
++    // Drops the code of pages that can't be fetched with the current domains, S, R and
++    // privilege. Only a change of those can make a page unfetchable without a TLB flush.
++    void CheckFetch() {
++        const uint64_t context = cpuJitPermContext(cpu);
++        if (context == permContext) return;
++        permContext = context;
++        std::vector<uint32_t> lost;
++        for (const auto &[access, n] : accessPages)
++            if (!cpuJitAccessReadable(cpu, access)) lost.push_back(access);
++        if (lost.empty()) return;
++        std::vector<uint32_t> drop;
++        for (const auto &[page, c] : code)
++            if (std::find(lost.begin(), lost.end(), c.access) != lost.end()) drop.push_back(page);
++        for (uint32_t page : drop) {
++            stats.fetchDropped++;
++            Drop(page);
++        }
+     }
+ 
+     void CodeWritten(uint8_t *host) {
+@@ -196,8 +232,10 @@
+     void CheckMappings() {
+         stats.mapChecks++;
+         std::vector<uint32_t> moved;
+-        for (const auto &[page, c] : code)
+-            if (CodePa(page) != c.pa) moved.push_back(page);
++        for (const auto &[page, c] : code) {
++            uint32_t access;
++            if (CodePa(page, access) != c.pa || access != c.access) moved.push_back(page);
++        }
+         for (uint32_t page : moved) {
+             stats.mapChanged++;
+             Drop(page);
+@@ -224,6 +262,8 @@
+         ClearPages();
+         jit->ClearCache();
+         code.clear();
++        accessPages.clear();
++        permContext = cpuJitPermContext(cpu);
+         byHost.clear();
+         unwatched.clear();
+         cpuJitForgetCode(cpu);
+@@ -249,6 +289,7 @@
+         if (g != gen) {
+             ClearPages();
+             gen = g;
++            CheckFetch();
+         }
+     }
+ 
+--- a/src/uarm/uarm/jit_dynarmic.h
++++ b/src/uarm/uarm/jit_dynarmic.h
+@@ -49,8 +49,13 @@
+ // Host address of the RAM page holding va if the guest may store there now, marked dirty
+ // (and the frame buffer, where it overlaps) as if all of it was written, or null.
+ uint8_t *cpuJitWritePage(ArmCpu *cpu, uint32_t va);
+-// Physical address of va by the page tables, without touching the TLBs.
+-bool cpuJitCodePa(ArmCpu *cpu, uint32_t va, uint32_t *pa);
++// Physical address of va by the page tables, without touching the TLBs, and in *access the
++// domain and AP of its page (MMU_ACCESS_*, see mmuTranslateCodeAccess), also on a fault.
++bool cpuJitCodePa(ArmCpu *cpu, uint32_t va, uint32_t *pa, uint32_t *access);
++// Whether code from a page with that access may be fetched now, in the current mode.
++bool cpuJitAccessReadable(ArmCpu *cpu, uint32_t access);
++// Domains, S, R and privilege: what cpuJitAccessReadable depends on besides the access.
++uint64_t cpuJitPermContext(ArmCpu *cpu);
+ // Host page holding the code at pa: RAM or ROM's peephole copy, null for anything else. For
+ // RAM, *lines gets the page's code flags, one per 64 bytes: set one and the first write to
+ // that line comes back through jitCodeWritten. Null for ROM.
+--- a/src/uarm/uarm/mem_internal.h
++++ b/src/uarm/uarm/mem_internal.h
+@@ -28,7 +28,7 @@
+ #define HOST_TLB_SIZE (1u << HOST_TLB_BITS)
+ 
+ struct HostTlbEntry {
+-    uint64_t key;      // gen << 32 | page << 1 | privileged (writes only)
++    uint64_t key;      // gen << 32 | page << 1 | privileged
+     uintptr_t addend;  // reads: host address - va; writes: pa - va
+ };
+ 
