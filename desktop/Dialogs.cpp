@@ -168,10 +168,10 @@ int fittingScaleQuarters(Device device, bool keyboard, frondSessions::JogControl
     const auto& display = frondFirmware::profile(device).frontend;
     int width = display.width + display.sideTabWidth, height = display.height + display.silkscreenHeight + display.stripHeight;
     if (device == frondFirmware::deviceFromId("sony-clie-tg50")) {
-        // The TG50 sizes the core lays out: the jog tab adds 34 across unless it is hidden or beside the keyboard.
+        // The TG50 sizes the core lays out: the jog tab adds 38 across unless it is hidden or beside the keyboard.
         const bool hidden = jog == frondSessions::JogControls::hidden, beside = keyboard && jog == frondSessions::JogControls::keyboard;
-        width = hidden || beside ? 320 : 354;
-        height = keyboard ? (beside ? 521 : hidden ? 544 : 568) : (hidden ? 368 : 374);
+        width = hidden || beside ? 320 : 358;
+        height = keyboard ? (beside ? 518 : hidden ? 544 : 571) : (hidden ? 368 : 374);
     }
     const auto* screen = QGuiApplication::primaryScreen();
     const auto available = screen ? screen->availableGeometry().size() : QSize();

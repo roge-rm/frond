@@ -586,12 +586,12 @@ static void tg50Art() {
     const int width=320,height=320;
     const DeviceControlView all{},noKeyboard{false,true},noTab{true,false},neither{false,false};
     assert(p.width==320 && p.height==224 && p.unit==1 && p.style==DeviceControlStyle::tg50 && p.navigator.w==0);
-    assert(p.count==8+42+4 && p.keyboardHeight==176 && p.sideTabWidth==34);
+    assert(p.count==8+42+4 && p.keyboardHeight==176 && p.sideTabWidth==38);
     assert(deviceSilkscreen(DeviceArt::tg50).count==0);
     // The strip shrinks without the keyboard; with the side tab it scales up to the full body width.
-    assert(deviceControlsHeight(p)==248 && deviceControlsHeight(p,noTab)==224);
+    assert(deviceControlsHeight(p)==251 && deviceControlsHeight(p,noTab)==224);
     assert(deviceControlsHeight(p,noKeyboard)==54 && deviceControlsHeight(p,neither)==48);
-    assert(deviceControlsWidth(p,width)==354 && deviceControlsWidth(p,width,noKeyboard)==354);
+    assert(deviceControlsWidth(p,width)==358 && deviceControlsWidth(p,width,noKeyboard)==358);
     assert(deviceControlsWidth(p,width,noTab)==320 && deviceControlsWidth(p,width,neither)==320);
     // Every key once: the app row, all 42 keyboard keys and the tab's four.
     std::vector<int> seen(keyIdCount,0);
@@ -613,7 +613,7 @@ static void tg50Art() {
         if(tab) {
             const auto& t=p.sideTab;
             assert(k.x>t.x && k.x+k.w<t.x+t.w && k.y>t.y && k.y+k.h<t.y+t.h && t.x+t.w==0);
-            assert(t.w==34 && k.w==30 && k.x-t.x==2 && t.x+t.w-k.x-k.w==2);
+            assert(t.w==38 && k.w==30 && k.x-t.x==4 && t.x+t.w-k.x-k.w==4);
         } else assert(k.x>=4 && k.x+k.w<=width-4);
         if(keyboard)assert(k.y>=48);
         const float cx=k.x+k.w*0.5f,cy=k.y+k.h*0.5f;
@@ -689,7 +689,7 @@ static void tg50Art() {
         const auto& a=t[i-1].bounds;const auto& c=t[i].bounds;
         assert(c.y>a.y+a.h && at(a.x+a.w*0.5f,a.y+a.h,all)==keyInvalid);
     }
-    assert(at(-34,-180,all)==keyInvalid && at(-1,-180,all)==keyInvalid);
+    assert(at(-38,-180,all)==keyInvalid && at(-1,-180,all)==keyInvalid);
 
     // Keys past bit 31 and on the side tab go through the event handler's pointer path:
     // pressed, shown in PressedButtons, released on leaving the key, on button up and on focus loss.
@@ -733,7 +733,7 @@ static void tg50Art() {
 
     // Pressed states, and the hidden parts drawn or left out.
     for(float scale:{1.f,2.f}) {
-        const int sw=int(354*scale),sh=int((320+deviceControlsHeight(p))*scale);
+        const int sw=int(358*scale),sh=int((320+deviceControlsHeight(p))*scale);
         auto* surface=SDL_CreateRGBSurfaceWithFormat(0,sw,sh,32,SDL_PIXELFORMAT_RGBA32);
         auto* renderer=SDL_CreateSoftwareRenderer(surface);assert(surface && renderer);
         // Strip units to surface pixels: the side tab is drawn 1:1, the rest scaled to the full width.
@@ -779,7 +779,7 @@ static void tg50Art() {
         mark();drawDeviceControls(renderer,p,width,height,scale,0,noKeyboard);
         assert(!magenta(200,340) && magenta(200,400));
         mark();drawDeviceControls(renderer,p,width,height,scale,0,neither);
-        assert(magenta(337,340) && magenta(160,400) && !magenta(34,330));
+        assert(magenta(337,340) && magenta(160,400) && !magenta(38,330));
         mark();drawDeviceControls(renderer,p,width,height,scale,0,noTab);
         assert(magenta(337,340) && !magenta(5,520));
         mark();drawDeviceSidebar(renderer,p,width,height,scale,0);
@@ -839,24 +839,24 @@ static void tg50JogBesideKeyboard() {
     assert(parseJogPlacement("keyboard",parsed) && parsed==JogPlacement::keyboard && !parseJogPlacement("left",parsed));
     // Older devices ignore the placement.
     assert(!deviceSideTabBelowScreen(deviceControls(DeviceArt::tx),beside) && deviceScreenLeft(deviceControls(DeviceArt::tx),beside)==0);
-    assert(deviceScreenLeft(p,beside)==0 && deviceControlsWidth(p,width,beside)==320 && deviceControlsHeight(p,beside)==201);
-    assert(deviceScreenLeft(p,fallback)==34 && deviceControlsWidth(p,width,fallback)==354 && deviceControlsHeight(p,fallback)==54);
+    assert(deviceScreenLeft(p,beside)==0 && deviceControlsWidth(p,width,beside)==320 && deviceControlsHeight(p,beside)==198);
+    assert(deviceScreenLeft(p,fallback)==38 && deviceControlsWidth(p,width,fallback)==358 && deviceControlsHeight(p,fallback)==54);
     assert(deviceControlsWidth(p,width,hidden)==320 && deviceControlsHeight(p,hidden)==224);
     const DeviceControlTransform t(p,width,beside);
-    assert(t.left==34 && t.sidebarLeft==34 && std::fabs(t.scale-286.f/320)<1e-6f && t.sidebarTop==245);
+    assert(t.left==38 && t.sidebarLeft==38 && std::fabs(t.scale-282.f/320)<1e-6f && t.sidebarTop==244);
     const DeviceControlTransform ts(p,width,fallback);
-    assert(ts.sidebarTop==0 && ts.sidebarLeft==34);
+    assert(ts.sidebarTop==0 && ts.sidebarLeft==38);
     const int strip=deviceControlsHeight(p,beside);
     for(size_t i=0;i<p.count;++i) {
         const auto& b=p.buttons[i];
         const auto r=deviceButtonRect(p,b,width,height,beside);
         if(b.section==DeviceControlSection::sideTab) {
-            // The tab keys stay 30 pixels wide with 2 pixel margins, inside the strip's height.
-            assert(r.x==2 && r.w==30 && r.h==b.bounds.h);
+            // The tab keys stay 30 pixels wide with 4 pixel margins, inside the strip's height.
+            assert(r.x==4 && r.w==30 && r.h==b.bounds.h);
             assert(r.y>height && r.y+r.h<height+strip);
         } else {
             // Everything else right of the tab, scaled the same both ways.
-            assert(r.x>=34 && r.x+r.w<=width && r.y>=height && r.y+r.h<=height+strip);
+            assert(r.x>=38 && r.x+r.w<=width && r.y>=height && r.y+r.h<=height+strip);
             assert(std::abs(r.w-b.bounds.w*t.scale)<=1 && std::abs(r.h-b.bounds.h*t.scale)<=1);
         }
         // Hit areas line up with the drawn rectangles in every placement.
@@ -908,7 +908,7 @@ static void tg50JogBesideKeyboard() {
             if(held>=idle-12)std::fprintf(stderr,"TG50 beside keyboard key %d at %d,%d scale %g: idle %d held %d\n",b.key,px,py,scale,idle,held);
             assert(held<idle-12);
         }
-        for(int x : {0,33,34,319}) {
+        for(int x : {0,37,38,319}) {
             const auto d=readPixel(surface,int(x*scale),int((height+strip-2)*scale));
             assert(!(d.r==255 && d.g==0 && d.b==255));
         }
@@ -946,7 +946,7 @@ static void tg50ScreenBounds() {
         for(auto rotation : {Rotation::portrait_0,Rotation::landscape_90,Rotation::portrait_180,Rotation::landscape_270}) {
             Guest guest(deviceTypeTG50);guest.setDisplay({320,320,0,224});auto display=guest.display();
             SdlEventHandler input(&guest,scale,display,rotation);
-            const int left=int(34*scale),extent=int(320*scale);
+            const int left=int(38*scale),extent=int(320*scale);
             auto pointer=[&](Uint32 type,int x,int y) {
                 SDL_Event e{};e.type=type;e.button.button=SDL_BUTTON_LEFT;e.button.x=x;e.button.y=y;
                 input.HandleEvent(e);
@@ -977,8 +977,8 @@ static void tg50Visibility() {
         if(fit!=WindowFit::none && scale!=1)continue;
         const DeviceControlView view=deviceControlView(keyboard,jog);
         const bool beside=keyboard && jog==JogPlacement::keyboard;
-        const int deviceWidth=jog==JogPlacement::hidden || beside ? 320 : 354;
-        const int deviceHeight=keyboard ? (beside ? 521 : jog==JogPlacement::hidden ? 544 : 568)
+        const int deviceWidth=jog==JogPlacement::hidden || beside ? 320 : 358;
+        const int deviceHeight=keyboard ? (beside ? 518 : jog==JogPlacement::hidden ? 544 : 571)
                                         : (jog==JogPlacement::hidden ? 368 : 374);
         assert(deviceWidth==deviceControlsWidth(controls,320,view) && deviceHeight==320+deviceControlsHeight(controls,view));
         const int ww=fit==WindowFit::none ? int(deviceWidth*scale) : 521;
@@ -1157,17 +1157,17 @@ static void tg50RuntimeTab() {
         Guest guest(deviceTypeTG50); guest.setDisplay({320,320,0,224});
         auto display = guest.display(); guest.frame.assign(320*320, 0xffffffff);
         const int tall=320+deviceControlsHeight(deviceControls(DeviceArt::tg50));
-        auto* window = SDL_CreateWindow("TG50 tab",0,0,int(354*scale),int(tall*scale),0); assert(window);
+        auto* window = SDL_CreateWindow("TG50 tab",0,0,int(358*scale),int(tall*scale),0); assert(window);
         {
             SdlRenderer renderer(window,&guest,scale,display,Rotation::portrait_0,false,fit);
             assert(renderer.Valid()); renderer.Draw(true);
-            auto* shot = SDL_CreateRGBSurfaceWithFormat(0,int(354*scale),int(tall*scale),32,SDL_PIXELFORMAT_RGBA32); assert(shot);
+            auto* shot = SDL_CreateRGBSurfaceWithFormat(0,int(358*scale),int(tall*scale),32,SDL_PIXELFORMAT_RGBA32); assert(shot);
             assert(SDL_RenderReadPixels(SDL_GetRenderer(window),nullptr,shot->format->format,shot->pixels,shot->pitch)==0);
             const auto jog = readPixel(shot,int(17*scale),int(154*scale));
             assert(std::max({jog.r,jog.g,jog.b}) > 20 && std::max({jog.r,jog.g,jog.b}) < 250);
-            if (fit != WindowFit::none) assert(renderer.Layout().width == 354);
+            if (fit != WindowFit::none) assert(renderer.Layout().width == 358);
             // The sidebar must stop before the first LCD column, including fractional scales.
-            const int left=int(34*scale),row=int(50*scale);
+            const int left=int(38*scale),row=int(50*scale);
             for(int x : {left,left+int(320*scale)-1}) {
                 const auto c=readPixel(shot,x,row);assert(c.r==255 && c.g==255 && c.b==255);
             }
@@ -1284,8 +1284,8 @@ static void tg50HostKeyboard() {
         SDL_Event e{}; e.type=type; e.tfinger.type=type; e.tfinger.touchId=7;
         // Below the LCD, x and y-320 are strip units, scaled to the window like the drawing.
         const DeviceControlTransform t(art,320,{});
-        const float wx=y<320 ? x+34 : t.left+x*t.scale,wy=y<320 ? y : 320+(y-320)*t.scale;
-        e.tfinger.fingerId=id; e.tfinger.x=(wx+0.5f)/354; e.tfinger.y=(wy+0.5f)/(320+deviceControlsHeight(art));
+        const float wx=y<320 ? x+38 : t.left+x*t.scale,wy=y<320 ? y : 320+(y-320)*t.scale;
+        e.tfinger.fingerId=id; e.tfinger.x=(wx+0.5f)/358; e.tfinger.y=(wy+0.5f)/(320+deviceControlsHeight(art));
         input.HandleEvent(e);
     };
     finger(SDL_FINGERDOWN,1,85,485); guest.expect({{tg50Key(6,0),true}});
