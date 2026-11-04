@@ -208,6 +208,7 @@ int main() {
     }
 
     for (const auto& p : deviceProfiles5) assert(p.capabilities.microphone == (p.deviceType == deviceTypeTG50));
+    for (const auto& p : deviceProfiles5) assert(p.capabilities.reservedAudio == (p.deviceType == deviceTypeTG50));
     // TG50 has NOR-only firmware, physical 16 MiB RAM and a qualified native board.
     {
         const auto* p = deviceProfileNamed5("sony-clie-tg50");
