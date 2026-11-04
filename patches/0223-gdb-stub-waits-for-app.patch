@@ -1,0 +1,102 @@
+diff --git a/src/cloudpilot/Makefile b/src/cloudpilot/Makefile
+index 58d3157..74be4a0 100644
+--- a/src/cloudpilot/Makefile
++++ b/src/cloudpilot/Makefile
+@@ -245,7 +245,8 @@ BUILDDIR_NATIVE = .build-frond
+ DEPDIR_NATIVE = .deps-frond
+ # frond/ first, for its keys.h in front of the shared art.
+ INCLUDE := -Ifrond $(INCLUDE) -Inative
+-CFLAGS_NATIVE = -O2 -g $(shell sdl2-config --cflags)
++# ENABLE_DEBUGGER: breakpoints and watchpoints for the GDB stub; idle checks while none is connected.
++CFLAGS_NATIVE = -O2 -g -DENABLE_DEBUGGER $(shell sdl2-config --cflags)
+ LDFLAGS_NATIVE = $(shell sdl2-config --libs) -lSDL2_image -lpthread
+ endif
+ 
+diff --git a/src/cloudpilot/native/GdbStub.cpp b/src/cloudpilot/native/GdbStub.cpp
+index a05bcfb..0ea3284 100644
+--- a/src/cloudpilot/native/GdbStub.cpp
++++ b/src/cloudpilot/native/GdbStub.cpp
+@@ -238,14 +238,25 @@ void GdbStub::AcceptConnection(int timeout) {
+ 
+     debugger.Reset();
+     debugger.Enable();
+-    debugger.Interrupt();
+ 
+     ResetPacketParser();
+-    runState = RunState::stopped;
++    fullRegisters = false;
++
++    // prc-tools' gdb 5.3 crashes when it first stops outside the app's symbols, so with an app set
++    // the stub leaves gdb's first packets queued and stops where the app starts.
++    holdUntilApp = debugger.GetBreakMode() == Debugger::BreakMode::appOnly;
++    if (holdUntilApp) {
++        debugger.Step();
++        runState = RunState::running;
++    } else {
++        debugger.Interrupt();
++        runState = RunState::stopped;
++    }
+ }
+ 
+ void GdbStub::CheckForInterrupt(int timeout) {
+-    if (connectionState != ConnectionState::connected || runState != RunState::running) return;
++    if (connectionState != ConnectionState::connected || runState != RunState::running || holdUntilApp)
++        return;
+ 
+     if (PollSocket(connectionSock, timeout) != SocketState::data) return;
+ 
+@@ -282,7 +293,11 @@ void GdbStub::CheckForBreak() {
+     debugger.UpdateBreakState();
+ 
+     runState = RunState::stopped;
+-    SendPacket(stopReason, false);
++    // A held connection's '?' is still queued and gets the stop reason as its reply.
++    if (holdUntilApp)
++        holdUntilApp = false;
++    else
++        SendPacket(stopReason, false);
+ }
+ 
+ bool GdbStub::ReceivePacket(int timeout) {
+@@ -359,8 +374,10 @@ bool GdbStub::HandlePacket() {
+     char* out = pktBuf.get();
+ 
+     try {
+-        if (in == strstr(in, "qSupported"))
++        if (in == strstr(in, "qSupported")) {
++            fullRegisters = true;
+             strcpy(out, "PacketSize=1024");
++        }
+ 
+         else if (in == strstr(in, "qAttached"))
+             strcpy(out, "1");
+@@ -572,8 +589,12 @@ void GdbStub::SerializeRegisters(char* destination) {
+     auto registers = debugger.ReadRegisters();
+     for (uint32 reg : registers) sstream << hex << setfill('0') << setw(8) << reg;
+ 
+-    // Only the 68000's own D0-D7, A0-A7, SR and PC. prc-tools' m68k-palmos-gdb 5.3 dies on a reply
+-    // with the 68881 registers after them; newer GDBs read those, all zero, with 'p' packets.
++    // prc-tools' m68k-palmos-gdb 5.3 dies on a reply with the 68881 registers after D0-D7, A0-A7,
++    // SR and PC; newer GDBs need them. FP0-FP7 are 96-bit, then the three 32-bit FPU registers.
++    if (fullRegisters) {
++        for (int i = 0; i < 12 * 8; i++) sstream << "00";
++        for (int i = 0; i < 3; i++) sstream << "00000000";
++    }
+ 
+     strcat(destination, sstream.str().c_str());
+ }
+diff --git a/src/cloudpilot/native/GdbStub.h b/src/cloudpilot/native/GdbStub.h
+index e091d23..31a9dd0 100644
+--- a/src/cloudpilot/native/GdbStub.h
++++ b/src/cloudpilot/native/GdbStub.h
+@@ -66,6 +66,10 @@ class GdbStub {
+     unique_ptr<char[]> pktBuf;
+     size_t pktBufUsed{0};
+ 
++    // Newer GDBs ask qSupported and want the 68881 registers in 'g' replies; 5.3 asks nothing.
++    bool fullRegisters{false};
++    // With an app set, a new connection waits for the app's first instruction before it answers.
++    bool holdUntilApp{false};
+     bool packetFirstChar{true};
+     bool packetInEsc{false};
+     bool packetInProgress{false};
