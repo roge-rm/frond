@@ -41,6 +41,7 @@ class MainWindow : public QMainWindow {
     void showFirmware(frondFirmware::Device device = frondFirmware::Device::automatic);
     void refreshSessions(const QString& select = {});
     void renameSession(const QString& path);
+    void duplicateSession(const QString& path);
     void editSession(const QString& path);
     frondSessions::Preferences defaultPreferences(frondFirmware::Device device) const;
     QString loadPreferences(const QString& path, frondFirmware::Device device, frondSessions::Preferences* prefs);

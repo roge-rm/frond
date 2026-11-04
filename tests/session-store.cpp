@@ -195,6 +195,79 @@ class SessionStoreTest : public QObject {
         QCOMPARE(cleanName("  a/b  "), QString("a-b"));
         QCOMPARE(cleanName(" .. "), QString());
     }
+    void duplicating() {
+        QVERIFY(create(folder(), "Zire 72", "palm-zire72"));
+        QCOMPARE(baseNameOf(folder(), "Zire 72"), QString("Zire 72"));
+        QCOMPARE(copyName(folder(), "Zire 72"), QString("Zire 72 2"));
+        QCOMPARE(baseNameOf(folder(), "7"), QString("7"));
+        QCOMPARE(baseNameOf(folder(), "Palm TX -2"), QString("Palm TX -2"));
+        QCOMPARE(baseNameOf(folder(), "Palm TX 2"), QString("Palm TX 2"));  // no "Palm TX" yet
+        const auto dir = machineDir(folder(), "Palm TX");
+        write(dir + "/Palm TX.frond", header(8, "palm-tx"));
+        write(dir + "/Palm TX.frond.settings.json", "{\"version\":1,\"scale\":6,\"smooth\":true,\"audio\":false,\"fastAudio\":false}");
+        write(dir + "/sd.frondsd", QByteArray(3000000, 'x'));
+        age(dir);
+        QCOMPARE(baseNameOf(folder(), "Palm TX 2"), QString("Palm TX"));
+        QCOMPARE(baseNameOf(folder(), "Palm TX 12"), QString("Palm TX"));
+        QString name;
+        const auto first = duplicate(folder(), describe(filePath(folder(), "Palm TX")), &name); QVERIFY2(first.isEmpty(), qPrintable(first));
+        QCOMPARE(name, QString("Palm TX 2"));
+        const auto copy = machineDir(folder(), "Palm TX 2");
+        QCOMPARE(QFileInfo(copy + "/sd.frondsd").size(), qint64(3000000));
+        QVERIFY(QFileInfo::exists(copy + "/Palm TX 2.frond"));
+        QVERIFY(!QFileInfo::exists(copy + "/Palm TX.frond"));
+        Preferences prefs;
+        QVERIFY(readPreferences(filePath(folder(), "Palm TX 2"), &prefs));
+        QCOMPARE(prefs.scale, 6);
+        QVERIFY(prefs.smooth && !prefs.audio);
+        // Independent files.
+        write(dir + "/sd.frondsd", QByteArray(10, 'y'));
+        QCOMPARE(QFileInfo(copy + "/sd.frondsd").size(), qint64(3000000));
+        // Duplicating the copy counts on from the base name.
+        QVERIFY(duplicate(folder(), describe(filePath(folder(), "Palm TX 2")), &name).isEmpty());
+        QCOMPARE(name, QString("Palm TX 3"));
+        QVERIFY(duplicate(folder(), describe(filePath(folder(), "Palm TX")), &name).isEmpty());
+        QCOMPARE(name, QString("Palm TX 4"));
+        // A held lock and a cancel leave no partial copy. A full disk takes the same path as a cancel, and
+        // the free space check fails the copy before any file is written.
+        QLockFile held(filePath(folder(), "Palm TX") + ".lock");
+        held.setStaleLockTime(0);
+        QVERIFY(held.tryLock());
+        QVERIFY(!duplicate(folder(), describe(filePath(folder(), "Palm TX")), &name).isEmpty());
+        held.unlock();
+        QVERIFY(!taken(folder(), "Palm TX 5"));
+        QVERIFY(duplicate(folder(), describe(filePath(folder(), "Palm TX")), &name, [](qint64, qint64) { return false; }) == "Duplicate cancelled.");
+        QVERIFY(!taken(folder(), "Palm TX 5"));
+        QVERIFY(QDir(folder()).entryList({".dup-*"}, QDir::AllEntries | QDir::Hidden | QDir::NoDotAndDotDot).isEmpty());
+        // A hidden folder left by a crash goes once it is old and unlocked, and never shows in the list.
+        const auto stale = folder() + "/.dup-1-2";
+        write(stale + "/Palm TX 9.frond", header(8, "palm-tx"));
+        QCOMPARE(list(folder()).size(), 5);
+        QVERIFY(QFileInfo::exists(stale));  // too new
+        age(stale);
+        {
+            QLockFile busy(stale + ".lock");
+            busy.setStaleLockTime(0);
+            QVERIFY(busy.tryLock());
+            list(folder());
+            QVERIFY(QFileInfo::exists(stale));  // locked
+        }
+        list(folder());
+        QVERIFY(!QFileInfo::exists(stale));
+        // A finished first save with its full card copy but no sd.frondsd still gets the card.
+        write(machineDir(folder(), "Cardless") + "/Cardless.frond", v8WithSd(1));
+        write(machineDir(folder(), "Cardless") + "/sd.frondsd.journal-1.full", realFrondsdV2(1, QByteArray(512, 'a')));
+        QVERIFY2(duplicate(folder(), describe(filePath(folder(), "Cardless")), &name).isEmpty(), "cardless");
+        QVERIFY(QFileInfo::exists(machineDir(folder(), name) + "/sd.frondsd"));
+        // A machine that has not been saved copies its marker and settings.
+        QVERIFY(create(folder(), "Fresh", "palm-tx"));
+        QVERIFY(writePreferences(filePath(folder(), "Fresh"), Preferences{5, false, true, false}).isEmpty());
+        QVERIFY(duplicate(folder(), describe(filePath(folder(), "Fresh")), &name).isEmpty());
+        QCOMPARE(name, QString("Fresh 2"));
+        QVERIFY(readPreferences(filePath(folder(), "Fresh 2"), &prefs));
+        QCOMPARE(prefs.scale, 5);
+        QCOMPARE(describe(filePath(folder(), "Fresh 2")).device, QString("palm-tx"));
+    }
     void renameAndRemove() {
         write(filePath(folder(), "One"), header(6, "palm-tx"));
         QVERIFY(create(folder(), "Two", "palm-e2"));
@@ -628,7 +701,15 @@ class SessionStoreTest : public QObject {
         QVERIFY(writePreferences(one, prefs).isEmpty());
         QVERIFY(writePreferences(two, Preferences{}).isEmpty());
         QVERIFY(readPreferences(one, &loaded)); QCOMPARE(loaded.scale, 7);
-        QVERIFY(loaded.smooth && !loaded.audio && loaded.fastAudio);
+        QVERIFY(loaded.smooth && !loaded.audio && loaded.fastAudio && !loaded.fastEngine);
+        // The engine is saved by name and defaults to Exact.
+        prefs.fastEngine = true;
+        QVERIFY(writePreferences(one, prefs).isEmpty());
+        QVERIFY(readPreferences(one, &loaded) && loaded.fastEngine);
+        { QFile saved(preferencesPath(one)); QVERIFY(saved.open(QIODevice::ReadOnly)); QVERIFY(saved.readAll().contains(R"("engine":"fast")")); }
+        prefs.fastEngine = false;
+        QVERIFY(writePreferences(one, prefs).isEmpty());
+        QVERIFY(readPreferences(one, &loaded) && !loaded.fastEngine);
         QVERIFY(rename(folder(), describe(one), "Moved").isEmpty());
         const auto moved = filePath(folder(), "Moved");
         QVERIFY(!QFileInfo::exists(preferencesPath(one)));

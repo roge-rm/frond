@@ -179,6 +179,31 @@ object Sessions {
         return Session(id, name, device, now, 0L, machine(context, id), settings = settings).also { write(context, it) }
     }
 
+    // Copies the machine under a new id and the next free numbered name. Blocks; run it off the main
+    // thread. Returns an error message or null (COPY_CANCELLED when cancelled). The copy is deleted if it fails.
+    fun duplicate(context: Context, s: Session, cancelled: () -> Boolean = { false }): String? {
+        val device = s.device
+        if (s.old || device == null) return "This session was saved by an older Frond."
+        val id = UUID.randomUUID().toString()
+        val dest = machine(context, id)
+        val name = copyName(s.name, list(context).map { it.name }.toSet())
+        activeImports.add(id)
+        try {
+            val error = copyMachine(s.folder, dest, folder(context).usableSpace, cancelled)
+            if (error != null) return error
+            return try {
+                write(context, Session(id, name, device, System.currentTimeMillis(), System.currentTimeMillis(), dest, settings = s.settings))
+                File(dest, COPY_PART).delete()
+                null
+            } catch (e: Exception) {
+                dest.deleteRecursively()
+                "Couldn't duplicate the session."
+            }
+        } finally {
+            activeImports.remove(id)
+        }
+    }
+
     fun rename(context: Context, s: Session, name: String) = SessionMetadata.update(meta(context, s.id)) {
         if (name.isNotBlank()) it.put("name", name.trim())
     }
@@ -569,13 +594,14 @@ internal fun removeStaleTemps(root: File, now: Long) {
 // document takes to read.
 internal val activeImports: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
 
-// An import stages into <id>/.import.part and writes <id>.json last; a process killed before
-// that leaves a folder no session lists. Only old ones not being imported now go.
+// An import stages into <id>/.import.part and a copy marks <id>/.copy.part; both write <id>.json last,
+// and a process killed before that leaves a folder no session lists. Only old ones not being imported now go.
 internal fun removeStaleImports(root: File, now: Long) {
     val cutoff = now - 10 * 60 * 1000
     root.listFiles { it.isDirectory }.orEmpty().forEach { dir ->
         if (dir.name in activeImports) return@forEach
-        if (!File(dir, ".import.part").isDirectory || File(dir, "${dir.name}.json").exists()) return@forEach
+        val staged = File(dir, ".import.part").isDirectory || File(dir, COPY_PART).isFile
+        if (!staged || File(dir, "${dir.name}.json").exists()) return@forEach
         if (dir.walkTopDown().any { it.lastModified() >= cutoff }) return@forEach
         dir.deleteRecursively()
     }
@@ -800,3 +826,69 @@ internal fun unzipPackable(input: java.io.InputStream, dest: File): Boolean = tr
 } catch (e: Exception) {
     false
 }
+
+// "Palm TX 2" gives "Palm TX" when a machine called "Palm TX" exists; "Zire 72" stays as it is.
+internal fun baseName(name: String, taken: Set<String>): String {
+    val match = Regex("^(.*\\S) (\\d+)$").find(name) ?: return name
+    return match.groupValues[1].takeIf { it in taken } ?: name
+}
+
+// The next free "<base> N" for a copy of `name`, counting up from 2.
+internal fun copyName(name: String, taken: Set<String>): String {
+    val base = baseName(name, taken)
+    var n = 2
+    while ("$base $n" in taken) n++
+    return "$base $n"
+}
+
+internal const val COPY_CANCELLED = "Copy cancelled."
+// Marks a machine folder being copied into, until its <id>.json is written.
+internal const val COPY_PART = ".copy.part"
+
+// Copies a machine folder's session, settings and cards into `dest`, which must not exist, settling
+// an unfinished SD save on the way. The session file is named session.frond. Returns an error
+// message, or null; `dest` is removed on any failure or cancel (COPY_CANCELLED). `free` is the room left on the disk.
+internal fun copyMachine(from: File, dest: File, free: Long, cancelled: () -> Boolean = { false }): String? {
+    if (dest.exists()) return "Couldn't duplicate the session."
+    val settle = sdSettleOf(from)
+    val files = from.listFiles()?.filter { it.isFile && packableName(it.name) }.orEmpty()
+    val frond = sessionFile(from)
+    val entries = (files.map { file ->
+        val source = if (settle.full != null && file.name == settle.sibling) settle.full else file
+        val name = when {
+            file == frond -> "session.frond"
+            file.name.endsWith(".frond.settings.json") -> "session.frond.settings.json"
+            else -> file.name
+        }
+        name to source
+    } + listOfNotNull(settle.full?.takeIf { files.none { f -> f.name == settle.sibling } }?.let { settle.sibling to it }))
+    val needed = entries.sumOf { it.second.length() }
+    if (free < needed + (16L shl 20)) return "Not enough free space to duplicate this machine. It needs ${needed / 1_000_000 + 1} MB."
+    return try {
+        if (!dest.mkdirs() || !File(dest, COPY_PART).createNewFile()) throw IOException("no folder")
+        val buffer = ByteArray(1 shl 20)
+        for ((name, source) in entries) {
+            if (cancelled()) throw CancellationException()
+            File(dest, name).outputStream().use { out ->
+                if (name == settle.sibling && settle.journal != null) writeSettledSd(source, settle.journal, out)
+                else source.inputStream().use { input ->
+                    while (true) {
+                        if (cancelled()) throw CancellationException()
+                        val n = input.read(buffer)
+                        if (n < 0) break
+                        out.write(buffer, 0, n)
+                    }
+                }
+            }
+        }
+        null
+    } catch (e: CancellationException) {
+        dest.deleteRecursively()
+        COPY_CANCELLED
+    } catch (e: Exception) {
+        dest.deleteRecursively()
+        "Couldn't duplicate the session."
+    }
+}
+
+private class CancellationException : Exception()

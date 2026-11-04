@@ -828,6 +828,9 @@ QMenu* MainWindow::rowMenu(const QString& path, QWidget* parent) {
     edit->setEnabled(!info.old && !client.running() && !busy && !frondSessions::inUse(path));
     auto* rename = menu->addAction(tr("Rename…"), this, [this, path] { QTimer::singleShot(0, this, [this, path] { renameSession(path); }); });
     rename->setObjectName("renameSession"); rename->setEnabled(!info.old);
+    auto* duplicate = menu->addAction(tr("Duplicate"), this, [this, path] { QTimer::singleShot(0, this, [this, path] { duplicateSession(path); }); });
+    duplicate->setObjectName("duplicateSession");
+    duplicate->setEnabled(!info.old && !client.running() && !busy && !frondSessions::inUse(path));
     auto* exportAction = menu->addAction(tr("Export…"), this, [this, path] { QTimer::singleShot(0, this, [this, path] { exportSession(path); }); });
     exportAction->setObjectName("exportSession"); exportAction->setEnabled(info.saved && !info.old);
     auto* remove = menu->addAction(tr("Delete"), this, [this, path] { QTimer::singleShot(0, this, [this, path] { deleteSession(path); }); });
@@ -878,6 +881,26 @@ void MainWindow::renameSession(const QString& path) {
     if (settings.value("lastSession").toString() == before)
         settings.setValue("lastSession", canonicalSession(renamed));
     refreshSessions(renamed);
+}
+// A running or open machine can't be duplicated; stop it first.
+void MainWindow::duplicateSession(const QString& path) {
+    if (client.running() || busy) return;
+    const auto info = infoFor(path);
+    QProgressDialog dialog(tr("Duplicating %1…").arg(info.name), tr("Cancel"), 0, 1000, this);
+    dialog.setObjectName("duplicateProgress");
+    dialog.setWindowModality(Qt::WindowModal);
+    dialog.setMinimumDuration(500);
+    dialog.setValue(0);
+    QString name;
+    const auto error = frondSessions::duplicate(sessionFolder(), info, &name, [&](qint64 done, qint64 total) {
+        dialog.setValue(total > 0 ? int(done * 1000 / total) : 0);
+        QCoreApplication::processEvents();
+        return !dialog.wasCanceled();
+    });
+    const bool cancelled = dialog.wasCanceled();
+    dialog.close();
+    if (!error.isEmpty() && !cancelled) failure(error);
+    refreshSessions(error.isEmpty() ? frondSessions::filePath(sessionFolder(), name) : QString());
 }
 void MainWindow::exportSession(const QString& path) {
     const auto info = infoFor(path);

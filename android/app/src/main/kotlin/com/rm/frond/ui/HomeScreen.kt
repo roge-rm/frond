@@ -39,7 +39,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -57,15 +56,11 @@ import com.rm.frond.Device
 import com.rm.frond.HomeModel
 import com.rm.frond.Session
 import com.rm.frond.Sessions
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(model: HomeModel) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
     var menu by remember { mutableStateOf(false) }
     var busy by model::copying
@@ -75,25 +70,20 @@ fun HomeScreen(model: HomeModel) {
 
     val importSession = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
-        busy = true
-        scope.launch {
-            val error = withContext(Dispatchers.IO) { Sessions.import(context, uri) }
-            busy = false
-            model.reload()
-            if (error != null) model.alert = "Couldn't import the session" to error
-            else snackbar.showSnackbar("Session imported")
-        }
+        val app = context.applicationContext
+        model.runCopy("Couldn't import the session", "Session imported") { Sessions.import(app, uri) }
     }
     val exportSession = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
         val s = exporting
         exporting = null
         if (uri == null || s == null) return@rememberLauncherForActivityResult
-        busy = true
-        scope.launch {
-            val error = withContext(Dispatchers.IO) { Sessions.export(context, s, uri) }
-            busy = false
-            if (error != null) model.alert = "Couldn't export the session" to error
-            else snackbar.showSnackbar("Session exported")
+        val app = context.applicationContext
+        model.runCopy("Couldn't export the session", "Session exported", reload = false) { Sessions.export(app, s, uri) }
+    }
+    model.notice?.let { text ->
+        LaunchedEffect(text) {
+            model.notice = null
+            snackbar.showSnackbar(text)
         }
     }
 
@@ -136,7 +126,10 @@ fun HomeScreen(model: HomeModel) {
         LazyColumn(Modifier.padding(padding).fillMaxSize()) {
             item(key = "header") { Header("Devices", Modifier.padding(start = 16.dp, top = 8.dp)) }
             items(model.sessions, key = { it.id }) { s ->
-                SessionRow(s, onMenu = { model.refreshRunning() }, editable = !busy && !model.running, onEdit = { model.edit(it) }, onOpen = { model.start(s) }, onRename = { renaming = it }, onDelete = { deleting = it }, onExport = {
+                SessionRow(s, onMenu = { model.refreshRunning() }, editable = !busy && !model.running, onEdit = { model.edit(it) }, onOpen = { model.start(s) }, onRename = { renaming = it }, onDuplicate = {
+                    val app = context.applicationContext
+                    model.runCopy("Couldn't duplicate the session", null, cancellable = true) { cancelled -> Sessions.duplicate(app, it, cancelled) }
+                }, onDelete = { deleting = it }, onExport = {
                     exporting = it
                     exportSession.launch("${it.name}.zip")
                 })
@@ -147,7 +140,13 @@ fun HomeScreen(model: HomeModel) {
     }
 
     if (busy) {
-        AlertDialog(onDismissRequest = {}, confirmButton = {}, title = { Text("Copying") }, text = { Progress() })
+        AlertDialog(
+            onDismissRequest = {},
+            confirmButton = {},
+            dismissButton = if (model.cancellable) ({ TextButton(onClick = { model.cancelCopy() }) { Text("Cancel") } }) else null,
+            title = { Text("Copying") },
+            text = { Progress() },
+        )
     }
     model.alert?.let { (title, text) ->
         AlertDialog(
@@ -203,6 +202,7 @@ private fun SessionRow(
     onEdit: (Session) -> Unit,
     onOpen: () -> Unit,
     onRename: (Session) -> Unit,
+    onDuplicate: (Session) -> Unit,
     onDelete: (Session) -> Unit,
     onExport: (Session) -> Unit,
 ) {
@@ -227,6 +227,7 @@ private fun SessionRow(
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                     DropdownMenuItem(text = { Text("Edit settings") }, enabled = editable && !s.old, onClick = { menu = false; onEdit(s) })
                     DropdownMenuItem(text = { Text("Rename") }, enabled = !s.old, onClick = { menu = false; onRename(s) })
+                    DropdownMenuItem(text = { Text("Duplicate") }, enabled = editable && !s.old, onClick = { menu = false; onDuplicate(s) })
                     DropdownMenuItem(text = { Text("Export") }, enabled = s.saved && !s.old, onClick = { menu = false; onExport(s) })
                     DropdownMenuItem(text = { Text("Delete") }, onClick = { menu = false; onDelete(s) })
                 }

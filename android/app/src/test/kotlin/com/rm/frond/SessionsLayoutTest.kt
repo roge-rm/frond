@@ -328,4 +328,82 @@ class SessionsLayoutTest {
         val want = java.security.MessageDigest.getInstance("MD5").digest(nor).joinToString("") { "%02x".format(it) }
         assertEquals(want, Sessions.norMd5(frond))
     }
+
+    @Test fun copyCancelAndLeftovers() {
+        val from = tmp.newFolder("cfrom")
+        File(from, "session.frond").writeText("session")
+        File(from, "sd.frondsd").writeBytes(ByteArray(3_000_000) { 1 })
+        val cancelled = File(tmp.root, "cancelled")
+        assertEquals(COPY_CANCELLED, copyMachine(from, cancelled, 1L shl 30) { true })
+        assertFalse(cancelled.exists())
+        var calls = 0
+        val midway = File(tmp.root, "midway")
+        assertEquals(COPY_CANCELLED, copyMachine(from, midway, 1L shl 30) { ++calls > 3 })
+        assertFalse(midway.exists())
+        // A first save's full card copy with no sd.frondsd still gets its card.
+        val fresh = tmp.newFolder("fresh")
+        File(fresh, "session.frond").writeBytes(v8WithSd(1))
+        File(fresh, "sd.frondsd.journal-1.full").writeBytes(tinyFrondsdV2(1, ByteArray(512) { 2 }))
+        val dest = File(tmp.root, "freshCopy")
+        assertNull(copyMachine(fresh, dest, 1L shl 30))
+        assertTrue(File(dest, "sd.frondsd").isFile)
+        // A folder left by a crashed copy goes once old, unless a copy is running.
+        val root = tmp.newFolder("root")
+        val left = File(root, "abc").also { it.mkdirs() }
+        File(left, COPY_PART).writeText("")
+        File(left, "session.frond").writeText("x")
+        val now = System.currentTimeMillis()
+        removeStaleImports(root, now)
+        assertTrue(left.exists())
+        left.walkTopDown().forEach { it.setLastModified(now - 3_600_000) }
+        activeImports.add("abc")
+        removeStaleImports(root, now)
+        assertTrue(left.exists())
+        activeImports.remove("abc")
+        removeStaleImports(root, now)
+        assertFalse(left.exists())
+    }
+}
+
+class SessionsDuplicateTest {
+    @get:Rule val tmp = TemporaryFolder()
+
+    @Test fun copyNamesCountOnFromTheBase() {
+        val taken = setOf("Palm TX", "Palm TX 2", "Zire 72")
+        assertEquals("Palm TX", baseName("Palm TX", taken))
+        assertEquals("Palm TX", baseName("Palm TX 2", taken))
+        assertEquals("Palm TX", baseName("Palm TX 12", taken))
+        assertEquals("Zire 72", baseName("Zire 72", taken))
+        assertEquals("Palm TX 2", baseName("Palm TX 2", setOf("Palm TX 2")))
+        assertEquals("7", baseName("7", taken))
+        assertEquals("Zire 72 2", copyName("Zire 72", setOf("Zire 72")))
+        assertEquals("Palm TX 2", copyName("Palm TX", setOf("Palm TX")))
+        assertEquals("Palm TX 3", copyName("Palm TX", setOf("Palm TX", "Palm TX 2")))
+        assertEquals("Palm TX 3", copyName("Palm TX 2", setOf("Palm TX", "Palm TX 2")))
+        assertEquals("Palm TX 4", copyName("Palm TX 2", setOf("Palm TX", "Palm TX 2", "Palm TX 3")))
+    }
+
+    @Test fun copyIsIndependentAndCleanedUp() {
+        val from = tmp.newFolder("from")
+        File(from, "session.frond").writeText("session")
+        File(from, "session.frond.settings.json").writeText("{}")
+        File(from, "sd.frondsd").writeBytes(ByteArray(100_000) { 7 })
+        File(from, "x.frond.tmp-1").writeText("temp")
+        val dest = File(tmp.root, "to")
+        assertNull(copyMachine(from, dest, 1L shl 30))
+        assertEquals("session", File(dest, "session.frond").readText())
+        assertEquals(100_000L, File(dest, "sd.frondsd").length())
+        assertFalse(File(dest, "x.frond.tmp-1").exists())
+        File(from, "sd.frondsd").writeText("changed")
+        assertEquals(100_000L, File(dest, "sd.frondsd").length())
+        // Not enough space leaves nothing behind.
+        val full = File(tmp.root, "full")
+        assertNotNull(copyMachine(from, full, 1000L))
+        assertFalse(full.exists())
+        // A copy that fails part way is removed.
+        val blocked = File(tmp.root, "blocked")
+        File(from, "sd.frondsd").setReadable(false)
+        assertNotNull(copyMachine(from, blocked, 1L shl 30))
+        assertFalse(blocked.exists())
+    }
 }
