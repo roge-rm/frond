@@ -1,0 +1,1196 @@
+diff --git a/src/cloudpilot/Makefile b/src/cloudpilot/Makefile
+index 3e51ae2..1540239 100644
+--- a/src/cloudpilot/Makefile
++++ b/src/cloudpilot/Makefile
+@@ -58,6 +58,7 @@ SOURCE_CXX = \
+ 	emulator/uae/readcpu.cpp \
+ 	emulator/uae/cputiming.cpp \
+ 	emulator/hardware/EmMemory.cpp \
++	emulator/hardware/EmBusTiming.cpp \
+ 	emulator/hardware/EmHAL.cpp \
+ 	emulator/hardware/EmCPU.cpp \
+ 	emulator/hardware/EmCPU68K.cpp \
+diff --git a/src/cloudpilot/emulator/EmSession.cpp b/src/cloudpilot/emulator/EmSession.cpp
+index 18e0a05..7677e46 100644
+--- a/src/cloudpilot/emulator/EmSession.cpp
++++ b/src/cloudpilot/emulator/EmSession.cpp
+@@ -272,6 +272,13 @@ void EmSession::Load(SavestateLoader<ChunkType>& loader) {
+     RecalculateClocksPerSecond();
+ }
+ 
++void EmSession::ScaleCycles(uint32 factor) {
++    systemCycles *= factor;
++    lastButtonEventReadAt *= factor;
++    dateCheckedAt *= factor;
++    EmHAL::ScaleCycles(factor);
++}
++
+ bool EmSession::Save() {
+     if (SuspendManager::IsSuspended()) {
+         logPrintf("unable to save state while the emulator is suspended");
+diff --git a/src/cloudpilot/emulator/EmSession.h b/src/cloudpilot/emulator/EmSession.h
+index 9126212..380bb7b 100644
+--- a/src/cloudpilot/emulator/EmSession.h
++++ b/src/cloudpilot/emulator/EmSession.h
+@@ -67,6 +67,8 @@ class EmSession {
+     void SetClockFactor(double clockFactor);
+     uint32 GetClocksPerSecond() const { return clocksPerSecond; }
+     uint64 GetSystemCycles() const { return systemCycles; }
++    // Converts a loaded session whose cycles were in other units (factor new per old).
++    void ScaleCycles(uint32 factor);
+ 
+     bool LaunchAppByName(const string& name);
+ 
+diff --git a/src/cloudpilot/emulator/hardware/EmBankDRAM.cpp b/src/cloudpilot/emulator/hardware/EmBankDRAM.cpp
+index 90a8d55..cfa07bc 100644
+--- a/src/cloudpilot/emulator/hardware/EmBankDRAM.cpp
++++ b/src/cloudpilot/emulator/hardware/EmBankDRAM.cpp
+@@ -323,6 +323,10 @@ void EmBankDRAM::InvalidAccess(emuptr address, long size, Bool forRead) {
+ void EmBankDRAM::SetWaitStates(EmBusWait wait) {
+     addressBank.waitByte = wait.byte;
+     addressBank.waitWord = wait.word;
++    addressBank.sdram = wait.sdram;
++    addressBank.busTag = 1 | (uint32(wait.dram) << 16);
+     addressBankDisabled.waitByte = wait.byte;
+     addressBankDisabled.waitWord = wait.word;
++    addressBankDisabled.sdram = wait.sdram;
++    addressBankDisabled.busTag = 1 | (uint32(wait.dram) << 16);
+ }
+diff --git a/src/cloudpilot/emulator/hardware/EmBankROM.cpp b/src/cloudpilot/emulator/hardware/EmBankROM.cpp
+index be93a67..af31db6 100644
+--- a/src/cloudpilot/emulator/hardware/EmBankROM.cpp
++++ b/src/cloudpilot/emulator/hardware/EmBankROM.cpp
+@@ -605,4 +605,6 @@ Bool Card::SupportsSZ(const EmAliasCardHeaderType<LAS>& cardHdr) {
+ void EmBankROM::SetWaitStates(EmBusWait wait) {
+     gROMAddressBank.waitByte = wait.byte;
+     gROMAddressBank.waitWord = wait.word;
++    gROMAddressBank.sdram = wait.sdram;
++    gROMAddressBank.busTag = 1 | (uint32(wait.dram) << 16);
+ }
+diff --git a/src/cloudpilot/emulator/hardware/EmBankSRAM.cpp b/src/cloudpilot/emulator/hardware/EmBankSRAM.cpp
+index d6286f4..d66b03b 100644
+--- a/src/cloudpilot/emulator/hardware/EmBankSRAM.cpp
++++ b/src/cloudpilot/emulator/hardware/EmBankSRAM.cpp
+@@ -380,6 +380,10 @@ void EmBankSRAM::ProtectedAccess(emuptr address, long size, Bool forRead) {
+ void EmBankSRAM::SetWaitStates(EmBusWait wait) {
+     gAddressBank.waitByte = wait.byte;
+     gAddressBank.waitWord = wait.word;
++    gAddressBank.sdram = wait.sdram;
++    gAddressBank.busTag = 1 | (uint32(wait.dram) << 16);
+     gAddressBankDisabled.waitByte = wait.byte;
+     gAddressBankDisabled.waitWord = wait.word;
++    gAddressBankDisabled.sdram = wait.sdram;
++    gAddressBankDisabled.busTag = 1 | (uint32(wait.dram) << 16);
+ }
+diff --git a/src/cloudpilot/emulator/hardware/EmBusTiming.cpp b/src/cloudpilot/emulator/hardware/EmBusTiming.cpp
+new file mode 100644
+index 0000000..591b96f
+--- /dev/null
++++ b/src/cloudpilot/emulator/hardware/EmBusTiming.cpp
+@@ -0,0 +1,266 @@
++#include "EmBusTiming.h"
++
++#include <algorithm>
++#include <iterator>
++
++namespace {
++    // A CAS-before-RAS refresh holds the DRAM for about 240 ns, four clocks at 16.58 MHz (EZ
++    // manual 14.1.2 and figure 18-8: a colliding CPU access waits 1-4 clocks).
++    constexpr uint32_t kRefreshClocks = 4;
++
++    // The EZ's LCD controller cycle lasts at most eight clocks (EZ manual 14.1.4), so a burst
++    // carries as many words as fit in eight clocks.
++    constexpr uint32_t kEzLcdCycleClocks = 8;
++
++    uint32_t BitsPerPixel(uint8_t panelControl) {
++        switch (panelControl & 3) {
++            case 1:
++                return 2;
++            case 2:
++                return 4;
++            default:
++                return 1;
++        }
++    }
++
++    // 16-bit (or 8-bit with DWIDTH) DMA transfers per line, with one more when the line is
++    // panned off a word boundary.
++    uint32_t LineTransfers(uint16_t width, uint8_t panelControl, uint8_t clockControl,
++                           uint8_t panning) {
++        const uint32_t bits = uint32_t(width) * BitsPerPixel(panelControl);
++        const uint32_t unit = (clockControl & 0x40) ? 8 : 16;
++        return (bits + unit - 1) / unit + ((panning & 0x0f) ? 1 : 0);
++    }
++
++    // Clocks for a line's DMA split into bursts of up to burstWords, where each burst takes
++    // first clocks for its first word and next for each further word.
++    uint32_t BurstClocks(uint32_t transfers, uint32_t burstWords, uint32_t first, uint32_t next) {
++        burstWords = std::max<uint32_t>(burstWords, 1);
++        const uint32_t bursts = (transfers + burstWords - 1) / burstWords;
++        return bursts * first + (transfers - bursts) * next;
++    }
++
++    // System clocks per LCD clock, from the PLL's two dividers of DMACLK.
++    double LcdClockInSystemClocks(uint16_t pllControl) {
++        return double(EmDragonballClockDivider((pllControl >> 11) & 7)) /
++               EmDragonballClockDivider((pllControl >> 8) & 7);
++    }
++
++    // DRAMMC REF with DRAMC CLK (both chips' manuals, DRAMMC description).
++    uint32_t RefreshPeriod(uint16_t dramConfig, uint16_t dramControl, uint32_t refMask,
++                           uint32_t systemClockHz) {
++        const uint32_t ref = dramConfig & refMask;
++        if (dramControl & 0x0800) return 32 * (ref + 1);
++        const double rate = ref == 0 ? 2 * 32768. : ref == 1 ? 32768. : 32768. / (ref + 1);
++        return uint32_t(systemClockHz / rate + 0.5);
++    }
++
++    EmBusSteal gSteal;
++    uint64_t gNextLcd = ~uint64_t(0);
++    uint64_t gNextRefresh = ~uint64_t(0);
++
++    // Moves an event time to the first one at or after start, keeping its phase.
++    uint64_t CatchUp(uint64_t next, uint32_t period, uint64_t start) {
++        if (next >= start) return next;
++        return next + ((start - next + period - 1) / period) * uint64_t(period);
++    }
++
++    // Charges every event of one kind due in [start, end]; share is fixed point, 1 << 16 whole.
++    uint64_t Due(uint64_t& next, uint32_t period, uint32_t length, uint64_t start, uint64_t end,
++                 uint32_t share, uint32_t& fraction) {
++        next = CatchUp(next, period, start);
++        uint64_t total = 0;
++        while (next <= end) {
++            total += uint64_t(length) * share;
++            next += period;
++        }
++        total += fraction;
++        fraction = uint32_t(total & 0xffff);
++        return total >> 16;
++    }
++
++    uint32_t gLcdFraction, gRefreshFraction;
++
++    EmSdramTiming gSdram;
++    uint32_t gOpenRow[4] = {~0u, ~0u, ~0u, ~0u};
++}  // namespace
++
++uint32_t EmDragonballClockDivider(uint32_t select) {
++    return (select & 4) ? 1 : 2u << (select & 3);
++}
++
++EmBusSteal EmEzBusSteal(const EmEzBusRegisters& r) {
++    EmBusSteal steal;
++
++    // LCD: LRRA's frame period (EZ manual 12.2.14) over the screen's lines, and the line's DMA
++    // from DRAM (DRAMC: first word 4 clocks, one more with MSW, then 1 with EDO or BC + 2 in
++    // fast page mode) or from SRAM/ROM (DWS + 1 clocks a transfer).
++    if ((r.lcdClockControl & 0x80) && r.lcdScreenWidth) {
++        const double line = (6. + r.lcdRefreshRateAdj + r.lcdScreenWidth) *
++                            ((r.lcdPixelClock & 0x3f) + 1) * LcdClockInSystemClocks(r.pllControl);
++        const uint32_t transfers = LineTransfers(r.lcdScreenWidth, r.lcdPanelControl,
++                                                 r.lcdClockControl, r.lcdPanningOffset);
++        uint32_t first, next;
++        if (r.lcdInDram && r.dramEnabled) {
++            first = 4 + ((r.dramControl >> 5) & 1);
++            next = (r.dramControl & 0x0400) ? 1 : ((r.dramControl >> 12) & 3) + 2;
++        } else {
++            first = next = (r.lcdClockControl & 0x0f) + 1;
++        }
++        const uint32_t burst = first >= kEzLcdCycleClocks ? 1 : 1 + (kEzLcdCycleClocks - first) / next;
++        steal.lcdLineClocks = std::max<uint32_t>(uint32_t(line + 0.5), 1);
++        steal.lcdDmaClocks = BurstClocks(transfers, burst, first, next);
++    }
++
++    // CAS-before-RAS refresh while the DRAM controller runs and isn't in self refresh.
++    if (r.dramEnabled && (r.dramControl & 0x8000) && !(r.dramControl & 0x4000)) {
++        steal.refreshPeriod = std::max<uint32_t>(
++            RefreshPeriod(r.dramConfig, r.dramControl, 0x0f, r.systemClockHz), 1);
++        steal.refreshClocks = kRefreshClocks;
++    }
++
++    return steal;
++}
++
++EmBusSteal EmVzBusSteal(const EmVzBusRegisters& r) {
++    EmBusSteal steal;
++
++    // LCD: LRRA's frame period (VZ manual 8.3.14), DMACR's burst length. SDRAM bursts are
++    // taken like EDO: a page miss for the first word, then one clock a word.
++    if ((r.lcdClockControl & 0x80) && r.lcdScreenWidth) {
++        const double line = (12. + (r.lcdRefreshRateAdj & 0x3ff) + r.lcdScreenWidth) *
++                            ((r.lcdPixelClock & 0x3f) + 1) * LcdClockInSystemClocks(r.pllControl);
++        const uint32_t transfers = LineTransfers(r.lcdScreenWidth, r.lcdPanelControl,
++                                                 r.lcdClockControl, r.lcdPanningOffset);
++        uint32_t first, next;
++        if (r.lcdInDram && r.dramEnabled && r.sdram) {
++            first = 4 + ((r.sdramControl >> 1) & 1);
++            next = 1;
++        } else if (r.lcdInDram && r.dramEnabled) {
++            first = 4 + ((r.dramControl >> 5) & 1);
++            next = (r.dramControl & 0x0400) ? 1 : ((r.dramControl >> 12) & 3) + 2;
++        } else {
++            first = next = (r.lcdClockControl & 0x0f) + 1;
++        }
++        const uint32_t burst = (r.lcdDmaControl >> 4) & 0x0f;
++        steal.lcdLineClocks = std::max<uint32_t>(uint32_t(line + 0.5), 1);
++        steal.lcdDmaClocks = BurstClocks(transfers, burst ? burst : 1, first, next);
++    }
++
++    // DRAM refresh as on the EZ; SDRAM auto refresh when SDCTRL RE is set, holding the SDRAM
++    // for the refresh to active latency (RACL: 3 or 6 clocks).
++    if (r.dramEnabled && r.sdram) {
++        if (r.sdramControl & 0x1000) {
++            steal.refreshPeriod = std::max<uint32_t>(
++                RefreshPeriod(r.dramConfig, r.dramControl, 0x1f, r.systemClockHz), 1);
++            steal.refreshClocks = (r.sdramControl & 1) ? 6 : 3;
++        }
++    } else if (r.dramEnabled && (r.dramControl & 0x8000) && !(r.dramControl & 0x4000)) {
++        steal.refreshPeriod = std::max<uint32_t>(
++            RefreshPeriod(r.dramConfig, r.dramControl, 0x1f, r.systemClockHz), 1);
++        steal.refreshClocks = kRefreshClocks;
++    }
++
++    return steal;
++}
++
++EmSdramTiming EmVzSdramTiming(uint16_t sdramControl, uint16_t dramControl) {
++    static constexpr uint8_t kHigh[] = {20, 22, 24, 0xff}, kLow[] = {19, 21, 23, 0xff};
++    EmSdramTiming t;
++    t.continuousPage = sdramControl & 0x4000;
++    t.casLatency2 = sdramControl & 0x0002;
++    t.bankHigh = kHigh[(sdramControl >> 4) & 3];
++    t.bankLow = kLow[(sdramControl >> 2) & 3];
++    // PGSZ: 256 to 2048 words, so 9 to 12 address bits.
++    t.pageShift = 9 + ((dramControl >> 8) & 3);
++    return t;
++}
++
++namespace EmSdram {
++    void Set(const EmSdramTiming& timing) {
++        gSdram = timing;
++        PrechargeAll();
++    }
++
++    uint32_t Access(uint32_t address, bool write, uint32_t words) {
++        const uint32_t hit = write ? 0 : 1 + gSdram.casLatency2;
++        const uint32_t miss = write ? 1 : 3 + gSdram.casLatency2;
++        if (!gSdram.continuousPage) return words * miss;
++        const uint32_t bank = (gSdram.bankHigh == 0xff ? 0 : ((address >> gSdram.bankHigh) & 1) << 1) |
++                              (gSdram.bankLow == 0xff ? 0 : (address >> gSdram.bankLow) & 1);
++        const uint32_t row = address >> gSdram.pageShift;
++        const uint32_t first = gOpenRow[bank] == row ? hit : miss;
++        gOpenRow[bank] = row;
++        return first + (words - 1) * hit;
++    }
++
++    void PrechargeAll() { std::fill(std::begin(gOpenRow), std::end(gOpenRow), ~0u); }
++}  // namespace EmSdram
++
++extern "C" uint32_t EmSdramAccess(uint32_t address, int write, int words) {
++    return EmSdram::Access(address, write, words);
++}
++
++namespace EmBusTiming {
++    uint64_t next = ~uint64_t(0);
++    uint64_t windowCount;
++    uint32_t windowWait, windowCycles;
++
++    namespace {
++        void ClearWindow() {
++            windowCount = 0;
++            windowWait = windowCycles = 0;
++        }
++    }  // namespace
++
++    void Set(const EmBusSteal& steal, uint64_t now) {
++        // Keeps an event's phase while its period stays and it is due within one period.
++        const bool lcdKept = steal.lcdLineClocks == gSteal.lcdLineClocks &&
++                             gNextLcd != ~uint64_t(0) && gNextLcd <= now + steal.lcdLineClocks;
++        const bool refreshKept = steal.refreshPeriod == gSteal.refreshPeriod &&
++                                 gNextRefresh != ~uint64_t(0) &&
++                                 gNextRefresh <= now + steal.refreshPeriod;
++        gSteal = steal;
++        if (!steal.lcdLineClocks || !steal.lcdDmaClocks)
++            gNextLcd = ~uint64_t(0);
++        else if (!lcdKept)
++            gNextLcd = now + steal.lcdLineClocks;
++        if (!steal.refreshPeriod || !steal.refreshClocks)
++            gNextRefresh = ~uint64_t(0);
++        else if (!refreshKept)
++            gNextRefresh = now + steal.refreshPeriod;
++        next = std::min(gNextLcd, gNextRefresh);
++        ClearWindow();
++    }
++
++    const EmBusSteal& Get() { return gSteal; }
++
++    uint32_t Charge(uint64_t start, uint64_t end, uint32_t cycles, uint32_t busClocks,
++                    uint32_t dramClocks) {
++        if (!cycles) return 0;
++        const uint32_t busShare = uint32_t((uint64_t(std::min(busClocks, cycles)) << 16) / cycles);
++        const uint32_t dramShare = uint32_t((uint64_t(std::min(dramClocks, cycles)) << 16) / cycles);
++        uint64_t extra = 0;
++        if (gNextLcd != ~uint64_t(0))
++            extra += Due(gNextLcd, gSteal.lcdLineClocks, gSteal.lcdDmaClocks, start, end,
++                         busShare, gLcdFraction);
++        if (gNextRefresh != ~uint64_t(0) && gNextRefresh <= end) {
++            extra += Due(gNextRefresh, gSteal.refreshPeriod, gSteal.refreshClocks, start, end,
++                         dramShare, gRefreshFraction);
++            if (gSdram.continuousPage) EmSdram::PrechargeAll();
++        }
++        next = std::min(gNextLcd, gNextRefresh);
++        return uint32_t(extra);
++    }
++
++    uint32_t ChargeWindow(uint64_t start, uint64_t end) {
++        const uint32_t busCycles = uint32_t(windowCount & 0xffff);
++        const uint32_t dramCycles = uint32_t((windowCount >> 16) & 0xffff);
++        const uint32_t busClocks = 4 * busCycles + windowWait;
++        const uint32_t dramClocks =
++            busCycles ? uint32_t(uint64_t(dramCycles) * busClocks / busCycles) : 0;
++        const uint32_t extra = Charge(start, end, windowCycles, busClocks, dramClocks);
++        ClearWindow();
++        return extra;
++    }
++}  // namespace EmBusTiming
+diff --git a/src/cloudpilot/emulator/hardware/EmBusTiming.h b/src/cloudpilot/emulator/hardware/EmBusTiming.h
+new file mode 100644
+index 0000000..0d02dc3
+--- /dev/null
++++ b/src/cloudpilot/emulator/hardware/EmBusTiming.h
+@@ -0,0 +1,118 @@
++#ifndef EmBusTiming_h
++#define EmBusTiming_h
++
++// Bus time the DragonBall's LCD DMA and DRAM refresh take from the 68000 core, worked out from
++// the registers as the ROM programs them (MC68EZ328 and MC68VZ328 user's manuals). Everything
++// is in system clocks. The CPU loop calls EmBusTiming::Charge after each instruction once the
++// cycle count reaches EmBusTiming::next, so the cost when nothing is due is one compare.
++
++#include <cstdint>
++
++struct EmBusSteal {
++    // System clocks per LCD line and the bus clocks the line's DMA takes; 0 with the DMA off.
++    uint32_t lcdLineClocks{0};
++    uint32_t lcdDmaClocks{0};
++    // System clocks between DRAM refresh requests and the clocks one refresh holds the DRAM;
++    // 0 without CAS-before-RAS refresh.
++    uint32_t refreshPeriod{0};
++    uint32_t refreshClocks{0};
++
++    bool operator==(const EmBusSteal& o) const {
++        return lcdLineClocks == o.lcdLineClocks && lcdDmaClocks == o.lcdDmaClocks &&
++               refreshPeriod == o.refreshPeriod && refreshClocks == o.refreshClocks;
++    }
++};
++
++// DragonBall clock dividers from a PLLCR SYSCLK SEL or LCDCLK SEL field: 2, 4, 8, 16, or 1.
++uint32_t EmDragonballClockDivider(uint32_t select);
++
++// MC68EZ328 LCD DMA (section 12) and DRAM controller (section 14) registers.
++struct EmEzBusRegisters {
++    uint16_t pllControl;       // PLLCR: LCDCLK SEL 13-11, SYSCLK SEL 10-8
++    uint16_t lcdScreenWidth;   // LXMAX, pixels
++    uint16_t lcdScreenHeight;  // LYMAX, lines minus one
++    uint8_t lcdPanelControl;   // LPICF: GS 1-0
++    uint8_t lcdPixelClock;     // LPXCD: PCD 5-0
++    uint8_t lcdClockControl;   // LCKCON: LCDON 7, DWIDTH 6, DWS 3-0
++    uint8_t lcdRefreshRateAdj; // LRRA
++    uint8_t lcdPanningOffset;  // LPOSR
++    bool lcdInDram;            // LSSA is in the DRAM chip select
++    uint16_t dramConfig;       // DRAMMC: REF 3-0
++    uint16_t dramControl;      // DRAMC: EN 15, RM 14, BC 13-12, CLK 11, EDO 10, MSW 5
++    bool dramEnabled;          // CSD drives DRAM (CSD's DRAM bit)
++    uint32_t systemClockHz;
++};
++
++EmBusSteal EmEzBusSteal(const EmEzBusRegisters& r);
++
++// MC68VZ328 LCD (section 8), DRAM controller (section 7) registers.
++struct EmVzBusRegisters {
++    uint16_t pllControl;       // PLLCR: LCDCLK SEL 13-11, SYSCLK SEL 10-8
++    uint16_t lcdScreenWidth;   // LXMAX, pixels
++    uint16_t lcdScreenHeight;  // LYMAX, lines minus one
++    uint8_t lcdPanelControl;   // LPICF: GS 1-0
++    uint8_t lcdPixelClock;     // LPXCD: PCD 5-0
++    uint8_t lcdClockControl;   // LCKCON: LCDEN 7, DWIDTH 6, DWS 3-0
++    uint16_t lcdRefreshRateAdj; // LRRA, 10 bits
++    uint8_t lcdPanningOffset;  // LPOSR
++    uint8_t lcdDmaControl;     // DMACR: burst length 7-4
++    bool lcdInDram;            // LSSA is in a DRAM chip select
++    uint16_t dramConfig;       // DRAMMC: REF 3-0
++    uint16_t dramControl;      // DRAMC: EN 15, RM 14, SLW 13 ... see EmVzBusSteal
++    uint16_t sdramControl;     // SDCTRL
++    bool dramEnabled;          // CSD or CSC drives DRAM
++    bool sdram;                // that DRAM is SDRAM
++    uint32_t systemClockHz;
++};
++
++EmBusSteal EmVzBusSteal(const EmVzBusRegisters& r);
++
++// MC68VZ328 SDRAM page state for CPU accesses (VZ manual 7.3.3 and figures 19-15 to 19-19, CAS
++// latency 1): a read waits 1 clock on a page hit and 3 on a miss, a write 0 and 1. CAS latency
++// 2 adds a clock to reads. Without continuous page mode every access is a miss.
++struct EmSdramTiming {
++    bool continuousPage{false};
++    bool casLatency2{false};
++    uint8_t bankHigh{0xff}, bankLow{0xff};  // address bits picking the bank, 0xff for none
++    uint8_t pageShift{9};                     // address bits within one row (page)
++};
++
++// SDCTRL and DRAMC PGSZ as the SDRAM timing.
++EmSdramTiming EmVzSdramTiming(uint16_t sdramControl, uint16_t dramControl);
++
++namespace EmSdram {
++    void Set(const EmSdramTiming& timing);
++    // Wait clocks for a CPU access of words 16-bit words from address.
++    uint32_t Access(uint32_t address, bool write, uint32_t words);
++    // A refresh closes every page.
++    void PrechargeAll();
++}  // namespace EmSdram
++
++namespace EmBusTiming {
++    // Next cycle count at which Charge has something to do; ~0 when nothing is modelled.
++    extern uint64_t next;
++
++    // Sets the model, keeping the phase of events already scheduled where it can.
++    void Set(const EmBusSteal& steal, uint64_t now);
++    const EmBusSteal& Get();
++
++    // Extra clocks for an instruction that ran from start to end (system cycles), of which
++    // busClocks used the bus and dramClocks the DRAM. LCD DMA and refresh due in that span
++    // delay it by their length times the instruction's share of bus or DRAM time, as the core
++    // keeps working internally while it is off the bus. Events before start passed while the
++    // CPU was stopped and cost nothing.
++    uint32_t Charge(uint64_t start, uint64_t end, uint32_t cycles, uint32_t busClocks,
++                    uint32_t dramClocks);
++
++    // The CPU's bus use since the last charge: bus cycles in the low 16 bits and DRAM cycles
++    // above (from EmAddressBank::busTag), the wait clocks of those cycles and all its clocks.
++    extern uint64_t windowCount;
++    extern uint32_t windowWait, windowCycles;
++
++    // Charge for an instruction that ran from start to end, at the bus and DRAM shares of the
++    // window, which it then clears. Taking the share over the window rather than from the one
++    // instruction an event lands in keeps the charge from locking onto a loop's phase.
++    uint32_t ChargeWindow(uint64_t start, uint64_t end);
++}  // namespace EmBusTiming
++
++#endif
+diff --git a/src/cloudpilot/emulator/hardware/EmCPU68K.cpp b/src/cloudpilot/emulator/hardware/EmCPU68K.cpp
+index bd09f8b..8e2c234 100644
+--- a/src/cloudpilot/emulator/hardware/EmCPU68K.cpp
++++ b/src/cloudpilot/emulator/hardware/EmCPU68K.cpp
+@@ -22,6 +22,7 @@
+ #include "Byteswapping.h"  // Canonical
+ #include "Debugger.h"
+ #include "EmBankROM.h"  // EmBankROM::GetMemoryStart
++#include "EmBusTiming.h"
+ #include "EmCommon.h"
+ #include "EmHAL.h"      // EmHAL::GetInterruptLevel
+ #include "EmMemory.h"   // CEnableFullAccess
+@@ -364,6 +365,7 @@ uint32 EmCPU68K::Execute(uint32 maxCycles) {
+     // A nested Execute (a ROM call from a trap patch) keeps the outer instruction's counts.
+     EmValueChanger<uae_u32> keepAccessWait(gUaeAccessWait, 0);
+     EmValueChanger<uae_u32> keepTimingExtra(gUaeTimingExtra, 0);
++    EmValueChanger<uae_u32> keepBusCount(gUaeBusCount, 0);
+ 
+     // Do not run cycleSlowly on each call if single stepping
+     int counter = maxCycles ? 0 : 1;
+@@ -437,7 +439,7 @@ uint32 EmCPU68K::Execute(uint32 maxCycles) {
+             const uint32 kind = timing >> 12;
+             uint32 clocks = (timing & 0xff) << 1;
+             uint32 programReads = (timing >> 8) & 0x0f;
+-            const uint32 programWait = EmMemGetBank(instructionPC).waitWord;
++            const EmAddressBank& programBank = EmMemGetBank(instructionPC);
+ 
+             switch (kind) {
+                 case kTimingShiftReg:
+@@ -459,6 +461,7 @@ uint32 EmCPU68K::Execute(uint32 maxCycles) {
+ 
+             gUaeAccessWait = 0;
+             gUaeTimingExtra = 0;
++            gUaeBusCount = 0;
+ 
+ #ifdef __EMSCRIPTEN__
+             ((cpuop_func*)((long)cpufunctbl_base + opcode))(opcode);
+@@ -489,7 +492,25 @@ uint32 EmCPU68K::Execute(uint32 maxCycles) {
+                     break;
+             }
+ 
+-            cycles = clocks + programReads * programWait + gUaeAccessWait + gUaeTimingExtra;
++            if (kind == kTimingReadFirst) {
++                gUaeAccessWait *= 2;
++                gUaeBusCount *= 2;
++            }
++
++            // Program reads run in order from the instruction, so on SDRAM all but the first
++            // hit the open page.
++            const uint32 programWait =
++                unlikely(programBank.sdram) && programReads
++                    ? EmSdramAccess(instructionPC, 0, programReads)
++                    : programReads * programBank.waitWord;
++            cycles = clocks + programWait + gUaeAccessWait + gUaeTimingExtra;
++
++            // LCD DMA and DRAM refresh take their share of the bus time since the last one.
++            EmBusTiming::windowCount += programReads * programBank.busTag + gUaeBusCount;
++            EmBusTiming::windowWait += programWait + gUaeAccessWait;
++            EmBusTiming::windowCycles += cycles;
++            const uint64 end = session->GetSystemCycles() + fCurrentCycles + cycles;
++            if (unlikely(end >= EmBusTiming::next)) cycles += EmBusTiming::ChargeWindow(end - cycles, end);
+         }
+         fCurrentCycles += cycles;
+         // =======================================================================
+diff --git a/src/cloudpilot/emulator/hardware/EmHAL.cpp b/src/cloudpilot/emulator/hardware/EmHAL.cpp
+index 69f6f59..a39cf95 100644
+--- a/src/cloudpilot/emulator/hardware/EmHAL.cpp
++++ b/src/cloudpilot/emulator/hardware/EmHAL.cpp
+@@ -437,6 +437,11 @@ uint32 EmHAL::CyclesToNextInterrupt(uint64 systemCycles) {
+     return EmHAL::GetRootHandler()->CyclesToNextInterrupt(systemCycles);
+ }
+ 
++void EmHAL::ScaleCycles(uint32 factor) {
++    EmAssert(EmHAL::GetRootHandler());
++    EmHAL::GetRootHandler()->ScaleCycles(factor);
++}
++
+ bool EmHAL::EnableRAM() {
+     EmAssert(EmHAL::GetRootHandler());
+     return EmHAL::GetRootHandler()->EnableRAM();
+@@ -777,6 +782,10 @@ uint32 EmHALHandler::CyclesToNextInterrupt(uint64 systemCycles) {
+     return this->GetNextHandler()->CyclesToNextInterrupt(systemCycles);
+ }
+ 
++void EmHALHandler::ScaleCycles(uint32 factor) {
++    if (this->GetNextHandler()) this->GetNextHandler()->ScaleCycles(factor);
++}
++
+ bool EmHALHandler::EnableRAM() {
+     if (!this->GetNextHandler()) return true;
+ 
+diff --git a/src/cloudpilot/emulator/hardware/EmHAL.h b/src/cloudpilot/emulator/hardware/EmHAL.h
+index 89d4291..1e17ac4 100644
+--- a/src/cloudpilot/emulator/hardware/EmHAL.h
++++ b/src/cloudpilot/emulator/hardware/EmHAL.h
+@@ -88,6 +88,8 @@ class EmHAL {
+     static uint16 GetLEDState(void);
+ 
+     static uint32 CyclesToNextInterrupt(uint64 systemCycles);
++    // Multiplies every saved cycle stamp after the session's counter changed units.
++    static void ScaleCycles(uint32 factor);
+     static bool EnableRAM();
+ 
+     static void AddCycleConsumer(CycleHandler handler, void* context);
+@@ -161,6 +163,7 @@ class EmHALHandler {
+     virtual uint16 GetLEDState(void);
+ 
+     virtual uint32 CyclesToNextInterrupt(uint64 systemCycles);
++    virtual void ScaleCycles(uint32 factor);
+     virtual bool EnableRAM();
+ 
+     virtual bool SupportsImageInSlot(EmHAL::Slot slot, uint32 blocksTotal);
+diff --git a/src/cloudpilot/emulator/hardware/EmMemory.h b/src/cloudpilot/emulator/hardware/EmMemory.h
+index 6b0ed27..1b9deae 100644
+--- a/src/cloudpilot/emulator/hardware/EmMemory.h
++++ b/src/cloudpilot/emulator/hardware/EmMemory.h
+@@ -63,11 +63,18 @@ typedef struct EmAddressBank {
+     /* Clocks of wait state a CPU byte or word bus access to this bank adds (a long is two words).
+      * Zero unless the chip-select model sets them. */
+     uint8 waitByte, waitWord;
++    /* Set when this bank is SDRAM, whose wait depends on the open page (EmSdram). */
++    uint8 sdram;
++    /* Added to gUaeBusCount per word access: bus cycles in the low half, DRAM cycles in the high
++     * half (EmBusTiming shares LCD DMA and refresh out by them). */
++    uint32 busTag;
+ } EmAddressBank;
+ 
+-/* Wait states for one region, in clocks: see EmAddressBank. */
++/* Wait states for one region, in clocks: see EmAddressBank. dram is set for DRAM (refresh
++ * holds it up), sdram for SDRAM. */
+ typedef struct EmBusWait {
+     uint8 byte, word;
++    uint8 dram, sdram;
+ } EmBusWait;
+ 
+ #ifndef ECM_DYNAMIC_PATCH
+diff --git a/src/cloudpilot/emulator/hardware/EmRegs328.cpp b/src/cloudpilot/emulator/hardware/EmRegs328.cpp
+index 320aba7..61718a6 100644
+--- a/src/cloudpilot/emulator/hardware/EmRegs328.cpp
++++ b/src/cloudpilot/emulator/hardware/EmRegs328.cpp
+@@ -2690,6 +2690,14 @@ int EmRegs328::GetPort(emuptr address) {
+     return 0;
+ }
+ 
++void EmRegs328::ScaleCycles(uint32 factor) {
++    tmr1LastProcessedSystemCycles *= factor;
++    tmr2LastProcessedSystemCycles *= factor;
++    systemCycles = gSession->GetSystemCycles();
++    UpdateTimers();
++    EmHALHandler::ScaleCycles(factor);
++}
++
+ uint32 EmRegs328::CyclesToNextInterrupt(uint64 systemCycles) {
+     this->systemCycles = systemCycles;
+ 
+diff --git a/src/cloudpilot/emulator/hardware/EmRegs328.h b/src/cloudpilot/emulator/hardware/EmRegs328.h
+index 4e8777f..03d4e86 100644
+--- a/src/cloudpilot/emulator/hardware/EmRegs328.h
++++ b/src/cloudpilot/emulator/hardware/EmRegs328.h
+@@ -68,6 +68,7 @@ class EmRegs328 : public EmRegs, public EmHALHandler {
+     virtual void PortDataChanged(int, uint8, uint8);
+ 
+     virtual uint32 CyclesToNextInterrupt(uint64 systemCycles);
++    virtual void ScaleCycles(uint32 factor);
+     void Cycle(uint64 systemCycles, Bool sleeping);
+ 
+     virtual void SetUARTSync(bool sync);
+diff --git a/src/cloudpilot/emulator/hardware/EmRegsEZ.cpp b/src/cloudpilot/emulator/hardware/EmRegsEZ.cpp
+index fc89f5d..10980a5 100644
+--- a/src/cloudpilot/emulator/hardware/EmRegsEZ.cpp
++++ b/src/cloudpilot/emulator/hardware/EmRegsEZ.cpp
+@@ -21,6 +21,8 @@
+ #include "EmMemory.h"  // gMemAccessFlags, EmMem_memcpy
+ #include "EmRegsEZPrv.h"
+ #include "EmSPISlave.h"  // DoExchange
++#include "EmBankROM.h"
++#include "EmBusTiming.h"
+ #include "EmSession.h"   // GetDevice
+ #include "EmSystemState.h"
+ #include "Frame.h"
+@@ -612,7 +614,8 @@ void EmRegsEZ::Dispose(void) {
+     EmHAL::onDayRollover.RemoveHandler(onDayRolloverHandle);
+     EmHAL::RemoveCycleConsumer(cycleThunk, this);
+ 
+-    Memory::SetWaitStates(EmBusWait{0, 0}, EmBusWait{0, 0});
++    Memory::SetWaitStates(EmBusWait{0, 0, 0, 0}, EmBusWait{0, 0, 0, 0});
++    EmBusTiming::Set(EmBusSteal{}, 0);
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -730,9 +733,9 @@ void EmRegsEZ::SetSubBankHandlers(void) {
+     INSTALL_HANDLER(StdRead, lcdRegisterWrite, lcdPanelControl);
+     INSTALL_HANDLER(StdRead, StdWrite, lcdPolarity);
+     INSTALL_HANDLER(StdRead, StdWrite, lcdACDRate);
+-    INSTALL_HANDLER(StdRead, StdWrite, lcdPixelClock);
+-    INSTALL_HANDLER(StdRead, StdWrite, lcdClockControl);
+-    INSTALL_HANDLER(StdRead, StdWrite, lcdRefreshRateAdj);
++    INSTALL_HANDLER(StdRead, waitStateRegisterWrite, lcdPixelClock);
++    INSTALL_HANDLER(StdRead, waitStateRegisterWrite, lcdClockControl);
++    INSTALL_HANDLER(StdRead, waitStateRegisterWrite, lcdRefreshRateAdj);
+     INSTALL_HANDLER(StdRead, lcdRegisterWrite, lcdPanningOffset);
+     INSTALL_HANDLER(StdRead, StdWrite, lcdFrameRate);
+     INSTALL_HANDLER(StdRead, lcdRegisterWrite, lcdGrayPalette);
+@@ -748,7 +751,7 @@ void EmRegsEZ::SetSubBankHandlers(void) {
+     INSTALL_HANDLER(StdRead, StdWrite, rtcDay);
+     INSTALL_HANDLER(StdRead, StdWrite, rtcDayAlarm);
+ 
+-    INSTALL_HANDLER(StdRead, StdWrite, dramConfig);
++    INSTALL_HANDLER(StdRead, waitStateRegisterWrite, dramConfig);
+     INSTALL_HANDLER(StdRead, waitStateRegisterWrite, dramControl);
+ 
+     INSTALL_HANDLER(StdRead, StdWrite, emuAddrCompare);
+@@ -1506,7 +1509,7 @@ void EmRegsEZ::UpdateWaitStates(void) {
+         const uint8 ws = (select >> 4) & 7;
+         const uint8 wait = ws == 7 ? 0 : ws;
+         const bool wide = select & 0x0080;
+-        return EmBusWait{wait, uint8(wide ? wait : 4 + 2 * wait)};
++        return EmBusWait{wait, uint8(wide ? wait : 4 + 2 * wait), 0, 0};
+     };
+ 
+     const EmBusWait rom = chipSelect(READ_REGISTER(csASelect));
+@@ -1515,12 +1518,31 @@ void EmRegsEZ::UpdateWaitStates(void) {
+     if (csDSelect & 0x0200) {
+         const uint16 dramControl = READ_REGISTER(dramControl);
+         const uint8 wait = ((dramControl >> 6) & 3) + ((dramControl >> 5) & 1);
+-        ram = EmBusWait{wait, wait};
++        ram = EmBusWait{wait, wait, 0, 0};
+     } else {
+         ram = chipSelect(csDSelect);
+     }
++    ram.dram = (csDSelect & 0x0200) != 0;
+ 
+     Memory::SetWaitStates(rom, ram);
++
++    // LCD DMA and DRAM refresh from the same registers (EmBusTiming.h).
++    // The screen is in RAM (the DRAM chip select) when it sits below the ROM.
++    const emuptr screen = READ_REGISTER(lcdStartAddr);
++    const EmEzBusRegisters bus{READ_REGISTER(pllControl),
++                               READ_REGISTER(lcdScreenWidth),
++                               READ_REGISTER(lcdScreenHeight),
++                               READ_REGISTER(lcdPanelControl),
++                               READ_REGISTER(lcdPixelClock),
++                               READ_REGISTER(lcdClockControl),
++                               READ_REGISTER(lcdRefreshRateAdj),
++                               READ_REGISTER(lcdPanningOffset),
++                               ram.dram != 0 && screen < EmBankROM::GetMemoryStart(),
++                               READ_REGISTER(dramConfig),
++                               READ_REGISTER(dramControl),
++                               ram.dram != 0,
++                               uint32(GetSystemClockFrequency())};
++    EmBusTiming::Set(EmEzBusSteal(bus), gSession ? gSession->GetSystemCycles() : 0);
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -1838,6 +1860,7 @@ void EmRegsEZ::lcdRegisterWrite(emuptr address, int size, uint32 value) {
+     EmRegsEZ::StdWrite(address, size, value);
+ 
+     MarkScreenDirty();
++    UpdateWaitStates();
+ }
+ 
+ void EmRegsEZ::pllRegisterWrite(emuptr address, int size, uint32 value) {
+@@ -1847,6 +1870,7 @@ void EmRegsEZ::pllRegisterWrite(emuptr address, int size, uint32 value) {
+     gSystemState.MarkScreenDirty();
+     EmHAL::onSystemClockChange.Dispatch();
+     powerOffCached = GetAsleep();
++    UpdateWaitStates();
+ }
+ 
+ void EmRegsEZ::tmr1RegisterWrite(emuptr address, int size, uint32 value) {
+@@ -2588,6 +2612,14 @@ int EmRegsEZ::GetPort(emuptr address) {
+     return 0;
+ }
+ 
++void EmRegsEZ::ScaleCycles(uint32 factor) {
++    lastProcessedSystemCycles *= factor;
++    systemCycles = gSession->GetSystemCycles();
++    UpdateTimer();
++    UpdateWaitStates();
++    EmHALHandler::ScaleCycles(factor);
++}
++
+ uint32 EmRegsEZ::CyclesToNextInterrupt(uint64 systemCycles) {
+     this->systemCycles = systemCycles;
+ 
+diff --git a/src/cloudpilot/emulator/hardware/EmRegsEZ.h b/src/cloudpilot/emulator/hardware/EmRegsEZ.h
+index e01b229..5150ff5 100644
+--- a/src/cloudpilot/emulator/hardware/EmRegsEZ.h
++++ b/src/cloudpilot/emulator/hardware/EmRegsEZ.h
+@@ -71,6 +71,7 @@ class EmRegsEZ : public EmRegs, public EmHALHandler {
+     virtual void GetKeyInfo(int* numRows, int* numCols, uint16* keyMap, Bool* rows) = 0;
+ 
+     virtual uint32 CyclesToNextInterrupt(uint64 systemCycles);
++    virtual void ScaleCycles(uint32 factor);
+     void Cycle(uint64 systemCycles, Bool sleeping);
+ 
+     virtual void SetUARTSync(bool sync);
+diff --git a/src/cloudpilot/emulator/hardware/EmRegsVZ.cpp b/src/cloudpilot/emulator/hardware/EmRegsVZ.cpp
+index a1a60f7..c5416e1 100644
+--- a/src/cloudpilot/emulator/hardware/EmRegsVZ.cpp
++++ b/src/cloudpilot/emulator/hardware/EmRegsVZ.cpp
+@@ -24,6 +24,8 @@
+ #include "EmMemory.h"  // gMemAccessFlags, EmMem_memcpy
+ #include "EmRegsVZPrv.h"
+ #include "EmSPISlave.h"  // DoExchange
++#include "EmBankROM.h"
++#include "EmBusTiming.h"
+ #include "EmSession.h"   // gSession
+ #include "EmSystemState.h"
+ #include "Frame.h"
+@@ -598,6 +600,7 @@ void EmRegsVZ::Reset(Bool hardwareReset) {
+     }
+ 
+     UpdateTimers();
++    UpdateBusTiming();
+ }
+ 
+ void EmRegsVZ::Save(Savestate<ChunkType>& savestate) { DoSave(savestate); }
+@@ -644,6 +647,7 @@ void EmRegsVZ::Load(SavestateLoader<ChunkType>& loader) {
+     systemCycles = gSession->GetSystemCycles();
+     UpdateTimers();
+     powerOffCached = GetAsleep();
++    UpdateBusTiming();
+ }
+ 
+ template <typename T>
+@@ -713,6 +717,9 @@ void EmRegsVZ::Dispose(void) {
+     EmHAL::onDayRollover.RemoveHandler(onDayRolloverHandle);
+ 
+     EmHAL::RemoveCycleConsumer(cycleThunk, this);
++
++    Memory::SetWaitStates(EmBusWait{0, 0, 0, 0}, EmBusWait{0, 0, 0, 0});
++    EmBusTiming::Set(EmBusSteal{}, 0);
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -746,8 +753,8 @@ void EmRegsVZ::SetSubBankHandlers(void) {
+     INSTALL_HANDLER(StdRead, StdWrite, csControl3);
+ 
+     INSTALL_HANDLER(StdRead, csASelectWrite, csASelect);
+-    INSTALL_HANDLER(StdRead, StdWrite, csBSelect);
+-    INSTALL_HANDLER(StdRead, StdWrite, csCSelect);
++    INSTALL_HANDLER(StdRead, busTimingRegisterWrite, csBSelect);
++    INSTALL_HANDLER(StdRead, busTimingRegisterWrite, csCSelect);
+     INSTALL_HANDLER(StdRead, csDSelectWrite, csDSelect);
+ 
+     INSTALL_HANDLER(StdRead, StdWrite, emuCS);
+@@ -880,15 +887,15 @@ void EmRegsVZ::SetSubBankHandlers(void) {
+     INSTALL_HANDLER(StdRead, lcdRegisterWrite, lcdPanelControl);
+     INSTALL_HANDLER(StdRead, StdWrite, lcdPolarity);
+     INSTALL_HANDLER(StdRead, StdWrite, lcdACDRate);
+-    INSTALL_HANDLER(StdRead, StdWrite, lcdPixelClock);
+-    INSTALL_HANDLER(StdRead, StdWrite, lcdClockControl);
+-    INSTALL_HANDLER(StdRead, StdWrite, lcdRefreshRateAdj);
++    INSTALL_HANDLER(StdRead, busTimingRegisterWrite, lcdPixelClock);
++    INSTALL_HANDLER(StdRead, busTimingRegisterWrite, lcdClockControl);
++    INSTALL_HANDLER(StdRead, busTimingRegisterWrite, lcdRefreshRateAdj);
+     INSTALL_HANDLER(StdRead, lcdRegisterWrite, lcdPanningOffset);
+     INSTALL_HANDLER(StdRead, StdWrite, lcdFrameRate);
+     INSTALL_HANDLER(StdRead, lcdRegisterWrite, lcdGrayPalette);
+     INSTALL_HANDLER(StdRead, StdWrite, lcdContrastControlPWM);
+     INSTALL_HANDLER(StdRead, StdWrite, lcdRefreshModeControl);
+-    INSTALL_HANDLER(StdRead, StdWrite, lcdDMAControl);
++    INSTALL_HANDLER(StdRead, busTimingRegisterWrite, lcdDMAControl);
+ 
+     INSTALL_HANDLER(rtcHourMinSecRead, StdWrite, rtcHourMinSec);
+     INSTALL_HANDLER(StdRead, StdWrite, rtcAlarm);
+@@ -900,8 +907,8 @@ void EmRegsVZ::SetSubBankHandlers(void) {
+     INSTALL_HANDLER(StdRead, StdWrite, rtcDay);
+     INSTALL_HANDLER(StdRead, StdWrite, rtcDayAlarm);
+ 
+-    INSTALL_HANDLER(StdRead, StdWrite, dramConfig);
+-    INSTALL_HANDLER(StdRead, StdWrite, dramControl);
++    INSTALL_HANDLER(StdRead, busTimingRegisterWrite, dramConfig);
++    INSTALL_HANDLER(StdRead, busTimingRegisterWrite, dramControl);
+     INSTALL_HANDLER(StdRead, sdctlWrite, sdramControl);
+     INSTALL_HANDLER(StdRead, StdWrite, sdramPwDn);
+ 
+@@ -1689,6 +1696,75 @@ void EmRegsVZ::sdctlWrite(emuptr address, int size, uint32 value) {
+     EmRegsVZ::StdWrite(address, size, value);
+ 
+     ApplySdctl();
++
++    UpdateBusTiming();
++}
++
++// ---------------------------------------------------------------------------
++//		EmRegsVZ::busTimingRegisterWrite
++// ---------------------------------------------------------------------------
++
++void EmRegsVZ::busTimingRegisterWrite(emuptr address, int size, uint32 value) {
++    EmRegsVZ::StdWrite(address, size, value);
++    UpdateBusTiming();
++}
++
++// ---------------------------------------------------------------------------
++//		EmRegsVZ::UpdateBusTiming
++// ---------------------------------------------------------------------------
++// Wait states for CPU bus cycles from the chip selects (MC68VZ328 manual 6.3: WS3-1 in the
++// chip-select register count two each, WS0 in CSCTRL1 one, 111 is external DTACK and counts as
++// none), RAM from the DRAM controller (SDRAM by page, EDO or fast page DRAM with no wait states
++// but MSW's one), then LCD DMA and refresh (EmBusTiming.h). On an 8-bit bus a word takes two
++// bus cycles.
++
++void EmRegsVZ::UpdateBusTiming(void) {
++    const uint16 csControl1 = READ_REGISTER(csControl1);
++    auto chipSelect = [csControl1](uint16 select, int index) {
++        const uint8 ws3 = (select >> 4) & 7;
++        const uint8 wait = ws3 == 7 ? 0 : 2 * ws3 + ((csControl1 >> (8 + index)) & 1);
++        const bool wide = select & 0x0080;
++        return EmBusWait{wait, uint8(wide ? wait : 4 + 2 * wait), 0, 0};
++    };
++
++    const EmBusWait rom = chipSelect(READ_REGISTER(csASelect), 0);
++    const uint16 csDSelect = READ_REGISTER(csDSelect);
++    const uint16 dramControl = READ_REGISTER(dramControl);
++    const uint16 sdramControl = READ_REGISTER(sdramControl);
++    const bool dram = csDSelect & 0x0200;
++    const bool sdram = dram && (sdramControl & 0x8000);
++    EmBusWait ram;
++    if (sdram) {
++        ram = EmBusWait{0, 0, 1, 1};
++        EmSdram::Set(EmVzSdramTiming(sdramControl, dramControl));
++    } else if (dram) {
++        const uint8 wait = (dramControl >> 5) & 1;
++        ram = EmBusWait{wait, wait, 1, 0};
++    } else {
++        ram = chipSelect(csDSelect, 3);
++    }
++
++    Memory::SetWaitStates(rom, ram);
++
++    // The screen is in RAM (the DRAM chip select) when it sits below the ROM.
++    const emuptr screen = READ_REGISTER(lcdStartAddr);
++    const EmVzBusRegisters bus{READ_REGISTER(pllControl),
++                               READ_REGISTER(lcdScreenWidth),
++                               READ_REGISTER(lcdScreenHeight),
++                               READ_REGISTER(lcdPanelControl),
++                               READ_REGISTER(lcdPixelClock),
++                               READ_REGISTER(lcdClockControl),
++                               READ_REGISTER(lcdRefreshRateAdj),
++                               READ_REGISTER(lcdPanningOffset),
++                               READ_REGISTER(lcdDMAControl),
++                               dram && screen < EmBankROM::GetMemoryStart(),
++                               READ_REGISTER(dramConfig),
++                               dramControl,
++                               sdramControl,
++                               dram,
++                               sdram,
++                               uint32(GetSystemClockFrequency())};
++    EmBusTiming::Set(EmVzBusSteal(bus), gSession ? gSession->GetSystemCycles() : 0);
+ }
+ 
+ void EmRegsVZ::ApplySdctl() {
+@@ -1728,6 +1804,8 @@ void EmRegsVZ::csControl1Write(emuptr address, int size, uint32 value) {
+ 
+         gSession->ScheduleResetBanks();
+     }
++
++    UpdateBusTiming();
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -1750,6 +1828,8 @@ void EmRegsVZ::csASelectWrite(emuptr address, int size, uint32 value) {
+ 
+         gSession->ScheduleResetBanks();
+     }
++
++    UpdateBusTiming();
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -1776,6 +1856,8 @@ void EmRegsVZ::csDSelectWrite(emuptr address, int size, uint32 value) {
+ 
+         gSession->ScheduleResetBanks();
+     }
++
++    UpdateBusTiming();
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -2129,6 +2211,8 @@ void EmRegsVZ::lcdRegisterWrite(emuptr address, int size, uint32 value) {
+     EmRegsVZ::StdWrite(address, size, value);
+ 
+     MarkScreenDirty();
++
++    UpdateBusTiming();
+ }
+ 
+ void EmRegsVZ::pllRegisterWrite(emuptr address, int size, uint32 value) {
+@@ -2140,6 +2224,8 @@ void EmRegsVZ::pllRegisterWrite(emuptr address, int size, uint32 value) {
+ 
+     UpdateTimers();
+     powerOffCached = GetAsleep();
++
++    UpdateBusTiming();
+ }
+ 
+ void EmRegsVZ::tmrRegisterWrite(emuptr address, int size, uint32 value) {
+@@ -3017,6 +3103,15 @@ void EmRegsVZ::Spi1DeassertSlaveSelect() {}
+ 
+ uint32 EmRegsVZ::GetBootKeyHoldTime() { return 18; }
+ 
++void EmRegsVZ::ScaleCycles(uint32 factor) {
++    tmr1LastProcessedSystemCycles *= factor;
++    tmr2LastProcessedSystemCycles *= factor;
++    systemCycles = gSession->GetSystemCycles();
++    UpdateTimers();
++    UpdateBusTiming();
++    EmHALHandler::ScaleCycles(factor);
++}
++
+ uint32 EmRegsVZ::CyclesToNextInterrupt(uint64 systemCycles) {
+     this->systemCycles = systemCycles;
+ 
+diff --git a/src/cloudpilot/emulator/hardware/EmRegsVZ.h b/src/cloudpilot/emulator/hardware/EmRegsVZ.h
+index f9abf8a..8bb0cf4 100644
+--- a/src/cloudpilot/emulator/hardware/EmRegsVZ.h
++++ b/src/cloudpilot/emulator/hardware/EmRegsVZ.h
+@@ -72,6 +72,7 @@ class EmRegsVZ : public EmRegs, public EmHALHandler {
+     virtual void GetKeyInfo(int* numRows, int* numCols, uint16* keyMap, Bool* rows) = 0;
+ 
+     virtual uint32 CyclesToNextInterrupt(uint64 systemCycles);
++    virtual void ScaleCycles(uint32 factor);
+     inline void Cycle(uint64 systemCycles, Bool sleeping);
+ 
+     virtual void SetUARTSync(bool sync);
+@@ -120,6 +121,8 @@ class EmRegsVZ : public EmRegs, public EmHALHandler {
+     uint32 rtcHourMinSecRead(emuptr address, int size);
+ 
+     void sdctlWrite(emuptr address, int size, uint32 value);
++    void busTimingRegisterWrite(emuptr address, int size, uint32 value);
++    void UpdateBusTiming(void);
+     void csControl1Write(emuptr address, int size, uint32 value);
+     void csASelectWrite(emuptr address, int size, uint32 value);
+     void csDSelectWrite(emuptr address, int size, uint32 value);
+diff --git a/src/cloudpilot/emulator/uae/cputiming.cpp b/src/cloudpilot/emulator/uae/cputiming.cpp
+index f3e2da5..a247dc6 100644
+--- a/src/cloudpilot/emulator/uae/cputiming.cpp
++++ b/src/cloudpilot/emulator/uae/cputiming.cpp
+@@ -12,6 +12,7 @@ extern "C" {
+ uae_u16 gCpuTiming[65536];
+ uae_u32 gUaeAccessWait;
+ uae_u32 gUaeTimingExtra;
++uae_u32 gUaeBusCount;
+ }
+ 
+ namespace {
+@@ -214,6 +215,7 @@ namespace {
+             case i_NEGX:
+             case i_NOT:
+                 t.clocks = sm == Dreg ? (l ? 6 : 4) : (l ? 12 : 8) + EaTime(sm, size);
++                if (in.mnemo == i_CLR && sm != Dreg) t.kind = kTimingReadFirst;
+                 break;
+ 
+             case i_NBCD:
+@@ -234,6 +236,7 @@ namespace {
+                     t.kind = kTimingSccReg;
+                 } else {
+                     t.clocks = 8 + EaTime(sm, size);
++                    t.kind = kTimingReadFirst;
+                 }
+                 break;
+ 
+@@ -364,6 +367,7 @@ namespace {
+ 
+             case i_MVSR2:
+                 t.clocks = sm == Dreg ? 6 : 8 + EaTime(sm, sz_word);
++                if (sm != Dreg) t.kind = kTimingReadFirst;
+                 break;
+ 
+             case i_MV2SR:
+diff --git a/src/cloudpilot/emulator/uae/cputiming.h b/src/cloudpilot/emulator/uae/cputiming.h
+index 608ad94..c90c6db 100644
+--- a/src/cloudpilot/emulator/uae/cputiming.h
++++ b/src/cloudpilot/emulator/uae/cputiming.h
+@@ -6,7 +6,8 @@
+  * gCpuTiming holds one entry per opcode: bits 0-7 are the clocks with no wait states, halved
+  * (all 68000 counts are even), bits 8-11 the bus reads from program space and bits 12-15 a
+  * kTiming kind for the parts that depend on data. Operand reads and writes go through the
+- * counting get_* and put_* macros, which add each bank's wait states to gUaeAccessWait.
++ * counting get_* and put_* macros, which add each bank's wait states to gUaeAccessWait and its
++ * bus tag to gUaeBusCount (bus cycles in the low half, DRAM cycles in the high half).
+  * Handlers add data-dependent clocks (multiply, divide) to gUaeTimingExtra. Both are cleared
+  * before each instruction and only touched on the emulation thread. */
+ 
+@@ -26,12 +27,18 @@ enum {
+     kTimingMovemWord, /* 4 clocks per register in the mask */
+     kTimingMovemLong, /* 8 clocks per register */
+     kTimingBitReg,    /* 2 more for a bit number from Dx of 16 or more */
+-    kTimingBitImm     /* 2 more for an immediate bit number of 16 or more */
++    kTimingBitImm,    /* 2 more for an immediate bit number of 16 or more */
++    kTimingReadFirst  /* CLR, Scc and MOVE from SR to memory: the 68000 reads the operand
++                         before writing it, so the write's bus cycles count twice */
+ };
+ 
+ extern uae_u16 gCpuTiming[65536];
+ extern uae_u32 gUaeAccessWait;
+ extern uae_u32 gUaeTimingExtra;
++extern uae_u32 gUaeBusCount;
++
++/* Wait clocks of a CPU access to SDRAM (EmBusTiming.h). */
++uae_u32 EmSdramAccess(uae_u32 address, int write, int words);
+ 
+ /* Builds gCpuTiming from table68k; call after read_table68k and do_merges. */
+ void BuildCpuTiming(void);
+diff --git a/src/cloudpilot/emulator/uae/machdep_maccess.h b/src/cloudpilot/emulator/uae/machdep_maccess.h
+index 69f609a..73df2b1 100644
+--- a/src/cloudpilot/emulator/uae/machdep_maccess.h
++++ b/src/cloudpilot/emulator/uae/machdep_maccess.h
+@@ -17,16 +17,26 @@
+ #define do_put_mem_word		EmMemDoPut16
+ #define do_put_mem_byte		EmMemDoPut8
+ 
+-/* CPU operand accesses add their bank's wait states to gUaeAccessWait (cputiming.h); a long is
+- * two bus cycles. Instruction fetches (get_i* in newcpu.h) are counted from the timing table. */
+-
+-STATIC_INLINE uint32 uae_get_long(emuptr a) { gUaeAccessWait += 2 * EmMemGetBank(a).waitWord; return EmMemGet32(a); }
+-STATIC_INLINE uint16 uae_get_word(emuptr a) { gUaeAccessWait += EmMemGetBank(a).waitWord; return EmMemGet16(a); }
+-STATIC_INLINE uint8 uae_get_byte(emuptr a) { gUaeAccessWait += EmMemGetBank(a).waitByte; return EmMemGet8(a); }
+-
+-STATIC_INLINE void uae_put_long(emuptr a, uint32 v) { gUaeAccessWait += 2 * EmMemGetBank(a).waitWord; EmMemPut32(a, v); }
+-STATIC_INLINE void uae_put_word(emuptr a, uint16 v) { gUaeAccessWait += EmMemGetBank(a).waitWord; EmMemPut16(a, v); }
+-STATIC_INLINE void uae_put_byte(emuptr a, uint8 v) { gUaeAccessWait += EmMemGetBank(a).waitByte; EmMemPut8(a, v); }
++/* CPU operand accesses add their bank's wait states to gUaeAccessWait and its bus tag to
++ * gUaeBusCount (cputiming.h); a long is two bus cycles. SDRAM banks look up the page instead.
++ * Instruction fetches (get_i* in newcpu.h) are counted from the timing table. */
++
++STATIC_INLINE void uae_count_access(emuptr a, int words, int write, int byte) {
++    const EmAddressBank* bank = &EmMemGetBank(a);
++    gUaeBusCount += words * bank->busTag;
++    if (__builtin_expect(bank->sdram, 0))
++        gUaeAccessWait += EmSdramAccess(a, write, words);
++    else
++        gUaeAccessWait += byte ? bank->waitByte : words * bank->waitWord;
++}
++
++STATIC_INLINE uint32 uae_get_long(emuptr a) { uae_count_access(a, 2, 0, 0); return EmMemGet32(a); }
++STATIC_INLINE uint16 uae_get_word(emuptr a) { uae_count_access(a, 1, 0, 0); return EmMemGet16(a); }
++STATIC_INLINE uint8 uae_get_byte(emuptr a) { uae_count_access(a, 1, 0, 1); return EmMemGet8(a); }
++
++STATIC_INLINE void uae_put_long(emuptr a, uint32 v) { uae_count_access(a, 2, 1, 0); EmMemPut32(a, v); }
++STATIC_INLINE void uae_put_word(emuptr a, uint16 v) { uae_count_access(a, 1, 1, 0); EmMemPut16(a, v); }
++STATIC_INLINE void uae_put_byte(emuptr a, uint8 v) { uae_count_access(a, 1, 1, 1); EmMemPut8(a, v); }
+ 
+ #define get_long			uae_get_long
+ #define get_word			uae_get_word
+diff --git a/src/cloudpilot/frond/main.cpp b/src/cloudpilot/frond/main.cpp
+index 4e9cc1a..7f0f4e8 100644
+--- a/src/cloudpilot/frond/main.cpp
++++ b/src/cloudpilot/frond/main.cpp
+@@ -29,6 +29,7 @@
+ #include "Chars.h"
+ #include "DbInstaller.h"
+ #include "EmBankROM.h"
++#include "EmBusTiming.h"
+ #include "Debugger.h"
+ #include "EmCommon.h"
+ #include "EmDevice.h"
+@@ -155,13 +156,16 @@ bool startCore(const DeviceProfile5& profile, const uint8_t* rom, size_t size) {
+     return gSession->Initialize(new EmDevice(cloudpilotDevice(profile)), copy, size);
+ }
+ 
+-// A session's metadata lines; contrast is optional.
++// A session's metadata lines; contrast is optional. "clock 1" marks a counter in whole 68000
++// clocks; sessions without it counted in units of two clocks and are converted on load.
+ struct SessionMetadata {
+     int contrast{Lcd68k::kDefaultContrast};
++    bool wholeClocks{false};
+ };
+ 
+ string metadataText(const SessionMetadata& metadata) {
+-    return string(kSessionFormat) + "\n" + kCloudpilotPin + "\ncontrast " + to_string(metadata.contrast) + "\n";
++    return string(kSessionFormat) + "\n" + kCloudpilotPin + "\ncontrast " + to_string(metadata.contrast) +
++           "\nclock 1\n";
+ }
+ 
+ string parseMetadata(const void* data, size_t size, SessionMetadata& metadata) {
+@@ -176,6 +180,8 @@ string parseMetadata(const void* data, size_t size, SessionMetadata& metadata) {
+             const long value = strtol(line.c_str() + 9, &end, 10);
+             if (*end || value < 0 || value > 100) return "invalid session contrast";
+             metadata.contrast = int(value);
++        } else if (line == "clock 1") {
++            metadata.wholeClocks = true;
+         } else if (!line.empty()) {
+             return "unknown session metadata";
+         }
+@@ -243,6 +249,7 @@ string applySession(const CheckedSession& session) {
+     vector<uint8_t> savestate(static_cast<const uint8_t*>(session.file.GetSavestate()),
+                               static_cast<const uint8_t*>(session.file.GetSavestate()) + session.file.GetSavestateSize());
+     if (!gSession->Load(savestate.size(), savestate.data())) return "session machine state is damaged";
++    if (!session.metadata.wholeClocks) gSession->ScaleCycles(2);
+     return "";
+ }
+ 
+@@ -610,6 +617,20 @@ class Runner {
+             const EmAddressBank& ram = EmMemGetBank(0);
+             cout << "bus wait: rom " << int(rom.waitByte) << "/" << int(rom.waitWord) << ", ram "
+                  << int(ram.waitByte) << "/" << int(ram.waitWord) << endl;
++        } else if (command == "bus-timing") {
++            // LCD DMA and DRAM refresh as the guest programmed them, in system clocks.
++            const EmBusSteal& steal = EmBusTiming::Get();
++            cout << "bus timing: lcd line " << steal.lcdLineClocks << " dma " << steal.lcdDmaClocks
++                 << ", refresh period " << steal.refreshPeriod << " hold " << steal.refreshClocks << endl;
++            // The DragonBall registers it comes from (same addresses on the EZ and VZ).
++            char regs[160];
++            snprintf(regs, sizeof(regs),
++                     "bus registers: pllcr %04x csd %04x drammc %04x dramc %04x lpicf %02x lpxcd %02x lckcon %02x "
++                     "lrra %04x lxmax %u lymax %u",
++                     EmMemGet16(0xfffff200), EmMemGet16(0xfffff116), EmMemGet16(0xfffffc00), EmMemGet16(0xfffffc02),
++                     EmMemGet8(0xfffffa20), EmMemGet8(0xfffffa25), EmMemGet8(0xfffffa27), EmMemGet16(0xfffffa28),
++                     EmMemGet16(0xfffffa08), EmMemGet16(0xfffffa0a));
++            cout << regs << endl;
+         } else if (command == "speed") {
+             string value;
+             words >> value;

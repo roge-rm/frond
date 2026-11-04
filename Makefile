@@ -493,6 +493,7 @@ build/test-cpu68k-timing: tests/cpu68k-timing.cpp build/source/.prepared
 	$(CXX) -std=c++17 -O1 -g -I$(CPU68K_UAE) -Ibuild/source/src/cloudpilot/emulator/hardware \
 		-Ibuild/source/src/cloudpilot/emulator -Ibuild/source/src/common -DEMULATION_LEVEL=EMULATION_UNIX \
 		tests/cpu68k-timing.cpp $(CPU68K_UAE)/readcpu.cpp $(CPU68K_UAE)/cputiming.cpp \
+		build/source/src/cloudpilot/emulator/hardware/EmBusTiming.cpp \
 		-x c $(CPU68K_UAE)/cpudefs.c -x none -o $@
 
 .PHONY: device-profiles test-device-profiles

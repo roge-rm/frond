@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Runs the 68k timing probe on a IIIx and checks each loop against the 68000 manual's clocks.
 
-Build the probe first: python3 tools/build-palm-probe.py --probe timing68k --sdk SDK-3.5
+Build the probe first: python3 tools/build-palm-probe.py --probe timing68k --sdk PALM-OS-SDK/sdk-3.5
 Run: python3 tests/timing68k.py --rom PRIVATE.rom --output build/timing68k-run [--speed original]
 The probe's RAM witness is read from a saved session. Each loop's expected clocks per pass are
 the manual's count plus the wait states the guest set (frond-68k's bus-wait) on each bus cycle,
-and the measured clocks per pass must be within --tolerance of it. The 100 Hz tick interrupt runs
-during every loop, so measured passes are a little slower than the bare count."""
+stretched by the bus time LCD DMA and DRAM refresh take (bus-timing): the loop's share of time on
+the bus times the DMA's share of each LCD line, and its share on DRAM times refresh's share. The
+measured clocks per pass must be within --tolerance of it, give or take one tick. The 100 Hz tick interrupt runs during
+every loop, so measured passes are a little slower than the bare count."""
 import argparse
 import re
 from pathlib import Path
@@ -37,6 +39,8 @@ LOOPS = [
     ('movem', 8, 24, 0, 0),
     ('rom', 7, 0, 8, 0),
     ('reg', 7, 0, 0, 4),
+    ('clr', 7, 8, 0, 0),
+    ('st', 7, 8, 0, 0),
 ]
 
 
@@ -66,7 +70,7 @@ def witness(path):
                 continue
             head = convert(payload[at:at + 32])
             version, done, per_second, loops = struct.unpack_from('>4I', head, 16)
-            if version != 2:
+            if version not in (2, 3):
                 continue
             body = convert(payload[at + 32:at + 32 + 12 * loops])
             values = struct.unpack(f'>{3 * loops}I', body)
@@ -107,7 +111,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--rom', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--probe', type=Path, default=Path('build/timing68k/FrondTiming68k.prc'))
+    parser.add_argument('--probe', type=Path, default=Path('build/timing68k-probe/FrondTiming68k.prc'))
     parser.add_argument('--speed', default='original', choices=['original', 'uncapped'])
     parser.add_argument('--tolerance', type=float, default=3.0, help='percent')
     parser.add_argument('--frondbench', type=Path, help='run this FrondBench.prc instead of the probe')
@@ -125,6 +129,13 @@ def main():
         if bus.startswith('bus wait:'):
             rom_wait = int(bus.split('rom ')[1].split('/')[1].split(',')[0])
             ram_wait = int(bus.split('ram ')[1].split('/')[1])
+        timing = core.send('bus-timing', ('bus timing:', 'unknown')).strip()
+        print(timing)
+        lcd = refresh = 0.0
+        if timing.startswith('bus timing:'):
+            numbers = [int(x) for x in re.findall(r'\d+', timing)]
+            lcd = numbers[1] / numbers[0] if numbers[0] else 0.0
+            refresh = numbers[3] / numbers[2] if numbers[2] else 0.0
         if args.frondbench:
             print(run_frondbench(core, args))
             core.frame(args.output / 'frondbench.png')
@@ -149,14 +160,21 @@ def main():
         raise SystemExit('the probe did not finish')
     _, per_second, rows = result
     failures = 0
-    print(f'{"loop":8} {"count":>7} {"ticks":>5} {"manual":>7} {"+wait":>7} {"measured":>9} {"diff":>7}')
+    print(f'{"loop":8} {"count":>7} {"ticks":>5} {"manual":>7} {"+wait":>7} {"+dma":>7} {"measured":>9} {"diff":>7}')
     for (name, program, ram, rom, _), (count, ticks, clocks) in zip(LOOPS, rows):
-        expected = clocks + ram_wait * (program + ram) + rom_wait * rom
+        waited = clocks + ram_wait * (program + ram) + rom_wait * rom
+        # Register accesses stay off the external bus, so only RAM and ROM cycles share it.
+        bus = 4 * (program + ram + rom) + ram_wait * (program + ram) + rom_wait * rom
+        dram = (4 + ram_wait) * (program + ram)
+        expected = waited / (1 - lcd * bus / waited - refresh * dram / waited)
         measured = ticks / per_second * CLOCK / count
         diff = 100 * (measured / expected - 1)
-        ok = abs(diff) <= args.tolerance
+        # The tick count can be one off either way, so the check allows one tick.
+        tick = 100 / ticks
+        ok = abs(diff) <= args.tolerance + tick
         failures += not ok
-        print(f'{name:8} {count:7} {ticks:5} {clocks:7} {expected:7} {measured:9.1f} {diff:+6.1f}%{"" if ok else "  FAIL"}')
+        print(f'{name:8} {count:7} {ticks:5} {clocks:7} {waited:7} {expected:7.1f} {measured:9.1f} '
+              f'{diff:+6.1f}%{"" if ok else "  FAIL"}')
     if failures and args.speed == 'original':
         raise SystemExit(f'{failures} loops off by more than {args.tolerance}%')
 
