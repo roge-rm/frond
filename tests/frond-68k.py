@@ -8,6 +8,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE = ROOT / 'out/frond-68k'
@@ -71,6 +72,25 @@ def main():
             result = run(path, '--check-rom')
             if result.returncode != 1:
                 sys.exit(f'noise {seed}: expected a refusal, got {result.returncode}: {result.stderr.strip()}')
+        # Sessions refused before a machine starts: damaged, for another device, or with storage
+        # a IIIx doesn't have. The ROM inside is a hollow one, which is never reached.
+        def session(name='palm-iiix', nand=b'', sd=b'', metadata=b'frond-68k 1\ncloudpilot 064d5d5\n', cut=0):
+            rom = header(0x128000)
+            body = struct.pack('<II', 0x19800819, 6) + name.encode().ljust(32, b'\0')
+            toc = struct.pack('<8I', 1, 4 << 20, len(metadata), len(rom), len(nand), 1, 1, len(sd))
+            data = body + toc + zlib.compress(metadata + rom + nand + b'\0\0' + sd)
+            return data[:len(data) - cut]
+        sessions = {
+            'damaged': (session(cut=3), 'invalid session image'),
+            'tx': (session(name='palm-tx'), 'session is not for a 68k device'),
+            'nand': (session(nand=bytes(16)), "storage a Palm IIIx doesn't have"),
+        }
+        for name, (data, message) in sessions.items():
+            path = Path(work) / f'{name}.session'
+            path.write_bytes(data)
+            result = subprocess.run([str(CORE), str(path), '--run-for', '1'], capture_output=True, text=True, timeout=60)
+            if result.returncode != 1 or message not in result.stderr:
+                sys.exit(f'{name} session: expected "{message}", got {result.returncode}: {result.stderr.strip()}')
         result = run(Path(work) / 'hollow.rom', '--device', 'palm-tx', '--check-rom')
         if result.returncode != 1:
             sys.exit('palm-tx: an ARM device was taken by frond-68k')

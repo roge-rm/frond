@@ -23,8 +23,14 @@ ROOT = Path(__file__).resolve().parents[1]
 ZIRE_NOR = Path(os.environ.get('FROND_DEVICE_IMAGES') or '/nonexistent/set-FROND_DEVICE_IMAGES') / 'Palm/Zire-72/Palm-Zire72-nor.bin'
 sys.path.insert(0, str(ROOT / 'tools'))
 from guest_process import run_guest
-from palm_boot import CORE, DEVICES, PROFILES, Core, launcher_check, setup_device, reset_recipe
+from palm_boot import CORE, CORE_68K, DEVICES_68K, PROFILES, ROM_DEVICES, Core, launcher_check, setup_device, reset_recipe
 from guest_faults import check_diagnostics, describe, parse_contract, observed_faults
+
+
+def core_for(device):
+    """The runner for a device; reads CORE at call time so the harness can swap it."""
+    return CORE_68K if device in DEVICES_68K else CORE
+
 
 
 def sha(path):
@@ -148,7 +154,8 @@ def suite(args):
         spec.loader.exec_module(legacy)
         return unittest.defaultTestLoader.loadTestsFromModule(legacy)
 
-    @unittest.skipUnless(args.nor and args.nor.is_file() and CORE.is_file(), 'private NOR or built core missing; pass --nor')
+    @unittest.skipUnless(args.nor and args.nor.is_file() and core_for(args.device).is_file(),
+                         'private NOR or built core missing; pass --nor')
     class DeviceRomTest(unittest.TestCase):
         @classmethod
         def setUpClass(cls):
@@ -187,7 +194,7 @@ def suite(args):
 
         def test_boot(self):
             try:
-                result = run_guest([str(CORE), *map(str, self.image), '--no-sound', '--run-for', '12'],
+                result = run_guest([str(core_for(args.device)), *map(str, self.image), '--no-sound', '--run-for', '12'],
                                    capture_output=True, text=True, timeout=args.boot_timeout,
                                    env={**os.environ, 'SDL_VIDEODRIVER': 'dummy', 'SDL_AUDIODRIVER': 'dummy'})
             except subprocess.TimeoutExpired as error:
@@ -255,7 +262,58 @@ def suite(args):
             self.assertEqual(after_hash, before_hash)
             self.check_phase(phase, root / 'guest.log')
 
-        @unittest.skipUnless(args.launcher and (ROOT / 'build/test-device-session').is_file(),
+        @unittest.skipUnless(args.launcher and args.device in DEVICES_68K, 'pass --launcher for a 68k device')
+        def test_running_session_refusal_68k(self):
+            # Damaged sessions loaded into a running frond-68k are refused and leave it running as it was.
+            root = self.root / 'refusal'
+            root.mkdir()
+            good = (self.root / 'launcher.session').read_bytes()
+            damaged = {'truncated': good[:-2], 'garbage': bytes(len(good)), 'empty': b''}
+            # A session for another device: the same file with the name field changed.
+            other = bytearray(good)
+            other[8:40] = b'palm-tx'.ljust(32, b'\0')
+            damaged['other-device'] = bytes(other)
+            core = Core(['--device', args.device, self.root / 'launcher.session'], root / 'guest.log')
+            try:
+                core.wait_frame(root / 'before.png', launcher_check(args.device), 60)
+                for name, data in damaged.items():
+                    path = root / f'{name}.session'
+                    path.write_bytes(data)
+                    line = core.send(f'load-session "{path}"', ('session refused', 'loaded session'))
+                    self.assertIn('machine unchanged', line, name)
+                core.wait_frame(root / 'after.png', launcher_check(args.device), 30)
+                core.key(root, 'hard1', hold_ms=300)
+                core.wait_frame(root / 'input.png', lambda rows: not launcher_check(args.device)(rows), 30)
+            finally:
+                self.assertEqual(core.close(), 0)
+            self.check_phase('refusal', root / 'guest.log')
+
+        @unittest.skipUnless(args.launcher and args.device in DEVICES_68K, 'pass --launcher for a 68k device')
+        def test_saved_contrast_68k(self):
+            # Contrast changes the LCD live and stays with the saved session.
+            root = self.root / 'contrast'
+            root.mkdir()
+
+            def panel(rows):
+                return max(row[x] for row in rows for x in range(0, len(row), 4))  # Red of the unlit panel.
+            core = Core(['--device', args.device, self.root / 'launcher.session'], root / 'guest.log')
+            try:
+                normal = panel(core.wait_frame(root / 'normal.png', launcher_check(args.device), 60))
+                core.send('display contrast=90', 'display:')
+                dark = panel(core.wait_frame(root / 'dark.png', lambda rows: rows and panel(rows) < normal - 20, 30))
+                core.send('window-snapshot "{}"'.format(root / 'window.png'), 'window snapshot')
+                core.send(f'save-session "{root / "dark.session"}"', 'wrote session')
+            finally:
+                self.assertEqual(core.close(), 0)
+            core = Core(['--device', args.device, root / 'dark.session'], root / 'reload.log')
+            try:
+                rows = core.wait_frame(root / 'reloaded.png', launcher_check(args.device), 60)
+                self.assertEqual(panel(rows), dark)
+            finally:
+                self.assertEqual(core.close(), 0)
+
+        @unittest.skipUnless(args.launcher and args.device not in DEVICES_68K and
+                             (ROOT / 'build/test-device-session').is_file(),
                              'pass --launcher and build device-session-probe for running-state rollback')
         def test_running_session_rollback(self):
             result = run_guest([str(ROOT / 'build/test-device-session'), str(self.root / 'launcher.session')],
@@ -276,7 +334,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--device', required=True, choices=[p['name'] for p in PROFILES if p['device_type'] >= 0])
     parser.add_argument('--synthetic-rejection', action='store_true', help='test TG50 malformed inputs without private firmware')
-    parser.add_argument('--nor', type=Path)
+    parser.add_argument('--nor', '--rom', dest='nor', type=Path, help='NOR, or the ROM of a 68k device')
     parser.add_argument('--nand', type=Path)
     parser.add_argument('--sha256', help='expected NOR SHA-256 from the private inventory')
     parser.add_argument('--launcher', action='store_true')
@@ -299,7 +357,7 @@ def main():
                 raise ValueError('--resets requires --launcher')
             reset_recipe(args.device)
         if args.expected_faults:
-            if args.synthetic_rejection or not args.nor or not args.nor.is_file() or not CORE.is_file():
+            if args.synthetic_rejection or not args.nor or not args.nor.is_file() or not core_for(args.device).is_file():
                 raise ValueError('expected-faults qualification requires the original NOR and built core')
             if not (ROOT / 'build/test-device-session').is_file():
                 raise ValueError('build device-session-probe before expected-faults qualification')
@@ -311,7 +369,7 @@ def main():
         if args.synthetic_rejection:
             selected = synthetic_suite(args)
         else:
-            if args.device not in DEVICES:
+            if args.device not in ROM_DEVICES:
                 raise ValueError('native board is not implemented for ' + args.device)
             selected = suite(args)
     except (OSError, ValueError) as error:
