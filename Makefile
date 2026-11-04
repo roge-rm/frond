@@ -484,9 +484,20 @@ test-tx-serial: prepare build/source/src/common/libcommon.a
 
 .PHONY: test-frond-68k
 test: test-frond-68k
-test-frond-68k: out/frond-68k build/test-cpu68k-timing
+test-frond-68k: out/frond-68k build/test-cpu68k-timing build/test-frond-68k-sound
 	./build/test-cpu68k-timing
+	./build/test-frond-68k-sound
 	python3 tests/frond-68k.py
+
+# Piezo, backlight, sleep, serial HotSync, databases, GDB and IrDA on the private IIIx ROM; skips
+# without it. Add --rom with FROND_68K_ROMS="--rom A --rom B" for other ROMs.
+.PHONY: test-frond-68k-peripherals
+test-frond-68k-peripherals: out/frond-68k build/test-frond-68k-sound
+	./build/test-frond-68k-sound
+	python3 tests/frond-68k-peripherals.py $(FROND_68K_ROMS)
+
+build/test-frond-68k-sound: tests/frond-68k-sound.cpp build/source/.prepared
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/cloudpilot/frond tests/frond-68k-sound.cpp -o $@
 
 CPU68K_UAE = build/source/src/cloudpilot/emulator/uae
 build/test-cpu68k-timing: tests/cpu68k-timing.cpp build/source/.prepared

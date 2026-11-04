@@ -1,0 +1,28 @@
+diff --git a/src/cloudpilot/emulator/hardware/EmCPU68K.cpp b/src/cloudpilot/emulator/hardware/EmCPU68K.cpp
+index 8e2c234..0e355ad 100644
+--- a/src/cloudpilot/emulator/hardware/EmCPU68K.cpp
++++ b/src/cloudpilot/emulator/hardware/EmCPU68K.cpp
+@@ -665,6 +665,8 @@ void EmCPU68K::CycleSlowly(Bool sleeping) { EmHAL::CycleSlowly(sleeping); }
+ //		� EmCPU68K::CheckAfterCycle
+ // ---------------------------------------------------------------------------
+ 
++uint64 EmCPU68K::CycleNow() const { return fSession->GetSystemCycles() + fCurrentCycles; }
++
+ void EmCPU68K::CheckAfterCycle(void) { regs.spcflags |= SPCFLAG_END_OF_CYCLE; }
+ 
+ // ---------------------------------------------------------------------------
+diff --git a/src/cloudpilot/emulator/hardware/EmCPU68K.h b/src/cloudpilot/emulator/hardware/EmCPU68K.h
+index 5b645b2..d6f820e 100644
+--- a/src/cloudpilot/emulator/hardware/EmCPU68K.h
++++ b/src/cloudpilot/emulator/hardware/EmCPU68K.h
+@@ -228,6 +228,10 @@ class EmCPU68K : public EmCPU {
+     virtual uint32 Execute(uint32 maxCycles);
+     virtual void CheckAfterCycle(void);
+ 
++    // The system cycle count including the instructions run so far in this Execute, for
++    // peripherals that timestamp guest writes (the piezo).
++    uint64 CycleNow() const;
++
+     // Low-level access to CPU state.
+ 
+     virtual emuptr GetPC(void);
