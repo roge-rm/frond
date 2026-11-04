@@ -117,6 +117,7 @@ Description: Native Palm TX and Tungsten E2 emulator
                         '--build', str(stage), str(temporary_output)], env=env, check=True)
         check_deb(temporary_output, package_version, architecture)
         output = root / 'out' / f'frond_{package_version}_{architecture}.deb'
+        output.parent.mkdir(exist_ok=True)
         temporary_output.replace(output)
     print(output)
     return output
