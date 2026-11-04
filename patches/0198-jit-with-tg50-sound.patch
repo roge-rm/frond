@@ -1,0 +1,102 @@
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -132,7 +132,6 @@
+ #ifndef __EMSCRIPTEN__
+     const uint32_t* cyclesInProgress;
+ #endif
+-    bool boundedAudio;
+ 
+     struct ArmBankedRegs bank_usr;  // usr regs when in another mode
+     struct ArmBankedRegs bank_svc;  // svc regs when in another mode
+@@ -4587,7 +4586,7 @@
+ #ifndef __EMSCRIPTEN__
+     // nativePc is only set by RunToNativePc around a whole run, so it holds for this batch.
+ #ifdef FROND_DYNARMIC
+-    if (memorySystemKind == ARM_MEMORY_SYSTEM_MMU && cpu->jit && !cpu->instructionObserver && !cpu->boundedAudio && !injected && !cpu->debugStub &&
++    if (memorySystemKind == ARM_MEMORY_SYSTEM_MMU && cpu->jit && !cpu->instructionObserver && !injected && !cpu->debugStub &&
+         !cpu->nativePc[0] && !cpu->slowPath)
+         return cpuPrvCycleJit(cpu, cycles);
+ #endif
+@@ -4939,5 +4938,3 @@
+ 
+ void cpuGetInstructionFetchState(ArmCpu* cpu,uint32_t* state) {icacheGetFetchState(cpu->ic,state);}
+ bool cpuRestoreInstructionFetchState(ArmCpu* cpu,const uint32_t* state) {return icacheSetFetchState(cpu->ic,state);}
+-
+-void cpuSetBoundedAudio(ArmCpu* cpu, bool enabled) { cpu->boundedAudio = enabled; }
+--- a/src/uarm/uarm/CPU.h
++++ b/src/uarm/uarm/CPU.h
+@@ -10,8 +10,6 @@
+ #include "pace_patch.h"
+ 
+ struct ArmCpu;
+-// A protected final FIFO requires the interpreter's bounded cycle overshoot.
+-void cpuSetBoundedAudio(struct ArmCpu*, bool);
+ // Before-instruction observer; it never replaces instructions or guest returns.
+ using InstructionObserver = void (*)(ArmCpu*, void*, uint32_t pc);
+ void cpuSetInstructionObserver(ArmCpu*, InstructionObserver, void*, uint32_t first, uint32_t last);
+--- a/src/uarm/uarm/audio_queue.cpp
++++ b/src/uarm/uarm/audio_queue.cpp
+@@ -136,6 +136,10 @@
+     AUDIO_QUEUE_LOCK;
+     audioQueue->protectedFifo = enabled;
+ }
++bool audioQueueProtected(AudioQueue* audioQueue) {
++    AUDIO_QUEUE_LOCK;
++    return audioQueue->protectedFifo;
++}
+ bool audioQueueCanProduce(AudioQueue* audioQueue, size_t frames) {
+     AUDIO_QUEUE_LOCK;
+     return frames <= audioQueue->capacity - audioQueue->pending;
+--- a/src/uarm/uarm/audio_queue.h
++++ b/src/uarm/uarm/audio_queue.h
+@@ -14,6 +14,7 @@
+ void audioQueueSetPreviewAllowed(struct AudioQueue*, bool);
+ bool audioQueuePreviewAllowed(struct AudioQueue*);
+ void audioQueueProtect(struct AudioQueue*, bool);
++bool audioQueueProtected(struct AudioQueue*);
+ bool audioQueueCanProduce(struct AudioQueue*, size_t frames);
+ void audioQueueRetain(struct AudioQueue*, bool);
+ bool audioQueueRetained(struct AudioQueue*);
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -593,7 +593,6 @@
+ }
+ 
+ void SocPXA::OnSetAudioQueue(struct AudioQueue *audioQueue) {
+-    if (GetDeviceType() == deviceTypeTG50) cpuSetBoundedAudio(cpu, audioQueue != nullptr);
+     if (fastAudio) fastAudio->SetQueue(audioQueue);
+     deviceSetAudioQueue(dev, ((GetDeviceType() == deviceTypeTG50 && !pcmEnabled) || audioOutputFenced || tg50AudioCheckpointDepth || fastAudioRouted || (fastAudio && fastAudio->OutputFenced())) ? nullptr : audioQueue);
+ }
+@@ -1086,7 +1085,8 @@
+ bool SocPXA::AdmitAudio(uint64_t& cycles, uint64_t frequency) {
+     audioAdmissionBlocked = false;
+     audioReservedQueue = nullptr;
+-    if (GetDeviceType() != deviceTypeTG50 || !audioQueue || !pcmEnabled || audioOutputFenced || tg50AudioCheckpointDepth) return true;
++    // Only a protected queue (one that never drops frames) needs a reservation.
++    if (!audioQueue || !audioQueueProtected(audioQueue) || !pcmEnabled || audioOutputFenced || tg50AudioCheckpointDepth) return true;
+     if (!frequency) { audioAdmissionBlocked = true; return false; }
+     // A batch can run past its cycles by the engine's bound. UINT32_MAX (an uncapped JIT,
+     // for measuring only) can't be reserved for, so it blocks.
+@@ -1113,6 +1113,11 @@
+     return !audioAdmissionBlocked;
+ }
+ 
++void SocPXA::AudioReservationTotals(uint64_t& checked, uint64_t& overruns) {
++    checked = audioReservationStats.checked;
++    overruns = audioReservationStats.overruns;
++}
++
+ void SocPXA::AudioAdvanced() {
+     if (!audioReservedQueue) return;
+     AudioQueue* queue = audioReservedQueue;
+--- a/src/uarm/uarm/soc_PXA.h
++++ b/src/uarm/uarm/soc_PXA.h
+@@ -64,6 +64,8 @@
+     bool SonyPreviewEnabled() const { return sonyPreview != nullptr; }
+     void SetAudioOutputFenced(bool) override;
+     bool AudioAdmissionBlocked() const override { return audioAdmissionBlocked; }
++    // Process-wide debug counter totals: batches checked, and those that committed more than reserved.
++    static void AudioReservationTotals(uint64_t& checked, uint64_t& overruns);
+     MemoryStickController* GetMemoryStick();
+     void RestoreFastAudioRoute();
+     FastAudio::EarlyDiagnostics AudioDiagnostics() const { return fastAudio?fastAudio->EarlyStatus():FastAudio::EarlyDiagnostics{}; }

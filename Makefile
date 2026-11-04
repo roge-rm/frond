@@ -757,6 +757,28 @@ test-tg50-state: out/frond
 		build/source/src/uarm/.build/cputil.o build/source/src/common/libcommon.a -lz -o build/test-tg50-touch
 	./build/test-tg50-touch
 
+# TG50 sound replay with a guest-time consumer and forced backpressure, in Exact and Fast.
+.PHONY: test-tg50-audio-replay
+test: test-tg50-audio-replay
+test-tg50-audio-replay: out/frond
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/tg50-audio-replay-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/tg50-audio-replay.cpp @build/tg50-audio-replay-core.rsp build/source/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-tg50-audio-replay
+	ulimit -c 0; ./build/test-tg50-audio-replay exact
+	ulimit -c 0; ./build/test-tg50-audio-replay fast
+
+# Needs a private TG50 session with the Voice Recorder ready to play: TG50_PREVIEW_SESSION=path.
+.PHONY: test-tg50-preview-replay
+test-tg50-preview-replay: out/frond
+	test -n "$(TG50_PREVIEW_SESSION)" || { echo "set TG50_PREVIEW_SESSION"; exit 1; }
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' ! -name timeutil.o > build/tg50-preview-replay-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/tg50-preview-replay.cpp @build/tg50-preview-replay-core.rsp build/source/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-tg50-preview-replay
+	ulimit -c 0; ./build/test-tg50-preview-replay exact "$(TG50_PREVIEW_SESSION)"
+	ulimit -c 0; ./build/test-tg50-preview-replay fast "$(TG50_PREVIEW_SESSION)"
+
 .PHONY: device-session-probe
 device-session-probe: out/frond
 	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/device-session-core.rsp
