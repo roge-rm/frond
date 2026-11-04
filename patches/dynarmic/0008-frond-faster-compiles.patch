@@ -1,0 +1,134 @@
+diff --git a/src/dynarmic/backend/x64/reg_alloc.h b/src/dynarmic/backend/x64/reg_alloc.h
+--- a/src/dynarmic/backend/x64/reg_alloc.h
++++ b/src/dynarmic/backend/x64/reg_alloc.h
+@@ -174,6 +174,10 @@
+     HostLoc FindFreeSpill() const;
+ 
+     std::vector<HostLocInfo> hostloc_info;
++    // Frond: locations changed since the last EndOfAllocScope (ReleaseAll is a no-op on the
++    // rest), and one past the highest location ever changed (the rest are still empty).
++    std::array<u64, 2> touched_locs{};
++    size_t used_locs = NonSpillHostLocCount;
+     HostLocInfo& LocInfo(HostLoc loc);
+     const HostLocInfo& LocInfo(HostLoc loc) const;
+ 
+diff --git a/src/dynarmic/backend/x64/reg_alloc.cpp b/src/dynarmic/backend/x64/reg_alloc.cpp
+--- a/src/dynarmic/backend/x64/reg_alloc.cpp
++++ b/src/dynarmic/backend/x64/reg_alloc.cpp
+@@ -6,7 +6,10 @@
+ #include "dynarmic/backend/x64/reg_alloc.h"
+ 
+ #include <algorithm>
++#include <array>
++#include <bit>
+ #include <numeric>
++#include <span>
+ #include <utility>
+ 
+ #include <fmt/ostream.h>
+@@ -504,8 +507,11 @@
+ }
+ 
+ void RegAlloc::EndOfAllocScope() {
+-    for (auto& iter : hostloc_info) {
+-        iter.ReleaseAll();
++    for (size_t w = 0; w < touched_locs.size(); w++) {
++        for (u64 bits = touched_locs[w]; bits; bits &= bits - 1) {
++            hostloc_info[w * 64 + std::countr_zero(bits)].ReleaseAll();
++        }
++        touched_locs[w] = 0;
+     }
+ }
+ 
+@@ -520,13 +526,16 @@
+ }
+ 
+ HostLoc RegAlloc::SelectARegister(const std::vector<HostLoc>& desired_locations) const {
+-    std::vector<HostLoc> candidates = desired_locations;
++    // Frond: the same partitions on a copy in a fixed buffer instead of a new vector.
++    std::array<HostLoc, 64> buffer;
++    ASSERT(desired_locations.size() <= buffer.size());
++    const auto candidates_end = std::copy(desired_locations.begin(), desired_locations.end(), buffer.begin());
+ 
+     // Find all locations that have not been allocated..
+-    const auto allocated_locs = std::partition(candidates.begin(), candidates.end(), [this](auto loc) {
++    const auto allocated_locs = std::partition(buffer.begin(), candidates_end, [this](auto loc) {
+         return !this->LocInfo(loc).IsLocked();
+     });
+-    candidates.erase(allocated_locs, candidates.end());
++    const std::span<HostLoc> candidates{buffer.begin(), allocated_locs};
+     ASSERT_MSG(!candidates.empty(), "All candidate registers have already been allocated");
+ 
+     // Selects the best location out of the available locations.
+@@ -540,7 +549,7 @@
+ }
+ 
+ std::optional<HostLoc> RegAlloc::ValueLocation(const IR::Inst* value) const {
+-    for (size_t i = 0; i < hostloc_info.size(); i++) {
++    for (size_t i = 0; i < used_locs; i++) {
+         if (hostloc_info[i].ContainsValue(value)) {
+             return static_cast<HostLoc>(i);
+         }
+@@ -667,7 +676,11 @@
+ 
+ HostLocInfo& RegAlloc::LocInfo(HostLoc loc) {
+     ASSERT(loc != HostLoc::RSP && loc != HostLoc::R15);
+-    return hostloc_info[static_cast<size_t>(loc)];
++    const size_t i = static_cast<size_t>(loc);
++    static_assert(NonSpillHostLocCount + SpillCount <= 128);
++    touched_locs[i / 64] |= u64(1) << (i % 64);
++    used_locs = std::max(used_locs, i + 1);
++    return hostloc_info[i];
+ }
+ 
+ const HostLocInfo& RegAlloc::LocInfo(HostLoc loc) const {
+diff --git a/src/dynarmic/backend/x64/emit_x64.cpp b/src/dynarmic/backend/x64/emit_x64.cpp
+--- a/src/dynarmic/backend/x64/emit_x64.cpp
++++ b/src/dynarmic/backend/x64/emit_x64.cpp
+@@ -5,6 +5,7 @@
+ 
+ #include "dynarmic/backend/x64/emit_x64.h"
+ 
++#include <cstdlib>
+ #include <iterator>
+ 
+ #include <mcl/assert.hpp>
+@@ -335,7 +336,11 @@
+ }
+ 
+ EmitX64::BlockDescriptor EmitX64::RegisterBlock(const IR::LocationDescriptor& descriptor, CodePtr entrypoint, size_t size) {
+-    PerfMapRegister(entrypoint, code.getCurr(), LocationDescriptorToFriendlyName(descriptor));
++    // Frond: only name the block when the perf map is written.
++    static const bool perf_map = std::getenv("PERF_BUILDID_DIR") != nullptr;
++    if (perf_map) {
++        PerfMapRegister(entrypoint, code.getCurr(), LocationDescriptorToFriendlyName(descriptor));
++    }
+     Patch(descriptor, entrypoint);
+ 
+     BlockDescriptor block_desc{entrypoint, size};
+diff --git a/src/dynarmic/backend/x64/a32_interface.cpp b/src/dynarmic/backend/x64/a32_interface.cpp
+--- a/src/dynarmic/backend/x64/a32_interface.cpp
++++ b/src/dynarmic/backend/x64/a32_interface.cpp
+@@ -226,7 +226,9 @@
+             Optimization::DeadCodeElimination(ir_block);
+         }
+         Optimization::IdentityRemovalPass(ir_block);
++#ifndef NDEBUG
+         Optimization::VerificationPass(ir_block);
++#endif
+         return emitter.Emit(ir_block);
+     }
+ 
+diff --git a/src/dynarmic/backend/arm64/a32_address_space.cpp b/src/dynarmic/backend/arm64/a32_address_space.cpp
+--- a/src/dynarmic/backend/arm64/a32_address_space.cpp
++++ b/src/dynarmic/backend/arm64/a32_address_space.cpp
+@@ -176,7 +176,9 @@
+         Optimization::DeadCodeElimination(ir_block);
+     }
+     Optimization::IdentityRemovalPass(ir_block);
++#ifndef NDEBUG
+     Optimization::VerificationPass(ir_block);
++#endif
+ 
+     return ir_block;
+ }
