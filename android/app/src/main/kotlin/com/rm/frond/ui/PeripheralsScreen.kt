@@ -278,13 +278,15 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                     )
                 }
                 }
-                item { Header("Device", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp)) }
+                item { Header("Display", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp)) }
+                item(key = "display") {
+                    Column {
+                        MachineDisplayRows(model.device, model.settings, true) { model.changeSettings(it) }
+                    }
+                }
+                item { Header("Audio", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp)) }
                 item(key = "sound") {
-                    ListItem(
-                        headlineContent = { Text("Sound", color = if (model.device.sound) Color.Unspecified else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)) },
-                        trailingContent = { Switch(checked = model.device.sound && model.sound, enabled = model.device.sound, onCheckedChange = { model.changeSound(it) }) },
-                        modifier = if (model.device.sound) Modifier.clickableRow { model.changeSound(!model.sound) } else Modifier,
-                    )
+                    MachineSoundRow(model.device, model.settings, true) { model.changeSettings(it) }
                 }
                 item(key = "microphone") {
                     val supported = model.device.microphone
@@ -300,21 +302,12 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                         modifier = if (supported) Modifier.clickableRow { enableMicrophone(!checked) } else Modifier,
                     )
                 }
-                item(key = "fastAudio") {
-                    val usable = model.fastAudioUsable == true
-                    ListItem(
-                        headlineContent = {
-                            Text("Low-latency audio", color = if (usable) Color.Unspecified else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f))
-                        },
-                        supportingContent = if (usable) {
-                            { Text("Applies at next start") }
-                        } else null,
-                        trailingContent = {
-                            Switch(checked = usable && model.fastAudio, enabled = usable, onCheckedChange = { model.changeFastAudio(it) })
-                        },
-                        modifier = if (usable) Modifier.clickableRow { model.changeFastAudio(!model.fastAudio) } else Modifier,
-                    )
+                item(key = "audioPreview") {
+                    MachineAudioPreviewRow(model.device, model.settings, model.audioPreviewUsable, true, APPLIES_AT_NEXT_START) {
+                        model.changeSettings(it)
+                    }
                 }
+                item { Header("Device", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp)) }
                 if (model.device.holdPresent) item(key = "hold") {
                     val on = model.hold
                     val usable = model.device.holdSupported && on != null && model.busy == null

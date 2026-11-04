@@ -89,6 +89,39 @@ class SessionsLayoutTest {
         assertEquals(File(dir, "session.frond"), sessionFile(dir))
     }
 
+    @Test fun sessionPathFollowsTheCore() {
+        val id = "0b6c9d7e-1111-2222-3333-444455556666"
+        val dir = tmp.newFolder(id)
+        // Nothing saved yet: the core's first save makes <id>.frond.
+        File(dir, "$id.json").writeText("{}")
+        assertNull(sessionFile(dir))
+        assertEquals(File(dir, "$id.frond"), sessionPathIn(dir))
+        // Save temps, journals and generation files aren't sessions.
+        File(dir, "$id.frond.tmp-abc123").writeText("t")
+        File(dir, "sd.frondsd.journal-4").writeText("j")
+        File(dir, "x.gen-2.frond").writeText("g")
+        File(dir, "ms.frondmsp.journal-3.frond").writeText("j")
+        assertNull(sessionFile(dir))
+        assertEquals(File(dir, "$id.frond"), sessionPathIn(dir))
+        // The core's first save in a new machine folder.
+        File(dir, "$id.frond").writeText("new")
+        assertEquals(File(dir, "$id.frond"), sessionFile(dir))
+        assertEquals(File(dir, "$id.frond"), sessionPathIn(dir))
+
+        val migrated = tmp.newFolder("migrated")
+        File(migrated, "session.frond").writeText("old")
+        assertEquals(File(migrated, "session.frond"), sessionPathIn(migrated))
+
+        val other = tmp.newFolder("other")
+        File(other, "Trip.frond").writeText("a")
+        assertEquals(File(other, "Trip.frond"), sessionPathIn(other))
+        File(other, "Two.frond").writeText("b")
+        assertNull(sessionFile(other))
+        assertEquals(File(other, "other.frond"), sessionPathIn(other))
+
+        assertNull(sessionFile(File(tmp.root, "missing")))
+    }
+
     @Test fun sessionFilePrefersFolderNameThenSessionFrond() {
         val dir = tmp.newFolder("Trip")
         File(dir, "other.frond").writeText("a")

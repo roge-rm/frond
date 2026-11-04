@@ -385,7 +385,14 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
             val folder = File(context.filesDir, "sd-exchange")
             val card = File(folder, "card.img")
             val marker = File(folder, PENDING)
-            return if (session != null && card.isFile && marker.isFile && marker.readText() == session) card else null
+            if (session == null || !card.isFile || !marker.isFile) return null
+            val owner = marker.readText()
+            return if (owner == session || sameMachine(context, owner, session)) card else null
+        }
+
+        private fun sameMachine(context: Context, a: String, b: String): Boolean {
+            val first = Sessions.forPath(context, a) ?: return false
+            return Sessions.forPath(context, b)?.id == first.id
         }
 
         // Inserts the edited card kept after a kill, once the session is running again.
@@ -409,7 +416,8 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
             val folder = File(context.filesDir, "sd-exchange")
             val marker = File(folder, PENDING)
             val owner = if (marker.isFile) marker.readText() else null
-            val keep = owner != null && File(owner).isFile
+            // A machine not saved yet has no session file but still owns its card.
+            val keep = owner != null && (File(owner).isFile || Sessions.forPath(context, owner) != null)
             val card = File(folder, "card.img")
             if (keep && card.isFile) try { FatImage.recover(card) } catch (_: IOException) { }
             val journal = FatImage.journalOf(card).name

@@ -10,6 +10,7 @@
 #include <SDL.h>
 #include "SdlEventHandler.h"
 #include "SdlRenderer.h"
+#include "DisplayChange.h"
 #include "WindowScale.h"
 #include <SDL_image.h>
 class Guest : public SoC {
@@ -1063,6 +1064,92 @@ static void tg50Visibility() {
     }
 }
 
+// The display command's argument, and a live renderer and input switching view and fit
+// the way the SDL and guest threads do: held controls release and hit areas follow.
+static void tg50LiveDisplay() {
+    DisplayChange change;std::string error;
+    assert(parseDisplayChange("fit=fill smooth=on keyboard=off jog=keyboard",true,change,error));
+    assert(change.fit==WindowFit::fill && change.smooth==true && change.keyboard==false && change.jog==JogPlacement::keyboard);
+    assert(parseDisplayChange("smooth=off",false,change,error) && !change.fit && change.smooth==false && !change.keyboard && !change.jog);
+    assert(parseDisplayChange("fit=none",false,change,error) && change.fit==WindowFit::none);
+    for(const char* bad : {"","fit=big","smooth=yes","keyboard","jog=left","size=fit","fit=fit extra"})
+        assert(!parseDisplayChange(bad,true,change,error) && !error.empty());
+    assert(!parseDisplayChange("keyboard=on",false,change,error) && !parseDisplayChange("jog=hidden",false,change,error));
+    DisplaySettings settings{WindowFit::fit,false,true,JogPlacement::screen};
+    DisplayChange first,second;
+    assert(parseDisplayChange("fit=whole keyboard=off",true,first,error) && parseDisplayChange("fit=fill jog=hidden",true,second,error));
+    first.Merge(second);settings.Apply(first);
+    assert(settings.fit==WindowFit::fill && !settings.smooth && !settings.keyboard && settings.jog==JogPlacement::hidden);
+
+    const auto& controls=deviceControls(deviceTypeTG50);
+    Guest guest(deviceTypeTG50);guest.setDisplay({320,320,0,224});auto display=guest.display();
+    guest.frame.assign(320*320,0xffffffff);
+    const float scale=1.25f;
+    struct Step {WindowFit fit;bool keyboard;JogPlacement jog;};
+    const Step steps[]={{WindowFit::fit,true,JogPlacement::screen},{WindowFit::fill,false,JogPlacement::hidden},
+                        {WindowFit::none,true,JogPlacement::keyboard},{WindowFit::whole,false,JogPlacement::screen},
+                        {WindowFit::none,false,JogPlacement::hidden}};
+    auto* win=SDL_CreateWindow("TG50 live display",0,0,521,761,SDL_WINDOW_RESIZABLE);assert(win);
+    SdlEventHandler input(&guest,scale,display,Rotation::portrait_0,deviceControlView(true,JogPlacement::screen));
+    input.SetDirectCapture(false);
+    KeyId held=keyInvalid;
+    for(const auto& step : steps) {
+        const DeviceControlView view=deviceControlView(step.keyboard,step.jog);
+        const bool fitted=step.fit!=WindowFit::none;
+        if(!fitted) SDL_SetWindowSize(win,int(scale*deviceControlsWidth(controls,320,view)),
+                                      int(scale*(320+deviceControlsHeight(controls,320,view))));
+        else SDL_SetWindowSize(win,521,761);
+        SdlRenderer renderer(win,&guest,scale,display,Rotation::portrait_0,true,step.fit,0,view);
+        assert(renderer.Valid());renderer.Draw(true);
+        const auto layout=renderer.Layout();
+        // The new view releases what the old one held.
+        input.SetView(view,scale);
+        if(held) guest.expect({{held,false}});
+        guest.expect({});assert(!input.PressedButtons());
+        input.SetLayout(layout,fitted);
+        auto pixel=[&](float x,float y) {
+            return std::pair<int,int>{int(std::floor(layout.x+(x+0.5f)*layout.scaleX)),int(std::floor(layout.y+(y+0.5f)*layout.scaleY))};
+        };
+        auto pointer=[&](Uint32 type,std::pair<int,int> at) {
+            SDL_Event e{};e.type=type;e.button.button=SDL_BUTTON_LEFT;e.button.x=at.first;e.button.y=at.second;
+            input.HandleEvent(e);
+        };
+        held=keyInvalid;
+        for(size_t i=0;i<controls.count;++i) {
+            const auto& b=controls.buttons[i];const auto r=deviceButtonRect(controls,b,320,320,view);
+            const auto at=pixel(r.x+r.w/2,r.y+r.h/2);
+            pointer(SDL_MOUSEBUTTONDOWN,at);
+            if(deviceControlShown(b,view)) {
+                guest.expect({{b.key,true}});
+                if(!held) {held=b.key;break;}
+                pointer(SDL_MOUSEBUTTONUP,at);guest.expect({{b.key,false}});
+            } else {guest.expect({});pointer(SDL_MOUSEBUTTONUP,at);guest.expect({});}
+            guest.noPen();
+        }
+        assert(held && input.PressedButtons()==deviceKeyBit(held));
+        // Hidden controls take no presses, and the LCD edges stay pen input.
+        for(size_t i=0;i<controls.count;++i) {
+            const auto& b=controls.buttons[i];if(deviceControlShown(b,view))continue;
+            const auto r=deviceButtonRect(controls,b,320,320,view);const auto at=pixel(r.x+r.w/2,r.y+r.h/2);
+            SDL_Event e{};e.type=SDL_FINGERDOWN;e.tfinger.type=e.type;e.tfinger.windowID=SDL_GetWindowID(win);
+            int ww=0,wh=0;SDL_GetWindowSize(win,&ww,&wh);
+            e.tfinger.touchId=2;e.tfinger.fingerId=i;e.tfinger.x=(at.first+0.5f)/ww;e.tfinger.y=(at.second+0.5f)/wh;
+            input.HandleEvent(e);guest.expect({});guest.noPen();
+        }
+        for(int gx : {0,319}) {
+            auto at=pixel(gx+deviceScreenLeft(controls,view),160);
+            if(!fitted) at={int(gx*scale+scale/2)+int(deviceScreenLeft(controls,view)*scale),int(160*scale+scale/2)};
+            SDL_Event e{};e.type=SDL_FINGERDOWN;e.tfinger.type=e.type;e.tfinger.windowID=SDL_GetWindowID(win);
+            int ww=0,wh=0;SDL_GetWindowSize(win,&ww,&wh);
+            e.tfinger.touchId=3;e.tfinger.fingerId=gx;e.tfinger.x=(at.first+0.5f)/ww;e.tfinger.y=(at.second+0.5f)/wh;
+            input.HandleEvent(e);guest.pen(true,gx,160);
+            e.type=e.tfinger.type=SDL_FINGERUP;input.HandleEvent(e);guest.pen(false);
+        }
+    }
+    input.SetView(deviceControlView(true,JogPlacement::screen),scale);guest.expect({{held,false}});
+    SDL_DestroyWindow(win);
+}
+
 static void tg50RuntimeTab() {
     for (auto fit : {WindowFit::none, WindowFit::fit})
     for(float scale : {1.f,1.25f,1.75f,2.f}) {
@@ -1241,6 +1328,9 @@ int main(int argc,char** argv) {
     if(argc==2 && std::strcmp(argv[1],"--tg50-visibility")==0) {
         tg50Visibility();SDL_Quit();puts("PASS: TG50 independent keyboard/jog visibility, app row, mouse/touch releases, rotations and fitted/fractional layouts");return 0;
     }
+    if(argc==2 && std::strcmp(argv[1],"--tg50-live-display")==0) {
+        tg50LiveDisplay();SDL_Quit();puts("PASS: TG50 display command parsing and live view/fit changes with releases and hit areas");return 0;
+    }
     if(argc==2 && std::strcmp(argv[1],"--tg50-layout")==0) {
         tg50RuntimeTab();SDL_Quit();puts("PASS: TG50 sidebar/LCD pixel boundaries and pen bounds at fractional scales and four rotations");return 0;
     }
@@ -1265,5 +1355,6 @@ int main(int argc,char** argv) {
     silkscreen(deviceTypeZire72);
     lcdScaling();
     tg50RuntimeTab();
+    tg50LiveDisplay();
     SDL_Quit();puts("PASS: TX, E2 and Zire 72 device buttons, holds/chords, focus/drag/rotation release, touch isolation, scales, pressed rendering and E2 and Zire 72 silkscreens; Zire 72, m515, IIIx and TG50 hit areas, pressed art and silkscreens; TG50 keyboard and side tab hiding");
 }

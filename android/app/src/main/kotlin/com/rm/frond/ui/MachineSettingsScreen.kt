@@ -18,10 +18,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.rm.frond.Device
-import com.rm.frond.Firmware
 import com.rm.frond.HomeModel
-import com.rm.frond.JogControls
-import com.rm.frond.ScreenSize
 import com.rm.frond.Sessions
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -37,9 +34,7 @@ fun MachineSettingsScreen(model: HomeModel) {
         value = null
         value = withContext(Dispatchers.IO) {
             val session = draft.sessionId?.let { Sessions.read(context, it)?.file }
-            if (draft.device.id == "sony-clie-tg50")
-                Firmware.sonyPreviewEligible(draft.device, session, Firmware.nor(context, draft.device))
-            else Firmware.fastAudioQualified(draft.device, session, Firmware.nor(context, draft.device))
+            audioPreviewQualified(context, draft.device, session)
         }
     }
     model.alert?.let { (title, text) ->
@@ -66,33 +61,10 @@ fun MachineSettingsScreen(model: HomeModel) {
                 model.chooseMachine(it)
             }
             Header("Display")
-            Choice("Size", draft.settings.size, ScreenSize.entries, { it.label }) {
-                model.changeMachineSettings(draft.settings.copy(size = it))
-            }
-            SwitchRow("Smooth pixels", draft.settings.smoothing) {
-                model.changeMachineSettings(draft.settings.copy(smoothing = it))
-            }
-            if (draft.device.id == "sony-clie-tg50") {
-                SwitchRow("Show keyboard", draft.settings.showKeyboard) {
-                    model.changeMachineSettings(draft.settings.copy(showKeyboard = it))
-                }
-                Choice("Jog controls", draft.settings.jogControls, JogControls.entries, { it.label }) {
-                    model.changeMachineSettings(draft.settings.copy(jogControls = it))
-                }
-            }
+            MachineDisplayRows(draft.device, draft.settings, false) { model.changeMachineSettings(it) }
             Header("Audio", Modifier.padding(top = 16.dp))
-            SwitchRow("Sound", draft.device.sound && draft.settings.sound, enabled = draft.device.sound) {
-                model.changeMachineSettings(draft.settings.copy(sound = it))
-            }
-            if (draft.device.id == "sony-clie-tg50") {
-                SwitchRow("Sony audio preview", qualified == true && draft.settings.sonyAudioPreview, enabled = qualified == true) {
-                    model.changeMachineSettings(draft.settings.copy(sonyAudioPreview = it))
-                }
-            } else {
-                SwitchRow("Low-latency audio", qualified == true && draft.settings.fastAudio, enabled = qualified == true) {
-                    model.changeMachineSettings(draft.settings.copy(fastAudio = it))
-                }
-            }
+            MachineSoundRow(draft.device, draft.settings, false) { model.changeMachineSettings(it) }
+            MachineAudioPreviewRow(draft.device, draft.settings, qualified, false) { model.changeMachineSettings(it) }
         }
     }
 }
