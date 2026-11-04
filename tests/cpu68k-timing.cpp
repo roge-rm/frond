@@ -1,8 +1,10 @@
 // Checks frond-68k's 68000 timing table against the Motorola MC68000 user's manual, section 8:
-// clocks with no wait states and bus reads from program space, for each opcode listed.
+// clocks with no wait states and bus reads from program space, for each opcode listed. Then the
+// bus time LCD DMA and DRAM refresh take, against the MC68EZ328 and MC68VZ328 manuals.
 
 #include <cstdio>
 
+#include "EmBusTiming.h"
 #include "cputiming.h"
 #include "readcpu.h"
 
@@ -57,13 +59,16 @@ namespace {
         {0x5248, "addq.w #1,a0", 8, 1, kTimingPlain},
         {0x5290, "addq.l #1,(a0)", 20, 1, kTimingPlain},
         {0x4280, "clr.l d0", 6, 1, kTimingPlain},
-        {0x4290, "clr.l (a0)", 20, 1, kTimingPlain},
+        {0x4290, "clr.l (a0)", 20, 1, kTimingReadFirst},
+        {0x4250, "clr.w (a0)", 12, 1, kTimingReadFirst},
+        {0x4239, "clr.b (xxx).l", 20, 3, kTimingReadFirst},
         {0x4440, "neg.w d0", 4, 1, kTimingPlain},
         {0x4a80, "tst.l d0", 4, 1, kTimingPlain},
         {0x4a90, "tst.l (a0)", 12, 1, kTimingPlain},
         {0x4ad0, "tas (a0)", 18, 1, kTimingPlain},
         {0x56c0, "sne d0", 4, 1, kTimingSccReg},
-        {0x56d0, "sne (a0)", 12, 1, kTimingPlain},
+        {0x56d0, "sne (a0)", 12, 1, kTimingReadFirst},
+        {0x50e8, "st (d16,a0)", 16, 2, kTimingReadFirst},
         {0xe388, "lsl.l #1,d0", 10, 1, kTimingPlain},
         {0xe148, "lsl.w #8,d0", 22, 1, kTimingPlain},
         {0xe3a8, "lsl.l d1,d0", 8, 1, kTimingShiftReg},
@@ -110,6 +115,7 @@ namespace {
         {0x46c0, "move d0,sr", 12, 2, kTimingPlain},
         {0x44c0, "move d0,ccr", 12, 1, kTimingPlain},
         {0x40c0, "move sr,d0", 6, 1, kTimingPlain},
+        {0x40d0, "move sr,(a0)", 12, 1, kTimingReadFirst},
         {0xc141, "exg d0,d1", 6, 1, kTimingPlain},
         {0x4880, "ext.w d0", 4, 1, kTimingPlain},
         {0x4840, "swap d0", 4, 1, kTimingPlain},
@@ -131,6 +137,116 @@ namespace {
         if (ok) return;
         printf("FAIL %s: %s got %u, manual %u\n", text, what, a, b);
         failures++;
+    }
+
+    // The EZ manual's bandwidth example (12.1.4.1): 320x240 at 2 bits a pixel, 2 clocks a word,
+    // 60 Hz at 16.58 MHz, takes 6.92% of the bus. Here as fast page DRAM with BC 00 (4, 2, 2...)
+    // the line's 40 words go in bursts of 3 words (8 clocks), and LRRA sets a 60 Hz frame.
+    void CheckBusTiming() {
+        EmEzBusRegisters ez{};
+        ez.pllControl = 0x2420;  // LCDCLK and SYSCLK both DMACLK / 1 (reset value)
+        ez.lcdScreenWidth = 320;
+        ez.lcdScreenHeight = 239;
+        ez.lcdPanelControl = 0x01;   // four greys
+        ez.lcdPixelClock = 2;        // three system clocks a pixel
+        ez.lcdClockControl = 0x80;   // on, 16-bit
+        ez.lcdRefreshRateAdj = 58;   // (6 + 58 + 320) x 3 = 1152 clocks a line, 60 Hz at 240 lines
+        ez.lcdInDram = true;
+        ez.dramEnabled = true;
+        ez.dramControl = 0x8800 | 0x0007;  // on, refresh from the system clock, REF in DRAMMC
+        ez.dramConfig = 7;                 // 32 x 8 = 256 clocks, the manual's 15.44 us
+        ez.systemClockHz = 16580608;
+        EmBusSteal steal = EmEzBusSteal(ez);
+        Expect(steal.lcdLineClocks == 1152, "ez lcd line clocks", steal.lcdLineClocks, 1152, "lcd");
+        // 40 words: 14 bursts (4 + 2 + 2), the last of one word: 13 x 8 + 4 = 108.
+        Expect(steal.lcdDmaClocks == 108, "ez lcd dma clocks", steal.lcdDmaClocks, 108, "lcd");
+        Expect(steal.refreshPeriod == 256, "ez refresh period", steal.refreshPeriod, 256, "refresh");
+        Expect(steal.refreshClocks == 4, "ez refresh hold", steal.refreshClocks, 4, "refresh");
+
+        // EDO: 4, 1, 1, 1, 1 fills the eight clocks with five words, 8 bursts of 8 = 64 clocks.
+        ez.dramControl |= 0x0400;
+        steal = EmEzBusSteal(ez);
+        Expect(steal.lcdDmaClocks == 64, "ez edo dma clocks", steal.lcdDmaClocks, 64, "lcd");
+        // The manual's 2 clocks a word, from SRAM with one wait state: 80 clocks, 6.94%.
+        ez.lcdInDram = false;
+        ez.lcdClockControl = 0x81;
+        steal = EmEzBusSteal(ez);
+        Expect(steal.lcdDmaClocks == 80, "ez sram dma clocks", steal.lcdDmaClocks, 80, "lcd");
+        const double share = 100.0 * steal.lcdDmaClocks / steal.lcdLineClocks;
+        Expect(share > 6.9 && share < 7.0, "ez dma share x100", unsigned(share * 100), 692, "lcd");
+
+        // 32 kHz refresh: REF 0 is twice 32 kHz, REF 3 a quarter.
+        ez.dramControl = 0x8000;
+        ez.dramConfig = 0;
+        const unsigned fast = EmEzBusSteal(ez).refreshPeriod;
+        Expect(fast == 253, "ez refresh 64 kHz", fast, 253, "refresh");
+        ez.dramConfig = 3;
+        const unsigned slow = EmEzBusSteal(ez).refreshPeriod;
+        Expect(slow == 2024, "ez refresh 8 kHz", slow, 2024, "refresh");
+        // Self refresh, the DRAM controller or LCD off: nothing taken.
+        ez.dramControl = 0xc000;
+        ez.lcdClockControl = 0x01;
+        steal = EmEzBusSteal(ez);
+        Expect(!steal.refreshPeriod && !steal.lcdLineClocks, "ez off", steal.refreshPeriod, 0, "off");
+
+        // VZ: (12 + XMAX + RRA) a line, DMACR's burst length, SDRAM refresh for RACL clocks.
+        EmVzBusRegisters vz{};
+        vz.pllControl = 0x2420;
+        vz.lcdScreenWidth = 160;
+        vz.lcdScreenHeight = 159;
+        vz.lcdPanelControl = 0x02;  // sixteen greys: 4 bits, 40 words a line
+        vz.lcdPixelClock = 0;
+        vz.lcdClockControl = 0x80;
+        vz.lcdRefreshRateAdj = 28;  // 200 clocks a line
+        vz.lcdDmaControl = 0x62;    // reset value: bursts of 6 words
+        vz.lcdInDram = true;
+        vz.dramEnabled = true;
+        vz.sdram = true;
+        vz.sdramControl = 0xd03c;  // on, continuous pages, refresh, CAS latency 1, RACL 3
+        vz.dramControl = 0x8800;
+        vz.dramConfig = 15;  // 512 clocks
+        vz.systemClockHz = 33161216;
+        steal = EmVzBusSteal(vz);
+        Expect(steal.lcdLineClocks == 200, "vz lcd line clocks", steal.lcdLineClocks, 200, "lcd");
+        // 40 words in 7 bursts of up to 6: 7 x 4 + 33 x 1 = 61.
+        Expect(steal.lcdDmaClocks == 61, "vz lcd dma clocks", steal.lcdDmaClocks, 61, "lcd");
+        Expect(steal.refreshPeriod == 512 && steal.refreshClocks == 3, "vz sdram refresh", steal.refreshPeriod,
+               512, "refresh");
+
+        // SDRAM pages: a read miss waits 3, a hit 1; writes 1 and 0; a refresh closes the pages.
+        // Each access changes the page state, so each is made once.
+        EmSdram::Set(EmVzSdramTiming(0xd03c, 0x0100));
+        const struct {
+            unsigned address;
+            bool write, precharge;
+            unsigned words, wait;
+            const char* text;
+        } sdram[] = {
+            {0x1000, false, false, 1, 3, "sdram read miss"},     {0x1002, false, false, 2, 2, "sdram long read hit"},
+            {0x1004, true, false, 1, 0, "sdram write hit"},      {0x9000, true, false, 1, 1, "sdram write miss"},
+            {0x9000, false, true, 1, 3, "sdram after refresh"},
+        };
+        for (const auto& a : sdram) {
+            if (a.precharge) EmSdram::PrechargeAll();
+            const unsigned wait = EmSdram::Access(a.address, a.write, a.words);
+            Expect(wait == a.wait, "wait clocks", wait, a.wait, a.text);
+        }
+
+        // Charge: a 10-clock DMA due inside an instruction that spent all its time on the bus
+        // costs 10; one that spent half of it costs 5; events before the instruction cost nothing.
+        steal = EmBusSteal{};
+        steal.lcdLineClocks = 1000;
+        steal.lcdDmaClocks = 10;
+        EmBusTiming::Set(steal, 0);
+        Expect(EmBusTiming::next == 1000, "next event", unsigned(EmBusTiming::next), 1000, "charge");
+        const unsigned full = EmBusTiming::Charge(990, 1002, 12, 12, 0);
+        Expect(full == 10, "full bus share", full, 10, "charge");
+        const unsigned half = EmBusTiming::Charge(1995, 2015, 20, 10, 0);
+        Expect(half == 5, "half bus share", half, 5, "charge");
+        const unsigned stopped = EmBusTiming::Charge(9500, 9510, 10, 10, 0);
+        Expect(stopped == 0, "after a stop", stopped, 0, "charge");
+        Expect(EmBusTiming::next == 10000, "caught up", unsigned(EmBusTiming::next), 10000, "charge");
+        EmBusTiming::Set(EmBusSteal{}, 0);
     }
 }  // namespace
 
@@ -174,6 +290,8 @@ int main() {
     Expect(divuMax <= 140 && divuMin >= 76, "divu range", divuMin, divuMax, "divu");
     Expect(divsMax <= 158 && divsMin >= 120, "divs range", divsMin, divsMax, "divs");
     printf("divu %u-%u, divs %u-%u clocks\n", divuMin, divuMax, divsMin, divsMax);
+
+    CheckBusTiming();
 
     if (failures) {
         printf("%d timing checks failed\n", failures);

@@ -5,7 +5,7 @@
  * per pass (no wait states). The results also sit in a RAM witness for a saved session, with the
  * bus cycles per pass so a checker can add the wait states the chip selects set. Builds with
  * the 3.5 SDK and calls only 3.1 APIs. */
-#define LOOPS 12
+#define LOOPS 14
 
 static volatile struct {
     UInt32 magic[4];
@@ -72,6 +72,18 @@ static void loopMovem(UInt32 n) {
                  "subq.l #1,%0\n\tbne.s 1b" : "=d"(n) : "0"(n) : "d1", "d2", "d3", "d4", "a1", "a2");
 }
 
+/* Four clr.w (a0) (12 each: the 68000 reads the word before clearing it) and the loop. */
+static void loopClear(UInt32 n, volatile void *at) {
+    asm volatile("1: clr.w (%2)\n\tclr.w (%2)\n\tclr.w (%2)\n\tclr.w (%2)\n\t"
+                 "subq.l #1,%0\n\tbne.s 1b" : "=d"(n) : "0"(n), "a"(at) : "memory");
+}
+
+/* Four st (a0) (12 each, read before write as with clr) and the loop. */
+static void loopSet(UInt32 n, volatile void *at) {
+    asm volatile("1: st (%2)\n\tst (%2)\n\tst (%2)\n\tst (%2)\n\t"
+                 "subq.l #1,%0\n\tbne.s 1b" : "=d"(n) : "0"(n), "a"(at) : "memory");
+}
+
 static UInt32 timed(int which, UInt32 n) {
     static UInt32 cell;
     UInt32 start = TimGetTicks();
@@ -91,17 +103,21 @@ static UInt32 timed(int which, UInt32 n) {
         case 9: loopMovem(n); break;
         /* The first long of the ROM's card header, and the system control register. */
         case 10: loopRead(n, (volatile void *)0x10c00000); break;
-        default: loopReadByte(n, (volatile void *)0xfffff000); break;
+        case 11: loopReadByte(n, (volatile void *)0xfffff000); break;
+        case 12: loopClear(n, &cell); break;
+        default: loopSet(n, &cell); break;
     }
     return TimGetTicks() - start;
 }
 
 UInt32 PilotMain(UInt16 command, MemPtr parameters, UInt16 flags) {
     static const char *names[LOOPS] = {"branch", "nop", "read", "call", "mulu0", "mulu1",
-                                       "divu", "dbra", "lsl", "movem", "rom", "reg"};
-    static const UInt32 clocks[LOOPS] = {18, 50, 66, 52, 56, 88, 140, 1030, 42, 134, 66, 50};
+                                       "divu", "dbra", "lsl", "movem", "rom", "reg", "clr", "st"};
+    static const UInt32 clocks[LOOPS] = {18, 50, 66, 52, 56, 88, 140, 1030, 42, 134, 66, 50,
+                                         66, 66};
     static const UInt32 counts[LOOPS] = {900000, 330000, 250000, 320000, 300000, 190000,
-                                         118000, 16000, 400000, 124000, 250000, 330000};
+                                         118000, 16000, 400000, 124000, 250000, 330000,
+                                         250000, 250000};
     Char line[64];
     EventType event;
     int i;
@@ -110,7 +126,7 @@ UInt32 PilotMain(UInt16 command, MemPtr parameters, UInt16 flags) {
     witness.magic[1] = 0x54494d45;
     witness.magic[2] = 0x5749544e;
     witness.magic[3] = 0x45535331;
-    witness.version = 2;
+    witness.version = 3;
     witness.loops = LOOPS;
     witness.ticksPerSecond = SysTicksPerSecond();
     WinEraseWindow();
