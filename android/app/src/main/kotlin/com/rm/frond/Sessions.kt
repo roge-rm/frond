@@ -12,9 +12,9 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 
-// A saved Palm. The core writes and reads session.frond in files/sessions/<id>/; <id>.json
-// in that folder holds its name, device and times. A session that hasn't been saved yet
-// starts from the device's firmware. An old one was saved by an earlier Frond (a numbered
+// A saved Palm in files/sessions/<id>/. The core saves to the .frond sessionFile finds there,
+// or <id>.frond when there's none yet; <id>.json in that folder holds its name, device and
+// times. A session that hasn't been saved yet starts from the device's firmware. An old one was saved by an earlier Frond (a numbered
 // session file or a device name this version doesn't know, then device is null); it can
 // only be deleted.
 data class Session(
@@ -23,13 +23,15 @@ data class Session(
     val device: Device?,
     val created: Long,
     val used: Long,
-    val file: File,
+    val folder: File,
     val old: Boolean = false,
     val settings: MachineSettings = MachineSettings(),
 ) {
+    // Looked up each time, as the first save names the file.
+    val file: File get() = sessionPathIn(folder)
     val saved: Boolean get() = file.isFile
     val savedAt: Long get() = file.lastModified()
-    val size: Long get() = packableSize(file.parentFile ?: file)
+    val size: Long get() = packableSize(folder)
 }
 
 object Sessions {
@@ -44,6 +46,7 @@ object Sessions {
     fun machine(context: Context, id: String) = File(folder(context), id)
 
     private fun meta(context: Context, id: String) = File(machine(context, id), "$id.json")
+    // Where Android puts a session file it creates (imports, migration, recovery).
     private fun data(context: Context, id: String) = File(machine(context, id), "session.frond")
 
     fun list(context: Context): List<Session> {
@@ -62,7 +65,7 @@ object Sessions {
             if (id.isEmpty() || id.startsWith(".")) return@forEach
             val dest = File(root, id)
             dest.mkdirs()
-            File(root, "$id.frond").takeIf { it.isFile }?.let { it.renameTo(File(dest, "session.frond")) }
+            File(root, "$id.frond").takeIf { it.isFile && sessionFile(dest) == null }?.let { it.renameTo(File(dest, "session.frond")) }
             val target = File(dest, json.name)
             if (json.canonicalFile != target.canonicalFile) json.renameTo(target)
         }
@@ -71,8 +74,7 @@ object Sessions {
             if (id.isEmpty()) return@forEach
             val dest = File(root, id)
             dest.mkdirs()
-            val target = File(dest, "session.frond")
-            if (!target.isFile) frond.renameTo(target)
+            if (sessionFile(dest) == null) frond.renameTo(File(dest, "session.frond"))
         }
     }
 
@@ -135,6 +137,8 @@ object Sessions {
     }
 
     fun read(context: Context, id: String): Session? = try {
+        // An empty id would name the sessions folder itself.
+        if (id.isEmpty()) return null
         val jsonFile = meta(context, id)
         if (!jsonFile.isFile) return null
         val json = SessionMetadata.read(jsonFile) {
@@ -142,9 +146,10 @@ object Sessions {
             Settings.legacyMachine(context, device)
         }
         val device = Device.byId(json.getString("device"))
-        val file = data(context, id)
+        val folder = machine(context, id)
+        val file = sessionPathIn(folder)
         val old = device == null || (file.isFile && (header(file)?.version ?: 0L) < FIRST_NAMED_VERSION)
-        Session(id, json.getString("name"), device, json.getLong("created"), json.optLong("used"), file, old,
+        Session(id, json.getString("name"), device, json.getLong("created"), json.optLong("used"), folder, old,
             MachineSettings.from(json.optJSONObject("settings")))
     } catch (e: Exception) {
         null
@@ -171,7 +176,7 @@ object Sessions {
     fun create(context: Context, device: Device, name: String = freeName(context, device.label), settings: MachineSettings = MachineSettings()): Session {
         val id = UUID.randomUUID().toString()
         val now = System.currentTimeMillis()
-        return Session(id, name, device, now, 0L, data(context, id), settings = settings).also { write(context, it) }
+        return Session(id, name, device, now, 0L, machine(context, id), settings = settings).also { write(context, it) }
     }
 
     fun rename(context: Context, s: Session, name: String) = SessionMetadata.update(meta(context, s.id)) {
@@ -189,6 +194,10 @@ object Sessions {
         }
     }
 
+    // For a machine folder or a file in one, the session file the core reads and saves there;
+    // anything else as it is.
+    fun resolve(context: Context, path: String?): String? = forPath(context, path)?.file?.path ?: path
+
     fun forPath(context: Context, path: String?): Session? {
         migrate(context)
         val file = path?.let(::File) ?: return null
@@ -203,13 +212,14 @@ object Sessions {
     }
 
     fun delete(context: Context, s: Session) {
+        require(s.id.isNotEmpty())
         SessionMetadata.locked(meta(context, s.id)) {
-            s.file.parentFile?.deleteRecursively()
+            machine(context, s.id).deleteRecursively()
         }
     }
 
     fun export(context: Context, s: Session, to: Uri): String? =
-        exportPackable(s.file.parentFile,
+        exportPackable(s.folder,
             { context.contentResolver.openOutputStream(to, "wt") },
             { try { android.provider.DocumentsContract.deleteDocument(context.contentResolver, to) } catch (_: Exception) {} })
 
@@ -240,19 +250,10 @@ object Sessions {
     // written once the save is complete. Dropped after the exchange, kept as a session if it fails.
     fun recoveryFolder(context: Context) = File(context.filesDir, "recovery")
     fun recoveryMachine(context: Context) = File(recoveryFolder(context), "before-exchange")
-    fun recoveryFile(context: Context) = File(recoveryMachine(context), "session.frond")
+    fun recoveryFile(context: Context) = sessionPathIn(recoveryMachine(context))
     private fun recoveryMeta(context: Context) = File(recoveryMachine(context), "before-exchange.json")
 
-    private fun recoverySession(context: Context): File {
-        val dir = recoveryMachine(context)
-        val named = File(dir, "before-exchange.frond")
-        val android = File(dir, "session.frond")
-        return when {
-            named.isFile -> named
-            android.isFile -> android
-            else -> dir.listFiles { f -> f.isFile && f.name.endsWith(".frond") && !ignoredName(f.name) }?.singleOrNull() ?: android
-        }
-    }
+    private fun recoverySession(context: Context): File = recoveryFile(context)
 
     // Room a recovery save needs: the saved session's size with some slack, or for an unsaved one its
     // firmware and RAM, as the save is compressed but can't be smaller than nothing.
@@ -306,7 +307,7 @@ object Sessions {
             // A recovery of a recovery keeps one "before exchange"; freeName numbers it.
             val name = freeName(context, "${from.removeSuffix(" before exchange")} before exchange")
             try {
-                write(context, Session(id, name, device, System.currentTimeMillis(), 0L, data(context, id), settings = settings))
+                write(context, Session(id, name, device, System.currentTimeMillis(), 0L, machine(context, id), settings = settings))
             } catch (e: IOException) {
                 dest.deleteRecursively()
                 return null
@@ -383,7 +384,7 @@ object Sessions {
             }
             File(dest, "session.frond.settings.json").takeIf { it.isFile }?.delete()
             val name = freeName(context, displayName(context, from)?.substringBeforeLast('.')?.takeIf { it.isNotBlank() } ?: device!!.label)
-            write(context, Session(id, name, device!!, System.currentTimeMillis(), 0L, data(context, id)))
+            write(context, Session(id, name, device!!, System.currentTimeMillis(), 0L, dest))
             return null
         } catch (e: Exception) {
             dest.deleteRecursively()
@@ -594,13 +595,21 @@ internal fun packableName(name: String): Boolean {
 internal fun packableSize(dir: File): Long =
     dir.listFiles()?.filter { it.isFile && packableName(it.name) }?.sumOf { it.length() } ?: 0L
 
+// The machine folder's session file, as frondMachine::sessionFile in the core finds it:
+// <folder name>.frond, then session.frond, then the only other .frond. Save temps and card
+// journals don't count.
 internal fun sessionFile(dir: File): File? {
+    if (!dir.isDirectory) return null
     val named = File(dir, "${dir.name}.frond")
-    if (named.isFile) return named
+    if (named.isFile && !ignoredName(named.name)) return named
     val android = File(dir, "session.frond")
-    if (android.isFile) return android
-    return dir.listFiles { f -> f.isFile && packableName(f.name) && f.name.endsWith(".frond") }?.singleOrNull()
+    if (android.isFile && !ignoredName(android.name)) return android
+    return dir.listFiles { f -> f.isFile && !ignoredName(f.name) && f.name.endsWith(".frond") }?.singleOrNull()
 }
+
+// Where the core saves in `dir`: its session file, or <folder name>.frond before the first save
+// (sessionPathIn in the core).
+internal fun sessionPathIn(dir: File): File = sessionFile(dir) ?: File(dir, "${dir.name}.frond")
 
 // The content generation of the SD card or Memory Stick Pro (kind 1 or 3) a v8 .frond
 // describes, with its kind, or 0 for none.

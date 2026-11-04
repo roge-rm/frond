@@ -14,6 +14,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.lifecycleScope
 import com.rm.frond.ui.FrondTheme
+import com.rm.frond.ui.audioPreviewQualified
+import com.rm.frond.ui.isTg50
 import com.rm.frond.ui.LogScreen
 import com.rm.frond.ui.PeripheralsScreen
 import kotlinx.coroutines.Dispatchers
@@ -259,16 +261,29 @@ class PeripheralsModel(
         }
     }
 
-    // The saved Sound setting. FrondActivity applies it to the core when the Palm shows again.
-    var sound by mutableStateOf(machineSettings().sound)
+    // The saved machine settings. Sound applies when the Palm shows again, display changes go to the core at
+    // once and show with the Palm, and the audio preview applies at the next start.
+    var settings by mutableStateOf(machineSettings())
         private set
 
-    fun changeSound(on: Boolean) {
-        if (!device.sound) return
+    // Saves one field of the machine settings, leaving the others as they are on disk.
+    fun changeSettings(next: MachineSettings) {
         val id = sessionId ?: return
+        val old = settings
         try {
-            Sessions.updateSettings(activity, id) { it.copy(sound = on) }
-            sound = on
+            Sessions.updateSettings(activity, id) { cur ->
+                var s = cur
+                if (next.size != old.size) s = s.copy(size = next.size)
+                if (next.smoothing != old.smoothing) s = s.copy(smoothing = next.smoothing)
+                if (next.sound != old.sound && device.sound) s = s.copy(sound = next.sound)
+                if (next.showKeyboard != old.showKeyboard) s = s.copy(showKeyboard = next.showKeyboard)
+                if (next.jogControls != old.jogControls) s = s.copy(jogControls = next.jogControls)
+                if (next.fastAudio != old.fastAudio && audioPreviewUsable == true) s = s.copy(fastAudio = next.fastAudio)
+                if (next.sonyAudioPreview != old.sonyAudioPreview && audioPreviewUsable == true) s = s.copy(sonyAudioPreview = next.sonyAudioPreview)
+                s
+            }
+            settings = machineSettings()
+            FrondActivity.running?.applyDisplay()
         } catch (e: Exception) {
             alert = "Couldn't save settings" to "Couldn't write the machine settings."
         }
@@ -306,30 +321,17 @@ class PeripheralsModel(
 
     fun microphoneDenied() { changeMicrophone(false); microphone = "off Permission denied" }
 
-    // Low-latency audio for this device. The core takes it at start-up, so a change applies at the next start.
-    var fastAudio by mutableStateOf(machineSettings().fastAudio)
-        private set
-    // Null while the NOR is being checked; false when the device or its firmware can't use it.
-    var fastAudioUsable by mutableStateOf<Boolean?>(if (device.fastAudio) null else false)
+    // Sony audio preview (TG50) or Low-latency audio. Null while the NOR is being checked; false when
+    // the device or its firmware can't use it.
+    var audioPreviewUsable by mutableStateOf<Boolean?>(if (device.fastAudio || device.isTg50()) null else false)
         private set
 
-    fun checkFastAudio(session: String?) {
-        if (!device.fastAudio) return
+    fun checkAudioPreview(session: String?) {
+        if (!device.fastAudio && !device.isTg50()) return
         activity.lifecycleScope.launch {
-            fastAudioUsable = withContext(Dispatchers.IO) {
-                Firmware.fastAudioQualified(device, session?.let { java.io.File(it) }, Firmware.nor(activity, device))
+            audioPreviewUsable = withContext(Dispatchers.IO) {
+                audioPreviewQualified(activity, device, session?.let { java.io.File(it) })
             }
-        }
-    }
-
-    fun changeFastAudio(on: Boolean) {
-        if (fastAudioUsable != true) return
-        val id = sessionId ?: return
-        try {
-            Sessions.updateSettings(activity, id) { it.copy(fastAudio = on) }
-            fastAudio = on
-        } catch (e: Exception) {
-            alert = "Couldn't save settings" to "Couldn't write the machine settings."
         }
     }
 
@@ -631,7 +633,7 @@ class PeripheralsActivity : ComponentActivity() {
         }
         if (device.memoryStick) panelControl = emulator.control
         model.watchGdb()
-        model.checkFastAudio(emulator.session)
+        model.checkAudioPreview(emulator.session)
         if (!model.waitingForGdb) model.refresh()
         model.readKeyboard()
         model.readHold()

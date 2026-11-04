@@ -147,6 +147,15 @@ class MachineSettingsTest {
         }
     }
 
+    @Test fun displayArgumentMatchesLaunchArguments() {
+        assertEquals("fit=fit smooth=off", MachineSettings().displayArgument())
+        assertEquals("fit=whole smooth=on", MachineSettings(ScreenSize.WHOLE, smoothing = true).displayArgument())
+        assertEquals("fit=fill smooth=off keyboard=off jog=hidden",
+            MachineSettings(ScreenSize.FILL, showKeyboard = false, jogControls = JogControls.HIDDEN)
+                .displayArgument(tg50Controls = true))
+        assertEquals("fit=fit smooth=off keyboard=on jog=keyboard", MachineSettings().displayArgument(tg50Controls = true))
+    }
+
     @Test fun launchArgumentsFollowThisMachineAfterReload() {
         val file = metadata("machine", legacy)
         assertEquals(listOf("--window-fit", "whole", "--smooth-lcd", "--no-sound"), settings(file).arguments())

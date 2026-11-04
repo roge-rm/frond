@@ -39,6 +39,12 @@ data class MachineSettings(
         if (!soundSupported || !sound) add("--no-sound")
     }
 
+    // The core's display command argument, for changing these while it runs.
+    fun displayArgument(tg50Controls: Boolean = false): String = buildString {
+        append("fit=${this@MachineSettings.size.arg} smooth=${if (smoothing) "on" else "off"}")
+        if (tg50Controls) append(" keyboard=${if (showKeyboard) "on" else "off"} jog=${jogControls.arg}")
+    }
+
     companion object {
         // Settings saved before the choice only had showJogControls: shown was left of the screen.
         private fun jogControls(json: JSONObject): JogControls =

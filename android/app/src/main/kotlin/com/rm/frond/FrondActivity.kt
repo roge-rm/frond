@@ -61,19 +61,24 @@ class FrondActivity : SDLActivity() {
     private val saveLock = Any()
     // Sound as last sent to the core; Settings can change it while the Palm runs. UI thread only.
     @Volatile private var sound = true
+    // Sends sound and display changes to the core in order.
     private val soundSender = java.util.concurrent.Executors.newSingleThreadExecutor {
         Thread(it, "FrondSound").apply { isDaemon = true }
     }
+    // The display settings as last sent to the core, as its display command argument. Set on the UI thread.
+    @Volatile private var display = ""
     // Game controller buttons and sticks to the Palm's buttons. UI thread only.
     private lateinit var controller: ControllerInput
 
     override fun getLibraries(): Array<String> = arrayOf("c++_shared", "SDL2", "SDL2_image", "main")
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        sessionPath = intent?.getStringExtra(EXTRA_SESSION)
+        // The core names a new machine's file on its first save, so an older path may not be the one in use.
+        sessionPath = Sessions.resolve(this, intent?.getStringExtra(EXTRA_SESSION))
         machineSettings = Sessions.forPath(this, sessionPath)?.settings ?: MachineSettings()
         settings = machineSettings.applyTo(Settings.from(this, intent))
         sound = launchDevice().sound && settings.sound
+        display = machineSettings.displayArgument(tg50Controls = launchDevice().id == "sony-clie-tg50")
         requestedOrientation = settings.orientation.request
         File(filesDir, START_ERROR).delete()
         link = ControlLink(File(filesDir, "control.sock")) { name, state ->
@@ -115,8 +120,12 @@ class FrondActivity : SDLActivity() {
         val extras = intent?.extras
         val arguments = mutableListOf<String>()
         val session = sessionPath
-        if (session != null && (File(session).isFile || File(session).isDirectory)) {
-            arguments += session
+        // Any session file in the machine's folder loads, so a fresh start can't save over it.
+        val saved = session?.let { path ->
+            File(path).takeIf { it.isFile || it.isDirectory } ?: Sessions.forPath(this, path)?.file?.takeIf { it.isFile }
+        }
+        if (saved != null) {
+            arguments += saved.path
         } else {
             val device = Device.byId(extras?.getString(EXTRA_DEVICE)) ?: Device.TX
             val nor = extras?.getString(EXTRA_NOR) ?: Firmware.nor(this, device).path
@@ -420,6 +429,28 @@ class FrondActivity : SDLActivity() {
         }
     }
 
+    // Applies the running machine's Size, Smooth pixels and TG50 controls. The core changes the
+    // window once the Palm shows again.
+    fun applyDisplay() {
+        val saved = Sessions.forPath(this, sessionPath)?.settings ?: return
+        val wanted = saved.displayArgument(tg50Controls = launchDevice().id == "sony-clie-tg50")
+        if (wanted == display) return
+        display = wanted
+        link.whenConnected {
+            if (!link.connectedOnce) return@whenConnected
+            // As with sound, each send reads the newest value when it goes out.
+            soundSender.execute {
+                val sent = display
+                val reply = link.request("display", sent, timeoutSeconds = 10)
+                if (!reply.ok) {
+                    Log.w(TAG, "display: ${reply.code} ${reply.message}")
+                    // Try again on the next change or resume.
+                    if (display == sent) display = ""
+                }
+            }
+        }
+    }
+
     // Asks the core whether the infrared keyboard is attached and shows the keyboard button to match. Waits for
     // the control link first, which with the debugger on can be a long time.
     private fun readKeyboard() {
@@ -454,6 +485,7 @@ class FrondActivity : SDLActivity() {
         }
         if (!leaving) readKeyboard()
         if (!leaving) applySound()
+        if (!leaving) applyDisplay()
     }
 
     private fun openPanel() {
