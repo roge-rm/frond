@@ -121,9 +121,13 @@ class DeviceInputTest(unittest.TestCase):
         self.assertEqual((zire['ram_min_bytes'], zire['ram_max_bytes'], zire['default_display_mode'],
                           zire['display_mode_mask']), (32 << 20, 32 << 20, 5, 1 << 5))
         self.assertEqual({p['cohort'] for p in data['profiles']},
-                         {'tx-nor-nand', 'e2-nor-nand', 'patched-e2', 'paravirtual', 'zire72-nor', 'tg50-nor', 'reserved'})
+                         {'tx-nor-nand', 'e2-nor-nand', 'patched-e2', 'paravirtual', 'zire72-nor', 'tg50-nor', 'reserved',
+                          'ez68k-rom'})
         self.assertTrue(all(p['status'] == 'inherited-unverified' for p in data['profiles'][2:4]))
-        self.assertTrue(all(p['status'] == 'reserved' for p in data['profiles'][6:]))
+        iiix = data['profiles'][6]
+        self.assertEqual((iiix['name'], iiix['status'], iiix['runner_eligible'], iiix['runs_68k']),
+                         ('palm-iiix', 'staged', False, True))
+        self.assertTrue(all(p['status'] == 'reserved' for p in data['profiles'][7:]))
 
     def test_tx_raw_geometry_and_options(self):
         base = [self.nor, '--device', 'palm-tx']
@@ -180,10 +184,12 @@ class DeviceInputTest(unittest.TestCase):
                           'invalid replay event')
 
     def test_unknown_and_mismatched_session_names(self):
-        for device in ('palm-tx2', 'tungsten-e2', 'palm-iiix'):
+        for device in ('palm-tx2', 'tungsten-e2', 'palm-m515'):
             with self.subTest(device=device):
                 path = session(self.root / 'unknown', device)
                 self.rejected([path], f"this session is for {device}, which Frond can't run")
+        # A IIIx session goes to frond-68k.
+        self.rejected([session(self.root / 'unknown', 'palm-iiix')], 'this session is for palm-iiix, which runs in frond-68k')
         for device in ('', 'Palm TX', 'palm_tx', 'x' * 32):
             with self.subTest(device=device):
                 path = session(self.root / 'bad-name', device)

@@ -6,7 +6,9 @@ uARM: https://github.com/uARM-Palm/uARM
 
 Copyright: Frond, CloudpilotEmu, uARM and contributing authors, as identified
 in the source files. uARM includes work by Dmitry Grinberg. The PACE engine
-includes UAE-derived code and its retained author notices.
+includes UAE-derived code and its retained author notices. The 68k core is
+CloudpilotEmu's DragonBall core, derived from the Palm OS Emulator (POSE,
+GPL-2.0-or-later) and UAE; it keeps their author notices.
 
 The application is distributed under GPL-3.0-or-later. The full GPL version 3
 text is in /usr/share/doc/frond/LICENSE and /usr/share/common-licenses/GPL-3.

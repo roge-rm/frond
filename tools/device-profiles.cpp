@@ -12,6 +12,7 @@ static const char* cohortName(DeviceCohort5 cohort) {
         case DeviceCohort5::zire72Nor: return "zire72-nor";
         case DeviceCohort5::tg50Nor: return "tg50-nor";
         case DeviceCohort5::reserved: return "reserved";
+        case DeviceCohort5::ez68k: return "ez68k-rom";
     }
     return "unknown";
 }
@@ -39,6 +40,8 @@ int main() {
                   << ",\"display_mode_mask\":" << p.displayModes
                   << ",\"explicit_raw_nand\":" << (p.requiresExplicitNand ? "true" : "false");
         std::cout << ",\"runner_eligible\":" << (deviceProfileRunnerEligible5(p.deviceType) ? "true" : "false")
+                  << ",\"runs_68k\":" << (deviceProfileRuns68k5(p.deviceType) ? "true" : "false")
+                  << ",\"cpu_hz\":" << p.cpuHz
                   << ",\"sound\":" << (p.capabilities.sound ? "true" : "false")
                   << ",\"storage_slot\":" << std::quoted(deviceProfileStorageSlot5(p) == DeviceStorageSlot5::memoryStick ? "memory-stick"
                         : deviceProfileStorageSlot5(p) == DeviceStorageSlot5::sd ? "sd" : "none");
