@@ -1,6 +1,7 @@
 """Frame checks and setup taps shared by ROM tests and the private app runner."""
 import os
 import hashlib
+import shutil
 import subprocess
 import threading
 import struct
@@ -31,9 +32,23 @@ def frontend_devices(profiles):
 
 DEVICES = runner_devices(PROFILES)
 FRONTEND_DEVICES = frontend_devices(PROFILES)
+# DragonBall devices, run by frond-68k.
+DEVICES_68K = profile_devices(PROFILES, 'runs_68k')
+ROM_DEVICES = {**DEVICES, **DEVICES_68K}
+
+
+def rom_device(device):
+    """The ARM or 68k profile entry; looked up each time so test fixtures added to DEVICES count."""
+    return DEVICES[device] if device in DEVICES else DEVICES_68K[device]
 
 
 CORE = Path(__file__).resolve().parents[1] / 'out/frond'
+CORE_68K = Path(__file__).resolve().parents[1] / 'out/frond-68k'
+
+
+def core_for(device):
+    """The runner binary for a device name."""
+    return CORE_68K if device in DEVICES_68K else CORE
 
 
 class Core:
@@ -41,7 +56,11 @@ class Core:
 
     def __init__(self, image, log, *args):
         self.lines, self.log = [], log.open('w')
-        self.process = subprocess.Popen(['heavy', 'emulator', str(CORE), *map(str, image), '--no-sound', *map(str, args)],
+        image = list(image)
+        # A selected 68k device runs in frond-68k; heavy only where it's installed.
+        device = image[image.index('--device') + 1] if '--device' in image[:-1] else None
+        runner = ['heavy', 'emulator'] if shutil.which('heavy') else []
+        self.process = subprocess.Popen([*runner, str(core_for(device)), *map(str, image), '--no-sound', *map(str, args)],
                                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                         text=True, errors='replace', start_new_session=True,
                                         env={**os.environ, 'SDL_VIDEODRIVER': 'dummy', 'SDL_AUDIODRIVER': 'dummy'})
@@ -372,9 +391,97 @@ def tg50_setup(core, root):
     core.wait_frame(root / 'launcher.png', tg50_launcher, 60)
 
 
+def iiix_dark(rows, x, y):
+    return sum(rows[y][4 * x:4 * x + 3]) < 250
+
+
+def iiix_target(rows, x, y):
+    """The IIIx calibration cross centred on (x, y): four arrow tips 10 pixels out, a dot in the middle."""
+    if rows is None or len(rows) != 160 or not (10 <= x < 150 and 10 <= y < 150):
+        return False
+    tips = all(iiix_dark(rows, x + dx, y + dy) for dx in (-10, 10) for dy in (-10, 10))
+    gaps = not any(iiix_dark(rows, x + dx, y + dy) for dx, dy in ((0, -5), (0, 5), (-5, 0), (5, 0)))
+    ink = sum(iiix_dark(rows, xx, yy) for yy in range(y - 10, y + 11) for xx in range(x - 10, x + 11))
+    return tips and gaps and iiix_dark(rows, x, y) and 120 <= ink <= 220
+
+
+def iiix_title(rows):
+    """An inverted title tab at the top left over a full-width line, as on every IIIx form."""
+    return (rows is not None and len(rows) == 160 and
+            sum(iiix_dark(rows, x, y) for x in range(2, 30) for y in range(1, 11)) > 150 and
+            sum(iiix_dark(rows, x, 13) for x in range(160)) > 150)
+
+
+def iiix_buttons(rows):
+    """Centres of the 10 to 15 pixel high buttons along the bottom of a form, left to right."""
+    if rows is None or len(rows) != 160:
+        return []
+    for top in range(130, 150):
+        spans, x = [], 0
+        while x < 160:
+            if iiix_dark(rows, x, top):
+                start = x
+                while x < 160 and iiix_dark(rows, x, top):
+                    x += 1
+                bottom = next((b for b in range(top + 9, min(top + 15, 160))
+                               if all(iiix_dark(rows, xx, b) for xx in range(start, x))), None)
+                # An outline, not a filled shape: light just inside the top edge.
+                inside = range(start + 3, x - 3)
+                if x - start >= 12 and bottom and sum(not iiix_dark(rows, xx, top + 2) for xx in inside) > 0.8 * len(inside):
+                    spans.append(((start + x) // 2, (top + bottom) // 2))
+            x += 1
+        if spans:
+            return spans
+    return []
+
+
+def iiix_launcher(rows):
+    """The launcher: a title tab, the category trigger at the top right and a grid of app icons."""
+    if not iiix_title(rows):
+        return False
+    trigger = any(all(iiix_dark(rows, x + i, y + i) and iiix_dark(rows, x + 7 - i, y + i) and
+                      not iiix_dark(rows, x + i - 1, y + i) for i in range(4))
+                  for y in range(2, 8) for x in range(100, 150))
+    # Three columns of icons, rows about 35 pixels apart.
+    icons = sum(1 for top in (20, 55, 90) for cx in (24, 76, 128)
+                if sum(iiix_dark(rows, x, y) for x in range(cx - 10, cx + 10) for y in range(top, top + 18)) > 25)
+    return trigger and icons >= 7
+
+
+def iiix_setup(core, root):
+    """Palm OS 3.1 to 4.1 setup: two tap-anywhere pages, three calibration targets, Next, then Done."""
+    frame = root / 'boot-frame.png'
+    rows = core.wait_frame(frame, lambda rows: iiix_title(rows) or iiix_launcher(rows), 120)
+    if iiix_launcher(rows):
+        return
+
+    def changed(before):
+        seen = []
+
+        def settled(rows):
+            seen.append(rows)
+            return rows is not None and rows != before and len(seen) > 1 and seen[-1] == seen[-2]
+        return core.wait_frame(frame, settled, 30)
+    rows = core.wait_frame(frame, iiix_title, 30)
+    for step in (1, 2):
+        (root / f'setup-{step}.png').write_bytes(frame.read_bytes())
+        core.tap(root, 80, 120)
+        rows = changed(rows)
+    for number, (x, y) in enumerate(((10, 10), (149, 149), (79, 60))):
+        rows = core.wait_frame(frame, lambda rows: iiix_target(rows, x, y), 30)
+        (root / f'calibrate-{number}.png').write_bytes(frame.read_bytes())
+        core.tap(root, x, y)
+    for step, count in ((3, 2), (4, 3)):
+        rows = core.wait_frame(frame, lambda rows: iiix_title(rows) and len(iiix_buttons(rows)) == count, 30)
+        (root / f'setup-{step}.png').write_bytes(frame.read_bytes())
+        # Next, then Done: the right-most button.
+        core.tap(root, *iiix_buttons(rows)[-1])
+    core.wait_frame(root / 'launcher.png', iiix_launcher, 60)
+
+
 def setup_device(device, core, root):
     """Run the profile's measured setup recipe; unknown recipes fail before sending input."""
-    recipe = DEVICES[device]['setup']
+    recipe = rom_device(device)['setup']
     try:
         run = SETUP_RECIPES[recipe]
     except KeyError:
@@ -382,11 +489,11 @@ def setup_device(device, core, root):
     return run(core, root)
 
 
-SETUP_RECIPES = {'tx': tx_setup, 'e2': e2_setup, 'zire': zire_setup, 'tg50': tg50_setup}
+SETUP_RECIPES = {'tx': tx_setup, 'e2': e2_setup, 'zire': zire_setup, 'tg50': tg50_setup, 'iiix': iiix_setup}
 
 
 def launcher_check(device):
-    recipe = DEVICES[device]['launcher']
+    recipe = rom_device(device)['launcher']
     try:
         return LAUNCHER_CHECKS[recipe]
     except KeyError:
@@ -394,7 +501,8 @@ def launcher_check(device):
 
 
 LAUNCHER_CHECKS = {'wallpaper': launcher_wallpaper,
-                   'wallpaper-upper': upper_wallpaper_launcher, 'tg50-clie': tg50_launcher}
+                   'wallpaper-upper': upper_wallpaper_launcher, 'tg50-clie': tg50_launcher,
+                   'iiix': iiix_launcher}
 
 
 def tg50_date_time_prefs(rows):
@@ -511,11 +619,43 @@ def tg50_reset(core, root, hard):
          'marked_session_after': hashlib.sha256((root / 'marked.session').read_bytes()).hexdigest()}, indent=2) + '\n')
 
 
-RESET_RECIPES = {'tg50': tg50_reset}
+def iiix_reset(core, root, hard):
+    """A soft reset keeps the finished setup and comes back to the launcher (4.1 by way of Date &
+    Time); a hard reset asks to erase, takes Up, and starts setup again. Then new input: Date Book on the first app key, and
+    the silkscreen Applications button back to the launcher."""
+    marked = root / 'marked.session'
+    core.send(f'save-session "{marked}"', 'wrote session')
+    marked_hash = hashlib.sha256(marked.read_bytes()).hexdigest()
+    core.send('reset-hard' if hard else 'reset', 'done', timeout=60)
+    if hard:
+        # The erase prompt is plain text with no title tab; Up confirms.
+        core.wait_frame(root / 'reset-erase.png', lambda rows: rows is not None and not iiix_title(rows) and
+                        sum(iiix_dark(rows, x, y) for x in range(160) for y in range(160)) > 300, 60)
+        core.key(root, 'up', hold_ms=300)
+        core.wait_frame(root / 'reset-setup.png', iiix_title, 120)
+        iiix_setup(core, root)
+    else:
+        # 4.1 opens Preferences at Date & Time after a soft reset; Applications leaves it.
+        rows = core.wait_frame(root / 'reset-launcher.png', lambda rows: iiix_launcher(rows) or iiix_title(rows), 120)
+        if not iiix_launcher(rows):
+            (root / 'reset-prefs.png').write_bytes((root / 'reset-launcher.png').read_bytes())
+            core.tap(root, 13, 178)
+            core.wait_frame(root / 'reset-launcher.png', iiix_launcher, 60)
+    core.key(root, 'hard1', hold_ms=300)
+    core.wait_frame(root / 'reset-input.png', lambda rows: iiix_title(rows) and not iiix_launcher(rows), 60)
+    core.tap(root, 13, 178)
+    core.wait_frame(root / 'reset-continued.png', iiix_launcher, 60)
+    assert hashlib.sha256(marked.read_bytes()).hexdigest() == marked_hash
+    (root / 'postconditions.json').write_text(json.dumps(
+        {'setup_after_reset': hard, 'new_input': 'Date Book', 'final_screen': 'launcher',
+         'marked_session': marked_hash}, indent=2) + '\n')
+
+
+RESET_RECIPES = {'tg50': tg50_reset, 'iiix': iiix_reset}
 
 
 def reset_recipe(device):
-    recipe = DEVICES[device]['setup']
+    recipe = rom_device(device)['setup']
     try:
         return RESET_RECIPES[recipe]
     except KeyError:

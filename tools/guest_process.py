@@ -1,5 +1,6 @@
 """Bounded cleanup for guest processes and their heavy emulator wrappers."""
 import os
+import shutil
 import signal
 import subprocess
 
@@ -23,7 +24,8 @@ def stop_guest(process, grace=3):
 
 
 def run_guest(args, *, timeout, capture_output=False, **kwargs):
-    command = ['heavy', 'emulator', *map(str, args)]
+    # heavy only where it's installed, as on a build host without emulator slots.
+    command = [*(['heavy', 'emulator'] if shutil.which('heavy') else []), *map(str, args)]
     if capture_output:
         kwargs.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     process = subprocess.Popen(command, start_new_session=True, **kwargs)
