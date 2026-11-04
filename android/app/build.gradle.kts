@@ -44,6 +44,23 @@ val prepareCore = tasks.register<Exec>("prepareCore") {
     commandLine("python3", "tools/prepare.py")
 }
 
+// The Fast engine's Dynarmic source, exported and patched into build/dynarmic-trial/src by the
+// repo's Makefile (which fetches the pinned revisions once if there's no donor clone). Dynarmic
+// also needs Boost's headers; frond.boostInclude is the folder holding boost/, /usr/include by default.
+val dynarmicSource: File = File(repoRoot, "build/dynarmic-trial/src")
+val boostInclude = providers.gradleProperty("frond.boostInclude").getOrElse("/usr/include")
+val prepareDynarmic = tasks.register<Exec>("prepareDynarmic") {
+    group = "build"
+    description = "Exports the patched Dynarmic source into build/dynarmic-trial/src"
+    workingDir(repoRoot)
+    commandLine("make", "--no-print-directory", "build/dynarmic-trial/src/.frond-source")
+}
+tasks.configureEach {
+    if (name.startsWith("configureCMake") || name.startsWith("buildCMake")) {
+        dependsOn(prepareDynarmic)
+    }
+}
+
 val checkDeviceData = tasks.register<Exec>("checkDeviceData") {
     dependsOn(prepareCore)
     workingDir(repoRoot)
@@ -152,6 +169,8 @@ android {
                     "-DSDL2_SOURCE=${sdlSource.absolutePath}",
                     "-DSDL2_IMAGE_SOURCE=${sdlImageSource.absolutePath}",
                     "-DFROND_SELF_TEST=${if (selfTest) "ON" else "OFF"}",
+                    "-DFROND_DYNARMIC=${dynarmicSource.absolutePath}",
+                    "-DFROND_BOOST_INCLUDE=$boostInclude",
                 )
             }
         }

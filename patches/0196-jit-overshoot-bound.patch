@@ -1,0 +1,97 @@
+--- a/src/uarm/uarm/CPU.h
++++ b/src/uarm/uarm/CPU.h
+@@ -126,6 +126,10 @@
+ // Engine for CPUs made from now on: Fast is the JIT where it's built in, Exact the interpreter.
+ // FROND_JIT=1 or 0 in the environment overrides it. Returns false if Fast isn't built in.
+ bool cpuSetFastEngine(bool fast);
++// Most cycles one cpuCycle call can return past the cycles it was asked for: 19 for the
++// interpreter (PACE charges 20 per operation), more for the Fast engine. UINT32_MAX if
++// generated code runs unchecked (FROND_JIT_MAX_UNCHECKED=0).
++uint32_t cpuMaxOvershootCycles(const struct ArmCpu *cpu);
+ // Host checkpoint repair preserves the separately serialized XScale fetch buffers.
+ // Caller provides ICACHE_FETCH_STATE_WORDS words (see icache.h).
+ void cpuGetInstructionFetchState(ArmCpu*, uint32_t*);
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -985,6 +985,23 @@
+ bool cpuSetFastEngine(bool fast) { return !fast; }
+ #endif
+ 
++uint32_t cpuMaxOvershootCycles(const struct ArmCpu *cpu) {
++    constexpr uint32_t interpreter = 19;
++#ifdef FROND_DYNARMIC
++    if (cpu && cpu->jit) {
++        // cpuPrvCycleJit: a run passes its budget by at most L - 1 (every link checks, no
++        // block is longer than L), then a run that stopped for the interpreter runs one
++        // more instruction before the budget check. PACE batches stay at 19.
++        const uint32_t l = jitMaxUnchecked(cpu->jit);
++        if (!l) return UINT32_MAX;
++        return l > interpreter ? l : interpreter;
++    }
++#else
++    (void)cpu;
++#endif
++    return interpreter;
++}
++
+ void cpuWriteProtectHost(struct ArmCpu *cpu, const uint8_t *host, uint32_t size) {
+ #ifdef FROND_DYNARMIC
+     if (cpu && cpu->jit) jitWriteProtect(cpu->jit, host, size);
+--- a/src/uarm/uarm/jit_dynarmic.h
++++ b/src/uarm/uarm/jit_dynarmic.h
+@@ -19,8 +19,12 @@
+ 
+ FrondJit *jitCreate(ArmCpu *cpu);
+ void jitDestroy(FrondJit *jit);
+-// Runs up to about cycles instructions. Returns how many ran.
++// Runs up to about cycles instructions. Returns how many ran, at most
++// cycles - 1 + jitMaxUnchecked(jit) for cycles >= 1.
+ uint32_t jitRun(FrondJit *jit, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, int &stop);
++// Most instructions generated code runs between two budget checks: no block is longer and
++// every link checks. 0 means no limit (FROND_JIT_MAX_UNCHECKED=0, for measuring only).
++uint32_t jitMaxUnchecked(const FrondJit *jit);
+ // Translated code is dropped when the RAM it came from is written (jitCodeWritten) or its
+ // mapping changes, so the guest's I-cache invalidations only matter for code from pages
+ // writes can't be seen on.
+--- a/src/uarm/uarm/jit_dynarmic.cpp
++++ b/src/uarm/uarm/jit_dynarmic.cpp
+@@ -516,8 +516,21 @@
+     Env env;
+     PageTable pages{};
+     std::unique_ptr<A32::Jit> jit;
++    uint32_t maxUnchecked = 0;
+ };
+ 
++// Instructions between budget checks in generated code. It bounds how far a run can pass
++// its budget, which audio admission reserves for. 64, 128 and 256 ran Bike and FrondBench
++// equally fast, so the smallest. FROND_JIT_MAX_UNCHECKED overrides it for measuring, 0 for
++// no limit.
++static constexpr uint32_t kMaxUnchecked = 64;
++
++static uint32_t jitPrvMaxUnchecked() {
++    const char *v = getenv("FROND_JIT_MAX_UNCHECKED");
++    if (v && *v) return uint32_t(strtoul(v, nullptr, 10));
++    return kMaxUnchecked;
++}
++
+ FrondJit *jitCreate(ArmCpu *cpu) {
+     auto *j = new FrondJit;
+     j->env.cpu = cpu;
+@@ -531,6 +544,8 @@
+     conf.page_table_pointer_mask_bits = 1;
+     conf.check_halt_on_link = true;
+     conf.check_halt_on_memory_access = true;
++    j->maxUnchecked = jitPrvMaxUnchecked();
++    conf.max_unchecked_instructions = j->maxUnchecked;
+     // Unaligned accesses go through the callbacks, which fault on them.
+     conf.detect_misaligned_access_via_page_table = 16 | 32 | 64;
+     conf.only_detect_misalignment_via_page_table_on_page_boundary = false;
+@@ -546,6 +561,8 @@
+ 
+ void jitDestroy(FrondJit *j) { delete j; }
+ 
++uint32_t jitMaxUnchecked(const FrondJit *j) { return j->maxUnchecked; }
++
+ void jitInvalidate(FrondJit *j, uint32_t va, uint32_t size) {
+     stats.invalRange++;
+     Env &e = j->env;

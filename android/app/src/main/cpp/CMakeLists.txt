@@ -77,6 +77,53 @@ target_compile_options(frondcore PRIVATE -O2 -g
     -Wno-unused-parameter -Wno-unknown-pragmas -Wno-visibility
     -Wno-constant-conversion -Wno-constant-logical-operand)
 
+# The Fast engine: Dynarmic on arm64-v8a (its arm64 back end) and x86_64, from FROND_DYNARMIC,
+# the patched source make dynarmic-source exports. Other ABIs build with the interpreter only.
+if(FROND_DYNARMIC AND ANDROID_ABI MATCHES "^(arm64-v8a|x86_64)$")
+    # Dynarmic only needs Boost's header-only parts; FROND_BOOST_INCLUDE holds the host's boost/.
+    set(boost "${CMAKE_CURRENT_BINARY_DIR}/boost")
+    file(MAKE_DIRECTORY "${boost}/include")
+    file(CREATE_LINK "${FROND_BOOST_INCLUDE}/boost" "${boost}/include/boost" SYMBOLIC)
+    file(WRITE "${boost}/BoostConfig.cmake"
+        "if(NOT TARGET Boost::boost)\n"
+        "  add_library(Boost::boost INTERFACE IMPORTED)\n"
+        "  set_target_properties(Boost::boost PROPERTIES INTERFACE_INCLUDE_DIRECTORIES \"${boost}/include\")\n"
+        "endif()\n")
+    file(STRINGS "${FROND_BOOST_INCLUDE}/boost/version.hpp" boost_version REGEX "define BOOST_LIB_VERSION")
+    string(REGEX REPLACE ".*\"([0-9]+)_([0-9]+).*" "\\1.\\2" boost_version "${boost_version}")
+    file(WRITE "${boost}/BoostConfigVersion.cmake"
+        "set(PACKAGE_VERSION ${boost_version})\n"
+        "if(PACKAGE_FIND_VERSION VERSION_GREATER PACKAGE_VERSION)\n"
+        "  set(PACKAGE_VERSION_COMPATIBLE FALSE)\n"
+        "else()\n"
+        "  set(PACKAGE_VERSION_COMPATIBLE TRUE)\n"
+        "endif()\n")
+    set(Boost_DIR "${boost}" CACHE PATH "" FORCE)
+    set(CMAKE_FIND_PACKAGE_PREFER_CONFIG ON)
+    set(DYNARMIC_TESTS OFF CACHE BOOL "" FORCE)
+    set(DYNARMIC_FRONTENDS "A32" CACHE STRING "" FORCE)
+    set(DYNARMIC_USE_BUNDLED_EXTERNALS ON CACHE BOOL "" FORCE)
+    set(DYNARMIC_WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
+    set(DYNARMIC_USE_PRECOMPILED_HEADERS OFF CACHE BOOL "" FORCE)
+    # Static, linked into libmain.so (SDL turns BUILD_SHARED_LIBS on).
+    set(shared_libs ${BUILD_SHARED_LIBS})
+    set(BUILD_SHARED_LIBS OFF)
+    add_subdirectory("${FROND_DYNARMIC}" dynarmic EXCLUDE_FROM_ALL)
+    set(BUILD_SHARED_LIBS ${shared_libs})
+    # The JIT file is C++20 and sees only Dynarmic's headers: the core's include folders hide
+    # system ones (uarm/syscall.h).
+    add_library(frondjit OBJECT "${UARM}/uarm/jit_dynarmic.cpp")
+    set_target_properties(frondjit PROPERTIES CXX_STANDARD 20)
+    target_include_directories(frondjit PRIVATE "${boost}/include"
+        "${FROND_DYNARMIC}/externals/mcl/include" "${FROND_DYNARMIC}/externals/fmt/include")
+    target_compile_options(frondjit PRIVATE -O2 -g)
+    target_link_libraries(frondjit PRIVATE dynarmic)
+    target_sources(frondcore PRIVATE $<TARGET_OBJECTS:frondjit>)
+    # PUBLIC: icache.h and icache_internal.h change with it.
+    target_compile_definitions(frondcore PUBLIC FROND_DYNARMIC)
+    target_link_libraries(frondcore PRIVATE dynarmic)
+endif()
+
 if(FROND_SELF_TEST)
     # The CPU tests from tests/ run as the synthetic self-test.
     add_library(main SHARED self_test.cpp test_arm_alignment.cpp test_instruction_cache.cpp)

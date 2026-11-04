@@ -1,0 +1,26 @@
+{
+  "revision": "a46601580d5512d324104f985b5f0209dc980ddc",
+  "url": "https://github.com/azahar-emu/dynarmic.git",
+  "dependencies": {
+    "externals/fmt": "7b273fbb541c7c9058800bc613f4291274b2d26e",
+    "externals/mcl": "5fc4beaf331037649b10625736b41365defb4f50",
+    "externals/oaknut": "94c726ce0338b054eb8cb5ea91de8fe6c19f4392",
+    "externals/robin-map": "054ec5ad67440fcd65e0497e5a27ef31f53fcc7f",
+    "externals/xbyak": "8c0098b69f95d02dea47efcdd42ab5aa2d03c72d",
+    "externals/zycore": "0b2432ced0884fd152b471d97ecf0258ff4d859f",
+    "externals/zydis": "bffbb610cfea643b98e87658b9058382f7522807"
+  },
+  "urls": {
+    "externals/fmt": "https://github.com/fmtlib/fmt.git",
+    "externals/mcl": "https://github.com/azahar-emu/mcl.git",
+    "externals/oaknut": "https://github.com/merryhime/oaknut.git",
+    "externals/robin-map": "https://github.com/Tessil/robin-map.git",
+    "externals/xbyak": "https://github.com/herumi/xbyak.git",
+    "externals/zycore": "https://github.com/zyantific/zycore-c.git",
+    "externals/zydis": "https://github.com/zyantific/zydis.git"
+  },
+  "excluded_dependencies": [
+    "externals/biscuit (RISC-V only)",
+    "externals/catch (tests disabled)"
+  ]
+}

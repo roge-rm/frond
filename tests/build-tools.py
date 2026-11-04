@@ -187,7 +187,9 @@ class PackagePolicyTests(unittest.TestCase):
                          'doc/peripherals.md', 'doc/infrared.md', 'doc/bluetooth-provider.md',
                          'doc/peripheral-qualification.md',
                          'vendor/cloudpilot/src/argparse/LICENSE',
-                         'vendor/cloudpilot/src/common/zip/UNLICENSE'):
+                         'vendor/cloudpilot/src/common/zip/UNLICENSE',
+                         *(f'build/dynarmic-trial/src/{path}' for path in policy.DYNARMIC_LICENCES.values())):
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
                 (root / name).write_text('Synthetic fixture, not a Frond release.\n')
             source = root / 'dummy.c'
             source.write_text('#include <stdio.h>\n#include <slirp/libslirp.h>\n'

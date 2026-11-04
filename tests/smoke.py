@@ -6,6 +6,8 @@
 
 Sessions, firmware copies and everything made here stay private under build/smoke/. A device without a
 ready session or firmware is skipped with the command that makes it. A new device is an entry in SMOKE.
+FROND_CORE picks another core binary, like build/frond-jit (make frond-jit) for the Fast engine.
+FROND_DEVICE_IMAGES picks another firmware folder in the layout of /srv/downloads/backup/deviceimages/palm.
 """
 import argparse
 import array
@@ -30,9 +32,10 @@ spec = importlib.util.spec_from_file_location('frond_run', ROOT / 'tools/frond-r
 frond_run = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(frond_run)
 
-CORE = ROOT / 'out/frond'
+CORE = Path(os.environ.get('FROND_CORE') or ROOT / 'out/frond').absolute()
 OUT = ROOT / 'build/smoke'
-PALM = Path('/srv/downloads/backup/deviceimages/palm/Palm')
+# FROND_DEVICE_IMAGES points at another copy of the firmware folder (deviceimages/palm).
+PALM = Path(os.environ.get('FROND_DEVICE_IMAGES') or '/srv/downloads/backup/deviceimages/palm') / 'Palm'
 SDK = ROOT.parent / 'palm-os-sdk/sdk-5r3'
 
 # nor, nand: read-only firmware under PALM. setup: function in tools/palm_boot.py that takes a cold boot to
@@ -89,7 +92,8 @@ class Run:
         else:
             boot = ['--device', device, str(PALM / cfg['nor'])] + (['--nand', str(PALM / cfg['nand'])] if cfg['nand'] else [])
         env = dict(os.environ, SDL_VIDEODRIVER='dummy', SDL_AUDIODRIVER='dummy')
-        command = ['heavy', 'emulator', str(CORE), *boot, *map(str, extra), '--desktop-socket', address]
+        # Under a heavy emulator slot where the machine has heavy (not on Senna).
+        command = (['heavy', 'emulator'] if shutil.which('heavy') else []) + [str(CORE), *boot, *map(str, extra), '--desktop-socket', address]
         if sound:
             env.update(SDL_AUDIODRIVER='disk', SDL_DISKAUDIOFILE=str(sound))
         else:

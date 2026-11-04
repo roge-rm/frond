@@ -139,6 +139,19 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     sonyAudioPreview->setObjectName("sonyAudioPreview");
     soundLayout->addWidget(sonyAudioPreview);
     layout->addWidget(sound);
+    auto* speed = new QGroupBox(tr("Speed"), this);
+    auto* engineRow = new QHBoxLayout(speed);
+    auto* engineLabel = new QLabel(tr("Engine"), speed);
+    engine = new QComboBox(speed);
+    engine->setObjectName("engine");
+    engine->addItem(tr("Exact"), false);
+    engine->addItem(tr("Fast"), true);
+    engine->setCurrentIndex(prefs.fastEngine ? 1 : 0);
+    engineLabel->setBuddy(engine);
+    engineRow->addWidget(engineLabel);
+    engineRow->addWidget(engine, 1);
+    layout->addWidget(speed);
+    speed->setVisible(qEnvironmentVariable("FROND_ENGINE_SETTING") == QLatin1String("1"));
     windowScale->setValue(prefs.scale);
     smoothLcd->setChecked(prefs.smooth);
     audio->setChecked(prefs.audio);
@@ -174,6 +187,7 @@ frondSessions::Preferences MachineSettings::values() const {
     prefs.sonyAudioPreview = sonyAudioPreview->isChecked();
     prefs.showKeyboard = showKeyboard->isChecked();
     prefs.jogControls = frondSessions::JogControls(jogControls->currentData().toInt());
+    prefs.fastEngine = engine->currentData().toBool();
     return prefs;
 }
 void MachineSettings::setDevice(Device device, bool qualified) {

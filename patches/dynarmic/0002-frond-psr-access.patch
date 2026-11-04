@@ -1,0 +1,183 @@
+--- a/src/dynarmic/backend/arm64/a32_address_space.cpp
++++ b/src/dynarmic/backend/arm64/a32_address_space.cpp
+@@ -162,7 +162,7 @@
+ }
+ 
+ IR::Block A32AddressSpace::GenerateIR(IR::LocationDescriptor descriptor) const {
+-    IR::Block ir_block = A32::Translate(A32::LocationDescriptor{descriptor}, conf.callbacks, {conf.arch_version, conf.define_unpredictable_behaviour, conf.hook_hint_instructions});
++    IR::Block ir_block = A32::Translate(A32::LocationDescriptor{descriptor}, conf.callbacks, {conf.arch_version, conf.define_unpredictable_behaviour, conf.hook_hint_instructions, conf.psr_coprocessor});
+ 
+     Optimization::PolyfillPass(ir_block, {});
+     Optimization::NamingPass(ir_block);
+--- a/src/dynarmic/backend/riscv64/a32_address_space.cpp
++++ b/src/dynarmic/backend/riscv64/a32_address_space.cpp
+@@ -24,7 +24,7 @@
+ }
+ 
+ IR::Block A32AddressSpace::GenerateIR(IR::LocationDescriptor descriptor) const {
+-    IR::Block ir_block = A32::Translate(A32::LocationDescriptor{descriptor}, conf.callbacks, {conf.arch_version, conf.define_unpredictable_behaviour, conf.hook_hint_instructions});
++    IR::Block ir_block = A32::Translate(A32::LocationDescriptor{descriptor}, conf.callbacks, {conf.arch_version, conf.define_unpredictable_behaviour, conf.hook_hint_instructions, conf.psr_coprocessor});
+ 
+     Optimization::PolyfillPass(ir_block, {});
+     if (conf.HasOptimization(OptimizationFlag::GetSetElimination)) {
+--- a/src/dynarmic/backend/x64/a32_interface.cpp
++++ b/src/dynarmic/backend/x64/a32_interface.cpp
+@@ -213,7 +213,7 @@
+         }
+         block_of_code.EnsureMemoryCommitted(MINIMUM_REMAINING_CODESIZE);
+ 
+-        IR::Block ir_block = A32::Translate(A32::LocationDescriptor{descriptor}, conf.callbacks, {conf.arch_version, conf.define_unpredictable_behaviour, conf.hook_hint_instructions});
++        IR::Block ir_block = A32::Translate(A32::LocationDescriptor{descriptor}, conf.callbacks, {conf.arch_version, conf.define_unpredictable_behaviour, conf.hook_hint_instructions, conf.psr_coprocessor});
+         Optimization::PolyfillPass(ir_block, polyfill_options);
+         Optimization::NamingPass(ir_block);
+         if (conf.HasOptimization(OptimizationFlag::GetSetElimination) && !conf.check_halt_on_memory_access) {
+--- a/src/dynarmic/frontend/A32/translate/a32_translate.h
++++ b/src/dynarmic/frontend/A32/translate/a32_translate.h
+@@ -4,6 +4,9 @@
+  */
+ #pragma once
+ 
++#include <cstddef>
++#include <optional>
++
+ #include <mcl/stdint.hpp>
+ 
+ #include "dynarmic/interface/A32/arch_version.h"
+@@ -29,6 +32,9 @@
+     /// If this is false, we treat the instruction as a NOP.
+     /// If this is true, we emit an ExceptionRaised instruction.
+     bool hook_hint_instructions = true;
++
++    /// Frond: see UserConfig::psr_coprocessor.
++    std::optional<std::size_t> psr_coprocessor;
+ };
+ 
+ /**
+--- a/src/dynarmic/frontend/A32/translate/impl/a32_translate_impl.h
++++ b/src/dynarmic/frontend/A32/translate/impl/a32_translate_impl.h
+@@ -401,6 +401,7 @@
+     bool arm_MRS(Cond cond, Reg d);
+     bool arm_MSR_imm(Cond cond, unsigned mask, int rotate, Imm<8> imm8);
+     bool arm_MSR_reg(Cond cond, unsigned mask, Reg n);
++    bool frond_PSR(u32 instruction, bool& should_continue);
+     bool arm_RFE();
+     bool arm_SETEND(bool E);
+     bool arm_SRS();
+--- a/src/dynarmic/frontend/A32/translate/impl/status_register_access.cpp
++++ b/src/dynarmic/frontend/A32/translate/impl/status_register_access.cpp
+@@ -4,6 +4,7 @@
+  */
+ 
+ #include <mcl/bit/bit_field.hpp>
++#include <mcl/bit/rotate.hpp>
+ 
+ #include "dynarmic/frontend/A32/translate/impl/a32_translate_impl.h"
+ 
+@@ -102,6 +103,77 @@
+     return true;
+ }
+ 
++// Frond: MRS Rd, SPSR, MSR to SPSR or to CPSR's control, extension and status fields, and
++// the MOVS PC and SUBS PC exception returns, through options.psr_coprocessor. Returns false
++// for anything else, which then decodes as usual (MSR CPSR_f stays a plain flags write).
++bool TranslatorVisitor::frond_PSR(u32 instruction, bool& should_continue) {
++    const auto cond = static_cast<Cond>(instruction >> 28);
++    if (cond == Cond::NV) {
++        return false;
++    }
++    const size_t coproc = *options.psr_coprocessor;
++
++    if ((instruction & 0x0FFF0FFF) == 0x014F0000) {  // MRS Rd, SPSR
++        const auto d = static_cast<Reg>((instruction >> 12) & 0xF);
++        if (d == Reg::PC) {
++            return false;
++        }
++        should_continue = true;
++        if (ArmConditionPassed(cond)) {
++            ir.SetRegister(d, ir.CoprocGetOneWord(coproc, false, 0, CoprocReg::C0, CoprocReg::C0, 0));
++        }
++        return true;
++    }
++
++    // MOVS PC, Rm and SUBS PC, Rn, #imm: exception return, CPSR = SPSR.
++    const bool movs = (instruction & 0x0FFFFFF0) == 0x01B0F000;
++    const bool subs = (instruction & 0x0FF0F000) == 0x0250F000;
++    if (movs || subs) {
++        const auto n = static_cast<Reg>(movs ? instruction & 0xF : (instruction >> 16) & 0xF);
++        if (n == Reg::PC) {
++            return false;
++        }
++        should_continue = true;
++        if (!ArmConditionPassed(cond)) {
++            return true;
++        }
++        IR::U32 target = ir.GetRegister(n);
++        if (subs) {
++            target = IR::U32{ir.Sub(target, ir.Imm32(mcl::bit::rotate_right<u32>(instruction & 0xFF, static_cast<int>((instruction >> 8) & 0xF) * 2)))};
++        }
++        ir.CoprocSendTwoWords(coproc, false, 2, CoprocReg::C0, target, ir.Imm32(0));
++        ir.SetTerm(IR::Term::FastDispatchHint{});
++        should_continue = false;
++        return true;
++    }
++
++    const bool imm = (instruction & 0x0FB0F000) == 0x0320F000;
++    if (!imm && (instruction & 0x0FB0FFF0) != 0x0120F000) {
++        return false;
++    }
++    const bool spsr = mcl::bit::get_bit<22>(instruction);
++    const u32 mask = (instruction >> 16) & 0xF;
++    if (mask == 0 || (!spsr && mask == 0b1000)) {
++        return false;
++    }
++    if (!imm && static_cast<Reg>(instruction & 0xF) == Reg::PC) {
++        return false;
++    }
++
++    should_continue = true;
++    if (!ArmConditionPassed(cond)) {
++        return true;
++    }
++    const IR::U32 value = imm ? ir.Imm32(mcl::bit::rotate_right<u32>(instruction & 0xFF, static_cast<int>((instruction >> 8) & 0xF) * 2))
++                              : ir.GetRegister(static_cast<Reg>(instruction & 0xF));
++    ir.CoprocSendTwoWords(coproc, false, spsr ? 1 : 0, CoprocReg::C0, value, ir.Imm32(mask));
++    if (!spsr) {
++        ir.SetTerm(IR::Term::LinkBlock{ir.current_location.AdvancePC(4)});
++        should_continue = false;
++    }
++    return true;
++}
++
+ // RFE{<amode>} <Rn>{!}
+ bool TranslatorVisitor::arm_RFE() {
+     return InterpretThisInstruction();
+--- a/src/dynarmic/frontend/A32/translate/translate_arm.cpp
++++ b/src/dynarmic/frontend/A32/translate/translate_arm.cpp
+@@ -41,7 +41,9 @@
+             tcb->PreCodeTranslationHook(false, arm_pc, visitor.ir);
+             ticks_for_instruction = tcb->GetTicksForCode(false, arm_pc, *arm_instruction);
+ 
+-            if (const auto vfp_decoder = DecodeVFP<TranslatorVisitor>(*arm_instruction)) {
++            if (options.psr_coprocessor && visitor.frond_PSR(*arm_instruction, should_continue)) {
++                // Frond: privileged status register access, done by frond_PSR.
++            } else if (const auto vfp_decoder = DecodeVFP<TranslatorVisitor>(*arm_instruction)) {
+                 should_continue = vfp_decoder->get().call(visitor, *arm_instruction);
+             } else if (const auto asimd_decoder = DecodeASIMD<TranslatorVisitor>(*arm_instruction)) {
+                 should_continue = asimd_decoder->get().call(visitor, *arm_instruction);
+--- a/src/dynarmic/interface/A32/config.h
++++ b/src/dynarmic/interface/A32/config.h
+@@ -209,6 +209,14 @@
+     // Coprocessors
+     std::array<std::shared_ptr<Coprocessor>, 16> coprocessors{};
+ 
++    /// Frond: when set, MRS SPSR, MSR SPSR and MSR CPSR writes to anything but the flags
++    /// are sent to this coprocessor slot, for a privileged guest. MRS Rd, SPSR is
++    /// GetOneWord (opc1 0). MSR is SendTwoWords with the value and the field mask, opc 0
++    /// for CPSR and 1 for SPSR. MOVS PC, Rm and SUBS PC, Rn, #imm are SendTwoWords opc 2
++    /// with the target, and the callback sets PC and CPSR. A CPSR write ends the block after
++    /// the call, so the callback may change the registers and CPSR in the JIT state.
++    std::optional<std::size_t> psr_coprocessor;
++
+     /// When set to true, UserCallbacks::InstructionSynchronizationBarrierRaised will be
+     /// called when an ISB instruction is executed.
+     /// When set to false, ISB will be treated as a NOP instruction.

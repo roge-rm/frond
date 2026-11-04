@@ -4,6 +4,17 @@ import subprocess
 import tarfile
 import tempfile
 
+# Licence files for Dynarmic and its bundled libraries, installed name: path in the Dynarmic source.
+DYNARMIC_LICENCES = {
+    'dynarmic-LICENSE': 'LICENSE.txt',
+    'fmt-LICENSE': 'externals/fmt/LICENSE',
+    'mcl-LICENSE': 'externals/mcl/LICENSE',
+    'oaknut-LICENSE': 'externals/oaknut/LICENSE',
+    'robin-map-LICENSE': 'externals/robin-map/LICENSE',
+    'xbyak-COPYRIGHT': 'externals/xbyak/COPYRIGHT',
+    'zycore-LICENSE': 'externals/zycore/LICENSE',
+    'zydis-LICENSE': 'externals/zydis/LICENSE',
+}
 FILES = {
     'usr/lib/frond/frond-core': 0o755,
     'usr/bin/frond-desktop': 0o755,
@@ -13,6 +24,7 @@ FILES = {
     **{f'usr/share/doc/frond/{name}': 0o644 for name in (
         'copyright', 'LICENSE', 'argparse-LICENSE', 'zip-UNLICENSE', 'README',
         'peripherals.md', 'infrared.md', 'bluetooth-provider.md', 'peripheral-qualification.md', 'changelog.gz')},
+    **{f'usr/share/doc/frond/{name}': 0o644 for name in DYNARMIC_LICENCES},
 }
 RUNTIME_PACKAGES = ('mtools', 'libslirp0', 'qt6-qpa-plugins', 'qt6-wayland',
                     'libqt6svg6', 'hicolor-icon-theme')

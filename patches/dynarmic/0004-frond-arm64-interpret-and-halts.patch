@@ -1,0 +1,141 @@
+diff --git a/src/dynarmic/backend/arm64/a32_address_space.cpp b/src/dynarmic/backend/arm64/a32_address_space.cpp
+index 91c2f34..7897470 100644
+--- a/src/dynarmic/backend/arm64/a32_address_space.cpp
++++ b/src/dynarmic/backend/arm64/a32_address_space.cpp
+@@ -166,7 +166,7 @@ IR::Block A32AddressSpace::GenerateIR(IR::LocationDescriptor descriptor) const {
+ 
+     Optimization::PolyfillPass(ir_block, {});
+     Optimization::NamingPass(ir_block);
+-    if (conf.HasOptimization(OptimizationFlag::GetSetElimination)) {
++    if (conf.HasOptimization(OptimizationFlag::GetSetElimination) && !conf.check_halt_on_memory_access) {
+         Optimization::A32GetSetElimination(ir_block, {.convert_nzc_to_nz = true});
+         Optimization::DeadCodeElimination(ir_block);
+     }
+@@ -215,6 +215,7 @@ void A32AddressSpace::EmitPrelude() {
+     prelude_info.exclusive_write_memory_32 = EmitExclusiveWriteCallTrampoline<&A32::UserCallbacks::MemoryWriteExclusive32, u32>(code, conf);
+     prelude_info.exclusive_write_memory_64 = EmitExclusiveWriteCallTrampoline<&A32::UserCallbacks::MemoryWriteExclusive64, u64>(code, conf);
+     prelude_info.call_svc = EmitCallTrampoline<&A32::UserCallbacks::CallSVC>(code, conf.callbacks);
++    prelude_info.interpreter_fallback = EmitCallTrampoline<&A32::UserCallbacks::InterpreterFallback>(code, conf.callbacks);
+     prelude_info.exception_raised = EmitCallTrampoline<&A32::UserCallbacks::ExceptionRaised>(code, conf.callbacks);
+     prelude_info.isb_raised = EmitCallTrampoline<&A32::UserCallbacks::InstructionSynchronizationBarrierRaised>(code, conf.callbacks);
+     prelude_info.add_ticks = EmitCallTrampoline<&A32::UserCallbacks::AddTicks>(code, conf.callbacks);
+@@ -379,6 +380,7 @@ EmitConfig A32AddressSpace::GetEmitConfig() {
+         .tpidr_el0{},
+ 
+         .check_halt_on_memory_access = conf.check_halt_on_memory_access,
++        .check_halt_on_link = conf.check_halt_on_link,
+ 
+         .page_table_pointer = mcl::bit_cast<u64>(conf.page_table),
+         .page_table_address_space_bits = 32,
+diff --git a/src/dynarmic/backend/arm64/a64_address_space.cpp b/src/dynarmic/backend/arm64/a64_address_space.cpp
+index e95a1a3..33e361c 100644
+--- a/src/dynarmic/backend/arm64/a64_address_space.cpp
++++ b/src/dynarmic/backend/arm64/a64_address_space.cpp
+@@ -390,6 +390,7 @@ void A64AddressSpace::EmitPrelude() {
+     prelude_info.exclusive_write_memory_64 = EmitExclusiveWriteCallTrampoline<&A64::UserCallbacks::MemoryWriteExclusive64, u64>(code, conf);
+     prelude_info.exclusive_write_memory_128 = EmitExclusiveWrite128CallTrampoline(code, conf);
+     prelude_info.call_svc = EmitCallTrampoline<&A64::UserCallbacks::CallSVC>(code, conf.callbacks);
++    prelude_info.interpreter_fallback = EmitCallTrampoline<&A64::UserCallbacks::InterpreterFallback>(code, conf.callbacks);
+     prelude_info.exception_raised = EmitCallTrampoline<&A64::UserCallbacks::ExceptionRaised>(code, conf.callbacks);
+     prelude_info.isb_raised = EmitCallTrampoline<&A64::UserCallbacks::InstructionSynchronizationBarrierRaised>(code, conf.callbacks);
+     prelude_info.ic_raised = EmitCallTrampoline<&A64::UserCallbacks::InstructionCacheOperationRaised>(code, conf.callbacks);
+diff --git a/src/dynarmic/backend/arm64/address_space.cpp b/src/dynarmic/backend/arm64/address_space.cpp
+index 2c7ae77..5067fff 100644
+--- a/src/dynarmic/backend/arm64/address_space.cpp
++++ b/src/dynarmic/backend/arm64/address_space.cpp
+@@ -239,6 +239,9 @@ void AddressSpace::Link(EmittedBlockInfo& block_info) {
+         case LinkTarget::CallSVC:
+             c.BL(prelude_info.call_svc);
+             break;
++        case LinkTarget::InterpreterFallback:
++            c.BL(prelude_info.interpreter_fallback);
++            break;
+         case LinkTarget::ExceptionRaised:
+             c.BL(prelude_info.exception_raised);
+             break;
+diff --git a/src/dynarmic/backend/arm64/address_space.h b/src/dynarmic/backend/arm64/address_space.h
+index 835566b..7be9509 100644
+--- a/src/dynarmic/backend/arm64/address_space.h
++++ b/src/dynarmic/backend/arm64/address_space.h
+@@ -124,6 +124,7 @@ protected:
+         void* exclusive_write_memory_128;
+ 
+         void* call_svc;
++        void* interpreter_fallback;
+         void* exception_raised;
+         void* dc_raised;
+         void* ic_raised;
+diff --git a/src/dynarmic/backend/arm64/emit_arm64.h b/src/dynarmic/backend/arm64/emit_arm64.h
+index 185cba1..e826fa6 100644
+--- a/src/dynarmic/backend/arm64/emit_arm64.h
++++ b/src/dynarmic/backend/arm64/emit_arm64.h
+@@ -74,6 +74,7 @@ enum class LinkTarget {
+     ExclusiveWriteMemory64,
+     ExclusiveWriteMemory128,
+     CallSVC,
++    InterpreterFallback,
+     ExceptionRaised,
+     InstructionSynchronizationBarrierRaised,
+     InstructionCacheOperationRaised,
+@@ -121,6 +122,8 @@ struct EmitConfig {
+ 
+     // Memory
+     bool check_halt_on_memory_access;
++    // Frond: LinkBlock and PopRSBHint also check for a halt (A32 only).
++    bool check_halt_on_link = false;
+ 
+     // Page table
+     u64 page_table_pointer;
+diff --git a/src/dynarmic/backend/arm64/emit_arm64_a32.cpp b/src/dynarmic/backend/arm64/emit_arm64_a32.cpp
+index 909dde7..99f4af2 100644
+--- a/src/dynarmic/backend/arm64/emit_arm64_a32.cpp
++++ b/src/dynarmic/backend/arm64/emit_arm64_a32.cpp
+@@ -33,8 +33,18 @@ oaknut::Label EmitA32Cond(oaknut::CodeGenerator& code, EmitContext&, IR::Cond co
+ 
+ void EmitA32Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::Terminal terminal, IR::LocationDescriptor initial_location, bool is_single_step);
+ 
+-void EmitA32Terminal(oaknut::CodeGenerator&, EmitContext&, IR::Term::Interpret, IR::LocationDescriptor, bool) {
+-    ASSERT_FALSE("Interpret should never be emitted.");
++// Frond: as the x64 back end, PC is set to the instruction and InterpreterFallback is called
++// for it, then back to the dispatcher.
++void EmitA32Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::Interpret terminal, IR::LocationDescriptor initial_location, bool) {
++    ASSERT_MSG(A32::LocationDescriptor{terminal.next}.TFlag() == A32::LocationDescriptor{initial_location}.TFlag(), "Unimplemented");
++    ASSERT_MSG(A32::LocationDescriptor{terminal.next}.EFlag() == A32::LocationDescriptor{initial_location}.EFlag(), "Unimplemented");
++    ASSERT_MSG(terminal.num_instructions == 1, "Unimplemented");
++
++    code.MOV(W1, A32::LocationDescriptor{terminal.next}.PC());
++    code.STR(W1, Xstate, offsetof(A32JitState, regs) + sizeof(u32) * 15);
++    code.MOV(X2, 1);
++    EmitRelocation(code, ctx, LinkTarget::InterpreterFallback);
++    EmitRelocation(code, ctx, LinkTarget::ReturnToDispatcher);
+ }
+ 
+ void EmitA32Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::ReturnToDispatch, IR::LocationDescriptor, bool) {
+@@ -65,6 +75,11 @@ void EmitA32Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::Li
+ 
+     if (ctx.conf.HasOptimization(OptimizationFlag::BlockLinking) && !is_single_step) {
+         if (ctx.conf.enable_cycle_counting) {
++            // Frond: a halt requested by a callback ends the run at the next linked branch.
++            if (ctx.conf.check_halt_on_link) {
++                code.LDAR(Wscratch0, Xhalt);
++                code.CBNZ(Wscratch0, fail);
++            }
+             code.CMP(Xticks, 0);
+             code.B(LE, fail);
+             EmitBlockLinkRelocation(code, ctx, terminal.next, BlockRelocationType::Branch);
+@@ -97,6 +112,15 @@ void EmitA32Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::Po
+     if (ctx.conf.HasOptimization(OptimizationFlag::ReturnStackBuffer) && !is_single_step) {
+         oaknut::Label fail;
+ 
++        // Frond: loops through returns go back to the dispatcher once the cycles run out or
++        // a halt is requested.
++        if (ctx.conf.check_halt_on_link && ctx.conf.enable_cycle_counting) {
++            code.CMP(Xticks, 0);
++            code.B(LE, fail);
++            code.LDAR(Wscratch0, Xhalt);
++            code.CBNZ(Wscratch0, fail);
++        }
++
+         code.LDR(Wscratch2, SP, offsetof(StackLayout, rsb_ptr));
+         code.AND(Wscratch2, Wscratch2, RSBIndexMask);
+         code.ADD(X2, SP, Xscratch2);

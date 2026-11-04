@@ -1,0 +1,73 @@
+--- a/src/uarm/uarm/jit_dynarmic.cpp
++++ b/src/uarm/uarm/jit_dynarmic.cpp
+@@ -100,16 +100,46 @@
+         codePages.emplace(page, std::move(copy));
+     }
+ 
++    // Pages named by line and range invalidations since the last check. A whole-cache
++    // invalidation, or too many ranges, checks every page.
++    std::vector<uint32_t> checkPages;
++    bool checkAll = false;
++
++    void CheckPage(uint32_t page, std::vector<uint8_t> &copy) {
++        uint8_t now[4096];
++        const bool ok = PageBytes(page, now);
++        if (ok && copy.size() == 4096 && !std::memcmp(now, copy.data(), 4096)) return;
++        stats.pagesChanged++;
++        jit->InvalidateCacheRange(page << 12, 4096);
++        if (ok) copy.assign(now, now + 4096); else copy.clear();
++    }
++
+     void CheckCode() {
+         checkCode = false;
+-        uint8_t now[4096];
+-        for (auto &[page, copy] : codePages) {
+-            const bool ok = PageBytes(page, now);
+-            if (ok && copy.size() == 4096 && !std::memcmp(now, copy.data(), 4096)) continue;
+-            stats.pagesChanged++;
+-            jit->InvalidateCacheRange(page << 12, 4096);
+-            if (ok) copy.assign(now, now + 4096); else copy.clear();
++        if (checkAll) {
++            for (auto &[page, copy] : codePages) CheckPage(page, copy);
++        } else {
++            std::sort(checkPages.begin(), checkPages.end());
++            checkPages.erase(std::unique(checkPages.begin(), checkPages.end()), checkPages.end());
++            for (uint32_t page : checkPages) {
++                const auto it = codePages.find(page);
++                if (it != codePages.end()) CheckPage(page, it->second);
++            }
+         }
++        checkAll = false;
++        checkPages.clear();
++    }
++
++    void NoteInvalidate(uint32_t va, uint32_t size) {
++        checkCode = true;
++        if (checkAll) return;
++        const uint32_t first = va >> 12, last = uint32_t((uint64_t(va) + size - 1) >> 12);
++        if (last - first >= 64 || checkPages.size() >= 1024) {
++            checkAll = true;
++            checkPages.clear();
++            return;
++        }
++        for (uint32_t page = first; page <= last; page++) checkPages.push_back(page);
+     }
+     uint64_t gen = ~0ull;
+     uint64_t budget = 0, ran = 0;
+@@ -248,7 +278,7 @@
+ 
+ void jitInvalidate(FrondJit *j, uint32_t va, uint32_t size) {
+     stats.invalRange++;
+-    j->env.checkCode = true;
++    j->env.NoteInvalidate(va, size);
+ }
+ 
+ void jitInvalidateAll(FrondJit *j, uint32_t pc) {
+@@ -256,6 +286,7 @@
+     auto &e = stats.invalAllPc[pc];
+     if (!e.first++ && stats.on) cpuJitFetch(j->env.cpu, pc & ~3u, &e.second);
+     j->env.checkCode = true;
++    j->env.checkAll = true;
+ }
+ 
+ uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, int &stop) {

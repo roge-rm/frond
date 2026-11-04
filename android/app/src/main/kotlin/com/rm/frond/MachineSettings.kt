@@ -12,6 +12,13 @@ enum class JogControls(val label: String, val arg: String) {
     KEYBOARD("Left of keyboard", "keyboard"),
 }
 
+// CPU engine; arg is the saved name and the core's --engine value. Fast falls back to Exact
+// where the core has no JIT.
+enum class Engine(val label: String, val arg: String) {
+    EXACT("Exact", "exact"),
+    FAST("Fast", "fast"),
+}
+
 // Preferences owned by one added machine, outside the guest's saved state.
 data class MachineSettings(
     val size: ScreenSize = ScreenSize.FIT,
@@ -23,11 +30,14 @@ data class MachineSettings(
     // New machines put the jog controls left of the keyboard.
     val jogControls: JogControls = JogControls.KEYBOARD,
     val sonyAudioPreview: Boolean = false,
+    // Applies at next start.
+    val engine: Engine = Engine.EXACT,
 ) {
     fun json(): JSONObject = JSONObject().put("size", size.name).put("smoothing", smoothing)
         .put("sound", sound).put("fastAudio", fastAudio).put("microphone", microphone)
         .put("showKeyboard", showKeyboard).put("jogControls", jogControls.arg)
         .put("showJogControls", jogControls != JogControls.HIDDEN).put("sonyAudioPreview", sonyAudioPreview)
+        .put("engine", engine.arg)
 
     fun applyTo(settings: Settings) = settings.copy(size = size, smoothing = smoothing, sound = sound)
 
@@ -37,6 +47,7 @@ data class MachineSettings(
         if (tg50Controls && !showKeyboard) add("--hide-keyboard")
         if (tg50Controls) addAll(listOf("--jog-controls", jogControls.arg))
         if (!soundSupported || !sound) add("--no-sound")
+        if (engine == Engine.FAST) addAll(listOf("--engine", engine.arg))
     }
 
     // The core's display command argument, for changing these while it runs.
@@ -62,6 +73,7 @@ data class MachineSettings(
                 showKeyboard = json.optBoolean("showKeyboard", true),
                 jogControls = jogControls(json),
                 sonyAudioPreview = json.optBoolean("sonyAudioPreview", false),
+                engine = Engine.entries.firstOrNull { it.arg == json.optString("engine") } ?: fallback.engine,
             )
         }
     }

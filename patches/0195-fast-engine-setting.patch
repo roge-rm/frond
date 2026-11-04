@@ -1,0 +1,112 @@
+--- a/src/uarm/Makefile
++++ b/src/uarm/Makefile
+@@ -166,6 +166,13 @@
+ OBJECTS_EXTRA_TEST = ../common/libcommon.a
+ OBJECTS_EXTRA_EMCC = ../common/libcommon-wasm.a
+ 
++# Fast engine: FROND_DYNARMIC_SRC is a patched Dynarmic source tree and FROND_DYNARMIC_LIBS its
++# built static libraries, in link order. Without them the core builds with the interpreter only.
++ifneq ($(FROND_DYNARMIC_SRC),)
++SOURCE_CXX_NATIVE += uarm/jit_dynarmic.cpp
++OBJECTS_EXTRA_NATIVE += $(FROND_DYNARMIC_LIBS)
++endif
++
+ BINARY_NATIVE = cp-uarm$(EXE_SUFFIX)
+ BINARY_EMCC = uarm_web.wasm
+ BINARY_TEST = test/test
+@@ -201,3 +208,18 @@
+ LDFLAGS_NATIVE_EXTRA += $(shell pkg-config --libs slirp)
+ CXXFLAGS_TEST_EXTRA += $(shell pkg-config --cflags slirp)
+ LDFLAGS_TEST_EXTRA += $(shell pkg-config --libs slirp)
++
++
++ifneq ($(FROND_DYNARMIC_SRC),)
++CXXFLAGS_NATIVE_EXTRA += -DFROND_DYNARMIC
++$(BUILDDIR_NATIVE)/uarm/jit_dynarmic.o: STD_CXX = -std=c++20
++# Only Dynarmic's headers: the core's include folders hide system ones (uarm/syscall.h).
++$(BUILDDIR_NATIVE)/uarm/jit_dynarmic.o: INCLUDE = -I$(FROND_DYNARMIC_SRC)/src \
++	-I$(FROND_DYNARMIC_SRC)/externals/mcl/include -I$(FROND_DYNARMIC_SRC)/externals/fmt/include
++endif
++
++# CPU.o and icache.o change with FROND_DYNARMIC, so switching it rebuilds them.
++JIT_STAMP := $(BUILDDIR_NATIVE)/.jit-$(if $(FROND_DYNARMIC_SRC),on,off)
++$(BUILDDIR_NATIVE)/uarm/CPU.o $(BUILDDIR_NATIVE)/uarm/icache.o: $(JIT_STAMP)
++$(JIT_STAMP):
++	mkdir -p $(BUILDDIR_NATIVE) && rm -f $(BUILDDIR_NATIVE)/.jit-* && touch $@
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -51,6 +51,7 @@
+ #include "session/session_file5.h"
+ #include "soc_PXA.h"
+ #include "soc_pv.h"
++#include "CPU.h"
+ #include "MachineSession.h"
+ #include "MsProCards.h"
+ #include "MemoryStickImage.h"
+@@ -1144,6 +1145,15 @@
+         .help("preview qualified original TG50 stereo audio")
+         .default_value(false).implicit_value(true);
+ 
++    program.add_argument("--engine")
++        .help("CPU engine: exact (the interpreter) or fast (the JIT, where it's built in)")
++        .metavar("<exact|fast>")
++        .default_value(string("exact"))
++        .action([](const string& value) {
++            if (value != "exact" && value != "fast") throw runtime_error("--engine is exact or fast");
++            return value;
++        });
++
+     program.add_argument("--fast-audio", "--experimental-fast-audio")
+         .help("preview one qualified TX or E2 stereo stream before the firmware audio queue")
+         .default_value(false).implicit_value(true);
+@@ -1319,6 +1329,9 @@
+ 
+     logEnable();
+ 
++    if (!cpuSetFastEngine(program.get("--engine") == "fast"))
++        cerr << "the Fast engine isn't built in here, running Exact" << endl;
++
+     try {
+         if (!run(options)) return 1;
+     } catch (const std::exception& error) {
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -975,6 +975,16 @@
+ #endif
+ }
+ 
++#ifdef FROND_DYNARMIC
++static bool cpuPrvFastEngine;
++bool cpuSetFastEngine(bool fast) {
++    cpuPrvFastEngine = fast;
++    return true;
++}
++#else
++bool cpuSetFastEngine(bool fast) { return !fast; }
++#endif
++
+ void cpuWriteProtectHost(struct ArmCpu *cpu, const uint8_t *host, uint32_t size) {
+ #ifdef FROND_DYNARMIC
+     if (cpu && cpu->jit) jitWriteProtect(cpu->jit, host, size);
+@@ -4477,7 +4487,8 @@
+ 
+ static bool cpuPrvJitWanted() {
+     const char *v = getenv("FROND_JIT");
+-    return !v || strcmp(v, "0");
++    if (v && *v) return strcmp(v, "0") != 0;
++    return cpuPrvFastEngine;
+ }
+ 
+ // One instruction through the interpreter, as cpuCycleLine's slow path does it.
+--- a/src/uarm/uarm/CPU.h
++++ b/src/uarm/uarm/CPU.h
+@@ -123,6 +123,9 @@
+ // Stores to this host RAM range go through the memory callbacks again until each page's
+ // next first write, which marks it dirty. For whoever clears dirty state (the frame buffer).
+ void cpuWriteProtectHost(struct ArmCpu *cpu, const uint8_t *host, uint32_t size);
++// Engine for CPUs made from now on: Fast is the JIT where it's built in, Exact the interpreter.
++// FROND_JIT=1 or 0 in the environment overrides it. Returns false if Fast isn't built in.
++bool cpuSetFastEngine(bool fast);
+ // Host checkpoint repair preserves the separately serialized XScale fetch buffers.
+ // Caller provides ICACHE_FETCH_STATE_WORDS words (see icache.h).
+ void cpuGetInstructionFetchState(ArmCpu*, uint32_t*);
