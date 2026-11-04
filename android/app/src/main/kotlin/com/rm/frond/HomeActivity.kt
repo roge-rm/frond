@@ -13,7 +13,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import com.rm.frond.ui.FirmwareScreen
@@ -24,6 +29,16 @@ import com.rm.frond.ui.MachineSettingsScreen
 import java.io.File
 
 data class MachineDraft(val device: Device, val settings: MachineSettings = MachineSettings(), val sessionId: String? = null)
+
+// Import, export and duplicate run here, so a recreated activity doesn't cancel them or leave the
+// Copying dialog up. The state is shared with whichever HomeModel is current.
+internal object HomeWork {
+    val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    var copying by mutableStateOf(false)
+    var cancellable by mutableStateOf(false)
+    var job: Job? = null
+    var model: HomeModel? = null
+}
 
 // What the home screen shows. Lives in the activity and reloads from storage on resume.
 class HomeModel(private val activity: HomeActivity) {
@@ -39,7 +54,12 @@ class HomeModel(private val activity: HomeActivity) {
     var startAfterImport by mutableStateOf<Device?>(null)
         private set
     var machineDraft by mutableStateOf<MachineDraft?>(null)
-    var copying by mutableStateOf(false)
+    var copying: Boolean
+        get() = HomeWork.copying
+        set(value) { HomeWork.copying = value }
+    val cancellable: Boolean get() = HomeWork.cancellable
+    // A short message for the home screen's snackbar.
+    var notice by mutableStateOf<String?>(null)
     var running by mutableStateOf(false)
         private set
     var settingsOpen by mutableStateOf(false)
@@ -81,6 +101,36 @@ class HomeModel(private val activity: HomeActivity) {
     fun update(changed: Settings) {
         settings = changed
         Settings.save(activity, changed)
+    }
+
+    // Runs `work` off the main thread while the Copying dialog shows. `work` gets a cancel check and
+    // returns an error message or null; a cancel shows nothing.
+    fun runCopy(errorTitle: String, success: String?, cancellable: Boolean = false, reload: Boolean = true,
+                work: (cancelled: () -> Boolean) -> String?) {
+        if (HomeWork.copying) return
+        HomeWork.copying = true
+        HomeWork.cancellable = cancellable
+        HomeWork.job = HomeWork.scope.launch {
+            var error: String? = null
+            var finished = false
+            try {
+                error = withContext(Dispatchers.IO) { work { !isActive } }
+                finished = true
+            } finally {
+                HomeWork.copying = false
+                HomeWork.cancellable = false
+                HomeWork.job = null
+                val current = HomeWork.model
+                if (reload) current?.reload()
+                if (finished && error == COPY_CANCELLED) Unit
+                else if (finished && error != null) current?.alert = errorTitle to error
+                else if (finished) current?.notice = success
+            }
+        }
+    }
+
+    fun cancelCopy() {
+        if (HomeWork.cancellable) HomeWork.job?.cancel()
     }
 
     fun reload() {
@@ -224,8 +274,14 @@ class HomeActivity : ComponentActivity() {
     private val model = HomeModel(this)
     private var processWatch: Job? = null
 
+    override fun onDestroy() {
+        if (HomeWork.model === model) HomeWork.model = null
+        super.onDestroy()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        HomeWork.model = model
         model.restore(savedInstanceState)
         enableEdgeToEdge()
         setContent {

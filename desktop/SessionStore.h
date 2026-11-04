@@ -3,6 +3,7 @@
 
 #include <QDateTime>
 #include <QDir>
+#include <QCoreApplication>
 #include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
@@ -11,10 +12,12 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSaveFile>
+#include <QStorageInfo>
 #include <QLockFile>
 #include <QString>
 #include <algorithm>
 #include <filesystem>
+#include <functional>
 #include <zlib.h>
 #include "FirmwareInput.h"
 
@@ -242,7 +245,8 @@ inline QString cleanName(QString name) {
 inline bool ignoredName(const QString& name) {
     return name.contains(".frond.tmp-") || name.contains(".frondsd.tmp-") ||
            name.contains(".frondms.tmp-") || name.contains(".frondsd.journal-") ||
-           name.contains(".frondmsp.journal-") || name.contains(".gen-");
+           name.contains(".frondmsp.journal-") || name.contains(".gen-") ||
+           name.startsWith(".dup-");
 }
 inline bool packableName(const QString& name) {
     if (ignoredName(name) || name.contains('/')) return false;
@@ -425,9 +429,26 @@ inline void migrateLoose(const QString& folder) {
     }
 }
 
+// Removes hidden copy folders left by a crashed duplicate: not locked, and untouched for ten minutes.
+inline void removeStaleCopies(const QString& folder) {
+    for (const auto& entry : QDir(folder).entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden)) {
+        if (!entry.fileName().startsWith(".dup-")) continue;
+        QLockFile lock(entry.absoluteFilePath() + ".lock");
+        lock.setStaleLockTime(0);
+        if (!lock.tryLock()) continue;
+        QDateTime newest = entry.lastModified();
+        for (const auto& child : QDir(entry.absoluteFilePath()).entryInfoList(QDir::Files | QDir::Hidden))
+            newest = std::max(newest, child.lastModified());
+        if (newest.secsTo(QDateTime::currentDateTime()) > 600) QDir(entry.absoluteFilePath()).removeRecursively();
+        lock.unlock();
+        if (!QFileInfo::exists(entry.absoluteFilePath())) QFile::remove(entry.absoluteFilePath() + ".lock");
+    }
+}
+
 // Newest first.
 inline QList<Info> list(const QString& folder) {
     migrateLoose(folder);
+    removeStaleCopies(folder);
     QList<Info> sessions;
     for (const auto& entry : QDir(folder).entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot)) {
         if (ignoredName(entry.fileName())) continue;
@@ -667,6 +688,118 @@ inline QString remove(const Info& info) {
     }
     for (const auto& path : {info.path, markerPath(info.path), preferencesPath(info.path)})
         if (QFileInfo::exists(path) && !QFile::remove(path)) return QStringLiteral("Couldn't delete the session.");
+    return {};
+}
+
+// "Palm TX 2" gives "Palm TX" when a machine called "Palm TX" exists; "Zire 72" stays as it is.
+inline QString baseNameOf(const QString& folder, const QString& name) {
+    const auto space = name.lastIndexOf(' ');
+    if (space <= 0 || space == name.size() - 1) return name;
+    bool number = false;
+    const auto digits = name.mid(space + 1);
+    digits.toInt(&number);
+    if (!number || digits.startsWith('-') || digits.startsWith('+')) return name;
+    const auto base = name.left(space).trimmed();
+    return !base.isEmpty() && taken(folder, base) ? base : name;
+}
+// The next free "<base> N" for a copy of `name`, counting up from 2.
+inline QString copyName(const QString& folder, const QString& name) {
+    const auto base = baseNameOf(folder, name);
+    int n = 2;
+    while (taken(folder, base + ' ' + QString::number(n))) n++;
+    return base + ' ' + QString::number(n);
+}
+
+// Called with bytes done and in total; returns false to cancel.
+using CopyProgress = std::function<bool(qint64, qint64)>;
+
+inline bool copyChunked(const QString& from, const QString& to, qint64* done, qint64 total, const CopyProgress& progress) {
+    QFile in(from), out(to);
+    if (!in.open(QIODevice::ReadOnly) || !out.open(QIODevice::WriteOnly)) return false;
+    QByteArray buffer(1 << 20, Qt::Uninitialized);
+    for (;;) {
+        const auto n = in.read(buffer.data(), buffer.size());
+        if (n < 0) return false;
+        if (n == 0) break;
+        if (out.write(buffer.constData(), n) != n) return false;
+        *done += n;
+        if (progress && !progress(*done, total)) return false;
+    }
+    return out.flush() && !in.error();
+}
+
+// Makes an independent copy of a machine under the next free numbered name: its session, settings
+// and card files. Takes the source's lock, so a machine that is open fails. The copy is deleted if
+// it fails, is cancelled or the disk is too full.
+inline QString duplicate(const QString& folder, const Info& info, QString* newName = nullptr, const CopyProgress& progress = {}) {
+    if (info.old) return QStringLiteral("This session was saved by an older Frond.");
+    QLockFile lock(info.path + ".lock");
+    lock.setStaleLockTime(0);
+    if (!lock.tryLock()) return QStringLiteral("This session is open in another Frond.");
+    const auto fromDir = machineDirOf(info.path);
+    const QString failed = QStringLiteral("Couldn't duplicate the session.");
+    if (!QDir().mkpath(folder)) return failed;
+    // Built in a hidden folder that list() ignores, under its own lock, and renamed into place when complete.
+    const auto hidden = folder + "/.dup-" + QString::number(QCoreApplication::applicationPid()) + '-' +
+                        QString::number(QDateTime::currentMSecsSinceEpoch());
+    QLockFile hold(hidden + ".lock");
+    hold.setStaleLockTime(0);
+    if (!hold.tryLock() || !QDir().mkpath(hidden)) return failed;
+    const QString dest = hidden;
+    QString name = copyName(folder, info.name);
+    const auto fail = [&](const QString& message) {
+        QDir(dest).removeRecursively();
+        hold.unlock();
+        QFile::remove(hidden + ".lock");
+        return message;
+    };
+    const auto frond = dest + '/' + name + ".frond";
+    QList<QPair<QString, QString>> jobs;  // source, destination
+    SdSettle settle;
+    qint64 total = 0;
+    if (info.saved) {
+        settle = sdSettleOf(fromDir, info.path);
+        for (const auto& entry : QDir(fromDir).entryInfoList(QDir::Files)) {
+            if (!packableName(entry.fileName())) continue;
+            auto source = entry.absoluteFilePath();
+            if (!settle.full.isEmpty() && entry.fileName() == settle.sibling) source = settle.full;
+            jobs.append({source, dest + '/' + packableDestName(entry.fileName(), name)});
+            total += QFileInfo(source).size();
+        }
+        if (!settle.full.isEmpty()) {
+            const auto card = dest + '/' + settle.sibling;
+            const bool listed = std::any_of(jobs.cbegin(), jobs.cend(), [&](const auto& job) { return job.second == card; });
+            if (!listed) {
+                jobs.append({settle.full, card});
+                total += QFileInfo(settle.full).size();
+            }
+        }
+        if (jobs.isEmpty()) return fail(failed);
+    } else {
+        QFile marker(markerPath(frond));
+        if (!marker.open(QIODevice::WriteOnly) || marker.write(info.device.toUtf8()) < 0) return fail(failed);
+        const auto prefs = preferencesPath(info.path);
+        if (QFileInfo::exists(prefs)) jobs.append({prefs, preferencesPath(frond)});
+    }
+    const auto free = QStorageInfo(folder).bytesAvailable();
+    if (free >= 0 && free < total + (16 << 20))
+        return fail(QStringLiteral("Not enough free space to duplicate %1. It needs %2 MB.").arg(info.name).arg(total / 1000000 + 1));
+    qint64 done = 0;
+    bool cancelled = false;
+    const CopyProgress watch = [&](qint64 n, qint64 all) {
+        if (progress && !progress(n, all)) cancelled = true;
+        return !cancelled;
+    };
+    for (const auto& [source, target] : jobs)
+        if (!copyChunked(source, target, &done, total, watch))
+            return fail(cancelled ? QStringLiteral("Duplicate cancelled.") : failed);
+    if (!settle.journal.isEmpty() && !applySdJournalCopy(settle.journal, dest + '/' + settle.sibling)) return fail(failed);
+    if (taken(folder, name)) return fail(failed);
+    const auto target = machineDir(folder, name);
+    hold.unlock();
+    if (!QDir().rename(hidden, target)) { QDir(dest).removeRecursively(); QFile::remove(hidden + ".lock"); return failed; }
+    QFile::remove(hidden + ".lock");
+    if (newName) *newName = name;
     return {};
 }
 

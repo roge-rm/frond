@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "Dialogs.h"
 #include "FirmwareStore.h"
 #include "AudioQualification.h"
@@ -30,7 +31,12 @@ FirmwareDialog::FirmwareDialog(const QString& root, Device preselect, QWidget* p
     device->setObjectName("device");
     // Items hold the device's fixed name; empty detects.
     device->addItem(tr("Detect from the NOR image"), QString());
-    for (auto d : frondFirmware::devices) device->addItem(frondFirmware::deviceName(d), frondFirmware::deviceId(d));
+    // Sorted by name here; the device list itself keeps its order.
+    QList<Device> sorted(std::begin(frondFirmware::devices), std::end(frondFirmware::devices));
+    std::stable_sort(sorted.begin(), sorted.end(), [](Device a, Device b) {
+        return QString::localeAwareCompare(frondFirmware::deviceName(a), frondFirmware::deviceName(b)) < 0;
+    });
+    for (auto d : sorted) device->addItem(frondFirmware::deviceName(d), frondFirmware::deviceId(d));
     device->setCurrentIndex(std::max(0, device->findData(frondFirmware::deviceId(preselect))));
     form->addRow(tr("Device"), device);
     auto field = [&](const QString& label, const QString& key) {
