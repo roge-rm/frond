@@ -78,6 +78,7 @@ uint64_t palmEpochSeconds() {
 }
 
 int main(int argc, char** argv) {
+    cpuSetJitSync(true);  // Fast compiles where asked for, so runs repeat
     try {
         if (argc==4 && std::string(argv[1])=="--check-replay") {
             replay(argv[2],number(argv[3],600000)); return 0;

@@ -185,6 +185,7 @@ uint64_t palmEpochSeconds() {
 }
 
 int main(int argc, char** argv) {
+    cpuSetJitSync(true);  // Fast compiles where asked for, so runs repeat
     try {
         const std::string mode = argc > 1 ? argv[1] : "";
         if (argc != 3 || (mode != "exact" && mode != "fast")) {

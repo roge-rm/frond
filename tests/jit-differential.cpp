@@ -21,6 +21,8 @@
 // --max-unchecked L sets the JIT's unchecked limit (FROND_JIT_MAX_UNCHECKED) for the run.
 // --hot N compiles a block once its start has been reached N times (FROND_JIT_HOT), with the
 // code before that in the interpreter. The default is 1, every block at once.
+// Fast compiles in sync mode (each block where it was asked for), unless --thread, which
+// compiles in the background as in normal play, so where runs stop doesn't repeat.
 #include <algorithm>
 #include <cassert>
 #include <chrono>
@@ -30,6 +32,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "CPU.h"
@@ -106,6 +109,7 @@ struct Machine {
     ArmCpu* cpu = nullptr;
     uint8_t* ram = nullptr;
     Pxa270wmmx* wmmx = nullptr;
+    ArmMem* mem = nullptr;
 };
 
 Machine makeMachine(bool fast) {
@@ -122,6 +126,7 @@ Machine makeMachine(bool fast) {
     ArmRam* ram = ramInit(mem, nullptr, 0, kRamSize, &buf, true);
     ramSetNoFramebuffer(ram);
     m.ram = buf.buffer;
+    m.mem = mem;
     static PacePatch pace{};
     PatchDispatch* pd = initPatchDispatch();
     m.cpu = cpuInit(kSetup, mem, ARM_MEMORY_SYSTEM_MMU, true, false, -1, 0x69054114, 0x0b16a16a, pd, &pace,
@@ -148,6 +153,8 @@ bool atSpin(Machine& m) {
     return !(pc & 3) && w == kSpinArm;
 }
 
+bool gThread = false;  // --thread: Fast compiles on the compile thread
+
 struct RunResult {
     bool stopped = false;
     uint64_t ran = 0;        // instructions run, for Exact (which steps one at a time)
@@ -169,6 +176,8 @@ RunResult run(Machine& m, uint64_t scheduleSeed, uint64_t limit) {
             const uint32_t k = s.below(100);
             b = k < 10 ? 1 : k < 30 ? 2 + s.below(19) : k < 70 ? 21 + s.below(180) : k < 95 ? 201 + s.below(1800) : 5000;
         }
+        // With the compile thread, sometimes give it time so blocks install between calls.
+        if (m.fast && gThread && s.below(4) == 0) std::this_thread::sleep_for(std::chrono::microseconds(s.below(200)));
         const uint32_t ran = cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, b);
         if (ran > b && ran - b > r.worstOver) r.worstOver = ran - b;
         r.ran += ran ? ran : 1;
@@ -1686,6 +1695,61 @@ bool directed(Engines& e) {
 // the JIT doesn't move the buffers on, so without that it kept the old line long after
 // Exact had refetched. The state is also saved in Fast and loaded in a fresh Exact CPU, as
 // a session would be, which then has no old line either.
+// A block compiled on the compile thread with a link to B, whose code is rewritten before
+// the block installs: the installed block has to run the new B. Fast only, thread on.
+// 0: as expected, -1: not.
+int staleLink() {
+    const char* name = "link to a block rewritten before install";
+    cpuSetJitSync(false);
+    static Machine m = makeMachine(true);
+    cpuSetJitSync(!gThread);
+    Case c = generate(99);
+    c.items.clear();
+    c.codeCacheable = false;
+    Item end;
+    end.kind = "end";
+    end.removable = false;
+    end.ins.push_back({kSpinArm, false});
+    c.items.push_back(end);
+    Assembled a = assemble(c);
+    const uint32_t A = kCode, B = kCode + 0x1000, S = kCode + 0x2000;  // separate pages
+    auto put = [&](uint32_t addr, uint32_t v) { memcpy(&a.image[addr], &v, 4); };
+    put(A, 0xe3a05000);      // mov r5, #0
+    put(A + 4, 0xea0003fd);  // b B
+    put(B, 0xe3a05001);      // mov r5, #1 (rewritten to mov r5, #2)
+    put(B + 4, 0xea0003fd);  // b S
+    put(S, kSpinArm);
+    a.start = B;
+    a.thumb = false;
+    c.cpsr = SVC | 0xc0;
+    prepare(m, c, a);
+    auto runFrom = [&](uint32_t pc) {
+        cpuSetReg(m.cpu, 15, pc);
+        cpuSetReg(m.cpu, 5, 9);
+        for (int i = 0; i < 100 && !(atSpin(m) && cpuGetRegisters(m.cpu)[15] == S); ++i)
+            cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, 50);
+        return cpuGetRegisters(m.cpu)[15] == S ? cpuGetRegExternal(m.cpu, 5) : 99u;
+    };
+    // B compiled and installed.
+    for (int i = 0; i < 20; ++i) {
+        runFrom(B);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    // A queued, and emitted linked to B while the run waits.
+    const uint32_t before = runFrom(A);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    // B rewritten from outside the run, so its block is dropped before A installs.
+    const uint32_t word = 0xe3a05002;
+    memAccess(m.mem, B, 4, true, (void*)&word);
+    const uint32_t after = runFrom(A), again = runFrom(A);
+    printf("%s: r5 %u before, %u and %u after the rewrite\n", name, before, after, again);
+    if (before != 1 || after != 2 || again != 2) {
+        printf("FAIL %s: expected 1, then 2\n", name);
+        return -1;
+    }
+    return 0;
+}
+
 struct CpuSaver {
     ArmCpu* cpu;
     template <class T>
@@ -1809,6 +1873,7 @@ int main(int argc, char** argv) {
     bool single = false, show = false, runDirected = true, open = false;
     double duration = 0;
     setenv("FROND_JIT_HOT", "1", 1);
+    cpuSetJitSync(true);
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--seed" && i + 1 < argc) {
@@ -1826,6 +1891,9 @@ int main(int argc, char** argv) {
             setenv("FROND_JIT_MAX_UNCHECKED", argv[++i], 1);
         } else if (a == "--hot" && i + 1 < argc) {
             setenv("FROND_JIT_HOT", argv[++i], 1);
+        } else if (a == "--thread") {
+            cpuSetJitSync(false);
+            gThread = true;
         } else if (a == "--verbose") {
             gVerbose = true;
         } else if (a == "--trace") {
@@ -1837,7 +1905,7 @@ int main(int argc, char** argv) {
         } else {
             fprintf(stderr,
                     "usage: %s [--seed N [--show] [--trace]] [--seeds A:B] [--duration S] [--no-directed]\n"
-                    "       [--max-unchecked L] [--hot N] [--verbose]\n",
+                    "       [--max-unchecked L] [--hot N] [--thread] [--verbose]\n",
                     argv[0]);
             return 2;
         }
@@ -1868,6 +1936,7 @@ int main(int argc, char** argv) {
         ok = directed(e) && ok;
         ok = fetchBuffer(e, true) == 0 && ok;
         ok = fetchBuffer(e, false) == 0 && ok;
+        ok = staleLink() == 0 && ok;
     }
     const auto t0 = std::chrono::steady_clock::now();
     auto elapsed = [&] { return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(); };

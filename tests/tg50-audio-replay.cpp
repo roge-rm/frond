@@ -173,6 +173,7 @@ static int brokenBound() {
 #endif
 
 int main(int argc, char** argv) {
+    cpuSetJitSync(true);  // Fast compiles where asked for, so runs repeat
     const std::string mode = argc > 1 ? argv[1] : "";
 #ifdef FROND_BROKEN_BOUND
     if (mode == "broken-bound") { unsetenv("FROND_JIT"); return brokenBound(); }
