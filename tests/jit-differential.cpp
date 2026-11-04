@@ -19,6 +19,8 @@
 // build/test-jit-differential --seeds A:B [--duration S] [--no-directed]
 //                                           seeds A to B-1 (A: for no end), for at most S s
 // --max-unchecked L sets the JIT's unchecked limit (FROND_JIT_MAX_UNCHECKED) for the run.
+// --hot N compiles a block once its start has been reached N times (FROND_JIT_HOT), with the
+// code before that in the interpreter. The default is 1, every block at once.
 #include <algorithm>
 #include <cassert>
 #include <chrono>
@@ -1806,6 +1808,7 @@ int main(int argc, char** argv) {
     uint64_t first = 1, last = 30001, one = 0;
     bool single = false, show = false, runDirected = true, open = false;
     double duration = 0;
+    setenv("FROND_JIT_HOT", "1", 1);
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--seed" && i + 1 < argc) {
@@ -1821,6 +1824,8 @@ int main(int argc, char** argv) {
             duration = atof(argv[++i]);
         } else if (a == "--max-unchecked" && i + 1 < argc) {
             setenv("FROND_JIT_MAX_UNCHECKED", argv[++i], 1);
+        } else if (a == "--hot" && i + 1 < argc) {
+            setenv("FROND_JIT_HOT", argv[++i], 1);
         } else if (a == "--verbose") {
             gVerbose = true;
         } else if (a == "--trace") {
@@ -1832,7 +1837,7 @@ int main(int argc, char** argv) {
         } else {
             fprintf(stderr,
                     "usage: %s [--seed N [--show] [--trace]] [--seeds A:B] [--duration S] [--no-directed]\n"
-                    "       [--max-unchecked L] [--verbose]\n",
+                    "       [--max-unchecked L] [--hot N] [--verbose]\n",
                     argv[0]);
             return 2;
         }
