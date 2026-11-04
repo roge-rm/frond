@@ -227,6 +227,26 @@ test-jit-overshoot: out/frond
 		$(CPU_TEST_LDLIBS) -o build/test-jit-overshoot
 	./build/test-jit-overshoot
 
+# Random ARM and Thumb blocks run on both engines and compared, plus directed tests.
+# Seeds 1 to 30000 and the directed tests, then 30001 to 40000 with an unchecked limit of 256.
+# JIT_DIFF_ARGS="--seeds 1: --duration 3600" for a long run, "--seed N" for one case.
+.PHONY: test-jit-differential build/test-jit-differential
+ifeq ($(FROND_FAST),1)
+test: test-jit-differential
+endif
+build/test-jit-differential: out/frond
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/jit-differential-core.rsp
+	$(CXX) -std=c++17 -O2 -g \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/jit-differential.cpp @build/jit-differential-core.rsp build/source/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-jit-differential
+test-jit-differential: build/test-jit-differential
+	@# The core logs every guest data abort to stderr, so that goes to a file.
+	./build/test-jit-differential $(JIT_DIFF_ARGS) 2>build/jit-differential.err || \
+		{ grep -v ' failed (pc=' build/jit-differential.err | tail -5; exit 1; }
+	test -n "$(JIT_DIFF_ARGS)" || ./build/test-jit-differential --seeds 30001:40001 --no-directed --max-unchecked 256 \
+		2>build/jit-differential.err || { grep -v ' failed (pc=' build/jit-differential.err | tail -5; exit 1; }
+
 .PHONY: test-arm-conditions benchmark-menu
 test-arm-conditions: out/frond
 	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/conditions-core.rsp
@@ -767,6 +787,19 @@ test-tg50-audio-replay: out/frond
 		$(CPU_TEST_LDLIBS) -o build/test-tg50-audio-replay
 	ulimit -c 0; ./build/test-tg50-audio-replay exact
 	ulimit -c 0; ./build/test-tg50-audio-replay fast
+
+# Negative check: admission is told a smaller bound than the JIT keeps to, and the reservation
+# debug counter has to report overruns.
+.PHONY: test-audio-reservation-negative
+ifeq ($(FROND_FAST),1)
+test: test-audio-reservation-negative
+endif
+test-audio-reservation-negative: out/frond
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/tg50-audio-replay-core.rsp
+	$(CXX) -std=c++17 -O1 -g -DFROND_BROKEN_BOUND -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/tg50-audio-replay.cpp @build/tg50-audio-replay-core.rsp build/source/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -Wl,--wrap=_Z21cpuMaxOvershootCyclesPK6ArmCpu -o build/test-audio-reservation-negative
+	ulimit -c 0; FROND_AUDIO_RESERVATION_STATS=1 ./build/test-audio-reservation-negative broken-bound
 
 # Needs a private TG50 session with the Voice Recorder ready to play: TG50_PREVIEW_SESSION=path.
 .PHONY: test-tg50-preview-replay

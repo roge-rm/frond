@@ -124,6 +124,21 @@ if(FROND_DYNARMIC AND ANDROID_ABI MATCHES "^(arm64-v8a|x86_64)$")
     target_link_libraries(frondcore PRIVATE dynarmic)
 endif()
 
+# The JIT differential test (tests/jit-differential.cpp) and benchmark-replay as command-line
+# programs, built with -Pfrond.jitDifferential=true, for adb push to /data/local/tmp.
+option(FROND_JIT_DIFFERENTIAL "Also build the jit-differential program" OFF)
+if(FROND_JIT_DIFFERENTIAL AND TARGET dynarmic)
+    add_executable(jit-differential "${FROND_CORE}/../../tests/jit-differential.cpp")
+    target_compile_options(jit-differential PRIVATE -O2 -g)
+    target_link_libraries(jit-differential PRIVATE frondcore dynarmic log)
+    # tools/benchmark-replay.cpp too, for Bike and FrondBench speed and hashes on a device.
+    add_executable(benchmark-replay "${FROND_CORE}/../../tools/benchmark-replay.cpp")
+    target_include_directories(benchmark-replay PRIVATE "${FROND_CORE}/../../tools")
+    target_compile_definitions(benchmark-replay PRIVATE SDL_MAIN_HANDLED)
+    target_compile_options(benchmark-replay PRIVATE -O2 -g)
+    target_link_libraries(benchmark-replay PRIVATE frondcore SDL2 SDL2_image log)
+endif()
+
 if(FROND_SELF_TEST)
     # The CPU tests from tests/ run as the synthetic self-test.
     add_library(main SHARED self_test.cpp test_arm_alignment.cpp test_instruction_cache.cpp)
