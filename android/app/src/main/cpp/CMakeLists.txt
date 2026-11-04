@@ -139,12 +139,37 @@ if(FROND_JIT_DIFFERENTIAL AND TARGET dynarmic)
     target_link_libraries(benchmark-replay PRIVATE frondcore SDL2 SDL2_image log)
 endif()
 
+# Cloudpilot's 68k core for DragonBall devices. Built here so both ABIs keep compiling; it goes
+# into its own libmain68k.so later, never into libmain.so, as both cores define the same UAE symbols.
+set(CLOUDPILOT "${FROND_CORE}/src/cloudpilot")
+core_sources("${CLOUDPILOT}" SOURCE_C cloudpilot_c)
+core_sources("${CLOUDPILOT}" SOURCE_CXX cloudpilot_cxx)
+execute_process(
+    COMMAND make -s --no-print-directory -C "${CLOUDPILOT}"
+        -f Makefile -f "${CMAKE_CURRENT_BINARY_DIR}/print.mk" frond-print-INCLUDE
+    OUTPUT_VARIABLE cloudpilot_flags OUTPUT_STRIP_TRAILING_WHITESPACE
+    COMMAND_ERROR_IS_FATAL ANY)
+separate_arguments(cloudpilot_flags UNIX_COMMAND "${cloudpilot_flags}")
+set(cloudpilot_include)
+foreach(flag ${cloudpilot_flags})
+    string(REGEX REPLACE "^-I" "${CLOUDPILOT}/" dir "${flag}")
+    list(APPEND cloudpilot_include "${dir}")
+endforeach()
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CLOUDPILOT}/Makefile")
+add_library(frond68kcore STATIC ${cloudpilot_c} ${cloudpilot_cxx})
+target_include_directories(frond68kcore PUBLIC ${cloudpilot_include})
+target_compile_definitions(frond68kcore PUBLIC EMULATION_LEVEL=EMULATION_UNIX)
+target_compile_options(frond68kcore PRIVATE -O2 -g
+    -Wno-unused-parameter -Wno-pragma-pack -Wno-multichar -Wno-unknown-pragmas
+    -Wno-missing-field-initializers)
+
 if(FROND_SELF_TEST)
     # The CPU tests from tests/ run as the synthetic self-test.
     add_library(main SHARED self_test.cpp test_arm_alignment.cpp test_instruction_cache.cpp)
     target_include_directories(main PRIVATE "${FROND_CORE}/../../tests")
     target_compile_options(main PRIVATE -O2)
     target_link_libraries(main PRIVATE frondcore SDL2 SDL2main log)
+    add_dependencies(main frond68kcore)
     return()
 endif()
 
@@ -158,3 +183,4 @@ target_compile_options(main PRIVATE -O2 -g
     -Wno-unused-parameter -Wno-unknown-pragmas -Wno-visibility
     -Wno-constant-conversion -Wno-constant-logical-operand)
 target_link_libraries(main PRIVATE frondcore SDL2 SDL2main SDL2_image log)
+add_dependencies(main frond68kcore)
