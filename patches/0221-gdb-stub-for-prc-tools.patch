@@ -1,0 +1,116 @@
+diff --git a/src/cloudpilot/native/DebugSupport.cpp b/src/cloudpilot/native/DebugSupport.cpp
+index 326b9f0..a2f3595 100644
+--- a/src/cloudpilot/native/DebugSupport.cpp
++++ b/src/cloudpilot/native/DebugSupport.cpp
+@@ -1,6 +1,8 @@
+ #include "DebugSupport.h"
+ 
++#include <cstring>
+ #include <iomanip>
++#include <optional>
+ 
+ #include "Debugger.h"
+ #include "Defer.h"
+@@ -60,24 +62,52 @@ namespace {
+     }
+ }  // namespace
+ 
++namespace {
++    // The .text section of an m68k COFF executable, as prc-tools' m68k-palmos-gcc links: file
++    // header (20 bytes, big-endian, magic 0x0150), optional header, then 40-byte section headers.
++    optional<ElfParser::Section> coffText(const uint8* data, size_t size) {
++        auto get16 = [&](size_t at) { return uint32(data[at] << 8 | data[at + 1]); };
++        auto get32 = [&](size_t at) { return get16(at) << 16 | get16(at + 2); };
++        if (size < 20 || get16(0) != 0x0150) return nullopt;
++        const size_t sections = get16(2), first = 20 + get16(16);
++        for (size_t i = 0; i < sections && first + 40 * (i + 1) <= size; ++i) {
++            const uint8* header = data + first + 40 * i;
++            if (memcmp(header, ".text\0", 6) != 0) continue;
++            ElfParser::Section section{};
++            section.name = ".text";
++            section.virtualAddress = get32(first + 40 * i + 12);
++            section.size = get32(first + 40 * i + 16);
++            section.offset = get32(first + 40 * i + 20);
++            if (section.offset > size || section.size > size - section.offset) return nullopt;
++            return section;
++        }
++        return nullopt;
++    }
++}  // namespace
++
+ void debug_support::SetApp(const uint8* elfData, size_t elfSize, const char* dbName,
+                            GdbStub& gdbStub, Debugger& debugger) {
+-    ElfParser parser;
++    optional<ElfParser::Section> sectionText = coffText(elfData, elfSize);
+ 
+-    try {
+-        parser.Parse(elfData, elfSize);
+-    } catch (const ElfParser::EInvalidElf& e) {
+-        cout << e.GetReason() << endl << flush;
+-        return;
+-    }
++    if (!sectionText) {
++        ElfParser parser;
+ 
+-    if (parser.GetMachine() != 0x04) {
+-        cout << "bad architecture" << endl << flush;
+-        return;
++        try {
++            parser.Parse(elfData, elfSize);
++        } catch (const ElfParser::EInvalidElf& e) {
++            cout << e.GetReason() << endl << flush;
++            return;
++        }
++
++        if (parser.GetMachine() != 0x04) {
++            cout << "bad architecture" << endl << flush;
++            return;
++        }
++
++        sectionText = parser.GetSection(".text");
+     }
+ 
+-    const auto sectionText = parser.GetSection(".text");
+-    if (!sectionText.has_value()) {
++    if (!sectionText.has_value() || sectionText->size == 0) {
+         cout << ".text not found in binary" << endl << flush;
+         return;
+     }
+@@ -112,7 +142,8 @@ emuptr debug_support::FindRegion(const uint8* region, size_t regionSize, emuptr
+                                  size_t size) {
+     if (regionSize > size) return 0xffffffff;
+ 
+-    for (emuptr address = start; address < start + size - regionSize; address++) {
++    // <=: the region may fill the whole range, as an app's code resource does.
++    for (emuptr address = start; address <= start + size - regionSize; address++) {
+         for (emuptr i = 0; i < regionSize; i++)
+             if (region[i] != EmMemGet8(i + address)) goto nextAddress;
+ 
+diff --git a/src/cloudpilot/native/GdbStub.cpp b/src/cloudpilot/native/GdbStub.cpp
+index 5f107a6..a05bcfb 100644
+--- a/src/cloudpilot/native/GdbStub.cpp
++++ b/src/cloudpilot/native/GdbStub.cpp
+@@ -125,7 +125,8 @@ void GdbStub::Listen() {
+         .sin_port = htons(listenPort),
+     };
+ 
+-    sa.sin_addr.s_addr = htonl(INADDR_ANY);
++    // Loopback only: the stub reads and writes all of the guest's memory.
++    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+ 
+     int newSock = withRetry(socket, PF_INET, SOCK_STREAM, 0);
+     if (newSock < 0) {
+@@ -571,11 +572,8 @@ void GdbStub::SerializeRegisters(char* destination) {
+     auto registers = debugger.ReadRegisters();
+     for (uint32 reg : registers) sstream << hex << setfill('0') << setw(8) << reg;
+ 
+-    // fp[0] .. fp[7] are 96bit long doubles
+-    for (int i = 0; i < 12 * 8; i++) sstream << "00";
+-
+-    // fudge the three int32 FPU registers
+-    for (int i = 0; i < 3; i++) sstream << "00000000";
++    // Only the 68000's own D0-D7, A0-A7, SR and PC. prc-tools' m68k-palmos-gdb 5.3 dies on a reply
++    // with the 68881 registers after them; newer GDBs read those, all zero, with 'p' packets.
+ 
+     strcat(destination, sstream.str().c_str());
+ }
