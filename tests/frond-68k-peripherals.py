@@ -2,13 +2,15 @@
 """frond-68k peripheral and workflow checks on private IIIx ROMs: piezo tones, backlight, sleep
 and wake, serial HotSync with pilot-link over a PTY and TCP, and installing, launching, listing
 and exporting databases. Each ROM boots to the launcher once; every check starts from that
-session.
+session. --only ppp also dials out over serial PPP to slirp and fetches example.com.
 
 ROMs come from --rom, else the IIIx 3.1 ROM in the private firmware folder; with none the checks
 are skipped. The probe PRCs are built with tools/build-palm-probe.py when m68k-palmos-gcc and the
 Palm OS 3.5 SDK are there (--sdk), else the checks that need them are skipped."""
 import argparse
 import os
+import re
+import signal
 import array
 import shutil
 import subprocess
@@ -23,10 +25,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 import palm_boot  # noqa: E402
 
-CHECKS = ['tones', 'backlight', 'sleep', 'serial', 'databases']
+CHECKS = ['tones', 'backlight', 'sleep', 'serial', 'databases', 'ppp']
+# Reaches example.com over the internet, so it only runs when asked for with --only ppp.
+OPT_IN = {'ppp'}
 HELLO = Path.home() / 'Projects/palm/hello/Hello.prc'
 FRONDBENCH = ROOT / 'build/frondbench/FrondBench.prc'
-PROBES = {'tone68k': 'FrondTone68k', 'alarm68k': 'FrondAlarm68k'}
+PROBES = {'tone68k': 'FrondTone68k', 'alarm68k': 'FrondAlarm68k', 'ppp68k': 'FrondPPP68k'}
 
 
 class Skip(Exception):
@@ -271,6 +275,53 @@ def check_serial(rom, session, root, probes):
     return f'{backed} databases backed up; {state.split(", ", 1)[1]}; tcp {tcp.split(", ", 1)[1]}'
 
 
+def check_ppp(rom, session, root, probes):
+    """PPP over the serial PTY to slirp (tools/palm-pppd.sh): set the Network panel's service to
+    Direct Serial, then the PPP probe dials with the guest's own NetLib, looks up example.com and
+    fetches it. slirp's counts show the DNS datagram and the TCP connection. OS 3.5 and later."""
+    if not shutil.which('slirp') or not shutil.which('cc'):
+        raise Skip('no slirp or cc')
+    if '3.1' in rom.name:
+        raise Skip('the Network panel steps are for OS 3.5 and later')
+    log = root / 'ppp' / 'slirp'
+    shutil.rmtree(log, ignore_errors=True)
+    log.mkdir(parents=True)
+    with Machine(session, root, 'ppp', '--serial', 'pty') as m:
+        pty = m.send('serial-state', 'serial:').split()[2]
+        helper = subprocess.Popen(['sh', str(ROOT / 'tools/palm-pppd.sh'), '--log', str(log), pty],
+                                  stdout=(log / 'helper.txt').open('w'), stderr=subprocess.STDOUT,
+                                  start_new_session=True)
+        try:
+            m.install(probes['ppp68k'])
+            m.core.launch('Preferences')
+            # Panel picker, Network, the Connection trigger, then Direct Serial on 3.5 and
+            # Cradle/Cable on 4.1, whose panel list has Date & Time and whose default service
+            # has a two-line user name.
+            taps = ((135, 5), (125, 73), (100, 92), (110, 84)) if '4.1' in rom.name else \
+                ((135, 5), (125, 62), (100, 87), (110, 121))
+            for x, y in taps:
+                m.core.tap(m.root, x, y)
+                time.sleep(0.7)
+            m.frame('network.png')
+            m.core.launch('Frond PPP')
+            end = time.monotonic() + 90
+            while time.monotonic() < end and 'tx 0' in m.send('serial-state', 'serial:'):
+                time.sleep(1)
+            time.sleep(30)
+            m.frame('probe.png')
+            state = m.send('serial-state', 'serial:')
+        finally:
+            os.killpg(helper.pid, signal.SIGTERM)
+            helper.wait()
+    text = (log / 'slirp_debug').read_text(errors='replace')
+    count = lambda pattern: int(found.group(1)) if (found := re.search(pattern, text)) else 0
+    dns, connections = count(r'(\d+) datagrams received'), count(r'(\d+) connections established')
+    received = count(r'(\d+) data packets \((\d+) bytes\)')
+    if not dns or not connections or not received:
+        raise AssertionError(f'slirp saw {dns} datagrams, {connections} connections, {received} data packets')
+    return f'{dns} DNS datagram, {connections} TCP connection, {received} data packets back; {state.split(", ", 1)[1]}'
+
+
 def check_databases(rom, session, root, probes):
     """Install Hello.prc and FrondBench from the console, launch Hello, list the RAM databases,
     export Hello as a PRC and the RAM and all databases as zips, and FrondBench starting."""
@@ -326,9 +377,10 @@ def build_probes(root, sdk):
     return out
 
 
-NEEDS = {'tones': ['tone68k'], 'sleep': ['alarm68k'], 'backlight': [], 'serial': [], 'databases': []}
+NEEDS = {'tones': ['tone68k'], 'sleep': ['alarm68k'], 'backlight': [], 'serial': [], 'databases': [],
+         'ppp': ['ppp68k']}
 RUN = {'tones': check_tones, 'backlight': check_backlight, 'sleep': check_sleep, 'serial': check_serial,
-       'databases': check_databases}
+       'databases': check_databases, 'ppp': check_ppp}
 
 
 def main():
@@ -356,7 +408,7 @@ def main():
                 core.send(f'save-session "{session}"', 'wrote session')
             finally:
                 core.close()
-            for check in args.only or CHECKS:
+            for check in args.only or [c for c in CHECKS if c not in OPT_IN]:
                 try:
                     missing = [p for p in NEEDS[check] if p not in probes]
                     if missing:
