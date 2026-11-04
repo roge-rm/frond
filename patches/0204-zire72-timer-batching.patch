@@ -1,0 +1,23 @@
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -175,7 +175,9 @@
+     gpio = pxaGpioInit(mem, ic, socRev);
+     tmr = pxaTimrInit(mem, ic);
+ #ifndef __EMSCRIPTEN__
+-    if (deviceType == DeviceType5::deviceTypeTX)
++    // The OS timer runs in batches up to its next match, synchronised on register access,
++    // so the CPU runs longer stretches between scheduler updates.
++    if (deviceType == DeviceType5::deviceTypeTX || deviceType == DeviceType5::deviceTypeZire72)
+         pxaTimrEnableBatching(tmr, TimerElapsedCB, TimerRescheduleCB, this);
+ #endif
+     rtc = pxaRtcInit(mem, ic);
+@@ -367,7 +369,8 @@
+             pxaTimrTick(tmr, batchedTicks);
+ 
+ #ifndef __EMSCRIPTEN__
+-            if (GetDeviceType() == DeviceType5::deviceTypeTX) return pxaTimrNextBatch(tmr, sleeping ? UINT32_MAX : 32);
++            if (GetDeviceType() == DeviceType5::deviceTypeTX || GetDeviceType() == DeviceType5::deviceTypeZire72)
++                return pxaTimrNextBatch(tmr, sleeping ? UINT32_MAX : 32);
+ #endif
+             return sleeping ? pxaTimrTicksToNextInterrupt(tmr) : 1;
+ 
