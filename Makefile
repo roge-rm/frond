@@ -1,6 +1,22 @@
 .PHONY: all clean prepare test test-cpu test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-pxa-timer benchmark-session test-native-governor test-db-list test-export-checkpoint test-db-backup test-checkpoint-input test-native-database
 BUILD_JOBS ?= 4
 CPU_TEST_LDLIBS ?= -lcurl -lpthread -lresolv $(shell pkg-config --libs slirp)
+
+# The Fast engine (Dynarmic JIT) is built in on x86-64 and arm64 hosts; FROND_FAST=0 leaves it out.
+# Its source is exported into build/ by make dynarmic-source and built once in build/dynarmic.
+HOST_ARCH := $(shell uname -m)
+FROND_FAST ?= $(if $(filter x86_64 aarch64 arm64,$(HOST_ARCH)),1,0)
+DYNARMIC_SRC ?= build/dynarmic-trial/src
+JIT_LIBS = build/dynarmic/src/dynarmic/libdynarmic.a build/dynarmic/externals/mcl/src/libmcl.a \
+	build/dynarmic/externals/fmt/libfmt.a \
+	$(if $(filter x86_64,$(HOST_ARCH)),build/dynarmic/externals/zydis/libZydis.a \
+	build/dynarmic/externals/zydis/zycore/libZycore.a)
+ifeq ($(FROND_FAST),1)
+CORE_JIT_DEPS = build/dynarmic/.built
+CORE_JIT_FLAGS = FROND_DYNARMIC_SRC=$(abspath $(DYNARMIC_SRC)) FROND_DYNARMIC_LIBS="$(abspath $(JIT_LIBS))"
+CPU_TEST_LDLIBS += $(JIT_LIBS)
+endif
+
 all: out/frond desktop
 
 .PHONY: test-memory-stick-media
@@ -42,8 +58,8 @@ FORCE:
 build/source/.prepared: FORCE
 	python3 tools/prepare.py
 
-out/frond: build/source/.prepared build/source/src/common/libcommon.a
-	$(MAKE) -C build/source/src/uarm bin
+out/frond: build/source/.prepared build/source/src/common/libcommon.a $(CORE_JIT_DEPS)
+	$(MAKE) -C build/source/src/uarm bin $(CORE_JIT_FLAGS)
 	mkdir -p out
 	cp build/source/src/uarm/cp-uarm out/frond.new
 	mv -f out/frond.new out/frond
@@ -198,6 +214,19 @@ test-db-backup: out/frond
 		build/source/src/common/libcommon.a -o build/test-db-backup
 	./build/test-db-backup
 
+.PHONY: test-jit-overshoot
+ifeq ($(FROND_FAST),1)
+test: test-jit-overshoot
+endif
+# How far a cpuCycle call runs past its budget in each engine, against cpuMaxOvershootCycles.
+test-jit-overshoot: out/frond
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/jit-overshoot-core.rsp
+	$(CXX) -std=c++17 -O1 -g \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/jit-overshoot.cpp @build/jit-overshoot-core.rsp build/source/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-jit-overshoot
+	./build/test-jit-overshoot
+
 .PHONY: test-arm-conditions benchmark-menu
 test-arm-conditions: out/frond
 	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/conditions-core.rsp
@@ -233,7 +262,7 @@ deb: desktop
 # The core is prepared fresh in build/arm64/source and mounted over build/source.
 ARM64_JOBS ?= 10
 .PHONY: deb-arm64
-deb-arm64:
+deb-arm64: build/dynarmic-trial/src/.frond-source
 	rm -rf build/arm64/source
 	python3 tools/prepare.py --destination $(CURDIR)/build/arm64/source
 	docker build -t frond-arm64-cross tools/arm64
@@ -825,39 +854,33 @@ SPEED_HOST ?=
 speed-check: benchmark-replay
 	BIKE_SESSION=$(BIKE_SESSION) FRONDBENCH_SESSION=$(FRONDBENCH_SESSION) SPEED_MIPS=$(SPEED_MIPS) SPEED_HOST=$(SPEED_HOST) SPEED_BENCH=$(SPEED_BENCH) python3 tools/speed-check.py
 
-# dynarmic JIT trial, off by default: build/benchmark-replay-jit only. DYNARMIC_SRC is a
-# dynarmic checkout with patches/dynarmic/*.patch applied. FROND_JIT=0 turns it off at run time.
-DYNARMIC_SRC ?= build/dynarmic-trial/src
-JIT_CXXFLAGS = -Wall -Wno-unused-parameter -Wno-unknown-pragmas -D_FILE_OFFSET_BITS=64 -O2 -g \
-	$(shell sdl2-config --cflags) $(shell pkg-config --cflags slirp) -pthread -DFROND_DYNARMIC \
-	-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
-	-Ibuild/source/src/common/zip -Ibuild/source/src/argparse
-JIT_LIBS = build/dynarmic/src/dynarmic/libdynarmic.a build/dynarmic/externals/mcl/src/libmcl.a \
-	build/dynarmic/externals/fmt/libfmt.a build/dynarmic/externals/zydis/libZydis.a \
-	build/dynarmic/externals/zydis/zycore/libZycore.a
+# Dynarmic for the Fast engine. FROND_JIT=1 or 0 picks the engine at run time over --engine.
+# The pinned source is exported from DYNARMIC_DONOR, a Dynarmic clone holding the revisions in
+# patches/dynarmic/source-lock.json, and patched. Without a donor, tools/dynarmic-source.py fetches
+# those revisions into build/dynarmic-donor once. make dynarmic-source redoes the export.
+DYNARMIC_DONOR ?= build/dynarmic-donor
+build/dynarmic-trial/src/.frond-source: patches/dynarmic/source-lock.json $(wildcard patches/dynarmic/*.patch) tools/dynarmic-source.py
+	python3 tools/dynarmic-source.py $(DYNARMIC_DONOR) build/dynarmic-trial/src
+	rm -f build/dynarmic/.built
 
-build/dynarmic/.built:
+.PHONY: dynarmic-source
+dynarmic-source:
+	python3 tools/dynarmic-source.py $(DYNARMIC_DONOR) build/dynarmic-trial/src
+	rm -f build/dynarmic/.built
+
+build/dynarmic/.built: $(if $(filter build/dynarmic-trial/src,$(DYNARMIC_SRC)),build/dynarmic-trial/src/.frond-source)
 	cmake -S $(DYNARMIC_SRC) -B build/dynarmic -G Ninja -DCMAKE_BUILD_TYPE=Release \
 		-DDYNARMIC_TESTS=OFF -DDYNARMIC_USE_BUNDLED_EXTERNALS=ON -DDYNARMIC_WARNINGS_AS_ERRORS=OFF \
 		-DDYNARMIC_FRONTENDS=A32 -DDYNARMIC_USE_PRECOMPILED_HEADERS=OFF
 	ninja -C build/dynarmic -j$(BUILD_JOBS) dynarmic
 	touch $@
 
-.PHONY: benchmark-replay-jit
-benchmark-replay-jit: out/frond build/dynarmic/.built
-	mkdir -p build/jit
-	$(CXX) -std=c++17 $(JIT_CXXFLAGS) -c build/source/src/uarm/uarm/CPU.cpp -o build/jit/CPU.o
-	$(CXX) -std=c++17 $(JIT_CXXFLAGS) -c build/source/src/uarm/uarm/icache.cpp -o build/jit/icache.o
-	$(CXX) -std=c++20 -O2 -g -Wall -I$(DYNARMIC_SRC)/src -I$(DYNARMIC_SRC)/externals/mcl/include -I$(DYNARMIC_SRC)/externals/fmt/include \
-		-c build/source/src/uarm/uarm/jit_dynarmic.cpp -o build/jit/jit_dynarmic.o
-	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' ! -name timeutil.o \
-		! -name CPU.o ! -name icache.o > build/jit/core.rsp
-	echo build/jit/CPU.o build/jit/icache.o build/jit/jit_dynarmic.o >> build/jit/core.rsp
-	$(CXX) -std=c++17 -O2 -g $(shell sdl2-config --cflags) \
-		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
-		tools/benchmark-replay.cpp @build/jit/core.rsp build/source/src/common/libcommon.a \
-		$(JIT_LIBS) $(CPU_TEST_LDLIBS) $(shell pkg-config --libs sdl2 SDL2_image) \
-		-o build/benchmark-replay-jit
+# Older names: benchmark-replay and out/frond have the JIT built in now.
+.PHONY: benchmark-replay-jit frond-jit
+benchmark-replay-jit: benchmark-replay
+	cp build/benchmark-replay build/benchmark-replay-jit
+frond-jit: out/frond
+	cp out/frond build/frond-jit
 
 .PHONY: test-tg50-serial-board
 test: test-tg50-serial-board

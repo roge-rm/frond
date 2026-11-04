@@ -1,0 +1,304 @@
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -967,6 +967,14 @@
+ 
+ void cpuInvalidateCodeCache(struct ArmCpu *cpu) { icacheInval(cpu->ic); }
+ 
++void cpuDropTranslatedCode(struct ArmCpu *cpu) {
++#ifdef FROND_DYNARMIC
++    if (cpu->jit) jitClear(cpu->jit);
++#else
++    (void)cpu;
++#endif
++}
++
+ // for external use
+ bool cpuMemOpExternal(struct ArmCpu *cpu, void *buf, uint32_t vaddr, uint_fast8_t size,
+                       bool write)  // for external use
+@@ -4312,6 +4320,31 @@
+ 
+ bool cpuJitSlowPath(ArmCpu *cpu) { return cpu->slowPath != 0; }
+ 
++uint32_t *cpuJitSpsr(ArmCpu *cpu) { return &cpu->SPSR; }
++
++uint32_t cpuJitSetCpsr(ArmCpu *cpu, uint32_t *regs, uint32_t cpsr, uint32_t mask, uint32_t value) {
++    cpu->flags = cpsr & 0xf0000000UL;
++    cpu->Q = !!(cpsr & ARM_SR_Q);
++    cpu->T = !!(cpsr & ARM_SR_T);
++    memcpy(cpu->regs + 8, regs + 8, 7 * sizeof(uint32_t));
++    cpuPrvSetPSR<false>(cpu, mask, value);
++    memcpy(regs + 8, cpu->regs + 8, 7 * sizeof(uint32_t));
++    return cpuPrvMaterializeCPSR(cpu);
++}
++
++uint32_t cpuJitExceptionReturn(ArmCpu *cpu, uint32_t *regs, uint32_t cpsr, uint32_t target) {
++    cpu->flags = cpsr & 0xf0000000UL;
++    cpu->Q = !!(cpsr & ARM_SR_Q);
++    cpu->T = !!(cpsr & ARM_SR_T);
++    memcpy(cpu->regs + 8, regs + 8, 7 * sizeof(uint32_t));
++    const uint32_t sr = cpu->SPSR;
++    cpuPrvSetPSRlo8(cpu, sr);
++    cpuPrvSetPSRhi8(cpu, sr);
++    memcpy(regs + 8, cpu->regs + 8, 7 * sizeof(uint32_t));
++    regs[REG_NO_PC] = target;
++    return cpuPrvMaterializeCPSR(cpu);
++}
++
+ // ARM encodings (or Thumb ones Frond translates to ARM) that dynarmic would get wrong
+ // for a privileged XScale, or that Frond gives special meaning.
+ static bool cpuPrvJitPlainArm(uint32_t i, bool thumb) {
+@@ -4327,10 +4360,10 @@
+               : cpuPrvDecoderArm<ARM_MEMORY_SYSTEM_MMU, false>(i) ==
+                     PREFIX_EXEC_FN(execFn_invalid<ARM_MEMORY_SYSTEM_MMU, false>))
+         return false;
+-    if ((i & 0x0fb000f0) == 0x01000000) return false;                           // MRS
+-    if ((i & 0x0fb0f0f0) == 0x0120f000 || (i & 0x0fb0f000) == 0x0320f000) {    // MSR
+-        return !(i & (1 << 22)) && !(i & 0x000f0000 & ~0x00080000);              // flags only
+-    }
++    // MRS and MSR: the JIT's psr_coprocessor runs the SPSR and CPSR control forms.
++    if ((i & 0x0fb000f0) == 0x01000000) return (i & 0x000f0fff) == 0x000f0000 && ((i >> 12) & 15) != 15;
++    if ((i & 0x0fb0f0f0) == 0x0120f000) return !(i & 0xf00) && (i & 15) != 15 && (i & 0x000f0000);
++    if ((i & 0x0fb0f000) == 0x0320f000) return (i & 0x000f0000) != 0;
+     if ((i & 0x0ff000f0) == 0x01200070) return false;                           // BKPT
+     if ((i & 0x0c000000) == 0x0c000000) return false;                           // coprocessor, SWI
+     if ((i & 0x0e000000) == 0x08000000 && (i & (1 << 22))) return false;        // LDM^, STM^
+@@ -4342,18 +4375,49 @@
+     if ((i & 0x0c000000) == 0 && ((i >> 12) & 15) == 15 && (i & (1 << 20))) {
+         const uint32_t op = (i >> 21) & 15;
+         const bool extra = !(i & (1 << 25)) && (i & 0x90) == 0x90;
+-        if (!extra && (op < 8 || op > 11)) return false;                        // S with PC
++        if (!extra && (op < 8 || op > 11)) {                                    // S with PC
++            // MOVS PC, Rm and SUBS PC, Rn, #imm run through the psr_coprocessor.
++            if ((i & 0x0ffffff0) == 0x01b0f000) return (i & 15) != 15;
++            if ((i & 0x0ff0f000) == 0x0250f000) return ((i >> 16) & 15) != 15;
++            return false;
++        }
+     }
+     return true;
+ }
+ 
++static bool cpuPrvJitLdrWord(uint32_t i, uint32_t rn, uint32_t rd) {
++    return (i & 0x0c500000) == 0x04100000 && ((i >> 16) & 15) == rn && ((i >> 12) & 15) == rd;
++}
++
++// The syscall dispatch pair LDR R12, [R9, #-table] then LDR PC, [R12, #offset], which the
++// interpreter reports to the patch dispatch. The JIT may run the pair when the syscall has
++// no patch (patchDispatchAddPatch drops translated code). Other forms of the two loads
++// stay with the interpreter. Returns -1 for any other instruction.
++static int cpuPrvJitSyscallPlain(ArmCpu *cpu, uint32_t pc, uint32_t i) {
++    const bool load = cpuPrvJitLdrWord(i, 9, 12), jump = cpuPrvJitLdrWord(i, 12, 15);
++    if (!load && !jump) return -1;
++    const bool exactLoad = (i & 0x0ffff000) == 0x0519c000, exactJump = (i & 0x0ffff000) == 0x059cf000;
++    if (!exactLoad && !exactJump) return 0;
++    uint32_t other;
++    if (!cpuJitFetch(cpu, load ? pc + 4 : pc - 4, &other)) return 0;
++    if (load) {
++        if ((other & 0x0ffff000) == 0x059cf000) return !patchDispatchHasPatch(cpu->patchDispatch, i & 0xfff, other & 0xfff);
++        return !cpuPrvJitLdrWord(other, 12, 15);
++    }
++    if ((other & 0x0ffff000) == 0x0519c000) return !patchDispatchHasPatch(cpu->patchDispatch, other & 0xfff, i & 0xfff);
++    return !cpuPrvJitLdrWord(other, 9, 12);
++}
++
+ bool cpuJitPlain(ArmCpu *cpu, uint32_t pc, uint32_t word, bool thumb) {
+     // The interpreter runs a fetch buffer's words before memory's. A buffer can hold other
+     // words than memory, like the patched PACE entry a session restores while its RAM has
+     // the original, so those instructions go to the interpreter.
+     uint32_t buffered;
+     if (icacheBufferedWord(cpu->ic, pc & ~3u, &buffered) && buffered != word) return false;
+-    if (!thumb) return cpuPrvJitPlainArm(word, false);
++    if (!thumb) {
++        const int syscall = cpuPrvJitSyscallPlain(cpu, pc, word);
++        return syscall >= 0 ? syscall : cpuPrvJitPlainArm(word, false);
++    }
+     const uint16_t h = (pc & 2) ? word >> 16 : word & 0xffff;
+     if (const uint32_t t = table_thumb2arm[h]) return cpuPrvJitPlainArm(t, true);
+     const uint32_t top = h >> 11;
+@@ -4366,6 +4430,9 @@
+     if (top == 0x1f || (top == 0x1d && !(h & 1)))  // BL or BLX suffix on its own
+         return !(cpu->earlyAudioHook &&
+                  (pc == cpu->earlyAudioFrom[0] || pc == cpu->earlyAudioFrom[1]));
++    // Forms the interpreter runs as Thumb: LDR PC-relative, ADD Rd, PC/SP, and ADD, MOV,
++    // BX and BLX with high registers.
++    if (top == 0x09 || (h >> 12) == 0xa || (h & 0xfc00) == 0x4400) return true;
+     return false;
+ }
+ 
+--- a/src/uarm/uarm/CPU.h
++++ b/src/uarm/uarm/CPU.h
+@@ -118,6 +118,8 @@
+ 
+ // Host code patches must discard decoded instructions as well as guest cache lines.
+ void cpuInvalidateCodeCache(struct ArmCpu *cpu);
++// Drops the JIT's translated code only, when something it was translated with changes.
++void cpuDropTranslatedCode(struct ArmCpu *cpu);
+ // Host checkpoint repair preserves the separately serialized XScale fetch buffers.
+ // Caller provides ICACHE_FETCH_STATE_WORDS words (see icache.h).
+ void cpuGetInstructionFetchState(ArmCpu*, uint32_t*);
+--- a/src/uarm/uarm/jit_dynarmic.cpp
++++ b/src/uarm/uarm/jit_dynarmic.cpp
+@@ -1,6 +1,7 @@
+ // dynarmic JIT for ordinary guest code (trial). Built as C++20 with FROND_DYNARMIC.
+-// Privileged, coprocessor and Frond's special instructions end the block and go back to
+-// the interpreter, which also takes every exception and IRQ between runs.
++// MRS and MSR run in generated code through the fork's psr_coprocessor. Other privileged,
++// coprocessor and Frond's special instructions end the block and go back to the
++// interpreter, which also takes every exception and IRQ between runs.
+ #include "jit_dynarmic.h"
+ 
+ #include <algorithm>
+@@ -15,6 +16,7 @@
+ #include "dynarmic/frontend/A32/a32_ir_emitter.h"
+ #include "dynarmic/interface/A32/a32.h"
+ #include "dynarmic/interface/A32/config.h"
++#include "dynarmic/interface/A32/coprocessor.h"
+ #include "dynarmic/ir/terminal.h"
+ 
+ namespace {
+@@ -25,6 +27,7 @@
+ // Counters for FROND_JIT_STATS=1.
+ struct Stats {
+     uint64_t runs = 0, ran = 0, interpret = 0, halt = 0, fault = 0, invalAll = 0, invalRange = 0, clears = 0;
++    uint64_t psr = 0;  // MSR CPSR and MOVS PC calls from generated code
+     // Code pages noted, dropped for a write, a changed mapping or a guest invalidation
+     // (unwatched pages only), and how often the mappings were checked.
+     uint64_t codePages = 0, unwatched = 0, pagesWritten = 0, mapChecks = 0, mapChanged = 0, unwatchedDropped = 0;
+@@ -50,9 +53,10 @@
+                 (unsigned long long)pageFills, (unsigned long long)reads, (unsigned long long)writes);
+         fprintf(stderr,
+                 "jit: codePages %llu unwatched %llu pagesWritten %llu mapChecks %llu mapChanged %llu "
+-                "unwatchedDropped %llu\n",
++                "unwatchedDropped %llu msrCpsr %llu\n",
+                 (unsigned long long)codePages, (unsigned long long)unwatched, (unsigned long long)pagesWritten,
+-                (unsigned long long)mapChecks, (unsigned long long)mapChanged, (unsigned long long)unwatchedDropped);
++                (unsigned long long)mapChecks, (unsigned long long)mapChanged, (unsigned long long)unwatchedDropped,
++                (unsigned long long)psr);
+         std::vector<std::pair<uint64_t, uint32_t>> top;
+         for (auto &[pc, n] : interpPc) top.push_back({n, pc});
+         std::sort(top.rbegin(), top.rend());
+@@ -278,12 +282,72 @@
+         jit->HaltExecution(kInterpret);
+     }
+ 
++    // MSR CPSR with more than the flags. The fork ends the block after this call, so the
++    // banked registers and CPSR can change under it. A set slow path (an unmasked pending
++    // interrupt, a Thumb switch) ends the run there; a privilege change empties the page
++    // table, which was filled with the old privilege's permissions.
++    static std::uint64_t SetCpsr(void *arg, std::uint32_t value, std::uint32_t mask) {
++        Env &e = *static_cast<Env *>(arg);
++        stats.psr++;
++        const uint32_t cpsr = cpuJitSetCpsr(e.cpu, e.jit->Regs().data(), e.jit->Cpsr(), mask, value);
++        e.jit->SetCpsr(cpsr);
++        e.CheckGen();
++        e.AfterIo();
++        return 0;
++    }
++
++    // MOVS PC or SUBS PC. The fork returns to the dispatcher after this call, which picks up
++    // the new PC and Thumb state.
++    static std::uint64_t ExceptionReturn(void *arg, std::uint32_t target, std::uint32_t) {
++        Env &e = *static_cast<Env *>(arg);
++        stats.psr++;
++        const uint32_t cpsr = cpuJitExceptionReturn(e.cpu, e.jit->Regs().data(), e.jit->Cpsr(), target);
++        e.jit->SetCpsr(cpsr);
++        e.CheckGen();
++        e.AfterIo();
++        return 0;
++    }
++
+     void AddTicks(std::uint64_t ticks) override { ran += ticks; }
+     std::uint64_t GetTicksRemaining() override { return budget; }
+ 
+     bool undoTick = false;
+ };
+ 
++// Slot for the fork's psr_coprocessor, one XScale doesn't have. Real coprocessor
++// instructions never reach dynarmic (cpuJitPlain), so the slot is only used for MRS and MSR.
++constexpr std::size_t kPsrCoprocessor = 8;
++
++struct PsrCoprocessor final : public A32::Coprocessor {
++    Env *env;
++    std::uint32_t ignored = 0;  // MSR SPSR's field mask
++    explicit PsrCoprocessor(Env *e) : env(e) {}
++
++    std::optional<Callback> CompileInternalOperation(bool, unsigned, A32::CoprocReg, A32::CoprocReg,
++                                                     A32::CoprocReg, unsigned) override {
++        return std::nullopt;
++    }
++    CallbackOrAccessOneWord CompileSendOneWord(bool, unsigned, A32::CoprocReg, A32::CoprocReg, unsigned) override {
++        return std::monostate{};
++    }
++    // opc 0: MSR CPSR, opc 1: MSR SPSR (written whole, mask ignored), opc 2: MOVS PC.
++    CallbackOrAccessTwoWords CompileSendTwoWords(bool, unsigned opc, A32::CoprocReg) override {
++        if (opc == 0) return Callback{&Env::SetCpsr, env};
++        if (opc == 2) return Callback{&Env::ExceptionReturn, env};
++        return std::array<std::uint32_t *, 2>{cpuJitSpsr(env->cpu), &ignored};
++    }
++    CallbackOrAccessOneWord CompileGetOneWord(bool, unsigned, A32::CoprocReg, A32::CoprocReg, unsigned) override {
++        return cpuJitSpsr(env->cpu);
++    }
++    CallbackOrAccessTwoWords CompileGetTwoWords(bool, unsigned, A32::CoprocReg) override { return std::monostate{}; }
++    std::optional<Callback> CompileLoadWords(bool, bool, A32::CoprocReg, std::optional<std::uint8_t>) override {
++        return std::nullopt;
++    }
++    std::optional<Callback> CompileStoreWords(bool, bool, A32::CoprocReg, std::optional<std::uint8_t>) override {
++        return std::nullopt;
++    }
++};
++
+ }  // namespace
+ 
+ struct FrondJit {
+@@ -308,6 +372,8 @@
+     conf.only_detect_misalignment_via_page_table_on_page_boundary = false;
+     conf.always_little_endian = true;
+     conf.code_cache_size = 64 * 1024 * 1024;
++    conf.coprocessors[kPsrCoprocessor] = std::make_shared<PsrCoprocessor>(&j->env);
++    conf.psr_coprocessor = kPsrCoprocessor;
+     j->jit = std::make_unique<A32::Jit>(conf);
+     j->env.jit = j->jit.get();
+     return j;
+--- a/src/uarm/uarm/jit_dynarmic.h
++++ b/src/uarm/uarm/jit_dynarmic.h
+@@ -53,5 +53,13 @@
+ // Moves on whenever cpuJitReadPage could answer differently.
+ uint64_t cpuJitPageGen(ArmCpu *cpu);
+ bool cpuJitSlowPath(ArmCpu *cpu);
++// Status registers for MRS and MSR in generated code. The SPSR is read and written in
++// place (an MSR writes all of it, as in the interpreter). cpuJitSetCpsr runs an MSR CPSR
++// with the field mask as the interpreter does, from cpsr (the JIT's current CPSR) and the
++// JIT's registers, switching their banked r8-r14 on a mode change. Returns the new CPSR.
++uint32_t *cpuJitSpsr(ArmCpu *cpu);
++uint32_t cpuJitSetCpsr(ArmCpu *cpu, uint32_t *regs, uint32_t cpsr, uint32_t mask, uint32_t value);
++// MOVS PC or SUBS PC: CPSR = SPSR in any mode and PC = target, as in the interpreter.
++uint32_t cpuJitExceptionReturn(ArmCpu *cpu, uint32_t *regs, uint32_t cpsr, uint32_t target);
+ 
+ #endif
+--- a/src/uarm/uarm/patch_dispatch.cpp
++++ b/src/uarm/uarm/patch_dispatch.cpp
+@@ -202,6 +202,14 @@
+     patch->ctx = ctx;
+     patch->headpatch = headpatch;
+     patch->tailpatch = tailpatch;
++
++    // The JIT runs syscall dispatches without a patch in generated code.
++    if (pd->cpu) cpuDropTranslatedCode(pd->cpu);
++}
++
++bool patchDispatchHasPatch(struct PatchDispatch* pd, uint32_t table, uint32_t offset) {
++    if (table < 4 || table > 12 || (table & 3) || offset > 0xfff || (offset & 3)) return true;
++    return pd->patchTable[(((table >> 2) - 1) << 10) | (offset >> 2)] != 0xff;
+ }
+ 
+ void patchDispatchSetCpu(struct PatchDispatch* pd, struct ArmCpu* cpu) { pd->cpu = cpu; }
+--- a/src/uarm/uarm/patch_dispatch.h
++++ b/src/uarm/uarm/patch_dispatch.h
+@@ -15,6 +15,8 @@
+ struct PatchDispatch* initPatchDispatch();
+ 
+ bool patchDispatchCanTrackTail(PatchDispatch* pd);
++// Whether LDR R12, [R9, #-table] then LDR PC, [R12, #offset] reaches a patched syscall.
++bool patchDispatchHasPatch(struct PatchDispatch* pd, uint32_t table, uint32_t offset);
+ 
+ void destroyPatchDispatch(struct PatchDispatch* pd);
+ void patchDispatchReset(struct PatchDispatch* pd);

@@ -17,6 +17,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import com.rm.frond.Device
+import com.rm.frond.Engine
 import com.rm.frond.Firmware
 import com.rm.frond.JogControls
 import com.rm.frond.MachineSettings
@@ -111,4 +112,10 @@ fun MachineAudioPreviewRow(
             onChange(settings.copy(fastAudio = it))
         }
     }
+}
+
+// Exact or Fast. Only shown in debug builds until the Fast engine is qualified.
+@Composable
+fun MachineEngineRow(settings: MachineSettings, listStyle: Boolean, onChange: (MachineSettings) -> Unit) {
+    MachineChoiceRow("Engine", settings.engine, Engine.entries, { it.label }, listStyle) { onChange(settings.copy(engine = it)) }
 }

@@ -147,6 +147,19 @@ class MachineSettingsTest {
         }
     }
 
+    @Test fun engineDefaultsToExactAndRoundTrips() {
+        assertEquals(Engine.EXACT, MachineSettings().engine)
+        assertEquals(Engine.EXACT, settings(metadata("engine-old", legacy)).engine)
+        assertFalse("--engine" in MachineSettings().arguments())
+        val file = metadata("engine", legacy.copy(engine = Engine.FAST))
+        val loaded = settings(file)
+        assertEquals(Engine.FAST, loaded.engine)
+        assertEquals("fast", loaded.json().getString("engine"))
+        val arguments = loaded.arguments()
+        assertEquals("fast", arguments[arguments.indexOf("--engine") + 1])
+        assertEquals(listOf("Exact", "Fast"), Engine.entries.map { it.label })
+    }
+
     @Test fun displayArgumentMatchesLaunchArguments() {
         assertEquals("fit=fit smooth=off", MachineSettings().displayArgument())
         assertEquals("fit=whole smooth=on", MachineSettings(ScreenSize.WHOLE, smoothing = true).displayArgument())

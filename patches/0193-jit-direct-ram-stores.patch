@@ -1,0 +1,334 @@
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -975,6 +975,16 @@
+ #endif
+ }
+ 
++void cpuWriteProtectHost(struct ArmCpu *cpu, const uint8_t *host, uint32_t size) {
++#ifdef FROND_DYNARMIC
++    if (cpu && cpu->jit) jitWriteProtect(cpu->jit, host, size);
++#else
++    (void)cpu;
++    (void)host;
++    (void)size;
++#endif
++}
++
+ // for external use
+ bool cpuMemOpExternal(struct ArmCpu *cpu, void *buf, uint32_t vaddr, uint_fast8_t size,
+                       bool write)  // for external use
+@@ -4266,6 +4276,17 @@
+     return (uint8_t *)(e.addend + (va & ~0xfffu));
+ }
+ 
++// Host address of the RAM page holding va if a store there would take the host TLB's
++// fast path for the current privilege (so the MMU allows it in this mode with the current
++// domains), marked dirty as ramDirectWritePage does. Null for anything else.
++uint8_t *cpuJitWritePage(ArmCpu *cpu, uint32_t va) {
++    if (cpu->nativeCallDepth) return nullptr;
++    const struct HostTlb &t = cpu->mem->hostTlb;
++    const struct HostTlbEntry &e = t.write[(va >> 12) & (HOST_TLB_SIZE - 1)];
++    if (!t.ram || e.key != hostTlbKey(t.gen, va, cpu->privileged)) return nullptr;
++    return ramDirectWritePage(t.ram, va + uint32_t(e.addend));
++}
++
+ // Code is read like icacheFetch reads it: ROM from its peephole copy, which holds the PACE
+ // entry and peephole patches the data side doesn't see. This is the host TLB's page for va,
+ // moved to the peephole copy for ROM.
+--- a/src/uarm/uarm/CPU.h
++++ b/src/uarm/uarm/CPU.h
+@@ -120,6 +120,9 @@
+ void cpuInvalidateCodeCache(struct ArmCpu *cpu);
+ // Drops the JIT's translated code only, when something it was translated with changes.
+ void cpuDropTranslatedCode(struct ArmCpu *cpu);
++// Stores to this host RAM range go through the memory callbacks again until each page's
++// next first write, which marks it dirty. For whoever clears dirty state (the frame buffer).
++void cpuWriteProtectHost(struct ArmCpu *cpu, const uint8_t *host, uint32_t size);
+ // Host checkpoint repair preserves the separately serialized XScale fetch buffers.
+ // Caller provides ICACHE_FETCH_STATE_WORDS words (see icache.h).
+ void cpuGetInstructionFetchState(ArmCpu*, uint32_t*);
+--- a/src/uarm/uarm/RAM.cpp
++++ b/src/uarm/uarm/RAM.cpp
+@@ -153,8 +153,44 @@
+     ram->writeObserver = observer; ram->writeContext = context;
+ }
+ void ramCodeWritten(struct ArmRam* ram, uint32_t offset) {
+-    ram->codeLines[offset >> 6] = 0;
+     ram->codeWritten(ram->codeContext, ram->buf.buffer + (offset & ~0xfffu));
++    // The JIT has dropped every block from the page, so none of its lines hold code now.
++    memset(ram->codeLines + ((offset & ~0xfffu) >> 6), 0, 0x1000 >> 6);
++}
++
++// Lowest offset whose writes can mark the frame buffer dirty: the wider writes start
++// below framebufferStart, and with no known size (framebufferStart_n 0) every write does.
++static uint32_t ramFramebufferLow(const struct ArmRam* ram) {
++    return ram->framebufferStart_64 < ram->framebufferStart ? ram->framebufferStart_64
++                                                            : ram->framebufferStart;
++}
++
++uint8_t* ramDirectWritePage(struct ArmRam* ram, uint32_t pa) {
++    const uint32_t offset = (pa - ram->adr) & ~0xfffu;
++    if (ram->writeObserver || uint64_t(offset) + 0x1000 > ram->buf.size) return nullptr;
++    if (ram->codeLines) {
++        const uint8_t* lines = ram->codeLines + (offset >> 6);
++        for (uint32_t i = 0; i < (0x1000 >> 6); i++)
++            if (lines[i]) return nullptr;
++    }
++    memoryBufferMarkRangeDirty(&ram->buf, offset, 0x1000);
++    const uint32_t lo = ramFramebufferLow(ram);
++    const uint64_t end = uint64_t(offset) + 0x1000;
++    if (offset < ram->framebufferEnd && end > lo) {
++        const uint32_t first = offset > lo ? offset : lo;
++        const uint64_t last = end < ram->framebufferEnd ? end : ram->framebufferEnd;
++        ramSetFramebufferDirty(ram, ram->adr + first, uint32_t(last - first));
++    }
++    return ram->buf.buffer + offset;
++}
++
++bool ramFramebufferHost(struct ArmRam* ram, uint8_t** host, uint32_t* size) {
++    const uint32_t lo = ramFramebufferLow(ram);
++    const uint64_t end = ram->framebufferEnd < ram->buf.size ? ram->framebufferEnd : ram->buf.size;
++    if (lo >= end) return false;
++    *host = ram->buf.buffer + lo;
++    *size = uint32_t(end - lo);
++    return true;
+ }
+ 
+ void ramMarkDirty(struct ArmRam* ram, uint32_t base, uint32_t size) {
+--- a/src/uarm/uarm/RAM.h
++++ b/src/uarm/uarm/RAM.h
+@@ -31,5 +31,11 @@
+ // translated code from.
+ using RamCodeWritten = void (*)(void* context, uint8_t* hostPage);
+ void ramMarkDirty(struct ArmRam* ram, uint32_t base, uint32_t size);
++// For the JIT's direct stores. Host address of the 4 KiB page at pa, after marking it
++// dirty and, where it overlaps the frame buffer, the frame buffer dirty, as if the whole page
++// had been written. Null while a write observer is set or the page has a code flag.
++uint8_t* ramDirectWritePage(struct ArmRam* ram, uint32_t pa);
++// Host range whose writes can mark the frame buffer dirty, if there is one.
++bool ramFramebufferHost(struct ArmRam* ram, uint8_t** host, uint32_t* size);
+ 
+ #endif
+--- a/src/uarm/uarm/SoC.cpp
++++ b/src/uarm/uarm/SoC.cpp
+@@ -2,6 +2,7 @@
+ 
+ #include <cstring>
+ 
++#include "CPU.h"
+ #include "RAM.h"
+ #include "ROM.h"
+ #include "audio_queue.h"
+@@ -60,6 +61,12 @@
+ }
+ 
+ bool SoC::SetFramebuffer(uint32_t start, uint32_t size) {
++    const bool tracked = SetFramebufferRange(start, size);
++    WriteProtectFramebuffer();
++    return tracked;
++}
++
++bool SoC::SetFramebufferRange(uint32_t start, uint32_t size) {
+     const bool inSram = sramFb && size && start >= sramBase && start - sramBase + size <= sramSize;
+     if (sramFb) {
+         if (inSram) ramSetFramebuffer(sramFb, start, size);
+@@ -84,6 +91,16 @@
+     framebufferAccessHighWatermark = 0;
+ 
+     framebufferDirty = false;
++    WriteProtectFramebuffer();
++}
++
++void SoC::WriteProtectFramebuffer() {
++    if (!cpu) return;
++    for (ArmRam *r : {ram, sramFb}) {
++        uint8_t *host;
++        uint32_t size;
++        if (r && ramFramebufferHost(r, &host, &size)) cpuWriteProtectHost(cpu, host, size);
++    }
+ }
+ 
+ void SoC::Sleep() {
+--- a/src/uarm/uarm/SoC.h
++++ b/src/uarm/uarm/SoC.h
+@@ -246,6 +246,10 @@
+     uint32_t framebufferAccessHighWatermark{~0u};
+ 
+    private:
++    // The JIT stores straight to RAM pages it has marked dirty; once the frame buffer is
++    // clean again, or moves, its pages go back through the callbacks.
++    void WriteProtectFramebuffer();
++    bool SetFramebufferRange(uint32_t start, uint32_t size);
+     bool restoringCheckpoint{false};
+     SoC(const SoC &) = delete;
+     SoC(SoC &&) = delete;
+--- a/src/uarm/uarm/jit_dynarmic.cpp
++++ b/src/uarm/uarm/jit_dynarmic.cpp
+@@ -42,6 +42,9 @@
+         return v && *v && strcmp(v, "0");
+     }();
+     uint64_t pageClears = 0, pageFills = 0, reads = 0, writes = 0;
++    // Pages mapped for direct stores, and pages sent back to the callbacks by
++    // jitWriteProtect or a code flag.
++    uint64_t writeMaps = 0, writeProtects = 0;
+     ~Stats() {
+         if (!on) return;
+         fprintf(stderr,
+@@ -53,10 +56,10 @@
+                 (unsigned long long)pageFills, (unsigned long long)reads, (unsigned long long)writes);
+         fprintf(stderr,
+                 "jit: codePages %llu unwatched %llu pagesWritten %llu mapChecks %llu mapChanged %llu "
+-                "unwatchedDropped %llu msrCpsr %llu\n",
++                "unwatchedDropped %llu msrCpsr %llu writeMaps %llu writeProtects %llu\n",
+                 (unsigned long long)codePages, (unsigned long long)unwatched, (unsigned long long)pagesWritten,
+                 (unsigned long long)mapChecks, (unsigned long long)mapChanged, (unsigned long long)unwatchedDropped,
+-                (unsigned long long)psr);
++                (unsigned long long)psr, (unsigned long long)writeMaps, (unsigned long long)writeProtects);
+         std::vector<std::pair<uint64_t, uint32_t>> top;
+         for (auto &[pc, n] : interpPc) top.push_back({n, pc});
+         std::sort(top.rbegin(), top.rend());
+@@ -89,6 +92,38 @@
+     PageTable *pages = nullptr;
+     std::vector<uint32_t> filled;  // page table entries to clear
+ 
++    // Page table entries with bit 0 set are read-only (the fork's page_table_write_protect_bit):
++    // stores to them come to the callbacks. A RAM page is filled read-only and made writable
++    // by its first store through Write, which marks it dirty (and the frame buffer, where it
++    // overlaps) as if all of it was written. Whoever clears that dirty state write-protects the
++    // page again (jitWriteProtect), and so does a code flag on any of its lines, so the
++    // flag's check runs on stores. Writable entries by host page:
++    std::unordered_map<uint8_t *, std::vector<uint32_t>> writable;
++
++    static uint8_t *ReadOnly(uint8_t *host) { return (uint8_t *)(uintptr_t(host) | 1); }
++
++    void ProtectHost(uint8_t *host) {
++        const auto it = writable.find(host);
++        if (it == writable.end()) return;
++        for (uint32_t page : it->second)
++            if ((*pages)[page] == host) (*pages)[page] = ReadOnly(host);
++        stats.writeProtects++;
++        writable.erase(it);
++    }
++
++    void Protect(const uint8_t *host, uint32_t size) {
++        for (auto it = writable.begin(); it != writable.end();) {
++            if (it->first + 0x1000 > host && it->first < host + size) {
++                for (uint32_t page : it->second)
++                    if ((*pages)[page] == it->first) (*pages)[page] = ReadOnly(it->first);
++                stats.writeProtects++;
++                it = writable.erase(it);
++            } else {
++                ++it;
++            }
++        }
++    }
++
+     // Each virtual page dynarmic has read code from, with the physical page it came from
+     // and its host page. Each 64-byte RAM line code is read from is flagged, and the first
+     // write to one comes back through CodeWritten and drops the code of every virtual page
+@@ -115,7 +150,11 @@
+         const uint32_t page = va >> 12;
+         auto it = code.find(page);
+         if (it == code.end()) it = NotePage(page);
+-        if (it->second.lines) it->second.lines[(va & 0xfffu) >> 6] = 1;
++        uint8_t *lines = it->second.lines;
++        if (lines && !lines[(va & 0xfffu) >> 6]) {
++            lines[(va & 0xfffu) >> 6] = 1;
++            ProtectHost(it->second.host);
++        }
+     }
+ 
+     std::unordered_map<uint32_t, CodePage>::iterator NotePage(uint32_t page) {
+@@ -177,6 +216,7 @@
+ 
+     void Clear() {
+         stats.clears++;
++        ClearPages();
+         jit->ClearCache();
+         code.clear();
+         byHost.clear();
+@@ -191,6 +231,7 @@
+         stats.pageClears++;
+         for (uint32_t i : filled) (*pages)[i] = nullptr;
+         filled.clear();
++        writable.clear();
+     }
+ 
+     void CheckGen() {
+@@ -219,9 +260,10 @@
+         CheckGen();
+         const uint32_t page = va >> 12;
+         if (!(*pages)[page]) {
+-            if (uint8_t *host = cpuJitReadPage(cpu, va)) {
++            uint8_t *host = cpuJitReadPage(cpu, va);
++            if (host && !(uintptr_t(host) & 1)) {
+                 stats.pageFills++;
+-                (*pages)[page] = host;
++                (*pages)[page] = ReadOnly(host);
+                 filled.push_back(page);
+             } else {
+                 AfterIo();
+@@ -237,6 +279,20 @@
+             Fault();
+             return;
+         }
++        // A RAM page the guest may store to in this mode: map it writable. Unaligned stores
++        // also land here for pages that already are.
++        CheckGen();
++        const uint32_t page = va >> 12;
++        uint8_t *const entry = (*pages)[page];
++        if (!entry || (uintptr_t(entry) & 1)) {
++            uint8_t *host = cpuJitWritePage(cpu, va);
++            if (host && !(uintptr_t(host) & 1)) {
++                stats.writeMaps++;
++                if (!entry) filled.push_back(page);
++                (*pages)[page] = host;
++                writable[host].push_back(page);
++            }
++        }
+         AfterIo();
+     }
+ 
+@@ -364,7 +420,9 @@
+     conf.callbacks = &j->env;
+     conf.arch_version = A32::ArchVersion::v5TE;
+     conf.page_table = &j->pages;
+-    conf.page_table_writes_via_callbacks = true;
++    conf.page_table_writes_via_callbacks = false;
++    conf.page_table_write_protect_bit = true;
++    conf.page_table_pointer_mask_bits = 1;
+     conf.check_halt_on_link = true;
+     conf.check_halt_on_memory_access = true;
+     // Unaligned accesses go through the callbacks, which fault on them.
+@@ -399,6 +457,10 @@
+ 
+ void jitCodeWritten(FrondJit *j, uint8_t *hostPage) { j->env.CodeWritten(hostPage); }
+ 
++void jitWriteProtect(FrondJit *j, const uint8_t *host, uint32_t size) {
++    if (!j->env.writable.empty()) j->env.Protect(host, size);
++}
++
+ uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, int &stop) {
+     Env &e = j->env;
+     A32::Jit &jit = *j->jit;
+--- a/src/uarm/uarm/jit_dynarmic.h
++++ b/src/uarm/uarm/jit_dynarmic.h
+@@ -31,6 +31,8 @@
+ void jitClear(FrondJit *jit);
+ // The first write to a watched RAM line since code was translated from it.
+ void jitCodeWritten(FrondJit *jit, uint8_t *hostPage);
++// Sends stores to the RAM pages in [host, host + size) back through the callbacks.
++void jitWriteProtect(FrondJit *jit, const uint8_t *host, uint32_t size);
+ 
+ // Provided by CPU.cpp for the JIT's callbacks. Accesses use the current privilege.
+ bool cpuJitRead(ArmCpu *cpu, uint32_t va, unsigned size, void *buf);
+@@ -40,6 +42,9 @@
+ bool cpuJitPlain(ArmCpu *cpu, uint32_t pc, uint32_t word, bool thumb);
+ // Host address of the readable RAM or ROM page holding va, or null.
+ uint8_t *cpuJitReadPage(ArmCpu *cpu, uint32_t va);
++// Host address of the RAM page holding va if the guest may store there now, marked dirty
++// (and the frame buffer, where it overlaps) as if all of it was written, or null.
++uint8_t *cpuJitWritePage(ArmCpu *cpu, uint32_t va);
+ // Physical address of va by the page tables, without touching the TLBs.
+ bool cpuJitCodePa(ArmCpu *cpu, uint32_t va, uint32_t *pa);
+ // Host page holding the code at pa: RAM or ROM's peephole copy, null for anything else. For

@@ -1065,6 +1065,7 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
         frondFirmware::storedNor(firmwareRoot(), startDevice))) arguments << "--sony-audio-preview";
     arguments << "--window-scale" << QString::number(runningPreferences.scale / 4.0);
     if (runningPreferences.smooth) arguments << "--smooth-lcd";
+    if (runningPreferences.fastEngine) arguments << "--engine" << "fast";
     if (startDevice == frondFirmware::deviceFromId("sony-clie-tg50")) {
         if (!runningPreferences.showKeyboard) arguments << "--hide-keyboard";
         arguments << "--jog-controls" << frondSessions::jogControlsName(runningPreferences.jogControls);

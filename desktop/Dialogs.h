@@ -23,6 +23,8 @@ class MachineSettings : public QWidget {
     QCheckBox *smoothLcd, *audio, *fastAudio, *showKeyboard, *sonyAudioPreview;
     QComboBox* jogControls;
     QLabel* jogControlsLabel;
+    // Only shown with FROND_ENGINE_SETTING=1 until the Fast engine is qualified.
+    QComboBox* engine;
  private:
     bool automaticScale;
     frondSessions::Preferences originalPreferences;
