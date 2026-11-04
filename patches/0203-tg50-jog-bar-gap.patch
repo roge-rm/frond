@@ -1,0 +1,46 @@
+--- a/src/uarm/native/DeviceControls.cpp
++++ b/src/uarm/native/DeviceControls.cpp
+@@ -1304,7 +1304,7 @@
+     }
+ 
+     // The side controls use the same body paint and texture coordinates as the keyboard.
+-    // Clipped to the tab, so each key's groove and lip fit in its 2 unit margins.
++    // Clipped to the tab. Each key's groove and lip reach 2.3 units out, inside its 4 unit margins.
+     if(sidebar && view.sideTab && profile.sideTabWidth>0) {
+         canvas.clipLeft=profile.sideTab.x;
+         canvas.clipRight=profile.sideTab.x+profile.sideTab.w;
+--- a/src/uarm/native/DeviceControls.h
++++ b/src/uarm/native/DeviceControls.h
+@@ -213,13 +213,13 @@
+         {tg50Key(7,4), {240,188,27,24}, "Right", DeviceControlIcon::legend, 0, kb},
+         {tg50Key(2,0), {271,188,27,24}, "Caps lock", DeviceControlIcon::legend, 0, kb},
+         // Side tab: the Jog Dial rolls up and down either side of its press, then Back.
+-        {keyIdJogUp, {-32,-230,30,26}, "Jog up", DeviceControlIcon::up, 6, tab},
+-        {keyIdJogPress, {-32,-198,30,64}, "Jog press", DeviceControlIcon::select, 6, tab},
+-        {keyIdJogDown, {-32,-128,30,26}, "Jog down", DeviceControlIcon::down, 6, tab},
+-        {keyIdBack, {-32,-86,30,26}, "Back", DeviceControlIcon::back, 6, tab},
++        {keyIdJogUp, {-34,-230,30,26}, "Jog up", DeviceControlIcon::up, 6, tab},
++        {keyIdJogPress, {-34,-198,30,64}, "Jog press", DeviceControlIcon::select, 6, tab},
++        {keyIdJogDown, {-34,-128,30,26}, "Jog down", DeviceControlIcon::down, 6, tab},
++        {keyIdBack, {-34,-86,30,26}, "Back", DeviceControlIcon::back, 6, tab},
+     };
+     static const DeviceControlProfile tg50Profile{320,224,tg50,std::size(tg50),{0,0,0,0},0,{0,0,0,0},
+-                                                  DeviceControlStyle::tg50,0.3f,1,0,176,{-34,-236,34,208},34};
++                                                  DeviceControlStyle::tg50,0.3f,1,0,176,{-38,-236,38,208},38};
+     static const DeviceControlProfile empty{0,0,nullptr,0,{0,0,0,0},0,{0,0,0,0}};
+     switch(art) {
+         case DeviceArt::tx: return txProfile;
+--- a/src/common/device_profile5.h
++++ b/src/common/device_profile5.h
+@@ -124,9 +124,9 @@
+      {false, true, true, true, false, true, true, true, true, true},
+      0xc70000, 0, 16u << 20, 16u << 20, DisplayMode::mode_320x320, 1u << 5, false,
+      DeviceNorLayout5::smallAndBigCards, 0, 0x20000, false, 0, 0,
+-     {true, "tg50", 320, 320, 0, 248, "Date Book|Address|To Do|Memo Pad",
++     {true, "tg50", 320, 320, 0, 251, "Date Book|Address|To Do|Memo Pad",
+       "up|down|app1|app2|app3|app4|home|power", -1, -1, -1, -1, false, false, false, "", "tg50-clie",
+-      DeviceStorageSlot5::memoryStick, 1073741887, true, true, 34, true},
++      DeviceStorageSlot5::memoryStick, 1073741887, true, true, 38, true},
+      4 | 8 | 16 | 32 | 64 | 128, 1886},
+     // Reserved names: art only, no board yet.
+     {deviceTypeInvalid, "palm-iiix", "Palm IIIx", DeviceCohort5::reserved, DeviceSupport5::reserved,
