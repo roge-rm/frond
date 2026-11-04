@@ -2,7 +2,8 @@
 // cpuMaxOvershootCycles. Synthetic code: a straight ARM run longer than any cap, ARM
 // conditional fallthrough chains (one block per condition change), Thumb straight runs and
 // Thumb conditional branch chains, at budgets from 1 up, from fresh starts and continuing.
-// Fast is checked at the built-in cap and at 64 and 256 (FROND_JIT_MAX_UNCHECKED), Exact at 19.
+// Fast is checked at the built-in cap and at 64 and 256 (FROND_JIT_MAX_UNCHECKED), Exact at 19,
+// compiling every block at once (FROND_JIT_HOT=1), and with the built-in interpret-first count.
 // With the cap off (FROND_JIT_MAX_UNCHECKED=0) the same cases must overshoot more than any
 // cap, so they really reach the unchecked paths.
 #include <cassert>
@@ -78,9 +79,11 @@ struct Engine {
     uint32_t bound;
 };
 
-static Engine make(bool fast, const char* cap) {
+static Engine make(bool fast, const char* cap, const char* hot) {
     if (cap) setenv("FROND_JIT_MAX_UNCHECKED", cap, 1);
     else unsetenv("FROND_JIT_MAX_UNCHECKED");
+    if (hot) setenv("FROND_JIT_HOT", hot, 1);
+    else unsetenv("FROND_JIT_HOT");
     unsetenv("FROND_JIT");
     if (!cpuSetFastEngine(fast)) {
         fprintf(stderr, "this core has no Fast engine\n");
@@ -135,11 +138,13 @@ int main() {
         const char* label;
         bool fast;
         const char* cap;
-    } setups[] = {{"exact", false, nullptr}, {"fast", true, nullptr}, {"fast L=64", true, "64"},
-                  {"fast L=256", true, "256"}, {"fast uncapped", true, "0"}};
+        const char* hot;
+    } setups[] = {{"exact", false, nullptr, "1"},      {"fast", true, nullptr, "1"},
+                  {"fast L=64", true, "64", "1"},      {"fast L=256", true, "256", "1"},
+                  {"fast uncapped", true, "0", "1"},   {"fast hot", true, nullptr, nullptr}};
     bool ok = true;
     for (const auto& s : setups) {
-        Engine e = make(s.fast, s.cap);
+        Engine e = make(s.fast, s.cap, s.hot);
         uint32_t all = 0;
         for (const auto& p : programs) {
             const uint32_t w = worst(e, p);

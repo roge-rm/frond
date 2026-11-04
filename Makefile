@@ -246,6 +246,8 @@ test-jit-differential: build/test-jit-differential
 		{ grep -v ' failed (pc=' build/jit-differential.err | tail -5; exit 1; }
 	test -n "$(JIT_DIFF_ARGS)" || ./build/test-jit-differential --seeds 30001:40001 --no-directed --max-unchecked 256 \
 		2>build/jit-differential.err || { grep -v ' failed (pc=' build/jit-differential.err | tail -5; exit 1; }
+	test -n "$(JIT_DIFF_ARGS)" || ./build/test-jit-differential --seeds 40001:50001 --no-directed --hot 3 \
+		2>build/jit-differential.err || { grep -v ' failed (pc=' build/jit-differential.err | tail -5; exit 1; }
 
 .PHONY: test-arm-conditions benchmark-menu
 test-arm-conditions: out/frond

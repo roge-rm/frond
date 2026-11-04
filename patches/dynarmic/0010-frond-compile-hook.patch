@@ -1,0 +1,91 @@
+diff --git a/src/dynarmic/interface/A32/config.h b/src/dynarmic/interface/A32/config.h
+--- a/src/dynarmic/interface/A32/config.h
++++ b/src/dynarmic/interface/A32/config.h
+@@ -110,6 +110,10 @@
+ 
+     virtual void InstructionSynchronizationBarrierRaised() {}
+ 
++    // Frond: asked before the block at pc is compiled. Returning false compiles nothing and
++    // the run goes back to the dispatcher, so the callback must halt execution then.
++    virtual bool ShouldCompile(VAddr /*pc*/, bool /*thumb*/) { return true; }
++
+     // Timing-related callbacks
+     // ticks ticks have passed
+     virtual void AddTicks(std::uint64_t ticks) = 0;
+diff --git a/src/dynarmic/backend/x64/a32_interface.cpp b/src/dynarmic/backend/x64/a32_interface.cpp
+--- a/src/dynarmic/backend/x64/a32_interface.cpp
++++ b/src/dynarmic/backend/x64/a32_interface.cpp
+@@ -194,7 +194,16 @@
+     }
+ 
+     CodePtr GetCurrentBlock() {
+-        return GetBasicBlock(GetCurrentLocation()).entrypoint;
++        const IR::LocationDescriptor location = GetCurrentLocation();
++        if (const auto block = emitter.GetBasicBlock(location)) {
++            return block->entrypoint;
++        }
++        // Frond: the callbacks can leave new code to the caller for now (they halt the run).
++        const A32::LocationDescriptor a32_location{location};
++        if (!conf.callbacks->ShouldCompile(a32_location.PC(), a32_location.TFlag())) {
++            return block_of_code.GetReturnFromRunCodeAddress();
++        }
++        return GetBasicBlock(location).entrypoint;
+     }
+ 
+     CodePtr GetCurrentSingleStep() {
+diff --git a/src/dynarmic/backend/arm64/a32_address_space.h b/src/dynarmic/backend/arm64/a32_address_space.h
+--- a/src/dynarmic/backend/arm64/a32_address_space.h
++++ b/src/dynarmic/backend/arm64/a32_address_space.h
+@@ -21,6 +21,10 @@
+ 
+     void InvalidateCacheRanges(const boost::icl::interval_set<u32>& ranges);
+ 
++    // Frond: GetOrEmit, unless the callbacks leave new code to the caller for now (they halt
++    // the run); then the dispatcher, which ends the run.
++    CodePtr GetOrEmitIfWanted(IR::LocationDescriptor descriptor);
++
+ protected:
+     friend class A32Core;
+ 
+diff --git a/src/dynarmic/backend/arm64/a32_address_space.cpp b/src/dynarmic/backend/arm64/a32_address_space.cpp
+--- a/src/dynarmic/backend/arm64/a32_address_space.cpp
++++ b/src/dynarmic/backend/arm64/a32_address_space.cpp
+@@ -187,6 +187,17 @@
+     InvalidateBasicBlocks(block_ranges.InvalidateRanges(ranges));
+ }
+ 
++CodePtr A32AddressSpace::GetOrEmitIfWanted(IR::LocationDescriptor descriptor) {
++    if (CodePtr block_entry = Get(descriptor)) {
++        return block_entry;
++    }
++    const A32::LocationDescriptor a32_location{descriptor};
++    if (!conf.callbacks->ShouldCompile(a32_location.PC(), a32_location.TFlag())) {
++        return reinterpret_cast<CodePtr>(prelude_info.return_to_dispatcher);
++    }
++    return GetOrEmit(descriptor);
++}
++
+ void A32AddressSpace::EmitPrelude() {
+     using namespace oaknut::util;
+ 
+@@ -326,7 +337,7 @@
+         code.BR(X0);
+ 
+         const auto fn = [](A32AddressSpace& self, A32JitState& context) -> CodePtr {
+-            return self.GetOrEmit(context.GetLocationDescriptor());
++            return self.GetOrEmitIfWanted(context.GetLocationDescriptor());
+         };
+ 
+         code.align(8);
+diff --git a/src/dynarmic/backend/arm64/a32_core.h b/src/dynarmic/backend/arm64/a32_core.h
+--- a/src/dynarmic/backend/arm64/a32_core.h
++++ b/src/dynarmic/backend/arm64/a32_core.h
+@@ -16,7 +16,7 @@
+ 
+     HaltReason Run(A32AddressSpace& process, A32JitState& thread_ctx, volatile u32* halt_reason) {
+         const auto location_descriptor = thread_ctx.GetLocationDescriptor();
+-        const auto entry_point = process.GetOrEmit(location_descriptor);
++        const auto entry_point = process.GetOrEmitIfWanted(location_descriptor);
+         return process.prelude_info.run_code(entry_point, &thread_ctx, halt_reason);
+     }
+ 
