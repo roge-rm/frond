@@ -24,10 +24,10 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 from guest_process import run_guest
-from palm_boot import Core, png_rows, date_time_prefs, zire_setup
+from palm_boot import Core, png_rows, date_time_prefs, palm_images, zire_setup
 CORE = ROOT / 'out/frond'
 # FROND_DEVICE_IMAGES is the firmware folder (deviceimages/palm); without it the firmware tests skip.
-PALM = Path(os.environ.get('FROND_DEVICE_IMAGES') or '/nonexistent/set-FROND_DEVICE_IMAGES')
+PALM = palm_images()
 ZIRE = PALM / 'Palm/Zire-72/Palm-Zire72-nor.bin'
 ZIRE_SHA = 'f44dd41217682740b86714e77b5ca0ef41b1d0bed18361e80bcc833a40f6659b'
 E2 = PALM / 'Palm/Tungsten-E2/Palm-Tungsten-E2-nor.bin'

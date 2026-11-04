@@ -1126,10 +1126,10 @@ index 69f609a..73df2b1 100644
  #define get_long			uae_get_long
  #define get_word			uae_get_word
 diff --git a/src/cloudpilot/frond/main.cpp b/src/cloudpilot/frond/main.cpp
-index 4e9cc1a..7f0f4e8 100644
+index 4e9cc1a..80336bf 100644
 --- a/src/cloudpilot/frond/main.cpp
 +++ b/src/cloudpilot/frond/main.cpp
-@@ -29,6 +29,7 @@
+@@ -29,9 +29,11 @@
  #include "Chars.h"
  #include "DbInstaller.h"
  #include "EmBankROM.h"
@@ -1137,7 +1137,11 @@ index 4e9cc1a..7f0f4e8 100644
  #include "Debugger.h"
  #include "EmCommon.h"
  #include "EmDevice.h"
-@@ -155,13 +156,16 @@ bool startCore(const DeviceProfile5& profile, const uint8_t* rom, size_t size) {
++#include "EmHAL.h"
+ #include "EmMemory.h"
+ #include "EmROMReader.h"
+ #include "EmSession.h"
+@@ -155,13 +157,16 @@ bool startCore(const DeviceProfile5& profile, const uint8_t* rom, size_t size) {
      return gSession->Initialize(new EmDevice(cloudpilotDevice(profile)), copy, size);
  }
  
@@ -1156,7 +1160,7 @@ index 4e9cc1a..7f0f4e8 100644
  }
  
  string parseMetadata(const void* data, size_t size, SessionMetadata& metadata) {
-@@ -176,6 +180,8 @@ string parseMetadata(const void* data, size_t size, SessionMetadata& metadata) {
+@@ -176,6 +181,8 @@ string parseMetadata(const void* data, size_t size, SessionMetadata& metadata) {
              const long value = strtol(line.c_str() + 9, &end, 10);
              if (*end || value < 0 || value > 100) return "invalid session contrast";
              metadata.contrast = int(value);
@@ -1165,7 +1169,7 @@ index 4e9cc1a..7f0f4e8 100644
          } else if (!line.empty()) {
              return "unknown session metadata";
          }
-@@ -243,6 +249,7 @@ string applySession(const CheckedSession& session) {
+@@ -243,6 +250,7 @@ string applySession(const CheckedSession& session) {
      vector<uint8_t> savestate(static_cast<const uint8_t*>(session.file.GetSavestate()),
                                static_cast<const uint8_t*>(session.file.GetSavestate()) + session.file.GetSavestateSize());
      if (!gSession->Load(savestate.size(), savestate.data())) return "session machine state is damaged";
@@ -1173,7 +1177,7 @@ index 4e9cc1a..7f0f4e8 100644
      return "";
  }
  
-@@ -610,6 +617,20 @@ class Runner {
+@@ -610,6 +618,31 @@ class Runner {
              const EmAddressBank& ram = EmMemGetBank(0);
              cout << "bus wait: rom " << int(rom.waitByte) << "/" << int(rom.waitWord) << ", ram "
                   << int(ram.waitByte) << "/" << int(ram.waitWord) << endl;
@@ -1182,14 +1186,25 @@ index 4e9cc1a..7f0f4e8 100644
 +            const EmBusSteal& steal = EmBusTiming::Get();
 +            cout << "bus timing: lcd line " << steal.lcdLineClocks << " dma " << steal.lcdDmaClocks
 +                 << ", refresh period " << steal.refreshPeriod << " hold " << steal.refreshClocks << endl;
-+            // The DragonBall registers it comes from (same addresses on the EZ and VZ).
++            // The LCD frame rate those give: the line times LYMAX + 1 lines.
++            const uint16 lines = EmMemGet16(0xfffffa0a) + 1;
++            if (steal.lcdLineClocks) {
++                char frame[64];
++                snprintf(frame, sizeof(frame), "lcd frame: %.1f Hz",
++                         double(EmHAL::GetSystemClockFrequency()) / (double(steal.lcdLineClocks) * lines));
++                cout << frame << endl;
++            }
++            // The DragonBall registers it comes from (same addresses on the EZ and VZ, except LRRA:
++            // 8 bits at $FA29 on the EZ, 10 bits at $FA28 on the VZ).
++            const bool vz = gSession->GetDevice().Supports68VZ328();
 +            char regs[160];
 +            snprintf(regs, sizeof(regs),
 +                     "bus registers: pllcr %04x csd %04x drammc %04x dramc %04x lpicf %02x lpxcd %02x lckcon %02x "
-+                     "lrra %04x lxmax %u lymax %u",
++                     "lrra %0*x lxmax %u lymax %u",
 +                     EmMemGet16(0xfffff200), EmMemGet16(0xfffff116), EmMemGet16(0xfffffc00), EmMemGet16(0xfffffc02),
-+                     EmMemGet8(0xfffffa20), EmMemGet8(0xfffffa25), EmMemGet8(0xfffffa27), EmMemGet16(0xfffffa28),
-+                     EmMemGet16(0xfffffa08), EmMemGet16(0xfffffa0a));
++                     EmMemGet8(0xfffffa20), EmMemGet8(0xfffffa25), EmMemGet8(0xfffffa27), vz ? 4 : 2,
++                     vz ? EmMemGet16(0xfffffa28) : EmMemGet8(0xfffffa29), EmMemGet16(0xfffffa08),
++                     EmMemGet16(0xfffffa0a));
 +            cout << regs << endl;
          } else if (command == "speed") {
              string value;

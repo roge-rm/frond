@@ -20,10 +20,10 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 # FROND_DEVICE_IMAGES is the firmware folder (deviceimages/palm).
-ZIRE_NOR = Path(os.environ.get('FROND_DEVICE_IMAGES') or '/nonexistent/set-FROND_DEVICE_IMAGES') / 'Palm/Zire-72/Palm-Zire72-nor.bin'
 sys.path.insert(0, str(ROOT / 'tools'))
 from guest_process import run_guest
-from palm_boot import CORE, CORE_68K, DEVICES_68K, PROFILES, ROM_DEVICES, Core, launcher_check, setup_device, reset_recipe
+from palm_boot import CORE, CORE_68K, DEVICES_68K, PROFILES, ROM_DEVICES, Core, launcher_check, palm_images, setup_device, reset_recipe
+ZIRE_NOR = palm_images() / 'Palm/Zire-72/Palm-Zire72-nor.bin'
 from guest_faults import check_diagnostics, describe, parse_contract, observed_faults
 
 

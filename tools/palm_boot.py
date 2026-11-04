@@ -42,6 +42,11 @@ def rom_device(device):
     return DEVICES[device] if device in DEVICES else DEVICES_68K[device]
 
 
+def palm_images():
+    """The private firmware folder (the deviceimages/palm layout) from FROND_DEVICE_IMAGES, else a path that isn't there."""
+    return Path(os.environ.get('FROND_DEVICE_IMAGES') or '/nonexistent/set-FROND_DEVICE_IMAGES')
+
+
 CORE = Path(__file__).resolve().parents[1] / 'out/frond'
 CORE_68K = Path(__file__).resolve().parents[1] / 'out/frond-68k'
 
