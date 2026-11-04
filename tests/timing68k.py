@@ -8,6 +8,7 @@ the manual's count plus the wait states the guest set (frond-68k's bus-wait) on 
 and the measured clocks per pass must be within --tolerance of it. The 100 Hz tick interrupt runs
 during every loop, so measured passes are a little slower than the bare count."""
 import argparse
+import re
 from pathlib import Path
 import struct
 import sys
@@ -18,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
 import palm_boot  # noqa: E402
 
 CLOCK = 16580608
+RESULTS = re.compile(rb'FrondBench 1\.0\n[^\0]{0,380}?Checksum [0-9A-Fa-f]+\n')
 MAGIC = struct.pack('>4I', 0x46723638, 0x54494d45, 0x5749544e, 0x45535331)
 
 # name, then bus cycles per pass from program space in RAM, data in RAM, data in ROM and data in
@@ -77,9 +79,9 @@ def frondbench_results(path):
     swap = lambda raw: bytes(b for pair in zip(raw[1::2], raw[0::2]) for b in pair)
     for payload in session_payloads(path.read_bytes()):
         for memory in (payload, swap(payload), swap(payload[1:])):
-            at = memory.find(b'FrondBench 1.0\n')
-            if at >= 0 and memory.find(b'Checksum', at) > 0:
-                return memory[at:memory.index(b'\0', at)].decode()
+            found = RESULTS.search(memory)
+            if found:
+                return found.group().decode('latin-1')
     return None
 
 
