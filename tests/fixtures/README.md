@@ -33,4 +33,4 @@ separate. The fixtures contain no firmware or application binary.
 `menu-response.replay` opens the SunVox editor menu three times after warm-up,
 with snapshots before each tap and after a 2.5-second response window. Start with
 the menu closed and run for 26 seconds. Pair it with the optional menu observer
-and analyser described in [input latency](../../doc/input-latency.md).
+and analyser described in [performance](../../doc/performance.md#input-and-menu-latency).

@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import tempfile
 
-from package_policy import DYNARMIC_LICENCES, check_deb, check_dependencies, check_stage
+from package_policy import DOCS, DYNARMIC_LICENCES, check_deb, check_dependencies, check_stage
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -76,12 +76,10 @@ def package(root=ROOT, core='out/frond', desktop='out/frond-desktop', architectu
         dynarmic = os.environ.get('FROND_DYNARMIC_SRC', 'build/dynarmic-trial/src')
         for name, source in DYNARMIC_LICENCES.items():
             copy(f'{dynarmic}/{source}', f'usr/share/doc/frond/{name}')
-        copy('doc/desktop.md', 'usr/share/doc/frond/README')
-        copy('doc/peripherals.md', 'usr/share/doc/frond/peripherals.md')
-        copy('doc/infrared.md', 'usr/share/doc/frond/infrared.md')
-        copy('doc/bluetooth-provider.md', 'usr/share/doc/frond/bluetooth-provider.md')
-        copy('doc/peripheral-qualification.md', 'usr/share/doc/frond/peripheral-qualification.md')
-        (work / 'debian/control').write_text('Source: frond\n\nPackage: frond\nArchitecture: any\nDescription: Palm TX emulator\n')
+        copy('doc/using-frond.md', 'usr/share/doc/frond/README')
+        for name in DOCS:
+            copy(f'doc/{name}', f'usr/share/doc/frond/{name}')
+        (work / 'debian/control').write_text('Source: frond\n\nPackage: frond\nArchitecture: any\nDescription: Palm OS emulator\n')
         deps = subprocess.check_output(['dpkg-shlibdeps', '--warnings=1', '-O', '-e' + str(core),
                                         '-e' + str(gui)], cwd=work, text=True,
                                        env=dict(os.environ, DEB_HOST_ARCH=architecture))
@@ -92,7 +90,7 @@ def package(root=ROOT, core='out/frond', desktop='out/frond-desktop', architectu
         check_dependencies(deps)
         changelog = stage / 'usr/share/doc/frond/changelog.gz'
         with changelog.open('wb') as raw, gzip.GzipFile(filename='', fileobj=raw, mode='wb', mtime=0) as output:
-            output.write(f'Frond {version}\n\n * Native Palm TX emulator and desktop launcher.\n'.encode())
+            output.write(f'Frond {version}\n\n * Native Palm OS emulator and desktop launcher.\n'.encode())
         changelog.chmod(0o644)
         installed = (sum(p.stat().st_size for p in stage.rglob('*') if p.is_file()) + 1023) // 1024
         (control / 'control').write_text(f'''Package: frond
