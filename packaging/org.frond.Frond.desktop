@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=Frond
-Comment=Palm TX emulator
+Comment=Palm OS emulator
 Exec=frond-desktop %f
 Icon=frond
 Terminal=false
