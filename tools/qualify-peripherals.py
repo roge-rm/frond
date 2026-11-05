@@ -100,7 +100,7 @@ def run(plan_path, output, timeout=900):
                 origin = Path(config['session']).resolve()
                 session = root / (name + '-working')
                 native.copy_session(origin, session)
-                if native.sha256(session) != native.sha256(origin):
+                if native.sha256(session if origin.is_dir() else session / 'working.frond') != native.sha256(origin):
                     raise RuntimeError('session changed while copying')
                 listener = stack.enter_context(socket.socket(socket.AF_UNIX))
                 address = str(socket_root / name)

@@ -42,7 +42,7 @@ class QualificationTests(unittest.TestCase):
         self.session.write_text(json.dumps(config or {}))
         plan_path = self.root / 'input-plan.json'
         plan_path.write_text(json.dumps(self.plan))
-        with patch.dict(os.environ, PATH=str(self.root) + os.pathsep + os.environ['PATH']):
+        with patch.dict(os.environ, PATH=str(self.root) + os.pathsep + os.environ['PATH'], FROND_EMULATOR_CMD='heavy emulator'):
             result = qualification.run(plan_path, self.output, timeout=6)
         self.assertEqual(json.loads((self.output / 'result.json').read_text()), result)
         # Each core prints its PID on start; all owned guests must be reaped.
