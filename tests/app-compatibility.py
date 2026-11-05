@@ -76,9 +76,10 @@ class MatrixTests(unittest.TestCase):
                   'inputs': [self.ident(p) for p in sources],
                   'origin': {'mode': 'session-restore' if args.session else 'cold-boot',
                              'saved_ram_cpu_loaded': bool(args.session)}, 'artifacts': {
-                      'session_saved': True, 'session': str(root / 'working.frond'),
+                      'session_saved': True, 'session': str(root / 'working' / 'working.frond'),
                       'exports': [], 'screenshots': []}}
-        (root / 'working.frond').write_bytes(b'saved' + bytes([self.calls]))
+        (root / 'working').mkdir()
+        (root / 'working' / 'working.frond').write_bytes(b'saved' + bytes([self.calls]))
         for index, name in enumerate(args.export_db, 1):
             archive = root / f'database-{index:03d}.zip'
             value = b'before' if self.calls == 1 else b'after'

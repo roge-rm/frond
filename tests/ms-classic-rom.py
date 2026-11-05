@@ -95,7 +95,7 @@ def checks(mb, work, result, folder1, folder2, saved, image):
     payload = work / 'put.bin'
     payload.write_bytes(os.urandom(70000) + b'Written by Frond\n')
     folder1.mkdir()
-    run = smoke.Run(DEVICE, work, smoke.OUT / f'{DEVICE}.session', extra=['--work-folder', folder1])
+    run = smoke.Run(DEVICE, work, smoke.session_path(DEVICE), extra=['--work-folder', folder1])
     run.control.command_timeout = 600
     try:
         run.ready()

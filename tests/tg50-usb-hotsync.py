@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Sony CLIE TG50 USB HotSync with pilot-link: list, fetch, install, list again and dlpsh.
 
-Skipped unless out/frond, pilot-xfer, pilot-dlpsh and a ready TG50 session (build/smoke/sony-clie-tg50.session,
+Skipped unless out/frond, pilot-xfer, pilot-dlpsh and a ready TG50 session (build/smoke/machines/sony-clie-tg50,
 from make smoke-sessions, or FROND_TG50_SESSION) exist. The session is only read. Takes about two minutes.
 """
 import json
@@ -16,7 +16,9 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE = ROOT / 'out/frond'
-SESSION = Path(os.environ.get('FROND_TG50_SESSION', ROOT / 'build/smoke/sony-clie-tg50.session'))
+SESSION = Path(os.environ.get('FROND_TG50_SESSION', (ROOT / 'build/smoke/machines/sony-clie-tg50'
+                                                             if (ROOT / 'build/smoke/machines/sony-clie-tg50').exists()
+                                                             else ROOT / 'build/smoke/sony-clie-tg50.session')))
 PILOT = shutil.which('pilot-xfer') and shutil.which('pilot-dlpsh')
 
 
@@ -28,7 +30,7 @@ def small_pdb(path, name):
     return path
 
 
-@unittest.skipUnless(CORE.is_file() and SESSION.is_file() and PILOT,
+@unittest.skipUnless(CORE.is_file() and SESSION.exists() and PILOT,
                      'needs out/frond, a ready TG50 session (make smoke-sessions) and pilot-link')
 class Tg50UsbHotSyncTest(unittest.TestCase):
     def hotsync(self, endpoint):

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Zire 72 detection, rejection and boot checks on the private Zire NOR, plus the E2 and TX still loading.
 
-Skipped when the firmware isn't there. FROND_ZIRE_LAUNCHER=1 adds the launcher and key runs, FROND_ZIRE_STORAGE=1
+Skipped when the firmware isn't there; FROND_DEVICE_IMAGES points at the firmware folder. FROND_ZIRE_LAUNCHER=1 adds the launcher and key runs, FROND_ZIRE_STORAGE=1
 the SD card, session and memo runs, FROND_HARD_RESET=1 the TX and E2 erase prompt after reset-hard,
 FROND_ZIRE_PERIPHERALS=1 USB HotSync, IrDA beaming, the infrared keyboard, Bluetooth pairing and the camera stub. Mutated copies live in a temporary directory under build/;
 the originals are only read and their SHA-256 is checked before and after.
@@ -26,7 +26,8 @@ sys.path.insert(0, str(ROOT / 'tools'))
 from guest_process import run_guest
 from palm_boot import Core, png_rows, date_time_prefs, zire_setup
 CORE = ROOT / 'out/frond'
-PALM = Path('/srv/downloads/backup/deviceimages/palm')
+# FROND_DEVICE_IMAGES is the firmware folder (deviceimages/palm); without it the firmware tests skip.
+PALM = Path(os.environ.get('FROND_DEVICE_IMAGES') or '/nonexistent/set-FROND_DEVICE_IMAGES')
 ZIRE = PALM / 'Palm/Zire-72/Palm-Zire72-nor.bin'
 ZIRE_SHA = 'f44dd41217682740b86714e77b5ca0ef41b1d0bed18361e80bcc833a40f6659b'
 E2 = PALM / 'Palm/Tungsten-E2/Palm-Tungsten-E2-nor.bin'
@@ -37,6 +38,14 @@ HSPR = struct.pack('<I', 0x68737072)  # HAL IDs are stored little endian
 
 def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def session_file(path):
+    """The .frond inside a saved machine folder, or the path itself for a lone file."""
+    if path.is_dir():
+        found = [path / (path.name + '.frond'), path / 'session.frond', *sorted(path.glob('*.frond'))]
+        return next((p for p in found if p.is_file()), path / (path.name + '.frond'))
+    return path
 
 
 def boot_to_launcher(root):
@@ -54,7 +63,7 @@ def boot_to_launcher(root):
         core.send(f'save-session "{session}"', 'wrote session')
     finally:
         core.close()
-    assert session.is_file(), 'launcher session not saved'
+    assert session_file(session).is_file(), 'launcher session not saved'
     return session
 
 @unittest.skipUnless(ZIRE.is_file() and CORE.is_file(), 'private Zire 72 firmware or core missing')
@@ -557,7 +566,7 @@ class Zire72StorageTest(unittest.TestCase):
             self.assertIn(b'Frind neni', archive.read('MemosDB-PMem.pdb'))
 
     def test_5_damaged_sessions_refused(self):
-        data = (self.root / 'card.session').read_bytes()
+        data = session_file(self.root / 'card.session').read_bytes()
         for name, bad in [('empty', b''), ('truncated-64', data[:64]), ('truncated-half', data[:len(data) // 2]),
                           ('truncated-last', data[:-1]), ('flipped', data[:len(data) // 2] + bytes([data[len(data) // 2] ^ 0x40])
                                                            + data[len(data) // 2 + 1:])]:

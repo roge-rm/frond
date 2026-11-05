@@ -19,7 +19,8 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-ZIRE_NOR = Path('/srv/downloads/backup/deviceimages/palm/Palm/Zire-72/Palm-Zire72-nor.bin')
+# FROND_DEVICE_IMAGES is the firmware folder (deviceimages/palm).
+ZIRE_NOR = Path(os.environ.get('FROND_DEVICE_IMAGES') or '/nonexistent/set-FROND_DEVICE_IMAGES') / 'Palm/Zire-72/Palm-Zire72-nor.bin'
 sys.path.insert(0, str(ROOT / 'tools'))
 from guest_process import run_guest
 from palm_boot import CORE, DEVICES, PROFILES, Core, launcher_check, setup_device, reset_recipe

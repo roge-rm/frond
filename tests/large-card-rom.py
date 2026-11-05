@@ -109,7 +109,7 @@ def qualify(device, mib, probe, guest_format=True):
     work.mkdir(parents=True, mode=0o700)
     result = {'device': device, 'mib': mib, 'guest_format': guest_format, 'layout_bytes': layout_bytes(mib), 'problems': []}
     problems = result['problems']
-    session = smoke.OUT / f'{device}.session'
+    session = smoke.session_path(device)
     if smoke.SMOKE[device].get('reminder'):
         session, _ = smoke.clear_reminder(device, work, session)
     folder1, folder2, saved, image = work / 'machine-1', work / 'machine-2', work / 'saved', work / 'card.img'

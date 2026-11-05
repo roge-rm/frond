@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the reproducible TX acceptance checks using user-supplied images."""
+"""TX only: run the reproducible TX acceptance checks using user-supplied images."""
 import argparse
 import hashlib
 import json
