@@ -199,8 +199,9 @@ class PackagePolicyTests(unittest.TestCase):
                               'puts("Synthetic-fixture 0.2.0"); return 0; }\n')
             flags = subprocess.check_output(['pkg-config', '--cflags', '--libs', 'slirp'], text=True).split()
             subprocess.run(['cc', str(source), '-o', str(root / 'out/frond'), *flags], check=True)
-            shutil.copyfile(root / 'out/frond', root / 'out/frond-desktop')
-            (root / 'out/frond-desktop').chmod(0o755)
+            for name in ('frond-desktop', 'frond-68k'):
+                shutil.copyfile(root / 'out/frond', root / 'out' / name)
+                (root / 'out' / name).chmod(0o755)
             # Seed ignored/private data near every tempting broad-copy input.
             for name in ('out/TX.rom', 'out/private.session', 'doc/private.frond', 'firmware.bin'):
                 (root / name).write_text('PRIVATE-MARKER-DO-NOT-PACKAGE')

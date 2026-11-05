@@ -24,7 +24,6 @@ make -j"$JOBS" -C build/source/src/uarm bin $TOOLS "CFLAGS_NATIVE=-O2 -g $SDL_CF
     "LDFLAGS_NATIVE=$SDL_LIBS -lSDL2_image -lreadline -lcurl -lpthread -lresolv" "$JIT" "$JIT_LIBS"
 mkdir -p build/arm64/out
 cp build/source/src/uarm/cp-uarm build/arm64/out/frond
-# The 68k runner is built but not packaged yet.
 make -j"$JOBS" -C build/source/src/cloudpilot FROND_68K=1 frond-68k $TOOLS
 cp build/source/src/cloudpilot/frond-68k build/arm64/out/frond-68k
 cmake -S desktop -B build/arm64/desktop -DCMAKE_BUILD_TYPE=RelWithDebInfo \
@@ -35,5 +34,5 @@ cmake -S desktop -B build/arm64/desktop -DCMAKE_BUILD_TYPE=RelWithDebInfo \
 cmake --build build/arm64/desktop --target frond-desktop --parallel "$JOBS"
 cp build/arm64/desktop/frond-desktop build/arm64/out/frond-desktop
 export QEMU_LD_PREFIX=/
-python3 tools/package-deb.py --core build/arm64/out/frond --desktop build/arm64/out/frond-desktop \
+python3 tools/package-deb.py --core build/arm64/out/frond --core-68k build/arm64/out/frond-68k --desktop build/arm64/out/frond-desktop \
     --architecture arm64 --strip $TRIPLE-strip --runner qemu-aarch64

@@ -19,6 +19,7 @@ DYNARMIC_LICENCES = {
 DOCS = ('developer-reference.md', 'testing.md', 'performance.md', 'adding-a-device.md')
 FILES = {
     'usr/lib/frond/frond-core': 0o755,
+    'usr/lib/frond/frond-68k-core': 0o755,
     'usr/bin/frond-desktop': 0o755,
     'usr/share/applications/org.frond.Frond.desktop': 0o644,
     'usr/share/icons/hicolor/scalable/apps/frond.svg': 0o644,
