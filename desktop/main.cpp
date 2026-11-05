@@ -10,11 +10,11 @@ int main(int argc, char** argv) {
     QApplication app(argc, argv);
     app.setOrganizationName("Frond");
     app.setApplicationName("Frond");
-    app.setApplicationVersion("0.10.1");
+    app.setApplicationVersion(FROND_VERSION);
     app.setDesktopFileName("org.frond.Frond");
     app.setWindowIcon(QIcon::fromTheme("frond"));
     QCommandLineParser parser;
-    parser.setApplicationDescription("Frond Palm TX emulator");
+    parser.setApplicationDescription("Frond Palm OS emulator");
     parser.addHelpOption(); parser.addVersionOption();
     parser.addPositionalArgument("session", "Open a saved Frond session.", "[session]");
     parser.addOption({"core", "Use this emulator executable.", "path"});

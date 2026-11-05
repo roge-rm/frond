@@ -12,7 +12,7 @@ Paths are relative to the manifest. All hashes are required. Unknown keys fail.
 Launch installs and launches; subsequent stages resume the previous saved state.
 Database interaction evidence must differ from launch; persistence/restore must
 retain the preceding exact records. Visual assertions always need human review.
-Use --device palm-tx (default), palm-e2 or palm-zire-72.
+Use --device palm-tx (default), palm-e2, palm-zire-72 or sony-clie-tg50.
 E2 cold fixtures take nor and nand; Zire fixtures take nor only. Their
 cold boot completes calibration/setup before replay, using 320x320 screens and
 the 120-row silkscreen for input; TX keeps its existing 320x480 boot/replay flow.
@@ -309,8 +309,9 @@ def verify_runner(result, directory, expected, cold_boot=False):
         require(observed.get('path') == wanted['path'] and observed.get('sha256') == wanted['sha256'],
                 'Runner input identity mismatch')
     require(result['artifacts'].get('session_saved') is True, 'Session not saved')
-    require(result['artifacts'].get('session') == str(directory / 'working.frond'), 'Detached saved session')
-    return artifact(directory / 'working.frond', directory)
+    saved = directory / 'working' / 'working.frond'
+    require(result['artifacts'].get('session') == str(saved), 'Detached saved session')
+    return artifact(saved, directory)
 
 
 def execute_stage(plan, app, label, stage, source, directory, timeout, previous):

@@ -457,11 +457,12 @@ MainWindow::MainWindow(const QString& core) : core(core) {
                "F1: Home\nF2: Calendar\nF3: Contacts\nF4: Web\n"
                "On the Tungsten E2, F1 to F4 are Calendar, Contacts, Tasks and Note Pad.\n"
                "On the Zire 72, F1 to F4 are Calendar, Contacts, Music and Camera, and F5 is the side voice button.\n"
+               "On the Sony CLIÉ TG50, F1 to F4 are Date Book, Address, To Do and Memo Pad, F5 is the voice button, F6 is Home, and left and right Alt are Blue and Red.\n"
                "Escape: Power (sleep and wake are experimental)\n\n"
                "Palm OS button assignments may change what the application buttons do."));
     });
     help->addAction(tr("&About Frond"), this, [this] {
-        QMessageBox::about(this, tr("About Frond"), tr("Frond 0.10.1\nExperimental Palm TX, Tungsten E2, Zire 72 and Sony CLIÉ TG50 emulator\nGPL-3.0-or-later"));
+        QMessageBox::about(this, tr("About Frond"), tr("Frond %1\nExperimental Palm TX, Tungsten E2, Zire 72 and Sony CLIÉ TG50 emulator\nGPL-3.0-or-later").arg(QStringLiteral(FROND_VERSION)));
     });
     connect(&client, &DesktopClient::diagnostic, this, [this](const QString& text) {
         log->moveCursor(QTextCursor::End); log->insertPlainText(text);
@@ -702,7 +703,7 @@ void MainWindow::refresh() {
     irdaPort->setEnabled(editable && caps.infrared && !keyboard->isChecked() && irda->currentData()=="tcp");
     bluetooth->setEnabled(editable && caps.bluetooth);
     bluetoothSocket->setEnabled(editable && caps.bluetooth && bluetooth->isChecked());
-    bluetooth->setToolTip(caps.bluetooth ? tr("See doc/bluetooth-provider.md for controller setup.") : reason);
+    bluetooth->setToolTip(caps.bluetooth ? tr("See doc/using-frond.md (Bluetooth) for controller setup.") : reason);
     // Which card buttons show follows the card's state, as on Android.
     const bool memoryStick = this->memoryStick();
     const bool supported = storageSupported();
