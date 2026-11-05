@@ -105,11 +105,13 @@ class PalmIIIxTest {
     }
 
     @Test fun argumentsCarryContrastAndSpeed() {
-        val s = MachineSettings(contrast = 30, speed = CpuSpeed.UNCAPPED, engine = Engine.FAST)
+        val s = MachineSettings(contrast = 30, contrastSet = true, speed = CpuSpeed.UNCAPPED, engine = Engine.FAST)
         val args = s.arguments(soundSupported = true, m68k = true)
         assertEquals(listOf("--window-fit", "fit", "--contrast", "30", "--speed", "uncapped"), args)
         assertFalse("--engine" in s.arguments(m68k = true))
-        assertEquals(listOf("--window-fit", "fit", "--contrast", "50"), MachineSettings().arguments(m68k = true))
+        // Without a chosen contrast the session's own stays.
+        assertEquals(listOf("--window-fit", "fit"), MachineSettings().arguments(m68k = true))
+        assertFalse("contrast" in MachineSettings().json().keys().asSequence().toList())
         assertEquals(listOf("--window-fit", "fit", "--engine", "fast"), s.arguments())
         assertEquals("fit=fit smooth=off contrast=30", s.displayArgument(m68k = true))
         assertEquals("fit=fit smooth=off", s.displayArgument())
@@ -119,6 +121,7 @@ class PalmIIIxTest {
         // Older settings have neither; a contrast out of range is clamped.
         val old = MachineSettings.from(s.json().apply { remove("contrast"); remove("speed") })
         assertEquals(MachineSettings.DEFAULT_CONTRAST, old.contrast)
+        assertFalse(old.contrastSet)
         assertEquals(CpuSpeed.ORIGINAL, old.speed)
         assertEquals(100, MachineSettings.from(s.json().put("contrast", 400)).contrast)
     }

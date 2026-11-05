@@ -275,7 +275,7 @@ class PeripheralsModel(
                 var s = cur
                 if (next.size != old.size) s = s.copy(size = next.size)
                 if (next.smoothing != old.smoothing) s = s.copy(smoothing = next.smoothing)
-                if (next.contrast != old.contrast) s = s.copy(contrast = next.contrast)
+                if (next.contrast != old.contrast) s = s.copy(contrast = next.contrast, contrastSet = true)
                 if (next.speed != old.speed && device.runs68k) s = s.copy(speed = next.speed)
                 if (next.sound != old.sound && device.sound) s = s.copy(sound = next.sound)
                 if (next.showKeyboard != old.showKeyboard) s = s.copy(showKeyboard = next.showKeyboard)

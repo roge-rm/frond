@@ -12,6 +12,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -81,6 +82,35 @@ def check_multiarch(out, pilotmain):
                ('detach', r'detached')])
 
 
+STOPPED = '''set confirm off
+set height 0
+set architecture m68k
+set endian big
+target remote 127.0.0.1:{port}
+break *{pilotmain:#x}
+shell sleep 20
+'''
+
+
+def stop_while_attached(core, gdb_path, port, pilotmain, root):
+    """gdb-stop with gdb attached and a breakpoint set must clear it, so launching the app runs on."""
+    (root / 'stop.gdb').write_text(STOPPED.format(port=port, pilotmain=pilotmain))
+    gdb = subprocess.Popen([gdb_path, '-nx', '-batch', '-x', str(root / 'stop.gdb')],
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                           text=True, errors='replace', cwd=root)
+    try:
+        time.sleep(4)
+        core.send('gdb-stop')
+        time.sleep(1)
+        core.launch('Hello')
+        time.sleep(3)
+        if core.process.poll() is not None:
+            raise AssertionError('the core exited on a breakpoint after gdb-stop')
+    finally:
+        gdb.kill()
+        gdb.communicate()
+
+
 def find(out, want):
     pos = 0
     for name, pattern in want:
@@ -146,6 +176,13 @@ def main():
                 print(f'frond-68k gdb: FAIL, gdb timed out after {args.timeout} s')
                 return 1
             (root / 'gdb.txt').write_text(out)
+            if args.multiarch:
+                try:
+                    check_multiarch(out, pilotmain)
+                    stop_while_attached(core, args.gdb, port, pilotmain, root)
+                except AssertionError as error:
+                    print(f'frond-68k gdb: FAIL, {error}')
+                    return 1
         finally:
             core.close()
         try:

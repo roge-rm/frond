@@ -54,13 +54,15 @@ data class MachineSettings(
     val engine: Engine = Engine.EXACT,
     // 68k devices: LCD contrast 0 to 100, and speed (applies at next start).
     val contrast: Int = DEFAULT_CONTRAST,
+    // False until a contrast is chosen, so a session's own saved contrast stays.
+    val contrastSet: Boolean = false,
     val speed: CpuSpeed = CpuSpeed.ORIGINAL,
 ) {
     fun json(): JSONObject = JSONObject().put("size", size.name).put("smoothing", smoothing)
         .put("sound", sound).put("fastAudio", fastAudio).put("microphone", microphone)
         .put("showKeyboard", showKeyboard).put("jogControls", jogControls.arg)
         .put("showJogControls", jogControls != JogControls.HIDDEN).put("sonyAudioPreview", sonyAudioPreview)
-        .put("engine", engine.arg).put("contrast", contrast).put("speed", speed.arg)
+        .put("engine", engine.arg).put("speed", speed.arg).also { if (contrastSet) it.put("contrast", contrast) }
 
     fun applyTo(settings: Settings) = settings.copy(size = size, smoothing = smoothing, sound = sound)
 
@@ -72,7 +74,7 @@ data class MachineSettings(
         if (tg50Controls) addAll(listOf("--jog-controls", jogControls.arg))
         if (!soundSupported || !sound) add("--no-sound")
         if (m68k) {
-            addAll(listOf("--contrast", contrast.toString()))
+            if (contrastSet) addAll(listOf("--contrast", contrast.toString()))
             if (speed == CpuSpeed.UNCAPPED) addAll(listOf("--speed", speed.arg))
         } else if (engine == Engine.FAST) {
             addAll(listOf("--engine", engine.arg))
@@ -107,6 +109,7 @@ data class MachineSettings(
                 sonyAudioPreview = json.optBoolean("sonyAudioPreview", false),
                 engine = Engine.entries.firstOrNull { it.arg == json.optString("engine") } ?: fallback.engine,
                 contrast = json.optInt("contrast", fallback.contrast).coerceIn(0, 100),
+                contrastSet = json.has("contrast") || fallback.contrastSet,
                 speed = CpuSpeed.entries.firstOrNull { it.arg == json.optString("speed") } ?: fallback.speed,
             )
         }
