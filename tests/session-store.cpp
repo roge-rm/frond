@@ -711,7 +711,7 @@ class SessionStoreTest : public QObject {
         QVERIFY(info.saved && !info.old && openable(readHeader(path)));
         Preferences prefs, loaded;
         QCOMPARE(prefs.contrast, 50); QVERIFY(!prefs.uncapped);
-        prefs.contrast = 30; prefs.uncapped = true;
+        QVERIFY(!prefs.contrastSet); prefs.contrast = 30; prefs.contrastSet = true; prefs.uncapped = true;
         QVERIFY(writePreferences(path, prefs).isEmpty());
         QVERIFY(readPreferences(path, &loaded));
         QCOMPARE(loaded.contrast, 30); QVERIFY(loaded.uncapped);
@@ -729,7 +729,7 @@ class SessionStoreTest : public QObject {
         // Settings from before these fields read as contrast 50 and Original.
         write(preferencesPath(copy), R"({"version":1,"scale":6,"smooth":false,"audio":true,"fastAudio":false})");
         QVERIFY(readPreferences(copy, &loaded));
-        QCOMPARE(loaded.contrast, 50); QVERIFY(!loaded.uncapped);
+        QCOMPARE(loaded.contrast, 50); QVERIFY(!loaded.uncapped); QVERIFY(!loaded.contrastSet);
     }
     void machinePreferences() {
         const auto one = filePath(folder(), "One"), two = filePath(folder(), "Two");

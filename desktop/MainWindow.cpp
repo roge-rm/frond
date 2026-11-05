@@ -627,6 +627,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (command=="keyboard-state" || command=="keyboard-attach") keyboard->setChecked(message=="attached");
         if (command == "display") {
             runningPreferences.contrast = contrast->value();
+            runningPreferences.contrastSet = true;
             if (const auto error = frondSessions::writePreferences(sessionPath, runningPreferences); !error.isEmpty()) failure(error);
         }
         if (command == "serial-mode") {
@@ -702,7 +703,7 @@ void MainWindow::refresh() {
     home->setVisible(!running);
     runningPage->setVisible(running);
     sessionBar->setVisible(running);
-    for (auto* state : {serialState, usbState, irdaState, bluetoothState}) state->setVisible(!state->text().isEmpty());
+    for (auto* state : {serialState, usbState, irdaState, bluetoothState, microphoneState}) state->setVisible(!state->text().isEmpty());
     setWindowTitle(running && !sessionPath.isEmpty() ? QFileInfo(sessionPath).completeBaseName() : tr("Frond"));
     const auto* current = sessionList->currentItem();
     startButton->setEnabled(!running && !busy && current && !current->data(Qt::UserRole + 1).toBool());
@@ -732,7 +733,7 @@ void MainWindow::refresh() {
     shown(!m68k || caps.usb, {usbLabel, usb, usbPort});
     shown(!m68k || caps.bluetooth, {bluetoothLabel, bluetooth, bluetoothSocket});
     shown(!m68k || caps.microphone, {microphoneLabel, microphoneToggle});
-    if (m68k) for (auto* state : {usbState, bluetoothState, microphoneState}) state->setVisible(false);
+    if (m68k) for (auto* state : {usbState, bluetoothState}) state->setVisible(false);
     shown(m68k, {contrastLabel, contrast, hotSyncButton});
     shown(!m68k, {rotateButton});
     contrast->setEnabled(enabled);
@@ -1155,7 +1156,7 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     arguments << "--window-scale" << QString::number(runningPreferences.scale / (m68k ? 2.0 : 4.0));
     if (runningPreferences.smooth) arguments << "--smooth-lcd";
     if (m68k) {
-        arguments << "--contrast" << QString::number(runningPreferences.contrast);
+        if (runningPreferences.contrastSet) arguments << "--contrast" << QString::number(runningPreferences.contrast);
         if (runningPreferences.uncapped) arguments << "--speed" << "uncapped";
     } else if (runningPreferences.fastEngine) arguments << "--engine" << "fast";
     {

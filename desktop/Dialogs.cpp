@@ -229,6 +229,7 @@ frondSessions::Preferences MachineSettings::values() const {
     prefs.showKeyboard = showKeyboard->isChecked();
     prefs.jogControls = frondSessions::JogControls(jogControls->currentData().toInt());
     prefs.fastEngine = engine->currentData().toBool();
+    if (contrast->value() != prefs.contrast) prefs.contrastSet = true;
     prefs.contrast = contrast->value();
     prefs.uncapped = speed->currentData().toBool();
     return prefs;

@@ -152,7 +152,20 @@ diff --git a/src/cloudpilot/emulator/hardware/EmMemory.h b/src/cloudpilot/emulat
 diff --git a/src/cloudpilot/native/GdbStub.cpp b/src/cloudpilot/native/GdbStub.cpp
 --- a/src/cloudpilot/native/GdbStub.cpp
 +++ b/src/cloudpilot/native/GdbStub.cpp
-@@ -415,6 +415,8 @@
+@@ -168,7 +168,11 @@ void GdbStub::Stop() {
+ 
+     connectionState = ConnectionState::socketClosed;
+ 
+-    debugger.Continue();
++    // Clears breakpoints and the debugger-active flag, as Disconnect does.
++    runState = RunState::running;
++    debugger.Reset();
++    pktBufUsed = 0;
++    connectionSock = 0;
+ }
+ 
+ void GdbStub::Cycle(int timeout) {
+@@ -415,6 +419,8 @@ bool GdbStub::HandlePacket() {
              strcpy(out, StopReason());
  
          else if (!strcmp(in, "D")) {

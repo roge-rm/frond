@@ -138,7 +138,7 @@ fun MachineContrastRow(settings: MachineSettings, listStyle: Boolean, onChange: 
             valueRange = 0f..100f,
             onValueChangeFinished = {
                 val next = value.roundToInt()
-                if (next != settings.contrast) onChange(settings.copy(contrast = next))
+                if (next != settings.contrast) onChange(settings.copy(contrast = next, contrastSet = true))
             },
         )
     }

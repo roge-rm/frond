@@ -54,6 +54,8 @@ struct Preferences {
     // 68k devices: LCD contrast 0-100, and Uncapped speed instead of the real clock.
     int contrast{50};
     bool uncapped{false};
+    // False until a contrast is chosen, so a session's own saved contrast stays.
+    bool contrastSet{false};
 };
 inline QString preferencesPath(const QString& path) { return path + ".settings.json"; }
 inline bool readPreferences(const QString& path, Preferences* result) {
@@ -68,18 +70,18 @@ inline bool readPreferences(const QString& path, Preferences* result) {
                object.value("showKeyboard").toBool(true), object.value("sonyAudioPreview").toBool(false), readJogControls(object),
                object.value("engine").toString() == QLatin1String("fast"),
                std::clamp(object.value("contrast").toInt(50), 0, 100),
-               object.value("speed").toString() == QLatin1String("uncapped")};
+               object.value("speed").toString() == QLatin1String("uncapped"), object.contains("contrast")};
     return true;
 }
 // The caller holds the session lock, or has just reserved a new machine.
 inline QString writePreferences(const QString& path, const Preferences& prefs) {
     QSaveFile file(preferencesPath(path));
-    const QJsonObject object{{"version", 1}, {"scale", std::clamp(prefs.scale, 4, 8)},
+    QJsonObject object{{"version", 1}, {"scale", std::clamp(prefs.scale, 4, 8)},
                              {"smooth", prefs.smooth}, {"audio", prefs.audio}, {"fastAudio", prefs.fastAudio}, {"microphone", prefs.microphone},
                              {"showKeyboard", prefs.showKeyboard}, {"jogControls", jogControlsName(prefs.jogControls)},
                              {"showJogControls", prefs.jogControls != JogControls::hidden}, {"sonyAudioPreview", prefs.sonyAudioPreview},
-                             {"engine", prefs.fastEngine ? "fast" : "exact"}, {"contrast", std::clamp(prefs.contrast, 0, 100)},
-                             {"speed", prefs.uncapped ? "uncapped" : "original"}};
+                             {"engine", prefs.fastEngine ? "fast" : "exact"}, {"speed", prefs.uncapped ? "uncapped" : "original"}};
+    if (prefs.contrastSet) object.insert("contrast", std::clamp(prefs.contrast, 0, 100));
     const auto bytes = QJsonDocument(object).toJson(QJsonDocument::Compact);
     if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit())
         return QStringLiteral("Couldn't save the machine settings.");
