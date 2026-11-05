@@ -161,7 +161,8 @@ def check_arm(core, session, root):
         if device == 'palm-tx':
             unsupported.append(('hold', 'on'))
         # As the desktop does, the ARM core saves over the session it runs in its machine folder.
-        saved = copy
+        saved = next((p for p in (copy / (session.name + '.frond'), *sorted(copy.glob('*.frond'))) if p.is_file()),
+                     copy) if copy.is_dir() else copy
         common(c, work, device, unsupported, saved)
         c.quit()
     finally:
