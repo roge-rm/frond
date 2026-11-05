@@ -498,6 +498,12 @@ test-frond-68k-peripherals: out/frond-68k build/test-frond-68k-sound
 
 # m68k-palmos-gdb 5.3 and gdb-multiarch on the debug Hello app (build/hello-debug) on the private
 # OS 3.5 ROM; skips without them.
+# The desktop control socket on both runners; needs a private ARM smoke session and IIIx ROM, else
+# that side is skipped.
+.PHONY: test-core-control
+test-core-control: out/frond out/frond-68k
+	python3 tests/core-control.py
+
 .PHONY: test-frond-68k-gdb
 test-frond-68k-gdb: out/frond-68k
 	python3 tests/frond-68k-gdb.py
