@@ -36,7 +36,7 @@ int main() {
                 const auto result=mmuTranslateCached<true>(fast,0x1234,priv);
                 const bool allowed=dac==3 || (dac==1 && (ap==3 || (priv && ap!=0)));
                 assert(bool(MMU_TRANSLATE_RESULT_OK(result))==allowed);
-                if (!allowed) assert(MMU_TRANSLATE_RESULT_FSR(result)==((dac==1 ? 0x0d : 0x08)|(dom<<4)));
+                if (!allowed) assert(MMU_TRANSLATE_RESULT_FSR(result)==((dac==1 ? 0x0d : 0x09)|(dom<<4)));
             }
             for (int repeat=0;repeat<2;++repeat) for (bool priv:{false,true}) for (bool w:{false,true})
                 for (auto addr:{0u,0x1234u,0xffffcu}) compare(addr,priv,w);

@@ -8,6 +8,7 @@ uint32_t cpuGetRegExternal(ArmCpu* c,uint_fast8_t r){return c->r[r];}
 void cpuSetReg(ArmCpu* c,uint_fast8_t r,uint32_t v){c->r[r]=v;}
 void cpuSetSlowPath(ArmCpu* c,uint32_t v){c->slow|=v;}
 void cpuClearSlowPath(ArmCpu* c,uint32_t v){c->slow&=~v;}
+void cpuDropTranslatedCode(ArmCpu*){}
 struct Target {
     PatchDispatch* pd;
     template<class T>void Save(T& s){patchDispatchSave(pd,s);}
