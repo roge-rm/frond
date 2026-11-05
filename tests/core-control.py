@@ -218,9 +218,14 @@ def check_68k(core, rom, root):
     finally:
         c.close()
     # A bad socket path or a missing launcher stops the core with an error, not a hang.
-    bad = subprocess.run([str(core), str(saved), '--desktop-socket', str(work / 'no-such-socket')],
-                         capture_output=True, text=True, timeout=60,
-                         env=dict(os.environ, SDL_VIDEODRIVER='dummy', SDL_AUDIODRIVER='dummy'))
+    # The missing socket sits in a short temporary folder so a long work path can't hit the 108-byte limit.
+    short = tempfile.mkdtemp(prefix='frond-')
+    try:
+        bad = subprocess.run([str(core), str(saved), '--desktop-socket', str(Path(short) / 'none')],
+                             capture_output=True, text=True, timeout=60,
+                             env=dict(os.environ, SDL_VIDEODRIVER='dummy', SDL_AUDIODRIVER='dummy'))
+    finally:
+        shutil.rmtree(short, ignore_errors=True)
     assert bad.returncode != 0 and 'cannot connect' in bad.stderr, bad.stderr
     both = subprocess.run([str(core), str(saved), '--run-for', '1', '--desktop-socket', 'x'],
                           capture_output=True, text=True, timeout=60)
