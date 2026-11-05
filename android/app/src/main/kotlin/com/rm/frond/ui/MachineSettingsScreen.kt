@@ -20,6 +20,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.rm.frond.Device
 import com.rm.frond.HomeModel
+import com.rm.frond.MachineRows
 import com.rm.frond.Sessions
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -63,13 +64,15 @@ fun MachineSettingsScreen(model: HomeModel) {
             }
             Header("Display")
             MachineDisplayRows(draft.device, draft.settings, false) { model.changeMachineSettings(it) }
+            val rows = MachineRows.of(draft.device, context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0)
             Header("Audio", Modifier.padding(top = 16.dp))
             MachineSoundRow(draft.device, draft.settings, false) { model.changeMachineSettings(it) }
-            MachineAudioPreviewRow(draft.device, draft.settings, qualified, false) { model.changeMachineSettings(it) }
-            if (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) {
-                Header("Speed", Modifier.padding(top = 16.dp))
-                MachineEngineRow(draft.settings, false) { model.changeMachineSettings(it) }
+            if (rows.audioPreview) {
+                MachineAudioPreviewRow(draft.device, draft.settings, qualified, false) { model.changeMachineSettings(it) }
             }
+            if (rows.speed || rows.engine) Header("Speed", Modifier.padding(top = 16.dp))
+            if (rows.speed) MachineSpeedRow(draft.settings, false) { model.changeMachineSettings(it) }
+            if (rows.engine) MachineEngineRow(draft.settings, false) { model.changeMachineSettings(it) }
         }
     }
 }

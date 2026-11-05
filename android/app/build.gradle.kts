@@ -176,7 +176,7 @@ android {
                     "-DFROND_DYNARMIC=${dynarmicSource.absolutePath}",
                     "-DFROND_BOOST_INCLUDE=$boostInclude",
                 )
-                if (jitDifferential) targets += listOf("main", "jit-differential", "benchmark-replay")
+                if (jitDifferential) targets += listOf("main", "main68k", "jit-differential", "benchmark-replay")
             }
         }
     }

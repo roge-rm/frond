@@ -61,9 +61,16 @@ set(front_end ${uarm_cxx})
 list(FILTER front_end INCLUDE REGEX "/native/")
 list(FILTER uarm_cxx EXCLUDE REGEX "/native/")
 
-add_library(frondcore STATIC ${uarm_c} ${uarm_cxx} ${common_c} ${common_cxx})
+# src/common (sessions, zip, card images) has no SoC code, so both cores link it.
+add_library(frondcommon STATIC ${common_c} ${common_cxx})
+target_include_directories(frondcommon PUBLIC "${COMMON}" "${COMMON}/zip")
+target_compile_definitions(frondcommon PUBLIC _FILE_OFFSET_BITS=64)
+target_compile_options(frondcommon PRIVATE -O2 -g -Wno-unused-parameter)
+
+add_library(frondcore STATIC ${uarm_c} ${uarm_cxx})
 target_include_directories(frondcore PUBLIC
-    "${UARM}/uarm" "${UARM}" "${COMMON}" "${COMMON}/zip" "${FROND_CORE}/src/argparse")
+    "${UARM}/uarm" "${UARM}" "${FROND_CORE}/src/argparse")
+target_link_libraries(frondcore PUBLIC frondcommon)
 set(network "${FROND_NETWORK_ROOT}/${ANDROID_ABI}/install")
 add_library(slirp STATIC IMPORTED)
 set_target_properties(slirp PROPERTIES
@@ -139,8 +146,8 @@ if(FROND_JIT_DIFFERENTIAL AND TARGET dynarmic)
     target_link_libraries(benchmark-replay PRIVATE frondcore SDL2 SDL2_image log)
 endif()
 
-# Cloudpilot's 68k core for DragonBall devices. Built here so both ABIs keep compiling; it goes
-# into its own libmain68k.so later, never into libmain.so, as both cores define the same UAE symbols.
+# Cloudpilot's 68k core for DragonBall devices, in its own libmain68k.so and never in libmain.so, as
+# both cores define the same UAE symbols. Frond68kActivity loads it in the :emulator68k process.
 set(CLOUDPILOT "${FROND_CORE}/src/cloudpilot")
 core_sources("${CLOUDPILOT}" SOURCE_C cloudpilot_c)
 core_sources("${CLOUDPILOT}" SOURCE_CXX cloudpilot_cxx)
@@ -158,10 +165,26 @@ endforeach()
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CLOUDPILOT}/Makefile")
 add_library(frond68kcore STATIC ${cloudpilot_c} ${cloudpilot_cxx})
 target_include_directories(frond68kcore PUBLIC ${cloudpilot_include})
-target_compile_definitions(frond68kcore PUBLIC EMULATION_LEVEL=EMULATION_UNIX)
+target_link_libraries(frond68kcore PUBLIC frondcommon)
+# ENABLE_DEBUGGER: the GDB stub's breakpoints, as in the desktop's frond-68k.
+target_compile_definitions(frond68kcore PUBLIC EMULATION_LEVEL=EMULATION_UNIX ENABLE_DEBUGGER)
 target_compile_options(frond68kcore PRIVATE -O2 -g
     -Wno-unused-parameter -Wno-pragma-pack -Wno-multichar -Wno-unknown-pragmas
     -Wno-missing-field-initializers)
+
+# frond-68k's runner (frond/ and the GDB stub) as libmain68k.so, with the same Android entry point
+# as libmain.so. frond/ goes first for its keys.h.
+core_sources("${CLOUDPILOT}" SOURCE_CXX_FROND cloudpilot_frond)
+list(REMOVE_ITEM cloudpilot_frond ${cloudpilot_cxx})
+add_library(main68k SHARED android_main.cpp ${cloudpilot_frond})
+target_include_directories(main68k BEFORE PRIVATE "${CLOUDPILOT}/frond")
+target_include_directories(main68k PRIVATE "${CLOUDPILOT}/native")
+set_source_files_properties("${CLOUDPILOT}/frond/main.cpp" PROPERTIES
+    COMPILE_DEFINITIONS "SDL_MAIN_HANDLED;main=frond_core_main")
+target_compile_options(main68k PRIVATE -O2 -g
+    -Wno-unused-parameter -Wno-pragma-pack -Wno-multichar -Wno-unknown-pragmas
+    -Wno-missing-field-initializers)
+target_link_libraries(main68k PRIVATE frond68kcore frondcommon SDL2 SDL2main SDL2_image log)
 
 if(FROND_SELF_TEST)
     # The CPU tests from tests/ run as the synthetic self-test.
@@ -169,7 +192,6 @@ if(FROND_SELF_TEST)
     target_include_directories(main PRIVATE "${FROND_CORE}/../../tests")
     target_compile_options(main PRIVATE -O2)
     target_link_libraries(main PRIVATE frondcore SDL2 SDL2main log)
-    add_dependencies(main frond68kcore)
     return()
 endif()
 
@@ -183,4 +205,3 @@ target_compile_options(main PRIVATE -O2 -g
     -Wno-unused-parameter -Wno-unknown-pragmas -Wno-visibility
     -Wno-constant-conversion -Wno-constant-logical-operand)
 target_link_libraries(main PRIVATE frondcore SDL2 SDL2main SDL2_image log)
-add_dependencies(main frond68kcore)

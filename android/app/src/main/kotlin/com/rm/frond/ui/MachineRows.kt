@@ -3,19 +3,24 @@ package com.rm.frond.ui
 import android.content.Context
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
+import com.rm.frond.CpuSpeed
 import com.rm.frond.Device
 import com.rm.frond.Engine
 import com.rm.frond.Firmware
@@ -23,6 +28,7 @@ import com.rm.frond.JogControls
 import com.rm.frond.MachineSettings
 import com.rm.frond.ScreenSize
 import java.io.File
+import kotlin.math.roundToInt
 
 // Per-machine settings rows shared by the Edit settings screen (form style) and the running menu (list style).
 // note is a one-clause line under a row, used for "Applies at next start".
@@ -76,11 +82,12 @@ fun <T> MachineChoiceRow(
     }
 }
 
-// Size, Smooth pixels, and on the TG50 Show keyboard and Jog controls.
+// Size, Smooth pixels, Contrast on 68k devices, and on the TG50 Show keyboard and Jog controls.
 @Composable
 fun MachineDisplayRows(device: Device, settings: MachineSettings, listStyle: Boolean, onChange: (MachineSettings) -> Unit) {
     MachineChoiceRow("Size", settings.size, ScreenSize.entries, { it.label }, listStyle) { onChange(settings.copy(size = it)) }
     MachineSwitchRow("Smooth pixels", settings.smoothing, listStyle) { onChange(settings.copy(smoothing = it)) }
+    if (device.runs68k) MachineContrastRow(settings, listStyle, onChange)
     if (device.isTg50()) {
         MachineSwitchRow("Show keyboard", settings.showKeyboard, listStyle) { onChange(settings.copy(showKeyboard = it)) }
         MachineChoiceRow("Jog controls", settings.jogControls, JogControls.entries, { it.label }, listStyle) {
@@ -118,4 +125,35 @@ fun MachineAudioPreviewRow(
 @Composable
 fun MachineEngineRow(settings: MachineSettings, listStyle: Boolean, onChange: (MachineSettings) -> Unit) {
     MachineChoiceRow("Engine", settings.engine, Engine.entries, { it.label }, listStyle) { onChange(settings.copy(engine = it)) }
+}
+
+// The LCD contrast, 0 to 100. The change is saved when the slider is let go.
+@Composable
+fun MachineContrastRow(settings: MachineSettings, listStyle: Boolean, onChange: (MachineSettings) -> Unit) {
+    var value by remember(settings.contrast) { mutableFloatStateOf(settings.contrast.toFloat()) }
+    val slider = @Composable {
+        Slider(
+            value = value,
+            onValueChange = { value = it },
+            valueRange = 0f..100f,
+            onValueChangeFinished = {
+                val next = value.roundToInt()
+                if (next != settings.contrast) onChange(settings.copy(contrast = next))
+            },
+        )
+    }
+    if (listStyle) {
+        ListItem(headlineContent = { Text("Contrast: ${value.roundToInt()}") }, supportingContent = { slider() })
+    } else {
+        Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+            Text("Contrast: ${value.roundToInt()}", style = MaterialTheme.typography.bodyLarge)
+            slider()
+        }
+    }
+}
+
+// Original or Uncapped, for 68k devices.
+@Composable
+fun MachineSpeedRow(settings: MachineSettings, listStyle: Boolean, onChange: (MachineSettings) -> Unit) {
+    MachineChoiceRow("Speed", settings.speed, CpuSpeed.entries, { it.label }, listStyle) { onChange(settings.copy(speed = it)) }
 }

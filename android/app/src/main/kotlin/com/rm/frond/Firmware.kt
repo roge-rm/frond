@@ -72,10 +72,43 @@ object Firmware {
 
     fun detect(nor: File): Device? {
         val info = try { inspect(nor) } catch (e: IOException) { return null }
-        return info.device ?: Device.entries.firstOrNull { it.detectKind == 1 && nor.length() == it.norSize }
+        info.device?.let { return it }
+        val rom = try { inspectRom68k(nor) } catch (e: IOException) { return null }
+        return rom.device ?: Device.entries.firstOrNull { it.detectKind == 1 && nor.length() == it.norSize }
     }
 
-    const val NOT_DETECTED = "This isn't a Palm TX, Tungsten E2 or Zire 72 NOR image."
+    const val NOT_DETECTED = "Frond can't tell which device this firmware is for. Choose the device."
+
+    // A 68k ROM's big-endian card header, read like common/device_profile5.h's deviceProfileInspect68kRom5:
+    // only the header, so frond-68k still checks the ROM properly when it starts.
+    data class Rom68kInfo(val device: Device? = null, val hasHeader: Boolean = false)
+
+    // Card flags: 0x0001 RAM only, 0x0020 runs on the 68EZ328. The IIIx's flash part holds 2 MiB from 0x10c00000.
+    private const val ROM68K_EZ_BASE = 0x10c00000L
+    private const val ROM68K_MAX_SIZE = 2L shl 20
+
+    fun inspectRom68k(rom: File, devices: List<Device> = Device.entries): Rom68kInfo = RandomAccessFile(rom, "r").use { file ->
+        val size = file.length()
+        if (size < 0x100) return@use Rom68kInfo()
+        val h = ByteArray(0x100)
+        file.readFully(h)
+        fun be16(at: Int) = ((h[at].toInt() and 0xff) shl 8) or (h[at + 1].toInt() and 0xff)
+        fun be32(at: Int) = (be16(at).toLong() shl 16) or be16(at + 2).toLong()
+        if (!h.copyOfRange(0x10, 0x19).contentEquals("PalmCard\u0000".toByteArray(Charsets.US_ASCII))) return@use Rom68kInfo()
+        if (be32(8) != 0xfeedbeefL) return@use Rom68kInfo()
+        val version = be16(0x0c)
+        val flags = be16(0x0e)
+        val reset = be32(4)
+        val cardBytes = be32(0x6c)
+        val company = if (version >= 5) be32(0x7e) else 0L
+        val hal = if (version >= 5) be32(0x82) else 0L
+        val header = Rom68kInfo(hasHeader = true)
+        if (version !in 3..5 || flags and 0x0001 != 0 || flags and 0x0020 == 0) return@use header
+        if (size > ROM68K_MAX_SIZE || size % 0x1000 != 0L || cardBytes > size) return@use header
+        if (reset < ROM68K_EZ_BASE || reset - ROM68K_EZ_BASE >= size) return@use header
+        val device = devices.firstOrNull { it.detectKind == 3 && (version < 5 || (it.companyId == company && it.halId == hal)) }
+        Rom68kInfo(device, true)
+    }
 
     // A picked NOR is copied here first, so the device can be found before the import.
     fun picked(context: Context) = File(File(context.filesDir, "firmware"), "picked-nor.bin")
@@ -117,7 +150,10 @@ object Firmware {
     // The same checks as desktop/FirmwareInput.h: the header names this device and the sizes fit.
     // Returns a message to show, or null when the files are fine. nand is null when none was chosen.
     fun check(device: Device, nor: File, nand: File?): String? {
+        if (device.runs68k) return checkRom68k(device, nor, nand)
         if (!nor.canRead()) return "Couldn't read the NOR image."
+        val rom = try { inspectRom68k(nor) } catch (e: IOException) { return "Couldn't read the NOR image." }
+        if (rom.device != null) return "This is a ${rom.device.label} ROM. Choose ${rom.device.label}."
         val header = try { header(nor) } catch (e: IOException) { return "Couldn't read the NOR image." }
         val info = try { inspect(nor, Device.entries + device) } catch (e: IOException) { return "Couldn't read the NOR image." }
         if (info.device != null && info.device != device && info.device != Device.E2 && info.device != Device.ZIRE72)
@@ -168,6 +204,17 @@ object Firmware {
                 if (nand != null && nandSize != device.nandSize) return "The ${device.label} NAND image must be a raw ${mib(device.nandSize)} file."
             }
         }
+        return null
+    }
+
+    // A 68k device takes one ROM file and no NAND, as in desktop/FirmwareInput.h.
+    private fun checkRom68k(device: Device, rom: File, nand: File?): String? {
+        if (!rom.canRead()) return "Couldn't read the ROM image."
+        val info = try { inspectRom68k(rom, Device.entries + device) } catch (e: IOException) { return "Couldn't read the ROM image." }
+        if (!info.hasHeader) return "This file isn't a ${device.label} ROM."
+        if (info.device == null) return "This ROM isn't one the ${device.label} can run."
+        if (info.device != device) return "This is a ${info.device.label} ROM. Choose ${info.device.label}."
+        if (nand != null) return "The ${device.label} has no NAND. Leave the NAND image empty."
         return null
     }
 

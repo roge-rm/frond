@@ -29,7 +29,7 @@ import java.io.File
 // fresh native state. libmain.so holds SDL_main. HomeActivity starts it with the extras
 // below; back saves the session through the core's control socket and returns home. Going to
 // the background pauses the core (patch 0088) and saves the session, so a process kill keeps it.
-class FrondActivity : SDLActivity() {
+open class FrondActivity : SDLActivity() {
     private lateinit var link: ControlLink
     private var sessionPath: String? = null
     @Volatile private var leaving = false
@@ -70,7 +70,11 @@ class FrondActivity : SDLActivity() {
     // Game controller buttons and sticks to the Palm's buttons. UI thread only.
     private lateinit var controller: ControllerInput
 
-    override fun getLibraries(): Array<String> = arrayOf("c++_shared", "SDL2", "SDL2_image", "main")
+    // The core library SDLActivity loads, and the control socket's file name in app storage.
+    protected open val coreLibrary get() = "main"
+    protected open val controlSocket get() = "control.sock"
+
+    override fun getLibraries(): Array<String> = arrayOf("c++_shared", "SDL2", "SDL2_image", coreLibrary)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         // The core names a new machine's file on its first save, so an older path may not be the one in use.
@@ -78,10 +82,10 @@ class FrondActivity : SDLActivity() {
         machineSettings = Sessions.forPath(this, sessionPath)?.settings ?: MachineSettings()
         settings = machineSettings.applyTo(Settings.from(this, intent))
         sound = launchDevice().sound && settings.sound
-        display = machineSettings.displayArgument(tg50Controls = launchDevice().id == "sony-clie-tg50")
+        display = machineSettings.displayArgument(tg50Controls = launchDevice().id == "sony-clie-tg50", m68k = launchDevice().runs68k)
         requestedOrientation = settings.orientation.request
         File(filesDir, START_ERROR).delete()
-        link = ControlLink(File(filesDir, "control.sock")) { name, state ->
+        link = ControlLink(File(filesDir, controlSocket)) { name, state ->
             if (name == "close") leave()
             if (name == "microphone") Log.i(TAG, "microphone: $state")
         }
@@ -134,12 +138,12 @@ class FrondActivity : SDLActivity() {
             arguments += nor
             if (File(nand).isFile) arguments += listOf("--nand", nand)
             // A new machine runs in its own folder, where cards above 128 MB live until the first save.
-            session?.let { File(it).parentFile }?.takeIf { (it.isDirectory || it.mkdirs()) && it.canonicalFile != Sessions.folder(this).canonicalFile }?.let {
+            if (!device.runs68k) session?.let { File(it).parentFile }?.takeIf { (it.isDirectory || it.mkdirs()) && it.canonicalFile != Sessions.folder(this).canonicalFile }?.let {
                 arguments += listOf("--work-folder", it.path)
             }
         }
         arguments += machineSettings.arguments(soundSupported = launchDevice().sound,
-            tg50Controls = launchDevice().id == "sony-clie-tg50")
+            tg50Controls = launchDevice().id == "sony-clie-tg50", m68k = launchDevice().runs68k)
         arguments += listOf("--window-background", BACKGROUND_HEX)
         if (machineSettings.fastAudio && launchDevice().id != "sony-clie-tg50" && fastAudioQualified()) {
             arguments += "--fast-audio"
@@ -433,7 +437,7 @@ class FrondActivity : SDLActivity() {
     // window once the Palm shows again.
     fun applyDisplay() {
         val saved = Sessions.forPath(this, sessionPath)?.settings ?: return
-        val wanted = saved.displayArgument(tg50Controls = launchDevice().id == "sony-clie-tg50")
+        val wanted = saved.displayArgument(tg50Controls = launchDevice().id == "sony-clie-tg50", m68k = launchDevice().runs68k)
         if (wanted == display) return
         display = wanted
         link.whenConnected {
@@ -493,7 +497,7 @@ class FrondActivity : SDLActivity() {
         hideKeyboard()
         panelOpen = true
         startActivity(
-            android.content.Intent(this, PeripheralsActivity::class.java)
+            android.content.Intent(this, Emulators.panel(launchDevice()))
                 .putExtra(EXTRA_DEVICE, intent?.getStringExtra(EXTRA_DEVICE) ?: Device.TX.id),
         )
     }

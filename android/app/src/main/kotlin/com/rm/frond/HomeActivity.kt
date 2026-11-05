@@ -161,7 +161,7 @@ class HomeModel(private val activity: HomeActivity) {
         }
         Sessions.markUsed(activity, session)
         activity.startActivity(
-            session.settings.applyTo(settings).putInto(Intent(activity, FrondActivity::class.java))
+            session.settings.applyTo(settings).putInto(Intent(activity, Emulators.activity(device)))
                 .putExtra(FrondActivity.EXTRA_SESSION, session.file.path)
                 .putExtra(FrondActivity.EXTRA_DEVICE, device.id)
                 .putExtra(FrondActivity.EXTRA_NOR, Firmware.nor(activity, device).path)
@@ -171,7 +171,8 @@ class HomeModel(private val activity: HomeActivity) {
 
     private fun emulatorRunning(): Boolean {
         val manager = activity.getSystemService(android.app.ActivityManager::class.java) ?: return true
-        return manager.runningAppProcesses.orEmpty().any { it.processName == activity.packageName + ":emulator" }
+        val names = Emulators.processes.map { activity.packageName + it }
+        return manager.runningAppProcesses.orEmpty().any { it.processName in names }
     }
 
     fun refreshRunning() {
