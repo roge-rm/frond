@@ -183,9 +183,9 @@ class PackagePolicyTests(unittest.TestCase):
             (root / 'VERSION').write_text('0.2.0\n')
             (root / 'packaging/debian-revision').write_text('1\n')
             for name in ('LICENSE', 'packaging/org.frond.Frond.desktop', 'packaging/frond.svg',
-                         'packaging/frond-mime.xml', 'packaging/copyright', 'doc/desktop.md',
-                         'doc/peripherals.md', 'doc/infrared.md', 'doc/bluetooth-provider.md',
-                         'doc/peripheral-qualification.md',
+                         'packaging/frond-mime.xml', 'packaging/copyright', 'doc/using-frond.md',
+                         'doc/developer-reference.md', 'doc/testing.md', 'doc/performance.md',
+                         'doc/adding-a-device.md',
                          'vendor/cloudpilot/src/argparse/LICENSE',
                          'vendor/cloudpilot/src/common/zip/UNLICENSE',
                          *(f'build/dynarmic-trial/src/{path}' for path in policy.DYNARMIC_LICENCES.values())):

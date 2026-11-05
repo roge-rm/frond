@@ -501,6 +501,11 @@ test-build-tools:
 check-reconstruction:
 	python3 tools/check-reconstruction.py
 
+# Every option, command, environment variable, tool and target in the sources is in the developer reference.
+.PHONY: check-docs
+check-docs: prepare
+	python3 tools/check-docs.py
+
 .PHONY: test-pace-step
 test-pace-step: build/test-gdbstub-target
 	python3 tests/pace-step.py
@@ -902,14 +907,15 @@ $(FRONDBENCH_DIR)/FrondBench.prc: $(FRONDBENCH_SRC)/frondbench.c $(FRONDBENCH_SR
 	build-prc -o $@ $(FRONDBENCH_SRC)/frondbench.def $(FRONDBENCH_DIR)/frondbench $(FRONDBENCH_DIR)/frondbench.ro
 
 # Emulation speed: Bike or Die replay and FrondBench through benchmark-replay.
-# SPEED_HOST=test-host runs on test-host in ~/frond-speed/.
-BIKE_SESSION ?= debug/mips-cap/level1-paused.frond
-FRONDBENCH_SESSION ?= debug/frondbench/run-04/working.frond
+# BIKE_SESSION and FRONDBENCH_SESSION are session files you supply; a workload without one is skipped.
+# SPEED_HOST=user@host runs on that machine in ~/frond-speed/ (SPEED_SSH_KEY and SPEED_REAL_MS are optional).
+BIKE_SESSION ?=
+FRONDBENCH_SESSION ?=
 SPEED_MIPS ?= 100
 SPEED_HOST ?=
 .PHONY: speed-check
 speed-check: benchmark-replay
-	BIKE_SESSION=$(BIKE_SESSION) FRONDBENCH_SESSION=$(FRONDBENCH_SESSION) SPEED_MIPS=$(SPEED_MIPS) SPEED_HOST=$(SPEED_HOST) SPEED_BENCH=$(SPEED_BENCH) python3 tools/speed-check.py
+	BIKE_SESSION=$(BIKE_SESSION) FRONDBENCH_SESSION=$(FRONDBENCH_SESSION) SPEED_MIPS=$(SPEED_MIPS) SPEED_HOST=$(SPEED_HOST) SPEED_BENCH=$(SPEED_BENCH) SPEED_SSH_KEY=$(SPEED_SSH_KEY) SPEED_REAL_MS=$(SPEED_REAL_MS) python3 tools/speed-check.py
 
 # Dynarmic for the Fast engine. FROND_JIT=1 or 0 picks the engine at run time over --engine.
 # The pinned source is exported from DYNARMIC_DONOR, a Dynarmic clone holding the revisions in
