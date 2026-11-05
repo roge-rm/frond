@@ -1,0 +1,402 @@
+diff --git a/src/common/device_profile5.h b/src/common/device_profile5.h
+--- a/src/common/device_profile5.h
++++ b/src/common/device_profile5.h
+@@ -133,7 +133,7 @@
+      4 | 8 | 16 | 32 | 64 | 128, 1886},
+     // DragonBall EZ with 4 MiB RAM and a 2 MiB flash part, run by frond-68k. Takes the IIIx 3.1 ROMs, the
+     // generic OS 3.5 EZ ROMs and the IIIx/V 4.1 ROM. Piezo, serial and IrDA; nothing else is on the device.
+-    // The desktop offers it; Android's inventory leaves 68k devices out until it has a 68k runner.
++    // The desktop and Android run it in their 68k runners (frond-68k, libmain68k.so).
+     {deviceTypeIIIx, "palm-iiix", "Palm IIIx", DeviceCohort5::ez68k, DeviceSupport5::experimentalDesktop,
+      DeviceDetect5::romHeader68k, 0x70616c6d /* palm */, 0x73756d6f /* sumo */, DeviceBoard5::ez328, DeviceArt::iiix,
+      {false, false, true, false, false, true, false, true, false},
+diff --git a/src/cloudpilot/emulator/stacktrace.cpp b/src/cloudpilot/emulator/stacktrace.cpp
+--- a/src/cloudpilot/emulator/stacktrace.cpp
++++ b/src/cloudpilot/emulator/stacktrace.cpp
+@@ -25,7 +25,8 @@
+  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
+-#ifdef _WIN32
++// Android has backtrace() only from API 33.
++#if defined(_WIN32) || (defined(__ANDROID__) && __ANDROID_API__ < 33)
+     #include <string>
+ 
+ std::string Backtrace(int skip = 1) { return "<backtrace unavailable>"; }
+diff --git a/src/cloudpilot/frond/main.cpp b/src/cloudpilot/frond/main.cpp
+--- a/src/cloudpilot/frond/main.cpp
++++ b/src/cloudpilot/frond/main.cpp
+@@ -27,6 +27,7 @@
+ #include <vector>
+ 
+ #include "../../uarm/native/DeviceControls.h"
++#include "../../uarm/native/WindowLayout.h"
+ #include "ButtonEvent.h"
+ #include "Chars.h"
+ #include "DbBackup.h"
+@@ -89,6 +90,10 @@
+     uint16_t gdbPort{0};
+     bool smooth{false};
+     optional<string> desktopSocket;
++    // A fitted window (Android, or --window-fit) places the device by WindowLayout in the background colour.
++    WindowFit fit{WindowFit::none};
++    uint32_t windowBackground{0};
++    int audioPeriod{512};
+ };
+ 
+ void usage() {
+@@ -97,6 +102,7 @@
+             "                 [--contrast 0-100] [--window-scale 1-4] [--no-sound] [--audio-output WAV]\n"
+             "                 [--tone-log] [--serial off|pty|tcp:PORT] [--irda off|pty|tcp:PORT]\n"
+             "                 [--gdb PORT] [--smooth-lcd] [--desktop-socket PATH]\n"
++            "                 [--window-fit fit|whole|fill] [--window-background RRGGBB] [--audio-period FRAMES]\n"
+             "FILE is a ROM or a saved session. --run-for runs headless for that many guest seconds.\n"
+             "The desktop's ARM-only options are taken and ignored."
+          << endl;
+@@ -504,6 +510,7 @@
+         SetSpeed(options.speed);
+         soundOn = options.sound;
+         smooth = options.smooth;
++        fit = options.fit;
+         desktopMode = bool(options.desktopSocket);
+         // The session owns the transports; they live as long as the process.
+         serialTransport = new HostTransport68k(serialLink);
+@@ -559,6 +566,13 @@
+             if (desktop) PollDesktop();
+             if (quit) break;
+             if (gdb) gdb->Cycle(gDebugger.IsStopped() ? 10 : 0);
++            // Hidden on Android: the guest waits and nothing is drawn, while the control socket still
++            // answers so the app can save. It carries on from now when shown again.
++            if (hidden) {
++                emulatedMs = wallMs();
++                SDL_Delay(50);
++                continue;
++            }
+ 
+             // Emulate up to the wall clock, in slices short enough to keep input and the console
+             // responsive. More than half a second behind starts over from now.
+@@ -687,7 +701,7 @@
+         want.freq = Piezo68k::kRate;
+         want.format = AUDIO_S16SYS;
+         want.channels = 1;
+-        want.samples = 512;
++        want.samples = uint16_t(options.audioPeriod);
+         audio = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
+         if (!audio) {
+             cerr << "no audio device: " << SDL_GetError() << endl;
+@@ -814,6 +828,9 @@
+     bool SaveWindow(const string& path) {
+         if (!renderer) return false;
+         Draw(false);
++        // Reads are relative to the viewport, so read the whole output.
++        SDL_RenderSetScale(renderer, 1, 1);
++        SDL_RenderSetViewport(renderer, nullptr);
+         int width = 0, height = 0;
+         if (SDL_GetRendererOutputSize(renderer, &width, &height) != 0) return false;
+         SDL_Surface* surface = SDL_CreateRGBSurfaceWithFormat(0, width, height, 32, SDL_PIXELFORMAT_RGBA32);
+@@ -1032,6 +1049,9 @@
+             case DesktopChannel::Poll::handled:
+             case DesktopChannel::Poll::idle: break;
+             case DesktopChannel::Poll::request: {
++                // Window events queued before the request go first, so a focus loss lifts the pen
++                // before a save.
++                if (window) PollWindow();
+                 Reply result;
+                 try {
+                     result = DesktopCommand(request.command, request.argument);
+@@ -1284,6 +1304,7 @@
+         string word;
+         optional<int> contrast;
+         optional<bool> smoothing;
++        optional<WindowFit> fitting;
+         while (words >> word) {
+             const auto equals = word.find('=');
+             const string name = word.substr(0, equals), value = equals == string::npos ? "" : word.substr(equals + 1);
+@@ -1293,6 +1314,8 @@
+                 contrast = int(number);
+             } else if (name == "smooth" && (value == "on" || value == "off")) {
+                 smoothing = value == "on";
++            } else if (WindowFit parsed; name == "fit" && parseWindowFit(value, parsed)) {
++                fitting = parsed;
+             } else if (equals != string::npos && (name == "keyboard" || name == "jog")) {
+                 error = "This device has no " + name + " controls.";
+                 return false;
+@@ -1301,8 +1324,8 @@
+                 return false;
+             }
+         }
+-        if (!contrast && !smoothing) {
+-            error = "Use contrast= or smooth=.";
++        if (!contrast && !smoothing && !fitting) {
++            error = "Use contrast=, smooth= or fit=.";
+             return false;
+         }
+         if (contrast) {
+@@ -1313,6 +1336,11 @@
+             smooth = *smoothing;
+             if (lcdTexture) SDL_SetTextureScaleMode(lcdTexture, smooth ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+         }
++        // Only a window opened fitted can change how it fits; a fixed-scale window stays as it is.
++        if (fitting && fit != WindowFit::none && *fitting != fit) {
++            fit = *fitting;
++            Layout();
++        }
+         return true;
+     }
+ 
+@@ -1367,17 +1395,26 @@
+         cout << "loaded session " << path << endl;
+     }
+ 
++    // Opens the window at the fixed scale, or resizable and fitted with fit set.
+     void OpenWindow() {
+         const auto& controls = deviceControls(profile->art);
+         const float s = options.windowScale;
+         const int width = int(Lcd68k::kWidth * s);
+         const int height = int((kInputHeight + deviceControlsHeight(controls, Lcd68k::kWidth)) * s);
+         window = SDL_CreateWindow(profile->displayName, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, width, height,
+-                                  0);
++                                  fit == WindowFit::none ? 0 : SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+         if (!window) {
+             cerr << "no window: " << SDL_GetError() << endl;
+             return;
+         }
++        CreateRenderer();
++#ifndef __ANDROID__
++        // On Android this would bring up the soft keyboard; keys still come in as key events.
++        SDL_StartTextInput();
++#endif
++    }
++
++    void CreateRenderer() {
+         renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_PRESENTVSYNC);
+         if (!renderer) renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
+         if (!renderer) {
+@@ -1387,17 +1424,74 @@
+         lcdTexture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STREAMING, Lcd68k::kWidth,
+                                        Lcd68k::kHeight);
+         if (lcdTexture) SDL_SetTextureScaleMode(lcdTexture, smooth ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+-        const auto& silkscreen = deviceSilkscreen(profile->art);
+-        if (silkscreen.count) silkscreenTexture = createDeviceSilkscreen(renderer, silkscreen, s);
+-        SDL_StartTextInput();
++        Layout();
+     }
+ 
+-    void Draw(bool present = true) {
++    // A lost renderer (Android after its context goes) is made again with its textures.
++    void ResetRenderer() {
++        for (auto* texture : {lcdTexture, silkscreenTexture, controlsTexture})
++            if (texture) SDL_DestroyTexture(texture);
++        lcdTexture = silkscreenTexture = controlsTexture = nullptr;
++        if (renderer) SDL_DestroyRenderer(renderer);
++        renderer = nullptr;
++        CreateRenderer();
++    }
++
++    int DeviceHeight() const { return kInputHeight + deviceControlsHeight(deviceControls(profile->art), Lcd68k::kWidth); }
++
++    // Where the device goes in the window and the scale the art is drawn at. Fixed: the window
++    // scale from the top left. Fitted: WindowLayout's place, drawn in device pixels through the
++    // viewport and render scale, with the art made at the output's own pixel size.
++    void Layout() {
+         if (!renderer) return;
++        int windowWidth = 0, windowHeight = 0, outputWidth = 0, outputHeight = 0;
++        SDL_GetWindowSize(window, &windowWidth, &windowHeight);
++        SDL_GetRendererOutputSize(renderer, &outputWidth, &outputHeight);
++        pixelsX = windowWidth > 0 ? float(outputWidth) / windowWidth : 1;
++        pixelsY = windowHeight > 0 ? float(outputHeight) / windowHeight : 1;
+         const float s = options.windowScale;
++        if (fit == WindowFit::none) {
++            layout = WindowLayout{s, s, 0, 0, int(Lcd68k::kWidth * s), int(DeviceHeight() * s)};
++            artScale = s;
++        } else {
++            layout = fitWindowLayout(fit, Lcd68k::kWidth, DeviceHeight(), windowWidth, windowHeight);
++            artScale = max(layout.scaleX * pixelsX, layout.scaleY * pixelsY);
++        }
++        if (silkscreenTexture) SDL_DestroyTexture(silkscreenTexture);
++        silkscreenTexture = nullptr;
++        const auto& silkscreen = deviceSilkscreen(profile->art);
++        if (silkscreen.count) silkscreenTexture = createDeviceSilkscreen(renderer, silkscreen, artScale);
++        if (silkscreenTexture && fit != WindowFit::none) SDL_SetTextureScaleMode(silkscreenTexture, SDL_ScaleModeLinear);
++        if (controlsTexture) SDL_DestroyTexture(controlsTexture);
++        controlsTexture = nullptr;
++        if (fit != WindowFit::none) {
++            const auto& controls = deviceControls(profile->art);
++            controlsTexture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_TARGET,
++                                                int(Lcd68k::kWidth * artScale),
++                                                int(deviceControlsHeight(controls, Lcd68k::kWidth) * artScale));
++            if (controlsTexture) SDL_SetTextureScaleMode(controlsTexture, SDL_ScaleModeLinear);
++        }
++        controlsDirty = true;
++    }
++
++    void Draw(bool present = true) {
++        if (!renderer || hidden) return;
++        const bool fitted = fit != WindowFit::none;
++        const float s = fitted ? 1 : options.windowScale;
++        const auto& controls = deviceControls(profile->art);
+         lcd.Update();
+-        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0xff);
++        SDL_RenderSetViewport(renderer, nullptr);
++        SDL_RenderSetScale(renderer, 1, 1);
++        const uint32_t colour = fitted ? options.windowBackground : 0;
++        SDL_SetRenderDrawColor(renderer, colour >> 16, (colour >> 8) & 0xff, colour & 0xff, 0xff);
+         SDL_RenderClear(renderer);
++        if (fitted) {
++            // The viewport is in output pixels at scale 1; the scale then maps device pixels into it.
++            const SDL_Rect viewport{int(lround(layout.x * pixelsX)), int(lround(layout.y * pixelsY)),
++                                    int(lround(layout.width * pixelsX)), int(lround(layout.height * pixelsY))};
++            SDL_RenderSetViewport(renderer, &viewport);
++            SDL_RenderSetScale(renderer, layout.scaleX * pixelsX, layout.scaleY * pixelsY);
++        }
+         if (lcdTexture) {
+             SDL_UpdateTexture(lcdTexture, nullptr, lcd.Pixels(), Lcd68k::kWidth * 4);
+             const SDL_Rect dest{0, 0, int(Lcd68k::kWidth * s), int(Lcd68k::kHeight * s)};
+@@ -1408,12 +1502,57 @@
+                                 int((kInputHeight - Lcd68k::kHeight) * s)};
+             SDL_RenderCopy(renderer, silkscreenTexture, nullptr, &dest);
+         }
+-        drawDeviceControls(renderer, deviceControls(profile->art), Lcd68k::kWidth, kInputHeight, s, pressed);
++        if (!fitted) {
++            drawDeviceControls(renderer, controls, Lcd68k::kWidth, kInputHeight, s, pressed);
++        } else if (controlsTexture) {
++            // Drawn once into a texture at the output's pixel size, again when a key changes.
++            if (controlsDirty || pressed != shownPressed) {
++                float sx, sy;
++                SDL_RenderGetScale(renderer, &sx, &sy);
++                SDL_Rect viewport;
++                SDL_RenderGetViewport(renderer, &viewport);
++                if (SDL_SetRenderTarget(renderer, controlsTexture) == 0) {
++                    SDL_RenderSetScale(renderer, 1, 1);
++                    drawDeviceControls(renderer, controls, Lcd68k::kWidth, 0, artScale, pressed);
++                    SDL_SetRenderTarget(renderer, nullptr);
++                    SDL_RenderSetScale(renderer, 1, 1);
++                    SDL_RenderSetViewport(renderer, &viewport);
++                    SDL_RenderSetScale(renderer, sx, sy);
++                    controlsDirty = false;
++                    shownPressed = pressed;
++                }
++            }
++            const SDL_Rect dest{0, kInputHeight, Lcd68k::kWidth, deviceControlsHeight(controls, Lcd68k::kWidth)};
++            SDL_RenderCopy(renderer, controlsTexture, nullptr, &dest);
++        } else {
++            drawDeviceControls(renderer, controls, Lcd68k::kWidth, kInputHeight, 1, pressed);
++        }
+         if (present) SDL_RenderPresent(renderer);
+     }
+ 
++    // A window point in device pixels; false outside the device when fitted.
++    bool DevicePoint(int windowX, int windowY, int& x, int& y) const {
++        if (fit == WindowFit::none) {
++            x = int(windowX / options.windowScale);
++            y = int(windowY / options.windowScale);
++            return true;
++        }
++        const float fx = (windowX - layout.x) / layout.scaleX, fy = (windowY - layout.y) / layout.scaleY;
++        x = int(floor(fx));
++        y = int(floor(fy));
++        return fx >= 0 && fy >= 0 && x < Lcd68k::kWidth && y < DeviceHeight();
++    }
++
++    // Lifts the pen and any held key, when the window loses focus or the app is hidden.
++    void ReleaseInput() {
++        if (penDown) gSession->QueuePenEvent(PenEvent::up());
++        penDown = false;
++        mouseKey = keyInvalid;
++        for (KeyId key : {keyIdHard1, keyIdHard2, keyIdHard3, keyIdHard4, keyIdUp, keyIdDown, keyIdPower})
++            if (pressed & deviceKeyBit(key)) Key(key, false);
++    }
++
+     void PollWindow() {
+-        const float s = options.windowScale;
+         const auto& controls = deviceControls(profile->art);
+         SDL_Event event;
+         while (SDL_PollEvent(&event)) {
+@@ -1423,6 +1562,24 @@
+                     if (desktop) desktop->Event("close");
+                     else quit = true;
+                     break;
++                case SDL_WINDOWEVENT:
++                    if (event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) Layout();
++                    if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST) ReleaseInput();
++                    break;
++                case SDL_RENDER_TARGETS_RESET:
++                    controlsDirty = true;
++                    break;
++                case SDL_RENDER_DEVICE_RESET:
++                    ResetRenderer();
++                    break;
++                case SDL_APP_DIDENTERBACKGROUND:
++                    hidden = true;
++                    ReleaseInput();
++                    break;
++                case SDL_APP_DIDENTERFOREGROUND:
++                    hidden = false;
++                    Layout();
++                    break;
+                 case SDL_MOUSEBUTTONDOWN:
+                 case SDL_MOUSEBUTTONUP:
+                 case SDL_MOUSEMOTION: {
+@@ -1430,13 +1587,16 @@
+                     if (event.type != SDL_MOUSEMOTION && event.button.button != SDL_BUTTON_LEFT) break;
+                     const int mx = event.type == SDL_MOUSEMOTION ? event.motion.x : event.button.x;
+                     const int my = event.type == SDL_MOUSEMOTION ? event.motion.y : event.button.y;
+-                    const int x = clamp(int(mx / s), 0, Lcd68k::kWidth - 1), y = int(my / s);
++                    int x = 0, y = 0;
++                    const bool inside = DevicePoint(mx, my, x, y);
++                    x = clamp(x, 0, Lcd68k::kWidth - 1);
+                     if (event.type == SDL_MOUSEBUTTONUP) {
+                         if (penDown) gSession->QueuePenEvent(PenEvent::up());
+                         if (mouseKey != keyInvalid) Key(mouseKey, false);
+                         penDown = false;
+                         mouseKey = keyInvalid;
+                     } else if (down) {
++                        if (!inside) break;
+                         if (y < kInputHeight) {
+                             penDown = true;
+                             gSession->QueuePenEvent(PenEvent::down(x, y));
+@@ -1503,6 +1663,14 @@
+     SDL_Renderer* renderer{nullptr};
+     SDL_Texture* lcdTexture{nullptr};
+     SDL_Texture* silkscreenTexture{nullptr};
++    SDL_Texture* controlsTexture{nullptr};
++    WindowFit fit{WindowFit::none};
++    WindowLayout layout;
++    float pixelsX{1}, pixelsY{1}, artScale{1};
++    bool controlsDirty{true};
++    DeviceKeyMask shownPressed{0};
++    // Android has the app in the background.
++    bool hidden{false};
+     DeviceKeyMask pressed{0};
+     bool penDown{false};
+     KeyId mouseKey{keyInvalid};
+@@ -1583,6 +1751,15 @@
+             options.toneLog = true;
+         } else if (arg == "--smooth-lcd") {
+             options.smooth = true;
++        } else if (arg == "--window-fit") {
++            const char* v = value();
++            if (!v || !parseWindowFit(v, options.fit)) return false;
++        } else if (arg == "--window-background") {
++            const char* v = value();
++            if (!v || !parseWindowColour(v, options.windowBackground)) return false;
++        } else if (arg == "--audio-period") {
++            if (!number(64, 8192, n) || n != int(n)) return false;
++            options.audioPeriod = int(n);
+         } else if (arg == "--desktop-socket") {
+             const char* v = value();
+             if (!v) return false;
+@@ -1674,7 +1851,12 @@
+             status = 1;
+         }
+     }
+-    // The console thread may still be blocked on stdin, so leave without unwinding it.
+     cout.flush();
++#ifdef __ANDROID__
++    // SDL_main returns to the activity, which ends the process.
++    return status;
++#else
++    // The console thread may still be blocked on stdin, so leave without unwinding it.
+     _exit(status);
++#endif
+ }

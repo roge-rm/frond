@@ -222,6 +222,9 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                 fun action(label: String, onClick: () -> Unit) = item(key = label) {
                     ListItem(headlineContent = { Text(label) }, modifier = Modifier.clickableRow(onClick = onClick))
                 }
+                // A 68k device shows only the hardware it has; the others grey out what isn't done yet.
+                val m68k = model.device.runs68k
+                fun has(present: Boolean) = !m68k || present
                 item { Header("Applications", Modifier.padding(horizontal = 16.dp)) }
                 action("Install application") { pickApp.launch(arrayOf("*/*")) }
                 action("Launch application") { model.askName("launch") }
@@ -288,7 +291,7 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                 item(key = "sound") {
                     MachineSoundRow(model.device, model.settings, true) { model.changeSettings(it) }
                 }
-                item(key = "microphone") {
+                if (has(model.device.microphone)) item(key = "microphone") {
                     val supported = model.device.microphone
                     val checked = model.microphone == "on" || model.microphone == "pending"
                     ListItem(
@@ -302,7 +305,7 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                         modifier = if (supported) Modifier.clickableRow { enableMicrophone(!checked) } else Modifier,
                     )
                 }
-                item(key = "audioPreview") {
+                if (!m68k) item(key = "audioPreview") {
                     MachineAudioPreviewRow(model.device, model.settings, model.audioPreviewUsable, true, APPLIES_AT_NEXT_START) {
                         model.changeSettings(it)
                     }
@@ -318,7 +321,7 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                         modifier = if (usable) Modifier.clickableRow { model.changeHold(on != true) } else Modifier,
                     )
                 }
-                item(key = "keyboard") {
+                if (has(model.device.keyboard)) item(key = "keyboard") {
                     val attached = model.keyboard
                     // The keyboard and beaming share the Palm's infrared port.
                     val usable = model.device.keyboard && attached != null && model.beam.phase == NetRelay.Phase.OFF
@@ -342,7 +345,7 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                     )
                 }
                 if (model.beam.phase == NetRelay.Phase.DISCONNECTED) action("Connect again") { model.retryBeam() }
-                item(key = "bluetooth") {
+                if (has(model.device.bluetooth)) item(key = "bluetooth") {
                     val usable = model.device.bluetooth
                     val faded = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
                     ListItem(
@@ -361,7 +364,7 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                     )
                 }
                 if (model.device.serialPort && model.serial.phase == NetRelay.Phase.DISCONNECTED) action("Connect again") { SerialLink.retry() }
-                item(key = "usb") {
+                if (has(model.device.usb)) item(key = "usb") {
                     val usable = model.device.usb
                     val faded = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
                     ListItem(
@@ -383,7 +386,7 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                         )
                     }
                 }
-                item(key = "network") {
+                if (has(model.device.network)) item(key = "network") {
                     val mode = model.network
                     val usable = model.device.network && mode != null
                     val faded = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
@@ -394,7 +397,9 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                     )
                 }
                 action("Reset") { confirmReset = true }
-                action("Rotate") { model.rotate() }
+                if (!m68k) action("Rotate") { model.rotate() }
+                // The cradle's HotSync button, for a device that sits in a serial cradle.
+                if (m68k && model.device.serialPort) action("HotSync") { model.hotSync() }
                 item { Header("Session", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp)) }
                 action("Save a copy") { saveCopy.launch("${model.name}.zip") }
                 action("Emulator log") { model.showLog() }

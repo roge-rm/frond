@@ -44,10 +44,14 @@ data class Device internal constructor(
     val holdPresent: Boolean = false, val holdSupported: Boolean = false,
     val memoryStick: Boolean = false,
     val microphone: Boolean = false,
+    // DragonBall devices run in libmain68k.so (Frond68kActivity), the others in libmain.so (FrondActivity).
+    val runs68k: Boolean = false,
 ) {
     val cardSupported: Boolean get() = sdSlot || memoryStick
     val cardLabel: String get() = if (storageSlot == "memory-stick") "Memory Stick" else "SD card"
     val hasNand: Boolean get() = nandSize > 0
+    // What the firmware file is called: a 68k device takes one ROM file.
+    val firmwareLabel: String get() = if (runs68k) "ROM image" else "NOR image"
     val fastAudio: Boolean get() = fastAudioNorMd5 != null
     val coreFlags: List<String> get() = listOf("--device", id)
     // New SD card sizes in MiB, 32 MB to the device's largest card. "2 GB" is 1886 MiB like a real 2 GB card.

@@ -90,10 +90,12 @@ class DeviceDataTest(unittest.TestCase):
         self.assertNotIn('staged-fixture', palm_boot.frontend_devices([staged]))
         self.assertIn('staged-fixture', palm_boot.frontend_devices([dict(staged, available=True)]))
         self.assertNotIn('staged-fixture', palm_boot.runner_devices([dict(staged, runner_eligible=False)]))
-        # Android has no 68k runner yet: an available DragonBall device stays out of its inventory.
-        dragonball = dict(staged, name='dragonball-fixture', available=True, runs_68k=True)
+        # Android runs an available DragonBall device in its 68k runner; its ROM has no one size.
+        dragonball = dict(staged, name='dragonball-fixture', available=True, runs_68k=True, nor_bytes=None)
         kotlin = next(data for path, data in generator.outputs({'profiles': [dragonball]}).items() if path.suffix == '.kt')
-        self.assertNotIn('dragonball-fixture', kotlin)
+        self.assertIn('dragonball-fixture', kotlin)
+        self.assertIn('runs68k = true', kotlin)
+        self.assertIn('norSize = 0L', kotlin)
         self.assertIn('dragonball-fixture', palm_boot.frontend_devices([dragonball]))
         for p in palm_boot.PROFILES:
             if p['device_type'] < 0:

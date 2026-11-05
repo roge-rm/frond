@@ -542,7 +542,8 @@ abstract class NetRelay(
 }
 
 // Infrared beaming. The core's irda-state is "tcp:PORT 127.0.0.1:PORT waiting|connected[ suspended][ error: ...]"
-// or "off[ error: ...]"; a sleeping Palm shows suspended and has its port closed until it wakes.
+// or "off[ error: ...]"; a sleeping Palm shows suspended and has its port closed until it wakes. frond-68k says
+// "tcp 127.0.0.1:PORT waiting|connected" or "off[ error]", as for its serial port.
 object IrBeam : NetRelay(5030, "irda-mode", "irda-state", "beam", "beaming") {
     const val DEFAULT_PORT = 5030
     override val closedMessage = "The other Frond closed the connection."
@@ -551,7 +552,8 @@ object IrBeam : NetRelay(5030, "irda-mode", "irda-state", "beam", "beaming") {
     override val dropPeerOnEarlyOverflow = false
 
     override fun coreLeftReason(state: String, port: Int): String? {
-        if (state.startsWith("tcp:$port ")) return null
+        if (state.startsWith("tcp:$port ") || state.startsWith("tcp 127.0.0.1:$port ")) return null
+        if (state.startsWith("off ") && !state.contains("error: ")) return state.removePrefix("off ").trim()
         return state.substringAfter("error: ", "").ifEmpty { "The emulator's infrared stopped." }
     }
 }

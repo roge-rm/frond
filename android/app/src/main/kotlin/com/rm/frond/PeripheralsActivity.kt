@@ -275,6 +275,7 @@ class PeripheralsModel(
                 var s = cur
                 if (next.size != old.size) s = s.copy(size = next.size)
                 if (next.smoothing != old.smoothing) s = s.copy(smoothing = next.smoothing)
+                if (next.contrast != old.contrast) s = s.copy(contrast = next.contrast)
                 if (next.sound != old.sound && device.sound) s = s.copy(sound = next.sound)
                 if (next.showKeyboard != old.showKeyboard) s = s.copy(showKeyboard = next.showKeyboard)
                 if (next.jogControls != old.jogControls) s = s.copy(jogControls = next.jogControls)
@@ -482,6 +483,9 @@ class PeripheralsModel(
 
     fun rotate() = device("Rotating", "Couldn't rotate", true) { send(it, "rotate") }
 
+    // Presses the cradle's HotSync button and goes back to the Palm.
+    fun hotSync() = device("Starting HotSync", "Couldn't start HotSync", true) { send(it, "hotsync") }
+
     // Erases the Palm, after saving the running session when saveFirst is set.
     fun hardReset(saveFirst: Boolean) = device(if (saveFirst) "Saving" else "Resetting", "Couldn't hard reset", true) { l ->
         runHardReset(FrondActivity.running?.session, saveFirst) { command, argument ->
@@ -609,7 +613,7 @@ class PeripheralsModel(
 // The emulator's menu: applications and databases, the SD card and the other peripherals of the running Palm. Runs in the emulator's process and uses
 // FrondActivity's control link. The TG50 keeps running without drawing while this menu is visible.
 // Other devices stay paused; Home saves the session like it does from the emulator.
-class PeripheralsActivity : ComponentActivity() {
+open class PeripheralsActivity : ComponentActivity() {
     private lateinit var model: PeripheralsModel
     private var panelControl: ControlLink? = null
 

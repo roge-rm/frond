@@ -41,8 +41,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-// Picks a NOR and NAND image with the system file picker, finds the device from the NOR like the
-// desktop (or takes the chosen one), checks them and copies them in.
+// Picks a NOR and NAND image, or a 68k device's ROM, with the system file picker, finds the device from
+// it like the desktop (or takes the chosen one), checks them and copies them in.
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FirmwareScreen(model: HomeModel) {
@@ -110,8 +110,8 @@ fun FirmwareScreen(model: HomeModel) {
         Column(Modifier.padding(padding).fillMaxSize()) {
             val shown = when {
                 chosen != null -> chosen!!.label
-                detected != null -> "${detected!!.label}, from the NOR image"
-                else -> "Detect from the NOR image"
+                detected != null -> "${detected!!.label}, from the firmware"
+                else -> "Detect from the firmware"
             }
             ListItem(
                 headlineContent = { Text("Device") },
@@ -120,7 +120,7 @@ fun FirmwareScreen(model: HomeModel) {
                     Box {
                         TextButton(onClick = { choosing = true }, enabled = !busy) { Text("Change") }
                         DropdownMenu(expanded = choosing, onDismissRequest = { choosing = false }) {
-                            DropdownMenuItem(text = { Text("Detect from the NOR image") }, onClick = {
+                            DropdownMenuItem(text = { Text("Detect from the firmware") }, onClick = {
                                 choosing = false
                                 chosen = null
                                 error = if (nor != null && detected == null) Firmware.NOT_DETECTED else null
@@ -137,11 +137,11 @@ fun FirmwareScreen(model: HomeModel) {
                 },
             )
             ListItem(
-                headlineContent = { Text("NOR image") },
+                headlineContent = { Text(device?.firmwareLabel ?: "NOR image") },
                 supportingContent = { Text(name(nor) ?: "Not chosen", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                 trailingContent = { TextButton(onClick = { pickNor.launch(arrayOf("*/*")) }, enabled = !busy) { Text("Choose") } },
             )
-            // A device with no NAND, like the Zire 72, doesn't show the row.
+            // A device with no NAND, like the Zire 72 or the IIIx, doesn't show the row.
             if (device?.hasNand != false) ListItem(
                 headlineContent = { Text(if (device?.nandRequired == false) "NAND image (optional)" else "NAND image") },
                 supportingContent = { Text(name(nand) ?: "Not chosen", maxLines = 1, overflow = TextOverflow.Ellipsis) },
