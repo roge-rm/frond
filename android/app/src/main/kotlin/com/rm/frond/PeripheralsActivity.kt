@@ -276,6 +276,7 @@ class PeripheralsModel(
                 if (next.size != old.size) s = s.copy(size = next.size)
                 if (next.smoothing != old.smoothing) s = s.copy(smoothing = next.smoothing)
                 if (next.contrast != old.contrast) s = s.copy(contrast = next.contrast)
+                if (next.speed != old.speed && device.runs68k) s = s.copy(speed = next.speed)
                 if (next.sound != old.sound && device.sound) s = s.copy(sound = next.sound)
                 if (next.showKeyboard != old.showKeyboard) s = s.copy(showKeyboard = next.showKeyboard)
                 if (next.jogControls != old.jogControls) s = s.copy(jogControls = next.jogControls)
@@ -285,6 +286,7 @@ class PeripheralsModel(
             }
             settings = machineSettings()
             FrondActivity.running?.applyDisplay()
+            FrondActivity.running?.applySpeed()
         } catch (e: Exception) {
             alert = "Couldn't save settings" to "Couldn't write the machine settings."
         }

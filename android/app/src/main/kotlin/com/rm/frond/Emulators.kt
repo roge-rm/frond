@@ -24,6 +24,7 @@ object Emulators {
 class Frond68kActivity : FrondActivity() {
     override val coreLibrary get() = "main68k"
     override val controlSocket get() = "control68k.sock"
+    override val gdbBlocksLink get() = false
 }
 
 // The running menu for Frond68kActivity, in its process.
