@@ -238,11 +238,11 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     // One row per device: label, control, and the port beside it. Readout rows hide while empty.
     soundToggle = new QCheckBox(tr("On"), root);
     soundToggle->setObjectName("sound");
-    label(tr("Sound"), 0); grid->addWidget(soundToggle, 0, 1, 1, 2);
+    label(tr("Sound"), 1); grid->addWidget(soundToggle, 1, 1, 1, 2);
     microphoneToggle = new QCheckBox(tr("On"), root);
     microphoneToggle->setObjectName("microphone");
-    microphoneLabel = label(tr("Microphone"), 13); grid->addWidget(microphoneToggle, 13, 1, 1, 2);
-    microphoneState = new QLabel(root); grid->addWidget(microphoneState, 14, 1, 1, 2);
+    microphoneLabel = label(tr("Microphone"), 14); grid->addWidget(microphoneToggle, 14, 1, 1, 2);
+    microphoneState = new QLabel(root); grid->addWidget(microphoneState, 15, 1, 1, 2);
     connect(microphoneToggle, &QCheckBox::clicked, this, [this](bool on) {
         send("microphone-mode", on ? "on" : "off");
     });
@@ -258,12 +258,12 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     connect(network, qOverload<int>(&QComboBox::activated), this, [this](int index) {
         send("network-mode", network->itemData(index).toString());
     });
-    networkLabel = label(tr("Network"), 1); grid->addWidget(network, 1, 1, 1, 2);
+    networkLabel = label(tr("Network"), 2); grid->addWidget(network, 2, 1, 1, 2);
     keyboard = new QCheckBox(tr("Attached"),root);
     keyboard->setObjectName("keyboardAttached");
     keyboard->setToolTip(tr("Uses the Palm Universal Wireless Keyboard protocol. Install and enable its Palm OS driver first. Type in the Palm window; modifiers and key releases are sent to the driver."));
     connect(keyboard,&QCheckBox::clicked,this,[this](bool attached) { send("keyboard-attach",attached?"on":"off"); });
-    keyboardLabel = label(tr("Infrared keyboard"), 2); grid->addWidget(keyboard, 2, 1, 1, 2);
+    keyboardLabel = label(tr("Infrared keyboard"), 3); grid->addWidget(keyboard, 3, 1, 1, 2);
     serial = new QComboBox(root);
     serial->setObjectName("serialMode");
     serial->addItem(tr("Off"), "off");
@@ -274,11 +274,11 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     serialPort->setRange(1, 65535);
     serialPort->setPrefix(tr("Port "));
     loadSerialSettings();
-    label(tr("Serial port"), 3); grid->addWidget(serial, 3, 1); grid->addWidget(serialPort, 3, 2);
+    label(tr("Serial port"), 4); grid->addWidget(serial, 4, 1); grid->addWidget(serialPort, 4, 2);
     serialState = new QLabel(root);
     serialState->setObjectName("serialState");
     serialState->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    grid->addWidget(serialState, 4, 1, 1, 2);
+    grid->addWidget(serialState, 5, 1, 1, 2);
     // While running, the choice is saved only once the core has opened it.
     auto serialChanged = [this] {
         if (client.running()) {
@@ -306,11 +306,11 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     usbPort->setRange(1, 65535);
     usbPort->setPrefix(tr("Port "));
     loadUsbSettings();
-    usbLabel = label(tr("USB HotSync"), 5); grid->addWidget(usb, 5, 1); grid->addWidget(usbPort, 5, 2);
+    usbLabel = label(tr("USB HotSync"), 6); grid->addWidget(usb, 6, 1); grid->addWidget(usbPort, 6, 2);
     usbState = new QLabel(root);
     usbState->setObjectName("usbState");
     usbState->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    grid->addWidget(usbState, 6, 1, 1, 2);
+    grid->addWidget(usbState, 7, 1, 1, 2);
     auto usbChanged = [this] {
         if (client.running()) {
             if (client.available()) send("usb-mode", usbArgument());
@@ -330,12 +330,12 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     irda->addItem(tr("Off"),"off");
     irda->addItem(tr("Terminal (PTY)"),"pty");
     irda->addItem(tr("Wait for a peer"),"tcp");
-    irda->setToolTip(tr("Link two Frond instances with tools/link-irda.py. Detach the infrared keyboard first."));
+    irda->setToolTip(tr("Link two Frond instances with tools/link-irda.py."));
     irdaPort=new QSpinBox(root);irdaPort->setObjectName("irdaPort");
     irdaPort->setRange(1,65535);irdaPort->setPrefix(tr("Port "));loadIrdaSettings();
-    label(tr("Infrared beaming"), 7); grid->addWidget(irda, 7, 1); grid->addWidget(irdaPort, 7, 2);
+    label(tr("Infrared beaming"), 8); grid->addWidget(irda, 8, 1); grid->addWidget(irdaPort, 8, 2);
     irdaState=new QLabel(root);irdaState->setObjectName("irdaState");
-    irdaState->setTextInteractionFlags(Qt::TextSelectableByMouse);grid->addWidget(irdaState, 8, 1, 1, 2);
+    irdaState->setTextInteractionFlags(Qt::TextSelectableByMouse);grid->addWidget(irdaState, 9, 1, 1, 2);
     auto irdaChanged=[this] {
         if(client.running()){if(client.available())send("irda-mode",irdaArgument());return;}
         settings.setValue("irdaMode",irda->currentData());settings.setValue("irdaPort",irdaPort->value());refresh();
@@ -349,10 +349,10 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     bluetoothSocket->setObjectName("bluetoothSocket");
     bluetoothSocket->setPlaceholderText(tr("Absolute controller socket path"));
     loadBluetoothSettings();
-    bluetoothLabel = label(tr("Bluetooth"), 9); grid->addWidget(bluetooth, 9, 1, 1, 2); grid->addWidget(bluetoothSocket, 10, 1, 1, 2);
+    bluetoothLabel = label(tr("Bluetooth"), 10); grid->addWidget(bluetooth, 10, 1, 1, 2); grid->addWidget(bluetoothSocket, 11, 1, 1, 2);
     bluetoothState = new QLabel(root); bluetoothState->setObjectName("bluetoothState");
     bluetoothState->setWordWrap(true); bluetoothState->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    grid->addWidget(bluetoothState, 11, 1, 1, 2);
+    grid->addWidget(bluetoothState, 12, 1, 1, 2);
     grid->setColumnStretch(1, 1);
     grid->setColumnMinimumWidth(2, 110);
     for (auto* c : {static_cast<QWidget*>(network), static_cast<QWidget*>(serial), static_cast<QWidget*>(usb), static_cast<QWidget*>(irda)})
@@ -360,20 +360,20 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     holdLabel = new QLabel(tr("Hold"), root);
     holdToggle = new QCheckBox(tr("On"), root);
     holdToggle->setObjectName("hold");
-    grid->addWidget(holdLabel, 12, 0);
-    grid->addWidget(holdToggle, 12, 1, 1, 2);
+    grid->addWidget(holdLabel, 13, 0);
+    grid->addWidget(holdToggle, 13, 1, 1, 2);
     connect(holdToggle, &QCheckBox::clicked, this, [this](bool on) {
         if (frondFirmware::profile(runningDevice).frontend.holdSupported && holdKnown)
             send("hold", on ? "on" : "off");
     });
     // 68k devices: LCD contrast, sent live and kept in the machine settings and the session.
-    contrastLabel = label(tr("Contrast"), 15);
+    contrastLabel = label(tr("Contrast"), 0);
     contrast = new QSlider(Qt::Horizontal, root);
     contrast->setObjectName("runningContrast");
     contrast->setRange(0, 100);
     contrast->setPageStep(10);
     contrast->setTracking(false);
-    grid->addWidget(contrast, 15, 1, 1, 2);
+    grid->addWidget(contrast, 0, 1, 1, 2);
     runningButtons << contrast;
     connect(contrast, &QSlider::valueChanged, this, [this](int value) {
         if (client.available() && frondFirmware::runs68k(runningDevice) && value != runningPreferences.contrast)
@@ -714,7 +714,7 @@ void MainWindow::refresh() {
     note(network, caps.network, networkTip); note(keyboard, caps.keyboard, keyboardTip);
     note(serial, caps.serial, serialTip); note(serialPort, caps.serial, {});
     note(usb, caps.usb, usbTip); note(usbPort, caps.usb, {});
-    note(irda,caps.infrared,irdaTip);note(irdaPort,caps.infrared,{});
+    note(irda, caps.infrared, caps.keyboard ? irdaTip + " " + tr("Detach the infrared keyboard first.") : irdaTip);note(irdaPort,caps.infrared,{});
     const bool enabled = client.available() && !busy && !stopping && exchangeStage == ExchangeStage::None;
     for (auto* w : runningButtons) w->setEnabled(enabled);
     microphoneToggle->setEnabled(enabled && caps.microphone);
