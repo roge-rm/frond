@@ -3,8 +3,8 @@
 out/frond-68k (a IIIx ROM booted to the launcher), checking the replies, the pushed link events, save
 and reload, and that commands a device can't do fail cleanly as "unsupported".
 
-Private firmware and sessions: --arm-session, else FROND_ARM_SESSION, else the palm-tx smoke session
-(build/smoke on devbox, the smoke folder on Senna); --rom, else the generic OS 3.5 EZ ROM in the
+Private firmware and sessions: --arm-session, else FROND_ARM_SESSION, else the palm-tx smoke machine
+(build/smoke/machines/palm-tx, or an older build/smoke/palm-tx.session); --rom, else the generic OS 3.5 EZ ROM in the
 firmware folder. A side with neither is skipped. Scratch goes in build/core-control-*.
 """
 import argparse
@@ -150,7 +150,10 @@ def check_arm(core, session, root):
     work = root / 'arm'
     work.mkdir()
     copy = work / session.name
-    shutil.copy2(session, copy)
+    if session.is_dir():
+        shutil.copytree(session, copy, ignore=shutil.ignore_patterns('*.tmp-*'))
+    else:
+        shutil.copy2(session, copy)
     c = Client(core, [copy], root, 'arm')
     try:
         device = c.ok('device-state')
@@ -237,9 +240,9 @@ def arm_session(given):
         return given
     if os.environ.get('FROND_ARM_SESSION'):
         return Path(os.environ['FROND_ARM_SESSION'])
-    for path in (ROOT / 'build/smoke/palm-tx.session/palm-tx.session.frond', ROOT / 'build/smoke/palm-tx.session',
-                 Path('/var/lib/lab/frond-work/smoke/palm-tx/palm-tx.frond')):
-        if path.is_file():
+    for path in (ROOT / 'build/smoke/machines/palm-tx', ROOT / 'build/smoke/palm-tx.session/palm-tx.session.frond',
+                 ROOT / 'build/smoke/palm-tx.session'):
+        if path.exists():
             return path
     return None
 
@@ -257,7 +260,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='core-control-', dir=ROOT / 'build') as work:
         root = (args.keep or Path(work)).resolve()
         root.mkdir(parents=True, exist_ok=True)
-        for name, ready, run in (('frond', session and session.is_file(),
+        for name, ready, run in (('frond', session and session.exists(),
                                   lambda: check_arm(ROOT / 'out/frond', session.resolve(), root)),
                                  ('frond-68k', rom.is_file(), lambda: check_68k(ROOT / 'out/frond-68k', rom.resolve(), root))):
             if not ready:
