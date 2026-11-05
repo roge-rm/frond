@@ -59,7 +59,7 @@ fun MachineSettingsScreen(model: HomeModel) {
         },
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
-            if (!editing) Choice("Device", draft.device, Device.shown, { it.label }) {
+            if (!editing) Choice("Device", draft.device, Device.shown.sortedBy { it.label.lowercase() }, { it.label }) {
                 model.chooseMachine(it)
             }
             Header("Display")
