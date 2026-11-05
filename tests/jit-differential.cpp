@@ -1750,6 +1750,83 @@ int staleLink() {
     return 0;
 }
 
+// A block compiled ahead (B, a branch target of A that hasn't run) whose code is rewritten
+// from outside before the guest first goes there: the new B has to run. Fast, thread on.
+int staleAhead() {
+    const char* name = "block compiled ahead, rewritten before use";
+    cpuSetJitSync(false);
+    static Machine m = makeMachine(true);
+    cpuSetJitSync(!gThread);
+    Case c = generate(98);
+    c.items.clear();
+    c.codeCacheable = false;
+    Item end;
+    end.kind = "end";
+    end.removable = false;
+    end.ins.push_back({kSpinArm, false});
+    c.items.push_back(end);
+    Assembled a = assemble(c);
+    const uint32_t A = kCode, B = kCode + 0x1000, S = kCode + 0x2000;  // separate pages
+    auto put = [&](uint32_t addr, uint32_t v) { memcpy(&a.image[addr], &v, 4); };
+    put(A, 0xe3a05000);       // mov r5, #0
+    put(A + 4, 0xe3560001);   // cmp r6, #1
+    put(A + 8, 0x0a0003fc);   // beq B
+    put(A + 12, 0xea0007fb);  // b S
+    put(B, 0xe3a05001);       // mov r5, #1 (rewritten to mov r5, #2)
+    put(B + 4, 0xea0003fd);   // b S
+    put(S, kSpinArm);
+    a.start = A;
+    a.thumb = false;
+    c.cpsr = SVC | 0xc0;
+    prepare(m, c, a);
+    auto runFrom = [&](uint32_t pc, uint32_t r6) {
+        cpuSetReg(m.cpu, 15, pc);
+        cpuSetReg(m.cpu, 5, 9);
+        cpuSetReg(m.cpu, 6, r6);
+        for (int i = 0; i < 100 && !(atSpin(m) && cpuGetRegisters(m.cpu)[15] == S); ++i)
+            cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, 50);
+        return cpuGetRegisters(m.cpu)[15] == S ? cpuGetRegExternal(m.cpu, 5) : 99u;
+    };
+    uint64_t stale0, compiled0, used0;
+    if (!cpuJitCompileCounts(m.cpu, &stale0, &compiled0, &used0)) {
+        printf("FAIL %s: no compile counts\n", name);
+        return -1;
+    }
+    // A compiled and installed without B running; B compiled ahead meanwhile. A's other
+    // target (A + 12) runs, so once one more block is compiled ahead than used, it is B,
+    // kept ready.
+    bool ready = false;
+    uint64_t stale = 0, compiled = 0, used = 0;
+    for (int i = 0; i < 2000 && !ready; ++i) {
+        runFrom(A, 0);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        cpuJitCompileCounts(m.cpu, &stale, &compiled, &used);
+        ready = i >= 20 && (compiled - compiled0) > (used - used0);
+    }
+    if (!ready) {
+        printf("FAIL %s: B was never compiled ahead (compiled %llu, used %llu)\n", name,
+               (unsigned long long)(compiled - compiled0), (unsigned long long)(used - used0));
+        return -1;
+    }
+    const uint64_t staleBefore = stale;
+    const uint32_t word = 0xe3a05002;
+    memAccess(m.mem, B, 4, true, (void*)&word);
+    uint32_t bad = 0, last = 0;
+    for (int i = 0; i < 20; ++i) {
+        last = runFrom(A, 1);
+        if (last != 2) bad++;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    cpuJitCompileCounts(m.cpu, &stale, &compiled, &used);
+    printf("%s: r5 %u after the rewrite, %u runs of 20 not 2, %llu dropped as stale\n", name, last, bad,
+           (unsigned long long)(stale - staleBefore));
+    if (bad || stale == staleBefore) {
+        printf("FAIL %s: expected 2, with the ready B dropped\n", name);
+        return -1;
+    }
+    return 0;
+}
+
 struct CpuSaver {
     ArmCpu* cpu;
     template <class T>
@@ -1937,6 +2014,7 @@ int main(int argc, char** argv) {
         ok = fetchBuffer(e, true) == 0 && ok;
         ok = fetchBuffer(e, false) == 0 && ok;
         ok = staleLink() == 0 && ok;
+        ok = staleAhead() == 0 && ok;
     }
     const auto t0 = std::chrono::steady_clock::now();
     auto elapsed = [&] { return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(); };

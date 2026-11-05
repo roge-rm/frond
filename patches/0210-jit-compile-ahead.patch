@@ -1,0 +1,201 @@
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -201,6 +201,8 @@
+     M68kTrapHandlerMap *m68kTrap0Handlers;
+ #ifdef FROND_DYNARMIC
+     struct FrondJit *jit;
++    // cpuJitMemoryOnly: code fetches outside RAM and ROM fail, and are noted.
++    bool jitMemoryOnly, jitRefused;
+ #endif
+ 
+     template <typename T>
+@@ -1005,9 +1007,15 @@
+     return true;
+ }
+ void cpuSetJitSync(bool sync) { jitSetSync(sync); }
++bool cpuJitCompileCounts(const struct ArmCpu *cpu, uint64_t *stale, uint64_t *aheadCompiled, uint64_t *aheadUsed) {
++    if (!cpu || !cpu->jit) return false;
++    jitCompileCounts(cpu->jit, stale, aheadCompiled, aheadUsed);
++    return true;
++}
+ #else
+ bool cpuSetFastEngine(bool fast) { return !fast; }
+ void cpuSetJitSync(bool) {}
++bool cpuJitCompileCounts(const struct ArmCpu *, uint64_t *, uint64_t *, uint64_t *) { return false; }
+ #endif
+ 
+ uint32_t cpuMaxOvershootCycles(const struct ArmCpu *cpu) {
+@@ -4368,9 +4376,20 @@
+     }
+     const MMUTranslateResult r = mmuTranslateCached<false>(cpu->memorySystem.mmu, va, cpu->privileged);
+     if (!MMU_TRANSLATE_RESULT_OK(r)) return false;
++    if (cpu->jitMemoryOnly && !memIsMemory(cpu->mem, MMU_TRANSLATE_RESULT_PA(r), 4)) {
++        cpu->jitRefused = true;
++        return false;
++    }
+     return memInstructionFetch<4>(cpu->mem, MMU_TRANSLATE_RESULT_PA(r), word);
+ }
+ 
++void cpuJitMemoryOnly(ArmCpu *cpu, bool on) {
++    cpu->jitMemoryOnly = on;
++    if (on) cpu->jitRefused = false;
++}
++
++bool cpuJitRefused(const ArmCpu *cpu) { return cpu->jitRefused; }
++
+ bool cpuJitCodePa(ArmCpu *cpu, uint32_t va, uint32_t *pa, uint32_t *access) {
+     const MMUTranslateResult r = mmuTranslateCodeAccess(cpu->memorySystem.mmu, va, access);
+     if (!MMU_TRANSLATE_RESULT_OK(r)) return false;
+--- a/src/uarm/uarm/CPU.h
++++ b/src/uarm/uarm/CPU.h
+@@ -131,6 +131,9 @@
+ // for, so runs repeat exactly (tests and replays); otherwise they run on a thread of their
+ // own. FROND_JIT_SYNC=1 or 0 overrides it.
+ void cpuSetJitSync(bool sync);
++// Fast engine's compile thread counts for this CPU (tests): blocks dropped as stale, and
++// blocks compiled ahead and those of them used. False without the Fast engine.
++bool cpuJitCompileCounts(const struct ArmCpu *cpu, uint64_t *stale, uint64_t *aheadCompiled, uint64_t *aheadUsed);
+ // Most cycles one cpuCycle call can return past the cycles it was asked for: 19 for the
+ // interpreter (PACE charges 20 per operation), more for the Fast engine. UINT32_MAX if
+ // generated code runs unchecked (FROND_JIT_MAX_UNCHECKED=0).
+--- a/src/uarm/uarm/jit_dynarmic.cpp
++++ b/src/uarm/uarm/jit_dynarmic.cpp
+@@ -63,6 +63,10 @@
+         compiled.cancelled += c.cancelled;
+         compiled.overflow += c.overflow;
+         compiled.no_space += c.no_space;
++        compiled.ahead_queued += c.ahead_queued;
++        compiled.ahead_compiled += c.ahead_compiled;
++        compiled.ahead_used += c.ahead_used;
++        compiled.ahead_skipped += c.ahead_skipped;
+     }
+     ~Stats() {
+         if (!on) return;
+@@ -73,6 +77,11 @@
+                 (unsigned long long)compiled.queued, (unsigned long long)compiled.installed,
+                 (unsigned long long)compiled.stale, (unsigned long long)compiled.cancelled,
+                 (unsigned long long)compiled.overflow, (unsigned long long)compiled.no_space);
++        fprintf(stderr, "jit: compile ahead queued %llu compiled %llu used %llu unused %llu skipped %llu\n",
++                (unsigned long long)compiled.ahead_queued, (unsigned long long)compiled.ahead_compiled,
++                (unsigned long long)compiled.ahead_used,
++                (unsigned long long)(compiled.ahead_compiled - compiled.ahead_used),
++                (unsigned long long)compiled.ahead_skipped);
+         fprintf(stderr,
+                 "jit: runs %llu ran %llu interpret %llu cold %llu queued %llu halt %llu fault %llu invalAll %llu "
+                 "invalRange %llu clears %llu pageClears %llu pageFills %llu reads %llu writes %llu\n",
+@@ -532,6 +541,17 @@
+             if (!thumb && (w & 0x0fef0f10) == 0x0e030f10) break;  // p15 c3 ends its block
+             at += size;
+         }
++        s->runnable = s->plain.front().second;
++        return s;
++    }
++
++    // Ahead of need: as SnapshotCode, reading only RAM and ROM. Code that reaches anything
++    // else isn't compiled ahead.
++    std::unique_ptr<A32::CodeSnapshot> SnapshotCodeAhead(A32::VAddr pc, bool thumb, bool whole) override {
++        cpuJitMemoryOnly(cpu, true);
++        auto s = SnapshotCode(pc, thumb, whole);
++        cpuJitMemoryOnly(cpu, false);
++        if (cpuJitRefused(cpu)) return nullptr;
+         return s;
+     }
+ 
+@@ -772,6 +792,17 @@
+     return jitPrvSync ? A32::Jit::CompileThread::Sync : A32::Jit::CompileThread::On;
+ }
+ 
++// Compiling ahead on the compile thread: blocks reached but not hot yet, and blocks up to
++// kAhead links on from one asked for (FROND_JIT_AHEAD sets it, 0 is off). Off in sync mode
++// unless set; it gives the same results there.
++static constexpr unsigned kAhead = 1;
++
++static unsigned jitPrvAhead(A32::Jit::CompileThread mode) {
++    const char *v = getenv("FROND_JIT_AHEAD");
++    if (v && *v) return unsigned(strtoul(v, nullptr, 10));
++    return mode == A32::Jit::CompileThread::On ? kAhead : 0;
++}
++
+ static uint32_t jitPrvMaxUnchecked() {
+     const char *v = getenv("FROND_JIT_MAX_UNCHECKED");
+     if (v && *v) return uint32_t(strtoul(v, nullptr, 10));
+@@ -805,7 +836,9 @@
+     j->jit = std::make_unique<A32::Jit>(conf);
+     j->env.jit = j->jit.get();
+     j->env.maxInstructions = j->maxUnchecked;
+-    j->jit->SetCompileThread(jitPrvCompileThread());
++    const A32::Jit::CompileThread mode = jitPrvCompileThread();
++    j->jit->SetCompileThread(mode);
++    j->jit->SetCompileAhead(jitPrvAhead(mode));
+     if (stats.on) stats.jits.push_back(j->jit.get());
+     return j;
+ }
+@@ -820,6 +853,13 @@
+ 
+ uint32_t jitMaxUnchecked(const FrondJit *j) { return j->maxUnchecked; }
+ 
++void jitCompileCounts(const FrondJit *j, uint64_t *stale, uint64_t *aheadCompiled, uint64_t *aheadUsed) {
++    const A32::Jit::CompileStats c = j->jit->GetCompileStats();
++    *stale = c.stale;
++    *aheadCompiled = c.ahead_compiled;
++    *aheadUsed = c.ahead_used;
++}
++
+ void jitInvalidate(FrondJit *j, uint32_t va, uint32_t size) {
+     stats.invalRange++;
+     Env &e = j->env;
+--- a/src/uarm/uarm/jit_dynarmic.h
++++ b/src/uarm/uarm/jit_dynarmic.h
+@@ -31,6 +31,8 @@
+ // Most instructions generated code runs between two budget checks: no block is longer and
+ // every link checks. 0 means no limit (FROND_JIT_MAX_UNCHECKED=0, for measuring only).
+ uint32_t jitMaxUnchecked(const FrondJit *jit);
++// Compile thread counts (A32::Jit::GetCompileStats): stale, ahead compiled, ahead used.
++void jitCompileCounts(const FrondJit *jit, uint64_t *stale, uint64_t *aheadCompiled, uint64_t *aheadUsed);
+ // Translated code is dropped when the RAM it came from is written (jitCodeWritten) or its
+ // mapping changes, so the guest's I-cache invalidations only matter for code from pages
+ // writes can't be seen on.
+@@ -50,6 +52,11 @@
+ bool cpuJitRead(ArmCpu *cpu, uint32_t va, unsigned size, void *buf);
+ bool cpuJitWrite(ArmCpu *cpu, uint32_t va, unsigned size, const void *buf);
+ bool cpuJitFetch(ArmCpu *cpu, uint32_t va, uint32_t *word);
++// While on, cpuJitFetch reads only RAM and ROM; a fetch from anything else fails and is
++// noted for cpuJitRefused (turning it on clears that). For code compiled ahead, which the
++// guest may never run, so no device sees a read the guest didn't make.
++void cpuJitMemoryOnly(ArmCpu *cpu, bool on);
++bool cpuJitRefused(const ArmCpu *cpu);
+ // Whether the JIT may run the instruction at pc (word is the aligned word holding it).
+ bool cpuJitPlain(ArmCpu *cpu, uint32_t pc, uint32_t word, bool thumb);
+ // Host address of the readable RAM or ROM page holding va, or null.
+--- a/src/uarm/uarm/mem.cpp
++++ b/src/uarm/uarm/mem.cpp
+@@ -231,6 +231,18 @@
+     return ret;
+ }
+ 
++bool memIsMemory(struct ArmMem *mem, uint32_t addr, uint32_t size) {
++    const uint32_t ub = addr + size;
++    if (ub < addr) return false;
++    const ArmMemAccessF ramF = ramAccessF, romF = romAccessF;
++    for (uint_fast8_t i = 0; i < NUM_MEM_REGIONS; i++) {
++        const struct ArmMemRegion &r = mem->regions[i];
++        if (r.pa <= addr && r.ub >= ub)
++            return i == REGION_RAM || i == REGION_ROM || r.aF == ramF || r.aF == romF;
++    }
++    return false;
++}
++
+ template bool memInstructionFetch<1>(struct ArmMem *mem, uint32_t addr, void *buf);
+ template bool memInstructionFetch<2>(struct ArmMem *mem, uint32_t addr, void *buf);
+ template bool memInstructionFetch<4>(struct ArmMem *mem, uint32_t addr, void *buf);
+--- a/src/uarm/uarm/mem.h
++++ b/src/uarm/uarm/mem.h
+@@ -41,5 +41,8 @@
+ 
+ template <int size>
+ bool memInstructionFetch(struct ArmMem* mem, uint32_t addr, void* buf);
++// Whether size bytes at addr are all in RAM or ROM (or a mirror), so reading them has no
++// effect on a device.
++bool memIsMemory(struct ArmMem* mem, uint32_t addr, uint32_t size);
+ 
+ #endif
