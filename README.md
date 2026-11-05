@@ -1,6 +1,9 @@
 # Frond
 
-Frond is a Palm OS emulator for Linux and Android, for running and writing Palm apps and games. It runs the Palm T|X, Tungsten E2 and Zire 72, the Palm IIIx, and the Sony CLIÉ TG50 as experimental, with sound, SD cards, infrared, Bluetooth, HotSync, networking and saved sessions. More devices are on the way, older 68k Palms next.
+Frond is a Palm OS emulator for Linux and Android, for running and writing Palm apps and games.
+
+Currently tt runs the Palm T|X, Tungsten E2 and Zire 72, the Palm IIIx, and the Sony CLIÉ TG50, with sound, SD cards, infrared, Bluetooth, HotSync, networking and saved sessions. 
+<br>More devices are on the way.
 
 It's built on [CloudpilotEmu](https://github.com/cloudpilot-emu/cloudpilot-emu) and [uARM](https://github.com/uARM-Palm/uARM). You need your own firmware for each device, none is included.
 
