@@ -39,7 +39,7 @@ FirmwareDialog::FirmwareDialog(const QString& root, Device preselect, QWidget* p
     for (auto d : sorted) device->addItem(frondFirmware::deviceName(d), frondFirmware::deviceId(d));
     device->setCurrentIndex(std::max(0, device->findData(frondFirmware::deviceId(preselect))));
     form->addRow(tr("Device"), device);
-    auto field = [&](const QString& label, const QString& key) {
+    auto field = [&](const QString& label, const QString& key, QLabel** labelWidget = nullptr) {
         auto* row = new QHBoxLayout;
         auto* edit = new QLineEdit(this);
         edit->setObjectName(key);
@@ -51,16 +51,20 @@ FirmwareDialog::FirmwareDialog(const QString& root, Device preselect, QWidget* p
             const auto file = QFileDialog::getOpenFileName(this, label, edit->text(), tr("Firmware images (*.bin *.rom);;All files (*)"));
             if (!file.isEmpty()) edit->setText(file);
         });
-        form->addRow(label, row);
+        auto* text = new QLabel(label, this);
+        form->addRow(text, row);
+        if (labelWidget) *labelWidget = text;
         return edit;
     };
-    nor = field(tr("NOR image"), "nor");
+    nor = field(tr("NOR image"), "nor", &norLabel);
     nand = field(tr("NAND image (optional for the E2)"), "nand");
-    // The Zire 72 has no NAND.
+    // The Zire 72 has no NAND, and a 68k device takes one ROM file.
     auto nandShown = [this] {
-        const bool none = frondFirmware::profile(frondFirmware::deviceFromId(device->currentData().toString())).nandSize == 0;
+        const auto selected = frondFirmware::deviceFromId(device->currentData().toString());
+        const bool none = frondFirmware::profile(selected).nandSize == 0;
         nand->setEnabled(!none);
         if (auto* choose = findChild<QPushButton*>("nandChoose")) choose->setEnabled(!none);
+        norLabel->setText(frondFirmware::runs68k(selected) ? tr("ROM image") : tr("NOR image"));
     };
     connect(device, &QComboBox::currentIndexChanged, this, nandShown);
     nandShown();
@@ -112,6 +116,12 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     windowScale->setToolTip(tr("1× to 2× in 0.25 steps."));
     smoothLcd = new QCheckBox(tr("Smooth pixels"), display);
     smoothLcd->setObjectName("smoothLcd");
+    contrastLabel = new QLabel(display);
+    contrast = new QSlider(Qt::Horizontal, display);
+    contrast->setObjectName("contrast");
+    contrast->setRange(0, 100);
+    contrast->setPageStep(10);
+    contrastLabel->setBuddy(contrast);
 
     showKeyboard = new QCheckBox(tr("Show keyboard"), display);
     showKeyboard->setObjectName("showKeyboard");
@@ -127,6 +137,8 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     displayLayout->addWidget(scaleLabel);
     displayLayout->addWidget(windowScale);
     displayLayout->addWidget(smoothLcd);
+    displayLayout->addWidget(contrastLabel);
+    displayLayout->addWidget(contrast);
     displayLayout->addWidget(showKeyboard);
     auto* jogRow = new QHBoxLayout;
     jogRow->addWidget(jogControlsLabel);
@@ -145,10 +157,23 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     sonyAudioPreview->setObjectName("sonyAudioPreview");
     soundLayout->addWidget(sonyAudioPreview);
     layout->addWidget(sound);
-    auto* speed = new QGroupBox(tr("Speed"), this);
-    auto* engineRow = new QHBoxLayout(speed);
-    auto* engineLabel = new QLabel(tr("Engine"), speed);
-    engine = new QComboBox(speed);
+    auto* speedBox = new QGroupBox(tr("Speed"), this);
+    speedGroup = speedBox;
+    auto* speedLayout = new QVBoxLayout(speedBox);
+    auto* speedRow = new QHBoxLayout;
+    speedLabel = new QLabel(tr("Speed"), speedBox);
+    speed = new QComboBox(speedBox);
+    speed->setObjectName("speed");
+    speed->addItem(tr("Original"), false);
+    speed->addItem(tr("Uncapped"), true);
+    speed->setCurrentIndex(prefs.uncapped ? 1 : 0);
+    speedLabel->setBuddy(speed);
+    speedRow->addWidget(speedLabel);
+    speedRow->addWidget(speed, 1);
+    speedLayout->addLayout(speedRow);
+    auto* engineRow = new QHBoxLayout;
+    engineLabel = new QLabel(tr("Engine"), speedBox);
+    engine = new QComboBox(speedBox);
     engine->setObjectName("engine");
     engine->addItem(tr("Exact"), false);
     engine->addItem(tr("Fast"), true);
@@ -156,8 +181,16 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     engineLabel->setBuddy(engine);
     engineRow->addWidget(engineLabel);
     engineRow->addWidget(engine, 1);
-    layout->addWidget(speed);
-    speed->setVisible(qEnvironmentVariable("FROND_ENGINE_SETTING") == QLatin1String("1"));
+    speedLayout->addLayout(engineRow);
+    layout->addWidget(speedBox);
+    contrast->setValue(prefs.contrast);
+    contrastLabel->setText(tr("Contrast: %1").arg(prefs.contrast));
+    connect(contrast, &QSlider::valueChanged, this, [this](int value) { contrastLabel->setText(tr("Contrast: %1").arg(value)); });
+    // setDevice shows the rows for the chosen device.
+    const bool engineShown = qEnvironmentVariable("FROND_ENGINE_SETTING") == QLatin1String("1");
+    for (QWidget* w : {static_cast<QWidget*>(contrastLabel), static_cast<QWidget*>(contrast),
+                       static_cast<QWidget*>(speedLabel), static_cast<QWidget*>(speed)}) w->setVisible(false);
+    speedGroup->setVisible(engineShown);
     windowScale->setValue(prefs.scale);
     smoothLcd->setChecked(prefs.smooth);
     audio->setChecked(prefs.audio);
@@ -173,6 +206,8 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
 int fittingScaleQuarters(Device device, bool keyboard, frondSessions::JogControls jog) {
     const auto& display = frondFirmware::profile(device).frontend;
     int width = display.width + display.sideTabWidth, height = display.height + display.silkscreenHeight + display.stripHeight;
+    // A 160x160 68k device is drawn at twice its size at 1x, the same width as a 320-pixel ARM screen.
+    if (frondFirmware::runs68k(device)) width *= 2, height *= 2;
     if (device == frondFirmware::deviceFromId("sony-clie-tg50")) {
         // The TG50 sizes the core lays out: the jog tab adds 38 across unless it is hidden or beside the keyboard.
         const bool hidden = jog == frondSessions::JogControls::hidden, beside = keyboard && jog == frondSessions::JogControls::keyboard;
@@ -194,6 +229,8 @@ frondSessions::Preferences MachineSettings::values() const {
     prefs.showKeyboard = showKeyboard->isChecked();
     prefs.jogControls = frondSessions::JogControls(jogControls->currentData().toInt());
     prefs.fastEngine = engine->currentData().toBool();
+    prefs.contrast = contrast->value();
+    prefs.uncapped = speed->currentData().toBool();
     return prefs;
 }
 void MachineSettings::setDevice(Device device, bool qualified) {
@@ -201,8 +238,18 @@ void MachineSettings::setDevice(Device device, bool qualified) {
     showKeyboard->setVisible(tg50);
     jogControlsLabel->setVisible(tg50);
     jogControls->setVisible(tg50);
-    fastAudio->setVisible(!tg50);
+    const bool m68k = frondFirmware::runs68k(device);
+    fastAudio->setVisible(!tg50 && !m68k);
     sonyAudioPreview->setVisible(tg50);
+    contrastLabel->setVisible(m68k);
+    contrast->setVisible(m68k);
+    // Original/Uncapped for 68k devices; the Engine choice has no JIT to pick there.
+    const bool engineShown = !m68k && qEnvironmentVariable("FROND_ENGINE_SETTING") == QLatin1String("1");
+    speedLabel->setVisible(m68k);
+    speed->setVisible(m68k);
+    engineLabel->setVisible(engineShown);
+    engine->setVisible(engineShown);
+    speedGroup->setVisible(m68k || engineShown);
     sonyAudioPreview->setEnabled(tg50 && qualified);
     const bool soundSupported = device != Device::automatic && frondFirmware::capabilities(device).sound;
     audio->setEnabled(soundSupported);

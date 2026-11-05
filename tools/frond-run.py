@@ -21,7 +21,10 @@ import struct
 import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from palm_boot import FRONTEND_DEVICES as DEVICES, png_rows, setup_device
+from palm_boot import DEVICES_68K, FRONTEND_DEVICES, png_rows, setup_device
+
+# out/frond runs the ARM devices only.
+DEVICES = {name: device for name, device in FRONTEND_DEVICES.items() if name not in DEVICES_68K}
 
 
 class RunError(Exception):

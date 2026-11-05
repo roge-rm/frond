@@ -69,7 +69,9 @@ class DeviceDataTest(unittest.TestCase):
         spec.loader.exec_module(runner)
         self.assertEqual(list(runner.DEVICES), ['palm-tx', 'palm-e2', 'palm-zire-72', 'sony-clie-tg50'])
         choices = next(action.choices for action in runner.parser()._actions if action.dest == 'device')
-        self.assertEqual(list(choices), list(palm_boot.FRONTEND_DEVICES))
+        self.assertEqual(list(choices), [name for name in palm_boot.FRONTEND_DEVICES if name not in palm_boot.DEVICES_68K])
+        self.assertIn('palm-iiix', palm_boot.FRONTEND_DEVICES)
+        self.assertNotIn('palm-iiix', runner.DEVICES)
         for name in ('palm-e2-franken', 'repalm'):
             self.assertIn(name, palm_boot.DEVICES)
             self.assertNotIn(name, runner.DEVICES)
@@ -88,6 +90,11 @@ class DeviceDataTest(unittest.TestCase):
         self.assertNotIn('staged-fixture', palm_boot.frontend_devices([staged]))
         self.assertIn('staged-fixture', palm_boot.frontend_devices([dict(staged, available=True)]))
         self.assertNotIn('staged-fixture', palm_boot.runner_devices([dict(staged, runner_eligible=False)]))
+        # Android has no 68k runner yet: an available DragonBall device stays out of its inventory.
+        dragonball = dict(staged, name='dragonball-fixture', available=True, runs_68k=True)
+        kotlin = next(data for path, data in generator.outputs({'profiles': [dragonball]}).items() if path.suffix == '.kt')
+        self.assertNotIn('dragonball-fixture', kotlin)
+        self.assertIn('dragonball-fixture', palm_boot.frontend_devices([dragonball]))
         for p in palm_boot.PROFILES:
             if p['device_type'] < 0:
                 self.assertFalse(p['runner_eligible'])

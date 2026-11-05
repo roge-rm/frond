@@ -10,7 +10,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def outputs(profiles):
-    available = [p for p in profiles['profiles'] if p['available']]
+    # Android has no 68k runner yet, so DragonBall devices stay out of its inventory.
+    available = [p for p in profiles['profiles'] if p['available'] and not p.get('runs_68k')]
     fields = {
         'id': 'name', 'label': 'display_name', 'norSize': 'nor_bytes', 'nandSize': 'raw_nand_bytes',
         'nandRequired': 'explicit_raw_nand', 'fastAudioNorMd5': 'fast_audio_md5',

@@ -41,6 +41,17 @@ inline QString deviceName(Device device) { return QString::fromUtf8(profile(devi
 using Capabilities = DeviceCapabilities5;
 inline Capabilities capabilities(Device device) { return profile(device).capabilities; }
 
+// DragonBall devices run in frond-68k. Their capabilities list all the hardware they have, so
+// controls for anything else are hidden rather than greyed.
+inline bool runs68k(Device device) { return device != Device::automatic && deviceProfileRuns68k5(int(device)); }
+
+// A 68k ROM's big-endian card header, read the way frond-68k reads it before its own full check.
+inline Device68kRomInfo5 inspectRom68k(QFile& rom) {
+    return deviceProfileInspect68kRom5(rom.size(), [&](uint64_t at, uint8_t* bytes, size_t count) {
+        return rom.seek(at) && rom.read(reinterpret_cast<char*>(bytes), count) == qint64(count);
+    });
+}
+
 // Looks for the Palm card header the way the core does (every 32 KiB) and says
 // whether it names an E2 or a Zire 72. 'other' is a header for another device, 'none' no header.
 // A Zire 72 NOR has a small card at 0x0 and a big card at 0x20000 to the end, both PalmCard aZ72.
@@ -63,11 +74,25 @@ inline Device detectDevice(const QString& norPath) {
     if (!QFileInfo(norPath).isFile() || !nor.open(QIODevice::ReadOnly)) return Device::automatic;
     const auto info = inspectNor(nor);
     if (info.profile && info.profile->frontend.available) return static_cast<Device>(info.profile->deviceType);
+    const auto rom68k = inspectRom68k(nor);
+    if (rom68k.profile && rom68k.profile->frontend.available) return static_cast<Device>(rom68k.profile->deviceType);
     for (auto device : devices) {
         const auto& p = profile(device);
         if (p.detect == DeviceDetect5::norSize && size_t(nor.size()) == p.norSize) return device;
     }
     return Device::automatic;
+}
+
+// A 68k device takes one ROM file and no NAND. The header check only; frond-68k checks the rest.
+inline QString validateRom68k(Device device, QFile& rom, const QString& nandPath) {
+    const auto info = inspectRom68k(rom);
+    const auto name = deviceName(device);
+    if (!info.hasHeader) return QStringLiteral("This file isn't a %1 ROM.").arg(name);
+    if (!info.profile) return QStringLiteral("This ROM isn't one the %1 can run.").arg(name);
+    if (info.profile != &profile(device))
+        return QStringLiteral("This is a %1 ROM. Choose %1.").arg(QString::fromUtf8(info.profile->displayName));
+    if (!nandPath.isEmpty()) return QStringLiteral("The %1 has no NAND. Leave the NAND image empty.").arg(name);
+    return {};
 }
 
 // Readability, geometry and which device the NOR header names; no boot claim.
@@ -83,6 +108,13 @@ inline QString validateFiles(Device chosen, const QString& norPath, const QStrin
         if (device == Device::automatic)
             return QStringLiteral("Frond can't tell which device this NOR image is for. Choose the device.");
     }
+    if (runs68k(device)) {
+        const auto error = validateRom68k(device, nor, nandPath);
+        if (error.isEmpty() && resolved) *resolved = device;
+        return error;
+    }
+    if (const auto rom68k = inspectRom68k(nor); rom68k.profile && rom68k.profile->frontend.available)
+        return QStringLiteral("This is a %1 ROM. Choose %1.").arg(QString::fromUtf8(rom68k.profile->displayName));
     if (device == Device::tx && (header == Header::e2 || header == Header::e2WrongPlace))
         return QStringLiteral("This is a Tungsten E2 NOR image. Choose Tungsten E2.");
     if (device != Device::zire72 && (header == Header::zire72 || header == Header::zire72BadLayout))

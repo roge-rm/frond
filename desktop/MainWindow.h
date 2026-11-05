@@ -24,7 +24,10 @@ class QSlider;
 class MainWindow : public QMainWindow {
     Q_OBJECT
  public:
-    explicit MainWindow(const QString& core);
+    // 'core68k' runs the DragonBall devices; empty finds it beside 'core' (frond-68k, frond-68k-core).
+    explicit MainWindow(const QString& core, const QString& core68k = {});
+    // frond-68k for DragonBall devices, else the ARM core.
+    QString coreFor(frondFirmware::Device device) const;
     // Starts (or with launch false, imports) a session file; the command line and resume use it.
     void openSession(const QString& path, bool launch = false);
     // Copies a session file into the managed folder. Returns an error message, or empty.
@@ -83,7 +86,7 @@ class MainWindow : public QMainWindow {
     QString outputFile(const QString& title, const QString& filter, const QString& defaultName);
     DesktopClient client;
     QSettings settings;
-    QString core, sessionPath, savingPath, pendingCopy, copyStaging;
+    QString core, core68k, sessionPath, savingPath, pendingCopy, copyStaging;
     bool hardResetAfterSave{false};
     std::unique_ptr<QLockFile> sessionLock, copyLock;
     QComboBox *network, *serial, *usb, *irda;
@@ -108,6 +111,9 @@ class MainWindow : public QMainWindow {
     QAction* importAction;
     QPushButton *sdCreate, *sdImport, *sdEject, *sdReinsert, *sdExport, *sdExchange, *sdRetry;
     QCheckBox *microphoneToggle, *soundToggle, *holdToggle, *cardReadOnly;
+    QLabel *networkLabel, *keyboardLabel, *usbLabel, *bluetoothLabel, *microphoneLabel, *contrastLabel;
+    QSlider* contrast;
+    QPushButton *rotateButton, *hotSyncButton;
     bool protectionKnown{false};
     QLabel* holdLabel;
     bool holdKnown{false}, holdOn{false};

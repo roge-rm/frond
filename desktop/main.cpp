@@ -18,6 +18,7 @@ int main(int argc, char** argv) {
     parser.addHelpOption(); parser.addVersionOption();
     parser.addPositionalArgument("session", "Open a saved Frond session.", "[session]");
     parser.addOption({"core", "Use this emulator executable.", "path"});
+    parser.addOption({"core-68k", "Use this emulator executable for 68k devices like the Palm IIIx.", "path"});
     parser.process(app);
     if (parser.positionalArguments().size() > 1) parser.showHelp(1);
     QString core = parser.value("core");
@@ -27,7 +28,9 @@ int main(int argc, char** argv) {
         for (const auto& candidate : candidates) if (QFileInfo(candidate).isExecutable()) { core = candidate; break; }
     }
     if (!core.isEmpty()) core = QFileInfo(core).absoluteFilePath();
-    MainWindow window(core);
+    QString core68k = parser.value("core-68k");
+    if (!core68k.isEmpty()) core68k = QFileInfo(core68k).absoluteFilePath();
+    MainWindow window(core, core68k);
     window.show();
     if (!parser.positionalArguments().isEmpty())
         window.openSession(parser.positionalArguments().first(), true);

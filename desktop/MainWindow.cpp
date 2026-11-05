@@ -42,7 +42,17 @@
 #include <QTimer>
 #include <QVBoxLayout>
 
-MainWindow::MainWindow(const QString& core) : core(core) {
+// frond-68k sits beside the ARM core: out/frond-68k in a build tree, frond-68k-core when installed.
+static QString siblingCore68k(const QString& core) {
+    if (core.isEmpty()) return {};
+    const QFileInfo info(core);
+    const auto name = info.fileName();
+    const auto sibling = name == QLatin1String("frond-core") ? QStringLiteral("frond-68k-core") : name + QStringLiteral("-68k");
+    return info.absolutePath() + '/' + sibling;
+}
+
+MainWindow::MainWindow(const QString& core, const QString& core68k)
+    : core(core), core68k(core68k.isEmpty() ? siblingCore68k(core) : core68k) {
     setWindowTitle(tr("Frond"));
     resize(620, 650);
     restoreGeometry(settings.value("windowGeometry").toByteArray());
@@ -220,14 +230,18 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     auto* grid = new QGridLayout;
     layout->addLayout(grid);
     grid->setHorizontalSpacing(12);
-    auto label = [&](const QString& text, int row) { grid->addWidget(new QLabel(text, root), row, 0); };
+    auto label = [&](const QString& text, int row) {
+        auto* l = new QLabel(text, root);
+        grid->addWidget(l, row, 0);
+        return l;
+    };
     // One row per device: label, control, and the port beside it. Readout rows hide while empty.
     soundToggle = new QCheckBox(tr("On"), root);
     soundToggle->setObjectName("sound");
     label(tr("Sound"), 0); grid->addWidget(soundToggle, 0, 1, 1, 2);
     microphoneToggle = new QCheckBox(tr("On"), root);
     microphoneToggle->setObjectName("microphone");
-    label(tr("Microphone"), 13); grid->addWidget(microphoneToggle, 13, 1, 1, 2);
+    microphoneLabel = label(tr("Microphone"), 13); grid->addWidget(microphoneToggle, 13, 1, 1, 2);
     microphoneState = new QLabel(root); grid->addWidget(microphoneState, 14, 1, 1, 2);
     connect(microphoneToggle, &QCheckBox::clicked, this, [this](bool on) {
         send("microphone-mode", on ? "on" : "off");
@@ -244,12 +258,12 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     connect(network, qOverload<int>(&QComboBox::activated), this, [this](int index) {
         send("network-mode", network->itemData(index).toString());
     });
-    label(tr("Network"), 1); grid->addWidget(network, 1, 1, 1, 2);
+    networkLabel = label(tr("Network"), 1); grid->addWidget(network, 1, 1, 1, 2);
     keyboard = new QCheckBox(tr("Attached"),root);
     keyboard->setObjectName("keyboardAttached");
     keyboard->setToolTip(tr("Uses the Palm Universal Wireless Keyboard protocol. Install and enable its Palm OS driver first. Type in the Palm window; modifiers and key releases are sent to the driver."));
     connect(keyboard,&QCheckBox::clicked,this,[this](bool attached) { send("keyboard-attach",attached?"on":"off"); });
-    label(tr("Infrared keyboard"), 2); grid->addWidget(keyboard, 2, 1, 1, 2);
+    keyboardLabel = label(tr("Infrared keyboard"), 2); grid->addWidget(keyboard, 2, 1, 1, 2);
     serial = new QComboBox(root);
     serial->setObjectName("serialMode");
     serial->addItem(tr("Off"), "off");
@@ -292,7 +306,7 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     usbPort->setRange(1, 65535);
     usbPort->setPrefix(tr("Port "));
     loadUsbSettings();
-    label(tr("USB HotSync"), 5); grid->addWidget(usb, 5, 1); grid->addWidget(usbPort, 5, 2);
+    usbLabel = label(tr("USB HotSync"), 5); grid->addWidget(usb, 5, 1); grid->addWidget(usbPort, 5, 2);
     usbState = new QLabel(root);
     usbState->setObjectName("usbState");
     usbState->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -335,7 +349,7 @@ MainWindow::MainWindow(const QString& core) : core(core) {
     bluetoothSocket->setObjectName("bluetoothSocket");
     bluetoothSocket->setPlaceholderText(tr("Absolute controller socket path"));
     loadBluetoothSettings();
-    label(tr("Bluetooth"), 9); grid->addWidget(bluetooth, 9, 1, 1, 2); grid->addWidget(bluetoothSocket, 10, 1, 1, 2);
+    bluetoothLabel = label(tr("Bluetooth"), 9); grid->addWidget(bluetooth, 9, 1, 1, 2); grid->addWidget(bluetoothSocket, 10, 1, 1, 2);
     bluetoothState = new QLabel(root); bluetoothState->setObjectName("bluetoothState");
     bluetoothState->setWordWrap(true); bluetoothState->setTextInteractionFlags(Qt::TextSelectableByMouse);
     grid->addWidget(bluetoothState, 11, 1, 1, 2);
@@ -352,11 +366,29 @@ MainWindow::MainWindow(const QString& core) : core(core) {
         if (frondFirmware::profile(runningDevice).frontend.holdSupported && holdKnown)
             send("hold", on ? "on" : "off");
     });
+    // 68k devices: LCD contrast, sent live and kept in the machine settings and the session.
+    contrastLabel = label(tr("Contrast"), 15);
+    contrast = new QSlider(Qt::Horizontal, root);
+    contrast->setObjectName("runningContrast");
+    contrast->setRange(0, 100);
+    contrast->setPageStep(10);
+    contrast->setTracking(false);
+    grid->addWidget(contrast, 15, 1, 1, 2);
+    runningButtons << contrast;
+    connect(contrast, &QSlider::valueChanged, this, [this](int value) {
+        if (client.available() && frondFirmware::runs68k(runningDevice) && value != runningPreferences.contrast)
+            send("display", "contrast=" + QString::number(value));
+    });
     auto* reset = button(tr("Reset"), "reset");
     auto* rotate = button(tr("Rotate"), "rotate");
+    rotateButton = rotate;
+    // The cradle's HotSync button, for a device that sits in a serial cradle.
+    hotSyncButton = button(tr("HotSync"), "hotsync");
     auto* deviceButtons = new QHBoxLayout;
-    deviceButtons->addWidget(reset); deviceButtons->addWidget(rotate); deviceButtons->addStretch();
+    deviceButtons->addWidget(reset); deviceButtons->addWidget(rotate); deviceButtons->addWidget(hotSyncButton);
+    deviceButtons->addStretch();
     layout->addLayout(deviceButtons);
+    connect(hotSyncButton, &QPushButton::clicked, this, [this] { send("hotsync"); });
     connect(reset, &QPushButton::clicked, this, [this] {
         if (QMessageBox::question(this, tr("Reset"), tr("Reset the %1 now?").arg(deviceLabel())) == QMessageBox::Yes) send("reset");
     });
@@ -462,7 +494,7 @@ MainWindow::MainWindow(const QString& core) : core(core) {
                "Palm OS button assignments may change what the application buttons do."));
     });
     help->addAction(tr("&About Frond"), this, [this] {
-        QMessageBox::about(this, tr("About Frond"), tr("Frond %1\nExperimental Palm TX, Tungsten E2, Zire 72 and Sony CLIÉ TG50 emulator\nGPL-3.0-or-later").arg(QStringLiteral(FROND_VERSION)));
+        QMessageBox::about(this, tr("About Frond"), tr("Frond %1\nExperimental Palm TX, Tungsten E2, Zire 72, Sony CLIÉ TG50 and Palm IIIx emulator\nGPL-3.0-or-later").arg(QStringLiteral(FROND_VERSION)));
     });
     connect(&client, &DesktopClient::diagnostic, this, [this](const QString& text) {
         log->moveCursor(QTextCursor::End); log->insertPlainText(text);
@@ -524,6 +556,7 @@ MainWindow::MainWindow(const QString& core) : core(core) {
             if (command == "serial-mode") showSerial("off " + message);  // the core is now off
             if (command == "usb-mode") showUsb("off " + message);
             if(command=="irda-mode")showIrda("off error: "+message);
+            if (command == "display") { const QSignalBlocker blocked(contrast); contrast->setValue(runningPreferences.contrast); }
             if (stopping) {
                 if (command == "save" && savingPath == sessionPath) askStop(message);
                 else save();
@@ -592,6 +625,10 @@ MainWindow::MainWindow(const QString& core) : core(core) {
             }
         }
         if (command=="keyboard-state" || command=="keyboard-attach") keyboard->setChecked(message=="attached");
+        if (command == "display") {
+            runningPreferences.contrast = contrast->value();
+            if (const auto error = frondSessions::writePreferences(sessionPath, runningPreferences); !error.isEmpty()) failure(error);
+        }
         if (command == "serial-mode") {
             settings.setValue("serialMode", serial->currentData());
             if (serial->currentData() == "tcp") settings.setValue("serialPort", serialPort->value());
@@ -613,7 +650,8 @@ MainWindow::MainWindow(const QString& core) : core(core) {
         refresh();
         if (command == "network-state" && !stopping) { send("keyboard-state"); return; }
         if (command == "keyboard-state" && !stopping && frondFirmware::capabilities(runningDevice).serial && serialArgument() != "off") { send("serial-state"); return; }
-        if ((command == "keyboard-state" || command == "serial-state") && !stopping && usbArgument() != "off") { send("usb-state"); return; }
+        if ((command == "keyboard-state" || command == "serial-state") && !stopping &&
+            frondFirmware::capabilities(runningDevice).usb && usbArgument() != "off") { send("usb-state"); return; }
         if ((command == "sd-state" || command == "ms-state") && !stopping) {
             send(command == "ms-state" && cardPresent ? "ms-protection" : "network-state"); return;
         }
@@ -684,6 +722,20 @@ void MainWindow::refresh() {
     soundToggle->setEnabled(enabled && caps.sound);
     soundToggle->setChecked(caps.sound && runningPreferences.audio);
     note(soundToggle, caps.sound, {});
+    // A 68k device's missing hardware isn't shown at all; on the others it's greyed.
+    const bool m68k = frondFirmware::runs68k(currentDevice());
+    auto shown = [&](bool present, std::initializer_list<QWidget*> widgets) {
+        for (auto* w : widgets) w->setVisible(present);
+    };
+    shown(!m68k || caps.network, {networkLabel, network});
+    shown(!m68k || caps.keyboard, {keyboardLabel, keyboard});
+    shown(!m68k || caps.usb, {usbLabel, usb, usbPort});
+    shown(!m68k || caps.bluetooth, {bluetoothLabel, bluetooth, bluetoothSocket});
+    shown(!m68k || caps.microphone, {microphoneLabel, microphoneToggle});
+    if (m68k) for (auto* state : {usbState, bluetoothState, microphoneState}) state->setVisible(false);
+    shown(m68k, {contrastLabel, contrast, hotSyncButton});
+    shown(!m68k, {rotateButton});
+    contrast->setEnabled(enabled);
     const auto& frontend = frondFirmware::profile(currentDevice()).frontend;
     holdLabel->setVisible(frontend.holdPresent);
     holdToggle->setVisible(frontend.holdPresent);
@@ -708,6 +760,8 @@ void MainWindow::refresh() {
     const bool memoryStick = this->memoryStick();
     const bool supported = storageSupported();
     storageHeading->setText(memoryStick ? tr("Memory Stick") : tr("SD card"));
+    storageHeading->setVisible(!m68k);
+    sdStatus->setVisible(!m68k);
     storageHeading->setEnabled(supported);
     sdStatus->setEnabled(supported);
     const bool known = sdKnown && running && supported;
@@ -983,7 +1037,6 @@ void MainWindow::openSession(const QString& path, bool launchNow) {
         if (!error.isEmpty()) failure(error);
         return;
     }
-    if (!QFileInfo(core).isExecutable()) return failure(tr("The Frond emulator executable could not be found. Reinstall Frond or build both desktop and core targets."));
     if (!QDir().mkpath(sessionFolder())) return failure(tr("Could not create the session storage directory."));
     const auto resolved = frondSessions::locate(sessionFolder(), QFileInfo(path).absoluteFilePath());
     const auto source = QFileInfo(resolved).canonicalFilePath();
@@ -995,6 +1048,7 @@ void MainWindow::openSession(const QString& path, bool launchNow) {
     const auto header = frondSessions::readHeader(load);
     auto device = frondFirmware::deviceFromId(header.device);
     if (device == frondFirmware::Device::automatic) device = frondFirmware::Device::tx;
+    if (!QFileInfo(coreFor(device)).isExecutable()) return failure(tr("The Frond emulator executable could not be found. Reinstall Frond or build both desktop and core targets."));
     QString target = load;
     QStringList arguments{load};
     bool reserved = false;
@@ -1022,6 +1076,9 @@ void MainWindow::openSession(const QString& path, bool launchNow) {
     }
     refreshSessions();
 }
+QString MainWindow::coreFor(frondFirmware::Device device) const {
+    return frondFirmware::runs68k(device) ? core68k : core;
+}
 void MainWindow::start() {
     if (client.running()) return;
     startupHandled = true;
@@ -1032,8 +1089,8 @@ void MainWindow::start() {
 void MainWindow::startSession(const frondSessions::Info& info) {
     if (client.running() || info.old) return;
     startupHandled = true;
-    if (!QFileInfo(core).isExecutable()) return failure(tr("The Frond emulator executable could not be found. Reinstall Frond or build both desktop and core targets."));
     const auto device = frondFirmware::deviceFromId(info.device);
+    if (!QFileInfo(coreFor(device)).isExecutable()) return failure(tr("The Frond emulator executable could not be found. Reinstall Frond or build both desktop and core targets."));
     QStringList arguments;
     if (info.saved) {
         const auto source = QFileInfo(info.path).canonicalFilePath();
@@ -1060,6 +1117,13 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     sessionPath = target;
     holdKnown = holdOn = false;
     const auto caps = frondFirmware::capabilities(startDevice);
+    const bool m68k = frondFirmware::runs68k(startDevice);
+    if (m68k) {
+        // frond-68k runs from the one session file and has no NAND or card folder.
+        for (const auto* option : {"--nand", "--work-folder"})
+            for (int i = arguments.indexOf(option); i >= 0; i = arguments.indexOf(option))
+                arguments.remove(i, std::min<qsizetype>(2, arguments.size() - i));
+    }
     if (caps.serial && serialArgument() != "off") arguments << "--serial" << serialArgument();
     if (caps.usb && usbArgument() != "off") arguments << "--usb" << usbArgument();
     if(caps.infrared && irdaArgument()!="off")arguments << "--irda" << irdaArgument();
@@ -1082,21 +1146,30 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     soundToggle->setChecked(caps.sound && runningPreferences.audio);
     if (!caps.sound || !runningPreferences.audio) arguments << "--no-sound";
     const auto sourceSession = !arguments.isEmpty() && !arguments.first().startsWith("--") ? arguments.first() : QString();
-    if (runningPreferences.fastAudio && startDevice != frondFirmware::deviceFromId("sony-clie-tg50") &&
+    if (!m68k && runningPreferences.fastAudio && startDevice != frondFirmware::deviceFromId("sony-clie-tg50") &&
         frondAudio::qualified(startDevice, sourceSession,
         frondFirmware::storedNor(firmwareRoot(), startDevice))) arguments << "--fast-audio";
-    if (runningPreferences.sonyAudioPreview && frondAudio::sonyPreviewEligible(startDevice, sourceSession,
+    if (!m68k && runningPreferences.sonyAudioPreview && frondAudio::sonyPreviewEligible(startDevice, sourceSession,
         frondFirmware::storedNor(firmwareRoot(), startDevice))) arguments << "--sony-audio-preview";
-    arguments << "--window-scale" << QString::number(runningPreferences.scale / 4.0);
+    // frond-68k's scale is screen pixels per Palm pixel; its 160-pixel LCD takes twice the ARM value.
+    arguments << "--window-scale" << QString::number(runningPreferences.scale / (m68k ? 2.0 : 4.0));
     if (runningPreferences.smooth) arguments << "--smooth-lcd";
-    if (runningPreferences.fastEngine) arguments << "--engine" << "fast";
+    if (m68k) {
+        arguments << "--contrast" << QString::number(runningPreferences.contrast);
+        if (runningPreferences.uncapped) arguments << "--speed" << "uncapped";
+    } else if (runningPreferences.fastEngine) arguments << "--engine" << "fast";
+    {
+        const QSignalBlocker blocked(contrast);
+        contrast->setValue(runningPreferences.contrast);
+    }
+    runningDevice = startDevice == frondFirmware::Device::automatic ? frondFirmware::Device::tx : startDevice;
     if (startDevice == frondFirmware::deviceFromId("sony-clie-tg50")) {
         if (!runningPreferences.showKeyboard) arguments << "--hide-keyboard";
         arguments << "--jog-controls" << frondSessions::jogControlsName(runningPreferences.jogControls);
     }
     stopping = closeAfterStop = allowClose = false;
     log->clear(); busy = true;
-    const bool launched = client.start(core, arguments);
+    const bool launched = client.start(coreFor(startDevice), arguments);
     if (!launched) { busy = false; sessionLock.reset(); }
     refresh(); statusBar()->showMessage(launched ? tr("Starting the Palm…") : tr("Could not start the Palm."));
 }

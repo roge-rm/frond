@@ -31,6 +31,23 @@ static void zireNor(QFile& nor, qint64 size = 14942208, quint32 hal = 0x615a3732
     nor.flush();
 }
 
+// Sparse synthetic 68k ROM: the big-endian card header at 0 with the reset vector in the ROM at 0x10c00000.
+static void rom68k(QFile& rom, qint64 size, quint16 version, quint16 flags = 0x0020, quint32 company = 0, quint32 hal = 0,
+                   quint32 resetOffset = 0x822a) {
+    rom.resize(0); rom.resize(size);
+    auto be = [&](qint64 at, quint32 value, int bytes) {
+        char out[4];
+        for (int i = 0; i < bytes; ++i) out[i] = char(value >> (8 * (bytes - 1 - i)));
+        rom.seek(at); rom.write(out, bytes);
+    };
+    be(0, 0x3000, 4); be(4, 0x10c00000 + resetOffset, 4); be(8, 0xfeedbeef, 4);
+    be(0x0c, version, 2); be(0x0e, flags, 2);
+    rom.seek(0x10); rom.write("PalmCard", 9);
+    be(0x6c, quint32(size), 4);
+    if (version >= 5) { be(0x7e, company, 4); be(0x82, hal, 4); }
+    rom.flush();
+}
+
 class FirmwareInputTest : public QObject {
     Q_OBJECT
  private slots:
@@ -144,6 +161,63 @@ class FirmwareInputTest : public QObject {
         QVERIFY(nand.resize(34603008));
         QVERIFY(!frondFirmware::validateFiles(Device::tx, txPath, nandPath).isEmpty());
         QVERIFY(!frondFirmware::validateFiles(Device::tx, txPath, {}).isEmpty());
+    }
+    // The IIIx takes one ROM file, told from its big-endian card header: the 3.1 retail and debug
+    // ROMs, the generic OS 3.5 EZ ROMs and the IIIx/V 4.1 ROM.
+    void iiixRoms() {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const auto iiix = frondFirmware::deviceFromId("palm-iiix");
+        QVERIFY(iiix != Device::automatic && frondFirmware::runs68k(iiix));
+        QVERIFY(std::find(frondFirmware::devices.begin(), frondFirmware::devices.end(), iiix) != frondFirmware::devices.end());
+        for (auto other : {Device::tx, Device::e2, Device::zire72, frondFirmware::deviceFromId("sony-clie-tg50")})
+            QVERIFY(!frondFirmware::runs68k(other));
+        const auto romPath = dir.filePath("rom"), nandPath = dir.filePath("nand");
+        QFile rom(romPath), nand(nandPath);
+        QVERIFY(rom.open(QIODevice::ReadWrite)); QVERIFY(nand.open(QIODevice::ReadWrite)); QVERIFY(nand.resize(34603008));
+        struct Kind { const char* name; qint64 size; quint16 version; quint32 company, hal, reset; };
+        const Kind kinds[] = {
+            {"3.1 retail", 0x128000, 3, 0, 0, 0x822a}, {"3.1 debug", 0x128000, 3, 0, 0, 0x8236},
+            {"3.5 EZ", 0x178000, 4, 0, 0, 0x90e0}, {"3.5 EZ debug", 0x178000, 4, 0, 0, 0x9184},
+            {"4.1", 0x1a8000, 5, 0x70616c6d, 0x73756d6f, 0xc6ea}};
+        for (const auto& kind : kinds) {
+            rom68k(rom, kind.size, kind.version, 0x0020, kind.company, kind.hal, kind.reset);
+            QCOMPARE(frondFirmware::detectDevice(romPath), iiix);
+            Device device = Device::automatic;
+            QVERIFY2(frondFirmware::validateFiles(Device::automatic, romPath, {}, &device).isEmpty(), kind.name);
+            QCOMPARE(device, iiix);
+            device = Device::automatic;
+            QVERIFY2(frondFirmware::validateFiles(iiix, romPath, {}, &device).isEmpty(), kind.name);
+            QCOMPARE(device, iiix);
+            // No NAND, and no ARM device takes it.
+            QVERIFY(frondFirmware::validateFiles(iiix, romPath, nandPath).contains("no NAND"));
+            for (auto other : {Device::tx, Device::e2, Device::zire72})
+                QVERIFY2(frondFirmware::validateFiles(other, romPath, {}).contains("Choose Palm IIIx"), kind.name);
+        }
+        // A 68328-only ROM, a header version 2 ROM and another 4.1 device's IDs have the header but can't run.
+        rom68k(rom, 0x128000, 3, 0x0010);
+        QVERIFY(frondFirmware::validateFiles(iiix, romPath, {}).contains("can run"));
+        QCOMPARE(frondFirmware::detectDevice(romPath), Device::automatic);
+        rom68k(rom, 0x128000, 2);
+        QVERIFY(frondFirmware::validateFiles(iiix, romPath, {}).contains("can run"));
+        rom68k(rom, 0x1a8000, 5, 0x0020, 0x70616c6d, 0x6173746e);
+        QVERIFY(frondFirmware::validateFiles(iiix, romPath, {}).contains("can run"));
+        // Over the 2 MiB flash part, or truncated.
+        rom68k(rom, (2 << 20) + 0x1000, 3);
+        QVERIFY(!frondFirmware::validateFiles(iiix, romPath, {}).isEmpty());
+        rom68k(rom, 0x128000, 3); QVERIFY(rom.resize(0x127000));
+        QVERIFY(!frondFirmware::validateFiles(iiix, romPath, {}).isEmpty());
+        // ARM NOR images aren't IIIx ROMs.
+        e2Nor(rom, 8 << 20, 0x20000);
+        QVERIFY(frondFirmware::validateFiles(iiix, romPath, {}).contains("isn't a Palm IIIx ROM"));
+        QCOMPARE(frondFirmware::detectDevice(romPath), Device::e2);
+        e2Nor(rom, 0x128000, 0);
+        QVERIFY(frondFirmware::validateFiles(iiix, romPath, {}).contains("isn't a Palm IIIx ROM"));
+        // Its hardware: the piezo, the cradle serial port and IrDA.
+        const auto caps = frondFirmware::capabilities(iiix);
+        QVERIFY(caps.sound && caps.serial && caps.infrared);
+        QVERIFY(!caps.network && !caps.keyboard && !caps.usb && !caps.bluetooth && !caps.microphone && !caps.fastAudio);
+        QCOMPARE(frondFirmware::profile(iiix).nandSize, size_t(0));
     }
     void deviceNames() {
         // Settings and the core get the fixed name; it round-trips, and other names detect.

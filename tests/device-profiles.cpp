@@ -40,7 +40,8 @@ int main() {
         assert(deviceTypeNamed5(p.name) == p.deviceType && std::string(deviceName5(deviceTypeNamed5(p.name))) == p.name);
         desktopCount += deviceProfileSupportsDesktop5(p.deviceType);
         assert(deviceProfileSupportsDesktop5(p.deviceType) ==
-               (p.deviceType == deviceTypeTX || p.deviceType == deviceTypeE2 || p.deviceType == deviceTypeZire72 || p.deviceType == deviceTypeTG50));
+               (p.deviceType == deviceTypeTX || p.deviceType == deviceTypeE2 || p.deviceType == deviceTypeZire72 ||
+                p.deviceType == deviceTypeTG50 || p.deviceType == deviceTypeIIIx));
         assert((p.deviceType == deviceTypeZire72) == (p.board == DeviceBoard5::pxa270Zire72));
         assert(deviceConfigurationGetNandSize(p.deviceType) == p.nandSize);
         assert(deviceConfigurationDefaultDisplayMode(p.deviceType) == p.defaultDisplay);
@@ -94,7 +95,7 @@ int main() {
         nor.resize(at + 12);
         assert(!inspect().profile && !inspect().hasHeader);
     }
-    assert(desktopCount == 4 && names.size() == 8 && types.size() == 7);
+    assert(desktopCount == 5 && names.size() == 8 && types.size() == 7);
     assert(std::string(deviceName5(deviceTypeTX)) == "palm-tx" && std::string(deviceName5(deviceTypeE2)) == "palm-e2");
     assert(deviceProfileNamed5("palm-tx")->capabilities.serial && !deviceProfileNamed5("palm-e2")->capabilities.serial);
     // Unknown names are refused, including numbers, old ids, case and prefixes.
@@ -373,12 +374,13 @@ static Device68kRomInfo5 inspect68k(const std::vector<uint8_t>& rom) {
     });
 }
 
-// Palm IIIx: a staged ez328 board for frond-68k, told from its ROM's big-endian card header alone.
+// Palm IIIx: an ez328 board for frond-68k on the desktop, told from its ROM's big-endian card header alone.
 static void palmIIIx() {
     const auto* p = deviceProfileNamed5("palm-iiix");
     assert(p && p->deviceType == deviceTypeIIIx && deviceProfile5(deviceTypeIIIx) == p);
     assert(p->board == DeviceBoard5::ez328 && p->detect == DeviceDetect5::romHeader68k && p->art == DeviceArt::iiix);
-    assert(p->support == DeviceSupport5::staged && !p->frontend.available && !deviceProfileSupportsDesktop5(p->deviceType));
+    assert(p->support == DeviceSupport5::experimentalDesktop && p->frontend.available &&
+           deviceProfileSupportsDesktop5(p->deviceType));
     assert(deviceProfileRuns68k5(p->deviceType) && !deviceProfileRunnerEligible5(p->deviceType));
     for (const auto& other : deviceProfiles5)
         if (&other != p) assert(!deviceProfileRuns68k5(other.deviceType));
@@ -393,8 +395,9 @@ static void palmIIIx() {
     assert(!p->nandSize && !p->norSize && !deviceProfileSdSizeValid5(p->deviceType, 512));
     assert(deviceProfileStorageSlot5(*p) == DeviceStorageSlot5::none && !p->msSizes && !p->msProMaxMib);
     const auto& caps = p->capabilities;
-    assert(!caps.network && !caps.keyboard && !caps.serial && !caps.usb && !caps.fastAudio && !caps.infrared &&
-           !caps.bluetooth && !caps.sound && !caps.microphone);
+    // Only the hardware a IIIx has: the piezo, the cradle serial port and IrDA.
+    assert(!caps.network && !caps.keyboard && caps.serial && !caps.usb && !caps.fastAudio && caps.infrared &&
+           !caps.bluetooth && caps.sound && !caps.microphone && !caps.reservedAudio);
     for (const auto& other : deviceProfiles5)
         if (&other != p) assert(other.detect != DeviceDetect5::romHeader68k && other.board != DeviceBoard5::ez328);
 

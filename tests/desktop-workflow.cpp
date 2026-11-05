@@ -14,6 +14,7 @@
 #include <QMenu>
 #include <QInputDialog>
 #include <QProgressDialog>
+#include <QPlainTextEdit>
 #include <QStatusBar>
 #include "Dialogs.h"
 #include "FirmwareStore.h"
@@ -980,6 +981,278 @@ for line in s.makefile('rb'):
         }
         QCOMPARE(digest(source), original);
     }
+    // A Palm IIIx ROM imports as a IIIx and runs in frond-68k beside the ARM core, with only the
+    // arguments and controls a IIIx has.
+    void iiixNewSession() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QSettings().setValue("serialMode", "pty"); QSettings().setValue("irdaMode", "tcp"); QSettings().setValue("irdaPort", 5031);
+        QSettings().setValue("usbMode", "pty"); QSettings().setValue("bluetoothEnabled", true);
+        QSettings().setValue("bluetoothSocket", "/nonexistent/bt"); QSettings().setValue("fastAudio", true);
+        qputenv("FROND_ENGINE_SETTING", "1");
+        QDir(managedFolder()).removeRecursively();
+        QTemporaryDir files;
+        const auto romPath = files.filePath("Palm-OS-3.5-en-ez.rom");
+        {
+            // Sparse synthetic OS 3.5 EZ ROM: the big-endian card header only.
+            QFile rom(romPath); QVERIFY(rom.open(QIODevice::WriteOnly)); QVERIFY(rom.resize(0x178000));
+            auto be = [&](qint64 at, quint32 value, int bytes) {
+                char out[4];
+                for (int i = 0; i < bytes; ++i) out[i] = char(value >> (8 * (bytes - 1 - i)));
+                rom.seek(at); rom.write(out, bytes);
+            };
+            be(0, 0x3000, 4); be(4, 0x10c090e0, 4); be(8, 0xfeedbeef, 4); be(0x0c, 4, 2); be(0x0e, 0x0020, 2);
+            rom.seek(0x10); rom.write("PalmCard", 9); be(0x6c, 0x178000, 4);
+        }
+        QFile arm(files.filePath("core")); QVERIFY(arm.open(QIODevice::WriteOnly));
+        arm.write("#!/bin/sh\ntouch \"$0.started\"\n"); arm.close();
+        QVERIFY(arm.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        // frond-68k answers the state queries for absent hardware as absent and the rest as unsupported.
+        QFile core(files.filePath("core-68k")); QVERIFY(core.open(QIODevice::WriteOnly));
+        core.write(R"PY(#!/usr/bin/python3
+import pathlib,socket,struct,sys
+pathlib.Path(sys.argv[0]+'.args').write_text('\n'.join(sys.argv[1:]))
+trace=pathlib.Path(sys.argv[0]+'.commands')
+s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+for line in s.makefile('rb'):
+    i,cmd,arg=line.rstrip(b'\n').split(b'\t')
+    a=bytes.fromhex(arg.decode())
+    with trace.open('ab') as t: t.write(cmd+b' '+a+b'\n')
+    status,code=b'ok',b'result'
+    message={b'device-state':b'palm-iiix',b'keyboard-state':b'detached',b'network-state':b'disabled',
+             b'serial-state':b'pty /dev/pts/7 waiting',b'usb-state':b'off',b'sd-state':b'none'}.get(cmd,b'done')
+    if cmd==b'display': message=b'contrast '+a.split(b'=')[1]+b', smooth off'
+    if cmd==b'save':
+        pathlib.Path(a.decode()).write_bytes(struct.pack('<II',0x19800819,8)+b'palm-iiix'.ljust(32,b'\0')+bytes(8)+
+            struct.pack('<5Q',0x178000,0,4<<20,0,0)+bytes(4)+b'state')
+    if cmd in (b'rotate',b'usb-mode',b'hold',b'hold-state',b'microphone-mode',b'keyboard-key') or cmd.split(b'-')[0] in (b'sd',b'ms',b'bluetooth'):
+        status,code,message=b'error',b'unsupported',b'unsupported'
+    s.sendall(i+b'\t'+status+b'\t'+code+b'\t'+message.hex().encode()+b'\n')
+    if cmd==b'quit': break
+)PY");
+        core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        const auto read = [&](const QString& suffix) {
+            QFile file(core.fileName() + suffix);
+            return file.open(QIODevice::ReadOnly) ? QString::fromUtf8(file.readAll()) : QString();
+        };
+        const auto firmwareRoot = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/frond/firmware";
+        QDir(firmwareRoot + "/palm-iiix").removeRecursively();
+        QStringList errors;
+        {
+            MainWindow window(arm.fileName()); window.show();
+            QTimer poll; poll.setInterval(30);
+            int dialogs = 0;
+            connect(&poll, &QTimer::timeout, &window, [&] {
+                if (auto* box = window.findChild<QMessageBox*>(); box && box->isVisible()) { errors << box->text(); box->accept(); }
+                auto* firmware = window.findChild<FirmwareDialog*>();
+                if (!firmware || !firmware->isVisible()) return;
+                ++dialogs;
+                firmware->findChild<QLineEdit*>("nor")->setText(romPath);
+                auto* settings = firmware->machineSettings;
+                // Detected as a IIIx: contrast and speed, no Engine even with FROND_ENGINE_SETTING=1.
+                QVERIFY(settings->contrast->isVisibleTo(firmware) && settings->speed->isVisibleTo(firmware));
+                QVERIFY(!settings->engine->isVisibleTo(firmware) && !settings->fastAudio->isVisibleTo(firmware));
+                QCOMPARE(settings->contrast->value(), 50);
+                settings->windowScale->setValue(6);
+                settings->contrast->setValue(30);
+                settings->speed->setCurrentIndex(settings->speed->findData(true));
+                firmware->findChild<QPushButton*>("import")->click();
+            });
+            poll.start();
+            window.findChild<QPushButton*>("addDevice")->click();
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("stop")->isEnabled(), 5000);
+            QCOMPARE(dialogs, 1);
+            QVERIFY(QFileInfo::exists(firmwareRoot + "/palm-iiix/nor.bin"));
+            QCOMPARE(digest(firmwareRoot + "/palm-iiix/nor.bin"), digest(romPath));
+            QCOMPARE(window.windowTitle(), QString("Palm IIIx"));
+            const auto args = read(".args").split('\n');
+            QCOMPARE(args.mid(0, 3), QStringList({"--device", "palm-iiix", firmwareRoot + "/palm-iiix/nor.bin"}));
+            for (const char* option : {"--nand", "--work-folder", "--usb", "--bluetooth", "--engine", "--fast-audio",
+                                       "--sony-audio-preview", "--jog-controls", "--hide-keyboard", "--no-sound"})
+                QVERIFY2(!args.contains(option), option);
+            const auto text = read(".args");
+            QVERIFY(text.contains("--window-scale\n3\n") && text.contains("--contrast\n30\n") && text.contains("--speed\nuncapped\n"));
+            QVERIFY(text.contains("--serial\npty\n") && text.contains("--irda\ntcp:5031\n"));
+            QVERIFY(!QFileInfo::exists(arm.fileName() + ".started"));
+            QTRY_VERIFY_WITH_TIMEOUT(read(".commands").contains("serial-state"), 5000);
+            auto* hotSync = window.findChild<QPushButton*>("hotsync");
+            QTRY_VERIFY_WITH_TIMEOUT(hotSync->isEnabled(), 5000);
+            // Only what a IIIx has is on the running page.
+            const auto shown = [&](const char* name) { return window.findChild<QWidget*>(name)->isVisibleTo(&window); };
+            for (const char* name : {"hotsync", "runningContrast", "serialMode", "irdaMode", "sound", "installApp", "launchApp",
+                                     "exportRam", "exportDatabase", "reset", "save", "saveCopy", "hardReset"})
+                QVERIFY2(shown(name), name);
+            for (const char* name : {"rotate", "networkMode", "keyboardAttached", "usbMode", "usbPort", "bluetoothEnabled",
+                                     "bluetoothSocket", "microphone", "hold", "storageHeading", "sdState", "sdNew", "sdRetry"})
+                QVERIFY2(!shown(name), name);
+            QVERIFY(window.findChild<QComboBox*>("serialMode")->isEnabled());
+            QCOMPARE(window.findChild<QSlider*>("runningContrast")->value(), 30);
+            hotSync->click();
+            QTRY_VERIFY_WITH_TIMEOUT(read(".commands").contains("hotsync \n"), 5000);
+            QTRY_VERIFY(hotSync->isEnabled());
+            window.findChild<QSlider*>("runningContrast")->setValue(70);
+            QTRY_VERIFY_WITH_TIMEOUT(read(".commands").contains("display contrast=70\n"), 5000);
+            frondSessions::Preferences prefs;
+            QTRY_VERIFY(frondSessions::readPreferences(managedSession("Palm IIIx"), &prefs) && prefs.contrast == 70);
+            QVERIFY(prefs.uncapped && prefs.scale == 6);
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+            poll.stop();
+        }
+        // Nothing frond-68k answers unsupported was asked.
+        const auto commands = read(".commands");
+        for (const char* command : {"rotate", "usb-", "hold", "microphone-mode", "sd-", "ms-", "bluetooth-"})
+            QVERIFY2(!commands.contains(QString("\n") + command) && !commands.startsWith(command), command);
+        QCOMPARE(errors, QStringList());
+        QVERIFY(commands.contains("save ") && commands.contains("quit "));
+        const auto saved = frondSessions::describe(managedSession("Palm IIIx"));
+        QVERIFY(saved.saved && !saved.old); QCOMPARE(saved.device, QString("palm-iiix"));
+        {
+            // It starts again from its session with the saved settings, and duplicates.
+            MainWindow window(arm.fileName()); window.show();
+            auto* list = window.findChild<QListWidget*>("sessionList");
+            QCOMPARE(list->count(), 1);
+            emit list->itemActivated(list->item(0));
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("stop")->isEnabled(), 5000);
+            const auto args = read(".args").split('\n');
+            QCOMPARE(args.value(0), QFileInfo(managedSession("Palm IIIx")).canonicalFilePath());
+            QVERIFY(!args.contains("--device") && !args.contains("--work-folder"));
+            QVERIFY(read(".args").contains("--contrast\n70\n") && read(".args").contains("--speed\nuncapped\n"));
+            QTRY_COMPARE_WITH_TIMEOUT(window.findChild<QSlider*>("runningContrast")->value(), 70, 5000);
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+            QTRY_VERIFY(window.findChild<QPushButton*>("addDevice")->isEnabled());
+            rowAction(window, 0, "duplicateSession");
+            QTRY_COMPARE_WITH_TIMEOUT(list->count(), 2, 5000);
+            frondSessions::Preferences prefs;
+            QVERIFY(frondSessions::readPreferences(managedSession("Palm IIIx 2"), &prefs));
+            QCOMPARE(prefs.contrast, 70); QVERIFY(prefs.uncapped);
+            QCOMPARE(frondSessions::describe(managedSession("Palm IIIx 2")).device, QString("palm-iiix"));
+            QCOMPARE(digest(managedSession("Palm IIIx 2")), digest(managedSession("Palm IIIx")));
+        }
+        QVERIFY(!QFileInfo::exists(arm.fileName() + ".started"));
+        qunsetenv("FROND_ENGINE_SETTING");
+        QDir(managedFolder()).removeRecursively();
+        QDir(firmwareRoot + "/palm-iiix").removeRecursively();
+        QSettings().clear();
+    }
+    // Opt-in run with a real ROM and frond-68k, not in ctest: FROND_IIIX_ROM and FROND_IIIX_CORE, and
+    // FROND_IIIX_SHOTS for screenshots (the Palm window is taken from DISPLAY with ImageMagick's import).
+    void iiixRealRom() {
+        const auto rom = qEnvironmentVariable("FROND_IIIX_ROM"), core68k = qEnvironmentVariable("FROND_IIIX_CORE");
+        if (rom.isEmpty() || core68k.isEmpty()) QSKIP("Set FROND_IIIX_ROM and FROND_IIIX_CORE");
+        const auto shots = qEnvironmentVariable("FROND_IIIX_SHOTS");
+        const auto palmShot = [&](const QString& name) {
+            if (!shots.isEmpty()) QCOMPARE(QProcess::execute("import", {"-window", "root", shots + '/' + name}), 0);
+        };
+        const auto desktopShot = [&](QWidget& window, const QString& name) {
+            if (!shots.isEmpty()) QVERIFY(window.grab().save(shots + '/' + name));
+        };
+        const auto logText = [](QWidget& window) { return window.findChild<QPlainTextEdit*>()->toPlainText(); };
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        QStringList errors;
+        const auto session = managedSession("Palm IIIx");
+        {
+            MainWindow window(QString(), core68k); window.show();
+            QTimer poll; poll.setInterval(50);
+            connect(&poll, &QTimer::timeout, &window, [&] {
+                if (auto* box = window.findChild<QMessageBox*>(); box && box->isVisible()) { errors << box->text(); box->accept(); }
+                auto* firmware = window.findChild<FirmwareDialog*>();
+                if (!firmware || !firmware->isVisible()) return;
+                firmware->findChild<QLineEdit*>("nor")->setText(rom);
+                firmware->machineSettings->windowScale->setValue(4);
+                firmware->findChild<QPushButton*>("import")->click();
+            });
+            poll.start();
+            window.findChild<QPushButton*>("addDevice")->click();
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("hotsync")->isVisibleTo(&window), 30000);
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("hotsync")->isEnabled(), 30000);
+            QVERIFY(logText(window).contains("frond-68k: palm-iiix"));
+            QTest::qWait(8000);
+            desktopShot(window, "desktop-running.png");
+            palmShot("palm-contrast-50.png");
+            for (int value : {90, 15}) {
+                window.findChild<QSlider*>("runningContrast")->setValue(value);
+                frondSessions::Preferences prefs;
+                QTRY_VERIFY_WITH_TIMEOUT(frondSessions::readPreferences(session, &prefs) && prefs.contrast == value, 10000);
+                QTest::qWait(1000);
+                palmShot(QString("palm-contrast-%1.png").arg(value));
+            }
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 30000);
+            poll.stop();
+            QVERIFY2(errors.isEmpty(), qPrintable(errors.join('\n')));
+            if (!shots.isEmpty()) {
+                QFile log(shots + "/first-run-log.txt"); QVERIFY(log.open(QIODevice::WriteOnly)); log.write(logText(window).toUtf8());
+            }
+        }
+        const auto saved = frondSessions::describe(session);
+        QVERIFY(saved.saved && !saved.old); QCOMPARE(saved.device, QString("palm-iiix"));
+        QCOMPARE(frondSessions::readHeader(session).device, QString("palm-iiix"));
+        {
+            // Resume on startup runs the saved session again with contrast 15.
+            QSettings().setValue("resume", true);
+            MainWindow window(QString(), core68k); window.show();
+            QTimer poll; poll.setInterval(50);
+            connect(&poll, &QTimer::timeout, &window, [&] {
+                if (auto* box = window.findChild<QMessageBox*>(); box && box->isVisible()) { errors << box->text(); box->accept(); }
+            });
+            poll.start();
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("hotsync")->isEnabled(), 30000);
+            QVERIFY(logText(window).contains("from session " + QFileInfo(session).canonicalFilePath()));
+            QCOMPARE(window.findChild<QSlider*>("runningContrast")->value(), 15);
+            QTest::qWait(5000);
+            desktopShot(window, "desktop-resumed.png");
+            palmShot("palm-resumed.png");
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 30000);
+            poll.stop();
+            QVERIFY2(errors.isEmpty(), qPrintable(errors.join('\n')));
+            if (!shots.isEmpty()) {
+                QFile log(shots + "/resumed-log.txt"); QVERIFY(log.open(QIODevice::WriteOnly)); log.write(logText(window).toUtf8());
+            }
+        }
+        QDir(managedFolder()).removeRecursively();
+        QSettings().clear();
+    }
+    // Edit settings: a IIIx has Contrast and Original/Uncapped speed, never the Engine; ARM devices the reverse.
+    void iiixSettings() {
+        qputenv("FROND_ENGINE_SETTING", "1");
+        const auto iiix = frondFirmware::deviceFromId("palm-iiix");
+        frondSessions::Preferences prefs;
+        QCOMPARE(prefs.contrast, 50);
+        prefs.contrast = 20; prefs.uncapped = true; prefs.fastEngine = true;
+        {
+            MachineSettingsDialog dialog(iiix, prefs, false); dialog.show();
+            auto* c = dialog.controls;
+            for (QWidget* w : {static_cast<QWidget*>(c->contrast), static_cast<QWidget*>(c->speed),
+                               static_cast<QWidget*>(c->windowScale), static_cast<QWidget*>(c->smoothLcd), static_cast<QWidget*>(c->audio)})
+                QVERIFY(w->isVisibleTo(&dialog));
+            for (QWidget* w : {static_cast<QWidget*>(c->engine), static_cast<QWidget*>(c->fastAudio), static_cast<QWidget*>(c->showKeyboard),
+                               static_cast<QWidget*>(c->sonyAudioPreview), static_cast<QWidget*>(c->jogControls)})
+                QVERIFY(!w->isVisibleTo(&dialog));
+            QVERIFY(c->audio->isEnabled());
+            QCOMPARE(c->contrast->value(), 20); QVERIFY(c->speed->currentData().toBool());
+            c->contrast->setValue(65); c->speed->setCurrentIndex(c->speed->findData(false));
+            const auto values = c->values();
+            QCOMPARE(values.contrast, 65); QVERIFY(!values.uncapped);
+        }
+        {
+            MachineSettingsDialog dialog(frondFirmware::Device::tx, prefs, false); dialog.show();
+            QVERIFY(dialog.controls->engine->isVisibleTo(&dialog));
+            QVERIFY(!dialog.controls->contrast->isVisibleTo(&dialog) && !dialog.controls->speed->isVisibleTo(&dialog));
+        }
+        qunsetenv("FROND_ENGINE_SETTING");
+        {
+            MachineSettingsDialog dialog(frondFirmware::Device::tx, prefs, false); dialog.show();
+            QVERIFY(!dialog.controls->engine->isVisibleTo(&dialog) && !dialog.controls->speed->isVisibleTo(&dialog));
+            MachineSettingsDialog iiixDialog(iiix, prefs, false); iiixDialog.show();
+            QVERIFY(!iiixDialog.controls->engine->isVisibleTo(&iiixDialog) && iiixDialog.controls->speed->isVisibleTo(&iiixDialog));
+        }
+        // The firmware field is a ROM for the IIIx.
+        QTemporaryDir root;
+        FirmwareDialog firmware(root.path(), iiix);
+        bool rom = false;
+        for (auto* label : firmware.findChildren<QLabel*>()) rom = rom || label->text() == "ROM image";
+        QVERIFY(rom);
+    }
     // Sessions in the managed folder, written the way the core does (magic, version, device name).
     static QByteArray sessionBytes(quint32 version, const QByteArray& device) {
         QByteArray bytes;
@@ -1256,6 +1529,8 @@ for line in s.makefile('rb'):
         QCOMPARE(headings, QStringList({"Applications", "SD card", "Device"}));
         const auto shown = [&](const char* name) { return window.findChild<QPushButton*>(name)->isVisibleTo(&window); };
         QVERIFY(shown("sdExchange") && shown("sdEject") && !shown("sdInsert") && !shown("sdNew") && !shown("sdRetry"));
+        // The cradle HotSync button and contrast are for 68k devices; the E2 keeps Rotate.
+        QVERIFY(!shown("hotsync") && shown("rotate") && !window.findChild<QSlider*>("runningContrast")->isVisibleTo(&window));
         QTRY_VERIFY(window.findChild<QPushButton*>("installApp")->isEnabled());
         // The E2 has no network or serial port; its USB, keyboard and Bluetooth stay.
         QVERIFY(!window.findChild<QComboBox*>("networkMode")->isEnabled());
