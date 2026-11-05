@@ -485,6 +485,14 @@ class PeripheralsModel(
 
     fun rotate() = device("Rotating", "Couldn't rotate", true) { send(it, "rotate") }
 
+    // Presses and releases the Palm's power button (key replay on the control link, both runners) and goes back to the Palm.
+    fun power() = device("Pressing power", "Couldn't press power", true) { l ->
+        val file = java.io.File(activity.cacheDir, "power.replay")
+        file.writeText("0 key-down power\n80 key-up power\n")
+        val reply = l.request("input-replay", file.path, timeoutSeconds = 30)
+        if (reply.ok) null else reply.message
+    }
+
     // Presses the cradle's HotSync button and goes back to the Palm.
     fun hotSync() = device("Starting HotSync", "Couldn't start HotSync", true) { send(it, "hotsync") }
 
