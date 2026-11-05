@@ -4,7 +4,7 @@ How to measure speed, latency and audio, and which diagnostic patches exist. Com
 
 ## Engines
 
-Each machine runs on the Exact engine (the interpreter) or the Fast engine (the Dynarmic JIT, built in on x86-64 and arm64 unless `FROND_FAST=0`). `--engine exact|fast` picks one, default exact. The desktop shows an Engine setting when started with `FROND_ENGINE_SETTING=1`. `FROND_JIT=1` or `0` in the environment overrides both. A debugger attached to a machine runs it on Exact.
+Each machine runs on the Exact engine (the interpreter) or the Fast engine (the Dynarmic JIT, built in on x86-64 and arm64 unless `FROND_FAST=0`). `--engine exact|fast` picks one, default exact. The desktop shows an Engine setting when started with `FROND_ENGINE_SETTING=1`. `FROND_JIT=1` or `0` in the environment overrides both. A debugger attached to a machine runs it on Exact. The Palm IIIx (`frond-68k`) only has the Exact engine, there is no JIT for 68k and the setting is hidden for it.
 
 Fast interprets code until a block has been reached a few times, then compiles it on a background thread. Tuning variables, for measuring and tests only:
 
@@ -22,6 +22,18 @@ Fast interprets code until a block has been reached a few times, then compiles i
 Correctness against the interpreter: `make test-jit-differential` and `make test-jit-overshoot` (see [testing.md](testing.md)). The benchmark below runs Exact unless `FROND_JIT=1` is set, so run it both ways and compare speed and hashes.
 
 `make frond-jit` copies `out/frond` to `build/frond-jit`, kept for older scripts. `make benchmark-replay-jit` does the same for the benchmark.
+
+## 68k timing
+
+`frond-68k` runs the Palm IIIx's 68000 with the clocks the MC68000 manual gives (section 8) instead of a flat cost per instruction. Each opcode has a clock count and a count of program reads. Data-dependent parts are worked out as the code runs: taken or not taken branches, shift counts, MOVEM register counts, MULU, MULS, DIVU and DIVS operands, and exceptions with their frame writes.
+
+- Wait states: each address bank has byte and word waits, set from the DragonBall EZ chip selects (CSA for ROM, CSD or DRAMC for RAM) when the guest writes them. Operand accesses add the wait, instruction fetches add the program reads times the wait. `bus-wait` shows them.
+- Bus time: LCD DMA and DRAM refresh take bus cycles from the CPU, worked out from the registers the guest programmed (line length from LRRA, LXMAX, PCD and the PLL dividers, burst length, refresh period). `bus-timing` shows the figures and the LCD frame rate.
+- The 328 and VZ chips use the same cycle table. The EZ has the full bus model; the VZ one (chip select waits, EDO, fast page and SDRAM page hits) is only unit-tested against the manual. The 328 gets no bus timing.
+- Not modelled: collisions between DRAM refresh and a single access.
+- `Original` runs the machine at the IIIx's real 16.58 MHz (cycles and timers, `speed-state` says 100%). `Uncapped` runs the CPU 8 times faster, or as fast as the host allows, with timers and the clock on real time. Set it in Edit settings, the Android running menu, `--speed original|uncapped` or the `speed` console and socket command.
+- Original is worked out from the clock and the manual's tables, there was no real IIIx to time it on. The timing probe (`tests/palm/timing68k-probe.c`) runs a dozen short loops (branches, calls, reads, MULU, DIVU, DBRA, shifts, MOVEM, ROM and register work) and `python3 tests/timing68k.py --rom ROM --output DIR` compares each loop's measured clocks with the manual's count plus the wait states and bus time. They agree within 1%, allowing for the 100 Hz tick interrupt. `make test-frond-68k` runs the table test.
+- Host cost: Original is mostly asleep after boot (a few percent of one core); Uncapped is bound by the host. A debugger costs about 3% host time while attached and almost nothing while no gdb is connected. FrondBench runs on the OS 3.5 and 4.1 ROMs (it needs 3.5), at Original and Uncapped; it is Frond's own, so there are no real IIIx scores to compare against.
 
 ## Fixed guest-time benchmarks
 

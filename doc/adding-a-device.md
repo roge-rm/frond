@@ -2,6 +2,8 @@
 
 How a device is described to Frond and what to build to make a new one run. The table of devices is `deviceProfiles5` in `src/common/device_profile5.h` of the patched core (`build/source` after `make prepare`). Everything else reads from it: the core, the desktop app, the Android app and the Python tools. See [developer-reference.md](developer-reference.md) for the command line and socket, [testing.md](testing.md) for the test targets and [performance.md](performance.md) for the engines.
 
+A 68k device (the Palm IIIx is the example) runs on a different runner, `frond-68k`, so some steps below differ. See [68k devices](#68k-devices).
+
 Core changes go in a new patch after the last one in `patches/`, or in an unpushed patch regenerated in place. Check them with `make check-reconstruction`. Keep the upstream licence headers and credit.
 
 ## Steps
@@ -56,30 +58,34 @@ A `DeviceProfile5` has these fields. The name is what sessions, settings, the co
 | `homeKey` | SDL keycode of a physical Home key. 0 for none |
 | `holdPresent`, `holdSupported` | A Hold switch is present, and it works |
 
-### The four devices
+### The devices
 
-| | Palm TX | Tungsten E2 | Zire 72 | Sony CLIÉ TG50 |
-|---|---|---|---|---|
-| `name` | `palm-tx` | `palm-e2` | `palm-zire-72` | `sony-clie-tg50` |
-| `board` | `pxa270Tx` | `pxa255E2` | `pxa270Zire72` | `pxa250SonyTG50` |
-| `art` | `tx` | `e2` | `zire72` | `tg50` |
-| `detect` | NOR size | card header, Palm `hspr` | card header, Palm `aZ72` | card header, `sony` `vrna` |
-| NOR | 16 MiB | 8 MiB, header at 0x20000 | 14,942,208 bytes, small and big cards | 13,041,664 bytes, small and big cards |
-| NAND (raw) | 138,412,032, given explicitly | 34,603,008 | none | none |
-| RAM | 32 MiB | 16 or 32 MiB | 32 MiB | 16 MiB |
-| Screen | 320x480 | 320x320 | 320x320 | 320x320 |
-| Silkscreen, bar | 0, 84 | 120, 80 | 120, 96 | 0, 251, side panel 38 |
-| Cards | SD 32 MiB to 2 GiB | SD 512 bytes to 1 GiB | SD 32 MiB to 2 GiB | Memory Stick 4 to 128 MB, Pro up to 1886 MiB |
-| `network` | yes | no | no | no |
-| `serial` | yes | no | no | yes |
-| `keyboard`, `usb`, `infrared`, `bluetooth`, `sound` | yes | yes | yes | yes |
-| `fastAudio` | yes | yes | no | no |
-| `microphone`, `reservedAudio` | no | no | no | yes |
-| Camera, Hold | no, no | no, no | camera present (no sensor, stays off), no | no, Hold switch works |
-| Home and Menu taps | Menu 54,466 | 27,351 and 27,405 | 23,352 and 23,412 | none (Home key F6) |
-| `setup`, `launcher` | `tx`, `wallpaper` | `e2`, `wallpaper-upper` | `zire`, `wallpaper` | `tg50`, `tg50-clie` |
+| | Palm TX | Tungsten E2 | Zire 72 | Sony CLIÉ TG50 | Palm IIIx |
+|---|---|---|---|---|---|
+| `name` | `palm-tx` | `palm-e2` | `palm-zire-72` | `sony-clie-tg50` | `palm-iiix` |
+| `board` | `pxa270Tx` | `pxa255E2` | `pxa270Zire72` | `pxa250SonyTG50` | `ez328` |
+| `art` | `tx` | `e2` | `zire72` | `tg50` | `iiix` |
+| `detect` | NOR size | card header, Palm `hspr` | card header, Palm `aZ72` | card header, `sony` `vrna` | `romHeader68k` |
+| NOR | 16 MiB | 8 MiB, header at 0x20000 | 14,942,208 bytes, small and big cards | 13,041,664 bytes, small and big cards | one ROM, up to 2 MiB, header at 0 |
+| NAND (raw) | 138,412,032, given explicitly | 34,603,008 | none | none | none |
+| RAM | 32 MiB | 16 or 32 MiB | 32 MiB | 16 MiB | 4 MiB |
+| Screen | 320x480 | 320x320 | 320x320 | 320x320 | 160x160 |
+| Silkscreen, bar | 0, 84 | 120, 80 | 120, 96 | 0, 251, side panel 38 | 60, 44 |
+| Cards | SD 32 MiB to 2 GiB | SD 512 bytes to 1 GiB | SD 32 MiB to 2 GiB | Memory Stick 4 to 128 MB, Pro up to 1886 MiB | none |
+| `network` | yes | no | no | no | no |
+| `serial` | yes | no | no | yes | yes |
+| `keyboard`, `usb`, `bluetooth` | yes | yes | yes | yes | no |
+| `infrared`, `sound` | yes | yes | yes | yes | yes |
+| `fastAudio` | yes | yes | no | no | no |
+| `microphone`, `reservedAudio` | no | no | no | yes | no |
+| Camera, Hold | no, no | no, no | camera present (no sensor, stays off), no | no, Hold switch works | no, no |
+| Home and Menu taps | Menu 54,466 | 27,351 and 27,405 | 23,352 and 23,412 | none (Home key F6) | none |
+| `setup`, `launcher` | `tx`, `wallpaper` | `e2`, `wallpaper-upper` | `zire`, `wallpaper` | `tg50`, `tg50-clie` | `iiix`, `iiix` |
+| Runner | `frond` | `frond` | `frond` | `frond` | `frond-68k` |
 
-`palm-e2-franken` and `repalm` are inherited models with no frontend. `palm-iiix` and `palm-m515` are reserved names with button bar art and no board, so the core refuses them.
+The IIIx also has `cpuHz` (16,580,608, the speed setting's Original) and `runs68k`.
+
+`palm-e2-franken` and `repalm` are inherited models with no frontend. `palm-m515` is a reserved name with button bar art and no board, so the core refuses it.
 
 ## Detection and rejection
 
@@ -105,7 +111,7 @@ Each board also has things to settle:
 - USB cable detect: the GPIO and its polarity differ per device.
 - Devices on chip selects the ROM touches but the real board doesn't answer on need a bus that takes writes and reads zero.
 
-The main tree has no separate 68k machine core. 68k code runs inside PACE on the ARM boards, through the interpreter in `uarm/uae`.
+On the ARM boards 68k code runs inside PACE, through the interpreter in `uarm/uae`. A device with a real 68k CPU has its own runner instead, see [68k devices](#68k-devices).
 
 ### PACE and the API bridge
 
@@ -119,6 +125,19 @@ Install, launch, database export and the other app commands need a verified poin
 | TG50 | Found in the original NOR and applied to an instruction shadow, so the original stays intact. Also hooks the automatic library Sleep/Wake call |
 
 Signatures are checked before anything is patched. A missing or ambiguous match leaves memory unchanged. A signature match alone doesn't mean the device is ready. The `guest-ready` command (and every command that needs the guest) repeats a preflight at a supported boundary and returns `not-ready` if there isn't one. Each operation then takes a checkpoint of RAM, flash, devices and the card, runs inside bounded recovery, and rolls back on any fault, so a failed install, launch or export leaves the guest as it was. Plan on the checkpoint needing about the size of guest RAM, flash and card again in memory.
+
+## 68k devices
+
+The Palm IIIx (DragonBall EZ, 68k) runs in `frond-68k`, built from the vendored CloudpilotEmu core (UAE 68000 plus the DragonBall register models) and Frond's runner in `src/cloudpilot/frond/`. The two runners share the art, the window layout, the control socket framing (`src/common/DesktopChannel.h`) and the session container, and have separate main loops and command handling. Patches 0211 to 0229 add it.
+
+- Profile: `board` is `ez328`, `detect` is `romHeader68k`, and `runs68k` is true. `deviceProfileRunnerEligible5` means the ARM runner and is false for it, `deviceProfileRuns68k5` tells the frontends to start `frond-68k`. `deviceProfileInspect68kRom5` reads the big-endian card header (`PalmCard`, `0xfeedbeef`, header version 3 to 5, EZ flag, reset vector in the ROM) and, on version 5, company `palm` and HAL `sumo`. The core then checks the ROM with `EmROMReader` and `EmDevice::SupportsROM`, so a Palm V 3.x or m100 ROM passes the header check and is refused by the core.
+- ROMs: OS 3.1 retail and debug, generic OS 3.5 EZ retail and debug, IIIx/V OS 4.1. The ROM goes in the session's NOR slot, with the RAM and the Cloudpilot savestate. Frond stores its own clock marker next to the savestate (a session without `clock 1` has its cycle counters doubled on load).
+- Cohort `ez68k`, no Fast engine (the setting is hidden), no PACE. A device with a 68k CPU has no PACE patch step, install and launch go through the Cloudpilot installer (`DbInstaller`) once `gSystemState.IsUIInitialized()` is true, which `guest-ready` reports.
+- Speed: Cloudpilot's timers run from emulated cycles. Original runs them at `cpuHz`, Uncapped raises the cycle budget (8 times) while timers stay on real time. Cycles are the 68000 manual's clocks plus the bank wait states (ROM 1, RAM 2 on the IIIx) plus the LCD DMA and DRAM refresh time the guest programmed, see [performance.md](performance.md#68k-timing).
+- Networking is PPP over the serial port to a host PPP server. Frond never turns on the NetLib redirect for a 68k device.
+- Android: `libmain68k.so` runs the same `frond/main.cpp` in `Frond68kActivity`, in its own `:emulator68k` process, so the two UAE copies never share a process. `DeviceInventory.kt` lists 68k devices with `runs68k`.
+- Another EZ or 68328/VZ Palm needs a profile, art and a setup recipe, and Cloudpilot already has the device model. A VZ board's bus timing is only unit-tested so far.
+- Checks: `make test-frond-68k`, `tests/device-rom.py --device palm-iiix --rom FILE --launcher --resets`, `make test-core-control`, see [testing.md](testing.md#per-device-tests). The IIIx has no `SMOKE` entry yet.
 
 ## Fast engine requirements
 
@@ -150,7 +169,7 @@ The bar should be a recognisable approximation of the real one, not a close copy
 ### Profiles (DeviceControls.h)
 
 - `DeviceControlProfile` is one device's bar: size in strip coordinates, its `DeviceButton`s, the five-way ring and select pill, a `DeviceControlStyle`, the app key corner radius, `unit` (strip units per screen pixel, 2 for 160-wide screens), and for a keyboard or side panel `keyboardHeight`, `sideTab` and `sideTabWidth`.
-- Strips are authored 320 units wide. The TX is 320x84, the E2 320x80, the Zire 72 320x96 and the TG50 320x224.
+- Strips are authored 320 units wide. The TX is 320x84, the E2 320x80, the Zire 72 320x96, the TG50 320x224 and the IIIx 320x44.
 - `DeviceButton` is a key (`keyIdHard1` to `keyIdHard4`, `keyIdUp` and so on), its rectangle, a label for tooltips, a `DeviceControlIcon`, an optional corner and the `section` it belongs to (`main`, `keyboard` or `sideTab`). A key that is half of a bigger shape, like a rocker, gets a `shape` to hit against.
 - `deviceControls(DeviceArt)` returns the profile for an art value. Add the new one there, and a value in `DeviceArt` in `device_profile5.h`.
 - Hit testing and drawing share the same geometry. App keys hit their whole rounded rectangle. The five-way hits the select pill first, then the ring split along its diagonals (`deviceNavigatorAt`). Moving a shape moves its hit area.
@@ -165,7 +184,7 @@ The bar should be a recognisable approximation of the real one, not a close copy
 
 ### Silkscreen
 
-- `DeviceSilkscreen` holds the size in LCD pixels (the E2 and Zire 72 are 320x120), the `SilkscreenButton`s (Home, Menu, Favorites, Find, clock, brightness, keyboard) and the two Graffiti areas.
+- `DeviceSilkscreen` holds the size in LCD pixels (the E2, Zire 72 and IIIx are 320x120), the `SilkscreenButton`s (Home, Menu, Favorites, Find, clock, brightness, keyboard) and the two Graffiti areas.
 - Take the rectangles from the ROM, not a photo. The E2's and Zire's come from the `'aslk'` 19000 resource, doubled from Palm OS coordinates to LCD pixels. Taps on the silkscreen go to the guest as pen input, so the art has to sit where Palm OS expects the buttons.
 - `paintSilkscreen` draws the panel, discs with glyphs (`silkscreenDiscGlyph`), the clock and brightness glyphs and the abc/123 areas. `createDeviceSilkscreen` makes the texture.
 
@@ -239,6 +258,12 @@ Keep firmware, sessions, installed Palm applications, raw PCM and captures out o
 ### Zire 72
 
 - Its small ROM clears RTC registers at the mistyped address 0x04090000, where nothing answers on chip select 1, so the bus takes the writes and reads zero. The USB cable detect is GPIO15, active high. The 5.2.8 ROM runs unpatched, and its PACE patch stays in NOR.
+
+### DragonBall EZ (Palm IIIx)
+
+- 16.58 MHz 68000. The IIIx 3.1 and 3.5 ROMs program ROM with 1 wait state and RAM with 2 (`bus-wait`). `bus-timing` shows the LCD DMA and refresh times the guest set: the 3.1 ROM runs the LCD at about 246 Hz, 3.5 and 4.1 at 82 Hz in 1 bpp.
+- Holding power for about two seconds turns the green backlight on.
+- The HotSync button is on the cradle, so it is a command (`hotsync`) and a running-page button, not a device key.
 
 ### PXA250 (Sony CLIÉ TG50)
 

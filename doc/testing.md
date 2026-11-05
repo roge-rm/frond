@@ -81,6 +81,17 @@ A new device adds a row here. "Smoke" means an entry in `SMOKE` in `tests/smoke.
 | `palm-tx` | yes | `test-tx-state`, `test-pxa-power`, `test-tx-serial`, `test-tx-usb-rom` (built, run by hand) | `device-rom.py`, `tx-baseline.py`, `app-compatibility.py`, lifecycle and power ROM tests, `desktop-*.py`, `large-card-rom.py` |
 | `palm-e2` | yes | `test-e2-state`, `test-pxa255-udc`, `test-pxa255-udc-dma` | `e2-rom.py`, `device-rom.py`, `app-compatibility.py`, `large-card-rom.py`, `desktop-keyboard.py` |
 | `palm-zire-72` | yes | `test-device-profiles` | `zire72-rom.py` (`FROND_ZIRE_LAUNCHER=1`, `_STORAGE=1`, `_PERIPHERALS=1` add more), `app-compatibility.py`, `large-card-rom.py` |
+| `palm-iiix` | no | `test-frond-68k` (68000 timing table, piezo, ROM header checks), `test-core-control` | `device-rom.py --device palm-iiix --rom FILE --launcher --resets`, `test-frond-68k-peripherals`, `test-frond-68k-gdb`, `timing68k.py`, `frond-68k-old-session.py` |
 | `sony-clie-tg50` | yes | `test-tg50-state`, `-pace`, `-audio-replay`, `-audio-queue`, `-pwm-audio`, `-microphone-*`, `-serial-board`, `-serial-configuration`, `-call-budget`, `test-sony-dac-preview`, `test-memory-stick-*` | `device-rom.py`, `app-compatibility.py`, `ms-classic-rom.py`, `ms-pro-rom.py`, `test-tg50-usb-hotsync` |
+
+The IIIx tests, with the ROMs from `FROND_DEVICE_IMAGES` (`Palm/IIIx/` and `Palm/Generic-OS-3.5-EZ/`) or `--rom`. Without a ROM they skip.
+
+- `make test-frond-68k` (in `make test`): the 68000 timing table against the manual and the bus timing (`build/test-cpu68k-timing`), the piezo tone renderer (`build/test-frond-68k-sound`) and `tests/frond-68k.py` for ROM acceptance and refusal with synthetic headers (wrong size, little-endian ARM header, truncated). `--rom` adds the real ROMs by hash.
+- `make test-frond-68k-peripherals`: tones and their frequencies, backlight, sleep and wake with an alarm, serial HotSync with pilot-link over a PTY and TCP, database install, launch, list and export. `--only ppp` also dials out over serial PPP to slirp and fetches a page. Serial needs pilot-link. `FROND_68K_ROMS="--rom A --rom B"` picks ROMs.
+- `make test-frond-68k-gdb`: prc-tools' `m68k-palmos-gdb` 5.3 and `gdb-multiarch` on the debug Hello app in `build/hello-debug`, on the OS 3.5 ROM. Skips without them.
+- `make test-core-control`: the same control socket requests against `out/frond` (an ARM smoke session, `--arm-session` or `FROND_ARM_SESSION`) and `out/frond-68k`, checking replies, pushed events, save and reload, and that what a device lacks answers `unsupported`.
+- `tests/device-rom.py --device palm-iiix --rom FILE --launcher --resets`: detection, cold boot to the launcher, saved session restore in a new process, soft and hard reset, damaged sessions refused into a running machine, saved contrast. Use `--sha256` to pin the ROM.
+- `tests/timing68k.py` and `tests/frond-68k-old-session.py` are by hand, see [performance.md](performance.md#68k-timing).
+- Desktop: `make test-desktop` has the IIIx import, settings and launch cases; `iiixRealRom` is opt-in (`FROND_IIIX_ROM`, `FROND_IIIX_CORE`, optional `FROND_IIIX_SHOTS`).
 
 Tests that cover every device (profiles, controls, sessions, lifecycle, SD, networking) run in `make test` and need no row.

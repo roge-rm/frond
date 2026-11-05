@@ -4,6 +4,8 @@ Everything here is for running the core and the tools without the desktop or And
 
 The core is `out/frond` (built by `make out/frond`). The desktop app runs it as a child and talks to it over the control socket.
 
+The Palm IIIx has its own runner, `out/frond-68k` (`make out/frond-68k`, installed as `/usr/lib/frond/frond-68k-core`). It takes the same desktop arguments and speaks the same control socket, but has its own options and console, see [Palm IIIx (frond-68k)](#palm-iiix-frond-68k). Everything outside that section is about `out/frond`.
+
 ## Command line
 
 `frond [options] nor_or_session`. The positional argument is a firmware NOR image or a saved session. `frond --help` prints the same list.
@@ -45,7 +47,7 @@ The core is `out/frond` (built by `make out/frond`). The desktop app runs it as 
 
 For a headless run set `SDL_VIDEODRIVER=dummy` and `SDL_AUDIODRIVER=dummy`.
 
-The desktop launcher `frond-desktop [session]` takes `--core PATH` (the emulator to run, found beside it or in `/usr/lib/frond` by default), `-h` and `-v`.
+The desktop launcher `frond-desktop [session]` takes `--core PATH` (the emulator to run, found beside it or in `/usr/lib/frond` by default), `--core-68k PATH` (the same for 68k devices like the Palm IIIx, default `frond-68k` beside the ARM core), `-h` and `-v`.
 
 ## Console commands
 
@@ -291,6 +293,154 @@ Breakpoints and snapshots aren't saved in sessions. On Android, Settings > Debug
 
 `tools/pace-report.py` combines a `monitor pace` object with the PRC you ran and prints a private report with resource offsets and, given the matching executable, symbols (`--context`, `--program`, `--executable`, `--runtime-map`, `--tool-prefix`).
 
+## Palm IIIx (frond-68k)
+
+`frond-68k` runs the Palm IIIx (DragonBall EZ, Palm OS 3.1 to 4.1) on the CloudpilotEmu 68k core. It is a separate program from `frond`, built by `make out/frond-68k` (the cloudpilot sources with `FROND_68K=1`, no network proxy, readline or Fast engine) and shipped in the Debian package as `/usr/lib/frond/frond-68k-core` beside `frond-core`. The desktop and Android apps start it for 68k devices. Run it by hand like this:
+
+```sh
+out/frond-68k --rom palm-os-3.5-ez.rom --run-for 10 --framebuffer-output out.png
+out/frond-68k iiix.frond --serial pty
+```
+
+### Command line
+
+`frond-68k [--rom] FILE [options]`. FILE is a ROM or a saved session. `--version` (as the only argument) prints `frond-68k VERSION`. A wrong option prints the usage and exits 2.
+
+| Option | Meaning |
+| --- | --- |
+| `--rom FILE` | The ROM or session. A plain positional file works the same. |
+| `--device NAME` | Expect this device, `palm-iiix`. |
+| `--check-rom` | Check the ROM (header, then Cloudpilot's own check) and print what it found, without starting. Not with a session. |
+| `--run-for SECONDS` | Run headless for this many guest seconds, as fast as the host allows, 0.001 to 3600. Not with `--desktop-socket`. |
+| `--framebuffer-output FILE` | Save the LCD as a PNG at the end of `--run-for`. |
+| `--input-replay FILE` | Replay timed pen and key events and snapshots, the same format as in [Input replay](#input-replay). |
+| `--speed original\|uncapped` | Original runs at the real 16.58 MHz, Uncapped at 8 times that with timers on real time. Default original. |
+| `--contrast N` | Screen contrast 0 to 100. Default 50, or the session's. |
+| `--window-scale N` | Screen pixels per Palm pixel, 1 to 4. Default 2. The desktop passes twice its own scale. |
+| `--window-fit MODE`, `--window-background RRGGBB` | Fit the device to a resizable window (`fit`, `whole` or `fill`) and the colour around it, as for `frond`. |
+| `--smooth-lcd` | Smooth pixels instead of nearest-neighbour. |
+| `-q`, `--no-sound` | Start with sound off. |
+| `--audio-output FILE` | Write the piezo sound to a WAV file. |
+| `--audio-period FRAMES` | Host audio period, 64 to 8192. Default 512. |
+| `--tone-log` | Print each tone change (`tone: HZ Hz duty D at S s`). |
+| `--serial off\|pty\|tcp:PORT`, `--irda off\|pty\|tcp:PORT` | Connect the serial port or infrared to a host PTY or a loopback TCP listener. The PTY path is printed. |
+| `--gdb PORT` | Start the GDB stub on 127.0.0.1:PORT, see below. |
+| `--desktop-socket PATH` | Connect to the desktop's control socket, see [Control socket](#control-socket). The console is off then. |
+
+`--work-folder`, `--nand`, `--engine`, `--jog-controls`, `--usb`, `--bluetooth`, `--fast-audio`, `--sony-audio-preview`, `--hide-keyboard` and `--hide-jog-controls` are taken and ignored, as the desktop passes them to every core.
+
+In the window F1 to F4 are the app buttons, the up and down arrows the rocker and Escape power. Typed text goes into the Palm.
+
+### Console commands
+
+Read from standard input, one per line, unless `--desktop-socket` is used. Paths may be quoted.
+
+| Command | Meaning |
+| --- | --- |
+| `quit` | Quit. |
+| `save-session FILE` | Save the session. |
+| `load-session FILE` | Load a session. The whole file is checked first and the machine is kept if it is refused. |
+| `reset`, `reset-hard`, `reset-noext` | Soft reset, hard reset (erases the Palm), or a reset with extensions not loaded. |
+| `input-replay FILE` | Load an input replay. |
+| `snapshot FILE` | Save the Palm screen as a PNG. |
+| `window-snapshot FILE` | Save the whole window, with silkscreen and buttons, as a PNG. |
+| `audio-on`, `audio-off`, `sound-state` | Turn sound on or off, or show it. |
+| `serial-mode off\|pty\|tcp:PORT`, `irda-mode off\|pty\|tcp:PORT` | Set the serial or infrared endpoint and show its state. |
+| `serial-state`, `irda-state` | Show the endpoint, `off` or `pty\|tcp ENDPOINT connected\|waiting`. |
+| `hotsync` | Press and release the cradle's HotSync button. |
+| `backlight-state` | `backlight: on` or `off`. |
+| `speed original\|uncapped` | Set the speed. |
+| `speed-state` | Measured MHz, the limit, the percentage and the mode. |
+| `bus-wait` | The wait states per byte and word cycle for ROM and RAM, as the guest set the chip selects. |
+| `bus-timing` | The LCD line and DMA clocks, the DRAM refresh period, the LCD frame rate and the DragonBall registers they come from. |
+| `display contrast=N smooth=on\|off` | Change the contrast or smoothing. |
+| `launch NAME` | Launch an app by its database name. |
+| `install FILE` | Install a PRC or PDB. |
+| `db-list` | List the RAM databases. |
+| `db-export FILE`, `db-export-all FILE` | Export the RAM databases, or all of them, to a ZIP. |
+| `db-export-db NAME FILE` | Export one database as a PDB or PRC. |
+| `gdb-start [PORT]` | Start the GDB stub on 127.0.0.1, port 2159 by default. |
+| `gdb-stop` | Stop it and go back to breaking everywhere. |
+| `gdb-state` | `off`, or `listening` or `connected`, then `running` or `stopped`. |
+| `gdb-app FILE [NAME]` | Tell the stub which executable (COFF or ELF) the app came from, and its database name, see below. |
+
+### Control socket
+
+The framing, the replies and the events are the same as for `frond`. `frond-68k` answers these: `device-state`, `guest-ready`, `replay-state`, `input-replay`, `save`, `install`, `export`, `export-db`, `db-list`, `launch-app`, `reset`, `hard-reset`, `quit`, `serial-state`, `serial-mode`, `irda-state`, `irda-mode`, `irda-stats`, `speed-state`, `display` (`contrast=` and `smooth=`), `sound-state`, `sound-mode`, `audio-on`, `audio-off`, and the IIIx's own `hotsync`, `speed` (`original` or `uncapped`), `backlight-state` and `gdb-start`, `gdb-stop`, `gdb-state`. `guest-ready` and the commands that need Palm OS answer `not-ready` until the UI is up. Events are `ready`, `close`, `serial` and `infrared`.
+
+What a IIIx doesn't have answers as absent to the state queries the desktop asks every device (`network-state` `disabled`, `hold-state` `unavailable`, `keyboard-state` `detached`, `usb-state` `off`, `sd-state` `none`, `microphone-state` and `microphone-epoch` `off` and `0`) and with `unsupported` to the rest: `usb-mode`, `bluetooth-state`, `bluetooth-mode`, `hold`, `keyboard-attach`, `keyboard-key`, `microphone-mode`, `network-mode` (other than `disabled`), `guest-orientation`, `rotate`, `replay-snapshots`, `sd-*` and `ms-*`. `make test-core-control` runs the same requests against both cores.
+
+### Debugging 68k apps with GDB
+
+The 68k runner has its own GDB stub on 127.0.0.1, off by default. Start it with `--gdb PORT` or the console command `gdb-start [PORT]` (2159 by default); `gdb-stop` and `gdb-state` stop it and show it. The monitor commands of the ARM stub don't exist here.
+
+To debug an app built with prc-tools, install its `.prc`, then tell the stub which executable it came from so it can find the code and relocate the symbols:
+
+```sh
+gdb-app path/to/hello Hello      # the COFF or ELF file, then the database name
+```
+
+Then connect with prc-tools' gdb:
+
+```sh
+m68k-palmos-gdb hello
+(gdb) set remotetimeout 120
+(gdb) target remote 127.0.0.1:2159
+```
+
+With an app set, gdb waits at `target remote` until the app starts and stops at its first instruction (gdb 5.3 crashes if it first stops outside the app). Launch the app on the Palm. From there `break`, `continue`, `next`, `step`, `stepi`, `finish`, `info registers`, `bt` and `detach` work. A `next` over a call that waits for input, like an alert, only comes back once you answer it on the Palm. An app built for a newer Palm OS than the ROM (for example a 3.5 app on the 3.1 ROM) shows its "needs Palm OS 3.5" alert first.
+
+gdb-multiarch can't read prc-tools' COFF files. Use it with `set architecture m68k`, `set endian big` and breakpoints at addresses: `gdb-app` prints how far the code moved, add that to the symbol's address from `m68k-palmos-nm`. On Android the gdb server is on in Settings, as for ARM.
+
+The debugger costs almost nothing while no gdb is connected. `make test-frond-68k-gdb` runs both gdbs on the debug Hello app in `build/hello-debug` on an OS 3.5 ROM.
+
+### Serial PPP
+
+`tools/palm-pppd.sh` connects the serial port to slirp or pppd, see [Palm IIIx serial and PPP](using-frond.md#palm-iiix-serial-and-ppp).
+
+## CloudpilotEmu command line tool
+
+The upstream CloudpilotEmu sources in `src/cloudpilot/native/` (`main.cpp`, `Commands.cpp`) are a separate command line emulator, `cloudpilot-emu`. Frond's makefile doesn't build or ship it, `frond-68k` is Frond's runner for the same core. The source is in the tree, so `make check-docs` lists its options and commands here.
+
+`cloudpilot-emu [options] image`. The image is a ROM or a saved image.
+
+| Option | Meaning |
+| --- | --- |
+| `-d`, `--device-id DEVICE` | Device ID (one of the IDs it lists when given a bad one). |
+| `--net-native` | Enable native network. |
+| `--net-proxy URI` | Network redirection through this `http` or `https` proxy. |
+| `--proxy-insecure` | Don't check the proxy's certificate. |
+| `--proxy-ca FILE` | Root certificate for the proxy. |
+| `--mount FILE` | Mount a card image. |
+| `-s`, `--script FILE` | Run console commands from a file at start. |
+| `-l`, `--listen PORT` | Listen for GDB on this port. |
+| `--wait-for-attach` | Wait for the debugger before running. |
+| `--debug-app FILE` | Configure the debugger for this app (the ELF file). |
+| `--trace-debugger`, `--trace-netlib`, `--trace-installer` | Log the GDB stub, the network API, or the database installer. |
+| `--small-window` | Use the smaller window. |
+
+Its console commands:
+
+| Command | Meaning |
+| --- | --- |
+| `set-user-name NAME` | Set the HotSync user name. |
+| `reset-soft`, `reset-noext` | Soft reset, or a reset without loading extensions. |
+| `save-image FILE [CARD]` | Save the session image, and the mounted card's image as well if CARD is given. |
+| `switch-image FILE` | Switch to another ROM or image. Not while a debugger is connected. |
+| `save-backup FILE`, `save-backup-with-rom FILE` | Save a backup of the RAM databases, or with the ROM ones. |
+| `save-card FILE` | Save the mounted card image. |
+| `trace [FRAMES] [stack\|nostack]` | Print an m68k stack trace, 3 frames by default. |
+| `locate FILE` | Find a file's contents in RAM. |
+| `debug-set-app FILE [NAME]` | Load an ELF file, find its code in Palm memory and configure GDB for it. Break mode becomes app-only. |
+| `debug-info` | Show the break mode and whether a debugger is connected. |
+| `debug-set-break-mode all\|app-only\|ram-only` | Set where the debugger breaks. |
+| `dump-memory FILE` | Write the Palm's RAM to a file. |
+| `show-syscall-traps` | List the syscall traps. |
+| `set-syscall-trap TRAP`, `clear-syscall-trap TRAP` | Break on a syscall trap word (decimal or `0x` hex), or stop. |
+| `clear-all-syscall-traps` | Remove all syscall traps. |
+
+It also has `install`, `launch`, `mount`, `unmount` and `reset-hard`, as `frond` does.
+
 ## Environment variables
 
 ### Core
@@ -331,6 +481,9 @@ Breakpoints and snapshots aren't saved in sessions. On Android, Settings > Debug
 | `FROND_HARD_RESET` | `1` adds the TX and E2 hard-reset run to `tests/zire72-rom.py`. |
 | `FROND_ZIRE_LAUNCHER`, `FROND_ZIRE_STORAGE`, `FROND_ZIRE_PERIPHERALS` | `1` adds the launcher and key runs, the storage runs, or the peripheral runs to the Zire 72 ROM tests. |
 | `FROND_ZIRE_EVIDENCE` | Folder those runs write screenshots to. |
+| `FROND_ARM_SESSION` | ARM session for `tests/core-control.py`. Default the palm-tx smoke machine. |
+| `FROND_IIIX_ROM`, `FROND_IIIX_CORE` | IIIx ROM and `frond-68k` binary for the opt-in IIIx run in the desktop workflow test (`iiixRealRom`). |
+| `FROND_IIIX_SHOTS` | Folder that run saves pictures of the Palm window to (needs ImageMagick's `import` and a display). |
 | `FROND_TG50_SESSION` | TG50 session for `tests/tg50-usb-hotsync.py`. Default `build/smoke/machines/sony-clie-tg50` (or the older `build/smoke/sony-clie-tg50.session`). |
 | `FROND_TG50_SCREENSHOT_DIR` | Folder `tests/device-controls.cpp` saves TG50 screenshots to. |
 | `FROND_TEST_CORE`, `FROND_TEST_SESSION` | Core and TX session for the desktop workflow test. |
@@ -390,6 +543,7 @@ All in `tools/`. Most take `--help`.
 | `build-palm-probe.py` | Builds a Palm probe app from `tests/palm/` with a local SDK (`--probe NAME`, `--sdk PATH`). |
 | `build-bluetooth-provider.py`, `build-bluetooth-opp-peer.py` | Build the optional BlueZ H4 provider (`btvirt`) and the virtual OPP test peer. |
 | `bluetooth-opp-peer.c`, `bluez-bdaddr.patch`, `bluez-bthost-config.patch` | Sources and patches for those. |
+| `palm-pppd.sh DEVICE` | Runs slirp (or pppd with `--pppd`) on the IIIx's serial PTY or `tcp:PORT`, see Palm IIIx. `slirp-select-fix.c` is the shim it preloads. |
 | `link-pty.py ENDPOINT` | Puts a PTY in front of a TCP endpoint (`PORT`, `HOST:PORT` or `listen:PORT`) for programs that only open serial devices. `--link PATH`, `--seconds N`. |
 | `link-irda.py FIRST SECOND` | Joins two infrared endpoints. `--seconds N`. |
 | `link-bluetooth.py serve\|join A B` | Carries Bluetooth controller connections over TCP. `--seconds N`. |
@@ -410,6 +564,7 @@ All in `tools/`. Most take `--help`.
 | `all` | Core and desktop app. |
 | `prepare` | Rebuild `build/source` from upstream and the patches. |
 | `out/frond` | The core only. |
+| `out/frond-68k` | The Palm IIIx runner. |
 | `frond-jit` | Copy of `out/frond` for runs that name the JIT. |
 | `desktop` | The Qt app, `out/frond-desktop`. |
 | `deb`, `deb-arm64` | Debian packages. The arm64 one is built in Docker. |
@@ -434,7 +589,7 @@ Tests in `make test`, by area:
 | --- | --- |
 | CPU and engines | `test-cpu`, `test-arm-conditions`, `test-instruction-cache`, `test-mmu-fast-path`, `test-mem-region-bounds`, `test-xscale-prefetch`, `test-jit-overshoot`, `test-jit-differential` |
 | SoC and timing | `test-pxa-timer`, `test-pxa-power`, `test-pxa255-udc`, `test-pxa255-udc-clock`, `test-pxa255-udc-dma`, `test-pxa255-udc-dma-state`, `test-pxa270-udc`, `test-scheduler`, `test-microwire64x16` |
-| Device state and sessions | `test-tx-state`, `test-e2-state`, `test-tg50-state`, `test-device-profiles`, `test-device-controls`, `test-session-v7`, `test-checkpoint-input`, `test-export-checkpoint`, `test-replay-snapshot`, `test-lifecycle` |
+| Device state and sessions | `test-tx-state`, `test-e2-state`, `test-tg50-state`, `test-device-profiles`, `test-device-controls`, `test-session-v7`, `test-frond-68k`, `test-checkpoint-input`, `test-export-checkpoint`, `test-replay-snapshot`, `test-lifecycle` |
 | Palm databases | `test-native-database`, `test-native-primitives`, `test-native-governor`, `test-db-list`, `test-db-backup` |
 | Storage | `test-sd-image`, `test-sd`, `test-card-backing`, `test-memory-stick-controller`, `test-memory-stick-media`, `test-memory-stick-pro` |
 | Audio | `test-sdl-audio`, `test-fast-audio`, `test-earlier-audio`, `test-audio-results`, `test-audio-reservation-negative`, `test-pxa-i2s-audio`, `test-tg50-pwm-audio`, `test-tg50-microphone-adc`, `test-tg50-microphone-dma`, `test-tg50-microphone-state`, `test-tg50-call-budget`, `test-tg50-pace`, `test-tg50-audio-replay`, `test-tg50-serial-board`, `test-tg50-serial-configuration` |
@@ -448,6 +603,9 @@ Not in `make test`. The first group builds a program and runs it with a private 
 | Target | Needs |
 | --- | --- |
 | `test-tx-lifecycle-rom`, `test-tx-power-rom`, `test-tx-usb-rom` | Build only. Run the program with a TX session. |
+| `test-frond-68k-peripherals` | IIIx ROM. Piezo, backlight, sleep, serial HotSync (pilot-link) and databases. |
+| `test-frond-68k-gdb` | IIIx ROM, `build/hello-debug`, `m68k-palmos-gdb` and gdb-multiarch. |
+| `test-core-control` | ARM smoke session (`FROND_ARM_SESSION`) and IIIx ROM. The control socket on both runners. |
 | `test-tg50-usb-hotsync` | TG50 session (`make smoke-sessions`) and pilot-link. |
 | `test-tg50-preview-replay` | `TG50_PREVIEW_SESSION`. |
 | `test-tg50-audio-lifecycle`, `test-tg50-audio-queue`, `test-sony-dac-host`, `test-sony-dac-preview`, `test-sony-original-guards` | Nothing. TG50 audio unit tests. |
