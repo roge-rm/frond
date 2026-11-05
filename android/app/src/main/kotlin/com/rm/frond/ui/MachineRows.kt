@@ -36,12 +36,9 @@ const val APPLIES_AT_NEXT_START = "Applies at next start"
 
 fun Device.isTg50() = id == "sony-clie-tg50"
 
-// Whether Sony audio preview (TG50) or Low-latency audio (others) can be used with this firmware. Blocking.
+// Whether Low-latency audio can be used with this firmware. Blocking.
 fun audioPreviewQualified(context: Context, device: Device, session: File?): Boolean =
-    if (device.isTg50()) Firmware.sonyPreviewEligible(device, session, Firmware.nor(context, device))
-    else Firmware.fastAudioQualified(device, session, Firmware.nor(context, device))
-
-fun audioPreviewLabel(device: Device) = if (device.isTg50()) "Sony audio preview" else "Low-latency audio"
+    Firmware.fastAudioQualified(device, session, Firmware.nor(context, device))
 
 @Composable
 fun MachineSwitchRow(
@@ -103,21 +100,15 @@ fun MachineSoundRow(device: Device, settings: MachineSettings, listStyle: Boolea
     }
 }
 
-// Sony audio preview on the TG50, Low-latency audio elsewhere. qualified is null while being checked.
+// Low-latency audio. qualified is null while being checked.
 @Composable
 fun MachineAudioPreviewRow(
     device: Device, settings: MachineSettings, qualified: Boolean?, listStyle: Boolean, note: String? = null,
     onChange: (MachineSettings) -> Unit,
 ) {
     val usable = qualified == true
-    if (device.isTg50()) {
-        MachineSwitchRow("Sony audio preview", usable && settings.sonyAudioPreview, listStyle, usable, note) {
-            onChange(settings.copy(sonyAudioPreview = it))
-        }
-    } else {
-        MachineSwitchRow("Low-latency audio", usable && settings.fastAudio, listStyle, usable, note) {
-            onChange(settings.copy(fastAudio = it))
-        }
+    MachineSwitchRow("Low-latency audio", usable && settings.fastAudio, listStyle, usable, note) {
+        onChange(settings.copy(fastAudio = it))
     }
 }
 

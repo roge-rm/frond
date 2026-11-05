@@ -309,12 +309,6 @@ object Firmware {
         return md5 == want
     }
 
-    fun sonyPreviewEligible(device: Device, session: File?, nor: File): Boolean {
-        if (device.id != "sony-clie-tg50" || !device.fastAudio) return false
-        val digest = if (session != null && (session.isFile || session.isDirectory)) Sessions.norMd5(session) else md5(nor)
-        return digest == "4fcdb4d5f12c04a4969088a9ed839f41"
-    }
-
     fun md5(file: File): String? = try {
         val digest = java.security.MessageDigest.getInstance("MD5")
         file.inputStream().use { input ->

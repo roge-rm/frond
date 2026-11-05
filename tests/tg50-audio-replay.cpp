@@ -1,12 +1,7 @@
-// Deterministic TG50 sound replay under backpressure, in Exact or Fast (first argument).
+// Deterministic TG50 sound replay on the ring-buffer queue, in Exact or Fast (first argument).
 // A guest loop feeds the I2S FIFO and moves the PWM duty with its own progress, so the PCM
 // depends on how far the CPU gets in each batch. The consumer pops what guest time says is
-// due, except in stall windows, and drains the queue every 40 steps. Each step asks for
-// more than the small queue holds, so admission blocks every step.
-//
-// Built with -DFROND_BROKEN_BOUND and -Wl,--wrap=_Z21cpuMaxOvershootCyclesPK6ArmCpu, the mode
-// broken-bound runs Fast with a large unchecked limit while admission is told the
-// interpreter's bound, and checks that the reservation counter reports overruns.
+// due and drains the queue every 40 steps; the queue is big enough that nothing is dropped.
 #include "tg50-audio-fixture.h"
 #include "audio_queue.h"
 #include "CPU.h"
@@ -18,6 +13,7 @@
 namespace {
 constexpr unsigned steps = 400, mid = 160;
 constexpr uint64_t stepCycles = 200000, frequency = 100000000;  // 2 ms of guest time asked
+constexpr size_t queueFrames = 8192;
 
 struct Consumer { uint64_t start{}, consumed{}; };
 // The savestate leaves RAM out (sessions store it apart), so a snapshot holds both.
@@ -30,7 +26,6 @@ struct Replay {
     Snapshot end, midState;
     Consumer midConsumer;
     size_t midFrames{};
-    unsigned blocked{}, stalledZero{};
 };
 
 void program(AudioMachine& m) {
@@ -86,11 +81,8 @@ Replay replay(AudioMachine& m, AudioQueue* queue, unsigned first, Consumer consu
             r.midFrames = r.pcm.size();
             if (reloadAtMid) assert(restore(m, r.midState));
         }
-        const uint64_t ran = m.soc.Run(stepCycles, frequency);
-        const bool stalled = step % 40 >= 30 && step % 40 < 38;
-        r.blocked += m.soc.AudioAdmissionBlocked();
-        r.stalledZero += stalled && !ran;
-        if (stalled) continue;
+        // No admission: every step runs its whole budget.
+        assert(m.soc.Run(stepCycles, frequency) >= stepCycles);
         const size_t pending = audioQueuePendingSamples(queue);
         const uint64_t due = (m.soc.GetTime() - consumer.start) * 441 / 10000000;
         size_t take = step % 40 == 39 ? pending
@@ -124,8 +116,8 @@ void same(const char* what, const Replay& a, const Replay& b) {
             off += size;
         }
     }
-    fprintf(stderr, "%s differs: frames %zu/%zu first at %zu, state %zu/%zu first at %zu, blocked %u/%u\n", what,
-            a.pcm.size(), b.pcm.size(), i, a.end.state.size(), b.end.state.size(), j, a.blocked, b.blocked);
+    fprintf(stderr, "%s differs: frames %zu/%zu first at %zu, state %zu/%zu first at %zu\n", what,
+            a.pcm.size(), b.pcm.size(), i, a.end.state.size(), b.end.state.size(), j);
     std::abort();
 }
 
@@ -145,39 +137,9 @@ void setup(AudioMachine& m) {
 }
 }  // namespace
 
-#ifdef FROND_BROKEN_BOUND
-extern "C" uint32_t __real__Z21cpuMaxOvershootCyclesPK6ArmCpu(const ArmCpu* cpu);
-// Every caller outside CPU.cpp (admission in soc_PXA.cpp, this test) sees this one.
-extern "C" uint32_t __wrap__Z21cpuMaxOvershootCyclesPK6ArmCpu(const ArmCpu*) { return 19; }
-
-static int brokenBound() {
-    setenv("FROND_JIT_MAX_UNCHECKED", "1000", 1);
-    if (!cpuSetFastEngine(true)) { puts("Fast engine not built in, skipped"); return 0; }
-    AudioMachine m; setup(m);
-    const uint32_t real = __real__Z21cpuMaxOvershootCyclesPK6ArmCpu(m.soc.GetCpu());
-    assert(real == 1000 && cpuMaxOvershootCycles(m.soc.GetCpu()) == 19);
-    // Room to spare, so an overrun is counted rather than ending in a push to a full queue.
-    auto* queue = audioQueueCreate(1 << 16);
-    attach(m, queue);
-    m.soc.Run(100000, frequency);
-    audioQueueDiscard(queue);
-    replay(m, queue, 0, Consumer{m.soc.GetTime(), 0});
-    uint64_t checked{}, overruns{};
-    SocPXA::AudioReservationTotals(checked, overruns);
-    m.soc.SetAudioQueue(nullptr);
-    printf("TG50 audio replay with a broken bound (admission told 19, the JIT runs up to %u): "
-           "%llu batches checked, %llu overruns %s\n", real, (unsigned long long)checked,
-           (unsigned long long)overruns, overruns ? "PASS (caught)" : "FAIL (not caught)");
-    return overruns ? 0 : 1;
-}
-#endif
-
 int main(int argc, char** argv) {
     cpuSetJitSync(true);  // Fast compiles where asked for, so runs repeat
     const std::string mode = argc > 1 ? argv[1] : "";
-#ifdef FROND_BROKEN_BOUND
-    if (mode == "broken-bound") { unsetenv("FROND_JIT"); return brokenBound(); }
-#endif
     if (mode != "exact" && mode != "fast") { fprintf(stderr, "usage: %s exact|fast\n", argv[0]); return 2; }
     unsetenv("FROND_JIT");
     if (!cpuSetFastEngine(mode == "fast")) { puts("Fast engine not built in, skipped"); return 0; }
@@ -185,10 +147,10 @@ int main(int argc, char** argv) {
     AudioMachine m; setup(m);
     const uint32_t bound = cpuMaxOvershootCycles(m.soc.GetCpu());
     assert(mode == "fast" ? bound > 19 && bound < UINT32_MAX : bound == 19);
-    auto* queue = audioQueueCreate(64);
+    auto* queue = audioQueueCreate(queueFrames);
     attach(m, queue);
     m.soc.Run(100000, frequency);  // past the I2S start, then begin from an empty queue
-    audioQueueDiscard(queue);
+    audioQueueClear(queue);
     const auto before = audioQueueAccounting(queue);
     const auto start = snapshot(m);
     const Consumer consumer{m.soc.GetTime(), 0};
@@ -196,7 +158,7 @@ int main(int argc, char** argv) {
     // Every replay starts from a load, which also queues the host serial resume.
     assert(restore(m, start));
     const auto a = replay(m, queue, 0, consumer);
-    assert(a.pcm.size() > 10000 && a.blocked > steps / 2 && a.stalledZero > 0);
+    assert(a.pcm.size() > 10000);
     unsigned distinct{};
     for (size_t i = 1; i < a.pcm.size(); ++i) distinct += a.pcm[i] != a.pcm[i - 1];
     assert(distinct > a.pcm.size() / 4);
@@ -208,12 +170,12 @@ int main(int argc, char** argv) {
     assert(b.midState == a.midState);
 
     // A fresh machine loaded from the start, then one loaded from the middle.
-    AudioMachine fresh; auto* freshQueue = audioQueueCreate(64);
+    AudioMachine fresh; auto* freshQueue = audioQueueCreate(queueFrames);
     attach(fresh, freshQueue);  // before the load, as in the first machine
     assert(restore(fresh, start));
     const auto c = replay(fresh, freshQueue, 0, consumer);
     same("fresh", a, c);
-    AudioMachine resumed; auto* resumedQueue = audioQueueCreate(64);
+    AudioMachine resumed; auto* resumedQueue = audioQueueCreate(queueFrames);
     attach(resumed, resumedQueue);
     assert(restore(resumed, a.midState));
     const auto d = replay(resumed, resumedQueue, mid, a.midConsumer);
@@ -225,20 +187,15 @@ int main(int argc, char** argv) {
     same("reload in place", a, Replay{e.pcm, a.end});
     same("resumed end", e, Replay{e.pcm, d.end});
 
-    // Nothing discarded and nothing left over: every committed frame was consumed.
+    // Nothing dropped: every committed frame was consumed, and loads only cleared empty queues.
     for (auto* q : {queue, freshQueue, resumedQueue}) {
         const auto acc = audioQueueAccounting(q);
         assert(acc.committed == acc.consumed + acc.discarded + audioQueuePendingSamples(q));
     }
     assert(audioQueueAccounting(queue).discarded == before.discarded);
     assert(!audioQueueAccounting(freshQueue).discarded && !audioQueueAccounting(resumedQueue).discarded);
-    uint64_t checked{}, overruns{};
-    SocPXA::AudioReservationTotals(checked, overruns);
-    assert(checked > 0 && !overruns);
-    printf("TG50 audio replay %s (bound %u): %zu frames, pcm %016llx, %u/%u steps blocked, "
-           "%llu batches checked, 0 overruns PASS\n",
-           mode.c_str(), bound, a.pcm.size(), (unsigned long long)hash(a.pcm), a.blocked, steps,
-           (unsigned long long)checked);
+    printf("TG50 audio replay %s (bound %u): %zu frames, pcm %016llx, 0 dropped PASS\n",
+           mode.c_str(), bound, a.pcm.size(), (unsigned long long)hash(a.pcm));
     m.soc.SetAudioQueue(nullptr); fresh.soc.SetAudioQueue(nullptr); resumed.soc.SetAudioQueue(nullptr);
     return 0;
 }

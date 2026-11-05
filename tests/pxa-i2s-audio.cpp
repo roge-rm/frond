@@ -37,32 +37,6 @@ static uint32_t rd(unsigned offset) {
 static uint32_t frame(void *, uint32_t tx, bool, bool, uint32_t n, uint32_t d) {
     serial.push_back(tx); lastNumerator = n; lastDenominator = d; return 0x89abcdef;
 }
-static void originChecks(PxaI2s *link) {
-    using Event = PxaI2sTxEvent;
-    std::vector<std::pair<Event, uint32_t>> events;
-    pxaI2sSetTxObserver(link, &events, [](void *context, Event event, uint32_t word) {
-        static_cast<decltype(events) *>(context)->emplace_back(event, word);
-    });
-    wr(0, 8); pxaI2sSetExternalRate(link, 44100); wr(0, 0x7701);
-    events.clear();
-    wr(0x80, 0x11223344); wr(0x80, 0x55667788);
-    pxaI2sPeriodic(link);
-    wr(4, 0x10);
-    assert(events.size() == 5);
-    assert(events[0] == std::make_pair(Event::enqueue, 0x11223344u));
-    assert(events[1] == std::make_pair(Event::enqueue, 0x55667788u));
-    assert(events[2] == std::make_pair(Event::dequeue, 0x11223344u));
-    assert(events[3].first == Event::control);
-    assert(events[4] == std::make_pair(Event::discard, 0x55667788u));
-    wr(4, 0); events.clear(); pxaI2sPeriodic(link);
-    assert(events.size() == 1 && events[0].first == Event::repeat);
-    wr(0, 0x7711); wr(0x80, 0x12345678); events.clear();
-    assert(rd(0x80) == 0x12345678);
-    assert(events.size() == 1 && events[0] == std::make_pair(Event::discard, 0x12345678u));
-    wr(0, 8);
-    pxaI2sSetTxObserver(link, nullptr, nullptr);
-    wr(0, 0x7700);
-}
 static void reg(unsigned address, unsigned value) {
     i2c(codec, i2cStart, 0); assert(i2c(codec, i2cTx, 0x20));
     assert(i2c(codec, i2cTx, address)); assert(i2c(codec, i2cTx, value));
@@ -325,83 +299,29 @@ static void mixedChecks() {
     }
 }
 
-static void hostRouteChecks() {
-    auto *link = pxaI2sInit(nullptr, nullptr, nullptr);
-    auto *ak = ak4534Init(nullptr, link, nullptr);
-    reg(0, 0x80); reg(1, 0x61); reg(4, 0x6a); reg(6, 0x10);
-    wr(4, 8); wr(0, 0x7701);
-    struct Capture {
-        bool suppress{}, loopbackSeen{};
-        unsigned controls{};
-        std::vector<std::pair<uint32_t,uint32_t>> frames;
-    } capture;
-    auto consume = [](void *context, bool txRouted) {
-        auto &c = *static_cast<Capture *>(context);
-        c.loopbackSeen |= !txRouted;
-        return c.suppress;
-    };
-    auto output = [](void *context, uint32_t portable, uint32_t host) {
-        static_cast<Capture *>(context)->frames.emplace_back(portable, host);
-    };
-    auto control = [](void *context) { ++static_cast<Capture *>(context)->controls; };
-    ak4534SetHostRoute(ak, &capture, consume, output, control);
-    // No heard contribution is bit-exact at every actual codec rate and phase.
-    for (unsigned fs = 0; fs < 8; ++fs) {
-        reg(5, fs << 5); capture.frames.clear();
-        for (unsigned i = 0; i < 17; ++i) {
-            wr(0x80, uint16_t(int(i)*199-1400) | (uint32_t(uint16_t(2200-int(i)*103)) << 16));
-            pxaI2sPeriodic(link);
-        }
-        assert(!capture.frames.empty());
-        for (const auto &f : capture.frames) assert(f.first == f.second);
+static void adcLoopbackChecks() {
+    // Reg 5 bit 1 sends the ADC input to the DAC path; with it clear the input never reaches the output.
+    for (unsigned loop = 0; loop < 2; ++loop) {
+        auto *link = pxaI2sInit(nullptr, nullptr, nullptr);
+        auto *ak = ak4534Init(nullptr, link, nullptr);
+        reg(0, 0x81); reg(1, 0x61); reg(4, 0x6a); reg(5, loop ? 2 : 0); reg(6, 0x10); reg(7, 0);
+        wr(4, 8); wr(0, 0x7701);
+        struct Capture { bool nonzero{}; unsigned pulls{}; } capture;
+        Ak4534InputSource source{&capture, [](void *c, Ak4534InputRoute, uint32_t, uint32_t) -> int16_t {
+            static_cast<Capture *>(c)->pulls++; return (static_cast<Capture *>(c)->pulls & 1) ? 12000 : -12000;
+        }, nullptr, nullptr};
+        ak4534SetInputSource(ak, &source);
+        ak4534SetOutput(ak, &capture, [](void *c, uint32_t frame) {
+            static_cast<Capture *>(c)->nonzero |= frame != 0;
+        }, nullptr);
+        for (unsigned i = 0; i < 3000; ++i) { wr(0x80, 0); pxaI2sPeriodic(link); }
+        assert(capture.pulls > 2500);
+        assert(capture.nonzero == bool(loop));
+        ak4534Destroy(ak);
     }
-    reg(5, 0); reg(5, 7 << 5); capture.frames.clear(); capture.suppress = true;
-    wr(0x80, uint16_t(1000) | (uint32_t(uint16_t(-2000)) << 16));
-    pxaI2sPeriodic(link);
-    assert(capture.frames.size() == 5);
-    for (const auto &f : capture.frames) assert(f.second == 0);
-    AudioState state{link,ak}; auto saved = saveState(state);
-    const auto savedHost = ak4534GetHostState(ak);
-    assert(savedHost.sum[0] == 0 && savedHost.sum[1] == 0);
-    capture.suppress = false; capture.frames.clear();
-    const uint32_t next = uint16_t(-3000) | (uint32_t(uint16_t(4000)) << 16);
-    wr(0x80,next); pxaI2sPeriodic(link);
-    assert(capture.frames.size() == 6);
-    assert(int16_t(capture.frames[0].second) == -1462);
-    assert(int16_t(capture.frames[0].second >> 16) == 1950);
-    auto expected = capture.frames;
-    // Checkpoint owners restore the parallel partial sum after portable rollback.
-    SavestateLoader<ChunkType> loader;
-    assert(loader.Load(saved.data(), saved.size()*4, state));
-    assert(ak4534RestoreHostState(ak,savedHost));
-    capture.frames.clear(); wr(0x80,next); pxaI2sPeriodic(link);
-    assert(capture.frames == expected);
-    // A new attachment treats an accepted portable partial sum as unheard.
-    assert(loader.Load(saved.data(), saved.size()*4, state));
-    ak4534SetHostRoute(ak,&capture,consume,output,control);
-    capture.frames.clear(); wr(0x80,next); pxaI2sPeriodic(link);
-    for (const auto &f : capture.frames) assert(f.first == f.second);
-    auto invalid = savedHost; invalid.sum[0] = INT64_MAX;
-    assert(!ak4534RestoreHostState(ak,invalid));
-    // ADC loopback replaces TX before filtering; its unrelated samples survive.
-    reg(5,(7 << 5) | 2); capture.suppress = true; capture.frames.clear();
-    unsigned samples{};
-    Ak4534InputSource source{&samples,
-        [](void *context,Ak4534InputRoute,uint32_t,uint32_t) -> int16_t {
-            return ++*static_cast<unsigned *>(context) & 1 ? 1000 : -1000;
-        },nullptr,nullptr};
-    ak4534SetInputSource(ak,&source);
-    reg(0,0x83); reg(7,0x0c);
-    // Repeated TX is a new physical occurrence while ADC loopback is active.
-    wr(0x80,0x77778888);
-    for (unsigned i=0; i<2120; ++i) pxaI2sPeriodic(link);
-    assert(capture.loopbackSeen && !capture.frames.empty() && capture.controls);
-    bool nonzero{};
-    for (const auto &f : capture.frames) { assert(f.first == f.second); nonzero |= bool(f.first); }
-    assert(nonzero && samples >= 2081);
-    ak4534Destroy(ak);
 }
+
 int main() {
     auto *link = pxaI2sInit(nullptr, nullptr, nullptr);
-    controllerChecks(link); originChecks(link); codecChecks(link); mixedChecks(); hostRouteChecks();
+    controllerChecks(link); codecChecks(link); mixedChecks(); adcLoopbackChecks();
 }

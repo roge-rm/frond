@@ -85,7 +85,7 @@ FirmwareDialog::FirmwareDialog(const QString& root, Device preselect, QWidget* p
         auto update = [this] {
             auto selected = frondFirmware::deviceFromId(device->currentData().toString());
             if (selected == Device::automatic) selected = frondFirmware::detectDevice(nor->text());
-            machineSettings->setDevice(selected, (frondAudio::qualified(selected, {}, nor->text()) || frondAudio::sonyPreviewEligible(selected, {}, nor->text())));
+            machineSettings->setDevice(selected, frondAudio::qualified(selected, {}, nor->text()));
         };
         connect(device, &QComboBox::currentIndexChanged, this, update);
         connect(nor, &QLineEdit::textChanged, this, update);
@@ -153,9 +153,6 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     fastAudio->setObjectName("fastAudio");
     soundLayout->addWidget(audio);
     soundLayout->addWidget(fastAudio);
-    sonyAudioPreview = new QCheckBox(tr("Sony audio preview"), sound);
-    sonyAudioPreview->setObjectName("sonyAudioPreview");
-    soundLayout->addWidget(sonyAudioPreview);
     layout->addWidget(sound);
     auto* speedBox = new QGroupBox(tr("Speed"), this);
     speedGroup = speedBox;
@@ -195,7 +192,6 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     smoothLcd->setChecked(prefs.smooth);
     audio->setChecked(prefs.audio);
     fastAudio->setChecked(prefs.fastAudio);
-    sonyAudioPreview->setChecked(prefs.sonyAudioPreview);
     connect(windowScale, &QSlider::valueChanged, this, [this](int value) {
         this->automaticScale = false;
         scaleLabel->setText(tr("Size: %1×").arg(value / 4.0));
@@ -225,7 +221,6 @@ frondSessions::Preferences MachineSettings::values() const {
     prefs.smooth = smoothLcd->isChecked();
     prefs.audio = audio->isChecked();
     prefs.fastAudio = fastAudio->isChecked();
-    prefs.sonyAudioPreview = sonyAudioPreview->isChecked();
     prefs.showKeyboard = showKeyboard->isChecked();
     prefs.jogControls = frondSessions::JogControls(jogControls->currentData().toInt());
     prefs.fastEngine = engine->currentData().toBool();
@@ -240,8 +235,7 @@ void MachineSettings::setDevice(Device device, bool qualified) {
     jogControlsLabel->setVisible(tg50);
     jogControls->setVisible(tg50);
     const bool m68k = frondFirmware::runs68k(device);
-    fastAudio->setVisible(!tg50 && !m68k);
-    sonyAudioPreview->setVisible(tg50);
+    fastAudio->setVisible(!m68k);
     contrastLabel->setVisible(m68k);
     contrast->setVisible(m68k);
     // Original/Uncapped for 68k devices; the Engine choice has no JIT to pick there.
@@ -251,7 +245,6 @@ void MachineSettings::setDevice(Device device, bool qualified) {
     engineLabel->setVisible(engineShown);
     engine->setVisible(engineShown);
     speedGroup->setVisible(m68k || engineShown);
-    sonyAudioPreview->setEnabled(tg50 && qualified);
     const bool soundSupported = device != Device::automatic && frondFirmware::capabilities(device).sound;
     audio->setEnabled(soundSupported);
     audio->setToolTip(soundSupported ? QString() : device == Device::automatic ? tr("Choose firmware first") :

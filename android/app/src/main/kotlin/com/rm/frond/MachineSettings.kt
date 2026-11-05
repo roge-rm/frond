@@ -49,7 +49,6 @@ data class MachineSettings(
     val showKeyboard: Boolean = true,
     // New machines put the jog controls left of the keyboard.
     val jogControls: JogControls = JogControls.KEYBOARD,
-    val sonyAudioPreview: Boolean = false,
     // Applies at next start.
     val engine: Engine = Engine.EXACT,
     // 68k devices: LCD contrast 0 to 100, and speed (applies at next start).
@@ -61,7 +60,7 @@ data class MachineSettings(
     fun json(): JSONObject = JSONObject().put("size", size.name).put("smoothing", smoothing)
         .put("sound", sound).put("fastAudio", fastAudio).put("microphone", microphone)
         .put("showKeyboard", showKeyboard).put("jogControls", jogControls.arg)
-        .put("showJogControls", jogControls != JogControls.HIDDEN).put("sonyAudioPreview", sonyAudioPreview)
+        .put("showJogControls", jogControls != JogControls.HIDDEN)
         .put("engine", engine.arg).put("speed", speed.arg).also { if (contrastSet) it.put("contrast", contrast) }
 
     fun applyTo(settings: Settings) = settings.copy(size = size, smoothing = smoothing, sound = sound)
@@ -106,7 +105,6 @@ data class MachineSettings(
                 microphone = json.optBoolean("microphone", fallback.microphone),
                 showKeyboard = json.optBoolean("showKeyboard", true),
                 jogControls = jogControls(json),
-                sonyAudioPreview = json.optBoolean("sonyAudioPreview", false),
                 engine = Engine.entries.firstOrNull { it.arg == json.optString("engine") } ?: fallback.engine,
                 contrast = json.optInt("contrast", fallback.contrast).coerceIn(0, 100),
                 contrastSet = json.has("contrast") || fallback.contrastSet,

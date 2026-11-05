@@ -15,7 +15,6 @@ import androidx.compose.ui.Modifier
 import androidx.lifecycle.lifecycleScope
 import com.rm.frond.ui.FrondTheme
 import com.rm.frond.ui.audioPreviewQualified
-import com.rm.frond.ui.isTg50
 import com.rm.frond.ui.LogScreen
 import com.rm.frond.ui.PeripheralsScreen
 import kotlinx.coroutines.Dispatchers
@@ -281,7 +280,6 @@ class PeripheralsModel(
                 if (next.showKeyboard != old.showKeyboard) s = s.copy(showKeyboard = next.showKeyboard)
                 if (next.jogControls != old.jogControls) s = s.copy(jogControls = next.jogControls)
                 if (next.fastAudio != old.fastAudio && audioPreviewUsable == true) s = s.copy(fastAudio = next.fastAudio)
-                if (next.sonyAudioPreview != old.sonyAudioPreview && audioPreviewUsable == true) s = s.copy(sonyAudioPreview = next.sonyAudioPreview)
                 s
             }
             settings = machineSettings()
@@ -324,13 +322,13 @@ class PeripheralsModel(
 
     fun microphoneDenied() { changeMicrophone(false); microphone = "off Permission denied" }
 
-    // Sony audio preview (TG50) or Low-latency audio. Null while the NOR is being checked; false when
+    // Low-latency audio. Null while the NOR is being checked; false when
     // the device or its firmware can't use it.
-    var audioPreviewUsable by mutableStateOf<Boolean?>(if (device.fastAudio || device.isTg50()) null else false)
+    var audioPreviewUsable by mutableStateOf<Boolean?>(if (device.fastAudio) null else false)
         private set
 
     fun checkAudioPreview(session: String?) {
-        if (!device.fastAudio && !device.isTg50()) return
+        if (!device.fastAudio) return
         activity.lifecycleScope.launch {
             audioPreviewUsable = withContext(Dispatchers.IO) {
                 audioPreviewQualified(activity, device, session?.let { java.io.File(it) })
