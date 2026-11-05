@@ -31,8 +31,48 @@ class RunError(Exception):
 
 
 def sha256(path):
+    if path.is_dir():
+        # A machine folder hashes as its sorted names and file hashes.
+        # Lock files and temporary names are left out; names are too, as the session file is renamed on copy.
+        digest = hashlib.sha256()
+        files = [p for p in path.rglob('*') if p.is_file() and p.suffix != '.lock' and not temp_name(p.name)]
+        for item_hash in sorted(sha256(item) for item in files):
+            digest.update(item_hash.encode() + b'\0')
+        return digest.hexdigest()
     with path.open('rb') as stream:
         return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+
+CARD_FILES = ('sd.frondsd', 'ms.frondms', 'ms.frondmsp')
+
+
+def temp_name(name):
+    return any(part in name for part in ('.frond.tmp-', '.frondsd.tmp-', '.frondms.tmp-',
+                                             '.frondsd.journal-', '.frondmsp.journal-', '.gen-'))
+
+
+def copy_session(source, machine):
+    """Copy a machine folder, or a session file with the card files beside it, to `machine`.
+    The session ends up as machine/working.frond, the file the core saves to."""
+    session = machine / 'working.frond'
+    if source.is_dir():
+        shutil.copytree(source, machine, ignore=lambda _d, names: [n for n in names if temp_name(n)])
+        found = [machine / (source.name + '.frond'),
+                 machine / 'session.frond', *sorted(machine.glob('*.frond'))]
+        original = next((p for p in found if p.is_file()), None)
+        if original is None:
+            raise RunError('input', f'No session file in machine folder: {source}')
+        if original != session:
+            original.rename(session)
+    else:
+        machine.mkdir()
+        shutil.copyfile(source, session)
+        if any((source.parent / name).is_file() for name in CARD_FILES):
+            for item in source.parent.iterdir():
+                if item.is_file() and item.name.startswith(CARD_FILES) and not temp_name(item.name):
+                    shutil.copyfile(item, machine / item.name)
+    for item in [machine, *machine.rglob('*')]:
+        item.chmod(0o700 if item.is_dir() else 0o600)
 
 
 def positive(value):
@@ -54,7 +94,7 @@ def parser():
     p.add_argument('--core', type=Path, default=Path(__file__).resolve().parents[1] / 'out/frond')
     p.add_argument('--device', choices=DEVICES, default='palm-tx')
     origin = p.add_mutually_exclusive_group(required=True)
-    origin.add_argument('--session', type=Path, help='restore a complete saved session')
+    origin.add_argument('--session', type=Path, help='restore a saved session: a machine folder (sessions/NAME/) or a .frond file; the file also brings the card files beside it')
     origin.add_argument('--nor', type=Path, help='cold boot from this NOR without saved RAM/CPU')
     p.add_argument('--nand', type=Path, help='NAND paired with --nor (required for TX and E2, absent on Zire)')
     p.add_argument('--output', type=Path, required=True, help='new private result directory')
@@ -295,7 +335,7 @@ def run(args):
         if args.replay:
             paths.append(args.replay.resolve())
         for path in paths:
-            if not path.is_file():
+            if not (path.is_file() or path.is_dir() and args.session and path == origins[0]):
                 raise RunError('input', f'Input file does not exist: {path}')
         if not args.session and (origins[0].stat().st_size != device['nor'] or
                                  args.nand and origins[1].stat().st_size != device['nand']):
@@ -311,17 +351,21 @@ def run(args):
         output.mkdir(mode=0o700, parents=True)
         root = output
         result['artifacts'] = {'directory': str(root), 'log': str(root / 'core.log'),
-                               'session': str(root / 'working.frond'), 'session_saved': False}
+                               'machine': str(root / 'working'), 'session': str(root / 'working' / 'working.frond'),
+                               'session_saved': False}
         result['stage'] = 'prepare'
         installs = []
         replay_source = None
+        machine = root / 'working'
+        if not args.session:
+            machine.mkdir(mode=0o700)
         for index, path in enumerate(paths):
             check_deadline(deadline)
             record = {'path': str(path), 'sha256': sha256(path)}
             if index == 0:
                 copy = root / 'core'
             elif index < install_start:
-                copy = root / ('working.frond' if args.session else 'input-nor.bin' if index == 1 else 'input-nand.bin')
+                copy = machine if args.session else root / ('input-nor.bin' if index == 1 else 'input-nand.bin')
             elif install_start <= index < install_start + len(args.install):
                 copy = root / f'install-{index - install_start + 1:03d}{path.suffix.lower()}'
                 installs.append(copy)
@@ -329,7 +373,12 @@ def run(args):
                 copy = replay_source = root / 'source.replay'
             else:
                 copy = None
-            if copy:
+            if copy and copy == machine:
+                copy_session(path, machine)
+                if sha256(machine) != record['sha256'] if path.is_dir() else sha256(machine / 'working.frond') != record['sha256']:
+                    raise RunError('input-changed', f'Input changed while copying: {path}')
+                record['copy'] = str(machine)
+            elif copy:
                 shutil.copyfile(path, copy)
                 copy.chmod(0o700 if index == 0 else 0o600)
                 if sha256(copy) != record['sha256']:
@@ -346,7 +395,7 @@ def run(args):
                 address = str(Path(socket_dir) / 'control')
                 listener.bind(address)
                 listener.listen(1)
-                boot = [str(root / 'working.frond'), *(['--device', args.device]
+                boot = [str(machine), *(['--device', args.device]
                     if args.device != 'palm-tx' else [])] if args.session else [
                     '--device', args.device, str(root / 'input-nor.bin'),
                     *(['--nand', str(root / 'input-nand.bin')] if args.nand else [])]
@@ -431,7 +480,7 @@ def run(args):
                         raise RunError('export', f'Unreadable named database archive: {archive}: {error}') from error
                     result['artifacts']['exports'].append({'database': name, 'path': str(archive)})
                 result['stage'] = 'save'
-                control.require('save', root / 'working.frond')
+                control.require('save', machine / 'working.frond')
                 result['artifacts']['session_saved'] = True
                 result['stage'] = 'quit'
                 control.require('quit')

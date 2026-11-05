@@ -116,7 +116,7 @@ def acceptance(args, output, deadline):
             process.wait(timeout=remaining())
         if process.returncode:
             raise RuntimeError('normal app install/launch failed; inspect prepare/result.json')
-        prepared = prep / 'working.frond'
+        prepared = prep / 'working' / 'working.frond'
         witness = descriptor(prepared)
         result['descriptor'] = witness
         remaining()

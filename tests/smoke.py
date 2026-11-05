@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Quick real-firmware check per device, for after shared core changes.
 
-  tests/smoke.py sessions [DEVICE...]   cold boot through setup, save build/smoke/DEVICE.session
+  tests/smoke.py sessions [DEVICE...]   cold boot through setup, save the machine folder build/smoke/machines/DEVICE/
   tests/smoke.py run [DEVICE...]        per device: app and tap, save and reload, supported media and sound
 
 Sessions, firmware copies and everything made here stay private under build/smoke/. A device without a
 ready session or firmware is skipped with the command that makes it. A new device is an entry in SMOKE.
 FROND_CORE picks another core binary, like build/frond-jit (make frond-jit) for the Fast engine.
-FROND_DEVICE_IMAGES picks another firmware folder in the layout of firmware/palm.
+FROND_DEVICE_IMAGES is the firmware folder (the deviceimages/palm layout, with Palm/TX/ and so on below it); the
+firmware steps are skipped without it. Sessions made before the folder layout (build/smoke/DEVICE.session) still load.
 """
 import argparse
 import array
@@ -35,7 +36,7 @@ spec.loader.exec_module(frond_run)
 CORE = Path(os.environ.get('FROND_CORE') or ROOT / 'out/frond').absolute()
 OUT = ROOT / 'build/smoke'
 # FROND_DEVICE_IMAGES points at another copy of the firmware folder (deviceimages/palm).
-PALM = Path(os.environ.get('FROND_DEVICE_IMAGES') or 'firmware/palm') / 'Palm'
+PALM = Path(os.environ.get('FROND_DEVICE_IMAGES') or '/nonexistent/set-FROND_DEVICE_IMAGES') / 'Palm'
 SDK = ROOT.parent / 'palm-os-sdk/sdk-5r3'
 
 # nor, nand: read-only firmware under PALM. setup: function in tools/palm_boot.py that takes a cold boot to
@@ -234,8 +235,19 @@ def sony_beeper(run, work):
     run.wait_frame(work / 'sound-selected.png', sony_general, 30)
 
 
-def missing(device):
+def session_path(device):
+    """The ready session of a device: its machine folder, else an older DEVICE.session, else the folder to make."""
+    new = OUT / 'machines' / device
+    old = OUT / f'{device}.session'
+    return new if new.exists() or not old.exists() else old
+
+
+def missing(device, action):
+    if action != 'sessions':
+        return None
     cfg = SMOKE[device]
+    if not os.environ.get('FROND_DEVICE_IMAGES'):
+        return 'set FROND_DEVICE_IMAGES to the firmware folder (deviceimages/palm)'
     for name in (cfg['nor'], cfg['nand']):
         if name and not (PALM / name).is_file():
             return f'firmware {PALM / name} is missing'
@@ -256,10 +268,11 @@ def make_session(device):
         getattr(palm_boot, SMOKE[device]['setup'])(run.boot, work)
         run.ready()
         time.sleep(1)
-        session = OUT / f'{device}.session'
-        session.unlink(missing_ok=True)
+        session = OUT / 'machines' / device
+        shutil.rmtree(session, ignore_errors=True)
+        session.parent.mkdir(exist_ok=True)
         run.require('save', session)
-        session.chmod(0o600)
+        session.chmod(0o700)
     finally:
         run.close()
 
@@ -288,7 +301,7 @@ def clear_reminder(device, work, session):
 def smoke(device, probes):
     cfg = SMOKE[device]
     work = workdir(device)
-    session = OUT / f'{device}.session'
+    session = session_path(device)
     steps = []
     if cfg.get('reminder'):
         session, cleared = clear_reminder(device, work, session)
@@ -384,16 +397,16 @@ def main():
     failed, probes = [], None
     for device in args.devices or list(SMOKE):
         started = time.monotonic()
-        reason = missing(device)
+        reason = missing(device, args.action)
         if reason:
             print(f'SKIP {device}: {reason}')
             continue
         try:
             if args.action == 'sessions':
                 make_session(device)
-                print(f'ok   {device}: build/smoke/{device}.session ({time.monotonic() - started:.0f} s)', flush=True)
+                print(f'ok   {device}: build/smoke/machines/{device}/ ({time.monotonic() - started:.0f} s)', flush=True)
                 continue
-            if not (OUT / f'{device}.session').is_file():
+            if not session_path(device).exists():
                 print(f'SKIP {device}: no ready session, make it with: make smoke-sessions')
                 continue
             cfg = SMOKE[device]

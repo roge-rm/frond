@@ -7,7 +7,7 @@ jobs:
   trixie:
     runs-on: ubuntu-24.04
     container: debian:trixie-slim
-    timeout-minutes: 25
+    timeout-minutes: 60
     env:
       QT_QPA_PLATFORM: offscreen
       BUILD_JOBS: '2'
@@ -16,7 +16,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends ca-certificates git build-essential \
-            python3 cmake pkg-config dpkg-dev binutils qt6-base-dev qt6-qpa-plugins \
+            python3 cmake ninja-build libboost-dev pkg-config dpkg-dev binutils qt6-base-dev qt6-qpa-plugins \
             qt6-wayland libqt6svg6 hicolor-icon-theme libsdl2-dev libsdl2-image-dev \
             libreadline-dev libcurl4-openssl-dev libslirp-dev mtools gdb-multiarch
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -28,7 +28,7 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config --global --add safe.directory "$GITHUB_WORKSPACE/vendor/cloudpilot"
       - name: Check build tools and independent source reconstruction
-        run: make test-build-tools check-reconstruction
+        run: make test-build-tools check-reconstruction check-docs
       - name: Build and run firmware-free core and desktop tests
         run: make -j2 test test-desktop
       - name: Check prepared source after tests

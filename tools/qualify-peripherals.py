@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import select
+import shlex
 import shutil
 import signal
 import socket
@@ -97,8 +98,8 @@ def run(plan_path, output, timeout=900):
                 report['stage'] = 'start-' + name
                 core = Path(config['core']).resolve()
                 origin = Path(config['session']).resolve()
-                session = root / (name + '-working.frond')
-                shutil.copyfile(origin, session)
+                session = root / (name + '-working')
+                native.copy_session(origin, session)
                 if native.sha256(session) != native.sha256(origin):
                     raise RuntimeError('session changed while copying')
                 listener = stack.enter_context(socket.socket(socket.AF_UNIX))
@@ -106,7 +107,7 @@ def run(plan_path, output, timeout=900):
                 listener.bind(address)
                 listener.listen(1)
                 log = stack.enter_context((root / (name + '.log')).open('wb'))
-                args = ['heavy', 'emulator', str(core), str(session), '--no-sound',
+                args = [*shlex.split(os.environ.get('FROND_EMULATOR_CMD', 'emulator')), str(core), str(session), '--no-sound',
                         '--desktop-socket', address, *[expand(a) for a in config.get('args', [])]]
                 process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=log,
                                            stderr=subprocess.STDOUT, start_new_session=True,

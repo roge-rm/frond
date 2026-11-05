@@ -26,6 +26,9 @@ def fake_core():
     print(os.getpid(), flush=True)
     raw = sys.argv[1] == '--device'
     session = Path(sys.argv[3] if raw else sys.argv[1])
+    output = session.parent
+    if session.is_dir():
+        output, session = session.parent, session / 'working.frond'
     config = json.loads(session.open().readline() if raw else session.read_text())
     if config.get('mutate_core'):
         Path(config['mutate_core']).write_text('changed original executable')
@@ -69,7 +72,7 @@ def fake_core():
                 code = 'needs-reset' if config.get('reset') else 'installed'
                 if config.get('corrupt'):
                     ok, code, message = False, 'corrupt', 'The Palm database is corrupt.'
-                assert Path(argument).parent == session.parent
+                assert Path(argument).parent == output
             elif command == 'launch-app':
                 if config.get('missing_app'):
                     ok, code = False, 'launch'
@@ -154,6 +157,24 @@ class DeveloperRunTest(unittest.TestCase):
         self.assertEqual(json.loads(self.session.read_text()), config or {})
         return result
 
+    def test_machine_folder_session_is_copied_with_its_card(self):
+        folder = self.root / 'sessions' / 'machine'
+        folder.mkdir(parents=True)
+        (folder / 'machine.frond').write_text('{}')
+        (folder / 'sd.frondsd').write_bytes(b'card')
+        (folder / 'machine.frond.tmp-1').write_bytes(b'partial')
+        args = runner.parser().parse_args([
+            '--core', str(self.core), '--session', str(folder), '--output', str(self.output),
+            '--app', 'Test App', '--settle', '0', '--timeout', '4'])
+        with patch.object(runner.shutil, 'which', return_value=None):
+            result = runner.run(args)
+        self.assertEqual(result['status'], 'ok', result)
+        self.assertEqual(result['command'][1], str(self.output / 'working'))
+        self.assertEqual(result['artifacts']['session'], str(self.output / 'working' / 'working.frond'))
+        self.assertEqual((self.output / 'working' / 'sd.frondsd').read_bytes(), b'card')
+        self.assertFalse((self.output / 'working' / 'machine.frond.tmp-1').exists())
+        self.assertEqual((folder / 'machine.frond').read_text(), '{}')
+
     def test_resume_does_not_relaunch_saved_workload(self):
         result = self.run_case({'missing_app': True, 'ready_retries': 999}, ['--resume-app', '--screenshot', '0'])
         self.assertEqual(result['status'], 'ok', result)
@@ -180,7 +201,7 @@ class DeveloperRunTest(unittest.TestCase):
         self.assertEqual(result['command'][0], str(self.output / 'core'))
         self.assertNotIn(str(self.session), result['command'])
         self.assertIn(str(self.output / 'input-nand.bin'), result['command'])
-        self.assertTrue((self.output / 'working.frond').is_file())
+        self.assertTrue((self.output / 'working' / 'working.frond').is_file())
         self.assertEqual(nor.stat().st_size, 16 << 20)
         self.assertEqual(nand.stat().st_size, 132 << 20)
 
@@ -188,7 +209,7 @@ class DeveloperRunTest(unittest.TestCase):
         result = self.run_case(extra=['--device', 'palm-e2'])
         self.assertEqual(result['status'], 'ok', result)
         self.assertEqual(result['command'][1:4],
-                         [str(self.output / 'working.frond'), '--device', 'palm-e2'])
+                         [str(self.output / 'working'), '--device', 'palm-e2'])
 
     def test_device_specific_flash_and_boot_helpers(self):
         for device, nor_size, nand_size in [
@@ -259,7 +280,7 @@ class DeveloperRunTest(unittest.TestCase):
         self.assertEqual(len(result['artifacts']['screenshots']), 3)
         self.assertEqual(len(result['artifacts']['exports']), 1)
         self.assertTrue(result['artifacts']['session_saved'])
-        self.assertEqual(json.loads((self.output / 'working.frond').read_text()), {'saved': True})
+        self.assertEqual(json.loads((self.output / 'working' / 'working.frond').read_text()), {'saved': True})
         commands = [step['command'] for step in result['steps']]
         self.assertEqual(commands.count('install'), 2)
         self.assertEqual(commands.count('reset'), 2)

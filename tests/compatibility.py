@@ -163,7 +163,8 @@ class Compatibility(unittest.TestCase):
             previous = raw[121:153].rstrip(b'\0').decode()
             self.assertEqual(bool(previous), len(calls) == 2)
             log_archive(archive, invocation(token, bool(previous), version=2))
-            session = args.output / 'working.frond'
+            session = args.output / 'working' / 'working.frond'
+            session.parent.mkdir()
             session.write_bytes(b'synthetic saved state')
             (args.output / 'result.json').write_text('{}')
             return {'status': 'ok', 'artifacts': {'exports': [{'path': str(archive), 'database': results.LOG}],
@@ -171,7 +172,7 @@ class Compatibility(unittest.TestCase):
         with patch.object(matrix.runner, 'run', side_effect=fake_run):
             report = matrix.run(self.args('--session', str(self.root / 'source.session')))
         self.assertEqual(report['status'], 'pass', report)
-        self.assertEqual(calls[1].session, calls[0].output / 'working.frond')
+        self.assertEqual(calls[1].session, calls[0].output / 'working' / 'working.frond')
         self.assertEqual(len(calls[0].install), 2)
         self.assertEqual(len(calls[1].install), 1)
         self.assertEqual(len(report['rows']), 21)
@@ -188,7 +189,7 @@ class Compatibility(unittest.TestCase):
             token = args.install[0].read_bytes()[88:120].decode()
             archive = args.output / 'log.zip'
             log_archive(archive, invocation(token, len(calls) == 2, version=2))
-            saved = args.output / 'working.frond'; saved.write_bytes(b'saved')
+            saved = args.output / 'working' / 'working.frond'; saved.parent.mkdir(); saved.write_bytes(b'saved')
             return {'status': 'ok',
                     'origin': {'mode': 'cold-boot' if args.nor else 'session-restore',
                                'saved_ram_cpu_loaded': args.session is not None},
@@ -200,7 +201,7 @@ class Compatibility(unittest.TestCase):
         self.assertIsNone(calls[0].session)
         self.assertEqual(calls[0].nor.read_bytes(), b'nor fixture')
         self.assertEqual(calls[0].nand.read_bytes(), b'nand fixture')
-        self.assertEqual(calls[1].session, calls[0].output / 'working.frond')
+        self.assertEqual(calls[1].session, calls[0].output / 'working' / 'working.frond')
         self.assertIsNone(calls[1].nor)
         self.assertEqual([r['status'] for r in report['rows'] if r['case'] == 'cold-boot'], ['pass'])
 

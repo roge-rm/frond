@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check that invalid input replays fail before guest execution."""
+"""TX only: check that invalid input replays fail before guest execution."""
 
 import argparse
 from pathlib import Path

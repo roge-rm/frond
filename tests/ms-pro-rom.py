@@ -138,7 +138,7 @@ def checks(mib, work, result, folder1, folder2, saved, blank, image):
     with open(blank, 'wb') as f:
         f.truncate(mib << 20)
     folder1.mkdir()
-    run = smoke.Run(DEVICE, work, smoke.OUT / f'{DEVICE}.session', extra=['--work-folder', folder1])
+    run = smoke.Run(DEVICE, work, smoke.session_path(DEVICE), extra=['--work-folder', folder1])
     run.control.command_timeout = 600
     try:
         run.ready()
