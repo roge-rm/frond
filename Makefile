@@ -284,7 +284,7 @@ test-desktop: desktop
 	+cmake --build build/desktop --parallel $(BUILD_JOBS)
 	ctest --test-dir build/desktop --output-on-failure
 
-deb: desktop
+deb: desktop out/frond-68k
 	python3 tools/package-deb.py
 
 # arm64 package for Raspberry Pi OS trixie, cross built in Docker. Needs Docker only.
