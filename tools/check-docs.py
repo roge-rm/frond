@@ -53,8 +53,8 @@ def under(files, suffix):
 def collect():
     core = core_text()
     items = {}  # kind -> set of names
-    main = under(core, 'native/main.cpp')
-    commands = under(core, 'native/Commands.cpp') + under(core, 'common/Cli.cpp')
+    main = under(core, 'uarm/native/main.cpp')
+    commands = under(core, 'uarm/native/Commands.cpp') + under(core, 'common/Cli.cpp')
     control = under(core, 'native/DesktopControl.h')
     replay = under(core, 'native/InputReplay.cpp')
     gdb = under(core, 'uarm/gdbstub.cpp')
