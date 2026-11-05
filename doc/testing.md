@@ -82,7 +82,7 @@ A new device adds a row here. "Smoke" means an entry in `SMOKE` in `tests/smoke.
 | `palm-e2` | yes | `test-e2-state`, `test-pxa255-udc`, `test-pxa255-udc-dma` | `e2-rom.py`, `device-rom.py`, `app-compatibility.py`, `large-card-rom.py`, `desktop-keyboard.py` |
 | `palm-zire-72` | yes | `test-device-profiles` | `zire72-rom.py` (`FROND_ZIRE_LAUNCHER=1`, `_STORAGE=1`, `_PERIPHERALS=1` add more), `app-compatibility.py`, `large-card-rom.py` |
 | `palm-iiix` | no | `test-frond-68k` (68000 timing table, piezo, ROM header checks), `test-core-control` | `device-rom.py --device palm-iiix --rom FILE --launcher --resets`, `test-frond-68k-peripherals`, `test-frond-68k-gdb`, `timing68k.py`, `frond-68k-old-session.py` |
-| `sony-clie-tg50` | yes | `test-tg50-state`, `-pace`, `-audio-replay`, `-audio-queue`, `-pwm-audio`, `-microphone-*`, `-serial-board`, `-serial-configuration`, `-call-budget`, `test-sony-dac-preview`, `test-memory-stick-*` | `device-rom.py`, `app-compatibility.py`, `ms-classic-rom.py`, `ms-pro-rom.py`, `test-tg50-usb-hotsync` |
+| `sony-clie-tg50` | yes | `test-tg50-state`, `-pace`, `-audio-replay`, `-audio-queue`, `-pwm-audio`, `-microphone-*`, `-serial-board`, `-serial-configuration`, `-call-budget`, `test-memory-stick-*` | `device-rom.py`, `app-compatibility.py`, `ms-classic-rom.py`, `ms-pro-rom.py`, `test-tg50-usb-hotsync` |
 
 The IIIx tests, with the ROMs from `FROND_DEVICE_IMAGES` (`Palm/IIIx/` and `Palm/Generic-OS-3.5-EZ/`) or `--rom`. Without a ROM they skip.
 

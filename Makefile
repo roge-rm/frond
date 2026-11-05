@@ -840,30 +840,6 @@ test-tg50-audio-replay: out/frond
 	ulimit -c 0; ./build/test-tg50-audio-replay exact
 	ulimit -c 0; ./build/test-tg50-audio-replay fast
 
-# Negative check: admission is told a smaller bound than the JIT keeps to, and the reservation
-# debug counter has to report overruns.
-.PHONY: test-audio-reservation-negative
-ifeq ($(FROND_FAST),1)
-test: test-audio-reservation-negative
-endif
-test-audio-reservation-negative: out/frond
-	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/tg50-audio-replay-core.rsp
-	$(CXX) -std=c++17 -O1 -g -DFROND_BROKEN_BOUND -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
-		tests/tg50-audio-replay.cpp @build/tg50-audio-replay-core.rsp build/source/src/common/libcommon.a \
-		$(CPU_TEST_LDLIBS) -Wl,--wrap=_Z21cpuMaxOvershootCyclesPK6ArmCpu -o build/test-audio-reservation-negative
-	ulimit -c 0; FROND_AUDIO_RESERVATION_STATS=1 ./build/test-audio-reservation-negative broken-bound
-
-# Needs a private TG50 session with the Voice Recorder ready to play: TG50_PREVIEW_SESSION=path.
-.PHONY: test-tg50-preview-replay
-test-tg50-preview-replay: out/frond
-	test -n "$(TG50_PREVIEW_SESSION)" || { echo "set TG50_PREVIEW_SESSION"; exit 1; }
-	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' ! -name timeutil.o > build/tg50-preview-replay-core.rsp
-	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
-		tests/tg50-preview-replay.cpp @build/tg50-preview-replay-core.rsp build/source/src/common/libcommon.a \
-		$(CPU_TEST_LDLIBS) -o build/test-tg50-preview-replay
-	ulimit -c 0; ./build/test-tg50-preview-replay exact "$(TG50_PREVIEW_SESSION)"
-	ulimit -c 0; ./build/test-tg50-preview-replay fast "$(TG50_PREVIEW_SESSION)"
-
 .PHONY: device-session-probe
 device-session-probe: out/frond
 	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/device-session-core.rsp
@@ -1064,16 +1040,6 @@ test-host-microphone-state: out/frond
 		$(shell sdl2-config --cflags) tests/host-microphone-state.cpp @build/host-microphone-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-host-microphone-state
 	./build/test-host-microphone-state
 
-.PHONY: test-sony-dac-preview
-test-sony-dac-preview: prepare
-	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Ibuild/source/src/uarm/uarm tests/sony-dac-preview.cpp -o build/test-sony-dac-preview
-	./build/test-sony-dac-preview
-
-.PHONY: test-sony-dac-host
-test-sony-dac-host: prepare
-	$(CXX) -std=c++17 -O1 -g -ffunction-sections -fdata-sections -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common tests/sony-dac-host.cpp build/source/src/uarm/uarm/pxa_I2S.cpp build/source/src/uarm/uarm/pxa_DMA.cpp build/source/src/uarm/uarm/i2sdev_AK4534.cpp build/source/src/uarm/uarm/audio_queue.cpp build/source/src/common/savestate/Chunk.cpp build/source/src/common/savestate/ChunkProbe.cpp build/source/src/common/Logging.cpp -Wl,--gc-sections -o build/test-sony-dac-host
-	./build/test-sony-dac-host
-
 .PHONY: test-csr-bcsp
 test: test-csr-bcsp
 test-csr-bcsp: out/frond
@@ -1138,9 +1104,3 @@ test-tg50-audio-lifecycle: out/frond
 	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/tg50-audio-lifecycle-core.rsp
 	$(CXX) -std=c++17 -O1 -g $(shell sdl2-config --cflags) -Ibuild/source/src/uarm/native -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common tests/tg50-audio-lifecycle.cpp build/source/src/uarm/native/SdlAudioDriver.cpp @build/tg50-audio-lifecycle-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-tg50-audio-lifecycle
 	ulimit -c 0; ./build/test-tg50-audio-lifecycle
-
-.PHONY: test-sony-original-guards
-test-sony-original-guards: out/frond
-	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/sony-original-guards-core.rsp
-	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common tests/sony-original-guards.cpp @build/sony-original-guards-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-sony-original-guards
-	ulimit -c 0; ./build/test-sony-original-guards

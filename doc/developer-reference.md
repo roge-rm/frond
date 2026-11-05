@@ -27,7 +27,6 @@ The Palm IIIx has its own runner, `out/frond-68k` (`make out/frond-68k`, install
 | `--audio-period FRAMES` | Host audio period, 64 to 8192. Default 512. |
 | `-q`, `--no-sound` | Start with audio off. |
 | `--fast-audio`, `--experimental-fast-audio` | Preview one qualified TX or E2 stereo stream before the firmware audio queue. |
-| `--sony-audio-preview` | Preview the original TG50 stereo audio. |
 | `--gdb PORT` | Wait for GDB on 127.0.0.1:PORT before running, see [GDB and PACE monitor](#gdb-and-pace-monitor). |
 | `--serial off\|pty\|tcp:PORT` | Connect the serial port to a host PTY or a loopback TCP listener (one client at a time). |
 | `--usb off\|pty\|tcp:PORT` | Same for the USB HotSync port, through a built-in USB host. |
@@ -327,7 +326,7 @@ out/frond-68k iiix.frond --serial pty
 | `--gdb PORT` | Start the GDB stub on 127.0.0.1:PORT, see below. |
 | `--desktop-socket PATH` | Connect to the desktop's control socket, see [Control socket](#control-socket). The console is off then. |
 
-`--work-folder`, `--nand`, `--engine`, `--jog-controls`, `--usb`, `--bluetooth`, `--fast-audio`, `--sony-audio-preview`, `--hide-keyboard` and `--hide-jog-controls` are taken and ignored, as the desktop passes them to every core.
+`--work-folder`, `--nand`, `--engine`, `--jog-controls`, `--usb`, `--bluetooth`, `--fast-audio`, `--hide-keyboard` and `--hide-jog-controls` are taken and ignored, as the desktop passes them to every core.
 
 In the window F1 to F4 are the app buttons, the up and down arrows the rocker and Escape power. Typed text goes into the Palm.
 
@@ -411,11 +410,9 @@ The debugger costs almost nothing while no gdb is connected. `make test-frond-68
 | `FROND_JIT_HOT` | Times a block is reached before it's compiled. `1` compiles at once. Default 4. |
 | `FROND_JIT_MAX_UNCHECKED` | Most cycles generated code runs without checking its budget. `0` means unchecked. |
 | `FROND_JIT_STATS` | Print JIT counters at exit. |
-| `FROND_AUDIO_RESERVATION_STATS` | `1` prints the audio batch reservation counters at exit. An overrun always prints. |
 | `FROND_PACE_FAULT_DIAGNOSTICS` | Log guest permission faults seen from PACE. |
 | `FROND_TG50_ORIGINAL_PACE_DIAGNOSTIC` | TG50 PACE entry diagnostics. |
 | `FROND_TG50_AUDIO_TRACE` | Trace the TG50 audio codec to stderr. |
-| `FROND_SONY_PREVIEW_TRACE` | Trace the TG50 Sony audio preview to stderr. |
 | `FROND_MS_TRACE` | File to write a Memory Stick register trace to. |
 | `FROND_MS_SUMMARY` | With `FROND_MS_TRACE`, write failures only. |
 | `FROND_VFS_TRACE` | Trace guest file calls for Memory Stick file access to stderr. |
@@ -449,7 +446,6 @@ The debugger costs almost nothing while no gdb is connected. `make test-frond-68
 | `FROND_TEST_E2_NOR`, `FROND_TEST_E2_NAND` | E2 firmware for the running-page picture. |
 | `FROND_TEST_QUALIFIED_NOR` | TX NOR image for the firmware import test. |
 | `FROND_TEST_TG50_CORE`, `FROND_TEST_TG50_NOR`, `FROND_TEST_TG50_SESSION`, `FROND_TEST_TG50_HOST_SESSION`, `FROND_TEST_TG50_TONE_SESSION`, `FROND_TEST_TG50_SHOTS`, `FROND_TEST_TG50_BT_SOCKET` | TG50 core, firmware, sessions, picture folder and Bluetooth socket for the TG50 desktop tests. |
-| `TG50_PREVIEW_SESSION` | TG50 session with the Voice Recorder ready, for `make test-tg50-preview-replay`. |
 | `BENCH_DUMP_RAM` | `1` makes `benchmark-replay` write guest RAM at the start and end. |
 | `BIKE_SESSION`, `FRONDBENCH_SESSION` | Session files for `make speed-check`. No default; a workload without one is skipped. |
 | `SPEED_BENCH` | `benchmark-replay` binary for `tools/speed-check.py`. |
@@ -549,7 +545,7 @@ Tests in `make test`, by area:
 | Device state and sessions | `test-tx-state`, `test-e2-state`, `test-tg50-state`, `test-device-profiles`, `test-device-controls`, `test-session-v7`, `test-frond-68k`, `test-checkpoint-input`, `test-export-checkpoint`, `test-replay-snapshot`, `test-lifecycle` |
 | Palm databases | `test-native-database`, `test-native-primitives`, `test-native-governor`, `test-db-list`, `test-db-backup` |
 | Storage | `test-sd-image`, `test-sd`, `test-card-backing`, `test-memory-stick-controller`, `test-memory-stick-media`, `test-memory-stick-pro` |
-| Audio | `test-sdl-audio`, `test-fast-audio`, `test-earlier-audio`, `test-audio-results`, `test-audio-reservation-negative`, `test-pxa-i2s-audio`, `test-tg50-pwm-audio`, `test-tg50-microphone-adc`, `test-tg50-microphone-dma`, `test-tg50-microphone-state`, `test-tg50-call-budget`, `test-tg50-pace`, `test-tg50-audio-replay`, `test-tg50-serial-board`, `test-tg50-serial-configuration` |
+| Audio | `test-sdl-audio`, `test-fast-audio`, `test-earlier-audio`, `test-audio-results`, `test-pxa-i2s-audio`, `test-tg50-pwm-audio`, `test-tg50-microphone-adc`, `test-tg50-microphone-dma`, `test-tg50-microphone-state`, `test-tg50-call-budget`, `test-tg50-pace`, `test-tg50-audio-replay`, `test-tg50-serial-board`, `test-tg50-serial-configuration` |
 | Serial, USB, infrared | `test-uart-lifecycle`, `test-uart-checkpoint`, `test-uart-flow`, `test-uart-dma-peer`, `test-tx-serial`, `test-host-serial`, `test-pty-link`, `test-usb-enumeration`, `test-usb-host-fixture`, `test-usb-bridge`, `test-usb-bridge-soc`, `test-irda-endpoint`, `test-irda-link`, `test-irda-results`, `test-keyboard` |
 | Bluetooth | `test-bluetooth`, `test-bluetooth-link`, `test-bluetooth-results`, `test-csr-bcsp`, `test-csr-controller-lifecycle`, `test-csr-peer-services` |
 | Network | `test-network`, `test-network-reliability`, `test-host-network`, `test-wifi` |
@@ -564,7 +560,6 @@ Not in `make test`. The first group builds a program and runs it with a private 
 | `test-frond-68k-gdb` | IIIx ROM, `build/hello-debug`, `m68k-palmos-gdb` and gdb-multiarch. |
 | `test-core-control` | ARM smoke session (`FROND_ARM_SESSION`) and IIIx ROM. The control socket on both runners. |
 | `test-tg50-usb-hotsync` | TG50 session (`make smoke-sessions`) and pilot-link. |
-| `test-tg50-preview-replay` | `TG50_PREVIEW_SESSION`. |
-| `test-tg50-audio-lifecycle`, `test-tg50-audio-queue`, `test-sony-dac-host`, `test-sony-dac-preview`, `test-sony-original-guards` | Nothing. TG50 audio unit tests. |
+| `test-tg50-audio-lifecycle`, `test-tg50-audio-queue` | Nothing. TG50 audio unit tests. |
 | `test-host-microphone`, `test-host-microphone-state` | Nothing. Host microphone unit tests. |
 | `test-csr-bcsp-lifetime`, `test-bluetooth-opp-peer` | Nothing. Bluetooth unit tests. |

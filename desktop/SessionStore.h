@@ -46,7 +46,6 @@ struct Preferences {
     int scale{4};  // quarter steps
     bool smooth{false}, audio{true}, fastAudio{false}, microphone{false};
     bool showKeyboard{true};
-    bool sonyAudioPreview{false};
     // New machines put the jog controls left of the keyboard.
     JogControls jogControls{JogControls::keyboard};
     // Engine: Fast is the JIT, Exact the interpreter. Applies at next launch.
@@ -67,7 +66,7 @@ inline bool readPreferences(const QString& path, Preferences* result) {
     const auto scale = object.value("scale").toInt();
     if (scale < 4 || scale > 8) return false;
     *result = {scale, object.value("smooth").toBool(), object.value("audio").toBool(), object.value("fastAudio").toBool(), object.value("microphone").toBool(false),
-               object.value("showKeyboard").toBool(true), object.value("sonyAudioPreview").toBool(false), readJogControls(object),
+               object.value("showKeyboard").toBool(true), readJogControls(object),
                object.value("engine").toString() == QLatin1String("fast"),
                std::clamp(object.value("contrast").toInt(50), 0, 100),
                object.value("speed").toString() == QLatin1String("uncapped"), object.contains("contrast")};
@@ -79,7 +78,7 @@ inline QString writePreferences(const QString& path, const Preferences& prefs) {
     QJsonObject object{{"version", 1}, {"scale", std::clamp(prefs.scale, 4, 8)},
                              {"smooth", prefs.smooth}, {"audio", prefs.audio}, {"fastAudio", prefs.fastAudio}, {"microphone", prefs.microphone},
                              {"showKeyboard", prefs.showKeyboard}, {"jogControls", jogControlsName(prefs.jogControls)},
-                             {"showJogControls", prefs.jogControls != JogControls::hidden}, {"sonyAudioPreview", prefs.sonyAudioPreview},
+                             {"showJogControls", prefs.jogControls != JogControls::hidden},
                              {"engine", prefs.fastEngine ? "fast" : "exact"}, {"speed", prefs.uncapped ? "uncapped" : "original"}};
     if (prefs.contrastSet) object.insert("contrast", std::clamp(prefs.contrast, 0, 100));
     const auto bytes = QJsonDocument(object).toJson(QJsonDocument::Compact);

@@ -1,0 +1,1371 @@
+diff --git a/src/cloudpilot/frond/main.cpp b/src/cloudpilot/frond/main.cpp
+--- a/src/cloudpilot/frond/main.cpp
++++ b/src/cloudpilot/frond/main.cpp
+@@ -1777,7 +1777,7 @@ bool parseOptions(int argc, char** argv, Options& options) {
+             // The desktop's options for ARM devices and their cards; a IIIx has none of these.
+             if (!value()) return false;
+             cout << "frond-68k: ignoring " << arg << endl;
+-        } else if (arg == "--fast-audio" || arg == "--sony-audio-preview" || arg == "--hide-keyboard" ||
++        } else if (arg == "--fast-audio" || arg == "--hide-keyboard" ||
+                    arg == "--hide-jog-controls") {
+             cout << "frond-68k: ignoring " << arg << endl;
+         } else if (!arg.empty() && arg[0] != '-' && options.image.empty()) {
+diff --git a/src/uarm/native/main.cpp b/src/uarm/native/main.cpp
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -82,7 +82,6 @@ struct Options {
+     optional<DisplayMode> displayMode;
+     optional<string> device;
+     bool experimentalFastAudio;
+-    bool sonyPreview;
+     optional<unsigned int> runFor;
+     optional<string> framebufferOutput;
+     optional<string> inputReplay;
+@@ -612,10 +611,6 @@ namespace {
+             return false;
+         }
+ 
+-        if (options.sonyPreview && (deviceType != deviceTypeTG50 || !static_cast<SocPXA*>(soc)->EnableSonyPreview())) {
+-            cerr << "Sony audio preview requires the verified original TG50 NOR image" << endl;
+-            return false;
+-        }
+         MainLoop mainLoop(soc);
+         if (options.experimentalFastAudio) mainLoop.SetTimesliceUsec(1000000 / 120);
+         mainLoop.SetCyclesPerSecondLimit(options.mips * 1000000);
+@@ -1152,10 +1147,6 @@ int main(int argc, char** argv) {
+     program.add_argument("--framebuffer-output")
+         .help("save the unrotated LCD framebuffer as PNG at the end of --run-for");
+ 
+-    program.add_argument("--sony-audio-preview")
+-        .help("preview qualified original TG50 stereo audio")
+-        .default_value(false).implicit_value(true);
+-
+     program.add_argument("--engine")
+         .help("CPU engine: exact (the interpreter) or fast (the JIT, where it's built in)")
+         .metavar("<exact|fast>")
+@@ -1327,7 +1318,6 @@ int main(int argc, char** argv) {
+                        .displayMode = program.present<DisplayMode>("--display"),
+                        .device = program.present("--device"),
+                        .experimentalFastAudio = program.get<bool>("--fast-audio"),
+-                       .sonyPreview = program.get<bool>("--sony-audio-preview"),
+                        .runFor = program.present<unsigned int>("--run-for"),
+                        .framebufferOutput = program.present("--framebuffer-output"),
+                        .inputReplay = program.present("--input-replay"),
+diff --git a/src/uarm/uarm/CPU.cpp b/src/uarm/uarm/CPU.cpp
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -180,11 +180,6 @@ struct ArmCpu {
+     void (*earlyAudioHook)(ArmCpu*,void*,uint32_t,uint32_t) = nullptr;
+     void* earlyAudioContext = nullptr;
+     uint32_t earlyAudioFrom[2]{};
+-    InstructionObserver instructionObserver{};
+-    void* instructionContext{};
+-    uint32_t instructionFirst{}, instructionLast{};
+-    uint32_t instructionSites[4]{};
+-    uint8_t instructionSiteCount{};
+     uint16_t breakPaceSyscall;
+     #ifndef __EMSCRIPTEN__
+     uint32_t nativePc[2];
+@@ -209,36 +204,6 @@ struct ArmCpu {
+     void DoSaveLoad(T &chunkHelper, uint32_t version);
+ };
+ 
+-static FORCE_INLINE void observeInstruction(ArmCpu* cpu, uint32_t pc) {
+-    if (unlikely(cpu->instructionObserver != nullptr) && !cpu->T &&
+-        pc >= cpu->instructionFirst && pc <= cpu->instructionLast)
+-        cpu->instructionObserver(cpu, cpu->instructionContext, pc);
+-}
+-void cpuSetInstructionObserver(ArmCpu* cpu, InstructionObserver observer, void* context,
+-                               uint32_t first, uint32_t last) {
+-    cpu->instructionObserver = observer; cpu->instructionContext = context;
+-    cpu->instructionFirst = first; cpu->instructionLast = last;
+-    cpu->instructionSiteCount = 0;
+-    // Translated code may hold the observed range as plain instructions.
+-    if (observer) cpuDropTranslatedCode(cpu);
+-}
+-void cpuSetInstructionObserverSites(ArmCpu* cpu, const uint32_t* sites, unsigned count) {
+-    if (count > sizeof(cpu->instructionSites) / sizeof(cpu->instructionSites[0])) count = 0;
+-    for (unsigned i = 0; i < count; ++i) cpu->instructionSites[i] = sites[i];
+-    cpu->instructionSiteCount = count;
+-    cpuDropTranslatedCode(cpu);
+-}
+-// An ARM instruction the observer may act on: one of its sites, or anywhere in its range
+-// without sites.
+-static bool cpuPrvObservedSite(const ArmCpu* cpu, uint32_t pc) {
+-    if (!cpu->instructionObserver || pc < cpu->instructionFirst || pc > cpu->instructionLast)
+-        return false;
+-    if (!cpu->instructionSiteCount) return true;
+-    for (unsigned i = 0; i < cpu->instructionSiteCount; ++i)
+-        if (cpu->instructionSites[i] == pc) return true;
+-    return false;
+-}
+-
+ enum ImmShiftType {
+     shiftTypeNoop,
+     shiftTypeZero,
+@@ -4071,8 +4036,7 @@ static FORCE_INLINE void cpuPrvRememberLine(const struct icache* ic, uint32_t pc
+ // each instruction leaves the PC at the next one, the epoch holds and the next slot is
+ // decoded. Per instruction it keeps the general loop's order: curInstrPC and the cycle
+ // count, then the PC, the execFn and the slow path check.
+-// observed is cpu->instructionObserver != nullptr, which only changes between batches.
+-template <int memorySystemKind, int size, bool observed>
++template <int memorySystemKind, int size>
+ ATTR_EMCC_NOINLINE static uint32_t cpuCycleLine(struct ArmCpu *cpu, uint32_t cycles) {
+     uint32_t cycleAcc = 0;
+     uint32_t acc = 0;
+@@ -4084,7 +4048,6 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleLine(struct ArmCpu *cpu, uint32_t cyc
+     while (acc < cycles) {
+         uint32_t pc = cpu->regs[REG_NO_PC];
+         cpu->curInstrPC = pc;
+-        if constexpr (observed) observeInstruction(cpu, pc);
+         acc += 1;
+         cycleAcc = acc;
+ 
+@@ -4108,9 +4071,6 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleLine(struct ArmCpu *cpu, uint32_t cyc
+ 
+         const uint32_t epoch = ic->epoch;
+         for (;;) {
+-            // Only an observer can move curInstrPC between the store below and here.
+-            if constexpr (observed)
+-                if (cpu->curInstrPC != pc) cpu->curInstrPC = pc;
+             uint32_t instr;
+             if constexpr (size == 4) std::memcpy(&instr, line->data + offset, sizeof(instr));
+             else instr = line->translatedThumbInstructions[offset >> 1];
+@@ -4127,7 +4087,6 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleLine(struct ArmCpu *cpu, uint32_t cyc
+             if ((cached & DECODED_BITS) != kind) break;
+ 
+             cpu->curInstrPC = pc;
+-            if constexpr (observed) observeInstruction(cpu, pc);
+             acc += 1;
+             cycleAcc = acc;
+         }
+@@ -4168,7 +4127,6 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleThumb(struct ArmCpu *cpu, uint32_t cy
+             if (!cpu->T) return acc;
+         }
+ 
+-        observeInstruction(cpu, cpu->curInstrPC);
+         acc += 1;
+         cycleAcc = acc;
+ 
+@@ -4253,7 +4211,6 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleArm(struct ArmCpu *cpu, uint32_t cycl
+             if (cpu->T) return acc;
+         }
+ 
+-        observeInstruction(cpu, cpu->curInstrPC);
+         acc += 1;
+         cycleAcc = acc;
+ 
+@@ -4563,8 +4520,6 @@ bool cpuJitPlain(ArmCpu *cpu, uint32_t pc, uint32_t word, bool thumb) {
+     // the original, so those instructions go to the interpreter.
+     uint32_t buffered;
+     if (icacheBufferedWord(cpu->ic, pc & ~3u, &buffered) && buffered != word) return false;
+-    // Observed instructions run in the interpreter, which calls the observer first.
+-    if (!thumb && cpuPrvObservedSite(cpu, pc)) return false;
+     if (!thumb) {
+         const int syscall = cpuPrvJitSyscallPlain(cpu, pc, word);
+         return syscall >= 0 ? syscall : cpuPrvJitPlainArm(word, false);
+@@ -4617,7 +4572,6 @@ template <int memorySystemKind>
+ static void cpuPrvJitInterpretOne(struct ArmCpu *cpu, uint32_t &acc) {
+     const uint32_t pc = cpu->regs[REG_NO_PC];
+     cpu->curInstrPC = pc;
+-    observeInstruction(cpu, pc);
+     acc += 1;
+     uint32_t instr = 0, decoded = 0;
+     uint_fast8_t fsr;
+@@ -4713,11 +4667,8 @@ ATTR_EMCC_NOINLINE uint32_t cpuCycle(struct ArmCpu *cpu, uint32_t cycles) {
+         return cpuPrvCycleJit(cpu, cycles);
+ #endif
+     if (!injected && !cpu->debugStub && !cpu->nativePc[0]) {
+-        if (cpu->instructionObserver)
+-            return cpu->T ? cpuCycleLine<memorySystemKind, 2, true>(cpu, cycles)
+-                          : cpuCycleLine<memorySystemKind, 4, true>(cpu, cycles);
+-        return cpu->T ? cpuCycleLine<memorySystemKind, 2, false>(cpu, cycles)
+-                      : cpuCycleLine<memorySystemKind, 4, false>(cpu, cycles);
++        return cpu->T ? cpuCycleLine<memorySystemKind, 2>(cpu, cycles)
++                      : cpuCycleLine<memorySystemKind, 4>(cpu, cycles);
+     }
+ #endif
+ 
+diff --git a/src/uarm/uarm/CPU.h b/src/uarm/uarm/CPU.h
+--- a/src/uarm/uarm/CPU.h
++++ b/src/uarm/uarm/CPU.h
+@@ -10,12 +10,6 @@
+ #include "pace_patch.h"
+ 
+ struct ArmCpu;
+-// Before-instruction observer; it never replaces instructions or guest returns.
+-using InstructionObserver = void (*)(ArmCpu*, void*, uint32_t pc);
+-void cpuSetInstructionObserver(ArmCpu*, InstructionObserver, void*, uint32_t first, uint32_t last);
+-// Up to four PCs in the range the observer acts on. The Fast engine hands only these to the
+-// interpreter, or the whole range with none. Setting the observer clears them.
+-void cpuSetInstructionObserverSites(ArmCpu*, const uint32_t* pcs, unsigned count);
+ // Contiguous physical mapping, inspected without filling the TLB or touching MMIO.
+ bool cpuInspectMapping(ArmCpu*, uint32_t address, uint32_t size, uint32_t& physical);
+ // Execution-thread-only observer, owned by the containing SoC. Null by default.
+diff --git a/src/uarm/uarm/RAM.cpp b/src/uarm/uarm/RAM.cpp
+--- a/src/uarm/uarm/RAM.cpp
++++ b/src/uarm/uarm/RAM.cpp
+@@ -149,9 +149,6 @@ void* ramResolveAddress(struct ArmRam* ram, uint32_t pv, uint32_t size) {
+     return ram->buf.buffer + (pv - ram->adr);
+ }
+ 
+-void ramSetWriteObserver(ArmRam* ram, RamWriteObserver observer, void* context) {
+-    ram->writeObserver = observer; ram->writeContext = context;
+-}
+ void ramCodeWritten(struct ArmRam* ram, uint32_t offset, uint32_t size) {
+     // The JIT drops every block from the page, so none of its lines hold code now. Cleared
+     // first, so the callback can flag fetch buffer lines it keeps again.
+@@ -168,7 +165,7 @@ static uint32_t ramFramebufferLow(const struct ArmRam* ram) {
+ 
+ uint8_t* ramDirectWritePage(struct ArmRam* ram, uint32_t pa) {
+     const uint32_t offset = (pa - ram->adr) & ~0xfffu;
+-    if (ram->writeObserver || uint64_t(offset) + 0x1000 > ram->buf.size) return nullptr;
++    if (uint64_t(offset) + 0x1000 > ram->buf.size) return nullptr;
+     if (ram->codeLines) {
+         const uint8_t* lines = ram->codeLines + (offset >> 6);
+         for (uint32_t i = 0; i < (0x1000 >> 6); i++)
+diff --git a/src/uarm/uarm/RAM.h b/src/uarm/uarm/RAM.h
+--- a/src/uarm/uarm/RAM.h
++++ b/src/uarm/uarm/RAM.h
+@@ -25,8 +25,6 @@ void ramSetNoFramebuffer(struct ArmRam* ram);
+ 
+ void* ramResolveAddress(struct ArmRam* ram, uint32_t pa, uint32_t size);
+ 
+-using RamWriteObserver = void (*)(void*, uintptr_t backing, uint32_t size);
+-void ramSetWriteObserver(ArmRam*, RamWriteObserver, void* context);
+ // Called with the host address of the page, on the first write to a flagged line (one the
+ // JIT has translated code from, or a watched fetch buffer line), with the written bytes'
+ // offset in the page and size. Every flag of the page is clear by then.
+@@ -34,7 +32,7 @@ using RamCodeWritten = void (*)(void* context, uint8_t* hostPage, uint32_t offse
+ void ramMarkDirty(struct ArmRam* ram, uint32_t base, uint32_t size);
+ // For the JIT's direct stores. Host address of the 4 KiB page at pa, after marking it
+ // dirty and, where it overlaps the frame buffer, the frame buffer dirty, as if the whole page
+-// had been written. Null while a write observer is set or the page has a code flag.
++// had been written. Null while the page has a code flag.
+ uint8_t* ramDirectWritePage(struct ArmRam* ram, uint32_t pa);
+ // Host range whose writes can mark the frame buffer dirty, if there is one.
+ bool ramFramebufferHost(struct ArmRam* ram, uint8_t** host, uint32_t* size);
+diff --git a/src/uarm/uarm/RAM_internal.h b/src/uarm/uarm/RAM_internal.h
+--- a/src/uarm/uarm/RAM_internal.h
++++ b/src/uarm/uarm/RAM_internal.h
+@@ -21,8 +21,6 @@ struct ArmRam {
+     uint32_t sz;
+     struct MemoryBuffer buf;
+     class SoC* soc;
+-    RamWriteObserver writeObserver;
+-    void* writeContext;
+     // One byte per 64-byte line of buf, set while the JIT holds code translated from that
+     // line. Null without the JIT. RAM regions over the same buffer share one array.
+     uint8_t* codeLines;
+@@ -46,8 +44,6 @@ static FORCE_INLINE bool ramAccessInline(void* userData, uint32_t pa, void* bufP
+     const uint8_t* addr = (uint8_t*)ram->buf.buffer + offset;
+ 
+     if constexpr (write) {
+-        if (ram->writeObserver)
+-            ram->writeObserver(ram->writeContext, reinterpret_cast<uintptr_t>(addr), size);
+         MEMORY_BUFFER_MARK_DIRTY(ram->buf, offset);
+         if (__builtin_expect(ram->codeLines != nullptr, 0) && ram->codeLines[offset >> 6])
+             ramCodeWritten(ram, offset, size);
+diff --git a/src/uarm/uarm/SonyDacHost.h b/src/uarm/uarm/SonyDacHost.h
+deleted file mode 100644
+--- a/src/uarm/uarm/SonyDacHost.h
++++ /dev/null
+@@ -1,145 +0,0 @@
+-#ifndef FROND_SONY_DAC_HOST_H
+-#define FROND_SONY_DAC_HOST_H
+-#include "SonyDacPreview.h"
+-#include "Tg50Audio.h"
+-#include "pxa_DMA.h"
+-#include "pxa_I2S.h"
+-#include "i2sdev_AK4534.h"
+-
+-// One emulator-thread owner. No pointers, provenance or preview PCM are portable.
+-class SonyDacHost {
+-public:
+-    using Canonical = uintptr_t (*)(void *, uint32_t, unsigned);
+-    struct Frame { uint32_t portable{}, host{}; };
+-    struct State {
+-        SonyDacPreview ledger;
+-        std::array<SonyDacPreview::Tag,16> fifo{};
+-        SonyDacPreview::Tag scoped{}, serial{};
+-        std::array<Frame,16> dac{};
+-        unsigned fifoCount{}, dacCount{};
+-        bool inWrite{};
+-        Ak4534HostState partial{};
+-    };
+-    SonyDacHost(PxaDma *dma, PxaI2s *i2s, AK4534 *codec, Tg50Audio &mixer,
+-                void *context, Canonical canonical)
+-        : dma(dma), i2s(i2s), codec(codec), context(context), canonical(canonical) {
+-        uint32_t words[16]{};
+-        state.fifoCount = pxaI2sTxSnapshot(i2s,words);
+-        const auto &initial = mixer.GetState();
+-        state.dacCount = initial.dacCount;
+-        for (unsigned i=0;i<state.dacCount;++i) state.dac[i] = {initial.dac[i],initial.dac[i]};
+-        pxaDmaSetWriteObserver(dma,this,[](void *p,bool before,uint32_t source,
+-                                        uint32_t target,unsigned width,uint32_t value,bool success) {
+-            if (target == 0x40400080) static_cast<SonyDacHost *>(p)->Dma(before,source,width,value,success);
+-        });
+-        pxaI2sSetTxObserver(i2s,this,[](void *p,PxaI2sTxEvent event,uint32_t) {
+-            static_cast<SonyDacHost *>(p)->Fifo(event);
+-        });
+-        ak4534SetHostRoute(codec,this,[](void *p,bool tx) {
+-            auto &self = *static_cast<SonyDacHost *>(p);
+-            const auto tag = self.state.serial; self.state.serial = {};
+-            if (!tx) { self.state.ledger.Discard(tag); return false; }
+-            return self.state.ledger.Serial(tag);
+-        },[](void *p,uint32_t portable,uint32_t host) {
+-            auto &self = *static_cast<SonyDacHost *>(p);
+-            if (self.state.dacCount == self.state.dac.size()) { self.Fence(); return; }
+-            self.state.dac[self.state.dacCount++] = {portable,host};
+-        },[](void *p) { static_cast<SonyDacHost *>(p)->Fence(); },[](void *p) {
+-            auto &self = *static_cast<SonyDacHost *>(p);
+-            self.Fence(); self.state.dac = {}; self.state.dacCount = 0;
+-        });
+-    }
+-    ~SonyDacHost() {
+-        pxaDmaSetWriteObserver(dma,nullptr,nullptr);
+-        pxaI2sSetTxObserver(i2s,nullptr,nullptr);
+-        ak4534SetHostRoute(codec,nullptr,nullptr,nullptr);
+-    }
+-    SonyDacHost(const SonyDacHost &) = delete;
+-    SonyDacHost &operator=(const SonyDacHost &) = delete;
+-    SonyDacPreview &Ledger() { return state.ledger; }
+-    void Fence(unsigned cause = 100) { state.ledger.Fence(cause); }
+-    bool Start() {
+-        const auto status = ak4534GetHostStatus(codec);
+-        if (!status.stable44100Stereo || !status.silentPartial || state.serial.generation || state.inWrite) return false;
+-        uint32_t words[16]{};
+-        if (pxaI2sTxSnapshot(i2s,words) != state.fifoCount) return false;
+-        for (unsigned i=0;i<state.fifoCount;++i) if (words[i]) return false;
+-        for (unsigned i=0;i<state.dacCount;++i)
+-            if (state.dac[i].portable || state.dac[i].host) return false;
+-        return state.ledger.Start();
+-    }
+-    uint32_t Select(uint32_t portable,bool present) {
+-        uint32_t host = portable;
+-        if (present) {
+-            if (!state.dacCount || state.dac[0].portable != portable) Fence(101);
+-            else host = state.dac[0].host;
+-            if (state.dacCount) Shift(state.dac,state.dacCount);
+-        }
+-        const auto status = ak4534GetHostStatus(codec);
+-        if (!status.stable44100Stereo) Fence(102);
+-        return state.ledger.Render(host,{},status.gain);
+-    }
+-    void Replace(const Tg50Audio& mixer) {
+-        state = {};
+-        uint32_t words[16]{};
+-        state.fifoCount = pxaI2sTxSnapshot(i2s, words);
+-        const auto& ordinary = mixer.GetState();
+-        state.dacCount = ordinary.dacCount;
+-        for (unsigned i = 0; i < state.dacCount; ++i)
+-            state.dac[i] = {ordinary.dac[i], ordinary.dac[i]};
+-    }
+-    State Capture() const { auto copy = state; copy.partial = ak4534GetHostState(codec); return copy; }
+-    bool Restore(const State &saved) {
+-        if (saved.fifoCount > 16 || saved.dacCount > 16 || saved.inWrite ||
+-            !ak4534RestoreHostState(codec,saved.partial)) return false;
+-        state = saved; return true;
+-    }
+-
+-private:
+-    template <typename T> static void Shift(T &queue,unsigned &count) {
+-        for (unsigned i=1;i<count;++i) queue[i-1] = queue[i];
+-        queue[--count] = {};
+-    }
+-    void Dma(bool before,uint32_t source,unsigned width,uint32_t value,bool success) {
+-        if (before) {
+-            if (state.inWrite) { Fence(); return; }
+-            state.inWrite = true;
+-            const auto address = canonical ? canonical(context,source,width) : 0;
+-            if (success && address) state.scoped = state.ledger.Dma(address,width,value);
+-            else Fence();
+-        } else {
+-            if (state.scoped.generation) state.ledger.Discard(state.scoped);
+-            state.scoped = {}; state.inWrite = false;
+-            if (!success) Fence();
+-        }
+-    }
+-    void Fifo(PxaI2sTxEvent event) {
+-        switch (event) {
+-            case PxaI2sTxEvent::enqueue:
+-                if (state.fifoCount == 16) { Fence(); return; }
+-                state.fifo[state.fifoCount++] = state.scoped;
+-                if (!state.inWrite || !state.scoped.generation) Fence();
+-                state.scoped = {}; break;
+-            case PxaI2sTxEvent::dequeue:
+-            case PxaI2sTxEvent::discard:
+-                if (!state.fifoCount) { Fence(); break; }
+-                if (event == PxaI2sTxEvent::discard) state.ledger.Discard(state.fifo[0]);
+-                else {
+-                    if (state.serial.generation) { state.ledger.Discard(state.serial); Fence(); }
+-                    state.serial = state.fifo[0];
+-                }
+-                Shift(state.fifo,state.fifoCount); break;
+-            case PxaI2sTxEvent::repeat:
+-                if (state.serial.generation) state.ledger.Discard(state.serial);
+-                state.serial = {}; Fence(104); break;
+-            case PxaI2sTxEvent::control: Fence(105); break;
+-        }
+-    }
+-    PxaDma *dma;
+-    PxaI2s *i2s;
+-    AK4534 *codec;
+-    void *context;
+-    Canonical canonical;
+-    State state{};
+-};
+-#endif
+diff --git a/src/uarm/uarm/SonyDacPreview.h b/src/uarm/uarm/SonyDacPreview.h
+deleted file mode 100644
+--- a/src/uarm/uarm/SonyDacPreview.h
++++ /dev/null
+@@ -1,220 +0,0 @@
+-#ifndef FROND_SONY_DAC_PREVIEW_H
+-#define FROND_SONY_DAC_PREVIEW_H
+-#include <array>
+-#include <cstddef>
+-#include <cstdint>
+-#include <limits>
+-
+-// Emulator-thread host state. Tags follow actual DMA words through every queue;
+-// portable guest samples, FIFO timing and PWM state are never changed here.
+-class SonyDacPreview {
+-public:
+-    static constexpr unsigned maxFrames = 1024, maxGenerations = 8;
+-    struct Tag { uint64_t generation{}; uint16_t frame{}; bool matches{true}; };
+-    struct Identity {
+-        uint32_t node{}, token{}, context{};
+-        uintptr_t backing{};
+-        uint32_t frames{};
+-        uint32_t source{}, originalBuffer{};
+-        uintptr_t nodeBacking{}, contextBacking{};
+-    };
+-    struct Generation {
+-        Identity identity{};
+-        uint64_t id{};
+-        uint32_t dmaNext{}, previewNext{}, references{};
+-        bool completed{}, cancelled{}, preview{}, transportDiscarded{}, sourceInvalidated{};
+-        std::array<uint32_t, maxFrames> raw{};
+-        // 1: preview committed to final FIFO, 2: serial processed/discarded, 4: suppression spent.
+-        std::array<uint8_t, maxFrames> delivered{};
+-        std::array<uint32_t, maxFrames> outstanding{};
+-        std::array<bool, maxFrames> read{};
+-    };
+-
+-    uint64_t Submit(Identity identity, const uint32_t *raw, bool eligible) {
+-        if (!raw || !identity.node || !identity.context || !identity.backing ||
+-            identity.backing % 4 || !identity.frames || identity.frames > maxFrames ||
+-            identity.backing > std::numeric_limits<uintptr_t>::max() - identity.frames * 4 || !nextId) {
+-            Fence(); return 0;
+-        }
+-        // Reuse ends the old source epoch even if an earlier node/context check
+-        // will refuse this submission. Existing FIFO tags retain their credits.
+-        if (InvalidateSource(identity.backing, identity.frames * 4)) return 0;
+-        for (const auto &g : generations) {
+-            if (!g.id) continue;
+-            if (g.identity.node == identity.node && !g.completed && !g.cancelled) {
+-                Fence(); return 0;
+-            }
+-            if (g.identity.context != identity.context) { Fence(); return 0; }
+-        }
+-        for (auto &g : generations) if (!g.id) {
+-            g = {};
+-            g.identity = identity; g.id = nextId++;
+-            for (unsigned i = 0; i < identity.frames; ++i) g.raw[i] = raw[i];
+-            g.preview = eligible && !fenced;
+-            return g.id;
+-        }
+-        Fence(); return 0;
+-    }
+-
+-    // Before source writes/reuse. Equal bytes do not preserve source ownership.
+-    bool InvalidateSource(uintptr_t backing, uint32_t size) {
+-        bool invalidated = false;
+-        for (auto& g : generations) {
+-            if (!g.id || (g.completed && g.dmaNext == g.identity.frames)) continue;
+-            const auto start = g.identity.backing;
+-            const bool overlaps = backing >= start ? backing - start < g.identity.frames * 4 :
+-                                                    start - backing < size;
+-            if (size && overlaps) { g.sourceInvalidated = true; invalidated = true; }
+-        }
+-        if (invalidated) Fence(200);
+-        return invalidated;
+-    }
+-
+-    Tag Dma(uintptr_t backing, unsigned width, uint32_t raw) {
+-        Generation *found = nullptr;
+-        for (auto &g : generations) {
+-            if (!g.id || g.transportDiscarded || g.sourceInvalidated ||
+-                (g.completed && g.dmaNext == g.identity.frames)) continue;
+-            if (backing >= g.identity.backing &&
+-                backing - g.identity.backing < uint64_t(g.identity.frames) * 4) {
+-                if (found) { Fence(); return {}; }
+-                found = &g;
+-            }
+-        }
+-        if (!found) { Fence(); return {}; }
+-        auto &g = *found;
+-        const auto offset = backing - g.identity.backing;
+-        // An unsupported width cannot enqueue in the word-only I2S target.
+-        if (width != 4 || offset % 4) { Fence(); return {}; }
+-        const auto frame = static_cast<uint16_t>(offset / 4);
+-        if (frame != g.dmaNext || g.raw[frame] != raw) Fence(12);
+-        // Retain known provenance after a mismatch, including earlier duplicates.
+-        const Tag result{g.id, frame, g.raw[frame] == raw};
+-        if (g.outstanding[frame] == std::numeric_limits<uint32_t>::max() ||
+-            g.references == std::numeric_limits<uint32_t>::max()) { Fence(); return {}; }
+-        ++g.outstanding[frame];
+-        g.read[frame] = true;
+-        while (g.dmaNext < g.identity.frames && g.read[g.dmaNext]) ++g.dmaNext;
+-        ++g.references;
+-        return result;
+-    }
+-
+-    void Complete(uint32_t node, uint32_t token, bool cancelled = false) {
+-        for (auto &g : generations) if (g.id && !g.completed && !g.cancelled &&
+-            g.identity.node == node && g.identity.token == token) {
+-            g.completed = !cancelled; g.cancelled = cancelled;
+-            if (cancelled) { g.preview = false; Fence(); }
+-            if (!cancelled && g.dmaNext != g.identity.frames) Fence();
+-            Retire(g); return;
+-        }
+-        Fence();
+-    }
+-
+-    // Every actual word reaches this once, including discarded FIFO/mixer words.
+-    void Discard(Tag tag) {
+-        auto *g = Find(tag);
+-        if (!g) { if (tag.generation) Fence(); return; }
+-        if (!g->outstanding[tag.frame]) { Fence(); return; }
+-        --g->outstanding[tag.frame];
+-        g->delivered[tag.frame] |= 2;
+-        if (!g->references) { Fence(); return; }
+-        --g->references; Retire(*g);
+-    }
+-
+-    // Caller reserves final FIFO admission before selection, then commits the mixed frame.
+-    // Called once on the ordinary mixer cadence, after portable DAC consumption.
+-    uint32_t Render(uint32_t ordinary, Tag actual, const uint32_t gain[2]) {
+-        if (gain[0] > 65536 || gain[1] > 65536) Fence();
+-        uint32_t result = Serial(actual) ? 0 : ordinary;
+-
+-        if (!fenced) {
+-            Generation *earliest = nullptr;
+-            for (auto &g : generations) if (g.id && g.preview) {
+-                while (g.previewNext < g.identity.frames && g.delivered[g.previewNext])
+-                    ++g.previewNext;
+-                if (g.previewNext < g.identity.frames && (!earliest || g.id < earliest->id))
+-                    earliest = &g;
+-            }
+-            if (earliest) {
+-                // Unpreviewed ordinary audio must never be overwritten.
+-                if (result) Fence(21);
+-                else {
+-                    auto &g = *earliest;
+-                    const auto word = g.raw[g.previewNext];
+-                    const auto left = int16_t(int64_t(int16_t(word)) * gain[0] / 65536);
+-                    const auto right = int16_t(int64_t(int16_t(word >> 16)) * gain[1] / 65536);
+-                    result = uint16_t(left) | (uint32_t(uint16_t(right)) << 16);
+-                    g.delivered[g.previewNext++] |= 1;
+-                }
+-            }
+-        }
+-        return result;
+-    }
+-
+-    // Decide once at actual serial consumption, before gain/resampling. Marking
+-    // processed here prevents a later preview of a word already in the DAC path.
+-    bool Serial(Tag tag) {
+-        bool suppress = false;
+-        if (auto *g = Find(tag)) {
+-            if (!g->outstanding[tag.frame]) { Fence(); return false; }
+-            auto &status = g->delivered[tag.frame];
+-            suppress = tag.matches && (status & 1) && !(status & 4);
+-            status |= 2 | (suppress ? 4 : 0);
+-        } else if (tag.generation) Fence();
+-        Discard(tag);
+-        return suppress;
+-    }
+-
+-    // Pause/control loss stops future preview, retaining heard-word suppression.
+-    void Fence(unsigned cause = 1) { if (!fenced) lastFenceCause = cause; fenced = true; for (auto &g : generations) g.preview = false; }
+-    bool Start() {
+-        // Restart within a silent edge only when every retained raw word is zero.
+-        // The owner must also establish silence in untagged pipeline entries.
+-        for (const auto &g : generations) if (g.id) {
+-            if (g.sourceInvalidated) return false;
+-            for (unsigned i = 0; i < g.identity.frames; ++i)
+-                if (g.raw[i]) return false;
+-        }
+-        // Retained silence keeps its transport tags and credits. Start the next
+-        // submitted buffer at the current common cadence, after gain has settled.
+-        for (auto &g : generations) if (g.id) {
+-            g.preview = false; g.previewNext = g.identity.frames;
+-        }
+-        fenced = false; return true;
+-    }
+-    bool Quiescent() const {
+-        for (const auto &g : generations) if (g.id) return false;
+-        return true;
+-    }
+-    bool Fenced() const { return fenced; }
+-    unsigned LastFenceCause() const { return lastFenceCause; }
+-    const std::array<Generation, maxGenerations> &Generations() const { return generations; }
+-    void Replace() { generations = {}; fenced = true; }
+-
+-    // Caller must prove the transport cannot read any remaining source words.
+-    // Existing FIFO/codec/mixer references still keep their suppression alive.
+-    void TransportDiscarded(uint64_t generation) {
+-        for (auto &g : generations) if (g.id == generation) {
+-            g.dmaNext = g.identity.frames;
+-            g.cancelled = true; g.preview = false; g.transportDiscarded = true;
+-            Fence(); Retire(g); return;
+-        }
+-        Fence();
+-    }
+-
+-private:
+-    Generation *Find(Tag tag) {
+-        if (!tag.generation) return nullptr;
+-        for (auto &g : generations)
+-            if (g.id == tag.generation && tag.frame < g.identity.frames) return &g;
+-        return nullptr;
+-    }
+-    static void Retire(Generation &g) {
+-        if (!g.references && (g.transportDiscarded || (g.completed && g.dmaNext == g.identity.frames))) g = {};
+-    }
+-    std::array<Generation, maxGenerations> generations{};
+-    uint64_t nextId{1};
+-    bool fenced{true};
+-    unsigned lastFenceCause{};
+-};
+-#endif
+diff --git a/src/uarm/uarm/Tg50Audio.h b/src/uarm/uarm/Tg50Audio.h
+--- a/src/uarm/uarm/Tg50Audio.h
++++ b/src/uarm/uarm/Tg50Audio.h
+@@ -72,10 +72,6 @@ public:
+             (next.running || !next.pwmPhase);
+     }
+     template <typename Emit> void Advance(uint64_t ns, Emit emit) {
+-        AdvanceHost(ns, emit, [](uint32_t dac, bool) { return dac; });
+-    }
+-    // Host selection runs after portable DAC consumption, before the same PWM mix.
+-    template <typename Emit, typename Select> void AdvanceHost(uint64_t ns, Emit emit, Select select) {
+         // Scheduler quanta are 20 us; bounding slices also makes direct tests safe.
+         while (ns) {
+             const auto slice = std::min<uint64_t>(ns, 1000000);
+@@ -85,13 +81,11 @@ public:
+                 state.hostPhase -= 1000000000;
+                 const int32_t beep = NextPwmSample();
+                 uint32_t dac{};
+-                const bool present = state.dacCount != 0;
+                 if (state.dacCount) {
+                     dac = state.dac[0];
+                     for (unsigned i = 1; i < state.dacCount; ++i) state.dac[i-1] = state.dac[i];
+                     state.dac[--state.dacCount] = 0;
+                 }
+-                dac = select(dac, present);
+                 const auto left = Saturate(int32_t(int16_t(dac)) + beep);
+                 const auto right = Saturate(int32_t(int16_t(dac >> 16)) + beep);
+                 emit(uint16_t(left) | (uint32_t(uint16_t(right)) << 16));
+diff --git a/src/uarm/uarm/device.h b/src/uarm/uarm/device.h
+--- a/src/uarm/uarm/device.h
++++ b/src/uarm/uarm/device.h
+@@ -30,8 +30,6 @@
+ struct AudioQueue;
+ struct MemoryStickController;
+ struct PxaDma;
+-class SonyDacHost;
+-SonyDacHost* deviceAttachSonyTransport(struct Device*, void*, uintptr_t (*)(void*, uint32_t, unsigned));
+ 
+ struct SocPeriphs {
+     // in to deviceSetup
+diff --git a/src/uarm/uarm/devicePalmTungstenE2.cpp b/src/uarm/uarm/devicePalmTungstenE2.cpp
+--- a/src/uarm/uarm/devicePalmTungstenE2.cpp
++++ b/src/uarm/uarm/devicePalmTungstenE2.cpp
+@@ -552,8 +552,3 @@ void deviceFenceInput(Device *d, bool fence) { if (d->tg50) tg50BoardFenceInput(
+ void deviceDisarmInput(Device *d) { if (d->tg50) tg50BoardDisarmInput(d->tg50); }
+ 
+ Ak4534InputDemand deviceInputDemand(Device *d) { return d->tg50 ? tg50BoardInputDemand(d->tg50) : Ak4534InputDemand{}; }
+-
+-SonyDacHost* deviceAttachSonyTransport(Device* dev, void* context,
+-                                      uintptr_t (*canonical)(void*, uint32_t, unsigned)) {
+-    return dev->tg50 ? tg50BoardAttachSonyTransport(dev->tg50, context, canonical) : nullptr;
+-}
+diff --git a/src/uarm/uarm/deviceSonyTG50.cpp b/src/uarm/uarm/deviceSonyTG50.cpp
+--- a/src/uarm/uarm/deviceSonyTG50.cpp
++++ b/src/uarm/uarm/deviceSonyTG50.cpp
+@@ -3,7 +3,6 @@
+ // Board wiring adapted from Dmitry Grinberg's uARM deviceSonyTG50.c.
+ #include "deviceSonyTG50.h"
+ #include "CsrBcspRadio.h"
+-#include "SonyDacHost.h"
+ #include <memory>
+ 
+ #include <array>
+@@ -36,10 +35,6 @@ constexpr uint32_t tg50SramSize = 1024;
+ struct Tg50Board {
+     CsrBcspRadio* radio{};
+     Tg50Audio audio{};
+-    std::unique_ptr<SonyDacHost> host;
+-    std::unique_ptr<SonyDacHost::State> restoreHost;
+-    PxaDma* dma{};
+-    PxaI2s* i2s{};
+     Microwire64x16 configuration{};
+     AudioQueue *queue{};
+     PxaPwm *pwm{};
+@@ -102,12 +97,7 @@ void tg50BoardAudioAdvance(Tg50Board *b, uint64_t ns) {
+     tg50ConfigurationOutput(b);
+     b->audio.SetMuxOutput(!pxaGpioIsInput(b->gpio, 16) &&
+                           pxaGpioAlternateFunction(b->gpio, 16) == 2);
+-    b->audio.AdvanceHost(ns, [b](uint32_t frame) { if (b->queue) audioQueuePush(b->queue, frame); },
+-        [b](uint32_t frame, bool present) {
+-            if (!b->host) return frame;
+-            if (!b->queue || !audioQueuePreviewAllowed(b->queue)) b->host->Fence();
+-            return b->host->Select(frame, present);
+-        });
++    b->audio.Advance(ns, [b](uint32_t frame) { if (b->queue) audioQueuePush(b->queue, frame); });
+ }
+ 
+ template <typename H> static void tg50AudioFields(H &h, Tg50Audio::State &s) {
+@@ -137,7 +127,6 @@ static std::array<uint32_t, 64> tg50KeyMap() {
+ Tg50Board *tg50BoardSetup(SocPeriphs *sp, Keypad *kp,Reschedule reschedule,GetEmuTime time) {
+     auto *board = new Tg50Board{};
+     board->mem = sp->mem;
+-    board->dma = sp->dma; board->i2s = sp->i2s;
+     board->gpio = sp->gpio;
+     board->pwm = sp->pwm0;
+     board->pwrClk = sp->pwrClk;
+@@ -228,9 +217,7 @@ std::function<void()> tg50BoardCaptureInput(Tg50Board *board) {
+     auto keys = tg50ucCaptureInput(board->uc);
+     auto radio = board->radio->CaptureInput();
+     const bool up = board->jogHeld[0], down = board->jogHeld[1];
+-    auto host = board->host ? std::make_shared<SonyDacHost::State>(board->host->Capture()) : nullptr;
+-    return [board, touch, keys, radio, up, down, host] {
+-        if (host) board->restoreHost = std::make_unique<SonyDacHost::State>(*host);
++    return [board, touch, keys, radio, up, down] {
+         touch(); keys();radio();
+         board->jogHeld[0] = up;
+         board->jogHeld[1] = down;
+@@ -330,12 +317,6 @@ template <typename T> bool tg50BoardLoad(Tg50Board *board, T &loader, bool prese
+         board->audio.Reset();
+         tg50AudioRegisters(board);
+     }
+-    if (board->host) {
+-        if (preserveInput && board->restoreHost) {
+-            if (!board->host->Restore(*board->restoreHost)) ERR("invalid trusted Sony host checkpoint");
+-        } else board->host->Replace(board->audio);
+-    }
+-    board->restoreHost.reset();
+     if (board->queue) audioQueueClear(board->queue);
+     if (!preserveInput) board->jogHeld[0] = board->jogHeld[1] = false;
+     if (board->restoringReset) board->configuration.ResetPins();
+@@ -352,7 +333,6 @@ template <typename T> bool tg50BoardLoad(Tg50Board *board, T &loader, bool prese
+ void tg50BoardDestroy(Tg50Board *board) {
+     if (!board) return;
+     if (board->queue) audioQueueProtect(board->queue, false);
+-    board->host.reset();
+     delete board->radio;board->radio=nullptr;
+     // The SoC is stopped; removing each callback prevents a stale context in the retained buses.
+     if (!pxaSspRemoveClient(board->ssp, board->touch) ||
+@@ -384,8 +364,6 @@ void tg50BoardEndReset(Tg50Board *board) { board->restoringReset = false; }
+ 
+ void tg50BoardSetAudioQueue(Tg50Board *board, AudioQueue *queue) {
+     if (board->queue == queue) return;
+-    if (board->host && !(board->queue && audioQueueRetained(board->queue)) &&
+-        !(queue && audioQueueRetained(queue))) board->host->Fence();
+     if (board->queue) { audioQueueClear(board->queue); audioQueueProtect(board->queue, false); }
+     board->queue = queue;
+     if (queue) audioQueueProtect(queue, true);
+@@ -430,10 +408,3 @@ void tg50BoardDisarmInput(Tg50Board *b) { ak4534DisarmInput(b->codec); }
+ Ak4534InputDemand tg50BoardInputDemand(Tg50Board *b) { return ak4534InputDemand(b->codec); }
+ 
+ CsrBcspRadio* tg50BoardBluetooth(Tg50Board* board){return board?board->radio:nullptr;}
+-
+-SonyDacHost* tg50BoardAttachSonyTransport(Tg50Board* board, void* context,
+-                                        uintptr_t (*canonical)(void*, uint32_t, unsigned)) {
+-    if (!board->host) board->host = std::make_unique<SonyDacHost>(board->dma, board->i2s,
+-        board->codec, board->audio, context, canonical);
+-    return board->host.get();
+-}
+diff --git a/src/uarm/uarm/deviceSonyTG50.h b/src/uarm/uarm/deviceSonyTG50.h
+--- a/src/uarm/uarm/deviceSonyTG50.h
++++ b/src/uarm/uarm/deviceSonyTG50.h
+@@ -6,9 +6,6 @@
+ 
+ #include "i2sdev_AK4534.h"
+ struct Tg50Board;
+-class SonyDacHost;
+-// Internal transport attachment, no firmware recognition or preview capability.
+-SonyDacHost* tg50BoardAttachSonyTransport(Tg50Board*, void*, uintptr_t (*)(void*, uint32_t, unsigned));
+ Ak4534InputDemand tg50BoardInputDemand(Tg50Board *);
+ void tg50BoardSetInputSource(Tg50Board *, const Ak4534InputSource *);
+ void tg50BoardFenceInput(Tg50Board *, bool);
+diff --git a/src/uarm/uarm/i2sdev_AK4534.cpp b/src/uarm/uarm/i2sdev_AK4534.cpp
+--- a/src/uarm/uarm/i2sdev_AK4534.cpp
++++ b/src/uarm/uarm/i2sdev_AK4534.cpp
+@@ -22,12 +22,6 @@ struct AK4534 {
+     AudioQueue *queue{};
+     void *outputContext{};
+     Ak4534Output output{};
+-    void *hostContext{};
+-    Ak4534HostConsume hostConsume{};
+-    Ak4534HostOutput hostOutput{};
+-    void (*hostControl)(void *){};
+-    void (*hostBoundary)(void *){};
+-    Ak4534HostState hostState{};
+     void (*outputBoundary)(void *){};
+     void *observerContext{};
+     Ak4534Observe observer{};
+@@ -80,10 +74,8 @@ static uint32_t ak4534Clock(const AK4534 *ak) {
+ static void ak4534Boundary(void *context) {
+     auto *ak = static_cast<AK4534 *>(context);
+     if (ak->outputBoundary) ak->outputBoundary(ak->outputContext);
+-    if (ak->hostBoundary) ak->hostBoundary(ak->hostContext);
+     ak->outPhase = 0;
+     ak->outSum[0] = ak->outSum[1] = 0;
+-    ak->hostState = {};
+     ak->wireNumerator = ak->wireDenominator = 0;
+     if (ak->queue) audioQueueClear(ak->queue);
+ }
+@@ -102,7 +94,7 @@ static void ak4534Targets(AK4534 *ak) {
+ }
+ 
+ static void ak4534Resample(AK4534 *ak, int32_t left, int32_t right,
+-                           uint32_t numerator, uint32_t denominator, bool suppress) {
++                           uint32_t numerator, uint32_t denominator) {
+     if (!numerator || !denominator) return;
+     if (ak->wireNumerator != numerator || ak->wireDenominator != denominator) {
+         ak4534Boundary(ak);
+@@ -114,26 +106,17 @@ static void ak4534Resample(AK4534 *ak, int32_t left, int32_t right,
+         const auto portion = std::min(remain, numerator - ak->outPhase);
+         ak->outSum[0] += int64_t(left) * portion;
+         ak->outSum[1] += int64_t(right) * portion;
+-        if (!suppress) {
+-            ak->hostState.sum[0] += int64_t(left) * portion;
+-            ak->hostState.sum[1] += int64_t(right) * portion;
+-        }
+         ak->outPhase += portion;
+         remain -= portion;
+         if (ak->outPhase == numerator) {
+             const auto l = static_cast<int16_t>(ak->outSum[0] / numerator);
+             const auto r = static_cast<int16_t>(ak->outSum[1] / numerator);
+             const uint32_t packed = uint16_t(l) | (uint32_t(uint16_t(r)) << 16);
+-            const auto hl = static_cast<int16_t>(ak->hostState.sum[0] / numerator);
+-            const auto hr = static_cast<int16_t>(ak->hostState.sum[1] / numerator);
+-            if (ak->hostOutput) ak->hostOutput(ak->hostContext, packed,
+-                uint16_t(hl) | (uint32_t(uint16_t(hr)) << 16));
+             if (ak->observer) ak->observer(ak->observerContext, Ak4534Tap::hostOutput, packed, 44100, 1);
+             if (ak->output) ak->output(ak->outputContext, packed);
+             else if (ak->queue) audioQueuePush(ak->queue, packed);
+             ak->outPhase = 0;
+             ak->outSum[0] = ak->outSum[1] = 0;
+-            ak->hostState = {};
+         }
+     }
+ }
+@@ -254,9 +237,6 @@ static uint32_t ak4534Frame(void *context, uint32_t packed, bool playing,
+     // MS0133-E-03 figures6-8: mono SDTO in the left slot, right held low.
+     const uint32_t rx = uint16_t(adc);
+     if (ak->regs[5] & 2) packed = rx;
+-    const bool txRouted = !(ak->regs[5] & 2);
+-    const bool consumed = ak->hostConsume && ak->hostConsume(ak->hostContext, txRouted);
+-    const bool suppress = txRouted && consumed;
+     int32_t samples[2] = {static_cast<int16_t>(packed), static_cast<int16_t>(packed >> 16)};
+     const unsigned dif = ak->regs[4] & 3;
+     // Retained format evidence establishes I2S only. Other wire formats stay silent.
+@@ -273,7 +253,7 @@ static uint32_t ak4534Frame(void *context, uint32_t packed, bool playing,
+     }
+     if (ak->observer) ak->observer(ak->observerContext, Ak4534Tap::digitalDac,
+         uint16_t(samples[0]) | (uint32_t(uint16_t(samples[1])) << 16), numerator, denominator);
+-    ak4534Resample(ak, samples[0], samples[1], numerator, denominator, suppress);
++    ak4534Resample(ak, samples[0], samples[1], numerator, denominator);
+     return ak->testRx ? ak->injectedRx : rx;
+ }
+ 
+@@ -296,7 +276,6 @@ static bool ak4534prvDoRegWrite(struct AK4534 *ak, uint8_t reg, uint8_t val)
+ 	
+ 	if (reg < sizeof(ak->regs) / sizeof(*ak->regs)) {
+         if (reg >= 14) return false;
+-        if (ak->hostControl) ak->hostControl(ak->hostContext);
+         const auto oldClock = ak4534Clock(ak);
+         const auto old = ak->regs[reg];
+         ak->regs[reg] = val & ak4534Masks[reg];
+@@ -545,10 +524,6 @@ template <typename T> bool ak4534Load(AK4534 *ak, T &loader, bool preserveInput)
+     }
+     next.testRx = false;
+     next.injectedRx = 0;
+-    // A replacement timeline has no previous preview contributions. Checkpoint
+-    // owners restore their exact host partial sums separately after rollback.
+-    next.hostState.sum[0] = next.outSum[0];
+-    next.hostState.sum[1] = next.outSum[1];
+     *ak = next;
+     if (ak->queue) audioQueueClear(ak->queue);
+     // Re-derive clock input without discarding saved controller or resampler phase.
+@@ -565,35 +540,6 @@ void ak4534SetObserver(AK4534 *ak, void *context, Ak4534Observe observer) {
+     ak->observer = observer;
+ }
+ 
+-void ak4534SetHostRoute(AK4534 *ak, void *context, Ak4534HostConsume consume, Ak4534HostOutput output,
+-                       void (*control)(void *), void (*boundary)(void *)) {
+-    ak->hostContext = context; ak->hostConsume = consume; ak->hostOutput = output;
+-    ak->hostControl = control;
+-    ak->hostBoundary = boundary;
+-    ak->hostState.sum[0] = ak->outSum[0];
+-    ak->hostState.sum[1] = ak->outSum[1];
+-}
+-Ak4534HostStatus ak4534GetHostStatus(const AK4534 *ak) {
+-    Ak4534HostStatus status{{ak->gain[0],ak->gain[1]},false};
+-    uint32_t numerator{}, denominator{};
+-    pxaI2sGetRate(ak->i2s,numerator,denominator);
+-    status.stable44100Stereo = pxaI2sTxNormal(ak->i2s) && numerator == 44100 && denominator == 1 &&
+-        (ak->regs[0] & 0x80) && (ak->regs[1] & 1) && (ak->regs[4] & 3) == 2 &&
+-        !(ak->regs[5] & 2) && !(ak->regs[6] & 0x20) && !ak->ramp[0] && !ak->ramp[1] &&
+-        ak->gain[0] == ak->target[0] && ak->gain[1] == ak->target[1];
+-    status.silentPartial = !ak->outSum[0] && !ak->outSum[1] &&
+-        !ak->hostState.sum[0] && !ak->hostState.sum[1];
+-    return status;
+-}
+-Ak4534HostState ak4534GetHostState(const AK4534 *ak) { return ak->hostState; }
+-bool ak4534RestoreHostState(AK4534 *ak, const Ak4534HostState &state) {
+-    for (unsigned ch = 0; ch < 2; ++ch)
+-        if (state.sum[ch] < -int64_t(32768) * ak->outPhase ||
+-            state.sum[ch] > int64_t(32767) * ak->outPhase) return false;
+-    ak->hostState = state;
+-    return true;
+-}
+-
+ void ak4534SetOutput(AK4534 *ak, void *ctx, Ak4534Output output, void (*boundary)(void *)) {
+     ak->outputContext = ctx; ak->output = output; ak->outputBoundary = boundary;
+ }
+diff --git a/src/uarm/uarm/i2sdev_AK4534.h b/src/uarm/uarm/i2sdev_AK4534.h
+--- a/src/uarm/uarm/i2sdev_AK4534.h
++++ b/src/uarm/uarm/i2sdev_AK4534.h
+@@ -54,18 +54,6 @@ using Ak4534Observe = void (*)(void *, Ak4534Tap, uint32_t packed,
+ using Ak4534Output = void (*)(void *, uint32_t);
+ void ak4534SetOutput(AK4534 *, void *, Ak4534Output, void (*boundary)(void *));
+ void ak4534SetObserver(AK4534 *, void *, Ak4534Observe);
+-// Parallel host contributions share the portable resampler's exact portions.
+-// consume returns true only for an already-previewed TX occurrence. ADC loopback
+-// still consumes its TX tag, but must never suppress the unrelated ADC input.
+-struct Ak4534HostState { int64_t sum[2]{}; };
+-struct Ak4534HostStatus { uint32_t gain[2]{}; bool stable44100Stereo{}; bool silentPartial{}; };
+-using Ak4534HostConsume = bool (*)(void *, bool txRouted);
+-using Ak4534HostOutput = void (*)(void *, uint32_t portableFrame, uint32_t hostFrame);
+-void ak4534SetHostRoute(AK4534 *, void *, Ak4534HostConsume, Ak4534HostOutput,
+-                       void (*beforeControl)(void *) = nullptr, void (*boundary)(void *) = nullptr);
+-Ak4534HostStatus ak4534GetHostStatus(const AK4534 *);
+-Ak4534HostState ak4534GetHostState(const AK4534 *);
+-bool ak4534RestoreHostState(AK4534 *, const Ak4534HostState &);
+ void ak4534SetAudioQueue(AK4534 *, AudioQueue *);
+ // Test-only serial input injection, never connected to a host microphone.
+ void ak4534TestInput(AK4534 *, bool enabled, uint32_t frame);
+diff --git a/src/uarm/uarm/pxa_DMA.cpp b/src/uarm/uarm/pxa_DMA.cpp
+--- a/src/uarm/uarm/pxa_DMA.cpp
++++ b/src/uarm/uarm/pxa_DMA.cpp
+@@ -49,8 +49,6 @@ struct PxaDma {
+     struct PxaDmaChannel channels[32];
+     uint8_t CMR[75];  // channel map registers	[  we store lower 8 bits only :-)  ]
+     struct PxaDmaPeripheral peripherals[75];  // wiring by request line, never serialized
+-    void *writeContext{};
+-    PxaDmaWriteObserver writeObserver{};
+ 
+     template <typename T>
+     void DoSaveLoad(T& chunkHelper) {
+@@ -262,11 +260,7 @@ static bool pxaDmaPrvChannelDoBurst(
+         if (count == each) {
+             ok = memAccess(dma->mem, ch->SAR, each, false, &value);
+             if (ok) {
+-                if (dma->writeObserver) dma->writeObserver(dma->writeContext, true,
+-                    ch->SAR, ch->TAR, each, value, true);
+                 ok = memAccess(dma->mem, ch->TAR, each, true, &value);
+-                if (dma->writeObserver) dma->writeObserver(dma->writeContext, false,
+-                    ch->SAR, ch->TAR, each, value, ok);
+             }
+         } else if (fromPeripheral) {
+             // A short read takes exactly count bytes from the peripheral FIFO,
+@@ -279,22 +273,14 @@ static bool pxaDmaPrvChannelDoBurst(
+                 for (unsigned k = 0; k < piece; ++k) bytes[i + k] = part >> (8 * k);
+                 i += piece;
+             }
+-            if (dma->writeObserver) dma->writeObserver(dma->writeContext, true,
+-                ch->SAR, ch->TAR, count, 0, ok);
+             for (unsigned i = 0; i < count && ok; ++i)
+                 ok = memAccess(dma->mem, ch->TAR + i, 1, true, &bytes[i]);
+-            if (dma->writeObserver) dma->writeObserver(dma->writeContext, false,
+-                ch->SAR, ch->TAR, count, 0, ok);
+         } else {
+             uint8_t bytes[4]{};
+             for (unsigned i = 0; i < count && ok; ++i)
+                 ok = memAccess(dma->mem, ch->SAR + i, 1, false, &bytes[i]);
+-            if (dma->writeObserver) dma->writeObserver(dma->writeContext, true,
+-                ch->SAR, ch->TAR, count, 0, ok);
+             for (unsigned i = 0; i < count && ok; ++i)
+                 ok = memAccess(dma->mem, ch->TAR + (toPeripheral ? 0 : i), 1, true, &bytes[i]);
+-            if (dma->writeObserver) dma->writeObserver(dma->writeContext, false,
+-                ch->SAR, ch->TAR, count, 0, ok);
+         }
+         if (!ok) return pxaDmaPrvBusError(dma, ch);
+         if (ch->CR & 0x80000000u) ch->SAR += count;
+@@ -324,11 +310,6 @@ static bool pxaDmaPrvChannelDoBurst(
+     return pxaDmaPrvChannelCheckForEnd(dma, channel);
+ }
+ 
+-void pxaDmaSetWriteObserver(PxaDma *dma, void *context, PxaDmaWriteObserver observer) {
+-    dma->writeContext = context;
+-    dma->writeObserver = observer;
+-}
+-
+ static void pxaDmaPrvChannelActIfNeeded(struct PxaDma* dma, uint_fast8_t channel) {
+     bool irqUpdate = false, doWork = false, justOne = true;
+     struct PxaDmaChannel* ch = &dma->channels[channel];
+diff --git a/src/uarm/uarm/pxa_DMA.h b/src/uarm/uarm/pxa_DMA.h
+--- a/src/uarm/uarm/pxa_DMA.h
++++ b/src/uarm/uarm/pxa_DMA.h
+@@ -104,11 +104,6 @@
+ #define DMA_CMR_DREQ_2 74
+ 
+ struct PxaDma;
+-// Synchronous host-only scope around one target write. Observers may track
+-// provenance, but must not change guest memory, registers or device timing.
+-using PxaDmaWriteObserver = void (*)(void *, bool before, uint32_t source,
+-                                    uint32_t target, unsigned width, uint32_t value, bool success);
+-void pxaDmaSetWriteObserver(PxaDma *, void *, PxaDmaWriteObserver);
+ 
+ struct PxaDma* pxaDmaInit(struct ArmMem* physMem, struct Reschedule reschedule, struct PxaIc* ic);
+ void pxaDmaPeriodic(struct PxaDma* dma);
+diff --git a/src/uarm/uarm/pxa_I2S.cpp b/src/uarm/uarm/pxa_I2S.cpp
+--- a/src/uarm/uarm/pxa_I2S.cpp
++++ b/src/uarm/uarm/pxa_I2S.cpp
+@@ -38,8 +38,6 @@ struct PxaI2s {
+     uint64_t phase{};
+     bool clockEnabled{true};
+     bool legacyState{};
+-    void *txContext{};
+-    PxaI2sTxObserver txObserver{};
+ 
+     template <typename T>
+     void DoSaveLoad(T &chunkHelper) {
+@@ -51,27 +49,9 @@ struct PxaI2s {
+     }
+ };
+ 
+-static void pxaI2sTxNotify(PxaI2s *i2s, PxaI2sTxEvent event, uint32_t value = 0) {
+-    if (i2s->txObserver) i2s->txObserver(i2s->txContext, event, value);
+-}
+-static void pxaI2sTxDiscard(PxaI2s *i2s) {
+-    for (unsigned i = 0; i < i2s->txFifoEnts; ++i)
+-        pxaI2sTxNotify(i2s, PxaI2sTxEvent::discard, i2s->txFifo[i]);
+-}
+-void pxaI2sSetTxObserver(PxaI2s *i2s, void *context, PxaI2sTxObserver observer) {
+-    i2s->txContext = context; i2s->txObserver = observer;
+-}
+-unsigned pxaI2sTxSnapshot(const PxaI2s *i2s, uint32_t words[16]) {
+-    for (unsigned i = 0; i < i2s->txFifoEnts; ++i) words[i] = i2s->txFifo[i];
+-    return i2s->txFifoEnts;
+-}
+-
+ static bool pxaI2sEnabled(const PxaI2s *i2s) {
+     return (i2s->sacr0 & 9) == 1 && i2s->clockEnabled;
+ }
+-bool pxaI2sTxNormal(const PxaI2s *i2s) {
+-    return pxaI2sEnabled(i2s) && !(i2s->sacr0 & 0x30) && !(i2s->sacr1 & 0x11);
+-}
+ 
+ static void pxaI2sPrvRecalc(PxaI2s *i2s) {
+     const bool enabled = pxaI2sEnabled(i2s);
+@@ -96,8 +76,6 @@ static void pxaI2sPrvBoundary(PxaI2s *i2s) {
+ }
+ 
+ static void pxaI2sPrvResetRegisters(PxaI2s *i2s) {
+-    pxaI2sTxNotify(i2s, PxaI2sTxEvent::control);
+-    pxaI2sTxDiscard(i2s);
+     i2s->sacr1 = i2s->saimr = 0;
+     i2s->sadiv = 26;
+     i2s->txFifoEnts = i2s->rxFifoEnts = 0;
+@@ -120,7 +98,6 @@ static bool pxaI2sPrvFifoW(struct PxaI2s *i2s, uint32_t val) {
+         return true;
+     }
+     i2s->txFifo[i2s->txFifoEnts++] = val;
+-    pxaI2sTxNotify(i2s, PxaI2sTxEvent::enqueue, val);
+     pxaI2sPrvRecalc(i2s);
+ 
+     return true;
+@@ -129,7 +106,6 @@ static bool pxaI2sPrvFifoW(struct PxaI2s *i2s, uint32_t val) {
+ static bool pxaI2sPrvFifoR(struct PxaI2s *i2s, uint32_t *valP) {
+     if ((i2s->sacr0 & 0x30) == 0x10) {
+         *valP = i2s->txFifoEnts ? i2s->txFifo[0] : 0;
+-        if (i2s->txFifoEnts) pxaI2sTxNotify(i2s, PxaI2sTxEvent::discard, *valP);
+         if (i2s->txFifoEnts) memmove(i2s->txFifo, i2s->txFifo + 1,
+             sizeof(*i2s->txFifo) * --i2s->txFifoEnts);
+         pxaI2sPrvRecalc(i2s);
+@@ -162,12 +138,6 @@ static bool pxaI2sPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size,
+ 
+     if (write) val = *(uint32_t *)buf;
+     if (write && pa != 0 && (i2s->sacr0 & 8)) return true;
+-    // Identical configuration writes keep the host route. Reset/flush commands
+-    // remain boundaries even when their stored bits already match.
+-    if (write && ((pa == 0 && (i2s->sacr0 != (val & 0xff3d) || (val & 8))) ||
+-                  (pa == 1 && (i2s->sacr1 != (val & 0x39) || (val & 0x18))) ||
+-                  (pa == 24 && i2s->sadiv != (val & 0x7f))))
+-        pxaI2sTxNotify(i2s, PxaI2sTxEvent::control);
+ 
+     switch (pa) {
+         case 0:
+@@ -184,7 +154,7 @@ static bool pxaI2sPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size,
+             if (write) {
+                 const auto changed = i2s->sacr1 ^ (val & 0x39);
+                 i2s->sacr1 = val & 0x39;
+-                if (val & 0x10) { pxaI2sTxDiscard(i2s); i2s->txFifoEnts = 0; i2s->lastTx = 0; }
++                if (val & 0x10) { i2s->txFifoEnts = 0; i2s->lastTx = 0; }
+                 if (val & 8) i2s->rxFifoEnts = 0;
+                 if (changed & 0x11) pxaI2sPrvBoundary(i2s);
+             } else
+@@ -266,14 +236,12 @@ void pxaI2sAttach(PxaI2s *i2s, void *codec, PxaI2sFrame frame, PxaI2sBoundary bo
+ 
+ void pxaI2sSetExternalRate(PxaI2s *i2s, uint32_t hz, bool discontinuity) {
+     if (hz == i2s->externalHz) return;
+-    pxaI2sTxNotify(i2s, PxaI2sTxEvent::control);
+     i2s->externalHz = hz;
+     if (discontinuity) pxaI2sPrvBoundary(i2s);
+ }
+ 
+ void pxaI2sSetClockEnabled(PxaI2s *i2s, bool enabled, bool discontinuity) {
+     if (i2s->clockEnabled != enabled) {
+-        pxaI2sTxNotify(i2s, PxaI2sTxEvent::control);
+         i2s->clockEnabled = enabled;
+         if (discontinuity) pxaI2sPrvBoundary(i2s);
+         pxaI2sPrvRecalc(i2s);
+@@ -289,11 +257,9 @@ void pxaI2sPeriodic(struct PxaI2s *i2s) {
+             val = 0;
+         } else if (i2s->txFifoEnts) {
+             i2s->lastTx = i2s->txFifo[0];
+-            pxaI2sTxNotify(i2s, PxaI2sTxEvent::dequeue, i2s->lastTx);
+             memmove(i2s->txFifo, i2s->txFifo + 1, sizeof(*i2s->txFifo) * --i2s->txFifoEnts);
+         } else {
+             i2s->sasr0 |= 0x20;
+-            pxaI2sTxNotify(i2s, PxaI2sTxEvent::repeat, i2s->lastTx);
+         }
+         if ((i2s->sacr0 & 0x30) != 0x10) val = i2s->lastTx;
+     }
+diff --git a/src/uarm/uarm/pxa_I2S.h b/src/uarm/uarm/pxa_I2S.h
+--- a/src/uarm/uarm/pxa_I2S.h
++++ b/src/uarm/uarm/pxa_I2S.h
+@@ -7,12 +7,6 @@
+ #include "pxa_IC.h"
+ 
+ struct PxaI2s;
+-enum class PxaI2sTxEvent { enqueue, dequeue, discard, repeat, control };
+-using PxaI2sTxObserver = void (*)(void *, PxaI2sTxEvent, uint32_t word);
+-// Host-only provenance; never serialized and never changes FIFO progression.
+-void pxaI2sSetTxObserver(PxaI2s *, void *, PxaI2sTxObserver);
+-unsigned pxaI2sTxSnapshot(const PxaI2s *, uint32_t words[16]);
+-bool pxaI2sTxNormal(const PxaI2s *);
+ 
+ struct PxaI2s *pxaI2sInit(struct ArmMem *physMem, struct PxaIc *ic, struct PxaDma *dma);
+ // The codec returns a serial input frame. MSB justified is a separate wire format.
+diff --git a/src/uarm/uarm/soc_PXA.cpp b/src/uarm/uarm/soc_PXA.cpp
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -52,7 +52,6 @@
+ #include "rom_info5.h"
+ #include "syscall_dispatch.h"
+ #include "deviceSonyTG50.h"
+-#include "SonyDacHost.h"
+ #include "md5.h"
+ #include "audio_queue.h"
+ 
+@@ -1421,9 +1420,6 @@ void SocPXA::ReleaseKeyboard() {
+ bool SocPXA::SetBluetooth(const std::string& path,std::string& error) {return deviceSetBluetooth(dev,path,error);}
+ std::string SocPXA::BluetoothState() {return deviceBluetoothState(dev);}
+ SocPXA::~SocPXA() {
+-    cpuSetInstructionObserver(cpu,nullptr,nullptr,0,0);
+-    if (ram) ramSetWriteObserver(ram,nullptr,nullptr);
+-    if (ramMirror) ramSetWriteObserver(ramMirror,nullptr,nullptr);
+     checkpointLifetime.reset();
+     deviceStopBluetooth(dev);
+     cpuSetEarlyAudioHook(cpu,nullptr,nullptr,0,0);
+@@ -1446,150 +1442,8 @@ void SocPXA::RefreshTransportPins(void* context) {
+ 
+ MemoryStickController* SocPXA::GetMemoryStick(){return deviceMemoryStick(dev);}
+ 
+-SonyDacHost* SocPXA::AttachSonyTransport() {
+-    if (!StateMutationAllowed()) return nullptr;
+-    return deviceAttachSonyTransport(dev, this, [](void* context, uint32_t address, unsigned width) {
+-        auto& soc = *static_cast<SocPXA*>(context);
+-        void* resolved = ramResolveAddress(soc.ram, address, width);
+-        if (!resolved && soc.ramMirror) resolved = ramResolveAddress(soc.ramMirror, address, width);
+-        return reinterpret_cast<uintptr_t>(resolved);
+-    });
+-}
+-
+ void SocPXA::SetAudioOutputFenced(bool fenced) {
+     if (!StateMutationAllowed() || !reservedAudio || audioOutputFenced == fenced) return;
+     audioOutputFenced = fenced;
+     RestoreFastAudioRoute();
+ }
+-
+-#ifndef __EMSCRIPTEN__
+-bool SocPXA::EnableSonyPreview() {
+-    if (!StateMutationAllowed() || GetDeviceType() != deviceTypeTG50) return false;
+-    if (sonyPreview) return true;
+-    // Original TG50 NOR. The immutable source image is separate from the PACE shadow.
+-    if (romGetSize(rom) != 13041664 ||
+-        md5(static_cast<uint8_t*>(romGetData(rom)), romGetSize(rom)) !=
+-            "4fcdb4d5f12c04a4969088a9ed839f41") return false;
+-    sonyPreview = AttachSonyTransport();
+-    if (!sonyPreview) return false;
+-    cpuSetInstructionObserver(cpu, SonyInstruction, this, 0x20b21bd8, 0x20b229e0);
+-    ramSetWriteObserver(ram, SonyRamWrite, this);
+-    if (ramMirror) ramSetWriteObserver(ramMirror, SonyRamWrite, this);
+-    // The PCs SonyInstruction acts on. Setting them also drops translated code and the
+-    // Fast engine's writable RAM pages, so every store reaches SonyRamWrite.
+-    static constexpr uint32_t sites[] = {0x20b21bd8, 0x20b22318, 0x20b22640, 0x20b229e0};
+-    cpuSetInstructionObserverSites(cpu, sites, 4);
+-    return true;
+-}
+-
+-void SocPXA::SonyRamWrite(void* context, uintptr_t backing, uint32_t size) {
+-    auto& self = *static_cast<SocPXA*>(context);
+-    if (!self.sonyPreview) return;
+-    self.sonyPreview->Ledger().InvalidateSource(backing,size);
+-}
+-
+-void SocPXA::SonyInstruction(ArmCpu* cpu, void* context, uint32_t pc) {
+-    uint32_t signature;
+-    switch (pc) {
+-        case 0x20b229e0: signature = 0xe3e01000; break;
+-        case 0x20b22640: case 0x20b22318: signature = 0xe92d4010; break;
+-        case 0x20b21bd8: signature = 0xe92d4070; break;
+-        default: return;
+-    }
+-    auto& self = *static_cast<SocPXA*>(context);
+-    auto& counts = self.sonyCounts;
+-    auto mix = [&](uint64_t value) {
+-        for (unsigned i = 0; i < 8; ++i) counts.trace = (counts.trace ^ ((value >> (8 * i)) & 0xff)) * 0x100000001b3ull;
+-    };
+-    {
+-        const auto* r = cpuGetRegisters(cpu);
+-        mix(pc); mix(r[0]); mix(r[4]); mix(r[8]);
+-        switch (pc) {
+-            case 0x20b229e0: ++counts.submitCalls; break;
+-            case 0x20b22640: ++counts.completeCalls; break;
+-            case 0x20b22318: ++counts.pauses; break;
+-            default: ++counts.cancels; break;
+-        }
+-    }
+-    auto& host = *self.sonyPreview;
+-    auto& ledger = host.Ledger();
+-    uint32_t physical{}, actual{};
+-    if (!cpuInspectMapping(cpu, pc, 4, physical) || physical != pc - 0x20000000 ||
+-        !cpuInspectRead(cpu, pc, &actual, 4) || actual != signature) {
+-        host.Fence(); return;
+-    }
+-    auto* regs = cpuGetRegisters(cpu);
+-    auto backing = [&](uint32_t address, uint32_t size) -> uintptr_t {
+-        uint32_t pa{};
+-        if (!cpuInspectMapping(cpu, address, size, pa)) return 0;
+-        void* pointer = ramResolveAddress(self.ram, pa, size);
+-        if (!pointer && self.ramMirror) pointer = ramResolveAddress(self.ramMirror, pa, size);
+-        return reinterpret_cast<uintptr_t>(pointer);
+-    };
+-    auto read = [&](uint32_t address, void* data, unsigned size) {
+-        return backing(address,size) && cpuInspectRead(cpu,address,data,size);
+-    };
+-    if (pc == 0x20b22318 || pc == 0x20b21bd8) {
+-        host.Fence();
+-        // Cancellation does not prove that descriptor/FIFO reads have ended.
+-        if (pc == 0x20b21bd8) {
+-            const auto generations = ledger.Generations();
+-            for (const auto& g : generations) if (g.id && !g.completed && !g.cancelled &&
+-                g.identity.context == regs[0]) ledger.Complete(g.identity.node,g.identity.token,true);
+-        }
+-        return;
+-    }
+-    const uint32_t node = pc == 0x20b229e0 ? regs[8] : regs[0];
+-    uint32_t fields[12]{};
+-    if ((node & 3) || !read(node,fields,sizeof(fields))) { host.Fence(); return; }
+-    if (pc == 0x20b22640) {
+-        for (const auto& g : ledger.Generations()) if (g.id && !g.completed && !g.cancelled &&
+-            g.identity.node == node && g.identity.token == fields[4] &&
+-            g.identity.context == fields[11] && g.identity.source == fields[7] &&
+-            g.identity.originalBuffer == fields[2] && g.identity.frames * 4 == fields[8] &&
+-            g.identity.nodeBacking == backing(node,sizeof(fields)) &&
+-            g.identity.contextBacking == backing(fields[11],0x48) &&
+-            g.identity.backing == backing(fields[7],fields[8])) {
+-            ++counts.completes; mix(1);
+-            ledger.Complete(node,fields[4]); return;
+-        }
+-        host.Fence(); return;
+-    }
+-    const uint32_t owner = regs[4], source = fields[7], bytes = fields[8];
+-    uint8_t ownerFields[0x48]{};
+-    if (!owner || fields[11] != owner || !read(owner,ownerFields,sizeof(ownerFields)) ||
+-        (source & 3) || source != fields[2] || bytes != fields[3] || !bytes ||
+-        bytes % 4 || bytes > SonyDacPreview::maxFrames * 4 || bytes != 4068) { host.Fence(); return; }
+-    uint16_t flags{};
+-    memcpy(&flags,ownerFields+0x44,2);
+-    uint32_t callback{};
+-    memcpy(&callback,ownerFields+0x34,4);
+-    const auto sourceBacking = backing(source,bytes);
+-    if (getenv("FROND_SONY_PREVIEW_TRACE"))
+-        fprintf(stderr,"sony-preview abi guest=%llu ctx=%08x source=%08x bytes=%u callback=%08x flags=%04x state=%02x%02x\n",
+-            (unsigned long long)self.GetTime(),owner,source,bytes,callback,flags,ownerFields[0x47],ownerFields[0x46]);
+-    uint32_t callbackPhysical{};
+-    // The original Avx PCM sink owns this stereo16 post-conversion source.
+-    if (flags != 0x00b6 || callback != 0x20c019f8 ||
+-        !sourceBacking || !cpuInspectMapping(cpu, callback & ~1u, 4, callbackPhysical) ||
+-        callbackPhysical != callback - 0x20000000 ||
+-        !cpuInspectRead(cpu, callback, &actual, 4) || actual != 0xe92d41f0) { host.Fence(); return; }
+-    std::array<uint32_t,SonyDacPreview::maxFrames> raw{};
+-    if (!read(source,raw.data(),bytes)) { host.Fence(); return; }
+-    const bool output = self.audioQueue && self.pcmEnabled && !self.audioOutputFenced &&
+-        !self.reservedAudioCheckpointDepth && audioQueuePreviewAllowed(self.audioQueue);
+-    if (!output) host.Fence();
+-    else if (ledger.Fenced()) host.Start();
+-    SonyDacPreview::Identity identity{node,fields[4],owner,sourceBacking,bytes/4,source,fields[2],backing(node,sizeof(fields)),backing(owner,0x48)};
+-    const auto generation = ledger.Submit(identity,raw.data(),output);
+-    counts.submits += generation != 0; mix(generation != 0);
+-    if (getenv("FROND_SONY_PREVIEW_TRACE")) {
+-        fprintf(stderr,"sony-preview submit guest=%llu gen=%llu node=%08x ctx=%08x source=%08x bytes=%u token=%08x callback=%08x flags=%04x fenced=%u output=%u cause=%u\n",
+-            (unsigned long long)self.GetTime(),(unsigned long long)generation,node,owner,source,bytes,
+-            fields[4],callback,flags,unsigned(ledger.Fenced()),unsigned(output),ledger.LastFenceCause());
+-    }
+-}
+-
+-#else
+-bool SocPXA::EnableSonyPreview() { return false; }
+-#endif
+diff --git a/src/uarm/uarm/soc_PXA.h b/src/uarm/uarm/soc_PXA.h
+--- a/src/uarm/uarm/soc_PXA.h
++++ b/src/uarm/uarm/soc_PXA.h
+@@ -59,17 +59,6 @@ class SocPXA : public SocGeneric<SocPXA> {
+ 
+    public:
+     ~SocPXA();
+-    class SonyDacHost* AttachSonyTransport();
+-    bool EnableSonyPreview();
+-    bool SonyPreviewEnabled() const { return sonyPreview != nullptr; }
+-    // Sony preview observer calls per site, accepted submissions, matched completions and
+-    // a hash of each call's site, registers and result, for comparing runs.
+-    struct SonyPreviewCounts {
+-        uint64_t submitCalls{}, submits{}, completeCalls{}, completes{}, pauses{}, cancels{};
+-        uint64_t trace{0xcbf29ce484222325ull};
+-    };
+-    const SonyPreviewCounts& SonyPreviewTotals() const { return sonyCounts; }
+-    void ResetSonyPreviewTotals() { sonyCounts = {}; }
+     void SetAudioOutputFenced(bool) override;
+     bool AudioAdmissionBlocked() const override { return audioAdmissionBlocked; }
+     // Process-wide debug counter totals: batches checked, and those that committed more than reserved.
+@@ -235,10 +224,6 @@ class SocPXA : public SocGeneric<SocPXA> {
+     struct AudioQueue* audioReservedQueue{};
+     uint64_t audioReservedFrames{}, audioCommittedBefore{};
+     bool audioOutputFenced{};
+-    class SonyDacHost* sonyPreview{};
+-    SonyPreviewCounts sonyCounts;
+-    static void SonyInstruction(ArmCpu*, void*, uint32_t);
+-    static void SonyRamWrite(void*, uintptr_t, uint32_t);
+     unsigned reservedAudioCheckpointDepth{0};
+     unsigned reservedAudioExternalCheckpointDepth{0};
+     bool microphoneInvalidatePending{};

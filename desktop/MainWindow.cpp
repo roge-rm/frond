@@ -919,8 +919,7 @@ void MainWindow::editSession(const QString& path) {
     const auto device = frondFirmware::deviceFromId(info.device);
     if (const auto error = loadPreferences(path, device, &prefs); !error.isEmpty()) return failure(error);
     MachineSettingsDialog dialog(device, prefs,
-        frondAudio::qualified(device, info.saved ? path : QString(), frondFirmware::storedNor(firmwareRoot(), device)) ||
-        frondAudio::sonyPreviewEligible(device, info.saved ? path : QString(), frondFirmware::storedNor(firmwareRoot(), device)), this);
+        frondAudio::qualified(device, info.saved ? path : QString(), frondFirmware::storedNor(firmwareRoot(), device)), this);
     if (dialog.exec() != QDialog::Accepted) return;
     if (const auto error = frondSessions::writePreferences(path, dialog.controls->values()); !error.isEmpty()) failure(error);
 }
@@ -1150,8 +1149,6 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     if (!m68k && runningPreferences.fastAudio && startDevice != frondFirmware::deviceFromId("sony-clie-tg50") &&
         frondAudio::qualified(startDevice, sourceSession,
         frondFirmware::storedNor(firmwareRoot(), startDevice))) arguments << "--fast-audio";
-    if (!m68k && runningPreferences.sonyAudioPreview && frondAudio::sonyPreviewEligible(startDevice, sourceSession,
-        frondFirmware::storedNor(firmwareRoot(), startDevice))) arguments << "--sony-audio-preview";
     // frond-68k's scale is screen pixels per Palm pixel; its 160-pixel LCD takes twice the ARM value.
     arguments << "--window-scale" << QString::number(runningPreferences.scale / (m68k ? 2.0 : 4.0));
     if (runningPreferences.smooth) arguments << "--smooth-lcd";

@@ -51,7 +51,6 @@ Set these when you add a machine, or in Edit settings while it's stopped. On And
 | Show keyboard, Jog controls | TG50 only. Jog controls are Hidden, Left of screen or Left of keyboard. |
 | Sound | Turns Palm sound on or off. It can also be switched on the running page. |
 | Low-latency audio | Less delay between a tap and the sound. See below. |
-| Sony audio preview | The TG50's version of the above. |
 | Contrast | Palm IIIx only. 0 to 100, default 50, lower fades the ink and higher darkens the panel. It's on the running page too and is saved with the machine. |
 | Speed | Palm IIIx only. Original runs at the real 16.58 MHz, Uncapped lets the host run it as fast as it can (timers stay real time). On Android it's in the running menu too and applies at once. |
 | Engine | Exact or Fast. It's hidden: on Linux set `FROND_ENGINE_SETTING=1`, on Android it shows in debug builds. See [performance.md](performance.md). The IIIx only has Exact, so it never shows there. |
@@ -242,7 +241,7 @@ Tested: discovery, sending a Memo or file by Bluetooth (OPP), PIN and Trusted De
 | | T\|X | E2 | Zire 72 | TG50 | IIIx |
 |---|---|---|---|---|---|
 | Sound | yes | yes | yes | yes, see below | yes, piezo |
-| Low-latency audio | yes | yes | | Sony audio preview | |
+| Low-latency audio | yes | yes | | | |
 | Microphone | | | | yes | |
 | Network | yes | | | | PPP over serial |
 | Serial port | yes | | | yes | yes |

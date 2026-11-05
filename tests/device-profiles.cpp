@@ -212,7 +212,7 @@ int main() {
     }
 
     for (const auto& p : deviceProfiles5) assert(p.capabilities.microphone == (p.deviceType == deviceTypeTG50));
-    for (const auto& p : deviceProfiles5) assert(p.capabilities.reservedAudio == (p.deviceType == deviceTypeTG50));
+    for (const auto& p : deviceProfiles5) assert(p.capabilities.backgroundPanel == (p.deviceType == deviceTypeTG50));
     // TG50 has NOR-only firmware, physical 16 MiB RAM and a qualified native board.
     {
         const auto* p = deviceProfileNamed5("sony-clie-tg50");
@@ -397,7 +397,7 @@ static void palmIIIx() {
     const auto& caps = p->capabilities;
     // Only the hardware a IIIx has: the piezo, the cradle serial port and IrDA.
     assert(!caps.network && !caps.keyboard && caps.serial && !caps.usb && !caps.fastAudio && caps.infrared &&
-           !caps.bluetooth && caps.sound && !caps.microphone && !caps.reservedAudio);
+           !caps.bluetooth && caps.sound && !caps.microphone && !caps.backgroundPanel);
     for (const auto& other : deviceProfiles5)
         if (&other != p) assert(other.detect != DeviceDetect5::romHeader68k && other.board != DeviceBoard5::ez328);
 

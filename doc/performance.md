@@ -17,7 +17,6 @@ Fast interprets code until a block has been reached a few times, then compiles i
 | `FROND_JIT_AHEAD` | How many links ahead of a requested block the thread also compiles. Default 1, `0` is off. |
 | `FROND_JIT_MAX_UNCHECKED` | Longest run of guest instructions between checks of the cycle budget. Default 64, `0` no limit. |
 | `FROND_JIT_STATS` | `1` prints compile and exit counters when the process ends. |
-| `FROND_AUDIO_RESERVATION_STATS` | `1` prints how the audio reservation was used, at exit. |
 
 Correctness against the interpreter: `make test-jit-differential` and `make test-jit-overshoot` (see [testing.md](testing.md)). The benchmark below runs Exact unless `FROND_JIT=1` is set, so run it both ways and compare speed and hashes.
 

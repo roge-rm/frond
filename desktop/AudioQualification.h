@@ -87,9 +87,4 @@ inline bool qualified(frondFirmware::Device device, const QString& session, cons
     return device != frondFirmware::deviceFromId("sony-clie-tg50") &&
         profile.capabilities.fastAudio && matchesNor(device,session,nor,profile.frontend.fastAudioNorMd5);
 }
-inline bool sonyPreviewEligible(frondFirmware::Device device, const QString& session, const QString& nor) {
-    return device == frondFirmware::deviceFromId("sony-clie-tg50") &&
-        frondFirmware::capabilities(device).fastAudio &&
-        matchesNor(device,session,nor,"4fcdb4d5f12c04a4969088a9ed839f41");
-}
 }

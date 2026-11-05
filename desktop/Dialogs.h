@@ -20,7 +20,7 @@ class MachineSettings : public QWidget {
     void setDevice(frondFirmware::Device device, bool qualified = false);
     QSlider* windowScale;
     QLabel* scaleLabel;
-    QCheckBox *smoothLcd, *audio, *fastAudio, *showKeyboard, *sonyAudioPreview;
+    QCheckBox *smoothLcd, *audio, *fastAudio, *showKeyboard;
     QComboBox* jogControls;
     QLabel* jogControlsLabel;
     // Only shown with FROND_ENGINE_SETTING=1 until the Fast engine is qualified; never for 68k devices.

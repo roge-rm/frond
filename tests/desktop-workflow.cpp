@@ -1068,7 +1068,7 @@ for line in s.makefile('rb'):
             const auto args = read(".args").split('\n');
             QCOMPARE(args.mid(0, 3), QStringList({"--device", "palm-iiix", firmwareRoot + "/palm-iiix/nor.bin"}));
             for (const char* option : {"--nand", "--work-folder", "--usb", "--bluetooth", "--engine", "--fast-audio",
-                                       "--sony-audio-preview", "--jog-controls", "--hide-keyboard", "--no-sound"})
+                                       "--jog-controls", "--hide-keyboard", "--no-sound"})
                 QVERIFY2(!args.contains(option), option);
             const auto text = read(".args");
             QVERIFY(text.contains("--window-scale\n3\n") && text.contains("--contrast\n30\n") && text.contains("--speed\nuncapped\n"));
@@ -1226,7 +1226,7 @@ for line in s.makefile('rb'):
                                static_cast<QWidget*>(c->windowScale), static_cast<QWidget*>(c->smoothLcd), static_cast<QWidget*>(c->audio)})
                 QVERIFY(w->isVisibleTo(&dialog));
             for (QWidget* w : {static_cast<QWidget*>(c->engine), static_cast<QWidget*>(c->fastAudio), static_cast<QWidget*>(c->showKeyboard),
-                               static_cast<QWidget*>(c->sonyAudioPreview), static_cast<QWidget*>(c->jogControls)})
+                               static_cast<QWidget*>(c->jogControls)})
                 QVERIFY(!w->isVisibleTo(&dialog));
             QVERIFY(c->audio->isEnabled());
             QCOMPARE(c->contrast->value(), 20); QVERIFY(c->speed->currentData().toBool());
