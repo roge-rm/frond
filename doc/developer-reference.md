@@ -398,49 +398,6 @@ The debugger costs almost nothing while no gdb is connected. `make test-frond-68
 
 `tools/palm-pppd.sh` connects the serial port to slirp or pppd, see [Palm IIIx serial and PPP](using-frond.md#palm-iiix-serial-and-ppp).
 
-## CloudpilotEmu command line tool
-
-The upstream CloudpilotEmu sources in `src/cloudpilot/native/` (`main.cpp`, `Commands.cpp`) are a separate command line emulator, `cloudpilot-emu`. Frond's makefile doesn't build or ship it, `frond-68k` is Frond's runner for the same core. The source is in the tree, so `make check-docs` lists its options and commands here.
-
-`cloudpilot-emu [options] image`. The image is a ROM or a saved image.
-
-| Option | Meaning |
-| --- | --- |
-| `-d`, `--device-id DEVICE` | Device ID (one of the IDs it lists when given a bad one). |
-| `--net-native` | Enable native network. |
-| `--net-proxy URI` | Network redirection through this `http` or `https` proxy. |
-| `--proxy-insecure` | Don't check the proxy's certificate. |
-| `--proxy-ca FILE` | Root certificate for the proxy. |
-| `--mount FILE` | Mount a card image. |
-| `-s`, `--script FILE` | Run console commands from a file at start. |
-| `-l`, `--listen PORT` | Listen for GDB on this port. |
-| `--wait-for-attach` | Wait for the debugger before running. |
-| `--debug-app FILE` | Configure the debugger for this app (the ELF file). |
-| `--trace-debugger`, `--trace-netlib`, `--trace-installer` | Log the GDB stub, the network API, or the database installer. |
-| `--small-window` | Use the smaller window. |
-
-Its console commands:
-
-| Command | Meaning |
-| --- | --- |
-| `set-user-name NAME` | Set the HotSync user name. |
-| `reset-soft`, `reset-noext` | Soft reset, or a reset without loading extensions. |
-| `save-image FILE [CARD]` | Save the session image, and the mounted card's image as well if CARD is given. |
-| `switch-image FILE` | Switch to another ROM or image. Not while a debugger is connected. |
-| `save-backup FILE`, `save-backup-with-rom FILE` | Save a backup of the RAM databases, or with the ROM ones. |
-| `save-card FILE` | Save the mounted card image. |
-| `trace [FRAMES] [stack\|nostack]` | Print an m68k stack trace, 3 frames by default. |
-| `locate FILE` | Find a file's contents in RAM. |
-| `debug-set-app FILE [NAME]` | Load an ELF file, find its code in Palm memory and configure GDB for it. Break mode becomes app-only. |
-| `debug-info` | Show the break mode and whether a debugger is connected. |
-| `debug-set-break-mode all\|app-only\|ram-only` | Set where the debugger breaks. |
-| `dump-memory FILE` | Write the Palm's RAM to a file. |
-| `show-syscall-traps` | List the syscall traps. |
-| `set-syscall-trap TRAP`, `clear-syscall-trap TRAP` | Break on a syscall trap word (decimal or `0x` hex), or stop. |
-| `clear-all-syscall-traps` | Remove all syscall traps. |
-
-It also has `install`, `launch`, `mount`, `unmount` and `reset-hard`, as `frond` does.
-
 ## Environment variables
 
 ### Core
