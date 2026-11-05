@@ -73,6 +73,8 @@ open class FrondActivity : SDLActivity() {
     // The core library SDLActivity loads, and the control socket's file name in app storage.
     protected open val coreLibrary get() = "main"
     protected open val controlSocket get() = "control.sock"
+    // The core doesn't answer the control link until gdb first attaches (ARM). The 68k core does.
+    protected open val gdbBlocksLink get() = true
 
     override fun getLibraries(): Array<String> = arrayOf("c++_shared", "SDL2", "SDL2_image", coreLibrary)
 
@@ -455,6 +457,16 @@ open class FrondActivity : SDLActivity() {
         }
     }
 
+    // Sends a 68k machine's saved Speed to the core, which changes it at once.
+    fun applySpeed() {
+        if (!launchDevice().runs68k) return
+        val wanted = (Sessions.forPath(this, sessionPath)?.settings ?: return).speed.arg
+        Thread({
+            val reply = link.request("speed", wanted, timeoutSeconds = 10)
+            if (!reply.ok) Log.w(TAG, "speed: ${reply.code} ${reply.message}")
+        }, "FrondSpeedSet").apply { isDaemon = true }.start()
+    }
+
     // Asks the core whether the infrared keyboard is attached and shows the keyboard button to match. Waits for
     // the control link first, which with the debugger on can be a long time.
     private fun readKeyboard() {
@@ -538,11 +550,24 @@ open class FrondActivity : SDLActivity() {
                 addresses.isEmpty() -> "Waiting for gdb on port ${settings.debuggerPort}"
                 else -> "Waiting for gdb at " + addresses.joinToString(", ") { "$it:${settings.debuggerPort}" }
             }
-            runOnUiThread { if (!link.connectedOnce && !leaving) { note.text = text; note.visibility = View.VISIBLE } }
+            runOnUiThread { if (!(gdbBlocksLink && link.connectedOnce) && !leaving) { note.text = text; note.visibility = View.VISIBLE } }
             // Nothing can reach the core's gdb port, so let the Palm run without it.
             if (error != null) releaseDebugger(port)
         }, "FrondDebugger").apply { isDaemon = true }.start()
-        link.whenConnected { runOnUiThread { layout?.removeView(note) } }
+        if (gdbBlocksLink) {
+            link.whenConnected { runOnUiThread { layout?.removeView(note) } }
+        } else {
+            // This core runs the Palm and answers the control link before gdb attaches, so the note stays until
+            // gdb-state says gdb is connected.
+            Thread({
+                while (!leaving && !destroyed) {
+                    val reply = link.request("gdb-state", timeoutSeconds = 5)
+                    if (reply.ok && reply.message.startsWith("connected")) break
+                    Thread.sleep(1000)
+                }
+                runOnUiThread { layout?.removeView(note) }
+            }, "FrondGdbNote").apply { isDaemon = true }.start()
+        }
     }
 
     // Ends any gdb session, which lets a Palm stopped in gdb run, and lets a core still waiting for its first gdb
@@ -574,7 +599,7 @@ open class FrondActivity : SDLActivity() {
     }
 
     // The core is still waiting for its first gdb and hasn't run the Palm.
-    val waitingForGdb: Boolean get() = debugPort != null && !link.connectedOnce
+    val waitingForGdb: Boolean get() = gdbBlocksLink && debugPort != null && !link.connectedOnce
 
     // A small note over the emulator while back saves the session.
     private fun addSavingNote() {

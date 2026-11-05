@@ -105,8 +105,10 @@ def check_tones(rom, session, root, probes):
     expected = [(440, .3), (1000, .3), (2500, .3)]
     if len(found) < 4:
         raise AssertionError(f'tones {found}')
+    # The guest ends a tone on its own timer, which on OS 3.1 steps about 16 ms, so a tone runs 300 to 336 ms
+    # depending on where the start falls in a step.
     for (frequency, length), (_, got_length, got) in zip(expected, found[-4:-1]):
-        if abs(got - frequency) > frequency * 0.02 or abs(got_length - length) > 0.03:
+        if abs(got - frequency) > frequency * 0.02 or abs(got_length - length) > 0.04:
             raise AssertionError(f'{frequency} Hz for {length} s, got {got:.1f} Hz for {got_length:.3f} s')
     # The Info sound: 500 Hz, short.
     if abs(found[-1][2] - 500) > 10 or found[-1][1] > 0.2:
