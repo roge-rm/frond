@@ -125,8 +125,8 @@ class DeviceInputTest(unittest.TestCase):
                           'ez68k-rom'})
         self.assertTrue(all(p['status'] == 'inherited-unverified' for p in data['profiles'][2:4]))
         iiix = data['profiles'][6]
-        self.assertEqual((iiix['name'], iiix['status'], iiix['runner_eligible'], iiix['runs_68k']),
-                         ('palm-iiix', 'staged', False, True))
+        self.assertEqual((iiix['name'], iiix['status'], iiix['runner_eligible'], iiix['runs_68k'], iiix['available']),
+                         ('palm-iiix', 'experimental-desktop', False, True, True))
         self.assertTrue(all(p['status'] == 'reserved' for p in data['profiles'][7:]))
 
     def test_tx_raw_geometry_and_options(self):

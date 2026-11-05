@@ -1,0 +1,22 @@
+diff --git a/src/common/device_profile5.h b/src/common/device_profile5.h
+--- a/src/common/device_profile5.h
++++ b/src/common/device_profile5.h
+@@ -132,12 +132,14 @@
+       DeviceStorageSlot5::memoryStick, 1073741887, true, true, 38, true},
+      4 | 8 | 16 | 32 | 64 | 128, 1886},
+     // DragonBall EZ with 4 MiB RAM and a 2 MiB flash part, run by frond-68k. Takes the IIIx 3.1 ROMs, the
+-    // generic OS 3.5 EZ ROMs and the IIIx/V 4.1 ROM. Not offered by the frontends yet.
+-    {deviceTypeIIIx, "palm-iiix", "Palm IIIx", DeviceCohort5::ez68k, DeviceSupport5::staged,
++    // generic OS 3.5 EZ ROMs and the IIIx/V 4.1 ROM. Piezo, serial and IrDA; nothing else is on the device.
++    // The desktop offers it; Android's inventory leaves 68k devices out until it has a 68k runner.
++    {deviceTypeIIIx, "palm-iiix", "Palm IIIx", DeviceCohort5::ez68k, DeviceSupport5::experimentalDesktop,
+      DeviceDetect5::romHeader68k, 0x70616c6d /* palm */, 0x73756d6f /* sumo */, DeviceBoard5::ez328, DeviceArt::iiix,
+-     {}, 0, 0, 4u << 20, 4u << 20, DisplayMode::mode_160x160, 1u << 1, false,
++     {false, false, true, false, false, true, false, true, false},
++     0, 0, 4u << 20, 4u << 20, DisplayMode::mode_160x160, 1u << 1, false,
+      DeviceNorLayout5::any, 0, 0, false, 0, 0,
+-     {false, "iiix", 160, 160, 60, 44, "Date Book|Address|To Do List|Memo Pad",
++     {true, "iiix", 160, 160, 60, 44, "Date Book|Address|To Do List|Memo Pad",
+       "up|down|app1|app2|app3|app4|power", -1, -1, -1, -1, false, false, false, "", "iiix"},
+      0, 0, 16580608},
+     // Reserved names: art only, no board yet.

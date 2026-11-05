@@ -23,9 +23,14 @@ class MachineSettings : public QWidget {
     QCheckBox *smoothLcd, *audio, *fastAudio, *showKeyboard, *sonyAudioPreview;
     QComboBox* jogControls;
     QLabel* jogControlsLabel;
-    // Only shown with FROND_ENGINE_SETTING=1 until the Fast engine is qualified.
+    // Only shown with FROND_ENGINE_SETTING=1 until the Fast engine is qualified; never for 68k devices.
     QComboBox* engine;
+    // 68k devices only.
+    QSlider* contrast;
+    QComboBox* speed;
  private:
+    QLabel *contrastLabel, *engineLabel, *speedLabel;
+    QWidget* speedGroup;
     bool automaticScale;
     frondSessions::Preferences originalPreferences;
 };
@@ -51,6 +56,7 @@ class FirmwareDialog : public QDialog {
     QString root;
     QComboBox* device;
     QLineEdit *nor, *nand;
+    QLabel* norLabel{nullptr};
     frondFirmware::Device stored{frondFirmware::Device::automatic};
 };
 

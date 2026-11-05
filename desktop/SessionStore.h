@@ -51,6 +51,9 @@ struct Preferences {
     JogControls jogControls{JogControls::keyboard};
     // Engine: Fast is the JIT, Exact the interpreter. Applies at next launch.
     bool fastEngine{false};
+    // 68k devices: LCD contrast 0-100, and Uncapped speed instead of the real clock.
+    int contrast{50};
+    bool uncapped{false};
 };
 inline QString preferencesPath(const QString& path) { return path + ".settings.json"; }
 inline bool readPreferences(const QString& path, Preferences* result) {
@@ -63,7 +66,9 @@ inline bool readPreferences(const QString& path, Preferences* result) {
     if (scale < 4 || scale > 8) return false;
     *result = {scale, object.value("smooth").toBool(), object.value("audio").toBool(), object.value("fastAudio").toBool(), object.value("microphone").toBool(false),
                object.value("showKeyboard").toBool(true), object.value("sonyAudioPreview").toBool(false), readJogControls(object),
-               object.value("engine").toString() == QLatin1String("fast")};
+               object.value("engine").toString() == QLatin1String("fast"),
+               std::clamp(object.value("contrast").toInt(50), 0, 100),
+               object.value("speed").toString() == QLatin1String("uncapped")};
     return true;
 }
 // The caller holds the session lock, or has just reserved a new machine.
@@ -73,7 +78,8 @@ inline QString writePreferences(const QString& path, const Preferences& prefs) {
                              {"smooth", prefs.smooth}, {"audio", prefs.audio}, {"fastAudio", prefs.fastAudio}, {"microphone", prefs.microphone},
                              {"showKeyboard", prefs.showKeyboard}, {"jogControls", jogControlsName(prefs.jogControls)},
                              {"showJogControls", prefs.jogControls != JogControls::hidden}, {"sonyAudioPreview", prefs.sonyAudioPreview},
-                             {"engine", prefs.fastEngine ? "fast" : "exact"}};
+                             {"engine", prefs.fastEngine ? "fast" : "exact"}, {"contrast", std::clamp(prefs.contrast, 0, 100)},
+                             {"speed", prefs.uncapped ? "uncapped" : "original"}};
     const auto bytes = QJsonDocument(object).toJson(QJsonDocument::Compact);
     if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit())
         return QStringLiteral("Couldn't save the machine settings.");

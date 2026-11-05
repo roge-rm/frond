@@ -179,10 +179,12 @@ class SessionStoreTest : public QObject {
         // Available sessions open; a reserved device stays unavailable.
         write(folder() + "/Zire.frond", header(6, "palm-zire-72"));
         write(folder() + "/Clie.frond", header(6, "sony-clie-tg50"));
-        write(folder() + "/Reserved.frond", header(6, "palm-iiix"));
+        write(folder() + "/IIIx.frond", header(8, "palm-iiix"));
+        write(folder() + "/Reserved.frond", header(6, "palm-m515"));
         for (const auto& info : list(folder())) {
             if (info.name == "Zire") QVERIFY(info.saved && !info.old && info.device == "palm-zire-72");
             if (info.name == "Clie") QVERIFY(info.saved && !info.old && info.device == "sony-clie-tg50");
+            if (info.name == "IIIx") QVERIFY(info.saved && !info.old && info.device == "palm-iiix");
             if (info.name == "Reserved") QVERIFY(info.old);
         }
     }
@@ -692,6 +694,42 @@ class SessionStoreTest : public QObject {
             QVERIFY(roundTrip.showKeyboard && roundTrip.jogControls == JogControls::screen);
             QCOMPARE(QFileInfo(one).size(), guest);
         }
+    }
+    // A Palm IIIx session: one v8 file with no cards, its contrast and speed in the machine settings.
+    void iiixSession() {
+        QByteArray bytes;
+        for (quint32 value : {frondSessions::magic, 8u}) put32(bytes, value);
+        bytes.append(QByteArray("palm-iiix").leftJustified(32, '\0', true));
+        put32(bytes, 0); put32(bytes, 0);
+        for (quint64 size : {0x178000ull, 0ull, 4ull << 20, 0ull, 0ull}) put64(bytes, size);
+        put32(bytes, 0);
+        bytes.append("savestate");
+        const auto path = filePath(folder(), "Palm IIIx");
+        write(path, bytes);
+        const auto info = describe(path);
+        QCOMPARE(info.device, QString("palm-iiix"));
+        QVERIFY(info.saved && !info.old && openable(readHeader(path)));
+        Preferences prefs, loaded;
+        QCOMPARE(prefs.contrast, 50); QVERIFY(!prefs.uncapped);
+        prefs.contrast = 30; prefs.uncapped = true;
+        QVERIFY(writePreferences(path, prefs).isEmpty());
+        QVERIFY(readPreferences(path, &loaded));
+        QCOMPARE(loaded.contrast, 30); QVERIFY(loaded.uncapped);
+        { QFile saved(preferencesPath(path)); QVERIFY(saved.open(QIODevice::ReadOnly));
+          const auto json = saved.readAll(); QVERIFY(json.contains(R"("speed":"uncapped")") && json.contains(R"("contrast":30)")); }
+        QString name;
+        const auto error = duplicate(folder(), info, &name);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(name, QString("Palm IIIx 2"));
+        const auto copy = filePath(folder(), name);
+        { QFile file(copy); QVERIFY(file.open(QIODevice::ReadOnly)); QCOMPARE(file.readAll(), bytes); }
+        QCOMPARE(describe(copy).device, QString("palm-iiix"));
+        QVERIFY(readPreferences(copy, &loaded));
+        QCOMPARE(loaded.contrast, 30); QVERIFY(loaded.uncapped);
+        // Settings from before these fields read as contrast 50 and Original.
+        write(preferencesPath(copy), R"({"version":1,"scale":6,"smooth":false,"audio":true,"fastAudio":false})");
+        QVERIFY(readPreferences(copy, &loaded));
+        QCOMPARE(loaded.contrast, 50); QVERIFY(!loaded.uncapped);
     }
     void machinePreferences() {
         const auto one = filePath(folder(), "One"), two = filePath(folder(), "Two");
