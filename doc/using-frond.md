@@ -1,12 +1,12 @@
 # Using Frond
 
-How to run Palm machines in Frond on Linux and Android. The two apps have the same features, so this covers both and says where they differ. Install and firmware sizes are in the [README](../README.md). For command line options, console commands and the control socket see [developer-reference.md](developer-reference.md), for tests [testing.md](testing.md) and for speed and audio diagnostics [performance.md](performance.md).
+How to run Palm machines in Frond on Linux and Android. The two apps have the same features, so this covers both and says where they differ. The Palm IIIx is a 68k machine and has its own notes under Settings, Buttons and Connections. Install and firmware sizes are in the [README](../README.md). For command line options, console commands and the control socket see [developer-reference.md](developer-reference.md), for tests [testing.md](testing.md) and for speed and audio diagnostics [performance.md](performance.md).
 
 ## Firmware and machines
 
 Each Palm you run is a machine on the Devices list (Home on Android). Frond works out the device from the NOR image and never changes your files.
 
-- **Firmware…** (File menu on Linux, the menu on Android) imports a NOR image and, where the device has one, a NAND image. **Add device** does the same and then starts a new machine. Device can detect the model from the NOR image, or you can choose it. A NOR image that belongs to another device than the one chosen is refused. The images are copied into `~/.local/share/frond/firmware/<device>/` on Linux, so you can move the originals.
+- **Firmware…** (File menu on Linux, the menu on Android) imports a NOR image and, where the device has one, a NAND image. **Add device** does the same and then starts a new machine. Device can detect the model from the NOR image, or you can choose it. The IIIx takes one ROM file (OS 3.1 retail or debug, a generic OS 3.5 EZ ROM, or the IIIx/V OS 4.1 ROM), shown as ROM image, and no NAND. A NOR image that belongs to another device than the one chosen is refused. The images are copied into `~/.local/share/frond/firmware/<device>/` on Linux, so you can move the originals.
 - The first start runs Palm OS setup. If taps land in the wrong place, calibrate the screen in Prefs.
 - **Edit settings…** changes a machine's display and sound settings while it's stopped. Cancel keeps the old ones. Two machines of the same model can have different settings.
 - **Rename…**, **Duplicate**, **Export…** and **Delete** are in the row's menu (right-click or the … button on Linux). **Import session…** in the File menu (Import session in the Android menu) brings an exported machine back. A row shows the device, when it was saved and its size. "Saved by an older Frond" rows can only be deleted.
@@ -52,7 +52,9 @@ Set these when you add a machine, or in Edit settings while it's stopped. On And
 | Sound | Turns Palm sound on or off. It can also be switched on the running page. |
 | Low-latency audio | Less delay between a tap and the sound. See below. |
 | Sony audio preview | The TG50's version of the above. |
-| Engine | Exact or Fast. It's hidden: on Linux set `FROND_ENGINE_SETTING=1`, on Android it shows in debug builds. See [performance.md](performance.md). |
+| Contrast | Palm IIIx only. 0 to 100, default 50, lower fades the ink and higher darkens the panel. It's on the running page too and is saved with the machine. |
+| Speed | Palm IIIx only. Original runs at the real 16.58 MHz, Uncapped lets the host run it as fast as it can (timers stay real time). On Android it's in the running menu too and applies at once. |
+| Engine | Exact or Fast. It's hidden: on Linux set `FROND_ENGINE_SETTING=1`, on Android it shows in debug builds. See [performance.md](performance.md). The IIIx only has Exact, so it never shows there. |
 
 Android also has Settings in the home menu: Orientation (follow the phone, portrait or landscape), the gdb server and its port, and the controller keys.
 
@@ -68,18 +70,20 @@ Click or tap the buttons under the screen and the silkscreen areas. Click and ho
 
 Keys, with the infrared keyboard detached:
 
-| Key | T\|X | E2 | Zire 72 | TG50 |
-|---|---|---|---|---|
-| Arrows, Enter | five-way, select | five-way, select | five-way, select | scroll rocker |
-| F1 | Home | Calendar | Calendar | Date Book |
-| F2 | Calendar | Contacts | Contacts | Address |
-| F3 | Contacts | Tasks | Music | To Do |
-| F4 | Web | Note Pad | Camera | Memo Pad |
-| F5 | | | Voice button (hold to record) | Voice button |
-| F6 | | | | Home |
-| Escape | Power | Power | Power | Power |
+| Key | T\|X | E2 | Zire 72 | TG50 | IIIx |
+|---|---|---|---|---|---|
+| Arrows, Enter | five-way, select | five-way, select | five-way, select | scroll rocker | scroll rocker (up and down) |
+| F1 | Home | Calendar | Calendar | Date Book | Date Book |
+| F2 | Calendar | Contacts | Contacts | Address | Address |
+| F3 | Contacts | Tasks | Music | To Do | To Do List |
+| F4 | Web | Note Pad | Camera | Memo Pad | Memo Pad |
+| F5 | | | Voice button (hold to record) | Voice button | |
+| F6 | | | | Home | |
+| Escape | Power | Power | Power | Power | Power |
 
 On the TG50 type with the computer keyboard, left Alt is Blue and right Alt is Red. Its jog wheel, jog press and Back are on the side tab. Help → Hardware Keyboard Controls lists the same keys.
+
+The IIIx has the four app buttons, the scroll rocker and power under the screen, and the Applications, Menu, Calculator, Find and Graffiti areas on its silkscreen. Typed text from the computer keyboard goes into the Palm. Hold power for about two seconds to turn the backlight on or off. The cradle's HotSync button is HotSync on the running page (Linux) or in the menu (Android).
 
 **Hold** (TG50) latches the device's Hold switch, which turns off the screen and controls, and audio keeps playing. It's saved with the machine.
 
@@ -137,7 +141,7 @@ Default Android ports are 5030 for infrared, 5032 Bluetooth, 5033 serial and 503
 
 ### Network
 
-Network is the T|X only. Choose a mode before opening a network app:
+Network is the T|X only. The Palm IIIx has no network setting, it connects over PPP on its serial port, see [Palm IIIx serial and PPP](#palm-iiix-serial-and-ppp). Choose a mode before opening a network app:
 
 - Virtual Wi-Fi (Frond): turn on Wi-Fi in Palm OS, scan and connect to the open **Frond** network. A virtual router gives it an address, DNS and IPv4 through the computer's or phone's connection, with no root, bridge or Wi-Fi adapter needed. The router is 10.0.2.2, so use that for a service on your computer. Blazer loads HTTP pages, but its old HTTPS is refused by most sites. For Network HotSync run `pilot-xfer -p net:127.0.0.1 -l` and enter 10.0.2.2 as the PC address in the Palm's HotSync setup.
 - Internet via host: forwards some 68k NetLib calls to host sockets. Blazer's Wi-Fi workflow doesn't work this way, use Virtual Wi-Fi.
@@ -148,6 +152,49 @@ The mode is saved. Live connections close when the machine resumes, so reload or
 ### Serial port
 
 The cradle serial port goes to a PTY or a TCP port. Open the path with `screen` or `minicom`, or connect to the port, for example `nc 127.0.0.1 5023`. Peers get CTS, DSR and DCD while connected, RTS flow control is honoured, and bytes sent with no peer are dropped. On Android use Wait for a peer or Connect to an address, then `link-pty.py PHONE:5033 --link /tmp/palm-serial` on a computer.
+
+### Palm IIIx serial and PPP
+
+The IIIx's serial port is the cradle connector, set to Off, a PTY or a TCP port like the other serial ports. Serial HotSync works with pilot-link on that path (`pilot-xfer -p /dev/pts/N -l`): press HotSync on the running page, then start HotSync on the Palm. Infrared beaming works as on the other devices.
+
+The IIIx reaches the network the way the real one did, with PPP over the serial port to a PPP server on the host. Frond doesn't redirect NetLib for it. Put the serial port on a PTY or TCP port, from the command line:
+
+```sh
+out/frond-68k iiix.frond --serial pty     # prints: serial: pty /dev/pts/N connected
+out/frond-68k iiix.frond --serial tcp:5000
+```
+
+Host with slirp (no root). Install Debian's `slirp` package (and `socat` for a TCP serial port), then run slirp on the port:
+
+```sh
+tools/palm-pppd.sh /dev/pts/N
+tools/palm-pppd.sh tcp:5000
+```
+
+slirp gives the guest 10.0.2.15 and DNS through 10.0.2.3, and makes the guest's connections from the host as an ordinary user, so nothing else needs setting up. Add `--log DIR` to keep slirp's debug log and its packet and connection counts in `DIR/slirp_debug`. The script needs a C compiler: Debian's 64-bit slirp exits on its first idle wait, and `tools/slirp-select-fix.c` is preloaded to fix that. The second argument is the speed, 57600 by default.
+
+Host with pppd (root). pppd needs root, or the `dip` group and `/dev/ppp` (the `ppp_generic` module):
+
+```sh
+sudo tools/palm-pppd.sh --pppd /dev/pts/N
+```
+
+The guest gets 10.68.0.2, the host is 10.68.0.1 and the DNS server is the host's first one from `/etc/resolv.conf`. For the guest to reach past the host, turn on IP forwarding and NAT, for example:
+
+```sh
+sudo sysctl net.ipv4.ip_forward=1
+sudo iptables -t nat -A POSTROUTING -s 10.68.0.2 -j MASQUERADE
+```
+
+On the Palm, on OS 3.5 and later:
+
+1. In Prefs, Network, pick a service (or make a new one) and set Connection to Direct Serial. Leave the user name empty.
+2. In Details, connection type PPP, Query DNS on, IP address automatic, and an empty login script.
+3. Tap Connect. The panel shows the connection come up and the button turns into Disconnect.
+
+On 3.1 set the modem to Direct Connect if it's offered and the phone to `00`.
+
+Programs that use NetLib, like a web clipping app or a telnet client, then work until you tap Disconnect or the machine sleeps. They also dial by themselves when the service isn't connected yet.
 
 ### USB HotSync
 
@@ -192,22 +239,24 @@ Tested: discovery, sending a Memo or file by Bluetooth (OPP), PIN and Trusted De
 
 ## Availability and limits
 
-| | T\|X | E2 | Zire 72 | TG50 |
-|---|---|---|---|---|
-| Sound | yes | yes | yes | yes, see below |
-| Low-latency audio | yes | yes | | Sony audio preview |
-| Microphone | | | | yes |
-| Network | yes | | | |
-| Serial port | yes | | | yes |
-| USB HotSync | yes | yes | yes | yes |
-| Infrared beaming | yes | yes | yes | yes |
-| Infrared keyboard | yes | yes | yes | yes |
-| Bluetooth | yes | yes | yes | yes |
-| Camera | | | no sensor | |
-| Hold | | | | yes |
-| Card | SD | SD | SD | Memory Stick, Pro |
+| | T\|X | E2 | Zire 72 | TG50 | IIIx |
+|---|---|---|---|---|---|
+| Sound | yes | yes | yes | yes, see below | yes, piezo |
+| Low-latency audio | yes | yes | | Sony audio preview | |
+| Microphone | | | | yes | |
+| Network | yes | | | | PPP over serial |
+| Serial port | yes | | | yes | yes |
+| USB HotSync | yes | yes | yes | yes | |
+| Infrared beaming | yes | yes | yes | yes | yes |
+| Infrared keyboard | yes | yes | yes | yes | |
+| Bluetooth | yes | yes | yes | yes | |
+| Camera | | | no sensor | | |
+| Hold | | | | yes | |
+| Card | SD | SD | SD | Memory Stick, Pro | none |
 
 The Zire 72's Camera shows a white screen and goes back to the launcher. The TG50 plays beeps, alarms and Sony Voice Recorder audio. Standard Palm SndStream (not in its firmware), the remote control, MagicGate and Memory Stick audio aren't there. Serial works at 9600, 57600 and 115200 baud. HotSync over the serial port isn't tested.
+
+On the IIIx, serial HotSync is tested with pilot-link (install, fetch, backup). It has no Fast engine, no SD slot and no Bluetooth, USB or Wi-Fi, as on the real one. Its backlight shows as a green panel.
 
 Microphone (TG50) is off each time it starts. Turn it on under Device while the machine runs. Android asks for permission the first time and arms it when you return to the device. Saving, file work, stopping, reset, sleep and leaving the app turn it off again. On Linux, hiding the device window does too.
 

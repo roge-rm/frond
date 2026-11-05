@@ -1,6 +1,6 @@
 # Frond
 
-Frond is a Palm OS emulator for Linux and Android, for running and writing Palm apps and games. It runs the Palm T|X, Tungsten E2 and Zire 72, and the Sony CLIÉ TG50 as experimental, with sound, SD cards, infrared, Bluetooth, HotSync, networking and saved sessions. More devices are on the way, older 68k Palms first.
+Frond is a Palm OS emulator for Linux and Android, for running and writing Palm apps and games. It runs the Palm T|X, Tungsten E2 and Zire 72, the Palm IIIx, and the Sony CLIÉ TG50 as experimental, with sound, SD cards, infrared, Bluetooth, HotSync, networking and saved sessions. More devices are on the way, older 68k Palms next.
 
 It's built on [CloudpilotEmu](https://github.com/cloudpilot-emu/cloudpilot-emu) and [uARM](https://github.com/uARM-Palm/uARM). You need your own firmware for each device, none is included.
 
@@ -62,16 +62,18 @@ The TG50 takes a Memory Stick from 4 to 128 MB, or a Memory Stick Pro from 256 M
 
 ### Peripherals
 
-| | T\|X | E2 | Zire 72 | TG50 |
-|---|---|---|---|---|
-| Virtual Wi-Fi, onto the internet through your computer or phone | yes | | | |
-| Cradle serial port, to a PTY or TCP port for terminal programs | yes | | | yes |
-| Microphone | | | | yes |
-| USB HotSync over a PTY or TCP port | yes | yes | yes | yes |
-| [Infrared beaming](doc/using-frond.md#infrared) between Frond machines | yes | yes | yes | yes |
-| [Virtual Bluetooth](doc/using-frond.md#bluetooth), with a local provider you start yourself | yes | yes | yes | yes |
+| | T\|X | E2 | Zire 72 | TG50 | IIIx |
+|---|---|---|---|---|---|
+| Virtual Wi-Fi, onto the internet through your computer or phone | yes | | | | |
+| Cradle serial port, to a PTY or TCP port for terminal programs and [HotSync](doc/using-frond.md#palm-iiix-serial-and-ppp) | yes | | | yes | yes |
+| Microphone | | | | yes | |
+| USB HotSync over a PTY or TCP port | yes | yes | yes | yes | |
+| [Infrared beaming](doc/using-frond.md#infrared) between Frond machines | yes | yes | yes | yes | yes |
+| [Virtual Bluetooth](doc/using-frond.md#bluetooth), with a local provider you start yourself | yes | yes | yes | yes | |
 
 Anything else stays greyed out until it's done, like the E2's and Zire's networking and serial and the Zire's camera.
+
+The Palm IIIx (Palm OS 3.1, 68k DragonBall EZ) runs in its own runner, `frond-68k`. It has sound, backlight, serial with the HotSync button, infrared and the screen contrast, and no SD, USB, Bluetooth or Wi-Fi, as on the real one. It only has the exact engine (no Fast), at its real 16.58 MHz or Uncapped. Networking is PPP over the serial port, see [Palm IIIx serial and PPP](doc/using-frond.md#palm-iiix-serial-and-ppp). Android has it too, and the debugger works with prc-tools' gdb, see [Palm IIIx](doc/developer-reference.md#palm-iiix-frond-68k).
 
 The infrared keyboard and beaming share the port, so take the keyboard off before turning beaming on. On Android infrared, Bluetooth, serial, USB HotSync and the gdb server go over the network, to another Frond or to `tools/link-irda.py`, `tools/link-bluetooth.py` and `tools/link-pty.py` (for pilot-link) on a computer.
 
@@ -128,6 +130,9 @@ Or get the `.deb` for your machine, amd64 or arm64, from [Releases](https://gith
 | Tungsten E2 | 8 MiB | 34,603,008 bytes raw dump, optional |
 | Zire 72 | 14,942,208 bytes | none |
 | Sony CLIÉ TG50 | 13,041,664 bytes | none |
+| Palm IIIx | one ROM file, 1.2 to 1.7 MB | none |
+
+The IIIx takes the OS 3.1 ROM (retail or debug), a generic OS 3.5 EZ ROM (retail or debug), or the IIIx/V OS 4.1 ROM.
 
 Frond works out the device from the NOR and never changes your files. On Linux use File → Firmware… or Add device, on Android import them when you add a device. Go through Palm OS setup the first time, and if taps land in the wrong spot, calibrate the screen in Prefs.
 
