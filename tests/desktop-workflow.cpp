@@ -419,11 +419,11 @@ for line in s.makefile('rb'):
         window.findChild<QCheckBox*>("keyboardAttached")->click();
         QTRY_VERIFY_WITH_TIMEOUT(read(".commands").contains("keyboard-attach"), 5000);
         QTRY_VERIFY(window.findChild<QCheckBox*>("keyboardAttached")->isChecked());
-        QVERIFY(!window.findChild<QComboBox*>("serialMode")->isEnabled());
-        QVERIFY(window.findChild<QComboBox*>("serialMode")->toolTip().contains("Not available on the Tungsten E2 yet"));
+        QTRY_VERIFY(window.findChild<QComboBox*>("serialMode")->isEnabled());
+        QVERIFY(!window.findChild<QComboBox*>("serialMode")->toolTip().contains("Not available"));
         QVERIFY(!window.findChild<QSpinBox*>("serialPort")->isEnabled());
         QTRY_VERIFY(window.findChild<QComboBox*>("usbMode")->isEnabled());
-        QVERIFY(!read(".commands").contains("serial-state"));
+        QTRY_VERIFY_WITH_TIMEOUT(read(".commands").contains("serial-state"), 5000);
         QTRY_VERIFY_WITH_TIMEOUT(read(".commands").contains("usb-state"), 5000);
         QVERIFY(read(".args").contains("--usb\npty"));
         QTRY_VERIFY(window.findChild<QLabel*>("usbState")->text().contains("Tungsten E2 enumerated"));
@@ -576,13 +576,15 @@ for line in s.makefile('rb'):
         QTRY_VERIFY_WITH_TIMEOUT(read(".commands").contains("network-state"), 5000);
         QTRY_VERIFY_WITH_TIMEOUT(read(".commands").contains("usb-state"), 5000);
         QVERIFY(!read(".commands").contains("serial-state"));
-        // Network, serial and low-latency audio grey out with the shared wording; the rest stay.
-        for (const char* name : {"networkMode", "serialMode"}) {
-            auto* box = window.findChild<QComboBox*>(name);
+        // Network greys out with the shared wording; the Zire has no serial port, so that row is left out.
+        {
+            auto* box = window.findChild<QComboBox*>("networkMode");
             QVERIFY(!box->isEnabled());
             QCOMPARE(box->toolTip(), QString("Not available on the Zire 72 yet"));
         }
-        QVERIFY(!window.findChild<QSpinBox*>("serialPort")->isEnabled());
+        QVERIFY(!window.findChild<QComboBox*>("serialMode")->isVisibleTo(&window));
+        QVERIFY(!window.findChild<QSpinBox*>("serialPort")->isVisibleTo(&window));
+        QVERIFY(!window.findChild<QPushButton*>("hotsync")->isVisibleTo(&window));
 
         QTRY_VERIFY(window.findChild<QComboBox*>("usbMode")->isEnabled());
         QVERIFY(window.findChild<QComboBox*>("irdaMode")->isEnabled());
@@ -1532,12 +1534,12 @@ for line in s.makefile('rb'):
         QCOMPARE(headings, QStringList({"Applications", "SD card", "Device"}));
         const auto shown = [&](const char* name) { return window.findChild<QPushButton*>(name)->isVisibleTo(&window); };
         QVERIFY(shown("sdExchange") && shown("sdEject") && !shown("sdInsert") && !shown("sdNew") && !shown("sdRetry"));
-        // The cradle HotSync button and contrast are for 68k devices; the E2 keeps Rotate.
-        QVERIFY(!shown("hotsync") && shown("rotate") && !window.findChild<QSlider*>("runningContrast")->isVisibleTo(&window));
+        // Contrast is for 68k devices; the E2 keeps Rotate and has the HotSync button.
+        QVERIFY(shown("hotsync") && shown("rotate") && !window.findChild<QSlider*>("runningContrast")->isVisibleTo(&window));
         QTRY_VERIFY(window.findChild<QPushButton*>("installApp")->isEnabled());
-        // The E2 has no network or serial port; its USB, keyboard and Bluetooth stay.
+        // The E2 has no network; its serial port, USB, keyboard and Bluetooth stay.
         QVERIFY(!window.findChild<QComboBox*>("networkMode")->isEnabled());
-        QVERIFY(!window.findChild<QComboBox*>("serialMode")->isEnabled());
+        QVERIFY(window.findChild<QComboBox*>("serialMode")->isEnabled());
         QVERIFY(window.findChild<QCheckBox*>("keyboardAttached")->isEnabled());
         // Sound here and in Settings are the same setting.
         auto* sound = window.findChild<QCheckBox*>("sound");

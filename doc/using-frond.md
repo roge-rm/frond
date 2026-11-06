@@ -119,7 +119,7 @@ Memory Stick: Files works on the stick's own Palm OS filesystem, with no ejectin
 
 ## Connections
 
-Each device only gets the connections it really has. A control it doesn't have yet is greyed out, with "Not available on the <device> yet".
+Each device only gets the connections it really has. A control it doesn't have yet is greyed out, with "Not available on the <device> yet". The Zire 72 has no serial port, so that row isn't shown.
 
 ### Endpoints
 
@@ -152,7 +152,9 @@ The mode is saved. Live connections close when the machine resumes, so reload or
 
 ### Serial port
 
-The cradle serial port goes to a PTY or a TCP port. Open the path with `screen` or `minicom`, or connect to the port, for example `nc 127.0.0.1 5023`. Peers get CTS, DSR and DCD while connected, RTS flow control is honoured, and bytes sent with no peer are dropped. On Android use Wait for a peer or Connect to an address, then `link-pty.py PHONE:5033 --link /tmp/palm-serial` on a computer.
+The serial port (the T|X and E2 connector, the TG50 and the IIIx cradle) goes to a PTY or a TCP port. Open the path with `screen` or `minicom`, or connect to the port, for example `nc 127.0.0.1 5023`. Peers get CTS, DSR and DCD while connected, RTS flow control is honoured, and bytes sent with no peer are dropped. On Android use Wait for a peer or Connect to an address, then `link-pty.py PHONE:5033 --link /tmp/palm-serial` on a computer.
+
+Serial HotSync works on the E2 with pilot-link (`pilot-xfer -p /dev/pts/N -l`): put the serial port on a PTY, press HotSync on the running page (Linux) or in the menu (Android) on the E2 or T|X, which pulls the connector's HotSync line low for half a second like the cradle button. The Palm starts HotSync and pilot-link answers. The T|X's serial HotSync isn't tested.
 
 ### Palm IIIx serial and PPP
 
@@ -246,7 +248,7 @@ Tested: discovery, sending a Memo or file by Bluetooth (OPP), PIN and Trusted De
 | Low-latency audio | yes | yes | | shorter queue | |
 | Microphone | | | | yes | |
 | Network | yes | | | | PPP over serial |
-| Serial port | yes | | | yes | yes |
+| Serial port | yes | yes | not offered | yes | yes |
 | USB HotSync | yes | yes | yes | yes | |
 | Infrared beaming | yes | yes | yes | yes | yes |
 | Infrared keyboard | yes | yes | yes | yes | |
@@ -255,7 +257,7 @@ Tested: discovery, sending a Memo or file by Bluetooth (OPP), PIN and Trusted De
 | Hold | | | | yes | |
 | Card | SD | SD | SD | Memory Stick, Pro | none |
 
-The Zire 72's Camera shows a white screen and goes back to the launcher. The TG50 plays beeps, alarms and Sony Voice Recorder audio. Standard Palm SndStream (not in its firmware), the remote control, MagicGate and Memory Stick audio aren't there. Serial works at 9600, 57600 and 115200 baud. HotSync over the serial port isn't tested.
+The Zire 72's Camera shows a white screen and goes back to the launcher. The TG50 plays beeps, alarms and Sony Voice Recorder audio. Standard Palm SndStream (not in its firmware), the remote control, MagicGate and Memory Stick audio aren't there. Serial works at 9600, 57600 and 115200 baud. HotSync over the serial port isn't tested on the TG50 or the T|X.
 
 On the IIIx, serial HotSync is tested with pilot-link (install, fetch, backup). It has no Fast engine, no SD slot and no Bluetooth, USB or Wi-Fi, as on the real one. Its backlight shows as a green panel.
 

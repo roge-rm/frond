@@ -111,7 +111,7 @@
       "fast_audio_md5": "2a9faf69b43ba590cfb9ba78e4eef11c",
       "network": false,
       "microphone": false,
-      "serial": false,
+      "serial": true,
       "keyboard": true,
       "usb": true,
       "infrared": true,

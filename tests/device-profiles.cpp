@@ -97,7 +97,7 @@ int main() {
     }
     assert(desktopCount == 5 && names.size() == 8 && types.size() == 7);
     assert(std::string(deviceName5(deviceTypeTX)) == "palm-tx" && std::string(deviceName5(deviceTypeE2)) == "palm-e2");
-    assert(deviceProfileNamed5("palm-tx")->capabilities.serial && !deviceProfileNamed5("palm-e2")->capabilities.serial);
+    assert(deviceProfileNamed5("palm-tx")->capabilities.serial && deviceProfileNamed5("palm-e2")->capabilities.serial);
     // Unknown names are refused, including numbers, old ids, case and prefixes.
     for (const char* name : {"", "3", "0", "tx", "tungsten-e2", "franken-e2", "Palm-TX", "palm-tx ", "palm", "palm-tx2"}) {
         assert(!deviceProfileNamed5(name) && deviceTypeNamed5(name) == deviceTypeInvalid);

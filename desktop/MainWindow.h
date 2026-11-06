@@ -111,7 +111,7 @@ class MainWindow : public QMainWindow {
     QAction* importAction;
     QPushButton *sdCreate, *sdImport, *sdEject, *sdReinsert, *sdExport, *sdExchange, *sdRetry;
     QCheckBox *microphoneToggle, *soundToggle, *holdToggle, *cardReadOnly;
-    QLabel *networkLabel, *keyboardLabel, *usbLabel, *bluetoothLabel, *microphoneLabel, *contrastLabel;
+    QLabel *serialLabel, *networkLabel, *keyboardLabel, *usbLabel, *bluetoothLabel, *microphoneLabel, *contrastLabel;
     QSlider* contrast;
     QPushButton *rotateButton, *hotSyncButton;
     bool protectionKnown{false};
