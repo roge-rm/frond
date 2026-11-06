@@ -39,6 +39,7 @@ class DesktopClient : public QObject {
     QLocalSocket* socket{nullptr};
     std::unique_ptr<QTemporaryDir> directory;
     QTimer deadline;
+    QTimer lostConnection;  // the socket closed while the core still runs
     QByteArray input;
     QString pending;
     quint64 serial{0};
