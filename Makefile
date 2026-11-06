@@ -496,6 +496,13 @@ test-frond-68k-peripherals: out/frond-68k build/test-frond-68k-sound
 	./build/test-frond-68k-sound
 	python3 tests/frond-68k-peripherals.py $(FROND_68K_ROMS)
 
+# Console database commands while a guest app is busy for 45 s on the private IIIx 3.1 ROM: they
+# wait for its event loop or fail with an error, and the core runs on. Skips without the ROM, or
+# m68k-palmos-gcc and the 3.5 SDK in ../palm-os-sdk.
+.PHONY: test-frond-68k-busy
+test-frond-68k-busy: out/frond-68k
+	python3 tests/frond-68k-busy.py
+
 # m68k-palmos-gdb 5.3 and gdb-multiarch on the debug Hello app (build/hello-debug) on the private
 # OS 3.5 ROM; skips without them.
 # The desktop control socket on both runners; needs a private ARM smoke session and IIIx ROM, else
