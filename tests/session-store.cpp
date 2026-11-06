@@ -653,6 +653,10 @@ class SessionStoreTest : public QObject {
         QCOMPARE(frondAudio::lowLatencyOption(frondFirmware::Device::tx, {}, raw), QString("--low-latency-queue"));
         QCOMPARE(frondAudio::lowLatencyOption(frondFirmware::deviceFromId("sony-clie-tg50"), {}, {}), QString("--low-latency-queue"));
         QCOMPARE(frondAudio::lowLatencyOption(frondFirmware::deviceFromId("palm-zire-72"), {}, {}), QString("--low-latency-queue"));
+        // A Zire 72 NOR of the right size that isn't the qualified one gets the queue limits only.
+        const auto zire = directory.filePath("zire.bin"); write(zire, QByteArray(14942208, char(0x61)));
+        QVERIFY(!frondAudio::qualified(frondFirmware::deviceFromId("palm-zire-72"), {}, zire));
+        QCOMPARE(frondAudio::lowLatencyOption(frondFirmware::deviceFromId("palm-zire-72"), {}, zire), QString("--low-latency-queue"));
         QVERIFY(frondAudio::lowLatencyOption(frondFirmware::Device::automatic, {}, {}).isEmpty());
     }
     void machineControlVisibilityPreferences() {

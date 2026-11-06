@@ -169,8 +169,13 @@ class Zire72RomTest(unittest.TestCase):
             self.rejected([ZIRE, '--ram-size', ram], 'unsupported RAM size')
         for display in ('320x480', '160x160'):
             self.rejected([ZIRE, '--display', display], 'unsupported display mode')
+        # Low-latency audio needs the exact Zire NOR; one changed byte is refused.
+        changed = self.patched('fast-audio-other', (len(self.good) - 1, bytes([self.good[-1] ^ 1])))
         for option in ('--fast-audio', '--experimental-fast-audio'):
-            self.rejected([ZIRE, option], 'requires a verified TX 5.4 or Tungsten E2 NOR')
+            self.rejected([changed, option], 'requires a verified TX 5.4, Tungsten E2 or Zire 72 NOR')
+        result = self.run_core([ZIRE, '--fast-audio', '--no-sound', '--run-for', '5'])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('unable to enable low-latency audio', result.stderr)
         self.rejected([ZIRE, '--device', 'palm-tx'], 'does not match ROM')
         self.rejected([ZIRE, '--device', 'palm-e2'], 'does not match ROM')
         self.rejected([ZIRE, '--experimental-tx'], 'Unknown argument: --experimental-tx')

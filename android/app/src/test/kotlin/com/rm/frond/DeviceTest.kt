@@ -38,11 +38,11 @@ class DeviceTest {
         assertTrue(Device.ZIRE72.serialAbsent && !Device.ZIRE72.hotSyncButton)
         assertTrue(Device.E2.serialPort && Device.E2.hotSyncButton && !Device.E2.serialAbsent)
         assertTrue(Device.TX.hotSyncButton && !Device.byId("sony-clie-tg50")!!.hotSyncButton)
-        assertNull(Device.ZIRE72.fastAudioNorMd5)
-        assertFalse(Device.ZIRE72.fastAudio)
+        assertEquals("0f3e0bf04ceaa5ad73a1768b7d9ede98", Device.ZIRE72.fastAudioNorMd5)
+        assertTrue(Device.ZIRE72.fastAudio)
         assertTrue(Device.TX.fastAudio)
         assertTrue(Device.E2.fastAudio)
-        // Low-latency audio: TX and E2 (preview or queue only) and the TG50 and Zire 72 (queue only).
+        // Low-latency audio: TX, E2 and Zire 72 (preview or queue only) and the TG50 (queue only).
         assertTrue(Device.TX.lowLatencyAudio && Device.E2.lowLatencyAudio)
         assertTrue(Device.byId("sony-clie-tg50")!!.lowLatencyAudio)
         assertTrue(Device.ZIRE72.lowLatencyAudio)
@@ -99,7 +99,7 @@ class FastAudioQualifiedTest {
     private fun nor(content: String) = java.io.File.createTempFile("nor", ".bin").apply { writeText(content); deleteOnExit() }
 
     @Test
-    fun zireNeverQualifies() {
+    fun otherZireNorDoesNotQualify() {
         assertFalse(Firmware.fastAudioQualified(Device.ZIRE72, null, nor("x")))
     }
 

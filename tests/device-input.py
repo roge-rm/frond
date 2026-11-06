@@ -105,7 +105,7 @@ class DeviceInputTest(unittest.TestCase):
             for option in ('--fast-audio', '--experimental-fast-audio'):
                 with self.subTest(args=args, option=option):
                     self.rejected([*args, option],
-                                  'requires a verified TX 5.4 or Tungsten E2 NOR')
+                                  'requires a verified TX 5.4, Tungsten E2 or Zire 72 NOR')
 
     def test_inventory(self):
         data = json.loads(subprocess.check_output([ROOT / 'out/frond-device-profiles']))
@@ -266,7 +266,7 @@ class DeviceInputTest(unittest.TestCase):
                 reject(good, 'unsupported display mode', '--display', display)
         with self.subTest(case='fast audio'):
             for option in ('--fast-audio', '--experimental-fast-audio'):
-                reject(good, 'requires a verified TX 5.4 or Tungsten E2 NOR', option)
+                reject(good, 'requires a verified TX 5.4, Tungsten E2 or Zire 72 NOR', option)
 
     def test_zire72_device_and_session_mismatches(self):
         rom = self.root / 'zire-mismatch'

@@ -231,9 +231,9 @@ class FirmwareInputTest : public QObject {
             QCOMPARE(frondFirmware::deviceFromId(other), Device::automatic);
         QCOMPARE(frondFirmware::deviceId(frondFirmware::deviceFromId("sony-clie-tg50")), QString("sony-clie-tg50"));
         QVERIFY(frondFirmware::capabilities(Device::e2).serial && !frondFirmware::capabilities(Device::e2).network && frondFirmware::capabilities(Device::tx).network);
-        // The Zire 72 has no serial port, network or low-latency audio; its camera isn't a setting.
+        // The Zire 72 has no serial port or network but has low-latency audio; its camera isn't a setting.
         const auto zire = frondFirmware::capabilities(Device::zire72);
-        QVERIFY(!zire.serial && !zire.network && !zire.fastAudio && zire.usb && zire.infrared && zire.keyboard && zire.bluetooth);
+        QVERIFY(!zire.serial && !zire.network && zire.fastAudio && zire.usb && zire.infrared && zire.keyboard && zire.bluetooth);
     }
 };
 QTEST_GUILESS_MAIN(FirmwareInputTest)
