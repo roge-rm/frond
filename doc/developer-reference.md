@@ -366,7 +366,7 @@ Read from standard input, one per line, unless `--desktop-socket` is used. Paths
 | `gdb-state` | `off`, or `listening` or `connected`, then `running` or `stopped`. |
 | `gdb-app FILE [NAME]` | Tell the stub which executable (COFF or ELF) the app came from, and its database name, see below. |
 
-`launch`, `install` and the `db-` commands call into Palm OS, so they wait for the running app's next event loop call (EvtGetEvent) and run there, and the console takes no other command meanwhile. If the app is busy for 30 guest seconds, the Palm is asleep or the debugger has stopped it, the command fails with the reason (`export failed: Palm OS is busy, ...`) and the session runs on.
+`launch`, `install` and the `db-` commands call into Palm OS, so they wait for the running app's next event loop call (EvtGetEvent) and run there, and the console takes no other command meanwhile. If the app is busy for 30 guest seconds, the Palm is asleep or the debugger has stopped it, the command fails with the reason (`export failed: Palm OS is busy, ...`) and the session runs on. After an install, as after a HotSync, the app with the database's creator gets `sysAppLaunchCmdSyncNotify` unless it's in front, and an app installed while the launcher shows makes the launcher reopen with it listed. Another app in front stays.
 
 ### Control socket
 
@@ -565,6 +565,7 @@ Not in `make test`. The first group builds a program and runs it with a private 
 | `test-frond-68k-peripherals` | IIIx ROM. Piezo, backlight, sleep, serial HotSync (pilot-link) and databases. |
 | `test-frond-68k-gdb` | IIIx ROM, `build/hello-debug`, `m68k-palmos-gdb` and gdb-multiarch. |
 | `test-frond-68k-busy` | IIIx 3.1 ROM, `m68k-palmos-gcc` and the 3.5 SDK in `../palm-os-sdk`. Database commands while an app is busy for 45 s. |
+| `test-frond-68k-install` | IIIx 3.1 ROM, `m68k-palmos-gcc` and the 3.5 SDK in `../palm-os-sdk`. Installs at the launcher and with another app in front. |
 | `test-core-control` | ARM smoke session (`FROND_ARM_SESSION`) and IIIx ROM. The control socket on both runners. |
 | `test-tg50-usb-hotsync` | TG50 session (`make smoke-sessions`) and pilot-link. |
 | `test-tg50-audio-lifecycle`, `test-tg50-audio-queue` | Nothing. TG50 audio unit tests. |

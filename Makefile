@@ -503,6 +503,13 @@ test-frond-68k-peripherals: out/frond-68k build/test-frond-68k-sound
 test-frond-68k-busy: out/frond-68k
 	python3 tests/frond-68k-busy.py
 
+# Installs at the launcher and with other apps in front on the private IIIx 3.1 ROM: the launcher
+# lists a new app at once, other apps stay in front, and sync notifies go to the creator app unless
+# it's in front. Skips without the ROM, or m68k-palmos-gcc and the 3.5 SDK in ../palm-os-sdk.
+.PHONY: test-frond-68k-install
+test-frond-68k-install: out/frond-68k
+	python3 tests/frond-68k-install.py
+
 # m68k-palmos-gdb 5.3 and gdb-multiarch on the debug Hello app (build/hello-debug) on the private
 # OS 3.5 ROM; skips without them.
 # The desktop control socket on both runners; needs a private ARM smoke session and IIIx ROM, else
