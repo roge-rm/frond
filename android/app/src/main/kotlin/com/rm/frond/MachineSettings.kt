@@ -80,6 +80,14 @@ data class MachineSettings(
         }
     }
 
+    // Audio arguments: the host period always, so low-latency limits are sized for Android's
+    // bursty output like normal audio, plus --fast-audio on qualified firmware (qualified reads
+    // the NOR, so it's only called with low latency on) or --low-latency-queue.
+    fun audioArguments(lowLatencyAvailable: Boolean, period: Int, qualified: () -> Boolean): List<String> = buildList {
+        if (fastAudio && lowLatencyAvailable) add(if (qualified()) "--fast-audio" else "--low-latency-queue")
+        addAll(listOf("--audio-period", period.toString()))
+    }
+
     // The core's display command argument, for changing these while it runs.
     fun displayArgument(tg50Controls: Boolean = false, m68k: Boolean = false): String = buildString {
         append("fit=${this@MachineSettings.size.arg} smooth=${if (smoothing) "on" else "off"}")

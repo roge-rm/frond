@@ -147,11 +147,7 @@ open class FrondActivity : SDLActivity() {
         arguments += machineSettings.arguments(soundSupported = launchDevice().sound,
             tg50Controls = launchDevice().id == "sony-clie-tg50", m68k = launchDevice().runs68k)
         arguments += listOf("--window-background", BACKGROUND_HEX)
-        if (machineSettings.fastAudio && launchDevice().lowLatencyAudio) {
-            arguments += if (fastAudioQualified()) "--fast-audio" else "--low-latency-queue"
-        } else {
-            arguments += listOf("--audio-period", audioPeriod().toString())
-        }
+        arguments += machineSettings.audioArguments(launchDevice().lowLatencyAudio, audioPeriod()) { fastAudioQualified() }
         debugPort?.let { arguments += listOf("--gdb", it.toString()) }
         arguments += listOf("--desktop-socket", link.path.path)
         return arguments.toTypedArray()
@@ -643,9 +639,12 @@ open class FrondActivity : SDLActivity() {
 
     private fun defaultAudioDriver() = if (Build.VERSION.SDK_INT >= 27) "aaudio" else "openslES"
 
-    // Host audio period in frames for normal audio: a power of two (SDL rounds to one) of at least
-    // 1024 and at least the phone's output buffer in 44.1 kHz frames. 512, the desktop's, underran
-    // 8-13 times a second on the x86_64 AVD against 3-4 at 1024 (doc/step9-plan.md, M4 notes).
+    // Host audio period in frames, normal and low-latency audio alike: a power of two (SDL rounds
+    // to one) of at least 1024 and at least the phone's output buffer in 44.1 kHz frames. SDL's
+    // AAudio and OpenSL output is filled in bursts of the mixer's period, so 512, the desktop's,
+    // underran 8-13 times a second on the x86_64 AVD against 3-4 at 1024 (doc/step9-plan.md, M4
+    // notes), and low latency at 512 fell back on a phone within 0.2 s. The core sizes its
+    // low-latency limits from this period.
     private fun audioPeriod(): Int {
         audioTest.getOrNull(1)?.toIntOrNull()?.takeIf { it in 64..8192 }?.let { return it }
         val audio = getSystemService(Context.AUDIO_SERVICE) as AudioManager

@@ -58,8 +58,8 @@ data class Device internal constructor(
     val firmwareLabel: String get() = if (runs68k) "ROM image" else "NOR image"
     val fastAudio: Boolean get() = fastAudioNorMd5 != null
     // Low-latency audio: the T|X and E2 preview on qualified firmware, otherwise the queue limits
-    // only (--low-latency-queue), which the TG50 always uses.
-    val lowLatencyAudio: Boolean get() = sound && (fastAudio || id == "sony-clie-tg50")
+    // only (--low-latency-queue), which the TG50 and Zire 72 always use.
+    val lowLatencyAudio: Boolean get() = sound && (fastAudio || id == "sony-clie-tg50" || id == "palm-zire-72")
     val coreFlags: List<String> get() = listOf("--device", id)
     // New SD card sizes in MiB, 32 MB to the device's largest card. "2 GB" is 1886 MiB like a real 2 GB card.
     val sdSizes: List<Int> get() = if (!sdSlot) emptyList() else SD_SIZES.filter { (it.toLong() shl 20) in sdMin..sdMax }

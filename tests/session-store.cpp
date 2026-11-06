@@ -652,7 +652,7 @@ class SessionStoreTest : public QObject {
         QVERIFY(!frondAudio::qualified(frondFirmware::Device::tx, {}, raw));
         QCOMPARE(frondAudio::lowLatencyOption(frondFirmware::Device::tx, {}, raw), QString("--low-latency-queue"));
         QCOMPARE(frondAudio::lowLatencyOption(frondFirmware::deviceFromId("sony-clie-tg50"), {}, {}), QString("--low-latency-queue"));
-        QVERIFY(frondAudio::lowLatencyOption(frondFirmware::deviceFromId("palm-zire-72"), {}, {}).isEmpty());
+        QCOMPARE(frondAudio::lowLatencyOption(frondFirmware::deviceFromId("palm-zire-72"), {}, {}), QString("--low-latency-queue"));
         QVERIFY(frondAudio::lowLatencyOption(frondFirmware::Device::automatic, {}, {}).isEmpty());
     }
     void machineControlVisibilityPreferences() {
