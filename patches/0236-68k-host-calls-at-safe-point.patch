@@ -1,0 +1,460 @@
+--- a/src/cloudpilot/emulator/EmPalmOS.cpp
++++ b/src/cloudpilot/emulator/EmPalmOS.cpp
+@@ -49,6 +49,8 @@
+ uint64 EmPalmOS::lastEventPromotedAt{0};
+ LocalID EmPalmOS::dbForLaunch{0};
+ bool EmPalmOS::postNilEvent{false};
++std::function<void()> EmPalmOS::safePointHandler;
++bool EmPalmOS::safePointRequested{false};
+ 
+ /***********************************************************************
+  *
+@@ -418,6 +420,8 @@
+             return;
+         }
+ 
++        RunSafePoint();
++
+         EmAssert(gSession);
+ 
+         if (HasKeyboardEvent()) {
+@@ -452,7 +456,12 @@
+ }
+ 
+ void EmPalmOS::InjectUIEvent() {
+-    if (dbForLaunch != 0) SysUIAppSwitch(0, dbForLaunch, sysAppLaunchCmdNormalLaunch, 0);
++    // A launch from a safe point gets here in the same EvtGetEvent, so its nil event isn't needed
++    // and would only wake the new app.
++    if (dbForLaunch != 0) {
++        SysUIAppSwitch(0, dbForLaunch, sysAppLaunchCmdNormalLaunch, 0);
++        postNilEvent = false;
++    }
+     dbForLaunch = 0;
+ }
+ 
+@@ -476,3 +485,21 @@
+ }
+ 
+ bool EmPalmOS::HasPendingAppForLaunch() { return dbForLaunch != 0; }
++
++void EmPalmOS::SetSafePointHandler(std::function<void()> handler) {
++    safePointHandler = std::move(handler);
++}
++
++void EmPalmOS::RequestSafePoint() {
++    safePointRequested = true;
++    postNilEvent = true;
++}
++
++void EmPalmOS::RunSafePoint() {
++    if (!safePointRequested || !safePointHandler || gSession->IsNested()) return;
++
++    // The event loop came round, so the nil event that asked for it is done with.
++    safePointRequested = false;
++    postNilEvent = false;
++    safePointHandler();
++}
+--- a/src/cloudpilot/emulator/EmPalmOS.h
++++ b/src/cloudpilot/emulator/EmPalmOS.h
+@@ -14,6 +14,8 @@
+ #ifndef EmPalmOS_h
+ #define EmPalmOS_h
+ 
++#include <functional>
++
+ #include "EmCPU68K.h"  // ExceptionNumber
+ #include "EmPatchModuleTypes.h"
+ #include "EmStructs.h"  // EmStackFrameList
+@@ -40,6 +42,13 @@
+     static bool LaunchAppByName(const string& name);
+     static bool HasPendingAppForLaunch();
+ 
++    // Host work that calls into Palm OS runs at a safe point, where no app or system call is half
++    // done: the start of EvtGetEvent, or its idle wait, outside any nested call. A request posts a
++    // nil event so a dozing event loop goes round once; the handler runs once per request.
++    static void SetSafePointHandler(std::function<void()> handler);
++    static void RequestSafePoint();
++    static void RunSafePoint();
++
+    protected:
+     static bool HandleTrap15(ExceptionNumber);
+     static bool HandleJSR_Ind(emuptr oldPC, emuptr dest);
+@@ -63,6 +72,9 @@
+ 
+     static LocalID dbForLaunch;
+     static bool postNilEvent;
++
++    static std::function<void()> safePointHandler;
++    static bool safePointRequested;
+ };
+ 
+ #endif /* EmPalmOS_h */
+--- a/src/cloudpilot/emulator/EmSession.cpp
++++ b/src/cloudpilot/emulator/EmSession.cpp
+@@ -482,10 +482,15 @@
+             deadMansSwitch = false;
+         }
+ 
++        if (cycles >= EXECUTE_SUBROUTINE_LIMIT && hostCalls > 0) throw EmGuestCallTimeout();
+         EmAssert(cycles < EXECUTE_SUBROUTINE_LIMIT);
+     }
+ }
+ 
++EmSession::HostCallScope::HostCallScope() { ++gSession->hostCalls; }
++
++EmSession::HostCallScope::~HostCallScope() { --gSession->hostCalls; }
++
+ void EmSession::YieldMemoryMgr() {
+     EmAssert(gCPU);
+ 
+@@ -498,6 +503,7 @@
+ 
+     while (memSemaphoreID.xsmuse != 0 && !EmPatchMgr::IsExecutingPatch() &&
+            !SuspendManager::IsSuspended() && !gDebugger.IsStopped()) {
++        if (cycles >= YIELD_MEMMGR_LIMIT && hostCalls > 0) throw EmGuestCallTimeout();
+         EmAssert(cycles < YIELD_MEMMGR_LIMIT);
+ 
+         cycles += gCPU68K->Execute(0);
+--- a/src/cloudpilot/emulator/EmSession.h
++++ b/src/cloudpilot/emulator/EmSession.h
+@@ -3,6 +3,7 @@
+ 
+ #include <cstddef>
+ #include <memory>
++#include <stdexcept>
+ #include <utility>
+ 
+ #include "ButtonEvent.h"
+@@ -24,6 +25,13 @@
+ 
+ class SessionImage;
+ 
++// A Palm OS call made for the host that didn't return within the cycle limit. Only thrown inside a
++// HostCallScope; elsewhere the limit stays an assertion.
++class EmGuestCallTimeout : public std::runtime_error {
++   public:
++    EmGuestCallTimeout() : std::runtime_error("Palm OS did not return from a host call") {}
++};
++
+ class EmSession {
+    public:
+     enum class ResetType : uint8 { sys = 0x01, soft = 0x02, noext = 0x03, hard = 0x04 };
+@@ -101,6 +109,16 @@
+ 
+     void TriggerDeadMansSwitch();
+ 
++    // While one is alive, a Palm OS call for the host that runs past the cycle limit throws
++    // EmGuestCallTimeout with the CPU registers put back, instead of asserting.
++    class HostCallScope {
++       public:
++        HostCallScope();
++        ~HostCallScope();
++        HostCallScope(const HostCallScope&) = delete;
++        HostCallScope& operator=(const HostCallScope&) = delete;
++    };
++
+     EmTransportSerial* GetTransportSerial(EmUARTDeviceType);
+ 
+    private:
+@@ -149,6 +167,7 @@
+     Savestate<ChunkType> savestate;
+ 
+     bool deadMansSwitch{false};
++    int hostCalls{0};
+ 
+     EmTransportSerialNull defaultTransportIR;
+     EmTransportSerialNull defaultTransportSerial;
+--- a/src/cloudpilot/emulator/EmSubroutine.cpp
++++ b/src/cloudpilot/emulator/EmSubroutine.cpp
+@@ -2104,9 +2104,17 @@
+     m68k_areg(newRegs, 7) = fStackPtr;
+     gCPU68K->SetRegisters(newRegs);
+ 
+-    // Call the Palm OS function.
++    // Call the Palm OS function. A host call abandoned at the cycle limit (EmGuestCallTimeout)
++    // gets the caller's registers and stack back before it goes on up.
+ 
+-    err = this->DoCall(trapWord);
++    try {
++        err = this->DoCall(trapWord);
++    } catch (...) {
++        gCPU68K->SetRegisters(oldRegs);
++        EmBankMapped::UnmapPhysicalMemory(this->GetStackBase());
++        gCPU68K->CheckAfterCycle();
++        throw;
++    }
+ 
+     // Save the result.
+ 
+@@ -2153,7 +2161,12 @@
+ 
+     // Call the function.
+ 
+-    err = this->Call(trapWord);
++    try {
++        err = this->Call(trapWord);
++    } catch (...) {
++        gCPU68K->SetRegisters(oldRegs);
++        throw;
++    }
+ 
+     // Restore the original state.
+ 
+@@ -2240,7 +2253,12 @@
+     // Execute until the next break.
+ 
+     EmAssert(gSession);
+-    gSession->ExecuteSubroutine();
++    try {
++        gSession->ExecuteSubroutine();
++    } catch (...) {
++        gCPU68K->RemoveHookException(kException_ATrapReturn, HandleTrap12);
++        throw;
++    }
+ 
+     // Remove the TRAP 12 exception handler.
+ 
+--- a/src/cloudpilot/emulator/patch/EmPatchModuleSys.cpp
++++ b/src/cloudpilot/emulator/patch/EmPatchModuleSys.cpp
+@@ -412,6 +412,7 @@
+     }
+ 
+     CallROMType HeadpatchEvtGetEvent() {
++        EmPalmOS::RunSafePoint();
+         EmPalmOS::InjectUIEvent();
+ 
+         return kExecuteROM;
+--- a/src/cloudpilot/frond/main.cpp
++++ b/src/cloudpilot/frond/main.cpp
+@@ -18,6 +18,7 @@
+ #include <cstring>
+ #include <deque>
+ #include <fstream>
++#include <functional>
+ #include <iomanip>
+ #include <iostream>
+ #include <memory>
+@@ -46,6 +47,7 @@
+ #include "EmDevice.h"
+ #include "EmHAL.h"
+ #include "EmMemory.h"
++#include "EmPalmOS.h"
+ #include "EmROMReader.h"
+ #include "EmSession.h"
+ #include "EmSystemState.h"
+@@ -526,6 +528,7 @@
+         gSession->SetTransportSerial(kUARTSerial, serialTransport);
+         gSession->SetTransportSerial(kUARTIR, irTransport);
+         piezo.Restart(gSession->GetSystemCycles());
++        EmPalmOS::SetSafePointHandler([this] { RunGuestCall(); });
+         pwmHandler = EmHAL::onPwmChange.AddHandler([this](double frequency, double duty) {
+             piezo.Change(gCPU68K ? gCPU68K->CycleNow() : gSession->GetSystemCycles(), frequency, duty);
+             if (this->options.toneLog) {
+@@ -537,6 +540,7 @@
+     }
+ 
+     ~Runner() {
++        EmPalmOS::SetSafePointHandler(nullptr);
+         EmHAL::onPwmChange.RemoveHandler(pwmHandler);
+         if (audio) SDL_CloseAudioDevice(audio);
+     }
+@@ -569,9 +573,11 @@
+         speedMark = {wallMs(), double(gSession->GetSystemCycles())};
+         while (!quit) {
+             string line;
+-            while (!quit && !desktop && console.Next(line)) Command(line);
++            // A command waiting for the guest's event loop holds back the ones after it.
++            while (!quit && !desktop && !guestCall && console.Next(line)) Command(line);
+             if (window) PollWindow();
+             if (desktop) PollDesktop();
++            ExpireGuestCall();
+             if (quit) break;
+             if (gdb) gdb->Cycle(gDebugger.IsStopped() ? 10 : 0);
+             // Hidden on Android: the guest waits and nothing is drawn, while the control socket still
+@@ -613,6 +619,52 @@
+    private:
+     using Clock = chrono::steady_clock;
+ 
++    // Host commands that call into Palm OS (install, launch, database lists and exports) wait for
++    // the guest's event loop, where no app or system call is half done, and run there inside the
++    // emulation. One waits at a time; it fails with a reason after kGuestCallSeconds of guest time,
++    // or at once while asleep, hidden or stopped in the debugger.
++    static constexpr double kGuestCallSeconds = 30;
++    struct GuestCall {
++        function<void()> run;
++        function<void(const string&)> refuse;
++        double deadline;
++    };
++    optional<GuestCall> guestCall;
++
++    void Guest(function<void()> run, function<void(const string&)> refuse) {
++        if (!gSystemState.IsUIInitialized()) return refuse("Palm OS hasn't finished starting");
++        guestCall = GuestCall{std::move(run), std::move(refuse), guestSeconds + kGuestCallSeconds};
++        EmPalmOS::RequestSafePoint();
++    }
++
++    // The safe point, from EvtGetEvent in the emulated CPU. A call that runs past the cycle limit
++    // is abandoned with the CPU's registers put back.
++    void RunGuestCall() {
++        if (!guestCall) return;
++        GuestCall call = std::move(*guestCall);
++        guestCall.reset();
++        EmSession::HostCallScope scope;
++        try {
++            call.run();
++        } catch (const exception& error) {
++            call.refuse(error.what());
++        }
++    }
++
++    void ExpireGuestCall() {
++        if (!guestCall) return;
++        string why;
++        if (hidden) why = "the emulator is in the background";
++        else if (gDebugger.IsStopped()) why = "the CPU is stopped in the debugger";
++        else if (!gSession->IsPowerOn()) why = "the Palm is asleep";
++        else if (guestSeconds >= guestCall->deadline)
++            why = "Palm OS is busy, its event loop didn't run in " + to_string(int(kGuestCallSeconds)) + " s";
++        else return;
++        GuestCall call = std::move(*guestCall);
++        guestCall.reset();
++        call.refuse(why);
++    }
++
+     // Runs up to cycles and moves guest time on.
+     bool Step(uint32_t cycles) {
+         ServiceLinks();
+@@ -999,48 +1051,59 @@
+         } else if (command == "launch") {
+             string name;
+             if (!argument(name)) return void(cout << "usage: launch <app name>" << endl);
+-            cout << (gSession->LaunchAppByName(name) ? "launch: started " : "launch: could not start ") << name
+-                 << endl;
++            Guest([name] {
++                cout << (gSession->LaunchAppByName(name) ? "launch: started " : "launch: could not start ") << name
++                     << endl;
++            }, [name](const string& why) { cout << "launch: could not start " << name << ": " << why << endl; });
+         } else if (command == "db-list") {
+             // One line per RAM database: type, creator, attributes in hex and the name.
+-            DatabaseInfoList databases;
+-            if (!GetDatabases(databases, GetDatabaseFlags::kOnlyRamDatabases))
+-                return void(cout << "db-list: Palm OS is not ready for the database list" << endl);
+-            for (const auto& database : databases) {
+-                char fields[48];
+-                snprintf(fields, sizeof(fields), "db: %s %s %04x ", fourCc(database.type).c_str(),
+-                         fourCc(database.creator).c_str(), unsigned(database.dbAttrs));
+-                cout << fields << printable(database.dbName, sizeof(database.dbName)) << endl;
+-            }
+-            cout << "db-list: " << databases.size() << " RAM databases" << endl;
++            Guest([] {
++                DatabaseInfoList databases;
++                if (!GetDatabases(databases, GetDatabaseFlags::kOnlyRamDatabases))
++                    return void(cout << "db-list: Palm OS is not ready for the database list" << endl);
++                for (const auto& database : databases) {
++                    char fields[48];
++                    snprintf(fields, sizeof(fields), "db: %s %s %04x ", fourCc(database.type).c_str(),
++                             fourCc(database.creator).c_str(), unsigned(database.dbAttrs));
++                    cout << fields << printable(database.dbName, sizeof(database.dbName)) << endl;
++                }
++                cout << "db-list: " << databases.size() << " RAM databases" << endl;
++            }, [](const string& why) { cout << "db-list: " << why << endl; });
+         } else if (command == "db-export" || command == "db-export-all") {
+             // A zip of the RAM databases, with the ROM ones too for db-export-all.
+             if (!argument(path)) return void(cout << "usage: " << command << " <zip file>" << endl);
+-            vector<uint8_t> archive;
+-            size_t count = 0, failed = 0;
+-            if (!backupDatabases(command == "db-export-all", archive, count, failed))
+-                return void(cout << "export failed: Palm OS couldn't list its databases" << endl);
+-            if (!writeFile(path, archive.data(), archive.size())) return void(cout << "export failed: cannot write " << path << endl);
+-            cout << "export written to " << path << ": " << count << " databases";
+-            if (failed) cout << ", " << failed << " failed";
+-            cout << endl;
++            const bool all = command == "db-export-all";
++            Guest([path, all] {
++                vector<uint8_t> archive;
++                size_t count = 0, failed = 0;
++                if (!backupDatabases(all, archive, count, failed))
++                    return void(cout << "export failed: Palm OS couldn't list its databases" << endl);
++                if (!writeFile(path, archive.data(), archive.size())) return void(cout << "export failed: cannot write " << path << endl);
++                cout << "export written to " << path << ": " << count << " databases";
++                if (failed) cout << ", " << failed << " failed";
++                cout << endl;
++            }, [](const string& why) { cout << "export failed: " << why << endl; });
+         } else if (command == "db-export-db") {
+             // One database by name as a PDB or PRC file.
+             string name;
+             if (!argument(name) || !argument(path)) return void(cout << "usage: db-export-db <name> <file>" << endl);
+-            vector<uint8_t> data;
+-            if (const auto error = exportDatabase(name, data); !error.empty()) return void(cout << "export failed: " << error << endl);
+-            if (!writeFile(path, data.data(), data.size())) return void(cout << "export failed: cannot write " << path << endl);
+-            cout << "export written to " << path << ": " << data.size() << " bytes" << endl;
++            Guest([name, path] {
++                vector<uint8_t> data;
++                if (const auto error = exportDatabase(name, data); !error.empty()) return void(cout << "export failed: " << error << endl);
++                if (!writeFile(path, data.data(), data.size())) return void(cout << "export failed: cannot write " << path << endl);
++                cout << "export written to " << path << ": " << data.size() << " bytes" << endl;
++            }, [](const string& why) { cout << "export failed: " << why << endl; });
+         } else if (command == "install") {
+             if (!argument(path)) return void(cout << "usage: install <file>" << endl);
+             vector<uint8_t> data;
+             if (!readFile(path, data)) return void(cout << "unable to read " << path << endl);
+-            const auto result = DbInstaller(data.size(), data.data()).Install();
+-            cout << (result == DbInstaller::Result::success       ? "installation successful"
+-                     : result == DbInstaller::Result::needsReboot ? "installation successful, needs reset"
+-                                                                  : "installation failed")
+-                 << endl;
++            Guest([data = std::move(data)]() mutable {
++                const auto result = DbInstaller(data.size(), data.data()).Install();
++                cout << (result == DbInstaller::Result::success       ? "installation successful"
++                         : result == DbInstaller::Result::needsReboot ? "installation successful, needs reset"
++                                                                      : "installation failed")
++                     << endl;
++            }, [](const string& why) { cout << "installation failed: " << why << endl; });
+         } else {
+             cout << "unknown command: " << command << endl;
+         }
+@@ -1052,7 +1115,8 @@
+         StateChanged("serial", lastSerial, LinkDescription(serialLink, serialError));
+         StateChanged("infrared", lastInfrared, LinkDescription(irLink, infraredError));
+         DesktopChannel::Request request;
+-        switch (desktop->Receive(request)) {
++        // One request at a time: the next waits while one waits for the guest's event loop.
++        switch (guestCall ? DesktopChannel::Poll::idle : desktop->Receive(request)) {
+             case DesktopChannel::Poll::closed: quit = true; return;
+             case DesktopChannel::Poll::handled:
+             case DesktopChannel::Poll::idle: break;
+@@ -1060,6 +1124,21 @@
+                 // Window events queued before the request go first, so a focus loss lifts the pen
+                 // before a save.
+                 if (window) PollWindow();
++                // Before the UI is up the command itself answers not-ready.
++                if (GuestCommand(request.command) && gSystemState.IsUIInitialized()) {
++                    Guest([this, request] {
++                        Reply result;
++                        try {
++                            result = DesktopCommand(request.command, request.argument);
++                        } catch (const exception& error) {
++                            result = {false, "failed", error.what()};
++                        }
++                        desktop->Reply(request.id, result.ok, result.code, result.message);
++                    }, [this, id = request.id](const string& why) {
++                        desktop->Reply(id, false, "not-ready", "Palm OS can't take the call now: " + why + ".");
++                    });
++                    break;
++                }
+                 Reply result;
+                 try {
+                     result = DesktopCommand(request.command, request.argument);
+@@ -1092,6 +1171,12 @@
+         string code{"failed"}, message;
+     };
+ 
++    // The desktop commands that call into Palm OS, so run at the guest's event loop.
++    static bool GuestCommand(const string& command) {
++        return command == "install" || command == "export" || command == "export-db" || command == "db-list" ||
++               command == "launch-app";
++    }
++
+     // The same commands, codes and replies as the ARM runner's DesktopControl. What a IIIx doesn't
+     // have answers "unsupported", or reports it absent for the state queries the desktop asks every
+     // device.
