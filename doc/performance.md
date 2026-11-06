@@ -1,6 +1,6 @@
 # Performance
 
-How to measure speed, latency and audio, and which diagnostic patches exist. Command details are in [developer-reference.md](developer-reference.md). Sessions, apps and captures are private and stay out of Git. Compare runs only on the same binary, session, replay and host conditions, and write down the host load. Results here depend on the host, so they are not listed. Measure on your machine.
+How to measure speed, latency and audio, and which diagnostic patches exist. Command details are in [developer-reference.md](developer-reference.md). Sessions, apps and captures are private and stay out of Git. Compare runs only on the same binary, session, replay and host conditions, and write down the host load. Results depend on the host, so apart from the comparison with CloudpilotEmu they are not listed. Measure on your machine.
 
 ## Engines
 
@@ -77,7 +77,7 @@ python3 tools/analyze-input-latency.py out/keyboard.log out/keyboard.raw --y 151
 
 ## Audio diagnostics
 
-Native audio backpressure pauses the whole guest (timers, DMA and codec) until SDL drains its queue, while input, drawing and the control socket keep running. The frontend runs 120 Hz slices, and with `--fast-audio` it pauses above 3072 queued frames and resumes below 2048. `--low-latency-queue` does the same without the preview, only while non-silent frames were queued in the last 100 ms, so a device that queues silence all the time keeps the normal limits until something plays.
+Native audio backpressure pauses the whole guest (timers, DMA and codec) until SDL drains its queue, while input, drawing and the control socket keep running. The frontend runs 120 Hz slices, and with `--fast-audio` it pauses above 6 host periods of queued frames and resumes below 4 (3072 and 2048 at the desktop's 512). `--low-latency-queue` does the same without the preview, only while non-silent frames were queued in the last 100 ms, so a device that queues silence all the time keeps the normal limits until something plays.
 
 - `tools/check-native-audio.py SESSION NEWDIR --seconds N [--continuous] [--mips N]` records PCM, SDL underruns, host load and the governor's `budget_mips_samples`. `--mips` is a ceiling, and the governor can still go lower under load, so compare the samples before blaming a change.
 - With an audio trace patch (`audio-timing-trace` or `audio-buffer-trace`, from git history), `python3 tools/analyze-audio-timing.py LOG` reports HAL writes, sampled DMA contents, codec silence and FIFO starvation, sound-stream lifecycle and backpressure intervals (host and guest time; guest time should hold still while the frontend waits). `tools/analyze-audio-buffers.py LOG` adds callback and mixer durations and DMA transfer counts. Neither gives a continuity verdict. A nonzero HAL buffer followed by silence in DMA without FIFO starvation points upstream of SDL.
@@ -85,6 +85,38 @@ Native audio backpressure pauses the whole guest (timers, DMA and codec) until S
 - Fast audio: the SDL underrun counter makes the core fall back to normal audio until reset or restore, with a brief gap. The guest probe `python3 tools/build-palm-probe.py --probe audio` plus `tools/check-audio-probe.py` checks callbacks and API results only, not host delivery.
 - Guest execution profile (`guest-execution-profile` patch, from git history): `FROND_EXECUTION_PROFILE=1` counts ARM, Thumb and PACE instruction attempts and samples PC bins. PACE's cycle charge differs from ARM and Thumb, so counts are not host CPU shares.
 - Instrumented builds change timing. Time uninstrumented binaries separately.
+
+## Against CloudpilotEmu
+
+Measured 2026-11-04 on a Ryzen 7 5700X, gcc 14.2, `-O2 -g` on both sides: Frond main at 1b9d14d and the IIIx at f550284 against unmodified CloudpilotEmu 2.3.0 (064d5d5, the pin in `vendor/cloudpilot`). Five runs of each, alternating sides, nothing else running. Upstream's runners open a window and pace to real time, so both sides ran under the same small headless driver linked against each tree's own core, using only its public API (boot, pen taps and keys, install and launch, a free-running loop, a RAM dump for FrondBench's results). Neither core was changed. The driver isn't in the repo.
+
+Tungsten E2, FrondBench through PACE, 100 MIPS, guest 37 to 65 s. Fast is `FROND_JIT=1` with the compile thread on, as the app runs it.
+
+| | Host MIPS best / median | Host s per guest s | FrondBench total |
+|---|---|---|---|
+| CloudpilotEmu uARM | 177.7 / 177.2 | 0.564 | 30030 ms |
+| Frond Exact | 182.6 / 179.7 | 0.556 | 30020 ms |
+| Frond Fast | 361.2 / 358.0 | 0.279 | 29960 ms |
+
+Tungsten E2, Bike or Die 2 v2.1b in trial mode, level 1 with the TX's sustained key replay, 100 MIPS, guest 45 to 85 s. The game isn't frame-identical between cores, probably as the clock chip follows host time, but the level, section and input are the same.
+
+| | Host MIPS best / median | Host s per guest s |
+|---|---|---|
+| CloudpilotEmu uARM | 115.6 / 113.9 | 0.878 |
+| Frond Exact | 159.5 / 156.6 | 0.639 |
+| Frond Fast | 323.9 / 313.3 | 0.319 |
+
+Palm IIIx, FrondBench on the OS 3.5 EZ ROM, from the Run tap until the results are in RAM. The checksum is 1995F512 in every run on both cores.
+
+| | Guest s | FrondBench total | Host s best / median | Host s per guest s |
+|---|---|---|---|---|
+| CloudpilotEmu (clock factor 0.5) | 270.0 | 269800 ms | 5.33 / 5.35 | 0.0198 |
+| Frond Original | 510.8 | 510460 ms | 8.33 / 8.44 | 0.0165 |
+| Frond Uncapped (8x) | 63.5 | 63170 ms | 8.04 / 8.31 | 0.131 |
+
+- On the E2, Exact is about 1.5% faster than upstream on FrondBench and 1.37x on Bike or Die, and Fast about 2x and 2.75x. On the TX on the same machine Bike runs at 186 to 200 MIPS in Exact and about 575 in Fast.
+- On the IIIx, Frond times the 68000 by the manual's clocks plus the EZ's wait states, LCD DMA and refresh (see [68k timing](#68k-timing)), so the same work takes 1.89x upstream's guest time; upstream runs guest code about 1.9x faster than a real IIIx. The same work takes about 1.58x upstream's host time, a few percent of it the GDB hooks. At real time a IIIx uses under 2% of one core, and Uncapped runs about 4x faster than upstream's default at about the same host cost.
+- E2 only for ARM. CloudpilotEmu normally runs in a browser as WebAssembly, which wasn't measured and would be slower than its native build.
 
 ## Debug patches
 

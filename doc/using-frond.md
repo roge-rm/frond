@@ -32,7 +32,7 @@ On Linux the window shows the running machine's controls instead of the list, an
 
 Under Applications (Linux) or the Peripherals screen (Android):
 
-- **Install application** takes PRC and PDB files, once Palm OS has started.
+- **Install application** takes PRC and PDB files, once Palm OS has started. As after a HotSync, an app installed while the launcher shows appears in it at once, and the app in front stays.
 - **Launch application** starts an installed app by its Palm database name.
 - **Export RAM databases** writes a ZIP of everything in RAM, other apps and your data included.
 - **Export database** writes one named database. Use it when an open system database, like `Shim Logs`, stops the full export.
@@ -63,7 +63,7 @@ The button bar and the silkscreens of the E2, Zire 72 and TG50 are drawn at the 
 
 Off by default. On the T|X and E2 with their qualified firmware, it plays one open 44.1 kHz stereo stream with less delay, for music apps like SunVox, and goes back to normal audio when your computer or phone can't keep up, which can pause the sound for a moment. Anything else, like several streams or other formats, uses normal audio.
 
-On the TG50, and on a T|X or E2 with other firmware, it keeps a shorter audio queue while sound is playing, which takes about 35 ms off the delay. Set it before starting the machine. It's greyed out where the device isn't supported. Diagnostics are in [performance.md](performance.md).
+On the TG50, the Zire 72, and on a T|X or E2 with other firmware, it keeps a shorter audio queue while sound is playing, which takes about 35 ms off the delay. Set it before starting the machine. It's greyed out where the device isn't supported. Diagnostics are in [performance.md](performance.md).
 
 ## Buttons, keys and controllers
 
@@ -245,7 +245,7 @@ Tested: discovery, sending a Memo or file by Bluetooth (OPP), PIN and Trusted De
 | | T\|X | E2 | Zire 72 | TG50 | IIIx |
 |---|---|---|---|---|---|
 | Sound | yes | yes | yes | yes, see below | yes, piezo |
-| Low-latency audio | yes | yes | | shorter queue | |
+| Low-latency audio | yes | yes | shorter queue | shorter queue | |
 | Microphone | | | yes | yes | |
 | Network | yes | | | | PPP over serial |
 | Serial port | yes | yes | not offered | yes | yes |

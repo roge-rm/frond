@@ -24,10 +24,10 @@ The Palm IIIx has its own runner, `out/frond-68k` (`make out/frond-68k`, install
 | `--work-folder DIR` | Run a session from elsewhere, in this empty machine folder. Its card files are copied there. |
 | `--ram-size MB` | RAM size, 16 or 32. |
 | `--mips N` | Target speed in MIPS. Default 100. |
-| `--audio-period FRAMES` | Host audio period, 64 to 8192. Default 512. |
+| `--audio-period FRAMES` | Host audio period, 64 to 8192. Default 512. Low-latency audio sizes its limits from it; Android passes 1024 or more. |
 | `-q`, `--no-sound` | Start with audio off. |
 | `--fast-audio`, `--experimental-fast-audio` | Preview one qualified TX or E2 stereo stream before the firmware audio queue. |
-| `--low-latency-queue` | The `--fast-audio` queue limits without the preview, on any device and firmware: 512-frame period, low startup thresholds, and the 120 Hz slice and 3072/2048 pending caps while non-silent frames were queued in the last 100 ms. The frontends pass it for Low-latency audio on the TG50, and on the TX or E2 with firmware that isn't qualified for the preview. |
+| `--low-latency-queue` | The `--fast-audio` queue limits without the preview, on any device and firmware: low startup thresholds, and the 120 Hz slice and pending caps of 6 and 4 host periods (3072/2048 frames at the default 512) while non-silent frames were queued in the last 100 ms. The frontends pass it for Low-latency audio on the TG50, the Zire 72, and on the TX or E2 with firmware that isn't qualified for the preview. |
 | `--gdb PORT` | Wait for GDB on 127.0.0.1:PORT before running, see [GDB and PACE monitor](#gdb-and-pace-monitor). |
 | `--serial off\|pty\|tcp:PORT` | Connect the serial port to a host PTY or a loopback TCP listener (one client at a time). |
 | `--usb off\|pty\|tcp:PORT` | Same for the USB HotSync port, through a built-in USB host. |
@@ -80,6 +80,8 @@ The core reads these from the terminal and from `--script`. A command with no ar
 | `db-export FILE` | Export the RAM databases to a ZIP. |
 | `db-export-rom FILE` | Export RAM and ROM databases (not the PACE cache). |
 | `db-export-all FILE` | Export every database. |
+
+`install` (here and on the control socket) runs where the app in front next asks for an event. On the T|X and Zire 72 an app waiting for input with no timeout, like Memo Pad, is woken first through EvtWakeup, as an interrupt would, and gets a nilEvent; `launch` and the `db-` commands do the same. After it, as after a HotSync, the app with the database's creator gets `sysAppLaunchCmdSyncNotify` unless it's in front, and an app installed while the launcher shows makes the launcher reopen with it listed. Another app in front stays, and so does a launch already under way.
 
 ## Control socket
 
@@ -357,6 +359,8 @@ Read from standard input, one per line, unless `--desktop-socket` is used. Paths
 | `bus-timing` | The LCD line and DMA clocks, the DRAM refresh period, the LCD frame rate and the DragonBall registers they come from. |
 | `display contrast=N smooth=on\|off` | Change the contrast or smoothing. |
 | `launch NAME` | Launch an app by its database name. |
+| `hidden [on\|off]` | Test only: set or show the state SDL's background event sets on Android, in which the guest stands still unless a host call is waiting. |
+| `cycles` | Test only: `cycles: N`, the guest's system cycle count. |
 | `install FILE` | Install a PRC or PDB. |
 | `db-list` | List the RAM databases. |
 | `db-export FILE`, `db-export-all FILE` | Export the RAM databases, or all of them, to a ZIP. |
@@ -402,6 +406,85 @@ The debugger costs almost nothing while no gdb is connected. `make test-frond-68
 
 `tools/palm-pppd.sh` connects the serial port to slirp or pppd, see [Palm IIIx serial and PPP](using-frond.md#palm-iiix-serial-and-ppp).
 
+## Using an IDE
+
+Frond has no IDE plugin. An IDE runs your build, then the [developer runner](#developer-runner) to install and try the app, and attaches GDB to a core started with `--gdb`.
+
+What each device gives you:
+
+- T|X, E2, Zire 72 and TG50: `tools/frond-run.py` for runs, and the ARM GDB stub with the PACE monitor. A 68k app on these is debugged at addresses with `monitor pace-break`, not at source lines.
+- IIIx: no runner, use `frond-68k` and its console. Source-level debugging works with prc-tools' `m68k-palmos-gdb` (gdb 5.3), which is too old for the GDB front ends of VS Code and Eclipse, so run it in the IDE's terminal. `gdb-multiarch` works in the IDE at addresses, see [Debugging 68k apps with GDB](#debugging-68k-apps-with-gdb).
+
+The examples below use a TX session in `sessions/tx/`, an app `MyApp.prc` named `My App`, and Frond built in `~/frond`. Change the paths to yours.
+
+### VS Code
+
+`.vscode/tasks.json`:
+
+```json
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build",
+      "type": "shell",
+      "command": "make",
+      "group": "build"
+    },
+    {
+      "label": "Run on Frond",
+      "type": "shell",
+      "command": "rm -rf build/frond-run && python3 ~/frond/tools/frond-run.py --core ~/frond/out/frond --session sessions/tx --install MyApp.prc --app 'My App' --run-for 10 --screenshot 5000 --output build/frond-run",
+      "dependsOn": "Build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Frond with GDB",
+      "type": "shell",
+      "command": "~/frond/out/frond build/frond-run/working --gdb 3333",
+      "isBackground": true,
+      "problemMatcher": []
+    }
+  ]
+}
+```
+
+"Run on Frond" installs the app into a copy of the session, runs it, and leaves the result, screenshots and the saved session in `build/frond-run/`. Drop `--run-for` and add `--headless` for a quick check without a window. "Frond with GDB" starts a window on that saved session, with the app installed, and waits for GDB.
+
+`.vscode/launch.json`, with the Native Debug extension (`webfreak.debug`):
+
+```json
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Attach to Frond",
+      "type": "gdb",
+      "request": "attach",
+      "remote": true,
+      "target": "127.0.0.1:3333",
+      "gdbpath": "gdb-multiarch",
+      "cwd": "${workspaceFolder}",
+      "autorun": ["set architecture arm", "set endian little"]
+    }
+  ]
+}
+```
+
+Start "Frond with GDB", then "Attach to Frond". Type monitor commands in the debug console, for example `monitor pace-break 1234`. `tools/pace-report.py` turns a stop into resource offsets and symbols.
+
+For the IIIx, start `frond-68k` in a terminal (`~/frond/out/frond-68k iiix.frond --gdb 2159`), then type `install MyApp.prc`, `gdb-app build/MyApp 'My App'` and `launch My App` at its console, and run `m68k-palmos-gdb` in a second terminal as shown above.
+
+### Eclipse
+
+With CDT and its GDB Hardware Debugging feature:
+
+- Run > External Tools > External Tools Configurations, a Program with Location `/usr/bin/python3` and the `frond-run.py` arguments from the VS Code task. Make a second one for `out/frond build/frond-run/working --gdb 3333`.
+- Run > Debug Configurations > GDB Hardware Debugging, a new configuration. On Debugger set the GDB command to `gdb-multiarch` and the remote target to localhost, port 3333. On Startup clear "Reset and Delay", "Halt" and "Load image", and add `set architecture arm` to the initialisation commands. A C/C++ Application is needed but only gives symbols, so any build output works.
+- Start the second external tool, then the debug configuration. Monitor commands go in the Debugger Console as `monitor pace-break 1234`.
+
+The IIIx works as in VS Code, in Eclipse's Terminal view.
+
 ## Environment variables
 
 ### Core
@@ -421,6 +504,7 @@ The debugger costs almost nothing while no gdb is connected. `make test-frond-68
 | `FROND_MS_TRACE` | File to write a Memory Stick register trace to. |
 | `FROND_MS_SUMMARY` | With `FROND_MS_TRACE`, write failures only. |
 | `FROND_VFS_TRACE` | Trace guest file calls for Memory Stick file access to stderr. |
+| `FROND_TRACE_WAKE` | Log `native: host wake` to stderr each time the core wakes an idle UI task for a host call (T|X and Zire 72), for `tests/host-call-wake.py`. |
 | `FROND_WIFI_TRACE` | Trace the virtual Wi-Fi card. |
 | `FROND_HOST_PROFILE` | Print host timing figures from the benchmark tools. |
 | `FROND_ENGINE_SETTING` | Desktop app: `1` shows the Engine setting. |
@@ -441,6 +525,8 @@ The debugger costs almost nothing while no gdb is connected. `make test-frond-68
 | `FROND_ZIRE_LAUNCHER`, `FROND_ZIRE_STORAGE`, `FROND_ZIRE_PERIPHERALS` | `1` adds the launcher and key runs, the storage runs, or the peripheral runs to the Zire 72 ROM tests. |
 | `FROND_ZIRE_EVIDENCE` | Folder those runs write screenshots to. |
 | `FROND_ARM_SESSION` | ARM session for `tests/core-control.py`. Default the palm-tx smoke machine. |
+| `FROND_ARM_SESSIONS` | Folder of ARM machine folders, one per device name, for `tests/frond-arm-install.py` and `tests/host-call-wake.py`. Default `build/smoke/machines`. |
+| `FROND_REQUIRE_SESSIONS` | `1` makes those two tests fail instead of skipping when a session or the probes are missing. |
 | `FROND_IIIX_ROM`, `FROND_IIIX_CORE` | IIIx ROM and `frond-68k` binary for the opt-in IIIx run in the desktop workflow test (`iiixRealRom`). |
 | `FROND_IIIX_SHOTS` | Folder that run saves pictures of the Palm window to (needs ImageMagick's `import` and a display). |
 | `Z72_SESSION`, `FROND_TEST_MIC_LEVEL` | Zire 72 session for `make test-z72-voice-memo` (skipped when empty), and the fake 1 kHz microphone level that test's core build reads. |
@@ -565,7 +651,9 @@ Not in `make test`. The first group builds a program and runs it with a private 
 | `test-frond-68k-peripherals` | IIIx ROM. Piezo, backlight, sleep, serial HotSync (pilot-link) and databases. |
 | `test-frond-68k-gdb` | IIIx ROM, `build/hello-debug`, `m68k-palmos-gdb` and gdb-multiarch. |
 | `test-frond-68k-busy` | IIIx 3.1 ROM, `m68k-palmos-gcc` and the 3.5 SDK in `../palm-os-sdk`. Database commands while an app is busy for 45 s. |
-| `test-frond-68k-install` | IIIx 3.1 ROM, `m68k-palmos-gcc` and the 3.5 SDK in `../palm-os-sdk`. Installs at the launcher and with another app in front. |
+| `test-frond-68k-install` | IIIx 3.1 ROM, `m68k-palmos-gcc` and the 3.5 SDK in `../palm-os-sdk`. Installs at the launcher and with another app in front, and install and export while hidden. |
+| `test-frond-arm-install` | T\|X, E2, Zire 72 and TG50 smoke sessions (`FROND_ARM_SESSIONS`, else `build/smoke/machines`), `m68k-palmos-gcc` and the 3.5 SDK. The same installs on each ARM device, and host calls while the Palm sleeps. |
+| `test-host-call-wake` | T\|X and Zire 72 smoke sessions as above. A GDB breakpoint on EvtWakeup: `guest-ready` wakes nothing, a host call wakes at most once. |
 | `test-core-control` | ARM smoke session (`FROND_ARM_SESSION`) and IIIx ROM. The control socket on both runners. |
 | `test-tg50-usb-hotsync` | TG50 session (`make smoke-sessions`) and pilot-link. |
 | `test-tg50-audio-lifecycle`, `test-tg50-audio-queue` | Nothing. TG50 audio unit tests. |
