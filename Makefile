@@ -256,6 +256,17 @@ test-jit-differential: build/test-jit-differential
 	test -n "$(JIT_DIFF_ARGS)" || ./build/test-jit-differential --seeds 40001:50001 --no-directed --hot 3 \
 		2>build/jit-differential.err || { grep -v ' failed (pc=' build/jit-differential.err | tail -5; exit 1; }
 
+# The JIT compile thread's bookkeeping on its own, with asserts on.
+.PHONY: test-jit-compile-thread
+ifeq ($(FROND_FAST),1)
+test: test-jit-compile-thread
+endif
+test-jit-compile-thread: build/dynarmic-trial/src/.frond-source
+	$(CXX) -std=c++20 -O1 -g -Ibuild/dynarmic-trial/src/src -Ibuild/dynarmic-trial/src/externals/mcl/include \
+		-Ibuild/dynarmic-trial/src/externals/fmt/include -DFMT_HEADER_ONLY \
+		tests/jit-compile-thread.cpp -pthread -o build/test-jit-compile-thread
+	./build/test-jit-compile-thread
+
 .PHONY: test-arm-conditions benchmark-menu
 test-arm-conditions: out/frond
 	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/conditions-core.rsp

@@ -1,0 +1,42 @@
+--- a/src/dynarmic/common/frond_compile_thread.h
++++ b/src/dynarmic/common/frond_compile_thread.h
+@@ -159,6 +159,9 @@
+         Status status = Status::Queued;
+         std::uint32_t first_pc = 0, last_pc = 0;  // guest code the block covers, set with Done
+         Result result{};
++        // A block that starts with an Interpret term ends where it starts (last_pc is
++        // first_pc - 1) and covers no guest code, so invalidations leave it, as block_ranges does.
++        bool HasCode() const { return first_pc <= last_pc; }
+         bool ahead = false;              // compiled ahead, not asked for
+         bool wanted = false;             // ahead, and asked for before it was done
+         bool valid = true;               // none of its code invalidated since the snapshot
+@@ -292,7 +295,9 @@
+         }
+         job->ready_seq = ++ready_seq;
+         ready_order.emplace_back(job->location.Value(), job->ready_seq);
+-        ready_span = std::max(ready_span, job->last_pc - job->first_pc);
++        if (job->HasCode()) {
++            ready_span = std::max(ready_span, job->last_pc - job->first_pc);
++        }
+         ready_by_pc.emplace(job->first_pc, job->location.Value());
+         const std::uint64_t key = job->location.Value();
+         ready.emplace(key, std::move(job));
+@@ -380,6 +385,9 @@
+ 
+ private:
+     bool Unaffected(const Job& job) const {
++        if (!job.HasCode()) {
++            return true;
++        }
+         const auto range = boost::icl::discrete_interval<std::uint32_t>::closed(job.first_pc, job.last_pc);
+         for (const auto& [seq, ranges] : inval_log) {
+             if (seq >= job.inval_seq && boost::icl::intersects(ranges, range)) {
+@@ -419,7 +427,7 @@
+             auto it = ready_by_pc.lower_bound(first > ready_span ? first - ready_span : 0);
+             while (it != ready_by_pc.end() && it->first <= last) {
+                 const auto r = ready.find(it->second);
+-                if (r->second->last_pc >= first) {
++                if (r->second->HasCode() && r->second->last_pc >= first) {
+                     stats.stale++;
+                     ready.erase(r);
+                     it = ready_by_pc.erase(it);
