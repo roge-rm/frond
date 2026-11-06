@@ -1,0 +1,22 @@
+diff --git a/src/cloudpilot/emulator/hardware/EmCPU68K.cpp b/src/cloudpilot/emulator/hardware/EmCPU68K.cpp
+index 238647a..a30445b 100644
+--- a/src/cloudpilot/emulator/hardware/EmCPU68K.cpp
++++ b/src/cloudpilot/emulator/hardware/EmCPU68K.cpp
+@@ -621,6 +621,17 @@ Bool EmCPU68K::ExecuteStoppedLoop(uint32 maxCycles) {
+     // Do not run cycleSlowly on each call if single stepping
+     int counter = maxCycles ? 0 : 1;
+ 
++    // An interrupt already pending above the mask that STOP loaded is taken at once, as on the
++    // 68000. Otherwise one raised just before the STOP (with the mask still up) would wait for the
++    // next interrupt, so the EZ tick timer would drop a tick.
++    if (const int32 pending = EmHAL::GetInterruptLevel();
++        pending != -1 && pending > regs.intmask && !gKernelStackOverflowed) {
++        regs.spcflags &= ~(SPCFLAG_INT | SPCFLAG_DOINT);
++        this->ProcessInterrupt(pending);
++        m68k_setstopped(0);
++        return false;
++    }
++
+     // While the CPU is stopped (because a STOP instruction was
+     // executed) do some idle tasks.
+ 
