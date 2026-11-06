@@ -553,8 +553,8 @@ for line in s.makefile('rb'):
                 firmwareDevice = firmware->findChild<QComboBox*>("device")->currentData().toString();
                 firmware->findChild<QLineEdit*>("nor")->setText(norPath);
                 QVERIFY(firmware->machineSettings);
-                QVERIFY(!firmware->machineSettings->fastAudio->isEnabled());
-                QCOMPARE(firmware->machineSettings->fastAudio->toolTip(), QString("Not available on the Zire 72 yet"));
+                QVERIFY(firmware->machineSettings->fastAudio->isEnabled());
+                QVERIFY(firmware->machineSettings->fastAudio->toolTip().isEmpty());
                 firmware->findChild<QPushButton*>("import")->click();
             }
         });
@@ -568,9 +568,9 @@ for line in s.makefile('rb'):
         QVERIFY(!QFileInfo::exists(firmwareRoot + "/palm-zire-72/nand.bin"));
         const auto args = read(".args").split('\n');
         QCOMPARE(args.mid(0, 3), QStringList({"--device", "palm-zire-72", firmwareRoot + "/palm-zire-72/nor.bin"}));
-        // No NAND, low-latency audio or serial port; USB and infrared settings carry over.
+        // No NAND, preview audio or serial port; the queue-only low-latency mode is on; USB and infrared settings carry over.
         QVERIFY(!args.contains("--nand") && !args.contains("--fast-audio") && !args.contains("--serial"));
-        QVERIFY(!args.contains("--low-latency-queue"));
+        QVERIFY(args.contains("--low-latency-queue"));
         QVERIFY(read(".args").contains("--usb\npty") && read(".args").contains("--irda\npty"));
         QCOMPARE(window.windowTitle(), QString("Zire 72"));
         QTRY_VERIFY_WITH_TIMEOUT(read(".commands").contains("network-state"), 5000);

@@ -182,4 +182,20 @@ class MachineSettingsTest {
         assertEquals(ScreenSize.WHOLE, launch.size)
         assertFalse(launch.sound)
     }
+
+    @Test fun audioArgumentsAlwaysPassThePeriod() {
+        var reads = 0
+        val qualified = { reads++; true }
+        val unqualified = { reads++; false }
+        // Low latency off, or a device without it: the period only, and the NOR isn't read.
+        assertEquals(listOf("--audio-period", "1024"), MachineSettings().audioArguments(true, 1024, qualified))
+        assertEquals(listOf("--audio-period", "2048"), MachineSettings(fastAudio = true).audioArguments(false, 2048, qualified))
+        assertEquals(0, reads)
+        // Low latency on: the preview or the queue limits, sized by the same period.
+        assertEquals(listOf("--fast-audio", "--audio-period", "1024"),
+            MachineSettings(fastAudio = true).audioArguments(true, 1024, qualified))
+        assertEquals(listOf("--low-latency-queue", "--audio-period", "1024"),
+            MachineSettings(fastAudio = true).audioArguments(true, 1024, unqualified))
+        assertEquals(2, reads)
+    }
 }

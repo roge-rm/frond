@@ -72,6 +72,18 @@ static void exercise(FastAudio::Driver driver) {
     for (unsigned i=0;i<7;++i) preview.Handle(0x4320,r,i,true);
     assert(preview.Failed() && preview.Bypass() && audioQueuePendingSamples(queue)==0);
     preview.Tick(250000010);assert(!preview.Bypass());preview.Reset();
+    // A 1024-frame host period starts with 1024 frames of silence and holds up to 12 periods.
+    {
+        auto large=audioQueueCreate(16384);preview.SetQueue(large);preview.SetPeriod(1024);
+        for (unsigned i=0;i<11;++i) preview.Handle(0x4320,r,i,true);
+        assert(preview.Active() && !preview.Failed() && audioQueuePendingSamples(large)==12*1024);
+        uint32_t silence[1024];assert(audioQueuePopChunk(large,silence,1024)==1024);
+        for (auto value : silence) assert(value==0);
+        assert(audioQueuePopChunk(large,&sample,1)==1 && sample!=0);
+        preview.Handle(0x4320,r,11,true);preview.Handle(0x4320,r,12,true);
+        assert(preview.Failed() && audioQueuePendingSamples(large)==0);
+        preview.Tick(250000012);preview.Reset();preview.SetPeriod(512);preview.SetQueue(queue);
+    }
     preview.Handle(0x4320,r,0,true);assert(preview.Active());preview.Reset();assert(!preview.Bypass());
     preview.Handle(0x4320,r,0,true);
     preview.NotifyUnderrun(10);

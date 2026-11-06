@@ -88,11 +88,12 @@ inline bool qualified(frondFirmware::Device device, const QString& session, cons
         profile.capabilities.fastAudio && matchesNor(device,session,nor,profile.frontend.fastAudioNorMd5);
 }
 // Low-latency audio: the T|X and E2 preview on qualified firmware, otherwise the queue limits
-// only (--low-latency-queue), which the TG50 always uses.
+// only (--low-latency-queue), which the TG50 and Zire 72 always use.
 inline bool lowLatencyAvailable(frondFirmware::Device device) {
     if (device == frondFirmware::Device::automatic) return false;
     const auto caps = frondFirmware::capabilities(device);
-    return caps.sound && (caps.fastAudio || device == frondFirmware::deviceFromId("sony-clie-tg50"));
+    return caps.sound && (caps.fastAudio || device == frondFirmware::deviceFromId("sony-clie-tg50") ||
+        device == frondFirmware::deviceFromId("palm-zire-72"));
 }
 inline QString lowLatencyOption(frondFirmware::Device device, const QString& session, const QString& nor) {
     if (!lowLatencyAvailable(device)) return {};
