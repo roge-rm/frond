@@ -510,6 +510,18 @@ test-frond-68k-busy: out/frond-68k
 test-frond-68k-install: out/frond-68k
 	python3 tests/frond-68k-install.py
 
+# The same installs on the T|X, E2, Zire 72 and TG50 smoke sessions (FROND_ARM_SESSIONS, a folder of
+# machine folders, else build/smoke/machines); a device without one is skipped. Needs the probes as above.
+.PHONY: test-frond-arm-install
+test-frond-arm-install: out/frond
+	python3 tests/frond-arm-install.py
+
+# A guest-ready check wakes nothing; a host call wakes the T|X's UI task, and a refused one on the Zire 72
+# wakes it at most once (GDB breakpoint on EvtWakeup). Same sessions as above.
+.PHONY: test-host-call-wake
+test-host-call-wake: out/frond
+	python3 tests/host-call-wake.py
+
 # m68k-palmos-gdb 5.3 and gdb-multiarch on the debug Hello app (build/hello-debug) on the private
 # OS 3.5 ROM; skips without them.
 # The desktop control socket on both runners; needs a private ARM smoke session and IIIx ROM, else

@@ -19,7 +19,7 @@ bool dbListGet(SyscallDispatch*, DbMetadataList& list) {
     return true;
 }
 bool syscallDispatchM68kSupport(SyscallDispatch*) { return true; }
-bool syscallDispatchPrepare(SyscallDispatch*) { return true; }
+bool syscallDispatchPrepare(SyscallDispatch*, SyscallPrepareMode) { return true; }
 uint32_t syscall68k_MemPtrNew(SyscallDispatch*, uint32_t, uint32_t) {
     return allocationFails ? 0 : 0x1000;
 }

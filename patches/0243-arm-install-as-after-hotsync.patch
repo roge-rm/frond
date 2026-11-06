@@ -1,0 +1,303 @@
+--- a/src/uarm/native/GuestDatabaseOps.h
++++ b/src/uarm/native/GuestDatabaseOps.h
+@@ -1,6 +1,8 @@
+ #ifndef FROND_GUEST_DATABASE_OPS_H
+ #define FROND_GUEST_DATABASE_OPS_H
+ 
++#include <cstdio>
++
+ #include "GuestExport.h"
+ #include "NativeDatabase.h"
+ #include "app_launcher.h"
+@@ -19,21 +21,47 @@
+     if (!NativeBoundary::Prepare(soc)) {
+         if (!syscallDispatchM68kSupport(soc.GetSyscallDispatch())) return DB_INSTALL_RESULT_ERR_NOT_SUPPORTED;
+         if (!syscallDispatchPrepare(soc.GetSyscallDispatch())) return DB_INSTALL_RESULT_ERR_NOT_CURRENTLY_POSSIBLE;
++        {
++            ReadOnlyGuest transaction(soc);
++            const int result = dbInstallerInstall(soc.GetSyscallDispatch(), size, data);
++            if (result < 0) return result;
++            transaction.Commit();
++            if (result != DB_INSTALL_RESULT_OK) return result;
++        }
++        // The sync notify and launcher relaunch run in their own transaction: if they fail, the
++        // guest goes back to just after the install, which still succeeded.
++        try {
++            ReadOnlyGuest transaction(soc);
++            dbInstallerFinish(soc.GetSyscallDispatch(), size, data);
++            transaction.Commit();
++        } catch (const std::exception& error) {
++            std::fprintf(stderr, "install: sync notify or launcher relaunch failed, the database is installed: %s\n", error.what());
++        }
++        return DB_INSTALL_RESULT_OK;
++    }
++    {
+         ReadOnlyGuest transaction(soc);
+-        const int result = dbInstallerInstall(soc.GetSyscallDispatch(), size, data);
+-        if (result >= 0) transaction.Commit();
+-        return result;
++        NativeBoundary::Session session(soc);
++        NativeDatabase<NativeBoundary::Session> database(session);
++        const int result = database.Install(static_cast<uint8_t*>(data), size);
++        if (result < 0) return result;
++        database.Finish();
++        session.Close();
++        transaction.Commit();
++        if (result != DB_INSTALL_RESULT_OK) return result;
+     }
+-    ReadOnlyGuest transaction(soc);
+-    NativeBoundary::Session session(soc);
+-    NativeDatabase<NativeBoundary::Session> database(session);
+-    const int result = database.Install(static_cast<uint8_t*>(data), size);
+-    if (result >= 0) {
++    try {
++        ReadOnlyGuest transaction(soc);
++        NativeBoundary::Session session(soc);
++        NativeDatabase<NativeBoundary::Session> database(session);
++        database.FinishInstall(static_cast<const uint8_t*>(data), size);
+         database.Finish();
+         session.Close();
+         transaction.Commit();
++    } catch (const std::exception& error) {
++        std::fprintf(stderr, "install: sync notify or launcher relaunch failed, the database is installed: %s\n", error.what());
+     }
+-    return result;
++    return DB_INSTALL_RESULT_OK;
+ }
+ 
+ enum class LaunchResult { notReady, failed, launched };
+--- a/src/uarm/native/NativeDatabase.h
++++ b/src/uarm/native/NativeDatabase.h
+@@ -3,6 +3,7 @@
+ 
+ #include <algorithm>
+ #include <array>
++#include <cstdio>
+ #include <cstring>
+ #include <functional>
+ #include <stdexcept>
+@@ -87,6 +88,39 @@
+         }
+     }
+ 
++    // What Palm OS gets after a HotSync install, for the database just installed from bytes: the
++    // app with its creator gets sysAppLaunchCmdSyncNotify unless it's the app in front, and an app
++    // install while the launcher is in front relaunches the launcher so it lists the app. Native
++    // calls take no card number. The session's safe point is the UI task blocked on an empty event
++    // queue, so only a pen or key event can be waiting.
++    void FinishInstall(const uint8_t* bytes, size_t length) {
++        if (!bytes || length < 78) return;
++        const auto* text = reinterpret_cast<const char*>(bytes);
++        const uint32_t installed = Find(std::string(text, strnlen(text, 31)));
++        if (!installed) return;
++        const uint32_t type = be32(bytes + 60), creator = be32(bytes + 64);
++        // Current app +96, found app +100, launch result +104, search state +128.
++        uint8_t zero[128]{};
++        write(scratch + 96, zero, sizeof(zero));
++        uint32_t current = 0, currentCreator = 0;
++        if (call(0x8800, {scratch + 96, 0, 0, 0}) == 0) read(scratch + 96, &current, 4);
++        if (current) {
++            write(scratch + 48, zero, 4);
++            if (session.Call(0x812c, {current, 0, 0, 0}, {0, 0, 0, 0, 0, 0, 0, scratch + 48}) == 0)
++                read(scratch + 48, &currentCreator, 4);
++        }
++        uint32_t app = 0;
++        if (type == applicationType) app = installed;
++        else if (session.Call(0x8198, {1, scratch + 128, applicationType, creator}, {1, scratch + 100}) == 0)
++            read(scratch + 100, &app, 4);
++        if (app && app != current) {
++            const uint32_t error = session.Call(0x87c8, {app, 0, syncNotify, 0}, {scratch + 104});
++            if (error) std::fprintf(stderr, "install: sync notify failed: Palm OS error %u\n", error);
++        }
++        if (type != applicationType || currentCreator != launcherCreator || call(0x82e0, {1, 0, 0, 0}) & 0xff) return;
++        if (call(0x88f8, {current, 0, 0, 0}) != 0) throw std::runtime_error("Could not relaunch the launcher");
++    }
++
+     // Name, attributes, type and creator of each RAM database, read from the database directory
+     // without opening any. Skips a68k like Export.
+     DbMetadataList List() {
+@@ -162,6 +196,10 @@
+     }
+ 
+  private:
++    static constexpr uint32_t applicationType = 0x6170706cu, launcherCreator = 0x6c6e6368u, syncNotify = 3;
++    static uint32_t be32(const uint8_t* p) {
++        return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | p[3];
++    }
+     static constexpr size_t maxDatabaseBytes = 64 * 1024 * 1024, maxArchiveBytes = 256 * 1024 * 1024;
+     static constexpr unsigned maxCallbacks = 65536, maxChunk = 65536;
+     Session& session;
+--- a/src/uarm/uarm/db_installer.cpp
++++ b/src/uarm/uarm/db_installer.cpp
+@@ -1,6 +1,7 @@
+ #include "db_installer.h"
+ 
+ #include <cstdio>
++#include <cstring>
+ #include <functional>
+ #include <stdexcept>
+ 
+@@ -106,3 +107,59 @@
+             return DB_INSTALL_RESULT_ERR_UNKNOWN;
+     }
+ }
++
++#define sysFileTApplication 0x6170706cu
++#define sysFileCLauncher 0x6c6e6368u
++#define sysAppLaunchCmdSyncNotify 3
++
++static uint32_t be32(const uint8_t* p) {
++    return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | p[3];
++}
++
++void dbInstallerFinish(struct SyscallDispatch* sd, size_t len, const void* data) {
++    if (len < 78 || !syscallDispatchPrepare(sd)) return;
++    const auto* header = static_cast<const uint8_t*>(data);
++    char name[32]{};
++    memcpy(name, header, 31);
++    const uint32_t type = be32(header + 60), creator = be32(header + 64);
++
++    // Name +0, card +32, database +34, type +38, creator +42, search state +48, launch result +80.
++    const uint32_t scratch = syscall68k_MemPtrNew(sd, SC_EXECUTE_PURE, 96);
++    if (!scratch) throw std::runtime_error("no scratch memory");
++    Defer release([=]() { syscall68k_MemPtrFree(sd, SC_EXECUTE_PURE, scratch); });
++    if (!syscallDispatch_memcpy_fromHost(sd, scratch, name, strlen(name) + 1))
++        throw std::runtime_error("memory error copying the database name");
++
++    const uint32_t installed = syscall68k_DmFindDatabase(sd, SC_EXECUTE_FULL, 0, scratch);
++    if (!installed) return;
++
++    uint32_t current = 0, currentCreator = 0;
++    if (syscall68k_SysCurAppDatabase(sd, SC_EXECUTE_FULL, scratch + 32, scratch + 34) == 0) {
++        current = paceGet32(scratch + 34);
++        if (current && syscall68k_DmDatabaseInfo(sd, SC_EXECUTE_FULL, paceGet16(scratch + 32), current, 0, 0, 0,
++                                                 0, 0, 0, 0, 0, 0, scratch + 38, scratch + 42) == 0)
++            currentCreator = paceGet32(scratch + 42);
++    }
++
++    // HotSync sends the notify once no app of the user's is running, so the app in front never
++    // gets it while its own instance has its databases open.
++    uint32_t app = 0;
++    if (type == sysFileTApplication)
++        app = installed;
++    else if (syscall68k_DmGetNextDatabaseByTypeCreator(sd, SC_EXECUTE_FULL, true, scratch + 48, sysFileTApplication,
++                                                       creator, true, scratch + 32, scratch + 34) == 0)
++        app = paceGet32(scratch + 34);
++    if (app && app != current) {
++        const uint16_t err =
++            syscall68k_SysAppLaunch(sd, SC_EXECUTE_FULL, 0, app, 0, sysAppLaunchCmdSyncNotify, 0, scratch + 80);
++        if (err) fprintf(stderr, "install: sync notify failed: Palm OS error %u\n", err);
++    }
++
++    // The relaunch goes through SysUIAppSwitch like the launch command. Any event already waiting,
++    // a tap or the appStopEvent of a switch under way, goes first and the launcher keeps its list.
++    if (type != sysFileTApplication || currentCreator != sysFileCLauncher ||
++        syscall68k_EvtEventAvail(sd, SC_EXECUTE_FULL) || syscall68k_EvtSysEventAvail(sd, SC_EXECUTE_FULL, true))
++        return;
++    if (syscall68k_SysUIAppSwitch(sd, SC_EXECUTE_FULL, 0, current, 0, 0) != 0)
++        throw std::runtime_error("could not relaunch the launcher");
++}
+--- a/src/uarm/uarm/db_installer.h
++++ b/src/uarm/uarm/db_installer.h
+@@ -20,4 +20,10 @@
+ 
+ int32_t dbInstallerInstall(struct SyscallDispatch* sd, size_t len, void* data);
+ 
++// What Palm OS gets after a HotSync install, for the database just installed from data: the app
++// with its creator gets sysAppLaunchCmdSyncNotify unless it's the app in front, and an app install
++// while the launcher is in front relaunches the launcher so it lists the app. Any other app in front
++// stays. Runs at the same EvtGetEvent safe point as the install, in its own guest transaction.
++void dbInstallerFinish(struct SyscallDispatch* sd, size_t len, const void* data);
++
+ #endif  // _DB_INSTALLER_H_
+--- a/src/uarm/uarm/native_boundary.cpp
++++ b/src/uarm/uarm/native_boundary.cpp
+@@ -204,7 +204,13 @@
+             {0x82fc,0x20068d2c,{0xe59fc004,0xe08cc00f,0xe12fff1c,0xfffcf751}},
+             {0x88f8,0x2006a51c,{0xe59fc004,0xe08cc00f,0xe12fff1c,0xfffe5c1d}},
+             {0x8584,0x2006974c,{0xe59fc004,0xe08cc00f,0xe12fff1c,0xfffd8d73}},
+-            {0x84b8,0x2006941c,{0xe59fc004,0xe08cc00f,0xe12fff1c,0xfffd8afb}}
++            {0x84b8,0x2006941c,{0xe59fc004,0xe08cc00f,0xe12fff1c,0xfffd8afb}},
++            // After an install: SysCurAppDatabase, DmGetNextDatabaseByTypeCreator, SysAppLaunch,
++            // EvtSysEventAvail.
++            {0x8800,0x2006a13c,{0xe59fc004,0xe08cc00f,0xe12fff1c,0xfffe6295}},
++            {0x8198,0x2014bf7c,{0xe92d421e,0xe5999000,0xe5999338,0xe59f408c}},
++            {0x87c8,0x20327a3c,{0xe92d4ff0,0xe5999000,0xe24dd02c,0xe5999224}},
++            {0x82e0,0x20068cbc,{0xe59fc004,0xe08cc00f,0xe12fff1c,0xfffe48bb}}
+         };
+         const Entry* expected=nullptr;
+         for (const auto& candidate:entries) if (candidate.trap==trap) expected=&candidate;
+--- a/src/uarm/uarm/syscall_dispatch.cpp
++++ b/src/uarm/uarm/syscall_dispatch.cpp
+@@ -715,6 +715,52 @@
+     });
+ }
+ 
++uint16_t syscall68k_SysCurAppDatabase(struct SyscallDispatch* sd, uint32_t flags, uint32_t cardNoP,
++                                      uint32_t dbIDP) {
++    return syscall68k(sd, flags, SYSCALL_68K_SYS_CUR_APP_DATABASE, false, [=]() {
++        pacePush32(dbIDP);
++        pacePush32(cardNoP);
++    });
++}
++
++uint16_t syscall68k_SysAppLaunch(struct SyscallDispatch* sd, uint32_t flags, uint16_t cardNo, uint32_t dbID,
++                                 uint16_t launchFlags, uint16_t cmd, uint32_t cmdPBP, uint32_t resultP) {
++    return syscall68k(sd, flags, SYSCALL_68K_SYS_APP_LAUNCH, false, [=]() {
++        pacePush32(resultP);
++        pacePush32(cmdPBP);
++        pacePush16(cmd);
++        pacePush16(launchFlags);
++        pacePush32(dbID);
++        pacePush16(cardNo);
++    });
++}
++
++uint16_t syscall68k_DmGetNextDatabaseByTypeCreator(struct SyscallDispatch* sd, uint32_t flags, bool newSearch,
++                                                   uint32_t stateP, uint32_t type, uint32_t creator,
++                                                   bool onlyLatestVersion, uint32_t cardNoP, uint32_t dbIDP) {
++    return syscall68k(sd, flags, SYSCALL_68K_DM_GET_NEXT_DATABASE_BY_TYPE_CREATOR, false, [=]() {
++        pacePush32(dbIDP);
++        pacePush32(cardNoP);
++        pacePush8(onlyLatestVersion);
++        pacePush32(creator);
++        pacePush32(type);
++        pacePush32(stateP);
++        pacePush8(newSearch);
++    });
++}
++
++uint16_t syscall68k_SysNotifyBroadcast(struct SyscallDispatch* sd, uint32_t flags, uint32_t notifyP) {
++    return syscall68k(sd, flags, SYSCALL_68K_SYS_NOTIFY_BROADCAST, false, [=]() { pacePush32(notifyP); });
++}
++
++bool syscall68k_EvtEventAvail(struct SyscallDispatch* sd, uint32_t flags) {
++    return syscall68k(sd, flags, SYSCALL_68K_EVT_EVENT_AVAIL, false, []() {}) & 0xff;
++}
++
++bool syscall68k_EvtSysEventAvail(struct SyscallDispatch* sd, uint32_t flags, bool ignorePenUps) {
++    return syscall68k(sd, flags, SYSCALL_68K_EVT_SYS_EVENT_AVAIL, false, [=]() { pacePush8(ignorePenUps); }) & 0xff;
++}
++
+ // Palm SDK 5r4 VFSMgr.h defines selector values; PalmTypes.h places the selector in D2.
+ static uint16_t syscall68k_vfs(SyscallDispatch* sd, uint32_t flags, uint16_t selector,
+                               std::function<void()> arguments) {
+--- a/src/uarm/uarm/syscall_dispatch.h
++++ b/src/uarm/uarm/syscall_dispatch.h
+@@ -82,6 +82,16 @@
+                                    uint32_t nameP);
+ uint16_t syscall68k_SysUIAppSwitch(struct SyscallDispatch* sd, uint32_t flags, uint16_t cardNo,
+                                    uint32_t dbID, uint16_t cmd, uint32_t cmdPBP);
++uint16_t syscall68k_SysCurAppDatabase(struct SyscallDispatch* sd, uint32_t flags, uint32_t cardNoP,
++                                      uint32_t dbIDP);
++uint16_t syscall68k_SysAppLaunch(struct SyscallDispatch* sd, uint32_t flags, uint16_t cardNo, uint32_t dbID,
++                                 uint16_t launchFlags, uint16_t cmd, uint32_t cmdPBP, uint32_t resultP);
++uint16_t syscall68k_DmGetNextDatabaseByTypeCreator(struct SyscallDispatch* sd, uint32_t flags, bool newSearch,
++                                                   uint32_t stateP, uint32_t type, uint32_t creator,
++                                                   bool onlyLatestVersion, uint32_t cardNoP, uint32_t dbIDP);
++uint16_t syscall68k_SysNotifyBroadcast(struct SyscallDispatch* sd, uint32_t flags, uint32_t notifyP);
++bool syscall68k_EvtEventAvail(struct SyscallDispatch* sd, uint32_t flags);
++bool syscall68k_EvtSysEventAvail(struct SyscallDispatch* sd, uint32_t flags, bool ignorePenUps);
+ 
+ using M68kStub = std::function<void(struct ArmCpu*, uint32_t parameterBase,
+                                     std::function<void()> deadMansSwitch)>;

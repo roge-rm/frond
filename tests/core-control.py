@@ -224,7 +224,50 @@ def check_arm(core, session, root):
         c.quit()
     finally:
         c.close()
+    work_folder(core, session, work, root, device)
     return device
+
+
+def files_of(folder):
+    """Every file under folder with its bytes and mtime."""
+    return {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in sorted(folder.rglob('*')) if p.is_file()}
+
+
+def work_folder(core, session, work, root, device):
+    """Run with --work-folder, as the desktop runs a session from outside its machines folder: saves
+    back to the session go to the work folder and leave the original's files as they were."""
+    original = work / 'wf-original'
+    original.mkdir()
+    source = original / session.name
+    if session.is_dir():
+        shutil.copytree(session, source, ignore=shutil.ignore_patterns('*.tmp-*'))
+    else:
+        shutil.copy2(session, source)
+    before = files_of(original)
+    run = work / 'wf-run'
+    run.mkdir()
+    c = Client(core, [source, '--work-folder', run], root, 'arm-work-folder')
+    try:
+        assert c.ok('device-state') == device
+        targets = [source]
+        if source.is_dir():
+            targets += [p for p in source.glob('*.frond') if p.is_file()]
+        for target in targets:
+            stamp = {p: p.stat().st_mtime_ns for p in run.glob('*.frond')}
+            c.ok('save', target, code='saved')
+            saved = [p for p in run.glob('*.frond') if p.stat().st_mtime_ns != stamp.get(p)]
+            assert len(saved) == 1 and saved[0].stat().st_size > 100000, \
+                f'save to {target.name} not in the work folder: {sorted(run.iterdir())}'
+            assert files_of(original) == before, f'save to {target.name} changed the original'
+        c.quit()
+    finally:
+        c.close()
+    c = Client(core, [saved[0]], root, 'arm-work-folder-reload')
+    try:
+        assert c.ok('device-state') == device
+        c.quit()
+    finally:
+        c.close()
 
 
 def check_68k(core, rom, root):

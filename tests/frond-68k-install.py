@@ -4,7 +4,8 @@ while the launcher shows appears in it at once, matching the launcher reopened b
 sysAppLaunchCmdSyncNotify. A PDB installed with Memo Pad in front notifies its creator app and
 Memo Pad stays; with that app itself in front it gets no notify, and another app's install leaves
 it in front. Two installs in a row at the launcher work, and an install while a launch is under
-way doesn't keep the launcher.
+way doesn't keep the launcher. A session saved by the next console command after an install at
+the launcher loads with the launcher listing the app.
 
 The sync probe logs each notify and launch in FrondSyncLog; the busy probe is the other app.
 Needs m68k-palmos-gcc and the Palm OS 3.5 SDK (--sdk) for them, else it's skipped. --evidence
@@ -90,6 +91,69 @@ def stays(core, root, name, before):
         raise AssertionError(f'{name}: the screen changed')
 
 
+def saved_after_install(session, root, after):
+    """Install and save-session in one write, so the save runs at the first chance after the
+    install's safe point; the relaunch is already handed to Palm OS by then."""
+    saved = root / 'saved-after-install.frond'
+    core = palm_boot.Core([session, '--device', 'palm-iiix'], root / 'save-log.txt')
+    try:
+        core.wait_frame(root / 'save-before.png', palm_boot.iiix_launcher, 60)
+        mark = len(core.lines)
+        core.send(f'install "{PROBE}"\nsave-session "{saved}"', 'wrote session', 60)
+        if not any('installation successful' in line for line in core.lines[mark:]):
+            raise AssertionError('install before the save: ' + ''.join(core.lines[mark:]).strip())
+    finally:
+        core.close()
+    core = palm_boot.Core([saved, '--device', 'palm-iiix'], root / 'saved-log.txt')
+    try:
+        loaded = settle(core, root / 'saved-loaded.png', lambda rows: body(rows) == body(after), 30)
+        if body(loaded) != body(after):
+            raise AssertionError('the session saved right after the install lost the launcher relaunch')
+        expect_log(core, root, 'saved', ['sync'])
+    finally:
+        core.close()
+
+
+def cycles(core):
+    """The guest's cycle count from the test-only console command."""
+    return int(core.send('cycles', 'cycles: ').split(':')[1])
+
+
+def hidden(core, root, pdb):
+    """With the app hidden (the test-only console command) the guest stands still, an install and a
+    RAM export still run and finish, and the guest stands still again with no call waiting."""
+    if 'on' not in core.send('hidden on', 'hidden: '):
+        raise AssertionError('hidden on')
+    try:
+        time.sleep(1)
+        start = cycles(core)
+        time.sleep(2)
+        if cycles(core) != start:
+            raise AssertionError('the guest ran while hidden')
+        mark = len(core.lines)
+        install(core, pdb)
+        reply = core.send(f'db-export "{root / "hidden.zip"}"', ('export written', 'export FAILED', 'not ready'), 120)
+        if 'written' not in reply:
+            raise AssertionError(f'export while hidden: {reply.strip()}')
+        if not (root / 'hidden.zip').is_file():
+            raise AssertionError('no export file while hidden')
+        ran = cycles(core)
+        if ran == start:
+            raise AssertionError('the host calls did not run the guest while hidden')
+        time.sleep(3)
+        if cycles(core) != ran:
+            raise AssertionError('the guest went on running after the host calls while hidden')
+        if any('could not' in line or 'not currently' in line for line in core.lines[mark:]):
+            raise AssertionError('a refusal while hidden: ' + ''.join(core.lines[mark:]).strip())
+        print(f'frond-68k install: hidden ran {ran - start} cycles for the install and export, then stood still', flush=True)
+    finally:
+        core.send('hidden off', 'hidden: ')
+    again = cycles(core)
+    time.sleep(2)
+    if cycles(core) == again:
+        raise AssertionError('the guest did not run again after showing')
+
+
 def check(rom, root):
     session = root / 'launcher.frond'
     core = palm_boot.Core(['--rom', rom, '--device', 'palm-iiix'], root / 'boot.txt')
@@ -158,10 +222,13 @@ def check(rom, root):
             raise AssertionError('an install during a launch kept the launcher in front')
         if core.process.poll() is not None:
             raise AssertionError('the core quit')
-        return ('launcher lists the app at once; Memo Pad and the probe stay in front; '
-                'PDB notifies only the app not in front; a pending launch wins')
+        hidden(core, root, pdb)
     finally:
         core.close()
+    saved_after_install(session, root, after)
+    return ('launcher lists the app at once; Memo Pad and the probe stay in front; '
+            'PDB notifies only the app not in front; a pending launch wins; install and export run while hidden; a save right after the install keeps '
+            'the relaunch')
 
 
 def main():
