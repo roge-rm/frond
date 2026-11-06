@@ -4,18 +4,28 @@
 DesktopClient::DesktopClient(QObject* parent) : QObject(parent) {
     deadline.setSingleShot(true);
     connect(&deadline, &QTimer::timeout, this, &DesktopClient::stalled);
+    lostConnection.setSingleShot(true); lostConnection.setInterval(1000);
+    connect(&lostConnection, &QTimer::timeout, this, [this] {
+        if (!expectingExit && running()) emit error(tr("The emulator control connection closed."));
+    });
     connect(&server, &QLocalServer::newConnection, this, [this] {
         auto* connection = server.nextPendingConnection();
         if (socket) { connection->deleteLater(); return; }
         socket = connection;
         server.close();
-        connect(socket, &QLocalSocket::readyRead, this, [this, connection] { if (socket == connection) receive(); });
+        connect(socket, &QLocalSocket::readyRead, this, [this, connection] {
+            // Replies are handled from the event loop, never inside the socket's own signal, so a
+            // slot may run a nested loop that frees the socket.
+            if (socket == connection) QMetaObject::invokeMethod(this, [this, connection] { if (socket == connection) receive(); }, Qt::QueuedConnection);
+        });
         connect(socket, &QLocalSocket::disconnected, this, [this, connection] {
             if (socket != connection) return;
-            if (ready && !expectingExit && running()) emit error(tr("The emulator control connection closed."));
+            // A crashing core closes the socket just before it exits; give the exit a moment so
+            // only the crash is reported.
+            if (ready && !expectingExit && running()) lostConnection.start();
             ready = false;
         });
-        receive();
+        QMetaObject::invokeMethod(this, [this, connection] { if (socket == connection) receive(); }, Qt::QueuedConnection);
     });
     connect(&process, &QProcess::readyReadStandardOutput, this, [this] {
         emit diagnostic(QString::fromLocal8Bit(process.readAllStandardOutput()));
@@ -29,8 +39,9 @@ DesktopClient::DesktopClient(QObject* parent) : QObject(parent) {
     connect(&process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
             [this](int code, QProcess::ExitStatus status) {
         if (!expectingExit && (status == QProcess::CrashExit || code != 0))
-            emit error(tr("The emulator stopped unexpectedly. See View → Emulator Log for details."));
-        deadline.stop(); ready = false; pending.clear();
+            emit error(tr("The emulator stopped unexpectedly."));
+        else if (!expectingExit) emit error(tr("The emulator stopped."));
+        deadline.stop(); lostConnection.stop(); ready = false; pending.clear();
         if (socket) { socket->disconnect(this); socket->deleteLater(); socket = nullptr; }
         server.close(); directory.reset();
         emit finished();
@@ -38,7 +49,7 @@ DesktopClient::DesktopClient(QObject* parent) : QObject(parent) {
 }
 DesktopClient::~DesktopClient() {
     // Only our child process is stopped; an interrupted save keeps the previous file.
-    server.disconnect(this); deadline.disconnect(this);
+    server.disconnect(this); deadline.disconnect(this); lostConnection.disconnect(this);
     if (socket) socket->disconnect(this);
     process.disconnect(this);
     if (running()) { process.kill(); process.waitForFinished(3000); }
@@ -46,6 +57,7 @@ DesktopClient::~DesktopClient() {
 bool DesktopClient::start(const QString& core, const QStringList& arguments) {
     if (running()) return false;
     if (socket) { socket->disconnect(this); socket->deleteLater(); socket = nullptr; }
+    lostConnection.stop();
     server.close(); input.clear(); pending.clear(); ready = false; expectingExit = false;
     directory = std::make_unique<QTemporaryDir>(QDir::tempPath() + "/frond-XXXXXX");
     if (!directory->isValid()) { emit error(tr("Could not create the private control directory.")); return false; }

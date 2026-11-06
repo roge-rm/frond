@@ -2,12 +2,14 @@
 #include <QMainWindow>
 #include <QSettings>
 #include <QLockFile>
+#include <QPointer>
 #include <QProgressDialog>
 #include "DesktopClient.h"
 #include "SdExchange.h"
 #include "FirmwareInput.h"
 #include "SessionStore.h"
 class QDialog;
+class QMessageBox;
 class SettingsDialog;
 class QListWidget;
 class QListWidgetItem;
@@ -79,7 +81,7 @@ class MainWindow : public QMainWindow {
     QString usbArgument() const;
     void showUsb(const QString& state);
     void loadUsbSettings();
-    void failure(const QString& message);
+    void failure(const QString& message, const QString& details = {});
     void showDevice(const QString& id);
     QString deviceLabel() const;
     frondFirmware::Device currentDevice() const;
@@ -125,6 +127,7 @@ class MainWindow : public QMainWindow {
     QDialog* exchangeDialog{nullptr};
     QDialog* memoryStickFiles{nullptr};
     QProgressDialog* cardProgress{nullptr};  // shown while an SD create, import or export runs
+    QPointer<QMessageBox> failureBox;  // the error showing now; later errors are added to it
     QString exchangeBackup;
     bool cardPresent{false}, cardInserted{false}, sdKnown{false};
     bool msExportPending{false};

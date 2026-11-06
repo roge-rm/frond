@@ -1497,6 +1497,136 @@ for line in s.makefile('rb'):
         window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
         QSettings().clear();
     }
+    void coreCrashInSdExchange() {
+        // The core dies while the SD exchange dialog is open (a nested event loop): the control
+        // socket is freed there, and nothing may touch it afterwards.
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QTemporaryDir files;
+        const auto source = files.filePath("input.frond");
+        QFile session(source); QVERIFY(session.open(QIODevice::WriteOnly)); session.write("private original session"); session.close();
+        QFile card(source + ".img"); QVERIFY(card.open(QIODevice::WriteOnly));
+        const auto image = frondSd::create(32);
+        QCOMPARE(card.write(reinterpret_cast<const char*>(image.data()), image.size()), qint64(image.size())); card.close();
+        QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly));
+        core.write(R"PY(#!/usr/bin/python3
+import os,signal,socket,sys,time,pathlib,shutil
+source=sys.argv[1]
+s=socket.socket(socket.AF_UNIX)
+s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+state='inserted'
+for line in s.makefile('rb'):
+    i,cmd,arg=line.rstrip(b'\n').split(b'\t')
+    cmd=cmd.decode(); arg=bytes.fromhex(arg.decode()).decode()
+    message='done'
+    if cmd=='device-state': message='palm-tx'
+    elif cmd=='sd-state': message=state
+    elif cmd=='network-state': message='disabled'
+    elif cmd=='keyboard-state': message='detached'
+    elif cmd=='sd-eject': state='ejected'
+    elif cmd=='save':
+        p=pathlib.Path(arg)
+        if p.suffix!='.frond':
+            p.mkdir(parents=True, exist_ok=True)
+            p=p/'session.frond'
+        p.write_text('recovery '+state)
+    elif cmd=='sd-export': shutil.copyfile(source+'.img',arg)
+    s.sendall(i+b'\tok\tresult\t'+message.encode().hex().encode()+b'\n')
+    if cmd=='sd-export':
+        s.shutdown(socket.SHUT_RDWR); time.sleep(.3); os.kill(os.getpid(),signal.SIGSEGV)
+)PY");
+        core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        MainWindow window(core.fileName()); window.show(); window.openSession(source, true);
+        auto* action = window.findChild<QPushButton*>("sdExchange"); QVERIFY(action);
+        QTRY_VERIFY_WITH_TIMEOUT(action->isEnabled(), 5000);
+        bool sawEditor = false, sawError = false;
+        QElapsedTimer sinceEditor;
+        QTimer poll; poll.setInterval(10);
+        connect(&poll, &QTimer::timeout, &window, [&] {
+            for (auto* box : window.findChildren<QMessageBox*>())
+                {
+                    if (!box->isVisible()) continue;
+                    if (box->windowTitle().contains("Close Palm")) box->button(QMessageBox::Yes)->click();
+                    else { sawError = true; box->done(QMessageBox::Ok); }
+                }
+            if (auto* dialog = window.findChild<QDialog*>("sdExchangeDialog")) {
+                if (!dialog->isVisible()) return;
+                if (!sawEditor) { sawEditor = true; sinceEditor.start(); }
+                else if (sinceEditor.elapsed() > 1500) dialog->reject();  // well after the crash
+            }
+        });
+        poll.start(); action->click();
+        QTRY_VERIFY_WITH_TIMEOUT(sawEditor && sawError, 10000);
+        QTest::qWait(2500);
+        poll.stop();
+        QVERIFY(!window.findChild<QDialog*>("sdExchangeDialog") || !window.findChild<QDialog*>("sdExchangeDialog")->isVisible());
+        window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        QSettings().clear();
+    }
+    void coreCrashThenStart() {
+        // The core dies with a signal while running: one dialog, naming nothing that isn't there,
+        // and Start works again afterwards.
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        putSession("Crash", 6, "palm-tx", 1);
+        QTemporaryDir files;
+        QFile core(files.path() + "/core");
+        QVERIFY(core.open(QIODevice::WriteOnly));
+        core.write(R"PY(#!/usr/bin/python3
+import os,signal,socket,sys,time
+s=socket.socket(socket.AF_UNIX)
+s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+print('core: about to crash' if not os.path.exists(sys.argv[0]+'.ran') else 'core: second run', flush=True)
+s.sendall(b'0\tevent\tready\t\n')
+first=not os.path.exists(sys.argv[0]+'.ran')
+open(sys.argv[0]+'.ran','w').close()
+for line in s.makefile('rb'):
+    i,cmd,arg=line.rstrip(b'\n').split(b'\t')
+    message={b'keyboard-state':b'detached',b'network-state':b'disabled',b'device-state':b'palm-tx',b'sd-state':b'none'}.get(cmd,b'done')
+    s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
+    if cmd==b'device-state' and first:
+        # The control socket goes first, as when a crash handler tears down; then the process dies.
+        s.shutdown(socket.SHUT_RDWR); time.sleep(.3); os.kill(os.getpid(),signal.SIGSEGV)
+    if cmd==b'quit': break
+)PY");
+        core.close();
+        QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        MainWindow window(core.fileName()); window.show();
+        QStringList shown, details;
+        // Close the newest dialog a while after it shows, as a person would, so a second one
+        // stacks over the first if the window makes two.
+        QTimer poll; poll.setInterval(600);
+        connect(&poll, &QTimer::timeout, &window, [&] {
+            const auto boxes = window.findChildren<QMessageBox*>();
+            for (auto it = boxes.rbegin(); it != boxes.rend(); ++it) {
+                if (!(*it)->isVisible()) continue;
+                shown << (*it)->text(); details << (*it)->detailedText();
+                (*it)->done(QMessageBox::Ok);
+                return;
+            }
+        });
+        poll.start();
+        auto* list = window.findChild<QListWidget*>("sessionList");
+        QCOMPARE(list->count(), 1);
+        list->setCurrentRow(0);
+        auto* start = window.findChild<QPushButton*>("start");
+        QVERIFY(start->isEnabled());
+        start->click();
+        QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(core.fileName() + ".ran"), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(!shown.isEmpty() && start->isVisible() && start->isEnabled(), 5000);
+        QTest::qWait(2000);  // a second dialog would come by now
+        QCOMPARE(shown.size(), 1);
+        QVERIFY2(shown[0].contains("stopped unexpectedly") && !shown[0].contains("View"), qPrintable(shown[0]));
+        QVERIFY2(details[0].contains("core: about to crash"), qPrintable(details[0]));
+        start->click();
+        QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("stop")->isVisible() &&
+                                 window.findChild<QPushButton*>("stop")->isEnabled(), 5000);
+        QCOMPARE(shown.size(), 1);
+        poll.stop();
+        window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        QDir(managedFolder()).removeRecursively();
+        QSettings().clear();
+    }
     void runningView() {
         QSettings().clear(); QSettings().setValue("resume", false);
         QDir(managedFolder()).removeRecursively();

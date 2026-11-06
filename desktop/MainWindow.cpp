@@ -499,7 +499,12 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     connect(&client, &DesktopClient::diagnostic, this, [this](const QString& text) {
         log->moveCursor(QTextCursor::End); log->insertPlainText(text);
     });
-    connect(&client, &DesktopClient::error, this, &MainWindow::failure);
+    connect(&client, &DesktopClient::error, this, [this](const QString& message) {
+        // The end of the emulator log, since the log button goes away when the core stops.
+        auto lines = log->toPlainText().split('\n');
+        while (!lines.isEmpty() && lines.last().trimmed().isEmpty()) lines.removeLast();
+        failure(message, lines.mid(qMax(0, int(lines.size()) - 40)).join('\n'));
+    });
     connect(&client, &DesktopClient::stalled, this, [this] {
         forceButton->show(); statusBar()->showMessage(tr("The emulator is not responding. Waiting for it to finish…"));
     });
@@ -1357,8 +1362,19 @@ void MainWindow::showDevice(const QString& id) {
     if (!frondFirmware::capabilities(runningDevice).serial) showSerial("off");
     refresh();
 }
-void MainWindow::failure(const QString& message) {
-    QMessageBox::critical(this, tr("Frond"), message);
+// Shown without a nested event loop, so it can be called from the client's process and socket
+// signals: an exec() there let the client delete its socket while the socket was still in use.
+void MainWindow::failure(const QString& message, const QString& details) {
+    if (failureBox && failureBox->isVisible()) {
+        if (!failureBox->text().contains(message)) failureBox->setText(failureBox->text() + "\n\n" + message);
+        if (!details.isEmpty() && failureBox->detailedText().isEmpty()) failureBox->setDetailedText(details);
+        return;
+    }
+    auto* box = new QMessageBox(QMessageBox::Critical, tr("Frond"), message, QMessageBox::Ok, this);
+    if (!details.isEmpty()) box->setDetailedText(details);
+    connect(box, &QDialog::finished, box, &QObject::deleteLater);
+    failureBox = box;
+    box->open();
 }
 void MainWindow::closeEvent(QCloseEvent* event) {
     if (allowClose || !client.running()) { settings.setValue("windowGeometry", saveGeometry()); event->accept(); return; }
