@@ -20,7 +20,7 @@ static void put(uint32_t p, uint32_t value, size_t n) {
     for (size_t i = 0; i < n; ++i) scratch[p - base + i] = value >> ((n - i - 1) * 8);
 }
 bool syscallDispatchM68kSupport(SyscallDispatch*) { return true; }
-bool syscallDispatchPrepare(SyscallDispatch*) { return true; }
+bool syscallDispatchPrepare(SyscallDispatch*, SyscallPrepareMode) { return true; }
 uint16_t syscall68k_MemNumCards(SyscallDispatch*, uint32_t) { return 1; }
 uint16_t syscall68k_DmNumDatabases(SyscallDispatch*, uint32_t, uint16_t) { return 1; }
 uint32_t syscall68k_MemPtrNew(SyscallDispatch*, uint32_t, uint32_t n) {

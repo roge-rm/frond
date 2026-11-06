@@ -1,0 +1,61 @@
+--- a/src/cloudpilot/frond/main.cpp
++++ b/src/cloudpilot/frond/main.cpp
+@@ -599,8 +599,10 @@
+             if (quit) break;
+             if (gdb) gdb->Cycle(gDebugger.IsStopped() ? 10 : 0);
+             // Hidden on Android: the guest waits and nothing is drawn, while the control socket still
+-            // answers so the app can save. It carries on from now when shown again.
+-            if (hidden) {
++            // answers so the app can save. It carries on from now when shown again. A host call
++            // waiting for the event loop (an install from the Peripherals screen) runs the guest
++            // without drawing or sound until it is done.
++            if (hidden && !guestCall) {
+                 emulatedMs = wallMs();
+                 SDL_Delay(50);
+                 continue;
+@@ -640,7 +642,7 @@
+     // Host commands that call into Palm OS (install, launch, database lists and exports) wait for
+     // the guest's event loop, where no app or system call is half done, and run there inside the
+     // emulation. One waits at a time; it fails with a reason after kGuestCallSeconds of guest time,
+-    // or at once while asleep, hidden or stopped in the debugger.
++    // or at once while asleep or stopped in the debugger.
+     static constexpr double kGuestCallSeconds = 30;
+     struct GuestCall {
+         function<void()> run;
+@@ -672,8 +674,7 @@
+     void ExpireGuestCall() {
+         if (!guestCall) return;
+         string why;
+-        if (hidden) why = "the emulator is in the background";
+-        else if (gDebugger.IsStopped()) why = "the CPU is stopped in the debugger";
++        if (gDebugger.IsStopped()) why = "the CPU is stopped in the debugger";
+         else if (!gSession->IsPowerOn()) why = "the Palm is asleep";
+         else if (guestSeconds >= guestCall->deadline)
+             why = "Palm OS is busy, its event loop didn't run in " + to_string(int(kGuestCallSeconds)) + " s";
+@@ -791,7 +792,7 @@
+     // The piezo's samples since the last slice, to the WAV file and the audio device. The
+     // device queue is kept between 40 and 250 ms; samples past that are dropped.
+     void Sound() {
+-        const bool toDevice = soundOn && audio;
++        const bool toDevice = soundOn && audio && !hidden;
+         if (!wavOpen && !toDevice) return piezo.Render(gSession->GetSystemCycles(), gSession->GetClocksPerSecond(), nullptr);
+         const bool playing = piezo.Playing();
+         samples.clear();
+@@ -974,6 +975,17 @@
+         } else if (command == "window-snapshot") {
+             if (!argument(path)) return void(cout << "usage: window-snapshot <file>" << endl);
+             cout << (SaveWindow(path) ? "window snapshot saved: " : "window snapshot failed: ") << path << endl;
++        } else if (command == "hidden") {
++            // For tests: the state SDL's background event sets on Android.
++            string value;
++            if (words >> value) {
++                if (value != "on" && value != "off") return void(cout << "usage: hidden [on|off]" << endl);
++                hidden = value == "on";
++                if (hidden) ReleaseInput();
++            }
++            cout << "hidden: " << (hidden ? "on" : "off") << endl;
++        } else if (command == "cycles") {
++            cout << "cycles: " << gSession->GetSystemCycles() << endl;
+         } else if (command == "audio-on" || command == "audio-off") {
+             SetSound(command == "audio-on");
+             cout << "sound: " << SoundState() << endl;
