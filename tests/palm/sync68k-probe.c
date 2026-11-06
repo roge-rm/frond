@@ -1,6 +1,8 @@
 /* For the frond-68k install check: each sysAppLaunchCmdSyncNotify adds a "sync" record to
    FrondSyncLog, making it if needed, and each normal launch a "launch" record before it draws its
-   name and waits for events. Runs without globals on the notify. */
+   name and waits for events. Runs without globals on the notify. A notify that finds the
+   FrondSyncSwitch database deletes it and switches to Memo Pad, which queues an appStopEvent for the
+   app in front. */
 #include <PalmOS.h>
 
 static void logLine(const char *text) {
@@ -19,9 +21,20 @@ static void logLine(const char *text) {
     DmCloseDatabase(log);
 }
 
+static void switchIfAsked(void) {
+    LocalID marker = DmFindDatabase(0, "FrondSyncSwitch"), memo;
+    if (!marker) return;
+    DmDeleteDatabase(0, marker);
+    memo = DmFindDatabase(0, "Memo Pad");
+    if (memo) SysUIAppSwitch(0, memo, sysAppLaunchCmdNormalLaunch, NULL);
+}
+
 UInt32 PilotMain(UInt16 command, MemPtr parameters, UInt16 flags) {
     EventType event;
-    if (command == sysAppLaunchCmdSyncNotify) logLine("sync");
+    if (command == sysAppLaunchCmdSyncNotify) {
+        logLine("sync");
+        switchIfAsked();
+    }
     if (command != sysAppLaunchCmdNormalLaunch) return 0;
     logLine("launch");
     WinEraseWindow();
