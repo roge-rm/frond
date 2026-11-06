@@ -26,8 +26,8 @@ The Palm IIIx has its own runner, `out/frond-68k` (`make out/frond-68k`, install
 | `--mips N` | Target speed in MIPS. Default 100. |
 | `--audio-period FRAMES` | Host audio period, 64 to 8192. Default 512. Low-latency audio sizes its limits from it; Android passes 1024 or more. |
 | `-q`, `--no-sound` | Start with audio off. |
-| `--fast-audio`, `--experimental-fast-audio` | Preview one qualified TX or E2 stereo stream before the firmware audio queue. |
-| `--low-latency-queue` | The `--fast-audio` queue limits without the preview, on any device and firmware: low startup thresholds, and the 120 Hz slice and pending caps of 6 and 4 host periods (3072/2048 frames at the default 512) while non-silent frames were queued in the last 100 ms. The frontends pass it for Low-latency audio on the TG50, the Zire 72, and on the TX or E2 with firmware that isn't qualified for the preview. |
+| `--fast-audio`, `--experimental-fast-audio` | Preview one qualified TX, E2 or Zire 72 stereo stream before the firmware audio queue. |
+| `--low-latency-queue` | The `--fast-audio` queue limits without the preview, on any device and firmware: low startup thresholds, and the 120 Hz slice and pending caps of 6 and 4 host periods (3072/2048 frames at the default 512) while non-silent frames were queued in the last 100 ms. The frontends pass it for Low-latency audio on the TG50, and on the TX, E2 or Zire 72 with firmware that isn't qualified for the preview. |
 | `--gdb PORT` | Wait for GDB on 127.0.0.1:PORT before running, see [GDB and PACE monitor](#gdb-and-pace-monitor). |
 | `--serial off\|pty\|tcp:PORT` | Connect the serial port to a host PTY or a loopback TCP listener (one client at a time). |
 | `--usb off\|pty\|tcp:PORT` | Same for the USB HotSync port, through a built-in USB host. |

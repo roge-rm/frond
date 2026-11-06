@@ -4,19 +4,48 @@
 #include <vector>
 #include "fast_audio.h"
 
+// RAM at 0 and the Zire 72 NOR code range at its real addresses.
+struct Memory {
+    std::vector<uint8_t> ram=std::vector<uint8_t>(0x10000),code=std::vector<uint8_t>(0x80000);
+    static constexpr uint32_t codeBase=0x20040000;
+    uint8_t* At(uint32_t a,unsigned size) {
+        if(a<ram.size() && size<=ram.size()-a)return ram.data()+a;
+        if(a>=codeBase && a-codeBase<code.size() && size<=code.size()-(a-codeBase))return code.data()+(a-codeBase);
+        return nullptr;
+    }
+};
+
 static void exercise(FastAudio::Driver driver) {
-    std::vector<uint8_t> ram(0x10000);
-    auto write=[&](uint32_t a,uint32_t v,unsigned size=4){assert(a+size<=ram.size());std::memcpy(ram.data()+a,&v,size);};
-    auto reader=[&](uint32_t a,void* p,unsigned size){if(a>ram.size() || size>ram.size()-a)return false;std::memcpy(p,ram.data()+a,size);return true;};
+    Memory memory;
+    const bool zire=driver==FastAudio::Driver::zire72;
+    auto write=[&](uint32_t a,uint32_t v,unsigned size=4){auto* p=memory.At(a,size);assert(p);std::memcpy(p,&v,size);};
+    auto reader=[&](uint32_t a,void* p,unsigned size){auto* from=memory.At(a,size);if(!from)return false;std::memcpy(p,from,size);return true;};
     uint32_t r[16]{};r[9]=0x100;r[12]=0x1000;r[1]=0x8000;r[2]=4096;
-    const uint32_t entry=0x2000,object=0x5000;
+    const uint32_t entry=zire?0x2009ce1c:0x2000,object=0x5000,table=0x4000;
+    // Channel table entries: 20 bytes with the object at +4, or 16 bytes with it at +0 on the Zire.
+    const uint32_t stride=zire?16:20,slot=zire?0:4;
     write(0x1320,entry);write(entry,0xe92d4200);write(entry+4,0xe5999000);write(entry+8,0xe5999000);
-    write(entry+32,0xe59fe100);write(entry+36,0xe0800100);write(entry+40,0xe08ee009);
-    write(entry+44,0xe08e0100);write(entry+48,0xe5900004);
-    write(entry-0x5f8,0xe4920004);write(entry-0x5f4,0xe1a005c0);write(entry-0x5f0,0xe250cc7f);
-    write(entry+40+0x100,0x1000);write(0x100,0x200);write(0x200,0x3000);write(0x4004,object);
+    if(!zire) {
+        write(entry+32,0xe59fe100);write(entry+36,0xe0800100);write(entry+40,0xe08ee009);
+        write(entry+44,0xe08e0100);write(entry+48,0xe5900004);
+        write(entry-0x5f8,0xe4920004);write(entry-0x5f4,0xe1a005c0);write(entry-0x5f0,0xe250cc7f);
+        write(entry+40+0x100,0x1000);
+    }
+    write(0x100,0x200);write(0x200,0x3000);write(table+slot,object);
     write(object,0x12);write(object+4,44100);write(object+8,2,2);write(object+40,1024,2);write(object+42,512,2);
-    const uint32_t first=driver==FastAudio::Driver::tx?0xe92d4200:0xe59fc004;
+    const uint32_t first=driver==FastAudio::Driver::e2?0xe59fc004:0xe92d4200;
+    // Zire 72 words the profile checks: HAL write, queue writer and mixer thread, at their NOR addresses.
+    const std::pair<uint32_t,uint32_t> zireCode[] = {
+        {entry+12,0xe3500000},{entry+20,0xe3500010},{entry+28,0xe59fc100},{entry+32,0xe089c00c},
+        {entry+36,0xe79c0200},{entry+40,0xe3500000},{entry+68,0xe8bd4200},{entry+72,0xeaffc8d5},
+        {0x2008f1d4,0xe5983000},{0x2008f1e0,0xe1d830f8},{0x2008f1ec,0xe5983004},
+        {0x2008f2d8,0xe3530011},{0x2008f39c,0xe3530002},
+        {0x2009c83c,0xe35c0012},{0x2009c84c,0xe1d730f8},{0x2009c850,0xe3530002},{0x2009c860,0xebffc645},
+        {0x2009c930,0xe493b004},{0x2009c938,0xe1a025cb},{0x2008e214,0xe1db22f8},{0x2008e228,0xe1db22fa}};
+    if(zire) {
+        for(auto [addr,value]:zireCode)write(addr,value);
+        write(entry+36+0x100,0x1000);
+    }
     if(driver==FastAudio::Driver::e2) {
         const uint32_t code=0x6000;
         write(entry,0xe59fc004);write(entry+4,0xe08cc00f);write(entry+8,0xe12fff1c);
@@ -47,11 +76,11 @@ static void exercise(FastAudio::Driver driver) {
     preview.RestartOutput();
     assert(audioQueuePendingSamples(queue)==0);
     // Multiple open channels return to the normal path, with no delayed echo.
-    write(0x4018,object+128);
+    write(table+stride+slot,object+128);
     preview.Handle(0x4320,r,4000,true);assert(preview.Failed() && preview.Bypass());
     assert(audioQueuePendingSamples(queue)==0);
     preview.Tick(250004001);assert(!preview.Bypass());
-    write(0x4018,0);preview.Reset();write(object+40,1024,2);write(object+42,1024,2);
+    write(table+stride+slot,0);preview.Reset();write(object+40,1024,2);write(object+42,1024,2);
     preview.Handle(0x4320,r,300000000,true);assert(preview.Active());
     preview.Handle(0x4318,r,300000001,true);assert(!preview.Active() && !preview.Failed());
     preview.Tick(550000002);assert(!preview.Bypass());
@@ -94,7 +123,7 @@ static void exercise(FastAudio::Driver driver) {
     assert(FastAudio::Scale(-1,1024)==-1 && FastAudio::Scale(32767,1024)==16383);
     if(driver==FastAudio::Driver::e2) {
         for(uint32_t addr:{0x6000u,0x601cu,0x6000u-0x418,0x6000u+0x1d84}) {
-            uint16_t before;std::memcpy(&before,ram.data()+addr,2);
+            uint16_t before;std::memcpy(&before,memory.At(addr,2),2);
             write(addr,before^1,2);preview.Reset();preview.Handle(0x4320,r,0,true);
             assert(preview.Failed() && !preview.Active());write(addr,before,2);
         }
@@ -103,7 +132,43 @@ static void exercise(FastAudio::Driver driver) {
         preview.Reset();write(entry+12,0x7fffffff);preview.Handle(0x4320,r,0,true);
         assert(preview.Failed() && !preview.Active());
     }
+    if(zire) {
+        // Any changed word in the HAL write, queue writer or mixer refuses the preview.
+        for(auto [addr,value]:zireCode) {
+            write(addr,value^0x10);preview.Reset();preview.Handle(0x4320,r,0,true);
+            assert(preview.Failed() && !preview.Active());write(addr,value);
+        }
+        write(entry+36+0x100,0x1000-16);preview.Reset();preview.Handle(0x4320,r,0,true);
+        assert(preview.Failed() && !preview.Active());write(entry+36+0x100,0x1000);
+        preview.Reset();preview.Handle(0x4320,r,0,true);assert(preview.Active());
+        // The TX and E2 profiles refuse the Zire driver, and the Zire profile refuses the TX one.
+        for(auto other:{FastAudio::Driver::tx,FastAudio::Driver::e2}) {
+            FastAudio wrong(reader,other);wrong.SetQueue(queue);
+            wrong.Handle(0x4320,r,0,true);assert(wrong.Failed() && !wrong.Active());
+        }
+        // Qualified start: SndStreamStart's ARM call to HAL control 5 at its NOR address.
+        const uint32_t start=0x20049d5c,call=0x20049ddc;
+        const std::pair<uint32_t,uint32_t> startCode[] = {{start,0xe92d43f0},{start+4,0xe5999000},
+            {call-12,0xe5940028},{call-8,0xe28d200c},{call-4,0xe3a01005},{call,0xeb00543b},{call+4,0xe3500000}};
+        for(auto [addr,value]:startCode)write(addr,value);
+        uint32_t ctl[16]{};ctl[1]=5;ctl[14]=call+4;
+        assert(preview.QualifiedStart(ctl));
+        ctl[14]=call+5;assert(!preview.QualifiedStart(ctl));ctl[14]=call+4;
+        for(auto [addr,value]:startCode) {
+            write(addr,value^1);assert(!preview.QualifiedStart(ctl));write(addr,value);
+        }
+        // A start with a result of 0 tracks the channel; a stop holds the preview until the next start.
+        preview.Reset();uint32_t result[16]{};
+        preview.ControlHead(ctl,10,true);preview.ControlTail(ctl,result,11);assert(!preview.ControlSuspended());
+        ctl[1]=6;preview.ControlHead(ctl,12,true);preview.ControlTail(ctl,result,13);assert(preview.ControlSuspended());
+        preview.Handle(0x4320,r,14,true);assert(!preview.Active());
+        ctl[1]=5;preview.ControlHead(ctl,15,true);preview.ControlTail(ctl,result,16);
+        preview.Handle(0x4320,r,17,true);assert(preview.Active() && !preview.Failed());
+        // The Thumb early hook never runs here, so an early transition records nothing.
+        uint32_t regs[16]{};preview.EarlyTransition(regs,0x2006c974,0x20057cd4,18);
+        assert(preview.EarlyStatus().ready==0 && preview.EarlyStatus().rejected==0 && preview.EarlyStatus().pending==0);
+    }
     puts("PASS: fast audio profile, PCM/gains, leading silence, pause, fallback, close and reset");
 }
 
-int main(){exercise(FastAudio::Driver::tx);exercise(FastAudio::Driver::e2);}
+int main(){exercise(FastAudio::Driver::tx);exercise(FastAudio::Driver::e2);exercise(FastAudio::Driver::zire72);}

@@ -208,7 +208,7 @@ int main() {
         assert(zire72->deviceType == deviceTypeZire72);
         const auto& caps = zire72->capabilities;
         assert(caps.keyboard && caps.usb && caps.infrared && caps.bluetooth);
-        assert(!caps.serial && !caps.network && !caps.fastAudio);
+        assert(!caps.serial && !caps.network && caps.fastAudio);
     }
 
     for (const auto& p : deviceProfiles5)

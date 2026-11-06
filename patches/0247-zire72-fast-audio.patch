@@ -1,0 +1,151 @@
+--- a/src/common/device_profile5.h
++++ b/src/common/device_profile5.h
+@@ -114,11 +114,12 @@
+     {deviceTypeZire72, "palm-zire-72", "Zire 72", DeviceCohort5::zire72Nor,
+      DeviceSupport5::zire72Desktop, DeviceDetect5::cardHeader, deviceCompanyPalm5,
+      0x615a3732 /* aZ72 */, DeviceBoard5::pxa270Zire72, DeviceArt::zire72,
+-     {false, true, false, true, false, true, true, true, true},
++     {false, true, false, true, true, true, true, true, true},
+      14942208, 0, 32u << 20, 32u << 20, DisplayMode::mode_320x320, 1u << 5, false,
+      DeviceNorLayout5::smallAndBigCards, 0, 0x20000, false, 32u << 20, 2048u << 20,
+      {true, "zire", 320, 320, 120, 96, "Calendar|Contacts|Music|Camera",
+-      "up|down|left|right|centre|app1|app2|app3|app4|home|menu|voice|power", 23, 352, 23, 412, false, true, true, "", "wallpaper"}},
++      "up|down|left|right|centre|app1|app2|app3|app4|home|menu|voice|power", 23, 352, 23, 412, false, true, true,
++      "0f3e0bf04ceaa5ad73a1768b7d9ede98", "wallpaper"}},
+     // PXA250 with a built-in keyboard; unsupported transports stay disabled.
+     {deviceTypeTG50, "sony-clie-tg50", "Sony CLIÉ TG50", DeviceCohort5::tg50Nor, DeviceSupport5::experimentalDesktop,
+      DeviceDetect5::cardHeader, 0x736f6e79 /* sony */, 0x76726e61 /* vrna */,
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -415,7 +415,7 @@
+             const bool qualified = audioProfile && audioProfile->capabilities.fastAudio &&
+                 digest == audioProfile->frontend.fastAudioNorMd5;
+             if (!qualified) {
+-                cerr << "low-latency audio requires a verified TX 5.4 or Tungsten E2 NOR image" << endl;
++                cerr << "low-latency audio requires a verified TX 5.4, Tungsten E2 or Zire 72 NOR image" << endl;
+                 return false;
+             }
+         }
+--- a/src/uarm/uarm/fast_audio.h
++++ b/src/uarm/uarm/fast_audio.h
+@@ -11,11 +11,11 @@
+ #include <cstring>
+ #include <stdexcept>
+ 
+-// Optional preview of one qualified TX or E2 PCM stream before its firmware queue.
++// Optional preview of one qualified TX, E2 or Zire 72 PCM stream before its firmware queue.
+ class FastAudio {
+ public:
+     using Reader = std::function<bool(uint32_t, void*, unsigned)>;
+-    enum class Driver { tx, e2 };
++    enum class Driver { tx, e2, zire72 };
+     explicit FastAudio(Reader read, Driver driver = Driver::tx) : read(read), driver(driver) {}
+     void SetQueue(AudioQueue* value) { queue = value; }
+     // Host audio period in frames: the stream starts after one period of silence and falls
+@@ -116,6 +116,13 @@
+     }
+     struct Control {uint32_t channel,command,sp,lr;bool qualifiedStart;};
+     bool QualifiedStart(const uint32_t* r) {
++        if(driver==Driver::zire72) {
++            // 5.2.8 SndStreamStart is ARM: ldr r0,[r4,#40]; add r2,sp,#12; mov r1,#5; bl HAL; cmp r0,#0.
++            const uint32_t entry=0x20049d5c,call=0x20049ddc;
++            return r[14]==call+4 && Is(entry,0xe92d43f0) && Is(entry+4,0xe5999000) &&
++                Is(call-12,0xe5940028) && Is(call-8,0xe28d200c) && Is(call-4,0xe3a01005) &&
++                Is(call,0xeb00543b) && Is(call+4,0xe3500000);
++        }
+         const bool e2=driver==Driver::e2;
+         const uint32_t entry=e2?0x20065de4:0x2004ae3c,call=e2?0x20065e30:0x2004ae88;
+         uint16_t next;
+@@ -211,6 +218,8 @@
+     EarlyDiagnostics EarlyStatus() const {return {earlyReady,earlyConsumed,earlyDisposed,earlyRejected,earlyContradictions,ledger.Pending(),previews,skips};}
+     ~FastAudio() = default;
+     void EarlyTransition(const uint32_t* regs,uint32_t pc,uint32_t from,uint64_t now=0,bool outputEnabled=true) {
++        // The Zire 72 stream writer is ARM code, which the Thumb-only early hook doesn't see.
++        if(driver==Driver::zire72)return;
+         const bool e2=driver==Driver::e2;
+         const uint32_t wrapper=e2?0x20072c6c:0x20057cc4;
+         const uint32_t writer=e2?0x2006659c:0x2004b5f4;
+@@ -315,6 +324,8 @@
+     bool Profile(const uint32_t* r, uint32_t& object, uint16_t& left, uint16_t& right) {
+         if (r[0]>=16 || r[12]>UINT32_MAX-0x320) return false;
+         uint32_t entry, ldr, literal, globals, tableOffset;
++        // Channel table: TX and E2 have 20-byte entries with the object at +4, the Zire 72 16-byte ones at +0.
++        unsigned stride=20,slot=4;
+         if (!Word(r[12]+0x320,entry) || entry<0x600 || entry>UINT32_MAX-8192) return false;
+         if (driver == Driver::tx) {
+             if (!Is(entry,0xe92d4200) || !Is(entry+4,0xe5999000) || !Is(entry+8,0xe5999000) ||
+@@ -355,15 +366,39 @@
+             literal=((code+28)&~3u)+(tableLoad&255)*4;
+             if (!Word(literal,tableOffset) || tableOffset>UINT32_MAX-28) return false;
+             tableOffset+=28;
++        } else if (driver == Driver::zire72) {
++            // ARM HALSoundWrite: checks the channel, loads the object from the 16-byte table and
++            // branches to the queue writer.
++            uint32_t branch;
++            if (!Is(entry,0xe92d4200) || !Is(entry+4,0xe5999000) || !Is(entry+8,0xe5999000) ||
++                !Is(entry+12,0xe3500000) || !Is(entry+20,0xe3500010) || !Word(entry+28,ldr) ||
++                (ldr&0xfffff000)!=0xe59fc000 || !Is(entry+32,0xe089c00c) || !Is(entry+36,0xe79c0200) ||
++                !Is(entry+40,0xe3500000) || !Is(entry+68,0xe8bd4200) || !Word(entry+72,branch) ||
++                (branch&0xff000000)!=0xea000000) return false;
++            const int64_t writer=int64_t(entry)+80+int64_t(int32_t(branch<<8)>>6);
++            if (writer<0 || writer>UINT32_MAX-0x200) return false;
++            // Queue writer: format and channel checks, 8-bit and byte-swap branches for formats 0x11 and 2.
++            const std::pair<unsigned,uint32_t> queue[] = {
++                {0x14,0xe5983000},{0x20,0xe1d830f8},{0x2c,0xe5983004},{0x118,0xe3530011},{0x1dc,0xe3530002}};
++            for (auto [offset,expected]:queue) if (!Is(uint32_t(writer)+offset,expected)) return false;
++            // Mixer thread: stereo 16-bit mixer for formats 0x12 and 2, then signed Q11 to 16 bits;
++            // the stereo mixer reads the signed gains at +40 and +42.
++            const std::pair<int,uint32_t> mixer[] = {
++                {-0x5e0,0xe35c0012},{-0x5d0,0xe1d730f8},{-0x5cc,0xe3530002},{-0x5bc,0xebffc645},
++                {-0x4ec,0xe493b004},{-0x4e4,0xe1a025cb},{-0xec08,0xe1db22f8},{-0xebf4,0xe1db22fa}};
++            for (auto [offset,expected]:mixer) if (!Is(uint32_t(int64_t(entry)+offset),expected)) return false;
++            literal=entry+36+(ldr&0xfff);
++            if (!Word(literal,tableOffset)) return false;
++            stride=16;slot=0;
+         } else return false;
+         if (!Word(r[9],globals) || !Word(globals,globals) ||
+-            uint64_t(globals)+tableOffset+324>UINT32_MAX) return false;
++            uint64_t(globals)+tableOffset+16*stride>UINT32_MAX) return false;
+         const uint32_t table=globals+tableOffset;
+         unsigned count=0;
+         object=0;
+         for (unsigned i=0; i<16; ++i) {
+             uint32_t p;
+-            if (!Word(table+20*i+4,p)) return false;
++            if (!Word(table+stride*i+slot,p)) return false;
+             if (p) ++count;
+             if (i==r[0]) object=p;
+         }
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -1223,12 +1223,16 @@
+ 
+ 
+ bool SocPXA::EnableFastAudio() {
+-    if ((GetDeviceType() != DeviceType5::deviceTypeTX && GetDeviceType() != DeviceType5::deviceTypeE2) || fastAudio) return false;
++    const auto type=GetDeviceType();
++    if ((type != DeviceType5::deviceTypeTX && type != DeviceType5::deviceTypeE2 &&
++         type != DeviceType5::deviceTypeZire72) || fastAudio) return false;
+     fastAudio = std::make_unique<FastAudio>([this](uint32_t addr, void* data, unsigned size) {
+         return cpuInspectRead(cpu,addr,data,size);
+-    }, GetDeviceType()==deviceTypeE2 ? FastAudio::Driver::e2 : FastAudio::Driver::tx);
++    }, type==deviceTypeE2 ? FastAudio::Driver::e2 : type==deviceTypeZire72 ? FastAudio::Driver::zire72 : FastAudio::Driver::tx);
+     fastAudio->SetQueue(audioQueue);
+-    fastAudio->SetEarlyPlayback(true);
++    // The Zire 72's 5.2.8 Sound Manager is ARM code, so it previews at the HAL write only.
++    const bool early=type!=deviceTypeZire72;
++    fastAudio->SetEarlyPlayback(early);
+     if(PowerSleeping())fastAudio->Sleep();
+     auto observer=[](ArmCpu* cpu,void* context,uint32_t pc,uint32_t from) {
+         auto* self=static_cast<SocPXA*>(context);
+@@ -1236,8 +1240,8 @@
+             {self->fastAudio->EarlyTransition(cpuGetRegisters(cpu),pc,from,self->GetTime(),self->pcmEnabled);
+             self->fastAudio->ValidateEarly(self->GetTime());self->UpdateFastAudioRoute();}
+     };
+-    const bool e2=GetDeviceType()==deviceTypeE2;
+-    cpuSetEarlyAudioHook(cpu,observer,this,e2?0x20072c7c:0x20057cd4,e2?0x200665c0:0x2004b618);
++    const bool e2=type==deviceTypeE2;
++    if(early)cpuSetEarlyAudioHook(cpu,observer,this,e2?0x20072c7c:0x20057cd4,e2?0x200665c0:0x2004b618);
+     auto hook = [](void* ctx, uint32_t trap, uint32_t* regs) {
+         auto soc = static_cast<SocPXA*>(ctx);
+         if(trap==0x4324)soc->fastAudio->ControlHead(regs,soc->GetTime(),patchDispatchCanTrackTail(soc->patchDispatch));
