@@ -4,8 +4,9 @@ installed while the launcher shows appears in it at once, matching the launcher 
 and gets sysAppLaunchCmdSyncNotify. A PDB installed with Memo Pad in front notifies its creator app
 and Memo Pad stays; Memo Pad waits for events with no timeout, and a RAM export, the database list
 and a launch work with it in front too. With the creator app itself in front it gets no notify, and
-another app's install leaves it in front. Two installs in a row at the launcher work, an install while a launch is under
-way doesn't keep the launcher, and a session saved by the next console command after an install at
+another app's install leaves it in front. Two installs in a row at the launcher work, an event
+the notified app queues (a switch to Memo Pad) isn't overridden by the relaunch, an install while a
+launch is under way doesn't keep the launcher, and a session saved by the next console command after an install at
 the launcher loads with the launcher listing the app.
 
 Sessions: --session DEVICE=PATH, else FROND_ARM_SESSIONS/DEVICE (a folder of machine folders), else
@@ -42,11 +43,11 @@ def build_probes(sdk):
     return PROBE.is_file() and OTHER.is_file()
 
 
-def data_pdb(path):
-    """FrondSyncData, a one-record PDB with the probe's creator."""
+def data_pdb(path, name=b'FrondSyncData', creator=b'FrSy'):
+    """A one-record PDB, by default FrondSyncData with the probe's creator."""
     header = bytearray(78)
-    header[0:13] = b'FrondSyncData'
-    header[60:64], header[64:68] = b'DATA', b'FrSy'
+    header[0:len(name)] = name
+    header[60:64], header[64:68] = b'DATA', creator
     header[76:78] = (1).to_bytes(2, 'big')
     entry = (78 + 8 + 2).to_bytes(4, 'big') + bytes(4)
     path.write_bytes(bytes(header) + entry + bytes(2) + b'data\0')
@@ -296,6 +297,20 @@ def check(device, session, work, root):
         if device.body(twice) != device.body(listed):
             raise AssertionError('two installs in a row left no launcher listing the apps')
 
+        # An event the notified app queued is handled first: with FrondSyncSwitch (no app has its
+        # creator, so it brings no notify) installed, the probe's notify switches to Memo Pad,
+        # queuing an appStopEvent for the launcher, and the launcher isn't relaunched over it.
+        install(core, data_pdb(root / 'FrondSyncSwitch.pdb', b'FrondSyncSwitch', b'FrSw'))
+        install(core)
+        logged.append('sync')
+        switched = settle(core, root / 'notify-switch.png', lambda rows: device.body(rows) == device.body(memo))
+        if device.body(switched) != device.body(memo):
+            raise AssertionError('the launcher was relaunched over the event the notified app queued')
+        expect_log(core, root, 'notify-switch', logged)
+        device.reopen(core, root)
+        time.sleep(2)
+        device.still(core, root / 'reopened-3.png')
+
         # A launch already under way wins over the relaunch.
         mark = len(core.lines)
         core.send(f'launch "Memo Pad"\ninstall "{PROBE}"', REPLIES, 60)
@@ -360,7 +375,7 @@ def main():
                 print(f'frond-arm install: {name} ok, launcher lists the app at once as reopened by hand; '
                       'Memo Pad and the probe stay in front; PDB notifies only the app not in front; '
                       'install, export, list and launch with Memo Pad in front; '
-                      'a pending launch wins; a save right after the install keeps the relaunch', flush=True)
+                      'a pending launch and an event queued by the notified app win; a save right after the install keeps the relaunch', flush=True)
             except AssertionError as error:
                 failed += 1
                 print(f'frond-arm install: {name} FAIL, {error}', flush=True)
