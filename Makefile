@@ -1043,6 +1043,35 @@ test-tg50-microphone-dma: prepare
 
 test: test-tg50-microphone-adc test-tg50-microphone-state test-tg50-microphone-dma
 
+.PHONY: test-z72-microphone
+test: test-z72-microphone
+test-z72-microphone: out/frond
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/z72-microphone-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common tests/z72-microphone.cpp @build/z72-microphone-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-z72-microphone
+	./build/test-z72-microphone
+
+# Zire 72 Voice Memo on the real ROM records a fake 1 kHz microphone (tests/z72-voice-memo.py).
+# Z72_SESSION is a Zire 72 session you supply, at the launcher with the setup Reminder up (the
+# smoke session); without it the test is skipped. Each run goes in a new folder.
+Z72_SESSION ?=
+Z72_MIC_DIR = build/z72-voice-memo
+.PHONY: test-z72-voice-memo
+test-z72-voice-memo: out/frond
+ifeq ($(Z72_SESSION),)
+	@echo "test-z72-voice-memo: skipped, no Z72_SESSION"
+else
+	mkdir -p $(Z72_MIC_DIR)
+	python3 tests/z72-voice-memo.py source build/source/src/uarm/native/main.cpp $(Z72_MIC_DIR)/main.cpp
+	$(CXX) -std=c++17 -O2 -g $(shell pkg-config --cflags sdl2 SDL2_image slirp) $(if $(filter 1,$(FROND_FAST)),-DFROND_DYNARMIC) \
+		-Ibuild/source/src/uarm/native -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		-Ibuild/source/src/common/zip -Ibuild/source/src/argparse -c $(Z72_MIC_DIR)/main.cpp -o $(Z72_MIC_DIR)/main.o
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/main.o' > $(Z72_MIC_DIR)/core.rsp
+	$(CXX) -o $(Z72_MIC_DIR)/frond-test-mic $(Z72_MIC_DIR)/main.o @$(Z72_MIC_DIR)/core.rsp build/source/src/common/libcommon.a \
+		$(shell pkg-config --libs sdl2 SDL2_image slirp) -lreadline $(CPU_TEST_LDLIBS)
+	python3 tests/z72-voice-memo.py run --core $(Z72_MIC_DIR)/frond-test-mic --session $(Z72_SESSION) \
+		--output $(Z72_MIC_DIR)/run-$(shell date +%Y%m%d-%H%M%S)
+endif
+
 .PHONY: test-host-microphone
 test-host-microphone: prepare
 	$(CXX) -std=c++17 -O2 -g -Ibuild/source/src/uarm/native -Ibuild/source/src/uarm/uarm \

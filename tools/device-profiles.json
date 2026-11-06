@@ -284,7 +284,7 @@
       "camera": true,
       "fast_audio_md5": "",
       "network": false,
-      "microphone": false,
+      "microphone": true,
       "serial": false,
       "keyboard": true,
       "usb": true,

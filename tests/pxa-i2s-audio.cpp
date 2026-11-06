@@ -307,7 +307,7 @@ static void adcLoopbackChecks() {
         reg(0, 0x81); reg(1, 0x61); reg(4, 0x6a); reg(5, loop ? 2 : 0); reg(6, 0x10); reg(7, 0);
         wr(4, 8); wr(0, 0x7701);
         struct Capture { bool nonzero{}; unsigned pulls{}; } capture;
-        Ak4534InputSource source{&capture, [](void *c, Ak4534InputRoute, uint32_t, uint32_t) -> int16_t {
+        AudioInputSource source{&capture, [](void *c, AudioInputRoute, uint32_t, uint32_t) -> int16_t {
             static_cast<Capture *>(c)->pulls++; return (static_cast<Capture *>(c)->pulls & 1) ? 12000 : -12000;
         }, nullptr, nullptr};
         ak4534SetInputSource(ak, &source);

@@ -50,6 +50,15 @@ class DeviceTest {
         assertFalse(Device.E2.camera)
         assertTrue(Device.ZIRE72 in Device.shown)
     }
+
+    // The microphone row, permission request and lifetime rules key on this flag.
+    @Test
+    fun microphoneOnTheZireAndTg50Only() {
+        assertTrue(Device.ZIRE72.microphone)
+        assertTrue(Device.byId("sony-clie-tg50")!!.microphone)
+        assertFalse(Device.TX.microphone)
+        assertFalse(Device.E2.microphone)
+    }
 }
 
 class SdBoundsTest {

@@ -246,7 +246,7 @@ Tested: discovery, sending a Memo or file by Bluetooth (OPP), PIN and Trusted De
 |---|---|---|---|---|---|
 | Sound | yes | yes | yes | yes, see below | yes, piezo |
 | Low-latency audio | yes | yes | | shorter queue | |
-| Microphone | | | | yes | |
+| Microphone | | | yes | yes | |
 | Network | yes | | | | PPP over serial |
 | Serial port | yes | yes | not offered | yes | yes |
 | USB HotSync | yes | yes | yes | yes | |
@@ -257,11 +257,11 @@ Tested: discovery, sending a Memo or file by Bluetooth (OPP), PIN and Trusted De
 | Hold | | | | yes | |
 | Card | SD | SD | SD | Memory Stick, Pro | none |
 
-The Zire 72's Camera shows a white screen and goes back to the launcher. The TG50 plays beeps, alarms and Sony Voice Recorder audio. Standard Palm SndStream (not in its firmware), the remote control, MagicGate and Memory Stick audio aren't there. Serial works at 9600, 57600 and 115200 baud. HotSync over the serial port isn't tested on the TG50 or the T|X.
+The Zire 72's Camera shows a white screen and goes back to the launcher. Its microphone is the built-in one that Voice Memo uses, with no choice of input. The TG50 plays beeps, alarms and Sony Voice Recorder audio. Standard Palm SndStream (not in its firmware), the remote control, MagicGate and Memory Stick audio aren't there. Serial works at 9600, 57600 and 115200 baud. HotSync over the serial port isn't tested on the TG50 or the T|X.
 
 On the IIIx, serial HotSync is tested with pilot-link (install, fetch, backup). It has no Fast engine, no SD slot and no Bluetooth, USB or Wi-Fi, as on the real one. Its backlight shows as a green panel.
 
-Microphone (TG50) is off each time it starts. Turn it on under Device while the machine runs. Android asks for permission the first time and arms it when you return to the device. Saving, file work, stopping, reset, sleep and leaving the app turn it off again. On Linux, hiding the device window does too.
+Microphone (Zire 72 and TG50) is off each time it starts. Turn it on under Device while the machine runs. Android asks for permission the first time and arms it when you return to the device. Saving, file work, stopping, reset, sleep and leaving the app turn it off again. On Linux, hiding the device window does too.
 
 ## Troubleshooting
 

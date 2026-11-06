@@ -7,9 +7,9 @@ struct Source {
     unsigned pulled{}, fences{}, disarms{};
     int16_t level{1000};
     bool alternating{true};
-    Ak4534InputRoute route{};
-    Ak4534InputSource Hooks() { return {this,
-        [](void *p, Ak4534InputRoute route, uint32_t n, uint32_t d) -> int16_t {
+    AudioInputRoute route{};
+    AudioInputSource Hooks() { return {this,
+        [](void *p, AudioInputRoute route, uint32_t n, uint32_t d) -> int16_t {
             auto &s=*static_cast<Source *>(p); assert(n && d); s.route=route;
             ++s.pulled; return s.alternating && (s.pulled & 1) ? -s.level : s.level;
         }, [](void *p,bool){++static_cast<Source *>(p)->fences;},
@@ -91,10 +91,10 @@ int main() {
     for(unsigned i=0;i<2081;++i) assert(tick(link)==0);
     assert(source.pulled==2081);
     const auto first=tick(link); assert(first>>16==0 && int16_t(first)<-990);
-    assert(source.pulled==2082 && source.route==Ak4534InputRoute::internalMic);
+    assert(source.pulled==2082 && source.route==AudioInputRoute::internalMic);
     for(unsigned i=0;i<100;++i) assert(std::abs(int16_t(tick(link)))>=990);
-    reg(7,0x08); tick(link);assert(source.route==Ak4534InputRoute::analogIn);
-    reg(7,0x16); tick(link);assert(source.route==Ak4534InputRoute::externalMic);
+    reg(7,0x08); tick(link);assert(source.route==AudioInputRoute::analogIn);
+    reg(7,0x16); tick(link);assert(source.route==AudioInputRoute::externalMic);
     const auto before=source.pulled;reg(7,0x06);tick(link);assert(source.pulled==before);
     reg(7,0x0d);for(unsigned i=0;i<18;++i)tick(link);auto amplified=int16_t(tick(link));assert(std::abs(amplified)>9900);
     reg(11,0);for(unsigned i=0;i<130;++i)tick(link);

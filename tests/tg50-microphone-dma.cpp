@@ -13,8 +13,8 @@ int main(){
     Reschedule reschedule{[](void *,uint32_t){},nullptr};
     auto *dma=pxaDmaInit(nullptr,reschedule,nullptr);auto *link=pxaI2sInit(nullptr,nullptr,dma);
     auto *ak=ak4534Init(nullptr,link,nullptr);unsigned samples=0;
-    Ak4534InputSource source{&samples,[](void*p,Ak4534InputRoute r,uint32_t n,uint32_t d)->int16_t{
-        assert(r==Ak4534InputRoute::internalMic && n==44100 && d==1);return (++*static_cast<unsigned*>(p)&1)?-1000:1000;
+    AudioInputSource source{&samples,[](void*p,AudioInputRoute r,uint32_t n,uint32_t d)->int16_t{
+        assert(r==AudioInputRoute::internalMic && n==44100 && d==1);return (++*static_cast<unsigned*>(p)&1)?-1000:1000;
     },nullptr,nullptr};ak4534SetInputSource(ak,&source);
     reg(0,0x83);reg(1,0x60);reg(4,0x6a);reg(7,0x0c);wr(0x40400000,0x7701);
     for(unsigned i=0;i<2081;++i){pxaI2sPeriodic(link);assert(rd(0x40400080)==0);}

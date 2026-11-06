@@ -1,0 +1,715 @@
+diff --git a/src/common/device_profile5.h b/src/common/device_profile5.h
+index df8f133..dca4227 100644
+--- a/src/common/device_profile5.h
++++ b/src/common/device_profile5.h
+@@ -114,7 +114,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
+     {deviceTypeZire72, "palm-zire-72", "Zire 72", DeviceCohort5::zire72Nor,
+      DeviceSupport5::zire72Desktop, DeviceDetect5::cardHeader, deviceCompanyPalm5,
+      0x615a3732 /* aZ72 */, DeviceBoard5::pxa270Zire72, DeviceArt::zire72,
+-     {false, true, false, true, false, true, true, true},
++     {false, true, false, true, false, true, true, true, true},
+      14942208, 0, 32u << 20, 32u << 20, DisplayMode::mode_320x320, 1u << 5, false,
+      DeviceNorLayout5::smallAndBigCards, 0, 0x20000, false, 32u << 20, 2048u << 20,
+      {true, "zire", 320, 320, 120, 96, "Calendar|Contacts|Music|Camera",
+diff --git a/src/uarm/native/SdlMicrophone.h b/src/uarm/native/SdlMicrophone.h
+index 80dc6e5..5fe6285 100644
+--- a/src/uarm/native/SdlMicrophone.h
++++ b/src/uarm/native/SdlMicrophone.h
+@@ -8,7 +8,7 @@
+ #include <functional>
+ #include <mutex>
+ #include <string>
+-#include "i2sdev_AK4534.h"
++#include "audio_input.h"
+ 
+ // Callback frames are mono signed16 at 48 kHz. The emulator never waits for input.
+ // A fixed 250 ms ring drops oldest frames on overflow. Guest time consumes at its
+@@ -17,7 +17,7 @@ class MicrophoneQueue {
+ public:
+     static constexpr size_t capacity = 12000;
+     void Fence(bool value) { std::lock_guard<std::mutex> lock(mutex); fenced = value; }
+-    void Configure(const Ak4534InputDemand& d) {
++    void Configure(const AudioInputDemand& d) {
+         std::lock_guard<std::mutex> lock(mutex);
+         if (fenced) return;
+         if (active != d.active || route != d.route || numerator != d.rateNumerator || denominator != d.rateDenominator) {
+@@ -47,7 +47,7 @@ public:
+             samples[(read + count) % capacity] = input[i]; ++count;
+         }
+     }
+-    int16_t Pull(Ak4534InputRoute requestedRoute, uint32_t n, uint32_t d) {
++    int16_t Pull(AudioInputRoute requestedRoute, uint32_t n, uint32_t d) {
+         std::lock_guard<std::mutex> lock(mutex);
+         if (fenced || !active || requestedRoute != route || n != numerator || d != denominator || !n || !d) return 0;
+         // Linear interpolation follows the anti-alias filter. Phase is in host frames.
+@@ -79,7 +79,7 @@ private:
+     size_t read{}, count{}, historyAt{};
+     double phase{};
+     bool active{}, fenced{};
+-    Ak4534InputRoute route{};
++    AudioInputRoute route{};
+     uint32_t numerator{}, denominator{};
+     uint64_t generation{}, dropped{}, underruns{};
+ };
+@@ -135,7 +135,7 @@ public:
+         if (closing) SDL_CloseAudioDevice(closing);
+     }
+     void Removed(SDL_AudioDeviceID id) { if (device.load() == id) { Disarm(); error = "Capture device disconnected"; } }
+-    void Service(const Ak4534InputDemand& demand) {
++    void Service(const AudioInputDemand& demand) {
+         if (pendingArm.load() && !background.load() && pendingArm.exchange(false)) Arm(pendingEpoch);
+         queue.Configure(demand);
+     }
+@@ -143,8 +143,8 @@ public:
+     size_t Pending() const { return queue.Pending(); }
+     uint64_t Dropped() const { return queue.Dropped(); }
+     uint64_t Underruns() const { return queue.Underruns(); }
+-    Ak4534InputSource Source() {
+-        return {this, [](void* p, Ak4534InputRoute r, uint32_t n, uint32_t d) {
++    AudioInputSource Source() {
++        return {this, [](void* p, AudioInputRoute r, uint32_t n, uint32_t d) {
+                     return static_cast<SdlMicrophone*>(p)->queue.Pull(r, n, d); },
+                 [](void* p, bool f) { static_cast<SdlMicrophone*>(p)->queue.Fence(f); },
+                 [](void* p) { static_cast<SdlMicrophone*>(p)->Disarm(); }};
+diff --git a/src/uarm/native/main.cpp b/src/uarm/native/main.cpp
+index 75708fe..da4d85d 100644
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -670,10 +670,11 @@ namespace {
+         // The endpoint opens after the session loads, so a restore starts detached.
+         SdlMicrophone microphone;
+         commandContext.microphone = &microphone;
+-        microphone.detach = [&] { if (deviceType == deviceTypeTG50) static_cast<SocPXA*>(soc)->SetMicrophoneSource(nullptr); };
++        const bool hasMicrophone = deviceProfile5(deviceType) && deviceProfile5(deviceType)->capabilities.microphone;
++        microphone.detach = [&] { if (hasMicrophone) static_cast<SocPXA*>(soc)->SetMicrophoneSource(nullptr); };
+         const auto microphoneSource = microphone.Source();
+         microphone.prepare = [&] {
+-            if (deviceType != deviceTypeTG50) return false;
++            if (!hasMicrophone) return false;
+             auto* machine = static_cast<SocPXA*>(soc);
+             machine->SetMicrophoneSource(&microphoneSource);
+             return !machine->PowerSleeping();
+@@ -908,7 +909,7 @@ namespace {
+                     if (!waitForPreviewAudio && pending > 3072) waitForPreviewAudio = true;
+                     if (waitForPreviewAudio && pending < 2048) waitForPreviewAudio = false;
+                 } else waitForPreviewAudio = false;
+-                if (deviceType == deviceTypeTG50) microphone.Service(static_cast<SocPXA*>(soc)->MicrophoneDemand());
++                if (hasMicrophone) microphone.Service(static_cast<SocPXA*>(soc)->MicrophoneDemand());
+                 serial.Service();
+                 usb.Service();
+                 infrared.Service();
+@@ -1108,7 +1109,7 @@ namespace {
+         SDL_SetEventFilter(nullptr, nullptr);
+         microphone.SetDeviceThread({});
+         microphone.CloseOnDeviceThread();
+-        if (deviceType == deviceTypeTG50) static_cast<SocPXA*>(soc)->SetMicrophoneSource(nullptr);
++        if (hasMicrophone) static_cast<SocPXA*>(soc)->SetMicrophoneSource(nullptr);
+         if (renderError) rethrow_exception(renderError);
+         if (guestError) rethrow_exception(guestError);
+         // The last frame the guest thread published, as the one-thread loop drew it.
+diff --git a/src/uarm/uarm/ac97dev_WM9712L.cpp b/src/uarm/uarm/ac97dev_WM9712L.cpp
+index 1112655..d548d79 100644
+--- a/src/uarm/uarm/ac97dev_WM9712L.cpp
++++ b/src/uarm/uarm/ac97dev_WM9712L.cpp
+@@ -2,6 +2,8 @@
+ 
+ #include "ac97dev_WM9712L.h"
+ 
++#include <algorithm>
++#include <cmath>
+ #include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
+@@ -10,7 +12,9 @@
+ #include "cputil.h"
+ #include "savestate/savestateAll.h"
+ 
++// Version 1 adds the ADC model (Zire 72 only); boards without it keep writing version 0.
+ #define SAVESTATE_VERSION 0
++#define SAVESTATE_VERSION_ADC 1
+ 
+ enum WM9712REG {
+     RESET = 0x00,
+@@ -99,6 +103,33 @@ struct WM9712L {
+ 
+     struct AudioQueue *audioQueue;
+ 
++    // ADC model, on boards with a microphone. Guest-time pacing: adcClock is the guest ns of the
++    // last PCM period, adcPhase the leftover ns*rate below one frame (always < 1e9).
++    bool adcModel;
++    struct GetEmuTime getTime;
++    AudioInputSource input;
++    unsigned inputFences;
++    uint16_t alcCtl, alcNoiseGate;  // 0x60 and 0x62
++    bool adcClockValid;
++    uint64_t adcClock, adcPhase;
++    // ALC: PGA index in 0.75 dB steps (0 is -17.25 dB, 23 is 0 dB, 63 is +30 dB), the output peak
++    // since the last step, frames since the last step and frames since the peak last went over.
++    uint8_t alcGain;
++    uint16_t alcPeak;
++    uint32_t alcElapsed, alcSinceOver;
++
++    template <typename T>
++    void DoSaveLoadAdc(T &chunkHelper) {
++        chunkHelper.Do(typename T::Pack16() << alcCtl << alcNoiseGate)
++            .DoBool(adcClockValid)
++            .Do64(adcClock)
++            .Do64(adcPhase)
++            .Do(typename T::Pack8() << alcGain)
++            .Do16(alcPeak)
++            .Do32(alcElapsed)
++            .Do32(alcSinceOver);
++    }
++
+     template <typename T>
+     void DoSaveLoad(T &chunkHelper) {
+         chunkHelper.DoBuffer16(digiRegs, sizeof(digiRegs) >> 1)
+@@ -148,6 +179,11 @@ static bool wm9712LprvCodecRegR(void *userData, uint32_t regAddr, uint16_t *regV
+     enum WM9712REG which = (enum WM9712REG)regAddr;
+     uint16_t val;
+ 
++    if (wm->adcModel && (which == ALCCTL || which == ALCNOISEGATE)) {
++        *regValP = which == ALCCTL ? wm->alcCtl : wm->alcNoiseGate;
++        return true;
++    }
++
+     switch (which) {
+         case RESET:
+             val = 0x6174;
+@@ -304,6 +340,11 @@ static bool wm9712LprvCodecRegW(void *userData, uint32_t regAddr, uint16_t val)
+ 
+     // fprintf(stderr, "codec wri [0x%04x] -> [0x%04x]\n", (unsigned)val, (unsigned)regAddr);
+ 
++    if (wm->adcModel && (which == ALCCTL || which == ALCNOISEGATE)) {
++        (which == ALCCTL ? wm->alcCtl : wm->alcNoiseGate) = val;
++        return true;
++    }
++
+     switch (which) {
+         case OUT2VOL:
+             wm->volOut2 = val;
+@@ -490,6 +531,168 @@ static bool wm9712LprvHaveAudioOutSample(struct WM9712L *wm, uint32_t *sampP) {
+     return true;
+ }
+ 
++// ADC power (WM9712L tables 40-41): PR0 in 0x26 powers the ADCs, 0x24 bits 12 and 11 the left
++// and right ADC. VRA (0x2a bit 0) sets the rate from ADCRATE; without it the model keeps the
++// old one zero sample per PCM period.
++static bool wm9712LprvAdcLeft(const struct WM9712L *wm) { return !(wm->pdown1 & 0x1000); }
++static bool wm9712LprvAdcRight(const struct WM9712L *wm) { return !(wm->pdown1 & 0x0800); }
++static bool wm9712LprvAdcRunning(const struct WM9712L *wm) {
++    return wm->adcModel && !(wm->pdown2 & 0x0100) && (wm->extdCtl & 1) && wm->adcRate &&
++           (wm9712LprvAdcLeft(wm) || wm9712LprvAdcRight(wm));
++}
++// RECSEL 0x1a bits 10:8 and 2:0 pick the left and right record source; 0 is the microphone.
++// Other sources read silence: the Zire has nothing on them.
++static bool wm9712LprvMicLeft(const struct WM9712L *wm) {
++    return wm9712LprvAdcLeft(wm) && !(wm->recSel & 0x0700);
++}
++static bool wm9712LprvMicRight(const struct WM9712L *wm) {
++    return wm9712LprvAdcRight(wm) && !(wm->recSel & 0x0007);
++}
++
++AudioInputDemand wm9712LInputDemand(struct WM9712L *wm) {
++    AudioInputDemand demand;
++    demand.route = AudioInputRoute::internalMic;
++    demand.fenced = wm->inputFences != 0;
++    demand.active = wm9712LprvAdcRunning(wm) && (wm9712LprvMicLeft(wm) || wm9712LprvMicRight(wm));
++    if (demand.active) {
++        demand.rateNumerator = wm->adcRate;
++        demand.rateDenominator = 1;
++    }
++    return demand;
++}
++
++void wm9712LDisarmInput(struct WM9712L *wm) {
++    if (wm->input.disarm) wm->input.disarm(wm->input.context);
++    wm->input = {};
++}
++
++void wm9712LSetInputSource(struct WM9712L *wm, const AudioInputSource *source) {
++    if (!wm->adcModel) return;
++    wm9712LDisarmInput(wm);
++    if (source) wm->input = *source;
++    if (wm->inputFences && wm->input.fence) wm->input.fence(wm->input.context, true);
++}
++
++void wm9712LFenceInput(struct WM9712L *wm, bool fence) {
++    if (!wm->adcModel) return;
++    const auto before = wm->inputFences;
++    if (fence) ++wm->inputFences;
++    else if (wm->inputFences) --wm->inputFences;
++    if (bool(before) != bool(wm->inputFences) && wm->input.fence)
++        wm->input.fence(wm->input.context, wm->inputFences != 0);
++}
++
++void wm9712LEnableAdc(struct WM9712L *wm, struct GetEmuTime getTime) {
++    wm->adcModel = true;
++    wm->getTime = getTime;
++    wm->alcGain = 23;
++}
++
++// Static record PGA (0x1c): bit 15 mutes; bits 13:8 and 5:0 are the left and right gain, in
++// 0.75 dB steps from -17.25 dB when bit 14 or 6 is set, else 1.5 dB steps from 0 dB up to
++// +22.5 dB as on a standard AC'97 codec. Returned as a 0.75 dB index like alcGain.
++static uint8_t wm9712LprvPgaIndex(const struct WM9712L *wm, bool right) {
++    const unsigned field = right ? wm->recGain & 0x7f : (wm->recGain >> 8) & 0x7f;
++    const unsigned gain = field & 0x3f;
++    return (field & 0x40) ? gain : 23 + 2 * std::min(gain, 15u);
++}
++
++// ALC (0x60, 0x62), an approximation of WM9712L section "Automatic level control": target
++// -22.5 dBFS plus 1.4 dB per step up to -1.5 dBFS, maximum PGA gain -12 dB plus 6 dB per step,
++// attack 1.05 ms * 2^ATK and decay 4.2 ms * 2^DCY per 0.75 dB step, hold 2.67 ms * 2^(HLD-1).
++// The noise gate (0x62 bit 7) holds the gain, or mutes with bit 5, below -76.5 dBFS plus
++// 1.5 dB per step of bits 4:0.
++static unsigned wm9712LprvAlcChannels(const struct WM9712L *wm) { return wm->alcNoiseGate >> 14; }
++
++static int32_t wm9712LprvApplyGain(int32_t input, unsigned boostDb, uint8_t pga) {
++    const double db = double(boostDb) - 17.25 + 0.75 * pga;
++    const double value = std::round(input * std::pow(10.0, db / 20.0));
++    return int32_t(std::clamp(value, -32768.0, 32767.0));
++}
++
++static void wm9712LprvAlcStep(struct WM9712L *wm, int32_t output, bool alcActive) {
++    if (!alcActive) {
++        // Start from the PGA of the channel the ALC controls: right only (1) seeds from the
++        // right, left or both from the left.
++        wm->alcGain = wm9712LprvPgaIndex(wm, wm9712LprvAlcChannels(wm) == 1);
++        wm->alcPeak = 0;
++        wm->alcElapsed = wm->alcSinceOver = 0;
++        return;
++    }
++    const double rate = wm->adcRate;
++    const auto frames = [&](double ms) { return std::max<uint32_t>(1, uint32_t(rate * ms / 1000.0)); };
++    const uint32_t attack = frames(1.05 * (1u << (wm->alcCtl & 0xf)));
++    const uint32_t decay = frames(4.2 * (1u << ((wm->alcCtl >> 4) & 0xf)));
++    const unsigned holdBits = (wm->alcCtl >> 8) & 0xf;
++    const uint32_t hold = holdBits ? frames(2.67 * (1u << (holdBits - 1))) : 0;
++    const uint16_t target = uint16_t(32768.0 * std::pow(10.0, (-22.5 + 1.4 * (wm->alcCtl >> 12)) / 20.0));
++    const uint8_t maxGain = uint8_t(std::min(63.0, (-12.0 + 6.0 * ((wm->alcNoiseGate >> 11) & 7) + 17.25) / 0.75));
++    const uint16_t magnitude = uint16_t(std::min(32767, std::abs(output)));
++    wm->alcPeak = std::max(wm->alcPeak, magnitude);
++    ++wm->alcElapsed;
++    if (magnitude > target) wm->alcSinceOver = 0;
++    else if (wm->alcSinceOver < UINT32_MAX) ++wm->alcSinceOver;
++    if (wm->alcPeak > target) {
++        if (wm->alcElapsed < attack) return;
++        if (wm->alcGain) --wm->alcGain;
++    } else {
++        if (wm->alcElapsed < decay) return;
++        const uint16_t gate = uint16_t(32768.0 * std::pow(10.0, (-76.5 + 1.5 * (wm->alcNoiseGate & 0x1f)) / 20.0));
++        const bool gated = (wm->alcNoiseGate & 0x80) && wm->alcPeak < gate;
++        if (!gated && wm->alcSinceOver >= hold && wm->alcGain < maxGain) ++wm->alcGain;
++        else if (wm->alcGain > maxGain) wm->alcGain = maxGain;
++    }
++    wm->alcPeak = 0;
++    wm->alcElapsed = 0;
++}
++
++// One ADC frame: left in bits 15:0, right in bits 31:16 of the PCM-in slot pair.
++static uint32_t wm9712LprvAdcFrame(struct WM9712L *wm) {
++    const bool left = wm9712LprvMicLeft(wm), right = wm9712LprvMicRight(wm);
++    int32_t input = 0;
++    if ((left || right) && !wm->inputFences && wm->input.pull)
++        input = wm->input.pull(wm->input.context, AudioInputRoute::internalMic, wm->adcRate, 1);
++    // Mic preamp boost 0x0e bit 7 and record boost 0x1a bit 14, 20 dB each.
++    const unsigned boost = ((wm->volMic & 0x80) ? 20 : 0) + ((wm->recSel & 0x4000) ? 20 : 0);
++    const unsigned alc = wm9712LprvAlcChannels(wm);
++    const bool alcLeft = alc & 2, alcRight = alc & 1;
++    const auto channel = [&](bool on, bool useAlc, bool isRight) -> int32_t {
++        if (!on || (wm->recGain & 0x8000)) return 0;
++        return wm9712LprvApplyGain(input, boost, useAlc ? wm->alcGain : wm9712LprvPgaIndex(wm, isRight));
++    };
++    const int32_t l = channel(left, alcLeft, false), r = channel(right, alcRight, true);
++    const bool alcActive = (alcLeft && left) || (alcRight && right);
++    const int32_t detected = std::max(alcLeft && left ? std::abs(l) : 0, alcRight && right ? std::abs(r) : 0);
++    bool gateMute = false;
++    if (alcActive && (wm->alcNoiseGate & 0xa0) == 0xa0) {
++        const double gate = 32768.0 * std::pow(10.0, (-76.5 + 1.5 * (wm->alcNoiseGate & 0x1f)) / 20.0);
++        gateMute = detected < gate;
++    }
++    wm9712LprvAlcStep(wm, detected, alcActive);
++    if (gateMute) return 0;
++    return (uint32_t(uint16_t(r)) << 16) | uint16_t(l);
++}
++
++// Frames due since the last PCM period at ADCRATE. At most 64 a period (the FIFO holds 16);
++// a longer gap, such as the PCM task being held, drops the rest without pulling them.
++static void wm9712LprvAdcAdvance(struct WM9712L *wm) {
++    const uint64_t now = wm->getTime.getTimeF(wm->getTime.userdata);
++    if (!wm->adcClockValid || now < wm->adcClock) {
++        wm->adcClockValid = true;
++        wm->adcClock = now;
++        wm->adcPhase = 0;
++        return;
++    }
++    const uint64_t elapsed = std::min<uint64_t>(now - wm->adcClock, 1000000000ull);
++    wm->adcClock = now;
++    wm->adcPhase += elapsed * wm->adcRate;
++    uint64_t due = wm->adcPhase / 1000000000ull;
++    wm->adcPhase %= 1000000000ull;
++    if (due > 64) due = 64;
++    for (uint64_t i = 0; i < due; ++i)
++        pxaAC97clientClientHaveData(wm->ac97, Ac97PrimaryAudio, wm9712LprvAdcFrame(wm));
++}
++
+ static bool wm9712LprvHaveMicOutSample(struct WM9712L *wm, uint32_t *sampP) {
+     *sampP = 0;
+     return true;
+@@ -617,8 +820,13 @@ void wm9712Lperiodic(struct WM9712L *wm) {
+     if (pxaAC97clientClientWantData(wm->ac97, Ac97PrimaryAudio, &val))
+         wm9712LprvNewAudioPlaybackSample(wm, val);
+ 
+-    if (wm9712LprvHaveAudioOutSample(wm, &val))
+-        pxaAC97clientClientHaveData(wm->ac97, Ac97PrimaryAudio, val);
++    if (wm9712LprvAdcRunning(wm))
++        wm9712LprvAdcAdvance(wm);
++    else {
++        wm->adcClockValid = false;
++        if (wm9712LprvHaveAudioOutSample(wm, &val))
++            pxaAC97clientClientHaveData(wm->ac97, Ac97PrimaryAudio, val);
++    }
+ 
+     if (wm9712LprvHaveMicOutSample(wm, &val))
+         pxaAC97clientClientHaveData(wm->ac97, Ac97SecondaryAudio, val);
+@@ -666,11 +874,13 @@ void wm9712LsetAudioQueue(struct WM9712L *wm, struct AudioQueue *audioQueue) {
+ 
+ template <typename T>
+ void wm9712Lsave(struct WM9712L *wm, T &savestate) {
+-    auto chunk = savestate.GetChunk(ChunkType::wm9712L, SAVESTATE_VERSION);
++    auto chunk = savestate.GetChunk(ChunkType::wm9712L,
++                                    wm->adcModel ? SAVESTATE_VERSION_ADC : SAVESTATE_VERSION);
+     if (!chunk) ERR("unable to allocate chunk");
+ 
+     SaveChunkHelper helper(*chunk);
+     wm->DoSaveLoad(helper);
++    if (wm->adcModel) wm->DoSaveLoadAdc(helper);
+ }
+ 
+ std::function<void()> wm9712CaptureInput(struct WM9712L *wm) {
+@@ -683,11 +893,31 @@ std::function<void()> wm9712CaptureInput(struct WM9712L *wm) {
+ 
+ template <typename T>
+ void wm9712Load(struct WM9712L *wm, T &loader, bool preserveInput) {
+-    auto chunk = loader.GetChunkOrFail(ChunkType::wm9712L, SAVESTATE_VERSION, "wm9712L");
++    uint32_t version = 0;
++    auto chunk = loader.GetChunkOrFail(ChunkType::wm9712L,
++                                       wm->adcModel ? SAVESTATE_VERSION_ADC : SAVESTATE_VERSION,
++                                       "wm9712L", version);
+     if (!chunk) return;
+ 
+     LoadChunkHelper helper(*chunk);
+     wm->DoSaveLoad(helper);
++    if (wm->adcModel) {
++        // Version 0 has no ADC state: the ALC starts from the register gain and the clock
++        // restarts at the next PCM period. Host input is never saved.
++        wm->alcCtl = wm->alcNoiseGate = 0;
++        wm->adcClockValid = false;
++        wm->adcClock = wm->adcPhase = 0;
++        wm->alcGain = wm9712LprvPgaIndex(wm, false);
++        wm->alcPeak = 0;
++        wm->alcElapsed = wm->alcSinceOver = 0;
++        if (version >= SAVESTATE_VERSION_ADC) {
++            wm->DoSaveLoadAdc(helper);
++            if (wm->adcPhase >= 1000000000ull || wm->alcGain > 63 || wm->alcPeak > 32767) {
++                loader.NotifyError();
++                return;
++            }
++        }
++    }
+ 
+     if (!preserveInput) wm9712LsetPen(wm, 0, 0, -1);
+ }
+diff --git a/src/uarm/uarm/ac97dev_WM9712L.h b/src/uarm/uarm/ac97dev_WM9712L.h
+index c22e6ed..6c23cff 100644
+--- a/src/uarm/uarm/ac97dev_WM9712L.h
++++ b/src/uarm/uarm/ac97dev_WM9712L.h
+@@ -7,6 +7,8 @@
+ 
+ #include <cstdint>
+ 
++#include "audio_input.h"
++#include "get_emu_time.h"
+ #include "pxa_AC97.h"
+ #include "pxa_GPIO.h"
+ 
+@@ -32,6 +34,15 @@ void wm9712LsetPen(struct WM9712L *wm, int16_t x, int16_t y,
+ 
+ void wm9712LsetAudioQueue(struct WM9712L *wm, struct AudioQueue *audioQueue);
+ 
++// Boards with a microphone (the Zire 72) get a modelled ADC paced by guest time. Without it the
++// PCM-in and mic slots read zero once per PCM period, as before, and the state chunk stays at
++// version 0. Host input follows audio_input.h; all calls run on the emulator thread.
++void wm9712LEnableAdc(struct WM9712L *wm, struct GetEmuTime getTime);
++AudioInputDemand wm9712LInputDemand(struct WM9712L *wm);
++void wm9712LSetInputSource(struct WM9712L *wm, const AudioInputSource *source);
++void wm9712LFenceInput(struct WM9712L *wm, bool fence);
++void wm9712LDisarmInput(struct WM9712L *wm);
++
+ template <typename T>
+ void wm9712Lsave(struct WM9712L *wm, T &savestate);
+ 
+diff --git a/src/uarm/uarm/audio_input.h b/src/uarm/uarm/audio_input.h
+new file mode 100644
+index 0000000..9e3628d
+--- /dev/null
++++ b/src/uarm/uarm/audio_input.h
+@@ -0,0 +1,29 @@
++#ifndef _AUDIO_INPUT_H_
++#define _AUDIO_INPUT_H_
++
++#include <cstdint>
++
++// Host sound input for a codec ADC (the AK4534 on the TG50, the WM9712L on the Zire 72).
++// All calls run on the emulator thread. Pull one mono frame at the requested guest rate;
++// zero on underrun, never block. Units: signed16, 32768 is the codec's ADC full scale
++// before its analogue gain.
++// A capture driver owns resampling and a bounded queue (at most 250ms), drops
++// oldest on overflow and counts drops. Fence freezes consumption/publication;
++// disarm closes the source and invalidates queued callback generations.
++// Host callbacks and queues are never portable state. A fresh load stays disarmed.
++enum class AudioInputRoute { internalMic, externalMic, analogIn };
++struct AudioInputSource {
++    void *context{};
++    int16_t (*pull)(void *, AudioInputRoute, uint32_t rateNumerator, uint32_t rateDenominator){};
++    void (*fence)(void *, bool){};
++    void (*disarm)(void *){};
++};
++// Guest analogue power/clock readiness, independent of host arm/fence state.
++// Poll on the emulator thread; the callback must never open a host device.
++struct AudioInputDemand {
++    bool active{}, fenced{};
++    AudioInputRoute route{};
++    uint32_t rateNumerator{}, rateDenominator{};
++};
++
++#endif
+diff --git a/src/uarm/uarm/device.h b/src/uarm/uarm/device.h
+index b9c6a1e..fbb553e 100644
+--- a/src/uarm/uarm/device.h
++++ b/src/uarm/uarm/device.h
+@@ -85,10 +85,10 @@ bool devicePanelEnabled(Device*);
+ bool deviceHoldSwitchOn(Device*);
+ void devicePeriodic(struct Device *dev, uint32_t tier);
+ void deviceNetworkPeriodic(Device* dev);
+-struct Ak4534InputSource;
+-struct Ak4534InputDemand;
+-Ak4534InputDemand deviceInputDemand(Device *);
+-void deviceSetInputSource(Device *, const Ak4534InputSource *);
++struct AudioInputSource;
++struct AudioInputDemand;
++AudioInputDemand deviceInputDemand(Device *);
++void deviceSetInputSource(Device *, const AudioInputSource *);
+ void deviceFenceInput(Device *, bool);
+ void deviceDisarmInput(Device *);
+ void deviceAudioSleepReset(Device *);
+diff --git a/src/uarm/uarm/devicePalmTungstenE2.cpp b/src/uarm/uarm/devicePalmTungstenE2.cpp
+index 6b39cea..6192ffc 100644
+--- a/src/uarm/uarm/devicePalmTungstenE2.cpp
++++ b/src/uarm/uarm/devicePalmTungstenE2.cpp
+@@ -252,6 +252,9 @@ struct Device *deviceSetup(enum DeviceType5 type, struct SocPeriphs *sp,
+             ERR("cannot map Zire 72 camera interface");
+         dev->wm9712L = wm9712LInit(sp->ac97, sp->gpio, -1, 27);
+         if (!dev->wm9712L || !dev->kpc) ERR("cannot initialize Zire 72 board");
++        // Built-in microphone on the codec's MIC1 input, recorded through the PCM-in slots
++        // (DRCMR11) by Voice Memo.
++        wm9712LEnableAdc(dev->wm9712L, getTime);
+         // The power key is on the matrix and on GPIO0, which the DAL reads as pressed when low
+         // (0x20093ce4). Held low, a soft reset waits forever for the key to come up.
+         if (!keypadAddGpioKey(kp, keyIdPower, 0, false)) ERR("cannot initialize Zire 72 power key");
+@@ -547,8 +550,21 @@ bool deviceTg50UsbListening(Device *dev) {
+ 
+ MemoryStickController* deviceMemoryStick(Device* d){return d&&d->tg50?tg50BoardMemoryStick(d->tg50):nullptr;}
+ 
+-void deviceSetInputSource(Device *d, const Ak4534InputSource *s) { if (d->tg50) tg50BoardSetInputSource(d->tg50, s); }
+-void deviceFenceInput(Device *d, bool fence) { if (d->tg50) tg50BoardFenceInput(d->tg50, fence); }
+-void deviceDisarmInput(Device *d) { if (d->tg50) tg50BoardDisarmInput(d->tg50); }
++// The TG50's AK4534 or the WM9712L; the WM9712L ignores these unless its ADC model is on.
++void deviceSetInputSource(Device *d, const AudioInputSource *s) {
++    if (d->tg50) tg50BoardSetInputSource(d->tg50, s);
++    else if (d->wm9712L) wm9712LSetInputSource(d->wm9712L, s);
++}
++void deviceFenceInput(Device *d, bool fence) {
++    if (d->tg50) tg50BoardFenceInput(d->tg50, fence);
++    else if (d->wm9712L) wm9712LFenceInput(d->wm9712L, fence);
++}
++void deviceDisarmInput(Device *d) {
++    if (d->tg50) tg50BoardDisarmInput(d->tg50);
++    else if (d->wm9712L) wm9712LDisarmInput(d->wm9712L);
++}
+ 
+-Ak4534InputDemand deviceInputDemand(Device *d) { return d->tg50 ? tg50BoardInputDemand(d->tg50) : Ak4534InputDemand{}; }
++AudioInputDemand deviceInputDemand(Device *d) {
++    if (d->tg50) return tg50BoardInputDemand(d->tg50);
++    return d->wm9712L ? wm9712LInputDemand(d->wm9712L) : AudioInputDemand{};
++}
+diff --git a/src/uarm/uarm/deviceSonyTG50.cpp b/src/uarm/uarm/deviceSonyTG50.cpp
+index c23f45f..3cefb76 100644
+--- a/src/uarm/uarm/deviceSonyTG50.cpp
++++ b/src/uarm/uarm/deviceSonyTG50.cpp
+@@ -399,10 +399,10 @@ bool tg50BoardUsbListening(Tg50Board *board) {
+ 
+ MemoryStickController* tg50BoardMemoryStick(Tg50Board* b){return b->ms;}
+ 
+-void tg50BoardSetInputSource(Tg50Board *b, const Ak4534InputSource *s) { ak4534SetInputSource(b->codec, s); }
++void tg50BoardSetInputSource(Tg50Board *b, const AudioInputSource *s) { ak4534SetInputSource(b->codec, s); }
+ void tg50BoardFenceInput(Tg50Board *b, bool fence) { ak4534FenceInput(b->codec, fence); }
+ void tg50BoardDisarmInput(Tg50Board *b) { ak4534DisarmInput(b->codec); }
+ 
+-Ak4534InputDemand tg50BoardInputDemand(Tg50Board *b) { return ak4534InputDemand(b->codec); }
++AudioInputDemand tg50BoardInputDemand(Tg50Board *b) { return ak4534InputDemand(b->codec); }
+ 
+ CsrBcspRadio* tg50BoardBluetooth(Tg50Board* board){return board?board->radio:nullptr;}
+diff --git a/src/uarm/uarm/deviceSonyTG50.h b/src/uarm/uarm/deviceSonyTG50.h
+index c26f872..451faec 100644
+--- a/src/uarm/uarm/deviceSonyTG50.h
++++ b/src/uarm/uarm/deviceSonyTG50.h
+@@ -6,8 +6,8 @@
+ 
+ #include "i2sdev_AK4534.h"
+ struct Tg50Board;
+-Ak4534InputDemand tg50BoardInputDemand(Tg50Board *);
+-void tg50BoardSetInputSource(Tg50Board *, const Ak4534InputSource *);
++AudioInputDemand tg50BoardInputDemand(Tg50Board *);
++void tg50BoardSetInputSource(Tg50Board *, const AudioInputSource *);
+ void tg50BoardFenceInput(Tg50Board *, bool);
+ void tg50BoardDisarmInput(Tg50Board *);
+ constexpr uint32_t tg50PhysicalRamSize = 16u << 20;
+diff --git a/src/uarm/uarm/i2sdev_AK4534.cpp b/src/uarm/uarm/i2sdev_AK4534.cpp
+index b25f67b..e7ae31b 100644
+--- a/src/uarm/uarm/i2sdev_AK4534.cpp
++++ b/src/uarm/uarm/i2sdev_AK4534.cpp
+@@ -34,7 +34,7 @@ struct AK4534 {
+     uint32_t wireNumerator{}, wireDenominator{};
+     uint32_t injectedRx{};
+     bool testRx{};
+-    Ak4534InputSource input{};
++    AudioInputSource input{};
+     unsigned inputFences{};
+     struct Adc {
+         uint32_t startup{}, gain{16}, pending{16}, changeWait{}, recovery{}, limiter{};
+@@ -121,11 +121,11 @@ static void ak4534Resample(AK4534 *ak, int32_t left, int32_t right,
+     }
+ }
+ 
+-Ak4534InputDemand ak4534InputDemand(AK4534 *ak) {
+-    Ak4534InputDemand demand;
++AudioInputDemand ak4534InputDemand(AK4534 *ak) {
++    AudioInputDemand demand;
+     const bool mic = ak->regs[7] & 4, external = ak->regs[7] & 2;
+-    demand.route = !mic ? Ak4534InputRoute::analogIn : external ?
+-        Ak4534InputRoute::externalMic : Ak4534InputRoute::internalMic;
++    demand.route = !mic ? AudioInputRoute::analogIn : external ?
++        AudioInputRoute::externalMic : AudioInputRoute::internalMic;
+     pxaI2sGetRate(ak->i2s, demand.rateNumerator, demand.rateDenominator);
+     demand.fenced = ak->inputFences != 0;
+     demand.active = (ak->regs[0] & 0x81) == 0x81 && ak4534Clock(ak) &&
+@@ -138,7 +138,7 @@ void ak4534DisarmInput(AK4534 *ak) {
+     if (ak->input.disarm) ak->input.disarm(ak->input.context);
+     ak->input = {};
+ }
+-void ak4534SetInputSource(AK4534 *ak, const Ak4534InputSource *source) {
++void ak4534SetInputSource(AK4534 *ak, const AudioInputSource *source) {
+     ak4534DisarmInput(ak);
+     if (source) ak->input = *source;
+     if (ak->inputFences && ak->input.fence) ak->input.fence(ak->input.context, true);
+@@ -163,8 +163,8 @@ static int32_t ak4534Adc(AK4534 *ak, bool msb, uint32_t n, uint32_t d) {
+         (ak->regs[7] & (external ? 16 : 8)));
+     int32_t input = 0;
+     if (connected && !ak->inputFences && ak->input.pull)
+-        input = ak->input.pull(ak->input.context, !mic ? Ak4534InputRoute::analogIn :
+-            external ? Ak4534InputRoute::externalMic : Ak4534InputRoute::internalMic, n, d);
++        input = ak->input.pull(ak->input.context, !mic ? AudioInputRoute::analogIn :
++            external ? AudioInputRoute::externalMic : AudioInputRoute::internalMic, n, d);
+     if (mic && (ak->regs[7] & 1)) input *= 10;
+     const bool crossing = !input || (input < 0) != (a.previous < 0);
+     a.previous = input;
+diff --git a/src/uarm/uarm/i2sdev_AK4534.h b/src/uarm/uarm/i2sdev_AK4534.h
+index 653865c..7a41cd4 100644
+--- a/src/uarm/uarm/i2sdev_AK4534.h
++++ b/src/uarm/uarm/i2sdev_AK4534.h
+@@ -9,6 +9,7 @@
+ #include "pxa_I2C.h"
+ #include "pxa_I2S.h"
+ #include "pxa_GPIO.h"
++#include "audio_input.h"
+ 
+ 
+ struct AK4534;
+@@ -20,29 +21,10 @@ struct AK4534* ak4534Init(struct PxaI2c *i2c, struct PxaI2s *i2s, struct PxaGpio
+ 
+ 
+ 
+-// All calls run on the emulator thread. Pull one mono frame at the requested
+-// guest rate; zero on underrun, never block. Units: signed16, 32768 is ADC peak
+-// before MGAIN/IPGA (0.6*AVDD Vpp at unity). Internal mic needs MPWRI.
+-// A capture driver owns resampling and a bounded queue (at most 250ms), drops
+-// oldest on overflow and counts drops. Fence freezes consumption/publication;
+-// disarm closes the source and invalidates queued callback generations.
+-// Host callbacks and queues are never portable state. A fresh load stays disarmed.
+-enum class Ak4534InputRoute { internalMic, externalMic, analogIn };
+-struct Ak4534InputSource {
+-    void *context{};
+-    int16_t (*pull)(void *, Ak4534InputRoute, uint32_t rateNumerator, uint32_t rateDenominator){};
+-    void (*fence)(void *, bool){};
+-    void (*disarm)(void *){};
+-};
+-// Guest analogue power/clock readiness, independent of host arm/fence state.
+-// Poll on the emulator thread; the callback must never open a host device.
+-struct Ak4534InputDemand {
+-    bool active{}, fenced{};
+-    Ak4534InputRoute route{};
+-    uint32_t rateNumerator{}, rateDenominator{};
+-};
+-Ak4534InputDemand ak4534InputDemand(AK4534 *);
+-void ak4534SetInputSource(AK4534 *, const Ak4534InputSource *);
++// Host input follows audio_input.h. Units at unity gain are 0.6*AVDD Vpp at ADC peak,
++// before MGAIN/IPGA. The internal mic needs MPWRI.
++AudioInputDemand ak4534InputDemand(AK4534 *);
++void ak4534SetInputSource(AK4534 *, const AudioInputSource *);
+ void ak4534FenceInput(AK4534 *, bool);
+ void ak4534DisarmInput(AK4534 *);
+ 
+diff --git a/src/uarm/uarm/soc_PXA.cpp b/src/uarm/uarm/soc_PXA.cpp
+index 383f869..820a9df 100644
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -688,9 +688,9 @@ void SocPXA::OnEngageKey(KeyId key, bool down) {
+     keypadKeyEvt(kp, key, down);
+ }
+ 
+-Ak4534InputDemand SocPXA::MicrophoneDemand() { return deviceInputDemand(dev); }
++AudioInputDemand SocPXA::MicrophoneDemand() { return deviceInputDemand(dev); }
+ 
+-void SocPXA::SetMicrophoneSource(const Ak4534InputSource *source) {
++void SocPXA::SetMicrophoneSource(const AudioInputSource *source) {
+     deviceSetInputSource(dev, source);
+     if (PowerSleeping()) deviceDisarmInput(dev);
+ }
+diff --git a/src/uarm/uarm/soc_PXA.h b/src/uarm/uarm/soc_PXA.h
+index ea501d3..b9217db 100644
+--- a/src/uarm/uarm/soc_PXA.h
++++ b/src/uarm/uarm/soc_PXA.h
+@@ -13,8 +13,8 @@
+ #include "soc_generic.h"
+ #include "pxa_RTC.h"
+ 
+-struct Ak4534InputSource;
+-struct Ak4534InputDemand;
++struct AudioInputSource;
++struct AudioInputDemand;
+ struct PxaUart;
+ #include "SerialHostRoute.h"
+ using IrHostHooks = SerialHostHooks;
+@@ -86,8 +86,8 @@ class SocPXA : public SocGeneric<SocPXA> {
+     bool PrepareM68kSupport() override;
+ 
+     // Current-session host source, never armed by loading portable state.
+-    Ak4534InputDemand MicrophoneDemand();
+-    void SetMicrophoneSource(const Ak4534InputSource *source);
++    AudioInputDemand MicrophoneDemand();
++    void SetMicrophoneSource(const AudioInputSource *source);
+     uint32_t DispatchTicks(uint32_t clientType, uint32_t batchedTicks);
+ 
+     bool KeyboardAttached() const override { return irKeyboard.Attached(); }
