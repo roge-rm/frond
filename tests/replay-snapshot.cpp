@@ -124,7 +124,8 @@ int main() {
             physical.Dispatch(0, soc, renderer);
             assert(soc.nextKey() == key);
         }
-        for (const auto* invalid : {"0", "61", "-1", "18x", "18446744073709551616"}) {
+        for (const std::string invalid : {std::string("0"), std::to_string(unsigned(keyIdCount)), std::string("-1"),
+                                          std::string("18x"), std::string("18446744073709551616")}) {
             std::ofstream(replayPath) << "0 key-down " << invalid << "\n";
             InputReplay physical;
             assert(!physical.Load(replayPath, 320, 320, error));
