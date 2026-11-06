@@ -306,7 +306,7 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                     )
                 }
                 if (!m68k) item(key = "audioPreview") {
-                    MachineAudioPreviewRow(model.device, model.settings, model.audioPreviewUsable, true, APPLIES_AT_NEXT_START) {
+                    MachineAudioPreviewRow(model.device, model.settings, true, APPLIES_AT_NEXT_START) {
                         model.changeSettings(it)
                     }
                 }

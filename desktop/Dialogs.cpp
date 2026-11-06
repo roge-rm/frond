@@ -85,7 +85,7 @@ FirmwareDialog::FirmwareDialog(const QString& root, Device preselect, QWidget* p
         auto update = [this] {
             auto selected = frondFirmware::deviceFromId(device->currentData().toString());
             if (selected == Device::automatic) selected = frondFirmware::detectDevice(nor->text());
-            machineSettings->setDevice(selected, frondAudio::qualified(selected, {}, nor->text()));
+            machineSettings->setDevice(selected);
         };
         connect(device, &QComboBox::currentIndexChanged, this, update);
         connect(nor, &QLineEdit::textChanged, this, update);
@@ -229,7 +229,7 @@ frondSessions::Preferences MachineSettings::values() const {
     prefs.uncapped = speed->currentData().toBool();
     return prefs;
 }
-void MachineSettings::setDevice(Device device, bool qualified) {
+void MachineSettings::setDevice(Device device) {
     const bool tg50 = device == frondFirmware::deviceFromId("sony-clie-tg50");
     showKeyboard->setVisible(tg50);
     jogControlsLabel->setVisible(tg50);
@@ -249,10 +249,9 @@ void MachineSettings::setDevice(Device device, bool qualified) {
     audio->setEnabled(soundSupported);
     audio->setToolTip(soundSupported ? QString() : device == Device::automatic ? tr("Choose firmware first") :
         tr("Not available on the %1 yet").arg(frondFirmware::deviceName(device)));
-    const bool supported = soundSupported && frondFirmware::capabilities(device).fastAudio && qualified;
+    const bool supported = frondAudio::lowLatencyAvailable(device);
     fastAudio->setEnabled(supported);
     fastAudio->setToolTip(supported ? QString() : device == Device::automatic ? tr("Choose firmware first") :
-        frondFirmware::capabilities(device).fastAudio ? tr("Requires qualified firmware") :
         tr("Not available on the %1 yet").arg(frondFirmware::deviceName(device)));
     if (automaticScale && device != Device::automatic) {
         const QSignalBlocker blocked(windowScale);
@@ -262,13 +261,13 @@ void MachineSettings::setDevice(Device device, bool qualified) {
     }
 }
 
-MachineSettingsDialog::MachineSettingsDialog(Device device, const frondSessions::Preferences& prefs, bool qualified, QWidget* parent)
+MachineSettingsDialog::MachineSettingsDialog(Device device, const frondSessions::Preferences& prefs, QWidget* parent)
     : QDialog(parent) {
     setWindowTitle(tr("Edit settings"));
     setObjectName("machineSettingsDialog");
     auto* layout = new QVBoxLayout(this);
     controls = new MachineSettings(prefs, false, this);
-    controls->setDevice(device, qualified);
+    controls->setDevice(device);
     layout->addWidget(controls);
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, this);
     connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);

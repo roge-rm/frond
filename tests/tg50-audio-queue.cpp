@@ -1,5 +1,6 @@
 // The TG50 on the ring-buffer queue through the actual SoC: a full queue drops its oldest frame,
 // nothing is produced while PCM output is off, a codec boundary keeps frames and a load clears.
+// A constant level counts as silence for the low-latency limits.
 #include "tg50-audio-fixture.h"
 #include "audio_queue.h"
 #include "Tg50Audio.h"
@@ -29,6 +30,15 @@ int main() {
     assert(audioQueuePendingSamples(small)==2 && audioQueueAccounting(small).discarded==1);
     assert(audioQueuePopChunk(small,&frame,1)==1 && frame==2);
     assert(audioQueuePopChunk(small,&frame,1)==1 && frame==3);
+
+    // Only a change counts as sound: silence or firmware idling at a constant level doesn't.
+    auto* level=audioQueueCreate(4096);
+    for(unsigned i=0;i<1000;++i)audioQueuePush(level,0);
+    assert(audioQueueAccounting(level).nonSilent==0);
+    for(unsigned i=0;i<1000;++i)audioQueuePush(level,0x01000100);
+    assert(audioQueueAccounting(level).nonSilent==1);
+    for(unsigned i=0;i<100;++i)audioQueuePush(level,i&1?0x01000100:0xff00ff00);
+    assert(audioQueueAccounting(level).nonSilent==101);
 
     // Growth keeps the old segments in order while a consumer reads.
     auto* growth=audioQueueCreate(2);

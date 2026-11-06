@@ -39,6 +39,10 @@ class DeviceTest {
         assertFalse(Device.ZIRE72.fastAudio)
         assertTrue(Device.TX.fastAudio)
         assertTrue(Device.E2.fastAudio)
+        // Low-latency audio: TX and E2 (preview or queue only) and the TG50 (queue only).
+        assertTrue(Device.TX.lowLatencyAudio && Device.E2.lowLatencyAudio)
+        assertTrue(Device.byId("sony-clie-tg50")!!.lowLatencyAudio)
+        assertFalse(Device.ZIRE72.lowLatencyAudio)
         assertTrue(Device.ZIRE72.camera)
         assertFalse(Device.E2.camera)
         assertTrue(Device.ZIRE72 in Device.shown)

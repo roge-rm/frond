@@ -1,0 +1,120 @@
+diff --git a/src/uarm/native/main.cpp b/src/uarm/native/main.cpp
+index 389d36a..b20b5fc 100644
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -82,6 +82,7 @@ struct Options {
+     optional<DisplayMode> displayMode;
+     optional<string> device;
+     bool experimentalFastAudio;
++    bool lowLatencyQueue;
+     optional<unsigned int> runFor;
+     optional<string> framebufferOutput;
+     optional<string> inputReplay;
+@@ -645,11 +646,14 @@ namespace {
+         // The guest thread's copy of fitted, for the layouts the SDL thread sends it.
+         bool inputFitted = fitted;
+ 
++        // --low-latency-queue gives any device the --fast-audio queue limits without the preview.
++        const bool queueOnly = options.lowLatencyQueue && !options.experimentalFastAudio;
++        const bool lowLatencyQueue = options.experimentalFastAudio || queueOnly;
+         // Low-latency audio's queue limits assume 512-frame periods.
+-        if (options.experimentalFastAudio && options.audioPeriod != 512)
+-            cerr << "--audio-period is ignored with --fast-audio" << endl;
+-        SdlAudioDriver audioDriver(soc, audioQueue, options.experimentalFastAudio,
+-                                   options.experimentalFastAudio ? 512 : options.audioPeriod);
++        if (lowLatencyQueue && options.audioPeriod != 512)
++            cerr << "--audio-period is ignored with low-latency audio" << endl;
++        SdlAudioDriver audioDriver(soc, audioQueue, lowLatencyQueue,
++                                   lowLatencyQueue ? 512 : options.audioPeriod);
+         if (!options.disableAudio) audioDriver.Start();
+ 
+         commands::Register();
+@@ -732,6 +736,10 @@ namespace {
+ 
+         uint64_t lastSpeedDump = startedAt;
+         bool waitForPreviewAudio = false;
++        // Queue-only mode counts as playing while changing frames were pushed in the last
++        // 100 ms (host time, usec). Silence or a constant level keeps the normal limits.
++        uint64_t queueOnlySounding = audioQueueAccounting(audioQueue).nonSilent, queueOnlySoundAt = 0;
++        bool queueOnlyHadSound = false;
+         uint64_t lastAudioUnderruns = audioDriver.GetUnderrunCount();
+         auto reportAudioUnderruns = [&]() {
+             const auto underruns = audioDriver.GetUnderrunCount();
+@@ -882,11 +890,19 @@ namespace {
+                 reportAudioUnderruns();
+                 // SIR peers need character-sized handoffs. A full display slice can
+                 // consume the original stack's entire discovery receive window.
++                bool lowLatencyActive = options.experimentalFastAudio && static_cast<SocPXA*>(soc)->FastAudioActive();
++                if (queueOnly) {
++                    const auto sounding = audioQueueAccounting(audioQueue).nonSilent;
++                    if (sounding != queueOnlySounding) {
++                        queueOnlySounding = sounding; queueOnlySoundAt = now; queueOnlyHadSound = true;
++                    }
++                    lowLatencyActive = queueOnlyHadSound && soc->PcmOutputEnabled() &&
++                                       audioQueuePendingSamples(audioQueue) > 0 && now - queueOnlySoundAt < 100000;
++                }
+                 mainLoop.SetTimesliceUsec(infrared.GetConfig().kind!=HostSerial::Kind::off ? 1000 :
+-                    options.experimentalFastAudio && static_cast<SocPXA*>(soc)->FastAudioActive()
+-                        ? 1000000 / 120 : 1000000 / MAIN_LOOP_FPS);
++                    lowLatencyActive ? 1000000 / 120 : 1000000 / MAIN_LOOP_FPS);
+ 
+-                if (!headless && options.experimentalFastAudio && static_cast<SocPXA*>(soc)->FastAudioActive()) {
++                if (!headless && lowLatencyActive) {
+                     const auto pending = audioQueuePendingSamples(audioQueue);
+                     if (!waitForPreviewAudio && pending > 3072) waitForPreviewAudio = true;
+                     if (waitForPreviewAudio && pending < 2048) waitForPreviewAudio = false;
+@@ -1160,6 +1176,10 @@ int main(int argc, char** argv) {
+         .help("preview one qualified TX or E2 stereo stream before the firmware audio queue")
+         .default_value(false).implicit_value(true);
+ 
++    program.add_argument("--low-latency-queue")
++        .help("use the low-latency audio queue limits without the preview, on any device")
++        .default_value(false).implicit_value(true);
++
+     program.add_argument("--input-replay")
+         .help("replay timestamped pen/key events and snapshots from a text file");
+ 
+@@ -1318,6 +1338,7 @@ int main(int argc, char** argv) {
+                        .displayMode = program.present<DisplayMode>("--display"),
+                        .device = program.present("--device"),
+                        .experimentalFastAudio = program.get<bool>("--fast-audio"),
++                       .lowLatencyQueue = program.get<bool>("--low-latency-queue"),
+                        .runFor = program.present<unsigned int>("--run-for"),
+                        .framebufferOutput = program.present("--framebuffer-output"),
+                        .inputReplay = program.present("--input-replay"),
+diff --git a/src/uarm/uarm/audio_queue.cpp b/src/uarm/uarm/audio_queue.cpp
+index fb06390..5bea968 100644
+--- a/src/uarm/uarm/audio_queue.cpp
++++ b/src/uarm/uarm/audio_queue.cpp
+@@ -38,6 +38,7 @@ struct AudioQueue {
+     size_t capacity;
+     uint64_t generation{0};
+     AudioQueueAccounting accounting{};
++    uint32_t lastPushed{0};
+ 
+     AudioQueue(size_t capacity) : queue(capacity), capacity(capacity) {}
+ 
+@@ -82,6 +83,9 @@ void audioQueuePush(struct AudioQueue* audioQueue, uint32_t sample) {
+     audioQueue->queue.Push(sample);
+     ++audioQueue->pending;
+     ++audioQueue->accounting.committed;
++    // A constant level, zero or not, is silence; only a change counts as sound.
++    if (sample != audioQueue->lastPushed) ++audioQueue->accounting.nonSilent;
++    audioQueue->lastPushed = sample;
+ }
+ 
+ size_t audioQueuePopChunk(struct AudioQueue* audioQueue, uint32_t* destination, size_t count) {
+diff --git a/src/uarm/uarm/audio_queue.h b/src/uarm/uarm/audio_queue.h
+index 1dd9cd9..41e5ca0 100644
+--- a/src/uarm/uarm/audio_queue.h
++++ b/src/uarm/uarm/audio_queue.h
+@@ -11,7 +11,8 @@ void audioQueueEnsureCapacity(struct AudioQueue* audioQueue, size_t capacity);
+ 
+ // A full queue drops its oldest frame. One emulator-thread producer.
+ // Queues outlive attached SoCs.
+-struct AudioQueueAccounting { uint64_t committed, consumed, discarded; };
++// nonSilent counts committed frames that differ from the frame pushed before them.
++struct AudioQueueAccounting { uint64_t committed, consumed, discarded, nonSilent; };
+ AudioQueueAccounting audioQueueAccounting(struct AudioQueue*);
+ 
+ void audioQueuePush(struct AudioQueue* audioQueue, uint32_t sample);
