@@ -5,13 +5,14 @@ and reload, and that commands a device can't do fail cleanly as "unsupported".
 
 Private firmware and sessions: --arm-session, else FROND_ARM_SESSION, else the palm-tx smoke machine
 (build/smoke/machines/palm-tx, or an older build/smoke/palm-tx.session); --rom, else the generic OS 3.5 EZ ROM in the
-firmware folder. A side with neither is skipped. Scratch goes in build/core-control-*.
+firmware folder. A side with neither is skipped. FROND_CORE picks another ARM core binary. Scratch goes in build/core-control-*.
 """
 import argparse
 import os
 from pathlib import Path
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -161,15 +162,65 @@ def check_arm(core, session, root):
         if device == 'palm-tx':
             unsupported.append(('hold', 'on'))
         # As the desktop does, the ARM core saves over the session it runs in its machine folder.
+        # A lone file is extracted to <stem>/ on load, so the save goes to <stem>/<stem>.frond.
         saved = next((p for p in (copy / (session.name + '.frond'), *sorted(copy.glob('*.frond'))) if p.is_file()),
-                     copy) if copy.is_dir() else copy
+                     copy) if copy.is_dir() else copy.parent / copy.stem / (copy.stem + '.frond')
         common(c, work, device, unsupported, saved)
+        if not copy.is_dir():
+            # Saving back to the lone file goes to the folder it was loaded into and leaves the file as it was.
+            before, stamp = copy.read_bytes(), saved.stat().st_mtime_ns
+            c.ok('save', copy, code='saved')
+            assert copy.read_bytes() == before, 'lone session file changed'
+            assert saved.stat().st_mtime_ns != stamp, 'lone save missed the folder it was loaded into'
+        # A lone file or .frond whose <stem>/ is another machine's folder is refused and the folder kept.
+        other = work / 'other'
+        other.mkdir()
+        files = {other / 'other.frond': b'another machine', other / 'sd.img': b'its card'}
+        for path, data in files.items():
+            path.write_bytes(data)
+        lone = work / 'other.session'
+        lone.write_bytes(b'not this machine')
+        for target in (lone, work / 'other.frond'):
+            c.fails('save', target, code='save')
+        assert all(path.read_bytes() == data for path, data in files.items()), 'another machine changed'
+        assert sorted(other.iterdir()) == sorted(files) and lone.read_bytes() == b'not this machine'
+        # A new .frond beside someone's lone .frond goes to its own <stem>/ and leaves that file alone.
+        beside = work / 'beside'
+        beside.mkdir()
+        (beside / 'palm-tx.session.frond').write_bytes(b'a lone session')
+        c.ok('save', beside / 'other.frond', code='saved')
+        assert (beside / 'palm-tx.session.frond').read_bytes() == b'a lone session', 'lone .frond overwritten'
+        assert (beside / 'other/other.frond').stat().st_size > 100000, 'new session not in its own folder'
+        # Saving over a lone v6 .frond goes to <stem>/, where loading would extract it, and keeps the file.
+        v6 = work / 'v6'
+        v6.mkdir()
+        old = v6 / 'old.frond'
+        old.write_bytes(struct.pack('<II', 0x19800819, 6) + b'palm-tx'.ljust(32, b'\0') + b'v6 body')
+        before = old.read_bytes()
+        c.ok('save', old, code='saved')
+        assert old.read_bytes() == before, 'lone v6 .frond rewritten'
+        assert (v6 / 'old/old.frond').stat().st_size > 100000, 'v6 save not where loading extracts it'
         c.quit()
     finally:
         c.close()
-    c = Client(core, [saved], root, 'arm-reload')
+    # Reload the save as a lone .frond (it runs in its parent) and save back to it in place. A session with
+    # cards can't be lone, so its whole folder is copied instead.
+    alone = work / 'alone'
+    cards = [p for p in saved.parent.iterdir() if p != saved and not p.name.startswith('.')]
+    if cards:
+        shutil.copytree(saved.parent, alone, ignore=shutil.ignore_patterns('*.tmp-*'))
+        lone = alone / saved.name
+    else:
+        alone.mkdir()
+        lone = alone / 'tx.frond'
+        shutil.copy2(saved, lone)
+    c = Client(core, [lone], root, 'arm-reload')
     try:
         assert c.ok('device-state') == device
+        stamp = lone.stat().st_mtime_ns
+        c.ok('save', lone, code='saved')
+        assert lone.stat().st_mtime_ns != stamp, 'lone .frond not saved back'
+        assert cards or sorted(alone.iterdir()) == [lone], sorted(alone.iterdir())
         c.quit()
     finally:
         c.close()
@@ -262,7 +313,7 @@ def main():
         root = (args.keep or Path(work)).resolve()
         root.mkdir(parents=True, exist_ok=True)
         for name, ready, run in (('frond', session and session.exists(),
-                                  lambda: check_arm(ROOT / 'out/frond', session.resolve(), root)),
+                                  lambda: check_arm(Path(os.environ.get('FROND_CORE') or ROOT / 'out/frond'), session.resolve(), root)),
                                  ('frond-68k', rom.is_file(), lambda: check_68k(ROOT / 'out/frond-68k', rom.resolve(), root))):
             if not ready:
                 print(f'core-control {name}: skipped, no {"ARM smoke session" if name == "frond" else "IIIx ROM"}')
