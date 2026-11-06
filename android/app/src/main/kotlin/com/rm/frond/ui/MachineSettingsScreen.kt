@@ -13,17 +13,12 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.produceState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.rm.frond.Device
 import com.rm.frond.HomeModel
 import com.rm.frond.MachineRows
-import com.rm.frond.Sessions
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -32,13 +27,6 @@ fun MachineSettingsScreen(model: HomeModel) {
     val context = LocalContext.current
     val editing = draft.sessionId != null
     val ready = model.firmwareReady[draft.device] == true
-    val qualified by produceState<Boolean?>(null, draft.device, draft.sessionId, ready) {
-        value = null
-        value = withContext(Dispatchers.IO) {
-            val session = draft.sessionId?.let { Sessions.read(context, it)?.file }
-            audioPreviewQualified(context, draft.device, session)
-        }
-    }
     model.alert?.let { (title, text) ->
         AlertDialog(onDismissRequest = { model.alert = null }, title = { Text(title) }, text = { Text(text) },
             confirmButton = { TextButton(onClick = { model.alert = null }) { Text("OK") } })
@@ -68,7 +56,7 @@ fun MachineSettingsScreen(model: HomeModel) {
             Header("Audio", Modifier.padding(top = 16.dp))
             MachineSoundRow(draft.device, draft.settings, false) { model.changeMachineSettings(it) }
             if (rows.audioPreview) {
-                MachineAudioPreviewRow(draft.device, draft.settings, qualified, false) { model.changeMachineSettings(it) }
+                MachineAudioPreviewRow(draft.device, draft.settings, false) { model.changeMachineSettings(it) }
             }
             if (rows.speed || rows.engine) Header("Speed", Modifier.padding(top = 16.dp))
             if (rows.speed) MachineSpeedRow(draft.settings, false) { model.changeMachineSettings(it) }

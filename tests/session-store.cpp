@@ -650,6 +650,10 @@ class SessionStoreTest : public QObject {
         write(path, prefix + QByteArray(65536, 'x')); QVERIFY(frondAudio::sessionNorMd5(path).isEmpty());
         const auto raw = directory.filePath("nor.bin"); write(raw, nor);
         QVERIFY(!frondAudio::qualified(frondFirmware::Device::tx, {}, raw));
+        QCOMPARE(frondAudio::lowLatencyOption(frondFirmware::Device::tx, {}, raw), QString("--low-latency-queue"));
+        QCOMPARE(frondAudio::lowLatencyOption(frondFirmware::deviceFromId("sony-clie-tg50"), {}, {}), QString("--low-latency-queue"));
+        QVERIFY(frondAudio::lowLatencyOption(frondFirmware::deviceFromId("palm-zire-72"), {}, {}).isEmpty());
+        QVERIFY(frondAudio::lowLatencyOption(frondFirmware::Device::automatic, {}, {}).isEmpty());
     }
     void machineControlVisibilityPreferences() {
         const auto one = filePath(folder(), "TG50 One"), two = filePath(folder(), "TG50 Two");

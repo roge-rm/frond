@@ -17,7 +17,7 @@ class MachineSettings : public QWidget {
  public:
     MachineSettings(const frondSessions::Preferences& prefs, bool automaticScale, QWidget* parent = nullptr);
     frondSessions::Preferences values() const;
-    void setDevice(frondFirmware::Device device, bool qualified = false);
+    void setDevice(frondFirmware::Device device);
     QSlider* windowScale;
     QLabel* scaleLabel;
     QCheckBox *smoothLcd, *audio, *fastAudio, *showKeyboard;
@@ -38,7 +38,7 @@ class MachineSettings : public QWidget {
 class MachineSettingsDialog : public QDialog {
     Q_OBJECT
  public:
-    MachineSettingsDialog(frondFirmware::Device device, const frondSessions::Preferences& prefs, bool qualified, QWidget* parent = nullptr);
+    MachineSettingsDialog(frondFirmware::Device device, const frondSessions::Preferences& prefs, QWidget* parent = nullptr);
     MachineSettings* controls;
 };
 

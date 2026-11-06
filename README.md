@@ -83,11 +83,11 @@ The Palm IIIx (Palm OS 3.1, 68k DragonBall EZ) runs in its own runner, `frond-68
 
 The infrared keyboard and beaming share the port, so take the keyboard off before turning beaming on. On Android infrared, Bluetooth, serial, USB HotSync and the gdb server go over the network, to another Frond or to `tools/link-irda.py`, `tools/link-bluetooth.py` and `tools/link-pty.py` (for pilot-link) on a computer.
 
-The TG50 plays beeps, alarms and Sony Voice Recorder audio. Its microphone is off each time it starts, and saving, stopping or going to the background turns it off again. Android asks for permission the first time. Bluetooth is tested with serial (SPP) and object exchange. Standard Palm SndStream, low-latency audio, the remote control, MagicGate and Memory Stick audio aren't there yet.
+The TG50 plays beeps, alarms and Sony Voice Recorder audio. Its microphone is off each time it starts, and saving, stopping or going to the background turns it off again. Android asks for permission the first time. Bluetooth is tested with serial (SPP) and object exchange. Its early Palm OS 5 has no SndStream, as on the real one, so apps like SunVox need Modern Clie Audio 2 installed first. The remote control, MagicGate and Memory Stick audio aren't there yet.
 
 ### Low-latency audio
 
-On the T|X and E2, off by default. It plays one 44.1 kHz stereo stream with less delay, for music apps like SunVox, and drops back to the normal path when your computer or phone can't keep up. See [Low-latency audio](doc/using-frond.md#low-latency-audio).
+Off by default. On the T|X and E2 it plays one 44.1 kHz stereo stream with less delay, for music apps like SunVox, and drops back to the normal path when your computer or phone can't keep up. On the TG50, and a T|X or E2 with other firmware, it keeps a shorter audio queue while sound plays, about 35 ms less delay. See [Low-latency audio](doc/using-frond.md#low-latency-audio).
 
 ### For developers
 

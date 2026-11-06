@@ -1,6 +1,5 @@
 package com.rm.frond.ui
 
-import android.content.Context
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -23,11 +22,9 @@ import androidx.compose.ui.unit.dp
 import com.rm.frond.CpuSpeed
 import com.rm.frond.Device
 import com.rm.frond.Engine
-import com.rm.frond.Firmware
 import com.rm.frond.JogControls
 import com.rm.frond.MachineSettings
 import com.rm.frond.ScreenSize
-import java.io.File
 import kotlin.math.roundToInt
 
 // Per-machine settings rows shared by the Edit settings screen (form style) and the running menu (list style).
@@ -35,10 +32,6 @@ import kotlin.math.roundToInt
 const val APPLIES_AT_NEXT_START = "Applies at next start"
 
 fun Device.isTg50() = id == "sony-clie-tg50"
-
-// Whether Low-latency audio can be used with this firmware. Blocking.
-fun audioPreviewQualified(context: Context, device: Device, session: File?): Boolean =
-    Firmware.fastAudioQualified(device, session, Firmware.nor(context, device))
 
 @Composable
 fun MachineSwitchRow(
@@ -100,13 +93,13 @@ fun MachineSoundRow(device: Device, settings: MachineSettings, listStyle: Boolea
     }
 }
 
-// Low-latency audio. qualified is null while being checked.
+// Low-latency audio. The firmware only picks the preview or the queue-only mode at start.
 @Composable
 fun MachineAudioPreviewRow(
-    device: Device, settings: MachineSettings, qualified: Boolean?, listStyle: Boolean, note: String? = null,
+    device: Device, settings: MachineSettings, listStyle: Boolean, note: String? = null,
     onChange: (MachineSettings) -> Unit,
 ) {
-    val usable = qualified == true
+    val usable = device.lowLatencyAudio
     MachineSwitchRow("Low-latency audio", usable && settings.fastAudio, listStyle, usable, note) {
         onChange(settings.copy(fastAudio = it))
     }

@@ -147,8 +147,8 @@ open class FrondActivity : SDLActivity() {
         arguments += machineSettings.arguments(soundSupported = launchDevice().sound,
             tg50Controls = launchDevice().id == "sony-clie-tg50", m68k = launchDevice().runs68k)
         arguments += listOf("--window-background", BACKGROUND_HEX)
-        if (machineSettings.fastAudio && launchDevice().id != "sony-clie-tg50" && fastAudioQualified()) {
-            arguments += "--fast-audio"
+        if (machineSettings.fastAudio && launchDevice().lowLatencyAudio) {
+            arguments += if (fastAudioQualified()) "--fast-audio" else "--low-latency-queue"
         } else {
             arguments += listOf("--audio-period", audioPeriod().toString())
         }

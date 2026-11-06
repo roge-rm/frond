@@ -14,7 +14,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.lifecycleScope
 import com.rm.frond.ui.FrondTheme
-import com.rm.frond.ui.audioPreviewQualified
 import com.rm.frond.ui.LogScreen
 import com.rm.frond.ui.PeripheralsScreen
 import kotlinx.coroutines.Dispatchers
@@ -279,7 +278,7 @@ class PeripheralsModel(
                 if (next.sound != old.sound && device.sound) s = s.copy(sound = next.sound)
                 if (next.showKeyboard != old.showKeyboard) s = s.copy(showKeyboard = next.showKeyboard)
                 if (next.jogControls != old.jogControls) s = s.copy(jogControls = next.jogControls)
-                if (next.fastAudio != old.fastAudio && audioPreviewUsable == true) s = s.copy(fastAudio = next.fastAudio)
+                if (next.fastAudio != old.fastAudio && device.lowLatencyAudio) s = s.copy(fastAudio = next.fastAudio)
                 s
             }
             settings = machineSettings()
@@ -321,20 +320,6 @@ class PeripheralsModel(
     }
 
     fun microphoneDenied() { changeMicrophone(false); microphone = "off Permission denied" }
-
-    // Low-latency audio. Null while the NOR is being checked; false when
-    // the device or its firmware can't use it.
-    var audioPreviewUsable by mutableStateOf<Boolean?>(if (device.fastAudio) null else false)
-        private set
-
-    fun checkAudioPreview(session: String?) {
-        if (!device.fastAudio) return
-        activity.lifecycleScope.launch {
-            audioPreviewUsable = withContext(Dispatchers.IO) {
-                audioPreviewQualified(activity, device, session?.let { java.io.File(it) })
-            }
-        }
-    }
 
     fun attachKeyboard(on: Boolean) =
         device(if (on) "Attaching" else "Detaching", if (on) "Couldn't attach the keyboard" else "Couldn't detach the keyboard", false) { l ->
@@ -645,7 +630,6 @@ open class PeripheralsActivity : ComponentActivity() {
         }
         if (device.memoryStick) panelControl = emulator.control
         model.watchGdb()
-        model.checkAudioPreview(emulator.session)
         if (!model.waitingForGdb) model.refresh()
         model.readKeyboard()
         model.readHold()

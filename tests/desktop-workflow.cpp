@@ -74,7 +74,8 @@ for line in s.makefile('rb'):
             QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("stop")->isEnabled(), 5000);
             QFile args(source.fileName()+".args"); QVERIFY(args.open(QIODevice::ReadOnly));
             const auto arguments = args.readAll();
-            QVERIFY(!arguments.contains("--fast-audio"));
+            // Unqualified firmware gets the queue-only mode.
+            QVERIFY(!arguments.contains("--fast-audio") && arguments.contains("--low-latency-queue"));
             QVERIFY(arguments.contains("--window-scale\n1.75"));
             QVERIFY(arguments.contains("--smooth-lcd"));
             window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
@@ -401,7 +402,8 @@ for line in s.makefile('rb'):
         QCOMPARE(args.value(1), QString("palm-e2"));
         QCOMPARE(args.value(2), firmwareRoot + "/palm-e2/nor.bin");
         QVERIFY(!args.contains("--nand"));
-        QVERIFY(!args.contains("--fast-audio"));
+        // Unqualified E2 firmware gets the queue-only low-latency mode.
+        QVERIFY(!args.contains("--fast-audio") && args.contains("--low-latency-queue"));
         QVERIFY(read(".args").contains("--window-scale\n1.75"));
         QVERIFY(args.contains("--smooth-lcd") && args.contains("--no-sound"));
         frondSessions::Preferences added;
@@ -568,6 +570,7 @@ for line in s.makefile('rb'):
         QCOMPARE(args.mid(0, 3), QStringList({"--device", "palm-zire-72", firmwareRoot + "/palm-zire-72/nor.bin"}));
         // No NAND, low-latency audio or serial port; USB and infrared settings carry over.
         QVERIFY(!args.contains("--nand") && !args.contains("--fast-audio") && !args.contains("--serial"));
+        QVERIFY(!args.contains("--low-latency-queue"));
         QVERIFY(read(".args").contains("--usb\npty") && read(".args").contains("--irda\npty"));
         QCOMPARE(window.windowTitle(), QString("Zire 72"));
         QTRY_VERIFY_WITH_TIMEOUT(read(".commands").contains("network-state"), 5000);
@@ -1067,7 +1070,7 @@ for line in s.makefile('rb'):
             QCOMPARE(window.windowTitle(), QString("Palm IIIx"));
             const auto args = read(".args").split('\n');
             QCOMPARE(args.mid(0, 3), QStringList({"--device", "palm-iiix", firmwareRoot + "/palm-iiix/nor.bin"}));
-            for (const char* option : {"--nand", "--work-folder", "--usb", "--bluetooth", "--engine", "--fast-audio",
+            for (const char* option : {"--nand", "--work-folder", "--usb", "--bluetooth", "--engine", "--fast-audio", "--low-latency-queue",
                                        "--jog-controls", "--hide-keyboard", "--no-sound"})
                 QVERIFY2(!args.contains(option), option);
             const auto text = read(".args");
@@ -1220,7 +1223,7 @@ for line in s.makefile('rb'):
         QCOMPARE(prefs.contrast, 50);
         prefs.contrast = 20; prefs.uncapped = true; prefs.fastEngine = true;
         {
-            MachineSettingsDialog dialog(iiix, prefs, false); dialog.show();
+            MachineSettingsDialog dialog(iiix, prefs); dialog.show();
             auto* c = dialog.controls;
             for (QWidget* w : {static_cast<QWidget*>(c->contrast), static_cast<QWidget*>(c->speed),
                                static_cast<QWidget*>(c->windowScale), static_cast<QWidget*>(c->smoothLcd), static_cast<QWidget*>(c->audio)})
@@ -1235,15 +1238,15 @@ for line in s.makefile('rb'):
             QCOMPARE(values.contrast, 65); QVERIFY(!values.uncapped);
         }
         {
-            MachineSettingsDialog dialog(frondFirmware::Device::tx, prefs, false); dialog.show();
+            MachineSettingsDialog dialog(frondFirmware::Device::tx, prefs); dialog.show();
             QVERIFY(dialog.controls->engine->isVisibleTo(&dialog));
             QVERIFY(!dialog.controls->contrast->isVisibleTo(&dialog) && !dialog.controls->speed->isVisibleTo(&dialog));
         }
         qunsetenv("FROND_ENGINE_SETTING");
         {
-            MachineSettingsDialog dialog(frondFirmware::Device::tx, prefs, false); dialog.show();
+            MachineSettingsDialog dialog(frondFirmware::Device::tx, prefs); dialog.show();
             QVERIFY(!dialog.controls->engine->isVisibleTo(&dialog) && !dialog.controls->speed->isVisibleTo(&dialog));
-            MachineSettingsDialog iiixDialog(iiix, prefs, false); iiixDialog.show();
+            MachineSettingsDialog iiixDialog(iiix, prefs); iiixDialog.show();
             QVERIFY(!iiixDialog.controls->engine->isVisibleTo(&iiixDialog) && iiixDialog.controls->speed->isVisibleTo(&iiixDialog));
         }
         // The firmware field is a ROM for the IIIx.
@@ -1895,6 +1898,7 @@ for line in s.makefile('rb'):
             QTRY_VERIFY(sound->isEnabled()); QVERIFY(!sound->isChecked());
             QVERIFY(read(".args").contains("--window-scale\n1.75"));
             QVERIFY(read(".args").contains("--no-sound") && read(".args").contains("--smooth-lcd") && !read(".args").contains("--fast-audio"));
+            QVERIFY(read(".args").contains("--low-latency-queue"));
             sound->click(); QTRY_VERIFY(read(".commands").contains("audio-on"));
             frondSessions::Preferences prefs;
             QVERIFY(frondSessions::readPreferences(one, &prefs)); QVERIFY(prefs.audio);
@@ -1944,6 +1948,7 @@ for line in s.makefile('rb'):
             auto* sound = next.findChild<QCheckBox*>("sound"); QTRY_VERIFY(sound->isEnabled()); QVERIFY(sound->isChecked());
             QVERIFY(read(".args").contains("--window-scale\n1"));
             QVERIFY(!read(".args").contains("--no-sound") && !read(".args").contains("--smooth-lcd") && !read(".args").contains("--fast-audio"));
+            QVERIFY(!read(".args").contains("--low-latency-queue"));
             sound->click(); QTRY_VERIFY(read(".commands").contains("audio-off"));
             frondSessions::Preferences prefs;
             QVERIFY(frondSessions::readPreferences(two, &prefs)); QVERIFY(!prefs.audio);
@@ -2068,8 +2073,9 @@ for line in s.makefile('rb'):
                 auto* dialog = window.findChild<MachineSettingsDialog*>();
                 if (!dialog || !dialog->isVisible()) return;
                 shown = true;
-                QVERIFY(!dialog->controls->fastAudio->isEnabled());
-                QCOMPARE(dialog->controls->fastAudio->toolTip(), QString("Requires qualified firmware"));
+                // Unqualified T|X firmware still gets the queue-only low-latency mode.
+                QVERIFY(dialog->controls->fastAudio->isEnabled());
+                QVERIFY(dialog->controls->fastAudio->toolTip().isEmpty());
                 QVERIFY(dialog->controls->fastAudio->isChecked() || accept);
                 QLockFile contender(one + ".lock"); contender.setStaleLockTime(0);
                 QVERIFY(!contender.tryLock());
@@ -2355,6 +2361,9 @@ for line in s.makefile('rb'):
         widget.setDevice(frondFirmware::Device::tx);
         QVERIFY(widget.audio->isEnabled());
         QVERIFY(widget.audio->isChecked());
+        QVERIFY(widget.fastAudio->isEnabled());
+        widget.setDevice(frondFirmware::deviceFromId("sony-clie-tg50"));
+        QVERIFY(widget.fastAudio->isEnabled() && widget.fastAudio->toolTip().isEmpty());
     }
     void settingsDialog() {
         QSettings().clear(); QSettings().setValue("resume", false);
@@ -2495,7 +2504,7 @@ for line in s.makefile('rb'):
                 dialog->machineSettings->smoothLcd->setChecked(!added);
                 dialog->machineSettings->audio->setChecked(!added);
                 QVERIFY(dialog->machineSettings->audio->isEnabled());
-                QVERIFY(!dialog->machineSettings->fastAudio->isEnabled());
+                QVERIFY(dialog->machineSettings->fastAudio->isEnabled());
                 ++added; dialog->findChild<QPushButton*>("import")->click();
             });
             import.start(); window.findChild<QPushButton*>("addDevice")->click(); import.stop();
@@ -2524,7 +2533,7 @@ for line in s.makefile('rb'):
             connect(&edit, &QTimer::timeout, &window, [&] {
                 auto* dialog = window.findChild<MachineSettingsDialog*>();
                 if (!dialog || !dialog->isVisible()) return;
-                QVERIFY(!dialog->controls->fastAudio->isEnabled());
+                QVERIFY(dialog->controls->fastAudio->isEnabled());
                 dialog->controls->windowScale->setValue(8);
                 ++editsShown;
                 if (saveEdit) dialog->accept(); else dialog->reject();
