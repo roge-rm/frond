@@ -1,0 +1,200 @@
+--- a/src/uarm/native/Commands.h
++++ b/src/uarm/native/Commands.h
+@@ -40,6 +40,7 @@
+         UsbHostBridge* usb{nullptr};      // live USB host bridge, never session state
+         std::string usbError{};           // why the last USB endpoint could not open
+         std::string sessionFolder{};      // machine folder, empty for a ROM start with no --work-folder
++        std::string sessionPath{};        // the session file or folder loaded into sessionFolder, else empty
+         // Queues a display change for the SDL thread; unset where there is no window to change.
+         std::function<void(const DisplayChange&)> changeDisplay{};
+     };
+--- a/src/uarm/native/Commands.cpp
++++ b/src/uarm/native/Commands.cpp
+@@ -141,7 +141,7 @@
+ 
+         auto ctx = reinterpret_cast<commands::Context*>(context);
+ 
+-        if (!frondNative::saveMachine(args[0], *ctx->soc)) {
++        if (!frondNative::saveMachine(args[0], *ctx->soc, ctx->sessionPath, ctx->sessionFolder)) {
+             cout << "failed to save session" << endl;
+             return;
+         }
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -515,7 +515,7 @@
+             return {true, "exported", "SD image exported."};
+         }
+         if (command == "save") {
+-            if (!frondNative::saveMachine(path, *ctx.soc)) return {false, "save", "Could not save device state."};
++            if (!frondNative::saveMachine(path, *ctx.soc, ctx.sessionPath, ctx.sessionFolder)) return {false, "save", "Could not save device state."};
+             return {true, "saved", "Session saved."};
+         }
+         if (command == "install") {
+--- a/src/uarm/native/MachineSession.h
++++ b/src/uarm/native/MachineSession.h
+@@ -14,28 +14,69 @@
+ #include <algorithm>
+ #include <cstring>
+ #include <filesystem>
++#include <fstream>
+ #include <iostream>
+ #include <string>
+ 
+ // Native save/load of a machine folder. A lone v6 .frond extracts into <stem>/.
+ namespace frondNative {
+ 
+-inline std::filesystem::path machineFolderForSave(const std::filesystem::path& path) {
++// A lone v6 file outside a machine folder, which loading extracts into a folder of its own.
++inline bool extractsOnLoad(const std::filesystem::path& file) {
+     std::error_code ec;
+-    if (std::filesystem::is_directory(path, ec) ||
+-        (!std::filesystem::exists(path, ec) && !frondMachine::endsWith(path.filename().string(), ".frond"))) {
+-        std::filesystem::create_directories(path, ec);
++    if (!std::filesystem::is_regular_file(file, ec) || frondSession::frondInFolder(file)) return false;
++    uint8_t header[SessionFile5::kHeaderBytes]{};
++    std::ifstream in(file, std::ios::binary);
++    if (!in.read(reinterpret_cast<char*>(header), sizeof header)) return false;
++    uint32_t version = 0;
++    std::string device;
++    return frondSession::peekHeader(header, sizeof header, version, device) && version == SessionFile5::kVersionV6;
++}
++
++// Where a save to `path` goes. `loadedFrom` and `loadedFolder` are the session this core loaded and
++// the machine folder it runs in (the --work-folder when there is one). A save back to that session, or
++// to its own session file, goes to that folder. A .frond saves into its parent only when that is this
++// machine's folder, the parent's own session file, or a new one named after a folder with no machine
++// in it. Any other file, a lone v6 .frond too, saves to loneExtractFolder(path), the folder loading it
++// would make, but never into another machine's folder there. Empty, with `why` set, when there's
++// nowhere safe.
++inline std::filesystem::path machineFolderForSave(const std::filesystem::path& path, std::string& why,
++                                                  const std::filesystem::path& loadedFrom = {},
++                                                  const std::filesystem::path& loadedFolder = {}) {
++    namespace fs = std::filesystem;
++    std::error_code ec;
++    const bool hasFolder = !loadedFolder.empty() && fs::is_directory(loadedFolder, ec);
++    const auto ours = [&](const fs::path& folder) { return hasFolder && fs::equivalent(folder, loadedFolder, ec); };
++    if (hasFolder && !loadedFrom.empty()) {
++        fs::path own;
++        if (fs::equivalent(path, loadedFrom, ec) ||
++            (fs::is_directory(loadedFrom, ec) && frondMachine::sessionFile(loadedFrom, own) && fs::equivalent(path, own, ec)))
++            return loadedFolder;
++    }
++    const bool frond = frondMachine::endsWith(path.filename().string(), ".frond");
++    if (fs::is_directory(path, ec) || (!fs::exists(path, ec) && !frond)) {
++        fs::create_directories(path, ec);
+         return path;
+     }
+-    if (frondMachine::endsWith(path.filename().string(), ".frond")) {
+-        if (frondSession::frondInFolder(path) || frondSession::isMachineFolder(path.parent_path()))
+-            return path.parent_path();
+-        const auto folder = path.parent_path() / path.stem();
+-        std::filesystem::create_directories(folder, ec);
+-        return folder;
++    if (frond && !extractsOnLoad(path)) {
++        const auto parent = path.parent_path();
++        const auto name = path.filename().string();
++        fs::path session;
++        if (ours(parent)) return parent;
++        if (frondMachine::sessionFile(parent, session)) {
++            if (fs::equivalent(path, session, ec)) return parent;
++        } else if (!frondSession::isMachineFolder(parent) &&
++                   (name == frondMachine::androidSession || name == parent.filename().string() + ".frond")) {
++            return parent;
++        }
+     }
+-    std::filesystem::create_directories(path, ec);
+-    return path;
++    const auto folder = frondSession::loneExtractFolder(path);
++    if (frondSession::isMachineFolder(folder) && !ours(folder)) {
++        why = folder.string() + " holds another machine";
++        return {};
++    }
++    fs::create_directories(folder, ec);
++    return folder;
+ }
+ 
+ inline void fillState(SoC& soc, frondSession::Contents& contents) {
+@@ -79,14 +120,26 @@
+     return true;
+ }
+ 
+-inline bool saveMachine(const std::filesystem::path& path, SoC& soc) {
+-    if (!soc.Save()) return false;
+-    const auto folder = machineFolderForSave(path);
++inline bool saveMachine(const std::filesystem::path& path, SoC& soc, const std::filesystem::path& loadedFrom = {},
++                        const std::filesystem::path& loadedFolder = {}) {
++    if (!soc.Save()) {
++        std::cerr << "save: the device state snapshot failed" << std::endl;
++        return false;
++    }
++    std::string why;
++    const auto folder = machineFolderForSave(path, why, loadedFrom, loadedFolder);
++    std::error_code ec;
++    if (folder.empty() || !std::filesystem::is_directory(folder, ec)) {
++        std::cerr << "save: " << (why.empty() ? folder.string() + " is not a folder and can't be made one" : why)
++                  << std::endl;
++        return false;
++    }
+     frondSession::Contents contents;
+     fillState(soc, contents);
+     std::vector<std::filesystem::path> temps;
+     SdSave sd;
+-    auto fail = [&] {
++    auto fail = [&](const char* why) {
++        std::cerr << "save: " << why << " in " << folder << std::endl;
+         for (const auto& t : temps) frondSession::removePath(t);
+         abandonSdSave(sd);
+         return false;
+@@ -101,19 +154,31 @@
+         frondMachine::Media media;
+         const bool ok = pro ? beginSdSave(folder, media, msCtrlrInserted(ms), sd, frondMachine::kindMsPro, msCtrlrReadOnly(ms))
+                             : beginSdSave(folder, media, soc.SdInserted(), sd);
+-        if (!ok) return fail();
++        if (!ok) return fail("the card save could not start");
+         temps.emplace_back();  // published by completeSdSave, not renamed with the .frond
+         contents.media.push_back(std::move(media));
+     }
+     if (ms && msCtrlrPresent(ms) && !pro) {
+         frondMachine::Media media;
+         std::filesystem::path temp;
+-        if (!publishMs(folder, ms, media, temp)) return fail();
++        if (!publishMs(folder, ms, media, temp)) return fail("the Memory Stick could not be written");
+         temps.push_back(std::move(temp));
+         contents.media.push_back(std::move(media));
+     }
+     // Once the .frond is published the card file is finished, or left for the next load.
+-    return publishWithSd(folder, contents, temps, sd);
++    // As publishWithSd, telling a .frond that wasn't written from a card step after it.
++    bool published = false;
++    const bool saved = frondSession::saveFolderFromTemps(folder, contents, temps, &published);
++    if (!published) {
++        abandonSdSave(sd);
++        std::cerr << "save: the session file could not be written in " << folder << std::endl;
++        return false;
++    }
++    const bool finished = completeSdSave(folder, sd);
++    if (!saved)
++        std::cerr << "save: the session file is written, but a card file could not be renamed or an unused one removed in "
++                  << folder << std::endl;
++    return finished && saved;
+ }
+ 
+ inline bool attachFolderMedia(const frondSession::Contents& contents, const std::filesystem::path& folder) {
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -388,6 +388,7 @@
+         if (!readSession(options, nor, nand, memory, savestate, ramSize, romInfo, displayMode,
+                          requestedDevice, sessionDevice, embeddedCard, sessionFolder))
+             return false;
++        const string sessionPath = sessionFolder.empty() ? string() : string(options.norOrSession);
+         const DeviceType5 deviceType = sessionDevice != DeviceType5::deviceTypeInvalid
+             ? sessionDevice : requestedDevice != deviceTypeInvalid ? requestedDevice
+                                                                    : romInfo.GetDeviceType();
+@@ -666,6 +667,7 @@
+             .screenWidth = displayConfiguration.width,
+             .screenHeight = displayConfiguration.height + displayConfiguration.graffitiHeight};
+         commandContext.sessionFolder = sessionFolder;
++        commandContext.sessionPath = sessionPath;
+ 
+         // The endpoint opens after the session loads, so a restore starts detached.
+         SdlMicrophone microphone;
