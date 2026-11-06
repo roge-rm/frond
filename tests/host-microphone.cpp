@@ -5,14 +5,14 @@
 
 static double tone(uint32_t rate, double hz) {
     MicrophoneQueue queue;
-    queue.Configure({true, false, Ak4534InputRoute::internalMic, rate, 1});
+    queue.Configure({true, false, AudioInputRoute::internalMic, rate, 1});
     std::vector<int16_t> input(9600);
     for (size_t i=0;i<input.size();++i) input[i]=int16_t(10000*std::sin(2*3.141592653589793*hz*i/48000));
     queue.Publish(input.data(), input.size(), queue.Generation());
     double sum=0;
     const size_t frames=rate/6;
     for(size_t i=0;i<frames;++i) {
-        const auto sample=queue.Pull(Ak4534InputRoute::internalMic,rate,1);
+        const auto sample=queue.Pull(AudioInputRoute::internalMic,rate,1);
         if(i>rate/100) sum+=double(sample)*sample;
     }
     return std::sqrt(sum/(frames-rate/100-1));
@@ -27,7 +27,7 @@ int main() {
     std::cout<<"8kHz out, 12kHz input RMS "<<alias<<'\n';
     assert(alias<30);
     MicrophoneQueue queue;
-    auto demand=Ak4534InputDemand{true,false,Ak4534InputRoute::internalMic,22050,1};
+    auto demand=AudioInputDemand{true,false,AudioInputRoute::internalMic,22050,1};
     queue.Configure(demand);
     const auto gen=queue.Generation();
     std::vector<int16_t> input(15000,1000);
@@ -61,8 +61,8 @@ int main() {
         assert(mic.Arm() && mic.State()=="on");
         auto source=mic.Source();
         source.fence(source.context,true);
-        mic.Service({true,false,Ak4534InputRoute::internalMic,22050,1});
-        assert(source.pull(source.context,Ak4534InputRoute::internalMic,22050,1)==0);
+        mic.Service({true,false,AudioInputRoute::internalMic,22050,1});
+        assert(source.pull(source.context,AudioInputRoute::internalMic,22050,1)==0);
         source.fence(source.context,false);
         assert(mic.State()=="on");
         mic.AppEventOnDeviceThread(SDL_APP_WILLENTERBACKGROUND);

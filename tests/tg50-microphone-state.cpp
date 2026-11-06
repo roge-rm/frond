@@ -8,7 +8,7 @@
 struct Source {
     unsigned pulls{},disarms{},fences{};
     bool fenced{};
-    Ak4534InputSource Hooks(){return {this,[](void *p,Ak4534InputRoute,uint32_t,uint32_t)->int16_t{
+    AudioInputSource Hooks(){return {this,[](void *p,AudioInputRoute,uint32_t,uint32_t)->int16_t{
         auto &s=*static_cast<Source*>(p);assert(!s.fenced);++s.pulls;return (s.pulls&1)?1000:-1000;
     },[](void*p,bool f){auto &s=*static_cast<Source*>(p);s.fenced=f;++s.fences;},
     [](void*p){++static_cast<Source*>(p)->disarms;}};}
