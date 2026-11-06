@@ -47,6 +47,10 @@ data class Device internal constructor(
     // DragonBall devices run in libmain68k.so (Frond68kActivity), the others in libmain.so (FrondActivity).
     val runs68k: Boolean = false,
 ) {
+    // The real Zire 72 has no serial port, so it's left out of the list rather than greyed.
+    val serialAbsent: Boolean get() = id == "palm-zire-72"
+    // The connector's HotSync button: the IIIx cradle, the T|X and the E2.
+    val hotSyncButton: Boolean get() = serialPort && (runs68k || id == "palm-tx" || id == "palm-e2")
     val cardSupported: Boolean get() = sdSlot || memoryStick
     val cardLabel: String get() = if (storageSlot == "memory-stick") "Memory Stick" else "SD card"
     val hasNand: Boolean get() = nandSize > 0

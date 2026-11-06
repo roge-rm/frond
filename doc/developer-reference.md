@@ -137,6 +137,7 @@ State commands take no argument. Mode commands change the setting and reply with
 | --- | --- | --- |
 | `hold-state` | | `hold`: `on`, `off` or `unavailable` |
 | `hold` | `on` or `off` | `hold` |
+| `hotsync` | | `hotsync`: pulls the connector's HotSync line low for 500 ms (T|X GPIO10, E2 GPIO4); `unsupported` elsewhere, or while another key is held |
 | `keyboard-state` | | `keyboard`: `attached` or `detached` |
 | `keyboard-attach` | `on` or `off` | `keyboard`; `infrared` error if an infrared peer owns the UART |
 | `keyboard-key` | hex scan code, space, `d` or `u` | `keyboard` |
@@ -215,6 +216,7 @@ Key names:
 | `back` | Back | TG50 |
 | `jog-up`, `jog-down`, `jog-press` | Jog dial | TG50 |
 | `hold` | Hold switch, held while down | TG50 |
+| `hotsync` | The connector's HotSync line, low while down | TX, E2 |
 
 The TG50 keyboard keys are numbers 17 to 58, in rows from the top left.
 
@@ -501,7 +503,7 @@ All in `tools/`. Most take `--help`.
 | `link-pty.py ENDPOINT` | Puts a PTY in front of a TCP endpoint (`PORT`, `HOST:PORT` or `listen:PORT`) for programs that only open serial devices. `--link PATH`, `--seconds N`. |
 | `link-irda.py FIRST SECOND` | Joins two infrared endpoints. `--seconds N`. |
 | `link-bluetooth.py serve\|join A B` | Carries Bluetooth controller connections over TCP. `--seconds N`. |
-| `probe-tx-serial.py`, `probe-tx-serial-host.py`, `probe-tx-usb-hotsync.py` | Serial and USB HotSync probes on a copy of a TX session. |
+| `probe-tx-serial.py`, `probe-tx-serial-host.py`, `probe-tx-usb-hotsync.py`, `probe-serial-hotsync.py` | Serial and USB HotSync probes on a copy of a TX session. `probe-serial-hotsync.py` runs pilot-link over the serial port of a TX or E2 session, pressing the HotSync button with a `key-down hotsync` replay. |
 | `qualify-peripherals.py` | Staged peripheral run against your own sessions. |
 | `tx-baseline.py` | TX acceptance checks from your own images. |
 | `test-input-replay.py` | Invalid input replays must fail before the guest runs. |
@@ -547,7 +549,7 @@ Tests in `make test`, by area:
 | Palm databases | `test-native-database`, `test-native-primitives`, `test-native-governor`, `test-db-list`, `test-db-backup` |
 | Storage | `test-sd-image`, `test-sd`, `test-card-backing`, `test-memory-stick-controller`, `test-memory-stick-media`, `test-memory-stick-pro` |
 | Audio | `test-sdl-audio`, `test-fast-audio`, `test-earlier-audio`, `test-audio-results`, `test-pxa-i2s-audio`, `test-tg50-pwm-audio`, `test-tg50-microphone-adc`, `test-tg50-microphone-dma`, `test-tg50-microphone-state`, `test-tg50-call-budget`, `test-tg50-pace`, `test-tg50-audio-replay`, `test-tg50-serial-board`, `test-tg50-serial-configuration` |
-| Serial, USB, infrared | `test-uart-lifecycle`, `test-uart-checkpoint`, `test-uart-flow`, `test-uart-dma-peer`, `test-tx-serial`, `test-host-serial`, `test-pty-link`, `test-usb-enumeration`, `test-usb-host-fixture`, `test-usb-bridge`, `test-usb-bridge-soc`, `test-irda-endpoint`, `test-irda-link`, `test-irda-results`, `test-keyboard` |
+| Serial, USB, infrared | `test-uart-lifecycle`, `test-uart-checkpoint`, `test-uart-flow`, `test-uart-dma-peer`, `test-tx-serial`, `test-hotsync-line`, `test-host-serial`, `test-pty-link`, `test-usb-enumeration`, `test-usb-host-fixture`, `test-usb-bridge`, `test-usb-bridge-soc`, `test-irda-endpoint`, `test-irda-link`, `test-irda-results`, `test-keyboard` |
 | Bluetooth | `test-bluetooth`, `test-bluetooth-link`, `test-bluetooth-results`, `test-csr-bcsp`, `test-csr-controller-lifecycle`, `test-csr-peer-services` |
 | Network | `test-network`, `test-network-reliability`, `test-host-network`, `test-wifi` |
 | Debugger and tools | `test-gdbstub`, `test-pace-debug`, `test-pace-step`, `test-debugger-inspect`, `test-developer-run`, `test-compatibility`, `test-gameplay-metrics`, `test-build-tools`, `test-render-link`, `test-peripheral-qualification` |

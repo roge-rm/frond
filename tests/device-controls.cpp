@@ -596,7 +596,7 @@ static void tg50Art() {
     // Every key once: the app row, all 42 keyboard keys and the tab's four.
     std::vector<int> seen(keyIdCount,0);
     for(size_t i=0;i<p.count;++i)++seen[p.buttons[i].key];
-    for(int k=keyIdHard1;k<keyIdCount;++k)assert(seen[k]==(k==keyIdLeft || k==keyIdRight || k==keyIdSelect || k==keyIdPower || k==keyIdVoice || k==keyIdHold ? 0 : 1));
+    for(int k=keyIdHard1;k<keyIdCount;++k)assert(seen[k]==(k==keyIdLeft || k==keyIdRight || k==keyIdSelect || k==keyIdPower || k==keyIdVoice || k==keyIdHold || k==keyIdHotSync ? 0 : 1));
     // Strip units to window pixels: the side tab stays 1:1, the rest scales with the window width.
     auto at=[&](float x,float y,const DeviceControlView& view) {
         const DeviceControlTransform t(p,width,view);

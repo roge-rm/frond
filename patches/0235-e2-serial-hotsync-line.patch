@@ -1,0 +1,168 @@
+diff --git a/src/common/device_profile5.h b/src/common/device_profile5.h
+index 82be59f..df8f133 100644
+--- a/src/common/device_profile5.h
++++ b/src/common/device_profile5.h
+@@ -94,7 +94,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
+       "85b048a692aa317763a7077ea72da6cb", "wallpaper"}},
+     {deviceTypeE2, "palm-e2", "Tungsten E2", DeviceCohort5::e2Nand, DeviceSupport5::e2Desktop,
+      DeviceDetect5::cardHeader, deviceCompanyPalm5, 0x68737072 /* hspr */, DeviceBoard5::pxa255E2,
+-     DeviceArt::e2, {false, true, false, true, true, true, true, true},
++     DeviceArt::e2, {false, true, true, true, true, true, true, true},
+      8u << 20, 34603008, 16u << 20, 32u << 20, DisplayMode::mode_320x320, 1u << 5, false,
+      DeviceNorLayout5::headerOffset, 0x20000, 0, true, 512, 1024u << 20,
+      {true, "e2", 320, 320, 120, 80, "Calendar|Contacts|Tasks|Note Pad",
+diff --git a/src/uarm/native/DesktopControl.h b/src/uarm/native/DesktopControl.h
+index 64feac6..a94bc1d 100644
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -252,7 +252,7 @@ class DesktopControl {
+         if (command == "device-state") return {true, "device", deviceProfile5(ctx.soc->GetDeviceType())->name};
+         const auto& caps = capabilities(ctx);
+         if (!caps.serial && command == "serial-mode")
+-            return {false, "unsupported", "This device has no emulated serial port."};
++            return {false, "unsupported", std::string("The ") + deviceProfile5(ctx.soc->GetDeviceType())->displayName + " has no serial port."};
+         if (!caps.network && command == "network-mode" && path != "disabled")
+             return {false, "unsupported", "This device has no emulated network."};
+         if(command=="bluetooth-state" || command=="bluetooth-mode") {
+@@ -287,6 +287,11 @@ class DesktopControl {
+             const bool ok=ctx.infrared->Start(static_cast<SocPXA*>(ctx.soc),config,ctx.infraredError);
+             return {ok,"infrared",ok?ctx.infrared->Describe():ctx.infraredError};
+         }
++        if (command == "hotsync") {
++            if (!static_cast<SocPXA*>(ctx.soc)->PressHotSync())
++                return {false, "unsupported", "This device has no HotSync button, or one is already being pressed."};
++            return {true, "hotsync", "HotSync button pressed."};
++        }
+         if (command == "hold-state")
+             return {true, "hold", !ctx.soc->HoldSwitchSupported() ? "unavailable" :
+                     ctx.soc->HoldSwitchOn() ? "on" : "off"};
+diff --git a/src/uarm/native/InputReplay.cpp b/src/uarm/native/InputReplay.cpp
+index c4750f4..5ffde60 100644
+--- a/src/uarm/native/InputReplay.cpp
++++ b/src/uarm/native/InputReplay.cpp
+@@ -26,7 +26,7 @@ bool InputReplay::Load(const std::string& path, int width, int height, std::stri
+         {"web", keyIdHard4}, {"up", keyIdUp}, {"down", keyIdDown},
+         {"left", keyIdLeft}, {"right", keyIdRight}, {"center", keyIdSelect},
+         {"power", keyIdPower}, {"voice", keyIdVoice},
+-        {"graffiti", keyIdGraffiti}, {"back", keyIdBack}, {"hold", keyIdHold},
++        {"graffiti", keyIdGraffiti}, {"back", keyIdBack}, {"hold", keyIdHold}, {"hotsync", keyIdHotSync},
+         {"jog-up", keyIdJogUp}, {"jog-down", keyIdJogDown}, {"jog-press", keyIdJogPress}};
+     std::string line;
+     size_t number = 0;
+diff --git a/src/uarm/native/main.cpp b/src/uarm/native/main.cpp
+index b20b5fc..75708fe 100644
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -404,7 +404,7 @@ namespace {
+         }
+         const bool isTx = deviceType == DeviceType5::deviceTypeTX;
+         // The desktop passes saved serial settings; unsupported devices skip them.
+-        if (options.desktopSocket && !isTx && deviceType != deviceTypeTG50) {
++        if (options.desktopSocket && !isTx && deviceType != deviceTypeE2 && deviceType != deviceTypeTG50) {
+             serialConfig = HostSerial::Config{};
+ 
+         }
+@@ -681,7 +681,8 @@ namespace {
+         HostSerial serial;
+         commandContext.serial = &serial;
+         const auto& capabilities = deviceProfile5(deviceType)->capabilities;
+-        if (soc->GetDeviceType() == DeviceType5::deviceTypeTX || soc->GetDeviceType() == DeviceType5::deviceTypeTG50) {
++        if (soc->GetDeviceType() == DeviceType5::deviceTypeTX || soc->GetDeviceType() == DeviceType5::deviceTypeE2 ||
++            soc->GetDeviceType() == DeviceType5::deviceTypeTG50) {
+             commandContext.serialUart = static_cast<SocPXA*>(soc)->GetSerialUart();
+             commandContext.serialRoute = static_cast<SocPXA*>(soc)->GetSerialRoute();
+         }
+diff --git a/src/uarm/uarm/devicePalmTungstenE2.cpp b/src/uarm/uarm/devicePalmTungstenE2.cpp
+index 0e04285..6b39cea 100644
+--- a/src/uarm/uarm/devicePalmTungstenE2.cpp
++++ b/src/uarm/uarm/devicePalmTungstenE2.cpp
+@@ -215,7 +215,7 @@ struct Device *deviceSetup(enum DeviceType5 type, struct SocPeriphs *sp,
+         wm9712LsetAuxVoltage(dev->wm9712L, WM9712LauxPinBmon, 4200 / 3);
+         pxaGpioSetState(sp->gpio, 0, true);
+         pxaGpioSetState(sp->gpio, 1, true);
+-        pxaGpioSetState(sp->gpio, 10, true);
++        if (!keypadAddGpioKey(kp, keyIdHotSync, 10, false)) ERR("cannot initialize TX HotSync line");  // palmtx.h HOTSYNC_BUTTON_N
+         pxaGpioSetState(sp->gpio, 14, true);  // SD absent
+         pxaGpioSetState(sp->gpio, 37, true);
+         pxaGpioSetState(sp->gpio, 90, true);
+@@ -308,8 +308,8 @@ struct Device *deviceSetup(enum DeviceType5 type, struct SocPeriphs *sp,
+ 
+     pxaGpioSetState(sp->gpio, 1, true);  // reset button
+ 
+-    pxaGpioSetState(sp->gpio, 4,
+-                    true);  // not in cradle (also prevents FIQ wtchdog from firing after 5 sec)
++    // HotSync line (palmte2.h HOTSYNC_BUTTON_N), high is not in cradle; low for over 5 s fires the FIQ watchdog.
++    if (!keypadAddGpioKey(kp, keyIdHotSync, 4, false)) ERR("Cannot init HotSync line\n");
+ 
+     pxaGpioSetState(sp->gpio, 35, true); // USB cable absent (palmte2.h USB_DETECT_N)
+     pxaGpioSetState(sp->gpio, 40, true);  // no hotsync button pressed [??]
+diff --git a/src/uarm/uarm/keys.h b/src/uarm/uarm/keys.h
+index c007009..a18bc5d 100644
+--- a/src/uarm/uarm/keys.h
++++ b/src/uarm/uarm/keys.h
+@@ -34,7 +34,9 @@ enum KeyId {
+     // Zire 72 side voice button (KPC direct key 7), after the TG50's keyboard keys.
+     keyIdVoice = keyIdKeyboard + 42,
+     keyIdHold = keyIdVoice + 1,
+-    keyIdCount = keyIdHold + 1
++    // The connector's HotSync line (E2 GPIO4, TX GPIO10), pulled low while pressed.
++    keyIdHotSync = keyIdHold + 1,
++    keyIdCount = keyIdHotSync + 1
+ };
+ 
+ // TG50 keyboard key at drive line 2-7 and column 0-6 of the ROM's keyboard code table; column c
+diff --git a/src/uarm/uarm/soc_PXA.cpp b/src/uarm/uarm/soc_PXA.cpp
+index 069929f..383f869 100644
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -279,6 +279,8 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
+     sp.ssp3 = ssp[2];
+     if (socRev == 2) sp.kpc = kpc;
+     irUart = deviceType == deviceTypeTG50 ? ffUart : stUart;
++    // The E2's FFUART is its serial port (the T|X's runs paced as a PXA27x); a host endpoint needs the paced model.
++    if (deviceType == DeviceType5::deviceTypeE2) pxaUartSetPacing(ffUart, true);
+     if (deviceType==DeviceType5::deviceTypeTX || deviceType==DeviceType5::deviceTypeE2 ||
+         deviceType==DeviceType5::deviceTypeZire72 || deviceType==deviceTypeTG50) {
+         pxaUartSetPacing(irUart,true);
+@@ -352,6 +354,13 @@ bool SocPXA::LcdEnabled() { return pxaLcdIsEnabled(lcd) && devicePanelEnabled(de
+ bool SocPXA::HoldSwitchSupported() const {
+     return deviceProfile5(deviceGetType(dev))->frontend.holdSupported;
+ }
++bool SocPXA::PressHotSync() {
++    if (GetDeviceType() != deviceTypeTX && GetDeviceType() != deviceTypeE2) return false;
++    if (jammedKey != keyInvalid) return false;
++    // Long enough for the E2 ROM to see it (150 ms is missed, 300 ms works) and short of the 5 s the E2 FIQ watchdog allows.
++    JamKey(keyIdHotSync, 500);
++    return true;
++}
+ bool SocPXA::HoldSwitchOn() const { return deviceHoldSwitchOn(dev); }
+ bool SocPXA::SetHoldSwitch(bool on) {
+     if (!HoldSwitchSupported()) return false;
+diff --git a/src/uarm/uarm/soc_PXA.h b/src/uarm/uarm/soc_PXA.h
+index eaeaf3a..ea501d3 100644
+--- a/src/uarm/uarm/soc_PXA.h
++++ b/src/uarm/uarm/soc_PXA.h
+@@ -106,7 +106,9 @@ class SocPXA : public SocGeneric<SocPXA> {
+     PxaUart* GetIrUart() { return irUart; }
+ 
+     // Model access for development probes; creates no host connection.
+-    PxaUart* GetSerialUart() { return (GetDeviceType() == deviceTypeTX || GetDeviceType() == deviceTypeTG50) ? ffUart : nullptr; }
++    PxaUart* GetSerialUart() { return (GetDeviceType() == deviceTypeTX || GetDeviceType() == deviceTypeE2 || GetDeviceType() == deviceTypeTG50) ? ffUart : nullptr; }
++    // Pulls the connector's HotSync line low for a moment; false where there is none or a key is already being held.
++    bool PressHotSync();
+ 
+     SerialHostRoute GetSerialRoute();
+     bool SetSerialHostHooks(const SerialHostHooks* hooks);
+diff --git a/src/uarm/uarm/soc_generic_impl.h b/src/uarm/uarm/soc_generic_impl.h
+index 073f5ae..41ce311 100644
+--- a/src/uarm/uarm/soc_generic_impl.h
++++ b/src/uarm/uarm/soc_generic_impl.h
+@@ -314,6 +314,8 @@ uint64_t SocGeneric<T>::GetTime() {
+ 
+ template <class T>
+ void SocGeneric<T>::JamKey(enum KeyId key, uint32_t durationMsec) {
++    // A new hold lets go of the one it replaces, so no line stays pressed.
++    if (jammedKey != keyInvalid && jammedKey != key) static_cast<T&>(*this).OnEngageKey(jammedKey, false);
+     jammedKey = key;
+     jammedKeyAt = scheduler->GetTime();
+     releaseJammedKeyAt = jammedKeyAt + durationMsec * 1_msec;

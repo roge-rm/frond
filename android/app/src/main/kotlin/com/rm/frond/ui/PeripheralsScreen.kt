@@ -356,7 +356,7 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                         modifier = if (usable) Modifier.clickableRow { choosingBluetooth = true } else Modifier,
                     )
                 }
-                item(key = "serial") {
+                if (!model.device.serialAbsent) item(key = "serial") {
                     val usable = model.device.serialPort
                     val faded = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
                     ListItem(
@@ -400,8 +400,8 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                 }
                 action("Reset") { confirmReset = true }
                 if (!m68k) action("Rotate") { model.rotate() }
-                // The cradle's HotSync button, for a device that sits in a serial cradle.
-                if (m68k && model.device.serialPort) action("HotSync") { model.hotSync() }
+                // The connector's HotSync button: the IIIx cradle, the T|X and the E2.
+                if (model.device.hotSyncButton) action("HotSync") { model.hotSync() }
                 item { Header("Session", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp)) }
                 action("Save a copy") { saveCopy.launch("${model.name}.zip") }
                 action("Emulator log") { model.showLog() }

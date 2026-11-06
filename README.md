@@ -71,13 +71,14 @@ The TG50 takes a Memory Stick from 4 to 128 MB, or a Memory Stick Pro from 256 M
 | | T\|X | E2 | Zire 72 | TG50 | IIIx |
 |---|---|---|---|---|---|
 | Virtual Wi-Fi, onto the internet through your computer or phone | yes | | | | |
-| Cradle serial port, to a PTY or TCP port for terminal programs and [HotSync](doc/using-frond.md#palm-iiix-serial-and-ppp) | yes | | | yes | yes |
+| Cradle serial port, to a PTY or TCP port for terminal programs and [HotSync](doc/using-frond.md#palm-iiix-serial-and-ppp) | yes | yes | | yes | yes |
+| HotSync button on the running page, like the cradle's | yes | yes | | | yes |
 | Microphone | | | | yes | |
 | USB HotSync over a PTY or TCP port | yes | yes | yes | yes | |
 | [Infrared beaming](doc/using-frond.md#infrared) between Frond machines | yes | yes | yes | yes | yes |
 | [Virtual Bluetooth](doc/using-frond.md#bluetooth), with a local provider you start yourself | yes | yes | yes | yes | |
 
-Anything else stays greyed out until it's done, like the E2's and Zire's networking and serial and the Zire's camera.
+Anything else stays greyed out until it's done, like the E2's and Zire's networking and the Zire's camera and microphone. The Zire 72 has no serial port, as on the real one.
 
 The Palm IIIx (Palm OS 3.1, 68k DragonBall EZ) runs in its own runner, `frond-68k`. It has sound, backlight, serial with the HotSync button, infrared and the screen contrast, and no SD, USB, Bluetooth or Wi-Fi, as on the real one. It only has the exact engine (no Fast), at its real 16.58 MHz or Uncapped. Networking is PPP over the serial port, see [Palm IIIx serial and PPP](doc/using-frond.md#palm-iiix-serial-and-ppp). Android has it too, and the debugger works with prc-tools' gdb, see [Palm IIIx](doc/developer-reference.md#palm-iiix-frond-68k).
 

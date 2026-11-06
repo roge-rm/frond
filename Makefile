@@ -580,6 +580,15 @@ test-e2-state: out/frond
 		$(CPU_TEST_LDLIBS) -o build/test-e2-state
 	./build/test-e2-state
 
+.PHONY: test-hotsync-line
+test: test-hotsync-line
+test-hotsync-line: out/frond
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/hotsync-line-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/hotsync-line.cpp @build/hotsync-line-core.rsp build/source/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-hotsync-line
+	./build/test-hotsync-line
+
 .PHONY: test-uart-flow
 test-uart-flow: prepare build/source/src/common/libcommon.a
 	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \

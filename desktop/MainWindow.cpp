@@ -274,7 +274,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     serialPort->setRange(1, 65535);
     serialPort->setPrefix(tr("Port "));
     loadSerialSettings();
-    label(tr("Serial port"), 4); grid->addWidget(serial, 4, 1); grid->addWidget(serialPort, 4, 2);
+    serialLabel = label(tr("Serial port"), 4); grid->addWidget(serial, 4, 1); grid->addWidget(serialPort, 4, 2);
     serialState = new QLabel(root);
     serialState->setObjectName("serialState");
     serialState->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -382,7 +382,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     auto* reset = button(tr("Reset"), "reset");
     auto* rotate = button(tr("Rotate"), "rotate");
     rotateButton = rotate;
-    // The cradle's HotSync button, for a device that sits in a serial cradle.
+    // The connector's HotSync button: the IIIx cradle, the T|X and the E2.
     hotSyncButton = button(tr("HotSync"), "hotsync");
     auto* deviceButtons = new QHBoxLayout;
     deviceButtons->addWidget(reset); deviceButtons->addWidget(rotate); deviceButtons->addWidget(hotSyncButton);
@@ -728,13 +728,16 @@ void MainWindow::refresh() {
     auto shown = [&](bool present, std::initializer_list<QWidget*> widgets) {
         for (auto* w : widgets) w->setVisible(present);
     };
+    shown(!frondFirmware::serialAbsent(currentDevice()), {serialLabel, serial, serialPort});
+    if (frondFirmware::serialAbsent(currentDevice())) serialState->setVisible(false);
     shown(!m68k || caps.network, {networkLabel, network});
     shown(!m68k || caps.keyboard, {keyboardLabel, keyboard});
     shown(!m68k || caps.usb, {usbLabel, usb, usbPort});
     shown(!m68k || caps.bluetooth, {bluetoothLabel, bluetooth, bluetoothSocket});
     shown(!m68k || caps.microphone, {microphoneLabel, microphoneToggle});
     if (m68k) for (auto* state : {usbState, bluetoothState}) state->setVisible(false);
-    shown(m68k, {contrastLabel, contrast, hotSyncButton});
+    shown(m68k, {contrastLabel, contrast});
+    shown(frondFirmware::hasHotSyncButton(currentDevice()), {hotSyncButton});
     shown(!m68k, {rotateButton});
     contrast->setEnabled(enabled);
     const auto& frontend = frondFirmware::profile(currentDevice()).frontend;
