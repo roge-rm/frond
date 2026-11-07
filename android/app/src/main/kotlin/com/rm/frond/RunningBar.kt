@@ -1,5 +1,12 @@
 package com.rm.frond
 
+import android.app.Activity
+import android.os.Handler
+import android.os.Looper
+import androidx.activity.result.ActivityResultRegistry
+import androidx.activity.result.ActivityResultRegistryOwner
+import androidx.activity.result.contract.ActivityResultContract
+import androidx.core.app.ActivityOptionsCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
@@ -48,5 +55,21 @@ internal class BarOwner : LifecycleOwner, SavedStateRegistryOwner, ViewModelStor
     fun destroy() {
         registry.currentState = Lifecycle.State.DESTROYED
         viewModelStore.clear()
+    }
+}
+
+// Lets the bar's Compose code use activity result launchers in a plain Activity: launches go through
+// startActivityForResult and the activity hands results back to dispatchResult.
+internal class BarResults(private val activity: Activity) : ActivityResultRegistry(), ActivityResultRegistryOwner {
+    override val activityResultRegistry get() = this
+
+    override fun <I, O> onLaunch(requestCode: Int, contract: ActivityResultContract<I, O>, input: I, options: ActivityOptionsCompat?) {
+        val direct = contract.getSynchronousResult(activity, input)
+        if (direct != null) {
+            Handler(Looper.getMainLooper()).post { dispatchResult(requestCode, direct.value) }
+            return
+        }
+        @Suppress("DEPRECATION")
+        activity.startActivityForResult(contract.createIntent(activity, input), requestCode, options?.toBundle())
     }
 }

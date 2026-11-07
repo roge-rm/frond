@@ -25,7 +25,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -47,6 +50,8 @@ import com.rm.frond.NetRelay
 import com.rm.frond.PeripheralsModel
 import com.rm.frond.RunningBar
 import com.rm.frond.RunningMenu
+import com.rm.frond.RunningSheets
+import com.rm.frond.SdCard
 
 // What the bar shows. The activity owns one and changes it on the UI thread.
 class RunningBarState {
@@ -63,6 +68,8 @@ class RunningBarState {
     var model by mutableStateOf<PeripheralsModel?>(null)
     // The confirm or chooser dialog open over the Palm: RESET, HARD_RESET or NETWORK.
     var dialog by mutableStateOf<RunningMenu.Id?>(null)
+    // The sheet open over the Palm, if any.
+    var sheet by mutableStateOf<RunningSheets.Sheet?>(null)
 }
 
 class RunningBarActions(
@@ -74,12 +81,19 @@ class RunningBarActions(
     val hide: () -> Unit,
     val openMenu: () -> Unit,
     val menuRow: (RunningMenu.Id) -> Unit,
+    val openSheet: (RunningSheets.Sheet) -> Unit,
+    val closeSheet: () -> Unit,
+    val filesOpen: (Boolean) -> Unit,
 )
 
 @Composable
 fun RunningBarView(state: RunningBarState, actions: RunningBarActions) {
     FrondTheme(dark = true) {
-        if (state.shown) Bar(state, actions) else Handle(actions)
+        // The view is the whole screen while a sheet is open, so its scrim catches every touch.
+        Box(if (state.sheet != null) Modifier.fillMaxSize() else Modifier) {
+            if (state.shown) Bar(state, actions) else Handle(actions, Modifier.align(Alignment.TopCenter))
+            state.sheet?.let { SheetLayer(it, state, actions) }
+        }
         MenuDialogs(state, actions)
     }
 }
@@ -93,18 +107,32 @@ private fun Bar(state: RunningBarState, actions: RunningBarActions) {
                 Text(state.name, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(state.subtitle, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
             }
-            if (state.keyboardKey) IconButton(actions.keyboard) { Icon(painterResource(R.drawable.ic_keyboard), contentDescription = "Keyboard") }
-            if (state.soundKey) IconButton(actions.toggleSound) {
+            val device = state.device
+            if (state.keyboardKey) BarButton(actions.keyboard) { Icon(painterResource(R.drawable.ic_keyboard), contentDescription = "Keyboard") }
+            if (device != null) for (sheet in RunningSheets.barSheets(device)) when (sheet) {
+                RunningSheets.Sheet.APPLICATIONS -> BarButton({ actions.openSheet(sheet) }) { Icon(painterResource(R.drawable.ic_apps), contentDescription = "Applications") }
+                RunningSheets.Sheet.CARD -> BarButton({ actions.openSheet(sheet) }) {
+                    val model = state.model
+                    val icon = RunningSheets.cardIcon(model?.state ?: SdCard.State.UNKNOWN, model?.slotShown?.linked != null)
+                    Icon(painterResource(cardIconRes(icon)), contentDescription = device.cardLabel)
+                }
+                else -> Unit
+            }
+            if (state.soundKey) BarButton(actions.toggleSound) {
                 Icon(painterResource(if (state.sound) R.drawable.ic_volume_up else R.drawable.ic_volume_off), contentDescription = if (state.sound) "Mute" else "Unmute")
             }
-            if (state.powerKey) IconButton(actions.power) { Icon(painterResource(R.drawable.ic_power), contentDescription = "Power") }
+            if (state.powerKey) BarButton(actions.power) { Icon(painterResource(R.drawable.ic_power), contentDescription = "Power") }
             Box {
-                IconButton(actions.openMenu) { Icon(Icons.Default.MoreVert, contentDescription = "More") }
+                BarButton(actions.openMenu) { Icon(Icons.Default.MoreVert, contentDescription = "More") }
                 Menu(state, actions)
             }
         }
     }
 }
+
+@Composable
+private fun BarButton(onClick: () -> Unit, content: @Composable () -> Unit) =
+    IconButton(onClick, Modifier.size(40.dp), content = content)
 
 @Composable
 private fun Menu(state: RunningBarState, actions: RunningBarActions) {
@@ -143,6 +171,19 @@ private fun MenuDialogs(state: RunningBarState, actions: RunningBarActions) {
     val model = state.model ?: return
     BusyDialog(model)
     AlertBox(model)
+    CardPickerDialogs(model)
+    if (model.path != null) {
+        val snackbar = remember { SnackbarHostState() }
+        // The file view covers the Palm; the core stays quiet while a Memory Stick is open.
+        DisposableEffect(Unit) {
+            actions.filesOpen(true)
+            onDispose { actions.filesOpen(false) }
+        }
+        Dialog({ if (model.path == "/") model.leaveFiles() else model.up() }, DialogProperties(usePlatformDefaultWidth = false)) {
+            Surface(Modifier.fillMaxSize()) { CardFilesScreen(model, snackbar) }
+        }
+    }
+    LaunchedEffect(model.path != null) { if (model.path != null) actions.closeSheet() }
     val context = LocalContext.current
     LaunchedEffect(model.note) {
         model.note?.let {
@@ -171,10 +212,10 @@ private fun MenuDialogs(state: RunningBarState, actions: RunningBarActions) {
 
 // A small tab at the top edge; a tap or a swipe down brings the bar back.
 @Composable
-private fun Handle(actions: RunningBarActions) {
+private fun Handle(actions: RunningBarActions, modifier: Modifier = Modifier) {
     run {
         Box(
-            Modifier.width(72.dp).height(20.dp)
+            modifier.width(72.dp).height(20.dp)
                 .background(MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.8f), RoundedCornerShape(bottomStart = 10.dp, bottomEnd = 10.dp))
                 .semantics { contentDescription = "Show bar" }
                 .clickable { actions.show() }

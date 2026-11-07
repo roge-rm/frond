@@ -149,6 +149,23 @@ class PeripheralsModel(
         }
     }
 
+    // The card's state without a busy dialog, for the bar's icon.
+    fun readCard() {
+        val c = card ?: return
+        if (busy != null || waitingForGdb || !device.cardSupported) return
+        activity.lifecycleScope.launch {
+            val s = withContext(Dispatchers.IO) { c.state() }
+            val protection = withContext(Dispatchers.IO) { c.protection() }
+            val pro = withContext(Dispatchers.IO) { c.memoryStickPro() }
+            val slot = withContext(Dispatchers.IO) { slotInfo(s) }
+            if (busy != null) return@launch
+            slotShown = slot
+            state = s
+            writeProtected = protection
+            memoryStickPro = pro
+        }
+    }
+
     fun cancelFiles() {
         if (!canCancelFiles || cancellingFiles) return
         cardCancel?.let {
@@ -363,6 +380,24 @@ class PeripheralsModel(
             val summary = result.summary()
             if (summary != null) alert = "Couldn't install" to summary
             else note = if (uris.size == 1) last else "${uris.size} applications installed"
+            loadApps()
+        }
+    }
+
+    // The applications in RAM, as the core lists them; null until the first read.
+    var apps by mutableStateOf<List<PalmDatabases.Info>?>(null)
+        private set
+
+    fun loadApps() {
+        val d = databases ?: return
+        if (waitingForGdb) return
+        activity.lifecycleScope.launch {
+            apps = withContext(Dispatchers.IO) {
+                try { RunningSheets.applications(d.list()) } catch (e: Exception) {
+                    Log.w(FrondActivity.TAG, "application list: ${e.message}")
+                    emptyList()
+                }
+            }
         }
     }
 

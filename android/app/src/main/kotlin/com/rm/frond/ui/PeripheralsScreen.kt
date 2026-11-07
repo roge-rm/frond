@@ -77,10 +77,6 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
     val snackbar = remember { SnackbarHostState() }
     var confirmEject by remember { mutableStateOf(false) }
     var confirmFiles by remember { mutableStateOf(false) }
-    var naming by remember { mutableStateOf(false) }
-    var exporting by remember { mutableStateOf<FatImage.Entry?>(null) }
-    var renaming by remember { mutableStateOf<FatImage.Entry?>(null) }
-    var deleting by remember { mutableStateOf<FatImage.Entry?>(null) }
     var confirmReset by remember { mutableStateOf(false) }
     var confirmHardReset by remember { mutableStateOf(false) }
     var choosingNetwork by remember { mutableStateOf(false) }
@@ -88,15 +84,6 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
     var choosingBluetooth by remember { mutableStateOf(false) }
     var choosingSerial by remember { mutableStateOf(false) }
     var choosingUsb by remember { mutableStateOf(false) }
-    val microphonePermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) model.changeMicrophone(true) else model.microphoneDenied()
-    }
-    val enableMicrophone: (Boolean) -> Unit = { on ->
-        if (!on) model.changeMicrophone(false)
-        else if (androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED)
-            model.changeMicrophone(true)
-        else microphonePermission.launch(android.Manifest.permission.RECORD_AUDIO)
-    }
     val saveCopy = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
         if (uri != null) model.saveCopy(uri)
     }
@@ -115,14 +102,6 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
     val saveZip = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
         if (uri != null) model.export(uri, exportName)
     }
-    val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) model.addFile(uri)
-    }
-    val saveFile = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
-        val entry = exporting
-        exporting = null
-        if (uri != null && entry != null) model.exportFile(entry, uri)
-    }
 
     LaunchedEffect(model.note) {
         model.note?.let {
@@ -132,83 +111,19 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
     }
 
     val path = model.path
-    Scaffold(
+    if (path != null) {
+        CardFilesScreen(model, snackbar)
+    } else Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(if (path == null) model.device.label else "${model.device.cardLabel} $path", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                title = { Text(model.device.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                 navigationIcon = {
-                    IconButton(onClick = { if (path == null) onClose() else if (path == "/") model.leaveFiles() else model.up() }) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-                    }
+                    IconButton(onClick = onClose) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
                 },
             )
         },
         snackbarHost = { SnackbarHost(snackbar) },
-        bottomBar = {
-            if (path != null) {
-                Surface(tonalElevation = 2.dp) {
-                    Row(
-                        Modifier.fillMaxWidth().navigationBarsPadding().padding(16.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        val pad = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
-                        OutlinedButton(onClick = { naming = true }, enabled = !model.device.memoryStick || model.writeProtected == false, shape = MaterialTheme.shapes.small, contentPadding = pad) {
-                            Text("New folder", maxLines = 1, softWrap = false)
-                        }
-                        OutlinedButton(onClick = { pickFile.launch(arrayOf("*/*")) }, enabled = !model.device.memoryStick || model.writeProtected == false, shape = MaterialTheme.shapes.small, contentPadding = pad) {
-                            Text("Add file", maxLines = 1, softWrap = false)
-                        }
-                        Spacer(Modifier.weight(1f))
-                        Button(onClick = { model.insertEdited() }, shape = MaterialTheme.shapes.small, contentPadding = pad) {
-                            Text(if (model.device.memoryStick) "Done" else "Insert", maxLines = 1, softWrap = false)
-                        }
-                    }
-                }
-            }
-        },
     ) { padding ->
-        if (path != null) {
-            LazyColumn(Modifier.padding(padding).fillMaxSize()) {
-                item {
-                    Text(
-                        "${Formatter.formatShortFileSize(context, model.free)} free" + if (model.changed) " · Changed" else "",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                    )
-                }
-                if (model.entries.isEmpty()) item { EmptyNote("Empty folder") }
-                items(model.entries, key = { it.shortName }) { e ->
-                    var menu by remember { mutableStateOf(false) }
-                    ListItem(
-                        headlineContent = { Text(e.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                        supportingContent = { Text(if (e.directory) "Folder" else Formatter.formatShortFileSize(context, e.size)) },
-                        leadingContent = {
-                            Marker(if (e.directory) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.outlineVariant)
-                        },
-                        trailingContent = if (model.device.memoryStick) ({
-                            Box {
-                                IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, contentDescription = "More") }
-                                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                                    DropdownMenuItem(text = { Text("Rename") }, enabled = model.writeProtected == false && model.busy == null,
-                                        onClick = { menu = false; renaming = e })
-                                    DropdownMenuItem(text = { Text("Delete") }, enabled = model.writeProtected == false && model.busy == null,
-                                        onClick = { menu = false; deleting = e })
-                                }
-                            }
-                        }) else null,
-                        modifier = Modifier.clickableRow {
-                            if (e.directory) model.open(SdCard.joined(path, e.name))
-                            else {
-                                exporting = e
-                                saveFile.launch(e.name)
-                            }
-                        },
-                    )
-                }
-                item { Spacer(Modifier.size(16.dp)) }
-            }
-        } else {
             LazyColumn(Modifier.padding(padding).fillMaxSize()) {
                 fun action(label: String, onClick: () -> Unit) = item(key = label) {
                     ListItem(headlineContent = { Text(label) }, modifier = Modifier.clickableRow(onClick = onClick))
@@ -297,20 +212,7 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                 item(key = "sound") {
                     MachineSoundRow(model.device, model.settings, true) { model.changeSettings(it) }
                 }
-                if (has(model.device.microphone)) item(key = "microphone") {
-                    val supported = model.device.microphone
-                    val checked = model.microphone == "on" || model.microphone == "pending"
-                    ListItem(
-                        headlineContent = { Text("Microphone", color = if (supported) Color.Unspecified else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)) },
-                        supportingContent = when {
-                            model.microphone == "pending" -> ({ Text("Ready on return") })
-                            model.microphone.startsWith("off ") -> ({ Text(model.microphone.removePrefix("off ")) })
-                            else -> null
-                        },
-                        trailingContent = { Switch(checked = checked, enabled = supported, onCheckedChange = enableMicrophone) },
-                        modifier = if (supported) Modifier.clickableRow { enableMicrophone(!checked) } else Modifier,
-                    )
-                }
+                if (has(model.device.microphone)) item(key = "microphone") { MicrophoneRow(model) }
                 if (!m68k) item(key = "audioPreview") {
                     MachineAudioPreviewRow(model.device, model.settings, true, APPLIES_AT_NEXT_START) {
                         model.changeSettings(it)
@@ -414,7 +316,6 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                 action("Hard reset") { confirmHardReset = true }
                 item { Spacer(Modifier.size(16.dp)) }
             }
-        }
     }
 
     BusyDialog(model)
@@ -425,114 +326,12 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
             model.changeNetwork(mode)
         }
     }
-    if (choosingBeam) {
-        RelayDialog(
-            title = "Infrared beaming",
-            labels = listOf("Off", "Wait for a peer", "Connect to another Frond"),
-            relay = IrBeam,
-            current = model.beam.mode,
-            onDismiss = { choosingBeam = false },
-            onChoose = { mode ->
-                choosingBeam = false
-                model.changeBeam(mode)
-            },
-        )
-    }
-    if (choosingSerial) {
-        RelayDialog(
-            title = "Serial port",
-            labels = listOf("Off", "Wait for a peer", "Connect to an address"),
-            relay = SerialLink,
-            current = model.serial.mode,
-            onDismiss = { choosingSerial = false },
-            onChoose = { mode ->
-                choosingSerial = false
-                model.changeSerial(mode)
-            },
-        )
-    }
-    if (choosingUsb) {
-        RelayDialog(
-            title = "USB HotSync",
-            labels = listOf("Off", "Wait for a peer", "Connect to an address"),
-            relay = UsbLink,
-            current = model.usb.mode,
-            onDismiss = { choosingUsb = false },
-            onChoose = { mode ->
-                choosingUsb = false
-                model.changeUsb(mode)
-            },
-        )
-    }
-    if (choosingBluetooth) {
-        val current = model.bluetooth.mode
-        val last = remember { BtLink.last(context) }
-        val start = if (current != BtMode.Off) current else last ?: BtMode.Off
-        LinkDialog(
-            title = "Bluetooth",
-            labels = listOf("Off", "Host other Fronds", "Join another Frond"),
-            defaultPort = BtLink.DEFAULT_PORT,
-            choice = when (current) {
-                is BtMode.Host -> "listen"
-                is BtMode.Join -> "connect"
-                BtMode.Off -> "off"
-            },
-            port = (start as? BtMode.Host)?.port,
-            address = (last as? BtMode.Join ?: start as? BtMode.Join)?.let { NetRelay.hostPort(it.host, it.port) },
-            addresses = produceState<List<String>?>(null) { value = withContext(Dispatchers.IO) { NetRelay.addresses(context) } }.value,
-            onDismiss = { choosingBluetooth = false },
-            toMode = { choice, port, address ->
-                when (choice) {
-                    "listen" -> NetRelay.port(port)?.let { BtMode.Host(it) }
-                    "connect" -> BtLink.address(address)?.let { BtMode.Join(it.first, it.second) }
-                    else -> BtMode.Off
-                }
-            },
-            onChoose = { mode ->
-                choosingBluetooth = false
-                model.changeBluetooth(mode)
-            },
-        )
-    }
-    model.picker?.let { p ->
-        if (!model.pickerMaking && model.pickerLinking == null && !model.confirmingChange && model.busy == null) {
-            CardPickerDialog(p.title, p.choices, p.selected, onSelect = { model.pick(it) }, onNewCard = { model.pickerMaking = true },
-                onLink = { model.startPickerLink() }, onDismiss = { model.picker = null }, onOk = { model.pickerOk() })
-        }
-    }
-    if (model.pickerMaking) {
-        NewCardDialog(com.rm.frond.Cards.libraryFor(com.rm.frond.Sessions.folder(context)), model.device,
-            onDismiss = { model.pickerMaking = false }) { name, kind, size -> model.makeCard(name, kind, size) }
-    }
-    model.pickerLinking?.let { (card, options) ->
-        LinkCardsDialog(card.name, options, onDismiss = { model.pickerLinking = null }) { model.linkFromPicker(card, it) }
-    }
-    if (model.confirmingChange) {
-        AlertDialog(
-            onDismissRequest = { model.confirmChange(false) },
-            title = { Text("Eject the card?") },
-            text = { Text("Close any files open on the Palm first.") },
-            confirmButton = { TextButton(onClick = { model.confirmChange(true) }) { Text("Eject") } },
-            dismissButton = { TextButton(onClick = { model.confirmChange(false) }) { Text("Cancel") } },
-        )
-    }
-    if (confirmEject || confirmFiles) {
-        val files = confirmFiles
-        AlertDialog(
-            onDismissRequest = { confirmEject = false; confirmFiles = false },
-            title = { Text(if (files && model.device.memoryStick) "Open Memory Stick files?" else "Eject the card?") },
-            text = { Text(if (files && model.device.memoryStick) "Close files on the Palm first; changes are saved immediately."
-                else if (files) "Close any files open on the Palm first. Frond saves a recovery session before the exchange." else "Close any files open on the Palm first.") },
-            confirmButton = {
-                TextButton(onClick = {
-                    confirmEject = false
-                    confirmFiles = false
-                    if (files) model.openFiles() else model.job("Ejecting", "Couldn't eject the card") { it.eject() }
-                }) { Text(if (files && model.device.memoryStick) "Open" else "Eject") }
-            },
-            dismissButton = { TextButton(onClick = { confirmEject = false; confirmFiles = false }) { Text("Cancel") } },
-        )
-    }
+    if (choosingBeam) LinkChoiceDialog(LinkKind.BEAM, model) { choosingBeam = false }
+    if (choosingSerial) LinkChoiceDialog(LinkKind.SERIAL, model) { choosingSerial = false }
+    if (choosingUsb) LinkChoiceDialog(LinkKind.USB, model) { choosingUsb = false }
+    if (choosingBluetooth) LinkChoiceDialog(LinkKind.BLUETOOTH, model) { choosingBluetooth = false }
+    CardPickerDialogs(model)
+    if (confirmEject || confirmFiles) CardEjectDialog(model, confirmFiles) { confirmEject = false; confirmFiles = false }
     if (confirmReset) {
         ResetDialog(model.device, onDismiss = { confirmReset = false }) { confirmReset = false; model.reset() }
     }
@@ -541,18 +340,6 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
             confirmHardReset = false
             model.hardReset(saveFirst)
         }
-    }
-    if (model.askingLeave) {
-        AlertDialog(
-            onDismissRequest = { model.askingLeave = false },
-            title = { Text("Insert the changed card?") },
-            confirmButton = {
-                TextButton(onClick = { model.askingLeave = false; model.insertEdited() }) { Text("Insert") }
-            },
-            dismissButton = {
-                TextButton(onClick = { model.askingLeave = false; model.discard() }) { Text("Discard changes") }
-            },
-        )
     }
     model.naming?.let { what ->
         DatabaseNameDialog(
@@ -569,43 +356,6 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                     saveZip.launch("$name.zip")
                 }
             },
-        )
-    }
-    renaming?.let { entry ->
-        var name by remember(entry) { mutableStateOf(entry.name) }
-        AlertDialog(
-            onDismissRequest = { renaming = null },
-            title = { Text("Rename card entry") },
-            text = { OutlinedTextField(name, { name = it }, singleLine = true, modifier = Modifier.fillMaxWidth()) },
-            confirmButton = { TextButton(onClick = { renaming = null; model.renameEntry(entry, name) }) { Text("Rename") } },
-            dismissButton = { TextButton(onClick = { renaming = null }) { Text("Cancel") } },
-        )
-    }
-    deleting?.let { entry ->
-        AlertDialog(
-            onDismissRequest = { deleting = null },
-            title = { Text("Delete ${entry.name}?") },
-            confirmButton = { TextButton(onClick = { deleting = null; model.deleteEntry(entry) }) { Text("Delete") } },
-            dismissButton = { TextButton(onClick = { deleting = null }) { Text("Cancel") } },
-        )
-    }
-    if (naming) {
-        var name by remember { mutableStateOf("") }
-        AlertDialog(
-            onDismissRequest = { naming = false },
-            title = { Text("New folder") },
-            text = {
-                val focus = remember { FocusRequester() }
-                OutlinedTextField(name, { name = it }, singleLine = true, modifier = Modifier.fillMaxWidth().focusRequester(focus))
-                LaunchedEffect(Unit) { focus.requestFocus() }
-            },
-            confirmButton = {
-                TextButton(enabled = name.isNotBlank(), onClick = {
-                    naming = false
-                    model.makeFolder(name)
-                }) { Text("Make") }
-            },
-            dismissButton = { TextButton(onClick = { naming = false }) { Text("Cancel") } },
         )
     }
 }
@@ -654,7 +404,7 @@ private fun DatabaseNameDialog(
     )
 }
 
-private fun relayText(s: NetRelay.Status): String = when (s.phase) {
+internal fun relayText(s: NetRelay.Status): String = when (s.phase) {
     NetRelay.Phase.OFF -> s.error?.let { "Off. $it" } ?: "Off"
     NetRelay.Phase.WAITING -> "Waiting for a peer on port ${(s.mode as? BeamMode.Listen)?.port}"
     NetRelay.Phase.CONNECTING -> "Connecting to ${(s.mode as? BeamMode.Connect)?.let { NetRelay.hostPort(it.host, it.port) }}"
@@ -662,13 +412,13 @@ private fun relayText(s: NetRelay.Status): String = when (s.phase) {
     NetRelay.Phase.DISCONNECTED -> s.error ?: "Disconnected"
 }
 
-private fun debuggerText(s: NetRelay.Status): String = when (s.phase) {
+internal fun debuggerText(s: NetRelay.Status): String = when (s.phase) {
     NetRelay.Phase.CONNECTED -> "gdb connected from ${s.peer ?: "the network"}"
     NetRelay.Phase.WAITING -> "Waiting for gdb on port ${(s.mode as? BeamMode.Listen)?.port}"
     else -> s.error?.let { "Off. $it" } ?: "Off"
 }
 
-private fun bluetoothText(s: BtLink.Status, radio: String?): String {
+internal fun bluetoothText(s: BtLink.Status, radio: String?): String {
     val link = when (val mode = s.mode) {
         BtMode.Off -> return s.error?.let { "Off. $it" } ?: "Off"
         is BtMode.Host -> "Hosting on port ${mode.port}" + when (s.links) {
@@ -785,4 +535,94 @@ private fun <T> LinkDialog(
         confirmButton = { TextButton(enabled = mode != null, onClick = { mode?.let(onChoose) }) { Text("OK") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
+}
+
+
+// Asks before ejecting the card, or before opening its files (which ejects it).
+@Composable
+fun CardEjectDialog(model: PeripheralsModel, files: Boolean, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (files && model.device.memoryStick) "Open Memory Stick files?" else "Eject the card?") },
+        text = { Text(if (files && model.device.memoryStick) "Close files on the Palm first; changes are saved immediately."
+            else if (files) "Close any files open on the Palm first. Frond saves a recovery session before the exchange." else "Close any files open on the Palm first.") },
+        confirmButton = {
+            TextButton(onClick = {
+                onDismiss()
+                if (files) model.openFiles() else model.job("Ejecting", "Couldn't eject the card") { it.eject() }
+            }) { Text(if (files && model.device.memoryStick) "Open" else "Eject") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+// The card picker and the dialogs it leads to: new card, link to machines, and the confirm before a change.
+@Composable
+fun CardPickerDialogs(model: PeripheralsModel) {
+    val context = LocalContext.current
+    model.picker?.let { p ->
+        if (!model.pickerMaking && model.pickerLinking == null && !model.confirmingChange && model.busy == null) {
+            CardPickerDialog(p.title, p.choices, p.selected, onSelect = { model.pick(it) }, onNewCard = { model.pickerMaking = true },
+                onLink = { model.startPickerLink() }, onDismiss = { model.picker = null }, onOk = { model.pickerOk() })
+        }
+    }
+    if (model.pickerMaking) {
+        NewCardDialog(com.rm.frond.Cards.libraryFor(com.rm.frond.Sessions.folder(context)), model.device,
+            onDismiss = { model.pickerMaking = false }) { name, kind, size -> model.makeCard(name, kind, size) }
+    }
+    model.pickerLinking?.let { (card, options) ->
+        LinkCardsDialog(card.name, options, onDismiss = { model.pickerLinking = null }) { model.linkFromPicker(card, it) }
+    }
+    if (model.confirmingChange) {
+        AlertDialog(
+            onDismissRequest = { model.confirmChange(false) },
+            title = { Text("Eject the card?") },
+            text = { Text("Close any files open on the Palm first.") },
+            confirmButton = { TextButton(onClick = { model.confirmChange(true) }) { Text("Eject") } },
+            dismissButton = { TextButton(onClick = { model.confirmChange(false) }) { Text("Cancel") } },
+        )
+    }
+}
+
+enum class LinkKind { BEAM, BLUETOOTH, SERIAL, USB }
+
+// The chooser for one of the network links: off, wait for a peer, or connect to an address.
+@Composable
+fun LinkChoiceDialog(kind: LinkKind, model: PeripheralsModel, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    when (kind) {
+        LinkKind.BEAM -> RelayDialog("Infrared beaming", listOf("Off", "Wait for a peer", "Connect to another Frond"), IrBeam,
+            model.beam.mode, onDismiss) { onDismiss(); model.changeBeam(it) }
+        LinkKind.SERIAL -> RelayDialog("Serial port", listOf("Off", "Wait for a peer", "Connect to an address"), SerialLink,
+            model.serial.mode, onDismiss) { onDismiss(); model.changeSerial(it) }
+        LinkKind.USB -> RelayDialog("USB HotSync", listOf("Off", "Wait for a peer", "Connect to an address"), UsbLink,
+            model.usb.mode, onDismiss) { onDismiss(); model.changeUsb(it) }
+        LinkKind.BLUETOOTH -> {
+            val current = model.bluetooth.mode
+            val last = remember { BtLink.last(context) }
+            val start = if (current != BtMode.Off) current else last ?: BtMode.Off
+            LinkDialog(
+                title = "Bluetooth",
+                labels = listOf("Off", "Host other Fronds", "Join another Frond"),
+                defaultPort = BtLink.DEFAULT_PORT,
+                choice = when (current) {
+                    is BtMode.Host -> "listen"
+                    is BtMode.Join -> "connect"
+                    BtMode.Off -> "off"
+                },
+                port = (start as? BtMode.Host)?.port,
+                address = (last as? BtMode.Join ?: start as? BtMode.Join)?.let { NetRelay.hostPort(it.host, it.port) },
+                addresses = produceState<List<String>?>(null) { value = withContext(Dispatchers.IO) { NetRelay.addresses(context) } }.value,
+                onDismiss = onDismiss,
+                toMode = { choice, port, address ->
+                    when (choice) {
+                        "listen" -> NetRelay.port(port)?.let { BtMode.Host(it) }
+                        "connect" -> BtLink.address(address)?.let { BtMode.Join(it.first, it.second) }
+                        else -> BtMode.Off
+                    }
+                },
+                onChoose = { onDismiss(); model.changeBluetooth(it) },
+            )
+        }
+    }
 }

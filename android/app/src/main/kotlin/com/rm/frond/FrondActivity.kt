@@ -59,6 +59,7 @@ open class FrondActivity : SDLActivity() {
     private val bar = com.rm.frond.ui.RunningBarState()
     private var barView: androidx.compose.ui.platform.ComposeView? = null
     private var barOwner: BarOwner? = null
+    private var barResults: BarResults? = null
     // The menu's model: the Peripherals screen's logic running here, on the control link.
     private var menuModel: PeripheralsModel? = null
     private var imeButtons = 0
@@ -401,7 +402,21 @@ open class FrondActivity : SDLActivity() {
     // returns. Also runs when SDL asks the core to close (the core sends a "close" event).
     // Back closes the bar's menu first, then leaves the machine.
     private fun back() {
-        if (bar.menuOpen) bar.menuOpen = false else leave()
+        if (bar.sheet != null) openSheet(null) else if (bar.menuOpen) bar.menuOpen = false else leave()
+    }
+
+    // Opens a sheet over the Palm, or closes it. The view covers the screen while one is open.
+    private fun openSheet(sheet: RunningSheets.Sheet?) {
+        if (leaving && sheet != null) return
+        bar.menuOpen = false
+        bar.sheet = sheet
+        layoutBar()
+        if (sheet != null) readMenuState()
+    }
+
+    // A Memory Stick's file view covers the Palm, so the core is told its panel is up.
+    private fun filesOpen(open: Boolean) {
+        if (runningDevice.memoryStick) link.setPanelVisible(open)
     }
 
     private fun leave() {
@@ -636,26 +651,33 @@ open class FrondActivity : SDLActivity() {
         bar.powerKey = RunningBar.powerKey(device)
         val owner = BarOwner().also { it.create() }
         barOwner = owner
+        val results = BarResults(this)
+        barResults = results
         val model = PeripheralsModel(
             ModelHost(this, owner.lifecycleScope, { runOnUiThread(it) }, {}),
-            device, null, null, link, session?.name ?: device.label,
+            device, SdCard(this, link, sessionPath, device), PalmDatabases(this, link), link, session?.name ?: device.label,
         )
         menuModel = model
         bar.device = device
         bar.model = model
         model.watchGdb()
         model.watchBeam()
+        model.watchBluetooth()
+        model.watchLinks()
         readMenuState()
         val view = androidx.compose.ui.platform.ComposeView(this).apply {
             setViewTreeLifecycleOwner(owner)
             setViewTreeViewModelStoreOwner(owner)
             setViewTreeSavedStateRegistryOwner(owner)
             setContent {
-                com.rm.frond.ui.RunningBarView(bar, com.rm.frond.ui.RunningBarActions(
-                    back = { leave() }, toggleSound = { toggleSound() }, power = { pressPower() },
-                    keyboard = { toggleKeyboard() }, show = { setBarShown(true) }, hide = { setBarShown(false) },
-                    openMenu = { openMenu() }, menuRow = { menuRow(it) },
-                ))
+                androidx.compose.runtime.CompositionLocalProvider(androidx.activity.compose.LocalActivityResultRegistryOwner provides results) {
+                    com.rm.frond.ui.RunningBarView(bar, com.rm.frond.ui.RunningBarActions(
+                        back = { leave() }, toggleSound = { toggleSound() }, power = { pressPower() },
+                        keyboard = { toggleKeyboard() }, show = { setBarShown(true) }, hide = { setBarShown(false) },
+                        openMenu = { openMenu() }, menuRow = { menuRow(it) },
+                        openSheet = { openSheet(it) }, closeSheet = { openSheet(null) }, filesOpen = { filesOpen(it) },
+                    ))
+                }
             }
         }
         barView = view
@@ -671,6 +693,7 @@ open class FrondActivity : SDLActivity() {
         model.readHold()
         model.readNetwork()
         model.readMicrophone()
+        model.readCard()
     }
 
     private fun openMenu() {
@@ -687,7 +710,7 @@ open class FrondActivity : SDLActivity() {
             RunningMenu.Id.HOLD -> model.changeHold(model.hold != true)
             RunningMenu.Id.KEYBOARD -> model.attachKeyboard(model.keyboard != true)
             RunningMenu.Id.MICROPHONE -> toggleMicrophone(model)
-            RunningMenu.Id.DISPLAY, RunningMenu.Id.CONNECTIONS -> openPanel()
+            RunningMenu.Id.DISPLAY, RunningMenu.Id.CONNECTIONS -> openSheet(RunningSheets.menuSheet(id))
             RunningMenu.Id.SCREENSHOT -> takeScreenshot()
             RunningMenu.Id.HIDE_BAR -> setBarShown(false)
             RunningMenu.Id.SAVE_COPY -> saveCopy(model)
@@ -725,6 +748,7 @@ open class FrondActivity : SDLActivity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
         @Suppress("DEPRECATION")
         super.onActivityResult(requestCode, resultCode, data)
+        if (barResults?.dispatchResult(requestCode, resultCode, data) == true) return
         if (requestCode == REQUEST_SAVE_COPY && resultCode == RESULT_OK) data?.data?.let { menuModel?.saveCopy(it) }
     }
 
@@ -767,10 +791,13 @@ open class FrondActivity : SDLActivity() {
     private fun layoutBar() {
         val view = barView ?: return
         val params = view.layoutParams as RelativeLayout.LayoutParams
-        val width = if (bar.shown) RelativeLayout.LayoutParams.MATCH_PARENT else RelativeLayout.LayoutParams.WRAP_CONTENT
-        if (params.width != width) {
+        val full = bar.shown || bar.sheet != null
+        val width = if (full) RelativeLayout.LayoutParams.MATCH_PARENT else RelativeLayout.LayoutParams.WRAP_CONTENT
+        val height = if (bar.sheet != null) RelativeLayout.LayoutParams.MATCH_PARENT else RelativeLayout.LayoutParams.WRAP_CONTENT
+        if (params.width != width || params.height != height) {
             params.width = width
-            params.addRule(RelativeLayout.CENTER_HORIZONTAL, if (bar.shown) 0 else -1)
+            params.height = height
+            params.addRule(RelativeLayout.CENTER_HORIZONTAL, if (full) 0 else -1)
             view.layoutParams = params
         }
         syncCorner()
