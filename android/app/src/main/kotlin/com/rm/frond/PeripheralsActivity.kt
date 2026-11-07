@@ -331,9 +331,32 @@ class PeripheralsModel(
         }
     }
 
-    fun install(uri: android.net.Uri) = palm("Installing", "Couldn't install") { d ->
-        val result = d.install(uri)
-        activity.runOnUiThread { note = result }
+    // Installs the picked files one after the other, in the order picked; a failure doesn't stop
+    // the rest. One busy state for the batch, and one alert naming what failed.
+    fun install(uris: List<android.net.Uri>) {
+        val d = databases ?: return
+        if (uris.isEmpty() || busy != null || waiting()) return
+        busy = "Installing"
+        activity.lifecycleScope.launch {
+            var last = ""
+            val result = withContext(Dispatchers.IO) {
+                InstallBatch.run(uris, { displayName(it) ?: "A file" }, { n, total ->
+                    if (total > 1) activity.runOnUiThread { busy = "Installing $n of $total" }
+                }) { last = d.install(it) }
+            }
+            busy = null
+            val summary = result.summary()
+            if (summary != null) alert = "Couldn't install" to summary
+            else note = if (uris.size == 1) last else "${uris.size} applications installed"
+        }
+    }
+
+    private fun displayName(uri: android.net.Uri): String? = try {
+        activity.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+            if (c.moveToFirst()) c.getString(0) else null
+        }
+    } catch (e: Exception) {
+        null
     }
 
     // Asks for a name at once and fills the list of RAM databases in when the core has read it.
