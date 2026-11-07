@@ -107,8 +107,8 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
             model.note = "Card image exported"
         }
     }
-    val pickApp = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) model.install(uri)
+    val pickApp = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        model.install(uris)
     }
     // The database to export once a document is picked; null exports all RAM databases.
     var exportName by rememberSaveable { mutableStateOf<String?>(null) }

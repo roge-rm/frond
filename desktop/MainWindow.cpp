@@ -140,8 +140,8 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     apps->addWidget(exportAll, 1, 0); apps->addWidget(exportOne, 1, 1);
     layout->addLayout(apps);
     connect(install, &QPushButton::clicked, this, [this] {
-        const auto path = QFileDialog::getOpenFileName(this, tr("Install application"), {}, tr("Palm databases (*.prc *.pdb);;All files (*)"));
-        if (!path.isEmpty()) send("install", QFileInfo(path).absoluteFilePath());
+        const auto paths = QFileDialog::getOpenFileNames(this, tr("Install application"), {}, tr("Palm databases (*.prc *.pdb);;All files (*)"));
+        installFiles(paths);
     });
     connect(launchApp, &QPushButton::clicked, this, [this] {
         bool ok;
@@ -480,6 +480,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         log->moveCursor(QTextCursor::End); log->insertPlainText(text);
     });
     connect(&client, &DesktopClient::error, this, [this](const QString& message) {
+        installQueue.clear(); installTotal = 0; installFailed.clear(); installHint = 0;
         // The end of the emulator log, since the log button goes away when the core stops.
         auto lines = log->toPlainText().split('\n');
         while (!lines.isEmpty() && lines.last().trimmed().isEmpty()) lines.removeLast();
@@ -503,6 +504,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (cardProgress) { cardProgress->hide(); cardProgress->deleteLater(); cardProgress = nullptr; }
         holdKnown = holdOn = false;
         microphoneArmed = false; microphoneState->clear();
+        installQueue.clear(); installTotal = 0; installFailed.clear(); installHint = 0;
         busy = false; stopping = false; hardResetAfterSave = false; cardPresent = cardInserted = false; runningDevice = frondFirmware::Device::tx;
         copyLock.reset(); savingPath.clear();
         frondSessions::removeStaging(copyStaging); copyStaging.clear(); pendingCopy.clear();
@@ -544,6 +546,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     connect(&client, &DesktopClient::result, this, [this](const QString& command, bool ok, const QString& code, const QString& message) {
         if (cardProgress) { cardProgress->hide(); cardProgress->deleteLater(); cardProgress = nullptr; }
         busy = false; forceButton->hide(); refresh();
+        if (command == "install" && installTotal > 0 && installResult(ok, code, message)) return;
         if (memoryStickFiles && QStringList({"ms-files", "ms-get", "ms-put", "ms-mkdir", "ms-delete", "ms-rename"}).contains(command)) return;
         if (!ok && cardMove.stage != CardMove::None) { cardMoveFailed(command, message); return; }
         if (!ok && exchangeStage != ExchangeStage::None) { exchangeResult(false, message); return; }
@@ -1501,6 +1504,51 @@ bool MainWindow::confirmReplace(const QString& dest) {
     if (!existing) return true;
     return QMessageBox::question(this, tr("Replace"), tr("Replace the session %1?").arg(QFileInfo(dest).fileName()),
                                  QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) == QMessageBox::Yes;
+}
+void MainWindow::installFiles(const QStringList& paths) {
+    if (paths.isEmpty() || busy || installTotal > 0) return;
+    if (paths.size() == 1) { send("install", QFileInfo(paths.first()).absoluteFilePath()); return; }
+    installQueue.clear(); installFailed.clear(); installHint = 0;
+    for (const auto& path : paths) installQueue << QFileInfo(path).absoluteFilePath();
+    installTotal = installQueue.size();
+    while (installTotal > 0 && !installNext()) {}
+}
+// Sends the next file; false when it couldn't be sent (counted as failed), true once one is in
+// flight or the batch has ended.
+bool MainWindow::installNext() {
+    if (installQueue.isEmpty()) return true;
+    installCurrent = installQueue.takeFirst();
+    const int number = installTotal - installQueue.size();
+    if (send("install", installCurrent)) {
+        statusBar()->showMessage(tr("Installing %1 of %2…").arg(number).arg(installTotal));
+        return true;
+    }
+    installFailed << QFileInfo(installCurrent).fileName() + ": " + tr("Couldn't send it to the emulator.");
+    if (!installQueue.isEmpty()) return false;
+    installTotal = 0;
+    failure(installFailed.join('\n'));
+    installFailed.clear();
+    return true;
+}
+// Takes a batch install's reply. True when it is dealt with: more files follow, or the summary
+// was shown. False lets the usual handling run (cancelled, or the window is closing).
+bool MainWindow::installResult(bool ok, const QString& code, const QString& message) {
+    if (!ok && (code == "cancelled" || stopping)) { installQueue.clear(); installTotal = 0; return false; }
+    if (!ok) {
+        installFailed << QFileInfo(installCurrent).fileName() + ": " + message;
+        if (code == "not-ready") ++installHint;
+    }
+    while (!installQueue.isEmpty()) {
+        if (installNext()) return true;
+    }
+    if (installTotal == 0) return true;
+    const auto failed = installFailed;
+    const int hint = installHint, total = installTotal;
+    installTotal = 0; installFailed.clear(); installHint = 0;
+    if (failed.isEmpty()) return false;
+    statusBar()->showMessage(tr("Installed %1 of %2.").arg(total - failed.size()).arg(total));
+    failure(failed.join('\n') + (hint ? tr("\n\nWait for Palm OS to finish its current activity, then try again.") : QString()));
+    return true;
 }
 bool MainWindow::send(const QString& command, const QString& argument) {
     if (!client.request(command, argument)) return false;

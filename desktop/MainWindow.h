@@ -38,6 +38,9 @@ class MainWindow : public QMainWindow {
     void openSession(const QString& path, bool launch = false);
     // Copies a session file into the managed folder. Returns an error message, or empty.
     QString importSession(const QString& path);
+    // Installs the files on the running device one after the other, in order. A failure doesn't
+    // stop the rest; the failures are listed together at the end.
+    void installFiles(const QStringList& paths);
  protected:
     void closeEvent(QCloseEvent* event) override;
  private:
@@ -73,6 +76,8 @@ class MainWindow : public QMainWindow {
     void endExchange();
     QString sessionFile() const;
     bool send(const QString& command, const QString& argument = {});
+    bool installNext();
+    bool installResult(bool ok, const QString& code, const QString& message);
     QString serialArgument() const;
     void showSerial(const QString& state);
     void loadSerialSettings();
@@ -145,6 +150,9 @@ class MainWindow : public QMainWindow {
     std::unique_ptr<SdExchange> exchange;
     QDialog* exchangeDialog{nullptr};
     QDialog* memoryStickFiles{nullptr};
+    QStringList installQueue, installFailed;  // files waiting, and "name: reason" for those that failed
+    int installTotal{0}, installHint{0};
+    QString installCurrent;
     QProgressDialog* cardProgress{nullptr};  // shown while an SD create, import or export runs
     QPointer<QMessageBox> failureBox;  // the error showing now; later errors are added to it
     QString exchangeBackup;

@@ -309,6 +309,33 @@ for line in s.makefile('rb'):
     core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
     return core.fileName();
 }
+// Answers like a core, logs each install argument to <where>/installs in order, and fails files
+// whose name starts with "bad".
+static QString fakeInstallCore(const QString& where) {
+    QFile core(where + "/install-core");
+    core.open(QIODevice::WriteOnly);
+    core.write(R"PY(#!/usr/bin/python3
+import os,pathlib,socket,sys
+log=pathlib.Path(sys.argv[0]).parent/'installs'
+s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+for line in s.makefile('rb'):
+    i,cmd,arg=line.rstrip(b'\n').split(b'\t')
+    if cmd==b'install':
+        name=bytes.fromhex(arg.decode()).decode()
+        with log.open('a') as f: f.write(name+'\n')
+        if pathlib.Path(name).name.startswith('die') and not log.with_name('died').exists():
+            log.with_name('died').write_text('x'); os._exit(1)
+        if pathlib.Path(name).name.startswith('bad'):
+            s.sendall(i+b'\terror\tinstall\t'+b'Not a Palm database.'.hex().encode()+b'\n'); continue
+    message={b'keyboard-state':b'detached',b'network-state':b'disabled',b'sd-state':b'inserted'}.get(cmd,b'done')
+    s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
+    if cmd==b'quit': break
+)PY");
+    core.close();
+    core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+    return core.fileName();
+}
 static QString argsOf(const QString& machineDir) {
     QFile f(machineDir + '/' + QFileInfo(machineDir).fileName() + ".frond.args");
     return f.open(QIODevice::ReadOnly) ? QString::fromUtf8(f.readAll()) : QString();
@@ -4124,6 +4151,64 @@ for line in s.makefile('rb'):
         slot = frondCards::readSlot(a);
         QVERIFY(slot.card.isEmpty() && slot.link == card.id && slot.swap);
         QVERIFY(onlyCard().machine.isEmpty());
+    }
+    // Several files install one after the other in the order given; a failure doesn't stop the rest
+    // and the failures come back in one message.
+    void installSeveral() {
+        cardsReset();
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QTemporaryDir files;
+        const auto core = fakeInstallCore(files.path());
+        const auto machine = cardsMachine("Palm TX", false);
+        MainWindow window(core);
+        window.show();
+        window.openSession(machine + "/Palm TX.frond", true);
+        QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("installApp")->isEnabled(), 20000);
+        const auto log = files.path() + "/installs";
+        const auto read = [&] { QFile f(log); return f.open(QIODevice::ReadOnly) ? QString::fromUtf8(f.readAll()).split('\n', Qt::SkipEmptyParts) : QStringList(); };
+        window.installFiles({"/x/b.prc", "/x/a.prc", "/x/c.pdb"});
+        QTRY_COMPARE_WITH_TIMEOUT(read(), QStringList({"/x/b.prc", "/x/a.prc", "/x/c.pdb"}), 5000);
+        QTRY_VERIFY(window.findChild<QPushButton*>("installApp")->isEnabled());
+        QVERIFY(!window.findChild<QMessageBox*>());
+        QFile::remove(log);
+        window.installFiles({"/x/one.prc", "/x/bad1.prc", "/x/two.prc", "/x/bad2.pdb", "/x/three.prc"});
+        QTRY_COMPARE_WITH_TIMEOUT(read().size(), 5, 5000);
+        QCOMPARE(read(), QStringList({"/x/one.prc", "/x/bad1.prc", "/x/two.prc", "/x/bad2.pdb", "/x/three.prc"}));
+        QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QMessageBox*>() && window.findChild<QMessageBox*>()->isVisible(), 5000);
+        const auto text = window.findChild<QMessageBox*>()->text();
+        QVERIFY(text.contains("bad1.prc: Not a Palm database.") && text.contains("bad2.pdb: Not a Palm database."));
+        QVERIFY(!text.contains("one.prc") && !text.contains("three.prc"));
+        window.findChild<QMessageBox*>()->close();
+        window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 10000);
+        QDir(managedFolder()).removeRecursively();
+        QSettings().clear();
+    }
+    // The core dying partway through a batch ends the batch: installing works again after a restart.
+    void installCoreDies() {
+        cardsReset();
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QTemporaryDir files;
+        const auto core = fakeInstallCore(files.path());
+        const auto machine = cardsMachine("Palm TX", false);
+        MainWindow window(core);
+        window.show();
+        window.openSession(machine + "/Palm TX.frond", true);
+        QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("installApp")->isEnabled(), 20000);
+        const auto log = files.path() + "/installs";
+        const auto read = [&] { QFile f(log); return f.open(QIODevice::ReadOnly) ? QString::fromUtf8(f.readAll()).split('\n', Qt::SkipEmptyParts) : QStringList(); };
+        window.installFiles({"/x/a.prc", "/x/die.prc", "/x/b.prc"});
+        QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(files.path() + "/died"), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(!window.findChild<QPushButton*>("stop")->isEnabled(), 10000);
+        for (auto* box : window.findChildren<QMessageBox*>()) box->close();
+        QFile::remove(log);
+        window.openSession(machine + "/Palm TX.frond", true);
+        QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("installApp")->isEnabled(), 20000);
+        window.installFiles({"/x/c.prc", "/x/d.prc"});
+        QTRY_COMPARE_WITH_TIMEOUT(read(), QStringList({"/x/c.prc", "/x/d.prc"}), 5000);
+        for (auto* box : window.findChildren<QMessageBox*>()) box->close();
+        window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 10000);
+        QDir(managedFolder()).removeRecursively();
+        QSettings().clear();
     }
     // Two machines linked to one card take turns in the window, with a fake core: each takes it at
     // start with --card-swap and its identity, and gives it back after its final save.
