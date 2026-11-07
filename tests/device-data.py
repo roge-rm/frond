@@ -130,8 +130,10 @@ class DeviceDataTest(unittest.TestCase):
         spec = importlib.util.spec_from_file_location('frond_arm_install_inventory', ROOT / 'tests/frond-arm-install.py')
         refresh = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(refresh)
-        self.assertEqual(refresh.DEVICES, tuple(name for name in palm_boot.FRONTEND_DEVICES if name in palm_boot.DEVICES))
+        self.assertEqual(refresh.DEVICES, tuple(name for name in palm_boot.FRONTEND_DEVICES if name in palm_boot.DEVICES) +
+                         tuple(refresh.VARIANTS))
         self.assertIn('palm-e2-franken', refresh.DEVICES)
+        self.assertIn('palm-e2-denvfs', refresh.DEVICES)
         self.assertNotIn('palm-iiix', refresh.DEVICES)
         for name in ('palm-e2', 'palm-e2-franken', 'palm-zire-72', 'sony-clie-tg50'):
             core = Mock()
