@@ -468,10 +468,10 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             tr("With the Palm window focused and the infrared keyboard detached:\n\n"
                "Arrow keys: five-way navigation\nEnter: centre select\n"
                "F1: Home\nF2: Calendar\nF3: Contacts\nF4: Web\n"
-               "On the Tungsten E2, F1 to F4 are Calendar, Contacts, Tasks and Note Pad.\n"
+               "On the Tungsten E2 and E3, F1 to F4 are Calendar, Contacts, Tasks and Note Pad.\n"
                "On the Zire 72, F1 to F4 are Calendar, Contacts, Music and Camera, and F5 is the side voice button.\n"
                "On the Sony CLIÉ TG50, F1 to F4 are Date Book, Address, To Do and Memo Pad, F5 is the voice button, F6 is Home, and left and right Alt are Blue and Red.\n"
-               "Escape: Power (sleep and wake are experimental)\n\n"
+               "Escape: Power, on devices with a power key in the button bar, except the de-NVFS E2\n\n"
                "Palm OS button assignments may change what the application buttons do."));
     });
     help->addAction(tr("&About Frond"), this, [this] {

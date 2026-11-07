@@ -51,6 +51,11 @@ SMOKE = {
     'palm-e2-franken': {'nor': PALM.parent / 'CloudpilotEmu/CloudPilot-Tungsten-E3v2.rom',
                          'nand': None, 'setup': 'e3_setup', 'app': 'Date Book',
                          'taps': [(100, 100)], 'area': (0, 0, 320, 320)},
+    # The E2 de-NVFS image: palm-e2 with the 6 MiB NOR named by FROND_TEST_E2_DENVFS_NOR; without it, skipped.
+    'palm-e2-denvfs': {'device': 'palm-e2', 'nor': Path(os.environ['FROND_TEST_E2_DENVFS_NOR']).expanduser()
+                       if os.environ.get('FROND_TEST_E2_DENVFS_NOR') else None,
+                       'nand': None, 'setup': 'e2_denvfs_setup', 'app': 'Date Book',
+                       'taps': [(100, 100)], 'area': (0, 0, 320, 320), 'optional': True},
     'palm-zire-72': {'nor': 'Zire-72/Palm-Zire72-nor.bin', 'nand': None, 'setup': 'zire_setup',
                      'app': 'Calculator', 'taps': [(60, 200)], 'area': (0, 0, 320, 320),
                      'reminder': 'zire_reminder'},
@@ -65,6 +70,12 @@ SD_MIB = 32
 
 class Fail(Exception):
     pass
+
+
+def required(device):
+    """True when an optional device's FROND_REQUIRE_* switch is set, so a missing session fails."""
+    return device == 'palm-e2-franken' and os.environ.get('FROND_REQUIRE_E3') == '1' or \
+        device == 'palm-e2-denvfs' and os.environ.get('FROND_REQUIRE_E2_DENVFS') == '1'
 
 
 def need(condition, message):
@@ -92,9 +103,9 @@ class Run:
         listener.listen(1)
         cfg = SMOKE[device]
         if session:
-            boot = [str(session)] + (['--device', device] if device != 'palm-tx' else [])
+            boot = [str(session)] + (['--device', cfg.get('device', device)] if device != 'palm-tx' else [])
         else:
-            boot = ['--device', device, str(PALM / cfg['nor'])] + (['--nand', str(PALM / cfg['nand'])] if cfg['nand'] else [])
+            boot = ['--device', cfg.get('device', device), str(PALM / cfg['nor'])] + (['--nand', str(PALM / cfg['nand'])] if cfg['nand'] else [])
         env = dict(os.environ, SDL_VIDEODRIVER='dummy', SDL_AUDIODRIVER='dummy')
         # Fast compiles in sync mode, so a run repeats; FROND_JIT_SYNC=0 tries the compile thread.
         env.setdefault('FROND_JIT_SYNC', '1')
@@ -246,10 +257,12 @@ def session_path(device):
 
 
 def missing(device, action):
+    cfg = SMOKE[device]
     if action != 'sessions':
         return None
-    cfg = SMOKE[device]
-    if not os.environ.get('FROND_DEVICE_IMAGES'):
+    if cfg.get('optional') and not cfg['nor']:
+        return 'set FROND_TEST_E2_DENVFS_NOR to the 6 MiB E2 de-NVFS NOR'
+    if not os.environ.get('FROND_DEVICE_IMAGES') and not cfg.get('optional'):
         return 'set FROND_DEVICE_IMAGES to the firmware folder (deviceimages/palm)'
     for name in (cfg['nor'], cfg['nand']):
         if name and not (PALM / name).is_file():
@@ -393,7 +406,7 @@ def main():
     p.add_argument('devices', nargs='*', choices=list(SMOKE))
     args = p.parse_args()
     for device in SMOKE:
-        need(device in DEVICES, f'{device} is not in tools/palm_boot.py')
+        need(SMOKE[device].get('device', device) in DEVICES, f'{device} is not in tools/palm_boot.py')
     need(CORE.is_file(), 'build the core first: make')
     OUT.mkdir(parents=True, exist_ok=True)
     OUT.chmod(0o700)
@@ -402,7 +415,9 @@ def main():
         started = time.monotonic()
         reason = missing(device, args.action)
         if reason:
-            print(f'SKIP {device}: {reason}')
+            print(f'SKIPPED {device}: {reason}')
+            if required(device):
+                failed.append(device)
             continue
         try:
             if args.action == 'sessions':
@@ -410,7 +425,9 @@ def main():
                 print(f'ok   {device}: build/smoke/machines/{device}/ ({time.monotonic() - started:.0f} s)', flush=True)
                 continue
             if not session_path(device).exists():
-                print(f'SKIP {device}: no ready session, make it with: make smoke-sessions')
+                print(f'SKIPPED {device}: no ready session, make it with: make smoke-sessions')
+                if required(device):
+                    failed.append(device)
                 continue
             cfg = SMOKE[device]
             if cfg.get('media', 'sd') == 'sd' or cfg.get('audio', 'sndstream') == 'sndstream':
