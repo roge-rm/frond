@@ -50,12 +50,13 @@ SMOKE = {
                 'setup': 'e2_setup', 'app': 'Date Book', 'taps': [(100, 100)], 'area': (0, 0, 320, 320)},
     'palm-e2-franken': {'nor': PALM.parent / 'CloudpilotEmu/CloudPilot-Tungsten-E3v2.rom',
                          'nand': None, 'setup': 'e3_setup', 'app': 'Date Book',
-                         'taps': [(100, 100)], 'area': (0, 0, 320, 320)},
+                         'taps': [(31, 306)], 'area': (0, 0, 320, 320)},
+    # The E3 and the E2 de-NVFS image open Date Book in its empty Agenda view; the tap picks Day view.
     # The E2 de-NVFS image: palm-e2 with the 6 MiB NOR named by FROND_TEST_E2_DENVFS_NOR; without it, skipped.
     'palm-e2-denvfs': {'device': 'palm-e2', 'nor': Path(os.environ['FROND_TEST_E2_DENVFS_NOR']).expanduser()
                        if os.environ.get('FROND_TEST_E2_DENVFS_NOR') else None,
                        'nand': None, 'setup': 'e2_denvfs_setup', 'app': 'Date Book',
-                       'taps': [(100, 100)], 'area': (0, 0, 320, 320), 'optional': True},
+                       'taps': [(31, 306)], 'area': (0, 0, 320, 320), 'optional': True},
     'palm-zire-72': {'nor': 'Zire-72/Palm-Zire72-nor.bin', 'nand': None, 'setup': 'zire_setup',
                      'app': 'Calculator', 'taps': [(60, 200)], 'area': (0, 0, 320, 320),
                      'reminder': 'zire_reminder'},
