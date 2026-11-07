@@ -46,20 +46,18 @@ data class Device internal constructor(
     val microphone: Boolean = false,
     // DragonBall devices run in libmain68k.so (Frond68kActivity), the others in libmain.so (FrondActivity).
     val runs68k: Boolean = false,
+    val hotSyncButton: Boolean = false,
 ) {
     // The real Zire 72 has no serial port, so it's left out of the list rather than greyed.
     val serialAbsent: Boolean get() = id == "palm-zire-72"
-    // The connector's HotSync button: the IIIx cradle, the T|X and the E2.
-    val hotSyncButton: Boolean get() = serialPort && (runs68k || id == "palm-tx" || id == "palm-e2")
     val cardSupported: Boolean get() = sdSlot || memoryStick
     val cardLabel: String get() = if (storageSlot == "memory-stick") "Memory Stick" else "SD card"
     val hasNand: Boolean get() = nandSize > 0
     // What the firmware file is called: a 68k device takes one ROM file.
     val firmwareLabel: String get() = if (runs68k) "ROM image" else "NOR image"
     val fastAudio: Boolean get() = fastAudioNorMd5 != null
-    // Low-latency audio: the T|X, E2 and Zire 72 preview on qualified firmware, otherwise the queue
-    // limits only (--low-latency-queue), which the TG50 always uses.
-    val lowLatencyAudio: Boolean get() = sound && (fastAudio || id == "sony-clie-tg50")
+    // ARM devices use the preview on qualified firmware, otherwise the queue limits only.
+    val lowLatencyAudio: Boolean get() = sound && !runs68k
     val coreFlags: List<String> get() = listOf("--device", id)
     // New SD card sizes in MiB, 32 MB to the device's largest card. "2 GB" is 1886 MiB like a real 2 GB card.
     val sdSizes: List<Int> get() = if (!sdSlot) emptyList() else SD_SIZES.filter { (it.toLong() shl 20) in sdMin..sdMax }

@@ -1,0 +1,219 @@
+diff --git a/src/common/device_profile5.h b/src/common/device_profile5.h
+--- a/src/common/device_profile5.h
++++ b/src/common/device_profile5.h
+@@ -101,10 +101,14 @@
+       "up|down|left|right|centre|app1|app2|app3|app4|home|menu|power", 27, 351, 27, 405, false, true, false,
+       "2a9faf69b43ba590cfb9ba78e4eef11c", "wallpaper-upper"}},
+     // The E2 board with a patched E3-style ROM.
+-    {deviceTypeFrankenE2, "palm-e2-franken", "FrankenE2 / Tungsten E3", DeviceCohort5::patchedE2,
+-     DeviceSupport5::inheritedUnverified, DeviceDetect5::cardHeader, deviceCompanyPalm5,
+-     0x446d4752 /* DmGR */, DeviceBoard5::pxa255E2, DeviceArt::none, {},
+-     0, 34603008, 16u << 20, 32u << 20, DisplayMode::mode_320x480, 1u << 6, false},
++    {deviceTypeFrankenE2, "palm-e2-franken", "Tungsten E3", DeviceCohort5::patchedE2,
++     DeviceSupport5::experimentalDesktop, DeviceDetect5::cardHeader, deviceCompanyPalm5,
++     0x446d4752 /* DmGR */, DeviceBoard5::pxa255E2, DeviceArt::e2,
++     {false, true, true, true, false, true, true, true},
++     8u << 20, 34603008, 16u << 20, 32u << 20, DisplayMode::mode_320x480, 1u << 6, false,
++     DeviceNorLayout5::headerOffset, 0x20000, 0, true, 512, 1024u << 20,
++     {true, "e3", 320, 480, 0, 80, "Calendar|Contacts|Tasks|Note Pad",
++      "up|down|left|right|centre|app1|app2|app3|app4|home|menu", 20, 466, 88, 466, false, true, false, "", "e3-stock"}},
+     {deviceTypePV, "repalm", "rePalm paravirtualized", DeviceCohort5::paravirtual,
+      DeviceSupport5::inheritedUnverified, DeviceDetect5::cardHeader, 0, 0x50765076 /* PvPv */,
+      DeviceBoard5::paravirtual, DeviceArt::none, {},
+@@ -160,6 +164,19 @@
+     return nullptr;
+ }
+ 
++// Shared board hardware, including variants with their own ROM patches and display geometry.
++inline bool deviceProfileIsE2Board5(int32_t deviceType) {
++    const auto* profile = deviceProfile5(deviceType);
++    return profile && profile->board == DeviceBoard5::pxa255E2;
++}
++
++// The cradle or connector has a separate HotSync button on these boards.
++inline bool deviceProfileHasHotSyncButton5(int32_t deviceType) {
++    const auto* profile = deviceProfile5(deviceType);
++    return profile && (profile->board == DeviceBoard5::pxa255E2 ||
++                       profile->board == DeviceBoard5::pxa270Tx || profile->board == DeviceBoard5::ez328);
++}
++
+ // Any table entry, reserved names included; nullptr for an unknown name.
+ inline const DeviceProfile5* deviceProfileNamed5(const char* name) {
+     if (!name) return nullptr;
+@@ -324,8 +341,8 @@
+ 
+ enum class DeviceFirmwareError5 { none, unknownDevice, norSize, explicitNand, nandSize, norLayout };
+ 
+-// E2 NOR: 128 KiB boot block, then the PalmCard header that maps the 8 MiB part.
+-// Fresh firmware only: E2 sessions from earlier builds may use another layout.
++// E2-board NOR: 128 KiB boot block, then the PalmCard header that maps the 8 MiB part.
++// Fresh firmware only: sessions from earlier builds may use another layout.
+ inline constexpr size_t e2NorHeaderOffset5 = 0x20000;
+ 
+ // Zire 72 NOR: a small card at 0x0 and a big card at 0x20000 running to the end of the part.
+@@ -347,7 +364,7 @@
+     int32_t deviceType, size_t norSize, size_t nandSize, bool fromSession, bool explicitNand) {
+     const auto* profile = deviceProfile5(deviceType);
+     if (!profile) return DeviceFirmwareError5::unknownDevice;
+-    // E2 sessions saved before the 8 MiB check may hold another NOR size; they still load.
++    // Legacy sessions saved before size checks may hold another NOR size; they still load.
+     const bool norSizeChecked = profile->norSize && !(fromSession && profile->legacySessionNor);
+     if (norSize == 0 || (norSizeChecked && norSize != profile->norSize))
+         return DeviceFirmwareError5::norSize;
+diff --git a/src/uarm/native/DeviceControls.h b/src/uarm/native/DeviceControls.h
+--- a/src/uarm/native/DeviceControls.h
++++ b/src/uarm/native/DeviceControls.h
+@@ -453,7 +453,11 @@
+         default: return none;
+     }
+ }
+-inline const DeviceSilkscreen& deviceSilkscreen(DeviceType5 device) {return deviceSilkscreen(deviceArt(device));}
++inline const DeviceSilkscreen& deviceSilkscreen(DeviceType5 device) {
++    const auto* profile = deviceProfile5(device);
++    return deviceSilkscreen(profile && profile->frontend.width > 0 && !profile->frontend.silkscreenHeight
++                                ? DeviceArt::none : deviceArt(device));
++}
+ // Draws the silkscreen at scale (device pixels per LCD pixel) into a new texture the caller owns.
+ SDL_Texture* createDeviceSilkscreen(SDL_Renderer* renderer, const DeviceSilkscreen& silkscreen, float scale);
+ #endif
+diff --git a/src/uarm/native/SdlEventHandler.cpp b/src/uarm/native/SdlEventHandler.cpp
+--- a/src/uarm/native/SdlEventHandler.cpp
++++ b/src/uarm/native/SdlEventHandler.cpp
+@@ -155,6 +155,12 @@
+                     break;
+                 }
+                 enum KeyId key = mapKey(event.key.keysym.sym);
++                if (key == keyIdPower) {
++                    const auto* profile = deviceProfile5(soc->GetDeviceType());
++                    if (profile && profile->frontend.available &&
++                        ("|" + std::string(profile->frontend.buttons) + "|").find("|power|") == std::string::npos)
++                        break;
++                }
+                 if (key && !hardKeys[key]) {
+                     hardKeys[key]=true;
+                     if (pointerKey!=key && !builtInHolds[key]) soc->KeyDown(key);
+diff --git a/src/uarm/native/main.cpp b/src/uarm/native/main.cpp
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -404,7 +404,7 @@
+         if (options.device) {
+             const auto* profile = deviceProfileNamed5(options.device->c_str());
+             if (!profile) {
+-                cerr << "unknown device " << *options.device << "; use palm-tx or palm-e2" << endl;
++                cerr << "unknown device profile " << *options.device << endl;
+                 return false;
+             }
+             if (profile->deviceType == deviceTypeInvalid) {
+@@ -442,7 +442,7 @@
+         }
+         const bool isTx = deviceType == DeviceType5::deviceTypeTX;
+         // The desktop passes saved serial settings; unsupported devices skip them.
+-        if (options.desktopSocket && !isTx && deviceType != deviceTypeE2 && deviceType != deviceTypeTG50) {
++        if (options.desktopSocket && !isTx && !deviceProfileIsE2Board5(deviceType) && deviceType != deviceTypeTG50) {
+             serialConfig = HostSerial::Config{};
+ 
+         }
+@@ -748,7 +748,7 @@
+         HostSerial serial;
+         commandContext.serial = &serial;
+         const auto& capabilities = deviceProfile5(deviceType)->capabilities;
+-        if (soc->GetDeviceType() == DeviceType5::deviceTypeTX || soc->GetDeviceType() == DeviceType5::deviceTypeE2 ||
++        if (soc->GetDeviceType() == DeviceType5::deviceTypeTX || deviceProfileIsE2Board5(soc->GetDeviceType()) ||
+             soc->GetDeviceType() == DeviceType5::deviceTypeTG50) {
+             commandContext.serialUart = static_cast<SocPXA*>(soc)->GetSerialUart();
+             commandContext.serialRoute = static_cast<SocPXA*>(soc)->GetSerialRoute();
+@@ -1238,7 +1238,7 @@
+     program.add_argument("--nand", "-n").help("NAND rom file").metavar("<nand file>");
+ 
+     program.add_argument("--device")
+-        .help("device for raw firmware, palm-tx or palm-e2; the E2 is also found from its NOR header")
++        .help("device profile name for raw firmware; detected from firmware when omitted")
+         .metavar("<name>");
+ 
+     program.add_argument("--run-for")
+diff --git a/src/uarm/uarm/soc_PXA.cpp b/src/uarm/uarm/soc_PXA.cpp
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -280,8 +280,8 @@
+     if (socRev == 2) sp.kpc = kpc;
+     irUart = deviceType == deviceTypeTG50 ? ffUart : stUart;
+     // The E2's FFUART is its serial port (the T|X's runs paced as a PXA27x); a host endpoint needs the paced model.
+-    if (deviceType == DeviceType5::deviceTypeE2) pxaUartSetPacing(ffUart, true);
+-    if (deviceType==DeviceType5::deviceTypeTX || deviceType==DeviceType5::deviceTypeE2 ||
++    if (deviceProfileIsE2Board5(deviceType)) pxaUartSetPacing(ffUart, true);
++    if (deviceType==DeviceType5::deviceTypeTX || deviceProfileIsE2Board5(deviceType) ||
+         deviceType==DeviceType5::deviceTypeZire72 || deviceType==deviceTypeTG50) {
+         pxaUartSetPacing(irUart,true);
+         pxaUartSetModeObserver(irUart,RefreshIrConfiguration,this);
+@@ -355,7 +355,7 @@
+     return deviceProfile5(deviceGetType(dev))->frontend.holdSupported;
+ }
+ bool SocPXA::PressHotSync() {
+-    if (GetDeviceType() != deviceTypeTX && GetDeviceType() != deviceTypeE2) return false;
++    if (!deviceProfileHasHotSyncButton5(GetDeviceType())) return false;
+     if (jammedKey != keyInvalid) return false;
+     // Long enough for the E2 ROM to see it (150 ms is missed, 300 ms works) and short of the 5 s the E2 FIQ watchdog allows.
+     JamKey(keyIdHotSync, 500);
+@@ -642,7 +642,7 @@
+ // USB cable detect: Linux palmtx.h TX GPIO13 and palmte2.h E2 GPIO35 are active low; the Zire's
+ // GPIO15 is active high (palmz72.c palm27x_udc_init(15, 95, 0)).
+ static int UsbDetectPin(DeviceType5 type) {
+-    return type==deviceTypeTX ? 13 : type==deviceTypeE2 ? 35 : type==deviceTypeZire72 ? 15 : -1;
++    return type==deviceTypeTX ? 13 : deviceProfileIsE2Board5(type) ? 35 : type==deviceTypeZire72 ? 15 : -1;
+ }
+ 
+ bool SocPXA::SetUsbTestCable(bool connected) {
+@@ -1334,7 +1334,7 @@
+ bool SocPXA::SetIrHostHooks(const IrHostHooks* hooks) {
+     if (hooks) {
+         if (!hooks->context || !hooks->read || !hooks->write || !hooks->pending || !hooks->replaced ||
+-            (GetDeviceType()!=deviceTypeTX && GetDeviceType()!=deviceTypeE2 &&
++            (GetDeviceType()!=deviceTypeTX && !deviceProfileIsE2Board5(GetDeviceType()) &&
+              GetDeviceType()!=deviceTypeZire72 && GetDeviceType()!=deviceTypeTG50) ||
+             irHostHooks.context || serialHostHooks.context || irKeyboard.Attached() || irKeyboard.Pending() ||
+             pxaUartIrState(irUart).sending) return false;
+@@ -1345,13 +1345,13 @@
+ 
+ void SocPXA::AttachKeyboard(bool value) {
+     if (value && (IrHostAttached() || serialHostHooks.context)) return;
+-    if (GetDeviceType()!=DeviceType5::deviceTypeTX && GetDeviceType()!=DeviceType5::deviceTypeE2 &&
++    if (GetDeviceType()!=DeviceType5::deviceTypeTX && !deviceProfileIsE2Board5(GetDeviceType()) &&
+         GetDeviceType()!=DeviceType5::deviceTypeZire72 && GetDeviceType()!=deviceTypeTG50) return;
+     irKeyboard.Attach(value);
+     RescheduleCB(this,RESCHEDULE_TASK_UART);
+ }
+ bool SocPXA::KeyboardKey(uint8_t code,bool down) {
+-    const bool accepted=(GetDeviceType()==DeviceType5::deviceTypeTX || GetDeviceType()==DeviceType5::deviceTypeE2 ||
++    const bool accepted=(GetDeviceType()==DeviceType5::deviceTypeTX || deviceProfileIsE2Board5(GetDeviceType()) ||
+                          GetDeviceType()==DeviceType5::deviceTypeZire72 || GetDeviceType()==deviceTypeTG50) &&
+         (!down || (pxaUartIrReceiveEnabled(irUart) &&
+                    (GetDeviceType()!=deviceTypeTG50 || IrPowerEnabled()))) && irKeyboard.Key(code,down);
+diff --git a/src/uarm/uarm/soc_PXA.h b/src/uarm/uarm/soc_PXA.h
+--- a/src/uarm/uarm/soc_PXA.h
++++ b/src/uarm/uarm/soc_PXA.h
+@@ -8,6 +8,7 @@
+ #include <string>
+ #include "fast_audio.h"
+ #include "device_type5.h"
++#include "device_profile5.h"
+ #include "memory_buffer.h"
+ #include "SoC.h"
+ #include "soc_generic.h"
+@@ -108,7 +109,7 @@
+     PxaUart* GetIrUart() { return irUart; }
+ 
+     // Model access for development probes; creates no host connection.
+-    PxaUart* GetSerialUart() { return (GetDeviceType() == deviceTypeTX || GetDeviceType() == deviceTypeE2 || GetDeviceType() == deviceTypeTG50) ? ffUart : nullptr; }
++    PxaUart* GetSerialUart() { return (GetDeviceType() == deviceTypeTX || deviceProfileIsE2Board5(GetDeviceType()) || GetDeviceType() == deviceTypeTG50) ? ffUart : nullptr; }
+     // Pulls the connector's HotSync line low for a moment; false where there is none or a key is already being held.
+     bool PressHotSync();
+ 
+@@ -123,7 +124,7 @@
+     }
+     UsbDevicePort GetUsbPort() {
+         if(GetDeviceType()==deviceTypeTX || GetDeviceType()==deviceTypeZire72)return UsbDevicePort(udc2);
+-        if(GetDeviceType()==deviceTypeE2)return UsbDevicePort(udc1);
++        if(deviceProfileIsE2Board5(GetDeviceType()))return UsbDevicePort(udc1);
+         if(GetDeviceType()==deviceTypeTG50)return UsbDevicePort(udc1,
+             [](void* context) { return static_cast<SocPXA*>(context)->UsbBoardListening(); }, this);
+         return {};

@@ -1236,3 +1236,13 @@ test-link-protocol: build/link/libfrondlink.a
 .PHONY: test-link-irda-cores
 test-link-irda-cores: out/frond desktop
 	python3 tests/link-irda-cores.py
+
+.PHONY: test-e2-family-peripherals
+test: test-e2-family-peripherals
+test-e2-family-peripherals: out/frond
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/e2-family-peripherals-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/e2-family-peripherals.cpp @build/e2-family-peripherals-core.rsp \
+		build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-e2-family-peripherals
+	timeout 120 ./build/test-e2-family-peripherals

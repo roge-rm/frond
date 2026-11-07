@@ -8,6 +8,8 @@ Core changes go in a new patch after the last one in `patches/`, or in an unpush
 
 ## Steps
 
+First check the existing profiles, board dispatch and ROM detection. A device may already have an inherited model with no frontend. Keep its fixed name and extend that model. If it shares a board with a supported device, start from that board's working paths and list the differences in firmware, display, controls and peripherals.
+
 1. Reserve the fixed name and write the profile (below). Leave `frontend.available` false.
 2. Add detection and rejection, and check wrong files are refused before a machine is made.
 3. Add the board and get a cold boot, setup and launcher, then soft and hard reset.
@@ -19,6 +21,8 @@ Core changes go in a new patch after the last one in `patches/`, or in an unpush
 9. Add a smoke entry and a setup recipe.
 
 Hardware that exists on the real device but isn't done yet stays in the profile and is greyed out in the frontends. Whether a peripheral is present and whether Frond supports it are separate fields, so don't work out one from the other.
+
+For a shared board, audit checks for the existing device type and name in the core, frontends and tools. Share hardware selection through the board model, and use capabilities for supported host interfaces. Keep ROM signatures, firmware-specific patches and qualified audio hooks separate. Test the existing device too when changing a shared path.
 
 ## Profile fields
 
@@ -54,7 +58,7 @@ A `DeviceProfile5` has these fields. The name is what sessions, settings, the co
 | `homeX`, `homeY`, `menuX`, `menuY` | Pen taps for Home and Menu where they are silkscreen or status bar taps. -1 for none |
 | `rotatingStatusBar` | Menu is a status bar tap that depends on rotation |
 | `sdSlot`, `camera`, `storageSlot`, `memoryStick` | A slot or camera is present. `storageSlot` is `none`, `sd` or `memoryStick`, and the SD slot implies `sd` |
-| `fastAudioNorMd5` | MD5 of the NOR the low-latency audio path was checked on. Empty for none |
+| `fastAudioNorMd5` | MD5 of the NOR qualified for audio preview. Empty for the queue setting only |
 | `homeKey` | SDL keycode of a physical Home key. 0 for none |
 | `holdPresent`, `holdSupported` | A Hold switch is present, and it works |
 
@@ -85,7 +89,13 @@ A `DeviceProfile5` has these fields. The name is what sessions, settings, the co
 
 The IIIx also has `cpuHz` (16,580,608, the speed setting's Original) and `runs68k`.
 
-`palm-e2-franken` and `repalm` are inherited models with no frontend. `palm-m515` is a reserved name with button bar art and no board, so the core refuses it.
+`repalm` is an inherited model with no frontend. `palm-m515` is a reserved name with button bar art and no board, so the core refuses it.
+
+### E2 variants
+
+`palm-e2-franken` identifies the Tungsten E3 by company `Palm` and HAL `DmGR`. It shares the E2's `pxa255E2` board, NAND, SD controller, codec, GPIO keys, Bluetooth model and button bar. Its 320x480 display includes a guest-drawn input area, with no physical silkscreen.
+
+The E3 profile enables both frontends and requires an 8 MiB NOR with its header at 0x20000 for new imports. RAM is 16 or 32 MiB, with 32 MiB as the default. Status-bar Home (20,466) and Menu (88,466) work with the input area expanded or collapsed. The modified ROM's NVFS and no-sleep handling stay separate from the shared hardware paths. The E3 has no Power control. Low-latency audio can use the shorter queue without ROM hooks. The qualified E3 preview shares the E2 HAL layout and uses the ARM stream-start verifier, with the Thumb queue hooks disabled. Its fingerprint is separate from the E2's.
 
 ## Detection and rejection
 
@@ -203,16 +213,16 @@ The bar should be a recognisable approximation of the real one, not a close copy
 
 ## Frontend fields and generated data
 
-Desktop menus, firmware detection and the core read the profile table directly. Android and the Python tools read exports of the same table, and the export only includes profiles with `frontend.available` set. After changing a profile:
+Desktop menus, firmware detection and the core read the profile table directly. Android and the Python tools read exports of the same table. JSON includes every profile; the generated Android inventory only includes profiles with `frontend.available` set. After changing a profile:
 
 ```
 make prepare
 make generate-device-data
 ```
 
-This rewrites `tools/device-profiles.json` and `android/app/src/main/kotlin/com/rm/frond/DeviceInventory.kt` from `./out/frond-device-profiles` (`make device-profiles`, which never opens firmware). Commit both with the profile patch. `make check-device-data` and the Android `preBuild` task fail if they're stale. The JSON also carries `runner_eligible`, which is true when the profile has a board. Python runners use that, so inventory-only and art-only profiles stay out of them.
+This compiles `tools/device-profiles.cpp` into `build/device-data/export` and rewrites `tools/device-profiles.json` and `android/app/src/main/kotlin/com/rm/frond/DeviceInventory.kt`. The exporter never opens firmware. Commit both generated files with the profile patch. `make check-device-data` and the Android `preBuild` task fail if they're stale. The JSON also carries `runner_eligible` for ARM boards and `runs_68k` for the separate 68k runner. Python runners use these fields, so inventory-only and art-only profiles stay out of them.
 
-Android's `Device.kt` has the fields in Kotlin. The `TX`, `E2` and `ZIRE72` names there and the desktop `Device` enum names are compatibility aliases, so a new device only needs its profile. Enable `available` once the board has passed the generic firmware run and the desktop and Android import, launch, controls, settings and session workflows work. A core screenshot alone doesn't show the frontend works.
+Android's `Device.kt` has the fields in Kotlin. The `TX`, `E2` and `ZIRE72` names there and the desktop `Device` enum names are compatibility aliases. HotSync button presence comes from `deviceProfileHasHotSyncButton5`, exported as `hot_sync_button` and generated as Android's `hotSyncButton`. Check remaining device-specific actions in both frontends. Enable `available` once the board has passed the generic firmware run and the desktop and Android import, launch, controls, settings and session workflows work. A core screenshot alone doesn't show the frontend works.
 
 ## Smoke and setup recipe
 

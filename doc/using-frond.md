@@ -15,6 +15,8 @@ Each Palm you run is a machine on the Devices list (Home on Android). Frond work
 
 On Linux each machine is a folder, `~/.local/share/frond/sessions/<name>/`, with the session (`<name>.frond`), its settings (`<name>.frond.settings.json`), a lock file and the card files (`sd.frondsd`, `ms.frondms` or `ms.frondmsp`). A machine that was never saved has a `<name>.frond.new` marker instead of the session. Export writes the same folder, so keep the settings with it when you move it. Android keeps the same folders in the app's storage. A machine is locked while it's open, so two windows can't overwrite it.
 
+The Tungsten E3 uses the modified 8 MiB ROM on the E2 board, with 32 MiB RAM by default. NAND is optional. Its saved device name stays `palm-e2-franken`. The 320×480 screen includes Palm OS's input area and status bar, with no extra silkscreen below it. Home and Menu use the status bar whether the input area is open or closed. Frond keeps sleep disabled for this ROM, so the E3 has no Power control.
+
 A session has your firmware, installed apps and personal data in it. Keep it to yourself.
 
 ## Running a machine
@@ -57,13 +59,13 @@ Set these when you add a machine, or in Edit settings while it's stopped. On And
 
 Android also has Settings in the home menu: Orientation (follow the phone, portrait or landscape), the gdb server and its port, and the controller keys.
 
-The button bar and the silkscreens of the E2, Zire 72 and TG50 are drawn at the chosen size.
+The button bars and silkscreens are drawn at the chosen size. The E3 uses the E2 button bar, with its input area drawn by Palm OS.
 
 ### Low-latency audio
 
-Off by default. On the T|X, E2 and Zire 72 with their qualified firmware, it plays one open 44.1 kHz stereo stream with less delay, for music apps like SunVox, and goes back to normal audio when your computer or phone can't keep up, which can pause the sound for a moment. Anything else, like several streams or other formats, uses normal audio.
+Off by default. On the T|X, E2, E3 and Zire 72 with their qualified firmware, it plays one open 44.1 kHz stereo stream with less delay, for music apps like SunVox, and goes back to normal audio when your computer or phone can't keep up, which can pause the sound for a moment. Anything else, like several streams or other formats, uses normal audio.
 
-On the TG50, and on a T|X, E2 or Zire 72 with other firmware, it keeps a shorter audio queue while sound is playing, which takes about 35 ms off the delay. Set it before starting the machine. It's greyed out where the device isn't supported. Diagnostics are in [performance.md](performance.md).
+On the TG50, and on a T|X, E2, E3 or Zire 72 with other firmware, it keeps a shorter audio queue while sound is playing. Set it before starting the machine. Diagnostics are in [performance.md](performance.md).
 
 ## Buttons, keys and controllers
 
@@ -71,7 +73,7 @@ Click or tap the buttons under the screen and the silkscreen areas. Click and ho
 
 Keys, with the infrared keyboard detached:
 
-| Key | T\|X | E2 | Zire 72 | TG50 | IIIx |
+| Key | T\|X | E2 / E3 | Zire 72 | TG50 | IIIx |
 |---|---|---|---|---|---|
 | Arrows, Enter | five-way, select | five-way, select | five-way, select | scroll rocker | scroll rocker (up and down) |
 | F1 | Home | Calendar | Calendar | Date Book | Date Book |
@@ -80,7 +82,7 @@ Keys, with the infrared keyboard detached:
 | F4 | Web | Note Pad | Camera | Memo Pad | Memo Pad |
 | F5 | | | Voice button (hold to record) | Voice button | |
 | F6 | | | | Home | |
-| Escape | Power | Power | Power | Power | Power |
+| Escape | Power | E2: Power | Power | Power | Power |
 
 On the TG50 type with the computer keyboard, left Alt is Blue and right Alt is Red. Its jog wheel, jog press and Back are on the side tab. Help → Hardware Keyboard Controls lists the same keys.
 
@@ -92,9 +94,9 @@ On Android a game controller presses the Palm's buttons. The d-pad and left stic
 
 ## Storage cards
 
-The T|X, E2 and Zire 72 take an SD card, the TG50 a Memory Stick. A card is its own thing, kept in the Cards drawer, and sits in one machine at a time. Delete a machine and its card stays in the drawer.
+The T|X, E2, E3 and Zire 72 take an SD card, the TG50 a Memory Stick. A card is its own thing, kept in the Cards drawer, and sits in one machine at a time. Delete a machine and its card stays in the drawer.
 
-| | T\|X | E2 | Zire 72 | TG50 |
+| | T\|X | E2 / E3 | Zire 72 | TG50 |
 |---|---|---|---|---|
 | Card | SD | SD | SD | Memory Stick, Memory Stick Pro |
 | New card sizes | 32 MB to 2 GB | 32 MB to 1 GB | 32 MB to 2 GB | 4 to 128 MB, Pro 256 MB to 2 GB |
@@ -168,7 +170,7 @@ The mode is saved. Live connections close when the machine resumes, so reload or
 
 ### Serial port
 
-The serial port (the T|X and E2 connector, the TG50 and the IIIx cradle) goes to a PTY or a TCP port. Open the path with `screen` or `minicom`, or connect to the port, for example `nc 127.0.0.1 5023`. Peers get CTS, DSR and DCD while connected, RTS flow control is honoured, and bytes sent with no peer are dropped. On Android use Wait for a peer or Connect to an address, then `link-pty.py PHONE:5033 --link /tmp/palm-serial` on a computer.
+The serial port (the T|X, E2 and E3 connector, the TG50 and the IIIx cradle) goes to a PTY or a TCP port. Open the path with `screen` or `minicom`, or connect to the port, for example `nc 127.0.0.1 5023`. Peers get CTS, DSR and DCD while connected, RTS flow control is honoured, and bytes sent with no peer are dropped. On Android use Wait for a peer or Connect to an address, then `link-pty.py PHONE:5033 --link /tmp/palm-serial` on a computer.
 
 Serial HotSync works on the E2 with pilot-link (`pilot-xfer -p /dev/pts/N -l`): put the serial port on a PTY, press HotSync on the running page (Linux) or in the menu (Android) on the E2 or T|X, which pulls the connector's HotSync line low for half a second like the cradle button. The Palm starts HotSync and pilot-link answers. The T|X's serial HotSync isn't tested.
 

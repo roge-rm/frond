@@ -77,6 +77,8 @@ python3 tools/analyze-input-latency.py out/keyboard.log out/keyboard.raw --y 151
 
 ## Audio diagnostics
 
+The qualified E3 preview uses the shared E2 HAL layout and its own ARM Sound Manager stream-start signature. It previews at HAL write, with the Thumb queue hooks off. Other E3 firmware uses the shorter queue without the preview.
+
 Native audio backpressure pauses the whole guest (timers, DMA and codec) until SDL drains its queue, while input, drawing and the control socket keep running. The frontend runs 120 Hz slices, and with `--fast-audio` it pauses above 6 host periods of queued frames and resumes below 4 (3072 and 2048 at the desktop's 512). `--low-latency-queue` does the same without the preview, only while non-silent frames were queued in the last 100 ms, so a device that queues silence all the time keeps the normal limits until something plays.
 
 - `tools/check-native-audio.py SESSION NEWDIR --seconds N [--continuous] [--mips N]` records PCM, SDL underruns, host load and the governor's `budget_mips_samples`. `--mips` is a ceiling, and the governor can still go lower under load, so compare the samples before blaming a change.

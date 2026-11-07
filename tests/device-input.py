@@ -105,7 +105,7 @@ class DeviceInputTest(unittest.TestCase):
             for option in ('--fast-audio', '--experimental-fast-audio'):
                 with self.subTest(args=args, option=option):
                     self.rejected([*args, option],
-                                  'requires a verified TX 5.4, Tungsten E2 or Zire 72 NOR')
+                                  'requires a qualified device NOR image')
 
     def test_inventory(self):
         data = json.loads(subprocess.check_output([ROOT / 'out/frond-device-profiles']))
@@ -123,7 +123,8 @@ class DeviceInputTest(unittest.TestCase):
         self.assertEqual({p['cohort'] for p in data['profiles']},
                          {'tx-nor-nand', 'e2-nor-nand', 'patched-e2', 'paravirtual', 'zire72-nor', 'tg50-nor', 'reserved',
                           'ez68k-rom'})
-        self.assertTrue(all(p['status'] == 'inherited-unverified' for p in data['profiles'][2:4]))
+        self.assertEqual(data['profiles'][2]['status'], 'experimental-desktop')
+        self.assertEqual(data['profiles'][3]['status'], 'inherited-unverified')
         iiix = data['profiles'][6]
         self.assertEqual((iiix['name'], iiix['status'], iiix['runner_eligible'], iiix['runs_68k'], iiix['available']),
                          ('palm-iiix', 'experimental-desktop', False, True, True))
@@ -159,8 +160,32 @@ class DeviceInputTest(unittest.TestCase):
                 result = self.rejected([path, '--run-for', '1'], 'failed to restore savestate')
                 self.assertNotIn('invalid', result.stderr)
 
+    def test_e3_nor_identity_geometry_and_legacy_sessions(self):
+        def e3(size=8 << 20, at=0x20000):
+            return header(0x446d4752, size, at)
+
+        rom = self.root / 'e3'
+        for data, message in ((e3(4 << 20), 'invalid NOR size; expected 8388608 bytes'),
+                              (e3((8 << 20) + 1), 'invalid NOR size; expected 8388608 bytes'),
+                              (e3(at=0), 'invalid NOR layout'),
+                              (e3(at=0x40000), 'invalid NOR layout')):
+            rom.write_bytes(data)
+            self.rejected([rom, '--run-for', '1'], message)
+        rom.write_bytes(e3())
+        self.rejected([rom, '--device', 'palm-e2'], 'does not match ROM')
+        self.rejected([self.e2, '--device', 'palm-e2-franken'], 'does not match ROM')
+        self.rejected([rom, '--display', '320x320'], 'unsupported display mode')
+        self.rejected([rom, '--ram-size', '64'], 'unsupported RAM size')
+        self.rejected([rom, '--fast-audio'], 'requires a qualified device NOR image')
+        for index, nor in enumerate((e3(4 << 20), e3(16 << 20), e3(at=0))):
+            path = session(self.root / f'e3-old-session-{index}', 'palm-e2-franken',
+                           nor=nor, nand=34603008)
+            result = self.rejected([path, '--desktop-socket', self.root / 'unused'],
+                                   'failed to restore savestate')
+            self.assertNotIn('invalid NOR', result.stderr)
+
     def test_inherited_cohorts_cannot_use_desktop(self):
-        for hal in (0x446d4752, 0x50765076):
+        for hal in (0x50765076,):
             with self.subTest(hal=hal):
                 rom = self.root / 'inherited'
                 rom.write_bytes(header(hal))
@@ -266,7 +291,7 @@ class DeviceInputTest(unittest.TestCase):
                 reject(good, 'unsupported display mode', '--display', display)
         with self.subTest(case='fast audio'):
             for option in ('--fast-audio', '--experimental-fast-audio'):
-                reject(good, 'requires a verified TX 5.4, Tungsten E2 or Zire 72 NOR', option)
+                reject(good, 'requires a qualified device NOR image', option)
 
     def test_zire72_device_and_session_mismatches(self):
         rom = self.root / 'zire-mismatch'
@@ -314,8 +339,8 @@ class DeviceInputTest(unittest.TestCase):
                 self.rejected([path], "saved by an older Frond and can't be loaded")
 
     def test_device_option_names(self):
-        self.rejected([self.nor, '--device', 'tx'], 'unknown device tx')
-        self.rejected([self.nor, '--device', '3'], 'unknown device 3')
+        self.rejected([self.nor, '--device', 'tx'], 'unknown device profile tx')
+        self.rejected([self.nor, '--device', '3'], 'unknown device profile 3')
         self.rejected([self.nor, '--device', 'sony-clie-tg50'], 'neither a supported ROM nor a session image')
         self.rejected([self.nor], 'neither a supported ROM nor a session image')
         self.rejected([self.nor, '--device', 'palm-e2'], 'neither a supported ROM nor a session image')

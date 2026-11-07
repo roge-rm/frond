@@ -27,6 +27,32 @@ class DeviceTest {
         assertEquals(listOf("--device", "palm-zire-72"), Device.ZIRE72.coreFlags)
     }
 
+    @Test fun e3KeepsTheExistingIdentityAndUsesTheWholeScreen() {
+        val e3 = Device.byId("palm-e2-franken")!!
+        assertEquals("Tungsten E3", e3.label)
+        assertEquals(listOf("--device", "palm-e2-franken"), e3.coreFlags)
+        assertEquals(8L shl 20, e3.norSize)
+        assertEquals(34_603_008L, e3.nandSize)
+        assertFalse(e3.nandRequired)
+        assertEquals(320, e3.width)
+        assertEquals(480, e3.height)
+        assertEquals(0, e3.silkscreenHeight)
+        assertEquals(Device.E2.sdSizes, e3.sdSizes)
+        assertEquals(Device.E2.buttons.filter { it != "power" }, e3.buttons)
+        assertFalse("power" in e3.buttons)
+        assertFalse(PalmButton.POWER in PalmButton.on(e3))
+        assertTrue(e3.sound && e3.sdSlot && e3.serialPort && e3.hotSyncButton)
+        assertTrue(e3.keyboard && e3.usb && e3.infrared && e3.bluetooth)
+        assertFalse(e3.network || e3.microphone || e3.camera)
+        assertTrue(e3.fastAudio)
+        assertEquals("a79f98bddd50c61e7eb89eee46eb81bd", e3.fastAudioNorMd5)
+        assertFalse(e3.fastAudioNorMd5 == Device.E2.fastAudioNorMd5)
+        assertTrue(e3.lowLatencyAudio)
+        assertFalse(Device.byId("palm-iiix")!!.lowLatencyAudio)
+        assertFalse(e3.serialAbsent || e3.runs68k)
+        assertTrue(e3 in Device.shown)
+    }
+
     // Sizes and capabilities from the core's deviceProfiles5 entry for the Zire 72.
     @Test
     fun zireIsNorOnlyWithNoNetworkOrSerial() {
@@ -92,6 +118,20 @@ class MemoryStickSizesTest {
 
 class FastAudioQualifiedTest {
     private fun nor(content: String) = java.io.File.createTempFile("nor", ".bin").apply { writeText(content); deleteOnExit() }
+
+    @Test fun e3FingerprintSelectsPreviewAndChangedNorUsesTheQueue() {
+        val firmware = nor("synthetic E3 NOR")
+        val e3 = Device.byId("palm-e2-franken")!!.copy(fastAudioNorMd5 = Firmware.md5(firmware))
+        val settings = MachineSettings(fastAudio = true)
+        fun arguments() = settings.audioArguments(e3.lowLatencyAudio, 1024) {
+            Firmware.fastAudioQualified(e3, null, firmware)
+        }
+        assertTrue(Firmware.fastAudioQualified(e3, null, firmware))
+        assertEquals(listOf("--fast-audio", "--audio-period", "1024"), arguments())
+        firmware.appendText("changed")
+        assertFalse(Firmware.fastAudioQualified(e3, null, firmware))
+        assertEquals(listOf("--low-latency-queue", "--audio-period", "1024"), arguments())
+    }
 
     @Test
     fun otherZireNorDoesNotQualify() {

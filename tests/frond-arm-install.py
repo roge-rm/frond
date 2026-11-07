@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ARM installs as after a HotSync install, on the T|X, E2, Zire 72 and TG50 smoke sessions. An app
+"""ARM installs as after a HotSync install, on available ARM devices' smoke sessions. An app
 installed while the launcher shows appears in it at once, matching the launcher reopened by hand,
 and gets sysAppLaunchCmdSyncNotify. A PDB installed with Memo Pad in front notifies its creator app
 and Memo Pad stays; Memo Pad waits for events with no timeout, and a RAM export, the database list
@@ -32,7 +32,7 @@ PROBE = ROOT / 'build/sync68k-probe/FrondSync68k.prc'
 OTHER = ROOT / 'build/busy68k-probe/FrondBusy68k.prc'
 # The console's install replies; the command's echo holds none of them.
 REPLIES = ('installation', 'database corrupt', 'out of memory', 'db cannot', 'unable to', 'unknown error')
-DEVICES = ('palm-tx', 'palm-e2', 'palm-zire-72', 'sony-clie-tg50')
+DEVICES = tuple(name for name in palm_boot.FRONTEND_DEVICES if name in palm_boot.DEVICES)
 
 
 def build_probes(sdk):
@@ -59,6 +59,7 @@ class Device:
 
     def __init__(self, name):
         self.name = name
+        self.profile = palm_boot.DEVICES[name]
 
     def body(self, rows):
         """A frame without the title bar's clock, and on the T|X its status bar's clock too."""
@@ -85,22 +86,22 @@ class Device:
             # Favorites to Applications.
             time.sleep(2)
             core.tap(root, 140, 55)
-        elif self.name == 'sony-clie-tg50':
-            core.wait_frame(root / 'boot.png', palm_boot.tg50_launcher, 60)
+        else:
+            core.wait_frame(root / 'boot.png', palm_boot.launcher_check(self.name), 60)
         return self.still(core, root / 'before.png')
 
     def reopen(self, core, root):
         """Home by hand, as the user would."""
-        if self.name == 'palm-e2':
-            core.tap(root, 27, 351)
-        elif self.name == 'palm-zire-72':
-            core.tap(root, 23, 352)
-        elif self.name == 'palm-tx':
+        if self.name == 'palm-tx':
             core.key(root, 'home')
             time.sleep(3)
             core.tap(root, 140, 55)
-        else:
+        elif self.profile['home_key']:
             core.key(root, 'home-key')
+        elif self.profile['home_x'] >= 0:
+            core.tap(root, self.profile['home_x'], self.profile['home_y'])
+        else:
+            raise AssertionError(f'{self.name}: no Home control in profile')
 
     def still(self, core, path, seconds=20):
         """A frame once two in a row agree."""
@@ -320,7 +321,8 @@ def check(device, session, work, root):
                                  ''.join(core.lines[mark:]).strip())
         if core.process.poll() is not None:
             raise AssertionError('the core quit')
-        asleep(core, device, root)
+        if 'power' in device.profile['buttons'].split('|'):
+            asleep(core, device, root)
         if any('sync notify or launcher relaunch failed' in line for line in core.lines):
             raise AssertionError('a sync notify or relaunch failed')
     finally:

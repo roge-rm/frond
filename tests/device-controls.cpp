@@ -258,6 +258,10 @@ static void exercise(DeviceType5 device) {
                 {SDLK_RIGHT,keyIdRight}, {SDLK_UP,keyIdUp}, {SDLK_DOWN,keyIdDown},
                 {SDLK_RETURN,keyIdSelect}, {SDLK_F1,keyIdHard1}, {SDLK_F2,keyIdHard2},
                 {SDLK_F3,keyIdHard3}, {SDLK_F4,keyIdHard4}, {SDLK_F5,keyIdVoice}, {SDLK_ESCAPE,keyIdPower}}) {
+            if (palm == keyIdPower && device == deviceTypeFrankenE2) {
+                key(host,true); key(host,false); input.HandleEvents(); guest.expect({});
+                continue;
+            }
             key(host,true); input.HandleEvents(); guest.expect({{palm,true}});
             key(host,false); input.HandleEvents(); guest.expect({{palm,false}});
         }
@@ -923,7 +927,7 @@ static void tg50HostKeyboard();
 static void zireAndM515() {
     // Art comes from the device table, by internal type for built devices and by name for all.
     assert(deviceArt(deviceTypeTX)==DeviceArt::tx && deviceArt(deviceTypeE2)==DeviceArt::e2);
-    assert(deviceArt(deviceTypePV)==DeviceArt::none && deviceArt(deviceTypeFrankenE2)==DeviceArt::none);
+    assert(deviceArt(deviceTypePV)==DeviceArt::none && deviceArt(deviceTypeFrankenE2)==DeviceArt::e2);
     assert(deviceArt("palm-tx")==DeviceArt::tx && deviceArt("palm-e2")==DeviceArt::e2);
     assert(deviceArt("palm-zire-72")==DeviceArt::zire72 && deviceArt("palm-m515")==DeviceArt::m515);
     assert(deviceArt("palm-iiix")==DeviceArt::iiix && deviceArt("sony-clie-tg50")==DeviceArt::tg50);
@@ -1341,7 +1345,11 @@ int main(int argc,char** argv) {
     // E2 app keys follow the ROM: hard1-4 are Calendar, Contacts, Tasks and Note Pad, left to right.
     for(int k=0;k<4;++k)assert(e2.buttons[k].key==KeyId(keyIdHard1+k) && (k==0 || e2.buttons[k].bounds.x>e2.buttons[k-1].bounds.x));
     assert(e2.buttons[1].bounds.x+e2.buttons[1].bounds.w<e2.navigator.x && e2.buttons[2].bounds.x>e2.navigator.x+e2.navigator.w);
-    assert(deviceControls(deviceTypePV).height==0 && deviceControls(deviceTypeFrankenE2).height==0);
+    assert(deviceControls(deviceTypePV).height==0);
+    assert(&deviceControls(deviceTypeFrankenE2)==&e2);
+    for (size_t i=0;i<deviceControls(deviceTypeFrankenE2).count;++i)
+        assert(deviceControls(deviceTypeFrankenE2).buttons[i].key!=keyIdPower);
+    assert(!deviceSilkscreen(deviceTypeFrankenE2).count && !deviceSilkscreen(deviceTypeFrankenE2).height);
     // A different device may use an app key for Calendar and separate up/down buttons.
     const DeviceButton otherButtons[]={{keyIdHard1,{4,4,30,30},"Calendar",DeviceControlIcon::calendar},
                                       {keyIdUp,{40,4,30,30},"Up",DeviceControlIcon::up}};
@@ -1349,6 +1357,7 @@ int main(int argc,char** argv) {
     assert(deviceControlAt(other,160,200,50,215)==keyIdUp);
     exercise(deviceTypeTX);
     exercise(deviceTypeE2);
+    exercise(deviceTypeFrankenE2);
     exercise(deviceTypeZire72);
     zireAndM515();
     silkscreen(deviceTypeE2);

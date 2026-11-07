@@ -44,6 +44,30 @@ class DeviceDataTest(unittest.TestCase):
         self.assertIn('sdMax = 2147483648L', kotlin)
         self.assertIn('sdMax = 1073741824L', kotlin)
 
+    def test_e3_generated_capabilities_and_geometry(self):
+        profiles = {p['name']: p for p in json.loads((ROOT / 'tools/device-profiles.json').read_text())['profiles']}
+        e3 = profiles['palm-e2-franken']
+        self.assertTrue(e3['available'])
+        self.assertEqual(e3['display_name'], 'Tungsten E3')
+        self.assertEqual((e3['width'], e3['height'], e3['silkscreen_height']), (320, 480, 0))
+        self.assertEqual(e3['setup'], 'e3')
+        self.assertEqual(e3['launcher'], 'e3-stock')
+        self.assertEqual(e3['nor_bytes'], 8 << 20)
+        self.assertEqual(e3['raw_nand_bytes'], 34603008)
+        self.assertFalse(e3['explicit_raw_nand'])
+        self.assertEqual(e3['fast_audio_md5'], 'a79f98bddd50c61e7eb89eee46eb81bd')
+        self.assertNotEqual(e3['fast_audio_md5'], profiles['palm-e2']['fast_audio_md5'])
+        self.assertNotIn('power', e3['buttons'].split('|'))
+        for key in ('sound', 'serial', 'usb', 'keyboard', 'infrared', 'bluetooth', 'hot_sync_button'):
+            self.assertTrue(e3[key], key)
+        for name in ('palm-tx', 'palm-e2', 'palm-iiix'):
+            self.assertTrue(profiles[name]['hot_sync_button'], name)
+        for name in ('palm-zire-72', 'sony-clie-tg50', 'repalm'):
+            self.assertFalse(profiles[name]['hot_sync_button'], name)
+        kotlin = (ROOT / 'android/app/src/main/kotlin/com/rm/frond/DeviceInventory.kt').read_text()
+        self.assertIn('id = "palm-e2-franken"', kotlin)
+        self.assertIn('hotSyncButton = true', kotlin)
+
     def test_memory_stick_sizes(self):
         profiles = {p['name']: p for p in json.loads((ROOT / 'tools/device-profiles.json').read_text())['profiles']}
         self.assertEqual(profiles['sony-clie-tg50']['ms_sizes_mb'], [4, 8, 16, 32, 64, 128])
@@ -67,18 +91,34 @@ class DeviceDataTest(unittest.TestCase):
         spec = importlib.util.spec_from_file_location('frond_run_inventory', ROOT / 'tools/frond-run.py')
         runner = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(runner)
-        self.assertEqual(list(runner.DEVICES), ['palm-tx', 'palm-e2', 'palm-zire-72', 'sony-clie-tg50'])
+        self.assertEqual(list(runner.DEVICES), ['palm-tx', 'palm-e2', 'palm-e2-franken', 'palm-zire-72', 'sony-clie-tg50'])
         choices = next(action.choices for action in runner.parser()._actions if action.dest == 'device')
         self.assertEqual(list(choices), [name for name in palm_boot.FRONTEND_DEVICES if name not in palm_boot.DEVICES_68K])
         self.assertIn('palm-iiix', palm_boot.FRONTEND_DEVICES)
         self.assertNotIn('palm-iiix', runner.DEVICES)
-        for name in ('palm-e2-franken', 'repalm'):
+        for name in ('repalm',):
             self.assertIn(name, palm_boot.DEVICES)
             self.assertNotIn(name, runner.DEVICES)
         spec = importlib.util.spec_from_file_location('compatibility_inventory', ROOT / 'tools/app-compatibility.py')
         matrix = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(matrix)
         self.assertEqual(matrix.runner.DEVICES, runner.DEVICES)
+
+    def test_install_refresh_uses_available_arm_profiles_and_home_controls(self):
+        spec = importlib.util.spec_from_file_location('frond_arm_install_inventory', ROOT / 'tests/frond-arm-install.py')
+        refresh = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(refresh)
+        self.assertEqual(refresh.DEVICES, tuple(name for name in palm_boot.FRONTEND_DEVICES if name in palm_boot.DEVICES))
+        self.assertIn('palm-e2-franken', refresh.DEVICES)
+        self.assertNotIn('palm-iiix', refresh.DEVICES)
+        for name in ('palm-e2', 'palm-e2-franken', 'palm-zire-72', 'sony-clie-tg50'):
+            core = Mock()
+            device = refresh.Device(name)
+            device.reopen(core, ROOT)
+            if device.profile['home_key']:
+                core.key.assert_called_once_with(ROOT, 'home-key')
+            else:
+                core.tap.assert_called_once_with(ROOT, device.profile['home_x'], device.profile['home_y'])
 
     def test_staged_runner_is_independent_of_frontend(self):
         staged = dict(palm_boot.PROFILES[0], name='staged-fixture', available=False,

@@ -47,8 +47,8 @@ inline bool runs68k(Device device) { return device != Device::automatic && devic
 
 // Hardware a device doesn't have at all, which is left out rather than greyed: the Zire 72 has no serial port.
 inline bool serialAbsent(Device device) { return device == Device::zire72; }
-// The connector's HotSync button: the 68k cradle devices, the T|X and the E2.
-inline bool hasHotSyncButton(Device device) { return runs68k(device) || device == Device::tx || device == Device::e2; }
+// The connector or cradle has a separate HotSync button on these boards.
+inline bool hasHotSyncButton(Device device) { return deviceProfileHasHotSyncButton5(int(device)); }
 
 // A 68k ROM's big-endian card header, read the way frond-68k reads it before its own full check.
 inline Device68kRomInfo5 inspectRom68k(QFile& rom) {
@@ -140,8 +140,10 @@ inline QString validateFiles(Device chosen, const QString& norPath, const QStrin
     const auto& selected = profile(device);
     if (info.profile && info.profile != &selected && info.profile->deviceType != deviceTypeE2 &&
         info.profile->deviceType != deviceTypeZire72)
-        return QStringLiteral("This is a %1 NOR image. Choose %2.").arg(QString::fromUtf8(info.profile->displayName), deviceName(device));
+        return QStringLiteral("This is a %1 NOR image. Choose %1.").arg(QString::fromUtf8(info.profile->displayName));
     if (device != Device::tx && device != Device::e2 && device != Device::zire72) {
+        if (info.profile && info.profile != &selected)
+            return QStringLiteral("This is a %1 NOR image. Choose %1.").arg(QString::fromUtf8(info.profile->displayName));
         if (selected.detect == DeviceDetect5::cardHeader && info.profile != &selected)
             return QStringLiteral("This NOR image has no %1 header.").arg(deviceName(device));
         if (!info.validLayout) return QStringLiteral("This %1 NOR image has an invalid card layout.").arg(deviceName(device));

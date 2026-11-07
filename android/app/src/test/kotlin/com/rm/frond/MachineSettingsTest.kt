@@ -61,6 +61,23 @@ class MachineSettingsTest {
         }
     }
 
+    @Test fun e3SessionMetadataPreservesTheDeviceAndSettings() {
+        val e3 = Device.byId("palm-e2-franken")!!
+        val chosen = MachineSettings(sound = true, fastAudio = true)
+        val file = metadata("e3", chosen)
+        SessionMetadata.update(file) { it.put("device", e3.id) }
+        val loaded = SessionMetadata.read(file) { error("settings already saved") }
+        assertEquals(e3, Device.byId(loaded.getString("device")))
+        assertEquals(chosen, MachineSettings.from(loaded.getJSONObject("settings")))
+        assertFalse("--no-sound" in chosen.arguments(soundSupported = e3.sound))
+        val arguments = chosen.audioArguments(e3.lowLatencyAudio, 1024) {
+            Firmware.fastAudioQualified(e3, null, File(tmp.root, "missing-nor"))
+        }
+        assertEquals(listOf("--low-latency-queue", "--audio-period", "1024"), arguments)
+        assertFalse("--fast-audio" in arguments)
+        assertEquals(ControllerMap.defaults(Device.E2), ControllerMap.defaults(e3))
+    }
+
     @Test fun unsupportedSoundMutesWithoutChangingTheSavedChoice() {
         val chosen = MachineSettings(sound = true)
         assertTrue("--no-sound" in chosen.arguments(soundSupported = false))

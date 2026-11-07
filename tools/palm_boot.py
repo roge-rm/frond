@@ -56,6 +56,15 @@ def core_for(device):
     return CORE_68K if device in DEVICES_68K else CORE
 
 
+def session_file(path):
+    """The .frond inside a saved machine folder, or a lone session file."""
+    path = Path(path)
+    if path.is_dir():
+        found = [path / (path.name + '.frond'), path / 'session.frond', *sorted(path.glob('*.frond'))]
+        return next((p for p in found if p.is_file()), path / (path.name + '.frond'))
+    return path
+
+
 class Core:
     """A core process driven over its console; waits on its output and frames, not on the clock."""
 
@@ -319,6 +328,38 @@ def e2_setup(core, root):
     core.wait_frame(root / 'launcher.png', lambda rows: launcher_wallpaper(rows, 40), 60)
 
 
+def e3_launcher(rows):
+    """The E3's stock launcher above its guest-drawn input area and status bar."""
+    return rows is not None and len(rows) == 480 and stock_launcher(rows)
+
+
+def e3_digitizer_done(rows):
+    if rows is None or len(rows) != 480:
+        return False
+    # Success text, the Done outline and the blue input area's left and right panels.
+    ink = sum(max(rows[y][4*x:4*x+3]) < 80 for y in range(42, 60) for x in range(5, 120))
+    return (ink > 180 and max(rows[292][4*35:4*35+3]) < 80 and
+            all(rows[340][4*x+2] > 140 and rows[340][4*x] < 140 for x in (3, 315)))
+
+
+def e3_setup(core, root):
+    """Calibrate the E3, finish Digitizer, then use its virtual Applications button."""
+    frame = root / 'boot-frame.png'
+    rows = core.wait_frame(frame, lambda rows: calibration_target(rows, 291, 292) or
+                           e3_launcher(rows) or (rows is not None and len(rows) == 480 and date_time_prefs(rows)), 120)
+    if e3_launcher(rows):
+        return
+    if calibration_target(rows, 291, 292):
+        for number, (x, y) in enumerate(((291, 292), (27, 27), (160, 160))):
+            core.wait_frame(frame, lambda rows: calibration_target(rows, x, y), 30)
+            (root / f'calibrate-{number}.png').write_bytes(frame.read_bytes())
+            core.tap(root, x, y)
+        core.wait_frame(root / 'digitizer-done.png', e3_digitizer_done, 30)
+    core.tap(root, 35, 305)
+    core.tap(root, 32, 352)
+    core.wait_frame(root / 'launcher.png', e3_launcher, 60)
+
+
 def tx_setup(core, root):
     """Finish the TX's Date & Time form, then open the launcher with the Home key."""
     def prefs(rows):
@@ -494,7 +535,8 @@ def setup_device(device, core, root):
     return run(core, root)
 
 
-SETUP_RECIPES = {'tx': tx_setup, 'e2': e2_setup, 'zire': zire_setup, 'tg50': tg50_setup, 'iiix': iiix_setup}
+SETUP_RECIPES = {'tx': tx_setup, 'e2': e2_setup, 'e3': e3_setup,
+                 'zire': zire_setup, 'tg50': tg50_setup, 'iiix': iiix_setup}
 
 
 def launcher_check(device):
@@ -507,7 +549,7 @@ def launcher_check(device):
 
 LAUNCHER_CHECKS = {'wallpaper': launcher_wallpaper,
                    'wallpaper-upper': upper_wallpaper_launcher, 'tg50-clie': tg50_launcher,
-                   'iiix': iiix_launcher}
+                   'iiix': iiix_launcher, 'e3-stock': e3_launcher}
 
 
 def tg50_date_time_prefs(rows):
@@ -597,7 +639,7 @@ def tg50_reset(core, root, hard):
     core.tap(root, 225, 232, hold_ms=300)
     core.wait_frame(root / 'marker-monday.png', lambda rows: tg50_week_start(rows, True), 30)
     core.send(f'save-session "{root / "marked.session"}"', 'wrote session')
-    marked_hash = hashlib.sha256((root / 'marked.session').read_bytes()).hexdigest()
+    marked_hash = hashlib.sha256(session_file(root / 'marked.session').read_bytes()).hexdigest()
     tg50_home(core, root, 'marked-launcher.png')
     core.send('reset-hard' if hard else 'reset', 'Set speed mode', timeout=60)
     if hard:
@@ -615,13 +657,13 @@ def tg50_reset(core, root, hard):
     core.key(root, 'hard1', hold_ms=600)
     core.wait_frame(root / 'reset-input.png', tg50_datebook, 60)
     tg50_home(core, root, 'reset-continued.png')
-    assert hashlib.sha256((root / 'marked.session').read_bytes()).hexdigest() == marked_hash
+    assert hashlib.sha256(session_file(root / 'marked.session').read_bytes()).hexdigest() == marked_hash
     (root / 'postconditions.json').write_text(json.dumps(
         {'marker': 'Formats week start', 'before': 'Sunday', 'marked': 'Monday',
          'after': 'Sunday' if hard else 'Monday', 'new_input': 'Date Book',
          'final_screen': 'Sony launcher', 'home_hold_ms': 600,
          'marked_session_before': marked_hash,
-         'marked_session_after': hashlib.sha256((root / 'marked.session').read_bytes()).hexdigest()}, indent=2) + '\n')
+         'marked_session_after': hashlib.sha256(session_file(root / 'marked.session').read_bytes()).hexdigest()}, indent=2) + '\n')
 
 
 def iiix_reset(core, root, hard):
@@ -630,6 +672,7 @@ def iiix_reset(core, root, hard):
     the silkscreen Applications button back to the launcher."""
     marked = root / 'marked.session'
     core.send(f'save-session "{marked}"', 'wrote session')
+    marked = session_file(marked)
     marked_hash = hashlib.sha256(marked.read_bytes()).hexdigest()
     core.send('reset-hard' if hard else 'reset', 'done', timeout=60)
     if hard:
@@ -656,7 +699,72 @@ def iiix_reset(core, root, hard):
          'marked_session': marked_hash}, indent=2) + '\n')
 
 
-RESET_RECIPES = {'tg50': tg50_reset, 'iiix': iiix_reset}
+def e3_formats(rows):
+    return (rows is not None and len(rows) == 480 and
+            sum(max(rows[68][4*x:4*x+3]) < 60 for x in range(320)) > 300)
+
+
+def e3_week_start(rows, monday):
+    if not e3_formats(rows):
+        return False
+    popup = sum(max(rows[y][4*x:4*x+3]) < 80 for y in range(222, 240) for x in range(145, 242))
+    m = max(rows[204][4*178:4*178+3]) < 80
+    s = max(rows[204][4*183:4*183+3]) < 80
+    return popup < 5 and m == monday and s != monday
+
+
+def e3_open_formats(core, root):
+    core.tap(root, 150, 280)
+    # Preferences opens its category list; Formats is the second General entry.
+    core.tap(root, 60, 104)
+    core.wait_frame(root / 'formats.png', e3_formats, 30)
+
+
+def e3_erase_confirmation(rows):
+    if rows is None or len(rows) != 480:
+        return False
+    ink = lambda top, bottom: sum(max(rows[y][4*x:4*x+3]) < 80
+                                 for y in range(top, bottom) for x in range(20, 300))
+    return ink(10, 75) > 1500 and ink(250, 310) > 1500 and ink(330, 480) == 0
+
+
+def e3_reset(core, root, hard):
+    """Soft reset retains a Formats marker; hard reset erases it and repeats calibration."""
+    e3_open_formats(core, root)
+    core.wait_frame(root / 'marker-before.png', lambda rows: e3_week_start(rows, False), 30)
+    core.tap(root, 234, 211)
+    core.wait_frame(root / 'week-menu.png', lambda rows: e3_formats(rows) and
+                    sum(max(rows[y][4*x:4*x+3]) < 80 for y in range(222, 240) for x in range(145, 242)) > 200, 30)
+    core.tap(root, 225, 232)
+    core.wait_frame(root / 'marker-monday.png', lambda rows: e3_week_start(rows, True), 30)
+    machine = root / 'marked'
+    core.send(f'save-session "{machine}"', 'wrote session')
+    marked = machine / 'marked.frond'
+    marked_hash = hashlib.sha256(marked.read_bytes()).hexdigest()
+    core.tap(root, 32, 352)
+    core.wait_frame(root / 'marked-launcher.png', e3_launcher, 30)
+    core.send('reset-hard' if hard else 'reset', 'Set speed mode', timeout=60)
+    if hard:
+        core.wait_frame(root / 'reset-erase.png', e3_erase_confirmation, 120)
+        core.key(root, 'up', hold_ms=600)
+    e3_setup(core, root)
+    e3_open_formats(core, root)
+    core.wait_frame(root / 'marker-after.png', lambda rows: e3_week_start(rows, not hard), 30)
+    core.tap(root, 32, 352)
+    core.wait_frame(root / 'reset-launcher.png', e3_launcher, 30)
+    core.key(root, 'hard1', hold_ms=300)
+    core.wait_frame(root / 'reset-input.png', lambda rows: rows is not None and not e3_launcher(rows), 30)
+    core.tap(root, 32, 352)
+    core.wait_frame(root / 'reset-continued.png', e3_launcher, 30)
+    assert hashlib.sha256(marked.read_bytes()).hexdigest() == marked_hash
+    (root / 'postconditions.json').write_text(json.dumps(
+        {'marker': 'Formats week start', 'before': 'Sunday', 'marked': 'Monday',
+         'after': 'Sunday' if hard else 'Monday', 'new_input': 'Calendar',
+         'final_screen': 'stock launcher',
+         'marked_session': marked_hash}, indent=2) + '\n')
+
+
+RESET_RECIPES = {'tg50': tg50_reset, 'iiix': iiix_reset, 'e3': e3_reset}
 
 
 def reset_recipe(device):

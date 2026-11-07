@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # FROND_DEVICE_IMAGES is the firmware folder (deviceimages/palm).
 sys.path.insert(0, str(ROOT / 'tools'))
 from guest_process import run_guest
-from palm_boot import CORE, CORE_68K, DEVICES_68K, PROFILES, ROM_DEVICES, Core, launcher_check, palm_images, setup_device, reset_recipe
+from palm_boot import CORE, CORE_68K, DEVICES_68K, PROFILES, ROM_DEVICES, Core, launcher_check, palm_images, setup_device, reset_recipe, session_file
 ZIRE_NOR = palm_images() / 'Palm/Zire-72/Palm-Zire72-nor.bin'
 from guest_faults import check_diagnostics, describe, parse_contract, observed_faults
 
@@ -34,7 +34,7 @@ def core_for(device):
 
 
 def sha(path):
-    with path.open('rb') as stream:
+    with session_file(path).open('rb') as stream:
         return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
@@ -120,7 +120,7 @@ def synthetic_suite(args):
                 self.reject(self.nor, 'unsupported RAM size', '--ram-size', ram)
             for display in ('160x160', '320x480'):
                 self.reject(self.nor, 'unsupported display mode', '--display', display)
-            self.reject(self.nor, 'requires a verified', '--fast-audio')
+            self.reject(self.nor, 'requires a qualified device NOR image', '--fast-audio')
             replay = self.root / 'outside-screen.replay'
             replay.write_text('0 pen-down 160 320\n')
             self.reject(self.nor, 'invalid replay event', '--input-replay', str(replay))
@@ -154,6 +154,9 @@ def suite(args):
         spec.loader.exec_module(legacy)
         return unittest.defaultTestLoader.loadTestsFromModule(legacy)
 
+    def session_args(path):
+        return [path, '--device', args.device, '--engine', getattr(args, 'engine', 'exact')]
+
     @unittest.skipUnless(args.nor and args.nor.is_file() and core_for(args.device).is_file(),
                          'private NOR or built core missing; pass --nor')
     class DeviceRomTest(unittest.TestCase):
@@ -172,7 +175,7 @@ def suite(args):
                 (cls.root / 'expected-faults.json').write_bytes(args.fault_contract_bytes)
                 (cls.root / 'expected-faults-identity.json').write_text(json.dumps(
                     {'source': str(args.expected_faults), 'sha256': cls.contract_hash}, indent=2) + '\n')
-            cls.image = ['--device', args.device, args.nor]
+            cls.image = ['--device', args.device, args.nor, '--engine', getattr(args, 'engine', 'exact')]
             if args.nand:
                 cls.image += ['--nand', args.nand]
 
@@ -215,9 +218,9 @@ def suite(args):
                 core.send(f'save-session "{session}"', 'wrote session')
             finally:
                 self.assertEqual(core.close(), 0)
-            self.assertTrue(session.is_file())
+            self.assertTrue(session_file(session).is_file())
             session_hash = sha(session)
-            reloaded = Core([session, '--device', args.device], self.root / 'reload.log')
+            reloaded = Core(session_args(session), self.root / 'reload.log')
             try:
                 reloaded.wait_frame(self.root / 'reloaded.png', launcher_check(args.device), 60)
             finally:
@@ -248,7 +251,7 @@ def suite(args):
             root.mkdir()
             session = self.root / 'launcher.session'
             before_hash = sha(session)
-            core = Core([session, '--device', args.device], root / 'guest.log')
+            core = Core(session_args(session), root / 'guest.log')
             try:
                 core.wait_frame(root / 'before.png', launcher_check(args.device), 60)
                 reset_recipe(args.device)(core, root, hard)
@@ -267,13 +270,13 @@ def suite(args):
             # Damaged sessions loaded into a running frond-68k are refused and leave it running as it was.
             root = self.root / 'refusal'
             root.mkdir()
-            good = (self.root / 'launcher.session').read_bytes()
+            good = session_file(self.root / 'launcher.session').read_bytes()
             damaged = {'truncated': good[:-2], 'garbage': bytes(len(good)), 'empty': b''}
             # A session for another device: the same file with the name field changed.
             other = bytearray(good)
             other[8:40] = b'palm-tx'.ljust(32, b'\0')
             damaged['other-device'] = bytes(other)
-            core = Core(['--device', args.device, self.root / 'launcher.session'], root / 'guest.log')
+            core = Core(session_args(self.root / 'launcher.session'), root / 'guest.log')
             try:
                 core.wait_frame(root / 'before.png', launcher_check(args.device), 60)
                 for name, data in damaged.items():
@@ -296,7 +299,7 @@ def suite(args):
 
             def panel(rows):
                 return max(row[x] for row in rows for x in range(0, len(row), 4))  # Red of the unlit panel.
-            core = Core(['--device', args.device, self.root / 'launcher.session'], root / 'guest.log')
+            core = Core(session_args(self.root / 'launcher.session'), root / 'guest.log')
             try:
                 normal = panel(core.wait_frame(root / 'normal.png', launcher_check(args.device), 60))
                 core.send('display contrast=90', 'display:')
@@ -305,7 +308,7 @@ def suite(args):
                 core.send(f'save-session "{root / "dark.session"}"', 'wrote session')
             finally:
                 self.assertEqual(core.close(), 0)
-            core = Core(['--device', args.device, root / 'dark.session'], root / 'reload.log')
+            core = Core(session_args(root / 'dark.session'), root / 'reload.log')
             try:
                 rows = core.wait_frame(root / 'reloaded.png', launcher_check(args.device), 60)
                 self.assertEqual(panel(rows), dark)
@@ -316,7 +319,7 @@ def suite(args):
                              (ROOT / 'build/test-device-session').is_file(),
                              'pass --launcher and build device-session-probe for running-state rollback')
         def test_running_session_rollback(self):
-            result = run_guest([str(ROOT / 'build/test-device-session'), str(self.root / 'launcher.session')],
+            result = run_guest([str(ROOT / 'build/test-device-session'), str(session_file(self.root / 'launcher.session'))],
                                capture_output=True, text=True, timeout=args.boot_timeout)
             (self.root / 'rollback.log').write_text(result.stdout + result.stderr)
             if result.returncode == 77:
@@ -337,6 +340,7 @@ def main():
     parser.add_argument('--nor', '--rom', dest='nor', type=Path, help='NOR, or the ROM of a 68k device')
     parser.add_argument('--nand', type=Path)
     parser.add_argument('--sha256', help='expected NOR SHA-256 from the private inventory')
+    parser.add_argument('--engine', choices=('exact', 'fast'), default='exact')
     parser.add_argument('--launcher', action='store_true')
     parser.add_argument('--resets', action='store_true', help="run the profile recipe's measured functional resets")
     parser.add_argument('--expected-faults', type=Path,
@@ -344,6 +348,8 @@ def main():
     parser.add_argument('--boot-timeout', type=float, default=300, help='boot deadline in seconds, including waiting for a slot')
     parser.add_argument('--evidence', type=Path, help='new directory, existing evidence is refused')
     args = parser.parse_args()
+    if args.device in DEVICES_68K and args.engine == 'fast':
+        parser.error('the Fast engine is not available for 68k devices')
     if args.boot_timeout <= 0:
         parser.error('--boot-timeout must be positive')
     if args.evidence:

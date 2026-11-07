@@ -104,6 +104,52 @@ class FirmwareInputTest : public QObject {
         e2Nor(nor, 8 << 20, 0x20000, 0x446d4752);
         QVERIFY(!frondFirmware::validateFiles(Device::e2, norPath, {}).isEmpty());
     }
+    void e3Files() {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const auto e3 = frondFirmware::deviceFromId("palm-e2-franken");
+        QVERIFY(e3 != Device::automatic);
+        QCOMPARE(frondFirmware::deviceId(e3), QString("palm-e2-franken"));
+        QCOMPARE(frondFirmware::deviceName(e3), QString("Tungsten E3"));
+        const auto& profile = frondFirmware::profile(e3);
+        QCOMPARE(profile.frontend.width, uint16_t(320));
+        QCOMPARE(profile.frontend.height, uint16_t(480));
+        QCOMPARE(profile.frontend.silkscreenHeight, uint16_t(0));
+        QVERIFY(!QString::fromLatin1(profile.frontend.buttons).split('|').contains("power"));
+        const auto caps = frondFirmware::capabilities(e3);
+        QVERIFY(caps.sound && caps.serial && caps.keyboard && caps.usb && caps.infrared && caps.bluetooth);
+        QVERIFY(!caps.network && caps.fastAudio && !caps.microphone);
+        QCOMPARE(QString::fromLatin1(profile.frontend.fastAudioNorMd5), QString("a79f98bddd50c61e7eb89eee46eb81bd"));
+        QVERIFY(frondFirmware::hasHotSyncButton(e3));
+        for (auto device : {Device::tx, Device::e2, frondFirmware::deviceFromId("palm-iiix")})
+            QVERIFY(frondFirmware::hasHotSyncButton(device));
+        QVERIFY(!frondFirmware::hasHotSyncButton(Device::automatic));
+        QVERIFY(!frondFirmware::hasHotSyncButton(frondFirmware::deviceFromId("sony-clie-tg50")));
+        const auto norPath = dir.filePath("synthetic-e3"), nandPath = dir.filePath("synthetic-nand");
+        QFile nor(norPath), nand(nandPath);
+        QVERIFY(nor.open(QIODevice::ReadWrite)); QVERIFY(nand.open(QIODevice::ReadWrite));
+        e2Nor(nor, 8 << 20, 0x20000, 0x446d4752);
+        QCOMPARE(frondFirmware::detectDevice(norPath), e3);
+        Device resolved = Device::automatic;
+        QVERIFY(frondFirmware::validateFiles(Device::automatic, norPath, {}, &resolved).isEmpty());
+        QCOMPARE(resolved, e3);
+        QVERIFY(frondFirmware::validateFiles(e3, norPath, {}).isEmpty());
+        QVERIFY(nand.resize(34603008));
+        QVERIFY(frondFirmware::validateFiles(e3, norPath, nandPath).isEmpty());
+        QVERIFY(nand.resize(34603008 - 528));
+        QVERIFY(!frondFirmware::validateFiles(e3, norPath, nandPath).isEmpty());
+        QVERIFY(!frondFirmware::validateFiles(e3, norPath, dir.filePath("missing")).isEmpty());
+        QVERIFY(frondFirmware::validateFiles(Device::tx, norPath, {}).contains("Choose Tungsten E3"));
+        QVERIFY(!frondFirmware::validateFiles(Device::e2, norPath, {}).isEmpty());
+        e2Nor(nor, 16 << 20, 0x20000, 0x446d4752);
+        QVERIFY(!frondFirmware::validateFiles(e3, norPath, {}).isEmpty());
+        e2Nor(nor, 8 << 20, 0x40000, 0x446d4752);
+        QVERIFY(frondFirmware::validateFiles(e3, norPath, {}).contains("invalid card layout"));
+        e2Nor(nor, 8 << 20, 0x20000);
+        QVERIFY(frondFirmware::validateFiles(e3, norPath, {}).contains("Choose Tungsten E2"));
+        QVERIFY(nor.resize(0)); QVERIFY(nor.resize(8 << 20));
+        QVERIFY(!frondFirmware::validateFiles(e3, norPath, {}).isEmpty());
+    }
     void zire72Files() {
         QTemporaryDir dir;
         QVERIFY(dir.isValid());
