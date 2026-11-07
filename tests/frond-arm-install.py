@@ -89,6 +89,12 @@ class Device:
             # Favorites to Applications.
             time.sleep(2)
             core.tap(root, 140, 55)
+        elif self.name == 'palm-e2-denvfs':
+            # A loaded session shows the launcher's empty Card view; Home goes back to the list.
+            time.sleep(3)
+            if not palm_boot.e2_denvfs_launcher(core.frame(root / 'boot.png')):
+                core.tap(root, 27, 352)
+            core.wait_frame(root / 'boot.png', palm_boot.e2_denvfs_launcher, 60)
         else:
             core.wait_frame(root / 'boot.png', palm_boot.launcher_check(self.core, self.variant), 60)
         return self.still(core, root / 'before.png')
