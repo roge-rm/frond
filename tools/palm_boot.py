@@ -328,6 +328,52 @@ def e2_setup(core, root):
     core.wait_frame(root / 'launcher.png', lambda rows: launcher_wallpaper(rows, 40), 60)
 
 
+def e2_denvfs_target(rows, x, y):
+    """The de-NVFS Digitizer's four black triangles, with white gaps between them."""
+    if rows is None or len(rows) != 320:
+        return False
+    def dark(dx, dy):
+        return max(rows[y+dy][4*(x+dx):4*(x+dx)+3]) < 80
+    return (all(dark(dx, dy) for dx in (-10, 10) for dy in (-10, 10)) and
+            not dark(0, -10) and not dark(-10, 0))
+
+
+def e2_denvfs_prefs(rows):
+    return (rows is not None and len(rows) == 320 and
+            sum(tuple(rows[12][4*x:4*x+3]) == (49, 0, 156) for x in range(10, 130)) >= 50 and
+            sum(max(rows[60][4*x:4*x+3]) < 180 for x in range(310)) >= 300)
+
+
+def e2_denvfs_launcher(rows):
+    """The purple status strip, category selector and coloured four-row icon grid."""
+    if rows is None or len(rows) != 320:
+        return False
+    purple = sum(tuple(rows[26][4*x:4*x+3]) == (49, 0, 156) for x in range(312))
+    category = sum(max(rows[y][4*x:4*x+3]) < 80 for y in range(6, 20) for x in range(272, 316))
+    cells = sum(sum(max(rows[y][4*x:4*x+3]) - min(rows[y][4*x:4*x+3]) > 50
+                    for y in range(top, top+40, 2) for x in range(left, left+70, 2)) > 30
+                for left in (16, 120, 220) for top in (40, 110, 182, 254))
+    return purple > 280 and category > 10 and cells >= 8
+
+
+def e2_denvfs_setup(core, root):
+    """Calibrate the RAM-backed E2 firmware, then leave Preferences with physical Home."""
+    frame = root / 'boot-frame.png'
+    rows = core.wait_frame(frame, lambda rows: e2_denvfs_target(rows, 20, 20) or
+                           e2_denvfs_prefs(rows) or e2_denvfs_launcher(rows) or
+                           (rows is not None and len(rows) == 320 and date_time_prefs(rows)), 120)
+    if e2_denvfs_launcher(rows):
+        return
+    if e2_denvfs_target(rows, 20, 20):
+        for number, (x, y) in enumerate(((20, 20), (300, 300), (160, 120))):
+            core.wait_frame(frame, lambda rows: e2_denvfs_target(rows, x, y), 30)
+            (root / f'calibrate-{number}.png').write_bytes(frame.read_bytes())
+            core.tap(root, x, y)
+        core.wait_frame(root / 'preferences.png', e2_denvfs_prefs, 30)
+    core.tap(root, 27, 352)
+    core.wait_frame(root / 'launcher.png', e2_denvfs_launcher, 60)
+
+
 def e3_launcher(rows):
     """The E3's stock launcher above its guest-drawn input area and status bar."""
     return rows is not None and len(rows) == 480 and stock_launcher(rows)
@@ -525,9 +571,18 @@ def iiix_setup(core, root):
     core.wait_frame(root / 'launcher.png', iiix_launcher, 60)
 
 
-def setup_device(device, core, root):
+def variant_recipe(device, variant=None):
+    if variant is None:
+        return rom_device(device)['setup']
+    name = variant['id'] if isinstance(variant, dict) else variant
+    if name != 'e2-denvfs' or not any(v['id'] == name for v in rom_device(device).get('firmware_variants', [])):
+        raise ValueError(f'No qualified firmware variant recipe for {device}: {name}')
+    return name
+
+
+def setup_device(device, core, root, variant=None):
     """Run the profile's measured setup recipe; unknown recipes fail before sending input."""
-    recipe = rom_device(device)['setup']
+    recipe = variant_recipe(device, variant)
     try:
         run = SETUP_RECIPES[recipe]
     except KeyError:
@@ -535,12 +590,12 @@ def setup_device(device, core, root):
     return run(core, root)
 
 
-SETUP_RECIPES = {'tx': tx_setup, 'e2': e2_setup, 'e3': e3_setup,
+SETUP_RECIPES = {'tx': tx_setup, 'e2': e2_setup, 'e2-denvfs': e2_denvfs_setup, 'e3': e3_setup,
                  'zire': zire_setup, 'tg50': tg50_setup, 'iiix': iiix_setup}
 
 
-def launcher_check(device):
-    recipe = rom_device(device)['launcher']
+def launcher_check(device, variant=None):
+    recipe = variant_recipe(device, variant) if variant is not None else rom_device(device)['launcher']
     try:
         return LAUNCHER_CHECKS[recipe]
     except KeyError:
@@ -548,6 +603,7 @@ def launcher_check(device):
 
 
 LAUNCHER_CHECKS = {'wallpaper': launcher_wallpaper,
+                   'e2-denvfs': e2_denvfs_launcher,
                    'wallpaper-upper': upper_wallpaper_launcher, 'tg50-clie': tg50_launcher,
                    'iiix': iiix_launcher, 'e3-stock': e3_launcher}
 
@@ -764,11 +820,76 @@ def e3_reset(core, root, hard):
          'marked_session': marked_hash}, indent=2) + '\n')
 
 
-RESET_RECIPES = {'tg50': tg50_reset, 'iiix': iiix_reset, 'e3': e3_reset}
+def e2_denvfs_formats(rows):
+    return (rows is not None and len(rows) == 320 and
+            sum(max(rows[68][4*x:4*x+3]) < 60 for x in range(320)) > 300)
 
 
-def reset_recipe(device):
-    recipe = rom_device(device)['setup']
+def e2_denvfs_week_start(rows, monday):
+    if not e2_denvfs_formats(rows):
+        return False
+    popup = sum(max(rows[y][4*x:4*x+3]) < 80 for y in range(222, 240) for x in range(145, 242))
+    m = max(rows[204][4*178:4*178+3]) < 80
+    s = max(rows[204][4*183:4*183+3]) < 80
+    return popup < 5 and m == monday and s != monday
+
+
+def e2_denvfs_open_formats(core, root):
+    core.launch('Preferences')
+    core.wait_frame(root / 'preferences.png', e2_denvfs_prefs, 30)
+    core.tap(root, 60, 104)
+    core.wait_frame(root / 'formats.png', e2_denvfs_formats, 30)
+
+
+def e2_denvfs_erase_confirmation(rows):
+    if rows is None or len(rows) != 320:
+        return False
+    def ink(top, bottom):
+        return sum(max(rows[y][4*x:4*x+3]) < 80 for y in range(top, bottom) for x in range(320))
+    return (ink(0, 120) == 0 and ink(120, 145) > 700 and ink(146, 168) > 500 and
+            ink(170, 194) > 650 and ink(195, 320) == 0)
+
+
+def e2_denvfs_reset(core, root, hard):
+    """Soft reset retains the week-start preference; confirmed hard reset restores Sunday."""
+    e2_denvfs_open_formats(core, root)
+    core.wait_frame(root / 'marker-before.png', lambda rows: e2_denvfs_week_start(rows, False), 30)
+    core.tap(root, 234, 211)
+    core.wait_frame(root / 'week-menu.png', lambda rows: e2_denvfs_formats(rows) and
+                    sum(max(rows[y][4*x:4*x+3]) < 80 for y in range(222, 240) for x in range(145, 242)) > 200, 30)
+    core.tap(root, 225, 232)
+    core.wait_frame(root / 'marker-monday.png', lambda rows: e2_denvfs_week_start(rows, True), 30)
+    marked = root / 'marked'
+    core.send(f'save-session "{marked}"', 'wrote session')
+    marked_hash = hashlib.sha256(session_file(marked).read_bytes()).hexdigest()
+    core.tap(root, 27, 352)
+    core.wait_frame(root / 'marked-launcher.png', e2_denvfs_launcher, 30)
+    core.send('reset-hard' if hard else 'reset', 'Set speed mode', timeout=60)
+    if hard:
+        core.wait_frame(root / 'reset-erase.png', e2_denvfs_erase_confirmation, 120)
+        core.key(root, 'up', hold_ms=600)
+    e2_denvfs_setup(core, root)
+    e2_denvfs_open_formats(core, root)
+    core.wait_frame(root / 'marker-after.png', lambda rows: e2_denvfs_week_start(rows, not hard), 30)
+    core.tap(root, 27, 352)
+    core.wait_frame(root / 'reset-launcher.png', e2_denvfs_launcher, 30)
+    core.key(root, 'hard1', hold_ms=300)
+    core.wait_frame(root / 'reset-input.png', lambda rows: rows is not None and not e2_denvfs_launcher(rows), 30)
+    core.tap(root, 27, 352)
+    core.wait_frame(root / 'reset-continued.png', e2_denvfs_launcher, 30)
+    assert hashlib.sha256(session_file(marked).read_bytes()).hexdigest() == marked_hash
+    (root / 'postconditions.json').write_text(json.dumps(
+        {'marker': 'Formats week start', 'before': 'Sunday', 'marked': 'Monday',
+         'after': 'Sunday' if hard else 'Monday', 'new_input': 'Calendar',
+         'final_screen': 'de-NVFS launcher', 'marked_session': marked_hash}, indent=2) + '\n')
+
+
+RESET_RECIPES = {'tg50': tg50_reset, 'iiix': iiix_reset, 'e3': e3_reset,
+                 'e2-denvfs': e2_denvfs_reset}
+
+
+def reset_recipe(device, variant=None):
+    recipe = variant_recipe(device, variant)
     try:
         return RESET_RECIPES[recipe]
     except KeyError:

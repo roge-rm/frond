@@ -121,6 +121,75 @@ int main() {
     for (size_t at : {size_t(0), size_t(0x8000), size_t(0x40000)})
         assert(deviceProfileValidateNorLayout5(0, at, false) == DeviceFirmwareError5::norLayout);
     for (int other : {2, 3}) assert(deviceProfileValidateNorLayout5(other, 0, false) == DeviceFirmwareError5::none);
+    // The de-NVFS firmware keeps the E2 board and qualifies its alternate NOR by its full header.
+    {
+        const auto* p = deviceProfile5(deviceTypeE2);
+        const auto* v = &deviceFirmwareVariants5[0];
+        assert(v->deviceType == p->deviceType && std::string(v->id) == "e2-denvfs");
+        assert(v->norSize == (6u << 20) && v->headerOffset == p->headerOffset && v->cardEndsAtEof);
+        assert(std::string(v->fastAudioNorMd5)=="c2d90f775b1737de5bcd11634bf51d7d");
+        assert(v->disableSleep);
+        assert(v->fastAudioArmStartEntry==0x205bc180 && v->fastAudioArmStartCall==0x205bc200 &&
+               v->fastAudioArmStartBranch==0xeb00543b);
+        assert(deviceProfileFastAudioQualified5(*p,p->frontend.fastAudioNorMd5));
+        assert(deviceProfileFastAudioQualified5(*p,v->fastAudioNorMd5,v));
+        assert(!deviceProfileFastAudioQualified5(*p,v->fastAudioNorMd5));
+        assert(!deviceProfileFastAudioQualified5(*p,"",v));
+        assert(!deviceProfileFastAudioQualified5(*p,nullptr,v));
+        assert(!deviceProfileFastAudioQualified5(*p,"c2d90f775b1737de5bcd11634bf51d70",v));
+        assert(!deviceProfileFastAudioQualified5(*deviceProfile5(deviceTypeFrankenE2),v->fastAudioNorMd5,v));
+        auto make = [&](size_t size, size_t at) {
+            std::vector<uint8_t> nor(size);
+            put32(nor, at + 8, 0xfeedbeef);
+            std::memcpy(nor.data() + at + 0x10, v->cardName, std::strlen(v->cardName) + 1);
+            std::memcpy(nor.data() + at + 0x30, v->manufacturer, std::strlen(v->manufacturer) + 1);
+            put32(nor, at + 0x6c, size - at);
+            put32(nor, at + 0x80, v->companyId);
+            put32(nor, at + 0x84, v->halId);
+            return nor;
+        };
+        auto inspect = [](const std::vector<uint8_t>& nor) {
+            return deviceProfileInspectNor5(nor.size(), [&](uint64_t at, uint8_t* out, size_t count) {
+                if (at > nor.size() || count > nor.size() - at) return false;
+                std::memcpy(out, nor.data() + at, count);
+                return true;
+            });
+        };
+        auto good = make(v->norSize, v->headerOffset);
+        assert(inspect(good).profile == p && inspect(good).variant == v && inspect(good).validLayout);
+        const RomInfo5 info(good.data(), good.size());
+        assert(info.IsValid() && info.GetDeviceType() == deviceTypeE2 && info.GetFirmwareVariant() == v);
+        assert(!info.NeedsNand() && info.NeedsNandPatch() && info.GetRecommendedRamSize() == (32u << 20));
+        assert(deviceProfileValidateFirmware5(p->deviceType, good.size(), p->nandSize, false, false, v) == DeviceFirmwareError5::none);
+        assert(deviceProfileValidateFirmware5(p->deviceType, good.size(), p->nandSize, false, false) == DeviceFirmwareError5::norSize);
+        assert(deviceProfileValidateFirmware5(deviceTypeFrankenE2, good.size(), p->nandSize, false, false, v) == DeviceFirmwareError5::norSize);
+        auto forged = *v;
+        assert(deviceProfileValidateFirmware5(p->deviceType, good.size(), p->nandSize, false, false, &forged) == DeviceFirmwareError5::norSize);
+        assert(deviceProfileValidateFirmware5(p->deviceType, good.size(), p->nandSize + 1, false, true, v) == DeviceFirmwareError5::nandSize);
+        for (size_t field : {size_t(0x10), size_t(0x16), size_t(0x30), size_t(0x39), size_t(0x80), size_t(0x84), size_t(0x6c)}) {
+            auto bad = good;
+            bad[v->headerOffset + field] ^= 1;
+            assert(!inspect(bad).variant && !RomInfo5(bad.data(), bad.size()).GetFirmwareVariant());
+        }
+        for (size_t at : {size_t(0), size_t(0x8000), size_t(0x40000)}) {
+            auto bad = make(v->norSize, at);
+            assert(!inspect(bad).variant && !RomInfo5(bad.data(), bad.size()).GetFirmwareVariant());
+        }
+        for (size_t size : {v->norSize - 1, v->norSize + 1, p->norSize}) {
+            auto bad = make(size, v->headerOffset);
+            assert(!inspect(bad).variant && !RomInfo5(bad.data(), bad.size()).GetFirmwareVariant());
+        }
+        // Retail-size custom card names keep the existing geometry rules.
+        auto custom = make(p->norSize, p->headerOffset);
+        assert(inspect(custom).profile == p && inspect(custom).validLayout && !inspect(custom).variant);
+        assert(deviceProfileValidateFirmware5(p->deviceType, custom.size(), p->nandSize, false, false) == DeviceFirmwareError5::none);
+        for (size_t size : {size_t(6u << 20), size_t(8u << 20)})
+            assert(deviceProfileNorSizeSupported5(p->deviceType, size));
+        for (size_t size : {size_t(0), size_t(6u << 20) - 1, size_t(6u << 20) + 1})
+            assert(!deviceProfileNorSizeSupported5(p->deviceType, size));
+        assert(!deviceProfileNorSizeSupported5(deviceTypeFrankenE2, v->norSize));
+        assert(!deviceProfileNorSizeSupported5(deviceTypeInvalid, v->norSize));
+    }
     // E3 keeps its named-session identity and E2 board, with a full-height LCD.
     {
         const auto* p = deviceProfileNamed5("palm-e2-franken");

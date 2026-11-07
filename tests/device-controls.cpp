@@ -6,6 +6,8 @@
 #include <cstring>
 #include <vector>
 #include <tuple>
+#include <fstream>
+#include "InputReplay.h"
 #include <utility>
 #include <SDL.h>
 #include "SdlEventHandler.h"
@@ -24,6 +26,8 @@ class Guest : public SoC {
     DisplayConfiguration display() const {return displayConfiguration;}
     void setDisplay(DisplayConfiguration c) {displayConfiguration=c;}
     bool attached=false;
+    bool powerSupported=true;
+    bool PowerButtonSupported() const override {return powerSupported;}
     void expect(std::initializer_list<std::pair<KeyId,bool>> expected) {
         assert(keyEventQueue->GetSize()==expected.size());
         for(auto [key,down]:expected) {auto e=keyEventQueue->Pop();assert(e.key==key && e.keyDown==down);}
@@ -1327,6 +1331,29 @@ static void tg50HostKeyboard() {
     assert((guest.events==std::vector<std::pair<uint8_t,bool>>{{0x1c,true},{0x1c,false}}));
 }
 
+static void firmwarePowerInput() {
+    Guest guest(deviceTypeE2);
+    guest.powerSupported=false;
+    auto display=guest.display();
+    SdlEventHandler input(&guest,1,display,Rotation::portrait_0);
+    SDL_Event event{};
+    event.type=SDL_KEYDOWN; event.key.keysym.sym=SDLK_ESCAPE;
+    input.HandleEvent(event); guest.expect({});
+    event.type=SDL_KEYUP; input.HandleEvent(event); guest.expect({});
+    guest.powerSupported=true;
+    event.type=SDL_KEYDOWN; input.HandleEvent(event); guest.expect({{keyIdPower,true}});
+    event.type=SDL_KEYUP; input.HandleEvent(event); guest.expect({{keyIdPower,false}});
+    const char* path="build/firmware-power.replay";
+    { std::ofstream replay(path); replay << "0 key-down power\n1 key-up power\n2 key-down hard1\n3 key-up hard1\n"; }
+    InputReplay replay;
+    std::string error;
+    assert(replay.Load(path,320,440,error));
+    guest.powerSupported=false;
+    replay.Dispatch(10,guest,[](const char*,bool&) {return false;});
+    guest.expect({{keyIdHard1,true},{keyIdHard1,false}});
+    std::remove(path);
+}
+
 int main(int argc,char** argv) {
     SDL_setenv("SDL_VIDEODRIVER","dummy",1);assert(SDL_Init(SDL_INIT_VIDEO|SDL_INIT_EVENTS)==0);
     if(argc==2 && std::strcmp(argv[1],"--tg50-visibility")==0) {
@@ -1338,6 +1365,7 @@ int main(int argc,char** argv) {
     if(argc==2 && std::strcmp(argv[1],"--tg50-layout")==0) {
         tg50RuntimeTab();SDL_Quit();puts("PASS: TG50 sidebar/LCD pixel boundaries and pen bounds at fractional scales and four rotations");return 0;
     }
+    firmwarePowerInput();
     const auto& profile=deviceControls(deviceTypeTX);
     assert(profile.count==9 && profile.style==DeviceControlStyle::tx && profile.height==84);
     const auto& e2=deviceControls(deviceTypeE2);

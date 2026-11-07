@@ -22,6 +22,7 @@ import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from palm_boot import DEVICES_68K, FRONTEND_DEVICES, png_rows, setup_device
+from firmware_variants import firmware_variant
 
 # out/frond runs the ARM devices only.
 DEVICES = {name: device for name, device in FRONTEND_DEVICES.items() if name not in DEVICES_68K}
@@ -99,7 +100,7 @@ def parser():
     origin = p.add_mutually_exclusive_group(required=True)
     origin.add_argument('--session', type=Path, help='restore a saved session: a machine folder (sessions/NAME/) or a .frond file; the file also brings the card files beside it')
     origin.add_argument('--nor', type=Path, help='cold boot from this NOR without saved RAM/CPU')
-    p.add_argument('--nand', type=Path, help='NAND paired with --nor (required for TX and E2, absent on Zire)')
+    p.add_argument('--nand', type=Path, help='NAND paired with --nor (required for TX, optional for E2, absent on Zire)')
     p.add_argument('--output', type=Path, required=True, help='new private result directory')
     p.add_argument('--install', type=Path, action='append', default=[], help='PRC/PDB; repeat in install order')
     launch = p.add_mutually_exclusive_group(required=True)
@@ -325,9 +326,8 @@ def run(args):
     root = process = connection = None
     try:
         device = DEVICES[args.device]
-        if args.nand and not args.nor or args.nor and args.device in ('palm-tx', 'palm-e2') and not args.nand:
-            raise RunError('argument', '--nor and --nand must be supplied together'
-                           if args.device == 'palm-tx' else '--nor and --nand must be supplied together for E2')
+        if args.nand and not args.nor or args.nor and device['explicit_raw_nand'] and not args.nand:
+            raise RunError('argument', '--nor and --nand must be supplied together')
         if args.nand and not device['nand']:
             raise RunError('argument', 'This device has no NAND')
         for name in ([args.app] if args.app is not None else []) + args.export_db:
@@ -344,7 +344,8 @@ def run(args):
         for path in paths:
             if not (path.is_file() or path.is_dir() and args.session and path == origins[0]):
                 raise RunError('input', f'Input file does not exist: {path}')
-        if not args.session and (origins[0].stat().st_size != device['nor'] or
+        variant = firmware_variant(origins[0], device) if not args.session else None
+        if not args.session and (origins[0].stat().st_size != (variant['nor_bytes'] if variant else device['nor']) or
                                  args.nand and origins[1].stat().st_size != device['nand']):
             raise RunError('input', 'Cold boot requires 16 MiB TX NOR and 132 MiB raw NAND'
                            if args.device == 'palm-tx' else f'Wrong NOR/NAND size for {args.device}')
@@ -434,7 +435,10 @@ def run(args):
                 if not args.session and args.device != 'palm-tx':
                     result['stage'] = 'setup'
                     setup = SocketBoot(control, root)
-                    setup_device(args.device, setup, root)
+                    if variant:
+                        setup_device(args.device, setup, root, variant=variant)
+                    else:
+                        setup_device(args.device, setup, root)
                     control.retry_ready('guest-ready', '', args.ready_timeout)
                 if installs or args.app is not None:
                     control.retry_ready('guest-ready', '', args.ready_timeout)

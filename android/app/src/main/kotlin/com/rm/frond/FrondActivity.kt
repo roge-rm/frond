@@ -72,7 +72,9 @@ open class FrondActivity : SDLActivity() {
     // The display settings as last sent to the core, as its display command argument. Set on the UI thread.
     @Volatile private var display = ""
     // Game controller buttons and sticks to the Palm's buttons. UI thread only.
-    private lateinit var controller: ControllerInput
+    private var controller = ControllerInput(ControllerMap(emptyMap())) { _, _ -> }
+    lateinit var runningDevice: Device
+        private set
 
     // The core library SDLActivity loads, and the control socket's file name in app storage.
     protected open val coreLibrary get() = "main"
@@ -86,6 +88,8 @@ open class FrondActivity : SDLActivity() {
         // The core names a new machine's file on its first save, so an older path may not be the one in use.
         sessionPath = Sessions.resolve(this, intent?.getStringExtra(EXTRA_SESSION))
         machineSettings = Sessions.forPath(this, sessionPath)?.settings ?: MachineSettings()
+        val device = launchDevice()
+        runningDevice = device.unresolvedFirmware()
         settings = machineSettings.applyTo(Settings.from(this, intent))
         sound = launchDevice().sound && settings.sound
         display = machineSettings.displayArgument(tg50Controls = launchDevice().id == "sony-clie-tg50", m68k = launchDevice().runs68k)
@@ -108,7 +112,6 @@ open class FrondActivity : SDLActivity() {
         requestFrameRate()
         addSavingNote()
         startDebugger()
-        addMenuButton()
         addKeyboard()
         addController()
         SdCard.clean(this)
@@ -118,6 +121,7 @@ open class FrondActivity : SDLActivity() {
             Thread { SdCard.restorePending(applicationContext, link, sessionPath) }.apply { isDaemon = true }.start()
         }
         running = this
+        resolveRunningDevice()
         if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) logSpeed()
         if (Build.VERSION.SDK_INT >= 33) {
             onBackInvokedDispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT) { leave() }
@@ -303,11 +307,31 @@ open class FrondActivity : SDLActivity() {
         return super.dispatchGenericMotionEvent(event)
     }
 
-    // Controller mapping for this device from Settings, and releases when a controller goes away.
-    private fun addController() {
-        val device = Device.byId(intent?.getStringExtra(EXTRA_DEVICE)) ?: Device.TX
+    // Resolve once off the UI thread. Power stays absent until the NOR is identified.
+    private fun resolveRunningDevice() {
+        val device = launchDevice()
+        val session = sessionPath?.let { File(it) }
+        val nor = File(intent?.getStringExtra(EXTRA_NOR) ?: Firmware.nor(this, device).path)
+        Thread({
+            val resolved = Firmware.runningDevice(device, session, nor)
+            runOnUiThread {
+                if (destroyed || leaving) return@runOnUiThread
+                runningDevice = resolved
+                configureController(resolved)
+                addMenuButton()
+            }
+        }, "FrondFirmware").apply { isDaemon = true }.start()
+    }
+
+    private fun configureController(device: Device) {
+        controller.releaseAll()
         val buttons = PalmButtons(device, link, cacheDir)
         controller = ControllerInput(ControllerMap.load(this, device), buttons::press)
+    }
+
+    // Controller mapping for this device from Settings, and releases when a controller goes away.
+    private fun addController() {
+        configureController(runningDevice)
         getSystemService(android.hardware.input.InputManager::class.java)?.registerInputDeviceListener(
             object : android.hardware.input.InputManager.InputDeviceListener {
                 override fun onInputDeviceAdded(deviceId: Int) {}
@@ -426,6 +450,12 @@ open class FrondActivity : SDLActivity() {
             addRule(RelativeLayout.ALIGN_PARENT_TOP)
             addRule(RelativeLayout.ALIGN_PARENT_END)
         })
+        keyboardButton?.let { keyboardButton ->
+            val params = keyboardButton.layoutParams as? RelativeLayout.LayoutParams ?: return@let
+            params.removeRule(RelativeLayout.ALIGN_PARENT_END)
+            params.addRule(RelativeLayout.START_OF, button.id)
+            keyboardButton.layoutParams = params
+        }
     }
 
     // While the Palm infrared keyboard is attached, a keyboard button beside the menu button shows

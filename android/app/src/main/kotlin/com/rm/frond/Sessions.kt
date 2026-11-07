@@ -80,9 +80,9 @@ object Sessions {
 
     private fun removeStaleSaves(context: Context) = removeStaleTemps(folder(context), System.currentTimeMillis())
 
-    // MD5 of the NOR image stored in a session file, which the core checks before low-latency
-    // audio (native/main.cpp). Reads the SessionFile5 header and inflates as far as the NOR.
-    fun norMd5(file: File): String? = try {
+    // Reads a named SessionFile5 and inflates as far as its embedded NOR.
+    private fun <T> withNor(file: File, device: Device? = null, supportedSizes: Set<Long>? = null,
+                            read: (java.io.InputStream, Long) -> T?): T? = try {
         val frond = if (file.isDirectory) sessionFile(file) ?: return null else file
         java.io.DataInputStream(java.io.BufferedInputStream(frond.inputStream())).use { input ->
             fun read32(): Long {
@@ -99,42 +99,90 @@ object Sessions {
             if (read32() != MAGIC) return null
             val version = read32()
             if (version !in FIRST_NAMED_VERSION..VERSION) return null
-            input.readFully(ByteArray(DEVICE_NAME_SIZE)) // device name
+            val name = ByteArray(DEVICE_NAME_SIZE).also { input.readFully(it) }
+            if (device != null && String(name, Charsets.US_ASCII).substringBefore('\u0000') != device.id) return null
             read32(); read32() // display mode, RAM size
             val metadataSize: Long
             val norSize: Long
+            val otherSizes: List<Long>
             if (version >= 7L) {
                 metadataSize = read64()
                 norSize = read64()
-                read64(); read64(); read64() // NAND, memory, savestate
-                val mediaBytes = read32() * (if (version == 7L) 92L else 100L)
-                if (mediaBytes > 0) input.skip(mediaBytes)
+                otherSizes = List(3) { read64() } // NAND, memory, savestate
+                val mediaCount = read32()
+                if (mediaCount > 2) return null
+                val mediaBytes = mediaCount * (if (version == 7L) 92L else 100L)
+                var descriptors = mediaBytes
+                while (descriptors > 0) {
+                    val skipped = input.skip(descriptors)
+                    if (skipped <= 0) return null
+                    descriptors -= skipped
+                }
             } else {
                 metadataSize = read32()
                 norSize = read32()
-                read32(); read32(); read32(); read32() // NAND, memory, savestate, SD
+                otherSizes = List(4) { read32() } // NAND, memory, savestate, SD
+                if (otherSizes.last() > (128L shl 20) || otherSizes.last() % 512L != 0L) return null
             }
-            val inflated = java.util.zip.InflaterInputStream(input, java.util.zip.Inflater(), 1 shl 16)
-            val digest = java.security.MessageDigest.getInstance("MD5")
-            val buffer = ByteArray(1 shl 16)
-            var skip = metadataSize
-            while (skip > 0) {
-                val n = inflated.read(buffer, 0, minOf(skip, buffer.size.toLong()).toInt())
-                if (n < 0) return null
-                skip -= n
+            val sizes = listOf(metadataSize, norSize) + otherSizes
+            val maximum = 512L shl 20 // SessionFile5's maximum inflated payload.
+            if (sizes.any { it < 0 || it > maximum } || sizes.sum() > maximum ||
+                metadataSize > (1L shl 20) || norSize <= 0 ||
+                (supportedSizes != null && norSize !in supportedSizes)) return null
+            // Reading a prefix cannot consume an unbounded series of empty deflate blocks.
+            val compressed = object : java.io.FilterInputStream(input) {
+                var left = 2 * (metadataSize + norSize) + 65536
+                override fun read(): Int {
+                    if (left <= 0) return -1
+                    return super.read().also { if (it >= 0) left-- }
+                }
+                override fun read(bytes: ByteArray, offset: Int, count: Int): Int {
+                    if (left <= 0) return -1
+                    return input.read(bytes, offset, minOf(count.toLong(), left).toInt()).also { if (it > 0) left -= it }
+                }
             }
-            var left = norSize
-            while (left > 0) {
-                val n = inflated.read(buffer, 0, minOf(left, buffer.size.toLong()).toInt())
-                if (n < 0) return null
-                digest.update(buffer, 0, n)
-                left -= n
+            val inflater = java.util.zip.Inflater()
+            try {
+                val inflated = java.util.zip.InflaterInputStream(compressed, inflater, 1 shl 16)
+                val buffer = ByteArray(1 shl 16)
+                var skip = metadataSize
+                while (skip > 0) {
+                    val n = inflated.read(buffer, 0, minOf(skip, buffer.size.toLong()).toInt())
+                    if (n < 0) return null
+                    skip -= n
+                }
+                read(inflated, norSize)
+            } finally {
+                inflater.end()
             }
-            digest.digest().joinToString("") { "%02x".format(it) }
         }
     } catch (e: Exception) {
         null
     }
+
+    fun norMd5(file: File, supportedSizes: Set<Long>? = null): String? = withNor(file, supportedSizes = supportedSizes) { input, size ->
+        val digest = java.security.MessageDigest.getInstance("MD5")
+        val buffer = ByteArray(1 shl 16)
+        var left = size
+        while (left > 0) {
+            val count = input.read(buffer, 0, minOf(left, buffer.size.toLong()).toInt())
+            if (count < 0) return@withNor null
+            digest.update(buffer, 0, count)
+            left -= count
+        }
+        digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    internal fun firmwareInfo(file: File, device: Device): Firmware.NorInfo? =
+        withNor(file, device, (device.firmwareVariants.map { it.norSize } + device.norSize).toSet()) { input, size ->
+            val end = (device.firmwareVariants.map { it.headerOffset } + device.headerOffset).max() + 0x100
+            if (end > size || end > (1L shl 20)) return@withNor null
+            val prefix = ByteArray(end.toInt())
+            java.io.DataInputStream(input).readFully(prefix)
+            Firmware.inspect(size, listOf(device)) { at, count ->
+                if (at < 0 || at > prefix.size - count) null else prefix.copyOfRange(at.toInt(), at.toInt() + count)
+            }.takeIf { it.validLayout && (size == device.norSize || it.variant != null) }
+        }
 
     fun read(context: Context, id: String): Session? = try {
         // An empty id would name the sessions folder itself.

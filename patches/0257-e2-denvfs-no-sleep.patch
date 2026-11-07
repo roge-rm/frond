@@ -1,0 +1,106 @@
+diff --git a/src/common/device_profile5.h b/src/common/device_profile5.h
+--- a/src/common/device_profile5.h
++++ b/src/common/device_profile5.h
+@@ -163,11 +163,12 @@
+     bool cardEndsAtEof;
+     const char* fastAudioNorMd5;
+     uint32_t fastAudioArmStartEntry{0}, fastAudioArmStartCall{0}, fastAudioArmStartBranch{0};
++    bool disableSleep{false};
+ };
+ inline constexpr DeviceFirmwareVariant5 deviceFirmwareVariants5[] = {
+     {deviceTypeE2, "e2-denvfs", 6u << 20, 0x20000, "rePalm", "Dmitry.GR",
+      deviceCompanyPalm5, 0x68737072 /* hspr */, true, "c2d90f775b1737de5bcd11634bf51d7d",
+-     0x205bc180, 0x205bc200, 0xeb00543b},
++     0x205bc180, 0x205bc200, 0xeb00543b, true},
+ };
+ 
+ // The caller supplies the variant parsed from this NOR's identity and geometry.
+diff --git a/src/uarm/native/SdlEventHandler.cpp b/src/uarm/native/SdlEventHandler.cpp
+--- a/src/uarm/native/SdlEventHandler.cpp
++++ b/src/uarm/native/SdlEventHandler.cpp
+@@ -156,6 +156,7 @@
+                 }
+                 enum KeyId key = mapKey(event.key.keysym.sym);
+                 if (key == keyIdPower) {
++                    if (!soc->PowerButtonSupported()) break;
+                     const auto* profile = deviceProfile5(soc->GetDeviceType());
+                     if (profile && profile->frontend.available &&
+                         ("|" + std::string(profile->frontend.buttons) + "|").find("|power|") == std::string::npos)
+diff --git a/src/uarm/uarm/SoC.cpp b/src/uarm/uarm/SoC.cpp
+--- a/src/uarm/uarm/SoC.cpp
++++ b/src/uarm/uarm/SoC.cpp
+@@ -36,9 +36,13 @@
+     systemState = createSystemState();
+ }
+ 
+-void SoC::KeyDown(enum KeyId key) { keyEventQueue->Push(KeyEvent::KeyDown(key)); }
+-
+-void SoC::KeyUp(enum KeyId key) { keyEventQueue->Push(KeyEvent::KeyUp(key)); }
++void SoC::KeyDown(enum KeyId key) {
++    if (key != keyIdPower || PowerButtonSupported()) keyEventQueue->Push(KeyEvent::KeyDown(key));
++}
++
++void SoC::KeyUp(enum KeyId key) {
++    if (key != keyIdPower || PowerButtonSupported()) keyEventQueue->Push(KeyEvent::KeyUp(key));
++}
+ 
+ void SoC::PenDown(int x, int y) {
+     penEventQueue->Push(PenEvent::PenDown(
+diff --git a/src/uarm/uarm/SoC.h b/src/uarm/uarm/SoC.h
+--- a/src/uarm/uarm/SoC.h
++++ b/src/uarm/uarm/SoC.h
+@@ -81,6 +81,7 @@
+     uint64_t GetInjectedTimeNsec() { return injectedTimeNsec; }
+     void ResetInjectedTimeNsec() { injectedTimeNsec = 0; }
+ 
++    virtual bool PowerButtonSupported() const { return true; }
+     void KeyDown(enum KeyId key);
+     void KeyUp(enum KeyId key);
+     void PenDown(int x, int y);
+diff --git a/src/uarm/uarm/soc_PXA.cpp b/src/uarm/uarm/soc_PXA.cpp
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -77,6 +77,8 @@
+ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, const uint32_t romSize,
+                uint8_t *nandContent, size_t nandSize, int gdbPort, uint_fast8_t socRev) {
+     RomInfo5 romInfo(romData, romSize);
++    const auto* variant = romInfo.GetFirmwareVariant();
++    disableSleep = variant && variant->deviceType == deviceType && variant->disableSleep;
+ 
+     struct Reschedule rescheduleCb = {.rescheduleCb = RescheduleCB, .ctx = this};
+     struct GetEmuTime getEmuTime = {.getTimeF = GetTimeCB, .userdata = this};
+@@ -111,12 +113,12 @@
+ 
+     syscallDispatch = initSyscallDispatch(this);
+     // TX boots through IPL/NAND. E2 ROM patches are not validated for this layout.
+-    // The E2 sleeps through the PXA25x power manager below, so it keeps SysSleep and
+-    // auto-off; the patched FrankenE2 ROM keeps the inherited no-sleep patch.
++    // Retail E2 keeps SysSleep and auto-off. Firmware with Power disabled uses
++    // the inherited no-sleep patch, as does the patched FrankenE2 ROM.
+     // The Zire 72's 5.2.8 ROM runs unpatched, like the TX.
+     if (deviceType != deviceTypeTG50 && deviceType != DeviceType5::deviceTypeTX && deviceType != DeviceType5::deviceTypeZire72)
+         patchContext = registerPatches(patchDispatch, syscallDispatch, cpu, systemState,
+-            deviceType == DeviceType5::deviceTypeE2 ? PATCH_FEATURE_ALL & ~PATCH_FEATURE_NO_SLEEP
++            deviceType == DeviceType5::deviceTypeE2 && !disableSleep ? PATCH_FEATURE_ALL & ~PATCH_FEATURE_NO_SLEEP
+                                                      : PATCH_FEATURE_ALL);
+ 
+     ram = ramInit(mem, this, RAM_BASE, ramBackingSize, &bufferMemory, true);
+diff --git a/src/uarm/uarm/soc_PXA.h b/src/uarm/uarm/soc_PXA.h
+--- a/src/uarm/uarm/soc_PXA.h
++++ b/src/uarm/uarm/soc_PXA.h
+@@ -57,6 +57,7 @@
+ 
+ class SocPXA : public SocGeneric<SocPXA> {
+     friend SocGeneric<SocPXA>;
++    bool disableSleep{false};
+ 
+    public:
+     ~SocPXA();
+@@ -82,6 +83,7 @@
+     bool HoldSwitchSupported() const override;
+     bool HoldSwitchOn() const override;
+     bool SetHoldSwitch(bool on) override;
++    bool PowerButtonSupported() const override { return !disableSleep; }
+     bool PowerSleeping() const;
+     // Wakes from PXA sleep since the process started, for tests. Not saved.
+     uint64_t PowerWakes() const { return powerWakes; }

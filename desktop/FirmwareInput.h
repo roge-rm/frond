@@ -158,12 +158,12 @@ inline QString validateFiles(Device chosen, const QString& norPath, const QStrin
                                         : QStringLiteral("Choose a readable NAND file, or leave it empty.");
     }
     if (deviceProfileValidateFirmware5(profile->deviceType, nor.size(), nandGiven ? nand.size() : profile->nandSize,
-                                       false, nandGiven) != DeviceFirmwareError5::none)
+                                       false, nandGiven, info.variant) != DeviceFirmwareError5::none)
         return device == Device::tx ? QStringLiteral("Choose a 16 MiB NOR image and a 132 MiB raw NAND image for the Palm TX.")
                : device == Device::zire72 ? QStringLiteral("Choose a 14,942,208-byte NOR image for the Zire 72.")
                                     : device != Device::e2 ? QStringLiteral("The firmware sizes do not match %1.").arg(deviceName(device))
-                                    : nor.size() != qint64(profile->norSize)
-                                          ? QStringLiteral("Choose an 8 MiB NOR image for the Tungsten E2.")
+                                    : nor.size() != qint64(info.variant ? info.variant->norSize : profile->norSize)
+                                          ? QStringLiteral("Choose an 8 MiB NOR image or a supported de-NVFS image for the Tungsten E2.")
                                           : QStringLiteral("The Tungsten E2 NAND image must be a raw 34,603,008-byte file, or empty.");
     if (resolved) *resolved = device;
     return {};

@@ -104,6 +104,47 @@ class FirmwareInputTest : public QObject {
         e2Nor(nor, 8 << 20, 0x20000, 0x446d4752);
         QVERIFY(!frondFirmware::validateFiles(Device::e2, norPath, {}).isEmpty());
     }
+    void e2DenvfsFiles() {
+        QTemporaryDir dir;
+        const auto path = dir.filePath("denvfs"), nandPath = dir.filePath("nand");
+        QFile nor(path), nand(nandPath);
+        QVERIFY(nor.open(QIODevice::ReadWrite)); QVERIFY(nand.open(QIODevice::ReadWrite));
+        auto make = [&] {
+            e2Nor(nor, 6 << 20, 0x20000);
+            nor.seek(0x20010); nor.write("rePalm", 7);
+            nor.seek(0x20030); nor.write("Dmitry.GR", 10);
+            const quint32 length = (6 << 20) - 0x20000;
+            const char bytes[4] = {char(length), char(length >> 8), char(length >> 16), char(length >> 24)};
+            nor.seek(0x2006c); nor.write(bytes, 4); nor.flush();
+        };
+        make();
+        Device resolved = Device::automatic;
+        QCOMPARE(frondFirmware::detectDevice(path), Device::e2);
+        QVERIFY(frondFirmware::validateFiles(Device::automatic, path, {}, &resolved).isEmpty());
+        QCOMPARE(resolved, Device::e2);
+        QVERIFY(frondFirmware::validateFiles(Device::e2, path, {}).isEmpty());
+        QVERIFY(!frondFirmware::validateFiles(Device::tx, path, {}).isEmpty());
+        QVERIFY(!frondFirmware::validateFiles(frondFirmware::deviceFromId("palm-e2-franken"), path, {}).isEmpty());
+        QVERIFY(nand.resize(34603008));
+        QVERIFY(frondFirmware::validateFiles(Device::e2, path, nandPath).isEmpty());
+        QVERIFY(nand.resize(34603008 - 528));
+        QVERIFY(frondFirmware::validateFiles(Device::e2, path, nandPath).contains("NAND"));
+        // Every field of the alternate geometry must match, including string terminators.
+        for (qint64 at : {0x20010, 0x20016, 0x20030, 0x20039, 0x2006c, 0x20080, 0x20084}) {
+            make(); nor.seek(at); nor.write("x", 1); nor.flush();
+            QVERIFY(!frondFirmware::validateFiles(Device::e2, path, {}).isEmpty());
+            QVERIFY(!frondFirmware::validateFiles(Device::automatic, path, {}).isEmpty());
+        }
+        make(); QVERIFY(nor.resize((6 << 20) - 1));
+        QVERIFY(!frondFirmware::validateFiles(Device::e2, path, {}).isEmpty());
+        make();
+        nor.seek(0x20000); const auto header = nor.read(0x88);
+        nor.seek(0x20000); nor.write(QByteArray(0x88, '\0'));
+        nor.seek(0x40000); nor.write(header); nor.flush();
+        QVERIFY(!frondFirmware::validateFiles(Device::e2, path, {}).isEmpty());
+        e2Nor(nor, 6 << 20, 0x20000);
+        QVERIFY(!frondFirmware::validateFiles(Device::e2, path, {}).isEmpty());
+    }
     void e3Files() {
         QTemporaryDir dir;
         QVERIFY(dir.isValid());

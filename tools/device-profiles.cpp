@@ -80,7 +80,23 @@ int main() {
                   << ",\"keyboard\":" << (p.capabilities.keyboard ? "true" : "false")
                   << ",\"usb\":" << (p.capabilities.usb ? "true" : "false")
                   << ",\"infrared\":" << (p.capabilities.infrared ? "true" : "false")
-                  << ",\"bluetooth\":" << (p.capabilities.bluetooth ? "true" : "false") << '}';
+                  << ",\"bluetooth\":" << (p.capabilities.bluetooth ? "true" : "false")
+                  << ",\"firmware_variants\":[";
+        bool firstVariant = true;
+        for (const auto& v : deviceFirmwareVariants5) {
+            if (v.deviceType != p.deviceType) continue;
+            if (!firstVariant) std::cout << ',';
+            firstVariant = false;
+            std::cout << "{\"id\":" << std::quoted(v.id)
+                      << ",\"nor_bytes\":" << v.norSize << ",\"header_offset\":" << v.headerOffset
+                      << ",\"card_name\":" << std::quoted(v.cardName)
+                      << ",\"manufacturer\":" << std::quoted(v.manufacturer)
+                      << ",\"company_id\":" << v.companyId << ",\"hal_id\":" << v.halId
+                      << ",\"card_ends_at_eof\":" << (v.cardEndsAtEof ? "true" : "false")
+                      << ",\"fast_audio_md5\":" << std::quoted(v.fastAudioNorMd5)
+                      << ",\"power_supported\":" << (v.disableSleep ? "false" : "true") << '}';
+        }
+        std::cout << "]}";
     }
     std::cout << "]}\n";
 }

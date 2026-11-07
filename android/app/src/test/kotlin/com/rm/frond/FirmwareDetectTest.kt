@@ -53,6 +53,37 @@ class FirmwareDetectTest {
         assertEquals(Device.E2, Firmware.detect(nor(16L shl 20, 0x20000)))
     }
 
+    @Test fun e2DenvfsRequiresFullIdentity() {
+        fun denvfs(size: Long = 6L shl 20, at: Long = 0x20000): File = nor(size, at).also { f ->
+            RandomAccessFile(f, "rw").use { file ->
+                file.seek(at + 0x10); file.write("rePalm\u0000".toByteArray(Charsets.US_ASCII))
+                file.seek(at + 0x30); file.write("Dmitry.GR\u0000".toByteArray(Charsets.US_ASCII))
+                le32(file, at + 0x6c, size - at)
+            }
+        }
+        val f = denvfs()
+        assertEquals(Device.E2, Firmware.detect(f))
+        assertEquals("e2-denvfs", Firmware.inspect(f).variant?.id)
+        assertNull(Firmware.check(Device.E2, f, null))
+        org.junit.Assert.assertNotNull(Firmware.check(Device.TX, f, null))
+        org.junit.Assert.assertNotNull(Firmware.check(Device.byId("palm-e2-franken")!!, f, null))
+        val nand = tmp.newFile()
+        RandomAccessFile(nand, "rw").use { it.setLength(Device.E2.nandSize) }
+        assertNull(Firmware.check(Device.E2, f, nand))
+        RandomAccessFile(nand, "rw").use { it.setLength(Device.E2.nandSize - 528) }
+        org.junit.Assert.assertNotNull(Firmware.check(Device.E2, f, nand))
+        for (offset in listOf(0x10L, 0x16L, 0x30L, 0x39L, 0x6cL, 0x80L, 0x84L)) {
+            val wrong = denvfs()
+            RandomAccessFile(wrong, "rw").use { it.seek(0x20000 + offset); it.writeByte(120) }
+            assertNull(Firmware.inspect(wrong).variant)
+            org.junit.Assert.assertNotNull(Firmware.check(Device.E2, wrong, null))
+        }
+        for (wrong in listOf(denvfs((6L shl 20) - 1), denvfs(at = 0x40000), nor(6L shl 20, 0x20000))) {
+            assertNull(Firmware.inspect(wrong).variant)
+            org.junit.Assert.assertNotNull(Firmware.check(Device.E2, wrong, null))
+        }
+    }
+
     @Test fun e3DetectionAndImportChecks() {
         val e3 = Device.byId("palm-e2-franken")!!
         fun e3Nor(size: Long = e3.norSize, at: Long = e3.headerOffset): File = nor(size, at).also { f ->

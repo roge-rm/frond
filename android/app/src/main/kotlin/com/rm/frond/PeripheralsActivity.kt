@@ -643,6 +643,7 @@ class PeripheralsModel(
 
     // Presses and releases the Palm's power button (key replay on the control link, both runners) and goes back to the Palm.
     fun power() = device("Pressing power", "Couldn't press power", true) { l ->
+        if ("power" !in device.buttons) return@device "Power is unavailable for this firmware."
         val file = java.io.File(activity.cacheDir, "power.replay")
         file.writeText("0 key-down power\n80 key-up power\n")
         val reply = l.request("input-replay", file.path, timeoutSeconds = 30)
@@ -787,8 +788,8 @@ open class PeripheralsActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        val device = Device.byId(intent?.getStringExtra(FrondActivity.EXTRA_DEVICE)) ?: Device.TX
         val emulator = FrondActivity.running
+        val device = emulator?.runningDevice ?: Device.byId(intent?.getStringExtra(FrondActivity.EXTRA_DEVICE)) ?: Device.TX
         model = PeripheralsModel(
             this,
             device,

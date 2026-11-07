@@ -11,6 +11,39 @@
 #include "mem.h"
 #include "soc_PXA.h"
 
+#include "patch_dispatch.h"
+#include "syscall.h"
+
+class FirmwarePowerSoc : public SocPXA {
+ public:
+    using SocPXA::SocPXA;
+    bool patched(uint32_t syscall) {
+        return patchDispatchHasPatch(patchDispatch, (syscall >> 14) * 4, syscall & 0xfff);
+    }
+    unsigned queuedKeys() const { return keyEventQueue->GetSize(); }
+};
+
+static void firmwarePower() {
+    for (bool variant : {false, true}) {
+        std::vector<uint8_t> rom((variant ? 6u : 8u) << 20), nand(34603008, 0xff);
+        auto word = [&](size_t at, uint32_t value) { std::memcpy(rom.data() + at, &value, 4); };
+        word(0x20008, 0xfeedbeef); word(0x20080, deviceCompanyPalm5); word(0x20084, 0x68737072);
+        if (variant) {
+            std::memcpy(rom.data() + 0x20010, "rePalm", 7);
+            std::memcpy(rom.data() + 0x20030, "Dmitry.GR", 10);
+            word(0x2006c, rom.size() - 0x20000);
+        }
+        FirmwarePowerSoc soc(deviceTypeE2, 32u << 20, rom.data(), rom.size(), nand.data(), nand.size(), -1, 0);
+        assert(soc.PowerButtonSupported() == !variant);
+        assert(soc.patched(SYSCALL_SYS_SLEEP) == variant);
+        assert(soc.patched(SYSCALL_SYS_SET_AUTO_OFF_TIME) == variant);
+        soc.KeyDown(keyIdPower); soc.KeyUp(keyIdPower);
+        assert(soc.queuedKeys() == (variant ? 0u : 2u));
+        soc.KeyDown(keyIdHard1); soc.KeyUp(keyIdHard1);
+        assert(soc.queuedKeys() == (variant ? 2u : 4u));
+    }
+}
+
 static constexpr uint32_t PM = 0x40f00000, GPIO = 0x40e00000;
 static void write(SocPXA& soc, uint32_t address, uint32_t value) {
     assert(memAccess(cpuGetMem(soc.GetCpu()), address, 4, true, &value));
@@ -143,6 +176,7 @@ static void pxa25xSleep() {
 }
 
 int main() {
+    firmwarePower();
     std::vector<uint8_t> rom(16 * 1024 * 1024), nand(132 * 1024 * 1024, 0xff);
     const uint32_t branch = 0xeafffffe;
     memcpy(rom.data(), &branch, 4);

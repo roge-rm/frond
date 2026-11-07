@@ -15,7 +15,7 @@ struct Memory {
     }
 };
 
-static void exercise(FastAudio::Driver driver,bool e3=false) {
+static void exercise(FastAudio::Driver driver,FastAudio::ArmStartSignature arm={}) {
     Memory memory;
     const bool zire=driver==FastAudio::Driver::zire72;
     auto write=[&](uint32_t a,uint32_t v,unsigned size=4){auto* p=memory.At(a,size);assert(p);std::memcpy(p,&v,size);};
@@ -58,7 +58,7 @@ static void exercise(FastAudio::Driver driver,bool e3=false) {
             {-0x418,0x12c0},{-0x416,0x12c9},{0x1d7c,0x8981},{0x1d82,0x8941},
             {0x1d84,0x8541},{0x1d86,0x8501}})write(code+offset,value,2);
     }
-    FastAudio preview=e3?FastAudio(reader,driver,FastAudio::E3Start):FastAudio(reader,driver);auto queue=audioQueueCreate(8192);preview.SetQueue(queue);
+    FastAudio preview=arm.entry?FastAudio(reader,driver,arm):FastAudio(reader,driver);auto queue=audioQueueCreate(8192);preview.SetQueue(queue);
     preview.Handle(0x4320,r,0,true);
     assert(preview.Active() && audioQueuePendingSamples(queue)==0);
     for(unsigned off=0;off<4096;off+=4)write(r[1]+off,0xf82f07d1); // 2001, -2001
@@ -147,10 +147,10 @@ static void exercise(FastAudio::Driver driver,bool e3=false) {
             wrong.Handle(0x4320,r,0,true);assert(wrong.Failed() && !wrong.Active());
         }
     }
-    if(zire || e3) {
+    if(zire || arm.entry) {
         // Qualified start: SndStreamStart's ARM call to HAL control 5 at its NOR address.
-        const uint32_t start=e3?0x207a2e60:0x20049d5c,call=e3?0x207a2ee0:0x20049ddc;
-        const uint32_t branch=e3?0xeb00542b:0xeb00543b;
+        const auto signature=arm.entry?arm:FastAudio::Zire72Start;
+        const uint32_t start=signature.entry,call=signature.call,branch=signature.branch;
         const std::pair<uint32_t,uint32_t> startCode[] = {{start,0xe92d43f0},{start+4,0xe5999000},
             {call-12,0xe5940028},{call-8,0xe28d200c},{call-4,0xe3a01005},{call,branch},{call+4,0xe3500000}};
         for(auto [addr,value]:startCode)write(addr,value);
@@ -181,4 +181,4 @@ static void exercise(FastAudio::Driver driver,bool e3=false) {
     puts("PASS: fast audio profile, PCM/gains, leading silence, pause, fallback, close and reset");
 }
 
-int main(){exercise(FastAudio::Driver::tx);exercise(FastAudio::Driver::e2);exercise(FastAudio::Driver::zire72);exercise(FastAudio::Driver::e2,true);}
+int main(){exercise(FastAudio::Driver::tx);exercise(FastAudio::Driver::e2);exercise(FastAudio::Driver::zire72);exercise(FastAudio::Driver::e2,FastAudio::E3Start);exercise(FastAudio::Driver::e2,{0x205bc180,0x205bc200,0xeb00543b});}

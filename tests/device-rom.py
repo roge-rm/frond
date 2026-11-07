@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 from guest_process import run_guest
 from palm_boot import CORE, CORE_68K, DEVICES_68K, PROFILES, ROM_DEVICES, Core, launcher_check, palm_images, setup_device, reset_recipe, session_file
+from firmware_variants import firmware_variant
 ZIRE_NOR = palm_images() / 'Palm/Zire-72/Palm-Zire72-nor.bin'
 from guest_faults import check_diagnostics, describe, parse_contract, observed_faults
 
@@ -142,6 +143,7 @@ def synthetic_suite(args):
 
 
 def suite(args):
+    variant = getattr(args, 'firmware_variant', None)
     if args.device == 'palm-zire-72' and args.nor is None:
         if args.sha256 and ZIRE_NOR.is_file() and sha(ZIRE_NOR) != args.sha256:
             raise ValueError('NOR does not match the requested SHA-256')
@@ -213,8 +215,8 @@ def suite(args):
             session = self.root / 'launcher.session'
             core = Core(self.image, self.root / 'setup.log')
             try:
-                setup_device(args.device, core, self.root)
-                core.wait_frame(self.root / 'launcher.png', launcher_check(args.device), 60)
+                setup_device(args.device, core, self.root, variant=variant)
+                core.wait_frame(self.root / 'launcher.png', launcher_check(args.device, variant), 60)
                 core.send(f'save-session "{session}"', 'wrote session')
             finally:
                 self.assertEqual(core.close(), 0)
@@ -222,7 +224,7 @@ def suite(args):
             session_hash = sha(session)
             reloaded = Core(session_args(session), self.root / 'reload.log')
             try:
-                reloaded.wait_frame(self.root / 'reloaded.png', launcher_check(args.device), 60)
+                reloaded.wait_frame(self.root / 'reloaded.png', launcher_check(args.device, variant), 60)
             finally:
                 self.assertEqual(reloaded.close(), 0)
             after_hash = sha(session)
@@ -253,8 +255,8 @@ def suite(args):
             before_hash = sha(session)
             core = Core(session_args(session), root / 'guest.log')
             try:
-                core.wait_frame(root / 'before.png', launcher_check(args.device), 60)
-                reset_recipe(args.device)(core, root, hard)
+                core.wait_frame(root / 'before.png', launcher_check(args.device, variant), 60)
+                reset_recipe(args.device, variant)(core, root, hard)
                 core.send(f'save-session "{root / "continued.session"}"', 'wrote session')
             finally:
                 self.assertEqual(core.close(), 0)
@@ -341,6 +343,7 @@ def main():
     parser.add_argument('--nand', type=Path)
     parser.add_argument('--sha256', help='expected NOR SHA-256 from the private inventory')
     parser.add_argument('--engine', choices=('exact', 'fast'), default='exact')
+    parser.add_argument('--variant', help='require this measured firmware variant; otherwise detect from the NOR')
     parser.add_argument('--launcher', action='store_true')
     parser.add_argument('--resets', action='store_true', help="run the profile recipe's measured functional resets")
     parser.add_argument('--expected-faults', type=Path,
@@ -352,16 +355,15 @@ def main():
         parser.error('the Fast engine is not available for 68k devices')
     if args.boot_timeout <= 0:
         parser.error('--boot-timeout must be positive')
-    if args.evidence:
-        try:
-            args.evidence.mkdir(parents=True, exist_ok=False)
-        except FileExistsError:
-            parser.error('Evidence directory already exists: ' + str(args.evidence))
     try:
+        profile = next(p for p in PROFILES if p['name'] == args.device)
+        args.firmware_variant = firmware_variant(args.nor, profile) if args.nor and args.nor.is_file() else None
+        if args.variant and (not args.firmware_variant or args.firmware_variant['id'] != args.variant):
+            raise ValueError('--variant does not match the selected device and NOR')
         if args.resets:
             if not args.launcher:
                 raise ValueError('--resets requires --launcher')
-            reset_recipe(args.device)
+            reset_recipe(args.device, args.firmware_variant)
         if args.expected_faults:
             if args.synthetic_rejection or not args.nor or not args.nor.is_file() or not core_for(args.device).is_file():
                 raise ValueError('expected-faults qualification requires the original NOR and built core')
@@ -380,6 +382,11 @@ def main():
             selected = suite(args)
     except (OSError, ValueError) as error:
         parser.error(str(error))
+    if args.evidence:
+        try:
+            args.evidence.mkdir(parents=True, exist_ok=False)
+        except FileExistsError:
+            parser.error('Evidence directory already exists: ' + str(args.evidence))
     result = unittest.TextTestRunner(verbosity=2).run(selected)
     return 0 if result.wasSuccessful() else 1
 

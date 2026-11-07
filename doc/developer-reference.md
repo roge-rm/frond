@@ -29,7 +29,7 @@ The Palm IIIx has its own runner, `out/frond-68k` (`make out/frond-68k`, install
 | `--mips N` | Target speed in MIPS. Default 100. |
 | `--audio-period FRAMES` | Host audio period, 64 to 8192. Default 512. Low-latency audio sizes its limits from it; Android passes 1024 or more. |
 | `-q`, `--no-sound` | Start with audio off. |
-| `--fast-audio`, `--experimental-fast-audio` | Preview one qualified TX, E2, E3 or Zire 72 stereo stream before the firmware audio queue. The E3 uses the HAL path without an early stream-start hook. |
+| `--fast-audio`, `--experimental-fast-audio` | Preview one qualified TX, E2, E3 or Zire 72 stereo stream before the firmware audio queue. The E3 and E2 de-NVFS image use the HAL path with an ARM stream-start verifier and no Thumb queue hooks. |
 | `--low-latency-queue` | The `--fast-audio` queue limits without the preview, on any device and firmware: low startup thresholds, and the 120 Hz slice and pending caps of 6 and 4 host periods (3072/2048 frames at the default 512) while non-silent frames were queued in the last 100 ms. The frontends pass it for Low-latency audio on ARM devices with sound when the firmware is not qualified for the preview, including modified E3 images and the TG50. |
 | `--gdb PORT` | Wait for GDB on 127.0.0.1:PORT before running, see [GDB and PACE monitor](#gdb-and-pace-monitor). |
 | `--serial off\|pty\|tcp:PORT` | Connect the serial port to a host PTY or a loopback TCP listener (one client at a time). |
@@ -230,7 +230,7 @@ Key names:
 | `home`, `calendar`, `contacts`, `web` | Aliases for `hard1`, `hard2`, `hard3`, `hard4` in that order | all |
 | `up`, `down` | Navigator up and down | all |
 | `left`, `right`, `center` | Navigator left, right and select | TX, E2, Zire 72 |
-| `power` | Power | all |
+| `power` | Power; ignored on E2 de-NVFS | supported firmware |
 | `voice` | Side voice button | Zire 72, TG50 |
 | `home-key` | Separate physical Home key | TG50 |
 | `graffiti` | Graffiti button | TG50 |
@@ -259,7 +259,7 @@ python3 tools/frond-run.py --session ready.frond \
 | `--core PATH` | The core to run. Default `out/frond`. |
 | `--device NAME` | `palm-tx`, `palm-e2`, `palm-zire-72` or `sony-clie-tg50`. |
 | `--session PATH` | Restore a saved session: a machine folder (`sessions/NAME/`) or a `.frond` file. A file brings the card files (`sd.frondsd`, `ms.frondms`, `ms.frondmsp`) beside it along. The run works on a copy. |
-| `--nor FILE`, `--nand FILE` | Cold boot from firmware instead of a session. NAND is needed for the TX and E2 and absent on the Zire. |
+| `--nor FILE`, `--nand FILE` | Cold boot from firmware instead of a session. NAND is needed for the TX, optional for the E2 and absent on the Zire. The 6 MiB E2 de-NVFS image uses `--device palm-e2` and needs no external NAND. |
 | `--output DIR` | New result folder, mode 0700. It must not exist. |
 | `--install FILE` | PRC or PDB. Repeat; installed in order. A reset request resets and waits again before the next one. |
 | `--app NAME` | Exact Palm database name to launch (case matters). |
@@ -562,6 +562,7 @@ The IIIx works as in VS Code, in Eclipse's Terminal view.
 | `FROND_TEST_SHOTS` | Folder to save pictures of the home window and settings to. |
 | `FROND_TEST_E2_NOR`, `FROND_TEST_E2_NAND` | E2 firmware for the running-page picture. |
 | `FROND_TEST_QUALIFIED_NOR` | TX NOR image for the firmware import test. |
+| `FROND_TEST_E2_DENVFS_NOR` | Qualified 6 MiB E2 de-NVFS NOR for desktop and Android raw/session audio checks. Read only; changed-image checks use copies. |
 | `FROND_TEST_TG50_CORE`, `FROND_TEST_TG50_NOR`, `FROND_TEST_TG50_SESSION`, `FROND_TEST_TG50_HOST_SESSION`, `FROND_TEST_TG50_TONE_SESSION`, `FROND_TEST_TG50_SHOTS`, `FROND_TEST_TG50_BT_SOCKET` | TG50 core, firmware, sessions, picture folder and Bluetooth socket for the TG50 desktop tests. |
 | `BENCH_DUMP_RAM` | `1` makes `benchmark-replay` write guest RAM at the start and end. |
 | `BIKE_SESSION`, `FRONDBENCH_SESSION` | Session files for `make speed-check`. No default; a workload without one is skipped. |

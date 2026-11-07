@@ -68,6 +68,28 @@ class DeviceDataTest(unittest.TestCase):
         self.assertIn('id = "palm-e2-franken"', kotlin)
         self.assertIn('hotSyncButton = true', kotlin)
 
+    def test_e2_denvfs_is_additive_firmware_metadata(self):
+        inventory = json.loads((ROOT / 'tools/device-profiles.json').read_text())
+        profiles = {p['name']: p for p in inventory['profiles']}
+        e2 = profiles['palm-e2']
+        self.assertEqual(e2['nor_bytes'], 8 << 20)
+        self.assertEqual(e2['fast_audio_md5'], '2a9faf69b43ba590cfb9ba78e4eef11c')
+        self.assertFalse(e2['explicit_raw_nand'])
+        variant, = e2['firmware_variants']
+        self.assertEqual(variant['id'], 'e2-denvfs')
+        self.assertEqual((variant['nor_bytes'], variant['header_offset']), (6 << 20, 0x20000))
+        self.assertEqual((variant['card_name'], variant['manufacturer']), ('rePalm', 'Dmitry.GR'))
+        self.assertEqual((variant['company_id'], variant['hal_id']), (e2['company_id'], e2['hal_id']))
+        self.assertTrue(variant['card_ends_at_eof'])
+        self.assertFalse(variant['power_supported'])
+        self.assertIn('power', e2['buttons'].split('|'))
+        self.assertEqual(variant['fast_audio_md5'], 'c2d90f775b1737de5bcd11634bf51d7d')
+        self.assertTrue(all(not p['firmware_variants'] for p in inventory['profiles'] if p['name'] != 'palm-e2'))
+        kotlin = next(data for path, data in generator.outputs(inventory).items() if path.suffix == '.kt')
+        self.assertIn('firmwareVariants = listOf(', kotlin)
+        self.assertIn('id = "e2-denvfs"', kotlin)
+        self.assertIn('norSize = 6291456L', kotlin)
+
     def test_memory_stick_sizes(self):
         profiles = {p['name']: p for p in json.loads((ROOT / 'tools/device-profiles.json').read_text())['profiles']}
         self.assertEqual(profiles['sony-clie-tg50']['ms_sizes_mb'], [4, 8, 16, 32, 64, 128])

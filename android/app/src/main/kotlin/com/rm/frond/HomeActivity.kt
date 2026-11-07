@@ -78,6 +78,8 @@ class HomeModel(private val activity: HomeActivity) {
     // Controller mapping per device, and the Palm button waiting for a controller key, if any.
     var controllers by mutableStateOf(emptyMap<Device, ControllerMap>())
         private set
+    var controllerDevices by mutableStateOf(emptyMap<Device, Device>())
+        private set
     var capturing by mutableStateOf<Pair<Device, PalmButton>?>(null)
     // The device whose controls Settings is showing, if any.
     var controlsFor by mutableStateOf<Device?>(null)
@@ -99,7 +101,7 @@ class HomeModel(private val activity: HomeActivity) {
     fun resetController(device: Device) {
         capturing = null
         ControllerMap.reset(activity, device)
-        controllers = controllers + (device to ControllerMap.defaults(device))
+        controllers = controllers + (device to ControllerMap.defaults(controllerDevices[device] ?: device))
     }
 
     private fun setController(device: Device, map: ControllerMap) {
@@ -165,7 +167,8 @@ class HomeModel(private val activity: HomeActivity) {
         sessions = Sessions.list(activity)
         firmwareReady = Device.shown.associateWith { Firmware.ready(activity, it) }
         settings = Settings.load(activity)
-        controllers = Device.shown.associateWith { ControllerMap.load(activity, it) }
+        controllerDevices = Device.shown.associateWith { Firmware.runningDevice(it, null, Firmware.nor(activity, it)) }
+        controllers = controllerDevices.mapValues { (_, device) -> ControllerMap.load(activity, device) }
         cards?.reload()
     }
 
