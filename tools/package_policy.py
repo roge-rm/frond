@@ -4,7 +4,8 @@ import subprocess
 import tarfile
 import tempfile
 
-# Licence files for Dynarmic and its bundled libraries, installed name: path in the Dynarmic source.
+# Licence texts for Dynarmic and its bundled libraries, installed name: path in the Dynarmic source
+# they were copied from. The package takes them from licences/.
 DYNARMIC_LICENCES = {
     'dynarmic-LICENSE': 'LICENSE.txt',
     'fmt-LICENSE': 'externals/fmt/LICENSE',
@@ -15,6 +16,8 @@ DYNARMIC_LICENCES = {
     'zycore-LICENSE': 'externals/zycore/LICENSE',
     'zydis-LICENSE': 'externals/zydis/LICENSE',
 }
+# Other third-party licence texts installed from licences/ under the same name.
+LICENCE_FILES = ('argparse-LICENSE', 'zip-UNLICENSE', 'monocypher-LICENCE', 'nanopb-LICENSE', *DYNARMIC_LICENCES)
 # Docs installed under usr/share/doc/frond/ (using-frond.md is installed as README).
 DOCS = ('developer-reference.md', 'testing.md', 'performance.md', 'adding-a-device.md')
 FILES = {
@@ -25,9 +28,7 @@ FILES = {
     'usr/share/icons/hicolor/scalable/apps/frond.svg': 0o644,
     'usr/share/mime/packages/frond.xml': 0o644,
     **{f'usr/share/doc/frond/{name}': 0o644 for name in (
-        'copyright', 'LICENSE', 'argparse-LICENSE', 'zip-UNLICENSE', 'README',
-        *DOCS, 'changelog.gz')},
-    **{f'usr/share/doc/frond/{name}': 0o644 for name in DYNARMIC_LICENCES},
+        'copyright', 'LICENSE', 'README', *LICENCE_FILES, *DOCS, 'changelog.gz')},
 }
 RUNTIME_PACKAGES = ('mtools', 'libslirp0', 'qt6-qpa-plugins', 'qt6-wayland',
                     'libqt6svg6', 'hicolor-icon-theme')

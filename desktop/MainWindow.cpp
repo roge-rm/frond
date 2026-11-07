@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "LicencesDialog.h"
 #include "FirmwareInput.h"
 #include "SdExchangeDialog.h"
 #include "MemoryStickFilesDialog.h"
@@ -474,7 +475,17 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
                "Palm OS button assignments may change what the application buttons do."));
     });
     help->addAction(tr("&About Frond"), this, [this] {
-        QMessageBox::about(this, tr("About Frond"), tr("Frond %1\nExperimental Palm TX, Tungsten E2, Zire 72, Sony CLIÉ TG50 and Palm IIIx emulator\nGPL-3.0-or-later").arg(QStringLiteral(FROND_VERSION)));
+        QMessageBox box(QMessageBox::NoIcon, tr("About Frond"),
+            tr("<p><b>Frond %1</b><br>A Palm OS emulator.</p>"
+               "<p>Copyright Frond, CloudpilotEmu and uARM authors.<br>"
+               "GPL-3.0-or-later, with no warranty.</p>"
+               "<p><a href=\"https://github.com/roge-rm/frond\">github.com/roge-rm/frond</a></p>")
+                .arg(QStringLiteral(FROND_VERSION)), QMessageBox::Close, this);
+        box.setTextFormat(Qt::RichText);
+        box.setTextInteractionFlags(Qt::TextBrowserInteraction);
+        auto* licences = box.addButton(tr("Licences"), QMessageBox::ActionRole);
+        // Any button closes the box, so the licences open from here and the box comes back.
+        do box.exec(); while (box.clickedButton() == licences && (showLicences(this), true));
     });
     connect(&client, &DesktopClient::diagnostic, this, [this](const QString& text) {
         log->moveCursor(QTextCursor::End); log->insertPlainText(text);

@@ -118,6 +118,10 @@ fun HomeScreen(model: HomeModel) {
                                 menu = false
                                 model.settingsOpen = true
                             })
+                            DropdownMenuItem(text = { Text("About") }, onClick = {
+                                menu = false
+                                model.aboutOpen = true
+                            })
                         }
                     }
                 },

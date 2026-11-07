@@ -35,6 +35,7 @@
 #include <QTcpSocket>
 #include <QImage>
 #include "MainWindow.h"
+#include "LicencesDialog.h"
 #include "LinkClient.h"
 #include "LinkCommon.h"
 #include "ConnectionsWindow.h"
@@ -4922,6 +4923,14 @@ for line in s.makefile('rb'):
         QVERIFY(!storedPeer(ha, b.client.hello().value("id").toString()).isEmpty());
         QCOMPARE(storedPeer(ha, b.client.hello().value("id").toString()).value("address").toString(), QString("[::1]:%1").arg(b.client.hello().value("port").toInt()));
         killHub(a); killHub(b);
+    }
+    // The Licences text lists every desktop component with its notice.
+    void licencesNotices() {
+        const QString text = thirdPartyNotices();
+        for (const char* name : {"argparse", "Monocypher", "Dynarmic", "Zydis", "xbyak", "Permission is hereby granted"})
+            QVERIFY2(text.contains(name), name);
+        QVERIFY(!text.contains("SDL2_image"));
+        QVERIFY(text.size() > 10000);
     }
 };
 int main(int argc, char** argv) {

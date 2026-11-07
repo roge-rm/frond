@@ -178,8 +178,7 @@ class PackagePolicyTests(unittest.TestCase):
         # This never packages Frond binaries or takes inputs from a user's home directory.
         with tempfile.TemporaryDirectory(prefix='frond-synthetic-deb-') as temporary:
             root = Path(temporary)
-            for name in ('out', 'packaging', 'doc', 'vendor/cloudpilot/src/argparse',
-                         'vendor/cloudpilot/src/common/zip'):
+            for name in ('out', 'packaging', 'doc', 'licences'):
                 (root / name).mkdir(parents=True)
             (root / 'VERSION').write_text('0.2.0\n')
             (root / 'packaging/debian-revision').write_text('1\n')
@@ -187,9 +186,7 @@ class PackagePolicyTests(unittest.TestCase):
                          'packaging/frond-mime.xml', 'packaging/copyright', 'doc/using-frond.md',
                          'doc/developer-reference.md', 'doc/testing.md', 'doc/performance.md',
                          'doc/adding-a-device.md',
-                         'vendor/cloudpilot/src/argparse/LICENSE',
-                         'vendor/cloudpilot/src/common/zip/UNLICENSE',
-                         *(f'build/dynarmic-trial/src/{path}' for path in policy.DYNARMIC_LICENCES.values())):
+                         *(f'licences/{name}' for name in policy.LICENCE_FILES)):
                 (root / name).parent.mkdir(parents=True, exist_ok=True)
                 (root / name).write_text('Synthetic fixture, not a Frond release.\n')
             source = root / 'dummy.c'

@@ -17,6 +17,12 @@ The argparse component is copyright (c) 2018 Pranav Srinivas Kumar and is
 MIT licensed; its full notice is in argparse-LICENSE in this directory.
 The zip component's public-domain dedication and fallback licence are in
 zip-UNLICENSE in this directory. Embedded miniz retains its source notices.
+The device link code (Connections) uses Monocypher, copyright (c) 2017-2023
+Loup Vaillant, Michael Savage and Fabio Scotoni. Frond uses it under CC0 (the
+BSD-2-Clause alternative is the fallback); its notice is in monocypher-LICENCE
+in this directory.
+The 68k core uses nanopb, copyright (c) 2011 Petteri Aimonen, under the zlib
+licence; its notice is in nanopb-LICENSE in this directory.
 The Fast engine uses Dynarmic, copyright (c) 2017 merryhime, under the 0BSD
 licence, with bundled fmt, mcl, oaknut, robin-map, zycore and zydis (MIT) and
 xbyak (BSD-3-Clause). Their notices are in dynarmic-LICENSE, fmt-LICENSE,
