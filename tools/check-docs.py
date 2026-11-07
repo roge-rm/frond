@@ -60,6 +60,8 @@ def collect():
     gdb = under(core, 'uarm/gdbstub.cpp')
 
     items['option'] = find(r'"(--[a-z0-9-]+)"', ' '.join(re.findall(r'add_argument\([^)]*\)', main)))
+    # Modes taken before the option parser, such as --card.
+    items['option'] |= find(r'argv\[1\]\) == "(--[a-z0-9-]+)"', main)
     items['option'] |= find(r"add_argument\('(--[a-z0-9-]+)'", read(ROOT / 'tools/frond-run.py'))
     items['option'] |= {'--' + n for n in find(r'addOption\(\{"([a-z-]+)"', read(ROOT / 'desktop/main.cpp'))}
     items['console'] = find(r'\.name = "([a-z0-9-]+)"', commands)
