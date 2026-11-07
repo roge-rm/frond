@@ -5,6 +5,12 @@
 #include "Dialogs.h"
 #include "FirmwareStore.h"
 #include "AudioQualification.h"
+#include "ConnectionsWindow.h"
+#include "LinkCommon.h"
+#include "CardsWindow.h"
+#include <QCoreApplication>
+#include <QFileSystemWatcher>
+#include <QJsonObject>
 #include <QListWidget>
 #include <QMenu>
 #include <QPainter>
@@ -37,6 +43,7 @@
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QRadioButton>
 #include <QStandardPaths>
 #include <QStatusBar>
 #include <QTimer>
@@ -53,6 +60,7 @@ static QString siblingCore68k(const QString& core) {
 
 MainWindow::MainWindow(const QString& core, const QString& core68k)
     : core(core), core68k(core68k.isEmpty() ? siblingCore68k(core) : core68k) {
+    frondCards::defaultCore() = core;
     setWindowTitle(tr("Frond"));
     resize(620, 650);
     restoreGeometry(settings.value("windowGeometry").toByteArray());
@@ -155,56 +163,33 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     // The buttons shown depend on the card's state; refresh() picks them.
     storageHeading = section(tr("SD card"));
     storageHeading->setObjectName("storageHeading");
+    // One row: the card in the slot (opens the picker), its state when the buttons don't say it
+    // (Ejected, or why there's no button) and the card's buttons. A linked card held elsewhere
+    // shows where it is, and Insert once it is free.
+    auto* cardRow = new QHBoxLayout;
+    cardPick = button(tr("No card"), "cardPick", true);
     sdStatus = new QLabel(tr("Not known"), root);
     sdStatus->setObjectName("sdState");
-    layout->addWidget(sdStatus);
-    auto* cardRow = new QHBoxLayout;
+    cardRow->addWidget(cardPick);
+    cardRow->addWidget(sdStatus);
     sdReinsert = button(tr("Insert"), "sdInsert", true);
     sdExchange = button(tr("Files"), "sdExchange", true);
     sdEject = button(tr("Eject"), "sdEject", true);
     sdExport = button(tr("Export image"), "sdExport", true);
-    sdCreate = button(tr("New card"), "sdNew", true);
-    sdImport = button(tr("Insert image"), "sdInsertImage", true);
     sdRetry = button(tr("Try again"), "sdRetry", true);
-    for (auto* b : {sdReinsert, sdExchange, sdEject, sdExport, sdCreate, sdImport, sdRetry}) cardRow->addWidget(b);
+    for (auto* b : {sdReinsert, sdExchange, sdEject, sdExport, sdRetry}) cardRow->addWidget(b);
     cardRow->addStretch();
     layout->addLayout(cardRow);
-    const auto replaceCard = [this] {
-        return !cardPresent || QMessageBox::question(this, tr("Replace the ejected card?"),
-            tr("Its files are lost unless you export the image first."),
-            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes;
-    };
-    connect(sdCreate, &QPushButton::clicked, this, [this, replaceCard] {
-        if (!replaceCard()) return;
-        // SD: 32 MB to the device's largest card; "2 GB" is 1886 MiB like a real 2 GB card.
-        // Memory Stick: the classic sizes the device takes, 128 MB first, then Memory Stick Pro.
-        const auto& profile = frondFirmware::profile(runningDevice);
-        QStringList labels;
-        QList<int> sizes;
-        if (memoryStick()) {
-            for (int mb : {128, 64, 32, 16, 8, 4})
-                if (profile.msSizes & uint32_t(mb)) sizes << mb;
-            for (int mib : {256, 512, 1024, 1886})
-                if (uint32_t(mib) <= profile.msProMaxMib) sizes << mib;
-        } else {
-            for (int mib : {32, 64, 128, 256, 512, 1024, 1886}) {
-                const auto bytes = quint64(mib) << 20;
-                if (bytes >= profile.sdMin && bytes <= profile.sdMax) sizes << mib;
-            }
-        }
-        for (int mib : sizes) {
-            const auto label = mib >= 1024 ? tr("%1 GB").arg((mib + 512) / 1024) : tr("%1 MB").arg(mib);
-            labels << (memoryStick() && mib > 128 ? tr("%1 Pro").arg(label) : label);
-        }
-        if (sizes.isEmpty()) return;
-        bool ok;
-        const auto size = QInputDialog::getItem(this, tr("New card"), tr("Size"), labels, 0, false, &ok);
-        if (ok && labels.contains(size)) send(cardCommand("create"), QString::number(sizes.value(labels.indexOf(size))));
-    });
-    connect(sdImport, &QPushButton::clicked, this, [this, replaceCard] {
-        if (!replaceCard()) return;
-        const auto file = QFileDialog::getOpenFileName(this, tr("Insert image"), {}, memoryStick() ? tr("Memory Stick images (*.frondms *.img);;All files (*)") : tr("SD images (*.img *.bin);;All files (*)"));
-        if (!file.isEmpty()) send(cardCommand("insert"), QFileInfo(file).absoluteFilePath());
+    auto* linkedRow = new QHBoxLayout;
+    linkedState = new QLabel(root);
+    linkedState->setObjectName("linkedState");
+    linkedInsert = button(tr("Insert"), "linkedInsert", true);
+    linkedRow->addWidget(linkedState); linkedRow->addWidget(linkedInsert); linkedRow->addStretch();
+    layout->addLayout(linkedRow);
+    connect(cardPick, &QPushButton::clicked, this, &MainWindow::pickCard);
+    connect(linkedInsert, &QPushButton::clicked, this, [this] {
+        const auto slot = frondCards::readSlot(runningMachineDir());
+        if (!slot.link.isEmpty() && !cardPresent) changeCard(slot.link);
     });
     connect(sdEject, &QPushButton::clicked, this, [this] {
         if (QMessageBox::question(this, tr("Eject the card?"), tr("Close any files open on the Palm first."),
@@ -285,14 +270,11 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             if (client.available()) send("serial-mode", serialArgument());
             return;
         }
-        settings.setValue("serialMode", serial->currentData());
-        settings.setValue("serialPort", serialPort->value());
         refresh();
     };
     connect(serial, qOverload<int>(&QComboBox::activated), this, serialChanged);
     connect(serialPort, &QSpinBox::editingFinished, this, [this, serialChanged] {
-        if (client.running() ? serial->currentData() == "tcp" : serialPort->value() != settings.value("serialPort", 5023).toInt())
-            serialChanged();
+        if (serial->currentData() == "tcp") serialChanged();
     });
     showSerial({});
     usb = new QComboBox(root);
@@ -316,21 +298,18 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             if (client.available()) send("usb-mode", usbArgument());
             return;
         }
-        settings.setValue("usbMode", usb->currentData());
-        settings.setValue("usbPort", usbPort->value());
         refresh();
     };
     connect(usb, qOverload<int>(&QComboBox::activated), this, usbChanged);
     connect(usbPort, &QSpinBox::editingFinished, this, [this, usbChanged] {
-        if (client.running() ? usb->currentData() == "tcp" : usbPort->value() != settings.value("usbPort", 5024).toInt())
-            usbChanged();
+        if (usb->currentData() == "tcp") usbChanged();
     });
     showUsb({});
     irda=new QComboBox(root);irda->setObjectName("irdaMode");
     irda->addItem(tr("Off"),"off");
     irda->addItem(tr("Terminal (PTY)"),"pty");
     irda->addItem(tr("Wait for a peer"),"tcp");
-    irda->setToolTip(tr("Link two Frond instances with tools/link-irda.py."));
+    irda->setToolTip(tr("Pick a connection to beam to another Frond. Pair them in File > Connections."));
     irdaPort=new QSpinBox(root);irdaPort->setObjectName("irdaPort");
     irdaPort->setRange(1,65535);irdaPort->setPrefix(tr("Port "));loadIrdaSettings();
     label(tr("Infrared beaming"), 8); grid->addWidget(irda, 8, 1); grid->addWidget(irdaPort, 8, 2);
@@ -338,7 +317,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     irdaState->setTextInteractionFlags(Qt::TextSelectableByMouse);grid->addWidget(irdaState, 9, 1, 1, 2);
     auto irdaChanged=[this] {
         if(client.running()){if(client.available())send("irda-mode",irdaArgument());return;}
-        settings.setValue("irdaMode",irda->currentData());settings.setValue("irdaPort",irdaPort->value());refresh();
+        refresh();
     };
     connect(irda,qOverload<int>(&QComboBox::activated),this,irdaChanged);
     connect(irdaPort,&QSpinBox::editingFinished,this,[this,irdaChanged]{if(irda->currentData()=="tcp")irdaChanged();});
@@ -442,8 +421,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     connect(logButton, &QPushButton::clicked, logDialog, &QWidget::show);
     auto bluetoothChanged = [this] {
         if (client.running()) { if (client.available()) send("bluetooth-mode", bluetoothArgument()); return; }
-        settings.setValue("bluetoothEnabled", bluetooth->isChecked());
-        settings.setValue("bluetoothSocket", bluetoothSocket->text()); refresh();
+        refresh();
     };
     connect(bluetooth, &QCheckBox::clicked, this, bluetoothChanged);
     connect(bluetoothSocket, &QLineEdit::editingFinished, this, bluetoothChanged);
@@ -477,6 +455,8 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     auto* file = menuBar()->addMenu(tr("&File"));
     importAction = file->addAction(tr("&Import session…"), this, &MainWindow::importSessionDialog);
     importAction->setShortcut(QKeySequence::Open);
+    file->addAction(tr("C&ards…"), this, [this] { showCards(); })->setObjectName("cardsAction");
+    file->addAction(tr("&Connections…"), this, &MainWindow::showConnections)->setObjectName("connectionsAction");
     file->addAction(tr("&Firmware…"), this, [this] { showFirmware(); });
     file->addAction(tr("&Settings…"), this, [this] { settingsDialog->exec(); });
     file->addSeparator();
@@ -526,7 +506,12 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         busy = false; stopping = false; hardResetAfterSave = false; cardPresent = cardInserted = false; runningDevice = frondFirmware::Device::tx;
         copyLock.reset(); savingPath.clear();
         frondSessions::removeStaging(copyStaging); copyStaging.clear(); pendingCopy.clear();
-        sdKnown = protectionKnown = false; showSerial({}); loadSerialSettings(); showUsb({}); loadUsbSettings(); showIrda({}); loadIrdaSettings(); showBluetooth({}); loadBluetoothSettings(); sessionLock.reset(); forceButton->hide(); refreshSessions();
+        // A linked card goes back to the drawer once the final save is in, under the session lock.
+        if (finalSaved && sessionLock)
+            if (const auto error = frondCards::releaseAtClose(sessionFolder(), frondSessions::machineDirOf(sessionPath)); !error.isEmpty())
+                log->appendPlainText(error);
+        finalSaved = false; linkedWatcher.reset(); linkedWatcherId.clear(); linkedHolder.clear(); cardMove = {};
+        sdKnown = protectionKnown = false; showSerial({}); loadSerialSettings(); showUsb({}); loadUsbSettings(); showIrda({}); link.setSticky("ir", {}); irdaLinkText.clear(); loadIrdaSettings(); showBluetooth({}); loadBluetoothSettings(); sessionLock.reset(); forceButton->hide(); refreshSessions();
         if (closeAfterStop) { allowClose = true; close(); }
         else statusBar()->showMessage(tr("Stopped."));
     });
@@ -540,6 +525,19 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     connect(&client, &DesktopClient::usbState, this, [this](const QString& state) { showUsb(state); });
     connect(&client, &DesktopClient::bluetoothState, this, &MainWindow::showBluetooth);
     connect(&client,&DesktopClient::infraredState,this,[this](const QString& state){showIrda(state);});
+    connect(&link, &LinkClient::message, this, [this](const QJsonObject& m) {
+        const auto type = m.value("type").toString();
+        if (type == "ir") showIrdaLink(m);
+        else if (type == "state") refreshIrdaChoices();
+    });
+    storeWatcher = new QFileSystemWatcher(this);
+    if (QDir().mkpath(frondLink::storeFolder())) storeWatcher->addPath(frondLink::storeFolder());
+    connect(storeWatcher, &QFileSystemWatcher::directoryChanged, this, [this] { refreshIrdaChoices(); });
+    connect(&client, &DesktopClient::cardState, this, [this](const QString& state) {
+        if (state != "inserted") return;
+        sdKnown = cardPresent = cardInserted = true;
+        refresh();
+    });
     connect(&client, &DesktopClient::sdProgress, this, [this](qint64 done, qint64 total) {
         if (cardProgress && total > 0) cardProgress->setValue(int(done * 1000 / total));
     });
@@ -547,6 +545,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (cardProgress) { cardProgress->hide(); cardProgress->deleteLater(); cardProgress = nullptr; }
         busy = false; forceButton->hide(); refresh();
         if (memoryStickFiles && QStringList({"ms-files", "ms-get", "ms-put", "ms-mkdir", "ms-delete", "ms-rename"}).contains(command)) return;
+        if (!ok && cardMove.stage != CardMove::None) { cardMoveFailed(command, message); return; }
         if (!ok && exchangeStage != ExchangeStage::None) { exchangeResult(false, message); return; }
         if (!ok) {
             if (code == "cancelled" && !stopping) { statusBar()->showMessage(tr("Cancelled.")); return; }
@@ -610,12 +609,15 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         else if (command == "sd-create" || command == "sd-insert" || command == "sd-reinsert" ||
                  command == "ms-create" || command == "ms-insert" || command == "ms-reinsert") cardPresent = cardInserted = true;
         else if (command == "sd-eject" || command == "ms-eject") cardInserted = false;
+        else if (command == "sd-take-out" || command == "ms-take-out") cardPresent = cardInserted = false;
+        else if (command == "sd-put-in" || command == "ms-put-in") cardPresent = cardInserted = true;
         if ((command.startsWith("sd-") || command.startsWith("ms-")) &&
             command != "sd-state" && command != "ms-state") sdKnown = true;
         if (command == "ms-protection" || command == "ms-read-only") {
             protectionKnown = message == "read-only" || message == "writable";
             cardReadOnly->setChecked(message == "read-only");
         }
+        if (cardMove.stage != CardMove::None && continueCardMove(command, message)) return;
         if (exchangeStage != ExchangeStage::None) { exchangeResult(true, message); return; }
         if (command == "network-state" || command == "network-mode") {
             const auto index = network->findData(message);
@@ -635,22 +637,17 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             runningPreferences.contrastSet = true;
             if (const auto error = frondSessions::writePreferences(sessionPath, runningPreferences); !error.isEmpty()) failure(error);
         }
-        if (command == "serial-mode") {
-            settings.setValue("serialMode", serial->currentData());
-            if (serial->currentData() == "tcp") settings.setValue("serialPort", serialPort->value());
-        }
+        if (command == "serial-mode") { runningPreferences.serial = serialArgument(); savePeripherals(); }
         if (command == "serial-state" || command == "serial-mode") showSerial(message);
-        if (command == "usb-mode") {
-            settings.setValue("usbMode", usb->currentData());
-            if (usb->currentData() == "tcp") settings.setValue("usbPort", usbPort->value());
-        }
+        if (command == "usb-mode") { runningPreferences.usb = usbArgument(); savePeripherals(); }
         if (command == "usb-state" || command == "usb-mode") showUsb(message);
+        if (command == "irda-mode") { runningPreferences.infrared = irdaChoice(); savePeripherals(); attachInfrared(); }
         if(command=="irda-state" || command=="irda-mode")showIrda(message);
         if(command=="bluetooth-state" || command=="bluetooth-mode") {
             showBluetooth(message);
             if(command=="bluetooth-mode") {
-                settings.setValue("bluetoothEnabled", bluetooth->isChecked());
-                if(bluetooth->isChecked())settings.setValue("bluetoothSocket", bluetoothSocket->text());
+                runningPreferences.bluetooth = bluetooth->isChecked() ? "socket:" + bluetoothSocket->text() : QStringLiteral("off");
+                savePeripherals();
             }
         }
         refresh();
@@ -662,11 +659,13 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             send(command == "ms-state" && cardPresent ? "ms-protection" : "network-state"); return;
         }
         if (command == "ms-protection" && !stopping) { send("network-state"); return; }
-        if ((command == "ms-create" || command == "ms-insert" || command == "ms-reinsert") && !stopping) { send("ms-protection"); return; }
+        if ((command == "ms-create" || command == "ms-insert" || command == "ms-reinsert" || command == "ms-put-in") && !stopping) { send("ms-protection"); return; }
         statusBar()->showMessage(command == "save" ? tr("Saved.") : tr("Running. Sessions save automatically on close."));
         const bool savedWorkingCopy = command == "save" && savingPath == sessionPath;
         if (command == "save") {
             if (savedWorkingCopy) {
+                frondCards::clearSwap(frondSessions::machineDirOf(sessionPath));
+                if (stopping) finalSaved = true;
                 settings.setValue("lastSession", sessionPath); settings.sync();
                 QFile::remove(frondSessions::markerPath(sessionPath));
                 QFile::remove(frondSessions::workPath(sessionPath));
@@ -674,7 +673,10 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             }
             if (!savedWorkingCopy) {
                 auto error = frondSessions::writePreferences(savingPath, runningPreferences);
-                // Save a Copy wrote into a staging folder; it replaces the destination only now.
+                // Save a Copy wrote into a staging folder; it replaces the destination only now. It
+                // carries slot.json as an export does.
+                if (error.isEmpty() && !pendingCopy.isEmpty())
+                    error = frondCards::stageSlot(runningMachineDir(), frondSessions::machineDirOf(savingPath));
                 if (error.isEmpty() && !pendingCopy.isEmpty()) error = frondSessions::publishStaged(copyStaging, pendingCopy);
                 if (!pendingCopy.isEmpty()) frondSessions::removeStaging(copyStaging);
                 pendingCopy.clear(); copyStaging.clear();
@@ -694,6 +696,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     });
     networkTip = network->toolTip(); keyboardTip = keyboard->toolTip(); serialTip = serial->toolTip();
     usbTip = usb->toolTip(); irdaTip=irda->toolTip();
+    frondCards::startUp(sessionFolder());
     refreshSessions();
     statusBar()->showMessage(tr("Ready. Sessions are saved automatically when you close Frond."));
     QTimer::singleShot(0, this, [this] {
@@ -762,6 +765,7 @@ void MainWindow::refresh() {
     usbPort->setEnabled(editable && caps.usb && usb->currentData() == "tcp");
     irda->setEnabled(editable && caps.infrared && !keyboard->isChecked());
     irdaPort->setEnabled(editable && caps.infrared && !keyboard->isChecked() && irda->currentData()=="tcp");
+    irdaPort->setVisible(!irda->currentData().toString().startsWith("link:"));
     bluetooth->setEnabled(editable && caps.bluetooth);
     bluetoothSocket->setEnabled(editable && caps.bluetooth && bluetooth->isChecked());
     bluetooth->setToolTip(caps.bluetooth ? tr("See doc/using-frond.md (Bluetooth) for controller setup.") : reason);
@@ -770,18 +774,40 @@ void MainWindow::refresh() {
     const bool supported = storageSupported();
     storageHeading->setText(memoryStick ? tr("Memory Stick") : tr("SD card"));
     storageHeading->setVisible(!m68k);
-    sdStatus->setVisible(!m68k);
     storageHeading->setEnabled(supported);
     sdStatus->setEnabled(supported);
     const bool known = sdKnown && running && supported;
     sdStatus->setText(!supported ? tr("Not available yet") : !known ? tr("Not known") : !cardPresent ? tr("No card") : cardInserted ? tr("Inserted") : tr("Ejected"));
+    // The picker button already says "No card" or the card's name, and Eject shows it's in.
+    sdStatus->setVisible(!m68k && (!known || (cardPresent && !cardInserted)));
     sdReinsert->setVisible(known && cardPresent && !cardInserted);
     sdExchange->setVisible(known && cardPresent && (!memoryStick || cardInserted));
     sdEject->setVisible(known && cardInserted);
     sdExport->setVisible(known && cardPresent && !cardInserted);
-    sdCreate->setVisible(known && !cardInserted); sdImport->setVisible(known && !cardInserted);
     sdRetry->setVisible(!known || (memoryStick && cardPresent && !protectionKnown));
-    for (auto* b : {sdReinsert, sdExchange, sdEject, sdExport, sdCreate, sdImport, sdRetry}) {
+    cardPick->setVisible(known);
+    cardPick->setText(known ? runningCardName() : tr("No card"));
+    // A linked card held by another machine, or free to go in.
+    const auto slot = running ? frondCards::readSlot(runningMachineDir()) : frondCards::Slot{};
+    QString linkedText;
+    bool linkedFree = false;
+    if (known && !cardPresent && !slot.link.isEmpty()) {
+        frondCards::Card card;
+        const auto library = frondCards::libraryFor(sessionFolder());
+        if (frondCards::readCard(frondCards::entryDir(library, slot.link), &card)) {
+            linkedFree = QFileInfo(frondCards::entryDir(library, slot.link) + '/' + frondCards::fileOfKind(card.kind)).isFile();
+            linkedText = linkedFree ? tr("%1 is free").arg(card.name)
+                                    : card.machine.isEmpty() ? tr("%1 is in another machine").arg(card.name) : tr("%1 is in %2").arg(card.name, card.machine);
+        }
+    }
+    if (running && !slot.link.isEmpty() && linkedWatcherId != slot.link) {
+        linkedWatcherId = slot.link;
+        linkedWatcher = std::make_unique<frondCards::FreeWatcher>(frondCards::libraryFor(sessionFolder()), slot.link, [this](bool) { refresh(); });
+    }
+    linkedState->setText(linkedText);
+    linkedState->setVisible(!linkedText.isEmpty() && supported);
+    linkedInsert->setVisible(linkedFree && supported);
+    for (auto* b : {cardPick, sdReinsert, sdExchange, sdEject, sdExport, sdRetry, linkedInsert}) {
         if (!supported) b->setVisible(false);
         b->setEnabled(enabled && supported);
     }
@@ -904,17 +930,44 @@ QMenu* MainWindow::rowMenu(const QString& path, QWidget* parent) {
 frondSessions::Preferences MainWindow::defaultPreferences(frondFirmware::Device device) const {
     const frondSessions::Preferences fresh;
     const auto scale = fittingScaleQuarters(device, fresh.showKeyboard, fresh.jogControls);
-    return {std::clamp(settings.value("windowScale", scale).toInt(), 4, 8),
+    frondSessions::Preferences prefs{std::clamp(settings.value("windowScale", scale).toInt(), 4, 8),
             settings.value("smoothLcd", false).toBool(), settings.value("audio", true).toBool(),
             settings.value("fastAudio", false).toBool()};
+    // A new machine starts with its peripherals off.
+    prefs.peripheralsSet = true;
+    return prefs;
+}
+void MainWindow::migratePeripherals(frondSessions::Preferences* prefs) {
+    if (prefs->peripheralsSet) return;
+    auto mode = [this](const char* key, const char* portKey, int port) {
+        const auto value = settings.value(key, "off").toString();
+        return value == "tcp" ? "tcp:" + QString::number(settings.value(portKey, port).toInt()) : value == "pty" ? value : QStringLiteral("off");
+    };
+    prefs->serial = mode("serialMode", "serialPort", 5023);
+    prefs->usb = mode("usbMode", "usbPort", 5024);
+    prefs->infrared = mode("irdaMode", "irdaPort", 5030);
+    const auto socket = settings.value("bluetoothSocket").toString();
+    prefs->bluetooth = settings.value("bluetoothEnabled", false).toBool() && !socket.isEmpty() ? "socket:" + socket : QStringLiteral("off");
+    prefs->peripheralsSet = true;
+}
+void MainWindow::savePeripherals() {
+    if (sessionPath.isEmpty()) return;
+    runningPreferences.peripheralsSet = true;
+    if (const auto error = frondSessions::writePreferences(sessionPath, runningPreferences); !error.isEmpty()) failure(error);
 }
 QString MainWindow::loadPreferences(const QString& path, frondFirmware::Device device, frondSessions::Preferences* prefs) {
-    if (frondSessions::readPreferences(path, prefs)) return {};
+    if (frondSessions::readPreferences(path, prefs)) {
+        if (prefs->peripheralsSet) return {};
+        migratePeripherals(prefs);
+        return frondSessions::writePreferences(path, *prefs);
+    }
     if (QFileInfo::exists(frondSessions::preferencesPath(path))) return tr("Couldn't read the machine settings.");
     *prefs = defaultPreferences(device);
     // New machines write their settings when added, so a missing file is a machine from before the
-    // choice: it keeps the controls left of the screen.
+    // choice: it keeps the controls left of the screen and takes the old global peripherals.
     prefs->jogControls = frondSessions::JogControls::screen;
+    prefs->peripheralsSet = false;
+    migratePeripherals(prefs);
     return frondSessions::writePreferences(path, *prefs);
 }
 void MainWindow::editSession(const QString& path) {
@@ -944,10 +997,54 @@ void MainWindow::renameSession(const QString& path) {
         settings.setValue("lastSession", canonicalSession(renamed));
     refreshSessions(renamed);
 }
-// A running or open machine can't be duplicated; stop it first.
+// A running or open machine can't be duplicated; stop it first. A machine with a card asks once
+// what the copy gets: the same card linked (first), a copy of it, or no card.
 void MainWindow::duplicateSession(const QString& path) {
     if (client.running() || busy) return;
     const auto info = infoFor(path);
+    auto choice = frondSessions::CardChoice::copy;
+    if (info.saved && !info.old) {
+        const auto dir = frondSessions::machineDirOf(info.path);
+        frondCards::reconcile(sessionFolder());
+        const auto slot = frondCards::readSlot(dir);
+        const auto cardName = frondCards::cardNameOf(sessionFolder(), dir);
+        const bool holds = !frondCards::cardFileIn(dir).isEmpty() && !slot.card.isEmpty();
+        if (!cardName.isEmpty() && (holds || !slot.link.isEmpty())) {
+            QDialog dialog(this);
+            dialog.setObjectName("duplicateCard");
+            dialog.setWindowTitle(tr("Duplicate %1").arg(info.name));
+            auto* layout = new QVBoxLayout(&dialog);
+            auto* link = new QRadioButton(tr("Link %1").arg(cardName), &dialog);
+            link->setObjectName("duplicateLink");
+            auto* copy = new QRadioButton(tr("Copy %1").arg(cardName), &dialog);
+            copy->setObjectName("duplicateCopy");
+            auto* none = new QRadioButton(tr("No card"), &dialog);
+            none->setObjectName("duplicateNone");
+            auto* clause = new QLabel(&dialog);
+            clause->setObjectName("duplicateClause");
+            clause->setWordWrap(true);
+            for (auto* r : {link, copy, none}) layout->addWidget(r);
+            layout->addWidget(clause);
+            copy->setVisible(holds);
+            link->setChecked(true);
+            const auto copyName = frondCards::freeCardName(frondCards::libraryFor(sessionFolder()), cardName);
+            auto update = [&] {
+                clause->setText(link->isChecked() ? tr("The copy shares %1 with %2.").arg(cardName, info.name)
+                                : copy->isChecked() ? tr("The copy gets its own card, %1.").arg(copyName)
+                                                    : tr("The copy has no card."));
+            };
+            for (auto* r : {link, copy, none}) connect(r, &QRadioButton::toggled, &dialog, update);
+            update();
+            auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+            buttons->button(QDialogButtonBox::Ok)->setText(tr("Duplicate"));
+            layout->addWidget(buttons);
+            connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+            connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+            if (dialog.exec() != QDialog::Accepted) return;
+            choice = link->isChecked() ? frondSessions::CardChoice::link
+                   : copy->isChecked() ? frondSessions::CardChoice::copy : frondSessions::CardChoice::none;
+        }
+    }
     QProgressDialog dialog(tr("Duplicating %1…").arg(info.name), tr("Cancel"), 0, 1000, this);
     dialog.setObjectName("duplicateProgress");
     dialog.setWindowModality(Qt::WindowModal);
@@ -958,11 +1055,12 @@ void MainWindow::duplicateSession(const QString& path) {
         dialog.setValue(total > 0 ? int(done * 1000 / total) : 0);
         QCoreApplication::processEvents();
         return !dialog.wasCanceled();
-    });
+    }, choice);
     const bool cancelled = dialog.wasCanceled();
     dialog.close();
     if (!error.isEmpty() && !cancelled) failure(error);
     refreshSessions(error.isEmpty() ? frondSessions::filePath(sessionFolder(), name) : QString());
+    if (cardsWindow) cardsWindow->refresh();
 }
 void MainWindow::exportSession(const QString& path) {
     const auto info = infoFor(path);
@@ -976,10 +1074,26 @@ void MainWindow::exportSession(const QString& path) {
 }
 void MainWindow::deleteSession(const QString& path) {
     const auto info = infoFor(path);
-    if (QMessageBox::question(this, tr("Delete"), tr("Delete %1?").arg(info.name),
+    // A card in the machine goes back to Cards; the dialog says so.
+    QString question = tr("Delete %1?").arg(info.name);
+    if (info.saved && !info.old) {
+        const auto dir = frondSessions::machineDirOf(info.path);
+        frondCards::reconcile(sessionFolder());
+        const auto slot = frondCards::readSlot(dir);
+        quint32 version = 0;
+        frondCards::descriptorsOf(info.path, &version);
+        if (!frondCards::cardFileIn(dir).isEmpty() && !slot.card.isEmpty())
+            question += ' ' + tr("Its card %1 stays in Cards.").arg(frondCards::cardNameOf(sessionFolder(), dir));
+        else if (version == 6 && frondCards::v6HasCard(info.path))
+            question += ' ' + tr("Its card stays in Cards.");
+    }
+    if (QMessageBox::question(this, tr("Delete"), question,
                               QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) return;
     const auto last = canonicalSession(path);
-    const auto error = frondSessions::remove(info);
+    const auto error = runCardJob(this, tr("Deleting %1…").arg(info.name), [&](const frondSessions::CopyProgress& progress) {
+        return frondSessions::remove(info, progress);
+    });
+    if (cardsWindow) cardsWindow->refresh();
     if (!error.isEmpty()) failure(error);
     else if (settings.value("lastSession").toString() == last) settings.remove("lastSession");
     refreshSessions();
@@ -1131,10 +1245,6 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
             for (int i = arguments.indexOf(option); i >= 0; i = arguments.indexOf(option))
                 arguments.remove(i, std::min<qsizetype>(2, arguments.size() - i));
     }
-    if (caps.serial && serialArgument() != "off") arguments << "--serial" << serialArgument();
-    if (caps.usb && usbArgument() != "off") arguments << "--usb" << usbArgument();
-    if(caps.infrared && irdaArgument()!="off")arguments << "--irda" << irdaArgument();
-    if(caps.bluetooth && bluetooth->isChecked()) arguments << "--bluetooth" << bluetoothArgument();
     sessionLock = std::make_unique<QLockFile>(sessionPath + ".lock");
     sessionLock->setStaleLockTime(0);
     if (!sessionLock->tryLock()) {
@@ -1150,6 +1260,14 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     if (const auto error = loadPreferences(target, startDevice, &runningPreferences); !error.isEmpty()) {
         sessionLock.reset(); return failure(error);
     }
+    runningDevice = startDevice == frondFirmware::Device::automatic ? frondFirmware::Device::tx : startDevice;
+    loadSerialSettings(); loadUsbSettings(); loadIrdaSettings(); loadBluetoothSettings();
+    if (caps.serial && serialArgument() != "off") arguments << "--serial" << serialArgument();
+    if (caps.usb && usbArgument() != "off") arguments << "--usb" << usbArgument();
+    if(caps.infrared && irdaArgument()!="off")arguments << "--irda" << irdaArgument();
+    if(caps.bluetooth && bluetooth->isChecked()) arguments << "--bluetooth" << bluetoothArgument();
+    irdaLinkText = caps.infrared && irdaChoice().startsWith("link:") && !frondLink::knownLink(irdaChoice())
+        ? tr("Infrared: Unknown connection") : QString();
     soundToggle->setChecked(caps.sound && runningPreferences.audio);
     if (!caps.sound || !runningPreferences.audio) arguments << "--no-sound";
     const auto sourceSession = !arguments.isEmpty() && !arguments.first().startsWith("--") ? arguments.first() : QString();
@@ -1169,44 +1287,112 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
         const QSignalBlocker blocked(contrast);
         contrast->setValue(runningPreferences.contrast);
     }
-    runningDevice = startDevice == frondFirmware::Device::automatic ? frondFirmware::Device::tx : startDevice;
     if (startDevice == frondFirmware::deviceFromId("sony-clie-tg50")) {
         if (!runningPreferences.showKeyboard) arguments << "--hide-keyboard";
         arguments << "--jog-controls" << frondSessions::jogControlsName(runningPreferences.jogControls);
+    }
+    // A saved machine in the managed folder: its slot (a linked card it takes now) gives the card
+    // flags. frond-68k has no cards.
+    finalSaved = false; linkedWatcher.reset(); linkedWatcherId.clear(); linkedHolder.clear(); cardMove = {};
+    const auto machine = frondSessions::machineDirOf(target);
+    if (!m68k && !sourceSession.isEmpty() && QFileInfo(sourceSession).canonicalFilePath() == QFileInfo(target).canonicalFilePath() &&
+        QFileInfo(frondCards::sessionsOf(machine)).canonicalFilePath() == QFileInfo(sessionFolder()).canonicalFilePath()) {
+        arguments << frondCards::takeAtStart(sessionFolder(), machine, &linkedHolder);
+        const auto slot = frondCards::readSlot(machine);
+        if (!slot.link.isEmpty() && frondCards::cardFileIn(machine).isEmpty()) {
+            linkedWatcherId = slot.link;
+            linkedWatcher = std::make_unique<frondCards::FreeWatcher>(frondCards::libraryFor(sessionFolder()), slot.link,
+                                                                      [this](bool) { refresh(); });
+        }
     }
     stopping = closeAfterStop = allowClose = false;
     log->clear(); busy = true;
     const bool launched = client.start(coreFor(startDevice), arguments);
     if (!launched) { busy = false; sessionLock.reset(); }
+    else attachInfrared();
     refresh(); statusBar()->showMessage(launched ? tr("Starting the Palm…") : tr("Could not start the Palm."));
 }
 QString MainWindow::bluetoothArgument() const {
     return bluetooth->isChecked() ? bluetoothSocket->text() : QStringLiteral("off");
 }
 void MainWindow::loadBluetoothSettings() {
-    bluetooth->setChecked(settings.value("bluetoothEnabled",false).toBool());
-    bluetoothSocket->setText(settings.value("bluetoothSocket").toString());
+    const auto& value = runningPreferences.bluetooth;
+    bluetooth->setChecked(value.startsWith("socket:"));
+    if (value.startsWith("socket:")) bluetoothSocket->setText(value.mid(7));
 }
 void MainWindow::showBluetooth(const QString& state) {
     bluetoothState->setText(state.isEmpty() || state=="off" ? QString() : tr("Bluetooth: %1").arg(state));
 }
-QString MainWindow::irdaArgument() const {
+QString MainWindow::irdaChoice() const {
     return irda->currentData()=="tcp" ? "tcp:"+QString::number(irdaPort->value()) : irda->currentData().toString();
 }
+// A connection runs the core's IR on a Unix socket the hub joins to the link; one per window.
+QString MainWindow::irdaArgument() const {
+    const auto choice = irdaChoice();
+    if (!choice.startsWith("link:")) return choice;
+    if (!frondLink::knownLink(choice)) return QStringLiteral("off");
+    const auto path = frondLink::coreSocketPath("ir", QString::number(QCoreApplication::applicationPid()));
+    return path.isEmpty() ? QStringLiteral("off") : "unix:" + path;
+}
 void MainWindow::loadIrdaSettings() {
-    irda->setCurrentIndex(std::max(0,irda->findData(settings.value("irdaMode","off").toString())));
-    irdaPort->setValue(settings.value("irdaPort",5030).toInt());
+    const auto& value = runningPreferences.infrared;
+    const QSignalBlocker blocked(irda);
+    frondLink::addConnectionChoices(irda, value);
+    irda->setCurrentIndex(std::max(0, irda->findData(value.startsWith("tcp:") ? QString("tcp") : value)));
+    irdaPort->setValue(value.startsWith("tcp:") ? value.mid(4).toInt() : 5030);
+}
+void MainWindow::refreshIrdaChoices() {
+    const auto current = irda->currentData().toString();
+    const QSignalBlocker blocked(irda);
+    frondLink::addConnectionChoices(irda, current);
+    irda->setCurrentIndex(std::max(0, irda->findData(current)));
 }
 void MainWindow::showIrda(const QString& state) {
     if(state.isEmpty()){irdaState->clear();return;}
     const auto parts=state.split(' ',Qt::SkipEmptyParts);
     const auto mode=parts.value(0).section(':',0,0);
+    // On a connection the hub's status shows instead of the socket.
+    if (mode == "unix" && irda->currentData().toString().startsWith("link:")) { irdaState->setText(irdaLinkText); refresh(); return; }
     irda->setCurrentIndex(std::max(0,irda->findData(mode)));
     if(mode=="tcp"){
         const auto port=parts.value(1).section(':',-1).toInt();if(port>0)irdaPort->setValue(port);
     }
-    settings.setValue("irdaMode",irda->currentData());settings.setValue("irdaPort",irdaPort->value());
     irdaState->setText(state=="off"?QString():tr("Infrared: %1").arg(state));refresh();
+}
+void MainWindow::attachInfrared() {
+    const auto choice = irdaChoice();
+    const bool wanted = client.running() && frondFirmware::capabilities(runningDevice).infrared &&
+                        frondLink::knownLink(choice) && irdaArgument().startsWith("unix:");
+    if (!wanted) { link.setSticky("ir", {}); if (!choice.startsWith("link:")) irdaLinkText.clear(); return; }
+    irdaLinkText = tr("Infrared: connecting to %1").arg(frondLink::connectionName(choice.mid(5)));
+    link.setSticky("ir", {{"op", "ir-attach"}, {"machine", QFileInfo(sessionPath).completeBaseName()},
+                          {"device", frondFirmware::deviceName(runningDevice)}, {"link", choice.mid(5)},
+                          {"socket", irdaArgument().mid(5)}});
+    irdaState->setText(irdaLinkText);
+    refresh();
+}
+void MainWindow::showIrdaLink(const QJsonObject& s) {
+    const auto peer = s.value("peer").toString(), state = s.value("state").toString(), far = s.value("far").toString();
+    const auto machine = s.value("machine").toString().isEmpty() ? s.value("device").toString() : s.value("machine").toString();
+    QString text;
+    if (state == "joined") text = far == "asleep" ? tr("Infrared: %1, Palm asleep").arg(peer) :
+                                  far == "paused" ? tr("Infrared: %1, Palm paused").arg(peer) :
+                                  tr("Infrared: %1, joined to %2").arg(peer, machine);
+    else if (state == "waiting") text = tr("Infrared: waiting for a machine on %1").arg(peer);
+    else if (state == "busy") text = tr("Infrared on %1 is in use by %2").arg(peer, s.value("busyBy").toString());
+    else if (state == "notfound") text = tr("Infrared: %1 not found").arg(peer);
+    else if (state == "keychanged") text = tr("Infrared: %1 key changed, pair again").arg(peer);
+    else if (state == "forgotten") text = tr("Infrared: pair again with %1").arg(peer);
+    else if (state == "unknown") text = tr("Infrared: Unknown connection");
+    else text = tr("Infrared: connecting to %1").arg(peer);
+    irdaLinkText = text;
+    if (client.running() && irda->currentData().toString().startsWith("link:")) { irdaState->setText(text); refresh(); }
+}
+void MainWindow::showConnections() {
+    if (!connectionsWindow) connectionsWindow = new ConnectionsWindow(&link, this);
+    connectionsWindow->show();
+    connectionsWindow->raise();
+    connectionsWindow->activateWindow();
 }
 
 QString MainWindow::serialArgument() const {
@@ -1233,8 +1419,9 @@ void MainWindow::showSerial(const QString& state) {
     else serialState->setText(tr("Serial: %1").arg(state));
 }
 void MainWindow::loadSerialSettings() {
-    serial->setCurrentIndex(std::max(0, serial->findData(settings.value("serialMode", "off").toString())));
-    serialPort->setValue(settings.value("serialPort", 5023).toInt());
+    const auto& value = runningPreferences.serial;
+    serial->setCurrentIndex(std::max(0, serial->findData(value.startsWith("tcp:") ? QString("tcp") : value)));
+    serialPort->setValue(value.startsWith("tcp:") ? value.mid(4).toInt() : 5023);
 }
 QString MainWindow::usbArgument() const {
     const auto mode = usb->currentData().toString();
@@ -1260,8 +1447,9 @@ void MainWindow::showUsb(const QString& state) {
     else usbState->setText(tr("USB: %1").arg(state));
 }
 void MainWindow::loadUsbSettings() {
-    usb->setCurrentIndex(std::max(0, usb->findData(settings.value("usbMode", "off").toString())));
-    usbPort->setValue(settings.value("usbPort", 5024).toInt());
+    const auto& value = runningPreferences.usb;
+    usb->setCurrentIndex(std::max(0, usb->findData(value.startsWith("tcp:") ? QString("tcp") : value)));
+    usbPort->setValue(value.startsWith("tcp:") ? value.mid(4).toInt() : 5024);
 }
 QString MainWindow::outputFile(const QString& title, const QString& filter, const QString& defaultName) {
     QFileDialog dialog(this, title, QDir::homePath() + '/' + defaultName, filter);
@@ -1278,6 +1466,10 @@ void MainWindow::save(bool saveAs) {
     }
     const auto path = outputFile(tr("Save a Copy"), tr("Frond sessions (*.frond)"), deviceLabel() + ".frond");
     if (path.isEmpty()) return;
+    saveCopyTo(path);
+}
+void MainWindow::saveCopyTo(const QString& path) {
+    if (!client.available()) return;
     const auto dest = frondSessions::exportDestDir(path);
     if (QFileInfo(dest).canonicalFilePath() == QFileInfo(frondSessions::machineDirOf(sessionPath)).canonicalFilePath() &&
         QFileInfo(dest).exists())
@@ -1461,4 +1653,166 @@ void MainWindow::exchangeResult(bool ok, const QString& message) {
         endExchange();
         statusBar()->showMessage(tr("Card inserted. Recovery session: %1").arg(exchangeBackup));
     }
+}
+
+// ---- Cards on the running machine ----
+
+QString MainWindow::runningMachineDir() const {
+    return client.running() && !sessionPath.isEmpty() ? frondSessions::machineDirOf(sessionPath) : QString();
+}
+// The card in the slot by its Cards name; one that isn't in Cards yet by its type.
+QString MainWindow::runningCardName() const {
+    if (!cardPresent) return tr("No card");
+    const auto dir = runningMachineDir();
+    const auto slot = frondCards::readSlot(dir);
+    frondCards::Card card;
+    if (!slot.card.isEmpty() && frondCards::readCard(frondCards::entryDir(frondCards::libraryFor(sessionFolder()), slot.card), &card))
+        return card.name;
+    const auto file = frondCards::cardFileIn(dir);
+    return frondCards::kindName(file.isEmpty() ? (memoryStick() ? QStringLiteral("ms") : QStringLiteral("sd")) : frondCards::kindOfFile(file));
+}
+CardsWindow* MainWindow::showCards() {
+    if (!cardsWindow) {
+        auto* w = new CardsWindow(sessionFolder(), this);
+        w->setAttribute(Qt::WA_DeleteOnClose);
+        w->runningMachine = [this] { return runningMachineDir(); };
+        w->exchangeOpen = [this] { return exchangeStage != ExchangeStage::None || memoryStickFiles != nullptr || cardMove.stage != CardMove::None; };
+        w->takeOutRunning = [this](const QString&) { if (client.available() && !busy && cardPresent) changeCard({}); };
+        w->changed = [this] { refreshSessions(); refresh(); };
+        cardsWindow = w;
+        // The rows were made before the window knew its running machine.
+        w->refresh();
+    }
+    cardsWindow->show();
+    cardsWindow->raise();
+    cardsWindow->activateWindow();
+    return cardsWindow;
+}
+void MainWindow::pickCard() {
+    if (!client.available() || busy || stopping || exchangeStage != ExchangeStage::None || cardMove.stage != CardMove::None) return;
+    const auto dir = runningMachineDir();
+    const auto slot = frondCards::readSlot(dir);
+    const auto current = cardPresent ? slot.card : QString();
+    CardPickerDialog dialog(sessionFolder(), dir, runningDevice, current, this);
+    if (dialog.exec() != QDialog::Accepted) return;
+    if (cardsWindow) cardsWindow->refresh();
+    if (!client.available() || busy || stopping) return;
+    const auto chosen = dialog.chosen();
+    if (chosen == current && (cardPresent || chosen.isEmpty())) return refresh();
+    changeCard(chosen);
+}
+// Each step goes through the core so the card's writes reach its file before it moves: eject (with
+// the usual confirmation), take out, then put the new card in.
+void MainWindow::changeCard(const QString& in) {
+    cardMove = {CardMove::None, in};
+    if (cardPresent && cardInserted) {
+        if (QMessageBox::question(this, tr("Eject the card?"), tr("Close any files open on the Palm first."),
+                                  QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) {
+            cardMove = {};
+            return refresh();
+        }
+        if (!client.available() || busy) { cardMove = {}; return; }
+        cardMove.stage = CardMove::Eject;
+        if (!send(cardCommand("eject"))) cardMove = {};
+        return;
+    }
+    if (cardPresent) {
+        cardMove.stage = CardMove::TakeOut;
+        if (!send(cardCommand("take-out"))) cardMove = {};
+        return;
+    }
+    if (!in.isEmpty()) putInCard(in);
+    else cardMove = {};
+}
+void MainWindow::putInCard(const QString& in) {
+    const auto library = frondCards::libraryFor(sessionFolder());
+    QString error;
+    frondCards::Card card;
+    {
+        frondCards::LibraryLock lock(library);
+        error = !lock.ok ? frondCards::busyMessage() : frondCards::toMachine(library, in, runningMachineDir());
+        if (error.isEmpty() && !frondCards::readCard(frondCards::entryDir(library, in), &card)) error = tr("Couldn't find that card.");
+    }
+    if (!error.isEmpty()) {
+        cardMove = {};
+        refresh();
+        return failure(error);
+    }
+    cardMove = {CardMove::PutIn, in};
+    const auto argument = QString::fromLatin1(card.identity.leftJustified(32, '\0', true).toHex()) +
+                          (card.writeProtected ? QStringLiteral(" protected") : QStringLiteral(" writable"));
+    if (!send(cardCommand("put-in"), argument)) cardMoveFailed(cardCommand("put-in"), tr("Couldn't reach the Palm."));
+    if (cardsWindow) cardsWindow->refresh();
+}
+// True when the result was a step of a card move and has been dealt with.
+bool MainWindow::continueCardMove(const QString& command, const QString& message) {
+    if (cardMove.stage == CardMove::Eject && command == cardCommand("eject")) {
+        cardMove.stage = CardMove::TakeOut;
+        if (!send(cardCommand("take-out"))) cardMove = {};
+        return true;
+    }
+    if (cardMove.stage == CardMove::TakeOut && command == cardCommand("take-out")) {
+        // The core settled the card in the folder's file: it goes to the drawer with the serial and
+        // protection the core reports. A card that isn't in Cards yet gets its entry first.
+        const auto dir = runningMachineDir();
+        const auto library = frondCards::libraryFor(sessionFolder());
+        const auto parts = message.split(' ');
+        QString error;
+        {
+            frondCards::LibraryLock lock(library);
+            if (!lock.ok) error = frondCards::busyMessage();
+            else {
+                auto slot = frondCards::readSlot(dir);
+                frondCards::Card card;
+                const auto file = frondCards::cardFileIn(dir);
+                if (file.isEmpty()) error = tr("Couldn't find the card's file.");
+                else if (slot.card.isEmpty() || !frondCards::readCard(frondCards::entryDir(library, slot.card), &card)) {
+                    slot.present = true;
+                    if (!frondCards::moveIn(library, dir, file, slot, {}, &card)) error = tr("Couldn't move the card into Cards.");
+                }
+                if (error.isEmpty()) {
+                    // The core's serial, unless another card has it (then the card keeps the new one it got).
+                    if (parts.size() == 2 && parts[0].size() == 64) {
+                        const auto reported = QByteArray::fromHex(parts[0].toLatin1());
+                        if (!frondCards::identityUsed(library, reported, card.id)) card.identity = reported;
+                    }
+                    card.writeProtected = parts.value(1) == "protected";
+                    frondCards::writeCard(frondCards::entryDir(library, card.id), card);
+                    error = frondCards::toDrawer(library, dir, card.id);
+                }
+            }
+        }
+        const auto in = cardMove.in;
+        cardMove = {};
+        if (!error.isEmpty()) {
+            refresh();
+            failure(error);
+            return true;
+        }
+        if (cardsWindow) cardsWindow->refresh();
+        if (!in.isEmpty()) putInCard(in);
+        else {
+            refresh();
+            statusBar()->showMessage(tr("Card taken out."));
+        }
+        return true;
+    }
+    if (cardMove.stage == CardMove::PutIn && command == cardCommand("put-in")) {
+        cardMove = {};
+        if (cardsWindow) cardsWindow->refresh();
+        return false;  // the usual follow-ups (protection for a stick) run
+    }
+    return false;
+}
+void MainWindow::cardMoveFailed(const QString& command, const QString& message) {
+    // A card moved in that the core couldn't open goes back to the drawer.
+    if (cardMove.stage == CardMove::PutIn && command == cardCommand("put-in")) {
+        const auto library = frondCards::libraryFor(sessionFolder());
+        frondCards::LibraryLock lock(library);
+        if (lock.ok) frondCards::toDrawer(library, runningMachineDir(), cardMove.in);
+    }
+    cardMove = {};
+    refresh();
+    if (cardsWindow) cardsWindow->refresh();
+    failure(message);
 }

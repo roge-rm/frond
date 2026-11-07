@@ -55,6 +55,12 @@ struct Preferences {
     bool uncapped{false};
     // False until a contrast is chosen, so a session's own saved contrast stays.
     bool contrastSet{false};
+    // Peripherals: off, pty, tcp:PORT, link:local or link:<connection id>; Bluetooth off or
+    // socket:/abs. Not stored in the .frond.
+    QString infrared{"off"}, serial{"off"}, usb{"off"}, bluetooth{"off"};
+    // False for settings from before these were kept per machine: they take the old global
+    // choices once, on the machine's next start.
+    bool peripheralsSet{false};
 };
 inline QString preferencesPath(const QString& path) { return path + ".settings.json"; }
 inline bool readPreferences(const QString& path, Preferences* result) {
@@ -70,6 +76,13 @@ inline bool readPreferences(const QString& path, Preferences* result) {
                object.value("engine").toString() == QLatin1String("fast"),
                std::clamp(object.value("contrast").toInt(50), 0, 100),
                object.value("speed").toString() == QLatin1String("uncapped"), object.contains("contrast")};
+    if (object.value("infrared").isString()) {
+        result->infrared = object.value("infrared").toString();
+        result->serial = object.value("serial").toString("off");
+        result->usb = object.value("usb").toString("off");
+        result->bluetooth = object.value("bluetooth").toString("off");
+        result->peripheralsSet = true;
+    }
     return true;
 }
 // The caller holds the session lock, or has just reserved a new machine.
@@ -81,6 +94,12 @@ inline QString writePreferences(const QString& path, const Preferences& prefs) {
                              {"showJogControls", prefs.jogControls != JogControls::hidden},
                              {"engine", prefs.fastEngine ? "fast" : "exact"}, {"speed", prefs.uncapped ? "uncapped" : "original"}};
     if (prefs.contrastSet) object.insert("contrast", std::clamp(prefs.contrast, 0, 100));
+    if (prefs.peripheralsSet) {
+        object.insert("infrared", prefs.infrared);
+        object.insert("serial", prefs.serial);
+        object.insert("usb", prefs.usb);
+        object.insert("bluetooth", prefs.bluetooth);
+    }
     const auto bytes = QJsonDocument(object).toJson(QJsonDocument::Compact);
     if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit())
         return QStringLiteral("Couldn't save the machine settings.");
@@ -138,8 +157,9 @@ inline quint64 le64(const QByteArray& bytes, int i) {
 
 // Header, size and magic of each v7 or v8 sibling. A stub shorter than the TOC is no media.
 // v8 descriptors are 100 bytes and end with the SD content generation, which a .frondsd v2
-// header must match; v7 descriptors are 92 bytes and go with a v1 .frondsd.
-inline QString checkImportedSiblings(const QString& dir, const QString& frond) {
+// header must match; v7 descriptors are 92 bytes and go with a v1 .frondsd. With `swap` (slot.json
+// says the slot changed since the save) each card file only has to be a good card on its own.
+inline QString checkImportedSiblings(const QString& dir, const QString& frond, bool swap = false) {
     const auto mismatch = QStringLiteral("That session's card files don't match.");
     QFile file(frond);
     if (!file.open(QIODevice::ReadOnly)) return QStringLiteral("Couldn't read that file.");
@@ -184,8 +204,20 @@ inline QString checkImportedSiblings(const QString& dir, const QString& frond) {
             } else {
                 return mismatch;
             }
-            if (kind == 2 && generation) return mismatch;
             cards.append({kind, physical, generation});
+        }
+    }
+    if (swap) {
+        // The cards are whatever files are there, described by their own headers.
+        cards.clear();
+        for (quint32 kind : {1u, 2u, 3u}) {
+            QFile card(dir + (kind == 1 ? "/sd.frondsd" : kind == 2 ? "/ms.frondms" : "/ms.frondmsp"));
+            if (!card.exists()) continue;
+            if (!card.open(QIODevice::ReadOnly)) return mismatch;
+            const auto hdr = card.read(64);
+            if (hdr.size() != 64) return mismatch;
+            if (kind == 2) cards.append({kind, quint64(card.size() - 64), le64(hdr, 32)});
+            else cards.append({kind, le64(hdr, 16), le32(hdr, 8) == 2 ? le64(hdr, 28) : 0});
         }
     }
     bool expectSd = false, expectMs = false, expectPro = false;
@@ -222,9 +254,16 @@ inline QString checkImportedSiblings(const QString& dir, const QString& frond) {
             if (!ms.open(QIODevice::ReadOnly)) return mismatch;
             const auto hdr = ms.read(64);
             if (hdr.size() != 64 || hdr.left(8) != QByteArray("FRONDMS\0", 8)) return mismatch;
-            if (le32(hdr, 8) != 1 || le32(hdr, 12) != 8192 || le32(hdr, 16) != 32 || le32(hdr, 20) != 512 ||
-                le32(hdr, 24) != 9)
+            // Blocks and pages per block of the 4 to 128 MB sticks, then the change counter (0249).
+            const quint64 blocks = le32(hdr, 12), pages = le32(hdr, 16);
+            bool shape = false;
+            for (const auto& [b, p] : {std::pair<quint64, quint64>{512, 16}, {1024, 16}, {1024, 32}, {2048, 32}, {4096, 32}, {8192, 32}})
+                shape |= blocks == b && pages == p;
+            if (le32(hdr, 8) != 1 || !shape || blocks * pages * 521 != card.physical || le32(hdr, 20) != 512 ||
+                le32(hdr, 24) != 9 || le64(hdr, 32) != card.generation)
                 return mismatch;
+            for (int i = 40; i < 64; ++i)
+                if (hdr[i]) return mismatch;
             if (quint64(ms.size()) != 64 + card.physical) return mismatch;
         }
     }
@@ -257,7 +296,8 @@ inline bool ignoredName(const QString& name) {
 }
 inline bool packableName(const QString& name) {
     if (ignoredName(name) || name.contains('/')) return false;
-    return name == "sd.frondsd" || name == "ms.frondms" || name == "ms.frondmsp" || name.endsWith(".frond.settings.json") ||
+    return name == "sd.frondsd" || name == "ms.frondms" || name == "ms.frondmsp" || name == "slot.json" ||
+           name.endsWith(".frond.settings.json") ||
            (name.endsWith(".frond") && !name.endsWith(".frond.new"));
 }
 inline bool tempName(const QString& name) {
@@ -683,14 +723,49 @@ inline QString rename(const QString& folder, const Info& info, const QString& wa
     return {};
 }
 
-inline QString remove(const Info& info) {
+// Called with bytes done and in total; returns false to cancel.
+using CopyProgress = std::function<bool(qint64, qint64)>;
+
+inline bool copyChunked(const QString& from, const QString& to, qint64* done, qint64 total, const CopyProgress& progress) {
+    QFile in(from), out(to);
+    if (!in.open(QIODevice::ReadOnly) || !out.open(QIODevice::WriteOnly)) return false;
+    QByteArray buffer(1 << 20, Qt::Uninitialized);
+    for (;;) {
+        const auto n = in.read(buffer.data(), buffer.size());
+        if (n < 0) return false;
+        if (n == 0) break;
+        if (out.write(buffer.constData(), n) != n) return false;
+        *done += n;
+        if (progress && !progress(*done, total)) return false;
+    }
+    return out.flush() && !in.error();
+}
+
+}  // namespace frondSessions
+#include "CardStore.h"
+namespace frondSessions {
+
+// Deletes a machine. Its card goes back to Cards first (an unsettled one as a settled copy); if
+// that fails nothing is removed. The lock is kept until the folder is gone.
+inline QString remove(const Info& info, const CopyProgress& progress = {}) {
     QLockFile lock(info.path + ".lock");
     lock.setStaleLockTime(0);
     if (!lock.tryLock()) return QStringLiteral("This session is open in another Frond.");
     const auto dir = machineDirOf(info.path);
     if (QFileInfo(dir).isDir() && QFileInfo(dir).fileName() == info.name) {
+        // A machine that was never saved can still hold a card put in from Cards.
+        if (!info.saved || !info.old)
+            if (const auto error = frondCards::keepCardOf(frondCards::sessionsOf(dir), dir, progress); !error.isEmpty()) return error;
+        const auto own = QFileInfo(info.path).fileName() + ".lock";
+        for (const auto& entry : QDir(dir).entryInfoList(QDir::AllEntries | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot)) {
+            if (entry.fileName() == own) continue;
+            const bool gone = entry.isDir() && !entry.isSymLink() ? QDir(entry.absoluteFilePath()).removeRecursively()
+                                                                  : QFile::remove(entry.absoluteFilePath());
+            if (!gone) return QStringLiteral("Couldn't delete the session.");
+        }
         lock.unlock();
-        if (!QDir(dir).removeRecursively()) return QStringLiteral("Couldn't delete the session.");
+        QFile::remove(dir + '/' + own);
+        if (!QDir().rmdir(dir) && QFileInfo::exists(dir)) return QStringLiteral("Couldn't delete the session.");
         return {};
     }
     for (const auto& path : {info.path, markerPath(info.path), preferencesPath(info.path)})
@@ -717,28 +792,15 @@ inline QString copyName(const QString& folder, const QString& name) {
     return base + ' ' + QString::number(n);
 }
 
-// Called with bytes done and in total; returns false to cancel.
-using CopyProgress = std::function<bool(qint64, qint64)>;
+// What a copy of a machine with a card gets: the same card linked to both, a copy of the card,
+// or no card.
+enum class CardChoice { link, copy, none };
 
-inline bool copyChunked(const QString& from, const QString& to, qint64* done, qint64 total, const CopyProgress& progress) {
-    QFile in(from), out(to);
-    if (!in.open(QIODevice::ReadOnly) || !out.open(QIODevice::WriteOnly)) return false;
-    QByteArray buffer(1 << 20, Qt::Uninitialized);
-    for (;;) {
-        const auto n = in.read(buffer.data(), buffer.size());
-        if (n < 0) return false;
-        if (n == 0) break;
-        if (out.write(buffer.constData(), n) != n) return false;
-        *done += n;
-        if (progress && !progress(*done, total)) return false;
-    }
-    return out.flush() && !in.error();
-}
-
-// Makes an independent copy of a machine under the next free numbered name: its session, settings
-// and card files. Takes the source's lock, so a machine that is open fails. The copy is deleted if
-// it fails, is cancelled or the disk is too full.
-inline QString duplicate(const QString& folder, const Info& info, QString* newName = nullptr, const CopyProgress& progress = {}) {
+// Makes a copy of a machine under the next free numbered name: its session, settings and, as
+// `choice` says, its card. Takes the source's lock, so a machine that is open fails. The copy is
+// deleted if it fails, is cancelled or the disk is too full.
+inline QString duplicate(const QString& folder, const Info& info, QString* newName = nullptr, const CopyProgress& progress = {},
+                         CardChoice choice = CardChoice::copy) {
     if (info.old) return QStringLiteral("This session was saved by an older Frond.");
     QLockFile lock(info.path + ".lock");
     lock.setStaleLockTime(0);
@@ -746,6 +808,21 @@ inline QString duplicate(const QString& folder, const Info& info, QString* newNa
     const auto fromDir = machineDirOf(info.path);
     const QString failed = QStringLiteral("Couldn't duplicate the session.");
     if (!QDir().mkpath(folder)) return failed;
+    const auto library = frondCards::libraryFor(folder);
+    if (info.saved)
+        if (const auto error = frondCards::reconcile(folder, fromDir); !error.isEmpty()) return error;
+    const auto slot = info.saved ? frondCards::readSlot(fromDir) : frondCards::Slot{};
+    const auto cardFile = info.saved ? frondCards::cardFileIn(fromDir) : QString();
+    frondCards::Card card;
+    const bool holds = !cardFile.isEmpty() && frondCards::readCard(frondCards::entryDir(library, slot.card), &card);
+    if (!cardFile.isEmpty() && !holds) return failed;
+    const auto linkTo = !slot.link.isEmpty() ? slot.link : holds ? slot.card : QString();
+    if (choice == CardChoice::copy && !holds && !linkTo.isEmpty())
+        return QStringLiteral("Its card isn't in it. Link it or leave it out.");
+    const bool hadCard = holds || !linkTo.isEmpty();
+    // No library card: copy whatever the folder has, as a load would settle it (a save that only
+    // got as far as its full card copy). Reconcile moves the copy's card in.
+    if (!hadCard) choice = CardChoice::copy;
     // Built in a hidden folder that list() ignores, under its own lock, and renamed into place when complete.
     const auto hidden = folder + "/.dup-" + QString::number(QCoreApplication::applicationPid()) + '-' +
                         QString::number(QDateTime::currentMSecsSinceEpoch());
@@ -764,10 +841,13 @@ inline QString duplicate(const QString& folder, const Info& info, QString* newNa
     QList<QPair<QString, QString>> jobs;  // source, destination
     SdSettle settle;
     qint64 total = 0;
+    const bool copyCard = choice == CardChoice::copy;
     if (info.saved) {
         settle = sdSettleOf(fromDir, info.path);
+        if (!copyCard) settle = {};
         for (const auto& entry : QDir(fromDir).entryInfoList(QDir::Files)) {
-            if (!packableName(entry.fileName())) continue;
+            if (!packableName(entry.fileName()) || entry.fileName() == "slot.json") continue;
+            if (frondCards::cardFiles.contains(entry.fileName()) && !copyCard) continue;
             auto source = entry.absoluteFilePath();
             if (!settle.full.isEmpty() && entry.fileName() == settle.sibling) source = settle.full;
             jobs.append({source, dest + '/' + packableDestName(entry.fileName(), name)});
@@ -788,7 +868,7 @@ inline QString duplicate(const QString& folder, const Info& info, QString* newNa
         const auto prefs = preferencesPath(info.path);
         if (QFileInfo::exists(prefs)) jobs.append({prefs, preferencesPath(frond)});
     }
-    const auto free = QStorageInfo(folder).bytesAvailable();
+    const auto free = frondCards::freeSpace()(folder);
     if (free >= 0 && free < total + (16 << 20))
         return fail(QStringLiteral("Not enough free space to duplicate %1. It needs %2 MB.").arg(info.name).arg(total / 1000000 + 1));
     qint64 done = 0;
@@ -801,13 +881,69 @@ inline QString duplicate(const QString& folder, const Info& info, QString* newNa
         if (!copyChunked(source, target, &done, total, watch))
             return fail(cancelled ? QStringLiteral("Duplicate cancelled.") : failed);
     if (!settle.journal.isEmpty() && !applySdJournalCopy(settle.journal, dest + '/' + settle.sibling)) return fail(failed);
-    if (taken(folder, name)) return fail(failed);
+    // The copy's slot: its own new card, the link, or nothing. A card the .frond still describes
+    // and the copy doesn't have loads as a swap.
+    frondCards::Card copy = card;
+    frondCards::Slot copySlot;
+    copySlot.present = true;
+    // A copied card gets its own serial, so the copy loads it as a swap: two cards with one serial
+    // and the same change counter would look unchanged in each other's machines.
+    copySlot.swap = slot.swap || hadCard;
+    if (choice == CardChoice::link) copySlot.link = linkTo;
+    if (info.saved && (slot.present || hadCard) && !frondCards::writeSlot(dest, copySlot)) return fail(failed);
+    frondCards::LibraryLock libraryLock(library);
+    if (!libraryLock.ok) return fail(frondCards::busyMessage());
+    if (copyCard && holds) {
+        copy.id = frondCards::newId();
+        copy.identity = frondCards::newIdentity();
+        copy.name = frondCards::freeCardName(library, card.name);
+        copy.created = frondCards::now();
+        copy.machine = name;
+        copySlot.card = copy.id;
+        copySlot.name = copy.name;
+        if (!frondCards::writeSlot(dest, copySlot) || !QDir().mkpath(frondCards::entryDir(library, copy.id)) ||
+            !frondCards::writeCard(frondCards::entryDir(library, copy.id), copy)) {
+            QDir(frondCards::entryDir(library, copy.id)).removeRecursively();
+            return fail(failed);
+        }
+    }
+    const auto dropEntry = [&] { if (copyCard && holds) QDir(frondCards::entryDir(library, copy.id)).removeRecursively(); };
+    if (taken(folder, name)) { dropEntry(); return fail(failed); }
+    if (choice == CardChoice::link && slot.link != linkTo) {
+        auto original = slot;
+        original.present = true;
+        original.link = linkTo;
+        if (!frondCards::writeSlot(fromDir, original)) { dropEntry(); return fail(failed); }
+    }
     const auto target = machineDir(folder, name);
     hold.unlock();
-    if (!QDir().rename(hidden, target)) { QDir(dest).removeRecursively(); QFile::remove(hidden + ".lock"); return failed; }
+    if (!QDir().rename(hidden, target)) {
+        dropEntry();
+        QDir(dest).removeRecursively(); QFile::remove(hidden + ".lock");
+        return failed;
+    }
     QFile::remove(hidden + ".lock");
     if (newName) *newName = name;
     return {};
+}
+
+// After an import's files are copied in: a packed card becomes a new library card, named from
+// slot.json or "<machine> card", with its own serial (the machine it came from may still have
+// the card); links aren't carried over.
+inline QString adoptImportedCard(const QString& folder, const QString& dir) {
+    const auto library = frondCards::libraryFor(folder);
+    frondCards::LibraryLock lock(library);
+    if (!lock.ok) return frondCards::busyMessage();
+    auto slot = frondCards::readSlot(dir);
+    const auto file = frondCards::cardFileIn(dir);
+    if (file.isEmpty()) {
+        if (!slot.present) return {};
+        slot.card.clear(); slot.link.clear();
+        return frondCards::writeSlot(dir, slot) ? QString() : QStringLiteral("Couldn't save the session.");
+    }
+    slot.present = true;
+    slot.link.clear();
+    return frondCards::moveIn(library, dir, file, slot, slot.name, nullptr, true) ? QString() : QStringLiteral("Couldn't save the session.");
 }
 
 inline QString importFolder(const QString& folder, const QString& from, QString* newName = nullptr) {
@@ -825,7 +961,11 @@ inline QString importFolder(const QString& folder, const QString& from, QString*
         QDir(dest).removeRecursively();
         return error;
     }
-    if (const auto error = checkImportedSiblings(dest, dest + '/' + name + ".frond"); !error.isEmpty()) {
+    if (const auto error = checkImportedSiblings(dest, dest + '/' + name + ".frond", frondCards::readSlot(dest).swap); !error.isEmpty()) {
+        QDir(dest).removeRecursively();
+        return error;
+    }
+    if (const auto error = adoptImportedCard(folder, dest); !error.isEmpty()) {
         QDir(dest).removeRecursively();
         return error;
     }
@@ -862,7 +1002,12 @@ inline QString importFile(const QString& folder, const QString& from, QString* n
         if (QFileInfo::exists(src) && !QFile::copy(src, destDir + '/' + sibling)) return fail();
     }
     if (!settle.journal.isEmpty() && !applySdJournalCopy(settle.journal, destDir + '/' + settle.sibling)) return fail();
-    if (const auto error = checkImportedSiblings(destDir, target); !error.isEmpty()) {
+    if (QFileInfo(sourceDir + "/slot.json").isFile() && !QFile::copy(sourceDir + "/slot.json", destDir + "/slot.json")) return fail();
+    if (const auto error = checkImportedSiblings(destDir, target, frondCards::readSlot(destDir).swap); !error.isEmpty()) {
+        QDir(destDir).removeRecursively();
+        return error;
+    }
+    if (const auto error = adoptImportedCard(folder, destDir); !error.isEmpty()) {
         QDir(destDir).removeRecursively();
         return error;
     }
@@ -894,7 +1039,7 @@ inline bool isMachineFolder(const QString& dir) {
     for (const auto& entry : entries) {
         const auto name = entry.fileName();
         if (!entry.isFile() || entry.isSymLink() || !machineFileName(name)) return false;
-        if (ignoredName(name) || name == "sd.frondsd" || name == "ms.frondms" || name == "ms.frondmsp") continue;
+        if (ignoredName(name) || name == "sd.frondsd" || name == "ms.frondms" || name == "ms.frondmsp" || name == "slot.json") continue;
         // Every .frond, settings, lock or marker file has to belong to the one session.
         const auto own = stem + ".frond";
         if (name != own && name != own + ".settings.json" && name != own + ".lock" && name != own + ".new" && name != own + ".work")
