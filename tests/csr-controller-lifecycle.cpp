@@ -13,7 +13,7 @@ void pxaUartSetPacing(PxaUart*,bool){}
 void pxaUartSetFuncs(PxaUart*,PxaUartReadF,PxaUartWriteF,PxaUartClientIsActive,PxaUartClientTick t,void* p){tick=t;context=p;}
 void pxaUartSetModeObserver(PxaUart*,void(*)(void*),void*){}
 bool pxaUartSetModemInputs(PxaUart*,uint8_t){return true;}
-PxaIrState pxaUartIrState(const PxaUart*){return {921600,0x1b,false,false,true};}
+PxaIrState pxaUartIrState(const PxaUart*){return {921600,0x1b,false,false,true,false};}
 bool pxaUartReceiverEnabled(const PxaUart*){return true;}
 bool pxaUartPlainEnabled(const PxaUart*){return true;}
 void pxaUartKick(PxaUart*){}

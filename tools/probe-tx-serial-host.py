@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the serial host probe on a private TX session copy with a host peer on the PTY or TCP endpoint."""
+"""Run the serial host probe on a private TX session copy with a host peer on the PTY, TCP or Unix socket endpoint."""
 import argparse
 import importlib.util
 import json
@@ -7,10 +7,12 @@ import os
 from pathlib import Path
 import re
 import select
+import shutil
 import signal
 import socket
 import struct
 import sys
+import tempfile
 import threading
 import time
 import tty
@@ -79,7 +81,7 @@ class Peer(threading.Thread):
         while not self.endpoint:
             require(time.monotonic() < deadline and not self.stop.is_set(), 'No serial endpoint in core.log')
             text = self.log.read_text(errors='replace') if self.log.exists() else ''
-            match = re.search(r'^serial: (pty|tcp) (\S+) ', text, re.M)
+            match = re.search(r'^serial: (pty|tcp|unix) (\S+) ', text, re.M)
             if match:
                 require(match[1] == self.kind, 'Wrong endpoint kind')
                 self.endpoint = match[2]
@@ -88,6 +90,12 @@ class Peer(threading.Thread):
             fd = os.open(self.endpoint, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
             tty.setraw(fd)
             read, write, close = (lambda: os.read(fd, 4096)), (lambda b: os.write(fd, b)), (lambda: os.close(fd))
+        elif self.kind == 'unix':
+            sock = socket.socket(socket.AF_UNIX)
+            sock.connect(self.endpoint)
+            sock.setblocking(False)
+            fd = sock.fileno()
+            read, write, close = (lambda: sock.recv(4096)), sock.send, sock.close
         else:
             host, port = self.endpoint.rsplit(':', 1)
             require(host == '127.0.0.1', 'TCP endpoint is not loopback')
@@ -156,7 +164,7 @@ def main():
     p.add_argument('--session', type=Path, required=True, help='user-supplied ready TX session')
     p.add_argument('--core', type=Path, default=ROOT / 'out/frond')
     p.add_argument('--probe', type=Path, default=ROOT / 'build/serial-host-probe/FrondSerialHostProbe.prc')
-    p.add_argument('--endpoint', choices=['pty', 'tcp'], required=True)
+    p.add_argument('--endpoint', choices=['pty', 'tcp', 'unix'], required=True)
     p.add_argument('--output', type=Path, required=True, help='new private result directory')
     p.add_argument('--timeout', type=runner.positive, default=240)
     args = p.parse_args()
@@ -164,6 +172,7 @@ def main():
     report = {'version': 1, 'status': 'error', 'endpoint': args.endpoint, 'error': None}
     stop = threading.Event()
     peer = None
+    sockets = None
     try:
         require(not args.output.exists(), 'Use a new output directory')
         args.output.mkdir(parents=True, mode=0o700)
@@ -172,7 +181,9 @@ def main():
         token = uuid.uuid4().hex
         config = root / 'config.pdb'
         config.write_bytes(config_database(token))
-        serial = 'pty' if args.endpoint == 'pty' else f'tcp:{free_port()}'
+        # A Unix socket goes in a short private folder, so its path fits a socket address.
+        sockets = tempfile.mkdtemp(prefix='frond-') if args.endpoint == 'unix' else None
+        serial = {'pty': 'pty', 'tcp': f'tcp:{free_port()}', 'unix': f'unix:{sockets}/serial.sock'}[args.endpoint]
         report['serial'] = serial
         peer = Peer(root / 'run' / 'core.log', args.endpoint, stop)
         peer.start()
@@ -197,6 +208,8 @@ def main():
         report['error'] = str(error)
     finally:
         stop.set()
+        if sockets:
+            shutil.rmtree(sockets, ignore_errors=True)
     if args.output.exists():
         (args.output / 'serial-host.json').write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps(report, indent=2))

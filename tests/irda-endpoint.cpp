@@ -9,6 +9,8 @@
 #include <fcntl.h>
 #include <memory>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
@@ -245,4 +247,75 @@ static void endpoints(){
     assert(!a.soc.IrHostAttached() && !b.soc.IrHostAttached());
     puts("PASS live loopback SIR byte relay TX->E2, reconnect and checkpoint/refused-load peer retention");
 }
-int main(){models(deviceTypeTX);models(deviceTypeE2);models(deviceTypeTG50);endpoints();}
+
+static int connectUnix(const std::string& path){
+    int fd=socket(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0);assert(fd>=0);
+    sockaddr_un a{};a.sun_family=AF_UNIX;strncpy(a.sun_path,path.c_str(),sizeof(a.sun_path)-1);
+    assert(!connect(fd,reinterpret_cast<sockaddr*>(&a),sizeof(a)));
+    assert(!fcntl(fd,F_SETFL,O_NONBLOCK));return fd;
+}
+static bool isSocket(const std::string& path){struct stat i{};return lstat(path.c_str(),&i)==0 && S_ISSOCK(i.st_mode);}
+static bool exists(const std::string& path){struct stat i{};return lstat(path.c_str(),&i)==0;}
+// The unix: endpoint beside tcp: connect, bytes both ways, one client, reconnect, close and reopen
+// on reset and sleep, and the refusals.
+static void unixEndpoints(){
+    char templ[]="build/irda-unix-XXXXXX";assert(mkdtemp(templ));
+    char* real=realpath(templ,nullptr);assert(real);const std::string folder=real;free(real);
+    const std::string path=folder+"/ir.sock";
+    const HostSerial::Config config{HostSerial::Kind::unixSocket,0,path};
+    Machine a(deviceTypeTX);HostInfrared x;std::string error;
+    assert(x.Start(&a.soc,config,error) && x.Endpoint()==path && isSocket(path));
+    assert(x.GetConfig().kind==HostSerial::Kind::unixSocket && x.Describe().find("unix:"+path+" "+path+" waiting")==0);
+    a.configure(3);
+    int ax=connectUnix(path);
+    waitFor([&]{return x.Describe().find(" connected")!=std::string::npos;});
+    // Guest to host.
+    const std::vector<uint8_t> bytes{0xff,0xc0,0x7d,0x00};
+    for(auto c:bytes){
+        a.write(0,c);a.run(2);uint8_t v=0;
+        waitFor([&]{a.run();x.Service();auto n=recv(ax,&v,1,0);return n==1;});assert(v==c);
+    }
+    // Host to guest.
+    auto toGuest=[&](uint8_t value){
+        assert(send(ax,&value,1,MSG_NOSIGNAL)==1);uint8_t got=0;
+        waitFor([&]{x.Service();a.run();if(!(a.read(5)&1))return false;got=a.read(0);return true;});assert(got==value);
+    };
+    toGuest(0x5a);
+    // A second client is closed at once; the first keeps the line.
+    int second=connectUnix(path);
+    waitFor([&]{uint8_t c;auto n=recv(second,&c,1,0);return n==0 || (n<0 && errno==ECONNRESET);});close(second);
+    assert(x.Describe().find(" connected")!=std::string::npos);
+    // The client drops and a new one gets the line.
+    close(ax);waitFor([&]{return x.Describe().find(" connected")==std::string::npos;});
+    ax=connectUnix(path);waitFor([&]{return x.Describe().find(" connected")!=std::string::npos;});
+    toGuest(0x6b);
+    // A reset closes the socket and removes it; the next Service opens it again at the same path.
+    a.soc.Reset();assert(x.Endpoint().empty() && !exists(path));
+    waitFor([&]{uint8_t c;auto n=recv(ax,&c,1,0);return n==0 || (n<0 && errno==ECONNRESET);});close(ax);
+    a.configure(3);x.Service();assert(x.Endpoint()==path && isSocket(path));
+    ax=connectUnix(path);waitFor([&]{return x.Describe().find(" connected")!=std::string::npos;});
+    // Sleep does the same.
+    a.sleep();x.Service();assert(x.Endpoint().empty() && !exists(path));
+    waitFor([&]{uint8_t c;auto n=recv(ax,&c,1,0);return n==0 || (n<0 && errno==ECONNRESET);});close(ax);
+    a.soc.Reset();a.configure(3);x.Service();assert(isSocket(path));
+    x.Stop();assert(!exists(path) && !a.soc.IrHostAttached());
+    // Refusals leave the machine unattached and the path as it was.
+    {
+        assert(chmod(folder.c_str(),0755)==0);error.clear();
+        assert(!x.Start(&a.soc,config,error) && error.find("0700")!=std::string::npos && !a.soc.IrHostAttached() && !exists(path));
+        assert(chmod(folder.c_str(),0700)==0);
+        const int file=open(path.c_str(),O_CREAT|O_WRONLY,0600);assert(file>=0);close(file);
+        error.clear();assert(!x.Start(&a.soc,config,error) && error.find("not a socket")!=std::string::npos);
+        assert(!a.soc.IrHostAttached());struct stat i{};assert(lstat(path.c_str(),&i)==0 && S_ISREG(i.st_mode));
+        assert(unlink(path.c_str())==0);
+        error.clear();
+        assert(!x.Start(&a.soc,{HostSerial::Kind::unixSocket,0,folder+"/"+std::string(sizeof(sockaddr_un::sun_path),'a')},error) && error.find("too long")!=std::string::npos);
+        assert(!x.Start(&a.soc,{HostSerial::Kind::unixSocket,0,"relative.sock"},error) && !a.soc.IrHostAttached());
+        assert(!x.Start(&a.soc,{HostSerial::Kind::unixSocket,0,folder+"/missing/ir.sock"},error));
+        // The refused start leaves the machine free for a good one.
+        assert(x.Start(&a.soc,config,error) && isSocket(path));x.Stop();
+    }
+    assert(rmdir(folder.c_str())==0);
+    puts("PASS unix: SIR endpoint: bytes both ways, one client, reconnect, reset and sleep close and reopen, refusals");
+}
+int main(){models(deviceTypeTX);models(deviceTypeE2);models(deviceTypeTG50);endpoints();unixEndpoints();}
