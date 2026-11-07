@@ -417,47 +417,13 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
         }
     }
 
-    model.busy?.let { label ->
-        AlertDialog(onDismissRequest = {}, confirmButton = {
-            if (model.canCancelFiles) TextButton(onClick = { model.cancelFiles() }, enabled = !model.cancellingFiles) {
-                Text(if (model.cancellingFiles) "Cancelling" else "Cancel")
-            }
-        }, title = { Text(label) }, text = {
-            val done = model.progress
-            if (done == null) Progress()
-            else androidx.compose.material3.LinearProgressIndicator(progress = { done },
-                modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp))
-        })
-    }
-    model.alert?.let { (title, text) ->
-        AlertDialog(
-            onDismissRequest = { model.alert = null },
-            title = { Text(title) },
-            text = { Text(text) },
-            confirmButton = { TextButton(onClick = { model.alert = null }) { Text("OK") } },
-        )
-    }
+    BusyDialog(model)
+    AlertBox(model)
     if (choosingNetwork) {
-        AlertDialog(
-            onDismissRequest = { choosingNetwork = false },
-            title = { Text("Network") },
-            text = {
-                LazyColumn {
-                    items(NetworkMode.entries) { mode ->
-                        ListItem(
-                            headlineContent = { Text(mode.label) },
-                            leadingContent = { RadioButton(selected = mode == model.network, onClick = null) },
-                            modifier = Modifier.clickableRow {
-                                choosingNetwork = false
-                                if (mode != model.network) model.changeNetwork(mode)
-                            },
-                        )
-                    }
-                }
-            },
-            confirmButton = {},
-            dismissButton = { TextButton(onClick = { choosingNetwork = false }) { Text("Cancel") } },
-        )
+        NetworkDialog(model.network, onDismiss = { choosingNetwork = false }) { mode ->
+            choosingNetwork = false
+            model.changeNetwork(mode)
+        }
     }
     if (choosingBeam) {
         RelayDialog(
@@ -568,28 +534,13 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
         )
     }
     if (confirmReset) {
-        AlertDialog(
-            onDismissRequest = { confirmReset = false },
-            title = { Text("Reset the ${model.device.label} now?") },
-            confirmButton = {
-                TextButton(onClick = { confirmReset = false; model.reset() }) { Text("Reset") }
-            },
-            dismissButton = { TextButton(onClick = { confirmReset = false }) { Text("Cancel") } },
-        )
+        ResetDialog(model.device, onDismiss = { confirmReset = false }) { confirmReset = false; model.reset() }
     }
     if (confirmHardReset) {
-        AlertDialog(
-            onDismissRequest = { confirmHardReset = false },
-            title = { Text("Hard reset") },
-            text = { Text("Erase everything on the ${model.device.label}?") },
-            confirmButton = {
-                Row {
-                    TextButton(onClick = { confirmHardReset = false; model.hardReset(saveFirst = true) }) { Text("Save first") }
-                    TextButton(onClick = { confirmHardReset = false; model.hardReset(saveFirst = false) }) { Text("Erase") }
-                }
-            },
-            dismissButton = { TextButton(onClick = { confirmHardReset = false }) { Text("Cancel") } },
-        )
+        HardResetDialog(model.device, onDismiss = { confirmHardReset = false }) { saveFirst ->
+            confirmHardReset = false
+            model.hardReset(saveFirst)
+        }
     }
     if (model.askingLeave) {
         AlertDialog(

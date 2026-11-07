@@ -19,6 +19,7 @@ import android.os.Process
 import android.util.Log
 import android.window.OnBackInvokedDispatcher
 import androidx.core.view.ViewCompat
+import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.setViewTreeLifecycleOwner
 import androidx.lifecycle.setViewTreeViewModelStoreOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
@@ -58,11 +59,30 @@ open class FrondActivity : SDLActivity() {
     private val bar = com.rm.frond.ui.RunningBarState()
     private var barView: androidx.compose.ui.platform.ComposeView? = null
     private var barOwner: BarOwner? = null
+    // The menu's model: the Peripherals screen's logic running here, on the control link.
+    private var menuModel: PeripheralsModel? = null
     private var imeButtons = 0
     @Volatile private var pendingMicrophone = false
     @Volatile private var foreground = false
     @Volatile private var microphoneResume = 0L
-    fun microphoneOnReturn(on: Boolean) { pendingMicrophone = on }
+    // Over the Palm (the menu in the bar) the request starts at once; behind another screen it waits for the return.
+    fun microphoneOnReturn(on: Boolean) {
+        pendingMicrophone = on
+        if (on && foreground) runOnUiThread { startPendingMicrophone() }
+    }
+
+    private fun startPendingMicrophone() {
+        if (leaving || !pendingMicrophone) return
+        pendingMicrophone = false
+        val owner = this
+        val resume = microphoneResume
+        Thread {
+            val epoch = link.request("microphone-epoch", timeoutSeconds = 10)
+            if (epoch.ok && running === owner && foreground && !leaving && microphoneResume == resume)
+                link.request("microphone-mode", "on-return:${epoch.message}", timeoutSeconds = 10)
+            runOnUiThread { menuModel?.settleMicrophone() }
+        }.apply { isDaemon = true }.start()
+    }
     private var keyboard: PalmKeyboard? = null
     // The Palm infrared keyboard, as the core last said.
     @Volatile private var keyboardAttached = false
@@ -132,7 +152,7 @@ open class FrondActivity : SDLActivity() {
         resolveRunningDevice()
         if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) logSpeed()
         if (Build.VERSION.SDK_INT >= 33) {
-            onBackInvokedDispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT) { leave() }
+            onBackInvokedDispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT) { back() }
         }
     }
 
@@ -288,11 +308,11 @@ open class FrondActivity : SDLActivity() {
     }
 
     @Deprecated("Back before Android 13")
-    override fun onBackPressed() = leave()
+    override fun onBackPressed() = back()
 
     override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
         if (event.keyCode == android.view.KeyEvent.KEYCODE_BACK) {
-            if (event.action == android.view.KeyEvent.ACTION_UP) leave()
+            if (event.action == android.view.KeyEvent.ACTION_UP) back()
             return true
         }
         // Controller keys go to the Palm here and never reach SDL, so they don't also arrive as
@@ -379,6 +399,11 @@ open class FrondActivity : SDLActivity() {
 
     // Saves the session and asks the core to quit. SDL then finishes the activity when its main
     // returns. Also runs when SDL asks the core to close (the core sends a "close" event).
+    // Back closes the bar's menu first, then leaves the machine.
+    private fun back() {
+        if (bar.menuOpen) bar.menuOpen = false else leave()
+    }
+
     private fun leave() {
         if (leaving) return
         leaving = true
@@ -585,16 +610,7 @@ open class FrondActivity : SDLActivity() {
     override fun onResume() {
         super.onResume()
         foreground = true
-        if (!leaving && pendingMicrophone) {
-            pendingMicrophone = false
-            val owner = this
-            val resume = microphoneResume
-            Thread {
-                val epoch = link.request("microphone-epoch", timeoutSeconds = 10)
-                if (epoch.ok && running === owner && foreground && !leaving && microphoneResume == resume)
-                    link.request("microphone-mode", "on-return:${epoch.message}", timeoutSeconds = 10)
-            }.apply { isDaemon = true }.start()
-        }
+        startPendingMicrophone()
         if (!leaving) readKeyboard()
         if (!leaving) applySound()
         bar.sound = sound
@@ -620,6 +636,16 @@ open class FrondActivity : SDLActivity() {
         bar.powerKey = RunningBar.powerKey(device)
         val owner = BarOwner().also { it.create() }
         barOwner = owner
+        val model = PeripheralsModel(
+            ModelHost(this, owner.lifecycleScope, { runOnUiThread(it) }, {}),
+            device, null, null, link, session?.name ?: device.label,
+        )
+        menuModel = model
+        bar.device = device
+        bar.model = model
+        model.watchGdb()
+        model.watchBeam()
+        readMenuState()
         val view = androidx.compose.ui.platform.ComposeView(this).apply {
             setViewTreeLifecycleOwner(owner)
             setViewTreeViewModelStoreOwner(owner)
@@ -628,7 +654,7 @@ open class FrondActivity : SDLActivity() {
                 com.rm.frond.ui.RunningBarView(bar, com.rm.frond.ui.RunningBarActions(
                     back = { leave() }, toggleSound = { toggleSound() }, power = { pressPower() },
                     keyboard = { toggleKeyboard() }, show = { setBarShown(true) }, hide = { setBarShown(false) },
-                    peripherals = { openPanel() },
+                    openMenu = { openMenu() }, menuRow = { menuRow(it) },
                 ))
             }
         }
@@ -637,6 +663,105 @@ open class FrondActivity : SDLActivity() {
             addRule(RelativeLayout.ALIGN_PARENT_TOP)
         })
         layoutBar()
+    }
+
+    private fun readMenuState() {
+        val model = menuModel ?: return
+        model.readKeyboard()
+        model.readHold()
+        model.readNetwork()
+        model.readMicrophone()
+    }
+
+    private fun openMenu() {
+        if (leaving) return
+        readMenuState()
+        bar.menuOpen = !bar.menuOpen
+    }
+
+    // The menu's rows. Reset, Hard reset and Network ask in the bar's own dialogs.
+    private fun menuRow(id: RunningMenu.Id) {
+        val model = menuModel ?: return
+        if (leaving) return
+        when (id) {
+            RunningMenu.Id.HOLD -> model.changeHold(model.hold != true)
+            RunningMenu.Id.KEYBOARD -> model.attachKeyboard(model.keyboard != true)
+            RunningMenu.Id.MICROPHONE -> toggleMicrophone(model)
+            RunningMenu.Id.DISPLAY, RunningMenu.Id.CONNECTIONS -> openPanel()
+            RunningMenu.Id.SCREENSHOT -> takeScreenshot()
+            RunningMenu.Id.HIDE_BAR -> setBarShown(false)
+            RunningMenu.Id.SAVE_COPY -> saveCopy(model)
+            RunningMenu.Id.LOG -> model.showLog()
+            RunningMenu.Id.RESET, RunningMenu.Id.HARD_RESET, RunningMenu.Id.NETWORK -> Unit
+        }
+    }
+
+    private fun toggleMicrophone(model: PeripheralsModel) {
+        val on = model.microphone != "on" && model.microphone != "pending"
+        if (!on) model.changeMicrophone(false)
+        else if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED) model.changeMicrophone(true)
+        else requestPermissions(arrayOf(android.Manifest.permission.RECORD_AUDIO), REQUEST_MICROPHONE)
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQUEST_MICROPHONE) return
+        if (grantResults.firstOrNull() == android.content.pm.PackageManager.PERMISSION_GRANTED) menuModel?.changeMicrophone(true)
+        else menuModel?.microphoneDenied()
+    }
+
+    private fun saveCopy(model: PeripheralsModel) {
+        @Suppress("DEPRECATION")
+        startActivityForResult(
+            android.content.Intent(android.content.Intent.ACTION_CREATE_DOCUMENT)
+                .addCategory(android.content.Intent.CATEGORY_OPENABLE)
+                .setType("application/zip")
+                .putExtra(android.content.Intent.EXTRA_TITLE, "${model.name}.zip"),
+            REQUEST_SAVE_COPY,
+        )
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
+        @Suppress("DEPRECATION")
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_SAVE_COPY && resultCode == RESULT_OK) data?.data?.let { menuModel?.saveCopy(it) }
+    }
+
+    // The Palm's view as a PNG in Pictures/Frond.
+    private fun takeScreenshot() {
+        val surface = SDLActivity.mSurface ?: return
+        if (surface.width == 0 || surface.height == 0) return
+        val bitmap = android.graphics.Bitmap.createBitmap(surface.width, surface.height, android.graphics.Bitmap.Config.ARGB_8888)
+        android.view.PixelCopy.request(surface, bitmap, { result ->
+            if (result != android.view.PixelCopy.SUCCESS) {
+                android.widget.Toast.makeText(this, "Couldn't take the screenshot", android.widget.Toast.LENGTH_SHORT).show()
+                return@request
+            }
+            val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US).format(java.util.Date())
+            val name = RunningMenu.screenshotName(bar.name, stamp)
+            Thread({
+                val saved = try { savePicture(bitmap, name); true } catch (e: Exception) { Log.w(TAG, "screenshot: ${e.message}"); false }
+                runOnUiThread {
+                    android.widget.Toast.makeText(this, if (saved) "Screenshot saved" else "Couldn't save the screenshot", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            }, "FrondScreenshot").apply { isDaemon = true }.start()
+        }, android.os.Handler(mainLooper))
+    }
+
+    private fun savePicture(bitmap: android.graphics.Bitmap, name: String) {
+        if (Build.VERSION.SDK_INT >= 29) {
+            val values = android.content.ContentValues().apply {
+                put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, name)
+                put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/png")
+                put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, "Pictures/Frond")
+            }
+            val uri = contentResolver.insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: throw java.io.IOException("no place to save")
+            contentResolver.openOutputStream(uri)!!.use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+        } else {
+            val folder = getExternalFilesDir(android.os.Environment.DIRECTORY_PICTURES) ?: throw java.io.IOException("no place to save")
+            File(folder, name).outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+        }
     }
 
     private fun layoutBar() {
@@ -944,6 +1069,8 @@ open class FrondActivity : SDLActivity() {
         @Volatile private var runLock: Cards.RunLock? = null
         const val TAG = "Frond"
         const val EXTRA_SESSION = "session"
+        private const val REQUEST_MICROPHONE = 41
+        private const val REQUEST_SAVE_COPY = 42
         const val EXTRA_DEVICE = "device"
         const val EXTRA_NOR = "nor"
         const val EXTRA_NAND = "nand"

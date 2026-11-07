@@ -24,9 +24,24 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
+// What a model needs from the screen it runs in: the Peripherals activity or the running bar over the emulator.
+// finish leaves the Peripherals screen and does nothing over the Palm.
+class ModelHost(
+    context: android.content.Context,
+    val lifecycleScope: kotlinx.coroutines.CoroutineScope,
+    private val ui: (Runnable) -> Unit,
+    private val onFinish: () -> Unit,
+) {
+    val applicationContext: android.content.Context = context.applicationContext
+    val contentResolver: android.content.ContentResolver get() = applicationContext.contentResolver
+    val cacheDir: File get() = applicationContext.cacheDir
+    fun runOnUiThread(block: () -> Unit) = ui(Runnable(block))
+    fun finish() = onFinish()
+}
+
 // What the emulator's menu screen shows. Card and database work runs one job at a time off the main thread.
 class PeripheralsModel(
-    private val activity: PeripheralsActivity,
+    private val activity: ModelHost,
     val device: Device,
     private val card: SdCard?,
     private val databases: PalmDatabases?,
@@ -428,8 +443,8 @@ class PeripheralsModel(
         }
     }
 
-    private val sessionId = Sessions.forPath(activity, FrondActivity.running?.session)?.id
-    private fun machineSettings() = sessionId?.let { Sessions.read(activity, it)?.settings } ?: MachineSettings()
+    private val sessionId = Sessions.forPath(activity.applicationContext, FrondActivity.running?.session)?.id
+    private fun machineSettings() = sessionId?.let { Sessions.read(activity.applicationContext, it)?.settings } ?: MachineSettings()
 
     // The physical switch is part of the guest session, independent of machine preferences.
     var hold by mutableStateOf<Boolean?>(null)
@@ -465,7 +480,7 @@ class PeripheralsModel(
         val id = sessionId ?: return
         val old = settings
         try {
-            Sessions.updateSettings(activity, id) { cur ->
+            Sessions.updateSettings(activity.applicationContext, id) { cur ->
                 var s = cur
                 if (next.size != old.size) s = s.copy(size = next.size)
                 if (next.smoothing != old.smoothing) s = s.copy(smoothing = next.smoothing)
@@ -501,13 +516,19 @@ class PeripheralsModel(
         if (!device.microphone || FrondActivity.running !== microphoneOwner) return
         microphoneOwner?.microphoneOnReturn(on)
         val id = sessionId ?: return
-        try { Sessions.updateSettings(activity, id) { it.copy(microphone = on) } }
+        try { Sessions.updateSettings(activity.applicationContext, id) { it.copy(microphone = on) } }
         catch (e: Exception) { alert = "Couldn't save settings" to "Couldn't write the machine settings." }
         if (on) microphone = "pending"
         else {
             microphone = "off"
             activity.lifecycleScope.launch { withContext(Dispatchers.IO) { link?.request("microphone-mode", "off", timeoutSeconds = 10) } }
         }
+    }
+
+    // The request has gone to the core: reads what it says now.
+    fun settleMicrophone() {
+        if (microphone == "pending") microphone = "off"
+        readMicrophone()
     }
 
     fun cancelMicrophoneRequest() {
@@ -814,7 +835,7 @@ open class PeripheralsActivity : ComponentActivity() {
         val emulator = FrondActivity.running
         val device = emulator?.runningDevice ?: Device.byId(intent?.getStringExtra(FrondActivity.EXTRA_DEVICE)) ?: Device.TX
         model = PeripheralsModel(
-            this,
+            ModelHost(this, lifecycleScope, { runOnUiThread(it) }, { finish() }),
             device,
             emulator?.let { SdCard(applicationContext, it.control, it.session, device) },
             emulator?.let { PalmDatabases(applicationContext, it.control) },
