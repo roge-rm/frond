@@ -140,6 +140,7 @@ Error codes seen across commands: `argument`, `unsupported` (the device lacks it
 | `save` | file | `saved` |
 | `install` | file (PRC or PDB) | `installed`, or `needs-reset` (reset to finish). Errors: `corrupt`, `memory`, `open`, `overwrite`, `unsupported`, `not-ready`, `read` |
 | `launch-app` | database name, up to 31 bytes | `launched`; errors `launch`, `not-ready` |
+| `delete-db` | database name, up to 31 bytes | `deleted`; errors `missing`, `rom`, `running` (the open application), `open`, `delete`, `not-ready` |
 | `export` | ZIP file | `exported`: all RAM databases |
 | `export-db` | ZIP file, newline, database name | `exported`: that database |
 | `db-list` | | `databases`: a line per RAM database, `type creator attributes` as hex, then the hex name |

@@ -244,6 +244,12 @@ def common(c, root, device, unsupported, saved):
     before = saved.stat().st_mtime_ns if saved.exists() else 0
     c.ok('save', saved, code='saved')
     assert saved.stat().st_size > 100000 and saved.stat().st_mtime_ns != before, 'session not written'
+    # Delete after the save, so the reload checks still find the database; install it again after.
+    c.fails('delete-db', '', code='argument')
+    c.fails('delete-db', 'No Such Database', code='missing')
+    c.ok('delete-db', PATTERN_NAME, code='deleted')
+    assert PATTERN_NAME.encode().hex() not in c.ok('db-list', code='databases'), 'deleted database still listed'
+    assert c.ok('install', PATTERN, code=('installed', 'needs-reset'))
 
 
 def check_arm(core, session, root):
