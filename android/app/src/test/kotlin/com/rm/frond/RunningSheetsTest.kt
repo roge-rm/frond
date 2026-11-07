@@ -32,7 +32,7 @@ class RunningSheetsTest {
     }
 
     @Test fun appsGetLaunchAndExportOnly() {
-        assertEquals(listOf(AppAction.LAUNCH, AppAction.EXPORT), RunningSheets.appActions)
+        assertEquals(listOf(AppAction.LAUNCH, AppAction.EXPORT, AppAction.DELETE), RunningSheets.appActions)
         val list = listOf(
             PalmDatabases.Info("Memos", "appl", "memo", true),
             PalmDatabases.Info("MemoDB", "DATA", "memo", false),
@@ -128,5 +128,15 @@ class RunningSheetsTest {
         assertTrue(RunningSheets.beamUsable(device, false))
         assertFalse(RunningSheets.beamUsable(device, true))
         assertFalse(RunningSheets.beamUsable(device, null))
+    }
+
+    @Test fun byNameDialogTakesCoreNames() {
+        assertTrue(RunningSheets.validDatabaseName(" Memos-PMem "))
+        assertTrue(RunningSheets.validDatabaseName("a".repeat(31)))
+        assertFalse(RunningSheets.validDatabaseName("a".repeat(32)))
+        assertFalse(RunningSheets.validDatabaseName("  "))
+        val all = listOf(PalmDatabases.Info("Memos-PMem", "DATA", "memo", false), PalmDatabases.Info("Todo", "appl", "todo", true))
+        assertEquals(listOf("Todo"), RunningSheets.matching(all, " tod ").map { it.name })
+        assertEquals(2, RunningSheets.matching(all, "").size)
     }
 }

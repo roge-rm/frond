@@ -395,6 +395,10 @@ open class FrondActivity : SDLActivity() {
                 .apply { isDaemon = true }.start()
         }
         controller.releaseAll()
+        // The menu and sheets live in this activity, so they pause with it: a waiting microphone request
+        // is dropped and the Bluetooth read stops until the Connections sheet is in front again.
+        menuModel?.cancelMicrophoneRequest()
+        menuModel?.stopBluetoothRefresh()
         super.onPause()
     }
 
@@ -630,6 +634,8 @@ open class FrondActivity : SDLActivity() {
         if (!leaving) applySound()
         bar.sound = sound
         if (!leaving) applyDisplay()
+        menuModel?.readMicrophone()
+        if (bar.sheet == RunningSheets.Sheet.CONNECTIONS) menuModel?.startBluetoothRefresh()
     }
 
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {

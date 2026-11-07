@@ -25,10 +25,15 @@ object RunningSheets {
 
     // ---- Applications ----
 
-    enum class AppAction { LAUNCH, EXPORT }
+    enum class AppAction { LAUNCH, EXPORT, DELETE }
 
-    // The core has no command to delete a database, so there is no Delete.
-    val appActions = listOf(AppAction.LAUNCH, AppAction.EXPORT)
+    val appActions = listOf(AppAction.LAUNCH, AppAction.EXPORT, AppAction.DELETE)
+
+    // A Palm database name the core takes: not blank, 31 bytes at most.
+    fun validDatabaseName(name: String) = name.isNotBlank() && name.trim().toByteArray(Charsets.ISO_8859_1).size <= 31
+
+    // The databases the by-name dialog lists, filtered by what is typed.
+    fun matching(all: List<PalmDatabases.Info>, typed: String) = all.filter { it.name.contains(typed.trim(), ignoreCase = true) }
 
     fun applications(all: List<PalmDatabases.Info>) = all.filter { it.application }
 

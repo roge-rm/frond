@@ -11,17 +11,21 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -89,6 +93,7 @@ fun BoxScope.SheetLayer(sheet: Sheet, state: RunningBarState, actions: RunningBa
 private fun ApplicationsSheet(model: PeripheralsModel, actions: RunningBarActions) {
     LaunchedEffect(Unit) { model.loadApps() }
     var exportName by rememberSaveable { mutableStateOf<String?>(null) }
+    var deleting by rememberSaveable { mutableStateOf<String?>(null) }
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris -> model.install(uris) }
     val save = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
         if (uri != null) model.export(uri, exportName)
@@ -96,6 +101,7 @@ private fun ApplicationsSheet(model: PeripheralsModel, actions: RunningBarAction
     Row(Modifier.padding(horizontal = 8.dp)) {
         TextButton(onClick = { pick.launch(arrayOf("*/*")) }) { Text("Install…") }
         TextButton(onClick = { exportName = null; save.launch("Palm databases.zip") }) { Text("Export all…") }
+        TextButton(onClick = { model.askName("other") }) { Text("Other…") }
     }
     val apps = model.apps
     if (apps == null) Progress()
@@ -113,12 +119,68 @@ private fun ApplicationsSheet(model: PeripheralsModel, actions: RunningBarAction
                         AppAction.EXPORT -> IconButton({ exportName = app.name; save.launch("${app.name}.zip") }) {
                             Icon(painterResource(R.drawable.ic_export), contentDescription = "Export ${app.name}")
                         }
+                        AppAction.DELETE -> IconButton({ deleting = app.name }) {
+                            Icon(Icons.Default.Delete, contentDescription = "Delete ${app.name}")
+                        }
                     }
                 }
             },
             colors = androidx.compose.material3.ListItemDefaults.colors(containerColor = Color.Transparent),
         )
     }
+    deleting?.let { name ->
+        AlertDialog(
+            onDismissRequest = { deleting = null },
+            title = { Text("Delete $name?") },
+            text = { Text("Its data goes too.") },
+            confirmButton = { TextButton(onClick = { deleting = null; model.delete(name) }) { Text("Delete", color = MaterialTheme.colorScheme.error) } },
+            dismissButton = { TextButton(onClick = { deleting = null }) { Text("Cancel") } },
+        )
+    }
+    if (model.naming == "other") {
+        OtherDatabaseDialog(
+            model,
+            onLaunch = { name -> model.naming = null; actions.closeSheet(); model.launch(name) },
+            onExport = { name -> model.naming = null; exportName = name; save.launch("$name.zip") },
+        )
+    }
+}
+
+// Launch or export any RAM database by name, picked from the list or typed.
+@Composable
+private fun OtherDatabaseDialog(model: PeripheralsModel, onLaunch: (String) -> Unit, onExport: (String) -> Unit) {
+    var name by rememberSaveable { mutableStateOf("") }
+    val shown = RunningSheets.matching(model.found, name)
+    val valid = RunningSheets.validDatabaseName(name)
+    AlertDialog(
+        onDismissRequest = { model.naming = null },
+        title = { Text("Other database") },
+        text = {
+            Column {
+                OutlinedTextField(name, { name = it }, label = { Text("Database name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                if (model.listing) Progress()
+                else if (shown.isNotEmpty()) {
+                    LazyColumn(Modifier.padding(top = 8.dp).heightIn(max = 240.dp)) {
+                        items(shown, key = { it.name }) { db ->
+                            ListItem(
+                                headlineContent = { Text(db.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                supportingContent = { Text(db.creator) },
+                                modifier = Modifier.clickableRow { name = db.name },
+                                colors = androidx.compose.material3.ListItemDefaults.colors(containerColor = Color.Transparent),
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Row {
+                TextButton(enabled = valid, onClick = { onLaunch(name.trim()) }) { Text("Launch") }
+                TextButton(enabled = valid, onClick = { onExport(name.trim()) }) { Text("Export…") }
+            }
+        },
+        dismissButton = { TextButton(onClick = { model.naming = null }) { Text("Cancel") } },
+    )
 }
 
 @Composable

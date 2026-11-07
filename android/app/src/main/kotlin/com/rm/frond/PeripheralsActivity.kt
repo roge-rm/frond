@@ -78,7 +78,7 @@ class PeripheralsModel(
         private set
     // Asking whether to insert the changed card on leaving the file view.
     var askingLeave by mutableStateOf(false)
-    // Asking for a database name: "launch" or "export", with the RAM databases found for the list.
+    // Asking for a database name: "launch", "export" or "other" (the sheets' by-name dialog), with the RAM databases found for the list.
     var naming by mutableStateOf<String?>(null)
     var found by mutableStateOf(emptyList<PalmDatabases.Info>())
 
@@ -440,6 +440,11 @@ class PeripheralsModel(
     fun launch(name: String) = palm("Launching", "Couldn't launch") { d ->
         d.launch(name)
         activity.runOnUiThread { activity.finish() }
+    }
+
+    fun delete(name: String) = palm("Deleting", "Couldn't delete") { d ->
+        d.delete(name)
+        activity.runOnUiThread { note = "$name deleted"; loadApps() }
     }
 
     fun export(to: android.net.Uri, name: String?) = palm("Exporting", "Couldn't export") { d ->

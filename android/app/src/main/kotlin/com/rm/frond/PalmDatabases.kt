@@ -7,7 +7,7 @@ import java.io.File
 import java.io.IOException
 
 // Installs, launches and exports Palm databases in the running core, like the desktop's File menu
-// (install, launch-app, export and export-db on the control socket). Files pass through private
+// (install, launch-app, delete-db, export and export-db on the control socket). Files pass through private
 // copies in the app cache, as the core only takes paths. Every call blocks; run them off the main thread.
 class PalmDatabases(private val context: Context, private val link: ControlLink) {
     class Failed(message: String) : Exception(message)
@@ -40,6 +40,11 @@ class PalmDatabases(private val context: Context, private val link: ControlLink)
     fun launch(name: String) {
         val reply = link.request("launch-app", name, timeoutSeconds = 120)
         if (!reply.ok) throw Failed(if (reply.code == "launch") launchFailed(name) else message(reply))
+    }
+
+    // Deletes a RAM database by name. The core refuses a ROM database, the running application and an open one.
+    fun delete(name: String) {
+        run("delete-db", name)
     }
 
     // Writes every RAM database, or the one named, as a ZIP to a picked document.
