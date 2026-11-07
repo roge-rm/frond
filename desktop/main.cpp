@@ -4,9 +4,14 @@
 #include <QFileInfo>
 #include <QIcon>
 #include <QStandardPaths>
+#include <cstring>
+#include "LinkHub.h"
 #include "MainWindow.h"
 
 int main(int argc, char** argv) {
+    // The link hub runs from this same binary without a GUI.
+    for (int i = 1; i < argc; ++i)
+        if (!std::strcmp(argv[i], "--link-service")) return frondLink::runHub(argc, argv);
     QApplication app(argc, argv);
     app.setOrganizationName("Frond");
     app.setApplicationName("Frond");

@@ -8,6 +8,10 @@
 #include "SdExchange.h"
 #include "FirmwareInput.h"
 #include "SessionStore.h"
+#include "LinkClient.h"
+class ConnectionsWindow;
+class CardsWindow;
+class QFileSystemWatcher;
 class QDialog;
 class QMessageBox;
 class SettingsDialog;
@@ -81,12 +85,26 @@ class MainWindow : public QMainWindow {
     QString usbArgument() const;
     void showUsb(const QString& state);
     void loadUsbSettings();
+    // Peripheral choices are per machine, in its settings file; machines from before take the
+    // old global choices once.
+    void migratePeripherals(frondSessions::Preferences* prefs);
+    void savePeripherals();
+    QString irdaChoice() const;  // off, pty, tcp:PORT, link:local or link:<id>
+    void refreshIrdaChoices();
+    void attachInfrared();
+    void showIrdaLink(const QJsonObject& status);
+    void showConnections();
     void failure(const QString& message, const QString& details = {});
     void showDevice(const QString& id);
     QString deviceLabel() const;
     frondFirmware::Device currentDevice() const;
     QString outputFile(const QString& title, const QString& filter, const QString& defaultName);
     DesktopClient client;
+    LinkClient link;
+    QPointer<ConnectionsWindow> connectionsWindow;
+    QFileSystemWatcher* storeWatcher{nullptr};
+    QString irdaSocket;   // the core's IR socket while Infrared uses a connection
+    QString irdaLinkText; // the hub's status for it
     QSettings settings;
     QString core, core68k, sessionPath, savingPath, pendingCopy, copyStaging;
     bool hardResetAfterSave{false};
@@ -111,7 +129,8 @@ class MainWindow : public QMainWindow {
     QPlainTextEdit* log;
     QList<QWidget*> runningButtons;
     QAction* importAction;
-    QPushButton *sdCreate, *sdImport, *sdEject, *sdReinsert, *sdExport, *sdExchange, *sdRetry;
+    QPushButton *cardPick, *sdEject, *sdReinsert, *sdExport, *sdExchange, *sdRetry, *linkedInsert;
+    QLabel* linkedState;
     QCheckBox *microphoneToggle, *soundToggle, *holdToggle, *cardReadOnly;
     QLabel *serialLabel, *networkLabel, *keyboardLabel, *usbLabel, *bluetoothLabel, *microphoneLabel, *contrastLabel;
     QSlider* contrast;
@@ -138,4 +157,29 @@ class MainWindow : public QMainWindow {
     QString networkTip, keyboardTip, serialTip, usbTip, irdaTip;
     QWidget *home, *runningPage, *sessionBar = nullptr;
     bool startupHandled{false}, busy{false}, stopping{false}, closeAfterStop{false}, allowClose{false};
+    // Cards: the final save before quit succeeded, so a linked card can go back to the drawer.
+    bool finalSaved{false};
+    // A linked card held by another machine while this one runs with an empty slot.
+    std::unique_ptr<frondCards::FreeWatcher> linkedWatcher;
+    QString linkedHolder, linkedWatcherId;
+    // A card change on the running machine: eject, take out to the drawer, put the next one in.
+    struct CardMove {
+        enum Stage { None, Eject, TakeOut, PutIn } stage{None};
+        QString in;  // the card going in, empty for none
+    } cardMove;
+    QPointer<CardsWindow> cardsWindow;
+    QString runningMachineDir() const;
+    QString runningCardName() const;
+    void pickCard();
+    void changeCard(const QString& in);
+    void putInCard(const QString& in);
+    bool continueCardMove(const QString& command, const QString& message);
+    void cardMoveFailed(const QString& command, const QString& message);
+ public:
+    // File > Cards: one window, raised if open.
+    CardsWindow* showCards();
+    // Save a Copy to `path` once its file dialog has picked it.
+    void saveCopyTo(const QString& path);
+    // Whether the running machine's linked card is in the drawer now (C5 shows "Insert").
+    bool linkedCardFree() const { return linkedWatcher && linkedWatcher->lastState(); }
 };

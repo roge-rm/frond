@@ -113,6 +113,9 @@ void DesktopClient::receive() {
             else if (fields[2] == "bluetooth" && ready && fields[3].size() % 2 == 0 &&
                      QByteArray::fromHex(fields[3]).toHex() == fields[3])
                 emit bluetoothState(QString::fromUtf8(QByteArray::fromHex(fields[3])));
+            else if (fields[2] == "card" && ready && fields[3].size() % 2 == 0 &&
+                     QByteArray::fromHex(fields[3]).toHex() == fields[3])
+                emit cardState(QString::fromUtf8(QByteArray::fromHex(fields[3])));
             else if (fields[2] == "sd-progress" && ready && fields[3].size() % 2 == 0 &&
                      QByteArray::fromHex(fields[3]).toHex() == fields[3]) {
                 const auto parts = QString::fromUtf8(QByteArray::fromHex(fields[3])).split(' ');

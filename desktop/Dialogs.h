@@ -8,6 +8,8 @@ class QComboBox;
 class QLabel;
 class QLineEdit;
 class QSlider;
+class QSpinBox;
+class QGroupBox;
 
 // Window scale in quarters that fits the screen, from the layout the core draws for the device.
 int fittingScaleQuarters(frondFirmware::Device device, bool keyboard, frondSessions::JogControls jog);
@@ -28,8 +30,15 @@ class MachineSettings : public QWidget {
     // 68k devices only.
     QSlider* contrast;
     QComboBox* speed;
+    // Infrared: the local choices and the connections. Shown once showPeripherals() is called.
+    QComboBox* infrared;
+    QSpinBox* infraredPort;
+    void showPeripherals(bool shown);
  private:
-    QLabel *contrastLabel, *engineLabel, *speedLabel;
+    QLabel *contrastLabel, *engineLabel, *speedLabel, *infraredLabel;
+    QGroupBox* peripherals;
+    bool peripheralsShown{false};
+    frondFirmware::Device device{frondFirmware::Device::automatic};
     QWidget* speedGroup;
     bool automaticScale;
     frondSessions::Preferences originalPreferences;

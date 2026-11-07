@@ -19,6 +19,8 @@
 #include <QScreen>
 #include <QSignalBlocker>
 #include "WindowScale.h"
+#include <QSpinBox>
+#include "LinkCommon.h"
 
 using frondFirmware::Device;
 
@@ -180,6 +182,29 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     engineRow->addWidget(engine, 1);
     speedLayout->addLayout(engineRow);
     layout->addWidget(speedBox);
+    peripherals = new QGroupBox(tr("Connections"), this);
+    auto* peripheralsLayout = new QHBoxLayout(peripherals);
+    infraredLabel = new QLabel(tr("Infrared"), peripherals);
+    infrared = new QComboBox(peripherals);
+    infrared->setObjectName("machineInfrared");
+    infrared->addItem(tr("Off"), "off");
+    infrared->addItem(tr("Terminal (PTY)"), "pty");
+    infrared->addItem(tr("Wait for a peer"), "tcp");
+    frondLink::addConnectionChoices(infrared, prefs.infrared);
+    infraredPort = new QSpinBox(peripherals);
+    infraredPort->setObjectName("machineInfraredPort");
+    infraredPort->setRange(1, 65535);
+    infraredPort->setPrefix(tr("Port "));
+    infraredPort->setValue(prefs.infrared.startsWith("tcp:") ? prefs.infrared.mid(4).toInt() : 5030);
+    infrared->setCurrentIndex(std::max(0, infrared->findData(prefs.infrared.startsWith("tcp:") ? QString("tcp") : prefs.infrared)));
+    infraredLabel->setBuddy(infrared);
+    peripheralsLayout->addWidget(infraredLabel);
+    peripheralsLayout->addWidget(infrared, 1);
+    peripheralsLayout->addWidget(infraredPort);
+    layout->addWidget(peripherals);
+    peripherals->setVisible(false);
+    connect(infrared, &QComboBox::currentIndexChanged, this, [this] { infraredPort->setVisible(infrared->currentData() == "tcp"); });
+    infraredPort->setVisible(infrared->currentData() == "tcp");
     contrast->setValue(prefs.contrast);
     contrastLabel->setText(tr("Contrast: %1").arg(prefs.contrast));
     connect(contrast, &QSlider::valueChanged, this, [this](int value) { contrastLabel->setText(tr("Contrast: %1").arg(value)); });
@@ -227,9 +252,20 @@ frondSessions::Preferences MachineSettings::values() const {
     if (contrast->value() != prefs.contrast) prefs.contrastSet = true;
     prefs.contrast = contrast->value();
     prefs.uncapped = speed->currentData().toBool();
+    if (peripheralsShown && device != Device::automatic && frondFirmware::capabilities(device).infrared) {
+        const auto mode = infrared->currentData().toString();
+        prefs.infrared = mode == "tcp" ? "tcp:" + QString::number(infraredPort->value()) : mode;
+        prefs.peripheralsSet = true;
+    }
     return prefs;
 }
+void MachineSettings::showPeripherals(bool shown) {
+    peripheralsShown = shown;
+    setDevice(device);
+}
 void MachineSettings::setDevice(Device device) {
+    this->device = device;
+    peripherals->setVisible(peripheralsShown && device != Device::automatic && frondFirmware::capabilities(device).infrared);
     const bool tg50 = device == frondFirmware::deviceFromId("sony-clie-tg50");
     showKeyboard->setVisible(tg50);
     jogControlsLabel->setVisible(tg50);
@@ -268,6 +304,7 @@ MachineSettingsDialog::MachineSettingsDialog(Device device, const frondSessions:
     auto* layout = new QVBoxLayout(this);
     controls = new MachineSettings(prefs, false, this);
     controls->setDevice(device);
+    controls->showPeripherals(true);
     layout->addWidget(controls);
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, this);
     connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);

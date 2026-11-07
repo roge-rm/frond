@@ -35,6 +35,27 @@
 #include <QTcpSocket>
 #include <QImage>
 #include "MainWindow.h"
+#include "LinkClient.h"
+#include "LinkCommon.h"
+#include "ConnectionsWindow.h"
+#include "CardsWindow.h"
+#include <QRadioButton>
+#include <QStandardItemModel>
+#include <QDirIterator>
+#include <QStorageInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QLocalServer>
+#include <QLocalSocket>
+#include <QTcpServer>
+#include <QUdpSocket>
+#include <functional>
+#include <memory>
+#include <signal.h>
+#include <sys/time.h>
+#include "LinkStore.h"
+#include "../link/link.h"
 
 static QByteArray digest(const QString& path) {
     QFile file(path);
@@ -43,6 +64,397 @@ static QByteArray digest(const QString& path) {
     if (!hash.addData(&file)) return {};
     return hash.result();
 }
+// ---- Connections: hubs on loopback, driven like windows through LinkClient ----
+struct TestHub {
+    QString root, run, data;
+    QProcessEnvironment env;
+    TestHub(const QString& base, const QString& tag, quint16 port) {
+        root = base + "/" + tag; run = root + "/run"; data = root + "/data";
+        QDir().mkpath(run); QDir().mkpath(data);
+        QFile::setPermissions(run, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+        env = QProcessEnvironment::systemEnvironment();
+        env.insert("XDG_RUNTIME_DIR", run); env.insert("XDG_DATA_HOME", data);
+        env.insert("FROND_LINK_PORT", QString::number(port)); env.insert("FROND_LINK_DISCOVERY_PORT", "0");
+        env.remove("FROND_LINK_SOCKET");
+    }
+    QString store() const { return data + "/frond/connections"; }
+    QString socket() const { return run + "/frond/link.sock"; }
+};
+// A window's side of the hub: the client and every message it got.
+struct HubUser {
+    LinkClient client;
+    QList<QJsonObject> got;
+    explicit HubUser(const TestHub& hub) {
+        client.setSocketPath(hub.socket()); client.setHubEnvironment(hub.env);
+        QObject::connect(&client, &LinkClient::message, &client, [this](const QJsonObject& m) { got.push_back(m); });
+    }
+    QJsonObject last(const QString& type) const {
+        for (auto it = got.rbegin(); it != got.rend(); ++it) if (it->value("type").toString() == type) return *it;
+        return {};
+    }
+    QString ir() const { return last("ir").value("state").toString(); }
+};
+// Stands in for a core's IR socket.
+struct FakeIr {
+    QLocalServer server;
+    QPointer<QLocalSocket> peer;
+    QByteArray got;
+    QString path;
+    explicit FakeIr(const QString& where) : path(where) {
+        QObject::connect(&server, &QLocalServer::newConnection, &server, [this] {
+            while (auto* s = server.nextPendingConnection()) {
+                peer = s;
+                QObject::connect(s, &QLocalSocket::readyRead, s, [this, s] { got += s->readAll(); });
+            }
+        });
+        listen();
+    }
+    bool listen() {
+        QLocalServer::removeServer(path);
+        return server.listen(path);
+    }
+    void sleep() { if (peer) peer->abort(); server.close(); QFile::remove(path); }
+    void send(const QByteArray& bytes) { if (peer) { peer->write(bytes); peer->flush(); } }
+};
+static quint16 freePort() {
+    QTcpServer probe; probe.listen(QHostAddress::LocalHost, 0);
+    return probe.serverPort();
+}
+static quint16 freeUdpPort() {
+    QUdpSocket probe; probe.bind(QHostAddress::AnyIPv4, 0);
+    return probe.localPort();
+}
+// A hub process that's gone or a zombie.
+static bool alive(qint64 pid) {
+    if (pid <= 0 || ::kill(pid_t(pid), 0) != 0) return false;
+    QFile stat(QString("/proc/%1/stat").arg(pid));
+    if (!stat.open(QIODevice::ReadOnly)) return false;
+    return QString::fromLatin1(stat.readAll()).section(')', -1).trimmed().left(1) != "Z";
+}
+static QJsonObject listed(const HubUser& user, const QString& list, const QString& id) {
+    for (const auto& e : user.last("state").value(list).toArray())
+        if (e.toObject().value("id").toString() == id) return e.toObject();
+    return {};
+}
+// The hello a hub sends on its socket, read with a plain connection.
+static QJsonObject hubHello(const QString& path) {
+    QLocalSocket s; s.connectToServer(path);
+    if (!s.waitForConnected(2000)) return {};
+    QByteArray line;
+    while (!line.contains('\n') && s.waitForReadyRead(2000)) line += s.readAll();
+    return QJsonDocument::fromJson(line.left(line.indexOf('\n'))).object();
+}
+// Runs f once on the next T that is the active modal dialog or popup, polling every 20 ms.
+template <typename T>
+static void whenShown(std::function<void(T*)> f) {
+    auto* timer = new QTimer;
+    timer->setInterval(20);
+    QObject::connect(timer, &QTimer::timeout, timer, [timer, f] {
+        auto* w = qobject_cast<T*>(QApplication::activeModalWidget());
+        if (!w) w = qobject_cast<T*>(QApplication::activePopupWidget());
+        if (!w || !w->isVisible()) return;
+        timer->stop(); timer->deleteLater();
+        f(w);
+    });
+    timer->start();
+}
+static void typeInto(const QString& text) {
+    whenShown<QInputDialog>([text](QInputDialog* d) { d->setTextValue(text); d->accept(); });
+}
+static void pickMenu(const QString& action) {
+    whenShown<QMenu>([action](QMenu* m) {
+        auto* a = m->findChild<QAction*>(action);
+        if (!a) { m->close(); return; }
+        m->setActiveAction(a);
+        QTest::keyClick(m, Qt::Key_Return);
+    });
+}
+static void killHub(const HubUser& user) {
+    const auto pid = qint64(user.client.hello().value("pid").toDouble());
+    if (pid > 0) ::kill(pid_t(pid), SIGKILL);
+}
+static QJsonObject storedPeer(const TestHub& hub, const QString& id) {
+    QFile f(hub.store() + "/connections.json");
+    if (!f.open(QIODevice::ReadOnly)) return {};
+    for (const auto& e : QJsonDocument::fromJson(f.readAll()).object().value("entries").toArray())
+        if (e.toObject().value("id").toString() == id) return e.toObject();
+    return {};
+}
+// a pairs with b by address, typing a wrong code first when asked. b's user watches.
+static bool pairHubs(HubUser& a, HubUser& b, bool wrongFirst) {
+    b.client.setSticky("watch", {{"op", "watch"}});
+    if (!QTest::qWaitFor([&] { return !b.last("hello").isEmpty(); }, 10000)) return false;
+    b.got.clear(); a.got.clear();
+    const auto port = b.client.hello().value("port").toInt();
+    a.client.send({{"op", "pair"}, {"address", "127.0.0.1:" + QString::number(port)}});
+    if (!QTest::qWaitFor([&] { return !a.last("pair-peer").isEmpty() && !b.last("pair-request").isEmpty(); }, 10000)) return false;
+    const auto code = b.last("pair-request").value("code").toString().remove(' ');
+    if (wrongFirst) {
+        a.client.send({{"op", "pair-code"}, {"code", QString("%1").arg((code.toInt() + 1) % 1000000, 6, 10, QChar('0'))}});
+        if (!QTest::qWaitFor([&] { return a.last("pair-result").value("result") == "wrongcode" &&
+                                         b.last("pair-request-update").value("tries").toInt() == 2; }, 10000)) return false;
+    }
+    a.client.send({{"op", "pair-code"}, {"code", code}});
+    return QTest::qWaitFor([&] { return a.last("pair-result").value("result") == "paired" &&
+                                        b.last("pair-request-end").value("result") == "paired"; }, 10000);
+}
+
+// ---- Cards: a library beside the test's sessions, real card files from the core's card tool ----
+static QString cardsData() { return QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/frond"; }
+static QString cardsSessions() { return cardsData() + "/sessions"; }
+static QString cardsLibrary() { return cardsData() + "/cards"; }
+static void cardsReset() {
+    QDir(cardsSessions()).removeRecursively();
+    QDir(cardsLibrary()).removeRecursively();
+    QDir().mkpath(cardsSessions());
+}
+// The ARM core built beside the desktop: out/frond from build/desktop.
+static QString cardsCore() {
+    const auto env = qEnvironmentVariable("FROND_TEST_CORE");
+    return env.isEmpty() ? QDir::cleanPath(QCoreApplication::applicationDirPath() + "/../../out/frond") : env;
+}
+static bool cardTool(const QStringList& args) {
+    QProcess p;
+    p.start(cardsCore(), QStringList{"--card"} + args);
+    return p.waitForFinished(120000) && p.exitCode() == 0;
+}
+static void putLe(QByteArray& b, int at, quint64 v, int n) {
+    for (int i = 0; i < n; ++i) b[at + i] = char(v >> (8 * i));
+}
+struct TestMedia {
+    quint32 kind{1};
+    quint64 logical{32ull << 20}, physical{32ull << 20}, generation{1};
+    QByteArray identity{QByteArray("c4c4c4c4frondcardstoretest0251c4")};
+};
+// A v8 .frond with a device header and media descriptors, enough for the store and a fake core.
+static void writeFrond(const QString& path, const QString& device, const QList<TestMedia>& media) {
+    QByteArray b(8 + 32 + 52, '\0');
+    putLe(b, 0, frondSessions::magic, 4); putLe(b, 4, 8, 4);
+    const auto id = device.toLatin1();
+    for (int i = 0; i < id.size(); ++i) b[8 + i] = id[i];
+    putLe(b, 88, quint64(media.size()), 4);
+    for (const auto& m : media) {
+        QByteArray d(100, '\0');
+        putLe(d, 0, m.kind, 4);
+        const QByteArray name = m.kind == 1 ? "sd.frondsd" : m.kind == 2 ? "ms.frondms" : "ms.frondmsp";
+        for (int i = 0; i < name.size(); ++i) d[4 + i] = name[i];
+        putLe(d, 36, 1, 4);
+        for (int i = 0; i < 32; ++i) d[44 + i] = m.identity.leftJustified(32, '\0', true)[i];
+        putLe(d, 76, m.logical, 8); putLe(d, 84, m.physical, 8); putLe(d, 92, m.generation, 8);
+        b += d;
+    }
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    QFile f(path); f.open(QIODevice::WriteOnly); f.write(b);
+}
+// A saved TX machine in the sessions folder; with a card, a 32 MB SD card at generation 1.
+// Each machine's card has its own serial, from the machine's name.
+static QByteArray machineIdentity(const QString& name) { return QCryptographicHash::hash(name.toUtf8(), QCryptographicHash::Md5).toHex(); }
+static QString cardsMachine(const QString& name, bool card, const QString& device = "palm-tx") {
+    const auto dir = cardsSessions() + '/' + name;
+    TestMedia media;
+    media.identity = machineIdentity(name);
+    writeFrond(dir + '/' + name + ".frond", device, card ? QList<TestMedia>{media} : QList<TestMedia>{});
+    if (card) cardTool({"make", "sd", "32", dir + "/sd.frondsd"});
+    return dir;
+}
+// Rewrites a v2 card file's generation and header CRC, as a save by another machine would.
+static bool setCardGeneration(const QString& path, quint64 generation) {
+    QFile f(path);
+    if (!f.open(QIODevice::ReadWrite)) return false;
+    auto hdr = f.read(64);
+    const auto payload = frondSessions::le64(hdr, 16);
+    const quint64 chunks = (payload + (1u << 20) - 1) >> 20;
+    f.seek(qint64(64 + payload));
+    const auto table = f.read(qint64(4 * chunks));
+    putLe(hdr, 28, generation, 8); putLe(hdr, 24, 0, 4);
+    uLong crc = crc32(0, reinterpret_cast<const Bytef*>(hdr.constData()), 64);
+    crc = crc32(crc, reinterpret_cast<const Bytef*>(table.constData()), uInt(table.size()));
+    putLe(hdr, 24, quint32(crc), 4);
+    return f.seek(0) && f.write(hdr) == 64;
+}
+static quint64 cardGeneration(const QString& path) {
+    quint64 g = 0;
+    frondCards::cardHeader(path, &g, nullptr);
+    return g;
+}
+static frondCards::Card onlyCard() {
+    const auto all = frondCards::entries(cardsLibrary());
+    return all.size() == 1 ? all[0].card : frondCards::Card{};
+}
+static frondCards::Card cardNamed(const QString& name) {
+    for (const auto& e : frondCards::entries(cardsLibrary()))
+        if (e.card.name == name) return e.card;
+    return {};
+}
+// Answers like a core and saves by keeping the session file it was started on. Writes its
+// arguments to <session>.args.
+static QString fakeCardCore(const QString& where) {
+    QFile core(where + "/card-core");
+    core.open(QIODevice::WriteOnly);
+    core.write(R"PY(#!/usr/bin/python3
+import pathlib,socket,sys
+pathlib.Path(sys.argv[1]+'.args').write_text('\n'.join(sys.argv[1:]))
+s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+for line in s.makefile('rb'):
+    i,cmd,arg=line.rstrip(b'\n').split(b'\t')
+    message={b'keyboard-state':b'detached',b'network-state':b'disabled',b'sd-state':b'inserted'}.get(cmd,b'done')
+    if cmd==b'save':
+        dest=pathlib.Path(bytes.fromhex(arg.decode()).decode())
+        if dest.resolve()!=pathlib.Path(sys.argv[1]).resolve(): dest.write_bytes(pathlib.Path(sys.argv[1]).read_bytes())
+    s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
+    if cmd==b'quit': break
+)PY");
+    core.close();
+    core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+    return core.fileName();
+}
+static QString argsOf(const QString& machineDir) {
+    QFile f(machineDir + '/' + QFileInfo(machineDir).fileName() + ".frond.args");
+    return f.open(QIODevice::ReadOnly) ? QString::fromUtf8(f.readAll()) : QString();
+}
+// Runs a machine in `window` until it is up, then closes it (final save, quit).
+static bool runAndClose(MainWindow& window, const QString& dir) {
+    window.show();
+    window.openSession(dir + '/' + QFileInfo(dir).fileName() + ".frond", true);
+    if (!QTest::qWaitFor([&] { return window.findChild<QPushButton*>("stop")->isEnabled(); }, 60000)) return false;
+    window.close();
+    return QTest::qWaitFor([&] { return !window.isVisible(); }, 120000);
+}
+
+// The running card picker: New card of `type` and `size` (labels as shown), then OK, or with
+// `cancel` the card tool's progress is cancelled and the picker closed. Returns the size labels the
+// New card dialog offered for `type`, greyed ones followed by " (greyed)".
+static QStringList pickNewCard(MainWindow& window, const QString& type, const QString& size, bool cancel, bool* sawProgress = nullptr) {
+    QStringList offered;
+    int stage = 0;  // 0 picker, 1 New card done, 2 picker closed
+    QTimer poll;
+    poll.setInterval(10);
+    QObject::connect(&poll, &QTimer::timeout, &window, [&] {
+        if (auto* job = window.findChild<QProgressDialog*>("cardJob"); job && job->isVisible()) {
+            if (sawProgress) *sawProgress = true;
+            if (cancel && !job->property("pressed").toBool())
+                if (auto* b = job->findChild<QPushButton*>()) {
+                    job->setProperty("pressed", true);
+                    QTimer::singleShot(0, b, &QPushButton::click);
+                }
+            return;
+        }
+        auto* modal = QApplication::activeModalWidget();
+        if (auto* d = qobject_cast<NewCardDialog*>(modal); d && stage == 0) {
+            d->type->setCurrentIndex(d->type->findText(type));
+            for (int i = 0; i < d->sizes->count(); ++i) {
+                auto* item = qobject_cast<QStandardItemModel*>(d->sizes->model())->item(i);
+                offered << d->sizes->itemText(i) + (item->isEnabled() ? QString() : QStringLiteral(" (greyed)"));
+            }
+            d->sizes->setCurrentIndex(d->sizes->findText(size));
+            stage = 1;
+            QTimer::singleShot(0, d, &QDialog::accept);
+        } else if (auto* p = qobject_cast<CardPickerDialog*>(modal); p && stage == 0 && !p->property("asked").toBool()) {
+            p->setProperty("asked", true);
+            QTimer::singleShot(0, p->newCard, &QPushButton::click);
+        } else if (p && stage == 1) {
+            stage = 2;
+            if (cancel) QTimer::singleShot(0, p, &QDialog::reject);
+            else QTimer::singleShot(0, p, &QDialog::accept);
+        }
+    });
+    poll.start();
+    QTimer::singleShot(0, window.findChild<QPushButton*>("cardPick"), &QPushButton::click);
+    QTest::qWaitFor([&] { return stage == 2 && !QApplication::activeModalWidget(); }, 120000);
+    return offered;
+}
+
+// A card tool that reports progress and runs until it is stopped, for Cancel. Set as
+// FROND_CARD_TOOL for as long as the object lives.
+struct SlowCardTool {
+    QTemporaryDir dir;
+    QByteArray before{qgetenv("FROND_CARD_TOOL")};
+    SlowCardTool() {
+        QFile f(dir.filePath("tool"));
+        f.open(QIODevice::WriteOnly);
+        f.write("#!/usr/bin/python3\nimport sys,time\nprint('progress 1/100',flush=True)\ntime.sleep(60)\nprint('ok sd 1',flush=True)\n");
+        f.close();
+        f.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+        qputenv("FROND_CARD_TOOL", f.fileName().toUtf8());
+    }
+    ~SlowCardTool() { qputenv("FROND_CARD_TOOL", before); }
+};
+
+// A core for the card controls: SD put-in, eject and take-out as the real one answers them, and
+// saves that copy the session and its card file to another folder. Writes its commands to
+// <where>/commands.
+static QString pickerCore(const QString& where, const QString& device) {
+    QFile core(where + "/picker-core");
+    core.open(QIODevice::WriteOnly);
+    auto script = QByteArray(R"PY(#!/usr/bin/python3
+import pathlib,shutil,socket,sys,time
+trace=pathlib.Path(__file__).with_name('commands')
+s=socket.socket(socket.AF_UNIX);s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+src=pathlib.Path(sys.argv[1])
+card='inserted' if any((src.parent/n).exists() for n in ('sd.frondsd',)) else 'none'
+identity='00'*32
+for line in s.makefile('rb'):
+    i,raw,arg=line.rstrip(b'\n').split(b'\t'); cmd=raw.decode(); arg=bytes.fromhex(arg.decode()).decode()
+    with trace.open('a') as t: t.write(cmd+'\t'+arg+'\n')
+    message='done'
+    if cmd=='device-state': message='DEVICE'
+    elif cmd=='sd-state': message=card
+    elif cmd=='network-state': message='disabled'
+    elif cmd=='keyboard-state': message='detached'
+    elif cmd=='sd-put-in': card='inserted'; identity=arg.split(' ')[0]
+    elif cmd=='sd-eject': card='ejected'
+    elif cmd=='sd-take-out': card='none'; message=identity+' writable'
+    elif cmd=='sd-export': shutil.copyfile(pathlib.Path(__file__).with_name('exchange.img'), arg)
+    elif cmd=='sd-insert': card='inserted'
+    elif cmd=='save':
+        if 'sd-exchange' in arg and pathlib.Path(__file__).with_name('slow-save').exists(): time.sleep(1.5)
+        dest=pathlib.Path(arg)
+        if dest.resolve()!=src.resolve():
+            dest.write_bytes(src.read_bytes())
+            if (src.parent/'sd.frondsd').exists(): shutil.copyfile(src.parent/'sd.frondsd', dest.parent/'sd.frondsd')
+    s.sendall(i+b'\tok\tresult\t'+message.encode().hex().encode()+b'\n')
+    if cmd=='quit': break
+)PY");
+    script.replace("DEVICE", device.toUtf8());
+    core.write(script);
+    core.close();
+    core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+    return core.fileName();
+}
+// A drawer card whose file is only its size, for lists that don't read it.
+static QString sparseCard(const QString& name, const QString& kind, qint64 bytes) {
+    frondCards::Card card{frondCards::newId(), name, kind, frondCards::now(), {}, bytes, frondCards::newIdentity(), false};
+    const auto entry = cardsLibrary() + '/' + card.id;
+    QDir().mkpath(entry);
+    frondCards::writeCard(entry, card);
+    QFile f(entry + '/' + frondCards::fileOfKind(kind));
+    f.open(QIODevice::WriteOnly);
+    f.resize(bytes);
+    return card.id;
+}
+static void screenshot(QWidget* w, const QString& name) {
+    const auto dir = qEnvironmentVariable("FROND_SCREENSHOTS");
+    if (dir.isEmpty()) return;
+    QDir().mkpath(dir);
+    w->grab().save(dir + '/' + name);
+}
+static void answerYes() {
+    whenShown<QMessageBox>([](QMessageBox* m) {
+        for (auto* b : m->buttons()) {
+            const auto role = m->buttonRole(b);
+            if (role == QMessageBox::YesRole || role == QMessageBox::AcceptRole || role == QMessageBox::DestructiveRole) { b->click(); return; }
+        }
+    });
+}
+static QString rowLabel(QListWidget* l, int i, const char* what) {
+    return l->itemWidget(l->item(i))->findChild<QLabel*>(what)->text();
+}
+static QAction* cardAction(QListWidget* l, int i, const char* action) {
+    return l->itemWidget(l->item(i))->findChild<QPushButton*>("cardMenu")->menu()->findChild<QAction*>(action);
+}
+
 class WorkflowTest : public QObject {
     Q_OBJECT
  private slots:
@@ -152,13 +564,8 @@ for line in s.makefile('rb'):
             auto* mode = window.findChild<QComboBox*>("serialMode");
             auto* port = window.findChild<QSpinBox*>("serialPort");
             auto* state = window.findChild<QLabel*>("serialState");
-            mode->setCurrentIndex(mode->findData("tcp"));
-            emit mode->activated(mode->currentIndex());
-            QVERIFY(port->isEnabled());
-            port->setValue(5099);
-            emit port->editingFinished();
-            QCOMPARE(QSettings().value("serialMode").toString(), QString("tcp"));
-            QCOMPARE(QSettings().value("serialPort").toInt(), 5099);
+            // A machine from before per-machine settings takes the old global choice.
+            QSettings().setValue("serialMode", "tcp"); QSettings().setValue("serialPort", 5099);
             window.openSession(source.fileName(), true);
             QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("stop")->isEnabled(), 5000);
             QFile args(source.fileName() + ".args"); QVERIFY(args.open(QIODevice::ReadOnly));
@@ -194,8 +601,8 @@ for line in s.makefile('rb'):
             QVERIFY(state->text().startsWith("Serial: off, Could not listen on 127.0.0.1:80"));
             // The failed choice is not saved and the mode shows what is open.
             QCOMPARE(mode->currentData().toString(), QString("off"));
-            QCOMPARE(QSettings().value("serialMode").toString(), QString("pty"));
-            QCOMPARE(QSettings().value("serialPort").toInt(), 5099);
+            QCOMPARE(machineSetting("serial"), QString("pty"));
+            QCOMPARE(QSettings().value("serialMode").toString(), QString("tcp"));
             QTRY_VERIFY_WITH_TIMEOUT(mode->isEnabled(), 5000);
             mode->setCurrentIndex(mode->findData("pty"));
             emit mode->activated(mode->currentIndex());
@@ -203,9 +610,7 @@ for line in s.makefile('rb'):
             window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
             QVERIFY(state->text().isEmpty());
         }
-        MainWindow next(core.fileName());
-        QCOMPARE(next.findChild<QComboBox*>("serialMode")->currentData().toString(), QString("pty"));
-        QCOMPARE(next.findChild<QSpinBox*>("serialPort")->value(), 5099);
+        QCOMPARE(machineSetting("serial", frondSessions::preferencesPath(QSettings().value("lastSession").toString())), QString("pty"));
         QSettings().clear();
     }
     void usbSetting() {
@@ -274,13 +679,7 @@ for line in s.makefile('rb'):
             auto* mode = window.findChild<QComboBox*>("usbMode");
             auto* port = window.findChild<QSpinBox*>("usbPort");
             auto* state = window.findChild<QLabel*>("usbState");
-            mode->setCurrentIndex(mode->findData("tcp"));
-            emit mode->activated(mode->currentIndex());
-            QVERIFY(port->isEnabled());
-            port->setValue(5098);
-            emit port->editingFinished();
-            QCOMPARE(QSettings().value("usbMode").toString(), QString("tcp"));
-            QCOMPARE(QSettings().value("usbPort").toInt(), 5098);
+            QSettings().setValue("usbMode", "tcp"); QSettings().setValue("usbPort", 5098);
             window.openSession(source.fileName(), true);
             QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("stop")->isEnabled(), 5000);
             QFile args(source.fileName() + ".args"); QVERIFY(args.open(QIODevice::ReadOnly));
@@ -297,7 +696,7 @@ for line in s.makefile('rb'):
             QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("USB: /dev/pts/8, waiting for a connection, Palm TX detached"), 5000);
             QVERIFY(commands().contains("usb-mode pty\n"));
             QVERIFY(!port->isEnabled());
-            QCOMPARE(QSettings().value("usbMode").toString(), QString("pty"));
+            QCOMPARE(machineSetting("usb"), QString("pty"));
             // A port that cannot be opened is shown, leaves USB off and is not saved.
             QTRY_VERIFY_WITH_TIMEOUT(mode->isEnabled(), 5000);
             QTimer dialogPoll;
@@ -312,14 +711,11 @@ for line in s.makefile('rb'):
             QTRY_VERIFY_WITH_TIMEOUT(state->text().startsWith("USB: off, Could not listen on 127.0.0.1:80"), 5000);
             dialogPoll.stop();
             QCOMPARE(mode->currentData().toString(), QString("off"));
-            QCOMPARE(QSettings().value("usbMode").toString(), QString("pty"));
-            QCOMPARE(QSettings().value("usbPort").toInt(), 5098);
+            QCOMPARE(machineSetting("usb"), QString("pty"));
             window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
             QVERIFY(state->text().isEmpty());
         }
-        MainWindow next(core.fileName());
-        QCOMPARE(next.findChild<QComboBox*>("usbMode")->currentData().toString(), QString("pty"));
-        QCOMPARE(next.findChild<QSpinBox*>("usbPort")->value(), 5098);
+        QCOMPARE(machineSetting("usb", frondSessions::preferencesPath(QSettings().value("lastSession").toString())), QString("pty"));
         QSettings().clear();
     }
     void e2NewSession() {
@@ -423,10 +819,10 @@ for line in s.makefile('rb'):
         QVERIFY(!window.findChild<QComboBox*>("serialMode")->toolTip().contains("Not available"));
         QVERIFY(!window.findChild<QSpinBox*>("serialPort")->isEnabled());
         QTRY_VERIFY(window.findChild<QComboBox*>("usbMode")->isEnabled());
-        QTRY_VERIFY_WITH_TIMEOUT(read(".commands").contains("serial-state"), 5000);
-        QTRY_VERIFY_WITH_TIMEOUT(read(".commands").contains("usb-state"), 5000);
-        QVERIFY(read(".args").contains("--usb\npty"));
-        QTRY_VERIFY(window.findChild<QLabel*>("usbState")->text().contains("Tungsten E2 enumerated"));
+        // A new machine starts with its peripherals off, whatever the old global choices were.
+        QVERIFY(!read(".args").contains("--usb") && !read(".args").contains("--serial"));
+        QCOMPARE(machineSetting("usb", frondSessions::preferencesPath(managedSession("Tungsten E2"))), QString("off"));
+        QCOMPARE(machineSetting("serial", frondSessions::preferencesPath(managedSession("Tungsten E2"))), QString("off"));
         QVERIFY(!window.findChild<QComboBox*>("usbMode")->toolTip().contains("Not available"));
         // A NAND file is passed on when given.
         window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
@@ -467,9 +863,6 @@ for line in s.makefile('rb'):
         QCOMPARE(QSettings().value("serialMode").toString(), QString("tcp"));
         QCOMPARE(QSettings().value("usbMode").toString(), QString("pty"));
         QVERIFY(QSettings().value("fastAudio").toBool());
-        MainWindow third(core.fileName()); third.show();
-        QCOMPARE(third.findChild<QComboBox*>("serialMode")->currentData().toString(), QString("tcp"));
-        QCOMPARE(third.findChild<QComboBox*>("usbMode")->currentData().toString(), QString("pty"));
         QVERIFY(QSettings().value("fastAudio").toBool());
         QSettings().clear();
     }
@@ -568,14 +961,13 @@ for line in s.makefile('rb'):
         QVERIFY(!QFileInfo::exists(firmwareRoot + "/palm-zire-72/nand.bin"));
         const auto args = read(".args").split('\n');
         QCOMPARE(args.mid(0, 3), QStringList({"--device", "palm-zire-72", firmwareRoot + "/palm-zire-72/nor.bin"}));
-        // No NAND, preview audio or serial port; the queue-only low-latency mode is on; USB and infrared settings carry over.
+        // No NAND, preview audio or serial port; the queue-only low-latency mode is on; a new machine's USB and infrared are off.
         QVERIFY(!args.contains("--nand") && !args.contains("--fast-audio") && !args.contains("--serial"));
         QVERIFY(args.contains("--low-latency-queue"));
-        QVERIFY(read(".args").contains("--usb\npty") && read(".args").contains("--irda\npty"));
+        QVERIFY(!read(".args").contains("--usb") && !read(".args").contains("--irda"));
         QCOMPARE(window.windowTitle(), QString("Zire 72"));
-        QTRY_VERIFY_WITH_TIMEOUT(read(".commands").contains("network-state"), 5000);
-        QTRY_VERIFY_WITH_TIMEOUT(read(".commands").contains("usb-state"), 5000);
-        QVERIFY(!read(".commands").contains("serial-state"));
+        QTRY_VERIFY_WITH_TIMEOUT(read(".commands").contains("keyboard-state"), 5000);
+        QVERIFY(!read(".commands").contains("serial-state") && !read(".commands").contains("usb-state"));
         // Network greys out with the shared wording; the Zire has no serial port, so that row is left out.
         {
             auto* box = window.findChild<QComboBox*>("networkMode");
@@ -589,8 +981,7 @@ for line in s.makefile('rb'):
         QTRY_VERIFY(window.findChild<QComboBox*>("usbMode")->isEnabled());
         QVERIFY(window.findChild<QComboBox*>("irdaMode")->isEnabled());
         QVERIFY(window.findChild<QCheckBox*>("bluetoothEnabled")->isEnabled());
-        QVERIFY(!window.findChild<QCheckBox*>("keyboardAttached")->isEnabled());  // infrared beaming has the port
-        QTRY_VERIFY(window.findChild<QLabel*>("usbState")->text().contains("Zire 72 enumerated"));
+        QVERIFY(window.findChild<QCheckBox*>("keyboardAttached")->isEnabled());  // infrared beaming is off on a new machine
         // Hard reset names the Zire and sends hard-reset.
         QString text;
         QTimer poll; poll.setInterval(30);
@@ -666,9 +1057,7 @@ for line in s.makefile('rb'):
             QTRY_VERIFY(state->text().contains("waiting")); QTRY_VERIFY(!keyboard->isEnabled());
             window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(),5000);
         }
-        MainWindow next(core.fileName());
-        QCOMPARE(next.findChild<QComboBox*>("irdaMode")->currentData().toString(),QString("tcp"));
-        QCOMPARE(next.findChild<QSpinBox*>("irdaPort")->value(),5097);
+        QCOMPARE(machineSetting("infrared", frondSessions::preferencesPath(QSettings().value("lastSession").toString())), QString("tcp:5097"));
         QSettings().clear();
     }
     void bluetoothSetting_data() {
@@ -713,8 +1102,7 @@ for line in s.makefile('rb'):
             auto* path=window.findChild<QLineEdit*>("bluetoothSocket");
             auto* state=window.findChild<QLabel*>("bluetoothState");
             QVERIFY(enabled && path && state); QVERIFY(!enabled->isChecked()); QVERIFY(!path->isEnabled());
-            enabled->click(); path->setText(socketPath); emit path->editingFinished();
-            QCOMPARE(QSettings().value("bluetoothSocket").toString(),socketPath);
+            QSettings().setValue("bluetoothEnabled", true); QSettings().setValue("bluetoothSocket", socketPath);
             window.openSession(source.fileName(),true);
             QTRY_VERIFY(enabled->isEnabled() && state->text().contains("connected"));
             QFile args(source.fileName()+".args"); QVERIFY(args.open(QIODevice::ReadOnly));
@@ -728,17 +1116,15 @@ for line in s.makefile('rb'):
             }); dismiss.start();
             path->setText(socketPath+" missing"); emit path->editingFinished();
             QTRY_VERIFY(shown.contains("Controller socket unavailable"));
-            QCOMPARE(QSettings().value("bluetoothSocket").toString(),socketPath);
+            QCOMPARE(machineSetting("bluetooth"), "socket:" + socketPath);
             QTRY_VERIFY(enabled->isEnabled()); enabled->click();
             QTRY_VERIFY(enabled->isEnabled() && state->text().isEmpty());
-            QCOMPARE(QSettings().value("bluetoothSocket").toString(),socketPath);
+            QCOMPARE(machineSetting("bluetooth"), QString("off"));
             path->setText(socketPath); enabled->click();
             QTRY_VERIFY(enabled->isEnabled() && state->text().contains("connected"));
             window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(),5000);
         }
-        MainWindow next(core.fileName());
-        QVERIFY(next.findChild<QCheckBox*>("bluetoothEnabled")->isChecked());
-        QCOMPARE(next.findChild<QLineEdit*>("bluetoothSocket")->text(),socketPath);
+        QCOMPARE(machineSetting("bluetooth", frondSessions::preferencesPath(QSettings().value("lastSession").toString())), "socket:" + socketPath);
         QSettings().clear();
     }
     void deviceWindowCloseReturnsHome_data() {
@@ -941,7 +1327,7 @@ for line in s.makefile('rb'):
                 if (!dialog->isVisible()) return;
                 sawEditor = true;
                 QVERIFY(!action->isEnabled());
-                for (const auto* name : {"sdInsert", "sdInsertImage", "sdEject", "sdNew"}) QVERIFY(!window.findChild<QPushButton*>(name)->isEnabled());
+                for (const auto* name : {"sdInsert", "sdEject", "cardPick"}) QVERIFY(!window.findChild<QPushButton*>(name)->isEnabled());
                 if (mode == "cancel-edit") dialog->reject();
                 else if (mode == "close-edit") window.close();
                 else dialog->accept();
@@ -1077,9 +1463,8 @@ for line in s.makefile('rb'):
                 QVERIFY2(!args.contains(option), option);
             const auto text = read(".args");
             QVERIFY(text.contains("--window-scale\n3\n") && text.contains("--contrast\n30\n") && text.contains("--speed\nuncapped\n"));
-            QVERIFY(text.contains("--serial\npty\n") && text.contains("--irda\ntcp:5031\n"));
+            QVERIFY(!text.contains("--serial") && !text.contains("--irda"));
             QVERIFY(!QFileInfo::exists(arm.fileName() + ".started"));
-            QTRY_VERIFY_WITH_TIMEOUT(read(".commands").contains("serial-state"), 5000);
             auto* hotSync = window.findChild<QPushButton*>("hotsync");
             QTRY_VERIFY_WITH_TIMEOUT(hotSync->isEnabled(), 5000);
             // Only what a IIIx has is on the running page.
@@ -1088,7 +1473,7 @@ for line in s.makefile('rb'):
                                      "exportRam", "exportDatabase", "reset", "save", "saveCopy", "hardReset"})
                 QVERIFY2(shown(name), name);
             for (const char* name : {"rotate", "networkMode", "keyboardAttached", "usbMode", "usbPort", "bluetoothEnabled",
-                                     "bluetoothSocket", "microphone", "hold", "storageHeading", "sdState", "sdNew", "sdRetry"})
+                                     "bluetoothSocket", "microphone", "hold", "storageHeading", "sdState", "cardPick", "sdRetry"})
                 QVERIFY2(!shown(name), name);
             QVERIFY(window.findChild<QComboBox*>("serialMode")->isEnabled());
             QCOMPARE(window.findChild<QSlider*>("runningContrast")->value(), 30);
@@ -1265,6 +1650,21 @@ for line in s.makefile('rb'):
             for (int i = 0; i < 4; i++) bytes.append(char(value >> (8 * i)));
         return bytes + device.leftJustified(32, '\0', true) + "body";
     }
+    // The newest machine settings file, and one key from it.
+    static QString newestSettings() {
+        QString newest; QDateTime when;
+        QDirIterator it(managedFolder(), {"*.settings.json"}, QDir::Files, QDirIterator::Subdirectories);
+        while (it.hasNext()) {
+            const auto path = it.next();
+            if (newest.isEmpty() || QFileInfo(path).lastModified() >= when) { newest = path; when = QFileInfo(path).lastModified(); }
+        }
+        return newest;
+    }
+    static QString machineSetting(const char* key, const QString& file = newestSettings()) {
+        QFile f(file);
+        if (!f.open(QIODevice::ReadOnly)) return {};
+        return QJsonDocument::fromJson(f.readAll()).object().value(key).toString();
+    }
     static QString managedFolder() {
         return QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/frond/sessions";
     }
@@ -1341,7 +1741,8 @@ s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[sys.argv.index('--desktop-so
 s.sendall(b'0\tevent\tready\t\n')
 for line in s.makefile('rb'):
     i,cmd,arg=line.rstrip(b'\n').split(b'\t')
-    message={b'keyboard-state':b'detached',b'network-state':b'disabled',b'sd-state':b'none',b'device-state':b'palm-tx'}.get(cmd,b'done')
+    message={b'keyboard-state':b'detached',b'network-state':b'disabled',b'sd-state':b'none',b'device-state':b'palm-tx',
+             b'serial-state':b'tcp 127.0.0.1:5077 waiting'}.get(cmd,b'done')
     if cmd==b'save': pathlib.Path(bytes.fromhex(arg.decode()).decode()).write_text('saved')
     s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
     if cmd==b'quit': break
@@ -1368,8 +1769,6 @@ for line in s.makefile('rb'):
     void hardReset() {
         QSettings().clear(); QSettings().setValue("resume", false);
         QTemporaryDir files;
-        QFile source(files.path() + "/hard.frond");
-        QVERIFY(source.open(QIODevice::WriteOnly)); source.write("session"); source.close();
         const auto sent = files.path() + "/sent";
         QFile core(files.path() + "/core");
         QVERIFY(core.open(QIODevice::WriteOnly));
@@ -1398,7 +1797,14 @@ for line in s.makefile('rb'):
             for (const auto& c : all) if (c == "save" || c == "hard-reset" || c == "quit") work << c;
             return work;
         };
-        MainWindow window(core.fileName()); window.show(); window.openSession(source.fileName(), true);
+        // A managed machine whose slot changed since the last save; the save before a hard reset
+        // clears its swap.
+        QDir(managedFolder()).removeRecursively();
+        putSession("Hard", 6, "palm-tx", 0);
+        const auto hardDir = frondSessions::machineDirOf(managedSession("Hard"));
+        auto swapped = [&] { return frondCards::readSlot(hardDir).swap; };
+        QVERIFY(frondCards::writeSlot(hardDir, {true, {}, {}, "hard", true}));
+        MainWindow window(core.fileName()); window.show(); window.openSession(managedSession("Hard"), true);
         auto* hard = window.findChild<QPushButton*>("hardReset");
         QTRY_VERIFY_WITH_TIMEOUT(hard->isEnabled(), 5000);
         QVERIFY(hard->isVisibleTo(&window));
@@ -1429,13 +1835,16 @@ for line in s.makefile('rb'):
         QTRY_VERIFY_WITH_TIMEOUT(!failed.isEmpty(), 3000);
         QTRY_VERIFY(hard->isEnabled());
         QCOMPARE(commands(), QStringList({"save"}));
+        QVERIFY(swapped());
         hard->click();
         QTRY_COMPARE_WITH_TIMEOUT(commands(), QStringList({"save", "save", "hard-reset"}), 3000);
         QTRY_VERIFY(hard->isEnabled());
+        QVERIFY(!swapped());
         answer = "Erase"; hard->click();
         QTRY_COMPARE_WITH_TIMEOUT(commands(), QStringList({"save", "save", "hard-reset", "hard-reset"}), 3000);
         poll.stop();
         window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        QDir(managedFolder()).removeRecursively();
         QSettings().clear();
     }
     // Save first, then the core dies before the save answers: the next session's save doesn't erase.
@@ -1653,7 +2062,7 @@ for line in s.makefile('rb'):
         QCOMPARE(menus, QStringList({"&File", "&Help"}));
         QStringList items;
         for (auto* action : window.menuBar()->actions().first()->menu()->actions()) if (!action->isSeparator()) items << action->text();
-        QCOMPARE(items, QStringList({"&Import session…", "&Firmware…", "&Settings…", "&Quit"}));
+        QCOMPARE(items, QStringList({"&Import session…", "C&ards…", "&Connections…", "&Firmware…", "&Settings…", "&Quit"}));
         auto* list = window.findChild<QListWidget*>("sessionList");
         emit list->itemActivated(list->item(0));
         auto* sd = window.findChild<QLabel*>("sdState");
@@ -1663,7 +2072,9 @@ for line in s.makefile('rb'):
             if (QStringList({"Applications", "SD card", "Device"}).contains(label->text())) headings << label->text();
         QCOMPARE(headings, QStringList({"Applications", "SD card", "Device"}));
         const auto shown = [&](const char* name) { return window.findChild<QPushButton*>(name)->isVisibleTo(&window); };
-        QVERIFY(shown("sdExchange") && shown("sdEject") && !shown("sdInsert") && !shown("sdNew") && !shown("sdRetry"));
+        QVERIFY(shown("sdExchange") && shown("sdEject") && !shown("sdInsert") && shown("cardPick") && !shown("sdRetry"));
+        // The card row says it once: the picker button names the card, and Inserted has no label.
+        QVERIFY(!sd->isVisibleTo(&window));
         // Contrast is for 68k devices; the E2 keeps Rotate and has the HotSync button.
         QVERIFY(shown("hotsync") && shown("rotate") && !window.findChild<QSlider*>("runningContrast")->isVisibleTo(&window));
         QTRY_VERIFY(window.findChild<QPushButton*>("installApp")->isEnabled());
@@ -1688,7 +2099,8 @@ for line in s.makefile('rb'):
         QTRY_VERIFY(window.findChild<QPushButton*>("sdEject")->isEnabled());
         window.findChild<QPushButton*>("sdEject")->click();
         QTRY_COMPARE_WITH_TIMEOUT(sd->text(), QString("Ejected"), 5000);
-        QTRY_VERIFY(shown("sdInsert") && shown("sdExchange") && shown("sdExport") && shown("sdNew") && shown("sdInsertImage") && !shown("sdEject"));
+        QTRY_VERIFY(shown("sdInsert") && shown("sdExchange") && shown("sdExport") && shown("cardPick") && !shown("sdEject"));
+        QVERIFY(sd->isVisibleTo(&window));
         answer.stop();
         window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
         QDir(managedFolder()).removeRecursively();
@@ -1701,145 +2113,145 @@ for line in s.makefile('rb'):
         const QStringList tx{"32 MB", "64 MB", "128 MB", "256 MB", "512 MB", "1 GB", "2 GB"};
         QTest::newRow("tx") << "palm-tx" << "create" << tx;
         QTest::newRow("tx-cancel") << "palm-tx" << "cancel" << tx;
-        QTest::newRow("e2") << "palm-e2" << "create" << QStringList{"32 MB", "64 MB", "128 MB", "256 MB", "512 MB", "1 GB"};
+        QTest::newRow("e2") << "palm-e2" << "create" << QStringList{"32 MB", "64 MB", "128 MB", "256 MB", "512 MB", "1 GB",
+                                                                      "2 GB · Too big for Tungsten E2 (greyed)"};
     }
-    // The picker offers 32 MB to the device's largest card, and the progress dialog follows the core's
-    // sd-progress events and cancels through cancel-files.
+    // New card in the running picker offers 32 MB to the largest SD card, greys what the machine
+    // can't take, makes the card with the card tool (progress, Cancel) and puts it in.
     void sdCreateSizes() {
         QFETCH(QString, device); QFETCH(QString, mode); QFETCH(QStringList, labels);
         QSettings().clear(); QSettings().setValue("resume", false);
-        QDir(managedFolder()).removeRecursively();
+        QDir(managedFolder()).removeRecursively(); QDir(cardsLibrary()).removeRecursively();
         putSession("Card", 6, device.toUtf8(), 1);
         QTemporaryDir files;
         QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly));
         auto script = QByteArray(R"PY(#!/usr/bin/python3
-import pathlib,socket,sys,time
+import pathlib,socket,sys
 trace=pathlib.Path(__file__).with_name('commands')
 s=socket.socket(socket.AF_UNIX);s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
 s.sendall(b'0\tevent\tready\t\n')
-card='none'; device='DEVICE'; mode='MODE'
-f=s.makefile('rb')
-def event(text): s.sendall(b'0\tevent\tsd-progress\t'+text.encode().hex().encode()+b'\n')
-for line in f:
+card='none'; device='DEVICE'
+for line in s.makefile('rb'):
     i,raw,arg=line.rstrip(b'\n').split(b'\t'); cmd=raw.decode(); arg=bytes.fromhex(arg.decode()).decode()
     with trace.open('a') as t: t.write(cmd+'\t'+arg+'\n')
-    ok=True; code='result'; message='done'
+    message='done'
     if cmd=='device-state': message=device
     elif cmd=='sd-state': message=card
     elif cmd=='network-state': message='disabled'
     elif cmd=='keyboard-state': message='detached'
-    elif cmd=='sd-create':
-        total=int(arg)<<20
-        event('0 %d'%total); time.sleep(1); event('%d %d'%(total//2,total))
-        if mode=='cancel':
-            cancel=f.readline().rstrip(b'\n')
-            assert cancel==b'0\tcancel-files\t'+i.hex().encode(), cancel
-            with trace.open('a') as t: t.write('cancelled\n')
-            ok=False; code='cancelled'; message='Cancelled.'
-        else:
-            event('%d %d'%(total,total)); card='inserted'
-    s.sendall(i+b'\t'+(b'ok' if ok else b'error')+b'\t'+code.encode()+b'\t'+message.encode().hex().encode()+b'\n')
+    elif cmd=='sd-put-in': card='inserted'
+    s.sendall(i+b'\tok\tresult\t'+message.encode().hex().encode()+b'\n')
     if cmd=='quit': break
 )PY");
-        script.replace("DEVICE", device.toUtf8()); script.replace("MODE", mode.toUtf8());
+        script.replace("DEVICE", device.toUtf8());
         core.write(script); core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
         MainWindow window(core.fileName()); window.show();
         window.openSession(managedSession("Card"), true);
         auto* state = window.findChild<QLabel*>("sdState");
-        auto* create = window.findChild<QPushButton*>("sdNew");
+        auto* pick = window.findChild<QPushButton*>("cardPick");
         QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("No card"), 5000);
-        QTRY_VERIFY(create->isVisible() && create->isEnabled());
-        QStringList offered; bool sawProgress = false;
-        QTimer answer; answer.setInterval(10);
-        connect(&answer, &QTimer::timeout, &window, [&] {
-            if (auto* input = window.findChild<QInputDialog*>(); input && input->isVisible()) {
-                offered = input->comboBoxItems();
-                input->setTextValue(offered.last()); input->accept();
-            }
-            if (auto* progress = window.findChild<QProgressDialog*>("cardProgress"); progress && progress->isVisible()) {
-                sawProgress = true;
-                if (mode == "cancel" && progress->value() >= 500) progress->findChild<QPushButton*>()->click();
-            }
-        });
-        answer.start();
-        create->click();
-        QTRY_VERIFY_WITH_TIMEOUT(!offered.isEmpty(), 5000);
+        QTRY_VERIFY(pick->isVisible() && pick->isEnabled());
+        QCOMPARE(pick->text(), QString("No card"));
+        QVERIFY(!state->isVisible());
+        std::unique_ptr<SlowCardTool> slow;
+        if (mode == "cancel") slow = std::make_unique<SlowCardTool>();
+        bool sawProgress = false;
+        const auto size = mode == "cancel" ? (device == "palm-e2" ? "1 GB" : "2 GB") : "32 MB";
+        const auto offered = pickNewCard(window, "SD card", size, mode == "cancel", &sawProgress);
         QCOMPARE(offered, labels);
-        const auto mib = labels.last() == "2 GB" ? "1886" : "1024";
-        if (mode == "cancel") QTRY_COMPARE_WITH_TIMEOUT(window.statusBar()->currentMessage(), QString("Cancelled."), 10000);
-        else QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Inserted"), 10000);
-        QVERIFY(sawProgress);
-        QTRY_VERIFY(!window.findChild<QProgressDialog*>("cardProgress"));
-        answer.stop(); window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
-        QFile trace(files.filePath("commands")); QVERIFY(trace.open(QIODevice::ReadOnly));
-        const auto commands = trace.readAll();
-        QVERIFY(commands.contains(QByteArray("sd-create\t") + mib + "\n"));
-        QCOMPARE(commands.contains("cancelled\n"), mode == "cancel");
+        if (mode == "cancel") {
+            QVERIFY(sawProgress);
+            QVERIFY(frondCards::entries(cardsLibrary()).isEmpty());
+            QVERIFY(QDir(cardsLibrary()).entryList(QDir::Dirs | QDir::Hidden | QDir::NoDotAndDotDot).filter(".new-").isEmpty());
+            QCOMPARE(state->text(), QString("No card"));
+        } else {
+            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Inserted"), 10000);
+            const auto card = onlyCard();
+            QCOMPARE(card.name, QString("SD card"));
+            QCOMPARE(pick->text(), QString("SD card"));
+            const auto dir = frondSessions::machineDirOf(managedSession("Card"));
+            QVERIFY(QFileInfo(dir + "/sd.frondsd").isFile());
+            const auto slot = frondCards::readSlot(dir);
+            QVERIFY(slot.card == card.id && slot.swap);
+            QFile trace(files.filePath("commands")); QVERIFY(trace.open(QIODevice::ReadOnly));
+            QVERIFY(trace.readAll().contains("sd-put-in\t" + card.identity.toHex() + " writable\n"));
+        }
+        window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        QDir(managedFolder()).removeRecursively(); QDir(cardsLibrary()).removeRecursively(); QSettings().clear();
+    }
+    // A card put in while the machine was off resumes ejected; the core's card event when it goes
+    // in shows it inserted.
+    void swappedCardEvent() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        putSession("Swap", 6, "palm-tx", 1);
+        QTemporaryDir files;
+        QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly));
+        QVERIFY(core.write(R"PY(#!/usr/bin/python3
+import socket,sys,threading,time
+s=socket.socket(socket.AF_UNIX);s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+lock=threading.Lock()
+def send(b):
+    with lock: s.sendall(b)
+def later():
+    time.sleep(1.5); send(b'0\tevent\tcard\t'+b'inserted'.hex().encode()+b'\n')
+for line in s.makefile('rb'):
+    i,raw,arg=line.rstrip(b'\n').split(b'\t'); cmd=raw.decode()
+    message={'device-state':'palm-tx','sd-state':'ejected','network-state':'disabled','keyboard-state':'detached'}.get(cmd,'done')
+    send(i+b'\tok\tresult\t'+message.encode().hex().encode()+b'\n')
+    if cmd=='sd-state': threading.Thread(target=later,daemon=True).start()
+    if cmd=='quit': break
+)PY") > 0);
+        core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        MainWindow window(core.fileName()); window.show();
+        window.openSession(managedSession("Swap"), true);
+        auto* state = window.findChild<QLabel*>("sdState");
+        QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Ejected"), 5000);
+        QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Inserted"), 5000);
+        window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
         QDir(managedFolder()).removeRecursively(); QSettings().clear();
     }
-    // A Memory Stick Pro create shows the progress dialog and Cancel reaches the core.
+    // A Memory Stick Pro made in the picker shows the progress dialog, and Cancel stops the card tool.
     void memoryStickCancel() {
         const auto device = frondFirmware::deviceFromId("sony-clie-tg50");
         if (!frondFirmware::profile(device).frontend.memoryStick) QSKIP("Memory Stick is not qualified yet");
         QSettings().clear(); QSettings().setValue("resume", false);
-        QDir(managedFolder()).removeRecursively();
+        QDir(managedFolder()).removeRecursively(); QDir(cardsLibrary()).removeRecursively();
         putSession("Stick", 6, "sony-clie-tg50", 1);
         QTemporaryDir files;
         QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly));
         QVERIFY(core.write(R"PY(#!/usr/bin/python3
-import pathlib,socket,sys,time
+import pathlib,socket,sys
 trace=pathlib.Path(__file__).with_name('commands')
 s=socket.socket(socket.AF_UNIX);s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
 s.sendall(b'0\tevent\tready\t\n')
-f=s.makefile('rb')
-def event(text): s.sendall(b'0\tevent\tsd-progress\t'+text.encode().hex().encode()+b'\n')
-for line in f:
+for line in s.makefile('rb'):
     i,raw,arg=line.rstrip(b'\n').split(b'\t'); cmd=raw.decode(); arg=bytes.fromhex(arg.decode()).decode()
     with trace.open('a') as t: t.write(cmd+'\t'+arg+'\n')
-    ok=True; code='result'; message='done'
-    if cmd=='device-state': message='sony-clie-tg50'
-    elif cmd=='hold-state': message='off'
-    elif cmd=='network-state': message='disabled'
-    elif cmd=='keyboard-state': message='detached'
-    elif cmd=='ms-state': message='none'
-    elif cmd=='ms-create':
-        total=int(arg)<<20
-        event('0 %d'%total); time.sleep(1); event('%d %d'%(total//2,total))
-        cancel=f.readline().rstrip(b'\n')
-        assert cancel==b'0\tcancel-files\t'+i.hex().encode(), cancel
-        with trace.open('a') as t: t.write('cancelled\n')
-        ok=False; code='cancelled'; message='Cancelled.'
-    s.sendall(i+b'\t'+(b'ok' if ok else b'error')+b'\t'+code.encode()+b'\t'+message.encode().hex().encode()+b'\n')
+    message={'device-state':'sony-clie-tg50','hold-state':'off','network-state':'disabled','keyboard-state':'detached','ms-state':'none'}.get(cmd,'done')
+    s.sendall(i+b'\tok\tresult\t'+message.encode().hex().encode()+b'\n')
     if cmd=='quit': break
 )PY") > 0);
         core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
         MainWindow window(core.fileName()); window.show();
         window.openSession(managedSession("Stick"), true);
         auto* state = window.findChild<QLabel*>("sdState");
-        auto* create = window.findChild<QPushButton*>("sdNew");
         QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("No card"), 5000);
+        QTRY_VERIFY(window.findChild<QPushButton*>("cardPick")->isEnabled());
+        QVERIFY(!state->isVisible());
+        QCOMPARE(window.findChild<QPushButton*>("cardPick")->text(), QString("No card"));
+        SlowCardTool slow;
         bool sawProgress = false;
-        QTimer answer; answer.setInterval(10);
-        connect(&answer, &QTimer::timeout, &window, [&] {
-            if (auto* input = window.findChild<QInputDialog*>(); input && input->isVisible()) {
-                input->setTextValue("256 MB Pro"); input->accept();
-            }
-            if (auto* progress = window.findChild<QProgressDialog*>("cardProgress"); progress && progress->isVisible()) {
-                sawProgress = true;
-                if (progress->value() >= 500) progress->findChild<QPushButton*>()->click();
-            }
-        });
-        answer.start();
-        create->click();
-        QTRY_COMPARE_WITH_TIMEOUT(window.statusBar()->currentMessage(), QString("Cancelled."), 10000);
+        const auto offered = pickNewCard(window, "Memory Stick Pro", "2 GB", true, &sawProgress);
+        QCOMPARE(offered, QStringList({"256 MB", "512 MB", "1 GB", "2 GB"}));
         QVERIFY(sawProgress);
-        QTRY_VERIFY(!window.findChild<QProgressDialog*>("cardProgress"));
-        answer.stop(); window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        QVERIFY(frondCards::entries(cardsLibrary()).isEmpty());
+        QVERIFY(QDir(cardsLibrary()).entryList(QDir::Dirs | QDir::Hidden | QDir::NoDotAndDotDot).filter(".new-").isEmpty());
+        window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
         QFile trace(files.filePath("commands")); QVERIFY(trace.open(QIODevice::ReadOnly));
-        const auto commands = trace.readAll();
-        QVERIFY(commands.contains("ms-create\t256\n"));
-        QVERIFY(commands.contains("cancelled\n"));
-        QDir(managedFolder()).removeRecursively(); QSettings().clear();
+        QVERIFY(!trace.readAll().contains("ms-put-in"));
+        QDir(managedFolder()).removeRecursively(); QDir(cardsLibrary()).removeRecursively(); QSettings().clear();
     }
     void memoryStickControls() {
         const auto device = frondFirmware::deviceFromId("sony-clie-tg50");
@@ -1867,8 +2279,8 @@ for line in s.makefile('rb'):
     elif cmd=='keyboard-state': message='detached'
     elif cmd=='ms-state': message=card
     elif cmd=='ms-protection': message=protection
-    elif cmd=='ms-create':
-        assert arg=='4' and card!='inserted';card='inserted'
+    elif cmd=='ms-put-in':
+        assert arg.endswith(' writable') and len(arg.split(' ')[0])==64 and card=='none';card='inserted'
     elif cmd=='ms-eject': assert card=='inserted';card='ejected'
     elif cmd=='ms-reinsert': assert card=='ejected';card='inserted'
     elif cmd=='ms-read-only':
@@ -1880,26 +2292,18 @@ for line in s.makefile('rb'):
         MainWindow window(core.fileName()); window.show();
         window.openSession(managedSession("Stick"), true);
         auto* state = window.findChild<QLabel*>("sdState");
-        auto* create = window.findChild<QPushButton*>("sdNew");
         auto* protection = window.findChild<QCheckBox*>("cardReadOnly");
+        QDir(cardsLibrary()).removeRecursively();
         QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("No card"), 5000);
-        QVERIFY(create->isVisible() && create->isEnabled());
+        QTRY_VERIFY(window.findChild<QPushButton*>("cardPick")->isVisible() && window.findChild<QPushButton*>("cardPick")->isEnabled());
         QCOMPARE(window.findChild<QLabel*>("storageHeading")->text(), QString("Memory Stick"));
         QVERIFY(!window.findChild<QPushButton*>("sdExchange")->isVisible());
-        // The picker offers the six classic sizes, 128 MB first, then the Pro sizes.
-        QStringList offered;
-        QTimer pick; pick.setInterval(10);
-        connect(&pick, &QTimer::timeout, &window, [&] {
-            if (auto* input = window.findChild<QInputDialog*>(); input && input->isVisible()) {
-                offered = input->comboBoxItems();
-                input->setTextValue("4 MB"); input->accept();
-            }
-        });
-        pick.start();
-        create->click();
-        QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Inserted"), 5000);
-        pick.stop();
-        QCOMPARE(offered, QStringList({"128 MB", "64 MB", "32 MB", "16 MB", "8 MB", "4 MB", "256 MB Pro", "512 MB Pro", "1 GB Pro", "2 GB Pro"}));
+        // New card offers the six classic sizes smallest first, then the Pro type with its own.
+        const auto offered = pickNewCard(window, "Memory Stick", "4 MB", false);
+        QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Inserted"), 10000);
+        QCOMPARE(offered, QStringList({"4 MB", "8 MB", "16 MB", "32 MB", "64 MB", "128 MB"}));
+        QCOMPARE(window.findChild<QPushButton*>("cardPick")->text(), QString("Memory Stick"));
+        QCOMPARE(onlyCard().kind, QString("ms"));
         QTRY_VERIFY(protection->isVisible()); QVERIFY(!protection->isEnabled());
         QTimer answer; answer.setInterval(10);
         connect(&answer, &QTimer::timeout, &window, [&] {
@@ -1919,11 +2323,12 @@ for line in s.makefile('rb'):
         answer.stop(); window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
         QFile trace(tracePath); QVERIFY(trace.open(QIODevice::ReadOnly));
         const auto commands = trace.readAll();
-        QVERIFY(commands.contains("ms-create\t4\n"));
+        QVERIFY(commands.contains("ms-put-in\t"));
+        QVERIFY(!commands.contains("ms-create"));
         QVERIFY(commands.contains("ms-read-only\ton\n"));
         QVERIFY(commands.contains("ms-reinsert\t\n"));
         QVERIFY(!commands.contains("sd-"));
-        QDir(managedFolder()).removeRecursively(); QSettings().clear();
+        QDir(managedFolder()).removeRecursively(); QDir(cardsLibrary()).removeRecursively(); QSettings().clear();
     }
     void qualifiedFirmwareSettings() {
         const auto norPath = qEnvironmentVariable("FROND_TEST_QUALIFIED_NOR");
@@ -2509,6 +2914,578 @@ for line in s.makefile('rb'):
         QSettings().clear();
     }
     // Optional actual frontend run; private firmware/session and captures stay outside the repo.
+    void linkPairing() {
+        QTemporaryDir dir(QDir::currentPath() + "/build/lk-XXXXXX");
+        TestHub ha(dir.path(), "a", freePort()), hb(dir.path(), "b", freePort()), hc(dir.path(), "c", freePort());
+        HubUser a(ha), b(hb), c(hc);
+        a.client.send({{"op", "rename"}, {"name", "Ay"}});
+        b.client.send({{"op", "rename"}, {"name", "Bee"}});
+        c.client.send({{"op", "rename"}, {"name", "Cee"}});
+        QTRY_VERIFY_WITH_TIMEOUT(!a.last("hello").isEmpty() && !c.last("hello").isEmpty(), 10000);
+        // Not watching: B refuses to pair.
+        a.client.send({{"op", "pair"}, {"address", "127.0.0.1:" + hb.env.value("FROND_LINK_PORT")}});
+        QTRY_COMPARE_WITH_TIMEOUT(a.last("pair-result").value("result").toString(), QString("notpairing"), 10000);
+        a.client.send({{"op", "pair-cancel"}});
+        QVERIFY(pairHubs(a, b, true));
+        QCOMPARE(a.last("pair-peer").value("name").toString(), QString("Bee"));
+        QCOMPARE(b.last("pair-request").value("name").toString(), QString("Ay"));
+        const auto aId = a.client.hello().value("id").toString(), bId = b.client.hello().value("id").toString();
+        QCOMPARE(storedPeer(ha, bId).value("name").toString(), QString("Bee"));
+        QCOMPARE(storedPeer(hb, aId).value("name").toString(), QString("Ay"));
+        QCOMPARE(storedPeer(ha, bId).value("key").toString().size(), 64);
+        for (const auto& file : {ha.store() + "/identity.json", ha.store() + "/connections.json", hb.store() + "/connections.json"})
+            QCOMPARE(QFileInfo(file).permissions() & ~(QFile::ReadUser | QFile::WriteUser), QFile::ReadOwner | QFile::WriteOwner);
+        QTRY_VERIFY_WITH_TIMEOUT(b.last("state").value("connections").toArray().size() == 1, 5000);
+        QCOMPARE(ConnectionsWindow::status(b.last("state").value("connections").toArray()[0].toObject()), QString("Not seen"));
+        // Lockout: three wrong codes, then B refuses for a while.
+        b.got.clear();
+        c.client.send({{"op", "pair"}, {"address", "127.0.0.1:" + hb.env.value("FROND_LINK_PORT")}});
+        QTRY_VERIFY_WITH_TIMEOUT(!b.last("pair-request").isEmpty(), 10000);
+        const auto code = b.last("pair-request").value("code").toString().remove(' ');
+        const auto wrong = QString("%1").arg((code.toInt() + 7) % 1000000, 6, 10, QChar('0'));
+        for (int i = 0; i < 3; ++i) {
+            c.got.clear();
+            c.client.send({{"op", "pair-code"}, {"code", wrong}});
+            QTRY_COMPARE_WITH_TIMEOUT(c.last("pair-result").value("result").toString(), QString("wrongcode"), 10000);
+        }
+        QTRY_COMPARE_WITH_TIMEOUT(b.last("pair-request-end").value("result").toString(), QString("lockedout"), 5000);
+        c.got.clear();
+        c.client.send({{"op", "pair-code"}, {"code", code}});
+        QTRY_COMPARE_WITH_TIMEOUT(c.last("pair-result").value("result").toString(), QString("notpairing"), 10000);
+        QVERIFY(storedPeer(hc, bId).isEmpty() && storedPeer(hb, c.client.hello().value("id").toString()).isEmpty());
+        for (auto* user : {&a, &b, &c}) killHub(*user);
+    }
+    void linkInfrared() {
+        QTemporaryDir dir(QDir::currentPath() + "/build/lk-XXXXXX");
+        TestHub ha(dir.path(), "a", freePort()), hb(dir.path(), "b", freePort());
+        HubUser a(ha), b(hb);
+        QVERIFY(pairHubs(a, b, false));
+        const auto aId = a.client.hello().value("id").toString(), bId = b.client.hello().value("id").toString();
+        FakeIr coreA1(ha.run + "/a1.sock"), coreA2(ha.run + "/a2.sock"), coreB1(hb.run + "/b1.sock");
+        auto attach = [](HubUser& u, const QString& machine, const QString& link, const FakeIr& core) {
+            u.client.setSticky("ir", {{"op", "ir-attach"}, {"machine", machine}, {"device", "Palm TX"}, {"link", link}, {"socket", core.path}});
+        };
+        // One side only: the link comes up and the channel waits.
+        HubUser a1(ha), b1(hb), a2(ha);
+        attach(a1, "Palm A1", bId, coreA1);
+        QTRY_COMPARE_WITH_TIMEOUT(a1.ir(), QString("waiting"), 10000);
+        QTRY_VERIFY_WITH_TIMEOUT(coreA1.peer, 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(b.last("state").value("connections").toArray()[0].toObject().value("up").toBool(), 5000);
+        // The other side joins it.
+        attach(b1, "Palm B1", aId, coreB1);
+        QTRY_COMPARE_WITH_TIMEOUT(a1.ir(), QString("joined"), 10000);
+        QTRY_COMPARE_WITH_TIMEOUT(b1.ir(), QString("joined"), 10000);
+        QCOMPARE(a1.last("ir").value("machine").toString(), QString("Palm B1"));
+        QCOMPARE(b1.last("ir").value("peer").toString(), QString(storedPeer(hb, aId).value("name").toString()));
+        QTRY_VERIFY_WITH_TIMEOUT(coreB1.peer, 5000);
+        coreA1.send("beam to B");
+        QTRY_COMPARE_WITH_TIMEOUT(coreB1.got, QByteArray("beam to B"), 5000);
+        coreB1.send("beam to A");
+        QTRY_COMPARE_WITH_TIMEOUT(coreA1.got, QByteArray("beam to A"), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(b.last("state").value("connections").toArray()[0].toObject().value("channels").toString()
+                                 .contains("Palm B1 – Palm A1"), 5000);
+        // A second machine on A for the same connection is busy.
+        attach(a2, "Palm A2", bId, coreA2);
+        QTRY_COMPARE_WITH_TIMEOUT(a2.ir(), QString("busy"), 10000);
+        QCOMPARE(a2.last("ir").value("busyBy").toString(), QString("Palm A1"));
+        a2.client.setSticky("ir", {});
+        // B's Palm sleeps: its socket closes, A sees it asleep, and it reopens on wake.
+        coreB1.sleep();
+        QTRY_COMPARE_WITH_TIMEOUT(a1.last("ir").value("far").toString(), QString("asleep"), 5000);
+        QVERIFY(coreB1.listen());
+        QTRY_COMPARE_WITH_TIMEOUT(a1.last("ir").value("far").toString(), QString("running"), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(coreB1.peer, 5000);
+        coreB1.got.clear();
+        coreA1.send("after wake");
+        QTRY_COMPARE_WITH_TIMEOUT(coreB1.got, QByteArray("after wake"), 5000);
+        // B's hub crashes: B's window starts a new one, the link comes back and the channel reopens.
+        const auto oldPid = b1.last("hello").value("pid").toDouble();
+        killHub(b1);
+        QTRY_VERIFY_WITH_TIMEOUT(a1.ir() != "joined", 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(b1.last("hello").value("pid").toDouble() != oldPid, 10000);
+        QTRY_COMPARE_WITH_TIMEOUT(a1.ir(), QString("joined"), 20000);
+        QTRY_COMPARE_WITH_TIMEOUT(b1.ir(), QString("joined"), 10000);
+        QTRY_VERIFY_WITH_TIMEOUT(coreB1.peer && coreB1.peer->state() == QLocalSocket::ConnectedState, 5000);
+        coreB1.got.clear();
+        coreA1.send("after restart");
+        QTRY_COMPARE_WITH_TIMEOUT(coreB1.got, QByteArray("after restart"), 5000);
+        // A pinned key that no longer matches: A shows it and keeps trying with backoff, storing
+        // nothing, as a refusal can come from anyone. B doesn't dial A meanwhile, so it only sees
+        // the failed handshake as the side dialled.
+        b1.client.setSticky("ir", {});
+        a1.client.setSticky("ir", {});
+        a.client.setSticky("watch", {});
+        QTRY_VERIFY_WITH_TIMEOUT(!a.client.isConnected() && !a1.client.isConnected() && !a2.client.isConnected() &&
+                                 !b1.client.isConnected(), 5000);
+        killHub(a);
+        QTest::qWait(300);
+        const auto keyOnB = storedPeer(hb, aId).value("key").toString();
+        QTRY_VERIFY_WITH_TIMEOUT(!listed(b, "connections", aId).value("up").toBool(), 10000);
+        QVERIFY(!listed(b, "connections", aId).value("keyChanged").toBool());
+        {
+            QFile f(ha.store() + "/connections.json"); QVERIFY(f.open(QIODevice::ReadOnly));
+            auto doc = QJsonDocument::fromJson(f.readAll()).object();
+            auto entries = doc.value("entries").toArray();
+            auto entry = entries[0].toObject();
+            entry["key"] = QString(64, 'a');
+            entries[0] = entry; doc["entries"] = entries;
+            f.close(); QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Truncate)); f.write(QJsonDocument(doc).toJson());
+        }
+        a1.got.clear();
+        attach(a1, "Palm A1", bId, coreA1);
+        QTRY_COMPARE_WITH_TIMEOUT(a1.ir(), QString("keychanged"), 15000);
+        QVERIFY(!storedPeer(ha, bId).value("keyChanged").toBool());
+        // B was dialled with the failed handshake: it shows the change too, but keeps A's key.
+        QTRY_VERIFY_WITH_TIMEOUT(listed(b, "connections", aId).value("keyChanged").toBool(), 5000);
+        QCOMPARE(ConnectionsWindow::status(listed(b, "connections", aId)), QString("Key changed, pair again"));
+        QVERIFY(!storedPeer(hb, aId).value("keyChanged").toBool());
+        QCOMPARE(storedPeer(hb, aId).value("key").toString(), keyOnB);
+        // Pairing again fixes it on both sides.
+        QVERIFY(pairHubs(a, b, false));
+        attach(b1, "Palm B1", aId, coreB1);
+        QTRY_COMPARE_WITH_TIMEOUT(a1.ir(), QString("joined"), 20000);
+        QVERIFY(!storedPeer(ha, bId).value("keyChanged").toBool());
+        QTRY_VERIFY_WITH_TIMEOUT(!listed(b, "connections", aId).value("keyChanged").toBool(), 5000);
+        // Someone else sends a first message with A's id while A's link is up: B ignores it.
+        {
+            frond::link::LinkConfig cfg;
+            cfg.local.identity = frond::link::makeIdentity();
+            QVERIFY(frondLink::parseId(aId, cfg.local.id));
+            cfg.local.name = "spoof";
+            frond::link::InstallId to{};
+            QVERIFY(frondLink::parseId(bId, to));
+            frond::link::Key32 wrong{};
+            wrong.fill(7);
+            frond::link::Link spoof(cfg, to, wrong, 0);
+            spoof.start();
+            const auto first = spoof.takeOutput();
+            QTcpSocket s; s.connectToHost("127.0.0.1", quint16(b.client.hello().value("port").toInt()));
+            QVERIFY(s.waitForConnected(3000));
+            s.write(reinterpret_cast<const char*>(first.data()), qint64(first.size()));
+            QVERIFY(s.waitForBytesWritten(3000));
+            QTRY_VERIFY_WITH_TIMEOUT(s.state() == QAbstractSocket::UnconnectedState, 5000);
+            QTest::qWait(500);
+            QVERIFY(!listed(b, "connections", aId).value("keyChanged").toBool());
+            QCOMPARE(a1.ir(), QString("joined"));
+        }
+        // B forgets A: A is told to pair again.
+        b.client.send({{"op", "forget"}, {"id", aId}});
+        QTRY_COMPARE_WITH_TIMEOUT(a1.ir(), QString("forgotten"), 20000);
+        QVERIFY(storedPeer(hb, aId).isEmpty());
+        for (auto* user : {&a, &b}) killHub(*user);
+    }
+    void linkThisComputer() {
+        QTemporaryDir dir(QDir::currentPath() + "/build/lk-XXXXXX");
+        TestHub h(dir.path(), "h", freePort());
+        HubUser l1(h), l2(h), l3(h);
+        FakeIr c1(h.run + "/l1.sock"), c2(h.run + "/l2.sock"), c3(h.run + "/l3.sock");
+        auto attach = [](HubUser& u, const QString& machine, const FakeIr& core) {
+            u.client.setSticky("ir", {{"op", "ir-attach"}, {"machine", machine}, {"device", "Tungsten E2"}, {"link", "local"}, {"socket", core.path}});
+        };
+        attach(l1, "Palm L1", c1);
+        QTRY_COMPARE_WITH_TIMEOUT(l1.ir(), QString("waiting"), 10000);
+        QCOMPARE(l1.last("ir").value("peer").toString(), QString("This computer"));
+        attach(l2, "Palm L2", c2);
+        QTRY_COMPARE_WITH_TIMEOUT(l1.ir(), QString("joined"), 5000);
+        QTRY_COMPARE_WITH_TIMEOUT(l2.ir(), QString("joined"), 5000);
+        QCOMPARE(l2.last("ir").value("machine").toString(), QString("Palm L1"));
+        QTRY_VERIFY_WITH_TIMEOUT(c1.peer && c2.peer, 5000);
+        c1.send("one"); QTRY_COMPARE_WITH_TIMEOUT(c2.got, QByteArray("one"), 5000);
+        c2.send("two"); QTRY_COMPARE_WITH_TIMEOUT(c1.got, QByteArray("two"), 5000);
+        attach(l3, "Palm L3", c3);
+        QTRY_COMPARE_WITH_TIMEOUT(l3.ir(), QString("busy"), 5000);
+        QCOMPARE(l3.last("ir").value("busyBy").toString(), QString("Palm L1"));
+        c2.sleep();
+        QTRY_COMPARE_WITH_TIMEOUT(l1.last("ir").value("far").toString(), QString("asleep"), 5000);
+        QVERIFY(c2.listen());
+        QTRY_COMPARE_WITH_TIMEOUT(l1.last("ir").value("far").toString(), QString("running"), 5000);
+        // L2 stops: L3 takes its place.
+        l2.client.setSticky("ir", {});
+        l2.client.send({{"op", "ir-detach"}});
+        QTRY_COMPARE_WITH_TIMEOUT(l3.ir(), QString("joined"), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(c3.peer, 5000);
+        c3.send("three"); QTRY_VERIFY_WITH_TIMEOUT(c1.got.endsWith("three"), 5000);
+        killHub(l1);
+    }
+    // Two hubs find each other by UDP beacon (sent to each other's port on loopback), pair from
+    // Nearby, dial the address the beacon gave, and dial at once when a beacon shows a peer moved.
+    void linkDiscovery() {
+        QTemporaryDir dir(QDir::currentPath() + "/build/lk-XXXXXX");
+        const quint16 ua = freeUdpPort(), ub = freeUdpPort(), pb = freePort();
+        TestHub ha(dir.path(), "a", freePort()), hb(dir.path(), "b", pb);
+        ha.env.insert("FROND_LINK_DISCOVERY_PORT", QString::number(ua));
+        ha.env.insert("FROND_LINK_BEACON_TO", QString("127.0.0.1:%1,127.0.0.2:%1").arg(ub));
+        hb.env.insert("FROND_LINK_DISCOVERY_PORT", QString::number(ub));
+        hb.env.insert("FROND_LINK_BEACON_TO", QString("127.0.0.1:%1").arg(ua));
+        HubUser a(ha), a1(ha);
+        auto b = std::make_unique<HubUser>(hb), b1 = std::make_unique<HubUser>(hb);
+        a.client.send({{"op", "rename"}, {"name", "Ay"}});
+        b->client.send({{"op", "rename"}, {"name", "Bee"}});
+        a.client.setSticky("watch", {{"op", "watch"}});
+        b->client.setSticky("watch", {{"op", "watch"}});
+        QTRY_VERIFY_WITH_TIMEOUT(!a.last("hello").isEmpty() && !b->last("hello").isEmpty(), 10000);
+        const auto aId = a.client.hello().value("id").toString(), bId = b->client.hello().value("id").toString();
+        // Each lists the other under Nearby.
+        QTRY_VERIFY_WITH_TIMEOUT(listed(a, "nearby", bId).value("name") == "Bee" && listed(*b, "nearby", aId).value("name") == "Ay", 10000);
+        QCOMPARE(listed(a, "nearby", bId).value("address").toString(), QString("127.0.0.1"));
+        QCOMPARE(listed(a, "nearby", bId).value("port").toInt(), int(pb));
+        // Pair from Nearby, by id.
+        a.got.clear(); b->got.clear();
+        a.client.send({{"op", "pair"}, {"id", bId}});
+        QTRY_VERIFY_WITH_TIMEOUT(!a.last("pair-peer").isEmpty() && !b->last("pair-request").isEmpty(), 10000);
+        a.client.send({{"op", "pair-code"}, {"code", b->last("pair-request").value("code").toString().remove(' ')}});
+        QTRY_COMPARE_WITH_TIMEOUT(a.last("pair-result").value("result").toString(), QString("paired"), 10000);
+        QVERIFY(storedPeer(ha, bId).value("address").toString().isEmpty());
+        QTRY_VERIFY_WITH_TIMEOUT(listed(a, "nearby", bId).isEmpty() && listed(a, "connections", bId).value("seen") == "127.0.0.1", 10000);
+        QCOMPARE(ConnectionsWindow::status(listed(a, "connections", bId)), QString("Seen at 127.0.0.1"));
+        // Infrared over the address the beacon gave.
+        FakeIr coreA(ha.run + "/a.sock"), coreB(hb.run + "/b.sock");
+        auto attach = [](HubUser& u, const QString& machine, const QString& link, const FakeIr& core) {
+            u.client.setSticky("ir", {{"op", "ir-attach"}, {"machine", machine}, {"device", "Palm TX"}, {"link", link}, {"socket", core.path}});
+        };
+        attach(a1, "Palm A", bId, coreA);
+        attach(*b1, "Palm B", aId, coreB);
+        QTRY_COMPARE_WITH_TIMEOUT(a1.ir(), QString("joined"), 10000);
+        QTRY_VERIFY_WITH_TIMEOUT(coreA.peer && coreB.peer, 5000);
+        coreA.send("found"); QTRY_COMPARE_WITH_TIMEOUT(coreB.got, QByteArray("found"), 5000);
+        // B's hub stops; A's dials fail and back off: 1, 1, 2, then 5 s, so 9 s on its next try is 10 s away.
+        b1->client.setSticky("ir", {}); b->client.setSticky("watch", {});
+        QTRY_VERIFY_WITH_TIMEOUT(!b->client.isConnected() && !b1->client.isConnected(), 5000);
+        killHub(*b);
+        b.reset(); b1.reset();
+        QTRY_COMPARE_WITH_TIMEOUT(a1.ir(), QString("notfound"), 10000);
+        QTest::qWait(9000);
+        QCOMPARE(a1.ir(), QString("notfound"));
+        // B comes back on another address and port: its first beacon has A dial at once.
+        const auto pb2 = freePort();
+        hb.env.insert("FROND_LINK_PORT", QString::number(pb2));
+        hb.env.insert("FROND_LINK_DISCOVERY_BIND", "127.0.0.2");
+        HubUser b2(hb);
+        coreB.got.clear();
+        QElapsedTimer back; back.start();
+        attach(b2, "Palm B", aId, coreB);
+        QTRY_COMPARE_WITH_TIMEOUT(a1.ir(), QString("joined"), 6000);
+        QVERIFY2(back.elapsed() < 6000, qPrintable(QString::number(back.elapsed())));
+        QCOMPARE(listed(a, "connections", bId).value("seen").toString(), QString("127.0.0.2"));
+        QTRY_VERIFY_WITH_TIMEOUT(coreB.peer && coreB.peer->state() == QLocalSocket::ConnectedState, 5000);
+        coreA.send("moved"); QTRY_COMPARE_WITH_TIMEOUT(coreB.got, QByteArray("moved"), 5000);
+        for (auto* user : {&a, &b2}) killHub(*user);
+    }
+    // Someone on the LAN sends a beacon with B's id and its own address, then refuses A's handshake
+    // as "key changed" in the clear. A stores nothing, tries the address its last handshake with B
+    // worked at (kept across a hub restart) and links up there.
+    void linkSpoofedBeacon() {
+        QTemporaryDir dir(QDir::currentPath() + "/build/lk-XXXXXX");
+        const quint16 ua = freeUdpPort();
+        TestHub ha(dir.path(), "a", freePort()), hb(dir.path(), "b", freePort());
+        ha.env.insert("FROND_LINK_DISCOVERY_PORT", QString::number(ua));
+        ha.env.insert("FROND_LINK_BEACON_TO", QString("127.0.0.1:%1").arg(freeUdpPort()));
+        HubUser a(ha), b(hb), a1(ha);
+        QVERIFY(pairHubs(a, b, false));
+        a.client.setSticky("watch", {{"op", "watch"}});
+        const auto aId = a.client.hello().value("id").toString(), bId = b.client.hello().value("id").toString();
+        // No typed address: only the one the pairing worked at.
+        a.client.send({{"op", "peer-address"}, {"id", bId}, {"address", ""}});
+        QTRY_VERIFY_WITH_TIMEOUT(storedPeer(ha, bId).value("address").toString().isEmpty(), 5000);
+        QCOMPARE(storedPeer(ha, bId).value("lastHost").toString(), QString("127.0.0.1"));
+        QCOMPARE(storedPeer(ha, bId).value("lastPort").toInt(), b.client.hello().value("port").toInt());
+        const auto oldPid = a.client.hello().value("pid").toDouble();
+        killHub(a);
+        QTRY_VERIFY_WITH_TIMEOUT(a.client.hello().value("pid").toDouble() != oldPid && a.client.isConnected(), 10000);
+        // The spoofer.
+        QTcpServer spoof;
+        QVERIFY(spoof.listen(QHostAddress::LocalHost, 0));
+        int dialled = 0;
+        QObject::connect(&spoof, &QTcpServer::newConnection, &spoof, [&] {
+            while (auto* s = spoof.nextPendingConnection()) {
+                ++dialled;
+                const auto refuse = frond::link::refuseFrame(frond::link::RefuseReason::KeyChanged);
+                s->write(reinterpret_cast<const char*>(refuse.data()), qint64(refuse.size()));
+                s->disconnectFromHost();
+            }
+        });
+        frond::link::Bytes beacon{'F', 'R', 'L', 'B', 1, 1};
+        frond::link::InstallId id{};
+        QVERIFY(frondLink::parseId(bId, id));
+        frond::link::putBytes(beacon, id);
+        frond::link::putU16(beacon, spoof.serverPort());
+        frond::link::putStr8(beacon, "spoof");
+        QUdpSocket udp;
+        QVERIFY(udp.writeDatagram(reinterpret_cast<const char*>(beacon.data()), qint64(beacon.size()), QHostAddress::LocalHost, ua) > 0);
+        QTest::qWait(300);
+        FakeIr core(ha.run + "/a1.sock");
+        a1.client.setSticky("ir", {{"op", "ir-attach"}, {"machine", "Palm A"}, {"device", "Palm TX"}, {"link", bId}, {"socket", core.path}});
+        QTRY_COMPARE_WITH_TIMEOUT(a1.ir(), QString("waiting"), 15000);
+        QVERIFY(dialled >= 1);
+        QVERIFY(!storedPeer(ha, bId).value("keyChanged").toBool());
+        QCOMPARE(storedPeer(ha, bId).value("lastHost").toString(), QString("127.0.0.1"));
+        Q_UNUSED(aId);
+        for (auto* user : {&a, &b}) killHub(*user);
+    }
+    // A code that runs out gets the same cooldown as a lockout, so codes can't be cycled.
+    void linkPairCodeCooldown() {
+        QTemporaryDir dir(QDir::currentPath() + "/build/lk-XXXXXX");
+        TestHub ha(dir.path(), "a", freePort()), hb(dir.path(), "b", freePort());
+        hb.env.insert("FROND_LINK_PAIR_CODE_MS", "1500");
+        HubUser a(ha), b(hb);
+        b.client.setSticky("watch", {{"op", "watch"}});
+        QTRY_VERIFY_WITH_TIMEOUT(!b.last("hello").isEmpty(), 10000);
+        const auto address = "127.0.0.1:" + QString::number(b.client.hello().value("port").toInt());
+        a.client.send({{"op", "pair"}, {"address", address}});
+        QTRY_VERIFY_WITH_TIMEOUT(!b.last("pair-request").isEmpty() && !a.last("pair-peer").isEmpty(), 10000);
+        QTRY_COMPARE_WITH_TIMEOUT(b.last("pair-request-end").value("result").toString(), QString("expired"), 10000);
+        a.got.clear(); b.got.clear();
+        a.client.send({{"op", "pair"}, {"address", address}});
+        QTRY_COMPARE_WITH_TIMEOUT(a.last("pair-result").value("result").toString(), QString("notpairing"), 10000);
+        QVERIFY(b.last("pair-request").isEmpty());
+        for (auto* user : {&a, &b}) killHub(*user);
+    }
+    // A window with Connections open stays on the hub. Its machine stops on one link and the next
+    // starts on another: the old attach goes, so the new one is the window's.
+    void linkReattachSameWindow() {
+        QTemporaryDir dir(QDir::currentPath() + "/build/lk-XXXXXX");
+        TestHub h(dir.path(), "h", freePort());
+        HubUser w(h), other(h);
+        w.client.setSticky("watch", {{"op", "watch"}});
+        FakeIr c1(h.run + "/w1.sock"), c2(h.run + "/w2.sock"), c3(h.run + "/o.sock");
+        auto attach = [](HubUser& u, const QString& machine, const QString& link, const FakeIr& core) {
+            u.client.setSticky("ir", {{"op", "ir-attach"}, {"machine", machine}, {"device", "Palm TX"}, {"link", link}, {"socket", core.path}});
+        };
+        attach(other, "Palm O", "local", c3);
+        attach(w, "Palm X", "local", c1);
+        QTRY_COMPARE_WITH_TIMEOUT(other.ir(), QString("joined"), 10000);
+        QCOMPARE(other.last("ir").value("machine").toString(), QString("Palm X"));
+        // Stop, then start on a connection that's gone.
+        w.client.setSticky("ir", {});
+        attach(w, "Palm Y", "00112233445566778899aabbccddeeff", c2);
+        QTRY_COMPARE_WITH_TIMEOUT(w.ir(), QString("unknown"), 5000);
+        QTRY_COMPARE_WITH_TIMEOUT(other.ir(), QString("waiting"), 5000);
+        QVERIFY(w.client.isConnected());
+        // And again on This computer, under its own name.
+        w.client.setSticky("ir", {});
+        attach(w, "Palm Z", "local", c2);
+        QTRY_COMPARE_WITH_TIMEOUT(other.ir(), QString("joined"), 5000);
+        QTRY_COMPARE_WITH_TIMEOUT(other.last("ir").value("machine").toString(), QString("Palm Z"), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(c2.peer && c3.peer, 5000);
+        c3.send("to Z"); QTRY_COMPARE_WITH_TIMEOUT(c2.got, QByteArray("to Z"), 5000);
+        QVERIFY(c1.got.isEmpty());
+        killHub(w);
+    }
+    // A client with nothing sticky lets go after 1 s, and the hub it started exits once idle
+    // (FROND_LINK_IDLE_EXIT_MS here, 30 s by default). A watching client keeps it running.
+    void linkIdleExit() {
+        QTemporaryDir dir(QDir::currentPath() + "/build/lk-XXXXXX");
+        TestHub h(dir.path(), "h", freePort());
+        h.env.insert("FROND_LINK_IDLE_EXIT_MS", "1500");
+        QVERIFY(hubHello(h.socket()).isEmpty());
+        qint64 pid = 0;
+        {
+            HubUser u(h);
+            u.client.send({{"op", "state"}});
+            QTRY_VERIFY_WITH_TIMEOUT(!u.last("state").isEmpty(), 10000);
+            pid = qint64(u.last("hello").value("pid").toDouble());
+            QVERIFY(alive(pid));
+            QTRY_VERIFY_WITH_TIMEOUT(!u.client.isConnected(), 5000);
+        }
+        QTRY_VERIFY_WITH_TIMEOUT(!alive(pid), 8000);
+        QVERIFY(hubHello(h.socket()).isEmpty());
+        HubUser w(h);
+        w.client.setSticky("watch", {{"op", "watch"}});
+        QTRY_VERIFY_WITH_TIMEOUT(!w.last("hello").isEmpty(), 10000);
+        pid = qint64(w.last("hello").value("pid").toDouble());
+        QTest::qWait(3000);
+        QVERIFY(alive(pid) && w.client.isConnected());
+        w.client.setSticky("watch", {});
+        QTRY_VERIFY_WITH_TIMEOUT(!w.client.isConnected(), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(!alive(pid), 8000);
+    }
+    // File > Connections… with no hub running: the window starts one. Rename this Frond, pair by
+    // address through the dialogs (a wrong code first), rename the connection and forget it.
+    void connectionsWindowClicks() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        qputenv("FROND_LINK_IDLE_EXIT_MS", "1500");
+        const auto socket = frondLink::hubSocketPath();
+        QVERIFY(!socket.isEmpty() && hubHello(socket).isEmpty());
+        QTemporaryDir dir(QDir::currentPath() + "/build/lk-XXXXXX");
+        TestHub hb(dir.path(), "b", freePort());
+        HubUser b(hb);
+        b.client.send({{"op", "rename"}, {"name", "Bee"}});
+        b.client.setSticky("watch", {{"op", "watch"}});
+        QTRY_VERIFY_WITH_TIMEOUT(!b.last("hello").isEmpty(), 10000);
+        qint64 pid = 0;
+        {
+            MainWindow window{QString()}; window.show();
+            auto* action = window.findChild<QAction*>("connectionsAction"); QVERIFY(action);
+            action->trigger();
+            auto* cw = window.findChild<ConnectionsWindow*>(); QVERIFY(cw && cw->isVisible());
+            QTRY_VERIFY_WITH_TIMEOUT(cw->header->text().startsWith("This Frond: "), 10000);
+            pid = qint64(hubHello(socket).value("pid").toDouble());
+            QVERIFY(alive(pid));
+            QCOMPARE(cw->list->count(), 1);
+            QVERIFY(cw->list->item(0)->text().startsWith("This computer\n"));
+            QVERIFY(cw->nearbyEmpty->isVisible() && !cw->pairButton->isEnabled());
+            typeInto("Desk");
+            cw->rename->click();
+            QTRY_COMPARE_WITH_TIMEOUT(cw->header->text(), QString("This Frond: Desk"), 5000);
+            // Add by address, then the code Bee shows.
+            b.got.clear();
+            typeInto("127.0.0.1:" + hb.env.value("FROND_LINK_PORT"));
+            cw->addAddress->click();
+            QTRY_VERIFY_WITH_TIMEOUT(cw->codeDialog && cw->codeDialog->isVisible(), 5000);
+            QTRY_COMPARE_WITH_TIMEOUT(cw->codeDialog->prompt->text(), QString("Enter the code shown on Bee"), 10000);
+            QTRY_VERIFY_WITH_TIMEOUT(!b.last("pair-request").isEmpty(), 5000);
+            QCOMPARE(b.last("pair-request").value("name").toString(), QString("Desk"));
+            const auto code = b.last("pair-request").value("code").toString();
+            const auto wrong = QString("%1").arg((QString(code).remove(' ').toInt() + 1) % 1000000, 6, 10, QChar('0'));
+            QVERIFY(!cw->codeDialog->pair->isEnabled());
+            QTest::keyClicks(cw->codeDialog->code, wrong.left(3) + " " + wrong.mid(3));
+            QVERIFY(cw->codeDialog->pair->isEnabled());
+            cw->codeDialog->pair->click();
+            QTRY_VERIFY_WITH_TIMEOUT(cw->codeDialog->problem->isVisible(), 10000);
+            QCOMPARE(cw->codeDialog->problem->text(), QString("Wrong code"));
+            cw->codeDialog->code->clear();
+            QTest::keyClicks(cw->codeDialog->code, code);
+            cw->codeDialog->pair->click();
+            QTRY_VERIFY_WITH_TIMEOUT(!cw->codeDialog, 10000);
+            QTRY_COMPARE_WITH_TIMEOUT(cw->list->count(), 2, 5000);
+            QTRY_VERIFY_WITH_TIMEOUT(cw->list->item(1)->text().startsWith("Bee\n"), 5000);
+            QTRY_VERIFY_WITH_TIMEOUT(b.last("pair-request-end").value("result") == "paired", 5000);
+            QCOMPARE(frondLink::pairedConnections().size(), 1);
+            const auto id = frondLink::pairedConnections()[0].id;
+            QCOMPARE(id, b.client.hello().value("id").toString());
+            // Row menu: Rename…
+            auto menuOn = [cw](int row) {
+                emit cw->list->customContextMenuRequested(cw->list->visualItemRect(cw->list->item(row)).center());
+            };
+            pickMenu("renameConnection");
+            typeInto("Bee's desk");
+            menuOn(1);
+            QTRY_VERIFY_WITH_TIMEOUT(cw->list->count() == 2 && cw->list->item(1)->text().startsWith("Bee's desk\n"), 5000);
+            QCOMPARE(frondLink::connectionName(id), QString("Bee's desk"));
+            // Row menu: Forget, confirmed.
+            pickMenu("forgetConnection");
+            whenShown<QMessageBox>([](QMessageBox* box) {
+                for (auto* button : box->buttons()) if (button->text() == "Forget") { button->click(); return; }
+                box->reject();
+            });
+            menuOn(1);
+            QTRY_COMPARE_WITH_TIMEOUT(cw->list->count(), 1, 5000);
+            QVERIFY(frondLink::pairedConnections().isEmpty());
+            QVERIFY(!listed(b, "connections", hubHello(socket).value("id").toString()).isEmpty());
+            cw->close();
+            window.close();
+        }
+        // Nothing uses the hub the window started any more: it exits.
+        QTRY_VERIFY_WITH_TIMEOUT(!alive(pid), 10000);
+        killHub(b);
+        qunsetenv("FROND_LINK_IDLE_EXIT_MS");
+        QSettings().clear();
+    }
+    // A window with Infrared on This computer runs the core on a Unix socket and shows the hub's status.
+    void infraredConnection() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QTemporaryDir files;
+        QFile source(files.filePath("input.frond")); QVERIFY(source.open(QIODevice::WriteOnly));
+        source.write("session"); source.close();
+        QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly));
+        core.write(R"PY(#!/usr/bin/python3
+import pathlib,socket,sys
+base=pathlib.Path(sys.argv[1]);pathlib.Path(str(base)+'.args').write_text('\n'.join(sys.argv[1:]))
+s=socket.socket(socket.AF_UNIX);s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+for line in s.makefile('rb'):
+    i,cmd,arg=line.rstrip(b'\n').split(b'\t');arg=bytes.fromhex(arg.decode())
+    message={b'device-state':b'palm-tx',b'sd-state':b'none',b'network-state':b'disabled',b'keyboard-state':b'detached'}.get(cmd,b'done')
+    if cmd==b'irda-mode':
+        state=b'off' if arg==b'off' else arg+b' '+arg[5:]+b' waiting'
+        message=state
+    if cmd==b'save':pathlib.Path(arg.decode()).write_text('saved')
+    s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
+    if cmd==b'quit':break
+)PY");
+        core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner));
+        {
+            MainWindow window(core.fileName()); window.show(); window.openSession(source.fileName(), true);
+            auto* mode = window.findChild<QComboBox*>("irdaMode"); auto* state = window.findChild<QLabel*>("irdaState");
+            auto* port = window.findChild<QSpinBox*>("irdaPort");
+            QTRY_VERIFY_WITH_TIMEOUT(mode->isEnabled(), 5000);
+            QVERIFY(mode->findData("link:local") > 0);
+            mode->setCurrentIndex(mode->findData("link:local"));
+            QMetaObject::invokeMethod(mode, "activated", Q_ARG(int, mode->currentIndex()));
+            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Infrared: waiting for a machine on This computer"), 15000);
+            QVERIFY(!port->isVisible());
+            QCOMPARE(machineSetting("infrared"), QString("link:local"));
+            mode->setCurrentIndex(mode->findData("off"));
+            QMetaObject::invokeMethod(mode, "activated", Q_ARG(int, mode->currentIndex()));
+            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString(), 5000);
+            QCOMPARE(machineSetting("infrared"), QString("off"));
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        }
+        // A machine set to a connection that's gone shows it and starts with Infrared off.
+        {
+            const auto settings = frondSessions::preferencesPath(QSettings().value("lastSession").toString());
+            frondSessions::Preferences prefs; QVERIFY(frondSessions::readPreferences(QSettings().value("lastSession").toString(), &prefs));
+            prefs.infrared = "link:00112233445566778899aabbccddeeff";
+            QVERIFY(frondSessions::writePreferences(QSettings().value("lastSession").toString(), prefs).isEmpty());
+            MachineSettingsDialog dialog(frondFirmware::Device::tx, prefs); dialog.show();
+            auto* picker = dialog.findChild<QComboBox*>("machineInfrared"); QVERIFY(picker && picker->isVisible());
+            QCOMPARE(picker->currentText(), QString("Unknown connection"));
+            QVERIFY(picker->findData("link:local") > 0);
+            picker->setCurrentIndex(picker->findData("tcp"));
+            dialog.findChild<QSpinBox*>("machineInfraredPort")->setValue(5044);
+            QCOMPARE(dialog.controls->values().infrared, QString("tcp:5044"));
+            MachineSettingsDialog iiix(frondFirmware::deviceFromId("palm-iiix"), prefs); iiix.show();
+            QVERIFY(iiix.findChild<QComboBox*>("machineInfrared")->isVisible());
+            QVERIFY(!QFileInfo(settings).fileName().isEmpty());
+        }
+        QSettings().clear();
+    }
+    // Each machine keeps its own peripherals: the old global choices go to a machine from before
+    // once, and later global values don't reach it.
+    void peripheralMigration() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QSettings().setValue("serialMode", "tcp"); QSettings().setValue("serialPort", 5077);
+        QSettings().setValue("irdaMode", "pty"); QSettings().setValue("usbMode", "off");
+        QTemporaryDir files;
+        QFile source(files.filePath("input.frond")); QVERIFY(source.open(QIODevice::WriteOnly)); source.write("session"); source.close();
+        QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly));
+        core.write(R"PY(#!/usr/bin/python3
+import pathlib,socket,sys
+pathlib.Path(sys.argv[1]+'.args').write_text('\n'.join(sys.argv[1:]))
+s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+for line in s.makefile('rb'):
+    i,cmd,arg=line.rstrip(b'\n').split(b'\t')
+    message={b'keyboard-state':b'detached',b'network-state':b'disabled',b'sd-state':b'none',b'device-state':b'palm-tx',
+             b'serial-state':b'tcp 127.0.0.1:5077 waiting'}.get(cmd,b'done')
+    if cmd==b'save': pathlib.Path(bytes.fromhex(arg.decode()).decode()).write_text('saved')
+    s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
+    if cmd==b'quit': break
+)PY");
+        core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        QString machine;
+        const auto args = [&] { QFile f((machine.isEmpty() ? source.fileName() : machine) + ".args"); return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray(); };
+        {
+            MainWindow window(core.fileName()); window.show(); window.openSession(source.fileName(), true);
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("stop")->isEnabled(), 5000);
+            QVERIFY(args().contains("--serial\ntcp:5077") && args().contains("--irda\npty") && !args().contains("--usb"));
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+            machine = QSettings().value("lastSession").toString();
+        }
+        QCOMPARE(machineSetting("serial", frondSessions::preferencesPath(machine)), QString("tcp:5077"));
+        QCOMPARE(machineSetting("infrared", frondSessions::preferencesPath(machine)), QString("pty"));
+        // The globals are left alone, and the machine no longer follows them.
+        QSettings().setValue("serialMode", "pty"); QSettings().setValue("irdaMode", "off");
+        {
+            MainWindow window(core.fileName()); window.show(); window.openSession(machine, true);
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("stop")->isEnabled(), 5000);
+            QVERIFY(args().contains("--serial\ntcp:5077") && args().contains("--irda\npty"));
+            QCOMPARE(window.findChild<QComboBox*>("serialMode")->currentData().toString(), QString("tcp"));
+            QCOMPARE(window.findChild<QSpinBox*>("serialPort")->value(), 5077);
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        }
+        QSettings().clear();
+    }
     void tg50BluetoothControls() {
         const auto core = qEnvironmentVariable("FROND_TEST_TG50_CORE");
         const auto source = qEnvironmentVariable("FROND_TEST_TG50_HOST_SESSION");
@@ -2532,7 +3509,7 @@ for line in s.makefile('rb'):
         }); dismiss.start();
         path->setText("relative"); emit path->editingFinished();
         QTRY_VERIFY_WITH_TIMEOUT(!shown.isEmpty(), 5000);
-        QCOMPARE(QSettings().value("bluetoothSocket").toString(), endpoint);
+        QCOMPARE(machineSetting("bluetooth"), "socket:" + endpoint);
         path->setText(endpoint); enabled->click();
         QTRY_VERIFY_WITH_TIMEOUT(enabled->isEnabled() && state->text().isEmpty(), 5000);
         enabled->click(); QTRY_VERIFY_WITH_TIMEOUT(state->text().contains("provider connected"), 5000);
@@ -2685,7 +3662,7 @@ for line in s.makefile('rb'):
             QTest::qWait(2000); focus(id); key("F6"); QTest::qWait(1500);
             capture(window, id, "launcher");
             QCOMPARE(window.findChild<QLabel*>("storageHeading")->text(), QString("Memory Stick"));
-            QCOMPARE(window.findChild<QPushButton*>("sdNew")->isVisible(), frondFirmware::profile(frondFirmware::deviceFromId("sony-clie-tg50")).frontend.memoryStick);
+            QCOMPARE(window.findChild<QPushButton*>("cardPick")->isVisible(), frondFirmware::profile(frondFirmware::deviceFromId("sony-clie-tg50")).frontend.memoryStick);
             QVERIFY(!window.findChild<QPushButton*>("sdExchange")->isVisible());
             QVERIFY(!window.findChild<QComboBox*>("usbMode")->isEnabled());
             QVERIFY(window.findChild<QCheckBox*>("bluetoothEnabled")->isEnabled());
@@ -2844,6 +3821,1023 @@ for line in s.makefile('rb'):
             window.close();
         }
     }
+    // ---- Cards (C4): the library, machine operations and the slot at start and close ----
+    void cardsMoveIn() {
+        cardsReset();
+        const auto a = cardsMachine("Palm TX", true);
+        cardsMachine("Empty", false);
+        // A v6 machine is left alone; an unsaved one too.
+        QDir().mkpath(cardsSessions() + "/Old");
+        { QFile f(cardsSessions() + "/Old/Old.frond"); f.open(QIODevice::WriteOnly); QByteArray b(40, '\0'); putLe(b, 0, frondSessions::magic, 4); putLe(b, 4, 6, 4); f.write(b); }
+        frondCards::startUp(cardsSessions());
+        const auto card = onlyCard();
+        QCOMPARE(card.name, QString("Palm TX card"));
+        QCOMPARE(card.kind, QString("sd"));
+        QCOMPARE(card.bytes, qint64(32) << 20);
+        QCOMPARE(card.identity, machineIdentity("Palm TX"));
+        QCOMPARE(card.machine, QString("Palm TX"));
+        auto slot = frondCards::readSlot(a);
+        QVERIFY(slot.present && slot.card == card.id && slot.link.isEmpty() && !slot.swap && slot.name == card.name);
+        QVERIFY(QFileInfo(a + "/sd.frondsd").isFile());
+        QVERIFY(!frondCards::readSlot(cardsSessions() + "/Empty").present);
+        // Again: nothing changes.
+        frondCards::reconcile(cardsSessions());
+        QCOMPARE(frondCards::entries(cardsLibrary()).size(), 1);
+        // A folder copied by hand holds the same id: the one the hint doesn't name gets "Palm TX card 2".
+        QVERIFY(QDir().mkpath(cardsSessions() + "/Copy"));
+        QVERIFY(QFile::copy(a + "/Palm TX.frond", cardsSessions() + "/Copy/Copy.frond"));
+        QVERIFY(QFile::copy(a + "/sd.frondsd", cardsSessions() + "/Copy/sd.frondsd"));
+        QVERIFY(QFile::copy(a + "/slot.json", cardsSessions() + "/Copy/slot.json"));
+        frondCards::reconcile(cardsSessions());
+        QCOMPARE(frondCards::readSlot(a).card, card.id);
+        const auto second = cardNamed("Palm TX card 2");
+        QVERIFY(!second.id.isEmpty() && second.machine == "Copy");
+        QCOMPARE(frondCards::readSlot(cardsSessions() + "/Copy").card, second.id);
+        // A machine open elsewhere is skipped.
+        const auto b = cardsMachine("Busy", true);
+        QLockFile busy(b + "/Busy.frond.lock"); busy.setStaleLockTime(0);
+        QVERIFY(busy.tryLock());
+        frondCards::reconcile(cardsSessions());
+        QVERIFY(!frondCards::readSlot(b).present);
+        busy.unlock();
+        frondCards::reconcile(cardsSessions());
+        QCOMPARE(frondCards::readSlot(b).card, cardNamed("Busy card").id);
+        // Two machines with one serial and no slot.json (an older Frond's Duplicate): the second
+        // gets a new serial and loads it as a swap.
+        const auto twinA = cardsMachine("Twin A", true), twinB = cardsMachine("Twin B", true);
+        TestMedia same; same.identity = machineIdentity("Twin A");
+        writeFrond(twinB + "/Twin B.frond", "palm-tx", {same});
+        frondCards::reconcile(cardsSessions());
+        QCOMPARE(cardNamed("Twin A card").identity, machineIdentity("Twin A"));
+        QVERIFY(!frondCards::readSlot(twinA).swap);
+        const auto twin = cardNamed("Twin B card");
+        QVERIFY(!twin.id.isEmpty() && twin.identity != machineIdentity("Twin A") && frondCards::readSlot(twinB).swap);
+        QVERIFY(frondCards::launchArguments(cardsSessions(), twinB).join(' ').contains("--card-swap --card-identity " + twin.identity.toHex()));
+    }
+    // A move to another file system fails rather than copying the card.
+    void cardsMoveNeverCopies() {
+        cardsReset();
+        cardsMachine("Palm TX", true);
+        frondCards::reconcile(cardsSessions());
+        const auto a = cardsSessions() + "/Palm TX";
+        const auto card = onlyCard();
+        {
+            frondCards::LibraryLock lock(cardsLibrary());
+            QVERIFY(frondCards::toDrawer(cardsLibrary(), a, card.id).isEmpty());
+        }
+        QTemporaryDir other;
+        if (QStorageInfo(other.path()).device() == QStorageInfo(cardsLibrary()).device())
+            QSKIP("The temporary folder is on the same file system as the library");
+        const auto away = other.path() + "/Away";
+        QVERIFY(QDir().mkpath(away));
+        {
+            frondCards::LibraryLock lock(cardsLibrary());
+            QVERIFY(frondCards::toMachine(cardsLibrary(), card.id, away).contains("same disk"));
+        }
+        QVERIFY(!QFileInfo::exists(away + "/sd.frondsd"));
+        QVERIFY(QFileInfo(cardsLibrary() + '/' + card.id + "/sd.frondsd").isFile());
+        QVERIFY(frondCards::readSlot(away).card.isEmpty());
+        QVERIFY(!frondCards::moveFile(cardsLibrary() + '/' + card.id + "/sd.frondsd", away + "/sd.frondsd"));
+        QVERIFY(QFileInfo(cardsLibrary() + '/' + card.id + "/sd.frondsd").isFile() && !QFileInfo::exists(away + "/sd.frondsd"));
+    }
+    void cardsDeleteKeepsCard() {
+        cardsReset();
+        // Not moved in yet: delete moves it in first.
+        const auto a = cardsMachine("Palm TX", true);
+        const auto digestBefore = digest(a + "/sd.frondsd");
+        QVERIFY(frondSessions::remove(frondSessions::describe(a)).isEmpty());
+        QVERIFY(!QFileInfo::exists(a));
+        auto card = onlyCard();
+        QCOMPARE(card.name, QString("Palm TX card"));
+        QVERIFY(card.machine.isEmpty());
+        QCOMPARE(digest(cardsLibrary() + '/' + card.id + "/sd.frondsd"), digestBefore);
+        // Unsettled: the save's full copy at generation 2 is what the .frond describes.
+        const auto b = cardsMachine("Tungsten", true);
+        TestMedia two; two.generation = 2;
+        writeFrond(b + "/Tungsten.frond", "palm-tx", {two});
+        QVERIFY(QFile::copy(b + "/sd.frondsd", b + "/sd.frondsd.journal-2.full"));
+        QVERIFY(setCardGeneration(b + "/sd.frondsd.journal-2.full", 2));
+        QVERIFY(frondSessions::remove(frondSessions::describe(b)).isEmpty());
+        QVERIFY(!QFileInfo::exists(b));
+        card = cardNamed("Tungsten card");
+        QCOMPARE(cardGeneration(cardsLibrary() + '/' + card.id + "/sd.frondsd"), quint64(2));
+        QVERIFY(QDir(cardsLibrary() + '/' + card.id).entryList(QDir::Files).size() == 2);
+        // A journal that can't be applied: refused, nothing removed.
+        const auto c = cardsMachine("Zire", true);
+        writeFrond(c + "/Zire.frond", "palm-tx", {two});
+        { QFile j(c + "/sd.frondsd.journal-2"); j.open(QIODevice::WriteOnly); j.write("broken"); }
+        const auto error = frondSessions::remove(frondSessions::describe(c));
+        QCOMPARE(error, QString("Open Zire once to finish its last save."));
+        QVERIFY(QFileInfo(c + "/sd.frondsd").isFile() && QFileInfo(c + "/Zire.frond").isFile());
+        // A full disk stops the settle copy the same way.
+        QFile::remove(c + "/sd.frondsd.journal-2");
+        QVERIFY(QFile::copy(c + "/sd.frondsd", c + "/sd.frondsd.journal-2.full"));
+        QVERIFY(setCardGeneration(c + "/sd.frondsd.journal-2.full", 2));
+        const auto keep = frondCards::freeSpace();
+        frondCards::freeSpace() = [](const QString&) { return qint64(1 << 20); };
+        QVERIFY(frondSessions::remove(frondSessions::describe(c)).startsWith("Not enough free space"));
+        frondCards::freeSpace() = keep;
+        QVERIFY(QFileInfo(c + "/Zire.frond").isFile() && QFileInfo(c + "/sd.frondsd").isFile());
+        QVERIFY(QDir(cardsLibrary()).entryList(QDir::Dirs | QDir::Hidden | QDir::NoDotAndDotDot).filter(".new-").isEmpty());
+        // Open elsewhere: refused.
+        const auto d = cardsMachine("Open", true);
+        QLockFile open(d + "/Open.frond.lock"); open.setStaleLockTime(0); QVERIFY(open.tryLock());
+        QVERIFY(!frondSessions::remove(frondSessions::describe(d)).isEmpty());
+        QVERIFY(QFileInfo(d + "/sd.frondsd").isFile());
+        // Never saved (it crashed before its first save) with a library card put in: the card goes back.
+        QVERIFY(frondSessions::create(cardsSessions(), "Unsaved", "palm-tx"));
+        const auto e = cardsSessions() + "/Unsaved";
+        const auto spare = cardNamed("Palm TX card");
+        {
+            frondCards::LibraryLock lock(cardsLibrary());
+            QVERIFY(frondCards::toMachine(cardsLibrary(), spare.id, e).isEmpty());
+        }
+        const auto spareDigest = digest(e + "/sd.frondsd");
+        QVERIFY(!frondSessions::describe(e).saved);
+        QVERIFY(frondSessions::remove(frondSessions::describe(e)).isEmpty());
+        QVERIFY(!QFileInfo::exists(e));
+        QCOMPARE(digest(cardsLibrary() + '/' + spare.id + "/sd.frondsd"), spareDigest);
+        QVERIFY(cardNamed("Palm TX card").machine.isEmpty());
+    }
+    void cardsDuplicate() {
+        cardsReset();
+        const auto a = cardsMachine("Palm TX", true);
+        QString name;
+        // Copy: a settled copy as a new card in the copy, with its own serial, loaded as a swap.
+        QVERIFY(frondSessions::duplicate(cardsSessions(), frondSessions::describe(a), &name, {}, frondSessions::CardChoice::copy).isEmpty());
+        QCOMPARE(name, QString("Palm TX 2"));
+        const auto original = cardNamed("Palm TX card"), copy = cardNamed("Palm TX card 2");
+        QVERIFY(!copy.id.isEmpty() && copy.id != original.id && copy.identity != original.identity && copy.machine == "Palm TX 2");
+        const auto copyDir = cardsSessions() + "/Palm TX 2";
+        QCOMPARE(frondCards::readSlot(copyDir).card, copy.id);
+        QVERIFY(frondCards::readSlot(copyDir).swap);
+        QVERIFY(frondCards::launchArguments(cardsSessions(), copyDir).join(' ').contains("--card-identity " + copy.identity.toHex()));
+        QCOMPARE(digest(copyDir + "/sd.frondsd"), digest(a + "/sd.frondsd"));
+        // No card.
+        QVERIFY(frondSessions::duplicate(cardsSessions(), frondSessions::describe(a), &name, {}, frondSessions::CardChoice::none).isEmpty());
+        auto slot = frondCards::readSlot(cardsSessions() + '/' + name);
+        QVERIFY(slot.present && slot.card.isEmpty() && slot.link.isEmpty() && slot.swap);
+        QVERIFY(frondCards::cardFileIn(cardsSessions() + '/' + name).isEmpty());
+        // Link: nothing copied, both linked; the original keeps holding it until reconcile frees it.
+        QVERIFY(frondSessions::duplicate(cardsSessions(), frondSessions::describe(a), &name, {}, frondSessions::CardChoice::link).isEmpty());
+        const auto linked = cardsSessions() + '/' + name;
+        slot = frondCards::readSlot(linked);
+        QVERIFY(slot.card.isEmpty() && slot.link == original.id && slot.swap && frondCards::cardFileIn(linked).isEmpty());
+        QCOMPARE(frondCards::readSlot(a).link, original.id);
+        frondCards::reconcile(cardsSessions());
+        QVERIFY(QFileInfo(cardsLibrary() + '/' + original.id + "/sd.frondsd").isFile());
+        QVERIFY(frondCards::cardFileIn(a).isEmpty());
+        slot = frondCards::readSlot(a);
+        QVERIFY(slot.card.isEmpty() && slot.link == original.id && slot.swap);
+        // A linked card that isn't in the machine: Copy is refused, Link still works.
+        QVERIFY(!frondSessions::duplicate(cardsSessions(), frondSessions::describe(a), &name, {}, frondSessions::CardChoice::copy).isEmpty());
+        QVERIFY(frondSessions::duplicate(cardsSessions(), frondSessions::describe(a), &name, {}, frondSessions::CardChoice::link).isEmpty());
+        QCOMPARE(frondCards::readSlot(cardsSessions() + '/' + name).link, original.id);
+        // Full disk: the copy fails and leaves no folder or card behind.
+        const auto entriesBefore = frondCards::entries(cardsLibrary()).size();
+        const auto keep = frondCards::freeSpace();
+        frondCards::freeSpace() = [](const QString&) { return qint64(1 << 20); };
+        QVERIFY(frondSessions::duplicate(cardsSessions(), frondSessions::describe(copyDir), &name, {}, frondSessions::CardChoice::copy).startsWith("Not enough free space"));
+        frondCards::freeSpace() = keep;
+        QCOMPARE(frondCards::entries(cardsLibrary()).size(), entriesBefore);
+        QVERIFY(QDir(cardsSessions()).entryList(QDir::Dirs | QDir::Hidden | QDir::NoDotAndDotDot).filter(".dup-").isEmpty());
+        // Cancelled: the same.
+        QVERIFY(frondSessions::duplicate(cardsSessions(), frondSessions::describe(copyDir), &name, [](qint64, qint64) { return false; },
+                                         frondSessions::CardChoice::copy) == "Duplicate cancelled.");
+        QCOMPARE(frondCards::entries(cardsLibrary()).size(), entriesBefore);
+    }
+    void cardsExportImport() {
+        cardsReset();
+        QTemporaryDir out(QDir::currentPath() + "/build/cards-export-XXXXXX");
+        const auto a = cardsMachine("Palm TX", true);
+        frondCards::reconcile(cardsSessions());
+        const auto original = onlyCard();
+        QVERIFY(frondSessions::exportFile(frondSessions::describe(a), out.path() + "/Trip.frond").isEmpty());
+        QVERIFY(QFileInfo(out.path() + "/Trip/slot.json").isFile() && QFileInfo(out.path() + "/Trip/sd.frondsd").isFile());
+        // Exporting again replaces it: a folder with slot.json is still a machine folder.
+        QVERIFY(frondSessions::exportFile(frondSessions::describe(a), out.path() + "/Trip.frond").isEmpty());
+        QString name;
+        QVERIFY(frondSessions::importFile(cardsSessions(), out.path() + "/Trip", &name).isEmpty());
+        const auto imported = cardsSessions() + '/' + name;
+        const auto slot = frondCards::readSlot(imported);
+        const auto card = cardNamed("Palm TX card 2");
+        QVERIFY(!card.id.isEmpty() && card.id != original.id && slot.card == card.id && slot.link.isEmpty());
+        QCOMPARE(digest(imported + "/sd.frondsd"), digest(a + "/sd.frondsd"));
+        // An export from an older Frond has no slot.json: moved in the same way.
+        QFile::remove(out.path() + "/Trip/slot.json");
+        QVERIFY(frondSessions::importFile(cardsSessions(), out.path() + "/Trip/Trip.frond", &name).isEmpty());
+        QCOMPARE(frondCards::readSlot(cardsSessions() + '/' + name).card, cardNamed(name + " card").id);
+        // A linked machine whose card is free exports and imports without one, swap kept.
+        QString linkName;
+        QVERIFY(frondSessions::duplicate(cardsSessions(), frondSessions::describe(a), &linkName, {}, frondSessions::CardChoice::link).isEmpty());
+        frondCards::reconcile(cardsSessions());
+        QVERIFY(frondSessions::exportFile(frondSessions::describe(a), out.path() + "/Linked.frond").isEmpty());
+        QVERIFY(frondSessions::importFile(cardsSessions(), out.path() + "/Linked", &name).isEmpty());
+        const auto noCard = frondCards::readSlot(cardsSessions() + '/' + name);
+        QVERIFY(noCard.swap && noCard.card.isEmpty() && noCard.link.isEmpty());
+        // A classic 4 MB stick with a nonzero change counter imports.
+        const auto stick = out.path() + "/Stick";
+        QVERIFY(cardTool({"make", "ms", "4", stick + "/ms.frondms"}) || (QDir().mkpath(stick) && cardTool({"make", "ms", "4", stick + "/ms.frondms"})));
+        {
+            QFile f(stick + "/ms.frondms"); QVERIFY(f.open(QIODevice::ReadWrite));
+            auto h = f.read(64); putLe(h, 32, 3, 8); f.seek(0); f.write(h);
+        }
+        TestMedia ms; ms.kind = 2; ms.logical = 4ull << 20; ms.physical = 4ull * 2048 * 521; ms.generation = 3;
+        writeFrond(stick + "/Stick.frond", "sony-clie-tg50", {ms});
+        QVERIFY2(frondSessions::importFile(cardsSessions(), stick, &name).isEmpty(), "classic stick import");
+        const auto stickCard = cardNamed("Stick card");
+        QVERIFY(stickCard.kind == "ms" && stickCard.bytes == qint64(4) << 20);
+        // The counter has to match the descriptor.
+        writeFrond(stick + "/Stick.frond", "sony-clie-tg50", {TestMedia{2, 4ull << 20, 4ull * 2048 * 521, 4}});
+        QVERIFY(!frondSessions::importFile(cardsSessions(), stick, &name).isEmpty());
+    }
+    void cardsCutOffMoves() {
+        cardsReset();
+        const auto a = cardsMachine("Palm TX", true), b = cardsMachine("Tungsten", false);
+        frondCards::reconcile(cardsSessions());
+        const auto card = onlyCard();
+        // Cut off after the rename out of a machine: the drawer wins.
+        auto slot = frondCards::readSlot(a);
+        slot.swap = true;
+        QVERIFY(frondCards::writeSlot(a, slot));
+        QVERIFY(QFile::rename(a + "/sd.frondsd", cardsLibrary() + '/' + card.id + "/sd.frondsd"));
+        frondCards::reconcile(cardsSessions());
+        slot = frondCards::readSlot(a);
+        QVERIFY(slot.card.isEmpty() && slot.swap);
+        // Cut off before the rename into a machine: the same.
+        QVERIFY(frondCards::writeSlot(b, {true, card.id, {}, card.name, true}));
+        frondCards::reconcile(cardsSessions());
+        QVERIFY(frondCards::readSlot(b).card.isEmpty() && QFileInfo(cardsLibrary() + '/' + card.id + "/sd.frondsd").isFile());
+        // A whole move, then a machine deleted by an older Frond: its entry and links go.
+        {
+            frondCards::LibraryLock lock(cardsLibrary());
+            QVERIFY(frondCards::toMachine(cardsLibrary(), card.id, b).isEmpty());
+        }
+        QVERIFY(QFileInfo(b + "/sd.frondsd").isFile());
+        slot = frondCards::readSlot(a);
+        slot.link = card.id;
+        QVERIFY(frondCards::writeSlot(a, slot));
+        QVERIFY(QDir(b).removeRecursively());
+        frondCards::reconcile(cardsSessions());
+        QVERIFY(frondCards::entries(cardsLibrary()).isEmpty());
+        QVERIFY(frondCards::readSlot(a).link.isEmpty());
+    }
+    void cardsCrashLeftovers() {
+        cardsReset();
+        QDir().mkpath(cardsLibrary());
+        // Hidden copies: an old unlocked one goes, a fresh one and a locked one stay.
+        for (const auto* name : {"/.new-old", "/.new-fresh", "/.new-held"}) {
+            QDir().mkpath(cardsLibrary() + name);
+            QFile f(cardsLibrary() + name + "/sd.frondsd"); f.open(QIODevice::WriteOnly); f.write("x"); f.close();
+        }
+        for (const auto* name : {"/.new-old", "/.new-held"})
+            for (const auto& path : {cardsLibrary() + name + "/sd.frondsd", cardsLibrary() + name}) {
+                struct timeval old[2] = {{time(nullptr) - 3600, 0}, {time(nullptr) - 3600, 0}};
+                QVERIFY(utimes(QFile::encodeName(path).constData(), old) == 0);
+            }
+        QLockFile held(cardsLibrary() + "/.new-held.lock"); held.setStaleLockTime(0); QVERIFY(held.tryLock());
+        frondCards::startUp(cardsSessions());
+        QVERIFY(!QFileInfo::exists(cardsLibrary() + "/.new-old"));
+        QVERIFY(QFileInfo::exists(cardsLibrary() + "/.new-fresh") && QFileInfo::exists(cardsLibrary() + "/.new-held"));
+        held.unlock();
+        // A linked holder that crashed: settled, the card goes back to the drawer (rule 6).
+        const auto a = cardsMachine("Palm TX", true);
+        frondCards::reconcile(cardsSessions());
+        const auto card = onlyCard();
+        auto slot = frondCards::readSlot(a);
+        slot.link = card.id;
+        QVERIFY(frondCards::writeSlot(a, slot));
+        // While it runs (locked), nothing moves.
+        {
+            QLockFile running(a + "/Palm TX.frond.lock"); running.setStaleLockTime(0); QVERIFY(running.tryLock());
+            frondCards::reconcile(cardsSessions());
+            QVERIFY(QFileInfo(a + "/sd.frondsd").isFile());
+            QCOMPARE(frondCards::entries(cardsLibrary()).size(), 1);
+        }
+        // Unsettled, it stays held.
+        { QFile j(a + "/sd.frondsd.journal-2"); j.open(QIODevice::WriteOnly); j.write("partial"); }
+        frondCards::reconcile(cardsSessions());
+        QVERIFY(QFileInfo(a + "/sd.frondsd").isFile());
+        QFile::remove(a + "/sd.frondsd.journal-2");
+        frondCards::reconcile(cardsSessions());
+        QVERIFY(!QFileInfo::exists(a + "/sd.frondsd") && QFileInfo(cardsLibrary() + '/' + card.id + "/sd.frondsd").isFile());
+        slot = frondCards::readSlot(a);
+        QVERIFY(slot.card.isEmpty() && slot.link == card.id && slot.swap);
+        QVERIFY(onlyCard().machine.isEmpty());
+    }
+    // Two machines linked to one card take turns in the window, with a fake core: each takes it at
+    // start with --card-swap and its identity, and gives it back after its final save.
+    void cardsLinkedTurns() {
+        cardsReset();
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QTemporaryDir files;
+        const auto core = fakeCardCore(files.path());
+        const auto a = cardsMachine("Palm TX", true), b = cardsMachine("Tungsten", false);
+        frondCards::reconcile(cardsSessions());
+        const auto card = onlyCard();
+        QString name;
+        for (const auto& dir : {a, b}) {
+            auto slot = frondCards::readSlot(dir);
+            slot.present = true; slot.link = card.id; slot.swap = slot.swap || dir == b;
+            QVERIFY(frondCards::writeSlot(dir, slot));
+        }
+        frondCards::reconcile(cardsSessions());  // a, stopped, gives it up
+        QVERIFY(QFileInfo(cardsLibrary() + '/' + card.id + "/sd.frondsd").isFile());
+        const auto identity = QString::fromLatin1(card.identity.toHex());
+        {
+            MainWindow window(core);
+            QVERIFY(runAndClose(window, b));
+        }
+        QVERIFY(argsOf(b).contains("--card-swap\n--card-identity\n" + identity));
+        QVERIFY(QFileInfo(cardsLibrary() + '/' + card.id + "/sd.frondsd").isFile() && frondCards::cardFileIn(b).isEmpty());
+        QVERIFY(frondCards::readSlot(b).swap);
+        // b holds it while it runs; a second window's a starts empty and sees it come free.
+        {
+            MainWindow first(core), second(core);
+            first.show();
+            first.openSession(b + "/Tungsten.frond", true);
+            QTRY_VERIFY_WITH_TIMEOUT(first.findChild<QPushButton*>("stop")->isEnabled(), 10000);
+            QVERIFY(QFileInfo(b + "/sd.frondsd").isFile());
+            QCOMPARE(onlyCard().machine, QString("Tungsten"));
+            second.show();
+            second.openSession(a + "/Palm TX.frond", true);
+            QTRY_VERIFY_WITH_TIMEOUT(second.findChild<QPushButton*>("stop")->isEnabled(), 10000);
+            QVERIFY(frondCards::cardFileIn(a).isEmpty());
+            QVERIFY(argsOf(a).contains("--card-swap") && !argsOf(a).contains("--card-identity"));
+            QVERIFY(!second.linkedCardFree());
+            first.close();
+            QTRY_VERIFY_WITH_TIMEOUT(!first.isVisible(), 10000);
+            QTRY_VERIFY_WITH_TIMEOUT(second.linkedCardFree(), 8000);
+            second.close();
+            QTRY_VERIFY_WITH_TIMEOUT(!second.isVisible(), 10000);
+        }
+        // An unlinked machine keeps its card; swap clears after its save.
+        auto slot = frondCards::readSlot(a);
+        slot.link.clear();
+        QVERIFY(frondCards::writeSlot(a, slot));
+        {
+            frondCards::LibraryLock lock(cardsLibrary());
+            QVERIFY(frondCards::toMachine(cardsLibrary(), card.id, a).isEmpty());
+        }
+        QVERIFY(frondCards::readSlot(a).swap);
+        {
+            MainWindow window(core);
+            QVERIFY(runAndClose(window, a));
+        }
+        QVERIFY(argsOf(a).contains("--card-swap\n--card-identity\n" + identity));
+        QVERIFY(QFileInfo(a + "/sd.frondsd").isFile() && !frondCards::readSlot(a).swap);
+        {
+            MainWindow window(core);
+            QVERIFY(runAndClose(window, a));
+        }
+        QVERIFY(!argsOf(a).contains("--card-"));
+        // A 68k machine never gets card flags.
+        const auto iiix = cardsMachine("Palm IIIx", false, "palm-iiix");
+        QVERIFY(frondCards::writeSlot(iiix, {true, {}, {}, {}, true}));
+        {
+            MainWindow window(core, core);
+            QVERIFY(runAndClose(window, iiix));
+        }
+        QVERIFY(!argsOf(iiix).isEmpty() && !argsOf(iiix).contains("--card-"));
+        QSettings().clear();
+    }
+    // With the T|X smoke session (FROND_ARM_SESSIONS) and the real core: two linked machines take
+    // turns, and a card changed between one's close and its next start resumes as a new card.
+    void cardsRealCore() {
+        const auto smoke = qEnvironmentVariable("FROND_ARM_SESSIONS");
+        if (smoke.isEmpty() || !QFileInfo(smoke + "/palm-tx").isDir()) QSKIP("Set FROND_ARM_SESSIONS to the smoke sessions");
+        cardsReset();
+        QSettings().clear(); QSettings().setValue("resume", false);
+        qputenv("SDL_VIDEODRIVER", "dummy"); qputenv("SDL_AUDIODRIVER", "dummy");
+        auto machine = [&](const QString& name) {
+            const auto dir = cardsSessions() + '/' + name;
+            QDir().mkpath(dir);
+            for (const auto& e : QDir(smoke + "/palm-tx").entryInfoList(QDir::Files)) {
+                if (!frondSessions::packableName(e.fileName())) continue;
+                QFile::copy(e.absoluteFilePath(), dir + '/' + frondSessions::packableDestName(e.fileName(), name));
+            }
+            frondSessions::Preferences prefs; prefs.audio = false; prefs.peripheralsSet = true;
+            frondSessions::writePreferences(dir + '/' + name + ".frond", prefs);
+            return dir;
+        };
+        const auto a = machine("Palm TX"), b = machine("Palm TX 2");
+        QVERIFY(frondCards::cardFileIn(a).isEmpty());
+        // A drawer card made by the card tool, linked to both.
+        frondCards::Card card{frondCards::newId(), "Games", "sd", frondCards::now(), {}, qint64(32) << 20, frondCards::newIdentity(), false};
+        const auto entry = cardsLibrary() + '/' + card.id;
+        QVERIFY(QDir().mkpath(entry) && frondCards::writeCard(entry, card));
+        QVERIFY(cardTool({"make", "sd", "32", entry + "/sd.frondsd"}));
+        for (const auto& dir : {a, b}) QVERIFY(frondCards::writeSlot(dir, {true, {}, card.id, {}, false}));
+        auto described = [](const QString& dir) {
+            const auto cards = frondCards::descriptorsOf(dir + '/' + QFileInfo(dir).fileName() + ".frond");
+            const auto* d = frondCards::describedCard(cards, "sd.frondsd");
+            return d ? *d : frondCards::Descriptor{};
+        };
+        const auto core = cardsCore();
+        for (const auto& dir : {a, b, a}) {
+            MainWindow window(core);
+            QVERIFY(runAndClose(window, dir));
+            // The save recorded the card, then it went back to the drawer.
+            const auto d = described(dir);
+            QVERIFY2(d.kind == 1 && d.identity == card.identity, qPrintable(dir));
+            QVERIFY(QFileInfo(entry + "/sd.frondsd").isFile() && frondCards::cardFileIn(dir).isEmpty());
+            QCOMPARE(d.generation, cardGeneration(entry + "/sd.frondsd"));
+        }
+        // Changed between a's close and its next start: a takes the new generation.
+        const auto next = cardGeneration(entry + "/sd.frondsd") + 5;
+        QVERIFY(setCardGeneration(entry + "/sd.frondsd", next));
+        {
+            MainWindow window(core);
+            QVERIFY(runAndClose(window, a));
+        }
+        QVERIFY(described(a).generation >= next);
+        QCOMPARE(described(a).generation, cardGeneration(entry + "/sd.frondsd"));
+        QSettings().clear();
+    }
+    // Part A: a machine's Copy card has its own serial. Written in both and swapped between the two
+    // machines, each resumes with a changed card: ejected first, then inserted.
+    void cardsCopyIdentity() {
+        const auto smoke = qEnvironmentVariable("FROND_ARM_SESSIONS");
+        if (smoke.isEmpty() || !QFileInfo(smoke + "/palm-tx").isDir()) QSKIP("Set FROND_ARM_SESSIONS to the smoke sessions");
+        cardsReset();
+        QSettings().clear(); QSettings().setValue("resume", false);
+        qputenv("SDL_VIDEODRIVER", "dummy"); qputenv("SDL_AUDIODRIVER", "dummy");
+        const auto a = cardsSessions() + "/Palm TX";
+        QDir().mkpath(a);
+        for (const auto& e : QDir(smoke + "/palm-tx").entryInfoList(QDir::Files)) {
+            if (!frondSessions::packableName(e.fileName())) continue;
+            QFile::copy(e.absoluteFilePath(), a + '/' + frondSessions::packableDestName(e.fileName(), "Palm TX"));
+        }
+        frondSessions::Preferences prefs; prefs.audio = false; prefs.peripheralsSet = true;
+        frondSessions::writePreferences(a + "/Palm TX.frond", prefs);
+        frondCards::Card card{frondCards::newId(), "Games", "sd", frondCards::now(), {}, qint64(32) << 20, frondCards::newIdentity(), false};
+        const auto entry = cardsLibrary() + '/' + card.id;
+        QVERIFY(QDir().mkpath(entry) && frondCards::writeCard(entry, card));
+        QVERIFY(cardTool({"make", "sd", "32", entry + "/sd.frondsd"}));
+        QVERIFY(frondCards::toMachine(cardsLibrary(), card.id, a).isEmpty());
+        const auto core = cardsCore();
+        // Each run: the sdState texts seen until it settles, then closed.
+        auto run = [&](const QString& dir) {
+            QStringList seen;
+            MainWindow window(core);
+            window.show();
+            window.openSession(frondSessions::sessionFrondIn(dir), true);
+            auto* state = window.findChild<QLabel*>("sdState");
+            QTimer watch;
+            QObject::connect(&watch, &QTimer::timeout, &window, [&] {
+                if (seen.isEmpty() || seen.last() != state->text()) seen << state->text();
+            });
+            watch.start(5);
+            QTest::qWaitFor([&] { return window.findChild<QPushButton*>("stop")->isEnabled(); }, 60000);
+            QTest::qWaitFor([&] { return seen.contains("Inserted"); }, 10000);
+            watch.stop();
+            window.close();
+            QTest::qWaitFor([&] { return !window.isVisible(); }, 120000);
+            return seen;
+        };
+        auto seen = run(a);
+        QVERIFY2(seen.contains("Inserted"), qPrintable(seen.join(", ")));
+        QString name;
+        QVERIFY(frondSessions::duplicate(cardsSessions(), frondSessions::describe(a), &name, {}, frondSessions::CardChoice::copy).isEmpty());
+        const auto b = cardsSessions() + '/' + name;
+        const auto copy = cardNamed("Games 2");
+        QVERIFY(!copy.id.isEmpty() && copy.identity != card.identity && frondCards::readSlot(b).swap);
+        seen = run(b);
+        QVERIFY2(seen.contains("Inserted"), qPrintable(seen.join(", ")));
+        // Written in both: a later generation in each file.
+        for (const auto& dir : {a, b}) QVERIFY(setCardGeneration(dir + "/sd.frondsd", cardGeneration(dir + "/sd.frondsd") + 3));
+        {
+            frondCards::LibraryLock lock(cardsLibrary());
+            QVERIFY(frondCards::toDrawer(cardsLibrary(), a, card.id).isEmpty());
+            QVERIFY(frondCards::toDrawer(cardsLibrary(), b, copy.id).isEmpty());
+            QVERIFY(frondCards::toMachine(cardsLibrary(), copy.id, a).isEmpty());
+            QVERIFY(frondCards::toMachine(cardsLibrary(), card.id, b).isEmpty());
+        }
+        for (const auto& [dir, id] : {std::pair{a, copy.id}, std::pair{b, card.id}}) {
+            QVERIFY(frondCards::launchArguments(cardsSessions(), dir).contains("--card-swap"));
+            seen = run(dir);
+            QVERIFY2(seen.contains("Ejected") && seen.indexOf("Ejected") < seen.lastIndexOf("Inserted"), qPrintable(seen.join(", ")));
+            QCOMPARE(frondCards::readSlot(dir).card, id);
+            QVERIFY(!frondCards::readSlot(dir).swap);
+        }
+        QSettings().clear();
+    }
+    // Part A: deleting a v6 machine keeps the card inside it as a drawer card.
+    void cardsV6Delete() {
+        cardsReset();
+        auto v6 = [&](const QString& name, const QByteArray& sd) {
+            const auto dir = cardsSessions() + '/' + name;
+            QDir().mkpath(dir);
+            QByteArray sections = QByteArray("meta") + QByteArray(1000, 'n') + QByteArray(3000, 'm') + QByteArray(77, 's');
+            QByteArray head(40 + 32, '\0');
+            putLe(head, 0, frondSessions::magic, 4); putLe(head, 4, 6, 4);
+            for (int i = 0; i < 7; ++i) head[8 + i] = "palm-tx"[i];
+            const quint32 toc[8]{0, 32, 4, 1000, 0, 3000, 77, quint32(sd.size())};
+            for (int i = 0; i < 8; ++i) putLe(head, 40 + 4 * i, toc[i], 4);
+            QByteArray body = sections + sd;
+            uLongf size = compressBound(uLong(body.size()));
+            QByteArray z(int(size), '\0');
+            compress2(reinterpret_cast<Bytef*>(z.data()), &size, reinterpret_cast<const Bytef*>(body.constData()), uLong(body.size()), 1);
+            z.resize(int(size));
+            QFile f(dir + '/' + name + ".frond");
+            f.open(QIODevice::WriteOnly);
+            f.write(head + z);
+            return dir;
+        };
+        QByteArray sd(32 << 20, '\0');
+        for (int i = 0; i < sd.size(); i += 4096) sd[i] = char(i >> 12);
+        const auto a = v6("Old TX", sd);
+        QVERIFY(frondCards::v6HasCard(a + "/Old TX.frond"));
+        QVERIFY(frondSessions::remove(frondSessions::describe(a)).isEmpty());
+        QVERIFY(!QFileInfo::exists(a));
+        const auto card = cardNamed("Old TX card");
+        QVERIFY(!card.id.isEmpty() && card.machine.isEmpty() && card.kind == "sd");
+        QCOMPARE(card.bytes, qint64(sd.size()));
+        QCOMPARE(card.identity, QCryptographicHash::hash(sd, QCryptographicHash::Md5).toHex());
+        QTemporaryDir out(QDir::currentPath() + "/build/cards-v6-XXXXXX");
+        QVERIFY(frondCards::exportCardImage(cardsSessions(), card.id, out.path() + "/old.img").isEmpty());
+        QFile img(out.path() + "/old.img"); QVERIFY(img.open(QIODevice::ReadOnly));
+        QVERIFY(img.readAll() == sd);
+        // No card inside: nothing kept.
+        const auto b = v6("Empty TX", {});
+        QVERIFY(frondSessions::remove(frondSessions::describe(b)).isEmpty());
+        QCOMPARE(frondCards::entries(cardsLibrary()).size(), 1);
+        // A cut-off file: refused, left as it is.
+        const auto c = v6("Broken TX", sd);
+        QFile cut(c + "/Broken TX.frond"); QVERIFY(cut.open(QIODevice::ReadWrite)); QVERIFY(cut.resize(cut.size() / 2)); cut.close();
+        const auto error = frondSessions::remove(frondSessions::describe(c));
+        QVERIFY2(error.endsWith("It wasn't deleted."), qPrintable(error));
+        QVERIFY(QFileInfo(c + "/Broken TX.frond").isFile());
+        QCOMPARE(frondCards::entries(cardsLibrary()).size(), 1);
+        QVERIFY(QDir(cardsLibrary()).entryList(QDir::Dirs | QDir::Hidden | QDir::NoDotAndDotDot).filter(".new-").isEmpty());
+        // Two v6 machines duplicated from each other hold the same card: the second one kept gets
+        // a new serial.
+        QVERIFY(frondCards::deleteCard(cardsSessions(), card.id).isEmpty());
+        const auto twinA = v6("Twin A", sd), twinB = v6("Twin B", sd);
+        QVERIFY(frondSessions::remove(frondSessions::describe(twinA)).isEmpty());
+        QVERIFY(frondSessions::remove(frondSessions::describe(twinB)).isEmpty());
+        const auto first = cardNamed("Twin A card"), second = cardNamed("Twin B card");
+        QVERIFY(!first.id.isEmpty() && !second.id.isEmpty());
+        QCOMPARE(first.identity, card.identity);
+        QVERIFY(second.identity != card.identity);
+    }
+    // Part A: Save a Copy carries slot.json as Export does, and the copy imports with its own card.
+    void cardsSaveCopy() {
+        cardsReset();
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QTemporaryDir files, out(QDir::currentPath() + "/build/cards-savecopy-XXXXXX");
+        const auto core = pickerCore(files.path(), "palm-tx");
+        const auto a = cardsMachine("Palm TX", true);
+        frondCards::reconcile(cardsSessions());
+        const auto card = onlyCard();
+        {
+            MainWindow window(core);
+            window.show();
+            window.openSession(a + "/Palm TX.frond", true);
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("stop")->isEnabled(), 10000);
+            window.saveCopyTo(out.path() + "/Trip.frond");
+            QTRY_VERIFY_WITH_TIMEOUT(QFileInfo(out.path() + "/Trip/Trip.frond").isFile() && QFileInfo(out.path() + "/Trip/slot.json").isFile(), 10000);
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 10000);
+        }
+        const auto slot = frondCards::readSlot(out.path() + "/Trip");
+        QVERIFY(slot.present && slot.card == card.id && !slot.swap);
+        QVERIFY(QFileInfo(out.path() + "/Trip/sd.frondsd").isFile());
+        QString name;
+        QVERIFY(frondSessions::importFile(cardsSessions(), out.path() + "/Trip", &name).isEmpty());
+        const auto imported = cardNamed("Palm TX card 2");
+        QVERIFY(!imported.id.isEmpty() && imported.identity != card.identity);
+        QCOMPARE(frondCards::readSlot(cardsSessions() + '/' + name).card, imported.id);
+        QCOMPARE(frondCards::readSlot(a).card, card.id);
+        QSettings().clear();
+    }
+    // The Cards window: rows, the row menu and New card.
+    // Import folder as card: a folder with nested folders and long names becomes a card whose files
+    // match, the smallest size is chosen, a folder that is too big or has unusable names is refused,
+    // and Cancel leaves nothing.
+    void importFolderCard() {
+        cardsReset();
+        if (!frondFolderCard::mtoolsAvailable()) QSKIP("mtools isn't installed");
+        QTemporaryDir work(QDir::currentPath() + "/build/cards-folder-XXXXXX");
+        const auto folder = work.filePath("My Music Collection");
+        auto put = [&](const QString& rel, const QByteArray& bytes) {
+            QDir().mkpath(QFileInfo(folder + '/' + rel).absolutePath());
+            QFile f(folder + '/' + rel);
+            QVERIFY(f.open(QIODevice::WriteOnly));
+            QVERIFY(f.write(bytes) == bytes.size());
+        };
+        QByteArray big(3 << 20, '\0');
+        for (int i = 0; i < big.size(); i += 4096) big[i] = char(i >> 12);
+        put("A rather long file name for a card.txt", "hello");
+        put("empty", {});
+        put("Songs/Album One/01 - A very long track title indeed.sunvox", big);
+        put("Songs/Album One/notes.txt", "x");
+        put("Songs/Album Two/Deeper/Deepest/readme.md", "nested");
+        // Names past ASCII come back exactly, short ones and lower-case ones too.
+        const QStringList names{"äpfel.txt", "ÄB.txt", "naïve café.txt", "Songs/émile.TXT", "日本語.md", "Ölfarben/ñ", "README.TXT"};
+        for (const auto& n : names) put(n, n.toUtf8());
+        const auto plan = frondFolderCard::measure(folder);
+        QVERIFY2(plan.problem.isEmpty(), qPrintable(plan.problem));
+        QCOMPARE(plan.files, 12);
+        QCOMPARE(plan.folders, 6);
+        QCOMPARE(frondFolderCard::smallestFit(plan, frondCards::sizesFor("sd")), 32);
+        QString id;
+        QList<qint64> seen;
+        const auto error = frondCards::importFolderCard(cardsSessions(), folder, "My Music", "sd", 32,
+                                                        [&](qint64 d, qint64 t) { seen << d * 1000 / qMax<qint64>(t, 1); return true; }, &id);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QVERIFY(seen.size() > 2 && seen.last() >= 900);
+        const auto card = cardNamed("My Music");
+        QCOMPARE(card.id, id);
+        QCOMPARE(card.kind, QString("sd"));
+        QCOMPARE(card.bytes, qint64(32) << 20);
+        QVERIFY(QDir(cardsLibrary()).entryList(QDir::Dirs | QDir::Hidden | QDir::NoDotAndDotDot).filter(".new-").isEmpty());
+        // Back out as an image, and the files read off it are the folder's.
+        QVERIFY(frondCards::exportCardImage(cardsSessions(), card.id, work.filePath("out.img")).isEmpty());
+        QDir().mkpath(work.filePath("back"));
+        QString mtoolsError;
+        QVERIFY2(frondFolderCard::runMtools("mcopy", work.filePath("out.img"), {"-s", "-m", "::/*", work.filePath("back")}, {}, 1).isEmpty(),
+                 "mcopy of the card failed");
+        QVERIFY(frondFolderCard::sameTree(folder, work.filePath("back")));
+        for (const auto& n : names) QVERIFY2(QFileInfo(work.filePath("back/" + n)).isFile(), qPrintable(n));
+        // The short names are Android's FatImage ones (FolderCardTest checks the same).
+        QCOMPARE(frondFolderCard::shortName("äpfel.txt", {}), QByteArray("_PFEL~1 TXT"));
+        QCOMPARE(frondFolderCard::shortName("README.TXT", {}), QByteArray("README  TXT"));
+        QCOMPARE(frondFolderCard::shortName("notes.txt", {"NOTES.TXT"}), QByteArray("NOTES~1 TXT"));
+        QVERIFY(QFileInfo(work.filePath("back/Songs/Album Two/Deeper/Deepest/readme.md")).isFile());
+        QVERIFY(QFileInfo(work.filePath("back/Songs/Album One/01 - A very long track title indeed.sunvox")).size() == big.size());
+        // The same card is a name already taken; a classic stick is not offered for a folder.
+        QVERIFY(frondCards::importFolderCard(cardsSessions(), folder, "My Music", "sd", 32).contains("already a card"));
+        QVERIFY(!frondCards::folderKinds().contains("ms"));
+        QVERIFY(frondCards::importFolderCard(cardsSessions(), folder, "Stick", "ms", 16).contains("Choose"));
+        // Too big for 32 MB: refused with nothing left; the next size up takes it.
+        put("Songs/huge.bin", QByteArray(40 << 20, 'z'));
+        const auto bigPlan = frondFolderCard::measure(folder);
+        QCOMPARE(frondFolderCard::smallestFit(bigPlan, frondCards::sizesFor("sd")), 64);
+        {
+            FolderCardDialog dialog(cardsSessions(), folder, bigPlan);
+            QCOMPARE(dialog.name->text(), QString("My Music Collection"));
+            QCOMPARE(dialog.type->itemText(0), QString("SD card"));
+            QVERIFY(dialog.type->findText("Memory Stick") < 0);
+            QCOMPARE(dialog.sizes->itemText(0), QString("32 MB · Too small"));
+            QVERIFY(!qobject_cast<QStandardItemModel*>(dialog.sizes->model())->item(0)->isEnabled());
+            QCOMPARE(dialog.sizes->currentText(), QString("64 MB"));
+            QCOMPARE(dialog.size(), 64);
+        }
+        const auto refused = frondCards::importFolderCard(cardsSessions(), folder, "Too big", "sd", 32);
+        QVERIFY2(refused.contains("doesn't fit"), qPrintable(refused));
+        QVERIFY(cardNamed("Too big").id.isEmpty());
+        QVERIFY(QDir(cardsLibrary()).entryList(QDir::Dirs | QDir::Hidden | QDir::NoDotAndDotDot).filter(".new-").isEmpty());
+        QCOMPARE(frondCards::entries(cardsLibrary()).size(), 1);
+        // Cancel at the start, while the files are going in, and while the card file is made.
+        auto nothingLeft = [&] {
+            QVERIFY(cardNamed("Stopped").id.isEmpty());
+            QVERIFY(QDir(cardsLibrary()).entryList(QDir::Dirs | QDir::Hidden | QDir::NoDotAndDotDot).filter(".new-").isEmpty());
+            QCOMPARE(frondCards::entries(cardsLibrary()).size(), 1);
+        };
+        QCOMPARE(frondCards::importFolderCard(cardsSessions(), folder, "Stopped", "sd", 64, [](qint64, qint64) { return false; }),
+                 QString("Cancelled."));
+        nothingLeft();
+        QCOMPARE(frondCards::importFolderCard(cardsSessions(), folder, "Stopped", "sd", 64,
+                                              [](qint64 d, qint64 t) { return d * 1000 / qMax<qint64>(t, 1) < 100; }),
+                 QString("Cancelled."));
+        nothingLeft();
+        {
+            SlowCardTool slow;
+            QCOMPARE(frondCards::importFolderCard(cardsSessions(), folder, "Stopped", "sd", 64,
+                                                  [](qint64 d, qint64 t) { return d * 1000 / qMax<qint64>(t, 1) < 502; }),
+                     QString("Cancelled."));
+            nothingLeft();
+        }
+        QVERIFY(frondCards::importFolderCard(cardsSessions(), folder, "Larger", "sd", 64).isEmpty());
+        QCOMPARE(cardNamed("Larger").bytes, qint64(64) << 20);
+        // Names a card can't hold, names that differ only in case, and too many names at the top.
+        QTemporaryDir odd(QDir::currentPath() + "/build/cards-folder-XXXXXX");
+        QFile(odd.filePath("Readme.txt")).open(QIODevice::WriteOnly);
+        QFile(odd.filePath("README.TXT")).open(QIODevice::WriteOnly);
+        QVERIFY(frondFolderCard::measure(odd.path()).problem.contains("differ only in case"));
+        QFile(odd.filePath("README.TXT")).remove();
+        QFile(odd.filePath("what?.txt")).open(QIODevice::WriteOnly);
+        QVERIFY(frondFolderCard::measure(odd.path()).problem.contains("can't be used"));
+        QFile(odd.filePath("what?.txt")).remove();
+        for (int i = 0; i < 520; ++i) QFile(odd.filePath(QString("file-%1.txt").arg(i))).open(QIODevice::WriteOnly);
+        QVERIFY(frondFolderCard::measure(odd.path()).problem.contains("too many names"));
+        QVERIFY(frondCards::importFolderCard(cardsSessions(), odd.path(), "Odd", "sd", 32).contains("too many names"));
+        QCOMPARE(frondCards::entries(cardsLibrary()).size(), 2);
+    }
+    void cardsWindow() {
+        cardsReset();
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QTemporaryDir files, out(QDir::currentPath() + "/build/cards-window-XXXXXX");
+        const auto core = fakeCardCore(files.path());
+        cardsMachine("Palm TX", true);
+        const auto spare = cardsMachine("Spare Palm TX", false);
+        const auto e2 = cardsMachine("Tungsten E2", false, "palm-e2");
+        frondCards::reconcile(cardsSessions());
+        QString games;
+        QVERIFY(frondCards::makeCard(cardsSessions(), "Games", "sd", 64, {}, &games).isEmpty());
+        QVERIFY(frondCards::setLinks(cardsSessions(), games, {spare, e2}).isEmpty());
+        const auto kinds = frondCards::kindsTaken();
+        if (kinds.contains("ms")) QVERIFY(frondCards::makeCard(cardsSessions(), "Photos", "ms", 16).isEmpty());
+        MainWindow window(core);
+        window.show();
+        auto* cards = window.showCards();
+        QVERIFY(cards && cards->isVisible());
+        QCOMPARE(window.findChild<QAction*>("cardsAction")->text(), QString("C&ards…"));
+        auto* sd = cards->findChild<QListWidget*>("sdCards");
+        QCOMPARE(sd->count(), 2);
+        QCOMPARE(rowLabel(sd, 0, "cardName"), QString("Games"));
+        QCOMPARE(rowLabel(sd, 0, "cardDetail"), QString("64 MB · Free · Linked to Spare Palm TX, Tungsten E2"));
+        QCOMPARE(rowLabel(sd, 1, "cardName"), QString("Palm TX card"));
+        QCOMPARE(rowLabel(sd, 1, "cardDetail"), QString("32 MB · In Palm TX"));
+        // The marker is drawn lit (highlight colour) only on the card that's in a machine.
+        auto* litMarker = sd->itemWidget(sd->item(1))->findChild<QFrame*>("cardMarker");
+        auto* darkMarker = sd->itemWidget(sd->item(0))->findChild<QFrame*>("cardMarker");
+        QVERIFY(litMarker->property("lit").toBool());
+        QVERIFY(!darkMarker->property("lit").toBool());
+        QTRY_VERIFY(litMarker->height() > 0);
+        const auto highlight = litMarker->palette().color(QPalette::Highlight);
+        QCOMPARE(litMarker->grab().toImage().pixelColor(1, litMarker->height() / 2).rgb(), highlight.rgb());
+        QVERIFY(darkMarker->grab().toImage().pixelColor(1, darkMarker->height() / 2).rgb() != highlight.rgb());
+        // A narrow window wraps the linked machines rather than cutting them off.
+        cards->resize(260, cards->height());
+        QTRY_VERIFY([&] {
+            auto* detail = sd->itemWidget(sd->item(0))->findChild<QLabel*>("cardDetail");
+            return detail->width() < 260 && detail->heightForWidth(detail->width()) <= detail->height() &&
+                   sd->visualItemRect(sd->item(0)).height() >= detail->height();
+        }());
+        cards->resize(520, cards->height());
+        if (kinds.contains("ms")) {
+            auto* ms = cards->findChild<QListWidget*>("memorySticks");
+            QCOMPARE(ms->count(), 1);
+            QCOMPARE(rowLabel(ms, 0, "cardDetail"), QString("16 MB · Not in a machine"));
+        }
+        screenshot(cards, "cards-window.png");
+        // In a stopped machine: Delete greyed, Take out of it there.
+        QVERIFY(!cardAction(sd, 1, "deleteCard")->isEnabled());
+        QCOMPARE(cardAction(sd, 1, "takeOutCard")->text(), QString("Take out of Palm TX"));
+        QVERIFY(!cardAction(sd, 0, "takeOutCard"));
+        cardAction(sd, 1, "takeOutCard")->trigger();
+        const auto txCard = cardNamed("Palm TX card");
+        QTRY_VERIFY_WITH_TIMEOUT(QFileInfo(cardsLibrary() + '/' + txCard.id + "/sd.frondsd").isFile(), 10000);
+        QTRY_COMPARE(rowLabel(sd, 1, "cardDetail"), QString("32 MB · Not in a machine"));
+        QVERIFY(frondCards::readSlot(cardsSessions() + "/Palm TX").swap);
+        // Rename.
+        typeInto("Trip");
+        cardAction(sd, 1, "renameCard")->trigger();
+        QTRY_COMPARE_WITH_TIMEOUT(cardNamed("Trip").id, txCard.id, 5000);
+        // Duplicate: a new serial.
+        cardAction(sd, 0, "duplicateCard")->trigger();
+        QTRY_VERIFY_WITH_TIMEOUT(!cardNamed("Games 2").id.isEmpty(), 10000);
+        QVERIFY(cardNamed("Games 2").identity != cardNamed("Games").identity);
+        QTRY_COMPARE(sd->count(), 3);
+        // Export image.
+        // The dialog suggests the card's name; saved in another folder.
+        QString suggested;
+        whenShown<QFileDialog>([&](QFileDialog* d) {
+            suggested = QFileInfo(d->selectedFiles().value(0)).fileName();
+            d->setDirectory(out.path());
+            d->selectFile("Games.img");
+            QMetaObject::invokeMethod(d, "accept");
+        });
+        QVERIFY(cardAction(sd, 0, "exportCard")->isEnabled());
+        cardAction(sd, 0, "exportCard")->trigger();
+        QTRY_COMPARE_WITH_TIMEOUT(QFileInfo(out.path() + "/Games.img").size(), qint64(64) << 20, 20000);
+        QCOMPARE(suggested, QString("Games.img"));
+        // Delete, after the confirmation.
+        answerYes();
+        cardAction(sd, 1, "deleteCard")->trigger();
+        QTRY_VERIFY_WITH_TIMEOUT(cardNamed("Games 2").id.isEmpty(), 5000);
+        QTRY_COMPARE(sd->count(), 2);
+        // New card: every type some device takes, sizes smallest first.
+        bool shown = false;
+        QStringList types, sizes;
+        whenShown<NewCardDialog>([&](NewCardDialog* d) {
+            shown = true;
+            for (int i = 0; i < d->type->count(); ++i) types << d->type->itemText(i);
+            d->type->setCurrentIndex(d->type->findText("SD card"));
+            for (int i = 0; i < d->sizes->count(); ++i) sizes << d->sizes->itemText(i);
+            QCOMPARE(d->sizes->currentText(), QString("128 MB"));
+            d->name->setText("Music");
+            screenshot(d, "new-card.png");
+            d->accept();
+        });
+        QTimer::singleShot(0, cards->findChild<QPushButton*>("newCard"), &QPushButton::click);
+        QTRY_VERIFY_WITH_TIMEOUT(cardNamed("Music").bytes == qint64(128) << 20, 20000);
+        QVERIFY(shown);
+        QCOMPARE(types.first(), QString("SD card"));
+        QCOMPARE(sizes, QStringList({"32 MB", "64 MB", "128 MB", "256 MB", "512 MB", "1 GB", "2 GB"}));
+        if (kinds.contains("ms")) QVERIFY(types.contains("Memory Stick"));
+        if (kinds.contains("ms-pro")) QCOMPARE(types.last(), QString("Memory Stick Pro"));
+        cards->close();
+        window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 10000);
+        QSettings().clear();
+    }
+    // The running card picker: cards the machine takes, greyed when in another machine or too big;
+    // a card put in and taken out again through the core.
+    void cardPicker() {
+        cardsReset();
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QTemporaryDir files;
+        const auto core = pickerCore(files.path(), "palm-e2");
+        cardsMachine("Palm TX", true);
+        const auto e2 = cardsMachine("Tungsten", false, "palm-e2");
+        frondCards::reconcile(cardsSessions());
+        QString games;
+        QVERIFY(frondCards::makeCard(cardsSessions(), "Games", "sd", 64, {}, &games).isEmpty());
+        sparseCard("Big", "sd", qint64(2048) << 20);
+        MainWindow window(core);
+        window.show();
+        window.openSession(e2 + "/Tungsten.frond", true);
+        auto* state = window.findChild<QLabel*>("sdState");
+        auto* pick = window.findChild<QPushButton*>("cardPick");
+        QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("No card"), 10000);
+        QTRY_VERIFY(pick->isVisible() && pick->isEnabled());
+        QCOMPARE(pick->text(), QString("No card"));
+        QVERIFY(!state->isVisible());
+        QStringList texts, enabled;
+        whenShown<CardPickerDialog>([&](CardPickerDialog* d) {
+            QCOMPARE(d->windowTitle(), QString("SD card for Tungsten"));
+            for (auto* r : d->findChildren<QRadioButton*>("cardChoice")) {
+                texts << r->text();
+                if (r->isEnabled()) enabled << r->text();
+                if (r->property("cardId").toString() == games) r->setChecked(true);
+            }
+            screenshot(d, "card-picker.png");
+            d->accept();
+        });
+        QTimer::singleShot(0, pick, &QPushButton::click);
+        QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Inserted"), 10000);
+        QCOMPARE(texts, QStringList({"No card", "Big · 2 GB · Too big for Tungsten E2", "Games · 64 MB", "Palm TX card · 32 MB · In Palm TX"}));
+        QCOMPARE(enabled, QStringList({"No card", "Games · 64 MB"}));
+        QCOMPARE(pick->text(), QString("Games"));
+        QVERIFY(QFileInfo(e2 + "/sd.frondsd").isFile());
+        QCOMPARE(frondCards::readSlot(e2).card, games);
+        // No card: eject after the confirmation, take out, back to the drawer.
+        whenShown<CardPickerDialog>([&](CardPickerDialog* d) {
+            for (auto* r : d->findChildren<QRadioButton*>("cardChoice"))
+                if (r->property("cardId").toString().isEmpty()) r->setChecked(true);
+            QTimer::singleShot(0, d, &QDialog::accept);
+            answerYes();
+        });
+        QTimer::singleShot(0, pick, &QPushButton::click);
+        QTRY_VERIFY_WITH_TIMEOUT(QFileInfo(cardsLibrary() + '/' + games + "/sd.frondsd").isFile(), 10000);
+        QTRY_COMPARE(pick->text(), QString("No card"));
+        QVERIFY(frondCards::cardFileIn(e2).isEmpty());
+        QFile trace(files.path() + "/commands"); QVERIFY(trace.open(QIODevice::ReadOnly));
+        const auto commands = trace.readAll();
+        QVERIFY(commands.indexOf("sd-put-in\t") < commands.indexOf("sd-eject\t"));
+        QVERIFY(commands.indexOf("sd-eject\t") < commands.indexOf("sd-take-out\t"));
+        window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 10000);
+        QSettings().clear();
+    }
+    // Link to machines, and a running linked machine's control when its card comes free.
+    void cardLink() {
+        cardsReset();
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QTemporaryDir files;
+        const auto core = pickerCore(files.path(), "palm-tx");
+        const auto holder = cardsMachine("Holder", true), a = cardsMachine("Spare", false), e2 = cardsMachine("Tungsten", false, "palm-e2");
+        frondCards::reconcile(cardsSessions());
+        QString games;
+        QVERIFY(frondCards::makeCard(cardsSessions(), "Games", "sd", 64, {}, &games).isEmpty());
+        const auto big = sparseCard("Big", "sd", qint64(2048) << 20);
+        {
+            LinkDialog dialog(cardsSessions(), games, {}, {});
+            QCOMPARE(dialog.windowTitle(), QString("Link Games to machines"));
+            QStringList texts;
+            for (int i = 0; i < dialog.machines->count(); ++i) texts << dialog.machines->item(i)->text();
+            QCOMPARE(texts, QStringList({"Holder · Palm TX · Has Holder card, take it out first", "Spare · Palm TX", "Tungsten · Tungsten E2"}));
+            QVERIFY(!(dialog.machines->item(0)->flags() & Qt::ItemIsEnabled));
+            dialog.machines->item(1)->setCheckState(Qt::Checked);
+            dialog.machines->item(2)->setCheckState(Qt::Checked);
+            QVERIFY(frondCards::setLinks(cardsSessions(), games, dialog.linked()).isEmpty());
+        }
+        QCOMPARE(frondCards::readSlot(a).link, games);
+        QCOMPARE(frondCards::readSlot(e2).link, games);
+        {
+            LinkDialog dialog(cardsSessions(), big, {}, {});
+            QCOMPARE(dialog.machines->item(2)->text(), QString("Tungsten · Tungsten E2 · Too big for Tungsten E2"));
+            QVERIFY(!(dialog.machines->item(2)->flags() & Qt::ItemIsEnabled));
+            QCOMPARE(dialog.machines->item(1)->text(), QString("Spare · Palm TX · Linked to Games"));
+            QCOMPARE(dialog.machines->item(1)->checkState(), Qt::Unchecked);
+        }
+        // Holder holds the card's partner; Spare runs linked to Games, which another machine has.
+        {
+            frondCards::LibraryLock lock(cardsLibrary());
+            QVERIFY(frondCards::toDrawer(cardsLibrary(), holder, cardNamed("Holder card").id).isEmpty());
+            QVERIFY(frondCards::toMachine(cardsLibrary(), games, holder).isEmpty());
+        }
+        MainWindow window(core);
+        window.show();
+        window.openSession(a + "/Spare.frond", true);
+        auto* linked = window.findChild<QLabel*>("linkedState");
+        auto* insert = window.findChild<QPushButton*>("linkedInsert");
+        QTRY_COMPARE_WITH_TIMEOUT(linked->text(), QString("Games is in Holder"), 10000);
+        QVERIFY(!insert->isVisible());
+        QVERIFY(frondCards::takeOutStopped(cardsSessions(), games).isEmpty());
+        QTRY_COMPARE_WITH_TIMEOUT(linked->text(), QString("Games is free"), 10000);
+        QTRY_VERIFY(insert->isVisible() && insert->isEnabled());
+        screenshot(&window, "card-linked.png");
+        insert->click();
+        QTRY_COMPARE_WITH_TIMEOUT(window.findChild<QLabel*>("sdState")->text(), QString("Inserted"), 10000);
+        QVERIFY(QFileInfo(a + "/sd.frondsd").isFile());
+        QCOMPARE(window.findChild<QPushButton*>("cardPick")->text(), QString("Games"));
+        window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 10000);
+        QSettings().clear();
+    }
+    // An exchange on the running machine's card greys its row menu in Cards and the picker, while
+    // it is pending (eject and backup save) and while its dialog is open.
+    void cardsExchangeGreying() {
+        if (!SdExchange::available()) QSKIP("mtools isn't installed");
+        cardsReset();
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QTemporaryDir files;
+        const auto core = pickerCore(files.path(), "palm-tx");
+        {
+            QFile img(files.filePath("exchange.img")); QVERIFY(img.open(QIODevice::WriteOnly));
+            const auto image = frondSd::create(32);
+            img.write(reinterpret_cast<const char*>(image.data()), qint64(image.size()));
+            QFile slow(files.filePath("slow-save")); QVERIFY(slow.open(QIODevice::WriteOnly));
+        }
+        const auto a = cardsMachine("Palm TX", true);
+        frondCards::reconcile(cardsSessions());
+        MainWindow window(core);
+        window.show();
+        window.openSession(a + "/Palm TX.frond", true);
+        auto* pick = window.findChild<QPushButton*>("cardPick");
+        auto* action = window.findChild<QPushButton*>("sdExchange");
+        QTRY_VERIFY_WITH_TIMEOUT(pick->isEnabled() && action->isEnabled(), 10000);
+        auto* cards = window.showCards();
+        auto* sd = cards->findChild<QListWidget*>("sdCards");
+        QCOMPARE(sd->count(), 1);
+        // The menu as it opens.
+        auto enabled = [&](const char* name) {
+            auto* menu = sd->itemWidget(sd->item(0))->findChild<QPushButton*>("cardMenu")->menu();
+            emit menu->aboutToShow();
+            auto* a = menu->findChild<QAction*>(name);
+            return a && a->isEnabled();
+        };
+        const QList<const char*> names{"renameCard", "linkCard", "takeOutCard"};
+        for (const auto* name : names) QVERIFY2(enabled(name), name);
+        QStringList failures;
+        bool sawPending = false, sawOpen = false;
+        auto check = [&](const QString& when) {
+            if (pick->isEnabled()) failures << when + ": picker enabled";
+            for (const auto* name : names)
+                if (enabled(name)) failures << when + ": " + name + " enabled";
+            cards->refresh();
+            for (const auto* name : names)
+                if (enabled(name)) failures << when + ": " + name + " enabled after refresh";
+        };
+        QTimer poll; poll.setInterval(10);
+        connect(&poll, &QTimer::timeout, &window, [&] {
+            if (auto* box = window.findChild<QMessageBox*>(); box && box->isVisible() && box->windowTitle().contains("Close Palm")) {
+                box->button(QMessageBox::Yes)->click();
+                return;
+            }
+            if (auto* dialog = window.findChild<QDialog*>("sdExchangeDialog"); dialog && dialog->isVisible()) {
+                if (!sawOpen) { sawOpen = true; check("open"); }
+                dialog->reject();
+                return;
+            }
+            QFile trace(files.filePath("commands"));
+            if (sawPending || !trace.open(QIODevice::ReadOnly)) return;
+            const auto commands = trace.readAll();
+            if (commands.contains("sd-exchange") && !commands.contains("sd-export")) { sawPending = true; check("pending"); }
+        });
+        poll.start();
+        action->click();
+        QTRY_VERIFY_WITH_TIMEOUT(sawOpen, 15000);
+        QTRY_VERIFY_WITH_TIMEOUT(action->isEnabled(), 10000);
+        poll.stop();
+        QVERIFY(sawPending);
+        QVERIFY2(failures.isEmpty(), qPrintable(failures.join("; ")));
+        // Back to normal afterwards.
+        QVERIFY(pick->isEnabled());
+        for (const auto* name : names) QVERIFY2(enabled(name), name);
+        window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 10000);
+        QSettings().clear();
+    }
+    // Pairing by an IPv6 loopback address.
+    void linkPairingIpv6() {
+        QTcpServer probe;
+        if (!probe.listen(QHostAddress::LocalHostIPv6, 0)) QSKIP("No IPv6 loopback here");
+        probe.close();
+        QTemporaryDir dir(QDir::currentPath() + "/build/lk6-XXXXXX");
+        TestHub ha(dir.path(), "a", freePort()), hb(dir.path(), "b", freePort());
+        HubUser a(ha), b(hb);
+        a.client.send({{"op", "rename"}, {"name", "Six"}});
+        b.client.setSticky("watch", {{"op", "watch"}});
+        QTRY_VERIFY_WITH_TIMEOUT(!a.last("hello").isEmpty() && !b.last("hello").isEmpty(), 10000);
+        b.got.clear(); a.got.clear();
+        a.client.send({{"op", "pair"}, {"address", "[::1]:" + QString::number(b.client.hello().value("port").toInt())}});
+        QTRY_VERIFY_WITH_TIMEOUT(!a.last("pair-peer").isEmpty() && !b.last("pair-request").isEmpty(), 10000);
+        a.client.send({{"op", "pair-code"}, {"code", b.last("pair-request").value("code").toString().remove(' ')}});
+        QTRY_VERIFY_WITH_TIMEOUT(a.last("pair-result").value("result") == "paired" && b.last("pair-request-end").value("result") == "paired", 10000);
+        QVERIFY(!storedPeer(ha, b.client.hello().value("id").toString()).isEmpty());
+        QCOMPARE(storedPeer(ha, b.client.hello().value("id").toString()).value("address").toString(), QString("[::1]:%1").arg(b.client.hello().value("port").toInt()));
+        killHub(a); killHub(b);
+    }
 };
 int main(int argc, char** argv) {
     // Isolate both settings and automatic session files from the real user's desktop.
@@ -2853,10 +4847,19 @@ int main(int argc, char** argv) {
     if (!QFile::link(directory.path() + "/data-real", directory.path() + "/data")) return 1;
     qputenv("XDG_CONFIG_HOME", (directory.path() + "/config").toUtf8());
     qputenv("XDG_DATA_HOME", (directory.path() + "/data").toUtf8());
+    // The link hub a window starts runs here too, on its own ports.
+    QDir().mkpath(directory.path() + "/run");
+    QFile::setPermissions(directory.path() + "/run", QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+    qputenv("XDG_RUNTIME_DIR", (directory.path() + "/run").toUtf8());
+    qputenv("FROND_LINK_PORT", "0"); qputenv("FROND_LINK_DISCOVERY_PORT", "0");
+    qunsetenv("FROND_LINK_SOCKET");
     QCoreApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
     QApplication app(argc, argv);
     app.setOrganizationName("FrondTest"); app.setApplicationName("FrondTest");
     app.setQuitOnLastWindowClosed(false);
+    qputenv("FROND_LINK_HUB", (QCoreApplication::applicationDirPath() + "/frond-desktop").toUtf8());
+    // Card tool operations run on the real ARM core even where a window's core is a fake one.
+    qputenv("FROND_CARD_TOOL", cardsCore().toUtf8());
     WorkflowTest test;
     return QTest::qExec(&test, argc, argv);
 }

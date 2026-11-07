@@ -607,7 +607,9 @@ class SessionStoreTest : public QObject {
         QCOMPARE(name, QString("Trip 2"));
         QVERIFY(QFileInfo::exists(filePath(folder(), "Trip 2")));
         QVERIFY(QFileInfo::exists(machineDir(folder(), "Trip 2") + "/sd.frondsd"));
-        QCOMPARE(describe(filePath(folder(), "Trip 2")).size, qint64(v7.size() + sd.size()));
+        // The card's slot.json is part of the machine now.
+        QCOMPARE(describe(filePath(folder(), "Trip 2")).size,
+                 qint64(v7.size() + sd.size() + QFileInfo(machineDir(folder(), "Trip 2") + "/slot.json").size()));
         QVERIFY(!QFileInfo::exists(machineDir(folder(), "Trip 2") + "/.frond.tmp-leftover"));
         QVERIFY(!QFileInfo::exists(machineDir(folder(), "Trip 2") + "/.gen-sd.frondsd-1"));
         QVERIFY(exportFile(describe(filePath(folder(), "Trip")), directory.filePath("out")).isEmpty());
