@@ -581,6 +581,11 @@ test-host-call-wake: out/frond
 test-patched-traps: out/frond
 	python3 tests/patched-traps.py
 
+# A session folder that doesn't load (a card file the session doesn't describe) is refused with a line, not a crash.
+.PHONY: test-session-folder-card
+test-session-folder-card: out/frond
+	python3 tests/session-folder-card.py
+
 # m68k-palmos-gdb 5.3 and gdb-multiarch on the debug Hello app (build/hello-debug) on the private
 # OS 3.5 ROM; skips without them.
 # The desktop control socket on both runners; needs a private ARM smoke session and IIIx ROM, else
