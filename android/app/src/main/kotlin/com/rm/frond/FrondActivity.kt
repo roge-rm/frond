@@ -19,6 +19,9 @@ import android.os.Process
 import android.util.Log
 import android.window.OnBackInvokedDispatcher
 import androidx.core.view.ViewCompat
+import androidx.lifecycle.setViewTreeLifecycleOwner
+import androidx.lifecycle.setViewTreeViewModelStoreOwner
+import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -51,6 +54,11 @@ open class FrondActivity : SDLActivity() {
     @Volatile private var startRefused: String? = null
     private var menuButton: View? = null
     private var keyboardButton: View? = null
+    // The running bar over the Palm: its state, view and the owner its ComposeView needs.
+    private val bar = com.rm.frond.ui.RunningBarState()
+    private var barView: androidx.compose.ui.platform.ComposeView? = null
+    private var barOwner: BarOwner? = null
+    private var imeButtons = 0
     @Volatile private var pendingMicrophone = false
     @Volatile private var foreground = false
     @Volatile private var microphoneResume = 0L
@@ -239,14 +247,22 @@ open class FrondActivity : SDLActivity() {
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout() or WindowInsetsCompat.Type.ime())
             view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
             // With the soft keyboard up the device would cover the corner buttons, so it goes below them.
-            val buttons = if (insets.isVisible(WindowInsetsCompat.Type.ime())) menuButton?.height ?: 0 else 0
-            (SDLActivity.mSurface?.layoutParams as? android.view.ViewGroup.MarginLayoutParams)?.let {
-                if (it.topMargin != buttons) {
-                    it.topMargin = buttons
-                    SDLActivity.mSurface?.layoutParams = it
-                }
-            }
+            imeButtons = if (insets.isVisible(WindowInsetsCompat.Type.ime())) menuButton?.height ?: 0 else 0
+            updateSurfaceMargin()
             insets
+        }
+    }
+
+    // Moves the Palm's surface down for the bar in portrait and for the corner buttons over the soft keyboard.
+    private fun updateSurfaceMargin() {
+        val portrait = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
+        val barPx = (RunningBar.HEIGHT_DP * resources.displayMetrics.density).toInt()
+        val margin = RunningBar.surfaceTopMargin(bar.shown, portrait, barPx, imeButtons)
+        (SDLActivity.mSurface?.layoutParams as? android.view.ViewGroup.MarginLayoutParams)?.let {
+            if (it.topMargin != margin) {
+                it.topMargin = margin
+                SDLActivity.mSurface?.layoutParams = it
+            }
         }
     }
 
@@ -319,6 +335,7 @@ open class FrondActivity : SDLActivity() {
                 runningDevice = resolved
                 configureController(resolved)
                 addMenuButton()
+                addBar(resolved)
             }
         }, "FrondFirmware").apply { isDaemon = true }.start()
     }
@@ -370,6 +387,7 @@ open class FrondActivity : SDLActivity() {
             controller.releaseAll()
             hideKeyboard()
             keyboardButton?.visibility = View.GONE
+            barView?.visibility = View.GONE
             savingNote?.visibility = View.VISIBLE
         }
         Thread({
@@ -557,7 +575,8 @@ open class FrondActivity : SDLActivity() {
             val attached = reply.message == "attached"
             keyboardAttached = attached
             runOnUiThread {
-                keyboardButton?.visibility = if (attached && !leaving) View.VISIBLE else View.GONE
+                bar.keyboardKey = attached
+                syncCorner()
                 if (!attached && keyboard?.hasFocus() == true) hideKeyboard()
             }
         }, "FrondKeyboard").apply { isDaemon = true }.start()
@@ -578,7 +597,107 @@ open class FrondActivity : SDLActivity() {
         }
         if (!leaving) readKeyboard()
         if (!leaving) applySound()
+        bar.sound = sound
         if (!leaving) applyDisplay()
+    }
+
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        updateSurfaceMargin()
+    }
+
+    // The ComposeView over the Palm: the whole width while the bar shows, just the handle when it's hidden,
+    // so touches outside both reach the Palm.
+    private fun addBar(device: Device) {
+        val layout = SDLActivity.getContentView() as? RelativeLayout ?: return
+        if (barView != null) return
+        val session = Sessions.forPath(this, sessionPath)
+        bar.shown = machineSettings.barShown
+        bar.name = session?.name ?: device.label
+        bar.subtitle = RunningBar.subtitle(device, machineSettings)
+        bar.soundKey = RunningBar.soundKey(device)
+        bar.sound = sound
+        bar.powerKey = RunningBar.powerKey(device)
+        val owner = BarOwner().also { it.create() }
+        barOwner = owner
+        val view = androidx.compose.ui.platform.ComposeView(this).apply {
+            setViewTreeLifecycleOwner(owner)
+            setViewTreeViewModelStoreOwner(owner)
+            setViewTreeSavedStateRegistryOwner(owner)
+            setContent {
+                com.rm.frond.ui.RunningBarView(bar, com.rm.frond.ui.RunningBarActions(
+                    back = { leave() }, toggleSound = { toggleSound() }, power = { pressPower() },
+                    keyboard = { toggleKeyboard() }, show = { setBarShown(true) }, hide = { setBarShown(false) },
+                    peripherals = { openPanel() },
+                ))
+            }
+        }
+        barView = view
+        layout.addView(view, RelativeLayout.LayoutParams(RelativeLayout.LayoutParams.MATCH_PARENT, RelativeLayout.LayoutParams.WRAP_CONTENT).apply {
+            addRule(RelativeLayout.ALIGN_PARENT_TOP)
+        })
+        layoutBar()
+    }
+
+    private fun layoutBar() {
+        val view = barView ?: return
+        val params = view.layoutParams as RelativeLayout.LayoutParams
+        val width = if (bar.shown) RelativeLayout.LayoutParams.MATCH_PARENT else RelativeLayout.LayoutParams.WRAP_CONTENT
+        if (params.width != width) {
+            params.width = width
+            params.addRule(RelativeLayout.CENTER_HORIZONTAL, if (bar.shown) 0 else -1)
+            view.layoutParams = params
+        }
+        syncCorner()
+        updateSurfaceMargin()
+    }
+
+    // The corner buttons show only while the bar is hidden.
+    private fun syncCorner() {
+        val corner = RunningBar.cornerButtons(bar.shown) && !leaving
+        menuButton?.visibility = if (corner) View.VISIBLE else View.GONE
+        keyboardButton?.visibility = if (corner && bar.keyboardKey) View.VISIBLE else View.GONE
+    }
+
+    private fun setBarShown(shown: Boolean) {
+        if (bar.shown == shown) return
+        bar.shown = shown
+        machineSettings = machineSettings.copy(barShown = shown)
+        layoutBar()
+        val id = Sessions.forPath(this, sessionPath)?.id ?: return
+        Thread({
+            try {
+                Sessions.updateSettings(applicationContext, id) { it.copy(barShown = shown) }
+            } catch (e: Exception) {
+                Log.w(TAG, "bar setting: ${e.message}")
+            }
+        }, "FrondBarSetting").apply { isDaemon = true }.start()
+    }
+
+    private fun toggleSound() {
+        if (leaving) return
+        val on = !bar.sound
+        bar.sound = on
+        val id = Sessions.forPath(this, sessionPath)?.id
+        Thread({
+            try {
+                if (id != null) Sessions.updateSettings(applicationContext, id) { it.copy(sound = on) }
+            } catch (e: Exception) {
+                Log.w(TAG, "sound setting: ${e.message}")
+            }
+            runOnUiThread { if (!leaving) applySound() }
+        }, "FrondBarSound").apply { isDaemon = true }.start()
+    }
+
+    // Presses and releases the Palm's power key by key replay on the control link.
+    private fun pressPower() {
+        if (leaving) return
+        Thread({
+            val file = File(cacheDir, "power.replay")
+            file.writeText("0 key-down power\n80 key-up power\n")
+            val reply = link.request("input-replay", file.path, timeoutSeconds = 30)
+            if (!reply.ok) Log.w(TAG, "power: ${reply.code} ${reply.message}")
+        }, "FrondBarPower").apply { isDaemon = true }.start()
     }
 
     private fun openPanel() {
@@ -765,6 +884,7 @@ open class FrondActivity : SDLActivity() {
         // core, and a second core can't start in this process, so save the session and end the
         // process instead; the next start loads the save.
         destroyed = true
+        barOwner?.destroy()
         if (!isFinishing && !leaving) {
             if (waitingForGdb) {
                 // Nothing has run since the session loaded, so there's nothing to save.

@@ -56,12 +56,14 @@ data class MachineSettings(
     // False until a contrast is chosen, so a session's own saved contrast stays.
     val contrastSet: Boolean = false,
     val speed: CpuSpeed = CpuSpeed.ORIGINAL,
+    // Android: whether the bar over the running machine shows.
+    val barShown: Boolean = true,
 ) {
     fun json(): JSONObject = JSONObject().put("size", size.name).put("smoothing", smoothing)
         .put("sound", sound).put("fastAudio", fastAudio).put("microphone", microphone)
         .put("showKeyboard", showKeyboard).put("jogControls", jogControls.arg)
         .put("showJogControls", jogControls != JogControls.HIDDEN)
-        .put("engine", engine.arg).put("speed", speed.arg).also { if (contrastSet) it.put("contrast", contrast) }
+        .put("engine", engine.arg).put("speed", speed.arg).put("barShown", barShown).also { if (contrastSet) it.put("contrast", contrast) }
 
     fun applyTo(settings: Settings) = settings.copy(size = size, smoothing = smoothing, sound = sound)
 
@@ -117,6 +119,7 @@ data class MachineSettings(
                 contrast = json.optInt("contrast", fallback.contrast).coerceIn(0, 100),
                 contrastSet = json.has("contrast") || fallback.contrastSet,
                 speed = CpuSpeed.entries.firstOrNull { it.arg == json.optString("speed") } ?: fallback.speed,
+                barShown = json.optBoolean("barShown", fallback.barShown),
             )
         }
     }
