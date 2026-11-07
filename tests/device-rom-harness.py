@@ -208,6 +208,28 @@ class HarnessTest(unittest.TestCase):
         self.assertEqual(sentinel.read_text(), 'earlier evidence')
         self.assertEqual(list(evidence.iterdir()), [sentinel])
 
+    def test_variant_mismatch_starts_no_guest(self):
+        evidence = self.root / 'mismatched-variant'
+        argv = ['device-rom', '--device', 'palm-e2', '--nor', str(self.nor), '--variant', 'e2-denvfs',
+                '--evidence', str(evidence)]
+        with patch.object(sys, 'argv', argv), patch.object(rom, 'suite') as suite, \
+             contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+            rom.main()
+        self.assertEqual(error.exception.code, 2)
+        suite.assert_not_called()
+        self.assertFalse(evidence.exists())
+
+    def test_detected_variant_reaches_generic_harness(self):
+        variant = {'id': 'e2-denvfs'}
+        for explicit in ([], ['--variant', 'e2-denvfs']):
+            argv = ['device-rom', '--device', 'palm-e2', '--nor', str(self.nor), *explicit]
+            with self.subTest(explicit=explicit), patch.object(sys, 'argv', argv), \
+                 patch.object(rom, 'firmware_variant', return_value=variant), \
+                 patch.object(rom, 'suite', return_value=unittest.TestSuite()) as suite, \
+                 contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(rom.main(), 0)
+            self.assertIs(suite.call_args.args[0].firmware_variant, variant)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -418,6 +418,7 @@ test-device-controls: out/frond
 	$(CXX) -std=c++17 -O1 -g $(shell sdl2-config --cflags) \
 		-Ibuild/source/src/uarm/native -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
 		tests/device-controls.cpp build/source/src/uarm/native/SdlEventHandler.cpp \
+		build/source/src/uarm/native/InputReplay.cpp \
 		build/source/src/uarm/native/DeviceControls.cpp build/source/src/uarm/native/SdlRenderer.cpp \
 		build/source/src/uarm/native/Silkscreen.cpp @build/controls-core-objects.rsp \
 		build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) $(shell sdl2-config --libs) -lSDL2_image -o build/test-device-controls
@@ -601,6 +602,8 @@ test-device-profiles: out/frond device-profiles
 	python3 tools/generate-device-data.py --check
 	python3 tests/device-data.py
 	python3 tests/device-rom-harness.py
+	python3 tests/e3-boot.py
+	python3 tests/e2-denvfs-boot.py
 	python3 tests/guest-faults.py
 	python3 tests/device-rom.py --device palm-zire-72
 

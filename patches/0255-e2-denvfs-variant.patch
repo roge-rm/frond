@@ -1,0 +1,162 @@
+diff --git a/src/common/device_profile5.h b/src/common/device_profile5.h
+--- a/src/common/device_profile5.h
++++ b/src/common/device_profile5.h
+@@ -152,6 +152,22 @@
+      0, 0, 0, 0, DisplayMode::mode_160x160, 0, false},
+ };
+ 
++// Firmware variants keep their board's device and session identity.
++struct DeviceFirmwareVariant5 {
++    DeviceType5 deviceType;
++    const char* id;
++    size_t norSize, headerOffset;
++    const char* cardName;
++    const char* manufacturer;
++    uint32_t companyId, halId;
++    bool cardEndsAtEof;
++    const char* fastAudioNorMd5;
++};
++inline constexpr DeviceFirmwareVariant5 deviceFirmwareVariants5[] = {
++    {deviceTypeE2, "e2-denvfs", 6u << 20, 0x20000, "rePalm", "Dmitry.GR",
++     deviceCompanyPalm5, 0x68737072 /* hspr */, true, ""},
++};
++
+ // 68k ROMs: a big-endian card header at 0 with the reset vector inside the ROM at its base address.
+ inline constexpr uint32_t rom68kEzBase5 = 0x10c00000;
+ inline constexpr uint64_t rom68kMaxSize5 = 2u << 20; // The IIIx's flash part.
+@@ -192,6 +208,7 @@
+ struct DeviceNorInfo5 {
+     const DeviceProfile5* profile{nullptr};
+     bool hasHeader{false}, validLayout{true};
++    const DeviceFirmwareVariant5* variant{nullptr};
+ };
+ template <typename Reader>
+ inline DeviceNorInfo5 deviceProfileInspectNor5(uint64_t size, Reader read) {
+@@ -200,6 +217,16 @@
+         if (at > size || size - at < 4 || !read(at, b, 4)) return false;
+         value = uint32_t(b[0]) | (uint32_t(b[1]) << 8) | (uint32_t(b[2]) << 16) | (uint32_t(b[3]) << 24);
+         return true;
++    };
++    auto text = [&](uint64_t at, const char* expected) {
++        // Card names and manufacturers occupy separate 32-byte, nul-terminated fields.
++        uint8_t b[32];
++        if (at > size || size - at < sizeof(b) || !read(at, b, sizeof(b))) return false;
++        for (unsigned i = 0; i < sizeof(b); ++i) {
++            if (b[i] != uint8_t(expected[i])) return false;
++            if (!expected[i]) return true;
++        }
++        return false;
+     };
+     auto cardName = [&](uint64_t at) {
+         uint8_t b[9];
+@@ -222,7 +249,18 @@
+                     word(big + 0x80, bigCompany) && bigCompany == company && word(big + 0x84, bigHal) && bigHal == hal &&
+                     word(big + 0x6c, length) && big + length == size;
+             }
+-            return {&p, true, valid};
++            const DeviceFirmwareVariant5* variant = nullptr;
++            for (const auto& v : deviceFirmwareVariants5) {
++                uint32_t length;
++                if (v.deviceType == p.deviceType && v.norSize == size && v.headerOffset == at &&
++                    v.companyId == company && v.halId == hal && text(at + 0x10, v.cardName) &&
++                    text(at + 0x30, v.manufacturer) &&
++                    (!v.cardEndsAtEof || (word(at + 0x6c, length) && at + length == size))) {
++                    variant = &v;
++                    break;
++                }
++            }
++            return {&p, true, valid, variant};
+         }
+         return {nullptr, true, true};
+     }
+@@ -359,14 +397,28 @@
+     return DeviceFirmwareError5::none;
+ }
+ 
++// Bounds for readers that hash a NOR before matching its firmware fingerprint.
++inline bool deviceProfileNorSizeSupported5(int32_t deviceType, uint64_t bytes) {
++    const auto* profile = deviceProfile5(deviceType);
++    if (!profile || !bytes) return false;
++    if (!profile->norSize || bytes == profile->norSize) return true;
++    for (const auto& v : deviceFirmwareVariants5)
++        if (int32_t(v.deviceType) == deviceType && v.norSize == bytes) return true;
++    return false;
++}
++
+ // Geometry checks cannot identify a dump's device or establish boot compatibility.
+ inline DeviceFirmwareError5 deviceProfileValidateFirmware5(
+-    int32_t deviceType, size_t norSize, size_t nandSize, bool fromSession, bool explicitNand) {
++    int32_t deviceType, size_t norSize, size_t nandSize, bool fromSession, bool explicitNand,
++    const DeviceFirmwareVariant5* variant = nullptr) {
+     const auto* profile = deviceProfile5(deviceType);
+     if (!profile) return DeviceFirmwareError5::unknownDevice;
+     // Legacy sessions saved before size checks may hold another NOR size; they still load.
+     const bool norSizeChecked = profile->norSize && !(fromSession && profile->legacySessionNor);
+-    if (norSize == 0 || (norSizeChecked && norSize != profile->norSize))
++    bool variantSize = false;
++    for (const auto& v : deviceFirmwareVariants5)
++        if (&v == variant && int32_t(v.deviceType) == deviceType && v.norSize == norSize) variantSize = true;
++    if (norSize == 0 || (norSizeChecked && norSize != profile->norSize && !variantSize))
+         return DeviceFirmwareError5::norSize;
+     if (profile->requiresExplicitNand && !fromSession && !explicitNand)
+         return DeviceFirmwareError5::explicitNand;
+diff --git a/src/common/rom_info5.cpp b/src/common/rom_info5.cpp
+--- a/src/common/rom_info5.cpp
++++ b/src/common/rom_info5.cpp
+@@ -1,5 +1,6 @@
+ #include "rom_info5.h"
+ 
++#include <cstring>
+ #include <iostream>
+ #include <string>
+ 
+@@ -83,6 +84,16 @@
+             return profile.deviceType;
+ 
+     return DeviceType5::deviceTypeInvalid;
++}
++
++const DeviceFirmwareVariant5* RomInfo5::GetFirmwareVariant() const {
++    if (!isValid) return nullptr;
++    const auto info = deviceProfileInspectNor5(size, [&](uint64_t at, uint8_t* out, size_t count) {
++        if (at > size || count > size - at) return false;
++        std::memcpy(out, buffer + at, count);
++        return true;
++    });
++    return info.variant;
+ }
+ 
+ bool RomInfo5::HasSmallAndBigCards() const {
+diff --git a/src/common/rom_info5.h b/src/common/rom_info5.h
+--- a/src/common/rom_info5.h
++++ b/src/common/rom_info5.h
+@@ -7,6 +7,8 @@
+ #include <string>
+ 
+ #include "device_type5.h"
++
++struct DeviceFirmwareVariant5;
+ 
+ class RomInfo5 {
+    public:
+@@ -31,6 +33,8 @@
+     size_t GetHeaderOffset() const;
+ 
+     DeviceType5 GetDeviceType() const;
++
++    const DeviceFirmwareVariant5* GetFirmwareVariant() const;
+ 
+     // True for a card at 0x0 plus a big card at 0x20000 with the same name and IDs,
+     // whose size runs to the end of the image (the Zire 72 layout).
+diff --git a/src/uarm/native/main.cpp b/src/uarm/native/main.cpp
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -506,7 +506,7 @@
+         }
+ 
+         auto firmwareError = deviceProfileValidateFirmware5(deviceType, nor.size, nand.size,
+-            sessionDevice != deviceTypeInvalid, options.nand.has_value());
++            sessionDevice != deviceTypeInvalid, options.nand.has_value(), romInfo.GetFirmwareVariant());
+         if (firmwareError == DeviceFirmwareError5::none && romInfo.IsValid())
+             firmwareError = deviceProfileValidateNorLayout5(deviceType, romInfo.GetHeaderOffset(),
+                                                             sessionDevice != deviceTypeInvalid,

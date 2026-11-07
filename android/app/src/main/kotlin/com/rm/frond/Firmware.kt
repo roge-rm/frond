@@ -22,42 +22,63 @@ object Firmware {
     // A Zire 72 NOR has a small card at 0x0 and a big card at 0x20000 to the end, both PalmCard aZ72.
     enum class Header { NONE, E2, E2_WRONG_PLACE, ZIRE72, ZIRE72_BAD_LAYOUT, OTHER }
 
-    data class NorInfo(val device: Device? = null, val hasHeader: Boolean = false, val validLayout: Boolean = true)
+    data class NorInfo(val device: Device? = null, val hasHeader: Boolean = false, val validLayout: Boolean = true,
+                       val variant: FirmwareVariant? = null)
 
     fun inspect(nor: File, devices: List<Device> = Device.entries): NorInfo = RandomAccessFile(nor, "r").use { file ->
+        inspect(file.length(), devices) { at, count ->
+            if (at < 0 || at > file.length() - count) null else {
+                file.seek(at)
+                ByteArray(count).also { file.readFully(it) }
+            }
+        }
+    }
+
+    internal fun inspect(size: Long, devices: List<Device> = Device.entries,
+                         read: (Long, Int) -> ByteArray?): NorInfo {
         fun read32(at: Long): Long? {
-            if (at < 0 || at > file.length() - 4) return null
-            file.seek(at)
-            return Integer.reverseBytes(file.readInt()).toLong() and 0xffffffffL
+            if (at < 0 || at > size - 4) return null
+            val bytes = read(at, 4) ?: return null
+            return bytes.indices.fold(0L) { value, i -> value or ((bytes[i].toLong() and 0xff) shl (8 * i)) }
         }
         fun palmCard(at: Long): Boolean {
-            if (at < 0 || at > file.length() - 0x19) return false
-            file.seek(at + 0x10)
-            val bytes = ByteArray(9)
-            file.readFully(bytes)
+            if (at < 0 || at > size - 0x19) return false
+            val bytes = read(at + 0x10, 9) ?: return false
             return bytes.contentEquals("PalmCard\u0000".toByteArray(Charsets.US_ASCII))
         }
+        fun text(at: Long, expected: String): Boolean {
+            if (at < 0 || at > size - 32) return false
+            val bytes = read(at, 32) ?: return false
+            val wanted = (expected + "\u0000").toByteArray(Charsets.US_ASCII)
+            return wanted.size <= bytes.size && bytes.copyOfRange(0, wanted.size).contentEquals(wanted)
+        }
         var at = 0L
-        while (at + 12 <= file.length()) {
+        while (at + 12 <= size) {
             if (read32(at + 8) == 0xfeedbeefL) {
-                val company = read32(at + 0x80) ?: return@use NorInfo()
-                val hal = read32(at + 0x84) ?: return@use NorInfo()
+                val company = read32(at + 0x80) ?: return NorInfo()
+                val hal = read32(at + 0x84) ?: return NorInfo()
                 val device = devices.firstOrNull {
                     it.detectKind == 0 && (it.companyId == 0L || it.companyId == company) && it.halId == hal
-                } ?: return@use NorInfo(hasHeader = true)
+                } ?: return NorInfo(hasHeader = true)
                 var valid = device.norLayout == 0 || at == device.headerOffset
                 if (device.norLayout == 2) {
                     val big = device.bigCardOffset
                     val length = read32(big + 0x6c)
                     valid = valid && palmCard(at) && palmCard(big) && read32(big + 8) == 0xfeedbeefL &&
                         read32(big + 0x80) == company && read32(big + 0x84) == hal &&
-                        length != null && big + length == file.length()
+                        length != null && big + length == size
                 }
-                return@use NorInfo(device, true, valid)
+                val variant = device.firmwareVariants.firstOrNull {
+                    it.norSize == size && it.headerOffset == at &&
+                        it.companyId == company && it.halId == hal &&
+                        text(at + 0x10, it.cardName) && text(at + 0x30, it.manufacturer) &&
+                        (!it.cardEndsAtEof || read32(at + 0x6c)?.let { length -> at + length == size } == true)
+                }
+                return NorInfo(device, true, valid, variant)
             }
             at += 32768
         }
-        NorInfo()
+        return NorInfo()
     }
 
     // Compatibility diagnostics for the original devices; detection uses the profile inventory.
@@ -181,7 +202,7 @@ object Firmware {
                     Header.NONE -> return if (norSize == Device.TX.norSize) "This looks like a Palm TX NOR image. Choose a Tungsten E2 one."
                         else "This NOR image has no Tungsten E2 header."
                 }
-                if (norSize != device.norSize) return "The Tungsten E2 NOR image must be ${mib(device.norSize)}. This one is ${mib(norSize)}."
+                if (norSize != (info.variant?.norSize ?: device.norSize)) return "Choose an 8 MiB NOR image or a supported de-NVFS image for the Tungsten E2."
                 if (nandSize != null && nandSize != device.nandSize)
                     return "The Tungsten E2 NAND image must be a raw ${mib(device.nandSize)} file. This one is ${mib(nandSize)}."
             }
@@ -300,13 +321,26 @@ object Firmware {
         false
     }
 
+    // Resolve once at machine start. Saved machines use their embedded NOR, including older named sessions.
+    fun runningDevice(device: Device, session: File?, nor: File): Device {
+        if (device.firmwareVariants.none { !it.powerSupported }) return device
+        val info = try {
+            if (session != null && (session.isFile || session.isDirectory)) Sessions.firmwareInfo(session, device)
+            else if (nor.length() in (device.firmwareVariants.map { it.norSize } + device.norSize))
+                inspect(nor, listOf(device)).takeIf { it.validLayout && (nor.length() == device.norSize || it.variant != null) }
+            else null
+        } catch (e: Exception) { null }
+        return if (info?.device?.id == device.id) device.withFirmware(info.variant) else device.unresolvedFirmware()
+    }
+
     // Whether the core accepts low-latency audio: the device has a qualified NOR and the one it runs
     // (inside a saved session, else the installed one) matches. Reads the NOR, so not on the UI thread.
     fun fastAudioQualified(device: Device, session: File?, nor: File): Boolean {
         if (device.id == "sony-clie-tg50") return false
-        val want = device.fastAudioNorMd5 ?: return false
-        val md5 = if (session != null && (session.isFile || session.isDirectory)) Sessions.norMd5(session) else md5(nor)
-        return md5 == want
+        val fingerprints = listOfNotNull(device.fastAudioNorMd5) + device.firmwareVariants.mapNotNull { it.fastAudioNorMd5 }
+        if (fingerprints.isEmpty()) return false
+        val md5 = if (session != null && (session.isFile || session.isDirectory)) Sessions.norMd5(session, (device.firmwareVariants.map { it.norSize } + device.norSize).toSet()) else md5(nor)
+        return md5 != null && md5 in fingerprints
     }
 
     fun md5(file: File): String? = try {

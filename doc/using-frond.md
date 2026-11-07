@@ -15,6 +15,8 @@ Each Palm you run is a machine on the Devices list (Home on Android). Frond work
 
 On Linux each machine is a folder, `~/.local/share/frond/sessions/<name>/`, with the session (`<name>.frond`), its settings (`<name>.frond.settings.json`), a lock file and the card files (`sd.frondsd`, `ms.frondms` or `ms.frondmsp`). A machine that was never saved has a `<name>.frond.new` marker instead of the session. Export writes the same folder, so keep the settings with it when you move it. Android keeps the same folders in the app's storage. A machine is locked while it's open, so two windows can't overwrite it.
 
+The 6 MiB E2 de-NVFS image is imported as Tungsten E2, with 32 MiB RAM by default and no NAND file needed. Its databases live in RAM, so save the session to keep them. The NOR must have the rePalm/Dmitry.GR card header at 0x20000, with the card running to the end of the image. Power and automatic sleep are disabled for this firmware; it stays awake while running.
+
 The Tungsten E3 uses the modified 8 MiB ROM on the E2 board, with 32 MiB RAM by default. NAND is optional. Its saved device name stays `palm-e2-franken`. The 320×480 screen includes Palm OS's input area and status bar, with no extra silkscreen below it. Home and Menu use the status bar whether the input area is open or closed. Frond keeps sleep disabled for this ROM, so the E3 has no Power control.
 
 A session has your firmware, installed apps and personal data in it. Keep it to yourself.

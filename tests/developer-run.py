@@ -8,6 +8,7 @@ from pathlib import Path
 import shlex
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -235,6 +236,67 @@ class DeveloperRunTest(unittest.TestCase):
             self.assertEqual(result['command'][2], device)
             self.assertEqual(len(result['inputs']), 3 if nand_size else 2)
             self.assertIn('guest-ready', [r['command'] for r in result['steps']])
+
+    def denvfs_nor(self):
+        nor = self.root / 'denvfs-nor'
+        with nor.open('wb') as stream:
+            stream.write(b'{}\n'); stream.truncate(6 << 20)
+            header = bytearray(0x88)
+            struct.pack_into('<I', header, 8, 0xfeedbeef)
+            header[0x10:0x17] = b'rePalm\0'
+            header[0x30:0x3a] = b'Dmitry.GR\0'
+            struct.pack_into('<I', header, 0x6c, (6 << 20) - 0x20000)
+            struct.pack_into('<II', header, 0x80, 0x50616c6d, 0x68737072)
+            stream.seek(0x20000); stream.write(header)
+        return nor
+
+    def denvfs_args(self, nor, *extra):
+        return runner.parser().parse_args(['--core', str(self.core), '--device', 'palm-e2',
+            '--nor', str(nor), '--resume-app', '--output', str(self.output),
+            '--settle', '0', '--timeout', '5', *extra])
+
+    def test_denvfs_without_nand_uses_private_copy_and_variant_setup(self):
+        nor = self.denvfs_nor()
+        original = runner.sha256(nor)
+        with patch.object(runner.shutil, 'which', return_value=None), patch.object(runner, 'setup_device') as setup:
+            result = runner.run(self.denvfs_args(nor))
+        self.assertEqual(result['status'], 'ok', result)
+        self.assertEqual(result['command'][1:4], ['--device', 'palm-e2', str(self.output / 'input-nor.bin')])
+        self.assertNotIn('--nand', result['command'])
+        self.assertNotIn('--ram-size', result['command'])
+        self.assertEqual(setup.call_args.kwargs['variant']['id'], 'e2-denvfs')
+        self.assertEqual([i['path'] for i in result['inputs']], [str(self.core), str(nor)])
+        self.assertTrue(all(result['inputs_unchanged'].values()))
+        self.assertEqual(runner.sha256(nor), original)
+
+    def test_denvfs_bad_identity_and_nand_fail_before_output(self):
+        for at in [0x20008, 0x20010, 0x20016, 0x20030, 0x20039, 0x2006c, 0x20080, 0x20084]:
+            with self.subTest(at=at):
+                nor = self.denvfs_nor()
+                with nor.open('r+b') as stream:
+                    stream.seek(at); stream.write(b'x')
+                original = runner.sha256(nor)
+                result = runner.run(self.denvfs_args(nor))
+                self.assertEqual(result['status'], 'error', result)
+                self.assertFalse(self.output.exists())
+                self.assertEqual(runner.sha256(nor), original)
+        nor = self.denvfs_nor()
+        nand = self.root / 'bad-nand'; nand.write_bytes(b'wrong NAND')
+        before = (runner.sha256(nor), runner.sha256(nand))
+        result = runner.run(self.denvfs_args(nor, '--nand', str(nand)))
+        self.assertEqual(result['status'], 'error', result)
+        self.assertFalse(self.output.exists())
+        self.assertEqual((runner.sha256(nor), runner.sha256(nand)), before)
+
+    def test_retail_e2_nand_is_optional_like_shared_profile(self):
+        nor = self.root / 'retail-nor'
+        with nor.open('wb') as stream:
+            stream.write(b'{}\n'); stream.truncate(8 << 20)
+        with patch.object(runner.shutil, 'which', return_value=None), patch.object(runner, 'setup_device') as setup:
+            result = runner.run(self.denvfs_args(nor))
+        self.assertEqual(result['status'], 'ok', result)
+        self.assertNotIn('--nand', result['command'])
+        self.assertEqual(setup.call_args.kwargs, {})
 
     def test_raw_flash_requires_pair_and_exact_sizes(self):
         for extra in [[], ['--nand', str(self.session)]]:

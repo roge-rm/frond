@@ -27,6 +27,24 @@ class DeviceTest {
         assertEquals(listOf("--device", "palm-zire-72"), Device.ZIRE72.coreFlags)
     }
 
+    @Test fun e2DenvfsKeepsRetailDefaultsAndDeviceIdentity() {
+        assertEquals(8L shl 20, Device.E2.norSize)
+        assertEquals(34_603_008L, Device.E2.nandSize)
+        assertFalse(Device.E2.nandRequired)
+        val variant = Device.E2.firmwareVariants.single()
+        assertEquals("e2-denvfs", variant.id)
+        assertEquals(6L shl 20, variant.norSize)
+        assertEquals(0x20000L, variant.headerOffset)
+        assertEquals("rePalm", variant.cardName)
+        assertEquals("Dmitry.GR", variant.manufacturer)
+        assertEquals(Device.E2.companyId, variant.companyId)
+        assertEquals(Device.E2.halId, variant.halId)
+        assertTrue(variant.cardEndsAtEof)
+        assertEquals("c2d90f775b1737de5bcd11634bf51d7d", variant.fastAudioNorMd5)
+        for (device in Device.entries.filter { it != Device.E2 }) assertTrue(device.firmwareVariants.isEmpty())
+        assertEquals(listOf("--device", "palm-e2"), Device.E2.coreFlags)
+    }
+
     @Test fun e3KeepsTheExistingIdentityAndUsesTheWholeScreen() {
         val e3 = Device.byId("palm-e2-franken")!!
         assertEquals("Tungsten E3", e3.label)
@@ -118,6 +136,67 @@ class MemoryStickSizesTest {
 
 class FastAudioQualifiedTest {
     private fun nor(content: String) = java.io.File.createTempFile("nor", ".bin").apply { writeText(content); deleteOnExit() }
+
+    private fun session(firmware: java.io.File, version: Int): java.io.File = nor("").also { session ->
+        java.io.DataOutputStream(session.outputStream()).use { out ->
+            fun le32(n: Int) = out.writeInt(Integer.reverseBytes(n))
+            fun le64(n: Long) { le32(n.toInt()); le32((n shr 32).toInt()) }
+            le32(0x19800819); le32(version)
+            out.write("palm-e2".toByteArray().copyOf(32))
+            le32(0); le32(0)
+            if (version >= 7) {
+                for (n in listOf(0L, firmware.length(), 0L, 0L, 0L)) le64(n)
+                le32(0)
+            } else {
+                for (n in listOf(0, firmware.length().toInt(), 0, 0, 0, 0)) le32(n)
+            }
+            java.util.zip.DeflaterOutputStream(out).use { it.write(firmware.readBytes()) }
+        }
+    }
+
+    private fun checkDenvfsAudioOptions(device: Device, firmware: java.io.File) {
+        val settings = MachineSettings(fastAudio = true)
+        fun arguments(session: java.io.File? = null) = settings.audioArguments(device.lowLatencyAudio, 512) {
+            Firmware.fastAudioQualified(device, session, firmware)
+        }
+        val fast = listOf("--fast-audio", "--audio-period", "512")
+        val queue = listOf("--low-latency-queue", "--audio-period", "512")
+        assertEquals(fast, arguments())
+        val sessions = (6..8).map { session(firmware, it) }
+        for (saved in sessions) assertEquals(fast, arguments(saved))
+        var original = 0
+        java.io.RandomAccessFile(firmware, "rw").use {
+            original = it.readUnsignedByte()
+            it.seek(0); it.writeByte(original xor 1)
+        }
+        assertEquals(queue, arguments())
+        for (saved in sessions) assertEquals(fast, arguments(saved))
+        val changedSession = session(firmware, 8)
+        java.io.RandomAccessFile(firmware, "rw").use { it.writeByte(original) }
+        assertEquals(fast, arguments())
+        assertEquals(queue, arguments(changedSession))
+    }
+
+    @Test fun variantFingerprintUsesSixMibRawOrEmbeddedNor() {
+        val firmware = nor("synthetic de-NVFS NOR")
+        java.io.RandomAccessFile(firmware, "rw").use { it.setLength(6L shl 20) }
+        val variant = Device.E2.firmwareVariants.single().copy(fastAudioNorMd5 = Firmware.md5(firmware))
+        val device = Device.E2.copy(firmwareVariants = listOf(variant))
+        assertTrue(device.copy(fastAudioNorMd5 = null).fastAudio)
+        checkDenvfsAudioOptions(device, firmware)
+    }
+
+    @Test fun qualifiedDenvfsFirmwareSelectsPreview() {
+        val source = System.getenv("FROND_TEST_E2_DENVFS_NOR")
+        org.junit.Assume.assumeTrue("FROND_TEST_E2_DENVFS_NOR not set", !source.isNullOrEmpty())
+        val original = java.io.File(source!!)
+        assertEquals(6L shl 20, original.length())
+        assertEquals("c2d90f775b1737de5bcd11634bf51d7d", Firmware.md5(original))
+        val copy = nor("")
+        original.copyTo(copy, overwrite = true)
+        checkDenvfsAudioOptions(Device.E2, copy)
+        assertEquals("c2d90f775b1737de5bcd11634bf51d7d", Firmware.md5(original))
+    }
 
     @Test fun e3FingerprintSelectsPreviewAndChangedNorUsesTheQueue() {
         val firmware = nor("synthetic E3 NOR")

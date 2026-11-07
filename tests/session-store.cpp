@@ -670,6 +670,70 @@ class SessionStoreTest : public QObject {
         QVERIFY(frondAudio::lowLatencyOption(frondFirmware::deviceFromId("palm-iiix"), {}, {}).isEmpty());
         QVERIFY(frondAudio::lowLatencyOption(frondFirmware::Device::automatic, {}, {}).isEmpty());
     }
+    void variantNorDigest() {
+        const auto path = filePath(folder(), "E2 variant"), raw = directory.filePath("denvfs.bin");
+        for (int size : {6 << 20, 8 << 20, 7 << 20}) {
+            const QByteArray nor(size, char(0x61));
+            const auto digest = QCryptographicHash::hash(nor, QCryptographicHash::Md5).toHex();
+            write(raw, nor);
+            QCOMPARE(frondAudio::matchesNor(frondFirmware::Device::e2, {}, raw, digest), size != (7 << 20));
+            for (quint32 version : {6u, 7u, 8u}) {
+                for (bool withCard : {false, true}) {
+                    if (version == 6 && withCard) continue;
+                    auto bytes = header(version, "palm-e2").left(40);
+                    put32(bytes, 0); put32(bytes, 0);
+                    if (version >= 7) {
+                        for (quint64 value : {quint64(4), quint64(size), quint64(0), quint64(0), quint64(0)}) put64(bytes, value);
+                        put32(bytes, withCard ? 1 : 0);
+                        if (withCard) bytes += (version == 8 ? v8WithSd(1) : v7WithSd()).mid(92);
+                    } else {
+                        for (quint32 value : {4u, quint32(size), 0u, 0u, 0u, 0u}) put32(bytes, value);
+                    }
+                    bytes += qCompress("meta" + nor + "guest data").mid(4);
+                    write(path, bytes);
+                    QCOMPARE(frondAudio::sessionNorMd5(path), size == (7 << 20) ? QByteArray() : digest);
+                    QVERIFY(!frondAudio::qualified(frondFirmware::Device::e2, path, raw));
+                }
+            }
+            QCOMPARE(frondAudio::lowLatencyOption(frondFirmware::Device::e2, {}, raw), QString("--low-latency-queue"));
+        }
+    }
+    void qualifiedDenvfsAudio() {
+        const auto source = qEnvironmentVariable("FROND_TEST_E2_DENVFS_NOR");
+        if (source.isEmpty()) QSKIP("FROND_TEST_E2_DENVFS_NOR not set");
+        QFile input(source);
+        QVERIFY(input.open(QIODevice::ReadOnly)); QCOMPARE(input.size(), qint64(6 << 20));
+        auto nor = input.readAll();
+        QCOMPARE(QCryptographicHash::hash(nor, QCryptographicHash::Md5).toHex(), QByteArray("c2d90f775b1737de5bcd11634bf51d7d"));
+        const auto raw = directory.filePath("qualified-denvfs.bin"), saved = filePath(folder(), "Qualified E2");
+        const auto fast = QString("--fast-audio"), queue = QString("--low-latency-queue");
+        auto session = [&](quint32 version, const QByteArray& firmware) {
+            auto bytes = header(version, "palm-e2").left(40);
+            put32(bytes, 0); put32(bytes, 0);
+            if (version >= 7) {
+                for (quint64 n : {quint64(0), quint64(firmware.size()), quint64(0), quint64(0), quint64(0)}) put64(bytes, n);
+                put32(bytes, 0);
+            } else {
+                for (quint32 n : {0u, quint32(firmware.size()), 0u, 0u, 0u, 0u}) put32(bytes, n);
+            }
+            return bytes + qCompress(firmware).mid(4);
+        };
+        write(raw, nor);
+        QCOMPARE(frondAudio::lowLatencyOption(frondFirmware::Device::e2, {}, raw), fast);
+        for (quint32 version : {6u, 7u, 8u}) {
+            write(saved, session(version, nor));
+            QCOMPARE(frondAudio::lowLatencyOption(frondFirmware::Device::e2, saved, raw), fast);
+            nor[0] = char(nor[0] ^ 1); write(raw, nor);
+            QCOMPARE(frondAudio::lowLatencyOption(frondFirmware::Device::e2, {}, raw), queue);
+            QCOMPARE(frondAudio::lowLatencyOption(frondFirmware::Device::e2, saved, raw), fast);
+            write(saved, session(version, nor));
+            nor[0] = char(nor[0] ^ 1); write(raw, nor);
+            QCOMPARE(frondAudio::lowLatencyOption(frondFirmware::Device::e2, saved, raw), queue);
+        }
+        QVERIFY(!frondAudio::qualified(frondFirmware::deviceFromId("palm-e2-franken"), {}, raw));
+        QVERIFY(input.seek(0));
+        QCOMPARE(QCryptographicHash::hash(input.readAll(), QCryptographicHash::Md5).toHex(), QByteArray("c2d90f775b1737de5bcd11634bf51d7d"));
+    }
     void machineControlVisibilityPreferences() {
         const auto one = filePath(folder(), "TG50 One"), two = filePath(folder(), "TG50 Two");
         write(one, header(6, "sony-clie-tg50"));

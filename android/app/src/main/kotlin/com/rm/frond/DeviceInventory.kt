@@ -93,6 +93,20 @@ internal val deviceInventory = listOf(
         msProMax = 0,
         runs68k = false,
         hotSyncButton = true,
+        firmwareVariants = listOf(
+            FirmwareVariant(
+                id = "e2-denvfs",
+                norSize = 6291456L,
+                headerOffset = 131072L,
+                cardName = "rePalm",
+                manufacturer = "Dmitry.GR",
+                companyId = 1348562029L,
+                halId = 1752395890L,
+                cardEndsAtEof = true,
+                fastAudioNorMd5 = "c2d90f775b1737de5bcd11634bf51d7d",
+                powerSupported = false,
+            ),
+        ),
     ),
     Device(
         id = "palm-e2-franken",

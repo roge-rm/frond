@@ -42,6 +42,21 @@ def outputs(profiles):
         kotlin += '    Device(\n'
         for key, source in fields.items():
             kotlin += f'        {key} = {literal(key, profile[source])},\n'
+        variants = profile.get('firmware_variants', [])
+        if variants:
+            kotlin += '        firmwareVariants = listOf(\n'
+            for variant in variants:
+                kotlin += '            FirmwareVariant(\n'
+                for key, source in {
+                    'id': 'id', 'norSize': 'nor_bytes', 'headerOffset': 'header_offset',
+                    'cardName': 'card_name', 'manufacturer': 'manufacturer',
+                    'companyId': 'company_id', 'halId': 'hal_id',
+                    'cardEndsAtEof': 'card_ends_at_eof', 'fastAudioNorMd5': 'fast_audio_md5',
+                    'powerSupported': 'power_supported',
+                }.items():
+                    kotlin += f'                {key} = {literal(key, variant[source])},\n'
+                kotlin += '            ),\n'
+            kotlin += '        ),\n'
         kotlin += '    ),\n'
     kotlin += ')\n'
     return {

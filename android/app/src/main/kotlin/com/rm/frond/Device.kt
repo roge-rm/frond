@@ -15,6 +15,14 @@ enum class NetworkMode(val id: String, val label: String) {
     }
 }
 
+data class FirmwareVariant(
+    val id: String, val norSize: Long, val headerOffset: Long,
+    val cardName: String, val manufacturer: String,
+    val companyId: Long, val halId: Long, val cardEndsAtEof: Boolean,
+    val fastAudioNorMd5: String? = null,
+    val powerSupported: Boolean = true,
+)
+
 // Generated inventory values come from deviceProfiles5. IDs are saved in sessions and settings.
 data class Device internal constructor(
     val id: String,
@@ -47,6 +55,7 @@ data class Device internal constructor(
     // DragonBall devices run in libmain68k.so (Frond68kActivity), the others in libmain.so (FrondActivity).
     val runs68k: Boolean = false,
     val hotSyncButton: Boolean = false,
+    val firmwareVariants: List<FirmwareVariant> = emptyList(),
 ) {
     // The real Zire 72 has no serial port, so it's left out of the list rather than greyed.
     val serialAbsent: Boolean get() = id == "palm-zire-72"
@@ -55,7 +64,7 @@ data class Device internal constructor(
     val hasNand: Boolean get() = nandSize > 0
     // What the firmware file is called: a 68k device takes one ROM file.
     val firmwareLabel: String get() = if (runs68k) "ROM image" else "NOR image"
-    val fastAudio: Boolean get() = fastAudioNorMd5 != null
+    val fastAudio: Boolean get() = fastAudioNorMd5 != null || firmwareVariants.any { it.fastAudioNorMd5 != null }
     // ARM devices use the preview on qualified firmware, otherwise the queue limits only.
     val lowLatencyAudio: Boolean get() = sound && !runs68k
     val coreFlags: List<String> get() = listOf("--device", id)
@@ -63,6 +72,12 @@ data class Device internal constructor(
     val sdSizes: List<Int> get() = if (!sdSlot) emptyList() else SD_SIZES.filter { (it.toLong() shl 20) in sdMin..sdMax }
     val appNames: List<String> get() = appNamesText.split('|')
     val buttons: List<String> get() = buttonsText.split('|')
+
+    internal fun unresolvedFirmware(): Device = withFirmware(firmwareVariants.firstOrNull { !it.powerSupported })
+
+    fun withFirmware(variant: FirmwareVariant?): Device =
+        if (variant?.powerSupported == false && variant in firmwareVariants)
+            copy(buttonsText = buttons.filter { it != "power" }.joinToString("|")) else this
 
     companion object {
         val SD_SIZES = listOf(32, 64, 128, 256, 512, 1024, 1886)

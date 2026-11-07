@@ -25,7 +25,8 @@ inline QByteArray sessionNorMd5(const QString& path) {
         if (count.size() != 4) return {};
         const quint32 media = quint32(uchar(count[0])) | (quint32(uchar(count[1])) << 8) |
                               (quint32(uchar(count[2])) << 16) | (quint32(uchar(count[3])) << 24);
-        if (media && !file.seek(file.pos() + qint64(media) * 92)) return {};
+        const qint64 descriptorSize = header.version >= 8 ? 100 : 92;
+        if (media && !file.seek(file.pos() + qint64(media) * descriptorSize)) return {};
     } else {
         const auto sizes = file.read(24);
         if (sizes.size() != 24) return {};
@@ -36,7 +37,7 @@ inline QByteArray sessionNorMd5(const QString& path) {
         skip = sizeAt(0); left = sizeAt(4);
     }
     const auto& profile = frondFirmware::profile(frondFirmware::deviceFromId(header.device));
-    if (skip > (1u << 20) || left != profile.norSize || !left) return {};
+    if (skip > (1u << 20) || !deviceProfileNorSizeSupported5(profile.deviceType, left) || !left) return {};
     quint64 inputLeft = 2 * (skip + left) + 65536;
     z_stream stream{};
     if (inflateInit(&stream) != Z_OK) return {};
@@ -67,25 +68,28 @@ inline QByteArray sessionNorMd5(const QString& path) {
     return valid && !left ? digest.result().toHex() : QByteArray();
 }
 
+inline QByteArray norMd5(frondFirmware::Device device, const QString& session, const QString& nor) {
+    if (device == frondFirmware::Device::automatic) return {};
+    if (!session.isEmpty()) return sessionNorMd5(session);
+    QFile file(nor);
+    if (!deviceProfileNorSizeSupported5(int(device), QFileInfo(nor).size()) || !file.open(QIODevice::ReadOnly)) return {};
+    QCryptographicHash digest(QCryptographicHash::Md5);
+    if (!digest.addData(&file)) return {};
+    return digest.result().toHex();
+}
 inline bool matchesNor(frondFirmware::Device device, const QString& session, const QString& nor,
                        const QByteArray& expected) {
-    const auto& profile = frondFirmware::profile(device);
-    if (device == frondFirmware::Device::automatic || expected.isEmpty()) return false;
-    QByteArray md5;
-    if (!session.isEmpty()) md5 = sessionNorMd5(session);
-    else {
-        QFile file(nor);
-        if (quint64(QFileInfo(nor).size()) != profile.norSize || !file.open(QIODevice::ReadOnly)) return false;
-        QCryptographicHash digest(QCryptographicHash::Md5);
-        if (!digest.addData(&file)) return false;
-        md5 = digest.result().toHex();
-    }
-    return md5 == expected;
+    return !expected.isEmpty() && norMd5(device, session, nor) == expected;
 }
 inline bool qualified(frondFirmware::Device device, const QString& session, const QString& nor) {
     const auto& profile = frondFirmware::profile(device);
-    return device != frondFirmware::deviceFromId("sony-clie-tg50") &&
-        profile.capabilities.fastAudio && matchesNor(device,session,nor,profile.frontend.fastAudioNorMd5);
+    if (device == frondFirmware::deviceFromId("sony-clie-tg50") || !profile.capabilities.fastAudio) return false;
+    const auto md5 = norMd5(device, session, nor);
+    if (md5.isEmpty()) return false;
+    if (md5 == profile.frontend.fastAudioNorMd5) return true;
+    for (const auto& variant : deviceFirmwareVariants5)
+        if (int(variant.deviceType) == int(device) && md5 == variant.fastAudioNorMd5) return true;
+    return false;
 }
 // ARM devices use the preview on qualified firmware, otherwise the queue limits only.
 inline bool lowLatencyAvailable(frondFirmware::Device device) {

@@ -58,7 +58,8 @@
       "keyboard": true,
       "usb": true,
       "infrared": true,
-      "bluetooth": true
+      "bluetooth": true,
+      "firmware_variants": []
     },
     {
       "name": "palm-e2",
@@ -117,7 +118,21 @@
       "keyboard": true,
       "usb": true,
       "infrared": true,
-      "bluetooth": true
+      "bluetooth": true,
+      "firmware_variants": [
+        {
+          "id": "e2-denvfs",
+          "nor_bytes": 6291456,
+          "header_offset": 131072,
+          "card_name": "rePalm",
+          "manufacturer": "Dmitry.GR",
+          "company_id": 1348562029,
+          "hal_id": 1752395890,
+          "card_ends_at_eof": true,
+          "fast_audio_md5": "c2d90f775b1737de5bcd11634bf51d7d",
+          "power_supported": false
+        }
+      ]
     },
     {
       "name": "palm-e2-franken",
@@ -176,7 +191,8 @@
       "keyboard": true,
       "usb": true,
       "infrared": true,
-      "bluetooth": true
+      "bluetooth": true,
+      "firmware_variants": []
     },
     {
       "name": "repalm",
@@ -235,7 +251,8 @@
       "keyboard": false,
       "usb": false,
       "infrared": false,
-      "bluetooth": false
+      "bluetooth": false,
+      "firmware_variants": []
     },
     {
       "name": "palm-zire-72",
@@ -294,7 +311,8 @@
       "keyboard": true,
       "usb": true,
       "infrared": true,
-      "bluetooth": true
+      "bluetooth": true,
+      "firmware_variants": []
     },
     {
       "name": "sony-clie-tg50",
@@ -360,7 +378,8 @@
       "keyboard": true,
       "usb": true,
       "infrared": true,
-      "bluetooth": true
+      "bluetooth": true,
+      "firmware_variants": []
     },
     {
       "name": "palm-iiix",
@@ -419,7 +438,8 @@
       "keyboard": false,
       "usb": false,
       "infrared": true,
-      "bluetooth": false
+      "bluetooth": false,
+      "firmware_variants": []
     },
     {
       "name": "palm-m515",
@@ -478,7 +498,8 @@
       "keyboard": false,
       "usb": false,
       "infrared": false,
-      "bluetooth": false
+      "bluetooth": false,
+      "firmware_variants": []
     }
   ]
 }

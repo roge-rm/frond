@@ -160,6 +160,34 @@ class DeviceInputTest(unittest.TestCase):
                 result = self.rejected([path, '--run-for', '1'], 'failed to restore savestate')
                 self.assertNotIn('invalid', result.stderr)
 
+    def test_e2_denvfs_variant(self):
+        def variant(size=6 << 20, at=0x20000):
+            data = e2_nor(size, at)
+            data[at + 0x10:at + 0x17] = b'rePalm\0'
+            data[at + 0x30:at + 0x3a] = b'Dmitry.GR\0'
+            struct.pack_into('<I', data, at + 0x6c, size - at)
+            return data
+
+        rom = self.root / 'e2-denvfs'
+        rom.write_bytes(variant())
+        # Valid alternate geometry reaches the independent NAND check, before SoC construction.
+        self.rejected([rom, '--nand', self.e2], 'invalid NAND size')
+        self.rejected([rom, '--device', 'palm-e2-franken'], 'does not match ROM')
+        self.rejected([rom, '--fast-audio'], 'requires a qualified device NOR image')
+        for field in (0x10, 0x16, 0x30, 0x39, 0x6c, 0x80, 0x84):
+            with self.subTest(field=field):
+                data = variant()
+                data[0x20000 + field] ^= 1
+                rom.write_bytes(data)
+                message = 'unknown ROM device identity' if field in (0x80, 0x84) else 'invalid NOR size'
+                self.rejected([rom, '--run-for', '1'], message)
+        for size in ((6 << 20) - 1, (6 << 20) + 1):
+            rom.write_bytes(variant(size))
+            self.rejected([rom], 'invalid NOR size')
+        for at in (0, 0x8000, 0x40000):
+            rom.write_bytes(variant(at=at))
+            self.rejected([rom], 'invalid NOR size')
+
     def test_e3_nor_identity_geometry_and_legacy_sessions(self):
         def e3(size=8 << 20, at=0x20000):
             return header(0x446d4752, size, at)
