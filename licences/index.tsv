@@ -1,0 +1,21 @@
+argparse-LICENSE	argparse	MIT	da
+zip-UNLICENSE	zip (with miniz)	Unlicense	da
+nanopb-LICENSE	nanopb	zlib	da
+monocypher-LICENCE	Monocypher	CC0-1.0 (BSD-2-Clause alternative)	d
+dynarmic-LICENSE	Dynarmic	0BSD	da
+fmt-LICENSE	fmt	MIT	da
+mcl-LICENSE	mcl	MIT	da
+oaknut-LICENSE	oaknut	MIT	da
+robin-map-LICENSE	robin-map	MIT	da
+xbyak-COPYRIGHT	xbyak	BSD-3-Clause	da
+zycore-LICENSE	zycore	MIT	da
+zydis-LICENSE	Zydis	MIT	da
+SDL2-LICENSE	SDL2	zlib	a
+SDL2_image-LICENSE,sdl2_image-stb-miniz-LICENSE	SDL2_image, with stb_image and miniz	zlib, MIT or public domain	a
+libslirp-COPYRIGHT	libslirp	BSD-3-Clause	a
+glib-COPYING	GLib	LGPL-2.1-or-later	a
+pcre2-LICENCE	PCRE2	BSD-3-Clause	a
+libiconv-COPYING.LIB	libiconv	LGPL-2.1-or-later	a
+libintl-COPYING	proxy-libintl	LGPL-2.0-or-later	a
+bluez-COPYING,bluez-COPYING.LIB,bluez-ecc-BSD-2-Clause	BlueZ (virtual Bluetooth controller)	GPL-2.0-or-later, LGPL-2.1-or-later, BSD-2-Clause	a
+Apache-2.0	AndroidX, Jetpack Compose, Compose Multiplatform, Material icons, Kotlin and kotlinx.coroutines	Apache-2.0	a

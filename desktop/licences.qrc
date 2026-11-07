@@ -1,0 +1,17 @@
+<RCC>
+  <qresource prefix="/licences">
+    <file alias="index.tsv">../licences/index.tsv</file>
+    <file alias="argparse-LICENSE">../licences/argparse-LICENSE</file>
+    <file alias="zip-UNLICENSE">../licences/zip-UNLICENSE</file>
+    <file alias="monocypher-LICENCE">../licences/monocypher-LICENCE</file>
+    <file alias="nanopb-LICENSE">../licences/nanopb-LICENSE</file>
+    <file alias="dynarmic-LICENSE">../licences/dynarmic-LICENSE</file>
+    <file alias="fmt-LICENSE">../licences/fmt-LICENSE</file>
+    <file alias="mcl-LICENSE">../licences/mcl-LICENSE</file>
+    <file alias="oaknut-LICENSE">../licences/oaknut-LICENSE</file>
+    <file alias="robin-map-LICENSE">../licences/robin-map-LICENSE</file>
+    <file alias="xbyak-COPYRIGHT">../licences/xbyak-COPYRIGHT</file>
+    <file alias="zycore-LICENSE">../licences/zycore-LICENSE</file>
+    <file alias="zydis-LICENSE">../licences/zydis-LICENSE</file>
+  </qresource>
+</RCC>

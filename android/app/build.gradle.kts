@@ -64,6 +64,17 @@ tasks.configureEach {
     }
 }
 
+// The licence notices shown by About: the repo's licences/ folder plus the GPL text from LICENSE.
+val licencesAssets = layout.buildDirectory.dir("generated/licences-assets")
+val copyLicences = tasks.register<Sync>("copyLicences") {
+    from(File(repoRoot, "licences")) { into("licences") }
+    from(File(repoRoot, "LICENSE")) { into("licences"); rename { "GPL-3.0.txt" } }
+    into(licencesAssets)
+}
+tasks.configureEach {
+    if ((name.startsWith("merge") && name.endsWith("Assets")) || name.lowercase().contains("lint")) dependsOn(copyLicences)
+}
+
 val checkDeviceData = tasks.register<Exec>("checkDeviceData") {
     dependsOn(prepareCore)
     workingDir(repoRoot)
@@ -215,6 +226,7 @@ android {
     sourceSets {
         getByName("main") {
             jniLibs.directories.add(File(bluetoothRoot, "jniLibs").absolutePath)
+            assets.directories.add(licencesAssets.get().asFile.absolutePath)
             // SDL's Java glue, SDLActivity and friends, straight from the pinned tarball.
             java.directories.add(File(sdlSource, "android-project/app/src/main/java").absolutePath)
         }

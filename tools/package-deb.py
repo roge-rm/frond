@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import tempfile
 
-from package_policy import DOCS, DYNARMIC_LICENCES, check_deb, check_dependencies, check_stage
+from package_policy import DOCS, LICENCE_FILES, check_deb, check_dependencies, check_stage
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -72,12 +72,8 @@ def package(root=ROOT, core='out/frond', desktop='out/frond-desktop',
         copy('packaging/frond-mime.xml', 'usr/share/mime/packages/frond.xml')
         copy('packaging/copyright', 'usr/share/doc/frond/copyright')
         copy('LICENSE', 'usr/share/doc/frond/LICENSE')
-        copy('vendor/cloudpilot/src/argparse/LICENSE', 'usr/share/doc/frond/argparse-LICENSE')
-        copy('vendor/cloudpilot/src/common/zip/UNLICENSE', 'usr/share/doc/frond/zip-UNLICENSE')
-        # Dynarmic (the Fast engine) and the parts of it linked into the core.
-        dynarmic = os.environ.get('FROND_DYNARMIC_SRC', 'build/dynarmic-trial/src')
-        for name, source in DYNARMIC_LICENCES.items():
-            copy(f'{dynarmic}/{source}', f'usr/share/doc/frond/{name}')
+        for name in LICENCE_FILES:
+            copy(f'licences/{name}', f'usr/share/doc/frond/{name}')
         copy('doc/using-frond.md', 'usr/share/doc/frond/README')
         for name in DOCS:
             copy(f'doc/{name}', f'usr/share/doc/frond/{name}')

@@ -21,6 +21,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import com.rm.frond.ui.AboutScreen
 import com.rm.frond.ui.CardsScreen
 import com.rm.frond.ui.FirmwareScreen
 import com.rm.frond.ui.FrondTheme
@@ -72,6 +73,7 @@ class HomeModel(private val activity: HomeActivity) {
     var running by mutableStateOf(false)
         private set
     var settingsOpen by mutableStateOf(false)
+    var aboutOpen by mutableStateOf(false)
     var settings by mutableStateOf(Settings())
         private set
 
@@ -336,7 +338,10 @@ class HomeActivity : ComponentActivity() {
                             else -> model.settingsOpen = false
                         }
                     }
+                    // The last one registered wins, so About closes first.
+                    BackHandler(enabled = model.aboutOpen) { model.aboutOpen = false }
                     when {
+                        model.aboutOpen -> AboutScreen(model)
                         model.settingsOpen -> SettingsScreen(model)
                         model.firmwareOpen -> FirmwareScreen(model)
                         model.machineDraft != null -> MachineSettingsScreen(model)
