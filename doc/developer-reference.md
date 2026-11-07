@@ -686,6 +686,7 @@ Not in `make test`. The first group builds a program and runs it with a private 
 | `test-link-irda-cores` | T\|X smoke session (`FROND_ARM_SESSIONS`, else `build/smoke/machines`) and the IR probe (`FROND_IR_PROBE`, else pilrc and the SDK). Two T\|X cores beam to each other over two link hubs on loopback, also after one sleeps and wakes. |
 | `test-host-call-wake` | T\|X and Zire 72 smoke sessions as above. A GDB breakpoint on EvtWakeup: `guest-ready` wakes nothing, a host call wakes at most once. |
 | `test-patched-traps` | T\|X smoke session as above. Hooks in the native trap table like UDMH's, written over the GDB stub: the database list, an install, an export and a launch still work, and the sync probe still gets its notify. |
+| `test-session-folder-card` | Nothing, plus the T\|X smoke session as above for its last case. A session folder that doesn't load is refused with one line, not a crash, and names the card file when one is there. |
 | `test-core-control` | ARM smoke session (`FROND_ARM_SESSION`) and IIIx ROM. The control socket on both runners. |
 | `test-tg50-usb-hotsync` | TG50 session (`make smoke-sessions`) and pilot-link. |
 | `test-tg50-audio-lifecycle`, `test-tg50-audio-queue` | Nothing. TG50 audio unit tests. |
