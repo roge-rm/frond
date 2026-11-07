@@ -63,11 +63,6 @@ data class Device internal constructor(
     val coreFlags: List<String> get() = listOf("--device", id)
     // New SD card sizes in MiB, 32 MB to the device's largest card. "2 GB" is 1886 MiB like a real 2 GB card.
     val sdSizes: List<Int> get() = if (!sdSlot) emptyList() else SD_SIZES.filter { (it.toLong() shl 20) in sdMin..sdMax }
-    // New Memory Stick sizes in MB, 128 MB first, then the Memory Stick Pro sizes the device takes.
-    val memoryStickSizes: List<Int> get() = if (!memoryStick) emptyList()
-        else msSizes.sortedDescending() + MEMORY_STICK_PRO_SIZES.filter { it <= msProMax }
-    // The largest SD image the device takes.
-    val sdImageMax: Long get() = minOf(sdMax, FatImage.MAX_BYTES)
     val appNames: List<String> get() = appNamesText.split('|')
     val buttons: List<String> get() = buttonsText.split('|')
 

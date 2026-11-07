@@ -179,9 +179,10 @@ object Sessions {
         return Session(id, name, device, now, 0L, machine(context, id), settings = settings).also { write(context, it) }
     }
 
-    // Copies the machine under a new id and the next free numbered name. Blocks; run it off the main
-    // thread. Returns an error message or null (COPY_CANCELLED when cancelled). The copy is deleted if it fails.
-    fun duplicate(context: Context, s: Session, cancelled: () -> Boolean = { false }): String? {
+    // Copies the machine under a new id and the next free numbered name, with its card as `choice`
+    // says. Blocks; run it off the main thread. Returns an error message or null (COPY_CANCELLED when
+    // cancelled). The copy is deleted if it fails.
+    fun duplicate(context: Context, s: Session, cancelled: () -> Boolean = { false }, choice: CardChoice = CardChoice.COPY): String? {
         val device = s.device
         if (s.old || device == null) return "This session was saved by an older Frond."
         val id = UUID.randomUUID().toString()
@@ -189,15 +190,18 @@ object Sessions {
         val name = copyName(s.name, list(context).map { it.name }.toSet())
         activeImports.add(id)
         try {
-            val error = copyMachine(s.folder, dest, folder(context).usableSpace, cancelled)
-            if (error != null) return error
-            return try {
-                write(context, Session(id, name, device, System.currentTimeMillis(), System.currentTimeMillis(), dest, settings = s.settings))
-                File(dest, COPY_PART).delete()
-                null
-            } catch (e: Exception) {
-                dest.deleteRecursively()
-                "Couldn't duplicate the session."
+            val lock = Cards.tryRunLock(s.folder) ?: return "Stop ${s.name} first."
+            lock.use {
+                val error = duplicateMachine(folder(context), s.folder, dest, cancelled, choice)
+                if (error != null) return error
+                return try {
+                    write(context, Session(id, name, device, System.currentTimeMillis(), System.currentTimeMillis(), dest, settings = s.settings))
+                    File(dest, COPY_PART).delete()
+                    null
+                } catch (e: Exception) {
+                    dropDuplicate(folder(context), dest)
+                    "Couldn't duplicate the session."
+                }
             }
         } finally {
             activeImports.remove(id)
@@ -236,29 +240,37 @@ object Sessions {
         return null
     }
 
-    fun delete(context: Context, s: Session) {
+    // Deletes a machine. Its card goes back to Cards first (an unsettled one as a settled copy); if
+    // that fails nothing is removed. Blocks; run it off the main thread. Returns an error or null.
+    fun delete(context: Context, s: Session, cancelled: () -> Boolean = { false }, progress: ((Long, Long) -> Unit)? = null): String? {
         require(s.id.isNotEmpty())
-        SessionMetadata.locked(meta(context, s.id)) {
-            machine(context, s.id).deleteRecursively()
+        return deleteMachine(folder(context), machine(context, s.id), s.name, s.saved && !s.old, cancelled, progress) { work ->
+            SessionMetadata.locked(meta(context, s.id)) { work() }
         }
     }
 
-    fun export(context: Context, s: Session, to: Uri): String? =
-        exportPackable(s.folder,
+    // Packs the machine's files, its card and slot.json. Its card is moved in first.
+    fun export(context: Context, s: Session, to: Uri): String? {
+        val lock = Cards.tryRunLock(s.folder)
+        lock.use { Cards.reconcile(folder(context), if (lock != null) s.folder else null) }
+        return exportPackable(s.folder,
             { context.contentResolver.openOutputStream(to, "wt") },
             { try { android.provider.DocumentsContract.deleteDocument(context.contentResolver, to) } catch (_: Exception) {} })
+    }
 
     // Saves the running Palm to a picked document, like the desktop's Save a Copy. The core saves to
     // a private folder first and keeps running from and saving to its own session. Blocks; run it off
     // the main thread. Returns an error message or null. The copy is a zip of packable files; SAF
     // cannot promise atomic replacement of an existing document.
-    fun saveCopy(context: Context, link: ControlLink, to: Uri): String? {
+    fun saveCopy(context: Context, link: ControlLink, to: Uri, session: String? = null): String? {
         val folder = File(context.cacheDir, "sessions").also { it.mkdirs() }
         // A copy left by a process killed mid-save would lend its old card to this one.
         val copy = File(folder, "copy").also { it.deleteRecursively(); it.mkdirs() }
         try {
             val reply = link.request("save", copy.path, timeoutSeconds = 120)
             if (!reply.ok) throw IOException(reply.message)
+            // The copy carries the machine's slot.json, as an export does.
+            forPath(context, session)?.folder?.let { if (!Cards.stageSlot(it, copy)) throw IOException("slot") }
             val output = context.contentResolver.openOutputStream(to, "wt") ?: throw IOException("no stream")
             output.use { zipPackable(copy, it) }
             return null
@@ -324,20 +336,27 @@ object Sessions {
             val from = recovery.optString("name", device.label)
             val settings = MachineSettings.from(recovery.optJSONObject("settings"), Settings.legacyMachine(context, device))
             val id = UUID.randomUUID().toString()
-            val dest = machine(context, id).also { it.mkdirs() }
-            if (!moveRecoveryCards(recoveryMachine(context), file, dest) || !file.renameTo(data(context, id))) {
-                dest.deleteRecursively()
-                return null
-            }
-            // A recovery of a recovery keeps one "before exchange"; freeName numbers it.
-            val name = freeName(context, "${from.removeSuffix(" before exchange")} before exchange")
+            activeImports.add(id)
             try {
-                write(context, Session(id, name, device, System.currentTimeMillis(), 0L, machine(context, id), settings = settings))
-            } catch (e: IOException) {
-                dest.deleteRecursively()
-                return null
+                val dest = machine(context, id).also { it.mkdirs() }
+                if (!moveRecoveryCards(recoveryMachine(context), file, dest) || !file.renameTo(data(context, id))) {
+                    dest.deleteRecursively()
+                    return null
+                }
+                // A recovery of a recovery keeps one "before exchange"; freeName numbers it.
+                val name = freeName(context, "${from.removeSuffix(" before exchange")} before exchange")
+                // Its card is a new card in Cards, as for an import.
+                try {
+                    Cards.adoptImportedCard(folder(context), dest, "$name card")?.let { throw IOException(it) }
+                    write(context, Session(id, name, device, System.currentTimeMillis(), 0L, machine(context, id), settings = settings))
+                } catch (e: IOException) {
+                    dest.deleteRecursively()
+                    return null
+                }
+                return name
+            } finally {
+                activeImports.remove(id)
             }
-            return name
         } finally {
             dropRecovery(context)
         }
@@ -400,15 +419,17 @@ object Sessions {
             }
             if (error != null) return error
             if (header.version >= 7L) {
-                checkImportedSiblings(staged, frond)?.let { return it }
+                checkImportedSiblings(staged, frond, Cards.readSlot(staged).swap)?.let { return it }
             }
             if (frond != File(dest, "session.frond") && !frond.renameTo(File(dest, "session.frond")))
                 return "Couldn't save the session."
-            for (sibling in listOf("sd.frondsd", "ms.frondms", "ms.frondmsp")) {
+            for (sibling in listOf("sd.frondsd", "ms.frondms", "ms.frondmsp", "slot.json")) {
                 File(staged, sibling).takeIf { it.isFile }?.renameTo(File(dest, sibling))
             }
             File(dest, "session.frond.settings.json").takeIf { it.isFile }?.delete()
             val name = freeName(context, displayName(context, from)?.substringBeforeLast('.')?.takeIf { it.isNotBlank() } ?: device!!.label)
+            // The packed card becomes a new card in Cards.
+            Cards.adoptImportedCard(folder(context), dest, "$name card")?.let { return it }
             write(context, Session(id, name, device!!, System.currentTimeMillis(), 0L, dest))
             return null
         } catch (e: Exception) {
@@ -451,7 +472,9 @@ private fun java.io.InputStream.readExact(n: Int): ByteArray {
 // v8 descriptors are 100 bytes and end with the SD content generation, which a .frondsd v2
 // header must match. A v2 file has one CRC32 per 1 MiB chunk after the payload, and a header
 // CRC over the header (its own field zeroed) and that table.
-internal fun checkImportedSiblings(dir: File, frond: File): String? {
+// With `swap` (slot.json says the slot changed since the save) the card files are whatever is there,
+// checked against their own headers.
+internal fun checkImportedSiblings(dir: File, frond: File, swap: Boolean = false): String? {
     val mismatch = "That session's card files don't match."
     val bytes = try { frond.readBytes() } catch (e: IOException) { return "Couldn't read that file." }
     if (bytes.size < 8) return "Couldn't read that file."
@@ -473,8 +496,8 @@ internal fun checkImportedSiblings(dir: File, frond: File): String? {
             val name = String(nameBytes, 0, nameEnd, Charsets.US_ASCII)
             val logical = le64(bytes, at + 76)
             val physical = le64(bytes, at + 84)
+            // For a classic stick, the change counter in its header (0249).
             val generation = if (descSize == 100) le64(bytes, at + 92) else 0L
-            if (kind == 2L && generation != 0L) return mismatch
             when (kind) {
                 1L -> if (name != "sd.frondsd" || logical != physical || physical < 512 || physical % 512 != 0L)
                     return mismatch
@@ -487,6 +510,21 @@ internal fun checkImportedSiblings(dir: File, frond: File): String? {
                 else -> return mismatch
             }
             cards.add(Card(kind, physical, generation))
+        }
+    }
+    if (swap) {
+        cards.clear()
+        for ((kind, name) in listOf(1L to "sd.frondsd", 2L to "ms.frondms", 3L to "ms.frondmsp")) {
+            val file = File(dir, name)
+            if (!file.isFile) continue
+            val hdr = file.inputStream().use { it.readExact(64) }
+            if (hdr.size != 64) return mismatch
+            if (kind == 2L) {
+                if (Device.MEMORY_STICK_SIZES.none { file.length() - 64 == Device.memoryStickPhysicalBytes(it) }) return mismatch
+                cards.add(Card(kind, file.length() - 64, le64(hdr, 32)))
+            } else {
+                cards.add(Card(kind, le64(hdr, 16), if (le32(hdr, 8) == 2L) le64(hdr, 28) else 0L))
+            }
         }
     }
     var expectSd = false
@@ -556,8 +594,9 @@ internal fun checkImportedSiblings(dir: File, frond: File): String? {
                 // The header's blocks and pages per block must make the descriptor's size.
                 if (le32(hdr, 8) != 1L || le32(hdr, 12) * le32(hdr, 16) * 521 != card.physical ||
                     le32(hdr, 16) != (if (card.physical < Device.memoryStickPhysicalBytes(16)) 16L else 32L) ||
-                    le32(hdr, 20) != 512L || le32(hdr, 24) != 9L)
+                    le32(hdr, 20) != 512L || le32(hdr, 24) != 9L || le64(hdr, 32) != card.generation)
                     return mismatch
+                if (hdr.copyOfRange(40, 64).any { it != 0.toByte() }) return mismatch
                 if (ms.length() != 64 + card.physical) return mismatch
             }
         }
@@ -614,7 +653,7 @@ internal fun ignoredName(name: String) =
 
 internal fun packableName(name: String): Boolean {
     if (ignoredName(name) || '/' in name || '\\' in name) return false
-    return name == "sd.frondsd" || name == "ms.frondms" || name == "ms.frondmsp" || name.endsWith(".frond.settings.json") ||
+    return name == "sd.frondsd" || name == "ms.frondms" || name == "ms.frondmsp" || name == "slot.json" || name.endsWith(".frond.settings.json") ||
         (name.endsWith(".frond") && !name.endsWith(".frond.new"))
 }
 
@@ -848,10 +887,12 @@ internal const val COPY_PART = ".copy.part"
 // Copies a machine folder's session, settings and cards into `dest`, which must not exist, settling
 // an unfinished SD save on the way. The session file is named session.frond. Returns an error
 // message, or null; `dest` is removed on any failure or cancel (COPY_CANCELLED). `free` is the room left on the disk.
-internal fun copyMachine(from: File, dest: File, free: Long, cancelled: () -> Boolean = { false }): String? {
+internal fun copyMachine(from: File, dest: File, free: Long, copyCard: Boolean = true, cancelled: () -> Boolean = { false }): String? {
     if (dest.exists()) return "Couldn't duplicate the session."
-    val settle = sdSettleOf(from)
-    val files = from.listFiles()?.filter { it.isFile && packableName(it.name) }.orEmpty()
+    val settle = if (copyCard) sdSettleOf(from) else SdSettle(null, null)
+    // slot.json is written by the duplicate; card files only when the card is copied.
+    val files = from.listFiles()?.filter { it.isFile && packableName(it.name) && it.name != "slot.json" &&
+        (copyCard || it.name !in Cards.cardFiles) }.orEmpty()
     val frond = sessionFile(from)
     val entries = (files.map { file ->
         val source = if (settle.full != null && file.name == settle.sibling) settle.full else file
@@ -892,3 +933,70 @@ internal fun copyMachine(from: File, dest: File, free: Long, cancelled: () -> Bo
 }
 
 private class CancellationException : Exception()
+
+// Deletes machine folder `dir` under its run lock, after its card (when `keepCard`) went back to
+// Cards; nothing is removed if that fails. `locked` wraps the removal. Returns an error or null.
+internal fun deleteMachine(sessions: File, dir: File, name: String, keepCard: Boolean, cancelled: () -> Boolean = { false },
+                           progress: ((Long, Long) -> Unit)? = null, locked: (() -> Unit) -> Unit = { it() }): String? {
+    val lock = Cards.tryRunLock(dir) ?: return if (dir.isDirectory) "Stop $name first." else null
+    lock.use {
+        if (keepCard) Cards.keepCardOf(sessions, dir, cancelled, progress, COPY_CANCELLED)?.let {
+            return if (it == "Delete cancelled.") COPY_CANCELLED else it
+        }
+        var gone = false
+        locked { gone = dir.deleteRecursively() }
+        return if (gone) null else "Couldn't delete the session."
+    }
+}
+
+// What a copy of a machine with a card gets: the same card linked to both, a copy of the card, or no card.
+enum class CardChoice { LINK, COPY, NONE }
+
+// Copies machine folder `from` into `dest` (which must not exist) with its card as `choice` says,
+// as the desktop's duplicate does: Link writes the link in both and leaves the copy's slot empty,
+// Copy makes the copy's card a new library card with its own serial, None leaves it out. A copy
+// that had a card loads with swap. Source machine held. `dest` is removed on failure.
+internal fun duplicateMachine(sessions: File, from: File, dest: File, cancelled: () -> Boolean, wanted: CardChoice): String? {
+    val failed = "Couldn't duplicate the session."
+    val library = Cards.libraryFor(sessions)
+    Cards.reconcile(sessions, from)?.let { return it }
+    val slot = Cards.readSlot(from)
+    val cardFile = Cards.cardFileIn(from)
+    val card = if (cardFile != null) slot.card?.let { Cards.readCard(Cards.entryDir(library, it)) } else null
+    val holds = cardFile != null && card != null
+    if (cardFile != null && !holds) return failed
+    val linkTo = slot.link ?: if (holds) slot.card else null
+    if (wanted == CardChoice.COPY && !holds && linkTo != null) return "Its card isn't in it. Link it or leave it out."
+    val hadCard = holds || linkTo != null
+    // No library card: whatever the folder has is copied; reconcile moves the copy's card in.
+    val choice = if (!hadCard) CardChoice.COPY else wanted
+    copyMachine(from, dest, Cards.freeSpace(sessions), copyCard = choice == CardChoice.COPY, cancelled = cancelled)?.let { return it }
+    var copySlot = Cards.Slot(present = true, swap = slot.swap || hadCard, link = if (choice == CardChoice.LINK) linkTo else null)
+    if ((slot.present || hadCard) && !Cards.writeSlot(dest, copySlot)) { dest.deleteRecursively(); return failed }
+    Cards.LibraryLock(library).use { lock ->
+        if (!lock.ok) { dest.deleteRecursively(); return Cards.BUSY }
+        if (choice == CardChoice.COPY && holds && card != null) {
+            val made = card.copy(id = Cards.newId(), identity = Cards.newIdentity(), name = Cards.freeCardName(library, card.name),
+                created = Cards.now(), machine = dest.name)
+            copySlot = copySlot.copy(card = made.id, name = made.name)
+            val entry = Cards.entryDir(library, made.id)
+            if (!Cards.writeSlot(dest, copySlot) || !entry.mkdirs() || !Cards.writeCard(entry, made)) {
+                entry.deleteRecursively()
+                dest.deleteRecursively()
+                return failed
+            }
+        }
+        if (choice == CardChoice.LINK && slot.link != linkTo && !Cards.writeSlot(from, slot.copy(present = true, link = linkTo))) {
+            dropDuplicate(sessions, dest)
+            return failed
+        }
+    }
+    return null
+}
+
+// Removes a duplicate that failed after its card entry was made.
+internal fun dropDuplicate(sessions: File, dest: File) {
+    val library = Cards.libraryFor(sessions)
+    Cards.readSlot(dest).card?.let { id -> if (Cards.readCard(Cards.entryDir(library, id))?.machine == dest.name) Cards.entryDir(library, id).deleteRecursively() }
+    dest.deleteRecursively()
+}

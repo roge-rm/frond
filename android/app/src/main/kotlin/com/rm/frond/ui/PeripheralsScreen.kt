@@ -75,11 +75,8 @@ import com.rm.frond.UsbLink
 fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
     val context = LocalContext.current
     val snackbar = remember { SnackbarHostState() }
-    var choosingSize by remember { mutableStateOf(false) }
     var confirmEject by remember { mutableStateOf(false) }
     var confirmFiles by remember { mutableStateOf(false) }
-    // What to do once the user agrees to lose the ejected card: "create" or "image".
-    var confirmReplace by remember { mutableStateOf<String?>(null) }
     var naming by remember { mutableStateOf(false) }
     var exporting by remember { mutableStateOf<FatImage.Entry?>(null) }
     var renaming by remember { mutableStateOf<FatImage.Entry?>(null) }
@@ -104,9 +101,6 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
         if (uri != null) model.saveCopy(uri)
     }
 
-    val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) model.job("Inserting", "Couldn't insert the image", cancellable = true) { it.insertImage(uri) }
-    }
     val saveImage = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
         if (uri != null) model.job("Copying", "Couldn't export the image", cancellable = true) {
             it.exportImage(uri)
@@ -137,9 +131,6 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
         }
     }
 
-    val createCard: () -> Unit = {
-        choosingSize = true
-    }
     val path = model.path
     Scaffold(
         topBar = {
@@ -243,14 +234,34 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                 }
                 if (model.device.cardSupported) {
                 item { Header(model.device.cardLabel, Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp)) }
-                item {
-                    val (label, colour) = when (model.state) {
-                        SdCard.State.INSERTED -> "Inserted" to MaterialTheme.colorScheme.primary
-                        SdCard.State.EJECTED -> "Ejected" to MaterialTheme.colorScheme.secondary
-                        SdCard.State.NONE -> "No card" to MaterialTheme.colorScheme.outlineVariant
-                        SdCard.State.UNKNOWN -> "Not known" to MaterialTheme.colorScheme.error
+                // One row for the card in the slot: its name or "No card" (opens the picker), and its
+                // state only when the actions below don't say it.
+                item(key = "cardRow") {
+                    val shown = model.slotShown
+                    val colour = when (model.state) {
+                        SdCard.State.INSERTED -> MaterialTheme.colorScheme.primary
+                        SdCard.State.EJECTED -> MaterialTheme.colorScheme.secondary
+                        SdCard.State.NONE -> MaterialTheme.colorScheme.outlineVariant
+                        SdCard.State.UNKNOWN -> MaterialTheme.colorScheme.error
                     }
-                    ListItem(headlineContent = { Text(label) }, leadingContent = { Marker(colour) })
+                    val usable = model.state != SdCard.State.UNKNOWN && model.busy == null && !shown.pending
+                    val faded = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                    ListItem(
+                        headlineContent = {
+                            Text(if (model.state == SdCard.State.UNKNOWN) "Not known" else shown.name,
+                                color = if (usable || model.state == SdCard.State.UNKNOWN) Color.Unspecified else faded)
+                        },
+                        supportingContent = if (model.state == SdCard.State.EJECTED) ({ Text("Ejected") }) else null,
+                        leadingContent = { Marker(colour) },
+                        modifier = if (usable) Modifier.clickableRow { model.openPicker() } else Modifier,
+                    )
+                }
+                if (model.state == SdCard.State.NONE) model.slotShown.linked?.let { linked ->
+                    val holder = model.slotShown.linkedHolder
+                    item(key = "linked") {
+                        ListItem(headlineContent = { Text(if (holder == null) "$linked is free" else "$linked is in $holder") })
+                    }
+                    if (holder == null) action("Insert") { model.insertLinked() }
                 }
                 when (model.state) {
                     SdCard.State.INSERTED -> {
@@ -261,13 +272,8 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                         action("Insert") { model.job("Inserting", "Couldn't insert the card") { it.reinsert() } }
                         if (model.device.sdSlot) action("Files") { model.openFiles() }
                         action("Export image") { saveImage.launch(if (model.memoryStickPro) "Memory Stick Pro.img" else if (model.device.memoryStick) "Memory Stick.frondms" else "SD card.img") }
-                        action("New card") { confirmReplace = "create" }
-                        action("Insert image") { confirmReplace = "image" }
                     }
-                    SdCard.State.NONE -> {
-                        action("New card", createCard)
-                        action("Insert image") { pickImage.launch(arrayOf("*/*")) }
-                    }
+                    SdCard.State.NONE -> Unit
                     SdCard.State.UNKNOWN -> action("Try again") { model.refresh() }
                 }
                 if (model.device.memoryStick && model.state != SdCard.State.NONE && model.state != SdCard.State.UNKNOWN) item {
@@ -522,22 +528,26 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
             },
         )
     }
-    if (choosingSize) {
+    model.picker?.let { p ->
+        if (!model.pickerMaking && model.pickerLinking == null && !model.confirmingChange && model.busy == null) {
+            CardPickerDialog(p.title, p.choices, p.selected, onSelect = { model.pick(it) }, onNewCard = { model.pickerMaking = true },
+                onLink = { model.startPickerLink() }, onDismiss = { model.picker = null }, onOk = { model.pickerOk() })
+        }
+    }
+    if (model.pickerMaking) {
+        NewCardDialog(com.rm.frond.Cards.libraryFor(com.rm.frond.Sessions.folder(context)), model.device,
+            onDismiss = { model.pickerMaking = false }) { name, kind, size -> model.makeCard(name, kind, size) }
+    }
+    model.pickerLinking?.let { (card, options) ->
+        LinkCardsDialog(card.name, options, onDismiss = { model.pickerLinking = null }) { model.linkFromPicker(card, it) }
+    }
+    if (model.confirmingChange) {
         AlertDialog(
-            onDismissRequest = { choosingSize = false },
-            title = { Text("New card") },
-            text = {
-                LazyColumn {
-                    items(if (model.device.memoryStick) model.device.memoryStickSizes else model.device.sdSizes) { mib ->
-                        ListItem(headlineContent = { Text(com.rm.frond.Device.sizeLabel(mib) + if (model.device.memoryStick && mib > 128) " Pro" else "") }, modifier = Modifier.clickableRow {
-                            choosingSize = false
-                            model.job("Making the card", "Couldn't make the card", cancellable = !model.device.memoryStick) { it.create(mib) }
-                        })
-                    }
-                }
-            },
-            confirmButton = {},
-            dismissButton = { TextButton(onClick = { choosingSize = false }) { Text("Cancel") } },
+            onDismissRequest = { model.confirmChange(false) },
+            title = { Text("Eject the card?") },
+            text = { Text("Close any files open on the Palm first.") },
+            confirmButton = { TextButton(onClick = { model.confirmChange(true) }) { Text("Eject") } },
+            dismissButton = { TextButton(onClick = { model.confirmChange(false) }) { Text("Cancel") } },
         )
     }
     if (confirmEject || confirmFiles) {
@@ -555,20 +565,6 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                 }) { Text(if (files && model.device.memoryStick) "Open" else "Eject") }
             },
             dismissButton = { TextButton(onClick = { confirmEject = false; confirmFiles = false }) { Text("Cancel") } },
-        )
-    }
-    confirmReplace?.let { what ->
-        AlertDialog(
-            onDismissRequest = { confirmReplace = null },
-            title = { Text("Replace the ejected card?") },
-            text = { Text("Its files are lost unless you export the image first.") },
-            confirmButton = {
-                TextButton(onClick = {
-                    confirmReplace = null
-                    if (what == "create") createCard() else pickImage.launch(arrayOf("*/*"))
-                }) { Text("Replace") }
-            },
-            dismissButton = { TextButton(onClick = { confirmReplace = null }) { Text("Cancel") } },
         )
     }
     if (confirmReset) {

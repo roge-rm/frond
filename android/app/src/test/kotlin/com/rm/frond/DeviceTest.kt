@@ -68,9 +68,6 @@ class SdBoundsTest {
         assertEquals(listOf(32, 64, 128, 256, 512, 1024, 1886), Device.ZIRE72.sdSizes)
         assertEquals(listOf(32, 64, 128, 256, 512, 1024), Device.E2.sdSizes)
         assertEquals(emptyList<Int>(), Device.byId("sony-clie-tg50")!!.sdSizes)
-        assertEquals(2048L shl 20, Device.TX.sdImageMax)
-        assertEquals(1024L shl 20, Device.E2.sdImageMax)
-        assertEquals(2048L shl 20, Device.ZIRE72.sdImageMax)
     }
 
     @Test fun labels() {
@@ -87,8 +84,6 @@ class MemoryStickSizesTest {
     @Test fun sizesFollowTheProfile() {
         val tg50 = Device.byId("sony-clie-tg50")!!
         assertEquals(listOf(4, 8, 16, 32, 64, 128), tg50.msSizes)
-        assertEquals(listOf(128, 64, 32, 16, 8, 4, 256, 512, 1024, 1886), tg50.memoryStickSizes)
-        assertEquals(emptyList<Int>(), Device.TX.memoryStickSizes)
         assertEquals(listOf("128 MB", "4 MB"), listOf(128, 4).map { Device.sizeLabel(it) })
         assertEquals(4_268_032L, Device.memoryStickPhysicalBytes(4))
         assertEquals(136_577_024L, Device.memoryStickPhysicalBytes(128))
