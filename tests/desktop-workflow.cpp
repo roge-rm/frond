@@ -19,6 +19,7 @@
 #include "Dialogs.h"
 #include "FirmwareStore.h"
 #include "SessionStore.h"
+#include "RunningBar.h"
 #include "AudioQualification.h"
 #include <QMessageBox>
 #include <QMenuBar>
@@ -2088,9 +2089,10 @@ for line in s.makefile('rb'):
         QStringList menus;
         for (auto* action : window.menuBar()->actions()) menus << action->text();
         QCOMPARE(menus, QStringList({"&File", "&Help"}));
+        QVERIFY(!window.findChild<RunningBar*>("runningBar")->isVisible());
         QStringList items;
         for (auto* action : window.menuBar()->actions().first()->menu()->actions()) if (!action->isSeparator()) items << action->text();
-        QCOMPARE(items, QStringList({"&Import session…", "C&ards…", "&Connections…", "&Firmware…", "&Settings…", "&Quit"}));
+        QCOMPARE(items, QStringList({"&Import session…", "C&ards…", "&Pairing…", "&Firmware…", "&Settings…", "&Quit"}));
         auto* list = window.findChild<QListWidget*>("sessionList");
         emit list->itemActivated(list->item(0));
         auto* sd = window.findChild<QLabel*>("sdState");
@@ -2130,6 +2132,147 @@ for line in s.makefile('rb'):
         QTRY_VERIFY(shown("sdInsert") && shown("sdExchange") && shown("sdExport") && shown("cardPick") && !shown("sdEject"));
         QVERIFY(sd->isVisibleTo(&window));
         answer.stop();
+        window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        QDir(managedFolder()).removeRecursively();
+        QSettings().clear();
+    }
+    // A fake core that logs each command and its argument (a replay file's lines joined with |) to "sent".
+    static void menuCore(const QString& dir, const QByteArray& device) {
+        QFile core(dir + "/core");
+        QVERIFY(core.open(QIODevice::WriteOnly));
+        core.write(QByteArray(R"PY(#!/usr/bin/python3
+import socket,sys
+s=socket.socket(socket.AF_UNIX)
+s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+log=open(sys.argv[0].rsplit('/',1)[0]+'/sent','a')
+mic=b'off'
+for line in s.makefile('rb'):
+    i,cmd,arg=line.rstrip(b'\n').split(b'\t')
+    text=bytes.fromhex(arg.decode())
+    if cmd==b'input-replay': text=open(text,'rb').read().replace(b'\n',b'|')
+    if cmd not in (b'keyboard-state',b'network-state',b'device-state',b'sd-state',b'microphone-state'):
+        log.write(cmd.decode()+' '+text.decode()+'\n'); log.flush()
+    if cmd==b'microphone-mode': mic=text
+    message={b'keyboard-state':b'detached',b'network-state':b'disabled',b'device-state':b'DEVICE',b'sd-state':b'none',b'microphone-state':mic,b'microphone-mode':mic}.get(cmd,b'done')
+    if cmd==b'keyboard-attach': message=b'attached'
+    s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
+    if cmd==b'quit': break
+)PY").replace("DEVICE", device));
+        core.close();
+        QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+    }
+    // The Machine menu and the bar: each row sends its command to the core.
+    void runningMenu() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        putSession("Menu", 6, "palm-tx", 0);
+        QTemporaryDir files;
+        const auto sent = files.path() + "/sent";
+        menuCore(files.path(), "palm-tx");
+        if (QTest::currentTestFailed()) return;
+        auto commands = [&] {
+            QFile f(sent); if (!f.open(QIODevice::ReadOnly)) return QStringList();
+            return QString::fromUtf8(f.readAll()).split('\n', Qt::SkipEmptyParts);
+        };
+        MainWindow window(files.path() + "/core"); window.show(); window.openSession(managedSession("Menu"), true);
+        auto* bar = window.findChild<RunningBar*>("runningBar");
+        QTRY_VERIFY_WITH_TIMEOUT(bar->isVisible() && window.findChild<QPushButton*>("save")->isEnabled(), 5000);
+        QStringList menus;
+        for (auto* action : window.menuBar()->actions()) menus << action->text();
+        QCOMPARE(menus, QStringList({"&File", "&Machine", "&Help"}));
+        QVERIFY(!window.statusBar()->isVisible());
+        QCOMPARE(bar->findChild<QLabel*>("barName")->text(), QString("Menu"));
+        QCOMPARE(bar->findChild<QLabel*>("barSubtitle")->text(), QString("Exact"));
+        auto menuAction = [&](const char* name) { auto* a = window.findChild<QAction*>(name); if (!a) qWarning("no %s", name); return a; };
+        // The T|X has no Hold; the rows it has are there and the others are not.
+        QVERIFY(!menuAction("machineHold")->isVisible());
+        QVERIFY(menuAction("machineMicrophone")->isVisible() && !menuAction("machineMicrophone")->isEnabled());
+        for (auto* name : {"machineKeyboard", "machineNetwork", "machineScreenshot", "machineSave", "machineReset"})
+            QTRY_VERIFY2_WITH_TIMEOUT(menuAction(name)->isVisible() && menuAction(name)->isEnabled(), name, 4000);
+        QTimer answer; answer.setInterval(30);
+        QString choice = "Yes";
+        connect(&answer, &QTimer::timeout, &window, [&] {
+            auto* box = window.findChild<QMessageBox*>();
+            if (!box || !box->isVisible()) return;
+            for (auto* b : box->buttons()) if (b->text() == choice || (choice == "Yes" && box->standardButton(b) == QMessageBox::Yes)) { b->click(); return; }
+        });
+        answer.start();
+        auto expect = [&](const QStringList& list) {
+            QTRY_COMPARE_WITH_TIMEOUT(commands(), list, 4000);
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("save")->isEnabled(), 4000);
+        };
+        menuAction("machineSave")->trigger();
+        QTRY_VERIFY_WITH_TIMEOUT(commands().size() == 1 && commands()[0].startsWith("save ") && commands()[0].endsWith("/Menu.frond"), 4000);
+        QStringList want = commands();
+        expect(want);
+        menuAction("machineKeyboard")->trigger();
+        want << "keyboard-attach on"; expect(want);
+        QTRY_VERIFY(menuAction("machineKeyboard")->isChecked());
+        QVERIFY(bar->findChild<QAction*>("barKeyboard")->isVisible());
+        menuAction("machineNetwork_internet")->trigger();
+        want << "network-mode internet"; expect(want);
+        QTRY_VERIFY(menuAction("machineNetwork_internet")->isChecked());
+        // Screenshot and Power are replays.
+        menuAction("machineScreenshot")->trigger();
+        QTRY_VERIFY_WITH_TIMEOUT(commands().size() >= want.size() + 1, 4000);
+        QVERIFY(commands()[want.size()].startsWith("input-replay 0 snapshot \""));
+        QVERIFY(commands()[want.size()].contains("/Frond/Frond Menu "));
+        want = commands();
+        expect(want);
+        window.findChild<QAction*>("barPower")->trigger();
+        want << "input-replay 0 key-down power|80 key-up power|"; expect(want);
+        window.findChild<QAction*>("barSound")->trigger();
+        want << "audio-off "; expect(want);
+        QVERIFY(!window.findChild<QAction*>("barSound")->isChecked());
+        choice = "Yes";
+        menuAction("machineReset")->trigger();
+        want << "reset "; expect(want);
+        choice = "Erase";
+        menuAction("machineHardReset")->trigger();
+        want << "hard-reset "; expect(want);
+        // Hide bar leaves the menu.
+        menuAction("machineHideBar")->trigger();
+        QVERIFY(!bar->isVisible());
+        QCOMPARE(menuAction("machineHideBar")->text(), QString("Show bar"));
+        menuAction("machineHideBar")->trigger();
+        QVERIFY(bar->isVisible());
+        QVERIFY(!menuAction("machineFullScreen")->isEnabled());
+        menuAction("machineSaveStop")->trigger();
+        QTRY_VERIFY_WITH_TIMEOUT(commands().last() == "quit ", 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(!bar->isVisible() && window.statusBar()->isVisible(), 5000);
+        menus.clear();
+        for (auto* action : window.menuBar()->actions()) menus << action->text();
+        QCOMPARE(menus, QStringList({"&File", "&Help"}));
+        answer.stop();
+        window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        QDir(managedFolder()).removeRecursively();
+        QSettings().clear();
+    }
+    // The replay turns the microphone off in the core; the bar turns it back on.
+    void runningMenuMicrophone() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        putSession("Mic", 6, "palm-zire-72", 0);
+        QTemporaryDir files;
+        const auto sent = files.path() + "/sent";
+        menuCore(files.path(), "palm-zire-72");
+        if (QTest::currentTestFailed()) return;
+        auto commands = [&] {
+            QFile f(sent); if (!f.open(QIODevice::ReadOnly)) return QStringList();
+            return QString::fromUtf8(f.readAll()).split('\n', Qt::SkipEmptyParts);
+        };
+        MainWindow window(files.path() + "/core"); window.show(); window.openSession(managedSession("Mic"), true);
+        auto* mic = window.findChild<QAction*>("machineMicrophone");
+        QTRY_VERIFY_WITH_TIMEOUT(mic->isVisible() && mic->isEnabled(), 5000);
+        mic->trigger();
+        QTRY_COMPARE_WITH_TIMEOUT(commands(), QStringList({"microphone-mode on"}), 4000);
+        QTRY_VERIFY(mic->isChecked());
+        QTRY_VERIFY(window.findChild<QAction*>("barPower")->isEnabled());
+        window.findChild<QAction*>("barPower")->trigger();
+        QTRY_COMPARE_WITH_TIMEOUT(commands(), QStringList({"microphone-mode on", "input-replay 0 key-down power|80 key-up power|", "microphone-mode on"}), 4000);
+        window.findChild<QAction*>("machineSaveStop")->trigger();
+        QTRY_VERIFY_WITH_TIMEOUT(commands().last() == "quit ", 5000);
         window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
         QDir(managedFolder()).removeRecursively();
         QSettings().clear();

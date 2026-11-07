@@ -9,6 +9,8 @@
 #include "FirmwareInput.h"
 #include "SessionStore.h"
 #include "LinkClient.h"
+#include "RunningBar.h"
+#include <QTemporaryDir>
 class ConnectionsWindow;
 class CardsWindow;
 class QFileSystemWatcher;
@@ -18,6 +20,7 @@ class SettingsDialog;
 class QListWidget;
 class QListWidgetItem;
 class QMenu;
+class QScrollArea;
 
 class QLineEdit;
 class QComboBox;
@@ -100,6 +103,14 @@ class MainWindow : public QMainWindow {
     void showIrdaLink(const QJsonObject& status);
     void showConnections();
     void failure(const QString& message, const QString& details = {});
+    // A status message: beside the name in the bar while a machine runs, else in the status bar.
+    void notify(const QString& text, int ms = 5000);
+    void barChosen(runningRules::Id id);
+    void barPressed(RunningBar::Button button);
+    void reveal(QWidget* widget);
+    // Runs `lines` as an input replay, for Screenshot and Power.
+    bool replay(const QString& lines, const QString& kind);
+    void screenshot();
     void showDevice(const QString& id);
     QString deviceLabel() const;
     frondFirmware::Device currentDevice() const;
@@ -107,6 +118,15 @@ class MainWindow : public QMainWindow {
     DesktopClient client;
     LinkClient link;
     QPointer<ConnectionsWindow> connectionsWindow;
+    RunningBar* runningBar{nullptr};
+    QScrollArea* runningScroll{nullptr};
+    QLabel *appsHeading{nullptr}, *deviceHeading{nullptr};
+    QPushButton *saveButton{nullptr}, *saveCopyButton{nullptr}, *logButton{nullptr}, *resetButton{nullptr}, *hardResetButton{nullptr};
+    QMenu* helpMenu{nullptr};
+    bool machineMenuShown{false};
+    std::unique_ptr<QTemporaryDir> replayFiles;  // the replay file the core is reading
+    QString replayKind, replayShot;              // "screenshot" or "power", and the screenshot's file name
+    bool replayMicrophone{false};                // the microphone was on, and the replay turned it off
     QFileSystemWatcher* storeWatcher{nullptr};
     QString irdaSocket;   // the core's IR socket while Infrared uses a connection
     QString irdaLinkText; // the hub's status for it

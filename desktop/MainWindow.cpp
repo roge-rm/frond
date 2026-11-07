@@ -9,6 +9,7 @@
 #include "ConnectionsWindow.h"
 #include "LinkCommon.h"
 #include "CardsWindow.h"
+#include "RunningRules.h"
 #include <QCoreApplication>
 #include <QFileSystemWatcher>
 #include <QJsonObject>
@@ -131,7 +132,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (!plain) runningButtons << b;
         return b;
     };
-    section(tr("Applications"), true);
+    appsHeading = section(tr("Applications"), true);
     auto* apps = new QGridLayout;
     auto* install = button(tr("Install application"), "installApp");
     auto* launchApp = button(tr("Launch application"), "launchApp");
@@ -212,7 +213,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     layout->addWidget(cardReadOnly);
     connect(cardReadOnly, &QCheckBox::clicked, this, [this](bool on) { send("ms-read-only", on ? "on" : "off"); });
 
-    section(tr("Device"));
+    deviceHeading = section(tr("Device"));
     auto* grid = new QGridLayout;
     layout->addLayout(grid);
     grid->setHorizontalSpacing(12);
@@ -360,6 +361,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             send("display", "contrast=" + QString::number(value));
     });
     auto* reset = button(tr("Reset"), "reset");
+    resetButton = reset;
     auto* rotate = button(tr("Rotate"), "rotate");
     rotateButton = rotate;
     // The connector's HotSync button: the IIIx cradle, the T|X and the E2.
@@ -393,6 +395,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     auto* copyButton = button(tr("Save a copy…"), "saveCopy");
     auto* logButton = button(tr("Emulator log"), "emulatorLog", true);
     auto* hardReset = button(tr("Hard reset"), "hardReset");
+    this->saveButton = saveButton; saveCopyButton = copyButton; this->logButton = logButton; hardResetButton = hardReset;
     for (auto* b : {saveButton, copyButton, logButton, hardReset}) { b->setParent(sessionBar); sessionButtons->addWidget(b); }
     connect(saveButton, &QPushButton::clicked, this, [this] { save(); });
     connect(hardReset, &QPushButton::clicked, this, [this] {
@@ -435,6 +438,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     sessionButtons->addStretch(); sessionButtons->addWidget(forceButton); sessionButtons->addWidget(stopButton);
     layout->addStretch();
     auto* scroll = new QScrollArea(this);
+    runningScroll = scroll;
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -453,16 +457,24 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             allowClose = closeAfterStop; client.forceStop();
         }
     });
+    runningBar = new RunningBar(this);
+    addToolBar(Qt::TopToolBarArea, runningBar);
+    connect(runningBar, &RunningBar::chosen, this, &MainWindow::barChosen);
+    connect(runningBar, &RunningBar::pressed, this, &MainWindow::barPressed);
+    connect(runningBar, &RunningBar::networkChosen, this, [this](const QString& mode) {
+        if (const auto index = network->findData(mode); index >= 0 && network->isEnabled()) { network->setCurrentIndex(index); emit network->activated(index); }
+    });
     auto* file = menuBar()->addMenu(tr("&File"));
     importAction = file->addAction(tr("&Import session…"), this, &MainWindow::importSessionDialog);
     importAction->setShortcut(QKeySequence::Open);
     file->addAction(tr("C&ards…"), this, [this] { showCards(); })->setObjectName("cardsAction");
-    file->addAction(tr("&Connections…"), this, &MainWindow::showConnections)->setObjectName("connectionsAction");
+    file->addAction(tr("&Pairing…"), this, &MainWindow::showConnections)->setObjectName("connectionsAction");
     file->addAction(tr("&Firmware…"), this, [this] { showFirmware(); });
     file->addAction(tr("&Settings…"), this, [this] { settingsDialog->exec(); });
     file->addSeparator();
     file->addAction(tr("&Quit"), QKeySequence::Quit, this, &QWidget::close);
     auto* help = menuBar()->addMenu(tr("&Help"));
+    helpMenu = help;
     help->addAction(tr("Hardware &Keyboard Controls"), this, [this] {
         QMessageBox::information(this, tr("Hardware Keyboard Controls"),
             tr("With the Palm window focused and the infrared keyboard detached:\n\n"
@@ -498,13 +510,13 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         failure(message, lines.mid(qMax(0, int(lines.size()) - 40)).join('\n'));
     });
     connect(&client, &DesktopClient::stalled, this, [this] {
-        forceButton->show(); statusBar()->showMessage(tr("The emulator is not responding. Waiting for it to finish…"));
+        forceButton->show(); runningBar->setForceStop(true); notify(tr("The emulator is not responding. Waiting for it to finish…"), 0);
     });
     connect(&client, &DesktopClient::started, this, [this] {
         microphoneArmed = false; microphoneState->clear();
         busy = false; hardResetAfterSave = false;
         frondSessions::touchWork(sessionPath);
-        statusBar()->showMessage(tr("Running. Your session will be saved when you close Frond.")); refresh();
+        notify(tr("Running. Your session will be saved when you close Frond.")); refresh();
         if (stopping) save();
         else send("device-state");
     });
@@ -524,9 +536,9 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             if (const auto error = frondCards::releaseAtClose(sessionFolder(), frondSessions::machineDirOf(sessionPath)); !error.isEmpty())
                 log->appendPlainText(error);
         finalSaved = false; linkedWatcher.reset(); linkedWatcherId.clear(); linkedHolder.clear(); cardMove = {};
-        sdKnown = protectionKnown = false; showSerial({}); loadSerialSettings(); showUsb({}); loadUsbSettings(); showIrda({}); link.setSticky("ir", {}); irdaLinkText.clear(); loadIrdaSettings(); showBluetooth({}); loadBluetoothSettings(); sessionLock.reset(); forceButton->hide(); refreshSessions();
+        sdKnown = protectionKnown = false; showSerial({}); loadSerialSettings(); showUsb({}); loadUsbSettings(); showIrda({}); link.setSticky("ir", {}); irdaLinkText.clear(); loadIrdaSettings(); showBluetooth({}); loadBluetoothSettings(); sessionLock.reset(); forceButton->hide(); runningBar->setForceStop(false); refreshSessions();
         if (closeAfterStop) { allowClose = true; close(); }
-        else statusBar()->showMessage(tr("Stopped."));
+        else notify(tr("Stopped."));
     });
     connect(&client, &DesktopClient::closeRequested, this, [this] { stop(false); });
     connect(&client, &DesktopClient::microphoneState, this, [this](const QString& state) {
@@ -556,13 +568,23 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     });
     connect(&client, &DesktopClient::result, this, [this](const QString& command, bool ok, const QString& code, const QString& message) {
         if (cardProgress) { cardProgress->hide(); cardProgress->deleteLater(); cardProgress = nullptr; }
-        busy = false; forceButton->hide(); refresh();
+        busy = false; forceButton->hide(); runningBar->setForceStop(false); refresh();
+        if (command == "input-replay") {
+            replayFiles.reset();
+            const bool rearm = ok && replayMicrophone;
+            replayMicrophone = false;
+            if (ok) {
+                if (replayKind == "screenshot") notify(tr("Screenshot saved: %1").arg(replayShot));
+                if (rearm) send("microphone-mode", "on");
+                return;
+            }
+        }
         if (command == "install" && installTotal > 0 && installResult(ok, code, message)) return;
         if (memoryStickFiles && QStringList({"ms-files", "ms-get", "ms-put", "ms-mkdir", "ms-delete", "ms-rename"}).contains(command)) return;
         if (!ok && cardMove.stage != CardMove::None) { cardMoveFailed(command, message); return; }
         if (!ok && exchangeStage != ExchangeStage::None) { exchangeResult(false, message); return; }
         if (!ok) {
-            if (code == "cancelled" && !stopping) { statusBar()->showMessage(tr("Cancelled.")); return; }
+            if (code == "cancelled" && !stopping) { notify(tr("Cancelled.")); return; }
             if (command == "save") { copyLock.reset(); pendingCopy.clear(); frondSessions::removeStaging(copyStaging); copyStaging.clear(); }
             hardResetAfterSave = false;
             log->appendPlainText(command + ": " + message);
@@ -674,7 +696,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         }
         if (command == "ms-protection" && !stopping) { send("network-state"); return; }
         if ((command == "ms-create" || command == "ms-insert" || command == "ms-reinsert" || command == "ms-put-in") && !stopping) { send("ms-protection"); return; }
-        statusBar()->showMessage(command == "save" ? tr("Saved.") : tr("Running. Sessions save automatically on close."));
+        notify(command == "save" ? tr("Saved.") : tr("Running. Sessions save automatically on close."));
         const bool savedWorkingCopy = command == "save" && savingPath == sessionPath;
         if (command == "save") {
             if (savedWorkingCopy) {
@@ -712,7 +734,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     usbTip = usb->toolTip(); irdaTip=irda->toolTip();
     frondCards::startUp(sessionFolder());
     refreshSessions();
-    statusBar()->showMessage(tr("Ready. Sessions are saved automatically when you close Frond."));
+    notify(tr("Ready. Sessions are saved automatically when you close Frond."));
     QTimer::singleShot(0, this, [this] {
         if (startupHandled) return;
         startupHandled = true;
@@ -725,6 +747,12 @@ void MainWindow::refresh() {
     home->setVisible(!running);
     runningPage->setVisible(running);
     sessionBar->setVisible(running);
+    statusBar()->setVisible(!running);
+    if (running != machineMenuShown) {
+        machineMenuShown = running;
+        if (running) menuBar()->insertMenu(helpMenu->menuAction(), runningBar->menu());
+        else { menuBar()->removeAction(runningBar->menu()->menuAction()); runningBar->setBarShown(true); }
+    }
     for (auto* state : {serialState, usbState, irdaState, bluetoothState, microphoneState}) state->setVisible(!state->text().isEmpty());
     setWindowTitle(running && !sessionPath.isEmpty() ? QFileInfo(sessionPath).completeBaseName() : tr("Frond"));
     const auto* current = sessionList->currentItem();
@@ -827,6 +855,85 @@ void MainWindow::refresh() {
     }
     cardReadOnly->setVisible(memoryStick && supported && known && cardPresent);
     cardReadOnly->setEnabled(enabled && protectionKnown && !cardInserted);
+    runningRules::State state;
+    state.ready = enabled;
+    state.running = running;
+    if (holdKnown) state.hold = holdOn;
+    state.keyboardAttached = keyboard->isChecked();
+    state.beamOff = irda->currentData() == "off";
+    state.microphone = microphoneArmed ? "on" : microphoneState->text().isEmpty() ? "off" : "off " + microphoneState->text();
+    state.network = network->currentData().toString();
+    state.barShown = runningBar->barShown();
+    QList<QPair<QString, QString>> modes;
+    for (int i = 0; i < network->count(); i++) modes << qMakePair(network->itemData(i).toString(), network->itemText(i));
+    const auto traits = runningRules::traitsFor(currentDevice());
+    runningBar->setMachine(running && !sessionPath.isEmpty() ? QFileInfo(sessionPath).completeBaseName() : QString(),
+                           runningRules::subtitle(traits, runningPreferences.fastEngine, frondFirmware::deviceName(currentDevice())));
+    runningBar->apply(traits, state, runningRules::cardIcon(supported, known, cardPresent, cardInserted),
+                      caps.sound && runningPreferences.audio, modes);
+    runningBar->setVisible(running && runningBar->barShown());
+}
+void MainWindow::notify(const QString& text, int ms) {
+    if (client.running()) runningBar->say(text, ms);
+    else statusBar()->showMessage(text);
+}
+void MainWindow::reveal(QWidget* widget) {
+    if (!widget->isVisibleTo(runningPage)) return;
+    runningScroll->ensureWidgetVisible(widget, 0, 0);
+}
+void MainWindow::barChosen(runningRules::Id id) {
+    using runningRules::Id;
+    // Each row does what its control on the running page does, so both always agree.
+    switch (id) {
+        case Id::Hold: holdToggle->click(); break;
+        case Id::Keyboard: keyboard->click(); break;
+        case Id::Microphone: microphoneToggle->click(); break;
+        case Id::Display: reveal(frondFirmware::runs68k(runningDevice) ? static_cast<QWidget*>(contrastLabel) : static_cast<QWidget*>(soundToggle)); break;
+        case Id::Connections: reveal(serial->isVisibleTo(runningPage) ? static_cast<QWidget*>(serial) : static_cast<QWidget*>(deviceHeading)); break;
+        case Id::Screenshot: screenshot(); break;
+        case Id::HideBar: runningBar->setBarShown(!runningBar->barShown()); refresh(); break;
+        case Id::Save: saveButton->click(); break;
+        case Id::SaveCopy: saveCopyButton->click(); break;
+        case Id::Log: logButton->click(); break;
+        case Id::Reset: resetButton->click(); break;
+        case Id::HardReset: hardResetButton->click(); break;
+        case Id::SaveStop: stopButton->click(); break;
+        case Id::Network: case Id::FullScreen: break;
+    }
+}
+void MainWindow::barPressed(RunningBar::Button button) {
+    switch (button) {
+        case RunningBar::Button::Stop: stopButton->click(); break;
+        case RunningBar::Button::Applications: reveal(appsHeading); break;
+        case RunningBar::Button::Card: reveal(storageHeading); break;
+        case RunningBar::Button::Sound: soundToggle->click(); break;
+        case RunningBar::Button::Power: replay(runningRules::powerReplay(), "power"); break;
+        case RunningBar::Button::ForceStop: forceButton->click(); break;
+    }
+}
+// Writes the replay file and hands it to the core. The core drops the microphone for a replay,
+// so it is turned back on when the replay is loaded.
+bool MainWindow::replay(const QString& lines, const QString& kind) {
+    if (!client.available() || busy || stopping) return false;
+    replayFiles = std::make_unique<QTemporaryDir>();
+    QFile file(replayFiles->filePath("input.replay"));
+    if (!replayFiles->isValid() || !file.open(QIODevice::WriteOnly) || file.write(lines.toUtf8()) < 0) {
+        replayFiles.reset();
+        failure(tr("Couldn't write the input file."));
+        return false;
+    }
+    file.close();
+    replayMicrophone = microphoneArmed; replayKind = kind;
+    if (!send("input-replay", file.fileName())) { replayFiles.reset(); replayMicrophone = false; return false; }
+    return true;
+}
+void MainWindow::screenshot() {
+    const auto folder = QStandardPaths::writableLocation(QStandardPaths::PicturesLocation) + "/Frond";
+    if (!QDir().mkpath(folder)) return failure(tr("Couldn't make the folder %1.").arg(folder));
+    const auto name = runningRules::screenshotName(QFileInfo(sessionPath).completeBaseName(),
+                                                   QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss"));
+    replayShot = name;
+    replay(runningRules::snapshotReplay(folder + "/" + name), "screenshot");
 }
 QString MainWindow::sessionFolder() const {
     return QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/frond/sessions";
@@ -1084,7 +1191,7 @@ void MainWindow::exportSession(const QString& path) {
     if (!confirmReplace(frondSessions::exportDestDir(target))) return;
     const auto error = frondSessions::exportFile(info, target);
     if (!error.isEmpty()) failure(error);
-    else statusBar()->showMessage(tr("Session exported to %1.").arg(frondSessions::exportDestDir(target)));
+    else notify(tr("Session exported to %1.").arg(frondSessions::exportDestDir(target)));
 }
 void MainWindow::deleteSession(const QString& path) {
     const auto info = infoFor(path);
@@ -1124,7 +1231,7 @@ void MainWindow::importSessionDialog() {
     if (path.isEmpty()) return;
     const auto error = importSession(path);
     if (!error.isEmpty()) failure(error);
-    else statusBar()->showMessage(tr("Session imported."));
+    else notify(tr("Session imported."));
 }
 void MainWindow::showFirmware(frondFirmware::Device device) {
     FirmwareDialog dialog(firmwareRoot(), device, this);
@@ -1324,7 +1431,7 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     const bool launched = client.start(coreFor(startDevice), arguments);
     if (!launched) { busy = false; sessionLock.reset(); }
     else attachInfrared();
-    refresh(); statusBar()->showMessage(launched ? tr("Starting the Palm…") : tr("Could not start the Palm."));
+    refresh(); notify(launched ? tr("Starting the Palm…") : tr("Could not start the Palm."));
 }
 QString MainWindow::bluetoothArgument() const {
     return bluetooth->isChecked() ? bluetoothSocket->text() : QStringLiteral("off");
@@ -1531,7 +1638,7 @@ bool MainWindow::installNext() {
     installCurrent = installQueue.takeFirst();
     const int number = installTotal - installQueue.size();
     if (send("install", installCurrent)) {
-        statusBar()->showMessage(tr("Installing %1 of %2…").arg(number).arg(installTotal));
+        notify(tr("Installing %1 of %2…").arg(number).arg(installTotal));
         return true;
     }
     installFailed << QFileInfo(installCurrent).fileName() + ": " + tr("Couldn't send it to the emulator.");
@@ -1557,13 +1664,13 @@ bool MainWindow::installResult(bool ok, const QString& code, const QString& mess
     const int hint = installHint, total = installTotal;
     installTotal = 0; installFailed.clear(); installHint = 0;
     if (failed.isEmpty()) return false;
-    statusBar()->showMessage(tr("Installed %1 of %2.").arg(total - failed.size()).arg(total));
+    notify(tr("Installed %1 of %2.").arg(total - failed.size()).arg(total));
     failure(failed.join('\n') + (hint ? tr("\n\nWait for Palm OS to finish its current activity, then try again.") : QString()));
     return true;
 }
 bool MainWindow::send(const QString& command, const QString& argument) {
     if (!client.request(command, argument)) return false;
-    busy = true; refresh(); statusBar()->showMessage(tr("Working…"));
+    busy = true; refresh(); notify(tr("Working…"));
     const bool msCard = command == "ms-create" || command == "ms-insert" || command == "ms-export";
     if (command == "sd-create" || command == "sd-insert" || command == "sd-export" || msCard) {
         // Large cards take a while; the core reports each percent and stops on cancel.
@@ -1589,7 +1696,7 @@ void MainWindow::stop(bool closeApp) {
     if (exchangeDialog) exchangeDialog->reject();
     else if (memoryStickFiles) memoryStickFiles->reject();
     else if (client.available() && exchangeStage == ExchangeStage::None) save();
-    else statusBar()->showMessage(tr("Waiting to save the session…"));
+    else notify(tr("Waiting to save the session…"));
 }
 void MainWindow::askStop(const QString& message) {
     const auto answer = QMessageBox::warning(this, tr("Session Was Not Saved"),
@@ -1710,7 +1817,7 @@ void MainWindow::exchangeResult(bool ok, const QString& message) {
         }
     } else if (exchangeStage == ExchangeStage::Insert) {
         endExchange();
-        statusBar()->showMessage(tr("Card inserted. Recovery session: %1").arg(exchangeBackup));
+        notify(tr("Card inserted. Recovery session: %1").arg(exchangeBackup));
     }
 }
 
@@ -1852,7 +1959,7 @@ bool MainWindow::continueCardMove(const QString& command, const QString& message
         if (!in.isEmpty()) putInCard(in);
         else {
             refresh();
-            statusBar()->showMessage(tr("Card taken out."));
+            notify(tr("Card taken out."));
         }
         return true;
     }
