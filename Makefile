@@ -575,6 +575,12 @@ test-frond-arm-install: out/frond
 test-host-call-wake: out/frond
 	python3 tests/host-call-wake.py
 
+# Host calls on the T|X with system patches in its native trap table, as UDMH makes them: hooks over
+# the GDB stub that chain to the ROM routines. Same sessions as above.
+.PHONY: test-patched-traps
+test-patched-traps: out/frond
+	python3 tests/patched-traps.py
+
 # m68k-palmos-gdb 5.3 and gdb-multiarch on the debug Hello app (build/hello-debug) on the private
 # OS 3.5 ROM; skips without them.
 # The desktop control socket on both runners; needs a private ARM smoke session and IIIx ROM, else
