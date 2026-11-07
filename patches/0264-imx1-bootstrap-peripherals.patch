@@ -1,0 +1,355 @@
+diff --git a/src/uarm/uarm/imx1_boot_probe.cpp b/src/uarm/uarm/imx1_boot_probe.cpp
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -14,10 +14,14 @@
+     Imx1ProbeResult result{};
+     bool failed = false;
+     ArmCpu* cpu = nullptr;
++    Imx1ProbeOptions options{};
++    Imx1Bootstrap peripherals;
+ 
+     const uint8_t* resolve(uint32_t address, uint32_t size) const {
+         for (uint32_t base : {0x10000000u, alias}) {
+-            if (address >= base && uint64_t(address) + size <= uint64_t(base) + rom.size())
++            // Table 3-1 and section 8.2 limit the bootstrap alias to 1 MiB.
++            const uint32_t length = base == 0 && rom.size() > 0x100000 ? 0x100000 : rom.size();
++            if (address >= base && uint64_t(address) + size <= uint64_t(base) + length)
+                 return rom.data() + address - base;
+         }
+         return nullptr;
+@@ -30,9 +34,25 @@
+                 return true;
+             }
+         }
++        // A JIT fault can retry through the interpreter. Keep the first bus failure.
++        if (p.failed) return false;
++        uint32_t value = 0;
++        if (write && size <= 4) std::memcpy(&value, data, size);
++        const auto status = p.options.bootstrapPeripherals ?
++            p.peripherals.access(address, size, write, value) : Imx1BootstrapAccess::unmapped;
++        ++p.result.busAccesses;
++        if (p.options.busObserver)
++            p.options.busObserver(p.options.busContext, {p.result.trace.step, p.result.trace.pc,
++                                   address, uint32_t(size), value, write, status});
++        if (status == Imx1BootstrapAccess::ok || status == Imx1BootstrapAccess::command) {
++            if (!write) std::memcpy(data, &value, size);
++            return true;
++        }
+         if (!p.failed) {
+             p.failed = true;
+             p.result.stop = write ? Imx1ProbeStop::unsupportedWrite : Imx1ProbeStop::unsupportedRead;
++            if (status != Imx1BootstrapAccess::unmapped) p.result.stop = Imx1ProbeStop::unsupportedPeripheral;
++            p.result.peripheralStatus = status;
+             p.result.address = address;
+             p.result.size = size;
+             if (write && size <= 4) std::memcpy(&p.result.value, data, size);
+@@ -63,6 +83,12 @@
+     if ((i & 0x0fbf0fff) == 0x010f0000) return true;  // MRS
+     if ((i & 0x0fb0fff0) == 0x0120f000 || (i & 0x0fb0f000) == 0x0320f000) return true;  // MSR
+     if ((i & 0x0f000f10) == 0x0e000f10) return true;  // CP15, strict bootstrap handler
++    if ((i & 0x0e000000) == 0x08000000) {
++        const unsigned base = (i >> 16) & 15;
++        // Ordinary ARMv4 LDMIA/STMIA, no PC, user-bank transfers or base in writeback list.
++        return (i & 0x01800000) == 0x00800000 && !(i & 0x00408000) && (i & 0xffff) &&
++               base != 15 && (!(i & 0x00200000) || !(i & (1u << base)));
++    }
+     if ((i & 0x0c000000) == 0x04000000) {
+         // Loading PC and register-specified shifts need further ARMv4T qualification.
+         return !((i & 0x0010f000) == 0x0010f000) && !((i & 0x02000010) == 0x02000010);
+@@ -82,7 +108,8 @@
+ }  // namespace
+ 
+ Imx1ProbeResult imx1BootProbe(const uint8_t* rom, uint32_t size, Imx1ProbeEntry entry,
+-                            uint32_t steps, Imx1ProbeObserver observer, void* context, bool fast) {
++                            uint32_t steps, Imx1ProbeObserver observer, void* context, bool fast,
++                            const Imx1ProbeOptions* options) {
+     if (!cpuSetFastEngine(fast)) {
+         Imx1ProbeResult result{};
+         result.stop = Imx1ProbeStop::engineUnavailable;
+@@ -90,6 +117,9 @@
+     }
+     // The core has process lifetime, as in the existing standalone CPU diagnostics.
+     auto* p = new Probe;
++    if (options) p->options = *options;
++    if (p->options.gpioDInputKnown) p->peripherals.setGpioDInput(p->options.gpioDInput);
++    p->peripherals.setRamMiB(p->options.ramMiB);
+     if (rom && size) p->rom.assign(rom, rom + size);
+     p->alias = entry == Imx1ProbeEntry::resetAlias ? 0 :
+                entry == Imx1ProbeEntry::linkedAlias ? 0x20000000 : 0x10000000;
+@@ -149,6 +179,7 @@
+         case Imx1ProbeStop::unsupportedWrite: return "unsupported-write";
+         case Imx1ProbeStop::exception: return "cpu-exception";
+         case Imx1ProbeStop::engineUnavailable: return "engine-unavailable";
++        case Imx1ProbeStop::unsupportedPeripheral: return "unsupported-peripheral";
+     }
+     return "unknown";
+ }
+diff --git a/src/uarm/uarm/imx1_boot_probe.h b/src/uarm/uarm/imx1_boot_probe.h
+--- a/src/uarm/uarm/imx1_boot_probe.h
++++ b/src/uarm/uarm/imx1_boot_probe.h
+@@ -2,14 +2,30 @@
+ #define FROND_IMX1_BOOT_PROBE_H
+ 
+ #include <cstdint>
++#include "imx1_bootstrap.h"
+ 
+ // The physical flash mapping is observed in the updater. Aliases are explicit experiments.
+ enum class Imx1ProbeEntry { physicalFlash, resetAlias, linkedAlias };
+ enum class Imx1ProbeStop {
+-    budget, unsupportedInstruction, unsupportedCp15, unsupportedRead, unsupportedWrite, exception, engineUnavailable
++    budget, unsupportedInstruction, unsupportedCp15, unsupportedRead, unsupportedWrite, exception, engineUnavailable,
++    unsupportedPeripheral
+ };
+ struct Imx1ProbeTrace {
+     uint32_t step, pc, instruction, cpsr, operand;
++};
++struct Imx1ProbeAccess {
++    uint32_t step, pc, address, size, value;
++    bool write;
++    Imx1BootstrapAccess status;
++};
++using Imx1ProbeBusObserver = void (*)(void*, const Imx1ProbeAccess&);
++struct Imx1ProbeOptions {
++    bool bootstrapPeripherals = false;
++    bool gpioDInputKnown = false;
++    uint32_t gpioDInput = 0;
++    uint32_t ramMiB = 0;
++    Imx1ProbeBusObserver busObserver = nullptr;
++    void* busContext = nullptr;
+ };
+ struct Imx1ProbeResult {
+     Imx1ProbeStop stop;
+@@ -17,11 +33,14 @@
+     uint32_t address, value, size;
+     uint32_t registers[16], cpsr, spsr;
+     uint64_t jitBlocks, jitInstructions;
++    uint64_t busAccesses;
++    Imx1BootstrapAccess peripheralStatus;
+ };
+ using Imx1ProbeObserver = void (*)(void*, const Imx1ProbeTrace&);
+-// One process-owned CPU, no firmware patches, RAM, devices, interrupts or session state.
++// One process-owned CPU, optional bootstrap registers/RAM, no interrupts or session state.
+ Imx1ProbeResult imx1BootProbe(const uint8_t* rom, uint32_t size, Imx1ProbeEntry entry,
+-                            uint32_t steps, Imx1ProbeObserver observer = nullptr, void* context = nullptr, bool fast = false);
++                            uint32_t steps, Imx1ProbeObserver observer = nullptr, void* context = nullptr,
++                            bool fast = false, const Imx1ProbeOptions* options = nullptr);
+ const char* imx1ProbeStopName(Imx1ProbeStop stop);
+ 
+ #endif
+diff --git a/src/uarm/uarm/imx1_bootstrap.cpp b/src/uarm/uarm/imx1_bootstrap.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/uarm/uarm/imx1_bootstrap.cpp
+@@ -0,0 +1,167 @@
++#include "imx1_bootstrap.h"
++
++#include <cstring>
++
++void Imx1Bootstrap::setRamMiB(uint32_t size) {
++    sdram[0].bytes = size == 32 ? 0x02000000 : size == 128 ? 0x04000000 : 0;
++    sdram[1].bytes = size == 128 ? 0x04000000 : 0;
++}
++
++const char* Imx1Bootstrap::registerName(uint32_t address) {
++    switch (address & ~3u) {
++        case 0x00205034: return "LCDC.RMCR";
++        case 0x00220010: return "EIM.CS2U";
++        case 0x00220014: return "EIM.CS2L";
++        case 0x00220018: return "EIM.CS3U";
++        case 0x0022001c: return "EIM.CS3L";
++        case 0x00220000: return "EIM.CS0U";
++        case 0x00220004: return "EIM.CS0L";
++        case 0x0021c120: return "GPIO.GIUS_B";
++        case 0x0021c300: return "GPIO.DDIR_D";
++        case 0x0021c320: return "GPIO.GIUS_D";
++        case 0x0021c324: return "GPIO.SSR_D";
++        case 0x00221000: return "SDRAMC.SDCTL0";
++        case 0x00221004: return "SDRAMC.SDCTL1";
++        default: return nullptr;
++    }
++}
++
++Imx1BootstrapAccess Imx1Bootstrap::access(uint32_t address, uint32_t size, bool write, uint32_t& value) {
++    // Table 3-1 fixes each CSD window at 64 MiB. Installed capacity is an explicit input.
++    if (address >= 0x08000000 && address < 0x10000000)
++        return sdramAccess((address - 0x08000000) >> 26, address & 0x03ffffff, size, write, value);
++    if (!registerName(address)) return Imx1BootstrapAccess::unmapped;
++    if (size != 4 || (address & 3)) return Imx1BootstrapAccess::width;
++    uint32_t* reg = nullptr;
++    uint32_t mask = 0xffffffff;
++    switch (address) {
++        // MC9328MX1RM rev.6.1, table 19-22. Enabling refresh requires the LCD/DMA model.
++        case 0x00205034:
++            reg = &rmcr; mask = 3;
++            if (write && (value & mask)) return Imx1BootstrapAccess::sideEffect;
++            break;
++        // Sections 11.6.2.1/2, table 11-5. CS2 has no attached memory in this subset.
++        // Timing fields are retained; synchronous and page transfers are unsupported.
++        case 0x00220010:
++            reg = &cs2u; mask = 0x3fffff7f;
++            if (write && (value & 0x00300000)) return Imx1BootstrapAccess::sideEffect;
++            break;
++        case 0x00220014: reg = &cs2l; mask = 0xffffff53; break;
++        case 0x00220018:
++            reg = &cs3u; mask = 0x3fffff7f;
++            if (write && (value & 0x00300000)) return Imx1BootstrapAccess::sideEffect;
++            break;
++        case 0x0022001c: reg = &cs3l; mask = 0xffffff53; break;
++        // Sections 11.6.1.1/2. Boot-selected CS0 width is unknown until programmed.
++        case 0x00220000:
++            reg = &cs0u; mask = 0x3fffff7f;
++            if (write && (value & 0x00300000)) return Imx1BootstrapAccess::sideEffect;
++            break;
++        case 0x00220004:
++            if (!write && !cs0lKnown) return Imx1BootstrapAccess::externalInput;
++            if (write) {
++                if (value & ~0xffffff51u) return Imx1BootstrapAccess::reservedBits;
++                if ((value & 0x00000751) != 0x00000501) return Imx1BootstrapAccess::sideEffect;
++                cs0lKnown = true;
++            }
++            reg = &cs0l; mask = 0xffffff51;
++            break;
++        // Tables 32-4 and 32-12. Keep the measured port in GPIO input mode.
++        case 0x0021c300:
++            reg = &ddirD;
++            if (write && value) return Imx1BootstrapAccess::sideEffect;
++            break;
++        case 0x0021c320:
++            reg = &giusD;
++            if (write && value != 0xffffffff) return Imx1BootstrapAccess::sideEffect;
++            break;
++        case 0x0021c120:
++            reg = &giusB;
++            if (write && value != 0xffffffff) return Imx1BootstrapAccess::sideEffect;
++            break;
++        // Table 32-13: reset zero does not establish external levels after reset.
++        case 0x0021c324:
++            if (write) return Imx1BootstrapAccess::sideEffect;
++            if (!gpioDInputKnown) return Imx1BootstrapAccess::externalInput;
++            value = gpioDInput;
++            return Imx1BootstrapAccess::ok;
++        case 0x00221000: return sdramControl(0, write, value);
++        case 0x00221004: return sdramControl(1, write, value);
++    }
++    if (write) {
++        if (value & ~mask) return Imx1BootstrapAccess::reservedBits;
++        *reg = value;
++    } else value = *reg;
++    return Imx1BootstrapAccess::ok;
++}
++
++Imx1BootstrapAccess Imx1Bootstrap::sdramControl(unsigned bank, bool write, uint32_t& value) {
++    auto& s = sdram[bank];
++    if (!write) {
++        if (bank == 1 && !s.controlKnown) return Imx1BootstrapAccess::externalInput;
++        value = s.control;
++        return Imx1BootstrapAccess::ok;
++    }
++    // Table 24-6. The measured sequence uses 32-bit, non-interleaved, CAS-2 SDRAM.
++    constexpr uint32_t mask = 0xfb3bf377;
++    if (value & ~mask) return Imx1BootstrapAccess::reservedBits;
++    const uint32_t mode = (value >> 28) & 7;
++    const uint32_t geometry = value & 0x03ffffff;
++    const uint32_t base = geometry & ~0x0000f000u;
++    if (!(value & 0x80000000) || (value & 0x08000000) || mode > 3 ||
++        (base != 0x01120200 && base != 0x02120200)) return Imx1BootstrapAccess::sideEffect;
++    if (!s.bytes) return Imx1BootstrapAccess::memoryUnavailable;
++    if (((value >> 24) & 3) != (s.bytes == 0x02000000 ? 1u : 2u))
++        return Imx1BootstrapAccess::sideEffect;
++    const uint32_t normal = base | (s.bytes == 0x02000000 ? 0x9000 : 0xd000);
++    if ((mode && geometry != base) || (!mode && geometry != normal))
++        return Imx1BootstrapAccess::sideEffect;
++    if (mode == 0 && (!s.precharged || s.refreshes < 8 || !s.modeSet))
++        return Imx1BootstrapAccess::sequence;
++    if (mode == 1) { s.precharged = false; s.refreshes = 0; s.modeSet = false; }
++    if (mode == 2 && !s.precharged) return Imx1BootstrapAccess::sequence;
++    if (mode == 3 && (s.refreshes < 8 || !s.precharged)) return Imx1BootstrapAccess::sequence;
++    s.control = value;
++    s.controlKnown = true;
++    return Imx1BootstrapAccess::ok;
++}
++
++Imx1BootstrapAccess Imx1Bootstrap::sdramAccess(unsigned bank, uint32_t offset, uint32_t size,
++                                             bool write, uint32_t& value) {
++    auto& s = sdram[bank];
++    if (!s.bytes) return Imx1BootstrapAccess::memoryUnavailable;
++    if (!(s.control & 0x80000000)) return Imx1BootstrapAccess::sequence;
++    const uint32_t mode = (s.control >> 28) & 7;
++    if (mode) {
++        if (size != 4 || (offset & 3)) return Imx1BootstrapAccess::width;
++        // Sections 24.5.3/4/5 and 24.7.3: these accesses issue commands, without RAM data.
++        if (mode == 1 && offset == 0x00200000) s.precharged = true;
++        else if (mode == 2 && offset == 0 && s.precharged) ++s.refreshes;
++        else if (mode == 3 && offset == 0x00111800 && s.refreshes >= 8) s.modeSet = true;
++        else return Imx1BootstrapAccess::sequence;
++        if (!write) value = 0;  // Command-read data is unspecified, diagnostic value only.
++        return Imx1BootstrapAccess::command;
++    }
++    if (!s.modeSet) return Imx1BootstrapAccess::sequence;
++    if ((size != 1 && size != 2 && size != 4) || (offset & (size - 1))) return Imx1BootstrapAccess::width;
++    if (offset >= s.bytes || size > s.bytes - offset) return Imx1BootstrapAccess::memoryUnavailable;
++    if (s.ram.empty()) s.ram.resize(s.bytes);  // Diagnostic power-on contents are zero.
++    if (write) std::memcpy(s.ram.data() + offset, &value, size);
++    else { value = 0; std::memcpy(&value, s.ram.data() + offset, size); }
++    return Imx1BootstrapAccess::ok;
++}
++
++const char* imx1BootstrapAccessName(Imx1BootstrapAccess access) {
++    switch (access) {
++        case Imx1BootstrapAccess::ok: return "ok";
++        case Imx1BootstrapAccess::command: return "sdram-command-no-data";
++        case Imx1BootstrapAccess::unmapped: return "unmapped-register";
++        case Imx1BootstrapAccess::width: return "unsupported-width";
++        case Imx1BootstrapAccess::reservedBits: return "reserved-bits";
++        case Imx1BootstrapAccess::sideEffect: return "unsupported-side-effect";
++        case Imx1BootstrapAccess::externalInput: return "external-input-unavailable";
++        case Imx1BootstrapAccess::memoryUnavailable: return "external-memory-unavailable";
++        case Imx1BootstrapAccess::sequence: return "unsupported-sdram-sequence";
++    }
++    return "unknown";
++}
+diff --git a/src/uarm/uarm/imx1_bootstrap.h b/src/uarm/uarm/imx1_bootstrap.h
+new file mode 100644
+--- /dev/null
++++ b/src/uarm/uarm/imx1_bootstrap.h
+@@ -0,0 +1,40 @@
++#ifndef FROND_IMX1_BOOTSTRAP_H
++#define FROND_IMX1_BOOTSTRAP_H
++
++#include <cstdint>
++#include <vector>
++
++enum class Imx1BootstrapAccess { ok, command, unmapped, width, reservedBits, sideEffect, externalInput, memoryUnavailable, sequence };
++
++// Register-only startup subset. External pin samples require an explicit input source.
++class Imx1Bootstrap {
++   public:
++    void setGpioDInput(uint32_t value) { gpioDInput = value; gpioDInputKnown = true; }
++    void setRamMiB(uint32_t size);
++    Imx1BootstrapAccess access(uint32_t address, uint32_t size, bool write, uint32_t& value);
++    static const char* registerName(uint32_t address);
++
++   private:
++    uint32_t rmcr = 0;
++    uint32_t cs2u = 0, cs2l = 0x0802;
++    uint32_t cs3u = 0, cs3l = 0x0802;
++    uint32_t cs0u = 0x3e00, cs0l = 0;
++    bool cs0lKnown = false;
++    uint32_t ddirD = 0, giusD = 0xffffffff;
++    uint32_t giusB = 0xffffffff;
++    uint32_t gpioDInput = 0;
++    bool gpioDInputKnown = false;
++    struct Sdram {
++        uint32_t control = 0x01000300, bytes = 0;
++        bool controlKnown = false;
++        bool precharged = false, modeSet = false;
++        uint32_t refreshes = 0;
++        std::vector<uint8_t> ram;
++    } sdram[2];
++    Imx1BootstrapAccess sdramControl(unsigned bank, bool write, uint32_t& value);
++    Imx1BootstrapAccess sdramAccess(unsigned bank, uint32_t offset, uint32_t size, bool write, uint32_t& value);
++};
++
++const char* imx1BootstrapAccessName(Imx1BootstrapAccess access);
++
++#endif

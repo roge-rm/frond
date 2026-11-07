@@ -1,0 +1,229 @@
+--- a/src/uarm/uarm/imx1_bootstrap.h
++++ b/src/uarm/uarm/imx1_bootstrap.h
+@@ -8,6 +8,7 @@
+ #include "imx1_cgm.h"
+ #include "imx1_gpio.h"
+ #include "imx1_eim.h"
++#include "imx1_timer.h"
+ 
+ enum class Imx1BootstrapAccess { ok, command, unmapped, width, reservedBits, sideEffect, externalInput, memoryUnavailable, sequence };
+ 
+@@ -16,6 +17,8 @@
+    public:
+     void setGpioDInput(uint32_t value) { gpio.setInput(3, value); }
+     void setRamMiB(uint32_t size);
++    // FastBus CPU cycles are BCLK cycles; both BCLK and PERCLK1 derive from System PLL.
++    void advanceFastBusCycles(uint32_t cycles);
+     Imx1BootstrapAccess access(uint32_t address, uint32_t size, bool write, uint32_t& value);
+     // Instruction reads cannot issue SDRAM commands or consume peripheral state.
+     bool instructionWord(uint32_t address, uint32_t& value) const;
+@@ -30,6 +33,8 @@
+     Imx1Cgm cgm;
+     Imx1Gpio gpio;
+     Imx1Eim eim;
++    Imx1Timer timer1;
++    uint32_t perclk1Phase = 0;
+     std::vector<uint8_t> sram = std::vector<uint8_t>(0x20000);
+     uint32_t rmcr = 0;
+     struct Sdram {
+--- a/src/uarm/uarm/imx1_bootstrap.cpp
++++ b/src/uarm/uarm/imx1_bootstrap.cpp
+@@ -1,6 +1,13 @@
+ #include "imx1_bootstrap.h"
+ 
+ #include <cstring>
++
++void Imx1Bootstrap::advanceFastBusCycles(uint32_t cycles) {
++    const uint64_t clocks = uint64_t(cycles) * cgm.busDivider() + perclk1Phase;
++    const uint32_t divider = cgm.perclk1Divider();
++    timer1.advance(clocks / divider);
++    perclk1Phase = clocks % divider;
++}
+ 
+ void Imx1Bootstrap::setRamMiB(uint32_t size) {
+     sdram[0].bytes = size == 32 ? 0x02000000 : size == 128 ? 0x04000000 : 0;
+@@ -32,6 +39,7 @@
+     if (const auto* name = Imx1Cgm::registerName(address)) return name;
+     if (const auto* name = Imx1Gpio::registerName(address)) return name;
+     if (const auto* name = Imx1Eim::registerName(address)) return name;
++    if (const auto* name = Imx1Timer::registerName(address)) return name;
+     switch (address & ~3u) {
+         case 0x00205034: return "LCDC.RMCR";
+         case 0x00221000: return "SDRAMC.SDCTL0";
+@@ -80,7 +88,16 @@
+         return Imx1BootstrapAccess::ok;
+     }
+     if (Imx1Cgm::registerName(address)) {
+-        switch (cgm.access(address, size, write, value)) {
++        auto next = cgm;
++        const auto result = next.access(address, size, write, value);
++        if (result == Imx1CgmAccess::ok && write) {
++            const bool changed = next.busDivider() != cgm.busDivider() ||
++                                 next.perclk1Divider() != cgm.perclk1Divider();
++            if (changed && timer1.enabled()) return Imx1BootstrapAccess::sideEffect;
++            if (changed) perclk1Phase = 0;
++            cgm = next;
++        }
++        switch (result) {
+             case Imx1CgmAccess::ok: return Imx1BootstrapAccess::ok;
+             case Imx1CgmAccess::unmapped: return Imx1BootstrapAccess::unmapped;
+             case Imx1CgmAccess::width: return Imx1BootstrapAccess::width;
+@@ -97,6 +114,16 @@
+             case Imx1GpioAccess::reservedBits: return Imx1BootstrapAccess::reservedBits;
+             case Imx1GpioAccess::sideEffect: return Imx1BootstrapAccess::sideEffect;
+             case Imx1GpioAccess::externalInput: return Imx1BootstrapAccess::externalInput;
++        }
++    }
++    if (Imx1Timer::registerName(address)) {
++        switch (timer1.access(address - 0x00202000, size, write, value)) {
++            case Imx1TimerAccess::ok: return Imx1BootstrapAccess::ok;
++            case Imx1TimerAccess::unmapped: return Imx1BootstrapAccess::unmapped;
++            case Imx1TimerAccess::width: return Imx1BootstrapAccess::width;
++            case Imx1TimerAccess::reservedBits: return Imx1BootstrapAccess::reservedBits;
++            case Imx1TimerAccess::sideEffect: return Imx1BootstrapAccess::sideEffect;
++            case Imx1TimerAccess::externalInput: return Imx1BootstrapAccess::externalInput;
+         }
+     }
+     if (Imx1Eim::registerName(address)) {
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -175,14 +175,21 @@
+             p->result.stop = Imx1ProbeStop::unsupportedInstruction;
+             break;
+         }
++        // The diagnostic time ratio is qualified only in ARM920T FastBus mode.
++        if (p->options.bootstrapPeripherals && condition(t.instruction, t.cpsr) &&
++            (t.instruction & 0x0fff0fff) == 0x0e010f10 && (t.operand & 0xc0000000)) {
++            p->result.stop = Imx1ProbeStop::unsupportedCp15;
++            break;
++        }
+         const auto exceptions = cpuExceptionSequence(p->cpu);
+-        cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(p->cpu, 1);
++        const auto cycles = cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(p->cpu, 1);
+         if (p->failed) break;
+         if (cpuExceptionSequence(p->cpu) != exceptions) {
+             p->result.stop = (t.instruction & 0x0f000f10) == 0x0e000f10 ?
+                              Imx1ProbeStop::unsupportedCp15 : Imx1ProbeStop::exception;
+             break;
+         }
++        if (p->options.bootstrapPeripherals) p->peripherals.advanceFastBusCycles(cycles);
+     }
+     std::memcpy(p->result.registers, cpuGetRegisters(p->cpu), sizeof(p->result.registers));
+     p->result.cpsr = cpuGetRegExternal(p->cpu, ARM_REG_NUM_CPSR);
+--- a/src/uarm/uarm/imx1_cgm.h
++++ b/src/uarm/uarm/imx1_cgm.h
+@@ -10,6 +10,8 @@
+    public:
+     Imx1CgmAccess access(uint32_t address, uint32_t size, bool write, uint32_t& value);
+     static const char* registerName(uint32_t address);
++    uint32_t busDivider() const { return ((cscr >> 10) & 15) + 1; }
++    uint32_t perclk1Divider() const { return (pcdr & 15) + 1; }
+ 
+    private:
+     uint32_t cscr = 0x0f00ac03, pcdr = 0x000b00bb;
+--- /dev/null
++++ b/src/uarm/uarm/imx1_timer.h
+@@ -0,0 +1,22 @@
++#ifndef FROND_IMX1_TIMER_H
++#define FROND_IMX1_TIMER_H
++
++#include <cstdint>
++
++enum class Imx1TimerAccess { ok, unmapped, width, reservedBits, sideEffect, externalInput };
++
++// MC9328MX1RM chapter 26. The caller supplies elapsed PERCLK1 edges.
++class Imx1Timer {
++   public:
++    Imx1TimerAccess access(uint32_t offset, uint32_t size, bool write, uint32_t& value);
++    void advance(uint64_t perclk1Cycles);
++    bool enabled() const { return control & 1; }
++    static const char* registerName(uint32_t address);
++
++   private:
++    uint32_t control = 0, prescaler = 0, compare = 0xffffffff;
++    uint32_t counter = 0, status = 0, statusRead = 0;
++    uint32_t phase = 0;
++};
++
++#endif
+--- /dev/null
++++ b/src/uarm/uarm/imx1_timer.cpp
+@@ -0,0 +1,78 @@
++#include "imx1_timer.h"
++
++const char* Imx1Timer::registerName(uint32_t address) {
++    static const char* names[] = {"TIMER1.TCTL", "TIMER1.TPRER", "TIMER1.TCMP",
++                                  "TIMER1.TCR", "TIMER1.TCN", "TIMER1.TSTAT"};
++    if (address < 0x00202000 || address >= 0x00202018) return nullptr;
++    return names[(address - 0x00202000) >> 2];
++}
++
++Imx1TimerAccess Imx1Timer::access(uint32_t offset, uint32_t size, bool write, uint32_t& value) {
++    if (offset >= 0x18) return Imx1TimerAccess::unmapped;
++    if (size != 4 || (offset & 3)) return Imx1TimerAccess::width;
++    if (!write) {
++        switch (offset) {
++            case 0x00: value = control; break;
++            case 0x04: value = prescaler; break;
++            case 0x08: value = compare; break;
++            case 0x0c: value = 0; break;  // Capture is disabled in every accepted configuration.
++            case 0x10: value = counter; break;
++            case 0x14: value = status; statusRead |= status; break;
++        }
++        return Imx1TimerAccess::ok;
++    }
++    switch (offset) {
++        case 0x00: {
++            if (value & ~0x81ffu) return Imx1TimerAccess::reservedBits;
++            // Reset has a three-SystemCLK hold. Capture and interrupt delivery are unconnected.
++            if (value & 0x8010) return Imx1TimerAccess::sideEffect;
++            if (value & 0xc0) return Imx1TimerAccess::externalInput;
++            if (value & 0x20) return Imx1TimerAccess::sideEffect;
++            const unsigned source = (value >> 1) & 7;
++            if (source >= 3) return Imx1TimerAccess::externalInput;
++            // Live source changes need the prescaler handoff qualified.
++            if (enabled() && (value & 1) && ((value ^ control) & 0xe))
++                return Imx1TimerAccess::sideEffect;
++            control = value;
++            if (!enabled()) { counter = 0; phase = 0; }
++            break;
++        }
++        case 0x04:
++            if (value & ~0xffu) return Imx1TimerAccess::reservedBits;
++            if (enabled() && value != prescaler) return Imx1TimerAccess::sideEffect;
++            prescaler = value;
++            break;
++        case 0x08: compare = value; break;
++        case 0x0c: case 0x10: return Imx1TimerAccess::sideEffect;
++        case 0x14: {
++            if (value & ~3u) return Imx1TimerAccess::reservedBits;
++            const uint32_t cleared = statusRead & ~value;
++            status &= ~cleared;
++            statusRead &= ~cleared;
++            break;
++        }
++    }
++    return Imx1TimerAccess::ok;
++}
++
++void Imx1Timer::advance(uint64_t perclk1Cycles) {
++    const unsigned source = (control >> 1) & 7;
++    if (!enabled() || !source) return;
++    const uint32_t divisor = (prescaler + 1) * (source == 2 ? 16 : 1);
++    uint64_t ticks = perclk1Cycles / divisor;
++    const uint64_t remainder = perclk1Cycles % divisor + phase;
++    ticks += remainder / divisor;
++    phase = remainder % divisor;
++    if (!ticks) return;
++    uint64_t distance = uint32_t(compare - counter);
++    if (!distance) distance = uint64_t(1) << 32;
++    if (ticks >= distance) {
++        status |= 1;
++        if (!(control & 0x100)) {
++            const uint64_t period = compare ? compare : uint64_t(1) << 32;
++            counter = (ticks - distance) % period;
++            return;
++        }
++    }
++    counter += uint32_t(ticks);
++}

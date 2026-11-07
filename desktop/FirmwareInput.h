@@ -107,6 +107,9 @@ inline QString validateFiles(Device chosen, const QString& norPath, const QStrin
     if (!QFileInfo(norPath).isFile() || !nor.open(QIODevice::ReadOnly))
         return QStringLiteral("Choose a readable NOR firmware file.");
     const auto header = norHeader(nor);
+    const auto detected = inspectNor(nor).profile;
+    if (detected && !detected->frontend.available)
+        return QStringLiteral("The %1 isn't supported yet.").arg(QString::fromUtf8(detected->displayName));
     Device device = chosen;
     if (device == Device::automatic) {
         device = detectDevice(norPath);

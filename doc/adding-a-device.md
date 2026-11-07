@@ -24,6 +24,8 @@ Hardware that exists on the real device but isn't done yet stays in the profile 
 
 For a shared board, audit checks for the existing device type and name in the core, frontends and tools. Share hardware selection through the board model, and use capabilities for supported host interfaces. Keep ROM signatures, firmware-specific patches and qualified audio hooks separate. Test the existing device too when changing a shared path.
 
+The [Zodiac 2 bring-up notes](zodiac2-bringup.md) track the staged i.MX1 model and remaining boot work.
+
 ## Profile fields
 
 A `DeviceProfile5` has these fields. The name is what sessions, settings, the control socket, `--device` and the logs use. `DeviceType5` is internal and never saved. Don't change a name or a saved display ID once it's out.

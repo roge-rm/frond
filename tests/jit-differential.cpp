@@ -1657,10 +1657,11 @@ bool directed(Engines& e) {
         // e880 0003 is stm.w r0, {r0, r1}; as a BLX suffix it goes to ARM at 0x10008.
         {"thumb lone blx suffix at the start", {0xe880, 0x0003, 0xe7fe, 0x0000, 0xfffe, 0xeaff}, true, USR,
          {{0, 0x20100}, {14, 0xff08}}, {{Expect::REG, 14, 0x10003}, {Expect::CPSR, 0, USR, 0x3f}}},
+        // ARM DDI0100I A7.1.17: a BL prefix records its address +4 in LR.
         {"thumb bl prefix without a suffix", {0xf000, 0x2005}, true, USR, {{0, 0xffffffff}},
-         {{Expect::REG, 0, 5}, {Expect::REG, 14, 0x10002}}},
+         {{Expect::REG, 0, 5}, {Expect::REG, 14, 0x10004}}},
         {"thumb bl prefix without a suffix in a block", {0x2201, 0xf000, 0x2005}, true, USR, {{0, 0xffffffff}},
-         {{Expect::REG, 0, 5}, {Expect::REG, 2, 1}, {Expect::REG, 14, 0x10004}}},
+         {{Expect::REG, 0, 5}, {Expect::REG, 2, 1}, {Expect::REG, 14, 0x10006}}},
         // An IRQ handler returns with ldm^ (interpreter) onto a BL suffix at 0x1000c.
         {"irq ldm^ return onto a bl suffix",
          {0xe16ff002, 0xe58d3000, 0xe8dd8000, 0x4f70f800, 0xe7fee7fe}, false, IRQ,

@@ -1,0 +1,14 @@
+--- a/src/uarm/uarm/cp15mmu.cpp
++++ b/src/uarm/uarm/cp15mmu.cpp
+@@ -121,6 +121,11 @@
+             }
+         }
+         if (read) return false;
++        if (CRn == 7 && op2 == 2 && (CRm == 10 || CRm == 14)) {
++            // Reset invalidates Dcache; enable, allocation and diagnostic writes stay gated.
++            // DDI0151C 2.3.11: index bits 31:26, segment bits 7:5, all other bits SBZ.
++            return !(cp15->control & 4) && !(val & ~0xfc0000e0u);
++        }
+         if (CRn == 7 && op2 == 0 && (CRm == 5 || CRm == 6 || CRm == 7)) {
+             if (CRm != 6) icacheInvalGuest(cp15->ic);
+             return true;

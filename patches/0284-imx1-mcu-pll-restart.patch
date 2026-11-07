@@ -1,0 +1,112 @@
+--- a/src/uarm/uarm/imx1_cgm.h
++++ b/src/uarm/uarm/imx1_cgm.h
+@@ -5,11 +5,19 @@
+ 
+ enum class Imx1CgmAccess { ok, unmapped, width, reservedBits, sideEffect, externalInput };
+ 
+-// MC9328MX1RM chapter 12. Static configuration only, without clock progression.
++struct Imx1PllRatio {
++    uint64_t numerator;
++    uint32_t denominator;
++};
++
++// MC9328MX1RM chapter 12. Internal-source FastBus timing subset.
+ class Imx1Cgm {
+    public:
+     Imx1CgmAccess access(uint32_t address, uint32_t size, bool write, uint32_t& value);
+     static const char* registerName(uint32_t address);
++    void advanceSystemPllCycles(uint64_t cycles);
++    // Nominal programmed ratio to CLK32, without asserting a valid or locked output.
++    Imx1PllRatio mcuPllTargetRatio() const;
+     uint32_t busDivider() const { return ((cscr >> 10) & 15) + 1; }
+     uint32_t perclk1Divider() const { return (pcdr & 15) + 1; }
+ 
+@@ -17,6 +25,9 @@
+     uint32_t cscr = 0x0f00ac03, pcdr = 0x000b00bb;
+     uint32_t mpctl0 = 0x003f1437, mpctl1 = 0;
+     uint32_t spctl0 = 0x043f1437, spctl1 = 0;
++    uint32_t mcuRestartCycles = 0;
++    // No MCU lock flag or qualified settling interval is available after programming.
++    bool mcuTimingUnknown = false;
+ };
+ 
+ #endif
+--- a/src/uarm/uarm/imx1_cgm.cpp
++++ b/src/uarm/uarm/imx1_cgm.cpp
+@@ -1,4 +1,29 @@
+ #include "imx1_cgm.h"
++
++#include <algorithm>
++#include <numeric>
++
++Imx1PllRatio Imx1Cgm::mcuPllTargetRatio() const {
++    // Equation 12-1 and table 12-9: internal reference = 512 * CLK32, MFN unsigned.
++    const uint32_t pd = ((mpctl0 >> 26) & 15) + 1;
++    const uint32_t mfd = ((mpctl0 >> 16) & 1023) + 1;
++    const uint32_t mfi = std::max(5u, (mpctl0 >> 10) & 15);
++    const uint32_t mfn = mpctl0 & 1023;
++    const uint64_t numerator = uint64_t(1024) * (mfi * mfd + mfn);
++    const uint32_t denominator = pd * mfd;
++    const uint32_t common = std::gcd(numerator, uint64_t(denominator));
++    return {numerator / common, denominator / common};
++}
++
++void Imx1Cgm::advanceSystemPllCycles(uint64_t cycles) {
++    if (!mcuRestartCycles) return;
++    if (cycles >= mcuRestartCycles) {
++        mcuRestartCycles = 0;
++        cscr &= ~0x00200000u;
++    } else {
++        mcuRestartCycles -= cycles;
++    }
++}
+ 
+ const char* Imx1Cgm::registerName(uint32_t address) {
+     switch (address & ~3u) {
+@@ -32,13 +57,30 @@
+         return Imx1CgmAccess::ok;
+     }
+     if (value & ~mask) return Imx1CgmAccess::reservedBits;
++    if ((address == 0x0021b004 || address == 0x0021b00c) &&
++        (!(value & 0x03ff0000) || (value & 1023) == 1023))
++        return Imx1CgmAccess::reservedBits;
+     if (address == 0x0021b000) {
+         if ((value >> 29) > 5) return Imx1CgmAccess::reservedBits;
+-        // Restart and shutdown require a scheduler. External source selection needs board clocks.
+-        if ((value & 0x00600000) || (value & 3) != 3) return Imx1CgmAccess::sideEffect;
++        // System PLL changes affect FastBus and need a separate clock handoff.
++        if ((value & 0x00400000) || (value & 3) != 3) return Imx1CgmAccess::sideEffect;
+         if ((value ^ cscr) & 0x00070000) return Imx1CgmAccess::externalInput;
++        if (value & 0x00200000) {
++            if (mcuRestartCycles) return Imx1CgmAccess::sideEffect;
++            // Internal-source reset SPCTL0 gives System PLL / CLK32 = 3000.
++            // Choose the documented maximum of two CLK32 periods, without claiming lock.
++            mcuRestartCycles = 2 * 3000;
++            mcuTimingUnknown = true;
++        }
++        // Writing zero has no effect on a pending self-clearing restart request.
++        *reg = (value & ~0x00200000u) | (mcuRestartCycles ? 0x00200000u : 0);
++        return Imx1CgmAccess::ok;
++    } else if (address == 0x0021b004) {
++        // Repeat writes need 56 FCLK cycles. Unqualified FCLK cannot establish that delay.
++        if (mcuTimingUnknown) return Imx1CgmAccess::externalInput;
++        mcuTimingUnknown = true;
+     } else if (address != 0x0021b020) {
+-        // PLL programming loses lock and has minimum write spacing in clock cycles.
++        // BRMO timing and System PLL programming remain unqualified.
+         return Imx1CgmAccess::sideEffect;
+     }
+     *reg = value;
+--- a/src/uarm/uarm/imx1_bootstrap.cpp
++++ b/src/uarm/uarm/imx1_bootstrap.cpp
+@@ -3,7 +3,9 @@
+ #include <cstring>
+ 
+ void Imx1Bootstrap::advanceFastBusCycles(uint32_t cycles) {
+-    const uint64_t clocks = uint64_t(cycles) * cgm.busDivider() + perclk1Phase;
++    const uint64_t systemClocks = uint64_t(cycles) * cgm.busDivider();
++    cgm.advanceSystemPllCycles(systemClocks);
++    const uint64_t clocks = systemClocks + perclk1Phase;
+     const uint32_t divider = cgm.perclk1Divider();
+     timer1.advance(clocks / divider);
+     perclk1Phase = clocks % divider;

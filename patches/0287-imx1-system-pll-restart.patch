@@ -1,0 +1,297 @@
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -30,6 +30,9 @@
+     }
+     static bool access(void* context, uint32_t address, uint_fast8_t size, bool write, void* data) {
+         auto& p = *static_cast<Probe*>(context);
++        // Further data accesses within one instruction also wait for the nominal bus clock.
++        if (!p.failed && p.options.bootstrapPeripherals && !memIsInstructionFetch(p.mem))
++            p.peripherals.finishSystemPllBusStall();
+         if (!write) {
+             if (const auto* source = p.resolve(address, size)) {
+                 std::memcpy(data, source, size);
+@@ -193,6 +196,7 @@
+     if (options) p->options = *options;
+     if (p->options.gpioAInputKnown) p->peripherals.setGpioInput(0, p->options.gpioAInput);
+     if (p->options.gpioDInputKnown) p->peripherals.setGpioDInput(p->options.gpioDInput);
++    p->peripherals.setSystemPllScenario(p->options.assumeSpllSettled);
+     p->peripherals.setRamMiB(p->options.ramMiB);
+     if (rom && size) p->rom.assign(rom, rom + size);
+     p->alias = entry == Imx1ProbeEntry::resetAlias ? 0 :
+@@ -209,6 +213,8 @@
+     bool blPrefix = false;
+     uint32_t blNextPc = 0;
+     for (uint32_t step = 0; step < steps; ++step) {
++        // Conservative bus stall: jump to the reference event without retiring instructions.
++        if (p->options.bootstrapPeripherals) p->peripherals.finishSystemPllBusStall();
+         auto& t = p->result.trace;
+         t = {step, cpuGetRegisters(p->cpu)[15], 0,
+              cpuGetRegExternal(p->cpu, ARM_REG_NUM_CPSR), 0, cpuIsThumb(p->cpu) ? 2u : 4u};
+--- a/src/uarm/uarm/imx1_boot_probe.h
++++ b/src/uarm/uarm/imx1_boot_probe.h
+@@ -23,6 +23,7 @@
+ struct Imx1ProbeOptions {
+     bool bootstrapPeripherals = false;
+     bool assumeMpllSettled = false;
++    bool assumeSpllSettled = false;
+     bool gpioAInputKnown = false;
+     uint32_t gpioAInput = 0;
+     bool gpioDInputKnown = false;
+--- a/src/uarm/uarm/imx1_bootstrap.cpp
++++ b/src/uarm/uarm/imx1_bootstrap.cpp
+@@ -2,22 +2,50 @@
+ 
+ #include <cstring>
+ #include <cassert>
++#include <algorithm>
++#include <limits>
+ 
+ void Imx1Bootstrap::advanceCpuCycles(uint32_t cycles, uint32_t mode, bool assumeSettled) {
+     assert(cpuClockModeSupported(mode, assumeSettled));
+-    uint64_t systemClocks;
+-    if (mode == 3) {
+-        asynchronousUsed = true;
+-        const auto pll = cgm.mcuPllTargetRatio();
+-        // PLL numerator < 2^24, denominator <= 2^14, prescaler <= 2.
+-        // A uint32_t cycle charge times 3000 * denominator * prescaler fits uint64_t.
+-        const uint64_t clocks = uint64_t(cycles) * 3000 * pll.denominator * cgm.mcuPrescaler() + systemPllPhase;
+-        systemClocks = clocks / pll.numerator;
+-        systemPllPhase = clocks % pll.numerator;
+-    } else {
+-        systemClocks = uint64_t(cycles) * cgm.busDivider();
+-    }
+-    cgm.advanceSystemPllCycles(systemClocks);
++    if (mode != 3) {
++        advanceSystemOutput(uint64_t(cycles) * cgm.busDivider());
++        return;
++    }
++    asynchronousUsed = true;
++    const auto mcu = cgm.mcuPllTargetRatio();
++    // A 32-bit charge times denominator (<= 16384) and PRESC (<= 2) fits uint64_t.
++    uint64_t units = uint64_t(cycles) * mcu.denominator * cgm.mcuPrescaler();
++    if (const auto pending = cgm.systemRestartRemaining()) {
++        const auto elapsed = std::min(units, pending);
++        units -= elapsed;
++        if (cgm.advanceSystemRestart(elapsed)) systemPllPhase = 0;
++        // LF=0 holds the output high. Timer and peripheral divider phases are retained.
++    }
++    const auto system = cgm.systemPllActiveRatio();
++    const uint64_t denominator = mcu.numerator * system.denominator;
++    while (units) {
++        // Bound multiplication for every legal PLL field and maximum CPU charge on 32-bit hosts.
++        const uint64_t chunk = std::min(units,
++            (std::numeric_limits<uint64_t>::max() - systemPllPhase) / system.numerator);
++        const uint64_t clocks = chunk * system.numerator + systemPllPhase;
++        cgm.advanceSystemWriteFraction(chunk * system.numerator, denominator);
++        advanceSystemOutput(clocks / denominator, false);
++        systemPllPhase = clocks % denominator;
++        units -= chunk;
++    }
++}
++
++uint64_t Imx1Bootstrap::finishSystemPllBusStall() {
++    const auto pending = cgm.systemRestartRemaining();
++    if (pending) {
++        cgm.advanceSystemRestart(pending);
++        systemPllPhase = 0;
++    }
++    return pending;
++}
++
++void Imx1Bootstrap::advanceSystemOutput(uint64_t systemClocks, bool wholeWritePeriods) {
++    cgm.advanceSystemPllCycles(systemClocks, wholeWritePeriods);
+     const uint64_t clocks = systemClocks + perclk1Phase;
+     const uint32_t divider = cgm.perclk1Divider();
+     timer1.advance(clocks / divider);
+@@ -114,9 +142,14 @@
+         if (write && asynchronousUsed &&
+             (address == 0x0021b004 || (address == 0x0021b000 && (value & 0x00200000))))
+             return Imx1BootstrapAccess::sideEffect;
++        // Holding System PLL output high requires the independent asynchronous MCU clock.
++        if (write && address == 0x0021b000 && (value & 0x00400000) && cpuClockMode != 3)
++            return Imx1BootstrapAccess::sideEffect;
+         auto next = cgm;
+         const auto result = next.access(address, size, write, value);
+         if (result == Imx1CgmAccess::ok && write) {
++            if (cpuClockMode == 3 && !asynchronousRatioSupported(next.systemPllTargetRatio()))
++                return Imx1BootstrapAccess::sideEffect;
+             const bool changed = next.busDivider() != cgm.busDivider() ||
+                                  next.perclk1Divider() != cgm.perclk1Divider();
+             if (cpuClockMode == 3 && (changed || next.mcuPrescaler() != cgm.mcuPrescaler()))
+--- a/src/uarm/uarm/imx1_bootstrap.h
++++ b/src/uarm/uarm/imx1_bootstrap.h
+@@ -16,19 +16,26 @@
+ // Startup memory/register subset. External pin samples require an explicit input source.
+ class Imx1Bootstrap {
+    public:
++    void setSystemPllScenario(bool enabled) { cgm.setSystemPllScenario(enabled); }
+     void setGpioInput(unsigned port, uint32_t value) { gpio.setInput(port, value); }
+     void setGpioDInput(uint32_t value) { setGpioInput(3, value); }
+     void setRamMiB(uint32_t size);
+     // FastBus CPU cycles are BCLK cycles; both BCLK and PERCLK1 derive from System PLL.
+     void advanceFastBusCycles(uint32_t cycles) { advanceCpuCycles(cycles, 0, false); }
+     bool cpuClockModeSupported(uint32_t mode, bool assumeSettled) const {
+-        if (mode == 0) return true;
++        if (mode == 0) return !cgm.systemRestartRemaining();
+         if (mode != 3 || !cgm.mcuClockReady(assumeSettled)) return false;
++        return asynchronousRatioSupported(cgm.systemPllActiveRatio());
++    }
++    bool asynchronousRatioSupported(Imx1PllRatio system) const {
+         const auto pll = cgm.mcuPllTargetRatio();
+         // DDI0151C 5.4 requires asynchronous FCLK strictly greater than BCLK.
+-        return pll.numerator * cgm.busDivider() >
+-               uint64_t(3000) * pll.denominator * cgm.mcuPrescaler();
++        return pll.numerator * system.denominator * cgm.busDivider() >
++               system.numerator * pll.denominator * cgm.mcuPrescaler();
+     }
++    // Finish a held-high System PLL interval before the next architectural bus access.
++    // Returns elapsed independent reference units, without retiring CPU instructions.
++    uint64_t finishSystemPllBusStall();
+     // Charge with the post-instruction mode, preserving System PLL and PERCLK1 fractions.
+     void advanceCpuCycles(uint32_t cycles, uint32_t mode, bool assumeSettled);
+     Imx1BootstrapAccess access(uint32_t address, uint32_t size, bool write, uint32_t& value, uint32_t cpuClockMode = 0);
+@@ -50,6 +57,7 @@
+     Imx1Sysctrl sysctrl;
+     uint32_t perclk1Phase = 0;
+     uint64_t systemPllPhase = 0;
++    void advanceSystemOutput(uint64_t clocks, bool wholeWritePeriods = true);
+     bool asynchronousUsed = false;
+     std::vector<uint8_t> sram = std::vector<uint8_t>(0x20000);
+     uint32_t rmcr = 0;
+--- a/src/uarm/uarm/imx1_cgm.cpp
++++ b/src/uarm/uarm/imx1_cgm.cpp
+@@ -3,19 +3,47 @@
+ #include <algorithm>
+ #include <numeric>
+ 
+-Imx1PllRatio Imx1Cgm::mcuPllTargetRatio() const {
++static Imx1PllRatio pllRatio(uint32_t control) {
+     // Equation 12-1 and table 12-9: internal reference = 512 * CLK32, MFN unsigned.
+-    const uint32_t pd = ((mpctl0 >> 26) & 15) + 1;
+-    const uint32_t mfd = ((mpctl0 >> 16) & 1023) + 1;
+-    const uint32_t mfi = std::max(5u, (mpctl0 >> 10) & 15);
+-    const uint32_t mfn = mpctl0 & 1023;
++    const uint32_t pd = ((control >> 26) & 15) + 1;
++    const uint32_t mfd = ((control >> 16) & 1023) + 1;
++    const uint32_t mfi = std::max(5u, (control >> 10) & 15);
++    const uint32_t mfn = control & 1023;
+     const uint64_t numerator = uint64_t(1024) * (mfi * mfd + mfn);
+     const uint32_t denominator = pd * mfd;
+     const uint32_t common = std::gcd(numerator, uint64_t(denominator));
+     return {numerator / common, denominator / common};
+ }
+ 
+-void Imx1Cgm::advanceSystemPllCycles(uint64_t cycles) {
++Imx1PllRatio Imx1Cgm::mcuPllTargetRatio() const { return pllRatio(mpctl0); }
++Imx1PllRatio Imx1Cgm::systemPllTargetRatio() const { return pllRatio(spctl0); }
++Imx1PllRatio Imx1Cgm::systemPllActiveRatio() const { return pllRatio(activeSpctl0); }
++
++bool Imx1Cgm::advanceSystemRestart(uint64_t units) {
++    if (!systemRestartUnits) return false;
++    if (units < systemRestartUnits) {
++        systemRestartUnits -= units;
++        return false;
++    }
++    systemRestartUnits = 0;
++    activeSpctl0 = spctl0;
++    // A new output period discards incomplete spacing credit conservatively.
++    systemWritePhase = 0;
++    cscr &= ~0x00400000u;
++    return true;
++}
++
++void Imx1Cgm::advanceSystemWriteFraction(uint64_t numerator, uint64_t denominator) {
++    // Write-relative progress cannot borrow the output phase from before the write.
++    // The bootstrap denominator is below 2^38, so adding two remainders fits uint64_t.
++    const uint64_t fraction = numerator % denominator + systemWritePhase;
++    const uint64_t periods = numerator / denominator + fraction / denominator;
++    systemWritePhase = fraction % denominator;
++    systemWriteDelay -= std::min<uint64_t>(periods, systemWriteDelay);
++}
++
++void Imx1Cgm::advanceSystemPllCycles(uint64_t cycles, bool wholeWritePeriods) {
++    if (wholeWritePeriods) systemWriteDelay -= std::min<uint64_t>(cycles, systemWriteDelay);
+     if (!mcuRestartCycles) return;
+     if (cycles >= mcuRestartCycles) {
+         mcuRestartCycles = 0;
+@@ -53,7 +81,11 @@
+     }
+     if (!write) {
+         // LF depends on elapsed reference clocks, not on register reads.
+-        if (address == 0x0021b010) return Imx1CgmAccess::externalInput;
++        if (address == 0x0021b010) {
++            if (!nominalSystemPll) return Imx1CgmAccess::externalInput;
++            value = spctl1 | (systemRestartUnits ? 0 : 0x8000);
++            return Imx1CgmAccess::ok;
++        }
+         value = *reg;
+         return Imx1CgmAccess::ok;
+     }
+@@ -63,9 +95,10 @@
+         return Imx1CgmAccess::reservedBits;
+     if (address == 0x0021b000) {
+         if ((value >> 29) > 5) return Imx1CgmAccess::reservedBits;
+-        // System PLL changes affect FastBus and need a separate clock handoff.
+-        if ((value & 0x00400000) || (value & 3) != 3) return Imx1CgmAccess::sideEffect;
++        if ((value & 3) != 3) return Imx1CgmAccess::sideEffect;
+         if ((value ^ cscr) & 0x00070000) return Imx1CgmAccess::externalInput;
++        if ((value & 0x00400000) && (!nominalSystemPll || systemRestartUnits))
++            return Imx1CgmAccess::sideEffect;
+         if (value & 0x00200000) {
+             if (mcuRestartCycles) return Imx1CgmAccess::sideEffect;
+             // Internal-source reset SPCTL0 gives System PLL / CLK32 = 3000.
+@@ -74,13 +107,23 @@
+             mcuRestartComplete = false;
+             mcuTimingUnknown = true;
+         }
++        if (value & 0x00400000) systemRestartUnits = 2 * mcuPllTargetRatio().numerator;
+         // Writing zero has no effect on a pending self-clearing restart request.
+-        *reg = (value & ~0x00200000u) | (mcuRestartCycles ? 0x00200000u : 0);
++        *reg = (value & ~0x00600000u) | (mcuRestartCycles ? 0x00200000u : 0) |
++               (systemRestartUnits ? 0x00400000u : 0);
+         return Imx1CgmAccess::ok;
+     } else if (address == 0x0021b004) {
+         // Repeat writes need 56 FCLK cycles. Unqualified FCLK cannot establish that delay.
+         if (mcuTimingUnknown) return Imx1CgmAccess::externalInput;
+         mcuTimingUnknown = true;
++    } else if (address == 0x0021b00c && nominalSystemPll) {
++        if (systemRestartUnits || systemWriteDelay) return Imx1CgmAccess::sideEffect;
++        systemWriteDelay = 30;
++        systemWritePhase = 0;
++    } else if (address == 0x0021b010 && nominalSystemPll) {
++        // LF is driven by the nominal output event; changing LF or BRMO is unqualified.
++        if (value != (spctl1 | (systemRestartUnits ? 0 : 0x8000))) return Imx1CgmAccess::sideEffect;
++        return Imx1CgmAccess::ok;
+     } else if (address != 0x0021b020) {
+         // BRMO timing and System PLL programming remain unqualified.
+         return Imx1CgmAccess::sideEffect;
+--- a/src/uarm/uarm/imx1_cgm.h
++++ b/src/uarm/uarm/imx1_cgm.h
+@@ -15,7 +15,14 @@
+    public:
+     Imx1CgmAccess access(uint32_t address, uint32_t size, bool write, uint32_t& value);
+     static const char* registerName(uint32_t address);
+-    void advanceSystemPllCycles(uint64_t cycles);
++    void advanceSystemPllCycles(uint64_t cycles, bool wholeWritePeriods = true);
++    void advanceSystemWriteFraction(uint64_t numerator, uint64_t denominator);
++    void setSystemPllScenario(bool enabled) { nominalSystemPll = enabled; }
++    Imx1PllRatio systemPllTargetRatio() const;
++    Imx1PllRatio systemPllActiveRatio() const;
++    uint64_t systemRestartRemaining() const { return systemRestartUnits; }
++    // Units are 1 / MCU PLL numerator CLK32 periods, independent of System PLL edges.
++    bool advanceSystemRestart(uint64_t units);
+     // Nominal programmed ratio to CLK32, without asserting a valid or locked output.
+     Imx1PllRatio mcuPllTargetRatio() const;
+     // Reset output is known. Programmed output needs restart completion and an explicit assumption.
+@@ -31,6 +38,11 @@
+     uint32_t mpctl0 = 0x003f1437, mpctl1 = 0;
+     uint32_t spctl0 = 0x043f1437, spctl1 = 0;
+     uint32_t mcuRestartCycles = 0;
++    uint32_t activeSpctl0 = 0x043f1437;
++    uint32_t systemWriteDelay = 0;
++    uint64_t systemWritePhase = 0;
++    uint64_t systemRestartUnits = 0;
++    bool nominalSystemPll = false;
+     // No MCU lock flag or qualified settling interval is available after programming.
+     bool mcuTimingUnknown = false;
+     bool mcuRestartComplete = false;

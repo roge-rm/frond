@@ -16,9 +16,12 @@ static void put32(std::vector<uint8_t>& data, size_t at, uint32_t value) {
 }
 
 static void palmIIIx();
+static void zodiac2();
 
 int main() {
     static_assert(int(DisplayMode::mode_320x320) == 5 && int(DisplayMode::mode_320x480) == 6);
+    static_assert(int(DisplayMode::mode_480x720) == 8 && int(DisplayMode::mode_480x320) == 9);
+    zodiac2();
     std::set<std::string> names;
     std::set<int> types;
     unsigned desktopCount = 0;
@@ -45,17 +48,18 @@ int main() {
         assert((p.deviceType == deviceTypeZire72) == (p.board == DeviceBoard5::pxa270Zire72));
         assert(deviceConfigurationGetNandSize(p.deviceType) == p.nandSize);
         assert(deviceConfigurationDefaultDisplayMode(p.deviceType) == p.defaultDisplay);
-        for (uint32_t ram : {0u, 1u, 4u << 20, 8u << 20, 16u << 20, 24u << 20, 32u << 20, 64u << 20, 1u << 31, UINT32_MAX}) {
+        for (uint32_t ram : {0u, 1u, 4u << 20, 8u << 20, 16u << 20, 24u << 20, 32u << 20, 64u << 20, 128u << 20, 1u << 31, UINT32_MAX}) {
             const bool expected = p.deviceType == deviceTypePV
                 ? ram >= (8u << 20) && (ram & (ram - 1)) == 0
                 : p.deviceType == deviceTypeTG50 ? ram == (16u << 20)
                 : p.deviceType == deviceTypeIIIx ? ram == (4u << 20)
+                : p.deviceType == deviceTypeZodiac2 ? ram == (128u << 20)
                 : ram == (32u << 20) || (p.deviceType != deviceTypeTX && p.deviceType != deviceTypeZire72 && ram == (16u << 20));
             assert(deviceConfigurationSupportsRamSize(p.deviceType, ram) == expected);
         }
-        for (int mode : {INT_MIN, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, INT_MAX}) {
-            const bool expected = mode >= 1 && mode <= 8 &&
-                (p.deviceType == deviceTypePV || mode == int(p.defaultDisplay));
+        for (int mode : {INT_MIN, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, INT_MAX}) {
+            const bool expected = mode >= 1 && mode <= 9 &&
+                ((p.deviceType == deviceTypePV && mode <= 8) || mode == int(p.defaultDisplay));
             assert(deviceConfigurationDeviceSupportsDisplayMode(p.deviceType, DisplayMode(mode)) == expected);
         }
         const size_t nor = p.norSize ? p.norSize : 256;
@@ -95,7 +99,7 @@ int main() {
         nor.resize(at + 12);
         assert(!inspect().profile && !inspect().hasHeader);
     }
-    assert(desktopCount == 6 && names.size() == 8 && types.size() == 7);
+    assert(desktopCount == 6 && names.size() == 9 && types.size() == 8);
     assert(std::string(deviceName5(deviceTypeTX)) == "palm-tx" && std::string(deviceName5(deviceTypeE2)) == "palm-e2");
     assert(deviceProfileNamed5("palm-tx")->capabilities.serial && deviceProfileNamed5("palm-e2")->capabilities.serial);
     // Unknown names are refused, including numbers, old ids, case and prefixes.
@@ -103,7 +107,7 @@ int main() {
         assert(!deviceProfileNamed5(name) && deviceTypeNamed5(name) == deviceTypeInvalid);
     }
     assert(!deviceProfileNamed5(nullptr) && !deviceName5(deviceTypeInvalid) && !deviceName5(99));
-    for (int id : {INT_MIN, -1, 7, 99, INT_MAX}) {
+    for (int id : {INT_MIN, -1, 8, 99, INT_MAX}) {
         assert(!deviceProfile5(id) && !deviceProfileSupportsDesktop5(id));
         assert(!deviceProfileSupportsRam5(id, 32u << 20));
         assert(!deviceProfileSupportsDisplay5(id, 6));
@@ -600,4 +604,60 @@ static void palmIIIx() {
         wrongName[0x10] = 'X';
         refused(wrongName, false);
     }
+}
+
+static void zodiac2() {
+    const auto* p = deviceProfileNamed5("tapwave-zodiac-2");
+    assert(p && p->deviceType == deviceTypeZodiac2 && p->support == DeviceSupport5::staged);
+    assert(p->board == DeviceBoard5::none && p->art == DeviceArt::none);
+    assert(!p->frontend.available && !deviceProfileRunnerEligible5(p->deviceType));
+    assert(!deviceProfileRuns68k5(p->deviceType) && !deviceProfileSupportsDesktop5(p->deviceType));
+    const auto& c = p->capabilities;
+    assert(!c.network && !c.keyboard && !c.serial && !c.usb && !c.fastAudio && !c.infrared &&
+           !c.bluetooth && !c.sound && !c.microphone && !c.backgroundPanel);
+    assert(p->norSize == 0x7d0000 && !p->nandSize && !p->requiresExplicitNand);
+    assert(p->minRam == (128u << 20) && p->maxRam == p->minRam);
+    assert(!deviceProfileSdSizeValid5(p->deviceType, 512));
+    const auto display = deviceConfigurationDisplayConfigForDevice(p->deviceType, p->defaultDisplay);
+    assert(display.width == 480 && display.height == 320 && !display.graffitiHeight && display.density == 144);
+    assert(!deviceProfileSupportsDisplay5(deviceTypePV, 9));
+    std::vector<uint8_t> good(p->norSize);
+    for (size_t at : {size_t(0), size_t(0x20000)}) {
+        put32(good, at + 8, 0xfeedbeef);
+        std::memcpy(good.data() + at + 0x10, "PalmCard", 9);
+        put32(good, at + 0x80, p->companyId);
+        put32(good, at + 0x84, p->halId);
+    }
+    put32(good, 0x20000 + 0x6c, good.size() - 0x20000);
+    auto inspect = [](const std::vector<uint8_t>& data) {
+        return deviceProfileInspectNor5(data.size(), [&](uint64_t at, uint8_t* out, size_t count) {
+            if (at > data.size() || count > data.size() - at) return false;
+            std::memcpy(out, data.data() + at, count);
+            return true;
+        });
+    };
+    const auto info = inspect(good);
+    assert(info.profile == p && info.hasHeader && info.validLayout && !info.variant);
+    for (size_t at : {size_t(0x80), size_t(0x84)}) {
+        auto bad = good;
+        bad[at] ^= 1;
+        assert(!inspect(bad).profile && inspect(bad).hasHeader);
+    }
+    for (size_t at : {size_t(0x20008), size_t(0x20010), size_t(0x20080), size_t(0x20084), size_t(0x2006c)}) {
+        auto bad = good;
+        bad[at] ^= 1;
+        assert(inspect(bad).profile == p && !inspect(bad).validLayout);
+    }
+    auto absentSmall = good;
+    absentSmall[8] = 0;
+    assert(inspect(absentSmall).profile == p && !inspect(absentSmall).validLayout);
+    for (size_t size : {size_t(0x20000), size_t(0x7cffff), size_t(0x800000)}) {
+        auto bad = good;
+        bad.resize(size, 0xff);
+        assert(inspect(bad).profile == p && !inspect(bad).validLayout);
+        assert(deviceProfileValidateFirmware5(p->deviceType, size, 0, false, false) == DeviceFirmwareError5::norSize);
+    }
+    assert(deviceProfileValidateNorLayout5(p->deviceType, 0, false, true) == DeviceFirmwareError5::none);
+    assert(deviceProfileValidateNorLayout5(p->deviceType, 0, false, false) == DeviceFirmwareError5::norLayout);
+    assert(deviceProfileValidateFirmware5(p->deviceType, good.size(), 1, false, false) == DeviceFirmwareError5::nandSize);
 }

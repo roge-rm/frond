@@ -33,6 +33,21 @@ class DeviceDataTest(unittest.TestCase):
         kotlin = next(data for path, data in generator.outputs(inventory).items() if path.suffix == '.kt')
         self.assertNotIn('test-fixture', kotlin)
 
+    def test_zodiac_inventory_is_unavailable(self):
+        inventory = json.loads((ROOT / 'tools/device-profiles.json').read_text())
+        profile = next(p for p in inventory['profiles'] if p['name'] == 'tapwave-zodiac-2')
+        self.assertEqual(profile['status'], 'staged')
+        self.assertEqual(profile['cohort'], 'zodiac-nor')
+        self.assertEqual(profile['nor_bytes'], 8192000)
+        self.assertEqual((profile['company_id'], profile['hal_id']), (0x54707776, 0x4d583161))
+        self.assertEqual((profile['width'], profile['height']), (480, 320))
+        self.assertEqual(profile['default_display_mode'], 9)
+        for key in ('available', 'runner_eligible', 'runs_68k', 'sound', 'usb', 'infrared', 'bluetooth'):
+            self.assertFalse(profile[key], key)
+        self.assertNotIn(profile['name'], palm_boot.DEVICES)
+        kotlin = next(data for path, data in generator.outputs(inventory).items() if path.suffix == '.kt')
+        self.assertNotIn(profile['name'], kotlin)
+
     def test_sd_bounds(self):
         profiles = {p['name']: p for p in json.loads((ROOT / 'tools/device-profiles.json').read_text())['profiles']}
         mib = 1 << 20

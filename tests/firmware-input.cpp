@@ -51,6 +51,24 @@ static void rom68k(QFile& rom, qint64 size, quint16 version, quint16 flags = 0x0
 class FirmwareInputTest : public QObject {
     Q_OBJECT
  private slots:
+    void stagedZodiac() {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const auto path = dir.filePath("synthetic-zodiac");
+        QFile nor(path);
+        QVERIFY(nor.open(QIODevice::ReadWrite));
+        zireNor(nor, 8192000, 0x4d583161, 0, 0x20000, 8192000 - 0x20000);
+        const char company[] = {0x76, 0x77, 0x70, 0x54};
+        for (qint64 at : {qint64(0x80), qint64(0x20080)}) {
+            QVERIFY(nor.seek(at));
+            QCOMPARE(nor.write(company, 4), qint64(4));
+        }
+        nor.flush();
+        QCOMPARE(frondFirmware::detectDevice(path), Device::automatic);
+        for (Device selected : {Device::automatic, Device::tx, Device::e2, Device::zire72})
+            QCOMPARE(frondFirmware::validateFiles(selected, path, {}),
+                     QStringLiteral("The Tapwave Zodiac 2 isn't supported yet."));
+    }
     void txFiles() {
         QTemporaryDir dir;
         QVERIFY(dir.isValid());

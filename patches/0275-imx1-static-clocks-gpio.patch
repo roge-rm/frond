@@ -1,0 +1,281 @@
+--- a/src/uarm/uarm/imx1_bootstrap.h
++++ b/src/uarm/uarm/imx1_bootstrap.h
+@@ -5,13 +5,15 @@
+ #include <vector>
+ 
+ #include "imx1_aitc.h"
++#include "imx1_cgm.h"
++#include "imx1_gpio.h"
+ 
+ enum class Imx1BootstrapAccess { ok, command, unmapped, width, reservedBits, sideEffect, externalInput, memoryUnavailable, sequence };
+ 
+ // Startup memory/register subset. External pin samples require an explicit input source.
+ class Imx1Bootstrap {
+    public:
+-    void setGpioDInput(uint32_t value) { gpioDInput = value; gpioDInputKnown = true; }
++    void setGpioDInput(uint32_t value) { gpio.setInput(3, value); }
+     void setRamMiB(uint32_t size);
+     Imx1BootstrapAccess access(uint32_t address, uint32_t size, bool write, uint32_t& value);
+     // Instruction reads cannot issue SDRAM commands or consume peripheral state.
+@@ -24,16 +26,14 @@
+ 
+    private:
+     Imx1Aitc aitc;
++    Imx1Cgm cgm;
++    Imx1Gpio gpio;
+     std::vector<uint8_t> sram = std::vector<uint8_t>(0x20000);
+     uint32_t rmcr = 0;
+     uint32_t cs2u = 0, cs2l = 0x0802;
+     uint32_t cs3u = 0, cs3l = 0x0802;
+     uint32_t cs0u = 0x3e00, cs0l = 0;
+     bool cs0lKnown = false;
+-    uint32_t ddirD = 0, giusD = 0xffffffff;
+-    uint32_t giusB = 0xffffffff;
+-    uint32_t gpioDInput = 0;
+-    bool gpioDInputKnown = false;
+     struct Sdram {
+         uint32_t control = 0x01000300, bytes = 0;
+         bool controlKnown = false;
+--- a/src/uarm/uarm/imx1_bootstrap.cpp
++++ b/src/uarm/uarm/imx1_bootstrap.cpp
+@@ -29,6 +29,8 @@
+ const char* Imx1Bootstrap::registerName(uint32_t address) {
+     if (address >= 0x00300000 && address < 0x00400000) return "SRAM";
+     if (const auto* name = Imx1Aitc::registerName(address)) return name;
++    if (const auto* name = Imx1Cgm::registerName(address)) return name;
++    if (const auto* name = Imx1Gpio::registerName(address)) return name;
+     switch (address & ~3u) {
+         case 0x00205034: return "LCDC.RMCR";
+         case 0x00220010: return "EIM.CS2U";
+@@ -37,10 +39,6 @@
+         case 0x0022001c: return "EIM.CS3L";
+         case 0x00220000: return "EIM.CS0U";
+         case 0x00220004: return "EIM.CS0L";
+-        case 0x0021c120: return "GPIO.GIUS_B";
+-        case 0x0021c300: return "GPIO.DDIR_D";
+-        case 0x0021c320: return "GPIO.GIUS_D";
+-        case 0x0021c324: return "GPIO.SSR_D";
+         case 0x00221000: return "SDRAMC.SDCTL0";
+         case 0x00221004: return "SDRAMC.SDCTL1";
+         default: return nullptr;
+@@ -86,6 +84,26 @@
+         }
+         return Imx1BootstrapAccess::ok;
+     }
++    if (Imx1Cgm::registerName(address)) {
++        switch (cgm.access(address, size, write, value)) {
++            case Imx1CgmAccess::ok: return Imx1BootstrapAccess::ok;
++            case Imx1CgmAccess::unmapped: return Imx1BootstrapAccess::unmapped;
++            case Imx1CgmAccess::width: return Imx1BootstrapAccess::width;
++            case Imx1CgmAccess::reservedBits: return Imx1BootstrapAccess::reservedBits;
++            case Imx1CgmAccess::sideEffect: return Imx1BootstrapAccess::sideEffect;
++            case Imx1CgmAccess::externalInput: return Imx1BootstrapAccess::externalInput;
++        }
++    }
++    if (Imx1Gpio::registerName(address)) {
++        switch (gpio.access(address, size, write, value)) {
++            case Imx1GpioAccess::ok: return Imx1BootstrapAccess::ok;
++            case Imx1GpioAccess::unmapped: return Imx1BootstrapAccess::unmapped;
++            case Imx1GpioAccess::width: return Imx1BootstrapAccess::width;
++            case Imx1GpioAccess::reservedBits: return Imx1BootstrapAccess::reservedBits;
++            case Imx1GpioAccess::sideEffect: return Imx1BootstrapAccess::sideEffect;
++            case Imx1GpioAccess::externalInput: return Imx1BootstrapAccess::externalInput;
++        }
++    }
+     if (!registerName(address)) return Imx1BootstrapAccess::unmapped;
+     if (size != 4 || (address & 3)) return Imx1BootstrapAccess::width;
+     uint32_t* reg = nullptr;
+@@ -122,25 +140,6 @@
+             }
+             reg = &cs0l; mask = 0xffffff51;
+             break;
+-        // Tables 32-4 and 32-12. Keep the measured port in GPIO input mode.
+-        case 0x0021c300:
+-            reg = &ddirD;
+-            if (write && value) return Imx1BootstrapAccess::sideEffect;
+-            break;
+-        case 0x0021c320:
+-            reg = &giusD;
+-            if (write && value != 0xffffffff) return Imx1BootstrapAccess::sideEffect;
+-            break;
+-        case 0x0021c120:
+-            reg = &giusB;
+-            if (write && value != 0xffffffff) return Imx1BootstrapAccess::sideEffect;
+-            break;
+-        // Table 32-13: reset zero does not establish external levels after reset.
+-        case 0x0021c324:
+-            if (write) return Imx1BootstrapAccess::sideEffect;
+-            if (!gpioDInputKnown) return Imx1BootstrapAccess::externalInput;
+-            value = gpioDInput;
+-            return Imx1BootstrapAccess::ok;
+         case 0x00221000: return sdramControl(0, write, value);
+         case 0x00221004: return sdramControl(1, write, value);
+     }
+--- a/src/uarm/uarm/imx1_cgm.h
++++ b/src/uarm/uarm/imx1_cgm.h
+@@ -0,0 +1,20 @@
++#ifndef FROND_IMX1_CGM_H
++#define FROND_IMX1_CGM_H
++
++#include <cstdint>
++
++enum class Imx1CgmAccess { ok, unmapped, width, reservedBits, sideEffect, externalInput };
++
++// MC9328MX1RM chapter 12. Static configuration only, without clock progression.
++class Imx1Cgm {
++   public:
++    Imx1CgmAccess access(uint32_t address, uint32_t size, bool write, uint32_t& value);
++    static const char* registerName(uint32_t address);
++
++   private:
++    uint32_t cscr = 0x0f00ac03, pcdr = 0x000b00bb;
++    uint32_t mpctl0 = 0x003f1437, mpctl1 = 0;
++    uint32_t spctl0 = 0x043f1437, spctl1 = 0;
++};
++
++#endif
+--- a/src/uarm/uarm/imx1_cgm.cpp
++++ b/src/uarm/uarm/imx1_cgm.cpp
+@@ -0,0 +1,46 @@
++#include "imx1_cgm.h"
++
++const char* Imx1Cgm::registerName(uint32_t address) {
++    switch (address & ~3u) {
++        case 0x0021b000: return "CGM.CSCR";
++        case 0x0021b004: return "CGM.MPCTL0";
++        case 0x0021b008: return "CGM.MPCTL1";
++        case 0x0021b00c: return "CGM.SPCTL0";
++        case 0x0021b010: return "CGM.SPCTL1";
++        case 0x0021b020: return "CGM.PCDR";
++        default: return nullptr;
++    }
++}
++
++Imx1CgmAccess Imx1Cgm::access(uint32_t address, uint32_t size, bool write, uint32_t& value) {
++    if (!registerName(address)) return Imx1CgmAccess::unmapped;
++    if (size != 4 || (address & 3)) return Imx1CgmAccess::width;
++    uint32_t* reg = nullptr;
++    uint32_t mask = 0;
++    switch (address) {
++        case 0x0021b000: reg = &cscr; mask = 0xff67bc03; break;
++        case 0x0021b004: reg = &mpctl0; mask = 0x3fff3fff; break;
++        case 0x0021b008: reg = &mpctl1; mask = 0x00000040; break;
++        case 0x0021b00c: reg = &spctl0; mask = 0x3fff3fff; break;
++        case 0x0021b010: reg = &spctl1; mask = 0x00008040; break;
++        case 0x0021b020: reg = &pcdr; mask = 0x007f00ff; break;
++    }
++    if (!write) {
++        // LF depends on elapsed reference clocks, not on register reads.
++        if (address == 0x0021b010) return Imx1CgmAccess::externalInput;
++        value = *reg;
++        return Imx1CgmAccess::ok;
++    }
++    if (value & ~mask) return Imx1CgmAccess::reservedBits;
++    if (address == 0x0021b000) {
++        if ((value >> 29) > 5) return Imx1CgmAccess::reservedBits;
++        // Restart and shutdown require a scheduler. External source selection needs board clocks.
++        if ((value & 0x00600000) || (value & 3) != 3) return Imx1CgmAccess::sideEffect;
++        if ((value ^ cscr) & 0x00070000) return Imx1CgmAccess::externalInput;
++    } else if (address != 0x0021b020) {
++        // PLL programming loses lock and has minimum write spacing in clock cycles.
++        return Imx1CgmAccess::sideEffect;
++    }
++    *reg = value;
++    return Imx1CgmAccess::ok;
++}
+--- a/src/uarm/uarm/imx1_gpio.h
++++ b/src/uarm/uarm/imx1_gpio.h
+@@ -0,0 +1,24 @@
++#ifndef FROND_IMX1_GPIO_H
++#define FROND_IMX1_GPIO_H
++
++#include <cstdint>
++
++enum class Imx1GpioAccess { ok, unmapped, width, reservedBits, sideEffect, externalInput };
++
++// MC9328MX1RM chapter 32. Pin mux state is separate from external board devices.
++class Imx1Gpio {
++   public:
++    Imx1Gpio();
++    Imx1GpioAccess access(uint32_t address, uint32_t size, bool write, uint32_t& value);
++    void setInput(unsigned port, uint32_t sample);
++    static const char* registerName(uint32_t address);
++
++   private:
++    struct Port {
++        uint32_t registers[17]{};
++        uint32_t sample = 0;
++        bool sampleKnown = false;
++    } ports[4];
++};
++
++#endif
+--- a/src/uarm/uarm/imx1_gpio.cpp
++++ b/src/uarm/uarm/imx1_gpio.cpp
+@@ -0,0 +1,66 @@
++#include "imx1_gpio.h"
++
++Imx1Gpio::Imx1Gpio() {
++    constexpr uint32_t inUseReset[] = {0x00c3fffe, 0xffffffff, 0x0007ffff, 0xffffffff};
++    for (unsigned port = 0; port < 4; ++port) {
++        auto& r = ports[port].registers;
++        for (unsigned i = 3; i <= 6; ++i) r[i] = 0xffffffff;
++        r[8] = inUseReset[port];
++        r[16] = port == 2 ? 0xf910ffff : 0xffffffff;
++    }
++}
++
++void Imx1Gpio::setInput(unsigned port, uint32_t sample) {
++    if (port >= 4) return;
++    ports[port].sample = sample;
++    ports[port].sampleKnown = true;
++}
++
++const char* Imx1Gpio::registerName(uint32_t address) {
++    if (address < 0x0021c000 || address >= 0x0021c400 || (address & 0xfc) > 0x40) return nullptr;
++    static const char* const names[4][17] = {
++        {"GPIO.DDIR_A", "GPIO.OCR1_A", "GPIO.OCR2_A", "GPIO.ICONFA1_A", "GPIO.ICONFA2_A",
++         "GPIO.ICONFB1_A", "GPIO.ICONFB2_A", "GPIO.DR_A", "GPIO.GIUS_A", "GPIO.SSR_A",
++         "GPIO.ICR1_A", "GPIO.ICR2_A", "GPIO.IMR_A", "GPIO.ISR_A", "GPIO.GPR_A", "GPIO.SWR_A", "GPIO.PUEN_A"},
++        {"GPIO.DDIR_B", "GPIO.OCR1_B", "GPIO.OCR2_B", "GPIO.ICONFA1_B", "GPIO.ICONFA2_B",
++         "GPIO.ICONFB1_B", "GPIO.ICONFB2_B", "GPIO.DR_B", "GPIO.GIUS_B", "GPIO.SSR_B",
++         "GPIO.ICR1_B", "GPIO.ICR2_B", "GPIO.IMR_B", "GPIO.ISR_B", "GPIO.GPR_B", "GPIO.SWR_B", "GPIO.PUEN_B"},
++        {"GPIO.DDIR_C", "GPIO.OCR1_C", "GPIO.OCR2_C", "GPIO.ICONFA1_C", "GPIO.ICONFA2_C",
++         "GPIO.ICONFB1_C", "GPIO.ICONFB2_C", "GPIO.DR_C", "GPIO.GIUS_C", "GPIO.SSR_C",
++         "GPIO.ICR1_C", "GPIO.ICR2_C", "GPIO.IMR_C", "GPIO.ISR_C", "GPIO.GPR_C", "GPIO.SWR_C", "GPIO.PUEN_C"},
++        {"GPIO.DDIR_D", "GPIO.OCR1_D", "GPIO.OCR2_D", "GPIO.ICONFA1_D", "GPIO.ICONFA2_D",
++         "GPIO.ICONFB1_D", "GPIO.ICONFB2_D", "GPIO.DR_D", "GPIO.GIUS_D", "GPIO.SSR_D",
++         "GPIO.ICR1_D", "GPIO.ICR2_D", "GPIO.IMR_D", "GPIO.ISR_D", "GPIO.GPR_D", "GPIO.SWR_D", "GPIO.PUEN_D"}
++    };
++    return names[(address >> 8) & 3][(address & 0xfc) / 4];
++}
++
++Imx1GpioAccess Imx1Gpio::access(uint32_t address, uint32_t size, bool write, uint32_t& value) {
++    if (!registerName(address)) return Imx1GpioAccess::unmapped;
++    if (size != 4 || (address & 3)) return Imx1GpioAccess::width;
++    auto& port = ports[(address >> 8) & 3];
++    const unsigned index = (address & 0xff) / 4;
++    auto& reg = port.registers[index];
++    if (index == 9) {
++        if (write) return Imx1GpioAccess::sideEffect;
++        if (!port.sampleKnown) return Imx1GpioAccess::externalInput;
++        value = port.sample;
++        return Imx1GpioAccess::ok;
++    }
++    if (!write) {
++        // Status needs sampled level/edge events, even when delivery is masked.
++        if (index == 13) return Imx1GpioAccess::externalInput;
++        value = reg;
++        return Imx1GpioAccess::ok;
++    }
++    // Nonzero interrupt masks need sampled pin events and a connected AITC request.
++    if (index == 12 && value) return Imx1GpioAccess::sideEffect;
++    if (index == 15) {
++        if (value & ~1u) return Imx1GpioAccess::reservedBits;
++        // Software reset holds for three system clocks, requiring clock progression.
++        if (value) return Imx1GpioAccess::sideEffect;
++    }
++    if (index == 13) reg &= ~value;
++    else reg = value;
++    return Imx1GpioAccess::ok;
++}

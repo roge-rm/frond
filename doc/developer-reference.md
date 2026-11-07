@@ -603,6 +603,7 @@ All in `tools/`. Most take `--help`.
 | `generate-device-data.py` | Writes the device profile data for Python and Android. `--check` fails if it's stale. |
 | `firmware_variants.py` | Helper module: finds the firmware variant (such as the E2 de-NVFS image) of a NOR file for `frond-run.py`. |
 | `device-profiles.cpp`, `device-profiles.json` | Dumps and holds the device profiles. |
+| `zodiac-boot-probe.cpp` | Experimental SmallROM trace: `build/zodiac-boot-probe ROM [physical\|reset\|linked] [instruction-budget] [exact\|fast]`. Optional `--bootstrap-peripherals`, `--gpio-a-input=VALUE`, `--gpio-d-input=VALUE` and `--ram-mib=32\|128` follow the engine. Reads a private ROM, stops on unsupported CPU or bus behaviour. See [Zodiac bring-up](zodiac2-bringup.md) and [input scenarios](zodiac2-inputs.md). |
 | `dynarmic-source.py` | Exports the pinned Dynarmic source and applies its patches. |
 | `package-deb.py`, `package_policy.py`, `check-package.py` | Build a Debian package from a fixed file list, and check one. |
 | `speed-check.py` | Emulation speed against fixed guest work (`make speed-check`). |
@@ -655,13 +656,27 @@ All in `tools/`. Most take `--help`.
 | `benchmark-replay`, `benchmark-replay-jit`, `benchmark-session`, `benchmark-menu` | Build and run the benchmark programs. |
 | `frondbench` | Build FrondBench with m68k-palmos-gcc. |
 | `device-session-probe` | Build the device session probe. |
+| `test-zodiac-jit` | ARM920T Exact/Fast instruction checks. Optional `build/test-zodiac-jit ROM` compares private SmallROM traces. See [JIT boundary](zodiac2-jit.md). |
+| `zodiac-boot-probe`, `test-zodiac-boot-probe` | Build the experimental i.MX1 boot probe or run its firmware-free CPU and memory checks. Outside `make test`. |
+| `test-zodiac-mmu` | ARM920 TTBR/DACR, abort/reset and retained instruction-cache checks in Exact and Fast. See [MMU and cache](zodiac2-mmu.md). Outside `make test`. |
+| `test-imx1-aitc` | i.MX1 AITC reset, enable/type/force, priority/mask/vector and bootstrap rejection checks. Outside `make test`. |
+| `test-imx1-clocks-gpio` | Static i.MX1 clock/GPIO reset and configuration, access rejection and explicit clock/pin limits. Outside `make test`. |
+| `test-imx1-spll` | Explicit nominal System PLL staging/restart, LF/output hold, spacing, FCLK/BCLK guards, phase and portable maximum charges. See [clocks](zodiac2-clocks.md). Outside `make test`. |
+| `test-imx1-mpll` | MCU PLL fields, restart readiness, nominal asynchronous ratios, fractional handoff and chunk invariance. See [clocks](zodiac2-clocks.md). Outside `make test`. |
+| `test-imx1-timer`, `test-zodiac-timer-probe` | Timer 1 registers, elapsed CPU-clock progression, polling, conditional clock handoffs and CP15 readback in Exact/Fast. See [Timer 1](zodiac2-timers.md). Outside `make test`. |
+| `test-zodiac-gpio-input` | Synthetic CLI scenarios for GPIO-A/D samples and both explicit PLL settling assumptions, headers, unknown defaults and invalid values. Outside `make test`. |
+| `test-zodiac-thumb-probe` | Exact/Fast Thumb fetch and page/end boundaries, retained cache, BL halfword state, mixed ARM/Thumb execution and conservative probe guards. Outside `make test`. |
+| `test-zodiac-armv4-probe` | Exact halfword/signed-byte and block transfers, scalar multiply and conservative probe guards. See [input scenarios](zodiac2-inputs.md). Outside `make test`. |
+| `test-imx1-sysctrl` | SCM GCCR configuration, guarded boot override, fetch isolation and Timer 1 phase. See [System Control](zodiac2-sysctrl.md). Outside `make test`. |
+| `test-imx1-eim` | EIM chip-select register state and strict bootstrap limits. See [EIM](zodiac2-eim.md). Outside `make test`. |
+| `test-zodiac-mmio` | Bootstrap register/RAM state and Exact/Fast probe checks. Optional `build/test-zodiac-mmio-probe ROM` compares private scenarios. Outside `make test`. |
 | `bluetooth-opp-peer` | Build the OPP test peer. |
 
 Tests in `make test`, by area:
 
 | Area | Targets |
 | --- | --- |
-| CPU and engines | `test-cpu`, `test-arm-conditions`, `test-instruction-cache`, `test-mmu-fast-path`, `test-mem-region-bounds`, `test-xscale-prefetch`, `test-jit-overshoot`, `test-jit-differential`, `test-jit-compile-thread` |
+| CPU and engines | `test-cpu`, `test-arm-conditions`, `test-instruction-cache`, `test-mmu-fast-path`, `test-mem-region-bounds`, `test-xscale-prefetch`, `test-jit-overshoot`, `test-jit-differential`, `test-jit-compile-thread`, `test-zodiac-jit` |
 | SoC and timing | `test-pxa-timer`, `test-pxa-power`, `test-pxa255-udc`, `test-pxa255-udc-clock`, `test-pxa255-udc-dma`, `test-pxa255-udc-dma-state`, `test-pxa270-udc`, `test-scheduler`, `test-microwire64x16` |
 | Device state and sessions | `test-tx-state`, `test-e2-state`, `test-tg50-state`, `test-device-profiles`, `test-device-controls`, `test-e2-family-peripherals`, `test-multi-touch`, `test-session-v7`, `test-frond-68k`, `test-checkpoint-input`, `test-export-checkpoint`, `test-replay-snapshot`, `test-lifecycle` |
 | Palm databases | `test-native-database`, `test-native-primitives`, `test-native-governor`, `test-db-list`, `test-db-backup` |

@@ -638,6 +638,37 @@ test-build-tools:
 check-reconstruction:
 	python3 tools/check-reconstruction.py
 
+# Experimental board probe, excluded from the public runners and firmware-free by default.
+.PHONY: zodiac-boot-probe test-zodiac-boot-probe
+zodiac-boot-probe: build/zodiac-boot-probe
+build/zodiac-boot-probe: out/frond tools/zodiac-boot-probe.cpp
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/zodiac-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tools/zodiac-boot-probe.cpp build/source/src/uarm/uarm/imx1_boot_probe.cpp build/source/src/uarm/uarm/imx1_bootstrap.cpp build/source/src/uarm/uarm/imx1_aitc.cpp build/source/src/uarm/uarm/imx1_cgm.cpp build/source/src/uarm/uarm/imx1_gpio.cpp build/source/src/uarm/uarm/imx1_sysctrl.cpp build/source/src/uarm/uarm/imx1_eim.cpp build/source/src/uarm/uarm/imx1_timer.cpp \
+		@build/zodiac-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $@
+
+test-zodiac-boot-probe: build/zodiac-boot-probe
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/zodiac-boot-probe.cpp build/source/src/uarm/uarm/imx1_boot_probe.cpp build/source/src/uarm/uarm/imx1_bootstrap.cpp build/source/src/uarm/uarm/imx1_aitc.cpp build/source/src/uarm/uarm/imx1_cgm.cpp build/source/src/uarm/uarm/imx1_gpio.cpp build/source/src/uarm/uarm/imx1_sysctrl.cpp build/source/src/uarm/uarm/imx1_eim.cpp build/source/src/uarm/uarm/imx1_timer.cpp \
+		@build/zodiac-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-boot-probe
+	./build/test-zodiac-boot-probe
+
+# Experimental ARM920T instruction checks and optional private-ROM trace comparison.
+.PHONY: test-zodiac-jit
+ifeq ($(FROND_FAST),1)
+test: test-zodiac-jit
+endif
+build/test-zodiac-jit: out/frond tests/zodiac-jit.cpp
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/zodiac-jit-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/zodiac-jit.cpp build/source/src/uarm/uarm/imx1_boot_probe.cpp build/source/src/uarm/uarm/imx1_bootstrap.cpp build/source/src/uarm/uarm/imx1_aitc.cpp build/source/src/uarm/uarm/imx1_cgm.cpp build/source/src/uarm/uarm/imx1_gpio.cpp build/source/src/uarm/uarm/imx1_sysctrl.cpp build/source/src/uarm/uarm/imx1_eim.cpp build/source/src/uarm/uarm/imx1_timer.cpp \
+		@build/zodiac-jit-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $@
+test-zodiac-jit: build/test-zodiac-jit
+	./build/test-zodiac-jit
+
 # Every option, command, environment variable, tool and target in the sources is in the developer reference.
 .PHONY: check-docs
 check-docs: prepare
@@ -1272,3 +1303,123 @@ test-e2-family-peripherals: out/frond
 		tests/e2-family-peripherals.cpp @build/e2-family-peripherals-core.rsp \
 		build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-e2-family-peripherals
 	timeout 120 ./build/test-e2-family-peripherals
+
+.PHONY: test-zodiac-mmio
+test-zodiac-mmio: build/zodiac-boot-probe
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Ibuild/source/src/uarm/uarm \
+		tests/zodiac-mmio.cpp build/source/src/uarm/uarm/imx1_bootstrap.cpp build/source/src/uarm/uarm/imx1_aitc.cpp build/source/src/uarm/uarm/imx1_cgm.cpp build/source/src/uarm/uarm/imx1_gpio.cpp build/source/src/uarm/uarm/imx1_sysctrl.cpp build/source/src/uarm/uarm/imx1_eim.cpp build/source/src/uarm/uarm/imx1_timer.cpp -o build/test-zodiac-mmio
+	./build/test-zodiac-mmio
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -DFROND_TEST_FAST=$(FROND_FAST) \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/zodiac-mmio-probe.cpp build/source/src/uarm/uarm/imx1_boot_probe.cpp \
+		build/source/src/uarm/uarm/imx1_bootstrap.cpp build/source/src/uarm/uarm/imx1_aitc.cpp build/source/src/uarm/uarm/imx1_cgm.cpp build/source/src/uarm/uarm/imx1_gpio.cpp build/source/src/uarm/uarm/imx1_sysctrl.cpp build/source/src/uarm/uarm/imx1_eim.cpp build/source/src/uarm/uarm/imx1_timer.cpp @build/zodiac-core.rsp \
+		build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-mmio-probe
+	./build/test-zodiac-mmio-probe
+
+# Firmware-free GPIO scenario checks through the command-line probe.
+.PHONY: test-zodiac-gpio-input
+test-zodiac-gpio-input: build/zodiac-boot-probe
+	python3 tests/zodiac-gpio-input.py
+
+.PHONY: test-zodiac-armv4-probe
+test-zodiac-armv4-probe: build/zodiac-boot-probe
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/zodiac-armv4-probe.cpp build/source/src/uarm/uarm/imx1_boot_probe.cpp \
+		build/source/src/uarm/uarm/imx1_bootstrap.cpp build/source/src/uarm/uarm/imx1_aitc.cpp \
+		build/source/src/uarm/uarm/imx1_cgm.cpp build/source/src/uarm/uarm/imx1_gpio.cpp \
+		build/source/src/uarm/uarm/imx1_sysctrl.cpp build/source/src/uarm/uarm/imx1_eim.cpp build/source/src/uarm/uarm/imx1_timer.cpp \
+		@build/zodiac-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-armv4-probe
+	./build/test-zodiac-armv4-probe
+
+.PHONY: test-zodiac-thumb-probe
+test-zodiac-thumb-probe: build/zodiac-boot-probe
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/zodiac-thumb-probe.cpp build/source/src/uarm/uarm/imx1_boot_probe.cpp \
+		build/source/src/uarm/uarm/imx1_bootstrap.cpp build/source/src/uarm/uarm/imx1_aitc.cpp \
+		build/source/src/uarm/uarm/imx1_cgm.cpp build/source/src/uarm/uarm/imx1_gpio.cpp \
+		build/source/src/uarm/uarm/imx1_sysctrl.cpp build/source/src/uarm/uarm/imx1_eim.cpp build/source/src/uarm/uarm/imx1_timer.cpp \
+		@build/zodiac-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-thumb-probe
+	./build/test-zodiac-thumb-probe
+
+# Directed ARM920 translation, abort and instruction-cache checks in both engines.
+.PHONY: test-zodiac-mmu
+build/test-zodiac-mmu: out/frond tests/zodiac-mmu.cpp
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/zodiac-mmu-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/zodiac-mmu.cpp @build/zodiac-mmu-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $@
+test-zodiac-mmu: build/test-zodiac-mmu
+	./build/test-zodiac-mmu
+
+# Standalone i.MX1 interrupt-controller state and strict bootstrap integration.
+.PHONY: test-imx1-aitc
+test-imx1-aitc: prepare
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Ibuild/source/src/uarm/uarm \
+		tests/imx1-aitc.cpp build/source/src/uarm/uarm/imx1_aitc.cpp build/source/src/uarm/uarm/imx1_cgm.cpp build/source/src/uarm/uarm/imx1_gpio.cpp build/source/src/uarm/uarm/imx1_sysctrl.cpp build/source/src/uarm/uarm/imx1_eim.cpp build/source/src/uarm/uarm/imx1_timer.cpp \
+		build/source/src/uarm/uarm/imx1_bootstrap.cpp -o build/test-imx1-aitc
+	./build/test-imx1-aitc
+
+.PHONY: test-imx1-clocks-gpio
+test-imx1-clocks-gpio: prepare
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Ibuild/source/src/uarm/uarm \
+		tests/imx1-clocks-gpio.cpp build/source/src/uarm/uarm/imx1_bootstrap.cpp \
+		build/source/src/uarm/uarm/imx1_aitc.cpp build/source/src/uarm/uarm/imx1_cgm.cpp \
+		build/source/src/uarm/uarm/imx1_gpio.cpp build/source/src/uarm/uarm/imx1_sysctrl.cpp build/source/src/uarm/uarm/imx1_eim.cpp build/source/src/uarm/uarm/imx1_timer.cpp -o build/test-imx1-clocks-gpio
+	./build/test-imx1-clocks-gpio
+
+.PHONY: test-imx1-mpll
+test-imx1-mpll: prepare
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Ibuild/source/src/uarm/uarm \
+		tests/imx1-mpll.cpp build/source/src/uarm/uarm/imx1_bootstrap.cpp \
+		build/source/src/uarm/uarm/imx1_aitc.cpp build/source/src/uarm/uarm/imx1_cgm.cpp \
+		build/source/src/uarm/uarm/imx1_gpio.cpp build/source/src/uarm/uarm/imx1_sysctrl.cpp build/source/src/uarm/uarm/imx1_eim.cpp build/source/src/uarm/uarm/imx1_timer.cpp -o build/test-imx1-mpll
+	./build/test-imx1-mpll
+
+.PHONY: test-imx1-spll
+test-imx1-spll: prepare
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Ibuild/source/src/uarm/uarm \
+		tests/imx1-spll.cpp build/source/src/uarm/uarm/imx1_bootstrap.cpp \
+		build/source/src/uarm/uarm/imx1_aitc.cpp build/source/src/uarm/uarm/imx1_cgm.cpp \
+		build/source/src/uarm/uarm/imx1_gpio.cpp build/source/src/uarm/uarm/imx1_sysctrl.cpp build/source/src/uarm/uarm/imx1_eim.cpp build/source/src/uarm/uarm/imx1_timer.cpp -o build/test-imx1-spll
+	./build/test-imx1-spll
+
+# Standalone EIM configuration and strict bootstrap integration.
+.PHONY: test-imx1-eim
+test-imx1-eim: prepare
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Ibuild/source/src/uarm/uarm \
+		tests/imx1-eim.cpp build/source/src/uarm/uarm/imx1_bootstrap.cpp \
+		build/source/src/uarm/uarm/imx1_aitc.cpp build/source/src/uarm/uarm/imx1_cgm.cpp \
+		build/source/src/uarm/uarm/imx1_gpio.cpp build/source/src/uarm/uarm/imx1_sysctrl.cpp build/source/src/uarm/uarm/imx1_eim.cpp build/source/src/uarm/uarm/imx1_timer.cpp -o build/test-imx1-eim
+	./build/test-imx1-eim
+
+.PHONY: test-imx1-timer
+test-imx1-timer: prepare
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Ibuild/source/src/uarm/uarm \
+		tests/imx1-timer.cpp build/source/src/uarm/uarm/imx1_bootstrap.cpp \
+		build/source/src/uarm/uarm/imx1_aitc.cpp build/source/src/uarm/uarm/imx1_cgm.cpp \
+		build/source/src/uarm/uarm/imx1_gpio.cpp build/source/src/uarm/uarm/imx1_sysctrl.cpp build/source/src/uarm/uarm/imx1_eim.cpp \
+		build/source/src/uarm/uarm/imx1_timer.cpp -o build/test-imx1-timer
+	./build/test-imx1-timer
+
+.PHONY: test-zodiac-timer-probe
+test-zodiac-timer-probe: build/zodiac-boot-probe
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -DFROND_TEST_FAST=$(FROND_FAST) \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/zodiac-timer-probe.cpp build/source/src/uarm/uarm/imx1_boot_probe.cpp \
+		build/source/src/uarm/uarm/imx1_bootstrap.cpp build/source/src/uarm/uarm/imx1_aitc.cpp \
+		build/source/src/uarm/uarm/imx1_cgm.cpp build/source/src/uarm/uarm/imx1_gpio.cpp \
+		build/source/src/uarm/uarm/imx1_sysctrl.cpp build/source/src/uarm/uarm/imx1_eim.cpp build/source/src/uarm/uarm/imx1_timer.cpp \
+		@build/zodiac-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-timer-probe
+	./build/test-zodiac-timer-probe
+
+# Named System Control configuration and strict bootstrap integration.
+.PHONY: test-imx1-sysctrl
+test-imx1-sysctrl: prepare
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Ibuild/source/src/uarm/uarm \
+		tests/imx1-sysctrl.cpp build/source/src/uarm/uarm/imx1_sysctrl.cpp \
+		build/source/src/uarm/uarm/imx1_bootstrap.cpp build/source/src/uarm/uarm/imx1_aitc.cpp \
+		build/source/src/uarm/uarm/imx1_cgm.cpp build/source/src/uarm/uarm/imx1_gpio.cpp \
+		build/source/src/uarm/uarm/imx1_eim.cpp build/source/src/uarm/uarm/imx1_timer.cpp -o build/test-imx1-sysctrl
+	./build/test-imx1-sysctrl
