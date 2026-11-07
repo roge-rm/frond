@@ -47,6 +47,20 @@ class PalmDatabases(private val context: Context, private val link: ControlLink)
         run("delete-db", name)
     }
 
+    // Deletes an application and the RAM databases with its creator, like the Palm launcher's Delete.
+    // The application goes first: if the core refuses it (ROM, running, open) nothing is touched.
+    // A data database that can't go is reported after the rest were tried.
+    fun deleteApplication(name: String) {
+        val all = list()
+        val app = all.firstOrNull { it.name == name && it.application } ?: throw Failed("There is no application named \"$name\".")
+        delete(app.name)
+        val failed = dataOf(all, app).mapNotNull { data ->
+            val reply = link.request("delete-db", data.name, timeoutSeconds = 120)
+            if (reply.ok) null else "${data.name}: ${message(reply)}"
+        }
+        if (failed.isNotEmpty()) throw Failed("${app.name} was deleted, but its data was not all: ${failed.joinToString("; ")}")
+    }
+
     // Writes every RAM database, or the one named, as a ZIP to a picked document.
     // The picked document is removed again when the export fails, so no empty file is left.
     fun export(to: Uri, name: String? = null) {
@@ -107,6 +121,9 @@ class PalmDatabases(private val context: Context, private val link: ControlLink)
             }
             return found.toList().sortedBy { it.name.lowercase() }
         }
+
+        // The databases that go with an application: the others with its creator.
+        fun dataOf(all: List<Info>, app: Info) = all.filter { it.creator == app.creator && it.name != app.name }
 
         // The core couldn't find or open the application. Built-in ones go by their database name,
         // which often isn't the name in the launcher.

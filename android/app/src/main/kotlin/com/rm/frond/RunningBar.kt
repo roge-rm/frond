@@ -1,11 +1,13 @@
 package com.rm.frond
 
 import android.app.Activity
+import android.content.Intent
 import android.os.Handler
 import android.os.Looper
 import androidx.activity.result.ActivityResultRegistry
 import androidx.activity.result.ActivityResultRegistryOwner
 import androidx.activity.result.contract.ActivityResultContract
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.app.ActivityOptionsCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
@@ -94,7 +96,27 @@ internal class BarResults(private val activity: Activity) : ActivityResultRegist
             Handler(Looper.getMainLooper()).post { dispatchResult(requestCode, direct.value) }
             return
         }
+        val intent = contract.createIntent(activity, input)
+        if (isPermissionRequest(intent.action)) {
+            // startActivityForResult has no activity for this action; the system dialog is requestPermissions.
+            activity.requestPermissions(intent.getStringArrayExtra(PERMISSIONS) ?: emptyArray(), requestCode)
+            return
+        }
         @Suppress("DEPRECATION")
-        activity.startActivityForResult(contract.createIntent(activity, input), requestCode, options?.toBundle())
+        activity.startActivityForResult(intent, requestCode, options?.toBundle())
+    }
+
+    // The activity's onRequestPermissionsResult, in the intent form the permission contracts parse.
+    fun dispatchPermissions(requestCode: Int, permissions: Array<String>, grantResults: IntArray): Boolean =
+        dispatchResult(
+            requestCode, Activity.RESULT_OK,
+            Intent().putExtra(PERMISSIONS, permissions).putExtra(GRANT_RESULTS, grantResults),
+        )
+
+    companion object {
+        private const val PERMISSIONS = ActivityResultContracts.RequestMultiplePermissions.EXTRA_PERMISSIONS
+        private const val GRANT_RESULTS = ActivityResultContracts.RequestMultiplePermissions.EXTRA_PERMISSION_GRANT_RESULTS
+
+        fun isPermissionRequest(action: String?) = action == ActivityResultContracts.RequestMultiplePermissions.ACTION_REQUEST_PERMISSIONS
     }
 }

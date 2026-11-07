@@ -711,6 +711,7 @@ open class FrondActivity : SDLActivity() {
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (barResults?.dispatchPermissions(requestCode, permissions, grantResults) == true) return
         if (requestCode != REQUEST_MICROPHONE) return
         if (grantResults.firstOrNull() == android.content.pm.PackageManager.PERMISSION_GRANTED) menuModel?.changeMicrophone(true)
         else menuModel?.microphoneDenied()
@@ -840,10 +841,18 @@ open class FrondActivity : SDLActivity() {
     private fun pressPower() {
         if (leaving) return
         Thread({
-            val file = File(cacheDir, "power.replay")
-            file.writeText("0 key-down power\n80 key-up power\n")
-            val reply = link.request("input-replay", file.path, timeoutSeconds = 30)
-            if (!reply.ok) Log.w(TAG, "power: ${reply.code} ${reply.message}")
+            // A file of its own per press, so two quick presses never share one.
+            val file = File.createTempFile("power", ".replay", cacheDir)
+            try {
+                file.writeText("0 key-down power\n80 key-up power\n")
+                // The core drops the microphone for input-replay; arm it again if it was on.
+                val wasOn = link.request("microphone-state", timeoutSeconds = 10).message == "on"
+                val reply = link.request("input-replay", file.path, timeoutSeconds = 30)
+                if (!reply.ok) Log.w(TAG, "power: ${reply.code} ${reply.message}")
+                if (wasOn) link.request("microphone-mode", "on", timeoutSeconds = 10)
+            } finally {
+                file.delete()
+            }
         }, "FrondBarPower").apply { isDaemon = true }.start()
     }
 

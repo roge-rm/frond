@@ -74,4 +74,10 @@ class RunningBarTest {
         assertTrue(RunningBar.cornerButtons(false))
         assertFalse(RunningBar.cornerButtons(true))
     }
+
+    @Test fun onlyTheRequestPermissionsActionNeedsRequestPermissions() {
+        assertTrue(BarResults.isPermissionRequest("androidx.activity.result.contract.action.REQUEST_PERMISSIONS"))
+        assertFalse(BarResults.isPermissionRequest("android.intent.action.OPEN_DOCUMENT"))
+        assertFalse(BarResults.isPermissionRequest(null))
+    }
 }

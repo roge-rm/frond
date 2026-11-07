@@ -203,6 +203,25 @@ def usb_unix(c, folder, path):
     assert c.ok('usb-mode', 'off', code='usb') == 'off' and not path.exists()
 
 
+def palm_database(path, name, kind, creator, resource):
+    """Writes a minimal .prc (an empty resource database) or a .pdb with one record."""
+    header = name.encode().ljust(32, b'\0') + struct.pack('>HHIIIIII', 1 if resource else 0, 1, 0, 0, 0, 0, 0, 0)
+    header += kind + creator + struct.pack('>IIH', 0, 0, 0 if resource else 1)
+    path.write_bytes(header + (b'' if resource else struct.pack('>IBBBB', 80 + 8, 0, 0, 0, 1) + b'\0\0' + b'data'))
+    return path
+
+
+def delete_application(c, listing_text, app):
+    """What the Android app does for Delete: the application first, then the others with its creator."""
+    entries = [line.split(' ') for line in listing_text.splitlines()]
+    named = [(bytes.fromhex(e[3]).decode('latin-1'), e[1]) for e in entries if len(e) == 4]
+    creator = dict(named)[app]
+    c.ok('delete-db', app, code='deleted')
+    for name, owner in named:
+        if owner == creator and name != app:
+            c.ok('delete-db', name, code='deleted')
+
+
 def common(c, root, device, unsupported, saved):
     """The checks both runners share, ending with a save to saved."""
     assert c.ok('device-state', code='device') == device
@@ -250,6 +269,19 @@ def common(c, root, device, unsupported, saved):
     c.ok('delete-db', PATTERN_NAME, code='deleted')
     assert PATTERN_NAME.encode().hex() not in c.ok('db-list', code='databases'), 'deleted database still listed'
     assert c.ok('install', PATTERN, code=('installed', 'needs-reset'))
+    # An application and its data go together, and a ROM database is refused.
+    app = palm_database(root / 'frond-test-app.prc', 'frond-test-app', b'appl', b'FTst', True)
+    data = palm_database(root / 'frond-test-data.pdb', 'frond-test-data', b'DATA', b'FTst', False)
+    for name, path in (('frond-test-data', data), ('frond-test-app', app)):
+        c.ok('install', path, code=('installed', 'needs-reset'))
+        assert name.encode().hex() in c.ok('db-list', code='databases'), f'{name} not listed'
+    delete_application(c, c.ok('db-list', code='databases'), 'frond-test-app')
+    left = c.ok('db-list', code='databases')
+    assert 'frond-test-app'.encode().hex() not in left and 'frond-test-data'.encode().hex() not in left, left
+    assert PATTERN_NAME.encode().hex() in left, 'delete took another creator\'s database'
+    refused = [c.request('delete-db', name)[1] for name in ('Launcher', 'Memo Pad', 'Memos-PMem')]
+    assert 'rom' in refused, f'no ROM database refused: {refused}'
+    c.ok('guest-ready')
 
 
 def check_arm(core, session, root):

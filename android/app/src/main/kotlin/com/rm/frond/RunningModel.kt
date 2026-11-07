@@ -84,7 +84,7 @@ class RunningModel(
             activity.runOnUiThread {
                 if (!waitingForGdb) return@runOnUiThread
                 waitingForGdb = false
-                refresh()
+                readCard()
                 readKeyboard()
                 readHold()
                 readNetwork()
@@ -431,8 +431,12 @@ class RunningModel(
     }
 
     fun delete(name: String) = palm("Deleting", "Couldn't delete") { d ->
-        d.delete(name)
-        activity.runOnUiThread { note = "$name deleted"; loadApps() }
+        try {
+            d.deleteApplication(name)
+            activity.runOnUiThread { note = "$name deleted" }
+        } finally {
+            activity.runOnUiThread { loadApps() }
+        }
     }
 
     fun export(to: android.net.Uri, name: String?) = palm("Exporting", "Couldn't export") { d ->
