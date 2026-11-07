@@ -982,7 +982,7 @@ test-tg50-call-budget: prepare
 	./build/test-tg50-call-budget
 
 .PHONY: test-memory-stick-controller
-test-memory-stick-controller: prepare
+test-memory-stick-controller: build/source/src/common/libcommon.a
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter \
 		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
 		tests/memory-stick-controller.cpp build/source/src/uarm/uarm/mmiodev_MemoryStickController.cpp \
@@ -991,7 +991,7 @@ test-memory-stick-controller: prepare
 
 .PHONY: test-memory-stick-pro
 test: test-memory-stick-pro
-test-memory-stick-pro: prepare
+test-memory-stick-pro: build/source/src/common/libcommon.a
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter \
 		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/uarm/native -Ibuild/source/src/common \
 		tests/memory-stick-pro.cpp build/source/src/uarm/uarm/mmiodev_MemoryStickController.cpp \
