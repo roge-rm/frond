@@ -51,6 +51,9 @@ class FatImage private constructor(private val image: File, private val file: Ra
         private set
     // Tests stop a change here: "data", "journal", "partly" and "applied".
     internal var crashHook: ((String) -> Unit)? = null
+    // For a card that is being built and is thrown away if it fails: changes go straight into the
+    // image, with no journal or syncs. Call sync() when done.
+    var bulk = false
 
     val clusterBytes get() = clusterSectors * SECTOR
 
@@ -370,6 +373,13 @@ class FatImage private constructor(private val image: File, private val file: Ra
     private fun commit() {
         stageFat()
         if (staged.isEmpty()) return
+        if (bulk) {
+            for ((at, sector) in staged) write(at, sector, 0, SECTOR)
+            fatOnDisk = fat.copyOf()
+            staged.clear()
+            committed = true
+            return
+        }
         file.fd.sync()
         crashHook?.invoke("data")
         val records = staged.entries.map { it.key to it.value }
@@ -431,6 +441,10 @@ class FatImage private constructor(private val image: File, private val file: Ra
     internal fun fatCopiesMatch(): Boolean {
         val first = read(fatStart, fatSectors * SECTOR)
         return (1 until fatCount).all { read(fatStart + it.toLong() * fatSectors * SECTOR, fatSectors * SECTOR).contentEquals(first) }
+    }
+
+    fun sync() {
+        file.fd.sync()
     }
 
     override fun close() {

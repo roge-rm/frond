@@ -186,6 +186,13 @@ target_compile_options(main68k PRIVATE -O2 -g
     -Wno-missing-field-initializers)
 target_link_libraries(main68k PRIVATE frond68kcore frondcommon SDL2 SDL2main SDL2_image log)
 
+# The card tool (native/CardTool.h) for the app's home process as libfrondcard.so: the core's card
+# file code and the JNI entry, without SDL, so it loads outside the :emulator process.
+add_library(frondcard SHARED CardToolJni.cpp)
+target_include_directories(frondcard PRIVATE "${UARM}/native")
+target_compile_options(frondcard PRIVATE -O2 -g -Wno-unused-parameter)
+target_link_libraries(frondcard PRIVATE frondcore log)
+
 if(FROND_SELF_TEST)
     # The CPU tests from tests/ run as the synthetic self-test.
     add_library(main SHARED self_test.cpp test_arm_alignment.cpp test_instruction_cache.cpp)

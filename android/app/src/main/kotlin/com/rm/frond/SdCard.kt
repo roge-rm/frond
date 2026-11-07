@@ -64,12 +64,23 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
         if (!reply.ok) throw Failed(if (reply.code == "not-ready") "Open Date Book on the Palm, then try again." else reply.message, reply.code)
     }
 
-    fun create(mib: Int) {
-        if (memoryStick && mib !in device.memoryStickSizes) throw Failed("Use a Memory Stick size from the list.")
-        run(command("create"), mib.toString())
-    }
     fun eject() = run(command("eject"))
     fun reinsert() = run(command("reinsert"))
+
+    // Settles the ejected card in the machine folder's file and empties the slot. Returns the
+    // card's serial (64 hex digits) and whether it's write protected, as the core reports them.
+    fun takeOut(): Pair<String?, Boolean> {
+        val reply = link.request(command("take-out"), timeoutSeconds = 240)
+        if (!reply.ok) throw Failed(reply.message, reply.code)
+        val parts = reply.message.split(' ')
+        return parts.getOrNull(0)?.takeIf { it.length == 64 } to (parts.getOrNull(1) == "protected")
+    }
+
+    // Opens the card file just moved into the machine folder and inserts it.
+    fun putIn(identity: String, protected: Boolean) {
+        val reply = link.request(command("put-in"), identity + if (protected) " protected" else " writable", timeoutSeconds = 120)
+        if (!reply.ok) throw Failed(reply.message, reply.code)
+    }
     // Whether the stick in the slot is a Memory Stick Pro ("pro N" from ms-type).
     fun memoryStickPro(): Boolean {
         if (!memoryStick) return false
@@ -88,28 +99,6 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
     fun protect(on: Boolean) {
         if (!memoryStick) throw Failed("Write protection is not available for this card.")
         run("ms-read-only", if (on) "on" else "off")
-    }
-
-    // Inserts a picked image as the card. The core checks its size again.
-    fun insertImage(uri: Uri) {
-        folder.mkdirs()
-        val copy = File(folder, "picked.img")
-        try {
-            // Frond classic stick files, or raw Memory Stick Pro images.
-            val stickFiles = device.msSizes.map { MEMORY_STICK_HEADER_BYTES + Device.memoryStickPhysicalBytes(it) } +
-                Device.MEMORY_STICK_PRO_SIZES.filter { it <= device.msProMax }.map { it.toLong() shl 20 }
-            val limit = if (memoryStick) stickFiles.maxOrNull() ?: 0L else device.sdImageMax
-            val problem = if (memoryStick && device.msProMax > 0) "Use a Frond classic Memory Stick image or a raw Memory Stick Pro image."
-                else if (memoryStick) "Use a Frond classic Memory Stick image from 4 to 128 MB."
-                else "Use a 32 MB to ${Device.sizeLabel(device.sdImageMax)} raw SD card image."
-            if (!copyIn(uri, copy, limit)) throw Failed(problem)
-            val size = copy.length()
-            if (memoryStick && size !in stickFiles ||
-                !memoryStick && (size < FatImage.MIN_BYTES || size > limit || size % 512 != 0L)) throw Failed(problem)
-            run(command("insert"), copy.path)
-        } finally {
-            copy.delete()
-        }
     }
 
     // Writes the ejected card's image to a picked document.
@@ -344,7 +333,6 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
 
     companion object {
         // Versioned 64-byte header and classic physical page records; the core checks CRC and boot blocks.
-        private const val MEMORY_STICK_HEADER_BYTES = 64L
         private const val MEMORY_STICK_FILE_BYTES = 8L shl 20
         // The core's candidate card file (uarm/SdCandidate.h), live while its machine runs.
         const val LIVE_CANDIDATE = ".frondsd.tmp-live-"
@@ -388,6 +376,14 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
             if (session == null || !card.isFile || !marker.isFile) return null
             val owner = marker.readText()
             return if (owner == session || sameMachine(context, owner, session)) card else null
+        }
+
+        // The machine folder whose SD exchange is open or pending, or null.
+        fun pendingMachine(context: Context): File? {
+            val marker = File(File(context.filesDir, "sd-exchange"), PENDING)
+            if (!marker.isFile) return null
+            val owner = try { marker.readText() } catch (_: IOException) { return null }
+            return Sessions.forPath(context, owner)?.folder ?: File(owner).parentFile
         }
 
         private fun sameMachine(context: Context, a: String, b: String): Boolean {

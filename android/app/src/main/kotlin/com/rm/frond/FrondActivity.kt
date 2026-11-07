@@ -34,6 +34,8 @@ open class FrondActivity : SDLActivity() {
     private var sessionPath: String? = null
     @Volatile private var leaving = false
     @Volatile private var quitSent = false
+    // Set when the final save on leaving succeeded: a linked card then goes back to Cards.
+    @Volatile private var finalSaveOk = false
     private lateinit var settings: Settings
     private var machineSettings = MachineSettings()
     private var savingNote: TextView? = null
@@ -45,6 +47,8 @@ open class FrondActivity : SDLActivity() {
     private val debugLock = Any()
     // Set in onDestroy; ends the wait to release the core's gdb port.
     @Volatile private var destroyed = false
+    // Why the core wasn't started, for the home screen.
+    @Volatile private var startRefused: String? = null
     private var menuButton: View? = null
     private var keyboardButton: View? = null
     @Volatile private var pendingMicrophone = false
@@ -132,6 +136,7 @@ open class FrondActivity : SDLActivity() {
         }
         if (saved != null) {
             arguments += saved.path
+            arguments += cardArguments()
         } else {
             val device = Device.byId(extras?.getString(EXTRA_DEVICE)) ?: Device.TX
             val nor = extras?.getString(EXTRA_NOR) ?: Firmware.nor(this, device).path
@@ -143,6 +148,8 @@ open class FrondActivity : SDLActivity() {
             if (!device.runs68k) session?.let { File(it).parentFile }?.takeIf { (it.isDirectory || it.mkdirs()) && it.canonicalFile != Sessions.folder(this).canonicalFile }?.let {
                 arguments += listOf("--work-folder", it.path)
             }
+            // Not saved yet: only the run lock, as there's no slot to load.
+            cardArguments()
         }
         arguments += machineSettings.arguments(soundSupported = launchDevice().sound,
             tg50Controls = launchDevice().id == "sony-clie-tg50", m68k = launchDevice().runs68k)
@@ -154,6 +161,49 @@ open class FrondActivity : SDLActivity() {
     }
 
     private fun launchDevice() = Device.byId(intent?.getStringExtra(EXTRA_DEVICE)) ?: Device.TX
+
+    // The machine's folder in the sessions folder, or null for a session elsewhere.
+    private fun machineFolder(): File? = Sessions.forPath(this, sessionPath)?.folder
+
+    // SDL asks for the main function first, on its thread. A machine in the sessions folder only
+    // starts once this process holds its .run.lock (10 s wait), so the home screen leaves its slot
+    // alone. Without it no core runs: SDL finds no such function, returns and ends the activity,
+    // and the home screen shows startRefused.
+    override fun getMainFunction(): String {
+        val folder = machineFolder() ?: return super.getMainFunction()
+        val deadline = System.currentTimeMillis() + 10_000
+        while (runLock == null) {
+            runLock = Cards.tryRunLock(folder)
+            if (runLock != null || System.currentTimeMillis() > deadline) break
+            Thread.sleep(100)
+        }
+        if (runLock != null) return super.getMainFunction()
+        Log.w(TAG, "couldn't take ${folder.name}/${Cards.RUN_LOCK}, not starting")
+        startRefused = "Couldn't start ${folder.name}: Frond is still using it. Try again in a moment."
+        return "frond_not_started"
+    }
+
+    // Takes a linked card if it is free and gives the core the card flags slot.json asks for, once
+    // getMainFunction has the run lock. ARM machines only; the 68k core doesn't know the flags.
+    // Runs on SDL's thread.
+    private fun cardArguments(): List<String> {
+        val folder = machineFolder() ?: return emptyList()
+        if (launchDevice().runs68k || runLock == null) return emptyList()
+        return try {
+            val start = Cards.takeAtStart(Sessions.folder(this), folder)
+            start.heldBy?.let { Log.i(TAG, "linked card is in $it") }
+            start.arguments
+        } catch (e: Exception) {
+            Log.e(TAG, "card start: ${e.message}")
+            emptyList()
+        }
+    }
+
+    // After a save of the machine that succeeded: the slot is what the .frond says again.
+    fun savedMachine() {
+        if (runLock == null) return
+        machineFolder()?.let { Cards.clearSwap(it) }
+    }
 
     // The core refuses to start with --fast-audio unless the NOR it runs is the qualified one for its
     // device. Runs on SDL's thread.
@@ -305,6 +355,10 @@ open class FrondActivity : SDLActivity() {
                 releaseInput()
                 if (path != null) link.request("save", path) else null
             }
+            if (reply != null && reply.ok) {
+                savedMachine()
+                finalSaveOk = true
+            }
             when {
                 reply == null || reply.ok -> quit()
                 // The core stopped during the save; SDL finishes the activity and onDestroy leaves a note.
@@ -348,6 +402,7 @@ open class FrondActivity : SDLActivity() {
                 if (leaving) return@Thread
                 releaseInput()
                 val reply = link.request("save", path, timeoutSeconds = 60)
+                if (reply.ok) savedMachine()
                 Log.i(TAG, "background save: ${reply.code} ${reply.message}")
             }
         }, "FrondStopSave").start()
@@ -693,6 +748,7 @@ open class FrondActivity : SDLActivity() {
                     releaseInput()
                     link.request("save", path, timeoutSeconds = 20)
                 }
+                if (reply.ok) savedMachine()
                 Log.w(TAG, "recreated by Android, saved: ${reply.code} ${reply.message}")
             }
             Process.killProcess(Process.myPid())
@@ -701,10 +757,20 @@ open class FrondActivity : SDLActivity() {
         // A core that stopped by itself, before anyone asked it to quit, failed to start or crashed.
         if (isFinishing && !quitSent) {
             File(filesDir, START_ERROR).writeText(
-                if (link.connectedOnce) "The emulator stopped unexpectedly." else "The emulator couldn't start this session.",
+                startRefused ?: if (link.connectedOnce) "The emulator stopped unexpectedly." else "The emulator couldn't start this session.",
             )
         }
         if (running === this) running = null
+        // The core has quit after a good final save: a linked card goes back to Cards.
+        if (isFinishing && quitSent && finalSaveOk && runLock != null && !launchDevice().runs68k) {
+            machineFolder()?.let { folder ->
+                try {
+                    Cards.releaseAtClose(Sessions.folder(this), folder)?.let { Log.w(TAG, "card release: $it") }
+                } catch (e: Exception) {
+                    Log.e(TAG, "card release: ${e.message}")
+                }
+            }
+        }
         HostDns.stop(applicationContext)
         IrBeam.stop()
         SerialLink.stop()
@@ -724,6 +790,8 @@ open class FrondActivity : SDLActivity() {
     companion object {
         // The emulator in this process, if it's up.
         @Volatile var running: FrondActivity? = null
+        // The running machine's .run.lock, held until the process ends.
+        @Volatile private var runLock: Cards.RunLock? = null
         const val TAG = "Frond"
         const val EXTRA_SESSION = "session"
         const val EXTRA_DEVICE = "device"

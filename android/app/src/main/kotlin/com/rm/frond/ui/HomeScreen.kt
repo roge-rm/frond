@@ -38,6 +38,9 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -52,6 +55,9 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.rm.frond.CardChoice
+import com.rm.frond.CardChoices
+import com.rm.frond.Cards
 import com.rm.frond.Device
 import com.rm.frond.HomeModel
 import com.rm.frond.Session
@@ -67,6 +73,7 @@ fun HomeScreen(model: HomeModel) {
     var renaming by remember { mutableStateOf<Session?>(null) }
     var deleting by remember { mutableStateOf<Session?>(null) }
     var exporting by remember { mutableStateOf<Session?>(null) }
+    var duplicating by remember { mutableStateOf<Session?>(null) }
 
     val importSession = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
@@ -99,6 +106,10 @@ fun HomeScreen(model: HomeModel) {
                                 menu = false
                                 importSession.launch(arrayOf("*/*"))
                             })
+                            DropdownMenuItem(text = { Text("Cards") }, onClick = {
+                                menu = false
+                                model.openCards()
+                            })
                             DropdownMenuItem(text = { Text("Firmware") }, onClick = {
                                 menu = false
                                 model.openFirmware()
@@ -127,8 +138,7 @@ fun HomeScreen(model: HomeModel) {
             item(key = "header") { Header("Devices", Modifier.padding(start = 16.dp, top = 8.dp)) }
             items(model.sessions, key = { it.id }) { s ->
                 SessionRow(s, onMenu = { model.refreshRunning() }, editable = !busy && !model.running, onEdit = { model.edit(it) }, onOpen = { model.start(s) }, onRename = { renaming = it }, onDuplicate = {
-                    val app = context.applicationContext
-                    model.runCopy("Couldn't duplicate the session", null, cancellable = true) { cancelled -> Sessions.duplicate(app, it, cancelled) }
+                    duplicating = it
                 }, onDelete = { deleting = it }, onExport = {
                     exporting = it
                     exportSession.launch("${it.name}.zip")
@@ -139,15 +149,7 @@ fun HomeScreen(model: HomeModel) {
         }
     }
 
-    if (busy) {
-        AlertDialog(
-            onDismissRequest = {},
-            confirmButton = {},
-            dismissButton = if (model.cancellable) ({ TextButton(onClick = { model.cancelCopy() }) { Text("Cancel") } }) else null,
-            title = { Text("Copying") },
-            text = { Progress() },
-        )
-    }
+    CopyingDialog(model)
     model.alert?.let { (title, text) ->
         AlertDialog(
             onDismissRequest = { model.alert = null },
@@ -177,15 +179,46 @@ fun HomeScreen(model: HomeModel) {
             dismissButton = { TextButton(onClick = { renaming = null }) { Text("Cancel") } },
         )
     }
+    duplicating?.let { s ->
+        // A machine with a card asks what the copy gets (Link first); one without is copied at once.
+        val choices = produceState<List<CardChoice>?>(null, s.id) {
+            value = withContext(Dispatchers.IO) { CardChoices.duplicateChoices(Sessions.folder(context), s.folder) }
+        }.value
+        // The card's name and the name Copy would give its copy.
+        val names = produceState<Pair<String, String>?>(null, s.id) {
+            value = withContext(Dispatchers.IO) {
+                val sessions = Sessions.folder(context)
+                CardChoices.cardNameOf(sessions, s.folder)?.let { it to Cards.freeCardName(Cards.libraryFor(sessions), it) }
+            }
+        }.value
+        val duplicate: (CardChoice) -> Unit = { choice ->
+            duplicating = null
+            val app = context.applicationContext
+            model.runCopy("Couldn't duplicate the session", null, cancellable = true) { cancelled -> Sessions.duplicate(app, s, cancelled, choice) }
+        }
+        when {
+            choices == null -> Unit
+            choices.isEmpty() -> LaunchedEffect(s.id) { duplicate(CardChoice.COPY) }
+            else -> ChoiceDialog("Duplicate ${s.name}", choices, { CardChoices.choiceLabel(it) }, "Duplicate",
+                onDismiss = { duplicating = null }, note = {
+                    CardChoices.duplicateClause(it, names?.first ?: "its card", names?.second ?: "a copy of its card", s.name)
+                }, onChoose = duplicate)
+        }
+    }
     deleting?.let { s ->
+        val clause = produceState<String?>(null, s.id) {
+            value = withContext(Dispatchers.IO) { CardChoices.deleteClause(Sessions.folder(context), s.folder) }
+        }.value
         AlertDialog(
             onDismissRequest = { deleting = null },
             title = { Text("Delete ${s.name}?") },
+            text = if (clause != null) ({ Text(clause) }) else null,
             confirmButton = {
                 TextButton(onClick = {
-                    Sessions.delete(context, s)
                     deleting = null
-                    model.reload()
+                    val app = context.applicationContext
+                    // Its card goes back to Cards first, which can mean a copy.
+                    model.runCopy("Couldn't delete the session", null, cancellable = true) { cancelled -> Sessions.delete(app, s, cancelled) }
                 }) { Text("Delete") }
             },
             dismissButton = { TextButton(onClick = { deleting = null }) { Text("Cancel") } },

@@ -22,6 +22,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 
 // What the emulator's menu screen shows. Card and database work runs one job at a time off the main thread.
 class PeripheralsModel(
@@ -118,6 +119,8 @@ class PeripheralsModel(
             val s = withContext(Dispatchers.IO) { c.state() }
             val protection = withContext(Dispatchers.IO) { c.protection() }
             val pro = withContext(Dispatchers.IO) { c.memoryStickPro() }
+            val slot = withContext(Dispatchers.IO) { slotInfo(s) }
+            slotShown = slot
             state = s
             writeProtected = protection
             memoryStickPro = pro
@@ -133,10 +136,180 @@ class PeripheralsModel(
 
     fun cancelFiles() {
         if (!canCancelFiles || cancellingFiles) return
+        cardCancel?.let {
+            it.set(true)
+            cancellingFiles = true
+            return
+        }
         val cancellation = card?.cancelJob()
         if (cancellation == null) { canCancelFiles = false; return }
         cancellingFiles = true
         activity.lifecycleScope.launch(Dispatchers.IO) { try { cancellation.input?.close() } catch (_: Exception) { } }
+    }
+
+    // ---- The card in the slot, as Cards knows it ----
+
+    // The running machine's folder, when it's one of the saved machines Cards looks after.
+    private val machineDir: File?
+        get() {
+            val dir = FrondActivity.running?.session?.let { File(it).absoluteFile.parentFile } ?: return null
+            return dir.takeIf { it.parentFile?.canonicalFile == sessions.canonicalFile }
+        }
+    private val sessions: File get() = Sessions.folder(activity.applicationContext)
+
+    // What the card row says: the card's name or "No card"; a linked card the slot is empty for,
+    // with where it is (null when it's free); and whether an SD exchange is pending.
+    data class SlotShown(val name: String, val linked: String? = null, val linkedId: String? = null,
+                         val linkedHolder: String? = null, val pending: Boolean = false)
+    var slotShown by mutableStateOf(SlotShown("No card"))
+        private set
+
+    private fun slotInfo(s: SdCard.State): SlotShown {
+        val dir = machineDir
+        val pending = SdCard.pendingFor(activity.applicationContext, FrondActivity.running?.session) != null
+        if (dir == null) return SlotShown(if (s == SdCard.State.NONE) "No card" else device.cardLabel, pending = pending)
+        val library = Cards.libraryFor(sessions)
+        val slot = Cards.readSlot(dir)
+        val file = Cards.cardFileIn(dir)
+        val name = when {
+            s == SdCard.State.NONE -> "No card"
+            file != null && slot.card != null -> Cards.readCard(Cards.entryDir(library, slot.card))?.name ?: Cards.kindName(Cards.kindOfFile(file))
+            file != null -> Cards.kindName(Cards.kindOfFile(file))
+            else -> device.cardLabel
+        }
+        if (s != SdCard.State.NONE || slot.link == null) return SlotShown(name, pending = pending)
+        val card = Cards.readCard(Cards.entryDir(library, slot.link)) ?: return SlotShown(name, pending = pending)
+        val free = File(Cards.entryDir(library, slot.link), Cards.fileOfKind(card.kind)).isFile
+        val holder = if (free) null else card.machine?.let { Cards.machineName(File(sessions, it)) } ?: "another machine"
+        return SlotShown(name, card.name, card.id, holder, pending)
+    }
+
+    // The picker: its choices, the one picked and the card the slot holds now.
+    class Picker(val title: String, val choices: List<CardChoices.Choice>, val selected: String?, val current: String?)
+    var picker by mutableStateOf<Picker?>(null)
+    var pickerLinking by mutableStateOf<Pair<Cards.Card, List<CardChoices.LinkOption>>?>(null)
+    var pickerMaking by mutableStateOf(false)
+    // The picker's OK on an inserted card waits for the eject to be confirmed.
+    var confirmingChange by mutableStateOf(false)
+    @Volatile private var cardCancel: java.util.concurrent.atomic.AtomicBoolean? = null
+
+    fun openPicker(select: String? = null) {
+        val dir = machineDir ?: return
+        if (busy != null || waiting() || slotShown.pending) return
+        val keep = picker?.selected
+        val reopening = picker != null
+        activity.lifecycleScope.launch {
+            val shown = withContext(Dispatchers.IO) {
+                Cards.reconcile(sessions, dir)
+                val slot = Cards.readSlot(dir)
+                val current = if (Cards.cardFileIn(dir) != null) slot.card else null
+                val choices = CardChoices.pickerChoices(sessions, dir, device)
+                val title = "${if (device.memoryStick) "Memory Stick" else "SD card"} for $name"
+                Picker(title, choices, CardChoices.pickerStart(choices, select ?: if (reopening) keep else current), current)
+            }
+            picker = shown
+        }
+    }
+
+    fun pick(id: String?) {
+        picker = picker?.let { Picker(it.title, it.choices, id, it.current) }
+    }
+
+    fun pickerOk() {
+        val p = picker ?: return
+        if (p.selected == p.current) { picker = null; return }
+        if (state == SdCard.State.INSERTED) { confirmingChange = true; return }
+        picker = null
+        changeCard(p.selected)
+    }
+
+    fun confirmChange(yes: Boolean) {
+        confirmingChange = false
+        val p = picker ?: return
+        if (!yes) return
+        picker = null
+        changeCard(p.selected)
+    }
+
+    // Eject (confirmed), take the old card out to the drawer, then put the new one in. The old
+    // card is never lost: a failed put-in sends the new one back to the drawer.
+    fun changeCard(to: String?) {
+        val dir = machineDir ?: return
+        job("Changing the card", "Couldn't change the card") { c ->
+            if (c.state() == SdCard.State.INSERTED) c.eject()
+            if (c.state() != SdCard.State.NONE) {
+                val (identity, protected) = c.takeOut()
+                Cards.tookOut(sessions, dir, identity, protected)?.let { throw SdCard.Failed(it) }
+            }
+            if (to == null) return@job
+            val (card, error) = Cards.toRunning(sessions, dir, to)
+            if (card == null) throw SdCard.Failed(error ?: "Couldn't find that card.")
+            try {
+                c.putIn(Cards.hex(card.identity.copyOf(32)), card.writeProtected)
+            } catch (e: Exception) {
+                Cards.putInFailed(sessions, dir, to)
+                throw e
+            }
+        }
+    }
+
+    // A linked card that's free goes in on a tap.
+    fun insertLinked() {
+        val id = slotShown.linkedId ?: return
+        if (slotShown.linkedHolder == null) changeCard(id)
+    }
+
+    // A new card from the picker, made on a worker with progress and Cancel, then selected.
+    fun makeCard(cardName: String, kind: String, size: Int) {
+        pickerMaking = false
+        if (busy != null) return
+        val cancel = java.util.concurrent.atomic.AtomicBoolean(false)
+        cardCancel = cancel
+        canCancelFiles = true
+        cancellingFiles = false
+        busy = "Making the card"
+        progress = null
+        activity.lifecycleScope.launch {
+            var made: String? = null
+            val error = withContext(Dispatchers.IO) {
+                Cards.makeCard(sessions, cardName, kind, size, { cancel.get() }, { done, total ->
+                    if (total > 0) activity.runOnUiThread { if (busy != null) progress = done.toFloat() / total }
+                }) { made = it }
+            }
+            cardCancel = null
+            busy = null
+            progress = null
+            canCancelFiles = false
+            cancellingFiles = false
+            when (error) {
+                null -> openPicker(made)
+                COPY_CANCELLED -> note = "Cancelled"
+                else -> alert = "Couldn't make the card" to error
+            }
+        }
+    }
+
+    fun startPickerLink() {
+        val id = picker?.selected ?: return
+        val dir = machineDir ?: return
+        activity.lifecycleScope.launch {
+            pickerLinking = withContext(Dispatchers.IO) {
+                Cards.readCard(Cards.entryDir(Cards.libraryFor(sessions), id))?.let { it to CardChoices.linkOptions(sessions, id, dir, dir) }
+            }
+        }
+    }
+
+    fun linkFromPicker(card: Cards.Card, machines: List<File>) {
+        pickerLinking = null
+        val dir = machineDir ?: return
+        activity.lifecycleScope.launch {
+            val moved = mutableListOf<String>()
+            val error = withContext(Dispatchers.IO) { Cards.setLinks(sessions, card.id, machines, dir, moved) }
+            if (error != null) alert = "Couldn't link the card" to error
+            else if (moved.isNotEmpty()) note = "${moved.joinToString(", ")} now linked to ${card.name}"
+            openPicker(card.id)
+            refresh()
+        }
     }
 
     // Database work through the control link; leaves the card state alone.
@@ -481,13 +654,13 @@ class PeripheralsModel(
 
     // Erases the Palm, after saving the running session when saveFirst is set.
     fun hardReset(saveFirst: Boolean) = device(if (saveFirst) "Saving" else "Resetting", "Couldn't hard reset", true) { l ->
-        runHardReset(FrondActivity.running?.session, saveFirst) { command, argument ->
+        runHardReset(FrondActivity.running?.session, saveFirst, onSaved = { FrondActivity.running?.savedMachine() }) { command, argument ->
             l.request(command, argument, timeoutSeconds = if (command == "save") 120 else 30)
         }
     }
 
     fun saveCopy(to: android.net.Uri) = device("Saving", "Couldn't save a copy", false) { l ->
-        Sessions.saveCopy(activity.applicationContext, l, to).also { if (it == null) activity.runOnUiThread { note = "Copy saved" } }
+        Sessions.saveCopy(activity.applicationContext, l, to, FrondActivity.running?.session).also { if (it == null) activity.runOnUiThread { note = "Copy saved" } }
     }
 
     // The core's log while the log view is open, or null when it's closed.
@@ -501,12 +674,13 @@ class PeripheralsModel(
 
     companion object {
         // Sends hard-reset, after a save of path when saveFirst is set; a failed save erases nothing.
-        // Returns an error message or null.
-        fun runHardReset(path: String?, saveFirst: Boolean, request: (String, String) -> ControlLink.Reply): String? {
+        // onSaved runs after a good save. Returns an error message or null.
+        fun runHardReset(path: String?, saveFirst: Boolean, onSaved: () -> Unit = {}, request: (String, String) -> ControlLink.Reply): String? {
             if (saveFirst) {
                 if (path == null) return "There's no session to save."
                 val saved = request("save", path)
                 if (!saved.ok) return saved.message
+                onSaved()
             }
             val reply = request("hard-reset", "")
             return if (reply.ok) null else reply.message

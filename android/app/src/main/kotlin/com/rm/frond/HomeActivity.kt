@@ -21,6 +21,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import com.rm.frond.ui.CardsScreen
 import com.rm.frond.ui.FirmwareScreen
 import com.rm.frond.ui.FrondTheme
 import com.rm.frond.ui.HomeScreen
@@ -36,6 +37,9 @@ internal object HomeWork {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     var copying by mutableStateOf(false)
     var cancellable by mutableStateOf(false)
+    // What the dialog says, and how far a card job has got, 0 to 1, when known.
+    var label by mutableStateOf("Copying")
+    var progress by mutableStateOf<Float?>(null)
     var job: Job? = null
     var model: HomeModel? = null
 }
@@ -58,6 +62,11 @@ class HomeModel(private val activity: HomeActivity) {
         get() = HomeWork.copying
         set(value) { HomeWork.copying = value }
     val cancellable: Boolean get() = HomeWork.cancellable
+    val copyLabel: String get() = HomeWork.label
+    val copyProgress: Float? get() = HomeWork.progress
+    // The Cards screen, when open.
+    var cards by mutableStateOf<CardsModel?>(null)
+        private set
     // A short message for the home screen's snackbar.
     var notice by mutableStateOf<String?>(null)
     var running by mutableStateOf(false)
@@ -106,19 +115,31 @@ class HomeModel(private val activity: HomeActivity) {
     // Runs `work` off the main thread while the Copying dialog shows. `work` gets a cancel check and
     // returns an error message or null; a cancel shows nothing.
     fun runCopy(errorTitle: String, success: String?, cancellable: Boolean = false, reload: Boolean = true,
-                work: (cancelled: () -> Boolean) -> String?) {
+                work: (cancelled: () -> Boolean) -> String?) =
+        runJob("Copying", errorTitle, success, cancellable, reload) { cancelled, _ -> work(cancelled) }
+
+    // As runCopy, with `label` in the dialog and a progress bar fed by `work`'s progress (bytes).
+    fun runJob(label: String, errorTitle: String, success: String?, cancellable: Boolean = false, reload: Boolean = true,
+               work: (cancelled: () -> Boolean, progress: (Long, Long) -> Unit) -> String?) {
         if (HomeWork.copying) return
         HomeWork.copying = true
         HomeWork.cancellable = cancellable
+        HomeWork.label = label
+        HomeWork.progress = null
         HomeWork.job = HomeWork.scope.launch {
             var error: String? = null
             var finished = false
             try {
-                error = withContext(Dispatchers.IO) { work { !isActive } }
+                error = withContext(Dispatchers.IO) {
+                    work({ !isActive }) { done, total ->
+                        if (total > 0) HomeWork.scope.launch { if (HomeWork.copying) HomeWork.progress = done.toFloat() / total }
+                    }
+                }
                 finished = true
             } finally {
                 HomeWork.copying = false
                 HomeWork.cancellable = false
+                HomeWork.progress = null
                 HomeWork.job = null
                 val current = HomeWork.model
                 if (reload) current?.reload()
@@ -145,6 +166,15 @@ class HomeModel(private val activity: HomeActivity) {
         firmwareReady = Device.shown.associateWith { Firmware.ready(activity, it) }
         settings = Settings.load(activity)
         controllers = Device.shown.associateWith { ControllerMap.load(activity, it) }
+        cards?.reload()
+    }
+
+    fun openCards() {
+        if (cards == null) cards = CardsModel(activity, this).also { it.open() }
+    }
+
+    fun closeCards() {
+        cards = null
     }
 
     fun start(requested: Session) {
@@ -284,11 +314,17 @@ class HomeActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         HomeWork.model = model
         model.restore(savedInstanceState)
+        // Cards: stale copies go and existing machines' cards move in. Machines running elsewhere wait.
+        if (savedInstanceState == null) {
+            val app = applicationContext
+            Thread({ Cards.startUp(Sessions.folder(app)) }, "FrondCards").start()
+        }
         enableEdgeToEdge()
         setContent {
             FrondTheme {
                 Surface(Modifier.fillMaxSize()) {
                     BackHandler(enabled = model.firmwareOpen) { model.closeFirmware() }
+                    BackHandler(enabled = model.cards != null && !model.firmwareOpen && !model.settingsOpen) { model.closeCards() }
                     BackHandler(enabled = model.machineDraft != null && !model.firmwareOpen) { model.cancelMachine() }
                     BackHandler(enabled = model.settingsOpen) {
                         when {
@@ -301,6 +337,7 @@ class HomeActivity : ComponentActivity() {
                         model.settingsOpen -> SettingsScreen(model)
                         model.firmwareOpen -> FirmwareScreen(model)
                         model.machineDraft != null -> MachineSettingsScreen(model)
+                        model.cards != null -> CardsScreen(model, model.cards!!)
                         else -> HomeScreen(model)
                     }
                 }
