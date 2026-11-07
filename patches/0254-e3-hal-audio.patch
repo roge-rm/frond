@@ -1,0 +1,121 @@
+diff --git a/src/common/device_profile5.h b/src/common/device_profile5.h
+--- a/src/common/device_profile5.h
++++ b/src/common/device_profile5.h
+@@ -104,11 +104,11 @@
+     {deviceTypeFrankenE2, "palm-e2-franken", "Tungsten E3", DeviceCohort5::patchedE2,
+      DeviceSupport5::experimentalDesktop, DeviceDetect5::cardHeader, deviceCompanyPalm5,
+      0x446d4752 /* DmGR */, DeviceBoard5::pxa255E2, DeviceArt::e2,
+-     {false, true, true, true, false, true, true, true},
++     {false, true, true, true, true, true, true, true},
+      8u << 20, 34603008, 16u << 20, 32u << 20, DisplayMode::mode_320x480, 1u << 6, false,
+      DeviceNorLayout5::headerOffset, 0x20000, 0, true, 512, 1024u << 20,
+      {true, "e3", 320, 480, 0, 80, "Calendar|Contacts|Tasks|Note Pad",
+-      "up|down|left|right|centre|app1|app2|app3|app4|home|menu", 20, 466, 88, 466, false, true, false, "", "e3-stock"}},
++      "up|down|left|right|centre|app1|app2|app3|app4|home|menu", 20, 466, 88, 466, false, true, false, "a79f98bddd50c61e7eb89eee46eb81bd", "e3-stock"}},
+     {deviceTypePV, "repalm", "rePalm paravirtualized", DeviceCohort5::paravirtual,
+      DeviceSupport5::inheritedUnverified, DeviceDetect5::cardHeader, 0, 0x50765076 /* PvPv */,
+      DeviceBoard5::paravirtual, DeviceArt::none, {},
+diff --git a/src/uarm/native/main.cpp b/src/uarm/native/main.cpp
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -452,7 +452,7 @@
+             const bool qualified = audioProfile && audioProfile->capabilities.fastAudio &&
+                 digest == audioProfile->frontend.fastAudioNorMd5;
+             if (!qualified) {
+-                cerr << "low-latency audio requires a verified TX 5.4, Tungsten E2 or Zire 72 NOR image" << endl;
++                cerr << "low-latency audio requires a qualified device NOR image" << endl;
+                 return false;
+             }
+         }
+@@ -1258,7 +1258,7 @@
+         });
+ 
+     program.add_argument("--fast-audio", "--experimental-fast-audio")
+-        .help("preview one qualified TX or E2 stereo stream before the firmware audio queue")
++        .help("preview one qualified stereo stream before the firmware audio queue")
+         .default_value(false).implicit_value(true);
+ 
+     program.add_argument("--low-latency-queue")
+diff --git a/src/uarm/uarm/fast_audio.h b/src/uarm/uarm/fast_audio.h
+--- a/src/uarm/uarm/fast_audio.h
++++ b/src/uarm/uarm/fast_audio.h
+@@ -11,12 +11,18 @@
+ #include <cstring>
+ #include <stdexcept>
+ 
+-// Optional preview of one qualified TX, E2 or Zire 72 PCM stream before its firmware queue.
++// Optional preview of one qualified PCM stream before its firmware queue.
+ class FastAudio {
+ public:
+     using Reader = std::function<bool(uint32_t, void*, unsigned)>;
+     enum class Driver { tx, e2, zire72 };
+-    explicit FastAudio(Reader read, Driver driver = Driver::tx) : read(read), driver(driver) {}
++    struct ArmStartSignature {uint32_t entry,call,branch;};
++    inline static constexpr ArmStartSignature Zire72Start{0x20049d5c,0x20049ddc,0xeb00543b};
++    inline static constexpr ArmStartSignature E3Start{0x207a2e60,0x207a2ee0,0xeb00542b};
++    explicit FastAudio(Reader read, Driver driver = Driver::tx)
++        : FastAudio(std::move(read),driver,driver==Driver::zire72?Zire72Start:ArmStartSignature{}) {}
++    FastAudio(Reader read, Driver driver, ArmStartSignature start)
++        : read(std::move(read)),driver(driver),armStart(start) {}
+     void SetQueue(AudioQueue* value) { queue = value; }
+     // Host audio period in frames: the stream starts after one period of silence and falls
+     // back past twelve queued.
+@@ -116,12 +122,12 @@
+     }
+     struct Control {uint32_t channel,command,sp,lr;bool qualifiedStart;};
+     bool QualifiedStart(const uint32_t* r) {
+-        if(driver==Driver::zire72) {
+-            // 5.2.8 SndStreamStart is ARM: ldr r0,[r4,#40]; add r2,sp,#12; mov r1,#5; bl HAL; cmp r0,#0.
+-            const uint32_t entry=0x20049d5c,call=0x20049ddc;
++        if(armStart.entry) {
++            // ARM SndStreamStart: ldr r0,[r4,#40]; add r2,sp,#12; mov r1,#5; bl HAL; cmp r0,#0.
++            const uint32_t entry=armStart.entry,call=armStart.call;
+             return r[14]==call+4 && Is(entry,0xe92d43f0) && Is(entry+4,0xe5999000) &&
+                 Is(call-12,0xe5940028) && Is(call-8,0xe28d200c) && Is(call-4,0xe3a01005) &&
+-                Is(call,0xeb00543b) && Is(call+4,0xe3500000);
++                Is(call,armStart.branch) && Is(call+4,0xe3500000);
+         }
+         const bool e2=driver==Driver::e2;
+         const uint32_t entry=e2?0x20065de4:0x2004ae3c,call=e2?0x20065e30:0x2004ae88;
+@@ -218,8 +224,8 @@
+     EarlyDiagnostics EarlyStatus() const {return {earlyReady,earlyConsumed,earlyDisposed,earlyRejected,earlyContradictions,ledger.Pending(),previews,skips};}
+     ~FastAudio() = default;
+     void EarlyTransition(const uint32_t* regs,uint32_t pc,uint32_t from,uint64_t now=0,bool outputEnabled=true) {
+-        // The Zire 72 stream writer is ARM code, which the Thumb-only early hook doesn't see.
+-        if(driver==Driver::zire72)return;
++        // ARM Sound Managers preview at HAL only; their writers have no Thumb early hook.
++        if(armStart.entry)return;
+         const bool e2=driver==Driver::e2;
+         const uint32_t wrapper=e2?0x20072c6c:0x20057cc4;
+         const uint32_t writer=e2?0x2006659c:0x2004b5f4;
+@@ -427,6 +433,7 @@
+     uint64_t previews=0,skips=0,starts=0,abandoned=0;
+     Reader read;
+     Driver driver;
++    ArmStartSignature armStart;
+     AudioQueue* queue{nullptr};
+     unsigned period{512};
+     bool active{false}, failed{false}, started{false};
+diff --git a/src/uarm/uarm/soc_PXA.cpp b/src/uarm/uarm/soc_PXA.cpp
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -1226,13 +1226,15 @@
+ bool SocPXA::EnableFastAudio() {
+     const auto type=GetDeviceType();
+     if ((type != DeviceType5::deviceTypeTX && type != DeviceType5::deviceTypeE2 &&
+-         type != DeviceType5::deviceTypeZire72) || fastAudio) return false;
++         type != DeviceType5::deviceTypeZire72 && type != DeviceType5::deviceTypeFrankenE2) || fastAudio) return false;
++    const auto start=type==deviceTypeFrankenE2?FastAudio::E3Start:
++        type==deviceTypeZire72?FastAudio::Zire72Start:FastAudio::ArmStartSignature{};
+     fastAudio = std::make_unique<FastAudio>([this](uint32_t addr, void* data, unsigned size) {
+         return cpuInspectRead(cpu,addr,data,size);
+-    }, type==deviceTypeE2 ? FastAudio::Driver::e2 : type==deviceTypeZire72 ? FastAudio::Driver::zire72 : FastAudio::Driver::tx);
++    }, deviceProfileIsE2Board5(type) ? FastAudio::Driver::e2 : type==deviceTypeZire72 ? FastAudio::Driver::zire72 : FastAudio::Driver::tx,start);
+     fastAudio->SetQueue(audioQueue);
+-    // The Zire 72's 5.2.8 Sound Manager is ARM code, so it previews at the HAL write only.
+-    const bool early=type!=deviceTypeZire72;
++    // ARM Sound Managers preview at the HAL write only.
++    const bool early=!start.entry;
+     fastAudio->SetEarlyPlayback(early);
+     if(PowerSleeping())fastAudio->Sleep();
+     auto observer=[](ArmCpu* cpu,void* context,uint32_t pc,uint32_t from) {

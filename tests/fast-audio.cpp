@@ -4,10 +4,10 @@
 #include <vector>
 #include "fast_audio.h"
 
-// RAM at 0 and the Zire 72 NOR code range at its real addresses.
+// RAM at 0 and qualified ARM Sound Manager code at its NOR addresses.
 struct Memory {
-    std::vector<uint8_t> ram=std::vector<uint8_t>(0x10000),code=std::vector<uint8_t>(0x80000);
-    static constexpr uint32_t codeBase=0x20040000;
+    std::vector<uint8_t> ram=std::vector<uint8_t>(0x10000),code=std::vector<uint8_t>(0x800000);
+    static constexpr uint32_t codeBase=0x20000000;
     uint8_t* At(uint32_t a,unsigned size) {
         if(a<ram.size() && size<=ram.size()-a)return ram.data()+a;
         if(a>=codeBase && a-codeBase<code.size() && size<=code.size()-(a-codeBase))return code.data()+(a-codeBase);
@@ -15,7 +15,7 @@ struct Memory {
     }
 };
 
-static void exercise(FastAudio::Driver driver) {
+static void exercise(FastAudio::Driver driver,bool e3=false) {
     Memory memory;
     const bool zire=driver==FastAudio::Driver::zire72;
     auto write=[&](uint32_t a,uint32_t v,unsigned size=4){auto* p=memory.At(a,size);assert(p);std::memcpy(p,&v,size);};
@@ -58,7 +58,7 @@ static void exercise(FastAudio::Driver driver) {
             {-0x418,0x12c0},{-0x416,0x12c9},{0x1d7c,0x8981},{0x1d82,0x8941},
             {0x1d84,0x8541},{0x1d86,0x8501}})write(code+offset,value,2);
     }
-    FastAudio preview(reader,driver);auto queue=audioQueueCreate(8192);preview.SetQueue(queue);
+    FastAudio preview=e3?FastAudio(reader,driver,FastAudio::E3Start):FastAudio(reader,driver);auto queue=audioQueueCreate(8192);preview.SetQueue(queue);
     preview.Handle(0x4320,r,0,true);
     assert(preview.Active() && audioQueuePendingSamples(queue)==0);
     for(unsigned off=0;off<4096;off+=4)write(r[1]+off,0xf82f07d1); // 2001, -2001
@@ -130,7 +130,7 @@ static void exercise(FastAudio::Driver driver) {
         FastAudio wrong(reader,FastAudio::Driver::tx);wrong.SetQueue(queue);
         wrong.Handle(0x4320,r,0,true);assert(wrong.Failed() && !wrong.Active());
         preview.Reset();write(entry+12,0x7fffffff);preview.Handle(0x4320,r,0,true);
-        assert(preview.Failed() && !preview.Active());
+        assert(preview.Failed() && !preview.Active());write(entry+12,0x6000+1-entry-12);
     }
     if(zire) {
         // Any changed word in the HAL write, queue writer or mixer refuses the preview.
@@ -146,10 +146,13 @@ static void exercise(FastAudio::Driver driver) {
             FastAudio wrong(reader,other);wrong.SetQueue(queue);
             wrong.Handle(0x4320,r,0,true);assert(wrong.Failed() && !wrong.Active());
         }
+    }
+    if(zire || e3) {
         // Qualified start: SndStreamStart's ARM call to HAL control 5 at its NOR address.
-        const uint32_t start=0x20049d5c,call=0x20049ddc;
+        const uint32_t start=e3?0x207a2e60:0x20049d5c,call=e3?0x207a2ee0:0x20049ddc;
+        const uint32_t branch=e3?0xeb00542b:0xeb00543b;
         const std::pair<uint32_t,uint32_t> startCode[] = {{start,0xe92d43f0},{start+4,0xe5999000},
-            {call-12,0xe5940028},{call-8,0xe28d200c},{call-4,0xe3a01005},{call,0xeb00543b},{call+4,0xe3500000}};
+            {call-12,0xe5940028},{call-8,0xe28d200c},{call-4,0xe3a01005},{call,branch},{call+4,0xe3500000}};
         for(auto [addr,value]:startCode)write(addr,value);
         uint32_t ctl[16]{};ctl[1]=5;ctl[14]=call+4;
         assert(preview.QualifiedStart(ctl));
@@ -164,11 +167,18 @@ static void exercise(FastAudio::Driver driver) {
         preview.Handle(0x4320,r,14,true);assert(!preview.Active());
         ctl[1]=5;preview.ControlHead(ctl,15,true);preview.ControlTail(ctl,result,16);
         preview.Handle(0x4320,r,17,true);assert(preview.Active() && !preview.Failed());
-        // The Thumb early hook never runs here, so an early transition records nothing.
-        uint32_t regs[16]{};preview.EarlyTransition(regs,0x2006c974,0x20057cd4,18);
+        // ARM starts cannot admit the E2 or TX Thumb submission hooks.
+        preview.SetEarlyPlayback(true);
+        uint32_t regs[16]{};
+        preview.EarlyTransition(regs,0x2006c974,0x20057cd4,18);
+        preview.EarlyTransition(regs,0x200861f8,0x20072c7c,19);
         assert(preview.EarlyStatus().ready==0 && preview.EarlyStatus().rejected==0 && preview.EarlyStatus().pending==0);
+        // A failed HAL start refuses further preview blocks until reset.
+        preview.Reset();result[0]=1;
+        preview.ControlHead(ctl,20,true);preview.ControlTail(ctl,result,21);
+        preview.Handle(0x4320,r,22,true);assert(preview.Failed() && !preview.Active());
     }
     puts("PASS: fast audio profile, PCM/gains, leading silence, pause, fallback, close and reset");
 }
 
-int main(){exercise(FastAudio::Driver::tx);exercise(FastAudio::Driver::e2);exercise(FastAudio::Driver::zire72);}
+int main(){exercise(FastAudio::Driver::tx);exercise(FastAudio::Driver::e2);exercise(FastAudio::Driver::zire72);exercise(FastAudio::Driver::e2,true);}

@@ -39,7 +39,7 @@ static void alterLateFailure(std::vector<uint8_t>& bytes,unsigned power){
  assert(gpio&&late&&pos*4==bytes.size());
 }
 int main(){
- for(auto device:{deviceTypeTX,deviceTypeE2}){
+ for(auto device:{deviceTypeTX,deviceTypeE2,deviceTypeFrankenE2}){
     Server server;const bool tx=device==deviceTypeTX;const unsigned power=tx?17:32,reset=tx?83:80;const uint32_t uart=tx?PXA_BTUART_BASE:PXA_HWUART_BASE;
     std::vector<uint8_t> nor((tx?16:8)*1024*1024),nand(tx?132*1024*1024:34603008,0xff);
     SocPXA soc(device,32*1024*1024,nor.data(),nor.size(),nand.data(),nand.size(),-1,tx?2:0);
@@ -93,6 +93,6 @@ int main(){
     write(soc,af,alternate);assert(recv(server.peer,buf,sizeof(buf),0)==0); // No UART tick needed.
     write(soc,af,original);for(uint8_t c:{1,3,12,0})write(soc,uart,c);run(soc);server.Accept();run(soc);assert(recv(server.peer,buf,sizeof(buf),0)==4);
     soc.Reset();assert(recv(server.peer,buf,sizeof(buf),0)==0);
-    printf("PASS %s board: real GPIO/UART, checkpoint power fence, late-invalid load rollback retains peer/exact pending bytes, accepted load/reset close and power-cycle recovery\n",tx?"TX":"E2");
+    printf("PASS %s board: real GPIO/UART, checkpoint power fence, late-invalid load rollback retains peer/exact pending bytes, accepted load/reset close and power-cycle recovery\n",tx?"TX":device==deviceTypeFrankenE2?"E3":"E2");
  }
 }

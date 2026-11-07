@@ -6,7 +6,7 @@
 #include "audio_queue.h"
 
 static void exercise(DeviceType5 device) {
-    const bool e2=device==deviceTypeE2;
+    const bool e2=deviceProfileIsE2Board5(device);
     std::vector<uint8_t> rom((e2?8:16)*1024*1024), nand(e2?34603008:132*1024*1024,0xff);
     SocPXA soc(device,(e2?16:32)*1024*1024,rom.data(),rom.size(),nand.data(),nand.size(),-1,e2?0:2);
     auto cpu=soc.GetCpu();auto queue=audioQueueCreate(8192);soc.SetAudioQueue(queue);
@@ -61,7 +61,10 @@ static void exercise(DeviceType5 device) {
     assert(soc.Load(snapshot.size(),snapshot.data()));
     call();assert(soc.FastAudioActive() && audioQueuePendingSamples(queue)==1536);
     soc.Reset();assert(!soc.FastAudioActive() && audioQueuePendingSamples(queue)==0);
+    // A changed runtime driver cannot reactivate preview after a reset.
+    write(entry,0);call();assert(!soc.FastAudioActive() && soc.AudioHostState().failed);
+    assert(audioQueuePendingSamples(queue)==0);
     puts("PASS: real ARM HAL interception is opt-in; no duplicate hardware PCM; restore/reset clear preview");
 }
 
-int main(){exercise(deviceTypeTX);exercise(deviceTypeE2);}
+int main(){exercise(deviceTypeTX);exercise(deviceTypeE2);exercise(deviceTypeFrankenE2);}

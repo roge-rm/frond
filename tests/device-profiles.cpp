@@ -41,7 +41,7 @@ int main() {
         desktopCount += deviceProfileSupportsDesktop5(p.deviceType);
         assert(deviceProfileSupportsDesktop5(p.deviceType) ==
                (p.deviceType == deviceTypeTX || p.deviceType == deviceTypeE2 || p.deviceType == deviceTypeZire72 ||
-                p.deviceType == deviceTypeTG50 || p.deviceType == deviceTypeIIIx));
+                p.deviceType == deviceTypeTG50 || p.deviceType == deviceTypeIIIx || p.deviceType == deviceTypeFrankenE2));
         assert((p.deviceType == deviceTypeZire72) == (p.board == DeviceBoard5::pxa270Zire72));
         assert(deviceConfigurationGetNandSize(p.deviceType) == p.nandSize);
         assert(deviceConfigurationDefaultDisplayMode(p.deviceType) == p.defaultDisplay);
@@ -95,7 +95,7 @@ int main() {
         nor.resize(at + 12);
         assert(!inspect().profile && !inspect().hasHeader);
     }
-    assert(desktopCount == 5 && names.size() == 8 && types.size() == 7);
+    assert(desktopCount == 6 && names.size() == 8 && types.size() == 7);
     assert(std::string(deviceName5(deviceTypeTX)) == "palm-tx" && std::string(deviceName5(deviceTypeE2)) == "palm-e2");
     assert(deviceProfileNamed5("palm-tx")->capabilities.serial && deviceProfileNamed5("palm-e2")->capabilities.serial);
     // Unknown names are refused, including numbers, old ids, case and prefixes.
@@ -120,7 +120,67 @@ int main() {
     assert(deviceProfileValidateNorLayout5(0, 0x20000, false) == DeviceFirmwareError5::none);
     for (size_t at : {size_t(0), size_t(0x8000), size_t(0x40000)})
         assert(deviceProfileValidateNorLayout5(0, at, false) == DeviceFirmwareError5::norLayout);
-    for (int other : {1, 2, 3}) assert(deviceProfileValidateNorLayout5(other, 0, false) == DeviceFirmwareError5::none);
+    for (int other : {2, 3}) assert(deviceProfileValidateNorLayout5(other, 0, false) == DeviceFirmwareError5::none);
+    // E3 keeps its named-session identity and E2 board, with a full-height LCD.
+    {
+        const auto* p = deviceProfileNamed5("palm-e2-franken");
+        assert(p && p->deviceType == deviceTypeFrankenE2 && p->support == DeviceSupport5::experimentalDesktop);
+        assert(p->board == DeviceBoard5::pxa255E2 && p->art == DeviceArt::e2);
+        assert(p->frontend.available && deviceProfileRunnerEligible5(p->deviceType));
+        assert(p->support == DeviceSupport5::experimentalDesktop);
+        assert(p->frontend.width == 320 && p->frontend.height == 480 && p->frontend.silkscreenHeight == 0);
+        assert(p->frontend.stripHeight == 80 && deviceProfileStorageSlot5(*p) == DeviceStorageSlot5::sd);
+        assert(!std::strstr(p->frontend.buttons, "power"));
+        assert(std::strstr(deviceProfile5(deviceTypeE2)->frontend.buttons, "power"));
+        const auto display = deviceConfigurationDisplayConfigForDevice(p->deviceType, p->defaultDisplay);
+        assert(display.width == 320 && display.height == 480 && display.graffitiHeight == 0);
+        const auto& caps = p->capabilities;
+        assert(caps.keyboard && caps.serial && caps.usb && caps.infrared && caps.bluetooth && caps.sound);
+        assert(caps.fastAudio && !caps.network && !caps.microphone && !caps.backgroundPanel);
+        assert(!std::strcmp(p->frontend.fastAudioNorMd5, "a79f98bddd50c61e7eb89eee46eb81bd"));
+        for (const auto& other : deviceProfiles5)
+            assert(deviceProfileIsE2Board5(other.deviceType) ==
+                   (other.deviceType == deviceTypeE2 || other.deviceType == deviceTypeFrankenE2));
+        for (const auto& other : deviceProfiles5)
+            assert(deviceProfileHasHotSyncButton5(other.deviceType) ==
+                   (other.deviceType == deviceTypeTX || other.deviceType == deviceTypeE2 ||
+                    other.deviceType == deviceTypeFrankenE2 || other.deviceType == deviceTypeIIIx));
+        for (int unknown : {-1, 99}) {
+            assert(!deviceProfileIsE2Board5(unknown) && !deviceProfileHasHotSyncButton5(unknown));
+        }
+        assert(p->norSize == (8u << 20) && p->headerOffset == 0x20000 && p->legacySessionNor);
+        for (size_t size : {size_t(256), size_t(4u << 20), size_t((8u << 20) - 1), size_t((8u << 20) + 1), size_t(16u << 20)}) {
+            assert(deviceProfileValidateFirmware5(p->deviceType, size, p->nandSize, false, false) == DeviceFirmwareError5::norSize);
+            assert(deviceProfileValidateFirmware5(p->deviceType, size, p->nandSize, true, false) == DeviceFirmwareError5::none);
+        }
+        assert(deviceProfileValidateFirmware5(p->deviceType, 0, p->nandSize, true, false) == DeviceFirmwareError5::norSize);
+        assert(deviceProfileValidateFirmware5(p->deviceType, p->norSize, p->nandSize + 1, true, false) == DeviceFirmwareError5::nandSize);
+        for (size_t at : {size_t(0), size_t(0x8000), size_t(0x40000)}) {
+            assert(deviceProfileValidateNorLayout5(p->deviceType, at, false) == DeviceFirmwareError5::norLayout);
+            assert(deviceProfileValidateNorLayout5(p->deviceType, at, true) == DeviceFirmwareError5::none);
+        }
+        std::vector<uint8_t> nor(p->norSize);
+        auto inspect = [&] {
+            return deviceProfileInspectNor5(nor.size(), [&](uint64_t at, uint8_t* out, size_t count) {
+                if (at > nor.size() || count > nor.size() - at) return false;
+                std::memcpy(out, nor.data() + at, count);
+                return true;
+            });
+        };
+        for (size_t at : {size_t(0), size_t(0x20000), size_t(0x40000)}) {
+            std::fill(nor.begin(), nor.end(), 0);
+            put32(nor, at + 8, 0xfeedbeef);
+            put32(nor, at + 0x80, p->companyId);
+            put32(nor, at + 0x84, p->halId);
+            const RomInfo5 info(nor.data(), nor.size());
+            assert(info.IsValid() && info.GetDeviceType() == p->deviceType && info.GetHeaderOffset() == at);
+            assert(info.GetRecommendedRamSize() == (32u << 20));
+            assert(inspect().profile == p && inspect().validLayout == (at == 0x20000));
+            put32(nor, at + 0x80, 0x58585858);
+            assert(inspect().hasHeader && !inspect().profile);
+            assert(RomInfo5(nor.data(), nor.size()).GetDeviceType() == deviceTypeInvalid);
+        }
+    }
     // Zire 72 NOR: small card at 0x0 and a matching big card at 0x20000, sessions included.
     assert(deviceProfileValidateFirmware5(deviceTypeZire72, 14942208, 0, false, false) == DeviceFirmwareError5::none);
     for (size_t nor : {size_t(14942207), size_t(14876672), size_t(8u << 20), size_t(16u << 20), size_t(0x20000)})
@@ -341,10 +401,13 @@ int main() {
             assert(!deviceProfileSdSizeValid5(type, 2048 * MiB + 512) && !deviceProfileSdSizeValid5(type, 4096 * MiB));
             assert(!deviceProfileSdSizeValid5(type, 16 * MiB));
         }
-        assert(deviceProfileSdSizeValid5(deviceTypeE2, 512) && deviceProfileSdSizeValid5(deviceTypeE2, 1024 * MiB));
-        assert(!deviceProfileSdSizeValid5(deviceTypeE2, 1024 * MiB + 512) && !deviceProfileSdSizeValid5(deviceTypeE2, 2048 * MiB));
+        for (auto type : {deviceTypeE2, deviceTypeFrankenE2}) {
+            assert(deviceProfileSdSizeValid5(type, 512) && deviceProfileSdSizeValid5(type, 1024 * MiB));
+            assert(!deviceProfileSdSizeValid5(type, 0) && !deviceProfileSdSizeValid5(type, 513));
+            assert(!deviceProfileSdSizeValid5(type, 1024 * MiB + 512) && !deviceProfileSdSizeValid5(type, 2048 * MiB));
+        }
     }
-    std::cout << "PASS: device names, cohort inventory, geometry, E2 NOR size/layout, header bounds and v6 named sessions\n";
+    std::cout << "PASS: device names, cohort inventory, geometry, E2-board NOR size/layout, header bounds and v6 named sessions\n";
 }
 
 // A synthetic 68k ROM: a big-endian card header at 0, the rest zero.

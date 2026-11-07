@@ -179,10 +179,12 @@ class SessionStoreTest : public QObject {
         // Available sessions open; a reserved device stays unavailable.
         write(folder() + "/Zire.frond", header(6, "palm-zire-72"));
         write(folder() + "/Clie.frond", header(6, "sony-clie-tg50"));
+        write(folder() + "/E3.frond", header(6, "palm-e2-franken"));
         write(folder() + "/IIIx.frond", header(8, "palm-iiix"));
         write(folder() + "/Reserved.frond", header(6, "palm-m515"));
         for (const auto& info : list(folder())) {
             if (info.name == "Zire") QVERIFY(info.saved && !info.old && info.device == "palm-zire-72");
+            if (info.name == "E3") QVERIFY(info.saved && !info.old && info.device == "palm-e2-franken");
             if (info.name == "Clie") QVERIFY(info.saved && !info.old && info.device == "sony-clie-tg50");
             if (info.name == "IIIx") QVERIFY(info.saved && !info.old && info.device == "palm-iiix");
             if (info.name == "Reserved") QVERIFY(info.old);
@@ -659,6 +661,13 @@ class SessionStoreTest : public QObject {
         const auto zire = directory.filePath("zire.bin"); write(zire, QByteArray(14942208, char(0x61)));
         QVERIFY(!frondAudio::qualified(frondFirmware::deviceFromId("palm-zire-72"), {}, zire));
         QCOMPARE(frondAudio::lowLatencyOption(frondFirmware::deviceFromId("palm-zire-72"), {}, zire), QString("--low-latency-queue"));
+        const auto e3 = frondFirmware::deviceFromId("palm-e2-franken");
+        QVERIFY(frondAudio::lowLatencyAvailable(e3));
+        QVERIFY(frondFirmware::capabilities(e3).fastAudio);
+        QCOMPARE(QByteArray(frondFirmware::profile(e3).frontend.fastAudioNorMd5), QByteArray("a79f98bddd50c61e7eb89eee46eb81bd"));
+        QVERIFY(!frondAudio::qualified(e3, {}, {}));
+        QCOMPARE(frondAudio::lowLatencyOption(e3, {}, {}), QString("--low-latency-queue"));
+        QVERIFY(frondAudio::lowLatencyOption(frondFirmware::deviceFromId("palm-iiix"), {}, {}).isEmpty());
         QVERIFY(frondAudio::lowLatencyOption(frondFirmware::Device::automatic, {}, {}).isEmpty());
     }
     void machineControlVisibilityPreferences() {

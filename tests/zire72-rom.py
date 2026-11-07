@@ -172,7 +172,7 @@ class Zire72RomTest(unittest.TestCase):
         # Low-latency audio needs the exact Zire NOR; one changed byte is refused.
         changed = self.patched('fast-audio-other', (len(self.good) - 1, bytes([self.good[-1] ^ 1])))
         for option in ('--fast-audio', '--experimental-fast-audio'):
-            self.rejected([changed, option], 'requires a verified TX 5.4, Tungsten E2 or Zire 72 NOR')
+            self.rejected([changed, option], 'requires a qualified device NOR image')
         result = self.run_core([ZIRE, '--fast-audio', '--no-sound', '--run-for', '5'])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn('unable to enable low-latency audio', result.stderr)

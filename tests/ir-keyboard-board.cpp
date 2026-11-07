@@ -59,7 +59,7 @@ static std::vector<uint32_t> scheduler(const std::vector<uint8_t>& state) {
     assert(false);return {};
 }
 int main() {
-    for(auto device : {deviceTypeTX,deviceTypeE2,deviceTypeTG50}) {
+    for(auto device : {deviceTypeTX,deviceTypeE2,deviceTypeFrankenE2,deviceTypeTG50}) {
         const bool tx=device==deviceTypeTX,tg=device==deviceTypeTG50;
         uartBase=tg?PXA_FFUART_BASE:PXA_STUART_BASE;
         std::vector<uint8_t> nor(tg?4096:(tx?16:8)*1024*1024),nand(tg?0:tx?132*1024*1024:34603008,0xff);
@@ -157,6 +157,6 @@ int main() {
         auto detached=saved(soc);soc.AttachKeyboard(true);
         assert(soc.Load(detached.size(),detached.data()) && !soc.KeyboardAttached());
         run(soc,20);assert(!(read(soc,5)&1));
-        printf("PASS: %s infrared UART gates, exact bytes, partial/fresh restore, malformed rollback, peer exclusion, release and detach persistence\n",tg?"TG50 FFUART":tx?"TX STUART":"E2 STUART");
+        printf("PASS: %s infrared UART gates, exact bytes, partial/fresh restore, malformed rollback, peer exclusion, release and detach persistence\n",tg?"TG50 FFUART":tx?"TX STUART":device==deviceTypeFrankenE2?"E3 STUART":"E2 STUART");
     }
 }

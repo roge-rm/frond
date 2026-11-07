@@ -1,4 +1,4 @@
-// UsbHostBridge on synthetic TX, E2 and Zire 72 SoCs (no firmware): the cable is plugged on emulated
+// UsbHostBridge on synthetic TX, E2, E3, Zire 72 and TG50 SoCs (no firmware): the cable is plugged on emulated
 // time inside Run, the host sleeps while the UDC is off, a read-only checkpoint restore
 // leaves the bridge alone, a load replugs, and off puts back a cable a save left out.
 #include <cassert>
@@ -11,6 +11,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include "CPU.h"
+#include "device_profile5.h"
 #include "ReadOnlyGuest.h"
 #include "UsbHostBridge.h"
 #include "soc_PXA.h"
@@ -27,13 +28,14 @@ static void exercise(DeviceType5 type) {
     std::vector<uint8_t> rom(tg50?4096:zire?14942208:(tx?16:8) * 1024 * 1024), nand(zire||tg50?0:tx?132 * 1024 * 1024:34603008, 0xff);
     SocPXA soc(type, (pxa270?32:16) * 1024 * 1024, rom.data(), rom.size(), zire||tg50?nullptr:nand.data(), nand.size(), -1,
                pxa270?2:0);
+    std::printf("Synthetic USB bridge %s\n", deviceName5(type));
     auto* cpu = soc.GetCpu();
     const uint32_t branch = 0xeafffffe;
     std::memcpy(static_cast<uint8_t*>(soc.GetMemoryData().data) + 0x3000, &branch, 4);
     cpuSetReg(cpu, 15, 0xa0003000);
     auto run = [&](unsigned ms) { for (unsigned i = 0; i < ms; ++i) assert(soc.Run(100000, 100000000) >= 100000); };
     auto udc = [&](unsigned offset, uint32_t value) { assert(cpuMemOpExternal(cpu, &value, 0x40600000 + offset, 4, true)); };
-    assert(soc.UsbTestCableAttached()==tx); // TX cable in by default, E2 and Zire cable out.
+    assert(soc.UsbTestCableAttached()==tx); // Only the TX cable is in by default.
     assert(soc.SetUsbTestCable(true));
 
     UsbHostBridge bridge;
@@ -147,4 +149,4 @@ static void exercise(DeviceType5 type) {
     puts("PASS: a port in use leaves USB off and the cable in, also after a load");
 }
 
-int main(){exercise(deviceTypeTX);exercise(deviceTypeE2);exercise(deviceTypeZire72);exercise(deviceTypeTG50);}
+int main(){exercise(deviceTypeTX);exercise(deviceTypeE2);exercise(deviceTypeFrankenE2);exercise(deviceTypeZire72);exercise(deviceTypeTG50);}

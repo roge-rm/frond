@@ -28,6 +28,20 @@ class PalmButtonsTest {
         assertNull(PalmButtons.tapPoint(Device.TX, PalmButton.HOME, PalmButtons.PORTRAIT))
     }
 
+    @Test fun e3UsesItsGuestStatusBarWithoutAnExtraSilkscreen() {
+        val e3 = Device.byId("palm-e2-franken")!!
+        assertEquals(0, e3.silkscreenHeight)
+        val oldPowerMapping = "97:power,96:centre"
+        assertEquals(mapOf(96 to PalmButton.CENTRE), ControllerMap.decode(oldPowerMapping, e3).keys)
+        org.junit.Assert.assertFalse(e3.rotatingStatusBar)
+        for (orientation in listOf(PalmButtons.PORTRAIT, PalmButtons.REVERSE_LANDSCAPE)) {
+            assertEquals(20 to 466, PalmButtons.tapPoint(e3, PalmButton.HOME, orientation))
+            assertEquals(88 to 466, PalmButtons.tapPoint(e3, PalmButton.MENU, orientation))
+        }
+        assertEquals(0, PalmButtons.sdlKey(PalmButton.HOME, e3))
+        assertEquals(PalmButtons.sdlKey(PalmButton.APP1, Device.E2), PalmButtons.sdlKey(PalmButton.APP1, e3))
+    }
+
     @Test fun e2SilkscreenDoesNotMove() {
         assertEquals(27 to 405, PalmButtons.tapPoint(Device.E2, PalmButton.MENU, PalmButtons.REVERSE_LANDSCAPE))
         assertEquals(27 to 351, PalmButtons.tapPoint(Device.E2, PalmButton.HOME, PalmButtons.PORTRAIT))

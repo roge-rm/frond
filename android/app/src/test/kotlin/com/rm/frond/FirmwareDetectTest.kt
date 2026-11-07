@@ -53,6 +53,27 @@ class FirmwareDetectTest {
         assertEquals(Device.E2, Firmware.detect(nor(16L shl 20, 0x20000)))
     }
 
+    @Test fun e3DetectionAndImportChecks() {
+        val e3 = Device.byId("palm-e2-franken")!!
+        fun e3Nor(size: Long = e3.norSize, at: Long = e3.headerOffset): File = nor(size, at).also { f ->
+            RandomAccessFile(f, "rw").use { le32(it, at + 0x84, e3.halId) }
+        }
+        val f = e3Nor()
+        assertEquals(e3, Firmware.detect(f))
+        assertNull(Firmware.check(e3, f, null))
+        val nand = tmp.newFile()
+        RandomAccessFile(nand, "rw").use { it.setLength(e3.nandSize) }
+        assertNull(Firmware.check(e3, f, nand))
+        RandomAccessFile(nand, "rw").use { it.setLength(e3.nandSize - 528) }
+        org.junit.Assert.assertNotNull(Firmware.check(e3, f, nand))
+        org.junit.Assert.assertNotNull(Firmware.check(e3, e3Nor(16L shl 20), null))
+        org.junit.Assert.assertNotNull(Firmware.check(e3, e3Nor(at = 0x40000), null))
+        org.junit.Assert.assertNotNull(Firmware.check(e3, nor(e3.norSize), null))
+        org.junit.Assert.assertNotNull(Firmware.check(e3, nor(e3.norSize, 0x20000), null))
+        org.junit.Assert.assertNotNull(Firmware.check(Device.E2, f, null))
+        org.junit.Assert.assertNotNull(Firmware.check(Device.TX, f, null))
+    }
+
     private fun card(file: RandomAccessFile, at: Long, length: Long) {
         le32(file, at + 8, 0xfeedbeefL)
         file.seek(at + 0x10)

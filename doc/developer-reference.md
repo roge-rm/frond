@@ -29,8 +29,8 @@ The Palm IIIx has its own runner, `out/frond-68k` (`make out/frond-68k`, install
 | `--mips N` | Target speed in MIPS. Default 100. |
 | `--audio-period FRAMES` | Host audio period, 64 to 8192. Default 512. Low-latency audio sizes its limits from it; Android passes 1024 or more. |
 | `-q`, `--no-sound` | Start with audio off. |
-| `--fast-audio`, `--experimental-fast-audio` | Preview one qualified TX, E2 or Zire 72 stereo stream before the firmware audio queue. |
-| `--low-latency-queue` | The `--fast-audio` queue limits without the preview, on any device and firmware: low startup thresholds, and the 120 Hz slice and pending caps of 6 and 4 host periods (3072/2048 frames at the default 512) while non-silent frames were queued in the last 100 ms. The frontends pass it for Low-latency audio on the TG50, and on the TX, E2 or Zire 72 with firmware that isn't qualified for the preview. |
+| `--fast-audio`, `--experimental-fast-audio` | Preview one qualified TX, E2, E3 or Zire 72 stereo stream before the firmware audio queue. The E3 uses the HAL path without an early stream-start hook. |
+| `--low-latency-queue` | The `--fast-audio` queue limits without the preview, on any device and firmware: low startup thresholds, and the 120 Hz slice and pending caps of 6 and 4 host periods (3072/2048 frames at the default 512) while non-silent frames were queued in the last 100 ms. The frontends pass it for Low-latency audio on ARM devices with sound when the firmware is not qualified for the preview, including modified E3 images and the TG50. |
 | `--gdb PORT` | Wait for GDB on 127.0.0.1:PORT before running, see [GDB and PACE monitor](#gdb-and-pace-monitor). |
 | `--serial off\|pty\|tcp:PORT` | Connect the serial port to a host PTY or a loopback TCP listener (one client at a time). |
 | `--usb off\|pty\|tcp:PORT` | Same for the USB HotSync port, through a built-in USB host. |
@@ -659,7 +659,7 @@ Tests in `make test`, by area:
 | --- | --- |
 | CPU and engines | `test-cpu`, `test-arm-conditions`, `test-instruction-cache`, `test-mmu-fast-path`, `test-mem-region-bounds`, `test-xscale-prefetch`, `test-jit-overshoot`, `test-jit-differential`, `test-jit-compile-thread` |
 | SoC and timing | `test-pxa-timer`, `test-pxa-power`, `test-pxa255-udc`, `test-pxa255-udc-clock`, `test-pxa255-udc-dma`, `test-pxa255-udc-dma-state`, `test-pxa270-udc`, `test-scheduler`, `test-microwire64x16` |
-| Device state and sessions | `test-tx-state`, `test-e2-state`, `test-tg50-state`, `test-device-profiles`, `test-device-controls`, `test-session-v7`, `test-frond-68k`, `test-checkpoint-input`, `test-export-checkpoint`, `test-replay-snapshot`, `test-lifecycle` |
+| Device state and sessions | `test-tx-state`, `test-e2-state`, `test-tg50-state`, `test-device-profiles`, `test-device-controls`, `test-e2-family-peripherals`, `test-session-v7`, `test-frond-68k`, `test-checkpoint-input`, `test-export-checkpoint`, `test-replay-snapshot`, `test-lifecycle` |
 | Palm databases | `test-native-database`, `test-native-primitives`, `test-native-governor`, `test-db-list`, `test-db-backup` |
 | Storage | `test-sd-image`, `test-sd`, `test-card-backing`, `test-memory-stick-controller`, `test-memory-stick-media`, `test-memory-stick-pro`, `test-card-tool`, `test-card-swap` (its firmware part on whichever smoke sessions are in `FROND_ARM_SESSIONS`) |
 | Audio | `test-sdl-audio`, `test-fast-audio`, `test-earlier-audio`, `test-audio-results`, `test-pxa-i2s-audio`, `test-tg50-pwm-audio`, `test-tg50-microphone-adc`, `test-tg50-microphone-dma`, `test-tg50-microphone-state`, `test-z72-microphone`, `test-z72-voice-memo`, `test-tg50-call-budget`, `test-tg50-pace`, `test-tg50-audio-replay`, `test-tg50-serial-board`, `test-tg50-serial-configuration` |

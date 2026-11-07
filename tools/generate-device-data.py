@@ -22,7 +22,7 @@ def outputs(profiles):
         'appNamesText': 'app_names', 'buttonsText': 'buttons', 'holdPresent': 'hold_present', 'holdSupported': 'hold_supported', 'homeKey': 'home_key', 'homeX': 'home_x', 'homeY': 'home_y',
         'menuX': 'menu_x', 'menuY': 'menu_y', 'rotatingStatusBar': 'rotating_status_bar',
         'sdMin': 'sd_min_bytes', 'sdMax': 'sd_max_bytes', 'msSizes': 'ms_sizes_mb', 'msProMax': 'ms_pro_max_mb',
-        'runs68k': 'runs_68k',
+        'runs68k': 'runs_68k', 'hotSyncButton': 'hot_sync_button',
     }
     longs = {'norSize', 'nandSize', 'companyId', 'halId', 'headerOffset', 'bigCardOffset', 'sdMin', 'sdMax'}
     def literal(key, value):

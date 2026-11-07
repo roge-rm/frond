@@ -318,7 +318,7 @@ fun PeripheralsScreen(model: PeripheralsModel, onClose: () -> Unit) {
                 }
                 item { Header("Device", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp)) }
                 if (m68k) item(key = "speed") { MachineSpeedRow(model.settings, true) { model.changeSettings(it) } }
-                action("Power") { model.power() }
+                if ("power" in model.device.buttons) action("Power") { model.power() }
                 if (model.device.holdPresent) item(key = "hold") {
                     val on = model.hold
                     val usable = model.device.holdSupported && on != null && model.busy == null
