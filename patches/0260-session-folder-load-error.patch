@@ -1,0 +1,23 @@
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -303,6 +303,20 @@
+                                 displayMode, requestedDevice, sessionDevice, embeddedCard, options);
+         }
+ 
++        // A folder that didn't load is not read as a file. When it holds a card file, that is the
++        // likely cause: a card the session doesn't describe.
++        std::error_code folderEc;
++        if (std::filesystem::is_directory(path, folderEc)) {
++            bool cardFile = false;
++            for (const auto& entry : std::filesystem::directory_iterator(path, folderEc)) {
++                const auto extension = entry.path().extension().string();
++                if (extension == ".frondsd" || extension == ".frondms" || extension == ".frondmsp") cardFile = true;
++            }
++            cerr << "session folder " << path.string() << " did not load"
++                 << (cardFile ? "; a card file in it must be one the session has" : "") << endl;
++            return false;
++        }
++
+         size_t norOrSessionLen{0};
+         unique_ptr<uint8_t[]> norOrSessionData;
+         if (!util::ReadFile(options.norOrSession, norOrSessionData, norOrSessionLen)) return false;
