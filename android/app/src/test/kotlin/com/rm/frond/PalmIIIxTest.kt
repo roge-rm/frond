@@ -128,12 +128,10 @@ class PalmIIIxTest {
 
     @Test fun the68kCoreRunsInItsOwnProcess() {
         assertEquals(Frond68kActivity::class.java, Emulators.activity(iiix))
-        assertEquals(Peripherals68kActivity::class.java, Emulators.panel(iiix))
         assertEquals("main68k", Emulators.library(iiix))
         assertEquals(":emulator68k", Emulators.process(iiix))
         for (arm in Device.entries.filter { !it.runs68k }) {
             assertEquals(FrondActivity::class.java, Emulators.activity(arm))
-            assertEquals(PeripheralsActivity::class.java, Emulators.panel(arm))
             assertEquals("main", Emulators.library(arm))
             assertEquals(":emulator", Emulators.process(arm))
         }
@@ -147,9 +145,7 @@ class PalmIIIxTest {
             e.getAttributeNS(android, "name") to e.getAttributeNS(android, "process")
         }
         assertEquals(":emulator68k", processes[".Frond68kActivity"])
-        assertEquals(":emulator68k", processes[".Peripherals68kActivity"])
         assertEquals(":emulator", processes[".FrondActivity"])
-        assertEquals(":emulator", processes[".PeripheralsActivity"])
         assertEquals(setOf(":emulator", ":emulator68k"), Emulators.processes.toSet())
     }
 

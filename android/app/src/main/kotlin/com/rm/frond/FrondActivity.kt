@@ -53,16 +53,15 @@ open class FrondActivity : SDLActivity() {
     @Volatile private var destroyed = false
     // Why the core wasn't started, for the home screen.
     @Volatile private var startRefused: String? = null
-    private var menuButton: View? = null
     private var keyboardButton: View? = null
     // The running bar over the Palm: its state, view and the owner its ComposeView needs.
     private val bar = com.rm.frond.ui.RunningBarState()
     private var barView: androidx.compose.ui.platform.ComposeView? = null
     private var barOwner: BarOwner? = null
     private var barResults: BarResults? = null
-    // The menu's model: the Peripherals screen's logic running here, on the control link.
-    private var menuModel: PeripheralsModel? = null
-    private var imeButtons = 0
+    // The menu's and sheets' model, on the control link.
+    private var menuModel: RunningModel? = null
+    private var imeVisible = false
     @Volatile private var pendingMicrophone = false
     @Volatile private var foreground = false
     @Volatile private var microphoneResume = 0L
@@ -88,8 +87,6 @@ open class FrondActivity : SDLActivity() {
     // The Palm infrared keyboard, as the core last said.
     @Volatile private var keyboardAttached = false
     @Volatile private var stopped = false
-    // Set while our own Peripherals screen covers the emulator; it saves on its own stop instead.
-    @Volatile private var panelOpen = false
     // One save at a time: the background save and the save on back.
     private val saveLock = Any()
     // Sound as last sent to the core; Settings can change it while the Palm runs. UI thread only.
@@ -263,22 +260,29 @@ open class FrondActivity : SDLActivity() {
             isAppearanceLightStatusBars = false
             isAppearanceLightNavigationBars = false
         }
+        // The room for the bar is known once the layout has its new size.
+        layout.addOnLayoutChangeListener { _, l, t, r, b, oldL, oldT, oldR, oldB -> if (b - t != oldB - oldT || r - l != oldR - oldL) updateSurfaceMargin() }
         ViewCompat.setOnApplyWindowInsetsListener(layout) { view, insets ->
             // The soft keyboard shrinks the surface too, and the core fits the device above it.
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout() or WindowInsetsCompat.Type.ime())
             view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
-            // With the soft keyboard up the device would cover the corner buttons, so it goes below them.
-            imeButtons = if (insets.isVisible(WindowInsetsCompat.Type.ime())) menuButton?.height ?: 0 else 0
+            imeVisible = insets.isVisible(WindowInsetsCompat.Type.ime())
             updateSurfaceMargin()
             insets
         }
     }
 
-    // Moves the Palm's surface down for the bar in portrait and for the corner buttons over the soft keyboard.
+    // Moves the Palm's surface down for a bar that takes its own space, and for the corner keyboard button
+    // while the soft keyboard is up.
     private fun updateSurfaceMargin() {
+        val density = resources.displayMetrics.density
         val portrait = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
-        val barPx = (RunningBar.HEIGHT_DP * resources.displayMetrics.density).toInt()
-        val margin = RunningBar.surfaceTopMargin(bar.shown, portrait, barPx, imeButtons)
+        bar.portrait = portrait
+        val barPx = (RunningBar.heightDp(portrait) * density).toInt()
+        val parent = SDLActivity.getContentView()
+        val available = if (parent == null) 0 else parent.height - parent.paddingTop - parent.paddingBottom
+        val imeButtons = if (imeVisible && keyboardButton?.visibility == View.VISIBLE) (48 * density).toInt() else 0
+        val margin = RunningBar.surfaceTopMargin(bar.mode, bar.shown, barPx, available, (RunningBar.MIN_PALM_DP * density).toInt(), imeButtons)
         (SDLActivity.mSurface?.layoutParams as? android.view.ViewGroup.MarginLayoutParams)?.let {
             if (it.topMargin != margin) {
                 it.topMargin = margin
@@ -355,7 +359,6 @@ open class FrondActivity : SDLActivity() {
                 if (destroyed || leaving) return@runOnUiThread
                 runningDevice = resolved
                 configureController(resolved)
-                addMenuButton()
                 addBar(resolved)
             }
         }, "FrondFirmware").apply { isDaemon = true }.start()
@@ -466,7 +469,6 @@ open class FrondActivity : SDLActivity() {
 
     override fun onStart() {
         stopped = false
-        panelOpen = false
         super.onStart()
     }
 
@@ -475,7 +477,7 @@ open class FrondActivity : SDLActivity() {
     override fun onStop() {
         super.onStop()
         stopped = true
-        if (isFinishing || isChangingConfigurations || panelOpen) return
+        if (isFinishing || isChangingConfigurations) return
         saveInBackground()
     }
 
@@ -494,33 +496,7 @@ open class FrondActivity : SDLActivity() {
         }, "FrondStopSave").start()
     }
 
-    // A small button in the corner that opens the menu screen (applications, SD card and the rest).
-    private fun addMenuButton() {
-        val layout = SDLActivity.getContentView() as? RelativeLayout ?: return
-        val button = android.widget.ImageButton(this).apply {
-            setImageResource(R.drawable.ic_menu)
-            contentDescription = "Menu"
-            setBackgroundColor(Color.TRANSPARENT)
-            alpha = 0.7f
-            val pad = (8 * resources.displayMetrics.density).toInt()
-            setPadding(pad, pad, pad, pad)
-            setOnClickListener { openPanel() }
-            id = View.generateViewId()
-        }
-        menuButton = button
-        layout.addView(button, RelativeLayout.LayoutParams(RelativeLayout.LayoutParams.WRAP_CONTENT, RelativeLayout.LayoutParams.WRAP_CONTENT).apply {
-            addRule(RelativeLayout.ALIGN_PARENT_TOP)
-            addRule(RelativeLayout.ALIGN_PARENT_END)
-        })
-        keyboardButton?.let { keyboardButton ->
-            val params = keyboardButton.layoutParams as? RelativeLayout.LayoutParams ?: return@let
-            params.removeRule(RelativeLayout.ALIGN_PARENT_END)
-            params.addRule(RelativeLayout.START_OF, button.id)
-            keyboardButton.layoutParams = params
-        }
-    }
-
-    // While the Palm infrared keyboard is attached, a keyboard button beside the menu button shows
+    // While the Palm infrared keyboard is attached, a keyboard button in the corner shows
     // and hides the soft keyboard. Hardware keys reach the core through SDL either way.
     private fun addKeyboard() {
         val layout = SDLActivity.getContentView() as? RelativeLayout ?: return
@@ -539,7 +515,7 @@ open class FrondActivity : SDLActivity() {
         }
         layout.addView(button, RelativeLayout.LayoutParams(RelativeLayout.LayoutParams.WRAP_CONTENT, RelativeLayout.LayoutParams.WRAP_CONTENT).apply {
             addRule(RelativeLayout.ALIGN_PARENT_TOP)
-            menuButton?.let { addRule(RelativeLayout.START_OF, it.id) } ?: addRule(RelativeLayout.ALIGN_PARENT_END)
+            addRule(RelativeLayout.ALIGN_PARENT_END)
         })
         keyboardButton = button
     }
@@ -650,6 +626,7 @@ open class FrondActivity : SDLActivity() {
         if (barView != null) return
         val session = Sessions.forPath(this, sessionPath)
         bar.shown = machineSettings.barShown
+        bar.mode = machineSettings.barMode
         bar.name = session?.name ?: device.label
         bar.subtitle = RunningBar.subtitle(device, machineSettings)
         bar.soundKey = RunningBar.soundKey(device)
@@ -659,7 +636,7 @@ open class FrondActivity : SDLActivity() {
         barOwner = owner
         val results = BarResults(this)
         barResults = results
-        val model = PeripheralsModel(
+        val model = RunningModel(
             ModelHost(this, owner.lifecycleScope, { runOnUiThread(it) }, {}),
             device, SdCard(this, link, sessionPath, device), PalmDatabases(this, link), link, session?.name ?: device.label,
         )
@@ -679,7 +656,7 @@ open class FrondActivity : SDLActivity() {
                 androidx.compose.runtime.CompositionLocalProvider(androidx.activity.compose.LocalActivityResultRegistryOwner provides results) {
                     com.rm.frond.ui.RunningBarView(bar, com.rm.frond.ui.RunningBarActions(
                         back = { leave() }, toggleSound = { toggleSound() }, power = { pressPower() },
-                        keyboard = { toggleKeyboard() }, show = { setBarShown(true) }, hide = { setBarShown(false) },
+                        keyboard = { toggleKeyboard() }, show = { setBarShown(true) }, hide = { setBarShown(false) }, autoHide = { setBarShown(false, remember = false) },
                         openMenu = { openMenu() }, menuRow = { menuRow(it) },
                         openSheet = { openSheet(it) }, closeSheet = { openSheet(null) }, filesOpen = { filesOpen(it) },
                     ))
@@ -725,7 +702,7 @@ open class FrondActivity : SDLActivity() {
         }
     }
 
-    private fun toggleMicrophone(model: PeripheralsModel) {
+    private fun toggleMicrophone(model: RunningModel) {
         val on = model.microphone != "on" && model.microphone != "pending"
         if (!on) model.changeMicrophone(false)
         else if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED) model.changeMicrophone(true)
@@ -739,7 +716,7 @@ open class FrondActivity : SDLActivity() {
         else menuModel?.microphoneDenied()
     }
 
-    private fun saveCopy(model: PeripheralsModel) {
+    private fun saveCopy(model: RunningModel) {
         @Suppress("DEPRECATION")
         startActivityForResult(
             android.content.Intent(android.content.Intent.ACTION_CREATE_DOCUMENT)
@@ -810,18 +787,30 @@ open class FrondActivity : SDLActivity() {
         updateSurfaceMargin()
     }
 
-    // The corner buttons show only while the bar is hidden.
+    // The corner keyboard button shows only while the bar is hidden.
     private fun syncCorner() {
         val corner = RunningBar.cornerButtons(bar.shown) && !leaving
-        menuButton?.visibility = if (corner) View.VISIBLE else View.GONE
         keyboardButton?.visibility = if (corner && bar.keyboardKey) View.VISIBLE else View.GONE
     }
 
-    private fun setBarShown(shown: Boolean) {
+    // The bar's mode changed in the Display sheet.
+    fun applyBarMode() {
+        val mode = Sessions.forPath(this, sessionPath)?.settings?.barMode ?: return
+        runOnUiThread {
+            if (bar.mode == mode) return@runOnUiThread
+            bar.mode = mode
+            machineSettings = machineSettings.copy(barMode = mode)
+            layoutBar()
+        }
+    }
+
+    // remember is false when Auto-hide hides the bar, so the machine still starts with it shown.
+    private fun setBarShown(shown: Boolean, remember: Boolean = true) {
         if (bar.shown == shown) return
         bar.shown = shown
-        machineSettings = machineSettings.copy(barShown = shown)
         layoutBar()
+        if (!remember) return
+        machineSettings = machineSettings.copy(barShown = shown)
         val id = Sessions.forPath(this, sessionPath)?.id ?: return
         Thread({
             try {
@@ -856,16 +845,6 @@ open class FrondActivity : SDLActivity() {
             val reply = link.request("input-replay", file.path, timeoutSeconds = 30)
             if (!reply.ok) Log.w(TAG, "power: ${reply.code} ${reply.message}")
         }, "FrondBarPower").apply { isDaemon = true }.start()
-    }
-
-    private fun openPanel() {
-        if (leaving) return
-        hideKeyboard()
-        panelOpen = true
-        startActivity(
-            android.content.Intent(this, Emulators.panel(launchDevice()))
-                .putExtra(EXTRA_DEVICE, intent?.getStringExtra(EXTRA_DEVICE) ?: Device.TX.id),
-        )
     }
 
     // With the debugger on in Settings: a loopback port for the core's --gdb, gdb's port on the network through
@@ -1091,7 +1070,7 @@ open class FrondActivity : SDLActivity() {
         if (isFinishing) Process.killProcess(Process.myPid())
     }
 
-    // The control link, for the Peripherals screen in this process.
+    // The control link, for the menu's model in this process.
     val control: ControlLink get() = link
     val session: String? get() = sessionPath
 

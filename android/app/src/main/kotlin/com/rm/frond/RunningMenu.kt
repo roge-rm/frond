@@ -1,7 +1,6 @@
 package com.rm.frond
 
-// The rows of the running bar's menu for a device, and their states. Greyed and hidden rows follow the
-// Peripherals screen: a 68k device lists only the hardware it has, the others grey out what isn't done yet.
+// The rows of the running bar's menu for a device, and their states. A 68k device lists only the hardware it has, the others grey out what isn't done yet.
 object RunningMenu {
     enum class Id { HOLD, KEYBOARD, MICROPHONE, NETWORK, DISPLAY, CONNECTIONS, SCREENSHOT, HIDE_BAR, SAVE_COPY, LOG, RESET, HARD_RESET }
 

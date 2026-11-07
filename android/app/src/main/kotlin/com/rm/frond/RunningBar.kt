@@ -26,15 +26,40 @@ object RunningBar {
     // Sound shows only on devices that make sound.
     fun soundKey(device: Device) = device.sound
 
-    // How far the Palm's surface is moved down: the bar's height in portrait while it shows, and at least
-    // the corner buttons' height while the soft keyboard is up.
-    fun surfaceTopMargin(shown: Boolean, portrait: Boolean, barPx: Int, imeButtonsPx: Int) =
-        maxOf(imeButtonsPx, if (shown && portrait) barPx else 0)
+    // Landscape has less height to spare, so its bar is shorter.
+    const val LANDSCAPE_HEIGHT_DP = 40
+
+    // The least height the Palm keeps when the bar takes its own space; with less room the bar overlays.
+    const val MIN_PALM_DP = 200
+
+    // Auto-hide mode hides the bar after this long without a touch on it.
+    const val AUTO_HIDE_MS = 4000L
+
+    fun heightDp(portrait: Boolean) = if (portrait) HEIGHT_DP else LANDSCAPE_HEIGHT_DP
+
+    // Whether the bar takes its own space above the Palm: Own space mode, shown, and the Palm keeps minPalmPx.
+    fun takesSpace(mode: BarMode, shown: Boolean, barPx: Int, availablePx: Int, minPalmPx: Int) =
+        mode == BarMode.OWN_SPACE && shown && availablePx - barPx >= minPalmPx
+
+    // How far the Palm's surface is moved down: the bar's height when it takes its own space, and at least
+    // the corner button's height while the soft keyboard is up.
+    fun surfaceTopMargin(mode: BarMode, shown: Boolean, barPx: Int, availablePx: Int, minPalmPx: Int, imeButtonsPx: Int) =
+        maxOf(imeButtonsPx, if (takesSpace(mode, shown, barPx, availablePx, minPalmPx)) barPx else 0)
+
+    // The bar hides by itself only in Auto-hide mode, and not while a menu, sheet or dialog is open.
+    fun autoHides(mode: BarMode, shown: Boolean, menuOpen: Boolean, sheetOpen: Boolean, dialogOpen: Boolean) =
+        mode == BarMode.AUTO_HIDE && shown && !menuOpen && !sheetOpen && !dialogOpen
+
+    // A side sheet in landscape, a bottom sheet in portrait.
+    fun sideSheet(portrait: Boolean) = !portrait
+
+    // The side sheet's width: 360 dp, at most 45% of the screen.
+    fun sideSheetWidthDp(screenWidthDp: Int) = minOf(360, screenWidthDp * 45 / 100)
 
     // The line under the machine's name: the engine on ARM devices, else the device.
     fun subtitle(device: Device, settings: MachineSettings) = if (device.runs68k) device.label else settings.engine.label
 
-    // The corner buttons show while the bar is hidden.
+    // The corner keyboard button shows while the bar is hidden.
     fun cornerButtons(shown: Boolean) = !shown
 }
 

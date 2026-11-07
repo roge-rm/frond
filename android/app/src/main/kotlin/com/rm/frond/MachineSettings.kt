@@ -26,6 +26,13 @@ enum class CpuSpeed(val label: String, val arg: String) {
     UNCAPPED("Uncapped", "uncapped"),
 }
 
+// Android: whether the bar over the running machine hides by itself over the Palm or takes its own space.
+// arg is the saved name.
+enum class BarMode(val label: String, val arg: String) {
+    AUTO_HIDE("Auto-hide", "autohide"),
+    OWN_SPACE("Own space", "space"),
+}
+
 // Which per-machine rows Edit settings and the running menu show. A 68k device has contrast and speed
 // and no engine or low-latency audio; the engine shows only in debug builds.
 data class MachineRows(val contrast: Boolean, val speed: Boolean, val engine: Boolean, val audioPreview: Boolean) {
@@ -58,12 +65,13 @@ data class MachineSettings(
     val speed: CpuSpeed = CpuSpeed.ORIGINAL,
     // Android: whether the bar over the running machine shows.
     val barShown: Boolean = true,
+    val barMode: BarMode = BarMode.AUTO_HIDE,
 ) {
     fun json(): JSONObject = JSONObject().put("size", size.name).put("smoothing", smoothing)
         .put("sound", sound).put("fastAudio", fastAudio).put("microphone", microphone)
         .put("showKeyboard", showKeyboard).put("jogControls", jogControls.arg)
         .put("showJogControls", jogControls != JogControls.HIDDEN)
-        .put("engine", engine.arg).put("speed", speed.arg).put("barShown", barShown).also { if (contrastSet) it.put("contrast", contrast) }
+        .put("engine", engine.arg).put("speed", speed.arg).put("barShown", barShown).put("barMode", barMode.arg).also { if (contrastSet) it.put("contrast", contrast) }
 
     fun applyTo(settings: Settings) = settings.copy(size = size, smoothing = smoothing, sound = sound)
 
@@ -120,6 +128,7 @@ data class MachineSettings(
                 contrastSet = json.has("contrast") || fallback.contrastSet,
                 speed = CpuSpeed.entries.firstOrNull { it.arg == json.optString("speed") } ?: fallback.speed,
                 barShown = json.optBoolean("barShown", fallback.barShown),
+                barMode = BarMode.entries.firstOrNull { it.arg == json.optString("barMode") } ?: fallback.barMode,
             )
         }
     }

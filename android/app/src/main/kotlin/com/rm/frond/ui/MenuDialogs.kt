@@ -15,13 +15,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.rm.frond.Device
 import com.rm.frond.NetworkMode
-import com.rm.frond.PeripheralsModel
+import com.rm.frond.RunningModel
 
-// Dialogs the Peripherals screen and the running bar's menu share.
+// Dialogs the running bar's menu and sheets use.
 
 // The job running now, with Cancel when it can be cancelled.
 @Composable
-fun BusyDialog(model: PeripheralsModel) {
+fun BusyDialog(model: RunningModel) {
     model.busy?.let { label ->
         AlertDialog(onDismissRequest = {}, confirmButton = {
             if (model.canCancelFiles) TextButton(onClick = { model.cancelFiles() }, enabled = !model.cancellingFiles) {
@@ -37,7 +37,7 @@ fun BusyDialog(model: PeripheralsModel) {
 }
 
 @Composable
-fun AlertBox(model: PeripheralsModel) {
+fun AlertBox(model: RunningModel) {
     model.alert?.let { (title, text) ->
         AlertDialog(
             onDismissRequest = { model.alert = null },

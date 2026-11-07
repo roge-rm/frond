@@ -1,21 +1,10 @@
 package com.rm.frond
 
-import android.os.Bundle
 import android.util.Log
-import androidx.activity.ComponentActivity
-import androidx.activity.compose.BackHandler
-import androidx.activity.compose.setContent
-import androidx.activity.enableEdgeToEdge
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.Surface
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Modifier
 import androidx.lifecycle.lifecycleScope
-import com.rm.frond.ui.FrondTheme
-import com.rm.frond.ui.LogScreen
-import com.rm.frond.ui.PeripheralsScreen
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -24,8 +13,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
-// What a model needs from the screen it runs in: the Peripherals activity or the running bar over the emulator.
-// finish leaves the Peripherals screen and does nothing over the Palm.
+// What the model needs from the running bar's activity.
 class ModelHost(
     context: android.content.Context,
     val lifecycleScope: kotlinx.coroutines.CoroutineScope,
@@ -39,8 +27,8 @@ class ModelHost(
     fun finish() = onFinish()
 }
 
-// What the emulator's menu screen shows. Card and database work runs one job at a time off the main thread.
-class PeripheralsModel(
+// What the running bar's menu and sheets show. Card and database work runs one job at a time off the main thread.
+class RunningModel(
     private val activity: ModelHost,
     val device: Device,
     private val card: SdCard?,
@@ -529,12 +517,14 @@ class PeripheralsModel(
                 if (next.sound != old.sound && device.sound) s = s.copy(sound = next.sound)
                 if (next.showKeyboard != old.showKeyboard) s = s.copy(showKeyboard = next.showKeyboard)
                 if (next.jogControls != old.jogControls) s = s.copy(jogControls = next.jogControls)
+                if (next.barMode != old.barMode) s = s.copy(barMode = next.barMode)
                 if (next.fastAudio != old.fastAudio && device.lowLatencyAudio) s = s.copy(fastAudio = next.fastAudio)
                 s
             }
             settings = machineSettings()
             FrondActivity.running?.applyDisplay()
             FrondActivity.running?.applySpeed()
+            FrondActivity.running?.applyBarMode()
         } catch (e: Exception) {
             alert = "Couldn't save settings" to "Couldn't write the machine settings."
         }
@@ -725,15 +715,6 @@ class PeripheralsModel(
 
     fun rotate() = device("Rotating", "Couldn't rotate", true) { send(it, "rotate") }
 
-    // Presses and releases the Palm's power button (key replay on the control link, both runners) and goes back to the Palm.
-    fun power() = device("Pressing power", "Couldn't press power", true) { l ->
-        if ("power" !in device.buttons) return@device "Power is unavailable for this firmware."
-        val file = java.io.File(activity.cacheDir, "power.replay")
-        file.writeText("0 key-down power\n80 key-up power\n")
-        val reply = l.request("input-replay", file.path, timeoutSeconds = 30)
-        if (reply.ok) null else reply.message
-    }
-
     // Presses the cradle's HotSync button and goes back to the Palm.
     fun hotSync() = device("Starting HotSync", "Couldn't start HotSync", true) { send(it, "hotsync") }
 
@@ -859,78 +840,5 @@ class PeripheralsModel(
     fun discard() = job("Reading", "Couldn't read the card") { c ->
         c.cancelEdit()
         activity.runOnUiThread { path = null }
-    }
-}
-
-// The emulator's menu: applications and databases, the SD card and the other peripherals of the running Palm. Runs in the emulator's process and uses
-// FrondActivity's control link. The TG50 keeps running without drawing while this menu is visible.
-// Other devices stay paused; Home saves the session like it does from the emulator.
-open class PeripheralsActivity : ComponentActivity() {
-    private lateinit var model: PeripheralsModel
-    private var panelControl: ControlLink? = null
-
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
-        val emulator = FrondActivity.running
-        val device = emulator?.runningDevice ?: Device.byId(intent?.getStringExtra(FrondActivity.EXTRA_DEVICE)) ?: Device.TX
-        model = PeripheralsModel(
-            ModelHost(this, lifecycleScope, { runOnUiThread(it) }, { finish() }),
-            device,
-            emulator?.let { SdCard(applicationContext, it.control, it.session, device) },
-            emulator?.let { PalmDatabases(applicationContext, it.control) },
-            emulator?.control,
-            emulator?.session?.let { Sessions.forPath(this, it)?.name } ?: device.label,
-        )
-        // Without the emulator (the process was restarted here) there's nothing to show.
-        if (emulator == null) {
-            finish()
-            return
-        }
-        if (device.memoryStick) panelControl = emulator.control
-        model.watchGdb()
-        if (!model.waitingForGdb) model.refresh()
-        model.readKeyboard()
-        model.readHold()
-        model.readNetwork()
-        model.watchBeam()
-        model.watchBluetooth()
-        model.watchLinks()
-        setContent {
-            FrondTheme {
-                Surface(Modifier.fillMaxSize()) {
-                    BackHandler(enabled = model.path != null || model.log != null) {
-                        if (model.log != null) model.log = null
-                        else if (model.path == "/") model.leaveFiles() else model.up()
-                    }
-                    val log = model.log
-                    if (log != null) LogScreen(log, onClose = { model.log = null })
-                    else PeripheralsScreen(model, onClose = { finish() })
-                }
-            }
-        }
-    }
-
-    override fun onResume() {
-        super.onResume()
-        panelControl?.setPanelVisible(true)
-        model.readMicrophone()
-        model.startBluetoothRefresh()
-    }
-
-    override fun onPause() {
-        model.stopBluetoothRefresh()
-        if (!isFinishing) model.cancelMicrophoneRequest()
-        panelControl?.setPanelVisible(false)
-        super.onPause()
-    }
-
-    override fun onStop() {
-        model.stopBluetoothRefresh()
-        super.onStop()
-        if (!isFinishing) FrondActivity.running?.microphoneOnReturn(false)
-        if (!isFinishing && !isChangingConfigurations) {
-            FrondActivity.running?.saveInBackground()
-        }
     }
 }

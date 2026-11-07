@@ -8,7 +8,9 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.lazy.LazyColumn
@@ -46,8 +48,9 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.rm.frond.NetRelay
-import com.rm.frond.PeripheralsModel
+import com.rm.frond.RunningModel
 import com.rm.frond.R
+import com.rm.frond.RunningBar
 import com.rm.frond.RunningSheets
 import com.rm.frond.RunningSheets.AppAction
 import com.rm.frond.RunningSheets.AudioRow
@@ -61,7 +64,7 @@ import com.rm.frond.UsbLink
 
 private val Faded @Composable get() = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
 
-// The dimmed scrim and a bottom sheet over the Palm. A tap on the scrim closes the sheet and goes no further.
+// The dimmed scrim and a bottom sheet (side sheet in landscape) over the Palm. A tap on the scrim closes the sheet and goes no further.
 @Composable
 fun BoxScope.SheetLayer(sheet: Sheet, state: RunningBarState, actions: RunningBarActions) {
     val device = state.device ?: return
@@ -69,12 +72,12 @@ fun BoxScope.SheetLayer(sheet: Sheet, state: RunningBarState, actions: RunningBa
     androidx.compose.foundation.layout.Box(
         Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.45f)).pointerInput(Unit) { detectTapGestures { actions.closeSheet() } },
     )
-    BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) {
-        Surface(
-            Modifier.fillMaxWidth().heightIn(max = maxHeight * 0.65f).pointerInput(Unit) { detectTapGestures { } },
-            shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
-            color = MaterialTheme.colorScheme.surfaceContainer,
-        ) {
+    val side = RunningBar.sideSheet(state.portrait)
+    BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = if (side) Alignment.CenterEnd else Alignment.BottomCenter) {
+        val shape = if (side) RoundedCornerShape(topStart = 16.dp, bottomStart = 16.dp) else RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp)
+        val size = if (side) Modifier.width(RunningBar.sideSheetWidthDp(maxWidth.value.toInt()).dp).fillMaxHeight()
+        else Modifier.fillMaxWidth().heightIn(max = maxHeight * 0.65f)
+        Surface(size.pointerInput(Unit) { detectTapGestures { } }, shape = shape, color = MaterialTheme.colorScheme.surfaceContainer) {
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 Text(RunningSheets.title(sheet, device), style = MaterialTheme.typography.titleMedium,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp))
@@ -90,7 +93,7 @@ fun BoxScope.SheetLayer(sheet: Sheet, state: RunningBarState, actions: RunningBa
 }
 
 @Composable
-private fun ApplicationsSheet(model: PeripheralsModel, actions: RunningBarActions) {
+private fun ApplicationsSheet(model: RunningModel, actions: RunningBarActions) {
     LaunchedEffect(Unit) { model.loadApps() }
     var exportName by rememberSaveable { mutableStateOf<String?>(null) }
     var deleting by rememberSaveable { mutableStateOf<String?>(null) }
@@ -148,7 +151,7 @@ private fun ApplicationsSheet(model: PeripheralsModel, actions: RunningBarAction
 
 // Launch or export any RAM database by name, picked from the list or typed.
 @Composable
-private fun OtherDatabaseDialog(model: PeripheralsModel, onLaunch: (String) -> Unit, onExport: (String) -> Unit) {
+private fun OtherDatabaseDialog(model: RunningModel, onLaunch: (String) -> Unit, onExport: (String) -> Unit) {
     var name by rememberSaveable { mutableStateOf("") }
     val shown = RunningSheets.matching(model.found, name)
     val valid = RunningSheets.validDatabaseName(name)
@@ -184,7 +187,7 @@ private fun OtherDatabaseDialog(model: PeripheralsModel, onLaunch: (String) -> U
 }
 
 @Composable
-private fun CardSheet(model: PeripheralsModel, actions: RunningBarActions) {
+private fun CardSheet(model: RunningModel, actions: RunningBarActions) {
     LaunchedEffect(Unit) { model.readCard() }
     var confirmEject by remember { mutableStateOf(false) }
     var confirmFiles by remember { mutableStateOf(false) }
@@ -243,7 +246,7 @@ private fun CardSheet(model: PeripheralsModel, actions: RunningBarActions) {
 }
 
 @Composable
-private fun DisplaySheet(model: PeripheralsModel, state: RunningBarState, actions: RunningBarActions) {
+private fun DisplaySheet(model: RunningModel, state: RunningBarState, actions: RunningBarActions) {
     val device = model.device
     LaunchedEffect(Unit) { model.readMicrophone() }
     val rows = RunningSheets.displayRows(device)
@@ -259,7 +262,7 @@ private fun DisplaySheet(model: PeripheralsModel, state: RunningBarState, action
 }
 
 @Composable
-private fun ConnectionsSheet(model: PeripheralsModel, actions: RunningBarActions) {
+private fun ConnectionsSheet(model: RunningModel, actions: RunningBarActions) {
     DisposableEffect(Unit) {
         model.startBluetoothRefresh()
         onDispose { model.stopBluetoothRefresh() }

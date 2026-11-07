@@ -32,31 +32,43 @@ On Linux the window shows the running machine's controls instead of the list, an
 - **Force Stop…** shows up if the emulator stops answering (Linux only). It stops without saving.
 - **Rotate** turns the view, and the button bar stays under the screen.
 
+### Android bar, menu and sheets
+
+On Android the controls sit in a bar along the top of the running machine. Taps outside it go to the Palm, and the machine keeps running while a menu or sheet is open.
+
+- The bar has back (saves and leaves), the machine's name and engine, then Applications, Card, Sound, Power and the ⋮ menu. Card shows the card's state (in, out, ejected or none) and only appears on devices with a slot. Power only appears where the device has a power key. The keyboard button shows when the infrared keyboard is attached.
+- ⋮ lists Hold (TG50), Infrared keyboard, Microphone and Network with their state, then Display…, Connections… and Screenshot, then Hide bar, Save a copy… and Emulator log, then Reset and Hard reset…. Rows the device doesn't have are left out. Screenshot saves a PNG of the Palm to Pictures/Frond.
+- Applications, Card, Display and Connections open as a sheet over the bottom of the screen, or at the side in landscape, so the Palm stays in view. Tap outside it or press back to close it. Card Files… opens full screen.
+- Display has the display settings, Rotate and Audio. Connections has infrared, Bluetooth, serial, USB HotSync, the debugger and HotSync.
+- Hide bar leaves a small handle at the top edge. Tap it or swipe down on it to bring the bar back. Whether the bar shows is remembered for each machine. In landscape the bar is shorter.
+- Top bar (in Edit settings and the Display sheet) is Auto-hide or Own space. Auto-hide puts the bar over the Palm and hides it after a few seconds without a touch. Own space moves the Palm down to leave room for it, in portrait and landscape. With little room left, the bar goes over the Palm instead.
+
 ### Apps
 
-Under Applications (Linux) or the Peripherals screen (Android):
+Under Applications (Linux) or the Applications sheet (Android):
 
-- **Install application** takes PRC and PDB files, once Palm OS has started. As after a HotSync, an app installed while the launcher shows appears in it at once, and the app in front stays.
-- **Launch application** starts an installed app by its Palm database name.
-- **Export RAM databases** writes a ZIP of everything in RAM, other apps and your data included.
+- **Install application** (Install… on Android, which takes several files) takes PRC and PDB files, once Palm OS has started. As after a HotSync, an app installed while the launcher shows appears in it at once, and the app in front stays.
+- **Launch application** starts an installed app by its Palm database name. On Android each app in the sheet has Launch, Export and Delete buttons, and Other… takes a database name.
+- **Export RAM databases** (Export all… on Android) writes a ZIP of everything in RAM, other apps and your data included.
 - **Export database** writes one named database. Use it when an open system database, like `Shim Logs`, stops the full export.
 
 Close Palm dialogs first if an install or export can't get through.
 
 ## Settings
 
-Set these when you add a machine, or in Edit settings while it's stopped. On Android they're in the machine's menu while it runs too.
+Set these when you add a machine, or in Edit settings while it's stopped. On Android most are in the Display sheet while it runs too.
 
 | Setting | What it does |
 |---|---|
 | Size (Linux) | 1× to 2× in quarter steps. It starts at the largest that fits the screen. |
 | Size (Android) | Fit, Whole steps or Fill. |
+| Top bar (Android) | Auto-hide or Own space. See above. |
 | Smooth pixels | Softens the LCD. Pixels are sharp by default. |
 | Show keyboard, Jog controls | TG50 only. Jog controls are Hidden, Left of screen or Left of keyboard. |
 | Sound | Turns Palm sound on or off. It can also be switched on the running page. |
 | Low-latency audio | Less delay between a tap and the sound. See below. |
 | Contrast | Palm IIIx only. 0 to 100, default 50, lower fades the ink and higher darkens the panel. It's on the running page too and is saved with the machine. |
-| Speed | Palm IIIx only. Original runs at the real 16.58 MHz, Uncapped lets the host run it as fast as it can (timers stay real time). On Android it's in the running menu too and applies at once. |
+| Speed | Palm IIIx only. Original runs at the real 16.58 MHz, Uncapped lets the host run it as fast as it can (timers stay real time). On Android it's in the Display sheet too and applies at once. |
 | Engine | Exact or Fast. It's hidden: on Linux set `FROND_ENGINE_SETTING=1`, on Android it shows in debug builds. See [performance.md](performance.md). The IIIx only has Exact, so it never shows there. |
 
 Android also has Settings in the home menu: Orientation (follow the phone, portrait or landscape), the gdb server and its port, and the controller keys.
@@ -88,7 +100,7 @@ Keys, with the infrared keyboard detached:
 
 On the TG50 type with the computer keyboard, left Alt is Blue and right Alt is Red. Its jog wheel, jog press and Back are on the side tab. Help → Hardware Keyboard Controls lists the same keys.
 
-The IIIx has the four app buttons, the scroll rocker and power under the screen, and the Applications, Menu, Calculator, Find and Graffiti areas on its silkscreen. Typed text from the computer keyboard goes into the Palm. Hold power for about two seconds to turn the backlight on or off. The cradle's HotSync button is HotSync on the running page (Linux) or in the menu (Android).
+The IIIx has the four app buttons, the scroll rocker and power under the screen, and the Applications, Menu, Calculator, Find and Graffiti areas on its silkscreen. Typed text from the computer keyboard goes into the Palm. Hold power for about two seconds to turn the backlight on or off. The cradle's HotSync button is HotSync on the running page (Linux) or in the Connections sheet (Android).
 
 **Hold** (TG50) latches the device's Hold switch, which turns off the screen and controls, and audio keeps playing. It's saved with the machine.
 
@@ -122,7 +134,7 @@ In a machine, the SD card or Memory Stick row shows the card's name or No card. 
 
 Duplicating a machine with a card asks what to do with it: Link (the copy shares the card), Copy (a copy of the card) or No card. A machine's Export packs its card, and importing it makes a new card in the drawer.
 
-Controls on the running page (only the ones that fit the state show):
+Controls on the running page, or in the Card sheet on Android (only the ones that fit the state show):
 
 - **Eject** and **Insert** take the card out and put it back.
 - **Export image** (once ejected) writes the card as an image.
@@ -133,7 +145,7 @@ Don't eject or sleep the Palm while an app is writing quickly, as the SD driver 
 
 ### Files
 
-SD cards: Linux needs `mtools` (`sudo apt install mtools`). Files saves a recovery session, ejects the card, and opens a dialog where you list a card folder, make a folder, copy a host file to the card and copy a card file to the host. Existing names, including ones that differ only in case, are refused, and there is no replace or delete. **Apply and Reinsert** puts the edited card in, Cancel keeps the original card ejected (use Insert). Cards for Files are FAT16, 32 MB and up. The recovery session is kept under `~/.local/share/frond/sd-exchange/` until you delete it, and has your whole Palm in it. Android does the same from Files under SD card.
+SD cards: Linux needs `mtools` (`sudo apt install mtools`). Files saves a recovery session, ejects the card, and opens a dialog where you list a card folder, make a folder, copy a host file to the card and copy a card file to the host. Existing names, including ones that differ only in case, are refused, and there is no replace or delete. **Apply and Reinsert** puts the edited card in, Cancel keeps the original card ejected (use Insert). Cards for Files are FAT16, 32 MB and up. The recovery session is kept under `~/.local/share/frond/sd-exchange/` until you delete it, and has your whole Palm in it. Android does the same from Files in the Card sheet.
 
 Memory Stick: Files works on the stick's own Palm OS filesystem, with no ejecting. Open Date Book on the Palm and try again if Sony Launcher is busy. You can add and export files, make folders, rename and delete. Changes happen at once. Names must be printable ASCII, paths at most 511 bytes, each transfer at most 8 MiB, and a folder lists at most 512 entries. Existing names are refused. Cancel stops a pending operation. Applications in `/PALM/Launcher` show in Sony Launcher's Card category. A protected stick can be read and exported only.
 
@@ -174,7 +186,7 @@ The mode is saved. Live connections close when the machine resumes, so reload or
 
 The serial port (the T|X, E2 and E3 connector, the TG50 and the IIIx cradle) goes to a PTY or a TCP port. Open the path with `screen` or `minicom`, or connect to the port, for example `nc 127.0.0.1 5023`. Peers get CTS, DSR and DCD while connected, RTS flow control is honoured, and bytes sent with no peer are dropped. On Android use Wait for a peer or Connect to an address, then `link-pty.py PHONE:5033 --link /tmp/palm-serial` on a computer.
 
-Serial HotSync works on the E2 with pilot-link (`pilot-xfer -p /dev/pts/N -l`): put the serial port on a PTY, press HotSync on the running page (Linux) or in the menu (Android) on the E2 or T|X, which pulls the connector's HotSync line low for half a second like the cradle button. The Palm starts HotSync and pilot-link answers. The T|X's serial HotSync isn't tested.
+Serial HotSync works on the E2 with pilot-link (`pilot-xfer -p /dev/pts/N -l`): put the serial port on a PTY, press HotSync on the running page (Linux) or in the Connections sheet (Android) on the E2 or T|X, which pulls the connector's HotSync line low for half a second like the cradle button. The Palm starts HotSync and pilot-link answers. The T|X's serial HotSync isn't tested.
 
 ### Palm IIIx serial and PPP
 
@@ -281,7 +293,7 @@ The Zire 72's Camera shows a white screen and goes back to the launcher. Its mic
 
 On the IIIx, serial HotSync is tested with pilot-link (install, fetch, backup). It has no Fast engine, no SD slot and no Bluetooth, USB or Wi-Fi, as on the real one. Its backlight shows as a green panel.
 
-Microphone (Zire 72 and TG50) is off each time it starts. Turn it on under Device while the machine runs. Android asks for permission the first time and arms it when you return to the device. Saving, file work, stopping, reset, sleep and leaving the app turn it off again. On Linux, hiding the device window does too.
+Microphone (Zire 72 and TG50) is off each time it starts. Turn it on under Microphone in the ⋮ menu (Android) or Device (Linux) while the machine runs. Android asks for permission the first time and arms it when you return to the device. Saving, file work, stopping, reset, sleep and leaving the app turn it off again. On Linux, hiding the device window does too.
 
 ## Troubleshooting
 

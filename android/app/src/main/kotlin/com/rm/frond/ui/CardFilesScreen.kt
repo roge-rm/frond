@@ -65,15 +65,14 @@ import com.rm.frond.IrBeam
 import com.rm.frond.NetRelay
 import com.rm.frond.NetworkMode
 import com.rm.frond.PalmDatabases
-import com.rm.frond.PeripheralsModel
+import com.rm.frond.RunningModel
 import com.rm.frond.SdCard
 import com.rm.frond.SerialLink
 import com.rm.frond.UsbLink
-// The card's file view: full screen, with the card ejected while it's open. Shared by the Peripherals screen
-// and the running bar. snackbar shows the model's notes where the caller wants them.
+// The card's file view: full screen, with the card ejected while it's open. snackbar shows the model's notes where the caller wants them.
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun CardFilesScreen(model: PeripheralsModel, snackbar: SnackbarHostState) {
+fun CardFilesScreen(model: RunningModel, snackbar: SnackbarHostState) {
     val context = LocalContext.current
     var naming by remember { mutableStateOf(false) }
     var exporting by remember { mutableStateOf<FatImage.Entry?>(null) }

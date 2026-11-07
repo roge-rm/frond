@@ -22,9 +22,10 @@ import androidx.compose.ui.unit.dp
 import com.rm.frond.CpuSpeed
 import com.rm.frond.Device
 import com.rm.frond.Engine
+import com.rm.frond.BarMode
 import com.rm.frond.JogControls
 import com.rm.frond.MachineSettings
-import com.rm.frond.PeripheralsModel
+import com.rm.frond.RunningModel
 import com.rm.frond.ScreenSize
 import kotlin.math.roundToInt
 
@@ -73,12 +74,13 @@ fun <T> MachineChoiceRow(
     }
 }
 
-// Size, Smooth pixels, Contrast on 68k devices, and on the TG50 Show keyboard and Jog controls.
+// Size, Smooth pixels, Contrast on 68k devices, Top bar, and on the TG50 Show keyboard and Jog controls.
 @Composable
 fun MachineDisplayRows(device: Device, settings: MachineSettings, listStyle: Boolean, onChange: (MachineSettings) -> Unit) {
     MachineChoiceRow("Size", settings.size, ScreenSize.entries, { it.label }, listStyle) { onChange(settings.copy(size = it)) }
     MachineSwitchRow("Smooth pixels", settings.smoothing, listStyle) { onChange(settings.copy(smoothing = it)) }
     if (device.runs68k) MachineContrastRow(settings, listStyle, onChange)
+    MachineChoiceRow("Top bar", settings.barMode, BarMode.entries, { it.label }, listStyle) { onChange(settings.copy(barMode = it)) }
     if (device.isTg50()) {
         MachineSwitchRow("Show keyboard", settings.showKeyboard, listStyle) { onChange(settings.copy(showKeyboard = it)) }
         MachineChoiceRow("Jog controls", settings.jogControls, JogControls.entries, { it.label }, listStyle) {
@@ -145,7 +147,7 @@ fun MachineSpeedRow(settings: MachineSettings, listStyle: Boolean, onChange: (Ma
 
 // Microphone on or off. Turning it on asks for the permission first when it isn't granted.
 @Composable
-fun MicrophoneRow(model: PeripheralsModel) {
+fun MicrophoneRow(model: RunningModel) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val permission = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
