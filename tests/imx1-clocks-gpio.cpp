@@ -7,6 +7,28 @@
 #include "imx1_bootstrap.h"
 
 int main() {
+    Imx1Gpio gpio;
+    for (unsigned port = 0; port < 4; ++port) {
+        const uint32_t base = 0x0021c000 + port * 0x100;
+        assert(gpio.interruptOutput(port) == Imx1GpioLine::clear);
+        uint32_t value = 0xdeadbeef;
+        assert(gpio.access(base + 0x24, 4, false, value) == Imx1GpioAccess::externalInput);
+        assert(value == 0xdeadbeef);
+        for (unsigned bit = 0; bit < 32; ++bit) {
+            value = 1u << bit;
+            assert(gpio.access(base + 0x30, 4, true, value) == Imx1GpioAccess::sideEffect);
+            assert(gpio.interruptOutput(port) == Imx1GpioLine::clear);
+            assert(gpio.access(base + 0x30, 4, false, value) == Imx1GpioAccess::ok && value == 0);
+        }
+        for (auto sample : {0u, 0xffffffffu}) {
+            gpio.setInput(port, sample);
+            assert(gpio.interruptOutput(port) == Imx1GpioLine::clear);
+            value = 0xdeadbeef;
+            assert(gpio.access(base + 0x34, 4, false, value) == Imx1GpioAccess::externalInput);
+            assert(value == 0xdeadbeef);
+        }
+    }
+    assert(gpio.interruptOutput(4) == Imx1GpioLine::unknown);
     Imx1Bootstrap soc;
     auto read = [&](uint32_t address, uint32_t expected) {
         uint32_t value = 0xdeadbeef;

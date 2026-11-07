@@ -12,7 +12,7 @@ void literal(std::vector<uint32_t>& words, unsigned reg, uint32_t value) {
     words.push_back(value);
 }
 Imx1ProbeResult run(std::vector<uint32_t> words) {
-    words.push_back(0xef000000);
+    words.push_back(0xe7f000f0);
     Imx1ProbeOptions options{};
     options.bootstrapPeripherals = true;
     const auto r = imx1BootProbe(reinterpret_cast<const uint8_t*>(words.data()), words.size() * 4,
@@ -34,7 +34,31 @@ std::vector<uint32_t> memory() {
     return words;
 }
 void finished(const Imx1ProbeResult& r) {
-    assert(r.stop == Imx1ProbeStop::unsupportedInstruction && r.trace.instruction == 0xef000000);
+    assert(r.stop == Imx1ProbeStop::unsupportedInstruction && r.trace.instruction == 0xe7f000f0);
+}
+void jumpTable() {
+    for (unsigned index = 0; index < 3; ++index) {
+        const auto r = run({0xe3a03000 | index, 0xe3530002, 0x908ff103, 0xe7f000f0,
+                            0xea000001, 0xea000002, 0xea000003,
+                            0xe3a04010, 0xea000003, 0xe3a04011, 0xea000001,
+                            0xe3a04012, 0xeaffffff});
+        finished(r);
+        assert(r.trace.pc == 0x10000034 && r.registers[4] == 0x10 + index);
+        assert(r.cpsr == (index == 2 ? 0x600000d3u : 0x800000d3u));
+        assert(!r.busAccesses && r.registers[3] == index);
+    }
+    const auto skipped = run({0xe3a03003, 0xe3530002, 0x908ff103, 0xe3a04099});
+    finished(skipped);
+    assert(skipped.trace.pc == 0x10000010 && skipped.registers[4] == 0x99 &&
+           skipped.cpsr == 0x200000d3);
+    // Flag-setting PC writes and nearby unqualified addressing forms stay gated.
+    for (uint32_t instruction : {0xe09ff103u, 0xe08ff10fu, 0xe08ff083u,
+                                 0xe08ff213u, 0xe08ef103u}) {
+        const auto r = run({instruction});
+        assert(r.stop == Imx1ProbeStop::unsupportedInstruction && r.trace.step == 0 &&
+               r.trace.instruction == instruction && r.registers[15] == 0x10000000 &&
+               r.cpsr == 0xd3 && !r.busAccesses);
+    }
 }
 void blockTransfers() {
     for (bool pre : {false, true}) for (bool up : {false, true}) {
@@ -107,7 +131,7 @@ int main() {
     assert(r.registers[0] == 0x00300104 && r.registers[2] == 0x80fe &&
            r.registers[3] == 0x80fe && !r.registers[4] && r.registers[6] == 0xff7f);
 
-    r = run({transfer(15, 2, 0, true, 1), 0xef000000, 0x12348001});
+    r = run({transfer(15, 2, 0, true, 1), 0xe7f000f0, 0x12348001});
     finished(r); assert(r.registers[2] == 0x8001);
     words = memory(); words.push_back(transfer(0, 2, 3, true, 2));
     r = run(words); finished(r); assert(r.registers[2] == 0xffffff80);
@@ -145,12 +169,13 @@ int main() {
     r = run(words); finished(r);
     assert(r.registers[2] == 0xfffffffa && r.registers[4] == 1 && !r.registers[5]);
     assert(r.cpsr == 0xd3);
-    for (uint32_t instruction : {0xe0120190u, 0xe0323190u, 0xe0021190u, 0xe0000190u,
+    for (uint32_t instruction : {0xe0021190u, 0xe0000190u,
                                  0xe00f0190u, 0xe0020f90u, 0xe002019fu, 0xe022f190u,
                                  0xe0802190u, 0xe1002091u}) {
         r = run({instruction});
         assert(r.stop == Imx1ProbeStop::unsupportedInstruction && r.trace.step == 0);
     }
     blockTransfers();
-    std::puts("PASS: Exact ARMv4 halfword/signed-byte and block addressing, scalar multiply and conservative instruction guards");
+    jumpTable();
+    std::puts("PASS: Exact ARMv4 transfers, scalar multiply, aligned PC-relative jump tables and conservative instruction guards");
 }

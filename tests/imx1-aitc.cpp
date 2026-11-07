@@ -125,8 +125,69 @@ void unknownAndBootstrap() {
     value = 0;
     assert(!b.instructionWord(base + 0x40, value));
 }
+void maskedGpioRequests() {
+    constexpr unsigned sources[] = {11, 12, 13, 62};
+    constexpr uint64_t gpioMask = (uint64_t(7) << 11) | (uint64_t(1) << 62);
+    Imx1Bootstrap b;
+    auto access = [&](unsigned offset, bool write, uint32_t value, Imx1BootstrapAccess status) {
+        assert(b.access(base + offset, 4, write, value) == status);
+        return value;
+    };
+    for (unsigned source = 0; source < 64; ++source) {
+        if ((gpioMask & (uint64_t(1) << source)) || source == 31 || source == 32 || source == 39 ||
+            source == 5 || source == 9 || source == 33 || source == 34 || source == 46) continue;
+        access(8, true, source, Imx1BootstrapAccess::externalInput);
+        assert(access(0x10, false, 0, Imx1BootstrapAccess::ok) == 0);
+        assert(access(0x14, false, 0, Imx1BootstrapAccess::ok) == 0);
+    }
+    for (unsigned port = 0; port < 4; ++port) {
+        const uint32_t gpioBase = 0x0021c000 + port * 0x100;
+        uint32_t value = 0xdeadbeef;
+        assert(b.access(gpioBase + 0x24, 4, false, value) == Imx1BootstrapAccess::externalInput);
+        assert(value == 0xdeadbeef);
+        access(8, true, sources[port], Imx1BootstrapAccess::ok);
+        const unsigned force = port == 3 ? 0x50 : 0x54;
+        const uint32_t bit = 1u << (sources[port] % 32);
+        access(force, true, bit, Imx1BootstrapAccess::sideEffect);
+        assert(access(force, false, 0, Imx1BootstrapAccess::ok) == 0);
+        for (auto mask : {1u, 0x80000000u, 0xffffffffu}) {
+            value = mask;
+            assert(b.access(gpioBase + 0x30, 4, true, value) == Imx1BootstrapAccess::sideEffect);
+            assert(b.access(gpioBase + 0x30, 4, false, value) == Imx1BootstrapAccess::ok && value == 0);
+        }
+        value = 0xffffffff;
+        assert(b.access(gpioBase + 0x34, 4, true, value) == Imx1BootstrapAccess::ok);
+        value = 0;
+        assert(b.access(gpioBase + 0x30, 4, true, value) == Imx1BootstrapAccess::ok);
+    }
+    assert(access(0x14, false, 0, Imx1BootstrapAccess::ok) == uint32_t(gpioMask));
+    assert(access(0x10, false, 0, Imx1BootstrapAccess::ok) == uint32_t(gpioMask >> 32));
+    for (auto type : {uint64_t(0), gpioMask}) {
+        access(0x18, true, type >> 32, Imx1BootstrapAccess::ok);
+        access(0x1c, true, type, Imx1BootstrapAccess::ok);
+        for (unsigned offset : {0x58u, 0x5cu, 0x60u, 0x64u})
+            assert(access(offset, false, 0, Imx1BootstrapAccess::ok) == 0);
+        for (unsigned offset : {0x40u, 0x44u})
+            assert(access(offset, false, 0, Imx1BootstrapAccess::ok) == 0xffffffff);
+        access(0x50, true, uint32_t(1) << 30, Imx1BootstrapAccess::sideEffect);
+        access(0x54, true, 1u << 11, Imx1BootstrapAccess::sideEffect);
+        assert(access(0x50, false, 0, Imx1BootstrapAccess::ok) == 0);
+        assert(access(0x54, false, 0, Imx1BootstrapAccess::ok) == 0);
+    }
+    // Whole source words still depend on the other peripheral inputs.
+    for (unsigned offset : {0x48u, 0x4cu})
+        assert(access(offset, false, 0xdeadbeef, Imx1BootstrapAccess::externalInput) == 0xdeadbeef);
+    // Forcing only the other sources makes each whole source word observable.
+    access(0x50, true, ~uint32_t(gpioMask >> 32), Imx1BootstrapAccess::ok);
+    access(0x54, true, ~uint32_t(gpioMask), Imx1BootstrapAccess::ok);
+    assert(access(0x48, false, 0, Imx1BootstrapAccess::ok) == ~uint32_t(gpioMask >> 32));
+    assert(access(0x4c, false, 0, Imx1BootstrapAccess::ok) == ~uint32_t(gpioMask));
+    uint32_t value = 0;
+    assert(!b.instructionWord(base + 0x40, value));
+    assert(access(0x44, false, 0, Imx1BootstrapAccess::ok) == 0xffffffff);
+}
 }
 int main() {
-    resetAndDecode(); prioritiesAndForces(); unknownAndBootstrap();
+    resetAndDecode(); prioritiesAndForces(); unknownAndBootstrap(); maskedGpioRequests();
     std::puts("PASS: AITC registers, priorities, level requests, explicit unknown inputs and transactional bootstrap guards");
 }

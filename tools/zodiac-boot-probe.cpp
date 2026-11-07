@@ -4,10 +4,12 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <vector>
 
 #include "device_profile5.h"
 #include "imx1_boot_probe.h"
+#include "imx1_i2c_read_window.h"
 
 static void trace(void*, const Imx1ProbeTrace& t) {
     if (t.instructionSize == 2) {
@@ -26,37 +28,61 @@ static void bus(void*, const Imx1ProbeAccess& t) {
                 name ? name : "unknown", imx1BootstrapAccessName(t.status));
 }
 
+static void i2c(void*, const Imx1ProbeI2cEvent& event) {
+    const auto& t = event.transfer;
+    std::printf("i2c step=%u pc=%08x issue-step=%u issue-pc=%08x phase=%s address=%02x byte=%02x direction=%s master-ack=%u response=%s control=%02x status=%02x hclk-divider=%u irq-source=39\n",
+                event.step, event.pc, event.issueStep, event.issuePc, imx1I2cPhaseName(t.phase),
+                t.address, t.byte, t.read ? "read" : "write", t.acknowledge, imx1I2cResponseName(event.response),
+                event.control, event.status, event.divider);
+}
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::fprintf(stderr, "Usage: %s ROM [physical|reset|linked] [instruction-budget] [exact|fast] [--bootstrap-peripherals] [--assume-mpll-settled] [--assume-spll-settled] [--gpio-a-input=VALUE] [--gpio-d-input=VALUE] [--ram-mib=32|128]\n", argv[0]);
+        std::fprintf(stderr, "Usage: %s ROM [physical|reset|linked] [instruction-budget] [exact|fast] [--bootstrap-peripherals] [--assume-mpll-settled] [--assume-spll-settled] [--assume-i2c-single-master] [--i2c-eeprom-image=PATH] [--asp-px1-input=high] [--gpio-a-input=VALUE] [--gpio-b-input=VALUE] [--gpio-d-input=VALUE] [--ram-mib=32|128]\n", argv[0]);
         return 1;
     }
     const char* engine = argc >= 5 ? argv[4] : "exact";
     if (std::strcmp(engine, "exact") && std::strcmp(engine, "fast")) {
         std::fprintf(stderr, "Engine must be exact or fast\n"); return 1;
     }
+    const char* i2cImagePath = nullptr;
     Imx1ProbeOptions options{};
     options.busObserver = bus;
+    options.i2cObserver = i2c;
     for (int i = 5; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--bootstrap-peripherals")) options.bootstrapPeripherals = true;
+        else if (!std::strcmp(argv[i], "--assume-i2c-single-master")) options.assumeI2cSingleMaster = true;
+        else if (!std::strncmp(argv[i], "--asp-px1-input=", 16)) {
+            if (options.aspPx1HighFromReset || std::strcmp(argv[i] + 16, "high")) {
+                std::fprintf(stderr, "Supply --asp-px1-input=high once, held from reset\n"); return 1;
+            }
+            options.aspPx1HighFromReset = true;
+        }
+        else if (!std::strncmp(argv[i], "--i2c-eeprom-image=", 19)) {
+            if (i2cImagePath || !argv[i][19]) {
+                std::fprintf(stderr, "Supply one nonempty --i2c-eeprom-image path\n"); return 1;
+            }
+            i2cImagePath = argv[i] + 19;
+        }
         else if (!std::strcmp(argv[i], "--assume-spll-settled")) options.assumeSpllSettled = true;
         else if (!std::strcmp(argv[i], "--assume-mpll-settled")) options.assumeMpllSettled = true;
         else if (!std::strncmp(argv[i], "--gpio-a-input=", 15) ||
+                 !std::strncmp(argv[i], "--gpio-b-input=", 15) ||
                  !std::strncmp(argv[i], "--gpio-d-input=", 15)) {
-            const bool portA = argv[i][7] == 'a';
+            const char port = argv[i][7];
             char* end = nullptr;
             errno = 0;
             const auto value = std::strtoul(argv[i] + 15, &end, 0);
             if (errno || argv[i][15] < '0' || argv[i][15] > '9' || *end || value > UINT32_MAX) {
-                std::fprintf(stderr, "GPIO-%c input must be a 32-bit value\n", portA ? 'A' : 'D'); return 1;
+                std::fprintf(stderr, "GPIO-%c input must be a 32-bit value\n", port - 'a' + 'A'); return 1;
             }
-            (portA ? options.gpioAInputKnown : options.gpioDInputKnown) = true;
-            (portA ? options.gpioAInput : options.gpioDInput) = value;
+            if (port == 'a') { options.gpioAInputKnown = true; options.gpioAInput = value; }
+            else if (port == 'b') { options.gpioBInputKnown = true; options.gpioBInput = value; }
+            else { options.gpioDInputKnown = true; options.gpioDInput = value; }
         } else if (!std::strcmp(argv[i], "--ram-mib=32")) options.ramMiB = 32;
         else if (!std::strcmp(argv[i], "--ram-mib=128")) options.ramMiB = 128;
         else { std::fprintf(stderr, "Unknown diagnostic option: %s\n", argv[i]); return 1; }
     }
-    if ((options.gpioAInputKnown || options.gpioDInputKnown || options.ramMiB) && !options.bootstrapPeripherals) {
+    if ((options.aspPx1HighFromReset || options.gpioAInputKnown || options.gpioBInputKnown || options.gpioDInputKnown || options.ramMiB) && !options.bootstrapPeripherals) {
         std::fprintf(stderr, "External-input scenarios require --bootstrap-peripherals\n"); return 1;
     }
     if (options.assumeMpllSettled && !options.bootstrapPeripherals) {
@@ -64,6 +90,23 @@ int main(int argc, char** argv) {
     }
     if (options.assumeSpllSettled && !options.bootstrapPeripherals) {
         std::fprintf(stderr, "SPLL scenario requires --bootstrap-peripherals\n"); return 1;
+    }
+    if (options.assumeI2cSingleMaster && !options.bootstrapPeripherals) {
+        std::fprintf(stderr, "I2C scenario requires --bootstrap-peripherals\n"); return 1;
+    }
+    std::unique_ptr<Imx1I2cReadWindow> i2cWindow;
+    if (i2cImagePath) {
+        if (!options.bootstrapPeripherals || !options.assumeI2cSingleMaster) {
+            std::fprintf(stderr, "I2C image requires --bootstrap-peripherals and --assume-i2c-single-master\n"); return 1;
+        }
+        std::ifstream image(i2cImagePath, std::ios::binary);
+        Imx1I2cReadWindow::Image bytes{};
+        if (!image.read(reinterpret_cast<char*>(bytes.data()), bytes.size()) ||
+            image.peek() != std::char_traits<char>::eof() || image.bad()) {
+            std::fprintf(stderr, "Expected an exact 256-byte I2C read-window image\n"); return 1;
+        }
+        i2cWindow = std::make_unique<Imx1I2cReadWindow>(bytes);
+        options.i2cBus = i2cWindow.get();
     }
     unsetenv("FROND_JIT");
     const char* name = argc >= 3 ? argv[2] : "physical";
@@ -77,8 +120,8 @@ int main(int argc, char** argv) {
         char* end = nullptr;
         errno = 0;
         budget = std::strtoul(argv[3], &end, 10);
-        if (errno || !*argv[3] || *end || !budget || budget > 10000000) {
-            std::fprintf(stderr, "Instruction budget must be 1..10000000\n");
+        if (errno || !*argv[3] || *end || !budget || budget > 20000000) {
+            std::fprintf(stderr, "Instruction budget must be 1..20000000\n");
             return 1;
         }
     }
@@ -108,9 +151,18 @@ int main(int argc, char** argv) {
                     options.assumeMpllSettled ? "enabled" : "disabled");
         std::printf("SPLL settled assumption=%s; initial nominal output/LF=1; restart holds output high for 2 CLK32 then activates target/LF=1 with phase zero; bus waits for that event without retiring instructions.\n",
                     options.assumeSpllSettled ? "enabled" : "disabled");
+        std::printf("I2C single-master initially-idle scenario=%s; no stretching; unknown slave responses stop.\n",
+                    options.assumeI2cSingleMaster ? "enabled" : "disabled");
+        if (options.aspPx1HighFromReset)
+            std::puts("Diagnostic ASP PX1 input held high from reset; no transitions; physical voltage and ADC samples unqualified.");
+        else std::puts("External ASP PX1 level and history are unknown.");
+        if (i2cWindow) std::puts("Explicit 256-byte I2C 0x50 read window attached; caller-supplied bytes; physical identity and contents unqualified.");
         if (options.gpioAInputKnown)
             std::printf("Hypothetical static full-port GPIO-A input=%08x\n", options.gpioAInput);
         else std::puts("External GPIO-A levels are unknown.");
+        if (options.gpioBInputKnown)
+            std::printf("Hypothetical static full-port GPIO-B input=%08x\n", options.gpioBInput);
+        else std::puts("External GPIO-B levels are unknown.");
         if (options.gpioDInputKnown)
             std::printf("Hypothetical static full-port GPIO-D input=%08x\n", options.gpioDInput);
         else std::puts("External GPIO-D levels are unknown.");

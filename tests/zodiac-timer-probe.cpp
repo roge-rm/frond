@@ -35,10 +35,10 @@ int main() {
     load(words, 1, 0x103); words.push_back(0xe5801000);
     for (unsigned i = 0; i < 70; ++i) words.push_back(0xe1a03003);
     words.push_back(0xe5902010); words.push_back(0xe3520004); words.push_back(0x3afffffc);
-    words.push_back(0xef000000);
+    words.push_back(0xe7f000f0);
     Trace exact;
     const auto a = run(words, exact);
-    assert(a.stop == Imx1ProbeStop::unsupportedInstruction && a.trace.instruction == 0xef000000);
+    assert(a.stop == Imx1ProbeStop::unsupportedInstruction && a.trace.instruction == 0xe7f000f0);
     uint32_t enabledAt = 0, reads = 0;
     for (const auto& entry : exact.bus) {
         assert(entry.status == Imx1BootstrapAccess::ok);
@@ -68,10 +68,10 @@ int main() {
     const auto change = run(words, mode);
     assert(change.stop == Imx1ProbeStop::unsupportedCp15 && change.trace.instruction == 0xee011f10);
     // A failed condition must leave FastBus timing available.
-    words[3] = 0x0e011f10; words.push_back(0xef000000);
+    words[3] = 0x0e011f10; words.push_back(0xe7f000f0);
     Trace skipped;
     const auto skip = run(words, skipped);
-    assert(skip.stop == Imx1ProbeStop::unsupportedInstruction && skip.trace.instruction == 0xef000000);
+    assert(skip.stop == Imx1ProbeStop::unsupportedInstruction && skip.trace.instruction == 0xe7f000f0);
     for (uint32_t unsupportedMode : {0x40000078u, 0x80000078u}) {
         words.clear(); load(words, 1, unsupportedMode); words.push_back(0xee011f10);
         Trace invalid;
@@ -84,7 +84,7 @@ int main() {
     assert(rejected.stop == Imx1ProbeStop::unsupportedCp15 && rejected.trace.instruction == 0xee011f10);
     assert(rejected.registers[15] == rejected.trace.pc && rejected.cpsr == rejected.trace.cpsr);
     words.clear(); load(words, 1, 0xc0000078); words.push_back(0xee011f10);
-    words.push_back(0xee114f10); words.push_back(0xef000000);
+    words.push_back(0xee114f10); words.push_back(0xe7f000f0);
     Trace resetClock;
     const auto knownReset = run(words, resetClock);
     assert(knownReset.stop == Imx1ProbeStop::unsupportedInstruction && knownReset.registers[4] == 0xc0000078);
@@ -125,13 +125,13 @@ int main() {
     for (unsigned i = 0; i < 173; ++i) words.push_back(0xe1a03003);
     const auto readCounter = words.size(); words.push_back(0xe5906010);
     words.push_back(0xe3a07020); words.push_back(0xe2577001); words.push_back(0x1afffffd);
-    words.push_back(0xe5908010); words.push_back(0xef000000);
+    words.push_back(0xe5908010); words.push_back(0xe7f000f0);
     Trace defaultClock;
     const auto oldStop = run(words, defaultClock);
     assert(oldStop.stop == Imx1ProbeStop::unsupportedCp15 && oldStop.trace.pc == 0x10000000 + async * 4);
     Trace asyncExact;
     const auto nominal = run(words, asyncExact, false, true);
-    assert(nominal.stop == Imx1ProbeStop::unsupportedInstruction && nominal.trace.instruction == 0xef000000);
+    assert(nominal.stop == Imx1ProbeStop::unsupportedInstruction && nominal.trace.instruction == 0xe7f000f0);
     assert(nominal.registers[4] == 0xc0000078 && nominal.registers[5] == 0x78);
     assert(nominal.registers[10] == 0x2e && nominal.registers[11] == 0x2e);
     // Literal loads branch over data words; charge each handoff with its selected mode.
@@ -174,13 +174,13 @@ int main() {
     words.push_back(0xe5992000); words.push_back(0xe3120501); words.push_back(0x1afffffc);
     words.push_back(0xe5907010); words.push_back(0xe5998010);
     for (unsigned i = 0; i < 300; ++i) words.push_back(0xe1a03003);
-    words.push_back(0xe590c010); words.push_back(0xef000000);
+    words.push_back(0xe590c010); words.push_back(0xe7f000f0);
     Trace strictSystem;
     const auto systemStop = run(words, strictSystem, false, true);
     assert(systemStop.stop == Imx1ProbeStop::unsupportedPeripheral && systemStop.address == 0x0021b00c);
     Trace systemExact;
     const auto system = run(words, systemExact, false, true, true);
-    assert(system.stop == Imx1ProbeStop::unsupportedInstruction && system.trace.instruction == 0xef000000);
+    assert(system.stop == Imx1ProbeStop::unsupportedInstruction && system.trace.instruction == 0xe7f000f0);
     assert(system.registers[10] == 0x8000 && system.registers[11] == 0x8000 && system.registers[8] == 0x8000);
     assert(system.registers[7] >= system.registers[6] && system.registers[7] <= system.registers[6] + 1);
     assert(system.registers[12] > system.registers[7]);

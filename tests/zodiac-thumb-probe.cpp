@@ -209,21 +209,41 @@ void mixedProgram() {
     p.half(0x4720); // BX r4 to ARM.
     if (p.bytes.size() & 3) p.half(0xde00);
     p.put(returnLiteral, base + p.bytes.size());
-    p.word(0xe2855004); p.word(0xef000000);
+    p.word(0xe2855004); p.word(0xe7f000f0);
     const auto r = compare(p);
-    assert(r.stop == Imx1ProbeStop::unsupportedInstruction && r.trace.instruction == 0xef000000);
+    assert(r.stop == Imx1ProbeStop::unsupportedInstruction && r.trace.instruction == 0xe7f000f0);
     assert(r.registers[1] == 0x80ff1234 && r.registers[2] == 2 &&
            r.registers[5] == 0x80ff123b && r.registers[6] == 0xffff80ff && r.registers[7] == 0xffffff80);
     assert(r.registers[13] == 0x00300200 && !(r.cpsr & ARM_SR_T));
+}
+void loadBaseInList() {
+    for (unsigned baseReg = 0; baseReg < 8; ++baseReg) {
+        for (unsigned mask : {1u << baseReg, 0xffu, (1u << baseReg) | 1u | 0x80u}) {
+            Program p;
+            p.literal(0, 0x00300100);
+            for (unsigned n = 0; n < 8; ++n) {
+                p.literal(1, 0x12340000 + n); p.word(0xe5801000 | (n * 4));
+            }
+            p.literal(baseReg, 0x00300100);
+            p.literal(12, base + p.bytes.size() + 16 + 1); p.word(0xe12fff1c);
+            p.half(0xc800 | baseReg << 8 | mask); p.half(0xde00);
+            const auto r = compare(p);
+            assert(r.stop == Imx1ProbeStop::unsupportedInstruction && r.trace.instruction == 0xde00);
+            unsigned index = 0;
+            for (unsigned n = 0; n < 8; ++n) if (mask & (1u << n))
+                assert(r.registers[n] == 0x12340000 + index++);
+            assert(r.cpsr == 0xf3 && !r.spsr && r.busAccesses == 8 + index);
+        }
+    }
 }
 void stackReturn() {
     Program p; p.enter();
     const uint32_t first = base + p.bytes.size();
     p.half(0x2209); p.half(0xf000); p.half(0xf802); // MOV r2,#9; BL subroutine.
-    p.half(0xdf00); p.half(0xde00);
+    p.half(0xde00); p.half(0xde00);
     p.half(0xb504); p.half(0x2200); p.half(0xbd04); // PUSH {r2,lr}; clear; POP {r2,pc}.
     const auto r = compare(p);
-    assert(r.stop == Imx1ProbeStop::unsupportedInstruction && r.trace.instruction == 0xdf00 &&
+    assert(r.stop == Imx1ProbeStop::unsupportedInstruction && r.trace.instruction == 0xde00 &&
            r.trace.pc == first + 6 && r.registers[2] == 9 && r.registers[13] == 0x00300200 &&
            r.registers[14] == ((first + 6) | 1u) && (r.cpsr & ARM_SR_T));
 }
@@ -231,17 +251,17 @@ void bxPc() {
     Program p; p.enter();
     p.half(0x4778); p.half(0xde00); // BX pc enters the ARM word at PC+4.
     p.word(0xe2822009); p.word(0xe28f3001); p.word(0xe12fff13); // ADD; ADR Thumb; BX r3.
-    p.half(0x1c15); p.half(0xdf00); // MOV r5,r2; gated SWI.
+    p.half(0x1c15); p.half(0xde00); // MOV r5,r2; gated undefined.
     auto r = compare(p);
-    assert(r.stop == Imx1ProbeStop::unsupportedInstruction && r.trace.instruction == 0xdf00 &&
+    assert(r.stop == Imx1ProbeStop::unsupportedInstruction && r.trace.instruction == 0xde00 &&
            r.trace.instructionSize == 2 && r.registers[2] == 9 && r.registers[5] == 9);
     Program unaligned; unaligned.enter(); unaligned.half(0x2200); unaligned.half(0x4778);
     r = compare(unaligned);
     assert(r.stop == Imx1ProbeStop::unsupportedInstruction && r.trace.instruction == 0x4778);
 }
 void guards() {
-    for (uint16_t h : {0x4780, 0x4781, 0x4701, 0xe800, 0xbe00, 0xdf00, 0xde00,
-                       0xb400, 0xbc00, 0xc000, 0xc801, 0xf800, 0x4348, 0xb200, 0x4400,
+    for (uint16_t h : {0x4780, 0x4781, 0x4701, 0xe800, 0xbe00, 0xdfab, 0xde00,
+                       0xb400, 0xbc00, 0xc000, 0xc001, 0xf800, 0x4340, 0xb200, 0x4400,
                        0x4487, 0x45ff}) {
         Program p; p.enter(); p.half(h); p.half(0xde00);
         const auto r = compare(p);
@@ -290,6 +310,6 @@ int main() {
     unsetenv("FROND_JIT");
     cpuSetJitSync(true);
     setenv("FROND_JIT_HOT", "1", 1);
-    fetchBoundaries(); blSteps(); mixedProgram(); stackReturn(); bxPc(); guards();
+    fetchBoundaries(); blSteps(); mixedProgram(); stackReturn(); loadBaseInList(); bxPc(); guards();
     std::puts("PASS: Exact/Fast Thumb fetch boundaries, retained cache, BL halfword stepping, mixed ARM/Thumb execution and probe guards");
 }
