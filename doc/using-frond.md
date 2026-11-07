@@ -92,21 +92,37 @@ On Android a game controller presses the Palm's buttons. The d-pad and left stic
 
 ## Storage cards
 
-The T|X, E2 and Zire 72 take an SD card, the TG50 a Memory Stick. One card is kept per machine, saved with it.
+The T|X, E2 and Zire 72 take an SD card, the TG50 a Memory Stick. A card is its own thing, kept in the Cards drawer, and sits in one machine at a time. Delete a machine and its card stays in the drawer.
 
 | | T\|X | E2 | Zire 72 | TG50 |
 |---|---|---|---|---|
 | Card | SD | SD | SD | Memory Stick, Memory Stick Pro |
 | New card sizes | 32 MB to 2 GB | 32 MB to 1 GB | 32 MB to 2 GB | 4 to 128 MB, Pro 256 MB to 2 GB |
 | Images it takes | up to 2 GB | up to 1 GB | up to 2 GB | `.frondms`, Pro as raw `.img` |
+| Import folder as card | yes | yes | yes | Pro only |
 
-SDHC isn't supported, so 2 GB is the top. A new 2 GB card is 1886 MB, like a real one, and Palm OS formats it. Cards over 128 MB are made in the machine's folder and need room for the whole card, with progress and Cancel. New cards are blank, so let Palm OS format them. On the TG50 a blank stick gets Palm OS's Unrecognized Format prompt, and a Pro stick needs a saved machine.
+SDHC isn't supported, so 2 GB is the top. A new 2 GB card is 1886 MB, like a real one, and Palm OS formats it. New cards are blank, so let Palm OS format them. On the TG50 a blank stick gets Palm OS's Unrecognized Format prompt, and a Pro stick needs a saved machine.
 
-Controls (SD card or Memory Stick section, only the ones that fit the state show):
+### Cards
 
-- **Eject** and **Insert** take the card out and put it back. Close files on the Palm before ejecting, as Frond can't flush them.
-- **Export image** (once ejected) writes `.img`, or `.frondms` for a classic stick. **Insert image** and **New card** replace the card and discard an ejected one, so export first.
-- **Write protected** (Memory Stick) is set while ejected.
+Open Cards from the main menu on Linux, or from the home menu on Android. SD cards and Memory Sticks are listed by name with their size, and the marker lights while a card is in a machine. A linked card lists its machines.
+
+- **New card** asks for a name, a type and a size. Cards over 128 MB need room for the whole card, with progress and Cancel.
+- **Import card image** takes a raw `.img` (SD or Pro) or a `.frondms`. The type comes from the file, and you're asked when SD and Pro both fit.
+- **Import folder as card** (Linux: a button in the Cards window, Android: the top menu) copies a folder from your computer onto a new card once, with its folders and long names. Pick the folder, then a name, type and size. The smallest size it fits is chosen, and smaller ones show Too small. A folder that is too big for any card, or has names a card can't hold, is refused. It needs mtools on Linux (`sudo apt install mtools`). Classic Memory Sticks aren't offered, since only the Palm writes their file system. Later changes to the folder don't reach the card.
+- The card's menu has Rename, Duplicate, Export image, Link to machines, Take out and Delete. Export image writes `.img`, or `.frondms` for a classic stick. Delete asks first and the card's files are lost. Duplicate, Export image, Take out and Delete wait while the card's machine runs.
+- **Link to machines** lets several machines share one card. Only one of them holds it at a time: the others show "Games is in Palm TX". Take it out of one machine and another can take it with Insert.
+- **Take out** puts a card back in the drawer.
+
+In a machine, the SD card or Memory Stick row shows the card's name or No card. Tap it to pick a card from the drawer, greyed when it is in another machine or too big for the device, or make a new one there. Changing the card ejects the old one first (close files on the Palm first, as Frond can't flush them), and the old card goes back to the drawer. A picked card is inserted at once.
+
+Duplicating a machine with a card asks what to do with it: Link (the copy shares the card), Copy (a copy of the card) or No card. A machine's Export packs its card, and importing it makes a new card in the drawer.
+
+Controls on the running page (only the ones that fit the state show):
+
+- **Eject** and **Insert** take the card out and put it back.
+- **Export image** (once ejected) writes the card as an image.
+- **Write protected** (Memory Stick) is set while ejected, and goes with the card.
 - **Files** copies files in and out.
 
 Don't eject or sleep the Palm while an app is writing quickly, as the SD driver can get stuck until you reset. FAT32 cards imported from `mkfs.fat` can be read but not written by the T|X.

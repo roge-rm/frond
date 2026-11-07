@@ -22,6 +22,9 @@ The Palm IIIx has its own runner, `out/frond-68k` (`make out/frond-68k`, install
 | `--input-replay FILE` | Replay timed pen and key events and snapshots, see [Input replay](#input-replay). |
 | `-s`, `--sd FILE` | SD card file. |
 | `--work-folder DIR` | Run a session from elsewhere, in this empty machine folder. Its card files are copied there. |
+| `--card-swap` | Load a session whose card files the launcher changed while it was off. A slot with another card, the same card changed elsewhere, or none comes up ejected, and the card there now goes in once the Palm has run 500 ms awake (5 s at most), with a `card` event. |
+| `--card-identity HEX` | With `--card-swap`, the identity of a card put in, as 64 hex digits (its 32 descriptor bytes, as in `card.json`). |
+| `--card-protected` | With `--card-swap`, a card put in is write protected. |
 | `--ram-size MB` | RAM size, 16 or 32. |
 | `--mips N` | Target speed in MIPS. Default 100. |
 | `--audio-period FRAMES` | Host audio period, 64 to 8192. Default 512. Low-latency audio sizes its limits from it; Android passes 1024 or more. |
@@ -47,6 +50,16 @@ The Palm IIIx has its own runner, `out/frond-68k` (`make out/frond-68k`, install
 
 For a headless run set `SDL_VIDEODRIVER=dummy` and `SDL_AUDIODRIVER=dummy`.
 
+`frond --card` makes, imports or exports a card file without starting a machine:
+
+```sh
+frond --card make sd|ms|mspro SIZE OUTPUT
+frond --card import IMAGE sd|ms|mspro OUTPUT
+frond --card export CARD IMAGE
+```
+
+SIZE is in MiB for an SD card or a Memory Stick Pro and in MB for a classic stick, within what some device takes. Import takes a raw SD or Pro image, or a `.frondms`. The output is a settled card file (`.frondsd`, `.frondmsp` or `.frondms`) or, for export, a raw image (a `.frondms` for a classic stick). It's written beside OUTPUT and renamed into place, so a failed or cancelled run leaves nothing and an existing file stays. Standard output has `progress DONE/TOTAL` in bytes at each whole percent, then `ok KIND BYTES` (`ok image BYTES` for export) or `error CODE MESSAGE`. The exit status is 0, 1 on failure or 2 on bad use. SIGTERM or SIGINT cancels. Codes: `usage`, `size`, `read`, `image`, `same`, `unsettled` (a journal beside the card), `space` (the folder needs the output plus 16 MiB free), `write`, `cancelled`.
+
 The desktop launcher `frond-desktop [session]` takes `--core PATH` (the emulator to run, found beside it or in `/usr/lib/frond` by default), `--core-68k PATH` (the same for 68k devices like the Palm IIIx, default `frond-68k` beside the ARM core), `-h` and `-v`.
 
 ## Console commands
@@ -63,6 +76,8 @@ The core reads these from the terminal and from `--script`. A command with no ar
 | `hold on\|off` | Set the Hold switch (TG50). |
 | `audio-on`, `audio-off` | Turn audio on or off. |
 | `mount IMAGE` | Insert an SD card image. The built-in help says "Unmount SD card." |
+| `sd-take-out`, `ms-take-out` | Leave the ejected card or stick settled in the machine folder's card file and empty the slot. Prints its identity and `protected` or `writable`. |
+| `sd-put-in IDENTITY [protected\|writable]`, `ms-put-in ...` | Insert the card file in the machine folder as a new card with that identity. |
 | `unmount` | Eject the SD card. |
 | `reset` | Soft reset. |
 | `reset-no-ext` | Reset with Up held, so extensions don't load. |
@@ -110,6 +125,7 @@ Error codes seen across commands: `argument`, `unsupported` (the device lacks it
 | `ready` | The core has connected. |
 | `close` | The user closed the window. The launcher decides what to do. |
 | `sd-progress` | `done total` in bytes, at each whole percent of an SD or Memory Stick create, import or export. |
+| `card` | `inserted`, when a card that `--card-swap` left ejected goes in. |
 | `serial`, `usb`, `infrared`, `bluetooth`, `microphone` | The new state, sent when it changes, for example a peer connecting. |
 
 ### State and guest commands
@@ -117,6 +133,7 @@ Error codes seen across commands: `argument`, `unsupported` (the device lacks it
 | Command | Argument | Success reply |
 | --- | --- | --- |
 | `device-state` | | `device`: profile name |
+| `power-state` | | `power`: `asleep` or `awake`, then `wakes=N`, the wakes from sleep since the core started. Not on `frond-68k`. |
 | `guest-ready` | | `guest-ready`; `not-ready` until Palm OS is at an application-call boundary |
 | `speed-state` | | `speed`: `N MIPS, limit N MIPS, N%, N underruns` |
 | `guest-orientation` | | `orientation`: `portrait`, `landscape`, `reverse-portrait` or `reverse-landscape` (TX only; `unknown` if unreadable) |
@@ -166,6 +183,8 @@ State commands take no argument. Mode commands change the setting and reply with
 | `sd-insert` | image file | `inserted` |
 | `sd-eject`, `sd-reinsert` | | `ejected`, `inserted` |
 | `sd-export` | file (card must be ejected) | `exported` |
+| `sd-take-out`, `ms-take-out` | | `taken-out`: `IDENTITY protected\|writable`. The ejected card is settled in the machine folder's card file and the slot is empty, so the launcher can move the file |
+| `sd-put-in`, `ms-put-in` | `IDENTITY` (64 hex digits), then `protected` or `writable` | `inserted`: the card file now in the machine folder goes in as a new card |
 | `ms-state` | | `card`: `none`, `inserted` or `ejected` |
 | `ms-type` | | `type`: `none`, `classic MB` or `pro MiB` |
 | `ms-protection` | | `protection`: `read-only` or `writable` |
@@ -331,7 +350,7 @@ out/frond-68k iiix.frond --serial pty
 | `--gdb PORT` | Start the GDB stub on 127.0.0.1:PORT, see below. |
 | `--desktop-socket PATH` | Connect to the desktop's control socket, see [Control socket](#control-socket). The console is off then. |
 
-`--work-folder`, `--nand`, `--engine`, `--jog-controls`, `--usb`, `--bluetooth`, `--fast-audio`, `--hide-keyboard` and `--hide-jog-controls` are taken and ignored, as the desktop passes them to every core.
+`--work-folder`, `--nand`, `--engine`, `--jog-controls`, `--usb`, `--bluetooth`, `--fast-audio`, `--hide-keyboard` and `--hide-jog-controls` are taken and ignored, as the desktop passes them to every core. `--card-swap`, `--card-identity` and `--card-protected` are refused with a one-line message and exit 2, as a IIIx has no card slot.
 
 In the window F1 to F4 are the app buttons, the up and down arrows the rocker and Escape power. Typed text goes into the Palm.
 
@@ -525,7 +544,11 @@ The IIIx works as in VS Code, in Eclipse's Terminal view.
 | `FROND_ZIRE_LAUNCHER`, `FROND_ZIRE_STORAGE`, `FROND_ZIRE_PERIPHERALS` | `1` adds the launcher and key runs, the storage runs, or the peripheral runs to the Zire 72 ROM tests. |
 | `FROND_ZIRE_EVIDENCE` | Folder those runs write screenshots to. |
 | `FROND_ARM_SESSION` | ARM session for `tests/core-control.py`. Default the palm-tx smoke machine. |
-| `FROND_ARM_SESSIONS` | Folder of ARM machine folders, one per device name, for `tests/frond-arm-install.py` and `tests/host-call-wake.py`. Default `build/smoke/machines`. |
+| `FROND_LINK_PRINT` | `1` makes `make test-link-protocol` print its pinned values instead of only checking them. |
+| `FROND_LINK_SOCKET`, `FROND_LINK_PORT`, `FROND_LINK_DISCOVERY_PORT`, `FROND_LINK_DISCOVERY_BIND`, `FROND_LINK_BEACON_TO`, `FROND_LINK_IDLE_EXIT_MS`, `FROND_LINK_PAIR_CODE_MS`, `FROND_LINK_HUB` | Link hub hooks for tests: hub socket, TCP port (0 for an ephemeral one), UDP discovery port (0 turns it off), the address the beacon socket binds, host:port beacon targets (comma list) instead of broadcast, idle exit in ms (default 30000), the pairing code's life in ms (default and most 120000) and the hub program a window starts. |
+| `XDG_RUNTIME_DIR` | Holds `frond/` (mode 0700) with the link hub's socket and the cores' link sockets. |
+| `FROND_DESKTOP`, `FROND_IR_PROBE` | `frond-desktop` and the IR probe PRC for `tests/link-irda-cores.py`. Defaults `out/frond-desktop` and a probe built with pilrc and the SDK. |
+| `FROND_ARM_SESSIONS` | Folder of ARM machine folders, one per device name, for `tests/frond-arm-install.py`, `tests/host-call-wake.py`, `tests/card-swap-rom.py` and `tests/link-irda-cores.py` (palm-tx only). Default `build/smoke/machines`. |
 | `FROND_REQUIRE_SESSIONS` | `1` makes those two tests fail instead of skipping when a session or the probes are missing. |
 | `FROND_IIIX_ROM`, `FROND_IIIX_CORE` | IIIx ROM and `frond-68k` binary for the opt-in IIIx run in the desktop workflow test (`iiixRealRom`). |
 | `FROND_IIIX_SHOTS` | Folder that run saves pictures of the Palm window to (needs ImageMagick's `import` and a display). |
@@ -533,6 +556,8 @@ The IIIx works as in VS Code, in Eclipse's Terminal view.
 | `FROND_TG50_SESSION` | TG50 session for `tests/tg50-usb-hotsync.py`. Default `build/smoke/machines/sony-clie-tg50` (or the older `build/smoke/sony-clie-tg50.session`). |
 | `FROND_TG50_SCREENSHOT_DIR` | Folder `tests/device-controls.cpp` saves TG50 screenshots to. |
 | `FROND_TEST_CORE`, `FROND_TEST_SESSION` | Core and TX session for the desktop workflow test. |
+| `FROND_CARD_TOOL` | The program the desktop runs as the card tool (`--card`), instead of its own core. The workflow test sets it to the ARM core. |
+| `FROND_SCREENSHOTS` | Folder the desktop workflow test saves its Cards window, New card and picker screenshots in. |
 | `FROND_TEST_SCREENSHOT`, `FROND_TEST_KEYBOARD`, `FROND_TEST_NETWORK` | Extra checks in that test: expected screenshot, keyboard and network state. |
 | `FROND_TEST_SHOTS` | Folder to save pictures of the home window and settings to. |
 | `FROND_TEST_E2_NOR`, `FROND_TEST_E2_NAND` | E2 firmware for the running-page picture. |
@@ -632,13 +657,14 @@ Tests in `make test`, by area:
 
 | Area | Targets |
 | --- | --- |
-| CPU and engines | `test-cpu`, `test-arm-conditions`, `test-instruction-cache`, `test-mmu-fast-path`, `test-mem-region-bounds`, `test-xscale-prefetch`, `test-jit-overshoot`, `test-jit-differential` |
+| CPU and engines | `test-cpu`, `test-arm-conditions`, `test-instruction-cache`, `test-mmu-fast-path`, `test-mem-region-bounds`, `test-xscale-prefetch`, `test-jit-overshoot`, `test-jit-differential`, `test-jit-compile-thread` |
 | SoC and timing | `test-pxa-timer`, `test-pxa-power`, `test-pxa255-udc`, `test-pxa255-udc-clock`, `test-pxa255-udc-dma`, `test-pxa255-udc-dma-state`, `test-pxa270-udc`, `test-scheduler`, `test-microwire64x16` |
 | Device state and sessions | `test-tx-state`, `test-e2-state`, `test-tg50-state`, `test-device-profiles`, `test-device-controls`, `test-session-v7`, `test-frond-68k`, `test-checkpoint-input`, `test-export-checkpoint`, `test-replay-snapshot`, `test-lifecycle` |
 | Palm databases | `test-native-database`, `test-native-primitives`, `test-native-governor`, `test-db-list`, `test-db-backup` |
-| Storage | `test-sd-image`, `test-sd`, `test-card-backing`, `test-memory-stick-controller`, `test-memory-stick-media`, `test-memory-stick-pro` |
+| Storage | `test-sd-image`, `test-sd`, `test-card-backing`, `test-memory-stick-controller`, `test-memory-stick-media`, `test-memory-stick-pro`, `test-card-tool`, `test-card-swap` (its firmware part on whichever smoke sessions are in `FROND_ARM_SESSIONS`) |
 | Audio | `test-sdl-audio`, `test-fast-audio`, `test-earlier-audio`, `test-audio-results`, `test-pxa-i2s-audio`, `test-tg50-pwm-audio`, `test-tg50-microphone-adc`, `test-tg50-microphone-dma`, `test-tg50-microphone-state`, `test-z72-microphone`, `test-z72-voice-memo`, `test-tg50-call-budget`, `test-tg50-pace`, `test-tg50-audio-replay`, `test-tg50-serial-board`, `test-tg50-serial-configuration` |
 | Serial, USB, infrared | `test-uart-lifecycle`, `test-uart-checkpoint`, `test-uart-flow`, `test-uart-dma-peer`, `test-tx-serial`, `test-hotsync-line`, `test-host-serial`, `test-pty-link`, `test-usb-enumeration`, `test-usb-host-fixture`, `test-usb-bridge`, `test-usb-bridge-soc`, `test-irda-endpoint`, `test-irda-link`, `test-irda-results`, `test-keyboard` |
+| Link protocol | `test-link-protocol` |
 | Bluetooth | `test-bluetooth`, `test-bluetooth-link`, `test-bluetooth-results`, `test-csr-bcsp`, `test-csr-controller-lifecycle`, `test-csr-peer-services` |
 | Network | `test-network`, `test-network-reliability`, `test-host-network`, `test-wifi` |
 | Debugger and tools | `test-gdbstub`, `test-pace-debug`, `test-pace-step`, `test-debugger-inspect`, `test-developer-run`, `test-compatibility`, `test-gameplay-metrics`, `test-build-tools`, `test-render-link`, `test-peripheral-qualification` |
@@ -653,6 +679,7 @@ Not in `make test`. The first group builds a program and runs it with a private 
 | `test-frond-68k-busy` | IIIx 3.1 ROM, `m68k-palmos-gcc` and the 3.5 SDK in `../palm-os-sdk`. Database commands while an app is busy for 45 s. |
 | `test-frond-68k-install` | IIIx 3.1 ROM, `m68k-palmos-gcc` and the 3.5 SDK in `../palm-os-sdk`. Installs at the launcher and with another app in front, and install and export while hidden. |
 | `test-frond-arm-install` | T\|X, E2, Zire 72 and TG50 smoke sessions (`FROND_ARM_SESSIONS`, else `build/smoke/machines`), `m68k-palmos-gcc` and the 3.5 SDK. The same installs on each ARM device, and host calls while the Palm sleeps. |
+| `test-link-irda-cores` | T\|X smoke session (`FROND_ARM_SESSIONS`, else `build/smoke/machines`) and the IR probe (`FROND_IR_PROBE`, else pilrc and the SDK). Two T\|X cores beam to each other over two link hubs on loopback, also after one sleeps and wakes. |
 | `test-host-call-wake` | T\|X and Zire 72 smoke sessions as above. A GDB breakpoint on EvtWakeup: `guest-ready` wakes nothing, a host call wakes at most once. |
 | `test-core-control` | ARM smoke session (`FROND_ARM_SESSION`) and IIIx ROM. The control socket on both runners. |
 | `test-tg50-usb-hotsync` | TG50 session (`make smoke-sessions`) and pilot-link. |
