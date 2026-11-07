@@ -1,5 +1,5 @@
 // Firmware-free checks for the host serial worker, its queues, flow control,
-// peer disconnects, detach paths and both endpoints (PTY and 127.0.0.1 TCP).
+// peer disconnects, detach paths and both endpoints (PTY, 127.0.0.1 TCP and Unix socket).
 #include <arpa/inet.h>
 #include <ifaddrs.h>
 #include <net/if.h>
@@ -7,6 +7,8 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include <atomic>
@@ -87,6 +89,25 @@ static int connectTo(uint16_t port) {
     address.sin_port = htons(port);
     assert(connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
     return fd;
+}
+
+static int connectUnix(const std::string& path) {
+    const int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    sockaddr_un address{};
+    address.sun_family = AF_UNIX;
+    strncpy(address.sun_path, path.c_str(), sizeof(address.sun_path) - 1);
+    assert(connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+    return fd;
+}
+
+static bool isSocket(const std::string& path) {
+    struct stat info{};
+    return lstat(path.c_str(), &info) == 0 && S_ISSOCK(info.st_mode);
+}
+
+static bool exists(const std::string& path) {
+    struct stat info{};
+    return lstat(path.c_str(), &info) == 0;
 }
 
 static uint16_t portOf(const HostSerial& serial) {
@@ -448,6 +469,169 @@ int main() {
         close(slave);
     }
     puts("PASS: hangup seen with a full receive queue (TCP and PTY), PTY leftovers flushed, reset during a write keeps later bytes");
+
+    {
+        // Unix socket endpoint: like TCP, in a 0700 folder.
+        HostSerial::Config c;
+        assert(HostSerial::Parse("unix:/run/x/y.sock", c) && c.kind == HostSerial::Kind::unixSocket && c.path == "/run/x/y.sock");
+        assert(HostSerial::Format(c) == "unix:/run/x/y.sock");
+        assert(!HostSerial::Parse("unix:", c) && !HostSerial::Parse("unix", c) && !HostSerial::Parse("UNIX:/a", c));
+
+        char templ[] = "build/host-serial-unix-XXXXXX";
+        assert(mkdtemp(templ));
+        char* absolute = realpath(templ, nullptr);
+        assert(absolute);
+        const std::string folder = absolute;
+        free(absolute);
+        const std::string path = folder + "/serial.sock";
+        const HostSerial::Config config{HostSerial::Kind::unixSocket, 0, path};
+
+        Guest guest(8);
+        HostSerial serial;
+        std::string error;
+        assert(serial.Start(guest.uart, config, error));
+        assert(serial.Endpoint() == path && isSocket(path));
+        assert(serial.GetConfig().kind == HostSerial::Kind::unixSocket && serial.GetConfig().path == path);
+        serial.Service();
+        assert(serial.Attached() && !serial.Connected());
+        assert(!(guest.read(MSR) & (CTS | DSR | DCD)));
+        assert(serial.Describe() == "unix " + path + " waiting");
+        int client = connectUnix(path);
+        assert(waitFor(serial, [&] { return serial.Connected(); }));
+        serial.Service();
+        assert((guest.read(MSR) & (CTS | DSR | DCD)) == (CTS | DSR | DCD));
+        assert(serial.Describe() == "unix " + path + " connected");
+
+        assert(::write(client, "hello", 5) == 5);
+        assert(waitFor(serial, [&] { return serial.PendingReceive() == 5; }));
+        for (int i = 0; i < 100; ++i) guest.step(1);
+        assert(guest.drain() == std::vector<uint8_t>({'h', 'e', 'l', 'l', 'o'}));
+        for (uint8_t b : {0x00, 0x7f, 0x80, 0xff}) guest.write(RBR, b);
+        for (int i = 0; i < 100; ++i) guest.step(1);
+        assert(readAll(client, 4) == std::vector<uint8_t>({0x00, 0x7f, 0x80, 0xff}));
+
+        // A second client is closed at once; the first keeps the line.
+        int second = connectUnix(path);
+        assert(peerClosed(second));
+        close(second);
+        assert(serial.Connected());
+
+        // The client drops: modem lines fall, then a new client gets the line.
+        close(client);
+        assert(waitFor(serial, [&] { return !serial.Connected(); }));
+        serial.Service();
+        assert(!(guest.read(MSR) & (CTS | DSR | DCD)));
+        client = connectUnix(path);
+        assert(waitFor(serial, [&] { return serial.Connected(); }));
+        serial.Service();
+        assert((guest.read(MSR) & (CTS | DSR | DCD)) == (CTS | DSR | DCD));
+        assert(::write(client, "again", 5) == 5);
+        assert(waitFor(serial, [&] { return serial.PendingReceive() == 5; }));
+        for (int i = 0; i < 100; ++i) guest.step(1);
+        assert(guest.drain() == std::vector<uint8_t>({'a', 'g', 'a', 'i', 'n'}));
+        close(client);
+
+        // Closing removes the socket file; switching to another endpoint does too.
+        serial.Stop();
+        assert(!exists(path));
+        assert(serial.Start(guest.uart, config, error) && isSocket(path));
+        assert(serial.Start(guest.uart, {HostSerial::Kind::tcp, 0}, error));
+        assert(!exists(path));
+        serial.Stop();
+
+        // A leftover socket file with nobody listening is replaced.
+        {
+            const int stale = socket(AF_UNIX, SOCK_STREAM, 0);
+            sockaddr_un address{};
+            address.sun_family = AF_UNIX;
+            strncpy(address.sun_path, path.c_str(), sizeof(address.sun_path) - 1);
+            assert(bind(stale, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+            close(stale);
+            assert(isSocket(path));
+            assert(serial.Start(guest.uart, config, error) && isSocket(path));
+            serial.Stop();
+            assert(!exists(path));
+        }
+
+        // A socket someone listens on is refused and left alone.
+        {
+            HostSerial other;
+            assert(other.Start(guest.uart, config, error));
+            HostSerial third;
+            assert(!third.Start(guest.uart, config, error) && error.find("in use") != std::string::npos);
+            assert(isSocket(path));
+            close(connectUnix(path));  // the first one still listens
+            other.Stop();
+            assert(!exists(path));
+        }
+
+        // Anything else at the path is refused and left alone.
+        {
+            const int file = open(path.c_str(), O_CREAT | O_WRONLY, 0600);
+            assert(file >= 0 && ::write(file, "keep", 4) == 4);
+            close(file);
+            error.clear();
+            assert(!serial.Start(guest.uart, config, error) && error.find("not a socket") != std::string::npos);
+            assert(!serial.Attached() && serial.Describe() == "off");
+            struct stat info{};
+            assert(lstat(path.c_str(), &info) == 0 && S_ISREG(info.st_mode) && info.st_size == 4);
+            assert(unlink(path.c_str()) == 0);
+            assert(symlink("elsewhere", path.c_str()) == 0);
+            assert(!serial.Start(guest.uart, config, error));
+            assert(unlink(path.c_str()) == 0);
+        }
+
+        // The folder must exist, be 0700 and be a folder; the path must be absolute and fit sun_path.
+        {
+            assert(chmod(folder.c_str(), 0755) == 0);
+            error.clear();
+            assert(!serial.Start(guest.uart, config, error) && error.find("0700") != std::string::npos);
+            assert(!exists(path));
+            assert(chmod(folder.c_str(), 0770) == 0);
+            assert(!serial.Start(guest.uart, config, error));
+            assert(chmod(folder.c_str(), 0700) == 0);
+            assert(!serial.Start(guest.uart, {HostSerial::Kind::unixSocket, 0, folder + "/missing/s.sock"}, error));
+            assert(!serial.Start(guest.uart, {HostSerial::Kind::unixSocket, 0, "serial.sock"}, error) && !error.empty());
+            assert(!serial.Start(guest.uart, {HostSerial::Kind::unixSocket, 0, folder + "/"}, error));
+            assert(!serial.Start(guest.uart, {HostSerial::Kind::unixSocket, 0, folder}, error));
+            const std::string longName = folder + "/" + std::string(sizeof(sockaddr_un::sun_path), 'a');
+            error.clear();
+            assert(!serial.Start(guest.uart, {HostSerial::Kind::unixSocket, 0, longName}, error) && error.find("too long") != std::string::npos);
+            // The longest path that fits still works.
+            const size_t room = sizeof(sockaddr_un::sun_path) - 1 - folder.size() - 1;
+            const std::string fits = folder + "/" + std::string(room, 'b');
+            assert(fits.size() == sizeof(sockaddr_un::sun_path) - 1);
+            assert(serial.Start(guest.uart, {HostSerial::Kind::unixSocket, 0, fits}, error) && isSocket(fits));
+            serial.Stop();
+            assert(!exists(fits));
+        }
+
+        // HostByteLink takes the same endpoint.
+        {
+            HostByteLink link;
+            assert(link.Open(config, error) && link.Endpoint() == path && isSocket(path));
+            const int peer = connectUnix(path);
+            for (int i = 0; i < 3000 && !link.Connected(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            assert(link.Connected());
+            assert(link.Send(reinterpret_cast<const uint8_t*>("to"), 2) == 2);
+            assert(readAll(peer, 2) == std::vector<uint8_t>({'t', 'o'}));
+            assert(::write(peer, "from", 4) == 4);
+            uint8_t got[8];
+            size_t count = 0;
+            for (int i = 0; i < 3000 && count < 4; ++i) {
+                count += link.Receive(got + count, sizeof(got) - count);
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            assert(count == 4 && memcmp(got, "from", 4) == 0);
+            close(peer);
+            for (int i = 0; i < 3000 && link.Connected(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            assert(!link.Connected());
+            link.Close();
+            assert(!exists(path));
+        }
+        assert(rmdir(folder.c_str()) == 0);
+    }
+    puts("PASS: Unix socket endpoint: modem lines, data both ways, one client, reconnect, stale and live socket files, bad folder, non-socket, long path, HostByteLink");
 
     return 0;
 }

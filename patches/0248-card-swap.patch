@@ -1,0 +1,877 @@
+diff --git a/src/uarm/native/CardSwap.h b/src/uarm/native/CardSwap.h
+new file mode 100644
+index 0000000..2feb53e
+--- /dev/null
++++ b/src/uarm/native/CardSwap.h
+@@ -0,0 +1,208 @@
++#ifndef FROND_CARD_SWAP_H
++#define FROND_CARD_SWAP_H
++
++#include "CardSave.h"
++#include "MachineFolder.h"
++#include "MachineSession.h"
++#include "MemoryStickImage.h"
++#include "MsProCards.h"
++#include "SdCards.h"
++#include "SessionIo.h"
++#include "device_profile5.h"
++#include "mmiodev_MemoryStickController.h"
++#include "sdcard.h"
++
++#include <algorithm>
++#include <array>
++#include <cstring>
++#include <filesystem>
++#include <string>
++#include <string_view>
++
++// Taking an ejected card out of a running machine into its folder's card file, and putting the
++// card file there back in, so a frontend can move the file between machines and the drawer.
++// A card taken out is settled: one file, no journals, candidate or generation files.
++namespace frondNative {
++
++using CardIdentity = std::array<uint8_t, frondMachine::identityBytes>;
++
++// The identity as 64 hex digits, the 32 descriptor bytes in order.
++inline std::string identityHex(const CardIdentity& identity) {
++    static const char digits[] = "0123456789abcdef";
++    std::string out;
++    for (const auto byte : identity) {
++        out += digits[byte >> 4];
++        out += digits[byte & 15];
++    }
++    return out;
++}
++
++inline bool parseIdentityHex(std::string_view text, CardIdentity& identity) {
++    if (text.size() != 2 * identity.size()) return false;
++    auto nibble = [](char c) {
++        return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
++    };
++    CardIdentity parsed{};
++    for (size_t i = 0; i < parsed.size(); ++i) {
++        const int hi = nibble(text[2 * i]), lo = nibble(text[2 * i + 1]);
++        if (hi < 0 || lo < 0) return false;
++        parsed[i] = uint8_t(hi << 4 | lo);
++    }
++    identity = parsed;
++    return true;
++}
++
++// The put-in argument: the identity, then "protected" or "writable" (the default).
++inline bool parsePutIn(const std::string& argument, CardIdentity& identity, bool& writeProtected) {
++    const auto space = argument.find(' ');
++    const std::string protection = space == std::string::npos ? "writable" : argument.substr(space + 1);
++    if (protection != "protected" && protection != "writable") return false;
++    writeProtected = protection == "protected";
++    return parseIdentityHex(std::string_view(argument).substr(0, space), identity);
++}
++
++// The take-out reply: the identity and protection for the frontend's card.json.
++inline std::string takenOutReply(const CardIdentity& identity, bool writeProtected) {
++    return identityHex(identity) + (writeProtected ? " protected" : " writable");
++}
++
++inline void noteTakenOut(const char* name, bool out) {
++    auto& names = slotCards().takenOut;
++    names.erase(std::remove(names.begin(), names.end(), name), names.end());
++    if (out) names.push_back(name);
++}
++
++constexpr const char* takeOutNeedsFolder = "Save the machine before taking its card out.";
++
++// Writes the card store's card (SD, or a Memory Stick Pro with `kind`) into the folder's card file
++// and closes it. A card on this folder's file is journalled and the journal applied; any other is
++// copied whole. If this fails the card stays in the store as it was.
++inline SdResult takeOutFileCard(const std::filesystem::path& folder, uint32_t kind, bool writeProtected,
++                                CardIdentity& identity) {
++    if (folder.empty()) return frondSdCandidate::fail("folder", takeOutNeedsFolder);
++    if (!sdCardInitialized()) return frondSdCandidate::fail("empty", "This session has no card.");
++    frondMachine::Media media;
++    SdSave save;
++    if (!beginSdSave(folder, media, false, save, kind, writeProtected)) {
++        abandonSdSave(save);
++        return frondSdCandidate::fail("write", "Could not write the card file.");
++    }
++    if (!finishSdSave(folder, save)) {
++        // The journal stays; the folder's .frond is older, so the next load drops it.
++        if (!save.journal.empty()) sdCardTrustChunks(save.chunks);
++        abandonSdSave(save);
++        return frondSdCandidate::fail("write", "Could not write the card file.");
++    }
++    identity = media.identity;
++    sdCardReset();
++    frondSdCandidate::releaseUnused();
++    const auto sidecar = folder / frondMachine::fileCardSibling(kind);
++    FileCardBacking::DiscardGenerations(sidecar);
++    frondSession::syncDir(folder);
++    noteTakenOut(frondMachine::fileCardSibling(kind), true);
++    return {true, "taken-out", {}};
++}
++
++// Opens the folder's card file (SD or Pro) in the card store as a new card with `identity`.
++inline SdResult openFileCard(const std::filesystem::path& folder, uint32_t kind, int32_t deviceType,
++                             const CardIdentity& identity) {
++    if (folder.empty()) return frondSdCandidate::fail("folder", "This machine has no folder to take a card from.");
++    if (sdCardInitialized()) return frondSdCandidate::fail("busy", "Take the current card out first.");
++    const char* name = frondMachine::fileCardSibling(kind);
++    frondSession::CardSwap swap;
++    swap.identityGiven = true;
++    swap.identity = identity;
++    frondMachine::Media media;
++    if (!frondSession::swappedInCard(folder, name, swap, media))
++        return frondSdCandidate::fail("card", "The card file is missing or damaged.");
++    const bool fits = kind == frondMachine::kindMsPro
++                          ? msProCreateAllowed(deviceType, frondMsPro::mibOfBytes(media.physicalSize))
++                          : sdImageFits(deviceType, media.physicalSize);
++    if (!fits) return frondSdCandidate::fail("size", "This machine doesn't take a card of that size.");
++    char id[SD_CARD_ID_MAX_LEN + 1]{};
++    std::memcpy(id, identity.data(), SD_CARD_ID_MAX_LEN);
++    if (!sdCardInitializeFromFile((folder / name).c_str(), media.physicalSize, frondSdFile::headerBytes, id))
++        return frondSdCandidate::fail("card", "Could not open the card file.");
++    noteTakenOut(name, false);
++    return {true, "opened", {}};
++}
++
++// An SD card into the empty slot; the caller inserts it.
++inline SdResult putInSd(const std::filesystem::path& folder, int32_t deviceType, const CardIdentity& identity,
++                        bool writeProtected) {
++    auto result = openFileCard(folder, frondMachine::kindSd, deviceType, identity);
++    if (result.ok) slotCards().sdProtected = writeProtected;
++    return result;
++}
++
++// The ejected stick, classic or Pro, into the folder's card file, and the slot emptied.
++inline SdResult takeOutMs(const std::filesystem::path& folder, MemoryStickController* ms, CardIdentity& identity,
++                          bool& writeProtected) {
++    if (!msCtrlrPresent(ms)) return frondSdCandidate::fail("empty", "This session has no Memory Stick.");
++    if (msCtrlrInserted(ms)) return frondSdCandidate::fail("busy", "Eject the Memory Stick before taking it out.");
++    if (folder.empty()) return frondSdCandidate::fail("folder", takeOutNeedsFolder);
++    writeProtected = msCtrlrReadOnly(ms);
++    if (msCtrlrPro(ms)) {
++        auto result = takeOutFileCard(folder, frondMachine::kindMsPro, writeProtected, identity);
++        if (result.ok) msCtrlrDetach(ms);
++        return result;
++    }
++    {
++        std::shared_ptr<const CardSnapshot> pin;
++        bool protect = false;
++        if (!msCtrlrSaveCheckpoint(ms, pin, protect) || !pin || !frondMsGeometry::byPhysicalBytes(pin->Size()))
++            return frondSdCandidate::fail("write", "Could not write the Memory Stick file.");
++        if (!frondSession::writeMsFromReader(folder / frondMachine::msSibling, pin->Size(),
++                                             [&](uint64_t off, uint64_t n, void* dest) { return pin->Read(off, n, dest); }) ||
++            !frondSession::syncDir(folder))
++            return frondSdCandidate::fail("write", "Could not write the Memory Stick file.");
++    }
++    identity = slotCards().msIdentity;
++    msCtrlrDetach(ms);
++    slotCards().msIdentity = {};
++    noteTakenOut(frondMachine::msSibling, true);
++    return {true, "taken-out", {}};
++}
++
++// The folder's stick file, classic or Pro, into the empty slot, inserted.
++inline SdResult putInMs(const std::filesystem::path& folder, MemoryStickController* ms, int32_t deviceType,
++                        const CardIdentity& identity, bool writeProtected) {
++    if (!ms) return frondSdCandidate::fail("unsupported", "This device has no Memory Stick slot.");
++    if (msCtrlrPresent(ms)) return frondSdCandidate::fail("busy", "Take the current Memory Stick out first.");
++    if (folder.empty()) return frondSdCandidate::fail("folder", "This machine has no folder to take a card from.");
++    std::error_code ec;
++    const bool classic = std::filesystem::is_regular_file(folder / frondMachine::msSibling, ec);
++    const bool pro = std::filesystem::is_regular_file(folder / frondMachine::msProSibling, ec);
++    if (classic == pro)
++        return frondSdCandidate::fail("card", classic ? "The folder has two Memory Stick files." : "The Memory Stick file is missing.");
++    if (pro) {
++        auto result = openFileCard(folder, frondMachine::kindMsPro, deviceType, identity);
++        if (!result.ok) return result;
++        if (!attachMsPro(ms, false) || !msCtrlrProtect(ms, writeProtected) || !msCtrlrInsert(ms, true)) {
++            detachMsPro(ms);
++            return frondSdCandidate::fail("card", "Could not open the Memory Stick file.");
++        }
++        return {true, "inserted", {}};
++    }
++    frondSession::CardSwap swap;
++    swap.identityGiven = true;
++    swap.identity = identity;
++    frondMachine::Media media;
++    std::vector<uint8_t> physical;
++    if (!frondSession::swappedInCard(folder, frondMachine::msSibling, swap, media) ||
++        !frondMs::decodeFile(folder / frondMachine::msSibling, physical))
++        return frondSdCandidate::fail("card", "The Memory Stick file is missing or damaged.");
++    if (!deviceProfileMsSizeValid5(deviceType, media.logicalSize >> 20))
++        return frondSdCandidate::fail("size", "This machine doesn't take a Memory Stick of that size.");
++    if (!msCtrlrAttachEjected(ms, std::move(physical), writeProtected) || !msCtrlrInsert(ms, true)) {
++        msCtrlrDetach(ms);
++        return frondSdCandidate::fail("card", "Could not open the Memory Stick file.");
++    }
++    slotCards().msIdentity = identity;
++    noteTakenOut(frondMachine::msSibling, false);
++    return {true, "inserted", {}};
++}
++
++}  // namespace frondNative
++
++#endif
+diff --git a/src/uarm/native/Commands.cpp b/src/uarm/native/Commands.cpp
+index 83c1794..676a994 100644
+--- a/src/uarm/native/Commands.cpp
++++ b/src/uarm/native/Commands.cpp
+@@ -24,6 +24,7 @@
+ #include "device_profile5.h"
+ #include "session/session_file5.h"
+ #include "MachineSession.h"
++#include "CardSwap.h"
+ #include "syscall_dispatch.h"
+ #include "cputil.h"
+ 
+@@ -100,6 +101,59 @@ namespace {
+         ctx->soc->SdInsert();
+     }
+ 
++    // The same card moves as the control socket's sd-take-out, sd-put-in, ms-take-out and ms-put-in.
++    MemoryStickController* memoryStick(commands::Context* ctx) {
++        auto* pxa = dynamic_cast<SocPXA*>(ctx->soc);
++        return pxa ? pxa->GetMemoryStick() : nullptr;
++    }
++
++    void CmdTakeOut(vector<string> args, cli::CommandEnvironment& env, void* context, bool stick) {
++        if (!args.empty()) return env.PrintUsage();
++        auto ctx = reinterpret_cast<commands::Context*>(context);
++        auto* ms = memoryStick(ctx);
++        frondNative::CardIdentity identity{};
++        bool protect = false;
++        frondNative::SdResult result;
++        if (stick) {
++            result = frondNative::takeOutMs(ctx->sessionFolder, ms, identity, protect);
++        } else if (ms) {
++            result = frondSdCandidate::fail("unsupported", "This device has no SD slot.");
++        } else if (ctx->soc->SdInserted()) {
++            result = frondSdCandidate::fail("busy", "Eject the card before taking it out.");
++        } else {
++            protect = frondNative::slotCards().sdProtected;
++            result = frondNative::takeOutFileCard(ctx->sessionFolder, frondMachine::kindSd, protect, identity);
++            if (result.ok) frondNative::slotCards().sdProtected = false;
++        }
++        cout << (result.ok ? frondNative::takenOutReply(identity, protect) : result.message) << endl;
++    }
++
++    void CmdPutIn(vector<string> args, cli::CommandEnvironment& env, void* context, bool stick) {
++        frondNative::CardIdentity identity{};
++        bool protect = false;
++        if (args.empty() || args.size() > 2 ||
++            !frondNative::parsePutIn(args.size() == 2 ? args[0] + " " + args[1] : args[0], identity, protect))
++            return env.PrintUsage();
++        auto ctx = reinterpret_cast<commands::Context*>(context);
++        auto* ms = memoryStick(ctx);
++        const auto device = ctx->soc->GetDeviceType();
++        frondNative::SdResult result;
++        if (stick) {
++            result = frondNative::putInMs(ctx->sessionFolder, ms, device, identity, protect);
++        } else if (ms) {
++            result = frondSdCandidate::fail("unsupported", "This device has no SD slot.");
++        } else {
++            result = frondNative::putInSd(ctx->sessionFolder, device, identity, protect);
++            if (result.ok) ctx->soc->SdInsert();
++        }
++        if (!result.ok) cout << result.message << endl;
++    }
++
++    void CmdSdTakeOut(vector<string> args, cli::CommandEnvironment& env, void* context) { CmdTakeOut(args, env, context, false); }
++    void CmdMsTakeOut(vector<string> args, cli::CommandEnvironment& env, void* context) { CmdTakeOut(args, env, context, true); }
++    void CmdSdPutIn(vector<string> args, cli::CommandEnvironment& env, void* context) { CmdPutIn(args, env, context, false); }
++    void CmdMsPutIn(vector<string> args, cli::CommandEnvironment& env, void* context) { CmdPutIn(args, env, context, true); }
++
+     void CmdHoldState(vector<string> args, cli::CommandEnvironment& env, void* context) {
+         if (!args.empty()) return env.PrintUsage();
+         auto *soc = reinterpret_cast<commands::Context*>(context)->soc;
+@@ -419,6 +473,20 @@ namespace {
+           .usage = "mount <image>",
+           .description = "Mount an SD card image.",
+           .cmd = CmdMount},
++         {.name = "sd-take-out",
++          .description = "Leave the ejected SD card in the machine folder's card file and empty the slot.",
++          .cmd = CmdSdTakeOut},
++         {.name = "sd-put-in",
++          .usage = "sd-put-in <identity> [protected|writable]",
++          .description = "Insert the SD card file in the machine folder.",
++          .cmd = CmdSdPutIn},
++         {.name = "ms-take-out",
++          .description = "Leave the ejected Memory Stick in the machine folder's card file and empty the slot.",
++          .cmd = CmdMsTakeOut},
++         {.name = "ms-put-in",
++          .usage = "ms-put-in <identity> [protected|writable]",
++          .description = "Insert the Memory Stick file in the machine folder.",
++          .cmd = CmdMsPutIn},
+          {.name = "reset", .description = "Reset Pilot.", .cmd = CmdReset},
+          {.name = "reset-no-ext",
+           .description = "Reset Pilot w/o loading extensions.",
+diff --git a/src/uarm/native/DesktopControl.h b/src/uarm/native/DesktopControl.h
+index d8e0dbd..f0232b1 100644
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -39,6 +39,7 @@
+ #include "session/session_file5.h"
+ #include "MachineSession.h"
+ #include "MsProCards.h"
++#include "CardSwap.h"
+ 
+ // Private Unix socket, owned by the launcher; DesktopChannel has the framing. Only the emulation
+ // thread dispatches requests.
+@@ -221,7 +222,7 @@ class DesktopControl {
+             command == "ms-mkdir" || command == "ms-delete" || command == "ms-rename";
+         const bool fileCommand = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "ms-insert" || command == "ms-export" || command == "input-replay";
+         if (fileCommand && (path.empty() || path.front() != '/')) return {false, "argument", "An absolute file path is required."};
+-        if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "ms-read-only" && command != "launch-app" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "bluetooth-mode" && command != "sound-mode" && command != "display" && command != "microphone-mode" && command != "hold" && !path.empty()) return {false, "argument", "This command takes no argument."};
++        if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "sd-put-in" && command != "ms-put-in" && command != "ms-read-only" && command != "launch-app" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "bluetooth-mode" && command != "sound-mode" && command != "display" && command != "microphone-mode" && command != "hold" && !path.empty()) return {false, "argument", "This command takes no argument."};
+         if (command == "guest-ready") {
+             if (!GuestDatabaseOps::Ready(*ctx.soc))
+                 return {false, "not-ready", "Palm OS has not reached a supported application boundary."};
+@@ -443,6 +444,22 @@ class DesktopControl {
+                 if(!msCtrlrAttach(ms,image))return {false,"image","Could not attach the Memory Stick image."};
+                 // A Pro stick it replaced leaves the card store.
+                 if(wasPro)frondNative::detachMsPro(nullptr);
++                frondNative::slotCards().msIdentity={};
++                return {true,"inserted","Memory Stick inserted."};
++            }
++            // Take-out leaves the ejected stick settled in the folder's card file for the frontend to
++            // move; put-in inserts the one the frontend moved there. Put-in takes "IDENTITY [protected]".
++            if(command=="ms-take-out"){
++                frondNative::CardIdentity identity{};bool protect=false;
++                const auto result=frondNative::takeOutMs(ctx.sessionFolder,ms,identity,protect);
++                if(!result.ok)return {false,result.code,result.message};
++                return {true,"taken-out",frondNative::takenOutReply(identity,protect)};
++            }
++            if(command=="ms-put-in"){
++                frondNative::CardIdentity identity{};bool protect=false;
++                if(!frondNative::parsePutIn(path,identity,protect))return {false,"argument","Use the card's 64-digit identity, then protected or writable."};
++                const auto result=frondNative::putInMs(ctx.sessionFolder,ms,ctx.soc->GetDeviceType(),identity,protect);
++                if(!result.ok)return {false,result.code,result.message};
+                 return {true,"inserted","Memory Stick inserted."};
+             }
+             if(command=="ms-eject"||command=="ms-reinsert") {
+@@ -494,6 +511,27 @@ class DesktopControl {
+                 result = frondNative::loadSdImage(ctx.sessionFolder, device, path, progress);
+             }
+             if (!result.ok) return {false, result.code, result.message};
++            frondNative::slotCards().sdProtected = false;
++            ctx.soc->SdInsert();
++            return {true, "inserted", "SD card inserted."};
++        }
++        if (command == "sd-take-out") {
++            if (!sdCardInitialized()) return {false, "empty", "This session has no card."};
++            if (ctx.soc->SdInserted()) return {false, "busy", "Eject the card before taking it out."};
++            frondNative::CardIdentity identity{};
++            const bool protect = frondNative::slotCards().sdProtected;
++            const auto result = frondNative::takeOutFileCard(ctx.sessionFolder, frondMachine::kindSd, protect, identity);
++            if (!result.ok) return {false, result.code, result.message};
++            frondNative::slotCards().sdProtected = false;
++            return {true, "taken-out", frondNative::takenOutReply(identity, protect)};
++        }
++        if (command == "sd-put-in") {
++            frondNative::CardIdentity identity{};
++            bool protect = false;
++            if (!frondNative::parsePutIn(path, identity, protect))
++                return {false, "argument", "Use the card's 64-digit identity, then protected or writable."};
++            const auto result = frondNative::putInSd(ctx.sessionFolder, ctx.soc->GetDeviceType(), identity, protect);
++            if (!result.ok) return {false, result.code, result.message};
+             ctx.soc->SdInsert();
+             return {true, "inserted", "SD card inserted."};
+         }
+diff --git a/src/uarm/native/MachineSession.h b/src/uarm/native/MachineSession.h
+index 78a1f77..6b47451 100644
+--- a/src/uarm/native/MachineSession.h
++++ b/src/uarm/native/MachineSession.h
+@@ -21,6 +21,19 @@
+ // Native save/load of a machine folder. A lone v6 .frond extracts into <stem>/.
+ namespace frondNative {
+ 
++// What the slots keep from load to save outside the card store: SD write protection (the card
++// doesn't model it, the descriptor carries it) and the classic stick's identity. `takenOut` are
++// card files a take-out left in the folder for the frontend to move; a save doesn't remove them.
++struct SlotCards {
++    bool sdProtected{};
++    std::array<uint8_t, frondMachine::identityBytes> msIdentity{};
++    std::vector<std::string> takenOut;
++};
++inline SlotCards& slotCards() {
++    static SlotCards cards;
++    return cards;
++}
++
+ // A lone v6 file outside a machine folder, which loading extracts into a folder of its own.
+ inline bool extractsOnLoad(const std::filesystem::path& file) {
+     std::error_code ec;
+@@ -101,6 +114,7 @@ inline bool publishMs(const std::filesystem::path& folder, MemoryStickController
+     media.name = frondMachine::msSibling;
+     media.inserted = msCtrlrInserted(ms);
+     media.writeProtected = msCtrlrReadOnly(ms);
++    media.identity = slotCards().msIdentity;
+     std::shared_ptr<const CardSnapshot> pin;
+     bool protect = false;
+     if (!msCtrlrSaveCheckpoint(ms, pin, protect) || !pin) return false;
+@@ -153,7 +167,8 @@ inline bool saveMachine(const std::filesystem::path& path, SoC& soc, const std::
+     if (sdCardInitialized() && (!ms || pro)) {
+         frondMachine::Media media;
+         const bool ok = pro ? beginSdSave(folder, media, msCtrlrInserted(ms), sd, frondMachine::kindMsPro, msCtrlrReadOnly(ms))
+-                            : beginSdSave(folder, media, soc.SdInserted(), sd);
++                            : beginSdSave(folder, media, soc.SdInserted(), sd, frondMachine::kindSd,
++                                          slotCards().sdProtected);
+         if (!ok) return fail("the card save could not start");
+         temps.emplace_back();  // published by completeSdSave, not renamed with the .frond
+         contents.media.push_back(std::move(media));
+@@ -168,7 +183,7 @@ inline bool saveMachine(const std::filesystem::path& path, SoC& soc, const std::
+     // Once the .frond is published the card file is finished, or left for the next load.
+     // As publishWithSd, telling a .frond that wasn't written from a card step after it.
+     bool published = false;
+-    const bool saved = frondSession::saveFolderFromTemps(folder, contents, temps, &published);
++    const bool saved = frondSession::saveFolderFromTemps(folder, contents, temps, &published, &slotCards().takenOut);
+     if (!published) {
+         abandonSdSave(sd);
+         std::cerr << "save: the session file could not be written in " << folder << std::endl;
+diff --git a/src/uarm/native/main.cpp b/src/uarm/native/main.cpp
+index ed8e776..675aaad 100644
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -20,6 +20,7 @@
+ #include "Cli.h"
+ #include "Commands.h"
+ #include "DesktopControl.h"
++#include "CardSwap.h"
+ #include "FileUtil.h"
+ #include "FrondPerformance.h"
+ #include "HostSerial.h"
+@@ -92,11 +93,17 @@ struct Options {
+     optional<string> infrared;
+     optional<string> usb;
+     optional<string> bluetooth;
++    bool cardSwap;                  // the frontend changed the card files while the machine was off
++    optional<string> cardIdentity;  // the card put in: 64 hex digits
++    bool cardProtected;
+ };
+ 
+ namespace {
+     // The session has a Memory Stick Pro, opened into the SD card store by applySession.
+     bool msProCard = false;
++    // Under --card-swap, a slot that holds another card than the one saved, or none. The card it
++    // holds now resumes as a hot eject and insert, and its write protection is set from `msProtect`.
++    bool sdSwapped = false, msSwapped = false, msProtect = false;
+     constexpr size_t AUDIO_QUEUE_SIZE = 44100 / MAIN_LOOP_FPS * 10;
+ 
+     uint32_t ramSizeFromMemorySize(uint32_t memorySize) {
+@@ -248,6 +255,14 @@ namespace {
+             embeddedCard = true;
+             msProCard = true;
+         }
++        // What the slots carry outside the card store, kept to the next save.
++        for (const auto& media : contents.media) {
++            if (media.kind == frondMachine::kindSd) frondNative::slotCards().sdProtected = media.writeProtected;
++            if (media.kind == frondMachine::kindMs) frondNative::slotCards().msIdentity = media.identity;
++            if (media.kind != frondMachine::kindSd) msProtect = media.writeProtected;
++        }
++        sdSwapped = contents.sdSwapped;
++        msSwapped = contents.msSwapped;
+         romInfo = RomInfo5(nor.data, nor.size);
+         if (sessionDevice != deviceTypeTX && romInfo.GetDeviceType() != sessionDevice) {
+             cerr << "session device profile does not match ROM" << endl;
+@@ -264,7 +279,19 @@ namespace {
+         frondSession::Contents contents;
+         std::filesystem::path folder;
+         const std::filesystem::path work = options.workFolder ? *options.workFolder : std::string();
+-        if (frondSession::loadPath(path, contents, folder, frondSession::msPhysicalBytes, work)) {
++        frondSession::CardSwap swap;
++        if (options.cardIdentity) {
++            frondNative::CardIdentity identity{};
++            if (!frondNative::parseIdentityHex(*options.cardIdentity, identity)) {
++                cerr << "--card-identity takes the card's identity as 64 hex digits" << endl;
++                return false;
++            }
++            swap.identityGiven = true;
++            swap.identity = identity;
++        }
++        swap.writeProtected = options.cardProtected;
++        if (frondSession::loadPath(path, contents, folder, frondSession::msPhysicalBytes, work,
++                                   options.cardSwap ? &swap : nullptr)) {
+             sessionFolder = folder.string();
+             return applySession(contents, folder, nor, nand, ram, savestate, ramSize, romInfo,
+                                 displayMode, requestedDevice, sessionDevice, embeddedCard, options);
+@@ -323,6 +350,10 @@ namespace {
+ 
+     bool run(const Options& requested) {
+         Options options = requested;
++        if (!options.cardSwap && (options.cardIdentity || options.cardProtected)) {
++            cerr << "--card-identity and --card-protected go with --card-swap" << endl;
++            return false;
++        }
+         if (options.gdbPort && (*options.gdbPort == 0 || *options.gdbPort > 65535)) {
+             cerr << "GDB port must be 1..65535" << endl;
+             return false;
+@@ -566,9 +597,11 @@ namespace {
+             free(memory.data);
+         }
+ 
++        auto* socPxa = dynamic_cast<SocPXA*>(soc);
++        auto* memoryStick = socPxa ? socPxa->GetMemoryStick() : nullptr;
+         if (msProCard) {
+-            auto* pxa = dynamic_cast<SocPXA*>(soc);
+-            if (!frondNative::attachMsPro(pxa ? pxa->GetMemoryStick() : nullptr, false)) {
++            if (!frondNative::attachMsPro(memoryStick, false) ||
++                (msSwapped && !msCtrlrProtect(memoryStick, msProtect))) {
+                 cerr << "session Memory Stick Pro could not be attached" << endl;
+                 return false;
+             }
+@@ -577,27 +610,42 @@ namespace {
+             const auto msPath = std::filesystem::path(sessionFolder) / frondMachine::msSibling;
+             std::error_code ec;
+             if (std::filesystem::is_regular_file(msPath, ec)) {
+-                auto* pxa = dynamic_cast<SocPXA*>(soc);
+-                auto* ms = pxa ? pxa->GetMemoryStick() : nullptr;
++                auto* ms = memoryStick;
+                 std::vector<uint8_t> physical;
+-                if (!ms || !frondMs::decodeFile(msPath, physical) || !msCtrlrAttach(ms, std::move(physical))) {
++                const bool attached = ms && frondMs::decodeFile(msPath, physical) &&
++                                      (msSwapped ? msCtrlrAttachEjected(ms, std::move(physical), msProtect)
++                                                 : msCtrlrAttach(ms, std::move(physical)));
++                if (!attached) {
+                     cerr << "session Memory Stick sidecar is missing or unreadable" << endl;
+                     return false;
+                 }
+             }
+         }
+ 
++        // A changed stick resumes ejected, then goes in below.
++        if (msSwapped) {
++            if (!memoryStick) {
++                cerr << "this device has no Memory Stick slot" << endl;
++                return false;
++            }
++            msCtrlrSwapOnLoad(memoryStick, true);
++        }
+         if (!soc->Load(savestate.size, savestate.data)) {
+             cerr << "failed to restore savestate" << endl;
+             return false;
+         }
++        if (msSwapped && msCtrlrPresent(memoryStick)) msCtrlrInsert(memoryStick, true);
+ 
+         // Physical host keys are up when a session starts. Complete any saved
+         // make packets and send break codes, without altering export rollback.
+         soc->ReleaseKeyboard();
+         if (savestate.data) free(savestate.data);
+ 
+-        if (soc->SdInserted()) {
++        if (sdSwapped) {
++            // The saved card is gone: eject it as a hot eject would, then insert the one there now.
++            soc->SdEject();
++            if (sdCardInitialized()) soc->SdInsert();
++        } else if (soc->SdInserted()) {
+             if (!soc->SdRemount()) {
+                 cerr << "failed to remount SD card: session and card image do not match" << endl;
+                 return false;
+@@ -1289,6 +1337,16 @@ int main(int argc, char** argv) {
+         .help("run a session from elsewhere in this empty machine folder; its cards are copied there")
+         .metavar("<folder>");
+ 
++    program.add_argument("--card-swap")
++        .help("the machine folder's card files may have changed since the save; a changed slot resumes as a hot swap")
++        .default_value(false).implicit_value(true);
++    program.add_argument("--card-identity")
++        .help("with --card-swap, the identity of a card put in, as 64 hex digits")
++        .metavar("<hex>");
++    program.add_argument("--card-protected")
++        .help("with --card-swap, a card put in is write protected")
++        .default_value(false).implicit_value(true);
++
+     program.add_argument("--serial")
+         .help("connect the TX serial port to a host PTY (pty) or a TCP listener on 127.0.0.1 "
+               "(tcp:PORT, one client at a time); default off")
+@@ -1352,7 +1410,10 @@ int main(int argc, char** argv) {
+                        .serial = program.present("--serial"),
+                        .infrared = program.present("--irda"),
+                        .usb = program.present("--usb"),
+-                       .bluetooth = program.present("--bluetooth")};
++                       .bluetooth = program.present("--bluetooth"),
++                       .cardSwap = program.get<bool>("--card-swap"),
++                       .cardIdentity = program.present("--card-identity"),
++                       .cardProtected = program.get<bool>("--card-protected")};
+ 
+     logEnable();
+ 
+diff --git a/src/uarm/uarm/MachineFolder.h b/src/uarm/uarm/MachineFolder.h
+index 342f059..974f6b5 100644
+--- a/src/uarm/uarm/MachineFolder.h
++++ b/src/uarm/uarm/MachineFolder.h
+@@ -23,6 +23,8 @@ constexpr const char* msSibling = "ms.frondms";
+ // A Memory Stick Pro: flat sectors in the .frondsd format, saved like an SD card.
+ constexpr const char* msProSibling = "ms.frondmsp";
+ constexpr const char* androidSession = "session.frond";
++// Which card the frontend's slot holds; packed with the machine, never read by the core.
++constexpr const char* slotFile = "slot.json";
+ constexpr uint32_t kindSd = 1, kindMs = 2, kindMsPro = 3;
+ constexpr size_t nameBytes = 32, identityBytes = 32;
+ // v7 descriptors are 92 bytes; v8 adds the SD content generation as a u64 at 92.
+@@ -55,7 +57,7 @@ inline bool endsWith(std::string_view name, std::string_view suffix) {
+ 
+ inline bool packableName(std::string_view name) {
+     if (ignoredName(name)) return false;
+-    if (name == sdSibling || name == msSibling || name == msProSibling) return true;
++    if (name == sdSibling || name == msSibling || name == msProSibling || name == slotFile) return true;
+     if (endsWith(name, ".frond")) return true;
+     if (endsWith(name, ".frond.settings.json")) return true;
+     return false;
+diff --git a/src/uarm/uarm/SessionIo.h b/src/uarm/uarm/SessionIo.h
+index f6e144b..e2cde90 100644
+--- a/src/uarm/uarm/SessionIo.h
++++ b/src/uarm/uarm/SessionIo.h
+@@ -39,6 +39,16 @@ struct Contents {
+     uint32_t ramSize{};
+     std::vector<uint8_t> metadata, nor, nand, memory, savestate;
+     std::vector<frondMachine::Media> media;
++    // Under --card-swap: the slot holds another card than the one saved, or none.
++    bool sdSwapped{}, msSwapped{};
++};
++
++// A load with --card-swap: the frontend may have changed the card files while the machine was off.
++// `identity` and `writeProtected` describe the card put in, given with --card-identity.
++struct CardSwap {
++    bool identityGiven{};
++    std::array<uint8_t, frondMachine::identityBytes> identity{};
++    bool writeProtected{};
+ };
+ 
+ inline uint32_t le32(const uint8_t* p) {
+@@ -893,10 +903,11 @@ inline bool saveFolder(const std::filesystem::path& folder, const Contents& cont
+ 
+ // Write the .frond temp, rename it, then rename sidecar temps. A failed .frond
+ // rename leaves previous card files; sidecar temps are ignored names. `published` is set once the
+-// .frond is renamed, so a caller can tell a later failure from one that changed nothing.
++// .frond is renamed, so a caller can tell a later failure from one that changed nothing. Card
++// files named in `keep` stay even when the .frond no longer describes them.
+ inline bool saveFolderFromTemps(const std::filesystem::path& folder, const Contents& contents,
+                                 const std::vector<std::filesystem::path>& sidecarTemps,
+-                                bool* published = nullptr) {
++                                bool* published = nullptr, const std::vector<std::string>* keep = nullptr) {
+     if (published) *published = false;
+     if (sidecarTemps.size() != contents.media.size()) return false;
+     std::filesystem::path dest;
+@@ -927,7 +938,7 @@ inline bool saveFolderFromTemps(const std::filesystem::path& folder, const Conte
+     for (const auto* sibling : {frondMachine::sdSibling, frondMachine::msSibling, frondMachine::msProSibling}) {
+         const bool described = std::any_of(contents.media.begin(), contents.media.end(),
+                                            [&](const frondMachine::Media& m) { return m.name == sibling; });
+-        if (described) continue;
++        if (described || (keep && std::find(keep->begin(), keep->end(), sibling) != keep->end())) continue;
+         std::error_code ec;
+         if (std::filesystem::exists(folder / sibling, ec) && !std::filesystem::remove(folder / sibling, ec))
+             return false;
+@@ -942,11 +953,113 @@ inline bool parseFolderSession(const uint8_t* data, size_t size, Contents& out)
+     return fromSession(session, out);
+ }
+ 
++// A card file the frontend put in under --card-swap, checked as a new card of its kind: header,
++// size and payload as a load does, and no journals or full copies beside it.
++inline bool swappedInCard(const std::filesystem::path& folder, const char* name, const CardSwap& swap,
++                          frondMachine::Media& out) {
++    if (!swap.identityGiven) {
++        std::cerr << "a card put in needs --card-identity" << std::endl;
++        return false;
++    }
++    frondMachine::Media media;
++    media.name = name;
++    media.inserted = true;
++    media.writeProtected = swap.writeProtected;
++    media.identity = swap.identity;
++    const auto path = folder / name;
++    std::error_code ec;
++    if (media.name == frondMachine::msSibling) {
++        media.kind = frondMachine::kindMs;
++        const auto bytes = std::filesystem::file_size(path, ec);
++        if (ec || bytes < frondSdFile::headerBytes) return false;
++        const auto* g = frondMsGeometry::byPhysicalBytes(bytes - frondSdFile::headerBytes);
++        if (!g) return false;
++        media.physicalSize = g->PhysicalBytes();
++        media.logicalSize = g->LogicalBytes();
++        if (!frondMachine::msHeaderLooksRight(path, media.physicalSize)) return false;
++    } else {
++        media.kind = media.name == frondMachine::msProSibling ? frondMachine::kindMsPro : frondMachine::kindSd;
++        if (!sdJournals(folder, media.kind).empty()) {
++            std::cerr << "the card put in has unfinished save files beside it" << std::endl;
++            return false;
++        }
++        frondSdFile::Info info;
++        if (frondMachine::readSdHeader(path, info) != frondMachine::SiblingStatus::ok) return false;
++        media.physicalSize = media.logicalSize = info.payloadBytes;
++        media.contentGeneration = info.generation;
++        if (!frondMachine::validMedia(media) || frondMachine::checkSdSibling(path, media) != frondMachine::SiblingStatus::ok)
++            return false;
++    }
++    if (!frondMachine::validMedia(media)) return false;
++    out = std::move(media);
++    return true;
++}
++
++// Fits the saved cards to the card files now in the folder, slot by slot (SD; Memory Stick or Pro).
++// A saved card whose file is there unchanged, with the same identity when one is given, stays as
++// saved. A missing file empties the slot; another card, or the same one changed, is checked as a
++// new card. The device profile check comes later, as for any load.
++inline bool resolveCardSwap(const std::filesystem::path& folder, Contents& parsed, const CardSwap& swap) {
++    std::vector<frondMachine::Media> cards;
++    const std::vector<std::vector<const char*>> slots = {{frondMachine::sdSibling},
++                                                         {frondMachine::msSibling, frondMachine::msProSibling}};
++    for (size_t slot = 0; slot < slots.size(); ++slot) {
++        const frondMachine::Media* saved = nullptr;
++        for (const auto& media : parsed.media) {
++            const bool sd = media.kind == frondMachine::kindSd;
++            if (sd == (slot == 0)) {
++                if (saved) return false;
++                saved = &media;
++            }
++        }
++        const char* present = nullptr;
++        for (const auto* name : slots[slot]) {
++            std::error_code ec;
++            if (!std::filesystem::is_regular_file(folder / name, ec)) continue;
++            if (present) {
++                std::cerr << "the folder has a Memory Stick and a Memory Stick Pro" << std::endl;
++                return false;
++            }
++            present = name;
++        }
++        if (!saved && !present) continue;
++        bool& swapped = slot == 0 ? parsed.sdSwapped : parsed.msSwapped;
++        if (saved && present && saved->name == present && (!swap.identityGiven || swap.identity == saved->identity)) {
++            std::error_code ec;
++            const auto path = folder / present;
++            const bool same = frondMachine::fileCardKind(saved->kind)
++                                  ? settleSdJournal(folder, *saved) &&
++                                        frondMachine::checkSdSibling(path, *saved) == frondMachine::SiblingStatus::ok
++                                  : std::filesystem::file_size(path, ec) == frondSdFile::headerBytes + saved->physicalSize &&
++                                        !ec && frondMachine::msHeaderLooksRight(path, saved->physicalSize);
++            if (same) {
++                cards.push_back(*saved);
++                continue;
++            }
++        }
++        swapped = true;
++        if (!present) continue;
++        frondMachine::Media card;
++        if (!swappedInCard(folder, present, swap, card)) return false;
++        cards.push_back(std::move(card));
++    }
++    parsed.media = std::move(cards);
++    return true;
++}
++
+ // Settles any SD journal, then checks the siblings. `full` reads every card byte, for imports.
++// With `swap` the card files may differ from the saved cards (resolveCardSwap).
+ inline bool loadV7Bytes(const uint8_t* data, size_t size, const std::filesystem::path& folder,
+-                        Contents& out, bool full = false) {
++                        Contents& out, bool full = false, const CardSwap* swap = nullptr) {
+     Contents parsed;
+     if (!parseFolderSession(data, size, parsed)) return false;
++    if (swap) {
++        if (!resolveCardSwap(folder, parsed, *swap) ||
++            frondMachine::checkSiblings(folder, parsed.media, full) != frondMachine::SiblingStatus::ok)
++            return false;
++        out = std::move(parsed);
++        return true;
++    }
+     for (const auto& media : parsed.media)
+         if (frondMachine::fileCardKind(media.kind) && !settleSdJournal(folder, media)) return false;
+     if (frondMachine::checkSiblings(folder, parsed.media, full) != frondMachine::SiblingStatus::ok)
+@@ -1125,8 +1238,10 @@ inline bool loadIntoWorkFolder(const std::filesystem::path& path, const std::fil
+ }
+ 
+ // `work`, when given and not the session's own folder, is where an outside session runs from.
++// `swap` is --card-swap, for a session loaded in its own folder; a copy into `work` checks as saved.
+ inline bool loadPath(const std::filesystem::path& path, Contents& out, std::filesystem::path& folder,
+-                     uint64_t msImageBytes = msPhysicalBytes, const std::filesystem::path& work = {}) {
++                     uint64_t msImageBytes = msPhysicalBytes, const std::filesystem::path& work = {},
++                     const CardSwap* swap = nullptr) {
+     std::error_code ec;
+     if (!work.empty()) {
+         const auto own = isMachineFolder(path) ? path : path.parent_path();
+@@ -1148,7 +1263,7 @@ inline bool loadPath(const std::filesystem::path& path, Contents& out, std::file
+                 !(frondMachine::sessionFile(path, session) && frondMachine::readBytes(session, bytes)))
+                 return false;
+         }
+-        return loadV7Bytes(bytes.data(), bytes.size(), path, out);
++        return loadV7Bytes(bytes.data(), bytes.size(), path, out, false, swap);
+     }
+     if (std::filesystem::is_regular_file(path, ec)) {
+         std::vector<uint8_t> bytes;
+@@ -1167,7 +1282,7 @@ inline bool loadPath(const std::filesystem::path& path, Contents& out, std::file
+             } else if (!isFolderVersion(version)) {
+                 return false;
+             }
+-            return loadV7Bytes(bytes.data(), bytes.size(), folder, out);
++            return loadV7Bytes(bytes.data(), bytes.size(), folder, out, false, swap);
+         }
+         if (version == SessionFile5::kVersionV6) {
+             if (!createLoneExtractFolder(path, folder)) return false;
+@@ -1177,11 +1292,11 @@ inline bool loadPath(const std::filesystem::path& path, Contents& out, std::file
+                 std::filesystem::remove_all(folder, ec);
+                 return false;
+             }
+-            return loadV7Bytes(bytes.data(), bytes.size(), folder, out);
++            return loadV7Bytes(bytes.data(), bytes.size(), folder, out, false, swap);
+         }
+         if (isFolderVersion(version)) {
+             folder = path.parent_path();
+-            return loadV7Bytes(bytes.data(), bytes.size(), folder, out);
++            return loadV7Bytes(bytes.data(), bytes.size(), folder, out, false, swap);
+         }
+     }
+     return false;
+diff --git a/src/uarm/uarm/mmiodev_MemoryStickController.cpp b/src/uarm/uarm/mmiodev_MemoryStickController.cpp
+index ba23983..a961457 100644
+--- a/src/uarm/uarm/mmiodev_MemoryStickController.cpp
++++ b/src/uarm/uarm/mmiodev_MemoryStickController.cpp
+@@ -52,6 +52,7 @@ struct MemoryStickController : LegacyMsRegisters {
+     uint32_t imageCrc{};
+     FILE* trace{};
+     uint32_t traceLines{},lastStatus{~0u};
++    bool swapLoad{};  // the next load keeps the stick attached now, ejected
+ };
+ struct MemoryStickMediaStateAccess {
+     static MemoryStickMedia::Result Attach(MemoryStickMedia& media,
+@@ -337,6 +338,13 @@ bool msCtrlrAttach(MemoryStickController* m,std::vector<uint8_t>&& physical) {
+     m->pro.Detach();
+     msCtrlrDiscardSaveImage(m);msCardReset(m);m->state={};m->state.inserted=1;msCtrlrRefresh(m);return true;
+ }
++bool msCtrlrAttachEjected(MemoryStickController* m,std::vector<uint8_t>&& physical,bool protect) {
++    if(!m||m->state.inserted||!frondMs::validBoot(physical))return false;
++    if(m->card.media.Attach(std::move(physical),protect)!=MemoryStickMedia::Result::ok)return false;
++    m->pro.Detach();
++    msCtrlrDiscardSaveImage(m);msCardReset(m);m->state={};msCtrlrRefresh(m);return true;
++}
++void msCtrlrSwapOnLoad(MemoryStickController* m,bool swap){if(m)m->swapLoad=swap;}
+ bool msCtrlrAttachPro(MemoryStickController* m,MsProStore store,bool inserted) {
+     if(!m||m->state.inserted||!store.sectors||!store.read||!store.write||store.attribute.empty()||store.attribute.size()%512)return false;
+     m->card.media.Detach();m->pro.Attach(std::move(store),false);
+@@ -397,6 +405,12 @@ template<typename T>bool msCtrlrLoad(MemoryStickController* m,T& loader,bool pre
+     auto* old=loader.GetChunkOrFail(tg50MsChunk,0,"TG50 Memory Stick");if(!old)return false;
+     LegacyMsRegisters legacy{};LoadChunkHelper h(*old);msCtrlrState(legacy,h);
+     if(old->HasError()){loader.NotifyError();return false;}
++    // Another stick, or none, since the save: the saved transfer state belonged to the old one.
++    if(m->swapLoad){
++        m->swapLoad=false;
++        msCtrlrDiscardSaveImage(m);static_cast<LegacyMsRegisters&>(*m)=legacy;m->state={};msCardReset(m);
++        (void)preserveInput;return true;
++    }
+     MemoryStickController::State state{};MemoryStickCard::State cs{};
+     uint32_t present=0,protect=0,pro=0;std::vector<uint8_t> physical;bool haveImage=false;
+     MemoryStickProCard::State ps{};
+diff --git a/src/uarm/uarm/mmiodev_MemoryStickController.h b/src/uarm/uarm/mmiodev_MemoryStickController.h
+index dc96c39..9a76576 100644
+--- a/src/uarm/uarm/mmiodev_MemoryStickController.h
++++ b/src/uarm/uarm/mmiodev_MemoryStickController.h
+@@ -35,6 +35,11 @@ bool msCtrlrReadOnly(MemoryStickController*);
+ bool msCtrlrProtect(MemoryStickController*,bool);
+ bool msCtrlrAttach(MemoryStickController*,const std::vector<uint8_t>&);
+ bool msCtrlrAttach(MemoryStickController*,std::vector<uint8_t>&&);
++// Attaches a classic stick taken out of the slot, so its write protection can be set before it goes in.
++bool msCtrlrAttachEjected(MemoryStickController*,std::vector<uint8_t>&& physical,bool protect);
++// For a load whose stick was changed while the machine was off: the next msCtrlrLoad keeps the stick
++// attached now (or none) and leaves it ejected, with fresh transfer state.
++void msCtrlrSwapOnLoad(MemoryStickController*,bool);
+ // Attaches a Memory Stick Pro whose sectors live in `store`, replacing any stick.
+ bool msCtrlrAttachPro(MemoryStickController*,MsProStore store,bool inserted=true);
+ bool msCtrlrPro(MemoryStickController*);

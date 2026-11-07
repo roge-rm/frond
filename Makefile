@@ -37,6 +37,35 @@ test-card-backing: prepare
 		build/miniz-card-backing.o -o build/test-card-backing
 	./build/test-card-backing
 
+.PHONY: test-card-swap
+test: test-card-swap
+# Card swap and change counters without a SoC, then on the T|X, E2, Zire 72 and TG50 smoke sessions
+# there are (tests/card-swap-rom.py).
+test-card-swap: out/frond
+	$(CC) -std=gnu99 -O1 -g -Ibuild/source/src/common -c build/source/src/common/zip/miniz.c \
+		-o build/miniz-card-swap.o
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/uarm/native -Ibuild/source/src/common \
+		tests/card-swap.cpp build/source/src/common/session/session_file5.cpp build/source/src/common/md5.cpp \
+		build/source/src/uarm/uarm/sdcard.cpp build/source/src/uarm/uarm/mmiodev_MemoryStickController.cpp \
+		build/miniz-card-swap.o build/source/src/common/libcommon.a -lz -o build/test-card-swap
+	./build/test-card-swap
+	python3 tests/card-swap-rom.py
+
+.PHONY: test-card-tool
+test: test-card-tool
+# The card tool (make, import, export) as a library, then as `frond-core --card` (tests/card-tool.py).
+test-card-tool: out/frond
+	$(CC) -std=gnu99 -O1 -g -Ibuild/source/src/common -c build/source/src/common/zip/miniz.c \
+		-o build/miniz-card-tool.o
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/uarm/native -Ibuild/source/src/common \
+		tests/card-tool.cpp build/source/src/common/session/session_file5.cpp build/source/src/common/md5.cpp \
+		build/source/src/uarm/uarm/sdcard.cpp build/source/src/uarm/uarm/mmiodev_MemoryStickController.cpp \
+		build/miniz-card-tool.o build/source/src/common/libcommon.a -lz -o build/test-card-tool
+	./build/test-card-tool
+	python3 tests/card-tool.py
+
 .PHONY: test-session-v7
 test: test-session-v7
 test-session-v7: prepare
@@ -1179,3 +1208,31 @@ test-tg50-audio-lifecycle: out/frond
 	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/tg50-audio-lifecycle-core.rsp
 	$(CXX) -std=c++17 -O1 -g $(shell sdl2-config --cflags) -Ibuild/source/src/uarm/native -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common tests/tg50-audio-lifecycle.cpp build/source/src/uarm/native/SdlAudioDriver.cpp @build/tg50-audio-lifecycle-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-tg50-audio-lifecycle
 	ulimit -c 0; ./build/test-tg50-audio-lifecycle
+
+# Link protocol library (link/): pairing, Noise KK, records and the channel mux. Monocypher is
+# vendored unchanged in link/monocypher/ and built as C.
+LINK_SOURCES := link/crypto.cpp link/noise.cpp link/wire.cpp link/pairing.cpp link/messages.cpp link/mux.cpp link/link.cpp
+LINK_CXXFLAGS := -std=c++17 -O1 -g -Wall -Wextra -Werror
+
+build/link/monocypher.o: link/monocypher/monocypher.c link/monocypher/monocypher.h
+	mkdir -p build/link
+	$(CC) -std=c99 -O2 -g -c $< -o $@
+
+build/link/libfrondlink.a: $(LINK_SOURCES) $(wildcard link/*.h) build/link/monocypher.o
+	mkdir -p build/link
+	for f in $(LINK_SOURCES); do $(CXX) $(LINK_CXXFLAGS) -c $$f -o build/link/$$(basename $$f .cpp).o || exit 1; done
+	rm -f $@
+	ar rcs $@ $(patsubst link/%.cpp,build/link/%.o,$(LINK_SOURCES)) build/link/monocypher.o
+
+.PHONY: test-link-protocol
+test: test-link-protocol
+test-link-protocol: build/link/libfrondlink.a
+	$(CXX) $(LINK_CXXFLAGS) tests/link-protocol.cpp build/link/libfrondlink.a -o build/test-link-protocol
+	./build/test-link-protocol
+
+# Infrared between two T|X cores joined by two link hubs on loopback: the IR probe beams both ways,
+# then again after one Palm sleeps and wakes. Needs a T|X smoke session (FROND_ARM_SESSIONS, else
+# build/smoke/machines) and the IR probe (FROND_IR_PROBE, else pilrc and the SDK), else it skips.
+.PHONY: test-link-irda-cores
+test-link-irda-cores: out/frond desktop
+	python3 tests/link-irda-cores.py

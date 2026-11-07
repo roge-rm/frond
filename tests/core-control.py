@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import shutil
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -105,6 +106,103 @@ class Client:
         shutil.rmtree(self.socket_dir, ignore_errors=True)
 
 
+def unix_modes(c):
+    """The unix: endpoint through the live mode commands and their state replies, for serial and infrared."""
+    folder = Path(tempfile.mkdtemp(prefix='frond-'))  # short, so the path fits a socket address
+    try:
+        for command, state, code in (('serial-mode', 'serial-state', 'serial'), ('irda-mode', 'irda-state', 'infrared')):
+            path = folder / f'{code}.sock'
+
+            def until(text):
+                end = time.monotonic() + 20
+                while text not in c.ok(state):
+                    assert time.monotonic() < end, f'{state}: no "{text}" in {c.ok(state)}'
+                    time.sleep(0.1)
+
+            def connect():
+                client = socket.socket(socket.AF_UNIX)
+                client.settimeout(10)
+                client.connect(str(path))
+                return client
+
+            c.fails(command, 'unix:', code='argument')
+            # The serial state reads "unix PATH waiting"; the infrared one "unix:PATH PATH waiting".
+            for text in (c.ok(command, f'unix:{path}', code=code), c.ok(state)):
+                assert text.startswith('unix') and f'{path} waiting' in text, text
+            assert any(name == code and text.startswith('unix') and f'{path} ' in text for name, text in c.events), c.events
+            assert stat.S_ISSOCK(os.lstat(path).st_mode)
+            client = connect()
+            until(f'{path} connected')
+            client.sendall(b'hello')
+            second = connect()
+            assert second.recv(1) == b'', 'a second client was kept'
+            second.close()
+            assert 'connected' in c.ok(state)
+            client.close()
+            until(f'{path} waiting')
+            client = connect()
+            until(f'{path} connected')
+            # tcp and back, then off: the socket file goes each time. The change comes right after
+            # bytes from the peer, which the UART may still hold.
+            client.sendall(b'hello')
+            assert '127.0.0.1:' in c.ok(command, 'tcp:0', code=code)
+            client.close()
+            assert not path.exists()
+            assert f'{path} ' in c.ok(command, f'unix:{path}', code=code)
+            assert c.ok(command, 'off', code=code) == 'off'
+            assert not path.exists()
+            # Refusals leave the link off and the path as it was.
+            os.chmod(folder, 0o755)
+            text = c.fails(command, f'unix:{path}', code=code)
+            assert '0700' in text, text
+            assert c.ok(state).startswith('off') and not path.exists()
+            os.chmod(folder, 0o700)
+            path.write_text('keep')
+            assert 'not a socket' in c.fails(command, f'unix:{path}', code=code)
+            assert path.read_text() == 'keep'
+            path.unlink()
+            assert 'too long' in c.fails(command, f'unix:{folder}/{"a" * 120}', code=code)
+            c.fails(command, 'unix:relative.sock', code=code)
+            c.fails(command, f'unix:{folder}/none/x.sock', code=code)
+            assert c.ok(state).startswith('off')
+            # A leftover socket file with no listener is replaced, and quitting removes it.
+            assert f'{path} ' in c.ok(command, f'unix:{path}', code=code)
+            assert c.ok(command, 'off', code=code) == 'off'
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def usb_unix(c, folder, path):
+    """--usb unix:PATH from the start, then usb-mode with unix: live (it shares the serial parser)."""
+    def until(text):
+        end = time.monotonic() + 20
+        while text not in c.ok('usb-state'):
+            assert time.monotonic() < end, f'usb-state: no "{text}" in {c.ok("usb-state")}'
+            time.sleep(0.1)
+
+    until(f'unix {path} waiting')
+    assert stat.S_ISSOCK(os.lstat(path).st_mode)
+    client = socket.socket(socket.AF_UNIX)
+    client.settimeout(10)
+    client.connect(str(path))
+    until(f'unix {path} connected')
+    client.close()
+    until(f'unix {path} waiting')
+    assert c.ok('usb-mode', 'off', code='usb') == 'off' and not path.exists()
+    moved = folder / 'usb-moved.sock'
+    assert c.ok('usb-mode', f'unix:{moved}', code='usb').startswith(f'unix {moved} waiting')
+    assert stat.S_ISSOCK(os.lstat(moved).st_mode)
+    assert '127.0.0.1:' in c.ok('usb-mode', 'tcp:0', code='usb') and not moved.exists()
+    c.fails('usb-mode', 'unix:', code='argument')
+    c.fails('usb-mode', 'unix:relative.sock', code='usb')
+    os.chmod(folder, 0o755)
+    assert '0700' in c.fails('usb-mode', f'unix:{path}', code='usb')
+    os.chmod(folder, 0o700)
+    assert c.ok('usb-state').startswith('off') and not path.exists()
+    assert c.ok('usb-mode', f'unix:{path}', code='usb').startswith(f'unix {path} waiting')
+    assert c.ok('usb-mode', 'off', code='usb') == 'off' and not path.exists()
+
+
 def common(c, root, device, unsupported, saved):
     """The checks both runners share, ending with a save to saved."""
     assert c.ok('device-state', code='device') == device
@@ -124,6 +222,7 @@ def common(c, root, device, unsupported, saved):
     assert c.ok('serial-mode', 'off', code='serial') == 'off'
     assert c.ok('irda-mode', 'pty', code='infrared').startswith('pty /dev/pts/')
     assert c.ok('irda-mode', 'off', code='infrared') == 'off'
+    unix_modes(c)
     c.ok('display', 'smooth=on')
     c.fails('display', 'smooth=maybe', code='argument')
     c.fails('display', 'jog=screen', code='argument')
@@ -214,9 +313,13 @@ def check_arm(core, session, root):
         alone.mkdir()
         lone = alone / 'tx.frond'
         shutil.copy2(saved, lone)
-    c = Client(core, [lone], root, 'arm-reload')
+    usb_folder = Path(tempfile.mkdtemp(prefix='frond-'))  # short, so the path fits a socket address
+    usb_path = usb_folder / 'usb.sock'
+    c = Client(core, [lone, '--usb', f'unix:{usb_path}'], root, 'arm-reload')
     try:
         assert c.ok('device-state') == device
+        if 'usb-mode' not in [command for command, _ in unsupported]:
+            usb_unix(c, usb_folder, usb_path)
         stamp = lone.stat().st_mtime_ns
         c.ok('save', lone, code='saved')
         assert lone.stat().st_mtime_ns != stamp, 'lone .frond not saved back'
@@ -224,6 +327,7 @@ def check_arm(core, session, root):
         c.quit()
     finally:
         c.close()
+        shutil.rmtree(usb_folder, ignore_errors=True)
     work_folder(core, session, work, root, device)
     return device
 

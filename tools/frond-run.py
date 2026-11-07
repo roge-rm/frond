@@ -121,8 +121,8 @@ def parser():
     p.add_argument('--command-timeout', type=positive, default=30, help='maximum time per socket command (default 30)')
     p.add_argument('--headless', action='store_true', help='use SDL dummy video/audio drivers')
     p.add_argument('--sound', action='store_true', help='enable sound (disabled by default)')
-    p.add_argument('--serial', metavar='off|pty|tcp:PORT', help='host serial endpoint for the core')
-    p.add_argument('--usb', metavar='off|pty|tcp:PORT', help='host endpoint for the USB HotSync port')
+    p.add_argument('--serial', metavar='off|pty|tcp:PORT|unix:PATH', help='host serial endpoint for the core')
+    p.add_argument('--usb', metavar='off|pty|tcp:PORT|unix:PATH', help='host endpoint for the USB HotSync port')
     return p
 
 
@@ -171,6 +171,7 @@ class Control:
         self.steps = steps
         self.buffer = b''
         self.serial = 0
+        self.events = []  # (name, text) of the card events seen, in order
 
     def line(self, deadline):
         while b'\n' not in self.buffer:
@@ -209,6 +210,9 @@ class Control:
                                   ['0', 'event', 'infrared'], ['0', 'event', 'bluetooth'], ['0', 'event', 'microphone'],
                                   ['0', 'event', 'sd-progress']):
                     continue  # asynchronous endpoint status or card progress, never a command reply
+                if fields[:3] == ['0', 'event', 'card'] and len(fields) == 4:
+                    self.events.append(('card', bytes.fromhex(fields[3]).decode()))
+                    continue  # a card put in at load went in
                 if len(fields) != 4 or fields[0] != str(self.serial) or fields[1] not in ('ok', 'error'):
                     raise RunError('protocol', f'Unexpected response: {fields!r}')
                 try:

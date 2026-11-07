@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """frond-68k peripheral and workflow checks on private IIIx ROMs: piezo tones, backlight, sleep
-and wake, serial HotSync with pilot-link over a PTY and TCP, and installing, launching, listing
+and wake, serial HotSync with pilot-link over a PTY, TCP and a Unix socket, the unix: endpoints, the ARM card swap flags refused, and installing, launching, listing
 and exporting databases. Each ROM boots to the launcher once; every check starts from that
 session. --only ppp also dials out over serial PPP to slirp and fetches example.com.
 
@@ -11,6 +11,8 @@ import argparse
 import os
 import re
 import signal
+import socket
+import stat
 import array
 import shutil
 import subprocess
@@ -25,7 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 import palm_boot  # noqa: E402
 
-CHECKS = ['tones', 'backlight', 'sleep', 'serial', 'databases', 'ppp']
+CHECKS = ['tones', 'backlight', 'sleep', 'serial', 'unix', 'card-flags', 'databases', 'ppp']
 # Reaches example.com over the internet, so it only runs when asked for with --only ppp.
 OPT_IN = {'ppp'}
 HELLO = Path.home() / 'Projects/palm/hello/Hello.prc'
@@ -224,7 +226,7 @@ def hotsync(m, port, *args, rate='57600'):
 
 
 class Endpoint:
-    """The serial port as pilot-link sees it: the PTY itself, or a PTY from socat for TCP."""
+    """The serial port as pilot-link sees it: the PTY itself, or a PTY from socat for TCP or a Unix socket."""
 
     def __init__(self, m, mode):
         self.socat = None
@@ -233,8 +235,9 @@ class Endpoint:
         if mode == 'pty':
             self.port = address
             return
-        self.port = str(m.root / 'tcp-tty')
-        self.socat = subprocess.Popen(['socat', f'pty,raw,echo=0,link={self.port}', f'tcp:{address}'],
+        self.port = str(m.root / f'{mode}-tty')
+        target = f'unix-connect:{address}' if mode == 'unix' else f'tcp:{address}'
+        self.socat = subprocess.Popen(['socat', f'pty,raw,echo=0,link={self.port}', target],
                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         end = time.monotonic() + 10
         while not Path(self.port).exists() and time.monotonic() < end:
@@ -274,7 +277,126 @@ def check_serial(rom, session, root, probes):
         if 'Hello' not in out:
             raise AssertionError('Hello not listed after reload')
         tcp = t.send('serial-state', 'serial:')
-    return f'{backed} databases backed up; {state.split(", ", 1)[1]}; tcp {tcp.split(", ", 1)[1]}'
+    folder = Path(tempfile.mkdtemp(prefix='fu-'))
+    try:
+        with Machine(m.root / 'synced.frond', root, 'serial-unix', '--serial', f'unix:{folder}/serial.sock') as u:
+            link = Endpoint(u, 'unix')
+            try:
+                out = hotsync(u, link.port, '-l', rate='115200')
+            finally:
+                link.close()
+            if 'Hello' not in out:
+                raise AssertionError('Hello not listed over a Unix socket')
+            unix = u.send('serial-state', 'serial:')
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+    return (f'{backed} databases backed up; {state.split(", ", 1)[1]}; tcp {tcp.split(", ", 1)[1]}; '
+            f'unix {unix.split(", ", 1)[1]}')
+
+
+def unix_client(path):
+    client = socket.socket(socket.AF_UNIX)
+    client.settimeout(10)
+    client.connect(path)
+    return client
+
+
+def check_unix(rom, session, root, probes):
+    """The unix: endpoint for --serial and --irda and the live mode commands: waiting, connected,
+    bytes from the host counted, one client, reconnect, off removes the socket file, and the
+    refusals (folder mode, a file in the way, a path too long or relative)."""
+    folder = Path(tempfile.mkdtemp(prefix='fu-'))
+    try:
+        serial_path, ir_path = f'{folder}/serial.sock', f'{folder}/ir.sock'
+        with Machine(session, root, 'unix', '--serial', f'unix:{serial_path}', '--irda', f'unix:{ir_path}') as m:
+            for name, path, state_command, prefix, mode_command in (
+                    ('serial', serial_path, 'serial-state', 'serial:', 'serial-mode'),
+                    ('irda', ir_path, 'irda-state', 'infrared:', 'irda-mode')):
+                def state():
+                    return m.send(state_command, prefix)
+
+                def wait(text):
+                    end = time.monotonic() + 10
+                    while time.monotonic() < end:
+                        if text in state():
+                            return
+                        time.sleep(0.1)
+                    raise AssertionError(f'{name}: no "{text}" in {state()}')
+
+                if f'unix {path} waiting' not in state():
+                    raise AssertionError(f'{name}: {state()}')
+                if not stat.S_ISSOCK(os.lstat(path).st_mode):
+                    raise AssertionError(f'{name}: no socket at {path}')
+                client = unix_client(path)
+                wait(f'unix {path} connected')
+                client.sendall(b'hello')
+                wait('rx 5')
+                second = unix_client(path)
+                if second.recv(1) != b'':
+                    raise AssertionError(f'{name}: a second client was kept')
+                second.close()
+                if 'connected' not in state():
+                    raise AssertionError(f'{name}: the first client lost the line')
+                client.close()
+                wait(f'unix {path} waiting')
+                client = unix_client(path)
+                wait(f'unix {path} connected')
+                client.sendall(b'again')
+                wait('rx 10')
+                client.close()
+                # Live changes: off removes the file, tcp and back to unix work, a new path moves it.
+                m.send(f'{mode_command} off', prefix)
+                if os.path.lexists(path) or state().split()[1:2] != ['off']:
+                    raise AssertionError(f'{name}: off left {path} or state {state()}')
+                if 'tcp 127.0.0.1:' not in m.send(f'{mode_command} tcp:0', prefix):
+                    raise AssertionError(f'{name}: tcp:0 after off')
+                moved = f'{folder}/{name}-moved.sock'
+                if f'unix {moved} waiting' not in m.send(f'{mode_command} unix:{moved}', prefix):
+                    raise AssertionError(f'{name}: unix: after tcp')
+                if not stat.S_ISSOCK(os.lstat(moved).st_mode):
+                    raise AssertionError(f'{name}: no socket at {moved}')
+                # Refusals leave the link off and the path as it was.
+                os.chmod(folder, 0o755)
+                reply = m.send(f'{mode_command} unix:{path}', prefix)
+                if 'error' not in reply or '0700' not in reply or os.path.lexists(path) or os.path.lexists(moved):
+                    raise AssertionError(f'{name}: bad folder mode: {reply.strip()}')
+                os.chmod(folder, 0o700)
+                Path(path).write_text('keep')
+                reply = m.send(f'{mode_command} unix:{path}', prefix)
+                if 'error' not in reply or 'not a socket' not in reply or Path(path).read_text() != 'keep':
+                    raise AssertionError(f'{name}: file in the way: {reply.strip()}')
+                Path(path).unlink()
+                reply = m.send(f'{mode_command} unix:{folder}/{"a" * 120}', prefix)
+                if 'error' not in reply or 'too long' not in reply:
+                    raise AssertionError(f'{name}: long path: {reply.strip()}')
+                if 'error' not in m.send(f'{mode_command} unix:relative.sock', prefix):
+                    raise AssertionError(f'{name}: relative path')
+                if 'error' not in m.send(f'{mode_command} unix:{folder}/none/x.sock', prefix):
+                    raise AssertionError(f'{name}: missing folder')
+                if 'error' not in m.send(f'{mode_command} unix:', prefix):
+                    raise AssertionError(f'{name}: empty path')
+                if f'unix {path} waiting' not in m.send(f'{mode_command} unix:{path}', prefix):
+                    raise AssertionError(f'{name}: a good path after the refusals')
+            m.core.send('quit')
+            m.core.process.wait(timeout=30)
+            left = sorted(p.name for p in folder.iterdir())
+            if left:
+                raise AssertionError(f'files left after quit: {left}')
+        return 'serial and infrared: connect, one client, reconnect, live modes, refusals, files removed on quit'
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def check_card_flags(rom, session, root, probes):
+    """The ARM core's card swap flags are refused with one line, as a IIIx has no card slot."""
+    for flags in (['--card-swap'], ['--card-identity', '0' * 64], ['--card-protected']):
+        result = subprocess.run([str(palm_boot.CORE_68K), str(session), *flags, '--run-for', '1'],
+                                capture_output=True, text=True, timeout=60)
+        lines = result.stderr.splitlines()
+        if result.returncode != 2 or result.stdout or len(lines) != 1 or \
+                f'{flags[0]} is not supported' not in lines[0]:
+            raise AssertionError(f'{flags[0]}: exit {result.returncode}, {result.stdout!r} {result.stderr!r}')
+    return '--card-swap, --card-identity and --card-protected refused'
 
 
 def check_ppp(rom, session, root, probes):
@@ -379,10 +501,10 @@ def build_probes(root, sdk):
     return out
 
 
-NEEDS = {'tones': ['tone68k'], 'sleep': ['alarm68k'], 'backlight': [], 'serial': [], 'databases': [],
+NEEDS = {'tones': ['tone68k'], 'sleep': ['alarm68k'], 'backlight': [], 'serial': [], 'unix': [], 'card-flags': [], 'databases': [],
          'ppp': ['ppp68k']}
 RUN = {'tones': check_tones, 'backlight': check_backlight, 'sleep': check_sleep, 'serial': check_serial,
-       'databases': check_databases, 'ppp': check_ppp}
+       'unix': check_unix, 'card-flags': check_card_flags, 'databases': check_databases, 'ppp': check_ppp}
 
 
 def main():
