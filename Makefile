@@ -424,6 +424,18 @@ test-device-controls: out/frond
 		build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) $(shell sdl2-config --libs) -lSDL2_image -o build/test-device-controls
 	./build/test-device-controls
 
+# Fingers on the buttons and pen, ARM (T|X, E2) and 68k (IIIx): several held at once, no private sessions.
+.PHONY: test-multi-touch
+test: test-multi-touch
+test-multi-touch: out/frond out/frond-68k
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/multi-touch-core-objects.rsp
+	$(CXX) -std=c++17 -O1 -g $(shell sdl2-config --cflags) \
+		-Ibuild/source/src/uarm/native -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common -Ibuild/source/src/cloudpilot/frond \
+		tests/multi-touch.cpp build/source/src/uarm/native/SdlEventHandler.cpp \
+		build/source/src/uarm/native/DeviceControls.cpp @build/multi-touch-core-objects.rsp \
+		build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) $(shell sdl2-config --libs) -o build/test-multi-touch
+	./build/test-multi-touch
+
 .PHONY: test-developer-run
 test-developer-run:
 	python3 tests/developer-run.py
