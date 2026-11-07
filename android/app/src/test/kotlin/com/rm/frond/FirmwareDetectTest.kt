@@ -78,6 +78,8 @@ class FirmwareDetectTest {
             assertNull(Firmware.inspect(wrong).variant)
             org.junit.Assert.assertNotNull(Firmware.check(Device.E2, wrong, null))
         }
+        val e3 = Device.byId("palm-e2-franken")!!
+        assertEquals("This is a Tungsten E2 NOR image. Choose Tungsten E2.", Firmware.check(e3, f, null))
         for (wrong in listOf(denvfs((6L shl 20) - 1), denvfs(at = 0x40000), nor(6L shl 20, 0x20000))) {
             assertNull(Firmware.inspect(wrong).variant)
             org.junit.Assert.assertNotNull(Firmware.check(Device.E2, wrong, null))
@@ -101,8 +103,9 @@ class FirmwareDetectTest {
         org.junit.Assert.assertNotNull(Firmware.check(e3, e3Nor(at = 0x40000), null))
         org.junit.Assert.assertNotNull(Firmware.check(e3, nor(e3.norSize), null))
         org.junit.Assert.assertNotNull(Firmware.check(e3, nor(e3.norSize, 0x20000), null))
-        org.junit.Assert.assertNotNull(Firmware.check(Device.E2, f, null))
-        org.junit.Assert.assertNotNull(Firmware.check(Device.TX, f, null))
+        assertEquals("This is a Tungsten E3 NOR image. Choose Tungsten E3.", Firmware.check(Device.E2, f, null))
+        assertEquals("This is a Tungsten E3 NOR image. Choose Tungsten E3.", Firmware.check(Device.TX, f, null))
+        assertEquals("This is a Tungsten E2 NOR image. Choose Tungsten E2.", Firmware.check(e3, nor(16L shl 20, 0x20000), null))
     }
 
     private fun card(file: RandomAccessFile, at: Long, length: Long) {
@@ -143,8 +146,8 @@ class FirmwareDetectTest {
     @Test fun zireChecks() {
         val nand = tmp.newFile().apply { writeBytes(ByteArray(16)) }
         assertEquals("The Zire 72 has no NAND. Leave the NAND image empty.", Firmware.check(Device.ZIRE72, zire(), nand))
-        assertEquals("This is a Zire 72 NOR image. Choose a Palm TX one.", Firmware.check(Device.TX, zire(), nand))
-        assertEquals("This is a Zire 72 NOR image. Choose a Tungsten E2 one.", Firmware.check(Device.E2, zire(), null))
+        assertEquals("This is a Zire 72 NOR image. Choose Zire 72.", Firmware.check(Device.TX, zire(), nand))
+        assertEquals("This is a Zire 72 NOR image. Choose Zire 72.", Firmware.check(Device.E2, zire(), null))
         assertEquals("Choose a 14,942,208-byte NOR image for the Zire 72.", Firmware.check(Device.ZIRE72, nor(8L shl 20, 0x20000), null))
         assertEquals("Choose a 14,942,208-byte NOR image for the Zire 72.", Firmware.check(Device.ZIRE72, nor(16L shl 20), null))
         // The big card runs to the end, so a wrong size is reported before the header.

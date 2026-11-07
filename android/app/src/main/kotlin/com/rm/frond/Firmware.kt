@@ -178,15 +178,15 @@ object Firmware {
         val header = try { header(nor) } catch (e: IOException) { return "Couldn't read the NOR image." }
         val info = try { inspect(nor, Device.entries + device) } catch (e: IOException) { return "Couldn't read the NOR image." }
         if (info.device != null && info.device != device && info.device != Device.E2 && info.device != Device.ZIRE72)
-            return "This is a ${info.device.label} NOR image. Choose a ${device.label} one."
+            return "This is a ${info.device.label} NOR image. Choose ${info.device.label}."
         val norSize = nor.length()
         val nandSize = nand?.length()
         when (device) {
             Device.TX -> {
                 if (header == Header.E2 || header == Header.E2_WRONG_PLACE)
-                    return "This is a Tungsten E2 NOR image. Choose a Palm TX one."
+                    return "This is a Tungsten E2 NOR image. Choose Tungsten E2."
                 if (header == Header.ZIRE72 || header == Header.ZIRE72_BAD_LAYOUT)
-                    return "This is a Zire 72 NOR image. Choose a Palm TX one."
+                    return "This is a Zire 72 NOR image. Choose Zire 72."
                 if (nand == null) return "Choose a NAND image for the Palm TX."
                 if (norSize == device.nandSize && nandSize == device.norSize)
                     return "The NOR and NAND images are the wrong way round."
@@ -197,8 +197,9 @@ object Firmware {
                 when (header) {
                     Header.E2 -> {}
                     Header.E2_WRONG_PLACE -> return "This E2 NOR image doesn't have its header at 0x20000."
-                    Header.ZIRE72, Header.ZIRE72_BAD_LAYOUT -> return "This is a Zire 72 NOR image. Choose a Tungsten E2 one."
-                    Header.OTHER -> return "This NOR image isn't for a Tungsten E2."
+                    Header.ZIRE72, Header.ZIRE72_BAD_LAYOUT -> return "This is a Zire 72 NOR image. Choose Zire 72."
+                    Header.OTHER -> return if (info.device != null) "This is a ${info.device.label} NOR image. Choose ${info.device.label}."
+                        else "This NOR image isn't for a Tungsten E2."
                     Header.NONE -> return if (norSize == Device.TX.norSize) "This looks like a Palm TX NOR image. Choose a Tungsten E2 one."
                         else "This NOR image has no Tungsten E2 header."
                 }
@@ -217,6 +218,7 @@ object Firmware {
                 if (nand != null) return "The Zire 72 has no NAND. Leave the NAND image empty."
             }
             else -> {
+                if (info.device == Device.E2) return "This is a Tungsten E2 NOR image. Choose Tungsten E2."
                 if (norSize != device.norSize) return "The ${device.label} NOR image must be ${mib(device.norSize)}."
                 if (device.detectKind == 0 && info.device != device) return "This NOR image has no ${device.label} header."
                 if (!info.validLayout) return "This ${device.label} NOR image has an invalid card layout."

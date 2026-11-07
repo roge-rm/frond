@@ -124,7 +124,10 @@ class FirmwareInputTest : public QObject {
         QCOMPARE(resolved, Device::e2);
         QVERIFY(frondFirmware::validateFiles(Device::e2, path, {}).isEmpty());
         QVERIFY(!frondFirmware::validateFiles(Device::tx, path, {}).isEmpty());
-        QVERIFY(!frondFirmware::validateFiles(frondFirmware::deviceFromId("palm-e2-franken"), path, {}).isEmpty());
+        const auto e3 = frondFirmware::deviceFromId("palm-e2-franken");
+        const auto chosenE3 = frondFirmware::validateFiles(e3, path, {});
+        QVERIFY(chosenE3.contains("This is a") && chosenE3.contains("Choose Tungsten E2"));
+        QVERIFY(!chosenE3.contains("must be"));
         QVERIFY(nand.resize(34603008));
         QVERIFY(frondFirmware::validateFiles(Device::e2, path, nandPath).isEmpty());
         QVERIFY(nand.resize(34603008 - 528));
@@ -181,7 +184,7 @@ class FirmwareInputTest : public QObject {
         QVERIFY(!frondFirmware::validateFiles(e3, norPath, nandPath).isEmpty());
         QVERIFY(!frondFirmware::validateFiles(e3, norPath, dir.filePath("missing")).isEmpty());
         QVERIFY(frondFirmware::validateFiles(Device::tx, norPath, {}).contains("Choose Tungsten E3"));
-        QVERIFY(!frondFirmware::validateFiles(Device::e2, norPath, {}).isEmpty());
+        QVERIFY(frondFirmware::validateFiles(Device::e2, norPath, {}).contains("Choose Tungsten E3"));
         e2Nor(nor, 16 << 20, 0x20000, 0x446d4752);
         QVERIFY(!frondFirmware::validateFiles(e3, norPath, {}).isEmpty());
         e2Nor(nor, 8 << 20, 0x40000, 0x446d4752);

@@ -132,6 +132,11 @@ inline QString validateFiles(Device chosen, const QString& norPath, const QStrin
                                         : QStringLiteral("This NOR image is not for a Zire 72.");
     if (device == Device::zire72 && !nandPath.isEmpty())
         return QStringLiteral("The Zire 72 has no NAND. Leave the NAND image empty.");
+    if (device == Device::e2 && header != Header::e2) {
+        const auto other = inspectNor(nor).profile;
+        if (other && other != &profile(device) && other->deviceType != deviceTypeZire72)
+            return QStringLiteral("This is a %1 NOR image. Choose %1.").arg(QString::fromUtf8(other->displayName));
+    }
     if (device == Device::e2 && header != Header::e2)
         return header == Header::e2WrongPlace ? QStringLiteral("This E2 NOR image doesn't have its header at 0x20000.")
                : header == Header::other ? QStringLiteral("This NOR image is not for a Tungsten E2.")

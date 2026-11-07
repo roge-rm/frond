@@ -548,8 +548,10 @@ The IIIx works as in VS Code, in Eclipse's Terminal view.
 | `FROND_LINK_SOCKET`, `FROND_LINK_PORT`, `FROND_LINK_DISCOVERY_PORT`, `FROND_LINK_DISCOVERY_BIND`, `FROND_LINK_BEACON_TO`, `FROND_LINK_IDLE_EXIT_MS`, `FROND_LINK_PAIR_CODE_MS`, `FROND_LINK_HUB` | Link hub hooks for tests: hub socket, TCP port (0 for an ephemeral one), UDP discovery port (0 turns it off), the address the beacon socket binds, host:port beacon targets (comma list) instead of broadcast, idle exit in ms (default 30000), the pairing code's life in ms (default and most 120000) and the hub program a window starts. |
 | `XDG_RUNTIME_DIR` | Holds `frond/` (mode 0700) with the link hub's socket and the cores' link sockets. |
 | `FROND_DESKTOP`, `FROND_IR_PROBE` | `frond-desktop` and the IR probe PRC for `tests/link-irda-cores.py`. Defaults `out/frond-desktop` and a probe built with pilrc and the SDK. |
-| `FROND_ARM_SESSIONS` | Folder of ARM machine folders, one per device name, for `tests/frond-arm-install.py`, `tests/host-call-wake.py`, `tests/card-swap-rom.py` and `tests/link-irda-cores.py` (palm-tx only). Default `build/smoke/machines`. |
+| `FROND_ARM_SESSIONS` | Folder of ARM machine folders, one per device name, for `tests/frond-arm-install.py`, `tests/host-call-wake.py`, `tests/patched-traps.py`, `tests/card-swap-rom.py` and `tests/link-irda-cores.py` (palm-tx only). Default `build/smoke/machines`. |
 | `FROND_REQUIRE_SESSIONS` | `1` makes those two tests fail instead of skipping when a session or the probes are missing. |
+| `FROND_REQUIRE_E3` | `1` makes `tests/smoke.py` and `tests/frond-arm-install.py` fail instead of skipping the Tungsten E3 when its firmware or session is missing. |
+| `FROND_REQUIRE_E2_DENVFS` | The same for the E2 de-NVFS image (`palm-e2-denvfs`), whose NOR comes from `FROND_TEST_E2_DENVFS_NOR`. |
 | `FROND_IIIX_ROM`, `FROND_IIIX_CORE` | IIIx ROM and `frond-68k` binary for the opt-in IIIx run in the desktop workflow test (`iiixRealRom`). |
 | `FROND_IIIX_SHOTS` | Folder that run saves pictures of the Palm window to (needs ImageMagick's `import` and a display). |
 | `Z72_SESSION`, `FROND_TEST_MIC_LEVEL` | Zire 72 session for `make test-z72-voice-memo` (skipped when empty), and the fake 1 kHz microphone level that test's core build reads. |
@@ -562,7 +564,7 @@ The IIIx works as in VS Code, in Eclipse's Terminal view.
 | `FROND_TEST_SHOTS` | Folder to save pictures of the home window and settings to. |
 | `FROND_TEST_E2_NOR`, `FROND_TEST_E2_NAND` | E2 firmware for the running-page picture. |
 | `FROND_TEST_QUALIFIED_NOR` | TX NOR image for the firmware import test. |
-| `FROND_TEST_E2_DENVFS_NOR` | Qualified 6 MiB E2 de-NVFS NOR for desktop and Android raw/session audio checks. Read only; changed-image checks use copies. |
+| `FROND_TEST_E2_DENVFS_NOR` | Qualified 6 MiB E2 de-NVFS NOR for desktop and Android raw/session audio checks, and for the `palm-e2-denvfs` entry in `tests/smoke.py`. Read only; changed-image checks use copies. |
 | `FROND_TEST_TG50_CORE`, `FROND_TEST_TG50_NOR`, `FROND_TEST_TG50_SESSION`, `FROND_TEST_TG50_HOST_SESSION`, `FROND_TEST_TG50_TONE_SESSION`, `FROND_TEST_TG50_SHOTS`, `FROND_TEST_TG50_BT_SOCKET` | TG50 core, firmware, sessions, picture folder and Bluetooth socket for the TG50 desktop tests. |
 | `BENCH_DUMP_RAM` | `1` makes `benchmark-replay` write guest RAM at the start and end. |
 | `BIKE_SESSION`, `FRONDBENCH_SESSION` | Session files for `make speed-check`. No default; a workload without one is skipped. |
@@ -599,6 +601,7 @@ All in `tools/`. Most take `--help`.
 | `check-reconstruction.py` | Rebuilds the core twice independently and compares them. |
 | `check-docs.py` | Checks this file against the sources (`make check-docs`). |
 | `generate-device-data.py` | Writes the device profile data for Python and Android. `--check` fails if it's stale. |
+| `firmware_variants.py` | Helper module: finds the firmware variant (such as the E2 de-NVFS image) of a NOR file for `frond-run.py`. |
 | `device-profiles.cpp`, `device-profiles.json` | Dumps and holds the device profiles. |
 | `dynarmic-source.py` | Exports the pinned Dynarmic source and applies its patches. |
 | `package-deb.py`, `package_policy.py`, `check-package.py` | Build a Debian package from a fixed file list, and check one. |
@@ -660,7 +663,7 @@ Tests in `make test`, by area:
 | --- | --- |
 | CPU and engines | `test-cpu`, `test-arm-conditions`, `test-instruction-cache`, `test-mmu-fast-path`, `test-mem-region-bounds`, `test-xscale-prefetch`, `test-jit-overshoot`, `test-jit-differential`, `test-jit-compile-thread` |
 | SoC and timing | `test-pxa-timer`, `test-pxa-power`, `test-pxa255-udc`, `test-pxa255-udc-clock`, `test-pxa255-udc-dma`, `test-pxa255-udc-dma-state`, `test-pxa270-udc`, `test-scheduler`, `test-microwire64x16` |
-| Device state and sessions | `test-tx-state`, `test-e2-state`, `test-tg50-state`, `test-device-profiles`, `test-device-controls`, `test-e2-family-peripherals`, `test-session-v7`, `test-frond-68k`, `test-checkpoint-input`, `test-export-checkpoint`, `test-replay-snapshot`, `test-lifecycle` |
+| Device state and sessions | `test-tx-state`, `test-e2-state`, `test-tg50-state`, `test-device-profiles`, `test-device-controls`, `test-e2-family-peripherals`, `test-multi-touch`, `test-session-v7`, `test-frond-68k`, `test-checkpoint-input`, `test-export-checkpoint`, `test-replay-snapshot`, `test-lifecycle` |
 | Palm databases | `test-native-database`, `test-native-primitives`, `test-native-governor`, `test-db-list`, `test-db-backup` |
 | Storage | `test-sd-image`, `test-sd`, `test-card-backing`, `test-memory-stick-controller`, `test-memory-stick-media`, `test-memory-stick-pro`, `test-card-tool`, `test-card-swap` (its firmware part on whichever smoke sessions are in `FROND_ARM_SESSIONS`) |
 | Audio | `test-sdl-audio`, `test-fast-audio`, `test-earlier-audio`, `test-audio-results`, `test-pxa-i2s-audio`, `test-tg50-pwm-audio`, `test-tg50-microphone-adc`, `test-tg50-microphone-dma`, `test-tg50-microphone-state`, `test-z72-microphone`, `test-z72-voice-memo`, `test-tg50-call-budget`, `test-tg50-pace`, `test-tg50-audio-replay`, `test-tg50-serial-board`, `test-tg50-serial-configuration` |
@@ -682,6 +685,7 @@ Not in `make test`. The first group builds a program and runs it with a private 
 | `test-frond-arm-install` | T\|X, E2, Zire 72 and TG50 smoke sessions (`FROND_ARM_SESSIONS`, else `build/smoke/machines`), `m68k-palmos-gcc` and the 3.5 SDK. The same installs on each ARM device, and host calls while the Palm sleeps. |
 | `test-link-irda-cores` | T\|X smoke session (`FROND_ARM_SESSIONS`, else `build/smoke/machines`) and the IR probe (`FROND_IR_PROBE`, else pilrc and the SDK). Two T\|X cores beam to each other over two link hubs on loopback, also after one sleeps and wakes. |
 | `test-host-call-wake` | T\|X and Zire 72 smoke sessions as above. A GDB breakpoint on EvtWakeup: `guest-ready` wakes nothing, a host call wakes at most once. |
+| `test-patched-traps` | T\|X smoke session as above. Hooks in the native trap table like UDMH's, written over the GDB stub: the database list, an install, an export and a launch still work, and the sync probe still gets its notify. |
 | `test-core-control` | ARM smoke session (`FROND_ARM_SESSION`) and IIIx ROM. The control socket on both runners. |
 | `test-tg50-usb-hotsync` | TG50 session (`make smoke-sessions`) and pilot-link. |
 | `test-tg50-audio-lifecycle`, `test-tg50-audio-queue` | Nothing. TG50 audio unit tests. |

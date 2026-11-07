@@ -11,7 +11,7 @@ the launcher loads with the launcher listing the app.
 
 Sessions: --session DEVICE=PATH, else FROND_ARM_SESSIONS/DEVICE (a folder of machine folders), else
 build/smoke/machines/DEVICE; a device with none is skipped, printing SKIPPED, and with
-FROND_REQUIRE_SESSIONS=1 any skip fails the run. --device picks devices. The sync probe
+FROND_REQUIRE_SESSIONS=1 any skip fails the run, except the Tungsten E3 unless FROND_REQUIRE_E3=1 and the E2 de-NVFS unless FROND_REQUIRE_E2_DENVFS=1. --device picks devices. The sync probe
 logs each notify and launch in FrondSyncLog; the busy probe is the other app. Needs m68k-palmos-gcc
 and the Palm OS 3.5 SDK (--sdk) for them, else it's skipped. --evidence keeps the logs and frames."""
 import argparse
@@ -32,7 +32,9 @@ PROBE = ROOT / 'build/sync68k-probe/FrondSync68k.prc'
 OTHER = ROOT / 'build/busy68k-probe/FrondBusy68k.prc'
 # The console's install replies; the command's echo holds none of them.
 REPLIES = ('installation', 'database corrupt', 'out of memory', 'db cannot', 'unable to', 'unknown error')
-DEVICES = tuple(name for name in palm_boot.FRONTEND_DEVICES if name in palm_boot.DEVICES)
+# Session id: (device, firmware variant). The E2 de-NVFS image has its own session and never sleeps.
+VARIANTS = {'palm-e2-denvfs': ('palm-e2', 'e2-denvfs')}
+DEVICES = tuple(name for name in palm_boot.FRONTEND_DEVICES if name in palm_boot.DEVICES) + tuple(VARIANTS)
 
 
 def build_probes(sdk):
@@ -59,7 +61,8 @@ class Device:
 
     def __init__(self, name):
         self.name = name
-        self.profile = palm_boot.DEVICES[name]
+        self.core, self.variant = VARIANTS.get(name, (name, None))
+        self.profile = palm_boot.DEVICES[self.core]
 
     def body(self, rows):
         """A frame without the title bar's clock, and on the T|X its status bar's clock too."""
@@ -87,7 +90,7 @@ class Device:
             time.sleep(2)
             core.tap(root, 140, 55)
         else:
-            core.wait_frame(root / 'boot.png', palm_boot.launcher_check(self.name), 60)
+            core.wait_frame(root / 'boot.png', palm_boot.launcher_check(self.core, self.variant), 60)
         return self.still(core, root / 'before.png')
 
     def reopen(self, core, root):
@@ -182,7 +185,7 @@ def saved_after_install(device, session, work, root, after):
     install's safe point; the relaunch is already handed to Palm OS by then."""
     saved = work / 'saved' / 'saved.frond'
     saved.parent.mkdir()
-    core = palm_boot.Core([session, '--device', device.name], root / 'save-log.txt')
+    core = palm_boot.Core([session, '--device', device.core], root / 'save-log.txt')
     try:
         device.ready(core, root)
         mark = len(core.lines)
@@ -191,7 +194,7 @@ def saved_after_install(device, session, work, root, after):
             raise AssertionError('install before the save: ' + ''.join(core.lines[mark:]).strip())
     finally:
         core.close()
-    core = palm_boot.Core([saved, '--device', device.name], root / 'saved-log.txt')
+    core = palm_boot.Core([saved, '--device', device.core], root / 'saved-log.txt')
     try:
         loaded = settle(core, root / 'saved-loaded.png', lambda rows: device.body(rows) == device.body(after), 40)
         if device.body(loaded) != device.body(after):
@@ -239,7 +242,7 @@ def asleep(core, device, root):
 def check(device, session, work, root):
     session = copy_session(session, work)
     pdb = data_pdb(root / 'FrondSyncData.pdb')
-    core = palm_boot.Core([session, '--device', device.name], root / 'log.txt')
+    core = palm_boot.Core([session, '--device', device.core], root / 'log.txt')
     try:
         # A new app at the launcher: listed at once, as the launcher reopened by hand.
         before = device.ready(core, root)
@@ -321,7 +324,9 @@ def check(device, session, work, root):
                                  ''.join(core.lines[mark:]).strip())
         if core.process.poll() is not None:
             raise AssertionError('the core quit')
-        if 'power' in device.profile['buttons'].split('|'):
+        if device.variant:
+            print(f'frond-arm install: {device.name} asleep step SKIPPED, this firmware does not sleep', flush=True)
+        elif 'power' in device.profile['buttons'].split('|'):
             asleep(core, device, root)
         if any('sync notify or launcher relaunch failed' in line for line in core.lines):
             raise AssertionError('a sync notify or relaunch failed')
@@ -352,6 +357,8 @@ def main():
     args = parser.parse_args()
     found = sessions(args)
     required = os.environ.get('FROND_REQUIRE_SESSIONS') == '1'
+    require_e3 = os.environ.get('FROND_REQUIRE_E3') == '1'
+    require_denvfs = os.environ.get('FROND_REQUIRE_E2_DENVFS') == '1'
     skips = []
 
     def skipped(reason):
@@ -365,8 +372,11 @@ def main():
     failed = 0
     for name in args.device or DEVICES:
         if name not in found:
-            print(f'frond-arm install: {name} SKIPPED, no session')
-            skips.append(name)
+            optional = (name == 'palm-e2-franken' and not require_e3) or (name == 'palm-e2-denvfs' and not require_denvfs)
+            print(f'frond-arm install: {name} SKIPPED, no session' +
+                  (f' (set FROND_REQUIRE_{"E3" if name == "palm-e2-franken" else "E2_DENVFS"}=1 to require it)' if optional else ''))
+            if not optional:
+                skips.append(name)
             continue
         with tempfile.TemporaryDirectory(prefix='frond-arm-install-') as work:
             work = Path(work)
