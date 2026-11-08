@@ -64,9 +64,10 @@ void same(const Machine& a, const Machine& b) {
 void software() {
     for (auto model : {ArmCpuModel::arm920t, ArmCpuModel::armv5te}) {
         Machine exact(false, true, model), fast(true, true, model);
-        for (uint32_t immediate : {0u, 1u, 3u, 0x37u, 0xacu, 0xffu})
+        for (uint32_t immediate : {0u, 1u, 3u, 0x37u, 0xabu, 0xacu, 0xffu, 0x123456u})
             for (bool thumb : {false, true}) for (bool high : {false, true})
             for (unsigned mode : {0x10u, 0x11u, 0x12u, 0x13u, 0x17u, 0x1bu, 0x1fu}) for (unsigned masks : {0u, 0x40u, 0x80u, 0xc0u}) {
+                if (thumb && immediate > 0xff) continue;
                 const uint32_t old = 0xb0000000 | (model == ArmCpuModel::armv5te ? 0x08000000 : 0) |
                                      mode | masks | (thumb ? 0x20 : 0);
                 const uint32_t next = code + (thumb ? 2 : 4);
@@ -98,6 +99,68 @@ void software() {
         exact.step(); fast.step(); same(exact, fast);
         assert(cpuExceptionSequence(exact.cpu) == 0 && exact.psr() == 0x20000053 &&
                cpuGetRegisters(exact.cpu)[15] == code + 4);
+    }
+}
+void guestOperations() {
+    Machine exact(false), fast(true);
+    for (bool thumb : {false, true}) for (bool high : {false, true})
+        for (uint32_t operation : {3u, 4u, 0x132u}) {
+            for (Machine* m : {&exact, &fast}) {
+                m->reset(thumb ? 0xf0 : 0xd0, high);
+                cpuSetReg(m->cpu, 0, operation);
+                cpuSetReg(m->cpu, 1, 0x40000); // Host output must never read this address.
+                if (thumb) m->half(code, 0xdfab);
+                else m->word(code, 0xef123456);
+                m->word(handler, 0xe3a05009);
+                m->word(handler + 4, 0xe1b0f00e);
+            }
+            exact.step(); fast.step(); same(exact, fast);
+            assert(cpuExceptionSequence(exact.cpu) == 1 && exact.spsr() == (thumb ? 0xf0u : 0xd0u));
+            assert(cpuGetRegisters(exact.cpu)[15] == (high ? 0xffff0008u : 8u));
+            for (unsigned i = 0; i < 3; ++i) { exact.step(); fast.step(); same(exact, fast); }
+            assert(exact.psr() == (thumb ? 0xf0u : 0xd0u));
+            assert(cpuGetRegisters(exact.cpu)[15] == code + (thumb ? 2 : 4));
+            assert(cpuGetRegisters(exact.cpu)[0] == operation && cpuGetRegisters(exact.cpu)[5] == 9);
+        }
+}
+void legacyOperations() {
+    Machine exact(false, true, ArmCpuModel::armv5te), fast(true, true, ArmCpuModel::armv5te);
+    for (bool thumb : {false, true}) for (uint32_t operation : {3u, 4u}) {
+        for (Machine* m : {&exact, &fast}) {
+            m->reset(thumb ? 0xf3 : 0xd3);
+            cpuSetReg(m->cpu, 0, operation); cpuSetReg(m->cpu, 1, 0x6000);
+            // A zero byte keeps the existing host output path silent.
+            if (thumb) m->half(code, 0xdfab);
+            else m->word(code, 0xef123456);
+        }
+        exact.step(); fast.step(); same(exact, fast);
+        assert(!cpuExceptionSequence(exact.cpu) && !exact.spsr());
+        assert(exact.psr() == (thumb ? 0xf3u : 0xd3u));
+        assert(cpuGetRegisters(exact.cpu)[15] == code + (thumb ? 2 : 4));
+    }
+}
+void conditionalOperations() {
+    Machine exact(false), fast(true);
+    for (uint32_t flags = 0; flags < 16; ++flags) for (unsigned cond = 0; cond < 15; ++cond) {
+        const bool n = flags & 8, z = flags & 4, c = flags & 2, v = flags & 1;
+        const bool passed[] = {z, !z, c, !c, n, !n, v, !v, c && !z, !c || z,
+                               n == v, n != v, !z && n == v, z || n != v, true};
+        const uint32_t old = (flags << 28) | 0x50;
+        for (Machine* m : {&exact, &fast}) {
+            m->reset(old);
+            cpuSetReg(m->cpu, 0, 4); cpuSetReg(m->cpu, 1, 0x40000);
+            m->word(code, (cond << 28) | 0x0f123456);
+        }
+        exact.step(); fast.step(); same(exact, fast);
+        assert(cpuExceptionSequence(exact.cpu) == uint64_t(passed[cond]));
+        assert(exact.psr() == (passed[cond] ? ((old & ~0xbfu) | 0x93) : old));
+        assert(exact.spsr() == (passed[cond] ? old : 0));
+        assert(cpuGetRegisters(exact.cpu)[15] == (passed[cond] ? 8u : code + 4));
+        if (passed[cond]) {
+            exact.step(); fast.step(); same(exact, fast);
+            exact.step(); fast.step(); same(exact, fast);
+            assert(exact.psr() == old && cpuGetRegisters(exact.cpu)[15] == code + 4);
+        }
     }
 }
 void otherExceptions() {
@@ -135,11 +198,11 @@ void otherExceptions() {
 }
 void normalBlocks() {
     Machine exact(false), fast(true, false);
-    for (bool thumb : {false, true}) {
+    for (bool thumb : {false, true}) for (bool hostImmediate : {false, true}) {
         for (Machine* m : {&exact, &fast}) {
             m->reset(thumb ? 0x300000f3 : 0x300000d3);
-            if (thumb) { m->half(code, 0xdf03); m->half(code + 2, 0x2407); m->half(code + 4, 0xe7fe); }
-            else { m->word(code, 0xef000003); m->word(code + 4, 0xe3a04007); m->word(code + 8, 0xeafffffe); }
+            if (thumb) { m->half(code, hostImmediate ? 0xdfab : 0xdf03); m->half(code + 2, 0x2407); m->half(code + 4, 0xe7fe); }
+            else { m->word(code, hostImmediate ? 0xef123456 : 0xef000003); m->word(code + 4, 0xe3a04007); m->word(code + 8, 0xeafffffe); }
             m->word(handler, 0xe3a05009); m->word(handler + 4, 0xe1b0f00e);
         }
         uint64_t blocks = 0, instructions = 0;
@@ -215,8 +278,8 @@ Imx1ProbeResult probe(const std::vector<uint32_t>& words, bool fast) {
 }
 void probeGuards() {
     for (bool fast : {false, true}) {
-        for (uint32_t accepted : {0u, 1u, 3u, 0x37u, 0xabu, 0xacu, 0xffu, 0x123455u, 0xffffffu}) for (bool thumb : {false, true}) {
-            if (thumb && (accepted == 0xab || accepted > 0xff)) continue;
+        for (uint32_t accepted : {0u, 1u, 3u, 0x37u, 0xabu, 0xacu, 0xffu, 0x123455u, 0x123456u, 0xffffffu}) for (bool thumb : {false, true}) {
+            if (thumb && accepted > 0xff) continue;
             std::vector<uint32_t> p(0x100 / 4, 0xe7f000f0);
             p[0] = 0xea00000e; p[2] = 0xe59ff018; p[0x28 / 4] = 0x80;
             p[0x80 / 4] = 0xe1b0f00e;
@@ -229,14 +292,6 @@ void probeGuards() {
             assert(r.registers[15] == (thumb ? 0x64u : 0x48u));
             assert(r.registers[14] == (thumb ? 0x62u : 0x44u));
             assert(r.cpsr == (thumb ? 0xf3u : 0xd3u) && r.spsr == r.cpsr && !r.busAccesses);
-            // The host semihosting values stop before entry.
-            for (uint32_t immediate : {thumb ? 0xabu : 0x123456u}) {
-                if (thumb) p[0x60 / 4] = 0x2407df00 | immediate;
-                else p[0x40 / 4] = 0xef000000 | immediate;
-                const auto rejected = probe(p, fast);
-                assert(rejected.stop == Imx1ProbeStop::unsupportedInstruction && !rejected.busAccesses);
-                assert(rejected.registers[15] == (thumb ? 0x60u : 0x40u) && !rejected.spsr);
-            }
         }
         for (uint32_t mode : {0x10u, 0x13u, 0x1fu})
             for (uint32_t spsr : {0u, 0xd3u, 0xf3u, 0xd4u, 0x10000d3u})
@@ -259,6 +314,9 @@ void probeGuards() {
             const auto r = probe({instruction}, fast);
             assert(r.stop == Imx1ProbeStop::unsupportedInstruction && r.trace.step == 0 && !r.busAccesses);
         }
+        const auto reserved = probe({0xff123456}, fast);
+        assert(reserved.stop == Imx1ProbeStop::unsupportedInstruction && reserved.trace.step == 0 &&
+               !reserved.busAccesses && !reserved.spsr && reserved.registers[15] == 0);
         for (uint32_t instruction : {0x0f000000u, 0x0f123456u}) {
             const auto r = probe({instruction, 0xe3a04007, 0xe7f000f0}, fast);
             assert(r.stop == Imx1ProbeStop::unsupportedInstruction && r.trace.step == 2 &&
@@ -269,6 +327,6 @@ void probeGuards() {
 } // namespace
 int main() {
     unsetenv("FROND_JIT"); cpuSetJitSync(true); setenv("FROND_JIT_HOT", "1", 1);
-    software(); otherExceptions(); normalBlocks(); fetchContinuation(); probeGuards();
+    software(); guestOperations(); legacyOperations(); conditionalOperations(); otherExceptions(); normalBlocks(); fetchContinuation(); probeGuards();
     std::puts("PASS: ARM920T and ARMv5 SWI entry, F mask, exception banks and return, Exact/Fast parity");
 }
