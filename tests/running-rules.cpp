@@ -162,6 +162,23 @@ class RunningRulesTest : public QObject {
         QCOMPARE(snapshotReplay("/a b/c\"d.png"), QString("0 snapshot \"/a b/c\\\"d.png\"\n"));
         QCOMPARE(powerReplay(), QString("0 key-down power\n80 key-up power\n"));
     }
+    void databaseListParsing() {
+        auto hex = [](const char* text) { return QString::fromLatin1(QByteArray(text).toHex()); };
+        const auto text = hex("appl") + " " + hex("memo") + " 00000001 " + hex("Memos") + "\n" +
+                          hex("DATA") + " " + hex("memo") + " 00000000 " + hex("Memo Data") + "\n" +
+                          hex("appl") + " " + hex("abcd") + " 00000001 " + hex("alpha") + "\n" +
+                          "bad line\n" + hex("appl") + " " + hex("zzzz") + " 0001 " + hex("odd") + "x\n";
+        const auto all = parseDatabases(text);
+        QCOMPARE(all.size(), size_t(3));
+        QCOMPARE(all[0].name, QString("alpha"));
+        QCOMPARE(all[1].name, QString("Memo Data"));
+        const auto apps = applications(all);
+        QCOMPARE(apps.size(), size_t(2));
+        const auto data = dataOf(all, apps[1]);
+        QCOMPARE(data.size(), size_t(1));
+        QCOMPARE(data[0].name, QString("Memo Data"));
+        QVERIFY(dataOf(all, apps[0]).empty());
+    }
 };
 QTEST_APPLESS_MAIN(RunningRulesTest)
 #include "running-rules.moc"

@@ -21,6 +21,8 @@ class RunningBar : public QToolBar {
     // Updates every row and button; `networks` are the modes (mode, label) the core offers.
     void apply(const runningRules::Traits& traits, const runningRules::State& state, runningRules::CardIcon card,
                bool soundOn, const QList<QPair<QString, QString>>& networks);
+    // The panel open at the right of the Palm (0 Applications, 1 Card, 2 Display, 3 Connections), or -1.
+    void setOpenPanel(int index);
     bool barShown() const { return shown; }
     void setBarShown(bool on);
  signals:

@@ -1,4 +1,8 @@
 #include "RunningBar.h"
+#include "Icons.h"
+#include <QKeyEvent>
+#include <QPainter>
+#include <QWidgetAction>
 #include <QActionGroup>
 #include <QLabel>
 #include <QMenu>
@@ -7,13 +11,65 @@
 
 using runningRules::Id;
 
+namespace {
+// A menu row in red for the destructive Hard reset. A plain QAction can't be coloured.
+class RedItem : public QWidget {
+ public:
+    RedItem(QAction* action, QWidget* parent) : QWidget(parent), act(action) {
+        setFocusPolicy(Qt::StrongFocus);
+        setMouseTracking(true);
+        setAttribute(Qt::WA_Hover);
+        setEnabled(action->isEnabled());
+    }
+    QSize sizeHint() const override {
+        return {fontMetrics().horizontalAdvance(act->text()) + 52, fontMetrics().height() + 10};
+    }
+ protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        const bool lit = isEnabled() && (underMouse() || hasFocus());
+        if (lit) p.fillRect(rect(), palette().color(QPalette::Highlight));
+        QColor colour(205, 40, 40);
+        if (!isEnabled()) colour = palette().color(QPalette::Disabled, QPalette::Text);
+        else if (lit) colour = Qt::white;
+        p.setPen(colour);
+        p.drawText(rect().adjusted(26, 0, -8, 0), Qt::AlignVCenter | Qt::AlignLeft, act->text());
+    }
+    void mouseReleaseEvent(QMouseEvent* e) override {
+        if (e->button() == Qt::LeftButton && rect().contains(e->position().toPoint())) choose();
+    }
+    void keyPressEvent(QKeyEvent* e) override {
+        if (e->key() == Qt::Key_Return || e->key() == Qt::Key_Enter || e->key() == Qt::Key_Space) choose();
+        else QWidget::keyPressEvent(e);
+    }
+    void actionEvent(QActionEvent* e) override {
+        if (e->type() == QEvent::ActionChanged) { setEnabled(act->isEnabled()); updateGeometry(); update(); }
+    }
+    void enterEvent(QEnterEvent*) override { update(); }
+    void leaveEvent(QEvent*) override { update(); }
+ private:
+    void choose() {
+        if (!isEnabled()) return;
+        if (auto* menu = qobject_cast<QMenu*>(parentWidget())) menu->close();
+        act->trigger();
+    }
+    QAction* act;
+};
+class RedAction : public QWidgetAction {
+ public:
+    using QWidgetAction::QWidgetAction;
+ protected:
+    QWidget* createWidget(QWidget* parent) override { return new RedItem(this, parent); }
+};
+}  // namespace
+
 RunningBar::RunningBar(QWidget* parent) : QToolBar(parent) {
     setObjectName("runningBar");
     setMovable(false);
     setFloatable(false);
     setContextMenuPolicy(Qt::PreventContextMenu);
-    setToolButtonStyle(Qt::ToolButtonTextOnly);
-    setIconSize({16, 16});
+    setToolButtonStyle(Qt::ToolButtonIconOnly);
+    setIconSize({20, 20});
     setFixedHeight(36);
     machineMenu = new QMenu(tr("&Machine"), this);
     machineMenu->setObjectName("machineMenu");
@@ -34,7 +90,11 @@ RunningBar::RunningBar(QWidget* parent) : QToolBar(parent) {
             networkMenu = machineMenu->addMenu(row.label);
             action = networkMenu->menuAction();
         } else {
-            action = machineMenu->addAction(row.label);
+            if (row.id == Id::HardReset) {
+                action = new RedAction(machineMenu);
+                action->setText(row.label);
+                machineMenu->addAction(action);
+            } else action = machineMenu->addAction(row.label);
             const auto id = row.id;
             connect(action, &QAction::triggered, this, [this, id] { emit chosen(id); });
         }
@@ -43,14 +103,14 @@ RunningBar::RunningBar(QWidget* parent) : QToolBar(parent) {
     }
     for (auto id : {Id::Hold, Id::Keyboard, Id::Microphone}) actions[id]->setCheckable(true);
 
-    auto button = [this](const QString& text, const QString& name, const QString& tip, Button which) {
-        auto* action = addAction(text);
+    auto button = [this](const QString& icon, const QString& name, const QString& tip, Button which) {
+        auto* action = addAction(frondIcons::icon(icon), tip);
         action->setObjectName(name);
         action->setToolTip(tip);
         connect(action, &QAction::triggered, this, [this, which] { emit pressed(which); });
         return action;
     };
-    stopAction = button(QString::fromUtf8("←"), "barStop", tr("Save and Stop"), Button::Stop);
+    stopAction = button("back", "barStop", tr("Save and Stop"), Button::Stop);
     nameLabel = new QLabel(this);
     nameLabel->setObjectName("barName");
     auto font = nameLabel->font(); font.setBold(true); nameLabel->setFont(font);
@@ -61,23 +121,28 @@ RunningBar::RunningBar(QWidget* parent) : QToolBar(parent) {
     statusLabel->setObjectName("barStatus");
     for (auto* l : {nameLabel, subtitleLabel, statusLabel}) l->setContentsMargins(8, 0, 4, 0);
     addWidget(nameLabel); addWidget(subtitleLabel); addWidget(statusLabel);
-    forceAction = button(tr("Force Stop…"), "barForceStop", tr("Force Stop…"), Button::ForceStop);
+    forceAction = button({}, "barForceStop", tr("Force Stop…"), Button::ForceStop);
+    forceAction->setIcon(QIcon());
+    forceAction->setText(tr("Force Stop…"));
     forceAction->setVisible(false);
+    // The one text button; the toolbar shows it as text.
+    static_cast<QToolButton*>(widgetForAction(forceAction))->setToolButtonStyle(Qt::ToolButtonTextOnly);
     auto* spacer = new QWidget(this);
     spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     addWidget(spacer);
-    keyboardAction = addAction(QString::fromUtf8("⌨"));
+    keyboardAction = addAction(frondIcons::icon("keyboard"), tr("Infrared keyboard attached"));
     keyboardAction->setObjectName("barKeyboard");
     keyboardAction->setToolTip(tr("Infrared keyboard attached"));
     keyboardAction->setVisible(false);
-    applicationsAction = button(tr("Applications"), "barApplications", tr("Applications"), Button::Applications);
-    cardAction = button(tr("Card"), "barCard", tr("Card"), Button::Card);
-    soundAction = button(tr("Sound"), "barSound", tr("Sound"), Button::Sound);
+    applicationsAction = button("apps", "barApplications", tr("Applications (Ctrl+1)"), Button::Applications);
+    cardAction = button("card-out", "barCard", tr("Card (Ctrl+2)"), Button::Card);
+    soundAction = button("sound-on", "barSound", tr("Sound"), Button::Sound);
     soundAction->setCheckable(true);
-    powerAction = button(tr("Power"), "barPower", tr("Power"), Button::Power);
+    powerAction = button("power", "barPower", tr("Power"), Button::Power);
     auto* more = new QToolButton(this);
     more->setObjectName("barMore");
-    more->setText(QString::fromUtf8("⋮"));
+    more->setIcon(frondIcons::icon("more"));
+    more->setIconSize({20, 20});
     more->setToolTip(tr("Machine"));
     more->setPopupMode(QToolButton::InstantPopup);
     more->setMenu(machineMenu);
@@ -95,10 +160,18 @@ void RunningBar::setMachine(const QString& name, const QString& subtitle) {
 }
 
 void RunningBar::say(const QString& text, int ms) {
-    statusLabel->setText(text);
+    // The bar has no room for a long message; the tooltip has all of it.
+    statusLabel->setText(statusLabel->fontMetrics().elidedText(text, Qt::ElideRight, 170));
     statusLabel->setToolTip(text);
     if (ms > 0 && !text.isEmpty()) statusTimer->start(ms);
     else statusTimer->stop();
+}
+
+void RunningBar::setOpenPanel(int index) {
+    applicationsAction->setCheckable(true);
+    cardAction->setCheckable(true);
+    applicationsAction->setChecked(index == 0);
+    cardAction->setChecked(index == 1);
 }
 
 void RunningBar::setForceStop(bool on) { forceAction->setVisible(on); }
@@ -147,15 +220,17 @@ void RunningBar::apply(const runningRules::Traits& traits, const runningRules::S
     const auto buttons = runningRules::buttons(traits, state);
     cardAction->setVisible(buttons.card);
     cardAction->setEnabled(buttons.cardEnabled);
-    static const QString glyph[] = {QString(), QString::fromUtf8("▫"), QString::fromUtf8("▣"), QString::fromUtf8("▢")};
-    static const char* tips[] = {"", "No card", "Card inserted", "Card ejected"};
-    cardAction->setText(tr("Card") + " " + glyph[int(card)]);
-    cardAction->setToolTip(tr(tips[int(card)]));
+    static const char* icons[] = {"card-none", "card-out", "card-in", "card-ejected"};
+    static const char* tips[] = {"No card slot", "No card", "Card inserted", "Card ejected"};
+    cardAction->setIcon(frondIcons::icon(icons[int(card)]));
+    cardAction->setToolTip(tr("Card: %1 (Ctrl+2)").arg(tr(tips[int(card)])));
     powerAction->setVisible(buttons.power);
     powerAction->setEnabled(buttons.powerEnabled);
     keyboardAction->setVisible(buttons.keyboard);
     soundAction->setEnabled(buttons.soundEnabled);
     soundAction->setChecked(soundOn);
+    soundAction->setIcon(frondIcons::icon(soundOn ? "sound-on" : "sound-off"));
+    soundAction->setToolTip(soundOn ? tr("Sound on") : tr("Sound off"));
     applicationsAction->setEnabled(true);
     stopAction->setEnabled(actions[Id::SaveStop]->isEnabled());
 }

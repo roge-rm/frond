@@ -2,6 +2,7 @@
 #include <optional>
 #include <QString>
 #include <QStringList>
+#include <algorithm>
 #include <vector>
 #include "FirmwareInput.h"
 
@@ -135,5 +136,56 @@ inline QString snapshotReplay(const QString& path) {
     return "0 snapshot \"" + quoted + "\"\n";
 }
 inline QString powerReplay() { return QStringLiteral("0 key-down power\n80 key-up power\n"); }
+
+// A RAM database as `db-list` gives it.
+struct Database {
+    QString name, type, creator;
+    bool resource{false};
+    bool application() const { return resource && type == QLatin1String("appl"); }
+};
+
+// db-list's reply: per line, type, creator and attributes in hex, then the name's bytes in hex.
+// Lines that don't parse are left out. Sorted by name, ignoring case.
+inline std::vector<Database> parseDatabases(const QString& text) {
+    std::vector<Database> out;
+    auto bytes = [](const QString& hex, bool* ok) {
+        QByteArray raw;
+        if (hex.size() % 2) { *ok = false; return raw; }
+        for (int i = 0; i < hex.size(); i += 2) {
+            bool good = false;
+            const int v = hex.mid(i, 2).toInt(&good, 16);
+            if (!good) { *ok = false; return raw; }
+            raw.append(char(v));
+        }
+        return raw;
+    };
+    for (const auto& line : text.split('\n')) {
+        const auto parts = line.split(' ');
+        if (parts.size() != 4 || parts[0].size() != 8 || parts[1].size() != 8 || parts[3].isEmpty()) continue;
+        bool ok = true;
+        const auto type = bytes(parts[0], &ok), creator = bytes(parts[1], &ok), name = bytes(parts[3], &ok);
+        bool attributes = false;
+        const int flags = parts[2].toInt(&attributes, 16);
+        if (!ok || !attributes) continue;
+        out.push_back({QString::fromLatin1(name), QString::fromLatin1(type), QString::fromLatin1(creator), (flags & 1) != 0});
+    }
+    std::stable_sort(out.begin(), out.end(), [](const Database& a, const Database& b) {
+        return a.name.compare(b.name, Qt::CaseInsensitive) < 0;
+    });
+    return out;
+}
+
+inline std::vector<Database> applications(const std::vector<Database>& all) {
+    std::vector<Database> out;
+    for (const auto& d : all) if (d.application()) out.push_back(d);
+    return out;
+}
+
+// The databases that go with an application: the others with its creator.
+inline std::vector<Database> dataOf(const std::vector<Database>& all, const Database& app) {
+    std::vector<Database> out;
+    for (const auto& d : all) if (d.creator == app.creator && d.name != app.name) out.push_back(d);
+    return out;
+}
 
 }  // namespace runningRules

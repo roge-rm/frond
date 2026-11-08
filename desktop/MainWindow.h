@@ -10,6 +10,7 @@
 #include "SessionStore.h"
 #include "LinkClient.h"
 #include "RunningBar.h"
+#include "RunningPanels.h"
 #include <QTemporaryDir>
 class ConnectionsWindow;
 class CardsWindow;
@@ -20,7 +21,9 @@ class SettingsDialog;
 class QListWidget;
 class QListWidgetItem;
 class QMenu;
-class QScrollArea;
+class QMimeData;
+class QDragEnterEvent;
+class QDropEvent;
 
 class QLineEdit;
 class QComboBox;
@@ -46,6 +49,8 @@ class MainWindow : public QMainWindow {
     void installFiles(const QStringList& paths);
  protected:
     void closeEvent(QCloseEvent* event) override;
+    void dragEnterEvent(QDragEnterEvent* event) override;
+    void dropEvent(QDropEvent* event) override;
  private:
     void start();
     void startSession(const frondSessions::Info& info);
@@ -107,7 +112,18 @@ class MainWindow : public QMainWindow {
     void notify(const QString& text, int ms = 5000);
     void barChosen(runningRules::Id id);
     void barPressed(RunningBar::Button button);
-    void reveal(QWidget* widget);
+    void togglePanel(int page);
+    void panelChanged(int page);
+    void fitWindow();
+    void listApps();
+    void databasesReply(bool ok, const QString& message);
+    void deleteApplication(const QString& name);
+    void deleteLookup(bool ok, const QString& message, const std::vector<runningRules::Database>& all);
+    void deleteNext();
+    void deleteReply(bool ok, const QString& message);
+    void exportDatabase(const QString& name);
+    void otherDatabase();
+    QStringList installPaths(const QMimeData* data) const;
     // Runs `lines` as an input replay, for Screenshot and Power.
     bool replay(const QString& lines, const QString& kind);
     void screenshot();
@@ -119,8 +135,17 @@ class MainWindow : public QMainWindow {
     LinkClient link;
     QPointer<ConnectionsWindow> connectionsWindow;
     RunningBar* runningBar{nullptr};
-    QScrollArea* runningScroll{nullptr};
-    QLabel *appsHeading{nullptr}, *deviceHeading{nullptr};
+    PanelHost* panels{nullptr};
+    AppsPanel* appsPanel{nullptr};
+    QWidget* drivers{nullptr};  // hidden home of the controls the bar and the menu use
+    QByteArray listGeometry;    // the list window's geometry while a machine runs
+    std::vector<runningRules::Database> knownDatabases;
+    bool appsStale{false};      // the Applications list needs a fresh db-list
+    struct DeleteApp {
+        bool active{false}, lookup{false}, first{false};
+        QString name;
+        QStringList queue, failed;
+    } deleteApp;
     QPushButton *saveButton{nullptr}, *saveCopyButton{nullptr}, *logButton{nullptr}, *resetButton{nullptr}, *hardResetButton{nullptr};
     QMenu* helpMenu{nullptr};
     bool machineMenuShown{false};
@@ -183,7 +208,7 @@ class MainWindow : public QMainWindow {
     bool microphoneArmed{false};
     QLabel* microphoneState;
     QString networkTip, keyboardTip, serialTip, usbTip, irdaTip;
-    QWidget *home, *runningPage, *sessionBar = nullptr;
+    QWidget* home;
     bool startupHandled{false}, busy{false}, stopping{false}, closeAfterStop{false}, allowClose{false};
     // Cards: the final save before quit succeeded, so a linked card can go back to the drawer.
     bool finalSaved{false};

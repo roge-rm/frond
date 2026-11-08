@@ -54,6 +54,8 @@
 #include <QUdpSocket>
 #include <functional>
 #include <memory>
+#include <QShortcut>
+#include <QWidgetAction>
 #include <signal.h>
 #include <sys/time.h>
 #include "LinkStore.h"
@@ -66,12 +68,18 @@ static QByteArray digest(const QString& path) {
     if (!hash.addData(&file)) return {};
     return hash.result();
 }
+// Opens the Card panel of the window `inside` belongs to.
+static void showCardPanel(QWidget* inside) { inside->window()->findChild<PanelHost*>("panelHost")->open(1); }
 // ---- Connections: hubs on loopback, driven like windows through LinkClient ----
 struct TestHub {
+    // A unix socket path is limited to 107 characters, so the hub lives in a short folder under the
+    // system temp folder, not under the build folder.
+    std::shared_ptr<QTemporaryDir> shortRoot;
     QString root, run, data;
     QProcessEnvironment env;
-    TestHub(const QString& base, const QString& tag, quint16 port) {
-        root = base + "/" + tag; run = root + "/run"; data = root + "/data";
+    TestHub(const QString&, const QString& tag, quint16 port) {
+        shortRoot = std::make_shared<QTemporaryDir>(QDir::tempPath() + "/fh-XXXXXX");
+        root = shortRoot->path() + "/" + tag; run = root + "/run"; data = root + "/data";
         QDir().mkpath(run); QDir().mkpath(data);
         QFile::setPermissions(run, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
         env = QProcessEnvironment::systemEnvironment();
@@ -1496,15 +1504,24 @@ for line in s.makefile('rb'):
             QVERIFY(!QFileInfo::exists(arm.fileName() + ".started"));
             auto* hotSync = window.findChild<QPushButton*>("hotsync");
             QTRY_VERIFY_WITH_TIMEOUT(hotSync->isEnabled(), 5000);
-            // Only what a IIIx has is on the running page.
+            // Only what a IIIx has is in the panels and the Machine menu.
             const auto shown = [&](const char* name) { return window.findChild<QWidget*>(name)->isVisibleTo(&window); };
-            for (const char* name : {"hotsync", "runningContrast", "serialMode", "irdaMode", "sound", "installApp", "launchApp",
-                                     "exportRam", "exportDatabase", "reset", "save", "saveCopy", "hardReset"})
-                QVERIFY2(shown(name), name);
-            for (const char* name : {"rotate", "networkMode", "keyboardAttached", "usbMode", "usbPort", "bluetoothEnabled",
-                                     "bluetoothSocket", "microphone", "hold", "storageHeading", "sdState", "cardPick", "sdRetry"})
-                QVERIFY2(!shown(name), name);
-            QVERIFY(window.findChild<QComboBox*>("serialMode")->isEnabled());
+            auto* panelHost = window.findChild<PanelHost*>("panelHost");
+            const auto inPanel = [&](int page, std::initializer_list<const char*> yes, std::initializer_list<const char*> no) {
+                panelHost->open(page);
+                for (const char* name : yes) QVERIFY2(shown(name), name);
+                for (const char* name : no) QVERIFY2(!shown(name), name);
+            };
+            inPanel(0, {"installApp", "otherApp", "exportRam"}, {});
+            inPanel(1, {}, {"storageHeading", "sdState", "cardPick", "sdRetry"});
+            inPanel(2, {"runningContrast", "sound"}, {"rotate", "microphone"});
+            inPanel(3, {"hotsync", "serialMode", "irdaMode"}, {"usbMode", "usbPort", "bluetoothEnabled", "bluetoothSocket"});
+            if (QTest::currentTestFailed()) return;
+            for (const char* name : {"machineReset", "machineSave", "machineSaveCopy", "machineHardReset"})
+                QVERIFY2(window.findChild<QAction*>(name)->isVisible(), name);
+            for (const char* name : {"machineNetwork", "machineKeyboard", "machineHold"})
+                QVERIFY2(!window.findChild<QAction*>(name)->isVisible(), name);
+            QTRY_VERIFY(window.findChild<QComboBox*>("serialMode")->isEnabled());
             QCOMPARE(window.findChild<QSlider*>("runningContrast")->value(), 30);
             hotSync->click();
             QTRY_VERIFY_WITH_TIMEOUT(read(".commands").contains("hotsync \n"), 5000);
@@ -1786,7 +1803,7 @@ for line in s.makefile('rb'):
         QCOMPARE(QString::fromUtf8(args.readAll()).split('\n').value(0), QFileInfo(managedSession("Trip")).canonicalFilePath());
         QVERIFY(QFileInfo::exists(managedSession("Trip") + ".lock"));
         QVERIFY(!window.findChild<QWidget*>("home")->isVisible());
-        QVERIFY(window.findChild<QWidget*>("running")->isVisible());
+        QVERIFY(window.findChild<RunningBar*>("runningBar")->isVisible());
         QCOMPARE(window.windowTitle(), QString("Trip"));
         window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
         // The core's save went into the same session, and it is the one that resumes.
@@ -1794,7 +1811,7 @@ for line in s.makefile('rb'):
         QDir(managedFolder()).removeRecursively();
         QSettings().clear();
     }
-    // The running page has the Android Menu sections, and the menu bar only File and Help.
+    // The panels have the Android Menu sections, and the menu bar only File and Help.
     void hardReset() {
         QSettings().clear(); QSettings().setValue("resume", false);
         QTemporaryDir files;
@@ -1836,7 +1853,7 @@ for line in s.makefile('rb'):
         MainWindow window(core.fileName()); window.show(); window.openSession(managedSession("Hard"), true);
         auto* hard = window.findChild<QPushButton*>("hardReset");
         QTRY_VERIFY_WITH_TIMEOUT(hard->isEnabled(), 5000);
-        QVERIFY(hard->isVisibleTo(&window));
+        QVERIFY(window.findChild<QAction*>("machineHardReset")->isVisible());
         QString answer, text, failed;
         QTimer poll; poll.setInterval(30);
         connect(&poll, &QTimer::timeout, &window, [&] {
@@ -1926,7 +1943,7 @@ for line in s.makefile('rb'):
         // The core is gone; start the session again and save it.
         QTest::qWait(1000);
         window.openSession(source.fileName(), true);
-        QTRY_VERIFY_WITH_TIMEOUT(hard->isVisible() && hard->isEnabled(), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(hard->isEnabled(), 5000);
         window.findChild<QPushButton*>("save")->click();
         QTRY_COMPARE_WITH_TIMEOUT(commands(), QStringList({"save", "save"}), 3000);
         QTest::qWait(300);
@@ -2057,8 +2074,7 @@ for line in s.makefile('rb'):
         QVERIFY2(shown[0].contains("stopped unexpectedly") && !shown[0].contains("View"), qPrintable(shown[0]));
         QVERIFY2(details[0].contains("core: about to crash"), qPrintable(details[0]));
         start->click();
-        QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("stop")->isVisible() &&
-                                 window.findChild<QPushButton*>("stop")->isEnabled(), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("stop")->isEnabled(), 5000);
         QCOMPARE(shown.size(), 1);
         poll.stop();
         window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
@@ -2097,16 +2113,22 @@ for line in s.makefile('rb'):
         emit list->itemActivated(list->item(0));
         auto* sd = window.findChild<QLabel*>("sdState");
         QTRY_COMPARE_WITH_TIMEOUT(sd->text(), QString("Inserted"), 5000);
+        // The page is gone; the four panels open at the Palm.
+        QVERIFY(!window.findChild<QWidget*>("running"));
         QStringList headings;
-        for (auto* label : window.findChild<QWidget*>("running")->findChildren<QLabel*>())
-            if (QStringList({"Applications", "SD card", "Device"}).contains(label->text())) headings << label->text();
-        QCOMPARE(headings, QStringList({"Applications", "SD card", "Device"}));
+        auto* panelHost = window.findChild<PanelHost*>("panelHost");
+        for (int page = 0; page < 4; ++page) { panelHost->open(page); headings << window.findChild<QLabel*>("panelTitle")->text(); }
+        QCOMPARE(headings, QStringList({"Applications", "SD card", "Display", "Connections"}));
+        panelHost->open(1);
         const auto shown = [&](const char* name) { return window.findChild<QPushButton*>(name)->isVisibleTo(&window); };
         QVERIFY(shown("sdExchange") && shown("sdEject") && !shown("sdInsert") && shown("cardPick") && !shown("sdRetry"));
         // The card row says it once: the picker button names the card, and Inserted has no label.
         QVERIFY(!sd->isVisibleTo(&window));
         // Contrast is for 68k devices; the E2 keeps Rotate and has the HotSync button.
-        QVERIFY(shown("hotsync") && shown("rotate") && !window.findChild<QSlider*>("runningContrast")->isVisibleTo(&window));
+        panelHost->open(2);
+        QVERIFY(shown("rotate") && !window.findChild<QSlider*>("runningContrast")->isVisibleTo(&window));
+        panelHost->open(3);
+        QVERIFY(shown("hotsync"));
         QTRY_VERIFY(window.findChild<QPushButton*>("installApp")->isEnabled());
         // The E2 has no network; its serial port, USB, keyboard and Bluetooth stay.
         QVERIFY(!window.findChild<QComboBox*>("networkMode")->isEnabled());
@@ -2126,6 +2148,7 @@ for line in s.makefile('rb'):
             if (auto* box = window.findChild<QMessageBox*>(); box && box->isVisible()) box->button(QMessageBox::Yes)->click();
         });
         answer.start();
+        panelHost->open(1);
         QTRY_VERIFY(window.findChild<QPushButton*>("sdEject")->isEnabled());
         window.findChild<QPushButton*>("sdEject")->click();
         QTRY_COMPARE_WITH_TIMEOUT(sd->text(), QString("Ejected"), 5000);
@@ -2228,6 +2251,9 @@ for line in s.makefile('rb'):
         choice = "Yes";
         menuAction("machineReset")->trigger();
         want << "reset "; expect(want);
+        // Hard reset is a coloured menu row, so it is a widget action; it sits in the menu bar's and the dots' menu.
+        QVERIFY(qobject_cast<QWidgetAction*>(menuAction("machineHardReset")));
+        QVERIFY(bar->menu()->actions().contains(menuAction("machineHardReset")));
         choice = "Erase";
         menuAction("machineHardReset")->trigger();
         want << "hard-reset "; expect(want);
@@ -2245,6 +2271,146 @@ for line in s.makefile('rb'):
         for (auto* action : window.menuBar()->actions()) menus << action->text();
         QCOMPARE(menus, QStringList({"&File", "&Help"}));
         answer.stop();
+        window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        QDir(managedFolder()).removeRecursively();
+        QSettings().clear();
+    }
+    // The Applications panel: the list, Launch, Delete (the app first, then its data), a refusal,
+    // Other… and a drop.
+    void appsPanel() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        putSession("Apps", 6, "palm-tx", 0);
+        QTemporaryDir files;
+        const auto sent = files.path() + "/sent";
+        QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly));
+        core.write(R"PY(#!/usr/bin/python3
+import os,socket,sys
+s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+log=open(sys.argv[0].rsplit('/',1)[0]+'/sent','a')
+dbs=[('appl','memo',1,'Memos'),('DATA','memo',0,'Memo Data'),('appl','nots',1,'Notes'),('DATA','nots',0,'Notes Extra'),
+     ('appl','lock',1,'Locked'),('DATA','lock',0,'Locked Data'),('DATA','othr',0,'Other Data')]
+for line in s.makefile('rb'):
+    i,cmd,arg=line.rstrip(b'\n').split(b'\t')
+    text=bytes.fromhex(arg.decode()).decode()
+    if cmd not in (b'keyboard-state',b'network-state',b'device-state',b'sd-state',b'microphone-state'):
+        log.write(cmd.decode()+' '+text+'\n'); log.flush()
+    message={b'keyboard-state':b'detached',b'network-state':b'disabled',b'device-state':b'palm-tx',b'sd-state':b'none',b'microphone-state':b'off'}.get(cmd,b'done')
+    if cmd==b'db-list':
+        message='\n'.join(t.encode().hex()+' '+c.encode().hex()+' %08x '%a+n.encode().hex() for t,c,a,n in dbs).encode()
+    if cmd==b'delete-db':
+        if text=='Locked':
+            s.sendall(i+b'\terror\trunning\t'+b'The application is running.'.hex().encode()+b'\n'); continue
+        dbs=[d for d in dbs if d[3]!=text]
+    if cmd==b'install': dbs.append(('appl','inst',1,os.path.basename(text).rsplit('.',1)[0]))
+    s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
+    if cmd==b'quit': break
+)PY");
+        core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        auto commands = [&] {
+            QFile f(sent); if (!f.open(QIODevice::ReadOnly)) return QStringList();
+            return QString::fromUtf8(f.readAll()).split('\n', Qt::SkipEmptyParts);
+        };
+        MainWindow window(files.path() + "/core"); window.show(); window.openSession(managedSession("Apps"), true);
+        auto* bar = window.findChild<RunningBar*>("runningBar");
+        auto* panels = window.findChild<PanelHost*>("panelHost");
+        auto* apps = window.findChild<AppsPanel*>("appsPanel");
+        QTRY_VERIFY_WITH_TIMEOUT(bar->isVisible() && window.findChild<QPushButton*>("save")->isEnabled(), 5000);
+        // No panel yet: the window is the menu bar and the bar.
+        QVERIFY(!panels->isVisible() && !window.findChild<QWidget*>("home")->isVisible());
+        const int slim = window.height();
+        QVERIFY(slim < 200);
+        window.findChild<QAction*>("barApplications")->trigger();
+        QTRY_COMPARE_WITH_TIMEOUT(apps->names(), QStringList({"Locked", "Memos", "Notes"}), 5000);
+        QVERIFY(panels->isVisible() && window.height() > slim + 300);
+        QCOMPARE(window.findChild<QLabel*>("panelTitle")->text(), QString("Applications"));
+        QVERIFY(window.findChild<QAction*>("barApplications")->isChecked());
+        if (const auto shot = qEnvironmentVariable("FROND_TEST_SHOT"); !shot.isEmpty()) window.grab().save(shot);
+        auto row = [&](const QString& app, const char* button) -> QToolButton* {
+            auto* list = apps->findChild<QListWidget*>("appsList");
+            for (int i = 0; i < list->count(); ++i)
+                if (list->item(i)->data(Qt::UserRole).toString() == app) return list->itemWidget(list->item(i))->findChild<QToolButton*>(button);
+            return nullptr;
+        };
+        auto idle = [&] { QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("save")->isEnabled(), 5000); };
+        row("Memos", "appLaunch")->click();
+        QTRY_VERIFY_WITH_TIMEOUT(commands().contains("launch-app Memos"), 5000);
+        idle();
+        // Delete asks first; No leaves everything.
+        QTimer answer; answer.setInterval(30);
+        QString choice = "No";
+        connect(&answer, &QTimer::timeout, &window, [&] {
+            if (auto* dialog = window.findChild<QDialog*>("otherDialog"); dialog && dialog->isVisible()) {
+                dialog->findChild<QComboBox*>("otherName")->setEditText("Memo Data");
+                dialog->findChild<QPushButton*>("otherLaunch")->click();
+                return;
+            }
+            auto* box = window.findChild<QMessageBox*>();
+            if (!box || !box->isVisible()) return;
+            for (auto* b : box->buttons()) if (b->text().remove('&') == choice || (choice == "Yes" && box->standardButton(b) == QMessageBox::Yes) ||
+                                               (choice == "No" && box->standardButton(b) == QMessageBox::No)) { b->click(); return; }
+        });
+        answer.start();
+        row("Memos", "appDelete")->click();
+        QTest::qWait(300);
+        QVERIFY(!commands().contains("delete-db Memos"));
+        choice = "Yes";
+        row("Memos", "appDelete")->click();
+        QTRY_COMPARE_WITH_TIMEOUT(apps->names(), QStringList({"Locked", "Notes"}), 5000);
+        {
+            // A fresh list first, then the application, then the data with its creator.
+            const auto list = commands();
+            const int at = int(list.indexOf("delete-db Memos"));
+            QVERIFY(at > 0 && list[at - 1] == "db-list ");
+            QCOMPARE(list[at + 1], QString("delete-db Memo Data"));
+            QVERIFY(!list.contains("delete-db Notes") && !list.contains("delete-db Other Data"));
+        }
+        idle();
+        // The core refuses the open application; its data is left.
+        choice = "Yes";
+        row("Locked", "appDelete")->click();
+        QTRY_VERIFY_WITH_TIMEOUT(commands().contains("delete-db Locked"), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(!window.findChildren<QMessageBox*>().isEmpty() && window.findChildren<QMessageBox*>().last()->text() == "The application is running.", 5000);
+        for (auto* box : window.findChildren<QMessageBox*>()) if (box->isVisible() && box->text().contains("running")) box->accept();
+        QVERIFY(!commands().contains("delete-db Locked Data"));
+        QCOMPARE(apps->names(), QStringList({"Locked", "Notes"}));
+        idle();
+        // Other… takes any database by name.
+        apps->findChild<QPushButton*>("otherApp")->click();
+        QTRY_VERIFY_WITH_TIMEOUT(commands().contains("launch-app Memo Data"), 5000);
+        idle();
+        // Files dropped on the window install, and the list picks them up.
+        QFile(files.filePath("Dropped.prc")).open(QIODevice::WriteOnly);
+        auto* mime = new QMimeData;
+        mime->setUrls({QUrl::fromLocalFile(files.filePath("Dropped.prc")), QUrl::fromLocalFile(files.filePath("note.txt"))});
+        QDragEnterEvent enter(QPoint(5, 5), Qt::CopyAction, mime, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(&window, &enter);
+        QVERIFY(enter.isAccepted());
+        QDropEvent drop(QPointF(5, 5), Qt::CopyAction, mime, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(&window, &drop);
+        QTRY_VERIFY_WITH_TIMEOUT(commands().contains("install " + files.filePath("Dropped.prc")), 5000);
+        QTRY_COMPARE_WITH_TIMEOUT(apps->names(), QStringList({"Dropped", "Locked", "Notes"}), 5000);
+        delete mime;
+        // Ctrl+2 swaps to the Card panel and Ctrl+1 comes back; the same key closes it.
+        auto press = [&](const char* keys) {
+            for (auto* shortcut : window.findChildren<QShortcut*>()) if (shortcut->key() == QKeySequence(QString::fromLatin1(keys))) { emit shortcut->activated(); return; }
+            QFAIL(keys);
+        };
+        press("Ctrl+2");
+        QTRY_COMPARE_WITH_TIMEOUT(panels->current(), 1, 2000);
+        press("Ctrl+2");
+        QTRY_COMPARE_WITH_TIMEOUT(panels->current(), -1, 2000);
+        press("Ctrl+1");
+        QTRY_COMPARE_WITH_TIMEOUT(panels->current(), 0, 2000);
+        // Close with the panel's button; the window gets small again.
+        window.findChild<QToolButton*>("panelClose")->click();
+        QVERIFY(!panels->isVisible() && !window.findChild<QAction*>("barApplications")->isChecked());
+        QTRY_COMPARE_WITH_TIMEOUT(window.height(), slim, 2000);
+        answer.stop();
+        QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("stop")->isEnabled(), 5000);
+        window.findChild<QPushButton*>("stop")->click();
+        QTRY_VERIFY_WITH_TIMEOUT(!bar->isVisible(), 5000);
         window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
         QDir(managedFolder()).removeRecursively();
         QSettings().clear();
@@ -2321,7 +2487,7 @@ for line in s.makefile('rb'):
         auto* state = window.findChild<QLabel*>("sdState");
         auto* pick = window.findChild<QPushButton*>("cardPick");
         QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("No card"), 5000);
-        QTRY_VERIFY(pick->isVisible() && pick->isEnabled());
+        showCardPanel(pick); QTRY_VERIFY(pick->isVisible() && pick->isEnabled());
         QCOMPARE(pick->text(), QString("No card"));
         QVERIFY(!state->isVisible());
         std::unique_ptr<SlowCardTool> slow;
@@ -2466,7 +2632,7 @@ for line in s.makefile('rb'):
         auto* protection = window.findChild<QCheckBox*>("cardReadOnly");
         QDir(cardsLibrary()).removeRecursively();
         QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("No card"), 5000);
-        QTRY_VERIFY(window.findChild<QPushButton*>("cardPick")->isVisible() && window.findChild<QPushButton*>("cardPick")->isEnabled());
+        showCardPanel(window.findChild<QPushButton*>("cardPick")); QTRY_VERIFY(window.findChild<QPushButton*>("cardPick")->isVisible() && window.findChild<QPushButton*>("cardPick")->isEnabled());
         QCOMPARE(window.findChild<QLabel*>("storageHeading")->text(), QString("Memory Stick"));
         QVERIFY(!window.findChild<QPushButton*>("sdExchange")->isVisible());
         // New card offers the six classic sizes smallest first, then the Pro type with its own.
@@ -3833,6 +3999,7 @@ for line in s.makefile('rb'):
             QTest::qWait(2000); focus(id); key("F6"); QTest::qWait(1500);
             capture(window, id, "launcher");
             QCOMPARE(window.findChild<QLabel*>("storageHeading")->text(), QString("Memory Stick"));
+            showCardPanel(window.findChild<QPushButton*>("cardPick"));
             QCOMPARE(window.findChild<QPushButton*>("cardPick")->isVisible(), frondFirmware::profile(frondFirmware::deviceFromId("sony-clie-tg50")).frontend.memoryStick);
             QVERIFY(!window.findChild<QPushButton*>("sdExchange")->isVisible());
             QVERIFY(!window.findChild<QComboBox*>("usbMode")->isEnabled());
@@ -4880,7 +5047,7 @@ for line in s.makefile('rb'):
         auto* state = window.findChild<QLabel*>("sdState");
         auto* pick = window.findChild<QPushButton*>("cardPick");
         QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("No card"), 10000);
-        QTRY_VERIFY(pick->isVisible() && pick->isEnabled());
+        showCardPanel(pick); QTRY_VERIFY(pick->isVisible() && pick->isEnabled());
         QCOMPARE(pick->text(), QString("No card"));
         QVERIFY(!state->isVisible());
         QStringList texts, enabled;
@@ -4965,7 +5132,7 @@ for line in s.makefile('rb'):
         QVERIFY(!insert->isVisible());
         QVERIFY(frondCards::takeOutStopped(cardsSessions(), games).isEmpty());
         QTRY_COMPARE_WITH_TIMEOUT(linked->text(), QString("Games is free"), 10000);
-        QTRY_VERIFY(insert->isVisible() && insert->isEnabled());
+        showCardPanel(insert); QTRY_VERIFY(insert->isVisible() && insert->isEnabled());
         screenshot(&window, "card-linked.png");
         insert->click();
         QTRY_COMPARE_WITH_TIMEOUT(window.findChild<QLabel*>("sdState")->text(), QString("Inserted"), 10000);
@@ -5085,9 +5252,11 @@ int main(int argc, char** argv) {
     qputenv("XDG_CONFIG_HOME", (directory.path() + "/config").toUtf8());
     qputenv("XDG_DATA_HOME", (directory.path() + "/data").toUtf8());
     // The link hub a window starts runs here too, on its own ports.
-    QDir().mkpath(directory.path() + "/run");
-    QFile::setPermissions(directory.path() + "/run", QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
-    qputenv("XDG_RUNTIME_DIR", (directory.path() + "/run").toUtf8());
+    // A unix socket path is limited to 107 characters, so the runtime folder is a short one under
+    // the system temp folder.
+    QTemporaryDir runtime(QDir::tempPath() + "/fr-XXXXXX");
+    QFile::setPermissions(runtime.path(), QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+    qputenv("XDG_RUNTIME_DIR", runtime.path().toUtf8());
     qputenv("FROND_LINK_PORT", "0"); qputenv("FROND_LINK_DISCOVERY_PORT", "0");
     qunsetenv("FROND_LINK_SOCKET");
     QCoreApplication::setAttribute(Qt::AA_DontUseNativeDialogs);

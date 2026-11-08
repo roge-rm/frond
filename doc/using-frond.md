@@ -43,14 +43,21 @@ On Android the controls sit in a bar along the top of the running machine. Taps 
 - Hide bar leaves a small handle at the top edge. Tap it or swipe down on it to bring the bar back. Whether the bar shows is remembered for each machine. In landscape the bar is shorter.
 - Top bar (in Edit settings and the Display sheet) is Auto-hide or Own space. Auto-hide puts the bar over the Palm and hides it after a few seconds without a touch. Own space moves the Palm down to leave room for it, in portrait and landscape. With little room left, the bar goes over the Palm instead.
 
+### Linux bar and panels
+
+On Linux the bar sits at the top of Frond's window while a machine runs, above a Machine menu with the same rows as ⋮ on Android (Hard reset… is red). The Palm stays in its own window. Applications, Card, Display and Connections open as a panel under the bar and the window grows to fit it. Ctrl+1 to Ctrl+4 open and close them, and so does the bar button or the panel's ✕.
+
+- Applications lists the installed apps, each with Launch, Export and Delete. Double-click launches. Dropping PRC and PDB files on the window installs them.
+- Card has the card controls below. Display has Contrast (Palm IIIx), Sound, Microphone and Rotate. Connections has infrared beaming, Bluetooth, serial, USB HotSync, HotSync and Pair with another Frond…, which opens Pairing.
+
 ### Apps
 
-Under Applications (Linux) or the Applications sheet (Android):
+Under Applications (the Linux panel or the Android sheet):
 
-- **Install application** (Install… on Android, which takes several files) takes PRC and PDB files, once Palm OS has started. As after a HotSync, an app installed while the launcher shows appears in it at once, and the app in front stays.
-- **Launch application** starts an installed app by its Palm database name. On Android each app in the sheet has Launch, Export and Delete buttons, and Other… takes a database name.
-- **Export RAM databases** (Export all… on Android) writes a ZIP of everything in RAM, other apps and your data included.
-- **Export database** writes one named database. Use it when an open system database, like `Shim Logs`, stops the full export.
+- **Install…** takes PRC and PDB files (several on Linux and Android), once Palm OS has started. As after a HotSync, an app installed while the launcher shows appears in it at once, and the app in front stays.
+- **Launch** and **Export** on an app's row start it or write its database as a ZIP. **Delete** asks first, then removes the app and the databases with its creator. The Palm refuses the app that is open or one in ROM, and leaves its data.
+- **Other…** takes any database name, to launch or export it. Use it for an open system database, like `Shim Logs`, that stops the full export.
+- **Export all…** writes a ZIP of everything in RAM, other apps and your data included.
 
 Close Palm dialogs first if an install or export can't get through.
 
@@ -65,9 +72,9 @@ Set these when you add a machine, or in Edit settings while it's stopped. On And
 | Top bar (Android) | Auto-hide or Own space. See above. |
 | Smooth pixels | Softens the LCD. Pixels are sharp by default. |
 | Show keyboard, Jog controls | TG50 only. Jog controls are Hidden, Left of screen or Left of keyboard. |
-| Sound | Turns Palm sound on or off. It can also be switched on the running page. |
+| Sound | Turns Palm sound on or off. It can also be switched in the Display panel or the bar. |
 | Low-latency audio | Less delay between a tap and the sound. See below. |
-| Contrast | Palm IIIx only. 0 to 100, default 50, lower fades the ink and higher darkens the panel. It's on the running page too and is saved with the machine. |
+| Contrast | Palm IIIx only. 0 to 100, default 50, lower fades the ink and higher darkens the panel. It's in the Display panel too and is saved with the machine. |
 | Speed | Palm IIIx only. Original runs at the real 16.58 MHz, Uncapped lets the host run it as fast as it can (timers stay real time). On Android it's in the Display sheet too and applies at once. |
 | Engine | Exact or Fast. It's hidden: on Linux set `FROND_ENGINE_SETTING=1`, on Android it shows in debug builds. See [performance.md](performance.md). The IIIx only has Exact, so it never shows there. |
 
@@ -100,7 +107,7 @@ Keys, with the infrared keyboard detached:
 
 On the TG50 type with the computer keyboard, left Alt is Blue and right Alt is Red. Its jog wheel, jog press and Back are on the side tab. Help → Hardware Keyboard Controls lists the same keys.
 
-The IIIx has the four app buttons, the scroll rocker and power under the screen, and the Applications, Menu, Calculator, Find and Graffiti areas on its silkscreen. Typed text from the computer keyboard goes into the Palm. Hold power for about two seconds to turn the backlight on or off. The cradle's HotSync button is HotSync on the running page (Linux) or in the Connections sheet (Android).
+The IIIx has the four app buttons, the scroll rocker and power under the screen, and the Applications, Menu, Calculator, Find and Graffiti areas on its silkscreen. Typed text from the computer keyboard goes into the Palm. Hold power for about two seconds to turn the backlight on or off. The cradle's HotSync button is HotSync in the Connections panel (Linux) or in the Connections sheet (Android).
 
 **Hold** (TG50) latches the device's Hold switch, which turns off the screen and controls, and audio keeps playing. It's saved with the machine.
 
@@ -134,7 +141,7 @@ In a machine, the SD card or Memory Stick row shows the card's name or No card. 
 
 Duplicating a machine with a card asks what to do with it: Link (the copy shares the card), Copy (a copy of the card) or No card. A machine's Export packs its card, and importing it makes a new card in the drawer.
 
-Controls on the running page, or in the Card sheet on Android (only the ones that fit the state show):
+Controls in the Card panel (Linux) or the Card sheet (Android) (only the ones that fit the state show):
 
 - **Eject** and **Insert** take the card out and put it back.
 - **Export image** (once ejected) writes the card as an image.
@@ -186,11 +193,11 @@ The mode is saved. Live connections close when the machine resumes, so reload or
 
 The serial port (the T|X, E2 and E3 connector, the TG50 and the IIIx cradle) goes to a PTY or a TCP port. Open the path with `screen` or `minicom`, or connect to the port, for example `nc 127.0.0.1 5023`. Peers get CTS, DSR and DCD while connected, RTS flow control is honoured, and bytes sent with no peer are dropped. On Android use Wait for a peer or Connect to an address, then `link-pty.py PHONE:5033 --link /tmp/palm-serial` on a computer.
 
-Serial HotSync works on the E2 with pilot-link (`pilot-xfer -p /dev/pts/N -l`): put the serial port on a PTY, press HotSync on the running page (Linux) or in the Connections sheet (Android) on the E2 or T|X, which pulls the connector's HotSync line low for half a second like the cradle button. The Palm starts HotSync and pilot-link answers. The T|X's serial HotSync isn't tested.
+Serial HotSync works on the E2 with pilot-link (`pilot-xfer -p /dev/pts/N -l`): put the serial port on a PTY, press HotSync in the Connections panel (Linux) or in the Connections sheet (Android) on the E2 or T|X, which pulls the connector's HotSync line low for half a second like the cradle button. The Palm starts HotSync and pilot-link answers. The T|X's serial HotSync isn't tested.
 
 ### Palm IIIx serial and PPP
 
-The IIIx's serial port is the cradle connector, set to Off, a PTY or a TCP port like the other serial ports. Serial HotSync works with pilot-link on that path (`pilot-xfer -p /dev/pts/N -l`): press HotSync on the running page, then start HotSync on the Palm. Infrared beaming works as on the other devices.
+The IIIx's serial port is the cradle connector, set to Off, a PTY or a TCP port like the other serial ports. Serial HotSync works with pilot-link on that path (`pilot-xfer -p /dev/pts/N -l`): press HotSync in the Connections panel, then start HotSync on the Palm. Infrared beaming works as on the other devices.
 
 The IIIx reaches the network the way the real one did, with PPP over the serial port to a PPP server on the host. Frond doesn't redirect NetLib for it. Put the serial port on a PTY or TCP port, from the command line:
 

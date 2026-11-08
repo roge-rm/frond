@@ -10,6 +10,7 @@
 #include "LinkCommon.h"
 #include "CardsWindow.h"
 #include "RunningRules.h"
+#include "RunningPanels.h"
 #include <QCoreApplication>
 #include <QFileSystemWatcher>
 #include <QJsonObject>
@@ -23,6 +24,9 @@
 #include <QDateTime>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QMimeData>
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -107,68 +111,49 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             menu->exec(sessionList->viewport()->mapToGlobal(at));
         }
     });
-    // The running controls go on this page while a Palm runs.
-    auto* root = new QWidget(outer);
-    runningPage = root;
-    runningPage->setObjectName("running");
-    auto* layout = new QVBoxLayout(root);
-    layout->setContentsMargins(0, 0, 0, 0);
-    outerLayout->addWidget(runningPage);
+    // The running controls sit in four panels under the bar. The ones the bar or the Machine menu
+    // already offers are made here, hidden, so each has one handler.
+    panels = new PanelHost(outer);
+    outerLayout->addWidget(panels);
+    drivers = new QWidget(this);
+    drivers->hide();
+    auto* root = drivers;
+    auto* appsLayout = panels->addPage(tr("Applications"));
+    auto* cardLayout = panels->addPage(tr("SD card"));
+    auto* displayLayout = panels->addPage(tr("Display"));
+    auto* connectionsLayout = panels->addPage(tr("Connections"));
     settingsDialog = new SettingsDialog(this);
     settingsDialog->resume->setChecked(settings.value("resume", true).toBool());
     connect(settingsDialog->resume, &QCheckBox::toggled, this, [this](bool enabled) { settings.setValue("resume", enabled); });
-    // The running page follows the Android Menu screen: Applications, SD card, Device, Session.
-    auto section = [&](const QString& title, bool first = false) {
-        auto* heading = new QLabel(title, root);
-        auto font = heading->font(); font.setPointSizeF(font.pointSizeF() * 1.2); font.setBold(true);
-        heading->setFont(font);
-        if (!first) layout->addSpacing(8);
-        layout->addWidget(heading);
-        return heading;
-    };
     auto button = [&](const QString& text, const char* name, bool plain = false) {
         auto* b = new QPushButton(text, root);
         b->setObjectName(name);
         if (!plain) runningButtons << b;
         return b;
     };
-    appsHeading = section(tr("Applications"), true);
-    auto* apps = new QGridLayout;
-    auto* install = button(tr("Install application"), "installApp");
-    auto* launchApp = button(tr("Launch application"), "launchApp");
-    auto* exportAll = button(tr("Export RAM databases"), "exportRam");
-    auto* exportOne = button(tr("Export database"), "exportDatabase");
-    apps->addWidget(install, 0, 0); apps->addWidget(launchApp, 0, 1);
-    apps->addWidget(exportAll, 1, 0); apps->addWidget(exportOne, 1, 1);
-    layout->addLayout(apps);
-    connect(install, &QPushButton::clicked, this, [this] {
+    appsPanel = new AppsPanel(root);
+    appsLayout->addWidget(appsPanel, 1);
+    connect(appsPanel, &AppsPanel::installRequested, this, [this] {
         const auto paths = QFileDialog::getOpenFileNames(this, tr("Install application"), {}, tr("Palm databases (*.prc *.pdb);;All files (*)"));
         installFiles(paths);
     });
-    connect(launchApp, &QPushButton::clicked, this, [this] {
-        bool ok;
-        const auto name = QInputDialog::getText(this, tr("Launch application"), tr("Palm database name"), QLineEdit::Normal, {}, &ok);
-        if (ok && !name.isEmpty()) send("launch-app", name);
-    });
-    connect(exportAll, &QPushButton::clicked, this, [this] {
+    connect(appsPanel, &AppsPanel::otherRequested, this, &MainWindow::otherDatabase);
+    connect(appsPanel, &AppsPanel::launchRequested, this, [this](const QString& name) { send("launch-app", name); });
+    connect(appsPanel, &AppsPanel::exportAllRequested, this, [this] {
         const auto path = outputFile(tr("Export RAM databases"), tr("ZIP archives (*.zip)"), "Palm databases.zip");
         if (!path.isEmpty()) send("export", path);
     });
-    connect(exportOne, &QPushButton::clicked, this, [this] {
-        bool ok;
-        const auto name = QInputDialog::getText(this, tr("Export database"), tr("Palm database name"), QLineEdit::Normal, {}, &ok);
-        if (!ok || name.isEmpty()) return;
-        const auto path = outputFile(tr("Export database"), tr("ZIP archives (*.zip)"), name + ".zip");
-        if (!path.isEmpty()) send("export-db", path + "\n" + name);
-    });
+    connect(appsPanel, &AppsPanel::exportRequested, this, [this](const QString& name) { exportDatabase(name); });
+    connect(appsPanel, &AppsPanel::deleteRequested, this, &MainWindow::deleteApplication);
 
     // The buttons shown depend on the card's state; refresh() picks them.
-    storageHeading = section(tr("SD card"));
+    storageHeading = new QLabel(tr("SD card"), root);
     storageHeading->setObjectName("storageHeading");
+    cardLayout->addWidget(storageHeading);
     // One row: the card in the slot (opens the picker), its state when the buttons don't say it
     // (Ejected, or why there's no button) and the card's buttons. A linked card held elsewhere
     // shows where it is, and Insert once it is free.
-    auto* cardRow = new QHBoxLayout;
+    auto* cardRow = new QVBoxLayout;
     cardPick = button(tr("No card"), "cardPick", true);
     sdStatus = new QLabel(tr("Not known"), root);
     sdStatus->setObjectName("sdState");
@@ -180,14 +165,13 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     sdExport = button(tr("Export image"), "sdExport", true);
     sdRetry = button(tr("Try again"), "sdRetry", true);
     for (auto* b : {sdReinsert, sdExchange, sdEject, sdExport, sdRetry}) cardRow->addWidget(b);
-    cardRow->addStretch();
-    layout->addLayout(cardRow);
+    cardLayout->addLayout(cardRow);
     auto* linkedRow = new QHBoxLayout;
     linkedState = new QLabel(root);
     linkedState->setObjectName("linkedState");
     linkedInsert = button(tr("Insert"), "linkedInsert", true);
     linkedRow->addWidget(linkedState); linkedRow->addWidget(linkedInsert); linkedRow->addStretch();
-    layout->addLayout(linkedRow);
+    cardLayout->addLayout(linkedRow);
     connect(cardPick, &QPushButton::clicked, this, &MainWindow::pickCard);
     connect(linkedInsert, &QPushButton::clicked, this, [this] {
         const auto slot = frondCards::readSlot(runningMachineDir());
@@ -210,26 +194,32 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
 
     cardReadOnly = new QCheckBox(tr("Write protected"), root);
     cardReadOnly->setObjectName("cardReadOnly");
-    layout->addWidget(cardReadOnly);
+    cardLayout->addWidget(cardReadOnly);
+    auto* cardsButton = new QPushButton(tr("Cards…"), root);
+    cardsButton->setObjectName("openCards");
+    cardLayout->addWidget(cardsButton);
+    cardLayout->addStretch();
+    connect(cardsButton, &QPushButton::clicked, this, [this] { showCards(); });
     connect(cardReadOnly, &QCheckBox::clicked, this, [this](bool on) { send("ms-read-only", on ? "on" : "off"); });
 
-    deviceHeading = section(tr("Device"));
-    auto* grid = new QGridLayout;
-    layout->addLayout(grid);
-    grid->setHorizontalSpacing(12);
-    auto label = [&](const QString& text, int row) {
+    auto* displayGrid = new QGridLayout;
+    displayLayout->addLayout(displayGrid);
+    auto* grid = new QGridLayout;  // the Connections panel
+    connectionsLayout->addLayout(grid);
+    for (auto* g : {displayGrid, grid}) g->setHorizontalSpacing(12);
+    auto label = [&](const QString& text, int row, QGridLayout* into = nullptr) {
         auto* l = new QLabel(text, root);
-        grid->addWidget(l, row, 0);
+        if (into) into->addWidget(l, row, 0);
         return l;
     };
     // One row per device: label, control, and the port beside it. Readout rows hide while empty.
     soundToggle = new QCheckBox(tr("On"), root);
     soundToggle->setObjectName("sound");
-    label(tr("Sound"), 1); grid->addWidget(soundToggle, 1, 1, 1, 2);
+    label(tr("Sound"), 1, displayGrid); displayGrid->addWidget(soundToggle, 1, 1, 1, 2);
     microphoneToggle = new QCheckBox(tr("On"), root);
     microphoneToggle->setObjectName("microphone");
-    microphoneLabel = label(tr("Microphone"), 14); grid->addWidget(microphoneToggle, 14, 1, 1, 2);
-    microphoneState = new QLabel(root); grid->addWidget(microphoneState, 15, 1, 1, 2);
+    microphoneLabel = label(tr("Microphone"), 2, displayGrid); displayGrid->addWidget(microphoneToggle, 2, 1, 1, 2);
+    microphoneState = new QLabel(root); displayGrid->addWidget(microphoneState, 3, 1, 1, 2);
     connect(microphoneToggle, &QCheckBox::clicked, this, [this](bool on) {
         send("microphone-mode", on ? "on" : "off");
     });
@@ -245,12 +235,12 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     connect(network, qOverload<int>(&QComboBox::activated), this, [this](int index) {
         send("network-mode", network->itemData(index).toString());
     });
-    networkLabel = label(tr("Network"), 2); grid->addWidget(network, 2, 1, 1, 2);
+    networkLabel = label(tr("Network"), 2);
     keyboard = new QCheckBox(tr("Attached"),root);
     keyboard->setObjectName("keyboardAttached");
     keyboard->setToolTip(tr("Uses the Palm Universal Wireless Keyboard protocol. Install and enable its Palm OS driver first. Type in the Palm window; modifiers and key releases are sent to the driver."));
     connect(keyboard,&QCheckBox::clicked,this,[this](bool attached) { send("keyboard-attach",attached?"on":"off"); });
-    keyboardLabel = label(tr("Infrared keyboard"), 3); grid->addWidget(keyboard, 3, 1, 1, 2);
+    keyboardLabel = label(tr("Infrared keyboard"), 3);
     serial = new QComboBox(root);
     serial->setObjectName("serialMode");
     serial->addItem(tr("Off"), "off");
@@ -261,7 +251,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     serialPort->setRange(1, 65535);
     serialPort->setPrefix(tr("Port "));
     loadSerialSettings();
-    serialLabel = label(tr("Serial port"), 4); grid->addWidget(serial, 4, 1); grid->addWidget(serialPort, 4, 2);
+    serialLabel = label(tr("Serial port"), 4, grid); grid->addWidget(serial, 4, 1); grid->addWidget(serialPort, 4, 2);
     serialState = new QLabel(root);
     serialState->setObjectName("serialState");
     serialState->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -290,7 +280,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     usbPort->setRange(1, 65535);
     usbPort->setPrefix(tr("Port "));
     loadUsbSettings();
-    usbLabel = label(tr("USB HotSync"), 6); grid->addWidget(usb, 6, 1); grid->addWidget(usbPort, 6, 2);
+    usbLabel = label(tr("USB HotSync"), 6, grid); grid->addWidget(usb, 6, 1); grid->addWidget(usbPort, 6, 2);
     usbState = new QLabel(root);
     usbState->setObjectName("usbState");
     usbState->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -311,10 +301,10 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     irda->addItem(tr("Off"),"off");
     irda->addItem(tr("Terminal (PTY)"),"pty");
     irda->addItem(tr("Wait for a peer"),"tcp");
-    irda->setToolTip(tr("Pick a connection to beam to another Frond. Pair them in File > Connections."));
+    irda->setToolTip(tr("Pick a connection to beam to another Frond. Pair them in File > Pairing."));
     irdaPort=new QSpinBox(root);irdaPort->setObjectName("irdaPort");
     irdaPort->setRange(1,65535);irdaPort->setPrefix(tr("Port "));loadIrdaSettings();
-    label(tr("Infrared beaming"), 8); grid->addWidget(irda, 8, 1); grid->addWidget(irdaPort, 8, 2);
+    label(tr("Infrared beaming"), 8, grid); grid->addWidget(irda, 8, 1); grid->addWidget(irdaPort, 8, 2);
     irdaState=new QLabel(root);irdaState->setObjectName("irdaState");
     irdaState->setTextInteractionFlags(Qt::TextSelectableByMouse);grid->addWidget(irdaState, 9, 1, 1, 2);
     auto irdaChanged=[this] {
@@ -330,7 +320,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     bluetoothSocket->setObjectName("bluetoothSocket");
     bluetoothSocket->setPlaceholderText(tr("Absolute controller socket path"));
     loadBluetoothSettings();
-    bluetoothLabel = label(tr("Bluetooth"), 10); grid->addWidget(bluetooth, 10, 1, 1, 2); grid->addWidget(bluetoothSocket, 11, 1, 1, 2);
+    bluetoothLabel = label(tr("Bluetooth"), 10, grid); grid->addWidget(bluetooth, 10, 1, 1, 2); grid->addWidget(bluetoothSocket, 11, 1, 1, 2);
     bluetoothState = new QLabel(root); bluetoothState->setObjectName("bluetoothState");
     bluetoothState->setWordWrap(true); bluetoothState->setTextInteractionFlags(Qt::TextSelectableByMouse);
     grid->addWidget(bluetoothState, 12, 1, 1, 2);
@@ -341,20 +331,18 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     holdLabel = new QLabel(tr("Hold"), root);
     holdToggle = new QCheckBox(tr("On"), root);
     holdToggle->setObjectName("hold");
-    grid->addWidget(holdLabel, 13, 0);
-    grid->addWidget(holdToggle, 13, 1, 1, 2);
     connect(holdToggle, &QCheckBox::clicked, this, [this](bool on) {
         if (frondFirmware::profile(runningDevice).frontend.holdSupported && holdKnown)
             send("hold", on ? "on" : "off");
     });
     // 68k devices: LCD contrast, sent live and kept in the machine settings and the session.
-    contrastLabel = label(tr("Contrast"), 0);
+    contrastLabel = label(tr("Contrast"), 0, displayGrid);
     contrast = new QSlider(Qt::Horizontal, root);
     contrast->setObjectName("runningContrast");
     contrast->setRange(0, 100);
     contrast->setPageStep(10);
     contrast->setTracking(false);
-    grid->addWidget(contrast, 0, 1, 1, 2);
+    displayGrid->addWidget(contrast, 0, 1, 1, 2);
     runningButtons << contrast;
     connect(contrast, &QSlider::valueChanged, this, [this](int value) {
         if (client.available() && frondFirmware::runs68k(runningDevice) && value != runningPreferences.contrast)
@@ -366,10 +354,14 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     rotateButton = rotate;
     // The connector's HotSync button: the IIIx cradle, the T|X and the E2.
     hotSyncButton = button(tr("HotSync"), "hotsync");
-    auto* deviceButtons = new QHBoxLayout;
-    deviceButtons->addWidget(reset); deviceButtons->addWidget(rotate); deviceButtons->addWidget(hotSyncButton);
-    deviceButtons->addStretch();
-    layout->addLayout(deviceButtons);
+    displayLayout->addWidget(rotate, 0, Qt::AlignLeft);
+    displayLayout->addStretch();
+    connectionsLayout->addWidget(hotSyncButton, 0, Qt::AlignLeft);
+    auto* pair = new QPushButton(tr("Pair with another Frond…"), root);
+    pair->setObjectName("pairWith");
+    connectionsLayout->addWidget(pair, 0, Qt::AlignLeft);
+    connectionsLayout->addStretch();
+    connect(pair, &QPushButton::clicked, this, &MainWindow::showConnections);
     connect(hotSyncButton, &QPushButton::clicked, this, [this] { send("hotsync"); });
     connect(reset, &QPushButton::clicked, this, [this] {
         if (QMessageBox::question(this, tr("Reset"), tr("Reset the %1 now?").arg(deviceLabel())) == QMessageBox::Yes) send("reset");
@@ -388,16 +380,12 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         send(enabled ? "audio-on" : "audio-off");
     });
 
-    // Pinned under the scroll area, shown while a Palm runs.
-    sessionBar = new QWidget(this);
-    auto* sessionButtons = new QHBoxLayout(sessionBar);
     auto* saveButton = button(tr("Save"), "save");
     auto* copyButton = button(tr("Save a copy…"), "saveCopy");
     auto* logButton = button(tr("Emulator log"), "emulatorLog", true);
     auto* hardReset = button(tr("Hard reset"), "hardReset");
     this->saveButton = saveButton; saveCopyButton = copyButton; this->logButton = logButton; hardResetButton = hardReset;
-    for (auto* b : {saveButton, copyButton, logButton, hardReset}) { b->setParent(sessionBar); sessionButtons->addWidget(b); }
-    connect(saveButton, &QPushButton::clicked, this, [this] { save(); });
+        connect(saveButton, &QPushButton::clicked, this, [this] { save(); });
     connect(hardReset, &QPushButton::clicked, this, [this] {
         QMessageBox box(QMessageBox::Warning, tr("Hard reset"), tr("Erase everything on the %1?").arg(deviceLabel()),
                         QMessageBox::NoButton, this);
@@ -415,7 +403,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     connect(copyButton, &QPushButton::clicked, this, [this] { save(true); });
     auto* saveShortcut = new QShortcut(QKeySequence::Save, this);
     connect(saveShortcut, &QShortcut::activated, this, [this] {
-        if (runningPage->isVisible() && client.available() && !busy && !stopping && exchangeStage == ExchangeStage::None) save();
+        if (client.running() && client.available() && !busy && !stopping && exchangeStage == ExchangeStage::None) save();
     });
     auto* logDialog = new QDialog(this);
     logDialog->setWindowTitle(tr("Emulator log")); logDialog->resize(700, 400);
@@ -430,26 +418,20 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     connect(bluetooth, &QCheckBox::clicked, this, bluetoothChanged);
     connect(bluetoothSocket, &QLineEdit::editingFinished, this, bluetoothChanged);
 
-    stopButton = new QPushButton(tr("Save and Stop"), sessionBar);
+    stopButton = new QPushButton(tr("Save and Stop"), root);
     stopButton->setObjectName("stop");
-    forceButton = new QPushButton(tr("Force Stop…"), sessionBar);
+    forceButton = new QPushButton(tr("Force Stop…"), root);
     forceButton->setObjectName("forceStop");
     forceButton->hide();
-    sessionButtons->addStretch(); sessionButtons->addWidget(forceButton); sessionButtons->addWidget(stopButton);
-    layout->addStretch();
-    auto* scroll = new QScrollArea(this);
-    runningScroll = scroll;
-    scroll->setWidgetResizable(true);
-    scroll->setFrameShape(QFrame::NoFrame);
-    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    scroll->setWidget(outer);
-    auto* central = new QWidget(this);
-    auto* centralLayout = new QVBoxLayout(central);
-    centralLayout->setContentsMargins(0, 0, 0, 0);
-    centralLayout->addWidget(scroll, 1);
-    centralLayout->addWidget(sessionBar);
-    sessionBar->hide();
-    setCentralWidget(central);
+    outerLayout->setStretchFactor(panels, 1);
+    setCentralWidget(outer);
+    setAcceptDrops(true);
+    connect(panels, &PanelHost::changed, this, &MainWindow::panelChanged);
+    const std::pair<const char*, int> panelKeys[] = {{"Ctrl+1", 0}, {"Ctrl+2", 1}, {"Ctrl+3", 2}, {"Ctrl+4", 3}};
+    for (const auto& [keys, page] : panelKeys) {
+        auto* shortcut = new QShortcut(QKeySequence(QString::fromLatin1(keys)), this);
+        connect(shortcut, &QShortcut::activated, this, [this, page = page] { if (client.running()) togglePanel(page); });
+    }
     connect(stopButton, &QPushButton::clicked, this, [this] { stop(false); });
     connect(forceButton, &QPushButton::clicked, this, [this] {
         if (QMessageBox::warning(this, tr("Force Stop"), tr("Stop without saving? Changes since the last save will be lost."),
@@ -526,6 +508,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (memoryStickFiles) memoryStickFiles->reject();
         if (cardProgress) { cardProgress->hide(); cardProgress->deleteLater(); cardProgress = nullptr; }
         holdKnown = holdOn = false;
+        appsStale = false; deleteApp = {}; knownDatabases.clear(); appsPanel->setDatabases({});
         microphoneArmed = false; microphoneState->clear();
         installQueue.clear(); installTotal = 0; installFailed.clear(); installHint = 0;
         busy = false; stopping = false; hardResetAfterSave = false; cardPresent = cardInserted = false; runningDevice = frondFirmware::Device::tx;
@@ -569,6 +552,9 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     connect(&client, &DesktopClient::result, this, [this](const QString& command, bool ok, const QString& code, const QString& message) {
         if (cardProgress) { cardProgress->hide(); cardProgress->deleteLater(); cardProgress = nullptr; }
         busy = false; forceButton->hide(); runningBar->setForceStop(false); refresh();
+        QTimer::singleShot(0, this, [this] { if (appsStale) listApps(); });
+        if (command == "db-list") { databasesReply(ok, message); return; }
+        if (deleteApp.active && !stopping && command == "delete-db") { deleteReply(ok, message); return; }
         if (command == "input-replay") {
             replayFiles.reset();
             const bool rearm = ok && replayMicrophone;
@@ -579,6 +565,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
                 return;
             }
         }
+        if (command == "install") appsStale = true;
         if (command == "install" && installTotal > 0 && installResult(ok, code, message)) return;
         if (memoryStickFiles && QStringList({"ms-files", "ms-get", "ms-put", "ms-mkdir", "ms-delete", "ms-rename"}).contains(command)) return;
         if (!ok && cardMove.stage != CardMove::None) { cardMoveFailed(command, message); return; }
@@ -745,13 +732,21 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
 void MainWindow::refresh() {
     const bool running = client.running();
     home->setVisible(!running);
-    runningPage->setVisible(running);
-    sessionBar->setVisible(running);
     statusBar()->setVisible(!running);
     if (running != machineMenuShown) {
         machineMenuShown = running;
-        if (running) menuBar()->insertMenu(helpMenu->menuAction(), runningBar->menu());
-        else { menuBar()->removeAction(runningBar->menu()->menuAction()); runningBar->setBarShown(true); }
+        if (running) {
+            menuBar()->insertMenu(helpMenu->menuAction(), runningBar->menu());
+            listGeometry = saveGeometry();
+            appsStale = true;
+        } else {
+            menuBar()->removeAction(runningBar->menu()->menuAction());
+            runningBar->setBarShown(true);
+            panels->open(-1);
+            if (!listGeometry.isEmpty()) restoreGeometry(listGeometry);
+            listGeometry.clear();
+        }
+        if (running) fitWindow();
     }
     for (auto* state : {serialState, usbState, irdaState, bluetoothState, microphoneState}) state->setVisible(!state->text().isEmpty());
     setWindowTitle(running && !sessionPath.isEmpty() ? QFileInfo(sessionPath).completeBaseName() : tr("Frond"));
@@ -815,6 +810,8 @@ void MainWindow::refresh() {
     const bool memoryStick = this->memoryStick();
     const bool supported = storageSupported();
     storageHeading->setText(memoryStick ? tr("Memory Stick") : tr("SD card"));
+    panels->setTitle(1, storageHeading->text());
+    appsPanel->setEnabled(enabled);
     storageHeading->setVisible(!m68k);
     storageHeading->setEnabled(supported);
     sdStatus->setEnabled(supported);
@@ -877,19 +874,32 @@ void MainWindow::notify(const QString& text, int ms) {
     if (client.running()) runningBar->say(text, ms);
     else statusBar()->showMessage(text);
 }
-void MainWindow::reveal(QWidget* widget) {
-    if (!widget->isVisibleTo(runningPage)) return;
-    runningScroll->ensureWidgetVisible(widget, 0, 0);
+void MainWindow::togglePanel(int page) { panels->open(panels->current() == page ? -1 : page); }
+void MainWindow::panelChanged(int page) {
+    runningBar->setOpenPanel(page);
+    if (page == 0) { appsStale = true; listApps(); }
+    fitWindow();
+}
+// Makes the window as wide as the panels need and as tall as the bar and the open panel, so the
+// Palm window next to it keeps its size.
+void MainWindow::fitWindow() {
+    if (!client.running() || isMaximized() || isFullScreen()) return;
+    panels->setMinimumHeight(panels->isVisibleTo(this) ? 420 : 0);
+    if (layout()) layout()->activate();
+    centralWidget()->layout()->activate();
+    resize(480, 1);
+    // The layout's minimum height settles after the panel is gone.
+    QTimer::singleShot(0, this, [this] { if (client.running() && !isMaximized() && !isFullScreen()) resize(480, 1); });
 }
 void MainWindow::barChosen(runningRules::Id id) {
     using runningRules::Id;
-    // Each row does what its control on the running page does, so both always agree.
+    // Each row does what its control does, so the menu and the panels always agree.
     switch (id) {
         case Id::Hold: holdToggle->click(); break;
         case Id::Keyboard: keyboard->click(); break;
         case Id::Microphone: microphoneToggle->click(); break;
-        case Id::Display: reveal(frondFirmware::runs68k(runningDevice) ? static_cast<QWidget*>(contrastLabel) : static_cast<QWidget*>(soundToggle)); break;
-        case Id::Connections: reveal(serial->isVisibleTo(runningPage) ? static_cast<QWidget*>(serial) : static_cast<QWidget*>(deviceHeading)); break;
+        case Id::Display: panels->open(2); break;
+        case Id::Connections: panels->open(3); break;
         case Id::Screenshot: screenshot(); break;
         case Id::HideBar: runningBar->setBarShown(!runningBar->barShown()); refresh(); break;
         case Id::Save: saveButton->click(); break;
@@ -904,8 +914,8 @@ void MainWindow::barChosen(runningRules::Id id) {
 void MainWindow::barPressed(RunningBar::Button button) {
     switch (button) {
         case RunningBar::Button::Stop: stopButton->click(); break;
-        case RunningBar::Button::Applications: reveal(appsHeading); break;
-        case RunningBar::Button::Card: reveal(storageHeading); break;
+        case RunningBar::Button::Applications: togglePanel(0); break;
+        case RunningBar::Button::Card: togglePanel(1); break;
         case RunningBar::Button::Sound: soundToggle->click(); break;
         case RunningBar::Button::Power: replay(runningRules::powerReplay(), "power"); break;
         case RunningBar::Button::ForceStop: forceButton->click(); break;
@@ -1623,6 +1633,114 @@ bool MainWindow::confirmReplace(const QString& dest) {
     return QMessageBox::question(this, tr("Replace"), tr("Replace the session %1?").arg(QFileInfo(dest).fileName()),
                                  QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) == QMessageBox::Yes;
 }
+// Asks the core for the RAM databases when the Applications panel is open and the core is free.
+void MainWindow::listApps() {
+    if (!appsStale || panels->current() != 0 || !client.available() || busy || stopping || exchangeStage != ExchangeStage::None) return;
+    appsStale = false;
+    if (client.request("db-list")) { busy = true; refresh(); }
+}
+void MainWindow::databasesReply(bool ok, const QString& message) {
+    const auto all = ok ? runningRules::parseDatabases(message) : std::vector<runningRules::Database>{};
+    if (deleteApp.active && deleteApp.lookup) { deleteLookup(ok, message, all); return; }
+    // A list that can't be had (Palm OS still starting) is left as it was.
+    if (!ok) { log->appendPlainText("db-list: " + message); return; }
+    knownDatabases = all;
+    appsPanel->setDatabases(all);
+}
+// Deletes an application and the RAM databases with its creator. The application goes first: if
+// the core refuses it (ROM, running, open) nothing else is touched.
+void MainWindow::deleteApplication(const QString& name) {
+    if (!client.available() || busy || stopping || deleteApp.active) return;
+    if (QMessageBox::question(this, tr("Delete"), tr("Delete %1 and its data?").arg(name),
+                              QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) return;
+    deleteApp = {};
+    deleteApp.active = deleteApp.lookup = true;
+    deleteApp.name = name;
+    if (!send("db-list")) deleteApp = {};
+}
+void MainWindow::deleteLookup(bool ok, const QString& message, const std::vector<runningRules::Database>& all) {
+    if (!ok) { deleteApp = {}; failure(message); return; }
+    const runningRules::Database* app = nullptr;
+    for (const auto& d : all) if (d.name == deleteApp.name && d.application()) app = &d;
+    if (!app) { deleteApp = {}; appsStale = true; failure(tr("There is no application named \"%1\".").arg(deleteApp.name)); return; }
+    deleteApp.lookup = false;
+    deleteApp.queue << app->name;
+    for (const auto& d : runningRules::dataOf(all, *app)) deleteApp.queue << d.name;
+    deleteApp.first = true;
+    deleteNext();
+}
+void MainWindow::deleteNext() {
+    if (deleteApp.queue.isEmpty()) {
+        const auto name = deleteApp.name;
+        const auto failed = deleteApp.failed;
+        deleteApp = {};
+        appsStale = true;
+        if (failed.isEmpty()) notify(tr("Deleted %1.").arg(name));
+        else failure(tr("%1 was deleted, but its data was not all: %2").arg(name, failed.join("; ")));
+        return;
+    }
+    if (!send("delete-db", deleteApp.queue.takeFirst())) { deleteApp = {}; appsStale = true; }
+}
+void MainWindow::deleteReply(bool ok, const QString& message) {
+    if (!ok && deleteApp.first) {
+        deleteApp = {};
+        appsStale = true;
+        failure(message);
+        return;
+    }
+    if (!ok) deleteApp.failed << message;
+    deleteApp.first = false;
+    deleteNext();
+}
+void MainWindow::exportDatabase(const QString& name) {
+    const auto path = outputFile(tr("Export database"), tr("ZIP archives (*.zip)"), name + ".zip");
+    if (!path.isEmpty()) send("export-db", path + "\n" + name);
+}
+// Any RAM database by name: launch it or export it.
+void MainWindow::otherDatabase() {
+    QDialog dialog(this);
+    dialog.setObjectName("otherDialog");
+    dialog.setWindowTitle(tr("Other database"));
+    auto* layout = new QVBoxLayout(&dialog);
+    layout->addWidget(new QLabel(tr("Palm database name"), &dialog));
+    auto* name = new QComboBox(&dialog);
+    name->setObjectName("otherName");
+    name->setEditable(true);
+    for (const auto& d : knownDatabases) name->addItem(d.name);
+    name->setCurrentIndex(-1);
+    layout->addWidget(name);
+    auto* buttons = new QDialogButtonBox(&dialog);
+    auto* launchButton = buttons->addButton(tr("Launch"), QDialogButtonBox::AcceptRole);
+    auto* exportButton = buttons->addButton(tr("Export…"), QDialogButtonBox::ActionRole);
+    buttons->addButton(QDialogButtonBox::Cancel);
+    layout->addWidget(buttons);
+    launchButton->setObjectName("otherLaunch");
+    exportButton->setObjectName("otherExport");
+    QAbstractButton* chosen = nullptr;
+    connect(buttons, &QDialogButtonBox::clicked, &dialog, [&](QAbstractButton* b) { chosen = b; if (b != buttons->button(QDialogButtonBox::Cancel)) dialog.accept(); else dialog.reject(); });
+    if (dialog.exec() != QDialog::Accepted || name->currentText().trimmed().isEmpty()) return;
+    const auto value = name->currentText().trimmed();
+    if (chosen == launchButton) send("launch-app", value);
+    else exportDatabase(value);
+}
+void MainWindow::dragEnterEvent(QDragEnterEvent* event) {
+    if (client.running() && !installPaths(event->mimeData()).isEmpty()) event->acceptProposedAction();
+}
+void MainWindow::dropEvent(QDropEvent* event) {
+    const auto paths = installPaths(event->mimeData());
+    if (!client.running() || paths.isEmpty()) return;
+    event->acceptProposedAction();
+    installFiles(paths);
+}
+QStringList MainWindow::installPaths(const QMimeData* data) const {
+    QStringList out;
+    for (const auto& url : data->urls()) {
+        const auto path = url.toLocalFile();
+        const auto suffix = QFileInfo(path).suffix().toLower();
+        if (suffix == "prc" || suffix == "pdb" || suffix == "pqa") out << path;
+    }
+    return out;
+}
 void MainWindow::installFiles(const QStringList& paths) {
     if (paths.isEmpty() || busy || installTotal > 0) return;
     if (paths.size() == 1) { send("install", QFileInfo(paths.first()).absoluteFilePath()); return; }
@@ -1735,7 +1853,11 @@ void MainWindow::failure(const QString& message, const QString& details) {
     box->open();
 }
 void MainWindow::closeEvent(QCloseEvent* event) {
-    if (allowClose || !client.running()) { settings.setValue("windowGeometry", saveGeometry()); event->accept(); return; }
+    if (allowClose || !client.running()) {
+        settings.setValue("windowGeometry", listGeometry.isEmpty() ? saveGeometry() : listGeometry);
+        event->accept();
+        return;
+    }
     event->ignore(); stop(true);
 }
 

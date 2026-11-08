@@ -60,7 +60,7 @@ You can also type with an emulated Palm infrared keyboard, if Palm's keyboard dr
 
 ### Apps and cards
 
-Install PRC and PDB files with Install application, under Applications on Linux or on the Peripherals screen on Android. Launch application and Export database are next to it.
+Install PRC and PDB files with Install…, in the Applications panel on Linux or sheet on Android. Launch, Export and Delete are on each app's row.
 
 Frond makes and imports SD card images up to 2 GB (1 GB on the E2), and copies files between your computer or phone and an ejected card with Files, under SD card. Close any files on the Palm before ejecting.
 
@@ -72,7 +72,7 @@ The TG50 takes a Memory Stick from 4 to 128 MB, or a Memory Stick Pro from 256 M
 |---|---|---|---|---|---|
 | Virtual Wi-Fi, onto the internet through your computer or phone | yes | | | | |
 | Cradle serial port, to a PTY or TCP port for terminal programs and [HotSync](doc/using-frond.md#palm-iiix-serial-and-ppp) | yes | yes | | yes | yes |
-| HotSync button on the running page, like the cradle's | yes | yes | | | yes |
+| HotSync button in the Connections panel, like the cradle's | yes | yes | | | yes |
 | Microphone | | | | yes | |
 | USB HotSync over a PTY or TCP port | yes | yes | yes | yes | |
 | [Infrared beaming](doc/using-frond.md#infrared) between Frond machines | yes | yes | yes | yes | yes |
