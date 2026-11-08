@@ -1,0 +1,41 @@
+diff --git a/src/uarm/uarm/imx1_bootstrap.h b/src/uarm/uarm/imx1_bootstrap.h
+--- a/src/uarm/uarm/imx1_bootstrap.h
++++ b/src/uarm/uarm/imx1_bootstrap.h
+@@ -127,6 +127,7 @@
+     bool asynchronousUsed = false;
+     std::vector<uint8_t> sram = std::vector<uint8_t>(0x20000);
+     uint32_t rmcr = 0;
++    uint32_t uartControl1[2] = {4, 4};
+     struct Sdram {
+         uint32_t control = 0x01000300, bytes = 0;
+         bool controlKnown = false;
+diff --git a/src/uarm/uarm/imx1_bootstrap.cpp b/src/uarm/uarm/imx1_bootstrap.cpp
+--- a/src/uarm/uarm/imx1_bootstrap.cpp
++++ b/src/uarm/uarm/imx1_bootstrap.cpp
+@@ -200,6 +200,8 @@
+     if (const auto* name = Imx1Sysctrl::registerName(address)) return name;
+     switch (address & ~3u) {
+         case 0x00205034: return "LCDC.RMCR";
++        case 0x00206080: return "UART1.UCR1";
++        case 0x00207080: return "UART2.UCR1";
+         case 0x00221000: return "SDRAMC.SDCTL0";
+         case 0x00221004: return "SDRAMC.SDCTL1";
+         default: return nullptr;
+@@ -207,6 +209,17 @@
+ }
+ 
+ Imx1BootstrapAccess Imx1Bootstrap::access(uint32_t address, uint32_t size, bool write, uint32_t& value, uint32_t cpuClockMode) {
++    if ((address & ~3u) == 0x00206080 || (address & ~3u) == 0x00207080) {
++        if (size != 4 || (address & 3)) return Imx1BootstrapAccess::width;
++        auto& control = uartControl1[(address - 0x00206080) >> 12];
++        if (write) {
++            if (value & 0xffff0000u) return Imx1BootstrapAccess::reservedBits;
++            // Only disabled clock/doze/idle-detect configuration has no attached UART effects.
++            if (value & ~0x0c06u) return Imx1BootstrapAccess::sideEffect;
++            control = value;
++        } else value = control;
++        return Imx1BootstrapAccess::ok;
++    }
+     // MC9328MX1RM 3.1.2: 128 KiB SRAM, then word reads repeat the last word.
+     if (address >= 0x00300000 && address < 0x00400000) {
+         const uint32_t offset = address - 0x00300000;
