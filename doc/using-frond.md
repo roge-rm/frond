@@ -137,7 +137,7 @@ Open Cards from the main menu on Linux, or from the home menu on Android. SD car
 - **New card** asks for a name, a type and a size. Cards over 128 MB need room for the whole card, with progress and Cancel.
 - **Import card image** takes a raw `.img` (SD or Pro) or a `.frondms`. The type comes from the file, and you're asked when SD and Pro both fit.
 - **Import folder as card** (Linux: a button in the Cards window, Android: the top menu) copies a folder from your computer onto a new card once, with its folders and long names. Pick the folder, then a name, type and size. The smallest size it fits is chosen, and smaller ones show Too small. A folder that is too big for any card, or has names a card can't hold, is refused. It needs mtools on Linux (`sudo apt install mtools`). Classic Memory Sticks aren't offered, since only the Palm writes their file system. Later changes to the folder don't reach the card.
-- The card's menu has Rename, Duplicate, Export image, Link to machines, Take out and Delete. Export image writes `.img`, or `.frondms` for a classic stick. Delete asks first and the card's files are lost. Duplicate, Export image, Take out and Delete wait while the card's machine runs.
+- The card's menu has Files, Rename, Duplicate, Export image, Link to machines, Take out and Delete. Export image writes `.img`, or `.frondms` for a classic stick. Delete asks first and the card's files are lost. Files, Duplicate, Export image, Take out and Delete wait while the card's machine runs.
 - **Link to machines** lets several machines share one card. Only one of them holds it at a time: the others show "Games is in Palm TX". Take it out of one machine and another can take it with Insert.
 - **Take out** puts a card back in the drawer.
 
@@ -150,15 +150,24 @@ Controls in the Card panel (Linux) or the Card sheet (Android) (only the ones th
 - **Eject** and **Insert** take the card out and put it back.
 - **Export image** (once ejected) writes the card as an image.
 - **Write protected** (Memory Stick) is set while ejected, and goes with the card.
-- **Files** copies files in and out.
+- **Files** opens the card's files, see [Files](#files).
 
 Don't eject or sleep the Palm while an app is writing quickly, as the SD driver can get stuck until you reset. FAT32 cards imported from `mkfs.fat` can be read but not written by the T|X.
 
 ### Files
 
-SD cards: Linux needs `mtools` (`sudo apt install mtools`). Files saves a recovery session, ejects the card, and opens a dialog where you list a card folder, make a folder, copy a host file to the card and copy a card file to the host. Existing names, including ones that differ only in case, are refused, and there is no replace or delete. **Apply and Reinsert** puts the edited card in, Cancel keeps the original card ejected (use Insert). Cards for Files are FAT16, 32 MB and up. The recovery session is kept under `~/.local/share/frond/sd-exchange/` until you delete it, and has your whole Palm in it. Android does the same from Files in the Card sheet.
+SD cards and Memory Stick Pro: Files opens the card in a file manager and changes it in place. In Cards it's on the card's menu, for a card in the drawer or in a machine that isn't running, and a card in a running machine shows Files… · In use. For the SD card of a running machine use Files in the Card panel or sheet: it ejects the card (close files on the Palm first), and closing Files puts it back in, ejected again if it was out before.
 
-Memory Stick: Files works on the stick's own Palm OS filesystem, with no ejecting. Open Date Book on the Palm and try again if Sony Launcher is busy. You can add and export files, make folders, rename and delete. Changes happen at once. Names must be printable ASCII, paths at most 511 bytes, each transfer at most 8 MiB, and a folder lists at most 512 entries. Existing names are refused. Cancel stops a pending operation. Applications in `/PALM/Launcher` show in Sony Launcher's Card category. A protected stick can be read and exported only.
+- Open a folder by double-clicking it (tap on Android), go back with Up or the path bar, and jump to `/PALM/Launcher` or `/DCIM`. The top line shows the free space and the card's size.
+- Sort by name, size or date. Select several with Ctrl or Shift, or Select all.
+- **Add files** and **Add folder** copy from your computer, folders with everything in them. On Linux you can also drop files and folders on the list, and drag them out of it.
+- **Export…** copies the selected files and folders to a folder on your computer. A name already there gets " (2)", nothing is overwritten.
+- **Cut**, **Copy** and **Paste** move or copy on the card. **Rename**, **New folder** and **Delete** (it asks first) work as usual.
+- When a name is already there you pick Replace, Skip or Keep both, with For all for the rest. Long jobs show progress with Cancel.
+- Each change is written as you make it, and only what it touches. If Frond is stopped part way, the card is fixed the next time it's opened, with the change done or not.
+- A write protected card can be browsed and exported only. While a card is open in Files it can't be moved, taken out or deleted. Cards for Files are FAT16, 32 MB and up.
+
+Memory Stick in a running machine: Files works on the stick's own Palm OS filesystem, with no ejecting. Open Date Book on the Palm and try again if Sony Launcher is busy. You can add and export files, make folders, rename and delete. Changes happen at once. Names must be printable ASCII, paths at most 511 bytes, each transfer at most 8 MiB, and a folder lists at most 512 entries. Existing names are refused. Cancel stops a pending operation. Applications in `/PALM/Launcher` show in Sony Launcher's Card category. A protected stick can be read and exported only.
 
 ## Connections
 
@@ -312,6 +321,5 @@ Microphone (Zire 72 and TG50) is off each time it starts. Turn it on under Micro
 - If `journalctl --user -u pipewire -u xdg-desktop-portal` reports `Could not get pidns`, tell PipeWire to use RTKit directly. Put `module.rt.args = { rtportal.enabled = false }` in `~/.config/pipewire/pipewire.conf.d/90-direct-rtkit.conf`, `~/.config/pipewire/pipewire-pulse.conf.d/90-direct-rtkit.conf` and `~/.config/pipewire/client.conf.d/90-direct-rtkit.conf`, then run `systemctl --user restart pipewire pipewire-pulse wireplumber`, which briefly interrupts audio in other apps. Remove the files and restart to undo it.
 - Low-latency audio drops back to normal on starvation until the next reset. Use normal audio for projects that need a bigger queue.
 - A card that stops responding after an eject or sleep during writes: reset the Palm. The card image is intact.
-- Files on Linux says to install mtools: `sudo apt install mtools`.
 - "This session is open in another Frond": close the other window, or it's still running.
 - Diagnostics and logs for bug reports: Emulator log, and [performance.md](performance.md) for speed and audio traces.

@@ -61,6 +61,8 @@ frond --card export CARD IMAGE
 
 SIZE is in MiB for an SD card or a Memory Stick Pro and in MB for a classic stick, within what some device takes. Import takes a raw SD or Pro image, or a `.frondms`. The output is a settled card file (`.frondsd`, `.frondmsp` or `.frondms`) or, for export, a raw image (a `.frondms` for a classic stick). It's written beside OUTPUT and renamed into place, so a failed or cancelled run leaves nothing and an existing file stays. Standard output has `progress DONE/TOTAL` in bytes at each whole percent, then `ok KIND BYTES` (`ok image BYTES` for export) or `error CODE MESSAGE`. The exit status is 0, 1 on failure or 2 on bad use. SIGTERM or SIGINT cancels. Codes: `usage`, `size`, `read`, `image`, `same`, `unsettled` (a journal beside the card), `space` (the folder needs the output plus 16 MiB free), `write`, `cancelled`.
 
+Files (desktop and Android) edits a `.frondsd` or `.frondmsp` in place and keeps two files beside it while a change is being written: `CARD.files-intent` (the 1 MiB chunks that got data) and `CARD.files-commit` (the change's FAT and folder sectors, chunk CRCs and header). The apps settle them before the card is loaded, moved or exported, so the card comes out with the change done (a complete commit is replayed) or not (an intent alone gets its chunk CRCs and header rewritten). The core and `frond --card` don't read them: settle first. The card's generation moves by one per visit that changes something.
+
 The desktop launcher `frond-desktop [session]` takes `--core PATH` (the emulator to run, found beside it or in `/usr/lib/frond` by default), `--core-68k PATH` (the same for 68k devices like the Palm IIIx, default `frond-68k` beside the ARM core), `-h` and `-v`.
 
 ## Console commands
@@ -568,6 +570,7 @@ The IIIx works as in VS Code, in Eclipse's Terminal view.
 | `FROND_TG50_SCREENSHOT_DIR` | Folder `tests/device-controls.cpp` saves TG50 screenshots to. |
 | `FROND_TEST_CORE`, `FROND_TEST_SESSION` | Core and TX session for the desktop workflow test. |
 | `FROND_CARD_TOOL` | The program the desktop runs as the card tool (`--card`), instead of its own core. The workflow test sets it to the ARM core. |
+| `FROND_CARD_OUT` | Folder the card file tests (`tests/card-file.cpp`, Android's `CardFileTest`) write edited cards to, with the files each should hold in `NAME.files/`, for loading them in the core. |
 | `FROND_SCREENSHOTS` | Folder the desktop workflow test saves its Cards window, New card and picker screenshots in. |
 | `FROND_TEST_SCREENSHOT`, `FROND_TEST_KEYBOARD`, `FROND_TEST_NETWORK` | Extra checks in that test: expected screenshot, keyboard and network state. |
 | `FROND_TEST_SHOTS` | Folder to save pictures of the home window and settings to. |
