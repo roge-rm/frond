@@ -15,7 +15,10 @@ int main() {
     uint32_t value = 0;
     auto read = [&](uint32_t offset, uint32_t expected) {
         value = 0xdeadbeef;
-        assert(soc.access(base + offset,4,false,value) == A::ok && value == expected);
+        const auto status = soc.access(base + offset,4,false,value);
+        if (status != A::ok || value != expected)
+            std::fprintf(stderr,"SSI read %x got %x status %u expected %x\n",offset,value,unsigned(status),expected);
+        assert(status == A::ok && value == expected);
     };
     auto write = [&](uint32_t offset, uint32_t setting, A expected = A::ok) {
         value = setting;
@@ -48,7 +51,7 @@ int main() {
     write(0x28,2,A::reservedBits); read(0x28,0x71);
     write(8,0); read(8,0x41);
     read(0xc,0xe8); read(0x14,0x6100); read(0x20,4);
-    for (auto offset : {0u,4u,0x1cu,0x24u}) {
+    for (auto offset : {4u,0x1cu,0x24u}) {
         value = 0xdeadbeef;
         assert(soc.access(base + offset,4,false,value) == A::unmapped && value == 0xdeadbeef);
         assert(soc.access(base + offset,4,true,value) == A::unmapped);
@@ -73,6 +76,35 @@ int main() {
         assert(soc.access(0x00223008,4,true,value) == A::ok);
         const auto lines = soc.interruptLines();
         assert(lines.irq == Imx1AitcLine::clear && lines.fiq == Imx1AitcLine::clear);
+    }
+    soc = Imx1Bootstrap{};
+    write(0,1,A::sequence);
+    write(8,0x9900); write(0xc,0xe8); write(0x20,4);
+    for (unsigned i = 0; i < 8; ++i) {
+        write(0,0x100 + i);
+        read(0x20,((i + 1) << 8) | 4);
+        read(8,0x9900 | (i < 4 ? 1 : 0));
+    }
+    write(0,0x10000,A::reservedBits); read(0x20,0x804);
+    write(0,0xdead); read(0x20,0x804);
+    value = 0xdeadbeef;
+    assert(soc.access(base,4,false,value) == A::sideEffect && value == 0xdeadbeef);
+    write(0xc,0x68,A::sideEffect); read(0xc,0xe8);
+    write(8,0x9b00,A::sideEffect); read(8,0x9900); read(0x20,0x804);
+    write(0x20,0xff88); read(0x20,0x888); read(8,0x9900);
+    auto primed = soc;
+    soc.advanceHclkCycles(10000); read(0x20,0x888); read(8,0x9900);
+    write(0x28,0x10); read(0x20,0x88); read(8,0x9941);
+    write(0,2,A::sequence); write(0x28,0); write(0,2); read(0x20,0x188);
+    write(8,0); read(0x20,0x88); read(8,0x41);
+    write(8,0x9900); write(0xc,0x68); write(0,0x1234); write(0,0x4321);
+    read(0x20,0x188); read(8,0x9900);
+    assert(primed.access(base + 0x20,4,false,value) == A::ok && value == 0x888);
+    primed = Imx1Bootstrap{};
+    assert(primed.access(base + 0x20,4,false,value) == A::ok && value == 0x81);
+    for (auto size : {1u,2u,8u}) {
+        assert(soc.access(base,size,true,value) == A::width);
+        assert(soc.access(base,size,false,value) == A::width);
     }
     // Native GPIO/mux and SSI configuration run through the timed probe in both engines.
     std::vector<uint32_t> program;
@@ -100,7 +132,13 @@ int main() {
         load(1,setting.second); program.push_back(0xe5841000 | setting.first);
     }
     program.push_back(0xe5945008); program.push_back(0xe5946020); program.push_back(0xe594700c);
-    program.push_back(0xe5841000);
+    // Eight unrolled writes reproduce the priming effects of 2009f514 before DMA/start.
+    load(1,0);
+    for (unsigned i = 0; i < 8; ++i) program.push_back(0xe5841000);
+    program.push_back(0xe5949020);
+    program.push_back(0xe594a008);
+    load(1,0x9b00);
+    program.push_back(0xe5841008);
     for (const auto& item : literals) {
         const auto offset = (program.size() - item.first - 2) * 4;
         assert(offset <= 0xfff);
@@ -115,11 +153,13 @@ int main() {
     for (unsigned fast = 0; fast < 2; ++fast) {
         results[fast] = imx1BootProbe(rom.data(),rom.size(),Imx1ProbeEntry::physicalFlash,100,
                                     nullptr,nullptr,fast,&options);
-        assert(results[fast].stop == Imx1ProbeStop::unsupportedWrite && results[fast].address == base);
+        assert(results[fast].stop == Imx1ProbeStop::unsupportedPeripheral && results[fast].address == base + 8 &&
+               results[fast].peripheralStatus == A::sideEffect);
         assert(results[fast].registers[5] == 0x9941 && results[fast].registers[6] == 4 &&
                results[fast].registers[7] == 0xe8 && results[fast].registers[8] == 3);
+        assert(results[fast].registers[9] == 0x804 && results[fast].registers[10] == 0x9900);
     }
     assert(results[0].cpsr == results[1].cpsr && results[0].busAccesses == results[1].busAccesses);
     assert(!std::memcmp(results[0].registers,results[1].registers,sizeof(results[0].registers)));
-    std::puts("PASS: native SSI mux/idle startup, empty state, transactional active guards and Exact/Fast execution");
+    std::puts("PASS: whole SSI startup and eight-word priming, FIFO counts/watermarks/full/reset/copy, guarded active transport and Exact/Fast");
 }
