@@ -1,0 +1,66 @@
+--- a/src/cloudpilot/emulator/hardware/EmRegsISPDana.h
++++ b/src/cloudpilot/emulator/hardware/EmRegsISPDana.h
+@@ -18,6 +18,7 @@
+     bool TryHostAckIn(unsigned endpoint);
+     bool PacketIsIn(unsigned endpoint) const { return endpoint<16 && (dcEndpoints[endpoint]&64); }
+     PacketResult PeekHostIn(unsigned endpoint, std::vector<uint8>&, bool& data1) const;
++    uint64 PacketResetEpoch(unsigned endpoint) const { return packetResetEpoch.at(endpoint); }
+     unsigned PacketCapacity(unsigned endpoint) const { return endpoint<16 ? Capacity(endpoint) : 0; }
+     uint8 EffectiveAddress() const { return effectiveAddress; }
+     void Reset(Bool hardware) override;
+@@ -35,6 +36,7 @@
+     virtual uint64 CurrentCycle() const;
+     virtual uint64 ClockHz() const;
+  private:
++    std::array<uint64,16> packetResetEpoch{};
+     struct Packet { uint16 length=0, words=0; bool full=false, writing=false; std::array<uint16,32> data{}; };
+     struct Endpoint { std::array<Packet,2> packet{}; uint16 cpu=0, bus=0, error=0;
+         bool statusPending=false, stalled=false, toggle=false, setup=false, overwrite=false, offered=false; };
+--- a/src/cloudpilot/emulator/hardware/EmRegsISPDana.cpp
++++ b/src/cloudpilot/emulator/hardware/EmRegsISPDana.cpp
+@@ -208,6 +208,7 @@
+             try { ValidateConfiguration(); } catch(...) { dcEndpoints[endpoint]=old; throw; }
+         }
+         flushed=0;
++        for(auto& epoch:packetResetEpoch) ++epoch;
+         fifo={}; allocated=false; setupPending=false; cursor=0; dcInterrupt&=0xff;
+         RefreshIrq();
+         configNext=next;
+@@ -405,7 +406,7 @@
+         } else { b={}; ep.setup=false; }
+         if(dcEndpoints[e]&32) ep.cpu^=1;
+     } else if(c>=0x40 && c<=0x4f) fifo[e].stalled=true;
+-    else if(c>=0x80 && c<=0x8f) { flushed &= ~(1u<<e); fifo[e]={}; }
++    else if(c>=0x80 && c<=0x8f) { flushed &= ~(1u<<e); fifo[e]={}; ++packetResetEpoch[e]; }
+     else if(c==0xf4) setupPending=false;
+     dcCommand=c; dcWord=0; dcLatch=0; cursor=0; accessCancelled=false;
+     if(writePacket || readPacket) {
+--- a/src/cloudpilot/emulator/hardware/UsbDanaPort.h
++++ b/src/cloudpilot/emulator/hardware/UsbDanaPort.h
+@@ -39,6 +39,7 @@
+     bool resetRequired=true;
+     uint32_t enableCount=0;
+     std::array<bool,15> outToggle{};
++    std::array<uint64,15> outResetEpoch{};
+     static UsbDanaPort& Self(void* p) { return *static_cast<UsbDanaPort*>(p); }
+     static R Result(EmRegsISPDana::PacketResult r) {
+         using D=EmRegsISPDana::PacketResult;
+@@ -57,7 +58,7 @@
+     R Setup(const uint8_t* data) {
+         if(!Ready()) return R::Timeout;
+         auto r=Result(dc.HostOut(0,{data,data+8},false,true));
+-        if(r==R::Ack) outToggle[0]=true;
++        if(r==R::Ack) { outToggle[0]=true; outResetEpoch[0]=dc.PacketResetEpoch(0); }
+         return r;
+     }
+     R Out(uint8_t ep,const uint8_t* data,unsigned size) {
+@@ -65,6 +66,9 @@
+         if(ep>14 || size>64) return R::Unsupported;
+         const unsigned fifo=ep ? ep+1 : 0;
+         if(dc.PacketIsIn(fifo) || size>dc.PacketCapacity(fifo)) return R::Timeout;
++        // ECR writes and clear-halt restart the controller's DATA0 sequence.
++        const auto epoch=dc.PacketResetEpoch(fifo);
++        if(outResetEpoch[ep]!=epoch) { outResetEpoch[ep]=epoch; outToggle[ep]=false; }
+         std::vector<uint8> bytes;
+         if(size) bytes.assign(data,data+size);
+         auto r=Result(dc.HostOut(fifo,bytes,outToggle[ep]));

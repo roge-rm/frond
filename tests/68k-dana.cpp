@@ -574,6 +574,19 @@ static void UsbAdapterTest() {
     assert(port.EpIn(14,bytes,&size)==R::Ack && size==1 && bytes[0]==99);
     assert(port.EpIn(15,bytes,&size)==R::Unsupported);
     assert(port.EpOut(15,setup,1)==R::Unsupported);
+    // Reconfiguration and clearing halt reset DATA0 independently of the host cache.
+    assert(port.Reset()); config();
+    auto take=[&](unsigned fifo,unsigned expected) {
+        dc.DC(0x10+fifo); assert(dc.DCData()==1); assert((dc.DCData()&255)==expected); dc.DC(0x70+fifo);
+    };
+    bytes[0]=71; assert(port.EpOut(1,bytes,1)==R::Ack); take(2,71);
+    config();
+    bytes[0]=72; assert(port.EpOut(1,bytes,1)==R::Ack); take(2,72);
+    // A single-endpoint clear must leave another endpoint's DATA1 sequence intact.
+    bytes[0]=73; assert(port.EpOut(3,bytes,1)==R::Ack); take(4,73);
+    dc.DC(0x42); assert(port.EpOut(1,bytes,1)==R::Stall); dc.DC(0x82);
+    bytes[0]=74; assert(port.EpOut(1,bytes,1)==R::Ack); take(2,74);
+    bytes[0]=75; assert(port.EpOut(3,bytes,1)==R::Ack); take(4,75);
     puts("Dana shared USB adapter reset/reattach/address/lateACK tests passed");
 }
 
