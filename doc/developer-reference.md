@@ -678,6 +678,7 @@ All in `tools/`. Most take `--help`.
 | `test-zodiac-irq` | IRQ/FIQ boundaries and masks, banked return, NIMASK and unknown-input guards, timer and GPIO ISR acknowledgement, Thumb BL interruption, stall preflight, generated batches and ARMv5 regressions. See [AITC](zodiac2-aitc.md#cpu-delivery). Outside `make test`. |
 | `test-zodiac-exception` | ARM/Thumb SWI entry and MOVS return, F preservation on exceptions, banked registers, vectors, cache/MMU continuations, probe guards and Exact/Fast generated code with ARMv5 regressions. Outside `make test`. |
 | `test-zodiac-multiply` | ARMv4T scalar multiply flags and C/V policy, operands, accumulation, rejected forms and Exact/Fast parity, including ordinary generated blocks and ARMv5TE regression vectors. Outside `make test`. |
+| `test-zodiac-ssi-startup` | SSI1 mux/idle configuration, empty readback, guarded effects and Exact/Fast startup. Outside `make test`. |
 | `test-zodiac-uart-startup` | Disabled UART1/2 control, reset/readback, guarded effects and Exact/Fast startup. Outside `make test`. |
 | `test-zodiac-dma-channel` | Disabled DMA channel allocation/configuration, reset and Exact/Fast execution. Outside `make test`. |
 | `test-zodiac-dma-startup` | Idle DMA global reset/control, guarded channel effects and Exact/Fast startup. Outside `make test`. |
@@ -706,7 +707,7 @@ All in `tools/`. Most take `--help`.
 | `test-zodiac-graphics-acquisition` | Explicit virtual raw axes, guest-time conversion, reset/cancellation, retained tagged FIFO, read-only counts, GPIO source patterns and real timed helper readback/identity on Exact/Fast. Outside `make test`. |
 | `test-zodiac-graphics-gpio` | Virtual two-bank GPIO, direction/latch/pull-down state, logical output pads, stored readback, unknown inputs and strict/reset/access guards. See [virtual GPIO](zodiac2-cs5.md#virtual-gpio-banks). Outside `make test`. |
 | `test-zodiac-i2c-image` | Private I2C image parsing, exact length and explicit endpoint attachment with a synthetic ROM. Outside `make test`. |
-| `test-imx1-sysctrl` | SCM GCCR configuration, guarded boot override, fetch isolation and Timer 1 phase. See [System Control](zodiac2-sysctrl.md). Outside `make test`. |
+| `test-imx1-sysctrl` | SCM GCCR/FMCR configuration, guarded boot and memory mux changes, fetch isolation and Timer 1 phase. See [System Control](zodiac2-sysctrl.md). Outside `make test`. |
 | `test-imx1-eim` | EIM chip-select register state and strict bootstrap limits. See [EIM](zodiac2-eim.md). Outside `make test`. |
 | `test-zodiac-mmio` | Bootstrap register/RAM state and Exact/Fast probe checks. Optional `build/test-zodiac-mmio-probe ROM` compares private scenarios. Outside `make test`. |
 | `bluetooth-opp-peer` | Build the OPP test peer. |

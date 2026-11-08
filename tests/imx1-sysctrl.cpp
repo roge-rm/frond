@@ -48,7 +48,7 @@ int main() {
     }
     assert(unknown == 0xdeadbeef);
     read(gccr, 0x6f);
-    for (auto address : {0x0021b800u, 0x0021b804u, 0x0021b808u, 0x0021b80cu, 0x0021b814u,
+    for (auto address : {0x0021b800u, 0x0021b804u, 0x0021b80cu, 0x0021b814u,
                          0x00208010u, 0x00212000u, 0x00214000u, 0x00222000u}) {
         unknown = 0xdeadbeef;
         assert(soc.access(address, 4, false, unknown, 3) == Imx1BootstrapAccess::unmapped);
@@ -58,6 +58,39 @@ int main() {
     assert(!soc.instructionWord(gccr, unknown));
     assert(!soc.instructionRead(gccr, 2, unknown));
     read(gccr, 0x6f);
+    // Table 8-3 input selectors retain configuration, without supplying pin levels.
+    constexpr uint32_t fmcr = 0x0021b808;
+    assert(!std::strcmp(Imx1Bootstrap::registerName(fmcr), "SCM.FMCR"));
+    read(fmcr, 3);
+    for (unsigned bit = 3; bit <= 8; ++bit) {
+        write(fmcr, 3 | (1u << bit));
+        read(fmcr, 3 | (1u << bit));
+    }
+    write(fmcr, 0x1fb);
+    for (unsigned bit = 9; bit < 32; ++bit) {
+        write(fmcr, 3 | (1u << bit), Imx1BootstrapAccess::reservedBits);
+        read(fmcr, 0x1fb);
+    }
+    for (uint32_t changed : {0u, 1u, 2u}) {
+        write(fmcr, changed, Imx1BootstrapAccess::sideEffect);
+        read(fmcr, 0x1fb);
+    }
+    write(fmcr, 7, Imx1BootstrapAccess::externalInput);
+    read(fmcr, 0x1fb);
+    for (uint32_t size : {0u,1u,2u,8u}) {
+        assert(soc.access(fmcr,size,false,unknown) == Imx1BootstrapAccess::width);
+        assert(soc.access(fmcr,size,true,unknown) == Imx1BootstrapAccess::width);
+    }
+    for (unsigned lane = 1; lane < 4; ++lane)
+        assert(soc.access(fmcr + lane,4,false,unknown) == Imx1BootstrapAccess::width);
+    assert(!soc.instructionWord(fmcr, unknown));
+    Imx1Bootstrap fresh;
+    unknown = 0xdeadbeef;
+    assert(fresh.access(fmcr,4,false,unknown) == Imx1BootstrapAccess::ok && unknown == 3);
+    auto copied = soc;
+    unknown = 0;
+    assert(copied.access(fmcr,4,false,unknown) == Imx1BootstrapAccess::ok && unknown == 0x1fb);
+    write(fmcr,3);
     // Table 8-5 does not gate Timer 1. Retained and rejected writes leave its phase alone.
     write(0x0021b000, 0x57000003);
     write(0x0021b020, 2);
@@ -74,9 +107,9 @@ int main() {
     write(gccr, 0x6f);
     soc.advanceFastBusCycles(96);
     read(0x00202010, 2);
-    // SCM access must not weaken asynchronous CGM guards.
+    // SCM access must not weaken the CGM oscillator guards.
     write(0x00202000, 0);
-    write(0x0021b000, 0x57000403, Imx1BootstrapAccess::sideEffect);
+    write(0x0021b000, 0x57000002, Imx1BootstrapAccess::sideEffect);
     read(0x0021b000, 0x57000003);
     std::puts("PASS: SCM GCCR reset/configuration, transactional guards, fetch isolation and Timer 1 phase");
 }
