@@ -16,6 +16,12 @@ int main() {
     assert(strict.access(eim, 0x200acb98, 0x160113e8, 4, false, value) == A::unmapped);
     configureGraphicsInterface(state, eim);
     configureGraphicsController(state, eim);
+    for (uint32_t pc : {0x200b8fccu, 0x200b9030u}) {
+        value = 0xdeadbeef;
+        assert(state.access(eim, pc, 0x1601021c, 4, false, value) == A::sequence);
+        assert(value == 0xdeadbeef);
+        assert(strict.access(eim, pc, 0x1601021c, 4, false, value) == A::unmapped);
+    }
     struct Operation { uint32_t pc, address, value; bool write; };
     for (auto op : {Operation{0x200acb98, 0x160113e8, 0, false},
             {0x200acba8, 0x160113e8, 0x400, true}, {0x200acbb4, 0x16010144, 0x2440, true},
@@ -67,6 +73,21 @@ int main() {
     assert(state.engineState().emptyRing());
     assert(state.engineState().ringAddress() == 0x150000 && state.engineState().ringBytes() == 65536);
     assert(state.engineState().ringBaseWord() == 0x10150000);
+    for (uint32_t pc : {0x200b8fccu, 0x200b9030u}) {
+        for (unsigned i = 0; i < 16; ++i) {
+            value = 0xdeadbeef;
+            assert(state.access(eim, pc, 0x1601021c, 4, false, value) == A::ok && value == 0);
+            assert(state.engineState().emptyRing() && state.engineState().ringBytes() == 65536);
+        }
+        value = 0xdeadbeef;
+        assert(state.access(eim, pc, 0x1601021c, 4, true, value) == A::externalInput);
+        for (uint32_t width : {1u, 2u})
+            assert(state.access(eim, pc, 0x1601021c, width, false, value) == A::width);
+        assert(value == 0xdeadbeef && state.engineState().emptyRing());
+    }
+    value = 0xdeadbeef;
+    assert(state.access(eim, 0x200b8fd0, 0x1601021c, 4, false, value) == A::externalInput);
+    assert(value == 0xdeadbeef);
     value = 0;
     assert(state.access(eim, 0x200b02fc, 0x16011280, 4, true, value) == A::sequence);
     assert(state.access(eim, 0x200b02ac, 0x16011280, 4, false, value) == A::ok && value == 0x10000);
@@ -91,6 +112,10 @@ int main() {
     state.reset();
     assert(!state.engineState().setupComplete() && !state.engineState().emptyRing());
     assert(state.engineState().ringAddress() == 0 && state.engineState().ringBytes() == 0);
+    for (uint32_t pc : {0x200b8fccu, 0x200b9030u}) {
+        value = 0xdeadbeef;
+        assert(state.access(eim, pc, 0x1601021c, 4, false, value) == A::sequence && value == 0xdeadbeef);
+    }
     assert(state.engineState().nativeOptionWord() == 0);
-    std::puts("PASS: native engine setup, clipping, bounded empty ring, guards and reset");
+    std::puts("PASS: native engine setup, clipping, bounded empty ring and consumer readback, guards and reset");
 }
