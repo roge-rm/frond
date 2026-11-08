@@ -177,24 +177,68 @@ Internal lists the databases in the Palm's RAM by file name, with their type and
 
 Each device only gets the connections it really has. A control it doesn't have yet is greyed out, with "Not available on the <device> yet". The Zire 72 has no serial port, so that row isn't shown.
 
+### Connections between Fronds
+
+A connection is a link between two Frond installs on the same network, paired once. A machine's Infrared, Serial or Bluetooth setting can name a connection, and then the two Palms talk to each other through it, for example beaming a memo from a Tungsten E2 on a phone to a T|X on your computer. One link carries all the channels between two installs, and it only runs while a machine wants it.
+
+Open Connections from the File menu on Linux or the Home ⋮ menu on Android. At the top, This Frond is the name other installs see, with Rename. Each install picks a name the first time. Under Connections are the paired installs, each with a status:
+
+- Connected, with the round trip time and what it carries, for example "Connected · 4 ms · Infrared: Palm TX – Tungsten E2".
+- Seen at 192.168.1.20, which means it's on the network but nothing is using the link.
+- Not seen.
+- Key changed, pair again, see below.
+- Not paired on <name>, pair again, which means that install forgot you.
+
+On Linux "This computer" is the first row. It joins machines running in different windows on the same computer, needs no pairing and is always there.
+
+A row's menu (right-click on Linux, ⋮ on Android) has Rename, Address…, Bluetooth radio and Forget. Rename is only your name for it. Address… sets an address to try when the install isn't found by itself, and Forget removes the pairing, after which the other install shows "pair again".
+
+To pair, open Connections on both. The other install shows up under Nearby, and Pair (or Add by address… if it isn't listed, with an address like `192.168.1.20`) asks it for a code. It shows a 6-digit code, for example "dan-laptop wants to pair. Code 482 913", and you type that code in on the first one ("Enter the code shown on Pixel 8"). The code lasts 2 minutes and 3 wrong tries lock it for a minute. Pairing swaps keys, and every later link checks them. If an install's key doesn't match, the row says "Key changed, pair again" and Frond doesn't link until you pair again. That happens after a reinstall, and it can also mean someone else is using that address.
+
+Frond only talks to private and link-local addresses, over TCP and UDP port 5035. A firewall that blocks 5035 on either computer shows the other as "Not seen". Allow both TCP and UDP on 5035.
+
+Android asks for the local network permission when Connections opens and when a machine first starts with a connection set. Without it the status line says "local network access is off".
+
+#### Using a connection
+
+In a machine's settings (Edit settings… on Linux, Machine settings on Android) and in the Connections panel while it runs, the Infrared, Serial and Bluetooth rows list Off, the local choices, then the connections by name:
+
+- Infrared and Serial: on Linux Off, Terminal (PTY), Wait for a peer, then This computer and the paired installs. On Android Off, then the paired installs.
+- Bluetooth: Off, This Frond, then the paired installs. On Linux there is also Controller socket. This computer isn't listed, as machines on one computer share This Frond's radio.
+
+Pick the same kind on both sides, for example Infrared on the E2 set to your phone's name and Infrared on the phone's machine set to the computer's name. A machine whose connection has been forgotten shows "Unknown connection" and acts as Off. The choice is saved with each machine and applied every time it starts.
+
+The status line says what is happening:
+
+- "Infrared: Pixel 8, joined to Tungsten E2", the other machine is there.
+- "waiting for a machine on Pixel 8", the link is up or coming up but nothing on that install is set to you. It joins when the other machine starts.
+- "Infrared on Pixel 8 is in use by Palm TX", only one machine per install can use a kind for a connection, and the first one has it. This is "busy".
+- "Pixel 8 not found", and "Palm asleep", "Palm paused" or "port closed" when the far side is asleep, in the background or has closed its serial port.
+- "key changed, pair again" and "pair again with Pixel 8" as in the list above.
+
+Infrared is byte for byte, so Palm OS's normal Beam works, with the receiver on in both. Serial passes bytes with flow control, and the far Palm's port counts as open only once both ends are joined. Baud rate and the separate RTS and DTR lines aren't carried. A link that drops loses the bytes in flight. Changing the choice on a running machine takes effect at once.
+
+Bluetooth over a connection uses one radio for the pair. Bluetooth radio in the row menu says whose it is, This Frond's or the other's, and Palms on both installs find each other through it. Moving the radio disconnects the controllers and they reconnect on their own. This Frond's radio is `btvirt`, which the Debian package and the Android app include. A source build looks in its build tree, see [Bluetooth](#bluetooth).
+
 ### Endpoints
 
-Serial, USB HotSync and infrared beaming each have an endpoint setting:
+Without a connection, serial, USB HotSync and infrared beaming have an endpoint setting on Linux:
 
 - Off (the default).
-- Terminal (PTY) on Linux, where Frond prints a `/dev/pts/N` path for a terminal program or pilot-link.
-- Wait for a peer listens on a port on 127.0.0.1 on Linux (all addresses on Android, which shows the phone's address) and takes one client at a time.
-- Connect to an address (Android) joins a peer that is waiting.
+- Terminal (PTY), where Frond prints a `/dev/pts/N` path for a terminal program or pilot-link.
+- Wait for a peer listens on a port on 127.0.0.1 and takes one client at a time.
 
-Linux keeps the choice between runs. A status line shows the endpoint and whether a peer is connected. Changing the choice while the machine runs closes the old connection. Nothing from the host is saved in a session, and reset, true sleep and loading a session close the connection.
+The choice is saved with each machine. A status line shows the endpoint and whether a peer is connected. Changing the choice while the machine runs closes the old connection. Nothing from the host is saved in a session, and reset, true sleep and loading a session close the connection.
 
-Android has no PTYs, so its endpoints go over the network, to another Frond or to a link tool on a computer:
+Android has no PTYs. Its USB HotSync row has Off, Wait for a peer (all addresses, port 5034, and it shows the phone's address) and Connect to an address, to reach a link tool on a computer. Infrared, serial and Bluetooth on Android use connections only.
+
+The link tools stay for scripts and for USB HotSync from a phone:
 
 - `tools/link-irda.py` joins two TCP endpoints. Each is a local port, `HOST:PORT`, or `listen:PORT`.
 - `tools/link-pty.py` puts a PTY in front of a port for pilot-link and terminals.
-- `tools/link-bluetooth.py` shares one `btvirt` (see Bluetooth).
+- `tools/link-bluetooth.py` shares one `btvirt`.
 
-Default Android ports are 5030 for infrared, 5032 Bluetooth, 5033 serial and 5034 USB HotSync. A relay waits again after its peer goes, and Connect again retries.
+A relay waits again after its peer goes, and Connect again retries.
 
 ### Network
 
@@ -208,7 +252,7 @@ The mode is saved. Live connections close when the machine resumes, so reload or
 
 ### Serial port
 
-The serial port (the T|X, E2 and E3 connector, the TG50 and the IIIx cradle) goes to a PTY or a TCP port. Open the path with `screen` or `minicom`, or connect to the port, for example `nc 127.0.0.1 5023`. Peers get CTS, DSR and DCD while connected, RTS flow control is honoured, and bytes sent with no peer are dropped. On Android use Wait for a peer or Connect to an address, then `link-pty.py PHONE:5033 --link /tmp/palm-serial` on a computer.
+The serial port (the T|X, E2 and E3 connector, the TG50 and the IIIx cradle) goes to a PTY or a TCP port. Open the path with `screen` or `minicom`, or connect to the port, for example `nc 127.0.0.1 5023`. Peers get CTS, DSR and DCD while connected, RTS flow control is honoured, and bytes sent with no peer are dropped. On Android the serial port goes to another Frond through a connection.
 
 Serial HotSync works on the E2 with pilot-link (`pilot-xfer -p /dev/pts/N -l`): put the serial port on a PTY, press HotSync in the Connections panel (Linux) or in the Connections sheet (Android) on the E2 or T|X, which pulls the connector's HotSync line low for half a second like the cradle button. The Palm starts HotSync and pilot-link answers. The T|X's serial HotSync isn't tested.
 
@@ -257,40 +301,33 @@ Programs that use NetLib, like a web clipping app or a telnet client, then work 
 
 ### USB HotSync
 
-Plugs the Palm's USB port into the computer. Start HotSync on the Palm (Local, Cradle/Cable), then run pilot-link, for example `pilot-xfer -p /dev/pts/7 -l`. The status line shows the bus step, and "enumerated" means it's ready. HotSync takes 15 to 20 seconds to start. pilot-link only opens serial devices, so for a TCP port put a PTY in front with `tools/link-pty.py` (a plain `socat` PTY doesn't work). Changing the setting or loading a session unplugs the cable and plugs it back in.
+Plugs the Palm's USB port into the computer. On Android use Wait for a peer, then `link-pty.py PHONE:5034 --link /tmp/palm-usb` on a computer. Start HotSync on the Palm (Local, Cradle/Cable), then run pilot-link, for example `pilot-xfer -p /dev/pts/7 -l`. The status line shows the bus step, and "enumerated" means it's ready. HotSync takes 15 to 20 seconds to start. pilot-link only opens serial devices, so for a TCP port put a PTY in front with `tools/link-pty.py` (a plain `socat` PTY doesn't work). Changing the setting or loading a session unplugs the cable and plugs it back in.
 
 ### Infrared
 
-Infrared beaming links two Frond machines. Detach the infrared keyboard first, as they share the port. Put each machine on Wait for a peer with a different port, then join them:
+Infrared beaming links two Frond machines through a connection, see Connections between Fronds above. Detach the infrared keyboard first, as they share the port. Set Infrared on each machine to the other install (or This computer for two windows on one computer) and use Palm OS's normal Beam command. Both Palms must be awake and the receiver needs Beam Receive on.
+
+On Linux you can still put each machine on Wait for a peer with a different port and join them yourself, for scripts:
 
 ```sh
 python3 tools/link-irda.py 5030 5031
 ```
 
-Use Palm OS's normal Beam command. Both Palms must be awake and the receiver needs Beam Receive on. For two Fronds on different machines use `HOST:PORT` or `listen:PORT` in the link tool. On Android, Infrared beaming has Wait for a peer and Connect to another Frond, so two phones need nothing else. The relay closes when either side goes, and `link-irda.py` reconnects when a Palm wakes. Beaming is off each time the emulator starts.
+`link-irda.py` reconnects when a Palm wakes.
 
 Infrared keyboard (Attached) makes your keyboard a Palm Universal Wireless Keyboard. Install Palm's keyboard driver (version 1.13, not included), reset if it asks, open Keyboard on the Palm and turn it ON. Then type in the Palm window. Left Alt is Fn and right Alt is AltGr, and the layout follows physical US keys, so pick the matching one in the driver. F1 to F4 and Escape keep their button and power uses. The attachment is saved with the machine.
 
 ### Bluetooth
 
-Bluetooth is off by default, and uses the original Palm Bluetooth stack against a virtual controller from `btvirt`, which you start yourself. Build it once from a source checkout (needs Git, a C toolchain, autotools, pkg-config and the GLib, D-Bus and readline headers):
+Bluetooth is off by default, and uses the original Palm Bluetooth stack against a virtual controller from `btvirt`. Set Bluetooth to This Frond and Frond runs `btvirt` for you, then turn Bluetooth off and on again in Palm OS (Sony Preferences on the TG50). Set Discoverable to Yes on the receiving Palm. The status shows the radio and the link state. Each machine gets its own virtual controller, and only machines on the same radio can see each other, so two machines on one computer set to This Frond find each other. To reach another install, pick a connection, see Connections between Fronds above. Frond never touches a real Bluetooth adapter.
+
+The Debian package and the Android app include `btvirt`. A source checkout builds it once (needs Git, a C toolchain, autotools, pkg-config and the GLib, D-Bus and readline headers):
 
 ```sh
 python3 tools/build-bluetooth-provider.py --fetch
-install -d -m 700 build/bluetooth-sockets
-build/bluetooth-provider/emulator/btvirt -s"$PWD/build/bluetooth-sockets"
 ```
 
-Turn Bluetooth On, enter the absolute path of `build/bluetooth-sockets/bt-server-bredr`, then turn Bluetooth off and on again in Palm OS (Sony Preferences on the TG50). The status shows `radio=on`, the link state, `provider connected` and the number of open ACL links. Set Discoverable to Yes on the receiving Palm. Each Frond gets its own virtual controller, and only Fronds on the same `btvirt` can see each other. Keep the socket private to your user. Frond never touches a real Bluetooth adapter.
-
-Over the network, one machine runs `btvirt` and the others join it:
-
-```sh
-python3 tools/link-bluetooth.py serve "$PWD/build/bluetooth-sockets/bt-server-bredr" listen:5032
-python3 tools/link-bluetooth.py join 192.168.1.20:5032 "$PWD/build/bt-join"
-```
-
-Then start Frond with `--bluetooth "$PWD/build/bt-join"`. On Android, the Bluetooth row has Host other Fronds (runs `btvirt` in the app and shows the phone's addresses) and Join another Frond.
+On Linux, Controller socket takes the absolute path of the `bt-server-bredr` socket of a `btvirt` you run yourself, for example `build/bluetooth-sockets/bt-server-bredr` after `install -d -m 700 build/bluetooth-sockets` and `build/bluetooth-provider/emulator/btvirt -s"$PWD/build/bluetooth-sockets"`. Keep that socket private to your user.
 
 Identities: the T|X's address comes from its image, so two clones of one T|X image look like the same device. Use images with different addresses, or mix models. The E2, Zire 72 and TG50 are given a new address each time they connect, so trusted devices don't carry over. The Zire 72 makes one up the first time and keeps it in the session, so don't copy a session to run two.
 

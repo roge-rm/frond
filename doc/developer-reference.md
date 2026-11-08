@@ -32,9 +32,9 @@ The Palm IIIx has its own runner, `out/frond-68k` (`make out/frond-68k`, install
 | `--fast-audio`, `--experimental-fast-audio` | Preview one qualified TX, E2, E3 or Zire 72 stereo stream before the firmware audio queue. The E3 and E2 de-NVFS image use the HAL path with an ARM stream-start verifier and no Thumb queue hooks. |
 | `--low-latency-queue` | The `--fast-audio` queue limits without the preview, on any device and firmware: low startup thresholds, and the 120 Hz slice and pending caps of 6 and 4 host periods (3072/2048 frames at the default 512) while non-silent frames were queued in the last 100 ms. The frontends pass it for Low-latency audio on ARM devices with sound when the firmware is not qualified for the preview, including modified E3 images and the TG50. |
 | `--gdb PORT` | Wait for GDB on 127.0.0.1:PORT before running, see [GDB and PACE monitor](#gdb-and-pace-monitor). |
-| `--serial off\|pty\|tcp:PORT` | Connect the serial port to a host PTY or a loopback TCP listener (one client at a time). |
-| `--usb off\|pty\|tcp:PORT` | Same for the USB HotSync port, through a built-in USB host. |
-| `--irda off\|pty\|tcp:PORT` | Same for infrared SIR bytes. Not with the infrared keyboard. |
+| `--serial off\|pty\|tcp:PORT\|unix:PATH` | Connect the serial port to a host PTY, a loopback TCP listener or a Unix socket, see [Connections](#connections) (one client at a time). |
+| `--usb off\|pty\|tcp:PORT\|unix:PATH` | Same for the USB HotSync port, through a built-in USB host. |
+| `--irda off\|pty\|tcp:PORT\|unix:PATH` | Same for infrared SIR bytes. Not with the infrared keyboard. |
 | `--bluetooth off\|SOCKET` | Connect the virtual radio to a local H4 controller Unix socket (such as `btvirt`). |
 | `--desktop-socket PATH` | Connect to the desktop launcher's control socket, see [Control socket](#control-socket). Not with `--run-for` or `--script`. |
 | `--save-on-disconnect FILE` | Save the session to this absolute path if the control socket closes without a `quit`, then exit, 1 if that save failed. Holds `FILE.core` locked for the run. Needs `--desktop-socket`. |
@@ -295,8 +295,8 @@ State commands take no argument. Mode commands change the setting and reply with
 | `microphone-state`, `microphone-epoch` | | `microphone` |
 | `microphone-mode` | `on`, `off` or `on-return:N` (arm when the Palm app returns to the foreground, N from `microphone-epoch`) | `microphone` |
 | `display` | words `fit=`(`none` `fit` `whole` `fill`), `smooth=`(`on` `off`), `keyboard=`(`on` `off`), `jog=`(`hidden` `screen` `keyboard`) | `display`: `queued`, applied once the app is in the foreground |
-| `serial-state`, `usb-state` | | `serial`, `usb`: `off`, `pty PATH waiting\|connected`, `tcp PORT waiting\|connected`, or `off` with an error |
-| `serial-mode`, `usb-mode`, `irda-mode` | `off`, `pty` or `tcp:PORT` | the state |
+| `serial-state`, `usb-state` | | `serial`, `usb`: `off`, `pty PATH waiting\|connected`, `tcp PORT waiting\|connected`, `unix PATH waiting\|connected`, or `off` with an error |
+| `serial-mode`, `usb-mode`, `irda-mode` | `off`, `pty`, `tcp:PORT` or `unix:PATH` | the state |
 | `irda-state` | | `infrared` |
 | `irda-stats` | | `infrared`: counters `rx= tx= rx_drop= tx_drop= pending= baud= rx_on= tx_on= power= sleeping=` |
 | `bluetooth-state` | | `bluetooth` |
@@ -373,6 +373,62 @@ The TG50 keyboard keys are numbers 17 to 58, in rows from the top left.
 
 `tools/test-input-replay.py` checks that invalid replays fail before the guest runs.
 
+## Connections
+
+Connections link Frond installs on a network, see [using-frond.md](using-frond.md). The desktop runs them in a per-user hub, `frond --link-service` (same binary, no window). Windows start it when they need it and it exits 30 seconds after its last client.
+
+### Unix endpoints
+
+`unix:PATH` for `--serial`, `--irda` and `--usb` (and `serial-mode`, `irda-mode`, `usb-mode`, in both cores) listens on a Unix socket and takes one client, otherwise like `tcp:`. PATH is absolute and under 108 bytes, and its folder must exist, be a directory you own and have mode 0700, or the core refuses it. A stale socket file is removed, a live one is refused ("is in use") and a file that isn't a socket is left alone. The socket is removed when the endpoint closes. A core that is killed leaves it behind until the next start.
+
+### Hub socket
+
+The hub listens on `$XDG_RUNTIME_DIR/frond/link.sock` (folder mode 0700, `FROND_LINK_SOCKET` picks another). The cores' link sockets are `ir-PID.sock`, `serial-PID.sock` and `bt-PID.sock` in the same folder. Messages are JSON lines. A client sends `{"op": ...}` and the hub answers with `{"type": ...}` events.
+
+| Op | Fields |
+| --- | --- |
+| `watch` | `on`. Sends `state` now and on every change. |
+| `state` | One `state` event. |
+| `rename` | `name`, this install's name. |
+| `peer-rename`, `peer-address`, `forget` | `id`, then `name` or `address`. |
+| `peer-radio` | `id`, `radio` (`here` or `there`). |
+| `pair`, `pair-code`, `pair-cancel`, `pair-dismiss` | `id` (from Nearby) or `address`, then the `code`. |
+| `ir-attach`, `serial-attach` | `machine`, `device`, `link` (`local` or a connection id), `socket` (the core's `unix:` path). One of each per client. |
+| `ir-detach`, `serial-detach` | |
+| `bt-attach` | `machine`, `device`, `link` (`radio` or a connection id), `socket` (the path the hub listens on for the core, which is then given to `bluetooth-mode`). |
+| `bt-detach` | |
+
+Attaches end when the client disconnects. A client that wants one to survive a hub restart sends it again.
+
+Events: `hello` (`id`, `name`, `port`, `pid`), `state` (name, port, connections with `rtt`, `seen`, `up`, `keyChanged` and `channels`, nearby installs), `pair-request`, `pair-request-update`, `pair-request-end`, `pair-peer`, `pair-result` (`paired`, `wrongcode`, `lockedout`, `expired`, `notpairing`, `unreachable`, `version`, `failed`), and `ir`, `serial` and `bt` with `state` (`joined`, `waiting`, `busy`, `notfound`, `connecting`, `keychanged`, `forgotten`, `unknown`; `bt` also `radio`, `noradio`, `here`, `there`), `peer`, `far` (`asleep`, `paused`, `reset`, `running`) and `busyBy`.
+
+### Store
+
+`<data>/frond/connections/` (0700, files 0600, the Android app keeps its own copy of the same format under its files folder). Only the hub writes it, behind a `.lock` file.
+
+- `identity.json`: `version`, `id`, `name`, `secret` (X25519), `port`.
+- `connections.json`: `version` 1 and `entries`, each with `id`, `name`, `peerName`, `key`, `address`, `manual`, `paired`, `lastSeen`, `lastHost`, `lastPort`, `bluetoothRadio` (`here` or `there`), `bluetoothRadioAt` and `keyChanged`.
+
+### Network
+
+TCP 5035 carries the links (Noise KK against the pinned keys, or a pairing request while a pair dialog is open) and UDP 5035 the beacons, sent only while Connections is open or a machine waits for a peer that isn't up. Only private, link-local and loopback addresses are accepted.
+
+### Machine settings
+
+The per-machine settings file `<name>.frond.settings.json` has `infrared`, `serial`, `usb` and `bluetooth`. Values:
+
+| Key | Values |
+| --- | --- |
+| `infrared`, `serial` | `off`, `pty`, `tcp:PORT`, `link:local` (This computer, desktop), `link:ID` |
+| `usb` | `off`, `pty`, `tcp:PORT` |
+| `bluetooth` | `off`, `radio` (This Frond), `socket:/absolute/path`, `link:ID` |
+
+A `link:ID` that isn't in the store acts as `off` and shows as Unknown connection. The Android metadata `settings` holds `infrared`, `serial` and `bluetooth` the same way, with only `off`, `radio` and `link:ID`. Nothing goes into the `.frond` session. With a link or `radio` choice the desktop starts the core with `--irda`, `--serial` or `bluetooth-mode` pointing at the hub's sockets.
+
+### btvirt
+
+`make deb` builds `btvirt` with `tools/build-bluetooth-provider.py` and installs it as `/usr/lib/frond/btvirt`. For This Frond's radio the hub looks for `FROND_BTVIRT`, `../lib/frond/btvirt` beside the binary, `btvirt` beside the binary, then the build tree, and runs it in `<runtime>/frond/radio/`. It stops 5 seconds after nothing uses it.
+
 ## Developer runner
 
 `tools/frond-run.py` installs PRC and PDB files into a private copy of a session, launches an app, runs a replay, takes screenshots, exports databases, and prints one JSON result. It needs Python 3.11 or later, a built core, and your own session or firmware.
@@ -402,7 +458,7 @@ python3 tools/frond-run.py --session ready.frond \
 | `--timeout`, `--startup-timeout`, `--ready-timeout`, `--command-timeout` | Wall-clock limits in seconds: overall 180, startup (socket and ready event) 60, each readiness phase 30, each socket command 30. |
 | `--headless` | SDL dummy video and audio. |
 | `--sound` | Sound on (off by default). |
-| `--serial ENDPOINT`, `--usb ENDPOINT` | `off`, `pty` or `tcp:PORT`, passed to the core. |
+| `--serial ENDPOINT`, `--usb ENDPOINT` | `off`, `pty`, `tcp:PORT` or `unix:PATH`, passed to the core. |
 
 The JSON has `version`, `status` (`ok` or `error`), `stage`, `error`, the socket `steps`, input hashes, `elapsed_seconds`, `core_exit_code` and `artifacts`. The exit status is 0 for ok, 1 for a failed run and 2 for bad arguments. The core log is `core.log`. The machine runs from a copy in `working/` in the output folder and the saved session is `working/working.frond` (with its card files beside it); `artifacts.machine` and `artifacts.session` give both paths, and `working/` can be passed to `--session` for a following run.
 
@@ -476,7 +532,7 @@ out/frond-68k iiix.frond --serial pty
 | `--audio-output FILE` | Write the piezo sound to a WAV file. |
 | `--audio-period FRAMES` | Host audio period, 64 to 8192. Default 512. |
 | `--tone-log` | Print each tone change (`tone: HZ Hz duty D at S s`). |
-| `--serial off\|pty\|tcp:PORT`, `--irda off\|pty\|tcp:PORT` | Connect the serial port or infrared to a host PTY or a loopback TCP listener. The PTY path is printed. |
+| `--serial off\|pty\|tcp:PORT\|unix:PATH`, `--irda off\|pty\|tcp:PORT\|unix:PATH` | Connect the serial port or infrared to a host PTY, a loopback TCP listener or a Unix socket. The PTY path is printed. |
 | `--gdb PORT` | Start the GDB stub on 127.0.0.1:PORT, see below. |
 | `--desktop-socket PATH` | Connect to the desktop's control socket, see [Control socket](#control-socket). The console is off then. |
 | `--save-on-disconnect FILE` | As on the ARM core. |
@@ -499,8 +555,8 @@ Read from standard input, one per line, unless `--desktop-socket` is used. Paths
 | `snapshot FILE` | Save the Palm screen as a PNG. |
 | `window-snapshot FILE` | Save the whole window, with silkscreen and buttons, as a PNG. |
 | `audio-on`, `audio-off`, `sound-state` | Turn sound on or off, or show it. |
-| `serial-mode off\|pty\|tcp:PORT`, `irda-mode off\|pty\|tcp:PORT` | Set the serial or infrared endpoint and show its state. |
-| `serial-state`, `irda-state` | Show the endpoint, `off` or `pty\|tcp ENDPOINT connected\|waiting`. |
+| `serial-mode off\|pty\|tcp:PORT\|unix:PATH`, `irda-mode off\|pty\|tcp:PORT\|unix:PATH` | Set the serial or infrared endpoint and show its state. |
+| `serial-state`, `irda-state` | Show the endpoint, `off` or `pty\|tcp\|unix ENDPOINT connected\|waiting`. |
 | `hotsync` | Press and release the cradle's HotSync button. |
 | `backlight-state` | `backlight: on` or `off`. |
 | `speed original\|uncapped` | Set the speed. |
@@ -749,7 +805,7 @@ All in `tools/`. Most take `--help`.
 | `check-audio-probe.py`, `check-bluetooth-probe.py`, `check-irda-probe.py` | Check the logs of the Palm probe apps. |
 | `check-compatibility.py`, `compatibility-results.py`, `app-compatibility.py` | App and system compatibility runs and their result decoding. |
 | `build-palm-probe.py` | Builds a Palm probe app from `tests/palm/` with a local SDK (`--probe NAME`, `--sdk PATH`). |
-| `build-bluetooth-provider.py`, `build-bluetooth-opp-peer.py` | Build the optional BlueZ H4 provider (`btvirt`) and the virtual OPP test peer. |
+| `build-bluetooth-provider.py`, `build-bluetooth-opp-peer.py` | Build the BlueZ H4 provider (`btvirt`, also installed by `make deb` as `/usr/lib/frond/btvirt`) and the virtual OPP test peer. |
 | `bluetooth-opp-peer.c`, `bluez-bdaddr.patch`, `bluez-bthost-config.patch` | Sources and patches for those. |
 | `palm-pppd.sh DEVICE` | Runs slirp (or pppd with `--pppd`) on the IIIx's serial PTY or `tcp:PORT`, see Palm IIIx. `slirp-select-fix.c` is the shim it preloads. |
 | `link-pty.py ENDPOINT` | Puts a PTY in front of a TCP endpoint (`PORT`, `HOST:PORT` or `listen:PORT`) for programs that only open serial devices. `--link PATH`, `--seconds N`. |
