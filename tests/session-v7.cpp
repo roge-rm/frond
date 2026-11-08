@@ -1681,6 +1681,29 @@ static void NandV9Folder() {
         bad[100] ^= 1;
         WriteFile(dir / "bad", bad);
         assert(frondStorage::pack(dir / "bad", dir / "bad.gz").ok && !frondStorage::unpack(dir / "bad.gz", dir / "out").ok);
+        // Unpacking stops at the size the header describes, and a header past the kind's real
+        // maximum (a NAND over 256 MiB, a classic stick of no known size) is refused at once.
+        auto longer = original;
+        longer.resize(longer.size() + (3u << 20), 0);
+        WriteFile(dir / "longer", longer);
+        assert(frondStorage::pack(dir / "longer", dir / "longer.gz").ok && !frondStorage::unpack(dir / "longer.gz", dir / "out").ok);
+        frondSdFile::Info big;
+        big.version = frondSdFile::versionV2;
+        big.nand = true;
+        big.payloadBytes = frondMachine::nandMainBytes(frondMachine::nandMaxBytes);
+        big.sideBytes = frondMachine::nandSpareBytes(frondMachine::nandMaxBytes);
+        assert(frondStorage::packed::knownSize(big));
+        big.payloadBytes += 1u << 20;
+        assert(!frondStorage::packed::knownSize(big));
+        big.nand = false;
+        big.classic = true;
+        assert(!frondStorage::packed::knownSize(big));
+        uint8_t hugeHeader[frondSdFile::headerBytes];
+        frondSdFile::makeHeaderV2(hugeHeader, 300ull << 20, 2, {}, 10ull << 20, frondSdFile::magicNand);
+        WriteFile(dir / "huge", std::vector<uint8_t>(hugeHeader, hugeHeader + sizeof(hugeHeader)));
+        assert(frondStorage::pack(dir / "huge", dir / "huge.gz").ok);
+        const auto refused = frondStorage::unpack(dir / "huge.gz", dir / "out");
+        assert(!refused.ok && refused.code == "image" && !fs::exists(dir / "out"));
         for (const auto& e : fs::directory_iterator(dir)) assert(e.path().filename().string().rfind(".frond", 0) != 0);
         fs::remove(plain);
         WriteFile(gz, damaged);

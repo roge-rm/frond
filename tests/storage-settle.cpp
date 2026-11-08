@@ -581,6 +581,71 @@ static void MismatchedJournal(const fs::path& root) {
     assert(frondStorage::settle(card).ok && frondStorage::readiness(card).ok);
 }
 
+// Names and leftovers settle refuses rather than guesses at, leaving the card as it is: a journal
+// name past 64 bits, a pending list of another size or beside a damaged header, and a journal
+// over a header that doesn't parse.
+static void RefusedGuesses(const fs::path& root) {
+    const auto dir = Fresh(root, "refused");
+    const auto card = dir / "nand.frondnand";
+    const auto file = WithSide(Random(2u << 20, 61), Random(65536, 62), 5, frondSdFile::magicNand);
+    WriteAll(card, file);
+    frondSdFile::Info info;
+    assert(frondSdFile::parseContainer(file.data(), info));
+
+    uint64_t generation = 0;
+    std::string suffix;
+    assert(frondStorage::journalName(card, dir / "nand.frondnand.journal-18446744073709551615.full", generation, suffix) &&
+           generation == UINT64_MAX && suffix == ".full");
+    const auto huge = dir / "nand.frondnand.journal-99999999999999999999";
+    assert(!frondStorage::journalName(card, huge, generation, suffix));
+    WriteAll(huge, {1, 2, 3});
+    assert(!frondStorage::hasChanges(card));
+    const auto unsettled = frondStorage::settle(card);
+    assert(!unsettled.ok && unsettled.code == "unsettled" && ReadAll(card) == file);
+    // A load at the card's own generation drops it as it does any stale journal file.
+    assert(frondStorage::settle(card, 5, info.payloadBytes).ok && !fs::exists(huge) && ReadAll(card) == file);
+
+    // A pending list of another size: refused as a mismatch, the card and its magic kept;
+    // discarding drops the list.
+    {
+        frondStorage::PendingWriter pending;
+        assert(pending.open(card, info.stored() + (1u << 20), 6));
+        assert(pending.add({0, 1}));
+    }
+    const auto stale = frondStorage::settle(card);
+    assert(!stale.ok && stale.code == "mismatch" && ReadAll(card) == file);
+    assert(frondStorage::readiness(card).code == "mismatch");
+    assert(frondStorage::discardMismatched(card).ok && ReadAll(card) == file && Snapshot(dir).size() == 1);
+
+    // A pending list beside a header that doesn't parse: refused as damaged, nothing written,
+    // and discarding doesn't drop it.
+    auto damaged = file;
+    damaged[3] = 'X';
+    WriteAll(card, damaged);
+    {
+        frondStorage::PendingWriter pending;
+        assert(pending.open(card, info.stored(), 6));
+        assert(pending.add({0}));
+    }
+    const auto broken = frondStorage::settle(card);
+    assert(!broken.ok && broken.code == "image" && broken.message == frondStorage::damagedMessage);
+    assert(ReadAll(card) == damaged);
+    assert(!frondStorage::discardMismatched(card).ok && fs::exists(frondStorage::pendingPath(card, 6)));
+    fs::remove(frondStorage::pendingPath(card, 6));
+
+    // A complete journal over a header that doesn't parse isn't applied.
+    Bytes next(file.begin() + 64, file.begin() + 64 + long(info.stored()));
+    next[10] ^= 1;
+    frondSdFile::ChunkCrcs crcs;
+    crcs.add(next.data(), next.size());
+    frondStorage::JournalWriter writer;
+    assert(writer.open(card, next.size(), 5, 6, frondStorage::JournalKind::session));
+    assert(writer.add(10, 1, next.data() + 10));
+    fs::path journal;
+    assert(writer.finish(crcs.table(), journal));
+    assert(!frondStorage::applyJournal(card, journal) && ReadAll(card) == damaged && fs::exists(journal));
+}
+
 int main(int argc, char** argv) {
     assert(argc == 3);
     const fs::path fixtures = argv[1], out = argv[2];
@@ -595,6 +660,7 @@ int main(int argc, char** argv) {
     NothingToDo(root);
     EditTemps(root);
     MismatchedJournal(root);
+    RefusedGuesses(root);
     fs::remove_all(root);
     std::puts("storage settle: ok");
     return 0;

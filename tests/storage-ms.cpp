@@ -338,6 +338,65 @@ fs::path blankStick(const fs::path& dir, const std::string& name, unsigned mb) {
     return file;
 }
 
+// A stick a TG50 mounted but never formatted: every L has a block of erased (0xff) data with the
+// driver's new-block extra bytes. It counts as blank and formats; a formatted stick with a damaged
+// MBR, or one block of anything else, doesn't.
+void mountedBlank(const fs::path& dir) {
+    const auto& l = layout(8);
+    auto mounted = frondMs::create(geometry(8));
+    for (uint32_t L = 0; L < l.UserBlocks(); ++L)
+        for (uint32_t p = 0; p < l.pagesPerBlock; ++p) {
+            std::fill_n(page(mounted, l, l.Home(L), p), 512, uint8_t(0xff));
+            std::memcpy(page(mounted, l, l.Home(L), p) + 512, newExtra(L).data(), 9);
+        }
+    const auto file = dir / "mounted.frondms";
+    writeStick(file, mounted, l);
+    {
+        Stick s(file);
+        CHECK(s.media.Holder(100) == int32_t(l.Home(100)));
+    }
+    {
+        CardFile c(file, true);
+        CHECK(c.blankStick());
+        FatImage fat(c);
+        CHECK(fat.list("/").size() == 1 && fat.list("/")[0].name == "MEMSTICK.IND");
+        checkSound(fat);
+        put(fat, "/", "x.txt", {'x'});
+    }
+    // The same stick formatted, then its MBR sector erased: not blank, so not formatted over.
+    std::vector<uint8_t> image;
+    {
+        Stick s(file);
+        image = s.logical();
+    }
+    std::fill_n(image.begin(), 512, uint8_t(0xff));
+    const auto damaged = dir / "damaged-mbr.frondms";
+    writeStick(damaged, frondMs::fromLogical(image.data(), image.size(), geometry(8)), l);
+    const auto before = readFile(damaged);
+    {
+        CardFile c(damaged, true);
+        CHECK(!c.blankStick());
+        bool refused = false;
+        try {
+            FatImage fat(c);
+        } catch (const Error&) {
+            refused = true;
+        }
+        CHECK(refused);
+    }
+    CHECK(readFile(damaged) == before);
+    // An erased stick with one held block of other bytes isn't blank either.
+    auto mixed = mounted;
+    page(mixed, l, l.Home(40), 3)[17] = 0x00;
+    const auto other = dir / "mixed.frondms";
+    writeStick(other, mixed, l);
+    {
+        CardFile c(other, true);
+        CHECK(!c.blankStick());
+    }
+    std::puts("storage ms: a mounted, unformatted stick is blank");
+}
+
 // Each size formats on its first open in Files, then takes files.
 void formats(const fs::path& dir) {
     for (unsigned mb : {4u, 8u, 16u, 32u, 64u, 128u}) {
@@ -517,6 +576,7 @@ int main(int argc, char** argv) {
             writer(dir);
             refusals(dir);
             formats(dir);
+            mountedBlank(dir);
             crashes(dir);
             fs::remove_all(dir);
         } else if (command == "make" && argc == 4) {
