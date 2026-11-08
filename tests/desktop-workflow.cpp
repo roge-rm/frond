@@ -5440,6 +5440,54 @@ for line in s.makefile('rb'):
         QVERIFY(frondCards::importFolderCard(cardsSessions(), odd.path(), "Odd", "sd", 32).contains("too many names"));
         QCOMPARE(frondCards::entries(cardsLibrary()).size(), 2);
     }
+    // While a stopped machine exports, Cards greys its card as for a running machine, and gives
+    // it back after.
+    void exportGreysCards() {
+        cardsReset();
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QTemporaryDir files, out(QDir::currentPath() + "/build/export-greys-XXXXXX");
+        const auto core = fakeCardCore(files.path());
+        cardsMachine("Palm TX", true);
+        frondCards::reconcile(cardsSessions());
+        MainWindow window(core);
+        window.show();
+        auto* cards = window.showCards();
+        auto* sd = cards->findChild<QListWidget*>("sdCards");
+        QCOMPARE(rowLabel(sd, 0, "cardName"), QString("Palm TX card"));
+        const QStringList media{"cardFiles", "duplicateCard", "exportCard", "takeOutCard"};
+        for (const auto& a : media) QVERIFY2(cardAction(sd, 0, a.toLatin1())->isEnabled(), qPrintable(a));
+        std::atomic<bool> entered{false}, release{false};
+        window.exportHook = [&] {
+            entered = true;
+            while (!release) QThread::msleep(5);
+        };
+        QStringList stillEnabled{"none seen"};
+        QTimer poll;
+        poll.setInterval(10);
+        connect(&poll, &QTimer::timeout, &window, [&] {
+            if (!entered || release) return;
+            stillEnabled.clear();
+            for (const auto& a : media)
+                if (cardAction(sd, 0, a.toLatin1())->isEnabled()) stillEnabled << a;
+            release = true;
+        });
+        poll.start();
+        whenShown<QFileDialog>([&](QFileDialog* d) {
+            d->setDirectory(out.path());
+            d->selectFile("Palm TX.frond");
+            QMetaObject::invokeMethod(d, "accept");
+        });
+        auto* list = window.findChild<QListWidget*>("sessionList");
+        QCOMPARE(rowTexts(window, "sessionName"), QStringList({"Palm TX"}));
+        auto* menu = list->itemWidget(list->item(0))->findChild<QPushButton*>("rowMenu")->menu();
+        for (auto* a : menu->actions()) if (a->objectName() == "exportSession") a->trigger();
+        QTRY_VERIFY_WITH_TIMEOUT(window.statusBar()->currentMessage().startsWith("Session exported to"), 20000);
+        QCOMPARE(stillEnabled, QStringList());
+        QVERIFY(QFileInfo(out.filePath("Palm TX/sd.frondsd")).isFile());
+        for (const auto& a : media) QVERIFY2(cardAction(sd, 0, a.toLatin1())->isEnabled(), qPrintable(a));
+        window.close();
+        QSettings().clear();
+    }
     void cardsWindow() {
         cardsReset();
         QSettings().clear(); QSettings().setValue("resume", false);

@@ -291,6 +291,8 @@ class MainWindow : public QMainWindow {
     CardsWindow* showCards();
     // Save a Copy to `path` once its file dialog has picked it.
     void saveCopyTo(const QString& path);
+    // Tests: called on the export's worker before it copies anything.
+    std::function<void()> exportHook;
     // Whether the running machine's linked card is in the drawer now (C5 shows "Insert").
     bool linkedCardFree() const { return linkedWatcher && linkedWatcher->lastState(); }
 };

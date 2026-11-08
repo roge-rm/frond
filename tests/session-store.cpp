@@ -80,24 +80,19 @@ static QByteArray v9WithNand(quint64 generation, quint64 units = 2048) {
     put64(bytes, generation);
     return bytes;
 }
-// nand.frondnand of `units` units: main bytes, the spare bytes from the next MiB, then the table.
+// nand.frondnand of `units` units filled with `fill`: main bytes, the spare bytes from the next
+// MiB, then the table, CRCs and all.
 static QByteArray tinyNand(quint64 generation, quint64 units = 2048, char fill = '\x5a') {
     const quint64 payload = units * 512, side = units * 16;
-    const quint64 stored = ((payload + (1u << 20) - 1) >> 20 << 20) + side, chunks = (stored + (1u << 20) - 1) >> 20;
-    QByteArray file("FRONDNA");
-    file.append('\0');
-    put32(file, 2);
-    put32(file, 512);
-    put64(file, payload);
-    put32(file, 0);
-    put64(file, generation);
-    put64(file, 64 + stored);
-    put32(file, 1u << 20);
-    put64(file, side);
-    file.append(QByteArray(8, '\0'));
-    file.append(QByteArray(qsizetype(stored), fill));
-    file.append(QByteArray(qsizetype(4 * chunks), '\0'));
-    return file;
+    const QByteArray stored(qsizetype(frondSdFile::storedBytes(payload, side)), fill);
+    frondSdFile::ChunkCrcs crcs;
+    crcs.add(reinterpret_cast<const uint8_t*>(stored.constData()), size_t(stored.size()));
+    QByteArray file(qsizetype(frondSdFile::headerBytes), '\0');
+    frondSdFile::makeHeaderV2(reinterpret_cast<uint8_t*>(file.data()), payload, generation, crcs.table(), side,
+                              frondSdFile::magicNand);
+    std::vector<uint8_t> table;
+    frondSdFile::tableBytes(crcs.table(), table);
+    return file + stored + QByteArray(reinterpret_cast<const char*>(table.data()), qsizetype(table.size()));
 }
 // tinyNand with real CRCs, as a saved machine leaves it.
 static QByteArray checkedNand(quint64 generation, quint64 units = 2048) {
@@ -410,6 +405,12 @@ class SessionStoreTest : public QObject {
         QCOMPARE(settled.readAll(), tinyNand(2, 2048, '\x33'));
         QVERIFY(QDir(machineDir(folder(), name)).entryList({"*journal*"}, QDir::Files | QDir::Hidden).isEmpty());
         QFile::remove(outside + "/n/nand.frondnand.journal-2.full");
+        // A NAND whose bytes don't match its CRCs.
+        auto flipped = tinyNand(2);
+        flipped[5000] = char(flipped[5000] ^ 1);
+        write(outside + "/n/nand.frondnand", flipped);
+        QCOMPARE(importFile(folder(), outside + "/n"), QString("That session's card files don't match."));
+        write(outside + "/n/nand.frondnand", tinyNand(1));
         // Behind its descriptor, missing, the wrong size or beside a session with no NAND.
         QVERIFY(!importFile(folder(), outside + "/n").isEmpty());
         QFile::remove(outside + "/n/nand.frondnand");
@@ -471,7 +472,27 @@ class SessionStoreTest : public QObject {
         QVERIFY(importFile(folder(), outside + "/n", &name, watch).isEmpty());
         const auto info = describe(filePath(folder(), name));
         QVERIFY(exportFile(info, outside + "/out", watch).isEmpty());
-        QVERIFY(total > 0 && last == total);
+        QVERIFY(total >= checkedNand(2).size() && last == total);
+        // The session stays locked for the job, as a running one is, so Cards leaves its media alone.
+        bool lockedDuring = false;
+        const CopyProgress check = [&](qint64, qint64) { lockedDuring = inUse(info.path); return true; };
+        QVERIFY(exportFile(info, outside + "/locked", check).isEmpty());
+        QVERIFY(lockedDuring && !inUse(info.path));
+        QDir(outside + "/locked").removeRecursively();
+        // An unfinished NAND save's full copy is what gets packed.
+        const auto dir = machineDirOf(info.path);
+        write(dir + "/nand.frondnand", tinyNand(1));
+        write(dir + "/nand.frondnand.journal-2.full", tinyNand(2, 2048, '\x33'));
+        QVERIFY(exportFile(info, outside + "/settled").isEmpty());
+        QVERIFY(!QFileInfo::exists(outside + "/settled/nand.frondnand"));
+        QString settled;
+        QVERIFY(importFile(folder(), outside + "/settled", &settled).isEmpty());
+        QFile got(machineDir(folder(), settled) + "/nand.frondnand");
+        QVERIFY(got.open(QIODevice::ReadOnly));
+        QCOMPARE(got.readAll(), tinyNand(2, 2048, '\x33'));
+        QDir(outside + "/settled").removeRecursively();
+        QFile::remove(dir + "/nand.frondnand.journal-2.full");
+        write(dir + "/nand.frondnand", checkedNand(2));
         const CopyProgress stop = [](qint64, qint64) { return false; };
         QCOMPARE(exportFile(info, outside + "/stopped", stop), cancelledText());
         QVERIFY(!QFileInfo::exists(outside + "/stopped"));

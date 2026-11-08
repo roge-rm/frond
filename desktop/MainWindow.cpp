@@ -1563,10 +1563,19 @@ void MainWindow::exportSession(const QString& path) {
     const auto target = outputFile(tr("Export"), tr("Frond sessions (*.frond)"), info.name + ".frond");
     if (target.isEmpty()) return;
     if (!confirmReplace(frondSessions::exportDestDir(target))) return;
-    // Packing a T|X NAND takes a couple of seconds, so it runs on a worker behind a progress dialog.
+    // Copying and packing a T|X takes a couple of seconds, so it runs on a worker behind a progress
+    // dialog. The session's lock is held for it, so Cards greys its media as for a running machine;
+    // one locked already is running, and Cards greys it anyway.
+    QLockFile hold(info.path + ".lock");
+    hold.setStaleLockTime(0);
+    const bool held = frondSessions::tryLockSession(hold, info.path);
+    if (held && cardsWindow) cardsWindow->refresh();
     const auto error = runCardJob(this, tr("Exporting %1…").arg(info.name), [&](const frondSessions::CopyProgress& progress) {
+        if (exportHook) exportHook();
         return frondSessions::exportFile(info, target, progress);
     });
+    if (held) hold.unlock();
+    if (cardsWindow) cardsWindow->refresh();
     if (error == frondSessions::cancelledText()) return;
     if (!error.isEmpty()) failure(error);
     else notify(tr("Session exported to %1.").arg(frondSessions::exportDestDir(target)));

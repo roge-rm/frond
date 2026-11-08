@@ -335,6 +335,10 @@ inline QString checkImportedSiblings(const QString& dir, const QString& frond, b
             return mismatch;
         for (int i = 56; i < 64; ++i)
             if (hdr[i]) return mismatch;
+        file.close();
+        // Every CRC, as the core's load checks them.
+        frondSdFile::Info info;
+        if (!frondStorage::verify(std::filesystem::path((dir + "/nand.frondnand").toStdString()), info).ok) return mismatch;
     } else if (QFileInfo::exists(dir + "/nand.frondnand")) {
         return mismatch;
     }
@@ -729,44 +733,6 @@ inline bool applySdJournalCopy(const QString& journalPath, const QString& sdPath
     return sd.seek(0) && sd.write(header) == 64 && sd.flush();
 }
 
-inline QString copyPackable(const QString& fromDir, const QString& toDir, const QString& newName) {
-    if (!QDir().mkpath(toDir)) return QStringLiteral("Couldn't save the session.");
-    const auto settle = sdSettleOf(fromDir, sessionFrondIn(fromDir));
-    const auto nandSettle = sdSettleOf(fromDir, sessionFrondIn(fromDir), true);
-    bool any = false;
-    for (const auto& entry : QDir(fromDir).entryInfoList(QDir::Files)) {
-        if (!packableName(entry.fileName())) continue;
-        if (!settle.full.isEmpty() && entry.fileName() == settle.sibling) continue;
-        if (!nandSettle.full.isEmpty() && entry.fileName() == nandSettle.sibling) continue;
-        const auto dest = toDir + '/' + packableDestName(entry.fileName(), newName);
-        QFile::remove(dest);
-        if (!QFile::copy(entry.absoluteFilePath(), dest)) return QStringLiteral("Couldn't save the session.");
-        any = true;
-    }
-    if (!any) return QStringLiteral("Couldn't save the session.");
-    if (!settle.full.isEmpty()) {
-        QFile::remove(toDir + '/' + settle.sibling);
-        if (!QFile::copy(settle.full, toDir + '/' + settle.sibling)) return QStringLiteral("Couldn't save the session.");
-    }
-    if (!settle.journal.isEmpty() && !applySdJournalCopy(settle.journal, toDir + '/' + settle.sibling))
-        return QStringLiteral("Couldn't save the session.");
-    if (!nandSettle.full.isEmpty()) {
-        QFile::remove(toDir + '/' + nandSettle.sibling);
-        if (!QFile::copy(nandSettle.full, toDir + '/' + nandSettle.sibling)) return QStringLiteral("Couldn't save the session.");
-    }
-    if (!nandSettle.journal.isEmpty() && !applySdJournalCopy(nandSettle.journal, toDir + '/' + nandSettle.sibling))
-        return QStringLiteral("Couldn't save the session.");
-    // A card or NAND file the source doesn't have must not stay behind in an existing folder.
-    for (const auto* card : {"sd.frondsd", "ms.frondms", "ms.frondmsp", "nand.frondnand"}) {
-        const bool settled = (!settle.full.isEmpty() && QLatin1String(card) == settle.sibling) ||
-                             (!nandSettle.full.isEmpty() && QLatin1String(card) == nandSettle.sibling);
-        if (QFileInfo::exists(fromDir + '/' + card) || settled) continue;
-        if (QFileInfo::exists(toDir + '/' + card) && !QFile::remove(toDir + '/' + card))
-            return QStringLiteral("Couldn't save the session.");
-    }
-    return {};
-}
-
 // What a stopped job returns, so the caller shows no failure.
 inline QString cancelledText() { return QStringLiteral("Cancelled."); }
 
@@ -776,17 +742,99 @@ inline frondStorage::Progress storageProgress(const std::function<bool(qint64, q
     return [progress](uint64_t done, uint64_t total) { return progress(qint64(done), qint64(total)); };
 }
 
-// An exported session carries its NAND packed as nand.frondnand.gz; a session folder in the
-// library keeps it unpacked. `progress` gets the bytes packed and stops the job with false.
-inline QString packNand(const QString& dir, const std::function<bool(qint64, qint64)>& progress = {}) {
-    const auto plain = dir + "/nand.frondnand";
-    if (!QFileInfo::exists(plain)) return {};
-    const auto file = std::filesystem::path(plain.toStdString());
-    const auto result = frondStorage::pack(file, frondStorage::packedPath(file), MZ_DEFAULT_LEVEL, storageProgress(progress));
-    if (!result.ok && result.code == "cancelled") return cancelledText();
-    if (!result.ok || !QFile::remove(plain)) return QStringLiteral("Couldn't export the session.");
+// Called with bytes done and in total; returns false to cancel.
+using CopyProgress = std::function<bool(qint64, qint64)>;
+
+inline bool copyChunked(const QString& from, const QString& to, qint64* done, qint64 total, const CopyProgress& progress) {
+    QFile in(from), out(to);
+    if (!in.open(QIODevice::ReadOnly) || !out.open(QIODevice::WriteOnly)) return false;
+    QByteArray buffer(1 << 20, Qt::Uninitialized);
+    for (;;) {
+        const auto n = in.read(buffer.data(), buffer.size());
+        if (n < 0) return false;
+        if (n == 0) break;
+        if (out.write(buffer.constData(), n) != n) return false;
+        *done += n;
+        if (progress && !progress(*done, total)) return false;
+    }
+    return out.flush() && !in.error();
+}
+
+// Copies a machine folder's packable files into `toDir`, settling an unfinished card or NAND save
+// on the way. With `packNandFile` the NAND goes in as nand.frondnand.gz, packed straight from the
+// source unless a save journal has to be applied to a copy first. `progress` gets the bytes copied
+// and packed as one count; false from it stops the copy with cancelledText().
+inline QString copyPackable(const QString& fromDir, const QString& toDir, const QString& newName,
+                            const CopyProgress& progress = {}, bool packNandFile = false) {
+    const QString failed = QStringLiteral("Couldn't save the session.");
+    if (!QDir().mkpath(toDir)) return failed;
+    const auto settle = sdSettleOf(fromDir, sessionFrondIn(fromDir));
+    const auto nandSettle = sdSettleOf(fromDir, sessionFrondIn(fromDir), true);
+    const QString nandName = QStringLiteral("nand.frondnand");
+    QList<QPair<QString, QString>> jobs;  // source, destination
+    QString packFrom;                     // the NAND to pack, a source file or the settled copy
+    qint64 total = 0;
+    const auto addNand = [&](const QString& source) {
+        if (packNandFile && nandSettle.journal.isEmpty()) {
+            packFrom = source;
+        } else {
+            jobs.append({source, toDir + '/' + nandName});
+            if (packNandFile) {
+                packFrom = toDir + '/' + nandName;
+                total += QFileInfo(source).size();
+            }
+        }
+        total += QFileInfo(source).size();
+    };
+    for (const auto& entry : QDir(fromDir).entryInfoList(QDir::Files)) {
+        if (!packableName(entry.fileName())) continue;
+        if (!settle.full.isEmpty() && entry.fileName() == settle.sibling) continue;
+        if (!nandSettle.full.isEmpty() && entry.fileName() == nandSettle.sibling) continue;
+        if (entry.fileName() == nandName) {
+            addNand(entry.absoluteFilePath());
+            continue;
+        }
+        jobs.append({entry.absoluteFilePath(), toDir + '/' + packableDestName(entry.fileName(), newName)});
+        total += entry.size();
+    }
+    if (jobs.isEmpty() && packFrom.isEmpty()) return failed;
+    if (!settle.full.isEmpty()) {
+        jobs.append({settle.full, toDir + '/' + settle.sibling});
+        total += QFileInfo(settle.full).size();
+    }
+    if (!nandSettle.full.isEmpty()) addNand(nandSettle.full);
+    qint64 done = 0;
+    bool cancelled = false;
+    const CopyProgress watch = [&](qint64 n, qint64 all) {
+        if (progress && !progress(n, all)) cancelled = true;
+        return !cancelled;
+    };
+    for (const auto& [source, target] : jobs) {
+        QFile::remove(target);
+        if (!copyChunked(source, target, &done, total, watch)) return cancelled ? cancelledText() : failed;
+    }
+    if (!settle.journal.isEmpty() && !applySdJournalCopy(settle.journal, toDir + '/' + settle.sibling)) return failed;
+    if (!nandSettle.journal.isEmpty() && !applySdJournalCopy(nandSettle.journal, toDir + '/' + nandSettle.sibling))
+        return failed;
+    if (!packFrom.isEmpty()) {
+        const auto plain = std::filesystem::path((toDir + '/' + nandName).toStdString());
+        const qint64 base = done;
+        const auto packed = frondStorage::pack(packFrom.toStdString(), frondStorage::packedPath(plain), MZ_DEFAULT_LEVEL,
+                                               [&](uint64_t n, uint64_t) { return watch(base + qint64(n), total); });
+        if (!packed.ok) return packed.code == "cancelled" ? cancelledText() : QStringLiteral("Couldn't export the session.");
+        if (QFileInfo::exists(toDir + '/' + nandName) && !QFile::remove(toDir + '/' + nandName))
+            return QStringLiteral("Couldn't export the session.");
+    }
+    // A card or NAND file the source doesn't have must not stay behind in an existing folder.
+    for (const auto* card : {"sd.frondsd", "ms.frondms", "ms.frondmsp", "nand.frondnand"}) {
+        const bool settled = (!settle.full.isEmpty() && QLatin1String(card) == settle.sibling) ||
+                             (!nandSettle.full.isEmpty() && QLatin1String(card) == nandSettle.sibling);
+        if (QFileInfo::exists(fromDir + '/' + card) || settled) continue;
+        if (QFileInfo::exists(toDir + '/' + card) && !QFile::remove(toDir + '/' + card)) return failed;
+    }
     return {};
 }
+
 // Unpacks `from`/nand.frondnand.gz into `to`/nand.frondnand, checked against its CRCs. Removes
 // the packed file when both are the same folder.
 inline QString unpackNand(const QString& from, const QString& to, const std::function<bool(qint64, qint64)>& progress = {}) {
@@ -862,24 +910,6 @@ inline QString rename(const QString& folder, const Info& info, const QString& wa
     lock.unlock();
     QDir().rmdir(oldDir);
     return {};
-}
-
-// Called with bytes done and in total; returns false to cancel.
-using CopyProgress = std::function<bool(qint64, qint64)>;
-
-inline bool copyChunked(const QString& from, const QString& to, qint64* done, qint64 total, const CopyProgress& progress) {
-    QFile in(from), out(to);
-    if (!in.open(QIODevice::ReadOnly) || !out.open(QIODevice::WriteOnly)) return false;
-    QByteArray buffer(1 << 20, Qt::Uninitialized);
-    for (;;) {
-        const auto n = in.read(buffer.data(), buffer.size());
-        if (n < 0) return false;
-        if (n == 0) break;
-        if (out.write(buffer.constData(), n) != n) return false;
-        *done += n;
-        if (progress && !progress(*done, total)) return false;
-    }
-    return out.flush() && !in.error();
 }
 
 }  // namespace frondSessions
@@ -1103,11 +1133,21 @@ inline QString importFolder(const QString& folder, const QString& from, QString*
     if (name.isEmpty()) return QStringLiteral("Couldn't save the session.");
     const auto dest = machineDir(folder, name);
     QFile::remove(markerPath(filePath(folder, name)));
-    if (const auto error = copyPackable(from, dest, name); !error.isEmpty()) {
+    // One count for the copy, then the NAND unpack.
+    const qint64 packedBytes = QFileInfo::exists(from + "/nand.frondnand") ? 0 : QFileInfo(from + "/nand.frondnand.gz").size();
+    qint64 copied = 0;
+    const CopyProgress copyWatch = [&](qint64 done, qint64 total) {
+        copied = total;
+        return !progress || progress(done, total + packedBytes);
+    };
+    const CopyProgress unpackWatch = [&](qint64 done, qint64 total) {
+        return !progress || progress(copied + done, copied + total);
+    };
+    if (const auto error = copyPackable(from, dest, name, copyWatch); !error.isEmpty()) {
         QDir(dest).removeRecursively();
         return error;
     }
-    if (const auto error = unpackNand(dest, dest, progress); !error.isEmpty()) {
+    if (const auto error = unpackNand(dest, dest, unpackWatch); !error.isEmpty()) {
         QDir(dest).removeRecursively();
         return error;
     }
@@ -1124,7 +1164,7 @@ inline QString importFolder(const QString& folder, const QString& from, QString*
 }
 
 // Copies a session file or machine folder in as a new session. Returns an error message, or empty and the new name.
-// `progress` follows the NAND unpack, the slow part; false stops it and gives cancelledText().
+// `progress` follows the card copies and the NAND unpack; false stops it and gives cancelledText().
 inline QString importFile(const QString& folder, const QString& from, QString* newName = nullptr,
                           const std::function<bool(qint64, qint64)>& progress = {}) {
     if (QFileInfo(from).isDir()) return importFolder(folder, from, newName, progress);
@@ -1148,16 +1188,36 @@ inline QString importFile(const QString& folder, const QString& from, QString* n
     // Cards beside it are copied, settling an unfinished SD save as copyPackable does.
     const auto sourceDir = QFileInfo(from).absolutePath();
     const auto settle = sdSettleOf(sourceDir, from), nandSettle = sdSettleOf(sourceDir, from, true);
+    // One count for the card copies, then the NAND unpack.
+    QList<QPair<QString, QString>> siblings;  // source, destination
+    qint64 copyTotal = 0, copied = 0;
     for (const auto* sibling : {"sd.frondsd", "ms.frondms", "ms.frondmsp", "nand.frondnand"}) {
         auto src = sourceDir + '/' + sibling;
         if (!settle.full.isEmpty() && QLatin1String(sibling) == settle.sibling) src = settle.full;
         if (!nandSettle.full.isEmpty() && QLatin1String(sibling) == nandSettle.sibling) src = nandSettle.full;
-        if (QFileInfo::exists(src) && !QFile::copy(src, destDir + '/' + sibling)) return fail();
+        if (!QFileInfo::exists(src)) continue;
+        siblings.append({src, destDir + '/' + sibling});
+        copyTotal += QFileInfo(src).size();
     }
+    const qint64 packedBytes =
+        QFileInfo::exists(sourceDir + "/nand.frondnand") ? 0 : QFileInfo(sourceDir + "/nand.frondnand.gz").size();
+    bool stopped = false;
+    const CopyProgress copyWatch = [&](qint64 done, qint64) {
+        if (progress && !progress(done, copyTotal + packedBytes)) stopped = true;
+        return !stopped;
+    };
+    for (const auto& [src, dest] : siblings)
+        if (!copyChunked(src, dest, &copied, copyTotal, copyWatch)) {
+            QDir(destDir).removeRecursively();
+            return stopped ? cancelledText() : QStringLiteral("Couldn't save the session.");
+        }
     if (!settle.journal.isEmpty() && !applySdJournalCopy(settle.journal, destDir + '/' + settle.sibling)) return fail();
     if (!nandSettle.journal.isEmpty() && !applySdJournalCopy(nandSettle.journal, destDir + '/' + nandSettle.sibling)) return fail();
     if (QFileInfo(sourceDir + "/slot.json").isFile() && !QFile::copy(sourceDir + "/slot.json", destDir + "/slot.json")) return fail();
-    if (const auto error = unpackNand(sourceDir, destDir, progress); !error.isEmpty()) {
+    const CopyProgress unpackWatch = [&](qint64 done, qint64 total) {
+        return !progress || progress(copyTotal + done, copyTotal + total);
+    };
+    if (const auto error = unpackNand(sourceDir, destDir, unpackWatch); !error.isEmpty()) {
         QDir(destDir).removeRecursively();
         return error;
     }
@@ -1340,7 +1400,7 @@ inline QString exportDestDir(const QString& to) {
 
 // Copies packable files out as a machine folder. `to` is a directory, or a .frond path whose stem
 // is the folder. Only a folder that is already a Frond session is replaced. Safe off the GUI
-// thread; `progress` follows the NAND pack and false stops it, giving cancelledText().
+// thread; `progress` follows the copy and the NAND pack, and false stops it, giving cancelledText().
 inline QString exportFile(const Info& info, const QString& to, const std::function<bool(qint64, qint64)>& progress = {}) {
     const auto destDir = exportDestDir(to);
     const auto destName = QFileInfo(destDir).fileName();
@@ -1358,14 +1418,15 @@ inline QString exportFile(const Info& info, const QString& to, const std::functi
         return QStringLiteral("That session is open in another Frond.");
     QLockFile targetLock(destFrond + ".lock"); targetLock.setStaleLockTime(0);
     if (isMachineFolder(destDir) && !targetLock.tryLock()) return QStringLiteral("That session is open in another Frond.");
+    // The session's lock for the copy, so Cards and other windows leave its media alone as they do
+    // for a running machine. One held already is a running machine, which they leave alone anyway.
+    QLockFile sourceLock(info.path + ".lock");
+    sourceLock.setStaleLockTime(0);
+    tryLockSession(sourceLock, info.path);
     const auto staging = makeStaging(destDir);
     if (staging.isEmpty()) return QStringLiteral("Couldn't export the session.");
     const auto part = staging + '/' + destName;
-    if (const auto error = copyPackable(sourceDir, part, destName); !error.isEmpty()) {
-        removeStaging(staging);
-        return error;
-    }
-    if (const auto error = packNand(part, progress); !error.isEmpty()) {
+    if (const auto error = copyPackable(sourceDir, part, destName, progress, true); !error.isEmpty()) {
         removeStaging(staging);
         return error;
     }
