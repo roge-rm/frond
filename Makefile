@@ -1829,3 +1829,15 @@ test-zodiac-graphics-acquisition: zodiac-boot-probe prepare
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Ibuild/source/src/uarm/uarm tests/zodiac-graphics-acquisition.cpp build/source/src/uarm/uarm/imx1_gpio.cpp -o build/test-zodiac-graphics-acquisition
 	./build/test-zodiac-graphics-acquisition
 	python3 tests/zodiac-graphics-acquisition.py
+
+# Explicit equal-frequency MCU PLL reprogramming and complete CPU handoff.
+.PHONY: test-imx1-mpll-retune
+test-imx1-mpll-retune: build/zodiac-boot-probe
+	$(CXX) -DFROND_TEST_FAST=$(FROND_FAST) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/imx1-mpll-retune.cpp build/source/src/uarm/uarm/imx1_boot_probe.cpp \
+		build/source/src/uarm/uarm/imx1_watchdog.cpp build/source/src/uarm/uarm/imx1_rtc.cpp build/source/src/uarm/uarm/imx1_bootstrap.cpp build/source/src/uarm/uarm/imx1_aitc.cpp \
+		build/source/src/uarm/uarm/imx1_cgm.cpp build/source/src/uarm/uarm/imx1_gpio.cpp \
+		build/source/src/uarm/uarm/imx1_sysctrl.cpp build/source/src/uarm/uarm/imx1_eim.cpp build/source/src/uarm/uarm/imx1_timer.cpp build/source/src/uarm/uarm/imx1_i2c.cpp build/source/src/uarm/uarm/imx1_asp.cpp build/source/src/uarm/uarm/imx1_pwm.cpp \
+		@build/zodiac-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-imx1-mpll-retune
+	./build/test-imx1-mpll-retune

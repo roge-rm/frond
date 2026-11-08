@@ -1,0 +1,250 @@
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -490,6 +490,7 @@
+         return result;
+     }
+     if (options && (((options->lcdcContrastOnly || options->mmcsdEmptySlot) && !options->bootstrapPeripherals) ||
++        (options->virtualMpllRetune && (!options->bootstrapPeripherals || !options->assumeMpllSettled)) ||
+         !imx1GraphicsProfileValid(options->graphicsProfile) ||
+         (!options->cs4IndexedInputs.empty() && (!options->bootstrapPeripherals || !options->cs4Port0InputKnown)) ||
+         (options->graphicsRawAxesKnown && (!options->bootstrapPeripherals ||
+@@ -536,6 +537,7 @@
+     p->peripherals.setI2cScenario(p->options.assumeI2cSingleMaster);
+     p->peripherals.setI2cBus(p->options.i2cBus);
+     p->peripherals.setI2cObserver(Probe::i2cEvent, p);
++    p->peripherals.setMcuRetuneScenario(p->options.virtualMpllRetune);
+     p->peripherals.setSystemPllScenario(p->options.assumeSpllSettled);
+     p->peripherals.setRamMiB(p->options.ramMiB);
+     if (rom && size) p->rom.assign(rom, rom + size);
+--- a/src/uarm/uarm/imx1_boot_probe.h
++++ b/src/uarm/uarm/imx1_boot_probe.h
+@@ -75,6 +75,7 @@
+     bool lcdcContrastOnly = false;
+     bool mmcsdEmptySlot = false;
+     bool assumeMpllSettled = false;
++    bool virtualMpllRetune = false;
+     bool assumeSpllSettled = false;
+     bool graphicsIrqA13 = false;
+     bool graphicsRawAxesKnown = false;
+--- a/src/uarm/uarm/imx1_bootstrap.cpp
++++ b/src/uarm/uarm/imx1_bootstrap.cpp
+@@ -14,6 +14,7 @@
+         return;
+     }
+     asynchronousUsed = true;
++    cgm.qualifyMcuOutput();
+     const auto mcu = cgm.mcuPllTargetRatio();
+     // A 32-bit charge times denominator (<= 16384) and PRESC (<= 2) fits uint64_t.
+     uint64_t units = uint64_t(cycles) * mcu.denominator * cgm.mcuPrescaler();
+@@ -546,8 +547,8 @@
+         return Imx1BootstrapAccess::ok;
+     }
+     if (Imx1Cgm::registerName(address)) {
+-        // A later PLL epoch would require a new phase origin and settling qualification.
+-        if (write && asynchronousUsed &&
++        // Later programming requires the explicit frequency-preserving MCU policy.
++        if (write && asynchronousUsed && !mcuRetuneScenario &&
+             (address == 0x0021b004 || (address == 0x0021b000 && (value & 0x00200000))))
+             return Imx1BootstrapAccess::sideEffect;
+         // Holding System PLL output high requires the independent asynchronous MCU clock.
+@@ -558,7 +559,10 @@
+         if (result == Imx1CgmAccess::ok && write) {
+             const auto referenceDenominator = cpuClockMode == 3 ?
+                 next.mcuPllTargetRatio().numerator : next.systemPllActiveRatio().numerator;
+-            if (!referenceRatioSupported(referenceDenominator)) return Imx1BootstrapAccess::sideEffect;
++            if (!referenceRatioSupported(referenceDenominator) ||
++                !next.mcuReferenceSupported(next.mcuPllTargetRatio().numerator) ||
++                !next.mcuReferenceSupported(next.systemPllActiveRatio().numerator))
++                return Imx1BootstrapAccess::sideEffect;
+             if (cpuClockMode == 3 &&
+                 (!asynchronousRatioSupported(next, next.systemPllActiveRatio()) ||
+                  !asynchronousRatioSupported(next, next.systemPllTargetRatio())))
+--- a/src/uarm/uarm/imx1_bootstrap.h
++++ b/src/uarm/uarm/imx1_bootstrap.h
+@@ -63,6 +63,7 @@
+     struct InterruptLines { Imx1AitcLine irq, fiq; };
+     InterruptLines interruptLines() const;
+     void connectCpuInterrupts() { cpuInterruptsConnected = true; }
++    void setMcuRetuneScenario(bool enabled) { mcuRetuneScenario = enabled; cgm.setMcuRetuneScenario(enabled); }
+     void setSystemPllScenario(bool enabled) { cgm.setSystemPllScenario(enabled); }
+     bool setGpioInput(unsigned port, uint32_t value) { return gpio.setInput(port, value); }
+     Imx1BootstrapAccess updateGpioInput(unsigned port, uint32_t value, uint32_t known);
+@@ -114,10 +115,11 @@
+ 
+    private:
+     bool referenceRatioSupported(uint64_t denominator) const {
+-        return rtc.referenceRatioSupported(denominator) && watchdog.referenceRatioSupported(denominator) &&
++        return cgm.mcuReferenceSupported(denominator) && rtc.referenceRatioSupported(denominator) && watchdog.referenceRatioSupported(denominator) &&
+                pwm.referenceRatioSupported(denominator);
+     }
+     void advanceReference(uint64_t numerator, uint64_t denominator) {
++        cgm.advanceMcuReference(numerator, denominator);
+         rtc.advanceReference(numerator, denominator);
+         watchdog.advanceReference(numerator, denominator);
+         pwm.advanceReference(numerator, denominator);
+@@ -144,7 +146,7 @@
+     uint32_t perclk1Phase = 0;
+     uint64_t systemPllPhase = 0;
+     void advanceSystemOutput(uint64_t clocks, bool wholeWritePeriods = true);
+-    bool asynchronousUsed = false;
++    bool asynchronousUsed = false, mcuRetuneScenario = false;
+     std::vector<uint8_t> sram = std::vector<uint8_t>(0x20000);
+     uint32_t rmcr = 0, pwmr = 0;
+     bool lcdcContrastOnly = false;
+--- a/src/uarm/uarm/imx1_cgm.cpp
++++ b/src/uarm/uarm/imx1_cgm.cpp
+@@ -2,6 +2,8 @@
+ 
+ #include <algorithm>
+ #include <numeric>
++#include <cassert>
++#include <limits>
+ 
+ static Imx1PllRatio pllRatio(uint32_t control) {
+     // Equation 12-1 and table 12-9: internal reference = 512 * CLK32, MFN unsigned.
+@@ -18,6 +20,52 @@
+ Imx1PllRatio Imx1Cgm::mcuPllTargetRatio() const { return pllRatio(mpctl0); }
+ Imx1PllRatio Imx1Cgm::systemPllTargetRatio() const { return pllRatio(spctl0); }
+ Imx1PllRatio Imx1Cgm::systemPllActiveRatio() const { return pllRatio(activeSpctl0); }
++
++bool Imx1Cgm::mcuReferenceSupported(uint64_t denominator) const {
++    if (!denominator) return false;
++    const auto supports = [](uint64_t d, uint64_t old) {
++        return d / std::gcd(d, old) <= (std::numeric_limits<uint64_t>::max() / 2) / old;
++    };
++    if (mcuReferenceRemaining && !supports(denominator, mcuReferenceDenominator)) return false;
++    if (nominalMcuRetune && mcuOutputQualified && mcuWriteDelay) {
++        const auto rate = mcuPllTargetRatio();
++        const auto divider = uint64_t(rate.denominator) * mcuPrescaler();
++        if (denominator > std::numeric_limits<uint64_t>::max() / std::max(rate.numerator, divider) ||
++            !supports(denominator * divider, mcuWriteDenominator)) return false;
++    }
++    return true;
++}
++
++void Imx1Cgm::advanceMcuReference(uint64_t numerator, uint64_t denominator) {
++    if (!numerator) return;
++    assert(mcuReferenceSupported(denominator));
++    if (nominalMcuRetune && mcuOutputQualified && mcuWriteDelay) {
++        // Every legal internal-source MCU ratio supplies at least 160 FCLK periods per CLK32.
++        if (numerator / denominator) mcuWriteDelay = 0;
++        else {
++            const auto rate = mcuPllTargetRatio();
++            const auto d = denominator * rate.denominator * mcuPrescaler();
++            const auto n = numerator * rate.numerator;
++            const auto common = mcuWriteDenominator * (d / std::gcd(d, mcuWriteDenominator));
++            const auto fraction = mcuWritePhase * (common / mcuWriteDenominator) + (n % d) * (common / d);
++            mcuWriteDelay -= std::min<uint64_t>(n / d + fraction / common, mcuWriteDelay);
++            mcuWritePhase = fraction % common;
++            mcuWriteDenominator = common;
++        }
++    }
++    if (!mcuReferenceRemaining) return;
++    const auto common = mcuReferenceDenominator * (denominator / std::gcd(denominator, mcuReferenceDenominator));
++    const auto fraction = mcuReferencePhase * (common / mcuReferenceDenominator) +
++                          (numerator % denominator) * (common / denominator);
++    const auto elapsed = numerator / denominator + fraction / common;
++    mcuReferencePhase = fraction % common;
++    mcuReferenceDenominator = common;
++    mcuReferenceRemaining -= std::min<uint64_t>(elapsed, mcuReferenceRemaining);
++    if (!mcuReferenceRemaining) {
++        mcuRestartComplete = true;
++        cscr &= ~0x00200000u;
++    }
++}
+ 
+ bool Imx1Cgm::advanceSystemRestart(uint64_t units) {
+     if (!systemRestartUnits) return false;
+@@ -97,24 +145,48 @@
+         if ((value >> 29) > 5) return Imx1CgmAccess::reservedBits;
+         if ((value & 3) != 3) return Imx1CgmAccess::sideEffect;
+         if ((value ^ cscr) & 0x00070000) return Imx1CgmAccess::externalInput;
+-        if ((value & 0x00400000) && (!nominalSystemPll || systemRestartUnits))
++        if ((value & 0x00400000) && (!nominalSystemPll || systemRestartUnits || mcuReferenceRemaining))
+             return Imx1CgmAccess::sideEffect;
+         if (value & 0x00200000) {
+-            if (mcuRestartCycles) return Imx1CgmAccess::sideEffect;
+-            // Internal-source reset SPCTL0 gives System PLL / CLK32 = 3000.
++            if (nominalMcuRetune && mcuOutputQualified && !mcuTimingUnknown)
++                return Imx1CgmAccess::sideEffect;
++            if (mcuRestartCycles || mcuReferenceRemaining) return Imx1CgmAccess::sideEffect;
++            if (nominalMcuRetune && mcuOutputQualified && (mcuContinuous || mcuRestartComplete)) {
++                if (systemRestartUnits || (value & 0x00400000)) return Imx1CgmAccess::sideEffect;
++                // The explicit equal-frequency policy keeps the qualified nominal output continuous.
++                mcuContinuous = true;
++                mcuReferenceRemaining = 2;
++                mcuReferencePhase = 0;
++                mcuReferenceDenominator = 1;
++            } else {
++                // Initial internal-source reset SPCTL0 gives System PLL / CLK32 = 3000.
++                mcuRestartCycles = 2 * 3000;
++            }
+             // Choose the documented maximum of two CLK32 periods, without claiming lock.
+-            mcuRestartCycles = 2 * 3000;
+             mcuRestartComplete = false;
+             mcuTimingUnknown = true;
+         }
+         if (value & 0x00400000) systemRestartUnits = 2 * mcuPllTargetRatio().numerator;
+         // Writing zero has no effect on a pending self-clearing restart request.
+-        *reg = (value & ~0x00600000u) | (mcuRestartCycles ? 0x00200000u : 0) |
++        *reg = (value & ~0x00600000u) | ((mcuRestartCycles || mcuReferenceRemaining) ? 0x00200000u : 0) |
+                (systemRestartUnits ? 0x00400000u : 0);
+         return Imx1CgmAccess::ok;
+     } else if (address == 0x0021b004) {
+         // Repeat writes need 56 FCLK cycles. Unqualified FCLK cannot establish that delay.
+-        if (mcuTimingUnknown) return Imx1CgmAccess::externalInput;
++        if (nominalMcuRetune && mcuOutputQualified && !mcuTimingUnknown)
++            return Imx1CgmAccess::sideEffect;
++        if (mcuTimingUnknown) {
++            if (!nominalMcuRetune || !mcuOutputQualified) return Imx1CgmAccess::externalInput;
++            const auto old = mcuPllTargetRatio(), next = pllRatio(value);
++            if (!mcuRestartComplete || mcuWriteDelay || mcuReferenceRemaining || systemRestartUnits ||
++                old.numerator != next.numerator || old.denominator != next.denominator)
++                return Imx1CgmAccess::sideEffect;
++            mcuContinuous = true;
++        }
++        mcuWriteDelay = 56;
++        mcuWritePhase = 0;
++        mcuWriteDenominator = 1;
++        mcuRestartComplete = false;
+         mcuTimingUnknown = true;
+     } else if (address == 0x0021b00c && nominalSystemPll) {
+         if (systemRestartUnits || systemWriteDelay) return Imx1CgmAccess::sideEffect;
+--- a/src/uarm/uarm/imx1_cgm.h
++++ b/src/uarm/uarm/imx1_cgm.h
+@@ -18,6 +18,10 @@
+     void advanceSystemPllCycles(uint64_t cycles, bool wholeWritePeriods = true);
+     void advanceSystemWriteFraction(uint64_t numerator, uint64_t denominator);
+     void setSystemPllScenario(bool enabled) { nominalSystemPll = enabled; }
++    void setMcuRetuneScenario(bool enabled) { nominalMcuRetune = enabled; }
++    void qualifyMcuOutput() { mcuOutputQualified = true; }
++    bool mcuReferenceSupported(uint64_t denominator) const;
++    void advanceMcuReference(uint64_t numerator, uint64_t denominator);
+     Imx1PllRatio systemPllTargetRatio() const;
+     Imx1PllRatio systemPllActiveRatio() const;
+     uint64_t systemRestartRemaining() const { return systemRestartUnits; }
+@@ -25,9 +29,11 @@
+     bool advanceSystemRestart(uint64_t units);
+     // Nominal programmed ratio to CLK32, without asserting a valid or locked output.
+     Imx1PllRatio mcuPllTargetRatio() const;
+-    // Reset output is known. Programmed output needs restart completion and an explicit assumption.
++    // Reset output is known; programmed output needs restart completion and an explicit assumption.
++    // The equal-frequency retune scenario keeps that qualified nominal output continuous.
+     bool mcuClockReady(bool assumeSettled) const {
+-        return !mcuTimingUnknown || (assumeSettled && mcuRestartComplete && !mcuRestartCycles);
++        return !mcuTimingUnknown || (assumeSettled && (mcuContinuous ||
++            (mcuRestartComplete && !mcuRestartCycles)));
+     }
+     uint32_t mcuPrescaler() const { return (cscr & 0x8000) ? 2 : 1; }
+     uint32_t busDivider() const { return ((cscr >> 10) & 15) + 1; }
+@@ -45,6 +51,10 @@
+     uint64_t systemWritePhase = 0;
+     uint64_t systemRestartUnits = 0;
+     bool nominalSystemPll = false;
++    bool nominalMcuRetune = false, mcuOutputQualified = false, mcuContinuous = false;
++    uint32_t mcuWriteDelay = 0, mcuReferenceRemaining = 0;
++    uint64_t mcuReferencePhase = 0, mcuReferenceDenominator = 1;
++    uint64_t mcuWritePhase = 0, mcuWriteDenominator = 1;
+     // No MCU lock flag or qualified settling interval is available after programming.
+     bool mcuTimingUnknown = false;
+     bool mcuRestartComplete = false;

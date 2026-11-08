@@ -123,7 +123,7 @@ static bool parseRtcTime(const char* text, Imx1RtcTime& time) {
 }
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::fprintf(stderr, "Usage: %s ROM [physical|reset|linked] [instruction-budget] [exact|fast] [--bootstrap-peripherals] [--trace=peripherals] [--arm920-icache-index-compatibility] [--lcdc-contrast-only] [--imx1-mmcsd-empty-slot] [--frame-output=PATH] [--assume-mpll-settled] [--assume-spll-settled] [--assume-i2c-single-master] [--i2c-eeprom-image=PATH] [--asp-px1-input=high] [--asp-u-sample=WORD] [--rtc-initial-time=DAY:HH:MM:SS] [--cs4-port0-input=BYTE] [--cs4-indexed-input=BANK/INDEX/BYTE] [--cs5-reset-status-input=BYTE] [--graphics-profile=virtual5744-compatible-8mib] [--graphics-raw-axes=FIRST/SECOND] [--graphics-irq-connection=virtual-a13] [--gpio-a-input-masked=VALUE/MASK] [--gpio-a-input=VALUE] [--gpio-b-input=VALUE] [--gpio-d-input=VALUE] [--ram-mib=32|128]\n", argv[0]);
+        std::fprintf(stderr, "Usage: %s ROM [physical|reset|linked] [instruction-budget] [exact|fast] [--bootstrap-peripherals] [--trace=peripherals] [--arm920-icache-index-compatibility] [--lcdc-contrast-only] [--imx1-mmcsd-empty-slot] [--frame-output=PATH] [--assume-mpll-settled] [--virtual-mpll-retune] [--assume-spll-settled] [--assume-i2c-single-master] [--i2c-eeprom-image=PATH] [--asp-px1-input=high] [--asp-u-sample=WORD] [--rtc-initial-time=DAY:HH:MM:SS] [--cs4-port0-input=BYTE] [--cs4-indexed-input=BANK/INDEX/BYTE] [--cs5-reset-status-input=BYTE] [--graphics-profile=virtual5744-compatible-8mib] [--graphics-raw-axes=FIRST/SECOND] [--graphics-irq-connection=virtual-a13] [--gpio-a-input-masked=VALUE/MASK] [--gpio-a-input=VALUE] [--gpio-b-input=VALUE] [--gpio-d-input=VALUE] [--ram-mib=32|128]\n", argv[0]);
         return 1;
     }
     const char* engine = argc >= 5 ? argv[4] : "exact";
@@ -260,6 +260,7 @@ int main(int argc, char** argv) {
             i2cImagePath = argv[i] + 19;
         }
         else if (!std::strcmp(argv[i], "--assume-spll-settled")) options.assumeSpllSettled = true;
+        else if (!std::strcmp(argv[i], "--virtual-mpll-retune")) options.virtualMpllRetune = true;
         else if (!std::strcmp(argv[i], "--assume-mpll-settled")) options.assumeMpllSettled = true;
         else if (!std::strncmp(argv[i], "--gpio-a-input=", 15) ||
                  !std::strncmp(argv[i], "--gpio-b-input=", 15) ||
@@ -302,6 +303,10 @@ int main(int argc, char** argv) {
     }
     if (!options.cs4IndexedInputs.empty() && (!options.bootstrapPeripherals || !options.cs4Port0InputKnown)) {
         std::fprintf(stderr, "CS4 indexed inputs require --bootstrap-peripherals and --cs4-port0-input\n"); return 1;
+    }
+    if (options.virtualMpllRetune && (!options.bootstrapPeripherals || !options.assumeMpllSettled)) {
+        std::fprintf(stderr, "Virtual MCU PLL retune requires bootstrap peripherals and assumed settled MCU PLL\n");
+        return 1;
     }
     if (options.assumeMpllSettled && !options.bootstrapPeripherals) {
         std::fprintf(stderr, "MPLL scenario requires --bootstrap-peripherals\n"); return 1;
@@ -368,6 +373,8 @@ int main(int argc, char** argv) {
         if (options.mmcsdEmptySlot) std::puts("Diagnostic i.MX MMCSD empty slot; card transactions and attached pin effects remain guarded.");
         std::printf("MPLL settled assumption=%s; nominal FCLK only after completed restart; no lock claim.\n",
                     options.assumeMpllSettled ? "enabled" : "disabled");
+        std::printf("virtual-mpll-retune=%s policy=equal-decoded-ratio-continuous-nominal-output-restart-two-clk32-periods-write-spacing-56-fclk-no-analogue-lock-claim\n",
+                    options.virtualMpllRetune ? "enabled" : "disabled");
         std::printf("SPLL settled assumption=%s; initial nominal output/LF=1; restart holds output high for 2 CLK32 then activates target/LF=1 with phase zero; bus waits for that event without retiring instructions.\n",
                     options.assumeSpllSettled ? "enabled" : "disabled");
         std::printf("I2C single-master initially-idle scenario=%s; no stretching; unknown slave responses stop.\n",
