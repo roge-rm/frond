@@ -587,6 +587,20 @@ static void UsbAdapterTest() {
     dc.DC(0x42); assert(port.EpOut(1,bytes,1)==R::Stall); dc.DC(0x82);
     bytes[0]=74; assert(port.EpOut(1,bytes,1)==R::Ack); take(2,74);
     bytes[0]=75; assert(port.EpOut(3,bytes,1)==R::Ack); take(4,75);
+    assert(port.Reset());assert(port.OutReady(3,64));config();
+    assert(port.OutReady(3,64) && port.OutReady(4,64) && port.OutReady(15,64));
+    assert(port.EpOut(3,bytes,64)==R::Ack && port.OutReady(3,64));
+    assert(port.EpOut(3,bytes,64)==R::Ack && !port.OutReady(3,64));
+    auto full=Save(dc);
+    for(unsigned n=0;n<10;++n) assert(!port.OutReady(3,64));
+    assert(port.OutReady(3,65)); // Oversize requests still reach the strict packet checks.
+    assert(Save(dc)==full); // Credit queries preserve FIFO, error, toggle, IRQ and command state.
+    assert(port.EpOut(3,bytes,64)==R::Nak); // Raw controller transactions still report a full-bank NAK.
+    dc.DC(0xa4);assert((dc.DCData()&31)==18);
+    dc.DC(0x74);assert(port.OutReady(3,64));
+    dc.DC(0x44);assert(port.OutReady(3,64) && port.EpOut(3,bytes,64)==R::Stall);
+    adapter.SetCable(false);assert(port.OutReady(3,64));
+    adapter.SetCable(true);assert(port.OutReady(3,64));
     puts("Dana shared USB adapter reset/reattach/address/lateACK tests passed");
 }
 

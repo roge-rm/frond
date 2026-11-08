@@ -170,7 +170,8 @@ struct Bench {
     struct InEvent { uint64_t ns; UsbPacketResult result; unsigned size; };
     std::vector<InEvent> inEvents;
     unsigned timeoutBudget = 0, timedOut = 0, configSetups = 0;
-    bool configStatus = false;
+    bool configStatus = false, outCredit = true;
+    unsigned outCalls = 0, creditQueries = 0;
     UsbDevicePort port() {
         using R = UsbPacketResult;
         static const UsbDevicePort::Operations ops{
@@ -194,7 +195,7 @@ struct Bench {
                 if(b.configStatus && b.timedOut < b.timeoutBudget) { ++b.timedOut; return R::Timeout; }
                 return UsbDevicePort(udc).In(d,n);
             },
-            [](void*, uint8_t e, const uint8_t* d, unsigned n) { return UsbDevicePort(udc).EpOut(e,d,n); },
+            [](void* ctx, uint8_t e, const uint8_t* d, unsigned n) { ++static_cast<Bench*>(ctx)->outCalls; return UsbDevicePort(udc).EpOut(e,d,n); },
             [](void* ctx, uint8_t e, uint8_t* d, unsigned* n) {
                 auto& b=*static_cast<Bench*>(ctx); auto result=UsbDevicePort(udc).EpIn(e,d,n);
                 b.inEvents.push_back({b.now,result,result==R::Ack?*n:0}); return result;
@@ -203,7 +204,8 @@ struct Bench {
                 auto& b=*static_cast<Bench*>(ctx);
                 if(!e && b.configStatus && b.timedOut < b.timeoutBudget) return R::Timeout;
                 return UsbDevicePort(udc).PeekIn(e,n);
-            }
+            },
+            [](void* ctx, uint8_t, unsigned) { auto& b=*static_cast<Bench*>(ctx); ++b.creditQueries; return b.outCredit; }
         };
         return {this,ops};
     }
@@ -669,8 +671,38 @@ static void testRequestCadence() {
     puts("PASS: bounded MPS request cadence, short/full/ZLP, masked guest real NAK, poke independence, OUT progress and backpressure/throughput");
 }
 
+static void testCooperativeOutCredit() {
+    Bench b;
+    b.outCredit=false;
+    b.guest.enable();b.host.Attach();
+    assert(b.runUntil(UsbBusHost::Phase::running,1000000000));
+    assert(UsbDevicePort(udc).OutReady(7,64)); // Ports without a hook keep normal bus polling.
+    std::vector<uint8_t> expected(130);
+    for(unsigned i=0;i<expected.size();++i) expected[i]=uint8_t(i*37);
+    b.fromHost.assign(expected.begin(),expected.end());
+    b.guest.toSend.assign(97,0x5a);
+    b.run(20000000);
+    assert(b.creditQueries && !b.outCalls && !b.host.GetCounters().bytesOut);
+    assert(b.fromHost.size()==66 && b.guest.received.empty()); // One retained 64-byte request.
+    assert(b.toHost==std::deque<uint8_t>(97,0x5a)); // IN continues while OUT has no credit.
+    assert(b.host.ReadStringDescriptor(1,0x409));b.run(10000000);
+    assert(!b.outCalls && !b.host.GetCounters().bytesOut);
+    b.outCredit=true;b.host.Poke();b.run(30000000);
+    assert(b.guest.received==expected && b.fromHost.empty());
+    assert(b.outCalls==3 && b.host.GetCounters().bytesOut==expected.size());
+    b.run(3000000);assert(b.outCalls==3);
+    b.outCredit=false;b.fromHost.assign(35,0xa5);b.run(3000000);
+    assert(b.fromHost.empty() && b.outCalls==3);
+    b.host.Detach();b.host.Attach();
+    assert(b.runUntil(UsbBusHost::Phase::running,1000000000));
+    b.outCredit=true;b.run(5000000);
+    assert(b.outCalls==3 && b.guest.received==expected); // Detach cancelled only the unacknowledged request.
+    puts("PASS: cooperative OUT credit retains bytes without tokens or ACK accounting, independent IN/control, exact resume and detach cancellation");
+}
+
 int main() {
     setvbuf(stdout, nullptr, _IONBF, 0);
+    testCooperativeOutCredit();
     testRequestCadence();
     testControlNoResponseRetry();
     testEnumerationAndFrames();

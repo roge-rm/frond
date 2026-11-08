@@ -956,6 +956,14 @@ state is saved separately from the host endpoint; loading one machine does not
 rewind a remote peer or bytes already sent to it. See the Dana checks in
 [testing.md](testing.md).
 
+Dana's staged localhost USB host uses a cooperative buffer-space query before
+submitting a bulk OUT token. A full device FIFO holds the pending request until
+space returns; only an actual ACK removes bytes from that request. Control and
+IN transfers continue independently. Other adapters keep their existing request
+scheduling. This host policy leaves the controller's full-FIFO NAK and transaction
+status behaviour unchanged. Receive-pressure checks use Palm OS's event loop
+while pausing application reads. Physical-host behaviour remains unqualified.
+
 The inherited 68k SD model reserves slot IDs 0 for SD and 1 for Memory Stick;
 a second SD slot uses ID 2. The default SD instance keeps chunk 0x1d0.
 The second instance uses chunk 0x201, with its own command, buffer and block
