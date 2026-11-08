@@ -211,6 +211,34 @@ class RunningRulesTest : public QObject {
         QCOMPARE(parseWindowId("wayland 5"), quint64(0));
         QCOMPARE(parseWindowId(""), quint64(0));
     }
+    void fullScreenRules() {
+        Traits t; State s; s.ready = true;
+        QVERIFY(!row(t, s, Id::FullScreen).enabled);
+        QCOMPARE(row(t, s, Id::FullScreen).label, QString("Full screen"));
+        s.embedded = true;
+        QVERIFY(row(t, s, Id::FullScreen).enabled);
+        s.fullScreen = true;
+        QCOMPARE(row(t, s, Id::FullScreen).label, QString("Leave full screen"));
+        QCOMPARE(fullScreenHideMs, 3000);
+        // The bar stays while the pointer is on it, a menu from it is open or a panel is.
+        QVERIFY(!barStaysInFullScreen(false, false, false));
+        QVERIFY(barStaysInFullScreen(true, false, false));
+        QVERIFY(barStaysInFullScreen(false, true, false));
+        QVERIFY(barStaysInFullScreen(false, false, true));
+        // The panel goes over the right edge, under the bar when that shows.
+        QCOMPARE(overlayPanel({1280, 800}, 36), QRect(1280 - panelWidth, 36, panelWidth, 764));
+        QCOMPARE(overlayPanel({1280, 800}, 0), QRect(1280 - panelWidth, 0, panelWidth, 800));
+        QCOMPARE(overlayPanel({200, 20}, 36).height(), 0);
+    }
+    void keyTargets() {
+        // The Palm gets the keys on a click on it and when the window is activated, Frond's window on
+        // a click on its widgets, and nothing changes while the window isn't active.
+        QCOMPARE(keyTarget(true, true, false, false), KeyTarget::Palm);
+        QCOMPARE(keyTarget(true, false, false, true), KeyTarget::Palm);
+        QCOMPARE(keyTarget(true, false, true, false), KeyTarget::Frond);
+        QCOMPARE(keyTarget(true, false, false, false), KeyTarget::Keep);
+        QCOMPARE(keyTarget(false, true, false, true), KeyTarget::Keep);
+    }
     // A panel opens at the right of the Palm, so the Palm keeps its width; Size scales the Palm.
     void windowAndPanelSizes() {
         QCOMPARE(windowWidth(320, false), 320);

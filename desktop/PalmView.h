@@ -2,6 +2,7 @@
 #include <QPointer>
 #include <QSize>
 #include <QWidget>
+class QTimer;
 class QWindow;
 
 // Holds the core's Palm window inside Frond's window. The core's X11 window is wrapped and
@@ -20,9 +21,24 @@ class PalmHolder : public QWidget {
     void setPalmSize(QSize size);
     QSize sizeHint() const override { return wanted; }
     QSize minimumSizeHint() const override { return wanted.isValid() ? wanted / 2 : QSize(); }
+    // Gives the keyboard to the Palm's window, or back to Frond's own window. Under a window
+    // manager the keys go to Frond's top-level window, which the Palm is a child of.
+    void focusPalm();
+    void focusFrond();
+    // Puts the Palm's window above the other native windows of Frond's window.
+    void raisePalm();
+    // The Palm's rectangle in global coordinates, empty when not embedded.
+    QRect palmGlobalRect() const;
+ protected:
+    bool eventFilter(QObject* watched, QEvent* event) override;
  private:
+    void setInputFocus(quint32 window);
+    void poll();
     QPointer<QWidget> container;
+    QPointer<QWindow> palm;
+    QTimer* pollTimer{nullptr};
     QSize wanted;
+    bool buttonWasDown{false}, palmHasFocus{false};
 };
 
 // The thin strip left over the Palm when the bar is hidden, with a tab in the middle that brings

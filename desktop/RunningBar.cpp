@@ -235,6 +235,8 @@ void RunningBar::apply(const runningRules::Traits& traits, const runningRules::S
         for (const auto& row : present) listed = listed || row.id == id;
         action->setVisible(listed);
     }
+    // Without the embedded Palm there is no strip to bring the bar back, so the row isn't offered.
+    actions[Id::HideBar]->setVisible(state.embedded);
     const auto buttons = runningRules::buttons(traits, state);
     cardAction->setVisible(buttons.card);
     cardAction->setEnabled(buttons.cardEnabled);

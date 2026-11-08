@@ -122,7 +122,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     runLayout->setContentsMargins(0, 0, 0, 0); runLayout->setSpacing(0);
     barHandle = new BarHandle(runArea);
     runLayout->addWidget(barHandle);
-    auto* body = new QHBoxLayout;
+    auto* body = bodyLayout = new QHBoxLayout;
     body->setSpacing(0);
     palmHolder = new PalmHolder(runArea);
     palmHolder->hide();
@@ -134,6 +134,23 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     runArea->hide();
     barHandle->hide();
     connect(barHandle, &BarHandle::clicked, this, [this] { setBarShown(true); });
+    edgeStrip = new QWidget(runArea);
+    edgeStrip->setObjectName("edgeStrip");
+    edgeStrip->setAutoFillBackground(true);
+    edgeStrip->setFixedHeight(runningRules::edgeStripHeight);
+    { auto dark = edgeStrip->palette(); dark.setColor(QPalette::Window, Qt::black); edgeStrip->setPalette(dark); }
+    edgeStrip->hide();
+    edgeStrip->installEventFilter(this);
+    runArea->installEventFilter(this);
+    overlayTimer = new QTimer(this);
+    overlayTimer->setSingleShot(true);
+    overlayTimer->setInterval(runningRules::fullScreenHideMs);
+    connect(overlayTimer, &QTimer::timeout, this, [this] {
+        if (!fullScreenOn) return;
+        if (runningRules::barStaysInFullScreen(runningBar->underMouse(), QApplication::activePopupWidget() != nullptr, panels->current() >= 0))
+            overlayTimer->start();
+        else showOverlayBar(false);
+    });
     drivers = new QWidget(this);
     drivers->hide();
     auto* root = drivers;
@@ -475,10 +492,9 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     setAcceptDrops(true);
     connect(panels, &PanelHost::aboutToChange, this, [this](int page) { if (embedded && page >= 0 && !panelWasOpen) baseWidth = width(); });
     connect(panels, &PanelHost::changed, this, &MainWindow::panelChanged);
-    // The same keys the Palm window sends back as shortcut events. F11 waits for full screen and
-    // Quit is the File menu's.
+    // The same keys the Palm window sends back as shortcut events; Quit is the File menu's.
     for (const auto& key : runningRules::shortcutKeys()) {
-        if (key.what == runningRules::Shortcut::FullScreen || key.what == runningRules::Shortcut::Quit) continue;
+        if (key.what == runningRules::Shortcut::Quit) continue;
         auto* shortcut = new QShortcut(QKeySequence(QString::fromLatin1(key.keys)), this);
         connect(shortcut, &QShortcut::activated, this, [this, what = key.what] { runShortcut(what); });
     }
@@ -495,6 +511,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     });
     runningBar = new RunningBar(this);
     addToolBar(Qt::TopToolBarArea, runningBar);
+    runningBar->installEventFilter(this);
     connect(runningBar, &RunningBar::chosen, this, &MainWindow::barChosen);
     connect(runningBar, &RunningBar::pressed, this, &MainWindow::barPressed);
     connect(runningBar, &RunningBar::networkChosen, this, [this](const QString& mode) {
@@ -804,7 +821,7 @@ void MainWindow::refresh() {
     home->setVisible(!running);
     runArea->setVisible(running);
     palmHolder->setVisible(running && embedded);
-    barHandle->setVisible(running && !runningBar->barShown());
+    barHandle->setVisible(running && !runningBar->barShown() && !fullScreenOn);
     statusBar()->setVisible(!running);
     if (running != machineMenuShown) {
         machineMenuShown = running;
@@ -814,6 +831,7 @@ void MainWindow::refresh() {
             listGeometry = saveGeometry();
             appsStale = true;
         } else {
+            leaveFullScreen();
             menuBar()->removeAction(runningBar->menu()->menuAction());
             runningBar->setBarShown(true);
             panels->open(-1);
@@ -946,6 +964,8 @@ void MainWindow::refresh() {
     state.microphone = microphoneArmed ? "on" : microphoneState->text().isEmpty() ? "off" : "off " + microphoneState->text();
     state.network = network->currentData().toString();
     state.barShown = runningBar->barShown();
+    state.embedded = embedded;
+    state.fullScreen = fullScreenOn;
     QList<QPair<QString, QString>> modes;
     for (int i = 0; i < network->count(); i++) modes << qMakePair(network->itemData(i).toString(), network->itemText(i));
     const auto traits = runningRules::traitsFor(currentDevice());
@@ -953,7 +973,8 @@ void MainWindow::refresh() {
                            runningRules::subtitle(traits, runningPreferences.fastEngine, frondFirmware::deviceName(currentDevice())));
     runningBar->apply(traits, state, runningRules::cardIcon(supported, known, cardPresent, cardInserted),
                       caps.sound && runningPreferences.audio, modes);
-    runningBar->setVisible(running && runningBar->barShown());
+    if (fullScreenOn) showOverlayBar(overlayBarShown);
+    else runningBar->setVisible(running && runningBar->barShown());
 }
 void MainWindow::notify(const QString& text, int ms) {
     if (client.running()) runningBar->say(text, ms);
@@ -962,6 +983,10 @@ void MainWindow::notify(const QString& text, int ms) {
 void MainWindow::togglePanel(int page) { panels->open(panels->current() == page ? -1 : page); }
 void MainWindow::panelChanged(int page) {
     runningBar->setOpenPanel(page);
+    if (fullScreenOn) {
+        placeOverlays();
+        if (page < 0 && overlayBarShown) overlayTimer->start();
+    }
     if (page == 0) { appsStale = true; listApps(); }
     setPanelOpen(page >= 0);
 }
@@ -1001,6 +1026,77 @@ void MainWindow::fitWindow() {
     // The layout's minimum height settles after the panel is gone.
     QTimer::singleShot(0, this, [this] { if (client.running() && !isMaximized() && !isFullScreen() && !embedded) resize(480, 1); });
 }
+// Full screen is only for the embedded Palm. The menu bar goes, the bar and an open panel float
+// over the Palm (native windows of the main window, so they stack above the embedded one) and the Palm fits the screen.
+void MainWindow::toggleFullScreen() {
+    if (fullScreenOn) leaveFullScreen();
+    else enterFullScreen();
+}
+void MainWindow::enterFullScreen() {
+    if (fullScreenOn || !client.running() || !embedded) return;
+    fullScreenOn = true;
+    menuBar()->hide();
+    removeToolBar(runningBar);
+    for (QWidget* w : {static_cast<QWidget*>(runningBar), static_cast<QWidget*>(panels), edgeStrip}) {
+        w->setParent(this);
+        w->setAttribute(Qt::WA_NativeWindow);
+        w->setAutoFillBackground(true);
+    }
+    bodyLayout->removeWidget(panels);
+    barHandle->hide();
+    showFullScreen();
+    overlayBarShown = true;
+    panels->setVisible(panels->current() >= 0);
+    refresh();
+    placeOverlays();
+    overlayTimer->start();
+}
+void MainWindow::leaveFullScreen() {
+    if (!fullScreenOn) return;
+    // A panel left open would squeeze the Palm in the smaller window.
+    panels->open(-1);
+    fullScreenOn = false;
+    overlayTimer->stop();
+    edgeStrip->hide();
+    panels->setParent(runArea);
+    bodyLayout->addWidget(panels);
+    panels->setVisible(panels->current() >= 0);
+    addToolBar(Qt::TopToolBarArea, runningBar);
+    menuBar()->show();
+    showNormal();
+    refresh();
+}
+void MainWindow::showOverlayBar(bool on) {
+    overlayBarShown = on;
+    runningBar->setVisible(on);
+    edgeStrip->setVisible(!on);
+    placeOverlays();
+}
+void MainWindow::placeOverlays() {
+    if (!fullScreenOn) return;
+    // Each is its own X window, so the raise goes to the window; the Palm's goes first.
+    const auto raise = [](QWidget* w) { if (w->windowHandle()) w->windowHandle()->raise(); else w->raise(); };
+    palmHolder->raisePalm();
+    const auto area = runArea->size();
+    const auto origin = runArea->mapTo(this, QPoint(0, 0));
+    runningBar->setGeometry(origin.x(), origin.y(), area.width(), runningBar->height());
+    edgeStrip->setGeometry(origin.x(), origin.y(), area.width(), runningRules::edgeStripHeight);
+    if (panels->current() >= 0) {
+        panels->setGeometry(runningRules::overlayPanel(area, overlayBarShown ? runningBar->height() : 0).translated(origin));
+        raise(panels);
+    }
+    if (overlayBarShown) raise(runningBar);
+    else raise(edgeStrip);
+}
+bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
+    if (fullScreenOn) {
+        if (watched == runningBar && event->type() == QEvent::Enter) overlayTimer->stop();
+        else if (watched == runningBar && event->type() == QEvent::Leave) overlayTimer->start();
+        else if (watched == edgeStrip && event->type() == QEvent::Enter) { showOverlayBar(true); overlayTimer->start(); }
+        else if (watched == runArea && event->type() == QEvent::Resize) QTimer::singleShot(0, this, &MainWindow::placeOverlays);
+    }
+    return QMainWindow::eventFilter(watched, event);
+}
 // Shows or hides the bar, keeps the choice in the machine's settings and keeps the Palm's size.
 void MainWindow::setBarShown(bool shown) {
     if (shown == runningBar->barShown()) return;
@@ -1022,6 +1118,9 @@ void MainWindow::embedReply(bool ok, const QString& message) {
     embedded = id && palmHolder->embed(id);
     if (!embedded) {
         log->appendPlainText(tr("The Palm stays in its own window. %1").arg(ok ? message : QString()));
+        // A hidden bar couldn't be brought back there; the saved choice stays for the next embedding.
+        runningBar->setBarShown(true);
+        refresh();
         return;
     }
     panels->setMinimumHeight(0);
@@ -1099,7 +1198,8 @@ void MainWindow::barChosen(runningRules::Id id) {
         case Id::Reset: resetButton->click(); break;
         case Id::HardReset: hardResetButton->click(); break;
         case Id::SaveStop: stopButton->click(); break;
-        case Id::Network: case Id::FullScreen: break;
+        case Id::FullScreen: toggleFullScreen(); break;
+        case Id::Network: break;
     }
 }
 // Each key does what its bar button or menu row does; a control that is greyed out does nothing.
@@ -1118,11 +1218,12 @@ void MainWindow::runShortcut(runningRules::Shortcut what) {
         case Shortcut::Display: togglePanel(2); break;
         case Shortcut::Connections: togglePanel(3); break;
         case Shortcut::Sound: soundToggle->click(); break;
-        case Shortcut::HideBar: barChosen(runningRules::Id::HideBar); break;
+        case Shortcut::HideBar: if (embedded) barChosen(runningRules::Id::HideBar); break;
         case Shortcut::Log: barChosen(runningRules::Id::Log); break;
         case Shortcut::Reset: barChosen(runningRules::Id::Reset); break;
         case Shortcut::Screenshot: screenshot(); break;
-        case Shortcut::FullScreen: case Shortcut::Quit: break;
+        case Shortcut::FullScreen: toggleFullScreen(); break;
+        case Shortcut::Quit: break;
     }
 }
 void MainWindow::barPressed(RunningBar::Button button) {

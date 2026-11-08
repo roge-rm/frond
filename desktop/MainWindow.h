@@ -19,6 +19,8 @@ class QFileSystemWatcher;
 class QDialog;
 class QMessageBox;
 class SettingsDialog;
+class QHBoxLayout;
+class QTimer;
 class QListWidget;
 class QListWidgetItem;
 class QMenu;
@@ -50,6 +52,7 @@ class MainWindow : public QMainWindow {
     void installFiles(const QStringList& paths);
  protected:
     void closeEvent(QCloseEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dropEvent(QDropEvent* event) override;
  private:
@@ -121,6 +124,12 @@ class MainWindow : public QMainWindow {
     void embedReply(bool ok, const QString& message);
     void afterDevice();
     void setBarShown(bool shown);
+    // Full screen: the Palm fills the screen, the bar and an open panel float over it.
+    void toggleFullScreen();
+    void enterFullScreen();
+    void leaveFullScreen();
+    void showOverlayBar(bool on);
+    void placeOverlays();
     void setPanelOpen(bool open);
     void liveDisplay(const QString& what);
     void listApps();
@@ -149,6 +158,10 @@ class MainWindow : public QMainWindow {
     QWidget* runArea{nullptr};  // the handle strip, the Palm and the panels
     PalmHolder* palmHolder{nullptr};
     BarHandle* barHandle{nullptr};
+    QHBoxLayout* bodyLayout{nullptr};  // the Palm and, outside full screen, the panel
+    QWidget* edgeStrip{nullptr};       // along the top edge in full screen, brings the bar back
+    QTimer* overlayTimer{nullptr};     // hides the bar 3 s after the pointer leaves it
+    bool fullScreenOn{false}, overlayBarShown{false};
     bool embedWanted{false}, embedTried{false}, embedded{false};
     bool panelWasOpen{false};
     int baseWidth{0};  // the window's width with no panel open, while the Palm is embedded

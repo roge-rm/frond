@@ -1,5 +1,6 @@
 #pragma once
 #include <optional>
+#include <QRect>
 #include <QSize>
 #include <QString>
 #include <QStringList>
@@ -55,6 +56,7 @@ struct State {
     QString microphone{"off"};  // on, off, or "off <reason>"
     QString network;            // the current mode, empty before it is known
     bool barShown{true};
+    bool embedded{false}, fullScreen{false};  // full screen is only offered with the Palm embedded
 };
 
 inline QString microphoneValue(const QString& state) {
@@ -81,8 +83,8 @@ inline std::vector<Row> rows(const Traits& t, const State& s) {
     out.push_back({Id::Connections, QObject::tr("Connections…"), std::nullopt, {}, true, false, 1});
     out.push_back({Id::Screenshot, QObject::tr("Screenshot"), std::nullopt, {}, ready, false, 1});
     out.push_back({Id::HideBar, s.barShown ? QObject::tr("Hide bar") : QObject::tr("Show bar"), std::nullopt, {}, true, false, 2});
-    // The Palm is in its own window until it can be embedded.
-    out.push_back({Id::FullScreen, QObject::tr("Full screen"), std::nullopt, {}, false, false, 2});
+    out.push_back({Id::FullScreen, s.fullScreen ? QObject::tr("Leave full screen") : QObject::tr("Full screen"), std::nullopt, {},
+                   s.embedded, false, 2});
     out.push_back({Id::Save, QObject::tr("Save"), std::nullopt, {}, ready, false, 2});
     out.push_back({Id::SaveCopy, QObject::tr("Save a copy…"), std::nullopt, {}, ready, false, 2});
     out.push_back({Id::Log, QObject::tr("Emulator log"), std::nullopt, {}, true, false, 2});
@@ -153,6 +155,24 @@ inline quint64 parseWindowId(const QString& reply) {
 
 // The side panel's width and the strip left of a hidden bar.
 constexpr int panelWidth = 300, handleHeight = 8;
+// Full screen: the bar goes this long after the pointer leaves it, and a strip this high along
+// the top edge brings it back.
+constexpr int fullScreenHideMs = 3000, edgeStripHeight = 4;
+// The bar stays in full screen while the pointer is on it, a menu from it is open or a panel is.
+inline bool barStaysInFullScreen(bool pointerOnBar, bool menuOpen, bool panelOpen) { return pointerOnBar || menuOpen || panelOpen; }
+// Where the panel goes in full screen: over the right edge, under the bar when that shows.
+inline QRect overlayPanel(QSize area, int barHeight) {
+    return QRect(area.width() - panelWidth, barHeight, panelWidth, std::max(0, area.height() - barHeight));
+}
+// Which window the keyboard goes to: the Palm after a click on it or when the window is activated,
+// Frond's own window after a click on one of its widgets.
+enum class KeyTarget { Keep, Palm, Frond };
+inline KeyTarget keyTarget(bool windowActive, bool pressOnPalm, bool pressOnFrond, bool justActivated) {
+    if (!windowActive) return KeyTarget::Keep;
+    if (pressOnFrond) return KeyTarget::Frond;
+    if (pressOnPalm || justActivated) return KeyTarget::Palm;
+    return KeyTarget::Keep;
+}
 
 // Window width for a Palm of `palm` pixels: a panel opens at its right, so the Palm keeps its size.
 inline int windowWidth(int palm, bool panelOpen) { return palm + (panelOpen ? panelWidth : 0); }

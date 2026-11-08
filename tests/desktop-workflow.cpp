@@ -2223,12 +2223,13 @@ for line in s.makefile('rb'):
         press("ctrl+s");
         QTRY_VERIFY_WITH_TIMEOUT(commands().size() == 1 && commands()[0].startsWith("save ") && commands()[0].endsWith("/Keys.frond"), 4000);
         QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("save")->isEnabled(), 4000);
-        // An unknown name does nothing; Ctrl+B hides the bar and shows it again.
+        // An unknown name does nothing, and so does Ctrl+B and F11 without the embedded Palm.
         press("ctrl+z");
         press("ctrl+b");
-        QTRY_VERIFY(!bar->isVisible());
-        press("ctrl+b");
-        QTRY_VERIFY(bar->isVisible());
+        press("f11");
+        QTest::qWait(150);
+        QVERIFY(bar->isVisible() && !window.isFullScreen());
+        QVERIFY(!window.findChild<QAction*>("machineHideBar")->isVisible());
         // Ctrl+1 opens the Applications panel and closes it again.
         auto* panels = window.findChild<PanelHost*>("panelHost");
         press("ctrl+1");
@@ -2292,8 +2293,7 @@ for line in s.makefile('rb'):
         QCOMPARE(panels->current(), 2);
         QTest::keyClick(&window, Qt::Key_3, Qt::ControlModifier);
         QCOMPARE(panels->current(), -1);
-        QTest::keyClick(&window, Qt::Key_B, Qt::ControlModifier);
-        QVERIFY(!bar->isVisible());
+        // Hide bar is only for the embedded Palm.
         QTest::keyClick(&window, Qt::Key_B, Qt::ControlModifier);
         QVERIFY(bar->isVisible());
         QTest::keyClick(&window, Qt::Key_S, Qt::ControlModifier);
@@ -2331,6 +2331,12 @@ for line in s.makefile('rb'):
             // The chain went on after the refusal, and no error box is up.
             QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QAction*>("machineNetwork")->isEnabled(), 4000);
             QVERIFY(!QApplication::activeModalWidget());
+            // Full screen and Hide bar are only offered with the embedded Palm.
+            auto* fullScreen = window.findChild<QAction*>("machineFullScreen");
+            QVERIFY(fullScreen->isVisible() && !fullScreen->isEnabled());
+            QVERIFY(!window.findChild<QAction*>("machineHideBar")->isVisible());
+            fullScreen->trigger();
+            QVERIFY(!window.isFullScreen() && window.menuBar()->isVisible());
             // The bar-only window: a panel opens under the bar at the size the panel needs.
             auto* panels = window.findChild<PanelHost*>("panelHost");
             panels->open(2);
