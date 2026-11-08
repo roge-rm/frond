@@ -1789,6 +1789,8 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
                                                                       [this](bool) { refresh(); });
         }
     }
+    // If Frond goes without stopping the Palm, the core saves the working session itself.
+    arguments << "--save-on-disconnect" << QFileInfo(target).absoluteFilePath();
     stopping = closeAfterStop = allowClose = false;
     log->clear(); busy = true;
     const bool launched = client.start(coreFor(startDevice), arguments);

@@ -96,6 +96,12 @@ class Client:
         assert self.process.wait(timeout=30) == 0, 'core exit status'
         self.close()
 
+    def drop(self):
+        """Closes the socket as a killed desktop would, with no quit."""
+        self.stream.close()
+        self.connection.close()
+        self.connection = None
+
     def close(self):
         if self.connection:
             self.connection.close()
@@ -369,7 +375,42 @@ def check_arm(core, session, root):
         c.close()
         shutil.rmtree(usb_folder, ignore_errors=True)
     work_folder(core, session, work, root, device)
+    # A copy of the machine folder saved after common(), which still has the pattern database.
+    gone = work / 'gone'
+    shutil.copytree(saved.parent, gone, ignore=shutil.ignore_patterns('*.tmp-*'))
+    disconnect(core, [gone / saved.name], gone / saved.name, root, 'arm')
     return device
+
+
+def disconnect(core, args, target, root, name):
+    """With --save-on-disconnect, as the desktop starts the core: the socket closing without a quit saves
+    the session to target and the core exits; a quit sent just before the close doesn't save."""
+    stamp = target.stat().st_mtime_ns
+    c = Client(core, [*args, '--save-on-disconnect', target], root, f'{name}-gone')
+    try:
+        c.until_ok('guest-ready')
+        c.ok('delete-db', PATTERN_NAME, code='deleted')
+        c.drop()
+        assert c.process.wait(timeout=60) == 0, 'core exit status after the socket closed'
+    finally:
+        c.close()
+    assert target.stat().st_mtime_ns != stamp, 'session not saved when the socket closed'
+    c = Client(core, [*args, '--save-on-disconnect', target], root, f'{name}-gone-reload')
+    try:
+        c.until_ok('guest-ready')
+        assert PATTERN_NAME.encode().hex() not in c.ok('db-list', code='databases'), 'saved state not the latest'
+        assert c.ok('install', PATTERN, code=('installed', 'needs-reset'))
+        stamp = target.stat().st_mtime_ns
+        c.serial += 1
+        c.connection.sendall(f'{c.serial}\tquit\t\n'.encode())
+        c.drop()
+        assert c.process.wait(timeout=60) == 0, 'core exit status after quit'
+    finally:
+        c.close()
+    assert target.stat().st_mtime_ns == stamp, 'quit then a closed socket saved the session'
+    for log in (f'{name}-gone', f'{name}-gone-reload'):
+        text = (root / f'{log}.log').read_text(errors='replace')
+        assert ('session saved to' in text) == (log == f'{name}-gone'), f'{log}: {text[-400:]}'
 
 
 def files_of(folder):
@@ -459,6 +500,9 @@ def check_68k(core, rom, root):
         c.quit()
     finally:
         c.close()
+    gone = work / 'gone.frond'
+    shutil.copy2(saved, gone)
+    disconnect(core, [gone, '--device', 'palm-iiix'], gone, root, 'iiix')
     # A bad socket path or a missing launcher stops the core with an error, not a hang.
     # The missing socket sits in a short temporary folder so a long work path can't hit the 108-byte limit.
     short = tempfile.mkdtemp(prefix='frond-')
@@ -472,6 +516,9 @@ def check_68k(core, rom, root):
     both = subprocess.run([str(core), str(saved), '--run-for', '1', '--desktop-socket', 'x'],
                           capture_output=True, text=True, timeout=60)
     assert both.returncode == 2, both.stderr
+    alone = subprocess.run([str(core), str(saved), '--run-for', '1', '--save-on-disconnect', str(saved)],
+                           capture_output=True, text=True, timeout=60)
+    assert alone.returncode == 2 and 'needs --desktop-socket' in alone.stderr, alone.stderr
 
 
 def arm_session(given):

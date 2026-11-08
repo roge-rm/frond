@@ -841,6 +841,10 @@ for line in s.makefile('rb'):
         QVERIFY(!args.contains("--fast-audio") && args.contains("--low-latency-queue"));
         QVERIFY(read(".args").contains("--window-scale\n1.75"));
         QVERIFY(args.contains("--smooth-lcd") && args.contains("--no-sound"));
+        // The core saves the working session if Frond goes without stopping it.
+        const QFileInfo working(managedSession("Tungsten E2"));
+        QCOMPARE(args.value(args.indexOf("--save-on-disconnect") + 1),
+                 QFileInfo(working.absolutePath()).canonicalFilePath() + '/' + working.fileName());
         frondSessions::Preferences added;
         QVERIFY(frondSessions::readPreferences(managedSession("Tungsten E2"), &added));
         QCOMPARE(added.scale, 7); QVERIFY(added.smooth && !added.audio && added.fastAudio);

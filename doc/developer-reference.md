@@ -37,6 +37,7 @@ The Palm IIIx has its own runner, `out/frond-68k` (`make out/frond-68k`, install
 | `--irda off\|pty\|tcp:PORT` | Same for infrared SIR bytes. Not with the infrared keyboard. |
 | `--bluetooth off\|SOCKET` | Connect the virtual radio to a local H4 controller Unix socket (such as `btvirt`). |
 | `--desktop-socket PATH` | Connect to the desktop launcher's control socket, see [Control socket](#control-socket). Not with `--run-for` or `--script`. |
+| `--save-on-disconnect FILE` | Save the session to this absolute path if the control socket closes without a `quit`, then exit. Needs `--desktop-socket`. |
 | `--script FILE` | Run console commands from a file at start. One per line, `#` starts a comment. |
 | `--display WxH` | Display mode, if the device supports it: 160x160, 160x240, 240x240, 240x320, 320x320, 320x480, 480x480 or 480x720. |
 | `--window-scale N` | Window scale: 1, 1.25, 1.5, 1.75 or 2. Default is the largest that fits. |
@@ -101,6 +102,8 @@ The core reads these from the terminal and from `--script`. A command with no ar
 ## Control socket
 
 The desktop app listens on a Unix socket and the core connects to it with `--desktop-socket`. Only the emulation thread serves requests, one at a time.
+
+When the socket closes the core exits. The desktop passes its working session with `--save-on-disconnect`, so if Frond is killed or crashes the core saves there first, on the emulation thread as a `save` request would. It doesn't save after a `quit`, one still waiting to be read included, or when a bad request broke the protocol.
 
 Lines are tab separated and end in a newline.
 
@@ -352,6 +355,7 @@ out/frond-68k iiix.frond --serial pty
 | `--serial off\|pty\|tcp:PORT`, `--irda off\|pty\|tcp:PORT` | Connect the serial port or infrared to a host PTY or a loopback TCP listener. The PTY path is printed. |
 | `--gdb PORT` | Start the GDB stub on 127.0.0.1:PORT, see below. |
 | `--desktop-socket PATH` | Connect to the desktop's control socket, see [Control socket](#control-socket). The console is off then. |
+| `--save-on-disconnect FILE` | As on the ARM core. |
 
 `--work-folder`, `--nand`, `--engine`, `--jog-controls`, `--usb`, `--bluetooth`, `--fast-audio`, `--hide-keyboard` and `--hide-jog-controls` are taken and ignored, as the desktop passes them to every core. `--card-swap`, `--card-identity` and `--card-protected` are refused with a one-line message and exit 2, as a IIIx has no card slot.
 
@@ -691,7 +695,7 @@ Not in `make test`. The first group builds a program and runs it with a private 
 | `test-host-call-wake` | T\|X and Zire 72 smoke sessions as above. A GDB breakpoint on EvtWakeup: `guest-ready` wakes nothing, a host call wakes at most once. |
 | `test-patched-traps` | T\|X smoke session as above. Hooks in the native trap table like UDMH's, written over the GDB stub: the database list, an install, an export and a launch still work, and the sync probe still gets its notify. |
 | `test-session-folder-card` | Nothing, plus the T\|X smoke session as above for its last case. A session folder that doesn't load is refused with one line, not a crash, and names the card file when one is there. |
-| `test-core-control` | ARM smoke session (`FROND_ARM_SESSION`) and IIIx ROM. The control socket on both runners. |
+| `test-core-control` | ARM smoke session (`FROND_ARM_SESSION`) and IIIx ROM. The control socket on both runners, and the save when it closes without a quit. |
 | `test-tg50-usb-hotsync` | TG50 session (`make smoke-sessions`) and pilot-link. |
 | `test-tg50-audio-lifecycle`, `test-tg50-audio-queue` | Nothing. TG50 audio unit tests. |
 | `test-host-microphone`, `test-host-microphone-state` | Nothing. Host microphone unit tests. |
