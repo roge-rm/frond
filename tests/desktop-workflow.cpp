@@ -4513,6 +4513,39 @@ for line in s.makefile('rb'):
         QVERIFY(!twin.id.isEmpty() && twin.identity != machineIdentity("Twin A") && frondCards::readSlot(twinB).swap);
         QVERIFY(frondCards::launchArguments(cardsSessions(), twinB).join(' ').contains("--card-swap --card-identity " + twin.identity.toHex()));
     }
+    // A core still saving after Frond died holds <session>.core: the machine counts as in use and
+    // reconcile leaves it. Once it exits, a take-out Frond didn't finish (the save has no card, the
+    // file is still there and the slot unchanged) puts the card in the drawer.
+    void cardsCoreStillSaving() {
+        cardsReset();
+        const auto a = cardsMachine("Palm TX", true);
+        frondCards::reconcile(cardsSessions());
+        const auto card = onlyCard();
+        const auto frond = a + "/Palm TX.frond";
+        QVERIFY(!frondSessions::coreRunning(frond) && !frondSessions::inUse(frond));
+        const int core = ::open(QFile::encodeName(frondSessions::corePath(frond)).constData(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+        QVERIFY(core >= 0 && ::flock(core, LOCK_EX | LOCK_NB) == 0);
+        writeFrond(frond, "palm-tx", {});
+        QVERIFY(frondSessions::coreRunning(frond) && frondSessions::inUse(frond));
+        QLockFile lock(frond + ".lock"); lock.setStaleLockTime(0);
+        QVERIFY(!frondSessions::tryLockSession(lock, frond));
+        frondCards::reconcile(cardsSessions());
+        QVERIFY(QFileInfo(a + "/sd.frondsd").isFile());
+        QCOMPARE(frondCards::readSlot(a).card, card.id);
+        ::close(core);
+        QVERIFY(!frondSessions::inUse(frond));
+        frondCards::reconcile(cardsSessions());
+        QVERIFY(!QFileInfo(a + "/sd.frondsd").isFile());
+        QVERIFY(frondCards::readSlot(a).card.isEmpty());
+        QVERIFY(frondCards::entries(cardsLibrary()).value(0).inDrawer);
+        // A card put in while stopped (swap set) stays for the next start.
+        {
+            frondCards::LibraryLock library(cardsLibrary());
+            QVERIFY(frondCards::toMachine(cardsLibrary(), card.id, a).isEmpty());
+        }
+        frondCards::reconcile(cardsSessions());
+        QVERIFY(QFileInfo(a + "/sd.frondsd").isFile() && frondCards::readSlot(a).swap);
+    }
     // A move to another file system fails rather than copying the card.
     void cardsMoveNeverCopies() {
         cardsReset();

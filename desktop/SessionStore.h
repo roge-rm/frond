@@ -19,6 +19,10 @@
 #include <filesystem>
 #include <functional>
 #include <zlib.h>
+#include <cerrno>
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
 #include "FirmwareInput.h"
 
 // Each machine is a folder: sessions/<name>/ holds <name>.frond, <name>.frond.settings.json,
@@ -311,7 +315,7 @@ inline bool tempName(const QString& name) {
 // Files Frond keeps in a machine folder, saved or working.
 inline bool machineFileName(const QString& name) {
     return packableName(name) || ignoredName(name) || name.endsWith(".frond.lock") || name.endsWith(".frond.new") ||
-           name.endsWith(".frond.work");
+           name.endsWith(".frond.work") || name.endsWith(".frond.core");
 }
 inline QString packableDestName(const QString& name, const QString& sessionName) {
     if (name.endsWith(".frond.settings.json")) return sessionName + ".frond.settings.json";
@@ -392,10 +396,29 @@ inline Info describe(const QString& path) {
     return info;
 }
 
+// A core run with --save-on-disconnect holds <session>.core locked with flock for its whole run.
+// It outlives a Frond that died while it saves, so the session's QLockFile alone isn't enough.
+inline QString corePath(const QString& frond) { return frond + ".core"; }
+inline bool coreRunning(const QString& frond) {
+    const int fd = ::open(QFile::encodeName(corePath(frond)).constData(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    const bool held = ::flock(fd, LOCK_EX | LOCK_NB) != 0 && errno == EWOULDBLOCK;
+    ::close(fd);
+    return held;
+}
+// Takes a session's lock only when no core still runs it.
+inline bool tryLockSession(QLockFile& lock, const QString& frond) {
+    if (!lock.tryLock()) return false;
+    if (!coreRunning(frond)) return true;
+    lock.unlock();
+    return false;
+}
+
 inline bool inUse(const QString& path) {
-    QLockFile lock(resolveFrond(path) + ".lock");
+    const auto frond = resolveFrond(path);
+    QLockFile lock(frond + ".lock");
     lock.setStaleLockTime(0);
-    if (!lock.tryLock()) return true;
+    if (!tryLockSession(lock, frond)) return true;
     lock.unlock();
     return false;
 }
@@ -433,7 +456,8 @@ inline bool removeStaleWork(const QString& frond) {
     const auto dir = machineDirOf(frond);
     QDir folder(dir);
     const QStringList markers{work.fileName(), QFileInfo(markerPath(frond)).fileName(),
-                              QFileInfo(preferencesPath(frond)).fileName(), QFileInfo(frond).fileName() + ".lock"};
+                              QFileInfo(preferencesPath(frond)).fileName(), QFileInfo(frond).fileName() + ".lock",
+                              QFileInfo(corePath(frond)).fileName()};
     for (const auto& entry : folder.entryInfoList(QDir::Files | QDir::Hidden | QDir::System))
         if (!markers.contains(entry.fileName()) && entry.lastModified() > work.lastModified()) return false;
     QFile::remove(markerPath(frond));
@@ -688,7 +712,7 @@ inline QString rename(const QString& folder, const Info& info, const QString& wa
     // locked throughout and neither lock file is pulled out from under its QLockFile.
     QLockFile lock(info.path + ".lock");
     lock.setStaleLockTime(0);
-    if (!lock.tryLock()) return QStringLiteral("This session is open in another Frond.");
+    if (!tryLockSession(lock, info.path)) return QStringLiteral("This session is open in another Frond.");
     const auto oldFrond = QFileInfo(info.path).fileName();
     const auto newFrond = name + ".frond";
     if (!QDir().mkdir(newDir)) return QStringLiteral("Couldn't rename the session.");
@@ -699,7 +723,8 @@ inline QString rename(const QString& folder, const Info& info, const QString& wa
         return QStringLiteral("Couldn't rename the session.");
     }
     const auto renamed = [&](const QString& file) {
-        for (const auto& suffix : {QString(), QStringLiteral(".new"), QStringLiteral(".settings.json"), QStringLiteral(".work")})
+        for (const auto& suffix : {QString(), QStringLiteral(".new"), QStringLiteral(".settings.json"), QStringLiteral(".work"),
+                                   QStringLiteral(".core")})
             if (file == oldFrond + suffix) return newFrond + suffix;
         return file;
     };
@@ -754,7 +779,7 @@ namespace frondSessions {
 inline QString remove(const Info& info, const CopyProgress& progress = {}) {
     QLockFile lock(info.path + ".lock");
     lock.setStaleLockTime(0);
-    if (!lock.tryLock()) return QStringLiteral("This session is open in another Frond.");
+    if (!tryLockSession(lock, info.path)) return QStringLiteral("This session is open in another Frond.");
     const auto dir = machineDirOf(info.path);
     if (QFileInfo(dir).isDir() && QFileInfo(dir).fileName() == info.name) {
         // A machine that was never saved can still hold a card put in from Cards.
@@ -808,7 +833,7 @@ inline QString duplicate(const QString& folder, const Info& info, QString* newNa
     if (info.old) return QStringLiteral("This session was saved by an older Frond.");
     QLockFile lock(info.path + ".lock");
     lock.setStaleLockTime(0);
-    if (!lock.tryLock()) return QStringLiteral("This session is open in another Frond.");
+    if (!tryLockSession(lock, info.path)) return QStringLiteral("This session is open in another Frond.");
     const auto fromDir = machineDirOf(info.path);
     const QString failed = QStringLiteral("Couldn't duplicate the session.");
     if (!QDir().mkpath(folder)) return failed;
@@ -1046,7 +1071,8 @@ inline bool isMachineFolder(const QString& dir) {
         if (ignoredName(name) || name == "sd.frondsd" || name == "ms.frondms" || name == "ms.frondmsp" || name == "slot.json") continue;
         // Every .frond, settings, lock or marker file has to belong to the one session.
         const auto own = stem + ".frond";
-        if (name != own && name != own + ".settings.json" && name != own + ".lock" && name != own + ".new" && name != own + ".work")
+        if (name != own && name != own + ".settings.json" && name != own + ".lock" && name != own + ".new" && name != own + ".work" &&
+            name != own + ".core")
             return false;
     }
     return true;

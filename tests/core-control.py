@@ -8,15 +8,18 @@ Private firmware and sessions: --arm-session, else FROND_ARM_SESSION, else the p
 firmware folder. A side with neither is skipped. FROND_CORE picks another ARM core binary. Scratch goes in build/core-control-*.
 """
 import argparse
+import fcntl
 import os
 from pathlib import Path
 import shutil
+import select
 import socket
 import stat
 import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import zipfile
 
@@ -31,18 +34,31 @@ PATTERN_NAME = 'frond-pattern.sunvox'
 class Client:
     """One core on a private control socket, as the desktop starts it."""
 
-    def __init__(self, core, args, root, name):
+    def __init__(self, core, args, root, name, piped=False):
+        """piped: stdout and stderr go through a pipe copied to the log, which drop() closes, as the
+        desktop's pipes lose their reader when it dies."""
         self.socket_dir = tempfile.mkdtemp(prefix='frond-control-')
         address = str(Path(self.socket_dir) / 'control')
         listener = socket.socket(socket.AF_UNIX)
         listener.bind(address)
         listener.listen(1)
         self.log = (root / f'{name}.log').open('wb')
+        self.pipe, self.copier, self.copying = None, None, False
+        output = self.log
+        if piped:
+            self.pipe, output = os.pipe()
+            self.copying = True
+            self.copier = threading.Thread(target=self.copy_output, daemon=True)
+            self.copier.start()
         runner = ['heavy', 'emulator'] if shutil.which('heavy') else []
-        self.process = subprocess.Popen([*runner, str(core), *map(str, args), '--no-sound', '--desktop-socket', address],
-                                        stdout=self.log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                                        start_new_session=True,
-                                        env=dict(os.environ, SDL_VIDEODRIVER='dummy', SDL_AUDIODRIVER='dummy'))
+        try:
+            self.process = subprocess.Popen([*runner, str(core), *map(str, args), '--no-sound', '--desktop-socket', address],
+                                            stdout=output, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                            start_new_session=True,
+                                            env=dict(os.environ, SDL_VIDEODRIVER='dummy', SDL_AUDIODRIVER='dummy'))
+        finally:
+            if piped:
+                os.close(output)
         self.connection = None
         try:
             listener.settimeout(300)  # includes waiting for an emulator slot
@@ -96,11 +112,31 @@ class Client:
         assert self.process.wait(timeout=30) == 0, 'core exit status'
         self.close()
 
+    def copy_output(self):
+        while self.copying:
+            ready, _, _ = select.select([self.pipe], [], [], 0.1)
+            if ready:
+                data = os.read(self.pipe, 65536)
+                if not data:
+                    break
+                self.log.write(data)
+                self.log.flush()
+
+    def close_output(self):
+        """Stops reading the core's output and closes the pipe, so its next write gets EPIPE."""
+        if self.copier:
+            self.copying = False
+            self.copier.join()
+            self.copier = None
+            os.close(self.pipe)
+            self.pipe = None
+
     def drop(self):
-        """Closes the socket as a killed desktop would, with no quit."""
+        """Closes the socket as a killed desktop would, with no quit, and the output pipe if there is one."""
         self.stream.close()
         self.connection.close()
         self.connection = None
+        self.close_output()
 
     def close(self):
         if self.connection:
@@ -108,6 +144,7 @@ class Client:
             self.connection = None
         if self.process.poll() is None:
             palm_boot.stop_guest(self.process)
+        self.close_output()
         self.log.close()
         shutil.rmtree(self.socket_dir, ignore_errors=True)
 
@@ -382,35 +419,85 @@ def check_arm(core, session, root):
     return device
 
 
+def core_locked(target):
+    """True while a core holds <target>.core, as the desktop checks it."""
+    try:
+        fd = os.open(f'{target}.core', os.O_RDONLY)
+    except FileNotFoundError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return False
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(fd)
+
+
 def disconnect(core, args, target, root, name):
-    """With --save-on-disconnect, as the desktop starts the core: the socket closing without a quit saves
-    the session to target and the core exits; a quit sent just before the close doesn't save."""
+    """With --save-on-disconnect, as the desktop starts the core. The socket closing without a quit
+    saves the session to target and the core exits 0, even with its output pipe closed at the same
+    time. It holds target.core locked for its run. No save after a quit still unread when the socket
+    closed or after a protocol error, and a failed save exits non-zero."""
+    folder = target.parent
+    run = lambda log, piped=False: Client(core, [*args, '--save-on-disconnect', target], root, f'{name}-{log}', piped)
     stamp = target.stat().st_mtime_ns
-    c = Client(core, [*args, '--save-on-disconnect', target], root, f'{name}-gone')
+    c = run('gone', piped=True)
     try:
         c.until_ok('guest-ready')
         c.ok('delete-db', PATTERN_NAME, code='deleted')
+        assert core_locked(target), 'target.core not locked while the core runs'
+        # A second core on the same session is refused before it looks for a launcher.
+        short = tempfile.mkdtemp(prefix='frond-')
+        try:
+            second = subprocess.run([str(core), *map(str, args), '--save-on-disconnect', str(target),
+                                     '--desktop-socket', str(Path(short) / 'none')],
+                                    capture_output=True, text=True, timeout=60,
+                                    env=dict(os.environ, SDL_VIDEODRIVER='dummy', SDL_AUDIODRIVER='dummy'))
+        finally:
+            shutil.rmtree(short, ignore_errors=True)
+        assert second.returncode != 0 and 'another core is running' in second.stderr, second.stderr
         c.drop()
-        assert c.process.wait(timeout=60) == 0, 'core exit status after the socket closed'
+        assert c.process.wait(timeout=60) == 0, f'core exit status {c.process.returncode} after the socket and its output closed'
     finally:
         c.close()
     assert target.stat().st_mtime_ns != stamp, 'session not saved when the socket closed'
-    c = Client(core, [*args, '--save-on-disconnect', target], root, f'{name}-gone-reload')
+    assert not core_locked(target), 'target.core still locked after the core exited'
+    c = run('gone-reload')
     try:
         c.until_ok('guest-ready')
         assert PATTERN_NAME.encode().hex() not in c.ok('db-list', code='databases'), 'saved state not the latest'
-        assert c.ok('install', PATTERN, code=('installed', 'needs-reset'))
         stamp = target.stat().st_mtime_ns
-        c.serial += 1
-        c.connection.sendall(f'{c.serial}\tquit\t\n'.encode())
+        # An install keeps the core busy, so the quit sent with it is still unread when the socket closes.
+        c.connection.sendall(f'{c.serial + 1}\tinstall\t{str(PATTERN).encode().hex()}\n{c.serial + 2}\tquit\t\n'.encode())
         c.drop()
-        assert c.process.wait(timeout=60) == 0, 'core exit status after quit'
+        assert c.process.wait(timeout=60) == 0, 'core exit status after a quit and a closed socket'
     finally:
         c.close()
-    assert target.stat().st_mtime_ns == stamp, 'quit then a closed socket saved the session'
-    for log in (f'{name}-gone', f'{name}-gone-reload'):
-        text = (root / f'{log}.log').read_text(errors='replace')
-        assert ('session saved to' in text) == (log == f'{name}-gone'), f'{log}: {text[-400:]}'
+    assert target.stat().st_mtime_ns == stamp, 'a quit then a closed socket saved the session'
+    c = run('gone-protocol')
+    try:
+        c.until_ok('guest-ready')
+        c.connection.sendall(b'not a request\n')
+        c.process.wait(timeout=60)
+        c.drop()
+    finally:
+        c.close()
+    assert target.stat().st_mtime_ns == stamp, 'a protocol error saved the session'
+    c = run('gone-fails')
+    try:
+        c.until_ok('guest-ready')
+        folder.chmod(0o500)
+        c.drop()
+        assert c.process.wait(timeout=60) != 0, 'a failed save on disconnect exited 0'
+    finally:
+        folder.chmod(0o700)
+        c.close()
+    assert target.stat().st_mtime_ns == stamp, 'a save into a read-only folder changed the session'
+    for log, saved in (('gone-reload', False), ('gone-protocol', False), ('gone-fails', False)):
+        text = (root / f'{name}-{log}.log').read_text(errors='replace')
+        assert ('session saved to' in text) == saved, f'{log}: {text[-400:]}'
+    assert 'could not be saved' in (root / f'{name}-gone-fails.log').read_text(errors='replace')
 
 
 def files_of(folder):
@@ -500,7 +587,8 @@ def check_68k(core, rom, root):
         c.quit()
     finally:
         c.close()
-    gone = work / 'gone.frond'
+    gone = work / 'gone' / 'gone.frond'
+    gone.parent.mkdir()
     shutil.copy2(saved, gone)
     disconnect(core, [gone, '--device', 'palm-iiix'], gone, root, 'iiix')
     # A bad socket path or a missing launcher stops the core with an error, not a hang.

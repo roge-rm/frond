@@ -37,7 +37,7 @@ The Palm IIIx has its own runner, `out/frond-68k` (`make out/frond-68k`, install
 | `--irda off\|pty\|tcp:PORT` | Same for infrared SIR bytes. Not with the infrared keyboard. |
 | `--bluetooth off\|SOCKET` | Connect the virtual radio to a local H4 controller Unix socket (such as `btvirt`). |
 | `--desktop-socket PATH` | Connect to the desktop launcher's control socket, see [Control socket](#control-socket). Not with `--run-for` or `--script`. |
-| `--save-on-disconnect FILE` | Save the session to this absolute path if the control socket closes without a `quit`, then exit. Needs `--desktop-socket`. |
+| `--save-on-disconnect FILE` | Save the session to this absolute path if the control socket closes without a `quit`, then exit, 1 if that save failed. Holds `FILE.core` locked for the run. Needs `--desktop-socket`. |
 | `--script FILE` | Run console commands from a file at start. One per line, `#` starts a comment. |
 | `--display WxH` | Display mode, if the device supports it: 160x160, 160x240, 240x240, 240x320, 320x320, 320x480, 480x480 or 480x720. |
 | `--window-scale N` | Window scale: 1, 1.25, 1.5, 1.75 or 2. Default is the largest that fits. |
@@ -103,7 +103,9 @@ The core reads these from the terminal and from `--script`. A command with no ar
 
 The desktop app listens on a Unix socket and the core connects to it with `--desktop-socket`. Only the emulation thread serves requests, one at a time.
 
-When the socket closes the core exits. The desktop passes its working session with `--save-on-disconnect`, so if Frond is killed or crashes the core saves there first, on the emulation thread as a `save` request would. It doesn't save after a `quit`, one still waiting to be read included, or when a bad request broke the protocol.
+When the socket closes the core exits. The desktop passes its working session with `--save-on-disconnect`, so if Frond is killed or crashes the core saves there first, on the emulation thread as a `save` request would. It doesn't save after a `quit`, one still waiting to be read included, or when a bad request broke the protocol. A failed save exits 1. Both cores ignore SIGPIPE, so a dead Frond's output pipes don't stop the save.
+
+For the whole run the core holds an `flock` on `FILE.core` (`<name>.frond.core` beside the session), which the kernel frees when it exits. A second core on the same session is refused. Frond counts a session whose `.core` is held as in use, like one whose `.lock` is held: starting it says it is still saving, and reconcile, the stale temp and work cleanup, rename, delete and duplicate leave it alone. On xcb the embedded Palm window is in Frond's X save set, so it goes back to the root window rather than being destroyed when Frond dies.
 
 Lines are tab separated and end in a newline.
 

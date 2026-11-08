@@ -1336,7 +1336,7 @@ void MainWindow::refreshSessions(const QString& select) {
     for (const auto& info : frondSessions::list(sessionFolder())) {
         if (!info.old && !QFileInfo::exists(frondSessions::preferencesPath(info.path))) {
             QLockFile lock(info.path + ".lock"); lock.setStaleLockTime(0);
-            if (lock.tryLock()) {
+            if (frondSessions::tryLockSession(lock, info.path)) {
                 frondSessions::Preferences prefs;
                 loadPreferences(info.path, frondFirmware::deviceFromId(info.device), &prefs);
             }
@@ -1454,7 +1454,7 @@ void MainWindow::editSession(const QString& path) {
     const auto info = infoFor(path);
     if (info.old) return;
     QLockFile lock(path + ".lock"); lock.setStaleLockTime(0);
-    if (!lock.tryLock()) return failure(tr("This session is open in another Frond."));
+    if (!frondSessions::tryLockSession(lock, path)) return failure(tr("This session is open in another Frond."));
     frondSessions::Preferences prefs;
     const auto device = frondFirmware::deviceFromId(info.device);
     if (const auto error = loadPreferences(path, device, &prefs); !error.isEmpty()) return failure(error);
@@ -1618,7 +1618,7 @@ void MainWindow::addDevice() {
         return failure(tr("Could not create the session storage directory."));
     const auto path = frondSessions::filePath(sessionFolder(), name);
     QLockFile lock(path + ".lock"); lock.setStaleLockTime(0);
-    if (!lock.tryLock()) return failure(tr("This session is open in another Frond."));
+    if (!frondSessions::tryLockSession(lock, path)) return failure(tr("This session is open in another Frond."));
     if (const auto error = frondSessions::writePreferences(path, dialog.machineSettings->values()); !error.isEmpty()) {
         QFile::remove(frondSessions::markerPath(path));
         return failure(error);
@@ -1729,6 +1729,11 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     if (!sessionLock->tryLock()) {
         sessionLock.reset();
         return failure(tr("This working session is already open, or its lock file could not be created."));
+    }
+    // A core left running by a Frond that stopped still holds the session while it saves.
+    if (frondSessions::coreRunning(sessionPath)) {
+        sessionLock.reset();
+        return failure(tr("The Palm that last ran this session is still saving it. Try again in a moment."));
     }
     if (!QFileInfo::exists(frondSessions::preferencesPath(target)) && !arguments.isEmpty() &&
         frondSessions::readPreferences(arguments.first(), &runningPreferences)) {
@@ -1964,7 +1969,7 @@ void MainWindow::saveCopyTo(const QString& path) {
     const auto name = QFileInfo(dest).fileName();
     const auto destFrond = dest + '/' + name + ".frond";
     copyLock = std::make_unique<QLockFile>(destFrond + ".lock"); copyLock->setStaleLockTime(0);
-    if (frondSessions::isMachineFolder(dest) && !copyLock->tryLock()) { copyLock.reset(); return failure(tr("This session is open in another Frond.")); }
+    if (frondSessions::isMachineFolder(dest) && !frondSessions::tryLockSession(*copyLock, destFrond)) { copyLock.reset(); return failure(tr("This session is open in another Frond.")); }
     // The core saves the copy into a staging folder; the working session's files stay as they are.
     copyStaging = frondSessions::makeStaging(dest);
     if (copyStaging.isEmpty() || !QDir().mkdir(copyStaging + '/' + name)) {

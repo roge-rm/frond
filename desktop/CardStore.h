@@ -417,7 +417,7 @@ inline void reconcileLocked(const QString& sessions, const QString& held = {}) {
         if (!isHeld) {
             m.lock = std::make_unique<QLockFile>(m.frond + ".lock");
             m.lock->setStaleLockTime(0);
-            if (!m.lock->tryLock()) {
+            if (!frondSessions::tryLockSession(*m.lock, m.frond)) {
                 const auto slot = readSlot(m.dir);
                 skippedClaims << slot.card << slot.link;
                 continue;
@@ -441,7 +441,7 @@ inline void reconcileLocked(const QString& sessions, const QString& held = {}) {
         };
         return hinted(a) && !hinted(b);
     });
-    QStringList claimed;
+    QStringList claimed, knownIn;  // knownIn: machines whose slot names the library card they hold
     for (auto& m : machines) {
         quint32 version = 0;
         descriptorsOf(m.frond, &version);
@@ -452,6 +452,7 @@ inline void reconcileLocked(const QString& sessions, const QString& held = {}) {
         if (!file.isEmpty()) {
             if (e && e->card.kind == kindOfFile(file) && !e->inDrawer && !claimed.contains(e->card.id)) {
                 claimed << e->card.id;  // rule 1
+                if (slot.card == e->card.id) knownIn << m.dir;
                 if (e->card.machine != m.name) {
                     e->card.machine = m.name;
                     writeCard(e->dir, e->card);
@@ -506,6 +507,18 @@ inline void reconcileLocked(const QString& sessions, const QString& held = {}) {
         const auto file = cardFileIn(m.dir);
         if (file.isEmpty() || slot.link.isEmpty() || slot.card != slot.link) continue;
         if (settled(m.dir, file, slot.swap)) toDrawer(library, m.dir, slot.card);
+    }
+    // Rule 7: a take-out the launcher didn't finish, as when Frond died and the core saved after it.
+    // The slot names the library card, the save has no card there and the slot hasn't changed
+    // since, so the card goes to the drawer.
+    for (auto& m : machines) {
+        const auto slot = readSlot(m.dir);
+        const auto file = cardFileIn(m.dir);
+        if (!knownIn.contains(m.dir) || file.isEmpty() || slot.card.isEmpty() || slot.swap) continue;
+        quint32 version = 0;
+        const auto cards = descriptorsOf(m.frond, &version);
+        if (version < 7 || describedCard(cards, file) || !settled(m.dir, file, false)) continue;
+        toDrawer(library, m.dir, slot.card);
     }
     // Hints of drawer cards.
     for (auto& e : entries(library))
@@ -904,7 +917,7 @@ inline QList<MachineSlot> machineSlots(const QString& sessions, const QString& h
         if (heldCanon.isEmpty() || info.canonicalFilePath() != heldCanon) {
             QLockFile lock(frond + ".lock");
             lock.setStaleLockTime(0);
-            m.busy = !lock.tryLock();
+            m.busy = !frondSessions::tryLockSession(lock, frond);
         }
         result.append(m);
     }
@@ -937,7 +950,8 @@ inline QList<Row> rows(const QString& sessions, const QString& held = {}) {
             QLockFile lock(frondSessions::sessionFrondIn(row.holderDir) + ".lock");
             lock.setStaleLockTime(0);
             const bool heldHere = !held.isEmpty() && QFileInfo(held).canonicalFilePath() == QFileInfo(row.holderDir).canonicalFilePath();
-            row.holderBusy = !heldHere && QFileInfo(frondSessions::sessionFrondIn(row.holderDir)).isFile() && !lock.tryLock();
+            row.holderBusy = !heldHere && QFileInfo(frondSessions::sessionFrondIn(row.holderDir)).isFile() &&
+                             !frondSessions::tryLockSession(lock, frondSessions::sessionFrondIn(row.holderDir));
         }
         result.append(row);
     }
@@ -1111,7 +1125,8 @@ inline QString cardSource(const QString& sessions, const QString& id, QString* p
             if (r.holderBusy) return QStringLiteral("%1 is running. Stop it first.").arg(r.holder);
             *hold = std::make_unique<QLockFile>(frondSessions::sessionFrondIn(r.holderDir) + ".lock");
             (*hold)->setStaleLockTime(0);
-            if (QFileInfo(frondSessions::sessionFrondIn(r.holderDir)).isFile() && !(*hold)->tryLock())
+            if (QFileInfo(frondSessions::sessionFrondIn(r.holderDir)).isFile() &&
+                !frondSessions::tryLockSession(**hold, frondSessions::sessionFrondIn(r.holderDir)))
                 return QStringLiteral("%1 is running. Stop it first.").arg(r.holder);
             if (holderDir) *holderDir = r.holderDir;
             const auto slot = readSlot(r.holderDir);
@@ -1209,7 +1224,7 @@ inline QString deleteCard(const QString& sessions, const QString& id, const QStr
         QLockFile mlock(frondSessions::sessionFrondIn(m.dir) + ".lock");
         mlock.setStaleLockTime(0);
         const bool own = !held.isEmpty() && QFileInfo(held).canonicalFilePath() == QFileInfo(m.dir).canonicalFilePath();
-        if (!own && !mlock.tryLock()) continue;
+        if (!own && !frondSessions::tryLockSession(mlock, frondSessions::sessionFrondIn(m.dir))) continue;
         auto slot = m.slot;
         slot.link.clear();
         writeSlot(m.dir, slot);
@@ -1229,7 +1244,7 @@ inline QString takeOutStopped(const QString& sessions, const QString& id, const 
     if (dir.isEmpty()) return QStringLiteral("Couldn't find that card.");
     QLockFile lock(frondSessions::sessionFrondIn(dir) + ".lock");
     lock.setStaleLockTime(0);
-    if (QFileInfo(frondSessions::sessionFrondIn(dir)).isFile() && !lock.tryLock())
+    if (QFileInfo(frondSessions::sessionFrondIn(dir)).isFile() && !frondSessions::tryLockSession(lock, frondSessions::sessionFrondIn(dir)))
         return QStringLiteral("%1 is running. Stop it first.").arg(QFileInfo(dir).fileName());
     if (const auto error = keepCardOf(sessions, dir, progress, QStringLiteral("Cancelled.")); !error.isEmpty()) return error;
     auto slot = readSlot(dir);
@@ -1260,7 +1275,7 @@ inline QString setLinks(const QString& sessions, const QString& id, const QStrin
         QLockFile mlock(frondSessions::sessionFrondIn(m.dir) + ".lock");
         mlock.setStaleLockTime(0);
         const bool own = !held.isEmpty() && QFileInfo(held).canonicalFilePath() == QFileInfo(m.dir).canonicalFilePath();
-        if (!own && !mlock.tryLock()) { error = QStringLiteral("%1 is running. Stop it first.").arg(m.name); continue; }
+        if (!own && !frondSessions::tryLockSession(mlock, frondSessions::sessionFrondIn(m.dir))) { error = QStringLiteral("%1 is running. Stop it first.").arg(m.name); continue; }
         auto slot = m.slot;
         slot.present = true;
         if (want) {
