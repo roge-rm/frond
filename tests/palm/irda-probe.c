@@ -1,6 +1,7 @@
 /* Original Exchange Manager probe. The ROM owns discovery, IrLAP and OBEX. */
 #include <PalmOS.h>
 #include <ExgMgr.h>
+#include <IrLib.h>
 #define CREATOR 'FrIR'
 #define PAYLOAD_SIZE 4096
 static void logLine(const Char* text) {
@@ -14,6 +15,11 @@ static void logLine(const Char* text) {
 }
 static void result(const Char* stage,Err error,UInt32 bytes) {
     Char line[96];StrPrintF(line,"%s err=%04x bytes=%lu",stage,(UInt16)error,bytes);logLine(line);
+}
+static void setScanning(Boolean enabled) {
+    UInt16 ref, length=sizeof(enabled); Err error=SysLibFind(irLibName,&ref);
+    if(!error) error=ExgLibControl(ref,irSetScanningMode,&enabled,&length);
+    result(enabled ? "scanning-on" : "scanning-off",error,length);
 }
 static void sendPayload(void) {
     ExgSocketType socket;Err error=0,disconnected;UInt32 offset=0,n,size;UInt8 buffer[256];UInt16 i;
@@ -67,6 +73,8 @@ UInt32 PilotMain(UInt16 command,MemPtr parameters,UInt16 flags) {
         if(!SysHandleEvent(&event)){
             if(event.eType==frmLoadEvent){FrmSetActiveForm(FrmInitForm(event.data.frmLoad.formID));FrmDrawForm(FrmGetActiveForm());}
             else if(event.eType==ctlSelectEvent && event.data.ctlSelect.controlID==1002)sendPayload();
+            else if(event.eType==ctlSelectEvent && event.data.ctlSelect.controlID==1003)setScanning(false);
+            else if(event.eType==ctlSelectEvent && event.data.ctlSelect.controlID==1004)setScanning(true);
             else FrmHandleEvent(FrmGetActiveForm(),&event);
         }
     }while(event.eType!=appStopEvent);

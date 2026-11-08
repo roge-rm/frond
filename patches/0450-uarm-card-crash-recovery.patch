@@ -1,0 +1,202 @@
+diff --git a/src/uarm/uarm/FileCardBacking.h b/src/uarm/uarm/FileCardBacking.h
+index de18fa2..4b3219d 100644
+--- a/src/uarm/uarm/FileCardBacking.h
++++ b/src/uarm/uarm/FileCardBacking.h
+@@ -21,6 +21,9 @@
+ // same folder. The dirty index is a bounded memory cache plus a disk index.
+ 
+ struct FileCardOptions {
++    // uARM saves adopt the durable base without Commit. With no root pointer,
++    // retain crash leftovers and resume that base; missing committed history is unknowable.
++    bool recoverRootlessBase = false;
+     bool rejectInvalidRoot = false;
+     bool requireRoot = false;
+     uint64_t minimumRoot = 0;
+@@ -228,6 +231,7 @@ class FileCardBacking : public CardBacking {
+         bool durable{};
+         bool published{};
+         bool ownedFile{};
++        bool ownedIndex{};
+         std::vector<std::pair<uint64_t, uint64_t>> memIndex;
+         Impl* owner{};
+ 
+@@ -238,7 +242,7 @@ class FileCardBacking : public CardBacking {
+             if (ownedFile && !durable && !file.empty()) {
+                 std::error_code ec;
+                 std::filesystem::remove(file, ec);
+-                if (!idxFile.empty()) std::filesystem::remove(idxFile, ec);
++                if (ownedIndex && !idxFile.empty()) std::filesystem::remove(idxFile, ec);
+             }
+         }
+     };
+@@ -409,6 +413,19 @@ class FileCardBacking : public CardBacking {
+             return !ec;
+         }
+ 
++        bool installGeneration(const std::filesystem::path& from, const std::filesystem::path& to) {
++            if (failRename()) return false;
++            // Reserve the destination before rename, including on filesystems without hardlinks.
++            const int fd = ::open(to.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
++            if (fd < 0) return false;
++            ::close(fd);
++            std::error_code ec;
++            std::filesystem::rename(from, to, ec);
++            if (!ec) return true;
++            std::filesystem::remove(to, ec);
++            return false;
++        }
++
+         bool flushDir() {
+             const int dfd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+             if (dfd < 0) return false;
+@@ -509,24 +526,40 @@ class FileCardBacking : public CardBacking {
+                 root = base;
+                 working = base;
+                 if (!options.rejectInvalidRoot) {
+-                    // A missing root cannot make surviving history pristine.
+-                    if (!std::filesystem::exists(genPath("root"), ec)) {
++                    // Only the explicit saved-base lifecycle may ignore rootless leftovers.
++                    const bool missing = !std::filesystem::exists(genPath("root"), ec);
++                    if (ec) return false;
++                    const bool recover = missing && options.recoverRootlessBase &&
++                                         !options.requireRoot && !options.minimumRoot;
++                    if (missing && !recover) {
+                         if (ec) return false;
+                         for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec))
+                             if (it->path().filename().string().find(genPrefix()) == 0 &&
+                                 !NeighbourName(durablePath, it->path().filename().string(), true)) return false;
+                         if (ec) return false;
+                     }
+-                    DiscardGenerations(durablePath);
++                    if (!recover) DiscardGenerations(durablePath);
+                 }
+             }
+             if (root->id < options.minimumRoot) return false;
+             nextId = 1;
+             for (auto* g = working.get(); g; g = g->parent.get()) {
+-                if (g->id >= nextId) nextId = g->id + 1;
++                if (g->id >= nextId) nextId = g->id == UINT64_MAX ? UINT64_MAX : g->id + 1;
+                 if (!g->durable) g->ownedFile = true;
+             }
+-            return true;
++            // Retained pending files and indexes reserve their IDs, including peers whose
++            // names are ambiguous with this namespace. Never reuse or wrap those IDs.
++            for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
++                auto name = it->path().filename().string();
++                if (!GeneratedName(tag, name)) continue;
++                auto id = name.substr(genPrefix().size());
++                if (id.size() > 4 && id.substr(id.size() - 4) == ".idx") id.resize(id.size() - 4);
++                if (id.empty() || id[0] < '1' || id[0] > '9') continue;
++                uint64_t value = 0;
++                for (char c : id) value = value * 10 + (c - '0');
++                if (value >= nextId) nextId = value == UINT64_MAX ? UINT64_MAX : value + 1;
++            }
++            return !ec;
+         }
+ 
+         // FNV-1a of the card identity and the durable file's header bytes before the payload.
+@@ -554,7 +587,8 @@ class FileCardBacking : public CardBacking {
+             boundRoot = true;
+             if (!std::filesystem::is_regular_file(rootPath, ec)) {
+                 std::error_code existsError;
+-                if (!std::filesystem::exists(rootPath, existsError) && !existsError) boundRoot = false;
++                const auto status = std::filesystem::symlink_status(rootPath, existsError);
++                if (status.type() == std::filesystem::file_type::not_found) boundRoot = false;
+                 return false;
+             }
+             uint8_t buf[kRootBytes]{};
+@@ -686,7 +720,6 @@ class FileCardBacking : public CardBacking {
+             child->id = nextId++;
+             child->parent = working;
+             child->owner = this;
+-            child->ownedFile = true;
+             child->file = genPath(std::to_string(child->id));
+             child->idxFile = genPath(std::to_string(child->id) + ".idx");
+             const auto tmp = tempName("tmp-");
+@@ -706,7 +739,14 @@ class FileCardBacking : public CardBacking {
+                 std::filesystem::remove(tmp, ec);
+                 return false;
+             }
+-            if (!ioRename(tmp, child->file) || !flushDir()) {
++            if (!installGeneration(tmp, child->file)) {
++                ::close(fd);
++                std::error_code ec;
++                std::filesystem::remove(tmp, ec);
++                return false;
++            }
++            child->ownedFile = true;
++            if (!flushDir()) {
+                 ::close(fd);
+                 std::error_code ec;
+                 std::filesystem::remove(tmp, ec);
+@@ -910,12 +950,13 @@ class FileCardBacking : public CardBacking {
+                 ::close(g->idxFd);
+                 g->idxFd = -1;
+             }
+-            if (!ioRename(tmp, g->idxFile)) {
++            if (!(g->ownedIndex ? ioRename(tmp, g->idxFile) : installGeneration(tmp, g->idxFile))) {
+                 ::close(tfd);
+                 std::error_code ec;
+                 std::filesystem::remove(tmp, ec);
+                 return false;
+             }
++            g->ownedIndex = true;
+             g->idxFd = tfd;
+             g->idxBase = 8;
+             g->idxCount = out;
+@@ -1161,7 +1202,6 @@ class FileCardBacking : public CardBacking {
+             while (child->parent && !child->parent->durable) child->parent = child->parent->parent;
+             if (!child->parent) return false;
+             child->owner = this;
+-            child->ownedFile = true;
+             child->file = genPath(std::to_string(child->id));
+             const auto tmp = tempName("tmp-");
+             const int fd = ::open(tmp.c_str(), O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+@@ -1220,7 +1260,13 @@ class FileCardBacking : public CardBacking {
+                 std::filesystem::remove(tmp, ec);
+                 return false;
+             }
+-            if (!ioRename(tmp, child->file) || !flushDir()) {
++            if (!installGeneration(tmp, child->file)) {
++                std::error_code ec;
++                std::filesystem::remove(tmp, ec);
++                return false;
++            }
++            child->ownedFile = true;
++            if (!flushDir()) {
+                 std::error_code ec;
+                 std::filesystem::remove(tmp, ec);
+                 std::filesystem::remove(child->file, ec);
+diff --git a/src/uarm/uarm/NandFile.h b/src/uarm/uarm/NandFile.h
+index ac0ecfd..72058ab 100644
+--- a/src/uarm/uarm/NandFile.h
++++ b/src/uarm/uarm/NandFile.h
+@@ -52,6 +52,8 @@ inline std::unique_ptr<FileCardBacking> openFile(const std::filesystem::path& pa
+         info.payloadBytes != frondMachine::nandMainBytes(rawBytes))
+         return nullptr;
+     FileCardOptions options;
++    // Saves adopt the file without Commit, like the uARM SD card, so leftover generations are resumed.
++    options.recoverRootlessBase = true;
+     options.identity = identity;
+     options.chunkCrcs = std::move(table);
+     return FileCardBacking::Open(path, info.stored(), frondSdFile::headerBytes, options);
+diff --git a/src/uarm/uarm/sdcard.cpp b/src/uarm/uarm/sdcard.cpp
+index 2316c5d..994f92a 100644
+--- a/src/uarm/uarm/sdcard.cpp
++++ b/src/uarm/uarm/sdcard.cpp
+@@ -178,6 +178,7 @@ bool sdCardInitializeFromFile(const char* path, uint64_t payloadBytes, uint64_t
+                               const char* id) {
+     if (!path || payloadBytes % SD_SECTOR_SIZE || !payloadBytes) return false;
+     FileCardOptions options;
++    options.recoverRootlessBase = true;
+     options.identity = id ? id : "";
+     if (!sidecarChunks(path, payloadBytes, payloadOffset, options.chunkCrcs)) return false;
+     auto file = FileCardBacking::Open(path, payloadBytes, payloadOffset, options);
+@@ -224,6 +225,7 @@ bool sdCardAdoptSaved(const char* path, uint64_t payloadBytes, uint64_t payloadO
+     auto* file = dynamic_cast<FileCardBacking*>(backing.get());
+     if (!file || file->Pinned() || payloadBytes != file->Size()) return false;
+     FileCardOptions options;
++    options.recoverRootlessBase = true;
+     options.identity = cardId;
+     if (!sidecarChunks(path, payloadBytes, payloadOffset, options.chunkCrcs)) return false;
+     // The sidecar now holds the live bytes, so generations beside it are never needed again.

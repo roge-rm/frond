@@ -1,0 +1,32 @@
+diff --git a/src/cloudpilot/frond/main.cpp b/src/cloudpilot/frond/main.cpp
+index 6fdd9a7..95122ec 100644
+--- a/src/cloudpilot/frond/main.cpp
++++ b/src/cloudpilot/frond/main.cpp
+@@ -1140,18 +1140,23 @@ class Runner {
+             error="USB debug role supports localhost TCP only.";return false;
+         }
+         StopUsb();
+-        usbDebugMode=mode;
+-        if(mode=="off") return true;
++        usbDebugMode="off";
++        if(config.kind==HostSerial::Kind::off) return true;
+         auto* dc=dynamic_cast<EmRegsISPDana*>(EmBankRegs::GetSubBank(0x1f000000,2));
+         if(!dc) { error="Dana controller unavailable.";return false; }
+         usbDana=make_unique<UsbDanaPort>(*dc);
+-        return usbBridge.Start(UsbHostBridge::Backend{
++        if(!usbBridge.Start(UsbHostBridge::Backend{
+             [this] { return usbDana->Port(); },
+             [this](bool attached) { usbCable=attached;usbDana->SetCable(attached); },
+             [this] { return usbCable; }, [] { return false; },
+             [] { return gDebugger.IsStopped(); }, [this] { return UsbTime(); },
+             [] {}, [this](const UsbHostHooks* hooks) { usbHooks=hooks?*hooks:UsbHostHooks{}; }
+-        },config,error);
++        },config,error)) {
++            StopUsb();
++            return false;
++        }
++        usbDebugMode=HostSerial::Format(usbBridge.GetConfig());
++        return true;
+     }
+     void ServiceLinks() {
+         if (serialLink.GetKind() == HostLink68k::Kind::off && irLink.GetKind() == HostLink68k::Kind::off &&

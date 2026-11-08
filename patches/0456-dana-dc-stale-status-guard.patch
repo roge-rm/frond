@@ -1,0 +1,23 @@
+--- a/src/cloudpilot/emulator/hardware/EmRegsISPDana.cpp
++++ b/src/cloudpilot/emulator/hardware/EmRegsISPDana.cpp
+@@ -170,7 +170,8 @@
+     if((dcCommand>=0x50 && dcCommand<=0x5f) || (dcCommand>=0xd0 && dcCommand<=0xdf))
+         return EndpointStatus(e,dcCommand<0x60);
+     if(dcCommand>=0xa0 && dcCommand<=0xaf) {
+-        flushed &= ~(1u<<e);
++        if(allocated && (fifo[e].packet[fifo[e].cpu].full || fifo[e].statusPending))
++            flushed &= ~(1u<<e);
+         auto result=fifo[e].error; fifo[e].error &= ~0x80; fifo[e].statusPending=false; return result;
+     }
+     if (dcCommand>=0x30 && dcCommand<=0x3f) return dcEndpoints[dcCommand-0x30];
+@@ -414,8 +415,9 @@
+     RefreshIrq();
+ }
+ uint16 EmRegsISPDana::EndpointStatus(unsigned e,bool clear) {
+-    flushed &= ~(1u<<e);
+     auto& ep=fifo[e];
++    // An empty flushed endpoint's status may still be read by a stale ISR.
++    if(allocated && (ep.packet[ep.cpu].full || ep.statusPending)) flushed &= ~(1u<<e);
+     uint16 result=(ep.stalled?128:0)|(ep.packet[1].full?64:0)|(ep.packet[0].full?32:0)|
+         (ep.toggle?16:0)|(ep.overwrite?8:0)|(ep.setup?4:0)|(ep.cpu?2:0);
+     if(clear) { dcInterrupt &= ~(1u<<(8+e)); ep.overwrite=false; RefreshIrq(); }

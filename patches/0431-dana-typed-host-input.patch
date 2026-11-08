@@ -1,0 +1,736 @@
+diff --git a/src/cloudpilot/emulator/hardware/EmHAL.cpp b/src/cloudpilot/emulator/hardware/EmHAL.cpp
+index ae92762..47e0e1e 100644
+--- a/src/cloudpilot/emulator/hardware/EmHAL.cpp
++++ b/src/cloudpilot/emulator/hardware/EmHAL.cpp
+@@ -137,6 +137,11 @@ void EmHAL::CycleSlowly(Bool sleeping) {
+ //		� EmHAL::ButtonEvent
+ // ---------------------------------------------------------------------------
+ 
++bool EmHAL::DispatchDanaInput(const std::vector<DanaTransition5>& batch) {
++    return GetRootHandler()->DispatchDanaInput(batch);
++}
++void EmHAL::ReleaseDanaInput(bool cancel) { GetRootHandler()->ReleaseDanaInput(cancel); }
++
+ void EmHAL::DispatchButtonEvent(ButtonEvent evt) {
+     EmAssert(EmHAL::GetRootHandler());
+     EmHAL::GetRootHandler()->DispatchButtonEvent(evt);
+diff --git a/src/cloudpilot/emulator/hardware/EmHAL.h b/src/cloudpilot/emulator/hardware/EmHAL.h
+index 6af031b..de69e2d 100644
+--- a/src/cloudpilot/emulator/hardware/EmHAL.h
++++ b/src/cloudpilot/emulator/hardware/EmHAL.h
+@@ -17,6 +17,7 @@
+ #include <algorithm>
+ 
+ #include "ButtonEvent.h"
++#include "dana_input5.h"
+ #include "CardImage.h"
+ #include "EmCommon.h"
+ #include "EmEvent.h"
+@@ -48,6 +49,8 @@ class EmHAL {
+ 
+     static void CycleSlowly(Bool sleeping);
+ 
++    static bool DispatchDanaInput(const std::vector<DanaTransition5>& batch);
++    static void ReleaseDanaInput(bool cancel=true);
+     static void DispatchButtonEvent(ButtonEvent evt);
+     static void TurnSoundOff(void);
+     static void ResetTimer(void);
+@@ -133,6 +136,8 @@ class EmHALHandler {
+ 
+     virtual void CycleSlowly(Bool sleeping);
+ 
++    virtual bool DispatchDanaInput(const std::vector<DanaTransition5>&) { return false; }
++    virtual void ReleaseDanaInput(bool cancel=true) {}
+     virtual void DispatchButtonEvent(ButtonEvent evt);
+     virtual void TurnSoundOff(void);
+     virtual void ResetTimer(void);
+diff --git a/src/cloudpilot/emulator/hardware/EmRegsVZDana.cpp b/src/cloudpilot/emulator/hardware/EmRegsVZDana.cpp
+index d8e769c..6a27120 100644
+--- a/src/cloudpilot/emulator/hardware/EmRegsVZDana.cpp
++++ b/src/cloudpilot/emulator/hardware/EmRegsVZDana.cpp
+@@ -1,5 +1,7 @@
+ #include "EmRegsVZDana.h"
+ #include <cstdio>
++#include "EmSession.h"
++#include "EmCPU68K.h"
+ #include <cstring>
+ #include "dana_keyboard5.h"
+ #include <stdexcept>
+@@ -14,7 +16,7 @@ void EmRegsVZDana::GetKeyInfo(int* rows, int* cols, uint16*, Bool*) {
+ uint8 EmRegsVZDana::GetPortInternalValue(int port) {
+     // The small ROM's reset path requires D7 high to leave its power-down branch.
+     uint8 result=EmRegsVZ::GetPortInternalValue(port) | (port == 'D' ? 0x9f : port == 'F' ? 2 : 0);
+-    if(port=='D' && !resetAsserted && (keysDirty || packetIndex)) result &= ~0x10;
++    if(port=='D' && !resetAsserted && (packetIndex || (keysDirty && InputReady()))) result &= ~0x10;
+     return result;
+ }
+ 
+@@ -60,14 +62,14 @@ void EmRegsVZDana::KDirWrite(emuptr a, int size, uint32 value) {
+     uint8 old=StdRead(a,size);
+     StdWrite(a,size,value);
+     if ((old&4) && !(value&4) && !(StdRead(0xfffff441,1)&4)) {
+-        resetReply=true; versionCommand=versionReply=0; packetIndex=0; queueHead=queueCount=0; keysDirty=false; if(heldCount) QueueKeys(); UpdateStIrq();
++        resetReply=true; versionCommand=versionReply=0; packetIndex=pollIndex=0; std::memset(presentedScan,0,8); queueHead=queueCount=0; keysDirty=false; if(heldCount) QueueKeys(); UpdateStIrq();
+     }
+ }
+ void EmRegsVZDana::PortDataChanged(int p, uint8 old, uint8 value) {
+     EmRegsVZ::PortDataChanged(p,old,value);
+     if (p=='B' && ((old^value)&0x40)) {
+         resetAsserted=(value&0x40)!=0;
+-        resetReply=!resetAsserted; versionCommand=versionReply=0; packetIndex=0; queueHead=queueCount=0; keysDirty=false; if(heldCount) QueueKeys(); UpdateStIrq();
++        resetReply=!resetAsserted; versionCommand=versionReply=0; packetIndex=pollIndex=0; std::memset(presentedScan,0,8); queueHead=queueCount=0; keysDirty=false; if(heldCount) QueueKeys(); UpdateStIrq();
+     }
+ }
+ 
+@@ -83,7 +85,7 @@ template <typename T> void EmRegsVZDana::SaveState(T& s) {
+     EmRegsVZ::Save(s);
+     adc.Save(s);
+     auto* c=s.GetChunk(ChunkType::regsVZDana); if(!c) return;
+-    c->Put32(6); SaveChunkHelper h(*c); StateFields(h);
++    c->Put32(7); SaveChunkHelper h(*c); StateFields(h); InputStateFields(h);
+ }
+ void EmRegsVZDana::Load(SavestateLoader<ChunkType>& l) {
+     EmRegsVZ::Load(l);
+@@ -91,28 +93,21 @@ void EmRegsVZDana::Load(SavestateLoader<ChunkType>& l) {
+     auto* c=l.GetChunk(ChunkType::regsVZDana);
+     if(!c) { l.NotifyError(); return; }
+     unsigned version=c->Get32();
+-    if(version!=5 && version!=6) { l.NotifyError(); return; }
++    if(version!=5 && version!=6 && version!=7) { l.NotifyError(); return; }
+     LoadChunkHelper h(*c);
+-    if(version==6) StateFields(h);
++    if(version>=6) StateFields(h);
+     else {
+         LegacyStateFields(h);
+         if(heldKeys>3 || packetKeys>3 || packetIndex>2 ||
+            (packetIndex && !packetKeys) || (packetIndex==2 && packetKeys!=3)) {
+             l.NotifyError(); return;
+         }
+-        heldCount=queueHead=queueCount=0;
+-        std::memset(heldScan,0,sizeof heldScan); std::memset(packets,0,sizeof packets);
+-        if(heldKeys&1) heldScan[heldCount++]=0x0f;
+-        if(heldKeys&2) heldScan[heldCount++]=0x70;
+-        if(packetIndex) {
+-            unsigned n=0;
+-            if(packetKeys&1) packets[0][n++]=0x0f;
+-            if(packetKeys&2) packets[0][n++]=0x70;
+-            queueCount=1;
+-        }
+-        if(keysDirty) QueueKeys();
+-        heldKeys=packetKeys=0; keysDirty=queueCount!=0;
++        MigrateLegacyInput();
+     }
++    hostPaced=false; inputLastCycle=inputDelay=inputClockHz=0; pollIndex=0; std::memset(presentedScan,0,8);
++    if(version==7) InputStateFields(h);
++    if(inputClockHz>0xffffffffu || inputDelay>inputClockHz/50 || (!hostPaced && inputDelay)) l.NotifyError();
++    if(pollIndex>8 || (pollIndex && (!hostPaced || !presentedScan[pollIndex-1] || packetIndex))) l.NotifyError();
+     if(!c->IsAtEnd()) l.NotifyError();
+     if(adc.mainBattery>4095 || adc.supply>4095 || heldKeys || packetKeys || heldCount>8 || queueHead>=32 || queueCount>32 || packetIndex>8 ||
+        (packetIndex && !queueCount) || versionCommand>8 || versionReply>3 ||
+@@ -127,6 +122,7 @@ void EmRegsVZDana::Load(SavestateLoader<ChunkType>& l) {
+         }
+         return true;
+     };
++    if(!valid(presentedScan)) l.NotifyError();
+     if(!valid(heldScan)) l.NotifyError();
+     for(auto& packet:packets) if(!valid(packet)) l.NotifyError();
+     for(unsigned i=0;i<8;i++) if((i<heldCount)!=(heldScan[i]!=0)) l.NotifyError();
+@@ -137,19 +133,45 @@ void EmRegsVZDana::Load(SavestateLoader<ChunkType>& l) {
+ void EmRegsVZDana::Reset(Bool hardware) {
+     EmRegsVZ::Reset(hardware);
+     if(!hardware) return;
++    hostPaced=false; inputLastCycle=inputDelay=inputClockHz=0; pollIndex=0; std::memset(presentedScan,0,8);
+     resetReply=true; resetAsserted=false; versionCommand=versionReply=0;
+     heldKeys=packetKeys=0; heldCount=queueHead=queueCount=0;
+     std::memset(heldScan,0,sizeof heldScan); std::memset(packets,0,sizeof packets); packetIndex=0; keysDirty=false; irqPinHigh=true; irqLatched=false; UpdateStIrq();
+     adc=AnalogueInputs();
+ }
+ 
+-void EmRegsVZDana::DispatchButtonEvent(ButtonEvent e) {
+-    unsigned scan=unsigned(e.GetButton());
+-    if(scan>=0x100 && scan<0x180) {
+-        if(!DispatchScanCode(scan-0x100,e.GetType()==ButtonEvent::Type::press))
+-            throw std::runtime_error("Dana keyboard input refused");
+-        return;
++bool EmRegsVZDana::DispatchDanaInput(const std::vector<DanaTransition5>& batch) {
++    if(batch.size()>24) return false;
++    std::vector<uint8> next(heldScan,heldScan+heldCount);
++    unsigned queued=queueCount;
++    for(auto event:batch) {
++        auto code=event.scan.Code();
++        if(!danaScanValid5(code)) return false;
++        auto it=std::find(next.begin(),next.end(),code);
++        if(event.down ? it!=next.end() : it==next.end()) continue;
++        if(event.down) next.push_back(code); else next.erase(it);
++        if(next.size()>8 || ++queued+next.size()>32) return false;
+     }
++    hostPaced=true;
++    for(auto event:batch) DispatchScanCode(event.scan.Code(),event.down);
++    return true;
++}
++void EmRegsVZDana::ReleaseDanaInput(bool cancel) {
++    if(!cancel) {
++        if(!heldCount) return;
++        heldCount=0; std::memset(heldScan,0,8);
++        if(queueCount==32) std::memset(packets[(queueHead+31)%32],0,8);
++        else QueueKeys();
++        UpdateStIrq(); return;
++    }
++    // Preserve a reply already being clocked; replace all later input with release.
++    if(packetIndex) { queueCount=1; }
++    else { queueHead=queueCount=0; }
++    heldCount=0; std::memset(heldScan,0,8);
++    QueueKeys(); UpdateStIrq();
++}
++
++void EmRegsVZDana::DispatchButtonEvent(ButtonEvent e) {
+     uint8 code;
+     switch(e.GetButton()) {
+         case ButtonEvent::Button::power: code=0x0f; break;
+@@ -181,7 +203,18 @@ bool EmRegsVZDana::DispatchScanCode(uint8 code,bool down) {
+ }
+ 
+ uint8 EmRegsVZDana::ReadKeyPacket() {
+-    if(!queueCount) return 0;
++    if(pollIndex || !queueCount || (!packetIndex && !InputReady())) {
++        if(!hostPaced) return 0;
++        // The ROM polls between IRQs. No new packet still means the last held set.
++        if(pollIndex) {
++            uint8 reply=presentedScan[pollIndex++-1];
++            if(pollIndex>8 || !presentedScan[pollIndex-1]) pollIndex=0;
++            return reply;
++        }
++        unsigned count=0; while(count<8 && presentedScan[count]) ++count;
++        if(count) pollIndex=1;
++        return 0x40|count;
++    }
+     auto* packet=packets[queueHead];
+     uint8 reply;
+     if(packetIndex) reply=packet[packetIndex++-1];
+@@ -191,7 +224,9 @@ uint8 EmRegsVZDana::ReadKeyPacket() {
+         packetIndex=1;
+     }
+     if(packetIndex>8 || !packet[packetIndex-1]) {
++        std::memcpy(presentedScan,packet,8);
+         std::memset(packet,0,8); queueHead=(queueHead+1)%32; --queueCount;
++        if(hostPaced) { inputLastCycle=InputCycle(); inputClockHz=InputHz(); inputDelay=inputClockHz/50; }
+         packetIndex=0;
+     }
+     keysDirty=queueCount!=0;
+@@ -199,7 +234,7 @@ uint8 EmRegsVZDana::ReadKeyPacket() {
+ }
+ 
+ void EmRegsVZDana::UpdateStIrq() {
+-    bool high=resetAsserted || !(keysDirty || packetIndex);
++    bool high=resetAsserted || !(packetIndex || (keysDirty && InputReady()));
+     uint16 control=StdRead(0xfffff302,2);
+     bool positive=(control&0x8000)!=0;
+     if(control&0x0800) {
+@@ -219,3 +254,41 @@ void EmRegsVZDana::StIntStatusWrite(emuptr a,int size,uint32 value) {
+     if((StdRead(0xfffff302,2)&0x0800) && (clear&1))irqLatched=false;
+     intStatusHiWrite(a,size,value); UpdateStIrq();
+ }
++
++uint64 EmRegsVZDana::InputCycle() const { return gCPU68K ? gCPU68K->CycleNow() : 0; }
++uint64 EmRegsVZDana::InputHz() const { return gSession ? uint64(gSession->GetClocksPerSecond()) : 0; }
++bool EmRegsVZDana::InputReady() {
++    uint64 now=InputCycle(),hz=InputHz();
++    if(inputClockHz && hz!=inputClockHz) inputDelay=inputDelay*hz/inputClockHz;
++    inputClockHz=hz;
++    if(now>=inputLastCycle) {
++        uint64 elapsed=now-inputLastCycle;
++        inputDelay=elapsed>=inputDelay?0:inputDelay-elapsed;
++    }
++    inputLastCycle=now;
++    return !inputDelay;
++}
++void EmRegsVZDana::CycleSlowly(Bool sleeping) {
++    EmRegsVZ::CycleSlowly(sleeping);
++    if(hostPaced && heldCount && !queueCount && !pollIndex && InputReady()) QueueKeys();
++    UpdateStIrq();
++}
++void EmRegsVZDana::ScaleCycles(uint32 factor) {
++    inputLastCycle*=factor;
++    EmRegsVZ::ScaleCycles(factor); UpdateStIrq();
++}
++
++void EmRegsVZDana::MigrateLegacyInput() {
++    heldCount=queueHead=queueCount=0;
++    std::memset(heldScan,0,sizeof heldScan); std::memset(packets,0,sizeof packets);
++    if(heldKeys&1) heldScan[heldCount++]=0x0f;
++    if(heldKeys&2) heldScan[heldCount++]=0x70;
++    if(packetIndex) {
++        unsigned n=0;
++        if(packetKeys&1) packets[0][n++]=0x0f;
++        if(packetKeys&2) packets[0][n++]=0x70;
++        queueCount=1;
++    }
++    if(keysDirty) QueueKeys();
++    heldKeys=packetKeys=0; keysDirty=queueCount!=0;
++}
+diff --git a/src/cloudpilot/emulator/hardware/EmRegsVZDana.h b/src/cloudpilot/emulator/hardware/EmRegsVZDana.h
+index 15e58f9..23225ff 100644
+--- a/src/cloudpilot/emulator/hardware/EmRegsVZDana.h
++++ b/src/cloudpilot/emulator/hardware/EmRegsVZDana.h
+@@ -16,6 +16,11 @@ class EmRegsVZDana : public EmRegsVZ, public EmSPISlave {
+     // while later transitions wait in a bounded FIFO.
+     uint8 heldKeys=0, packetKeys=0;
+     uint8 heldScan[8]{}, packets[32][8]{};
++    uint8 presentedScan[8]{};
++    unsigned pollIndex=0;
++    bool hostPaced=false;
++    uint64 inputLastCycle=0,inputDelay=0,inputClockHz=0;
++    bool InputReady();
+     unsigned heldCount=0, queueHead=0, queueCount=0;
+     void QueueKeys();
+     unsigned packetIndex=0;
+@@ -38,12 +43,20 @@ class EmRegsVZDana : public EmRegsVZ, public EmSPISlave {
+             return channel==2 ? mainBattery : channel==6 ? supply : 0;
+         }
+     } adc;
++   protected:
++    void MigrateLegacyInput();
+    public:
+     bool SetVirtualAnalogueInputs(uint16 mainBattery, uint16 supply, bool packDetectHigh) {
+         if(mainBattery>4095 || supply>4095) return false;
+         adc.mainBattery=mainBattery; adc.supply=supply; adc.packDetectHigh=packDetectHigh;
+         return true;
+     }
++    void CycleSlowly(Bool sleeping) override;
++    void ScaleCycles(uint32 factor) override;
++    virtual uint64 InputCycle() const;
++    virtual uint64 InputHz() const;
++    bool DispatchDanaInput(const std::vector<DanaTransition5>&) override;
++    void ReleaseDanaInput(bool cancel=true) override;
+     void DispatchButtonEvent(ButtonEvent) override;
+     // Scan codes are physical ST positions, independent of host text and KeyId.
+     bool DispatchScanCode(uint8 code, bool down);
+@@ -59,6 +72,7 @@ class EmRegsVZDana : public EmRegsVZ, public EmSPISlave {
+         h.Do32(heldCount).Do32(queueHead).Do32(queueCount);
+         for(auto& code:heldScan) h.Do8(code);
+         for(auto& packet:packets) for(auto& code:packet) h.Do8(code); }
++    template<class T> void InputStateFields(T& h) { h.DoBool(hostPaced).Do64(inputLastCycle).Do64(inputDelay).Do64(inputClockHz).Do32(pollIndex); for(auto& code:presentedScan) h.Do8(code); }
+     void Reset(Bool hardware) override;
+ 
+     void KDirWrite(emuptr, int, uint32);
+diff --git a/src/cloudpilot/frond/main.cpp b/src/cloudpilot/frond/main.cpp
+index 4d73963..a602368 100644
+--- a/src/cloudpilot/frond/main.cpp
++++ b/src/cloudpilot/frond/main.cpp
+@@ -374,6 +374,12 @@ optional<KeyId> keyNamed(const string& name) {
+     return nullopt;
+ }
+ 
++optional<DanaScan5> danaForLegacyKey(KeyId key) {
++    const char* name=key==keyIdPower?"power":key==keyIdUp?"up":key==keyIdDown?"down":
++        key==keyIdHard1?"calendar":key==keyIdHard2?"address":key==keyIdHard3?"todo":key==keyIdHard4?"memo":nullptr;
++    return name?DanaScan5::Named(name):nullopt;
++}
++
+ // Timed pen, key and snapshot events, in the ARM runner's replay format, timed in guest
+ // milliseconds from when the replay was loaded.
+ class Replay {
+@@ -384,16 +390,18 @@ class Replay {
+         Kind kind;
+         int x{0}, y{0};
+         KeyId key{keyInvalid};
++        optional<DanaScan5> dana;
+         string path;
+     };
+ 
+-    bool Load(const string& path, int width, int height, string& error) {
++    bool Load(const string& path, int width, int height, string& error, bool danaDevice=false) {
+         ifstream file(path);
+         if (!file) {
+             error = "cannot open input replay: " + path;
+             return false;
+         }
+         vector<Event> loaded;
++        std::array<bool,128> danaHeld{};
+         string line;
+         size_t number = 0;
+         while (getline(file, line)) {
+@@ -420,9 +428,14 @@ class Replay {
+                 string name;
+                 if (!(tokens >> name)) return fail();
+                 const auto key = keyNamed(name);
+-                if (!key) return fail();
+-                event.key = *key;
++                if (!key) {
++                    if(!danaDevice || name.rfind("dana.",0)!=0 || !(event.dana=DanaScan5::Named(string_view(name).substr(5)))) return fail();
++                } else { event.key = *key; if(danaDevice) event.dana=danaForLegacyKey(*key); }
+                 event.kind = command == "key-down" ? Kind::keyDown : Kind::keyUp;
++                if(event.dana) {
++                    danaHeld[event.dana->Code()]=command=="key-down";
++                    if(std::count(danaHeld.begin(),danaHeld.end(),true)>8) return fail();
++                }
+             } else if (command == "snapshot") {
+                 event.kind = Kind::snapshot;
+                 if (!(tokens >> quoted(event.path)) || event.path.empty()) return fail();
+@@ -447,7 +460,8 @@ class Replay {
+             started = true;
+         }
+         while (next < events.size() && events[next].at <= guestMs - start) {
+-            handle(events[next++]);
++            if(!handle(events[next])) return;
++            ++next;
+             cout << "replay event " << next << " at " << guestMs - start << " ms" << endl;
+         }
+     }
+@@ -565,6 +579,7 @@ class Runner {
+     Runner(const Options& options, const DeviceProfile5& profile, const SessionMetadata& metadata)
+         : options(options), profile(&profile), metadata(metadata),
+           lcd(profile.frontend.width, profile.frontend.height) {
++        if(profile.deviceType==deviceTypeDana) EmHAL::ReleaseDanaInput(false);
+         lcd.SetContrast(options.contrast.value_or(metadata.contrast));
+         this->metadata.contrast = lcd.Contrast();
+         SetSpeed(options.speed);
+@@ -1025,15 +1040,25 @@ class Runner {
+         return text;
+     }
+ 
++    bool ReplaceReplay(Replay replacement) {
++        if(profile->deviceType==deviceTypeDana) {
++            if(!danaInput.ReleaseSource(DanaSource5::replay,
++                [](const auto& batch) { return EmHAL::DispatchDanaInput(batch); })) return false;
++        } else ReleaseInput();
++        replay=std::move(replacement); return true;
++    }
++
+     bool LoadReplay(const string& path) {
+         string error;
+         Replay replacement;
+-        if (!replacement.Load(path, lcd.Width(), InputHeight(), error)) {
++        if (!replacement.Load(path, lcd.Width(), InputHeight(), error, profile->deviceType==deviceTypeDana)) {
+             cerr << error << endl;
+             cout << error << endl;
+             return false;
+         }
+-        replay = std::move(replacement);
++        if(!ReplaceReplay(std::move(replacement))) {
++            cout << "input replay refused: keyboard busy" << endl; return false;
++        }
+         return true;
+     }
+ 
+@@ -1043,7 +1068,9 @@ class Runner {
+                 case Replay::Kind::penDown: gSession->QueuePenEvent(PenEvent::down(event.x, event.y)); break;
+                 case Replay::Kind::penUp: gSession->QueuePenEvent(PenEvent::up()); break;
+                 case Replay::Kind::keyDown:
+-                case Replay::Kind::keyUp: Key(event.key, event.kind == Replay::Kind::keyDown); break;
++                case Replay::Kind::keyUp:
++                    if(event.dana) return DanaKey(DanaSource5::replay,*event.dana,event.kind==Replay::Kind::keyDown);
++                    Key(event.key, event.kind == Replay::Kind::keyDown); break;
+                 case Replay::Kind::snapshot: {
+                     bool blank = false;
+                     if (!SaveFrame(event.path, blank)) cerr << "cannot capture replay snapshot: " << event.path << endl;
+@@ -1051,14 +1078,36 @@ class Runner {
+                     break;
+                 }
+             }
++            return true;
+         });
+     }
+ 
++    bool DanaKey(DanaSource5 source,DanaScan5 scan,bool down) {
++        return profile->deviceType==deviceTypeDana && danaInput.Key(source,scan,down,
++            [](const auto& batch) { return EmHAL::DispatchDanaInput(batch); });
++    }
++    bool DanaText(const string& text) {
++        return profile->deviceType==deviceTypeDana && danaInput.Text(text,
++            [](const auto& batch) { return EmHAL::DispatchDanaInput(batch); });
++    }
++
++    string DanaInputCommand(const string& command,const string& argument) {
++        if(profile->deviceType!=deviceTypeDana) return "unsupported-device";
++        if(command=="dana-text") {
++            if(!DanaInput5::TextTransitions(argument)) return "unsupported-text";
++            return DanaText(argument)?"accepted":"busy";
++        }
++        auto scan=DanaScan5::Named(argument);
++        if(!scan) return "unsupported-key";
++        return DanaKey(DanaSource5::console,*scan,command=="dana-down")?"accepted":"busy";
++    }
++
+     // Every source of a key (mouse, keyboard, fingers) goes through here; the key is pressed by the
+     // first holder and released by the last.
+     void Key(KeyId key, bool down) {
+-        if(profile->deviceType==deviceTypeDana && key!=keyIdPower && key!=keyIdUp) {
+-            cerr << "Dana key is not qualified" << endl; return;
++        if(profile->deviceType==deviceTypeDana) {
++            if(auto scan=danaForLegacyKey(key)) DanaKey(DanaSource5::screen,*scan,down);
++            return;
+         }
+         if (down ? !keyHolds.Press(key) : !keyHolds.Release(key)) return;
+         SetKey(key, down);
+@@ -1139,7 +1188,13 @@ class Runner {
+             return void(cout << "unsupported: " << refusal << endl);
+         auto argument = [&](string& value) { return bool(words >> quoted(value)) && !value.empty(); };
+         string path;
+-        if (command == "quit") {
++        if (command == "dana-down" || command == "dana-up" || command == "dana-text") {
++            string value,extra;
++            if(!(words >> quoted(value)) || (words >> extra)) return void(cout << "input refused: argument" << endl);
++            const auto result=DanaInputCommand(command,value);
++            cout << (result=="accepted"?"input accepted":"input refused: "+result) << endl;
++        } else if (command == "quit") {
++            ReleaseInput();
+             quit = true;
+         } else if (command == "save-session") {
+             if (!argument(path)) return void(cout << "usage: save-session <file>" << endl);
+@@ -1152,6 +1207,7 @@ class Runner {
+             if (!argument(path)) return void(cout << "usage: load-session <file>" << endl);
+             LoadSession(path);
+         } else if (command == "reset" || command == "reset-hard" || command == "reset-noext") {
++            ReleaseInput();
+             gSession->Reset(command == "reset"        ? EmSession::ResetType::soft
+                             : command == "reset-hard" ? EmSession::ResetType::hard
+                                                       : EmSession::ResetType::noext);
+@@ -1460,6 +1516,10 @@ class Runner {
+             "keyboard-key", "network-mode", "sound-mode", "speed", "microphone-mode", "usb-mode",
+             "bluetooth-mode", "gdb-start"};
+         const bool card = command.rfind("sd-", 0) == 0 || command.rfind("ms-", 0) == 0;
++        if(command=="dana-down" || command=="dana-up" || command=="dana-text") {
++            const auto result=DanaInputCommand(command,argument);
++            return {result=="accepted",result,"Dana input: "+result};
++        }
+         bool fileCommand = false, takesArgument = card;
+         for (const char* name : fileCommands) fileCommand = fileCommand || command == name;
+         for (const char* name : argumentCommands) takesArgument = takesArgument || command == name;
+@@ -1485,8 +1545,8 @@ class Runner {
+         if (command == "input-replay") {
+             string error;
+             Replay replacement;
+-            if (!replacement.Load(argument, lcd.Width(), InputHeight(), error)) return {false, "replay", error};
+-            replay = std::move(replacement);
++            if (!replacement.Load(argument, lcd.Width(), InputHeight(), error, profile->deviceType==deviceTypeDana)) return {false, "replay", error};
++            if(!ReplaceReplay(std::move(replacement))) return {false,"busy","Dana keyboard busy."};
+             return {true, "loaded", "Input replay loaded."};
+         }
+         if (command == "save") {
+@@ -1568,6 +1628,7 @@ class Runner {
+             return DeleteReply(EmPalmOS::DeleteDatabaseByName(argument));
+         }
+         if (command == "reset" || command == "hard-reset") {
++            ReleaseInput();
+             gSession->Reset(command == "reset" ? EmSession::ResetType::soft : EmSession::ResetType::hard);
+             piezo.Restart(gSession->GetSystemCycles());
+             return {true, "done", "Done."};
+@@ -1665,6 +1726,7 @@ class Runner {
+         }
+         if (command == "gdb-state") return {true, "gdb", GdbState()};
+         if (command == "quit") {
++            ReleaseInput();
+             desktopQuit = true;
+             return {true, "done", "Done."};
+         }
+@@ -1796,6 +1858,7 @@ class Runner {
+             SyncDTR();
+             return void(cout << "session refused: " << error << "; machine restored" << endl);
+         }
++        ReleaseInput(false);
+         metadata = session.metadata;
+         lcd.SetContrast(metadata.contrast);
+         SetSpeed(speed);
+@@ -1962,7 +2025,9 @@ class Runner {
+     }
+ 
+     // Lifts the pen and any held key, when the window loses focus or the app is hidden.
+-    void ReleaseInput() {
++    void ReleaseInput(bool cancel=true) {
++        replay=Replay();
++        if(profile->deviceType==deviceTypeDana) { danaInput.Clear(); EmHAL::ReleaseDanaInput(cancel); }
+         if (penDown) gSession->QueuePenEvent(PenEvent::up());
+         penDown = false;
+         mouseKey = keyInvalid;
+@@ -1978,13 +2043,19 @@ class Runner {
+         while (SDL_PollEvent(&event)) {
+             switch (event.type) {
+                 case SDL_QUIT:
++                    ReleaseInput();
+                     // The desktop decides: it saves, then sends quit.
+                     if (desktop) desktop->Event("close");
+                     else quit = true;
+                     break;
+                 case SDL_WINDOWEVENT:
+                     if (event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) Layout();
+-                    if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST) ReleaseInput();
++                    if (event.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) windowFocused=true;
++                    if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
++                        // Initial focus events must keep balanced input from the loaded session.
++                        if(windowFocused) ReleaseInput(windowPolled);
++                        windowFocused=false;
++                    }
+                     break;
+                 case SDL_RENDER_TARGETS_RESET:
+                     controlsDirty = true;
+@@ -2060,11 +2131,31 @@ class Runner {
+                 case SDL_KEYUP: {
+                     const bool keyDown = event.type == SDL_KEYDOWN;
+                     if (desktop) {
+-                        if (const auto name = shortcutName(event.key.keysym.sym, event.key.keysym.mod, false)) {
++                        if (const auto name = shortcutName(event.key.keysym.sym, event.key.keysym.mod,
++                                                          profile->deviceType == deviceTypeDana)) {
+                             if (keyDown && !event.key.repeat) desktop->Event("shortcut", *name);
+                             break;
+                         }
+                     }
++                    if(profile->deviceType==deviceTypeDana) {
++                        if(event.key.repeat) break;
++                        string name=SDL_GetScancodeName(event.key.keysym.scancode);
++                        for(char& c:name) c=char(std::tolower(static_cast<unsigned char>(c)));
++                        switch(event.key.keysym.scancode) {
++                            case SDL_SCANCODE_LSHIFT: name="lshift"; break;
++                            case SDL_SCANCODE_RSHIFT: name="rshift"; break;
++                            case SDL_SCANCODE_LCTRL: case SDL_SCANCODE_RCTRL: name="ctrl"; break;
++                            case SDL_SCANCODE_LGUI: case SDL_SCANCODE_RGUI: name="command"; break;
++                            case SDL_SCANCODE_LALT: case SDL_SCANCODE_RALT: name="function"; break;
++                            case SDL_SCANCODE_RETURN: name="enter"; break;
++                            case SDL_SCANCODE_CAPSLOCK: name="caps"; break;
++                            case SDL_SCANCODE_APPLICATION: name="apps"; break;
++                            default: break;
++                        }
++                        auto scan=DanaScan5::Named(name);
++                        if(scan && !DanaKey((event.key.keysym.scancode==SDL_SCANCODE_RCTRL || event.key.keysym.scancode==SDL_SCANCODE_RALT || event.key.keysym.scancode==SDL_SCANCODE_RGUI)?DanaSource5::physicalRight:DanaSource5::physical,*scan,keyDown)) cerr << "Dana keyboard busy" << endl;
++                        break;
++                    }
+                     KeyId key = keyInvalid;
+                     switch (event.key.keysym.sym) {
+                         case SDLK_F1: key = keyIdHard1; break;
+@@ -2093,6 +2184,7 @@ class Runner {
+                 }
+             }
+         }
++        windowPolled=true;
+     }
+ 
+     const Options& options;
+@@ -2108,6 +2200,7 @@ class Runner {
+     bool quit{false};
+     bool smooth{false};
+     SDL_Window* window{nullptr};
++    bool windowFocused{false}, windowPolled{false};
+     SDL_Renderer* renderer{nullptr};
+     SDL_Texture* lcdTexture{nullptr};
+     SDL_Texture* silkscreenTexture{nullptr};
+@@ -2123,6 +2216,7 @@ class Runner {
+     bool penDown{false};
+     KeyId mouseKey{keyInvalid};
+     KeyHolds68k keyHolds;
++    DanaInput5 danaInput;
+     // Fingers: held buttons and the pen, besides the mouse.
+     struct TouchHost : TouchSink68k {
+         explicit TouchHost(Runner& runner) : runner(runner) {}
+diff --git a/src/common/dana_input5.h b/src/common/dana_input5.h
+new file mode 100644
+index 0000000..4b84592
+--- /dev/null
++++ b/src/common/dana_input5.h
+@@ -0,0 +1,81 @@
++#pragma once
++#include "dana_keyboard5.h"
++#include <array>
++#include <optional>
++#include <vector>
++#include <string>
++#include <string_view>
++
++// A separate tag from KeyId and its 64-bit mask. Only inventory names create scans.
++class DanaScan5 {
++    uint8_t value;
++    explicit DanaScan5(uint8_t value) : value(value) {}
++  public:
++    uint8_t Code() const { return value; }
++    static std::optional<DanaScan5> Named(std::string_view name) {
++        for(const auto& key:danaKeys5) if(name==key.name) return DanaScan5(key.scan);
++        return std::nullopt;
++    }
++};
++struct DanaTransition5 { DanaScan5 scan; bool down; };
++enum class DanaSource5 { physical, physicalRight, console, replay, screen, count };
++
++// Source ownership commits only after the complete ST batch is accepted.
++class DanaInput5 {
++    std::array<std::array<bool,128>,size_t(DanaSource5::count)> held{};
++  public:
++    void Clear() { held={}; }
++    template<class Send> bool Key(DanaSource5 source,DanaScan5 scan,bool down,Send send) {
++        if(size_t(source)>=held.size()) return false;
++        auto next=held;
++        auto& owner=next[size_t(source)][scan.Code()];
++        if(owner==down) return true;
++        bool before=false,after=false;
++        for(auto& row:held) before|=row[scan.Code()];
++        owner=down;
++        for(auto& row:next) after|=row[scan.Code()];
++        std::vector<DanaTransition5> batch;
++        if(before!=after) batch.push_back({scan,after});
++        if(!send(batch)) return false;
++        held=next; return true;
++    }
++    template<class Send> bool ReleaseSource(DanaSource5 source,Send send) {
++        if(size_t(source)>=held.size()) return false;
++        auto next=held;
++        next[size_t(source)]={};
++        std::vector<DanaTransition5> batch;
++        for(const auto& key:danaKeys5) if(held[size_t(source)][key.scan]) {
++            bool other=false;
++            for(const auto& row:next) other|=row[key.scan];
++            if(!other) batch.push_back({*DanaScan5::Named(key.name),false});
++        }
++        if(!send(batch)) return false;
++        held=next; return true;
++    }
++    static std::optional<std::vector<DanaTransition5>> TextTransitions(const std::string& text) {
++        std::vector<DanaTransition5> batch;
++        const char* plain="`1234567890-=[]\\;',./";
++        const char* upper="~!@#$%^&*()_+{}|:\"<>?";
++        for(unsigned char ch:text) {
++            bool shift=ch>='A' && ch<='Z';
++            char c=shift?char(ch+32):char(ch);
++            if(auto pos=std::strchr(upper,ch); pos && ch) { c=plain[pos-upper]; shift=true; }
++            std::string name(1,c);
++            if(ch==' ') name="space";
++            if(ch=='\n' || ch=='\r') name="enter";
++            if(ch=='\t') name="tab";
++            auto scan=DanaScan5::Named(name);
++            if(!scan || batch.size()+(shift?4:2)>24) return std::nullopt;
++            auto modifier=*DanaScan5::Named("lshift");
++            if(shift) batch.push_back({modifier,true});
++            batch.push_back({*scan,true}); batch.push_back({*scan,false});
++            if(shift) batch.push_back({modifier,false});
++        }
++        return batch;
++    }
++    template<class Send> bool Text(const std::string& text,Send send) {
++        for(auto& row:held) for(bool down:row) if(down) return false;
++        auto batch=TextTransitions(text);
++        return batch && send(*batch);
++    }
++};
+diff --git a/src/common/dana_keyboard5.h b/src/common/dana_keyboard5.h
+index cde3e4f..791ee89 100644
+--- a/src/common/dana_keyboard5.h
++++ b/src/common/dana_keyboard5.h
+@@ -62,9 +62,9 @@ inline constexpr DanaKey5 danaKeys5[] = {
+     {0x25, "l"},
+     {0x24, ";"},
+     {0x14, "'"},
+-    {0x2e, "enter"},
++    {0x6e, "enter"},
+     {0x09, "lshift"},
+-    {0x29, "\\"},
++    {0x2e, "\\"},
+     {0x6b, "z"},
+     {0x6c, "x"},
+     {0x6d, "c"},
+@@ -89,7 +89,8 @@ inline constexpr DanaKey5 danaKeys5[] = {
+ };
+ inline bool danaScanValid5(unsigned scan) {
+     for(const auto& key:danaKeys5) if(key.scan==scan) return true;
+-    return false;
++    // Older snapshots can contain the ISO wire position; no host key exposes it.
++    return scan==0x29;
+ }
+ inline unsigned danaScanNamed5(const char* name) {
+     for(const auto& key:danaKeys5) if(std::strcmp(key.name,name)==0) return key.scan;

@@ -1,4 +1,7 @@
 #include "CardSave.h"
+#include "MachineSession.h"
+#include <sys/wait.h>
+#include <unistd.h>
 #include "MemoryStickImage.h"
 #include "NandFile.h"
 #include "SessionIo.h"
@@ -1712,7 +1715,74 @@ static void NandV9Folder() {
     fs::remove_all(dir);
 }
 
+static void NativeWrapperRefusal() {
+    const auto dir = FixtureDir();
+    const auto work = dir / "work";
+    fs::create_directory(work);
+    for (const char* magic : {"FRONDLINKSD1\n", "FRONDPORTSD1\n"}) {
+        std::vector<uint8_t> bytes(256, 0);
+        std::memcpy(bytes.data(), magic, std::strlen(magic));
+        SessionFile5 file;
+        assert(!file.Deserialize(bytes.size(), bytes.data()));
+        uint32_t version = 0;
+        std::string device;
+        assert(!frondSession::peekHeader(bytes.data(), bytes.size(), version, device));
+        const auto source = dir / "machine.frond";
+        WriteFile(source, bytes);
+        frondSession::Contents contents;
+        fs::path folder;
+        assert(!frondSession::loadIntoWorkFolder(source, work, contents, folder, 0));
+        assert(fs::is_empty(work));
+        assert(!frondSession::loadIntoWorkFolder(dir, work, contents, folder, 0));
+        assert(fs::is_empty(work));
+        assert(ReadAll(source) == bytes);
+    }
+    fs::remove_all(dir);
+}
+
+static void ProductionCrashRecovery() {
+    const auto dir = FixtureDir(), machine = dir / "machine";
+    fs::create_directories(machine);
+    auto contents = TinyContents();
+    std::vector<uint8_t> payload(65536, 0x36), encoded, got(512), dirty(512, 0xe9);
+    assert(frondSdFile::encode(payload, encoded));
+    WriteFile(machine / frondMachine::sdSibling, encoded);
+    contents.media.push_back(TinySd(payload.size()));
+    assert(frondSession::saveFolder(machine, contents));
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        sdCardReset();
+        const auto pid = fork();
+        assert(pid >= 0);
+        if (!pid) {
+            frondSession::Contents loaded;
+            fs::path folder;
+            if (!frondSession::loadPath(machine, loaded, folder) ||
+                !frondNative::attachFolderMedia(loaded, folder) ||
+                !sdCardWrite(0, dirty.data()) || !sdCardSnapshot()) _exit(2);
+            _exit(0);
+        }
+        int status = 0;
+        assert(waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        frondSession::Contents loaded;
+        fs::path folder;
+        assert(frondSession::loadPath(machine, loaded, folder));
+        assert(frondNative::attachFolderMedia(loaded, folder));
+        assert(sdCardRead(0, got.data()) && got == std::vector<uint8_t>(512, 0x36));
+    }
+    assert(sdCardWrite(0, dirty.data()) && SaveCard(machine));
+    sdCardReset();
+    frondSession::Contents loaded;
+    fs::path folder;
+    assert(frondSession::loadPath(machine, loaded, folder) && frondNative::attachFolderMedia(loaded, folder));
+    assert(sdCardRead(0, got.data()) && got == dirty);
+    sdCardReset();
+    fs::remove_all(dir);
+    std::puts("production folder load/attach fork/_exit, save/adopt/reload PASS");
+}
+
 int main() {
+    ProductionCrashRecovery();
+    NativeWrapperRefusal();
     RoundTrip();
     RefusedSiblingsLeaveBytes();
     TruncatedHeader();

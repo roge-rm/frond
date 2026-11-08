@@ -1,0 +1,91 @@
+--- a/src/common/device_profile5.h
++++ b/src/common/device_profile5.h
+@@ -8,10 +8,10 @@
+ // These values are stored in existing sessions.
+ enum class DisplayMode {
+     mode_160x160 = 1, mode_160x220 = 2, mode_240x240 = 3, mode_240x320 = 4,
+-    mode_320x320 = 5, mode_320x480 = 6, mode_480x480 = 7, mode_480x720 = 8
+-};
+-
+-enum class DeviceCohort5 { txNand, e2Nand, patchedE2, paravirtual, zire72Nor, tg50Nor, reserved, ez68k };
++    mode_320x320 = 5, mode_320x480 = 6, mode_480x480 = 7, mode_480x720 = 8, mode_560x160 = 9
++};
++
++enum class DeviceCohort5 { txNand, e2Nand, patchedE2, paravirtual, zire72Nor, tg50Nor, reserved, ez68k, vz68k };
+ enum class DeviceSupport5 { txDesktop, e2Desktop, zire72Desktop, inheritedUnverified, staged, reserved, experimentalDesktop };
+ // How a device is told from its firmware: the card header's company and HAL IDs, the NOR size, or a
+ // big-endian 68k card header (deviceProfileInspect68kRom5).
+@@ -146,6 +146,13 @@
+      {true, "iiix", 160, 160, 60, 44, "Date Book|Address|To Do List|Memo Pad",
+       "up|down|app1|app2|app3|app4|power", -1, -1, -1, -1, false, false, false, "", "iiix"},
+      0, 0, 16580608},
++    // Dana firmware is recognised, but its VZ board and peripherals are not built yet.
++    {deviceTypeDana, "alphasmart-dana", "AlphaSmart Dana", DeviceCohort5::vz68k, DeviceSupport5::staged,
++     DeviceDetect5::romHeader68k, 0x61736d74 /* asmt */, 0x44616e61 /* Dana */,
++     DeviceBoard5::none, DeviceArt::none, {},
++     6u << 20, 0, 8u << 20, 8u << 20, DisplayMode::mode_560x160, 1u << 9, false,
++     DeviceNorLayout5::any, 0, 0x8000, false, 0, 0,
++     {false, "", 560, 160, 0, 0, "", "", -1, -1, -1, -1, false, true}},
+     // Reserved names: art only, no board yet.
+     {deviceTypeInvalid, "palm-m515", "Palm m515", DeviceCohort5::reserved, DeviceSupport5::reserved,
+      DeviceDetect5::none, 0, 0, DeviceBoard5::none, DeviceArt::m515, {},
+@@ -310,6 +317,28 @@
+     const uint16_t flags = be16(0x0e);
+     const uint32_t reset = be32(4), cardBytes = be32(0x6c);
+     if (info.headerVersion >= 5) info.companyId = be32(0x7e), info.halId = be32(0x82);
++    const auto* dana = deviceProfileNamed5("alphasmart-dana");
++    if (info.headerVersion == 5 && info.companyId == dana->companyId && info.halId == dana->halId) {
++        // Dana has a VZ small card and a second card at 32 KiB, with padding after it.
++        if (!(flags & 0x0040) || (flags & 0x0001) || size != dana->norSize ||
++            cardBytes < sizeof(h) || cardBytes > 0x8000 ||
++            reset < 0x10000000 || reset - 0x10000000 >= cardBytes)
++            return info;
++        uint8_t big[0x100];
++        if (!read(0x8000, big, sizeof(big))) return info;
++        auto word = [&](unsigned at) {
++            return uint32_t(big[at]) << 24 | uint32_t(big[at + 1]) << 16 |
++                   uint32_t(big[at + 2]) << 8 | big[at + 3];
++        };
++        for (unsigned i = 0; i < sizeof(name); ++i) if (big[0x10 + i] != uint8_t(name[i])) return info;
++        const auto bigReset = word(4), length = word(0x6c);
++        if (word(8) != 0xfeedbeef || big[0x0c] || big[0x0d] != 5 ||
++            !(big[0x0f] & 0x40) || (big[0x0f] & 1) || word(0x7e) != info.companyId ||
++            word(0x82) != info.halId || length < sizeof(big) || length > size - 0x8000 ||
++            bigReset < 0x10008000 || bigReset - 0x10008000 >= length) return info;
++        info.profile = dana;
++        return info;
++    }
+     // Card flags: 0x0001 RAM only, 0x0020 runs on the 68EZ328.
+     if (info.headerVersion < 3 || info.headerVersion > 5 || (flags & 0x0001) || !(flags & 0x0020)) return info;
+     if (size > rom68kMaxSize5 || size % 0x1000 || cardBytes > size) return info;
+@@ -391,7 +420,7 @@
+ 
+ inline bool deviceProfileSupportsDisplay5(int32_t deviceType, int32_t mode) {
+     const auto* profile = deviceProfile5(deviceType);
+-    return profile && mode >= 1 && mode <= 8 && (profile->displayModes & (1u << mode));
++    return profile && mode >= 1 && mode <= 9 && (profile->displayModes & (1u << mode));
+ }
+ 
+ enum class DeviceFirmwareError5 { none, unknownDevice, norSize, explicitNand, nandSize, norLayout };
+--- a/src/common/device_type5.h
++++ b/src/common/device_type5.h
+@@ -9,6 +9,7 @@
+     deviceTypeZire72 = 4,
+     deviceTypeTG50 = 5,
+     deviceTypeIIIx = 6,
++    deviceTypeDana = 7,
+     deviceTypeInvalid = -1
+ };
+ 
+--- a/src/uarm/uarm/device_configuration.cpp
++++ b/src/uarm/uarm/device_configuration.cpp
+@@ -44,6 +44,9 @@
+         case DisplayMode::mode_480x720:
+             return {.width = 480, .height = 720, .graffitiHeight = 0, .density = 216};
+ 
++        case DisplayMode::mode_560x160:
++            return {.width = 560, .height = 160, .graffitiHeight = 0, .density = 72};
++
+         default:
+             return DisplayConfiguration{};
+     }

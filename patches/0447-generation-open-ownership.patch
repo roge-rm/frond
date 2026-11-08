@@ -1,0 +1,18 @@
+--- a/src/uarm/uarm/FileCardBacking.h
++++ b/src/uarm/uarm/FileCardBacking.h
+@@ -528,6 +528,7 @@
+             g->file = genPath(std::to_string(id));
+             g->fd = ::open(g->file.c_str(), O_RDWR | O_CLOEXEC);
+             if (g->fd < 0) return nullptr;
++            g->owner = this;
+             uint8_t header[kHeaderBytes];
+             if (!ioRead(g->fd, header, kHeaderBytes, 0)) return nullptr;
+             if (std::memcmp(header, "FRONDGEN", 8) != 0) return nullptr;
+@@ -543,7 +544,6 @@
+             g->idxCount = g->overlayCount;
+             g->frozen = true;
+             g->published = true;
+-            g->owner = this;
+             g->dataEnd = g->indexOffset ? g->indexOffset : kHeaderBytes;
+             return g;
+         }

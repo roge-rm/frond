@@ -33,6 +33,44 @@ class DeviceDataTest(unittest.TestCase):
         kotlin = next(data for path, data in generator.outputs(inventory).items() if path.suffix == '.kt')
         self.assertNotIn('test-fixture', kotlin)
 
+    def test_dana_independent_native_card_inventory(self):
+        profiles = json.loads((ROOT / 'tools/device-profiles.json').read_text())['profiles']
+        dana = next(p for p in profiles if p['name'] == 'alphasmart-dana')
+        self.assertEqual([s['id'] for s in dana['storage_slots']], [0, 2])
+        self.assertEqual([s['label'] for s in dana['storage_slots']], [1, 2])
+        for slot in dana['storage_slots']:
+            self.assertEqual(slot['kind'], 'sd')
+            sd, mmc = slot['media_families']
+            self.assertEqual(sd['family'], 'sdsc')
+            self.assertEqual((sd['min_bytes'], sd['max_bytes']), (32 << 20, 2048 << 20))
+            self.assertEqual(mmc['family'], 'legacy-mmc-spi')
+            self.assertEqual(mmc['csd_format'], 'mmc-1.2-spec-3.3')
+            self.assertEqual(mmc['runtime_sizes_bytes'], [n << 20 for n in (32, 64, 128, 256)])
+            for family in (sd, mmc):
+                self.assertEqual(family['block_bytes'], 512)
+                self.assertEqual(family['size_rule'], 'legacy-csd-fixed-512')
+                self.assertEqual(family['guest_qualified_sizes_bytes'], [32 << 20])
+        for p in profiles:
+            if p is not dana:
+                self.assertNotIn(2, [s['id'] for s in p['storage_slots']])
+
+    def test_dana_core_backend_stays_out_of_frontends(self):
+        inventory = json.loads((ROOT / 'tools/device-profiles.json').read_text())
+        dana = next(p for p in inventory['profiles'] if p['name'] == 'alphasmart-dana')
+        self.assertEqual(dana['status'], 'staged')
+        self.assertEqual((dana['width'], dana['height']), (560, 160))
+        self.assertTrue(dana['sd_slot'])
+        self.assertTrue(dana['keyboard'])
+        self.assertTrue(dana['sound'])
+        self.assertTrue(dana['infrared'])
+        for key in ('available', 'runner_eligible', 'usb', 'network', 'serial', 'bluetooth', 'microphone'):
+            self.assertFalse(dana[key], key)
+        kotlin = next(data for path, data in generator.outputs(inventory).items() if path.suffix == '.kt')
+        self.assertNotIn('id = "alphasmart-dana"', kotlin)
+        self.assertNotIn('alphasmart-dana', palm_boot.DEVICES)
+        self.assertIn('alphasmart-dana', palm_boot.DEVICES_68K)
+        self.assertTrue(dana['runs_68k'])
+
     def test_sd_bounds(self):
         profiles = {p['name']: p for p in json.loads((ROOT / 'tools/device-profiles.json').read_text())['profiles']}
         mib = 1 << 20

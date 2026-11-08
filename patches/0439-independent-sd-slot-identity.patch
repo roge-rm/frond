@@ -1,0 +1,322 @@
+--- a/src/cloudpilot/emulator/ExternalStorage.cpp
++++ b/src/cloudpilot/emulator/ExternalStorage.cpp
+@@ -1,4 +1,5 @@
+ #include "ExternalStorage.h"
++#include <cstring>
+ 
+ #include "EmSPISlaveSD.h"
+ #include "savestate/ChunkHelper.h"
+@@ -9,7 +10,7 @@
+ ExternalStorage gExternalStorage;
+ 
+ namespace {
+-    constexpr uint32 SAVESTATE_VERSION = 1;
++    constexpr uint32 SAVESTATE_VERSION = 2;
+ }
+ 
+ bool ExternalStorage::HasImage(const string& key) const { return images.find(key) != images.end(); }
+@@ -19,7 +20,7 @@
+ }
+ 
+ bool ExternalStorage::AddImage(const string& key, uint8* imageData, size_t size) {
+-    if (key.length() > MAX_KEY_LENGTH || size % (CardImage::BLOCK_SIZE) != 0 || HasImage(key))
++    if (key.empty() || key.length() > MAX_KEY_LENGTH || size == 0 || size % (CardImage::BLOCK_SIZE) != 0 || HasImage(key))
+         return false;
+ 
+     images.emplace(key, make_shared<CardImage>(imageData, size / CardImage::BLOCK_SIZE));
+@@ -28,7 +29,7 @@
+ }
+ 
+ bool ExternalStorage::Mount(const string& key, EmHAL::Slot slot) {
+-    if (slot == EmHAL::Slot::none || IsMounted(slot) || !HasImage(key) ||
++    if (static_cast<int>(slot) < 0 || slot > EmHAL::MAX_SLOT || IsMounted(slot) || !HasImage(key) ||
+         GetSlot(key) != EmHAL::Slot::none || !EmHAL::SupportsImageInSlot(slot, *images.at(key)))
+         return false;
+ 
+@@ -68,9 +69,16 @@
+     for (uint8 slot = 0; slot <= static_cast<uint8>(EmHAL::MAX_SLOT); slot++) {
+         const string& key(mountedKeysFromSavestate[slot]);
+ 
+-        if (key.empty()) continue;
++        if (key.empty()) {
++            if (slots[slot]) {
++                slots[slot].reset();
++                EmHAL::Unmount(static_cast<EmHAL::Slot>(slot));
++            }
++            continue;
++        }
+ 
+         if (!HasImage(key)) {
++            slots[slot].reset();
+             EmHAL::Unmount(static_cast<EmHAL::Slot>(slot));
+             remountFailed = true;
+             continue;
+@@ -84,7 +92,8 @@
+ bool ExternalStorage::RemountFailed() const { return remountFailed; }
+ 
+ bool ExternalStorage::IsMounted(EmHAL::Slot slot) const {
+-    return slot != EmHAL::Slot::none && slots[static_cast<uint8>(slot)].operator bool();
++    return static_cast<int>(slot) >= 0 && slot <= EmHAL::MAX_SLOT &&
++        slots[static_cast<uint8>(slot)].operator bool();
+ }
+ 
+ bool ExternalStorage::IsMounted(const string& key) const {
+@@ -158,10 +167,12 @@
+     typename T::chunkT* chunk = savestate.GetChunk(ChunkType::externalStorage);
+     if (!chunk) return;
+ 
+-    chunk->Put32(SAVESTATE_VERSION);
++    const bool secondSD = !mountedKeysFromSavestate[static_cast<int>(EmHAL::Slot::sdcard2)].empty();
++    chunk->Put32(secondSD ? SAVESTATE_VERSION : 1);
+ 
+     SaveChunkHelper helper(*chunk);
+     DoSaveLoad(helper);
++    if (secondSD) helper.DoString(mountedKeysFromSavestate[2], MAX_KEY_LENGTH);
+ }
+ 
+ template void ExternalStorage::Save<Savestate<ChunkType>>(Savestate<ChunkType>&);
+@@ -169,16 +180,32 @@
+ 
+ void ExternalStorage::Load(SavestateLoader<ChunkType>& loader) {
+     Chunk* chunk = loader.GetChunk(ChunkType::externalStorage);
+-    if (!chunk) return;
++    if (!chunk) {
++        for (auto& key : mountedKeysFromSavestate) key.clear();
++        return;
++    }
+ 
+     const uint32 version = chunk->Get32();
+-    if (version > SAVESTATE_VERSION) {
++    if (version < 1 || version > SAVESTATE_VERSION) {
+         logPrintf("unable to restore ExternalStorage: unsupported savestate version\n");
+         loader.NotifyError();
+ 
+         return;
+     }
+ 
+-    LoadChunkHelper helper(*chunk);
+-    DoSaveLoad(helper);
+-}
++    string keys[static_cast<int>(EmHAL::MAX_SLOT) + 1];
++    bool valid = true;
++    for (unsigned i = 0; i < (version == 1 ? 2u : 3u); ++i) {
++        char bytes[MAX_KEY_LENGTH + 1]{};
++        chunk->GetBuffer(bytes, sizeof(bytes));
++        const auto end = static_cast<const char*>(std::memchr(bytes, 0, sizeof(bytes)));
++        if (!end) valid = false;
++        else keys[i].assign(bytes, end - bytes);
++    }
++    valid = valid && !chunk->HasError() && chunk->IsAtEnd();
++    for (unsigned i = 0; i < 3; ++i)
++        for (unsigned j = 0; j < i; ++j)
++            if (!keys[i].empty() && keys[i] == keys[j]) valid = false;
++    if (!valid) { loader.NotifyError(); return; }
++    for (unsigned i = 0; i < 3; ++i) mountedKeysFromSavestate[i] = keys[i];
++}
+--- a/src/cloudpilot/emulator/hardware/EmHAL.h
++++ b/src/cloudpilot/emulator/hardware/EmHAL.h
+@@ -36,8 +36,8 @@
+ 
+ class EmHAL {
+    public:
+-    enum class Slot { none = -1, sdcard = 0, memorystick = 1 };
+-    constexpr static Slot MAX_SLOT = Slot::memorystick;
++    enum class Slot { none = -1, sdcard = 0, memorystick = 1, sdcard2 = 2 };
++    constexpr static Slot MAX_SLOT = Slot::sdcard2;
+ 
+    public:
+     typedef void (*CycleHandler)(void*, uint64, bool);
+--- a/src/cloudpilot/emulator/hardware/EmSPISlaveSD.cpp
++++ b/src/cloudpilot/emulator/hardware/EmSPISlaveSD.cpp
+@@ -1,6 +1,7 @@
+ #include "EmSPISlaveSD.h"
+ 
+ #include "CPCrc.h"
++#include <stdexcept>
+ #include "ExternalStorage.h"
+ #include "savestate/ChunkHelper.h"
+ #include "savestate/Savestate.h"
+@@ -23,7 +24,6 @@
+     constexpr uint8 DATA_RESPONSE_ACCEPTED = 0xe5;
+     constexpr uint8 DATA_RESPONSE_WRITE_FAILED = 0x0d;
+ 
+-    CardImage* image() { return gExternalStorage.GetImageInSlot(EmHAL::Slot::sdcard); }
+ 
+     bool determineLayout(size_t blocksTotal, uint32& cSizeMult, uint32& cSize) {
+         if (blocksTotal < 4) return false;
+@@ -38,6 +38,14 @@
+         return (1 << (cSizeMult + 2)) * (cSize + 1) == blocksTotal;
+     }
+ }  // namespace
++
++EmSPISlaveSD::EmSPISlaveSD(EmHAL::Slot slot)
++    : slot(slot), chunkType(slot == EmHAL::Slot::sdcard ? ChunkType::spiSlaveSD : ChunkType::spiSlaveSD2) {
++    if (slot != EmHAL::Slot::sdcard && slot != EmHAL::Slot::sdcard2)
++        throw std::invalid_argument("invalid SD slot");
++}
++
++CardImage* EmSPISlaveSD::Image() const { return gExternalStorage.GetImageInSlot(slot); }
+ 
+ void EmSPISlaveSD::Reset() {
+     spiState = SpiState::notSelected;
+@@ -54,8 +62,11 @@
+ void EmSPISlaveSD::Save(SavestateProbe<ChunkType>& savestateProbe) { DoSave(savestateProbe); }
+ 
+ void EmSPISlaveSD::Load(SavestateLoader<ChunkType>& loader) {
+-    Chunk* chunk = loader.GetChunk(ChunkType::spiSlaveSD);
+-    if (!chunk) return;
++    Chunk* chunk = loader.GetChunk(chunkType);
++    if (!chunk) {
++        if (slot == EmHAL::Slot::sdcard2) Reset();
++        return;
++    }
+ 
+     const uint32 version = chunk->Get32();
+     if (version != SAVESTATE_VERSION) {
+@@ -127,7 +138,7 @@
+ void EmSPISlaveSD::Enable(void) {
+     if (spiState != SpiState::notSelected) return;
+ 
+-    if (gExternalStorage.IsMounted(EmHAL::Slot::sdcard)) {
++    if (gExternalStorage.IsMounted(slot)) {
+         spiState = SpiState::rxCmdByte;
+         lastCmd = 0;
+     }
+@@ -137,7 +148,7 @@
+ 
+ template <typename T>
+ void EmSPISlaveSD::DoSave(T& savestate) {
+-    typename T::chunkT* chunk = savestate.GetChunk(ChunkType::spiSlaveSD);
++    typename T::chunkT* chunk = savestate.GetChunk(chunkType);
+     if (!chunk) return;
+ 
+     chunk->Put32(SAVESTATE_VERSION);
+@@ -163,7 +174,7 @@
+ }
+ 
+ uint8 EmSPISlaveSD::DoExchange8(uint8 data) {
+-    if (!gExternalStorage.IsMounted(EmHAL::Slot::sdcard)) return 0xff;
++    if (!gExternalStorage.IsMounted(slot)) return 0xff;
+     if (cardState == CardState::multiblockRead) HandleCmd12(data);
+ 
+     switch (spiState) {
+@@ -349,7 +360,7 @@
+         case 18:
+             if (cardState == CardState::idle) {
+                 PrepareR1(ERR_CARD_IDLE);
+-            } else if (Param() >> 9 >= image()->BlocksTotal()) {
++            } else if (Param() >> 9 >= Image()->BlocksTotal()) {
+                 PrepareR1(ERR_PARAMETER);
+             } else {
+                 cardState = CardState::multiblockRead;
+@@ -364,7 +375,7 @@
+         case 24:
+             if (cardState == CardState::idle) {
+                 PrepareR1(ERR_CARD_IDLE);
+-            } else if (Param() >> 9 >= image()->BlocksTotal()) {
++            } else if (Param() >> 9 >= Image()->BlocksTotal()) {
+                 PrepareR1(ERR_PARAMETER);
+             } else {
+                 currentBlock = Param() >> 9;
+@@ -379,7 +390,7 @@
+         case 25:
+             if (cardState == CardState::idle) {
+                 PrepareR1(ERR_CARD_IDLE);
+-            } else if (Param() >> 9 >= image()->BlocksTotal()) {
++            } else if (Param() >> 9 >= Image()->BlocksTotal()) {
+                 PrepareR1(ERR_PARAMETER);
+             } else {
+                 cardState = CardState::multiblockWrite;
+@@ -470,7 +481,7 @@
+     uint8 block[512];
+ 
+     BufferStart(0);
+-    if (image()->Read(block, Param() >> 9, 1) != 1) {
++    if (Image()->Read(block, Param() >> 9, 1) != 1) {
+         PrepareR1(ERR_PARAMETER);
+         return;
+     }
+@@ -485,7 +496,7 @@
+     uint8 block[512];
+ 
+     BufferStart(0);
+-    if (image()->Read(block, currentBlock, 1) != 1) {
++    if (Image()->Read(block, currentBlock, 1) != 1) {
+         BufferAdd(0x08);  // Data error token: out of range.
+         cardState = CardState::initialized;
+         return;
+@@ -500,7 +511,7 @@
+     const uint32 blLen = 0x09, sectorSize = 0;
+     uint32 cSizeMult, cSize;
+ 
+-    if (!determineLayout(image()->BlocksTotal(), cSizeMult, cSize)) {
++    if (!determineLayout(Image()->BlocksTotal(), cSizeMult, cSize)) {
+         PrepareR1(ERR_PARAMETER);
+         return;
+     }
+@@ -586,7 +597,7 @@
+ void EmSPISlaveSD::FinishWriteSingleBlock() {
+     BufferStart(0);
+ 
+-    if (image()->Write(buffer, currentBlock) == 1) {
++    if (Image()->Write(buffer, currentBlock) == 1) {
+         BufferAdd(DATA_RESPONSE_ACCEPTED, 0xff);
+     } else {
+         BufferAdd(DATA_RESPONSE_WRITE_FAILED);
+@@ -599,7 +610,7 @@
+ void EmSPISlaveSD::FinishWriteMultiblock() {
+     BufferStart(0);
+ 
+-    if (image()->Write(buffer, currentBlock) == 1) {
++    if (Image()->Write(buffer, currentBlock) == 1) {
+         ++currentBlock;
+         BufferAdd(DATA_RESPONSE_ACCEPTED, 0xff);
+     } else {
+--- a/src/cloudpilot/emulator/hardware/EmSPISlaveSD.h
++++ b/src/cloudpilot/emulator/hardware/EmSPISlaveSD.h
+@@ -3,12 +3,14 @@
+ 
+ #include "EmCommon.h"
+ #include "EmSPISlave.h"
++#include "EmHAL.h"
++#include "savestate/ChunkType.h"
+ 
+ class EmSPISlaveSD : public EmSPISlave {
+    public:
+     static bool IsSizeRepresentable(size_t blocksTotal);
+ 
+-    EmSPISlaveSD() = default;
++    explicit EmSPISlaveSD(EmHAL::Slot slot = EmHAL::Slot::sdcard);
+ 
+     void Reset();
+ 
+@@ -77,13 +79,16 @@
+     void PrepareR1(uint8 flags);
+ 
+    private:
++    CardImage* Image() const;
++    const EmHAL::Slot slot;
++    const ChunkType chunkType;
+     bool acmd = false;
+ 
+     SpiState spiState{SpiState::notSelected};
+     CardState cardState{CardState::idle};
+     uint8 lastCmd{0};
+ 
+-    uint8 buffer[550];
++    uint8 buffer[550]{};
+     uint32 bufferSize{0};
+     uint32 bufferIndex{0};
+     uint8 cmd12Countdown{0};
+--- a/src/cloudpilot/emulator/savestate/ChunkType.h
++++ b/src/cloudpilot/emulator/savestate/ChunkType.h
+@@ -31,7 +31,8 @@
+     spiSlaveSD = 0x1d0,
+     regsVZDana = 0x1e0,
+     regsISPDana = 0x1f0,
+-    uartDana = 0x200
++    uartDana = 0x200,
++    spiSlaveSD2 = 0x201
+ };
+ 
+ #endif  // _CHUNK_TYPE_H_

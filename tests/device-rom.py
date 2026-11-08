@@ -287,7 +287,10 @@ def suite(args):
                     line = core.send(f'load-session "{path}"', ('session refused', 'loaded session'))
                     self.assertIn('machine unchanged', line, name)
                 core.wait_frame(root / 'after.png', launcher_check(args.device), 30)
-                core.key(root, 'hard1', hold_ms=300)
+                if args.device == 'alphasmart-dana':
+                    core.tap(root, 25, 30)
+                else:
+                    core.key(root, 'hard1', hold_ms=300)
                 core.wait_frame(root / 'input.png', lambda rows: not launcher_check(args.device)(rows), 30)
             finally:
                 self.assertEqual(core.close(), 0)
@@ -350,11 +353,21 @@ def main():
                         help='private JSON of observed fault signatures/counts, requires --launcher, --resets and --sha256')
     parser.add_argument('--boot-timeout', type=float, default=300, help='boot deadline in seconds, including waiting for a slot')
     parser.add_argument('--evidence', type=Path, help='new directory, existing evidence is refused')
+    parser.add_argument('--keyboard-session', type=Path, help='Dana 1.5 ready session for guest keyboard checks')
+    parser.add_argument('--keyboard-probe', type=Path, help='FrondKeyboardProbe.prc for --keyboard-session')
     args = parser.parse_args()
     if args.device in DEVICES_68K and args.engine == 'fast':
         parser.error('the Fast engine is not available for 68k devices')
     if args.boot_timeout <= 0:
         parser.error('--boot-timeout must be positive')
+    if args.keyboard_session or args.keyboard_probe:
+        if args.device != 'alphasmart-dana' or not (args.keyboard_session and args.keyboard_probe and args.evidence):
+            parser.error('keyboard checks require Dana, --keyboard-session, --keyboard-probe and --evidence')
+        if args.nor or args.nand or args.synthetic_rejection or args.resets or args.expected_faults or args.launcher or args.sha256 or args.variant:
+            parser.error('keyboard checks use a ready session, without boot/reset checks')
+        return subprocess.run([sys.executable, str(ROOT / 'tests/dana-input.py'),
+            '--session', str(args.keyboard_session), '--probe', str(args.keyboard_probe),
+            '--evidence', str(args.evidence), '--core', str(core_for(args.device))]).returncode
     try:
         profile = next(p for p in PROFILES if p['name'] == args.device)
         args.firmware_variant = firmware_variant(args.nor, profile) if args.nor and args.nor.is_file() else None

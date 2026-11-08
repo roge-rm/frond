@@ -1,0 +1,235 @@
+diff --git a/src/cloudpilot/frond/RuntimeCards.h b/src/cloudpilot/frond/RuntimeCards.h
+index eb10001..633d4f4 100644
+--- a/src/cloudpilot/frond/RuntimeCards.h
++++ b/src/cloudpilot/frond/RuntimeCards.h
+@@ -88,6 +88,54 @@ class RuntimeCards {
+         }
+         return out.str();
+     }
++    // Called on the stopped guest thread, with both source locks held throughout the copy.
++    bool CopyPortable(const std::filesystem::path& dir, std::string& manifest) const {
++        if(!CanSave()) return false;
++        std::ostringstream out; out << "frond-portable-sd 1\n";
++        for(unsigned n=0;n<2;++n) if(cards[n]) {
++            const auto& c=*cards[n];
++            const std::string name=n?"sd2.frondsd":"sd0.frondsd";
++            std::array<uint8_t,frondMachine::identityBytes> identity{};
++            if(!frondSession::writeSdFromReader(dir/name,c.backing->Size(),
++                [&](uint64_t off,uint64_t size,void* dest){return c.backing->Read(off,size,dest);},identity)) return false;
++            frondSdFile::Info info;
++            if(frondMachine::readSdHeader(dir/name,info)!=frondMachine::SiblingStatus::ok) return false;
++            out << (n?2:0) << " sd " << name << " " << c.key << " " << c.serial << " "
++                << c.backing->Size() << " " << c.protectedCard << " "
++                << gExternalStorage.IsMounted(slot(n)) << " " << info.crc << "\n";
++        }
++        manifest=out.str();
++        return CanSave();
++    }
++    // Portable identity is the guest identity. Ownership is the new directory and locked inode.
++    // Resolve only fixed sibling names; Stage performs the full pair and root checks afterwards.
++    static std::string ResolvePortable(const std::string& text,const std::filesystem::path& dir,
++                                       std::string& linked) {
++        if(text.size()>8192 || text.find('\0')!=std::string::npos) return "invalid portable manifest";
++        std::istringstream in(text); std::string line;
++        if(!std::getline(in,line) || line!="frond-portable-sd 1") return "unknown portable manifest";
++        std::ostringstream out; out << "frond-linked-sd 1\n";
++        unsigned seen=0;
++        while(std::getline(in,line)) {
++            unsigned id,protect,insert; uint64_t serial,size,crc;
++            std::string kind,name,key,extra; std::istringstream row(line);
++            if(!(row>>id>>kind>>name>>key>>serial>>size>>protect>>insert>>crc) || row>>extra ||
++                (id!=0 && id!=2) || kind!="sd" || name!=(id?"sd2.frondsd":"sd0.frondsd") ||
++                (seen&(1u<<id)) || protect>1 || insert>1) return "invalid portable descriptor";
++            seen|=1u<<id;
++            const auto path=std::filesystem::absolute(dir/name).lexically_normal();
++            struct stat st{}; frondSdFile::Info info;
++            if(lstat(path.c_str(),&st) || !S_ISREG(st.st_mode) ||
++                frondMachine::readSdHeader(path,info)!=frondMachine::SiblingStatus::ok ||
++                info.version!=frondSdFile::versionV2 || info.payloadBytes!=size || info.crc!=crc)
++                return "invalid portable media header or checksum";
++            out << id << " sd " << std::quoted(path.string()) << " " << key << " " << serial << " "
++                << size << " " << protect << " " << insert << " " << st.st_dev << " " << st.st_ino << " "
++                << uint64_t(st.st_mtim.tv_sec)*1000000000ull+st.st_mtim.tv_nsec << "\n";
++        }
++        if(!seen) return "empty portable manifest";
++        linked=out.str(); return "";
++    }
+     std::string Stage(const std::string& text, Pair& next) {
+         if(text.empty()) return "";
+         if(text.size()>8192 || text.find('\0')!=std::string::npos) return "invalid card manifest";
+diff --git a/src/cloudpilot/frond/main.cpp b/src/cloudpilot/frond/main.cpp
+index fc2df24..d75bdea 100644
+--- a/src/cloudpilot/frond/main.cpp
++++ b/src/cloudpilot/frond/main.cpp
+@@ -1,3 +1,4 @@
++#include <sys/syscall.h>
+ // frond-68k: the runner for DragonBall (68k) devices, built on Cloudpilot's core. It checks a ROM,
+ // runs a ROM or saved session in a window with the LCD, silkscreen and button bar, or headless for
+ // a set number of guest seconds, and takes console commands on stdin, or the desktop's commands on
+@@ -270,6 +271,10 @@ string parseMetadata(const void* data, size_t size, SessionMetadata& metadata) {
+ // Native linked sessions are deliberately refused by portable SessionFile5 readers.
+ RuntimeCards runtimeCards;
+ constexpr char linkedMagic[] = "FRONDLINKSD1\n";
++constexpr char portableMagic[] = "FRONDPORTSD1\n";
++bool isPortable(const vector<uint8_t>& data) {
++    return data.size()>=sizeof(portableMagic)-1 && !memcmp(data.data(),portableMagic,sizeof(portableMagic)-1);
++}
+ bool isLinked(const vector<uint8_t>& data) {
+     return data.size() >= sizeof(linkedMagic)-1 && !memcmp(data.data(),linkedMagic,sizeof(linkedMagic)-1);
+ }
+@@ -323,9 +328,9 @@ struct CheckedSession {
+     SessionMetadata metadata;
+ };
+ 
+-string checkSession(const vector<uint8_t>& data, const string& deviceName, CheckedSession& session) {
++string checkSession(const vector<uint8_t>& data, const string& deviceName, CheckedSession& session, const string& folder="") {
+     size_t offset=0;
+-    if(isLinked(data)) {
++    if(isLinked(data) || isPortable(data)) {
+         offset=sizeof(linkedMagic)-1;
+         if(data.size()-offset<12) return "truncated linked session";
+         auto get=[&]() { uint32_t x=0; for(unsigned i=0;i<4;++i) x|=uint32_t(data[offset++])<<(8*i); return x; };
+@@ -335,6 +340,13 @@ string checkSession(const vector<uint8_t>& data, const string& deviceName, Check
+            linkedHash(data.data()+offset+count,data.size()-offset-count)!=machineHash) return "damaged linked session";
+         session.manifest.assign(reinterpret_cast<const char*>(data.data()+offset),count);
+         offset+=count;
++        if(isPortable(data)) {
++            if(folder.empty()) return "portable folder required; container conversion is unsupported";
++            string linked;
++            const auto error=RuntimeCards::ResolvePortable(session.manifest,folder,linked);
++            if(!error.empty()) return error;
++            session.manifest=std::move(linked);
++        }
+     }
+     if (!session.file.Deserialize(data.size()-offset, data.data()+offset)) return "invalid session image";
+     const auto* named = deviceProfileNamed5(session.file.GetDeviceName().c_str());
+@@ -357,6 +369,45 @@ string checkSession(const vector<uint8_t>& data, const string& deviceName, Check
+     return "";
+ }
+ 
++// A portable folder owns its media files, including ejected cards. Generic readers refuse its magic.
++bool readSessionInput(const string& path,vector<uint8_t>& data,string& folder) {
++    struct stat st{};
++    if(lstat(path.c_str(),&st)) return false;
++    if(S_ISDIR(st.st_mode)) {
++        folder=std::filesystem::absolute(path).lexically_normal().string();
++        return readFile(folder+"/machine.frond",data) && isPortable(data);
++    }
++    return readFile(path,data);
++}
++bool savePortable(const string& path,const DeviceProfile5& profile,const SessionMetadata& metadata) {
++    vector<uint8_t> data;
++    if(!runtimeCards.HasCards() || !serializeSession(profile,metadata,data) || !isLinked(data)) return false;
++    const size_t h=sizeof(linkedMagic)-1;
++    const uint32_t count=frondSdFile::get32(data.data()+h);
++    vector<uint8_t> machine(data.begin()+h+12+count,data.end());
++    std::string pattern=path+".stage-XXXXXX";
++    vector<char> name(pattern.begin(),pattern.end()); name.push_back(0);
++    if(!mkdtemp(name.data())) return false;
++    const std::filesystem::path staging(name.data());
++    bool ok=false;
++    // Only this private directory is removed on failure, never the requested destination.
++    try {
++        string manifest;
++        if(runtimeCards.CopyPortable(staging,manifest)) {
++            vector<uint8_t> out(portableMagic,portableMagic+sizeof(portableMagic)-1);
++            auto put=[&](uint32_t x){for(unsigned i=0;i<4;++i) out.push_back(x>>(8*i));};
++            put(manifest.size()); put(linkedHash(machine.data(),machine.size()));
++            put(linkedHash(reinterpret_cast<const uint8_t*>(manifest.data()),manifest.size()));
++            out.insert(out.end(),manifest.begin(),manifest.end()); out.insert(out.end(),machine.begin(),machine.end());
++            ok=writeFile((staging/"machine.frond").string(),out.data(),out.size()) && frondSession::syncDir(staging);
++            if(ok) ok=syscall(SYS_renameat2,AT_FDCWD,staging.c_str(),AT_FDCWD,path.c_str(),1)==0;
++            if(ok) frondSession::syncDir(std::filesystem::absolute(path).parent_path());
++        }
++    } catch(...) { ok=false; }
++    std::error_code ec; std::filesystem::remove_all(staging,ec);
++    return ok;
++}
++
+ // Decode the real protocol chunks into temporary devices before touching live attachments.
+ struct CardStateCheck {
+     const RuntimeCards::Pair& pair;
+@@ -1310,6 +1361,19 @@ class Runner {
+         } else if (command == "quit") {
+             ReleaseInput();
+             quit = true;
++        } else if (command == "export-portable" || command == "copy-session" || command == "duplicate-session") {
++            if(!argument(path)) return void(cout << "usage: " << command << " <new-folder>" << endl);
++            cout << (savePortable(path,*profile,metadata)?"wrote portable folder ":"portable export refused: new folder and managed media required ") << path << endl;
++        } else if (command == "peek-session") {
++            if(!argument(path)) return;
++            vector<uint8_t> data; string folder; CheckedSession checked; RuntimeCards::Pair pair;
++            string error=readSessionInput(path,data,folder)?checkSession(data,profile->name,checked,folder):"cannot read session";
++            if(error.empty()) error=runtimeCards.Stage(checked.manifest,pair);
++            if(error.empty()) error=checkCardState(checked,pair);
++            if(!error.empty()) cout << "peek refused: " << error << endl;
++            else cout << "session media: " << bool(pair.card[0])+bool(pair.card[1]) << " SD cards; slots SD0="
++                      << (pair.card[0]?(pair.inserted[0]?"inserted":"ejected"):"empty") << " SD2="
++                      << (pair.card[1]?(pair.inserted[1]?"inserted":"ejected"):"empty") << endl;
+         } else if (command == "save-session") {
+             if (!argument(path)) return void(cout << "usage: save-session <file>" << endl);
+             vector<uint8_t> data;
+@@ -1317,7 +1381,7 @@ class Runner {
+                 cout << "failed to save session" << endl;
+             else
+                 cout << "wrote session to " << path << (runtimeCards.HasCards()?" (linked external SD backings; not portable)":"") << endl;
+-        } else if (command == "load-session") {
++        } else if (command == "load-session" || command == "import-portable") {
+             if (!argument(path)) return void(cout << "usage: load-session <file>" << endl);
+             LoadSession(path);
+         } else if (command == "reset" || command == "reset-hard" || command == "reset-noext") {
+@@ -1957,9 +2021,10 @@ class Runner {
+     // Checks the file first; a session that fails after that puts the old machine back.
+     void LoadSession(const string& path) {
+         vector<uint8_t> data;
+-        if (!readFile(path, data)) return void(cout << "session refused: cannot read " << path << "; machine unchanged" << endl);
++        string folder;
++        if (!readSessionInput(path, data,folder)) return void(cout << "session refused: cannot read " << path << "; machine unchanged" << endl);
+         CheckedSession session;
+-        if (const auto error = checkSession(data, profile->name, session); !error.empty())
++        if (const auto error = checkSession(data, profile->name, session,folder); !error.empty())
+             return void(cout << "session refused: " << error << "; machine unchanged" << endl);
+         vector<uint8_t> backup;
+         if (!serializeSession(*profile, metadata, backup))
+@@ -2521,21 +2586,22 @@ int main(int argc, char** argv) {
+     Feature::SetNetworkRedirection(false);
+ 
+     vector<uint8_t> image;
+-    if (!readFile(options.image, image)) {
++    string folder;
++    if (!readSessionInput(options.image, image,folder)) {
+         cerr << "cannot read ROM " << options.image << endl;
+         return 1;
+     }
+ 
+     const DeviceProfile5* profile = nullptr;
+     SessionMetadata metadata;
+-    const bool isSession = isLinked(image) || SessionFile5::IsSessionFile(image.size(), image.data());
++    const bool isSession = isPortable(image) || isLinked(image) || SessionFile5::IsSessionFile(image.size(), image.data());
+     if (isSession) {
+         if (options.checkOnly) {
+             cerr << "--check-rom takes a ROM" << endl;
+             return 2;
+         }
+         CheckedSession session;
+-        string error = checkSession(image, options.device, session);
++        string error = checkSession(image, options.device, session,folder);
+         RuntimeCards::Pair next;
+         if(error.empty() && !startCore(*session.profile,static_cast<const uint8_t*>(session.file.GetNor()),session.file.GetNorSize())) error="core failed to start";
+         if(error.empty()) error=runtimeCards.Stage(session.manifest,next);
+diff --git a/src/uarm/uarm/SessionIo.h b/src/uarm/uarm/SessionIo.h
+index 11cdbc8..6052ab9 100644
+--- a/src/uarm/uarm/SessionIo.h
++++ b/src/uarm/uarm/SessionIo.h
+@@ -294,8 +294,9 @@ inline bool writeSdFromReader(const std::filesystem::path& path, uint64_t size,
+         }
+     }
+     md5Finalize(&digest);
+-    if (!finishSdV2(fd, shape, generation, crcs.table()) || close(fd) < 0 ||
+-        rename(name.data(), path.c_str()) < 0) {
++    const bool finished = finishSdV2(fd, shape, generation, crcs.table());
++    const bool closed = close(fd) == 0;
++    if (!finished || !closed || rename(name.data(), path.c_str()) < 0) {
+         unlink(name.data());
+         return false;
+     }

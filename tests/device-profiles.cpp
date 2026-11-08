@@ -16,6 +16,7 @@ static void put32(std::vector<uint8_t>& data, size_t at, uint32_t value) {
 }
 
 static void palmIIIx();
+static void danaInventory();
 
 int main() {
     static_assert(int(DisplayMode::mode_320x320) == 5 && int(DisplayMode::mode_320x480) == 6);
@@ -50,12 +51,13 @@ int main() {
                 ? ram >= (8u << 20) && (ram & (ram - 1)) == 0
                 : p.deviceType == deviceTypeTG50 ? ram == (16u << 20)
                 : p.deviceType == deviceTypeIIIx ? ram == (4u << 20)
+                : p.deviceType == deviceTypeDana ? ram == (8u << 20)
                 : ram == (32u << 20) || (p.deviceType != deviceTypeTX && p.deviceType != deviceTypeZire72 && ram == (16u << 20));
             assert(deviceConfigurationSupportsRamSize(p.deviceType, ram) == expected);
         }
         for (int mode : {INT_MIN, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, INT_MAX}) {
-            const bool expected = mode >= 1 && mode <= 8 &&
-                (p.deviceType == deviceTypePV || mode == int(p.defaultDisplay));
+            const bool expected = mode >= 1 && mode <= 9 &&
+                ((p.deviceType == deviceTypePV && mode <= 8) || mode == int(p.defaultDisplay));
             assert(deviceConfigurationDeviceSupportsDisplayMode(p.deviceType, DisplayMode(mode)) == expected);
         }
         const size_t nor = p.norSize ? p.norSize : 256;
@@ -95,7 +97,7 @@ int main() {
         nor.resize(at + 12);
         assert(!inspect().profile && !inspect().hasHeader);
     }
-    assert(desktopCount == 6 && names.size() == 8 && types.size() == 7);
+    assert(desktopCount == 6 && names.size() == 9 && types.size() == 8);
     assert(std::string(deviceName5(deviceTypeTX)) == "palm-tx" && std::string(deviceName5(deviceTypeE2)) == "palm-e2");
     assert(deviceProfileNamed5("palm-tx")->capabilities.serial && deviceProfileNamed5("palm-e2")->capabilities.serial);
     // Unknown names are refused, including numbers, old ids, case and prefixes.
@@ -103,7 +105,7 @@ int main() {
         assert(!deviceProfileNamed5(name) && deviceTypeNamed5(name) == deviceTypeInvalid);
     }
     assert(!deviceProfileNamed5(nullptr) && !deviceName5(deviceTypeInvalid) && !deviceName5(99));
-    for (int id : {INT_MIN, -1, 7, 99, INT_MAX}) {
+    for (int id : {INT_MIN, -1, 8, 99, INT_MAX}) {
         assert(!deviceProfile5(id) && !deviceProfileSupportsDesktop5(id));
         assert(!deviceProfileSupportsRam5(id, 32u << 20));
         assert(!deviceProfileSupportsDisplay5(id, 6));
@@ -397,6 +399,7 @@ int main() {
     }
 
     palmIIIx();
+    danaInventory();
 
     // Public header layout and IDs from RomInfo5, no dump data.
     for (auto hal : {0x68737072u, 0x446d4752u, 0x50765076u, 0x615a3732u, 0x12345678u}) {
@@ -521,7 +524,7 @@ static void palmIIIx() {
            deviceProfileSupportsDesktop5(p->deviceType));
     assert(deviceProfileRuns68k5(p->deviceType) && !deviceProfileRunnerEligible5(p->deviceType));
     for (const auto& other : deviceProfiles5)
-        if (&other != p) assert(!deviceProfileRuns68k5(other.deviceType));
+        if (&other != p && other.deviceType != deviceTypeDana) assert(!deviceProfileRuns68k5(other.deviceType));
     assert(p->cpuHz == 16580608);
     assert(deviceProfileSupportsRam5(p->deviceType, 4u << 20) && !deviceProfileSupportsRam5(p->deviceType, 8u << 20));
     assert(p->defaultDisplay == DisplayMode::mode_160x160 && p->displayModes == (1u << 1));
@@ -537,7 +540,7 @@ static void palmIIIx() {
     assert(!caps.network && !caps.keyboard && caps.serial && !caps.usb && !caps.fastAudio && caps.infrared &&
            !caps.bluetooth && caps.sound && !caps.microphone && !caps.backgroundPanel);
     for (const auto& other : deviceProfiles5)
-        if (&other != p) assert(other.detect != DeviceDetect5::romHeader68k && other.board != DeviceBoard5::ez328);
+        if (&other != p) assert(other.board != DeviceBoard5::ez328);
 
     constexpr uint32_t base = 0x10c00000, palm = 0x70616c6d, sumo = 0x73756d6f, ez = 0x0020;
     // The shapes of the IIIx 3.1, generic OS 3.5 EZ and IIIx/V 4.1 ROMs.
@@ -605,4 +608,50 @@ static void palmIIIx() {
         wrongName[0x10] = 'X';
         refused(wrongName, false);
     }
+}
+
+// Dana runs in the core only; frontend and peripheral acceptance are separate.
+static void danaInventory() {
+    const auto* p = deviceProfileNamed5("alphasmart-dana");
+    assert(p && p->deviceType == deviceTypeDana && p->support == DeviceSupport5::staged);
+    assert(p->board == DeviceBoard5::vz328);
+    assert(!p->frontend.available && !deviceProfileSupportsDesktop5(p->deviceType));
+    assert(deviceProfileRuns68k5(p->deviceType) && !deviceProfileRunnerEligible5(p->deviceType));
+    assert(p->frontend.sdSlot && !deviceProfileSdSizeValid5(p->deviceType, 512));
+    assert(p->capabilities.keyboard && !p->capabilities.usb && p->capabilities.infrared && p->capabilities.sound);
+    assert(deviceProfileSupportsDisplay5(p->deviceType, 9) && !deviceProfileSupportsDisplay5(p->deviceType, 1));
+    const auto display = deviceConfigurationDisplayConfigForDevice(p->deviceType, p->defaultDisplay);
+    assert(display.width == 560 && display.height == 160 && !display.graffitiHeight);
+    auto small = rom68k(6u << 20, 5, 0x40, p->companyId, p->halId, 0x100002a2, 0x6000);
+    auto big = rom68k(0x5c8000, 5, 0x40, p->companyId, p->halId, 0x1000c80a, 0x5c8000);
+    std::copy(big.begin(), big.end(), small.begin() + 0x8000);
+    assert(inspect68k(small).profile == p);
+    assert(RomInfo5(small.data(), small.size()).GetDeviceType() == deviceTypeInvalid);
+    for (uint32_t length : {1u, 0x200u}) {
+        auto bad = small;
+        for (unsigned i = 0; i < 4; ++i) bad[0x6c + i] = length >> (24 - i * 8);
+        assert(!inspect68k(bad).profile);
+    }
+    auto refused = [&](size_t offset) {
+        auto bad = small;
+        bad[offset] ^= 1;
+        assert(!inspect68k(bad).profile);
+    };
+    for (size_t offset : {size_t(0x7e), size_t(0x82), size_t(0x0d), size_t(0x0f), size_t(0x8008),
+                         size_t(0x8010), size_t(0x800d), size_t(0x807e), size_t(0x8082),
+                         size_t(4), size_t(0x8004), size_t(0x806c)}) refused(offset);
+    for (size_t offset : {size_t(0x0f), size_t(0x800f)}) {
+        auto bad = small;
+        bad[offset] &= ~0x40;
+        assert(!inspect68k(bad).profile);
+    }
+    auto truncated = small;
+    truncated.resize(truncated.size() - 0x1000);
+    assert(!inspect68k(truncated).profile);
+    assert(!deviceProfileInspect68kRom5(small.size(), [&](uint64_t at, uint8_t* out, size_t count) {
+        if (at) return false;
+        std::memcpy(out, small.data(), count);
+        return true;
+    }).profile);
+    assert(deviceProfileValidateFirmware5(p->deviceType, (6u << 20) - 1, 0, false, false) == DeviceFirmwareError5::norSize);
 }

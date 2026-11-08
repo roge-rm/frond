@@ -90,7 +90,7 @@ test-session-v7: prepare
 	$(CC) -std=gnu99 -O1 -g -Ibuild/source/src/common -c build/source/src/common/zip/miniz.c \
 		-o build/miniz-session-v7.o
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
-		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/common \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/uarm/native -Ibuild/source/src/common \
 		tests/session-v7.cpp build/source/src/common/session/session_file5.cpp \
 		build/source/src/common/md5.cpp build/source/src/uarm/uarm/sdcard.cpp build/miniz-session-v7.o \
 		-o build/test-session-v7
@@ -512,6 +512,13 @@ test-device-controls: out/frond
 	./build/test-device-controls
 
 # Fingers on the buttons and pen, ARM (T|X, E2) and 68k (IIIx): several held at once, no private sessions.
+.PHONY: test-68k-frame-bounds
+test: test-68k-frame-bounds
+test-68k-frame-bounds: prepare
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Ibuild/source/src/cloudpilot/emulator tests/68k-frame-bounds.cpp -o build/test-68k-frame-bounds
+	./build/test-68k-frame-bounds
+
 .PHONY: test-multi-touch
 test: test-multi-touch
 test-multi-touch: out/frond out/frond-68k
@@ -1369,3 +1376,40 @@ test-e2-family-peripherals: out/frond
 		tests/e2-family-peripherals.cpp @build/e2-family-peripherals-core.rsp \
 		build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-e2-family-peripherals
 	timeout 120 ./build/test-e2-family-peripherals
+
+.PHONY: test-68k-vz-registers
+test: test-68k-vz-registers
+test-68k-vz-registers: prepare
+	$(MAKE) -C build/source/src/common libcommon.a
+	$(MAKE) -C build/source/src/cloudpilot FROND_68K=1 -f Makefile \
+		-f $(CURDIR)/tests/68k-vz-registers.mk FROND_TEST_ROOT=$(CURDIR) vz-register-test
+
+.PHONY: test-68k-dana
+test: test-68k-dana
+test-68k-dana: prepare
+	$(MAKE) -C build/source/src/common libcommon.a
+	$(MAKE) -C build/source/src/cloudpilot FROND_68K=1 -f Makefile \
+		-f $(CURDIR)/tests/68k-dana.mk FROND_TEST_ROOT=$(CURDIR) dana-test
+
+.PHONY: test-dana-input
+test: test-dana-input
+test-dana-input: prepare
+	$(CXX) -std=c++17 -Wall -Wextra -Ibuild/source/src/common tests/dana-input.cpp -o build/test-dana-input
+	./build/test-dana-input
+
+.PHONY: test-68k-sd
+test-68k-sd: prepare
+	$(MAKE) -C build/source/src/cloudpilot FROND_68K=1 -j4 -f Makefile \
+		-f $(CURDIR)/tests/68k-sd.mk FROND_TEST_ROOT=$(CURDIR) sd-test
+
+.PHONY: test-68k-card-provider
+test-68k-card-provider: prepare
+	$(MAKE) -C build/source/src/common bin
+	$(CXX) -std=c++17 -O1 -Ibuild/source/src/common -Ibuild/source/src/uarm/uarm \
+		tests/68k-card-provider.cpp build/source/src/common/libcommon.a -o build/test-68k-card-provider
+	./build/test-68k-card-provider build/provider-runtime-check
+
+.PHONY: test-dana-card-inventory
+test-dana-card-inventory: prepare
+	$(CXX) -std=c++17 -O2 -Ibuild/source/src/common tests/dana-card-inventory.cpp -o build/test-dana-card-inventory
+	./build/test-dana-card-inventory

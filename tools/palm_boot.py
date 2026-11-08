@@ -571,6 +571,57 @@ def iiix_setup(core, root):
     core.wait_frame(root / 'launcher.png', iiix_launcher, 60)
 
 
+def dana_geometry(rows):
+    return rows is not None and len(rows) == 160 and all(len(row) == 560 * 4 for row in rows)
+
+
+def dana_setup_title(rows):
+    return dana_geometry(rows) and iiix_title([row[800:1440] for row in rows])
+
+
+def dana_launcher(rows):
+    if not dana_geometry(rows):
+        return False
+    # Full-width title separator and two rows of icons, outside compatibility mode.
+    return (sum(iiix_dark(rows, x, 13) for x in range(560)) > 550 and
+            sum(iiix_dark(rows, x, y) for x in range(15, 190) for y in range(20, 80)) > 900 and
+            sum(iiix_dark(rows, x, y) for x in range(375, 510) for y in range(20, 80)) > 350)
+
+
+def dana_erase(rows):
+    return (dana_geometry(rows) and not dana_setup_title(rows) and not dana_launcher(rows) and
+            250 < sum(iiix_dark(rows, x, y) for x in range(210, 355) for y in range(60, 95)) < 1100 and
+            not any(iiix_dark(rows, x, y) for x in range(200) for y in range(160)))
+
+
+def dana_setup(core, root):
+    frame = root / 'boot-frame.png'
+    rows = core.wait_frame(frame, lambda r: dana_setup_title(r) or dana_launcher(r), 120)
+    if dana_launcher(rows):
+        return
+    # Measured Dana OS 4.1 compatibility-mode display coordinates.
+    for x, y in ((280, 80), (280, 80), (10, 10), (550, 150), (280, 64), (267, 152), (309, 152)):
+        before = rows
+        core.tap(root, x, y)
+        rows = core.wait_frame(frame, lambda r: dana_geometry(r) and r != before, 30)
+    core.wait_frame(root / 'launcher.png', dana_launcher, 60)
+
+
+def dana_reset(core, root, hard):
+    core.send('reset-hard' if hard else 'reset', 'done', timeout=60)
+    if hard:
+        core.wait_frame(root / 'reset-erase.png', dana_erase, 120)
+        # Release before reboot, where held Up selects the USB startup path.
+        core.key(root, 'up', hold_ms=200)
+        core.wait_frame(root / 'reset-setup.png', dana_setup_title, 120)
+        dana_setup(core, root)
+    else:
+        rows = core.wait_frame(root / 'reset-launcher.png', lambda r: dana_launcher(r) or dana_setup_title(r), 120)
+        if not dana_launcher(rows):
+            core.tap(root, 393, 65)
+            core.wait_frame(root / 'reset-launcher.png', dana_launcher, 60)
+
+
 def variant_recipe(device, variant=None):
     if variant is None:
         return rom_device(device)['setup']
@@ -591,7 +642,7 @@ def setup_device(device, core, root, variant=None):
 
 
 SETUP_RECIPES = {'tx': tx_setup, 'e2': e2_setup, 'e2-denvfs': e2_denvfs_setup, 'e3': e3_setup,
-                 'zire': zire_setup, 'tg50': tg50_setup, 'iiix': iiix_setup}
+                 'zire': zire_setup, 'tg50': tg50_setup, 'iiix': iiix_setup, 'dana': dana_setup}
 
 
 def launcher_check(device, variant=None):
@@ -605,7 +656,7 @@ def launcher_check(device, variant=None):
 LAUNCHER_CHECKS = {'wallpaper': launcher_wallpaper,
                    'e2-denvfs': e2_denvfs_launcher,
                    'wallpaper-upper': upper_wallpaper_launcher, 'tg50-clie': tg50_launcher,
-                   'iiix': iiix_launcher, 'e3-stock': e3_launcher}
+                   'iiix': iiix_launcher, 'dana': dana_launcher, 'e3-stock': e3_launcher}
 
 
 def tg50_date_time_prefs(rows):
@@ -884,7 +935,7 @@ def e2_denvfs_reset(core, root, hard):
          'final_screen': 'de-NVFS launcher', 'marked_session': marked_hash}, indent=2) + '\n')
 
 
-RESET_RECIPES = {'tg50': tg50_reset, 'iiix': iiix_reset, 'e3': e3_reset,
+RESET_RECIPES = {'dana': dana_reset, 'tg50': tg50_reset, 'iiix': iiix_reset, 'e3': e3_reset,
                  'e2-denvfs': e2_denvfs_reset}
 
 

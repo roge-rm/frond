@@ -903,7 +903,7 @@ Tests in `make test`, by area:
 | --- | --- |
 | CPU and engines | `test-cpu`, `test-arm-conditions`, `test-instruction-cache`, `test-mmu-fast-path`, `test-mem-region-bounds`, `test-xscale-prefetch`, `test-jit-overshoot`, `test-jit-differential`, `test-jit-compile-thread` |
 | SoC and timing | `test-pxa-timer`, `test-pxa-power`, `test-pxa255-udc`, `test-pxa255-udc-clock`, `test-pxa255-udc-dma`, `test-pxa255-udc-dma-state`, `test-pxa270-udc`, `test-scheduler`, `test-microwire64x16` |
-| Device state and sessions | `test-tx-state`, `test-e2-state`, `test-tg50-state`, `test-device-profiles`, `test-device-controls`, `test-e2-family-peripherals`, `test-multi-touch`, `test-session-v7`, `test-frond-68k`, `test-checkpoint-input`, `test-export-checkpoint`, `test-replay-snapshot`, `test-lifecycle`, `test-shortcut-keys` |
+| Device state and sessions | `test-tx-state`, `test-e2-state`, `test-tg50-state`, `test-device-profiles`, `test-device-controls`, `test-e2-family-peripherals`, `test-multi-touch`, `test-68k-frame-bounds`, `test-session-v7`, `test-frond-68k`, `test-checkpoint-input`, `test-export-checkpoint`, `test-replay-snapshot`, `test-lifecycle`, `test-shortcut-keys` |
 | Palm databases | `test-native-database`, `test-native-primitives`, `test-native-governor`, `test-db-list`, `test-db-backup` |
 | Storage | `test-sd-image`, `test-sd`, `test-card-backing`, `test-memory-stick-controller`, `test-memory-stick-media`, `test-ms-logical-equivalence` (the version 2 stick layout against the flat physical model, `build/test-ms-logical-equivalence SEQUENCES OPERATIONS` for a longer run), `test-memory-stick-pro`, `test-card-tool`, `test-storage-settle` (needs mtools), `test-storage-fat` (needs mtools), `test-storage-ms` (classic stick writes, the settled check and blank stick formats, needs mtools), `test-card-swap` (its firmware part on whichever smoke sessions are in `FROND_ARM_SESSIONS`), `test-card-reinsert` (the same sessions) |
 | Audio | `test-sdl-audio`, `test-fast-audio`, `test-earlier-audio`, `test-audio-results`, `test-pxa-i2s-audio`, `test-tg50-pwm-audio`, `test-tg50-microphone-adc`, `test-tg50-microphone-dma`, `test-tg50-microphone-state`, `test-z72-microphone`, `test-z72-voice-memo`, `test-tg50-call-budget`, `test-tg50-pace`, `test-tg50-audio-replay`, `test-tg50-serial-board`, `test-tg50-serial-configuration` |
@@ -934,3 +934,178 @@ Not in `make test`. The first group builds a program and runs it with a private 
 | `test-host-microphone`, `test-host-microphone-state` | Nothing. Host microphone unit tests. |
 | `test-csr-bcsp-lifetime`, `test-bluetooth-opp-peer` | Nothing. Bluetooth unit tests. |
 | `test-bluetooth-dun` | `btvirt` (`BLUETOOTH_PROVIDER`, default `build/bluetooth-provider`). The Bluetooth phone end to end. |
+
+Dana core keyboard commands are `dana-down NAME`, `dana-up NAME` and
+`dana-text TEXT`, in the console and control socket. Names come from
+`dana_keyboard5.h`; replay uses `key-down dana.NAME` and `key-up dana.NAME`.
+Input can be refused while the bounded keyboard queue is busy; retry after the
+machine runs. A text request holds at most 24 scan transitions (12 unshifted or
+six shifted characters), accepts ASCII and uses US key positions. Palm OS applies
+caps, sticky modifiers and repeat. SDL physical keys use Ctrl, GUI for command
+and Alt for function. Dana frontend availability is still gated separately.
+
+`make test-dana-input` checks the typed Dana host route without firmware.
+`tests/device-rom.py --keyboard-session READY.frond --keyboard-probe PROBE.prc`
+selects its guest keyboard check, with `--device alphasmart-dana` and a new
+`--evidence` directory.
+
+Dana IrDA uses UART2 SIR on PJ4/PJ5, with active-low PG4 shutdown and the guest
+pin mux. It uses the existing `irda-mode`, `irda-state` and `irda-stats` commands
+and decoded SIR byte links. External serial stays unsupported. UART2 local FIFO
+state is saved separately from the host endpoint; loading one machine does not
+rewind a remote peer or bytes already sent to it. See the Dana checks in
+[testing.md](testing.md).
+
+The inherited 68k SD model reserves slot IDs 0 for SD and 1 for Memory Stick;
+a second SD slot uses ID 2. The default SD instance keeps chunk 0x1d0.
+The second instance uses chunk 0x201, with its own command, buffer and block
+cursor. SD uses version 1; MMC uses version 2 with a trailing protocol field.
+ExternalStorage writes version 1 with the two
+original image keys when the second SD is empty, or version 2 with a third
+key when it is mounted. Version 1 loads with the second SD empty. These
+chunks store media identity and protocol state, not card contents.
+
+Dana routes SPI1 to separate SD instances. Slot 0 uses B5 power, active-low
+J3 select and D2 detect; slot 1 uses K5 power, active-low F2 select and D3
+detect. F7/F0 are low for write protection. D1/D0 stay high for SD memory cards;
+SDIO interrupts are unsupported. PJ0/1/2 must select SPI1. Both selected cards
+receive clocks; overlapping replies are combined with AND as a deterministic
+contention model, without an electrical fidelity claim.
+
+Power loss and explicit insertion/removal reset only that card. Deselection
+ends its SPI transaction. Protocol restore keeps each cursor, including across
+remount, and missing legacy Dana SD chunks reset their instances. No card
+contents are rewound by these snapshots. Read-only CardImage policy is fixed
+at construction and rejects sector and byte-range writes and formatting.
+
+Dana D3c is complete in the native backend: per-slot runtime attachment, linked
+sessions and portable folders. The profile remains staged and the frontend
+unavailable until D4.
+
+Dana runtime cards (staged): `sd-attach` and `sd2-attach` take an absolute
+`.frondsd` path, a distinct 32-character lowercase hexadecimal identity and
+`writable` or `protected`, then optional `sd` or `mmc` (default `sd`).
+Quote paths containing spaces. `--sd-attach` and
+`--sd2-attach` accept the same argument as one quoted command-line value.
+`sd-state`, `sd-eject`, `sd-insert` and `sd-take-out` address the first slot;
+`sd2-state`, `sd2-eject`, `sd2-insert` and `sd2-take-out` address the second.
+Socket commands use the same names and argument strings. `sd-export` and
+`sd2-export` write the live card to a new absolute destination path. Eject before taking
+out; taking out settles writable media into a portable card file.
+
+The runner takes an exclusive nonblocking file lock, rejects duplicate keys
+and CID serials. Its fixed-512-byte SDSC encoder accepts representable capacities
+from 32 MiB up to 1 GiB minus 256 KiB. The legacy scalar inventory range still
+ends at 2048 MiB; exact CSD validation rejects unrepresentable sizes within it.
+These are runtime constraints; guest qualification covers 32 MiB.
+MMC attachments accept 32, 64, 128 or 256 MiB.
+Both physical slots accept these families independently. Stable ExternalStorage/HAL
+IDs are SD0=0, MemoryStick=1 and SD2=2; Dana labels SD0 as slot 1 and SD2 as
+slot 2. Dana has no Memory Stick slot. The additive `storage_slots` inventory
+lists each slot, family rules and guest-qualified sizes. Legacy scalar SD fields
+describe the primary slot. `deviceProfileCardSizeValid5` validates native media;
+the SPI CSD encoder shares its exact representability helper. An integer MiB
+size within the SDSC bounds can still fail CSD encoding. No SDHC or SDIO.
+
+Guest qualification covers 32 MiB FAT SD and MMC on each slot, paired and in
+both mixed orders, including read/write, protection, removal, restore and
+lifecycle checks. Larger runtime capacities have synthetic geometry coverage.
+Frontend selection, single-file card conversion and unsupported socket export
+paths remain refused. ARM runner eligibility remains false; Dana uses frond-68k.
+
+CardImage can read through a bounded CardBacking provider; raw constructors
+remain writable by default. Provider images have no RawData pointer. Successful
+runtime block writes commit file generations before the SD success response.
+A commit error stops later writes. Completed external writes survive resets
+and are not rewound by protocol state. Keep the backing and generation files
+together until take-out succeeds. Protected attachment does not change payload
+bytes. Linked sessions and portable folders retain inserted and ejected cards.
+
+Native 68k linked SD sessions use `FRONDLINKSD1\n`, followed by three
+little-endian uint32 values (manifest byte length, machine FNV-1a32, manifest
+FNV-1a32), an at-most-8192-byte manifest and an ordinary SessionFile5 image.
+New manifests start with `frond-linked-sd 3`. Each row contains HAL slot (0 or 2),
+`sd`, quoted absolute backing path, 32-character lowercase hex identity, decimal
+CID serial, payload bytes, protected and inserted flags (0 or 1), then the base
+file's device, inode and nanosecond modification time, followed by `sd` or `mmc` and the committed root generation ID.
+The row kind stays `sd` for the shared block container. Missing rows mean empty
+slots. SD0/chunk01d0, MS1 and SD2/chunk0201 keep their existing IDs.
+
+These saves refer to live external backings. Keep the base `.frondsd` and all
+its `.gen-*` files together at their original paths. Completed external writes
+remain current when an older machine snapshot loads. Taking out, replacing or
+modifying the base invalidates earlier linked saves. This format is for the
+native core; portable SessionFile5 readers refuse its magic. It is not a portable
+export or a standalone machine copy. Card-free saves keep their existing format.
+Unmanaged images and failed backings still refuse saves.
+
+Load stages both backing handles and validates the descriptors and production SD
+chunks before replacing attachments. Owned files reuse their locks only at the same normalised absolute path;
+a protection change shares the owned backing with a new immutable image policy.
+The paused load retains both old handles until success and restores the old
+machine and attachments if another machine chunk fails. Provider bytes never
+rewind with protocol state.
+
+Strict Dana restore requires an existing root and a complete validated chain,
+with a root ID at least as recent as the linked descriptor. Pristine attachments
+and portable exports write a committed base marker before saving descriptors.
+Missing roots or generations fail without deleting namespace entries. Dana
+manifest versions 1 and 2 lack history proof and are refused, including pristine
+copies. Generic FileCardBacking consumers retain missing-history refusal.
+
+The uARM one-slot runtime explicitly opens a missing root from the last saved
+base. Its ordinary writes are temporary overlays; saves adopt the updated base
+without calling Commit. After a process crash, rootless overlays and indexes are
+retained and ignored, and new generations use IDs above the retained files.
+This policy cannot prove whether an absent root once represented a Commit;
+callers that need committed-history proof must use the strict provider policy.
+A present malformed root or a corrupt bound chain still refuses without cleanup.
+Ordinary writes do not become durable commits.
+
+Generation validation checks the full file and ordered unique page index before
+staging succeeds. Each index contains at most one record per geometry page;
+chains allow 256 files and validation visits at most sixteen full-card indexes.
+Strict indexes are also capped at 524288 records, the 2 GiB runtime maximum
+at 4096 bytes per page. Normal commits compact at eight generations; the larger
+chain limit allows pinned histories while bounding validation work. A commit at
+either validation limit must compact successfully before publishing its root.
+Failed compaction leaves the previous committed root readable; retry or roll back.
+Unknown namespace entries are preserved and prevent a strict pristine attach.
+Temporary names that also belong to an existing neighbouring backing are retained.
+Keep stale or crash files for diagnosis; do not delete hidden files to force attach.
+
+Dana portable folders use the native console commands `export-portable <new-folder>`,
+`copy-session <new-folder>` or `duplicate-session <new-folder>`. Each captures the
+current machine and streams both owned committed cards, including ejected cards.
+Open the folder as the runner's input, or use `import-portable <folder>` or
+`load-session <folder>`. `peek-session <folder>` checks both slots and reports
+insertion. Guest card IDs and CID serials stay with the saved protocol state;
+the copies own separate files and generation roots. Ordinary saves remain linked.
+Keep the whole folder, including hidden `.gen-*` files after use. Moving it on
+the same filesystem keeps ownership. Cross-filesystem moves are refused; use a
+runtime copy command before moving across filesystems. Use the copy commands for new copies; a
+filesystem copy with different media inodes is conservatively refused. The new
+`FRONDPORTSD1` wrapper is refused by the older common/frontend folder and container
+readers; single-file conversion and frontend import are not supported yet.
+Publication flushes the staging directory, renames without replacing an existing
+output, then flushes its parent. A failed final flush reports output published
+with uncertain durability and keeps the complete output. Only a completed parent
+flush reports success.
+
+Dana MMC media use legacy byte-addressed SPI with aligned 512-byte blocks,
+CSD structure 1.2 / MMC spec field 3.3 and the virtual product name `FRNDMC`.
+CMD1 initializes MMC; CMD55 and SD application commands are refused, and CMD8
+has no R7 response. The six-character MMC CID carries the per-card serial.
+The implementation covers initialization, identification, block reads/writes and
+reset used by Dana. CRC enable, erase, card lock and programmable CSD/write
+protection commands are unsupported. This does not claim MMCplus, high-speed
+MMC, eMMC or SDHC support. Register fields and SPI behaviour follow the
+[SanDisk MMC/RS-MMC manual 80-36-00320 v1.3](https://www.elde.cz/datasht/MMC%20-%20ProdManRS-MMCv1.3.pdf),
+sections 3.5 and 5.
+
+Portable manifests use `frond-portable-sd 3` with a trailing protocol
+column and a committed base root in each new copy. Wrapper magic, HAL slots and chunk IDs stay the same.
+SD protocol chunks retain v1. MMC chunks use v2 with a trailing uint32 protocol
+value 1; MMC refuses ACMD state. Restore checks the decoded family against the
+staged descriptor before installing either card. Ejected media retain the family.
+A standalone `.frondsd` holds blocks only; specify the family again on attachment.

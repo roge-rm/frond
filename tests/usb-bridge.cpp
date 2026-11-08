@@ -89,6 +89,10 @@ struct Guest {
             requests.push_back(std::vector<uint8_t>(req, req + 8));
             const unsigned length = req[6] | req[7] << 8;
             if (req[0] == 0x80 && req[1] == 6 && req[3] == 1) return answer(device, length);
+            if (req[0] == 0x80 && req[1] == 6 && req[3] == 3) {
+                if (req[2] == 0) return answer({4, 3, 9, 4}, length);
+                return answer({6, 3, 'U', 0, uint8_t('0' + req[2]), 0}, length);
+            }
             if (req[0] == 0x80 && req[1] == 6 && req[3] == 2) return answer(config, length);
             if (req[0] == 0xc2 && req[1] == 4 && !stallVendor4 && vendorDelay && !vendorAt) {
                 vendorAt = now + vendorDelay;
@@ -379,6 +383,38 @@ static bool waitReadable(int fd) {
     return poll(&p, 1, 2000) == 1;
 }
 
+static void testStringsAndControlOwnership() {
+    Bench b;
+    b.guest.ports = 0;
+    unsigned strings = 0;
+    b.host.controlTrace = [&](const uint8_t* setup, const std::vector<uint8_t>& data, bool ok) {
+        if (setup[1] == 6 && setup[3] == 3) {
+            assert(ok && data.size() >= 4 && data[1] == 3);
+            ++strings;
+        }
+    };
+    b.guest.enable(); b.host.Attach();
+    assert(b.runUntil(UsbBusHost::Phase::running, 2000000000ull));
+    assert(strings == 0 && !b.host.InEndpoint() && !b.host.OutEndpoint());
+    assert(b.host.ReadStringDescriptor(1, 0x0409));
+    assert(!b.host.ReadStringDescriptor(2, 0x0409));
+    b.run(20000000);
+    assert(strings == 1 && !b.host.InEndpoint() && !b.host.OutEndpoint());
+    // A diagnostic completion may submit another diagnostic without replacing enumeration.
+    b.host.controlTrace = [&](const uint8_t* setup, const std::vector<uint8_t>&, bool ok) {
+        if (setup[1] == 6 && setup[3] == 3 && setup[2] == 1) {
+            assert(ok && b.host.ReadStringDescriptor(2, 0x0409));
+        }
+    };
+    assert(b.host.ReadStringDescriptor(1, 0x0409));
+    b.run(20000000);
+    assert(!b.host.InEndpoint() && !b.host.OutEndpoint());
+    b.guest.ports = 1;
+    assert(b.runUntil(UsbBusHost::Phase::running, 1500000000ull, "cnys"));
+    assert(b.host.InEndpoint() == 6 && b.host.OutEndpoint() == 7);
+    puts("PASS: separate diagnostic completion, idle wake, reentrant callback and later real port discovery");
+}
+
 static void testByteLink() {
     HostByteLink link;
     std::string error;
@@ -406,6 +442,7 @@ int main() {
     testPortLater();
     testReenableAndLostSetup();
     testFailures();
+    testStringsAndControlOwnership();
     testByteLink();
     free(udc);
 }

@@ -174,6 +174,20 @@ The Palm IIIx (DragonBall EZ, 68k) runs in `frond-68k`, built from the vendored 
 - Another EZ or 68328/VZ Palm needs a profile, art and a setup recipe, and Cloudpilot already has the device model. A VZ board's bus timing is only unit-tested so far.
 - Checks: `make test-frond-68k`, `tests/device-rom.py --device palm-iiix --rom FILE --launcher --resets`, `make test-core-control`, see [testing.md](testing.md#per-device-tests). The IIIx has no `SMOKE` entry yet.
 
+Dana uses the staged `vz328` backend in `frond-68k`, with `runs68k` true and
+`frontend.available` false. Normal ROM/session dispatch, native ROM pen input
+and the full keyboard input route work, including text synthesis, modifiers,
+replay and console/socket input. The ROM keeps its rollover and repeat rules.
+Halt/mask sleep, wake, backlight and the decoded two-button power modes are
+qualified. Sound uses the VZ
+PWM1 pin on PB7, with guest clock and pin-mux gating, and the existing mono
+piezo renderer. Alerts, clicks, Sound Manager tones and saved pending tones are
+qualified. IrDA uses UART2 SIR on PJ4/PJ5 with PG4 shutdown, qualified by
+guest payload and database beams, local state and disconnect checks. Fast audio,
+microphone, external serial and USB transfers remain unavailable. Both SD/MMC
+slots work in the native backend. Its virtual ADC inputs are raw simulator counts;
+physical voltages and electrical pen fidelity are unqualified.
+
 ## Fast engine requirements
 
 The Fast engine is a JIT (Dynarmic). A new board runs in it when these hold:
@@ -314,3 +328,13 @@ Keep firmware, sessions, installed Palm applications, raw PCM and captures out o
 
 - The board adds the Sony TG50 support chip (`mmiodev_TG50uc`) with the keyboard matrix, jog and Hold. Audio is the Sony mono path on the shared ring-buffer queue, and storage is a Memory Stick controller. RAM is 16 MiB, plus an extra MiB and a mirror that reproduce the RAM probe workaround.
 - Its firmware has no SndStream.
+
+Dana D3c native card inventory uses stable HAL slots SD0=0 and SD2=2 (labels
+1 and 2), each with representable SDSC capacities from 32 MiB up to 1 GiB
+minus 256 KiB and legacy MMC SPI at 32/64/128/256 MiB. Guest-qualified sizes are
+32 MiB FAT for each family and slot, paired and both mixed orders. Runtime
+bounds do not claim guest qualification at every capacity. The backend is
+complete for native CLI/runtime/session use; the device remains staged and
+frontend unavailable. D3d USB/Wi-Fi and D4 frontend work remain separate.
+`make test-dana-card-inventory` checks per-slot/family geometry and metadata
+without firmware. Frontend/card export acceptance waits for the next release.
