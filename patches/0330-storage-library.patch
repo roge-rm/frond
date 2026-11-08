@@ -1,0 +1,2054 @@
+diff --git a/src/common/storage/Container.h b/src/common/storage/Container.h
+new file mode 100644
+index 0000000..c23bc70
+--- /dev/null
++++ b/src/common/storage/Container.h
+@@ -0,0 +1,238 @@
++#ifndef FROND_STORAGE_CONTAINER_H
++#define FROND_STORAGE_CONTAINER_H
++
++#include <algorithm>
++#include <cstdint>
++#include <cstring>
++#include <limits>
++#include <vector>
++
++#define MINIZ_NO_ZLIB_COMPATIBLE_NAMES
++#include "zip/miniz.h"
++
++// The card container, .frondsd and .frondmsp: 64-byte header then the stored bytes.
++// Identity stays in the media descriptor, not this header.
++//
++// v1: 8-11 version, 12-15 sector size, 16-23 payload bytes, 24-27 CRC32 of the payload.
++// v2: as v1 to byte 23, then 24-27 header CRC, 28-35 content generation, 36-43 CRC table offset
++// (64 + stored bytes), 44-47 chunk bytes (1 MiB), 48-55 side region bytes. Bytes 56-63 are zero.
++// The stored bytes are the payload (logical sectors) and, when the side region isn't empty, zeros
++// to the next 1 MiB boundary and the side region. The table after them has one CRC32 per chunk of
++// the stored bytes, the last one short. The header CRC covers the header with its own field
++// zeroed, then the table. A side region of 0 is every v1 and v2 file there was before it.
++namespace frondSdFile {
++constexpr size_t headerBytes = 64;
++constexpr uint32_t versionV1 = 1, versionV2 = 2;
++constexpr uint32_t sectorBytes = 512;
++constexpr uint32_t chunkBytes = 1u << 20;
++constexpr uint64_t maxPayloadBytes = 2048ull << 20;  // largest SD card Frond makes
++constexpr uint64_t maxSideBytes = 1ull << 32;
++
++inline uint32_t get32(const uint8_t* p) {
++    return uint32_t(p[0]) | (uint32_t(p[1]) << 8) | (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
++}
++inline uint64_t get64(const uint8_t* p) { return uint64_t(get32(p)) | (uint64_t(get32(p + 4)) << 32); }
++inline void put32(uint8_t* p, uint32_t n) {
++    for (unsigned i = 0; i < 4; ++i) p[i] = uint8_t(n >> (8 * i));
++}
++inline void put64(uint8_t* p, uint64_t n) {
++    put32(p, uint32_t(n));
++    put32(p + 4, uint32_t(n >> 32));
++}
++inline uint32_t crc32(const uint8_t* bytes, size_t size) { return mz_crc32(0, bytes, size); }
++
++inline bool validPayloadSize(uint64_t size) {
++    return size >= sectorBytes && size % sectorBytes == 0 && size <= maxPayloadBytes;
++}
++
++// Where the side region starts in the stored bytes: the chunk boundary after the payload.
++inline uint64_t sideOffset(uint64_t payloadBytes) {
++    return (payloadBytes + chunkBytes - 1) / chunkBytes * chunkBytes;
++}
++
++// Payload, padding and side region; just the payload when there is no side region.
++inline uint64_t storedBytes(uint64_t payloadBytes, uint64_t sideBytes) {
++    return sideBytes ? sideOffset(payloadBytes) + sideBytes : payloadBytes;
++}
++
++inline bool encode(const uint8_t* payload, uint64_t size, std::vector<uint8_t>& file) {
++    if (!validPayloadSize(size)) return false;
++    if (size > std::numeric_limits<size_t>::max()) return false;
++    if (!payload) return false;
++    const auto n = static_cast<size_t>(size);
++    std::vector<uint8_t> out(headerBytes + n);
++    std::memcpy(out.data(), "FRONDSD", 8);
++    put32(out.data() + 8, versionV1);
++    put32(out.data() + 12, sectorBytes);
++    put64(out.data() + 16, size);
++    put32(out.data() + 24, crc32(payload, n));
++    std::memcpy(out.data() + headerBytes, payload, n);
++    file.swap(out);
++    return true;
++}
++
++inline bool encode(const std::vector<uint8_t>& payload, std::vector<uint8_t>& file) {
++    return encode(payload.data(), payload.size(), file);
++}
++
++inline uint64_t chunkCount(uint64_t payloadBytes) { return (payloadBytes + chunkBytes - 1) / chunkBytes; }
++
++struct Info {
++    uint32_t version{};
++    uint64_t payloadBytes{};
++    uint64_t sideBytes{};
++    uint32_t crc{};  // v1: payload CRC, v2: header CRC
++    uint64_t generation{};
++    uint64_t stored() const { return storedBytes(payloadBytes, sideBytes); }
++    uint64_t chunks() const { return chunkCount(stored()); }
++    uint64_t fileBytes() const { return headerBytes + stored() + (version == versionV2 ? 4 * chunks() : 0); }
++};
++
++// Any container header, with or without a side region.
++inline bool parseContainer(const uint8_t* header, Info& info) {
++    if (!header) return false;
++    if (std::memcmp(header, "FRONDSD\0", 8) || get32(header + 12) != sectorBytes) return false;
++    Info parsed;
++    parsed.version = get32(header + 8);
++    parsed.payloadBytes = get64(header + 16);
++    parsed.crc = get32(header + 24);
++    if (!validPayloadSize(parsed.payloadBytes)) return false;
++    unsigned zeroFrom = 28;
++    if (parsed.version == versionV2) {
++        parsed.generation = get64(header + 28);
++        parsed.sideBytes = get64(header + 48);
++        if (parsed.sideBytes > maxSideBytes || get64(header + 36) != headerBytes + parsed.stored() ||
++            get32(header + 44) != chunkBytes)
++            return false;
++        zeroFrom = 56;
++    } else if (parsed.version != versionV1) {
++        return false;
++    }
++    for (unsigned i = zeroFrom; i < headerBytes; ++i)
++        if (header[i]) return false;
++    info = parsed;
++    return true;
++}
++
++// An SD or Pro card header: no side region, which neither has.
++inline bool parseHeader(const uint8_t* header, Info& info) {
++    Info parsed;
++    if (!parseContainer(header, parsed) || parsed.sideBytes) return false;
++    info = parsed;
++    return true;
++}
++
++inline bool parseHeader(const uint8_t* header, uint64_t& payloadBytes, uint32_t& crc) {
++    Info info;
++    if (!parseHeader(header, info)) return false;
++    payloadBytes = info.payloadBytes;
++    crc = info.crc;
++    return true;
++}
++
++inline void tableBytes(const std::vector<uint32_t>& table, std::vector<uint8_t>& out) {
++    out.resize(table.size() * 4);
++    for (size_t i = 0; i < table.size(); ++i) put32(out.data() + 4 * i, table[i]);
++}
++
++// The header CRC of a v2 header (any value in 24-27) and its table.
++inline uint32_t headerCrc(const uint8_t* header, const std::vector<uint32_t>& table) {
++    uint8_t copy[headerBytes];
++    std::memcpy(copy, header, headerBytes);
++    put32(copy + 24, 0);
++    uint32_t crc = mz_crc32(0, copy, headerBytes);
++    std::vector<uint8_t> bytes;
++    tableBytes(table, bytes);
++    return mz_crc32(crc, bytes.data(), bytes.size());
++}
++
++inline void makeHeaderV2(uint8_t* header, uint64_t payloadBytes, uint64_t generation,
++                         const std::vector<uint32_t>& table, uint64_t sideBytes = 0) {
++    std::memset(header, 0, headerBytes);
++    std::memcpy(header, "FRONDSD", 8);
++    put32(header + 8, versionV2);
++    put32(header + 12, sectorBytes);
++    put64(header + 16, payloadBytes);
++    put64(header + 28, generation);
++    put64(header + 36, headerBytes + storedBytes(payloadBytes, sideBytes));
++    put32(header + 44, chunkBytes);
++    put64(header + 48, sideBytes);
++    put32(header + 24, headerCrc(header, table));
++}
++
++// Chunk CRCs of a payload fed in order, in pieces of any size.
++class ChunkCrcs {
++   public:
++    void add(const uint8_t* bytes, size_t n) {
++        while (n) {
++            if (filled_ == 0) table_.push_back(0);
++            const size_t take = std::min<size_t>(n, chunkBytes - filled_);
++            table_.back() = mz_crc32(table_.back(), bytes, take);
++            filled_ = (filled_ + take) % chunkBytes;
++            bytes += take;
++            n -= take;
++        }
++    }
++    const std::vector<uint32_t>& table() const { return table_; }
++
++   private:
++    std::vector<uint32_t> table_;
++    size_t filled_{};
++};
++
++inline bool encodeV2(const uint8_t* payload, uint64_t size, uint64_t generation, std::vector<uint8_t>& file) {
++    if (!validPayloadSize(size) || !payload || size > std::numeric_limits<size_t>::max()) return false;
++    const auto n = static_cast<size_t>(size);
++    ChunkCrcs crcs;
++    crcs.add(payload, n);
++    std::vector<uint8_t> out(headerBytes + n);
++    makeHeaderV2(out.data(), size, generation, crcs.table());
++    std::memcpy(out.data() + headerBytes, payload, n);
++    std::vector<uint8_t> table;
++    tableBytes(crcs.table(), table);
++    out.insert(out.end(), table.begin(), table.end());
++    file.swap(out);
++    return true;
++}
++
++inline bool encodeV2(const std::vector<uint8_t>& payload, uint64_t generation, std::vector<uint8_t>& file) {
++    return encodeV2(payload.data(), payload.size(), generation, file);
++}
++
++// Reads the table of a v2 file in memory or after its header and checks the header CRC.
++inline bool readTable(const uint8_t* header, const uint8_t* tableData, size_t tableSize, const Info& info,
++                      std::vector<uint32_t>& table) {
++    const uint64_t count = info.chunks();
++    if (info.version != versionV2 || tableSize != count * 4) return false;
++    std::vector<uint32_t> parsed(static_cast<size_t>(count));
++    for (size_t i = 0; i < parsed.size(); ++i) parsed[i] = get32(tableData + 4 * i);
++    if (headerCrc(header, parsed) != info.crc) return false;
++    table.swap(parsed);
++    return true;
++}
++
++// Accepts v1 and v2 with no side region and checks every byte.
++inline bool decode(const uint8_t* file, size_t size, std::vector<uint8_t>& payload, Info* infoOut = nullptr) {
++    if (!file || size < headerBytes) return false;
++    Info info;
++    if (!parseHeader(file, info)) return false;
++    if (info.payloadBytes > std::numeric_limits<size_t>::max()) return false;
++    if (size != info.fileBytes()) return false;
++    const auto n = static_cast<size_t>(info.payloadBytes);
++    if (info.version == versionV1) {
++        if (crc32(file + headerBytes, n) != info.crc) return false;
++    } else {
++        std::vector<uint32_t> table;
++        if (!readTable(file, file + headerBytes + n, size - headerBytes - n, info, table)) return false;
++        ChunkCrcs crcs;
++        crcs.add(file + headerBytes, n);
++        if (crcs.table() != table) return false;
++    }
++    std::vector<uint8_t> candidate(file + headerBytes, file + headerBytes + n);
++    payload.swap(candidate);
++    if (infoOut) *infoOut = info;
++    return true;
++}
++}  // namespace frondSdFile
++
++#endif
+diff --git a/src/common/storage/Io.h b/src/common/storage/Io.h
+new file mode 100644
+index 0000000..fcd9863
+--- /dev/null
++++ b/src/common/storage/Io.h
+@@ -0,0 +1,101 @@
++#ifndef FROND_STORAGE_IO_H
++#define FROND_STORAGE_IO_H
++
++#include <cerrno>
++#include <cstdint>
++#include <fcntl.h>
++#include <filesystem>
++#include <string>
++#include <sys/stat.h>
++#include <unistd.h>
++#include <vector>
++
++// File helpers for the storage library: whole reads and writes at an offset, folder fsync, temps.
++namespace frondStorage {
++
++inline bool writeAllAt(int fd, const void* data, size_t n, uint64_t offset) {
++    const auto* p = static_cast<const uint8_t*>(data);
++    while (n) {
++        const auto w = pwrite(fd, p, n, off_t(offset));
++        if (w < 0 && errno == EINTR) continue;
++        if (w <= 0) return false;
++        p += w;
++        n -= size_t(w);
++        offset += uint64_t(w);
++    }
++    return true;
++}
++
++inline bool readAllAt(int fd, void* data, size_t n, uint64_t offset) {
++    auto* p = static_cast<uint8_t*>(data);
++    while (n) {
++        const auto r = pread(fd, p, n, off_t(offset));
++        if (r < 0 && errno == EINTR) continue;
++        if (r <= 0) return false;
++        p += r;
++        n -= size_t(r);
++        offset += uint64_t(r);
++    }
++    return true;
++}
++
++inline bool syncDir(const std::filesystem::path& dir) {
++    const int fd = ::open(dir.empty() ? "." : dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
++    if (fd < 0) return false;
++    const int rc = fsync(fd);
++    ::close(fd);
++    return rc == 0;
++}
++
++inline std::filesystem::path folderOf(const std::filesystem::path& file) {
++    auto dir = file.parent_path();
++    return dir.empty() ? std::filesystem::path(".") : dir;
++}
++
++inline bool createTemp(const std::filesystem::path& dir, const char* prefix, std::filesystem::path& out) {
++    std::error_code ec;
++    if (!std::filesystem::is_directory(dir, ec)) return false;
++    std::string tmpl = (dir / prefix).string();
++    tmpl += "XXXXXX";
++    std::vector<char> name(tmpl.begin(), tmpl.end());
++    name.push_back(0);
++    const int fd = mkstemp(name.data());
++    if (fd < 0) return false;
++    close(fd);
++    out = name.data();
++    return true;
++}
++
++inline void removePath(const std::filesystem::path& p) {
++    std::error_code ec;
++    if (!p.empty()) std::filesystem::remove(p, ec);
++}
++
++inline int64_t sizeOf(int fd) {
++    struct stat st {};
++    return fstat(fd, &st) == 0 ? int64_t(st.st_size) : -1;
++}
++
++// An open file description lock on the whole file, as the apps hold on a card open in Files.
++// It conflicts with any other descriptor's, in this process or another.
++inline bool tryLock(int fd) {
++    struct flock l {};
++    l.l_type = F_WRLCK;
++    l.l_whence = SEEK_SET;
++    return fcntl(fd, F_OFD_SETLK, &l) == 0;
++}
++
++// Closes on scope exit.
++struct Fd {
++    int fd{-1};
++    explicit Fd(int f) : fd(f) {}
++    Fd(const Fd&) = delete;
++    Fd& operator=(const Fd&) = delete;
++    ~Fd() {
++        if (fd >= 0) ::close(fd);
++    }
++};
++
++}  // namespace frondStorage
++
++#endif
+diff --git a/src/common/storage/Journal.h b/src/common/storage/Journal.h
+new file mode 100644
+index 0000000..a157e65
+--- /dev/null
++++ b/src/common/storage/Journal.h
+@@ -0,0 +1,325 @@
++#ifndef FROND_STORAGE_JOURNAL_H
++#define FROND_STORAGE_JOURNAL_H
++
++#include "storage/Container.h"
++#include "storage/Io.h"
++
++#include <algorithm>
++#include <cstdint>
++#include <cstring>
++#include <filesystem>
++#include <string>
++#include <vector>
++
++// Card journals, <card>.journal-<to generation>, little endian:
++// header 64 bytes: "FRONDJNL", version u32, flags u32, stored bytes u64, from generation u64,
++// to generation u64, record count u64, table count u64, 8 zero bytes;
++// records: stored-bytes offset u64, length u32, bytes; then the complete new chunk table;
++// trailer 16 bytes: "FRONDEND", CRC32 of everything before the trailer u32, zero u32.
++// Version 1 has flags 0 and is a session journal. Version 2 has flags bit 0 for standalone.
++// A session journal is replayed only when the .frond asks for its generation; a standalone one
++// (a change made outside a running machine) is always replayed. Session saves still write
++// version 1, which every frontend reads.
++// A journal is written as a temp and renamed, so one under its own name is complete.
++namespace frondStorage {
++
++constexpr size_t journalHeaderBytes = 64, journalTrailerBytes = 16, journalRecordBytes = 12;
++constexpr uint32_t journalStandalone = 1;
++
++enum class JournalKind { session, standalone };
++
++inline std::string journalPrefix(const std::filesystem::path& card) { return card.filename().string() + ".journal-"; }
++
++inline std::filesystem::path journalPath(const std::filesystem::path& card, uint64_t toGeneration) {
++    return folderOf(card) / (journalPrefix(card) + std::to_string(toGeneration));
++}
++
++// A full copy at `generation`, renamed onto the card by a session load.
++inline std::filesystem::path fullPath(const std::filesystem::path& card, uint64_t generation) {
++    return folderOf(card) / (journalPrefix(card) + std::to_string(generation) + ".full");
++}
++
++// The chunks a standalone change put data into before its journal.
++inline std::filesystem::path pendingPath(const std::filesystem::path& card, uint64_t generation) {
++    return folderOf(card) / (journalPrefix(card) + std::to_string(generation) + ".pending");
++}
++
++// Every file beside the card with its journal prefix: journals, full copies, pending lists.
++inline std::vector<std::filesystem::path> journalFiles(const std::filesystem::path& card) {
++    std::vector<std::filesystem::path> found;
++    std::error_code ec;
++    const std::string prefix = journalPrefix(card);
++    for (std::filesystem::directory_iterator it(folderOf(card), ec), end; !ec && it != end; it.increment(ec)) {
++        const auto name = it->path().filename().string();
++        if (name.compare(0, prefix.size(), prefix) == 0) found.push_back(it->path());
++    }
++    std::sort(found.begin(), found.end());
++    return found;
++}
++
++// The generation and suffix of a journal file name ("", ".full", ".pending" or anything else).
++inline bool journalName(const std::filesystem::path& card, const std::filesystem::path& file, uint64_t& generation,
++                        std::string& suffix) {
++    const auto name = file.filename().string();
++    const auto prefix = journalPrefix(card);
++    if (name.compare(0, prefix.size(), prefix) != 0) return false;
++    size_t at = prefix.size(), end = at;
++    while (end < name.size() && end - at < 20 && name[end] >= '0' && name[end] <= '9') ++end;
++    if (end == at) return false;
++    generation = std::stoull(name.substr(at, end - at));
++    suffix = name.substr(end);
++    return true;
++}
++
++inline void removeJournalFiles(const std::filesystem::path& card, const std::filesystem::path& keep = {}) {
++    bool removed = false;
++    for (const auto& path : journalFiles(card)) {
++        if (!keep.empty() && path == keep) continue;
++        removePath(path);
++        removed = true;
++    }
++    if (removed) syncDir(folderOf(card));
++}
++
++inline bool storedSizeOk(uint64_t stored) {
++    return stored >= frondSdFile::sectorBytes &&
++           stored <= frondSdFile::sideOffset(frondSdFile::maxPayloadBytes) + frondSdFile::maxSideBytes;
++}
++
++inline bool rangeOk(uint64_t size, uint64_t offset, uint64_t length) {
++    return offset <= size && length <= size - offset;
++}
++
++// Builds a journal in a temp beside the card: records in any order, then finish() with the new table.
++class JournalWriter {
++   public:
++    ~JournalWriter() { abandon(); }
++
++    bool open(const std::filesystem::path& card, uint64_t storedBytes, uint64_t from, uint64_t to,
++              JournalKind kind = JournalKind::session) {
++        abandon();
++        if (!createTemp(folderOf(card), ".frondsd.tmp-", temp_)) return false;
++        fd_ = ::open(temp_.c_str(), O_RDWR | O_CLOEXEC);
++        if (fd_ < 0) return false;
++        card_ = card;
++        kind_ = kind;
++        stored_ = storedBytes;
++        from_ = from;
++        to_ = to;
++        end_ = journalHeaderBytes;
++        records_ = 0;
++        return true;
++    }
++
++    bool add(uint64_t offset, uint32_t length, const uint8_t* data) {
++        if (fd_ < 0 || !rangeOk(stored_, offset, length)) return false;
++        uint8_t rec[journalRecordBytes];
++        frondSdFile::put64(rec, offset);
++        frondSdFile::put32(rec + 8, length);
++        if (!writeAllAt(fd_, rec, sizeof(rec), end_) || !writeAllAt(fd_, data, length, end_ + sizeof(rec)))
++            return false;
++        end_ += sizeof(rec) + length;
++        ++records_;
++        return true;
++    }
++
++    // Writes table, header and trailer, fsyncs and renames to its journal name.
++    bool finish(const std::vector<uint32_t>& table, std::filesystem::path& journal) {
++        if (fd_ < 0 || table.size() != frondSdFile::chunkCount(stored_)) return false;
++        std::vector<uint8_t> tableBytes;
++        frondSdFile::tableBytes(table, tableBytes);
++        if (!writeAllAt(fd_, tableBytes.data(), tableBytes.size(), end_)) return false;
++        end_ += tableBytes.size();
++        uint8_t header[journalHeaderBytes]{};
++        std::memcpy(header, "FRONDJNL", 8);
++        const bool standalone = kind_ == JournalKind::standalone;
++        frondSdFile::put32(header + 8, standalone ? 2 : 1);
++        frondSdFile::put32(header + 12, standalone ? journalStandalone : 0);
++        frondSdFile::put64(header + 16, stored_);
++        frondSdFile::put64(header + 24, from_);
++        frondSdFile::put64(header + 32, to_);
++        frondSdFile::put64(header + 40, records_);
++        frondSdFile::put64(header + 48, table.size());
++        if (!writeAllAt(fd_, header, sizeof(header), 0)) return false;
++        uint32_t crc = 0;
++        std::vector<uint8_t> buf(1u << 20);
++        for (uint64_t off = 0; off < end_;) {
++            const size_t n = size_t(std::min<uint64_t>(buf.size(), end_ - off));
++            if (!readAllAt(fd_, buf.data(), n, off)) return false;
++            crc = mz_crc32(crc, buf.data(), n);
++            off += n;
++        }
++        uint8_t trailer[journalTrailerBytes]{};
++        std::memcpy(trailer, "FRONDEND", 8);
++        frondSdFile::put32(trailer + 8, crc);
++        if (!writeAllAt(fd_, trailer, sizeof(trailer), end_) || fsync(fd_) != 0) return false;
++        const int fd = fd_;
++        fd_ = -1;
++        if (::close(fd) != 0) return false;
++        const auto dest = journalPath(card_, to_);
++        if (rename(temp_.c_str(), dest.c_str()) < 0) return false;
++        temp_.clear();
++        if (!syncDir(folderOf(card_))) {
++            removePath(dest);
++            return false;
++        }
++        journal = dest;
++        return true;
++    }
++
++    void abandon() {
++        if (fd_ >= 0) ::close(fd_);
++        fd_ = -1;
++        removePath(temp_);
++        temp_.clear();
++    }
++
++   private:
++    std::filesystem::path card_, temp_;
++    int fd_{-1};
++    JournalKind kind_{JournalKind::session};
++    uint64_t stored_{}, from_{}, to_{}, end_{}, records_{};
++};
++
++struct Journal {
++    uint32_t version{};
++    bool standalone{};
++    uint64_t storedBytes{}, from{}, to{}, records{};
++    std::vector<uint32_t> table;
++};
++
++// Checks a whole journal: trailer CRC, record bounds, exact length. Only reads it.
++inline bool readJournal(int fd, uint64_t size, Journal& out) {
++    if (size < journalHeaderBytes + journalTrailerBytes) return false;
++    uint8_t header[journalHeaderBytes];
++    uint8_t trailer[journalTrailerBytes];
++    if (!readAllAt(fd, header, sizeof(header), 0) || !readAllAt(fd, trailer, sizeof(trailer), size - sizeof(trailer)))
++        return false;
++    if (std::memcmp(header, "FRONDJNL", 8)) return false;
++    Journal parsed;
++    parsed.version = frondSdFile::get32(header + 8);
++    const uint32_t flags = frondSdFile::get32(header + 12);
++    if (parsed.version == 1 ? flags != 0 : parsed.version != 2 || (flags & ~journalStandalone)) return false;
++    parsed.standalone = flags & journalStandalone;
++    for (size_t i = 56; i < sizeof(header); ++i)
++        if (header[i]) return false;
++    if (std::memcmp(trailer, "FRONDEND", 8) || frondSdFile::get32(trailer + 12)) return false;
++    parsed.storedBytes = frondSdFile::get64(header + 16);
++    parsed.from = frondSdFile::get64(header + 24);
++    parsed.to = frondSdFile::get64(header + 32);
++    parsed.records = frondSdFile::get64(header + 40);
++    const uint64_t tableCount = frondSdFile::get64(header + 48);
++    const bool sizeOk = parsed.version == 1 ? frondSdFile::validPayloadSize(parsed.storedBytes)
++                                            : storedSizeOk(parsed.storedBytes);
++    if (!sizeOk || tableCount != frondSdFile::chunkCount(parsed.storedBytes) || parsed.to != parsed.from + 1)
++        return false;
++    const uint64_t body = size - journalTrailerBytes;
++    uint32_t crc = 0;
++    std::vector<uint8_t> buf(1u << 20);
++    for (uint64_t off = 0; off < body;) {
++        const size_t n = size_t(std::min<uint64_t>(buf.size(), body - off));
++        if (!readAllAt(fd, buf.data(), n, off)) return false;
++        crc = mz_crc32(crc, buf.data(), n);
++        off += n;
++    }
++    if (crc != frondSdFile::get32(trailer + 8)) return false;
++    uint64_t at = journalHeaderBytes;
++    for (uint64_t i = 0; i < parsed.records; ++i) {
++        uint8_t rec[journalRecordBytes];
++        if (at + sizeof(rec) > body || !readAllAt(fd, rec, sizeof(rec), at)) return false;
++        const uint64_t offset = frondSdFile::get64(rec);
++        const uint32_t length = frondSdFile::get32(rec + 8);
++        if (!rangeOk(parsed.storedBytes, offset, length)) return false;
++        at += sizeof(rec) + length;
++    }
++    if (at + tableCount * 4 != body) return false;
++    std::vector<uint8_t> tableBytes(static_cast<size_t>(tableCount * 4));
++    if (!readAllAt(fd, tableBytes.data(), tableBytes.size(), at)) return false;
++    parsed.table.resize(size_t(tableCount));
++    for (size_t i = 0; i < parsed.table.size(); ++i) parsed.table[i] = frondSdFile::get32(tableBytes.data() + 4 * i);
++    out = std::move(parsed);
++    return true;
++}
++
++inline bool readJournal(const std::filesystem::path& path, Journal& out) {
++    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
++    if (fd < 0) return false;
++    Fd closer(fd);
++    const auto size = sizeOf(fd);
++    return size >= 0 && readJournal(fd, uint64_t(size), out);
++}
++
++// Steps of applying a journal, for crash tests: pages and table, then header, then journal gone.
++enum class JournalStep { pages = 1, header = 2, all = 3 };
++
++// Test hook: when not negative, applying a journal fails after this many records, as ENOSPC or
++// EIO would.
++inline int64_t& journalFailAfter() {
++    static int64_t records = -1;
++    return records;
++}
++
++// Applies a complete journal to the card in place: pages and table, fsync, header at the new
++// generation, fsync, then deletes the journal. Applying it twice gives the same bytes.
++inline bool applyJournal(const std::filesystem::path& card, const std::filesystem::path& journal,
++                         std::vector<uint32_t>* tableOut = nullptr, JournalStep stop = JournalStep::all) {
++    const int jfd = ::open(journal.c_str(), O_RDONLY | O_CLOEXEC);
++    if (jfd < 0) return false;
++    Fd jcloser(jfd);
++    Journal parsed;
++    const int sfd = ::open(card.c_str(), O_RDWR | O_CLOEXEC);
++    Fd scloser(sfd);
++    const auto jsize = sizeOf(jfd);
++    bool ok = sfd >= 0 && jsize >= 0 && readJournal(jfd, uint64_t(jsize), parsed) &&
++              uint64_t(sizeOf(sfd)) == frondSdFile::headerBytes + parsed.storedBytes + 4 * parsed.table.size();
++    // The payload and side region split from the card's header; a header that doesn't parse
++    // (or a card from before side regions) is all payload.
++    uint64_t payloadBytes = parsed.storedBytes, sideBytes = 0;
++    if (ok) {
++        uint8_t header[frondSdFile::headerBytes];
++        frondSdFile::Info info;
++        if (readAllAt(sfd, header, sizeof(header), 0) && frondSdFile::parseContainer(header, info) &&
++            info.stored() == parsed.storedBytes) {
++            payloadBytes = info.payloadBytes;
++            sideBytes = info.sideBytes;
++        }
++    }
++    uint64_t at = journalHeaderBytes;
++    std::vector<uint8_t> data;
++    for (uint64_t i = 0; ok && i < parsed.records; ++i) {
++        if (journalFailAfter() >= 0 && i == uint64_t(journalFailAfter())) {
++            ok = false;
++            break;
++        }
++        uint8_t rec[journalRecordBytes];
++        ok = readAllAt(jfd, rec, sizeof(rec), at);
++        if (!ok) break;
++        const uint64_t offset = frondSdFile::get64(rec);
++        const uint32_t length = frondSdFile::get32(rec + 8);
++        data.resize(length);
++        ok = readAllAt(jfd, data.data(), length, at + sizeof(rec)) &&
++             writeAllAt(sfd, data.data(), length, frondSdFile::headerBytes + offset);
++        at += sizeof(rec) + length;
++    }
++    if (ok) {
++        std::vector<uint8_t> tableBytes;
++        frondSdFile::tableBytes(parsed.table, tableBytes);
++        ok = writeAllAt(sfd, tableBytes.data(), tableBytes.size(), frondSdFile::headerBytes + parsed.storedBytes);
++    }
++    if (ok && stop != JournalStep::pages) {
++        uint8_t header[frondSdFile::headerBytes];
++        frondSdFile::makeHeaderV2(header, payloadBytes, parsed.to, parsed.table, sideBytes);
++        ok = fsync(sfd) == 0 && writeAllAt(sfd, header, sizeof(header), 0) && fsync(sfd) == 0;
++    }
++    if (!ok) return false;
++    if (stop == JournalStep::all) {
++        removePath(journal);
++        syncDir(folderOf(card));
++    }
++    if (tableOut) *tableOut = std::move(parsed.table);
++    return true;
++}
++
++}  // namespace frondStorage
++
++#endif
+diff --git a/src/common/storage/Legacy.h b/src/common/storage/Legacy.h
+new file mode 100644
+index 0000000..eba211e
+--- /dev/null
++++ b/src/common/storage/Legacy.h
+@@ -0,0 +1,169 @@
++#ifndef FROND_STORAGE_LEGACY_H
++#define FROND_STORAGE_LEGACY_H
++
++#include "storage/Container.h"
++#include "storage/Io.h"
++
++#include <algorithm>
++#include <cstdint>
++#include <cstring>
++#include <filesystem>
++#include <set>
++#include <utility>
++#include <vector>
++
++// The two files Files… in the 0.14 apps leaves beside a card while a change is written, settled as
++// desktop/CardFile.h and Android's CardFile.kt settle them:
++// <card>.files-intent: "FRONDFI1", card bytes u64, generation u64, then a u32 chunk number per
++// chunk that got data (little endian).
++// <card>.files-commit: "FRONDFC1", record count u32, file length u64, records (file offset u64,
++// length u32, bytes), "FCEND\0\0\0", CRC32 of everything before it (big endian).
++// A complete commit is replayed (the change is done). An intent then gets its chunks' CRCs and the
++// header rewritten at its generation (only free clusters changed). Repeating either is harmless.
++namespace frondStorage {
++namespace legacy {
++
++constexpr size_t intentHeader = 24;
++constexpr uint64_t commitMaxBytes = uint64_t(64) << 20;
++
++inline std::filesystem::path intentOf(const std::filesystem::path& card) {
++    return card.string() + ".files-intent";
++}
++inline std::filesystem::path commitOf(const std::filesystem::path& card) {
++    return card.string() + ".files-commit";
++}
++
++inline bool present(const std::filesystem::path& card) {
++    std::error_code ec;
++    return std::filesystem::exists(intentOf(card), ec) || std::filesystem::exists(commitOf(card), ec);
++}
++
++inline uint32_t be32(const uint8_t* p) {
++    return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | uint32_t(p[3]);
++}
++inline uint64_t be64(const uint8_t* p) { return (uint64_t(be32(p)) << 32) | be32(p + 4); }
++
++inline bool readWhole(const std::filesystem::path& path, uint64_t limit, std::vector<uint8_t>& out) {
++    out.clear();
++    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
++    if (fd < 0) return false;
++    Fd closer(fd);
++    const auto size = sizeOf(fd);
++    if (size < 0 || uint64_t(size) > limit) return false;
++    out.resize(size_t(size));
++    return out.empty() || readAllAt(fd, out.data(), out.size(), 0);
++}
++
++struct Record {
++    uint64_t at{};
++    std::vector<uint8_t> bytes;
++};
++
++inline bool decodeCommit(const std::vector<uint8_t>& b, uint64_t& finalLength, std::vector<Record>& records) {
++    if (b.size() < 20 + 12 || std::memcmp(b.data(), "FRONDFC1", 8)) return false;
++    const size_t end = b.size() - 12;
++    if (std::memcmp(b.data() + end, "FCEND\0\0\0", 8)) return false;
++    if (mz_crc32(0, b.data(), end + 8) != be32(b.data() + end + 8)) return false;
++    const auto count = int32_t(be32(b.data() + 8));
++    finalLength = be64(b.data() + 12);
++    if (int64_t(finalLength) < 0) return false;
++    size_t at = 20;
++    records.clear();
++    for (int32_t i = 0; i < count; ++i) {
++        if (at + 12 > end) return false;
++        const auto offset = int64_t(be64(b.data() + at));
++        const auto length = int32_t(be32(b.data() + at + 8));
++        if (offset < 0 || length < 0 || at + 12 + size_t(length) > end || uint64_t(offset) + uint64_t(length) > finalLength)
++            return false;
++        records.push_back({uint64_t(offset), std::vector<uint8_t>(b.begin() + at + 12, b.begin() + at + 12 + length)});
++        at += 12 + size_t(length);
++    }
++    return at == end;
++}
++
++inline bool chunkCrc(int fd, uint64_t payload, uint64_t i, uint32_t& out) {
++    const uint64_t start = i * frondSdFile::chunkBytes;
++    const uint64_t n = std::min<uint64_t>(frondSdFile::chunkBytes, payload - start);
++    std::vector<uint8_t> buf(static_cast<size_t>(n));
++    if (!readAllAt(fd, buf.data(), buf.size(), frondSdFile::headerBytes + start)) return false;
++    out = mz_crc32(0, buf.data(), buf.size());
++    return true;
++}
++
++// Rewrites the CRCs of the chunks named (all of them for a card that isn't v2 yet) and the header
++// at `target`, or the card's own generation if that is later.
++inline bool refresh(int fd, uint64_t payload, uint64_t target, const std::vector<int32_t>& listed) {
++    uint8_t head[frondSdFile::headerBytes];
++    if (!readAllAt(fd, head, sizeof(head), 0)) return false;
++    const uint64_t count = frondSdFile::chunkCount(payload);
++    const bool v2 = !std::memcmp(head, "FRONDSD\0", 8) && frondSdFile::get32(head + 8) == 2 &&
++                    frondSdFile::get64(head + 16) == payload &&
++                    sizeOf(fd) == int64_t(frondSdFile::headerBytes + payload + 4 * count);
++    std::vector<uint32_t> table(size_t(count), 0);
++    if (v2) {
++        std::vector<uint8_t> raw(static_cast<size_t>(4 * count));
++        if (!readAllAt(fd, raw.data(), raw.size(), frondSdFile::headerBytes + payload)) return false;
++        for (size_t i = 0; i < table.size(); ++i) table[i] = frondSdFile::get32(raw.data() + 4 * i);
++    }
++    std::set<uint64_t> which;
++    if (v2) {
++        for (auto i : listed)
++            if (i >= 0 && uint64_t(i) < count) which.insert(uint64_t(i));
++    } else {
++        for (uint64_t i = 0; i < count; ++i) which.insert(i);
++    }
++    for (auto i : which)
++        if (!chunkCrc(fd, payload, i, table[size_t(i)])) return false;
++    if (ftruncate(fd, off_t(frondSdFile::headerBytes + payload + 4 * count)) != 0) return false;
++    std::vector<uint8_t> t;
++    frondSdFile::tableBytes(table, t);
++    if (!writeAllAt(fd, t.data(), t.size(), frondSdFile::headerBytes + payload) || fsync(fd) != 0) return false;
++    uint8_t h[frondSdFile::headerBytes];
++    frondSdFile::makeHeaderV2(h, payload, std::max(target, v2 ? frondSdFile::get64(head + 28) : uint64_t(0)), table);
++    return writeAllAt(fd, h, sizeof(h), 0) && fsync(fd) == 0;
++}
++
++// Settles both files on the card open as `fd` (read and write, locked).
++inline bool settle(const std::filesystem::path& card, int fd) {
++    const auto commit = commitOf(card);
++    removePath(commit.string() + ".tmp");
++    std::error_code ec;
++    if (std::filesystem::exists(commit, ec)) {
++        std::vector<uint8_t> raw;
++        uint64_t finalLength = 0;
++        std::vector<Record> records;
++        if (readWhole(commit, commitMaxBytes, raw) && !raw.empty() && decodeCommit(raw, finalLength, records)) {
++            if (sizeOf(fd) < int64_t(finalLength) && ftruncate(fd, off_t(finalLength)) != 0) return false;
++            for (const auto& r : records)
++                if (!writeAllAt(fd, r.bytes.data(), r.bytes.size(), r.at)) return false;
++            if (fsync(fd) != 0) return false;
++        }
++        removePath(commit);
++        syncDir(folderOf(card));
++    }
++    const auto intent = intentOf(card);
++    if (std::filesystem::exists(intent, ec)) {
++        std::vector<uint8_t> b;
++        readWhole(intent, uint64_t(64) << 20, b);
++        // A short header means nothing was written yet: it is fsynced before any data.
++        if (b.size() >= intentHeader && !std::memcmp(b.data(), "FRONDFI1", 8)) {
++            const uint64_t payload = frondSdFile::get64(b.data() + 8);
++            const uint64_t target = frondSdFile::get64(b.data() + 16);
++            std::vector<int32_t> listed;
++            for (size_t i = 0; i < (b.size() - intentHeader) / 4; ++i)
++                listed.push_back(int32_t(frondSdFile::get32(b.data() + intentHeader + 4 * i)));
++            if (payload >= frondSdFile::sectorBytes && payload <= frondSdFile::maxPayloadBytes &&
++                payload % frondSdFile::sectorBytes == 0 &&
++                sizeOf(fd) >= int64_t(frondSdFile::headerBytes + payload) && !refresh(fd, payload, target, listed))
++                return false;
++        }
++        removePath(intent);
++        syncDir(folderOf(card));
++    }
++    return true;
++}
++
++}  // namespace legacy
++}  // namespace frondStorage
++
++#endif
+diff --git a/src/common/storage/Pending.h b/src/common/storage/Pending.h
+new file mode 100644
+index 0000000..60cc6d4
+--- /dev/null
++++ b/src/common/storage/Pending.h
+@@ -0,0 +1,151 @@
++#ifndef FROND_STORAGE_PENDING_H
++#define FROND_STORAGE_PENDING_H
++
++#include "storage/Container.h"
++#include "storage/Io.h"
++#include "storage/Journal.h"
++
++#include <algorithm>
++#include <cstdint>
++#include <cstring>
++#include <filesystem>
++#include <set>
++#include <vector>
++
++// <card>.journal-N.pending, for a standalone change to generation N: "FRONDJP1", stored bytes u64,
++// generation u64, then a u32 chunk number per chunk that gets data (little endian). Each number
++// is appended and fsynced before data goes into the chunk, and data only goes where the card's
++// file system has nothing. With no complete journal-N, settle rewrites those chunks' CRCs and the
++// header at N (only free space changed); with one, the journal is replayed and this goes.
++namespace frondStorage {
++
++constexpr size_t pendingHeaderBytes = 24;
++
++class PendingWriter {
++   public:
++    ~PendingWriter() { close(); }
++
++    // Makes the file with its header, fsynced, and the folder fsynced.
++    bool open(const std::filesystem::path& card, uint64_t storedBytes, uint64_t generation) {
++        close();
++        path_ = pendingPath(card, generation);
++        fd_ = ::open(path_.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
++        if (fd_ < 0) return false;
++        uint8_t head[pendingHeaderBytes]{};
++        std::memcpy(head, "FRONDJP1", 8);
++        frondSdFile::put64(head + 8, storedBytes);
++        frondSdFile::put64(head + 16, generation);
++        end_ = 0;
++        return append(head, sizeof(head)) && syncDir(folderOf(card));
++    }
++
++    // Adds chunk numbers not listed yet; returns once they are on disk.
++    bool add(const std::vector<uint32_t>& chunks) {
++        std::vector<uint8_t> bytes;
++        for (auto c : chunks) {
++            if (!listed_.insert(c).second) continue;
++            bytes.resize(bytes.size() + 4);
++            frondSdFile::put32(bytes.data() + bytes.size() - 4, c);
++        }
++        return bytes.empty() || append(bytes.data(), bytes.size());
++    }
++
++    const std::filesystem::path& path() const { return path_; }
++
++    void close() {
++        if (fd_ >= 0) ::close(fd_);
++        fd_ = -1;
++    }
++
++   private:
++    bool append(const uint8_t* bytes, size_t n) {
++        if (fd_ < 0 || !writeAllAt(fd_, bytes, n, end_) || fsync(fd_) != 0) return false;
++        end_ += n;
++        return true;
++    }
++
++    std::filesystem::path path_;
++    int fd_{-1};
++    uint64_t end_{};
++    std::set<uint32_t> listed_;
++};
++
++struct Pending {
++    bool started{};  // false: the header never got to disk, so no data was written
++    uint64_t storedBytes{}, generation{};
++    std::vector<uint32_t> chunks;
++};
++
++inline bool readPending(const std::filesystem::path& path, Pending& out) {
++    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
++    if (fd < 0) return false;
++    Fd closer(fd);
++    const auto size = sizeOf(fd);
++    if (size < 0 || uint64_t(size) > (uint64_t(64) << 20)) return false;
++    std::vector<uint8_t> b(static_cast<size_t>(size));
++    if (!b.empty() && !readAllAt(fd, b.data(), b.size(), 0)) return false;
++    Pending parsed;
++    if (b.size() >= pendingHeaderBytes && !std::memcmp(b.data(), "FRONDJP1", 8)) {
++        parsed.started = true;
++        parsed.storedBytes = frondSdFile::get64(b.data() + 8);
++        parsed.generation = frondSdFile::get64(b.data() + 16);
++        for (size_t at = pendingHeaderBytes; at + 4 <= b.size(); at += 4)
++            parsed.chunks.push_back(frondSdFile::get32(b.data() + at));
++    }
++    out = std::move(parsed);
++    return true;
++}
++
++// CRC32 of chunk i of the stored bytes.
++inline bool storedChunkCrc(int fd, uint64_t stored, uint64_t i, uint32_t& out) {
++    const uint64_t start = i * frondSdFile::chunkBytes;
++    const uint64_t n = std::min<uint64_t>(frondSdFile::chunkBytes, stored - start);
++    std::vector<uint8_t> buf(static_cast<size_t>(n));
++    if (!readAllAt(fd, buf.data(), buf.size(), frondSdFile::headerBytes + start)) return false;
++    out = mz_crc32(0, buf.data(), buf.size());
++    return true;
++}
++
++// Rewrites the listed chunks' CRCs (every chunk of a v1 card) and the header at `generation`, or
++// the card's own if that is later. The card is open read and write as `fd`.
++inline bool refreshChunks(int fd, uint64_t storedBytes, uint64_t generation, const std::vector<uint32_t>& listed) {
++    uint8_t head[frondSdFile::headerBytes];
++    if (!readAllAt(fd, head, sizeof(head), 0)) return false;
++    frondSdFile::Info info;
++    const int64_t size = sizeOf(fd);
++    const bool parsed = frondSdFile::parseContainer(head, info) && info.stored() == storedBytes;
++    const bool v2 = parsed && info.version == frondSdFile::versionV2 && size == int64_t(info.fileBytes());
++    if (!parsed) {
++        // A header that doesn't parse is taken as a card with no side region, as the apps do.
++        if (!frondSdFile::validPayloadSize(storedBytes)) return false;
++        info = {};
++        info.payloadBytes = storedBytes;
++    }
++    if (size < int64_t(frondSdFile::headerBytes + storedBytes)) return false;
++    const uint64_t count = frondSdFile::chunkCount(storedBytes);
++    std::vector<uint32_t> table(size_t(count), 0);
++    std::set<uint64_t> which;
++    if (v2) {
++        std::vector<uint8_t> raw(static_cast<size_t>(4 * count));
++        if (!readAllAt(fd, raw.data(), raw.size(), frondSdFile::headerBytes + storedBytes)) return false;
++        for (size_t i = 0; i < table.size(); ++i) table[i] = frondSdFile::get32(raw.data() + 4 * i);
++        for (auto i : listed)
++            if (i < count) which.insert(i);
++    } else {
++        for (uint64_t i = 0; i < count; ++i) which.insert(i);
++    }
++    for (auto i : which)
++        if (!storedChunkCrc(fd, storedBytes, i, table[size_t(i)])) return false;
++    if (ftruncate(fd, off_t(frondSdFile::headerBytes + storedBytes + 4 * count)) != 0) return false;
++    std::vector<uint8_t> t;
++    frondSdFile::tableBytes(table, t);
++    if (!writeAllAt(fd, t.data(), t.size(), frondSdFile::headerBytes + storedBytes) || fsync(fd) != 0) return false;
++    uint8_t h[frondSdFile::headerBytes];
++    frondSdFile::makeHeaderV2(h, info.payloadBytes, std::max(generation, v2 ? info.generation : uint64_t(0)), table,
++                              info.sideBytes);
++    return writeAllAt(fd, h, sizeof(h), 0) && fsync(fd) == 0;
++}
++
++}  // namespace frondStorage
++
++#endif
+diff --git a/src/common/storage/Settle.h b/src/common/storage/Settle.h
+new file mode 100644
+index 0000000..e981278
+--- /dev/null
++++ b/src/common/storage/Settle.h
+@@ -0,0 +1,236 @@
++#ifndef FROND_STORAGE_SETTLE_H
++#define FROND_STORAGE_SETTLE_H
++
++#include "storage/Container.h"
++#include "storage/Io.h"
++#include "storage/Journal.h"
++#include "storage/Legacy.h"
++#include "storage/Pending.h"
++
++#include <cstdint>
++#include <filesystem>
++#include <functional>
++#include <optional>
++#include <string>
++#include <vector>
++
++// One settle and one verify for every card file, used by the core's card loads, `frond --card`
++// and the apps.
++//
++// settle() finishes what a cut-off write left beside the card, in this order:
++// 1. the apps' legacy .files-commit and .files-intent (Legacy.h);
++// 2. standalone journals, always replayed onto the card at their from or to generation;
++// 3. pending lists with no journal left (Pending.h);
++// 4. with a session generation, the session save: a full copy or a session journal to that
++//    generation, as a load of that .frond needs. Without one, any session file left refuses.
++// Steps 1-3 lock the card as the apps do, so a card open in Files… isn't touched. Each step is
++// safe to repeat after a crash in it, and a card with nothing beside it is left alone.
++namespace frondStorage {
++
++struct Result {
++    bool ok{false};
++    std::string code, message;
++};
++inline Result failed(const char* code, std::string message) { return {false, code, std::move(message)}; }
++
++constexpr const char* unsettledMessage = "The card has an unfinished save. Open its machine once to finish it.";
++constexpr const char* inFilesMessage = "The card is open in Files. Close it first.";
++
++// The header and, for v2, the table of a card file, with the header CRC and file size checked.
++inline bool readHeader(int fd, frondSdFile::Info& info, std::vector<uint32_t>* table = nullptr) {
++    uint8_t header[frondSdFile::headerBytes];
++    if (!readAllAt(fd, header, sizeof(header), 0) || !frondSdFile::parseContainer(header, info)) return false;
++    if (sizeOf(fd) != int64_t(info.fileBytes())) return false;
++    if (info.version != frondSdFile::versionV2) return true;
++    std::vector<uint8_t> bytes(static_cast<size_t>(4 * info.chunks()));
++    std::vector<uint32_t> parsed;
++    if (!readAllAt(fd, bytes.data(), bytes.size(), frondSdFile::headerBytes + info.stored()) ||
++        !frondSdFile::readTable(header, bytes.data(), bytes.size(), info, parsed))
++        return false;
++    if (table) table->swap(parsed);
++    return true;
++}
++
++inline bool readHeader(const std::filesystem::path& card, frondSdFile::Info& info,
++                       std::vector<uint32_t>* table = nullptr) {
++    const int fd = ::open(card.c_str(), O_RDONLY | O_CLOEXEC);
++    if (fd < 0) return false;
++    Fd closer(fd);
++    return readHeader(fd, info, table);
++}
++
++// The journal files beside a card that steps 2 and 3 settle.
++struct Changes {
++    std::vector<std::pair<std::filesystem::path, Journal>> standalone;
++    std::vector<std::filesystem::path> pending;
++};
++
++inline Changes changesOf(const std::filesystem::path& card) {
++    Changes out;
++    for (const auto& path : journalFiles(card)) {
++        uint64_t generation = 0;
++        std::string suffix;
++        if (!journalName(card, path, generation, suffix)) continue;
++        Journal journal;
++        if (suffix.empty() && readJournal(path, journal) && journal.standalone && journal.to == generation)
++            out.standalone.emplace_back(path, std::move(journal));
++        else if (suffix == ".pending")
++            out.pending.push_back(path);
++    }
++    return out;
++}
++
++// Whether anything is beside the card for steps 1-3.
++inline bool hasChanges(const std::filesystem::path& card) {
++    if (legacy::present(card)) return true;
++    const auto changes = changesOf(card);
++    return !changes.standalone.empty() || !changes.pending.empty();
++}
++
++// Replays one standalone journal onto the card open as `fd`. A v1 card at generation 0 first
++// gets room for its table; the journal holds the whole new table.
++inline Result replayStandalone(const std::filesystem::path& card, int fd, const std::filesystem::path& path,
++                               const Journal& journal) {
++    uint8_t header[frondSdFile::headerBytes];
++    frondSdFile::Info info;
++    if (!readAllAt(fd, header, sizeof(header), 0) || !frondSdFile::parseContainer(header, info) ||
++        info.stored() != journal.storedBytes)
++        return failed("unsettled", "The card's unfinished change doesn't fit it.");
++    const uint64_t v2Bytes = frondSdFile::headerBytes + journal.storedBytes + 4 * journal.table.size();
++    const int64_t size = sizeOf(fd);
++    if (info.version == frondSdFile::versionV1) {
++        if (journal.from != 0 || (size != int64_t(frondSdFile::headerBytes + info.stored()) && size != int64_t(v2Bytes)))
++            return failed("unsettled", "The card's unfinished change doesn't fit it.");
++        if (ftruncate(fd, off_t(v2Bytes)) != 0 || fsync(fd) != 0) return failed("write", "Could not write the card file.");
++    } else if (size != int64_t(v2Bytes) || (info.generation != journal.from && info.generation != journal.to)) {
++        return failed("unsettled", "The card's unfinished change doesn't fit it.");
++    }
++    if (!applyJournal(card, path, nullptr, JournalStep::header)) return failed("write", "Could not write the card file.");
++    removePath(pendingPath(card, journal.to));
++    removePath(path);
++    syncDir(folderOf(card));
++    return {true, "", {}};
++}
++
++// Steps 1-3: the apps' leftovers, standalone journals and pending lists.
++inline Result settleChanges(const std::filesystem::path& card) {
++    std::error_code ec;
++    if (!std::filesystem::is_regular_file(card, ec) || !hasChanges(card)) return {true, "", {}};
++    const int fd = ::open(card.c_str(), O_RDWR | O_CLOEXEC);
++    if (fd < 0) return failed("write", "Could not write the card file.");
++    Fd closer(fd);
++    if (!tryLock(fd)) return failed("busy", inFilesMessage);
++    if (!legacy::settle(card, fd)) return failed("write", "Could not write the card file.");
++    auto changes = changesOf(card);
++    for (const auto& [path, journal] : changes.standalone)
++        if (auto replayed = replayStandalone(card, fd, path, journal); !replayed.ok) return replayed;
++    for (const auto& path : changesOf(card).pending) {
++        Pending pending;
++        if (!readPending(path, pending)) return failed("read", "Could not read the card's journal.");
++        if (pending.started && !refreshChunks(fd, pending.storedBytes, pending.generation, pending.chunks))
++            return failed("write", "Could not write the card file.");
++        removePath(path);
++        syncDir(folderOf(card));
++    }
++    return {true, "", {}};
++}
++
++// Step 4: brings the card to the generation a .frond describes. Same generation: stale journals
++// go. One behind with a complete journal to this generation: the journal is replayed. A complete
++// journal to this generation is also replayed over a card already there, which is harmless. A
++// sound full copy at this generation, when the card isn't there yet, is renamed into place.
++// Anything else refuses. `payloadBytes` is what the .frond says the card holds.
++inline bool settleSession(const std::filesystem::path& card, uint64_t want, uint64_t payloadBytes) {
++    frondSdFile::Info info;
++    bool readable = false;
++    {
++        const int fd = ::open(card.c_str(), O_RDONLY | O_CLOEXEC);
++        Fd closer(fd);
++        uint8_t header[frondSdFile::headerBytes];
++        readable = fd >= 0 && readAllAt(fd, header, sizeof(header), 0) && frondSdFile::parseContainer(header, info);
++    }
++    std::error_code ec;
++    const auto full = fullPath(card, want);
++    if (want > 0 && (!readable || info.generation != want) && std::filesystem::exists(full, ec)) {
++        frondSdFile::Info copy;
++        if (!readHeader(full, copy) || copy.version != frondSdFile::versionV2 || copy.generation != want ||
++            copy.payloadBytes != payloadBytes || rename(full.c_str(), card.c_str()) < 0)
++            return false;
++        syncDir(folderOf(card));
++        removeJournalFiles(card);
++        return true;
++    }
++    if (!readable) return journalFiles(card).empty();  // the load's own check refuses it
++    const auto journalFile = journalPath(card, want);
++    Journal parsed;
++    const bool replay = want > 0 && info.version == frondSdFile::versionV2 && std::filesystem::exists(journalFile, ec) &&
++                        readJournal(journalFile, parsed) && parsed.to == want && parsed.storedBytes == info.stored() &&
++                        (info.generation == want || info.generation == parsed.from);
++    if (replay) {
++        if (!applyJournal(card, journalFile)) return false;
++        removeJournalFiles(card);
++        return true;
++    }
++    if (info.generation != want) return false;
++    removeJournalFiles(card);
++    return true;
++}
++
++// Settles a card file for a load of a .frond that describes it at `want` with `payloadBytes`.
++inline Result settle(const std::filesystem::path& card, uint64_t want, uint64_t payloadBytes) {
++    if (auto changes = settleChanges(card); !changes.ok) return changes;
++    if (!settleSession(card, want, payloadBytes)) return failed("unsettled", unsettledMessage);
++    return {true, "", {}};
++}
++
++// Settles a card file outside any machine: what the apps or a standalone change left is finished,
++// and a session save left beside it refuses.
++inline Result settle(const std::filesystem::path& card) {
++    if (auto changes = settleChanges(card); !changes.ok) return changes;
++    if (!journalFiles(card).empty()) return failed("unsettled", unsettledMessage);
++    return {true, "", {}};
++}
++
++using Progress = std::function<bool(uint64_t done, uint64_t total)>;
++
++// Checks a card file against its header and CRCs: a v1 file's whole CRC, or a v2 file's header
++// CRC and every chunk. Only reads. `progress` gets the stored bytes read; false from it cancels.
++inline Result verify(int fd, frondSdFile::Info& info, const Progress& progress = {}) {
++    uint8_t header[frondSdFile::headerBytes];
++    if (!readAllAt(fd, header, sizeof(header), 0) || !frondSdFile::parseContainer(header, info))
++        return failed("image", "That is not a Frond card file.");
++    if (sizeOf(fd) != int64_t(info.fileBytes())) return failed("image", "The card file is damaged.");
++    const uint64_t stored = info.stored();
++    std::vector<uint8_t> chunk(frondSdFile::chunkBytes);
++    frondSdFile::ChunkCrcs crcs;
++    uint32_t whole = 0;
++    for (uint64_t off = 0; off < stored; off += chunk.size()) {
++        const auto n = size_t(std::min<uint64_t>(chunk.size(), stored - off));
++        if (!readAllAt(fd, chunk.data(), n, frondSdFile::headerBytes + off))
++            return failed("read", "Could not read the card file.");
++        crcs.add(chunk.data(), n);
++        if (info.version == frondSdFile::versionV1) whole = uint32_t(mz_crc32(whole, chunk.data(), n));
++        if (progress && !progress(off + n, stored)) return failed("cancelled", "Cancelled.");
++    }
++    if (info.version == frondSdFile::versionV1)
++        return whole == info.crc ? Result{true, "", {}} : failed("image", "The card file is damaged.");
++    std::vector<uint8_t> raw(4 * crcs.table().size());
++    if (!readAllAt(fd, raw.data(), raw.size(), frondSdFile::headerBytes + stored))
++        return failed("read", "Could not read the card file.");
++    std::vector<uint32_t> table(crcs.table().size());
++    for (size_t i = 0; i < table.size(); ++i) table[i] = frondSdFile::get32(raw.data() + 4 * i);
++    if (table != crcs.table() || frondSdFile::headerCrc(header, table) != info.crc)
++        return failed("image", "The card file is damaged.");
++    return {true, "", {}};
++}
++
++inline Result verify(const std::filesystem::path& card, frondSdFile::Info& info, const Progress& progress = {}) {
++    const int fd = ::open(card.c_str(), O_RDONLY | O_CLOEXEC);
++    if (fd < 0) return failed("read", "Could not read the card file.");
++    Fd closer(fd);
++    return verify(fd, info, progress);
++}
++
++}  // namespace frondStorage
++
++#endif
+diff --git a/src/uarm/native/CardTool.h b/src/uarm/native/CardTool.h
+index a342f2a..13a1635 100644
+--- a/src/uarm/native/CardTool.h
++++ b/src/uarm/native/CardTool.h
+@@ -8,6 +8,7 @@
+ #include "SdImage.h"
+ #include "SessionIo.h"
+ #include "device_profile5.h"
++#include "storage/Settle.h"
+ 
+ #include <algorithm>
+ #include <array>
+@@ -246,32 +247,14 @@ class FileSnapshot : public CardSnapshot {
+     uint64_t size_;
+ };
+ 
+-// Checks a .frondsd (v1 or v2) against its header and CRCs; this is the first half of an export's progress.
+-inline Result verifySdFile(int fd, const frondSdFile::Info& info, uint64_t fileSize, const uint8_t* header, Run& run) {
++inline Result fromStorage(const frondStorage::Result& result) { return {result.ok, result.code, result.message}; }
++
++// Checks a .frondsd (v1 or v2) against its header and CRCs (frondStorage::verify); this is the
++// first half of an export's progress.
++inline Result verifySdFile(int fd, const frondSdFile::Info& info, uint64_t fileSize, const uint8_t*, Run& run) {
+     if (fileSize != info.fileBytes()) return fail("image", "The card file is damaged.");
+-    std::vector<uint8_t> chunk(frondSdFile::chunkBytes);
+-    frondSdFile::ChunkCrcs crcs;
+-    uint32_t whole = 0;
+-    for (uint64_t off = 0; off < info.payloadBytes; off += chunk.size()) {
+-        const auto n = size_t(std::min<uint64_t>(chunk.size(), info.payloadBytes - off));
+-        if (!frondSession::readAllAt(fd, chunk.data(), n, frondSdFile::headerBytes + off))
+-            return fail("read", "Could not read the card file.");
+-        crcs.add(chunk.data(), n);
+-        whole = uint32_t(mz_crc32(whole, chunk.data(), n));
+-        if (!run.report(off + n, 2 * info.payloadBytes)) return fail("cancelled", "Cancelled.");
+-    }
+-    if (info.version == frondSdFile::versionV1) {
+-        if (whole != info.crc) return fail("image", "The card file is damaged.");
+-        return {true, "", {}};
+-    }
+-    std::vector<uint8_t> raw(4 * crcs.table().size());
+-    if (!frondSession::readAllAt(fd, raw.data(), raw.size(), frondSdFile::headerBytes + info.payloadBytes))
+-        return fail("read", "Could not read the card file.");
+-    std::vector<uint32_t> table(crcs.table().size());
+-    for (size_t i = 0; i < table.size(); ++i) table[i] = frondSdFile::get32(raw.data() + 4 * i);
+-    if (table != crcs.table() || frondSdFile::headerCrc(header, table) != info.crc)
+-        return fail("image", "The card file is damaged.");
+-    return {true, "", {}};
++    frondSdFile::Info read;
++    return fromStorage(frondStorage::verify(fd, read, [&](uint64_t done, uint64_t total) { return run.report(done, 2 * total); }));
+ }
+ 
+ // A card file's image: raw sectors for an SD card or Memory Stick Pro, a .frondms for a classic
+@@ -288,10 +271,14 @@ inline Result exportCard(const std::filesystem::path& card, const std::filesyste
+     struct Closer { int fd; ~Closer() { ::close(fd); } } closer{fd};
+     uint8_t header[frondSdFile::headerBytes]{};
+     if (!frondSession::readAllAt(fd, header, sizeof(header), 0)) return fail("image", "That is not a Frond card file.");
+-    const std::string journal = card.filename().string() + ".journal-";
+-    for (std::filesystem::directory_iterator it(folderOf(card), ec), end; !ec && it != end; it.increment(ec))
+-        if (it->path().filename().string().rfind(journal, 0) == 0)
+-            return fail("unsettled", "The card has an unfinished save. Open its machine once to finish it.");
++    if (!std::memcmp(header, "FRONDSD", 7)) {
++        if (auto settled = frondStorage::settle(card); !settled.ok) return fromStorage(settled);
++    } else {
++        const std::string journal = card.filename().string() + ".journal-";
++        for (std::filesystem::directory_iterator it(folderOf(card), ec), end; !ec && it != end; it.increment(ec))
++            if (it->path().filename().string().rfind(journal, 0) == 0)
++                return fail("unsettled", frondStorage::unsettledMessage);
++    }
+     if (!std::memcmp(header, "FRONDMS", 7)) {
+         std::vector<uint8_t> physical;
+         if (!frondMs::decodeFile(card, physical)) return fail("image", "The card file is damaged.");
+@@ -301,9 +288,12 @@ inline Result exportCard(const std::filesystem::path& card, const std::filesyste
+         return writeMs(image, physical, run);
+     }
+     frondSdFile::Info info;
+-    if (!frondSdFile::parseHeader(header, info)) return fail("image", "That is not a Frond card file.");
++    if (!frondSession::readAllAt(fd, header, sizeof(header), 0) || !frondSdFile::parseHeader(header, info))
++        return fail("image", "That is not a Frond card file.");
+     if (auto space = checkSpace(image, info.payloadBytes); !space.ok) return space;
+-    if (auto verified = verifySdFile(fd, info, uint64_t(st.st_size), header, run); !verified.ok) return verified;
++    // Checking is the first half of the progress.
++    if (auto verified = verifySdFile(fd, info, uint64_t(frondStorage::sizeOf(fd)), header, run); !verified.ok)
++        return verified;
+     FileSnapshot snapshot(fd, info.payloadBytes);
+     auto result = frondSdCandidate::exportRaw(
+         snapshot, image, [&](uint64_t done, uint64_t total) { return run.report(info.payloadBytes + done, 2 * total); });
+@@ -316,8 +306,30 @@ inline uint64_t sizeOf(const std::filesystem::path& file) {
+     return ::stat(file.c_str(), &st) == 0 ? uint64_t(st.st_size) : 0;
+ }
+ 
+-// One operation from its words: make KIND SIZE OUTPUT, import IMAGE KIND OUTPUT or export CARD IMAGE.
+-// On success the message is "KIND BYTES" of the card file (for export, "image BYTES").
++// Finishes what a cut-off change or the apps left beside an SD or Pro card file. "settled GENERATION".
++inline Result settleCard(const std::filesystem::path& card) {
++    struct stat st{};
++    if (::stat(card.c_str(), &st) < 0 || !S_ISREG(st.st_mode)) return fail("read", "Could not read the card file.");
++    if (auto settled = frondStorage::settle(card); !settled.ok) return fromStorage(settled);
++    frondSdFile::Info info;
++    if (!frondStorage::readHeader(card, info)) return fail("image", "The card file is damaged.");
++    return {true, "settled " + std::to_string(info.generation), {}};
++}
++
++// Checks every byte of a settled SD or Pro card file against its CRCs. "verified GENERATION".
++inline Result verifyCard(const std::filesystem::path& card, const Progress& progress = {}) {
++    Run run{progress};
++    if (frondStorage::hasChanges(card) || !frondStorage::journalFiles(card).empty())
++        return fail("unsettled", frondStorage::unsettledMessage);
++    frondSdFile::Info info;
++    auto verified = frondStorage::verify(card, info, [&](uint64_t done, uint64_t total) { return run.report(done, total); });
++    if (!verified.ok) return fromStorage(verified);
++    return {true, "verified " + std::to_string(info.generation), {}};
++}
++
++// One operation from its words: make KIND SIZE OUTPUT, import IMAGE KIND OUTPUT, export CARD IMAGE,
++// settle CARD or verify CARD. On success the message is "KIND BYTES" of the card file (for export,
++// "image BYTES"; for settle and verify, "settled GENERATION" or "verified GENERATION").
+ inline Result run(const std::vector<std::string>& args, const Progress& progress = {}) {
+     Kind kind;
+     Result result;
+@@ -329,11 +341,15 @@ inline Result run(const std::vector<std::string>& args, const Progress& progress
+         if (!parseKind(args[2], kind)) return fail("usage", "The card kind is sd, ms or mspro.");
+         result = importImage(args[1], kind, args[3], progress);
+         if (result.ok) result.message = std::string(kindName(kind)) + " " + std::to_string(sizeOf(args[3]));
++    } else if (args.size() == 2 && args[0] == "settle") {
++        result = settleCard(args[1]);
++    } else if (args.size() == 2 && args[0] == "verify") {
++        result = verifyCard(args[1], progress);
+     } else if (args.size() == 3 && args[0] == "export") {
+         result = exportCard(args[1], args[2], progress);
+         if (result.ok) result.message = "image " + std::to_string(sizeOf(args[2]));
+     } else {
+-        return fail("usage", "Use: make KIND SIZE OUTPUT, import IMAGE KIND OUTPUT or export CARD IMAGE.");
++        return fail("usage", "Use: make KIND SIZE OUTPUT, import IMAGE KIND OUTPUT, export CARD IMAGE, settle CARD or verify CARD.");
+     }
+     return result;
+ }
+diff --git a/src/uarm/uarm/FrondSdImage.h b/src/uarm/uarm/FrondSdImage.h
+index 2320fee..a74edca 100644
+--- a/src/uarm/uarm/FrondSdImage.h
++++ b/src/uarm/uarm/FrondSdImage.h
+@@ -1,212 +1,7 @@
+ #ifndef FROND_SD_IMAGE_H
+ #define FROND_SD_IMAGE_H
+ 
+-#include <algorithm>
+-#include <cstdint>
+-#include <cstring>
+-#include <limits>
+-#include <vector>
+-
+-#define MINIZ_NO_ZLIB_COMPATIBLE_NAMES
+-#include "zip/miniz.h"
+-
+-// .frondsd sidecar, matching MemoryStickImage.h: 64-byte header then sectors.
+-// Identity stays in the media descriptor, not this header.
+-//
+-// v1: 8-11 version, 12-15 sector size, 16-23 payload bytes, 24-27 CRC32 of the payload.
+-// v2: as v1 to byte 23, then 24-27 header CRC, 28-35 content generation, 36-43 CRC table offset
+-// (always 64 + payload), 44-47 chunk bytes (1 MiB). The table after the payload has one CRC32 per
+-// chunk, the last one short. The header CRC covers the header with its own field zeroed, then the
+-// table. Bytes 48-63 are zero.
+-namespace frondSdFile {
+-constexpr size_t headerBytes = 64;
+-constexpr uint32_t versionV1 = 1, versionV2 = 2;
+-constexpr uint32_t sectorBytes = 512;
+-constexpr uint32_t chunkBytes = 1u << 20;
+-constexpr uint64_t maxPayloadBytes = 2048ull << 20;  // largest SD card Frond makes
+-
+-inline uint32_t get32(const uint8_t* p) {
+-    return uint32_t(p[0]) | (uint32_t(p[1]) << 8) | (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
+-}
+-inline uint64_t get64(const uint8_t* p) { return uint64_t(get32(p)) | (uint64_t(get32(p + 4)) << 32); }
+-inline void put32(uint8_t* p, uint32_t n) {
+-    for (unsigned i = 0; i < 4; ++i) p[i] = uint8_t(n >> (8 * i));
+-}
+-inline void put64(uint8_t* p, uint64_t n) {
+-    put32(p, uint32_t(n));
+-    put32(p + 4, uint32_t(n >> 32));
+-}
+-inline uint32_t crc32(const uint8_t* bytes, size_t size) { return mz_crc32(0, bytes, size); }
+-
+-inline bool validPayloadSize(uint64_t size) {
+-    return size >= sectorBytes && size % sectorBytes == 0 && size <= maxPayloadBytes;
+-}
+-
+-inline bool encode(const uint8_t* payload, uint64_t size, std::vector<uint8_t>& file) {
+-    if (!validPayloadSize(size)) return false;
+-    if (size > std::numeric_limits<size_t>::max()) return false;
+-    if (!payload) return false;
+-    const auto n = static_cast<size_t>(size);
+-    std::vector<uint8_t> out(headerBytes + n);
+-    std::memcpy(out.data(), "FRONDSD", 8);
+-    put32(out.data() + 8, versionV1);
+-    put32(out.data() + 12, sectorBytes);
+-    put64(out.data() + 16, size);
+-    put32(out.data() + 24, crc32(payload, n));
+-    std::memcpy(out.data() + headerBytes, payload, n);
+-    file.swap(out);
+-    return true;
+-}
+-
+-inline bool encode(const std::vector<uint8_t>& payload, std::vector<uint8_t>& file) {
+-    return encode(payload.data(), payload.size(), file);
+-}
+-
+-inline uint64_t chunkCount(uint64_t payloadBytes) { return (payloadBytes + chunkBytes - 1) / chunkBytes; }
+-
+-struct Info {
+-    uint32_t version{};
+-    uint64_t payloadBytes{};
+-    uint32_t crc{};  // v1: payload CRC, v2: header CRC
+-    uint64_t generation{};
+-    uint64_t fileBytes() const {
+-        return headerBytes + payloadBytes + (version == versionV2 ? 4 * chunkCount(payloadBytes) : 0);
+-    }
+-};
+-
+-inline bool parseHeader(const uint8_t* header, Info& info) {
+-    if (!header) return false;
+-    if (std::memcmp(header, "FRONDSD\0", 8) || get32(header + 12) != sectorBytes) return false;
+-    Info parsed;
+-    parsed.version = get32(header + 8);
+-    parsed.payloadBytes = get64(header + 16);
+-    parsed.crc = get32(header + 24);
+-    if (!validPayloadSize(parsed.payloadBytes)) return false;
+-    unsigned zeroFrom = 28;
+-    if (parsed.version == versionV2) {
+-        parsed.generation = get64(header + 28);
+-        if (get64(header + 36) != headerBytes + parsed.payloadBytes || get32(header + 44) != chunkBytes)
+-            return false;
+-        zeroFrom = 48;
+-    } else if (parsed.version != versionV1) {
+-        return false;
+-    }
+-    for (unsigned i = zeroFrom; i < headerBytes; ++i)
+-        if (header[i]) return false;
+-    info = parsed;
+-    return true;
+-}
+-
+-inline bool parseHeader(const uint8_t* header, uint64_t& payloadBytes, uint32_t& crc) {
+-    Info info;
+-    if (!parseHeader(header, info)) return false;
+-    payloadBytes = info.payloadBytes;
+-    crc = info.crc;
+-    return true;
+-}
+-
+-inline void tableBytes(const std::vector<uint32_t>& table, std::vector<uint8_t>& out) {
+-    out.resize(table.size() * 4);
+-    for (size_t i = 0; i < table.size(); ++i) put32(out.data() + 4 * i, table[i]);
+-}
+-
+-// The header CRC of a v2 header (any value in 24-27) and its table.
+-inline uint32_t headerCrc(const uint8_t* header, const std::vector<uint32_t>& table) {
+-    uint8_t copy[headerBytes];
+-    std::memcpy(copy, header, headerBytes);
+-    put32(copy + 24, 0);
+-    uint32_t crc = mz_crc32(0, copy, headerBytes);
+-    std::vector<uint8_t> bytes;
+-    tableBytes(table, bytes);
+-    return mz_crc32(crc, bytes.data(), bytes.size());
+-}
+-
+-inline void makeHeaderV2(uint8_t* header, uint64_t payloadBytes, uint64_t generation,
+-                         const std::vector<uint32_t>& table) {
+-    std::memset(header, 0, headerBytes);
+-    std::memcpy(header, "FRONDSD", 8);
+-    put32(header + 8, versionV2);
+-    put32(header + 12, sectorBytes);
+-    put64(header + 16, payloadBytes);
+-    put64(header + 28, generation);
+-    put64(header + 36, headerBytes + payloadBytes);
+-    put32(header + 44, chunkBytes);
+-    put32(header + 24, headerCrc(header, table));
+-}
+-
+-// Chunk CRCs of a payload fed in order, in pieces of any size.
+-class ChunkCrcs {
+-   public:
+-    void add(const uint8_t* bytes, size_t n) {
+-        while (n) {
+-            if (filled_ == 0) table_.push_back(0);
+-            const size_t take = std::min<size_t>(n, chunkBytes - filled_);
+-            table_.back() = mz_crc32(table_.back(), bytes, take);
+-            filled_ = (filled_ + take) % chunkBytes;
+-            bytes += take;
+-            n -= take;
+-        }
+-    }
+-    const std::vector<uint32_t>& table() const { return table_; }
+-
+-   private:
+-    std::vector<uint32_t> table_;
+-    size_t filled_{};
+-};
+-
+-inline bool encodeV2(const uint8_t* payload, uint64_t size, uint64_t generation, std::vector<uint8_t>& file) {
+-    if (!validPayloadSize(size) || !payload || size > std::numeric_limits<size_t>::max()) return false;
+-    const auto n = static_cast<size_t>(size);
+-    ChunkCrcs crcs;
+-    crcs.add(payload, n);
+-    std::vector<uint8_t> out(headerBytes + n);
+-    makeHeaderV2(out.data(), size, generation, crcs.table());
+-    std::memcpy(out.data() + headerBytes, payload, n);
+-    std::vector<uint8_t> table;
+-    tableBytes(crcs.table(), table);
+-    out.insert(out.end(), table.begin(), table.end());
+-    file.swap(out);
+-    return true;
+-}
+-
+-inline bool encodeV2(const std::vector<uint8_t>& payload, uint64_t generation, std::vector<uint8_t>& file) {
+-    return encodeV2(payload.data(), payload.size(), generation, file);
+-}
+-
+-// Reads the table of a v2 file in memory or after its header and checks the header CRC.
+-inline bool readTable(const uint8_t* header, const uint8_t* tableData, size_t tableSize, const Info& info,
+-                      std::vector<uint32_t>& table) {
+-    const uint64_t count = chunkCount(info.payloadBytes);
+-    if (info.version != versionV2 || tableSize != count * 4) return false;
+-    std::vector<uint32_t> parsed(static_cast<size_t>(count));
+-    for (size_t i = 0; i < parsed.size(); ++i) parsed[i] = get32(tableData + 4 * i);
+-    if (headerCrc(header, parsed) != info.crc) return false;
+-    table.swap(parsed);
+-    return true;
+-}
+-
+-// Accepts v1 and v2 and checks every byte.
+-inline bool decode(const uint8_t* file, size_t size, std::vector<uint8_t>& payload, Info* infoOut = nullptr) {
+-    if (!file || size < headerBytes) return false;
+-    Info info;
+-    if (!parseHeader(file, info)) return false;
+-    if (info.payloadBytes > std::numeric_limits<size_t>::max()) return false;
+-    if (size != info.fileBytes()) return false;
+-    const auto n = static_cast<size_t>(info.payloadBytes);
+-    if (info.version == versionV1) {
+-        if (crc32(file + headerBytes, n) != info.crc) return false;
+-    } else {
+-        std::vector<uint32_t> table;
+-        if (!readTable(file, file + headerBytes + n, size - headerBytes - n, info, table)) return false;
+-        ChunkCrcs crcs;
+-        crcs.add(file + headerBytes, n);
+-        if (crcs.table() != table) return false;
+-    }
+-    std::vector<uint8_t> candidate(file + headerBytes, file + headerBytes + n);
+-    payload.swap(candidate);
+-    if (infoOut) *infoOut = info;
+-    return true;
+-}
+-}  // namespace frondSdFile
++// The .frondsd format lives in the storage library.
++#include "storage/Container.h"
+ 
+ #endif
+diff --git a/src/uarm/uarm/SessionIo.h b/src/uarm/uarm/SessionIo.h
+index d488161..7e27fc3 100644
+--- a/src/uarm/uarm/SessionIo.h
++++ b/src/uarm/uarm/SessionIo.h
+@@ -5,6 +5,9 @@
+ #include "MachineFolder.h"
+ #include "md5.h"
+ #include "session/session_file5.h"
++#include "storage/Io.h"
++#include "storage/Journal.h"
++#include "storage/Settle.h"
+ 
+ #include <algorithm>
+ #include <array>
+@@ -67,23 +70,8 @@ inline void md5HexIdentity(const uint8_t digest[16], std::array<uint8_t, frondMa
+     }
+ }
+ 
+-inline bool createTemp(const std::filesystem::path& dir, const char* prefix, std::filesystem::path& out) {
+-    std::error_code ec;
+-    if (!std::filesystem::is_directory(dir, ec)) return false;
+-    std::string tmpl = (dir / prefix).string();
+-    tmpl += "XXXXXX";
+-    std::vector<char> name(tmpl.begin(), tmpl.end());
+-    name.push_back(0);
+-    const int fd = mkstemp(name.data());
+-    if (fd < 0) return false;
+-    close(fd);
+-    out = name.data();
+-    return true;
+-}
+-inline void removePath(const std::filesystem::path& p) {
+-    std::error_code ec;
+-    if (!p.empty()) std::filesystem::remove(p, ec);
+-}
++using frondStorage::createTemp;
++using frondStorage::removePath;
+ 
+ inline bool peekHeader(const uint8_t* data, size_t size, uint32_t& version, std::string& device) {
+     if (!data || size < SessionFile5::kHeaderBytes) return false;
+@@ -210,39 +198,9 @@ inline bool saveV7(const std::filesystem::path& dest, const Contents& contents)
+     return writeAtomicFrond(dest, session.GetSerializedSession(), session.GetSerializedSessionSize());
+ }
+ 
+-inline bool writeAllAt(int fd, const void* data, size_t n, uint64_t offset) {
+-    const auto* p = static_cast<const uint8_t*>(data);
+-    while (n) {
+-        const auto w = pwrite(fd, p, n, off_t(offset));
+-        if (w < 0 && errno == EINTR) continue;
+-        if (w <= 0) return false;
+-        p += w;
+-        n -= size_t(w);
+-        offset += uint64_t(w);
+-    }
+-    return true;
+-}
+-
+-inline bool readAllAt(int fd, void* data, size_t n, uint64_t offset) {
+-    auto* p = static_cast<uint8_t*>(data);
+-    while (n) {
+-        const auto r = pread(fd, p, n, off_t(offset));
+-        if (r < 0 && errno == EINTR) continue;
+-        if (r <= 0) return false;
+-        p += r;
+-        n -= size_t(r);
+-        offset += uint64_t(r);
+-    }
+-    return true;
+-}
+-
+-inline bool syncDir(const std::filesystem::path& dir) {
+-    const int fd = ::open(dir.empty() ? "." : dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+-    if (fd < 0) return false;
+-    const int rc = fsync(fd);
+-    ::close(fd);
+-    return rc == 0;
+-}
++using frondStorage::readAllAt;
++using frondStorage::syncDir;
++using frondStorage::writeAllAt;
+ 
+ // Table and header of a .frondsd v2 whose payload is already written after the header, then fsync.
+ inline bool finishSdV2(int fd, uint64_t size, uint64_t generation, const std::vector<uint32_t>& table) {
+@@ -587,304 +545,79 @@ inline bool streamInflateV6(const uint8_t* file, size_t size, Contents& out, con
+     return true;
+ }
+ 
+-// SD save journal, sd.frondsd.journal-<to generation>. Little-endian:
+-// header 64 bytes: "FRONDJNL", version u32 1, zero u32, payload bytes u64, from generation u64,
+-// to generation u64, record count u64, table count u64, 8 zero bytes;
+-// records: payload offset u64, length u32, bytes; then the complete new chunk table;
+-// trailer 16 bytes: "FRONDEND", CRC32 of everything before the trailer u32, zero u32.
+-// It is written as a temp and renamed, so a journal under its own name is complete.
+-constexpr size_t journalHeaderBytes = 64, journalTrailerBytes = 16, journalRecordBytes = 12;
++// SD and Memory Stick Pro save journals, <card>.journal-<to generation> beside the folder's card
++// file, in the storage library's format (storage/Journal.h). Saves write session journals.
++constexpr size_t journalHeaderBytes = frondStorage::journalHeaderBytes;
++constexpr size_t journalTrailerBytes = frondStorage::journalTrailerBytes;
++constexpr size_t journalRecordBytes = frondStorage::journalRecordBytes;
++
++// `kind` picks the card file: SD (sd.frondsd) or Memory Stick Pro (ms.frondmsp), which share all of this.
++inline std::filesystem::path fileCardPath(const std::filesystem::path& folder, uint32_t kind) {
++    return folder / frondMachine::fileCardSibling(kind);
++}
+ 
+-// `kind` picks the sidecar: SD (sd.frondsd) or Memory Stick Pro (ms.frondmsp), which share all of this.
+ inline std::filesystem::path sdJournalPath(const std::filesystem::path& folder, uint64_t toGeneration,
+                                            uint32_t kind = frondMachine::kindSd) {
+-    return folder / (std::string(frondMachine::fileCardJournalPrefix(kind)) + std::to_string(toGeneration));
++    return frondStorage::journalPath(fileCardPath(folder, kind), toGeneration);
+ }
+ 
+ // A full copy at `generation`, fsynced under this name before the .frond that describes it is
+ // published, then renamed onto sd.frondsd. Shares the journal prefix so frontends leave it alone.
+ inline std::filesystem::path sdFullPath(const std::filesystem::path& folder, uint64_t generation,
+                                         uint32_t kind = frondMachine::kindSd) {
+-    return folder / (std::string(frondMachine::fileCardJournalPrefix(kind)) + std::to_string(generation) + ".full");
++    return frondStorage::fullPath(fileCardPath(folder, kind), generation);
+ }
+ 
+ inline std::vector<std::filesystem::path> sdJournals(const std::filesystem::path& folder,
+                                                      uint32_t kind = frondMachine::kindSd) {
+-    std::vector<std::filesystem::path> found;
+-    std::error_code ec;
+-    const std::string prefix = frondMachine::fileCardJournalPrefix(kind);
+-    for (std::filesystem::directory_iterator it(folder, ec), end; !ec && it != end; it.increment(ec)) {
+-        const auto name = it->path().filename().string();
+-        if (name.compare(0, prefix.size(), prefix) == 0) found.push_back(it->path());
+-    }
+-    return found;
++    return frondStorage::journalFiles(fileCardPath(folder, kind));
+ }
+ 
+ inline void removeSdJournals(const std::filesystem::path& folder, const std::filesystem::path& keep = {},
+                              uint32_t kind = frondMachine::kindSd) {
+-    bool removed = false;
+-    for (const auto& path : sdJournals(folder, kind)) {
+-        if (!keep.empty() && path == keep) continue;
+-        removePath(path);
+-        removed = true;
+-    }
+-    if (removed) syncDir(folder);
++    frondStorage::removeJournalFiles(fileCardPath(folder, kind), keep);
+ }
+ 
+-// Builds a journal in a temp: records in any order, then finish() with the new table.
++// Builds a session journal in a temp: records in any order, then finish() with the new table.
+ class SdJournalWriter {
+    public:
+-    ~SdJournalWriter() { abandon(); }
+-
+     bool open(const std::filesystem::path& folder, uint64_t payloadBytes, uint64_t from, uint64_t to,
+               uint32_t kind = frondMachine::kindSd) {
+-        if (!createTemp(folder, ".frondsd.tmp-", temp_)) return false;
+-        kind_ = kind;
+-        fd_ = ::open(temp_.c_str(), O_RDWR | O_CLOEXEC);
+-        if (fd_ < 0) return false;
+-        folder_ = folder;
+-        payload_ = payloadBytes;
+-        from_ = from;
+-        to_ = to;
+-        end_ = journalHeaderBytes;
+-        return true;
+-    }
+-
+-    bool add(uint64_t offset, uint32_t length, const uint8_t* data) {
+-        if (fd_ < 0 || !cardRangeOk(payload_, offset, length)) return false;
+-        uint8_t rec[journalRecordBytes];
+-        frondSdFile::put64(rec, offset);
+-        frondSdFile::put32(rec + 8, length);
+-        if (!writeAllAt(fd_, rec, sizeof(rec), end_) || !writeAllAt(fd_, data, length, end_ + sizeof(rec)))
+-            return false;
+-        end_ += sizeof(rec) + length;
+-        ++records_;
+-        return true;
++        return writer_.open(fileCardPath(folder, kind), payloadBytes, from, to);
+     }
+-
+-    // Writes table, header and trailer, fsyncs and renames to its journal name.
++    bool add(uint64_t offset, uint32_t length, const uint8_t* data) { return writer_.add(offset, length, data); }
+     bool finish(const std::vector<uint32_t>& table, std::filesystem::path& journal) {
+-        if (fd_ < 0 || table.size() != frondSdFile::chunkCount(payload_)) return false;
+-        std::vector<uint8_t> tableBytes;
+-        frondSdFile::tableBytes(table, tableBytes);
+-        if (!writeAllAt(fd_, tableBytes.data(), tableBytes.size(), end_)) return false;
+-        end_ += tableBytes.size();
+-        uint8_t header[journalHeaderBytes]{};
+-        std::memcpy(header, "FRONDJNL", 8);
+-        frondSdFile::put32(header + 8, 1);
+-        frondSdFile::put64(header + 16, payload_);
+-        frondSdFile::put64(header + 24, from_);
+-        frondSdFile::put64(header + 32, to_);
+-        frondSdFile::put64(header + 40, records_);
+-        frondSdFile::put64(header + 48, table.size());
+-        if (!writeAllAt(fd_, header, sizeof(header), 0)) return false;
+-        uint32_t crc = 0;
+-        std::vector<uint8_t> buf(1u << 20);
+-        for (uint64_t off = 0; off < end_;) {
+-            const size_t n = size_t(std::min<uint64_t>(buf.size(), end_ - off));
+-            if (!readAllAt(fd_, buf.data(), n, off)) return false;
+-            crc = mz_crc32(crc, buf.data(), n);
+-            off += n;
+-        }
+-        uint8_t trailer[journalTrailerBytes]{};
+-        std::memcpy(trailer, "FRONDEND", 8);
+-        frondSdFile::put32(trailer + 8, crc);
+-        if (!writeAllAt(fd_, trailer, sizeof(trailer), end_) || fsync(fd_) != 0) return false;
+-        const int fd = fd_;
+-        fd_ = -1;
+-        if (::close(fd) != 0) return false;
+-        const auto dest = sdJournalPath(folder_, to_, kind_);
+-        if (rename(temp_.c_str(), dest.c_str()) < 0) return false;
+-        temp_.clear();
+-        if (!syncDir(folder_)) {
+-            removePath(dest);
+-            return false;
+-        }
+-        journal = dest;
+-        return true;
+-    }
+-
+-    void abandon() {
+-        if (fd_ >= 0) ::close(fd_);
+-        fd_ = -1;
+-        removePath(temp_);
+-        temp_.clear();
++        return writer_.finish(table, journal);
+     }
++    void abandon() { writer_.abandon(); }
+ 
+    private:
+-    std::filesystem::path folder_, temp_;
+-    int fd_{-1};
+-    uint64_t payload_{}, from_{}, to_{}, end_{}, records_{};
+-    uint32_t kind_{frondMachine::kindSd};
++    frondStorage::JournalWriter writer_;
+ };
+ 
+-struct SdJournal {
+-    uint64_t payloadBytes{}, from{}, to{}, records{};
+-    std::vector<uint32_t> table;
+-};
+-
+-// Checks a whole journal: trailer CRC, record bounds, exact length. Only reads it.
+-inline bool readSdJournal(int fd, uint64_t size, SdJournal& out) {
+-    if (size < journalHeaderBytes + journalTrailerBytes) return false;
+-    uint8_t header[journalHeaderBytes];
+-    uint8_t trailer[journalTrailerBytes];
+-    if (!readAllAt(fd, header, sizeof(header), 0) || !readAllAt(fd, trailer, sizeof(trailer), size - sizeof(trailer)))
+-        return false;
+-    if (std::memcmp(header, "FRONDJNL", 8) || frondSdFile::get32(header + 8) != 1 || frondSdFile::get32(header + 12))
+-        return false;
+-    for (size_t i = 56; i < sizeof(header); ++i)
+-        if (header[i]) return false;
+-    if (std::memcmp(trailer, "FRONDEND", 8) || frondSdFile::get32(trailer + 12)) return false;
+-    SdJournal parsed;
+-    parsed.payloadBytes = frondSdFile::get64(header + 16);
+-    parsed.from = frondSdFile::get64(header + 24);
+-    parsed.to = frondSdFile::get64(header + 32);
+-    parsed.records = frondSdFile::get64(header + 40);
+-    const uint64_t tableCount = frondSdFile::get64(header + 48);
+-    if (!frondSdFile::validPayloadSize(parsed.payloadBytes) || tableCount != frondSdFile::chunkCount(parsed.payloadBytes) ||
+-        parsed.to != parsed.from + 1)
+-        return false;
+-    const uint64_t body = size - journalTrailerBytes;
+-    uint32_t crc = 0;
+-    std::vector<uint8_t> buf(1u << 20);
+-    for (uint64_t off = 0; off < body;) {
+-        const size_t n = size_t(std::min<uint64_t>(buf.size(), body - off));
+-        if (!readAllAt(fd, buf.data(), n, off)) return false;
+-        crc = mz_crc32(crc, buf.data(), n);
+-        off += n;
+-    }
+-    if (crc != frondSdFile::get32(trailer + 8)) return false;
+-    uint64_t at = journalHeaderBytes;
+-    for (uint64_t i = 0; i < parsed.records; ++i) {
+-        uint8_t rec[journalRecordBytes];
+-        if (at + sizeof(rec) > body || !readAllAt(fd, rec, sizeof(rec), at)) return false;
+-        const uint64_t offset = frondSdFile::get64(rec);
+-        const uint32_t length = frondSdFile::get32(rec + 8);
+-        if (!cardRangeOk(parsed.payloadBytes, offset, length)) return false;
+-        at += sizeof(rec) + length;
+-    }
+-    if (at + tableCount * 4 != body) return false;
+-    std::vector<uint8_t> tableBytes(size_t(tableCount * 4));
+-    if (!readAllAt(fd, tableBytes.data(), tableBytes.size(), at)) return false;
+-    parsed.table.resize(size_t(tableCount));
+-    for (size_t i = 0; i < parsed.table.size(); ++i) parsed.table[i] = frondSdFile::get32(tableBytes.data() + 4 * i);
+-    out = std::move(parsed);
+-    return true;
+-}
++using SdJournal = frondStorage::Journal;
++using frondStorage::JournalStep;
+ 
++inline bool readSdJournal(int fd, uint64_t size, SdJournal& out) { return frondStorage::readJournal(fd, size, out); }
+ inline bool readSdJournal(const std::filesystem::path& path, SdJournal& out) {
+-    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+-    if (fd < 0) return false;
+-    struct stat st {};
+-    const bool ok = fstat(fd, &st) == 0 && readSdJournal(fd, uint64_t(st.st_size), out);
+-    ::close(fd);
+-    return ok;
++    return frondStorage::readJournal(path, out);
+ }
+ 
+-// Steps of applying a journal, for crash tests: pages and table, then header, then journal gone.
+-enum class JournalStep { pages = 1, header = 2, all = 3 };
++inline int64_t& sdJournalFailAfter() { return frondStorage::journalFailAfter(); }
+ 
+-// Test hook: when not negative, applying a journal fails after this many records, as ENOSPC or
+-// EIO would.
+-inline int64_t& sdJournalFailAfter() {
+-    static int64_t records = -1;
+-    return records;
+-}
+-
+-// Applies a complete journal to the sidecar in place: pages and table, fsync, header at the new
+-// generation, fsync, then deletes the journal. Applying it twice gives the same bytes.
++// Applies a complete journal to the card file in place (storage/Journal.h applyJournal).
+ inline bool applySdJournal(const std::filesystem::path& folder, const std::filesystem::path& journal,
+                            std::vector<uint32_t>* tableOut = nullptr, JournalStep stop = JournalStep::all,
+                            uint32_t kind = frondMachine::kindSd) {
+-    const int jfd = ::open(journal.c_str(), O_RDONLY | O_CLOEXEC);
+-    if (jfd < 0) return false;
+-    struct stat st {};
+-    SdJournal parsed;
+-    const int sfd = ::open((folder / frondMachine::fileCardSibling(kind)).c_str(), O_RDWR | O_CLOEXEC);
+-    struct stat sst {};
+-    bool ok = sfd >= 0 && fstat(jfd, &st) == 0 && readSdJournal(jfd, uint64_t(st.st_size), parsed) &&
+-              fstat(sfd, &sst) == 0 &&
+-              uint64_t(sst.st_size) == frondSdFile::headerBytes + parsed.payloadBytes + 4 * parsed.table.size();
+-    uint64_t at = journalHeaderBytes;
+-    std::vector<uint8_t> data;
+-    for (uint64_t i = 0; ok && i < parsed.records; ++i) {
+-        if (sdJournalFailAfter() >= 0 && i == uint64_t(sdJournalFailAfter())) {
+-            ok = false;
+-            break;
+-        }
+-        uint8_t rec[journalRecordBytes];
+-        ok = readAllAt(jfd, rec, sizeof(rec), at);
+-        if (!ok) break;
+-        const uint64_t offset = frondSdFile::get64(rec);
+-        const uint32_t length = frondSdFile::get32(rec + 8);
+-        data.resize(length);
+-        ok = readAllAt(jfd, data.data(), length, at + sizeof(rec)) &&
+-             writeAllAt(sfd, data.data(), length, frondSdFile::headerBytes + offset);
+-        at += sizeof(rec) + length;
+-    }
+-    ::close(jfd);
+-    if (ok) {
+-        std::vector<uint8_t> tableBytes;
+-        frondSdFile::tableBytes(parsed.table, tableBytes);
+-        ok = writeAllAt(sfd, tableBytes.data(), tableBytes.size(), frondSdFile::headerBytes + parsed.payloadBytes);
+-    }
+-    if (ok && stop != JournalStep::pages) {
+-        uint8_t header[frondSdFile::headerBytes];
+-        frondSdFile::makeHeaderV2(header, parsed.payloadBytes, parsed.to, parsed.table);
+-        ok = fsync(sfd) == 0 && writeAllAt(sfd, header, sizeof(header), 0) && fsync(sfd) == 0;
+-    }
+-    if (sfd >= 0) ::close(sfd);
+-    if (!ok) return false;
+-    if (stop == JournalStep::all) {
+-        removePath(journal);
+-        syncDir(folder);
+-    }
+-    if (tableOut) *tableOut = std::move(parsed.table);
+-    return true;
++    return frondStorage::applyJournal(fileCardPath(folder, kind), journal, tableOut, stop);
+ }
+ 
+-// Brings sd.frondsd to the generation the .frond describes. Same generation: stale journals go.
+-// One behind with a complete journal to this generation: the journal is replayed. A complete
+-// journal to this generation is also replayed over a sidecar already there, which is harmless.
+-// A sound full copy at this generation, when the sidecar isn't there yet, is renamed into place.
+-// Anything else refuses the load.
++// Brings the folder's card file to the generation the .frond describes (storage/Settle.h): what
++// Files… or a standalone change left is finished first, then the session save.
+ inline bool settleSdJournal(const std::filesystem::path& folder, const frondMachine::Media& card) {
+-    const uint32_t kind = card.kind;
+-    const auto sidecar = folder / frondMachine::fileCardSibling(kind);
+-    const uint64_t want = card.contentGeneration;
+-    std::ifstream in(sidecar, std::ios::binary);
+-    uint8_t header[frondSdFile::headerBytes];
+-    frondSdFile::Info info;
+-    const bool readable =
+-        in && in.read(reinterpret_cast<char*>(header), sizeof(header)) && frondSdFile::parseHeader(header, info);
+-    in.close();
+-    std::error_code ec;
+-    const auto full = sdFullPath(folder, want, kind);
+-    if (want > 0 && (!readable || info.generation != want) && std::filesystem::exists(full, ec)) {
+-        frondSdFile::Info copy;
+-        if (frondMachine::readSdHeader(full, copy) != frondMachine::SiblingStatus::ok ||
+-            copy.version != frondSdFile::versionV2 || copy.generation != want ||
+-            copy.payloadBytes != card.physicalSize || rename(full.c_str(), sidecar.c_str()) < 0)
+-            return false;
+-        syncDir(folder);
+-        removeSdJournals(folder, {}, kind);
+-        return true;
+-    }
+-    if (!readable) return sdJournals(folder, kind).empty();  // the sibling check refuses it
+-    const auto journal = sdJournalPath(folder, want, kind);
+-    SdJournal parsed;
+-    const bool replay = want > 0 && info.version == frondSdFile::versionV2 && std::filesystem::exists(journal, ec) &&
+-                        readSdJournal(journal, parsed) && parsed.to == want &&
+-                        parsed.payloadBytes == info.payloadBytes &&
+-                        (info.generation == want || info.generation == parsed.from);
+-    if (replay) {
+-        if (!applySdJournal(folder, journal, nullptr, JournalStep::all, kind)) return false;
+-        removeSdJournals(folder, {}, kind);
+-        return true;
+-    }
+-    if (info.generation != want) return false;
+-    removeSdJournals(folder, {}, kind);
+-    return true;
++    const auto result = frondStorage::settle(fileCardPath(folder, card.kind), card.contentGeneration, card.physicalSize);
++    if (!result.ok && result.code != "unsettled") std::cerr << result.message << std::endl;
++    return result.ok;
+ }
+ 
+ inline bool sessionPathIn(const std::filesystem::path& folder, std::filesystem::path& dest) {
+@@ -955,8 +688,9 @@ inline bool parseFolderSession(const uint8_t* data, size_t size, Contents& out)
+     return fromSession(session, out);
+ }
+ 
+-// A card file the frontend put in under --card-swap, checked as a new card of its kind: header,
+-// size and payload as a load does, and no journals or full copies beside it.
++// A card file the frontend put in under --card-swap, checked as a new card of its kind: what Files…
++// or a standalone change left beside it is settled, then header, size and payload as a load does,
++// and no session journals or full copies beside it.
+ inline bool swappedInCard(const std::filesystem::path& folder, const char* name, const CardSwap& swap,
+                           frondMachine::Media& out) {
+     if (!swap.identityGiven) {
+@@ -981,6 +715,10 @@ inline bool swappedInCard(const std::filesystem::path& folder, const char* name,
+         if (!frondMachine::msHeaderLooksRight(path, media.physicalSize, &media.contentGeneration)) return false;
+     } else {
+         media.kind = media.name == frondMachine::msProSibling ? frondMachine::kindMsPro : frondMachine::kindSd;
++        if (const auto settled = frondStorage::settleChanges(path); !settled.ok) {
++            std::cerr << settled.message << std::endl;
++            return false;
++        }
+         if (!sdJournals(folder, media.kind).empty()) {
+             std::cerr << "the card put in has unfinished save files beside it" << std::endl;
+             return false;

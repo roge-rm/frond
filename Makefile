@@ -85,6 +85,20 @@ test-session-v7: prepare
 		-o build/test-session-v7
 	./build/test-session-v7
 
+.PHONY: test-storage-settle
+test: test-storage-settle
+# The storage library's settle and verify: both apps' leftovers (read back with mtools), journal
+# v2 session and standalone journals cut off at each step, pending lists and side regions.
+test-storage-settle: prepare
+	$(CC) -std=gnu99 -O1 -g -Ibuild/source/src/common -c build/source/src/common/zip/miniz.c \
+		-o build/miniz-storage-settle.o
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/common \
+		tests/storage-settle.cpp build/source/src/common/session/session_file5.cpp \
+		build/source/src/common/md5.cpp build/source/src/uarm/uarm/sdcard.cpp build/miniz-storage-settle.o \
+		-o build/test-storage-settle
+	python3 tests/storage-settle.py build/test-storage-settle
+
 prepare: build/source/.prepared
 
 # Check input content on every invocation, including removed patches and the gitlink.
