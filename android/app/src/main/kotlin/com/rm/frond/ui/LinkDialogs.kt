@@ -29,7 +29,6 @@ import com.rm.frond.InfraredChoice
 import com.rm.frond.LinkStore
 import com.rm.frond.NetRelay
 import com.rm.frond.RunningModel
-import com.rm.frond.SerialLink
 import com.rm.frond.UsbLink
 
 internal fun relayText(s: NetRelay.Status): String = when (s.phase) {
@@ -218,9 +217,8 @@ enum class LinkKind { BEAM, BLUETOOTH, SERIAL, USB }
 fun LinkChoiceDialog(kind: LinkKind, model: RunningModel, onDismiss: () -> Unit) {
     val context = LocalContext.current
     when (kind) {
-        LinkKind.BEAM -> InfraredDialog(model.beam.choice, onDismiss) { onDismiss(); model.changeBeam(it) }
-        LinkKind.SERIAL -> RelayDialog("Serial port", listOf("Off", "Wait for a peer", "Connect to an address"), SerialLink,
-            model.serial.mode, onDismiss) { onDismiss(); model.changeSerial(it) }
+        LinkKind.BEAM -> ConnectionChoiceDialog("Infrared beaming", model.beam.choice, onDismiss) { onDismiss(); model.changeBeam(it) }
+        LinkKind.SERIAL -> ConnectionChoiceDialog("Serial port", model.serial.choice, onDismiss) { onDismiss(); model.changeSerial(it) }
         LinkKind.USB -> RelayDialog("USB HotSync", listOf("Off", "Wait for a peer", "Connect to an address"), UsbLink,
             model.usb.mode, onDismiss) { onDismiss(); model.changeUsb(it) }
         LinkKind.BLUETOOTH -> {
@@ -253,15 +251,15 @@ fun LinkChoiceDialog(kind: LinkKind, model: RunningModel, onDismiss: () -> Unit)
     }
 }
 
-// Off or one of the paired connections, for the running machine's infrared.
+// Off or one of the paired connections, for the running machine's infrared or serial port.
 @Composable
-fun InfraredDialog(current: String, onDismiss: () -> Unit, onChoose: (String) -> Unit) {
+fun ConnectionChoiceDialog(title: String, current: String, onDismiss: () -> Unit, onChoose: (String) -> Unit) {
     val context = LocalContext.current
     val choices = remember { InfraredChoice.choices(current, LinkStore.choices(InfraredChoice.folder(context))) }
     var picked by remember { mutableStateOf(current) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Infrared beaming") },
+        title = { Text(title) },
         text = {
             Column {
                 for ((value, label) in choices) {

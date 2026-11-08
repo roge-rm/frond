@@ -107,7 +107,7 @@ class RunningSheetsTest {
 
     @Test fun connectionRowsFollowTheDevice() {
         for (device in Device.entries) {
-            val rows = RunningSheets.connectionRows(device, off, off, false)
+            val rows = RunningSheets.connectionRows(device, off, false)
             assertEquals(ConnRow.BEAM, rows.first())
             assertEquals(device.id, device.hotSyncButton, ConnRow.HOTSYNC in rows)
             assertEquals(device.id, !device.serialAbsent, ConnRow.SERIAL in rows)
@@ -115,15 +115,15 @@ class RunningSheetsTest {
             assertEquals(device.id, !device.runs68k || device.bluetooth, ConnRow.BLUETOOTH in rows)
             assertEquals(device.id, device.camera, ConnRow.CAMERA in rows)
             assertFalse(ConnRow.DEBUGGER in rows)
-            assertFalse(rows.any { it == ConnRow.SERIAL_RETRY || it == ConnRow.USB_RETRY })
+            assertFalse(ConnRow.USB_RETRY in rows)
         }
     }
 
     @Test fun retryAndDebuggerRowsAppearWhenNeeded() {
         val device = Device.entries.first { it.serialPort && it.usb }
-        val rows = RunningSheets.connectionRows(device, gone, gone, true)
-        assertTrue(ConnRow.SERIAL_RETRY in rows && ConnRow.USB_RETRY in rows && ConnRow.DEBUGGER in rows)
-        // Infrared over a connection reconnects by itself, so it has no retry row.
+        val rows = RunningSheets.connectionRows(device, gone, true)
+        assertTrue(ConnRow.USB_RETRY in rows && ConnRow.DEBUGGER in rows)
+        // Infrared and serial over a connection reconnect by themselves, so they have no retry row.
         assertEquals(ConnRow.BEAM, rows[0])
     }
 

@@ -630,7 +630,7 @@ class RunningModel(
         IrLink.apply(activity.applicationContext, l, choice, name, device.label)
     }
 
-    // The serial port and USB HotSync over the network, as their relays say.
+    // The serial port over a connection, as SerialLink says, and USB HotSync over the network, as its relay says.
     var serial by mutableStateOf(SerialLink.status.value)
         private set
     var usb by mutableStateOf(UsbLink.status.value)
@@ -646,8 +646,12 @@ class RunningModel(
         activity.lifecycleScope.launch { DebugLink.status.collect { debugger = it } }
     }
 
-    fun changeSerial(mode: BeamMode) = device("Changing the serial port", "Couldn't change the serial port", false) { l ->
-        SerialLink.set(activity.applicationContext, l, mode)
+    // Off or link:<id>: kept in the machine's settings, then applied to the core and the link.
+    fun changeSerial(choice: String) = device("Changing the serial port", "Couldn't change the serial port", false) { l ->
+        sessionId?.let { id -> Sessions.updateSettings(activity.applicationContext, id) { it.copy(serial = choice) } }
+        activity.runOnUiThread { settings = settings.copy(serial = choice) }
+        if (InfraredChoice.linkId(choice) != null) FrondActivity.running?.askLocalNetwork()
+        SerialLink.apply(activity.applicationContext, l, choice, name, device.label)
     }
 
     fun changeUsb(mode: BeamMode) = device("Changing USB HotSync", "Couldn't change USB HotSync", false) { l ->

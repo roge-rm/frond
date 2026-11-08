@@ -64,13 +64,21 @@ fun MachineSettingsScreen(model: HomeModel) {
             if (rows.speed || rows.engine) Header("Speed", Modifier.padding(top = 16.dp))
             if (rows.speed) MachineSpeedRow(draft.settings, false) { model.changeMachineSettings(it) }
             if (rows.engine) MachineEngineRow(draft.settings, false) { model.changeMachineSettings(it) }
+            if (draft.device.infrared || draft.device.serialPort) Header("Connections", Modifier.padding(top = 16.dp))
             if (draft.device.infrared) {
-                Header("Connections", Modifier.padding(top = 16.dp))
                 val choices = remember(draft.settings.infrared) {
                     InfraredChoice.choices(draft.settings.infrared, LinkStore.choices(InfraredChoice.folder(context)))
                 }
                 Choice("Infrared", draft.settings.infrared, choices.map { it.first }, { v -> choices.first { it.first == v }.second }) {
                     model.changeMachineSettings(draft.settings.copy(infrared = it))
+                }
+            }
+            if (draft.device.serialPort) {
+                val choices = remember(draft.settings.serial) {
+                    InfraredChoice.choices(draft.settings.serial, LinkStore.choices(InfraredChoice.folder(context)))
+                }
+                Choice("Serial port", draft.settings.serial, choices.map { it.first }, { v -> choices.first { it.first == v }.second }) {
+                    model.changeMachineSettings(draft.settings.copy(serial = it))
                 }
             }
         }

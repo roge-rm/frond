@@ -17,7 +17,7 @@ import java.net.Socket
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
-// How a relayed endpoint (the serial port, USB HotSync, the debugger) reaches another machine on the network.
+// How a relayed endpoint (USB HotSync, the debugger) reaches another machine on the network.
 sealed class BeamMode {
     object Off : BeamMode()
     // Waits on all interfaces for one peer at a time.
@@ -541,15 +541,6 @@ abstract class NetRelay(
     }
 }
 
-// The TX's cradle serial port. serial-state is "tcp 127.0.0.1:PORT waiting|connected" or "off[ reason]". The core
-// keeps the client through reset, Palm sleep and loads. The E2 has no serial port.
-object SerialLink : NetRelay(5033, "serial-mode", "serial-state", "serial", "serial") {
-    const val DEFAULT_PORT = 5033
-
-    override fun coreLeftReason(state: String, port: Int): String? =
-        tcpLeftReason(state, port, "The emulator's serial port stopped.")
-}
-
 // USB HotSync on the TX, E2 and Zire 72. usb-state is "tcp 127.0.0.1:PORT waiting|connected PHASE" or "off[ reason]"; the
 // core keeps the client through reset, Palm sleep and loads, which only replug the cable.
 object UsbLink : NetRelay(5034, "usb-mode", "usb-state", "usb", "usb") {
@@ -597,7 +588,7 @@ object DebugLink : NetRelay(3333, "", "", "debugger", "debugger") {
     }
 }
 
-// For serial-state and usb-state: null while still tcp on port, otherwise the core's reason or fallback.
+// For usb-state: null while still tcp on port, otherwise the core's reason or fallback.
 fun tcpLeftReason(state: String, port: Int, fallback: String): String? {
     if (state.startsWith("tcp 127.0.0.1:$port ")) return null
     // "off REASON" after a failed switch; anything else (plain off, another port, a pty) has no reason to show.

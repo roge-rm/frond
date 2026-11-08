@@ -37,15 +37,15 @@ class InfraredChoiceTest {
     }
 
     @Test fun statusLine() {
-        assertEquals("Off", IrLink.Status().text)
+        assertEquals("Off", CoreLink.Status().text)
         assertEquals("Off. Restored keyboard owns the infrared UART.",
-            IrLink.Status("link:aa11", error = "Restored keyboard owns the infrared UART.").text)
-        assertEquals("Infrared: Unknown connection", IrLink.Status("link:cc33").text)
-        assertEquals("Infrared: connecting", IrLink.Status("link:aa11", active = true).text)
-        val joined = IrLink.Status("link:aa11", active = true, ir = LinkWire.IrStatus("joined", "Desk", machine = "Palm TX"))
+            CoreLink.Status("link:aa11", error = "Restored keyboard owns the infrared UART.").text)
+        assertEquals("Infrared: Unknown connection", CoreLink.Status("link:cc33").text)
+        assertEquals("Infrared: connecting", CoreLink.Status("link:aa11", active = true).text)
+        val joined = CoreLink.Status("link:aa11", active = true, ir = LinkWire.IrStatus("joined", "Desk", machine = "Palm TX"))
         assertEquals("Infrared: Desk, joined to Palm TX", joined.text)
         // Beaming over a connection keeps the keyboard off the port.
         assertTrue(joined.active)
-        assertFalse(IrLink.Status().active)
+        assertFalse(CoreLink.Status().active)
     }
 }

@@ -19,6 +19,7 @@ object LinkWire {
 
     // ChannelKind, CloseReason, PeerState and RefuseReason values on the wire.
     const val KIND_INFRARED = 1
+    const val KIND_SERIAL = 2
     const val CLOSE_NORMAL = 0
     const val CLOSE_GONE = 4
     enum class PeerState(val wire: Int, val text: String) {
@@ -227,22 +228,25 @@ object LinkWire {
         val busyBy: String = "", val far: String = "running", val core: Boolean = false,
     )
 
-    fun irText(s: IrStatus): String {
+    fun irText(s: IrStatus): String = channelText("Infrared", s)
+
+    // title is Infrared or Serial. A serial port whose far side closed shows as closed rather than asleep.
+    fun channelText(title: String, s: IrStatus): String {
         val far = s.machine.ifEmpty { s.device }
         return when (s.state) {
             "joined" -> when (s.far) {
-                "asleep" -> "Infrared: ${s.peer}, Palm asleep"
-                "paused" -> "Infrared: ${s.peer}, Palm paused"
-                else -> "Infrared: ${s.peer}, joined to $far"
+                "asleep" -> if (title == "Serial") "$title: ${s.peer}, port closed" else "$title: ${s.peer}, Palm asleep"
+                "paused" -> "$title: ${s.peer}, Palm paused"
+                else -> "$title: ${s.peer}, joined to $far"
             }
-            "waiting" -> "Infrared: waiting for a machine on ${s.peer}"
-            "busy" -> "Infrared on ${s.peer} is in use by ${s.busyBy}"
-            "notfound" -> "Infrared: ${s.peer} not found"
-            "keychanged" -> "Infrared: ${s.peer} key changed, pair again"
-            "forgotten" -> "Infrared: pair again with ${s.peer}"
-            "unknown" -> "Infrared: Unknown connection"
-            "nonetwork" -> "Infrared: local network access is off"
-            else -> "Infrared: connecting to ${s.peer}"
+            "waiting" -> "$title: waiting for a machine on ${s.peer}"
+            "busy" -> "$title on ${s.peer} is in use by ${s.busyBy}"
+            "notfound" -> "$title: ${s.peer} not found"
+            "keychanged" -> "$title: ${s.peer} key changed, pair again"
+            "forgotten" -> "$title: pair again with ${s.peer}"
+            "unknown" -> "$title: Unknown connection"
+            "nonetwork" -> "$title: local network access is off"
+            else -> "$title: connecting to ${s.peer}"
         }
     }
 }

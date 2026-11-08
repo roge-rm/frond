@@ -19,19 +19,19 @@ class RelayAddressTest {
 
     @Test
     fun addresses() {
-        assertEquals("192.168.1.20" to 5031, SerialLink.address("192.168.1.20:5031"))
-        assertEquals("10.0.2.2" to SerialLink.DEFAULT_PORT, SerialLink.address(" 10.0.2.2 "))
-        assertEquals("desk.local" to 6000, SerialLink.address("desk.local:6000"))
-        assertEquals("fe80::1" to 5032, SerialLink.address("[fe80::1]:5032"))
-        assertEquals("fe80::1" to SerialLink.DEFAULT_PORT, SerialLink.address("[fe80::1]"))
-        assertEquals("fe80::1" to SerialLink.DEFAULT_PORT, SerialLink.address("fe80::1"))
-        assertNull(SerialLink.address(""))
-        assertNull(SerialLink.address(":5030"))
-        assertNull(SerialLink.address("host:"))
-        assertNull(SerialLink.address("host:70000"))
-        assertNull(SerialLink.address("a host:5030"))
-        assertNull(SerialLink.address("[]:5030"))
-        assertNull(SerialLink.address("[fe80::1]5030"))
+        assertEquals("192.168.1.20" to 5031, UsbLink.address("192.168.1.20:5031"))
+        assertEquals("10.0.2.2" to UsbLink.DEFAULT_PORT, UsbLink.address(" 10.0.2.2 "))
+        assertEquals("desk.local" to 6000, UsbLink.address("desk.local:6000"))
+        assertEquals("fe80::1" to 5032, UsbLink.address("[fe80::1]:5032"))
+        assertEquals("fe80::1" to UsbLink.DEFAULT_PORT, UsbLink.address("[fe80::1]"))
+        assertEquals("fe80::1" to UsbLink.DEFAULT_PORT, UsbLink.address("fe80::1"))
+        assertNull(UsbLink.address(""))
+        assertNull(UsbLink.address(":5030"))
+        assertNull(UsbLink.address("host:"))
+        assertNull(UsbLink.address("host:70000"))
+        assertNull(UsbLink.address("a host:5030"))
+        assertNull(UsbLink.address("[]:5030"))
+        assertNull(UsbLink.address("[fe80::1]5030"))
     }
 
     @Test

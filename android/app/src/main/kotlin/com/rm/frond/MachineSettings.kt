@@ -68,12 +68,14 @@ data class MachineSettings(
     val barMode: BarMode = BarMode.AUTO_HIDE,
     // Infrared: off, or link:<id> for a connection (InfraredChoice). Applied at every start.
     val infrared: String = InfraredChoice.OFF,
+    // Serial: the same values. The LAN serial options are gone.
+    val serial: String = InfraredChoice.OFF,
 ) {
     fun json(): JSONObject = JSONObject().put("size", size.name).put("smoothing", smoothing)
         .put("sound", sound).put("fastAudio", fastAudio).put("microphone", microphone)
         .put("showKeyboard", showKeyboard).put("jogControls", jogControls.arg)
         .put("showJogControls", jogControls != JogControls.HIDDEN)
-        .put("engine", engine.arg).put("speed", speed.arg).put("barShown", barShown).put("barMode", barMode.arg).put("infrared", infrared).also { if (contrastSet) it.put("contrast", contrast) }
+        .put("engine", engine.arg).put("speed", speed.arg).put("barShown", barShown).put("barMode", barMode.arg).put("infrared", infrared).put("serial", serial).also { if (contrastSet) it.put("contrast", contrast) }
 
     fun applyTo(settings: Settings) = settings.copy(size = size, smoothing = smoothing, sound = sound)
 
@@ -132,6 +134,7 @@ data class MachineSettings(
                 barShown = json.optBoolean("barShown", fallback.barShown),
                 barMode = BarMode.entries.firstOrNull { it.arg == json.optString("barMode") } ?: fallback.barMode,
                 infrared = InfraredChoice.normalise(json.optString("infrared", fallback.infrared)),
+                serial = InfraredChoice.normalise(json.optString("serial", fallback.serial)),
             )
         }
     }

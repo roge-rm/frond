@@ -59,7 +59,6 @@ import com.rm.frond.RunningSheets.ConnRow
 import com.rm.frond.RunningSheets.DisplayRow
 import com.rm.frond.RunningSheets.Sheet
 import com.rm.frond.SdCard
-import com.rm.frond.SerialLink
 import com.rm.frond.UsbLink
 
 private val Faded @Composable get() = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
@@ -273,7 +272,7 @@ private fun ConnectionsSheet(model: RunningModel, actions: RunningBarActions) {
     var choosing by remember { mutableStateOf<LinkKind?>(null) }
     val device = model.device
     val debuggerShown = model.debugger.phase != NetRelay.Phase.OFF || model.debugger.error != null
-    for (row in RunningSheets.connectionRows(device, model.serial.phase, model.usb.phase, debuggerShown)) {
+    for (row in RunningSheets.connectionRows(device, model.usb.phase, debuggerShown)) {
         when (row) {
             ConnRow.BEAM -> {
                 val usable = RunningSheets.beamUsable(device, model.keyboard)
@@ -285,8 +284,7 @@ private fun ConnectionsSheet(model: RunningModel, actions: RunningBarActions) {
                 )
             }
             ConnRow.BLUETOOTH -> ConnItem("Bluetooth", device.bluetooth, if (device.bluetooth) bluetoothText(model.bluetooth, model.radio) else null) { choosing = LinkKind.BLUETOOTH }
-            ConnRow.SERIAL -> ConnItem("Serial port", device.serialPort, if (device.serialPort) relayText(model.serial) else null) { choosing = LinkKind.SERIAL }
-            ConnRow.SERIAL_RETRY -> SheetAction("Connect again") { SerialLink.retry() }
+            ConnRow.SERIAL -> ConnItem("Serial port", device.serialPort, if (device.serialPort) model.serial.text else null) { choosing = LinkKind.SERIAL }
             ConnRow.USB -> ConnItem("USB HotSync", device.usb, if (device.usb) relayText(model.usb) else null) { choosing = LinkKind.USB }
             ConnRow.USB_RETRY -> SheetAction("Connect again") { UsbLink.retry() }
             ConnRow.CAMERA -> ConnItem("Camera", false, null) { }

@@ -10,12 +10,10 @@ import org.junit.Test
 class NetRelayTest {
     @Test
     fun defaultPorts() {
-        assertEquals(5033, SerialLink.defaultPort)
-        assertEquals(SerialLink.DEFAULT_PORT, SerialLink.defaultPort)
         assertEquals(5034, UsbLink.defaultPort)
         assertEquals(UsbLink.DEFAULT_PORT, UsbLink.defaultPort)
         // Bluetooth has its own relay on 5032, and Connections use 5035.
-        assertEquals(setOf(5032, 5033, 5034, 5035), setOf(BtLink.DEFAULT_PORT, SerialLink.defaultPort, UsbLink.defaultPort, LinkWire.DEFAULT_PORT))
+        assertEquals(setOf(5032, 5034, 5035), setOf(BtLink.DEFAULT_PORT, UsbLink.defaultPort, LinkWire.DEFAULT_PORT))
         // gdb's usual remote port.
         assertEquals(3333, DebugLink.defaultPort)
         assertEquals(DebugLink.DEFAULT_PORT, DebugLink.defaultPort)
@@ -46,22 +44,10 @@ class NetRelayTest {
 
     @Test
     fun addressesTakeEachDefault() {
-        assertEquals("10.0.2.2" to 5033, SerialLink.address("10.0.2.2"))
         assertEquals("10.0.2.2" to 5034, UsbLink.address(" 10.0.2.2 "))
         assertEquals("fe80::1" to 5034, UsbLink.address("[fe80::1]"))
-        assertEquals("desk.local" to 6000, SerialLink.address("desk.local:6000"))
+        assertEquals("desk.local" to 6000, UsbLink.address("desk.local:6000"))
         assertNull(UsbLink.address("host:"))
-    }
-
-    @Test
-    fun serialState() {
-        // DesktopControl::SerialState and HostSerial::Describe.
-        assertNull(SerialLink.coreLeftReason("tcp 127.0.0.1:40123 waiting", 40123))
-        assertNull(SerialLink.coreLeftReason("tcp 127.0.0.1:40123 connected", 40123))
-        assertEquals("The emulator's serial port stopped.", SerialLink.coreLeftReason("off", 40123))
-        assertEquals("Could not listen.", SerialLink.coreLeftReason("off Could not listen.", 40123))
-        assertEquals("The emulator's serial port stopped.", SerialLink.coreLeftReason("tcp 127.0.0.1:40124 waiting", 40123))
-        assertEquals("The emulator's serial port stopped.", SerialLink.coreLeftReason("pty /dev/pts/3 connected", 40123))
     }
 
     @Test

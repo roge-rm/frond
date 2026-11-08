@@ -8,30 +8,32 @@ import kotlinx.coroutines.flow.StateFlow
 import org.json.JSONObject
 import java.io.File
 
-// The running machine's infrared over a connection, in the emulator's process. The core listens on a
-// Unix socket in a private folder (irda-mode unix:PATH); the link engine joins it to the chosen connection
-// as the desktop hub does. Set at every start from the machine's settings and when changed while it runs.
-object IrLink {
-    private const val TAG = "Frond"
-
+// The running machine's infrared or serial port over a connection, in the emulator's process. The core
+// listens on a Unix socket in a private folder (irda-mode or serial-mode unix:PATH); the link engine joins it
+// to the chosen connection as the desktop hub does. Set at every start from the machine's settings and when
+// changed while it runs. key is the hub's name for the kind (ir-attach, serial-attach, its events).
+open class CoreLink(
+    private val key: String, private val modeCommand: String, private val title: String, private val socketName: String,
+) {
     data class Status(
         // The machine's setting: off or link:<id>.
         val choice: String = InfraredChoice.OFF,
-        // The core's infrared is on a connection.
+        // The core's port is on a connection.
         val active: Boolean = false,
         val ir: LinkWire.IrStatus? = null,
         val error: String? = null,
+        val title: String = "Infrared",
     ) {
         val text: String get() = when {
             error != null -> "Off. $error"
-            !active && InfraredChoice.linkId(choice) != null -> "Infrared: Unknown connection"
+            !active && InfraredChoice.linkId(choice) != null -> "$title: Unknown connection"
             !active -> "Off"
-            ir != null -> LinkWire.irText(ir)
-            else -> "Infrared: connecting"
+            ir != null -> LinkWire.channelText(title, ir)
+            else -> "$title: connecting"
         }
     }
 
-    private val state = MutableStateFlow(Status())
+    private val state = MutableStateFlow(Status(title = title))
     val status: StateFlow<Status> get() = state
 
     private val lock = Any()
@@ -44,10 +46,10 @@ object IrLink {
         val folder = File(context.noBackupFilesDir, "link-run")
         if (!folder.isDirectory && !folder.mkdirs()) return null
         try { Os.chmod(folder.path, "700".toInt(8)) } catch (e: Exception) { return null }
-        return File(folder, "ir-${android.os.Process.myPid()}.sock").path
+        return File(folder, "$socketName-${android.os.Process.myPid()}.sock").path
     }
 
-    // Sets the core's infrared and the link for choice. Blocks on the control link, so never on the main
+    // Sets the core's port and the link for choice. Blocks on the control link, so never on the main
     // thread. Returns an error to show, or null.
     fun apply(context: Context, control: ControlLink, choice: String, machine: String, device: String): String? {
         synchronized(lock) {
@@ -55,33 +57,34 @@ object IrLink {
             if (id == null) {
                 detach()
                 val wasOn = state.value.active
-                state.value = Status(choice)
+                state.value = Status(choice, title = title)
                 if (wasOn) {
-                    val reply = control.request("irda-mode", "off", timeoutSeconds = 30)
+                    val reply = control.request(modeCommand, "off", timeoutSeconds = 30)
                     if (!reply.ok) return reply.message
                 }
                 return null
             }
-            val path = socketPath(context) ?: return "Couldn't make a folder for the infrared socket.".also { state.value = Status(choice, error = it) }
-            val reply = control.request("irda-mode", "unix:$path", timeoutSeconds = 30)
+            val path = socketPath(context)
+                ?: return "Couldn't make a folder for the ${title.lowercase()} socket.".also { state.value = Status(choice, error = it, title = title) }
+            val reply = control.request(modeCommand, "unix:$path", timeoutSeconds = 30)
             if (!reply.ok) {
                 detach()
-                state.value = Status(choice, error = reply.message)
+                state.value = Status(choice, error = reply.message, title = title)
                 return reply.message
             }
-            state.value = Status(choice, active = true)
-            val op = JSONObject().put("op", "ir-attach").put("machine", machine).put("device", device)
+            state.value = Status(choice, active = true, title = title)
+            val op = JSONObject().put("op", "$key-attach").put("machine", machine).put("device", device)
                 .put("link", id).put("socket", path).put("paused", paused)
             attach = op
             val c = connection ?: Links.open(context, preferHost = true) { event -> onEvent(event) }.also { connection = it }
-            c.setSticky("ir", op)
-            Log.i(TAG, "infrared: link $id, core on $path")
+            c.setSticky(key, op)
+            Log.i(TAG, "$key: link $id, core on $path")
             return null
         }
     }
 
     private fun onEvent(event: JSONObject) {
-        if (event.optString("type") != "ir") return
+        if (event.optString("type") != key) return
         synchronized(lock) {
             if (connection == null) return
             val ir = LinkWire.IrStatus(
@@ -99,14 +102,14 @@ object IrLink {
             if (paused == on) return
             paused = on
             attach = attach?.put("paused", on)
-            connection?.send(JSONObject().put("op", "ir-state").put("state", if (on) "paused" else "running"))
+            connection?.send(JSONObject().put("op", "$key-state").put("state", if (on) "paused" else "running"))
         }
     }
 
     private fun detach() {
         attach = null
         connection?.let {
-            it.setSticky("ir", null)
+            it.setSticky(key, null)
             it.close()
         }
         connection = null
@@ -116,7 +119,17 @@ object IrLink {
     fun stop() {
         synchronized(lock) {
             detach()
-            state.value = Status()
+            state.value = Status(title = title)
         }
     }
+
+    private companion object {
+        const val TAG = "Frond"
+    }
 }
+
+object IrLink : CoreLink("ir", "irda-mode", "Infrared", "ir")
+
+// Serial is lossless: the engine opens the core's socket only once the channel joins, so the Palm's DSR and DCD
+// mean the far port is open, and the far Palm's RTS low stops the link and drops this one's CTS.
+object SerialLink : CoreLink("serial", "serial-mode", "Serial", "serial")

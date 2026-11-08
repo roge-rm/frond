@@ -146,15 +146,19 @@ open class FrondActivity : SDLActivity() {
         link.whenConnected {
             Thread { SdCard.restorePending(applicationContext, link, sessionPath) }.apply { isDaemon = true }.start()
         }
-        // Infrared over a connection is set from the machine's settings at every start.
-        if (InfraredChoice.linkId(machineSettings.infrared) != null) {
+        // Infrared and serial over a connection are set from the machine's settings at every start.
+        val infraredLink = InfraredChoice.linkId(machineSettings.infrared) != null
+        val serialLink = InfraredChoice.linkId(machineSettings.serial) != null && launchDevice().serialPort
+        if (infraredLink || serialLink) {
             askLocalNetwork()
             link.whenConnected {
                 Thread({
                     val name = Sessions.forPath(applicationContext, sessionPath)?.name ?: launchDevice().label
-                    IrLink.apply(applicationContext, link, machineSettings.infrared, name, launchDevice().label)
+                    if (infraredLink) IrLink.apply(applicationContext, link, machineSettings.infrared, name, launchDevice().label)
                         ?.let { Log.w(TAG, "infrared: $it") }
-                }, "FrondInfrared").apply { isDaemon = true }.start()
+                    if (serialLink) SerialLink.apply(applicationContext, link, machineSettings.serial, name, launchDevice().label)
+                        ?.let { Log.w(TAG, "serial: $it") }
+                }, "FrondLinks").apply { isDaemon = true }.start()
             }
         }
         running = this
@@ -485,6 +489,7 @@ open class FrondActivity : SDLActivity() {
         stopped = false
         super.onStart()
         IrLink.setPaused(false)
+        SerialLink.setPaused(false)
     }
 
     // Hidden: SDL pauses the core and its audio. Saving here means a process kill while away keeps
@@ -494,6 +499,7 @@ open class FrondActivity : SDLActivity() {
         stopped = true
         // The core pauses in the background; a connection's far side sees the Palm paused.
         IrLink.setPaused(true)
+        SerialLink.setPaused(true)
         if (isFinishing || isChangingConfigurations) return
         saveInBackground()
     }

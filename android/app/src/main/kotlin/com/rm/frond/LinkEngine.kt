@@ -22,12 +22,15 @@ import java.nio.channels.SelectionKey
 import java.nio.channels.Selector
 import java.nio.channels.ServerSocketChannel
 import java.nio.channels.SocketChannel
+import java.io.ByteArrayOutputStream
 import java.util.ArrayDeque
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.Semaphore
 
 // The Android side of Connections, the same job as the desktop's frond --link-service (desktop/LinkHub.cpp)
 // and the same wire: the store, discovery, the TCP listener, links to paired installs and the running
-// machine's infrared socket. Clients (the Connections screen, the running machine) send it the hub's JSON
+// machine's infrared and serial sockets. Clients (the Connections screen, the running machine) send it the hub's JSON
 // ops and get its events. One thread runs everything: sockets on a Selector, the native link objects,
 // and every client op, posted from other threads.
 class LinkEngine(private val store: LinkStore, private val host: Host) {
@@ -71,7 +74,7 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         var remote: InetSocketAddress? = null
     }
 
-    private class Held(val ch: Int, val machine: String, val device: String)
+    private class Held(val ch: Int, val kind: Int, val machine: String, val device: String)
 
     private class PeerRun {
         var link: Conn? = null
@@ -95,7 +98,21 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
 
     private enum class St { IDLE, OPENING, WAITING, JOINED, BUSY }
 
-    private inner class Attach(val client: ClientState, val machine: String, val device: String, val link: String, val socketPath: String) {
+    private inner class Attach(
+        val client: ClientState, val machine: String, val device: String, val link: String, val socketPath: String,
+        val kind: Int = LinkWire.KIND_INFRARED,
+    ) {
+        val serial get() = kind == LinkWire.KIND_SERIAL
+        // Serial: the reader takes one buffer from the core at a time and waits on the gate until the mux has
+        // taken it all (outHeld is what didn't fit yet), so the core's queue fills and its CTS drops. Bytes
+        // from the link go to the writer thread; credit goes back as it writes them (unacked). pendingIn holds
+        // what came before the core socket was up.
+        var gate: Semaphore? = null
+        var outHeld: ByteArray? = null
+        var outAt = 0
+        var writer: LinkedBlockingQueue<ByteArray>? = null
+        var unacked = 0
+        val pendingIn = ByteArrayOutputStream()
         var core: LocalSocket? = null
         var coreGeneration = 0
         var coreUp = false
@@ -278,13 +295,7 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
 
     private fun dropClient(c: ClientState) {
         if (!clients.remove(c)) return
-        for (a in ArrayList(attaches)) {
-            if (a.client !== c) continue
-            unjoin(a, true)
-            attaches.remove(a)
-            closeCore(a)
-            matchPeer(a.link)
-        }
+        for (a in ArrayList(attaches)) if (a.client === c) removeAttach(a)
         if (pairOut.client === c) {
             pairConn?.let { closeConn(it, false) }
             pairOut = PairOut()
@@ -371,25 +382,25 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
                 pairOut = PairOut()
             }
             "pair-dismiss" -> if (code != 0L) endPairRequest("cancelled")
-            "ir-attach" -> {
-                if (attaches.any { it.client === c }) return
-                val a = Attach(c, op.optString("machine"), op.optString("device"), op.optString("link"), op.optString("socket"))
+            "ir-attach", "serial-attach" -> {
+                val kind = if (op.optString("op") == "ir-attach") LinkWire.KIND_INFRARED else LinkWire.KIND_SERIAL
+                if (attaches.any { it.client === c && it.kind == kind }) return
+                val a = Attach(c, op.optString("machine"), op.optString("device"), op.optString("link"), op.optString("socket"), kind)
                 a.paused = op.optBoolean("paused", false)
                 attaches += a
-                coreConnect(a)
+                // A serial port opens only once it's joined, so the Palm's DSR and DCD mean the far port is open.
+                if (!a.serial) coreConnect(a)
                 val r = run(a.link)
                 if (r.link == null && r.dialing == null) { r.nextTry = now(); r.backoff = 0 }
                 matchPeer(a.link)
+                syncCores()
             }
-            "ir-detach" -> for (a in ArrayList(attaches)) {
-                if (a.client !== c) continue
-                unjoin(a, true)
-                attaches.remove(a)
-                closeCore(a)
-                matchPeer(a.link)
+            "ir-detach", "serial-detach" -> {
+                val kind = if (op.optString("op") == "ir-detach") LinkWire.KIND_INFRARED else LinkWire.KIND_SERIAL
+                for (a in ArrayList(attaches)) if (a.client === c && a.kind == kind) removeAttach(a)
             }
             // The app went to the background (paused) or came back.
-            "ir-state" -> for (a in attaches) {
+            "ir-state", "serial-state" -> for (a in attaches) {
                 if (a.client !== c) continue
                 a.paused = op.optString("state") == "paused"
                 coreState(a, ownState(a))
@@ -592,28 +603,31 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
 
     // The link went: its channels are gone, the machines on it wait again.
     private fun linkDown(c: Conn) {
-        for (a in attaches) {
-            if (a.chLink !== c) continue
-            a.st = St.IDLE; a.ch = 0; a.chLink = null; a.farMachine = ""; a.farDevice = ""; a.farState = PeerState.RUNNING
-        }
+        for (a in attaches) if (a.chLink === c) clearChannel(a)
         if (c.peer.isNotEmpty()) runs[c.peer]?.let { r ->
             if (r.link === c) { r.link = null; r.held.clear(); r.nextTry = now() + LinkWire.backoff(0) }
             if (r.dialing === c) r.dialing = null
         }
+        // Serial bytes in flight are lost and the core's serial port closes (DSR and DCD drop).
+        syncCores()
     }
 
     private fun pump(c: Conn) {
         if (c !in conns || !c.connected) return
-        while (c.toWrite < WRITE_AHEAD) {
-            val out = when {
-                c.link != 0L && LinkNative.linkHasOutput(c.link) -> LinkNative.linkTakeOutput(c.link, WRITE_AHEAD)
-                c.pairing != 0L -> LinkNative.pairTakeOutput(c.pairing)
-                else -> null
+        // Then serial bytes the core held while the channel had no room, and what they make.
+        for (round in 0..1) {
+            while (c.toWrite < WRITE_AHEAD) {
+                val out = when {
+                    c.link != 0L && LinkNative.linkHasOutput(c.link) -> LinkNative.linkTakeOutput(c.link, WRITE_AHEAD)
+                    c.pairing != 0L -> LinkNative.pairTakeOutput(c.pairing)
+                    else -> null
+                }
+                if (out == null || out.isEmpty()) break
+                c.out.add(ByteBuffer.wrap(out))
+                flush(c)
+                if (c !in conns) return
             }
-            if (out == null || out.isEmpty()) break
-            c.out.add(ByteBuffer.wrap(out))
-            flush(c)
-            if (c !in conns) return
+            if (round == 1 || c.closing || !pullSerial(c)) break
         }
         flush(c)
     }
@@ -860,7 +874,9 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
 
     private fun joined(a: Attach, c: Conn, ch: Int, machine: String, device: String) {
         a.st = St.JOINED; a.ch = ch; a.chLink = c; a.farMachine = machine; a.farDevice = device; a.farState = PeerState.RUNNING
-        if (ownState(a) != PeerState.RUNNING) LinkNative.muxSendState(c.link, ch, ownState(a).wire)
+        // A serial port isn't open yet as it joins; only a paused Palm is worth saying.
+        val own = if (a.serial && !a.paused) PeerState.RUNNING else ownState(a)
+        if (own != PeerState.RUNNING) LinkNative.muxSendState(c.link, ch, own.wire)
     }
 
     private fun muxEvents(c: Conn) {
@@ -872,35 +888,40 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
             val a = attachOn(c, e.channel)
             when (e.kind) {
                 EventKind.OPEN_REQUEST ->
-                    // Serial and Bluetooth come later.
-                    if (e.channelKind != LinkWire.KIND_INFRARED) LinkNative.muxClose(c.link, e.channel, LinkWire.CLOSE_GONE)
-                    else irRequest(c, e)
+                    // Bluetooth comes later.
+                    if (e.channelKind != LinkWire.KIND_INFRARED && e.channelKind != LinkWire.KIND_SERIAL)
+                        LinkNative.muxClose(c.link, e.channel, LinkWire.CLOSE_GONE)
+                    else channelRequest(c, e)
                 EventKind.ACCEPTED -> if (a != null) joined(a, c, a.ch, e.machine, e.device)
                 EventKind.WAITING -> if (a != null) a.st = St.WAITING
                 EventKind.BUSY -> if (a != null) {
                     a.st = St.BUSY; a.ch = 0; a.chLink = null; a.busyBy = e.machine; a.retryAt = now() + BUSY_RETRY_MS
                 }
                 EventKind.DATA -> {
-                    if (a != null && a.st == St.JOINED && a.coreUp) writeCore(a, e.data)
-                    LinkNative.muxConsumed(c.link, e.channel, e.data.size)
+                    if (a != null && a.serial && a.st == St.JOINED) serialIn(a, e.data)
+                    else {
+                        if (a != null && a.st == St.JOINED && a.coreUp) writeCore(a, e.data)
+                        LinkNative.muxConsumed(c.link, e.channel, e.data.size)
+                    }
                 }
                 EventKind.CLOSED -> {
-                    if (a != null) { a.st = St.IDLE; a.ch = 0; a.chLink = null; a.retryAt = now() + 500; a.farMachine = "" }
+                    if (a != null) { clearChannel(a); a.retryAt = now() + 500 }
                     r.held.removeAll { it.ch == e.channel }
                 }
                 EventKind.STATE -> if (a != null) a.farState = PeerState.of(e.code)
             }
         }
         if (c in conns) matchPeer(c.peer)
+        syncCores()
     }
 
-    private fun irRequest(c: Conn, e: LinkWire.ChannelEvent) {
+    private fun channelRequest(c: Conn, e: LinkWire.ChannelEvent) {
         val r = run(c.peer)
         var idle: Attach? = null
         var pending: Attach? = null
         var joined: Attach? = null
         for (a in attaches) {
-            if (a.link != c.peer) continue
+            if (a.link != c.peer || a.kind != e.channelKind) continue
             when (a.st) {
                 St.IDLE, St.BUSY -> if (idle == null) idle = a
                 St.OPENING, St.WAITING -> if (pending == null) pending = a
@@ -914,7 +935,7 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         }
         if (pending != null) {
             // Both sides opened at once: the link's initiator keeps its own channel, the other yields.
-            if (c.outgoing) { LinkNative.muxWaiting(c.link, e.channel); r.held += Held(e.channel, e.machine, e.device); return }
+            if (c.outgoing) { LinkNative.muxWaiting(c.link, e.channel); r.held += Held(e.channel, e.channelKind, e.machine, e.device); return }
             LinkNative.muxClose(c.link, pending.ch, LinkWire.CLOSE_NORMAL)
             LinkNative.muxAccept(c.link, e.channel, pending.machine, pending.device)
             joined(pending, c, e.channel, e.machine, e.device)
@@ -922,7 +943,7 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         }
         if (joined != null) { LinkNative.muxBusy(c.link, e.channel, joined.farMachine, joined.farDevice); return }
         LinkNative.muxWaiting(c.link, e.channel)
-        r.held += Held(e.channel, e.machine, e.device)
+        r.held += Held(e.channel, e.channelKind, e.machine, e.device)
     }
 
     private fun matchPeer(hex: String) {
@@ -932,25 +953,34 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         if (!c.up || c.link == 0L || linkState(c) != LinkState.UP) return
         for (a in attaches) {
             if (a.link != hex || !(a.st == St.IDLE || a.st == St.BUSY) || a.retryAt > now()) continue
-            if (r.held.isNotEmpty()) {
-                val h = r.held.removeAt(0)
+            val at = r.held.indexOfFirst { it.kind == a.kind }
+            if (at >= 0) {
+                val h = r.held.removeAt(at)
                 if (LinkNative.muxAccept(c.link, h.ch, a.machine, a.device)) {
                     joined(a, c, h.ch, h.machine, h.device)
                     continue
                 }
             }
-            val ch = LinkNative.muxOpen(c.link, LinkWire.KIND_INFRARED, a.machine, a.device)
+            val ch = LinkNative.muxOpen(c.link, a.kind, a.machine, a.device)
             if (ch == 0) continue
             a.st = St.OPENING; a.ch = ch; a.chLink = c
         }
-        // Held requests while every machine here is joined are busy.
-        val joined = attaches.firstOrNull { it.link == hex && it.st == St.JOINED }
-        val spare = attaches.any { it.link == hex && it.st != St.JOINED }
-        if (joined != null && !spare) {
-            for (h in r.held) LinkNative.muxBusy(c.link, h.ch, joined.farMachine, joined.farDevice)
-            r.held.clear()
+        // Held requests of a kind while every machine here of that kind is joined are busy.
+        for (kind in listOf(LinkWire.KIND_INFRARED, LinkWire.KIND_SERIAL)) {
+            val joined = attaches.firstOrNull { it.link == hex && it.kind == kind && it.st == St.JOINED } ?: continue
+            if (attaches.any { it.link == hex && it.kind == kind && it.st != St.JOINED }) continue
+            val busy = r.held.filter { it.kind == kind }
+            for (h in busy) LinkNative.muxBusy(c.link, h.ch, joined.farMachine, joined.farDevice)
+            r.held.removeAll(busy.toSet())
         }
         pump(c)
+    }
+
+    private fun removeAttach(a: Attach) {
+        unjoin(a, true)
+        attaches.remove(a)
+        dropCore(a)
+        matchPeer(a.link)
     }
 
     private fun unjoin(a: Attach, closeChannel: Boolean) {
@@ -960,14 +990,43 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
             pump(c)
         }
         a.st = St.IDLE; a.ch = 0; a.chLink = null
+        a.unacked = 0; a.pendingIn.reset(); a.outHeld = null
     }
 
-    // ---- The core's infrared socket ----
+    // The channel is gone; the machine waits for the next one.
+    private fun clearChannel(a: Attach) {
+        a.st = St.IDLE; a.ch = 0; a.chLink = null; a.farMachine = ""; a.farDevice = ""; a.farState = PeerState.RUNNING
+        a.unacked = 0; a.pendingIn.reset()
+    }
+
+    // ---- The core's infrared and serial sockets ----
 
     private fun closeCore(a: Attach) {
         a.coreGeneration++
         try { a.core?.close() } catch (_: IOException) {}
         a.core = null
+        // Lets a serial reader waiting on the gate see the socket is gone, and ends the writer.
+        a.gate?.release()
+        a.gate = null
+        a.writer?.offer(ByteArray(0))
+        a.writer = null
+        a.outHeld = null
+    }
+
+    private fun dropCore(a: Attach) {
+        closeCore(a)
+        a.coreUp = false
+        a.unacked = 0
+        a.pendingIn.reset()
+    }
+
+    // Serial ports are open only while joined: opened as the channel joins, closed as it goes.
+    private fun syncCores() {
+        for (a in ArrayList(attaches)) {
+            if (!a.serial) continue
+            if (a.st != St.JOINED) { if (a.core != null || a.coreUp) dropCore(a) }
+            else if (a.core == null && !a.coreUp && now() >= a.nextCoreTry) coreConnect(a)
+        }
     }
 
     private fun coreConnect(a: Attach) {
@@ -985,24 +1044,55 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         a.coreUp = true
         val generation = a.coreGeneration
         coreState(a, ownState(a))
+        val gate = if (a.serial) Semaphore(1) else null
+        if (a.serial) {
+            // Little held in the socket either way, so back-pressure reaches the core soon.
+            try { s.sendBufferSize = SERIAL_AHEAD; s.receiveBufferSize = SERIAL_AHEAD } catch (_: IOException) {}
+            a.gate = gate
+            val queue = LinkedBlockingQueue<ByteArray>()
+            a.writer = queue
+            Thread({
+                try {
+                    val output = s.outputStream
+                    while (true) {
+                        val bytes = queue.take()
+                        if (bytes.isEmpty()) break
+                        output.write(bytes)
+                        post { if (a in attaches && a.coreGeneration == generation) serialWritten(a, bytes.size) }
+                    }
+                } catch (_: IOException) {
+                } catch (_: InterruptedException) {}
+            }, "FrondLinkSerialOut").apply { isDaemon = true }.start()
+            if (a.pendingIn.size() > 0) {
+                val held = a.pendingIn.toByteArray()
+                a.pendingIn.reset()
+                a.unacked += held.size
+                queue.offer(held)
+            }
+        }
         // Bytes from the core come in on their own thread and are handled on the engine's.
         Thread({
-            val buffer = ByteArray(4096)
+            val buffer = ByteArray(if (gate != null) SERIAL_AHEAD else 4096)
             try {
                 val input = s.inputStream
                 while (true) {
+                    gate?.acquire()
+                    if (a.coreGeneration != generation) break
                     val n = input.read(buffer)
                     if (n < 0) break
                     val bytes = buffer.copyOf(n)
                     post { if (a in attaches && a.coreGeneration == generation) coreBytes(a, bytes) }
                 }
-            } catch (_: IOException) {}
+            } catch (_: IOException) {
+            } catch (_: InterruptedException) {}
             post { if (a in attaches && a.coreGeneration == generation) coreClosed(a) }
         }, "FrondLinkCore").apply { isDaemon = true }.start()
     }
 
-    // Sleep, load or reset closed the core's port; it reopens on wake.
+    // Sleep, load or reset closed the core's port; infrared reopens on wake, serial while still joined.
     private fun coreClosed(a: Attach) {
+        // Serial bytes the core never took are lost with the socket; their credit goes back.
+        if (a.unacked > 0) serialWritten(a, a.unacked)
         closeCore(a)
         val was = a.coreUp
         a.coreUp = false
@@ -1015,6 +1105,7 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
     }
 
     private fun coreBytes(a: Attach, data: ByteArray) {
+        if (a.serial) { serialOut(a, data); return }
         if (a.st != St.JOINED) return  // nobody in range
         val c = a.chLink ?: return
         if (c !in conns || c.link == 0L) return
@@ -1033,6 +1124,50 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
             LinkNative.muxSendState(c.link, a.ch, state.wire)
             pump(c)
         }
+    }
+
+    // ---- Serial, lossless: bytes move only as far as the other side has room ----
+
+    // Bytes from the link; credit goes back once the writer has given them to the core.
+    private fun serialIn(a: Attach, data: ByteArray) {
+        val w = a.writer
+        if (a.coreUp && w != null) { a.unacked += data.size; w.offer(data) } else a.pendingIn.write(data)
+    }
+
+    private fun serialWritten(a: Attach, n: Int) {
+        val c = a.chLink ?: return
+        if (c !in conns || c.link == 0L) return
+        val k = minOf(n, a.unacked)
+        a.unacked -= k
+        if (k > 0) {
+            LinkNative.muxConsumed(c.link, a.ch, k)
+            pump(c)
+        }
+    }
+
+    // A buffer the reader took from the core: what the mux has room for goes now, the rest when it drains.
+    private fun serialOut(a: Attach, data: ByteArray) {
+        a.outHeld = data
+        a.outAt = 0
+        serialPull(a)
+        a.chLink?.let { pump(it) }
+    }
+
+    // Moves held core bytes into the mux; the reader goes on once they're all in.
+    private fun serialPull(a: Attach): Boolean {
+        val held = a.outHeld ?: return false
+        val c = a.chLink
+        if (a.st != St.JOINED || c == null || c !in conns || c.link == 0L) return false
+        val took = LinkNative.muxSend(c.link, a.ch, held, a.outAt, held.size - a.outAt)
+        a.outAt += took
+        if (a.outAt >= held.size) { a.outHeld = null; a.gate?.release() }
+        return took > 0
+    }
+
+    private fun pullSerial(c: Conn): Boolean {
+        var moved = false
+        for (a in attaches) if (a.serial && a.chLink === c && serialPull(a)) moved = true
+        return moved
     }
 
     // ---- Discovery ----
@@ -1088,7 +1223,7 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
 
     // ---- Status ----
 
-    private fun irStatus(a: Attach): JSONObject {
+    private fun status(a: Attach): JSONObject {
         val p = store.find(a.link)
         val r = runs[a.link]
         val state = when {
@@ -1102,14 +1237,16 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
             r != null && r.failed && r.link == null -> "notfound"
             else -> "connecting"
         }
-        return JSONObject().put("type", "ir").put("peer", p?.name ?: "").put("state", state).put("machine", a.farMachine)
+        return JSONObject().put("type", if (a.serial) "serial" else "ir").put("peer", p?.name ?: "").put("state", state).put("machine", a.farMachine)
             .put("device", a.farDevice).put("busyBy", a.busyBy).put("core", a.coreUp).put("far", a.farState.text)
     }
 
-    private fun peerChannels(hex: String): String {
-        val parts = attaches.filter { it.link == hex && it.st == St.JOINED }.map { "${it.machine} – ${it.farMachine.ifEmpty { it.farDevice }}" }
-        return if (parts.isEmpty()) "" else "Infrared: " + parts.joinToString(", ")
-    }
+    private fun peerChannels(hex: String): String =
+        listOf(LinkWire.KIND_INFRARED to "Infrared: ", LinkWire.KIND_SERIAL to "Serial: ").mapNotNull { (kind, title) ->
+            val parts = attaches.filter { it.link == hex && it.kind == kind && it.st == St.JOINED }
+                .map { "${it.machine} – ${it.farMachine.ifEmpty { it.farDevice }}" }
+            if (parts.isEmpty()) null else title + parts.joinToString(", ")
+        }.joinToString(" · ")
 
     private fun snapshot(): JSONObject {
         val list = JSONArray()
@@ -1162,7 +1299,8 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
             } else if (want || r.held.isNotEmpty()) r.idleSince = t
         }
         // Cores: reconnect after sleep, load or reset.
-        for (a in ArrayList(attaches)) if (!a.coreUp && a.core == null && t >= a.nextCoreTry) coreConnect(a)
+        for (a in ArrayList(attaches)) if (!a.serial && !a.coreUp && a.core == null && t >= a.nextCoreTry) coreConnect(a)
+        syncCores()
         for (a in ArrayList(attaches)) if ((a.st == St.BUSY || a.st == St.IDLE) && a.retryAt <= t) matchPeer(a.link)
         // Discovery.
         val active = discoveryActive()
@@ -1178,7 +1316,7 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         if (code != 0L && t - codeAt >= PAIR_CODE_MS) endPairRequest("expired")
         // Status.
         for (a in attaches) {
-            val s = irStatus(a)
+            val s = status(a)
             if (s.toString() != a.lastStatus?.toString()) { a.lastStatus = s; sendTo(a.client, s) }
         }
         if (watchers() > 0) {
@@ -1200,6 +1338,8 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         // A closing connection's last bytes get this long to go.
         const val CLOSING_MS = 3000L
         const val CORE_RETRY_MS = 250L
+        // Serial bytes held for the core socket each way before the core's own queue fills and its CTS drops.
+        const val SERIAL_AHEAD = 4096
         const val BUSY_RETRY_MS = 5000L
         const val PAIR_COOLDOWN_MS = 60000L
         const val PAIR_CODE_MS = 120000L
