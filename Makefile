@@ -52,6 +52,13 @@ test-card-swap: out/frond
 	./build/test-card-swap
 	python3 tests/card-swap-rom.py
 
+.PHONY: test-card-reinsert
+test: test-card-reinsert
+# A card put back right after an eject, with no guest time between, on the T|X, E2, Zire 72 and TG50
+# smoke sessions there are (tests/card-reinsert-rom.py).
+test-card-reinsert: out/frond
+	python3 tests/card-reinsert-rom.py
+
 .PHONY: test-card-tool
 test: test-card-tool
 # The card tool (make, import, export) as a library, then as `frond-core --card` (tests/card-tool.py).
