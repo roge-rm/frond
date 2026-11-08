@@ -706,9 +706,10 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             if (command == "ms-type") msExportPending = false;
             if (command == "ms-protection" || command == "ms-read-only") { protectionKnown = false; refresh(); }
             if (command == "microphone-mode") { microphoneArmed = false; microphoneState->setText(message); }
-            if (command == "serial-mode") showSerial("off " + message);  // the core is now off
+            // A failed switch leaves the core off; the picker and the hub's attach follow it.
+            if (command == "serial-mode") { showSerial("off " + message); attachSerial(); }
             if (command == "usb-mode") showUsb("off " + message);
-            if(command=="irda-mode")showIrda("off error: "+message);
+            if (command == "irda-mode") { showIrda("off error: " + message); attachInfrared(); }
             if (command == "display" && contrastPending) { const QSignalBlocker blocked(contrast); contrast->setValue(runningPreferences.contrast); }
             if (command == "display") { contrastPending = false; liveDisplay({}); }
             if (stopping) {

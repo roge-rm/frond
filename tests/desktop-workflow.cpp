@@ -105,6 +105,11 @@ struct HubUser {
         client.setSocketPath(hub.socket()); client.setHubEnvironment(hub.env);
         QObject::connect(&client, &LinkClient::message, &client, [this](const QJsonObject& m) { got.push_back(m); });
     }
+    // The hub the windows use, with this process's environment.
+    explicit HubUser(const QString& socket) {
+        client.setSocketPath(socket);
+        QObject::connect(&client, &LinkClient::message, &client, [this](const QJsonObject& m) { got.push_back(m); });
+    }
     QJsonObject last(const QString& type) const {
         for (auto it = got.rbegin(); it != got.rend(); ++it) if (it->value("type").toString() == type) return *it;
         return {};
@@ -4024,6 +4029,67 @@ for line in s.makefile('rb'):
         QTRY_COMPARE_WITH_TIMEOUT(a1->serial(), QString("waiting"), 5000);
         a1->client.setSticky("serial", {}); a1->client.setSticky("ir", {}); b1->client.setSticky("ir", {});
         for (auto* user : {&a, &b}) killHub(*user);
+    }
+    // A live switch from a connection that the core refuses leaves the port off and the hub's
+    // attach gone, for serial and infrared.
+    void linkSwitchFails() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QTemporaryDir files;
+        QFile source(files.filePath("input.frond")); QVERIFY(source.open(QIODevice::WriteOnly));
+        source.write("session"); source.close();
+        QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly));
+        core.write(R"PY(#!/usr/bin/python3
+import socket,sys
+s=socket.socket(socket.AF_UNIX);s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+modes={b'serial-mode':b'off',b'irda-mode':b'off'}
+for line in s.makefile('rb'):
+    i,cmd,arg=line.rstrip(b'\n').split(b'\t');arg=bytes.fromhex(arg.decode())
+    message={b'device-state':b'palm-tx',b'sd-state':b'none',b'network-state':b'disabled',b'keyboard-state':b'detached'}.get(cmd,b'done')
+    if cmd in modes:
+        if arg==b'pty':
+            s.sendall(i+b'\terror\t'+(b'serial' if cmd==b'serial-mode' else b'infrared')+b'\t'+b'No PTY here'.hex().encode()+b'\n');continue
+        modes[cmd]=arg
+        message=b'unix '+arg[5:]+b' waiting' if arg.startswith(b'unix:') else arg
+        if cmd==b'irda-mode' and arg.startswith(b'unix:'): message=b'unix:'+arg[5:]+b' '+arg[5:]+b' waiting'
+    if cmd==b'serial-state': message=modes[b'serial-mode']
+    if cmd==b'save':open(arg.decode(),'w').write('saved')
+    s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
+    if cmd==b'quit':break
+)PY");
+        core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner));
+        HubUser other(frondLink::hubSocketPath());
+        FakeSerial otherSerial(QFileInfo(frondLink::hubSocketPath()).path() + "/sw-s.sock");
+        FakeIr otherIr(QFileInfo(frondLink::hubSocketPath()).path() + "/sw-i.sock");
+        other.client.setSticky("serial", {{"op", "serial-attach"}, {"machine", "Other"}, {"device", "Palm TX"}, {"link", "local"}, {"socket", otherSerial.path}});
+        other.client.setSticky("ir", {{"op", "ir-attach"}, {"machine", "Other"}, {"device", "Palm TX"}, {"link", "local"}, {"socket", otherIr.path}});
+        QTRY_COMPARE_WITH_TIMEOUT(other.serial(), QString("waiting"), 10000);
+        QString shown; QTimer dismiss; dismiss.setInterval(20);
+        {
+            MainWindow window(core.fileName()); window.show(); window.openSession(source.fileName(), true);
+            connect(&dismiss, &QTimer::timeout, &window, [&] {
+                if (auto* box = window.findChild<QMessageBox*>(); box && box->isVisible()) { shown = box->text(); box->done(QMessageBox::Ok); }
+            }); dismiss.start();
+            for (const auto& [name, kind] : {std::pair<const char*, QString>{"serialMode", "serial"}, std::pair<const char*, QString>{"irdaMode", "ir"}}) {
+                auto* mode = window.findChild<QComboBox*>(name);
+                const auto pick = [mode](const char* value) {
+                    mode->setCurrentIndex(mode->findData(value));
+                    QMetaObject::invokeMethod(mode, "activated", Q_ARG(int, mode->currentIndex()));
+                };
+                QTRY_VERIFY_WITH_TIMEOUT(mode->isEnabled(), 5000);
+                pick("link:local");
+                QTRY_COMPARE_WITH_TIMEOUT(other.last(kind).value("state").toString(), QString("joined"), 10000);
+                QTRY_VERIFY_WITH_TIMEOUT(mode->isEnabled(), 5000);
+                shown.clear();
+                pick("pty");
+                QTRY_VERIFY_WITH_TIMEOUT(shown.contains("No PTY here"), 5000);
+                QTRY_COMPARE_WITH_TIMEOUT(other.last(kind).value("state").toString(), QString("waiting"), 5000);
+                QCOMPARE(mode->currentData().toString(), QString("off"));
+            }
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        }
+        other.client.setSticky("serial", {}); other.client.setSticky("ir", {});
+        QSettings().clear();
     }
     void linkSerialThisComputer() {
         QTemporaryDir dir(QDir::currentPath() + "/build/lk-XXXXXX");
