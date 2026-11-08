@@ -1413,3 +1413,10 @@ test-68k-card-provider: prepare
 test-dana-card-inventory: prepare
 	$(CXX) -std=c++17 -O2 -Ibuild/source/src/common tests/dana-card-inventory.cpp -o build/test-dana-card-inventory
 	./build/test-dana-card-inventory
+
+.PHONY: test-68k-bus-state
+test: test-68k-bus-state
+test-68k-bus-state: prepare
+	$(MAKE) -C build/source/src/common libcommon.a
+	$(MAKE) -C build/source/src/cloudpilot FROND_68K=1 -f Makefile \
+		-f $(CURDIR)/tests/68k-bus-state.mk FROND_TEST_ROOT=$(CURDIR) bus-state-test
