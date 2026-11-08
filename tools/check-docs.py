@@ -17,7 +17,7 @@ DOC = ROOT / 'doc/developer-reference.md'
 
 # Names that are real but not Frond's to document.
 IGNORE = {
-    'env': {'HOME', 'PATH', 'TMPDIR', 'CXX', 'SOURCE_DATE_EPOCH', 'DEB_HOST_ARCH', 'PULSE_PROP'},
+    'env': {'HOME', 'PATH', 'TMPDIR', 'CXX', 'SOURCE_DATE_EPOCH', 'DEB_HOST_ARCH', 'PULSE_PROP', 'LC_ALL'},
     'monitor': {'tg50-original-pace-entry'},
     'target': {'FORCE'},
 }

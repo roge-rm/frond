@@ -121,6 +121,19 @@ test-storage-fat: prepare
 		tests/storage-fat.cpp build/miniz-storage-fat.o -o build/test-storage-fat
 	python3 tests/storage-fat.py build/test-storage-fat
 
+.PHONY: test-storage-ms
+test: test-storage-ms
+# Files on classic Memory Sticks: writes into held and unclaimed blocks read back through
+# LogicalMsMedia, unsettled sticks refused, the TG50's format for each size read back with mtools,
+# cut-off changes (tests/storage-ms.py).
+test-storage-ms: prepare
+	$(CC) -std=gnu99 -O1 -g -Ibuild/source/src/common -c build/source/src/common/zip/miniz.c \
+		-o build/miniz-storage-ms.o
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/common \
+		tests/storage-ms.cpp build/miniz-storage-ms.o -o build/test-storage-ms
+	python3 tests/storage-ms.py build/test-storage-ms
+
 prepare: build/source/.prepared
 
 # Check input content on every invocation, including removed patches and the gitlink.

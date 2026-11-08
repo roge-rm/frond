@@ -1,0 +1,575 @@
+diff --git a/src/common/storage/CardFile.h b/src/common/storage/CardFile.h
+index 43c1e4f..c632e24 100644
+--- a/src/common/storage/CardFile.h
++++ b/src/common/storage/CardFile.h
+@@ -1,6 +1,7 @@
+ #ifndef FROND_STORAGE_CARD_FILE_H
+ #define FROND_STORAGE_CARD_FILE_H
+ 
++#include "storage/ClassicStick.h"
+ #include "storage/Container.h"
+ #include "storage/Errors.h"
+ #include "storage/Io.h"
+@@ -20,8 +21,11 @@
+ #include <utility>
+ #include <vector>
+ 
+-// A card file (sd.frondsd, ms.frondmsp) edited in place for one Files… visit, and the Blocks a
+-// FatImage reads and writes through. Offsets are payload bytes from 0, whole sectors for metadata.
++// A card file (sd.frondsd, ms.frondmsp, ms.frondms) edited in place for one Files… visit, and the
++// Blocks a FatImage reads and writes through. Offsets are payload bytes from 0, whole sectors for
++// metadata. A classic stick (ms.frondms) is its logical sectors as storage/ClassicStick.h has them:
++// only a settled one opens, an L nobody holds reads as zeros and gets a block before its first
++// write, and a blank one is formatted the TG50's way when a FatImage first opens it.
+ //
+ // Crash safety, per change. 1: before data goes into a chunk, its number is appended to
+ // <card>.journal-N.pending and fsynced; the data only goes into clusters the card's FAT calls free.
+@@ -54,6 +58,10 @@ class Blocks {
+     virtual void commit(const Sectors& sectors) = 0;
+     // A change failed after writing data: the card is made sound again now.
+     virtual void settleData() {}
++    // Called when a FatImage opens the card, before it reads anything.
++    virtual void prepare() {}
++    // A classic stick formats itself as the TG50 does (FatImage::format); false for any other card.
++    virtual bool formatStick() { return false; }
+ };
+ 
+ // Whether a cut-off change is waiting beside the card file.
+@@ -99,8 +107,6 @@ class CardFile : public Blocks {
+         if (!tryLock(fd_.fd)) throw Error(inUseMessage);
+         if (const auto settled = settleChangesLocked(card, fd_.fd); !settled.ok) throw Error(settled.message);
+         load();
+-        // Writing a classic stick has to keep its side region right, which Files doesn't do yet.
+-        if (classic_ && writable) throw Error("Files can't change a classic Memory Stick yet.");
+     }
+     static std::unique_ptr<CardFile> open(const std::filesystem::path& card, bool canWrite) {
+         return std::make_unique<CardFile>(card, canWrite);
+@@ -125,32 +131,69 @@ class CardFile : public Blocks {
+     // Bytes written into the card file, the write calls (file offset, length), and journal bytes.
+     int64_t cardBytesWritten{0}, journalBytesWritten{0};
+     std::vector<std::pair<int64_t, int64_t>> writes;
+-    // Tests: called at "writing" (after the first data of a change), "data", "journal", "partly",
+-    // "applied". After a simulated crash (`dead`) nothing more reaches the disk.
++    // Tests: called at "claimed" (a classic stick's new blocks are in), "writing" (after the first
++    // data of a change), "data", "journal", "partly", "applied". After a simulated crash (`dead`)
++    // nothing more reaches the disk.
+     std::function<void(const char*)> crashHook;
+     bool dead{false};
+ 
+     int64_t length() const override { return payload_; }
+     void read(int64_t at, char* b, int64_t n) override {
+         if (at < 0 || n < 0 || at + n > payload_) throw Error("The card is shorter than its file system says.");
+-        if (!readAllAt(fd_.fd, b, size_t(n), uint64_t(frondSdFile::headerBytes + at)))
+-            throw Error("Couldn't read the card.");
++        if (!classic_) {
++            if (!readAllAt(fd_.fd, b, size_t(n), uint64_t(frondSdFile::headerBytes + at)))
++                throw Error("Couldn't read the card.");
++            return;
++        }
++        // Block by block: an L nobody holds reads as zeros.
++        const int64_t blockBytes = int64_t(stick_.layout.BlockBytes());
++        while (n > 0) {
++            const int64_t logical = at / blockBytes;
++            const int64_t m = std::min(n, (logical + 1) * blockBytes - at);
++            if (stick_.holder[size_t(logical)] < 0) std::memset(b, 0, size_t(m));
++            else if (!readAllAt(fd_.fd, b, size_t(m), uint64_t(frondSdFile::headerBytes + at)))
++                throw Error("Couldn't read the card.");
++            at += m;
++            b += m;
++            n -= m;
++        }
++    }
++    // Whether this is a classic stick with nothing on it yet: every block that holds an L is all
++    // zeros, as `frond --card make ms` leaves it or a format cut off before its commit.
++    bool blankStick() {
++        if (!classic_ || written_) return false;
++        std::vector<char> block(size_t(stick_.layout.BlockBytes()));
++        for (uint32_t L = 0; L < stick_.layout.UserBlocks(); ++L) {
++            if (stick_.holder[L] < 0) continue;
++            read(int64_t(L) * int64_t(block.size()), block.data(), int64_t(block.size()));
++            if (std::any_of(block.begin(), block.end(), [](char c) { return c != 0; })) return !(written_ = true);
++        }
++        return true;
++    }
++    // A blank classic stick gets the file system the TG50's driver writes for its size.
++    void prepare() override {
++        if (!blankStick()) return;
++        if (!writable) throw Error(blankStickMessage);
++        formatStick();
++    }
++    bool formatStick() override {
++        if (!classic_) return false;
++        if (!writable) throw Error("The card is write protected.");
++        if (!stick_.bootOk) throw Error(stickBootMessage);
++        commit(classicStick::formatSectors(stick_.layout, stick_.made));
++        return true;
+     }
+     void write(int64_t at, const char* b, int64_t n) override {
+         if (!writable) throw Error("The card is write protected.");
+         if (at < 0 || n < 0 || at + n > payload_) throw Error("The card is shorter than its file system says.");
+         if (dead || n == 0) return;
+         start();
+-        std::vector<uint32_t> fresh;
+-        for (int64_t i = chunkOf(at); i <= chunkOf(at + n - 1); ++i)
+-            if (!dirty_.count(uint32_t(i))) fresh.push_back(uint32_t(i));
+         const bool first = dirty_.empty();
+-        if (!fresh.empty()) {
+-            note(fresh);
+-            dirty_.insert(fresh.begin(), fresh.end());
+-        }
++        claimRange(at, n);
++        if (dead) return;
++        noteRange(at, n);
+         put(int64_t(frondSdFile::headerBytes) + at, reinterpret_cast<const uint8_t*>(b), n);
+-        if (first && !fresh.empty()) hook("writing");
++        if (first) hook("writing");
+     }
+     void sync() override {
+         if (!dead && fsync(fd_.fd) != 0) throw Error("Couldn't write the card.");
+@@ -163,6 +206,8 @@ class CardFile : public Blocks {
+         if (dead) return;
+         if (sectors.empty() && dirty_.empty()) return;
+         start();
++        for (const auto& s : sectors) claimRange(s.first, int64_t(s.second.size()));
++        if (dead) return;
+         if (fsync(fd_.fd) != 0) throw Error("Couldn't write the card.");
+         hook("data");
+         if (dead) return;
+@@ -267,6 +312,14 @@ class CardFile : public Blocks {
+         } else {
+             table_.clear();
+         }
++        if (info.classic) {
++            const auto* layout = frondMsLayout::of(info);
++            if (!layout || !classicStick::load(*layout, [&](uint64_t off, uint64_t n, void* dest) {
++                    return readAllAt(fd_.fd, dest, size_t(n), frondSdFile::headerBytes + off);
++                }, stick_))
++                throw Error(damagedMessage);
++            if (!stick_.settled) throw Error(unsettledStickMessage);
++        }
+         version_ = info.version;
+         payload_ = int64_t(info.payloadBytes);
+         side_ = info.sideBytes;
+@@ -295,6 +348,88 @@ class CardFile : public Blocks {
+         if (!pending_->add(list)) throw Error("Couldn't write the card's journal.");
+         journalBytesWritten += int64_t(4 * list.size());
+     }
++    // Adds the chunks of stored bytes [at, at + n) that have no data yet to the pending list.
++    // Whether any were new.
++    bool noteRange(int64_t at, int64_t n) {
++        std::vector<uint32_t> fresh;
++        for (int64_t i = chunkOf(at); i <= chunkOf(at + n - 1); ++i)
++            if (!dirty_.count(uint32_t(i))) fresh.push_back(uint32_t(i));
++        if (fresh.empty()) return false;
++        note(fresh);
++        dirty_.insert(fresh.begin(), fresh.end());
++        return true;
++    }
++    // Stored bytes outside the file system's own sectors, noted first as data.
++    void putStored(uint64_t at, const uint8_t* b, uint64_t n) {
++        noteRange(int64_t(at), int64_t(n));
++        put(int64_t(frondSdFile::headerBytes + at), b, int64_t(n));
++    }
++    // Gives every L in payload bytes [at, at + n) that nobody holds a block of its own, with zero
++    // data. In steps with an fsync between, so a crash leaves each L unheld or held with zeros,
++    // which read the same: a borrower's copy, its new map entry, then L's zeros and map entries,
++    // then the extra bytes that make the claim.
++    void claimRange(int64_t at, int64_t n) {
++        if (!classic_ || n <= 0) return;
++        const auto& l = stick_.layout;
++        const int64_t blockBytes = int64_t(l.BlockBytes());
++        std::vector<classicStick::Claim> claims;
++        for (int64_t L = at / blockBytes; L <= (at + n - 1) / blockBytes; ++L)
++            if (stick_.holder[size_t(L)] < 0) claims.push_back({uint32_t(L)});
++        if (claims.empty()) return;
++        try {
++            for (auto& c : claims) {
++                c = classicStick::plan(stick_, c.logical);
++                classicStick::apply(stick_, c);
++            }
++            writeClaims(claims);
++        } catch (...) {
++            // What is on the disk is a state a crash could leave, so it's read again.
++            classicStick::State again;
++            if (classicStick::load(stick_.layout, [&](uint64_t off, uint64_t len, void* dest) {
++                    return readAllAt(fd_.fd, dest, size_t(len), frondSdFile::headerBytes + off);
++                }, again))
++                stick_ = std::move(again);
++            throw;
++        }
++        hook("claimed");
++    }
++    void writeClaims(const std::vector<classicStick::Claim>& claims) {
++        const auto& l = stick_.layout;
++        auto sync = [&] {
++            if (fsync(fd_.fd) != 0) throw Error("Couldn't write the card.");
++        };
++        auto mapEntry = [&](uint32_t block, uint32_t entry) {
++            uint8_t raw[4];
++            frondSdFile::put32(raw, entry);
++            putStored(l.MapAt() + 4ull * block, raw, 4);
++        };
++        std::vector<uint8_t> data(size_t(l.BlockBytes()));
++        bool borrowers = false;
++        for (const auto& c : claims) {
++            if (c.borrower < 0) continue;
++            borrowers = true;
++            if (!readAllAt(fd_.fd, data.data(), data.size(), frondSdFile::headerBytes + l.SlotAt(c.logical)))
++                throw Error("Couldn't read the card.");
++            putStored(l.SlotAt(c.borrowerSlot), data.data(), data.size());
++        }
++        if (borrowers) {
++            sync();
++            for (const auto& c : claims)
++                if (c.borrower >= 0) mapEntry(uint32_t(c.borrower), stick_.entryOf(c.borrowerSlot));
++            sync();
++        }
++        std::fill(data.begin(), data.end(), 0);
++        for (const auto& c : claims) {
++            putStored(l.SlotAt(c.logical), data.data(), data.size());
++            mapEntry(c.block, c.logical);
++        }
++        sync();
++        for (const auto& c : claims) {
++            const auto extras = classicStick::newBlockExtras(l, c.logical);
++            putStored(l.ExtraAt(c.block, 0), extras.data(), extras.size());
++        }
++        sync();
++    }
+     void put(int64_t at, const uint8_t* b, int64_t n) {
+         if (!writeAllAt(fd_.fd, b, size_t(n), uint64_t(at))) throw Error("Couldn't write the card.");
+         cardBytesWritten += n;
+@@ -322,6 +457,8 @@ class CardFile : public Blocks {
+     int64_t payload_{0};
+     uint64_t side_{0}, stored_{0};
+     bool classic_{};
++    classicStick::State stick_;
++    bool written_{false};  // the stick is known not to be blank
+     uint64_t gen_{0}, openGen_{0}, target_{0};
+     // Chunk CRCs as on the card; empty for a v1 card until its first change.
+     std::vector<uint32_t> table_;
+diff --git b/src/common/storage/ClassicStick.h b/src/common/storage/ClassicStick.h
+new file mode 100644
+index 0000000..0db1e01
+--- /dev/null
++++ b/src/common/storage/ClassicStick.h
+@@ -0,0 +1,268 @@
++#ifndef FROND_STORAGE_CLASSIC_STICK_H
++#define FROND_STORAGE_CLASSIC_STICK_H
++
++#include "storage/Container.h"
++#include "storage/Errors.h"
++#include "storage/MsLayout.h"
++
++#include <algorithm>
++#include <array>
++#include <cstdint>
++#include <cstring>
++#include <functional>
++#include <map>
++#include <vector>
++
++// What Files needs to know about a classic Memory Stick in a v2 .frondms (storage/MsLayout.h), and
++// the sectors the TG50's slot driver writes when it formats one (3452Slot 2.10, S0 findings).
++//
++// Files reads and writes the stick's logical sectors as the Sony driver does: L's data from the
++// block that holds it, zeros for an L nobody holds. It only opens a settled stick: every L has at
++// most one claiming block, and that block sits in logical slot L. Then L's data is the payload at
++// L x block bytes, so a held L is read and written in place. An L nobody holds gets a free block in
++// its segment first (claim()), with every page's extra bytes f8 ff Lhi Llo ff ff ff ff ff as the
++// driver writes a new block, and zero data.
++namespace frondStorage {
++
++constexpr const char* unsettledStickMessage = "Put the stick in the TG50 once to finish its last write.";
++constexpr const char* blankStickMessage = "The Memory Stick is blank.";
++constexpr const char* stickBootMessage = "The Memory Stick's boot blocks are damaged.";
++constexpr const char* stickFullMessage = "The Memory Stick has no free block left.";
++
++namespace classicStick {
++
++using frondMsLayout::Layout;
++
++// A stick's map, page 0 claims and disabled blocks, read once when a CardFile opens it.
++struct State {
++    Layout layout{};
++    std::vector<uint32_t> map;     // per physical block
++    std::vector<int32_t> holder;   // per L: the claiming block, or -1
++    std::vector<int32_t> owner;    // per slot: the block in it, or -1
++    std::vector<uint8_t> unusable; // per physical block: in the disabled-block table
++    std::array<uint8_t, 8> made{};  // boot block 0x1ac-0x1b3, the stick's date and time
++    bool settled{true}, bootOk{false};
++
++    uint32_t slotOf(uint32_t entry) const { return entry & frondMsLayout::spillBit ? layout.UserBlocks() + (entry & ~frondMsLayout::spillBit) : entry; }
++    uint32_t entryOf(uint32_t slot) const { return slot < layout.UserBlocks() ? slot : frondMsLayout::spillBit | (slot - layout.UserBlocks()); }
++};
++
++using ReadFn = std::function<bool(uint64_t offset, uint64_t length, void* dest)>;
++
++// Whether boot block 0 has the disabled-block entry the driver needs to mount: 0x170 zero, 0x174
++// a big-endian size 1 to 0x200, 0x178 == 1.
++inline bool bootEntryValid(const uint8_t* page0) {
++    const uint32_t size = uint32_t(page0[0x174]) << 24 | uint32_t(page0[0x175]) << 16 | uint32_t(page0[0x176]) << 8 | page0[0x177];
++    return page0[0x178] == 1 && !page0[0x170] && !page0[0x171] && !page0[0x172] && !page0[0x173] && size >= 1 && size <= 0x200;
++}
++
++// Reads the state from the stored bytes (payload, padding, side region).
++inline bool load(const Layout& l, const ReadFn& read, State& s) {
++    s = State{};
++    s.layout = l;
++    std::vector<uint8_t> raw(size_t(4) * l.blocks), extras(size_t(l.Pages()) * frondMsLayout::extraBytes);
++    std::vector<uint8_t> boot(2 * frondMsLayout::dataBytes);
++    if (!read(l.MapAt(), raw.size(), raw.data()) || !read(l.ExtrasAt(), extras.size(), extras.data()) ||
++        !read(l.BootPageAt(0, 0), boot.size(), boot.data()))
++        return false;
++    s.map.resize(l.blocks);
++    s.holder.assign(l.UserBlocks(), -1);
++    s.owner.assign(l.Slots(), -1);
++    s.unusable.assign(l.blocks, 0);
++    std::memcpy(s.made.data(), boot.data() + 0x1ac, 8);
++    s.bootOk = bootEntryValid(boot.data());
++    if (s.bootOk) {
++        const uint8_t* e = boot.data() + 0x174;
++        const uint32_t size = uint32_t(e[0]) << 24 | uint32_t(e[1]) << 16 | uint32_t(e[2]) << 8 | e[3];
++        for (uint32_t i = 0; i + 1 < size && i + 1 < frondMsLayout::dataBytes; i += 2) {
++            const uint32_t block = uint32_t(boot[512 + i]) << 8 | boot[512 + i + 1];
++            if (block < l.blocks) s.unusable[block] = 1;
++        }
++    }
++    for (uint32_t b = 0; b < l.blocks; ++b) {
++        s.map[b] = frondSdFile::get32(raw.data() + 4 * b);
++        if (b < 2) {
++            if (s.map[b] != frondMsLayout::bootSlot) return false;
++            continue;
++        }
++        if (s.map[b] == frondMsLayout::erasedSlot) continue;
++        const uint32_t slot = s.slotOf(s.map[b]);
++        if (slot >= l.Slots() || s.owner[slot] >= 0) return false;
++        s.owner[slot] = int32_t(b);
++        const auto c = frondMsLayout::claimOf(l, b, extras.data() + size_t(b) * l.pagesPerBlock * frondMsLayout::extraBytes);
++        if (c.logical < 0) continue;
++        if (s.holder[size_t(c.logical)] >= 0 || slot != uint32_t(c.logical)) s.settled = false;
++        else s.holder[size_t(c.logical)] = int32_t(b);
++    }
++    return true;
++}
++
++// How claim() changes the stored bytes: a borrower moved out of slot L, then L's new block.
++struct Claim {
++    uint32_t logical{}, block{};
++    int32_t borrower{-1};
++    uint32_t borrowerSlot{};
++};
++
++// Picks the block for an L nobody holds, as the driver's free search does: from L's home block
++// forward, wrapping inside its segment, the first erased block that isn't disabled. The segment
++// keeps a free block (two in the last one, which the driver reserves). Throws when there is none.
++inline Claim plan(State& s, uint32_t logical) {
++    const auto& l = s.layout;
++    const uint32_t segment = l.SegmentOfLogical(logical);
++    const uint32_t first = segment * frondMsLayout::segmentBlocks;
++    const uint32_t count = std::min(l.blocks, first + frondMsLayout::segmentBlocks) - first;
++    auto usable = [&](uint32_t b) { return b >= 2 && s.map[b] == frondMsLayout::erasedSlot && !s.unusable[b]; };
++    uint32_t free = 0;
++    for (uint32_t i = 0; i < count; ++i) free += usable(first + i);
++    const uint32_t keep = segment + 1 == l.Segments() ? 2 : 1;
++    if (free <= keep) throw Error(stickFullMessage);
++    const uint32_t home = l.Home(logical);
++    Claim c;
++    c.logical = logical;
++    for (uint32_t i = 0; i < count; ++i) {
++        const uint32_t b = first + (home - first + i) % count;
++        if (!usable(b)) continue;
++        c.block = b;
++        break;
++    }
++    c.borrower = s.owner[logical];
++    if (c.borrower >= 0) {
++        // A block that claims nothing borrowed slot L when the spill area was full: it moves to a
++        // free spill slot, or a free slot of another L nobody holds.
++        uint32_t slot = l.Slots();
++        for (uint32_t i = l.UserBlocks(); i < l.Slots() && slot == l.Slots(); ++i)
++            if (s.owner[i] < 0) slot = i;
++        for (uint32_t i = 0; i < l.UserBlocks() && slot == l.Slots(); ++i)
++            if (s.owner[i] < 0 && i != logical) slot = i;
++        if (slot == l.Slots()) throw Error(stickFullMessage);
++        c.borrowerSlot = slot;
++    }
++    return c;
++}
++
++// Notes a claim done on the stored bytes.
++inline void apply(State& s, const Claim& c) {
++    if (c.borrower >= 0) {
++        s.owner[c.borrowerSlot] = c.borrower;
++        s.map[size_t(c.borrower)] = s.entryOf(c.borrowerSlot);
++    }
++    s.owner[c.logical] = int32_t(c.block);
++    s.map[c.block] = c.logical;
++    s.holder[c.logical] = int32_t(c.block);
++}
++
++// Every page's extra bytes for a new block holding L.
++inline std::vector<uint8_t> newBlockExtras(const Layout& l, uint32_t logical) {
++    std::vector<uint8_t> out(size_t(l.pagesPerBlock) * frondMsLayout::extraBytes, 0xff);
++    for (uint32_t p = 0; p < l.pagesPerBlock; ++p) {
++        uint8_t* e = out.data() + size_t(p) * frondMsLayout::extraBytes;
++        e[0] = 0xf8;
++        e[1] = 0xff;
++        e[2] = uint8_t(logical >> 8);
++        e[3] = uint8_t(logical);
++    }
++    return out;
++}
++
++// The driver's FORMAT for each size (3452Slot 2.10 0x20a5bd90): partition entry bytes 0-7, start,
++// sectors, sectors per cluster, sectors per FAT, heads.
++struct FormatRow {
++    uint32_t megabytes;
++    uint8_t entry[8];
++    uint32_t hidden, total, cluster, fatSectors, heads;
++};
++constexpr FormatRow formatRows[] = {
++    {4, {0x80, 0x01, 0x0c, 0x00, 0x01, 0x01, 0x10, 0xf5}, 27, 7845, 16, 2, 2},
++    {8, {0x80, 0x01, 0x0a, 0x00, 0x01, 0x01, 0x50, 0xed}, 25, 15783, 16, 3, 2},
++    {16, {0x80, 0x01, 0x0a, 0x00, 0x01, 0x03, 0x50, 0xed}, 25, 31591, 32, 3, 4},
++    {32, {0x80, 0x01, 0x04, 0x00, 0x01, 0x03, 0xd0, 0xdd}, 19, 63341, 32, 6, 4},
++    {64, {0x80, 0x02, 0x08, 0x00, 0x01, 0x07, 0xd0, 0xdd}, 39, 126681, 32, 12, 8},
++    {128, {0x80, 0x02, 0x02, 0x00, 0x06, 0x0f, 0xd0, 0xdd}, 33, 253407, 32, 31, 16},
++};
++inline const FormatRow* formatRow(uint32_t megabytes) {
++    for (const auto& r : formatRows)
++        if (r.megabytes == megabytes) return &r;
++    return nullptr;
++}
++
++// The FAT time and date of MEMSTICK.IND from boot bytes 0x1ac-0x1b3: time zone, year (big endian,
++// or two decimal halves as Frond's own sticks have it), month, day, hour, minute, second. A field
++// of 0xff, or one out of range, gives 0.
++inline std::pair<uint16_t, uint16_t> madeStamp(const std::array<uint8_t, 8>& m) {
++    auto field = [](uint8_t v, unsigned lo, unsigned hi) { return v != 0xff && v >= lo && v <= hi ? unsigned(v) : 0u; };
++    unsigned year = unsigned(m[1]) << 8 | m[2];
++    if (m[1] == 0xff || m[2] == 0xff) year = 0;
++    else if (year < 1980 || year > 2107) year = m[1] < 100 && m[2] < 100 ? m[1] * 100u + m[2] : 0;
++    if (year < 1980 || year > 2107) year = 0;
++    const unsigned month = field(m[3], 1, 12), day = field(m[4], 1, 31);
++    const unsigned hour = field(m[5], 0, 23), minute = field(m[6], 0, 59), second = field(m[7], 0, 59);
++    const uint16_t time = uint16_t(hour << 11 | minute << 5 | second / 2);
++    const uint16_t date = year && month && day ? uint16_t((year - 1980) << 9 | month << 5 | day) : 0;
++    return {time, date};
++}
++
++// The sectors the driver's FORMAT writes, by payload offset: the MBR with one entry, the boot
++// sector, both FATs, and the root folder with a hidden, read-only MEMSTICK.IND. The rest of the
++// root is zeroed, which the driver leaves as it was.
++inline std::map<int64_t, std::vector<uint8_t>> formatSectors(const Layout& l, const std::array<uint8_t, 8>& made) {
++    const FormatRow* r = formatRow(l.megabytes);
++    if (!r) throw Error("Frond can't format a Memory Stick of that size.");
++    std::map<int64_t, std::vector<uint8_t>> out;
++    auto sector = [&](int64_t index) -> std::vector<uint8_t>& {
++        auto& s = out[index * 512];
++        s.assign(512, 0);
++        return s;
++    };
++    auto le16 = [](uint8_t* p, uint32_t v) { p[0] = uint8_t(v); p[1] = uint8_t(v >> 8); };
++    auto le32 = [](uint8_t* p, uint32_t v) { for (int i = 0; i < 4; ++i) p[i] = uint8_t(v >> (8 * i)); };
++    const bool fat16 = r->entry[4] == 0x06;
++    auto& mbr = sector(0);
++    std::memcpy(mbr.data() + 0x1be, r->entry, 8);
++    le32(mbr.data() + 0x1c6, r->hidden);
++    le32(mbr.data() + 0x1ca, r->total);
++    mbr[0x1fe] = 0x55;
++    mbr[0x1ff] = 0xaa;
++    auto& boot = sector(r->hidden);
++    boot[0] = 0xe9;
++    std::memset(boot.data() + 3, ' ', 8);
++    le16(boot.data() + 0x0b, 512);
++    boot[0x0d] = uint8_t(r->cluster);
++    le16(boot.data() + 0x0e, 1);
++    boot[0x10] = 2;
++    le16(boot.data() + 0x11, 512);
++    if (r->total < 0x10000) le16(boot.data() + 0x13, r->total);
++    else le32(boot.data() + 0x20, r->total);
++    boot[0x15] = 0xf8;
++    le16(boot.data() + 0x16, r->fatSectors);
++    le16(boot.data() + 0x18, 16);
++    le16(boot.data() + 0x1a, r->heads);
++    le32(boot.data() + 0x1c, r->hidden);
++    boot[0x26] = 0x29;
++    std::memcpy(boot.data() + 0x36, fat16 ? "FAT16   " : "FAT12   ", 8);
++    boot[0x1fe] = 0x55;
++    boot[0x1ff] = 0xaa;
++    const int64_t fatAt = int64_t(r->hidden) + 1;
++    for (int64_t copy = 0; copy < 2; ++copy)
++        for (int64_t i = 0; i < r->fatSectors; ++i) {
++            auto& s = sector(fatAt + copy * r->fatSectors + i);
++            if (i) continue;
++            s[0] = 0xf8;
++            s[1] = s[2] = 0xff;
++            if (fat16) s[3] = 0xff;
++        }
++    const int64_t rootAt = fatAt + 2 * int64_t(r->fatSectors);
++    for (int64_t i = 0; i < 32; ++i) sector(rootAt + i);
++    auto& root = out[rootAt * 512];
++    std::memcpy(root.data(), "MEMSTICKIND", 11);
++    root[11] = 0x03;
++    const auto [time, date] = madeStamp(made);
++    le16(root.data() + 0x16, time);
++    le16(root.data() + 0x18, date);
++    return out;
++}
++
++}  // namespace classicStick
++}  // namespace frondStorage
++
++#endif
+diff --git a/src/common/storage/FatImage.h b/src/common/storage/FatImage.h
+index ee44c80..beecf2a 100644
+--- a/src/common/storage/FatImage.h
++++ b/src/common/storage/FatImage.h
+@@ -87,6 +87,7 @@ class FatImage {
+    public:
+     // Reads the card's layout. Throws Error.
+     explicit FatImage(Blocks& b) : blocks_(b) {
++        blocks_.prepare();
+         const int64_t size = blocks_.length();
+         if (size < 512 * 64 || size > (int64_t(2048) << 20) || size % sectorBytes) throw Error("Use a card of up to 2 GB.");
+         auto boot = readAt(0, sectorBytes);
+@@ -148,8 +149,10 @@ class FatImage {
+     bool committed{false};
+ 
+     // A fresh FAT12 or FAT16 file system over the whole card (fatLayout), in one commit: the
+-    // partition table, boot sector, both FATs and the root folder with the volume label.
++    // partition table, boot sector, both FATs and the root folder with the volume label. A classic
++    // stick gets the TG50's own layout instead (storage/ClassicStick.h), with no label.
+     static void format(Blocks& blocks, const std::string& label = "FROND") {
++        if (blocks.formatStick()) return;
+         const auto l = fatLayout(blocks.length());
+         Sectors out;
+         auto sector = [&](int64_t index) -> std::vector<uint8_t>& {
+diff --git a/src/uarm/native/DesktopControl.h b/src/uarm/native/DesktopControl.h
+index 68e94d3..c41bde5 100644
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -41,6 +41,7 @@
+ #include "MsProCards.h"
+ #include "CardSwap.h"
+ #include "CardReinsert.h"
++#include "CardTool.h"
+ 
+ // Private Unix socket, owned by the launcher; DesktopChannel has the framing. Only the emulation
+ // thread dispatches requests.
+@@ -519,9 +520,13 @@ class DesktopControl {
+                     if(!result.ok)return {false,result.code,result.message};
+                     return {true,"exported","Memory Stick image exported."};
+                 }
++                // A classic stick exports as a v2 .frondms, which Cards imports.
+                 std::vector<uint8_t> image;
+                 if(!msCtrlrExport(ms,image))return {false,"empty","This session has no Memory Stick."};
+-                const auto file=frondMs::encode(image);writeAtomic(path,file.data(),file.size());
++                const frondCardTool::Progress none;
++                frondCardTool::Run run{none};
++                const auto result=frondCardTool::writeMs(path,image,run);
++                if(!result.ok)return {false,result.code,result.message};
+                 return {true,"exported","Memory Stick image exported."};
+             }
+             return {false,"command","Unknown Memory Stick command."};
