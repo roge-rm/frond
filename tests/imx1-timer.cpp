@@ -48,8 +48,9 @@ int main() {
     timer.advance(15); read(16, 0); timer.advance(1); read(16, 1);
     write(4, 1, Imx1TimerAccess::sideEffect); read(4, 0);
     write(0, 0x103, Imx1TimerAccess::sideEffect); read(0, 0x105);
-    for (uint32_t value : {0x8001u, 0x115u, 0x125u})
+    for (uint32_t value : {0x8001u, 0x125u})
         write(0, value, Imx1TimerAccess::sideEffect);
+    write(0, 0x115); read(0, 0x115); write(0, 0x105);
     for (uint32_t value : {0x145u, 0x107u, 0x109u, 0x10fu})
         write(0, value, Imx1TimerAccess::externalInput);
     read(0, 0x105);
@@ -101,7 +102,7 @@ int main() {
     soc.advanceFastBusCycles(1); busRead(0x00202010, 2);
     soc.advanceFastBusCycles(1); busRead(0x00202010, 4);
     assert(!soc.instructionWord(0x00202010, untouched));
-    assert(soc.access(0x00203000, 4, false, untouched) == Imx1BootstrapAccess::unmapped);
+    assert(soc.access(0x00203000, 4, false, untouched) == Imx1BootstrapAccess::ok && untouched == 0);
     assert(!std::strcmp(Imx1Bootstrap::registerName(0x00202010), "TIMER1.TCN"));
     std::puts("PASS: Timer 1 reset, elapsed clocks, prescaling, compare/restart/rollover, read-before-w0c and explicit gates");
 }

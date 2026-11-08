@@ -73,7 +73,8 @@ int main() {
         assert(soc.access(address, 4, false, unknown) == Imx1BootstrapAccess::unmapped);
         assert(unknown == 0xdeadbeef);
         write(address, 0, Imx1BootstrapAccess::unmapped);
-        assert(!soc.instructionWord(address, unknown));
+        uint32_t instruction = 0xdeadbeef;
+        assert(!soc.instructionWord(address, instruction));
     }
     assert(!std::strcmp(Imx1Bootstrap::registerName(0x00220020), "EIM.CS4U"));
     assert(!std::strcmp(Imx1Bootstrap::registerName(0x0022002c), "EIM.CS5L"));

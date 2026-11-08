@@ -242,7 +242,7 @@ int main() {
         reject(instruction ^ 0x00010000, 0); // CRn=6
         reject(instruction ^ 0x00000080, 0); // op2=6
     }
-    reject(0xee010f10, 0x507d); // Dcache enable
+    reject(0xee010f10, 0x507c); // Dcache requires the MMU
     reject(0xee070f52, 0);      // Dcache allocation
     reject(0xee090f10, 0);      // Dcache lockdown
     reject(0xee0f0f10, 0);      // Diagnostic RAM access
@@ -314,6 +314,18 @@ int main() {
         cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, 1);
         assert((cpuGetRegExternal(m.cpu, ARM_REG_NUM_CPSR) & 31) == ARM_SR_MODE_ABT);
         assert(cpuGetRegisters(m.cpu)[15] == 0x0c && cpuGetRegisters(m.cpu)[3] == 1);
+    });
+    run([](Machine& m) {
+        // Primary ArmRam backing uses the same data view and write watches.
+        m.word(0x2460, 0xe5902000); m.word(0x2480, 0xee070f3a);
+        m.word(code, 0xe3a03001); m.word(table, 0xc0e);
+        m.setup(0x507d); m.step(code); assert(cpuGetRegisters(m.cpu)[3] == 1);
+        cpuSetReg(m.cpu, 0, code); m.step(0x2460);
+        cpuSetReg(m.cpu, 0, code); cpuSetReg(m.cpu, 1, 0xe3a03002); m.step(store);
+        uint32_t backing; std::memcpy(&backing, m.ram + code, 4); assert(backing == 0xe3a03001);
+        m.cp(0x2480, code); std::memcpy(&backing, m.ram + code, 4); assert(backing == 0xe3a03002);
+        m.step(code); assert(cpuGetRegisters(m.cpu)[3] == 1);
+        m.cp(lineInval, code); m.step(code); assert(cpuGetRegisters(m.cpu)[3] == 2);
     });
     uint64_t blocks = 0, instructions = 0;
     assert(cpuJitExecutionCounts(fast.cpu, &blocks, &instructions) && blocks && instructions);

@@ -21,10 +21,11 @@ int main() {
             assert(gpio.access(base + 0x30, 4, false, value) == Imx1GpioAccess::ok && value == 0);
         }
         for (auto sample : {0u, 0xffffffffu}) {
-            gpio.setInput(port, sample);
-            assert(gpio.interruptOutput(port) == Imx1GpioLine::clear);
+            Imx1Gpio sampled;
+            assert(sampled.setInput(port, sample));
+            assert(sampled.interruptOutput(port) == Imx1GpioLine::clear);
             value = 0xdeadbeef;
-            assert(gpio.access(base + 0x34, 4, false, value) == Imx1GpioAccess::externalInput);
+            assert(sampled.access(base + 0x34, 4, false, value) == Imx1GpioAccess::externalInput);
             assert(value == 0xdeadbeef);
         }
     }
@@ -109,17 +110,23 @@ int main() {
         assert(soc.access(base + 0x44, 4, false, unknown) == Imx1BootstrapAccess::unmapped);
     }
     assert(unknown == 0xdeadbeef);
-    soc.setGpioDInput(0x600);
+    Imx1Bootstrap sampledSoc;
+    assert(sampledSoc.setGpioDInput(0x600));
+    assert(sampledSoc.setGpioInput(0, 0x80));
+    soc = sampledSoc;
     read(0x0021c324, 0x600);
-    // Output and pull settings do not stand in for measured pin levels.
-    assert(soc.access(0x0021c024, 4, false, unknown) == Imx1BootstrapAccess::externalInput);
-    soc.setGpioInput(0, 0);
-    read(0x0021c024, 0);
-    soc.setGpioInput(0, 0x80);
-    // Retaining a full sample is independent of direction, mux, output and pulls.
+    // External samples apply while the pin is not driven by GPIO.
+    read(0x0021c024, 0x80);
+    assert(!soc.setGpioInput(0, 0));
+    assert(soc.setGpioInput(0, 0x80));
+    // Unknown output sources guard SSR, DR-selected output uses logical feedback.
     for (auto offset : {0u, 0x1cu, 0x20u, 0x40u})
         write(0x0021c000 + offset, 0xffffffff, Imx1BootstrapAccess::ok);
-    read(0x0021c024, 0x80);
+    assert(soc.access(0x0021c024, 4, false, unknown) == Imx1BootstrapAccess::externalInput);
+    write(0x0021c004, 0xffffffff, Imx1BootstrapAccess::ok);
+    write(0x0021c008, 0xffffffff, Imx1BootstrapAccess::ok);
+    read(0x0021c024, 0xffffffff);
+    assert(soc.setGpioInput(0, 0x80));
     read(0x0021c324, 0x600);
     for (auto address : {0x0021c124u, 0x0021c224u})
         assert(soc.access(address, 4, false, unknown) == Imx1BootstrapAccess::externalInput);

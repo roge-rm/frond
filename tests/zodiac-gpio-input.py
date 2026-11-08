@@ -44,15 +44,15 @@ def main():
         assert 'External GPIO-D levels are unknown.' in unknown
         d_only = run('--bootstrap-peripherals', '--gpio-d-input=0x600')
         assert 'stop=unsupported-peripheral' in d_only and 'address=0021c024' in d_only
-        assert 'Hypothetical static full-port GPIO-D input=00000600' in d_only
+        assert 'Hypothetical static from-reset full-port GPIO-D input=00000600' in d_only
         a_only = run('--bootstrap-peripherals', '--gpio-a-input=0')
         assert 'stop=unsupported-peripheral' in a_only and 'address=0021c124' in a_only
-        assert 'Hypothetical static full-port GPIO-A input=00000000' in a_only
+        assert 'Hypothetical static from-reset full-port GPIO-A input=00000000' in a_only
         assert 'External GPIO-B levels are unknown.' in a_only
         assert 'External GPIO-D levels are unknown.' in a_only
         b_only = run('--bootstrap-peripherals', '--gpio-b-input=0x08000000')
         assert 'stop=unsupported-peripheral' in b_only and 'address=0021c024' in b_only
-        assert 'Hypothetical static full-port GPIO-B input=08000000' in b_only
+        assert 'Hypothetical static from-reset full-port GPIO-B input=08000000' in b_only
         ad_only = run('--bootstrap-peripherals', '--gpio-a-input=0x80', '--gpio-d-input=0x600')
         assert 'stop=unsupported-peripheral' in ad_only and 'address=0021c124' in ad_only
         assert 'r1=00000080' in ad_only
@@ -65,8 +65,8 @@ def main():
             value = 255 if sample == '0377' else int(sample, 0)
             assert 'stop=instruction-budget' in known
             assert f'r1={value:08x} r2=08000000 r3=00000600' in known
-            assert f'Hypothetical static full-port GPIO-A input={value:08x}' in known
-            assert 'Hypothetical static full-port GPIO-D input=00000600' in known
+            assert f'Hypothetical static from-reset full-port GPIO-A input={value:08x}' in known
+            assert 'Hypothetical static from-reset full-port GPIO-D input=00000600' in known
             assert 'jit-blocks=0 jit-instructions=0' in known
         for sample in ('0', '0x08000000', '4294967295', '0377'):
             known = run('--bootstrap-peripherals', '--gpio-a-input=0x80',
@@ -74,8 +74,49 @@ def main():
             value = 255 if sample == '0377' else int(sample, 0)
             assert 'stop=instruction-budget' in known
             assert f'r1=00000080 r2={value:08x} r3=00000600' in known
-            assert f'Hypothetical static full-port GPIO-B input={value:08x}' in known
+            assert f'Hypothetical static from-reset full-port GPIO-B input={value:08x}' in known
             assert 'jit-blocks=0 jit-instructions=0' in known
+        # Configure B14, clear only its ISR bit, enable it, read IMR then try ISR.
+        # The admitted path must still reject a full ISR read with other pins unqualified.
+        def interrupt_rom(mode):
+            words = [0, 0, 0xe5801028, 0, 0xe5801034, 0xe5801030,
+                     0xe5902030, 0xe5903034, 0xeafffffe]
+            constants = [(0, 0, 0x0021c100), (1, 1, mode << 28), (3, 1, 0x4000)]
+            for at, register, value in constants:
+                literal = len(words)
+                words[at] = 0xe59f0000 | register << 12 | ((literal - at - 2) * 4)
+                words.append(value)
+            struct.pack_into('<' + str(len(words)) + 'I', rom, 0x100, *words)
+            image.seek(0)
+            image.write(rom)
+            image.flush()
+
+        for mode, sample, idle in ((2, '0x08000000', True), (2, None, False),
+                                   (2, '0x08004000', False), (3, '0x08004000', True),
+                                   (3, '0x08000000', False), (0, '0x08000000', True),
+                                   (0, '0x08004000', False), (1, '0x08004000', True),
+                                   (1, '0x08000000', False)):
+            interrupt_rom(mode)
+            options = ['--bootstrap-peripherals']
+            if sample is not None:
+                options.append('--gpio-b-input=' + sample)
+            result = run(*options)
+            assert 'stop=unsupported-peripheral' in result
+            if idle:
+                assert 'address=0021c130 size=4 value=00004000 register=GPIO.IMR_B status=ok' in result
+                assert 'address=0021c134 size=4 value=00000000 register=GPIO.ISR_B status=external-input-unavailable' in result
+                assert 'r2=00004000' in result
+            else:
+                assert 'address=0021c130 size=4 value=00004000 register=GPIO.IMR_B status=unsupported-side-effect' in result
+                assert 'r2=00000000' in result
+        # Restore the sample-reader image used by the remaining parser checks.
+        words = (0xe59f0018, 0xe5901000, 0xe59f0014, 0xe5902000,
+                 0xe59f0010, 0xe5903000, 0xeafffffe, 0xe1a00000,
+                 0x0021c024, 0x0021c124, 0x0021c324)
+        struct.pack_into('<11I', rom, 0x100, *words)
+        image.seek(0)
+        image.write(rom)
+        image.flush()
         settled = run('--bootstrap-peripherals', '--assume-mpll-settled')
         assert 'MPLL settled assumption=enabled; nominal FCLK only after completed restart; no lock claim.' in settled
         assert 'MPLL settled assumption=disabled;' in unknown
@@ -94,7 +135,7 @@ def main():
             assert 'External-input scenarios require --bootstrap-peripherals' in missing_bootstrap
         for option in ('--gpio-c-input=0', '--gpio-a-input', '--gpio-b-input', '--gpio-A-input=0', '--gpio-B-input=0'):
             assert 'Unknown diagnostic option:' in run('--bootstrap-peripherals', option, code=1)
-    print('PASS: explicit GPIO-A/B/D whole-port samples, unknown defaults, parsing and Exact propagation')
+    print('PASS: explicit GPIO-A/B/D whole-port samples, idle interrupt/ISR guards, parsing and Exact propagation')
 
 
 if __name__ == '__main__':

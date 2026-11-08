@@ -104,6 +104,7 @@ struct Machine {
     void cp(uint32_t instruction, uint32_t value) {
         word(0x1000, instruction); cpuSetReg(cpu, 0, value); cpuSetReg(cpu, 15, 0x1000);
         assert((cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(cpu, 1) == 1));
+        assert(cpuGetRegisters(cpu)[15] == 0x1004);
     }
     void thumb(uint32_t pc) { cpuSetReg(cpu, ARM_REG_NUM_CPSR, 0xf3); cpuSetReg(cpu, 15, pc); }
     uint32_t fetch(uint32_t pc) {
@@ -149,7 +150,7 @@ void fetchBoundaries() {
         assert(m.fetch(0x9002) == 0x2242); // Retain the guest I-cache halfword.
         m.step(); assert(cpuGetRegisters(m.cpu)[2] == 0x42);
         cpuSetReg(m.cpu, ARM_REG_NUM_CPSR, 0xd3);
-        m.cp(0xee070f35, 0x9002);
+        m.cp(0xee070f35, 0x9000);
         m.thumb(0x9002); assert(m.fetch(0x9002) == 0x2277);
         m.step(); assert(cpuGetRegisters(m.cpu)[2] == 0x77);
     }
@@ -262,7 +263,7 @@ void bxPc() {
 void guards() {
     for (uint16_t h : {0x4780, 0x4781, 0x4701, 0xe800, 0xbe00, 0xdfab, 0xde00,
                        0xb400, 0xbc00, 0xc000, 0xc001, 0xf800, 0x4340, 0xb200, 0x4400,
-                       0x4487, 0x45ff}) {
+                       0x44ff, 0x45ff}) {
         Program p; p.enter(); p.half(h); p.half(0xde00);
         const auto r = compare(p);
         assert(r.stop == Imx1ProbeStop::unsupportedInstruction && r.trace.instruction == h);

@@ -1,0 +1,32 @@
+diff --git a/src/uarm/uarm/imx1_boot_probe.cpp b/src/uarm/uarm/imx1_boot_probe.cpp
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -179,10 +179,15 @@
+         const unsigned base = (i >> 16) & 15;
+         const bool load = i & 0x00100000;
+         if (i & 0x00400000) {
+-            // User-bank LDM/STM require an exception mode, no PC and no writeback.
+             const unsigned mode = cpsr & 31;
+-            return armMode(mode) && mode != 0x10 && mode != 0x1f && base != 15 &&
+-                   (i & 0x7fff) && !(i & 0x00208000);
++            if (!armMode(mode) || mode == 0x10 || mode == 0x1f || base == 15) return false;
++            if (load && (i & 0x8000)) {
++                // LDM exception return uses current registers, then restores CPSR.
++                return armMode(spsr & 31) && !(spsr & ~0xf00000ffu) &&
++                       (!(i & 0x00200000) || !(i & (1u << base)));
++            }
++            // User-bank LDM/STM require no PC and no writeback.
++            return (i & 0x7fff) && !(i & 0x00208000);
+         }
+         return (load || !(i & 0x8000)) && (i & 0xffff) &&
+                base != 15 && (!(i & 0x00200000) || !(i & (1u << base)));
+@@ -407,7 +412,8 @@
+         blNextPc = t.pc + 2;
+         const bool contextReturn = !thumb && condition(t.instruction, t.cpsr) &&
+             (((t.instruction & 0x0ffffff0) == 0x01b0f000) ||
+-             ((t.instruction & 0x0fffffff) == 0x025ef004));
++             ((t.instruction & 0x0fffffff) == 0x025ef004) ||
++             ((t.instruction & 0x0e508000) == 0x08508000));
+         if (contextReturn && !interruptedContexts.empty() &&
+             (t.cpsr & 31) == interruptedContexts.back().mode) {
+             const auto saved = interruptedContexts.back();

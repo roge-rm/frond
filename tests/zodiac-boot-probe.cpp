@@ -31,6 +31,28 @@ static bool memory(void* data, uint32_t address, uint_fast8_t size, bool write, 
 }
 
 int main() {
+    for (uint32_t invalid : {0u, imx1ProbeMaximumSteps + 1}) {
+        const auto rejected=imx1BootProbe(nullptr,0,Imx1ProbeEntry::physicalFlash,invalid);
+        assert(rejected.stop==Imx1ProbeStop::unsupportedPeripheral && rejected.peripheralStatus==Imx1BootstrapAccess::sequence);
+    }
+
+    assert(run({0xe16f1f10}, imx1ProbeMaximumSteps).stop == Imx1ProbeStop::unsupportedInstruction);
+    // Invalid virtual profiles fail before CPU setup or bus activity.
+    for (bool fast : {false, true}) {
+        for (unsigned scenario = 0; scenario < 3; ++scenario) {
+            Imx1ProbeOptions options;
+            options.graphicsProfile = scenario == 0 ? static_cast<Imx1GraphicsProfile>(255) :
+                Imx1GraphicsProfile::virtual5744Compatible8MiB;
+            options.bootstrapPeripherals = scenario == 0 || scenario == 2;
+            options.cs5ResetStatusInputKnown = scenario == 2;
+            const auto result = imx1BootProbe(nullptr, 0, Imx1ProbeEntry::physicalFlash,
+                                              1, nullptr, nullptr, fast, &options);
+            assert(result.stop == Imx1ProbeStop::unsupportedPeripheral);
+            assert(result.peripheralStatus == Imx1BootstrapAccess::sequence && !result.busAccesses);
+            assert(!result.jitBlocks && !result.irqEntries && !result.fiqEntries);
+        }
+    }
+
     // Cache maintenance with disabled caches, ARM920 control reset and first MMIO store.
     auto r = run({0xe3a00000, 0xee070f16, 0xee070f15, 0xee111f10,
                   0xe59f0004, 0xe5801000, 0xeafffffe, 0x00205034});
@@ -40,7 +62,7 @@ int main() {
     assert(r.stop == Imx1ProbeStop::unsupportedRead && r.address == 0x0021b000 && r.size == 4);
     r = run({0xee110f10, 0xe3800004, 0xee010f10});
     assert(r.stop == Imx1ProbeStop::unsupportedCp15 && r.trace.operand == 0x7c);
-    for (uint32_t instruction : {0xee100f10u, 0xee170f16u, 0xee070f36u, 0xee080f37u}) {
+    for (uint32_t instruction : {0xee100f10u, 0xee170f16u, 0xee070f56u, 0xee080f37u}) {
         r = run({instruction});  // IDs, read of write-only cache register, unsupported cache/TLB form.
         assert(r.stop == Imx1ProbeStop::unsupportedCp15);
     }

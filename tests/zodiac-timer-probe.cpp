@@ -16,15 +16,16 @@ void load(std::vector<uint32_t>& words, unsigned reg, uint32_t value) {
     words.push_back(0xea000000);
     words.push_back(value);
 }
-Imx1ProbeResult run(const std::vector<uint32_t>& words, Trace& trace, bool fast = false, bool assumeSettled = false, bool assumeSystem = false) {
+Imx1ProbeResult run(const std::vector<uint32_t>& words, Trace& trace, bool fast = false, bool assumeSettled = false, bool assumeSystem = false, uint32_t steps = 30000) {
     Imx1ProbeOptions options{};
     options.bootstrapPeripherals = true;
+    options.rtcInitialTimeKnown = true;
     options.assumeMpllSettled = assumeSettled;
     options.assumeSpllSettled = assumeSystem;
     options.busObserver = access;
     options.busContext = &trace;
     return imx1BootProbe(reinterpret_cast<const uint8_t*>(words.data()), words.size() * 4,
-                          Imx1ProbeEntry::physicalFlash, 30000, nullptr, nullptr, fast, &options);
+                          Imx1ProbeEntry::physicalFlash, steps, nullptr, nullptr, fast, &options);
 }
 }  // namespace
 
@@ -198,5 +199,74 @@ int main() {
     }
     assert(systemFast.jitBlocks && systemFast.jitInstructions);
 #endif
+    // A compare request remains pending while CPSR I masks CPU delivery.
+    words.clear();
+    load(words, 0, 0x0021b000); load(words, 1, 0x57000003); words.push_back(0xe5801000);
+    words.push_back(0xe3a01000); words.push_back(0xe5801020);
+    load(words, 0, 0x00223000); words.push_back(0xe3a0103a); words.push_back(0xe5801008);
+    load(words, 0, 0x00203000); words.push_back(0xe3a0100a); words.push_back(0xe5801008);
+    words.push_back(0xe3a01013); words.push_back(0xe5801000);
+    const auto afterEnable = words.size();
+    for (unsigned i = 0; i < 20; ++i) words.push_back(0xe1a03003);
+    const auto maskedStopPc = 0x10000000 + words.size() * 4;
+    words.push_back(0xe7f000f0);
+    Trace irqTrace;
+    const auto irq = run(words, irqTrace);
+    assert(irq.stop == Imx1ProbeStop::unsupportedInstruction && !irq.elapsedInterruptBoundary);
+    assert(irq.peripheralStatus == Imx1BootstrapAccess::ok && !irq.irqEntries && !irq.fiqEntries);
+    assert(irq.trace.pc == maskedStopPc && irq.trace.pc > 0x10000000 + (afterEnable + 8) * 4);
+    assert(irq.registers[15] == irq.trace.pc && (irq.cpsr & 31) == 0x13);
+    assert(irq.address == 0 && irq.size == 0 && irq.value == 0);
+    assert(irq.interruptPending.normal == uint64_t(1) << 58 && irq.interruptPending.fast == 0);
+    assert(irq.interruptPending.unknownNormal == 0 && irq.interruptPending.unknownFast == 0);
+    for (const auto& entry : irqTrace.bus)
+        assert(entry.address != 0x00217010 && entry.step < irq.trace.step);
+#if FROND_TEST_FAST
+    Trace irqFastTrace;
+    const auto irqFast = run(words, irqFastTrace, true);
+    assert(!irqFast.elapsedInterruptBoundary && irqFast.trace.step == irq.trace.step && !irqFast.irqEntries);
+    assert(irqFast.interruptPending.normal == irq.interruptPending.normal);
+    assert(irqFast.interruptPending.fast == 0 && irqFast.busAccesses == irq.busAccesses);
+    assert(irqFastTrace.bus.size() == irqTrace.bus.size());
+    assert(!std::memcmp(irqFast.registers, irq.registers, sizeof(irq.registers)));
+#endif
+    // A sampling event during the pre-fetch SPLL stall remains pending while I is set.
+    words.clear();
+    load(words, 0, 0x00223000); words.push_back(0xe3a01012); words.push_back(0xe5801008);
+    load(words, 0, 0x00204000); load(words, 1, 0x8000); words.push_back(0xe5801018);
+    for (unsigned i = 0; i < 15200; ++i) words.push_back(0xe1a03003);
+    load(words, 0, 0x0021b000); load(words, 1, 0x57000003); words.push_back(0xe5801000);
+    load(words, 1, 0x03e717bf); words.push_back(0xe5801004);
+    load(words, 1, 0x57200003); words.push_back(0xe5801000);
+    for (unsigned i = 0; i < 6000; ++i) words.push_back(0xe1a03003);
+    load(words, 1, 0xc0000078); words.push_back(0xee011f10);
+    load(words, 1, 0x123638ad); words.push_back(0xe580100c);
+    load(words, 1, 0x57400003);
+    const auto restartPc = 0x10000000 + words.size() * 4;
+    words.push_back(0xe5801000);
+    words.push_back(0xe3a07055);
+    words.push_back(0xe7f000f0);
+    Trace stallTrace;
+    const auto stalled = run(words, stallTrace, false, true, true);
+    assert(stalled.stop == Imx1ProbeStop::unsupportedInstruction && !stalled.elapsedInterruptBoundary);
+    assert(stalled.trace.pc == restartPc + 8 && stalled.registers[15] == restartPc + 8);
+    assert(stalled.registers[7] == 0x55 && stalled.cpsr == stalled.trace.cpsr && !stalled.irqEntries);
+    assert(stalled.address == 0 && stalled.size == 0 && stalled.value == 0);
+    assert(stalled.interruptPending.normal == uint64_t(1) << 18 && stalled.interruptPending.fast == 0);
+    assert(stallTrace.bus.back().pc == restartPc && stallTrace.bus.back().value == 0x57400003);
+    assert(!stalled.possibleWatchdogTimeoutBoundary);
+    // Possible watchdog expiry is a sticky uncertainty boundary, with no invented IRQ/reset.
+    words.clear(); load(words, 0, 0x00201000); load(words, 1, 0x0202);
+    words.push_back(0xe5801000); words.push_back(0xe2811001); words.push_back(0xe5801000);
+    const auto loopPc = 0x10000000 + words.size() * 4;
+    words.push_back(0xeafffffe);
+    Trace watchdogTrace;
+    const auto watchdog = run(words, watchdogTrace, false, false, false, 4200000);
+    assert(watchdog.stop == Imx1ProbeStop::unsupportedPeripheral && watchdog.possibleWatchdogTimeoutBoundary);
+    assert(watchdog.peripheralStatus == Imx1BootstrapAccess::possibleWatchdogTimeout);
+    assert(!watchdog.elapsedInterruptBoundary && watchdog.interruptPending.normal == 0);
+    assert(watchdog.address == 0 && watchdog.size == 0 && watchdog.value == 0);
+    assert(watchdog.trace.pc == loopPc && watchdog.registers[15] == loopPc && (watchdog.cpsr & 31) == 0x13);
+    assert(watchdogTrace.bus.size() == 2 && watchdogTrace.bus.back().value == 0x0203);
     std::puts("PASS: Timer 1 advances between instructions, polling sees elapsed cycles and clock modes stay explicit");
 }

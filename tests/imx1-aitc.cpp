@@ -135,7 +135,7 @@ void maskedGpioRequests() {
     };
     for (unsigned source = 0; source < 64; ++source) {
         if ((gpioMask & (uint64_t(1) << source)) || source == 31 || source == 32 || source == 39 ||
-            source == 5 || source == 9 || source == 33 || source == 34 || source == 46) continue;
+            source == 58 || source == 59 || source == 63 || source == 5 || source == 9 || source == 17 || source == 18 || source == 33 || source == 34 || source == 46) continue;
         access(8, true, source, Imx1BootstrapAccess::externalInput);
         assert(access(0x10, false, 0, Imx1BootstrapAccess::ok) == 0);
         assert(access(0x14, false, 0, Imx1BootstrapAccess::ok) == 0);

@@ -20,12 +20,51 @@ static void trace(void*, const Imx1ProbeTrace& t) {
     std::printf("step=%u pc=%08x instruction=%08x cpsr=%08x operand=%08x width=4\n",
                 t.step, t.pc, t.instruction, t.cpsr, t.operand);
 }
-static void bus(void*, const Imx1ProbeAccess& t) {
+static void bus(void* context, const Imx1ProbeAccess& t) {
     const char* name = Imx1Bootstrap::registerName(t.address);
     if (!name && t.address >= 0x08000000 && t.address < 0x10000000) name = "SDRAM";
-    std::printf("bus step=%u pc=%08x operation=%s address=%08x size=%u value=%08x register=%s status=%s\n",
+    std::printf("bus step=%u pc=%08x operation=%s address=%08x size=%u value=%08x register=%s status=%s%s",
                 t.step, t.pc, t.write ? "write" : "read", t.address, t.size, t.value,
-                name ? name : "unknown", imx1BootstrapAccessName(t.status));
+                name ? name : "unknown", imx1BootstrapAccessName(t.status),
+                (t.diagnosticCs5Configuration || t.diagnosticCs5Reset) &&
+                    static_cast<Imx1ProbeOptions*>(context)->graphicsProfile != Imx1GraphicsProfile::strict ? " source=virtual5744-compatible-8mib" :
+                t.diagnosticCs5Configuration ? " source=diagnostic-cs5-configuration" :
+                t.diagnosticCs5Reset ? " source=diagnostic-cs5-reset" :
+                t.diagnosticCs4 ? " source=diagnostic-cs4-capture" : "");
+    if (t.knownMask != 0xffffffffu) std::printf(" known-mask=%08x single-pin-query", t.knownMask);
+    std::putchar('\n');
+}
+
+static void cs5Reset(void* context, const Imx1ProbeCs5ResetEvent& event) {
+    std::printf("cs5-reset step=%u pc=%08x operation=%s address=%08x size=%u value=%02x phase=%u status=%s source=%s\n",
+                event.step, event.pc, event.write ? "write" : "read", event.address, event.size,
+                event.value, event.phase, imx1BootstrapAccessName(event.status),
+                static_cast<Imx1ProbeOptions*>(context)->graphicsProfile != Imx1GraphicsProfile::strict ?
+                    "virtual5744-compatible-8mib" : "diagnostic-reset-echo");
+}
+
+static void cs5Configuration(void* context, const Imx1ProbeCs5ConfigurationEvent& event) {
+    std::printf("cs5-configuration step=%u pc=%08x operation=%s address=%08x size=%u value=%08x defaults-known=%u status=%s source=%s",
+                event.step, event.pc, event.write ? "write" : "read", event.address, event.size,
+                event.value, event.defaultsKnown, imx1BootstrapAccessName(event.status),
+                static_cast<Imx1ProbeOptions*>(context)->graphicsProfile != Imx1GraphicsProfile::strict ?
+                    "virtual5744-compatible-8mib" : "configured-virtual-aperture");
+    if (event.knownMask != 0xffffffffu) std::printf(" known-mask=%08x single-pin-query", event.knownMask);
+    std::putchar('\n');
+}
+
+static void cs4(void*, const Imx1ProbeCs4Event& event) {
+    char index[12], bank[12];
+    if (event.index < 0) std::strcpy(index, "unknown");
+    else std::snprintf(index, sizeof(index), "%02x", event.index);
+    if (event.bank < 0) std::strcpy(bank, "unknown");
+    else std::snprintf(bank, sizeof(bank), "%d", event.bank);
+    const char* operation = event.address == 0x15000000 ?
+        (event.write ? "index-write" : "raw-port0-input") : event.address == 0x15000001 ?
+        (event.write ? "data-command" : "data-read") : "unmapped";
+    std::printf("cs4-capture step=%u pc=%08x operation=%s address=%08x size=%u value=%02x index=%s bank=%s status=%s source=diagnostic-recorder\n",
+                event.step, event.pc, operation, event.address, event.size, event.value, index, bank,
+                imx1BootstrapAccessName(event.status));
 }
 
 static void i2c(void*, const Imx1ProbeI2cEvent& event) {
@@ -35,9 +74,28 @@ static void i2c(void*, const Imx1ProbeI2cEvent& event) {
                 t.address, t.byte, t.read ? "read" : "write", t.acknowledge, imx1I2cResponseName(event.response),
                 event.control, event.status, event.divider);
 }
+static void interrupt(void*, const Imx1ProbeInterrupt& event) {
+    std::printf("interrupt step=%u interrupted-pc=%08x cpsr=%08x vector=%08x link=%08x type=%s normal-pending=%016llx fast-pending=%016llx\n",
+                event.step, event.interruptedPc, event.cpsr, event.vector, event.link, event.fiq ? "fiq" : "irq",
+                (unsigned long long)event.pending.normal, (unsigned long long)event.pending.fast);
+}
+static bool parseRtcTime(const char* text, Imx1RtcTime& time) {
+    uint32_t fields[4]{};
+    for (unsigned i = 0; i < 4; ++i) {
+        if (*text < '0' || *text > '9') return false;
+        while (*text >= '0' && *text <= '9') {
+            if (fields[i] > 511) return false;
+            fields[i] = fields[i] * 10 + unsigned(*text++ - '0');
+        }
+        if (i < 3) { if (*text++ != ':') return false; }
+        else if (*text) return false;
+    }
+    time = {fields[0], fields[1], fields[2], fields[3]};
+    return Imx1Rtc::validTime(time);
+}
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::fprintf(stderr, "Usage: %s ROM [physical|reset|linked] [instruction-budget] [exact|fast] [--bootstrap-peripherals] [--assume-mpll-settled] [--assume-spll-settled] [--assume-i2c-single-master] [--i2c-eeprom-image=PATH] [--asp-px1-input=high] [--gpio-a-input=VALUE] [--gpio-b-input=VALUE] [--gpio-d-input=VALUE] [--ram-mib=32|128]\n", argv[0]);
+        std::fprintf(stderr, "Usage: %s ROM [physical|reset|linked] [instruction-budget] [exact|fast] [--bootstrap-peripherals] [--assume-mpll-settled] [--assume-spll-settled] [--assume-i2c-single-master] [--i2c-eeprom-image=PATH] [--asp-px1-input=high] [--asp-u-sample=WORD] [--rtc-initial-time=DAY:HH:MM:SS] [--cs4-port0-input=BYTE] [--cs5-reset-status-input=BYTE] [--graphics-profile=virtual5744-compatible-8mib] [--gpio-a-input=VALUE] [--gpio-b-input=VALUE] [--gpio-d-input=VALUE] [--ram-mib=32|128]\n", argv[0]);
         return 1;
     }
     const char* engine = argc >= 5 ? argv[4] : "exact";
@@ -46,16 +104,67 @@ int main(int argc, char** argv) {
     }
     const char* i2cImagePath = nullptr;
     Imx1ProbeOptions options{};
+    options.interruptObserver = interrupt;
     options.busObserver = bus;
     options.i2cObserver = i2c;
+    options.cs4Observer = cs4;
+    options.cs5ResetObserver = cs5Reset;
+    options.cs5ConfigurationObserver = cs5Configuration;
+    options.busContext = options.cs5ResetContext = options.cs5ConfigurationContext = &options;
     for (int i = 5; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--bootstrap-peripherals")) options.bootstrapPeripherals = true;
         else if (!std::strcmp(argv[i], "--assume-i2c-single-master")) options.assumeI2cSingleMaster = true;
+        else if (!std::strncmp(argv[i], "--graphics-profile=", 19)) {
+            if (options.graphicsProfile != Imx1GraphicsProfile::strict ||
+                std::strcmp(argv[i] + 19, "virtual5744-compatible-8mib")) {
+                std::fprintf(stderr, "Supply --graphics-profile=virtual5744-compatible-8mib once\n"); return 1;
+            }
+            options.graphicsProfile = Imx1GraphicsProfile::virtual5744Compatible8MiB;
+        }
+        else if (!std::strncmp(argv[i], "--rtc-initial-time=", 19)) {
+            if (options.rtcInitialTimeKnown || !parseRtcTime(argv[i] + 19, options.rtcInitialTime)) {
+                std::fprintf(stderr, "Supply one --rtc-initial-time=DAY:HH:MM:SS (0..511:0..23:0..59:0..59)\n"); return 1;
+            }
+            options.rtcInitialTimeKnown = true;
+        }
+        else if (!std::strncmp(argv[i], "--cs4-port0-input=", 18)) {
+            char* end = nullptr;
+            errno = 0;
+            const char* text = argv[i] + 18;
+            const auto value = std::strtoul(text, &end, 0);
+            if (options.cs4Port0InputKnown || errno || *text < '0' || *text > '9' || *end || value > 0xff) {
+                std::fprintf(stderr, "Supply one 8-bit --cs4-port0-input value\n"); return 1;
+            }
+            options.cs4Port0InputKnown = true;
+            options.cs4Port0Input = value;
+        }
+        else if (!std::strncmp(argv[i], "--cs5-reset-status-input=", 25)) {
+            char* end = nullptr;
+            errno = 0;
+            const char* text = argv[i] + 25;
+            const auto value = std::strtoul(text, &end, 0);
+            if (options.cs5ResetStatusInputKnown || errno || *text < '0' || *text > '9' || *end || value > 0xff) {
+                std::fprintf(stderr, "Supply one 8-bit --cs5-reset-status-input value\n"); return 1;
+            }
+            options.cs5ResetStatusInputKnown = true;
+            options.cs5ResetStatusInput = value;
+        }
         else if (!std::strncmp(argv[i], "--asp-px1-input=", 16)) {
             if (options.aspPx1HighFromReset || std::strcmp(argv[i] + 16, "high")) {
                 std::fprintf(stderr, "Supply --asp-px1-input=high once, held from reset\n"); return 1;
             }
             options.aspPx1HighFromReset = true;
+        }
+        else if (!std::strncmp(argv[i], "--asp-u-sample=", 15)) {
+            char* end = nullptr;
+            errno = 0;
+            const char* text = argv[i] + 15;
+            const auto value = std::strtoul(text, &end, 0);
+            if (options.aspUSampleKnown || errno || *text < '0' || *text > '9' || *end || value > 0xffff) {
+                std::fprintf(stderr, "Supply one 16-bit --asp-u-sample value\n"); return 1;
+            }
+            options.aspUSampleKnown = true;
+            options.aspUSample = value;
         }
         else if (!std::strncmp(argv[i], "--i2c-eeprom-image=", 19)) {
             if (i2cImagePath || !argv[i][19]) {
@@ -82,7 +191,11 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--ram-mib=128")) options.ramMiB = 128;
         else { std::fprintf(stderr, "Unknown diagnostic option: %s\n", argv[i]); return 1; }
     }
-    if ((options.aspPx1HighFromReset || options.gpioAInputKnown || options.gpioBInputKnown || options.gpioDInputKnown || options.ramMiB) && !options.bootstrapPeripherals) {
+    if (options.graphicsProfile != Imx1GraphicsProfile::strict &&
+        (!options.bootstrapPeripherals || options.cs5ResetStatusInputKnown)) {
+        std::fprintf(stderr, "Graphics profile requires --bootstrap-peripherals and owns CS5 reset state; omit --cs5-reset-status-input\n"); return 1;
+    }
+    if ((options.aspUSampleKnown || options.cs5ResetStatusInputKnown || options.rtcInitialTimeKnown || options.cs4Port0InputKnown || options.aspPx1HighFromReset || options.gpioAInputKnown || options.gpioBInputKnown || options.gpioDInputKnown || options.ramMiB) && !options.bootstrapPeripherals) {
         std::fprintf(stderr, "External-input scenarios require --bootstrap-peripherals\n"); return 1;
     }
     if (options.assumeMpllSettled && !options.bootstrapPeripherals) {
@@ -120,8 +233,8 @@ int main(int argc, char** argv) {
         char* end = nullptr;
         errno = 0;
         budget = std::strtoul(argv[3], &end, 10);
-        if (errno || !*argv[3] || *end || !budget || budget > 20000000) {
-            std::fprintf(stderr, "Instruction budget must be 1..20000000\n");
+        if (errno || !*argv[3] || *end || !budget || budget > imx1ProbeMaximumSteps) {
+            std::fprintf(stderr, "Instruction budget must be 1..%u\n", imx1ProbeMaximumSteps);
             return 1;
         }
     }
@@ -153,19 +266,40 @@ int main(int argc, char** argv) {
                     options.assumeSpllSettled ? "enabled" : "disabled");
         std::printf("I2C single-master initially-idle scenario=%s; no stretching; unknown slave responses stop.\n",
                     options.assumeI2cSingleMaster ? "enabled" : "disabled");
+        if (options.rtcInitialTimeKnown) {
+            const auto t = options.rtcInitialTime;
+            std::printf("Diagnostic RTC initial time=%u:%02u:%02u:%02u; opaque chip day, CLK32 subsecond phase zero at entry; elapsed reference clocks only, no civil epoch or host time.\n", t.day, t.hour, t.minute, t.second);
+        } else std::puts("Retained RTC day/time and subsecond phase are unknown.");
+        if (options.graphicsProfile != Imx1GraphicsProfile::strict)
+            std::printf("VIRTUAL GRAPHICS: virtual5744-compatible-8mib; identity=%08x revision=%08x capacity=%u are model choices; external bank plus %u-byte internal bank; bounded direct backing, configured windows and paired lookup storage; cold VRAM zero, soft reset retains bytes; wrap and other apertures unbacked; GPIO direction 1 drives ideal output pads under selector ffff, external inputs unknown; reset clears GPIO state; reset status=00, REG_BASE=01, CPU_DEFAULTS=0e transaction; unsupported controller operations stop.\n",
+                        Imx1Cs5Configuration::virtualIdentity, Imx1Cs5Configuration::virtualRevision,
+                        Imx1Cs5Configuration::virtualExternalBytes, Imx1Cs5Configuration::virtualInternalBytes);
+        if (options.graphicsProfile != Imx1GraphicsProfile::strict)
+            std::puts("VIRTUAL DISPLAY: before programming, pixel source=1 pixel per 16 charged CPU cycles; programmed PCLK follows graphics clocks; 32-cycle initial or 32-tick programmed settling, running latch at next frame boundary; framebuffer RGB565 to host ABGR8888; startup option nibble=0 on pins9..12 after display enable, per-pin observations only; no physical clock, panel timing or board strap claim.");
+        if (options.graphicsProfile != Imx1GraphicsProfile::strict)
+            std::printf("VIRTUAL GRAPHICS CLOCKS: reference=16000000Hz, time=200000000Hz from Cgm/CLK32 guest time; counter=source/4 with 4*(lock+1) reference-period gate; register-driven nominal VCO curve, no physical lock or oscillator claim.\n");
+        if (options.cs5ResetStatusInputKnown)
+            std::printf("DIAGNOSTIC CS5 RESET: opaque status input=%02x is caller-supplied and unqualified; bit3 echoes reset-helper writes immediately; other bits, chip reset effects and timing are unmodelled. Configured virtual REG_BASE=01 selects +10000; exact CPU_DEFAULTS=0e is recorded; full identity/revision words remain unknown.\n", options.cs5ResetStatusInput);
+        if (options.cs4Port0InputKnown)
+            std::printf("DIAGNOSTIC CS4 RECORDER: raw port0 input=%02x is caller-supplied and unqualified; writes are captured; physical read side effects, audio, FIFO and timing are unmodelled; data reads stop.\n", options.cs4Port0Input);
         if (options.aspPx1HighFromReset)
             std::puts("Diagnostic ASP PX1 input held high from reset; no transitions; physical voltage and ADC samples unqualified.");
         else std::puts("External ASP PX1 level and history are unknown.");
+        if (options.aspUSampleKnown)
+            std::printf("Diagnostic ASP manual U post-filter sample=%04x; U_SEL=0, BIT_SELECT=2; fixed virtual stimulus, no physical voltage or calibration claim.\n", options.aspUSample);
+        else std::puts("External ASP U conversion input is unknown.");
         if (i2cWindow) std::puts("Explicit 256-byte I2C 0x50 read window attached; caller-supplied bytes; physical identity and contents unqualified.");
         if (options.gpioAInputKnown)
-            std::printf("Hypothetical static full-port GPIO-A input=%08x\n", options.gpioAInput);
+            std::printf("Hypothetical static from-reset full-port GPIO-A input=%08x\n", options.gpioAInput);
         else std::puts("External GPIO-A levels are unknown.");
         if (options.gpioBInputKnown)
-            std::printf("Hypothetical static full-port GPIO-B input=%08x\n", options.gpioBInput);
+            std::printf("Hypothetical static from-reset full-port GPIO-B input=%08x\n", options.gpioBInput);
         else std::puts("External GPIO-B levels are unknown.");
         if (options.gpioDInputKnown)
-            std::printf("Hypothetical static full-port GPIO-D input=%08x\n", options.gpioDInput);
+            std::printf("Hypothetical static from-reset full-port GPIO-D input=%08x\n", options.gpioDInput);
         else std::puts("External GPIO-D levels are unknown.");
+        std::puts("Timer 2 toggle mode requires D31 GPIO input or DR-selected output; TMR2OUT waveform and board effects remain unmodelled.");
+        std::puts("GPIO pad model=ideal digital DR-selected GPIO output without contention; SSR uses output feedback, other supplied levels remain external hypotheses; no synchronizer timing claim.");
         std::printf("Diagnostic RAM capacity=%u MiB, initial contents zero; bus timing unqualified.\n", options.ramMiB);
     }
     if (entry != Imx1ProbeEntry::physicalFlash) std::puts("Selected alias is an unverified mapping experiment.");
@@ -177,6 +311,19 @@ int main(int argc, char** argv) {
                 result.trace.operand, result.trace.instructionSize);
     std::printf("bus-accesses=%llu peripheral-status=%s\n", (unsigned long long)result.busAccesses,
                 imx1BootstrapAccessName(result.peripheralStatus));
+    if (result.possibleWatchdogTimeoutBoundary)
+        std::printf("possible-watchdog-timeout-boundary; elapsed reference interval exhausted, reset/IRQ state unknown, no guest MMIO or CPU delivery\n");
+    if (result.elapsedInterruptBoundary) {
+        const auto pending = result.interruptPending;
+        std::printf("elapsed-interrupt-boundary normal-pending=%016llx fast-pending=%016llx unknown-normal=%016llx unknown-fast=%016llx; CPU delivery guarded, no guest access\n",
+                    (unsigned long long)pending.normal, (unsigned long long)pending.fast,
+                    (unsigned long long)pending.unknownNormal, (unsigned long long)pending.unknownFast);
+    }
+    if (options.graphicsProfile != Imx1GraphicsProfile::strict)
+        std::printf("graphics-frame lcd=%u width=%u height=%u fnv1a=%08x format=ABGR8888\n",
+                    unsigned(result.graphicsLcdEnabled), result.graphicsFrameWidth, result.graphicsFrameHeight, result.graphicsFrameHash);
+    std::printf("irq-entries=%llu fiq-entries=%llu\n", (unsigned long long)result.irqEntries,
+                (unsigned long long)result.fiqEntries);
     std::printf("jit-blocks=%llu jit-instructions=%llu final-cpsr=%08x\n",
                 (unsigned long long)result.jitBlocks, (unsigned long long)result.jitInstructions, result.cpsr);
     for (unsigned i = 0; i < 16; ++i)

@@ -185,8 +185,8 @@ int main() {
     // This edge loses a timer tick if the fractional phase is dropped on either handoff.
     chunks.advanceFastBusCycles(73);
     assert(counter(chunks) == 3908);
-    uint32_t change = 0x57008003;
-    assert(chunks.access(cscr, 4, true, change, 3) == Imx1BootstrapAccess::sideEffect);
+    uint32_t change = 3;
+    assert(chunks.access(cscr + 32, 4, true, change, 3) == Imx1BootstrapAccess::sideEffect);
     change = 0x57200003;
     assert(chunks.access(cscr, 4, true, change, 3) == Imx1BootstrapAccess::sideEffect);
     change = 0x03e717bf;
