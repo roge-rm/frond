@@ -1,0 +1,286 @@
+diff --git a/src/uarm/uarm/imx1_cs5_configuration.h b/src/uarm/uarm/imx1_cs5_configuration.h
+--- a/src/uarm/uarm/imx1_cs5_configuration.h
++++ b/src/uarm/uarm/imx1_cs5_configuration.h
+@@ -10,6 +10,7 @@
+ #include "imx1_graphics_display.h"
+ #include "imx1_graphics_interrupts.h"
+ #include "imx1_graphics_acquisition.h"
++#include "imx1_graphics_sd.h"
+ 
+ enum class Imx1GraphicsProfile { strict, virtual5744Compatible8MiB };
+ inline bool imx1GraphicsProfileValid(Imx1GraphicsProfile profile) {
+@@ -38,6 +39,7 @@
+         display.reset();
+         interrupts.reset();
+         acquisition.reset();
++        sd.reset();
+         clocks.reset();
+         timeFraction = {};
+         waitCpuFraction = {};
+@@ -83,6 +85,7 @@
+     void selectAcquisitionSource(uint32_t source) { acquisition.selectSource(source); }
+     bool setAcquisitionInput(uint32_t first, uint32_t second) { return acquisition.setInput(first, second); }
+     const Imx1GraphicsAcquisition& acquisitionState() const { return acquisition; }
++    const Imx1GraphicsSd& sdState() const { return sd; }
+     const Imx1GraphicsClocks& clockState() const { return clocks; }
+     Imx1GraphicsLookup::Entry lookupEntry(unsigned index) const { return lookup.entry(index); }
+     bool memoryInterfaceReady() const { return programmed && interfaceMode == 0x11 && (interfaceControl & ~0xe00u) == 0x0c000000; }
+@@ -103,13 +106,20 @@
+     Imx1BootstrapAccess access(const Imx1Eim& eim, uint32_t pc, uint32_t address,
+                               uint32_t size, bool write, uint32_t& value, uint32_t sampledPin = 32) {
+         if (!imx1GraphicsProfileValid(profile)) return Imx1BootstrapAccess::sequence;
++        if (virtualProfile() && Imx1GraphicsSd::owns(address)) {
++            if (!memoryReady(eim) || !clocks.programmed()) return Imx1BootstrapAccess::sequence;
++            const auto window = windows.aperture2();
++            if (address >= 0x16200000 && (!window.known || address - 0x16000000 < window.first ||
++                uint64_t(address - 0x16000000) + size > uint64_t(window.last) + 1)) return Imx1BootstrapAccess::sequence;
++            return sd.access(pc,address,size,write,value);
++        }
+         if (virtualProfile() && Imx1GraphicsAcquisition::owns(address)) {
+             if (!memoryReady(eim) || !clocks.programmed()) return Imx1BootstrapAccess::sequence;
+             return acquisition.access(pc, address, size, write, value);
+         }
+         if (virtualProfile() && Imx1GraphicsInterrupts::owns(address)) {
+             if (!deviceConfigured(eim) || !memoryInterfaceReady()) return Imx1BootstrapAccess::sequence;
+-            return interrupts.access(pc, address, size, write, value);
++            return interrupts.access(pc, address, size, write, value, sd.cardEventsKnown());
+         }
+         if (virtualProfile() && ((pc >= 0x20086952 && pc <= 0x20086a60 && !Imx1GraphicsDisplay::owns(address)) || address == 0x16010184)) {
+             if (!deviceConfigured(eim)) return Imx1BootstrapAccess::sequence;
+@@ -216,7 +226,13 @@
+              pc == 0x200c424c || pc == 0x200c42d0 || pc == 0x200c42f4 || pc == 0x200c4314 ||
+              pc == 0x200c4330 || pc == 0x200c4344 || pc == 0x200c435c || pc == 0x200c4374 ||
+              (pc == 0x200871dc && memoryReady(eim) && clocks.programmed()) ||
+-             pc == 0x20084650 || pc == 0x20084658 || pc == 0x20084660 || pc == 0x20084664);
++             pc == 0x20084650 || pc == 0x20084658 || pc == 0x20084660 || pc == 0x20084664 ||
++             (memoryReady(eim) && clocks.programmed() &&
++              (pc == 0x204d26c6 || pc == 0x204d26ce || pc == 0x204d26da || pc == 0x204d270a ||
++               pc == 0x204d218e || pc == 0x204d22f4 || pc == 0x204d2314 || pc == 0x204d231c ||
++               pc == 0x204d3652 || pc == 0x204d2742 || pc == 0x204d247e || pc == 0x204d2522 ||
++               pc == 0x204d2534 || pc == 0x204d2574 || pc == 0x204d2586 || pc == 0x204d277a ||
++               pc == 0x204d22ae)));
+         if (!virtualProfile() || write || (!controllerIdentity &&
+             pc != (address == 0x16010000 ? 0x200bac00u : 0x200bac28u)))
+             return Imx1BootstrapAccess::externalInput;
+@@ -230,6 +246,7 @@
+     void advanceDisplay(uint64_t ticks) {
+         if (!clocks.programmed() || clocks.systemRate().numerator) engine.advance(ticks);
+         acquisition.advance(ticks);
++        sd.advance(ticks);
+         const auto before = display.verticalBlankEvents();
+         display.advanceCpuCycles(ticks);
+         interrupts.observeDisplay(true, display.verticalBlankEvents() != before);
+@@ -325,6 +342,7 @@
+     Imx1GraphicsDisplay display;
+     Imx1GraphicsInterrupts interrupts;
+     Imx1GraphicsAcquisition acquisition;
++    Imx1GraphicsSd sd;
+     Imx1GraphicsClocks clocks;
+     Imx1GraphicsFraction timeFraction, waitCpuFraction;
+     // These interface configuration words reset to zero in the virtual profile.
+diff --git a/src/uarm/uarm/imx1_graphics_gpio.h b/src/uarm/uarm/imx1_graphics_gpio.h
+--- a/src/uarm/uarm/imx1_graphics_gpio.h
++++ b/src/uarm/uarm/imx1_graphics_gpio.h
+@@ -30,6 +30,17 @@
+         // CNTL2/4 sample pads; a full input word has no established external levels.
+         if (offset == 8) return Imx1BootstrapAccess::externalInput;
+         const bool control = offset == 4;
++        if (!index && offset == 0 &&
++            ((!write && (pc == 0x204d26f4 || pc == 0x204d2716)) ||
++             (write && (pc == 0x204d2708 || pc == 0x204d272a)))) {
++            if (!state.dataKnown || !state.controlKnown) return Imx1BootstrapAccess::sequence;
++            if (!write) value = state.data;
++            else {
++                if ((value ^ state.data) & ~0x40004000u) return Imx1BootstrapAccess::sideEffect;
++                state.data = value;
++            }
++            return Imx1BootstrapAccess::ok;
++        }
+         if (write) {
+             if (pc == (control ? 0x200b9b8cu : 0x200b9b5cu)) {
+                 bool& read = control ? controlRead[index] : dataRead[index];
+diff --git a/src/uarm/uarm/imx1_graphics_interrupts.h b/src/uarm/uarm/imx1_graphics_interrupts.h
+--- a/src/uarm/uarm/imx1_graphics_interrupts.h
++++ b/src/uarm/uarm/imx1_graphics_interrupts.h
+@@ -20,11 +20,29 @@
+         if (sourceKnown && event) { pending |= displayMask; known |= displayMask; }
+         else if (!sourceKnown && !(pending & known & displayMask)) known &= ~displayMask;
+     }
+-    Imx1BootstrapAccess access(uint32_t pc, uint32_t address, uint32_t size, bool write, uint32_t& value) {
++    Imx1BootstrapAccess access(uint32_t pc, uint32_t address, uint32_t size, bool write, uint32_t& value,
++                              bool emptySdCardEventsKnown = false) {
+         using A = Imx1BootstrapAccess;
+         if (!owns(address)) return A::unmapped;
+         if (size != 4) return A::width;
+         if (address == 0x16010200) {
++            if (pc == (write ? 0x204d22aau : 0x204d22a4u)) {
++                if (!emptySdCardEventsKnown) return A::externalInput;
++                if (!write) value = enabled;
++                else {
++                    if (value != (enabled | 0x02000000u)) return A::sideEffect;
++                    enabled = value;
++                }
++                return A::ok;
++            }
++            if (pc == (write ? 0x204d22beu : 0x204d22b8u)) {
++                if (!write) value = enabled;
++                else {
++                    if (value != (enabled & ~0x02000000u)) return A::sideEffect;
++                    enabled = value;
++                }
++                return A::ok;
++            }
+             if (!write) {
+                 if (pc != 0x20086dee && pc != 0x200876f2) return A::externalInput;
+                 value = enabled;
+@@ -32,7 +50,7 @@
+                 if (pc != 0x20086970 && pc != 0x20086e08 && pc != 0x20087702) return A::externalInput;
+                 if (pc == 0x20086970 && value != 0) return A::sideEffect;
+                 if (value & ~nativeMask) return A::reservedBits;
+-                if (value & ~displayMask) return A::externalInput;
++                if (value & ~(displayMask | (emptySdCardEventsKnown ? 0x02000000u : 0u))) return A::externalInput;
+                 if (value & ~known) return A::externalInput;
+                 enabled = value;
+             }
+diff --git a/src/uarm/uarm/imx1_graphics_sd.h b/src/uarm/uarm/imx1_graphics_sd.h
+new file mode 100644
+--- /dev/null
++++ b/src/uarm/uarm/imx1_graphics_sd.h
+@@ -0,0 +1,137 @@
++#ifndef FROND_IMX1_GRAPHICS_SD_H
++#define FROND_IMX1_GRAPHICS_SD_H
++
++#include <algorithm>
++#include "imx1_bootstrap.h"
++
++// Explicit virtual empty SD slot. Time is in the shared 200 MHz guest domain.
++class Imx1GraphicsSd {
++   public:
++    static bool owns(uint32_t address) {
++        return address == 0x1601090c || address == 0x16010910 ||
++               (address >= 0x16202000 && address < 0x16202200);
++    }
++    void reset() { *this = {}; }
++    void advance(uint64_t ticks) {
++        if (resetHeld) resetElapsed = std::min<uint64_t>(32, resetElapsed + std::min<uint64_t>(ticks,32));
++        if (clockRemaining) {
++            const auto step = std::min(ticks, clockRemaining);
++            clockRemaining -= step;
++            ticks -= step;
++        }
++        if (!clockRemaining && (clock & 0x100) && commandPending && !resetHeld) {
++            const auto step = std::min(ticks, commandRemaining);
++            commandRemaining -= step;
++            if (!commandRemaining) {
++                commandPending = false;
++                status1 |= 1;
++                status2 = 0x80 | ((command & 0x700) == 0x300 ? 0 : 0x40);
++            }
++        }
++    }
++    uint32_t controlValue() const { return control; }
++    uint32_t clockValue() const { return clockRemaining ? clock & ~0x100u : clock; }
++    uint32_t statusValue() const { return status2; }
++    bool pending() const { return commandPending; }
++    bool cardEventsKnown() const { return released && (interruptMask == 0x31d || interruptMask == 0x305); }
++    Imx1BootstrapAccess access(uint32_t pc, uint32_t address, uint32_t size, bool write, uint32_t& value) {
++        using A = Imx1BootstrapAccess;
++        if (!owns(address)) return A::unmapped;
++        const bool config = address < 0x16200000;
++        if (size != 4 && !(size == 2 && !write && !config)) return A::width;
++        if (config) {
++            if (address == 0x16010910) {
++                if (!write) {
++                    if (pc != 0x204d26a2 && pc != 0x204d26b4 && pc != 0x204d3618 && pc != 0x204d3728) return A::externalInput;
++                    value = control; // Card-present and write-protect inputs are zero for the empty slot.
++                } else {
++                    if (pc != 0x204d26b2 && pc != 0x204d26ba && pc != 0x204d273e) return A::externalInput;
++                    if (value & ~0x438000u) return A::sideEffect;
++                    control = value;
++                    if (value & 0x8000) { commandPending = false; commandRemaining = 0; clock = 0; clockRemaining = 0; }
++                }
++            } else {
++                if (pc != (write ? 0x204d26c2u : 0x204d26bcu)) return A::externalInput;
++                if (write) {
++                    if (value & ~0x08000000u) return A::sideEffect;
++                    interface = value;
++                } else value = interface;
++            }
++            return A::ok;
++        }
++        const uint32_t offset = address - 0x16202000;
++        if (offset & 3) return A::unmapped;
++        if (offset == 0x1c0) {
++            if (!write || (pc != 0x204d26cc && pc != 0x204d26d8)) return A::externalInput;
++            if (value != 0 && value != 7) return A::sideEffect;
++            if (value == 7 && (!resetHeld || resetElapsed < 32)) return A::sequence;
++            if (!value) {
++                resetHeld = true; resetElapsed = 0; released = false;
++                status1 = 0; status2 = 0x80; clock = 0; clockRemaining = 0;
++                commandPending = false; commandRemaining = 0; argumentLow = argumentHigh = command = 0;
++                interruptMask = option = port = 0;
++            } else { resetHeld = false; released = true; }
++            return A::ok;
++        }
++        if (!released || resetHeld || (control & 0x438000) != 0x430000 || interface != 0x08000000) return A::sequence;
++        const bool native = (pc >= 0x204d2174 && pc <= 0x204d2190) ||
++                            (pc >= 0x204d226e && pc <= 0x204d22b2) ||
++                            (pc >= 0x204d22b4 && pc <= 0x204d2326) ||
++                            (pc >= 0x204d2456 && pc <= 0x204d269c) ||
++                            (pc >= 0x204d2748 && pc <= 0x204d294a) ||
++                            (pc >= 0x204d363e && pc <= 0x204d3656) || pc == 0x204d2736;
++        if (!native) return A::externalInput;
++        if (!write) {
++            switch (offset) {
++                case 0x38: value = status1; break;
++                case 0x3c: value = status2; break;
++                case 0x40: value = interruptMask; break;
++                case 0x48: value = clockValue(); break;
++                case 0x50: value = option; break;
++                default: return A::externalInput;
++            }
++            return A::ok;
++        }
++        if (value >> 16) return A::sideEffect;
++        switch (offset) {
++            case 0x00:
++                // No card supplies data or responses. Other command formats stay guarded.
++                if (value != 0x300 && value != 0x437 && value != 0x701) return A::externalInput;
++                if (commandPending) return A::sequence;
++                command = value; commandPending = true;
++                commandRemaining = uint64_t((value == 0x300 ? 48 : 64)) * 2 * ((clock & 0xff) + 1);
++                status1 &= ~1u; status2 = 0x4000;
++                break;
++            case 0x04: if (value != 0x200) return A::sideEffect; port = value; break;
++            case 0x08: if (commandPending) return A::sequence; argumentLow = value; break;
++            case 0x0c: if (commandPending) return A::sequence; argumentHigh = value; break;
++            case 0x38: status1 &= value; break;
++            case 0x3c: if (value & ~0x7fu) return A::sideEffect; status2 = (status2 & ~0x7fu) | (status2 & value & 0x7f); break;
++            case 0x40:
++                if (pc == 0x204d22a0) {
++                    if (value != ((interruptMask & ~0x18u) | 0x305u)) return A::sideEffect;
++                } else if (pc != 0x204d22f0 || value != (interruptMask | 0x31du)) return A::sideEffect;
++                if (value != 0x31d && value != 0x305) return A::externalInput;
++                interruptMask = value;
++                break;
++            case 0x48:
++                if (value & ~0x1ffu) return A::sideEffect;
++                if ((value & 0xff) != 0 && (value & 0xff) != 1 && (value & 0xff) != 0x40) return A::sideEffect;
++                if ((value & 0x100) && (!(clock & 0x100) || (value & 0xff) != (clock & 0xff))) clockRemaining = 20000;
++                if (!(value & 0x100)) clockRemaining = 0;
++                clock = value;
++                break;
++            case 0x50: if (value & ~0x8000u) return A::sideEffect; option = value; break;
++            case 0x6c: case 0x1f0: if (value) return A::sideEffect; break;
++            case 0x1e8: if (value != 0x700) return A::sideEffect; break;
++            default: return A::externalInput;
++        }
++        return A::ok;
++    }
++   private:
++    uint32_t control = 0, interface = 0, clock = 0, status1 = 0, status2 = 0x80;
++    uint32_t command = 0, argumentLow = 0, argumentHigh = 0, interruptMask = 0, option = 0, port = 0;
++    uint64_t clockRemaining = 0, commandRemaining = 0, resetElapsed = 0;
++    bool commandPending = false, resetHeld = false, released = false;
++};
++#endif
