@@ -1,5 +1,5 @@
 #include "SdExchange.h"
-#include "FatImage.h"
+#include "CardStorage.h"
 #include <QStorageInfo>
 #include <QCryptographicHash>
 #include <QDir>

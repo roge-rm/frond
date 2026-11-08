@@ -1,6 +1,7 @@
-// Files… edits a .frondsd or .frondmsp in place (desktop/CardFile.h, FatImage): few writes, one
-// generation per visit, and a cut-off change settles to a card that loads. The same cases as
-// Android's CardFileTest, and leftovers in Android's format settle here.
+// Files… edits a .frondsd or .frondmsp in place through the storage library (storage/CardFile.h and
+// FatImage.h, by way of desktop/CardStorage.h): few writes, one generation per visit, and a cut-off
+// change settles to a card that loads. The same cases as Android's CardFileTest, and leftovers in
+// Android's format settle here.
 #include <QtTest>
 #include <QCryptographicHash>
 #include <QDir>
@@ -38,6 +39,20 @@ QByteArray blank(unsigned mib = 32) {
     return QByteArray(reinterpret_cast<const char*>(bytes.data()), int(bytes.size()));
 }
 quint32 crcOf(const QByteArray& b) { return quint32(::crc32(0, reinterpret_cast<const Bytef*>(b.constData()), uInt(b.size()))); }
+// The files Android's CardFile.kt leaves beside a card while a change is written.
+QString intentOf(const QString& card) { return card + QStringLiteral(".files-intent"); }
+QString commitOf(const QString& card) { return card + QStringLiteral(".files-commit"); }
+// The library's: a standalone journal to `generation` and its pending list.
+QString journalOf(const QString& card, quint64 generation) { return card + QStringLiteral(".journal-%1").arg(generation); }
+QString pendingOf(const QString& card, quint64 generation) { return journalOf(card, generation) + QStringLiteral(".pending"); }
+// Everything beside a card file whose name starts with the card's.
+QStringList besides(const QString& card) {
+    const QFileInfo info(card);
+    QStringList out;
+    for (const auto& name : QDir(info.path()).entryList(QDir::Files | QDir::Hidden))
+        if (name.startsWith(info.fileName() + '.')) out << name.mid(info.fileName().size());
+    return out;
+}
 
 void put(FatImage& fat, const QString& folder, const QString& name, const QByteArray& data) {
     qint64 at = 0;
@@ -179,6 +194,16 @@ class CardFileTest : public QObject {
                 QVERIFY2(crashed, qPrintable(tag + ' ' + step + " didn't crash"));
             }
             QVERIFY2(unsettled(file), qPrintable(tag + ' ' + step + " leaves a journal"));
+            // A standalone journal once the change's metadata is written, the pending list before.
+            const bool journalled = isNew;
+            QCOMPARE(QFile::exists(journalOf(file, 7)), journalled);
+            QVERIFY(QFile::exists(pendingOf(file, 7)));
+            if (journalled) {
+                frondStorage::Journal j;
+                QVERIFY(frondStorage::readJournal(pathOf(journalOf(file, 7)), j));
+                QVERIFY(j.standalone && j.from == 6 && j.to == 7);
+            }
+            QVERIFY(!QFile::exists(intentOf(file)) && !QFile::exists(commitOf(file)));
             QVERIFY(settle(file));
             QVERIFY(!unsettled(file));
             QCOMPARE(verify(file), std::optional<quint64>(7));
@@ -198,7 +223,7 @@ class CardFileTest : public QObject {
             const auto before = readAll(file);
             const auto data = randomBytes(5000, 1);
             qint64 bytes = 0;
-            QList<QPair<qint64, qint64>> writes;
+            std::vector<std::pair<int64_t, int64_t>> writes;
             {
                 auto c = CardFile::open(file, true);
                 {
@@ -216,7 +241,7 @@ class CardFileTest : public QObject {
             QVERIFY(writes.size() <= 8);
             for (int i = 0; i < before.size(); ++i)
                 if (before[i] != after[i])
-                    QVERIFY2(std::any_of(writes.begin(), writes.end(), [&](const QPair<qint64, qint64>& w) { return i >= w.first && i < w.first + w.second; }),
+                    QVERIFY2(std::any_of(writes.begin(), writes.end(), [&](const std::pair<int64_t, int64_t>& w) { return i >= w.first && i < w.first + w.second; }),
                              qPrintable(QString("byte %1 changed outside a write").arg(i)));
             QCOMPARE(verify(file), std::optional<quint64>(7));
             auto c = CardFile::open(file, false);
@@ -507,8 +532,7 @@ class CardFileTest : public QObject {
                 QVERIFY(crashed);
             }
             QVERIFY(writeAll(out + '/' + name + ".sparse", sparse(readAll(file))));
-            if (QFile::exists(intentOf(file))) QVERIFY(QFile::copy(intentOf(file), out + '/' + name + ".files-intent"));
-            if (QFile::exists(commitOf(file))) QVERIFY(QFile::copy(commitOf(file), out + '/' + name + ".files-commit"));
+            for (const auto& suffix : besides(file)) QVERIFY(QFile::copy(file + suffix, out + '/' + name + suffix));
             QVERIFY(settle(file));
             QVERIFY(writeAll(out + '/' + name + ".expect", expected(file).toUtf8()));
         }
@@ -525,8 +549,8 @@ class CardFileTest : public QObject {
                 const auto bytes = unsparse(readAll(from + ".sparse"));
                 QVERIFY2(!bytes.isEmpty(), qPrintable(from));
                 QVERIFY(writeAll(file, bytes));
-                for (const auto* kind : {".files-intent", ".files-commit"})
-                    if (QFile::exists(from + kind)) QVERIFY(QFile::copy(from + kind, file + kind));
+                for (const auto& suffix : besides(from))
+                    if (suffix != ".sparse" && suffix != ".expect") QVERIFY(QFile::copy(from + suffix, file + suffix));
                 QVERIFY2(unsettled(file), qPrintable(from));
                 QVERIFY(frondCardFile::ready(file));
                 QVERIFY(!unsettled(file));
@@ -583,6 +607,28 @@ class CardFileTest : public QObject {
         QCOMPARE(cf::exportTo(fat, {"/PALM/in"}, host.filePath("out")), 2);
         QVERIFY(QFileInfo(host.filePath("out/in (2)/Deep/" + accented)).isFile());
         QCOMPARE(cf::keepBothName(QString(260, 'a') + ".txt", [](const QString&) { return false; }).size(), 255);
+    }
+
+    // A 16 MiB card file formatted as FAT12 takes the same operations.
+    void aSmallCardIsFat12() {
+        const auto dir = root.filePath("fat12");
+        QDir().mkpath(dir);
+        const auto file = dir + "/sd.frondsd";
+        QVERIFY(writeAll(file, encodeV2(QByteArray(16 << 20, '\0'), 3)));
+        { auto c = CardFile::open(file, true); FatImage::format(*c); }
+        QCOMPARE(verify(file), std::optional<quint64>(4));
+        const auto data = randomBytes(100000, 5);
+        cf::Resolver never([](const QString&) { return cf::Decision{cf::Clash::Cancel, false}; });
+        visit(file, [&](FatImage& fat) {
+            QCOMPARE(fat.fatBits(), 12);
+            QCOMPARE(fat.clusterBytes(), qint64(16384));
+            fat.makeFolder("/", "PALM");
+            put(fat, "/PALM", "A long file name.prc", data);
+            cf::paste(fat, {"/PALM"}, "/", false, never);
+            QVERIFY2(fat.check().isEmpty(), qPrintable(fat.check().join("; ")));
+        });
+        QCOMPARE(verify(file), std::optional<quint64>(5));
+        visit(file, [&](FatImage& fat) { QCOMPARE(readFile(fat, "/PALM (2)/A long file name.prc"), data); });
     }
 
     // With FROND_CARD_OUT set, the edited cards are kept there (with the files they should hold in

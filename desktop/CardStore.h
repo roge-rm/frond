@@ -3,7 +3,7 @@
 // Include SessionStore.h, which pulls this in once its own helpers are declared.
 #include "SessionStore.h"
 #include "FolderCard.h"
-#include "CardFile.h"
+#include "CardStorage.h"
 #ifndef FROND_CARD_STORE_H
 #define FROND_CARD_STORE_H
 

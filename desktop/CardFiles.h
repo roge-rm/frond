@@ -2,7 +2,7 @@
 // The file manager's operations on a card, the same as Android's CardFiles.kt: paste (copy or
 // move), rename, delete, files and folders from the host keeping their structure, copies out to a
 // host folder, and the name-clash rules. No widgets, so the tests run it.
-#include "FatImage.h"
+#include "CardStorage.h"
 #include <functional>
 
 namespace frondCardFiles {

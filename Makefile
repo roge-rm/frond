@@ -99,6 +99,18 @@ test-storage-settle: prepare
 		-o build/test-storage-settle
 	python3 tests/storage-settle.py build/test-storage-settle
 
+.PHONY: test-storage-fat
+test: test-storage-fat
+# The storage library's FatImage on FAT12: format layouts, FAT32 refused, cut-off changes on a FAT12
+# card file, and cards it formats or fills read back with mtools (tests/storage-fat.py).
+test-storage-fat: prepare
+	$(CC) -std=gnu99 -O1 -g -Ibuild/source/src/common -c build/source/src/common/zip/miniz.c \
+		-o build/miniz-storage-fat.o
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/common \
+		tests/storage-fat.cpp build/miniz-storage-fat.o -o build/test-storage-fat
+	python3 tests/storage-fat.py build/test-storage-fat
+
 prepare: build/source/.prepared
 
 # Check input content on every invocation, including removed patches and the gitlink.
