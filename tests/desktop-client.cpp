@@ -49,35 +49,26 @@ s.close()
         QTRY_COMPARE(finished.count(), 2);
         QCOMPARE(error.count(), 0);
     }
-    void memoryStickFraming() {
+    void largeReplies() {
         QTemporaryDir dir; QFile fake(dir.filePath("core.py")); QVERIFY(fake.open(QIODevice::WriteOnly));
         fake.write(R"PY(import socket,sys
 s=socket.socket(socket.AF_UNIX);s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
 s.sendall(b'0\tevent\tready\t\n')
 for line in s.makefile('rb'):
     i,cmd,arg=line.rstrip(b'\n').split(b'\t'); message=b'done'
-    if cmd==b'ms-get':
-        paths=bytes.fromhex(arg.decode()).split(b'\n')
-        assert [len(bytes.fromhex(p.decode())) for p in paths]==[4095,511]
-    if cmd==b'ms-files':
-        message=b'space\t0\t129695744\n'+b''.join(b'f\t0\t'+(str(i).ljust(255,'A')).encode().hex().encode()+b'\n' for i in range(512))
+    if cmd==b'db-list':
+        message=b''.join(b'db\t'+(str(i).ljust(255,'A')).encode().hex().encode()+b'\n' for i in range(512))
     s.sendall(i+b'\tok\tdone\t'+message.hex().encode()+b'\n')
     if cmd==b'quit': break
 )PY"); fake.close();
         DesktopClient client; QSignalSpy ready(&client, &DesktopClient::started), result(&client, &DesktopClient::result);
         QSignalSpy error(&client, &DesktopClient::error), finished(&client, &DesktopClient::finished);
         QVERIFY(client.start("/usr/bin/python3", {fake.fileName()})); QTRY_COMPARE(ready.count(), 1);
-        QString host = "/";
-        while (host.size() + 256 < 4095) host += QString(255, 'h') + '/';
-        host += QString(4095 - host.size(), 'h');
-        const auto card = '/' + QString(255, 'c') + '/' + QString(254, 'c');
-        QVERIFY(client.request("ms-get", QString::fromLatin1(host.toUtf8().toHex()) + '\n' + QString::fromLatin1(card.toUtf8().toHex())));
-        QTRY_COMPARE(result.count(), 1);
-        QVERIFY(client.request("ms-files", "/")); QTRY_COMPARE_WITH_TIMEOUT(result.count(), 2, 5000);
-        const auto listing = result.at(1).at(3).toString();
-        QCOMPARE(listing.count('\n'), 513); QVERIFY(listing.size() > 262144); QCOMPARE(error.count(), 0);
-        QVERIFY(!client.request("ms-get", QString(18000, 'x'))); QCOMPARE(error.count(), 1); QVERIFY(client.available());
-        QVERIFY(client.request("save", "/session.frond")); QTRY_COMPARE(result.count(), 3);
+        QVERIFY(client.request("db-list")); QTRY_COMPARE_WITH_TIMEOUT(result.count(), 1, 5000);
+        const auto listing = result.at(0).at(3).toString();
+        QCOMPARE(listing.count('\n'), 512); QVERIFY(listing.size() > 262144); QCOMPARE(error.count(), 0);
+        QVERIFY(!client.request("install", QString(18000, 'x'))); QCOMPARE(error.count(), 1); QVERIFY(client.available());
+        QVERIFY(client.request("save", "/session.frond")); QTRY_COMPARE(result.count(), 2);
         QVERIFY(client.request("quit")); QTRY_COMPARE(finished.count(), 1);
     }
     void infraredEvents() {

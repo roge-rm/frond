@@ -26,7 +26,6 @@ class CardImageFiles private constructor(private val app: Context, private val s
 
     override var title by mutableStateOf("")
         private set
-    override val memoryStick get() = false
     override var canWrite by mutableStateOf(true)
         private set
     override var path by mutableStateOf<String?>(null)
@@ -64,7 +63,6 @@ class CardImageFiles private constructor(private val app: Context, private val s
             if (found == null) return@runJob error
             val kept = found.card
             val file = Cards.fileOfKind(kept.kind)
-            if (kept.kind == "ms") { found.close(); return@runJob "A Memory Stick can't be opened here." }
             if (found.path.name != file) {
                 found.close()
                 return@runJob "Open ${found.holder?.let { Cards.machineName(it) } ?: "the machine"} once to finish its last save."

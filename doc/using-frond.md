@@ -156,7 +156,7 @@ Don't eject or sleep the Palm while an app is writing quickly, as the SD driver 
 
 ### Files
 
-SD cards and Memory Stick Pro: Files opens the card in a file manager and changes it in place. In Cards it's on the card's menu, for a card in the drawer or in a machine that isn't running, and a card in a running machine shows Files… · In use. For the SD card of a running machine use Files in the Card panel or sheet: it ejects the card (close files on the Palm first), and closing Files puts it back in, ejected again if it was out before.
+SD cards and Memory Sticks: Files opens the card in a file manager and changes it in place. In Cards it's on the card's menu, for a card in the drawer or in a machine that isn't running, and a card in a running machine shows Files… · In use. For the card of a running machine use Files in the Card panel or sheet: it ejects the card (close files on the Palm first), and closing Files puts it back in, ejected again if it was out before.
 
 - Open a folder by double-clicking it (tap on Android), go back with Up or the path bar, and jump to `/PALM/Launcher` or `/DCIM`. The top line shows the free space and the card's size.
 - Sort by name, size or date. Select several with Ctrl or Shift, or Select all.
@@ -167,7 +167,7 @@ SD cards and Memory Stick Pro: Files opens the card in a file manager and change
 - Each change is written as you make it, and only what it touches. If Frond is stopped part way, the card is fixed the next time it's opened, with the change done or not.
 - A write protected card can be browsed and exported only. While a card is open in Files it can't be moved, taken out or deleted. Cards for Files are FAT16, 32 MB and up.
 
-Memory Stick in a running machine: Files works on the stick's own Palm OS filesystem, with no ejecting. Open Date Book on the Palm and try again if Sony Launcher is busy. You can add and export files, make folders, rename and delete. Changes happen at once. Names must be printable ASCII, paths at most 511 bytes, each transfer at most 8 MiB, and a folder lists at most 512 entries. Existing names are refused. Cancel stops a pending operation. Applications in `/PALM/Launcher` show in Sony Launcher's Card category. A protected stick can be read and exported only.
+A classic Memory Stick opens in Files only when its last write is finished; if not, put it in the TG50 once. A blank stick is formatted the way the TG50 does it the first time Files opens it.
 
 ## Connections
 

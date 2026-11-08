@@ -67,7 +67,8 @@ class RunningSheetsTest {
         assertTrue(CardRow.WRITE_PROTECT in RunningSheets.cardRows(stick, SdCard.State.EJECTED, false, false))
         assertTrue(CardRow.WRITE_PROTECT in RunningSheets.cardRows(stick, SdCard.State.INSERTED, false, false))
         assertFalse(CardRow.WRITE_PROTECT in RunningSheets.cardRows(stick, SdCard.State.NONE, false, false))
-        assertFalse(CardRow.FILES in RunningSheets.cardRows(stick, SdCard.State.EJECTED, false, false) && !stick.sdSlot)
+        // Files… works on an ejected stick the same as on an SD card.
+        assertTrue(CardRow.FILES in RunningSheets.cardRows(stick, SdCard.State.EJECTED, false, false))
     }
 
     @Test fun noCardSlotNoRows() {

@@ -32,7 +32,6 @@ class ClashPrompt {
 // What the file view shows and does, for the running machine's card and for a card opened from Cards.
 interface FilesModel {
     val title: String
-    val memoryStick: Boolean
     // False for a write-protected card.
     val canWrite: Boolean
     val path: String?

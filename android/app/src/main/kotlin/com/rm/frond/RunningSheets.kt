@@ -63,7 +63,7 @@ object RunningSheets {
             SdCard.State.INSERTED -> rows += listOf(CardRow.FILES, CardRow.EJECT)
             SdCard.State.EJECTED -> {
                 rows += CardRow.INSERT
-                if (device.sdSlot) rows += CardRow.FILES
+                rows += CardRow.FILES
                 rows += CardRow.EXPORT_IMAGE
             }
             SdCard.State.NONE -> Unit

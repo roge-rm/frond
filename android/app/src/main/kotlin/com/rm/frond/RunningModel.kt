@@ -43,9 +43,8 @@ class RunningModel(
     var writeProtected by mutableStateOf<Boolean?>(null)
         private set
     override val title get() = device.cardLabel
-    override val memoryStick get() = device.memoryStick
     override val canWrite get() = !device.memoryStick || writeProtected == false
-    override val leaveLabel get() = if (device.memoryStick) "Done" else "Insert"
+    override val leaveLabel get() = "Insert"
     override val prompt = ClashPrompt()
     // Whether the stick in the slot is a Memory Stick Pro, which exports as a raw image.
     var memoryStickPro by mutableStateOf(false)
@@ -772,12 +771,9 @@ class RunningModel(
 
     // Lists the open folder again after a change.
     private fun relist(c: SdCard, wanted: String) {
-        // An SD card's folders as the card names them.
-        val at = if (device.memoryStick) wanted else c.read { CardFiles.realPath(it, wanted) }
-        val listing = try { c.list(at) } catch (error: Exception) {
-            if (device.memoryStick) activity.runOnUiThread { entries = emptyList(); free = 0 }
-            throw error
-        }
+        // The card's folders as the card names them.
+        val at = c.read { CardFiles.realPath(it, wanted) }
+        val listing = c.list(at)
         activity.runOnUiThread {
             path = at
             entries = listing.entries
@@ -794,7 +790,7 @@ class RunningModel(
         open(p.substringBeforeLast('/').ifEmpty { "/" })
     }
 
-    fun openFiles() = job(if (device.memoryStick) "Reading" else "Ejecting", "Couldn't open the card", cancellable = true) { c ->
+    fun openFiles() = job("Ejecting", "Couldn't open the card", cancellable = true) { c ->
         c.beginEdit()
         val found = SHORTCUTS.filter { c.hasFolder(it) }
         activity.runOnUiThread { shortcuts = found }
@@ -848,9 +844,7 @@ class RunningModel(
 
     override fun exportFile(entry: FatImage.Entry, to: Uri) {
         job("Copying", "Couldn't export the file", cancellable = true) { c ->
-            c.exportFile(entry, to, path ?: "/") {
-                activity.runOnUiThread { canCancelFiles = false; busy = "Saving exported document" }
-            }
+            c.exportFile(entry, to)
             activity.runOnUiThread { note = "${entry.name} exported" }
         }
     }
@@ -877,7 +871,7 @@ class RunningModel(
 
     // Closes the file view and puts the card back in the Palm, edited or not. The insert waits for
     // the Palm to notice the card was out, up to a few seconds, so the busy label stays up.
-    override fun insertEdited() { job(if (device.memoryStick) "Closing files" else "Inserting", "Couldn't insert the card") { c ->
+    override fun insertEdited() { job("Inserting", "Couldn't insert the card") { c ->
         c.finishEdit()
         activity.runOnUiThread { path = null }
     } }

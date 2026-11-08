@@ -437,7 +437,8 @@ pathlib.Path(__file__).with_name('pid').write_text(str(os.getpid()))
 s=socket.socket(socket.AF_UNIX);s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
 s.sendall(b'0\tevent\tready\t\n')
 src=pathlib.Path(sys.argv[1])
-card='inserted' if any((src.parent/n).exists() for n in ('sd.frondsd',)) else 'none'
+cards=('sd.frondsd','ms.frondms','ms.frondmsp')
+card='inserted' if any((src.parent/n).exists() for n in cards) else 'none'
 flag=lambda n: pathlib.Path(__file__).with_name(n).exists()
 if card=='inserted' and flag('start-ejected'): card='ejected'
 identity='00'*32
@@ -447,7 +448,10 @@ for line in s.makefile('rb'):
     message='done'
     if flag('fail-'+cmd):
         s.sendall(i+b'\terror\tresult\t'+('Injected '+cmd+' failure').encode().hex().encode()+b'\n'); continue
+    # A Memory Stick moves the same way as an SD card.
+    if cmd.startswith('ms-'): cmd='sd-'+cmd[3:]
     if cmd=='device-state': message='DEVICE'
+    elif cmd=='sd-protection': message='writable'
     elif cmd=='sd-state': message=card
     elif cmd=='network-state': message='disabled'
     elif cmd=='keyboard-state': message='detached'
@@ -459,7 +463,8 @@ for line in s.makefile('rb'):
         dest=pathlib.Path(arg)
         if dest.resolve()!=src.resolve():
             dest.write_bytes(src.read_bytes())
-            if (src.parent/'sd.frondsd').exists(): shutil.copyfile(src.parent/'sd.frondsd', dest.parent/'sd.frondsd')
+            for n in cards:
+                if (src.parent/n).exists(): shutil.copyfile(src.parent/n, dest.parent/n)
     s.sendall(i+b'\tok\tresult\t'+message.encode().hex().encode()+b'\n')
     if cmd=='sd-take-out' and flag('die-after-take-out'):
         s.shutdown(socket.SHUT_RDWR); time.sleep(.3); sys.exit(1)
@@ -1381,6 +1386,73 @@ for line in s.makefile('rb'):
         }
         if (opened || mode == "take-out-fail") QVERIFY(frondCards::readSlot(a).swap);
         for (const auto& f : QDir(files.path()).entryList({"fail-*"})) QFile::remove(files.filePath(f));
+        window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 10000);
+        QSettings().clear();
+    }
+    // Files… on a running TG50's blank classic stick: eject, save, take it out, Files formats it the
+    // TG50's way and adds a file, then it goes back in.
+    void tg50StickFiles() {
+        const auto device = frondFirmware::deviceFromId("sony-clie-tg50");
+        if (!frondFirmware::profile(device).frontend.memoryStick) QSKIP("Memory Stick is not qualified yet");
+        cardsReset();
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QTemporaryDir files;
+        const auto core = pickerCore(files.path(), "sony-clie-tg50");
+        const auto dir = cardsSessions() + "/Stick";
+        TestMedia media;
+        media.kind = 2;
+        media.logical = 4 << 20;
+        media.physical = 4 * 2048 * 521;
+        media.identity = machineIdentity("Stick");
+        writeFrond(dir + "/Stick.frond", "sony-clie-tg50", {media});
+        cardTool({"make", "ms", "4", dir + "/ms.frondms"});
+        frondCards::reconcile(cardsSessions());
+        const auto cardPath = dir + "/ms.frondms";
+        const auto generation = cardGeneration(cardPath);
+        QFile host(files.filePath("hello.txt")); QVERIFY(host.open(QIODevice::WriteOnly)); host.write("hello"); host.close();
+        MainWindow window(core);
+        window.show();
+        window.openSession(dir + "/Stick.frond", true);
+        auto* action = window.findChild<QPushButton*>("sdExchange");
+        QTRY_VERIFY_WITH_TIMEOUT(action->isVisible() && action->isEnabled(), 10000);
+        bool sawWindow = false;
+        QStringList errors;
+        QTimer poll; poll.setInterval(10);
+        connect(&poll, &QTimer::timeout, &window, [&] {
+            for (auto* box : window.findChildren<QMessageBox*>()) {
+                if (!box->isVisible()) continue;
+                if (box->windowTitle().contains("Open the card")) box->button(QMessageBox::Yes)->click();
+                else { errors << box->text(); box->done(QMessageBox::Ok); }
+            }
+            if (auto* w = window.findChild<CardFilesWindow*>("cardFilesWindow"); w && w->isVisible() && !sawWindow) {
+                sawWindow = true;
+                QVERIFY(frondCards::readSlot(dir).swap);
+                w->addPaths({host.fileName()});
+                QVERIFY(w->list->findItems("hello.txt", Qt::MatchExactly).size() == 1);
+                w->doneButton->click();
+            }
+        });
+        poll.start(); action->click();
+        QTRY_VERIFY_WITH_TIMEOUT(sawWindow || !errors.isEmpty(), 10000);
+        QTRY_VERIFY_WITH_TIMEOUT(action->isEnabled(), 10000);
+        QTest::qWait(100);
+        poll.stop();
+        QVERIFY2(errors.isEmpty(), qPrintable(errors.join(' ')));
+        QVERIFY(sawWindow);
+        QFile trace(files.filePath("commands")); QVERIFY(trace.open(QIODevice::ReadOnly));
+        QStringList got;
+        for (const auto& line : QString::fromUtf8(trace.readAll()).split('\n', Qt::SkipEmptyParts)) {
+            const auto command = line.section('\t', 0, 0);
+            if (command == "save" || (command.startsWith("ms-") && command != "ms-state" && command != "ms-protection")) got << command;
+            QVERIFY(!command.startsWith("sd-") && command != "ms-files" && command != "ms-put");
+        }
+        QCOMPARE(got, QStringList({"ms-eject", "save", "ms-take-out", "ms-put-in"}));
+        QCOMPARE(cardGeneration(cardPath), generation + 1);
+        {
+            auto c = frondCardFile::CardFile::open(cardPath, false);
+            frondCardFile::FatImage fat(*c);
+            QVERIFY(fat.find("/hello.txt") && fat.find("/MEMSTICK.IND"));
+        }
         window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 10000);
         QSettings().clear();
     }
@@ -5636,7 +5708,7 @@ for line in s.makefile('rb'):
         QVERIFY(!frondCards::readSlot(stopped).swap);
         edit("Stopped card", stopped + "/sd.frondsd");
         QVERIFY(frondCards::readSlot(stopped).swap);
-        // A classic Memory Stick has no Files… at all.
+        // A classic Memory Stick has Files… too.
         {
             sparseCard("Stick", "ms", 4 << 20);
             cards->refresh();
@@ -5644,7 +5716,7 @@ for line in s.makefile('rb'):
             QCOMPARE(sticks->count(), 1);
             auto* menu = sticks->itemWidget(sticks->item(0))->findChild<QPushButton*>("cardMenu")->menu();
             emit menu->aboutToShow();
-            QVERIFY(!menu->findChild<QAction*>("cardFiles"));
+            QVERIFY(menu->findChild<QAction*>("cardFiles") && menu->findChild<QAction*>("cardFiles")->isEnabled());
             QVERIFY(menu->findChild<QAction*>("renameCard"));
         }
         // A card open in Files can't be taken out or deleted.

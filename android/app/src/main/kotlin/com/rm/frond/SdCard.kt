@@ -7,9 +7,9 @@ import java.io.File
 import java.io.IOException
 import java.security.MessageDigest
 
-// Card images live in the core/session. The SD file view takes the ejected card out of the core into
-// the machine folder's sd.frondsd, edits that file in place (CardFile) and puts it back in. A Memory
-// Stick goes through guest commands. Every call blocks; run it off the main thread.
+// Card images live in the core/session. The file view takes the ejected card out of the core into
+// the machine folder's card file (sd.frondsd, ms.frondms or ms.frondmsp), edits that file in place
+// (CardFile) and puts it back in. Every call blocks; run it off the main thread.
 class SdCard(private val context: Context, private val link: ControlLink, private val session: String? = null,
              private val device: Device = Device.TX) {
     private val memoryStick = device.storageSlot == "memory-stick"
@@ -43,7 +43,7 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
 
     // Whether the card has a folder at path.
     fun hasFolder(path: String): Boolean = try {
-        if (memoryStick) { list(path); true } else read { it.find(path)?.directory == true }
+        read { it.find(path)?.directory == true }
     } catch (e: Exception) {
         false
     }
@@ -54,7 +54,7 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
         jobCancelled = false
     }
 
-    private val folder = File(context.filesDir, if (memoryStick) "ms-images" else "sd-exchange")
+    private val folder = File(context.filesDir, "sd-exchange")
     // The card file open for the file view, and whether a change was committed to it.
     @Volatile private var cardFile: CardFile? = null
     var changed = false
@@ -77,8 +77,7 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
 
     private fun run(command: String, argument: String = "") {
         if (jobCancelled) throw Failed("File transfer cancelled.", "cancelled")
-        val reply = link.request(command, argument, timeoutSeconds = if (command == "ms-get" || command == "ms-put") 240 else 120,
-            cancelRequested = { jobCancelled })
+        val reply = link.request(command, argument, timeoutSeconds = 120, cancelRequested = { jobCancelled })
         if (!reply.ok) throw Failed(if (reply.code == "not-ready") "Open Date Book on the Palm, then try again." else reply.message, reply.code)
     }
 
@@ -133,10 +132,9 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
     }
 
     // Starts editing: ejects the card if needed, saves the session in its folder, marks the slot swapped
-    // and takes the card out into the folder's sd.frondsd, then opens that file. A kill from here on
+    // and takes the card out into the folder's card file, then opens that file. A kill from here on
     // loads the machine with --card-swap and the card as the file holds it.
     fun beginEdit() {
-        if (memoryStick) return
         folder.mkdirs()
         if (pendingFor(context, session) != null && !restorePending(context, link, session)) {
             throw Failed("The last edit of this card wasn't put back in the Palm. Close the emulator and open it again.")
@@ -162,7 +160,7 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
             throw e
         }
         try {
-            cardFile = CardFile.open(File(dir, "sd.frondsd"), true)
+            cardFile = CardFile.open(cardFileIn(dir), !protectedCard)
             FatImage.over(cardFile!!).use { }
         } catch (e: Exception) {
             // The card goes back in as it was.
@@ -190,35 +188,9 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
     // A folder's entries, the free space on the card and the card's size.
     class Listing(val entries: List<FatImage.Entry>, val free: Long, val total: Long)
 
-    fun list(path: String): Listing {
-        if (!memoryStick) return read { Listing(it.list(path), it.freeBytes, it.totalBytes) }
-        if (jobCancelled) throw Failed("File transfer cancelled.", "cancelled")
-        val reply = link.request("ms-files", path, timeoutSeconds = 120, cancelRequested = { jobCancelled })
-        if (!reply.ok) throw Failed(if (reply.code == "not-ready") "Open Date Book on the Palm, then try again." else reply.message, reply.code)
-        val lines = reply.message.lines().filter { it.isNotEmpty() }
-        val space = lines.firstOrNull()?.split('\t') ?: throw Failed("The Palm returned no card space.")
-        if (space.size != 3 || space[0] != "space") throw Failed("The Palm returned invalid card space.")
-        val used = space[1].toLongOrNull() ?: throw Failed("The Palm returned invalid card space.")
-        val total = space[2].toLongOrNull() ?: throw Failed("The Palm returned invalid card space.")
-        if (used < 0 || total < used || total > (2048L shl 20)) throw Failed("The Palm returned invalid card space.")
-        val entries = lines.drop(1).map { line ->
-            val fields = line.split('\t')
-            if (fields.size != 3 || fields[0] !in listOf("d", "f")) throw Failed("The Palm returned an invalid folder entry.")
-            val size = fields[1].toLongOrNull() ?: throw Failed("The Palm returned an invalid file size.")
-            if (size < 0 || size > total) throw Failed("The Palm returned an invalid file size.")
-            val name = decodeName(fields[2])
-            FatImage.Entry(name, name, fields[0] == "d", size, 0)
-        }
-        if (entries.size > 512) throw Failed("This folder has more than 512 entries.")
-        if (entries.map { it.name.lowercase(java.util.Locale.ROOT) }.toSet().size != entries.size)
-            throw Failed("The Palm returned duplicate filenames.")
-        return Listing(entries, total - used, total)
-    }
-
-    private fun guestPair(host: String, card: String) = hex(host) + "\n" + hex(card)
+    fun list(path: String): Listing = read { Listing(it.list(path), it.freeBytes, it.totalBytes) }
 
     fun <T> read(block: (FatImage) -> T): T {
-        if (memoryStick) throw Failed("File exchange is not available for Memory Stick images.")
         val c = cardFile ?: throw Failed("The card isn't open.")
         return synchronized(c) { FatImage.over(c).use(block) }
     }
@@ -226,7 +198,6 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
     // Edits the card file in place; CardFile commits each change so a crash leaves the old or the new
     // card. The check reads back only what changed.
     private fun edit(block: (FatImage) -> Unit, verify: (FatImage) -> Unit) {
-        if (memoryStick) throw Failed("File exchange is not available for Memory Stick images.")
         val c = cardFile ?: throw Failed("The card isn't open.")
         synchronized(c) {
             FatImage.over(c).use { fat ->
@@ -252,31 +223,10 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
     // Returns the name it went in under, or null when the clash rule skipped it.
     fun addFile(path: String, uri: Uri, resolver: CardFiles.Resolver): String? {
         folder.mkdirs()
-        var name = displayName(uri) ?: throw Failed("That file has no name.")
-        if (memoryStick) checkMemoryStickName(name) else FatImage.checkName(name)
+        val name = displayName(uri) ?: throw Failed("That file has no name.")
+        FatImage.checkName(name)
         val source = File(folder, "incoming")
         try {
-            if (memoryStick) {
-                val taken = list(path).entries.firstOrNull { it.name.equals(name, ignoreCase = true) }
-                if (taken != null) {
-                    when (resolver.decide(name)) {
-                        CardFiles.Clash.CANCEL -> throw Failed("File transfer cancelled.", "cancelled")
-                        CardFiles.Clash.SKIP -> return null
-                        CardFiles.Clash.KEEP_BOTH -> {
-                            val used = list(path).entries.map { it.name.lowercase() }.toSet()
-                            name = CardFiles.keepBothName(name) { it.lowercase() in used }
-                            checkMemoryStickName(name)
-                        }
-                        CardFiles.Clash.REPLACE -> {
-                            if (taken.directory) throw Failed("$name is a folder on the card.")
-                            run("ms-delete", joined(path, taken.name))
-                        }
-                    }
-                }
-                if (!copyIn(uri, source, MEMORY_STICK_FILE_BYTES)) throw Failed("File exchange supports files up to 8 MB.")
-                run("ms-put", guestPair(source.path, joined(path, name)))
-                return name
-            }
             val room = read { it.freeBytes }
             val size = sizeOf(uri) ?: 0L
             if (size > room) throw Failed("There isn't room on the card for that file.")
@@ -304,9 +254,8 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
         }
     }
 
-    // Copies a picked folder and everything in it into a card folder. SD only.
+    // Copies a picked folder and everything in it into a card folder.
     fun addTree(path: String, root: FolderCard.Node, resolver: CardFiles.Resolver, progress: (Float) -> Unit = {}): CardFiles.Report {
-        if (memoryStick) throw Failed("Adding a folder isn't available for Memory Sticks.")
         val plan = FolderCard.measure(root) { jobCancelled }
         plan.problem?.let { throw Failed(if (it == COPY_CANCELLED) "File transfer cancelled." else it, if (it == COPY_CANCELLED) "cancelled" else null) }
         if (plan.bytes > read { it.freeBytes }) throw Failed("There isn't room on the card for that folder.")
@@ -318,9 +267,8 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
         return report
     }
 
-    // Copies or moves card entries into a folder. SD only.
+    // Copies or moves card entries into a folder.
     fun paste(sources: List<String>, destFolder: String, move: Boolean, resolver: CardFiles.Resolver, progress: (Float) -> Unit = {}): CardFiles.Report {
-        if (memoryStick) throw Failed("Cut, copy and paste aren't available for Memory Sticks.")
         var report = CardFiles.Report(0, 0)
         cancellable {
             val total = maxOf(if (move) 1L else read { CardFiles.bytesIn(it, sources) }, 1L)
@@ -331,51 +279,21 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
 
     // Deletes entries and what is in them.
     fun deleteEntries(path: String, names: List<String>) {
-        if (memoryStick) {
-            for (name in names) {
-                if (jobCancelled) throw Failed("File transfer cancelled.", "cancelled")
-                deleteEntry(path, name)
-            }
-            return
-        }
         cancellable { edit({ CardFiles.delete(it, names.map { n -> joined(path, n) }) { jobCancelled } }) { } }
     }
 
     fun makeFolder(path: String, name: String) {
-        if (memoryStick) { checkMemoryStickName(name); run("ms-mkdir", joined(path, name)); return }
         edit({ it.makeFolder(path, name.trim()) }) { fat ->
             if (fat.find(joined(path, name.trim()))?.directory != true) throw Failed("The folder didn't land on the card.")
         }
     }
 
     fun renameEntry(path: String, oldName: String, newName: String) {
-        if (!memoryStick) { edit({ CardFiles.rename(it, joined(path, oldName), newName) }) { }; return }
-        checkMemoryStickName(oldName); checkMemoryStickName(newName)
-        run("ms-rename", hex(joined(path, oldName)) + "\n" + hex(newName))
+        edit({ CardFiles.rename(it, joined(path, oldName), newName) }) { }
     }
 
-    private fun deleteEntry(path: String, name: String) {
-        checkMemoryStickName(name)
-        run("ms-delete", joined(path, name))
-    }
-
-    // Copies card entries into a picked folder. A Memory Stick gives files only.
+    // Copies card entries into a picked folder.
     fun exportEntries(path: String, entries: List<FatImage.Entry>, to: CardFiles.HostFolder, progress: (Float) -> Unit = {}): Int {
-        if (memoryStick) {
-            folder.mkdirs()
-            var n = 0
-            for (entry in entries) {
-                if (jobCancelled) throw Failed("File transfer cancelled.", "cancelled")
-                if (entry.directory) throw Failed("Folders can't be copied from a Memory Stick.")
-                val exported = File(folder, "file-export")
-                try {
-                    run("ms-get", guestPair(exported.path, joined(path, entry.name)))
-                    to.file(entry.name).use { out -> exported.inputStream().use { it.copyTo(out, 1 shl 16) } }
-                } finally { exported.delete() }
-                progress(++n / entries.size.toFloat())
-            }
-            return n
-        }
         return cancellable {
             read { fat ->
                 val paths = entries.map { joined(path, it.name) }
@@ -385,23 +303,7 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
         }
     }
 
-    fun exportFile(entry: FatImage.Entry, to: Uri, path: String = "/", publishing: () -> Unit = {}) {
-        if (memoryStick) {
-            folder.mkdirs()
-            val exported = File(folder, "file-export")
-            try {
-                run("ms-get", guestPair(exported.path, joined(path, entry.name)))
-                synchronized(exportGate) {
-                    if (jobCancelled) throw Failed("File transfer cancelled.", "cancelled")
-                    // A document provider cannot promise atomic replacement once publication starts.
-                    publishingExport = true
-                }
-                publishing()
-                val output = context.contentResolver.openOutputStream(to, "wt") ?: throw Failed("Couldn't write there.")
-                output.use { out -> exported.inputStream().use { it.copyTo(out, 1 shl 16) } }
-            } finally { exported.delete() }
-            return
-        }
+    fun exportFile(entry: FatImage.Entry, to: Uri) {
         val output = context.contentResolver.openOutputStream(to, "wt") ?: throw Failed("Couldn't write there.")
         output.use { o -> read { it.read(entry, o) } }
     }
@@ -411,7 +313,6 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
     // Also run as the machine stops, so it is synchronized against the view's own call.
     @Synchronized
     fun finishEdit() {
-        if (memoryStick) return
         val c = cardFile
         cardFile = null
         if (c != null) {
@@ -461,25 +362,8 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
     } ?: uri.lastPathSegment?.substringAfterLast('/')
 
     companion object {
-        // Versioned 64-byte header and classic physical page records; the core checks CRC and boot blocks.
-        private const val MEMORY_STICK_FILE_BYTES = 8L shl 20
         // The core's candidate card file (uarm/SdCandidate.h), live while its machine runs.
         const val LIVE_CANDIDATE = ".frondsd.tmp-live-"
-        private fun hex(text: String) = text.toByteArray(Charsets.UTF_8).joinToString("") { "%02x".format(it) }
-        private fun checkMemoryStickName(name: String) {
-            if (name.isEmpty() || name.length > 255 || name in listOf(".", "..") ||
-                name.first() == ' ' || name.last() in listOf(' ', '.') ||
-                name.any { it.code !in 32..126 || it in "/\\:*?\"<>|" })
-                throw Failed("Use a printable ASCII filename without reserved characters.")
-        }
-        private fun decodeName(value: String): String {
-            if (value.length % 2 != 0 || value.length > 510 || value.any { it !in "0123456789abcdef" })
-                throw Failed("The Palm returned an invalid filename.")
-            val name = ByteArray(value.length / 2) { value.substring(it * 2, it * 2 + 2).toInt(16).toByte() }.toString(Charsets.US_ASCII)
-            checkMemoryStickName(name)
-            return name
-        }
-
         fun joined(path: String, name: String) = if (path.endsWith("/")) path + name else "$path/$name"
 
         private fun sha256(file: File): ByteArray {
@@ -553,6 +437,10 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
 
         // Room for one change's journal: at most every FAT sector in both copies plus folder sectors.
         const val JOURNAL_ROOM = 1L shl 20
+
+        // The card file a take-out left in a machine folder: the SD card, or the classic or Pro stick.
+        fun cardFileIn(dir: File): File = listOf("sd.frondsd", "ms.frondms", "ms.frondmsp").map { File(dir, it) }
+            .firstOrNull { it.isFile } ?: File(dir, "sd.frondsd")
 
         // The machine folder whose card is taken out for the file view in this process, or null.
         // Its slot keeps swap until the card is back, whatever saves happen meanwhile.

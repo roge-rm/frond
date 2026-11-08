@@ -170,14 +170,13 @@ private fun <T> LinkDialog(
 fun CardEjectDialog(model: RunningModel, files: Boolean, onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(if (files && model.device.memoryStick) "Open Memory Stick files?" else "Eject the card?") },
-        text = { Text(if (files && model.device.memoryStick) "Close files on the Palm first; changes are saved immediately."
-            else if (files) "Close any files open on the Palm first. Frond saves a recovery session before the exchange." else "Close any files open on the Palm first.") },
+        title = { Text("Eject the card?") },
+        text = { Text(if (files) "Close any files open on the Palm first. Frond saves a recovery session before the exchange." else "Close any files open on the Palm first.") },
         confirmButton = {
             TextButton(onClick = {
                 onDismiss()
                 if (files) model.openFiles() else model.job("Ejecting", "Couldn't eject the card") { it.eject() }
-            }) { Text(if (files && model.device.memoryStick) "Open" else "Eject") }
+            }) { Text("Eject") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )

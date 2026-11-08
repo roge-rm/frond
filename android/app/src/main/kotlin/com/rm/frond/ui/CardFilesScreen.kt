@@ -84,7 +84,6 @@ fun CardFilesScreen(model: FilesModel, snackbar: SnackbarHostState) {
     var clip by remember { mutableStateOf<Clip?>(null) }
     val ready = model.busy == null
     val writable = ready && model.canWrite
-    val stick = model.memoryStick
 
     val pickFiles = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) model.addFiles(uris)
@@ -154,16 +153,14 @@ fun CardFilesScreen(model: FilesModel, snackbar: SnackbarHostState) {
                             OutlinedButton(onClick = { deleting = picked }, enabled = writable, shape = MaterialTheme.shapes.small, contentPadding = pad) {
                                 Text("Delete", maxLines = 1, softWrap = false, color = MaterialTheme.colorScheme.error)
                             }
-                            if (!stick) {
-                                OutlinedButton(onClick = { clip = Clip(picked.map { fullPath(it) }, true); selected = emptySet() }, enabled = writable,
-                                    shape = MaterialTheme.shapes.small, contentPadding = pad) { Text("Cut", maxLines = 1, softWrap = false) }
-                                OutlinedButton(onClick = { clip = Clip(picked.map { fullPath(it) }, false); selected = emptySet() }, enabled = ready,
-                                    shape = MaterialTheme.shapes.small, contentPadding = pad) { Text("Copy", maxLines = 1, softWrap = false) }
-                            }
+                            OutlinedButton(onClick = { clip = Clip(picked.map { fullPath(it) }, true); selected = emptySet() }, enabled = writable,
+                                shape = MaterialTheme.shapes.small, contentPadding = pad) { Text("Cut", maxLines = 1, softWrap = false) }
+                            OutlinedButton(onClick = { clip = Clip(picked.map { fullPath(it) }, false); selected = emptySet() }, enabled = ready,
+                                shape = MaterialTheme.shapes.small, contentPadding = pad) { Text("Copy", maxLines = 1, softWrap = false) }
                             if (picked.size == 1) OutlinedButton(onClick = { renaming = picked.first() }, enabled = writable,
                                 shape = MaterialTheme.shapes.small, contentPadding = pad) { Text("Rename", maxLines = 1, softWrap = false) }
                             OutlinedButton(onClick = { copyOut = picked; pickTarget.launch(null) },
-                                enabled = ready && !(stick && picked.any { it.directory }),
+                                enabled = ready,
                                 shape = MaterialTheme.shapes.small, contentPadding = pad) { Text("Export", maxLines = 1, softWrap = false) }
                         } else {
                             clip?.let { c ->
@@ -178,7 +175,7 @@ fun CardFilesScreen(model: FilesModel, snackbar: SnackbarHostState) {
                             OutlinedButton(onClick = { pickFiles.launch(arrayOf("*/*")) }, enabled = writable, shape = MaterialTheme.shapes.small, contentPadding = pad) {
                                 Text("Add files", maxLines = 1, softWrap = false)
                             }
-                            if (!stick) OutlinedButton(onClick = { pickTree.launch(null) }, enabled = writable, shape = MaterialTheme.shapes.small, contentPadding = pad) {
+                            OutlinedButton(onClick = { pickTree.launch(null) }, enabled = writable, shape = MaterialTheme.shapes.small, contentPadding = pad) {
                                 Text("Add folder", maxLines = 1, softWrap = false)
                             }
                         }

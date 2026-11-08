@@ -77,12 +77,11 @@ bool DesktopClient::request(const QString& command, const QString& argument) {
     if (line.size() > 32768 || socket->write(line) != line.size()) {
         pending.clear(); emit error(tr("Could not send the emulator command.")); return false;
     }
-    deadline.start(command == "ms-get" || command == "ms-put" ? 240000 : 120000);
+    deadline.start(120000);
     return true;
 }
 bool DesktopClient::cancelFiles() {
-    if (!socket || !QStringList({"ms-files", "ms-get", "ms-put", "ms-mkdir", "ms-delete", "ms-rename",
-                                 "sd-create", "sd-insert", "sd-export", "ms-create", "ms-insert", "ms-export"}).contains(pending)) return false;
+    if (!socket || !QStringList({"sd-create", "sd-insert", "sd-export", "ms-create", "ms-insert", "ms-export"}).contains(pending)) return false;
     const auto line = QByteArray("0\tcancel-files\t") + QByteArray::number(serial).toHex() + '\n';
     return socket->write(line) == line.size();
 }

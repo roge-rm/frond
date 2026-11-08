@@ -2,7 +2,6 @@
 #include "LicencesDialog.h"
 #include "FirmwareInput.h"
 #include "CardFilesWindow.h"
-#include "MemoryStickFilesDialog.h"
 #include "Dialogs.h"
 #include "FirmwareStore.h"
 #include "AudioQualification.h"
@@ -595,7 +594,6 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     connect(&client, &DesktopClient::finished, this, [this] {
         if (exchangeDialog) exchangeDialog->reject();
         else endExchange();
-        if (memoryStickFiles) memoryStickFiles->reject();
         if (cardProgress) { cardProgress->hide(); cardProgress->deleteLater(); cardProgress = nullptr; }
         holdKnown = holdOn = false;
         palmHolder->release(); embedded = embedWanted = embedTried = panelWasOpen = fitOffPending = false;
@@ -678,7 +676,6 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         }
         if (command == "install") appsStale = true;
         if (command == "install" && installTotal > 0 && installResult(ok, code, message)) return;
-        if (memoryStickFiles && QStringList({"ms-files", "ms-get", "ms-put", "ms-mkdir", "ms-delete", "ms-rename"}).contains(command)) return;
         if (!ok && cardMove.stage != CardMove::None) { cardMoveFailed(command, message); return; }
         if (!ok && exchangeStage != ExchangeStage::None) { exchangeResult(false, message); return; }
         if (!ok) {
@@ -950,7 +947,7 @@ void MainWindow::refresh() {
     // The picker button already says "No card" or the card's name, and Eject shows it's in.
     sdStatus->setVisible(!m68k && (!known || (cardPresent && !cardInserted)));
     sdReinsert->setVisible(known && cardPresent && !cardInserted);
-    sdExchange->setVisible(known && cardPresent && (!memoryStick || cardInserted));
+    sdExchange->setVisible(known && cardPresent);
     sdEject->setVisible(known && cardInserted);
     sdExport->setVisible(known && cardPresent && !cardInserted);
     sdRetry->setVisible(!known || (memoryStick && cardPresent && !protectionKnown));
@@ -2173,7 +2170,6 @@ void MainWindow::stop(bool closeApp) {
     if (stopping) return;
     stopping = true; client.cancelFiles(); refresh();
     if (exchangeDialog) exchangeDialog->reject();
-    else if (memoryStickFiles) memoryStickFiles->reject();
     else if (client.available() && exchangeStage == ExchangeStage::None) save();
     else notify(tr("Waiting to save the session…"));
 }
@@ -2233,17 +2229,6 @@ QString MainWindow::cardCommand(const char* operation) const {
     return (memoryStick() ? QStringLiteral("ms-") : QStringLiteral("sd-")) + QLatin1String(operation);
 }
 void MainWindow::beginExchange() {
-    if (memoryStick()) {
-        if (!client.available() || stopping || !cardInserted || memoryStickFiles) return;
-        if (QMessageBox::question(this, tr("Open Memory Stick files?"), tr("Close files on the Palm first; changes are saved immediately."),
-                                  QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) return;
-        if (!client.available() || stopping || !cardInserted) return;
-        MemoryStickFilesDialog dialog(client, [this](const QString& command, const QString& argument) { return send(command, argument); },
-                                      cardReadOnly->isChecked(), this);
-        memoryStickFiles = &dialog; dialog.exec(); memoryStickFiles = nullptr;
-        if (stopping && client.running() && client.available()) save();
-        return;
-    }
     if (!client.available() || stopping || !cardPresent || exchangeStage != ExchangeStage::None || cardMove.stage != CardMove::None) return;
     if (cardInserted && QMessageBox::question(this, tr("Open the card's files?"),
             tr("Close any files open on the Palm first. The card is ejected while Files is open and goes back in when you close it."),
@@ -2252,7 +2237,7 @@ void MainWindow::beginExchange() {
     if (!client.available() || stopping || !cardPresent || exchangeStage != ExchangeStage::None) return;
     exchangeWasInserted = cardInserted;
     exchangeIdentity.clear();
-    if (cardInserted) { exchangeStage = ExchangeStage::Eject; send("sd-eject"); }
+    if (cardInserted) { exchangeStage = ExchangeStage::Eject; send(cardCommand("eject")); }
     else { exchangeStage = ExchangeStage::Save; savingPath = sessionPath; send("save", sessionPath); }
 }
 void MainWindow::endExchange() {
@@ -2277,7 +2262,7 @@ void MainWindow::exchangeResult(bool ok, const QString& message) {
     // Stopping with the card out: it goes back in before the final save.
     if (ok && stopping && stage == ExchangeStage::TakeOut) {
         exchangeStage = ExchangeStage::PutIn;
-        if (!send("sd-put-in", exchangeIdentity + (exchangeProtected ? " protected" : " writable"))) { endExchange(); save(); }
+        if (!send(cardCommand("put-in"), exchangeIdentity + (exchangeProtected ? " protected" : " writable"))) { endExchange(); save(); }
         return;
     }
     if (!ok || stopping) {
@@ -2286,7 +2271,7 @@ void MainWindow::exchangeResult(bool ok, const QString& message) {
         if (!ok && stage == ExchangeStage::PutIn)
             failure(tr("Couldn't put the card back in. It's kept in the machine and goes in at the next start. %1").arg(message));
         else if (!ok) failure(message);
-        if (reinsert && client.available()) send("sd-reinsert");
+        if (reinsert && client.available()) send(cardCommand("reinsert"));
         if (stopping) save();
         return;
     }
@@ -2306,12 +2291,12 @@ void MainWindow::exchangeResult(bool ok, const QString& message) {
             slot.swap = true;
             if (!frondCards::writeSlot(dir, slot)) { exchangeResult(false, tr("Couldn't open the card.")); return; }
         }
-        exchangeStage = ExchangeStage::TakeOut; send("sd-take-out");
+        exchangeStage = ExchangeStage::TakeOut; send(cardCommand("take-out"));
     } else if (stage == ExchangeStage::TakeOut) {
         exchangeStage = ExchangeStage::Open;
         openExchangeCard();
     } else if (stage == ExchangeStage::PutIn) {
-        if (!exchangeWasInserted) { exchangeStage = ExchangeStage::EjectAgain; send("sd-eject"); return; }
+        if (!exchangeWasInserted) { exchangeStage = ExchangeStage::EjectAgain; send(cardCommand("eject")); return; }
         endExchange();
         notify(tr("Card put back in."));
     } else if (stage == ExchangeStage::EjectAgain) {
@@ -2319,9 +2304,11 @@ void MainWindow::exchangeResult(bool ok, const QString& message) {
         notify(tr("Card put back in, ejected."));
     }
 }
-// The card is out of the core in the machine folder's sd.frondsd: opens it in Files.
+// The card is out of the core in the machine folder's card file (sd.frondsd, ms.frondms or
+// ms.frondmsp): opens it in Files.
 void MainWindow::openExchangeCard() {
-    const auto path = runningMachineDir() + "/sd.frondsd";
+    const auto dir = runningMachineDir();
+    const auto path = !memoryStick() ? dir + "/sd.frondsd" : QFileInfo::exists(dir + "/ms.frondms") ? dir + "/ms.frondms" : dir + "/ms.frondmsp";
     std::unique_ptr<frondCardFile::CardFile> card;
     QString error;
     try {
@@ -2356,7 +2343,7 @@ void MainWindow::exchangeClosed() {
         return;
     }
     exchangeStage = ExchangeStage::PutIn;
-    if (!send("sd-put-in", exchangeIdentity + (exchangeProtected ? " protected" : " writable"))) exchangeResult(false, tr("Couldn't reach the Palm."));
+    if (!send(cardCommand("put-in"), exchangeIdentity + (exchangeProtected ? " protected" : " writable"))) exchangeResult(false, tr("Couldn't reach the Palm."));
 }
 
 // ---- Cards on the running machine ----
@@ -2380,7 +2367,7 @@ CardsWindow* MainWindow::showCards() {
         auto* w = new CardsWindow(sessionFolder(), this);
         w->setAttribute(Qt::WA_DeleteOnClose);
         w->runningMachine = [this] { return runningMachineDir(); };
-        w->exchangeOpen = [this] { return exchangeStage != ExchangeStage::None || memoryStickFiles != nullptr || cardMove.stage != CardMove::None; };
+        w->exchangeOpen = [this] { return exchangeStage != ExchangeStage::None || cardMove.stage != CardMove::None; };
         w->takeOutRunning = [this](const QString&) { if (client.available() && !busy && cardPresent) changeCard({}); };
         w->changed = [this] { refreshSessions(); refresh(); };
         cardsWindow = w;

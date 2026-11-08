@@ -206,8 +206,7 @@ class ControlLink(val path: File, private val onEvent: (String, String) -> Unit)
             }
         }
         const val TAG = "Frond"
-        val FILE_COMMANDS = setOf("ms-files", "ms-get", "ms-put", "ms-mkdir", "ms-delete", "ms-rename",
-            "sd-create", "sd-insert", "sd-export", "ms-create", "ms-insert", "ms-export")
+        val FILE_COMMANDS = setOf("sd-create", "sd-insert", "sd-export", "ms-create", "ms-insert", "ms-export")
         fun cancelLine(id: String) = "0\tcancel-files\t${encode(id)}\n".toByteArray(Charsets.US_ASCII)
         val CLOSED = Reply(false, "closed", "The emulator stopped.")
 

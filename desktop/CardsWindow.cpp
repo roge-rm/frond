@@ -496,8 +496,7 @@ QMenu* CardsWindow::menuFor(const QString& id, QWidget* parent) {
         a->setEnabled(enabled && !exchange);
     };
     const bool stopped = !row.holderBusy && !inRunning;
-    // A classic Memory Stick has no FAT the desktop can write in place, so it has no Files….
-    if (row.card.kind != "ms") add(stopped ? tr("Files…") : tr("Files… · In use"), "cardFiles", stopped, &CardsWindow::openFiles);
+    add(stopped ? tr("Files…") : tr("Files… · In use"), "cardFiles", stopped, &CardsWindow::openFiles);
     add(tr("Rename…"), "renameCard", true, &CardsWindow::renameCard);
     add(tr("Duplicate"), "duplicateCard", stopped, &CardsWindow::duplicateCard);
     add(tr("Export image…"), "exportCard", stopped, &CardsWindow::exportImage);
@@ -609,7 +608,6 @@ void CardsWindow::openFiles(const QString& id) {
     std::unique_ptr<QLockFile> hold;
     frondCards::Card card;
     if (const auto error = frondCards::cardSource(sessions, id, &path, &hold, &card, &holderDir); !error.isEmpty()) return failed(error);
-    if (card.kind == "ms") return failed(tr("A Memory Stick can't be opened here."));
     if (QFileInfo(path).fileName() != frondCards::fileOfKind(card.kind))
         return failed(tr("Open %1 once to finish its last save.").arg(QFileInfo(holderDir).fileName()));
     std::unique_ptr<frondCardFile::CardFile> opened;

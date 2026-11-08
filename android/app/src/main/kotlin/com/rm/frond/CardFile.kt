@@ -4,8 +4,8 @@ import java.io.File
 import java.io.IOException
 
 // A Frond card file edited in place for one Files… visit: sd.frondsd for SD, ms.frondmsp for a
-// Memory Stick Pro. The work is the storage library's (src/common/storage/CardFile.h), the same
-// code the desktop and the core use, in libfrondcard.so.
+// Memory Stick Pro, ms.frondms for a classic stick. The work is the storage library's
+// (src/common/storage/CardFile.h), the same code the desktop and the core use, in libfrondcard.so.
 //
 // Crash safety, per change: before data goes into a 1 MiB chunk, its number goes into
 // <card>.journal-N.pending, and data only goes into clusters the card's FAT calls free; then the

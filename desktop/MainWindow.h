@@ -233,7 +233,6 @@ class MainWindow : public QMainWindow {
     QPointer<CardFilesWindow> exchangeDialog;
     void openExchangeCard();
     void exchangeClosed();
-    QDialog* memoryStickFiles{nullptr};
     QStringList installQueue, installFailed;  // files waiting, and "name: reason" for those that failed
     int installTotal{0}, installHint{0};
     QString installCurrent;
