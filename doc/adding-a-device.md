@@ -6,6 +6,25 @@ A 68k device (the Palm IIIx is the example) runs on a different runner, `frond-6
 
 Core changes go in a new patch after the last one in `patches/`, or in an unpushed patch regenerated in place. Check them with `make check-reconstruction`. Keep the upstream licence headers and credit.
 
+## Reuse what's there
+
+A new device should be mostly existing code with a new profile. Before writing anything, find the path an existing device already uses and extend it. Add a profile field or a per-device table for what differs; don't copy a file and change the copy.
+
+| Need | Reuse |
+| --- | --- |
+| SoC, board, timers, interrupts, LCD | the board model for that SoC (see Hardware notes per SoC) |
+| Cards, sticks and internal storage | the storage library in `src/common/storage/` (see Storage below) |
+| Sessions | the session folder with media descriptors and sidecars; no new save format |
+| Install, launch, export, guest commands | the PACE and API bridge and the shared guest-command code |
+| Sound | the shared ring-buffer audio queue |
+| Button bar and silkscreen | an existing style and painter in `DeviceControls.cpp` where the layout fits |
+| Frontend settings and lists | the generated device data and capability flags |
+| Tests | `tests/device-rom.py`, `tests/smoke.py` and the console, frame, setup and probe helpers in `tools/` |
+
+Work the same way earlier devices were done: a plan with milestones, a read of the firmware (REA) only as far as the code needs, compared with what was found for the closest existing device, then build, focused tests and the device checks saved for the release. Keep firmware reads and evidence under `build/` as before.
+
+When a change touches a shared path, run the focused tests for the devices that already use it too.
+
 ## Steps
 
 First check the existing profiles, board dispatch and ROM detection. A device may already have an inherited model with no frontend. Keep its fixed name and extend that model. If it shares a board with a supported device, start from that board's working paths and list the differences in firmware, display, controls and peripherals.
@@ -169,10 +188,20 @@ List every control and port the real device has: keyboard, jog controls, storage
 
 - `capabilities` gates settings in the desktop (`capabilities()` in `desktop/FirmwareInput.h`), Android, the CLI and the core.
 - `sound` is a separate fact from the storage kind and from `fastAudio`.
-- The storage slot kind comes from `deviceProfileStorageSlot5` (SD, Memory Stick or none). Sizes are checked by `deviceProfileSdSizeValid5`, `deviceProfileMsSizeValid5` and `deviceProfileMsProSizeValid5`.
+- The storage slot kind comes from `deviceProfileStorageSlot5` (SD, Memory Stick or none). Sizes are checked by `deviceProfileSdSizeValid5`, `deviceProfileMsSizeValid5` and `deviceProfileMsProSizeValid5`. Storage itself is covered in the next section.
 - Add a presence field to the frontend part when a peripheral needs one (the camera and SD slot have one).
 
 When a peripheral needs its own guest procedure, add a scenario behind `tests/device-rom.py` and reuse the shared console, frame, setup and probe helpers in `tools/`.
+
+## Storage
+
+Every medium goes through the storage library in `src/common/storage/`: one container format, journals, settle and verify, CardFile and FatImage. Both apps use it for Files…. Don't add a new card format, writer or crash-recovery path for a device.
+
+- **SD and MMC:** set the slot and sizes in the profile. Nothing else is needed.
+- **Memory Stick Pro:** set `msProMaxMib`. The attribute area is generated from size and identity.
+- **Classic Memory Stick:** the container keeps every extra byte and boot block, so any driver sees a real stick. Writing from outside (`ClassicStick.h`) and the blank-stick format follow the TG50's driver, 3452Slot 2.10 (findings kept under `build/step-storage/rea/`). For a new Clié, read its Memory Stick slot driver and compare it with that: the blank-stick format for each size (partition start, FAT type and size, cluster size, `MEMSTICK.IND`), the extra bytes and order a new block gets, and which block wins when two claim one logical address. If they match, add nothing. If they differ, make the format or writer values a per-device table in `ClassicStick.h`.
+- **Internal NAND:** stored as `nand.frondnand` beside the session with a media descriptor. It can't be edited from outside; databases go in and out through the guest commands.
+- **RAM:** part of the session, reached through the guest commands.
 
 ## Button bar and silkscreen art
 
