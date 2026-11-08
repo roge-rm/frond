@@ -90,6 +90,13 @@ class LinkWireTest {
         assertFalse(LinkWire.allowedPeer(null))
     }
 
+    @Test fun numericHosts() {
+        for (h in listOf("192.168.1.20", "100.64.0.7", "::1", "fd7a:115c:a1e0::1", "fe80::1%wlan0"))
+            assertTrue(h, LinkWire.numericHost(h))
+        for (h in listOf("", "frond.local", "my-pc", "1.example"))
+            assertFalse(h, LinkWire.numericHost(h))
+    }
+
     @Test fun addressesAndHex() {
         assertEquals("192.168.1.20" to 5035, LinkWire.hostPort("192.168.1.20"))
         assertEquals("192.168.1.20" to 6000, LinkWire.hostPort("192.168.1.20:6000"))

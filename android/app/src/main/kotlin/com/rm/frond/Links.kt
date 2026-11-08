@@ -46,6 +46,10 @@ object Links {
         return LinkConnection(context.applicationContext, preferHost, onEvent).also { it.begin() }
     }
 
+    // The engine this process hosts, or null.
+    @Synchronized
+    internal fun hosted(): LinkEngine? = engine
+
     // Starts the engine and the local server here. Null when another process holds either.
     @Synchronized
     internal fun host(context: Context): LinkEngine? {
@@ -281,8 +285,9 @@ class LinkConnection internal constructor(
         }
     }
 
-    // One try: the other process's engine, else ours.
+    // One try: the engine this process hosts, else the other process's, else ours.
     private fun attach(): Boolean {
+        if (Links.hosted() != null) return hostHere()
         val s = LocalSocket()
         val reached = try {
             s.connect(LocalSocketAddress(Links.socketName(context), LocalSocketAddress.Namespace.ABSTRACT))
@@ -291,19 +296,29 @@ class LinkConnection internal constructor(
             try { s.close() } catch (_: IOException) {}
             false
         }
-        if (reached && preferHost) {
-            // The home process hosts: ask it to yield, then wait for it to close.
-            try {
-                s.outputStream.write("{\"op\":\"yield\"}\n".toByteArray())
-                s.soTimeout = 3000
-                while (s.inputStream.read(ByteArray(4096)) >= 0) {}
-            } catch (_: IOException) {}
+        val ours = reached && try { s.peerCredentials.pid == android.os.Process.myPid() } catch (e: IOException) { false }
+        val step = LinkAttach.choose(
+            hostedHere = Links.hosted() != null, reached = reached, reachedOurs = ours, preferHost = preferHost,
+            holding = System.currentTimeMillis() < holdUntil,
+        )
+        if (step != LinkAttach.Step.JOIN_REMOTE && step != LinkAttach.Step.YIELD_THEN_HOST && reached) {
             try { s.close() } catch (_: IOException) {}
-            return hostHere()
         }
-        if (reached) return remote(s)
-        if (!preferHost && System.currentTimeMillis() < holdUntil) return false
-        return hostHere()
+        return when (step) {
+            LinkAttach.Step.HOST_HERE -> hostHere()
+            LinkAttach.Step.JOIN_REMOTE -> remote(s)
+            LinkAttach.Step.YIELD_THEN_HOST -> {
+                // The home process hosts: ask it to yield, then wait for it to close.
+                try {
+                    s.outputStream.write("{\"op\":\"yield\"}\n".toByteArray())
+                    s.soTimeout = 3000
+                    while (s.inputStream.read(ByteArray(4096)) >= 0) {}
+                } catch (_: IOException) {}
+                try { s.close() } catch (_: IOException) {}
+                hostHere()
+            }
+            LinkAttach.Step.WAIT -> false
+        }
     }
 
     private fun hostHere(): Boolean {
@@ -363,6 +378,25 @@ class LinkConnection internal constructor(
             try { s.close() } catch (_: IOException) {}
         }, "FrondLinkRemote").apply { isDaemon = true; start() }
         return true
+    }
+}
+
+// Where a LinkConnection gets its engine on one try. Every client in a process shares the engine that
+// process hosts; only an engine in the other process is joined over the socket, or asked to yield by the
+// emulator. Yielding our own engine would drop every other link kind running here.
+object LinkAttach {
+    enum class Step { HOST_HERE, JOIN_REMOTE, YIELD_THEN_HOST, WAIT }
+
+    // hostedHere: this process runs the engine. reached: the abstract socket answered; reachedOurs: and it's
+    // this process's server, an engine stopping here. holding: the home process just yielded to the emulator.
+    fun choose(hostedHere: Boolean, reached: Boolean, reachedOurs: Boolean, preferHost: Boolean, holding: Boolean): Step = when {
+        hostedHere -> Step.HOST_HERE
+        // Ours, stopping: wait for it to go, then start again.
+        reached && reachedOurs -> Step.WAIT
+        reached && preferHost -> Step.YIELD_THEN_HOST
+        reached -> Step.JOIN_REMOTE
+        !preferHost && holding -> Step.WAIT
+        else -> Step.HOST_HERE
     }
 }
 

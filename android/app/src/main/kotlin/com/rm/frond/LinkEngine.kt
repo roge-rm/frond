@@ -72,7 +72,10 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         var link = 0L
         var pairing = 0L
         var peer = ""
-        val created = now()
+        // Reset once a dialled name resolves, so the connect gets its own time.
+        var created = now()
+        // Waiting on a name lookup off the engine thread; not yet connecting.
+        var resolving = false
         var closingAt = 0L
         var closing = false
         var up = false
@@ -130,6 +133,8 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         var core: LocalSocket? = null
         var coreGeneration = 0
         var coreUp = false
+        // A connect to the core's socket is running on the core-connect thread.
+        var coreConnecting = false
         var nextCoreTry = 0L
         var st = St.IDLE
         var ch = 0
@@ -174,6 +179,10 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
     private fun wall() = System.currentTimeMillis()
 
     private val tasks = ConcurrentLinkedQueue<() -> Unit>()
+    // Connects to the cores' infrared and serial sockets off the engine thread, one at a time.
+    private val coreConnector = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "FrondLinkCoreConnect").apply { isDaemon = true }
+    }
     private var selector: Selector? = null
     private var listener: ServerSocketChannel? = null
     private var udp: DatagramChannel? = null
@@ -327,6 +336,7 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
             Log.e(TAG, "link: engine failed", e)
         }
         shutdown()
+        coreConnector.shutdownNow()
         host.stopped()
     }
 
@@ -759,19 +769,45 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         conns += c
         r.dialing = c
         c.link = LinkNative.linkDial(store.identity.secret, store.identity.id, store.identity.name, key, p.key, now())
-        try {
-            setOptions(s)
-            val address = InetAddress.getByName(target.first)
-            if (!LinkWire.allowedPeer(address)) throw IOException("not a local address")
-            if (s.connect(InetSocketAddress(address, target.second))) {
-                c.connected = true
-                c.remote = s.remoteAddress as? InetSocketAddress
-                register(c, SelectionKey.OP_READ)
-                pump(c)
-            } else register(c, SelectionKey.OP_CONNECT)
-        } catch (e: Exception) {
-            removeConn(c)
+        // Any address can be dialled, as on the desktop (a VPN's, say); only the listener is held to the
+        // local network.
+        startConnect(c, target.first, target.second) { pump(c) }
+    }
+
+    // Resolves host off the engine thread, then connects c to it. connected runs if the connect finishes at
+    // once, else connReady carries on. A failed lookup or connect removes c.
+    private fun startConnect(c: Conn, host: String, port: Int, connected: () -> Unit) {
+        c.resolving = true
+        resolve(host) { address ->
+            if (c !in conns) return@resolve
+            c.resolving = false
+            c.created = now()
+            try {
+                if (address == null) throw IOException("unknown host")
+                setOptions(c.channel)
+                if (c.channel.connect(InetSocketAddress(address, port))) {
+                    c.connected = true
+                    c.remote = c.channel.remoteAddress as? InetSocketAddress
+                    register(c, SelectionKey.OP_READ)
+                    connected()
+                } else register(c, SelectionKey.OP_CONNECT)
+            } catch (e: Exception) {
+                removeConn(c)
+            }
         }
+    }
+
+    // Gives done the address on the engine thread, or null if it doesn't resolve. A name is looked up on its
+    // own thread, as a slow lookup here would stall every link; a numeric address needs no lookup.
+    private fun resolve(host: String, done: (InetAddress?) -> Unit) {
+        if (LinkWire.numericHost(host)) {
+            done(try { InetAddress.getByName(host) } catch (e: Exception) { null })
+            return
+        }
+        Thread({
+            val address = try { InetAddress.getByName(host) } catch (e: Exception) { null }
+            post { done(address) }
+        }, "FrondLinkResolve").apply { isDaemon = true }.start()
     }
 
     // Tries the next address at once, and backs off after a round of them.
@@ -849,25 +885,13 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
     }
 
     private fun pairOutStart() {
-        val target = try { InetAddress.getByName(pairOut.host) } catch (e: Exception) { null }
         val s = SocketChannel.open()
         s.configureBlocking(false)
         val c = Conn(s, true)
         c.kind = Kind.PAIR_OUT
         conns += c
         pairOut.conn = c
-        try {
-            if (target == null || !LinkWire.allowedPeer(target)) throw IOException("not a local address")
-            setOptions(s)
-            if (s.connect(InetSocketAddress(target, pairOut.port))) {
-                c.connected = true
-                c.remote = s.remoteAddress as? InetSocketAddress
-                register(c, SelectionKey.OP_READ)
-                queue(c, LinkWire.pairRequest(store.identity.id, store.identity.name))
-            } else register(c, SelectionKey.OP_CONNECT)
-        } catch (e: Exception) {
-            removeConn(c)
-        }
+        startConnect(c, pairOut.host, pairOut.port) { queue(c, LinkWire.pairRequest(store.identity.id, store.identity.name)) }
     }
 
     private fun pairDone(c: Conn) {
@@ -876,10 +900,10 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         if (result == PairResult.PENDING) return
         var pairedId = ""
         if (result == PairResult.PAIRED) {
-            val info = LinkNative.pairPeer(c.pairing)
-            val id = info.copyOfRange(0, 16)
-            val key = info.copyOfRange(16, 48)
-            val name = info.copyOfRange(48, info.size).toString(Charsets.UTF_8)
+            val info = LinkText.peer(LinkNative.pairPeer(c.pairing)) ?: run { closeConn(c); return }
+            val id = info.id
+            val key = info.key
+            val name = info.name
             val hex = LinkWire.hex(id)
             pairedId = hex
             val old = store.find(hex)
@@ -1069,6 +1093,7 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
 
     private fun closeCore(a: Attach) {
         a.coreGeneration++
+        a.coreConnecting = false
         try { a.core?.close() } catch (_: IOException) {}
         a.core = null
         // Lets a serial reader waiting on the gate see the socket is gone, and ends the writer.
@@ -1090,8 +1115,8 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
     private fun syncCores() {
         for (a in ArrayList(attaches)) {
             if (!a.serial) continue
-            if (a.st != St.JOINED) { if (a.core != null || a.coreUp) dropCore(a) }
-            else if (a.core == null && !a.coreUp && now() >= a.nextCoreTry) coreConnect(a)
+            if (a.st != St.JOINED) { if (a.core != null || a.coreUp || a.coreConnecting) dropCore(a) }
+            else if (a.core == null && !a.coreUp && !a.coreConnecting && now() >= a.nextCoreTry) coreConnect(a)
         }
     }
 
@@ -1099,13 +1124,30 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         closeCore(a)
         a.nextCoreTry = now() + CORE_RETRY_MS
         if (a.socketPath.isEmpty()) return
-        val s = LocalSocket()
-        try {
-            s.connect(LocalSocketAddress(a.socketPath, LocalSocketAddress.Namespace.FILESYSTEM))
-        } catch (e: IOException) {
-            try { s.close() } catch (_: IOException) {}
-            return
+        // Connected on its own thread so a core slow to accept never holds up the engine; a newer try or a
+        // closed core (a new generation) drops the result.
+        val generation = a.coreGeneration
+        val path = a.socketPath
+        a.coreConnecting = true
+        coreConnector.execute {
+            val s = LocalSocket()
+            val ok = try {
+                s.connect(LocalSocketAddress(path, LocalSocketAddress.Namespace.FILESYSTEM))
+                true
+            } catch (e: IOException) {
+                try { s.close() } catch (_: IOException) {}
+                false
+            }
+            post {
+                val current = a in attaches && a.coreGeneration == generation
+                if (current) a.coreConnecting = false
+                if (ok && (!current || a.core != null)) try { s.close() } catch (_: IOException) {}
+                else if (ok) coreOpened(a, s)
+            }
         }
+    }
+
+    private fun coreOpened(a: Attach, s: LocalSocket) {
         a.core = s
         a.coreUp = true
         val generation = a.coreGeneration
@@ -1702,7 +1744,7 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
                 continue
             }
             if (c.kind == Kind.UNKNOWN && t - c.created > FIRST_FRAME_MS) { closeConn(c, false); continue }
-            if (c.outgoing && !c.connected && t - c.created > 3000) { removeConn(c); continue }
+            if (c.outgoing && !c.connected && t - c.created > (if (c.resolving) RESOLVE_MS else 3000)) { removeConn(c); continue }
             if (c.link != 0L && c.connected) { LinkNative.linkTick(c.link, t); afterLink(c) }
             else if (c.kind == Kind.LINK && !c.outgoing && t - c.created > FIRST_FRAME_MS && !c.up) closeConn(c, false)
             if (c in conns && c.pairing != 0L) { LinkNative.pairTick(c.pairing, t); pump(c); pairDone(c) }
@@ -1720,7 +1762,7 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
             } else if (want || r.held.isNotEmpty()) r.idleSince = t
         }
         // Cores: reconnect after sleep, load or reset.
-        for (a in ArrayList(attaches)) if (!a.serial && !a.bt && !a.coreUp && a.core == null && t >= a.nextCoreTry) coreConnect(a)
+        for (a in ArrayList(attaches)) if (!a.serial && !a.bt && !a.coreUp && a.core == null && !a.coreConnecting && t >= a.nextCoreTry) coreConnect(a)
         radioTick()
         syncCores()
         for (a in ArrayList(attaches)) if ((a.st == St.BUSY || a.st == St.IDLE) && a.retryAt <= t) matchPeer(a.link)
@@ -1760,6 +1802,8 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         // A closing connection's last bytes get this long to go.
         const val CLOSING_MS = 3000L
         const val CORE_RETRY_MS = 250L
+        // A dialled name gets this long to resolve before the try counts as failed.
+        const val RESOLVE_MS = 10000L
         // Serial bytes held for the core socket each way before the core's own queue fills and its CTS drops.
         const val SERIAL_AHEAD = 4096
         const val BUSY_RETRY_MS = 5000L

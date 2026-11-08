@@ -34,16 +34,18 @@ bool fixed(JNIEnv* env, jbyteArray a, std::array<uint8_t, N>& out) {
     return true;
 }
 
-std::string stringOf(JNIEnv* env, jstring s) {
-    if (!s) return {};
-    const char* c = env->GetStringUTFChars(s, nullptr);
-    std::string r(c ? c : "");
-    if (c) env->ReleaseStringUTFChars(s, c);
-    return r;
+// Text crosses as UTF-8 bytes both ways: JNI's own string calls use modified UTF-8, which garbles
+// characters outside the BMP such as emoji.
+std::string stringOf(JNIEnv* env, jbyteArray a) {
+    const Bytes b = bytesOf(env, a);
+    return std::string(b.begin(), b.end());
+}
+jbyteArray textOf(JNIEnv* env, const std::string& s) {
+    return arrayOf(env, reinterpret_cast<const uint8_t*>(s.data()), s.size());
 }
 
 // Kotlin passes the identity secret, install id and name each time a link or pairing starts.
-bool localInfo(JNIEnv* env, jbyteArray secret, jbyteArray id, jstring name, LocalInfo& out) {
+bool localInfo(JNIEnv* env, jbyteArray secret, jbyteArray id, jbyteArray name, LocalInfo& out) {
     Key32 s{};
     if (!fixed(env, secret, s) || !fixed(env, id, out.id)) return false;
     const bool ok = identityFromSecret(s, out.identity);
@@ -106,7 +108,7 @@ jbyteArray FN(refuseFrame)(JNIEnv* env, jclass, jint reason) {
 // ---- Links ----
 
 // We dial a paired peer.
-jlong FN(linkDial)(JNIEnv* env, jclass, jbyteArray secret, jbyteArray id, jstring name, jbyteArray peerId,
+jlong FN(linkDialUtf8)(JNIEnv* env, jclass, jbyteArray secret, jbyteArray id, jbyteArray name, jbyteArray peerId,
                    jbyteArray peerKey, jlong now) {
     LinkConfig cfg;
     InstallId pid{};
@@ -119,7 +121,7 @@ jlong FN(linkDial)(JNIEnv* env, jclass, jbyteArray secret, jbyteArray id, jstrin
 }
 
 // A peer dialled us. paired is the pinned table: 48 bytes per peer, id then key.
-jlong FN(linkAnswer)(JNIEnv* env, jclass, jbyteArray secret, jbyteArray id, jstring name, jbyteArray paired, jlong now) {
+jlong FN(linkAnswerUtf8)(JNIEnv* env, jclass, jbyteArray secret, jbyteArray id, jbyteArray name, jbyteArray paired, jlong now) {
     LinkConfig cfg;
     if (!localInfo(env, secret, id, name, cfg.local)) return 0;
     const auto table = std::make_shared<Bytes>(bytesOf(env, paired));
@@ -161,7 +163,7 @@ jbyteArray FN(linkPeerId)(JNIEnv* env, jclass, jlong h) {
     const auto& id = L(h)->peerId();
     return arrayOf(env, id.data(), id.size());
 }
-jstring FN(linkPeerName)(JNIEnv* env, jclass, jlong h) { return env->NewStringUTF(L(h)->peerName().c_str()); }
+jbyteArray FN(linkPeerNameUtf8)(JNIEnv* env, jclass, jlong h) { return textOf(env, L(h)->peerName()); }
 jlong FN(linkRtt)(JNIEnv*, jclass, jlong h) { return jlong(L(h)->rttMs()); }
 
 // The Bluetooth radio choice (MsgType::Radio): ours to the peer, and the peer's, oldest first, as
@@ -182,14 +184,14 @@ jlongArray FN(linkNextRadio)(JNIEnv* env, jclass, jlong h) {
 
 // ---- Channels ----
 
-jint FN(muxOpen)(JNIEnv* env, jclass, jlong h, jint kind, jstring machine, jstring device) {
+jint FN(muxOpenUtf8)(JNIEnv* env, jclass, jlong h, jint kind, jbyteArray machine, jbyteArray device) {
     return L(h)->mux().open(ChannelKind(kind), stringOf(env, machine), stringOf(env, device));
 }
-jboolean FN(muxAccept)(JNIEnv* env, jclass, jlong h, jint ch, jstring machine, jstring device) {
+jboolean FN(muxAcceptUtf8)(JNIEnv* env, jclass, jlong h, jint ch, jbyteArray machine, jbyteArray device) {
     return L(h)->mux().accept(uint16_t(ch), stringOf(env, machine), stringOf(env, device));
 }
 jboolean FN(muxWaiting)(JNIEnv*, jclass, jlong h, jint ch) { return L(h)->mux().waiting(uint16_t(ch)); }
-jboolean FN(muxBusy)(JNIEnv* env, jclass, jlong h, jint ch, jstring machine, jstring device) {
+jboolean FN(muxBusyUtf8)(JNIEnv* env, jclass, jlong h, jint ch, jbyteArray machine, jbyteArray device) {
     return L(h)->mux().busy(uint16_t(ch), stringOf(env, machine), stringOf(env, device));
 }
 void FN(muxClose)(JNIEnv*, jclass, jlong h, jint ch, jint reason) { L(h)->mux().close(uint16_t(ch), CloseReason(reason)); }
@@ -227,12 +229,12 @@ jlong FN(codeNew)(JNIEnv*, jclass, jlong now) {
     return reinterpret_cast<jlong>(new std::shared_ptr<PairCode>(std::make_shared<PairCode>(uint64_t(now))));
 }
 void FN(codeFree)(JNIEnv*, jclass, jlong h) { delete C(h); }
-jstring FN(codeText)(JNIEnv* env, jclass, jlong h) { return env->NewStringUTF((*C(h))->code().c_str()); }
+jbyteArray FN(codeTextUtf8)(JNIEnv* env, jclass, jlong h) { return textOf(env, (*C(h))->code()); }
 jint FN(codeTriesLeft)(JNIEnv*, jclass, jlong h) { return (*C(h))->triesLeft(); }
 void FN(codeSucceeded)(JNIEnv*, jclass, jlong h) { (*C(h))->succeeded(); }
 
 // A: the code as typed; queues P1.
-jlong FN(pairDial)(JNIEnv* env, jclass, jbyteArray secret, jbyteArray id, jstring name, jstring code, jlong now) {
+jlong FN(pairDialUtf8)(JNIEnv* env, jclass, jbyteArray secret, jbyteArray id, jbyteArray name, jbyteArray code, jlong now) {
     LocalInfo local;
     if (!localInfo(env, secret, id, name, local)) return 0;
     auto* w = new PairWrap;
@@ -243,7 +245,7 @@ jlong FN(pairDial)(JNIEnv* env, jclass, jbyteArray secret, jbyteArray id, jstrin
 }
 
 // B: one per incoming pairing connection, sharing the dialog's code.
-jlong FN(pairAnswer)(JNIEnv* env, jclass, jbyteArray secret, jbyteArray id, jstring name, jlong code, jlong now) {
+jlong FN(pairAnswerUtf8)(JNIEnv* env, jclass, jbyteArray secret, jbyteArray id, jbyteArray name, jlong code, jlong now) {
     LocalInfo local;
     if (!localInfo(env, secret, id, name, local)) return 0;
     auto* w = new PairWrap;

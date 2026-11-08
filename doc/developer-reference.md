@@ -400,7 +400,7 @@ The hub listens on `$XDG_RUNTIME_DIR/frond/link.sock` (folder mode 0700, `FROND_
 
 Attaches end when the client disconnects. A client that wants one to survive a hub restart sends it again.
 
-Events: `hello` (`id`, `name`, `port`, `pid`), `state` (name, port, connections with `rtt`, `seen`, `up`, `keyChanged` and `channels`, nearby installs), `pair-request`, `pair-request-update`, `pair-request-end`, `pair-peer`, `pair-result` (`paired`, `wrongcode`, `lockedout`, `expired`, `notpairing`, `unreachable`, `version`, `failed`), and `ir`, `serial` and `bt` with `state` (`joined`, `waiting`, `busy`, `notfound`, `connecting`, `keychanged`, `forgotten`, `unknown`; `bt` also `radio`, `noradio`, `here`, `there`), `peer`, `far` (`asleep`, `paused`, `reset`, `running`) and `busyBy`.
+Events: `hello` (`id`, `name`, `port`, `pid`), `state` (name, port, connections with `peerName`, `rtt`, `seen`, `up`, `keyChanged`, `forgotten`, `bluetoothRadio` and `channels`, nearby installs, and `local`, the channels between machines on this computer), `pair-request`, `pair-request-update`, `pair-request-end`, `pair-peer`, `pair-result` (`paired`, `wrongcode`, `lockedout`, `expired`, `notpairing`, `unreachable`, `version`, `failed`), and `ir`, `serial` and `bt` with `state` (`joined`, `waiting`, `busy`, `notfound`, `connecting`, `keychanged`, `forgotten`, `unknown`; `bt` also `radio`, `noradio`, `here`, `there`), `peer`, `machine` and `device` (the far machine), `far` (`asleep`, `paused`, `reset`, `running`), `busyBy` and `core` (the core's socket is up; `bt` has `listening` and `controllers` instead).
 
 ### Store
 
@@ -411,7 +411,7 @@ Events: `hello` (`id`, `name`, `port`, `pid`), `state` (name, port, connections 
 
 ### Network
 
-TCP 5035 carries the links (Noise KK against the pinned keys, or a pairing request while a pair dialog is open) and UDP 5035 the beacons, sent only while Connections is open or a machine waits for a peer that isn't up. Only private, link-local and loopback addresses are accepted.
+TCP 5035 carries the links (Noise KK against the pinned keys, or a pairing request while a pair dialog is open) and UDP 5035 the beacons, sent while Connections is open, a pairing is under way or any machine has Infrared, Serial or Bluetooth on a connection, even once its link is up. Incoming links and beacons are only taken from loopback, private (10/8, 172.16/12, 192.168/16), link-local and ULA (fc00::/7) addresses. Frond dials any address, so a connection added by address can be on a VPN, but the far side still has to see this one at an address in those ranges.
 
 ### Machine settings
 

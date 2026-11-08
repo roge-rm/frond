@@ -166,7 +166,11 @@ object LinkWire {
 
     fun showHostPort(host: String, port: Int) = NetRelay.hostPort(host, port)
 
-    // Peers may only be on the local network: loopback, private, link-local and ULA addresses.
+    // An IPv4 or IPv6 literal, which InetAddress takes without a name lookup.
+    fun numericHost(host: String): Boolean =
+        host.isNotEmpty() && (':' in host || host.all { it.isDigit() || it == '.' })
+
+    // Peers that may dial in: loopback, private, link-local and ULA addresses.
     fun allowedPeer(address: InetAddress?): Boolean {
         val b = address?.address ?: return false
         if (address is Inet4Address) {
