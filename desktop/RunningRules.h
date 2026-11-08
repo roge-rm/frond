@@ -1,5 +1,6 @@
 #pragma once
 #include <optional>
+#include <QSize>
 #include <QString>
 #include <QStringList>
 #include <algorithm>
@@ -119,6 +120,47 @@ inline const std::vector<ShortcutKey>& shortcutKeys() {
 inline std::optional<Shortcut> shortcutFor(const QString& name) {
     for (const auto& key : shortcutKeys()) if (name == QLatin1String(key.name)) return key.what;
     return std::nullopt;
+}
+
+// The menu row a shortcut belongs to, if it has one.
+inline std::optional<Id> rowFor(Shortcut what) {
+    switch (what) {
+        case Shortcut::Save: return Id::Save;
+        case Shortcut::SaveCopy: return Id::SaveCopy;
+        case Shortcut::SaveStop: return Id::SaveStop;
+        case Shortcut::Display: return Id::Display;
+        case Shortcut::Connections: return Id::Connections;
+        case Shortcut::HideBar: return Id::HideBar;
+        case Shortcut::Log: return Id::Log;
+        case Shortcut::Reset: return Id::Reset;
+        case Shortcut::Screenshot: return Id::Screenshot;
+        case Shortcut::FullScreen: return Id::FullScreen;
+        default: return std::nullopt;
+    }
+}
+
+// Embedding the Palm's window needs Qt on X11 (xcb). `forced` tries it anyway, for tests.
+inline bool embedPossible(const QString& platform, bool forced) { return forced || platform == QLatin1String("xcb"); }
+
+// The X11 window id out of the core's `window-id` reply ("x11 ID"), or 0.
+inline quint64 parseWindowId(const QString& reply) {
+    const auto parts = reply.trimmed().split(' ');
+    if (parts.size() != 2 || parts[0] != QLatin1String("x11")) return 0;
+    bool ok = false;
+    const auto id = parts[1].toULongLong(&ok);
+    return ok ? id : 0;
+}
+
+// The side panel's width and the strip left of a hidden bar.
+constexpr int panelWidth = 300, handleHeight = 8;
+
+// Window width for a Palm of `palm` pixels: a panel opens at its right, so the Palm keeps its size.
+inline int windowWidth(int palm, bool panelOpen) { return palm + (panelOpen ? panelWidth : 0); }
+
+// The Palm's size after the Size setting goes from `from` to `to` (quarter steps).
+inline QSize scaledPalm(QSize size, int from, int to) {
+    if (from <= 0) return size;
+    return {int(qint64(size.width()) * to / from), int(qint64(size.height()) * to / from)};
 }
 
 enum class CardIcon { None, Out, In, Ejected };

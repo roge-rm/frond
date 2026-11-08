@@ -20,6 +20,8 @@
 #include "FirmwareStore.h"
 #include "SessionStore.h"
 #include "RunningBar.h"
+#include "PalmView.h"
+#include <QShortcut>
 #include "AudioQualification.h"
 #include <QMessageBox>
 #include <QMenuBar>
@@ -2186,6 +2188,8 @@ for line in s.makefile('rb'):
     if cmd not in (b'keyboard-state',b'network-state',b'device-state',b'sd-state',b'microphone-state'):
         log.write(cmd.decode()+' '+text.decode()+'\n'); log.flush()
     if cmd==b'microphone-mode': mic=text
+    if cmd==b'window-id':
+        s.sendall(i+b'\terror\tunsupported\t'+b'The window is not an X11 window.'.hex().encode()+b'\n'); continue
     message={b'keyboard-state':b'detached',b'network-state':b'disabled',b'device-state':b'DEVICE',b'sd-state':b'none',b'microphone-state':mic,b'microphone-mode':mic}.get(cmd,b'done')
     if cmd==b'keyboard-attach': message=b'attached'
     s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
@@ -2241,8 +2245,141 @@ for line in s.makefile('rb'):
         QTRY_VERIFY_WITH_TIMEOUT(commands().last().startsWith("input-replay 0 snapshot \""), 4000);
         // The same keys work with the Qt window in front.
         const auto before = commands().size();
+        QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("save")->isEnabled(), 4000);
         QTest::keyClick(&window, Qt::Key_S, Qt::ControlModifier);
         QTRY_VERIFY_WITH_TIMEOUT(commands().size() == before + 1 && commands().last().startsWith("save "), 4000);
+    }
+    // The menu rows show their keys, and the keys still fire once: a row never takes the key itself.
+    void menuShowsKeys() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        putSession("Show", 6, "palm-tx", 0);
+        QTemporaryDir files;
+        const auto sent = files.path() + "/sent";
+        menuCore(files.path(), "palm-tx");
+        if (QTest::currentTestFailed()) return;
+        auto commands = [&] {
+            QFile f(sent); if (!f.open(QIODevice::ReadOnly)) return QStringList();
+            return QString::fromUtf8(f.readAll()).split('\n', Qt::SkipEmptyParts);
+        };
+        MainWindow window(files.path() + "/core"); window.show(); window.openSession(managedSession("Show"), true);
+        auto* bar = window.findChild<RunningBar*>("runningBar");
+        QTRY_VERIFY_WITH_TIMEOUT(bar->isVisible() && window.findChild<QAction*>("machineSave")->isEnabled(), 5000);
+        auto keys = [&](const char* name) { return window.findChild<QAction*>(name)->text().section('\t', 1); };
+        QCOMPARE(keys("machineSave"), QString("Ctrl+S"));
+        QCOMPARE(keys("machineSaveCopy"), QString("Ctrl+Shift+S"));
+        QCOMPARE(keys("machineSaveStop"), QString("Ctrl+W"));
+        QCOMPARE(keys("machineHideBar"), QString("Ctrl+B"));
+        QCOMPARE(keys("machineLog"), QString("Ctrl+L"));
+        QCOMPARE(keys("machineReset"), QString("Ctrl+R"));
+        QCOMPARE(keys("machineDisplay"), QString("Ctrl+3"));
+        QCOMPARE(keys("machineConnections"), QString("Ctrl+4"));
+        QCOMPARE(keys("machineScreenshot"), QString("F12"));
+        QCOMPARE(keys("machineFullScreen"), QString("F11"));
+        QVERIFY(keys("machineHardReset").isEmpty() && keys("machineKeyboard").isEmpty());
+        QCOMPARE(window.findChild<QAction*>("machineSave")->text().section('\t', 0, 0), QString("Save"));
+        // The rows show the keys as text only: no action owns a key, so each key has the one
+        // window shortcut and can't be ambiguous.
+        for (auto* a : window.findChildren<QAction*>()) QVERIFY2(a->shortcut().isEmpty() || !a->objectName().startsWith("machine"), qPrintable(a->objectName()));
+        QStringList seen;
+        for (auto* shortcut : window.findChildren<QShortcut*>()) {
+            QVERIFY2(!seen.contains(shortcut->key().toString()), qPrintable(shortcut->key().toString()));
+            seen << shortcut->key().toString();
+        }
+        // Each key fires its action once: with the window in front, and with the menu open.
+        auto* panels = window.findChild<PanelHost*>("panelHost");
+        QTest::keyClick(&window, Qt::Key_3, Qt::ControlModifier);
+        QCOMPARE(panels->current(), 2);
+        QTest::keyClick(&window, Qt::Key_3, Qt::ControlModifier);
+        QCOMPARE(panels->current(), -1);
+        QTest::keyClick(&window, Qt::Key_B, Qt::ControlModifier);
+        QVERIFY(!bar->isVisible());
+        QTest::keyClick(&window, Qt::Key_B, Qt::ControlModifier);
+        QVERIFY(bar->isVisible());
+        QTest::keyClick(&window, Qt::Key_S, Qt::ControlModifier);
+        QTRY_VERIFY_WITH_TIMEOUT(commands().size() == 1 && commands()[0].startsWith("save "), 4000);
+        QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("save")->isEnabled(), 4000);
+        bar->menu()->popup(window.mapToGlobal(QPoint(40, 40)));
+        QTRY_VERIFY(bar->menu()->isVisible());
+        QTest::keyClick(bar->menu(), Qt::Key_S, Qt::ControlModifier);
+        QTest::qWait(300);
+        QVERIFY(commands().size() <= 2);
+        bar->menu()->close();
+    }
+    // With the core refusing window-id the Palm keeps its own window: bar-only window, no dialog,
+    // everything else works.
+    void embedFallback() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        putSession("Fall", 6, "palm-tx", 0);
+        QTemporaryDir files;
+        const auto sent = files.path() + "/sent";
+        menuCore(files.path(), "palm-tx");
+        if (QTest::currentTestFailed()) return;
+        auto commands = [&] {
+            QFile f(sent); if (!f.open(QIODevice::ReadOnly)) return QStringList();
+            return QString::fromUtf8(f.readAll()).split('\n', Qt::SkipEmptyParts);
+        };
+        qputenv("FROND_TRY_EMBED", "1");
+        {
+            MainWindow window(files.path() + "/core"); window.show(); window.openSession(managedSession("Fall"), true);
+            auto* bar = window.findChild<RunningBar*>("runningBar");
+            QTRY_VERIFY_WITH_TIMEOUT(bar->isVisible() && window.findChild<QAction*>("machineSave")->isEnabled(), 5000);
+            QTRY_VERIFY_WITH_TIMEOUT(commands().contains("window-id "), 4000);
+            auto* holder = window.findChild<PalmHolder*>("palmHolder");
+            QVERIFY(holder && !holder->isVisible() && !holder->embedded());
+            // The chain went on after the refusal, and no error box is up.
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QAction*>("machineNetwork")->isEnabled(), 4000);
+            QVERIFY(!QApplication::activeModalWidget());
+            // The bar-only window: a panel opens under the bar at the size the panel needs.
+            auto* panels = window.findChild<PanelHost*>("panelHost");
+            panels->open(2);
+            QVERIFY(panels->isVisible());
+            QCOMPARE(window.width(), 480);
+            QVERIFY(panels->maximumWidth() > runningRules::panelWidth);
+            // Display shows what applies: no Size without the embedding, Smooth pixels always.
+            QVERIFY(!window.findChild<QSlider*>("runningSize")->isVisibleTo(&window));
+            QVERIFY(window.findChild<QCheckBox*>("runningSmooth")->isVisibleTo(&window));
+            QVERIFY(!window.findChild<QCheckBox*>("runningShowKeyboard")->isVisibleTo(&window));
+            QVERIFY(!window.findChild<QComboBox*>("runningSpeed")->isVisibleTo(&window));
+            panels->open(-1);
+            window.findChild<QAction*>("machineSaveStop")->trigger();
+            QTRY_VERIFY_WITH_TIMEOUT(commands().last() == "quit ", 5000);
+            QTRY_VERIFY_WITH_TIMEOUT(!bar->isVisible(), 5000);
+            QVERIFY(!holder->embedded() && !window.findChild<QWidget*>("runArea")->isVisible());
+        }
+        qunsetenv("FROND_TRY_EMBED");
+    }
+    // The Display rows that can change while the Palm runs: each is kept in the machine's settings
+    // and sent to the core.
+    void liveDisplayRows() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        putSession("Live", 6, "palm-tx", 0);
+        QTemporaryDir files;
+        const auto sent = files.path() + "/sent";
+        menuCore(files.path(), "palm-tx");
+        if (QTest::currentTestFailed()) return;
+        auto commands = [&] {
+            QFile f(sent); if (!f.open(QIODevice::ReadOnly)) return QStringList();
+            return QString::fromUtf8(f.readAll()).split('\n', Qt::SkipEmptyParts);
+        };
+        MainWindow window(files.path() + "/core"); window.show(); window.openSession(managedSession("Live"), true);
+        QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QAction*>("machineSave")->isEnabled(), 5000);
+        window.findChild<PanelHost*>("panelHost")->open(2);
+        auto* smooth = window.findChild<QCheckBox*>("runningSmooth");
+        QTRY_VERIFY_WITH_TIMEOUT(smooth->isEnabled(), 4000);
+        smooth->click();
+        QTRY_VERIFY_WITH_TIMEOUT(commands().contains("display smooth=on"), 4000);
+        frondSessions::Preferences kept;
+        QVERIFY(frondSessions::readPreferences(managedSession("Live"), &kept));
+        QVERIFY(kept.smooth);
+        QTRY_VERIFY_WITH_TIMEOUT(smooth->isEnabled(), 4000);
+        smooth->click();
+        QTRY_VERIFY_WITH_TIMEOUT(commands().contains("display smooth=off"), 4000);
+        QVERIFY(frondSessions::readPreferences(managedSession("Live"), &kept) && !kept.smooth);
+        // Contrast's own bookkeeping isn't touched by the others.
+        QVERIFY(!kept.contrastSet);
     }
     // The arrow keys walk every row of the Machine menu, the red Hard reset… row included, both ways.
     void machineMenuKeys() {
@@ -2354,10 +2491,27 @@ for line in s.makefile('rb'):
         choice = "Erase";
         menuAction("machineHardReset")->trigger();
         want << "hard-reset "; expect(want);
-        // Hide bar leaves the menu.
+        // Hide bar leaves the thin strip with its tab, and the machine remembers it.
+        auto* handle = window.findChild<BarHandle*>("barHandle");
+        QVERIFY(!handle->isVisible());
+        menuAction("machineHideBar")->trigger();
+        QVERIFY(!bar->isVisible() && handle->isVisible());
+        QCOMPARE(handle->height(), 8);
+        QCOMPARE(menuAction("machineHideBar")->text(), QString("Show bar\tCtrl+B"));
+        {
+            frondSessions::Preferences kept;
+            QVERIFY(frondSessions::readPreferences(managedSession("Menu"), &kept));
+            QVERIFY(!kept.barShown);
+        }
+        QTest::mouseClick(handle, Qt::LeftButton);
+        QVERIFY(bar->isVisible() && !handle->isVisible());
+        {
+            frondSessions::Preferences kept;
+            QVERIFY(frondSessions::readPreferences(managedSession("Menu"), &kept));
+            QVERIFY(kept.barShown);
+        }
         menuAction("machineHideBar")->trigger();
         QVERIFY(!bar->isVisible());
-        QCOMPARE(menuAction("machineHideBar")->text(), QString("Show bar"));
         menuAction("machineHideBar")->trigger();
         QVERIFY(bar->isVisible());
         QVERIFY(!menuAction("machineFullScreen")->isEnabled());

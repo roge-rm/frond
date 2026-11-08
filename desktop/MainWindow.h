@@ -11,6 +11,7 @@
 #include "LinkClient.h"
 #include "RunningBar.h"
 #include "RunningPanels.h"
+#include "PalmView.h"
 #include <QTemporaryDir>
 class ConnectionsWindow;
 class CardsWindow;
@@ -116,6 +117,12 @@ class MainWindow : public QMainWindow {
     void togglePanel(int page);
     void panelChanged(int page);
     void fitWindow();
+    // The core's reply to window-id: embeds the Palm, or keeps its own window.
+    void embedReply(bool ok, const QString& message);
+    void afterDevice();
+    void setBarShown(bool shown);
+    void setPanelOpen(bool open);
+    void liveDisplay(const QString& what);
     void listApps();
     void databasesReply(bool ok, const QString& message);
     void deleteApplication(const QString& name);
@@ -139,6 +146,17 @@ class MainWindow : public QMainWindow {
     PanelHost* panels{nullptr};
     AppsPanel* appsPanel{nullptr};
     QWidget* drivers{nullptr};  // hidden home of the controls the bar and the menu use
+    QWidget* runArea{nullptr};  // the handle strip, the Palm and the panels
+    PalmHolder* palmHolder{nullptr};
+    BarHandle* barHandle{nullptr};
+    bool embedWanted{false}, embedTried{false}, embedded{false};
+    bool panelWasOpen{false};
+    int baseWidth{0};  // the window's width with no panel open, while the Palm is embedded
+    bool contrastPending{false};
+    QCheckBox *smoothToggle{nullptr}, *keyboardShow{nullptr};
+    QSlider* sizeSlider{nullptr};
+    QComboBox *jogBox{nullptr}, *speedBox{nullptr};
+    QLabel *sizeLabel{nullptr}, *jogLabel{nullptr}, *speedLabel{nullptr};
     QByteArray listGeometry;    // the list window's geometry while a machine runs
     std::vector<runningRules::Database> knownDatabases;
     bool appsStale{false};      // the Applications list needs a fresh db-list

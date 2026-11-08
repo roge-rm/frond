@@ -61,6 +61,8 @@ struct Preferences {
     // False for settings from before these were kept per machine: they take the old global
     // choices once, on the machine's next start.
     bool peripheralsSet{false};
+    // The running bar is shown over the Palm; Hide bar turns it off for this machine.
+    bool barShown{true};
 };
 inline QString preferencesPath(const QString& path) { return path + ".settings.json"; }
 inline bool readPreferences(const QString& path, Preferences* result) {
@@ -76,6 +78,7 @@ inline bool readPreferences(const QString& path, Preferences* result) {
                object.value("engine").toString() == QLatin1String("fast"),
                std::clamp(object.value("contrast").toInt(50), 0, 100),
                object.value("speed").toString() == QLatin1String("uncapped"), object.contains("contrast")};
+    result->barShown = object.value("barShown").toBool(true);
     if (object.value("infrared").isString()) {
         result->infrared = object.value("infrared").toString();
         result->serial = object.value("serial").toString("off");
@@ -93,6 +96,7 @@ inline QString writePreferences(const QString& path, const Preferences& prefs) {
                              {"showKeyboard", prefs.showKeyboard}, {"jogControls", jogControlsName(prefs.jogControls)},
                              {"showJogControls", prefs.jogControls != JogControls::hidden},
                              {"engine", prefs.fastEngine ? "fast" : "exact"}, {"speed", prefs.uncapped ? "uncapped" : "original"}};
+    if (!prefs.barShown) object.insert("barShown", false);
     if (prefs.contrastSet) object.insert("contrast", std::clamp(prefs.contrast, 0, 100));
     if (prefs.peripheralsSet) {
         object.insert("infrared", prefs.infrared);

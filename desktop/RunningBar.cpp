@@ -111,6 +111,12 @@ RunningBar::RunningBar(QWidget* parent) : QToolBar(parent) {
             connect(action, &QAction::triggered, this, [this, id] { emit chosen(id); });
         }
         for (const auto& pair : names) if (pair.first == row.id) action->setObjectName(pair.second);
+        // The keys only show beside the row, as text after a tab. The window's own shortcuts do the
+        // work, so no row owns a key and none can fire twice or clash.
+        for (const auto& key : runningRules::shortcutKeys())
+            if (runningRules::rowFor(key.what) == row.id)
+                keyText[row.id] = QKeySequence(QString::fromLatin1(key.keys)).toString(QKeySequence::NativeText);
+        if (!keyText[row.id].isEmpty() && row.id != Id::Network) action->setText(row.label + '\t' + keyText[row.id]);
         actions[row.id] = action;
     }
     for (auto id : {Id::Hold, Id::Keyboard, Id::Microphone}) actions[id]->setCheckable(true);
@@ -201,7 +207,7 @@ void RunningBar::apply(const runningRules::Traits& traits, const runningRules::S
     for (const auto& row : runningRules::rows(traits, state)) {
         auto* action = actions[row.id];
         action->setVisible(true);
-        action->setText(row.label);
+        action->setText(keyText[row.id].isEmpty() ? row.label : row.label + '\t' + keyText[row.id]);
         action->setEnabled(row.enabled);
         if (row.on) action->setChecked(*row.on);
         action->setToolTip(row.value);

@@ -160,7 +160,7 @@
 +#endif  // _SHORTCUT_KEYS_H_
 --- /dev/null
 +++ b/src/uarm/native/WindowId.h
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,36 @@
 +#ifndef _WINDOW_ID_H_
 +#define _WINDOW_ID_H_
 +
@@ -170,8 +170,7 @@
 +#include <string>
 +
 +// X11's own headers define names (Bool, Status, None) that clash with the 68k core's, so the
-+// window is read without them: the x11 member of SDL's syswm union is {Display*, int screen,
-+// Window window}.
++// window is read without them: the x11 member of SDL's syswm union is {Display*, Window window}.
 +#ifdef SDL_VIDEO_DRIVER_X11
 +#undef SDL_VIDEO_DRIVER_X11
 +#define FROND_RESTORE_X11_DRIVER
@@ -190,7 +189,6 @@
 +    if (!window || !SDL_GetWindowWMInfo(window, &info) || info.subsystem != SDL_SYSWM_X11) return {};
 +    struct X11Info {
 +        void* display;
-+        int screen;
 +        unsigned long window;
 +    } x11;
 +    static_assert(sizeof(info.info) >= sizeof(X11Info), "syswm union");

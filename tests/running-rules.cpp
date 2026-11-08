@@ -190,6 +190,36 @@ class RunningRulesTest : public QObject {
         // The core's name is the Qt sequence in lower case.
         for (const auto& key : shortcutKeys()) QCOMPARE(QString(key.keys).toLower(), QString(key.name));
     }
+    // Rows that show a key beside them; every key that has a row is found, and Install, Quit and
+    // the panels' keys without a row are not.
+    void rowKeys() {
+        QCOMPARE(*rowFor(Shortcut::Save), Id::Save);
+        QCOMPARE(*rowFor(Shortcut::HideBar), Id::HideBar);
+        QCOMPARE(*rowFor(Shortcut::FullScreen), Id::FullScreen);
+        QVERIFY(!rowFor(Shortcut::Install) && !rowFor(Shortcut::Quit) && !rowFor(Shortcut::Sound) && !rowFor(Shortcut::Card));
+    }
+    void embedRules() {
+        QVERIFY(embedPossible("xcb", false));
+        QVERIFY(!embedPossible("offscreen", false) && !embedPossible("wayland", false) && !embedPossible("", false));
+        QVERIFY(embedPossible("offscreen", true));
+        QCOMPARE(parseWindowId("x11 12345"), quint64(12345));
+        QCOMPARE(parseWindowId("x11 12345\n"), quint64(12345));
+        QCOMPARE(parseWindowId("x11 140724472224432"), quint64(140724472224432ULL));
+        QCOMPARE(parseWindowId("unsupported"), quint64(0));
+        QCOMPARE(parseWindowId("x11"), quint64(0));
+        QCOMPARE(parseWindowId("x11 abc"), quint64(0));
+        QCOMPARE(parseWindowId("wayland 5"), quint64(0));
+        QCOMPARE(parseWindowId(""), quint64(0));
+    }
+    // A panel opens at the right of the Palm, so the Palm keeps its width; Size scales the Palm.
+    void windowAndPanelSizes() {
+        QCOMPARE(windowWidth(320, false), 320);
+        QCOMPARE(windowWidth(320, true), 320 + panelWidth);
+        QCOMPARE(scaledPalm({320, 564}, 4, 8), QSize(640, 1128));
+        QCOMPARE(scaledPalm({320, 564}, 8, 4), QSize(160, 282));
+        QCOMPARE(scaledPalm({320, 564}, 4, 5), QSize(400, 705));
+        QCOMPARE(scaledPalm({320, 564}, 0, 5), QSize(320, 564));
+    }
 };
 QTEST_APPLESS_MAIN(RunningRulesTest)
 #include "running-rules.moc"

@@ -831,6 +831,15 @@ class SessionStoreTest : public QObject {
         prefs.fastEngine = false;
         QVERIFY(writePreferences(one, prefs).isEmpty());
         QVERIFY(readPreferences(one, &loaded) && !loaded.fastEngine);
+        // The bar is shown unless this machine hid it.
+        QVERIFY(loaded.barShown);
+        prefs.barShown = false;
+        QVERIFY(writePreferences(one, prefs).isEmpty());
+        QVERIFY(readPreferences(one, &loaded) && !loaded.barShown);
+        prefs.barShown = true;
+        QVERIFY(writePreferences(one, prefs).isEmpty());
+        QVERIFY(readPreferences(one, &loaded) && loaded.barShown);
+        { QFile saved(preferencesPath(one)); QVERIFY(saved.open(QIODevice::ReadOnly)); QVERIFY(!saved.readAll().contains("barShown")); }
         QVERIFY(rename(folder(), describe(one), "Moved").isEmpty());
         const auto moved = filePath(folder(), "Moved");
         QVERIFY(!QFileInfo::exists(preferencesPath(one)));

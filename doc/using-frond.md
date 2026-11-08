@@ -45,7 +45,7 @@ On Android the controls sit in a bar along the top of the running machine. Taps 
 
 ### Linux bar and panels
 
-On Linux the bar sits at the top of Frond's window while a machine runs, above a Machine menu with the same rows as ⋮ on Android (Hard reset… is red). The Palm stays in its own window. Applications, Card, Display and Connections open as a panel under the bar and the window grows to fit it. Ctrl+1 to Ctrl+4 open and close them, and so does the bar button or the panel's ✕.
+On Linux the bar sits at the top of Frond's window while a machine runs, above a Machine menu with the same rows as ⋮ on Android (Hard reset… is red). The Palm is inside Frond's window under the bar (on X11, and on Wayland through XWayland). Applications, Card, Display and Connections open as a panel at the right of the Palm and the window grows to the right, so the Palm keeps its size. Hide bar leaves a thin strip with a tab at the top, and the choice is remembered for each machine. The Machine menu shows each row's keys. Display has Size, Smooth pixels, Show keyboard and Jog controls (TG50) and Speed (Palm IIIx), which change while the Palm runs. Keys go to the Palm while the pointer is over it and to Frond's window and panel elsewhere. If the Palm's window can't be embedded, it stays in its own window, with the bar and the panels in Frond's window. Ctrl+1 to Ctrl+4 open and close them, and so does the bar button or the panel's ✕.
 
 Shortcuts work in the Palm window and in Frond's: Ctrl+S Save, Ctrl+Shift+S Save a copy, Ctrl+W Save and Stop, Ctrl+I Install, Ctrl+M Sound, Ctrl+B Hide bar, Ctrl+L Emulator log, Ctrl+R Reset, F12 Screenshot, Ctrl+Q Quit. With the infrared keyboard attached the Ctrl keys go to the Palm, and only F11 and F12 still come back to Frond.
 

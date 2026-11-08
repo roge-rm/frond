@@ -37,6 +37,7 @@
 #include <QShortcut>
 #include <QGuiApplication>
 #include <QScreen>
+#include <QWindow>
 #include <QScrollArea>
 #include <QSpinBox>
 #include <QSlider>
@@ -114,8 +115,25 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     });
     // The running controls sit in four panels under the bar. The ones the bar or the Machine menu
     // already offers are made here, hidden, so each has one handler.
-    panels = new PanelHost(outer);
-    outerLayout->addWidget(panels);
+    // Running: a strip for the hidden bar over the Palm and its panel side by side.
+    runArea = new QWidget(outer);
+    runArea->setObjectName("runArea");
+    auto* runLayout = new QVBoxLayout(runArea);
+    runLayout->setContentsMargins(0, 0, 0, 0); runLayout->setSpacing(0);
+    barHandle = new BarHandle(runArea);
+    runLayout->addWidget(barHandle);
+    auto* body = new QHBoxLayout;
+    body->setSpacing(0);
+    palmHolder = new PalmHolder(runArea);
+    palmHolder->hide();
+    panels = new PanelHost(runArea);
+    body->addWidget(palmHolder, 1);
+    body->addWidget(panels);
+    runLayout->addLayout(body, 1);
+    outerLayout->addWidget(runArea, 1);
+    runArea->hide();
+    barHandle->hide();
+    connect(barHandle, &BarHandle::clicked, this, [this] { setBarShown(true); });
     drivers = new QWidget(this);
     drivers->hide();
     auto* root = drivers;
@@ -347,8 +365,41 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     runningButtons << contrast;
     connect(contrast, &QSlider::valueChanged, this, [this](int value) {
         if (client.available() && frondFirmware::runs68k(runningDevice) && value != runningPreferences.contrast)
-            send("display", "contrast=" + QString::number(value));
+            { contrastPending = true; send("display", "contrast=" + QString::number(value)); }
     });
+    // Settings the core changes while it runs. Each is kept in the machine settings first.
+    sizeLabel = label(tr("Size"), 3, displayGrid);
+    sizeSlider = new QSlider(Qt::Horizontal, root);
+    sizeSlider->setObjectName("runningSize");
+    sizeSlider->setRange(4, 8);
+    sizeSlider->setPageStep(1);
+    sizeSlider->setTracking(false);
+    displayGrid->addWidget(sizeSlider, 3, 1, 1, 2);
+    smoothToggle = new QCheckBox(tr("Smooth pixels"), root);
+    smoothToggle->setObjectName("runningSmooth");
+    displayGrid->addWidget(smoothToggle, 4, 0, 1, 3);
+    keyboardShow = new QCheckBox(tr("Show keyboard"), root);
+    keyboardShow->setObjectName("runningShowKeyboard");
+    displayGrid->addWidget(keyboardShow, 5, 0, 1, 3);
+    jogLabel = label(tr("Jog controls"), 6, displayGrid);
+    jogBox = new QComboBox(root);
+    jogBox->setObjectName("runningJogControls");
+    jogBox->addItem(tr("Hidden"), int(frondSessions::JogControls::hidden));
+    jogBox->addItem(tr("Left of screen"), int(frondSessions::JogControls::screen));
+    jogBox->addItem(tr("Left of keyboard"), int(frondSessions::JogControls::keyboard));
+    displayGrid->addWidget(jogBox, 6, 1, 1, 2);
+    speedLabel = label(tr("Speed"), 7, displayGrid);
+    speedBox = new QComboBox(root);
+    speedBox->setObjectName("runningSpeed");
+    speedBox->addItem(tr("Original"), false);
+    speedBox->addItem(tr("Uncapped"), true);
+    displayGrid->addWidget(speedBox, 7, 1, 1, 2);
+    for (auto* w : std::initializer_list<QWidget*>{sizeSlider, smoothToggle, keyboardShow, jogBox, speedBox}) runningButtons << w;
+    connect(sizeSlider, &QSlider::valueChanged, this, [this](int value) { liveDisplay("size"); (void)value; });
+    connect(smoothToggle, &QCheckBox::clicked, this, [this] { liveDisplay("smooth"); });
+    connect(keyboardShow, &QCheckBox::clicked, this, [this] { liveDisplay("keyboard"); });
+    connect(jogBox, qOverload<int>(&QComboBox::activated), this, [this] { liveDisplay("jog"); });
+    connect(speedBox, qOverload<int>(&QComboBox::activated), this, [this] { liveDisplay("speed"); });
     auto* reset = button(tr("Reset"), "reset");
     resetButton = reset;
     auto* rotate = button(tr("Rotate"), "rotate");
@@ -420,9 +471,9 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     forceButton = new QPushButton(tr("Force Stop…"), root);
     forceButton->setObjectName("forceStop");
     forceButton->hide();
-    outerLayout->setStretchFactor(panels, 1);
     setCentralWidget(outer);
     setAcceptDrops(true);
+    connect(panels, &PanelHost::aboutToChange, this, [this](int page) { if (embedded && page >= 0 && !panelWasOpen) baseWidth = width(); });
     connect(panels, &PanelHost::changed, this, &MainWindow::panelChanged);
     // The same keys the Palm window sends back as shortcut events. F11 waits for full screen and
     // Quit is the File menu's.
@@ -517,6 +568,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (memoryStickFiles) memoryStickFiles->reject();
         if (cardProgress) { cardProgress->hide(); cardProgress->deleteLater(); cardProgress = nullptr; }
         holdKnown = holdOn = false;
+        palmHolder->release(); embedded = embedWanted = embedTried = panelWasOpen = false;
         appsStale = false; deleteApp = {}; knownDatabases.clear(); appsPanel->setDatabases({});
         microphoneArmed = false; microphoneState->clear();
         installQueue.clear(); installTotal = 0; installFailed.clear(); installHint = 0;
@@ -529,6 +581,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
                 log->appendPlainText(error);
         finalSaved = false; linkedWatcher.reset(); linkedWatcherId.clear(); linkedHolder.clear(); cardMove = {};
         sdKnown = protectionKnown = false; showSerial({}); loadSerialSettings(); showUsb({}); loadUsbSettings(); showIrda({}); link.setSticky("ir", {}); irdaLinkText.clear(); loadIrdaSettings(); showBluetooth({}); loadBluetoothSettings(); sessionLock.reset(); forceButton->hide(); runningBar->setForceStop(false); refreshSessions();
+        refresh();
         if (closeAfterStop) { allowClose = true; close(); }
         else notify(tr("Stopped."));
     });
@@ -563,6 +616,12 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         busy = false; forceButton->hide(); runningBar->setForceStop(false); refresh();
         QTimer::singleShot(0, this, [this] { if (appsStale) listApps(); });
         if (command == "db-list") { databasesReply(ok, message); return; }
+        if (command == "window-id") {
+            embedReply(ok, message);
+            if (stopping) save();
+            else afterDevice();
+            return;
+        }
         if (deleteApp.active && !stopping && command == "delete-db") { deleteReply(ok, message); return; }
         if (command == "input-replay") {
             replayFiles.reset();
@@ -592,7 +651,8 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             if (command == "serial-mode") showSerial("off " + message);  // the core is now off
             if (command == "usb-mode") showUsb("off " + message);
             if(command=="irda-mode")showIrda("off error: "+message);
-            if (command == "display") { const QSignalBlocker blocked(contrast); contrast->setValue(runningPreferences.contrast); }
+            if (command == "display" && contrastPending) { const QSignalBlocker blocked(contrast); contrast->setValue(runningPreferences.contrast); }
+            if (command == "display") { contrastPending = false; liveDisplay({}); }
             if (stopping) {
                 if (command == "save" && savingPath == sessionPath) askStop(message);
                 else save();
@@ -616,8 +676,8 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (command == "device-state") {
             showDevice(message);
             if (stopping) save();
-            else send(frondFirmware::profile(runningDevice).frontend.holdPresent ? "hold-state" :
-                storageSupported() ? cardCommand("state") : "network-state");
+            else if (embedWanted && !embedTried) { embedTried = true; send("window-id"); }
+            else afterDevice();
             return;
         }
         if (command == "hold-state") {
@@ -664,7 +724,8 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             }
         }
         if (command=="keyboard-state" || command=="keyboard-attach") keyboard->setChecked(message=="attached");
-        if (command == "display") {
+        if (command == "display" && contrastPending) {
+            contrastPending = false;
             runningPreferences.contrast = contrast->value();
             runningPreferences.contrastSet = true;
             if (const auto error = frondSessions::writePreferences(sessionPath, runningPreferences); !error.isEmpty()) failure(error);
@@ -741,9 +802,13 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
 void MainWindow::refresh() {
     const bool running = client.running();
     home->setVisible(!running);
+    runArea->setVisible(running);
+    palmHolder->setVisible(running && embedded);
+    barHandle->setVisible(running && !runningBar->barShown());
     statusBar()->setVisible(!running);
     if (running != machineMenuShown) {
         machineMenuShown = running;
+        centralWidget()->layout()->setContentsMargins(running ? QMargins() : QMargins(9, 9, 9, 9));
         if (running) {
             menuBar()->insertMenu(helpMenu->menuAction(), runningBar->menu());
             listGeometry = saveGeometry();
@@ -752,7 +817,14 @@ void MainWindow::refresh() {
             menuBar()->removeAction(runningBar->menu()->menuAction());
             runningBar->setBarShown(true);
             panels->open(-1);
-            if (!listGeometry.isEmpty()) restoreGeometry(listGeometry);
+            // The panel's and the Palm's minimum sizes go with them once the layout settles.
+            panels->setMinimumWidth(0); panels->setMaximumWidth(QWIDGETSIZE_MAX);
+            if (layout()) layout()->activate();
+            centralWidget()->layout()->activate();
+            if (!listGeometry.isEmpty()) {
+                restoreGeometry(listGeometry);
+                QTimer::singleShot(0, this, [this, geometry = listGeometry] { if (!client.running()) restoreGeometry(geometry); });
+            }
             listGeometry.clear();
         }
         if (running) fitWindow();
@@ -791,6 +863,10 @@ void MainWindow::refresh() {
     shown(!m68k || caps.microphone, {microphoneLabel, microphoneToggle});
     if (m68k) for (auto* state : {usbState, bluetoothState}) state->setVisible(false);
     shown(m68k, {contrastLabel, contrast});
+    shown(embedded, {sizeLabel, sizeSlider});
+    shown(currentDevice() == frondFirmware::deviceFromId("sony-clie-tg50"), {keyboardShow, jogLabel, jogBox});
+    shown(m68k, {speedLabel, speedBox});
+    liveDisplay({});
     shown(frondFirmware::hasHotSyncButton(currentDevice()), {hotSyncButton});
     shown(!m68k, {rotateButton});
     contrast->setEnabled(enabled);
@@ -887,18 +963,124 @@ void MainWindow::togglePanel(int page) { panels->open(panels->current() == page 
 void MainWindow::panelChanged(int page) {
     runningBar->setOpenPanel(page);
     if (page == 0) { appsStale = true; listApps(); }
+    setPanelOpen(page >= 0);
+}
+// Embedded, the panel opens at the right of the Palm and the window grows by its width. Without
+// the embedding the window is as wide as a panel needs and as tall as the bar and the open panel.
+void MainWindow::setPanelOpen(bool open) {
+    const bool changed = open != panelWasOpen;
+    panelWasOpen = open;
+    if (embedded) {
+        panels->setFixedWidth(runningRules::panelWidth);
+        // Showing the panel can already stretch the window to the layout's minimum, so opening
+        // starts from the width the window had without it.
+        if (changed && client.running() && !isMaximized() && !isFullScreen()) {
+            // The layout's minimum width drops with the panel; settle it before shrinking.
+            runArea->layout()->invalidate();
+            centralWidget()->layout()->invalidate();
+            if (layout()) { layout()->invalidate(); layout()->activate(); }
+            if (open) resize(runningRules::windowWidth(baseWidth, true), height());
+            else {
+                // The layout's minimum width settles after the panel is gone.
+                const int target = std::max(1, width() - runningRules::panelWidth);
+                QTimer::singleShot(0, this, [this, target] {
+                    if (client.running() && embedded && !panelWasOpen && !isMaximized() && !isFullScreen()) resize(target, height());
+                });
+            }
+        }
+        return;
+    }
     fitWindow();
 }
-// Makes the window as wide as the panels need and as tall as the bar and the open panel, so the
-// Palm window next to it keeps its size.
 void MainWindow::fitWindow() {
-    if (!client.running() || isMaximized() || isFullScreen()) return;
+    if (!client.running() || isMaximized() || isFullScreen() || embedded) return;
     panels->setMinimumHeight(panels->isVisibleTo(this) ? 420 : 0);
     if (layout()) layout()->activate();
     centralWidget()->layout()->activate();
     resize(480, 1);
     // The layout's minimum height settles after the panel is gone.
-    QTimer::singleShot(0, this, [this] { if (client.running() && !isMaximized() && !isFullScreen()) resize(480, 1); });
+    QTimer::singleShot(0, this, [this] { if (client.running() && !isMaximized() && !isFullScreen() && !embedded) resize(480, 1); });
+}
+// Shows or hides the bar, keeps the choice in the machine's settings and keeps the Palm's size.
+void MainWindow::setBarShown(bool shown) {
+    if (shown == runningBar->barShown()) return;
+    runningBar->setBarShown(shown);
+    barHandle->setVisible(client.running() && !shown);
+    runningPreferences.barShown = shown;
+    if (!sessionPath.isEmpty() && client.running())
+        if (const auto error = frondSessions::writePreferences(sessionPath, runningPreferences); !error.isEmpty()) failure(error);
+    if (embedded && !isMaximized() && !isFullScreen()) {
+        const int change = runningBar->height() - runningRules::handleHeight;
+        resize(width(), height() + (shown ? change : -change));
+    }
+    refresh();
+}
+// The window-id reply. An X11 id is wrapped and shown under the bar; anything else leaves the
+// core's own window and the bar-only window as they are.
+void MainWindow::embedReply(bool ok, const QString& message) {
+    const auto id = ok ? runningRules::parseWindowId(message) : 0;
+    embedded = id && palmHolder->embed(id);
+    if (!embedded) {
+        log->appendPlainText(tr("The Palm stays in its own window. %1").arg(ok ? message : QString()));
+        return;
+    }
+    panels->setMinimumHeight(0);
+    panels->setFixedWidth(runningRules::panelWidth);
+    palmHolder->show();
+    if (!isMaximized() && !isFullScreen()) {
+        if (layout()) layout()->activate();
+        centralWidget()->layout()->activate();
+        auto size = sizeHint().expandedTo(minimumSizeHint());
+        const auto* screen = windowHandle() ? windowHandle()->screen() : QGuiApplication::primaryScreen();
+        if (screen && !screen->availableGeometry().isEmpty()) size = size.boundedTo(screen->availableGeometry().size());
+        resize(size);
+    }
+    refresh();
+}
+// What follows the device name: the first state questions, in the order the window needs them.
+// A display setting changed in the panel: kept in the machine settings, then sent to the core. With
+// nothing named it only shows the settings in the controls.
+void MainWindow::liveDisplay(const QString& what) {
+    if (what.isEmpty() || !client.available()) {
+        const QSignalBlocker a(sizeSlider), b(smoothToggle), c(keyboardShow), d(jogBox), e(speedBox);
+        if (!sizeSlider->isSliderDown()) sizeSlider->setValue(runningPreferences.scale);
+        sizeLabel->setText(tr("Size: %1×").arg(sizeSlider->value() / 4.0));
+        smoothToggle->setChecked(runningPreferences.smooth);
+        keyboardShow->setChecked(runningPreferences.showKeyboard);
+        jogBox->setCurrentIndex(std::max(0, jogBox->findData(int(runningPreferences.jogControls))));
+        speedBox->setCurrentIndex(runningPreferences.uncapped ? 1 : 0);
+        return;
+    }
+    auto prefs = runningPreferences;
+    QString command = "display", argument;
+    const auto onOff = [](bool on) { return on ? QStringLiteral("on") : QStringLiteral("off"); };
+    if (what == "size") prefs.scale = sizeSlider->value();
+    else if (what == "smooth") { prefs.smooth = smoothToggle->isChecked(); argument = "smooth=" + onOff(prefs.smooth); }
+    else if (what == "keyboard") { prefs.showKeyboard = keyboardShow->isChecked(); argument = "keyboard=" + onOff(prefs.showKeyboard); }
+    else if (what == "jog") {
+        prefs.jogControls = frondSessions::JogControls(jogBox->currentData().toInt());
+        argument = "jog=" + frondSessions::jogControlsName(prefs.jogControls);
+    } else if (what == "speed") {
+        prefs.uncapped = speedBox->currentData().toBool();
+        command = "speed"; argument = prefs.uncapped ? "uncapped" : "original";
+    }
+    if (const auto error = frondSessions::writePreferences(sessionPath, prefs); !error.isEmpty()) { liveDisplay({}); return failure(error); }
+    const int oldScale = runningPreferences.scale;
+    runningPreferences = prefs;
+    if (what == "size") {
+        // The core follows the window, so the window is what changes size.
+        if (embedded && !isMaximized() && !isFullScreen() && oldScale != prefs.scale) {
+            const auto now = palmHolder->size(), next = runningRules::scaledPalm(now, oldScale, prefs.scale);
+            resize(width() + next.width() - now.width(), height() + next.height() - now.height());
+        }
+        sizeLabel->setText(tr("Size: %1×").arg(prefs.scale / 4.0));
+        return;
+    }
+    send(command, argument);
+}
+void MainWindow::afterDevice() {
+    send(frondFirmware::profile(runningDevice).frontend.holdPresent ? "hold-state" :
+         storageSupported() ? cardCommand("state") : "network-state");
 }
 void MainWindow::barChosen(runningRules::Id id) {
     using runningRules::Id;
@@ -910,7 +1092,7 @@ void MainWindow::barChosen(runningRules::Id id) {
         case Id::Display: panels->open(2); break;
         case Id::Connections: panels->open(3); break;
         case Id::Screenshot: screenshot(); break;
-        case Id::HideBar: runningBar->setBarShown(!runningBar->barShown()); refresh(); break;
+        case Id::HideBar: setBarShown(!runningBar->barShown()); break;
         case Id::Save: saveButton->click(); break;
         case Id::SaveCopy: saveCopyButton->click(); break;
         case Id::Log: logButton->click(); break;
@@ -1441,6 +1623,11 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     }
     // frond-68k's scale is screen pixels per Palm pixel; its 160-pixel LCD takes twice the ARM value.
     arguments << "--window-scale" << QString::number(runningPreferences.scale / (m68k ? 2.0 : 4.0));
+    // The Palm's window follows Frond's window when it is embedded.
+    embedWanted = runningRules::embedPossible(QGuiApplication::platformName(), qEnvironmentVariableIsSet("FROND_TRY_EMBED"));
+    embedTried = embedded = false;
+    if (embedWanted) arguments << "--window-fit" << "whole";
+    runningBar->setBarShown(runningPreferences.barShown);
     if (runningPreferences.smooth) arguments << "--smooth-lcd";
     if (m68k) {
         if (runningPreferences.contrastSet) arguments << "--contrast" << QString::number(runningPreferences.contrast);

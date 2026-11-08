@@ -60,6 +60,7 @@ void PanelHost::setTitle(int page, const QString& text) {
 void PanelHost::open(int page) {
     if (page < 0 || page >= pages->count()) page = -1;
     if (page == index) return;
+    emit aboutToChange(page);
     index = page;
     if (page >= 0) {
         pages->setCurrentIndex(page);

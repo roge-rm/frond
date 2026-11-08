@@ -21,6 +21,7 @@ class PanelHost : public QFrame {
     int current() const { return index; }
     void setTitle(int page, const QString& title);
  signals:
+    void aboutToChange(int index);  // before the panel is shown or hidden
     void changed(int index);
  private:
     QLabel* title;

@@ -36,6 +36,7 @@ class RunningBar : public QToolBar {
     QLabel *nameLabel, *subtitleLabel, *statusLabel;
     QTimer* statusTimer;
     std::map<runningRules::Id, QAction*> actions;
+    std::map<runningRules::Id, QString> keyText;  // the keys shown beside a row
     QAction *stopAction, *applicationsAction, *cardAction, *soundAction, *powerAction, *keyboardAction, *forceAction;
     bool shown{true}, wantVisible{false};
 };
