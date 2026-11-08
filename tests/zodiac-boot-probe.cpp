@@ -10,7 +10,8 @@
 #include "patch_dispatch.h"
 #include "system_state.h"
 
-static Imx1ProbeResult run(std::initializer_list<uint32_t> words, uint32_t steps = 100, bool fast = false) {
+static Imx1ProbeResult run(std::initializer_list<uint32_t> words, uint32_t steps = 100, bool fast = false,
+                             const Imx1ProbeOptions* options = nullptr) {
     std::vector<uint8_t> rom(words.size() * 4);
     size_t offset = 0;
     for (uint32_t w : words) {
@@ -18,7 +19,7 @@ static Imx1ProbeResult run(std::initializer_list<uint32_t> words, uint32_t steps
     }
     const auto original = rom;
     const auto r = imx1BootProbe(rom.data(), rom.size(), Imx1ProbeEntry::physicalFlash, steps,
-                                nullptr, nullptr, fast);
+                                nullptr, nullptr, fast, options);
     assert(rom == original);
     return r;
 }
@@ -51,6 +52,16 @@ int main() {
             assert(result.peripheralStatus == Imx1BootstrapAccess::sequence && !result.busAccesses);
             assert(!result.jitBlocks && !result.irqEntries && !result.fiqEntries);
         }
+    }
+
+    for (bool fast : {false,true}) {
+        const auto strict = run({0xee070f55,0xeafffffe},4,fast);
+        assert(strict.stop == Imx1ProbeStop::unsupportedCp15 && strict.trace.step == 0);
+        Imx1ProbeOptions compatibility;
+        compatibility.arm920IcacheIndexCompatibility = true;
+        const auto accepted = run({0xee070f55,0xeafffffe},4,fast,&compatibility);
+        assert(accepted.stop == Imx1ProbeStop::budget && accepted.trace.step == 3);
+        assert(accepted.registers[15] == 0x10000004 && accepted.registers[0] == 0);
     }
 
     // Cache maintenance with disabled caches, ARM920 control reset and first MMIO store.

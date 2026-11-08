@@ -36,6 +36,7 @@ struct Machine {
     void reset() {
         std::memset(ram, 0, bytes);
         cpuReset(cpu, code);
+        cpuArm920SetIcacheIndexCompatibility(cpu, false);
         cpuSetReg(cpu, ARM_REG_NUM_CPSR, 0xd3);
         for (unsigned i = 0; i < 15; ++i) cpuSetReg(cpu, i, 0);
         word(control, 0xee010f10); word(ttb, 0xee020f10); word(domain, 0xee030f10);
@@ -204,8 +205,9 @@ int main() {
         assert((cpuGetRegExternal(m.cpu, ARM_REG_NUM_CPSR) & 31) == ARM_SR_MODE_ABT);
     });
     // Reserved operand bits and unsupported encodings must reject before cache or MMU changes.
-    auto reject = [&](uint32_t instruction, uint32_t operand) {
+    auto reject = [&](uint32_t instruction, uint32_t operand, bool compatibility = false) {
         run([&](Machine& m) {
+            cpuArm920SetIcacheIndexCompatibility(m.cpu, compatibility);
             m.word(rejected, instruction);
             m.setup(0x5079);
             m.cp(0x2300, 0x55); m.cp(0x2320, 0x12345678);
@@ -242,6 +244,9 @@ int main() {
         reject(instruction ^ 0x00010000, 0); // CRn=6
         reject(instruction ^ 0x00000080, 0); // op2=6
     }
+    for (uint32_t operand : {0u, 0x20420520u, 0xffffffffu}) reject(0xee070f55, operand);
+    for (uint32_t instruction : {0xee170f55u,0xee270f55u,0xfe070f55u,0xee07ff55u,
+                                 0xee060f55u,0xee070f57u}) reject(instruction,0,true);
     reject(0xee010f10, 0x507c); // Dcache requires the MMU
     reject(0xee070f52, 0);      // Dcache allocation
     reject(0xee090f10, 0);      // Dcache lockdown

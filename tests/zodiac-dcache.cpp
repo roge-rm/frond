@@ -59,6 +59,7 @@ struct Machine {
     void reset(uint32_t attr = 0xc0e) {
         std::memset(ram.data(), 0, ram.size());
         cpuReset(cpu, ctl);
+        cpuArm920SetIcacheIndexCompatibility(cpu, false);
         cpuSetReg(cpu, ARM_REG_NUM_CPSR, 0xd3);
         for (unsigned i = 0; i < 15; ++i) cpuSetReg(cpu, i, 0);
         readLimit = writeLimit = bytes; deny = failedWalkRetry = false;
@@ -278,6 +279,32 @@ int main() {
         m.step(code); assert(cpuGetRegisters(m.cpu)[3] == 1); m.noData();
         m.cp(clean, data); assert(m.word(data) == 0x12345678);
         m.cp(lineI, code); m.step(code); assert(cpuGetRegisters(m.cpu)[3] == 2);
+    });
+    for (uint32_t operand : {0u, 1u, 0xffffffffu, 0x20420520u}) run(0xc0e, [&](Machine& m) {
+        constexpr uint32_t code = 0x18000, compatibility = 0x1380;
+        m.word(compatibility, 0xee070f55);
+        m.word(code, 0xe3a03001); m.word(code + 0x100, 0xe3a04001);
+        m.enable(0x507d); m.step(code); m.step(code + 0x100);
+        m.load(); m.store(data, 0x12345678); m.load(data + 0x100000);
+        m.word(code, 0xe3a03002); m.word(code + 0x100, 0xe3a04002);
+        m.word(table + 4, 0); m.accesses.clear();
+        cpuArm920SetIcacheIndexCompatibility(m.cpu, true);
+        cpuSetReg(m.cpu, 0, operand);
+        uint32_t regs[15]; std::memcpy(regs, cpuGetRegisters(m.cpu), sizeof(regs));
+        const auto cpsr = cpuGetRegExternal(m.cpu, ARM_REG_NUM_CPSR);
+        const auto spsr = cpuGetRegExternal(m.cpu, ARM_REG_NUM_SPSR);
+        m.step(compatibility);
+        assert(cpuGetRegisters(m.cpu)[15] == compatibility + 4);
+        assert(!std::memcmp(regs, cpuGetRegisters(m.cpu), sizeof(regs)));
+        assert(cpuGetRegExternal(m.cpu, ARM_REG_NUM_CPSR) == cpsr);
+        assert(cpuGetRegExternal(m.cpu, ARM_REG_NUM_SPSR) == spsr);
+        m.noData(); assert(m.word(data) == 0x11223344);
+        assert(m.load() == 0x12345678 && m.load(data + 0x100000) == 0x11223344);
+        m.step(code); m.step(code + 0x100);
+        assert(cpuGetRegisters(m.cpu)[3] == 2 && cpuGetRegisters(m.cpu)[4] == 2);
+        m.cp(clean, data); assert(m.word(data) == 0x12345678);
+        cpuArm920SetIcacheIndexCompatibility(m.cpu, false);
+        m.step(compatibility); m.und();
     });
     // A populated cache hit must still fail the current domain/permission checks.
     run(0xc0e, [](Machine& m) {

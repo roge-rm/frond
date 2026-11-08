@@ -108,7 +108,7 @@ static bool parseRtcTime(const char* text, Imx1RtcTime& time) {
 }
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::fprintf(stderr, "Usage: %s ROM [physical|reset|linked] [instruction-budget] [exact|fast] [--bootstrap-peripherals] [--trace=peripherals] [--frame-output=PATH] [--assume-mpll-settled] [--assume-spll-settled] [--assume-i2c-single-master] [--i2c-eeprom-image=PATH] [--asp-px1-input=high] [--asp-u-sample=WORD] [--rtc-initial-time=DAY:HH:MM:SS] [--cs4-port0-input=BYTE] [--cs5-reset-status-input=BYTE] [--graphics-profile=virtual5744-compatible-8mib] [--graphics-raw-axes=FIRST/SECOND] [--graphics-irq-connection=virtual-a13] [--gpio-a-input-masked=VALUE/MASK] [--gpio-a-input=VALUE] [--gpio-b-input=VALUE] [--gpio-d-input=VALUE] [--ram-mib=32|128]\n", argv[0]);
+        std::fprintf(stderr, "Usage: %s ROM [physical|reset|linked] [instruction-budget] [exact|fast] [--bootstrap-peripherals] [--trace=peripherals] [--arm920-icache-index-compatibility] [--frame-output=PATH] [--assume-mpll-settled] [--assume-spll-settled] [--assume-i2c-single-master] [--i2c-eeprom-image=PATH] [--asp-px1-input=high] [--asp-u-sample=WORD] [--rtc-initial-time=DAY:HH:MM:SS] [--cs4-port0-input=BYTE] [--cs5-reset-status-input=BYTE] [--graphics-profile=virtual5744-compatible-8mib] [--graphics-raw-axes=FIRST/SECOND] [--graphics-irq-connection=virtual-a13] [--gpio-a-input-masked=VALUE/MASK] [--gpio-a-input=VALUE] [--gpio-b-input=VALUE] [--gpio-d-input=VALUE] [--ram-mib=32|128]\n", argv[0]);
         return 1;
     }
     const char* engine = argc >= 5 ? argv[4] : "exact";
@@ -126,6 +126,10 @@ int main(int argc, char** argv) {
     options.busContext = options.cs5ResetContext = options.cs5ConfigurationContext = &options;
     for (int i = 5; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--bootstrap-peripherals")) options.bootstrapPeripherals = true;
+        else if (!std::strcmp(argv[i], "--arm920-icache-index-compatibility")) {
+            if (options.arm920IcacheIndexCompatibility) return 1;
+            options.arm920IcacheIndexCompatibility = true;
+        }
         else if (!std::strcmp(argv[i], "--trace=peripherals")) peripheralTrace = true;
         else if (!std::strncmp(argv[i], "--frame-output=", 15) && argv[i][15]) {
             if (options.frameObserver) return 1;
@@ -255,6 +259,8 @@ int main(int argc, char** argv) {
           !options.bootstrapPeripherals || options.gpioAInputKnown || (options.gpioAInputMask & 0x2000)))) {
         std::fprintf(stderr, "Virtual GPU IRQ requires the virtual graphics profile and bootstrap; GPIO-A13 is reserved, omit full-port GPIO-A input and exclude bit13 from its masked input\n"); return 1;
     }
+    if (options.arm920IcacheIndexCompatibility)
+        std::printf("ARM920T compatibility: undocumented c7,c5,2 flushes the whole I-cache; no silicon claim.\n");
     if (options.graphicsProfile != Imx1GraphicsProfile::strict &&
         (!options.bootstrapPeripherals || options.cs5ResetStatusInputKnown)) {
         std::fprintf(stderr, "Graphics profile requires --bootstrap-peripherals and owns CS5 reset state; omit --cs5-reset-status-input\n"); return 1;
