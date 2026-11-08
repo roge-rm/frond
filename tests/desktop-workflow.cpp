@@ -16,6 +16,7 @@
 #include <QProgressDialog>
 #include <QPlainTextEdit>
 #include <QStatusBar>
+#include "../uarm/MemoryStickImage.h"
 #include "Dialogs.h"
 #include "FirmwareStore.h"
 #include "SessionStore.h"
@@ -4813,12 +4814,15 @@ for line in s.makefile('rb'):
         const auto stick = out.path() + "/Stick";
         QVERIFY(QDir().mkpath(stick));
         QVERIFY(cardTool({"make", "ms", "4", out.path() + "/stick-v2.frondms"}));
-        QVERIFY(cardTool({"export", out.path() + "/stick-v2.frondms", stick + "/ms.frondms"}));
-        QFile::remove(out.path() + "/stick-v2.frondms");
         {
-            QFile f(stick + "/ms.frondms"); QVERIFY(f.open(QIODevice::ReadWrite));
-            auto h = f.read(64); putLe(h, 32, 3, 8); f.seek(0); f.write(h);
+            std::vector<uint8_t> physical;
+            QVERIFY(frondMs::readPhysical((out.path() + "/stick-v2.frondms").toStdString(), physical));
+            auto v1 = frondMs::encode(physical);
+            frondMs::putChanges(v1.data(), 3);
+            QFile f(stick + "/ms.frondms"); QVERIFY(f.open(QIODevice::WriteOnly));
+            QVERIFY(f.write(reinterpret_cast<const char*>(v1.data()), qint64(v1.size())) == qint64(v1.size()));
         }
+        QFile::remove(out.path() + "/stick-v2.frondms");
         TestMedia ms; ms.kind = 2; ms.logical = 4ull << 20; ms.physical = 4ull * 2048 * 521; ms.generation = 3;
         writeFrond(stick + "/Stick.frond", "sony-clie-tg50", {ms});
         QVERIFY2(frondSessions::importFile(cardsSessions(), stick, &name).isEmpty(), "classic stick import");
@@ -5251,7 +5255,7 @@ for line in s.makefile('rb'):
     // and Cancel leaves nothing.
     void importFolderCard() {
         cardsReset();
-        if (!frondFolderCard::mtoolsAvailable()) QSKIP("mtools isn't installed");
+        if (QStandardPaths::findExecutable("mcopy").isEmpty()) QSKIP("mtools isn't installed (the test reads the card back with it)");
         QTemporaryDir work(QDir::currentPath() + "/build/cards-folder-XXXXXX");
         const auto folder = work.filePath("My Music Collection");
         auto put = [&](const QString& rel, const QByteArray& bytes) {
@@ -5289,10 +5293,20 @@ for line in s.makefile('rb'):
         // Back out as an image, and the files read off it are the folder's.
         QVERIFY(frondCards::exportCardImage(cardsSessions(), card.id, work.filePath("out.img")).isEmpty());
         QDir().mkpath(work.filePath("back"));
-        QString mtoolsError;
-        QVERIFY2(frondFolderCard::runMtools("mcopy", work.filePath("out.img"), {"-s", "-m", "::/*", work.filePath("back")}, {}, 1).isEmpty(),
-                 "mcopy of the card failed");
+        {
+            // mtools, a reader of its own, at the partition `frond --card make` puts at sector 63.
+            QProcess mcopy;
+            auto env = QProcessEnvironment::systemEnvironment();
+            env.insert("MTOOLSRC", "/dev/null");
+            env.insert("LC_ALL", "C.UTF-8");
+            mcopy.setProcessEnvironment(env);
+            mcopy.start("mcopy", {"-i", work.filePath("out.img") + "@@" + QString::number(63 * 512), "-s", "-m", "::/*", work.filePath("back")});
+            QVERIFY(mcopy.waitForFinished(60000) && mcopy.exitCode() == 0);
+        }
         QVERIFY(frondFolderCard::sameTree(folder, work.filePath("back")));
+        // Dates come from the folder.
+        QCOMPARE(QFileInfo(work.filePath("back/Songs/Album One/notes.txt")).lastModified().toSecsSinceEpoch() / 2,
+                 QFileInfo(folder + "/Songs/Album One/notes.txt").lastModified().toSecsSinceEpoch() / 2);
         for (const auto& n : names) QVERIFY2(QFileInfo(work.filePath("back/" + n)).isFile(), qPrintable(n));
         // The short names are Android's FatImage ones (FolderCardTest checks the same).
         QCOMPARE(frondFolderCard::shortName("äpfel.txt", {}), QByteArray("_PFEL~1 TXT"));
@@ -5333,13 +5347,13 @@ for line in s.makefile('rb'):
                  QString("Cancelled."));
         nothingLeft();
         QCOMPARE(frondCards::importFolderCard(cardsSessions(), folder, "Stopped", "sd", 64,
-                                              [](qint64 d, qint64 t) { return d * 1000 / qMax<qint64>(t, 1) < 100; }),
+                                              [](qint64 d, qint64 t) { return d * 1000 / qMax<qint64>(t, 1) < 500; }),
                  QString("Cancelled."));
         nothingLeft();
         {
             SlowCardTool slow;
             QCOMPARE(frondCards::importFolderCard(cardsSessions(), folder, "Stopped", "sd", 64,
-                                                  [](qint64 d, qint64 t) { return d * 1000 / qMax<qint64>(t, 1) < 502; }),
+                                                  [](qint64 d, qint64 t) { return d * 1000 / qMax<qint64>(t, 1) < 2; }),
                      QString("Cancelled."));
             nothingLeft();
         }

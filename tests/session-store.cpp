@@ -99,6 +99,20 @@ static QByteArray tinyNand(quint64 generation, quint64 units = 2048, char fill =
     file.append(QByteArray(qsizetype(4 * chunks), '\0'));
     return file;
 }
+// tinyNand with real CRCs, as a saved machine leaves it.
+static QByteArray checkedNand(quint64 generation, quint64 units = 2048) {
+    const quint64 payload = units * 512, side = units * 16;
+    QByteArray stored(qsizetype(frondSdFile::storedBytes(payload, side)), '\0');
+    for (qsizetype i = 0; i < stored.size(); i++) stored[i] = char(i * 7 % 251);
+    frondSdFile::ChunkCrcs crcs;
+    crcs.add(reinterpret_cast<const uint8_t*>(stored.constData()), size_t(stored.size()));
+    QByteArray file(qsizetype(frondSdFile::headerBytes), '\0');
+    frondSdFile::makeHeaderV2(reinterpret_cast<uint8_t*>(file.data()), payload, generation, crcs.table(), side,
+                              frondSdFile::magicNand);
+    std::vector<uint8_t> table;
+    frondSdFile::tableBytes(crcs.table(), table);
+    return file + stored + QByteArray(reinterpret_cast<const char*>(table.data()), qsizetype(table.size()));
+}
 // .frondsd v2 of 512 bytes: header CRC, generation, table offset, 1 MiB chunks, one table entry.
 static QByteArray tinyFrondsdV2(quint64 generation) {
     QByteArray file("FRONDSD");
@@ -409,6 +423,42 @@ class SessionStoreTest : public QObject {
         QVERIFY(packableName("nand.frondnand"));
         QVERIFY(ignoredName("nand.frondnand.journal-3") && ignoredName(".x.frondnand.tmp-abc"));
         QVERIFY(!packableName("nand.frondnand.journal-3.full"));
+    }
+    // An export carries the NAND packed; importing it unpacks and checks it.
+    void exportPacksNand() {
+        const auto outside = directory.filePath("packed");
+        write(outside + "/n/n.frond", v9WithNand(2));
+        write(outside + "/n/nand.frondnand", checkedNand(2));
+        QString name;
+        QVERIFY(importFile(folder(), outside + "/n", &name).isEmpty());
+        QVERIFY(exportFile(describe(filePath(folder(), name)), outside + "/out").isEmpty());
+        QVERIFY(!QFileInfo::exists(outside + "/out/nand.frondnand"));
+        QVERIFY(QFileInfo(outside + "/out/nand.frondnand.gz").size() < checkedNand(2).size() / 2);
+        QVERIFY(isMachineFolder(outside + "/out"));
+        QString back;
+        QVERIFY(importFile(folder(), outside + "/out", &back).isEmpty());
+        QFile got(machineDir(folder(), back) + "/nand.frondnand");
+        QVERIFY(got.open(QIODevice::ReadOnly));
+        QCOMPARE(got.readAll(), checkedNand(2));
+        QVERIFY(!QFileInfo::exists(machineDir(folder(), back) + "/nand.frondnand.gz"));
+        QVERIFY(importFile(folder(), outside + "/out/out.frond", &back).isEmpty());
+        QVERIFY(QFileInfo::exists(machineDir(folder(), back) + "/nand.frondnand"));
+        // The duplicate stays unpacked.
+        QString copy;
+        QVERIFY(duplicate(folder(), describe(filePath(folder(), back)), &copy).isEmpty());
+        QVERIFY(QFileInfo::exists(machineDir(folder(), copy) + "/nand.frondnand"));
+        QVERIFY(!QFileInfo::exists(machineDir(folder(), copy) + "/nand.frondnand.gz"));
+        // A damaged pack is refused and leaves nothing behind.
+        QFile gz(outside + "/out/nand.frondnand.gz");
+        QVERIFY(gz.open(QIODevice::ReadWrite));
+        gz.seek(gz.size() / 2);
+        const auto byte = gz.read(1);
+        gz.seek(gz.size() / 2);
+        gz.write(QByteArray(1, char(byte[0] ^ 0x40)));
+        gz.close();
+        const auto before = QDir(folder()).entryList(QDir::AllEntries | QDir::NoDotAndDotDot).size();
+        QVERIFY(!importFile(folder(), outside + "/out").isEmpty());
+        QCOMPARE(QDir(folder()).entryList(QDir::AllEntries | QDir::NoDotAndDotDot).size(), before);
     }
     void copiesSettleUnfinishedSave() {
         const auto outside = directory.filePath("unfinished");

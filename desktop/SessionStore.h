@@ -25,6 +25,7 @@
 #include <optional>
 #include <unistd.h>
 #include "FirmwareInput.h"
+#include "storage/Packed.h"
 
 // Each machine is a folder: sessions/<name>/ holds <name>.frond, <name>.frond.settings.json,
 // the lock, sd.frondsd / ms.frondms / ms.frondmsp, nand.frondnand, and <name>.frond.new until the first save.
@@ -363,7 +364,8 @@ inline bool ignoredName(const QString& name) {
 }
 inline bool packableName(const QString& name) {
     if (ignoredName(name) || name.contains('/')) return false;
-    return name == "sd.frondsd" || name == "ms.frondms" || name == "ms.frondmsp" || name == "nand.frondnand" || name == "slot.json" ||
+    return name == "sd.frondsd" || name == "ms.frondms" || name == "ms.frondmsp" || name == "nand.frondnand" ||
+           name == "nand.frondnand.gz" || name == "slot.json" ||
            name.endsWith(".frond.settings.json") ||
            (name.endsWith(".frond") && !name.endsWith(".frond.new"));
 }
@@ -765,6 +767,27 @@ inline QString copyPackable(const QString& fromDir, const QString& toDir, const 
     return {};
 }
 
+// An exported session carries its NAND packed as nand.frondnand.gz; a session folder in the
+// library keeps it unpacked.
+inline QString packNand(const QString& dir) {
+    const auto plain = dir + "/nand.frondnand";
+    if (!QFileInfo::exists(plain)) return {};
+    const auto file = std::filesystem::path(plain.toStdString());
+    if (!frondStorage::pack(file, frondStorage::packedPath(file)).ok || !QFile::remove(plain))
+        return QStringLiteral("Couldn't export the session.");
+    return {};
+}
+// Unpacks `from`/nand.frondnand.gz into `to`/nand.frondnand, checked against its CRCs. Removes
+// the packed file when both are the same folder.
+inline QString unpackNand(const QString& from, const QString& to) {
+    const auto packed = from + "/nand.frondnand.gz";
+    if (!QFileInfo::exists(packed) || QFileInfo::exists(from + "/nand.frondnand")) return {};
+    if (!frondStorage::unpack(packed.toStdString(), (to + "/nand.frondnand").toStdString()).ok)
+        return QStringLiteral("The session's NAND file is damaged.");
+    if (QFileInfo(from).canonicalFilePath() == QFileInfo(to).canonicalFilePath()) QFile::remove(packed);
+    return {};
+}
+
 inline QString locate(const QString& folder, const QString& path) {
     migrateLoose(folder);
     if (QFileInfo::exists(path) || QFileInfo::exists(markerPath(path))) return path;
@@ -1071,6 +1094,10 @@ inline QString importFolder(const QString& folder, const QString& from, QString*
         QDir(dest).removeRecursively();
         return error;
     }
+    if (const auto error = unpackNand(dest, dest); !error.isEmpty()) {
+        QDir(dest).removeRecursively();
+        return error;
+    }
     if (const auto error = checkImportedSiblings(dest, dest + '/' + name + ".frond", frondCards::readSlot(dest).swap); !error.isEmpty()) {
         QDir(dest).removeRecursively();
         return error;
@@ -1115,6 +1142,10 @@ inline QString importFile(const QString& folder, const QString& from, QString* n
     if (!settle.journal.isEmpty() && !applySdJournalCopy(settle.journal, destDir + '/' + settle.sibling)) return fail();
     if (!nandSettle.journal.isEmpty() && !applySdJournalCopy(nandSettle.journal, destDir + '/' + nandSettle.sibling)) return fail();
     if (QFileInfo(sourceDir + "/slot.json").isFile() && !QFile::copy(sourceDir + "/slot.json", destDir + "/slot.json")) return fail();
+    if (const auto error = unpackNand(sourceDir, destDir); !error.isEmpty()) {
+        QDir(destDir).removeRecursively();
+        return error;
+    }
     if (const auto error = checkImportedSiblings(destDir, target, frondCards::readSlot(destDir).swap); !error.isEmpty()) {
         QDir(destDir).removeRecursively();
         return error;
@@ -1152,6 +1183,7 @@ inline bool isMachineFolder(const QString& dir) {
         const auto name = entry.fileName();
         if (!entry.isFile() || entry.isSymLink() || !machineFileName(name)) return false;
         if (ignoredName(name) || name == "sd.frondsd" || name == "ms.frondms" || name == "ms.frondmsp" || name == "nand.frondnand" ||
+            name == "nand.frondnand.gz" ||
             name == "slot.json")
             continue;
         // Every .frond, settings, lock or marker file has to belong to the one session.
@@ -1314,6 +1346,10 @@ inline QString exportFile(const Info& info, const QString& to) {
     if (staging.isEmpty()) return QStringLiteral("Couldn't export the session.");
     const auto part = staging + '/' + destName;
     if (const auto error = copyPackable(sourceDir, part, destName); !error.isEmpty()) {
+        removeStaging(staging);
+        return error;
+    }
+    if (const auto error = packNand(part); !error.isEmpty()) {
         removeStaging(staging);
         return error;
     }

@@ -22,6 +22,17 @@ static QByteArray digest(const QString& path) {
     QFile file(path); QCryptographicHash hash(QCryptographicHash::Sha256);
     if (!file.open(QIODevice::ReadOnly) || !hash.addData(&file)) return {}; return hash.result();
 }
+// createCard's partition starts at sector 63.
+constexpr qint64 kPartitionOffset = 63 * 512;
+// mtools with no user or system config.
+static QProcessEnvironment mtoolsEnvironment() {
+    auto env = QProcessEnvironment::systemEnvironment();
+    for (const auto& key : env.keys())
+        if (key.startsWith("MTOOLS")) env.remove(key);
+    env.insert("MTOOLSRC", "/dev/null");
+    env.insert("LC_ALL", "C.UTF-8");
+    return env;
+}
 static bool createCard(const QString& path, unsigned size) {
     const auto bytes = frondSd::create(size);
     return write(path, QByteArray::fromRawData(reinterpret_cast<const char*>(bytes.data()), bytes.size()));
@@ -30,12 +41,12 @@ static bool createCard(const QString& path, unsigned size) {
 // Every FAT copy of a card image made by createCard is the same.
 static bool fatCopiesMatch(const QString& image) {
     QFile f(image);
-    if (!f.open(QIODevice::ReadOnly) || !f.seek(frondFolderCard::partitionOffset)) return false;
+    if (!f.open(QIODevice::ReadOnly) || !f.seek(kPartitionOffset)) return false;
     const auto boot = f.read(512);
     const int reserved = frondFolderCard::le16(boot, 14), fats = uint8_t(boot[16]), sectors = frondFolderCard::le16(boot, 22);
     QByteArray first;
     for (int i = 0; i < fats; ++i) {
-        if (!f.seek(frondFolderCard::partitionOffset + qint64(reserved + i * sectors) * 512)) return false;
+        if (!f.seek(kPartitionOffset + qint64(reserved + i * sectors) * 512)) return false;
         const auto copy = f.read(qint64(sectors) * 512);
         if (i == 0) first = copy; else if (copy != first) return false;
     }
@@ -43,10 +54,10 @@ static bool fatCopiesMatch(const QString& image) {
 }
 static QString mtools(const QString& tool, const QString& image, const QStringList& args) {
     QProcess p;
-    p.setProcessEnvironment(frondFolderCard::mtoolsEnvironment());
+    p.setProcessEnvironment(mtoolsEnvironment());
     p.setProcessChannelMode(QProcess::MergedChannels);
     p.start(QStandardPaths::findExecutable(tool),
-            QStringList{"-i", image + "@@" + QString::number(frondFolderCard::partitionOffset)} + args);
+            QStringList{"-i", image + "@@" + QString::number(kPartitionOffset)} + args);
     p.closeWriteChannel();
     if (!p.waitForFinished(30000) || p.exitCode() != 0) return {};
     return QString::fromUtf8(p.readAll());
@@ -67,12 +78,12 @@ static const QStringList kNames{QString::fromUtf8("äpfel.txt"), QString::fromUt
 struct Raw {
     QString path; int reserved, fats, fatSectors, rootEntries, perCluster;
     explicit Raw(const QString& p) : path(p) {
-        QFile f(p); f.open(QIODevice::ReadOnly); f.seek(frondFolderCard::partitionOffset);
+        QFile f(p); f.open(QIODevice::ReadOnly); f.seek(kPartitionOffset);
         const auto b = f.read(512);
         reserved = frondFolderCard::le16(b, 14); fats = uint8_t(b[16]); fatSectors = frondFolderCard::le16(b, 22);
         rootEntries = frondFolderCard::le16(b, 17); perCluster = uint8_t(b[13]);
     }
-    qint64 part(qint64 sector) const { return frondFolderCard::partitionOffset + sector * 512; }
+    qint64 part(qint64 sector) const { return kPartitionOffset + sector * 512; }
     qint64 rootAt() const { return part(reserved + qint64(fats) * fatSectors); }
     qint64 clusterAt(uint32_t c) const { return rootAt() + rootEntries * 32 + qint64(c - 2) * perCluster * 512; }
     QByteArray get(qint64 at, int n) const { QFile f(path); f.open(QIODevice::ReadOnly); f.seek(at); return f.read(n); }
@@ -261,10 +272,10 @@ class ExchangeTest : public QObject {
         {
             // Fill every free slot of the fixed root with empty files.
             QFile f(source); QVERIFY(f.open(QIODevice::ReadWrite));
-            QVERIFY(f.seek(frondFolderCard::partitionOffset)); const auto boot = f.read(512);
+            QVERIFY(f.seek(kPartitionOffset)); const auto boot = f.read(512);
             const int reserved = frondFolderCard::le16(boot, 14), fats = uint8_t(boot[16]), sectors = frondFolderCard::le16(boot, 22);
             const int entries = frondFolderCard::le16(boot, 17);
-            const qint64 root = frondFolderCard::partitionOffset + qint64(reserved + fats * sectors) * 512;
+            const qint64 root = kPartitionOffset + qint64(reserved + fats * sectors) * 512;
             QVERIFY(f.seek(root)); auto bytes = f.read(entries * 32);
             for (int i = 0; i < entries; ++i) {
                 if (bytes[i * 32] != 0) continue;

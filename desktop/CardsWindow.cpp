@@ -552,7 +552,6 @@ void CardsWindow::importImage() {
     afterChange(this);
 }
 void CardsWindow::importFolder() {
-    if (!frondFolderCard::mtoolsAvailable()) return failed(tr("Install mtools to import a folder (Debian: sudo apt install mtools)."));
     const auto folder = QFileDialog::getExistingDirectory(this, tr("Import folder as card"));
     if (folder.isEmpty()) return;
     QApplication::setOverrideCursor(Qt::WaitCursor);

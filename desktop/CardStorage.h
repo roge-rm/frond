@@ -13,6 +13,7 @@
 #include <QString>
 #include <QStringList>
 #include <QTime>
+#include <algorithm>
 #include <exception>
 #include <filesystem>
 #include <functional>
@@ -164,13 +165,20 @@ class FatImage {
     void read(const Entry& entry, const std::function<void(const char*, qint64)>& out) {
         translated([&] { fat.read(entry.raw, [&](const char* b, int64_t n) { out(b, qint64(n)); }); });
     }
-    // A new file of `size` bytes from `input` (reads up to n bytes, returns how many, 0 at the end).
-    void add(const QString& path, const QString& name, const std::function<qint64(char*, qint64)>& input, qint64 size) {
+    // A new file of `size` bytes from `input` (reads up to n bytes, returns how many, 0 at the end),
+    // dated `when` or now.
+    void add(const QString& path, const QString& name, const std::function<qint64(char*, qint64)>& input, qint64 size,
+             const QDateTime& when = {}) {
         translated([&] {
-            fat.add(utf8Of(path), utf8Of(name), [&](char* b, int64_t n) { return int64_t(input(b, qint64(n))); }, int64_t(size));
+            fat.add(utf8Of(path), utf8Of(name), [&](char* b, int64_t n) { return int64_t(input(b, qint64(n))); }, int64_t(size),
+                    stampOf(when));
         });
     }
-    void makeFolder(const QString& path, const QString& name) { translated([&] { fat.makeFolder(utf8Of(path), utf8Of(name)); }); }
+    void makeFolder(const QString& path, const QString& name, const QDateTime& when = {}) {
+        translated([&] { fat.makeFolder(utf8Of(path), utf8Of(name), stampOf(when)); });
+    }
+    // Runs `work` as one change with one commit; a failure or cancel in it rolls all of it back.
+    void batch(const std::function<void()>& work) { translated([&] { fat.batch(work); }); }
     // A file, or a folder with everything in it.
     void remove(const QString& path) { translated([&] { fat.remove(utf8Of(path)); }); }
     // Into toFolder, under newName when given (a rename when the folder is the same).
@@ -213,6 +221,14 @@ class FatImage {
     static void checkName(const QString& name) { translated([&] { frondStorage::fat::checkName(utf8Of(name)); }); }
 
  private:
+    static std::optional<frondStorage::fat::Stamp> stampOf(const QDateTime& when) {
+        if (!when.isValid()) return std::nullopt;
+        const auto local = when.toLocalTime();
+        const int year = std::clamp(local.date().year() - 1980, 0, 127);
+        const QTime t = local.time();
+        return frondStorage::fat::Stamp{uint16_t((year << 9) | (local.date().month() << 5) | local.date().day()),
+                                        uint16_t((t.hour() << 11) | (t.minute() << 5) | (t.second() / 2))};
+    }
     static QDateTime dateOf(frondStorage::fat::Stamp s) {
         if (s.date == 0) return {};
         const QDate d(1980 + (s.date >> 9), (s.date >> 5) & 15, s.date & 31);

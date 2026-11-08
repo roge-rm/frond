@@ -1083,9 +1083,9 @@ inline QStringList folderKinds() {
     return result;
 }
 
-// A host folder copied once onto a new card: a blank FAT16 image, the folder written in and read
-// back with mtools, then the card tool makes the card file from it, all inside cards/.new-<id> so a refusal, an
-// error or Cancel leaves nothing. Named `name`. Refused when the folder doesn't fit a card of `size`.
+// A host folder copied once onto a new card: the card tool makes a new card file, then the folder
+// goes onto it through the storage library in one commit, all inside cards/.new-<id> so a refusal,
+// an error or Cancel leaves nothing. Named `name`. Refused when the folder doesn't fit a card of `size`.
 inline QString importFolderCard(const QString& sessions, const QString& folder, const QString& name, const QString& kind, int size,
                                 const frondSessions::CopyProgress& progress = {}, QString* id = nullptr) {
     const auto library = libraryFor(sessions);
@@ -1094,8 +1094,7 @@ inline QString importFolderCard(const QString& sessions, const QString& folder, 
     if (freeCardName(library, wanted) != wanted) return QStringLiteral("There's already a card called %1.").arg(wanted);
     if (!folderKinds().contains(kind) || !sizesFor(kind).contains(size)) return QStringLiteral("Choose an SD card or Memory Stick Pro size.");
     if (!QFileInfo(folder).isDir()) return QStringLiteral("Couldn't read the folder.");
-    if (!frondFolderCard::mtoolsAvailable()) return QStringLiteral("Install mtools to import a folder (Debian: sudo apt install mtools).");
-    // Phases of the progress bar: copy 0 to 45%, check 45 to 50%, the card file 50 to 100%.
+    // Phases of the progress bar: the new card file 0 to 20%, the files 20 to 100%.
     constexpr qint64 whole = 1000;
     auto report = [&](qint64 done) { return !progress || progress(done, whole); };
     const auto plan = frondFolderCard::measure(folder, [&] { return !report(0); });
@@ -1105,23 +1104,24 @@ inline QString importFolderCard(const QString& sessions, const QString& folder, 
         return QStringLiteral("The folder doesn't fit on a %1 card.").arg(sizeLabel(size));
     const qint64 cardBytes = qint64(size) << 20;
     const auto free = freeSpace()(library);
-    if (free >= 0 && free < 2 * cardBytes + plan.bytes + spareBytes)
-        return QStringLiteral("Not enough free space for the card. It needs %1 MB.").arg((2 * cardBytes + plan.bytes + spareBytes) / 1000000 + 1);
+    if (free >= 0 && free < cardBytes + spareBytes)
+        return QStringLiteral("Not enough free space for the card. It needs %1 MB.").arg((cardBytes + spareBytes) / 1000000 + 1);
     NewCopy copy(library);
     if (!copy.ok) return QStringLiteral("Couldn't add the card.");
-    const auto raw = copy.dir + "/.work.img", back = copy.dir + "/.back";
-    if (!frondFolderCard::blankImage(raw, unsigned(size))) return QStringLiteral("Couldn't make the card.");
-    if (auto error = frondFolderCard::copyFolder(raw, folder, back, plan, [&](qint64 d, qint64 t) { return report(t ? d * 450 / t : 0); });
-        !error.isEmpty())
-        return error;
-    if (!report(450)) return QStringLiteral("Cancelled.");
-    if (!frondFolderCard::sameTree(folder, back)) return QStringLiteral("The card copy didn't match the folder.");
-    QDir(back).removeRecursively();
     const auto file = copy.dir + '/' + fileOfKind(kind);
-    const auto r = runCardTool(cardTool(), {QStringLiteral("import"), raw, toolKind(kind), file},
-                               [&](qint64 d, qint64 t) { return report(500 + (t ? d * 500 / t : 0)); });
+    const auto r = runCardTool(cardTool(), {QStringLiteral("make"), toolKind(kind), QString::number(size), file},
+                               [&](qint64 d, qint64 t) { return report(t ? d * 200 / t : 0); });
     if (!r.ok) return toolError(r);
-    QFile::remove(raw);
+    if (!report(200)) return QStringLiteral("Cancelled.");
+    try {
+        frondCardFile::CardFile card(file, true);
+        frondCardFile::FatImage fat(card);
+        if (const auto error = frondFolderCard::fill(fat, folder, plan, [&](qint64 d, qint64 t) { return report(200 + d * 800 / t); });
+            !error.isEmpty())
+            return error;
+    } catch (const frondCardFile::Error& e) {
+        return QStringLiteral("Couldn't copy the folder: %1").arg(e.message);
+    }
     qint64 logical = 0;
     if (!cardHeader(file, nullptr, &logical)) return QStringLiteral("Couldn't add the card.");
     if (const auto error = adoptNew(library, copy, {{}, wanted, kind, now(), {}, logical, newIdentity(), false}); !error.isEmpty())

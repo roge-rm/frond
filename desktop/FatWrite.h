@@ -1,6 +1,6 @@
 #pragma once
-// FAT directory entry pieces for the folder import (FolderCard.h): the storage library's
-// (storage/FatNames.h) with Qt types. Header only.
+// FAT names and directory entry pieces: the storage library's (storage/FatNames.h) with Qt
+// types, for the tests that build or read cards by hand. Header only.
 #include "storage/FatNames.h"
 
 #include <QByteArray>
