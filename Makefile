@@ -1417,6 +1417,18 @@ test-zodiac-ssi-startup: build/zodiac-boot-probe
 	./build/test-zodiac-ssi-startup
 
 # Disabled i.MX1 UART startup and guarded peripheral access.
+.PHONY: test-zodiac-pcm-transport
+test-zodiac-pcm-transport: build/zodiac-boot-probe
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/zodiac-pcm-transport.cpp build/source/src/uarm/uarm/imx1_boot_probe.cpp \
+		build/source/src/uarm/uarm/imx1_watchdog.cpp build/source/src/uarm/uarm/imx1_rtc.cpp build/source/src/uarm/uarm/imx1_bootstrap.cpp build/source/src/uarm/uarm/imx1_aitc.cpp \
+		build/source/src/uarm/uarm/imx1_cgm.cpp build/source/src/uarm/uarm/imx1_gpio.cpp \
+		build/source/src/uarm/uarm/imx1_sysctrl.cpp build/source/src/uarm/uarm/imx1_eim.cpp build/source/src/uarm/uarm/imx1_timer.cpp build/source/src/uarm/uarm/imx1_i2c.cpp build/source/src/uarm/uarm/imx1_asp.cpp build/source/src/uarm/uarm/imx1_pwm.cpp \
+		@build/zodiac-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-pcm-transport
+	./build/test-zodiac-pcm-transport
+
+# Disabled i.MX1 UART startup and guarded peripheral access.
 .PHONY: test-zodiac-uart-startup
 test-zodiac-uart-startup: build/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \

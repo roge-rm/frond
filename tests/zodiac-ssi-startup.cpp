@@ -33,7 +33,7 @@ int main() {
     // Read-only status and counts are not supplied by written values.
     write(8,0x99ff); read(8,0x9941);
     write(0x20,0xff84); read(0x20,0x84);
-    for (auto setting : {0x9b00u,0x9d00u,0xf900u}) write(8,setting,A::sideEffect);
+    for (auto setting : {0x9d00u,0xf900u}) write(8,setting,A::sideEffect);
     write(8,0x10000,A::reservedBits); read(8,0x9941);
     for (auto offset : {0xcu,0x10u}) {
         write(offset,0x100,A::sideEffect); write(offset,0x200,A::sideEffect);
@@ -90,7 +90,7 @@ int main() {
     value = 0xdeadbeef;
     assert(soc.access(base,4,false,value) == A::sideEffect && value == 0xdeadbeef);
     write(0xc,0x68,A::sideEffect); read(0xc,0xe8);
-    write(8,0x9b00,A::sideEffect); read(8,0x9900); read(0x20,0x804);
+    write(8,0x9d00,A::sideEffect); read(8,0x9900); read(0x20,0x804);
     write(0x20,0xff88); read(0x20,0x888); read(8,0x9900);
     auto primed = soc;
     soc.advanceHclkCycles(10000); read(0x20,0x888); read(8,0x9900);
@@ -137,7 +137,7 @@ int main() {
     for (unsigned i = 0; i < 8; ++i) program.push_back(0xe5841000);
     program.push_back(0xe5949020);
     program.push_back(0xe594a008);
-    load(1,0x9b00);
+    load(1,0x9d00);
     program.push_back(0xe5841008);
     for (const auto& item : literals) {
         const auto offset = (program.size() - item.first - 2) * 4;
@@ -161,5 +161,5 @@ int main() {
     }
     assert(results[0].cpsr == results[1].cpsr && results[0].busAccesses == results[1].busAccesses);
     assert(!std::memcmp(results[0].registers,results[1].registers,sizeof(results[0].registers)));
-    std::puts("PASS: whole SSI startup and eight-word priming, FIFO counts/watermarks/full/reset/copy, guarded active transport and Exact/Fast");
+    std::puts("PASS: whole SSI startup and eight-word priming, FIFO counts/watermarks/full/reset/copy, guarded unsupported modes and Exact/Fast");
 }

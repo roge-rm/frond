@@ -437,6 +437,12 @@ int main(int argc, char** argv) {
                     unsigned(result.graphicsLcdEnabled), result.graphicsFrameWidth, result.graphicsFrameHeight, result.graphicsFrameHash);
     std::printf("irq-entries=%llu fiq-entries=%llu\n", (unsigned long long)result.irqEntries,
                 (unsigned long long)result.fiqEntries);
+    if (options.bootstrapPeripherals)
+        std::printf("pcm-transport dma-active=%u remaining=%u source=%08x pending-source=%08x fifo-words=%u transmitted-words=%llu disr=%08x scsr=%04x stcr=%04x stccr=%04x\n",
+                    unsigned(result.pcm.dmaActive), result.pcm.remaining, result.pcm.source,
+                    result.pcm.pendingSource, result.pcm.fifoWords,
+                    (unsigned long long)result.pcm.transmittedWords, result.pcm.status,
+                    result.pcm.control, result.pcm.transmitControl, result.pcm.clockControl);
     std::printf("jit-blocks=%llu jit-instructions=%llu final-cpsr=%08x\n",
                 (unsigned long long)result.jitBlocks, (unsigned long long)result.jitInstructions, result.cpsr);
     for (unsigned i = 0; i < 16; ++i)
