@@ -789,7 +789,12 @@ internal fun zipPackable(dir: File, output: java.io.OutputStream) {
     }
 }
 
-internal fun unzipPackable(input: java.io.InputStream, dest: File): Boolean = try {
+// The largest nand.frondnand: a 256 MiB NAND's main and spare bytes, up to 1 MiB of padding
+// between them, the 64-byte header and a CRC per MiB.
+internal const val NAND_FILE_MAX_BYTES = 64L + (257L shl 20) + 4L * 257
+
+// `nandMax` caps an unpacked NAND, so a damaged or hostile pack can't fill the disk.
+internal fun unzipPackable(input: java.io.InputStream, dest: File, nandMax: Long = NAND_FILE_MAX_BYTES): Boolean = try {
     dest.mkdirs()
     ZipInputStream(input).use { zip ->
         while (true) {
@@ -799,7 +804,23 @@ internal fun unzipPackable(input: java.io.InputStream, dest: File): Boolean = tr
                 // A desktop export carries the NAND packed; the gzip stream checks its CRC and size.
                 if (File(dest, NAND_FILE).exists()) continue
                 val part = File(dest, ".$NAND_FILE.tmp-unzip")
-                part.outputStream().use { java.util.zip.GZIPInputStream(zip.nonClosing(), 1 shl 16).copyTo(it, 1 shl 20) }
+                try {
+                    part.outputStream().use { out ->
+                        val gz = java.util.zip.GZIPInputStream(zip.nonClosing(), 1 shl 16)
+                        val buffer = ByteArray(1 shl 20)
+                        var total = 0L
+                        while (true) {
+                            val n = gz.read(buffer)
+                            if (n < 0) break
+                            total += n
+                            if (total > nandMax) throw IOException("The NAND is too big.")
+                            out.write(buffer, 0, n)
+                        }
+                    }
+                } catch (e: Exception) {
+                    part.delete()
+                    throw e
+                }
                 if (!part.renameTo(File(dest, NAND_FILE))) throw IOException("Couldn't unpack the NAND.")
                 continue
             }

@@ -258,6 +258,13 @@ class SessionsLayoutTest {
         // A damaged pack is refused.
         val bad = gz.copyOf().also { it[it.size - 6] = (it[it.size - 6].toInt() xor 1).toByte() }
         assertFalse(unzipPackable(ByteArrayInputStream(zipOf(bad)), tmp.newFolder("bad")))
+        // One that unpacks past the cap is refused and leaves no part file.
+        val capped = tmp.newFolder("capped")
+        assertFalse(unzipPackable(ByteArrayInputStream(zipOf(gz)), capped, nand.size - 1L))
+        assertFalse(File(capped, NAND_FILE).exists())
+        assertFalse(File(capped, ".$NAND_FILE.tmp-unzip").exists())
+        assertTrue(unzipPackable(ByteArrayInputStream(zipOf(gz)), tmp.newFolder("exact"), nand.size.toLong()))
+        assertEquals(64L + (257L shl 20) + 4L * 257, NAND_FILE_MAX_BYTES)
         // A NAND whose CRCs don't match its bytes is refused.
         val flipped = nand.copyOf().also { it[5000] = (it[5000].toInt() xor 1).toByte() }
         File(dest, NAND_FILE).writeBytes(flipped)
