@@ -32,6 +32,21 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
         return Cancellation(input)
     }
 
+    val cancelled: Boolean get() = jobCancelled
+
+    private fun <T> cancellable(block: () -> T): T = try {
+        block()
+    } catch (e: FatImage.Cancelled) {
+        throw Failed("File transfer cancelled.", "cancelled")
+    }
+
+    // Whether the card has a folder at path.
+    fun hasFolder(path: String): Boolean = try {
+        if (memoryStick) { list(path); true } else read { it.find(path)?.directory == true }
+    } catch (e: Exception) {
+        false
+    }
+
     fun finishMutation() = synchronized(exportGate) {
         // Once the native write commits, cancellation cannot undo the folder refresh.
         publishingExport = true
@@ -155,8 +170,11 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
         changed = false
     }
 
-    fun list(path: String): Pair<List<FatImage.Entry>, Long> {
-        if (!memoryStick) return read { it.list(path) to it.freeBytes }
+    // A folder's entries, the free space on the card and the card's size.
+    class Listing(val entries: List<FatImage.Entry>, val free: Long, val total: Long)
+
+    fun list(path: String): Listing {
+        if (!memoryStick) return read { Listing(it.list(path), it.freeBytes, it.totalBytes) }
         if (jobCancelled) throw Failed("File transfer cancelled.", "cancelled")
         val reply = link.request("ms-files", path, timeoutSeconds = 120, cancelRequested = { jobCancelled })
         if (!reply.ok) throw Failed(if (reply.code == "not-ready") "Open Date Book on the Palm, then try again." else reply.message, reply.code)
@@ -177,7 +195,7 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
         if (entries.size > 512) throw Failed("This folder has more than 512 entries.")
         if (entries.map { it.name.lowercase(java.util.Locale.ROOT) }.toSet().size != entries.size)
             throw Failed("The Palm returned duplicate filenames.")
-        return entries to (total - used)
+        return Listing(entries, total - used, total)
     }
 
     private fun guestPair(host: String, card: String) = hex(host) + "\n" + hex(card)
@@ -199,14 +217,43 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
         FatImage.open(working, false).use(verify)
     }
 
+    // Copies picked files into a card folder under their own names. Returns how many went in and how many were skipped.
+    fun addFiles(path: String, uris: List<Uri>, resolver: CardFiles.Resolver, progress: (Float) -> Unit = {}): Pair<Int, Int> {
+        var added = 0
+        var skipped = 0
+        uris.forEachIndexed { i, uri ->
+            if (jobCancelled) throw Failed("File transfer cancelled.", "cancelled")
+            if (addFile(path, uri, resolver) == null) skipped++ else added++
+            progress((i + 1f) / uris.size)
+        }
+        return added to skipped
+    }
+
     // Copies a picked file into a card folder under its own name and checks the bytes on the card.
-    fun addFile(path: String, uri: Uri): String {
+    // Returns the name it went in under, or null when the clash rule skipped it.
+    fun addFile(path: String, uri: Uri, resolver: CardFiles.Resolver): String? {
         folder.mkdirs()
-        val name = displayName(uri) ?: throw Failed("That file has no name.")
+        var name = displayName(uri) ?: throw Failed("That file has no name.")
         if (memoryStick) checkMemoryStickName(name) else FatImage.checkName(name)
         val source = File(folder, "incoming")
         try {
             if (memoryStick) {
+                val taken = list(path).entries.firstOrNull { it.name.equals(name, ignoreCase = true) }
+                if (taken != null) {
+                    when (resolver.decide(name)) {
+                        CardFiles.Clash.CANCEL -> throw Failed("File transfer cancelled.", "cancelled")
+                        CardFiles.Clash.SKIP -> return null
+                        CardFiles.Clash.KEEP_BOTH -> {
+                            val used = list(path).entries.map { it.name.lowercase() }.toSet()
+                            name = CardFiles.keepBothName(name) { it.lowercase() in used }
+                            checkMemoryStickName(name)
+                        }
+                        CardFiles.Clash.REPLACE -> {
+                            if (taken.directory) throw Failed("$name is a folder on the card.")
+                            run("ms-delete", joined(path, taken.name))
+                        }
+                    }
+                }
                 if (!copyIn(uri, source, MEMORY_STICK_FILE_BYTES)) throw Failed("File exchange supports files up to 8 MB.")
                 run("ms-put", guestPair(source.path, joined(path, name)))
                 return name
@@ -219,19 +266,60 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
             if (size > free) throw Failed("There isn't room on this device for that file. Free up about ${(size - free + (1L shl 20) - 1) shr 20} MB and try again.")
             if (!copyIn(uri, source, room)) throw Failed("There isn't room on the card for that file.")
             val expected = sha256(source)
-            edit({ fat -> source.inputStream().buffered(1 shl 16).use { fat.add(path, name, it, source.length()) } }) { fat ->
-                val entry = fat.find(joined(path, name)) ?: throw Failed("The file didn't land on the card.")
-                val digest = MessageDigest.getInstance("SHA-256")
-                fat.read(entry, object : java.io.OutputStream() {
-                    override fun write(b: Int) = digest.update(b.toByte())
-                    override fun write(b: ByteArray, off: Int, len: Int) = digest.update(b, off, len)
-                })
-                if (!digest.digest().contentEquals(expected)) throw Failed("The copy on the card didn't match the file.")
+            var put: String? = null
+            cancellable {
+                edit({ fat -> put = CardFiles.addStream(fat, path, name, source.length(), { source.inputStream().buffered(1 shl 16) }, resolver) }) { fat ->
+                    val landed = put ?: return@edit
+                    val entry = fat.find(joined(path, landed)) ?: throw Failed("The file didn't land on the card.")
+                    val digest = MessageDigest.getInstance("SHA-256")
+                    fat.read(entry, object : java.io.OutputStream() {
+                        override fun write(b: Int) = digest.update(b.toByte())
+                        override fun write(b: ByteArray, off: Int, len: Int) = digest.update(b, off, len)
+                    })
+                    if (!digest.digest().contentEquals(expected)) throw Failed("The copy on the card didn't match the file.")
+                }
             }
-            return name
+            return put
         } finally {
             source.delete()
         }
+    }
+
+    // Copies a picked folder and everything in it into a card folder. SD only.
+    fun addTree(path: String, root: FolderCard.Node, resolver: CardFiles.Resolver, progress: (Float) -> Unit = {}): CardFiles.Report {
+        if (memoryStick) throw Failed("Adding a folder isn't available for Memory Sticks.")
+        val plan = FolderCard.measure(root) { jobCancelled }
+        plan.problem?.let { throw Failed(if (it == COPY_CANCELLED) "File transfer cancelled." else it, if (it == COPY_CANCELLED) "cancelled" else null) }
+        if (plan.bytes > read { it.freeBytes }) throw Failed("There isn't room on the card for that folder.")
+        var report = CardFiles.Report(0, 0)
+        val total = maxOf(plan.bytes, 1L)
+        cancellable {
+            edit({ fat -> report = CardFiles.importTree(fat, root, path, resolver, { jobCancelled }) { progress(it.toFloat() / total) } }) { }
+        }
+        return report
+    }
+
+    // Copies or moves card entries into a folder. SD only.
+    fun paste(sources: List<String>, destFolder: String, move: Boolean, resolver: CardFiles.Resolver, progress: (Float) -> Unit = {}): CardFiles.Report {
+        if (memoryStick) throw Failed("Cut, copy and paste aren't available for Memory Sticks.")
+        var report = CardFiles.Report(0, 0)
+        cancellable {
+            val total = maxOf(if (move) 1L else read { CardFiles.bytesIn(it, sources) }, 1L)
+            edit({ fat -> report = CardFiles.paste(fat, sources, destFolder, move, resolver, { jobCancelled }) { progress(it.toFloat() / total) } }) { }
+        }
+        return report
+    }
+
+    // Deletes entries and what is in them.
+    fun deleteEntries(path: String, names: List<String>) {
+        if (memoryStick) {
+            for (name in names) {
+                if (jobCancelled) throw Failed("File transfer cancelled.", "cancelled")
+                deleteEntry(path, name)
+            }
+            return
+        }
+        cancellable { edit({ CardFiles.delete(it, names.map { n -> joined(path, n) }) { jobCancelled } }) { } }
     }
 
     fun makeFolder(path: String, name: String) {
@@ -242,15 +330,40 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
     }
 
     fun renameEntry(path: String, oldName: String, newName: String) {
-        if (!memoryStick) throw Failed("Renaming is not available in this file view.")
+        if (!memoryStick) { edit({ CardFiles.rename(it, joined(path, oldName), newName) }) { }; return }
         checkMemoryStickName(oldName); checkMemoryStickName(newName)
         run("ms-rename", hex(joined(path, oldName)) + "\n" + hex(newName))
     }
 
-    fun deleteEntry(path: String, name: String) {
-        if (!memoryStick) throw Failed("Deleting is not available in this file view.")
+    private fun deleteEntry(path: String, name: String) {
         checkMemoryStickName(name)
         run("ms-delete", joined(path, name))
+    }
+
+    // Copies card entries into a picked folder. A Memory Stick gives files only.
+    fun exportEntries(path: String, entries: List<FatImage.Entry>, to: CardFiles.HostFolder, progress: (Float) -> Unit = {}): Int {
+        if (memoryStick) {
+            folder.mkdirs()
+            var n = 0
+            for (entry in entries) {
+                if (jobCancelled) throw Failed("File transfer cancelled.", "cancelled")
+                if (entry.directory) throw Failed("Folders can't be copied from a Memory Stick.")
+                val exported = File(folder, "file-export")
+                try {
+                    run("ms-get", guestPair(exported.path, joined(path, entry.name)))
+                    to.file(entry.name).use { out -> exported.inputStream().use { it.copyTo(out, 1 shl 16) } }
+                } finally { exported.delete() }
+                progress(++n / entries.size.toFloat())
+            }
+            return n
+        }
+        return cancellable {
+            read { fat ->
+                val paths = entries.map { joined(path, it.name) }
+                val total = maxOf(CardFiles.bytesIn(fat, paths), 1L)
+                CardFiles.exportTree(fat, paths, to, { jobCancelled }) { progress(it.toFloat() / total) }
+            }
+        }
     }
 
     fun exportFile(entry: FatImage.Entry, to: Uri, path: String = "/", publishing: () -> Unit = {}) {

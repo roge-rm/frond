@@ -14,12 +14,15 @@ import java.util.zip.CRC32
 
 // Reads and edits a FAT16 SD card image in place: the card the core makes (one primary FAT16
 // partition) or a FAT16 superfloppy, 32 MiB to 2 GiB. It does what the desktop's SD exchange does with
-// mtools: list folders, copy files in and out, make folders. Nothing is ever overwritten or deleted.
+// mtools: list folders, copy files in and out, make folders, and copy, move, rename and delete inside the card.
+// Data is never overwritten in place: new data goes to free clusters.
 // Each change is crash safe: new file data goes into free clusters, then the changed FAT and folder
 // sectors go through a journal next to the card (<card>.journal) before they're written in place.
 // open() replays a complete journal and drops a damaged one. Not thread safe; one editor per image file.
 class FatImage private constructor(private val image: File, private val file: RandomAccessFile) : AutoCloseable {
     class FatException(message: String) : IOException(message)
+    // A copy stopped by its caller; the change is rolled back.
+    class Cancelled : IOException("Cancelled")
 
     data class Entry(
         val name: String,
@@ -27,6 +30,8 @@ class FatImage private constructor(private val image: File, private val file: Ra
         val directory: Boolean,
         val size: Long,
         val firstCluster: Int,
+        // Last change, in milliseconds since 1970; 0 when the card has none.
+        val modified: Long = 0L,
     )
 
     private var offset = 0L
@@ -175,7 +180,8 @@ class FatImage private constructor(private val image: File, private val file: Ra
             longFirst = -1
             if (attr and 0x08 != 0) continue
             if (short == "." || short == "..") continue
-            val entry = Entry(long ?: short, short, attr and 0x10 != 0, u32(bytes, at + 28), u16(bytes, at + 26))
+            val entry = Entry(long ?: short, short, attr and 0x10 != 0, u32(bytes, at + 28), u16(bytes, at + 26),
+                dosMillis(u16(bytes, at + 24), u16(bytes, at + 22)))
             result += Slot(entry, start, i - start + 1)
         }
         return result
@@ -248,8 +254,14 @@ class FatImage private constructor(private val image: File, private val file: Ra
         val existing = slots(parent)
         refuseTaken(existing, name)
         val cluster = allocate(1).first()
-        val block = ByteArray(clusterBytes)
         val (date, time) = now()
+        write(clusterAt(cluster), folderBlock(cluster, parent.cluster, date, time), 0, clusterBytes)
+        addEntry(parent, existing, name, 0x10, cluster, 0)
+    }
+
+    // A new folder's first cluster: the "." and ".." entries, then empty.
+    private fun folderBlock(cluster: Int, parent: Int, date: Int, time: Int): ByteArray {
+        val block = ByteArray(clusterBytes)
         fun dot(at: Int, label: String, target: Int) {
             label.toByteArray(Charsets.US_ASCII).copyInto(block, at)
             for (i in label.length until 11) block[at + i] = ' '.code.toByte()
@@ -258,9 +270,118 @@ class FatImage private constructor(private val image: File, private val file: Ra
             put16(block, at + 26, target)
         }
         dot(0, ".", cluster)
-        dot(32, "..", parent.cluster)
-        write(clusterAt(cluster), block, 0, clusterBytes)
-        addEntry(parent, existing, name, 0x10, cluster, 0)
+        dot(32, "..", parent)
+        return block
+    }
+
+    private fun locate(path: String): Pair<Folder, Slot> {
+        val p = parts(path)
+        if (p.isEmpty()) throw FatException("That is the top folder.")
+        val parent = folder(p.dropLast(1).joinToString("/", "/"))
+        val slot = slots(parent).firstOrNull { it.entry.name.equals(p.last(), ignoreCase = true) }
+            ?: throw FatException("There's no ${p.last()} on the card.")
+        return parent to slot
+    }
+
+    private fun rawOf(parent: Folder, slot: Slot): ByteArray =
+        parent.bytes().copyOfRange((slot.first + slot.count - 1) * 32, (slot.first + slot.count) * 32)
+
+    private fun eraseSlots(parent: Folder, slot: Slot) {
+        val bytes = parent.bytes()
+        for (i in slot.first until slot.first + slot.count) bytes[i * 32] = 0xe5.toByte()
+        parent.writeSlots(bytes, slot.first, slot.count)
+    }
+
+    private fun freeTree(entry: Entry, depth: Int) {
+        if (depth > MAX_DEPTH) throw FatException("Folders are nested too deeply.")
+        if (entry.directory) for (s in slots(Folder(entry.firstCluster))) freeTree(s.entry, depth + 1)
+        for (c in chain(entry.firstCluster)) fat[c] = 0
+    }
+
+    // Deletes a file, or a folder with everything in it. The space is free again.
+    fun remove(path: String) = change {
+        val (parent, slot) = locate(path)
+        freeTree(slot.entry, 0)
+        eraseSlots(parent, slot)
+    }
+
+    // Moves a file or folder into toFolder, under newName when given (a rename when the folder is the
+    // same). A folder can't go into itself.
+    fun move(from: String, toFolder: String, newName: String? = null) = change {
+        val (parent, slot) = locate(from)
+        val name = newName ?: slot.entry.name
+        checkName(name)
+        val dest = folder(toFolder)
+        if (slot.entry.directory && within(from, toFolder)) throw FatException("${slot.entry.name} can't go into itself.")
+        val raw = rawOf(parent, slot)
+        eraseSlots(parent, slot)
+        val existing = slots(dest)
+        refuseTaken(existing, name)
+        addEntry(dest, existing, name, raw[11].toInt() and 0xff, slot.entry.firstCluster, slot.entry.size, template = raw)
+        if (slot.entry.directory && dest.cluster != parent.cluster) {
+            val inner = Folder(slot.entry.firstCluster)
+            val bytes = inner.bytes()
+            put16(bytes, 32 + 26, dest.cluster)
+            inner.writeSlots(bytes, 1, 1)
+        }
+    }
+
+    // Copies a file or folder into toFolder under newName (or its own name). `bytes` gets the
+    // amount copied so far; `cancelled` stops it. A folder can't be copied into itself.
+    fun copy(from: String, toFolder: String, newName: String? = null, cancelled: () -> Boolean = { false },
+             bytes: (Long) -> Unit = {}) = change {
+        val (parent, slot) = locate(from)
+        val name = newName ?: slot.entry.name
+        checkName(name)
+        val dest = folder(toFolder)
+        if (slot.entry.directory && within(from, toFolder)) throw FatException("${slot.entry.name} can't go into itself.")
+        refuseTaken(slots(dest), name)
+        var done = 0L
+        copyOne(rawOf(parent, slot), slot.entry, dest, name, 0, cancelled) { done += it; bytes(done) }
+    }
+
+    private fun copyOne(raw: ByteArray, entry: Entry, dest: Folder, name: String, depth: Int, cancelled: () -> Boolean, bytes: (Long) -> Unit) {
+        if (depth > MAX_DEPTH) throw FatException("Folders are nested too deeply.")
+        if (cancelled()) throw Cancelled()
+        val existing = slots(dest)
+        if (entry.directory) {
+            val cluster = allocate(1).first()
+            write(clusterAt(cluster), folderBlock(cluster, dest.cluster, u16(raw, 24), u16(raw, 22)), 0, clusterBytes)
+            addEntry(dest, existing, name, 0x10, cluster, 0, template = raw)
+            val inner = Folder(entry.firstCluster)
+            val innerBytes = inner.bytes()
+            val target = Folder(cluster)
+            for (child in slots(inner)) {
+                val childRaw = innerBytes.copyOfRange((child.first + child.count - 1) * 32, (child.first + child.count) * 32)
+                copyOne(childRaw, child.entry, target, child.entry.name, depth + 1, cancelled, bytes)
+            }
+        } else {
+            val source = chain(entry.firstCluster)
+            val clusters = allocate(source.size)
+            val buffer = ByteArray(clusterBytes)
+            var left = entry.size
+            for (i in clusters.indices) {
+                if (cancelled()) throw Cancelled()
+                val n = minOf(left, clusterBytes.toLong()).toInt()
+                file.seek(clusterAt(source[i]))
+                file.readFully(buffer, 0, n)
+                buffer.fill(0, n, clusterBytes)
+                write(clusterAt(clusters[i]), buffer, 0, clusterBytes)
+                left -= n
+                bytes(n.toLong())
+            }
+            addEntry(dest, existing, name, raw[11].toInt() and 0xff, clusters.firstOrNull() ?: 0, entry.size, template = raw)
+        }
+    }
+
+    // The bytes in a file, or in every file under a folder.
+    fun sizeOf(path: String): Long {
+        val (parent, slot) = locate(path)
+        fun total(e: Entry, depth: Int): Long {
+            if (depth > MAX_DEPTH) throw FatException("Folders are nested too deeply.")
+            return if (e.directory) slots(Folder(e.firstCluster)).sumOf { total(it.entry, depth + 1) } else e.size
+        }
+        return total(slot.entry, 0)
     }
 
     private fun refuseTaken(existing: List<Slot>, name: String) {
@@ -280,7 +401,7 @@ class FatImage private constructor(private val image: File, private val file: Ra
         return free
     }
 
-    private fun addEntry(folder: Folder, existing: List<Slot>, name: String, attr: Int, cluster: Int, size: Long) {
+    private fun addEntry(folder: Folder, existing: List<Slot>, name: String, attr: Int, cluster: Int, size: Long, template: ByteArray? = null) {
         val short = shortName(name, existing.map { it.entry.shortName.uppercase() }.toSet())
         val needsLong = displayOf(short) != name
         val longCount = if (needsLong) (name.length + 12) / 13 else 0
@@ -310,6 +431,11 @@ class FatImage private constructor(private val image: File, private val file: Ra
         bytes[at + 11] = attr.toByte()
         val (date, time) = now()
         stamp(bytes, at, date, time)
+        // A moved or copied entry keeps its dates.
+        if (template != null) {
+            for (i in 13..19) bytes[at + i] = template[i]
+            for (i in 22..25) bytes[at + i] = template[i]
+        }
         put16(bytes, at + 26, cluster)
         put32(bytes, at + 28, size)
         folder.writeSlots(bytes, first, total)
@@ -541,6 +667,23 @@ class FatImage private constructor(private val image: File, private val file: Ra
         }
 
         fun parts(path: String): List<String> = path.split('/').filter { it.isNotEmpty() }
+
+        private const val MAX_DEPTH = 64
+
+        // Whether `inner` is `outer` or below it.
+        fun within(outer: String, inner: String): Boolean {
+            val o = parts(outer).map { it.lowercase() }
+            val i = parts(inner).map { it.lowercase() }
+            return i.size >= o.size && i.take(o.size) == o
+        }
+
+        private fun dosMillis(date: Int, time: Int): Long {
+            if (date == 0) return 0L
+            val c = Calendar.getInstance()
+            c.clear()
+            c.set(1980 + (date shr 9), ((date shr 5) and 15) - 1, date and 31, time shr 11, (time shr 5) and 63, (time and 31) * 2)
+            return c.timeInMillis
+        }
 
         fun checkName(name: String) {
             if (name.isEmpty() || name.length > 255 || name == "." || name == ".." || name.endsWith('.') ||

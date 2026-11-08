@@ -1,5 +1,6 @@
 package com.rm.frond
 
+import android.net.Uri
 import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -36,11 +37,16 @@ class RunningModel(
     private val link: ControlLink?,
     // The running session's name, for the copy's file name.
     val name: String,
-) {
+) : FilesModel {
     var state by mutableStateOf(SdCard.State.UNKNOWN)
         private set
     var writeProtected by mutableStateOf<Boolean?>(null)
         private set
+    override val title get() = device.cardLabel
+    override val memoryStick get() = device.memoryStick
+    override val canWrite get() = !device.memoryStick || writeProtected == false
+    override val leaveLabel get() = if (device.memoryStick) "Done" else "Insert"
+    override val prompt = ClashPrompt()
     // Whether the stick in the slot is a Memory Stick Pro, which exports as a raw image.
     var memoryStickPro by mutableStateOf(false)
         private set
@@ -48,7 +54,7 @@ class RunningModel(
         private set
     var cancellingFiles by mutableStateOf(false)
         private set
-    var busy by mutableStateOf<String?>(null)
+    override var busy by mutableStateOf<String?>(null)
         private set
     // How far a long SD job has got, 0 to 1, or null when it isn't known.
     var progress by mutableStateOf<Float?>(null)
@@ -56,16 +62,20 @@ class RunningModel(
     var alert by mutableStateOf<Pair<String, String>?>(null)
     var note by mutableStateOf<String?>(null)
     // The card folder open in the file view, or null when the view is closed.
-    var path by mutableStateOf<String?>(null)
+    override var path by mutableStateOf<String?>(null)
         private set
-    var entries by mutableStateOf(emptyList<FatImage.Entry>())
+    override var entries by mutableStateOf(emptyList<FatImage.Entry>())
         private set
-    var free by mutableStateOf(0L)
+    override var free by mutableStateOf(0L)
         private set
-    var changed by mutableStateOf(false)
+    override var total by mutableStateOf(0L)
+        private set
+    override var shortcuts by mutableStateOf(emptyList<String>())
+        private set
+    override var changed by mutableStateOf(false)
         private set
     // Asking whether to insert the changed card on leaving the file view.
-    var askingLeave by mutableStateOf(false)
+    override var askingLeave by mutableStateOf(false)
     // Asking for a database name: "launch", "export" or "other" (the sheets' by-name dialog), with the RAM databases found for the list.
     var naming by mutableStateOf<String?>(null)
     var found by mutableStateOf(emptyList<PalmDatabases.Info>())
@@ -763,28 +773,31 @@ class RunningModel(
 
     // Lists the open folder again after a change.
     private fun relist(c: SdCard, at: String) {
-        val (list, space) = try { c.list(at) } catch (error: Exception) {
+        val listing = try { c.list(at) } catch (error: Exception) {
             if (device.memoryStick) activity.runOnUiThread { entries = emptyList(); free = 0 }
             throw error
         }
         activity.runOnUiThread {
             path = at
-            entries = list
-            free = space
+            entries = listing.entries
+            free = listing.free
+            total = listing.total
         }
+    }
+
+    override fun open(at: String) { job("Reading", "Couldn't open the folder", cancellable = true) { c -> relist(c, at) } }
+
+    override fun up() {
+        val p = path ?: return
+        if (p == "/") return
+        open(p.substringBeforeLast('/').ifEmpty { "/" })
     }
 
     fun openFiles() = job(if (device.memoryStick) "Reading" else "Ejecting", "Couldn't open the card", cancellable = true) { c ->
         c.beginEdit()
+        val found = SHORTCUTS.filter { c.hasFolder(it) }
+        activity.runOnUiThread { shortcuts = found }
         relist(c, "/")
-    }
-
-    fun open(at: String) = job("Reading", "Couldn't open the folder", cancellable = true) { c -> relist(c, at) }
-
-    fun up() {
-        val p = path ?: return
-        if (p == "/") return
-        open(p.substringBeforeLast('/').ifEmpty { "/" })
     }
 
     private fun finishMutation(c: SdCard) {
@@ -792,57 +805,83 @@ class RunningModel(
         activity.runOnUiThread { canCancelFiles = false; cancellingFiles = false }
     }
 
-    fun addFile(uri: android.net.Uri) {
+    private fun resolver(several: Boolean) = CardFiles.Resolver { name -> prompt.ask(name, several) { activity.runOnUiThread(it) } }
+
+    private fun progressed(fraction: Float) = activity.runOnUiThread { if (busy != null) progress = fraction }
+
+    // A change to the card, then the folder listed again.
+    private fun change(label: String, failTitle: String, done: String? = null, work: (SdCard, String) -> String?) {
         val at = path ?: return
-        job("Copying", "Couldn't add the file", cancellable = true) { c ->
-            val name = c.addFile(at, uri)
+        job(label, failTitle, cancellable = true) { c ->
+            val text = work(c, at)
             finishMutation(c)
             relist(c, at)
-            activity.runOnUiThread { note = "$name added" }
+            (done ?: text)?.let { activity.runOnUiThread { note = it } }
         }
     }
 
-    fun makeFolder(name: String) {
-        val at = path ?: return
-        job("Copying", "Couldn't make the folder", cancellable = true) { c ->
-            c.makeFolder(at, name)
-            finishMutation(c)
-            relist(c, at)
-        }
+    private fun counted(report: CardFiles.Report, what: String): String =
+        "${report.done} $what" + if (report.skipped > 0) ", ${report.skipped} skipped" else ""
+
+    override fun addFiles(uris: List<Uri>) = change("Copying", "Couldn't add the files") { c, at ->
+        val (added, skipped) = c.addFiles(at, uris, resolver(uris.size > 1), ::progressed)
+        counted(CardFiles.Report(added, skipped), "added")
     }
 
-    fun renameEntry(entry: FatImage.Entry, newName: String) {
-        val at = path ?: return
-        job("Renaming", "Couldn't rename the entry", cancellable = true) { c -> c.renameEntry(at, entry.name, newName); finishMutation(c); relist(c, at) }
+    override fun addFolder(tree: Uri) = change("Copying", "Couldn't add the folder") { c, at ->
+        val root = FolderCard.Document.root(activity.applicationContext.contentResolver, tree)
+        counted(c.addTree(at, root, resolver(true), ::progressed), "files added")
     }
 
-    fun deleteEntry(entry: FatImage.Entry) {
-        val at = path ?: return
-        job("Deleting", "Couldn't delete the entry", cancellable = true) { c -> c.deleteEntry(at, entry.name); finishMutation(c); relist(c, at) }
+    override fun makeFolder(name: String) = change("Copying", "Couldn't make the folder") { c, at -> c.makeFolder(at, name); null }
+
+    override fun renameEntry(entry: FatImage.Entry, newName: String) =
+        change("Renaming", "Couldn't rename the entry") { c, at -> c.renameEntry(at, entry.name, newName); null }
+
+    override fun deleteEntries(entries: List<FatImage.Entry>) =
+        change("Deleting", "Couldn't delete", "Deleted") { c, at -> c.deleteEntries(at, entries.map { it.name }); null }
+
+    override fun paste(sources: List<String>, move: Boolean) = change(if (move) "Moving" else "Copying", "Couldn't paste") { c, at ->
+        counted(c.paste(sources, at, move, resolver(sources.size > 1), ::progressed), if (move) "moved" else "copied")
     }
 
-    fun exportFile(entry: FatImage.Entry, to: android.net.Uri) =
+    override fun exportFile(entry: FatImage.Entry, to: Uri) {
         job("Copying", "Couldn't export the file", cancellable = true) { c ->
             c.exportFile(entry, to, path ?: "/") {
                 activity.runOnUiThread { canCancelFiles = false; busy = "Saving exported document" }
             }
             activity.runOnUiThread { note = "${entry.name} exported" }
         }
+    }
+
+    override fun exportEntries(entries: List<FatImage.Entry>, tree: Uri) {
+        val at = path ?: return
+        job("Copying", "Couldn't copy to the folder", cancellable = true) { c ->
+            val host = DocumentHost.root(activity.applicationContext.contentResolver, tree)
+            val n = c.exportEntries(at, entries, host, ::progressed)
+            activity.runOnUiThread { note = "$n files copied" }
+        }
+    }
 
     // Leaving the file view: with changes, asks whether to insert them first.
-    fun leaveFiles() {
+    override fun leaveFiles() {
         if (changed) askingLeave = true else insertEdited()
     }
 
-    // Closes the file view and puts the card back in the Palm, edited or not.
-    fun insertEdited() = job(if (device.memoryStick) "Closing files" else "Inserting", "Couldn't insert the card") { c ->
+    // Closes the file view and puts the card back in the Palm, edited or not. The insert waits for
+    // the Palm to notice the card was out, up to a few seconds, so the busy label stays up.
+    override fun insertEdited() { job(if (device.memoryStick) "Closing files" else "Inserting", "Couldn't insert the card") { c ->
         c.finishEdit()
         activity.runOnUiThread { path = null }
-    }
+    } }
 
     // Closes the file view and leaves the card ejected, without the changes.
-    fun discard() = job("Reading", "Couldn't read the card") { c ->
+    override fun discard() { job("Reading", "Couldn't read the card") { c ->
         c.cancelEdit()
         activity.runOnUiThread { path = null }
-    }
+    } }
+
 }
+
+// Card folders the file view offers a shortcut to when they exist.
+private val SHORTCUTS = listOf("/PALM/Launcher", "/DCIM")

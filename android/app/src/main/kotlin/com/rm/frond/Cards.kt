@@ -828,7 +828,7 @@ object Cards {
         return ToolResult(false, parts.getOrElse(1) { "error" }, parts.getOrElse(2) { "Couldn't run the card tool." })
     }
 
-    private fun toolError(r: ToolResult) = if (r.code == "cancelled") COPY_CANCELLED else r.message
+    fun toolError(r: ToolResult) = if (r.code == "cancelled") COPY_CANCELLED else r.message
 
     // ---- Card operations. Each takes the library lock for its changes; copies run outside it. ----
 
@@ -927,7 +927,7 @@ object Cards {
         override fun close() { lock?.close() }
     }
 
-    private fun cardSource(sessions: File, id: String): Pair<Source?, String?> {
+    fun cardSource(sessions: File, id: String): Pair<Source?, String?> {
         val library = libraryFor(sessions)
         val card = readCard(entryDir(library, id)) ?: return null to "Couldn't find that card."
         val file = fileOfKind(card.kind)
