@@ -83,7 +83,9 @@ int main() {
     assert(memory.access(state, eim, 0x16fffffe, 2, true, value) == Access::ok);
     assert(memory.dirty(0).first == 0 && memory.dirty(0).end == Imx1GraphicsMemory::internalBytes);
     assert(memory.dirty(1).first == 0 && memory.dirty(1).end == Imx1GraphicsMemory::externalBytes);
-    for (auto address : {0x16080000u, 0x16200000u, 0x16400000u, 0x16160000u, 0x17000000u, 0xffffffffu}) {
+    value = 0xdeadbeef;
+    assert(memory.access(state, eim, 0x16080000, 4, true, value) == Access::sequence && value == 0xdeadbeef);
+    for (auto address : {0x16200000u, 0x16400000u, 0x16160000u, 0x17000000u, 0xffffffffu}) {
         value = 0xdeadbeef;
         assert(memory.access(state, eim, address, 4, true, value) == Access::unmapped);
         assert(value == 0xdeadbeef);

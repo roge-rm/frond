@@ -11,7 +11,17 @@
 #include "imx1_boot_probe.h"
 #include "imx1_i2c_read_window.h"
 
+static bool peripheralTrace = false;
+static bool frameOutputFailed = false;
+static void captureFrame(void* context, uint32_t width, uint32_t height, const uint32_t* pixels) {
+    std::ofstream output(static_cast<const char*>(context), std::ios::binary);
+    output << "P6\n" << width << ' ' << height << "\n255\n";
+    for (uint32_t i = 0; i < width * height; ++i)
+        for (unsigned lane = 0; lane < 3; ++lane) output.put(char(pixels[i] >> (lane * 8)));
+    frameOutputFailed = !output;
+}
 static void trace(void*, const Imx1ProbeTrace& t) {
+    if (peripheralTrace) return;
     if (t.instructionSize == 2) {
         std::printf("step=%u pc=%08x instruction=%04x cpsr=%08x operand=%08x width=2\n",
                     t.step, t.pc, t.instruction, t.cpsr, t.operand);
@@ -21,6 +31,8 @@ static void trace(void*, const Imx1ProbeTrace& t) {
                 t.step, t.pc, t.instruction, t.cpsr, t.operand);
 }
 static void bus(void* context, const Imx1ProbeAccess& t) {
+    if (peripheralTrace && t.status == Imx1BootstrapAccess::ok && t.address >= 0x08000000 &&
+        !(t.address >= 0x15000000 && t.address < 0x17000000)) return;
     const char* name = Imx1Bootstrap::registerName(t.address);
     if (!name && t.address >= 0x08000000 && t.address < 0x10000000) name = "SDRAM";
     std::printf("bus step=%u pc=%08x operation=%s address=%08x size=%u value=%08x register=%s status=%s%s",
@@ -96,7 +108,7 @@ static bool parseRtcTime(const char* text, Imx1RtcTime& time) {
 }
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::fprintf(stderr, "Usage: %s ROM [physical|reset|linked] [instruction-budget] [exact|fast] [--bootstrap-peripherals] [--assume-mpll-settled] [--assume-spll-settled] [--assume-i2c-single-master] [--i2c-eeprom-image=PATH] [--asp-px1-input=high] [--asp-u-sample=WORD] [--rtc-initial-time=DAY:HH:MM:SS] [--cs4-port0-input=BYTE] [--cs5-reset-status-input=BYTE] [--graphics-profile=virtual5744-compatible-8mib] [--graphics-raw-axes=FIRST/SECOND] [--graphics-irq-connection=virtual-a13] [--gpio-a-input-masked=VALUE/MASK] [--gpio-a-input=VALUE] [--gpio-b-input=VALUE] [--gpio-d-input=VALUE] [--ram-mib=32|128]\n", argv[0]);
+        std::fprintf(stderr, "Usage: %s ROM [physical|reset|linked] [instruction-budget] [exact|fast] [--bootstrap-peripherals] [--trace=peripherals] [--frame-output=PATH] [--assume-mpll-settled] [--assume-spll-settled] [--assume-i2c-single-master] [--i2c-eeprom-image=PATH] [--asp-px1-input=high] [--asp-u-sample=WORD] [--rtc-initial-time=DAY:HH:MM:SS] [--cs4-port0-input=BYTE] [--cs5-reset-status-input=BYTE] [--graphics-profile=virtual5744-compatible-8mib] [--graphics-raw-axes=FIRST/SECOND] [--graphics-irq-connection=virtual-a13] [--gpio-a-input-masked=VALUE/MASK] [--gpio-a-input=VALUE] [--gpio-b-input=VALUE] [--gpio-d-input=VALUE] [--ram-mib=32|128]\n", argv[0]);
         return 1;
     }
     const char* engine = argc >= 5 ? argv[4] : "exact";
@@ -114,6 +126,12 @@ int main(int argc, char** argv) {
     options.busContext = options.cs5ResetContext = options.cs5ConfigurationContext = &options;
     for (int i = 5; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--bootstrap-peripherals")) options.bootstrapPeripherals = true;
+        else if (!std::strcmp(argv[i], "--trace=peripherals")) peripheralTrace = true;
+        else if (!std::strncmp(argv[i], "--frame-output=", 15) && argv[i][15]) {
+            if (options.frameObserver) return 1;
+            options.frameObserver = captureFrame;
+            options.frameContext = argv[i] + 15;
+        }
         else if (!std::strcmp(argv[i], "--assume-i2c-single-master")) options.assumeI2cSingleMaster = true;
         else if (!std::strncmp(argv[i], "--graphics-profile=", 19)) {
             if (options.graphicsProfile != Imx1GraphicsProfile::strict ||
@@ -383,5 +401,6 @@ int main(int argc, char** argv) {
     for (unsigned i = 0; i < 16; ++i)
         std::printf("r%u=%08x%c", i, result.registers[i], i % 4 == 3 ? '\n' : ' ');
     std::printf("cpsr=%08x spsr=%08x\n", result.cpsr, result.spsr);
+    if (frameOutputFailed) { std::fprintf(stderr,"Could not write frame output\n"); return 1; }
     return 2;  // A diagnostic stop never establishes a successful boot.
 }

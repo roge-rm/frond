@@ -1690,6 +1690,13 @@ test-zodiac-graphics-engine: build/zodiac-boot-probe
 		build/source/src/uarm/uarm/imx1_eim.cpp -o build/test-zodiac-graphics-engine
 	./build/test-zodiac-graphics-engine
 
+.PHONY: test-zodiac-graphics-commands
+test-zodiac-graphics-commands: build/zodiac-boot-probe
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Ibuild/source/src/uarm/uarm tests/zodiac-graphics-commands.cpp \
+		build/source/src/uarm/uarm/imx1_eim.cpp -o build/test-zodiac-graphics-commands
+	./build/test-zodiac-graphics-commands
+
 .PHONY: test-zodiac-graphics-display
 test-zodiac-graphics-display: build/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \

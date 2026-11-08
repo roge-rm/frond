@@ -1,6 +1,7 @@
 #include <cassert>
 #include <cstdio>
 #include "zodiac-graphics-setup.h"
+#include "imx1_graphics_memory.h"
 
 int main() {
     using A = Imx1BootstrapAccess;
@@ -73,6 +74,31 @@ int main() {
     assert(state.engineState().emptyRing());
     assert(state.engineState().ringAddress() == 0x150000 && state.engineState().ringBytes() == 65536);
     assert(state.engineState().ringBaseWord() == 0x10150000);
+    Imx1GraphicsMemory memory;
+    value = 0x12345678;
+    assert(memory.access(state, eim, 0x16080000, 4, true, value) == A::sequence);
+    value = 0x40000;
+    assert(state.access(eim, 0x200c51d8, 0x16010014, 4, true, value) == A::ok);
+    value = 0x5ffff;
+    assert(state.access(eim, 0x200c51fc, 0x16010010, 4, true, value) == A::ok);
+    for (uint32_t i = 0; i < 4; ++i) {
+        value = 0x12345678 + i;
+        assert(memory.access(state, eim, 0x16080000 + i * 0x10000, 4, true, value) == A::ok);
+        value = 0;
+        assert(memory.access(state, eim, 0x16150000, 4, false, value) == A::ok && value == 0x12345678 + i);
+    }
+    value = 0xaabbccdd;
+    assert(memory.access(state, eim, 0x160bfffc, 4, true, value) == A::ok);
+    assert(memory.access(state, eim, 0x1615fffc, 4, false, value) == A::ok && value == 0xaabbccdd);
+    assert(memory.dirty(0).first == 0x50000 && memory.dirty(0).end == 0x60000);
+    assert(state.engineState().emptyRing());
+    value = 0xdeadbeef;
+    for (uint32_t width : {1u, 2u, 8u})
+        assert(memory.access(state, eim, 0x16080000, width, true, value) == A::width);
+    assert(memory.access(state, eim, 0x16080001, 4, true, value) == A::width);
+    assert(memory.access(strict, eim, 0x16080000, 4, true, value) == A::sequence);
+    assert(memory.access(state, eim, 0x160c0000, 4, true, value) == A::unmapped);
+    assert(value == 0xdeadbeef);
     for (uint32_t pc : {0x200b8fccu, 0x200b9030u}) {
         for (unsigned i = 0; i < 16; ++i) {
             value = 0xdeadbeef;
@@ -101,7 +127,7 @@ int main() {
     assert(state.access(eim, 0x200b8e88, 0x16010220, 4, true, value) == A::sequence);
     assert(state.engineState().emptyRing());
     assert(state.access(eim, 0, 0x16010218, 4, true, value) == A::unmapped);
-    assert(state.access(eim, 0, 0x16010140, 4, false, value) == A::unmapped);
+    assert(state.access(eim, 0, 0x16010140, 4, false, value) == A::externalInput);
     value = 0x3e01;
     assert(eim.access(0x00220028, 4, true, value) == Imx1EimAccess::ok);
     value = 0xdeadbeef;
@@ -110,6 +136,8 @@ int main() {
     value = 0x3e00;
     assert(eim.access(0x00220028, 4, true, value) == Imx1EimAccess::ok);
     state.reset();
+    value = 0xdeadbeef;
+    assert(memory.access(state, eim, 0x16080000, 4, false, value) == A::sequence && value == 0xdeadbeef);
     assert(!state.engineState().setupComplete() && !state.engineState().emptyRing());
     assert(state.engineState().ringAddress() == 0 && state.engineState().ringBytes() == 0);
     for (uint32_t pc : {0x200b8fccu, 0x200b9030u}) {
