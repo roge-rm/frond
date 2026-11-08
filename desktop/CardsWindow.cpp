@@ -625,7 +625,11 @@ void CardsWindow::openFiles(const QString& id) {
             };
         frondCardFile::FatImage check(*opened);
     } catch (const frondCardFile::Error& e) {
-        return failed(e.message);
+        if (e.message != frondCardFile::mismatchMessage()) return failed(e.message);
+        opened.reset();
+        if (!discardChange(path)) return;
+        hold.reset();
+        return openFiles(id);
     }
     auto* w = new CardFilesWindow(std::move(opened), card.name, this);
     w->hold = std::move(hold);
@@ -637,6 +641,23 @@ void CardsWindow::openFiles(const QString& id) {
         afterChange(this);
     });
     w->QDialog::open();
+}
+// A card refused for an unfinished change that doesn't match it: the choice to drop that change.
+bool CardsWindow::discardChange(const QString& path) {
+    QMessageBox box(QMessageBox::Warning, tr("Files"), frondCardFile::mismatchMessage(), QMessageBox::Cancel, this);
+    auto* discard = box.addButton(tr("Discard unfinished change"), QMessageBox::DestructiveRole);
+    box.setDefaultButton(QMessageBox::Cancel);
+    box.exec();
+    if (box.clickedButton() != discard) return false;
+    if (QMessageBox::question(this, tr("Discard unfinished change"), tr("Discard the unfinished change? This can't be undone."),
+                              QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Discard)
+        return false;
+    const auto error = frondCardFile::discardMismatched(path);
+    if (!error.isEmpty()) {
+        failed(error);
+        return false;
+    }
+    return true;
 }
 void CardsWindow::linkCard(const QString& id) {
     LinkDialog dialog(sessions, id, held(), {}, this);

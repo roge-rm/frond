@@ -94,6 +94,7 @@ class CardsWindow : public QDialog {
     QLabel *sdHeading, *msHeading, *sdEmpty, *msEmpty;
     // Files… on a card: a free card or one in a stopped machine, edited in place.
     void openFiles(const QString& id);
+    bool discardChange(const QString& path);
     CardFilesWindow* files{nullptr};
  private:
     void newCard();

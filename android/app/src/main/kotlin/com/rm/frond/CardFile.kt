@@ -89,6 +89,13 @@ class CardFile private constructor(val file: File, val writable: Boolean) : Auto
             return if (code == "busy") Cards.IN_FILES else message
         }
 
+        // Drops an unfinished change that doesn't match the card and settles the rest. Null when
+        // done, otherwise the message to show.
+        fun discardMismatched(card: File): String? {
+            val (code, message) = CardStorage.failure(CardStorage.discard(card.path)) ?: return null
+            return if (code == "busy") Cards.IN_FILES else message
+        }
+
         // What a card load checks: the header and every CRC. Reads the whole card. The generation
         // (0 for v1), or null.
         fun verify(card: File): Long? = CardStorage.verify(card.path).takeIf { it >= 0 }

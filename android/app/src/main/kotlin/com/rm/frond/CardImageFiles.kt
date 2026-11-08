@@ -45,6 +45,9 @@ class CardImageFiles private constructor(private val app: Context, private val s
     override val leaveLabel get() = "Done"
     override val prompt = ClashPrompt()
     var note by mutableStateOf<String?>(null)
+    // A card Files… refused for an unfinished change that doesn't match it, waiting for the choice
+    // to discard that change.
+    var mismatched by mutableStateOf<CardChoices.Row?>(null)
 
     private fun ui(block: () -> Unit) { HomeWork.scope.launch { block() } }
     private fun percent(progress: (Long, Long) -> Unit): (Float) -> Unit = { progress((it.coerceIn(0f, 1f) * 1000).toLong(), 1000) }
@@ -70,6 +73,10 @@ class CardImageFiles private constructor(private val app: Context, private val s
                 CardFile.open(found.path, !kept.writeProtected)
             } catch (e: IOException) {
                 found.close()
+                if (e.message == Cards.MISMATCH) {
+                    ui { mismatched = row }
+                    return@runJob null
+                }
                 return@runJob e.message ?: "Couldn't read the card."
             }
             // A machine loads the card as changed from the first write on, even after a crash.
@@ -98,6 +105,18 @@ class CardImageFiles private constructor(private val app: Context, private val s
                 HomeWork.model?.openCards()
             }
             null
+        }
+    }
+
+    // Drops the unfinished change that doesn't match the card, under its lock, then opens it.
+    fun discard(row: CardChoices.Row) {
+        val home = home ?: return
+        home.runJob("Discarding the change", "Couldn't discard the change", null, cancellable = false, reload = false) { _, _ ->
+            val (found, error) = Cards.cardSource(sessions, row.card.id)
+            if (found == null) return@runJob error
+            val failed = found.use { CardFile.discardMismatched(it.path) }
+            if (failed == null) ui { start(row) }
+            failed
         }
     }
 

@@ -516,6 +516,11 @@ static void MismatchedJournal(const fs::path& root) {
     } catch (const frondStorage::Error& e) {
         assert(e.message == frondStorage::mismatchMessage);
     }
+    // Discarding drops it and its pending list, leaves the card as it was, and settles.
+    WriteAll(frondStorage::pendingPath(card, 4), {'F', 'R', 'O', 'N'});
+    assert(frondStorage::discardMismatched(card).ok);
+    assert(ReadAll(card) == file && Snapshot(dir).size() == 1);
+    assert(frondStorage::settle(card).ok && frondStorage::readiness(card).ok);
 }
 
 int main(int argc, char** argv) {

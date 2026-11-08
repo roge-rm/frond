@@ -37,6 +37,7 @@ internal object CardStorage {
     // "ok" or "error CODE MESSAGE".
     @JvmStatic external fun settle(path: String): String
     @JvmStatic external fun readiness(path: String): String
+    @JvmStatic external fun discard(path: String): String
     // The generation, or -1.
     @JvmStatic external fun verify(path: String): Long
     @JvmStatic external fun header(path: String): ByteArray?

@@ -39,6 +39,7 @@ class Cancelled : public Error {
 inline QString inUseMessage() { return QString::fromUtf8(frondStorage::inUseMessage); }
 inline QString damagedMessage() { return QString::fromUtf8(frondStorage::damagedMessage); }
 inline QString inFilesMessage() { return QString::fromUtf8(frondStorage::inFilesMessage); }
+inline QString mismatchMessage() { return QString::fromUtf8(frondStorage::mismatchMessage); }
 
 inline std::filesystem::path pathOf(const QString& file) { return std::filesystem::path(QFile::encodeName(file).toStdString()); }
 inline std::string utf8Of(const QString& s) { return s.toStdString(); }
@@ -63,6 +64,12 @@ inline bool inUse(const QString& card) { return frondStorage::inUse(pathOf(card)
 // Finishes a cut-off change, if there is one. False when the card is open in a CardFile now, or
 // can't be written; true when there was nothing to do or it's done.
 inline bool settle(const QString& card) { return frondStorage::settleCard(pathOf(card)); }
+// Drops an unfinished change that doesn't match the card, under its lock, and settles the rest.
+// Empty on success, else the message to show.
+inline QString discardMismatched(const QString& card) {
+    const auto r = frondStorage::discardMismatched(pathOf(card));
+    return r.ok ? QString() : textOf(r.message);
+}
 // A card file nobody has open in Files…, with any change a crash cut off finished.
 inline bool ready(const QString& card) { return frondStorage::ready(pathOf(card)); }
 // As ready(), with why not: empty when ready, else the message to show.

@@ -56,6 +56,7 @@ fun CardsScreen(home: HomeModel, model: CardsModel) {
     var making by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf<CardChoices.Row?>(null) }
     var deleting by remember { mutableStateOf<CardChoices.Row?>(null) }
+    var discarding by remember { mutableStateOf<CardChoices.Row?>(null) }
     var exporting by remember { mutableStateOf<CardChoices.Row?>(null) }
     val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) model.importImage(uri)
@@ -145,6 +146,24 @@ fun CardsScreen(home: HomeModel, model: CardsModel) {
         Dialog({ if (files.path == "/") files.leaveFiles() else files.up() }, DialogProperties(usePlatformDefaultWidth = false)) {
             Surface(Modifier.fillMaxSize()) { CardFilesScreen(files, filesSnackbar) }
         }
+    }
+    files.mismatched?.let { row ->
+        AlertDialog(
+            onDismissRequest = { files.mismatched = null },
+            title = { Text("Files") },
+            text = { Text(Cards.MISMATCH) },
+            confirmButton = { TextButton(onClick = { files.mismatched = null; discarding = row }) { Text("Discard unfinished change") } },
+            dismissButton = { TextButton(onClick = { files.mismatched = null }) { Text("Cancel") } },
+        )
+    }
+    discarding?.let { row ->
+        AlertDialog(
+            onDismissRequest = { discarding = null },
+            title = { Text("Discard unfinished change") },
+            text = { Text("Discard the unfinished change? This can't be undone.") },
+            confirmButton = { TextButton(onClick = { discarding = null; files.discard(row) }) { Text("Discard") } },
+            dismissButton = { TextButton(onClick = { discarding = null }) { Text("Cancel") } },
+        )
     }
     home.alert?.let { (title, text) ->
         AlertDialog(

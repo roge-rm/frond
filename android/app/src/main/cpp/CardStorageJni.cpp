@@ -254,6 +254,12 @@ extern "C" JNIEXPORT jstring JNICALL STORAGE(settle)(JNIEnv* env, jclass, jstrin
     return guarded(env, jstring(nullptr), [&] { return reply(env, frondStorage::settleChanges(utf8(env, path))); });
 }
 
+// discard(path): drops an unfinished change that doesn't match the card, then settles the rest.
+// "ok" or "error CODE MESSAGE".
+extern "C" JNIEXPORT jstring JNICALL STORAGE(discard)(JNIEnv* env, jclass, jstring path) {
+    return guarded(env, jstring(nullptr), [&] { return reply(env, frondStorage::discardMismatched(utf8(env, path))); });
+}
+
 // readiness(path): as settle, and "error busy" when the card is open in Files.
 extern "C" JNIEXPORT jstring JNICALL STORAGE(readiness)(JNIEnv* env, jclass, jstring path) {
     return guarded(env, jstring(nullptr), [&] { return reply(env, frondStorage::readiness(utf8(env, path))); });
