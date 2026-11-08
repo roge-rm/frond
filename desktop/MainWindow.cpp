@@ -252,6 +252,13 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (into) into->addWidget(l, row, 0);
         return l;
     };
+    // The control with its port field below it, so both fit the panel's width.
+    auto stack = [](QWidget* control, QWidget* port) {
+        auto* v = new QVBoxLayout;
+        v->setContentsMargins(0, 0, 0, 0); v->setSpacing(4);
+        v->addWidget(control); v->addWidget(port);
+        return v;
+    };
     // One row per device: label, control, and the port beside it. Readout rows hide while empty.
     soundToggle = new QCheckBox(tr("On"), root);
     soundToggle->setObjectName("sound");
@@ -291,7 +298,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     serialPort->setRange(1, 65535);
     serialPort->setPrefix(tr("Port "));
     loadSerialSettings();
-    serialLabel = label(tr("Serial port"), 4, grid); grid->addWidget(serial, 4, 1); grid->addWidget(serialPort, 4, 2);
+    serialLabel = label(tr("Serial port"), 4, grid); grid->addLayout(stack(serial, serialPort), 4, 1, 1, 2);
     serialState = new QLabel(root);
     serialState->setObjectName("serialState");
     serialState->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -320,7 +327,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     usbPort->setRange(1, 65535);
     usbPort->setPrefix(tr("Port "));
     loadUsbSettings();
-    usbLabel = label(tr("USB HotSync"), 6, grid); grid->addWidget(usb, 6, 1); grid->addWidget(usbPort, 6, 2);
+    usbLabel = label(tr("USB HotSync"), 6, grid); grid->addLayout(stack(usb, usbPort), 6, 1, 1, 2);
     usbState = new QLabel(root);
     usbState->setObjectName("usbState");
     usbState->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -344,7 +351,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     irda->setToolTip(tr("Pick a connection to beam to another Frond. Pair them in File > Pairing."));
     irdaPort=new QSpinBox(root);irdaPort->setObjectName("irdaPort");
     irdaPort->setRange(1,65535);irdaPort->setPrefix(tr("Port "));loadIrdaSettings();
-    label(tr("Infrared beaming"), 8, grid); grid->addWidget(irda, 8, 1); grid->addWidget(irdaPort, 8, 2);
+    label(tr("Infrared beaming"), 8, grid); grid->addLayout(stack(irda, irdaPort), 8, 1, 1, 2);
     irdaState=new QLabel(root);irdaState->setObjectName("irdaState");
     irdaState->setTextInteractionFlags(Qt::TextSelectableByMouse);grid->addWidget(irdaState, 9, 1, 1, 2);
     auto irdaChanged=[this] {
@@ -360,7 +367,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     bluetoothSocket->setObjectName("bluetoothSocket");
     bluetoothSocket->setPlaceholderText(tr("Absolute controller socket path"));
     loadBluetoothSettings();
-    bluetoothLabel = label(tr("Bluetooth"), 10, grid); grid->addWidget(bluetooth, 10, 1, 1, 2); grid->addWidget(bluetoothSocket, 11, 1, 1, 2);
+    bluetoothLabel = label(tr("Bluetooth"), 10, grid); grid->addWidget(bluetooth, 10, 1, 1, 2); grid->addWidget(bluetoothSocket, 11, 0, 1, 3);
     bluetoothState = new QLabel(root); bluetoothState->setObjectName("bluetoothState");
     bluetoothState->setWordWrap(true); bluetoothState->setTextInteractionFlags(Qt::TextSelectableByMouse);
     grid->addWidget(bluetoothState, 12, 1, 1, 2);
@@ -919,14 +926,14 @@ void MainWindow::refresh() {
     keyboard->setEnabled(enabled && caps.keyboard && irda->currentData()=="off");
     const bool editable = !busy && !stopping && (!running || enabled);
     serial->setEnabled(editable && caps.serial);
-    serialPort->setEnabled(editable && caps.serial && serial->currentData() == "tcp");
+    serialPort->setEnabled(caps.serial && serial->currentData() == "tcp"); serialPort->setReadOnly(!editable);
     usb->setEnabled(editable && caps.usb);
-    usbPort->setEnabled(editable && caps.usb && usb->currentData() == "tcp");
+    usbPort->setEnabled(caps.usb && usb->currentData() == "tcp"); usbPort->setReadOnly(!editable);
     irda->setEnabled(editable && caps.infrared && !keyboard->isChecked());
-    irdaPort->setEnabled(editable && caps.infrared && !keyboard->isChecked() && irda->currentData()=="tcp");
+    irdaPort->setEnabled(caps.infrared && !keyboard->isChecked() && irda->currentData()=="tcp"); irdaPort->setReadOnly(!editable);
     irdaPort->setVisible(!irda->currentData().toString().startsWith("link:"));
     bluetooth->setEnabled(editable && caps.bluetooth);
-    bluetoothSocket->setEnabled(editable && caps.bluetooth && bluetooth->isChecked());
+    bluetoothSocket->setEnabled(caps.bluetooth && bluetooth->isChecked()); bluetoothSocket->setReadOnly(!editable);
     bluetooth->setToolTip(caps.bluetooth ? tr("See doc/using-frond.md (Bluetooth) for controller setup.") : reason);
     // Which card buttons show follows the card's state, as on Android.
     const bool memoryStick = this->memoryStick();
