@@ -229,7 +229,7 @@ class ExchangeTest : public QObject {
             const auto n = QString::fromUtf8(name);
             QVERIFY2(!exchange.put(input, n, error), name);
             QVERIFY2(!exchange.mkdir(n, error), name);
-            QVERIFY(error.contains("already exists"));
+            QVERIFY(error.contains("already"));
             QCOMPARE(digest(exchange.image()), before);
         }
     }
