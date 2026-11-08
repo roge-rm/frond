@@ -159,10 +159,13 @@ class MainWindow : public QMainWindow {
     PalmHolder* palmHolder{nullptr};
     BarHandle* barHandle{nullptr};
     QHBoxLayout* bodyLayout{nullptr};  // the Palm and, outside full screen, the panel
-    QWidget* edgeStrip{nullptr};       // along the top edge in full screen, brings the bar back
     QTimer* overlayTimer{nullptr};     // hides the bar 3 s after the pointer leaves it
+    QTimer* edgeTimer{nullptr};        // watches for the pointer at the top edge while the bar is hidden
     bool fullScreenOn{false}, overlayBarShown{false};
+    bool fullScreenWasMaximized{false};
+    QSize fullScreenReturnSize;  // the window's size to go back to, without a panel
     bool embedWanted{false}, embedTried{false}, embedded{false};
+    bool fitOffPending{false};  // `display fit=none` sent after the embedding failed
     bool panelWasOpen{false};
     int baseWidth{0};  // the window's width with no panel open, while the Palm is embedded
     bool contrastPending{false};

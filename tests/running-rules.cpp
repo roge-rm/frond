@@ -231,13 +231,42 @@ class RunningRulesTest : public QObject {
         QCOMPARE(overlayPanel({200, 20}, 36).height(), 0);
     }
     void keyTargets() {
-        // The Palm gets the keys on a click on it and when the window is activated, Frond's window on
-        // a click on its widgets, and nothing changes while the window isn't active.
-        QCOMPARE(keyTarget(true, true, false, false), KeyTarget::Palm);
-        QCOMPARE(keyTarget(true, false, false, true), KeyTarget::Palm);
-        QCOMPARE(keyTarget(true, false, true, false), KeyTarget::Frond);
-        QCOMPARE(keyTarget(true, false, false, false), KeyTarget::Keep);
-        QCOMPARE(keyTarget(false, true, false, true), KeyTarget::Keep);
+        // A press on the Palm gives it the keys, a press on a Frond widget takes them, anything
+        // else (the bar, the menu bar, another application) leaves the choice.
+        QVERIFY(palmWantsKeys(false, Press::OnPalm));
+        QVERIFY(!palmWantsKeys(true, Press::OnFrond));
+        QVERIFY(palmWantsKeys(true, Press::None));
+        QVERIFY(!palmWantsKeys(false, Press::None));
+        // Typing in a panel field with the pointer over the Palm: the window manager put the focus
+        // on Frond's top-level, which holds the Palm, so it moves to the key window.
+        QCOMPARE(keyTarget(FocusAt::HoldsPalm, false, false), KeyTarget::Frond);
+        QCOMPARE(keyTarget(FocusAt::Frond, false, false), KeyTarget::Keep);
+        QCOMPARE(keyTarget(FocusAt::Palm, false, false), KeyTarget::Frond);
+        // Back from another application (Alt-Tab): the top-level gets the focus, and it goes to
+        // whichever had the keys before, the Palm or the panel.
+        QCOMPARE(keyTarget(FocusAt::HoldsPalm, true, false), KeyTarget::Palm);
+        QCOMPARE(keyTarget(FocusAt::Palm, true, false), KeyTarget::Keep);
+        QCOMPARE(keyTarget(FocusAt::Frond, true, false), KeyTarget::Palm);
+        // Click on the Palm after coming back: the press sets the choice and the focus follows.
+        QCOMPARE(keyTarget(FocusAt::HoldsPalm, palmWantsKeys(false, Press::OnPalm), false), KeyTarget::Palm);
+        // Nothing moves while another application or a dialog has the focus, or a menu is open.
+        QCOMPARE(keyTarget(FocusAt::Elsewhere, true, false), KeyTarget::Keep);
+        QCOMPARE(keyTarget(FocusAt::Elsewhere, false, false), KeyTarget::Keep);
+        QCOMPARE(keyTarget(FocusAt::HoldsPalm, true, true), KeyTarget::Keep);
+        QCOMPARE(keyTarget(FocusAt::HoldsPalm, false, true), KeyTarget::Keep);
+    }
+    void topEdgeReveal() {
+        // The hidden bar comes back with the pointer on the top two rows of the full-screen area.
+        const QRect area(0, 0, 1280, 800);
+        QVERIFY(revealBar({640, 0}, area));
+        QVERIFY(revealBar({0, 1}, area));
+        QVERIFY(!revealBar({640, 2}, area));
+        QVERIFY(!revealBar({640, 400}, area));
+        // A second monitor to the right: only its own top edge counts.
+        const QRect right(1280, 0, 1920, 1080);
+        QVERIFY(revealBar({1300, 0}, right));
+        QVERIFY(!revealBar({100, 0}, right));
+        QVERIFY(!revealBar({1300, -1}, right));
     }
     // A panel opens at the right of the Palm, so the Palm keeps its width; Size scales the Palm.
     void windowAndPanelSizes() {

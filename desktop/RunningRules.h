@@ -155,23 +155,44 @@ inline quint64 parseWindowId(const QString& reply) {
 
 // The side panel's width and the strip left of a hidden bar.
 constexpr int panelWidth = 300, handleHeight = 8;
-// Full screen: the bar goes this long after the pointer leaves it, and a strip this high along
-// the top edge brings it back.
-constexpr int fullScreenHideMs = 3000, edgeStripHeight = 4;
+// Full screen: the bar goes this long after the pointer leaves it, and comes back when the
+// pointer is this close to the top edge of the screen.
+constexpr int fullScreenHideMs = 3000, edgeRevealPixels = 2;
 // The bar stays in full screen while the pointer is on it, a menu from it is open or a panel is.
 inline bool barStaysInFullScreen(bool pointerOnBar, bool menuOpen, bool panelOpen) { return pointerOnBar || menuOpen || panelOpen; }
+// The hidden bar comes back with the pointer at the top edge of the full-screen area.
+inline bool revealBar(QPoint pointer, QRect area) {
+    return pointer.x() >= area.left() && pointer.x() <= area.right() && pointer.y() >= area.top() &&
+           pointer.y() < area.top() + edgeRevealPixels;
+}
 // Where the panel goes in full screen: over the right edge, under the bar when that shows.
 inline QRect overlayPanel(QSize area, int barHeight) {
     return QRect(area.width() - panelWidth, barHeight, panelWidth, std::max(0, area.height() - barHeight));
 }
-// Which window the keyboard goes to: the Palm after a click on it or when the window is activated,
-// Frond's own window after a click on one of its widgets.
+// The keyboard with the Palm embedded. The X server sends keys to the focus window, or to the
+// window under the pointer when that is inside the focus window, so the focus never stays on a
+// window that holds the Palm (Frond's top-level): it goes to the Palm or to Frond's key window,
+// which doesn't hold it.
+// Where the X focus is: in another application or a dialog, on the Palm, on one of Frond's
+// windows that doesn't hold the Palm, or on one that does.
+enum class FocusAt { Elsewhere, Palm, Frond, HoldsPalm };
+// What a mouse press was on: the Palm, a Frond widget that takes the keys (anything but the bar
+// and the menu bar), or neither.
+enum class Press { None, OnPalm, OnFrond };
+// Whether the Palm should have the keys after a press: a press on it gives them, a press on a
+// Frond widget takes them, anything else leaves the choice as it was.
+inline bool palmWantsKeys(bool wanted, Press press) {
+    if (press == Press::OnPalm) return true;
+    if (press == Press::OnFrond) return false;
+    return wanted;
+}
+// Where to move the X focus. Nothing changes while another application or a dialog has it, or a
+// menu is open (it grabs the keyboard).
 enum class KeyTarget { Keep, Palm, Frond };
-inline KeyTarget keyTarget(bool windowActive, bool pressOnPalm, bool pressOnFrond, bool justActivated) {
-    if (!windowActive) return KeyTarget::Keep;
-    if (pressOnFrond) return KeyTarget::Frond;
-    if (pressOnPalm || justActivated) return KeyTarget::Palm;
-    return KeyTarget::Keep;
+inline KeyTarget keyTarget(FocusAt at, bool palmWanted, bool menuOpen) {
+    if (at == FocusAt::Elsewhere || menuOpen) return KeyTarget::Keep;
+    if (palmWanted) return at == FocusAt::Palm ? KeyTarget::Keep : KeyTarget::Palm;
+    return at == FocusAt::Frond ? KeyTarget::Keep : KeyTarget::Frond;
 }
 
 // Window width for a Palm of `palm` pixels: a panel opens at its right, so the Palm keeps its size.

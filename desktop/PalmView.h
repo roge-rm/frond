@@ -2,6 +2,7 @@
 #include <QPointer>
 #include <QSize>
 #include <QWidget>
+#include <vector>
 class QTimer;
 class QWindow;
 
@@ -21,10 +22,12 @@ class PalmHolder : public QWidget {
     void setPalmSize(QSize size);
     QSize sizeHint() const override { return wanted; }
     QSize minimumSizeHint() const override { return wanted.isValid() ? wanted / 2 : QSize(); }
-    // Gives the keyboard to the Palm's window, or back to Frond's own window. Under a window
-    // manager the keys go to Frond's top-level window, which the Palm is a child of.
+    // Gives the keyboard to the Palm's window, or to Frond's key window, which forwards keys to
+    // Qt's focus widget. The X focus is read back every poll and moved off any window that holds
+    // the Palm (see runningRules::keyTarget).
     void focusPalm();
     void focusFrond();
+    bool palmWantsKeys() const { return wantPalm; }
     // Puts the Palm's window above the other native windows of Frond's window.
     void raisePalm();
     // The Palm's rectangle in global coordinates, empty when not embedded.
@@ -34,11 +37,28 @@ class PalmHolder : public QWidget {
  private:
     void setInputFocus(quint32 window);
     void poll();
+    // Moves the X focus where runningRules::keyTarget says.
+    void applyFocus();
     QPointer<QWidget> container;
     QPointer<QWindow> palm;
+    QWidget* keySink{nullptr};
     QTimer* pollTimer{nullptr};
     QSize wanted;
-    bool buttonWasDown{false}, palmHasFocus{false};
+    // The Palm's X window and its parents, refreshed about once a second and on each press.
+    std::vector<quint32> holders;
+    int holdersAge{0};
+    bool buttonWasDown{false}, wantPalm{true};
+};
+
+// Frond's key window while the Palm is embedded: a 1x1 native window under the Palm's, so the
+// keys can go to Frond with the pointer over the Palm. Qt hands its keys to the top-level's focus
+// widget; any key or input method event that still reaches it goes on there too.
+class KeySink : public QWidget {
+    Q_OBJECT
+ public:
+    explicit KeySink(QWidget* parent);
+ protected:
+    bool event(QEvent* event) override;
 };
 
 // The thin strip left over the Palm when the bar is hidden, with a tab in the middle that brings

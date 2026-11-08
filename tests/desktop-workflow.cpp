@@ -2189,6 +2189,9 @@ for line in s.makefile('rb'):
         log.write(cmd.decode()+' '+text.decode()+'\n'); log.flush()
     if cmd==b'microphone-mode': mic=text
     if cmd==b'window-id':
+        # A "windowid" file holds the answer; without one the core refuses.
+        try: s.sendall(i+b'\tok\twindow\t'+open(here+'/windowid','rb').read().strip().hex().encode()+b'\n'); continue
+        except OSError: pass
         s.sendall(i+b'\terror\tunsupported\t'+b'The window is not an X11 window.'.hex().encode()+b'\n'); continue
     message={b'keyboard-state':b'detached',b'network-state':b'disabled',b'device-state':b'DEVICE',b'sd-state':b'none',b'microphone-state':mic,b'microphone-mode':mic}.get(cmd,b'done')
     if cmd==b'keyboard-attach': message=b'attached'
@@ -2328,6 +2331,11 @@ for line in s.makefile('rb'):
             QTRY_VERIFY_WITH_TIMEOUT(commands().contains("window-id "), 4000);
             auto* holder = window.findChild<PalmHolder*>("palmHolder");
             QVERIFY(holder && !holder->isVisible() && !holder->embedded());
+            // The log names the core's refusal, and the core goes back to following the Palm's size.
+            auto* log = window.findChild<QPlainTextEdit*>("logText");
+            QTRY_VERIFY_WITH_TIMEOUT(log->toPlainText().contains("The Palm stays in its own window: The window is not an X11 window."), 4000);
+            QTRY_VERIFY_WITH_TIMEOUT(commands().contains("display fit=none"), 4000);
+            QVERIFY(commands().indexOf("display fit=none") == commands().indexOf("window-id ") + 1);
             // The chain went on after the refusal, and no error box is up.
             QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QAction*>("machineNetwork")->isEnabled(), 4000);
             QVERIFY(!QApplication::activeModalWidget());
@@ -2353,6 +2361,38 @@ for line in s.makefile('rb'):
             QTRY_VERIFY_WITH_TIMEOUT(commands().last() == "quit ", 5000);
             QTRY_VERIFY_WITH_TIMEOUT(!bar->isVisible(), 5000);
             QVERIFY(!holder->embedded() && !window.findChild<QWidget*>("runArea")->isVisible());
+        }
+        qunsetenv("FROND_TRY_EMBED");
+    }
+    // The core answers with an X11 window that can't be wrapped (offscreen Qt): the same fallback,
+    // with a log line that tells it apart from a refusal.
+    void embedWrapFails() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        putSession("Wrap", 6, "palm-tx", 0);
+        QTemporaryDir files;
+        const auto sent = files.path() + "/sent";
+        menuCore(files.path(), "palm-tx");
+        if (QTest::currentTestFailed()) return;
+        { QFile id(files.path() + "/windowid"); QVERIFY(id.open(QIODevice::WriteOnly)); id.write("x11 4242\n"); }
+        auto commands = [&] {
+            QFile f(sent); if (!f.open(QIODevice::ReadOnly)) return QStringList();
+            return QString::fromUtf8(f.readAll()).split('\n', Qt::SkipEmptyParts);
+        };
+        qputenv("FROND_TRY_EMBED", "1");
+        {
+            MainWindow window(files.path() + "/core"); window.show(); window.openSession(managedSession("Wrap"), true);
+            auto* bar = window.findChild<RunningBar*>("runningBar");
+            QTRY_VERIFY_WITH_TIMEOUT(bar->isVisible() && window.findChild<QAction*>("machineSave")->isEnabled(), 5000);
+            auto* log = window.findChild<QPlainTextEdit*>("logText");
+            QTRY_VERIFY_WITH_TIMEOUT(log->toPlainText().contains("The Palm stays in its own window: window 4242 couldn't be embedded."), 4000);
+            QVERIFY(!log->toPlainText().contains("not an X11 window"));
+            QVERIFY(!window.findChild<PalmHolder*>("palmHolder")->embedded());
+            QTRY_VERIFY_WITH_TIMEOUT(commands().contains("display fit=none"), 4000);
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QAction*>("machineNetwork")->isEnabled(), 4000);
+            QVERIFY(!QApplication::activeModalWidget());
+            window.findChild<QAction*>("machineSaveStop")->trigger();
+            QTRY_VERIFY_WITH_TIMEOUT(commands().last() == "quit ", 5000);
         }
         qunsetenv("FROND_TRY_EMBED");
     }

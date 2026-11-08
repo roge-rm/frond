@@ -11,6 +11,7 @@
 #include "CardsWindow.h"
 #include "RunningRules.h"
 #include "RunningPanels.h"
+#include <QCursor>
 #include <QCoreApplication>
 #include <QFileSystemWatcher>
 #include <QJsonObject>
@@ -134,13 +135,6 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     runArea->hide();
     barHandle->hide();
     connect(barHandle, &BarHandle::clicked, this, [this] { setBarShown(true); });
-    edgeStrip = new QWidget(runArea);
-    edgeStrip->setObjectName("edgeStrip");
-    edgeStrip->setAutoFillBackground(true);
-    edgeStrip->setFixedHeight(runningRules::edgeStripHeight);
-    { auto dark = edgeStrip->palette(); dark.setColor(QPalette::Window, Qt::black); edgeStrip->setPalette(dark); }
-    edgeStrip->hide();
-    edgeStrip->installEventFilter(this);
     runArea->installEventFilter(this);
     overlayTimer = new QTimer(this);
     overlayTimer->setSingleShot(true);
@@ -150,6 +144,16 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (runningRules::barStaysInFullScreen(runningBar->underMouse(), QApplication::activePopupWidget() != nullptr, panels->current() >= 0))
             overlayTimer->start();
         else showOverlayBar(false);
+    });
+    // The pointer over the Palm only reaches the core, so the top edge is watched here.
+    edgeTimer = new QTimer(this);
+    edgeTimer->setInterval(15);
+    connect(edgeTimer, &QTimer::timeout, this, [this] {
+        if (!fullScreenOn || overlayBarShown) { edgeTimer->stop(); return; }
+        if (runningRules::revealBar(QCursor::pos(), QRect(runArea->mapToGlobal(QPoint(0, 0)), runArea->size()))) {
+            showOverlayBar(true);
+            overlayTimer->start();
+        }
     });
     drivers = new QWidget(this);
     drivers->hide();
@@ -473,7 +477,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     auto* logDialog = new QDialog(this);
     logDialog->setWindowTitle(tr("Emulator log")); logDialog->resize(700, 400);
     auto* logLayout = new QVBoxLayout(logDialog);
-    log = new QPlainTextEdit(logDialog); log->setReadOnly(true); log->setMaximumBlockCount(1000);
+    log = new QPlainTextEdit(logDialog); log->setObjectName("logText"); log->setReadOnly(true); log->setMaximumBlockCount(1000);
     logLayout->addWidget(log);
     connect(logButton, &QPushButton::clicked, logDialog, &QWidget::show);
     auto bluetoothChanged = [this] {
@@ -490,7 +494,9 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     forceButton->hide();
     setCentralWidget(outer);
     setAcceptDrops(true);
-    connect(panels, &PanelHost::aboutToChange, this, [this](int page) { if (embedded && page >= 0 && !panelWasOpen) baseWidth = width(); });
+    connect(panels, &PanelHost::aboutToChange, this, [this](int page) {
+        if (embedded && page >= 0 && !panelWasOpen && !isMaximized() && !isFullScreen()) baseWidth = width();
+    });
     connect(panels, &PanelHost::changed, this, &MainWindow::panelChanged);
     // The same keys the Palm window sends back as shortcut events; Quit is the File menu's.
     for (const auto& key : runningRules::shortcutKeys()) {
@@ -585,7 +591,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (memoryStickFiles) memoryStickFiles->reject();
         if (cardProgress) { cardProgress->hide(); cardProgress->deleteLater(); cardProgress = nullptr; }
         holdKnown = holdOn = false;
-        palmHolder->release(); embedded = embedWanted = embedTried = panelWasOpen = false;
+        palmHolder->release(); embedded = embedWanted = embedTried = panelWasOpen = fitOffPending = false;
         appsStale = false; deleteApp = {}; knownDatabases.clear(); appsPanel->setDatabases({});
         microphoneArmed = false; microphoneState->clear();
         installQueue.clear(); installTotal = 0; installFailed.clear(); installHint = 0;
@@ -635,6 +641,19 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (command == "db-list") { databasesReply(ok, message); return; }
         if (command == "window-id") {
             embedReply(ok, message);
+            // The core started fitted for the embedding; on its own it goes back to following the
+            // Palm's size (Rotate, keyboard, jog). frond-68k can't change that live and has no rotation.
+            if (!embedded && !stopping && !frondFirmware::runs68k(runningDevice) && send("display", "fit=none")) {
+                fitOffPending = true;
+                return;
+            }
+            if (stopping) save();
+            else afterDevice();
+            return;
+        }
+        if (command == "display" && fitOffPending) {
+            fitOffPending = false;
+            if (!ok) log->appendPlainText(command + ": " + message);
             if (stopping) save();
             else afterDevice();
             return;
@@ -1035,9 +1054,11 @@ void MainWindow::toggleFullScreen() {
 void MainWindow::enterFullScreen() {
     if (fullScreenOn || !client.running() || !embedded) return;
     fullScreenOn = true;
+    fullScreenWasMaximized = isMaximized();
+    fullScreenReturnSize = QSize(panelWasOpen ? baseWidth : width(), height());
     menuBar()->hide();
     removeToolBar(runningBar);
-    for (QWidget* w : {static_cast<QWidget*>(runningBar), static_cast<QWidget*>(panels), edgeStrip}) {
+    for (QWidget* w : {static_cast<QWidget*>(runningBar), static_cast<QWidget*>(panels)}) {
         w->setParent(this);
         w->setAttribute(Qt::WA_NativeWindow);
         w->setAutoFillBackground(true);
@@ -1057,19 +1078,26 @@ void MainWindow::leaveFullScreen() {
     panels->open(-1);
     fullScreenOn = false;
     overlayTimer->stop();
-    edgeStrip->hide();
+    edgeTimer->stop();
     panels->setParent(runArea);
     bodyLayout->addWidget(panels);
     panels->setVisible(panels->current() >= 0);
     addToolBar(Qt::TopToolBarArea, runningBar);
     menuBar()->show();
-    showNormal();
+    if (fullScreenWasMaximized) showMaximized();
+    else {
+        // The window manager brings back the size from before full screen, which is wider by a
+        // panel when one was open then.
+        showNormal();
+        if (fullScreenReturnSize.width() > 0) resize(fullScreenReturnSize);
+    }
     refresh();
 }
 void MainWindow::showOverlayBar(bool on) {
     overlayBarShown = on;
     runningBar->setVisible(on);
-    edgeStrip->setVisible(!on);
+    if (on) edgeTimer->stop();
+    else if (fullScreenOn) edgeTimer->start();
     placeOverlays();
 }
 void MainWindow::placeOverlays() {
@@ -1080,19 +1108,16 @@ void MainWindow::placeOverlays() {
     const auto area = runArea->size();
     const auto origin = runArea->mapTo(this, QPoint(0, 0));
     runningBar->setGeometry(origin.x(), origin.y(), area.width(), runningBar->height());
-    edgeStrip->setGeometry(origin.x(), origin.y(), area.width(), runningRules::edgeStripHeight);
     if (panels->current() >= 0) {
         panels->setGeometry(runningRules::overlayPanel(area, overlayBarShown ? runningBar->height() : 0).translated(origin));
         raise(panels);
     }
     if (overlayBarShown) raise(runningBar);
-    else raise(edgeStrip);
 }
 bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
     if (fullScreenOn) {
         if (watched == runningBar && event->type() == QEvent::Enter) overlayTimer->stop();
         else if (watched == runningBar && event->type() == QEvent::Leave) overlayTimer->start();
-        else if (watched == edgeStrip && event->type() == QEvent::Enter) { showOverlayBar(true); overlayTimer->start(); }
         else if (watched == runArea && event->type() == QEvent::Resize) QTimer::singleShot(0, this, &MainWindow::placeOverlays);
     }
     return QMainWindow::eventFilter(watched, event);
@@ -1117,7 +1142,8 @@ void MainWindow::embedReply(bool ok, const QString& message) {
     const auto id = ok ? runningRules::parseWindowId(message) : 0;
     embedded = id && palmHolder->embed(id);
     if (!embedded) {
-        log->appendPlainText(tr("The Palm stays in its own window. %1").arg(ok ? message : QString()));
+        log->appendPlainText(!ok || !id ? tr("The Palm stays in its own window: %1").arg(message)
+                                        : tr("The Palm stays in its own window: window %1 couldn't be embedded.").arg(id));
         // A hidden bar couldn't be brought back there; the saved choice stays for the next embedding.
         runningBar->setBarShown(true);
         refresh();

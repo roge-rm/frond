@@ -14,10 +14,12 @@ int main(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--link-service")) return frondLink::runHub(argc, argv);
     // The Palm's window can only be embedded from Qt's X11 backend, so a Wayland desktop runs
     // Frond through XWayland.
-    if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM") && !qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY") &&
-        !qEnvironmentVariableIsEmpty("DISPLAY"))
-        qputenv("QT_QPA_PLATFORM", "xcb;wayland");
+    const bool pickPlatform = qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM") &&
+                              !qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY") && !qEnvironmentVariableIsEmpty("DISPLAY");
+    if (pickPlatform) qputenv("QT_QPA_PLATFORM", "xcb;wayland");
     QApplication app(argc, argv);
+    // Programs Frond starts (the link hub, the file manager) pick their own platform.
+    if (pickPlatform) qunsetenv("QT_QPA_PLATFORM");
     if (QGuiApplication::platformName() == "xcb" && qEnvironmentVariableIsEmpty("SDL_VIDEODRIVER"))
         qputenv("SDL_VIDEODRIVER", "x11");
     app.setOrganizationName("Frond");
