@@ -96,7 +96,7 @@ static bool parseRtcTime(const char* text, Imx1RtcTime& time) {
 }
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::fprintf(stderr, "Usage: %s ROM [physical|reset|linked] [instruction-budget] [exact|fast] [--bootstrap-peripherals] [--assume-mpll-settled] [--assume-spll-settled] [--assume-i2c-single-master] [--i2c-eeprom-image=PATH] [--asp-px1-input=high] [--asp-u-sample=WORD] [--rtc-initial-time=DAY:HH:MM:SS] [--cs4-port0-input=BYTE] [--cs5-reset-status-input=BYTE] [--graphics-profile=virtual5744-compatible-8mib] [--gpio-a-input=VALUE] [--gpio-b-input=VALUE] [--gpio-d-input=VALUE] [--ram-mib=32|128]\n", argv[0]);
+        std::fprintf(stderr, "Usage: %s ROM [physical|reset|linked] [instruction-budget] [exact|fast] [--bootstrap-peripherals] [--assume-mpll-settled] [--assume-spll-settled] [--assume-i2c-single-master] [--i2c-eeprom-image=PATH] [--asp-px1-input=high] [--asp-u-sample=WORD] [--rtc-initial-time=DAY:HH:MM:SS] [--cs4-port0-input=BYTE] [--cs5-reset-status-input=BYTE] [--graphics-profile=virtual5744-compatible-8mib] [--graphics-irq-connection=virtual-a13] [--gpio-a-input-masked=VALUE/MASK] [--gpio-a-input=VALUE] [--gpio-b-input=VALUE] [--gpio-d-input=VALUE] [--ram-mib=32|128]\n", argv[0]);
         return 1;
     }
     const char* engine = argc >= 5 ? argv[4] : "exact";
@@ -121,6 +121,30 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "Supply --graphics-profile=virtual5744-compatible-8mib once\n"); return 1;
             }
             options.graphicsProfile = Imx1GraphicsProfile::virtual5744Compatible8MiB;
+        }
+        else if (!std::strncmp(argv[i], "--graphics-irq-connection=", 26)) {
+            if (options.graphicsIrqA13 || std::strcmp(argv[i] + 26, "virtual-a13")) {
+                std::fprintf(stderr, "Supply --graphics-irq-connection=virtual-a13 once\n"); return 1;
+            }
+            options.graphicsIrqA13 = true;
+        }
+        else if (!std::strncmp(argv[i], "--gpio-a-input-masked=", 22)) {
+            const char* text = argv[i] + 22;
+            char* end = nullptr;
+            errno = 0;
+            const auto value = std::strtoul(text, &end, 0);
+            if (options.gpioAInputMaskedKnown || errno || *text < '0' || *text > '9' || *end != '/' || value > UINT32_MAX) {
+                std::fprintf(stderr, "Supply one --gpio-a-input-masked=VALUE/MASK\n"); return 1;
+            }
+            text = end + 1;
+            errno = 0;
+            const auto mask = std::strtoul(text, &end, 0);
+            if (errno || *text < '0' || *text > '9' || *end || !mask || mask > UINT32_MAX || (value & ~mask)) {
+                std::fprintf(stderr, "GPIO-A masked value must fit its nonzero 32-bit mask\n"); return 1;
+            }
+            options.gpioAInputMaskedKnown = true;
+            options.gpioAInput = value;
+            options.gpioAInputMask = mask;
         }
         else if (!std::strncmp(argv[i], "--rtc-initial-time=", 19)) {
             if (options.rtcInitialTimeKnown || !parseRtcTime(argv[i] + 19, options.rtcInitialTime)) {
@@ -192,11 +216,16 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--ram-mib=128")) options.ramMiB = 128;
         else { std::fprintf(stderr, "Unknown diagnostic option: %s\n", argv[i]); return 1; }
     }
+    if ((options.gpioAInputKnown && options.gpioAInputMaskedKnown) ||
+        (options.graphicsIrqA13 && (options.graphicsProfile != Imx1GraphicsProfile::virtual5744Compatible8MiB ||
+          !options.bootstrapPeripherals || options.gpioAInputKnown || (options.gpioAInputMask & 0x2000)))) {
+        std::fprintf(stderr, "Virtual GPU IRQ requires the virtual graphics profile and bootstrap; GPIO-A13 is reserved, omit full-port GPIO-A input and exclude bit13 from its masked input\n"); return 1;
+    }
     if (options.graphicsProfile != Imx1GraphicsProfile::strict &&
         (!options.bootstrapPeripherals || options.cs5ResetStatusInputKnown)) {
         std::fprintf(stderr, "Graphics profile requires --bootstrap-peripherals and owns CS5 reset state; omit --cs5-reset-status-input\n"); return 1;
     }
-    if ((options.aspUSampleKnown || options.cs5ResetStatusInputKnown || options.rtcInitialTimeKnown || options.cs4Port0InputKnown || options.aspPx1HighFromReset || options.gpioAInputKnown || options.gpioBInputKnown || options.gpioDInputKnown || options.ramMiB) && !options.bootstrapPeripherals) {
+    if ((options.aspUSampleKnown || options.cs5ResetStatusInputKnown || options.rtcInitialTimeKnown || options.cs4Port0InputKnown || options.aspPx1HighFromReset || options.gpioAInputKnown || options.gpioAInputMaskedKnown || options.gpioBInputKnown || options.gpioDInputKnown || options.ramMiB) && !options.bootstrapPeripherals) {
         std::fprintf(stderr, "External-input scenarios require --bootstrap-peripherals\n"); return 1;
     }
     if (options.assumeMpllSettled && !options.bootstrapPeripherals) {
@@ -294,7 +323,11 @@ int main(int argc, char** argv) {
         if (i2cWindow) std::puts("Explicit 256-byte I2C 0x50 read window attached; caller-supplied bytes; physical identity and contents unqualified.");
         if (options.gpioAInputKnown)
             std::printf("Hypothetical static from-reset full-port GPIO-A input=%08x\n", options.gpioAInput);
+        else if (options.gpioAInputMaskedKnown)
+            std::printf("Hypothetical static from-reset masked GPIO-A input=%08x mask=%08x; other lanes have separate owners or remain unknown.\n", options.gpioAInput, options.gpioAInputMask);
         else std::puts("External GPIO-A levels are unknown.");
+        if (options.graphicsIrqA13)
+            std::puts("VIRTUAL GPU IRQ: virtual-a13; GPU interrupt owns i.MX1 GPIO-A13 from reset, asserted low, released resolved high by an ideal virtual pull-up; pending and enables determine its level; inferred topology, no physical wiring claim.");
         if (options.gpioBInputKnown)
             std::printf("Hypothetical static from-reset full-port GPIO-B input=%08x\n", options.gpioBInput);
         else std::puts("External GPIO-B levels are unknown.");

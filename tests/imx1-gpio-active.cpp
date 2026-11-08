@@ -153,8 +153,60 @@ void transactionalDelivery() {
     bus(soc, base + 0x34, true, bit);
     assert(soc.interruptLines().irq == Imx1AitcLine::clear);
 }
+void drivenOwnership() {
+    Imx1Gpio gpio;
+    assert(gpio.setInputMasked(0, 0x80, ~bit));
+    assert(gpio.reserveInput(0, bit));
+    assert(!gpio.setInput(0, 0x80));
+    assert(!gpio.reserveInput(0, bit << 1));
+    assert(gpio.updateInput(0, 0, 0xffffffff) == G::sideEffect);
+    op(gpio, 0, 0x24, false, 0xfeedface, G::externalInput);
+    assert(gpio.driveInput(0, bit, bit, true) == G::ok);
+    assert(op(gpio, 0, 0x24, false) == (0x80 | bit));
+    assert(gpio.driveInput(0, 0x80, bit) == G::sideEffect);
+    op(gpio, 0, 0x20, true, bit);
+    op(gpio, 0, 0x28, true, 0); // Rising edge.
+    op(gpio, 0, 0x30, true, bit);
+    assert(gpio.driveInput(0, 0, bit) == G::ok);
+    assert(gpio.driveInput(0, bit, bit, true) == G::ok);
+    assert(op(gpio, 0, 0x34, false) == 0); // Restoring a baseline creates no edge.
+    assert(gpio.driveInput(0, 0, bit) == G::ok);
+    assert(gpio.driveInput(0, bit, bit) == G::ok);
+    assert(op(gpio, 0, 0x34, false) == bit);
+    op(gpio, 0, 0x34, true, bit);
+    assert(gpio.driveInput(0, 0, 0) == G::ok); // Disconnected source is unknown.
+    op(gpio, 0, 0x34, false, 0xfeedface, G::externalInput);
+    assert(gpio.driveInput(0, bit, bit, true) == G::ok);
+    op(gpio, 0, 0x34, true, bit);
+    assert(op(gpio, 0, 0x34, false) == 0);
+    Imx1Gpio raw;
+    assert(raw.setInput(0, 0x80) && !raw.reserveInput(0, bit));
+    assert(op(raw, 0, 0x24, false) == 0x80);
+
+    Imx1Bootstrap soc;
+    assert(soc.setGpioInputMasked(0, 0x80, ~bit));
+    assert(soc.reserveGpioInput(0, bit));
+    assert(soc.driveGpioInput(0, bit, bit, true, true) == B::ok);
+    bus(soc, base + 0x20, true, bit);
+    bus(soc, base + 0x28, true, 3u << 26);
+    bus(soc, base + 0x30, true, bit);
+    bus(soc, 0x00223008, true, 11);
+    assert(soc.driveGpioInput(0, 0, bit, false) == B::sideEffect);
+    assert(bus(soc, base + 0x24, false) == (0x80 | bit));
+    soc.connectCpuInterrupts();
+    assert(soc.driveGpioInput(0, 0, bit, false) == B::ok);
+    assert(bus(soc, base + 0x34, false) == 0);
+    assert(soc.driveGpioInput(0, 0, bit) == B::ok);
+    assert(soc.interruptLines().irq == Imx1AitcLine::asserted);
+    assert(soc.driveGpioInput(0, bit, bit) == B::ok);
+    bus(soc, base + 0x34, true, bit);
+    assert(soc.driveGpioInput(0, 0, 0) == B::externalInput);
+    assert(bus(soc, base + 0x24, false) == (0x80 | bit));
+    assert(bus(soc, base + 0x34, false) == 0);
+}
+
 }
 int main() {
-    levels(); edges(); knownnessAndMux(); mixedKnownness(); transactionalDelivery();
+    levels(); edges(); knownnessAndMux(); mixedKnownness(); transactionalDelivery(); drivenOwnership();
     std::puts("PASS: GPIO levels, edges, masked status, W1C, unknown history, immutable samples and transactional AITC delivery");
 }

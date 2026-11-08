@@ -1711,3 +1711,10 @@ test-zodiac-cs5-bus: build/zodiac-boot-probe
 		build/source/src/uarm/uarm/imx1_eim.cpp build/source/src/uarm/uarm/imx1_timer.cpp build/source/src/uarm/uarm/imx1_i2c.cpp build/source/src/uarm/uarm/imx1_asp.cpp build/source/src/uarm/uarm/imx1_pwm.cpp -o build/test-zodiac-cs5-bus
 	./build/test-zodiac-cs5-bus
 	python3 tests/zodiac-cs5-bus.py
+
+.PHONY: test-zodiac-graphics-interrupts
+test-zodiac-graphics-interrupts: zodiac-boot-probe prepare
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Ibuild/source/src/uarm/uarm \
+		tests/zodiac-graphics-interrupts.cpp -o build/test-zodiac-graphics-interrupts
+	./build/test-zodiac-graphics-interrupts
+	python3 tests/zodiac-graphics-interrupts.py

@@ -1,0 +1,526 @@
+diff --git a/src/uarm/uarm/imx1_gpio.h b/src/uarm/uarm/imx1_gpio.h
+--- a/src/uarm/uarm/imx1_gpio.h
++++ b/src/uarm/uarm/imx1_gpio.h
+@@ -12,7 +12,11 @@
+     Imx1Gpio();
+     Imx1GpioAccess access(uint32_t address, uint32_t size, bool write, uint32_t& value);
+     // Supply an immutable whole-port level before the port is accessed.
+-    bool setInput(unsigned port, uint32_t sample);
++    bool setInput(unsigned port, uint32_t sample) { return setInputMasked(port, sample, 0xffffffff); }
++    bool setInputMasked(unsigned port, uint32_t sample, uint32_t mask);
++    // Reserve external input lanes before MMIO; diagnostic samples cannot own them.
++    bool reserveInput(unsigned port, uint32_t mask);
++    Imx1GpioAccess driveInput(unsigned port, uint32_t sample, uint32_t known, bool baseline = false);
+     // Runtime board samples are separate from immutable diagnostic inputs.
+     Imx1GpioAccess updateInput(unsigned port, uint32_t sample, uint32_t known);
+     Imx1GpioLine interruptOutput(unsigned port) const;
+@@ -38,6 +42,7 @@
+         uint32_t registers[17]{};
+         uint32_t sample = 0;
+         bool sampleKnown = false;
++        uint32_t fixedMask = 0, drivenMask = 0;
+         bool accessed = false;
+         bool boardInput = false;
+         uint32_t inputKnown = 0;
+diff --git a/src/uarm/uarm/imx1_gpio.cpp b/src/uarm/uarm/imx1_gpio.cpp
+--- a/src/uarm/uarm/imx1_gpio.cpp
++++ b/src/uarm/uarm/imx1_gpio.cpp
+@@ -10,17 +10,45 @@
+     }
+ }
+ 
+-bool Imx1Gpio::setInput(unsigned port, uint32_t sample) {
+-    if (port >= 4) return false;
++bool Imx1Gpio::setInputMasked(unsigned port, uint32_t sample, uint32_t mask) {
++    if (port >= 4 || !mask || (sample & ~mask)) return false;
+     auto& p = ports[port];
+-    if (p.boardInput) return false;
+-    if (p.sampleKnown) return p.sample == sample;
++    if (p.boardInput || (mask & p.drivenMask)) return false;
++    if (p.sampleKnown) return p.fixedMask == mask && (p.sample & mask) == sample;
+     if (p.accessed) return false;
+-    p.sample = sample;
++    p.sample = (p.sample & ~mask) | sample;
+     p.sampleKnown = true;
+-    p.inputKnown = 0xffffffff;
++    p.fixedMask = mask;
++    p.inputKnown |= mask;
+     resolvePad(p);
+     return true;
++}
++
++bool Imx1Gpio::reserveInput(unsigned port, uint32_t mask) {
++    if (port >= 4 || !mask) return false;
++    auto& p = ports[port];
++    if (p.accessed || p.boardInput || (p.fixedMask & mask)) return false;
++    if (p.drivenMask) return p.drivenMask == mask;
++    p.drivenMask = mask;
++    return true;
++}
++
++Imx1GpioAccess Imx1Gpio::driveInput(unsigned index, uint32_t sample, uint32_t known, bool baseline) {
++    if (index >= 4) return Imx1GpioAccess::unmapped;
++    auto& port = ports[index];
++    if (!port.drivenMask || ((sample | known) & ~port.drivenMask)) return Imx1GpioAccess::sideEffect;
++    auto next = port;
++    next.sample = (next.sample & ~next.drivenMask) | sample;
++    next.inputKnown = (next.inputKnown & ~next.drivenMask) | known;
++    resolvePad(next);
++    auto old = port;
++    if (baseline) {
++        old.pad = (old.pad & ~port.drivenMask) | (next.pad & port.drivenMask);
++        old.padKnown = (old.padKnown & ~port.drivenMask) | (next.padKnown & port.drivenMask);
++    }
++    const auto status = updateInterrupts(next, old, index, true);
++    if (status == Imx1GpioAccess::ok) port = next;
++    return status;
+ }
+ 
+ void Imx1Gpio::resolvePad(Port& port) {
+@@ -42,7 +70,7 @@
+ Imx1GpioAccess Imx1Gpio::updateInput(unsigned index, uint32_t sample, uint32_t known) {
+     if (index >= 4) return Imx1GpioAccess::unmapped;
+     auto& port = ports[index];
+-    if (port.sampleKnown) return Imx1GpioAccess::sideEffect;
++    if (port.sampleKnown || port.drivenMask) return Imx1GpioAccess::sideEffect;
+     auto next = port;
+     next.boardInput = true;
+     next.sample = sample;
+diff --git a/src/uarm/uarm/imx1_bootstrap.h b/src/uarm/uarm/imx1_bootstrap.h
+--- a/src/uarm/uarm/imx1_bootstrap.h
++++ b/src/uarm/uarm/imx1_bootstrap.h
+@@ -44,6 +44,11 @@
+     void setSystemPllScenario(bool enabled) { cgm.setSystemPllScenario(enabled); }
+     bool setGpioInput(unsigned port, uint32_t value) { return gpio.setInput(port, value); }
+     Imx1BootstrapAccess updateGpioInput(unsigned port, uint32_t value, uint32_t known);
++    bool setGpioInputMasked(unsigned port, uint32_t value, uint32_t mask) { return gpio.setInputMasked(port, value, mask); }
++    bool reserveGpioInput(unsigned port, uint32_t mask) { return gpio.reserveInput(port, mask); }
++    // Preview permits a peripheral and its GPIO/AITC effects to commit together.
++    Imx1BootstrapAccess driveGpioInput(unsigned port, uint32_t value, uint32_t known,
++                                      bool commit = true, bool baseline = false);
+     bool setGpioDInput(uint32_t value) { return setGpioInput(3, value); }
+     void setRamMiB(uint32_t size);
+     // FastBus CPU cycles are BCLK cycles; both BCLK and PERCLK1 derive from System PLL.
+diff --git a/src/uarm/uarm/imx1_bootstrap.cpp b/src/uarm/uarm/imx1_bootstrap.cpp
+--- a/src/uarm/uarm/imx1_bootstrap.cpp
++++ b/src/uarm/uarm/imx1_bootstrap.cpp
+@@ -109,6 +109,19 @@
+     const auto gate = interruptGate(controller);
+     if (gate != Imx1BootstrapAccess::ok) return gate;
+     gpio = next;
++    return Imx1BootstrapAccess::ok;
++}
++Imx1BootstrapAccess Imx1Bootstrap::driveGpioInput(unsigned port, uint32_t value, uint32_t known,
++                                                  bool commit, bool baseline) {
++    auto next = gpio;
++    const auto status = next.driveInput(port, value, known, baseline);
++    if (status == Imx1GpioAccess::unmapped) return Imx1BootstrapAccess::unmapped;
++    if (status != Imx1GpioAccess::ok) return Imx1BootstrapAccess::sideEffect;
++    auto controller = aitc;
++    setInterruptInputs(controller, i2c, rtc, timer1, timer2, asp, pwm, next);
++    const auto gate = interruptGate(controller);
++    if (gate != Imx1BootstrapAccess::ok) return gate;
++    if (commit) gpio = next;
+     return Imx1BootstrapAccess::ok;
+ }
+ Imx1Bootstrap::InterruptLines Imx1Bootstrap::interruptLines() const {
+diff --git a/src/uarm/uarm/imx1_boot_probe.h b/src/uarm/uarm/imx1_boot_probe.h
+--- a/src/uarm/uarm/imx1_boot_probe.h
++++ b/src/uarm/uarm/imx1_boot_probe.h
+@@ -69,6 +69,9 @@
+     bool bootstrapPeripherals = false;
+     bool assumeMpllSettled = false;
+     bool assumeSpllSettled = false;
++    bool graphicsIrqA13 = false;
++    bool gpioAInputMaskedKnown = false;
++    uint32_t gpioAInputMask = 0;
+     bool gpioAInputKnown = false;
+     uint32_t gpioAInput = 0;
+     bool gpioBInputKnown = false;
+diff --git a/src/uarm/uarm/imx1_boot_probe.cpp b/src/uarm/uarm/imx1_boot_probe.cpp
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -35,6 +35,26 @@
+     uint32_t graphicsSampledPin = 32, graphicsSampleOffset = 0;
+     uint32_t i2cIssueStep = 0, i2cIssuePc = 0;
+     bool irqRaised = false, fiqRaised = false;
++    Imx1BootstrapAccess acceptGraphics(const Imx1Cs5Configuration& candidate, bool commit) {
++        if (options.graphicsIrqA13) {
++            const auto line = candidate.interruptState().interruptOutput();
++            // The explicit virtual pull-up resolves a released INTb to high.
++            const uint32_t value = line == Imx1GpioLine::clear ? 0x2000 : 0;
++            const uint32_t known = line == Imx1GpioLine::unknown ? 0 : 0x2000;
++            const auto status = peripherals.driveGpioInput(0, value, known, commit);
++            if (status != Imx1BootstrapAccess::ok) return status;
++        }
++        if (commit) cs5Configuration = candidate;
++        return Imx1BootstrapAccess::ok;
++    }
++    Imx1BootstrapAccess advanceGraphicsCpu(uint32_t cycles, Imx1PllRatio period) {
++        if (!options.graphicsIrqA13) return cs5Configuration.advanceCpuCycles(cycles, period) ?
++            Imx1BootstrapAccess::ok : Imx1BootstrapAccess::sideEffect;
++        auto candidate = cs5Configuration;
++        if (!candidate.advanceCpuCycles(cycles, period)) return Imx1BootstrapAccess::sideEffect;
++        return acceptGraphics(candidate, true);
++    }
++    Imx1BootstrapAccess graphicsWireStatus = Imx1BootstrapAccess::ok;
+     void updateInterrupts() {
+         const auto lines = peripherals.interruptLines();
+         const bool irq = lines.irq == Imx1AitcLine::asserted;
+@@ -53,7 +73,13 @@
+     void finishGraphicsBusStall() {
+         const auto period = peripherals.cpuReferencePeriod(3);
+         const auto units = peripherals.finishSystemPllBusStall();
+-        cs5Configuration.advanceReference(units, period.denominator);
++        if (!units) return;
++        if (!options.graphicsIrqA13) cs5Configuration.advanceReference(units, period.denominator);
++        else {
++            auto candidate = cs5Configuration;
++            candidate.advanceReference(units, period.denominator);
++            graphicsWireStatus = acceptGraphics(candidate, true);
++        }
+     }
+ 
+     Imx1BootstrapAccess cs5Wait(uint32_t& elapsed) {
+@@ -82,9 +108,14 @@
+                 ready = service.add(numerator,denominator) != 0;
+             }
+             peripherals.advanceHclkCycles(1);
+-            cs5Configuration.advanceBusCycles(1,busPeriod,cpuPeriod);
++            if (!options.graphicsIrqA13) cs5Configuration.advanceBusCycles(1,busPeriod,cpuPeriod);
++            else {
++                auto candidate = cs5Configuration;
++                candidate.advanceBusCycles(1,busPeriod,cpuPeriod);
++                timedStatus = acceptGraphics(candidate, true);
++            }
+             ++elapsed;
+-            timedStatus = peripherals.clockStatus();
++            if (timedStatus == Imx1BootstrapAccess::ok) timedStatus = peripherals.clockStatus();
+             if (timedStatus != Imx1BootstrapAccess::ok) break;
+             state = transaction.sample(elapsed,true,mode == Imx1Cs5Mode::dtack ? !ready : ready);
+         }
+@@ -96,7 +127,7 @@
+     }
+ 
+     bool clockBoundary() {
+-        const auto status = cs5Configuration.referencePeriodSupported(peripherals.cpuReferencePeriod(cpuArm920ClockMode(cpu))) ?
++        const auto status = graphicsWireStatus != Imx1BootstrapAccess::ok ? graphicsWireStatus : cs5Configuration.referencePeriodSupported(peripherals.cpuReferencePeriod(cpuArm920ClockMode(cpu))) ?
+             peripherals.clockStatus() : Imx1BootstrapAccess::sideEffect;
+         if (status == Imx1BootstrapAccess::ok) return false;
+         result.stop = Imx1ProbeStop::unsupportedPeripheral;
+@@ -134,6 +165,11 @@
+         // Further data accesses within one instruction also wait for the nominal bus clock.
+         if (!p.failed && p.options.bootstrapPeripherals && !memIsInstructionFetch(p.mem))
+             p.finishGraphicsBusStall();
++        if (p.graphicsWireStatus != Imx1BootstrapAccess::ok) {
++            p.clockBoundary();
++            p.failed = true;
++            return false;
++        }
+         if (!write) {
+             if (const auto* source = p.resolve(address, size)) {
+                 std::memcpy(data, source, size);
+@@ -175,13 +211,19 @@
+                 auto candidate = p.cs5Reset;
+                 const auto status = candidate.access(p.peripherals.eimState(),p.result.trace.pc,address,size,write,datum,
+                                                        p.cs5Configuration.virtualProfile());
+-                if (!preview && status == Imx1BootstrapAccess::ok) p.cs5Reset = candidate;
++                if (status != Imx1BootstrapAccess::ok) return status;
++                if (write && (datum & 8) && p.cs5Configuration.virtualProfile()) {
++                    auto graphicsNext = p.cs5Configuration;
++                    graphicsNext.reset();
++                    const auto gate = p.acceptGraphics(graphicsNext, !preview);
++                    if (gate != Imx1BootstrapAccess::ok) return gate;
++                }
++                if (!preview) p.cs5Reset = candidate;
+                 return status;
+             }
+             auto candidate = p.cs5Configuration;
+             const auto status = candidate.access(p.peripherals.eimState(),p.result.trace.pc,address,size,write,datum,sampledPin);
+-            if (!preview && status == Imx1BootstrapAccess::ok) p.cs5Configuration = candidate;
+-            return status;
++            return status == Imx1BootstrapAccess::ok ? p.acceptGraphics(candidate, !preview) : status;
+         };
+         Imx1BootstrapAccess status;
+         if (diagnosticCs5 && p.cs5Configuration.virtualProfile()) {
+@@ -201,9 +243,6 @@
+                 p.result.trace.pc, address, size, write, value) : diagnosticCs4 ? p.cs4Capture.access(p.peripherals.eimState(), address, size, write, value) :
+                 p.options.bootstrapPeripherals ? p.peripherals.access(address, size, write, value, cpuArm920ClockMode(p.cpu)) : Imx1BootstrapAccess::unmapped;
+         }
+-        if (diagnosticCs5Reset && p.cs5Configuration.virtualProfile() &&
+-            status == Imx1BootstrapAccess::ok && write && (value & 8))
+-            p.cs5Configuration.reset();
+         if (diagnosticCs5Reset && p.options.cs5ResetObserver)
+             p.options.cs5ResetObserver(p.options.cs5ResetContext, {p.result.trace.step, p.result.trace.pc,
+                 address, uint32_t(size), value, write, p.cs5Reset.phaseValue(), status});
+@@ -402,7 +441,12 @@
+     }
+     if (options && (!imx1GraphicsProfileValid(options->graphicsProfile) ||
+         (options->graphicsProfile != Imx1GraphicsProfile::strict &&
+-         (!options->bootstrapPeripherals || options->cs5ResetStatusInputKnown)))) {
++         (!options->bootstrapPeripherals || options->cs5ResetStatusInputKnown)) ||
++        (options->gpioAInputMaskedKnown && (!options->bootstrapPeripherals || options->gpioAInputKnown ||
++          !options->gpioAInputMask || (options->gpioAInput & ~options->gpioAInputMask))) ||
++        (options->graphicsIrqA13 && (!options->bootstrapPeripherals ||
++          options->graphicsProfile != Imx1GraphicsProfile::virtual5744Compatible8MiB || options->gpioAInputKnown ||
++          (options->gpioAInputMaskedKnown && (options->gpioAInputMask & 0x2000)))))) {
+         Imx1ProbeResult result{};
+         result.stop = Imx1ProbeStop::unsupportedPeripheral;
+         result.peripheralStatus = Imx1BootstrapAccess::sequence;
+@@ -421,6 +465,16 @@
+         return p->result;
+     }
+     if (p->options.gpioAInputKnown) p->peripherals.setGpioInput(0, p->options.gpioAInput);
++    if (p->options.gpioAInputMaskedKnown)
++        p->peripherals.setGpioInputMasked(0, p->options.gpioAInput, p->options.gpioAInputMask);
++    if (p->options.graphicsIrqA13) {
++        if (!p->peripherals.reserveGpioInput(0, 0x2000) ||
++            p->acceptGraphics(p->cs5Configuration, true) != Imx1BootstrapAccess::ok) {
++            p->result.stop = Imx1ProbeStop::unsupportedPeripheral;
++            p->result.peripheralStatus = Imx1BootstrapAccess::sequence;
++            return p->result;
++        }
++    }
+     if (p->options.gpioBInputKnown) p->peripherals.setGpioInput(1, p->options.gpioBInput);
+     if (p->options.gpioDInputKnown) p->peripherals.setGpioDInput(p->options.gpioDInput);
+     if (p->options.bootstrapPeripherals) p->peripherals.connectCpuInterrupts();
+@@ -552,9 +606,10 @@
+             }
+         }
+         if (p->options.bootstrapPeripherals) {
+-            if (!p->cs5Configuration.advanceCpuCycles(cycles, p->peripherals.cpuReferencePeriod(cpuArm920ClockMode(p->cpu)))) {
++            const auto graphicsStatus = p->advanceGraphicsCpu(cycles, p->peripherals.cpuReferencePeriod(cpuArm920ClockMode(p->cpu)));
++            if (graphicsStatus != Imx1BootstrapAccess::ok) {
+                 p->result.stop = Imx1ProbeStop::unsupportedPeripheral;
+-                p->result.peripheralStatus = Imx1BootstrapAccess::sideEffect;
++                p->result.peripheralStatus = graphicsStatus;
+                 break;
+             }
+             if (p->graphicsMemory) p->graphicsFrame.advance(p->cs5Configuration, *p->graphicsMemory, p->peripherals.eimState());
+diff --git a/src/uarm/uarm/imx1_cs5_configuration.h b/src/uarm/uarm/imx1_cs5_configuration.h
+--- a/src/uarm/uarm/imx1_cs5_configuration.h
++++ b/src/uarm/uarm/imx1_cs5_configuration.h
+@@ -8,6 +8,7 @@
+ #include "imx1_graphics_controller.h"
+ #include "imx1_graphics_engine.h"
+ #include "imx1_graphics_display.h"
++#include "imx1_graphics_interrupts.h"
+ 
+ enum class Imx1GraphicsProfile { strict, virtual5744Compatible8MiB };
+ inline bool imx1GraphicsProfileValid(Imx1GraphicsProfile profile) {
+@@ -27,13 +28,14 @@
+     void reset() {
+         selected = programmed = false;
+         defaults = interfaceMode = 0;
+-        interfaceControl = interfaceIo = readControl = writeControl = busTiming = memoryIo = busArbitration = interruptControl = 0;
++        interfaceControl = interfaceIo = readControl = writeControl = busTiming = memoryIo = busArbitration = 0;
+         gpio.reset();
+         windows.reset();
+         lookup.reset();
+         controller.reset();
+         engine.reset();
+         display.reset();
++        interrupts.reset();
+         clocks.reset();
+         timeFraction = {};
+         waitCpuFraction = {};
+@@ -44,7 +46,7 @@
+     bool advanceCpuCycles(uint32_t cycles, Imx1PllRatio period = {64, 390625}) {
+         if (!referencePeriodSupported(period)) return false;
+         controller.advanceCpuCycles(cycles);
+-        if (!clocks.programmed()) { display.advanceCpuCycles(cycles); return true; }
++        if (!clocks.programmed()) { advanceDisplay(cycles); return true; }
+         while (cycles) {
+             const uint32_t chunk = std::min(cycles, 1000000u);
+             advanceGraphicsTicks(timeFraction.add(uint64_t(chunk) * period.numerator * 390625,
+@@ -70,7 +72,7 @@
+         const auto elapsed = waitCpuFraction.add(uint64_t(cycles) * bus.numerator * cpu.denominator,
+                                                  uint64_t(bus.denominator) * cpu.numerator);
+         controller.advanceCpuCycles(elapsed);
+-        if (!clocks.programmed()) display.advanceCpuCycles(elapsed);
++        if (!clocks.programmed()) advanceDisplay(elapsed);
+         else advanceReference(uint64_t(cycles) * bus.numerator,bus.denominator);
+     }
+     bool deviceConfigured(const Imx1Eim& eim) const {
+@@ -86,6 +88,7 @@
+     const Imx1GraphicsWindows& memoryWindows() const { return windows; }
+     const Imx1GraphicsEngine& engineState() const { return engine; }
+     const Imx1GraphicsDisplay& displayState() const { return display; }
++    const Imx1GraphicsInterrupts& interruptState() const { return interrupts; }
+     Imx1GraphicsGpio::Bank gpioBank(unsigned index) const { return gpio.bank(index); }
+     bool defaultsKnown() const { return programmed; }
+     uint8_t defaultsValue() const { return defaults; }
+@@ -93,7 +96,11 @@
+     Imx1BootstrapAccess access(const Imx1Eim& eim, uint32_t pc, uint32_t address,
+                               uint32_t size, bool write, uint32_t& value, uint32_t sampledPin = 32) {
+         if (!imx1GraphicsProfileValid(profile)) return Imx1BootstrapAccess::sequence;
+-        if (virtualProfile() && ((pc >= 0x20086952 && pc <= 0x20086a60 && !Imx1GraphicsDisplay::owns(address)) || address == 0x16010184 || address == 0x16010200)) {
++        if (virtualProfile() && Imx1GraphicsInterrupts::owns(address)) {
++            if (!deviceConfigured(eim) || !memoryInterfaceReady()) return Imx1BootstrapAccess::sequence;
++            return interrupts.access(pc, address, size, write, value);
++        }
++        if (virtualProfile() && ((pc >= 0x20086952 && pc <= 0x20086a60 && !Imx1GraphicsDisplay::owns(address)) || address == 0x16010184)) {
+             if (!deviceConfigured(eim)) return Imx1BootstrapAccess::sequence;
+             return boardAccess(pc,address,size,write,value);
+         }
+@@ -208,12 +215,17 @@
+     }
+ 
+    private:
++    void advanceDisplay(uint64_t ticks) {
++        const auto before = display.verticalBlankEvents();
++        display.advanceCpuCycles(ticks);
++        interrupts.observeDisplay(true, display.verticalBlankEvents() != before);
++    }
+     void advanceGraphicsTicks(uint64_t ticks) {
+         clocks.setGpuBusy(!engine.emptyRing());
+         while (ticks) {
+             uint64_t step = std::min<uint64_t>(ticks, 1000000);
+             if (clocks.nextEvent()) step = std::min(step, clocks.nextEvent());
+-            display.advanceCpuCycles(step);
++            advanceDisplay(step);
+             clocks.advance(step);
+             ticks -= step;
+             display.setClockSources(clocks.pixelRate(), clocks.systemRate());
+@@ -230,14 +242,14 @@
+             {0x20086a34,0x16010184,0,0,false},{0x20086a3c,0x16010184,0xffffffff,0xf7,true},{0x20086a3e,0x16010184,0,0,false},
+             {0x20086a44,0x16010018,0,0,false},{0x20086a52,0x16010018,0x100000,0x400,true},{0x20086a54,0x16010018,0,0,false},
+             {0x20086a5a,0x16010020,0,0,false},{0x20086a5e,0x16010020,0,0x100000,true},{0x20086a60,0x16010020,0,0,false},
+-            {0x20086970,0x16010200,0xffffffff,0,true},{0x20086974,0x16010018,0,0,false},
++            {0x20086974,0x16010018,0,0,false},
+             {0x20086982,0x16010018,0x100000,0x400,true}};
+         const Operation* op = nullptr;
+         for (const auto& candidate : operations) if (candidate.pc == pc && candidate.address == address && candidate.write == write) {op=&candidate;break;}
+         if (!op) return Imx1BootstrapAccess::externalInput;
+         uint32_t* state = address == 0x16010018 ? &interfaceControl : address == 0x16010020 ? &interfaceIo :
+             address == 0x16010024 ? &readControl : address == 0x16010028 ? &writeControl :
+-            address == 0x16010184 ? &busArbitration : &interruptControl;
++            &busArbitration;
+         if (write) {
+             if (value != ((*state & ~op->clear) | op->set)) return Imx1BootstrapAccess::sideEffect;
+             *state=value;
+@@ -297,10 +309,11 @@
+     Imx1GraphicsController controller;
+     Imx1GraphicsEngine engine;
+     Imx1GraphicsDisplay display;
++    Imx1GraphicsInterrupts interrupts;
+     Imx1GraphicsClocks clocks;
+     Imx1GraphicsFraction timeFraction, waitCpuFraction;
+     // These interface configuration words reset to zero in the virtual profile.
+-    uint32_t busArbitration = 0, interruptControl = 0;
++    uint32_t busArbitration = 0;
+     uint32_t interfaceControl = 0, interfaceIo = 0, readControl = 0, writeControl = 0, busTiming = 0, memoryIo = 0;
+     bool selected = false, programmed = false;
+     uint8_t defaults = 0, interfaceMode = 0;
+diff --git a/src/uarm/uarm/imx1_graphics_display.h b/src/uarm/uarm/imx1_graphics_display.h
+--- a/src/uarm/uarm/imx1_graphics_display.h
++++ b/src/uarm/uarm/imx1_graphics_display.h
+@@ -28,6 +28,7 @@
+     bool latchPending() const { return pending; }
+     uint64_t revision() const { return activeRevision; }
+     uint64_t frameNumber() const { return frames; }
++    uint64_t verticalBlankEvents() const { return blankEvents; }
+     bool lcdEnabled() const { return enabled; }
+     bool surface(Surface& value) const {
+         if (!enabled) return false;
+@@ -74,6 +75,12 @@
+             bool frameBoundary = false;
+             if (enabled && framePeriod) {
+                 const uint64_t elapsed = phase + pixelFraction.add(step * rateNumerator, rateDenominator);
++                const uint64_t horizontal = activeWord(0x420) & 0x7ff;
++                const uint64_t end = (activeWord(0x428) >> 16) & 0x3ff;
++                const uint64_t edge = (end * horizontal * pixelCycles) % framePeriod;
++                // Entry into the vertical blank interval, including end == total.
++                blankEvents += (elapsed + framePeriod - edge) / framePeriod -
++                               (phase + framePeriod - edge) / framePeriod;
+                 const uint64_t crossed = elapsed / framePeriod;
+                 frames += crossed;
+                 phase = elapsed % framePeriod;
+@@ -224,18 +231,6 @@
+         if ((offset == 0x540 || offset == 0x578 || offset == 0x594) && value != 0x80604020) return A::sideEffect;
+         if ((offset == 0x544 || offset == 0x58c || offset == 0x598) && value != 0xffdfbf9f) return A::sideEffect;
+         if ((offset == 0x548 || offset == 0x590 || offset == 0x59c) && value != 0) return A::sideEffect;
+-        if (offset == 0x4f0) {
+-            // Native panel pulse configuration; electrical output remains unmodelled.
+-            if (write) {
+-                if (pc != 0x200869f0) return A::externalInput;
+-                if ((value & ~0x07ff0000u) != ((stagedWord(offset) & 0xf800ffffu) | 0x40000000u)) return A::sideEffect;
+-                staged[index(offset)] = active[index(offset)] = value;
+-            } else {
+-                if (pc != 0x200869c8 && pc != 0x200869f2) return A::externalInput;
+-                value = stagedWord(offset);
+-            }
+-            return A::ok;
+-        }
+         if (offset == 0x524 && value != 0x102aa) return A::sideEffect;
+         staged[index(offset)] = value;
+         knownWords[index(offset)] = true;
+@@ -323,7 +318,7 @@
+     std::array<bool, wordCount> knownWords{};
+     Surface activeSurface{}, submittedSurface{};
+     uint64_t latchDelay = 0, phase = 0, framePeriod = 0, submittedPeriod = 0;
+-    uint64_t activeRevision = 0, frames = 0;
++    uint64_t activeRevision = 0, frames = 0, blankEvents = 0;
+     uint32_t updateControl = 0, clockDelay = 0, clockControl = 0;
+     bool editing = false, pending = false, submittedEnabled = false, enabled = false;
+     bool activeTimingKnown = false, submittedTimingKnown = false;
+diff --git a/src/uarm/uarm/imx1_graphics_interrupts.h b/src/uarm/uarm/imx1_graphics_interrupts.h
+new file mode 100644
+--- /dev/null
++++ b/src/uarm/uarm/imx1_graphics_interrupts.h
+@@ -0,0 +1,55 @@
++#ifndef FROND_IMX1_GRAPHICS_INTERRUPTS_H
++#define FROND_IMX1_GRAPHICS_INTERRUPTS_H
++
++#include "imx1_bootstrap.h"
++
++// Native groups are 0x50, 0x02000000 and 1. The virtual profile assigns bit 0 to scan blank entry.
++class Imx1GraphicsInterrupts {
++   public:
++    static constexpr uint32_t nativeMask = 0x02000051, displayMask = 1;
++    static bool owns(uint32_t address) { return address == 0x16010200 || address == 0x16010204; }
++    void reset() { *this = {}; }
++    uint32_t enableValue() const { return enabled; }
++    uint32_t pendingValue() const { return pending; }
++    uint32_t knownMask() const { return known; }
++    Imx1GpioLine interruptOutput() const {
++        if (enabled & pending & known) return Imx1GpioLine::asserted;
++        return enabled & ~known ? Imx1GpioLine::unknown : Imx1GpioLine::clear;
++    }
++    void observeDisplay(bool sourceKnown, bool event) {
++        if (sourceKnown && event) { pending |= displayMask; known |= displayMask; }
++        else if (!sourceKnown && !(pending & known & displayMask)) known &= ~displayMask;
++    }
++    Imx1BootstrapAccess access(uint32_t pc, uint32_t address, uint32_t size, bool write, uint32_t& value) {
++        using A = Imx1BootstrapAccess;
++        if (!owns(address)) return A::unmapped;
++        if (size != 4) return A::width;
++        if (address == 0x16010200) {
++            if (!write) {
++                if (pc != 0x20086dee && pc != 0x200876f2) return A::externalInput;
++                value = enabled;
++            } else {
++                if (pc != 0x20086970 && pc != 0x20086e08 && pc != 0x20087702) return A::externalInput;
++                if (pc == 0x20086970 && value != 0) return A::sideEffect;
++                if (value & ~nativeMask) return A::reservedBits;
++                if (value & ~displayMask) return A::externalInput;
++                if (value & ~known) return A::externalInput;
++                enabled = value;
++            }
++        } else if (write) {
++            if (pc != 0x20087824) return A::externalInput;
++            if (value & ~nativeMask) return A::reservedBits;
++            pending &= ~value;
++            known |= value;
++        } else {
++            if (pc != 0x200868cc || known != 0xffffffff) return A::externalInput;
++            value = pending;
++        }
++        return A::ok;
++    }
++   private:
++    // Virtual cold reset clears latches. Unadmitted engine producers cannot submit work.
++    uint32_t enabled = 0, pending = 0, known = 0xffffffff;
++};
++
++#endif

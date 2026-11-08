@@ -89,6 +89,46 @@ int main() {
     assert(state.access(eim,0x200b9cd4,0x160104c0,4,false,value,13) == A::externalInput && value == 0xdeadbeef);
     assert(state.access(eim,0x200b9cd4,0x160104c0,4,false,value,3) == A::ok && value == 8);
     const uint64_t period = 8 * 6 * Imx1GraphicsDisplay::pixelCycles;
+    assert(state.displayState().verticalBlankEvents() == 0);
+    assert(state.interruptState().pendingValue() == 0);
+    {
+        auto raster = state.displayState();
+        const auto system = Imx1GraphicsClocks::Rate{200000000,1};
+        raster.advanceCpuCycles(100);
+        raster.setClockSources({0,1},system);
+        raster.advanceCpuCycles(10000);
+        assert(raster.scanPhase() == 100 && raster.verticalBlankEvents() == 0);
+        raster.setClockSources({25000000,1},system); // Two phase units per 200 MHz tick.
+        raster.advanceCpuCycles(141);
+        assert(raster.scanPhase() == 382 && raster.verticalBlankEvents() == 0);
+        raster.advanceCpuCycles(1);
+        assert(raster.scanPhase() == 384 && raster.verticalBlankEvents() == 1);
+        raster.setClockSources({12500000,1},system);
+        raster.advanceCpuCycles(period);
+        assert(raster.scanPhase() == 384 && raster.verticalBlankEvents() == 2);
+    }
+    {
+        auto irq = state;
+        irq.advanceCpuCycles(3 * 8 * Imx1GraphicsDisplay::pixelCycles - 1);
+        assert(irq.interruptState().pendingValue() == 0);
+        irq.advanceCpuCycles(1);
+        assert(irq.displayState().verticalBlankEvents() == 1);
+        assert(irq.interruptState().pendingValue() == 1);
+        assert(irq.interruptState().interruptOutput() == Imx1GpioLine::clear);
+        store(irq,eim,0x20086e08,0x200,1);
+        assert(irq.interruptState().interruptOutput() == Imx1GpioLine::asserted);
+        store(irq,eim,0x20087824,0x204,1);
+        assert(irq.interruptState().pendingValue() == 0);
+        irq.advanceCpuCycles(period - 1);
+        assert(irq.interruptState().pendingValue() == 0);
+        irq.advanceCpuCycles(1);
+        assert(irq.displayState().verticalBlankEvents() == 2);
+        assert(irq.interruptState().pendingValue() == 1);
+        store(irq,eim,0x20087702,0x200,0);
+        assert(irq.interruptState().pendingValue() == 1);
+        assert(irq.interruptState().interruptOutput() == Imx1GpioLine::clear);
+    }
+
     {
         auto waited=state;
         store(waited,eim,0x200c45e4,0x80,0x3f);
@@ -118,6 +158,9 @@ int main() {
         assert(waited.displayState().scanPhase()==reference.displayState().scanPhase());
         assert(waited.displayState().scanPhase()==partition.displayState().scanPhase());
         assert(waited.displayState().frameNumber()==reference.displayState().frameNumber());
+        assert(waited.displayState().verticalBlankEvents()==reference.displayState().verticalBlankEvents());
+        assert(waited.displayState().verticalBlankEvents()==partition.displayState().verticalBlankEvents());
+        assert(waited.interruptState().pendingValue()==reference.interruptState().pendingValue());
     }
 
 
@@ -185,6 +228,8 @@ int main() {
     state.advanceCpuCycles(3 * period + 7);
     for (unsigned i = 0; i < 3 * period + 7; ++i) chunked.advanceCpuCycles(1);
     assert(state.displayState().frameNumber() == chunked.displayState().frameNumber());
+    assert(state.displayState().verticalBlankEvents() == chunked.displayState().verticalBlankEvents());
+    assert(state.interruptState().pendingValue() == chunked.interruptState().pendingValue());
     assert(state.displayState().revision() == chunked.displayState().revision());
 
     Imx1GraphicsMemory memory;
