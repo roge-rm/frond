@@ -87,6 +87,41 @@ void directed(Machine& exact, Machine& fast) {
     }
     std::printf("PASS: %u aligned ARM ADD pc,pc,Rm cases, modes, flags, source registers and wraparound\n", count);
 }
+uint32_t immediateOperand(uint32_t encoding) {
+    const unsigned rotate = ((encoding >> 8) & 15) * 2;
+    const uint32_t value = encoding & 255;
+    return rotate ? (value >> rotate) | (value << (32 - rotate)) : value;
+}
+void immediateDirected(Machine& exact, Machine& fast) {
+    for (unsigned mode : {0x10u,0x11u,0x12u,0x13u,0x17u,0x1bu,0x1fu})
+    for (unsigned flags = 0; flags < 16; ++flags) for (unsigned source : {0u,12u,15u})
+    for (uint32_t encoding : {0u,8u,0xc02u,0x102u}) for (bool subtract : {false,true}) {
+        const uint32_t status = (flags << 28) | 0xc0 | mode;
+        const uint32_t base = source == 15 ? code+8 : 0xfffffff8;
+        const uint32_t instruction = (subtract ? 0xe240f000 : 0xe280f000) | source << 16 | encoding;
+        for (auto* m : {&exact,&fast}) {
+            m->reset(status); if (source != 15) cpuSetReg(m->cpu,source,base);
+            m->word(code,instruction);
+        }
+        const auto saved = exact.spsr();
+        generated(exact,fast,code);
+        const uint32_t operand = immediateOperand(encoding);
+        assert(exact.reg(15) == (subtract ? base-operand : base+operand));
+        assert(exact.psr() == status && exact.spsr() == saved);
+        for (unsigned r = 0; r < 15; ++r)
+            assert(exact.reg(r) == (r == source ? base : 0x12340000+r));
+    }
+    for (unsigned flags = 0; flags < 16; ++flags) for (bool subtract : {false,true}) {
+        for (auto* m : {&exact,&fast}) {
+            m->reset((flags << 28) | 0xd3); cpuSetReg(m->cpu,12,0x1800);
+            m->word(code,(subtract ? 0x124cf008 : 0x128cf008));
+        }
+        generated(exact,fast,code);
+        assert(exact.reg(15) == ((flags & 4) ? code+4 : subtract ? 0x17f8u : 0x1808u));
+        assert(exact.psr() == ((flags << 28) | 0xd3));
+    }
+    std::puts("PASS: immediate ADD/SUB PC, rotated operands, wraparound, conditions, modes and preserved status");
+}
 void continuation(Machine& exact, Machine& fast) {
     for (bool cached : {false, true}) for (unsigned mapping = 0; mapping < 3; ++mapping) {
         for (Machine* m : {&exact, &fast}) {
@@ -125,14 +160,37 @@ void probeCases(bool fast, unsigned source) {
         else assert(r.registers[15] == 0x84 && r.trace.instruction == (0xe08ff000 | source));
     }
 }
+void immediateProbeCases(bool fast, unsigned source) {
+    for (bool subtract : {false,true}) for (bool skip : {false,true})
+    for (unsigned low = 0; low < 4; ++low) {
+        std::vector<uint32_t> p(0x100/4,0xe7f000f0);
+        p[0] = skip ? 0xe3500000 : 0xe1a00000; // CMP r0,#0 sets Z for skipped NE.
+        p[1] = 0xea00001d;
+        uint32_t target = 0x40, encoding = 8;
+        if (source == 15) { p[0x80/4] = 0xe1a00000; encoding = 0x18 + low; target = subtract ? 0x74 : 0xa4; }
+        else {
+            p[0x80/4] = 0xe59f0040 | source << 12;
+            p[0xc8/4] = subtract ? target+low+8 : target+low-8;
+        }
+        p[0x84/4] = (subtract ? 0x1240f000 : 0x1280f000) | source << 16 | encoding;
+        p[target/4] = 0xe3a09009;
+        Imx1ProbeOptions options{}; options.bootstrapPeripherals = true;
+        const auto r = imx1BootProbe(reinterpret_cast<const uint8_t*>(p.data()),p.size()*4,
+                                    Imx1ProbeEntry::resetAlias,100,nullptr,nullptr,fast,&options);
+        assert(r.stop == Imx1ProbeStop::unsupportedInstruction && !r.busAccesses);
+        if (skip) assert(r.registers[15] == 0x88 && r.cpsr == 0x600000d3);
+        else if (!low) assert(r.registers[15] == target+4 && r.registers[9] == 9 && r.cpsr == 0xd3);
+        else assert(r.registers[15] == 0x84 && r.trace.instruction == p[0x84/4] && r.cpsr == 0xd3);
+    }
+}
 void guards() {
-    for (bool fast : {false, true}) for (unsigned source = 0; source < 15; ++source) {
+    for (bool fast : {false, true}) for (unsigned source = 0; source < 16; ++source) {
         const pid_t child = fork(); assert(child >= 0);
-        if (!child) { probeCases(fast, source); _exit(0); }
+        if (!child) { if (source < 15) probeCases(fast, source); immediateProbeCases(fast,source); _exit(0); }
         int status = 0; assert(waitpid(child, &status, 0) == child);
         assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
     }
-    for (bool fast : {false, true}) for (uint32_t word : {0xe08ff00fu, 0xe09ff00cu, 0xe08ff08cu}) {
+    for (bool fast : {false, true}) for (uint32_t word : {0xe08ff00fu, 0xe09ff00cu, 0xe08ff08cu,0xe29cf008u,0xe25cf008u,0xe2acf008u}) {
         Imx1ProbeOptions options{}; options.bootstrapPeripherals = true;
         const auto r = imx1BootProbe(reinterpret_cast<const uint8_t*>(&word), 4,
                                     Imx1ProbeEntry::resetAlias, 100, nullptr, nullptr, fast, &options);
@@ -143,5 +201,5 @@ void guards() {
 }
 int main() {
     unsetenv("FROND_JIT"); Machine exact(false), fast(true);
-    directed(exact, fast); continuation(exact, fast); guards();
+    directed(exact, fast); immediateDirected(exact,fast); continuation(exact, fast); guards();
 }
