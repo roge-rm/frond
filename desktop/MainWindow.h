@@ -5,7 +5,6 @@
 #include <QPointer>
 #include <QProgressDialog>
 #include "DesktopClient.h"
-#include "SdExchange.h"
 #include "FirmwareInput.h"
 #include "SessionStore.h"
 #include "LinkClient.h"
@@ -15,6 +14,7 @@
 #include <QTemporaryDir>
 class ConnectionsWindow;
 class CardsWindow;
+class CardFilesWindow;
 class QFileSystemWatcher;
 class QDialog;
 class QMessageBox;
@@ -224,18 +224,21 @@ class MainWindow : public QMainWindow {
     QLabel* holdLabel;
     bool holdKnown{false}, holdOn{false};
     QLabel *sdStatus, *storageHeading;
-    enum class ExchangeStage { None, Eject, Backup, Export, Insert };
+    // Files… on the running machine's SD card: eject, save, take the card out into the machine
+    // folder's sd.frondsd, edit it there in place, then put it back in (ejected again if it was out).
+    enum class ExchangeStage { None, Eject, Save, TakeOut, Open, PutIn, EjectAgain };
     ExchangeStage exchangeStage{ExchangeStage::None};
-    std::unique_ptr<QTemporaryDir> exchangeFiles, exchangeRecovery;
-    std::unique_ptr<SdExchange> exchange;
-    QDialog* exchangeDialog{nullptr};
+    QString exchangeIdentity;           // what the take-out reported, for the put-in
+    bool exchangeProtected{false}, exchangeWasInserted{false};
+    QPointer<CardFilesWindow> exchangeDialog;
+    void openExchangeCard();
+    void exchangeClosed();
     QDialog* memoryStickFiles{nullptr};
     QStringList installQueue, installFailed;  // files waiting, and "name: reason" for those that failed
     int installTotal{0}, installHint{0};
     QString installCurrent;
     QProgressDialog* cardProgress{nullptr};  // shown while an SD create, import or export runs
     QPointer<QMessageBox> failureBox;  // the error showing now; later errors are added to it
-    QString exchangeBackup;
     bool cardPresent{false}, cardInserted{false}, sdKnown{false};
     bool msExportPending{false};
     // The running device selects the available peripheral controls.

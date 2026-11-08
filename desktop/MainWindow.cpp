@@ -1,7 +1,7 @@
 #include "MainWindow.h"
 #include "LicencesDialog.h"
 #include "FirmwareInput.h"
-#include "SdExchangeDialog.h"
+#include "CardFilesWindow.h"
 #include "MemoryStickFilesDialog.h"
 #include "Dialogs.h"
 #include "FirmwareStore.h"
@@ -200,7 +200,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     cardRow->addWidget(cardPick);
     cardRow->addWidget(sdStatus);
     sdReinsert = button(tr("Insert"), "sdInsert", true);
-    sdExchange = button(tr("Files"), "sdExchange", true);
+    sdExchange = button(tr("Files…"), "sdExchange", true);
     sdEject = button(tr("Eject"), "sdEject", true);
     sdExport = button(tr("Export image"), "sdExport", true);
     sdRetry = button(tr("Try again"), "sdRetry", true);
@@ -800,7 +800,8 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         const bool savedWorkingCopy = command == "save" && savingPath == sessionPath;
         if (command == "save") {
             if (savedWorkingCopy) {
-                frondCards::clearSwap(frondSessions::machineDirOf(sessionPath));
+                // While Files has the card out, the slot keeps swap until it's back in.
+                if (exchangeStage == ExchangeStage::None) frondCards::clearSwap(frondSessions::machineDirOf(sessionPath));
                 if (stopping) finalSaved = true;
                 settings.setValue("lastSession", sessionPath); settings.sync();
                 QFile::remove(frondSessions::markerPath(sessionPath));
@@ -2243,64 +2244,119 @@ void MainWindow::beginExchange() {
         if (stopping && client.running() && client.available()) save();
         return;
     }
-    if (!client.available() || stopping || !cardPresent || exchangeStage != ExchangeStage::None) return;
-    if (!SdExchange::available()) return failure(tr("Install mtools to exchange files (Debian: sudo apt install mtools)."));
-    if (QMessageBox::question(this, tr("Close Palm Files Before Exchange"),
-            tr("Save your work and close all files using the SD card on the Palm. "
-               "Frond will eject the card and save a recovery session before editing a private image. "
-               "Ejection cannot flush files left open by a Palm app. Continue?"),
+    if (!client.available() || stopping || !cardPresent || exchangeStage != ExchangeStage::None || cardMove.stage != CardMove::None) return;
+    if (cardInserted && QMessageBox::question(this, tr("Open the card's files?"),
+            tr("Close any files open on the Palm first. The card is ejected while Files is open and goes back in when you close it."),
             QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) return;
     // The Palm window can request shutdown while the confirmation is open.
     if (!client.available() || stopping || !cardPresent || exchangeStage != ExchangeStage::None) return;
-    const auto data = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/frond/sd-exchange";
-    const auto cache = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
-    if (!QDir().mkpath(data) || !QDir().mkpath(cache)) return failure(tr("Could not create SD exchange storage."));
-    exchangeRecovery = std::make_unique<QTemporaryDir>(data + "/recovery-XXXXXX");
-    exchangeFiles = std::make_unique<QTemporaryDir>(cache + "/sd-exchange-XXXXXX");
-    if (!exchangeRecovery->isValid() || !exchangeFiles->isValid()) {
-        endExchange(); return failure(tr("Could not create private SD exchange storage."));
-    }
-    exchangeBackup = exchangeRecovery->path() + "/before-exchange";
+    exchangeWasInserted = cardInserted;
+    exchangeIdentity.clear();
     if (cardInserted) { exchangeStage = ExchangeStage::Eject; send("sd-eject"); }
-    else { exchangeStage = ExchangeStage::Backup; send("save", exchangeBackup); }
+    else { exchangeStage = ExchangeStage::Save; savingPath = sessionPath; send("save", sessionPath); }
 }
 void MainWindow::endExchange() {
-    exchange.reset(); exchangeFiles.reset(); exchangeRecovery.reset();
-    exchangeStage = ExchangeStage::None; busy = false; refresh();
+    if (exchangeDialog) {
+        // Closing it here must not start a put-in.
+        auto* dialog = exchangeDialog.data();
+        exchangeDialog = nullptr;
+        dialog->closeCard();
+        dialog->disconnect(this);
+        dialog->close();
+    }
+    exchangeStage = ExchangeStage::None; exchangeIdentity.clear(); busy = false; refresh();
+    if (cardsWindow) cardsWindow->refresh();
 }
 void MainWindow::exchangeResult(bool ok, const QString& message) {
-    if (ok && exchangeStage == ExchangeStage::Backup) exchangeRecovery->setAutoRemove(false);
-    if (!ok || stopping) {
-        endExchange();
-        if (stopping) save();
-        else failure(message + (QFileInfo::exists(exchangeBackup) ? tr("\nRecovery session: %1").arg(exchangeBackup) : QString{}));
+    const auto stage = exchangeStage;
+    if (ok && stage == ExchangeStage::TakeOut) {
+        const auto parts = message.split(' ');
+        exchangeIdentity = parts.value(0).size() == 64 ? parts.value(0) : QString(64, '0');
+        exchangeProtected = parts.value(1) == "protected";
+    }
+    // Stopping with the card out: it goes back in before the final save.
+    if (ok && stopping && stage == ExchangeStage::TakeOut) {
+        exchangeStage = ExchangeStage::PutIn;
+        if (!send("sd-put-in", exchangeIdentity + (exchangeProtected ? " protected" : " writable"))) { endExchange(); save(); }
         return;
     }
-    if (exchangeStage == ExchangeStage::Eject) {
-        exchangeStage = ExchangeStage::Backup; send("save", exchangeBackup);
-    } else if (exchangeStage == ExchangeStage::Backup) {
-        exchangeStage = ExchangeStage::Export; send("sd-export", exchangeFiles->path() + "/original.img");
-    } else if (exchangeStage == ExchangeStage::Export) {
-        exchange = std::make_unique<SdExchange>(exchangeFiles->path() + "/edit-XXXXXX");
-        QString error;
-        const auto maxCard = qint64(std::min<quint64>(frondFirmware::profile(runningDevice).sdMax, quint64(2048) << 20));
-        if (!exchange->open(exchangeFiles->path() + "/original.img", error, maxCard)) {
-            endExchange(); failure(error); return;
-        }
-        SdExchangeDialog dialog(*exchange, exchangeBackup, this);
-        exchangeDialog = &dialog;
-        const auto result = dialog.exec();
-        exchangeDialog = nullptr;
-        if (result == QDialog::Accepted && !stopping && client.running()) {
-            exchangeStage = ExchangeStage::Insert; send("sd-insert", exchange->image());
-        } else {
-            endExchange();
-            if (stopping && client.running()) save();
-        }
-    } else if (exchangeStage == ExchangeStage::Insert) {
+    if (!ok || stopping) {
+        const bool reinsert = !ok && !stopping && exchangeWasInserted && (stage == ExchangeStage::Save || stage == ExchangeStage::TakeOut);
         endExchange();
-        notify(tr("Card inserted. Recovery session: %1").arg(exchangeBackup));
+        if (!ok && stage == ExchangeStage::PutIn)
+            failure(tr("Couldn't put the card back in. It's kept in the machine and goes in at the next start. %1").arg(message));
+        else if (!ok) failure(message);
+        if (reinsert && client.available()) send("sd-reinsert");
+        if (stopping) save();
+        return;
     }
+    if (stage == ExchangeStage::Eject) {
+        exchangeStage = ExchangeStage::Save; savingPath = sessionPath; send("save", sessionPath);
+    } else if (stage == ExchangeStage::Save) {
+        // The working session is saved; as for any save, except that swap stays set from here
+        // until the card is back in, so a machine that dies meanwhile loads it from the folder.
+        savingPath.clear();
+        settings.setValue("lastSession", sessionPath); settings.sync();
+        QFile::remove(frondSessions::markerPath(sessionPath));
+        QFile::remove(frondSessions::workPath(sessionPath));
+        const auto dir = runningMachineDir();
+        auto slot = frondCards::readSlot(dir);
+        if (!slot.swap) {
+            slot.present = true;
+            slot.swap = true;
+            if (!frondCards::writeSlot(dir, slot)) { exchangeResult(false, tr("Couldn't open the card.")); return; }
+        }
+        exchangeStage = ExchangeStage::TakeOut; send("sd-take-out");
+    } else if (stage == ExchangeStage::TakeOut) {
+        exchangeStage = ExchangeStage::Open;
+        openExchangeCard();
+    } else if (stage == ExchangeStage::PutIn) {
+        if (!exchangeWasInserted) { exchangeStage = ExchangeStage::EjectAgain; send("sd-eject"); return; }
+        endExchange();
+        notify(tr("Card put back in."));
+    } else if (stage == ExchangeStage::EjectAgain) {
+        endExchange();
+        notify(tr("Card put back in, ejected."));
+    }
+}
+// The card is out of the core in the machine folder's sd.frondsd: opens it in Files.
+void MainWindow::openExchangeCard() {
+    const auto path = runningMachineDir() + "/sd.frondsd";
+    std::unique_ptr<frondCardFile::CardFile> card;
+    QString error;
+    try {
+        card = frondCardFile::CardFile::open(path, !exchangeProtected);
+        frondCardFile::FatImage check(*card);
+    } catch (const frondCardFile::Error& e) {
+        error = e.message;
+        card.reset();
+    }
+    if (!error.isEmpty()) {
+        // The card goes back in as it was.
+        failure(error);
+        exchangeClosed();
+        return;
+    }
+    auto* dialog = new CardFilesWindow(std::move(card), runningCardName(), this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowModality(Qt::WindowModal);
+    exchangeDialog = dialog;
+    connect(dialog, &QDialog::finished, this, &MainWindow::exchangeClosed);
+    refresh();
+    dialog->QDialog::open();
+}
+// Files closed: the card file is closed and goes back in the Palm.
+void MainWindow::exchangeClosed() {
+    if (exchangeDialog) exchangeDialog->closeCard();
+    exchangeDialog = nullptr;
+    if (exchangeStage != ExchangeStage::Open) return;
+    if (!client.available()) {
+        endExchange();
+        failure(tr("The emulator stopped. The card is kept in the machine and goes in at the next start."));
+        return;
+    }
+    exchangeStage = ExchangeStage::PutIn;
+    if (!send("sd-put-in", exchangeIdentity + (exchangeProtected ? " protected" : " writable"))) exchangeResult(false, tr("Couldn't reach the Palm."));
 }
 
 // ---- Cards on the running machine ----

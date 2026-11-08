@@ -43,6 +43,8 @@
 #include "LinkCommon.h"
 #include "ConnectionsWindow.h"
 #include "CardsWindow.h"
+#include "CardFilesWindow.h"
+#include <QTreeWidget>
 #include <QRadioButton>
 #include <QStandardItemModel>
 #include <QDirIterator>
@@ -433,11 +435,15 @@ s=socket.socket(socket.AF_UNIX);s.connect(sys.argv[sys.argv.index('--desktop-soc
 s.sendall(b'0\tevent\tready\t\n')
 src=pathlib.Path(sys.argv[1])
 card='inserted' if any((src.parent/n).exists() for n in ('sd.frondsd',)) else 'none'
+flag=lambda n: pathlib.Path(__file__).with_name(n).exists()
+if card=='inserted' and flag('start-ejected'): card='ejected'
 identity='00'*32
 for line in s.makefile('rb'):
     i,raw,arg=line.rstrip(b'\n').split(b'\t'); cmd=raw.decode(); arg=bytes.fromhex(arg.decode()).decode()
     with trace.open('a') as t: t.write(cmd+'\t'+arg+'\n')
     message='done'
+    if flag('fail-'+cmd):
+        s.sendall(i+b'\terror\tresult\t'+('Injected '+cmd+' failure').encode().hex().encode()+b'\n'); continue
     if cmd=='device-state': message='DEVICE'
     elif cmd=='sd-state': message=card
     elif cmd=='network-state': message='disabled'
@@ -445,15 +451,15 @@ for line in s.makefile('rb'):
     elif cmd=='sd-put-in': card='inserted'; identity=arg.split(' ')[0]
     elif cmd=='sd-eject': card='ejected'
     elif cmd=='sd-take-out': card='none'; message=identity+' writable'
-    elif cmd=='sd-export': shutil.copyfile(pathlib.Path(__file__).with_name('exchange.img'), arg)
-    elif cmd=='sd-insert': card='inserted'
     elif cmd=='save':
-        if 'sd-exchange' in arg and pathlib.Path(__file__).with_name('slow-save').exists(): time.sleep(1.5)
+        if flag('slow-save'): time.sleep(1.5)
         dest=pathlib.Path(arg)
         if dest.resolve()!=src.resolve():
             dest.write_bytes(src.read_bytes())
             if (src.parent/'sd.frondsd').exists(): shutil.copyfile(src.parent/'sd.frondsd', dest.parent/'sd.frondsd')
     s.sendall(i+b'\tok\tresult\t'+message.encode().hex().encode()+b'\n')
+    if cmd=='sd-take-out' and flag('die-after-take-out'):
+        s.shutdown(socket.SHUT_RDWR); time.sleep(.3); sys.exit(1)
     if cmd=='quit': break
 )PY");
     script.replace("DEVICE", device.toUtf8());
@@ -1291,129 +1297,89 @@ for line in s.makefile('rb'):
         QVERIFY(window.isVisible());
         QCOMPARE(digest(source.fileName()), QCryptographicHash::hash("unchanged import", QCryptographicHash::Sha256));
     }
-    void sdExchange_data() {
+    void sdFiles_data() {
         QTest::addColumn<QString>("mode");
-        for (const auto* mode : {"cancel-start", "cancel-edit", "apply", "save-fail", "export-fail", "insert-fail", "eject-fail", "already-ejected", "close-edit", "close-start"})
+        for (const auto* mode : {"apply", "cancel-start", "already-ejected", "save-fail", "take-out-fail", "put-in-fail", "eject-fail"})
             QTest::newRow(mode) << QString(mode);
     }
-    void sdExchange() {
+    // Files… on the running machine's card: eject, save, take the card out, edit it in place in
+    // Files, then put it back in (and eject it again if it was out). Swap stays set from the save on.
+    void sdFiles() {
         QFETCH(QString, mode);
+        cardsReset();
         QSettings().clear(); QSettings().setValue("resume", false);
         QTemporaryDir files;
-        const auto source = files.filePath("input.frond");
-        QFile session(source); QVERIFY(session.open(QIODevice::WriteOnly)); session.write("private original session"); session.close();
-        const auto original = digest(source);
-        QFile card(source + ".img"); QVERIFY(card.open(QIODevice::WriteOnly));
-        const auto image = frondSd::create(32);
-        QCOMPARE(card.write(reinterpret_cast<const char*>(image.data()), image.size()), qint64(image.size())); card.close();
-        const auto originalCard = digest(card.fileName());
-        QFile modeFile(source + ".mode"); QVERIFY(modeFile.open(QIODevice::WriteOnly)); modeFile.write(mode.toUtf8()); modeFile.close();
-        QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly));
-        core.write(R"PY(#!/usr/bin/python3
-import socket,sys,pathlib,shutil
-source=pathlib.Path(sys.argv[1])
-mode=pathlib.Path(str(source)+'.mode').read_text()
-trace=pathlib.Path(str(source)+'.commands')
-s=socket.socket(socket.AF_UNIX)
-s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
-s.sendall(b'0\tevent\tready\t\n')
-state='ejected' if mode=='already-ejected' else 'inserted'
-for line in s.makefile('rb'):
-    i,cmd,arg=line.rstrip(b'\n').split(b'\t')
-    cmd=cmd.decode(); arg=bytes.fromhex(arg.decode()).decode()
-    with trace.open('a') as f: f.write(cmd+'\t'+arg+'\n')
-    ok=True; message='done'
-    if cmd=='device-state': message='palm-tx'
-    elif cmd=='sd-state': message=state
-    elif cmd=='network-state': message='disabled'
-    elif cmd=='keyboard-state': message='detached'
-    elif cmd=='sd-eject':
-        if mode=='eject-fail': ok=False
-        else: state='ejected'
-    elif cmd=='save':
-        if mode=='save-fail' and 'sd-exchange' in arg: ok=False
-        else:
-            p=pathlib.Path(arg)
-            if p.suffix!='.frond':
-                p.mkdir(parents=True, exist_ok=True)
-                p=p/'session.frond'
-            p.write_text('recovery '+state)
-    elif cmd=='sd-export':
-        assert state=='ejected'
-        if mode=='export-fail': ok=False
-        else: shutil.copyfile(str(source)+'.img',arg)
-    elif cmd=='sd-insert':
-        assert state=='ejected' and pathlib.Path(arg).is_file()
-        if mode=='insert-fail': ok=False
-        else: state='inserted'
-    elif cmd=='quit': pass
-    else: raise AssertionError(cmd)
-    if not ok: message='Injected '+cmd+' failure'
-    s.sendall(i+b'\t'+(b'ok' if ok else b'error')+b'\tresult\t'+message.encode().hex().encode()+b'\n')
-    if cmd=='quit': break
-)PY");
-        core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
-        MainWindow window(core.fileName()); window.show(); window.openSession(source, true);
-        auto* action = window.findChild<QPushButton*>("sdExchange"); QVERIFY(action);
-        QTRY_VERIFY_WITH_TIMEOUT(action->isEnabled(), 5000);
-        bool sawEditor = false, sawError = false;
+        const auto core = pickerCore(files.path(), "palm-tx");
+        auto flag = [&](const QString& name) { QFile f(files.filePath(name)); QVERIFY(f.open(QIODevice::WriteOnly)); };
+        if (mode == "already-ejected") flag("start-ejected");
+        if (mode == "save-fail") flag("fail-save");
+        if (mode == "take-out-fail") flag("fail-sd-take-out");
+        if (mode == "put-in-fail") flag("fail-sd-put-in");
+        if (mode == "eject-fail") flag("fail-sd-eject");
+        const auto a = cardsMachine("Palm TX", true);
+        frondCards::reconcile(cardsSessions());
+        const auto cardPath = a + "/sd.frondsd";
+        const auto generation = cardGeneration(cardPath);
+        QFile host(files.filePath("hello.txt")); QVERIFY(host.open(QIODevice::WriteOnly)); host.write("hello"); host.close();
+        MainWindow window(core);
+        window.show();
+        window.openSession(a + "/Palm TX.frond", true);
+        auto* action = window.findChild<QPushButton*>("sdExchange");
+        QTRY_VERIFY_WITH_TIMEOUT(action->isEnabled(), 10000);
+        QCOMPARE(action->text(), QString("Files…"));
+        bool sawWindow = false;
+        QStringList errors;
         QTimer poll; poll.setInterval(10);
         connect(&poll, &QTimer::timeout, &window, [&] {
-            if (auto* box = window.findChild<QMessageBox*>()) {
-                if (box->windowTitle().contains("Close Palm")) {
-                    if (mode == "close-start") window.close();
-                    box->button(mode == "cancel-start" ? QMessageBox::Cancel : QMessageBox::Yes)->click();
-                }
-                else { sawError = true; box->button(QMessageBox::Ok)->click(); }
+            for (auto* box : window.findChildren<QMessageBox*>()) {
+                if (!box->isVisible()) continue;
+                if (box->windowTitle().contains("Open the card")) box->button(mode == "cancel-start" ? QMessageBox::Cancel : QMessageBox::Yes)->click();
+                else { errors << box->text(); box->done(QMessageBox::Ok); }
             }
-            if (auto* dialog = window.findChild<QDialog*>("sdExchangeDialog")) {
-                if (!dialog->isVisible()) return;
-                sawEditor = true;
+            if (auto* w = window.findChild<CardFilesWindow*>("cardFilesWindow"); w && w->isVisible() && !sawWindow) {
+                sawWindow = true;
                 QVERIFY(!action->isEnabled());
                 for (const auto* name : {"sdInsert", "sdEject", "cardPick"}) QVERIFY(!window.findChild<QPushButton*>(name)->isEnabled());
-                if (mode == "cancel-edit") dialog->reject();
-                else if (mode == "close-edit") window.close();
-                else dialog->accept();
+                QVERIFY(frondCards::readSlot(a).swap);
+                w->addPaths({host.fileName()});
+                QVERIFY(w->list->findItems("hello.txt", Qt::MatchExactly).size() == 1);
+                w->doneButton->click();
             }
         });
         poll.start(); action->click();
-        QTRY_VERIFY_WITH_TIMEOUT((mode == "close-edit" || mode == "close-start") ? !window.isVisible() : action->isEnabled(), 10000);
+        QTRY_VERIFY_WITH_TIMEOUT(mode == "cancel-start" || sawWindow || !errors.isEmpty(), 10000);
+        QTRY_VERIFY_WITH_TIMEOUT(action->isEnabled(), 10000);
+        QTest::qWait(100);
         poll.stop();
-        const auto state = window.findChild<QLabel*>("sdState")->text();
-        QCOMPARE(state.contains("Inserted"), mode == "apply" || mode == "already-ejected" || mode == "cancel-start" || mode == "eject-fail");
-        QCOMPARE(sawEditor, mode == "cancel-edit" || mode == "apply" || mode == "insert-fail" || mode == "already-ejected" || mode == "close-edit");
-        QCOMPARE(sawError, mode.endsWith("fail"));
-        QFile trace(source + ".commands"); QVERIFY(trace.open(QIODevice::ReadOnly));
-        const auto commands = QString::fromUtf8(trace.readAll()).split('\n', Qt::SkipEmptyParts);
-        QStringList exchangeCommands; QString backup;
-        for (const auto& line : commands) {
+        const bool opened = mode == "apply" || mode == "already-ejected" || mode == "put-in-fail";
+        QCOMPARE(sawWindow, opened);
+        QCOMPARE(!errors.isEmpty(), mode.endsWith("fail"));
+        if (mode == "put-in-fail") QVERIFY2(errors.join(' ').contains("It's kept in the machine and goes in at the next start."), qPrintable(errors.join(' ')));
+        QFile trace(files.filePath("commands")); QVERIFY(trace.open(QIODevice::ReadOnly));
+        QStringList got;
+        for (const auto& line : QString::fromUtf8(trace.readAll()).split('\n', Qt::SkipEmptyParts)) {
             const auto command = line.section('\t', 0, 0);
-            if (command == "save" && backup.isEmpty()) backup = line.section('\t', 1);
-            if (command == "save" || command == "quit" || command.startsWith("sd-")) exchangeCommands << command;
+            if (command == "save" || command.startsWith("sd-") && command != "sd-state") got << command;
         }
-        QStringList expected{"sd-state"};
-        if (mode != "cancel-start" && mode != "eject-fail" && mode != "close-start") {
-            if (mode != "already-ejected") expected << "sd-eject";
-            expected << "save";
-            if (mode != "save-fail") {
-                expected << "sd-export";
-                if (mode == "apply" || mode == "insert-fail" || mode == "already-ejected") expected << "sd-insert";
-                if (mode == "close-edit") expected << "save" << "quit";
-                const auto savedPath = QFileInfo(backup).isDir() ? backup + "/session.frond" : backup;
-                QFile saved(savedPath); QVERIFY(saved.open(QIODevice::ReadOnly)); QCOMPARE(saved.readAll(), QByteArray("recovery ejected"));
-                const auto permissions = QFileInfo(QFileInfo(backup).absolutePath()).permissions();
-                QVERIFY(!(permissions & (QFile::ReadGroup | QFile::ReadOther)));
-            } else QVERIFY(!QFileInfo::exists(backup));
+        QStringList expected;
+        if (mode == "apply" || mode == "put-in-fail") expected = {"sd-eject", "save", "sd-take-out", "sd-put-in"};
+        else if (mode == "already-ejected") expected = {"save", "sd-take-out", "sd-put-in", "sd-eject"};
+        else if (mode == "save-fail") expected = {"sd-eject", "save", "sd-reinsert"};
+        else if (mode == "take-out-fail") expected = {"sd-eject", "save", "sd-take-out", "sd-reinsert"};
+        else if (mode == "eject-fail") expected = {"sd-eject"};
+        QCOMPARE(got, expected);
+        // The card file changed in place only when Files had it, one generation on, and it loads.
+        QVERIFY(frondCardFile::verify(cardPath).has_value());
+        QCOMPARE(*frondCardFile::verify(cardPath), opened ? generation + 1 : generation);
+        {
+            auto c = frondCardFile::CardFile::open(cardPath, false);
+            frondCardFile::FatImage fat(*c);
+            QCOMPARE(bool(fat.find("/hello.txt")), opened);
         }
-        if (mode == "eject-fail") expected << "sd-eject";
-        if (mode == "close-start") expected << "save" << "quit";
-        QCOMPARE(exchangeCommands, expected);
-        QCOMPARE(digest(source), original); QCOMPARE(digest(card.fileName()), originalCard);
-        if (window.isVisible()) {
-            QVERIFY(!window.close());
-            QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
-        }
-        QCOMPARE(digest(source), original);
+        if (opened || mode == "take-out-fail") QVERIFY(frondCards::readSlot(a).swap);
+        for (const auto& f : QDir(files.path()).entryList({"fail-*"})) QFile::remove(files.filePath(f));
+        window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 10000);
+        QSettings().clear();
     }
     // A Palm IIIx ROM imports as a IIIx and runs in frond-68k beside the ARM core, with only the
     // arguments and controls a IIIx has.
@@ -1958,69 +1924,42 @@ for line in s.makefile('rb'):
         window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
         QSettings().clear();
     }
-    void coreCrashInSdExchange() {
-        // The core dies while the SD exchange dialog is open (a nested event loop): the control
-        // socket is freed there, and nothing may touch it afterwards.
+    // The core dies while Files has the running machine's card: Files closes, and the card stays in
+    // the machine folder, swapped, to go in at the next start.
+    void coreCrashInSdFiles() {
+        cardsReset();
         QSettings().clear(); QSettings().setValue("resume", false);
         QTemporaryDir files;
-        const auto source = files.filePath("input.frond");
-        QFile session(source); QVERIFY(session.open(QIODevice::WriteOnly)); session.write("private original session"); session.close();
-        QFile card(source + ".img"); QVERIFY(card.open(QIODevice::WriteOnly));
-        const auto image = frondSd::create(32);
-        QCOMPARE(card.write(reinterpret_cast<const char*>(image.data()), image.size()), qint64(image.size())); card.close();
-        QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly));
-        core.write(R"PY(#!/usr/bin/python3
-import os,signal,socket,sys,time,pathlib,shutil
-source=sys.argv[1]
-s=socket.socket(socket.AF_UNIX)
-s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
-s.sendall(b'0\tevent\tready\t\n')
-state='inserted'
-for line in s.makefile('rb'):
-    i,cmd,arg=line.rstrip(b'\n').split(b'\t')
-    cmd=cmd.decode(); arg=bytes.fromhex(arg.decode()).decode()
-    message='done'
-    if cmd=='device-state': message='palm-tx'
-    elif cmd=='sd-state': message=state
-    elif cmd=='network-state': message='disabled'
-    elif cmd=='keyboard-state': message='detached'
-    elif cmd=='sd-eject': state='ejected'
-    elif cmd=='save':
-        p=pathlib.Path(arg)
-        if p.suffix!='.frond':
-            p.mkdir(parents=True, exist_ok=True)
-            p=p/'session.frond'
-        p.write_text('recovery '+state)
-    elif cmd=='sd-export': shutil.copyfile(source+'.img',arg)
-    s.sendall(i+b'\tok\tresult\t'+message.encode().hex().encode()+b'\n')
-    if cmd=='sd-export':
-        s.shutdown(socket.SHUT_RDWR); time.sleep(.3); os.kill(os.getpid(),signal.SIGSEGV)
-)PY");
-        core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
-        MainWindow window(core.fileName()); window.show(); window.openSession(source, true);
-        auto* action = window.findChild<QPushButton*>("sdExchange"); QVERIFY(action);
-        QTRY_VERIFY_WITH_TIMEOUT(action->isEnabled(), 5000);
-        bool sawEditor = false, sawError = false;
-        QElapsedTimer sinceEditor;
+        const auto core = pickerCore(files.path(), "palm-tx");
+        { QFile f(files.filePath("die-after-take-out")); QVERIFY(f.open(QIODevice::WriteOnly)); }
+        const auto a = cardsMachine("Palm TX", true);
+        frondCards::reconcile(cardsSessions());
+        MainWindow window(core);
+        window.show();
+        window.openSession(a + "/Palm TX.frond", true);
+        auto* action = window.findChild<QPushButton*>("sdExchange");
+        QTRY_VERIFY_WITH_TIMEOUT(action->isEnabled(), 10000);
+        bool sawWindow = false;
+        QStringList errors;
         QTimer poll; poll.setInterval(10);
         connect(&poll, &QTimer::timeout, &window, [&] {
-            for (auto* box : window.findChildren<QMessageBox*>())
-                {
-                    if (!box->isVisible()) continue;
-                    if (box->windowTitle().contains("Close Palm")) box->button(QMessageBox::Yes)->click();
-                    else { sawError = true; box->done(QMessageBox::Ok); }
-                }
-            if (auto* dialog = window.findChild<QDialog*>("sdExchangeDialog")) {
-                if (!dialog->isVisible()) return;
-                if (!sawEditor) { sawEditor = true; sinceEditor.start(); }
-                else if (sinceEditor.elapsed() > 1500) dialog->reject();  // well after the crash
+            for (auto* box : window.findChildren<QMessageBox*>()) {
+                if (!box->isVisible()) continue;
+                if (box->windowTitle().contains("Open the card")) box->button(QMessageBox::Yes)->click();
+                else { errors << box->text(); box->done(QMessageBox::Ok); }
             }
+            if (auto* w = window.findChild<CardFilesWindow*>("cardFilesWindow"); w && w->isVisible()) sawWindow = true;
         });
         poll.start(); action->click();
-        QTRY_VERIFY_WITH_TIMEOUT(sawEditor && sawError, 10000);
-        QTest::qWait(2500);
+        QTRY_VERIFY_WITH_TIMEOUT(sawWindow, 10000);
+        QTRY_VERIFY_WITH_TIMEOUT(errors.join(' ').contains("The card is kept in the machine and goes in at the next start."), 10000);
+        QTest::qWait(300);
         poll.stop();
-        QVERIFY(!window.findChild<QDialog*>("sdExchangeDialog") || !window.findChild<QDialog*>("sdExchangeDialog")->isVisible());
+        auto* w = window.findChild<CardFilesWindow*>("cardFilesWindow");
+        QVERIFY(!w || !w->isVisible());
+        QVERIFY(frondCards::readSlot(a).swap);
+        QVERIFY(frondCardFile::ready(a + "/sd.frondsd"));
+        QVERIFY(frondCardFile::verify(a + "/sd.frondsd").has_value());
         window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
         QSettings().clear();
     }
@@ -5475,20 +5414,14 @@ for line in s.makefile('rb'):
         window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 10000);
         QSettings().clear();
     }
-    // An exchange on the running machine's card greys its row menu in Cards and the picker, while
-    // it is pending (eject and backup save) and while its dialog is open.
+    // Files… on the running machine's card greys its row menu in Cards and the picker, while it is
+    // pending (eject and save) and while Files is open.
     void cardsExchangeGreying() {
-        if (!SdExchange::available()) QSKIP("mtools isn't installed");
         cardsReset();
         QSettings().clear(); QSettings().setValue("resume", false);
         QTemporaryDir files;
         const auto core = pickerCore(files.path(), "palm-tx");
-        {
-            QFile img(files.filePath("exchange.img")); QVERIFY(img.open(QIODevice::WriteOnly));
-            const auto image = frondSd::create(32);
-            img.write(reinterpret_cast<const char*>(image.data()), qint64(image.size()));
-            QFile slow(files.filePath("slow-save")); QVERIFY(slow.open(QIODevice::WriteOnly));
-        }
+        { QFile slow(files.filePath("slow-save")); QVERIFY(slow.open(QIODevice::WriteOnly)); }
         const auto a = cardsMachine("Palm TX", true);
         frondCards::reconcile(cardsSessions());
         MainWindow window(core);
@@ -5521,11 +5454,11 @@ for line in s.makefile('rb'):
         };
         QTimer poll; poll.setInterval(10);
         connect(&poll, &QTimer::timeout, &window, [&] {
-            if (auto* box = window.findChild<QMessageBox*>(); box && box->isVisible() && box->windowTitle().contains("Close Palm")) {
+            if (auto* box = window.findChild<QMessageBox*>(); box && box->isVisible() && box->windowTitle().contains("Open the card")) {
                 box->button(QMessageBox::Yes)->click();
                 return;
             }
-            if (auto* dialog = window.findChild<QDialog*>("sdExchangeDialog"); dialog && dialog->isVisible()) {
+            if (auto* dialog = window.findChild<QDialog*>("cardFilesWindow"); dialog && dialog->isVisible()) {
                 if (!sawOpen) { sawOpen = true; check("open"); }
                 dialog->reject();
                 return;
@@ -5533,7 +5466,7 @@ for line in s.makefile('rb'):
             QFile trace(files.filePath("commands"));
             if (sawPending || !trace.open(QIODevice::ReadOnly)) return;
             const auto commands = trace.readAll();
-            if (commands.contains("sd-exchange") && !commands.contains("sd-export")) { sawPending = true; check("pending"); }
+            if (commands.contains("save\t") && !commands.contains("sd-take-out")) { sawPending = true; check("pending"); }
         });
         poll.start();
         action->click();
@@ -5545,6 +5478,79 @@ for line in s.makefile('rb'):
         // Back to normal afterwards.
         QVERIFY(pick->isEnabled());
         for (const auto* name : names) QVERIFY2(enabled(name), name);
+        window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 10000);
+        QSettings().clear();
+    }
+    // Files… in Cards: a free card and a stopped machine's card open in Files and change in place;
+    // the running machine's card is greyed In use. A stopped machine's card is marked swapped.
+    void cardsFilesGating() {
+        cardsReset();
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QTemporaryDir files;
+        const auto core = pickerCore(files.path(), "palm-tx");
+        const auto runner = cardsMachine("Runner", true), stopped = cardsMachine("Stopped", true), empty = cardsMachine("Empty", false);
+        frondCards::reconcile(cardsSessions());
+        QString free;
+        QVERIFY(frondCards::makeCard(cardsSessions(), "Free", "sd", 32, {}, &free).isEmpty());
+        QFile host(files.filePath("note.txt")); QVERIFY(host.open(QIODevice::WriteOnly)); host.write("note"); host.close();
+        MainWindow window(core);
+        window.show();
+        window.openSession(runner + "/Runner.frond", true);
+        QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("sdExchange")->isEnabled(), 10000);
+        auto* cards = window.showCards();
+        auto* sd = cards->findChild<QListWidget*>("sdCards");
+        auto row = [&](const QString& name) {
+            for (int i = 0; i < sd->count(); ++i)
+                if (rowLabel(sd, i, "cardName") == name) return i;
+            return -1;
+        };
+        auto filesAction = [&](const QString& name) {
+            auto* menu = sd->itemWidget(sd->item(row(name)))->findChild<QPushButton*>("cardMenu")->menu();
+            emit menu->aboutToShow();
+            return menu->findChild<QAction*>("cardFiles");
+        };
+        QCOMPARE(sd->count(), 3);
+        QCOMPARE(filesAction("Runner card")->text(), QString("Files… · In use"));
+        QVERIFY(!filesAction("Runner card")->isEnabled());
+        QCOMPARE(filesAction("Stopped card")->text(), QString("Files…"));
+        QVERIFY(filesAction("Stopped card")->isEnabled() && filesAction("Free")->isEnabled());
+        auto edit = [&](const QString& name, const QString& path) {
+            const auto generation = cardGeneration(path);
+            bool done = false;
+            QTimer poll; poll.setInterval(10);
+            connect(&poll, &QTimer::timeout, cards, [&] {
+                auto* w = cards->findChild<CardFilesWindow*>("cardFilesWindow");
+                if (!w || !w->isVisible() || done) return;
+                done = true;
+                // Open in Files: the card can't be opened again or moved.
+                QVERIFY(frondCardFile::inUse(path));
+                w->addPaths({host.fileName()});
+                w->doneButton->click();
+            });
+            poll.start();
+            filesAction(name)->trigger();
+            QTRY_VERIFY_WITH_TIMEOUT(done, 5000);
+            QTRY_VERIFY_WITH_TIMEOUT(!cards->findChild<CardFilesWindow*>("cardFilesWindow"), 5000);
+            poll.stop();
+            QVERIFY(!frondCardFile::inUse(path));
+            QCOMPARE(*frondCardFile::verify(path), generation + 1);
+            auto c = frondCardFile::CardFile::open(path, false);
+            frondCardFile::FatImage fat(*c);
+            QVERIFY(fat.find("/note.txt"));
+        };
+        edit("Free", cardsLibrary() + '/' + free + "/sd.frondsd");
+        QVERIFY(!frondCards::readSlot(stopped).swap);
+        edit("Stopped card", stopped + "/sd.frondsd");
+        QVERIFY(frondCards::readSlot(stopped).swap);
+        // A card open in Files can't be taken out or deleted.
+        {
+            auto c = frondCardFile::CardFile::open(cardsLibrary() + '/' + free + "/sd.frondsd", true);
+            {
+                frondCards::LibraryLock lock(cardsLibrary());
+                QCOMPARE(frondCards::toMachine(cardsLibrary(), free, empty), QString("The card is open in Files. Close it first."));
+            }
+            QCOMPARE(frondCards::deleteCard(cardsSessions(), free), QString("The card is open in Files. Close it first."));
+        }
         window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 10000);
         QSettings().clear();
     }

@@ -11,6 +11,7 @@ class QMenu;
 class QPushButton;
 class QRadioButton;
 class QVBoxLayout;
+class CardFilesWindow;
 
 // Runs `work` on a worker thread behind a progress dialog with Cancel; the progress it is given
 // returns false once Cancel is pressed. Returns work's error, empty on success.
@@ -91,6 +92,9 @@ class CardsWindow : public QDialog {
     std::function<void()> changed;
     QListWidget *sdList, *msList;
     QLabel *sdHeading, *msHeading, *sdEmpty, *msEmpty;
+    // Files… on a card: a free card or one in a stopped machine, edited in place.
+    void openFiles(const QString& id);
+    CardFilesWindow* files{nullptr};
  private:
     void newCard();
     void importImage();
