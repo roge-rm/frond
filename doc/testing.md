@@ -24,6 +24,7 @@ The first `make` fetches Dynarmic (needs network, Ninja and Boost). `FROND_FAST=
 - `make test-build-tools` tests staging safety and package policy with synthetic data. It does not package Frond.
 - `make check-reconstruction` prepares the core twice in separate temporary directories from the pinned upstream and `patches/`, compares file hashes and modes, and checks them against `build/source`. A matching prepare stamp alone doesn't show that `build/source` is unmodified, so run it before judging a build. Core changes go in a new patch after the last one, then run this.
 - `make test-jit-overshoot` and `make test-jit-differential` run with `make test` when the Fast engine is built. The differential test runs random ARM and Thumb blocks on both engines and compares them, plus directed cases: seeds 1 to 30000, then two further ranges of 10000. For a long run use `make test-jit-differential JIT_DIFF_ARGS="--seeds 1: --duration 3600"`, or `--seed N` for one case.
+- `make test-zodiac-graphics-acquisition` checks the virtual raw-axis input, guest-time acquisition, reset/cancellation, tagged FIFO, GPIO source selection and real timed helper readback/identity transfers on Exact and Fast.
 - `make check-device-data` checks the generated per-device data against the profiles.
 - `make test-compatibility` runs synthetic 68k and ARM/Thumb programs through the core: mixed-width memory, branches, returns, traps, faults and an ARM to Thumb to ARM call chain. These are bounded checks, not ISA conformance tests.
 

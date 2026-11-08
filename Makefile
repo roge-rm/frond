@@ -1718,3 +1718,9 @@ test-zodiac-graphics-interrupts: zodiac-boot-probe prepare
 		tests/zodiac-graphics-interrupts.cpp -o build/test-zodiac-graphics-interrupts
 	./build/test-zodiac-graphics-interrupts
 	python3 tests/zodiac-graphics-interrupts.py
+
+.PHONY: test-zodiac-graphics-acquisition
+test-zodiac-graphics-acquisition: zodiac-boot-probe prepare
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Ibuild/source/src/uarm/uarm tests/zodiac-graphics-acquisition.cpp build/source/src/uarm/uarm/imx1_gpio.cpp -o build/test-zodiac-graphics-acquisition
+	./build/test-zodiac-graphics-acquisition
+	python3 tests/zodiac-graphics-acquisition.py

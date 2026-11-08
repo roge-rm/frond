@@ -96,7 +96,7 @@ static bool parseRtcTime(const char* text, Imx1RtcTime& time) {
 }
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::fprintf(stderr, "Usage: %s ROM [physical|reset|linked] [instruction-budget] [exact|fast] [--bootstrap-peripherals] [--assume-mpll-settled] [--assume-spll-settled] [--assume-i2c-single-master] [--i2c-eeprom-image=PATH] [--asp-px1-input=high] [--asp-u-sample=WORD] [--rtc-initial-time=DAY:HH:MM:SS] [--cs4-port0-input=BYTE] [--cs5-reset-status-input=BYTE] [--graphics-profile=virtual5744-compatible-8mib] [--graphics-irq-connection=virtual-a13] [--gpio-a-input-masked=VALUE/MASK] [--gpio-a-input=VALUE] [--gpio-b-input=VALUE] [--gpio-d-input=VALUE] [--ram-mib=32|128]\n", argv[0]);
+        std::fprintf(stderr, "Usage: %s ROM [physical|reset|linked] [instruction-budget] [exact|fast] [--bootstrap-peripherals] [--assume-mpll-settled] [--assume-spll-settled] [--assume-i2c-single-master] [--i2c-eeprom-image=PATH] [--asp-px1-input=high] [--asp-u-sample=WORD] [--rtc-initial-time=DAY:HH:MM:SS] [--cs4-port0-input=BYTE] [--cs5-reset-status-input=BYTE] [--graphics-profile=virtual5744-compatible-8mib] [--graphics-raw-axes=FIRST/SECOND] [--graphics-irq-connection=virtual-a13] [--gpio-a-input-masked=VALUE/MASK] [--gpio-a-input=VALUE] [--gpio-b-input=VALUE] [--gpio-d-input=VALUE] [--ram-mib=32|128]\n", argv[0]);
         return 1;
     }
     const char* engine = argc >= 5 ? argv[4] : "exact";
@@ -121,6 +121,18 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "Supply --graphics-profile=virtual5744-compatible-8mib once\n"); return 1;
             }
             options.graphicsProfile = Imx1GraphicsProfile::virtual5744Compatible8MiB;
+        }
+        else if (!std::strncmp(argv[i], "--graphics-raw-axes=", 20)) {
+            const char* text = argv[i] + 20;
+            char* end = nullptr;
+            errno = 0;
+            const auto first = std::strtoul(text, &end, 0);
+            if (options.graphicsRawAxesKnown || errno || *text < '0' || *text > '9' || *end != '/' || first > 1023) return 1;
+            text = end + 1; errno = 0;
+            const auto second = std::strtoul(text, &end, 0);
+            if (errno || *text < '0' || *text > '9' || *end || second > 1023) return 1;
+            options.graphicsRawAxesKnown = true;
+            options.graphicsRawFirst = first; options.graphicsRawSecond = second;
         }
         else if (!std::strncmp(argv[i], "--graphics-irq-connection=", 26)) {
             if (options.graphicsIrqA13 || std::strcmp(argv[i] + 26, "virtual-a13")) {
@@ -215,6 +227,10 @@ int main(int argc, char** argv) {
         } else if (!std::strcmp(argv[i], "--ram-mib=32")) options.ramMiB = 32;
         else if (!std::strcmp(argv[i], "--ram-mib=128")) options.ramMiB = 128;
         else { std::fprintf(stderr, "Unknown diagnostic option: %s\n", argv[i]); return 1; }
+    }
+    if (options.graphicsRawAxesKnown && (!options.bootstrapPeripherals ||
+        options.graphicsProfile != Imx1GraphicsProfile::virtual5744Compatible8MiB)) {
+        std::fprintf(stderr, "Raw graphics axes require the virtual graphics profile and bootstrap peripherals\n"); return 1;
     }
     if ((options.gpioAInputKnown && options.gpioAInputMaskedKnown) ||
         (options.graphicsIrqA13 && (options.graphicsProfile != Imx1GraphicsProfile::virtual5744Compatible8MiB ||
