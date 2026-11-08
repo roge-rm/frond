@@ -223,6 +223,42 @@ int main() {
     assert(state.access(eim,0x200ad7b0,0x1601054c,4,false,value) == A::ok && value == 0);
     state.advanceCpuCycles(8 * Imx1GraphicsDisplay::pixelCycles);
     assert(state.access(eim,0x200ad7b0,0x1601054c,4,false,value) == A::ok && value == 0x400);
+    {
+        // The native two-phase wait observes entry into and exit from the active interval.
+        auto waiting = state;
+        const auto phase = waiting.displayState().scanPhase();
+        for (unsigned i = 0; i < 16; ++i) {
+            value = 0;
+            assert(waiting.access(eim,0x200adb08,0x1601054c,4,false,value) == A::ok && value == 0x400);
+            assert(waiting.access(eim,0x200adb14,0x1601054c,4,false,value) == A::ok && value == 0x400);
+        }
+        assert(waiting.displayState().scanPhase() == phase);
+        unsigned ticks = 0;
+        do {
+            waiting.advanceCpuCycles(1);
+            assert(waiting.access(eim,0x200adb14,0x1601054c,4,false,value) == A::ok);
+            assert(++ticks <= period);
+        } while (value & 0x400);
+        do {
+            waiting.advanceCpuCycles(1);
+            assert(waiting.access(eim,0x200adb08,0x1601054c,4,false,value) == A::ok);
+            assert(++ticks <= 2 * period);
+        } while (!(value & 0x400));
+        assert(ticks == period);
+        value = 0xdeadbeef;
+        assert(waiting.access(eim,0x200adb0c,0x1601054c,4,false,value) == A::externalInput && value == 0xdeadbeef);
+        for (uint32_t pc : {0x200adb08u,0x200adb14u}) {
+            assert(waiting.access(eim,pc,0x1601054c,4,true,value) == A::externalInput);
+            assert(waiting.access(eim,pc,0x1601054c,2,false,value) == A::width);
+            assert(value == 0xdeadbeef);
+        }
+        assert(waiting.displayState().scanPhase() == phase);
+        auto resetDisplay = waiting.displayState();
+        resetDisplay.reset();
+        for (uint32_t pc : {0x200adb08u,0x200adb14u}) {
+            assert(resetDisplay.access(Imx1GraphicsWindows{},pc,0x1601054c,4,false,value) == A::ok && value == 0);
+        }
+    }
     // Advancing one large interval and many small ones crosses the same deadlines.
     auto chunked = state;
     state.advanceCpuCycles(3 * period + 7);
