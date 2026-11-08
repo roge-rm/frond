@@ -28,6 +28,13 @@ licence, with bundled fmt, mcl, oaknut, robin-map, zycore and zydis (MIT) and
 xbyak (BSD-3-Clause). Their notices are in dynarmic-LICENSE, fmt-LICENSE,
 mcl-LICENSE, oaknut-LICENSE, robin-map-LICENSE, zycore-LICENSE, zydis-LICENSE
 and xbyak-COPYRIGHT in this directory.
+This Frond's Bluetooth radio, /usr/lib/frond/btvirt, is BlueZ's virtual
+controller (emulator/btvirt), copyright the BlueZ authors, under the
+GPL-2.0-or-later, with LGPL-2.1-or-later library parts and BSD-2-Clause ECC
+code; Frond adds a small patch. Its notices are in bluez-COPYING,
+bluez-COPYING.LIB and bluez-ecc-BSD-2-Clause in this directory. The source is
+https://github.com/bluez/bluez at the revision named in
+tools/build-bluetooth-provider.py, with tools/bluez-bdaddr.patch.
 Qt, SDL and other system libraries are supplied separately by Debian.
 
 Palm firmware and applications are not included in this package.

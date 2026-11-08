@@ -386,10 +386,16 @@ test-desktop: desktop
 	+cmake --build build/desktop --parallel $(BUILD_JOBS)
 	ctest --test-dir build/desktop --output-on-failure
 
-deb: desktop out/frond-68k
+deb: desktop out/frond-68k build/bluetooth-provider/emulator/btvirt
 	python3 tools/package-deb.py
 
-# arm64 package for Raspberry Pi OS trixie, cross built in Docker. Needs Docker only.
+# This Frond's Bluetooth radio. The pinned BlueZ source is fetched once with
+# python3 tools/build-bluetooth-provider.py --fetch.
+build/bluetooth-provider/emulator/btvirt:
+	python3 tools/build-bluetooth-provider.py --jobs $(BUILD_JOBS)
+
+# arm64 package for Raspberry Pi OS trixie, cross built in Docker. Needs Docker and the BlueZ
+# checkout from tools/build-bluetooth-provider.py --fetch (btvirt is cross built from it).
 # The core is prepared fresh in build/arm64/source and mounted over build/source.
 ARM64_JOBS ?= 10
 .PHONY: deb-arm64

@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def package(root=ROOT, core='out/frond', desktop='out/frond-desktop',
-            core68k='out/frond-68k', architecture=None,
+            core68k='out/frond-68k', btvirt='build/bluetooth-provider/emulator/btvirt', architecture=None,
             strip='strip', runner=()):
     # A cross build passes its own binaries, architecture, strip tool and an emulator runner.
     version = (root / 'VERSION').read_text().strip()
@@ -41,6 +41,10 @@ def package(root=ROOT, core='out/frond', desktop='out/frond-desktop',
             env=dict(env, QT_QPA_PLATFORM='offscreen'), text=True).strip()
         if not reported or reported.split()[-1] != version:
             raise ValueError(f'{executable} reports {reported!r}, expected {version}')
+    # This Frond's Bluetooth radio, BlueZ btvirt (tools/build-bluetooth-provider.py). It has no --version.
+    radio = root / btvirt
+    if radio.is_symlink() or not radio.is_file():
+        raise ValueError(f'Expected regular built binary: {btvirt} (build it with tools/build-bluetooth-provider.py)')
     if architecture is None:
         architecture = subprocess.check_output(['dpkg', '--print-architecture'], text=True).strip()
     work_parent = root / 'build'
@@ -65,7 +69,8 @@ def package(root=ROOT, core='out/frond', desktop='out/frond-desktop',
         core = copy(core, 'usr/lib/frond/frond-core', 0o755)
         core68k = copy(core68k, 'usr/lib/frond/frond-68k-core', 0o755)
         gui = copy(desktop, 'usr/bin/frond-desktop', 0o755)
-        for binary in (core, core68k, gui):
+        radio = copy(btvirt, 'usr/lib/frond/btvirt', 0o755)
+        for binary in (core, core68k, gui, radio):
             subprocess.run([strip, '--strip-unneeded', str(binary)], check=True)
         copy('packaging/org.frond.Frond.desktop', 'usr/share/applications/org.frond.Frond.desktop')
         copy('packaging/frond.svg', 'usr/share/icons/hicolor/scalable/apps/frond.svg')
@@ -79,7 +84,7 @@ def package(root=ROOT, core='out/frond', desktop='out/frond-desktop',
             copy(f'doc/{name}', f'usr/share/doc/frond/{name}')
         (work / 'debian/control').write_text('Source: frond\n\nPackage: frond\nArchitecture: any\nDescription: Palm OS emulator\n')
         deps = subprocess.check_output(['dpkg-shlibdeps', '--warnings=1', '-O', '-e' + str(core),
-                                        '-e' + str(core68k), '-e' + str(gui)], cwd=work, text=True,
+                                        '-e' + str(core68k), '-e' + str(gui), '-e' + str(radio)], cwd=work, text=True,
                                        env=dict(os.environ, DEB_HOST_ARCH=architecture))
         deps = next(line.removeprefix('shlibs:Depends=') for line in deps.splitlines()
                     if line.startswith('shlibs:Depends='))
@@ -126,12 +131,14 @@ if __name__ == '__main__':
     parser.add_argument('--core', default='out/frond', help='core binary, relative to the checkout')
     parser.add_argument('--core-68k', default='out/frond-68k', help='68k core binary, relative to the checkout')
     parser.add_argument('--desktop', default='out/frond-desktop', help='desktop binary, relative to the checkout')
+    parser.add_argument('--btvirt', default='build/bluetooth-provider/emulator/btvirt',
+                        help='btvirt binary (Bluetooth radio), relative to the checkout')
     parser.add_argument('--architecture', help='Debian architecture; defaults to the host')
     parser.add_argument('--strip', default='strip', help='strip tool for the binaries')
     parser.add_argument('--runner', default='', help='emulator that runs the binaries for their version check')
     args = parser.parse_args()
     try:
-        package(core=args.core, core68k=args.core_68k, desktop=args.desktop, architecture=args.architecture,
+        package(core=args.core, core68k=args.core_68k, desktop=args.desktop, btvirt=args.btvirt, architecture=args.architecture,
                 strip=args.strip, runner=args.runner.split())
     except (ValueError, OSError, subprocess.CalledProcessError) as error:
         raise SystemExit(str(error))

@@ -33,6 +33,19 @@ cmake -S desktop -B build/arm64/desktop -DCMAKE_BUILD_TYPE=RelWithDebInfo \
     -DQT_HOST_PATH=/usr -DQT_HOST_PATH_CMAKE_DIR=/usr/lib/x86_64-linux-gnu/cmake
 cmake --build build/arm64/desktop --target frond-desktop --parallel "$JOBS"
 cp build/arm64/desktop/frond-desktop build/arm64/out/frond-desktop
+# btvirt, This Frond's Bluetooth radio, from the patched BlueZ checkout: the same files the Android build uses.
+BLUEZ=/src/build/bluetooth-provider
+BT=/src/build/arm64/btvirt
+rm -rf $BT && mkdir -p $BT
+printf '#define VERSION "5.87-frond"\n#define HAVE_LINUX_TYPES_H 1\n#define HAVE_LINUX_IF_ALG_H 1\n#define HAVE_SYS_RANDOM_H 1\n#define HAVE_GETRANDOM 1\n' > $BT/config.h
+ln -s $BLUEZ/lib/bluetooth $BT/bluetooth
+for f in emulator/main.c emulator/serial.c emulator/server.c emulator/vhci.c emulator/btdev.c emulator/bthost.c \
+         emulator/smp.c emulator/phy.c emulator/le.c lib/bluetooth/bluetooth.c src/shared/queue.c src/shared/util.c \
+         src/shared/crypto.c src/shared/ecc.c src/shared/io-mainloop.c src/shared/timeout-mainloop.c \
+         src/shared/mainloop.c src/shared/mainloop-notify.c; do
+    $TRIPLE-gcc -O2 -DHAVE_CONFIG_H -I$BT -I$BLUEZ -c $BLUEZ/$f -o $BT/$(echo $f | tr / _).o
+done
+$TRIPLE-gcc $BT/*.o -o build/arm64/out/btvirt
 export QEMU_LD_PREFIX=/
 python3 tools/package-deb.py --core build/arm64/out/frond --core-68k build/arm64/out/frond-68k --desktop build/arm64/out/frond-desktop \
-    --architecture arm64 --strip $TRIPLE-strip --runner qemu-aarch64
+    --btvirt build/arm64/out/btvirt --architecture arm64 --strip $TRIPLE-strip --runner qemu-aarch64

@@ -13,5 +13,8 @@
     <file alias="xbyak-COPYRIGHT">../licences/xbyak-COPYRIGHT</file>
     <file alias="zycore-LICENSE">../licences/zycore-LICENSE</file>
     <file alias="zydis-LICENSE">../licences/zydis-LICENSE</file>
+    <file alias="bluez-COPYING">../licences/bluez-COPYING</file>
+    <file alias="bluez-COPYING.LIB">../licences/bluez-COPYING.LIB</file>
+    <file alias="bluez-ecc-BSD-2-Clause">../licences/bluez-ecc-BSD-2-Clause</file>
   </qresource>
 </RCC>
