@@ -348,6 +348,10 @@ Modem and phone by device:
 
 Plugs the Palm's USB port into the computer. On Android use Wait for a peer, then `link-pty.py PHONE:5034 --link /tmp/palm-usb` on a computer. Start HotSync on the Palm (Local, Cradle/Cable), then run pilot-link, for example `pilot-xfer -p /dev/pts/7 -l`. The status line shows the bus step, and "enumerated" means it's ready. HotSync takes 15 to 20 seconds to start. pilot-link only opens serial devices, so for a TCP port put a PTY in front with `tools/link-pty.py` (a plain `socat` PTY doesn't work). Changing the setting or loading a session unplugs the cable and plugs it back in.
 
+The common USB host submits the next request in a direction 1 ms after completing
+the previous request. This limits transfers to roughly 8–64 kB/s per
+endpoint direction, depending on packet size, across all common-host devices.
+
 ### Infrared
 
 Infrared beaming links two Frond machines through a connection, see Connections between Fronds above. Detach the infrared keyboard first, as they share the port. Set Infrared on each machine to the other install (or This computer for two windows on one computer) and use Palm OS's normal Beam command. Both Palms must be awake and the receiver needs Beam Receive on.

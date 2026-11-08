@@ -167,6 +167,8 @@ struct Guest {
 
 struct Bench {
     Guest guest;
+    struct InEvent { uint64_t ns; UsbPacketResult result; unsigned size; };
+    std::vector<InEvent> inEvents;
     unsigned timeoutBudget = 0, timedOut = 0, configSetups = 0;
     bool configStatus = false;
     UsbDevicePort port() {
@@ -193,7 +195,10 @@ struct Bench {
                 return UsbDevicePort(udc).In(d,n);
             },
             [](void*, uint8_t e, const uint8_t* d, unsigned n) { return UsbDevicePort(udc).EpOut(e,d,n); },
-            [](void*, uint8_t e, uint8_t* d, unsigned* n) { return UsbDevicePort(udc).EpIn(e,d,n); },
+            [](void* ctx, uint8_t e, uint8_t* d, unsigned* n) {
+                auto& b=*static_cast<Bench*>(ctx); auto result=UsbDevicePort(udc).EpIn(e,d,n);
+                b.inEvents.push_back({b.now,result,result==R::Ack?*n:0}); return result;
+            },
             [](void* ctx, uint8_t e, unsigned* n) {
                 auto& b=*static_cast<Bench*>(ctx);
                 if(!e && b.configStatus && b.timedOut < b.timeoutBudget) return R::Timeout;
@@ -507,7 +512,9 @@ static void testDirectionalMps() {
             b.run(5000000); assert(b.host.GetCounters().naks > naks);
             b.guest.silent = false;
             b.space = expected.size() + 64;
-            b.run(500000000);
+            // At MPS 8, 4097 bytes need over 512 one-packet requests.
+            b.run(1000000000);
+            if (b.guest.received != expected || !b.fromHost.empty()) std::fprintf(stderr, "MPS %u round %u expected %zu received %zu queued %zu\n", outMps, round, expected.size(), b.guest.received.size(), b.fromHost.size());
             assert(b.guest.received == expected && b.fromHost.empty());
             assert(std::vector<uint8_t>(b.toHost.begin(), b.toHost.end()) == expected);
             assert(b.host.GetCounters().bytesOut == expected.size());
@@ -626,8 +633,45 @@ static void testByteLink() {
     puts("PASS: HostByteLink on a PTY moves bytes both ways and closes");
 }
 
+static void testRequestCadence() {
+    for(unsigned length : {0u, 7u, 64u}) {
+        Bench b; b.guest.enable(); b.host.Attach();
+        assert(b.runUntil(UsbBusHost::Phase::running, 2000000000ull, "cnys"));
+        b.guest.silent=true; b.inEvents.clear();
+        for(unsigned i=0;i<length;++i) wr8(0x318,uint8_t(i));
+        if(length<64) wr(0x118,0x80);
+        for(unsigned i=0;i<2000 && (b.inEvents.empty() || b.inEvents.back().result!=UsbPacketResult::Ack);++i) b.run(1000);
+        assert(!b.inEvents.empty() && b.inEvents.back().result==UsbPacketResult::Ack);
+        const auto ack=b.inEvents.back(); assert(ack.size==length);
+        const auto count=b.inEvents.size();
+        b.fromHost={1,2,3,4};
+        // Pokes and masked guest service cannot change the request submission deadline.
+        for(unsigned i=0;i<500;++i) { b.host.Poke(); b.run(1000); }
+        assert(b.inEvents.size()==count);
+        assert(b.host.GetCounters().bytesOut==4); // OUT remains eligible during IN cooldown.
+        const auto naks=b.host.GetCounters().naks;
+        b.run(3000000);
+        assert(b.inEvents.size()>count && b.inEvents[count].result==UsbPacketResult::Nak);
+        assert(b.inEvents[count].ns>=ack.ns+UsbBusHost::frameNs);
+        assert(b.host.GetCounters().naks>naks); // empty controller is really polled with guest still masked.
+        b.guest.epOut(); assert(b.guest.received==std::vector<uint8_t>({1,2,3,4}));
+        b.guest.silent=false; b.space=0;
+        b.guest.toSend.assign(4096,0x5a); b.run(5000000);
+        assert(b.host.GetCounters().bytesIn==length);
+        b.space=8192; b.run(120000000);
+        assert(b.host.GetCounters().bytesIn==length+4096);
+        uint64_t lastAck=0;
+        for(const auto& e:b.inEvents) if(e.result==UsbPacketResult::Ack) {
+            if(lastAck) assert(e.ns>=lastAck+UsbBusHost::frameNs);
+            lastAck=e.ns;
+        }
+    }
+    puts("PASS: bounded MPS request cadence, short/full/ZLP, masked guest real NAK, poke independence, OUT progress and backpressure/throughput");
+}
+
 int main() {
     setvbuf(stdout, nullptr, _IONBF, 0);
+    testRequestCadence();
     testControlNoResponseRetry();
     testEnumerationAndFrames();
     testPortLater();
