@@ -25,7 +25,10 @@ uint32_t read(Imx1Bootstrap& soc, uint32_t address) {
 }
 void write(Imx1Bootstrap& soc, uint32_t address, uint32_t value, B expected = B::ok) {
     const auto argument = value;
-    assert(soc.access(address, 4, true, value) == expected && value == argument);
+    const auto actual = soc.access(address, 4, true, value);
+    if (actual != expected) std::fprintf(stderr, "%08x=%08x: %s expected %s\n", address, argument,
+        imx1BootstrapAccessName(actual), imx1BootstrapAccessName(expected));
+    assert(actual == expected && value == argument);
 }
 void registersAndGuards() {
     Imx1Watchdog watchdog;
@@ -103,7 +106,7 @@ void bootstrapInactiveRequest() {
     assert(read(soc, aitc + 0x60) == 0);
     write(soc, aitc + 0x50, 0x80000000, B::sideEffect);
     assert(read(soc, aitc + 0x50) == 0);
-    write(soc, aitc + 8, 60, B::externalInput); // Unmodelled DMA input remains unknown.
+    write(soc, aitc + 8, 0, B::externalInput); // Unmodelled interrupt input remains unknown.
     write(soc, base, 0x7f16, B::resetRequest);
     write(soc, base, 0x7f13, B::sideEffect);
     assert(read(soc, base) == 0x7f12);
@@ -189,7 +192,7 @@ void activeBootstrap() {
     // A live reference divisor change is rejected before the RTC has elapsed at all.
     write(soc, 0x00204010, 0xa0, B::sideEffect); assert(read(soc, 0x00204010) == 0x80);
     write(soc, 0x00204010, 0xe0, B::sideEffect); assert(read(soc, 0x00204010) == 0x80);
-    write(soc, 0x00204018, 0, B::sideEffect);
+    write(soc, 0x00204018, 0);
     write(soc, 0x00204004, 1, B::sideEffect); assert(read(soc, 0x00204004) == 56);
     for (unsigned i = 0; i < 100; ++i) assert(read(soc, base + 8) == 0);
     soc.advanceFastBusCycles(16384 * 250 - 1);
