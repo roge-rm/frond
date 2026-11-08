@@ -1,8 +1,11 @@
 #pragma once
-// The card file manager: a card file (sd.frondsd or ms.frondmsp) opened with CardFile and edited
-// in place, each change committed as it's made. The same for a card opened from Cards and for the
-// running machine's card while it is taken out. Closing the window ends the visit.
+// The file manager for every medium: a card file (sd.frondsd, ms.frondms or ms.frondmsp) opened
+// with CardFile and edited in place, each change committed as it's made, the same for a card
+// opened from Cards and for the running machine's card while it is taken out; and Internal, a
+// running machine's RAM databases through the core's database commands, which has no folders.
+// Closing the window ends the visit.
 #include <QDialog>
+#include <QHash>
 #include <QLockFile>
 #include <QPointer>
 #include <QTemporaryDir>
@@ -10,6 +13,7 @@
 #include <functional>
 #include <memory>
 #include "CardFiles.h"
+#include "RunningRules.h"
 
 class QLabel;
 class QMessageBox;
@@ -24,6 +28,20 @@ class CardFilesWindow : public QDialog {
  public:
     // `card` is open for this visit; `writable` false for a write-protected card.
     CardFilesWindow(std::unique_ptr<frondCardFile::CardFile> card, const QString& title, QWidget* parent = nullptr);
+    // Internal: what the window asks of the running machine. Each runs one job through the core and
+    // answers with databasesDone(); `list` answers with setDatabases().
+    struct Databases {
+        std::function<void()> list;
+        std::function<void(const QStringList& hostFiles)> install;
+        std::function<void(const QStringList& names, const QString& hostFolder)> exportTo;
+        std::function<void(const QStringList& names)> remove;
+    };
+    CardFilesWindow(Databases databases, const QString& title, QWidget* parent = nullptr);
+    bool internal() const { return source.list != nullptr; }
+    // The databases db-list found; the window lists them.
+    void setDatabases(const std::vector<runningRules::Database>& all);
+    // A database job ended with `message` for the note; the list is asked for again.
+    void databasesDone(const QString& message);
     ~CardFilesWindow() override;
 
     // Held until the card is closed: the machine's lock for a card in a stopped machine.
@@ -36,7 +54,7 @@ class CardFilesWindow : public QDialog {
     bool deleteOnClose{false};
     // A closing that waits for a job is held back until the worker stops.
     void done(int result) override;
-    bool working() const { return busy; }
+    bool working() const { return busy || waiting; }
     // Run on the job's worker thread before the work, for the tests.
     std::function<void()> workHook;
     bool changed() const { return wasChanged; }
@@ -70,6 +88,7 @@ class CardFilesWindow : public QDialog {
     void dropEvent(QDropEvent* event) override;
 
  private:
+    void build(const QString& title);
     using Work = std::function<QString(frondCardFile::FatImage&, const frondCardFiles::Cancelled&, const frondCardFiles::Bytes&, qint64& total)>;
     // Runs a job on the card behind a progress dialog with Cancel, then lists the folder again.
     // Returns false when it failed (the message is shown).
@@ -94,5 +113,9 @@ class CardFilesWindow : public QDialog {
     std::atomic<bool> stopRequested{false};
     QPointer<QMessageBox> clashBox;
     int openLevel{0};
+    // Internal: the commands, the database each listed file is, and a job in the core.
+    Databases source;
+    QHash<QString, QString> databaseOf;
+    bool waiting{false}, listed{false};
     void deleteWhenSafe();
 };

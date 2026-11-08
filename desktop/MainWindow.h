@@ -138,6 +138,14 @@ class MainWindow : public QMainWindow {
     void deleteLookup(bool ok, const QString& message, const std::vector<runningRules::Database>& all);
     void deleteNext();
     void deleteReply(bool ok, const QString& message);
+    // Internal on the Storage panel: Files… on the running machine's RAM databases, each change one
+    // queued run of install, export-db or delete-db.
+    void openInternal();
+    void listInternal();
+    void startInternal(const QString& kind, const QList<QPair<QString, QString>>& commands, const QString& folder = {});
+    void internalNext();
+    void internalReply(bool ok, const QString& message);
+    void internalDone();
     void exportDatabase(const QString& name);
     void otherDatabase();
     QStringList installPaths(const QMimeData* data) const;
@@ -181,6 +189,19 @@ class MainWindow : public QMainWindow {
         QString name;
         QStringList queue, failed;
     } deleteApp;
+    QPointer<CardFilesWindow> internalFiles;
+    QLabel* internalHeading{nullptr};
+    QPushButton* internalButton{nullptr};
+    bool internalListWanted{false};
+    struct InternalJob {
+        bool active{false};
+        QString kind, folder;  // "install", "export" or "delete"; where an export goes
+        QList<QPair<QString, QString>> queue;
+        QString current;
+        QStringList failed, zips;
+        int done{0};
+        std::shared_ptr<QTemporaryDir> temp;
+    } internalJob;
     QPushButton *saveButton{nullptr}, *saveCopyButton{nullptr}, *logButton{nullptr}, *resetButton{nullptr}, *hardResetButton{nullptr};
     QMenu* helpMenu{nullptr};
     bool machineMenuShown{false};

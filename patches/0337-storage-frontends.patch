@@ -64,6 +64,78 @@ diff --git a/src/common/storage/FatImage.h b/src/common/storage/FatImage.h
          const int total = int(entries.size() / 32);
          // A moved or copied entry keeps its dates.
          if (templ.size() == 32) {
+diff --git a/src/common/storage/Journal.h b/src/common/storage/Journal.h
+--- a/src/common/storage/Journal.h
++++ b/src/common/storage/Journal.h
+@@ -8,6 +8,7 @@
+ #include <cstdint>
+ #include <cstring>
+ #include <filesystem>
++#include <functional>
+ #include <string>
+ #include <vector>
+ 
+@@ -340,6 +341,60 @@
+     return true;
+ }
+ 
++// Writes the card as applyJournal would leave it to `out`, changing neither file: the header at
++// the journal's generation, the stored bytes with each record laid over them in journal order, then
++// the new table. For a settled copy (an export or a duplicate) of a card a save didn't finish.
++// Everything is checked first, so `out` gets nothing for a damaged journal. `out` returns false to
++// stop. False on any failure.
++inline bool writeApplied(const std::filesystem::path& card, const std::filesystem::path& journal,
++                         const std::function<bool(const uint8_t*, size_t)>& out) {
++    const int jfd = ::open(journal.c_str(), O_RDONLY | O_CLOEXEC);
++    if (jfd < 0) return false;
++    Fd jcloser(jfd);
++    const int sfd = ::open(card.c_str(), O_RDONLY | O_CLOEXEC);
++    if (sfd < 0) return false;
++    Fd scloser(sfd);
++    Journal parsed;
++    const auto jsize = sizeOf(jfd);
++    if (jsize < 0 || !readJournal(jfd, uint64_t(jsize), parsed)) return false;
++    uint8_t header[frondSdFile::headerBytes];
++    frondSdFile::Info info;
++    if (!readAllAt(sfd, header, sizeof(header), 0) || !frondSdFile::parseContainer(header, info) ||
++        info.version != frondSdFile::versionV2 || info.stored() != parsed.storedBytes || info.generation != parsed.from ||
++        uint64_t(sizeOf(sfd)) != info.fileBytes())
++        return false;
++    struct Record {
++        uint64_t offset;
++        uint32_t length;
++        uint64_t data;
++    };
++    std::vector<Record> records;
++    records.reserve(size_t(parsed.records));
++    uint64_t at = journalHeaderBytes;
++    for (uint64_t i = 0; i < parsed.records; ++i) {
++        uint8_t rec[journalRecordBytes];
++        if (!readAllAt(jfd, rec, sizeof(rec), at)) return false;
++        records.push_back({frondSdFile::get64(rec), frondSdFile::get32(rec + 8), at + sizeof(rec)});
++        at += sizeof(rec) + records.back().length;
++    }
++    frondSdFile::makeHeaderV2(header, info.payloadBytes, parsed.to, parsed.table, info.sideBytes, frondSdFile::magicOf(info));
++    if (!out(header, sizeof(header))) return false;
++    std::vector<uint8_t> block(frondSdFile::chunkBytes);
++    for (uint64_t pos = 0; pos < parsed.storedBytes; pos += block.size()) {
++        const uint64_t n = std::min<uint64_t>(block.size(), parsed.storedBytes - pos);
++        if (!readAllAt(sfd, block.data(), size_t(n), frondSdFile::headerBytes + pos)) return false;
++        for (const auto& r : records) {
++            const uint64_t start = std::max(r.offset, pos), end = std::min(r.offset + r.length, pos + n);
++            if (start >= end) continue;
++            if (!readAllAt(jfd, block.data() + (start - pos), size_t(end - start), r.data + (start - r.offset))) return false;
++        }
++        if (!out(block.data(), size_t(n))) return false;
++    }
++    std::vector<uint8_t> tableBytes;
++    frondSdFile::tableBytes(parsed.table, tableBytes);
++    return out(tableBytes.data(), tableBytes.size());
++}
++
+ }  // namespace frondStorage
+ 
+ #endif
 diff --git a/src/common/storage/Packed.h b/src/common/storage/Packed.h
 new file mode 100644
 --- /dev/null

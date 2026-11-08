@@ -460,6 +460,26 @@ class SessionStoreTest : public QObject {
         QVERIFY(!importFile(folder(), outside + "/out").isEmpty());
         QCOMPARE(QDir(folder()).entryList(QDir::AllEntries | QDir::NoDotAndDotDot).size(), before);
     }
+    // Export and import follow the NAND's progress; a stop leaves nothing behind.
+    void exportProgressAndCancel() {
+        const auto outside = directory.filePath("progress");
+        write(outside + "/n/n.frond", v9WithNand(2));
+        write(outside + "/n/nand.frondnand", checkedNand(2));
+        QString name;
+        qint64 last = 0, total = 0;
+        const CopyProgress watch = [&](qint64 done, qint64 all) { last = done; total = all; return true; };
+        QVERIFY(importFile(folder(), outside + "/n", &name, watch).isEmpty());
+        const auto info = describe(filePath(folder(), name));
+        QVERIFY(exportFile(info, outside + "/out", watch).isEmpty());
+        QVERIFY(total > 0 && last == total);
+        const CopyProgress stop = [](qint64, qint64) { return false; };
+        QCOMPARE(exportFile(info, outside + "/stopped", stop), cancelledText());
+        QVERIFY(!QFileInfo::exists(outside + "/stopped"));
+        QVERIFY(QDir(outside).entryList(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden).size() == 2);
+        const auto before = QDir(folder()).entryList(QDir::AllEntries | QDir::NoDotAndDotDot).size();
+        QCOMPARE(importFile(folder(), outside + "/out", nullptr, stop), cancelledText());
+        QCOMPARE(QDir(folder()).entryList(QDir::AllEntries | QDir::NoDotAndDotDot).size(), before);
+    }
     void copiesSettleUnfinishedSave() {
         const auto outside = directory.filePath("unfinished");
         const QByteArray oldPayload(512, '\xa5');

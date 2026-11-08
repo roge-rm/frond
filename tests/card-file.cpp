@@ -12,6 +12,7 @@
 #include <map>
 #include <zlib.h>
 #include "CardFiles.h"
+#include "zip/miniz.h"
 #include "SdImage.h"
 
 using namespace frondCardFile;
@@ -607,6 +608,26 @@ class CardFileTest : public QObject {
         QCOMPARE(cf::exportTo(fat, {"/PALM/in"}, host.filePath("out")), 2);
         QVERIFY(QFileInfo(host.filePath("out/in (2)/Deep/" + accented)).isFile());
         QCOMPARE(cf::keepBothName(QString(260, 'a') + ".txt", [](const QString&) { return false; }).size(), 255);
+    }
+
+    // An Internal export's zip lands in the folder by file name; a name there already gets " (2)".
+    void unzipIntoKeepsBoth() {
+        QTemporaryDir host;
+        const auto zip = host.filePath("export.zip");
+        mz_zip_archive archive{};
+        QVERIFY(mz_zip_writer_init_file(&archive, QFile::encodeName(zip).constData(), 0));
+        QVERIFY(mz_zip_writer_add_mem(&archive, "Memos.pdb", "memo", 4, MZ_DEFAULT_COMPRESSION));
+        QVERIFY(mz_zip_writer_add_mem(&archive, "sub/Notes.prc", "note", 4, MZ_DEFAULT_COMPRESSION));
+        QVERIFY(mz_zip_writer_finalize_archive(&archive) && mz_zip_writer_end(&archive));
+        QDir(host.path()).mkpath("out");
+        QCOMPARE(cf::unzipInto(zip, host.filePath("out")), 2);
+        QCOMPARE(readAll(host.filePath("out/Memos.pdb")), QByteArray("memo"));
+        QCOMPARE(readAll(host.filePath("out/Notes.prc")), QByteArray("note"));
+        QCOMPARE(cf::unzipInto(zip, host.filePath("out")), 2);
+        QCOMPARE(readAll(host.filePath("out/Memos (2).pdb")), QByteArray("memo"));
+        QString error;
+        QCOMPARE(cf::unzipInto(host.filePath("missing.zip"), host.filePath("out"), &error), -1);
+        QCOMPARE(error, QString("Couldn't read the export."));
     }
 
     // A 16 MiB card file formatted as FAT12 takes the same operations.

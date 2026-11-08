@@ -218,12 +218,13 @@ struct Buttons {
 };
 inline Buttons buttons(const Traits& t, const State& s) {
     Buttons b;
-    b.card = t.cardSlot;
+    // Storage: the slot where there is one, and Internal on every machine.
+    b.card = true;
     b.power = t.powerKey;
     b.keyboard = s.keyboardAttached;
     b.soundEnabled = s.ready && t.sound;
     b.powerEnabled = s.ready && t.powerKey;
-    b.cardEnabled = s.ready && t.cardSlot;
+    b.cardEnabled = s.ready;
     return b;
 }
 
@@ -258,6 +259,15 @@ struct Database {
 
 // db-list's reply: per line, type, creator and attributes in hex, then the name's bytes in hex.
 // Lines that don't parse are left out. Sorted by name, ignoring case.
+// The file a database exports as: its name with .prc for a resource database, else .pdb, with
+// the characters a file name can't have replaced.
+inline QString databaseFile(const Database& d) {
+    QString name = d.name;
+    for (auto c : QStringLiteral("\\/:*?\"<>|")) name.replace(c, '_');
+    if (name.trimmed().isEmpty() || name == "." || name == "..") name = QStringLiteral("Database");
+    return name + (d.resource ? QStringLiteral(".prc") : QStringLiteral(".pdb"));
+}
+
 inline std::vector<Database> parseDatabases(const QString& text) {
     std::vector<Database> out;
     auto bytes = [](const QString& hex, bool* ok) {

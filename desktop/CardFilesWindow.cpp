@@ -4,6 +4,7 @@
 #include <QCheckBox>
 #include <QDrag>
 #include <QDragEnterEvent>
+#include <QDir>
 #include <QDropEvent>
 #include <QFileDialog>
 #include <QHBoxLayout>
@@ -81,10 +82,75 @@ class CardFilesList : public QTreeWidget {
 
 CardFilesWindow::CardFilesWindow(std::unique_ptr<frondCardFile::CardFile> opened, const QString& title, QWidget* parent)
     : QDialog(parent), card(std::move(opened)) {
+    writable = card && card->writable;
+    build(title);
+    open(QStringLiteral("/"));
+    // The shortcuts the card has.
+    try {
+        FatImage fat(*card);
+        for (const auto& s : shortcutFolders) {
+            const auto e = fat.find(s);
+            if (!e || !e->directory) continue;
+            auto* b = new QPushButton(s, this);
+            b->setObjectName("filesShortcut");
+            b->setAutoDefault(false);
+            connect(b, &QPushButton::clicked, this, [this, s] { open(s); });
+            shortcuts->addWidget(b);
+        }
+    } catch (const frondCardFile::Error&) {}
+}
+
+CardFilesWindow::CardFilesWindow(Databases databases, const QString& title, QWidget* parent) : QDialog(parent), source(std::move(databases)) {
+    build(title);
+    // One flat list of databases: no folders, and nothing to move or rename.
+    list->setHeaderLabels({tr("Name"), tr("Type"), tr("Creator")});
+    list->setDragEnabled(false);
+    for (QWidget* w : std::initializer_list<QWidget*>{upButton, pathBar, cutButton, copyButton, pasteButton, renameButton, newFolderButton,
+                                                      addFolderButton})
+        w->hide();
+    header->setText(tr("Reading the databases…"));
+    waiting = true;
+    updateButtons();
+    source.list();
+}
+
+void CardFilesWindow::setDatabases(const std::vector<runningRules::Database>& all) {
+    if (!internal()) return;
+    const auto keep = selectedNames();
+    list->clear();
+    databaseOf.clear();
+    for (const auto& d : all) {
+        auto file = runningRules::databaseFile(d);
+        if (databaseOf.contains(file)) file = cf::keepBothName(file, [&](const QString& n) { return databaseOf.contains(n); });
+        databaseOf.insert(file, d.name);
+        auto* item = new FileItem(list);
+        item->entry.name = file;
+        item->setText(NameColumn, file);
+        item->setText(SizeColumn, d.type);
+        item->setText(DateColumn, d.creator);
+        item->setIcon(NameColumn, style()->standardIcon(QStyle::SP_FileIcon));
+        if (keep.contains(file)) item->setSelected(true);
+    }
+    header->setText(all.size() == 1 ? tr("1 database") : tr("%1 databases").arg(all.size()));
+    list->resizeColumnToContents(SizeColumn);
+    list->resizeColumnToContents(DateColumn);
+    waiting = false;
+    listed = true;
+    updateButtons();
+}
+
+void CardFilesWindow::databasesDone(const QString& message) {
+    if (!internal()) return;
+    note->setText(message);
+    waiting = true;
+    updateButtons();
+    source.list();
+}
+
+void CardFilesWindow::build(const QString& title) {
     setObjectName("cardFilesWindow");
     openLevel = QThread::currentThread()->loopLevel();
     setWindowTitle(tr("%1 files").arg(title));
-    writable = card && card->writable;
     auto* layout = new QVBoxLayout(this);
 
     auto* top = new QHBoxLayout;
@@ -220,18 +286,6 @@ CardFilesWindow::CardFilesWindow(std::unique_ptr<frondCardFile::CardFile> opened
         return cf::Decision{cf::Clash::Cancel, false};
     };
     resize(720, 560);
-    open(QStringLiteral("/"));
-    // The shortcuts the card has.
-    try {
-        FatImage fat(*card);
-        for (const auto& s : shortcutFolders) {
-            const auto e = fat.find(s);
-            if (!e || !e->directory) continue;
-            auto* b = button(s, "filesShortcut");
-            connect(b, &QPushButton::clicked, this, [this, s] { open(s); });
-            shortcuts->addWidget(b);
-        }
-    } catch (const frondCardFile::Error&) {}
 }
 
 CardFilesWindow::~CardFilesWindow() {
@@ -240,7 +294,7 @@ CardFilesWindow::~CardFilesWindow() {
 }
 
 void CardFilesWindow::done(int result) {
-    if (busy) {
+    if (busy && !internal()) {
         // The worker is still writing the card: stop it, close when it has.
         stopRequested = true;
         closeWanted = true;
@@ -261,6 +315,12 @@ void CardFilesWindow::deleteWhenSafe() {
 }
 
 void CardFilesWindow::closeCard() {
+    if (internal()) {
+        source = {};
+        waiting = false;
+        updateButtons();
+        return;
+    }
     if (busy) {
         done(QDialog::Rejected);
         return;
@@ -330,6 +390,15 @@ void CardFilesWindow::relist() {
 
 void CardFilesWindow::updateButtons() {
     const int picked = int(list->selectedItems().size());
+    if (internal()) {
+        const bool ready = internal() && !waiting;
+        deleteButton->setEnabled(ready && picked > 0);
+        exportButton->setEnabled(ready && picked > 0);
+        addFilesButton->setEnabled(ready);
+        selectAllButton->setEnabled(ready && list->topLevelItemCount() > 0);
+        list->setEnabled(internal());
+        return;
+    }
     const bool open = card != nullptr;
     const bool write = open && writable;
     upButton->setEnabled(open && current != "/");
@@ -365,6 +434,16 @@ void CardFilesWindow::selectNames(const QStringList& names) {
 
 void CardFilesWindow::activated(QTreeWidgetItem* item) {
     const auto& e = static_cast<FileItem*>(item)->entry;
+    if (internal()) {
+        if (waiting) return;
+        const auto folder = QFileDialog::getExistingDirectory(this, tr("Export to folder"));
+        if (!folder.isEmpty() && internal()) {
+            waiting = true;
+            updateButtons();
+            source.exportTo({databaseOf.value(e.name)}, folder);
+        }
+        return;
+    }
     if (e.directory) return open(FatImage::joined(current, e.name));
     const auto to = QFileDialog::getSaveFileName(this, tr("Export file"), QDir::homePath() + '/' + e.name);
     if (!to.isEmpty()) exportFile(e.name, to);
@@ -429,6 +508,20 @@ static QString counted(const cf::Report& r, const QString& what) {
 
 void CardFilesWindow::addPaths(const QStringList& hostPaths) {
     if (hostPaths.isEmpty()) return;
+    if (internal()) {
+        // Databases install one file at a time; a folder adds the files in it.
+        QStringList files;
+        for (const auto& p : hostPaths) {
+            if (QFileInfo(p).isDir()) {
+                for (const auto& f : QDir(p).entryInfoList(QDir::Files, QDir::Name)) files << f.absoluteFilePath();
+            } else files << QFileInfo(p).absoluteFilePath();
+        }
+        if (files.isEmpty() || waiting) return;
+        waiting = true;
+        updateButtons();
+        source.install(files);
+        return;
+    }
     const auto at = current;
     job(tr("Copying…"), tr("Couldn't add the files"), [&](FatImage& fat, const cf::Cancelled& stop, const cf::Bytes& bytes, qint64& total) {
         QString problem;
@@ -443,6 +536,15 @@ void CardFilesWindow::addPaths(const QStringList& hostPaths) {
 }
 
 void CardFilesWindow::exportSelected(const QString& hostFolder) {
+    if (internal()) {
+        QStringList names;
+        for (const auto& n : selectedNames()) names << databaseOf.value(n);
+        if (names.isEmpty() || waiting) return;
+        waiting = true;
+        updateButtons();
+        source.exportTo(names, hostFolder);
+        return;
+    }
     const auto paths = selectedPaths();
     if (paths.isEmpty()) return;
     job(tr("Copying…"), tr("Couldn't copy to the folder"), [&](FatImage& fat, const cf::Cancelled& stop, const cf::Bytes& bytes, qint64& total) {
@@ -504,6 +606,15 @@ void CardFilesWindow::deleteSelected(bool ask) {
         box.exec();
         if (box.clickedButton() != yes) return;
     }
+    if (internal()) {
+        QStringList databases;
+        for (const auto& n : names) databases << databaseOf.value(n);
+        if (waiting || !internal()) return;
+        waiting = true;
+        updateButtons();
+        source.remove(databases);
+        return;
+    }
     const auto paths = selectedPaths();
     job(tr("Deleting…"), tr("Couldn't delete"), [&](FatImage& fat, const cf::Cancelled& stop, const cf::Bytes&, qint64&) {
         cf::remove(fat, paths, stop);
@@ -550,7 +661,7 @@ void CardFilesWindow::paste() {
 // Copies the selection into a private folder for a drag to another program. The paths, or none.
 QStringList CardFilesWindow::dragOut() {
     const auto paths = selectedPaths();
-    if (paths.isEmpty() || !card) return {};
+    if (paths.isEmpty() || !card || internal()) return {};
     const auto cache = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
     QDir().mkpath(cache);
     dragFolder = std::make_unique<QTemporaryDir>(cache + "/card-drag-XXXXXX");
@@ -568,11 +679,11 @@ QStringList CardFilesWindow::dragOut() {
 }
 
 void CardFilesWindow::dragEnterEvent(QDragEnterEvent* event) {
-    if (event->source() != list && writable && card && event->mimeData()->hasUrls()) event->acceptProposedAction();
+    if (event->source() != list && ((writable && card) || (internal() && !waiting)) && event->mimeData()->hasUrls()) event->acceptProposedAction();
     else event->ignore();
 }
 void CardFilesWindow::dropEvent(QDropEvent* event) {
-    if (event->source() == list || !writable || !card) return event->ignore();
+    if (event->source() == list || !((writable && card) || internal())) return event->ignore();
     QStringList paths;
     for (const auto& url : event->mimeData()->urls())
         if (url.isLocalFile()) paths << url.toLocalFile();

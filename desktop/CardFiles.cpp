@@ -4,6 +4,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QSaveFile>
+#include "zip/miniz.h"
 
 namespace frondCardFiles {
 using frondCardFile::Cancelled;
@@ -255,6 +256,43 @@ int exportTo(FatImage& fat, const QStringList& paths, const QString& hostFolder,
         if (!entry) throw Error(QStringLiteral("%1 isn't on the card.").arg(lastName(path)));
         out(path, *entry, hostFolder);
     }
+    return files;
+}
+
+int unzipInto(const QString& zip, const QString& hostFolder, QString* error) {
+    auto fail = [&](const QString& message) {
+        if (error) *error = message;
+        return -1;
+    };
+    mz_zip_archive archive{};
+    if (!mz_zip_reader_init_file(&archive, QFile::encodeName(zip).constData(), 0)) return fail(QStringLiteral("Couldn't read the export."));
+    int files = 0;
+    QString problem;
+    const auto count = mz_zip_reader_get_num_files(&archive);
+    for (mz_uint i = 0; i < count && problem.isEmpty(); ++i) {
+        mz_zip_archive_file_stat stat;
+        if (!mz_zip_reader_file_stat(&archive, i, &stat)) { problem = QStringLiteral("Couldn't read the export."); break; }
+        if (mz_zip_reader_is_file_a_directory(&archive, i)) continue;
+        auto name = QString::fromUtf8(stat.m_filename).section('/', -1);
+        if (name.isEmpty() || name == "." || name == "..") continue;
+        if (QFileInfo::exists(hostFolder + '/' + name))
+            name = keepBothName(name, [&](const QString& n) { return QFileInfo::exists(hostFolder + '/' + n); });
+        QFile out(hostFolder + '/' + name);
+        if (!out.open(QIODevice::WriteOnly | QIODevice::NewOnly)) { problem = QStringLiteral("Couldn't write %1.").arg(name); break; }
+        size_t size = 0;
+        void* data = mz_zip_reader_extract_to_heap(&archive, i, &size, 0);
+        const bool written = data && out.write(static_cast<const char*>(data), qint64(size)) == qint64(size) && out.flush();
+        mz_free(data);
+        out.close();
+        if (!written) {
+            out.remove();
+            problem = QStringLiteral("Couldn't write %1.").arg(name);
+            break;
+        }
+        files++;
+    }
+    mz_zip_reader_end(&archive);
+    if (!problem.isEmpty()) return fail(problem);
     return files;
 }
 

@@ -1306,6 +1306,58 @@ for line in s.makefile('rb'):
         QVERIFY(window.isVisible());
         QCOMPARE(digest(source.fileName()), QCryptographicHash::hash("unchanged import", QCryptographicHash::Sha256));
     }
+    // Files… on Internal: one flat list of databases by file name; install, export and delete go
+    // to the callbacks with the database names, and each answer reads the list again.
+    void internalFilesWindow() {
+        int lists = 0;
+        QStringList installed, exported, removed;
+        QString exportFolder;
+        CardFilesWindow::Databases d;
+        d.list = [&] { lists++; };
+        d.install = [&](const QStringList& files) { installed = files; };
+        d.exportTo = [&](const QStringList& names, const QString& folder) { exported = names; exportFolder = folder; };
+        d.remove = [&](const QStringList& names) { removed = names; };
+        CardFilesWindow w(d, "Internal");
+        QVERIFY(w.internal());
+        QCOMPARE(lists, 1);
+        QCOMPARE(w.windowTitle(), QString("Internal files"));
+        QVERIFY(w.working());
+        for (QWidget* hidden : std::initializer_list<QWidget*>{w.upButton, w.pathBar, w.cutButton, w.copyButton, w.pasteButton, w.renameButton,
+                                                               w.newFolderButton, w.addFolderButton})
+            QVERIFY(hidden->isHidden());
+        w.setDatabases({{"Memo/DB", "DATA", "memo", false}, {"Notes", "appl", "note", true}});
+        QVERIFY(!w.working());
+        QCOMPARE(w.header->text(), QString("2 databases"));
+        QCOMPARE(w.list->topLevelItemCount(), 2);
+        w.selectNames({"Memo_DB.pdb", "Notes.prc"});
+        QCOMPARE(w.selectedNames().size(), 2);
+        w.exportSelected("/somewhere");
+        QCOMPARE(exported, QStringList({"Memo/DB", "Notes"}));
+        QCOMPARE(exportFolder, QString("/somewhere"));
+        QVERIFY(w.working());
+        // A second request waits for the answer.
+        w.deleteSelected(false);
+        QVERIFY(removed.isEmpty());
+        w.databasesDone("2 files copied");
+        QCOMPARE(lists, 2);
+        QCOMPARE(w.note->text(), QString("2 files copied"));
+        w.setDatabases({{"Memo/DB", "DATA", "memo", false}, {"Notes", "appl", "note", true}});
+        w.selectNames({"Notes.prc"});
+        w.deleteSelected(false);
+        QCOMPARE(removed, QStringList({"Notes"}));
+        w.databasesDone("Notes deleted");
+        w.setDatabases({{"Memo/DB", "DATA", "memo", false}});
+        QCOMPARE(w.header->text(), QString("1 database"));
+        // A folder adds the files in it.
+        QTemporaryDir host;
+        QDir(host.path()).mkpath("in");
+        for (const char* name : {"in/A.prc", "in/B.pdb"}) {
+            QFile f(host.filePath(name));
+            QVERIFY(f.open(QIODevice::WriteOnly));
+        }
+        w.addPaths({host.filePath("in")});
+        QCOMPARE(installed, QStringList({host.filePath("in/A.prc"), host.filePath("in/B.pdb")}));
+    }
     void sdFiles_data() {
         QTest::addColumn<QString>("mode");
         for (const auto* mode : {"apply", "cancel-start", "already-ejected", "save-fail", "take-out-fail", "put-in-fail", "eject-fail"})
@@ -1812,6 +1864,20 @@ for line in s.makefile('rb'):
         // The unsaved one can't be exported.
         menu = list->itemWidget(list->item(0))->findChild<QPushButton*>("rowMenu")->menu();
         for (auto* a : menu->actions()) QCOMPARE(a->isEnabled(), a->objectName() != "exportSession");
+        // A saved one exports on a worker; the window says where it went.
+        {
+            QTemporaryDir out;
+            whenShown<QFileDialog>([&](QFileDialog* d) {
+                d->setDirectory(out.path());
+                d->selectFile("Work.frond");
+                QMetaObject::invokeMethod(d, "accept");
+            });
+            menu = list->itemWidget(list->item(1))->findChild<QPushButton*>("rowMenu")->menu();
+            for (auto* a : menu->actions()) if (a->objectName() == "exportSession") a->trigger();
+            QTRY_VERIFY_WITH_TIMEOUT(window.statusBar()->currentMessage().startsWith("Session exported to"), 10000);
+            QVERIFY(QFileInfo(out.filePath("Work/Work.frond")).isFile());
+            QVERIFY(!window.findChild<QProgressDialog*>("cardJob") || !window.findChild<QProgressDialog*>("cardJob")->isVisible());
+        }
         list->setCurrentRow(1);
         QVERIFY(window.findChild<QPushButton*>("start")->isEnabled());
         QDir(managedFolder()).removeRecursively();
@@ -2226,9 +2292,10 @@ for line in s.makefile('rb'):
         QStringList headings;
         auto* panelHost = window.findChild<PanelHost*>("panelHost");
         for (int page = 0; page < 4; ++page) { panelHost->open(page); headings << window.findChild<QLabel*>("panelTitle")->text(); }
-        QCOMPARE(headings, QStringList({"Applications", "SD card", "Display", "Connections"}));
+        QCOMPARE(headings, QStringList({"Applications", "Storage", "Display", "Connections"}));
         panelHost->open(1);
         const auto shown = [&](const char* name) { return window.findChild<QPushButton*>(name)->isVisibleTo(&window); };
+        QVERIFY(shown("internalFiles"));
         QVERIFY(shown("sdExchange") && shown("sdEject") && !shown("sdInsert") && shown("cardPick") && !shown("sdRetry"));
         // The card row says it once: the picker button names the card, and Inserted has no label.
         QVERIFY(!sd->isVisibleTo(&window));

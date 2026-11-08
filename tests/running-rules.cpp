@@ -135,11 +135,18 @@ class RunningRulesTest : public QObject {
         State s; s.ready = true;
         QVERIFY(buttons(tx, s).power && buttons(tx, s).powerEnabled);
         QVERIFY(buttons(tx, s).card);
-        QVERIFY(!buttons(iiix, s).card && !buttons(iiix, s).cardEnabled);
+        // Storage shows on every machine: Internal at least.
+        QVERIFY(buttons(iiix, s).card && buttons(iiix, s).cardEnabled);
         s.ready = false;
         QVERIFY(!buttons(tx, s).powerEnabled && !buttons(tx, s).soundEnabled);
         s.keyboardAttached = true;
         QVERIFY(buttons(tx, s).keyboard);
+    }
+    void databaseFilesAreNamedByKind() {
+        QCOMPARE(databaseFile({"Memos-PMem", "appl", "memo", true}), QString("Memos-PMem.prc"));
+        QCOMPARE(databaseFile({"MemoDB", "DATA", "memo", false}), QString("MemoDB.pdb"));
+        QCOMPARE(databaseFile({"a/b:c", "DATA", "x", false}), QString("a_b_c.pdb"));
+        QCOMPARE(databaseFile({"..", "DATA", "x", false}), QString("Database.pdb"));
     }
     void cardIconStates() {
         QCOMPARE(cardIcon(false, true, true, true), CardIcon::None);

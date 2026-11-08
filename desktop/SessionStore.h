@@ -767,22 +767,34 @@ inline QString copyPackable(const QString& fromDir, const QString& toDir, const 
     return {};
 }
 
+// What a stopped job returns, so the caller shows no failure.
+inline QString cancelledText() { return QStringLiteral("Cancelled."); }
+
+// The library's progress over a CopyProgress, which may be empty.
+inline frondStorage::Progress storageProgress(const std::function<bool(qint64, qint64)>& progress) {
+    if (!progress) return {};
+    return [progress](uint64_t done, uint64_t total) { return progress(qint64(done), qint64(total)); };
+}
+
 // An exported session carries its NAND packed as nand.frondnand.gz; a session folder in the
-// library keeps it unpacked.
-inline QString packNand(const QString& dir) {
+// library keeps it unpacked. `progress` gets the bytes packed and stops the job with false.
+inline QString packNand(const QString& dir, const std::function<bool(qint64, qint64)>& progress = {}) {
     const auto plain = dir + "/nand.frondnand";
     if (!QFileInfo::exists(plain)) return {};
     const auto file = std::filesystem::path(plain.toStdString());
-    if (!frondStorage::pack(file, frondStorage::packedPath(file)).ok || !QFile::remove(plain))
-        return QStringLiteral("Couldn't export the session.");
+    const auto result = frondStorage::pack(file, frondStorage::packedPath(file), MZ_DEFAULT_LEVEL, storageProgress(progress));
+    if (!result.ok && result.code == "cancelled") return cancelledText();
+    if (!result.ok || !QFile::remove(plain)) return QStringLiteral("Couldn't export the session.");
     return {};
 }
 // Unpacks `from`/nand.frondnand.gz into `to`/nand.frondnand, checked against its CRCs. Removes
 // the packed file when both are the same folder.
-inline QString unpackNand(const QString& from, const QString& to) {
+inline QString unpackNand(const QString& from, const QString& to, const std::function<bool(qint64, qint64)>& progress = {}) {
     const auto packed = from + "/nand.frondnand.gz";
     if (!QFileInfo::exists(packed) || QFileInfo::exists(from + "/nand.frondnand")) return {};
-    if (!frondStorage::unpack(packed.toStdString(), (to + "/nand.frondnand").toStdString()).ok)
+    const auto result = frondStorage::unpack(packed.toStdString(), (to + "/nand.frondnand").toStdString(), nullptr, storageProgress(progress));
+    if (!result.ok && result.code == "cancelled") return cancelledText();
+    if (!result.ok)
         return QStringLiteral("The session's NAND file is damaged.");
     if (QFileInfo(from).canonicalFilePath() == QFileInfo(to).canonicalFilePath()) QFile::remove(packed);
     return {};
@@ -1079,7 +1091,8 @@ inline QString adoptImportedCard(const QString& folder, const QString& dir) {
     return frondCards::moveIn(library, dir, file, slot, slot.name, nullptr, true) ? QString() : QStringLiteral("Couldn't save the session.");
 }
 
-inline QString importFolder(const QString& folder, const QString& from, QString* newName = nullptr) {
+inline QString importFolder(const QString& folder, const QString& from, QString* newName = nullptr,
+                            const std::function<bool(qint64, qint64)>& progress = {}) {
     const auto frond = sessionFrondIn(from);
     const auto header = readHeader(frond);
     if (const auto error = importError(header); !error.isEmpty()) return error;
@@ -1094,7 +1107,7 @@ inline QString importFolder(const QString& folder, const QString& from, QString*
         QDir(dest).removeRecursively();
         return error;
     }
-    if (const auto error = unpackNand(dest, dest); !error.isEmpty()) {
+    if (const auto error = unpackNand(dest, dest, progress); !error.isEmpty()) {
         QDir(dest).removeRecursively();
         return error;
     }
@@ -1111,8 +1124,10 @@ inline QString importFolder(const QString& folder, const QString& from, QString*
 }
 
 // Copies a session file or machine folder in as a new session. Returns an error message, or empty and the new name.
-inline QString importFile(const QString& folder, const QString& from, QString* newName = nullptr) {
-    if (QFileInfo(from).isDir()) return importFolder(folder, from, newName);
+// `progress` follows the NAND unpack, the slow part; false stops it and gives cancelledText().
+inline QString importFile(const QString& folder, const QString& from, QString* newName = nullptr,
+                          const std::function<bool(qint64, qint64)>& progress = {}) {
+    if (QFileInfo(from).isDir()) return importFolder(folder, from, newName, progress);
     const auto header = readHeader(from);
     if (const auto error = importError(header); !error.isEmpty()) return error;
     if (!QDir().mkpath(folder)) return QStringLiteral("Couldn't save the session.");
@@ -1142,7 +1157,7 @@ inline QString importFile(const QString& folder, const QString& from, QString* n
     if (!settle.journal.isEmpty() && !applySdJournalCopy(settle.journal, destDir + '/' + settle.sibling)) return fail();
     if (!nandSettle.journal.isEmpty() && !applySdJournalCopy(nandSettle.journal, destDir + '/' + nandSettle.sibling)) return fail();
     if (QFileInfo(sourceDir + "/slot.json").isFile() && !QFile::copy(sourceDir + "/slot.json", destDir + "/slot.json")) return fail();
-    if (const auto error = unpackNand(sourceDir, destDir); !error.isEmpty()) {
+    if (const auto error = unpackNand(sourceDir, destDir, progress); !error.isEmpty()) {
         QDir(destDir).removeRecursively();
         return error;
     }
@@ -1324,8 +1339,9 @@ inline QString exportDestDir(const QString& to) {
 }
 
 // Copies packable files out as a machine folder. `to` is a directory, or a .frond path whose stem
-// is the folder. Only a folder that is already a Frond session is replaced.
-inline QString exportFile(const Info& info, const QString& to) {
+// is the folder. Only a folder that is already a Frond session is replaced. Safe off the GUI
+// thread; `progress` follows the NAND pack and false stops it, giving cancelledText().
+inline QString exportFile(const Info& info, const QString& to, const std::function<bool(qint64, qint64)>& progress = {}) {
     const auto destDir = exportDestDir(to);
     const auto destName = QFileInfo(destDir).fileName();
     const auto sourceDir = machineDirOf(info.path);
@@ -1349,7 +1365,7 @@ inline QString exportFile(const Info& info, const QString& to) {
         removeStaging(staging);
         return error;
     }
-    if (const auto error = packNand(part); !error.isEmpty()) {
+    if (const auto error = packNand(part, progress); !error.isEmpty()) {
         removeStaging(staging);
         return error;
     }

@@ -60,5 +60,9 @@ qint64 hostBytes(const QStringList& hostPaths, QString* problem = nullptr);
 // Copies files and folders off the card into a host folder. A name already there gets " (2)".
 // Returns the number of files.
 int exportTo(FatImage& fat, const QStringList& paths, const QString& hostFolder, const Cancelled& cancelled = {}, const Bytes& bytes = {});
+// Copies the files in a ZIP archive (the core's database export) into a host folder, each under
+// its own name, a name already there getting " (2)". Folders in the archive are left out. Returns
+// the number of files, or -1 with `error` set.
+int unzipInto(const QString& zip, const QString& hostFolder, QString* error = nullptr);
 
 }  // namespace frondCardFiles

@@ -158,7 +158,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     drivers->hide();
     auto* root = drivers;
     auto* appsLayout = panels->addPage(tr("Applications"));
-    auto* cardLayout = panels->addPage(tr("SD card"));
+    auto* cardLayout = panels->addPage(tr("Storage"));
     auto* displayLayout = panels->addPage(tr("Display"));
     auto* connectionsLayout = panels->addPage(tr("Connections"));
     settingsDialog = new SettingsDialog(this);
@@ -237,7 +237,15 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     auto* cardsButton = new QPushButton(tr("Cards…"), root);
     cardsButton->setObjectName("openCards");
     cardLayout->addWidget(cardsButton);
+    // Internal: the RAM databases of every running machine, in the same Files… as a card.
+    internalHeading = new QLabel(tr("Internal"), root);
+    internalHeading->setObjectName("internalHeading");
+    cardLayout->addSpacing(12);
+    cardLayout->addWidget(internalHeading);
+    internalButton = button(tr("Files…"), "internalFiles", true);
+    cardLayout->addWidget(internalButton);
     cardLayout->addStretch();
+    connect(internalButton, &QPushButton::clicked, this, &MainWindow::openInternal);
     connect(cardsButton, &QPushButton::clicked, this, [this] { showCards(); });
     connect(cardReadOnly, &QCheckBox::clicked, this, [this](bool on) { send("ms-read-only", on ? "on" : "off"); });
 
@@ -598,6 +606,8 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         holdKnown = holdOn = false;
         palmHolder->release(); embedded = embedWanted = embedTried = panelWasOpen = fitOffPending = false;
         appsStale = false; deleteApp = {}; knownDatabases.clear(); appsPanel->setDatabases({});
+        if (internalFiles) internalFiles->close();
+        internalJob = {}; internalListWanted = false;
         microphoneArmed = false; microphoneState->clear();
         installQueue.clear(); installTotal = 0; installFailed.clear(); installHint = 0;
         busy = false; stopping = false; hardResetAfterSave = false; cardPresent = cardInserted = false; runningDevice = frondFirmware::Device::tx;
@@ -642,7 +652,10 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     connect(&client, &DesktopClient::result, this, [this](const QString& command, bool ok, const QString& code, const QString& message) {
         if (cardProgress) { cardProgress->hide(); cardProgress->deleteLater(); cardProgress = nullptr; }
         busy = false; forceButton->hide(); runningBar->setForceStop(false); refresh();
-        QTimer::singleShot(0, this, [this] { if (appsStale) listApps(); });
+        QTimer::singleShot(0, this, [this] {
+            if (internalListWanted) listInternal();
+            if (appsStale) listApps();
+        });
         if (command == "db-list") { databasesReply(ok, message); return; }
         if (command == "window-id") {
             embedReply(ok, message);
@@ -675,6 +688,10 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             }
         }
         if (command == "install") appsStale = true;
+        if (internalJob.active && !stopping && (command == "install" || command == "export-db" || command == "delete-db")) {
+            internalReply(ok, message);
+            return;
+        }
         if (command == "install" && installTotal > 0 && installResult(ok, code, message)) return;
         if (!ok && cardMove.stage != CardMove::None) { cardMoveFailed(command, message); return; }
         if (!ok && exchangeStage != ExchangeStage::None) { exchangeResult(false, message); return; }
@@ -937,7 +954,8 @@ void MainWindow::refresh() {
     const bool memoryStick = this->memoryStick();
     const bool supported = storageSupported();
     storageHeading->setText(memoryStick ? tr("Memory Stick") : tr("SD card"));
-    panels->setTitle(1, storageHeading->text());
+    panels->setTitle(1, tr("Storage"));
+    internalButton->setEnabled(enabled && !internalFiles);
     appsPanel->setEnabled(enabled);
     storageHeading->setVisible(!m68k);
     storageHeading->setEnabled(supported);
@@ -1545,7 +1563,11 @@ void MainWindow::exportSession(const QString& path) {
     const auto target = outputFile(tr("Export"), tr("Frond sessions (*.frond)"), info.name + ".frond");
     if (target.isEmpty()) return;
     if (!confirmReplace(frondSessions::exportDestDir(target))) return;
-    const auto error = frondSessions::exportFile(info, target);
+    // Packing a T|X NAND takes a couple of seconds, so it runs on a worker behind a progress dialog.
+    const auto error = runCardJob(this, tr("Exporting %1…").arg(info.name), [&](const frondSessions::CopyProgress& progress) {
+        return frondSessions::exportFile(info, target, progress);
+    });
+    if (error == frondSessions::cancelledText()) return;
     if (!error.isEmpty()) failure(error);
     else notify(tr("Session exported to %1.").arg(frondSessions::exportDestDir(target)));
 }
@@ -1577,7 +1599,11 @@ void MainWindow::deleteSession(const QString& path) {
 }
 QString MainWindow::importSession(const QString& path) {
     QString name;
-    const auto error = frondSessions::importFile(sessionFolder(), path, &name);
+    const auto folder = sessionFolder();
+    // A packed NAND is unpacked and checked on a worker behind a progress dialog.
+    const auto error = runCardJob(this, tr("Importing the session…"), [&](const frondSessions::CopyProgress& progress) {
+        return frondSessions::importFile(folder, path, &name, progress);
+    });
     if (error.isEmpty()) refreshSessions(frondSessions::filePath(sessionFolder(), name));
     return error;
 }
@@ -1586,6 +1612,7 @@ void MainWindow::importSessionDialog() {
     const auto path = QFileDialog::getOpenFileName(this, tr("Import session"), {}, tr("Frond sessions (*.frond *.session);;All files (*)"));
     if (path.isEmpty()) return;
     const auto error = importSession(path);
+    if (error == frondSessions::cancelledText()) return;
     if (!error.isEmpty()) failure(error);
     else notify(tr("Session imported."));
 }
@@ -1632,7 +1659,7 @@ void MainWindow::openSession(const QString& path, bool launchNow) {
     if (client.running()) return;
     if (!launchNow) {
         const auto error = importSession(QFileInfo(path).absoluteFilePath());
-        if (!error.isEmpty()) failure(error);
+        if (!error.isEmpty() && error != frondSessions::cancelledText()) failure(error);
         return;
     }
     if (!QDir().mkpath(sessionFolder())) return failure(tr("Could not create the session storage directory."));
@@ -2000,10 +2027,113 @@ void MainWindow::listApps() {
 void MainWindow::databasesReply(bool ok, const QString& message) {
     const auto all = ok ? runningRules::parseDatabases(message) : std::vector<runningRules::Database>{};
     if (deleteApp.active && deleteApp.lookup) { deleteLookup(ok, message, all); return; }
+    if (internalFiles) {
+        // A failed list keeps the last one and says why; it isn't asked for again until the next change.
+        internalFiles->setDatabases(ok ? all : knownDatabases);
+        if (!ok) internalFiles->note->setText(message);
+    }
     // A list that can't be had (Palm OS still starting) is left as it was.
     if (!ok) { log->appendPlainText("db-list: " + message); return; }
     knownDatabases = all;
     appsPanel->setDatabases(all);
+}
+void MainWindow::openInternal() {
+    if (!client.running()) return;
+    if (internalFiles) { internalFiles->raise(); internalFiles->activateWindow(); return; }
+    CardFilesWindow::Databases d;
+    d.list = [this] { internalListWanted = true; listInternal(); };
+    d.install = [this](const QStringList& files) {
+        QList<QPair<QString, QString>> commands;
+        for (const auto& f : files) commands << qMakePair(QStringLiteral("install"), f);
+        startInternal("install", commands);
+    };
+    d.exportTo = [this](const QStringList& names, const QString& folder) {
+        internalJob.temp = std::make_shared<QTemporaryDir>();
+        QList<QPair<QString, QString>> commands;
+        for (int i = 0; i < names.size(); ++i)
+            commands << qMakePair(QStringLiteral("export-db"), internalJob.temp->filePath(QString::number(i) + ".zip") + "\n" + names[i]);
+        startInternal("export", commands, folder);
+    };
+    d.remove = [this](const QStringList& names) {
+        QList<QPair<QString, QString>> commands;
+        for (const auto& n : names) commands << qMakePair(QStringLiteral("delete-db"), n);
+        startInternal("delete", commands);
+    };
+    internalFiles = new CardFilesWindow(std::move(d), tr("Internal"), this);
+    internalFiles->setObjectName("internalFilesWindow");
+    internalFiles->deleteOnClose = true;
+    connect(internalFiles, &QDialog::finished, this, [this] { refresh(); });
+    internalFiles->show();
+    refresh();
+}
+// Asks for db-list for the Internal window once the core is free.
+void MainWindow::listInternal() {
+    if (!internalListWanted || !internalFiles || !client.available() || busy || stopping || internalJob.active ||
+        exchangeStage != ExchangeStage::None || deleteApp.active || installTotal > 0)
+        return;
+    internalListWanted = false;
+    if (!send("db-list")) internalListWanted = true;
+}
+void MainWindow::startInternal(const QString& kind, const QList<QPair<QString, QString>>& commands, const QString& folder) {
+    if (!client.available() || busy || stopping || internalJob.active || exchangeStage != ExchangeStage::None || deleteApp.active ||
+        installTotal > 0) {
+        if (internalFiles) internalFiles->databasesDone(tr("Frond is busy. Try again in a moment."));
+        return;
+    }
+    const auto temp = internalJob.temp;
+    internalJob = {};
+    internalJob.active = true;
+    internalJob.kind = kind;
+    internalJob.folder = folder;
+    internalJob.queue = commands;
+    internalJob.temp = temp;
+    internalNext();
+}
+void MainWindow::internalNext() {
+    while (!internalJob.queue.isEmpty()) {
+        const auto [command, argument] = internalJob.queue.takeFirst();
+        internalJob.current = command == "install" ? QFileInfo(argument).fileName() : argument.section('\n', -1);
+        if (command == "export-db") internalJob.zips << argument.section('\n', 0, 0);
+        if (send(command, argument)) return;
+        if (command == "export-db") internalJob.zips.removeLast();
+        internalJob.failed << internalJob.current + ": " + tr("Couldn't send it to the emulator.");
+    }
+    internalDone();
+}
+void MainWindow::internalReply(bool ok, const QString& message) {
+    if (ok) internalJob.done++;
+    else {
+        internalJob.failed << internalJob.current + ": " + message;
+        if (internalJob.kind == "export") internalJob.zips.removeLast();
+    }
+    internalNext();
+}
+void MainWindow::internalDone() {
+    auto job = internalJob;
+    internalJob = {};
+    appsStale = true;
+    QString message;
+    if (job.kind == "export") {
+        int files = 0;
+        for (const auto& zip : job.zips) {
+            QString error;
+            const int n = frondCardFiles::unzipInto(zip, job.folder, &error);
+            if (n < 0) job.failed << error;
+            else files += n;
+        }
+        message = files == 1 ? tr("1 file copied") : tr("%1 files copied").arg(files);
+    } else if (job.kind == "install") {
+        message = tr("%1 added").arg(job.done);
+    } else {
+        message = job.done == 1 ? tr("1 deleted") : tr("%1 deleted").arg(job.done);
+    }
+    job.temp.reset();
+    if (!job.failed.isEmpty())
+        QMessageBox::warning(internalFiles ? static_cast<QWidget*>(internalFiles) : this,
+                             job.kind == "install" ? tr("Couldn't add the files") : job.kind == "export" ? tr("Couldn't copy to the folder")
+                                                                                                      : tr("Couldn't delete"),
+                             job.failed.join('\n'));
+    if (internalFiles) internalFiles->databasesDone(message);
 }
 // Deletes an application and the RAM databases with its creator. The application goes first: if
 // the core refuses it (ROM, running, open) nothing else is touched.

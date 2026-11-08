@@ -153,7 +153,7 @@ RunningBar::RunningBar(QWidget* parent) : QToolBar(parent) {
     keyboardAction->setToolTip(tr("Infrared keyboard attached"));
     keyboardAction->setVisible(false);
     applicationsAction = button("apps", "barApplications", tr("Applications (Ctrl+1)"), Button::Applications);
-    cardAction = button("card-out", "barCard", tr("Card (Ctrl+2)"), Button::Card);
+    cardAction = button("card-out", "barCard", tr("Storage (Ctrl+2)"), Button::Card);
     soundAction = button("sound-on", "barSound", tr("Sound"), Button::Sound);
     soundAction->setCheckable(true);
     powerAction = button("power", "barPower", tr("Power"), Button::Power);
@@ -241,9 +241,10 @@ void RunningBar::apply(const runningRules::Traits& traits, const runningRules::S
     cardAction->setVisible(buttons.card);
     cardAction->setEnabled(buttons.cardEnabled);
     static const char* icons[] = {"card-none", "card-out", "card-in", "card-ejected"};
-    static const char* tips[] = {"No card slot", "No card", "Card inserted", "Card ejected"};
+    static const char* tips[] = {"", "No card", "Card inserted", "Card ejected"};
     cardAction->setIcon(frondIcons::icon(icons[int(card)]));
-    cardAction->setToolTip(tr("Card: %1 (Ctrl+2)").arg(tr(tips[int(card)])));
+    cardAction->setToolTip(card == runningRules::CardIcon::None ? tr("Storage (Ctrl+2)")
+                                                                : tr("Storage: %1 (Ctrl+2)").arg(tr(tips[int(card)])));
     powerAction->setVisible(buttons.power);
     powerAction->setEnabled(buttons.powerEnabled);
     keyboardAction->setVisible(buttons.keyboard);
