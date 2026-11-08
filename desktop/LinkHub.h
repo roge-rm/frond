@@ -33,6 +33,9 @@ class Hub : public QObject {
     static constexpr qint64 kWriteAhead = 4096;
     static constexpr int kSendBuffer = 8192;
     static constexpr int kIdleExitMs = 30000;
+    // Serial bytes the hub holds for a core socket each way: Qt's read buffer, the write ahead to a
+    // local partner and the socket's send buffer. Past that the core's own queue fills and its CTS drops.
+    static constexpr qint64 kSerialAhead = 4096;
 
     explicit Hub(QObject* parent = nullptr);
     ~Hub() override;
@@ -44,6 +47,7 @@ class Hub : public QObject {
     struct Attach;
     struct Held {
         uint16_t ch;
+        frond::link::ChannelKind kind;
         QString machine, device;
     };
     struct PeerRun {
@@ -105,14 +109,23 @@ class Hub : public QObject {
     void endPairRequest(const QString& result);
     // Channels
     void muxEvents(Conn* c);
-    void irRequest(Conn* c, const frond::link::ChannelEvent& e);
+    void channelRequest(Conn* c, const frond::link::ChannelEvent& e);
     void matchPeer(const QString& hex);
     void matchLocal();
     Attach* attachOn(Conn* c, uint16_t ch);
+    void removeAttach(Attach* a);
     void unjoin(Attach* a, bool closeChannel);
+    void clearChannel(Attach* a);
     void coreConnect(Attach* a);
+    void dropCore(Attach* a);
+    void syncCores();
     void coreBytes(Attach* a, const QByteArray& data);
     void coreState(Attach* a, frond::link::PeerState state);
+    // Serial: bytes move only as far as the other side has room, so nothing is ever dropped.
+    void serialIn(Attach* a, const QByteArray& data);
+    bool serialPull(Attach* a);
+    bool pullSerial(Conn* c);
+    void serialWritten(Attach* a, qint64 n);
     bool wanted(const QString& hex) const;
     // Discovery
     bool discoveryActive() const;
@@ -120,7 +133,7 @@ class Hub : public QObject {
     void datagrams();
     // Status
     void tick();
-    QJsonObject irStatus(const Attach* a) const;
+    QJsonObject status(const Attach* a) const;
     QJsonObject snapshot() const;
     QString peerChannels(const QString& hex) const;
 

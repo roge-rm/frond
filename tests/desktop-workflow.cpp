@@ -110,6 +110,7 @@ struct HubUser {
         return {};
     }
     QString ir() const { return last("ir").value("state").toString(); }
+    QString serial() const { return last("serial").value("state").toString(); }
 };
 // Stands in for a core's IR socket.
 struct FakeIr {
@@ -133,6 +134,37 @@ struct FakeIr {
     void sleep() { if (peer) peer->abort(); server.close(); QFile::remove(path); }
     void send(const QByteArray& bytes) { if (peer) { peer->write(bytes); peer->flush(); } }
 };
+// Stands in for a core's serial socket. With RTS low it stops reading, as the core does, and only
+// a little sits in its socket's buffer.
+struct FakeSerial {
+    QLocalServer server;
+    QPointer<QLocalSocket> peer;
+    QByteArray got;
+    QString path;
+    bool rts{true};
+    int opens{0};
+    explicit FakeSerial(const QString& where) : path(where) {
+        QObject::connect(&server, &QLocalServer::newConnection, &server, [this] {
+            while (auto* s = server.nextPendingConnection()) {
+                peer = s;
+                ++opens;
+                s->setReadBufferSize(1024);
+                QObject::connect(s, &QLocalSocket::readyRead, s, [this, s] { if (rts && s == peer) got += s->readAll(); });
+            }
+        });
+        QLocalServer::removeServer(path);
+        server.listen(path);
+    }
+    bool open() const { return peer && peer->state() == QLocalSocket::ConnectedState; }
+    void setRts(bool on) { rts = on; if (on && peer) got += peer->readAll(); }
+    void send(const QByteArray& bytes) { if (peer) peer->write(bytes); }
+    qint64 unsent() const { return peer ? peer->bytesToWrite() : 0; }
+};
+static QByteArray pattern(int size, int seed) {
+    QByteArray b(size, Qt::Uninitialized);
+    for (int i = 0; i < size; ++i) b[i] = char((i * 7 + seed) % 251);
+    return b;
+}
 static quint16 freePort() {
     QTcpServer probe; probe.listen(QHostAddress::LocalHost, 0);
     return probe.serverPort();
@@ -3914,6 +3946,126 @@ for line in s.makefile('rb'):
         c3.send("three"); QTRY_VERIFY_WITH_TIMEOUT(c1.got.endsWith("three"), 5000);
         killHub(l1);
     }
+    // Serial over a connection: the port opens only once joined, nothing is lost when the far
+    // Palm holds RTS low (the link stops and the near core's socket fills), and a link that drops
+    // closes both ports.
+    void linkSerial() {
+        QTemporaryDir dir(QDir::currentPath() + "/build/lk-XXXXXX");
+        TestHub ha(dir.path(), "a", freePort()), hb(dir.path(), "b", freePort());
+        HubUser a(ha), b(hb);
+        QVERIFY(pairHubs(a, b, false));
+        const auto aId = a.client.hello().value("id").toString(), bId = b.client.hello().value("id").toString();
+        FakeSerial coreA(ha.run + "/sa.sock"), coreB(hb.run + "/sb.sock"), coreA2(ha.run + "/sa2.sock");
+        FakeIr irA(ha.run + "/ia.sock"), irB(hb.run + "/ib.sock");
+        auto attach = [](HubUser& u, const QString& machine, const QString& link, const QString& path) {
+            u.client.setSticky("serial", {{"op", "serial-attach"}, {"machine", machine}, {"device", "Palm TX"}, {"link", link}, {"socket", path}});
+        };
+        auto a1 = std::make_unique<HubUser>(ha), b1 = std::make_unique<HubUser>(hb);
+        HubUser a2(ha);
+        attach(*a1, "Palm A1", bId, coreA.path);
+        QTRY_COMPARE_WITH_TIMEOUT(a1->serial(), QString("waiting"), 10000);
+        QTest::qWait(600);
+        QCOMPARE(coreA.opens, 0);
+        // Infrared on the same link as serial, alongside it.
+        a1->client.setSticky("ir", {{"op", "ir-attach"}, {"machine", "Palm A1"}, {"device", "Palm TX"}, {"link", bId}, {"socket", irA.path}});
+        b1->client.setSticky("ir", {{"op", "ir-attach"}, {"machine", "Palm B1"}, {"device", "Palm TX"}, {"link", aId}, {"socket", irB.path}});
+        attach(*b1, "Palm B1", aId, coreB.path);
+        QTRY_COMPARE_WITH_TIMEOUT(a1->serial(), QString("joined"), 10000);
+        QTRY_COMPARE_WITH_TIMEOUT(b1->serial(), QString("joined"), 10000);
+        QTRY_COMPARE_WITH_TIMEOUT(a1->ir(), QString("joined"), 10000);
+        QCOMPARE(a1->last("serial").value("machine").toString(), QString("Palm B1"));
+        QTRY_VERIFY_WITH_TIMEOUT(coreA.open() && coreB.open(), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(b.last("state").value("connections").toArray()[0].toObject().value("channels").toString()
+                                 .contains("Serial: Palm B1 – Palm A1"), 5000);
+        coreA.send("to B"); QTRY_COMPARE_WITH_TIMEOUT(coreB.got, QByteArray("to B"), 5000);
+        coreB.send("to A"); QTRY_COMPARE_WITH_TIMEOUT(coreA.got, QByteArray("to A"), 5000);
+        coreA.got.clear(); coreB.got.clear();
+        // B's Palm holds RTS low: A's megabyte stops in A's core socket and none is lost.
+        coreB.setRts(false);
+        const auto big = pattern(1 << 20, 3);
+        coreA.send(big);
+        QTest::qWait(1500);
+        const auto stuck = coreA.unsent();
+        QVERIFY2(stuck > 512 * 1024, qPrintable(QString::number(stuck)));
+        QTest::qWait(500);
+        QCOMPARE(coreA.unsent(), stuck);
+        QVERIFY(coreB.got.isEmpty());
+        // The other way, and infrared, still go.
+        coreB.send("reply"); QTRY_COMPARE_WITH_TIMEOUT(coreA.got, QByteArray("reply"), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(irA.peer && irB.peer, 5000);
+        irA.send("beam"); QTRY_COMPARE_WITH_TIMEOUT(irB.got, QByteArray("beam"), 5000);
+        coreB.setRts(true);
+        QTRY_COMPARE_WITH_TIMEOUT(coreB.got.size(), big.size(), 30000);
+        QVERIFY(coreB.got == big);
+        // A second machine on A for serial is busy.
+        attach(a2, "Palm A2", bId, coreA2.path);
+        QTRY_COMPARE_WITH_TIMEOUT(a2.serial(), QString("busy"), 10000);
+        QCOMPARE(a2.last("serial").value("busyBy").toString(), QString("Palm A1"));
+        QCOMPARE(coreA2.opens, 0);
+        a2.client.setSticky("serial", {});
+        // B's hub dies mid-transfer: both ports close, the link comes back and they reopen.
+        coreB.setRts(false);
+        coreA.send(pattern(64 * 1024, 5));
+        QTest::qWait(300);
+        const int opensA = coreA.opens;
+        killHub(*b1);
+        QTRY_VERIFY_WITH_TIMEOUT(!coreA.open(), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(a1->serial() != "joined", 5000);
+        QTRY_COMPARE_WITH_TIMEOUT(a1->serial(), QString("joined"), 20000);
+        QTRY_VERIFY_WITH_TIMEOUT(coreA.open() && coreA.opens > opensA && coreB.open(), 10000);
+        coreB.got.clear();
+        coreB.setRts(true);
+        coreB.got.clear();
+        coreA.send("after reconnect");
+        QTRY_COMPARE_WITH_TIMEOUT(coreB.got, QByteArray("after reconnect"), 5000);
+        // B stops: A's port closes and it waits.
+        b1->client.setSticky("serial", {});
+        QTRY_VERIFY_WITH_TIMEOUT(!coreA.open(), 5000);
+        QTRY_COMPARE_WITH_TIMEOUT(a1->serial(), QString("waiting"), 5000);
+        a1->client.setSticky("serial", {}); a1->client.setSticky("ir", {}); b1->client.setSticky("ir", {});
+        for (auto* user : {&a, &b}) killHub(*user);
+    }
+    void linkSerialThisComputer() {
+        QTemporaryDir dir(QDir::currentPath() + "/build/lk-XXXXXX");
+        TestHub h(dir.path(), "h", freePort());
+        HubUser l1(h), l2(h), l3(h);
+        FakeSerial c1(h.run + "/s1.sock"), c2(h.run + "/s2.sock"), c3(h.run + "/s3.sock");
+        auto attach = [](HubUser& u, const QString& machine, const FakeSerial& core) {
+            u.client.setSticky("serial", {{"op", "serial-attach"}, {"machine", machine}, {"device", "Tungsten E2"}, {"link", "local"}, {"socket", core.path}});
+        };
+        attach(l1, "Palm L1", c1);
+        QTRY_COMPARE_WITH_TIMEOUT(l1.serial(), QString("waiting"), 10000);
+        QCOMPARE(l1.last("serial").value("peer").toString(), QString("This computer"));
+        QTest::qWait(600);
+        QCOMPARE(c1.opens, 0);
+        attach(l2, "Palm L2", c2);
+        QTRY_COMPARE_WITH_TIMEOUT(l1.serial(), QString("joined"), 5000);
+        QTRY_COMPARE_WITH_TIMEOUT(l2.serial(), QString("joined"), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(c1.open() && c2.open(), 5000);
+        c1.send("one"); QTRY_COMPARE_WITH_TIMEOUT(c2.got, QByteArray("one"), 5000);
+        c2.send("two"); QTRY_COMPARE_WITH_TIMEOUT(c1.got, QByteArray("two"), 5000);
+        c2.got.clear();
+        c2.setRts(false);
+        const auto big = pattern(1 << 20, 9);
+        c1.send(big);
+        QTest::qWait(1500);
+        const auto stuck = c1.unsent();
+        QVERIFY2(stuck > 512 * 1024, qPrintable(QString::number(stuck)));
+        c2.setRts(true);
+        QTRY_COMPARE_WITH_TIMEOUT(c2.got.size(), big.size(), 30000);
+        QVERIFY(c2.got == big);
+        attach(l3, "Palm L3", c3);
+        QTRY_COMPARE_WITH_TIMEOUT(l3.serial(), QString("busy"), 5000);
+        QCOMPARE(c3.opens, 0);
+        // L2 stops: L1's port closes and opens again joined to L3.
+        const int opens1 = c1.opens;
+        l2.client.setSticky("serial", {});
+        QTRY_COMPARE_WITH_TIMEOUT(l3.serial(), QString("joined"), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(c1.opens > opens1 && c1.open() && c3.open(), 5000);
+        QVERIFY(!c2.open());
+        c3.send("three"); QTRY_COMPARE_WITH_TIMEOUT(c1.got, QByteArray("twothree"), 5000);
+        killHub(l1);
+    }
     // Two hubs find each other by UDP beacon (sent to each other's port on loopback), pair from
     // Nearby, dial the address the beacon gave, and dial at once when a beacon shows a peer moved.
     void linkDiscovery() {
@@ -4244,6 +4396,85 @@ for line in s.makefile('rb'):
             MachineSettingsDialog iiix(frondFirmware::deviceFromId("palm-iiix"), prefs); iiix.show();
             QVERIFY(iiix.findChild<QComboBox*>("machineInfrared")->isVisible());
             QVERIFY(!QFileInfo(settings).fileName().isEmpty());
+        }
+        QSettings().clear();
+    }
+    void serialConnection() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QTemporaryDir files;
+        QFile source(files.filePath("input.frond")); QVERIFY(source.open(QIODevice::WriteOnly));
+        source.write("session"); source.close();
+        QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly));
+        core.write(R"PY(#!/usr/bin/python3
+import pathlib,socket,sys
+base=pathlib.Path(sys.argv[1]);pathlib.Path(str(base)+'.args').write_text('\n'.join(sys.argv[1:]))
+s=socket.socket(socket.AF_UNIX);s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+state=b'off'
+if '--serial' in sys.argv:
+    arg=sys.argv[sys.argv.index('--serial')+1].encode()
+    state=b'unix '+arg[5:]+b' waiting' if arg.startswith(b'unix:') else arg
+for line in s.makefile('rb'):
+    i,cmd,arg=line.rstrip(b'\n').split(b'\t');arg=bytes.fromhex(arg.decode())
+    message={b'device-state':b'palm-tx',b'sd-state':b'none',b'network-state':b'disabled',b'keyboard-state':b'detached'}.get(cmd,b'done')
+    if cmd==b'serial-mode':
+        state=b'off' if arg==b'off' else b'unix '+arg[5:]+b' waiting' if arg.startswith(b'unix:') else arg
+    if cmd in (b'serial-mode',b'serial-state'):message=state
+    if cmd==b'save':pathlib.Path(arg.decode()).write_text('saved')
+    s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
+    if cmd==b'quit':break
+)PY");
+        core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner));
+        QString machine;
+        const auto args = [&] { QFile f((machine.isEmpty() ? source.fileName() : machine) + ".args"); return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray(); };
+        {
+            MainWindow window(core.fileName()); window.show(); window.openSession(source.fileName(), true);
+            auto* mode = window.findChild<QComboBox*>("serialMode"); auto* state = window.findChild<QLabel*>("serialState");
+            auto* port = window.findChild<QSpinBox*>("serialPort");
+            QTRY_VERIFY_WITH_TIMEOUT(mode->isEnabled(), 5000);
+            QVERIFY(mode->findData("link:local") > 0);
+            mode->setCurrentIndex(mode->findData("link:local"));
+            QMetaObject::invokeMethod(mode, "activated", Q_ARG(int, mode->currentIndex()));
+            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Serial: waiting for a machine on This computer"), 15000);
+            QVERIFY(!port->isVisible());
+            QCOMPARE(machineSetting("serial"), QString("link:local"));
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+            machine = QSettings().value("lastSession").toString();
+        }
+        // The setting is applied at the next start, with the core's port on a Unix socket.
+        {
+            MainWindow window(core.fileName()); window.show(); window.openSession(machine, true);
+            auto* mode = window.findChild<QComboBox*>("serialMode"); auto* state = window.findChild<QLabel*>("serialState");
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("stop")->isEnabled(), 5000);
+            QVERIFY(args().contains("--serial\nunix:") && args().contains("/serial-"));
+            QCOMPARE(mode->currentData().toString(), QString("link:local"));
+            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Serial: waiting for a machine on This computer"), 15000);
+            mode->setCurrentIndex(mode->findData("off"));
+            QMetaObject::invokeMethod(mode, "activated", Q_ARG(int, mode->currentIndex()));
+            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString(), 5000);
+            QCOMPARE(machineSetting("serial", frondSessions::preferencesPath(machine)), QString("off"));
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        }
+        // Machine settings: a connection that's gone shows as such; no Serial row without serial.
+        {
+            frondSessions::Preferences prefs; QVERIFY(frondSessions::readPreferences(machine, &prefs));
+            prefs.serial = "link:00112233445566778899aabbccddeeff";
+            MachineSettingsDialog dialog(frondFirmware::Device::tx, prefs); dialog.show();
+            auto* picker = dialog.findChild<QComboBox*>("machineSerial"); QVERIFY(picker && picker->isVisible());
+            QCOMPARE(picker->currentText(), QString("Unknown connection"));
+            QVERIFY(picker->findData("link:local") > 0);
+            QVERIFY(!dialog.findChild<QSpinBox*>("machineSerialPort")->isVisible());
+            QCOMPARE(dialog.controls->values().serial, prefs.serial);
+            picker->setCurrentIndex(picker->findData("link:local"));
+            QCOMPARE(dialog.controls->values().serial, QString("link:local"));
+            picker->setCurrentIndex(picker->findData("tcp"));
+            dialog.findChild<QSpinBox*>("machineSerialPort")->setValue(5045);
+            QCOMPARE(dialog.controls->values().serial, QString("tcp:5045"));
+            MachineSettingsDialog iiix(frondFirmware::deviceFromId("palm-iiix"), prefs); iiix.show();
+            QVERIFY(iiix.findChild<QComboBox*>("machineSerial")->isVisible());
+            MachineSettingsDialog zire(frondFirmware::deviceFromId("palm-zire-72"), prefs); zire.show();
+            QVERIFY(!zire.findChild<QComboBox*>("machineSerial")->isVisible());
+            QVERIFY(zire.findChild<QComboBox*>("machineInfrared")->isVisible());
         }
         QSettings().clear();
     }

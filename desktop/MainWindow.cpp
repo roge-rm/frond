@@ -618,7 +618,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             if (const auto error = frondCards::releaseAtClose(sessionFolder(), frondSessions::machineDirOf(sessionPath)); !error.isEmpty())
                 log->appendPlainText(error);
         finalSaved = false; linkedWatcher.reset(); linkedWatcherId.clear(); linkedHolder.clear(); cardMove = {};
-        sdKnown = protectionKnown = false; showSerial({}); loadSerialSettings(); showUsb({}); loadUsbSettings(); showIrda({}); link.setSticky("ir", {}); irdaLinkText.clear(); loadIrdaSettings(); showBluetooth({}); loadBluetoothSettings(); sessionLock.reset(); forceButton->hide(); runningBar->setForceStop(false); refreshSessions();
+        sdKnown = protectionKnown = false; showSerial({}); link.setSticky("serial", {}); serialLinkText.clear(); loadSerialSettings(); showUsb({}); loadUsbSettings(); showIrda({}); link.setSticky("ir", {}); irdaLinkText.clear(); loadIrdaSettings(); showBluetooth({}); loadBluetoothSettings(); sessionLock.reset(); forceButton->hide(); runningBar->setForceStop(false); refreshSessions();
         refresh();
         if (closeAfterStop) { allowClose = true; close(); }
         else notify(tr("Stopped."));
@@ -636,6 +636,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     connect(&link, &LinkClient::message, this, [this](const QJsonObject& m) {
         const auto type = m.value("type").toString();
         if (type == "ir") showIrdaLink(m);
+        else if (type == "serial") showSerialLink(m);
         else if (type == "state") refreshIrdaChoices();
     });
     storeWatcher = new QFileSystemWatcher(this);
@@ -787,7 +788,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             runningPreferences.contrastSet = true;
             if (const auto error = frondSessions::writePreferences(sessionPath, runningPreferences); !error.isEmpty()) failure(error);
         }
-        if (command == "serial-mode") { runningPreferences.serial = serialArgument(); savePeripherals(); }
+        if (command == "serial-mode") { runningPreferences.serial = serialChoice(); savePeripherals(); attachSerial(); }
         if (command == "serial-state" || command == "serial-mode") showSerial(message);
         if (command == "usb-mode") { runningPreferences.usb = usbArgument(); savePeripherals(); }
         if (command == "usb-state" || command == "usb-mode") showUsb(message);
@@ -942,6 +943,7 @@ void MainWindow::refresh() {
     const bool editable = !busy && !stopping && (!running || enabled);
     serial->setEnabled(editable && caps.serial);
     serialPort->setEnabled(caps.serial && serial->currentData() == "tcp"); serialPort->setReadOnly(!editable);
+    if (!frondFirmware::serialAbsent(currentDevice())) serialPort->setVisible(!serial->currentData().toString().startsWith("link:"));
     usb->setEnabled(editable && caps.usb);
     usbPort->setEnabled(caps.usb && usb->currentData() == "tcp"); usbPort->setReadOnly(!editable);
     irda->setEnabled(editable && caps.infrared && !keyboard->isChecked());
@@ -1786,6 +1788,8 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     if(caps.bluetooth && bluetooth->isChecked()) arguments << "--bluetooth" << bluetoothArgument();
     irdaLinkText = caps.infrared && irdaChoice().startsWith("link:") && !frondLink::knownLink(irdaChoice())
         ? tr("Infrared: Unknown connection") : QString();
+    serialLinkText = caps.serial && serialChoice().startsWith("link:") && !frondLink::knownLink(serialChoice())
+        ? tr("Serial: Unknown connection") : QString();
     soundToggle->setChecked(caps.sound && runningPreferences.audio);
     if (!caps.sound || !runningPreferences.audio) arguments << "--no-sound";
     const auto sourceSession = !arguments.isEmpty() && !arguments.first().startsWith("--") ? arguments.first() : QString();
@@ -1834,7 +1838,7 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     log->clear(); busy = true;
     const bool launched = client.start(coreFor(startDevice), arguments);
     if (!launched) { busy = false; sessionLock.reset(); }
-    else attachInfrared();
+    else { attachInfrared(); attachSerial(); }
     refresh(); notify(launched ? tr("Starting the Palm…") : tr("Could not start the Palm."));
 }
 QString MainWindow::bluetoothArgument() const {
@@ -1867,10 +1871,12 @@ void MainWindow::loadIrdaSettings() {
     irdaPort->setValue(value.startsWith("tcp:") ? value.mid(4).toInt() : 5030);
 }
 void MainWindow::refreshIrdaChoices() {
-    const auto current = irda->currentData().toString();
-    const QSignalBlocker blocked(irda);
-    frondLink::addConnectionChoices(irda, current);
-    irda->setCurrentIndex(std::max(0, irda->findData(current)));
+    for (auto* combo : {irda, serial}) {
+        const auto current = combo->currentData().toString();
+        const QSignalBlocker blocked(combo);
+        frondLink::addConnectionChoices(combo, current);
+        combo->setCurrentIndex(std::max(0, combo->findData(current)));
+    }
 }
 void MainWindow::showIrda(const QString& state) {
     if(state.isEmpty()){irdaState->clear();return;}
@@ -1920,15 +1926,56 @@ void MainWindow::showConnections() {
     connectionsWindow->activateWindow();
 }
 
-QString MainWindow::serialArgument() const {
+QString MainWindow::serialChoice() const {
     const auto mode = serial->currentData().toString();
     return mode == "tcp" ? "tcp:" + QString::number(serialPort->value()) : mode;
+}
+// A connection runs the core's serial port on a Unix socket the hub opens once the channel joins.
+QString MainWindow::serialArgument() const {
+    const auto choice = serialChoice();
+    if (!choice.startsWith("link:")) return choice;
+    if (!frondLink::knownLink(choice)) return QStringLiteral("off");
+    const auto path = frondLink::coreSocketPath("serial", QString::number(QCoreApplication::applicationPid()));
+    return path.isEmpty() ? QStringLiteral("off") : "unix:" + path;
+}
+void MainWindow::attachSerial() {
+    const auto choice = serialChoice();
+    const bool wanted = client.running() && frondFirmware::capabilities(runningDevice).serial &&
+                        frondLink::knownLink(choice) && serialArgument().startsWith("unix:");
+    if (!wanted) { link.setSticky("serial", {}); if (!choice.startsWith("link:")) serialLinkText.clear(); return; }
+    serialLinkText = tr("Serial: connecting to %1").arg(frondLink::connectionName(choice.mid(5)));
+    link.setSticky("serial", {{"op", "serial-attach"}, {"machine", QFileInfo(sessionPath).completeBaseName()},
+                              {"device", frondFirmware::deviceName(runningDevice)}, {"link", choice.mid(5)},
+                              {"socket", serialArgument().mid(5)}});
+    serialState->setText(serialLinkText);
+    refresh();
+}
+void MainWindow::showSerialLink(const QJsonObject& s) {
+    const auto peer = s.value("peer").toString(), state = s.value("state").toString(), far = s.value("far").toString();
+    const auto machine = s.value("machine").toString().isEmpty() ? s.value("device").toString() : s.value("machine").toString();
+    QString text;
+    if (state == "joined") text = far == "asleep" ? tr("Serial: %1, port closed").arg(peer) :
+                                  far == "paused" ? tr("Serial: %1, Palm paused").arg(peer) :
+                                  tr("Serial: %1, joined to %2").arg(peer, machine);
+    else if (state == "waiting") text = tr("Serial: waiting for a machine on %1").arg(peer);
+    else if (state == "busy") text = tr("Serial on %1 is in use by %2").arg(peer, s.value("busyBy").toString());
+    else if (state == "notfound") text = tr("Serial: %1 not found").arg(peer);
+    else if (state == "keychanged") text = tr("Serial: %1 key changed, pair again").arg(peer);
+    else if (state == "forgotten") text = tr("Serial: pair again with %1").arg(peer);
+    else if (state == "unknown") text = tr("Serial: Unknown connection");
+    else text = tr("Serial: connecting to %1").arg(peer);
+    serialLinkText = text;
+    if (client.running() && serial->currentData().toString().startsWith("link:")) { serialState->setText(text); refresh(); }
 }
 // Live readout of the core's serial-state reply: "off", "off <error>" or
 // "<pty|tcp> <endpoint> <connected|waiting>". Empty while no core is running.
 // While running, the mode and port follow what the core actually has open.
 void MainWindow::showSerial(const QString& state) {
     const auto parts = state.split(' ');
+    // On a connection the hub's status shows instead of the socket.
+    if (parts[0] == "unix" && serial->currentData().toString().startsWith("link:")) {
+        serialState->setText(serialLinkText); refresh(); return;
+    }
     if (!state.isEmpty()) {
         serial->setCurrentIndex(std::max(0, serial->findData(parts[0])));
         if (parts[0] == "tcp" && parts.size() > 1) {
@@ -1945,6 +1992,8 @@ void MainWindow::showSerial(const QString& state) {
 }
 void MainWindow::loadSerialSettings() {
     const auto& value = runningPreferences.serial;
+    const QSignalBlocker blocked(serial);
+    frondLink::addConnectionChoices(serial, value);
     serial->setCurrentIndex(std::max(0, serial->findData(value.startsWith("tcp:") ? QString("tcp") : value)));
     serialPort->setValue(value.startsWith("tcp:") ? value.mid(4).toInt() : 5023);
 }

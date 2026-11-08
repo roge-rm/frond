@@ -7,6 +7,7 @@
 #include <QDialogButtonBox>
 #include <QFileDialog>
 #include <QFormLayout>
+#include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -183,28 +184,36 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     speedLayout->addLayout(engineRow);
     layout->addWidget(speedBox);
     peripherals = new QGroupBox(tr("Connections"), this);
-    auto* peripheralsLayout = new QHBoxLayout(peripherals);
-    infraredLabel = new QLabel(tr("Infrared"), peripherals);
-    infrared = new QComboBox(peripherals);
-    infrared->setObjectName("machineInfrared");
-    infrared->addItem(tr("Off"), "off");
-    infrared->addItem(tr("Terminal (PTY)"), "pty");
-    infrared->addItem(tr("Wait for a peer"), "tcp");
-    frondLink::addConnectionChoices(infrared, prefs.infrared);
-    infraredPort = new QSpinBox(peripherals);
-    infraredPort->setObjectName("machineInfraredPort");
-    infraredPort->setRange(1, 65535);
-    infraredPort->setPrefix(tr("Port "));
-    infraredPort->setValue(prefs.infrared.startsWith("tcp:") ? prefs.infrared.mid(4).toInt() : 5030);
-    infrared->setCurrentIndex(std::max(0, infrared->findData(prefs.infrared.startsWith("tcp:") ? QString("tcp") : prefs.infrared)));
-    infraredLabel->setBuddy(infrared);
-    peripheralsLayout->addWidget(infraredLabel);
-    peripheralsLayout->addWidget(infrared, 1);
-    peripheralsLayout->addWidget(infraredPort);
+    auto* peripheralsLayout = new QGridLayout(peripherals);
+    // One row per peripheral: the local choices, then the connections, and a port for Wait for a peer.
+    auto row = [&](int at, const QString& title, const QString& name, const QString& value, int port,
+                   QLabel*& label, QComboBox*& combo, QSpinBox*& spin) {
+        label = new QLabel(title, peripherals);
+        combo = new QComboBox(peripherals);
+        combo->setObjectName(name);
+        combo->addItem(tr("Off"), "off");
+        combo->addItem(tr("Terminal (PTY)"), "pty");
+        combo->addItem(tr("Wait for a peer"), "tcp");
+        frondLink::addConnectionChoices(combo, value);
+        spin = new QSpinBox(peripherals);
+        spin->setObjectName(name + "Port");
+        spin->setRange(1, 65535);
+        spin->setPrefix(tr("Port "));
+        spin->setValue(value.startsWith("tcp:") ? value.mid(4).toInt() : port);
+        combo->setCurrentIndex(std::max(0, combo->findData(value.startsWith("tcp:") ? QString("tcp") : value)));
+        label->setBuddy(combo);
+        peripheralsLayout->addWidget(label, at, 0);
+        peripheralsLayout->addWidget(combo, at, 1);
+        peripheralsLayout->addWidget(spin, at, 2);
+        auto* box = combo; auto* field = spin;
+        connect(combo, &QComboBox::currentIndexChanged, this, [box, field] { field->setVisible(box->currentData() == "tcp"); });
+        spin->setVisible(combo->currentData() == "tcp");
+    };
+    row(0, tr("Infrared"), "machineInfrared", prefs.infrared, 5030, infraredLabel, infrared, infraredPort);
+    row(1, tr("Serial"), "machineSerial", prefs.serial, 5023, serialLabel, serial, serialPort);
+    peripheralsLayout->setColumnStretch(1, 1);
     layout->addWidget(peripherals);
     peripherals->setVisible(false);
-    connect(infrared, &QComboBox::currentIndexChanged, this, [this] { infraredPort->setVisible(infrared->currentData() == "tcp"); });
-    infraredPort->setVisible(infrared->currentData() == "tcp");
     contrast->setValue(prefs.contrast);
     contrastLabel->setText(tr("Contrast: %1").arg(prefs.contrast));
     connect(contrast, &QSlider::valueChanged, this, [this](int value) { contrastLabel->setText(tr("Contrast: %1").arg(value)); });
@@ -252,9 +261,17 @@ frondSessions::Preferences MachineSettings::values() const {
     if (contrast->value() != prefs.contrast) prefs.contrastSet = true;
     prefs.contrast = contrast->value();
     prefs.uncapped = speed->currentData().toBool();
+    const auto choice = [](QComboBox* combo, QSpinBox* port) {
+        const auto mode = combo->currentData().toString();
+        return mode == "tcp" ? "tcp:" + QString::number(port->value()) : mode;
+    };
     if (peripheralsShown && device != Device::automatic && frondFirmware::capabilities(device).infrared) {
-        const auto mode = infrared->currentData().toString();
-        prefs.infrared = mode == "tcp" ? "tcp:" + QString::number(infraredPort->value()) : mode;
+        prefs.infrared = choice(infrared, infraredPort);
+        prefs.peripheralsSet = true;
+    }
+    if (peripheralsShown && device != Device::automatic && frondFirmware::capabilities(device).serial &&
+        !frondFirmware::serialAbsent(device)) {
+        prefs.serial = choice(serial, serialPort);
         prefs.peripheralsSet = true;
     }
     return prefs;
@@ -265,7 +282,14 @@ void MachineSettings::showPeripherals(bool shown) {
 }
 void MachineSettings::setDevice(Device device) {
     this->device = device;
-    peripherals->setVisible(peripheralsShown && device != Device::automatic && frondFirmware::capabilities(device).infrared);
+    const bool known = peripheralsShown && device != Device::automatic;
+    const bool hasInfrared = known && frondFirmware::capabilities(device).infrared;
+    const bool hasSerial = known && frondFirmware::capabilities(device).serial && !frondFirmware::serialAbsent(device);
+    peripherals->setVisible(hasInfrared || hasSerial);
+    for (QWidget* w : {static_cast<QWidget*>(infraredLabel), static_cast<QWidget*>(infrared)}) w->setVisible(hasInfrared);
+    infraredPort->setVisible(hasInfrared && infrared->currentData() == "tcp");
+    for (QWidget* w : {static_cast<QWidget*>(serialLabel), static_cast<QWidget*>(serial)}) w->setVisible(hasSerial);
+    serialPort->setVisible(hasSerial && serial->currentData() == "tcp");
     const bool tg50 = device == frondFirmware::deviceFromId("sony-clie-tg50");
     showKeyboard->setVisible(tg50);
     jogControlsLabel->setVisible(tg50);

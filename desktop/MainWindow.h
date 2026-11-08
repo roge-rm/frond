@@ -110,6 +110,9 @@ class MainWindow : public QMainWindow {
     void refreshIrdaChoices();
     void attachInfrared();
     void showIrdaLink(const QJsonObject& status);
+    QString serialChoice() const;  // off, pty, tcp:PORT, link:local or link:<id>
+    void attachSerial();
+    void showSerialLink(const QJsonObject& status);
     void showConnections();
     void failure(const QString& message, const QString& details = {});
     // A status message: beside the name in the bar while a machine runs, else in the status bar.
@@ -211,6 +214,7 @@ class MainWindow : public QMainWindow {
     QFileSystemWatcher* storeWatcher{nullptr};
     QString irdaSocket;   // the core's IR socket while Infrared uses a connection
     QString irdaLinkText; // the hub's status for it
+    QString serialLinkText; // the same for Serial
     QSettings settings;
     QString core, core68k, sessionPath, savingPath, pendingCopy, copyStaging;
     bool hardResetAfterSave{false};

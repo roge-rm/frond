@@ -6,6 +6,9 @@
 #include <QNetworkDatagram>
 #include <cstdio>
 #include <algorithm>
+#ifdef Q_OS_UNIX
+#include <sys/socket.h>
+#endif
 
 namespace frondLink {
 using namespace frond::link;
@@ -64,6 +67,7 @@ struct Hub::Conn {
 
 struct Hub::Attach {
     Client* client{nullptr};
+    ChannelKind kind{ChannelKind::Infrared};
     QString machine, device, link, socketPath;
     QLocalSocket* core{nullptr};
     bool coreUp{false};
@@ -76,6 +80,13 @@ struct Hub::Attach {
     Attach* partner{nullptr};
     qint64 retryAt{0};
     QJsonObject lastStatus;
+    // Serial: bytes from the link written to the core and not yet taken by its socket (credit
+    // goes back as it takes them), and bytes that came before the core socket was up.
+    qint64 unacked{0};
+    QByteArray pendingIn;
+    bool serial() const { return kind == ChannelKind::Serial; }
+    // Joined to a machine: over a link, or to a partner on this computer.
+    bool joined() const { return st == St::Joined && (link != QLatin1String("local") || partner); }
 };
 
 Hub::Hub(QObject* parent) : QObject(parent) { clock.start(); }
@@ -174,15 +185,7 @@ int Hub::watchers() const {
 }
 void Hub::dropClient(Client* c) {
     if (!clients.removeOne(c)) return;
-    for (auto* a : QList<Attach*>(attaches)) {
-        if (a->client != c) continue;
-        unjoin(a, true);
-        attaches.removeOne(a);
-        if (a->core) a->core->deleteLater();
-        const auto hex = a->link;
-        delete a;
-        if (hex == "local") matchLocal(); else matchPeer(hex);
-    }
+    for (auto* a : QList<Attach*>(attaches)) if (a->client == c) removeAttach(a);
     if (pairOut.client == c) {
         if (pairOut.conn) closeConn(pairOut.conn, false);
         pairOut = {};
@@ -263,32 +266,29 @@ void Hub::handle(Client* c, const QJsonObject& op) {
         pairOut = {};
     } else if (type == "pair-dismiss") {
         if (code) endPairRequest("cancelled");
-    } else if (type == "ir-attach") {
-        for (auto* a : attaches) if (a->client == c) return;  // one per window
+    } else if (type == "ir-attach" || type == "serial-attach") {
+        const auto kind = type == "ir-attach" ? ChannelKind::Infrared : ChannelKind::Serial;
+        for (auto* a : attaches) if (a->client == c && a->kind == kind) return;  // one of each per window
         auto* a = new Attach;
         a->client = c;
+        a->kind = kind;
         a->machine = op.value("machine").toString();
         a->device = op.value("device").toString();
         a->link = op.value("link").toString();
         a->socketPath = op.value("socket").toString();
         attaches.push_back(a);
-        coreConnect(a);
+        // A serial port opens only once it's joined, so the Palm's DSR and DCD mean the far port is open.
+        if (!a->serial()) coreConnect(a);
         if (a->link == "local") matchLocal();
         else {
             auto& r = runs[a->link];
             if (!r.link && !r.dialing) { r.nextTry = now(); r.backoff = 0; }
             matchPeer(a->link);
         }
-    } else if (type == "ir-detach") {
-        for (auto* a : QList<Attach*>(attaches)) {
-            if (a->client != c) continue;
-            unjoin(a, true);
-            attaches.removeOne(a);
-            if (a->core) { a->core->disconnect(this); a->core->abort(); a->core->deleteLater(); }
-            const auto hex = a->link;
-            delete a;
-            if (hex == "local") matchLocal(); else matchPeer(hex);
-        }
+        syncCores();
+    } else if (type == "ir-detach" || type == "serial-detach") {
+        const auto kind = type == "ir-detach" ? ChannelKind::Infrared : ChannelKind::Serial;
+        for (auto* a : QList<Attach*>(attaches)) if (a->client == c && a->kind == kind) removeAttach(a);
     }
 }
 
@@ -439,26 +439,28 @@ void Hub::linkUp(Conn* c) {
 
 // The link went: its channels are gone, the machines on it wait again.
 void Hub::linkDown(Conn* c) {
-    for (auto* a : attaches) {
-        if (a->chLink != c) continue;
-        a->st = Attach::St::Idle; a->ch = 0; a->chLink = nullptr; a->farMachine.clear(); a->farDevice.clear();
-        a->farState = PeerState::Running;
-    }
+    for (auto* a : attaches) if (a->chLink == c) clearChannel(a);
     if (!c->peer.isEmpty() && runs.contains(c->peer)) {
         auto& r = runs[c->peer];
         if (r.link == c) { r.link = nullptr; r.held.clear(); r.nextTry = now() + kBackoff[0]; }
         if (r.dialing == c) r.dialing = nullptr;
     }
+    // Serial bytes in flight are lost and the cores' serial ports close (DSR and DCD drop).
+    syncCores();
 }
 
 void Hub::pump(Conn* c) {
     if (!conns.contains(c) || c->socket->state() != QAbstractSocket::ConnectedState) return;
-    while (c->socket->bytesToWrite() < kWriteAhead) {
-        Bytes out;
-        if (c->link && c->link->hasOutput()) out = c->link->takeOutput(size_t(kWriteAhead));
-        else if (c->pairing) out = c->pairing->takeOutput();
-        if (out.empty()) break;
-        c->socket->write(fromBytes(out));
+    // Then serial bytes the cores held while the channel had no room, and what they make.
+    for (int round = 0; round < 2; ++round) {
+        while (c->socket->bytesToWrite() < kWriteAhead) {
+            Bytes out;
+            if (c->link && c->link->hasOutput()) out = c->link->takeOutput(size_t(kWriteAhead));
+            else if (c->pairing) out = c->pairing->takeOutput();
+            if (out.empty()) break;
+            c->socket->write(fromBytes(out));
+        }
+        if (round == 1 || c->closing || !pullSerial(c)) break;
     }
     if (c->closing && c->socket->bytesToWrite() == 0 && !(c->link && c->link->hasOutput())) c->socket->disconnectFromHost();
 }
@@ -719,12 +721,12 @@ void Hub::muxEvents(Conn* c) {
         using K = ChannelEvent::Kind;
         switch (e.kind) {
             case K::OpenRequest:
-                if (e.channelKind != ChannelKind::Infrared) mux.close(e.channel, CloseReason::Gone);  // serial and Bluetooth come later
-                else irRequest(c, e);
+                if (e.channelKind == ChannelKind::Bluetooth) mux.close(e.channel, CloseReason::Gone);  // Bluetooth comes later
+                else channelRequest(c, e);
                 break;
             case K::Accepted:
                 if (a) { a->st = Attach::St::Joined; a->farMachine = QString::fromStdString(e.machine); a->farDevice = QString::fromStdString(e.device);
-                         a->farState = PeerState::Running; if (!a->coreUp) mux.sendState(a->ch, PeerState::Asleep); }
+                         a->farState = PeerState::Running; if (!a->coreUp && !a->serial()) mux.sendState(a->ch, PeerState::Asleep); }
                 break;
             case K::Waiting:
                 if (a) a->st = Attach::St::Waiting;
@@ -734,11 +736,12 @@ void Hub::muxEvents(Conn* c) {
                          a->retryAt = now() + kBusyRetryMs; }
                 break;
             case K::Data:
+                if (a && a->serial() && a->st == Attach::St::Joined) { serialIn(a, fromBytes(e.data)); break; }
                 if (a && a->st == Attach::St::Joined && a->coreUp && a->core) a->core->write(fromBytes(e.data));
                 mux.consumed(e.channel, e.data.size());
                 break;
             case K::Closed:
-                if (a) { a->st = Attach::St::Idle; a->ch = 0; a->chLink = nullptr; a->retryAt = now() + 500; a->farMachine.clear(); }
+                if (a) { clearChannel(a); a->retryAt = now() + 500; }
                 r.held.erase(std::remove_if(r.held.begin(), r.held.end(), [&](const Held& h) { return h.ch == e.channel; }), r.held.end());
                 break;
             case K::State:
@@ -747,14 +750,15 @@ void Hub::muxEvents(Conn* c) {
         }
     }
     if (conns.contains(c)) matchPeer(c->peer);
+    syncCores();
 }
 
-void Hub::irRequest(Conn* c, const ChannelEvent& e) {
+void Hub::channelRequest(Conn* c, const ChannelEvent& e) {
     auto& mux = c->link->mux();
     auto& r = runs[c->peer];
     Attach *idle = nullptr, *pending = nullptr, *joined = nullptr;
     for (auto* a : attaches) {
-        if (a->link != c->peer) continue;
+        if (a->link != c->peer || a->kind != e.channelKind) continue;
         if (a->st == Attach::St::Idle || a->st == Attach::St::Busy) { if (!idle) idle = a; }
         else if (a->st == Attach::St::Opening || a->st == Attach::St::Waiting) { if (!pending) pending = a; }
         else if (a->st == Attach::St::Joined && !joined) joined = a;
@@ -764,18 +768,18 @@ void Hub::irRequest(Conn* c, const ChannelEvent& e) {
         mux.accept(e.channel, a->machine.toStdString(), a->device.toStdString());
         a->st = Attach::St::Joined; a->ch = e.channel; a->chLink = c; a->farMachine = machine; a->farDevice = device;
         a->farState = PeerState::Running;
-        if (!a->coreUp) mux.sendState(a->ch, PeerState::Asleep);
+        if (!a->coreUp && !a->serial()) mux.sendState(a->ch, PeerState::Asleep);
     };
     if (idle) return join(idle);
     if (pending) {
         // Both sides opened at once: the link's initiator keeps its own channel, the other yields.
-        if (c->outgoing) { mux.waiting(e.channel); r.held.push_back({e.channel, machine, device}); return; }
+        if (c->outgoing) { mux.waiting(e.channel); r.held.push_back({e.channel, e.channelKind, machine, device}); return; }
         mux.close(pending->ch, CloseReason::Normal);
         return join(pending);
     }
     if (joined) { mux.busy(e.channel, joined->farMachine.toStdString(), joined->farDevice.toStdString()); return; }
     mux.waiting(e.channel);
-    r.held.push_back({e.channel, machine, device});
+    r.held.push_back({e.channel, e.channelKind, machine, device});
 }
 
 void Hub::matchPeer(const QString& hex) {
@@ -786,44 +790,66 @@ void Hub::matchPeer(const QString& hex) {
     auto& mux = c->link->mux();
     for (auto* a : attaches) {
         if (a->link != hex || !(a->st == Attach::St::Idle || a->st == Attach::St::Busy) || a->retryAt > now()) continue;
-        if (!r.held.isEmpty()) {
-            const auto h = r.held.takeFirst();
+        const auto held = std::find_if(r.held.begin(), r.held.end(), [&](const Held& h) { return h.kind == a->kind; });
+        if (held != r.held.end()) {
+            const auto h = *held;
+            r.held.erase(held);
             if (mux.accept(h.ch, a->machine.toStdString(), a->device.toStdString())) {
                 a->st = Attach::St::Joined; a->ch = h.ch; a->chLink = c; a->farMachine = h.machine; a->farDevice = h.device;
                 a->farState = PeerState::Running;
-                if (!a->coreUp) mux.sendState(a->ch, PeerState::Asleep);
+                if (!a->coreUp && !a->serial()) mux.sendState(a->ch, PeerState::Asleep);
                 continue;
             }
         }
-        const auto ch = mux.open(ChannelKind::Infrared, a->machine.toStdString(), a->device.toStdString());
+        const auto ch = mux.open(a->kind, a->machine.toStdString(), a->device.toStdString());
         if (!ch) continue;
         a->st = Attach::St::Opening; a->ch = ch; a->chLink = c;
     }
-    // Held requests while every machine here is joined are busy.
-    Attach* joined = nullptr;
-    bool spare = false;
-    for (auto* a : attaches) {
-        if (a->link != hex) continue;
-        if (a->st == Attach::St::Joined && !joined) joined = a;
-        if (a->st != Attach::St::Joined) spare = true;
+    // Held requests of a kind while every machine here of that kind is joined are busy.
+    for (const auto kind : {ChannelKind::Infrared, ChannelKind::Serial}) {
+        Attach* joined = nullptr;
+        bool spare = false;
+        for (auto* a : attaches) {
+            if (a->link != hex || a->kind != kind) continue;
+            if (a->st == Attach::St::Joined && !joined) joined = a;
+            if (a->st != Attach::St::Joined) spare = true;
+        }
+        if (!joined || spare) continue;
+        for (auto it = r.held.begin(); it != r.held.end();) {
+            if (it->kind != kind) { ++it; continue; }
+            mux.busy(it->ch, joined->farMachine.toStdString(), joined->farDevice.toStdString());
+            it = r.held.erase(it);
+        }
     }
-    if (joined && !spare)
-        for (const auto& h : std::exchange(r.held, {})) mux.busy(h.ch, joined->farMachine.toStdString(), joined->farDevice.toStdString());
     pump(c);
 }
 
 void Hub::matchLocal() {
-    QList<Attach*> locals;
-    for (auto* a : attaches) if (a->link == "local") locals.push_back(a);
-    for (int i = 0; i < locals.size(); ++i) {
-        auto* a = locals[i];
-        auto* partner = i == 0 && locals.size() > 1 ? locals[1] : i == 1 ? locals[0] : nullptr;
-        a->partner = partner;
-        a->st = partner ? Attach::St::Joined : i >= 2 ? Attach::St::Busy : Attach::St::Waiting;
-        a->farMachine = partner ? partner->machine : QString();
-        a->farDevice = partner ? partner->device : QString();
-        a->busyBy = i >= 2 ? locals[0]->machine : QString();
+    for (const auto kind : {ChannelKind::Infrared, ChannelKind::Serial}) {
+        QList<Attach*> locals;
+        for (auto* a : attaches) if (a->link == "local" && a->kind == kind) locals.push_back(a);
+        for (int i = 0; i < locals.size(); ++i) {
+            auto* a = locals[i];
+            auto* partner = i == 0 && locals.size() > 1 ? locals[1] : i == 1 ? locals[0] : nullptr;
+            // A serial port joined to another machine closes first, so its DSR and DCD drop.
+            if (a->serial() && a->partner != partner) dropCore(a);
+            a->partner = partner;
+            a->st = partner ? Attach::St::Joined : i >= 2 ? Attach::St::Busy : Attach::St::Waiting;
+            a->farMachine = partner ? partner->machine : QString();
+            a->farDevice = partner ? partner->device : QString();
+            a->busyBy = i >= 2 ? locals[0]->machine : QString();
+        }
     }
+}
+
+void Hub::removeAttach(Attach* a) {
+    unjoin(a, true);
+    attaches.removeOne(a);
+    if (a->core) { a->core->disconnect(this); a->core->abort(); a->core->deleteLater(); }
+    const auto hex = a->link;
+    delete a;
+    if (hex == "local") matchLocal(); else matchPeer(hex);
+    syncCores();
 }
 
 void Hub::unjoin(Attach* a, bool closeChannel) {
@@ -832,7 +858,15 @@ void Hub::unjoin(Attach* a, bool closeChannel) {
         pump(a->chLink);
     }
     a->st = Attach::St::Idle; a->ch = 0; a->chLink = nullptr;
+    a->unacked = 0; a->pendingIn.clear();
     if (a->partner) { a->partner->partner = nullptr; a->partner = nullptr; }
+}
+
+// The channel is gone; the machine waits for the next one.
+void Hub::clearChannel(Attach* a) {
+    a->st = Attach::St::Idle; a->ch = 0; a->chLink = nullptr; a->farMachine.clear(); a->farDevice.clear();
+    a->farState = PeerState::Running;
+    a->unacked = 0; a->pendingIn.clear();
 }
 
 void Hub::coreConnect(Attach* a) {
@@ -841,14 +875,33 @@ void Hub::coreConnect(Attach* a) {
     if (a->socketPath.isEmpty()) return;
     auto* s = new QLocalSocket(this);
     a->core = s;
+    // Serial: hold no more than a little of the core's bytes, so its queue fills and CTS drops.
+    if (a->serial()) s->setReadBufferSize(kSerialAhead);
     connect(s, &QLocalSocket::connected, this, [this, a, s] {
         if (!attaches.contains(a) || a->core != s) return;
         a->coreUp = true;
+#ifdef Q_OS_UNIX
+        if (a->serial()) {
+            const int size = int(kSerialAhead);
+            ::setsockopt(int(s->socketDescriptor()), SOL_SOCKET, SO_SNDBUF, &size, sizeof size);
+        }
+#endif
         coreState(a, PeerState::Running);
+        if (a->serial()) {
+            if (!a->pendingIn.isEmpty()) { a->unacked += a->pendingIn.size(); s->write(std::exchange(a->pendingIn, {})); }
+            if (a->partner) serialPull(a->partner);
+            serialPull(a);
+            if (a->chLink) pump(a->chLink);
+        }
     });
     connect(s, &QLocalSocket::readyRead, this, [this, a, s] {
         if (!attaches.contains(a) || a->core != s) return;
-        coreBytes(a, s->readAll());
+        if (!a->serial()) { coreBytes(a, s->readAll()); return; }
+        serialPull(a);
+        if (a->chLink) pump(a->chLink);
+    });
+    connect(s, &QLocalSocket::bytesWritten, this, [this, a, s](qint64 n) {
+        if (attaches.contains(a) && a->core == s && a->serial()) serialWritten(a, n);
     });
     connect(s, &QLocalSocket::disconnected, this, [this, a, s] {
         if (!attaches.contains(a) || a->core != s) return;
@@ -857,6 +910,7 @@ void Hub::coreConnect(Attach* a) {
         a->coreUp = false;
         if (was) coreState(a, PeerState::Asleep);
         a->core = nullptr;
+        if (a->unacked) serialWritten(a, a->unacked);  // lost with the socket; their credit goes back
         s->deleteLater();
         a->nextCoreTry = now() + kCoreRetryMs;
     });
@@ -864,11 +918,28 @@ void Hub::coreConnect(Attach* a) {
         if (!attaches.contains(a) || a->core != s || s->state() == QLocalSocket::ConnectedState) return;
         if (a->coreUp) { a->coreUp = false; coreState(a, PeerState::Asleep); }
         a->core = nullptr;
+        if (a->unacked) serialWritten(a, a->unacked);
         s->disconnect(this);
         s->deleteLater();
         a->nextCoreTry = now() + kCoreRetryMs;
     });
     s->connectToServer(a->socketPath);
+}
+
+void Hub::dropCore(Attach* a) {
+    if (a->core) { a->core->disconnect(this); a->core->abort(); a->core->deleteLater(); a->core = nullptr; }
+    a->coreUp = false;
+    a->unacked = 0;
+    a->pendingIn.clear();
+}
+
+// Serial ports are open only while joined: opened as a channel joins, closed as it goes.
+void Hub::syncCores() {
+    for (auto* a : attaches) {
+        if (!a->serial()) continue;
+        if (!a->joined()) { if (a->core || a->coreUp) dropCore(a); }
+        else if (!a->core && !a->coreUp && now() >= a->nextCoreTry) coreConnect(a);
+    }
 }
 
 void Hub::coreBytes(Attach* a, const QByteArray& data) {
@@ -891,6 +962,59 @@ void Hub::coreState(Attach* a, PeerState state) {
         a->chLink->link->mux().sendState(a->ch, state);
         pump(a->chLink);
     }
+}
+
+// Bytes from the link for a serial port; credit goes back once the core's socket takes them.
+void Hub::serialIn(Attach* a, const QByteArray& data) {
+    if (a->coreUp && a->core) { a->unacked += data.size(); a->core->write(data); }
+    else a->pendingIn += data;
+}
+
+void Hub::serialWritten(Attach* a, qint64 n) {
+    if (a->partner) { serialPull(a->partner); return; }
+    if (!a->chLink || !conns.contains(a->chLink) || !a->chLink->link) return;
+    const auto k = std::min(n, a->unacked);
+    a->unacked -= k;
+    if (k > 0) {
+        a->chLink->link->mux().consumed(a->ch, size_t(k));
+        pump(a->chLink);
+    }
+}
+
+// Takes what the other side has room for from the core's socket. The rest waits there.
+bool Hub::serialPull(Attach* a) {
+    if (!a->core || !a->coreUp || !a->joined()) return false;
+    bool moved = false;
+    if (a->partner) {
+        auto* to = a->partner;
+        if (!to->core || !to->coreUp) return false;
+        while (a->core->bytesAvailable() > 0) {
+            const qint64 room = kSerialAhead - to->core->bytesToWrite();
+            if (room <= 0) break;
+            const auto part = a->core->read(room);
+            if (part.isEmpty()) break;
+            to->core->write(part);
+            moved = true;
+        }
+        return moved;
+    }
+    if (!a->chLink || !conns.contains(a->chLink) || !a->chLink->link) return false;
+    auto& mux = a->chLink->link->mux();
+    while (a->core->bytesAvailable() > 0) {
+        const auto room = mux.writable(a->ch);
+        if (room == 0) break;
+        const auto part = a->core->read(qint64(std::min<size_t>(room, 2048)));
+        if (part.isEmpty()) break;
+        mux.send(a->ch, reinterpret_cast<const uint8_t*>(part.constData()), size_t(part.size()));
+        moved = true;
+    }
+    return moved;
+}
+
+bool Hub::pullSerial(Conn* c) {
+    bool moved = false;
+    for (auto* a : attaches) if (a->serial() && a->chLink == c && serialPull(a)) moved = true;
+    return moved;
 }
 
 // ---- Discovery ----
@@ -957,8 +1081,8 @@ void Hub::datagrams() {
 
 // ---- Status ----
 
-QJsonObject Hub::irStatus(const Attach* a) const {
-    QJsonObject o{{"type", "ir"}};
+QJsonObject Hub::status(const Attach* a) const {
+    QJsonObject o{{"type", a->serial() ? "serial" : "ir"}};
     const bool local = a->link == "local";
     const Peer* p = local ? nullptr : const_cast<Store&>(store).find(a->link);
     o["peer"] = local ? QCoreApplication::translate("frondLink", "This computer") : p ? p->name : QString();
@@ -988,12 +1112,18 @@ QJsonObject Hub::irStatus(const Attach* a) const {
 }
 
 QString Hub::peerChannels(const QString& hex) const {
-    QStringList parts;
-    for (const auto* a : attaches)
-        if (a->link == hex && a->st == Attach::St::Joined && (hex != "local" || a->partner))
-            parts << QStringLiteral("%1 – %2").arg(a->machine, a->farMachine.isEmpty() ? a->farDevice : a->farMachine);
-    if (hex == "local" && parts.size() == 2) parts.removeLast();
-    return parts.isEmpty() ? QString() : QCoreApplication::translate("frondLink", "Infrared: %1").arg(parts.join(", "));
+    QStringList kinds;
+    for (const auto kind : {ChannelKind::Infrared, ChannelKind::Serial}) {
+        QStringList parts;
+        for (const auto* a : attaches)
+            if (a->link == hex && a->kind == kind && a->joined())
+                parts << QStringLiteral("%1 – %2").arg(a->machine, a->farMachine.isEmpty() ? a->farDevice : a->farMachine);
+        if (hex == "local" && parts.size() == 2) parts.removeLast();
+        if (parts.isEmpty()) continue;
+        kinds << (kind == ChannelKind::Serial ? QCoreApplication::translate("frondLink", "Serial: %1")
+                                              : QCoreApplication::translate("frondLink", "Infrared: %1")).arg(parts.join(", "));
+    }
+    return kinds.join(QStringLiteral(" · "));
 }
 
 QJsonObject Hub::snapshot() const {
@@ -1051,7 +1181,8 @@ void Hub::tick() {
         } else if (want || !r.held.isEmpty()) r.idleSince = t;
     }
     // Cores: reconnect after sleep, load or reset.
-    for (auto* a : attaches) if (!a->coreUp && !a->core && t >= a->nextCoreTry) coreConnect(a);
+    for (auto* a : attaches) if (!a->serial() && !a->coreUp && !a->core && t >= a->nextCoreTry) coreConnect(a);
+    syncCores();
     for (auto* a : attaches) if (a->st == Attach::St::Busy && a->link != "local" && a->retryAt <= t) matchPeer(a->link);
     for (auto* a : attaches) if (a->st == Attach::St::Idle && a->link != "local" && a->retryAt <= t) matchPeer(a->link);
     // Discovery.
@@ -1068,7 +1199,7 @@ void Hub::tick() {
     if (code && t - codeAt >= pairCodeMs) endPairRequest("expired");
     // Status.
     for (auto* a : attaches) {
-        const auto s = irStatus(a);
+        const auto s = status(a);
         if (s != a->lastStatus) { a->lastStatus = s; sendTo(a->client, s); }
     }
     if (watchers()) {

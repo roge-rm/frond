@@ -64,9 +64,10 @@ QString LinkClient::hubProgram() {
 }
 
 void LinkClient::setSticky(const QString& key, const QJsonObject& op) {
-    // The hub keeps one infrared attach per client until it's detached, and a client with the
-    // Connections window open stays connected, so a cleared or replaced attach is detached first.
-    if (key == "ir" && sticky.contains(key) && isConnected()) socket.write(frondLink::encodeLine({{"op", "ir-detach"}}));
+    // The hub keeps one infrared and one serial attach per client until it's detached, and a client
+    // with the Connections window open stays connected, so a cleared or replaced attach is detached first.
+    if ((key == "ir" || key == "serial") && sticky.contains(key) && isConnected())
+        socket.write(frondLink::encodeLine({{"op", key + "-detach"}}));
     if (op.isEmpty()) {
         sticky.remove(key);
         if (sticky.isEmpty()) linger.start();
