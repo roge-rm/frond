@@ -38,6 +38,15 @@ int main() {
         value = 0;
         assert(state.access(eim, readPcs[i], address, 4, false, value) == Access::ok && value == settings[i]);
     }
+    value = 0xdeadbeef;
+    assert(state.access(eim,0x200a62ce,0x16010188,4,false,value) == Access::ok && value == 0x15ff1000);
+    assert(state.access(eim,0x200a62ce,0x16010188,4,true,value) == Access::externalInput);
+    assert(state.access(eim,0x200a62ce,0x16010188,2,false,value) == Access::width);
+    assert(state.access(eim,0x200a62cc,0x16010188,4,false,value) == Access::externalInput);
+    auto resetWindows = state.memoryWindows();
+    resetWindows.reset();
+    value = 0xdeadbeef;
+    assert(resetWindows.access(0x200a62ce,0x16010188,4,false,value) == Access::sequence && value == 0xdeadbeef);
     const auto& windows = state.memoryWindows();
     assert(windows.internal().known && windows.internal().first == 0x100000 && windows.internal().last == 0x15ffff);
     assert(windows.external().known && windows.external().first == 0x800000 && windows.external().last == 0xffffff);

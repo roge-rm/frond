@@ -92,6 +92,51 @@ int main() {
     assert(state.displayState().verticalBlankEvents() == 0);
     assert(state.interruptState().pendingValue() == 0);
     {
+        auto rotated = state;
+        Imx1GraphicsMemory bytes;
+        Imx1GraphicsFrame output;
+        unsigned n = 0;
+        for (uint32_t colour : {0xf800u,0x07e0u,0x001fu,0xffffu,0u,0xffe0u}) {
+            assert(bytes.accessGpu(rotated,eim,0x800000 + n++ * 2,2,true,colour) == A::ok);
+        }
+        transaction(rotated,eim,true);
+        store(rotated,eim,0x200ae9a8,0x414,0x1801c16);
+        store(rotated,eim,0x200ae9b8,0x418,0x800000);
+        store(rotated,eim,0x200ae9c4,0x41c,4);
+        transaction(rotated,eim,false);
+        uint32_t pending = 0;
+        assert(rotated.access(eim,0x200ae9d8,0x160104d8,4,false,pending) == A::ok && (pending & 2));
+        rotated.advanceCpuCycles(period - 1);
+        assert(rotated.displayState().latchPending() && rotated.displayState().activeWord(0x414) == 0x1801c06);
+        rotated.advanceCpuCycles(1);
+        assert(!rotated.displayState().latchPending());
+        assert(output.advance(rotated,bytes,eim));
+        uint32_t first = 99, last = 99;
+        const auto pixels = output.getPendingFrame(first,last);
+        assert(pixels && output.width() == 3 && output.height() == 2 && first == 0 && last == 1);
+        const uint32_t expected[]{0xff00ff00,0xffffffff,0xff00ffff,0xff0000ff,0xffff0000,0xff000000};
+        for (unsigned i = 0; i < 6; ++i) assert(pixels[i] == expected[i]);
+        output.acknowledgeFrame();
+        uint32_t blue = 0x001f;
+        assert(bytes.accessGpu(rotated,eim,0x800008,2,true,blue) == A::ok);
+        rotated.advanceCpuCycles(period);
+        assert(output.advance(rotated,bytes,eim));
+        assert(output.getPendingFrame(first,last)[5] == 0xffff0000);
+        assert(first <= 1 && last >= 1);
+        transaction(rotated,eim,true);
+        uint32_t bad = 0x1801c0e;
+        assert(rotated.access(eim,0x200ae9a8,0x16010414,4,true,bad) == A::sideEffect);
+        store(rotated,eim,0x200ae9c4,0x41c,2);
+        bad = 0x7b;
+        assert(rotated.access(eim,0x200aeb68,0x160104d8,4,true,bad) == A::sideEffect);
+        assert(!rotated.displayState().latchPending() && rotated.displayState().activeWord(0x41c) == 4);
+        store(rotated,eim,0x200ae9c4,0x41c,4);
+        store(rotated,eim,0x200ae9b8,0x418,0x800002);
+        assert(rotated.access(eim,0x200aeb68,0x160104d8,4,true,bad) == A::sideEffect);
+        bad = 0x12345678;
+        assert(rotated.access(eim,0x200ae9dc,0x160104d8,4,false,bad) == A::externalInput && bad == 0x12345678);
+    }
+    {
         auto raster = state.displayState();
         const auto system = Imx1GraphicsClocks::Rate{200000000,1};
         raster.advanceCpuCycles(100);

@@ -1,0 +1,134 @@
+diff --git a/src/uarm/uarm/imx1_graphics_display.h b/src/uarm/uarm/imx1_graphics_display.h
+--- a/src/uarm/uarm/imx1_graphics_display.h
++++ b/src/uarm/uarm/imx1_graphics_display.h
+@@ -11,6 +11,8 @@
+    public:
+     struct Surface {
+         uint32_t base = 0, pitch = 0, width = 0, height = 0;
++        int32_t xStride = 2, yStride = 0;
++        uint32_t rangeBase = 0, rangeBytes = 0;
+         unsigned bank = 0;
+         uint32_t bankOffset = 0;
+     };
+@@ -147,7 +149,7 @@
+         }
+         if (offset == 0x4d8) {
+             if (!write) {
+-                if (pc != 0x200ad74c) return A::externalInput;
++                if (pc != 0x200ad74c && pc != 0x200ae9d8) return A::externalInput;
+                 value = updateControl | (pending ? 2u : 0u);
+                 return A::ok;
+             }
+@@ -218,7 +220,7 @@
+         if (offset == 0x414) {
+             if (value & ~0x1ffffffu) return A::sideEffect;
+             if ((value & 7) != 0 && (value & 7) != 6) return A::sideEffect;
+-            if (value & 0x18) return A::sideEffect;
++            if ((value & 0x18) != 0 && (value & 0x18) != 0x10) return A::sideEffect;
+         }
+         if (offset == 0x418 && ((value & 1) || value > 0xffffff)) return A::sideEffect;
+         if (offset == 0x41c && (!value || value > 0x10000 || (value & 1))) return A::sideEffect;
+@@ -254,6 +256,7 @@
+     struct Operation { uint32_t pc, offset; };
+     inline static constexpr Operation operations[] = {
+         {0x200ad720,0x418},{0x200ad72c,0x41c},{0x200ad738,0x414},
++        {0x200ae9a8,0x414},{0x200ae9b8,0x418},{0x200ae9c4,0x41c},
+         {0x200ad65c,0x42c},{0x200ad668,0x430},
+         {0x200ad2e0,0x410},{0x200ad2ec,0x414},{0x200ad2f8,0x420},{0x200ad304,0x424},{0x200ad310,0x428},
+         {0x200ad31c,0x48c},{0x200ad328,0x490},{0x200ad334,0x4a0},{0x200ad340,0x4a4},
+@@ -294,20 +297,36 @@
+             if (!knownWords[index(offset)]) return false;
+         const uint32_t control = stagedWord(0x414), h = stagedWord(0x42c), v = stagedWord(0x430);
+         const uint32_t activeH = stagedWord(0x424), activeV = stagedWord(0x428);
+-        if ((control & 0x1f) != 6 || (control & 0x1800000) != 0x1800000 ||
++        if ((control & 7) != 6 || ((control & 0x18) != 0 && (control & 0x18) != 0x10) ||
++            (control & 0x1800000) != 0x1800000 ||
+             h != activeH || v != activeV) return false;
+         value.width = (h >> 16) - (h & 0x7ff);
+         value.height = (v >> 16) - (v & 0x3ff);
+         value.base = stagedWord(0x418);
+         value.pitch = stagedWord(0x41c);
+         if (!value.width || !value.height || value.width > 1024 || value.height > 1024 ||
+-            uint64_t(value.width) * value.height > 1024 * 1024 || value.pitch < value.width * 2) return false;
+-        const uint64_t length = uint64_t(value.height - 1) * value.pitch + value.width * 2;
++            uint64_t(value.width) * value.height > 1024 * 1024) return false;
++        const bool rotated = (control & 0x18) == 0x10;
++        if (value.pitch < (rotated ? value.height : value.width) * 2) return false;
++        if (rotated) {
++            // Mode 2 starts at the upper halfword of its word-aligned offset.
++            if ((value.base & 3) || value.base > 0xfffffffdu) return false;
++            value.base += 2;
++            value.xStride = int32_t(value.pitch);
++            value.yStride = -2;
++        } else value.yStride = int32_t(value.pitch);
++        const int64_t lastRow = int64_t(value.height - 1) * value.yStride;
++        const int64_t lastColumn = int64_t(value.width - 1) * value.xStride;
++        const int64_t first = int64_t(value.base) + std::min<int64_t>(0,lastRow);
++        const int64_t end = int64_t(value.base) + std::max<int64_t>(0,lastRow) + lastColumn + 2;
++        if (first < 0 || end > 0x100000000ll) return false;
++        value.rangeBase = uint32_t(first);
++        value.rangeBytes = uint32_t(end - first);
+         unsigned bank = 0;
+         for (auto range : {windows.internal(),windows.external()}) {
+-            if (range.known && value.base >= range.first && uint64_t(value.base) + length <= uint64_t(range.last) + 1) {
++            if (range.known && value.rangeBase >= range.first && uint64_t(value.rangeBase) + value.rangeBytes <= uint64_t(range.last) + 1) {
+                 value.bank = bank;
+-                value.bankOffset = value.base - range.first;
++                value.bankOffset = value.rangeBase - range.first;
+                 return true;
+             }
+             ++bank;
+diff --git a/src/uarm/uarm/imx1_graphics_frame.h b/src/uarm/uarm/imx1_graphics_frame.h
+--- a/src/uarm/uarm/imx1_graphics_frame.h
++++ b/src/uarm/uarm/imx1_graphics_frame.h
+@@ -41,16 +41,16 @@
+         if (!full && display.frameNumber() == lastFrame) return true;
+         Imx1GraphicsDisplay::Surface candidate;
+         if (!display.surface(candidate)) return false;
+-        const uint64_t length = uint64_t(candidate.height - 1) * candidate.pitch + candidate.width * 2;
+-        if (!memory.contains(configuration, eim, candidate.base, length)) return false;
++        if (!memory.contains(configuration, eim, candidate.rangeBase, candidate.rangeBytes)) return false;
+         enabled = true;
+         const auto dirty = memory.dirty(candidate.bank, Imx1GraphicsMemory::Consumer::scanout);
+         uint32_t first = candidate.height, last = 0;
+         if (full) { first = 0; last = candidate.height - 1; }
+         else if (dirty.pending) {
+             for (uint32_t y = 0; y < candidate.height; ++y) {
+-                const uint64_t begin = uint64_t(candidate.bankOffset) + uint64_t(y) * candidate.pitch;
+-                if (begin < dirty.end && begin + candidate.width * 2 > dirty.first) {
++                const uint64_t begin = uint64_t(int64_t(candidate.bankOffset) + candidate.base - candidate.rangeBase +
++                                                int64_t(y) * candidate.yStride);
++                if (begin < dirty.end && begin + uint64_t(candidate.width - 1) * candidate.xStride + 2 > dirty.first) {
+                     first = std::min(first, y);
+                     last = y;
+                 }
+@@ -61,8 +61,14 @@
+             if (pixels.size() != candidate.width * candidate.height) pixels.resize(candidate.width * candidate.height);
+             row.resize(candidate.width * 2);
+             for (uint32_t y = first; y <= last; ++y) {
+-                if (!memory.copyGpuRange(configuration, eim, candidate.base + y * candidate.pitch,
+-                                          candidate.width * 2, row.data())) return false;
++                const uint32_t start = uint32_t(int64_t(candidate.base) + int64_t(y) * candidate.yStride);
++                if (candidate.xStride == 2) {
++                    if (!memory.copyGpuRange(configuration, eim, start, candidate.width * 2, row.data())) return false;
++                } else {
++                    for (uint32_t x = 0; x < candidate.width; ++x)
++                        if (!memory.copyGpuRange(configuration, eim, start + x * candidate.xStride,
++                                                  2, row.data() + x * 2)) return false;
++                }
+                 for (uint32_t x = 0; x < candidate.width; ++x) {
+                     const uint32_t rgb = uint32_t(row[x * 2]) | (uint32_t(row[x * 2 + 1]) << 8);
+                     const uint32_t red = (rgb >> 11) & 31, green = (rgb >> 5) & 63, blue = rgb & 31;
+diff --git a/src/uarm/uarm/imx1_graphics_windows.h b/src/uarm/uarm/imx1_graphics_windows.h
+--- a/src/uarm/uarm/imx1_graphics_windows.h
++++ b/src/uarm/uarm/imx1_graphics_windows.h
+@@ -28,7 +28,8 @@
+         if (size != 4) return Imx1BootstrapAccess::width;
+         for (unsigned i = 0; i < offsets.size(); ++i) {
+             if (address != 0x16010000 + offsets[i]) continue;
+-            if (pc != (write ? writePcs[i] : readPcs[i])) return Imx1BootstrapAccess::externalInput;
++            if (pc != (write ? writePcs[i] : readPcs[i]) &&
++                !(!write && i == 0 && pc == 0x200a62ce)) return Imx1BootstrapAccess::externalInput;
+             if (write) {
+                 if (value != settings[i]) return Imx1BootstrapAccess::sideEffect;
+                 words[i] = value;
