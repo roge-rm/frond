@@ -108,7 +108,6 @@ void prospectiveRatiosAndTransactions() {
     assert(read(staged, cgm) == 0x57000403);
     Imx1Bootstrap b; configure(b); b.advanceCpuCycles(37, 3, true); untouched = b;
     write(b, cgm + 32, 3, A::sideEffect);
-    write(b, cgm, 0x57000403, A::sideEffect, 0); // Existing FastBus live-timer guard.
     write(b, cgm, 0x57010003, A::externalInput);
     write(b, cgm, 0x57000002, A::sideEffect);
     write(b, cgm, 0x5720ac03, A::sideEffect);
@@ -125,6 +124,7 @@ void hclkConsumers() {
     write(b, pwm, 0x10010);
     auto unchanged = b;
     write(b, cgm, 0x5700a803, A::sideEffect);
+    write(b, cgm, 0x5700a803, A::sideEffect, 0);
     compare(b, unchanged);
     // PRESC changes are safe while reset is pending; five HCLK edges still finish it.
     write(b, cgm, 0x57002c03);
@@ -141,6 +141,7 @@ void hclkConsumers() {
     write(b, 0x0021c020, 0); write(b, 0x00217008, 0x80); write(b, 0x00217008, 0xb0);
     unchanged = b;
     write(b, cgm, 0x5700ac03, A::sideEffect);
+    write(b, cgm, 0x5700ac03, A::sideEffect, 0);
     compare(b, unchanged);
     write(b, cgm, 0x5700a803); // PRESC alone changes elapsed CPU duration, no bus divider change.
     write(b, 0x00217008, 0x80);
@@ -180,6 +181,7 @@ void manualUClockPhases() {
     for (unsigned n = 0; n < 137; ++n) chunks.advanceCpuCycles(1, 3, true);
     assert(read(b, adc + 0x1c) == 0 && read(chunks, adc + 0x1c) == 0);
     write(b, cgm, 0x5700ac03, A::sideEffect);
+    write(b, cgm, 0x5700ac03, A::sideEffect, 0);
     write(chunks, cgm, 0x5700ac03, A::sideEffect);
     write(b, cgm, 0x57008003); write(chunks, cgm, 0x57008003);
     b.advanceCpuCycles(10000, 3, true);

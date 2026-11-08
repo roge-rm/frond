@@ -84,6 +84,66 @@ void serialDomains() {
     compare(b, chunks);
     write(b, ssi, 0xabcd); write(chunks, ssi, 0xabcd);
 }
+void fastBusDomains() {
+    Imx1Bootstrap b; configure(b);
+    b.setLcdcContrastOnly(true);
+    write(b, 0x20502c, 0x580); write(b, 0x205034, 2);
+    write(b, 0x208008, 47); write(b, 0x208004, 17); write(b, 0x208000, 0x10);
+    // Establish nonzero independent fractions before the native FastBus handoff.
+    b.advanceCpuCycles(17, 3, true);
+    auto unchanged = b;
+    write(b, cgm, 0x57003c03, A::ok, 0);
+    for (unsigned i = 0; i < 4000; ++i) {
+        b.advanceCpuCycles(1, 0, true); unchanged.advanceCpuCycles(16, 0, true);
+        compare(b, unchanged, false);
+        assert(b.lcdcContrastPhase() == unchanged.lcdcContrastPhase());
+        assert(read(b, 0x20800c) == read(unchanged, 0x20800c));
+    }
+    b.advanceHclkCycles(11); unchanged.advanceHclkCycles(11 * 16);
+    compare(b, unchanged, false);
+    assert(b.lcdcContrastPhase() == unchanged.lcdcContrastPhase());
+    assert(read(b, 0x20800c) == read(unchanged, 0x20800c));
+    write(b, cgm, 0x57000003, A::ok, 0);
+    // Returning to asynchronous operation must retain the pre-handoff PLL fraction.
+    for (unsigned i = 0; i < 3000; ++i) {
+        b.advanceCpuCycles(1, 3, true); unchanged.advanceCpuCycles(1, 3, true);
+        compare(b, unchanged);
+        assert(b.lcdcContrastPhase() == unchanged.lcdcContrastPhase());
+        assert(read(b, 0x20800c) == read(unchanged, 0x20800c));
+    }
+    write(b, cgm, 0x57003c03, A::ok, 0);
+    auto chunks = b;
+    b.advanceCpuCycles(100000, 0, true);
+    for (unsigned i = 0; i < 1000; ++i) chunks.advanceCpuCycles(100, 0, true);
+    compare(b, chunks);
+    assert(b.lcdcContrastPhase() == chunks.lcdcContrastPhase());
+    assert(read(b, 0x20800c) == read(chunks, 0x20800c));
+    // An actual PERCLK1 divider change remains guarded with live consumers.
+    write(b, cgm + 32, 0x00100013, A::sideEffect, 0);
+    compare(b, chunks);
+    b.advanceCpuCycles(19, 0, true); chunks.advanceCpuCycles(19, 0, true);
+    compare(b, chunks);
+}
+void latentPeripheralPhase() {
+    Imx1Bootstrap b; configure(b);
+    write(b, 0x202000, 0); write(b, 0x203000, 0);
+    write(b, 0x202004, 0); write(b, 0x203004, 0);
+    // Disabled consumers do not stop the independent PERCLK1 divider.
+    b.advanceCpuCycles(1, 0, true);
+    auto unchanged = b;
+    write(b, cgm, 0x57003c03, A::ok, 0);
+    for (auto* state : {&b, &unchanged}) {
+        write(*state, 0x202000, 0x103); write(*state, 0x203000, 0x103);
+        write(*state, 0x208008, 29); write(*state, 0x208004, 7);
+        write(*state, 0x208000, 0x10);
+    }
+    for (unsigned i = 0; i < 200; ++i) {
+        b.advanceCpuCycles(1, 0, true); unchanged.advanceCpuCycles(16, 0, true);
+        compare(b, unchanged, false);
+        assert(read(b, 0x20800c) == read(unchanged, 0x20800c));
+    }
+    assert(read(b, 0x202010) > 0);
+}
 void guards() {
     Imx1Bootstrap b; configure(b);
     auto untouched = b;
@@ -101,6 +161,7 @@ void guards() {
     assert(b.pcmState().dmaActive && b.pcmDmaRemaining() == 4);
     untouched = b;
     write(b, cgm, 0x5700ac03, A::sideEffect);
+    write(b, cgm, 0x57003c03, A::sideEffect, 0);
     write(b, cgm + 32, 0x000f0012, A::sideEffect);
     compare(b, untouched);
     for (unsigned i = 0; i < 3000; ++i) {
@@ -126,6 +187,7 @@ void wholePair() {
     auto store = [&](uint32_t address, uint32_t value) {
         literal(0, address); literal(1, value); words.push_back(0xe5801000);
     };
+    literal(13, 0x31fff0);
     store(cgm, 0x57000003); store(cgm + 4, 0x03e717bf); store(cgm, 0x57200003);
     literal(0, cgm);
     words.push_back(0xe5902000); words.push_back(0xe3120602); words.push_back(0x1afffffc);
@@ -144,7 +206,13 @@ void wholePair() {
     const auto callRestore = words.size(); words.push_back(0);
     literal(0, cgm); words.push_back(0xe5905000);
     literal(1, 0x78); words.push_back(0xee011f10);
-    literal(1, 0xc0000078); words.push_back(0xee011f10); words.push_back(0xee117f10);
+    literal(0, 6);
+    const auto callSlow = words.size(); words.push_back(0);
+    literal(0, cgm); words.push_back(0xe5908000);
+    literal(1, 0xc0000078); words.push_back(0xee011f10);
+    literal(0, 96);
+    const auto callNormal = words.size(); words.push_back(0);
+    literal(0, cgm); words.push_back(0xe590a000); words.push_back(0xee117f10);
     words.push_back(0xe7f000f0);
     const auto divide = words.size();
     literal(1, cgm); words.push_back(0xe5910000); words.push_back(0xe3c00b0f);
@@ -152,6 +220,33 @@ void wholePair() {
     const auto restore = words.size();
     literal(0, cgm); words.push_back(0xe5901000); words.push_back(0xe3c11b2f);
     words.push_back(0xe5801000); words.push_back(0xe12fff1e);
+    // Native rate clamp/divide/two-write helper, with fixture-relative BL and literal.
+    const auto later = words.size();
+    const uint32_t laterWords[] = {
+        0xe3500006, 0x33a00006, 0xe92d4008, 0x3a000001, 0xe3500060, 0x83a00060,
+        0xe3a01060, 0xeb010cb1, 0xe2401001, 0xe51f02e4, 0xe5902000, 0xe3c22df0,
+        0xe5802000, 0xe5902000, 0xe1821501, 0xe5801000, 0xe8bd4008, 0xe12fff1e,
+    };
+    words.insert(words.end(), std::begin(laterWords), std::end(laterWords));
+    const auto cgmLiteral = words.size(); words.push_back(cgm);
+    const auto divide96 = words.size();
+    const uint32_t divideWords[] = {
+        0xe3a02000, 0xe070c1a1, 0x3a000020, 0xe070c421, 0x3a00000f, 0xe1a00400,
+        0xe38224ff, 0xe070c221, 0x3a000017, 0xe070c421, 0x3a000009, 0xe1a00400,
+        0xe38228ff, 0xe070c421, 0x21a00400, 0x23822cff, 0xe070c221, 0x3a00000e,
+        0xe270c000, 0x2a0002d1, 0x21a00420, 0xe070c3a1, 0x20411380, 0xe0a22002,
+        0xe070c321, 0x20411300, 0xe0a22002, 0xe070c2a1, 0x20411280, 0xe0a22002,
+        0xe070c221, 0x20411200, 0xe0a22002, 0xe070c1a1, 0x20411180, 0xe0a22002,
+        0xe070c121, 0x20411100, 0xe0a22002, 0xe070c0a1, 0x20411080, 0xe0a22002,
+        0xe070c001, 0x20411000, 0xe0b22002, 0x2affffe5, 0xe1a00002, 0xe12fff1e,
+    };
+    words.insert(words.end(), std::begin(divideWords), std::end(divideWords));
+    const auto zeroDivisor = words.size(); words.push_back(0xe7f000f0);
+    words[later + 7] = 0xeb000000 | uint32_t(divide96 - later - 7 - 2);
+    words[later + 9] = 0xe59f0000 | uint32_t((cgmLiteral - later - 9 - 2) * 4);
+    words[divide96 + 18] = 0x2a000000 | uint32_t(zeroDivisor - divide96 - 18 - 2);
+    words[callSlow] = 0xeb000000 | uint32_t(later - callSlow - 2);
+    words[callNormal] = 0xeb000000 | uint32_t(later - callNormal - 2);
     words[callDivide] = 0xeb000000 | uint32_t(divide - callDivide - 2);
     words[callRestore] = 0xeb000000 | uint32_t(restore - callRestore - 2);
     std::vector<uint8_t> rom(words.size() * 4); std::memcpy(rom.data(), words.data(), rom.size());
@@ -164,6 +259,7 @@ void wholePair() {
         results[fast] = imx1BootProbe(rom.data(), rom.size(), Imx1ProbeEntry::physicalFlash,
                                     100000, nullptr, nullptr, fast, &options);
         assert(results[fast].registers[4] == 0x5700ac03 && results[fast].registers[5] == 0x57000003);
+        assert(results[fast].registers[8] == 0x57003c03 && results[fast].registers[10] == 0x57000003);
         assert(results[fast].registers[6] >= 5 && (results[fast].registers[7] & 0xc0000000) == 0xc0000000);
         assert(results[fast].stop == Imx1ProbeStop::unsupportedInstruction);
     }
@@ -182,6 +278,6 @@ void wholePair() {
 
 }
 int main() {
-    serialDomains(); guards(); wholePair();
-    std::puts("PASS: independent SSI/BCLK domains, buffered words, underrun, continuous phase, DMA guards and equal-time state");
+    serialDomains(); fastBusDomains(); latentPeripheralPhase(); guards(); wholePair();
+    std::puts("PASS: independent SSI/PERCLK/BCLK domains, FastBus live dividers, retained fractions, DMA guards and equal-time state");
 }
