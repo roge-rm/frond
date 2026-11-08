@@ -32,10 +32,13 @@ int main() {
         write(base, upper, Imx1BootstrapAccess::ok);
         write(base + 4, lower, Imx1BootstrapAccess::ok);
         read(base, upper); read(base + 4, lower);
-        for (uint32_t bad : {0x80000000u, 0x40000000u, 0x80u})
+        write(base, 0x80000000, chip == 5 ? Imx1BootstrapAccess::sideEffect : Imx1BootstrapAccess::reservedBits);
+        for (uint32_t bad : {0x40000000u, 0x80u})
             write(base, bad, Imx1BootstrapAccess::reservedBits);
-        for (uint32_t bad : {0x00100000u, 0x00200000u, 0x00300000u, 0x3f00u})
+        for (uint32_t bad : {0x00100000u, 0x00200000u, 0x00300000u})
             write(base, bad, Imx1BootstrapAccess::sideEffect);
+        write(base, 0x3f00, chip == 5 ? Imx1BootstrapAccess::ok : Imx1BootstrapAccess::sideEffect);
+        if (chip == 5) write(base,upper,Imx1BootstrapAccess::ok);
         for (uint32_t bad : {0x80u, 0x20u, 0x08u, 0x04u})
             write(base + 4, lower | bad, Imx1BootstrapAccess::reservedBits);
         read(base, upper); read(base + 4, lower);

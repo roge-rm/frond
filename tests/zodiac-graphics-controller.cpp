@@ -105,8 +105,10 @@ int main() {
     assert(memory.dirty(1,Imx1GraphicsMemory::Consumer::upload).generation==savedUpload.generation);
     assert(memory.dirty(1,Imx1GraphicsMemory::Consumer::persistence).generation==savedPersistence.generation);
     assert(!state.memoryReady(eim));
-    state.advanceCpuCycles(31);assert(!state.memoryReady(eim));
-    state.advanceCpuCycles(1);assert(state.memoryReady(eim));
+    // 24 HCLK periods supply exactly 32 elapsed CPU cycles at this independent ratio.
+    const Imx1PllRatio bus={128,390625},cpu={96,390625};
+    state.advanceBusCycles(23,bus,cpu);assert(!state.memoryReady(eim));
+    state.advanceBusCycles(1,bus,cpu);assert(state.memoryReady(eim));
     value=0;assert(memory.access(state,eim,0x16800000,4,false,value)==Access::ok && value==0x12345678);
     store(0x200c6888, 0x1601019c, 0x7bbb7444, Access::sequence);
     store(0x200c67c4, 0x1601019c, 0x7bbb7445, Access::ok);

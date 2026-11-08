@@ -1693,3 +1693,13 @@ test-zodiac-graphics-display: build/zodiac-boot-probe
 test-zodiac-graphics-clocks: build/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Ibuild/source/src/uarm/uarm tests/zodiac-graphics-clocks.cpp -o build/test-zodiac-graphics-clocks
 	./build/test-zodiac-graphics-clocks
+
+# CS5 asynchronous external acknowledge and guest-clock transaction checks.
+.PHONY: test-zodiac-cs5-bus
+test-zodiac-cs5-bus: build/zodiac-boot-probe
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Ibuild/source/src/uarm/uarm tests/zodiac-cs5-bus.cpp \
+		build/source/src/uarm/uarm/imx1_watchdog.cpp build/source/src/uarm/uarm/imx1_rtc.cpp build/source/src/uarm/uarm/imx1_bootstrap.cpp \
+		build/source/src/uarm/uarm/imx1_aitc.cpp build/source/src/uarm/uarm/imx1_cgm.cpp build/source/src/uarm/uarm/imx1_gpio.cpp build/source/src/uarm/uarm/imx1_sysctrl.cpp \
+		build/source/src/uarm/uarm/imx1_eim.cpp build/source/src/uarm/uarm/imx1_timer.cpp build/source/src/uarm/uarm/imx1_i2c.cpp build/source/src/uarm/uarm/imx1_asp.cpp build/source/src/uarm/uarm/imx1_pwm.cpp -o build/test-zodiac-cs5-bus
+	./build/test-zodiac-cs5-bus
+	python3 tests/zodiac-cs5-bus.py

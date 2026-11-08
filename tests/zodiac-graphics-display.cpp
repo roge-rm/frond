@@ -40,7 +40,7 @@ static void mode(Imx1Cs5Configuration& state, const Imx1Eim& eim, uint32_t base 
             {0x200ad404,0x540,0x80604020},{0x200ad410,0x544,0xffdfbf9f},{0x200ad418,0x548,0},
             {0x200ad420,0x578,0x80604020},{0x200ad428,0x58c,0xffdfbf9f},{0x200ad430,0x590,0},
             {0x200ad438,0x594,0x80604020},{0x200ad440,0x598,0xffdfbf9f},{0x200ad448,0x59c,0},
-            {0x200ad528,0x538,0x800000}}) store(state,eim,op[0],op[1],op[2]);
+            {0x200ad528,0x538,0x800000},{0x200ad3b8,0x524,0x102aa}}) store(state,eim,op[0],op[1],op[2]);
     store(state,eim,0x200ad2ec,0x414,0x1800406);
     store(state,eim,0x200ad2f8,0x420,0x60008);
     store(state,eim,0x200ad304,0x424,0x40001);
@@ -89,6 +89,37 @@ int main() {
     assert(state.access(eim,0x200b9cd4,0x160104c0,4,false,value,13) == A::externalInput && value == 0xdeadbeef);
     assert(state.access(eim,0x200b9cd4,0x160104c0,4,false,value,3) == A::ok && value == 8);
     const uint64_t period = 8 * 6 * Imx1GraphicsDisplay::pixelCycles;
+    {
+        auto waited=state;
+        store(waited,eim,0x200c45e4,0x80,0x3f);
+        auto partition=waited,reference=waited;
+        uint32_t panel=0;
+        assert(waited.access(eim,0x20086a7c,0x16010524,4,false,panel)==A::ok && panel==0x102aa);
+        panel |= 0x4001;
+        assert(waited.access(eim,0x20086a82,0x16010524,4,true,panel)==A::ok);
+        assert(waited.displayState().activeWord(0x524)==0x142ab);
+        uint32_t pulse=0;
+        assert(waited.access(eim,0x200869c8,0x160104f0,4,false,pulse)==A::ok && pulse==0);
+        pulse=0x407f0000;assert(waited.access(eim,0x200869f0,0x160104f0,4,true,pulse)==A::ok);
+        pulse|=0x80000000u;assert(waited.access(eim,0x200869f0,0x160104f0,4,true,pulse)==A::sideEffect);
+        pulse=0;assert(waited.access(eim,0x200869f2,0x160104f0,4,false,pulse)==A::ok && pulse==0x407f0000);
+        partition=waited;reference=waited;
+        const auto phase=waited.displayState().scanPhase();
+        const Imx1PllRatio bus={128,390625},cpu={64,390625};
+        waited.advanceBusCycles(17,bus,cpu);
+        for (unsigned i=0;i<17;++i) partition.advanceBusCycles(1,bus,cpu);
+        reference.advanceReference(17*bus.numerator,bus.denominator);
+        assert(waited.displayState().scanPhase()!=phase);
+        assert(waited.displayState().scanPhase()==partition.displayState().scanPhase());
+        assert(waited.displayState().scanPhase()==reference.displayState().scanPhase());
+        waited.advanceBusCycles(19,bus,{125,762752});
+        for (unsigned i=0;i<19;++i) partition.advanceBusCycles(1,bus,{125,762752});
+        reference.advanceReference(19*bus.numerator,bus.denominator);
+        assert(waited.displayState().scanPhase()==reference.displayState().scanPhase());
+        assert(waited.displayState().scanPhase()==partition.displayState().scanPhase());
+        assert(waited.displayState().frameNumber()==reference.displayState().frameNumber());
+    }
+
 
     {
         auto staged = state, reference = state;

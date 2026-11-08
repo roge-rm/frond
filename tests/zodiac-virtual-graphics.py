@@ -9,7 +9,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 PROBE = ROOT / 'build/zodiac-boot-probe'
 
-def main():
+def main(bus_checks=None):
     with tempfile.TemporaryDirectory(prefix='zodiac-cs5-reset-', dir=ROOT / 'build') as work:
         rom = bytearray(0x7d0000)
         for base in (0, 0x20000):
@@ -343,6 +343,7 @@ def main():
             assert 'graphics-frame lcd=1 width=3 height=2 fnv1a=%08x'%expected in output,output
             clock_outputs.append(re.sub(r'^jit-blocks=.*\n','',re.sub(r'engine=(exact|fast)','engine=checked',output),flags=re.M))
         assert clock_outputs[0]==clock_outputs[1], 'Exact/Fast clock traces differ'
+        if bus_checks: bus_checks(rom,word,branch,path,bootstrap,profile,expected)
         branch(0xd9000,0xd9000)
         query = 0xd6000 + (len(display_ops)-2) * 0x40
         for instruction in (0xe3a07000,0xe3a07002):

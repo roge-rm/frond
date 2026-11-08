@@ -32,6 +32,7 @@ static void bus(void* context, const Imx1ProbeAccess& t) {
                 t.diagnosticCs5Reset ? " source=diagnostic-cs5-reset" :
                 t.diagnosticCs4 ? " source=diagnostic-cs4-capture" : "");
     if (t.knownMask != 0xffffffffu) std::printf(" known-mask=%08x single-pin-query", t.knownMask);
+    if (t.cs5WaitClocks) std::printf(" cs5-hclk=%u",t.cs5WaitClocks);
     std::putchar('\n');
 }
 
@@ -278,6 +279,8 @@ int main(int argc, char** argv) {
             std::puts("VIRTUAL DISPLAY: before programming, pixel source=1 pixel per 16 charged CPU cycles; programmed PCLK follows graphics clocks; 32-cycle initial or 32-tick programmed settling, running latch at next frame boundary; framebuffer RGB565 to host ABGR8888; startup option nibble=0 on pins9..12 after display enable, per-pin observations only; no physical clock, panel timing or board strap claim.");
         if (options.graphicsProfile != Imx1GraphicsProfile::strict)
             std::printf("VIRTUAL GRAPHICS CLOCKS: reference=16000000Hz, time=200000000Hz from Cgm/CLK32 guest time; counter=source/4 with 4*(lock+1) reference-period gate; register-driven nominal VCO curve, no physical lock or oscillator claim.\n");
+        if (options.graphicsProfile != Imx1GraphicsProfile::strict)
+            std::puts("VIRTUAL CS5 BUS: fixed WSC62=63 HCLK stalls; DTACK=fresh falling edge, WAIT=ready high; one live SCLK service cycle and minimum3 HCLK; timeout1022 HCLK, response on final edge wins; HCLK from Cgm with nominal CLK32=32768Hz; GPIO SSR sample independent; no physical timing claim.");
         if (options.cs5ResetStatusInputKnown)
             std::printf("DIAGNOSTIC CS5 RESET: opaque status input=%02x is caller-supplied and unqualified; bit3 echoes reset-helper writes immediately; other bits, chip reset effects and timing are unmodelled. Configured virtual REG_BASE=01 selects +10000; exact CPU_DEFAULTS=0e is recorded; full identity/revision words remain unknown.\n", options.cs5ResetStatusInput);
         if (options.cs4Port0InputKnown)
@@ -311,6 +314,8 @@ int main(int argc, char** argv) {
                 result.trace.operand, result.trace.instructionSize);
     std::printf("bus-accesses=%llu peripheral-status=%s\n", (unsigned long long)result.busAccesses,
                 imx1BootstrapAccessName(result.peripheralStatus));
+    if (options.graphicsProfile != Imx1GraphicsProfile::strict)
+        std::printf("cs5-hclk-total=%llu\n",(unsigned long long)result.cs5WaitClocks);
     if (result.possibleWatchdogTimeoutBoundary)
         std::printf("possible-watchdog-timeout-boundary; elapsed reference interval exhausted, reset/IRQ state unknown, no guest MMIO or CPU delivery\n");
     if (result.elapsedInterruptBoundary) {
