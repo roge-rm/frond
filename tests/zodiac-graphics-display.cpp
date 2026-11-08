@@ -188,6 +188,26 @@ int main() {
         pulse=0x407f0000;assert(waited.access(eim,0x200869f0,0x160104f0,4,true,pulse)==A::ok);
         pulse|=0x80000000u;assert(waited.access(eim,0x200869f0,0x160104f0,4,true,pulse)==A::sideEffect);
         pulse=0;assert(waited.access(eim,0x200869f2,0x160104f0,4,false,pulse)==A::ok && pulse==0x407f0000);
+        // The native getter reads the same retained panel pulse word as the setter.
+        for (uint32_t field : {0u, 1u, 127u, 274u, 364u, 2047u}) {
+            pulse=0x40000000u | (field << 16);
+            assert(waited.access(eim,0x200869f0,0x160104f0,4,true,pulse)==A::ok);
+            const auto revision=waited.displayState().revision();
+            const auto phaseBefore=waited.displayState().scanPhase();
+            const auto framesBefore=waited.displayState().frameNumber();
+            pulse=0xdeadbeef;
+            assert(waited.access(eim,0x20086d12,0x160104f0,4,false,pulse)==A::ok);
+            assert(pulse==(0x40000000u | (field << 16)));
+            assert(waited.displayState().activeWord(0x4f0)==pulse);
+            assert(waited.displayState().revision()==revision);
+            assert(waited.displayState().scanPhase()==phaseBefore);
+            assert(waited.displayState().frameNumber()==framesBefore);
+            assert(waited.access(eim,0x20086d12,0x160104f0,4,true,pulse)==A::externalInput);
+        }
+        pulse=0xdeadbeef;
+        assert(waited.access(eim,0x20086d12,0x160104f0,2,false,pulse)==A::width && pulse==0xdeadbeef);
+        assert(waited.access(eim,0x20086d14,0x160104f0,4,false,pulse)==A::externalInput && pulse==0xdeadbeef);
+        assert(strict.access(eim,0x20086d12,0x160104f0,4,false,pulse)==A::unmapped && pulse==0xdeadbeef);
         partition=waited;reference=waited;
         const auto phase=waited.displayState().scanPhase();
         const Imx1PllRatio bus={128,390625},cpu={64,390625};

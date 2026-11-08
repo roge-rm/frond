@@ -1,0 +1,12 @@
+diff --git a/src/uarm/uarm/imx1_graphics_display.h b/src/uarm/uarm/imx1_graphics_display.h
+--- a/src/uarm/uarm/imx1_graphics_display.h
++++ b/src/uarm/uarm/imx1_graphics_display.h
+@@ -122,7 +122,7 @@
+                 if ((value & ~0x07ff0000u) != ((stagedWord(offset) & 0xf800ffffu) | 0x40000000u)) return A::sideEffect;
+                 staged[index(offset)] = active[index(offset)] = value;
+             } else {
+-                if (pc != 0x200869c8 && pc != 0x200869f2) return A::externalInput;
++                if (pc != 0x200869c8 && pc != 0x200869f2 && pc != 0x20086d12) return A::externalInput;
+                 value = stagedWord(offset);
+             }
+             return A::ok;
