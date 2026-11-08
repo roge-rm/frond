@@ -64,13 +64,126 @@ frond --card verify CARD
 
 SIZE is in MiB for an SD card or a Memory Stick Pro and in MB for a classic stick, within what some device takes. Import takes a raw SD or Pro image, a `.frondms`, or a raw classic stick image (its logical blocks in order, which get fresh boot blocks). The output is a settled card file (`.frondsd`, `.frondmsp` or `.frondms`) or, for export, a raw image; a classic stick exports its logical blocks, or a version 2 `.frondms` when IMAGE ends in `.frondms`. It's written beside OUTPUT and renamed into place, so a failed or cancelled run leaves nothing and an existing file stays. Settle finishes a change cut off beside a card file (below), discard first drops a standalone journal that doesn't fit the card, with its pending list, then settles, and verify checks every byte of one against its CRCs without changing it. Settle and verify also take a machine's `nand.frondnand`. Standard output has `progress DONE/TOTAL` in bytes at each whole percent, then `ok KIND BYTES` (`ok image BYTES` for export, `ok settled GENERATION` for settle and discard, `ok verified GENERATION` for verify) or `error CODE MESSAGE`. The exit status is 0, 1 on failure or 2 on bad use. SIGTERM or SIGINT cancels. Codes: `usage`, `size`, `read`, `image`, `same`, `unsettled` (a machine's save journal beside the card, or a change that doesn't fit it), `busy` (the card is open in Files), `space` (the folder needs the output plus 16 MiB free), `write`, `cancelled`.
 
-Files edits a `.frondsd`, `.frondms` or `.frondmsp` in place, FAT12 or FAT16, and FAT32 is refused. Both apps write each change through the storage library (Android through `libfrondcard.so`) as a standalone journal with a pending list (below), holding an open file description lock on the card file while it's open. Earlier Android versions kept `CARD.files-intent` (the 1 MiB chunks that got data) and `CARD.files-commit` (the change's FAT and folder sectors, chunk CRCs and header) instead; those are still settled. Both kinds are settled before the card is loaded, moved or exported, so the card comes out with the change done (a complete commit or journal is replayed) or not (an intent or pending list alone gets its chunk CRCs and header rewritten). The apps, the core's card loads (a session folder, `--card-swap`, `sd-put-in`) and `frond --card export` and `settle` all settle them the same way. The card's generation moves by one per visit that changes something.
-
-Card journals are `CARD.journal-N`, to generation N, written as journal version 2 (version 1 session journals are still read). A machine's save writes a session journal, replayed only by a load of the `.frond` at N. A standalone journal (its standalone flag set) is replayed whenever the card is settled; one that doesn't match the card's generation is refused with "The card has an unfinished change that doesn't match it." Cards and Files… then offers Discard unfinished change, which does what `frond --card discard` does. A standalone journal is written as `.frondsd.tmp-edit-CARD-XXXXXX` and renamed; a settle removes such temps a crash left. `CARD.journal-N.pending` lists the 1 MiB chunks a standalone change put data into before its journal; with no journal, settling rewrites those chunks' CRCs and the header at N. A v2 card file's header bytes 48-55 hold the size of a side region after the logical sectors, starting at the next 1 MiB boundary and covered by the chunk CRCs; it is 0 for every SD card and Memory Stick Pro. Session version 9 keeps the internal NAND in `nand.frondnand`, the same v2 container with magic `FRONDNA`: the 512 main bytes of each 528 bytes of NAND in page order, then the 16 spare bytes of each in the side region. Its saves journal as `nand.frondnand.journal-N` like a card's, and a load settles them. Version 8 and older sessions load their NAND from the `.frond`, and the next save writes version 9. `--nand` and `save-nand` keep the raw 528-byte page format.
-
-A classic stick's `ms.frondms` is the same container with magic `FRONDMS\0`. Its logical sectors are the stick's logical blocks in order (494 in the first 512-block segment, 496 in each later one), so logical sector = block x pages per block + page. The side region holds the data of physical blocks 0 and 1 (the boot blocks), the 9 extra bytes of every physical page, a 32-bit location per physical block (erased, boot, a logical block or a spare slot) and the spare slots, one per block beyond the logical ones. The block the Sony driver uses for a logical block always sits in its slot; other written blocks go in the spare slots, then in unused logical slots. A 128 MB stick takes 136.6 MB. A version 1 `ms.frondms` (the physical pages with their extra bytes, and a change counter at bytes 32-39) still loads, and its next save writes version 2 at the counter plus one.
+The card files, journals, settle rules and session media are in [Storage formats](#storage-formats).
 
 The desktop launcher `frond-desktop [session]` takes `--core PATH` (the emulator to run, found beside it or in `/usr/lib/frond` by default), `--core-68k PATH` (the same for 68k devices like the Palm IIIx, default `frond-68k` beside the ARM core), `-h` and `-v`.
+
+## Storage formats
+
+Every medium a machine keeps outside its `.frond` is a container file in the machine's folder, written and settled by one library (`src/common/storage/`) that the core, `frond --card`, the desktop app and Android (through `libfrondcard.so`) all use.
+
+| Medium | File | Magic | Side region |
+|---|---|---|---|
+| SD card | `sd.frondsd` | `FRONDSD\0` | none |
+| Memory Stick Pro | `ms.frondmsp` | `FRONDSD\0` | none |
+| Classic Memory Stick | `ms.frondms` | `FRONDMS\0` | boot blocks, extra bytes, location map, spare slots |
+| Internal NAND (T\|X, E2) | `nand.frondnand` | `FRONDNA\0` | spare bytes of every page |
+
+### Container
+
+A 64-byte header, little endian, then the stored bytes, then for version 2 a CRC table.
+
+| Bytes | Version 1 | Version 2 |
+|---|---|---|
+| 0-7 | magic | magic |
+| 8-11 | version 1 | version 2 |
+| 12-15 | sector size, 512 | sector size, 512 |
+| 16-23 | payload bytes | payload bytes |
+| 24-27 | CRC32 of the payload | header CRC: the header with this field zeroed, then the table |
+| 28-35 | zero | content generation |
+| 36-43 | zero | table offset, 64 + stored bytes |
+| 44-47 | zero | chunk size, 1 MiB |
+| 48-55 | zero | side region bytes |
+| 56-63 | zero | zero |
+
+The payload is the medium's logical sectors. With a side region the stored bytes are the payload, zeros to the next 1 MiB boundary, then the side region; without one they're just the payload. The table has one CRC32 per 1 MiB chunk of the stored bytes, the last one short, so the padding and side region are checked too. Only SD and Pro files can be version 1, and the classic stick and NAND magics need version 2 with a side region. Payloads are at most 2 GiB. A load checks the header CRC and every chunk, and refuses the file if one is wrong. The generation goes up by one at every save and every Files visit that changes something.
+
+### Journals
+
+A change is never written straight over a container. `CARD.journal-N` takes the file to generation N:
+
+- Header, 64 bytes: `FRONDJNL`, version u32 (2), flags u32 (bit 0 standalone), stored bytes u64, from generation u64, to generation u64, record count u64, table count u64, 8 zero bytes.
+- Records: stored-bytes offset u64, length u32, the bytes.
+- The whole new chunk table.
+- Trailer, 16 bytes: `FRONDEND`, CRC32 of everything before it, zero u32.
+
+A journal is written as a temp and renamed, so one under its own name is complete. A session journal comes from a machine's save and is replayed only by a load of the `.frond` at N; version 1 journals from older saves are read as session journals. A standalone journal comes from Files and is replayed whenever the card is settled. A save that writes the whole medium (its first save, or a conversion) writes `CARD.journal-N.full` instead, a whole copy at N, which a load of that `.frond` renames into place.
+
+Files writes each change in three steps, holding an open file description lock on the card (which Android's `FileChannel` lock also sees):
+
+1. Before data goes into a chunk, its number goes into `CARD.journal-N.pending` (`FRONDJP1`, stored bytes u64, generation u64, then a u32 per chunk), fsynced. Data only goes into clusters the FAT calls free.
+2. The data is fsynced, then the FAT and folder sectors and the new table go into a standalone journal, written as `.frondsd.tmp-edit-CARD-XXXXXX` and renamed.
+3. The journal is applied in place with the header, then the journal and pending list go.
+
+Earlier Android versions left `CARD.files-intent` and `CARD.files-commit` instead; those are still settled.
+
+### Settle
+
+Settle finishes whatever a crash left beside a container, and runs before every load, move, export, Files visit and `frond --card` command. In order:
+
+1. Old Android `.files-commit` and `.files-intent`.
+2. Standalone journals, replayed at their from or to generation.
+3. Pending lists with no journal: the listed chunks' CRCs and the header are rewritten at N (only free space changed, so the change isn't there). Leftover standalone temps go.
+4. With a `.frond` to load, its save: a session journal or `.full` copy to the generation the `.frond` names. Other journals go once the card is at that generation.
+
+Steps 1-3 take the card's lock, so a card open in Files is left alone (`busy`). Each step is safe to repeat after a crash in it. Settle refuses rather than guesses, and leaves the files as they are:
+
+| Found | Code | Message |
+|---|---|---|
+| A standalone journal of another size or generation | `mismatch` | The card has an unfinished change that doesn't match it. |
+| A pending list of another size | `mismatch` | The same |
+| A pending list or journal beside a header that doesn't parse | `image` | The card file is damaged. |
+| A session journal or `.full` with no `.frond` loading it | `unsettled` | The card has an unfinished save. Open its machine once to finish it. |
+
+Discard unfinished change (Cards and Files in both apps) and `frond --card discard` drop the mismatched journals and pending lists, then settle. A journal name whose generation doesn't fit in 64 bits isn't taken as a journal; a load at the card's generation removes it with the other stale files.
+
+### Classic Memory Stick
+
+A version 2 `ms.frondms` keeps every byte the Sony driver can see. The payload is the logical blocks in order, 494 in the first 512-block segment and 496 in each later one, so logical sector = block x pages per block + page. The side region holds the data of physical blocks 0 and 1 (the boot blocks), the 9 extra bytes of every physical page, a u32 location per physical block (erased, boot, a logical slot or a spare slot) and the spare slots, one block each. The block the driver uses for a logical block, by its holder rule (overwrite bit clear wins, then the higher block), always sits in that logical block's slot. Other written blocks go in the spare slots, then in unused logical slots.
+
+| Size | Blocks | Pages per block | Files formats it as |
+|---|---|---|---|
+| 4 MB | 512 | 16 | FAT12 |
+| 8 MB | 1024 | 16 | FAT12 |
+| 16 MB | 1024 | 32 | FAT12 |
+| 32 MB | 2048 | 32 | FAT12 |
+| 64 MB | 4096 | 32 | FAT12 |
+| 128 MB | 8192 | 32 | FAT16 |
+
+A 128 MB stick takes 136.6 MB. A version 1 `ms.frondms` (the physical pages with their extra bytes, and a change counter at bytes 32-39) still loads, and its next save writes version 2 at the counter plus one.
+
+Files writes a stick as the driver does:
+
+- It opens only a settled stick: each logical block claimed by at most one block, and that block in its slot. Otherwise it asks for the stick to go in the TG50 once.
+- A held logical block is written in place. One nobody holds gets a free block in its segment, searched forward from its home block, with `f8 ff Lhi Llo ff ff ff ff ff` in the extra bytes of every page and zeros in the pages it doesn't write. Blocks in the disabled-block table are never used.
+- A stick with no partition table or boot sector, whose held blocks are all zeros or all 0xff (made by Frond, or mounted once in a TG50 and never formatted), is blank. Files formats it the first time it opens it writable, with the driver's layout: one MBR entry, the boot sector, 1 reserved sector, 2 FATs, 512 root entries, media byte f8, a hidden read-only `MEMSTICK.IND` in the root and the rest of the root zeroed. Read only, it says the stick is blank.
+
+### Internal NAND
+
+The T|X and E2 keep their NAND in `nand.frondnand`: the 512 main bytes of each 528-byte unit in page order as the payload, then the 16 spare bytes of each in the side region (a 2112-byte T|X page is 2048 main and 64 spare, the same split). A NAND is at most 256 MiB raw. Saves journal it like a card, and settle and verify take it. It can't be opened in Files: databases go in and out through Internal. `--nand` and `save-nand` keep the raw 528-byte unit format.
+
+### Session media
+
+From version 7 a `.frond` holds bounded state and a media section describing each container beside it, one 100-byte descriptor per medium (92 bytes in version 7):
+
+| Bytes | Field |
+|---|---|
+| 0-3 | kind: 1 SD, 2 classic stick, 3 Pro, 4 NAND |
+| 4-35 | file name, zero padded |
+| 36-39 | inserted, 0 or 1 |
+| 40-43 | write protected, 0 or 1 |
+| 44-75 | identity, the card's 32 bytes (unused for NAND) |
+| 76-83 | logical bytes (NAND: main bytes) |
+| 84-91 | physical bytes (NAND: raw bytes with spare) |
+| 92-99 | content generation (version 8 on) |
+
+A load settles each file to its descriptor's generation and checks its size and CRCs, and refuses the session if one doesn't match. Version 9 adds kind 4, so the NAND leaves the `.frond`. Version 8 and older sessions load their NAND from the `.frond`, and the next save writes version 9. Every device saves version 9.
+
+### Exported sessions
+
+The desktop's Export writes the machine folder with the NAND packed as `nand.frondnand.gz`: a gzip file (deflate, no name or time) of the whole container. The other files go as they are, settled. A T|X folder of about 160 MB exports at about 43 MB, an E2 at about 9 MB. Android exports a zip, which deflates every file, so its NAND stays `nand.frondnand` inside. Both apps import either.
+
+Unpacking checks the gzip CRC and size, stops at the size the container header describes (a NAND at 256 MiB), then checks every container CRC, writing a temp that is renamed only when all of it is right. A load of a folder with only `nand.frondnand.gz` unpacks it the same way, removing the `.gz` once the plain file is in place.
 
 ## Console commands
 

@@ -13,7 +13,7 @@ Each Palm you run is a machine on the Devices list (Home on Android). Frond work
 - **Hard reset** erases everything on the Palm. **Save first** in its prompt saves the machine before erasing. The T|X and E2 then ask "Erase all data?", press up to erase. The Zire 72 erases at once and starts at calibration.
 - **Reset** (a soft reset) is next to Rotate.
 
-On Linux each machine is a folder, `~/.local/share/frond/sessions/<name>/`, with the session (`<name>.frond`), its settings (`<name>.frond.settings.json`), a lock file, the card files (`sd.frondsd`, `ms.frondms` or `ms.frondmsp`) and, on a device with NAND, its internal NAND (`nand.frondnand`). A machine that was never saved has a `<name>.frond.new` marker instead of the session. Export writes the same folder, so keep the settings with it when you move it. Android keeps the same folders in the app's storage. A machine is locked while it's open, so two windows can't overwrite it.
+On Linux each machine is a folder, `~/.local/share/frond/sessions/<name>/`, with the session (`<name>.frond`), its settings (`<name>.frond.settings.json`), a lock file, the card files (`sd.frondsd`, `ms.frondms` or `ms.frondmsp`) and, on a device with NAND, its internal NAND (`nand.frondnand`). A machine that was never saved has a `<name>.frond.new` marker instead of the session. Export writes the same folder with the NAND packed as `nand.frondnand.gz`, so keep the settings with it when you move it. A T|X exports at about 43 MB though its folder is about 160 MB, and an E2 at about 9 MB against 40 MB. Android exports the folder as a zip, and both apps import either. Android keeps the same folders in the app's storage. A machine is locked while it's open, so two windows can't overwrite it.
 
 The 6 MiB E2 de-NVFS image is imported as Tungsten E2, with 32 MiB RAM by default and no NAND file needed. Its databases live in RAM, so save the session to keep them. The NOR must have the rePalm/Dmitry.GR card header at 0x20000, with the card running to the end of the image. Power and automatic sleep are disabled for this firmware; it stays awake while running.
 
@@ -36,16 +36,16 @@ On Linux the window shows the running machine's controls instead of the list, an
 
 On Android the controls sit in a bar along the top of the running machine. Taps outside it go to the Palm, and the machine keeps running while a menu or sheet is open.
 
-- The bar has back (saves and leaves), the machine's name and engine, then Applications, Card, Sound, Power and the ⋮ menu. Card shows the card's state (in, out, ejected or none) and only appears on devices with a slot. Power only appears where the device has a power key. The keyboard button shows when the infrared keyboard is attached.
+- The bar has back (saves and leaves), the machine's name and engine, then Applications, Storage, Sound, Power and the ⋮ menu. Storage shows the card's state (in, out, ejected or none) on devices with a slot. Power only appears where the device has a power key. The keyboard button shows when the infrared keyboard is attached.
 - ⋮ lists Hold (TG50), Infrared keyboard, Microphone and Network with their state, then Display…, Connections… and Screenshot, then Hide bar, Save a copy… and Emulator log, then Reset and Hard reset…. Rows the device doesn't have are left out. Screenshot saves a PNG of the Palm to Pictures/Frond.
-- Applications, Card, Display and Connections open as a sheet over the bottom of the screen, or at the side in landscape, so the Palm stays in view. Tap outside it or press back to close it. Card Files… opens full screen.
+- Applications, Storage, Display and Connections open as a sheet over the bottom of the screen, or at the side in landscape, so the Palm stays in view. Tap outside it or press back to close it. Files… opens full screen.
 - Display has the display settings, Rotate and Audio. Connections has infrared, Bluetooth, serial, USB HotSync, the debugger and HotSync.
 - Hide bar leaves a small handle at the top edge. Tap it or swipe down on it to bring the bar back. Whether the bar shows is remembered for each machine. In landscape the bar is shorter.
 - Top bar (in Edit settings and the Display sheet) is Auto-hide or Own space. Auto-hide puts the bar over the Palm and hides it after a few seconds without a touch. Own space moves the Palm down to leave room for it, in portrait and landscape. With little room left, the bar goes over the Palm instead.
 
 ### Linux bar and panels
 
-On Linux the bar sits at the top of Frond's window while a machine runs, above a Machine menu with the same rows as ⋮ on Android (Hard reset… is red). The Palm is inside Frond's window under the bar (on X11, and on Wayland through XWayland). Applications, Card, Display and Connections open as a panel at the right of the Palm and the window grows to the right, so the Palm keeps its size. Hide bar leaves a thin strip with a tab at the top, and the choice is remembered for each machine. The Machine menu shows each row's keys. Display has Size, Smooth pixels, Show keyboard and Jog controls (TG50) and Speed (Palm IIIx), which change while the Palm runs. A click on the Palm gives it the keys and a click in a panel takes them back, wherever the pointer is when you type; switching to another window and back keeps the choice. If the Palm's window can't be embedded, it stays in its own window, with the bar and the panels in Frond's window. Ctrl+1 to Ctrl+4 open and close them, and so does the bar button or the panel's ✕.
+On Linux the bar sits at the top of Frond's window while a machine runs, above a Machine menu with the same rows as ⋮ on Android (Hard reset… is red). The Palm is inside Frond's window under the bar (on X11, and on Wayland through XWayland). Applications, Storage, Display and Connections open as a panel at the right of the Palm and the window grows to the right, so the Palm keeps its size. Hide bar leaves a thin strip with a tab at the top, and the choice is remembered for each machine. The Machine menu shows each row's keys. Display has Size, Smooth pixels, Show keyboard and Jog controls (TG50) and Speed (Palm IIIx), which change while the Palm runs. A click on the Palm gives it the keys and a click in a panel takes them back, wherever the pointer is when you type; switching to another window and back keeps the choice. If the Palm's window can't be embedded, it stays in its own window, with the bar and the panels in Frond's window. Ctrl+1 to Ctrl+4 open and close them, and so does the bar button or the panel's ✕.
 
 F11 or the Full screen row in the Machine menu fills the screen. The bar hides after 3 seconds and comes back when the pointer touches the top edge. Panels open over the Palm instead of widening the window.
 
@@ -121,6 +121,8 @@ On Android a game controller presses the Palm's buttons. The d-pad and left stic
 
 The T|X, E2, E3 and Zire 72 take an SD card, the TG50 a Memory Stick. A card is its own thing, kept in the Cards drawer, and sits in one machine at a time. Delete a machine and its card stays in the drawer.
 
+While a machine runs, Storage (the bar button, Ctrl+2 on Linux) lists its card slot, where the device has one, and Internal, the Palm's own databases. Each has Files…, the same file manager, see [Files](#files).
+
 | | T\|X | E2 / E3 | Zire 72 | TG50 |
 |---|---|---|---|---|
 | Card | SD | SD | SD | Memory Stick, Memory Stick Pro |
@@ -136,8 +138,8 @@ Open Cards from the main menu on Linux, or from the home menu on Android. SD car
 
 - **New card** asks for a name, a type and a size. Cards over 128 MB need room for the whole card, with progress and Cancel.
 - **Import card image** takes a raw `.img` (SD or Pro) or a `.frondms`. The type comes from the file, and you're asked when SD and Pro both fit.
-- **Import folder as card** (Linux: a button in the Cards window, Android: the top menu) copies a folder from your computer onto a new card once, with its folders and long names. Pick the folder, then a name, type and size. The smallest size it fits is chosen, and smaller ones show Too small. A folder that is too big for any card, or has names a card can't hold, is refused. It needs mtools on Linux (`sudo apt install mtools`). Classic Memory Sticks aren't offered, since only the Palm writes their file system. Later changes to the folder don't reach the card.
-- The card's menu has Files (not for a classic stick), Rename, Duplicate, Export image, Link to machines, Take out and Delete. Export image writes `.img`, or `.frondms` for a classic stick. Delete asks first and the card's files are lost. Files, Duplicate, Export image, Take out and Delete wait while the card's machine runs. If Files finds an unfinished change that doesn't match the card, it offers to discard that change.
+- **Import folder as card** (Linux: a button in the Cards window, Android: the top menu) copies a folder from your computer onto a new card once, with its folders and long names. Pick the folder, then a name, type and size. The smallest size it fits is chosen, and smaller ones show Too small. A folder that is too big for any card, or has names a card can't hold, is refused. Classic Memory Sticks aren't offered. Later changes to the folder don't reach the card.
+- The card's menu has Files, Rename, Duplicate, Export image, Link to machines, Take out and Delete. Export image writes `.img`, or `.frondms` for a classic stick. Delete asks first and the card's files are lost. Files, Duplicate, Export image, Take out and Delete wait while the card's machine runs. If Files finds an unfinished change that doesn't match the card, it offers **Discard unfinished change**, which drops that change and leaves the card as it was before it.
 - **Link to machines** lets several machines share one card. Only one of them holds it at a time: the others show "Games is in Palm TX". Take it out of one machine and another can take it with Insert.
 - **Take out** puts a card back in the drawer.
 
@@ -145,7 +147,7 @@ In a machine, the SD card or Memory Stick row shows the card's name or No card. 
 
 Duplicating a machine with a card asks what to do with it: Link (the copy shares the card), Copy (a copy of the card) or No card. A machine's Export packs its card, and importing it makes a new card in the drawer.
 
-Controls in the Card panel (Linux) or the Card sheet (Android) (only the ones that fit the state show):
+Card controls in the Storage panel (Linux) or the Storage sheet (Android) (only the ones that fit the state show):
 
 - **Eject** and **Insert** take the card out and put it back.
 - **Export image** (once ejected) writes the card as an image.
@@ -156,7 +158,7 @@ Don't eject or sleep the Palm while an app is writing quickly, as the SD driver 
 
 ### Files
 
-SD cards and Memory Sticks: Files opens the card in a file manager and changes it in place. In Cards it's on the card's menu, for a card in the drawer or in a machine that isn't running, and a card in a running machine shows Files… · In use. For the card of a running machine use Files in the Card panel or sheet: it ejects the card (close files on the Palm first), and closing Files puts it back in, ejected again if it was out before.
+SD cards and Memory Sticks: Files opens the card in a file manager and changes it in place. In Cards it's on the card's menu, for a card in the drawer or in a machine that isn't running, and a card in a running machine shows Files… · In use. For the card of a running machine use Files in the Storage panel or sheet: it ejects the card (close files on the Palm first), and closing Files puts it back in, ejected again if it was out before.
 
 - Open a folder by double-clicking it (tap on Android), go back with Up or the path bar, and jump to `/PALM/Launcher` or `/DCIM`. The top line shows the free space and the card's size.
 - Sort by name, size or date. Select several with Ctrl or Shift, or Select all.
@@ -165,9 +167,11 @@ SD cards and Memory Sticks: Files opens the card in a file manager and changes i
 - **Cut**, **Copy** and **Paste** move or copy on the card. **Rename**, **New folder** and **Delete** (it asks first) work as usual.
 - When a name is already there you pick Replace, Skip or Keep both, with For all for the rest. Long jobs show progress with Cancel.
 - Each change is written as you make it, and only what it touches. If Frond is stopped part way, the card is fixed the next time it's opened, with the change done or not.
-- A write protected card can be browsed and exported only. While a card is open in Files it can't be moved, taken out or deleted. Cards for Files are FAT16, 32 MB and up.
+- A write protected card can be browsed and exported only. While a card is open in Files it can't be moved, taken out or deleted. Files reads and writes FAT12 and FAT16, and refuses a FAT32 card.
 
-A classic Memory Stick opens in Files only when its last write is finished; if not, put it in the TG50 once. A blank stick is formatted the way the TG50 does it the first time Files opens it.
+A classic Memory Stick opens in Files only when its last write is finished; if not, put it in the TG50 once. A blank stick, new or put in a TG50 but never formatted, is formatted the way the TG50 does it the first time Files opens it.
+
+Internal lists the databases in the Palm's RAM by file name, with their type and creator, while the machine runs. Add files installs PRC and PDB files (on Linux a dropped folder installs the files in it), Export… writes the selected databases to a folder as PRC and PDB files, and Delete removes them. There are no folders, so Add folder, Cut, Copy, Paste, Rename and New folder aren't there. As in Applications, the Palm refuses a database that is open or in ROM.
 
 ## Connections
 
