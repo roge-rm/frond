@@ -57,8 +57,8 @@ int main() {
     assert(state.dmaResetRemainingHclk() == 1 && read(0) == 1);
     state.advanceHclkCycles(1);
     assert(state.dmaResetRemainingHclk() == 0 && read(8) == 0x7ff && read(0x1c) == 0xffff);
-    // No channel, 2D surface or transfer state is admitted by this startup model.
-    for (auto offset : {0x20u,0x40u,0x80u,0x8cu,0x1ccu}) {
+    // 2D surfaces and unimplemented per-channel words remain guarded.
+    for (auto offset : {0x20u,0x40u,0x9cu,0x1dcu}) {
         value = 0xdeadbeef;
         assert(state.access(0x00209000+offset,4,false,value) == A::unmapped && value == 0xdeadbeef);
         assert(state.access(0x00209000+offset,4,true,value) == A::unmapped);
@@ -80,7 +80,7 @@ int main() {
     }
     const uint32_t program[]{0xe59f0038,0xe3a01002,0xe5801000,0xe3a01001,0xe5801000,
         0xe5902008,0xe59f1024,0xe1822001,0xe5802008,0xe590301c,0xe59f1018,
-        0xe1833001,0xe580301c,0xe5904000,0xe5905008,0xe5801080,
+        0xe1833001,0xe580301c,0xe5904000,0xe5905008,0xe580109c,
         0x00209000,0x7ff,0xffff};
     std::vector<uint8_t> rom(sizeof(program));
     std::memcpy(rom.data(),program,sizeof(program));
@@ -91,7 +91,7 @@ int main() {
         results[fast] = imx1BootProbe(rom.data(),rom.size(),Imx1ProbeEntry::physicalFlash,
                                       32,nullptr,nullptr,fast,&options);
         const auto& result = results[fast];
-        assert(result.stop == Imx1ProbeStop::unsupportedWrite && result.address == 0x00209080);
+        assert(result.stop == Imx1ProbeStop::unsupportedWrite && result.address == 0x0020909c);
         assert(result.registers[2] == 0x7ff && result.registers[3] == 0xffff &&
                result.registers[4] == 1 && result.registers[5] == 0x7ff);
     }

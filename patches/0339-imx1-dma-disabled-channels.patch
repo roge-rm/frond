@@ -1,0 +1,73 @@
+diff --git a/src/uarm/uarm/imx1_bootstrap.cpp b/src/uarm/uarm/imx1_bootstrap.cpp
+--- a/src/uarm/uarm/imx1_bootstrap.cpp
++++ b/src/uarm/uarm/imx1_bootstrap.cpp
+@@ -86,7 +86,7 @@
+         if (output != Imx1GpioLine::unknown) known |= bit;
+         if (output == Imx1GpioLine::asserted) asserted |= bit;
+     }
+-    // All DMA channels remain reset; channel configuration and transfers are guarded.
++    // Disabled channel configuration cannot produce a completion or error.
+     known |= (uint64_t(1) << 60) | (uint64_t(1) << 61);
+     controller.setInputs(asserted, known);
+ }
+@@ -190,6 +190,12 @@
+ }
+ 
+ const char* Imx1Bootstrap::registerName(uint32_t address) {
++    if (address >= 0x00209080 && address < 0x00209340 && !(address & 3)) {
++        static constexpr const char* names[]{"DMA.SAR", "DMA.DAR", "DMA.CNTR", "DMA.CCR",
++                                             "DMA.RSSR", "DMA.BLR", "DMA.RTOR_BUCR"};
++        const auto word = ((address - 0x00209080) & 0x3f) / 4;
++        if (word < 7) return names[word];
++    }
+     if (address >= 0x00300000 && address < 0x00400000) return "SRAM";
+     if (const auto* name = Imx1Rtc::registerName(address)) return name;
+     if (const auto* name = Imx1I2c::registerName(address)) return name;
+@@ -232,6 +238,7 @@
+                     // DRST clears owned global state and holds reset for three HCLKs.
+                     dmaControl = 0; dmaMask = 0x7ff; dmaBurstTimeout = 0;
+                     dmaResetClocks = 3;
++                    for (auto& channel : dmaChannels) for (auto& word : channel) word = 0;
+                 } else dmaControl = value;
+             } else value = dmaControl;
+             return Imx1BootstrapAccess::ok;
+@@ -243,6 +250,28 @@
+             else if (offset == 0x1c) dmaBurstTimeout = value;
+             // W1C status stays clear while every channel is disabled.
+         } else value = offset == 8 ? dmaMask : offset == 0x1c ? dmaBurstTimeout : 0;
++        return Imx1BootstrapAccess::ok;
++    }
++    if (address >= 0x00209080 && address < 0x00209340) {
++        if (size != 4 || (address & 3)) return Imx1BootstrapAccess::width;
++        const auto offset = address - 0x00209080;
++        const auto word = (offset & 0x3f) / 4;
++        if (word >= 7) return Imx1BootstrapAccess::unmapped;
++        auto& channel = dmaChannels[offset / 0x40];
++        if (write) {
++            static constexpr uint32_t masks[]{0xffffffff,0xffffffff,0xffffff,0x3fff,0x1f,0x3f,0xffff};
++            if (value & ~masks[word]) return Imx1BootstrapAccess::reservedBits;
++            if (word == 3) {
++                // CEN and FRC would start work; only disabled channel configuration is admitted.
++                if (value & 3) return Imx1BootstrapAccess::sideEffect;
++                const auto source = (value >> 10) & 3, destination = (value >> 12) & 3;
++                if (((value >> 4) & 3) == 3 || ((value >> 6) & 3) == 3 ||
++                    destination == 3 || source == 3)
++                    return Imx1BootstrapAccess::sideEffect;
++            }
++            // The selected probe is little endian; both DMA address registers are word aligned.
++            channel[word] = word < 2 ? value & ~3u : value;
++        } else value = channel[word];
+         return Imx1BootstrapAccess::ok;
+     }
+     if ((address & ~3u) == 0x00206080 || (address & ~3u) == 0x00207080) {
+diff --git a/src/uarm/uarm/imx1_bootstrap.h b/src/uarm/uarm/imx1_bootstrap.h
+--- a/src/uarm/uarm/imx1_bootstrap.h
++++ b/src/uarm/uarm/imx1_bootstrap.h
+@@ -131,6 +131,7 @@
+     uint32_t uartControl1[2] = {4, 4};
+     uint32_t dmaControl = 0, dmaMask = 0x7ff, dmaBurstTimeout = 0;
+     uint32_t dmaResetClocks = 0;
++    uint32_t dmaChannels[11][7] = {};
+     struct Sdram {
+         uint32_t control = 0x01000300, bytes = 0;
+         bool controlKnown = false;
