@@ -23,6 +23,7 @@ enum class MsgType : uint8_t {
     State = 9,    // u8 PeerState
     Ping = 10,    // u64 sender's clock in ms
     Pong = 11,    // the ping's u64 echoed
+    Radio = 12,   // u8 side, u64 when chosen: whose radio Bluetooth uses on this link
 };
 
 enum class ChannelKind : uint8_t { Infrared = 1, Serial = 2, Bluetooth = 3 };
@@ -69,5 +70,14 @@ struct MachineBody {
 };
 Bytes encodeMachine(const MachineBody& m);
 bool decodeMachine(const Bytes& p, MachineBody& out);
+
+// Which side's radio carries Bluetooth on a link, as the sender sees it. 'at' is when someone
+// chose it, ms since 1970, 0 if nobody has; the later choice wins and both sides keep it.
+struct RadioBody {
+    bool senderHolds = false;
+    uint64_t at = 0;
+};
+Bytes encodeRadio(const RadioBody& r);
+bool decodeRadio(const Bytes& p, RadioBody& out);
 
 }  // namespace frond::link

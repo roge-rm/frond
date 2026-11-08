@@ -177,6 +177,12 @@ void Link::handleLinkMessage(const Message& m, uint64_t now) {
             unanswered_ = 0;
             return;
         }
+        case MsgType::Radio: {
+            RadioBody r;
+            if (state_ != LinkState::Up || !decodeRadio(m.payload, r)) return fail(LinkError::Protocol);
+            radio.push_back(r);
+            return;
+        }
         case MsgType::Close: {
             uint8_t why = m.payload.empty() ? 0 : m.payload[0];
             return fail(why == uint8_t(CloseReason::Version) ? LinkError::Version : LinkError::Closed);
@@ -214,6 +220,11 @@ Bytes Link::takeOutput(size_t max) {
     Message m;
     while (o.size() < max && mux_.next(m)) writeRecord(m, o);
     return o;
+}
+
+void Link::sendRadio(const RadioBody& r) {
+    if (state_ != LinkState::Up) return;
+    mux_.queueControl({MsgType::Radio, 0, encodeRadio(r)});
 }
 
 void Link::close(CloseReason reason) {

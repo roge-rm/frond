@@ -487,6 +487,27 @@ static void testLinkBasics() {
     CHECK(p.b->state() == LinkState::Down && p.b->error() == LinkError::Closed);
 }
 
+// The Bluetooth radio choice: both ways once up, refused before, bad bodies drop the link.
+static void testRadio() {
+    Pair p;
+    p.a->sendRadio({true, 123});  // not up yet: nothing goes
+    p.up();
+    CHECK(p.a->state() == LinkState::Up && p.b->radio.empty());
+    p.a->sendRadio({true, 1700000000000ull});
+    p.b->sendRadio({false, 5});
+    pump(*p.a, *p.b, p.now);
+    CHECK(p.b->radio.size() == 1 && p.b->radio[0].senderHolds && p.b->radio[0].at == 1700000000000ull);
+    CHECK(p.a->radio.size() == 1 && !p.a->radio[0].senderHolds && p.a->radio[0].at == 5);
+    CHECK(p.a->state() == LinkState::Up && p.b->state() == LinkState::Up);
+    RadioBody r;
+    CHECK(!decodeRadio(Bytes{2, 0, 0, 0, 0, 0, 0, 0, 0}, r));
+    CHECK(!decodeRadio(Bytes{0, 0, 0}, r));
+    CHECK(decodeRadio(encodeRadio({false, 9}), r) && !r.senderHolds && r.at == 9);
+    // A radio message on a channel instead of the link is a protocol error.
+    Message m{MsgType::Radio, 1, encodeRadio({true, 1})};
+    CHECK(!p.b->mux().receive(m));
+}
+
 static void testTamperReplayReorder() {
     for (int mode = 0; mode < 3; mode++) {
         Pair p;
@@ -732,6 +753,7 @@ int main() {
         {"vectors cpace", testCpace},
         {"pairing: code, wrong code, lockout, expiry", testPairing},
         {"link: channels, ping, close", testLinkBasics},
+        {"link: bluetooth radio choice", testRadio},
         {"link: tamper, replay, reorder", testTamperReplayReorder},
         {"link: key change refused", testKeyChange},
         {"link: version refuse", testVersion},

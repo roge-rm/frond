@@ -80,6 +80,9 @@ public:
 
     // Channels: usable once state() is Up.
     Mux& mux() { return mux_; }
+    // The Bluetooth radio choice, once Up. What the peer sends lands in radio, oldest first.
+    void sendRadio(const RadioBody& r);
+    std::deque<RadioBody> radio;
 
 private:
     void fail(LinkError e, bool refuse = false, RefuseReason why = RefuseReason::Protocol);
