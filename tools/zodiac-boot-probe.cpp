@@ -75,9 +75,11 @@ static void cs4(void*, const Imx1ProbeCs4Event& event) {
     const char* operation = event.address == 0x15000000 ?
         (event.write ? "index-write" : "raw-port0-input") : event.address == 0x15000001 ?
         (event.write ? "data-command" : "data-read") : "unmapped";
-    std::printf("cs4-capture step=%u pc=%08x operation=%s address=%08x size=%u value=%02x index=%s bank=%s status=%s source=diagnostic-recorder\n",
+    const bool indexedSample = !event.write && event.address == 0x15000001 && event.status == Imx1BootstrapAccess::ok;
+    if (indexedSample) operation = "raw-indexed-input";
+    std::printf("cs4-capture step=%u pc=%08x operation=%s address=%08x size=%u value=%02x index=%s bank=%s status=%s source=%s\n",
                 event.step, event.pc, operation, event.address, event.size, event.value, index, bank,
-                imx1BootstrapAccessName(event.status));
+                imx1BootstrapAccessName(event.status), indexedSample ? "diagnostic-indexed-input" : "diagnostic-recorder");
 }
 
 static void i2c(void*, const Imx1ProbeI2cEvent& event) {
@@ -91,6 +93,19 @@ static void interrupt(void*, const Imx1ProbeInterrupt& event) {
     std::printf("interrupt step=%u interrupted-pc=%08x cpsr=%08x vector=%08x link=%08x type=%s normal-pending=%016llx fast-pending=%016llx\n",
                 event.step, event.interruptedPc, event.cpsr, event.vector, event.link, event.fiq ? "fiq" : "irq",
                 (unsigned long long)event.pending.normal, (unsigned long long)event.pending.fast);
+}
+static bool parseCs4IndexedInput(const char* text, Imx1Cs4IndexedInputs& inputs) {
+    uint32_t fields[3]{};
+    for (unsigned i = 0; i < 3; ++i) {
+        if (*text < '0' || *text > '9') return false;
+        errno = 0;
+        char* end = nullptr;
+        const auto value = std::strtoul(text, &end, 0);
+        if (errno || value > (i ? 255u : 1u) || *end != (i == 2 ? '\0' : '/')) return false;
+        fields[i] = uint32_t(value);
+        text = end + (i != 2);
+    }
+    return inputs.set(fields[0], fields[1], fields[2]);
 }
 static bool parseRtcTime(const char* text, Imx1RtcTime& time) {
     uint32_t fields[4]{};
@@ -108,7 +123,7 @@ static bool parseRtcTime(const char* text, Imx1RtcTime& time) {
 }
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::fprintf(stderr, "Usage: %s ROM [physical|reset|linked] [instruction-budget] [exact|fast] [--bootstrap-peripherals] [--trace=peripherals] [--arm920-icache-index-compatibility] [--lcdc-contrast-only] [--frame-output=PATH] [--assume-mpll-settled] [--assume-spll-settled] [--assume-i2c-single-master] [--i2c-eeprom-image=PATH] [--asp-px1-input=high] [--asp-u-sample=WORD] [--rtc-initial-time=DAY:HH:MM:SS] [--cs4-port0-input=BYTE] [--cs5-reset-status-input=BYTE] [--graphics-profile=virtual5744-compatible-8mib] [--graphics-raw-axes=FIRST/SECOND] [--graphics-irq-connection=virtual-a13] [--gpio-a-input-masked=VALUE/MASK] [--gpio-a-input=VALUE] [--gpio-b-input=VALUE] [--gpio-d-input=VALUE] [--ram-mib=32|128]\n", argv[0]);
+        std::fprintf(stderr, "Usage: %s ROM [physical|reset|linked] [instruction-budget] [exact|fast] [--bootstrap-peripherals] [--trace=peripherals] [--arm920-icache-index-compatibility] [--lcdc-contrast-only] [--frame-output=PATH] [--assume-mpll-settled] [--assume-spll-settled] [--assume-i2c-single-master] [--i2c-eeprom-image=PATH] [--asp-px1-input=high] [--asp-u-sample=WORD] [--rtc-initial-time=DAY:HH:MM:SS] [--cs4-port0-input=BYTE] [--cs4-indexed-input=BANK/INDEX/BYTE] [--cs5-reset-status-input=BYTE] [--graphics-profile=virtual5744-compatible-8mib] [--graphics-raw-axes=FIRST/SECOND] [--graphics-irq-connection=virtual-a13] [--gpio-a-input-masked=VALUE/MASK] [--gpio-a-input=VALUE] [--gpio-b-input=VALUE] [--gpio-d-input=VALUE] [--ram-mib=32|128]\n", argv[0]);
         return 1;
     }
     const char* engine = argc >= 5 ? argv[4] : "exact";
@@ -201,6 +216,11 @@ int main(int argc, char** argv) {
             options.cs4Port0InputKnown = true;
             options.cs4Port0Input = value;
         }
+        else if (!std::strncmp(argv[i], "--cs4-indexed-input=", 20)) {
+            if (!parseCs4IndexedInput(argv[i] + 20, options.cs4IndexedInputs)) {
+                std::fprintf(stderr, "Supply unique --cs4-indexed-input=BANK/INDEX/BYTE (bank 0..1, bytes 0..255)\n"); return 1;
+            }
+        }
         else if (!std::strncmp(argv[i], "--cs5-reset-status-input=", 25)) {
             char* end = nullptr;
             errno = 0;
@@ -275,6 +295,9 @@ int main(int argc, char** argv) {
     }
     if ((options.aspUSampleKnown || options.cs5ResetStatusInputKnown || options.rtcInitialTimeKnown || options.cs4Port0InputKnown || options.aspPx1HighFromReset || options.gpioAInputKnown || options.gpioAInputMaskedKnown || options.gpioBInputKnown || options.gpioDInputKnown || options.ramMiB) && !options.bootstrapPeripherals) {
         std::fprintf(stderr, "External-input scenarios require --bootstrap-peripherals\n"); return 1;
+    }
+    if (!options.cs4IndexedInputs.empty() && (!options.bootstrapPeripherals || !options.cs4Port0InputKnown)) {
+        std::fprintf(stderr, "CS4 indexed inputs require --bootstrap-peripherals and --cs4-port0-input\n"); return 1;
     }
     if (options.assumeMpllSettled && !options.bootstrapPeripherals) {
         std::fprintf(stderr, "MPLL scenario requires --bootstrap-peripherals\n"); return 1;
@@ -361,7 +384,11 @@ int main(int argc, char** argv) {
         if (options.cs5ResetStatusInputKnown)
             std::printf("DIAGNOSTIC CS5 RESET: opaque status input=%02x is caller-supplied and unqualified; bit3 echoes reset-helper writes immediately; other bits, chip reset effects and timing are unmodelled. Configured virtual REG_BASE=01 selects +10000; exact CPU_DEFAULTS=0e is recorded; full identity/revision words remain unknown.\n", options.cs5ResetStatusInput);
         if (options.cs4Port0InputKnown)
-            std::printf("DIAGNOSTIC CS4 RECORDER: raw port0 input=%02x is caller-supplied and unqualified; writes are captured; physical read side effects, audio, FIFO and timing are unmodelled; data reads stop.\n", options.cs4Port0Input);
+            std::printf("DIAGNOSTIC CS4 RECORDER: raw port0 input=%02x is caller-supplied and unqualified; writes are captured; physical read side effects, audio, FIFO and timing are unmodelled; %sdata reads stop.\n", options.cs4Port0Input, options.cs4IndexedInputs.empty() ? "" : "unsupplied ");
+        for (int bank = 0; bank < 2; ++bank) for (int index = 0; index < 256; ++index) {
+            const int sample = options.cs4IndexedInputs.sample(bank, index);
+            if (sample >= 0) std::printf("DIAGNOSTIC CS4 INDEXED INPUT: bank=%d index=%02x byte=%02x; fixed caller sample, no register/read-side-effect model; writes do not update it.\n", bank, index, sample);
+        }
         if (options.aspPx1HighFromReset)
             std::puts("Diagnostic ASP PX1 input held high from reset; no transitions; physical voltage and ADC samples unqualified.");
         else std::puts("External ASP PX1 level and history are unknown.");

@@ -43,11 +43,11 @@ def main(bus_checks=None):
             assert p.returncode == code, (options, p.returncode, p.stdout, p.stderr)
             return p.stdout + p.stderr
 
-        for budget in ('0','50000001','4294967296'):
+        for budget in ('0','100000001','4294967296'):
             p=subprocess.run([str(PROBE),str(path),'linked',budget,'exact'],capture_output=True,text=True,timeout=15)
-            assert p.returncode==1 and 'Instruction budget must be 1..50000000' in p.stderr,(budget,p.stdout,p.stderr)
-        p=subprocess.run([str(PROBE),str(path),'linked','50000000','exact'],capture_output=True,text=True,timeout=15)
-        assert p.returncode==2 and 'budget=50000000' in p.stdout,(p.stdout,p.stderr)
+            assert p.returncode==1 and 'Instruction budget must be 1..100000000' in p.stderr,(budget,p.stdout,p.stderr)
+        p=subprocess.run([str(PROBE),str(path),'linked','100000000','exact'],capture_output=True,text=True,timeout=15)
+        assert p.returncode==2 and 'budget=100000000' in p.stdout,(p.stdout,p.stderr)
         profile = '--graphics-profile=virtual5744-compatible-8mib'
         bootstrap = '--bootstrap-peripherals'
         assert 'Graphics profile requires' in run(profile)

@@ -33,8 +33,8 @@ def main():
         path = Path(work) / 'synthetic.rom'
         path.write_bytes(rom)
 
-        def run(*options, code=1):
-            result = subprocess.run([str(PROBE), str(path), 'physical', '100', 'exact', *options],
+        def run(*options, code=1, engine="exact", budget="100"):
+            result = subprocess.run([str(PROBE), str(path), 'physical', budget, engine, *options],
                                     capture_output=True, text=True, timeout=15)
             assert result.returncode == code, (options, result.returncode, result.stdout, result.stderr)
             return result.stdout + result.stderr
@@ -47,6 +47,11 @@ def main():
             assert 'Supply one 8-bit --cs4-port0-input value' in run(bootstrap, supplied + bad)
         assert 'Supply one 8-bit --cs4-port0-input value' in run(bootstrap, supplied + '0', supplied + '255')
         assert 'Unknown diagnostic option:' in run(bootstrap, '--cs4-port0-input')
+        for budget in ('0', '100000001', '4294967296'):
+            assert 'Instruction budget must be 1..100000000' in run(bootstrap, budget=budget)
+        # The maximum parses, but the unsupplied data read stops this fixture promptly.
+        capped = run(bootstrap, supplied + '0', code=2, budget='100000000')
+        assert 'budget=100000000' in capped and 'stop=unsupported-peripheral' in capped
         normal = run(bootstrap, code=2)
         assert 'cs4-capture ' not in normal and 'DIAGNOSTIC CS4 RECORDER' not in normal
         assert 'stop=unsupported-write' in normal
@@ -73,10 +78,41 @@ def main():
             assert 'source=diagnostic-cs4-capture' in output
             assert 'stop=unsupported-peripheral' in output and 'r3=00000000' in output
             assert 'r2=' + ('000000ff' if byte == '0xff' else '00000000') in output
+        indexed = '--cs4-indexed-input='
+        error = 'Supply unique --cs4-indexed-input=BANK/INDEX/BYTE'
+        for bad in ('', '1', '1/14', '1/14/', '/14/0', '2/14/0', '1/256/0', '1/14/256',
+                    '-1/14/0', '+1/14/0', '1/-1/0', '1/14/+1', ' 1/14/0', '1/14/0 ',
+                    '1/14/0/1', '1//0', '1/0x/0', '1/14/1.5', '1/14/18446744073709551616'):
+            assert error in run(bootstrap, supplied + '0', indexed + bad)
+        assert error in run(bootstrap, supplied + '0', indexed + '1/14/0', indexed + '1/0x0e/3')
+        for options in ((indexed + '1/14/0',), (bootstrap, indexed + '1/14/0')):
+            assert 'CS4 indexed inputs require' in run(*options)
+        assert 'Unknown diagnostic option:' in run(bootstrap, '--cs4-indexed-input')
+
+        # Native init compares index 0e with 3; other bytes take its ordinary -2 failure path.
+        words = [0xe59f0100, 0xe59f1100, 0xe5801000, 0xe59f10fc, 0xe5801004, 0xe59f00f8,
+                 0xe3a0100f, 0xe5c01000, 0xe3a01001, 0xe5c01001,
+                 0xe3a0100e, 0xe5c01000, 0xe5d04001, 0xe3540003, 0x13e05001, 0x03a05000,
+                 0xe3a06000, 0xe3550000, 0x03a06001, 0xeafffffe]
+        struct.pack_into(f'<{len(words)}I', rom, 0x100, *words)
+        path.write_bytes(rom)
+        for engine in ('exact', 'fast'):
+            guarded = run(bootstrap, supplied + '0', code=2, engine=engine)
+            assert 'status=external-input-unavailable' in guarded and 'stop=unsupported-peripheral' in guarded
+            for byte in (0, 3, 255):
+                output = run(bootstrap, supplied + '0', indexed + f'1/0x0e/{byte}',
+                             indexed + '0/14/42', code=2, engine=engine)
+                assert 'stop=instruction-budget' in output, output
+                assert f'r4={byte:08x} r5=' + ('00000000' if byte == 3 else 'fffffffe') in output
+                assert 'r6=' + ('00000001' if byte == 3 else '00000000') in output
+                assert f'operation=raw-indexed-input address=15000001 size=1 value={byte:02x} index=0e bank=1 status=ok source=diagnostic-indexed-input' in output
+                assert f'DIAGNOSTIC CS4 INDEXED INPUT: bank=1 index=0e byte={byte:02x}' in output
+            unknown = run(bootstrap, supplied + '0', indexed + '0/14/3', code=2, engine=engine)
+            assert 'stop=unsupported-peripheral' in unknown and 'status=external-input-unavailable' in unknown
         expected = [('01', '0f', '1', 'ok'), ('0d', '0d', '1', 'ok'),
                     ('03', '49', '1', 'ok'), ('00', '48', '1', 'ok')]
         assert commands[0] == commands[1] == expected, commands
-    print('PASS: default CS4 stop, explicit byte parsing, four startup pairs, raw sample independence, trace PCs and guarded data reads')
+    print('PASS: default CS4 stop, explicit byte parsing, four startup pairs, raw sample independence, trace PCs, guarded data reads and explicit banked input branches')
 
 
 if __name__ == '__main__':
