@@ -1,0 +1,357 @@
+diff --git a/src/uarm/uarm/CPU.cpp b/src/uarm/uarm/CPU.cpp
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -174,6 +174,7 @@
+     uint32_t paceOffset;
+     bool modePace;
+     bool sleeping;
++    bool arm920WaitEnabled, arm920Waiting;
+ 
+     struct stub *debugStub;
+     struct PatchDispatch *patchDispatch;
+@@ -3554,6 +3555,7 @@
+ }
+ 
+ void cpuReset(struct ArmCpu *cpu, uint32_t pc) {
++    cpu->arm920Waiting = false;
+     cpu->exceptionSequence = 0;
+ #ifndef __EMSCRIPTEN__
+     cpuClearNativeRuntime(cpu);
+@@ -4780,6 +4782,7 @@
+ #endif
+ 
+ bool cpuProcessPendingInterrupts(struct ArmCpu* cpu) {
++    if (cpu->arm920Waiting) return false;
+     if (cpu->waitingFiqs && !cpu->F) {
+         cpuPrvException(cpu, cpu->vectorBase + ARM_VECTOR_OFFT_FIQ, cpu->regs[REG_NO_PC] + 4,
+                         ARM_SR_MODE_FIQ | ARM_SR_I | ARM_SR_F);
+@@ -4795,6 +4798,7 @@
+ 
+ template <int memorySystemKind, bool injected>
+ ATTR_EMCC_NOINLINE uint32_t cpuCycle(struct ArmCpu *cpu, uint32_t cycles) {
++    if (cpu->arm920Waiting) return 0;
+     cpuProcessPendingInterrupts(cpu);
+ 
+     if (cpu->memorySystemKind == ARM_MEMORY_SYSTEM_MMU) {
+@@ -4849,6 +4853,7 @@
+ }
+ 
+ uint32_t cpuCyclePure(struct ArmCpu *cpu) {
++    if (cpu->arm920Waiting) return 0;
+     cpuClearSlowPath(cpu, SLOW_PATH_REASON_INSTRUCTION_SET_CHANGE | SLOW_PATH_REASON_RESCHEDULE |
+                               SLOW_PATH_REASON_PACE_SYSCALL_BREAK |
+                               SLOW_PATH_REASON_INJECTED_CALL_DONE);
+@@ -4936,6 +4941,16 @@
+ uint16_t cpuGetCPAR(struct ArmCpu *cpu) { return cpu->CPAR; }
+ 
+ void cpuSetCPAR(struct ArmCpu *cpu, uint16_t cpar) { cpu->CPAR = cpar; }
++
++void cpuArm920EnableWait(ArmCpu* cpu) { cpu->arm920WaitEnabled = true; }
++bool cpuArm920BeginWait(ArmCpu* cpu) {
++    if (!cpu->arm920WaitEnabled) return false;
++    cpu->arm920Waiting = true;
++    cpuSetSlowPath(cpu, SLOW_PATH_REASON_RESCHEDULE);
++    return true;
++}
++bool cpuArm920Waiting(const ArmCpu* cpu) { return cpu->arm920Waiting; }
++void cpuArm920EndWait(ArmCpu* cpu) { cpu->arm920Waiting = false; }
+ 
+ void cpuSetSleeping(struct ArmCpu *cpu) {
+     cpu->sleeping = true;
+diff --git a/src/uarm/uarm/CPU.h b/src/uarm/uarm/CPU.h
+--- a/src/uarm/uarm/CPU.h
++++ b/src/uarm/uarm/CPU.h
+@@ -156,6 +156,10 @@
+ 
+ // Take one unmasked interrupt at this boundary, without fetching or executing an instruction.
+ bool cpuProcessPendingInterrupts(struct ArmCpu* cpu);
++void cpuArm920EnableWait(ArmCpu*);
++bool cpuArm920BeginWait(ArmCpu*);
++bool cpuArm920Waiting(const ArmCpu*);
++void cpuArm920EndWait(ArmCpu*);
+ void cpuIrq(struct ArmCpu *cpu, bool fiq, bool raise);  // unraise when acknowledged
+ 
+ uint32_t cpuGetRegExternal(struct ArmCpu *cpu, uint_fast8_t reg);
+diff --git a/src/uarm/uarm/cp15mmu.cpp b/src/uarm/uarm/cp15mmu.cpp
+--- a/src/uarm/uarm/cp15mmu.cpp
++++ b/src/uarm/uarm/cp15mmu.cpp
+@@ -147,6 +147,10 @@
+             if (val & 31) return false;
+             icacheInvalAddr(cp15->ic, val);
+             return true;
++        }
++        if (CRn == 7 && CRm == 0 && op2 == 4) {
++            // DDI0151C 4.9: drain before waiting; only an attached scheduler admits WFI.
++            return !cp15->dataCache.guard.active && cpuArm920BeginWait(cpu);
+         }
+         if (CRn == 7 && CRm == 10 && op2 == 4) {
+             // DDI0151C SBZ violations are UNPREDICTABLE; drain ignores the operand in this model.
+diff --git a/src/uarm/uarm/imx1_boot_probe.cpp b/src/uarm/uarm/imx1_boot_probe.cpp
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -64,6 +64,14 @@
+         return acceptGraphics(candidate, true);
+     }
+     Imx1BootstrapAccess graphicsWireStatus = Imx1BootstrapAccess::ok;
++    bool idleWakePossible() const {
++        if (peripherals.idleWakePossible()) return true;
++        // Preview the connected display request through GPIO and AITC without driving a pin.
++        return options.graphicsIrqA13 && cs5Configuration.clockState().programmed() &&
++            cs5Configuration.displayState().lcdEnabled() &&
++            (cs5Configuration.interruptState().enableValue() & Imx1GraphicsInterrupts::displayMask) &&
++            peripherals.gpioWakePossible(0, 0, 0x2000);
++    }
+     void updateInterrupts() {
+         const auto lines = peripherals.interruptLines();
+         const bool irq = lines.irq == Imx1AitcLine::asserted;
+@@ -551,6 +559,7 @@
+     p->cpu = cpuInit(p->alias, mem, ARM_MEMORY_SYSTEM_MMU, false, false, -1, 0, 0,
+                      patches, pace, createSystemState(), ArmCpuModel::arm920t, true);
+     patchDispatchSetCpu(patches, p->cpu);
++    if (p->options.bootstrapPeripherals) cpuArm920EnableWait(p->cpu);
+     cpuArm920SetMemoryCheck(p->cpu, Probe::cacheMemoryCheck, p);
+     cpuArm920SetIcacheIndexCompatibility(p->cpu, p->options.arm920IcacheIndexCompatibility);
+     p->result.stop = Imx1ProbeStop::budget;
+@@ -559,6 +568,39 @@
+     struct InterruptedContext { uint32_t pc, cpsr, mode; bool prefix; uint32_t nextPc; };
+     std::vector<InterruptedContext> interruptedContexts;
+     for (uint32_t step = 0; step < steps; ++step) {
++        if (p->options.bootstrapPeripherals &&
++            (cpuArm920Waiting(p->cpu) || !p->peripherals.mcuEnabled() || p->peripherals.mcuWakePending())) {
++            bool wake = p->peripherals.wakeMcuFromInterrupt();
++            while (cpuArm920Waiting(p->cpu) && (!wake || p->peripherals.mcuWakePending())) {
++                if (!wake && !p->idleWakePossible()) {
++                    p->result.stop = Imx1ProbeStop::idleNoWake;
++                    break;
++                }
++                if (p->result.idleHclk == p->options.idleHclkBudget) { p->result.stop = Imx1ProbeStop::idleBudget; break; }
++                // One HCLK preserves event ordering, including requests already high at entry.
++                const auto period = p->peripherals.busReferencePeriod();
++                p->peripherals.advanceHclkCycles(1);
++                auto candidate = p->cs5Configuration;
++                if (!candidate.referencePeriodSupported(period)) {
++                    p->result.stop = Imx1ProbeStop::unsupportedPeripheral;
++                    p->result.peripheralStatus = Imx1BootstrapAccess::sideEffect;
++                    break;
++                }
++                candidate.advanceReference(period.numerator, period.denominator);
++                const auto status = p->acceptGraphics(candidate, true);
++                if (p->graphicsMemory) p->graphicsFrame.advance(p->cs5Configuration, *p->graphicsMemory, p->peripherals.eimState());
++                ++p->result.idleHclk;
++                if (status != Imx1BootstrapAccess::ok) {
++                    p->result.stop = Imx1ProbeStop::unsupportedPeripheral;
++                    p->result.peripheralStatus = status;
++                    break;
++                }
++                if (p->clockBoundary()) break;
++                wake = p->peripherals.wakeMcuFromInterrupt() || wake;
++            }
++            if (p->result.stop != Imx1ProbeStop::budget) break;
++            if (wake) cpuArm920EndWait(p->cpu);
++        }
+         // Conservative bus stall: jump to the reference event without retiring instructions.
+         if (p->options.bootstrapPeripherals) {
+             p->finishGraphicsBusStall();
+@@ -698,6 +740,8 @@
+ 
+ const char* imx1ProbeStopName(Imx1ProbeStop stop) {
+     switch (stop) {
++        case Imx1ProbeStop::idleBudget: return "idle-clock-budget";
++        case Imx1ProbeStop::idleNoWake: return "idle-no-known-wake";
+         case Imx1ProbeStop::budget: return "instruction-budget";
+         case Imx1ProbeStop::unsupportedDataCache: return "unsupported-data-cache";
+         case Imx1ProbeStop::unsupportedInstruction: return "unsupported-instruction";
+diff --git a/src/uarm/uarm/imx1_boot_probe.h b/src/uarm/uarm/imx1_boot_probe.h
+--- a/src/uarm/uarm/imx1_boot_probe.h
++++ b/src/uarm/uarm/imx1_boot_probe.h
+@@ -13,7 +13,7 @@
+ enum class Imx1ProbeEntry { physicalFlash, resetAlias, linkedAlias };
+ enum class Imx1ProbeStop {
+     budget, unsupportedInstruction, unsupportedCp15, unsupportedRead, unsupportedWrite, exception, engineUnavailable,
+-    unsupportedPeripheral, unsupportedDataCache
++    unsupportedPeripheral, unsupportedDataCache, idleBudget, idleNoWake
+ };
+ struct Imx1ProbeTrace {
+     uint32_t step, pc, instruction, cpsr, operand;
+@@ -70,6 +70,8 @@
+     Imx1I2cBus* i2cBus = nullptr;
+     Imx1ProbeI2cObserver i2cObserver = nullptr;
+     void* i2cContext = nullptr;
++    // Diagnostic elapsed HCLK limit per probe run, independent of the instruction budget.
++    uint32_t idleHclkBudget = 16000000;
+     bool bootstrapPeripherals = false;
+     bool arm920IcacheIndexCompatibility = false;
+     bool lcdcContrastOnly = false;
+@@ -101,6 +103,7 @@
+     uint64_t jitBlocks, jitInstructions;
+     uint64_t busAccesses;
+     uint64_t cs5WaitClocks = 0;
++    uint64_t idleHclk = 0;
+     uint32_t graphicsFrameWidth = 0, graphicsFrameHeight = 0, graphicsFrameHash = 0;
+     bool graphicsLcdEnabled = false;
+     uint64_t irqEntries = 0, fiqEntries = 0;
+diff --git a/src/uarm/uarm/imx1_bootstrap.cpp b/src/uarm/uarm/imx1_bootstrap.cpp
+--- a/src/uarm/uarm/imx1_bootstrap.cpp
++++ b/src/uarm/uarm/imx1_bootstrap.cpp
+@@ -554,6 +554,8 @@
+         // Holding System PLL output high requires the independent asynchronous MCU clock.
+         if (write && address == 0x0021b000 && (value & 0x00400000) && cpuClockMode != 3)
+             return Imx1BootstrapAccess::sideEffect;
++        if (write && address == 0x0021b000 && (!(value & 1) || bool(value & 1) != cgm.mcuEnabled()) &&
++            (cpuClockMode != 0 || !cgm.mcuPowerQualified())) return Imx1BootstrapAccess::sideEffect;
+         auto next = cgm;
+         const auto result = next.access(address, size, write, value);
+         if (result == Imx1CgmAccess::ok && write) {
+diff --git a/src/uarm/uarm/imx1_bootstrap.h b/src/uarm/uarm/imx1_bootstrap.h
+--- a/src/uarm/uarm/imx1_bootstrap.h
++++ b/src/uarm/uarm/imx1_bootstrap.h
+@@ -60,6 +60,30 @@
+     // Elapsed HCLK periods while the CPU waits, independently of retired instructions.
+     void advanceHclkCycles(uint32_t cycles);
+     Imx1AitcPending interruptPending() const;
++    bool mcuWakePending() const { return cgm.mcuWakePending(); }
++    bool mcuEnabled() const { return cgm.mcuEnabled(); }
++    bool wakeMcuFromInterrupt() {
++        const auto lines = interruptLines();
++        const bool asserted = lines.irq == Imx1AitcLine::asserted || lines.fiq == Imx1AitcLine::asserted;
++        if (asserted) cgm.wakeMcuPll();
++        return asserted;
++    }
++    bool gpioWakePossible(unsigned port, uint32_t value, uint32_t known) const {
++        auto pins = gpio;
++        if (pins.driveInput(port, value, known) != Imx1GpioAccess::ok) return false;
++        auto controller = aitc;
++        setInterruptInputs(controller, i2c, rtc, timer1, timer2, asp, pwm, pins);
++        return controller.irq() == Imx1AitcLine::asserted || controller.fiq() == Imx1AitcLine::asserted;
++    }
++    bool idleWakePossible() const {
++        auto candidate = aitc;
++        uint64_t sources = rtc.futureInterrupts() |
++            (timer1.canInterrupt() ? uint64_t(1) << 59 : 0) |
++            (timer2.canInterrupt() ? uint64_t(1) << 58 : 0);
++        candidate.setInputs(sources, ~uint64_t(0));
++        return watchdog.enabled() || candidate.irq() == Imx1AitcLine::asserted ||
++               candidate.fiq() == Imx1AitcLine::asserted;
++    }
+     struct InterruptLines { Imx1AitcLine irq, fiq; };
+     InterruptLines interruptLines() const;
+     void connectCpuInterrupts() { cpuInterruptsConnected = true; }
+diff --git a/src/uarm/uarm/imx1_cgm.cpp b/src/uarm/uarm/imx1_cgm.cpp
+--- a/src/uarm/uarm/imx1_cgm.cpp
++++ b/src/uarm/uarm/imx1_cgm.cpp
+@@ -26,6 +26,7 @@
+     const auto supports = [](uint64_t d, uint64_t old) {
+         return d / std::gcd(d, old) <= (std::numeric_limits<uint64_t>::max() / 2) / old;
+     };
++    if (mcuWakeRemaining && !supports(denominator, mcuWakeDenominator)) return false;
+     if (mcuReferenceRemaining && !supports(denominator, mcuReferenceDenominator)) return false;
+     if (nominalMcuRetune && mcuOutputQualified && mcuWriteDelay) {
+         const auto rate = mcuPllTargetRatio();
+@@ -36,9 +37,32 @@
+     return true;
+ }
+ 
++void Imx1Cgm::wakeMcuPll() {
++    if (mcuEnabled()) return;
++    cscr |= 1;
++    mcuTimingUnknown = true;
++    mcuRestartComplete = false;
++    mcuContinuous = false;
++    // MC9328MX1RM 12.4.2: nominal nine CLK32 periods (274.66 us), within the 300 us wake bound.
++    mcuWakeRemaining = 9;
++    mcuWakePhase = 0;
++    mcuWakeDenominator = 1;
++}
++
+ void Imx1Cgm::advanceMcuReference(uint64_t numerator, uint64_t denominator) {
+     if (!numerator) return;
+     assert(mcuReferenceSupported(denominator));
++    if (mcuWakeRemaining) {
++        const auto common = mcuWakeDenominator * (denominator / std::gcd(denominator, mcuWakeDenominator));
++        const auto fraction = mcuWakePhase * (common / mcuWakeDenominator) +
++                              (numerator % denominator) * (common / denominator);
++        const auto elapsed = numerator / denominator + fraction / common;
++        mcuWakePhase = fraction % common;
++        mcuWakeDenominator = common;
++        mcuWakeRemaining -= std::min<uint64_t>(elapsed, mcuWakeRemaining);
++        if (!mcuWakeRemaining) mcuRestartComplete = true;
++    }
++    if (!mcuEnabled()) return;
+     if (nominalMcuRetune && mcuOutputQualified && mcuWriteDelay) {
+         // Every legal internal-source MCU ratio supplies at least 160 FCLK periods per CLK32.
+         if (numerator / denominator) mcuWriteDelay = 0;
+@@ -143,7 +167,13 @@
+         return Imx1CgmAccess::reservedBits;
+     if (address == 0x0021b000) {
+         if ((value >> 29) > 5) return Imx1CgmAccess::reservedBits;
+-        if ((value & 3) != 3) return Imx1CgmAccess::sideEffect;
++        if (!(value & 2)) return Imx1CgmAccess::sideEffect;
++        const bool powerChanged = (value ^ cscr) & 1;
++        if (powerChanged && (!mcuOutputQualified || mcuRestartCycles || mcuReferenceRemaining ||
++            mcuWakeRemaining || systemRestartUnits || (value & 0x00600000) ||
++            ((value ^ cscr) & ~1u))) return Imx1CgmAccess::sideEffect;
++        if (!mcuEnabled() && !powerChanged && (value & 0x00600000)) return Imx1CgmAccess::sideEffect;
++        if (powerChanged && (value & 1)) wakeMcuPll();
+         if ((value ^ cscr) & 0x00070000) return Imx1CgmAccess::externalInput;
+         if ((value & 0x00400000) && (!nominalSystemPll || systemRestartUnits || mcuReferenceRemaining))
+             return Imx1CgmAccess::sideEffect;
+@@ -172,6 +202,7 @@
+                (systemRestartUnits ? 0x00400000u : 0);
+         return Imx1CgmAccess::ok;
+     } else if (address == 0x0021b004) {
++        if (!mcuEnabled() || mcuWakeRemaining) return Imx1CgmAccess::sideEffect;
+         // Repeat writes need 56 FCLK cycles. Unqualified FCLK cannot establish that delay.
+         if (nominalMcuRetune && mcuOutputQualified && !mcuTimingUnknown)
+             return Imx1CgmAccess::sideEffect;
+diff --git a/src/uarm/uarm/imx1_cgm.h b/src/uarm/uarm/imx1_cgm.h
+--- a/src/uarm/uarm/imx1_cgm.h
++++ b/src/uarm/uarm/imx1_cgm.h
+@@ -31,7 +31,12 @@
+     Imx1PllRatio mcuPllTargetRatio() const;
+     // Reset output is known; programmed output needs restart completion and an explicit assumption.
+     // The equal-frequency retune scenario keeps that qualified nominal output continuous.
++    bool mcuEnabled() const { return cscr & 1; }
++    bool mcuWakePending() const { return mcuWakeRemaining != 0; }
++    void wakeMcuPll();
++    bool mcuPowerQualified() const { return mcuOutputQualified; }
+     bool mcuClockReady(bool assumeSettled) const {
++        if (!mcuEnabled() || mcuWakeRemaining) return false;
+         return !mcuTimingUnknown || (assumeSettled && (mcuContinuous ||
+             (mcuRestartComplete && !mcuRestartCycles)));
+     }
+@@ -45,7 +50,8 @@
+     uint32_t cscr = 0x0f00ac03, pcdr = 0x000b00bb;
+     uint32_t mpctl0 = 0x003f1437, mpctl1 = 0;
+     uint32_t spctl0 = 0x043f1437, spctl1 = 0;
+-    uint32_t mcuRestartCycles = 0;
++    uint32_t mcuRestartCycles = 0, mcuWakeRemaining = 0;
++    uint64_t mcuWakePhase = 0, mcuWakeDenominator = 1;
+     uint32_t activeSpctl0 = 0x043f1437;
+     uint32_t systemWriteDelay = 0;
+     uint64_t systemWritePhase = 0;
+diff --git a/src/uarm/uarm/imx1_rtc.h b/src/uarm/uarm/imx1_rtc.h
+--- a/src/uarm/uarm/imx1_rtc.h
++++ b/src/uarm/uarm/imx1_rtc.h
+@@ -18,6 +18,11 @@
+     void advanceReference(uint64_t numerator, uint64_t denominator);
+     static constexpr uint64_t interruptSources = (uint64_t(1) << 17) | (uint64_t(1) << 18);
+     uint64_t assertedInterrupts() const;
++    uint64_t futureInterrupts() const {
++        if (!known || !(control & 0x80)) return 0;
++        return ((enable & 0x003f) ? uint64_t(1) << 17 : 0) |
++               ((enable & 0xff00) ? uint64_t(1) << 18 : 0);
++    }
+     // The normal watchdog input is absent or at most CLK32 / 16384 in this subset.
+     bool watchdogClockBoundSupported() const { return (control & 0x80) && divisor() == 32768 && !(enable & 0x80); }
+     bool preservesWatchdogClock(const Imx1Rtc& next, uint32_t address) const;
+diff --git a/src/uarm/uarm/imx1_timer.h b/src/uarm/uarm/imx1_timer.h
+--- a/src/uarm/uarm/imx1_timer.h
++++ b/src/uarm/uarm/imx1_timer.h
+@@ -11,6 +11,7 @@
+     Imx1TimerAccess access(uint32_t offset, uint32_t size, bool write, uint32_t& value,
+                            bool outputIsolated = false);
+     void advance(uint64_t perclk1Cycles);
++    bool canInterrupt() const { return (control & 0x11) == 0x11 && (control & 0xe); }
+     bool enabled() const { return control & 1; }
+     bool outputIsolationRequired() const { return enabled() && (control & 0x20); }
+     bool interruptOutput() const { return (control & 0x10) && (status & 1); }

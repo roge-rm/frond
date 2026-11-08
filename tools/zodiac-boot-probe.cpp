@@ -123,7 +123,7 @@ static bool parseRtcTime(const char* text, Imx1RtcTime& time) {
 }
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::fprintf(stderr, "Usage: %s ROM [physical|reset|linked] [instruction-budget] [exact|fast] [--bootstrap-peripherals] [--trace=peripherals] [--arm920-icache-index-compatibility] [--lcdc-contrast-only] [--imx1-mmcsd-empty-slot] [--frame-output=PATH] [--assume-mpll-settled] [--virtual-mpll-retune] [--assume-spll-settled] [--assume-i2c-single-master] [--i2c-eeprom-image=PATH] [--asp-px1-input=high] [--asp-u-sample=WORD] [--rtc-initial-time=DAY:HH:MM:SS] [--cs4-port0-input=BYTE] [--cs4-indexed-input=BANK/INDEX/BYTE] [--cs5-reset-status-input=BYTE] [--graphics-profile=virtual5744-compatible-8mib] [--graphics-raw-axes=FIRST/SECOND] [--graphics-irq-connection=virtual-a13] [--gpio-a-input-masked=VALUE/MASK] [--gpio-a-input=VALUE] [--gpio-b-input=VALUE] [--gpio-d-input=VALUE] [--ram-mib=32|128]\n", argv[0]);
+        std::fprintf(stderr, "Usage: %s ROM [physical|reset|linked] [instruction-budget] [exact|fast] [--bootstrap-peripherals] [--trace=peripherals] [--idle-hclk-budget=N] [--arm920-icache-index-compatibility] [--lcdc-contrast-only] [--imx1-mmcsd-empty-slot] [--frame-output=PATH] [--assume-mpll-settled] [--virtual-mpll-retune] [--assume-spll-settled] [--assume-i2c-single-master] [--i2c-eeprom-image=PATH] [--asp-px1-input=high] [--asp-u-sample=WORD] [--rtc-initial-time=DAY:HH:MM:SS] [--cs4-port0-input=BYTE] [--cs4-indexed-input=BANK/INDEX/BYTE] [--cs5-reset-status-input=BYTE] [--graphics-profile=virtual5744-compatible-8mib] [--graphics-raw-axes=FIRST/SECOND] [--graphics-irq-connection=virtual-a13] [--gpio-a-input-masked=VALUE/MASK] [--gpio-a-input=VALUE] [--gpio-b-input=VALUE] [--gpio-d-input=VALUE] [--ram-mib=32|128]\n", argv[0]);
         return 1;
     }
     const char* engine = argc >= 5 ? argv[4] : "exact";
@@ -132,6 +132,7 @@ int main(int argc, char** argv) {
     }
     const char* i2cImagePath = nullptr;
     Imx1ProbeOptions options{};
+    bool idleBudgetSupplied = false;
     options.interruptObserver = interrupt;
     options.busObserver = bus;
     options.i2cObserver = i2c;
@@ -154,6 +155,18 @@ int main(int argc, char** argv) {
             options.arm920IcacheIndexCompatibility = true;
         }
         else if (!std::strcmp(argv[i], "--trace=peripherals")) peripheralTrace = true;
+        else if (!std::strncmp(argv[i], "--idle-hclk-budget=", 19)) {
+            const char* text = argv[i] + 19;
+            char* end = nullptr;
+            errno = 0;
+            const auto value = std::strtoul(text, &end, 10);
+            if (idleBudgetSupplied || errno || *text < '0' || *text > '9' || *end ||
+                !value || value > 64000000) {
+                std::fprintf(stderr, "Supply one --idle-hclk-budget value from 1 to 64000000\n"); return 1;
+            }
+            idleBudgetSupplied = true;
+            options.idleHclkBudget = value;
+        }
         else if (!std::strncmp(argv[i], "--frame-output=", 15) && argv[i][15]) {
             if (options.frameObserver) return 1;
             options.frameObserver = captureFrame;
@@ -279,6 +292,11 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--ram-mib=128")) options.ramMiB = 128;
         else { std::fprintf(stderr, "Unknown diagnostic option: %s\n", argv[i]); return 1; }
     }
+    if (idleBudgetSupplied && !options.bootstrapPeripherals) {
+        std::fprintf(stderr, "Idle HCLK budget requires --bootstrap-peripherals\n"); return 1;
+    }
+    if (options.bootstrapPeripherals)
+        std::printf("idle-hclk-budget=%u cumulative-per-run independent-of-instruction-budget\n", options.idleHclkBudget);
     if (options.graphicsRawAxesKnown && (!options.bootstrapPeripherals ||
         options.graphicsProfile != Imx1GraphicsProfile::virtual5744Compatible8MiB)) {
         std::fprintf(stderr, "Raw graphics axes require the virtual graphics profile and bootstrap peripherals\n"); return 1;
@@ -434,6 +452,7 @@ int main(int argc, char** argv) {
                 result.trace.operand, result.trace.instructionSize);
     std::printf("bus-accesses=%llu peripheral-status=%s\n", (unsigned long long)result.busAccesses,
                 imx1BootstrapAccessName(result.peripheralStatus));
+    std::printf("idle-hclk-total=%llu\n", (unsigned long long)result.idleHclk);
     if (options.graphicsProfile != Imx1GraphicsProfile::strict)
         std::printf("cs5-hclk-total=%llu\n",(unsigned long long)result.cs5WaitClocks);
     if (result.possibleWatchdogTimeoutBoundary)
