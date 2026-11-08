@@ -10,14 +10,12 @@ import org.junit.Test
 class NetRelayTest {
     @Test
     fun defaultPorts() {
-        assertEquals(5030, IrBeam.defaultPort)
-        assertEquals(IrBeam.DEFAULT_PORT, IrBeam.defaultPort)
         assertEquals(5033, SerialLink.defaultPort)
         assertEquals(SerialLink.DEFAULT_PORT, SerialLink.defaultPort)
         assertEquals(5034, UsbLink.defaultPort)
         assertEquals(UsbLink.DEFAULT_PORT, UsbLink.defaultPort)
-        // Bluetooth has its own relay on 5032.
-        assertEquals(setOf(5030, 5032, 5033, 5034), setOf(IrBeam.defaultPort, BtLink.DEFAULT_PORT, SerialLink.defaultPort, UsbLink.defaultPort))
+        // Bluetooth has its own relay on 5032, and Connections use 5035.
+        assertEquals(setOf(5032, 5033, 5034, 5035), setOf(BtLink.DEFAULT_PORT, SerialLink.defaultPort, UsbLink.defaultPort, LinkWire.DEFAULT_PORT))
         // gdb's usual remote port.
         assertEquals(3333, DebugLink.defaultPort)
         assertEquals(DebugLink.DEFAULT_PORT, DebugLink.defaultPort)

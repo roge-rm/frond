@@ -273,18 +273,17 @@ private fun ConnectionsSheet(model: RunningModel, actions: RunningBarActions) {
     var choosing by remember { mutableStateOf<LinkKind?>(null) }
     val device = model.device
     val debuggerShown = model.debugger.phase != NetRelay.Phase.OFF || model.debugger.error != null
-    for (row in RunningSheets.connectionRows(device, model.beam.phase, model.serial.phase, model.usb.phase, debuggerShown)) {
+    for (row in RunningSheets.connectionRows(device, model.serial.phase, model.usb.phase, debuggerShown)) {
         when (row) {
             ConnRow.BEAM -> {
                 val usable = RunningSheets.beamUsable(device, model.keyboard)
                 ListItem(
                     headlineContent = { Text("Infrared beaming", color = if (usable) Color.Unspecified else Faded) },
-                    supportingContent = { Text(relayText(model.beam), color = if (usable) Color.Unspecified else Faded) },
+                    supportingContent = { Text(model.beam.text, color = if (usable) Color.Unspecified else Faded) },
                     colors = androidx.compose.material3.ListItemDefaults.colors(containerColor = Color.Transparent),
                     modifier = if (usable) Modifier.clickableRow { choosing = LinkKind.BEAM } else Modifier,
                 )
             }
-            ConnRow.BEAM_RETRY -> SheetAction("Connect again") { model.retryBeam() }
             ConnRow.BLUETOOTH -> ConnItem("Bluetooth", device.bluetooth, if (device.bluetooth) bluetoothText(model.bluetooth, model.radio) else null) { choosing = LinkKind.BLUETOOTH }
             ConnRow.SERIAL -> ConnItem("Serial port", device.serialPort, if (device.serialPort) relayText(model.serial) else null) { choosing = LinkKind.SERIAL }
             ConnRow.SERIAL_RETRY -> SheetAction("Connect again") { SerialLink.retry() }

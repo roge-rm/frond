@@ -4,7 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 
-class IrBeamTest {
+class RelayAddressTest {
     @Test
     fun ports() {
         assertEquals(5030, NetRelay.port("5030"))
@@ -19,19 +19,19 @@ class IrBeamTest {
 
     @Test
     fun addresses() {
-        assertEquals("192.168.1.20" to 5031, IrBeam.address("192.168.1.20:5031"))
-        assertEquals("10.0.2.2" to IrBeam.DEFAULT_PORT, IrBeam.address(" 10.0.2.2 "))
-        assertEquals("desk.local" to 6000, IrBeam.address("desk.local:6000"))
-        assertEquals("fe80::1" to 5032, IrBeam.address("[fe80::1]:5032"))
-        assertEquals("fe80::1" to IrBeam.DEFAULT_PORT, IrBeam.address("[fe80::1]"))
-        assertEquals("fe80::1" to IrBeam.DEFAULT_PORT, IrBeam.address("fe80::1"))
-        assertNull(IrBeam.address(""))
-        assertNull(IrBeam.address(":5030"))
-        assertNull(IrBeam.address("host:"))
-        assertNull(IrBeam.address("host:70000"))
-        assertNull(IrBeam.address("a host:5030"))
-        assertNull(IrBeam.address("[]:5030"))
-        assertNull(IrBeam.address("[fe80::1]5030"))
+        assertEquals("192.168.1.20" to 5031, SerialLink.address("192.168.1.20:5031"))
+        assertEquals("10.0.2.2" to SerialLink.DEFAULT_PORT, SerialLink.address(" 10.0.2.2 "))
+        assertEquals("desk.local" to 6000, SerialLink.address("desk.local:6000"))
+        assertEquals("fe80::1" to 5032, SerialLink.address("[fe80::1]:5032"))
+        assertEquals("fe80::1" to SerialLink.DEFAULT_PORT, SerialLink.address("[fe80::1]"))
+        assertEquals("fe80::1" to SerialLink.DEFAULT_PORT, SerialLink.address("fe80::1"))
+        assertNull(SerialLink.address(""))
+        assertNull(SerialLink.address(":5030"))
+        assertNull(SerialLink.address("host:"))
+        assertNull(SerialLink.address("host:70000"))
+        assertNull(SerialLink.address("a host:5030"))
+        assertNull(SerialLink.address("[]:5030"))
+        assertNull(SerialLink.address("[fe80::1]5030"))
     }
 
     @Test
@@ -58,15 +58,5 @@ class IrBeamTest {
         // HostSerial::Parse takes off or tcp:PORT.
         assertEquals("off", NetRelay.coreMode(null))
         assertEquals("tcp:40123", NetRelay.coreMode(40123))
-    }
-
-    @Test
-    fun infraredState() {
-        // HostInfrared::Describe.
-        assertNull(IrBeam.coreLeftReason("tcp:40123 127.0.0.1:40123 waiting", 40123))
-        assertNull(IrBeam.coreLeftReason("tcp:40123 127.0.0.1:40123 waiting suspended", 40123))
-        assertEquals("The emulator's infrared stopped.", IrBeam.coreLeftReason("off", 40123))
-        assertEquals("Restored keyboard owns the infrared UART.", IrBeam.coreLeftReason("off error: Restored keyboard owns the infrared UART.", 40123))
-        assertEquals("The emulator's infrared stopped.", IrBeam.coreLeftReason("tcp:40124 127.0.0.1:40124 waiting", 40123))
     }
 }

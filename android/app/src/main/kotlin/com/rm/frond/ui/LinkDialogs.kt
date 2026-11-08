@@ -25,7 +25,8 @@ import androidx.compose.ui.unit.dp
 import com.rm.frond.BeamMode
 import com.rm.frond.BtLink
 import com.rm.frond.BtMode
-import com.rm.frond.IrBeam
+import com.rm.frond.InfraredChoice
+import com.rm.frond.LinkStore
 import com.rm.frond.NetRelay
 import com.rm.frond.RunningModel
 import com.rm.frond.SerialLink
@@ -217,8 +218,7 @@ enum class LinkKind { BEAM, BLUETOOTH, SERIAL, USB }
 fun LinkChoiceDialog(kind: LinkKind, model: RunningModel, onDismiss: () -> Unit) {
     val context = LocalContext.current
     when (kind) {
-        LinkKind.BEAM -> RelayDialog("Infrared beaming", listOf("Off", "Wait for a peer", "Connect to another Frond"), IrBeam,
-            model.beam.mode, onDismiss) { onDismiss(); model.changeBeam(it) }
+        LinkKind.BEAM -> InfraredDialog(model.beam.choice, onDismiss) { onDismiss(); model.changeBeam(it) }
         LinkKind.SERIAL -> RelayDialog("Serial port", listOf("Off", "Wait for a peer", "Connect to an address"), SerialLink,
             model.serial.mode, onDismiss) { onDismiss(); model.changeSerial(it) }
         LinkKind.USB -> RelayDialog("USB HotSync", listOf("Off", "Wait for a peer", "Connect to an address"), UsbLink,
@@ -251,4 +251,30 @@ fun LinkChoiceDialog(kind: LinkKind, model: RunningModel, onDismiss: () -> Unit)
             )
         }
     }
+}
+
+// Off or one of the paired connections, for the running machine's infrared.
+@Composable
+fun InfraredDialog(current: String, onDismiss: () -> Unit, onChoose: (String) -> Unit) {
+    val context = LocalContext.current
+    val choices = remember { InfraredChoice.choices(current, LinkStore.choices(InfraredChoice.folder(context))) }
+    var picked by remember { mutableStateOf(current) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Infrared beaming") },
+        text = {
+            Column {
+                for ((value, label) in choices) {
+                    ListItem(
+                        headlineContent = { Text(label) },
+                        leadingContent = { RadioButton(selected = picked == value, onClick = null) },
+                        modifier = Modifier.clickableRow { picked = value },
+                    )
+                }
+                if (choices.size == 1) EmptyNote("Pair with another Frond in Connections first.")
+            }
+        },
+        confirmButton = { TextButton(onClick = { onChoose(picked) }) { Text("OK") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }

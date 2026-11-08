@@ -172,7 +172,7 @@ private fun Menu(state: RunningBarState, actions: RunningBarActions) {
     val device = state.device ?: return
     val model = state.model ?: return
     val rows = RunningMenu.rows(device, RunningMenu.State(
-        hold = model.hold, keyboard = model.keyboard, beamOff = model.beam.phase == NetRelay.Phase.OFF,
+        hold = model.hold, keyboard = model.keyboard, beamOff = !model.beam.active,
         microphone = model.microphone, network = model.network, busy = model.busy != null,
     ))
     DropdownMenu(state.menuOpen, { state.menuOpen = false }) {

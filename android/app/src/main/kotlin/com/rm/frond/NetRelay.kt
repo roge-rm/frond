@@ -17,7 +17,7 @@ import java.net.Socket
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
-// How a relayed endpoint (infrared beaming, the serial port, USB HotSync) reaches another machine on the network.
+// How a relayed endpoint (the serial port, USB HotSync, the debugger) reaches another machine on the network.
 sealed class BeamMode {
     object Off : BeamMode()
     // Waits on all interfaces for one peer at a time.
@@ -70,7 +70,7 @@ abstract class NetRelay(
     // it left, to show.
     abstract fun coreLeftReason(state: String, port: Int): String?
 
-    // What the peer is called in messages: another Frond for infrared, anything for serial and USB.
+    // What the peer is called in messages.
     protected open val closedMessage = "The other side closed the connection."
     protected open val stoppedMessage = "Stopped waiting for connections."
     protected open val coreClosedMessage = "The emulator closed the connection."
@@ -538,23 +538,6 @@ abstract class NetRelay(
             }
             return found.filter { it.isNotEmpty() }.distinct()
         }
-    }
-}
-
-// Infrared beaming. The core's irda-state is "tcp:PORT 127.0.0.1:PORT waiting|connected[ suspended][ error: ...]"
-// or "off[ error: ...]"; a sleeping Palm shows suspended and has its port closed until it wakes. frond-68k says
-// "tcp 127.0.0.1:PORT waiting|connected" or "off[ error]", as for its serial port.
-object IrBeam : NetRelay(5030, "irda-mode", "irda-state", "beam", "beaming") {
-    const val DEFAULT_PORT = 5030
-    override val closedMessage = "The other Frond closed the connection."
-    override val stoppedMessage = "Stopped waiting for other Fronds."
-    // A sleeping Palm keeps the core's port closed for any length of time; frames beamed then are lost, not fatal.
-    override val dropPeerOnEarlyOverflow = false
-
-    override fun coreLeftReason(state: String, port: Int): String? {
-        if (state.startsWith("tcp:$port ") || state.startsWith("tcp 127.0.0.1:$port ")) return null
-        if (state.startsWith("off ") && !state.contains("error: ")) return state.removePrefix("off ").trim()
-        return state.substringAfter("error: ", "").ifEmpty { "The emulator's infrared stopped." }
     }
 }
 

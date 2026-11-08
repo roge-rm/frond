@@ -194,6 +194,15 @@ target_include_directories(frondcard PRIVATE "${UARM}/native")
 target_compile_options(frondcard PRIVATE -O2 -g -Wno-unused-parameter)
 target_link_libraries(frondcard PRIVATE frondcore log)
 
+# The link library (link/: pairing, Noise KK, records, mux) for Connections as libfrondlink.so,
+# loaded by LinkNative.kt in the home and emulator processes. Same sources as the desktop's.
+set(LINK "${FROND_CORE}/../../link")
+add_library(frondlink SHARED LinkJni.cpp
+    "${LINK}/crypto.cpp" "${LINK}/noise.cpp" "${LINK}/wire.cpp" "${LINK}/pairing.cpp"
+    "${LINK}/messages.cpp" "${LINK}/mux.cpp" "${LINK}/link.cpp" "${LINK}/monocypher/monocypher.c")
+target_include_directories(frondlink PRIVATE "${LINK}")
+target_compile_options(frondlink PRIVATE -O2 -g)
+
 if(FROND_SELF_TEST)
     # The CPU tests from tests/ run as the synthetic self-test.
     add_library(main SHARED self_test.cpp test_arm_alignment.cpp test_instruction_cache.cpp)

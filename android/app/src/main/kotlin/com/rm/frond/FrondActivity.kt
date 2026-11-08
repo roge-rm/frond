@@ -146,6 +146,17 @@ open class FrondActivity : SDLActivity() {
         link.whenConnected {
             Thread { SdCard.restorePending(applicationContext, link, sessionPath) }.apply { isDaemon = true }.start()
         }
+        // Infrared over a connection is set from the machine's settings at every start.
+        if (InfraredChoice.linkId(machineSettings.infrared) != null) {
+            askLocalNetwork()
+            link.whenConnected {
+                Thread({
+                    val name = Sessions.forPath(applicationContext, sessionPath)?.name ?: launchDevice().label
+                    IrLink.apply(applicationContext, link, machineSettings.infrared, name, launchDevice().label)
+                        ?.let { Log.w(TAG, "infrared: $it") }
+                }, "FrondInfrared").apply { isDaemon = true }.start()
+            }
+        }
         running = this
         resolveRunningDevice()
         if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) logSpeed()
@@ -473,6 +484,7 @@ open class FrondActivity : SDLActivity() {
     override fun onStart() {
         stopped = false
         super.onStart()
+        IrLink.setPaused(false)
     }
 
     // Hidden: SDL pauses the core and its audio. Saving here means a process kill while away keeps
@@ -480,6 +492,8 @@ open class FrondActivity : SDLActivity() {
     override fun onStop() {
         super.onStop()
         stopped = true
+        // The core pauses in the background; a connection's far side sees the Palm paused.
+        IrLink.setPaused(true)
         if (isFinishing || isChangingConfigurations) return
         saveInBackground()
     }
@@ -710,6 +724,13 @@ open class FrondActivity : SDLActivity() {
         if (!on) model.changeMicrophone(false)
         else if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED) model.changeMicrophone(true)
         else requestPermissions(arrayOf(android.Manifest.permission.RECORD_AUDIO), REQUEST_MICROPHONE)
+    }
+
+    // Android 17 asks before Frond reaches the local network; Connections need it.
+    fun askLocalNetwork() {
+        runOnUiThread {
+            if (Links.needsPermission(this)) requestPermissions(arrayOf(Links.LOCAL_NETWORK), REQUEST_LOCAL_NETWORK)
+        }
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
@@ -1073,7 +1094,7 @@ open class FrondActivity : SDLActivity() {
             }
         }
         HostDns.stop(applicationContext)
-        IrBeam.stop()
+        IrLink.stop()
         SerialLink.stop()
         UsbLink.stop()
         stopDebugLink()
@@ -1096,6 +1117,7 @@ open class FrondActivity : SDLActivity() {
         const val TAG = "Frond"
         const val EXTRA_SESSION = "session"
         private const val REQUEST_MICROPHONE = 41
+        private const val REQUEST_LOCAL_NETWORK = 43
         private const val REQUEST_SAVE_COPY = 42
         const val EXTRA_DEVICE = "device"
         const val EXTRA_NOR = "nor"

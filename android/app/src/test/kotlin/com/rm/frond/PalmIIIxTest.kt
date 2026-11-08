@@ -148,12 +148,4 @@ class PalmIIIxTest {
         assertEquals(":emulator", processes[".FrondActivity"])
         assertEquals(setOf(":emulator", ":emulator68k"), Emulators.processes.toSet())
     }
-
-    @Test fun beamingReadsTheIiixState() {
-        assertNull(IrBeam.coreLeftReason("tcp 127.0.0.1:5030 waiting", 5030))
-        assertNull(IrBeam.coreLeftReason("tcp 127.0.0.1:5030 connected", 5030))
-        assertEquals("cannot listen", IrBeam.coreLeftReason("off cannot listen", 5030))
-        assertEquals("The emulator's infrared stopped.", IrBeam.coreLeftReason("off", 5030))
-        assertEquals("The emulator's infrared stopped.", IrBeam.coreLeftReason("tcp 127.0.0.1:5031 waiting", 5030))
-    }
 }

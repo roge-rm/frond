@@ -100,14 +100,13 @@ object RunningSheets {
 
     // ---- Connections ----
 
-    enum class ConnRow { BEAM, BEAM_RETRY, BLUETOOTH, SERIAL, SERIAL_RETRY, USB, USB_RETRY, CAMERA, DEBUGGER, HOTSYNC }
+    enum class ConnRow { BEAM, BLUETOOTH, SERIAL, SERIAL_RETRY, USB, USB_RETRY, CAMERA, DEBUGGER, HOTSYNC }
 
     fun connectionRows(
-        device: Device, beam: NetRelay.Phase, serial: NetRelay.Phase, usb: NetRelay.Phase, debuggerShown: Boolean,
+        device: Device, serial: NetRelay.Phase, usb: NetRelay.Phase, debuggerShown: Boolean,
     ): List<ConnRow> {
         val m68k = device.runs68k
         val rows = mutableListOf(ConnRow.BEAM)
-        if (beam == NetRelay.Phase.DISCONNECTED) rows += ConnRow.BEAM_RETRY
         if (!m68k || device.bluetooth) rows += ConnRow.BLUETOOTH
         if (!device.serialAbsent) rows += ConnRow.SERIAL
         if (device.serialPort && serial == NetRelay.Phase.DISCONNECTED) rows += ConnRow.SERIAL_RETRY

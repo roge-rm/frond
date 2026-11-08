@@ -1,0 +1,1211 @@
+package com.rm.frond
+
+import android.net.LocalSocket
+import android.net.LocalSocketAddress
+import android.util.Log
+import com.rm.frond.LinkWire.EventKind
+import com.rm.frond.LinkWire.LinkError
+import com.rm.frond.LinkWire.LinkState
+import com.rm.frond.LinkWire.PairResult
+import com.rm.frond.LinkWire.PeerState
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.IOException
+import java.net.Inet4Address
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.NetworkInterface
+import java.net.StandardSocketOptions
+import java.nio.ByteBuffer
+import java.nio.channels.DatagramChannel
+import java.nio.channels.SelectionKey
+import java.nio.channels.Selector
+import java.nio.channels.ServerSocketChannel
+import java.nio.channels.SocketChannel
+import java.util.ArrayDeque
+import java.util.concurrent.ConcurrentLinkedQueue
+
+// The Android side of Connections, the same job as the desktop's frond --link-service (desktop/LinkHub.cpp)
+// and the same wire: the store, discovery, the TCP listener, links to paired installs and the running
+// machine's infrared socket. Clients (the Connections screen, the running machine) send it the hub's JSON
+// ops and get its events. One thread runs everything: sockets on a Selector, the native link objects,
+// and every client op, posted from other threads.
+class LinkEngine(private val store: LinkStore, private val host: Host) {
+    interface Host {
+        // UDP port for beacons; 0 turns discovery off.
+        val discoveryPort: Int
+        // Called on the engine thread when discovery starts and stops, for the Wi-Fi multicast lock.
+        fun discovery(on: Boolean) {}
+        // False while Android's local network access is off for Frond.
+        fun networkAllowed(): Boolean = true
+        // The engine stopped by itself (yield, or a failure); called on its thread.
+        fun stopped() {}
+    }
+
+    // Gets events on the engine thread. Must not block for long.
+    interface Client {
+        fun send(event: JSONObject)
+    }
+
+    private class ClientState(val client: Client) {
+        var watch = false
+    }
+
+    private enum class Kind { UNKNOWN, LINK, PAIR_IN, PAIR_OUT }
+
+    private inner class Conn(val channel: SocketChannel, val outgoing: Boolean) {
+        var kind = Kind.UNKNOWN
+        var pre = ByteArray(0)
+        var link = 0L
+        var pairing = 0L
+        var peer = ""
+        val created = now()
+        var closingAt = 0L
+        var closing = false
+        var up = false
+        var connected = !outgoing
+        var gotAnswer = false
+        val out = ArrayDeque<ByteBuffer>()
+        var key: SelectionKey? = null
+        val toWrite get() = out.sumOf { it.remaining() }
+        var remote: InetSocketAddress? = null
+    }
+
+    private class Held(val ch: Int, val machine: String, val device: String)
+
+    private class PeerRun {
+        var link: Conn? = null
+        var dialing: Conn? = null
+        var backoff = 0
+        var nextTry = 0L
+        var target = 0
+        var failed = false
+        var forgotten = false
+        // Either side's failed handshake against the pinned key; shown, never stored (LinkHub.h).
+        var keyMismatch = false
+        var seen: InetAddress? = null
+        var seenPort = 0
+        var seenAt = 0L
+        var beaconDialAt = -100000L
+        var idleSince = 0L
+        val held = ArrayList<Held>()
+    }
+
+    private class Nearby(val name: String, val address: InetAddress, val port: Int, val at: Long)
+
+    private enum class St { IDLE, OPENING, WAITING, JOINED, BUSY }
+
+    private inner class Attach(val client: ClientState, val machine: String, val device: String, val link: String, val socketPath: String) {
+        var core: LocalSocket? = null
+        var coreGeneration = 0
+        var coreUp = false
+        var nextCoreTry = 0L
+        var st = St.IDLE
+        var ch = 0
+        var chLink: Conn? = null
+        var farMachine = ""
+        var farDevice = ""
+        var busyBy = ""
+        var farState = PeerState.RUNNING
+        var retryAt = 0L
+        var paused = false
+        var lastStatus: JSONObject? = null
+    }
+
+    private val clock0 = System.nanoTime()
+    private fun now() = (System.nanoTime() - clock0) / 1_000_000 + 1_000_000
+    private fun wall() = System.currentTimeMillis()
+
+    private val tasks = ConcurrentLinkedQueue<() -> Unit>()
+    private var selector: Selector? = null
+    private var listener: ServerSocketChannel? = null
+    private var udp: DatagramChannel? = null
+    private var thread: Thread? = null
+    @Volatile private var running = false
+    val port get() = listenPort
+    private var listenPort = 0
+
+    private val clients = ArrayList<ClientState>()
+    private val conns = ArrayList<Conn>()
+    private val attaches = ArrayList<Attach>()
+    private val runs = HashMap<String, PeerRun>()
+    private val nearby = HashMap<String, Nearby>()
+    private val recent = HashMap<String, ArrayList<Long>>()
+    private var lastBeacon = -100000L
+    private var wasActive = false
+    private var lastSnapshot: JSONObject? = null
+    private var lastTick = 0L
+
+    // B: the code shown while someone pairs with us.
+    private var code = 0L
+    private var requester = ByteArray(0)
+    private var requesterName = ""
+    private var pairCooldown = 0L
+    private var codeAt = 0L
+
+    // A: the pairing this engine runs for one client.
+    private class PairOut {
+        var client: ClientState? = null
+        var host = ""
+        var port = 0
+        var typedAddress = ""
+        var code = ""
+        var conn: Any? = null
+        var peerName = ""
+        var peerId = ByteArray(0)
+    }
+    private var pairOut = PairOut()
+    private val pairConn get() = pairOut.conn as Conn?
+
+    // ---- Life ----
+
+    // Opens the sockets and starts the thread. Returns an error, or null. The store must be open.
+    fun start(): String? {
+        val sel = Selector.open()
+        selector = sel
+        val server = ServerSocketChannel.open()
+        try {
+            server.setOption(StandardSocketOptions.SO_REUSEADDR, true)
+            try { server.bind(InetSocketAddress(store.identity.port), 16) } catch (e: IOException) { server.bind(InetSocketAddress(0), 16) }
+        } catch (e: IOException) {
+            server.close()
+            sel.close()
+            return "Couldn't take connections from the network."
+        }
+        server.configureBlocking(false)
+        server.register(sel, SelectionKey.OP_ACCEPT)
+        listener = server
+        listenPort = server.socket().localPort
+        if (host.discoveryPort != 0) {
+            try {
+                val d = DatagramChannel.open()
+                d.setOption(StandardSocketOptions.SO_REUSEADDR, true)
+                d.setOption(StandardSocketOptions.SO_BROADCAST, true)
+                d.bind(InetSocketAddress(host.discoveryPort))
+                d.configureBlocking(false)
+                d.register(sel, SelectionKey.OP_READ)
+                udp = d
+            } catch (e: IOException) {
+                Log.w(TAG, "link: no discovery: $e")
+            }
+        }
+        running = true
+        thread = Thread(::loop, "FrondLink").apply { isDaemon = true; start() }
+        Log.i(TAG, "link: engine on port $listenPort as ${store.identity.name}")
+        return null
+    }
+
+    // Closes every link with a close record. From any thread; returns once the thread has ended.
+    fun stop() {
+        val t = thread ?: return
+        post { shutdown() }
+        if (Thread.currentThread() !== t) t.join(2000)
+    }
+
+    fun post(task: () -> Unit) {
+        tasks.add(task)
+        selector?.wakeup()
+    }
+
+    fun connect(client: Client) = post {
+        val c = ClientState(client)
+        clients += c
+        client.send(JSONObject().put("type", "hello").put("id", store.identity.hex).put("name", store.identity.name).put("port", listenPort))
+    }
+
+    fun disconnect(client: Client) = post { clients.firstOrNull { it.client === client }?.let(::dropClient) }
+
+    fun handle(client: Client, op: JSONObject) = post { clients.firstOrNull { it.client === client }?.let { handleOp(it, op) } }
+
+    private fun shutdown() {
+        if (!running) return
+        running = false
+        for (c in ArrayList(conns)) {
+            if (c.link != 0L && c.connected) {
+                LinkNative.linkClose(c.link, LinkWire.CLOSE_NORMAL)
+                LinkNative.linkTakeOutput(c.link, 0)?.let { try { c.channel.write(ByteBuffer.wrap(it)) } catch (_: IOException) {} }
+            }
+            removeConn(c)
+        }
+        for (a in attaches) closeCore(a)
+        attaches.clear()
+        endPairRequest("cancelled")
+        try { listener?.close() } catch (_: IOException) {}
+        try { udp?.close() } catch (_: IOException) {}
+        try { selector?.close() } catch (_: IOException) {}
+        if (wasActive) host.discovery(false)
+        wasActive = false
+        store.close()
+        Log.i(TAG, "link: engine stopped")
+    }
+
+    private fun loop() {
+        try {
+            while (running) {
+                val sel = selector ?: break
+                val wait = (100 - (now() - lastTick)).coerceIn(1, 100)
+                sel.select(wait)
+                if (!running) break
+                for (key in sel.selectedKeys().toList()) {
+                    sel.selectedKeys().remove(key)
+                    if (!key.isValid) continue
+                    when (val what = key.attachment()) {
+                        is Conn -> connReady(what, key)
+                        else -> if (key.channel() === listener) incoming() else if (key.channel() === udp) datagrams()
+                    }
+                }
+                while (true) { val task = tasks.poll() ?: break; task(); if (!running) break }
+                if (running && now() - lastTick >= 100) { lastTick = now(); tick() }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "link: engine failed", e)
+        }
+        shutdown()
+        host.stopped()
+    }
+
+    // ---- Clients ----
+
+    private fun sendTo(c: ClientState?, o: JSONObject) {
+        if (c != null && c in clients) c.client.send(o)
+    }
+
+    private fun broadcastWatchers(o: JSONObject) {
+        for (c in clients) if (c.watch) c.client.send(o)
+    }
+
+    private fun watchers() = clients.count { it.watch }
+
+    private fun dropClient(c: ClientState) {
+        if (!clients.remove(c)) return
+        for (a in ArrayList(attaches)) {
+            if (a.client !== c) continue
+            unjoin(a, true)
+            attaches.remove(a)
+            closeCore(a)
+            matchPeer(a.link)
+        }
+        if (pairOut.client === c) {
+            pairConn?.let { closeConn(it, false) }
+            pairOut = PairOut()
+        }
+        if (c.watch && watchers() == 0 && code != 0L) endPairRequest("cancelled")
+    }
+
+    private fun handleOp(c: ClientState, op: JSONObject) {
+        when (op.optString("op")) {
+            "watch" -> {
+                c.watch = op.optBoolean("on", true)
+                if (c.watch) sendTo(c, snapshot()) else if (watchers() == 0 && code != 0L) endPairRequest("cancelled")
+            }
+            "state" -> sendTo(c, snapshot())
+            "rename" -> {
+                val name = op.optString("name").trim().take(64)
+                if (name.isNotEmpty()) store.setName(name)
+            }
+            "peer-rename", "peer-address", "forget" -> {
+                val hex = op.optString("id")
+                store.find(hex) ?: return
+                when (op.optString("op")) {
+                    "peer-rename" -> {
+                        val name = op.optString("name").trim().take(64)
+                        if (name.isNotEmpty()) store.update(hex) { it.copy(name = name) }
+                    }
+                    "peer-address" -> {
+                        store.update(hex) { it.copy(address = op.optString("address").trim()) }
+                        val r = run(hex)
+                        r.nextTry = now(); r.backoff = 0; r.failed = false
+                    }
+                    else -> {
+                        val r = run(hex)
+                        r.link?.let { closeConn(it) }
+                        r.dialing?.let { closeConn(it) }
+                        runs.remove(hex)
+                        store.remove(hex)
+                    }
+                }
+                store.save()
+            }
+            "pair" -> {
+                pairConn?.let { closeConn(it, false) }
+                pairOut = PairOut()
+                pairOut.client = c
+                if (op.has("id")) {
+                    val n = nearby[op.optString("id")]
+                    if (n == null) {
+                        sendTo(c, JSONObject().put("type", "pair-result").put("result", "unreachable"))
+                        pairOut = PairOut()
+                        return
+                    }
+                    pairOut.host = n.address.hostAddress ?: ""
+                    pairOut.port = n.port
+                    pairOut.peerName = n.name
+                } else {
+                    val typed = op.optString("address").trim()
+                    pairOut.typedAddress = typed
+                    val target = LinkWire.hostPort(typed)
+                    if (target == null) {
+                        sendTo(c, JSONObject().put("type", "pair-result").put("result", "unreachable").put("name", typed))
+                        pairOut = PairOut()
+                        return
+                    }
+                    pairOut.host = target.first
+                    pairOut.port = target.second
+                    pairOut.peerName = typed
+                }
+                pairOutStart()
+            }
+            "pair-code" -> {
+                if (pairOut.client !== c) return
+                pairOut.code = op.optString("code")
+                val conn = pairConn
+                if (conn != null && conn.gotAnswer && conn.pairing == 0L) {
+                    conn.pairing = newPairing(pairOut.code)
+                    pump(conn)
+                    pairDone(conn)
+                } else if (conn == null) pairOutStart()
+            }
+            "pair-cancel" -> {
+                if (pairOut.client !== c) return
+                pairConn?.let { closeConn(it, false) }
+                pairOut = PairOut()
+            }
+            "pair-dismiss" -> if (code != 0L) endPairRequest("cancelled")
+            "ir-attach" -> {
+                if (attaches.any { it.client === c }) return
+                val a = Attach(c, op.optString("machine"), op.optString("device"), op.optString("link"), op.optString("socket"))
+                a.paused = op.optBoolean("paused", false)
+                attaches += a
+                coreConnect(a)
+                val r = run(a.link)
+                if (r.link == null && r.dialing == null) { r.nextTry = now(); r.backoff = 0 }
+                matchPeer(a.link)
+            }
+            "ir-detach" -> for (a in ArrayList(attaches)) {
+                if (a.client !== c) continue
+                unjoin(a, true)
+                attaches.remove(a)
+                closeCore(a)
+                matchPeer(a.link)
+            }
+            // The app went to the background (paused) or came back.
+            "ir-state" -> for (a in attaches) {
+                if (a.client !== c) continue
+                a.paused = op.optString("state") == "paused"
+                coreState(a, ownState(a))
+            }
+            "yield" -> shutdown()
+        }
+    }
+
+    private fun run(hex: String) = runs.getOrPut(hex) { PeerRun() }
+
+    // ---- TCP ----
+
+    private fun register(c: Conn, ops: Int) {
+        val sel = selector ?: return
+        try {
+            c.key = c.channel.register(sel, ops, c)
+        } catch (e: IOException) {
+            removeConn(c)
+        }
+    }
+
+    private fun interest(c: Conn) {
+        val key = c.key ?: return
+        if (!key.isValid) return
+        key.interestOps(if (!c.connected) SelectionKey.OP_CONNECT else SelectionKey.OP_READ or (if (c.out.isEmpty()) 0 else SelectionKey.OP_WRITE))
+    }
+
+    private fun setOptions(ch: SocketChannel) {
+        try {
+            ch.setOption(StandardSocketOptions.TCP_NODELAY, true)
+            ch.setOption(StandardSocketOptions.SO_SNDBUF, SEND_BUFFER)
+        } catch (_: IOException) {}
+    }
+
+    private fun incoming() {
+        while (true) {
+            val s = try { listener?.accept() } catch (e: IOException) { null } ?: return
+            val from = (s.remoteAddress as? InetSocketAddress)?.address
+            if (!LinkWire.allowedPeer(from)) { s.close(); continue }
+            val t = now()
+            val times = recent.getOrPut(from!!.hostAddress ?: "") { ArrayList() }
+            times.removeAll { t - it > 10000 }
+            val pending = conns.count { !it.outgoing && !it.up && it.kind != Kind.PAIR_IN }
+            if (times.size >= PER_ADDRESS || pending >= MAX_PENDING) { s.close(); continue }
+            times += t
+            s.configureBlocking(false)
+            setOptions(s)
+            val c = Conn(s, false)
+            c.remote = s.remoteAddress as? InetSocketAddress
+            conns += c
+            register(c, SelectionKey.OP_READ)
+        }
+    }
+
+    private val readBuffer = ByteBuffer.allocate(65536)
+
+    private fun connReady(c: Conn, key: SelectionKey) {
+        if (c !in conns) return
+        try {
+            if (key.isConnectable) {
+                if (!c.channel.finishConnect()) return
+                c.connected = true
+                c.remote = c.channel.remoteAddress as? InetSocketAddress
+                setOptions(c.channel)
+                if (c.kind == Kind.PAIR_OUT) queue(c, LinkWire.pairRequest(store.identity.id, store.identity.name))
+                pump(c)
+                interest(c)
+                return
+            }
+            if (key.isWritable) {
+                flush(c)
+                if (c !in conns) return
+                pump(c)
+            }
+            if (key.isReadable) {
+                readBuffer.clear()
+                val n = c.channel.read(readBuffer)
+                if (n < 0) { removeConn(c); return }
+                if (n > 0) connInput(c, readBuffer.array().copyOf(n))
+            }
+        } catch (e: IOException) {
+            removeConn(c)
+        }
+    }
+
+    private fun queue(c: Conn, bytes: ByteArray) {
+        if (bytes.isEmpty()) return
+        c.out.add(ByteBuffer.wrap(bytes))
+        flush(c)
+    }
+
+    private fun flush(c: Conn) {
+        if (!c.connected || c !in conns) return
+        try {
+            while (c.out.isNotEmpty()) {
+                val b = c.out.peek()!!
+                c.channel.write(b)
+                if (b.hasRemaining()) break
+                c.out.poll()
+            }
+        } catch (e: IOException) {
+            removeConn(c)
+            return
+        }
+        if (c.closing && c.out.isEmpty() && !(c.link != 0L && LinkNative.linkHasOutput(c.link))) { removeConn(c); return }
+        interest(c)
+    }
+
+    private fun connInput(c: Conn, data: ByteArray) {
+        if (c.closing) return
+        when (c.kind) {
+            Kind.UNKNOWN -> {
+                c.pre += data
+                when (LinkWire.FirstFrame.entries[LinkNative.peekFirstFrame(c.pre)]) {
+                    LinkWire.FirstFrame.NEED_MORE -> if (c.pre.size > 4096) closeConn(c, false)
+                    LinkWire.FirstFrame.NOISE -> {
+                        c.kind = Kind.LINK
+                        c.link = LinkNative.linkAnswer(store.identity.secret, store.identity.id, store.identity.name, store.pairedTable(), now())
+                        val pre = c.pre
+                        c.pre = ByteArray(0)
+                        LinkNative.linkReceive(c.link, pre, pre.size, now())
+                        afterLink(c)
+                    }
+                    LinkWire.FirstFrame.PAIR -> {
+                        val (first, used) = LinkWire.frameAt(c.pre, c.pre.size) ?: return
+                        val rest = c.pre.copyOfRange(used, c.pre.size)
+                        c.pre = ByteArray(0)
+                        pairFirst(c, first, rest)
+                    }
+                    LinkWire.FirstFrame.BAD_VERSION -> {
+                        queue(c, LinkNative.refuseFrame(LinkWire.REFUSE_VERSION))
+                        closeConn(c)
+                    }
+                    LinkWire.FirstFrame.GARBAGE -> closeConn(c, false)
+                }
+            }
+            Kind.LINK -> {
+                LinkNative.linkReceive(c.link, data, data.size, now())
+                afterLink(c)
+            }
+            Kind.PAIR_IN, Kind.PAIR_OUT -> pairInput(c, data)
+        }
+    }
+
+    private fun linkState(c: Conn) = LinkState.entries[LinkNative.linkState(c.link)]
+
+    private fun afterLink(c: Conn) {
+        if (c !in conns || c.link == 0L) return
+        val state = linkState(c)
+        if (c.peer.isEmpty() && state != LinkState.HANDSHAKE) c.peer = LinkWire.hex(LinkNative.linkPeerId(c.link))
+        if (state == LinkState.UP && !c.up) {
+            c.up = true
+            linkUp(c)
+            if (c !in conns) return
+        }
+        if (c.up) muxEvents(c)
+        if (c !in conns) return
+        pump(c)
+        if (c !in conns) return
+        if (linkState(c) == LinkState.DOWN && !c.closing) {
+            val hex = c.peer.ifEmpty { LinkWire.hex(LinkNative.linkPeerId(c.link)) }
+            val p = store.find(hex)
+            val error = LinkError.entries[LinkNative.linkError(c.link)]
+            if (error == LinkError.KEY_CHANGED && p != null) {
+                val r = run(hex)
+                if (!(r.link != null && r.link !== c && r.link!!.up)) r.keyMismatch = true
+            }
+            if (error == LinkError.UNKNOWN_PEER && p != null && c.outgoing) run(hex).forgotten = true
+            closeConn(c)
+        }
+    }
+
+    private fun linkUp(c: Conn) {
+        val p = store.find(c.peer)
+        if (p == null) { closeConn(c); return }
+        val r = run(c.peer)
+        val old = r.link
+        if (old != null && old !== c) {
+            // One link per pair of installs: keep the one dialled by the lower id; from the same side, the newer.
+            val initNew = if (c.outgoing) store.identity.hex else p.id
+            val initOld = if (old.outgoing) store.identity.hex else p.id
+            if (!(initNew == initOld || initNew < initOld)) { closeConn(c); return }
+            r.link = null
+            linkDown(old)
+            closeConn(old)
+        }
+        if (r.dialing === c) r.dialing = null
+        r.link = c
+        r.backoff = 0; r.failed = false; r.forgotten = false; r.keyMismatch = false; r.idleSince = now()
+        val peerName = LinkNative.linkPeerName(c.link)
+        store.update(c.peer) {
+            var q = it.copy(lastSeen = wall(), keyChanged = false, peerName = peerName)
+            val remote = c.remote
+            if (c.outgoing && remote != null) q = q.copy(lastHost = remote.address.hostAddress ?: "", lastPort = remote.port)
+            q
+        }
+        store.save()
+        matchPeer(c.peer)
+    }
+
+    // The link went: its channels are gone, the machines on it wait again.
+    private fun linkDown(c: Conn) {
+        for (a in attaches) {
+            if (a.chLink !== c) continue
+            a.st = St.IDLE; a.ch = 0; a.chLink = null; a.farMachine = ""; a.farDevice = ""; a.farState = PeerState.RUNNING
+        }
+        if (c.peer.isNotEmpty()) runs[c.peer]?.let { r ->
+            if (r.link === c) { r.link = null; r.held.clear(); r.nextTry = now() + LinkWire.backoff(0) }
+            if (r.dialing === c) r.dialing = null
+        }
+    }
+
+    private fun pump(c: Conn) {
+        if (c !in conns || !c.connected) return
+        while (c.toWrite < WRITE_AHEAD) {
+            val out = when {
+                c.link != 0L && LinkNative.linkHasOutput(c.link) -> LinkNative.linkTakeOutput(c.link, WRITE_AHEAD)
+                c.pairing != 0L -> LinkNative.pairTakeOutput(c.pairing)
+                else -> null
+            }
+            if (out == null || out.isEmpty()) break
+            c.out.add(ByteBuffer.wrap(out))
+            flush(c)
+            if (c !in conns) return
+        }
+        flush(c)
+    }
+
+    private fun closeConn(c: Conn, flush: Boolean = true) {
+        if (c !in conns) return
+        if (c.up) { c.up = false; linkDown(c); if (c.peer.isNotEmpty()) matchPeer(c.peer) }
+        if (c.link != 0L && linkState(c) != LinkState.DOWN) LinkNative.linkClose(c.link, LinkWire.CLOSE_NORMAL)
+        if (pairConn === c) pairOut.conn = null
+        if (!c.closing) c.closingAt = now()
+        c.closing = true
+        if (flush && c.connected) {
+            pump(c)
+            // A peer that never reads gets dropped by the tick after CLOSING_MS.
+        } else {
+            removeConn(c)
+        }
+    }
+
+    private fun removeConn(c: Conn) {
+        if (!conns.remove(c)) return
+        if (c.up) { c.up = false; linkDown(c) }
+        if (c.peer.isNotEmpty()) runs[c.peer]?.let { r ->
+            if (r.dialing === c) { r.dialing = null; dialFailed(c) }
+            if (r.link === c) r.link = null
+            matchPeer(c.peer)
+        }
+        if (pairConn === c) {
+            pairOut.conn = null
+            if (c.kind == Kind.PAIR_OUT && !c.gotAnswer && c.pairing == 0L)
+                sendTo(pairOut.client, JSONObject().put("type", "pair-result").put("result", "unreachable").put("name", pairOut.peerName))
+        }
+        try { c.key?.cancel() } catch (_: Exception) {}
+        try { c.channel.close() } catch (_: IOException) {}
+        if (c.link != 0L) { LinkNative.linkFree(c.link); c.link = 0L }
+        if (c.pairing != 0L) { LinkNative.pairFree(c.pairing); c.pairing = 0L }
+    }
+
+    // Where to dial a peer, tried in turn: the last beacon's address, the last address a handshake we
+    // dialled succeeded at and the typed address, each once.
+    private fun dialTargets(hex: String): List<Pair<String, Int>> {
+        val p = store.find(hex) ?: return emptyList()
+        val targets = ArrayList<Pair<String, Int>>()
+        fun add(host: String, port: Int) {
+            if (host.isNotEmpty() && port != 0 && (host to port) !in targets) targets += host to port
+        }
+        runs[hex]?.let { r -> r.seen?.let { add(it.hostAddress ?: "", r.seenPort) } }
+        add(p.lastHost, p.lastPort)
+        if (p.address.isNotEmpty()) LinkWire.hostPort(p.address)?.let { add(it.first, it.second) }
+        return targets
+    }
+
+    private fun dial(hex: String) {
+        val p = store.find(hex) ?: return
+        val r = run(hex)
+        val targets = dialTargets(hex)
+        if (targets.isEmpty()) { r.failed = true; r.nextTry = now() + LinkWire.backoff(r.backoff++); return }
+        val target = targets[r.target % targets.size]
+        val key = LinkWire.unhex(p.id, 16) ?: return
+        val s = SocketChannel.open()
+        s.configureBlocking(false)
+        val c = Conn(s, true)
+        c.kind = Kind.LINK
+        c.peer = hex
+        conns += c
+        r.dialing = c
+        c.link = LinkNative.linkDial(store.identity.secret, store.identity.id, store.identity.name, key, p.key, now())
+        try {
+            setOptions(s)
+            val address = InetAddress.getByName(target.first)
+            if (!LinkWire.allowedPeer(address)) throw IOException("not a local address")
+            if (s.connect(InetSocketAddress(address, target.second))) {
+                c.connected = true
+                c.remote = s.remoteAddress as? InetSocketAddress
+                register(c, SelectionKey.OP_READ)
+                pump(c)
+            } else register(c, SelectionKey.OP_CONNECT)
+        } catch (e: Exception) {
+            removeConn(c)
+        }
+    }
+
+    // Tries the next address at once, and backs off after a round of them.
+    private fun dialFailed(c: Conn) {
+        val r = run(c.peer)
+        val count = dialTargets(c.peer).size
+        ++r.target
+        if (count > 1 && r.target % count != 0) { r.nextTry = now(); return }
+        r.failed = true
+        r.nextTry = now() + LinkWire.backoff(r.backoff++)
+    }
+
+    // ---- Pairing ----
+    // Before CPace, A sends a request frame (header, 0, idA, name) and B answers with its own id and
+    // name, or a refuse frame if its Connections screen isn't open. B shows the code then.
+
+    private fun newPairing(typed: String) =
+        LinkNative.pairDial(store.identity.secret, store.identity.id, store.identity.name, typed, now())
+
+    private fun pairFirst(c: Conn, first: ByteArray, rest: ByteArray) {
+        val frame = LinkWire.parsePairFrame(first)
+        val request = frame as? LinkWire.PairFrame.Request
+        val same = code != 0L && request != null && request.id.contentEquals(requester)
+        if (request == null || watchers() == 0 || now() < pairCooldown || (code != 0L && !same) ||
+            request.id.contentEquals(store.identity.id)) {
+            queue(c, LinkNative.refuseFrame(LinkWire.REFUSE_NOT_PAIRING))
+            closeConn(c)
+            return
+        }
+        if (code == 0L) {
+            code = LinkNative.codeNew(now())
+            codeAt = now()
+            requester = request.id
+            requesterName = request.name.ifEmpty { "Frond" }
+            broadcastWatchers(JSONObject().put("type", "pair-request").put("name", requesterName)
+                .put("code", LinkWire.showCode(LinkNative.codeText(code))))
+        }
+        c.kind = Kind.PAIR_IN
+        queue(c, LinkWire.pairRequest(store.identity.id, store.identity.name))
+        c.pairing = LinkNative.pairAnswer(store.identity.secret, store.identity.id, store.identity.name, code, now())
+        if (rest.isNotEmpty()) pairInput(c, rest)
+    }
+
+    private fun pairInput(c: Conn, data: ByteArray) {
+        if (c.kind == Kind.PAIR_OUT && !c.gotAnswer) {
+            c.pre += data
+            val (body, used) = LinkWire.frameAt(c.pre, c.pre.size) ?: return
+            val rest = c.pre.copyOfRange(used, c.pre.size)
+            c.pre = ByteArray(0)
+            when (val f = LinkWire.parsePairFrame(body)) {
+                is LinkWire.PairFrame.Request -> {
+                    pairOut.peerId = f.id
+                    if (f.name.isNotEmpty()) pairOut.peerName = f.name
+                    c.gotAnswer = true
+                    sendTo(pairOut.client, JSONObject().put("type", "pair-peer").put("name", pairOut.peerName))
+                    if (pairOut.code.isNotEmpty()) c.pairing = newPairing(pairOut.code)
+                    if (rest.isNotEmpty() && c.pairing != 0L) LinkNative.pairReceive(c.pairing, rest, rest.size, now())
+                    pump(c)
+                    if (c.pairing != 0L) pairDone(c)
+                }
+                else -> {
+                    val why = (f as? LinkWire.PairFrame.Refused)?.reason ?: LinkWire.REFUSE_PROTOCOL
+                    sendTo(pairOut.client, JSONObject().put("type", "pair-result").put("name", pairOut.peerName).put("result",
+                        when (why) { LinkWire.REFUSE_NOT_PAIRING -> "notpairing"; LinkWire.REFUSE_VERSION -> "version"; else -> "failed" }))
+                    c.gotAnswer = true
+                    closeConn(c, false)
+                }
+            }
+            return
+        }
+        if (c.pairing == 0L) return
+        LinkNative.pairReceive(c.pairing, data, data.size, now())
+        pump(c)
+        pairDone(c)
+    }
+
+    private fun pairOutStart() {
+        val target = try { InetAddress.getByName(pairOut.host) } catch (e: Exception) { null }
+        val s = SocketChannel.open()
+        s.configureBlocking(false)
+        val c = Conn(s, true)
+        c.kind = Kind.PAIR_OUT
+        conns += c
+        pairOut.conn = c
+        try {
+            if (target == null || !LinkWire.allowedPeer(target)) throw IOException("not a local address")
+            setOptions(s)
+            if (s.connect(InetSocketAddress(target, pairOut.port))) {
+                c.connected = true
+                c.remote = s.remoteAddress as? InetSocketAddress
+                register(c, SelectionKey.OP_READ)
+                queue(c, LinkWire.pairRequest(store.identity.id, store.identity.name))
+            } else register(c, SelectionKey.OP_CONNECT)
+        } catch (e: Exception) {
+            removeConn(c)
+        }
+    }
+
+    private fun pairDone(c: Conn) {
+        if (c.pairing == 0L) return
+        val result = PairResult.entries[LinkNative.pairResult(c.pairing)]
+        if (result == PairResult.PENDING) return
+        var pairedId = ""
+        if (result == PairResult.PAIRED) {
+            val info = LinkNative.pairPeer(c.pairing)
+            val id = info.copyOfRange(0, 16)
+            val key = info.copyOfRange(16, 48)
+            val name = info.copyOfRange(48, info.size).toString(Charsets.UTF_8)
+            val hex = LinkWire.hex(id)
+            pairedId = hex
+            val old = store.find(hex)
+            var p = (old ?: LinkStore.Peer(hex, name, name, key)).copy(key = key, peerName = name, paired = true, keyChanged = false, lastSeen = wall())
+            if (p.name.isEmpty()) p = p.copy(name = name)
+            if (c.kind == Kind.PAIR_OUT) {
+                if (pairOut.typedAddress.isNotEmpty()) p = p.copy(address = pairOut.typedAddress)
+                c.remote?.let { p = p.copy(lastHost = it.address.hostAddress ?: "", lastPort = pairOut.port) }
+            }
+            store.put(p)
+            run(hex).apply { forgotten = false; failed = false; keyMismatch = false }
+            nearby.remove(hex)
+            store.save()
+        }
+        if (c.kind == Kind.PAIR_OUT) {
+            sendTo(pairOut.client, JSONObject().put("type", "pair-result").put("result", LinkWire.pairResultName(result))
+                .put("name", pairOut.peerName).put("id", pairedId))
+            if (result == PairResult.PAIRED) { pairOut.client = null; pairOut.code = "" }
+        } else if (code != 0L) {
+            when {
+                result == PairResult.PAIRED -> { LinkNative.codeSucceeded(code); endPairRequest("paired") }
+                result == PairResult.LOCKED_OUT || LinkNative.codeTriesLeft(code) <= 0 -> endPairRequest("lockedout")
+                result == PairResult.EXPIRED -> endPairRequest("expired")
+                else -> broadcastWatchers(JSONObject().put("type", "pair-request-update").put("result", LinkWire.pairResultName(result))
+                    .put("tries", LinkNative.codeTriesLeft(code)))
+            }
+        }
+        closeConn(c)
+    }
+
+    // A code that ran out or was locked out gets the same cooldown, so codes can't be cycled.
+    private fun endPairRequest(result: String) {
+        if (code == 0L) return
+        if (result == "lockedout" || result == "expired") pairCooldown = now() + PAIR_COOLDOWN_MS
+        broadcastWatchers(JSONObject().put("type", "pair-request-end").put("result", result).put("name", requesterName))
+        for (c in ArrayList(conns))
+            if (c.kind == Kind.PAIR_IN && c.pairing != 0L && LinkNative.pairResult(c.pairing) == PairResult.PENDING.ordinal) closeConn(c, false)
+        // Pairings still alive keep their own reference to the code.
+        LinkNative.codeFree(code)
+        code = 0L
+        requester = ByteArray(0)
+        requesterName = ""
+    }
+
+    // ---- Channels ----
+
+    private fun wanted(hex: String) = attaches.any { it.link == hex }
+
+    private fun attachOn(c: Conn, ch: Int) = attaches.firstOrNull { it.chLink === c && it.ch == ch }
+
+    private fun ownState(a: Attach) = when {
+        a.paused -> PeerState.PAUSED
+        !a.coreUp -> PeerState.ASLEEP
+        else -> PeerState.RUNNING
+    }
+
+    private fun joined(a: Attach, c: Conn, ch: Int, machine: String, device: String) {
+        a.st = St.JOINED; a.ch = ch; a.chLink = c; a.farMachine = machine; a.farDevice = device; a.farState = PeerState.RUNNING
+        if (ownState(a) != PeerState.RUNNING) LinkNative.muxSendState(c.link, ch, ownState(a).wire)
+    }
+
+    private fun muxEvents(c: Conn) {
+        while (c in conns && c.link != 0L) {
+            val raw = LinkNative.muxNextEvent(c.link) ?: break
+            val e = LinkWire.ChannelEvent.decode(raw) ?: continue
+            val r = run(c.peer)
+            r.idleSince = now()
+            val a = attachOn(c, e.channel)
+            when (e.kind) {
+                EventKind.OPEN_REQUEST ->
+                    // Serial and Bluetooth come later.
+                    if (e.channelKind != LinkWire.KIND_INFRARED) LinkNative.muxClose(c.link, e.channel, LinkWire.CLOSE_GONE)
+                    else irRequest(c, e)
+                EventKind.ACCEPTED -> if (a != null) joined(a, c, a.ch, e.machine, e.device)
+                EventKind.WAITING -> if (a != null) a.st = St.WAITING
+                EventKind.BUSY -> if (a != null) {
+                    a.st = St.BUSY; a.ch = 0; a.chLink = null; a.busyBy = e.machine; a.retryAt = now() + BUSY_RETRY_MS
+                }
+                EventKind.DATA -> {
+                    if (a != null && a.st == St.JOINED && a.coreUp) writeCore(a, e.data)
+                    LinkNative.muxConsumed(c.link, e.channel, e.data.size)
+                }
+                EventKind.CLOSED -> {
+                    if (a != null) { a.st = St.IDLE; a.ch = 0; a.chLink = null; a.retryAt = now() + 500; a.farMachine = "" }
+                    r.held.removeAll { it.ch == e.channel }
+                }
+                EventKind.STATE -> if (a != null) a.farState = PeerState.of(e.code)
+            }
+        }
+        if (c in conns) matchPeer(c.peer)
+    }
+
+    private fun irRequest(c: Conn, e: LinkWire.ChannelEvent) {
+        val r = run(c.peer)
+        var idle: Attach? = null
+        var pending: Attach? = null
+        var joined: Attach? = null
+        for (a in attaches) {
+            if (a.link != c.peer) continue
+            when (a.st) {
+                St.IDLE, St.BUSY -> if (idle == null) idle = a
+                St.OPENING, St.WAITING -> if (pending == null) pending = a
+                St.JOINED -> if (joined == null) joined = a
+            }
+        }
+        if (idle != null) {
+            LinkNative.muxAccept(c.link, e.channel, idle.machine, idle.device)
+            joined(idle, c, e.channel, e.machine, e.device)
+            return
+        }
+        if (pending != null) {
+            // Both sides opened at once: the link's initiator keeps its own channel, the other yields.
+            if (c.outgoing) { LinkNative.muxWaiting(c.link, e.channel); r.held += Held(e.channel, e.machine, e.device); return }
+            LinkNative.muxClose(c.link, pending.ch, LinkWire.CLOSE_NORMAL)
+            LinkNative.muxAccept(c.link, e.channel, pending.machine, pending.device)
+            joined(pending, c, e.channel, e.machine, e.device)
+            return
+        }
+        if (joined != null) { LinkNative.muxBusy(c.link, e.channel, joined.farMachine, joined.farDevice); return }
+        LinkNative.muxWaiting(c.link, e.channel)
+        r.held += Held(e.channel, e.machine, e.device)
+    }
+
+    private fun matchPeer(hex: String) {
+        if (hex.isEmpty()) return
+        val r = runs[hex] ?: return
+        val c = r.link ?: return
+        if (!c.up || c.link == 0L || linkState(c) != LinkState.UP) return
+        for (a in attaches) {
+            if (a.link != hex || !(a.st == St.IDLE || a.st == St.BUSY) || a.retryAt > now()) continue
+            if (r.held.isNotEmpty()) {
+                val h = r.held.removeAt(0)
+                if (LinkNative.muxAccept(c.link, h.ch, a.machine, a.device)) {
+                    joined(a, c, h.ch, h.machine, h.device)
+                    continue
+                }
+            }
+            val ch = LinkNative.muxOpen(c.link, LinkWire.KIND_INFRARED, a.machine, a.device)
+            if (ch == 0) continue
+            a.st = St.OPENING; a.ch = ch; a.chLink = c
+        }
+        // Held requests while every machine here is joined are busy.
+        val joined = attaches.firstOrNull { it.link == hex && it.st == St.JOINED }
+        val spare = attaches.any { it.link == hex && it.st != St.JOINED }
+        if (joined != null && !spare) {
+            for (h in r.held) LinkNative.muxBusy(c.link, h.ch, joined.farMachine, joined.farDevice)
+            r.held.clear()
+        }
+        pump(c)
+    }
+
+    private fun unjoin(a: Attach, closeChannel: Boolean) {
+        val c = a.chLink
+        if (c != null && a.ch != 0 && c in conns && c.link != 0L && closeChannel) {
+            LinkNative.muxClose(c.link, a.ch, LinkWire.CLOSE_GONE)
+            pump(c)
+        }
+        a.st = St.IDLE; a.ch = 0; a.chLink = null
+    }
+
+    // ---- The core's infrared socket ----
+
+    private fun closeCore(a: Attach) {
+        a.coreGeneration++
+        try { a.core?.close() } catch (_: IOException) {}
+        a.core = null
+    }
+
+    private fun coreConnect(a: Attach) {
+        closeCore(a)
+        a.nextCoreTry = now() + CORE_RETRY_MS
+        if (a.socketPath.isEmpty()) return
+        val s = LocalSocket()
+        try {
+            s.connect(LocalSocketAddress(a.socketPath, LocalSocketAddress.Namespace.FILESYSTEM))
+        } catch (e: IOException) {
+            try { s.close() } catch (_: IOException) {}
+            return
+        }
+        a.core = s
+        a.coreUp = true
+        val generation = a.coreGeneration
+        coreState(a, ownState(a))
+        // Bytes from the core come in on their own thread and are handled on the engine's.
+        Thread({
+            val buffer = ByteArray(4096)
+            try {
+                val input = s.inputStream
+                while (true) {
+                    val n = input.read(buffer)
+                    if (n < 0) break
+                    val bytes = buffer.copyOf(n)
+                    post { if (a in attaches && a.coreGeneration == generation) coreBytes(a, bytes) }
+                }
+            } catch (_: IOException) {}
+            post { if (a in attaches && a.coreGeneration == generation) coreClosed(a) }
+        }, "FrondLinkCore").apply { isDaemon = true }.start()
+    }
+
+    // Sleep, load or reset closed the core's port; it reopens on wake.
+    private fun coreClosed(a: Attach) {
+        closeCore(a)
+        val was = a.coreUp
+        a.coreUp = false
+        if (was) coreState(a, ownState(a))
+        a.nextCoreTry = now() + CORE_RETRY_MS
+    }
+
+    private fun writeCore(a: Attach, data: ByteArray) {
+        try { a.core?.outputStream?.write(data) } catch (e: IOException) { coreClosed(a) }
+    }
+
+    private fun coreBytes(a: Attach, data: ByteArray) {
+        if (a.st != St.JOINED) return  // nobody in range
+        val c = a.chLink ?: return
+        if (c !in conns || c.link == 0L) return
+        var at = 0
+        while (at < data.size) {
+            val n = minOf(2048, data.size - at)
+            LinkNative.muxSend(c.link, a.ch, data, at, n)
+            at += n
+        }
+        pump(c)
+    }
+
+    private fun coreState(a: Attach, state: PeerState) {
+        val c = a.chLink ?: return
+        if (a.st == St.JOINED && c in conns && c.link != 0L) {
+            LinkNative.muxSendState(c.link, a.ch, state.wire)
+            pump(c)
+        }
+    }
+
+    // ---- Discovery ----
+
+    private fun discoveryActive() = watchers() > 0 || pairOut.client != null || attaches.isNotEmpty()
+
+    private fun beacon(type: Int, to: InetSocketAddress? = null) {
+        val d = udp ?: return
+        val datagram = LinkWire.beacon(type, store.identity.id, listenPort, store.identity.name)
+        try {
+            if (to != null) { d.send(ByteBuffer.wrap(datagram), to); return }
+            val targets = LinkedHashSet<InetAddress>()
+            targets += InetAddress.getByAddress(byteArrayOf(-1, -1, -1, -1))
+            try {
+                for (i in NetworkInterface.getNetworkInterfaces()?.toList() ?: emptyList()) {
+                    if (!i.isUp || i.isLoopback) continue
+                    for (address in i.interfaceAddresses) address.broadcast?.takeIf { it is Inet4Address }?.let { targets += it }
+                }
+            } catch (_: Exception) {}
+            for (t in targets) try { d.send(ByteBuffer.wrap(datagram), InetSocketAddress(t, host.discoveryPort)) } catch (_: IOException) {}
+        } catch (e: IOException) {
+        }
+    }
+
+    private val udpBuffer = ByteBuffer.allocate(512)
+
+    private fun datagrams() {
+        val d = udp ?: return
+        while (true) {
+            udpBuffer.clear()
+            val from = try { d.receive(udpBuffer) as? InetSocketAddress } catch (e: IOException) { null } ?: return
+            if (!LinkWire.allowedPeer(from.address)) continue
+            val b = LinkWire.parseBeacon(udpBuffer.array(), udpBuffer.position()) ?: continue
+            if (b.id.contentEquals(store.identity.id)) continue
+            if (b.type == LinkWire.QUERY && discoveryActive()) beacon(LinkWire.BEACON, from)
+            val hex = LinkWire.hex(b.id)
+            val p = store.find(hex)
+            if (p != null && p.paired) {
+                val r = run(hex)
+                val moved = r.seen != from.address || r.seenPort != b.port || now() - r.seenAt > NEARBY_MS
+                r.seen = from.address
+                r.seenPort = b.port
+                r.seenAt = now()
+                // A peer that moved or came back is dialled at once, at most once a second, starting at the new address.
+                if (moved && wanted(hex) && r.link == null && r.dialing == null && now() - r.beaconDialAt >= LinkWire.backoff(0)) {
+                    r.nextTry = now(); r.target = 0; r.beaconDialAt = now()
+                }
+            } else {
+                nearby[hex] = Nearby(b.name, from.address, b.port, now())
+            }
+        }
+    }
+
+    // ---- Status ----
+
+    private fun irStatus(a: Attach): JSONObject {
+        val p = store.find(a.link)
+        val r = runs[a.link]
+        val state = when {
+            p == null -> "unknown"
+            !host.networkAllowed() -> "nonetwork"
+            p.keyChanged || (r != null && r.keyMismatch && r.link == null) -> "keychanged"
+            r != null && r.forgotten -> "forgotten"
+            a.st == St.JOINED -> "joined"
+            a.st == St.WAITING -> "waiting"
+            a.st == St.BUSY -> "busy"
+            r != null && r.failed && r.link == null -> "notfound"
+            else -> "connecting"
+        }
+        return JSONObject().put("type", "ir").put("peer", p?.name ?: "").put("state", state).put("machine", a.farMachine)
+            .put("device", a.farDevice).put("busyBy", a.busyBy).put("core", a.coreUp).put("far", a.farState.text)
+    }
+
+    private fun peerChannels(hex: String): String {
+        val parts = attaches.filter { it.link == hex && it.st == St.JOINED }.map { "${it.machine} – ${it.farMachine.ifEmpty { it.farDevice }}" }
+        return if (parts.isEmpty()) "" else "Infrared: " + parts.joinToString(", ")
+    }
+
+    private fun snapshot(): JSONObject {
+        val list = JSONArray()
+        for (p in store.peers) {
+            val r = runs[p.id]
+            val up = r?.link?.up == true
+            val o = JSONObject().put("id", p.id).put("name", p.name).put("peerName", p.peerName).put("address", p.address)
+                .put("keyChanged", p.keyChanged).put("up", up).put("lastSeen", p.lastSeen)
+            if (r != null) {
+                o.put("forgotten", r.forgotten)
+                if (r.keyMismatch && !up) o.put("keyChanged", true)
+                if (up) o.put("rtt", LinkNative.linkRtt(r.link!!.link))
+                val seen = r.seen
+                if (seen != null && now() - r.seenAt < NEARBY_MS) o.put("seen", seen.hostAddress)
+            }
+            o.put("channels", peerChannels(p.id))
+            list.put(o)
+        }
+        val near = JSONArray()
+        for ((id, n) in nearby) near.put(JSONObject().put("id", id).put("name", n.name).put("address", n.address.hostAddress).put("port", n.port))
+        return JSONObject().put("type", "state").put("id", store.identity.hex).put("name", store.identity.name).put("port", listenPort)
+            .put("connections", list).put("nearby", near)
+    }
+
+    private fun tick() {
+        val t = now()
+        for (c in ArrayList(conns)) {
+            if (c !in conns) continue
+            if (c.closing) {
+                if ((t - c.created > 2000 && !c.connected) || t - c.closingAt > CLOSING_MS) removeConn(c)
+                else flush(c)
+                continue
+            }
+            if (c.kind == Kind.UNKNOWN && t - c.created > FIRST_FRAME_MS) { closeConn(c, false); continue }
+            if (c.outgoing && !c.connected && t - c.created > 3000) { removeConn(c); continue }
+            if (c.link != 0L && c.connected) { LinkNative.linkTick(c.link, t); afterLink(c) }
+            else if (c.kind == Kind.LINK && !c.outgoing && t - c.created > FIRST_FRAME_MS && !c.up) closeConn(c, false)
+            if (c in conns && c.pairing != 0L) { LinkNative.pairTick(c.pairing, t); pump(c); pairDone(c) }
+            else if (c.kind == Kind.PAIR_OUT && t - c.created > PAIR_OUT_MS) closeConn(c, false)
+        }
+        // Links: dial what's wanted, drop what nothing uses.
+        for (p in store.peers) {
+            val want = wanted(p.id)
+            if (!want && !runs.containsKey(p.id)) continue
+            val r = run(p.id)
+            if (want && r.link == null && r.dialing == null && t >= r.nextTry && host.networkAllowed()) dial(p.id)
+            val link = r.link
+            if (link != null && !want && r.held.isEmpty() && t - r.idleSince > LINK_IDLE_MS) {
+                if (attaches.none { it.chLink === link }) closeConn(link)
+            } else if (want || r.held.isNotEmpty()) r.idleSince = t
+        }
+        // Cores: reconnect after sleep, load or reset.
+        for (a in ArrayList(attaches)) if (!a.coreUp && a.core == null && t >= a.nextCoreTry) coreConnect(a)
+        for (a in ArrayList(attaches)) if ((a.st == St.BUSY || a.st == St.IDLE) && a.retryAt <= t) matchPeer(a.link)
+        // Discovery.
+        val active = discoveryActive()
+        if (active != wasActive) host.discovery(active)
+        if (active && (!wasActive || t - lastBeacon >= BEACON_MS)) {
+            if (!wasActive) beacon(LinkWire.QUERY)
+            beacon(LinkWire.BEACON)
+            lastBeacon = t
+        }
+        wasActive = active
+        nearby.entries.removeAll { t - it.value.at > NEARBY_MS }
+        recent.entries.removeAll { it.value.isEmpty() || t - it.value.last() > 10000 }
+        if (code != 0L && t - codeAt >= PAIR_CODE_MS) endPairRequest("expired")
+        // Status.
+        for (a in attaches) {
+            val s = irStatus(a)
+            if (s.toString() != a.lastStatus?.toString()) { a.lastStatus = s; sendTo(a.client, s) }
+        }
+        if (watchers() > 0) {
+            val s = snapshot()
+            if (s.toString() != lastSnapshot?.toString()) { lastSnapshot = s; broadcastWatchers(s) }
+        } else lastSnapshot = null
+    }
+
+    companion object {
+        private const val TAG = "Frond"
+        // Bytes queued for a link socket before the engine stops taking more from the mux, so infrared never
+        // waits long behind other bytes. The kernel buffer is capped too.
+        const val WRITE_AHEAD = 4096
+        const val SEND_BUFFER = 8192
+        const val BEACON_MS = 3000L
+        const val NEARBY_MS = 10000L
+        const val FIRST_FRAME_MS = 10000L
+        const val LINK_IDLE_MS = 15000L
+        // A closing connection's last bytes get this long to go.
+        const val CLOSING_MS = 3000L
+        const val CORE_RETRY_MS = 250L
+        const val BUSY_RETRY_MS = 5000L
+        const val PAIR_COOLDOWN_MS = 60000L
+        const val PAIR_CODE_MS = 120000L
+        const val PAIR_OUT_MS = 120000L
+        // Connections not yet authenticated, and new connections per address in 10 s.
+        const val MAX_PENDING = 16
+        const val PER_ADDRESS = 10
+    }
+}

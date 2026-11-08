@@ -13,11 +13,14 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.rm.frond.Device
 import com.rm.frond.HomeModel
+import com.rm.frond.InfraredChoice
+import com.rm.frond.LinkStore
 import com.rm.frond.MachineRows
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -61,6 +64,15 @@ fun MachineSettingsScreen(model: HomeModel) {
             if (rows.speed || rows.engine) Header("Speed", Modifier.padding(top = 16.dp))
             if (rows.speed) MachineSpeedRow(draft.settings, false) { model.changeMachineSettings(it) }
             if (rows.engine) MachineEngineRow(draft.settings, false) { model.changeMachineSettings(it) }
+            if (draft.device.infrared) {
+                Header("Connections", Modifier.padding(top = 16.dp))
+                val choices = remember(draft.settings.infrared) {
+                    InfraredChoice.choices(draft.settings.infrared, LinkStore.choices(InfraredChoice.folder(context)))
+                }
+                Choice("Infrared", draft.settings.infrared, choices.map { it.first }, { v -> choices.first { it.first == v }.second }) {
+                    model.changeMachineSettings(draft.settings.copy(infrared = it))
+                }
+            }
         }
     }
 }

@@ -23,6 +23,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import com.rm.frond.ui.AboutScreen
 import com.rm.frond.ui.CardsScreen
+import com.rm.frond.ui.ConnectionsScreen
 import com.rm.frond.ui.FirmwareScreen
 import com.rm.frond.ui.FrondTheme
 import com.rm.frond.ui.HomeScreen
@@ -67,6 +68,9 @@ class HomeModel(private val activity: HomeActivity) {
     val copyProgress: Float? get() = HomeWork.progress
     // The Cards screen, when open.
     var cards by mutableStateOf<CardsModel?>(null)
+        private set
+    // The Connections screen, when open; it watches the link engine while Home is in front.
+    var connections by mutableStateOf<ConnectionsModel?>(null)
         private set
     // A short message for the home screen's snackbar.
     var notice by mutableStateOf<String?>(null)
@@ -183,6 +187,15 @@ class HomeModel(private val activity: HomeActivity) {
 
     fun openCards() {
         if (cards == null) cards = CardsModel(activity, this).also { it.open() }
+    }
+
+    fun openConnections() {
+        if (connections == null) connections = ConnectionsModel(activity).also { it.open() }
+    }
+
+    fun closeConnections() {
+        connections?.close()
+        connections = null
     }
 
     fun closeCards() {
@@ -342,6 +355,7 @@ class HomeActivity : ComponentActivity() {
                 Surface(Modifier.fillMaxSize()) {
                     BackHandler(enabled = model.firmwareOpen) { model.closeFirmware() }
                     BackHandler(enabled = model.cards != null && !model.firmwareOpen && !model.settingsOpen) { model.closeCards() }
+                    BackHandler(enabled = model.connections != null && model.cards == null && !model.firmwareOpen && !model.settingsOpen) { model.closeConnections() }
                     BackHandler(enabled = model.machineDraft != null && !model.firmwareOpen) { model.cancelMachine() }
                     BackHandler(enabled = model.settingsOpen) {
                         when {
@@ -358,6 +372,7 @@ class HomeActivity : ComponentActivity() {
                         model.firmwareOpen -> FirmwareScreen(model)
                         model.machineDraft != null -> MachineSettingsScreen(model)
                         model.cards != null -> CardsScreen(model, model.cards!!)
+                        model.connections != null -> ConnectionsScreen(model, model.connections!!)
                         else -> HomeScreen(model)
                     }
                 }
@@ -406,6 +421,16 @@ class HomeActivity : ComponentActivity() {
             model.alert = "Emulator stopped" to note.readText()
             note.delete()
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        model.connections?.open()
+    }
+
+    override fun onStop() {
+        model.connections?.close()
+        super.onStop()
     }
 
     override fun onPause() {

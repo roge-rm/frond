@@ -66,12 +66,14 @@ data class MachineSettings(
     // Android: whether the bar over the running machine shows.
     val barShown: Boolean = true,
     val barMode: BarMode = BarMode.AUTO_HIDE,
+    // Infrared: off, or link:<id> for a connection (InfraredChoice). Applied at every start.
+    val infrared: String = InfraredChoice.OFF,
 ) {
     fun json(): JSONObject = JSONObject().put("size", size.name).put("smoothing", smoothing)
         .put("sound", sound).put("fastAudio", fastAudio).put("microphone", microphone)
         .put("showKeyboard", showKeyboard).put("jogControls", jogControls.arg)
         .put("showJogControls", jogControls != JogControls.HIDDEN)
-        .put("engine", engine.arg).put("speed", speed.arg).put("barShown", barShown).put("barMode", barMode.arg).also { if (contrastSet) it.put("contrast", contrast) }
+        .put("engine", engine.arg).put("speed", speed.arg).put("barShown", barShown).put("barMode", barMode.arg).put("infrared", infrared).also { if (contrastSet) it.put("contrast", contrast) }
 
     fun applyTo(settings: Settings) = settings.copy(size = size, smoothing = smoothing, sound = sound)
 
@@ -129,6 +131,7 @@ data class MachineSettings(
                 speed = CpuSpeed.entries.firstOrNull { it.arg == json.optString("speed") } ?: fallback.speed,
                 barShown = json.optBoolean("barShown", fallback.barShown),
                 barMode = BarMode.entries.firstOrNull { it.arg == json.optString("barMode") } ?: fallback.barMode,
+                infrared = InfraredChoice.normalise(json.optString("infrared", fallback.infrared)),
             )
         }
     }

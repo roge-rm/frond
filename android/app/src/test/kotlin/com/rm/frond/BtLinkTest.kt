@@ -14,8 +14,8 @@ class BtLinkTest {
         assertEquals("fe80::1" to 6000, BtLink.address("[fe80::1]:6000"))
         assertNull(BtLink.address("host:0"))
         assertNull(BtLink.address(""))
-        // Infrared keeps its own default.
-        assertEquals("10.0.2.2" to IrBeam.DEFAULT_PORT, IrBeam.address("10.0.2.2"))
+        // Serial keeps its own default.
+        assertEquals("10.0.2.2" to SerialLink.DEFAULT_PORT, SerialLink.address("10.0.2.2"))
     }
 
     @Test

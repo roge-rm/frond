@@ -187,7 +187,7 @@ android {
                     "-DFROND_DYNARMIC=${dynarmicSource.absolutePath}",
                     "-DFROND_BOOST_INCLUDE=$boostInclude",
                 )
-                if (jitDifferential) targets += listOf("main", "main68k", "frondcard", "jit-differential", "benchmark-replay")
+                if (jitDifferential) targets += listOf("main", "main68k", "frondcard", "frondlink", "jit-differential", "benchmark-replay")
             }
         }
     }

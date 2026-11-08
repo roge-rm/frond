@@ -607,14 +607,14 @@ class RunningModel(
         if (reply.ok) null else reply.message
     }
 
-    // Infrared beaming over the network, as the relay says. Kept up to date while the menu is open.
-    var beam by mutableStateOf(IrBeam.status.value)
+    // Infrared over a connection, as IrLink says. Kept up to date while the menu is open.
+    var beam by mutableStateOf(IrLink.status.value)
         private set
 
     fun watchBeam() {
         activity.lifecycleScope.launch {
-            IrBeam.status.collect {
-                val changed = it.phase != beam.phase
+            IrLink.status.collect {
+                val changed = it.active != beam.active
                 beam = it
                 // Beaming ending can come with the core restoring the keyboard from a loaded session.
                 if (changed) readKeyboard()
@@ -622,11 +622,13 @@ class RunningModel(
         }
     }
 
-    fun changeBeam(mode: BeamMode) = device("Changing infrared beaming", "Couldn't change infrared beaming", false) { l ->
-        IrBeam.set(activity.applicationContext, l, mode)
+    // Off or link:<id>: kept in the machine's settings, then applied to the core and the link.
+    fun changeBeam(choice: String) = device("Changing infrared beaming", "Couldn't change infrared beaming", false) { l ->
+        sessionId?.let { id -> Sessions.updateSettings(activity.applicationContext, id) { it.copy(infrared = choice) } }
+        activity.runOnUiThread { settings = settings.copy(infrared = choice) }
+        if (InfraredChoice.linkId(choice) != null) FrondActivity.running?.askLocalNetwork()
+        IrLink.apply(activity.applicationContext, l, choice, name, device.label)
     }
-
-    fun retryBeam() = IrBeam.retry()
 
     // The serial port and USB HotSync over the network, as their relays say.
     var serial by mutableStateOf(SerialLink.status.value)
