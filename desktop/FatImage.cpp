@@ -529,15 +529,29 @@ QPair<QByteArray, int> FatImage::freeSlots(const Folder& f, int count) {
 // Runs one change and commits it, or rolls the in-memory state back when it fails. Data already
 // written went into clusters the card's FAT still calls free.
 void FatImage::change(const std::function<void()>& block) {
+    if (changing) return block();
+    changing++;
     try {
         block();
         commit();
+        changing--;
     } catch (...) {
+        changing--;
         fat = fatOnDisk;
         staged.clear();
         try { blocks.settleData(); } catch (...) {}
         throw;
     }
+}
+
+void FatImage::replace(const QString& victim, const std::function<void()>& work) {
+    change([&] {
+        const auto [parent, slot] = locate(victim);
+        // Out of its folder first so the new entry can take the name; freed after the new data is in.
+        eraseSlots(parent, slot);
+        work();
+        freeTree(slot.entry, 0);
+    });
 }
 
 // Stages the FAT sectors that differ from the card, in every FAT copy.

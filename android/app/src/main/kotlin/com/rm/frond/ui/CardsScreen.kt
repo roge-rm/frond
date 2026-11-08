@@ -221,7 +221,8 @@ private fun CardRow(
                 IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, contentDescription = "More") }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                     val stopped = !exchange && !running
-                    DropdownMenuItem(text = { Text("Files…") }, enabled = stopped && row.card.kind != "ms",
+                    // A classic Memory Stick can't be edited in place, so it has no Files….
+                    if (row.card.kind != "ms") DropdownMenuItem(text = { Text("Files…") }, enabled = stopped,
                         trailingIcon = if (running) ({ Text("In use", style = MaterialTheme.typography.labelMedium) }) else null,
                         onClick = { menu = false; onFiles(row) })
                     DropdownMenuItem(text = { Text("Rename") }, enabled = !exchange, onClick = { menu = false; onRename(row) })

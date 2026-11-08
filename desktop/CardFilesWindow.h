@@ -4,12 +4,15 @@
 // running machine's card while it is taken out. Closing the window ends the visit.
 #include <QDialog>
 #include <QLockFile>
+#include <QPointer>
 #include <QTemporaryDir>
+#include <atomic>
 #include <functional>
 #include <memory>
 #include "CardFiles.h"
 
 class QLabel;
+class QMessageBox;
 class QLineEdit;
 class QPushButton;
 class QHBoxLayout;
@@ -25,8 +28,17 @@ class CardFilesWindow : public QDialog {
 
     // Held until the card is closed: the machine's lock for a card in a stopped machine.
     std::unique_ptr<QLockFile> hold;
-    // Closes the card file and lets go of `hold`. Called on close; safe to call again.
+    // Closes the card file and lets go of `hold`. Called on close; safe to call again. While a
+    // job runs it cancels the job and closes once its worker has stopped.
     void closeCard();
+    // Set by the owner instead of WA_DeleteOnClose: deleted after closing, once no job and no
+    // event loop started since it opened (a prompt, a job's progress) is still on the stack.
+    bool deleteOnClose{false};
+    // A closing that waits for a job is held back until the worker stops.
+    void done(int result) override;
+    bool working() const { return busy; }
+    // Run on the job's worker thread before the work, for the tests.
+    std::function<void()> workHook;
     bool changed() const { return wasChanged; }
     QString path() const { return current; }
 
@@ -76,4 +88,11 @@ class CardFilesWindow : public QDialog {
     bool clipMove{false}, wasChanged{false}, writable{true};
     QHBoxLayout* shortcuts;
     std::unique_ptr<QTemporaryDir> dragFolder;
+    // A job is running; a close asked for meanwhile (and its result) waits for it.
+    bool busy{false}, closeWanted{false};
+    int closeResult{0};
+    std::atomic<bool> stopRequested{false};
+    QPointer<QMessageBox> clashBox;
+    int openLevel{0};
+    void deleteWhenSafe();
 };

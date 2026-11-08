@@ -56,7 +56,7 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
 
     private val folder = File(context.filesDir, if (memoryStick) "ms-images" else "sd-exchange")
     // The card file open for the file view, and whether a change was committed to it.
-    private var cardFile: CardFile? = null
+    @Volatile private var cardFile: CardFile? = null
     var changed = false
         private set
     // Whether the card was in the Palm when the file view opened, and what the take-out reported.
@@ -408,13 +408,22 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
 
     // Closes the card file and puts the card back in the Palm (ejected again if it was out). The
     // insert waits for the Palm to notice the card was out.
+    // Also run as the machine stops, so it is synchronized against the view's own call.
+    @Synchronized
     fun finishEdit() {
         if (memoryStick) return
         val c = cardFile
         cardFile = null
-        if (c != null) synchronized(c) { c.close() }
-        if (identity != null) putBack()
-        changed = false
+        if (c != null) {
+            try { synchronized(c) { c.close() } } catch (_: Exception) { }
+            // A close that failed can leave the visit's intent file; the card goes in settled.
+            CardFile.settle(c.file)
+        }
+        try {
+            if (identity != null) putBack()
+        } finally {
+            changed = false
+        }
     }
 
     // Drops what an earlier version's exchange left in the private folder.

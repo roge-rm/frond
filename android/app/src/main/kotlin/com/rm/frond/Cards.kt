@@ -167,7 +167,7 @@ object Cards {
     // The SD or Pro v2 generation, or the classic stick's change counter, and the logical size, from
     // a card file's header.
     fun cardHeader(file: File): Pair<Long, Long>? = try {
-        val h = file.inputStream().use { input -> ByteArray(64).also { if (input.read(it) != 64) return null } }
+        val h = FileLocks.readStart(file, 64).takeIf { it.size == 64 } ?: return null
         val magic = String(h, 0, 8, Charsets.US_ASCII)
         when (magic) {
             "FRONDSD\u0000" -> (if (le32(h, 8) == 2L) le64(h, 28) else 0L) to le64(h, 16)
@@ -244,20 +244,14 @@ object Cards {
 
     // A machine's <machine>/.run.lock, held by the :emulator process while the machine runs. Others
     // take it for the length of an operation. Null when someone holds it.
-    class RunLock internal constructor(private val file: RandomAccessFile, private val lock: FileLock) : Closeable {
-        override fun close() {
-            try { lock.release() } catch (_: IOException) {}
-            try { file.close() } catch (_: IOException) {}
-        }
+    class RunLock internal constructor(private val held: FileLocks.Held) : Closeable {
+        override fun close() = held.close()
     }
 
+    // Null when this process or another holds it (through FileLocks, so a check never drops a lock
+    // this process holds).
     fun tryRunLock(dir: File): RunLock? = try {
-        if (!dir.isDirectory) null
-        else {
-            val file = RandomAccessFile(File(dir, RUN_LOCK), "rw")
-            val lock = try { file.channel.tryLock() } catch (e: OverlappingFileLockException) { null }
-            if (lock == null) { file.close(); null } else RunLock(file, lock)
-        }
+        if (!dir.isDirectory) null else FileLocks.tryLock(File(dir, RUN_LOCK))?.let { RunLock(it) }
     } catch (e: IOException) {
         null
     }
@@ -368,16 +362,14 @@ object Cards {
         val id = newId()
         val dir = File(library, ".new-$id")
         private val lockFile = File(library, ".new-$id.lock")
-        private var raf: RandomAccessFile? = null
-        private var lock: FileLock? = null
+        private var lock: FileLocks.Held? = null
         private var kept = false
         val ok: Boolean
 
         init {
             ok = try {
                 library.mkdirs()
-                raf = RandomAccessFile(lockFile, "rw")
-                lock = raf!!.channel.tryLock()
+                lock = FileLocks.tryLock(lockFile)
                 lock != null && dir.mkdirs()
             } catch (e: Exception) {
                 false
@@ -388,8 +380,7 @@ object Cards {
 
         override fun close() {
             if (!kept) dir.deleteRecursively()
-            try { lock?.release() } catch (_: IOException) {}
-            try { raf?.close() } catch (_: IOException) {}
+            lock?.close()
             lockFile.delete()
         }
     }
@@ -398,12 +389,10 @@ object Cards {
     fun removeStaleNew(library: File, now: Long = System.currentTimeMillis()) {
         library.listFiles { f -> f.isDirectory && f.name.startsWith(".new-") }.orEmpty().forEach { dir ->
             val lockFile = File(library, "${dir.name}.lock")
-            val raf = try { RandomAccessFile(lockFile, "rw") } catch (e: IOException) { return@forEach }
-            raf.use {
-                val lock = try { it.channel.tryLock() } catch (e: OverlappingFileLockException) { null } ?: return@forEach
+            val lock = try { FileLocks.tryLock(lockFile) } catch (e: IOException) { null } ?: return@forEach
+            lock.use {
                 val newest = (listOf(dir) + dir.listFiles().orEmpty()).maxOf { f -> f.lastModified() }
                 if (now - newest > 10 * 60 * 1000) dir.deleteRecursively()
-                lock.release()
             }
             if (!dir.exists()) lockFile.delete()
         }

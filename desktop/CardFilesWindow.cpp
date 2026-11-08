@@ -20,6 +20,7 @@
 #include <QShortcut>
 #include <QStandardPaths>
 #include <QThread>
+#include <QTimer>
 #include <QTreeWidget>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -81,6 +82,7 @@ class CardFilesList : public QTreeWidget {
 CardFilesWindow::CardFilesWindow(std::unique_ptr<frondCardFile::CardFile> opened, const QString& title, QWidget* parent)
     : QDialog(parent), card(std::move(opened)) {
     setObjectName("cardFilesWindow");
+    openLevel = QThread::currentThread()->loopLevel();
     setWindowTitle(tr("%1 files").arg(title));
     writable = card && card->writable;
     auto* layout = new QVBoxLayout(this);
@@ -209,6 +211,7 @@ CardFilesWindow::CardFilesWindow(std::unique_ptr<frondCardFile::CardFile> opened
         auto* all = several ? new QCheckBox(tr("For all"), &box) : nullptr;
         if (all) box.setCheckBox(all);
         box.setDefaultButton(both);
+        clashBox = &box;
         box.exec();
         const bool forAll = all && all->isChecked();
         if (box.clickedButton() == replace) return cf::Decision{cf::Clash::Replace, forAll};
@@ -231,9 +234,37 @@ CardFilesWindow::CardFilesWindow(std::unique_ptr<frondCardFile::CardFile> opened
     } catch (const frondCardFile::Error&) {}
 }
 
-CardFilesWindow::~CardFilesWindow() { closeCard(); }
+CardFilesWindow::~CardFilesWindow() {
+    card.reset();
+    hold.reset();
+}
+
+void CardFilesWindow::done(int result) {
+    if (busy) {
+        // The worker is still writing the card: stop it, close when it has.
+        stopRequested = true;
+        closeWanted = true;
+        closeResult = result;
+        if (clashBox) clashBox->reject();
+        return;
+    }
+    QDialog::done(result);
+    if (deleteOnClose) deleteWhenSafe();
+}
+
+void CardFilesWindow::deleteWhenSafe() {
+    if (!busy && QThread::currentThread()->loopLevel() <= openLevel) {
+        deleteLater();
+        return;
+    }
+    QTimer::singleShot(20, this, &CardFilesWindow::deleteWhenSafe);
+}
 
 void CardFilesWindow::closeCard() {
+    if (busy) {
+        done(QDialog::Rejected);
+        return;
+    }
     card.reset();
     hold.reset();
     dragFolder.reset();
@@ -340,21 +371,26 @@ void CardFilesWindow::activated(QTreeWidgetItem* item) {
 }
 
 cf::Decision CardFilesWindow::askOnUi(const QString& name, bool several) {
+    if (stopRequested) return cf::Decision{cf::Clash::Cancel, false};
     if (QThread::currentThread() == thread()) return askClash(name, several);
     cf::Decision d;
-    QMetaObject::invokeMethod(this, [&] { d = askClash(name, several); }, Qt::BlockingQueuedConnection);
+    QMetaObject::invokeMethod(this, [&] { d = stopRequested ? cf::Decision{cf::Clash::Cancel, false} : askClash(name, several); },
+                              Qt::BlockingQueuedConnection);
     return d;
 }
 
 bool CardFilesWindow::job(const QString& label, const QString& failTitle, const Work& work) {
-    if (!card) return false;
+    if (!card || closeWanted || busy) return false;
     QString message;
     bool cancelled = false, committed = false;
     auto* opened = card.get();
+    busy = true;
+    stopRequested = false;
     const auto error = runCardJob(this, label, [&](const frondSessions::CopyProgress& progress) -> QString {
         qint64 total = 0, done = 0;
-        const cf::Cancelled stop = [&] { return !progress(done, std::max<qint64>(total, 1)); };
+        const cf::Cancelled stop = [&] { return !progress(done, std::max<qint64>(total, 1)) || stopRequested.load(); };
         const cf::Bytes bytes = [&](qint64 n) { done = n; };
+        if (workHook) workHook();
         try {
             FatImage fat(*opened);
             try {
@@ -368,13 +404,21 @@ bool CardFilesWindow::job(const QString& label, const QString& failTitle, const 
             cancelled = true;
         } catch (const frondCardFile::Error& e) {
             return e.message;
+        } catch (const std::exception&) {
+            return tr("Something went wrong with the card.");
         }
         return {};
     });
+    busy = false;
     wasChanged = wasChanged || committed;
     relist();
     if (cancelled) message = tr("Cancelled.");
     note->setText(message);
+    if (closeWanted) {
+        // Closed while it ran: close now the worker has stopped, after this call returns.
+        QTimer::singleShot(0, this, [this] { done(closeResult); });
+        return false;
+    }
     if (!error.isEmpty()) QMessageBox::warning(this, failTitle, error);
     return error.isEmpty() && !cancelled;
 }

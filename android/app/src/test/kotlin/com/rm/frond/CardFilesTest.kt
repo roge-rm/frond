@@ -302,6 +302,72 @@ class CardFilesTest {
         }
     }
 
+    // A replace writes the new one beside the old and swaps them in one commit: a cancel or a
+    // source that fails leaves the old one and its space as they were.
+    @Test fun replaceKeepsTheOldUntilTheNewIsIn() {
+        seeded(card()).use { fat ->
+            fat.put("/Other", "track one.sunvox", byteArrayOf(4, 4))
+            val free = fat.freeBytes
+            var calls = 0
+            try {
+                CardFiles.paste(fat, listOf("/Music/Album/track one.sunvox"), "/Other", false, always(CardFiles.Clash.REPLACE), { ++calls > 3 })
+                fail("not cancelled")
+            } catch (e: FatImage.Cancelled) {}
+            assertArrayEquals(byteArrayOf(4, 4), fat.get("/Other/track one.sunvox"))
+            assertEquals(free, fat.freeBytes)
+            val failing = object : java.io.InputStream() {
+                var n = 0
+                override fun read(): Int = if (n++ < 70_000) 1 else throw java.io.IOException("gone")
+            }
+            try {
+                CardFiles.addStream(fat, "/Other", "track one.sunvox", 150_000, { failing }, always(CardFiles.Clash.REPLACE))
+                fail("added")
+            } catch (e: java.io.IOException) {
+                assertEquals("gone", e.message)
+            }
+            assertArrayEquals(byteArrayOf(4, 4), fat.get("/Other/track one.sunvox"))
+            assertEquals(free, fat.freeBytes)
+            assertEquals(emptyList<String>(), fat.check())
+            // Done: the new one only, and the old one's cluster is free again.
+            CardFiles.paste(fat, listOf("/Music/Album/track one.sunvox"), "/Other", false, always(CardFiles.Clash.REPLACE))
+            assertArrayEquals(big, fat.get("/Other/track one.sunvox"))
+            assertEquals(listOf("track one.sunvox"), fat.names("/Other"))
+            val cluster = 4 * 512L
+            assertEquals(free + cluster - (big.size + cluster - 1) / cluster * cluster, fat.freeBytes)
+            assertEquals(emptyList<String>(), fat.check())
+        }
+    }
+
+    // A folder entry whose start cluster is 0 (or past the end, or free) is refused; it isn't read
+    // as the top folder, and a move or delete of it changes nothing.
+    @Test fun aDamagedFolderIsRefused() {
+        val file = card()
+        FatImage.open(file, true).use { it.makeFolder("/", "Bad"); it.makeFolder("/", "Other") }
+        val bytes = file.readBytes()
+        val name = "BAD        ".toByteArray(Charsets.US_ASCII)
+        val at = (0 until bytes.size - 32).first { i -> (0 until 11).all { bytes[i + it] == name[it] } && bytes[i + 11].toInt() == 0x10 }
+        bytes[at + 26] = 0
+        bytes[at + 27] = 0
+        file.writeBytes(bytes)
+        FatImage.open(file, true).use { fat ->
+            for (attempt in listOf<() -> Unit>(
+                { fat.list("/Bad") },
+                { fat.move("/Bad", "/Other") },
+                { fat.remove("/Bad") },
+                { fat.copy("/Bad", "/Other") },
+                { fat.put("/Bad", "x.txt", byteArrayOf(1)) },
+                { fat.sizeOf("/Bad") },
+            )) {
+                try { attempt(); fail("read a damaged folder") } catch (e: FatImage.FatException) { assertEquals("The folder Bad is damaged.", e.message) }
+            }
+            assertEquals(listOf("Bad", "Other"), fat.names("/"))
+        }
+        FatImage.open(file, false).use { fat ->
+            assertEquals(listOf("Bad", "Other"), fat.names("/"))
+            assertEquals(emptyList<String>(), fat.names("/Other"))
+        }
+    }
+
     @Test fun sortingByNameSizeAndDate() {
         fun e(name: String, dir: Boolean, size: Long, modified: Long) = FatImage.Entry(name, name, dir, size, 0, modified)
         val list = listOf(e("b.txt", false, 5, 100), e("A.txt", false, 50, 50), e("zdir", true, 0, 10), e("c.txt", false, 1, 200))

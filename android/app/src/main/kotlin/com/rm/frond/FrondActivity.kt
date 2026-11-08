@@ -440,6 +440,8 @@ open class FrondActivity : SDLActivity() {
         }
         Thread({
             letDebuggerGo()
+            // A card out for the file view goes back in first, so the final save has it.
+            menuModel?.putCardBackForStop()
             val path = sessionPath
             val reply = synchronized(saveLock) {
                 releaseInput()
@@ -1058,6 +1060,8 @@ open class FrondActivity : SDLActivity() {
             )
         }
         if (running === this) running = null
+        // Nothing has the card out for the file view once the machine has stopped.
+        if (isFinishing) SdCard.editing = null
         // The core has quit after a good final save: a linked card goes back to Cards.
         if (isFinishing && quitSent && finalSaveOk && runLock != null && !launchDevice().runs68k) {
             machineFolder()?.let { folder ->

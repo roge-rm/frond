@@ -189,13 +189,20 @@ class FatImage private constructor(private val image: File?, private val blocks:
         return result
     }
 
+    // A subfolder starts at a used cluster; anything else would read as the top folder or nothing.
+    private fun sub(entry: Entry): Folder {
+        val c = entry.firstCluster
+        if (c < 2 || c >= clusterCount + 2 || fat[c] == 0) throw FatException("The folder ${entry.name} is damaged.")
+        return Folder(c)
+    }
+
     private fun folder(path: String): Folder {
         var folder = Folder(0)
         for (part in parts(path)) {
             val entry = slots(folder).firstOrNull { it.entry.name.equals(part, ignoreCase = true) }?.entry
                 ?: throw FatException("There's no folder $part on the card.")
             if (!entry.directory) throw FatException("$part is a file.")
-            folder = Folder(entry.firstCluster)
+            folder = sub(entry)
         }
         return folder
     }
@@ -295,7 +302,7 @@ class FatImage private constructor(private val image: File?, private val blocks:
 
     private fun freeTree(entry: Entry, depth: Int) {
         if (depth > MAX_DEPTH) throw FatException("Folders are nested too deeply.")
-        if (entry.directory) for (s in slots(Folder(entry.firstCluster))) freeTree(s.entry, depth + 1)
+        if (entry.directory) for (s in slots(sub(entry))) freeTree(s.entry, depth + 1)
         for (c in chain(entry.firstCluster)) fat[c] = 0
     }
 
@@ -320,7 +327,7 @@ class FatImage private constructor(private val image: File?, private val blocks:
         refuseTaken(existing, name)
         addEntry(dest, existing, name, raw[11].toInt() and 0xff, slot.entry.firstCluster, slot.entry.size, template = raw)
         if (slot.entry.directory && dest.cluster != parent.cluster) {
-            val inner = Folder(slot.entry.firstCluster)
+            val inner = sub(slot.entry)
             val bytes = inner.bytes()
             put16(bytes, 32 + 26, dest.cluster)
             inner.writeSlots(bytes, 1, 1)
@@ -349,7 +356,7 @@ class FatImage private constructor(private val image: File?, private val blocks:
             val cluster = allocate(1).first()
             write(clusterAt(cluster), folderBlock(cluster, dest.cluster, u16(raw, 24), u16(raw, 22)), 0, clusterBytes)
             addEntry(dest, existing, name, 0x10, cluster, 0, template = raw)
-            val inner = Folder(entry.firstCluster)
+            val inner = sub(entry)
             val innerBytes = inner.bytes()
             val target = Folder(cluster)
             for (child in slots(inner)) {
@@ -379,7 +386,7 @@ class FatImage private constructor(private val image: File?, private val blocks:
         val (parent, slot) = locate(path)
         fun total(e: Entry, depth: Int): Long {
             if (depth > MAX_DEPTH) throw FatException("Folders are nested too deeply.")
-            return if (e.directory) slots(Folder(e.firstCluster)).sumOf { total(it.entry, depth + 1) } else e.size
+            return if (e.directory) slots(sub(e)).sumOf { total(it.entry, depth + 1) } else e.size
         }
         return total(slot.entry, 0)
     }
@@ -459,7 +466,7 @@ class FatImage private constructor(private val image: File?, private val blocks:
         var found = search()
         while (found < 0) {
             if (folder.root) throw FatException("The card's top folder is full. Use a subfolder.")
-            val last = folder.clusters().last()
+            val last = folder.clusters().lastOrNull() ?: throw FatException("The card's FAT is damaged.")
             val added = allocate(1).first()
             fat[last] = added
             write(clusterAt(added), ByteArray(clusterBytes), 0, clusterBytes)
@@ -472,6 +479,8 @@ class FatImage private constructor(private val image: File?, private val blocks:
     // Runs one change and commits it, or rolls the in-memory state back when it fails. Data
     // already written went into clusters the card's FAT still calls free.
     private fun change(block: () -> Unit) {
+        if (changing > 0) return block()
+        changing++
         try {
             block()
             commit()
@@ -481,7 +490,23 @@ class FatImage private constructor(private val image: File?, private val blocks:
             // Data already written changed free clusters; a card file gets its CRCs fixed now.
             try { (blocks as? CardFile)?.settleData() } catch (_: Exception) { }
             throw e
+        } finally {
+            changing--
         }
+    }
+
+    // A change inside another (replace) commits with the outer one.
+    private var changing = 0
+
+    // Runs `work` (an add, copy or move that makes an entry of the victim's name) and removes
+    // `victim` in the same commit. The victim's clusters stay used until then, so a cancel, a
+    // failure or a crash leaves the old one; the new data needs room beside it.
+    fun replace(victim: String, work: () -> Unit) = change {
+        val (parent, slot) = locate(victim)
+        // Out of its folder first so the new entry can take the name; freed after the new data is in.
+        eraseSlots(parent, slot)
+        work()
+        freeTree(slot.entry, 0)
     }
 
     // Stages the FAT sectors that differ from the card, in every FAT copy.

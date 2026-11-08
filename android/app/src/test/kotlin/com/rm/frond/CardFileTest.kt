@@ -141,6 +141,39 @@ class CardFileTest {
         assertTrue(Cards.ready(file))
     }
 
+    // Whether another process can take the file's lock (python3's lockf, a POSIX lock as the
+    // FileChannel's is). Null when python3 isn't here.
+    private fun lockedElsewhere(file: File): Boolean? {
+        val script = "import fcntl,sys\nf=open(sys.argv[1],'r+')\ntry:\n fcntl.lockf(f,fcntl.LOCK_EX|fcntl.LOCK_NB);print('free')\nexcept OSError:\n print('held')\n"
+        val p = try { ProcessBuilder("python3", "-c", script, file.path).redirectErrorStream(true).start() } catch (e: IOException) { return null }
+        val out = p.inputStream.bufferedReader().readText().trim()
+        p.waitFor()
+        return when (out) { "held" -> true; "free" -> false; else -> null }
+    }
+
+    // A second try, a check or a read of a file this process holds locked never opens and closes
+    // another descriptor of it, which would drop the lock for the whole process.
+    @Test fun checksNeverDropAHeldLock() {
+        val file = card("held")
+        val machine = dir("held-machine")
+        CardFile.open(file, true).use {
+            Cards.tryRunLock(machine)!!.use {
+                assertNull(Cards.tryRunLock(machine))
+                Cards.tryRunLock(machine)?.close()
+                assertTrue(CardFile.inUse(file))
+                assertFalse(Cards.ready(file))
+                assertTrue(CardFile.settle(file))
+                assertEquals(5L, Cards.cardHeader(file)!!.first)
+                val elsewhere = lockedElsewhere(File(machine, Cards.RUN_LOCK)) ?: return
+                assertTrue("run lock dropped", elsewhere)
+                assertEquals("card lock dropped", true, lockedElsewhere(file))
+            }
+            assertEquals(false, lockedElsewhere(File(machine, Cards.RUN_LOCK)))
+            assertEquals(true, lockedElsewhere(file))
+        }
+        assertEquals(false, lockedElsewhere(file))
+    }
+
     @Test fun aWriteProtectedCardRefusesChanges() {
         val file = card("protected")
         val before = file.readBytes()
@@ -208,6 +241,102 @@ class CardFileTest {
         assertTrue(CardFile.settle(file))
         assertEquals(1L, CardFile.verify(file))
         assertEquals(old, snapshot(file))
+    }
+
+    // ---- Leftovers shared with the desktop ----
+    // tests/fixtures/card-leftovers/<side>/: a card cut off at the commit file ("commit") and at
+    // the data ("intent"), written by each app's CardFile, with what it holds once settled. Each
+    // app settles both sides' fixtures. FROND_FIXTURE_OUT=<dir> writes this side's again.
+
+    private val leftovers: File?
+        get() = generateSequence(File("").absoluteFile) { it.parentFile }
+            .map { File(it, "tests/fixtures/card-leftovers") }.firstOrNull { it.isDirectory }
+
+    // The card file as its 512-byte blocks that aren't all zero: "FRONDSP1", the length, then each
+    // block's offset and bytes (little endian).
+    private fun sparse(file: File): ByteArray {
+        val b = file.readBytes()
+        val out = java.io.ByteArrayOutputStream()
+        val head = java.nio.ByteBuffer.allocate(16).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        head.put("FRONDSP1".toByteArray(Charsets.US_ASCII)).putLong(b.size.toLong())
+        out.write(head.array())
+        for (at in b.indices step 512) {
+            val block = b.copyOfRange(at, minOf(at + 512, b.size)).copyOf(512)
+            if (block.all { it == 0.toByte() }) continue
+            out.write(java.nio.ByteBuffer.allocate(8).order(java.nio.ByteOrder.LITTLE_ENDIAN).putLong(at.toLong()).array())
+            out.write(block)
+        }
+        return out.toByteArray()
+    }
+
+    private fun unsparse(b: ByteArray, to: File) {
+        val buf = java.nio.ByteBuffer.wrap(b).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        assertEquals("FRONDSP1", String(b, 0, 8, Charsets.US_ASCII))
+        buf.position(8)
+        val out = ByteArray(buf.long.toInt())
+        while (buf.remaining() >= 520) {
+            val at = buf.long.toInt()
+            val block = ByteArray(512).also { buf.get(it) }
+            block.copyInto(out, at, 0, minOf(512, out.size - at))
+        }
+        to.writeBytes(out)
+    }
+
+    // The generation, then each path with "dir" or its size and CRC-32, by path.
+    private fun expected(file: File): String = CardFile.open(file, false).use { c ->
+        FatImage.over(c).use { fat ->
+            assertEquals(emptyList<String>(), fat.check())
+            val out = sortedMapOf<String, String>()
+            fun walk(path: String) {
+                for (e in fat.list(path)) {
+                    val full = SdCard.joined(path, e.name)
+                    if (e.directory) { out[full] = "dir"; walk(full) } else {
+                        val bytes = ByteArrayOutputStream().also { fat.read(e, it) }.toByteArray()
+                        out[full] = "${bytes.size}\t%08x".format(java.util.zip.CRC32().also { it.update(bytes) }.value)
+                    }
+                }
+            }
+            walk("/")
+            "generation ${CardFile.verify(file)}\n" + out.entries.joinToString("") { "${it.key}\t${it.value}\n" }
+        }
+    }
+
+    private val leftoverCases = listOf("commit" to "journal", "intent" to "data")
+
+    @Test fun writeLeftoverFixtures() {
+        val out = System.getenv("FROND_FIXTURE_OUT")?.let { File(it) } ?: return
+        out.deleteRecursively(); out.mkdirs()
+        for ((name, step) in leftoverCases) {
+            val file = card("fixture-$name")
+            visit(file) { it.makeFolder("/", "PALM") }
+            CardFile.open(file, true).use { c ->
+                c.crashHook = { if (it == step) { c.dead = true; throw Crash() } }
+                FatImage.over(c).use { fat ->
+                    try { fat.put("/PALM", "\u00dcn\u00efcode long name for the card.prc", Random(41).nextBytes(5_000)); fail() } catch (_: Crash) { }
+                }
+            }
+            File(out, "$name.sparse").writeBytes(sparse(file))
+            for (kind in listOf("intent", "commit")) {
+                val left = if (kind == "intent") CardFile.intentOf(file) else CardFile.commitOf(file)
+                if (left.exists()) left.copyTo(File(out, "$name.files-$kind"))
+            }
+            assertTrue(CardFile.settle(file))
+            File(out, "$name.expect").writeText(expected(file))
+        }
+    }
+
+    @Test fun leftoversFromEitherAppSettle() {
+        val root = leftovers ?: return fail("no tests/fixtures/card-leftovers")
+        for (side in listOf("android", "desktop")) for ((name, _) in leftoverCases) {
+            val from = File(root, side)
+            val file = File(dir("leftover-$side-$name"), "sd.frondsd")
+            unsparse(File(from, "$name.sparse").readBytes(), file)
+            for (kind in listOf("intent", "commit")) File(from, "$name.files-$kind").takeIf { it.isFile }?.copyTo(File(file.path + ".files-$kind"))
+            assertTrue("$side $name", CardFile.unsettled(file))
+            assertTrue(Cards.ready(file))
+            assertFalse(CardFile.unsettled(file))
+            assertEquals("$side $name", File(from, "$name.expect").readText(), expected(file))
+        }
     }
 
     // With FROND_CARD_OUT set, the edited cards are kept there (with the files they should hold in

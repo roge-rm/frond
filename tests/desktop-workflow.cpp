@@ -56,6 +56,8 @@
 #include <QLocalSocket>
 #include <QTcpServer>
 #include <QUdpSocket>
+#include <atomic>
+#include <csignal>
 #include <functional>
 #include <memory>
 #include <QShortcut>
@@ -429,8 +431,9 @@ static QString pickerCore(const QString& where, const QString& device) {
     QFile core(where + "/picker-core");
     core.open(QIODevice::WriteOnly);
     auto script = QByteArray(R"PY(#!/usr/bin/python3
-import pathlib,shutil,socket,sys,time
+import os,pathlib,shutil,socket,sys,time
 trace=pathlib.Path(__file__).with_name('commands')
+pathlib.Path(__file__).with_name('pid').write_text(str(os.getpid()))
 s=socket.socket(socket.AF_UNIX);s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
 s.sendall(b'0\tevent\tready\t\n')
 src=pathlib.Path(sys.argv[1])
@@ -1961,6 +1964,93 @@ for line in s.makefile('rb'):
         QVERIFY(frondCardFile::ready(a + "/sd.frondsd"));
         QVERIFY(frondCardFile::verify(a + "/sd.frondsd").has_value());
         window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        QSettings().clear();
+    }
+    void sdFilesCloseDuringJob_data() {
+        QTest::addColumn<QString>("mode");
+        for (const auto* mode : {"close", "core-exit"}) QTest::newRow(mode) << QString(mode);
+    }
+    // Files closed, or the core gone, while a job still writes the card: the window stays until
+    // the worker has stopped, and only then is the card closed and put back in (or kept).
+    void sdFilesCloseDuringJob() {
+        QFETCH(QString, mode);
+        cardsReset();
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QTemporaryDir files;
+        const auto core = pickerCore(files.path(), "palm-tx");
+        const auto a = cardsMachine("Palm TX", true);
+        frondCards::reconcile(cardsSessions());
+        const auto cardPath = a + "/sd.frondsd";
+        QFile host(files.filePath("big.bin"));
+        QVERIFY(host.open(QIODevice::WriteOnly));
+        host.write(QByteArray(4 << 20, 'x'));
+        host.close();
+        MainWindow window(core);
+        window.show();
+        window.openSession(a + "/Palm TX.frond", true);
+        auto* action = window.findChild<QPushButton*>("sdExchange");
+        QTRY_VERIFY_WITH_TIMEOUT(action->isEnabled(), 10000);
+        std::atomic<bool> entered{false}, release{false};
+        QPointer<CardFilesWindow> w;
+        bool started = false, heldBack = false;
+        QStringList errors;
+        QTimer poll; poll.setInterval(10);
+        connect(&poll, &QTimer::timeout, &window, [&] {
+            for (auto* box : window.findChildren<QMessageBox*>()) {
+                if (!box->isVisible()) continue;
+                if (box->windowTitle().contains("Open the card")) box->button(QMessageBox::Yes)->click();
+                else { errors << box->text(); box->done(QMessageBox::Ok); }
+            }
+            if (!w)
+                if (auto* f = window.findChild<CardFilesWindow*>("cardFilesWindow"); f && f->isVisible()) {
+                    w = f;
+                    f->workHook = [&] { entered = true; while (!release) QThread::msleep(5); };
+                    QTimer::singleShot(0, f, [f, &host] { f->addPaths({host.fileName()}); });
+                }
+            if (entered && !started) {
+                started = true;
+                if (mode == "close") w->reject();
+                else {
+                    QFile pid(files.filePath("pid"));
+                    QVERIFY(pid.open(QIODevice::ReadOnly));
+                    ::kill(pid.readAll().trimmed().toInt(), SIGKILL);
+                }
+                QTimer::singleShot(1000, &window, [&] {
+                    heldBack = w && w->isVisible() && w->working();
+                    release = true;
+                });
+            }
+        });
+        poll.start(); action->click();
+        QTRY_VERIFY_WITH_TIMEOUT(started, 10000);
+        QTRY_VERIFY_WITH_TIMEOUT(release, 10000);
+        QVERIFY(heldBack);
+        // Closed once the worker stopped, then deleted.
+        QTRY_VERIFY_WITH_TIMEOUT(!w, 10000);
+        if (mode == "close") QTRY_VERIFY_WITH_TIMEOUT(action->isEnabled(), 10000);
+        else QTRY_VERIFY_WITH_TIMEOUT(errors.join(' ').contains("The card is kept in the machine and goes in at the next start."), 10000);
+        QTest::qWait(200);
+        poll.stop();
+        QFile trace(files.filePath("commands")); QVERIFY(trace.open(QIODevice::ReadOnly));
+        QStringList got;
+        for (const auto& line : QString::fromUtf8(trace.readAll()).split('\n', Qt::SkipEmptyParts)) {
+            const auto command = line.section('\t', 0, 0);
+            if (command == "save" || command.startsWith("sd-") && command != "sd-state") got << command;
+        }
+        if (mode == "close") QCOMPARE(got, QStringList({"sd-eject", "save", "sd-take-out", "sd-put-in"}));
+        else QCOMPARE(got, QStringList({"sd-eject", "save", "sd-take-out"}));
+        // The add was cancelled: the card is closed, settled, loads, and doesn't have the file.
+        QVERIFY(!frondCardFile::inUse(cardPath));
+        QVERIFY(frondCardFile::ready(cardPath));
+        QVERIFY(frondCardFile::verify(cardPath).has_value());
+        {
+            auto c = frondCardFile::CardFile::open(cardPath, false);
+            frondCardFile::FatImage fat(*c);
+            QVERIFY(!fat.find("/big.bin"));
+            QVERIFY2(fat.check().isEmpty(), qPrintable(fat.check().join("; ")));
+        }
+        if (mode == "core-exit") QVERIFY(frondCards::readSlot(a).swap);
+        window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 10000);
         QSettings().clear();
     }
     void coreCrashThenStart() {
@@ -5542,6 +5632,17 @@ for line in s.makefile('rb'):
         QVERIFY(!frondCards::readSlot(stopped).swap);
         edit("Stopped card", stopped + "/sd.frondsd");
         QVERIFY(frondCards::readSlot(stopped).swap);
+        // A classic Memory Stick has no Files… at all.
+        {
+            sparseCard("Stick", "ms", 4 << 20);
+            cards->refresh();
+            auto* sticks = cards->findChild<QListWidget*>("memorySticks");
+            QCOMPARE(sticks->count(), 1);
+            auto* menu = sticks->itemWidget(sticks->item(0))->findChild<QPushButton*>("cardMenu")->menu();
+            emit menu->aboutToShow();
+            QVERIFY(!menu->findChild<QAction*>("cardFiles"));
+            QVERIFY(menu->findChild<QAction*>("renameCard"));
+        }
         // A card open in Files can't be taken out or deleted.
         {
             auto c = frondCardFile::CardFile::open(cardsLibrary() + '/' + free + "/sd.frondsd", true);

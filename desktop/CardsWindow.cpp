@@ -496,8 +496,8 @@ QMenu* CardsWindow::menuFor(const QString& id, QWidget* parent) {
         a->setEnabled(enabled && !exchange);
     };
     const bool stopped = !row.holderBusy && !inRunning;
-    // A classic Memory Stick has no FAT the desktop can write in place.
-    add(stopped ? tr("Files…") : tr("Files… · In use"), "cardFiles", stopped && row.card.kind != "ms", &CardsWindow::openFiles);
+    // A classic Memory Stick has no FAT the desktop can write in place, so it has no Files….
+    if (row.card.kind != "ms") add(stopped ? tr("Files…") : tr("Files… · In use"), "cardFiles", stopped, &CardsWindow::openFiles);
     add(tr("Rename…"), "renameCard", true, &CardsWindow::renameCard);
     add(tr("Duplicate"), "duplicateCard", stopped, &CardsWindow::duplicateCard);
     add(tr("Export image…"), "exportCard", stopped, &CardsWindow::exportImage);
@@ -629,7 +629,7 @@ void CardsWindow::openFiles(const QString& id) {
     }
     auto* w = new CardFilesWindow(std::move(opened), card.name, this);
     w->hold = std::move(hold);
-    w->setAttribute(Qt::WA_DeleteOnClose);
+    w->deleteOnClose = true;
     w->setWindowModality(Qt::WindowModal);
     files = w;
     connect(w, &QDialog::finished, this, [this] {

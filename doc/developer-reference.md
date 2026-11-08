@@ -571,6 +571,7 @@ The IIIx works as in VS Code, in Eclipse's Terminal view.
 | `FROND_TEST_CORE`, `FROND_TEST_SESSION` | Core and TX session for the desktop workflow test. |
 | `FROND_CARD_TOOL` | The program the desktop runs as the card tool (`--card`), instead of its own core. The workflow test sets it to the ARM core. |
 | `FROND_CARD_OUT` | Folder the card file tests (`tests/card-file.cpp`, Android's `CardFileTest`) write edited cards to, with the files each should hold in `NAME.files/`, for loading them in the core. |
+| `FROND_FIXTURE_OUT` | Folder the card file tests (`tests/card-file.cpp`, Android's `CardFileTest`) write that side's cut-off card fixture to, for `tests/fixtures/card-leftovers/desktop` or `android`. |
 | `FROND_SCREENSHOTS` | Folder the desktop workflow test saves its Cards window, New card and picker screenshots in. |
 | `FROND_TEST_SCREENSHOT`, `FROND_TEST_KEYBOARD`, `FROND_TEST_NETWORK` | Extra checks in that test: expected screenshot, keyboard and network state. |
 | `FROND_TEST_SHOTS` | Folder to save pictures of the home window and settings to. |

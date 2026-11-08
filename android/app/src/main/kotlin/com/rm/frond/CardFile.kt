@@ -9,8 +9,6 @@ import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.channels.FileChannel
-import java.nio.channels.FileLock
-import java.nio.channels.OverlappingFileLockException
 import java.nio.file.StandardOpenOption
 import java.util.TreeMap
 import java.util.TreeSet
@@ -44,8 +42,8 @@ internal interface FatBlocks : AutoCloseable {
 // generation to the one at open plus 1, so a machine with the card sees it changed. The card file is
 // locked (FileChannel lock) while open, so other Frond processes and threads leave it alone.
 // Not thread safe.
-class CardFile private constructor(val file: File, private val raf: RandomAccessFile, private val lock: FileLock,
-                                   val writable: Boolean) : FatBlocks {
+class CardFile private constructor(val file: File, private val held: FileLocks.Held, val writable: Boolean) : FatBlocks {
+    private val raf = held.raf
     private var version = 0
     var payloadBytes = 0L
         private set
@@ -235,8 +233,7 @@ class CardFile private constructor(val file: File, private val raf: RandomAccess
             if (!dead) settleData()
         } finally {
             try { intent?.close() } catch (_: IOException) {}
-            try { lock.release() } catch (_: IOException) {}
-            raf.close()
+            held.close()
         }
     }
 
@@ -265,33 +262,22 @@ class CardFile private constructor(val file: File, private val raf: RandomAccess
         // Opens a card file for a visit, settling a cut-off change first. Throws IN_USE when another
         // CardFile (this process or another) has it.
         fun open(card: File, writable: Boolean): CardFile {
-            val raf = RandomAccessFile(card, "rw")
+            val held = FileLocks.tryLock(card) ?: throw IOException(IN_USE)
             try {
-                val lock = tryLock(raf) ?: throw IOException(IN_USE)
-                try {
-                    settleLocked(card, raf)
-                    return CardFile(card, raf, lock, writable).also { it.load() }
-                } catch (e: Exception) {
-                    try { lock.release() } catch (_: IOException) {}
-                    throw e
-                }
+                settleLocked(card, held.raf)
+                return CardFile(card, held, writable).also { it.load() }
             } catch (e: Exception) {
-                raf.close()
+                held.close()
                 throw e
             }
         }
 
-        private fun tryLock(raf: RandomAccessFile): FileLock? = try {
-            raf.channel.tryLock()
-        } catch (e: OverlappingFileLockException) {
-            null
-        }
-
-        // Whether a card file is open in a CardFile now.
+        // Whether a card file is open in a CardFile now. A card this process has open is never
+        // opened again here, which would drop its lock.
         fun inUse(card: File): Boolean {
             if (!card.isFile) return false
             return try {
-                RandomAccessFile(card, "rw").use { raf -> tryLock(raf)?.also { it.release() } == null }
+                FileLocks.tryLock(card)?.close() == null
             } catch (e: IOException) {
                 false
             }
@@ -305,10 +291,8 @@ class CardFile private constructor(val file: File, private val raf: RandomAccess
         fun settle(card: File): Boolean {
             if (!card.isFile || !unsettled(card)) return true
             return try {
-                RandomAccessFile(card, "rw").use { raf ->
-                    val lock = tryLock(raf) ?: return false
-                    try { settleLocked(card, raf) } finally { try { lock.release() } catch (_: IOException) {} }
-                }
+                val held = FileLocks.tryLock(card) ?: return false
+                held.use { settleLocked(card, it.raf) }
                 true
             } catch (e: IOException) {
                 false

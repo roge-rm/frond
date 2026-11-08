@@ -135,8 +135,15 @@ class HomeModel(private val activity: HomeActivity) {
             var finished = false
             try {
                 error = withContext(Dispatchers.IO) {
-                    work({ !isActive }) { done, total ->
-                        if (total > 0) HomeWork.scope.launch { if (HomeWork.copying) HomeWork.progress = done.toFloat() / total }
+                    try {
+                        work({ !isActive }) { done, total ->
+                            if (total > 0) HomeWork.scope.launch { if (HomeWork.copying) HomeWork.progress = done.toFloat() / total }
+                        }
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        // A damaged card or a bug shows as a message, not a crash.
+                        e.message ?: "Something went wrong."
                     }
                 }
                 finished = true
@@ -179,6 +186,7 @@ class HomeModel(private val activity: HomeActivity) {
     }
 
     fun closeCards() {
+        CardImageFiles.current?.takeIf { it.isOpen }?.close()
         cards = null
     }
 
@@ -312,6 +320,8 @@ class HomeActivity : ComponentActivity() {
 
     override fun onDestroy() {
         if (HomeWork.model === model) HomeWork.model = null
+        // A card open in Files stays open across a recreate and closes when the screen really goes.
+        if (isFinishing && !isChangingConfigurations) CardImageFiles.current?.close()
         super.onDestroy()
     }
 
@@ -319,6 +329,8 @@ class HomeActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         HomeWork.model = model
         model.restore(savedInstanceState)
+        // A card still open in Files from before a recreate: its view comes back.
+        if (CardImageFiles.current?.isOpen == true) model.openCards()
         // Cards: stale copies go and existing machines' cards move in. Machines running elsewhere wait.
         if (savedInstanceState == null) {
             val app = applicationContext

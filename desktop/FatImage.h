@@ -53,6 +53,10 @@ class FatImage {
     // A file or folder into toFolder under newName (or its own). `bytes` gets the amount so far.
     void copy(const QString& from, const QString& toFolder, const QString& newName = {},
               const std::function<bool()>& cancelled = {}, const std::function<void(qint64)>& bytes = {});
+    // Runs `work` (an add, copy or move that makes an entry of the victim's name) and removes
+    // `victim` in the same commit. The victim's clusters stay used until then, so a cancel, a
+    // failure or a crash leaves the old one; the new data needs room beside it.
+    void replace(const QString& victim, const std::function<void()>& work);
     // The bytes in a file, or in every file under a folder.
     qint64 sizeOf(const QString& path);
 
@@ -105,6 +109,8 @@ class FatImage {
     std::vector<quint32> fat, fatOnDisk;
     // Metadata sectors changed by the current change, by card offset, until commit.
     std::map<qint64, QByteArray> staged;
+    // A change inside another (replace) commits with the outer one.
+    int changing{0};
 };
 
 }  // namespace frondCardFile

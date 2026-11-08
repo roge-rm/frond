@@ -2338,7 +2338,7 @@ void MainWindow::openExchangeCard() {
         return;
     }
     auto* dialog = new CardFilesWindow(std::move(card), runningCardName(), this);
-    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->deleteOnClose = true;
     dialog->setWindowModality(Qt::WindowModal);
     exchangeDialog = dialog;
     connect(dialog, &QDialog::finished, this, &MainWindow::exchangeClosed);

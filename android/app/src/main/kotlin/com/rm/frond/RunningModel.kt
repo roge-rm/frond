@@ -771,7 +771,9 @@ class RunningModel(
     }
 
     // Lists the open folder again after a change.
-    private fun relist(c: SdCard, at: String) {
+    private fun relist(c: SdCard, wanted: String) {
+        // An SD card's folders as the card names them.
+        val at = if (device.memoryStick) wanted else c.read { CardFiles.realPath(it, wanted) }
         val listing = try { c.list(at) } catch (error: Exception) {
             if (device.memoryStick) activity.runOnUiThread { entries = emptyList(); free = 0 }
             throw error
@@ -860,6 +862,14 @@ class RunningModel(
             val n = c.exportEntries(at, entries, host, ::progressed)
             activity.runOnUiThread { note = "$n files copied" }
         }
+    }
+
+    // As the machine stops: a job on the card is cancelled and the card goes back in before the
+    // final save. Blocks; not on the main thread.
+    fun putCardBackForStop() {
+        val c = card ?: return
+        c.cancelJob()
+        try { c.finishEdit() } catch (e: Exception) { Log.w(FrondActivity.TAG, "card put back at stop: ${e.message}") }
     }
 
     // Leaving the file view puts the card back; its changes are already on it.

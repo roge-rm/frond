@@ -81,6 +81,55 @@ QPair<QMap<QString, QString>, qint64> snapshot(const QString& file) {
     if (!problems.isEmpty()) out["!problems"] = problems.join("; ");
     return {out, fat.freeBytes()};
 }
+// The card file as its 512-byte blocks that aren't all zero: "FRONDSP1", the length, then each
+// block's offset and bytes (little endian).
+QByteArray sparse(const QByteArray& b) {
+    QByteArray out("FRONDSP1");
+    QByteArray n(8, '\0');
+    qToLittleEndian<quint64>(quint64(b.size()), n.data());
+    out += n;
+    for (qint64 at = 0; at < b.size(); at += 512) {
+        auto block = b.mid(int(at), 512);
+        block.resize(512, '\0');
+        if (block.count('\0') == 512) continue;
+        qToLittleEndian<quint64>(quint64(at), n.data());
+        out += n + block;
+    }
+    return out;
+}
+QByteArray unsparse(const QByteArray& b) {
+    if (!b.startsWith("FRONDSP1") || b.size() < 16) return {};
+    QByteArray out(int(qFromLittleEndian<quint64>(b.constData() + 8)), '\0');
+    for (int i = 16; i + 520 <= b.size(); i += 520) {
+        const auto at = int(qFromLittleEndian<quint64>(b.constData() + i));
+        out.replace(at, std::min(512, int(out.size()) - at), b.mid(i + 8, std::min(512, int(out.size()) - at)));
+    }
+    return out;
+}
+// The generation, then each path with "dir" or its size and CRC-32, by path.
+QString expected(const QString& file) {
+    QMap<QString, QString> out;
+    {
+        auto c = CardFile::open(file, false);
+        FatImage fat(*c);
+        if (!fat.check().isEmpty()) return "problems " + fat.check().join("; ");
+        std::function<void(const QString&)> walk = [&](const QString& path) {
+            for (const auto& e : fat.list(path)) {
+                const auto full = FatImage::joined(path, e.name);
+                if (e.directory) { out[full] = "dir"; walk(full); }
+                else {
+                    const auto bytes = readFile(fat, full);
+                    out[full] = QStringLiteral("%1\t%2").arg(bytes.size()).arg(crcOf(bytes), 8, 16, QChar('0'));
+                }
+            }
+        };
+        walk("/");
+    }
+    QString text = QStringLiteral("generation %1\n").arg(verify(file).value_or(0));
+    for (auto it = out.begin(); it != out.end(); ++it) text += it.key() + '\t' + it.value() + '\n';
+    return text;
+}
+const QList<QPair<QString, QByteArray>> leftoverCases{{"commit", "journal"}, {"intent", "data"}};
 }  // namespace
 
 class CardFileTest : public QObject {
@@ -364,6 +413,125 @@ class CardFileTest : public QObject {
             QVERIFY(settle(file));
             QCOMPARE(verify(file), std::optional<quint64>(6));
         }
+    }
+
+    // Replace keeps the old entry until the new one is complete: a cancel, a failing source, a
+    // full card or a crash leaves the old one; a finished replace leaves only the new one.
+    void replaceKeepsTheOldOne() {
+        const auto file = card("replace");
+        const auto first = randomBytes(9000, 21), second = randomBytes(150000, 22);
+        QTemporaryDir host;
+        writeAll(host.filePath("a.txt"), second);
+        visit(file, [&](FatImage& fat) {
+            put(fat, "/", "a.txt", first);
+            fat.makeFolder("/", "src");
+            put(fat, "/src", "a.txt", second);
+        });
+        const auto old = snapshot(file);
+        cf::Resolver replace([](const QString&) { return cf::Decision{cf::Clash::Replace, false}; });
+        visit(file, [&](FatImage& fat) {
+            // Cancelled part way through a host file.
+            int calls = 0;
+            bool cancelled = false;
+            try { cf::addFile(fat, "/", host.filePath("a.txt"), replace, [&] { return ++calls > 3; }); } catch (const Cancelled&) { cancelled = true; }
+            QVERIFY(cancelled && calls > 3);
+            // Cancelled part way through a copy on the card.
+            calls = 0;
+            cancelled = false;
+            try { cf::paste(fat, {"/src/a.txt"}, "/", false, replace, [&] { return ++calls > 3; }); } catch (const Cancelled&) { cancelled = true; }
+            QVERIFY(cancelled);
+            // A source that ends early.
+            bool failed = false;
+            qint64 given = 0;
+            try {
+                fat.replace("/a.txt", [&] {
+                    fat.add("/", "a.txt", [&](char*, qint64 n) { const auto m = std::min<qint64>(n, 30000 - given); given += m; return m; }, 90000);
+                });
+            } catch (const Cancelled&) {
+            } catch (const Error&) { failed = true; }
+            QVERIFY(failed);
+            // A new file that doesn't fit beside the old one.
+            failed = false;
+            const qint64 tooBig = fat.freeBytes() + fat.clusterBytes();
+            try {
+                fat.replace("/a.txt", [&] { fat.add("/", "a.txt", [](char* b, qint64 n) { std::memset(b, 1, size_t(n)); return n; }, tooBig); });
+            } catch (const Cancelled&) {
+            } catch (const Error&) { failed = true; }
+            QVERIFY(failed);
+        });
+        QVERIFY(!unsettled(file));
+        QCOMPARE(snapshot(file), old);
+        // Done: only the new one, and the old one's clusters are free again.
+        visit(file, [&](FatImage& fat) {
+            QCOMPARE(cf::addFile(fat, "/", host.filePath("a.txt"), replace), QString("a.txt"));
+            QCOMPARE(readFile(fat, "/a.txt"), second);
+            cf::paste(fat, {"/src/a.txt"}, "/", true, replace);
+            QVERIFY(!fat.find("/src/a.txt"));
+            QCOMPARE(readFile(fat, "/a.txt"), second);
+            QVERIFY2(fat.check().isEmpty(), qPrintable(fat.check().join("; ")));
+        });
+        qint64 cluster = 0;
+        visit(file, [&](FatImage& fat) { cluster = fat.clusterBytes(); });
+        const auto after = snapshot(file);
+        QCOMPARE(after.second, old.second + (qint64(first.size()) + cluster - 1) / cluster * cluster);
+        QCOMPARE(after.first.keys(), QStringList({"/a.txt", "/src"}));
+    }
+
+    void replaceSurvivesCrashes() {
+        const auto first = randomBytes(9000, 31), second = randomBytes(40000, 32);
+        crashTest("replace", [&](FatImage& fat) { put(fat, "/", "a.txt", first); },
+                  [&](FatImage& fat) { fat.replace("/a.txt", [&] { put(fat, "/", "a.txt", second); }); });
+    }
+
+    // ---- Leftovers shared with Android ----
+    // tests/fixtures/card-leftovers/<side>/: a card cut off at the commit file ("commit") and at
+    // the data ("intent"), written by each app's CardFile, with what it holds once settled. Each
+    // app settles both sides' fixtures. FROND_FIXTURE_OUT=<dir> writes this side's again.
+
+    void writeLeftoverFixtures() {
+        const auto out = qEnvironmentVariable("FROND_FIXTURE_OUT");
+        if (out.isEmpty()) return;
+        QDir(out).removeRecursively();
+        QDir().mkpath(out);
+        for (const auto& [name, step] : leftoverCases) {
+            const auto file = card("fixture-" + name);
+            visit(file, [](FatImage& fat) { fat.makeFolder("/", "PALM"); });
+            {
+                auto c = CardFile::open(file, true);
+                auto* raw = c.get();
+                const auto wanted = step;
+                c->crashHook = [raw, wanted](const char* at) { if (wanted == at) { raw->dead = true; throw Crash(); } };
+                FatImage fat(*c);
+                bool crashed = false;
+                try { put(fat, "/PALM", QString::fromUtf8("Ünïcode long name for the card.prc"), randomBytes(5000, 41)); } catch (const Crash&) { crashed = true; }
+                QVERIFY(crashed);
+            }
+            QVERIFY(writeAll(out + '/' + name + ".sparse", sparse(readAll(file))));
+            if (QFile::exists(intentOf(file))) QVERIFY(QFile::copy(intentOf(file), out + '/' + name + ".files-intent"));
+            if (QFile::exists(commitOf(file))) QVERIFY(QFile::copy(commitOf(file), out + '/' + name + ".files-commit"));
+            QVERIFY(settle(file));
+            QVERIFY(writeAll(out + '/' + name + ".expect", expected(file).toUtf8()));
+        }
+    }
+
+    void leftoversFromEitherAppSettle() {
+        const QString fixtures = QStringLiteral(FROND_FIXTURES) + "/card-leftovers";
+        for (const auto* side : {"android", "desktop"})
+            for (const auto& [name, step] : leftoverCases) {
+                const auto from = fixtures + '/' + side + '/' + name;
+                const auto dir = root.filePath(QStringLiteral("leftover-%1-%2").arg(side, name));
+                QDir().mkpath(dir);
+                const auto file = dir + "/sd.frondsd";
+                const auto bytes = unsparse(readAll(from + ".sparse"));
+                QVERIFY2(!bytes.isEmpty(), qPrintable(from));
+                QVERIFY(writeAll(file, bytes));
+                for (const auto* kind : {".files-intent", ".files-commit"})
+                    if (QFile::exists(from + kind)) QVERIFY(QFile::copy(from + kind, file + kind));
+                QVERIFY2(unsettled(file), qPrintable(from));
+                QVERIFY(frondCardFile::ready(file));
+                QVERIFY(!unsettled(file));
+                QCOMPARE(expected(file), QString::fromUtf8(readAll(from + ".expect")));
+            }
     }
 
     // Long and non-ASCII names, dates, and the file manager's paste, rename, delete and host copies.

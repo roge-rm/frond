@@ -39,7 +39,8 @@ class CardsModel(private val activity: HomeActivity, private val home: HomeModel
     var importing by mutableStateOf<Pair<File, List<String>>?>(null)
 
     // The file view of a card opened with Files…; open while its path is set.
-    val files by lazy { CardImageFiles(activity, home, sessions) }
+    // One per process, so it outlives a recreated home screen.
+    val files: CardImageFiles get() = CardImageFiles.shared(app, sessions)
 
     // Reconciles first, as the plan asks whenever Cards opens.
     fun open() {

@@ -1,10 +1,10 @@
 package com.rm.frond
 
+import android.content.Context
 import android.net.Uri
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -15,8 +15,11 @@ import java.io.IOException
 // The card file is edited in place (CardFile), each change committed as it's made. The card file's
 // lock, and the machine's run lock when a machine holds it, are kept until the view closes. A
 // machine's slot gets swap before the first write, so it loads the card as changed.
-class CardImageFiles(private val activity: HomeActivity, private val home: HomeModel, private val sessions: File) : FilesModel {
-    private val app = activity.applicationContext
+// One per process (`shared`), so a recreated home screen finds the visit still open; it ends when
+// the view is left or the home screen really goes.
+class CardImageFiles private constructor(private val app: Context, private val sessions: File) : FilesModel {
+    // Jobs and alerts go to whichever home screen is current.
+    private val home: HomeModel? get() = HomeWork.model
     private var source: Cards.Source? = null
     private var card: Cards.Card? = null
     private var cardFile: CardFile? = null
@@ -36,20 +39,23 @@ class CardImageFiles(private val activity: HomeActivity, private val home: HomeM
         private set
     override var changed by mutableStateOf(false)
         private set
-    override val busy: String? get() = if (home.copying) home.copyLabel else null
+    override val busy: String? get() = if (HomeWork.copying) HomeWork.label else null
     override var shortcuts by mutableStateOf(emptyList<String>())
         private set
     override val leaveLabel get() = "Done"
     override val prompt = ClashPrompt()
     var note by mutableStateOf<String?>(null)
 
-    private fun ui(block: () -> Unit) = activity.runOnUiThread(block)
+    private fun ui(block: () -> Unit) { HomeWork.scope.launch { block() } }
     private fun percent(progress: (Long, Long) -> Unit): (Float) -> Unit = { progress((it.coerceIn(0f, 1f) * 1000).toLong(), 1000) }
-    private fun resolver(several: Boolean) = CardFiles.Resolver { name -> prompt.ask(name, several) { activity.runOnUiThread(it) } }
+    private fun resolver(several: Boolean) = CardFiles.Resolver { name -> prompt.ask(name, several) { ui(it) } }
+    // Whether a visit is open.
+    val isOpen: Boolean get() = cardFile != null || path != null
 
     // Opens the card file and lists its top folder.
     fun start(row: CardChoices.Row) {
         if (path != null) return
+        val home = home ?: return
         home.runJob("Opening the card", "Couldn't open the card", null, cancellable = false, reload = false) { _, _ ->
             val (found, error) = Cards.cardSource(sessions, row.card.id)
             if (found == null) return@runJob error
@@ -88,12 +94,17 @@ class CardImageFiles(private val activity: HomeActivity, private val home: HomeM
                 changed = false
                 shortcuts = shown.second
                 show("/", shown.first)
+                // A home screen recreated while it opened shows it too.
+                HomeWork.model?.openCards()
             }
             null
         }
     }
 
     private fun listing(fat: FatImage, at: String) = SdCard.Listing(fat.list(at), fat.freeBytes, fat.totalBytes)
+
+    // The path with each folder named as the card has it.
+    private fun shownPath(fat: FatImage, at: String) = CardFiles.realPath(fat, at)
 
     private fun show(at: String, list: SdCard.Listing) {
         path = at
@@ -109,18 +120,18 @@ class CardImageFiles(private val activity: HomeActivity, private val home: HomeM
     }
 
     private fun relist(at: String) {
-        val list = fat { listing(it, at) }
-        ui { show(at, list) }
+        val (real, list) = fat { shownPath(it, at).let { p -> p to listing(it, p) } }
+        ui { show(real, list) }
     }
 
     override fun open(at: String) {
-        if (home.copying) return
-        activity.lifecycleScope.launch {
+        if (HomeWork.copying) return
+        HomeWork.scope.launch {
             try {
-                val list = withContext(Dispatchers.IO) { fat { listing(it, at) } }
-                show(at, list)
+                val (real, list) = withContext(Dispatchers.IO) { fat { shownPath(it, at).let { p -> p to listing(it, p) } } }
+                show(real, list)
             } catch (e: Exception) {
-                home.alert = "Couldn't open the folder" to (e.message ?: "Couldn't read the card.")
+                HomeWork.model?.alert = "Couldn't open the folder" to (e.message ?: "Couldn't read the card.")
             }
         }
     }
@@ -133,6 +144,7 @@ class CardImageFiles(private val activity: HomeActivity, private val home: HomeM
     // Runs a change on the card, then lists the folder again. Cancel keeps what was done.
     private fun change(label: String, failTitle: String, work: (FatImage, () -> Boolean, (Float) -> Unit, String) -> String?) {
         val at = path ?: return
+        val home = home ?: return
         home.runJob(label, failTitle, null, cancellable = true, reload = false) { cancelled, progress ->
             val bar = percent(progress)
             var message: String? = null
@@ -149,8 +161,10 @@ class CardImageFiles(private val activity: HomeActivity, private val home: HomeM
                 error = COPY_CANCELLED
             } catch (e: IOException) {
                 error = e.message ?: "Couldn't change the card."
+            } catch (e: Exception) {
+                error = e.message ?: "Couldn't change the card."
             }
-            relist(at)
+            try { relist(at) } catch (e: Exception) { if (error == null) error = e.message ?: "Couldn't read the card." }
             message?.let { m -> ui { note = m } }
             error
         }
@@ -212,6 +226,7 @@ class CardImageFiles(private val activity: HomeActivity, private val home: HomeM
 
     override fun exportFile(entry: FatImage.Entry, to: Uri) {
         val at = path ?: return
+        val home = home ?: return
         home.runJob("Copying", "Couldn't export the file", null, cancellable = true, reload = false) { _, _ ->
             try {
                 val out = app.contentResolver.openOutputStream(to, "wt") ?: return@runJob "Couldn't write there."
@@ -226,6 +241,7 @@ class CardImageFiles(private val activity: HomeActivity, private val home: HomeM
 
     override fun exportEntries(entries: List<FatImage.Entry>, tree: Uri) {
         val at = path ?: return
+        val home = home ?: return
         home.runJob("Copying", "Couldn't copy to the folder", null, cancellable = true, reload = false) { cancelled, progress ->
             val bar = percent(progress)
             try {
@@ -250,20 +266,28 @@ class CardImageFiles(private val activity: HomeActivity, private val home: HomeM
     override fun insertEdited() = close()
 
     // Closes the card file and lets go of the machine's lock.
-    private fun close() {
+    fun close() {
         val held = source
         val opened = cardFile
         source = null
         card = null
         cardFile = null
         ui { path = null; changed = false }
-        activity.lifecycleScope.launch(Dispatchers.IO) {
-            try { opened?.let { synchronized(it) { it.close() } } } catch (_: IOException) { }
+        HomeWork.scope.launch(Dispatchers.IO) {
+            try { opened?.let { synchronized(it) { it.close() } } } catch (_: Exception) { }
             held?.close()
         }
     }
 
-    private companion object {
-        val SHORTCUTS = listOf("/PALM/Launcher", "/DCIM")
+    companion object {
+        private val SHORTCUTS = listOf("/PALM/Launcher", "/DCIM")
+
+        // The process's file view of a card from Cards, made on first use.
+        @Volatile var current: CardImageFiles? = null
+            private set
+
+        fun shared(context: Context, sessions: File): CardImageFiles = synchronized(this) {
+            current ?: CardImageFiles(context.applicationContext, sessions).also { current = it }
+        }
     }
 }

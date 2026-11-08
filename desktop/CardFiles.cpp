@@ -73,25 +73,28 @@ Report paste(FatImage& fat, const QStringList& sources, const QString& destFolde
         const bool here = FatImage::parts(parentOf(source.toLower())) == FatImage::parts(destFolder.toLower());
         if (move && here) { report.skipped++; continue; }
         auto target = name;
+        QString victim;
         if (const auto taken = named(fat, destFolder, name)) {
             switch (here ? Clash::KeepBoth : resolver.decide(name)) {
             case Clash::Cancel: throw frondCardFile::Cancelled();
             case Clash::Skip: report.skipped++; continue;
             case Clash::KeepBoth: target = keepBoth(fat, destFolder, name); break;
             case Clash::Replace: {
-                const auto victim = FatImage::joined(destFolder, taken->name);
+                victim = FatImage::joined(destFolder, taken->name);
                 if (FatImage::within(victim, source)) throw Error(QStringLiteral("%1 holds what you are replacing it with.").arg(taken->name));
-                fat.remove(victim);
                 break;
             }
             }
         }
-        if (move) fat.move(source, destFolder, target);
-        else {
-            const auto base = copied;
-            fat.copy(source, destFolder, target, cancelled, [&](qint64 n) { if (bytes) bytes(base + n); });
-            copied += fat.sizeOf(FatImage::joined(destFolder, target));
-        }
+        const auto base = copied;
+        const auto work = [&] {
+            if (move) fat.move(source, destFolder, target);
+            else fat.copy(source, destFolder, target, cancelled, [&](qint64 n) { if (bytes) bytes(base + n); });
+        };
+        // A replace swaps the entries in one commit once the new one is complete.
+        if (victim.isEmpty()) work();
+        else fat.replace(victim, work);
+        if (!move) copied += fat.sizeOf(FatImage::joined(destFolder, target));
         report.done++;
     }
     return report;
@@ -128,6 +131,7 @@ QString addFile(FatImage& fat, const QString& folder, const QString& hostFile, R
     if (!in.open(QIODevice::ReadOnly)) throw Error(QStringLiteral("Couldn't read %1.").arg(name));
     const qint64 size = in.size();
     auto target = name;
+    QString victim;
     if (const auto taken = named(fat, folder, name)) {
         switch (resolver.decide(name)) {
         case Clash::Cancel: throw frondCardFile::Cancelled();
@@ -135,20 +139,24 @@ QString addFile(FatImage& fat, const QString& folder, const QString& hostFile, R
         case Clash::KeepBoth: target = keepBoth(fat, folder, name); break;
         case Clash::Replace:
             if (taken->directory) throw Error(QStringLiteral("%1 is a folder on the card.").arg(name));
-            if (size > fat.freeBytes() + taken->size) throw Error(QStringLiteral("There isn't enough space on the card."));
-            fat.remove(FatImage::joined(folder, taken->name));
+            victim = FatImage::joined(folder, taken->name);
             break;
         }
     }
     qint64 done = 0;
-    fat.add(folder, target, [&](char* b, qint64 n) -> qint64 {
-        check(cancelled);
-        const auto r = in.read(b, n);
-        if (r < 0) throw Error(QStringLiteral("Couldn't read %1.").arg(name));
-        done += r;
-        if (bytes) bytes(done);
-        return r;
-    }, size);
+    const auto work = [&] {
+        fat.add(folder, target, [&](char* b, qint64 n) -> qint64 {
+            check(cancelled);
+            const auto r = in.read(b, n);
+            if (r < 0) throw Error(QStringLiteral("Couldn't read %1.").arg(name));
+            done += r;
+            if (bytes) bytes(done);
+            return r;
+        }, size);
+    };
+    // A replace keeps the old file until the new one is complete, then swaps them in one commit.
+    if (victim.isEmpty()) work();
+    else fat.replace(victim, work);
     return target;
 }
 
