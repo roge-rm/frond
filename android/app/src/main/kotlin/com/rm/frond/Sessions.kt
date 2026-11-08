@@ -494,6 +494,31 @@ private fun java.io.InputStream.readExact(n: Int): ByteArray {
 // CRC over the header (its own field zeroed) and that table.
 // With `swap` (slot.json says the slot changed since the save) the card files are whatever is there,
 // checked against their own headers.
+// A classic stick's v2 .frondms header (FRONDMS version 2): its physical size (pages x 521) from
+// the payload and side region sizes, or 0 when they aren't one of the 4 to 128 MB layouts. The
+// payload is the user blocks (496 a segment of 512, 2 fewer in segment 0); the side region holds
+// the 2 boot blocks, 9 extra bytes a page, a u32 a block and the spare blocks.
+internal fun classicV2Physical(hdr: ByteArray): Long {
+    val payload = le64(hdr, 16)
+    val side = le64(hdr, 48)
+    for ((b, p) in listOf(512L to 16L, 1024L to 16L, 1024L to 32L, 2048L to 32L, 4096L to 32L, 8192L to 32L)) {
+        val user = b / 512 * 496 - 2
+        val block = p * 512
+        if (payload == user * block && side == 2 * block + 9 * b * p + 4 * b + (b - 2 - user) * block) return b * p * 521
+    }
+    return 0L
+}
+
+// The stored bytes of a v2 card file: the payload, then the side region from the next MiB.
+internal fun storedBytesV2(hdr: ByteArray): Long {
+    val payload = le64(hdr, 16)
+    val side = le64(hdr, 48)
+    return if (side != 0L) (payload + (1L shl 20) - 1) / (1L shl 20) * (1L shl 20) + side else payload
+}
+
+internal fun classicV2(hdr: ByteArray) = hdr.size >= 64 &&
+    hdr.copyOfRange(0, 8).contentEquals("FRONDMS\u0000".toByteArray(Charsets.US_ASCII)) && le32(hdr, 8) == 2L
+
 internal fun checkImportedSiblings(dir: File, frond: File, swap: Boolean = false): String? {
     val mismatch = "That session's card files don't match."
     val bytes = try { frond.readBytes() } catch (e: IOException) { return "Couldn't read that file." }
@@ -539,7 +564,10 @@ internal fun checkImportedSiblings(dir: File, frond: File, swap: Boolean = false
             if (!file.isFile) continue
             val hdr = file.inputStream().use { it.readExact(64) }
             if (hdr.size != 64) return mismatch
-            if (kind == 2L) {
+            if (kind == 2L && classicV2(hdr)) {
+                if (classicV2Physical(hdr) == 0L) return mismatch
+                cards.add(Card(kind, classicV2Physical(hdr), le64(hdr, 28)))
+            } else if (kind == 2L) {
                 if (Device.MEMORY_STICK_SIZES.none { file.length() - 64 == Device.memoryStickPhysicalBytes(it) }) return mismatch
                 cards.add(Card(kind, file.length() - 64, le64(hdr, 32)))
             } else {
@@ -611,6 +639,17 @@ internal fun checkImportedSiblings(dir: File, frond: File, swap: Boolean = false
                 val hdr = input.readExact(64)
                 if (hdr.size != 64 || !hdr.copyOfRange(0, 8).contentEquals("FRONDMS\u0000".toByteArray(Charsets.US_ASCII)))
                     return mismatch
+                if (classicV2(hdr)) {
+                    // v2: logical blocks, then the side region; generation, table and 1 MiB chunks as SD.
+                    val stored = storedBytesV2(hdr)
+                    val chunks = (stored + (1L shl 20) - 1) / (1L shl 20)
+                    if (le32(hdr, 12) != 512L || classicV2Physical(hdr) == 0L || classicV2Physical(hdr) != card.physical ||
+                        le64(hdr, 28) != card.generation || le64(hdr, 36) != 64 + stored || le32(hdr, 44) != (1L shl 20) ||
+                        ms.length() != 64 + stored + 4 * chunks)
+                        return mismatch
+                    if (hdr.copyOfRange(56, 64).any { it != 0.toByte() }) return mismatch
+                    return@use
+                }
                 // The header's blocks and pages per block must make the descriptor's size.
                 if (le32(hdr, 8) != 1L || le32(hdr, 12) * le32(hdr, 16) * 521 != card.physical ||
                     le32(hdr, 16) != (if (card.physical < Device.memoryStickPhysicalBytes(16)) 16L else 32L) ||
@@ -669,7 +708,7 @@ internal fun removeStaleImports(root: File, now: Long) {
 internal fun ignoredName(name: String) =
     name.contains(".frond.tmp-") || name.contains(".frondsd.tmp-") ||
         name.contains(".frondms.tmp-") || name.contains(".frondsd.journal-") || name.contains(".frondmsp.journal-") ||
-        name.contains(".gen-")
+        name.contains(".frondms.journal-") || name.contains(".gen-")
 
 internal fun packableName(name: String): Boolean {
     if (ignoredName(name) || '/' in name || '\\' in name) return false
@@ -696,13 +735,13 @@ internal fun sessionFile(dir: File): File? {
 // (sessionPathIn in the core).
 internal fun sessionPathIn(dir: File): File = sessionFile(dir) ?: File(dir, "${dir.name}.frond")
 
-// The content generation of the SD card or Memory Stick Pro (kind 1 or 3) a v8 .frond
-// describes, with its kind, or 0 for none.
+// The content generation of the file-backed card (kind 1 SD, 2 classic stick or 3 Pro) a v8
+// .frond describes, with its kind, or 0 for none.
 internal fun sdCardOf(frond: File?): Pair<Long, Long> = try {
     val head = frond?.inputStream()?.use { it.readExact(92 + 200) } ?: ByteArray(0)
     if (head.size < 92 || le32(head, 4) != 8L) 0L to 1L
     else (0 until minOf(le32(head, 88), 2L).toInt()).map { 92 + it * 100 }
-        .firstOrNull { it + 100 <= head.size && le32(head, it).let { kind -> kind == 1L || kind == 3L } }
+        .firstOrNull { it + 100 <= head.size && le32(head, it).let { kind -> kind in 1L..3L } }
         ?.let { le64(head, it + 92) to le32(head, it) } ?: (0L to 1L)
 } catch (e: IOException) {
     0L to 1L
@@ -713,19 +752,19 @@ internal fun sdGenerationOf(frond: File?): Long = sdCardOf(frond).first
 // A save the core didn't finish leaves sd.frondsd behind the .frond: the card it describes is
 // sd.frondsd.journal-<G>.full, or sd.frondsd one generation behind plus sd.frondsd.journal-<G>.
 // Exports settle it as a load would, so they hold a plain sd.frondsd at G. Both null when
-// sd.frondsd is right as it is, or nothing can settle it. A Memory Stick Pro works the same way
-// with ms.frondmsp; `sibling` names the card file.
+// sd.frondsd is right as it is, or nothing can settle it. A Memory Stick Pro or a v2 classic stick
+// works the same way with ms.frondmsp or ms.frondms; `sibling` names the card file.
 internal class SdSettle(val full: File?, val journal: File?, val sibling: String = "sd.frondsd")
 
 internal fun sdSettleOf(dir: File, frond: File? = sessionFile(dir)): SdSettle {
     val (want, kind) = sdCardOf(frond)
-    val sibling = if (kind == 3L) "ms.frondmsp" else "sd.frondsd"
+    val sibling = when (kind) { 3L -> "ms.frondmsp"; 2L -> "ms.frondms"; else -> "sd.frondsd" }
     val none = SdSettle(null, null, sibling)
     if (want == 0L) return none
     val sd = File(dir, sibling)
     val hdr = try { if (sd.isFile) sd.inputStream().use { it.readExact(64) } else ByteArray(0) } catch (e: IOException) { ByteArray(0) }
-    val v2 = hdr.size == 64 && hdr.copyOfRange(0, 8).contentEquals("FRONDSD\u0000".toByteArray(Charsets.US_ASCII)) &&
-        le32(hdr, 8) == 2L
+    val v2 = hdr.size == 64 && (hdr.copyOfRange(0, 8).contentEquals("FRONDSD\u0000".toByteArray(Charsets.US_ASCII)) ||
+        hdr.copyOfRange(0, 8).contentEquals("FRONDMS\u0000".toByteArray(Charsets.US_ASCII))) && le32(hdr, 8) == 2L
     val have = if (v2) le64(hdr, 28) else 0L
     if (v2 && have == want) return none
     val full = File(dir, "$sibling.journal-$want.full")
@@ -757,7 +796,7 @@ internal fun readSdJournalIndex(journal: File, sdHeader: ByteArray, sdLength: Lo
         val to = le64(head, 32)
         val count = le64(head, 40)
         val chunks = le64(head, 48)
-        if (le32(sdHeader, 8) != 2L || le64(sdHeader, 16) != payload || le64(sdHeader, 28) != from || to != from + 1 ||
+        if (le32(sdHeader, 8) != 2L || storedBytesV2(sdHeader) != payload || le64(sdHeader, 28) != from || to != from + 1 ||
             chunks != (payload + (1L shl 20) - 1) / (1L shl 20) || sdLength != 64 + payload + 4 * chunks)
             return null
         val body = size - 16
@@ -832,17 +871,16 @@ internal fun writeSettledSd(sd: File, journal: File, out: java.io.OutputStream) 
 }
 
 // Moves the cards `frond` needs from a recovery folder into `dest`: sd.frondsd with the journal
-// an unfinished save left (the load replays it), or the full copy in its place, and ms.frondms.
-// A Memory Stick Pro's ms.frondmsp moves like sd.frondsd. False when one won't move.
+// an unfinished save left (the load replays it), or the full copy in its place. ms.frondmsp and a
+// v2 ms.frondms move like sd.frondsd. False when one won't move.
 internal fun moveRecoveryCards(from: File, frond: File, dest: File): Boolean {
     val settle = sdSettleOf(from, frond)
     val moves = buildList {
         val sd = settle.full ?: File(from, settle.sibling)
         if (sd.isFile) add(sd to settle.sibling)
         settle.journal?.let { add(it to it.name) }
-        File(from, "ms.frondms").takeIf { it.isFile }?.let { add(it to "ms.frondms") }
-        val other = if (settle.sibling == "sd.frondsd") "ms.frondmsp" else "sd.frondsd"
-        File(from, other).takeIf { it.isFile }?.let { add(it to other) }
+        for (other in listOf("sd.frondsd", "ms.frondms", "ms.frondmsp").filter { it != settle.sibling })
+            File(from, other).takeIf { it.isFile }?.let { add(it to other) }
     }
     return moves.all { (file, name) -> file.renameTo(File(dest, name)) }
 }

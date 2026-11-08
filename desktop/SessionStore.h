@@ -163,6 +163,25 @@ inline quint64 le64(const QByteArray& bytes, int i) {
     return quint64(le32(bytes, i)) | (quint64(le32(bytes, i + 4)) << 32);
 }
 
+// A classic stick's v2 .frondms header (FRONDMS version 2): its physical size (pages x 521) from
+// the payload and side region sizes, or 0 when they aren't one of the 4 to 128 MB layouts. The
+// payload is the user blocks (496 a segment of 512, 2 fewer in segment 0); the side region holds
+// the 2 boot blocks, 9 extra bytes a page, a u32 a block and the spare blocks.
+inline quint64 classicV2Physical(const QByteArray& hdr) {
+    const quint64 payload = le64(hdr, 16), side = le64(hdr, 48);
+    for (const auto& [b, p] : {std::pair<quint64, quint64>{512, 16}, {1024, 16}, {1024, 32}, {2048, 32}, {4096, 32}, {8192, 32}}) {
+        const quint64 user = b / 512 * 496 - 2, block = p * 512;
+        if (payload == user * block && side == 2 * block + 9 * b * p + 4 * b + (b - 2 - user) * block) return b * p * 521;
+    }
+    return 0;
+}
+// The stored bytes of a v2 card file: the payload, then the side region from the next MiB.
+inline quint64 storedBytesV2(const QByteArray& hdr) {
+    const quint64 payload = le64(hdr, 16), side = le64(hdr, 48);
+    return side ? ((payload + (1u << 20) - 1) >> 20 << 20) + side : payload;
+}
+inline bool classicV2(const QByteArray& hdr) { return hdr.left(8) == QByteArray("FRONDMS\0", 8) && le32(hdr, 8) == 2; }
+
 // Header, size and magic of each v7 or v8 sibling. A stub shorter than the TOC is no media.
 // v8 descriptors are 100 bytes and end with the SD content generation, which a .frondsd v2
 // header must match; v7 descriptors are 92 bytes and go with a v1 .frondsd. With `swap` (slot.json
@@ -224,7 +243,8 @@ inline QString checkImportedSiblings(const QString& dir, const QString& frond, b
             if (!card.open(QIODevice::ReadOnly)) return mismatch;
             const auto hdr = card.read(64);
             if (hdr.size() != 64) return mismatch;
-            if (kind == 2) cards.append({kind, quint64(card.size() - 64), le64(hdr, 32)});
+            if (kind == 2 && classicV2(hdr)) cards.append({kind, classicV2Physical(hdr), le64(hdr, 28)});
+            else if (kind == 2) cards.append({kind, quint64(card.size() - 64), le64(hdr, 32)});
             else cards.append({kind, le64(hdr, 16), le32(hdr, 8) == 2 ? le64(hdr, 28) : 0});
         }
     }
@@ -262,6 +282,17 @@ inline QString checkImportedSiblings(const QString& dir, const QString& frond, b
             if (!ms.open(QIODevice::ReadOnly)) return mismatch;
             const auto hdr = ms.read(64);
             if (hdr.size() != 64 || hdr.left(8) != QByteArray("FRONDMS\0", 8)) return mismatch;
+            if (classicV2(hdr)) {
+                // v2: logical blocks, then the side region; generation, table and 1 MiB chunks as SD.
+                const quint64 stored = storedBytesV2(hdr), chunks = (stored + (1u << 20) - 1) >> 20;
+                if (le32(hdr, 12) != 512 || !classicV2Physical(hdr) || classicV2Physical(hdr) != card.physical ||
+                    le64(hdr, 28) != card.generation || le64(hdr, 36) != 64 + stored || le32(hdr, 44) != (1u << 20) ||
+                    quint64(ms.size()) != 64 + stored + 4 * chunks)
+                    return mismatch;
+                for (int i = 56; i < 64; ++i)
+                    if (hdr[i]) return mismatch;
+                continue;
+            }
             // Blocks and pages per block of the 4 to 128 MB sticks, then the change counter (0249).
             const quint64 blocks = le32(hdr, 12), pages = le32(hdr, 16);
             bool shape = false;
@@ -299,7 +330,7 @@ inline QString cleanName(QString name) {
 inline bool ignoredName(const QString& name) {
     return name.contains(".frond.tmp-") || name.contains(".frondsd.tmp-") ||
            name.contains(".frondms.tmp-") || name.contains(".frondsd.journal-") ||
-           name.contains(".frondmsp.journal-") || name.contains(".gen-") ||
+           name.contains(".frondmsp.journal-") || name.contains(".frondms.journal-") || name.contains(".gen-") ||
            name.startsWith(".dup-");
 }
 inline bool packableName(const QString& name) {
@@ -559,8 +590,8 @@ inline QString reserve(const QString& folder, const QString& base, const QString
     return {};
 }
 
-// The content generation of the SD card or Memory Stick Pro a v8 .frond describes, or 0 for none.
-// `kind` gets the descriptor's kind, 1 for SD or 3 for Pro.
+// The content generation of the file-backed card a v8 .frond describes, or 0 for none. `kind` gets
+// the descriptor's kind, 1 for SD, 2 for a classic stick or 3 for Pro.
 inline quint64 sdGenerationOf(const QString& frond, quint32* kind = nullptr) {
     QFile file(frond);
     if (!file.open(QIODevice::ReadOnly)) return 0;
@@ -571,7 +602,7 @@ inline quint64 sdGenerationOf(const QString& frond, quint32* kind = nullptr) {
         const auto desc = file.read(100);
         if (desc.size() != 100) return 0;
         const auto found = le32(desc, 0);
-        if (found == 1 || found == 3) {
+        if (found == 1 || found == 2 || found == 3) {
             if (kind) *kind = found;
             return le64(desc, 92);
         }
@@ -583,7 +614,8 @@ inline quint64 sdGenerationOf(const QString& frond, quint32* kind = nullptr) {
 // sd.frondsd.journal-<G>.full, or sd.frondsd one generation behind plus sd.frondsd.journal-<G>.
 // Copies settle it as a load would, so they hold a plain sd.frondsd at G. Both empty when
 // sd.frondsd is right as it is, or nothing can settle it. `frond` is the session file in `dir`.
-// A Memory Stick Pro works the same way with ms.frondmsp; `sibling` names the card file.
+// A Memory Stick Pro or a v2 classic stick works the same way with ms.frondmsp or ms.frondms;
+// `sibling` names the card file.
 struct SdSettle {
     QString full, journal, sibling{QStringLiteral("sd.frondsd")};
 };
@@ -591,11 +623,12 @@ inline SdSettle sdSettleOf(const QString& dir, const QString& frond) {
     quint32 kind = 1;
     const auto want = sdGenerationOf(frond, &kind);
     if (!want) return {};
-    const QString sibling = kind == 3 ? QStringLiteral("ms.frondmsp") : QStringLiteral("sd.frondsd");
+    const QString sibling = kind == 3 ? QStringLiteral("ms.frondmsp") : kind == 2 ? QStringLiteral("ms.frondms") : QStringLiteral("sd.frondsd");
     QFile sd(dir + '/' + sibling);
     QByteArray hdr;
     if (sd.open(QIODevice::ReadOnly)) hdr = sd.read(64);
-    const bool v2 = hdr.size() == 64 && hdr.left(8) == QByteArray("FRONDSD\0", 8) && le32(hdr, 8) == 2;
+    const bool v2 = hdr.size() == 64 && (hdr.left(8) == QByteArray("FRONDSD\0", 8) || hdr.left(8) == QByteArray("FRONDMS\0", 8)) &&
+                    le32(hdr, 8) == 2;
     const quint64 have = v2 ? le64(hdr, 28) : 0;
     if (v2 && have == want) return {{}, {}, sibling};
     const auto prefix = dir + '/' + sibling + ".journal-" + QString::number(want);
@@ -604,8 +637,9 @@ inline SdSettle sdSettleOf(const QString& dir, const QString& frond) {
     return {{}, {}, sibling};
 }
 
-// Applies a complete journal to a copied sd.frondsd: pages, the new chunk table, then the header
-// at the journal's generation with its CRC. Checks the trailer CRC and every bound first.
+// Applies a complete journal to a copied v2 card file: pages, the new chunk table, then the header
+// at the journal's generation with its CRC. Checks the trailer CRC and every bound first. The
+// journal's offsets are in the stored bytes, which for a classic stick go on past the payload.
 inline bool applySdJournalCopy(const QString& journalPath, const QString& sdPath) {
     QFile journal(journalPath), sd(sdPath);
     if (!journal.open(QIODevice::ReadOnly) || !sd.open(QIODevice::ReadWrite)) return false;
@@ -622,7 +656,7 @@ inline bool applySdJournalCopy(const QString& journalPath, const QString& sdPath
     const quint64 payload = le64(head, 16), from = le64(head, 24), to = le64(head, 32);
     const quint64 records = le64(head, 40), chunks = le64(head, 48);
     const auto hdr = sd.read(64);
-    if (hdr.size() != 64 || le32(hdr, 8) != 2 || le64(hdr, 16) != payload || le64(hdr, 28) != from ||
+    if (hdr.size() != 64 || le32(hdr, 8) != 2 || storedBytesV2(hdr) != payload || le64(hdr, 28) != from ||
         to != from + 1 || chunks != (payload + (1u << 20) - 1) >> 20 ||
         quint64(sd.size()) != 64 + payload + 4 * chunks)
         return false;

@@ -160,7 +160,7 @@ inline const Descriptor* describedCard(const QList<Descriptor>& cards, const QSt
     return nullptr;
 }
 
-// The SD or Pro v2 generation, or the classic stick's change counter, in a card file's header.
+// The SD, Pro or classic v2 generation, or a v1 classic stick's change counter, in a card file's header.
 inline bool cardHeader(const QString& path, quint64* counter, qint64* logical) {
     using frondSessions::le32;
     using frondSessions::le64;
@@ -171,6 +171,11 @@ inline bool cardHeader(const QString& path, quint64* counter, qint64* logical) {
     if (h.left(8) == QByteArray("FRONDSD\0", 8)) {
         if (counter) *counter = le32(h, 8) == 2 ? le64(h, 28) : 0;
         if (logical) *logical = qint64(le64(h, 16));
+        return true;
+    }
+    if (frondSessions::classicV2(h)) {
+        if (counter) *counter = le64(h, 28);
+        if (logical) *logical = qint64(frondSessions::classicV2Physical(h) / 521 * 512);
         return true;
     }
     if (h.left(8) == QByteArray("FRONDMS\0", 8)) {

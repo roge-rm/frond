@@ -4736,9 +4736,13 @@ for line in s.makefile('rb'):
         QVERIFY(frondSessions::importFile(cardsSessions(), out.path() + "/Linked", &name).isEmpty());
         const auto noCard = frondCards::readSlot(cardsSessions() + '/' + name);
         QVERIFY(noCard.swap && noCard.card.isEmpty() && noCard.link.isEmpty());
-        // A classic 4 MB stick with a nonzero change counter imports.
+        // A classic 4 MB stick as an older Frond saved it, a v1 file with a nonzero change counter,
+        // imports.
         const auto stick = out.path() + "/Stick";
-        QVERIFY(cardTool({"make", "ms", "4", stick + "/ms.frondms"}) || (QDir().mkpath(stick) && cardTool({"make", "ms", "4", stick + "/ms.frondms"})));
+        QVERIFY(QDir().mkpath(stick));
+        QVERIFY(cardTool({"make", "ms", "4", out.path() + "/stick-v2.frondms"}));
+        QVERIFY(cardTool({"export", out.path() + "/stick-v2.frondms", stick + "/ms.frondms"}));
+        QFile::remove(out.path() + "/stick-v2.frondms");
         {
             QFile f(stick + "/ms.frondms"); QVERIFY(f.open(QIODevice::ReadWrite));
             auto h = f.read(64); putLe(h, 32, 3, 8); f.seek(0); f.write(h);

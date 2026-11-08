@@ -23,8 +23,18 @@ all: out/frond desktop
 test: test-memory-stick-controller test-memory-stick-media
 test-memory-stick-media: prepare
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
-		-Ibuild/source/src/uarm/uarm tests/memory-stick-media.cpp -o build/test-memory-stick-media
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/common tests/memory-stick-media.cpp -o build/test-memory-stick-media
 	./build/test-memory-stick-media
+
+.PHONY: test-ms-logical-equivalence
+test: test-ms-logical-equivalence
+test-ms-logical-equivalence: prepare
+	$(CC) -std=gnu99 -O1 -g -Ibuild/source/src/common -c build/source/src/common/zip/miniz.c \
+		-o build/miniz-ms-logical-equivalence.o
+	$(CXX) -std=c++17 -O2 -g -Wall -Wextra -Werror -UNDEBUG \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/common tests/ms-logical-equivalence.cpp \
+		build/miniz-ms-logical-equivalence.o -o build/test-ms-logical-equivalence
+	./build/test-ms-logical-equivalence
 
 .PHONY: test-card-backing
 test: test-card-backing
@@ -1025,7 +1035,7 @@ test-memory-stick-controller: build/source/src/common/libcommon.a
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter \
 		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
 		tests/memory-stick-controller.cpp build/source/src/uarm/uarm/mmiodev_MemoryStickController.cpp \
-		build/source/src/common/libcommon.a -lz -o build/test-memory-stick-controller
+		build/source/src/uarm/uarm/sdcard.cpp build/source/src/common/libcommon.a -lz -o build/test-memory-stick-controller
 	./build/test-memory-stick-controller
 
 .PHONY: test-memory-stick-pro

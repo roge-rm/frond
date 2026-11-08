@@ -164,15 +164,16 @@ object Cards {
 
     fun describedCard(cards: List<Descriptor>, file: String) = cards.firstOrNull { it.kind == descriptorKindOf(file) }
 
-    // The SD or Pro v2 generation, or the classic stick's change counter, and the logical size, from
-    // a card file's header.
+    // The SD, Pro or classic v2 generation, or a v1 classic stick's change counter, and the logical
+    // size, from a card file's header.
     fun cardHeader(file: File): Pair<Long, Long>? = try {
         val h = CardFile.header(file) ?: return null
         val magic = String(h, 0, 8, Charsets.US_ASCII)
         when (magic) {
             "FRONDSD\u0000" -> (if (le32(h, 8) == 2L) le64(h, 28) else 0L) to le64(h, 16)
             // Each MB is 2048 pages of 512 bytes plus 9.
-            "FRONDMS\u0000" -> le64(h, 32) to le32(h, 12) * le32(h, 16) * 512
+            "FRONDMS\u0000" -> if (classicV2(h)) le64(h, 28) to classicV2Physical(h) / 521 * 512
+                else le64(h, 32) to le32(h, 12) * le32(h, 16) * 512
             else -> null
         }
     } catch (e: IOException) {
@@ -319,6 +320,7 @@ object Cards {
 
     const val SAME_DISK = "Cards and sessions have to be on the same disk."
     const val IN_FILES = "The card is open in Files. Close it first."
+    const val MISMATCH = "The card has an unfinished change that doesn't match it."
 
     // A card file nobody has open in Files…, with any change a crash cut off finished.
     fun ready(card: File) = !CardFile.inUse(card) && CardFile.settle(card)

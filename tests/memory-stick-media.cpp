@@ -38,7 +38,7 @@ static void Check(const M::Geometry& g) {
     input.fill(0xa5);
     assert(card.Program(3, 7, input, true, false) == M::Result::ok);
     ExpectPage(card, 3, 7, 0xa5, 0xff);
-    assert(card.Dirty() && card.ChangedPages() == 1);
+    assert(card.Dirty());
     const auto checkpoint = card.SaveCheckpoint();
     input.fill(0x5a);
     assert(card.Program(3, 7, input, false, true) == M::Result::ok);
@@ -89,7 +89,7 @@ static void Check(const M::Geometry& g) {
     assert(card.Erase(3) == M::Result::ok);
     for (unsigned page = 0; page < pagesPerBlock; ++page) ExpectPage(card, 3, page, 0xff, 0xff);
     ExpectPage(card, 4, 0, 0, 0);
-    assert(card.ChangedPages() == 1);
+    assert(card.Dirty());
 
     // Export/reopen retains physical mapping bytes, including the last page and its last extra byte.
     input.fill(0xc3);

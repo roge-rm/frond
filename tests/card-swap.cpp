@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -403,9 +404,10 @@ static void TakeOutClassic() {
     assert(frondNative::slotCards().msIdentity == id);
     // A save carries the identity.
     frondMachine::Media media;
-    fs::path temp;
-    assert(frondNative::publishMs(off, other, media, temp) && media.identity == id);
-    fs::remove(temp);
+    frondNative::SdSave save;
+    assert(frondNative::beginMsSave(off, other, media, save) && media.identity == id);
+    if (!save.full.empty()) fs::remove(save.full);
+    if (!save.journal.empty()) fs::remove(save.journal);
     msCtrlrDestroy(ms);
     msCtrlrDestroy(other);
     frondNative::slotCards() = {};
@@ -444,7 +446,13 @@ static void WriteStickPage(MemoryStickController* ms, uint32_t word) {
     }
 }
 
-static uint64_t StickChanges(const fs::path& path, uint64_t physical) {
+// A .frondms's change counter (v1) or generation (v2).
+static uint64_t StickGeneration(const fs::path& path, uint64_t physical) {
+    if (frondMachine::msFileVersion(path) == 2) {
+        frondSdFile::Info info;
+        assert(frondMachine::readSdHeader(path, info) == frondMachine::SiblingStatus::ok && info.classic);
+        return info.generation;
+    }
     uint64_t changes = ~0ull;
     assert(frondMachine::msHeaderLooksRight(path, physical, &changes));
     return changes;
@@ -496,88 +504,101 @@ static void SdCounter() {
     std::printf("SD change counter ok\n");
 }
 
-// A classic stick's change counter: in the .frondms header and the descriptor, moved on once per
-// open or insert by the first save after a write.
+// A classic stick's generation: a v1 file's change counter carries on as its v2 generation, and
+// then every save moves it on, like SD.
 static void ClassicCounter() {
     const auto* g = frondMsGeometry::byMegabytes(16);
     const auto id = Id(11);
     const auto a = Machine("counter-ms-a");
-    const auto b = Machine("counter-ms-b");
-    auto* ms = msCtrlrInit(nullptr, 0x14000000);
-    assert(msCtrlrAttach(ms, frondMs::create(*g)));
-    frondNative::msOpened(id, 0);
-
-    // Saved unwritten: counter 0, as an older Frond wrote it. Its header still decodes.
-    auto publish = [&](const fs::path& folder) {
-        frondMachine::Media media;
-        fs::path temp;
-        assert(frondNative::publishMs(folder, ms, media, temp));
-        fs::rename(temp, folder / frondMachine::msSibling);
-        return media;
-    };
-    auto saved = publish(a);
-    assert(saved.contentGeneration == 0 && StickChanges(a / frondMachine::msSibling, g->PhysicalBytes()) == 0);
-    auto contents = Contents("sony-clie-tg50");
-    contents.media.push_back(saved);
-    SaveFrond(a, contents);
-    SaveFrond(b, contents);
-    fs::copy_file(a / frondMachine::msSibling, b / frondMachine::msSibling);
-
-    // Written in b: the next save is counter 1, and later saves of the same insert stay at 1.
-    WriteStickPage(ms, 0x5a5a5a5a);
-    assert(msCtrlrChanged(ms));
-    saved = publish(b);
-    assert(saved.contentGeneration == 1 && StickChanges(b / frondMachine::msSibling, g->PhysicalBytes()) == 1);
-    WriteStickPage(ms, 0x1a1a1a1a);
-    saved = publish(b);
-    assert(saved.contentGeneration == 1);
-    std::vector<uint8_t> physical;
-    assert(frondMs::decodeFile(b / frondMachine::msSibling, physical));
-    contents.media = {saved};
-    SaveFrond(b, contents);
-    frondSession::Contents got;
-    assert(Load(b, got, nullptr) && got.media[0].contentGeneration == 1);
-
-    // The descriptor carries the counter.
-    std::vector<uint8_t> bytes;
-    frondMachine::Media decoded;
-    assert(frondMachine::encodeDescriptor(saved, bytes) && frondMachine::decodeDescriptor(bytes.data(), bytes.size(), decoded));
-    assert(decoded.contentGeneration == 1);
-
-    // b's stick back in a, same identity: refused as saved, changed under --card-swap.
-    fs::remove(a / frondMachine::msSibling);
-    fs::copy_file(b / frondMachine::msSibling, a / frondMachine::msSibling);
-    assert(!Load(a, got, nullptr));
-    auto swap = Swap(true, id);
-    assert(Load(a, got, &swap) && got.msSwapped && got.media[0].contentGeneration == 1 && got.media[0].identity == id);
-    auto noId = Swap(false);
-    assert(!Load(a, got, &noId));
-    // A descriptor with no counter (an older Frond's) and an unwritten stick: unchanged.
-    fs::remove(a / frondMachine::msSibling);
+    const auto b = Root() / "counter-ms-b";
+    fs::remove_all(b);
+    const auto stick = a / frondMachine::msSibling;
+    // A v1 stick at counter 4, as an older Frond saved it.
     {
         auto fresh = frondMs::create(*g);
-        assert(frondSession::writeMsFile(a / frondMachine::msSibling, fresh.data(), fresh.size()));
+        assert(frondSession::writeMsFile(stick, fresh.data(), fresh.size()));
+        std::fstream f(stick, std::ios::in | std::ios::out | std::ios::binary);
+        const uint8_t four[8] = {4};
+        f.seekp(32);
+        f.write(reinterpret_cast<const char*>(four), 8);
     }
-    assert(Load(a, got, &swap) && !got.msSwapped);
+    frondMachine::Media v1;
+    v1.kind = frondMachine::kindMs;
+    v1.name = frondMachine::msSibling;
+    v1.inserted = true;
+    v1.identity = id;
+    v1.logicalSize = g->LogicalBytes();
+    v1.physicalSize = g->PhysicalBytes();
+    v1.contentGeneration = 4;
+    auto contents = Contents("sony-clie-tg50");
+    contents.media.push_back(v1);
+    SaveFrond(a, contents);
+    frondSession::Contents got;
+    assert(Load(a, got, nullptr) && got.media[0].contentGeneration == 4);
+    assert(StickGeneration(stick, g->PhysicalBytes()) == 4);
 
-    // Take-out moves the counter on for a stick written since put-in, once.
-    assert(msCtrlrInsert(ms, false));
-    const auto c = Machine("counter-ms-c");
-    fs::copy_file(b / frondMachine::msSibling, c / frondMachine::msSibling);
-    msCtrlrDetach(ms);
-    frondNative::slotCards() = {};
-    assert(frondNative::putInMs(c, ms, deviceTypeTG50, id, false).ok && frondNative::slotCards().msChanges == 1);
-    CardIdentity outId{};
-    bool protect = false;
-    assert(msCtrlrInsert(ms, false));
-    assert(frondNative::takeOutMs(c, ms, outId, protect).ok && StickChanges(c / frondMachine::msSibling, g->PhysicalBytes()) == 1);
-    assert(frondNative::putInMs(c, ms, deviceTypeTG50, id, false).ok);
-    WriteStickPage(ms, 0x2b2b2b2b);
-    assert(msCtrlrInsert(ms, false));
-    assert(frondNative::takeOutMs(c, ms, outId, protect).ok && StickChanges(c / frondMachine::msSibling, g->PhysicalBytes()) == 2);
+    // It loads into RAM, and the first save writes v2 at generation 5, a full file.
+    auto* ms = msCtrlrInit(nullptr, 0x14000000);
+    assert(frondNative::attachClassicFile(ms, stick, id, true, false));
+    frondNative::msOpened(id, 4);
+    assert(!sdCardFileBacked());
+    auto save = [&](const fs::path& folder, uint64_t want, bool full) {
+        auto saved = Contents("sony-clie-tg50");
+        frondMachine::Media media;
+        frondNative::SdSave sd;
+        assert(frondNative::beginMsSave(folder, ms, media, sd));
+        assert(full == !sd.full.empty() && full == sd.journal.empty());
+        saved.media.push_back(media);
+        assert(frondNative::publishWithSd(folder, saved, {fs::path()}, sd));
+        assert(media.contentGeneration == want && media.identity == id);
+        assert(StickGeneration(folder / frondMachine::msSibling, g->PhysicalBytes()) == want);
+        assert(frondMachine::msFileVersion(folder / frondMachine::msSibling) == 2);
+        return media;
+    };
+    WriteStickPage(ms, 0x5a5a5a5a);
+    save(a, 5, true);
+    // Now on the file: later saves are journals, one generation each.
+    assert(sdCardFileBacked());
+    WriteStickPage(ms, 0x1a1a1a1a);
+    save(a, 6, false);
+    auto last = save(a, 7, false);
+    std::vector<uint8_t> image;
+    assert(msCtrlrExport(ms, image));
     msCtrlrDestroy(ms);
+    sdCardReset();
+    frondSdCandidate::releaseUnused();
+
+    // It reads back as the stick that was saved, and its descriptor carries the generation.
+    std::vector<uint8_t> physical;
+    assert(frondMs::readPhysical(stick, physical) && physical == image);
+    std::vector<uint8_t> bytes;
+    frondMachine::Media decoded;
+    assert(frondMachine::encodeDescriptor(last, bytes) && frondMachine::decodeDescriptor(bytes.data(), bytes.size(), decoded));
+    assert(decoded.contentGeneration == 7);
+    assert(Load(a, got, nullptr) && got.media[0].contentGeneration == 7);
+
+    // Into another folder, saved there, and back: refused as saved, changed under --card-swap.
+    fs::copy(a, b, fs::copy_options::recursive);
+    fs::rename(b / FrondOf(a).filename(), FrondOf(b));
+    assert(Load(b, got, nullptr));
+    ms = msCtrlrInit(nullptr, 0x14000000);
+    assert(frondNative::attachClassicFile(ms, b / frondMachine::msSibling, id, true, false));
+    frondNative::msOpened(id, 7);
+    WriteStickPage(ms, 0x2b2b2b2b);
+    save(b, 8, false);
+    msCtrlrDestroy(ms);
+    sdCardReset();
+    frondSdCandidate::releaseUnused();
+    fs::remove(stick);
+    for (const auto& e : fs::directory_iterator(a))
+        if (e.path().filename().string().rfind("ms.frondms.", 0) == 0) fs::remove(e.path());
+    for (const auto& e : fs::directory_iterator(b))
+        if (e.path().filename().string().rfind("ms.frondms", 0) == 0) fs::rename(e.path(), a / e.path().filename());
+    assert(!Load(a, got, nullptr));
+    auto swap = Swap(true, id);
+    assert(Load(a, got, &swap) && got.msSwapped && got.media[0].contentGeneration == 8 && got.media[0].identity == id);
     frondNative::slotCards() = {};
-    std::printf("classic Memory Stick change counter ok\n");
+    std::printf("classic Memory Stick generation ok\n");
 }
 
 static void Arguments() {
