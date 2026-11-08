@@ -1,5 +1,5 @@
 // A window's connection to the link hub. Starts the hub if none answers, and starts a new one
-// if it goes away, then sends the sticky requests (watch, ir-attach, serial-attach) again so channels reopen.
+// if it goes away, then sends the sticky requests (watch, ir-attach, serial-attach, bt-attach) again so channels reopen.
 #pragma once
 #include <QJsonObject>
 #include <QLocalSocket>

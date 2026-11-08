@@ -4,10 +4,15 @@
 #include <QJsonArray>
 #include <QNetworkInterface>
 #include <QNetworkDatagram>
+#include <QDir>
 #include <cstdio>
 #include <algorithm>
 #ifdef Q_OS_UNIX
 #include <sys/socket.h>
+#endif
+#ifdef Q_OS_LINUX
+#include <csignal>
+#include <sys/prctl.h>
 #endif
 
 namespace frondLink {
@@ -23,6 +28,10 @@ constexpr qint64 kClosingMs = 3000;   // a closing connection's last bytes get t
 constexpr qint64 kCoreRetryMs = 250;
 constexpr qint64 kBusyRetryMs = 5000;
 constexpr qint64 kPairCooldownMs = 60000;
+constexpr qint64 kRadioRetryMs = 100;
+constexpr qint64 kRadioStartMs = 5000;  // btvirt gets this long to make its socket
+// Bluetooth bytes the hub reads ahead from a core or the radio; past that they wait in its socket.
+constexpr qint64 kBluetoothAhead = 16384;
 constexpr int kMaxPending = 16;       // connections not yet authenticated
 constexpr int kPerAddress = 10;       // new connections per address in 10 s
 const QByteArray kBeaconMagic("FRLB");
@@ -84,9 +93,30 @@ struct Hub::Attach {
     // goes back as it takes them), and bytes that came before the core socket was up.
     qint64 unacked{0};
     QByteArray pendingIn;
+    // Bluetooth: the hub's socket the core connects to, once per controller.
+    QLocalServer* btServer{nullptr};
     bool serial() const { return kind == ChannelKind::Serial; }
+    bool bt() const { return kind == ChannelKind::Bluetooth; }
     // Joined to a machine: over a link, or to a partner on this computer.
     bool joined() const { return st == St::Joined && (link != QLatin1String("local") || partner); }
+};
+
+struct Hub::Controller {
+    Attach* owner{nullptr};          // the machine here it belongs to; null for one a peer put on our radio
+    QString peer;                    // a peer's controller: the connection it came over
+    QString machine;                 // a peer's controller: its machine
+    QLocalSocket* core{nullptr};     // ours: the core's connection
+    QLocalSocket* radioSock{nullptr};  // our radio, for ours on this Frond's radio and for a peer's
+    bool radioUp{false};
+    bool wantsRadio{false};
+    qint64 radioTry{0};
+    Conn* chLink{nullptr};           // the Bluetooth channel, when the radio is on the other side
+    uint16_t ch{0};
+    bool open{false};                // the channel was accepted
+    qint64 unacked{0};               // link bytes written to the near socket and not yet taken
+    QByteArray pending;              // link bytes that came before the radio was up
+    // The socket the channel's bytes go to and come from.
+    QLocalSocket* nearEnd() const { return owner ? core : radioUp ? radioSock : nullptr; }
 };
 
 Hub::Hub(QObject* parent) : QObject(parent) { clock.start(); }
@@ -266,6 +296,21 @@ void Hub::handle(Client* c, const QJsonObject& op) {
         pairOut = {};
     } else if (type == "pair-dismiss") {
         if (code) endPairRequest("cancelled");
+    } else if (type == "peer-radio") {
+        auto* p = store.find(op.value("id").toString());
+        if (!p) return;
+        const auto hex = hexId(p->id);
+        const bool here = op.value("radio").toString() != QLatin1String("there");
+        const qint64 at = std::max(wall(), p->bluetoothRadioAt + 1);
+        setRadio(hex, here, at);
+        if (const auto it = runs.find(hex); it != runs.end() && it->link && it->link->up && it->link->link) {
+            it->link->link->sendRadio({here, uint64_t(at)});
+            pump(it->link);
+        }
+    } else if (type == "bt-attach") {
+        btAttach(c, op);
+    } else if (type == "bt-detach") {
+        for (auto* a : QList<Attach*>(attaches)) if (a->client == c && a->bt()) removeAttach(a);
     } else if (type == "ir-attach" || type == "serial-attach") {
         const auto kind = type == "ir-attach" ? ChannelKind::Infrared : ChannelKind::Serial;
         for (auto* a : attaches) if (a->client == c && a->kind == kind) return;  // one of each per window
@@ -396,6 +441,7 @@ void Hub::afterLink(Conn* c) {
     }
     if (c->up) muxEvents(c);
     if (!conns.contains(c)) return;
+    if (c->up) btRadioChoices(c);
     pump(c);
     if (link.state() == LinkState::Down && !c->closing) {
         const auto hex = c->peer.isEmpty() ? hexId(link.peerId()) : c->peer;
@@ -435,11 +481,13 @@ void Hub::linkUp(Conn* c) {
     if (c->outgoing) { p->goodHost = c->socket->peerAddress().toString(); p->goodPort = c->socket->peerPort(); }
     store.save();
     matchPeer(c->peer);
+    btLinkUp(c);
 }
 
 // The link went: its channels are gone, the machines on it wait again.
 void Hub::linkDown(Conn* c) {
     for (auto* a : attaches) if (a->chLink == c) clearChannel(a);
+    btLinkDown(c);
     if (!c->peer.isEmpty() && runs.contains(c->peer)) {
         auto& r = runs[c->peer];
         if (r.link == c) { r.link = nullptr; r.held.clear(); r.nextTry = now() + kBackoff[0]; }
@@ -460,7 +508,9 @@ void Hub::pump(Conn* c) {
             if (out.empty()) break;
             c->socket->write(fromBytes(out));
         }
-        if (round == 1 || c->closing || !pullSerial(c)) break;
+        if (round == 1 || c->closing) break;
+        const bool serialMoved = pullSerial(c);
+        if (!(pullBluetooth(c) || serialMoved)) break;
     }
     if (c->closing && c->socket->bytesToWrite() == 0 && !(c->link && c->link->hasOutput())) c->socket->disconnectFromHost();
 }
@@ -719,9 +769,12 @@ void Hub::muxEvents(Conn* c) {
         r.idleSince = now();
         auto* a = attachOn(c, e.channel);
         using K = ChannelEvent::Kind;
+        if (e.kind != K::OpenRequest) {
+            if (auto* k = controllerOn(c, e.channel)) { btChannelEvent(k, e); continue; }
+        }
         switch (e.kind) {
             case K::OpenRequest:
-                if (e.channelKind == ChannelKind::Bluetooth) mux.close(e.channel, CloseReason::Gone);  // Bluetooth comes later
+                if (e.channelKind == ChannelKind::Bluetooth) btRequest(c, e);
                 else channelRequest(c, e);
                 break;
             case K::Accepted:
@@ -789,7 +842,7 @@ void Hub::matchPeer(const QString& hex) {
     if (!c || !c->up || !c->link || c->link->state() != LinkState::Up) return;
     auto& mux = c->link->mux();
     for (auto* a : attaches) {
-        if (a->link != hex || !(a->st == Attach::St::Idle || a->st == Attach::St::Busy) || a->retryAt > now()) continue;
+        if (a->bt() || a->link != hex || !(a->st == Attach::St::Idle || a->st == Attach::St::Busy) || a->retryAt > now()) continue;
         const auto held = std::find_if(r.held.begin(), r.held.end(), [&](const Held& h) { return h.kind == a->kind; });
         if (held != r.held.end()) {
             const auto h = *held;
@@ -843,6 +896,7 @@ void Hub::matchLocal() {
 }
 
 void Hub::removeAttach(Attach* a) {
+    if (a->bt()) dropAttachBt(a);
     unjoin(a, true);
     attaches.removeOne(a);
     if (a->core) { a->core->disconnect(this); a->core->abort(); a->core->deleteLater(); }
@@ -1022,7 +1076,7 @@ bool Hub::pullSerial(Conn* c) {
 
 bool Hub::discoveryActive() const {
     if (watchers() || pairOut.client) return true;
-    return std::any_of(attaches.begin(), attaches.end(), [](const Attach* a) { return a->link != "local"; });
+    return std::any_of(attaches.begin(), attaches.end(), [](const Attach* a) { return a->link != "local" && a->link != "radio"; });
 }
 
 void Hub::beacon(quint8 type, const QHostAddress& to, quint16 port) {
@@ -1082,7 +1136,16 @@ void Hub::datagrams() {
 // ---- Status ----
 
 QJsonObject Hub::status(const Attach* a) const {
-    QJsonObject o{{"type", a->serial() ? "serial" : "ir"}};
+    QJsonObject o{{"type", a->bt() ? "bt" : a->serial() ? "serial" : "ir"}};
+    if (a->bt()) {
+        o["listening"] = a->btServer && a->btServer->isListening();
+        o["controllers"] = int(std::count_if(controllers.begin(), controllers.end(), [a](const Controller* k) { return k->owner == a; }));
+        if (a->link == QLatin1String("radio")) {
+            o["peer"] = QCoreApplication::translate("frondLink", "This Frond");
+            o["state"] = radioProgram().isEmpty() ? "noradio" : "radio";
+            return o;
+        }
+    }
     const bool local = a->link == "local";
     const Peer* p = local ? nullptr : const_cast<Store&>(store).find(a->link);
     o["peer"] = local ? QCoreApplication::translate("frondLink", "This computer") : p ? p->name : QString();
@@ -1098,6 +1161,16 @@ QJsonObject Hub::status(const Attach* a) const {
         default: {
             const auto it = runs.find(a->link);
             state = !local && it != runs.end() && it->failed && !it->link ? "notfound" : "connecting";
+        }
+    }
+    if (a->bt() && p) {
+        // Bluetooth has no channel of its own to wait for: once linked, it's on one side's radio.
+        const bool here = radioHere(a->link);
+        o["radio"] = here ? "here" : "there";
+        if (state == "connecting" || state == "joined" || state == "waiting" || state == "busy") {
+            const auto it = runs.find(a->link);
+            if (it != runs.end() && it->link && it->link->up) state = here ? (radioProgram().isEmpty() ? "noradio" : "here") : "there";
+            else state = "connecting";
         }
     }
     o["state"] = state;
@@ -1123,6 +1196,7 @@ QString Hub::peerChannels(const QString& hex) const {
         kinds << (kind == ChannelKind::Serial ? QCoreApplication::translate("frondLink", "Serial: %1")
                                               : QCoreApplication::translate("frondLink", "Infrared: %1")).arg(parts.join(", "));
     }
+    if (const auto bt = peerBluetooth(hex); !bt.isEmpty()) kinds << bt;
     return kinds.join(QStringLiteral(" · "));
 }
 
@@ -1141,6 +1215,7 @@ QJsonObject Hub::snapshot() const {
             if (!it->seen.isNull() && now() - it->seenAt < kNearbyMs) o["seen"] = it->seen.toString();
         }
         o["channels"] = peerChannels(hex);
+        o["bluetoothRadio"] = radioHere(hex) ? "here" : "there";
         list.append(o);
     }
     QJsonArray near;
@@ -1177,11 +1252,13 @@ void Hub::tick() {
         if (r.link && !want && r.held.isEmpty() && t - r.idleSince > kLinkIdleMs) {
             bool used = false;
             for (const auto* a : attaches) if (a->chLink == r.link) used = true;
+            for (const auto* k : controllers) if (k->chLink == r.link) used = true;
             if (!used) closeConn(r.link);
         } else if (want || !r.held.isEmpty()) r.idleSince = t;
     }
     // Cores: reconnect after sleep, load or reset.
-    for (auto* a : attaches) if (!a->serial() && !a->coreUp && !a->core && t >= a->nextCoreTry) coreConnect(a);
+    for (auto* a : attaches) if (!a->serial() && !a->bt() && !a->coreUp && !a->core && t >= a->nextCoreTry) coreConnect(a);
+    radioTick();
     syncCores();
     for (auto* a : attaches) if (a->st == Attach::St::Busy && a->link != "local" && a->retryAt <= t) matchPeer(a->link);
     for (auto* a : attaches) if (a->st == Attach::St::Idle && a->link != "local" && a->retryAt <= t) matchPeer(a->link);
@@ -1207,6 +1284,340 @@ void Hub::tick() {
         if (s != lastSnapshot) { lastSnapshot = s; broadcastWatchers(s); }
     } else lastSnapshot = {};
     if (clients.isEmpty() && t - idleSince > idleExitMs) QCoreApplication::quit();
+}
+
+// ---- Bluetooth ----
+
+QString Hub::radioProgram() {
+    if (qEnvironmentVariableIsSet("FROND_BTVIRT")) {
+        const auto custom = qEnvironmentVariable("FROND_BTVIRT");
+        return !custom.isEmpty() && QFileInfo(custom).isExecutable() ? custom : QString();
+    }
+    const auto dir = QCoreApplication::applicationDirPath();
+    for (const auto& candidate : {dir + "/../lib/frond/btvirt", dir + "/btvirt",
+                                  dir + "/../build/bluetooth-provider/emulator/btvirt",
+                                  dir + "/../../build/bluetooth-provider/emulator/btvirt"}) {
+        const QFileInfo info(candidate);
+        if (info.isFile() && info.isExecutable()) return info.canonicalFilePath();
+    }
+    return {};
+}
+
+QString Hub::radioSocket() const { return radioFolder + "/bt-server-bredr"; }
+
+// No one has chosen: the side with the lower install id holds the radio, as both sides work out the same.
+bool Hub::radioHere(const QString& hex) const {
+    const auto* p = const_cast<Store&>(store).find(hex);
+    if (!p) return true;
+    if (p->bluetoothRadioAt > 0) return p->bluetoothRadio != QLatin1String("there");
+    return hexId(store.local().id) < hex;
+}
+
+Hub::Controller* Hub::controllerOn(Conn* c, uint16_t ch) const {
+    for (auto* k : controllers) if (k->chLink == c && k->ch == ch) return k;
+    return nullptr;
+}
+
+void Hub::btAttach(Client* c, const QJsonObject& op) {
+    for (auto* a : attaches) if (a->client == c && a->bt()) return;  // one per window
+    auto* a = new Attach;
+    a->client = c;
+    a->kind = ChannelKind::Bluetooth;
+    a->machine = op.value("machine").toString();
+    a->device = op.value("device").toString();
+    a->link = op.value("link").toString();
+    a->socketPath = op.value("socket").toString();
+    attaches.push_back(a);
+    a->btServer = new QLocalServer(this);
+    a->btServer->setSocketOptions(QLocalServer::UserAccessOption);
+    connect(a->btServer, &QLocalServer::newConnection, this, [this, a] { if (attaches.contains(a)) btAccept(a); });
+    if (!a->socketPath.isEmpty()) {
+        QLocalServer::removeServer(a->socketPath);
+        a->btServer->listen(a->socketPath);
+    }
+    if (a->link == QLatin1String("radio")) startRadio();
+    else if (a->link != QLatin1String("local")) {
+        auto& r = runs[a->link];
+        if (!r.link && !r.dialing) { r.nextTry = now(); r.backoff = 0; }
+    }
+}
+
+void Hub::dropAttachBt(Attach* a) {
+    for (auto* k : QList<Controller*>(controllers)) if (k->owner == a) dropController(k);
+    if (a->btServer) { a->btServer->disconnect(this); a->btServer->close(); a->btServer->deleteLater(); a->btServer = nullptr; }
+}
+
+// The core made a connection: a new controller.
+void Hub::btAccept(Attach* a) {
+    while (auto* s = a->btServer->nextPendingConnection()) {
+        auto* k = new Controller;
+        k->owner = a;
+        k->core = s;
+        s->setReadBufferSize(kBluetoothAhead);
+        controllers.push_back(k);
+        connect(s, &QLocalSocket::readyRead, this, [this, k] {
+            if (!controllers.contains(k)) return;
+            if (k->wantsRadio) { if (k->radioUp) btPipe(k->core, k->radioSock); return; }
+            if (btPull(k) && k->chLink) pump(k->chLink);
+        });
+        connect(s, &QLocalSocket::bytesWritten, this, [this, k](qint64 n) { if (controllers.contains(k)) btWritten(k, n); });
+        connect(s, &QLocalSocket::disconnected, this, [this, k] { if (controllers.contains(k)) dropController(k); });
+        btRoute(k);
+    }
+}
+
+// One of ours goes to this Frond's radio, or over the link once it's up. Until then it waits, unread.
+void Hub::btRoute(Controller* k) {
+    auto* a = k->owner;
+    if (!a || k->wantsRadio || k->chLink) return;
+    if (a->link == QLatin1String("radio") || (store.find(a->link) && radioHere(a->link))) {
+        k->wantsRadio = true;
+        btRadioConnect(k);
+        return;
+    }
+    const auto it = runs.find(a->link);
+    Conn* c = it != runs.end() ? it->link : nullptr;
+    if (!c || !c->up || !c->link || c->link->state() != LinkState::Up) return;
+    const auto ch = c->link->mux().open(ChannelKind::Bluetooth, a->machine.toStdString(), a->device.toStdString());
+    if (!ch) { dropController(k); return; }
+    k->chLink = c; k->ch = ch; k->open = false;
+    pump(c);
+}
+
+// The peer puts one of its controllers on our radio.
+void Hub::btRequest(Conn* c, const ChannelEvent& e) {
+    auto& mux = c->link->mux();
+    if (!radioHere(c->peer) || !startRadio()) { mux.close(e.channel, CloseReason::Gone); return; }
+    auto* k = new Controller;
+    k->peer = c->peer;
+    k->machine = QString::fromStdString(e.machine);
+    k->chLink = c; k->ch = e.channel; k->open = true;
+    k->wantsRadio = true;
+    controllers.push_back(k);
+    mux.accept(e.channel, store.name().toStdString(), std::string());
+    btRadioConnect(k);
+}
+
+void Hub::btChannelEvent(Controller* k, const ChannelEvent& e) {
+    auto* c = k->chLink;
+    auto& mux = c->link->mux();
+    using K = ChannelEvent::Kind;
+    switch (e.kind) {
+        case K::Accepted: k->open = true; btPull(k); break;
+        case K::Data: {
+            const auto data = fromBytes(e.data);
+            if (auto* s = k->nearEnd()) { k->unacked += data.size(); s->write(data); }
+            else k->pending += data;  // credit goes back once the radio takes them
+            break;
+        }
+        case K::Busy:
+        case K::Closed: dropController(k, false); break;
+        default: break;
+    }
+    (void)mux;
+}
+
+void Hub::btRadioConnect(Controller* k) {
+    k->radioTry = now() + kRadioRetryMs;
+    if (k->radioSock) return;
+    if (!startRadio()) return;  // shown as no radio; it waits
+    auto* s = new QLocalSocket(this);
+    k->radioSock = s;
+    s->setReadBufferSize(kBluetoothAhead);
+    connect(s, &QLocalSocket::connected, this, [this, k, s] {
+        if (!controllers.contains(k) || k->radioSock != s) return;
+        k->radioUp = true;
+        if (k->owner) { btPipe(k->core, s); return; }
+        if (!k->pending.isEmpty()) { k->unacked += k->pending.size(); s->write(std::exchange(k->pending, {})); }
+        if (btPull(k) && k->chLink) pump(k->chLink);
+    });
+    connect(s, &QLocalSocket::readyRead, this, [this, k, s] {
+        if (!controllers.contains(k) || k->radioSock != s) return;
+        if (k->owner) { btPipe(s, k->core); return; }
+        if (btPull(k) && k->chLink) pump(k->chLink);
+    });
+    connect(s, &QLocalSocket::bytesWritten, this, [this, k, s](qint64 n) {
+        if (controllers.contains(k) && k->radioSock == s && !k->owner) btWritten(k, n);
+    });
+    auto gone = [this, k, s] {
+        if (!controllers.contains(k) || k->radioSock != s) return;
+        s->disconnect(this);
+        s->deleteLater();
+        k->radioSock = nullptr;
+        // btvirt makes its socket a moment after it starts: try again for a while, else the controller is lost.
+        const bool starting = radio && radio->state() != QProcess::NotRunning && now() - radioStarted < kRadioStartMs;
+        if (k->radioUp || !starting) { dropController(k); return; }
+        k->radioTry = now() + kRadioRetryMs;
+    };
+    connect(s, &QLocalSocket::disconnected, this, gone);
+    connect(s, &QLocalSocket::errorOccurred, this, [s, gone](QLocalSocket::LocalSocketError) {
+        if (s->state() != QLocalSocket::ConnectedState) gone();
+    });
+    s->connectToServer(radioSocket());
+}
+
+void Hub::btPipe(QLocalSocket* from, QLocalSocket* to) {
+    if (from && to && from->bytesAvailable() > 0) to->write(from->readAll());
+}
+
+// Takes what the channel has room for from the near socket. The rest waits there.
+bool Hub::btPull(Controller* k) {
+    auto* s = k->nearEnd();
+    if (!s || !k->chLink || !k->open || !conns.contains(k->chLink) || !k->chLink->link) return false;
+    auto& mux = k->chLink->link->mux();
+    bool moved = false;
+    while (s->bytesAvailable() > 0) {
+        const auto room = mux.writable(k->ch);
+        if (room == 0) break;
+        const auto part = s->read(qint64(std::min<size_t>(room, 8192)));
+        if (part.isEmpty()) break;
+        mux.send(k->ch, reinterpret_cast<const uint8_t*>(part.constData()), size_t(part.size()));
+        moved = true;
+    }
+    return moved;
+}
+
+bool Hub::pullBluetooth(Conn* c) {
+    bool moved = false;
+    for (auto* k : QList<Controller*>(controllers)) if (k->chLink == c && btPull(k)) moved = true;
+    return moved;
+}
+
+void Hub::btWritten(Controller* k, qint64 n) {
+    if (!k->chLink || !conns.contains(k->chLink) || !k->chLink->link) return;
+    const auto taken = std::min(n, k->unacked);
+    k->unacked -= taken;
+    if (taken > 0) {
+        k->chLink->link->mux().consumed(k->ch, size_t(taken));
+        pump(k->chLink);
+    }
+}
+
+// The controller is gone: the core sees its controller lost, the far side's channel closes.
+void Hub::dropController(Controller* k, bool closeChannel) {
+    if (!controllers.removeOne(k)) return;
+    if (closeChannel && k->chLink && conns.contains(k->chLink) && k->chLink->link) {
+        k->chLink->link->mux().close(k->ch, CloseReason::Gone);
+        pump(k->chLink);
+    }
+    for (auto* s : {k->radioSock, k->core}) {
+        if (!s) continue;
+        s->disconnect(this);
+        s->abort();
+        s->deleteLater();
+    }
+    delete k;
+}
+
+void Hub::btLinkUp(Conn* c) {
+    if (!conns.contains(c) || !c->link) return;
+    const auto* p = store.find(c->peer);
+    c->link->sendRadio({radioHere(c->peer), uint64_t(p ? p->bluetoothRadioAt : 0)});
+    for (auto* k : QList<Controller*>(controllers))
+        if (controllers.contains(k) && k->owner && k->owner->link == c->peer) btRoute(k);
+    pump(c);
+}
+
+void Hub::btLinkDown(Conn* c) {
+    for (auto* k : QList<Controller*>(controllers)) if (k->chLink == c) dropController(k, false);
+}
+
+// The peer's view of whose radio it is. The later choice wins; at the same time the lower id's.
+void Hub::btRadioChoices(Conn* c) {
+    auto& queue = c->link->radio;
+    while (!queue.empty() && conns.contains(c)) {
+        const auto r = queue.front();
+        queue.pop_front();
+        auto* p = store.find(c->peer);
+        if (!p) continue;
+        const bool theyMeanHere = !r.senderHolds;  // "here" as we say it
+        const qint64 at = qint64(r.at);
+        const bool same = theyMeanHere == radioHere(c->peer);
+        if (at > p->bluetoothRadioAt || (at == p->bluetoothRadioAt && at > 0 && !same && c->peer < hexId(store.local().id))) {
+            if (!same || at != p->bluetoothRadioAt) setRadio(c->peer, theyMeanHere, at);
+        } else if (at < p->bluetoothRadioAt) {
+            c->link->sendRadio({radioHere(c->peer), uint64_t(p->bluetoothRadioAt)});
+        }
+    }
+}
+
+void Hub::setRadio(const QString& hex, bool here, qint64 at) {
+    auto* p = store.find(hex);
+    if (!p) return;
+    p->bluetoothRadio = here ? "here" : "there";
+    p->bluetoothRadioAt = at;
+    store.save();
+    btReroute(hex);
+}
+
+// Controllers on the side that no longer holds the radio go; the cores reconnect to the new one.
+void Hub::btReroute(const QString& hex) {
+    const bool here = radioHere(hex);
+    for (auto* k : QList<Controller*>(controllers)) {
+        if (!controllers.contains(k)) continue;
+        if (k->owner && k->owner->link == hex && ((here && k->chLink) || (!here && k->wantsRadio))) dropController(k);
+        else if (!k->owner && k->peer == hex && !here) dropController(k);
+    }
+}
+
+bool Hub::radioWanted() const {
+    for (const auto* k : controllers) if (k->wantsRadio) return true;
+    for (const auto* a : attaches) if (a->bt() && a->link == QLatin1String("radio")) return true;
+    return false;
+}
+
+// Runs this Frond's radio, a btvirt in <runtime>/frond/radio. It goes with the hub.
+bool Hub::startRadio() {
+    if (radio && radio->state() != QProcess::NotRunning) return true;
+    if (radio) { radio->deleteLater(); radio = nullptr; }
+    if (radioFailed && now() - radioStarted < kRadioStartMs) return false;
+    const auto program = radioProgram();
+    const auto runtime = runtimeFolder();
+    if (program.isEmpty() || runtime.isEmpty()) return false;
+    radioFolder = runtime + "/radio";
+    QDir().mkpath(radioFolder);
+    QFile::setPermissions(radioFolder, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+    for (const auto& name : QDir(radioFolder).entryList({"bt-server-*"}, QDir::System | QDir::Files))
+        QFile::remove(radioFolder + "/" + name);
+    radio = new QProcess(this);
+    radio->setProgram(program);
+    radio->setArguments({"-s" + radioFolder});
+    radio->setStandardOutputFile(QProcess::nullDevice());
+    radio->setStandardErrorFile(QProcess::nullDevice());
+#ifdef Q_OS_LINUX
+    // A hub that's killed takes its radio with it.
+    radio->setChildProcessModifier([] { ::prctl(PR_SET_PDEATHSIG, SIGTERM); });
+#endif
+    radioStarted = radioIdleSince = now();
+    radio->start();
+    radioFailed = !radio->waitForStarted(2000);
+    if (radioFailed) { radio->deleteLater(); radio = nullptr; return false; }
+    return true;
+}
+
+void Hub::radioTick() {
+    const auto t = now();
+    for (auto* k : QList<Controller*>(controllers))
+        if (controllers.contains(k) && k->wantsRadio && !k->radioSock && t >= k->radioTry) btRadioConnect(k);
+    if (!radio) return;
+    if (radioWanted()) { radioIdleSince = t; return; }
+    if (t - radioIdleSince < kRadioIdleMs) return;
+    radio->terminate();
+    if (!radio->waitForFinished(1000)) radio->kill();
+    radio->deleteLater();
+    radio = nullptr;
+}
+
+QString Hub::peerBluetooth(const QString& hex) const {
+    QStringList parts;
+    for (const auto* a : attaches) {
+        if (!a->bt() || a->link != hex) continue;
+        if (std::any_of(controllers.begin(), controllers.end(), [a](const Controller* k) { return k->owner == a; }))
+            parts << a->machine;
+    }
+    for (const auto* k : controllers) if (!k->owner && k->peer == hex && !parts.contains(k->machine)) parts << k->machine;
+    if (parts.isEmpty()) return {};
+    return QCoreApplication::translate("frondLink", "Bluetooth: %1").arg(parts.join(", "));
 }
 
 int runHub(int argc, char** argv) {

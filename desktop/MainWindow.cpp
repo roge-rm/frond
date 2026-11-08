@@ -368,8 +368,11 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     connect(irda,qOverload<int>(&QComboBox::activated),this,irdaChanged);
     connect(irdaPort,&QSpinBox::editingFinished,this,[this,irdaChanged]{if(irda->currentData()=="tcp")irdaChanged();});
 
-    bluetooth = new QCheckBox(tr("On"), root);
-    bluetooth->setObjectName("bluetoothEnabled");
+    bluetooth = new QComboBox(root);
+    bluetooth->setObjectName("bluetoothMode");
+    bluetooth->addItem(tr("Off"), "off");
+    bluetooth->addItem(tr("This Frond"), "radio");
+    bluetooth->addItem(tr("Controller socket"), "socket");
     bluetoothSocket = new QLineEdit(root);
     bluetoothSocket->setObjectName("bluetoothSocket");
     bluetoothSocket->setPlaceholderText(tr("Absolute controller socket path"));
@@ -380,7 +383,8 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     grid->addWidget(bluetoothState, 12, 1, 1, 2);
     grid->setColumnStretch(1, 1);
     grid->setColumnMinimumWidth(2, 110);
-    for (auto* c : {static_cast<QWidget*>(network), static_cast<QWidget*>(serial), static_cast<QWidget*>(usb), static_cast<QWidget*>(irda)})
+    for (auto* c : {static_cast<QWidget*>(network), static_cast<QWidget*>(serial), static_cast<QWidget*>(usb), static_cast<QWidget*>(irda),
+                    static_cast<QWidget*>(bluetooth)})
         c->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     holdLabel = new QLabel(tr("Hold"), root);
     holdToggle = new QCheckBox(tr("On"), root);
@@ -494,12 +498,26 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     log = new QPlainTextEdit(logDialog); log->setObjectName("logText"); log->setReadOnly(true); log->setMaximumBlockCount(1000);
     logLayout->addWidget(log);
     connect(logButton, &QPushButton::clicked, logDialog, &QWidget::show);
+    // This Frond and connections: the hub listens for the core first, then the core is pointed at it.
     auto bluetoothChanged = [this] {
-        if (client.running()) { if (client.available()) send("bluetooth-mode", bluetoothArgument()); return; }
+        if (!client.running()) { refresh(); return; }
+        if (!bluetoothViaHub()) {
+            const auto argument = bluetoothArgument();
+            if (argument == bluetoothCore) { attachBluetooth(); return; }
+            if (client.available() && send("bluetooth-mode", argument)) bluetoothSent = argument;
+            return;
+        }
+        attachBluetooth();
+        if (bluetoothCore == bluetoothArgument()) {
+            bluetoothCoreChoice = runningPreferences.bluetooth = bluetoothChoice();
+            savePeripherals();
+        } else applyBluetoothLink();
         refresh();
     };
-    connect(bluetooth, &QCheckBox::clicked, this, bluetoothChanged);
-    connect(bluetoothSocket, &QLineEdit::editingFinished, this, bluetoothChanged);
+    connect(bluetooth, qOverload<int>(&QComboBox::activated), this, bluetoothChanged);
+    connect(bluetoothSocket, &QLineEdit::editingFinished, this, [this, bluetoothChanged] {
+        if (bluetooth->currentData() == "socket") bluetoothChanged();
+    });
 
     stopButton = new QPushButton(tr("Save and Stop"), root);
     stopButton->setObjectName("stop");
@@ -618,7 +636,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             if (const auto error = frondCards::releaseAtClose(sessionFolder(), frondSessions::machineDirOf(sessionPath)); !error.isEmpty())
                 log->appendPlainText(error);
         finalSaved = false; linkedWatcher.reset(); linkedWatcherId.clear(); linkedHolder.clear(); cardMove = {};
-        sdKnown = protectionKnown = false; showSerial({}); link.setSticky("serial", {}); serialLinkText.clear(); loadSerialSettings(); showUsb({}); loadUsbSettings(); showIrda({}); link.setSticky("ir", {}); irdaLinkText.clear(); loadIrdaSettings(); showBluetooth({}); loadBluetoothSettings(); sessionLock.reset(); forceButton->hide(); runningBar->setForceStop(false); refreshSessions();
+        sdKnown = protectionKnown = false; showSerial({}); link.setSticky("serial", {}); serialLinkText.clear(); loadSerialSettings(); showUsb({}); loadUsbSettings(); showIrda({}); link.setSticky("ir", {}); irdaLinkText.clear(); loadIrdaSettings(); showBluetooth({}); link.setSticky("bt", {}); bluetoothAttach = {}; bluetoothListening = false; bluetoothLinkText.clear(); bluetoothCore = bluetoothCoreChoice = "off"; bluetoothSent.clear(); loadBluetoothSettings(); sessionLock.reset(); forceButton->hide(); runningBar->setForceStop(false); refreshSessions();
         refresh();
         if (closeAfterStop) { allowClose = true; close(); }
         else notify(tr("Stopped."));
@@ -633,10 +651,13 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     connect(&client, &DesktopClient::usbState, this, [this](const QString& state) { showUsb(state); });
     connect(&client, &DesktopClient::bluetoothState, this, &MainWindow::showBluetooth);
     connect(&client,&DesktopClient::infraredState,this,[this](const QString& state){showIrda(state);});
+    // A Bluetooth switch waiting for the core to be free goes once the current request is done.
+    connect(&client, &DesktopClient::result, this, [this] { QTimer::singleShot(0, this, [this] { applyBluetoothLink(); }); });
     connect(&link, &LinkClient::message, this, [this](const QJsonObject& m) {
         const auto type = m.value("type").toString();
         if (type == "ir") showIrdaLink(m);
         else if (type == "serial") showSerialLink(m);
+        else if (type == "bt") showBluetoothLink(m);
         else if (type == "state") refreshIrdaChoices();
     });
     storeWatcher = new QFileSystemWatcher(this);
@@ -706,10 +727,19 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             if (command == "ms-type") msExportPending = false;
             if (command == "ms-protection" || command == "ms-read-only") { protectionKnown = false; refresh(); }
             if (command == "microphone-mode") { microphoneArmed = false; microphoneState->setText(message); }
-            // A failed switch leaves the core off; the picker and the hub's attach follow it.
+            // A failed switch leaves the core off (serial, infrared) or as it was (Bluetooth); the
+            // picker and the hub's attach follow it.
             if (command == "serial-mode") { showSerial("off " + message); attachSerial(); }
             if (command == "usb-mode") showUsb("off " + message);
             if (command == "irda-mode") { showIrda("off error: " + message); attachInfrared(); }
+            if (command == "bluetooth-mode") {
+                bluetoothSent.clear();
+                const QSignalBlocker blocked(bluetooth);
+                frondLink::addConnectionChoices(bluetooth, bluetoothCoreChoice, false);
+                bluetooth->setCurrentIndex(std::max(0, bluetooth->findData(bluetoothCoreChoice.startsWith("socket:") ? QString("socket") : bluetoothCoreChoice)));
+                if (bluetoothCoreChoice.startsWith("socket:")) bluetoothSocket->setText(bluetoothCoreChoice.mid(7));
+                attachBluetooth();
+            }
             if (command == "display" && contrastPending) { const QSignalBlocker blocked(contrast); contrast->setValue(runningPreferences.contrast); }
             if (command == "display") { contrastPending = false; liveDisplay({}); }
             if (stopping) {
@@ -796,11 +826,14 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (command == "irda-mode") { runningPreferences.infrared = irdaChoice(); savePeripherals(); attachInfrared(); }
         if(command=="irda-state" || command=="irda-mode")showIrda(message);
         if(command=="bluetooth-state" || command=="bluetooth-mode") {
-            showBluetooth(message);
             if(command=="bluetooth-mode") {
-                runningPreferences.bluetooth = bluetooth->isChecked() ? "socket:" + bluetoothSocket->text() : QStringLiteral("off");
+                bluetoothCore = bluetoothSent.isEmpty() ? bluetoothArgument() : bluetoothSent;
+                bluetoothSent.clear();
+                bluetoothCoreChoice = runningPreferences.bluetooth = bluetoothChoice();
                 savePeripherals();
+                attachBluetooth();
             }
+            showBluetooth(message);
         }
         refresh();
         if (command == "network-state" && !stopping) { send("keyboard-state"); return; }
@@ -951,8 +984,9 @@ void MainWindow::refresh() {
     irdaPort->setEnabled(caps.infrared && !keyboard->isChecked() && irda->currentData()=="tcp"); irdaPort->setReadOnly(!editable);
     irdaPort->setVisible(!irda->currentData().toString().startsWith("link:"));
     bluetooth->setEnabled(editable && caps.bluetooth);
-    bluetoothSocket->setEnabled(caps.bluetooth && bluetooth->isChecked()); bluetoothSocket->setReadOnly(!editable);
-    bluetooth->setToolTip(caps.bluetooth ? tr("See doc/using-frond.md (Bluetooth) for controller setup.") : reason);
+    bluetoothSocket->setEnabled(caps.bluetooth && bluetooth->currentData() == "socket"); bluetoothSocket->setReadOnly(!editable);
+    if (!m68k || caps.bluetooth) bluetoothSocket->setVisible(bluetooth->currentData() == "socket");
+    bluetooth->setToolTip(caps.bluetooth ? QString() : reason);
     // Which card buttons show follows the card's state, as on Android.
     const bool memoryStick = this->memoryStick();
     const bool supported = storageSupported();
@@ -1786,7 +1820,13 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     if (caps.serial && serialArgument() != "off") arguments << "--serial" << serialArgument();
     if (caps.usb && usbArgument() != "off") arguments << "--usb" << usbArgument();
     if(caps.infrared && irdaArgument()!="off")arguments << "--irda" << irdaArgument();
-    if(caps.bluetooth && bluetooth->isChecked()) arguments << "--bluetooth" << bluetoothArgument();
+    // This Frond and connections start off: the hub listens first, then bluetooth-mode points the core at it.
+    bluetoothCore = caps.bluetooth && !bluetoothViaHub() ? bluetoothArgument() : QStringLiteral("off");
+    bluetoothCoreChoice = bluetoothCore == "off" ? QStringLiteral("off") : bluetoothChoice();
+    bluetoothSent.clear(); bluetoothListening = false; bluetoothAttach = {};
+    if (bluetoothCore != "off") arguments << "--bluetooth" << bluetoothCore;
+    bluetoothLinkText = caps.bluetooth && bluetoothChoice().startsWith("link:") && !frondLink::knownLink(bluetoothChoice())
+        ? tr("Bluetooth: Unknown connection") : QString();
     irdaLinkText = caps.infrared && irdaChoice().startsWith("link:") && !frondLink::knownLink(irdaChoice())
         ? tr("Infrared: Unknown connection") : QString();
     serialLinkText = caps.serial && serialChoice().startsWith("link:") && !frondLink::knownLink(serialChoice())
@@ -1839,19 +1879,84 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     log->clear(); busy = true;
     const bool launched = client.start(coreFor(startDevice), arguments);
     if (!launched) { busy = false; sessionLock.reset(); }
-    else { attachInfrared(); attachSerial(); }
+    else { attachInfrared(); attachSerial(); attachBluetooth(); }
     refresh(); notify(launched ? tr("Starting the Palm…") : tr("Could not start the Palm."));
 }
+QString MainWindow::bluetoothChoice() const {
+    const auto mode = bluetooth->currentData().toString();
+    return mode == "socket" ? "socket:" + bluetoothSocket->text() : mode;
+}
+bool MainWindow::bluetoothViaHub() const {
+    const auto choice = bluetoothChoice();
+    return choice == "radio" || (choice.startsWith("link:") && choice != "link:local" && frondLink::knownLink(choice));
+}
+// The core's endpoint: the socket path, or the hub's socket for this window.
 QString MainWindow::bluetoothArgument() const {
-    return bluetooth->isChecked() ? bluetoothSocket->text() : QStringLiteral("off");
+    const auto choice = bluetoothChoice();
+    if (choice.startsWith("socket:")) return choice.size() > 7 ? choice.mid(7) : QStringLiteral("off");
+    if (!bluetoothViaHub()) return QStringLiteral("off");
+    const auto path = frondLink::coreSocketPath("bt", QString::number(QCoreApplication::applicationPid()));
+    return path.isEmpty() ? QStringLiteral("off") : path;
 }
 void MainWindow::loadBluetoothSettings() {
     const auto& value = runningPreferences.bluetooth;
-    bluetooth->setChecked(value.startsWith("socket:"));
+    const QSignalBlocker blocked(bluetooth);
+    frondLink::addConnectionChoices(bluetooth, value, false);
+    bluetooth->setCurrentIndex(std::max(0, bluetooth->findData(value.startsWith("socket:") ? QString("socket") : value)));
     if (value.startsWith("socket:")) bluetoothSocket->setText(value.mid(7));
 }
 void MainWindow::showBluetooth(const QString& state) {
+    // Through the hub its status shows instead of the socket.
+    if (!state.isEmpty() && state != "off" && bluetoothViaHub() && bluetoothCore == bluetoothArgument()) {
+        bluetoothState->setText(bluetoothLinkText); refresh(); return;
+    }
     bluetoothState->setText(state.isEmpty() || state=="off" ? QString() : tr("Bluetooth: %1").arg(state));
+}
+void MainWindow::attachBluetooth() {
+    const bool wanted = client.running() && frondFirmware::capabilities(runningDevice).bluetooth && bluetoothViaHub() &&
+                        !bluetoothArgument().startsWith("off");
+    if (!wanted) {
+        link.setSticky("bt", {}); bluetoothAttach = {}; bluetoothListening = false;
+        if (!bluetoothChoice().startsWith("link:")) bluetoothLinkText.clear();
+        return;
+    }
+    const auto choice = bluetoothChoice();
+    const QJsonObject op{{"op", "bt-attach"}, {"machine", QFileInfo(sessionPath).completeBaseName()},
+                         {"device", frondFirmware::deviceName(runningDevice)},
+                         {"link", choice == "radio" ? QStringLiteral("radio") : choice.mid(5)}, {"socket", bluetoothArgument()}};
+    if (op == bluetoothAttach) return;
+    bluetoothAttach = op;
+    bluetoothListening = false;
+    bluetoothLinkText = choice == "radio" ? tr("Bluetooth: This Frond's radio")
+                                          : tr("Bluetooth: connecting to %1").arg(frondLink::connectionName(choice.mid(5)));
+    link.setSticky("bt", op);
+    if (bluetoothCore == bluetoothArgument()) bluetoothState->setText(bluetoothLinkText);
+    refresh();
+}
+// Points the core at the hub's socket once the hub listens there and the core is free.
+void MainWindow::applyBluetoothLink() {
+    if (!client.running() || stopping || !bluetoothViaHub() || !bluetoothListening || !bluetoothSent.isEmpty()) return;
+    const auto argument = bluetoothArgument();
+    if (argument == bluetoothCore || !client.available()) return;
+    if (send("bluetooth-mode", argument)) bluetoothSent = argument;
+}
+void MainWindow::showBluetoothLink(const QJsonObject& s) {
+    const auto peer = s.value("peer").toString(), state = s.value("state").toString();
+    QString text;
+    if (!s.value("listening").toBool()) text = tr("Bluetooth: couldn't make the controller socket");
+    else if (state == "radio") text = tr("Bluetooth: This Frond's radio");
+    else if (state == "noradio") text = tr("Bluetooth: this Frond has no radio (btvirt is missing)");
+    else if (state == "here") text = tr("Bluetooth: this Frond's radio, with %1").arg(peer);
+    else if (state == "there") text = tr("Bluetooth: %1's radio").arg(peer);
+    else if (state == "notfound") text = tr("Bluetooth: %1 not found").arg(peer);
+    else if (state == "keychanged") text = tr("Bluetooth: %1 key changed, pair again").arg(peer);
+    else if (state == "forgotten") text = tr("Bluetooth: pair again with %1").arg(peer);
+    else if (state == "unknown") text = tr("Bluetooth: Unknown connection");
+    else text = tr("Bluetooth: connecting to %1").arg(peer);
+    bluetoothLinkText = text;
+    const bool listening = s.value("listening").toBool();
+    if (listening && !bluetoothListening) { bluetoothListening = true; applyBluetoothLink(); }
+    if (client.running() && bluetoothViaHub()) { bluetoothState->setText(text); refresh(); }
 }
 QString MainWindow::irdaChoice() const {
     return irda->currentData()=="tcp" ? "tcp:"+QString::number(irdaPort->value()) : irda->currentData().toString();
@@ -1872,10 +1977,10 @@ void MainWindow::loadIrdaSettings() {
     irdaPort->setValue(value.startsWith("tcp:") ? value.mid(4).toInt() : 5030);
 }
 void MainWindow::refreshIrdaChoices() {
-    for (auto* combo : {irda, serial}) {
+    for (auto* combo : {irda, serial, bluetooth}) {
         const auto current = combo->currentData().toString();
         const QSignalBlocker blocked(combo);
-        frondLink::addConnectionChoices(combo, current);
+        frondLink::addConnectionChoices(combo, current, combo != bluetooth);
         combo->setCurrentIndex(std::max(0, combo->findData(current)));
     }
 }

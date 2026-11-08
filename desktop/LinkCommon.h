@@ -14,6 +14,7 @@
 #include <QStandardPaths>
 #include <QString>
 #include <QVector>
+#include <algorithm>
 
 namespace frondLink {
 
@@ -87,13 +88,19 @@ inline QString connectionName(const QString& id) {
 
 // Puts the connections into a picker after its local choices: a separator, This computer, then
 // the paired ones by name, with item data link:local and link:<id>. 'current' is kept as
-// "Unknown connection" if it names one that's gone.
-inline void addConnectionChoices(QComboBox* combo, const QString& current) {
+// "Unknown connection" if it names one that's gone. Bluetooth has no This computer: machines on
+// one desktop share This Frond's radio.
+inline void addConnectionChoices(QComboBox* combo, const QString& current, bool thisComputer = true) {
     for (int i = combo->count() - 1; i >= 0; --i)
         if (combo->itemData(i).toString().startsWith("link:") || combo->itemText(i).isEmpty()) combo->removeItem(i);
+    const auto paired = pairedConnections();
+    const bool unknown = current.startsWith("link:") &&
+                         std::none_of(paired.begin(), paired.end(), [&](const Choice& c) { return "link:" + c.id == current; }) &&
+                         !(thisComputer && current == QLatin1String("link:local"));
+    if (!thisComputer && paired.isEmpty() && !unknown) return;
     combo->insertSeparator(combo->count());
-    combo->addItem(QCoreApplication::translate("frondLink", "This computer"), "link:local");
-    for (const auto& c : pairedConnections()) combo->addItem(c.name, "link:" + c.id);
+    if (thisComputer) combo->addItem(QCoreApplication::translate("frondLink", "This computer"), "link:local");
+    for (const auto& c : paired) combo->addItem(c.name, "link:" + c.id);
     if (current.startsWith("link:") && combo->findData(current) < 0)
         combo->addItem(QCoreApplication::translate("frondLink", "Unknown connection"), current);
 }

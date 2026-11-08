@@ -30,14 +30,17 @@ class MachineSettings : public QWidget {
     // 68k devices only.
     QSlider* contrast;
     QComboBox* speed;
-    // Infrared and Serial: the local choices and the connections. Shown once showPeripherals() is called.
+    // Infrared, Serial and Bluetooth: the local choices and the connections. Shown once showPeripherals() is called.
     QComboBox* infrared;
     QSpinBox* infraredPort;
     QComboBox* serial;
     QSpinBox* serialPort;
+    // Bluetooth: Off, This Frond, a controller socket, the connections.
+    QComboBox* bluetooth;
+    QLineEdit* bluetoothSocket;
     void showPeripherals(bool shown);
  private:
-    QLabel *contrastLabel, *engineLabel, *speedLabel, *infraredLabel, *serialLabel;
+    QLabel *contrastLabel, *engineLabel, *speedLabel, *infraredLabel, *serialLabel, *bluetoothLabel;
     QGroupBox* peripherals;
     bool peripheralsShown{false};
     frondFirmware::Device device{frondFirmware::Device::automatic};

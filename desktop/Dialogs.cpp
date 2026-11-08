@@ -211,6 +211,23 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     };
     row(0, tr("Infrared"), "machineInfrared", prefs.infrared, 5030, infraredLabel, infrared, infraredPort);
     row(1, tr("Serial"), "machineSerial", prefs.serial, 5023, serialLabel, serial, serialPort);
+    bluetoothLabel = new QLabel(tr("Bluetooth"), peripherals);
+    bluetooth = new QComboBox(peripherals);
+    bluetooth->setObjectName("machineBluetooth");
+    bluetooth->addItem(tr("Off"), "off");
+    bluetooth->addItem(tr("This Frond"), "radio");
+    bluetooth->addItem(tr("Controller socket"), "socket");
+    frondLink::addConnectionChoices(bluetooth, prefs.bluetooth, false);
+    bluetooth->setCurrentIndex(std::max(0, bluetooth->findData(prefs.bluetooth.startsWith("socket:") ? QString("socket") : prefs.bluetooth)));
+    bluetoothSocket = new QLineEdit(prefs.bluetooth.startsWith("socket:") ? prefs.bluetooth.mid(7) : QString(), peripherals);
+    bluetoothSocket->setObjectName("machineBluetoothSocket");
+    bluetoothSocket->setPlaceholderText(tr("Absolute controller socket path"));
+    bluetoothLabel->setBuddy(bluetooth);
+    peripheralsLayout->addWidget(bluetoothLabel, 2, 0);
+    peripheralsLayout->addWidget(bluetooth, 2, 1);
+    peripheralsLayout->addWidget(bluetoothSocket, 3, 1, 1, 2);
+    connect(bluetooth, &QComboBox::currentIndexChanged, this, [this] { bluetoothSocket->setVisible(bluetooth->currentData() == "socket"); });
+    bluetoothSocket->setVisible(bluetooth->currentData() == "socket");
     peripheralsLayout->setColumnStretch(1, 1);
     layout->addWidget(peripherals);
     peripherals->setVisible(false);
@@ -274,6 +291,12 @@ frondSessions::Preferences MachineSettings::values() const {
         prefs.serial = choice(serial, serialPort);
         prefs.peripheralsSet = true;
     }
+    if (peripheralsShown && device != Device::automatic && frondFirmware::capabilities(device).bluetooth) {
+        const auto mode = bluetooth->currentData().toString();
+        const auto path = bluetoothSocket->text().trimmed();
+        prefs.bluetooth = mode == "socket" ? (path.isEmpty() ? QStringLiteral("off") : "socket:" + path) : mode;
+        prefs.peripheralsSet = true;
+    }
     return prefs;
 }
 void MachineSettings::showPeripherals(bool shown) {
@@ -285,7 +308,10 @@ void MachineSettings::setDevice(Device device) {
     const bool known = peripheralsShown && device != Device::automatic;
     const bool hasInfrared = known && frondFirmware::capabilities(device).infrared;
     const bool hasSerial = known && frondFirmware::capabilities(device).serial && !frondFirmware::serialAbsent(device);
-    peripherals->setVisible(hasInfrared || hasSerial);
+    const bool hasBluetooth = known && frondFirmware::capabilities(device).bluetooth;
+    peripherals->setVisible(hasInfrared || hasSerial || hasBluetooth);
+    for (QWidget* w : {static_cast<QWidget*>(bluetoothLabel), static_cast<QWidget*>(bluetooth)}) w->setVisible(hasBluetooth);
+    bluetoothSocket->setVisible(hasBluetooth && bluetooth->currentData() == "socket");
     for (QWidget* w : {static_cast<QWidget*>(infraredLabel), static_cast<QWidget*>(infrared)}) w->setVisible(hasInfrared);
     infraredPort->setVisible(hasInfrared && infrared->currentData() == "tcp");
     for (QWidget* w : {static_cast<QWidget*>(serialLabel), static_cast<QWidget*>(serial)}) w->setVisible(hasSerial);

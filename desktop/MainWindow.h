@@ -1,4 +1,5 @@
 #pragma once
+#include <QJsonObject>
 #include <QMainWindow>
 #include <QSettings>
 #include <QLockFile>
@@ -96,6 +97,13 @@ class MainWindow : public QMainWindow {
     QString bluetoothArgument() const;
     void showBluetooth(const QString& state);
     void loadBluetoothSettings();
+    // off, radio (This Frond), socket:/abs, or link:<id>. This Frond and connections go through
+    // the hub, which listens for the core on a socket per window.
+    QString bluetoothChoice() const;
+    bool bluetoothViaHub() const;
+    void attachBluetooth();
+    void applyBluetoothLink();
+    void showBluetoothLink(const QJsonObject& status);
     QString irdaArgument() const;
     void showIrda(const QString& state);
     void loadIrdaSettings();
@@ -215,6 +223,12 @@ class MainWindow : public QMainWindow {
     QString irdaSocket;   // the core's IR socket while Infrared uses a connection
     QString irdaLinkText; // the hub's status for it
     QString serialLinkText; // the same for Serial
+    QString bluetoothLinkText; // and for Bluetooth through the hub
+    QJsonObject bluetoothAttach;  // the bt-attach sent, so an unchanged one isn't sent again
+    bool bluetoothListening{false};  // the hub listens on this window's socket
+    QString bluetoothCore{"off"};  // what the core's Bluetooth is set to now
+    QString bluetoothCoreChoice{"off"};  // the choice that gave it
+    QString bluetoothSent;  // the bluetooth-mode argument waiting for its reply
     QSettings settings;
     QString core, core68k, sessionPath, savingPath, pendingCopy, copyStaging;
     bool hardResetAfterSave{false};
@@ -227,7 +241,7 @@ class MainWindow : public QMainWindow {
     QLabel* serialState;
     QLabel* usbState;
     QLineEdit* bluetoothSocket;
-    QCheckBox* bluetooth;
+    QComboBox* bluetooth;
     QLabel* bluetoothState;
     QListWidget* sessionList;
     QLabel* emptyNote;

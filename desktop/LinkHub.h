@@ -12,6 +12,7 @@
 #include <QMap>
 #include <QObject>
 #include <QPair>
+#include <QProcess>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTimer>
@@ -36,6 +37,12 @@ class Hub : public QObject {
     // Serial bytes the hub holds for a core socket each way: Qt's read buffer, the write ahead to a
     // local partner and the socket's send buffer. Past that the core's own queue fills and its CTS drops.
     static constexpr qint64 kSerialAhead = 4096;
+    // How long this Frond's radio (btvirt) keeps running with no controller on it.
+    static constexpr qint64 kRadioIdleMs = 5000;
+
+    // The btvirt the hub runs as this Frond's radio: FROND_BTVIRT, else the one installed beside
+    // the program. Empty if there is none.
+    static QString radioProgram();
 
     explicit Hub(QObject* parent = nullptr);
     ~Hub() override;
@@ -45,6 +52,7 @@ class Hub : public QObject {
     struct Client;
     struct Conn;
     struct Attach;
+    struct Controller;
     struct Held {
         uint16_t ch;
         frond::link::ChannelKind kind;
@@ -127,6 +135,33 @@ class Hub : public QObject {
     bool pullSerial(Conn* c);
     void serialWritten(Attach* a, qint64 n);
     bool wanted(const QString& hex) const;
+    // Bluetooth. A machine's core connects to the hub's socket for it, once per controller. Each
+    // controller goes to this Frond's radio or, on a connection whose radio is on the other side,
+    // over a Bluetooth channel to that side's radio. Bytes are lossless both ways.
+    void btAttach(Client* c, const QJsonObject& op);
+    void btAccept(Attach* a);
+    bool radioHere(const QString& hex) const;
+    void btRoute(Controller* k);
+    void btRequest(Conn* c, const frond::link::ChannelEvent& e);
+    void btChannelEvent(Controller* k, const frond::link::ChannelEvent& e);
+    void btLinkUp(Conn* c);
+    void btLinkDown(Conn* c);
+    void btRadioChoices(Conn* c);
+    void setRadio(const QString& hex, bool here, qint64 at);
+    void btReroute(const QString& hex);
+    void btRadioConnect(Controller* k);
+    void btPipe(QLocalSocket* from, QLocalSocket* to);
+    bool btPull(Controller* k);
+    bool pullBluetooth(Conn* c);
+    void btWritten(Controller* k, qint64 n);
+    void dropController(Controller* k, bool closeChannel = true);
+    void dropAttachBt(Attach* a);
+    Controller* controllerOn(Conn* c, uint16_t ch) const;
+    bool radioWanted() const;
+    bool startRadio();
+    void radioTick();
+    QString radioSocket() const;
+    QString peerBluetooth(const QString& hex) const;
     // Discovery
     bool discoveryActive() const;
     void beacon(quint8 type, const QHostAddress& to = {}, quint16 port = 0);
@@ -150,6 +185,11 @@ class Hub : public QObject {
     QList<Client*> clients;
     QList<Conn*> conns;
     QList<Attach*> attaches;
+    QList<Controller*> controllers;
+    QProcess* radio{nullptr};
+    QString radioFolder;
+    qint64 radioStarted{0}, radioIdleSince{0};
+    bool radioFailed{false};
     QMap<QString, PeerRun> runs;
     QMap<QString, Nearby> nearby;
     QHash<QString, QList<qint64>> recent;  // incoming connection times per address

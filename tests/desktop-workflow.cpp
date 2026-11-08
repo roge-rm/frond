@@ -78,6 +78,7 @@ static QByteArray digest(const QString& path) {
 // Opens the Card panel of the window `inside` belongs to.
 static void showCardPanel(QWidget* inside) { inside->window()->findChild<PanelHost*>("panelHost")->open(1); }
 // ---- Connections: hubs on loopback, driven like windows through LinkClient ----
+static QString fakeRadio();
 struct TestHub {
     // A unix socket path is limited to 107 characters, so the hub lives in a short folder under the
     // system temp folder, not under the build folder.
@@ -92,6 +93,7 @@ struct TestHub {
         env = QProcessEnvironment::systemEnvironment();
         env.insert("XDG_RUNTIME_DIR", run); env.insert("XDG_DATA_HOME", data);
         env.insert("FROND_LINK_PORT", QString::number(port)); env.insert("FROND_LINK_DISCOVERY_PORT", "0");
+        env.insert("FROND_BTVIRT", fakeRadio());
         env.remove("FROND_LINK_SOCKET");
     }
     QString store() const { return data + "/frond/connections"; }
@@ -116,6 +118,7 @@ struct HubUser {
     }
     QString ir() const { return last("ir").value("state").toString(); }
     QString serial() const { return last("serial").value("state").toString(); }
+    QString bt() const { return last("bt").value("state").toString(); }
 };
 // Stands in for a core's IR socket.
 struct FakeIr {
@@ -164,6 +167,64 @@ struct FakeSerial {
     void setRts(bool on) { rts = on; if (on && peer) got += peer->readAll(); }
     void send(const QByteArray& bytes) { if (peer) peer->write(bytes); }
     qint64 unsent() const { return peer ? peer->bytesToWrite() : 0; }
+};
+// Stands in for btvirt (FROND_BTVIRT): each connection is a controller and bytes from one reach all
+// the others, as controllers in one btvirt hear each other. Each connection adds a line to
+// <folder>/opened.
+static QString fakeRadio() {
+    const auto path = QDir::currentPath() + "/build/fake-btvirt.py";
+    QFile f(path);
+    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        f.write(R"PY(#!/usr/bin/python3
+import os,selectors,socket,sys
+folder=next(a[2:] for a in sys.argv[1:] if a.startswith('-s'))
+path=os.path.join(folder,'bt-server-bredr')
+try: os.unlink(path)
+except FileNotFoundError: pass
+server=socket.socket(socket.AF_UNIX);server.bind(path);server.listen(16)
+sel=selectors.DefaultSelector();sel.register(server,selectors.EVENT_READ)
+peers=[]
+while True:
+    for key,_ in sel.select():
+        if key.fileobj is server:
+            c,_=server.accept();peers.append(c);sel.register(c,selectors.EVENT_READ)
+            with open(os.path.join(folder,'opened'),'a') as o: o.write('x\n')
+            continue
+        c=key.fileobj
+        try: data=c.recv(65536)
+        except OSError: data=b''
+        if not data:
+            sel.unregister(c);peers.remove(c);c.close();continue
+        for p in peers:
+            if p is not c:
+                try: p.sendall(data)
+                except OSError: pass
+)PY");
+        f.close();
+        f.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+    }
+    return path;
+}
+static int radioOpened(const QString& runtime) {
+    QFile f(runtime + "/frond/radio/opened");
+    return f.open(QIODevice::ReadOnly) ? int(f.readAll().count('\n')) : 0;
+}
+// Stands in for a core's Bluetooth: each connection to the hub's socket is a controller.
+struct FakeBt {
+    QLocalSocket s;
+    QByteArray got;
+    QString path;
+    bool closed{false};
+    explicit FakeBt(const QString& where) : path(where) {
+        QObject::connect(&s, &QLocalSocket::readyRead, &s, [this] { got += s.readAll(); });
+        QObject::connect(&s, &QLocalSocket::disconnected, &s, [this] { closed = true; });
+    }
+    bool connect() {
+        closed = false; got.clear();
+        s.abort(); s.connectToServer(path);
+        return s.waitForConnected(2000);
+    }
+    void send(const QByteArray& bytes) { s.write(bytes); s.flush(); }
 };
 static QByteArray pattern(int size, int seed) {
     QByteArray b(size, Qt::Uninitialized);
@@ -1075,7 +1136,7 @@ for line in s.makefile('rb'):
 
         QTRY_VERIFY(window.findChild<QComboBox*>("usbMode")->isEnabled());
         QVERIFY(window.findChild<QComboBox*>("irdaMode")->isEnabled());
-        QVERIFY(window.findChild<QCheckBox*>("bluetoothEnabled")->isEnabled());
+        QVERIFY(window.findChild<QComboBox*>("bluetoothMode")->isEnabled());
         QVERIFY(window.findChild<QCheckBox*>("keyboardAttached")->isEnabled());  // infrared beaming is off on a new machine
         // Hard reset names the Zire and sends hard-reset.
         QString text;
@@ -1193,30 +1254,39 @@ for line in s.makefile('rb'):
         core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner));
         {
             MainWindow window(core.fileName()); window.show();
-            auto* enabled=window.findChild<QCheckBox*>("bluetoothEnabled");
+            auto* mode=window.findChild<QComboBox*>("bluetoothMode");
             auto* path=window.findChild<QLineEdit*>("bluetoothSocket");
             auto* state=window.findChild<QLabel*>("bluetoothState");
-            QVERIFY(enabled && path && state); QVERIFY(!enabled->isChecked()); QVERIFY(!path->isEnabled());
+            const auto pick=[mode](const char* value){
+                mode->setCurrentIndex(mode->findData(value));
+                QMetaObject::invokeMethod(mode,"activated",Q_ARG(int,mode->currentIndex()));
+            };
+            QVERIFY(mode && path && state); QCOMPARE(mode->currentData().toString(), QString("off")); QVERIFY(!path->isEnabled());
+            QVERIFY(mode->findData("radio") > 0 && mode->findData("socket") > 0 && mode->findData("link:local") < 0);
             QSettings().setValue("bluetoothEnabled", true); QSettings().setValue("bluetoothSocket", socketPath);
             window.openSession(source.fileName(),true);
-            QTRY_VERIFY(enabled->isEnabled() && state->text().contains("connected"));
+            QTRY_VERIFY(mode->isEnabled() && state->text().contains("connected"));
             QFile args(source.fileName()+".args"); QVERIFY(args.open(QIODevice::ReadOnly));
             QVERIFY(args.readAll().contains("--bluetooth\n"+socketPath.toUtf8()));
-            enabled->click(); QTRY_VERIFY(enabled->isEnabled() && state->text().isEmpty());
-            QVERIFY(!path->isEnabled()); enabled->click();
-            QTRY_VERIFY(enabled->isEnabled() && state->text().contains("connected"));
+            QCOMPARE(mode->currentData().toString(), QString("socket"));
+            pick("off"); QTRY_VERIFY(mode->isEnabled() && state->text().isEmpty());
+            QVERIFY(!path->isEnabled()); pick("socket");
+            QTRY_VERIFY(mode->isEnabled() && state->text().contains("connected"));
             QString shown; QTimer dismiss; dismiss.setInterval(20);
             connect(&dismiss,&QTimer::timeout,&window,[&]{
                 if(auto* box=window.findChild<QMessageBox*>();box && box->isVisible()) {shown=box->text();box->done(QMessageBox::Ok);}
             }); dismiss.start();
+            // A failed switch keeps the core's socket, and the field goes back to it.
             path->setText(socketPath+" missing"); emit path->editingFinished();
             QTRY_VERIFY(shown.contains("Controller socket unavailable"));
             QCOMPARE(machineSetting("bluetooth"), "socket:" + socketPath);
-            QTRY_VERIFY(enabled->isEnabled()); enabled->click();
-            QTRY_VERIFY(enabled->isEnabled() && state->text().isEmpty());
+            QTRY_COMPARE(path->text(), socketPath);
+            QCOMPARE(mode->currentData().toString(), QString("socket"));
+            QTRY_VERIFY(mode->isEnabled()); pick("off");
+            QTRY_VERIFY(mode->isEnabled() && state->text().isEmpty());
             QCOMPARE(machineSetting("bluetooth"), QString("off"));
-            path->setText(socketPath); enabled->click();
-            QTRY_VERIFY(enabled->isEnabled() && state->text().contains("connected"));
+            path->setText(socketPath); pick("socket");
+            QTRY_VERIFY(mode->isEnabled() && state->text().contains("connected"));
             window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(),5000);
         }
         QCOMPARE(machineSetting("bluetooth", frondSessions::preferencesPath(QSettings().value("lastSession").toString())), "socket:" + socketPath);
@@ -1652,7 +1722,7 @@ for line in s.makefile('rb'):
             inPanel(0, {"installApp", "otherApp", "exportRam"}, {});
             inPanel(1, {}, {"storageHeading", "sdState", "cardPick", "sdRetry"});
             inPanel(2, {"runningContrast", "sound"}, {"rotate", "microphone"});
-            inPanel(3, {"hotsync", "serialMode", "irdaMode"}, {"usbMode", "usbPort", "bluetoothEnabled", "bluetoothSocket"});
+            inPanel(3, {"hotsync", "serialMode", "irdaMode"}, {"usbMode", "usbPort", "bluetoothMode", "bluetoothSocket"});
             if (QTest::currentTestFailed()) return;
             for (const char* name : {"machineReset", "machineSave", "machineSaveCopy", "machineHardReset"})
                 QVERIFY2(window.findChild<QAction*>(name)->isVisible(), name);
@@ -4030,6 +4100,185 @@ for line in s.makefile('rb'):
         a1->client.setSticky("serial", {}); a1->client.setSticky("ir", {}); b1->client.setSticky("ir", {});
         for (auto* user : {&a, &b}) killHub(*user);
     }
+    // Bluetooth over a connection: every controller goes to the side whose radio it is, several
+    // per link, lossless through the 64 KB window, and moving the radio moves the controllers.
+    void linkBluetooth() {
+        QTemporaryDir dir(QDir::currentPath() + "/build/lk-XXXXXX");
+        TestHub ha(dir.path(), "a", freePort()), hb(dir.path(), "b", freePort());
+        HubUser a(ha), b(hb);
+        QVERIFY(pairHubs(a, b, false));
+        const auto aId = a.client.hello().value("id").toString(), bId = b.client.hello().value("id").toString();
+        a.client.setSticky("watch", {{"op", "watch"}});
+        // A puts Bluetooth on B's radio.
+        a.client.send({{"op", "peer-radio"}, {"id", bId}, {"radio", "there"}});
+        QTRY_COMPARE_WITH_TIMEOUT(storedPeer(ha, bId).value("bluetoothRadio").toString(), QString("there"), 5000);
+        const auto chosen = storedPeer(ha, bId).value("bluetoothRadioAt").toDouble();
+        QVERIFY(chosen > 0);
+        HubUser a1(ha), a2(ha), b1(hb);
+        auto attach = [](HubUser& u, const QString& machine, const QString& link, const QString& path) {
+            u.client.setSticky("bt", {{"op", "bt-attach"}, {"machine", machine}, {"device", "Palm TX"}, {"link", link}, {"socket", path}});
+        };
+        FakeBt coreA(ha.run + "/frond/bt-a1.sock"), coreA2(ha.run + "/frond/bt-a2.sock"), coreB(hb.run + "/frond/bt-b1.sock");
+        attach(a1, "Palm A1", bId, coreA.path);
+        QTRY_VERIFY_WITH_TIMEOUT(a1.last("bt").value("listening").toBool(), 10000);
+        QTRY_COMPARE_WITH_TIMEOUT(a1.bt(), QString("there"), 15000);
+        // B learns the choice once linked.
+        QTRY_COMPARE_WITH_TIMEOUT(storedPeer(hb, aId).value("bluetoothRadio").toString(), QString("here"), 5000);
+        QCOMPARE(storedPeer(hb, aId).value("bluetoothRadioAt").toDouble(), chosen);
+        attach(b1, "Palm B1", aId, coreB.path);
+        QTRY_COMPARE_WITH_TIMEOUT(b1.bt(), QString("here"), 10000);
+        QVERIFY(coreA.connect() && coreB.connect());
+        QTRY_COMPARE_WITH_TIMEOUT(radioOpened(hb.run), 2, 10000);
+        QCOMPARE(radioOpened(ha.run), 0);
+        coreA.send("hci from A"); QTRY_COMPARE_WITH_TIMEOUT(coreB.got, QByteArray("hci from A"), 5000);
+        coreB.send("hci from B"); QTRY_COMPARE_WITH_TIMEOUT(coreA.got, QByteArray("hci from B"), 5000);
+        // A second machine on A: another controller on the same link.
+        attach(a2, "Palm A2", bId, coreA2.path);
+        QTRY_VERIFY_WITH_TIMEOUT(a2.last("bt").value("listening").toBool(), 10000);
+        QVERIFY(coreA2.connect());
+        QTRY_COMPARE_WITH_TIMEOUT(radioOpened(hb.run), 3, 10000);
+        QTRY_COMPARE_WITH_TIMEOUT(a1.last("bt").value("controllers").toInt(), 1, 5000);
+        coreA.got.clear(); coreA2.got.clear();
+        coreB.send("to both"); QTRY_VERIFY_WITH_TIMEOUT(coreA.got == "to both" && coreA2.got == "to both", 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(listed(b, "connections", aId).value("channels").toString().contains("Bluetooth: Palm B1, Palm A1, Palm A2") ||
+                                 listed(b, "connections", aId).value("channels").toString().contains("Bluetooth: Palm B1, Palm A2, Palm A1"), 5000);
+        // A megabyte from A arrives whole on B's radio, past the 64 KB window.
+        coreB.got.clear(); coreA2.got.clear();
+        const auto big = pattern(1 << 20, 9);
+        coreA.send(big);
+        QTRY_COMPARE_WITH_TIMEOUT(coreB.got.size(), big.size(), 30000);
+        QVERIFY(coreB.got == big);
+        QTRY_COMPARE_WITH_TIMEOUT(coreA2.got.size(), big.size(), 30000);
+        // B moves the radio to A: every controller goes and the cores reconnect, now on A's radio.
+        b.client.send({{"op", "peer-radio"}, {"id", aId}, {"radio", "there"}});
+        QTRY_COMPARE_WITH_TIMEOUT(storedPeer(ha, bId).value("bluetoothRadio").toString(), QString("here"), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(coreA.closed && coreA2.closed && coreB.closed, 5000);
+        QTRY_COMPARE_WITH_TIMEOUT(a1.bt(), QString("here"), 5000);
+        QTRY_COMPARE_WITH_TIMEOUT(b1.bt(), QString("there"), 5000);
+        QVERIFY(coreA.connect() && coreB.connect());
+        QTRY_COMPARE_WITH_TIMEOUT(radioOpened(ha.run), 2, 10000);
+        coreB.send("again from B"); QTRY_COMPARE_WITH_TIMEOUT(coreA.got, QByteArray("again from B"), 5000);
+        coreA.send("again from A"); QTRY_COMPARE_WITH_TIMEOUT(coreB.got, QByteArray("again from A"), 5000);
+        // B's hub dies: A drops B's controller, B's window starts a new hub and the core reconnects.
+        killHub(b1);
+        QTRY_VERIFY_WITH_TIMEOUT(coreB.closed, 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(b1.last("hello").value("pid").toDouble() != 0 && b1.client.isConnected(), 10000);
+        QTRY_COMPARE_WITH_TIMEOUT(b1.bt(), QString("there"), 20000);
+        QTRY_VERIFY_WITH_TIMEOUT(coreB.connect(), 5000);
+        coreA.got.clear();
+        QTRY_COMPARE_WITH_TIMEOUT(radioOpened(ha.run), 3, 10000);
+        coreB.send("after restart"); QTRY_COMPARE_WITH_TIMEOUT(coreA.got, QByteArray("after restart"), 5000);
+        for (auto* u : {&a1, &a2, &b1}) u->client.setSticky("bt", {});
+        a.client.setSticky("watch", {});
+        for (auto* user : {&a, &b, &b1}) killHub(*user);
+    }
+    // The running page's Bluetooth picker: This Frond goes through the hub, the core is pointed at
+    // the hub's socket once it listens, and machine settings have the same choices.
+    void bluetoothConnection() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QTemporaryDir files;
+        QFile source(files.filePath("input.frond")); QVERIFY(source.open(QIODevice::WriteOnly));
+        source.write("session"); source.close();
+        QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly));
+        core.write(R"PY(#!/usr/bin/python3
+import pathlib,socket,sys
+base=pathlib.Path(sys.argv[1]);pathlib.Path(str(base)+'.args').write_text('\n'.join(sys.argv[1:]))
+modes=pathlib.Path(str(base)+'.modes');modes.write_text('')
+s=socket.socket(socket.AF_UNIX);s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+for line in s.makefile('rb'):
+    i,cmd,arg=line.rstrip(b'\n').split(b'\t');arg=bytes.fromhex(arg.decode())
+    message={b'device-state':b'palm-tx',b'sd-state':b'none',b'network-state':b'disabled',b'keyboard-state':b'detached'}.get(cmd,b'done')
+    if cmd==b'bluetooth-mode':
+        with modes.open('a') as m: m.write(arg.decode()+'\n')
+        if arg.endswith(b'missing'):
+            s.sendall(i+b'\terror\tbluetooth\t'+b'Controller socket unavailable'.hex().encode()+b'\n');continue
+        message=b'off' if arg==b'off' else arg+b' connected'
+    if cmd==b'save':pathlib.Path(arg.decode()).write_text('saved')
+    s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
+    if cmd==b'quit':break
+)PY");
+        core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner));
+        QString machine;
+        const auto file = [&](const char* suffix) {
+            QFile f((machine.isEmpty() ? source.fileName() : machine) + suffix);
+            return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
+        };
+        const auto hubPath = frondLink::coreSocketPath("bt", QString::number(QCoreApplication::applicationPid()));
+        QString shown; QTimer dismiss; dismiss.setInterval(20);
+        {
+            MainWindow window(core.fileName()); window.show(); window.openSession(source.fileName(), true);
+            auto* mode = window.findChild<QComboBox*>("bluetoothMode"); auto* state = window.findChild<QLabel*>("bluetoothState");
+            auto* path = window.findChild<QLineEdit*>("bluetoothSocket");
+            connect(&dismiss, &QTimer::timeout, &window, [&] {
+                if (auto* box = window.findChild<QMessageBox*>(); box && box->isVisible()) { shown = box->text(); box->done(QMessageBox::Ok); }
+            }); dismiss.start();
+            const auto pick = [mode](const char* value) {
+                mode->setCurrentIndex(mode->findData(value));
+                QMetaObject::invokeMethod(mode, "activated", Q_ARG(int, mode->currentIndex()));
+            };
+            QTRY_VERIFY_WITH_TIMEOUT(mode->isEnabled(), 5000);
+            QCOMPARE(mode->itemText(mode->findData("radio")), QString("This Frond"));
+            QVERIFY(mode->findData("link:local") < 0);
+            pick("radio");
+            QTRY_VERIFY_WITH_TIMEOUT(file(".modes").contains(hubPath.toUtf8() + "\n"), 15000);
+            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Bluetooth: This Frond's radio"), 5000);
+            QVERIFY(!path->isVisible());
+            QTRY_COMPARE_WITH_TIMEOUT(machineSetting("bluetooth"), QString("radio"), 5000);
+            // The hub's socket gives the core controllers on This Frond's radio.
+            const int before = radioOpened(qEnvironmentVariable("XDG_RUNTIME_DIR"));
+            FakeBt controller(hubPath);
+            QVERIFY(controller.connect());
+            QTRY_COMPARE_WITH_TIMEOUT(radioOpened(qEnvironmentVariable("XDG_RUNTIME_DIR")), before + 1, 10000);
+            // A switch the core refuses leaves it, the picker and the hub on This Frond.
+            path->setText(files.filePath("missing")); pick("socket");
+            QTRY_VERIFY_WITH_TIMEOUT(shown.contains("Controller socket unavailable"), 5000);
+            QTRY_COMPARE_WITH_TIMEOUT(mode->currentData().toString(), QString("radio"), 5000);
+            QCOMPARE(machineSetting("bluetooth"), QString("radio"));
+            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Bluetooth: This Frond's radio"), 5000);
+            QVERIFY(controller.s.state() == QLocalSocket::ConnectedState);
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+            machine = QSettings().value("lastSession").toString();
+        }
+        // At the next start the core starts without Bluetooth and is pointed at the hub once it listens.
+        {
+            MainWindow window(core.fileName()); window.show(); window.openSession(machine, true);
+            auto* mode = window.findChild<QComboBox*>("bluetoothMode"); auto* state = window.findChild<QLabel*>("bluetoothState");
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("stop")->isEnabled(), 5000);
+            QVERIFY(!file(".args").contains("--bluetooth"));
+            QCOMPARE(mode->currentData().toString(), QString("radio"));
+            QTRY_VERIFY_WITH_TIMEOUT(file(".modes").contains(hubPath.toUtf8() + "\n"), 15000);
+            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Bluetooth: This Frond's radio"), 5000);
+            mode->setCurrentIndex(mode->findData("off"));
+            QMetaObject::invokeMethod(mode, "activated", Q_ARG(int, mode->currentIndex()));
+            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString(), 5000);
+            QCOMPARE(machineSetting("bluetooth", frondSessions::preferencesPath(machine)), QString("off"));
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        }
+        // Machine settings: Off, This Frond, a socket and the connections; none on the IIIx.
+        {
+            frondSessions::Preferences prefs; QVERIFY(frondSessions::readPreferences(machine, &prefs));
+            prefs.bluetooth = "link:00112233445566778899aabbccddeeff";
+            MachineSettingsDialog dialog(frondFirmware::Device::tx, prefs); dialog.show();
+            auto* picker = dialog.findChild<QComboBox*>("machineBluetooth"); QVERIFY(picker && picker->isVisible());
+            auto* field = dialog.findChild<QLineEdit*>("machineBluetoothSocket");
+            QCOMPARE(picker->currentText(), QString("Unknown connection"));
+            QVERIFY(picker->findData("link:local") < 0);
+            QVERIFY(!field->isVisible());
+            QCOMPARE(dialog.controls->values().bluetooth, prefs.bluetooth);
+            picker->setCurrentIndex(picker->findData("radio"));
+            QCOMPARE(dialog.controls->values().bluetooth, QString("radio"));
+            picker->setCurrentIndex(picker->findData("socket"));
+            QVERIFY(field->isVisible());
+            field->setText("/run/bt.sock");
+            QCOMPARE(dialog.controls->values().bluetooth, QString("socket:/run/bt.sock"));
+            MachineSettingsDialog iiix(frondFirmware::deviceFromId("palm-iiix"), prefs); iiix.show();
+            QVERIFY(!iiix.findChild<QComboBox*>("machineBluetooth")->isVisible());
+            MachineSettingsDialog zire(frondFirmware::deviceFromId("palm-zire-72"), prefs); zire.show();
+            QVERIFY(zire.findChild<QComboBox*>("machineBluetooth")->isVisible());
+        }
+        QSettings().clear();
+    }
     // A live switch from a connection that the core refuses leaves the port off and the hub's
     // attach gone, for serial and infrared.
     void linkSwitchFails() {
@@ -4600,13 +4849,17 @@ for line in s.makefile('rb'):
         QSettings().setValue("bluetoothEnabled", true); QSettings().setValue("bluetoothSocket", endpoint);
         const auto original = digest(source);
         MainWindow window(core); window.show(); window.openSession(source, true);
-        auto* enabled = window.findChild<QCheckBox*>("bluetoothEnabled");
+        auto* enabled = window.findChild<QComboBox*>("bluetoothMode");
         auto* path = window.findChild<QLineEdit*>("bluetoothSocket");
         auto* state = window.findChild<QLabel*>("bluetoothState");
         auto* stop = window.findChild<QPushButton*>("stop");
+        const auto pick = [enabled](const char* mode) {
+            enabled->setCurrentIndex(enabled->findData(mode));
+            QMetaObject::invokeMethod(enabled, "activated", Q_ARG(int, enabled->currentIndex()));
+        };
         QTRY_VERIFY_WITH_TIMEOUT(stop->isEnabled() && enabled->isEnabled(), 20000);
-        QVERIFY(!enabled->isChecked()); QVERIFY(!path->isEnabled());
-        enabled->click(); QTRY_VERIFY_WITH_TIMEOUT(state->text().contains("provider connected"), 5000);
+        QCOMPARE(enabled->currentData().toString(), QString("off")); QVERIFY(!path->isEnabled());
+        path->setText(endpoint); pick("socket"); QTRY_VERIFY_WITH_TIMEOUT(state->text().contains("provider connected"), 5000);
         QString shown; QTimer dismiss; dismiss.setInterval(20);
         connect(&dismiss, &QTimer::timeout, &window, [&] {
             if (auto* box = window.findChild<QMessageBox*>(); box && box->isVisible()) { shown = box->text(); box->done(QMessageBox::Ok); }
@@ -4614,14 +4867,14 @@ for line in s.makefile('rb'):
         path->setText("relative"); emit path->editingFinished();
         QTRY_VERIFY_WITH_TIMEOUT(!shown.isEmpty(), 5000);
         QCOMPARE(machineSetting("bluetooth"), "socket:" + endpoint);
-        path->setText(endpoint); enabled->click();
+        path->setText(endpoint); pick("off");
         QTRY_VERIFY_WITH_TIMEOUT(enabled->isEnabled() && state->text().isEmpty(), 5000);
-        enabled->click(); QTRY_VERIFY_WITH_TIMEOUT(state->text().contains("provider connected"), 5000);
+        pick("socket"); QTRY_VERIFY_WITH_TIMEOUT(state->text().contains("provider connected"), 5000);
         stop->click(); QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("addDevice")->isEnabled(), 15000);
-        QVERIFY(!enabled->isChecked());
         const auto saved = QSettings().value("lastSession").toString(); QVERIFY(QFileInfo::exists(saved));
         window.openSession(saved, true);
-        QTRY_VERIFY_WITH_TIMEOUT(stop->isEnabled() && enabled->isEnabled(), 20000); QVERIFY(!enabled->isChecked());
+        QTRY_VERIFY_WITH_TIMEOUT(stop->isEnabled() && enabled->isEnabled(), 20000);
+        QCOMPARE(enabled->currentData().toString(), QString("off"));
         stop->click(); QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("addDevice")->isEnabled(), 15000);
         QCOMPARE(digest(source), original); QSettings().clear();
     }
@@ -4770,7 +5023,7 @@ for line in s.makefile('rb'):
             QCOMPARE(window.findChild<QPushButton*>("cardPick")->isVisible(), frondFirmware::profile(frondFirmware::deviceFromId("sony-clie-tg50")).frontend.memoryStick);
             QVERIFY(!window.findChild<QPushButton*>("sdExchange")->isVisible());
             QVERIFY(!window.findChild<QComboBox*>("usbMode")->isEnabled());
-            QVERIFY(window.findChild<QCheckBox*>("bluetoothEnabled")->isEnabled());
+            QVERIFY(window.findChild<QComboBox*>("bluetoothMode")->isEnabled());
             QVERIFY(window.findChild<QCheckBox*>("keyboardAttached")->isEnabled());
             focus(id); key("F4"); QTest::qWait(1200); tap(id, 20, 306);
             key("q"); xd({"keydown", "Shift_L"}); key("a"); xd({"keyup", "Shift_L"});
@@ -6180,7 +6433,7 @@ for line in s.makefile('rb'):
     // The Licences text lists every desktop component with its notice.
     void licencesNotices() {
         const QString text = thirdPartyNotices();
-        for (const char* name : {"argparse", "Monocypher", "Dynarmic", "Zydis", "xbyak", "Permission is hereby granted"})
+        for (const char* name : {"argparse", "Monocypher", "Dynarmic", "Zydis", "xbyak", "BlueZ", "Permission is hereby granted"})
             QVERIFY2(text.contains(name), name);
         QVERIFY(!text.contains("SDL2_image"));
         QVERIFY(text.size() > 10000);
@@ -6207,6 +6460,7 @@ int main(int argc, char** argv) {
     app.setOrganizationName("FrondTest"); app.setApplicationName("FrondTest");
     app.setQuitOnLastWindowClosed(false);
     qputenv("FROND_LINK_HUB", (QCoreApplication::applicationDirPath() + "/frond-desktop").toUtf8());
+    qputenv("FROND_BTVIRT", fakeRadio().toUtf8());
     // Card tool operations run on the real ARM core even where a window's core is a fake one.
     qputenv("FROND_CARD_TOOL", cardsCore().toUtf8());
     WorkflowTest test;
