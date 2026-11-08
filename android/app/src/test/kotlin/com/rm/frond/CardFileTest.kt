@@ -209,4 +209,53 @@ class CardFileTest {
         assertEquals(1L, CardFile.verify(file))
         assertEquals(old, snapshot(file))
     }
+
+    // With FROND_CARD_OUT set, the edited cards are kept there (with the files they should hold in
+    // <name>.files/) so the core can be made to load them.
+    @Test fun writeCardsForTheCore() {
+        val out = System.getenv("FROND_CARD_OUT")?.let { File(it) } ?: return
+        out.deleteRecursively(); out.mkdirs()
+        val long = "A rather long file name for a card, with spaces and dots.v2.prc"
+        val files = mapOf(
+            "/PALM/$long" to Random(11).nextBytes(70_000),
+            "/PALM/Launcher/h\u00e9llo \u00fcber \u65e5\u672c.txt" to "caf\u00e9".toByteArray(),
+            "/PALM/Launcher/Deep/x.bin" to Random(12).nextBytes(5_000),
+            // The files the SD probe on the Palm looks for.
+            "/HOST.TXT" to "Hello from host\n".toByteArray(),
+            "/DELETE.TXT" to "Delete me\n".toByteArray(),
+        )
+        fun folders(fat: FatImage) {
+            fat.makeFolder("/", "PALM"); fat.makeFolder("/PALM", "Launcher"); fat.makeFolder("/PALM/Launcher", "Deep")
+        }
+        fun fill(fat: FatImage) {
+            folders(fat)
+            for ((path, bytes) in files) fat.put(path.substringBeforeLast('/'), path.substringAfterLast('/'), bytes)
+        }
+        fun keep(name: String, file: File) {
+            file.copyTo(File(out, name), true)
+            for ((path, bytes) in files) File(out, "$name.files$path").also { it.parentFile.mkdirs() }.writeBytes(bytes)
+        }
+        val v2 = card("core-v2")
+        visit(v2, ::fill)
+        keep("v2.frondsd", v2)
+        val v1 = card("core-v1", v1 = true)
+        visit(v1, ::fill)
+        assertEquals(1L, CardFile.verify(v1))
+        keep("v1-to-v2.frondsd", v1)
+        // Crashed with the commit file written, then settled.
+        val crashed = card("core-crash")
+        visit(crashed, ::folders)
+        CardFile.open(crashed, true).use { c ->
+            c.crashHook = { if (it == "journal") { c.dead = true; throw Crash() } }
+            FatImage.over(c).use { fat ->
+                try {
+                    for ((path, bytes) in files) fat.put(path.substringBeforeLast('/'), path.substringAfterLast('/'), bytes)
+                    fail("no crash")
+                } catch (_: Crash) { }
+            }
+        }
+        assertTrue(CardFile.settle(crashed))
+        keep("crash-settled.frondsd", crashed)
+        File(out, "crash-settled.frondsd.list").writeText(snapshot(crashed).first.keys.joinToString("\n") + "\n")
+    }
 }
