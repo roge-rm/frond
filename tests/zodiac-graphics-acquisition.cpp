@@ -53,7 +53,25 @@ int main() {
         put(s,0xd10,get(s,0xd10)); assert(s.queued()==1);
         assert(get(s,0xd14)==(0x0a000000 | (source ? 24 : 23)));
     }
-    put(s,0xd08,0x2401,A::sideEffect); put(s,0xd10,0x3700a,A::sideEffect);
+    put(s,0xd08,0x2401); put(s,0xd10,0x1700a);
+    put(s,0xd0c,0x400,A::externalInput); // Axis stimuli do not supply mode 1.
+    assert(get(s,0xd0c)==0 && !s.deadlineRemaining() && !s.queued());
+    assert(s.setMode1Input(0)); assert(!s.setMode1Input(1024));
+    put(s,0xd0c,0x400); auto mode1Split=s;
+    assert(s.setMode1Input(1023)); s.selectSource(2);
+    s.advance(19999); mode1Split.advance(9999); mode1Split.advance(10000);
+    assert(!s.queued() && !mode1Split.queued());
+    put(s,0xd08,0x2402,A::sequence); put(s,0xd10,0x2700a,A::sequence);
+    s.advance(1); mode1Split.advance(1);
+    assert(get(s,0xd10)==0x11700a); put(s,0xd10,get(s,0xd10));
+    put(s,0xd0c,0); assert(get(s,0xd14)==0x09000000 && get(mode1Split,0xd14)==0x09000000);
+    put(s,0xd0c,0x400); s.advance(19999); put(s,0xd0c,0); s.advance(2); assert(!s.queued());
+    put(s,0xd0c,0x400); s.advance(20000); put(s,0xd0c,0);
+    assert(get(s,0xd14)==0x090003ff);
+    put(s,0xd0c,0x400); put(s,0xd08,0x2c01); assert(!s.deadlineRemaining() && !s.queued());
+    s.reset(); configure(s); put(s,0xd08,0x2401); put(s,0xd10,0x1700a);
+    put(s,0xd0c,0x400); s.advance(20000); put(s,0xd0c,0); assert(get(s,0xd14)==0x090003ff);
+    put(s,0xd08,0x2403,A::sideEffect); put(s,0xd10,0x3700a,A::sideEffect);
     assert(s.access(0,0x16010d08,2,false,v)==A::width);
     puts("PASS: virtual acquisition input capture, partitioned guest deadline, FIFO, reset, cancel and guards");
 }

@@ -123,7 +123,7 @@ static bool parseRtcTime(const char* text, Imx1RtcTime& time) {
 }
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::fprintf(stderr, "Usage: %s ROM [physical|reset|linked] [instruction-budget] [exact|fast] [--bootstrap-peripherals] [--trace=peripherals] [--idle-hclk-budget=N] [--arm920-icache-index-compatibility] [--lcdc-contrast-only] [--imx1-mmcsd-empty-slot] [--frame-output=PATH] [--assume-mpll-settled] [--virtual-mpll-retune] [--assume-spll-settled] [--assume-i2c-single-master] [--i2c-eeprom-image=PATH] [--asp-px1-input=high] [--asp-u-sample=WORD] [--rtc-initial-time=DAY:HH:MM:SS] [--cs4-port0-input=BYTE] [--cs4-indexed-input=BANK/INDEX/BYTE] [--cs5-reset-status-input=BYTE] [--graphics-profile=virtual5744-compatible-8mib] [--graphics-raw-axes=FIRST/SECOND] [--graphics-irq-connection=virtual-a13] [--gpio-a-input-masked=VALUE/MASK] [--gpio-a-input=VALUE] [--gpio-b-input=VALUE] [--gpio-d-input=VALUE] [--ram-mib=32|128]\n", argv[0]);
+        std::fprintf(stderr, "Usage: %s ROM [physical|reset|linked] [instruction-budget] [exact|fast] [--bootstrap-peripherals] [--trace=peripherals] [--idle-hclk-budget=N] [--arm920-icache-index-compatibility] [--lcdc-contrast-only] [--imx1-mmcsd-empty-slot] [--frame-output=PATH] [--assume-mpll-settled] [--virtual-mpll-retune] [--assume-spll-settled] [--assume-i2c-single-master] [--i2c-eeprom-image=PATH] [--asp-px1-input=high] [--asp-u-sample=WORD] [--rtc-initial-time=DAY:HH:MM:SS] [--cs4-port0-input=BYTE] [--cs4-indexed-input=BANK/INDEX/BYTE] [--cs5-reset-status-input=BYTE] [--graphics-profile=virtual5744-compatible-8mib] [--graphics-raw-axes=FIRST/SECOND] [--graphics-raw-mode1=SAMPLE] [--graphics-irq-connection=virtual-a13] [--gpio-a-input-masked=VALUE/MASK] [--gpio-a-input=VALUE] [--gpio-b-input=VALUE] [--gpio-d-input=VALUE] [--ram-mib=32|128]\n", argv[0]);
         return 1;
     }
     const char* engine = argc >= 5 ? argv[4] : "exact";
@@ -179,6 +179,14 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "Supply --graphics-profile=virtual5744-compatible-8mib once\n"); return 1;
             }
             options.graphicsProfile = Imx1GraphicsProfile::virtual5744Compatible8MiB;
+        }
+        else if (!std::strncmp(argv[i], "--graphics-raw-mode1=", 21)) {
+            const char* text = argv[i] + 21;
+            char* end = nullptr;
+            errno = 0;
+            const auto sample = std::strtoul(text, &end, 0);
+            if (options.graphicsRawMode1Known || errno || *text < '0' || *text > '9' || *end || sample > 1023) return 1;
+            options.graphicsRawMode1Known = true; options.graphicsRawMode1 = sample;
         }
         else if (!std::strncmp(argv[i], "--graphics-raw-axes=", 20)) {
             const char* text = argv[i] + 20;
@@ -297,6 +305,12 @@ int main(int argc, char** argv) {
     }
     if (options.bootstrapPeripherals)
         std::printf("idle-hclk-budget=%u cumulative-per-run independent-of-instruction-budget\n", options.idleHclkBudget);
+    if (options.graphicsRawMode1Known && (!options.bootstrapPeripherals ||
+        options.graphicsProfile != Imx1GraphicsProfile::virtual5744Compatible8MiB)) {
+        std::fprintf(stderr, "Raw graphics mode1 requires the virtual graphics profile and bootstrap peripherals\n"); return 1;
+    }
+    if (options.graphicsRawMode1Known)
+        std::printf("graphics-raw-mode1=%u explicit-virtual-sample physical-source-unknown\n", options.graphicsRawMode1);
     if (options.graphicsRawAxesKnown && (!options.bootstrapPeripherals ||
         options.graphicsProfile != Imx1GraphicsProfile::virtual5744Compatible8MiB)) {
         std::fprintf(stderr, "Raw graphics axes require the virtual graphics profile and bootstrap peripherals\n"); return 1;
