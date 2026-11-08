@@ -416,7 +416,7 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
         cardFile = null
         if (c != null) {
             try { synchronized(c) { c.close() } } catch (_: Exception) { }
-            // A close that failed can leave the visit's intent file; the card goes in settled.
+            // A close that failed can leave the visit's pending list; the card goes in settled.
             CardFile.settle(c.file)
         }
         try {

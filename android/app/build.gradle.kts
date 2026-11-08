@@ -254,3 +254,30 @@ dependencies {
 }
 
 tasks.named("preBuild") { dependsOn(prepareCore, fetchSdl, fetchSdlImage) }
+
+// Unit tests load a host build of the storage library's JNI (CardStorageJni.cpp with miniz) as
+// libfrondcard.so, so the CardFile and FatImage tests run the same C++ as the app. Needs the host's
+// cc and c++, and the JDK's jni.h.
+val hostStorage: File = layout.buildDirectory.dir("host-storage").get().asFile
+val buildHostStorage = tasks.register<Exec>("buildHostStorage") {
+    group = "build"
+    description = "Builds the storage library's JNI for the host, for unit tests"
+    dependsOn(prepareCore)
+    val jni = File(projectDir, "src/main/cpp/CardStorageJni.cpp")
+    val common = File(coreSource, "src/common")
+    val jdk = File(System.getProperty("java.home"))
+    inputs.file(jni)
+    inputs.dir(File(common, "storage"))
+    inputs.file(File(common, "zip/miniz.c"))
+    outputs.file(File(hostStorage, "libfrondcard.so"))
+    doFirst { hostStorage.mkdirs() }
+    commandLine("sh", "-c",
+        "cc -std=gnu99 -O1 -fPIC -I\"$common\" -c \"$common/zip/miniz.c\" -o \"$hostStorage/miniz.o\" && " +
+        "c++ -std=c++17 -O1 -g -fPIC -shared -Wall -Wextra -Wno-unused-parameter " +
+        "-I\"$jdk/include\" -I\"$jdk/include/linux\" -I\"$common\" \"$jni\" \"$hostStorage/miniz.o\" " +
+        "-o \"$hostStorage/libfrondcard.so\"")
+}
+tasks.withType<Test>().configureEach {
+    dependsOn(buildHostStorage)
+    systemProperty("java.library.path", hostStorage.absolutePath)
+}

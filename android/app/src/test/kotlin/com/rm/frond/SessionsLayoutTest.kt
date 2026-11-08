@@ -229,8 +229,8 @@ class SessionsLayoutTest {
     }
 
     // A journal from `from` to from + 1 over a 512-byte card: one record, then the new table.
-    private fun journalTo(from: Long, offset: Long, data: ByteArray, newPayload: ByteArray): ByteArray {
-        val body = "FRONDJNL".toByteArray(Charsets.US_ASCII) + put32(1) + put32(0) + put64(512) + put64(from) +
+    private fun journalTo(from: Long, offset: Long, data: ByteArray, newPayload: ByteArray, version: Long = 1): ByteArray {
+        val body = "FRONDJNL".toByteArray(Charsets.US_ASCII) + put32(version) + put32(0) + put64(512) + put64(from) +
             put64(from + 1) + put64(1) + put64(1) + ByteArray(8) + put64(offset) + put32(data.size.toLong()) + data +
             put32(CRC32().also { it.update(newPayload) }.value)
         return body + "FRONDEND".toByteArray(Charsets.US_ASCII) + put32(CRC32().also { it.update(body) }.value) + put32(0)
@@ -269,6 +269,19 @@ class SessionsLayoutTest {
         assertArrayEquals(tinyFrondsdV2(1, newPayload), File(copied, "sd.frondsd").readBytes())
         assertEquals(listOf("sd.frondsd", "session.frond"), copied.list()!!.sorted())
         assertNull(checkImportedSiblings(copied, File(copied, "session.frond")))
+    }
+
+    // The core's session saves write version 2 journals.
+    @Test fun exportTakesVersion2Journals() {
+        val oldPayload = ByteArray(512) { 0xa5.toByte() }
+        val newPayload = oldPayload.copyOf().also { "abcd".toByteArray().copyInto(it, 8) }
+        val dir = tmp.newFolder("pending-v2")
+        File(dir, "session.frond").writeBytes(v8WithSd(4))
+        File(dir, "sd.frondsd").writeBytes(tinyFrondsdV2(3, oldPayload))
+        File(dir, "sd.frondsd.journal-4").writeBytes(journalTo(3, 8, "abcd".toByteArray(), newPayload, version = 2))
+        val dest = unpack(dir, "settled-v2")
+        assertArrayEquals(tinyFrondsdV2(4, newPayload), File(dest, "sd.frondsd").readBytes())
+        assertEquals(listOf("sd.frondsd", "session.frond"), dest.list()!!.sorted())
     }
 
     // A recovery left with an unfinished save: adopting it moves the journal it needs along with

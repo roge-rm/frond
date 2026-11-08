@@ -138,10 +138,6 @@ class FolderCardTest {
             assertEquals((names + "Ölfarben").sorted(), fat.list("/").map { it.name }.sorted())
             assertEquals(listOf("ñ"), fat.list("/Ölfarben").map { it.name })
         }
-        // The desktop's writer (desktop/FolderCard.h) makes the same short names.
-        assertEquals("_PFEL~1 TXT", String(FatImage.shortName("äpfel.txt", emptySet()), Charsets.ISO_8859_1))
-        assertEquals("README  TXT", String(FatImage.shortName("README.TXT", emptySet()), Charsets.ISO_8859_1))
-        assertEquals("NOTES~1 TXT", String(FatImage.shortName("notes.txt", setOf("NOTES.TXT")), Charsets.ISO_8859_1))
     }
 
     @Test fun aFolderThatDoesNotFitStopsTheCopyAndCancelStopsIt() {

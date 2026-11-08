@@ -198,6 +198,8 @@ class CardFileTest {
                 FatImage.over(c).use { fat -> try { change(fat); fail("$tag $step didn't crash") } catch (_: Crash) { } }
             }
             assertTrue("$tag $step leaves a journal", CardFile.unsettled(file))
+            // A standalone journal once the change's metadata is written, the pending list before.
+            assertEquals("$tag $step", if (isNew) listOf(".journal-7", ".journal-7.pending") else listOf(".journal-7.pending"), besides(file))
             // The card the core would load now, before the settle, may be refused; after it, it loads.
             assertTrue(CardFile.settle(file))
             assertFalse(CardFile.unsettled(file))
@@ -241,6 +243,51 @@ class CardFileTest {
         assertTrue(CardFile.settle(file))
         assertEquals(1L, CardFile.verify(file))
         assertEquals(old, snapshot(file))
+    }
+
+    // A standalone journal's temp left by a crash goes at the next settle.
+    @Test fun aStaleJournalTempGoes() {
+        val file = card("temp")
+        val temp = File(file.parentFile, ".frondsd.tmp-edit-sd.frondsd-abc123").also { it.writeBytes(ByteArray(100)) }
+        val session = File(file.parentFile, ".frondsd.tmp-xyz789").also { it.writeBytes(ByteArray(100)) }
+        assertTrue(CardFile.unsettled(file))
+        assertNull(CardFile.notReady(file))
+        assertFalse(temp.exists())
+        assertTrue(session.exists())
+        assertEquals(5L, CardFile.verify(file))
+    }
+
+    // A change left for another copy of the card says so, rather than that the card is open.
+    @Test fun aMismatchedJournalSaysSo() {
+        val file = card("mismatch")
+        CardFile.open(file, true).use { c ->
+            c.crashHook = { if (it == "journal") { c.dead = true; throw Crash() } }
+            FatImage.over(c).use { fat -> try { fat.makeFolder("/", "PALM"); fail() } catch (_: Crash) { } }
+        }
+        val other = card("mismatch-other", generation = 9)
+        other.copyTo(file, true)
+        val message = CardFile.notReady(file)
+        assertTrue(message, message != null && message != Cards.IN_FILES && "doesn't match" in message)
+        try { CardFile.open(file, true).close(); fail("opened") } catch (e: IOException) { assertEquals(message, e.message) }
+        CardFile.open(other, true).use { assertEquals(Cards.IN_FILES, CardFile.notReady(other)) }
+    }
+
+    // A 16 MiB card formats as FAT12 and takes the same changes.
+    @Test fun aSmallCardIsFat12() {
+        val file = File(dir("fat12"), "sd.frondsd").also { it.writeBytes(CardFile.encodeV2(ByteArray(16 shl 20), 3)) }
+        CardFile.open(file, true).use { it.format() }
+        assertEquals(4L, CardFile.verify(file))
+        val data = Random(5).nextBytes(100_000)
+        visit(file) { fat ->
+            assertEquals(12, fat.fatBits)
+            assertEquals(16384, fat.clusterBytes)
+            fat.makeFolder("/", "PALM")
+            fat.put("/PALM", "A long file name.prc", data)
+            fat.copy("/PALM", "/", "PALM 2")
+            assertEquals(emptyList<String>(), fat.check())
+        }
+        assertEquals(5L, CardFile.verify(file))
+        assertEquals(snapshot(file).first["/PALM/A long file name.prc"], snapshot(file).first["/PALM 2/A long file name.prc"])
     }
 
     // ---- Leftovers shared with the desktop ----
@@ -303,6 +350,10 @@ class CardFileTest {
 
     private val leftoverCases = listOf("commit" to "journal", "intent" to "data")
 
+    // The suffixes of the files beside `file` whose names start with its name and a dot.
+    private fun besides(file: File): List<String> =
+        file.parentFile!!.list().orEmpty().filter { it.startsWith(file.name + ".") }.map { it.substring(file.name.length) }.sorted()
+
     @Test fun writeLeftoverFixtures() {
         val out = System.getenv("FROND_FIXTURE_OUT")?.let { File(it) } ?: return
         out.deleteRecursively(); out.mkdirs()
@@ -316,10 +367,7 @@ class CardFileTest {
                 }
             }
             File(out, "$name.sparse").writeBytes(sparse(file))
-            for (kind in listOf("intent", "commit")) {
-                val left = if (kind == "intent") CardFile.intentOf(file) else CardFile.commitOf(file)
-                if (left.exists()) left.copyTo(File(out, "$name.files-$kind"))
-            }
+            for (suffix in besides(file)) File(file.path + suffix).copyTo(File(out, name + suffix))
             assertTrue(CardFile.settle(file))
             File(out, "$name.expect").writeText(expected(file))
         }
@@ -331,7 +379,7 @@ class CardFileTest {
             val from = File(root, side)
             val file = File(dir("leftover-$side-$name"), "sd.frondsd")
             unsparse(File(from, "$name.sparse").readBytes(), file)
-            for (kind in listOf("intent", "commit")) File(from, "$name.files-$kind").takeIf { it.isFile }?.copyTo(File(file.path + ".files-$kind"))
+            for (suffix in besides(File(from, name))) if (suffix != ".sparse" && suffix != ".expect") File(from, name + suffix).copyTo(File(file.path + suffix))
             assertTrue("$side $name", CardFile.unsettled(file))
             assertTrue(Cards.ready(file))
             assertFalse(CardFile.unsettled(file))

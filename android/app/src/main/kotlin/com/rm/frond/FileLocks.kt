@@ -4,15 +4,14 @@ import java.io.Closeable
 import java.io.File
 import java.io.IOException
 import java.io.RandomAccessFile
-import java.nio.ByteBuffer
 import java.nio.channels.FileLock
 import java.nio.channels.OverlappingFileLockException
 
-// The file locks this process holds: machines' .run.lock, card files open in Files, card copies.
-// They are POSIX record locks (FileChannel locks), which belong to the process and all go when it
-// closes any descriptor of the file. So every such lock is taken here, and nothing opens a file
-// held here: a second try in this process gets null without touching the file, and reads go through
-// the holder's descriptor.
+// The file locks this process holds: machines' .run.lock and card copies' .new-*.lock. They are
+// POSIX record locks (FileChannel locks), which belong to the process and all go when it closes any
+// descriptor of the file. So every such lock is taken here, and nothing opens a file held here: a
+// second try in this process gets null without touching the file. Card files open in Files hold the
+// storage library's own lock (CardFile), which other descriptors don't drop.
 internal object FileLocks {
     class Held internal constructor(private val key: String, val raf: RandomAccessFile, private val lock: FileLock) : Closeable {
         private var closed = false
@@ -54,27 +53,5 @@ internal object FileLocks {
             return null
         }
         Held(key, raf, lock).also { held[key] = it }
-    }
-
-    // Up to `length` bytes from the start of the file, through the holder's descriptor when this
-    // process holds it. Fewer at the end of the file.
-    fun readStart(file: File, length: Int): ByteArray {
-        synchronized(this) {
-            held[keyOf(file)]?.let { h ->
-                val buffer = ByteBuffer.allocate(length)
-                while (buffer.hasRemaining()) if (h.raf.channel.read(buffer, buffer.position().toLong()) <= 0) break
-                return buffer.array().copyOf(buffer.position())
-            }
-        }
-        return file.inputStream().use { input ->
-            val b = ByteArray(length)
-            var got = 0
-            while (got < length) {
-                val n = input.read(b, got, length - got)
-                if (n <= 0) break
-                got += n
-            }
-            b.copyOf(got)
-        }
     }
 }

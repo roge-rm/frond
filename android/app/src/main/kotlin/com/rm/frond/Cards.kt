@@ -167,7 +167,7 @@ object Cards {
     // The SD or Pro v2 generation, or the classic stick's change counter, and the logical size, from
     // a card file's header.
     fun cardHeader(file: File): Pair<Long, Long>? = try {
-        val h = FileLocks.readStart(file, 64).takeIf { it.size == 64 } ?: return null
+        val h = CardFile.header(file) ?: return null
         val magic = String(h, 0, 8, Charsets.US_ASCII)
         when (magic) {
             "FRONDSD\u0000" -> (if (le32(h, 8) == 2L) le64(h, 28) else 0L) to le64(h, 16)
@@ -330,7 +330,7 @@ object Cards {
         val file = cardFileIn(dir)
         val card = readCard(entryDir(library, id))
         if (file == null || card == null) return "Couldn't move the card."
-        if (!ready(File(dir, file))) return IN_FILES
+        CardFile.notReady(File(dir, file))?.let { return it }
         val slot = readSlot(dir).copy(present = true, swap = true, card = id)
         if (!writeSlot(dir, slot)) return "Couldn't move the card."
         if (!File(dir, file).renameTo(File(entryDir(library, id), file))) return "Couldn't move the card into Cards. $SAME_DISK"
@@ -345,7 +345,7 @@ object Cards {
         val file = fileOfKind(card.kind)
         if (cardFileIn(dir) != null) return "Take the machine's card out first."
         if (!File(entryDir(library, id), file).isFile) return "That card is in another machine."
-        if (!ready(File(entryDir(library, id), file))) return IN_FILES
+        CardFile.notReady(File(entryDir(library, id), file))?.let { return it }
         val slot = readSlot(dir).copy(present = true, swap = true, card = id, name = card.name)
         if (!writeSlot(dir, slot)) return "Couldn't move the card."
         if (!File(entryDir(library, id), file).renameTo(File(dir, file))) {
@@ -938,12 +938,12 @@ object Cards {
         val file = fileOfKind(card.kind)
         val inDrawer = File(entryDir(library, id), file)
         if (inDrawer.isFile) {
-            if (!ready(inDrawer)) return null to IN_FILES
+            CardFile.notReady(inDrawer)?.let { return null to it }
             return Source(inDrawer, card, null, null) to null
         }
         val holder = holderOf(sessions, id) ?: return null to "Couldn't find that card."
         val lock = tryRunLock(holder) ?: return null to "${machineName(holder)} is running. Stop it first."
-        if (!ready(File(holder, file))) { lock.close(); return null to IN_FILES }
+        CardFile.notReady(File(holder, file))?.let { lock.close(); return null to it }
         val slot = readSlot(holder)
         if (settled(holder, file, slot.swap)) return Source(File(holder, file), card, holder, lock) to null
         val settle = sdSettleOf(holder)
@@ -1038,7 +1038,7 @@ object Cards {
             if (!lock.ok) return BUSY
             val card = readCard(entryDir(library, id)) ?: return "Couldn't find that card."
             if (!File(entryDir(library, id), fileOfKind(card.kind)).isFile) return "Take the card out of its machine first."
-            if (!ready(File(entryDir(library, id), fileOfKind(card.kind)))) return IN_FILES
+            CardFile.notReady(File(entryDir(library, id), fileOfKind(card.kind)))?.let { return it }
             if (!entryDir(library, id).deleteRecursively()) return "Couldn't delete the card."
             for (dir in sessions.listFiles { f -> f.isDirectory && !f.name.startsWith(".") }.orEmpty()) {
                 val slot = readSlot(dir)

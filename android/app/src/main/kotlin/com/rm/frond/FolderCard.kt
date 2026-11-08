@@ -208,7 +208,6 @@ object FolderCard {
         var done = 0L
         try {
             FatImage.open(image, true).use { fat ->
-                fat.bulk = true
                 fun put(path: String, nodes: List<Node>) {
                     for (node in nodes) {
                         if (cancelled()) throw Stopped()

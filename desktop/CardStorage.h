@@ -65,6 +65,11 @@ inline bool inUse(const QString& card) { return frondStorage::inUse(pathOf(card)
 inline bool settle(const QString& card) { return frondStorage::settleCard(pathOf(card)); }
 // A card file nobody has open in Files…, with any change a crash cut off finished.
 inline bool ready(const QString& card) { return frondStorage::ready(pathOf(card)); }
+// As ready(), with why not: empty when ready, else the message to show.
+inline QString notReady(const QString& card) {
+    const auto r = frondStorage::readiness(pathOf(card));
+    return r.ok ? QString() : textOf(r.message);
+}
 // What the core's load checks: the header and every CRC. The generation, or nothing.
 inline std::optional<quint64> verify(const QString& card) {
     const auto g = frondStorage::verifiedGeneration(pathOf(card));

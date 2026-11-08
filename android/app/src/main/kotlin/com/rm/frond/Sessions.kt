@@ -745,9 +745,12 @@ internal fun readSdJournalIndex(journal: File, sdHeader: ByteArray, sdLength: Lo
         if (size < 64 + 16) return null
         val head = ByteArray(64).also { file.seek(0); file.readFully(it) }
         val trailer = ByteArray(16).also { file.seek(size - 16); file.readFully(it) }
-        if (!head.copyOfRange(0, 8).contentEquals("FRONDJNL".toByteArray(Charsets.US_ASCII)) || le32(head, 8) != 1L ||
-            le32(head, 12) != 0L || !trailer.copyOfRange(0, 8).contentEquals("FRONDEND".toByteArray(Charsets.US_ASCII)) ||
-            le32(trailer, 12) != 0L)
+        // Version 1 (flags 0) or 2 (flags 0 for a session save, 1 for a standalone change).
+        val version = le32(head, 8)
+        val flags = le32(head, 12)
+        if (!head.copyOfRange(0, 8).contentEquals("FRONDJNL".toByteArray(Charsets.US_ASCII)) ||
+            (if (version == 1L) flags != 0L else version != 2L || flags > 1L) ||
+            !trailer.copyOfRange(0, 8).contentEquals("FRONDEND".toByteArray(Charsets.US_ASCII)) || le32(trailer, 12) != 0L)
             return null
         val payload = le64(head, 16)
         val from = le64(head, 24)

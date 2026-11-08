@@ -614,8 +614,10 @@ inline bool applySdJournalCopy(const QString& journalPath, const QString& sdPath
     const auto head = journal.read(64);
     journal.seek(size - 16);
     const auto trailer = journal.read(16);
-    if (head.size() != 64 || trailer.size() != 16 || head.left(8) != "FRONDJNL" || le32(head, 8) != 1 ||
-        le32(head, 12) || trailer.left(8) != "FRONDEND" || le32(trailer, 12))
+    // Version 1 (flags 0) or 2 (flags 0 for a session save, 1 for a standalone change).
+    const quint32 version = head.size() == 64 ? le32(head, 8) : 0, flags = head.size() == 64 ? le32(head, 12) : 1;
+    if (head.size() != 64 || trailer.size() != 16 || head.left(8) != "FRONDJNL" ||
+        (version == 1 ? flags != 0 : version != 2 || flags > 1) || trailer.left(8) != "FRONDEND" || le32(trailer, 12))
         return false;
     const quint64 payload = le64(head, 16), from = le64(head, 24), to = le64(head, 32);
     const quint64 records = le64(head, 40), chunks = le64(head, 48);

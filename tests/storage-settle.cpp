@@ -3,6 +3,7 @@
 // and a second settle changing nothing. Writes the settled leftover cards to argv[1] for
 // tests/storage-settle.py to read with mtools.
 #include "SessionIo.h"
+#include "storage/CardFile.h"
 #include "storage/Settle.h"
 
 #include <cassert>
@@ -276,7 +277,7 @@ static void StandaloneCrashes(const fs::path& root) {
         fs::remove(frondStorage::pendingPath(card, 4));
         const auto before = Snapshot(dir);
         const auto r = frondStorage::settle(card);
-        assert(!r.ok && r.code == "unsettled" && Snapshot(dir) == before);
+        assert(!r.ok && r.code == "mismatch" && Snapshot(dir) == before);
     }
 
     // A card open in Files… (locked) isn't touched.
@@ -300,8 +301,9 @@ static void StandaloneCrashes(const fs::path& root) {
 // ---- Session journals, v1 as saves write them and v2 with the session flag ----
 
 // A v1 journal rewritten as v2 with flags 0, its trailer CRC redone.
-static Bytes AsV2Session(Bytes journal) {
-    frondSdFile::put32(journal.data() + 8, 2);
+// A session journal as version 1, as saves before journal v2 wrote it.
+static Bytes AsV1Session(Bytes journal) {
+    frondSdFile::put32(journal.data() + 8, 1);
     const size_t body = journal.size() - 16;
     frondSdFile::put32(journal.data() + body + 8, mz_crc32(0, journal.data(), body));
     return journal;
@@ -331,10 +333,10 @@ static void SessionCrashes(const fs::path& root) {
                 fs::path journal;
                 assert(writer.finish(crcs.table(), journal));
                 frondStorage::Journal parsed;
-                assert(frondStorage::readJournal(journal, parsed) && parsed.version == 1 && !parsed.standalone);
-                if (v2) {
-                    WriteAll(journal, AsV2Session(ReadAll(journal)));
-                    assert(frondStorage::readJournal(journal, parsed) && parsed.version == 2 && !parsed.standalone);
+                assert(frondStorage::readJournal(journal, parsed) && parsed.version == 2 && !parsed.standalone);
+                if (!v2) {
+                    WriteAll(journal, AsV1Session(ReadAll(journal)));
+                    assert(frondStorage::readJournal(journal, parsed) && parsed.version == 1 && !parsed.standalone);
                 }
                 if (stop >= 2) assert(frondSession::applySdJournal(dir, journal, nullptr, frondSession::JournalStep::pages));
                 if (stop >= 3) assert(frondSession::applySdJournal(dir, journal, nullptr, frondSession::JournalStep::header));
@@ -464,6 +466,58 @@ static void NothingToDo(const fs::path& root) {
     assert(frondStorage::verify(card, info).ok && info.version == 1);
 }
 
+// A standalone journal's temp left by a crash goes at the next settle; one a CardFile is writing
+// now (it holds the card's lock) stays. Session save temps are never touched.
+static void EditTemps(const fs::path& root) {
+    const auto dir = Fresh(root, "edit-temps");
+    const auto card = dir / "card.frondsd";
+    Bytes file;
+    assert(frondSdFile::encodeV2(Random(cardBytes, 41), 4, file));
+    WriteAll(card, file);
+    const auto stale = dir / (frondStorage::editTempPrefix(card) + "abc123");
+    const auto session = dir / ".frondsd.tmp-xyz789";
+    const auto other = dir / (frondStorage::editTempPrefix(dir / "other.frondsd") + "def456");
+    for (const auto& p : {stale, session, other}) WriteAll(p, Random(100, 42));
+    assert(frondStorage::hasChanges(card));
+    {
+        frondStorage::CardFile open(card, true);
+        assert(!fs::exists(stale));
+        WriteAll(stale, Random(100, 43));
+        assert(frondStorage::settleChanges(card).code == "busy");
+        assert(fs::exists(stale));
+        assert(frondStorage::readiness(card).code == "busy");
+    }
+    assert(frondStorage::settle(card).ok && !fs::exists(stale) && fs::exists(session) && fs::exists(other));
+    assert(!frondStorage::hasChanges(card));
+    assert(frondStorage::readiness(card).ok);
+}
+
+// A standalone journal that doesn't match its card is refused with its own message, untouched.
+static void MismatchedJournal(const fs::path& root) {
+    const auto dir = Fresh(root, "mismatch");
+    const auto card = dir / "card.frondsd";
+    const auto payload = Random(cardBytes, 51);
+    Bytes file;
+    assert(frondSdFile::encodeV2(payload, 9, file));
+    WriteAll(card, file);
+    frondSdFile::ChunkCrcs crcs;
+    crcs.add(payload.data(), payload.size());
+    frondStorage::JournalWriter writer;
+    assert(writer.open(card, cardBytes, 3, 4, frondStorage::JournalKind::standalone));
+    fs::path journal;
+    assert(writer.finish(crcs.table(), journal));
+    const auto before = Snapshot(dir);
+    const auto r = frondStorage::readiness(card);
+    assert(!r.ok && r.code == "mismatch" && r.message == frondStorage::mismatchMessage);
+    assert(Snapshot(dir) == before);
+    try {
+        frondStorage::CardFile open(card, true);
+        assert(false);
+    } catch (const frondStorage::Error& e) {
+        assert(e.message == frondStorage::mismatchMessage);
+    }
+}
+
 int main(int argc, char** argv) {
     assert(argc == 3);
     const fs::path fixtures = argv[1], out = argv[2];
@@ -475,6 +529,8 @@ int main(int argc, char** argv) {
     SessionCrashes(root);
     SideRegions(root);
     NothingToDo(root);
+    EditTemps(root);
+    MismatchedJournal(root);
     fs::remove_all(root);
     std::puts("storage settle: ok");
     return 0;
