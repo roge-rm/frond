@@ -1368,6 +1368,18 @@ test-zodiac-ldm-return: build/zodiac-boot-probe
 		@build/zodiac-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-ldm-return
 	./build/test-zodiac-ldm-return
 
+# ARM920 word stores of PC, base-restored abort and interpreter fallback.
+.PHONY: test-zodiac-store-pc
+test-zodiac-store-pc: build/zodiac-boot-probe
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/zodiac-store-pc.cpp build/source/src/uarm/uarm/imx1_boot_probe.cpp \
+		build/source/src/uarm/uarm/imx1_watchdog.cpp build/source/src/uarm/uarm/imx1_rtc.cpp build/source/src/uarm/uarm/imx1_bootstrap.cpp build/source/src/uarm/uarm/imx1_aitc.cpp \
+		build/source/src/uarm/uarm/imx1_cgm.cpp build/source/src/uarm/uarm/imx1_gpio.cpp \
+		build/source/src/uarm/uarm/imx1_sysctrl.cpp build/source/src/uarm/uarm/imx1_eim.cpp build/source/src/uarm/uarm/imx1_timer.cpp build/source/src/uarm/uarm/imx1_i2c.cpp build/source/src/uarm/uarm/imx1_asp.cpp build/source/src/uarm/uarm/imx1_pwm.cpp \
+		@build/zodiac-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-store-pc
+	./build/test-zodiac-store-pc
+
 # ARM920 aligned ARM linkage stub branches.
 .PHONY: test-zodiac-arm-add-pc
 test-zodiac-arm-add-pc: build/zodiac-boot-probe

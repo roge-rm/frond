@@ -99,3 +99,6 @@ The IIIx tests, with the ROMs from `FROND_DEVICE_IMAGES` (`Palm/IIIx/` and `Palm
 - Desktop: `make test-desktop` has the IIIx import, settings and launch cases; `iiixRealRom` is opt-in (`FROND_IIIX_ROM`, `FROND_IIIX_CORE`, optional `FROND_IIIX_SHOTS`).
 
 Tests that cover every device (profiles, controls, sessions, lifecycle, SD, networking) run in `make test` and need no row.
+
+`make test-zodiac-store-pc` checks the ARM920T stored PC value, word/block address
+modes, writeback, aborts and focused Exact/Fast probe admission.

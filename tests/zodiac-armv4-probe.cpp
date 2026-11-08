@@ -84,7 +84,7 @@ void blockTransfers() {
     words.push_back(0xe5902004); words.push_back(0xe5903008);
     auto r = run(words); finished(r);
     assert(r.registers[0] == 0x00300140 && r.registers[2] == 0x00300140 && r.registers[3] == 0x11223344);
-    for (uint32_t instruction : {0xe9c00006u, 0xe9800000u, 0xe9808000u, 0xe98f0006u,
+    for (uint32_t instruction : {0xe9c08006u, 0xe9800000u, 0xe98f0006u,
                                  0xe9a00003u, 0xe9300001u}) {
         words.clear(); literal(words, 0, 0x00300140); words.push_back(instruction);
         r = run(words);

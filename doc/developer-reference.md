@@ -678,6 +678,7 @@ All in `tools/`. Most take `--help`.
 | `test-zodiac-irq` | IRQ/FIQ boundaries and masks, banked return, NIMASK and unknown-input guards, timer and GPIO ISR acknowledgement, Thumb BL interruption, stall preflight, generated batches and ARMv5 regressions. See [AITC](zodiac2-aitc.md#cpu-delivery). Outside `make test`. |
 | `test-zodiac-exception` | ARM/Thumb SWI entry and MOVS return, F preservation on exceptions, banked registers, vectors, cache/MMU continuations, probe guards and Exact/Fast generated code with ARMv5 regressions. Outside `make test`. |
 | `test-zodiac-multiply` | ARMv4T scalar multiply flags and C/V policy, operands, accumulation, rejected forms and Exact/Fast parity, including ordinary generated blocks and ARMv5TE regression vectors. Outside `make test`. |
+| `test-zodiac-store-pc` | ARM920T word STR/STM PC+12, address modes, writeback, conditions, aborts and Exact/Fast interpreter fallback. Outside `make test`. |
 | `test-zodiac-armv4-probe` | Exact halfword/signed-byte and block transfers, scalar multiply and conservative probe guards. See [input scenarios](zodiac2-inputs.md). Outside `make test`. |
 | `test-imx1-asp` | ASP configuration/reset, fixed PX1, explicit manual U stimulus, guest-clock conversion, FIFO, compare, IRQ and transactional guards. See [ASP](zodiac2-asp.md). Outside `make test`. |
 | `test-imx1-rtc` | Retained RTC input, binary fields, elapsed reference clocks, sampling/alarm events, fractional phases, rollover, System PLL stall and IRQ guards. See [RTC](zodiac2-rtc.md). Outside `make test`. |
