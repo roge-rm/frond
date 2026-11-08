@@ -122,6 +122,97 @@ void immediateDirected(Machine& exact, Machine& fast) {
     }
     std::puts("PASS: immediate ADD/SUB PC, rotated operands, wraparound, conditions, modes and preserved status");
 }
+uint32_t shifted(uint32_t value, unsigned type, unsigned amount, bool carry) {
+    if (!amount && type == 3) return (value / 2) | (carry ? 0x80000000u : 0u);
+    if (!amount && (type == 1 || type == 2)) amount = 32;
+    for (unsigned bit = 0; bit < amount; ++bit) {
+        if (type == 0) value *= 2;
+        else if (type == 1) value /= 2;
+        else if (type == 2) value = (value / 2) | (value & 0x80000000u);
+        else value = (value / 2) | ((value & 1) ? 0x80000000u : 0u);
+    }
+    return value;
+}
+void registerDirected(Machine& exact, Machine& fast) {
+    unsigned count = 0;
+    for (unsigned type = 0; type < 4; ++type) for (unsigned amount = 0; amount < 32; ++amount)
+    for (uint32_t value : {0u,1u,0xffffffffu,0x80000000u,0x80000001u,0x76543210u})
+    for (unsigned flags = 0; flags < 16; ++flags) for (bool subtract : {false,true}) {
+        const uint32_t status = (flags << 28) | 0xd3;
+        const uint32_t operand = shifted(value,type,amount,flags & 2);
+        // An aligned target also checks the shift's low bits in the probe below.
+        const uint32_t base = subtract ? 0x1800+operand : 0x1800-operand;
+        const uint32_t instruction = (subtract ? 0xe04bf000 : 0xe08bf000) | amount << 7 | type << 5;
+        for (auto* m : {&exact,&fast}) {
+            m->reset(status); cpuSetReg(m->cpu,0,value); cpuSetReg(m->cpu,11,base);
+            m->word(code,instruction);
+        }
+        const auto saved = exact.spsr(); generated(exact,fast,code);
+        assert(exact.reg(15) == 0x1800 && exact.psr() == status && exact.spsr() == saved);
+        for (unsigned r = 0; r < 15; ++r)
+            assert(exact.reg(r) == (r == 0 ? value : r == 11 ? base : 0x12340000+r));
+        ++count;
+    }
+    for (unsigned mode : {0x10u,0x11u,0x12u,0x13u,0x17u,0x1bu,0x1fu})
+    for (unsigned rn = 0; rn < 16; ++rn) for (unsigned rm = 0; rm < 16; ++rm)
+    for (uint32_t pc : {code,code+4}) for (bool subtract : {false,true}) {
+        const uint32_t status = 0xa00000c0 | mode;
+        for (auto* m : {&exact,&fast}) {
+            m->reset(status);
+            for (unsigned r = 0; r < 15; ++r) cpuSetReg(m->cpu,r,0xffffff00+4*r);
+            m->word(pc,(subtract ? 0xe040f000 : 0xe080f000) | rn << 16 | rm);
+        }
+        const uint32_t base = rn == 15 ? pc+8 : exact.reg(rn);
+        const uint32_t operand = rm == 15 ? pc+8 : exact.reg(rm);
+        generated(exact,fast,pc);
+        assert(exact.reg(15) == (subtract ? base-operand : base+operand) && exact.psr() == status);
+        for (unsigned r = 0; r < 15; ++r) assert(exact.reg(r) == 0xffffff00+4*r);
+    }
+    for (unsigned flags = 0; flags < 16; ++flags) for (bool subtract : {false,true}) {
+        for (auto* m : {&exact,&fast}) {
+            m->reset((flags << 28) | 0xd3); cpuSetReg(m->cpu,11,0x1800); cpuSetReg(m->cpu,0,0x40);
+            m->word(code,subtract ? 0x104bf000 : 0x108bf000); // NE
+        }
+        generated(exact,fast,code);
+        assert(exact.reg(15) == ((flags & 4) ? code+4 : subtract ? 0x17c0u : 0x1840u));
+        assert(exact.psr() == ((flags << 28) | 0xd3));
+    }
+    std::printf("PASS: %u generated register ADD/SUB PC shifts, carry, status, all Rn/Rm aliases, modes and wraparound\n",count);
+}
+void registerProbeCases(bool fast, unsigned source) {
+    for (unsigned rm : {0u,14u,15u}) for (unsigned type = 0; type < 4; ++type) {
+        const pid_t child = fork(); assert(child >= 0);
+        if (!child) {
+            for (unsigned amount : {0u,1u,2u,31u}) for (unsigned low = 0; low < 4; ++low)
+            for (bool subtract : {false,true}) {
+                std::vector<uint32_t> p(0x100/4,0xe7f000f0);
+                p[0] = 0xea00001e;
+                // Both PC reads at 0x88 yield 0x90. Other operands are loaded unchanged.
+                p[0x80/4] = 0xe59f0040 | source << 12;
+                p[0x84/4] = 0xe59f0040 | rm << 12;
+                const uint32_t value = source == rm ? 0x90+low : 0x80000003+low;
+                p[0xcc/4] = value;
+                const uint32_t operand = shifted(rm == 15 ? 0x90 : value,type,amount,false);
+                const uint32_t base = source == 15 ? 0x90 : source == rm ? value :
+                    subtract ? 0x40+low+operand : 0x40+low-operand;
+                p[0xc8/4] = base;
+                if (source == 15) p[0x80/4] = 0xe1a00000;
+                if (rm == 15) p[0x84/4] = 0xe1a00000;
+                p[0x88/4] = (subtract ? 0xe040f000 : 0xe080f000) | source << 16 | amount << 7 | type << 5 | rm;
+                const uint32_t target = subtract ? base-operand : base+operand;
+                Imx1ProbeOptions options{}; options.bootstrapPeripherals = true;
+                const auto r = imx1BootProbe(reinterpret_cast<const uint8_t*>(p.data()),p.size()*4,
+                                            Imx1ProbeEntry::resetAlias,4,nullptr,nullptr,fast,&options);
+                assert(!r.busAccesses && r.cpsr == 0xd3);
+                if (target & 3) assert(r.stop == Imx1ProbeStop::unsupportedInstruction && r.registers[15] == 0x88);
+                else assert(r.stop == Imx1ProbeStop::budget && r.registers[15] == target);
+            }
+            _exit(0);
+        }
+        int status = 0; assert(waitpid(child,&status,0) == child);
+        assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    }
+}
 void continuation(Machine& exact, Machine& fast) {
     for (bool cached : {false, true}) for (unsigned mapping = 0; mapping < 3; ++mapping) {
         for (Machine* m : {&exact, &fast}) {
@@ -186,20 +277,20 @@ void immediateProbeCases(bool fast, unsigned source) {
 void guards() {
     for (bool fast : {false, true}) for (unsigned source = 0; source < 16; ++source) {
         const pid_t child = fork(); assert(child >= 0);
-        if (!child) { if (source < 15) probeCases(fast, source); immediateProbeCases(fast,source); _exit(0); }
+        if (!child) { if (source < 15) probeCases(fast, source); immediateProbeCases(fast,source); registerProbeCases(fast,source); _exit(0); }
         int status = 0; assert(waitpid(child, &status, 0) == child);
         assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
     }
-    for (bool fast : {false, true}) for (uint32_t word : {0xe08ff00fu, 0xe09ff00cu, 0xe08ff08cu,0xe29cf008u,0xe25cf008u,0xe2acf008u}) {
+    for (bool fast : {false, true}) for (uint32_t word : {0xe09ff00cu,0xe05bf000u,0xe08bf010u,0xe04bf010u,0xe08bf090u,0xe29cf008u,0xe25cf008u,0xe2acf008u}) {
         Imx1ProbeOptions options{}; options.bootstrapPeripherals = true;
         const auto r = imx1BootProbe(reinterpret_cast<const uint8_t*>(&word), 4,
                                     Imx1ProbeEntry::resetAlias, 100, nullptr, nullptr, fast, &options);
         assert(r.stop == Imx1ProbeStop::unsupportedInstruction && !r.trace.step && !r.busAccesses);
     }
-    std::puts("PASS: aligned ARM linkage stubs admitted, unaligned/PC-source/flags/other-shift forms guarded");
+    std::puts("PASS: aligned ADD/SUB linkage admitted, unaligned/flag-setting/register-shift/illegal forms guarded");
 }
 }
 int main() {
     unsetenv("FROND_JIT"); Machine exact(false), fast(true);
-    directed(exact, fast); immediateDirected(exact,fast); continuation(exact, fast); guards();
+    directed(exact, fast); immediateDirected(exact,fast); registerDirected(exact,fast); continuation(exact, fast); guards();
 }
