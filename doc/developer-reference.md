@@ -678,6 +678,7 @@ All in `tools/`. Most take `--help`.
 | `test-zodiac-irq` | IRQ/FIQ boundaries and masks, banked return, NIMASK and unknown-input guards, timer and GPIO ISR acknowledgement, Thumb BL interruption, stall preflight, generated batches and ARMv5 regressions. See [AITC](zodiac2-aitc.md#cpu-delivery). Outside `make test`. |
 | `test-zodiac-exception` | ARM/Thumb SWI entry and MOVS return, F preservation on exceptions, banked registers, vectors, cache/MMU continuations, probe guards and Exact/Fast generated code with ARMv5 regressions. Outside `make test`. |
 | `test-zodiac-multiply` | ARMv4T scalar multiply flags and C/V policy, operands, accumulation, rejected forms and Exact/Fast parity, including ordinary generated blocks and ARMv5TE regression vectors. Outside `make test`. |
+| `test-zodiac-lcdc-contrast` | Explicit LCD-clock contrast policy, native transaction, counter/clock, strict and panel/DMA guards in Exact/Fast. Outside `make test`. |
 | `test-zodiac-ssi-startup` | SSI1 mux/idle configuration, empty readback, guarded effects and Exact/Fast startup. Outside `make test`. |
 | `test-zodiac-uart-startup` | Disabled UART1/2 control, reset/readback, guarded effects and Exact/Fast startup. Outside `make test`. |
 | `test-zodiac-dma-channel` | Disabled DMA channel allocation/configuration, reset and Exact/Fast execution. Outside `make test`. |
