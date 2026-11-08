@@ -178,6 +178,12 @@ test-render-link: prepare
 		tests/render-link.cpp $(shell sdl2-config --libs) -lpthread -o build/test-render-link
 	./build/test-render-link
 
+test: test-shortcut-keys
+test-shortcut-keys: prepare
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror $(shell sdl2-config --cflags) \
+		-Ibuild/source/src/uarm/native tests/shortcut-keys.cpp -o build/test-shortcut-keys
+	./build/test-shortcut-keys
+
 test-fast-audio: out/frond
 	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm \
 		tests/fast-audio.cpp build/source/src/uarm/uarm/audio_queue.cpp \

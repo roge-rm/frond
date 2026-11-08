@@ -1,0 +1,201 @@
+--- a/src/uarm/native/SdlEventHandler.h
++++ b/src/uarm/native/SdlEventHandler.h
+@@ -5,6 +5,8 @@
+ 
+ #include <array>
+ #include <atomic>
++#include <functional>
++#include <string>
+ #include "DeviceControls.h"
+ #include "Rotation.h"
+ #include "WindowLayout.h"
+@@ -33,6 +35,8 @@
+     bool QuitRequested() const;
+     void ClearQuitRequested() { quitRequested = false; }
+     void ClearRedrawRequested();
++    // Called with the shortcut name for the keys the desktop app owns (see ShortcutKeys.h).
++    void SetShortcutSink(std::function<void(const std::string&)> sink) { shortcutSink = std::move(sink); }
+ 
+     void SetRotation(Rotation rotation);
+     // A new set of shown controls and window scale; releases pointers and touches held on
+@@ -89,6 +93,7 @@
+     bool background{false};
+     bool fitted{false};
+     bool directCapture{true};
++    std::function<void(const std::string&)> shortcutSink;
+     std::atomic<bool> capture{false};
+     WindowLayout layout;
+ 
+--- a/src/uarm/native/SdlEventHandler.cpp
++++ b/src/uarm/native/SdlEventHandler.cpp
+@@ -6,6 +6,7 @@
+ #include <algorithm>
+ 
+ #include "keys.h"
++#include "ShortcutKeys.h"
+ #include "IrKeyboardMapping.h"
+ #include "BuiltInKeyboardMapping.h"
+ 
+@@ -134,6 +135,12 @@
+                 break;
+ 
+             case SDL_KEYDOWN: {
++                if (shortcutSink) {
++                    if (const auto name = shortcutName(event.key.keysym.sym, event.key.keysym.mod, soc->KeyboardAttached())) {
++                        if (!event.key.repeat) shortcutSink(*name);
++                        break;
++                    }
++                }
+                 if (event.key.repeat) break;
+                 const auto scan = event.key.keysym.scancode;
+                 const auto code = irKeyboardCode(scan);
+--- a/src/uarm/native/Commands.h
++++ b/src/uarm/native/Commands.h
+@@ -43,6 +43,8 @@
+         std::string sessionPath{};        // the session file or folder loaded into sessionFolder, else empty
+         // Queues a display change for the SDL thread; unset where there is no window to change.
+         std::function<void(const DisplayChange&)> changeDisplay{};
++        // The window's X11 id as "x11 ID" for the desktop app to embed, empty without one.
++        std::function<std::string()> windowId{};
+     };
+ 
+     void Register();
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -653,6 +653,11 @@
+             else if (!ctx.microphone->Arm()) return {false, "microphone", ctx.microphone->State()};
+             return {true, "microphone", ctx.microphone->State()};
+         }
++        if (command == "window-id") {
++            const auto id = ctx.windowId ? ctx.windowId() : std::string();
++            if (id.empty()) return {false, "unsupported", "The window is not an X11 window."};
++            return {true, "window", id};
++        }
+         if (command == "display") {
+             // Queued for the SDL thread, which applies it once the app is in the foreground.
+             if (!ctx.changeDisplay) return {false, "unsupported", "There is no window to change."};
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -20,6 +20,7 @@
+ #include "Cli.h"
+ #include "Commands.h"
+ #include "DesktopControl.h"
++#include "WindowId.h"
+ #include "CardSwap.h"
+ #include "CardTool.h"
+ #include "FileUtil.h"
+@@ -850,6 +851,12 @@
+ #endif
+         };
+         sdlEventHandler.SetDirectCapture(false);
++        if (desktop) sdlEventHandler.SetShortcutSink([&](const string& name) { desktop->event("shortcut", name); });
++        commandContext.windowId = [&]() {
++            string id;
++            link.Call([&] { id = x11WindowId(window); });
++            return id;
++        };
+         // Display changes from the guest thread wait here for the SDL thread.
+         mutex displayMutex;
+         optional<DisplayChange> displayRequest;
+--- a/src/cloudpilot/frond/main.cpp
++++ b/src/cloudpilot/frond/main.cpp
+@@ -31,6 +31,8 @@
+ #include <vector>
+ 
+ #include "../../uarm/native/DeviceControls.h"
++#include "../../uarm/native/ShortcutKeys.h"
++#include "../../uarm/native/WindowId.h"
+ #include "../../uarm/native/WindowLayout.h"
+ #include "ButtonEvent.h"
+ #include "Chars.h"
+@@ -1238,6 +1240,11 @@
+         const Reply notReady{false, "not-ready", "Wait for Palm OS to reach a supported application boundary."};
+ 
+         if (command == "device-state") return {true, "device", profile->name};
++        if (command == "window-id") {
++            const string id = x11WindowId(window);
++            if (id.empty()) return {false, "unsupported", "The window is not an X11 window."};
++            return {true, "window", id};
++        }
+         if (command == "guest-ready") {
+             if (!ready) return {false, "not-ready", "Palm OS has not reached a supported application boundary."};
+             return {true, "guest-ready", "Palm OS can accept application commands."};
+@@ -1786,6 +1793,12 @@
+                 case SDL_KEYDOWN:
+                 case SDL_KEYUP: {
+                     const bool keyDown = event.type == SDL_KEYDOWN;
++                    if (desktop) {
++                        if (const auto name = shortcutName(event.key.keysym.sym, event.key.keysym.mod, false)) {
++                            if (keyDown && !event.key.repeat) desktop->Event("shortcut", *name);
++                            break;
++                        }
++                    }
+                     KeyId key = keyInvalid;
+                     switch (event.key.keysym.sym) {
+                         case SDLK_F1: key = keyIdHard1; break;
+--- /dev/null
++++ b/src/uarm/native/ShortcutKeys.h
+@@ -0,0 +1,22 @@
++#ifndef _SHORTCUT_KEYS_H_
++#define _SHORTCUT_KEYS_H_
++
++#include <SDL.h>
++
++#include <optional>
++#include <string>
++
++// The keys of the Palm window that belong to the desktop app: F11, F12, and Ctrl with a letter or
++// digit (Shift allowed, Alt not). They are sent to the app as a shortcut event ("ctrl+shift+s")
++// and never reach the Palm. With the infrared keyboard attached, Ctrl keys go to its driver and
++// only F11 and F12 are shortcuts.
++inline std::optional<std::string> shortcutName(SDL_Keycode sym, Uint16 mod, bool keyboardAttached) {
++    if (sym == SDLK_F11) return "f11";
++    if (sym == SDLK_F12) return "f12";
++    if (keyboardAttached || !(mod & KMOD_CTRL) || (mod & (KMOD_ALT | KMOD_GUI))) return std::nullopt;
++    const bool letter = sym >= SDLK_a && sym <= SDLK_z, digit = sym >= SDLK_0 && sym <= SDLK_9;
++    if (!letter && !digit) return std::nullopt;
++    return std::string("ctrl+") + ((mod & KMOD_SHIFT) ? "shift+" : "") + char(sym);
++}
++
++#endif  // _SHORTCUT_KEYS_H_
+--- /dev/null
++++ b/src/uarm/native/WindowId.h
+@@ -0,0 +1,38 @@
++#ifndef _WINDOW_ID_H_
++#define _WINDOW_ID_H_
++
++#include <SDL.h>
++
++#include <cstring>
++#include <string>
++
++// X11's own headers define names (Bool, Status, None) that clash with the 68k core's, so the
++// window is read without them: the x11 member of SDL's syswm union is {Display*, int screen,
++// Window window}.
++#ifdef SDL_VIDEO_DRIVER_X11
++#undef SDL_VIDEO_DRIVER_X11
++#define FROND_RESTORE_X11_DRIVER
++#endif
++#include <SDL_syswm.h>
++#ifdef FROND_RESTORE_X11_DRIVER
++#define SDL_VIDEO_DRIVER_X11 1
++#undef FROND_RESTORE_X11_DRIVER
++#endif
++
++// "x11 ID" for a window the desktop app can embed, else empty (no X11 window, as with a Wayland
++// or dummy video driver).
++inline std::string x11WindowId(SDL_Window* window) {
++    SDL_SysWMinfo info;
++    SDL_VERSION(&info.version);
++    if (!window || !SDL_GetWindowWMInfo(window, &info) || info.subsystem != SDL_SYSWM_X11) return {};
++    struct X11Info {
++        void* display;
++        int screen;
++        unsigned long window;
++    } x11;
++    static_assert(sizeof(info.info) >= sizeof(X11Info), "syswm union");
++    std::memcpy(&x11, &info.info, sizeof(x11));
++    return "x11 " + std::to_string(x11.window);
++}
++
++#endif  // _WINDOW_ID_H_

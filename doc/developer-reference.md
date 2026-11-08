@@ -126,6 +126,7 @@ Error codes seen across commands: `argument`, `unsupported` (the device lacks it
 | `close` | The user closed the window. The launcher decides what to do. |
 | `sd-progress` | `done total` in bytes, at each whole percent of an SD or Memory Stick create, import or export. |
 | `card` | `inserted`, when a card that `--card-swap` left ejected goes in. |
+| `shortcut` | A key pressed in the Palm window that belongs to the app, as `ctrl+s`, `ctrl+shift+s`, `ctrl+1` or `f12`: F11, F12, and Ctrl (with Shift) and a letter or digit. They never reach the Palm. With the infrared keyboard attached, Ctrl keys go to the Palm and only `f11` and `f12` are sent. |
 | `serial`, `usb`, `infrared`, `bluetooth`, `microphone` | The new state, sent when it changes, for example a peer connecting. |
 
 ### State and guest commands
@@ -133,6 +134,7 @@ Error codes seen across commands: `argument`, `unsupported` (the device lacks it
 | Command | Argument | Success reply |
 | --- | --- | --- |
 | `device-state` | | `device`: profile name |
+| `window-id` | | `window`: `x11 ID`, the decimal X11 window id the app can embed. `unsupported` when the window isn't an X11 window (Wayland, the dummy video driver). `--window-fit whole` makes the Palm follow the window's size. |
 | `power-state` | | `power`: `asleep` or `awake`, then `wakes=N`, the wakes from sleep since the core started. Not on `frond-68k`. |
 | `guest-ready` | | `guest-ready`; `not-ready` until Palm OS is at an application-call boundary |
 | `speed-state` | | `speed`: `N MIPS, limit N MIPS, N%, N underruns` |
@@ -394,7 +396,7 @@ Read from standard input, one per line, unless `--desktop-socket` is used. Paths
 
 ### Control socket
 
-The framing, the replies and the events are the same as for `frond`. `frond-68k` answers these: `device-state`, `guest-ready`, `replay-state`, `input-replay`, `save`, `install`, `export`, `export-db`, `db-list`, `launch-app`, `reset`, `hard-reset`, `quit`, `serial-state`, `serial-mode`, `irda-state`, `irda-mode`, `irda-stats`, `speed-state`, `display` (`contrast=` and `smooth=`), `sound-state`, `sound-mode`, `audio-on`, `audio-off`, and the IIIx's own `hotsync`, `speed` (`original` or `uncapped`), `backlight-state` and `gdb-start`, `gdb-stop`, `gdb-state`. `guest-ready` and the commands that need Palm OS answer `not-ready` until the UI is up. `install`, `export`, `export-db`, `db-list` and `launch-app` wait for the app's event loop as on the console, holding back later requests, and answer `not-ready` with the reason if it doesn't come. Events are `ready`, `close`, `serial` and `infrared`.
+The framing, the replies and the events are the same as for `frond`. `frond-68k` answers these: `device-state`, `guest-ready`, `replay-state`, `input-replay`, `save`, `install`, `export`, `export-db`, `db-list`, `launch-app`, `reset`, `hard-reset`, `quit`, `serial-state`, `serial-mode`, `irda-state`, `irda-mode`, `irda-stats`, `speed-state`, `display` (`contrast=` and `smooth=`), `sound-state`, `sound-mode`, `audio-on`, `audio-off`, and the IIIx's own `hotsync`, `speed` (`original` or `uncapped`), `backlight-state` and `gdb-start`, `gdb-stop`, `gdb-state`. `guest-ready` and the commands that need Palm OS answer `not-ready` until the UI is up. `install`, `export`, `export-db`, `db-list` and `launch-app` wait for the app's event loop as on the console, holding back later requests, and answer `not-ready` with the reason if it doesn't come. `window-id` is answered as on `frond`. Events are `ready`, `close`, `shortcut`, `serial` and `infrared`.
 
 What a IIIx doesn't have answers as absent to the state queries the desktop asks every device (`network-state` `disabled`, `hold-state` `unavailable`, `keyboard-state` `detached`, `usb-state` `off`, `sd-state` `none`, `microphone-state` and `microphone-epoch` `off` and `0`) and with `unsupported` to the rest: `usb-mode`, `bluetooth-state`, `bluetooth-mode`, `hold`, `keyboard-attach`, `keyboard-key`, `microphone-mode`, `network-mode` (other than `disabled`), `guest-orientation`, `rotate`, `replay-snapshots`, `sd-*` and `ms-*`. `make test-core-control` runs the same requests against both cores.
 
