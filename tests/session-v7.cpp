@@ -1,5 +1,6 @@
 #include "CardSave.h"
 #include "MemoryStickImage.h"
+#include "NandFile.h"
 #include "SessionIo.h"
 #include "sdcard.h"
 
@@ -233,7 +234,7 @@ static void LegacyV6() {
     fs::path session;
     assert(frondMachine::sessionFile(got, session));
     auto v7 = ReadAll(session);
-    assert(v7[4] == 8);
+    assert(v7[4] == 9);
     SessionFile5 v7file;
     assert(v7file.Deserialize(v7.size(), v7.data()) && v7file.GetSdSize() == 0);
 
@@ -266,7 +267,7 @@ static void LegacyV6() {
     assert(frondMachine::readBytes(android / frondMachine::sdSibling, extracted));
     assert(frondSdFile::decode(extracted.data(), extracted.size(), decoded) && decoded == payload);
     auto androidSession = ReadAll(android / frondMachine::androidSession);
-    assert(androidSession[4] == 8);
+    assert(androidSession[4] == 9);
     fs::remove_all(dir);
 }
 
@@ -441,7 +442,7 @@ static void LoneV6Bin() {
     fs::path session;
     assert(frondMachine::sessionFile(got, session));
     auto v7 = ReadAll(session);
-    assert(v7[4] == 8);
+    assert(v7[4] == 9);
 
     auto payload = TinyPayload();
     SessionFile5 withSd;
@@ -769,7 +770,7 @@ static void NewWritesAreV7() {
     session.SetDeviceName("palm-tx").SetNor(sizeof(nor), nor).SetRamSize(16u << 20);
     assert(session.Serialize());
     const auto* bytes = static_cast<const uint8_t*>(session.GetSerializedSession());
-    assert(bytes[4] == 8);
+    assert(bytes[4] == 9);
     session.SetSd(512, nor);
     assert(!session.Serialize());
 }
@@ -1553,6 +1554,108 @@ static void MsProSession() {
     fs::remove_all(dir);
 }
 
+// Session v9: internal NAND in nand.frondnand with a kind 4 descriptor and an empty NAND section.
+// A v8 session still loads its embedded NAND, a v9 one that embeds NAND is refused, the file
+// goes with a work-folder copy, and a NAND journal a save left is replayed at load.
+static void NandV9Folder() {
+    const auto dir = FixtureDir();
+    const auto machine = dir / "palm-e2";
+    fs::create_directories(machine);
+    constexpr uint64_t raw = 528 * 4096;  // 2 MiB of main bytes, 64 KiB spare
+    const uint64_t stored = frondNand::storedBytes(raw);
+    assert(stored == (2u << 20) + 65536 && frondNand::sideOffset(raw) == (2u << 20));
+    std::vector<uint8_t> bytes(static_cast<size_t>(stored));
+    for (size_t i = 0; i < bytes.size(); ++i) bytes[i] = uint8_t(i * 7 + i / 512);
+    frondMachine::Media media;
+    frondNand::fillMedia(media, raw);
+    assert(frondMachine::validMedia(media) && media.logicalSize == (2u << 20));
+    auto identity = media.identity;
+    assert(frondSession::writeSdFromReader(
+        machine / frondMachine::nandSibling, stored,
+        [&](uint64_t off, uint64_t n, void* dest) { return std::memcpy(dest, bytes.data() + off, n), true; }, identity, 1,
+        frondSession::nandShape(raw)));
+    assert(identity == media.identity);
+    media.contentGeneration = 1;
+    auto contents = TinyContents();
+    contents.deviceName = "palm-e2";
+    contents.nand.clear();
+    contents.media.push_back(media);
+    assert(frondSession::saveFolder(machine, contents));
+    fs::path session;
+    assert(frondMachine::sessionFile(machine, session));
+    auto saved = ReadAll(session);
+    assert(saved[4] == 9);
+    SessionFile5 probe;
+    assert(probe.Deserialize(saved.size(), saved.data()) && probe.GetVersion() == 9 && probe.GetNandSize() == 0);
+    frondSession::Contents loaded;
+    fs::path folder;
+    assert(frondSession::loadPath(machine, loaded, folder) && loaded.nand.empty());
+    assert(loaded.media.size() == 1 && loaded.media[0].kind == frondMachine::kindNand &&
+           loaded.media[0].physicalSize == raw && loaded.media[0].name == frondMachine::nandSibling);
+    assert(frondMachine::checkSiblings(machine, loaded.media, true) == frondMachine::SiblingStatus::ok);
+
+    // A header for another size, or the SD magic, doesn't match.
+    auto other = media;
+    frondNand::fillMedia(other, raw * 2);
+    other.contentGeneration = 1;
+    assert(frondMachine::checkSiblings(machine, {other}) == frondMachine::SiblingStatus::mismatch);
+    assert(!frondNand::openFile(machine / frondMachine::nandSibling, raw * 2));
+    // Missing, or there with no descriptor: refused.
+    fs::rename(machine / frondMachine::nandSibling, dir / "nand.keep");
+    assert(!frondSession::loadPath(machine, loaded, folder));
+    fs::rename(dir / "nand.keep", machine / frondMachine::nandSibling);
+    assert(frondMachine::checkSiblings(machine, {}) == frondMachine::SiblingStatus::extra);
+    assert(frondMachine::packableName(frondMachine::nandSibling));
+    assert(frondMachine::ignoredName("nand.frondnand.journal-2") && frondMachine::ignoredName(".frondnand.tmp-x"));
+
+    // v9 never embeds NAND.
+    uint8_t one[] = {1};
+    SessionFile5 embedded;
+    embedded.SetDeviceName("palm-e2").SetNor(1, one).SetNand(1, one).SetRamSize(16u << 20);
+    assert(!embedded.SerializeAs(9) && embedded.SerializeAs(8));
+    std::vector<uint8_t> forged(static_cast<const uint8_t*>(embedded.GetSerializedSession()),
+                                static_cast<const uint8_t*>(embedded.GetSerializedSession()) + embedded.GetSerializedSessionSize());
+    SessionFile5 back;
+    assert(back.Deserialize(forged.size(), forged.data()) && back.GetNandSize() == 1);
+    forged[4] = 9;
+    assert(!back.Deserialize(forged.size(), forged.data()));
+
+    // A journal from a save that published its .frond at 2 and stopped is replayed at load.
+    {
+        auto file = frondNand::openFile(machine / frondMachine::nandSibling, raw);
+        assert(file);
+        const std::vector<uint8_t> page(512, 0x3c), spare(16, 0x00);
+        assert(file->Write(4096, page.size(), page.data()) &&
+               file->Write(frondNand::sideOffset(raw) + 8 * 16, spare.size(), spare.data()));
+        std::memcpy(bytes.data() + 4096, page.data(), page.size());
+        std::memcpy(bytes.data() + frondNand::sideOffset(raw) + 8 * 16, spare.data(), spare.size());
+        frondNative::SdSave save;
+        save.kind = frondMachine::kindNand;
+        auto next = media;
+        auto pin = file->Snapshot();
+        assert(frondNative::journalStore(machine, next, save,
+                                         [&](const frondNative::StoreChangeFn& fn) { return file->ForEachOverlayIn(*pin, fn); }));
+        assert(next.contentGeneration == 2 && !save.journal.empty());
+        contents.media = {next};
+        assert(frondSession::saveFolderFromTemps(machine, contents, {fs::path()}));
+    }
+    FileCardBacking::DiscardGenerations(machine / frondMachine::nandSibling);
+    // A copy into a work folder takes the file and its journal.
+    const auto work = dir / "work";
+    fs::create_directories(work);
+    assert(frondSession::loadPath(machine, loaded, folder, frondSession::msPhysicalBytes, work) && folder == work);
+    auto storedOf = [&](const fs::path& path) {
+        const auto file = ReadAll(path);
+        assert(file.size() == 64 + stored + 4 * frondSdFile::chunkCount(stored));
+        return std::vector<uint8_t>(file.begin() + 64, file.begin() + 64 + long(stored));
+    };
+    assert(storedOf(work / frondMachine::nandSibling) == bytes);
+    assert(frondSession::loadPath(machine, loaded, folder) && loaded.media[0].contentGeneration == 2);
+    assert(storedOf(machine / frondMachine::nandSibling) == bytes);
+    assert(frondSession::sdJournals(machine, frondMachine::kindNand).empty());
+    fs::remove_all(dir);
+}
+
 int main() {
     RoundTrip();
     RefusedSiblingsLeaveBytes();
@@ -1577,5 +1680,6 @@ int main() {
     CandidateRace();
     V7FixtureMigrates();
     LazyChunkCheck();
+    NandV9Folder();
     std::puts("Session v7 and streamed v6 extraction checks passed");
 }

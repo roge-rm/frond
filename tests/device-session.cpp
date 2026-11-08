@@ -3,10 +3,12 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <stdexcept>
 #include <vector>
 #include "CPEndian.h"
+#include "NandFile.h"
 #include "device_profile5.h"
 #include "session/session_file5.h"
 #include "soc_PXA.h"
@@ -44,10 +46,25 @@ int main(int argc, char **argv) {
         std::vector<uint8_t> nor(session.GetNorSize()), nand(session.GetNandSize());
         memcpy(nor.data(), session.GetNor(), nor.size());
         if (!nand.empty()) memcpy(nand.data(), session.GetNand(), nand.size());
+        // A v9 session's NAND is nand.frondnand beside it, read through a scratch copy so the
+        // session folder isn't written.
+        frondSession::Contents contents;
+        require(frondSession::fromSession(session, contents), "invalid session media");
+        const frondMachine::Media *nandMedia = nullptr;
+        for (const auto &media : contents.media)
+            if (media.kind == frondMachine::kindNand) nandMedia = &media;
+        const auto folder = std::filesystem::path(argv[1]).parent_path();
+        const auto scratch = std::filesystem::path("build") / "device-session-nand";
+        if (nandMedia) {
+            std::filesystem::remove_all(scratch);
+            std::filesystem::create_directories(scratch);
+            std::filesystem::copy_file(folder / frondMachine::nandSibling, scratch / frondMachine::nandSibling);
+        }
         const bool pxa270 = profile->board == DeviceBoard5::pxa270Tx ||
                             profile->board == DeviceBoard5::pxa270Zire72;
-        SocPXA soc(profile->deviceType, session.GetRamSize(), nor.data(), nor.size(),
-                   nand.data(), nand.size(), -1, pxa270 ? 2 : 0);
+        SocPXA soc(profile->deviceType, session.GetRamSize(), nor.data(), nor.size(), nand.data(),
+                   nandMedia ? size_t(nandMedia->physicalSize) : nand.size(), -1, pxa270 ? 2 : 0);
+        require(!nandMedia || frondNand::attachFile(soc.GetNand(), scratch, *nandMedia), "cannot open the NAND file");
         require(session.GetMemorySize() == soc.GetMemoryData().size && session.GetSavestateSize(),
                 "complete RAM and peripheral state are required");
         memcpy(soc.GetMemoryData().data, session.GetMemory(), session.GetMemorySize());
@@ -85,6 +102,7 @@ int main(int argc, char **argv) {
         soc.KeyUp(keyIdHard1);
         soc.Run(cyclesPerSecond, cyclesPerSecond);
         require(frame(soc, *profile) != originalFrame, "new input did not change the resumed guest");
+        if (nandMedia) std::filesystem::remove_all(scratch);
         printf("PASS: %s fresh machine, truncated/late-corrupt state rollback and continued guest input\n",
                profile->name);
         return 0;

@@ -61,6 +61,44 @@ static QByteArray v8WithSd(quint64 generation) {
     put64(bytes, generation);
     return bytes;
 }
+// v9 with one NAND descriptor (kind 4) of `units` 528-byte units at `generation`.
+static QByteArray v9WithNand(quint64 generation, quint64 units = 2048) {
+    QByteArray bytes;
+    for (quint32 value : {frondSessions::magic, 9u}) put32(bytes, value);
+    bytes.append(QByteArray("palm-tx").leftJustified(32, '\0', true));
+    put32(bytes, 0);
+    put32(bytes, 0);
+    for (int i = 0; i < 5; i++) put64(bytes, 0);
+    put32(bytes, 1);
+    put32(bytes, 4);
+    bytes.append(QByteArray("nand.frondnand").leftJustified(32, '\0', true));
+    put32(bytes, 1);
+    put32(bytes, 0);
+    bytes.append(QByteArray("nand").leftJustified(32, '\0', true));
+    put64(bytes, units * 512);
+    put64(bytes, units * 528);
+    put64(bytes, generation);
+    return bytes;
+}
+// nand.frondnand of `units` units: main bytes, the spare bytes from the next MiB, then the table.
+static QByteArray tinyNand(quint64 generation, quint64 units = 2048, char fill = '\x5a') {
+    const quint64 payload = units * 512, side = units * 16;
+    const quint64 stored = ((payload + (1u << 20) - 1) >> 20 << 20) + side, chunks = (stored + (1u << 20) - 1) >> 20;
+    QByteArray file("FRONDNA");
+    file.append('\0');
+    put32(file, 2);
+    put32(file, 512);
+    put64(file, payload);
+    put32(file, 0);
+    put64(file, generation);
+    put64(file, 64 + stored);
+    put32(file, 1u << 20);
+    put64(file, side);
+    file.append(QByteArray(8, '\0'));
+    file.append(QByteArray(qsizetype(stored), fill));
+    file.append(QByteArray(qsizetype(4 * chunks), '\0'));
+    return file;
+}
 // .frondsd v2 of 512 bytes: header CRC, generation, table offset, 1 MiB chunks, one table entry.
 static QByteArray tinyFrondsdV2(quint64 generation) {
     QByteArray file("FRONDSD");
@@ -305,7 +343,7 @@ class SessionStoreTest : public QObject {
         QCOMPARE(importFile(folder(), outside + "/text.frond"), QString("That isn't a Frond session."));
         write(outside + "/old.frond", header(5, "palm-tx"));
         QVERIFY(importFile(folder(), outside + "/old.frond").contains("older Frond"));
-        write(outside + "/new.frond", header(9, "palm-tx"));
+        write(outside + "/new.frond", header(10, "palm-tx"));
         QVERIFY(importFile(folder(), outside + "/new.frond").contains("newer Frond"));
         write(outside + "/v7.frond", header(7, "palm-tx"));
         QVERIFY(importFile(folder(), outside + "/v7.frond").isEmpty());
@@ -334,6 +372,44 @@ class SessionStoreTest : public QObject {
     }
     // A save the core didn't finish: the copy gets sd.frondsd settled to the .frond's generation,
     // from the journal or the full copy it needs, and no journals.
+    // A v9 session's NAND file goes with it, settled from a full copy, and has to match its descriptor.
+    void v9NandFile() {
+        const auto outside = directory.filePath("nand");
+        write(outside + "/n/n.frond", v9WithNand(2));
+        write(outside + "/n/nand.frondnand", tinyNand(2));
+        QString name;
+        QVERIFY(importFile(folder(), outside + "/n", &name).isEmpty());
+        QFile got(machineDir(folder(), name) + "/nand.frondnand");
+        QVERIFY(got.open(QIODevice::ReadOnly));
+        QCOMPARE(got.readAll(), tinyNand(2));
+        QString copy;
+        QVERIFY(duplicate(folder(), describe(filePath(folder(), name)), &copy).isEmpty());
+        QFile copied(machineDir(folder(), copy) + "/nand.frondnand");
+        QVERIFY(copied.open(QIODevice::ReadOnly));
+        QCOMPARE(copied.readAll(), tinyNand(2));
+        // An unfinished save's full copy is what the copy gets.
+        write(outside + "/n/nand.frondnand", tinyNand(1));
+        write(outside + "/n/nand.frondnand.journal-2.full", tinyNand(2, 2048, '\x33'));
+        QVERIFY(importFile(folder(), outside + "/n", &name).isEmpty());
+        QFile settled(machineDir(folder(), name) + "/nand.frondnand");
+        QVERIFY(settled.open(QIODevice::ReadOnly));
+        QCOMPARE(settled.readAll(), tinyNand(2, 2048, '\x33'));
+        QVERIFY(QDir(machineDir(folder(), name)).entryList({"*journal*"}, QDir::Files | QDir::Hidden).isEmpty());
+        QFile::remove(outside + "/n/nand.frondnand.journal-2.full");
+        // Behind its descriptor, missing, the wrong size or beside a session with no NAND.
+        QVERIFY(!importFile(folder(), outside + "/n").isEmpty());
+        QFile::remove(outside + "/n/nand.frondnand");
+        QVERIFY(!importFile(folder(), outside + "/n").isEmpty());
+        write(outside + "/n/nand.frondnand", tinyNand(2, 4096));
+        QVERIFY(!importFile(folder(), outside + "/n").isEmpty());
+        write(outside + "/s/s.frond", v8WithSd(3));
+        write(outside + "/s/sd.frondsd", tinyFrondsdV2(3));
+        write(outside + "/s/nand.frondnand", tinyNand(2));
+        QVERIFY(!importFile(folder(), outside + "/s").isEmpty());
+        QVERIFY(packableName("nand.frondnand"));
+        QVERIFY(ignoredName("nand.frondnand.journal-3") && ignoredName(".x.frondnand.tmp-abc"));
+        QVERIFY(!packableName("nand.frondnand.journal-3.full"));
+    }
     void copiesSettleUnfinishedSave() {
         const auto outside = directory.filePath("unfinished");
         const QByteArray oldPayload(512, '\xa5');

@@ -36,9 +36,9 @@ data class Session(
 
 object Sessions {
     // SessionFile5's magic and newest version, in common/session/session_file5.cpp. Version 6 is the
-    // first to name the device; earlier ones are refused. Version 7 is readable here.
+    // first to name the device; earlier ones are refused. Versions 7 to 9 are readable here.
     private const val MAGIC = 0x19800819L
-    private const val VERSION = 8L
+    private const val VERSION = 9L
     private const val FIRST_NAMED_VERSION = 6L
     private const val DEVICE_NAME_SIZE = 32
 
@@ -110,7 +110,7 @@ object Sessions {
                 norSize = read64()
                 otherSizes = List(3) { read64() } // NAND, memory, savestate
                 val mediaCount = read32()
-                if (mediaCount > 2) return null
+                if (mediaCount > 3) return null
                 val mediaBytes = mediaCount * (if (version == 7L) 92L else 100L)
                 var descriptors = mediaBytes
                 while (descriptors > 0) {
@@ -443,7 +443,7 @@ object Sessions {
             }
             if (frond != File(dest, "session.frond") && !frond.renameTo(File(dest, "session.frond")))
                 return "Couldn't save the session."
-            for (sibling in listOf("sd.frondsd", "ms.frondms", "ms.frondmsp", "slot.json")) {
+            for (sibling in listOf("sd.frondsd", "ms.frondms", "ms.frondmsp", NAND_FILE, "slot.json")) {
                 File(staged, sibling).takeIf { it.isFile }?.renameTo(File(dest, sibling))
             }
             File(dest, "session.frond.settings.json").takeIf { it.isFile }?.delete()
@@ -524,14 +524,15 @@ internal fun checkImportedSiblings(dir: File, frond: File, swap: Boolean = false
     val bytes = try { frond.readBytes() } catch (e: IOException) { return "Couldn't read that file." }
     if (bytes.size < 8) return "Couldn't read that file."
     val version = le32(bytes, 4)
-    if (version != 7L && version != 8L) return null
+    if (version != 7L && version != 8L && version != 9L) return null
     val descSize = if (version == 7L) 92 else 100
     data class Card(val kind: Long, val physical: Long, val generation: Long)
     val cards = mutableListOf<Card>()
+    var nand: Card? = null
     if (bytes.size >= 40 + 52) {
         val mediaCount = le32(bytes, 88)
         val descBytes = mediaCount * descSize
-        if (mediaCount > 2L || (mediaCount != 0L && (descBytes / descSize != mediaCount || bytes.size < 40 + 52 + descBytes)))
+        if (mediaCount > 3L || (mediaCount != 0L && (descBytes / descSize != mediaCount || bytes.size < 40 + 52 + descBytes)))
             return mismatch
         for (i in 0 until mediaCount.toInt()) {
             val at = 40 + 52 + i * descSize
@@ -552,6 +553,14 @@ internal fun checkImportedSiblings(dir: File, frond: File, swap: Boolean = false
                 // Memory Stick Pro: flat sectors in an SD-style file.
                 3L -> if (name != "ms.frondmsp" || logical != physical || Device.MEMORY_STICK_PRO_SIZES.none { logical == it.toLong() shl 20 })
                     return mismatch
+                // Internal NAND (v9): 528-byte units of 512 main and 16 spare bytes, up to 256 MiB.
+                4L -> {
+                    if (version != 9L || nand != null || name != NAND_FILE || physical <= 0L || physical % 528 != 0L ||
+                        physical > (256L shl 20) || logical != physical / 33 * 32)
+                        return mismatch
+                    nand = Card(kind, physical, generation)
+                    continue
+                }
                 else -> return mismatch
             }
             cards.add(Card(kind, physical, generation))
@@ -664,15 +673,32 @@ internal fun checkImportedSiblings(dir: File, frond: File, swap: Boolean = false
     if (!expectMs && File(dir, "ms.frondms").isFile) return mismatch
     if (!expectPro && File(dir, "ms.frondmsp").isFile) return mismatch
     if (expectMs && expectPro) return mismatch
+    val nandFile = File(dir, NAND_FILE)
+    val want = nand
+    if (want == null) return if (nandFile.isFile) mismatch else null
+    // v2 only: main bytes, then the spare bytes from the next MiB, one CRC a MiB of both.
+    if (!nandFile.isFile) return mismatch
+    val hdr = nandFile.inputStream().use { it.readExact(64) }
+    if (hdr.size != 64 || !hdr.copyOfRange(0, 8).contentEquals("FRONDNA\u0000".toByteArray(Charsets.US_ASCII))) return mismatch
+    val stored = storedBytesV2(hdr)
+    val chunks = (stored + (1L shl 20) - 1) / (1L shl 20)
+    if (le32(hdr, 8) != 2L || le32(hdr, 12) != 512L || le64(hdr, 16) != want.physical / 33 * 32 ||
+        le64(hdr, 48) * 32 != le64(hdr, 16) || le64(hdr, 28) != want.generation || le64(hdr, 36) != 64 + stored ||
+        le32(hdr, 44) != (1L shl 20) || nandFile.length() != 64 + stored + 4 * chunks)
+        return mismatch
+    if (hdr.copyOfRange(56, 64).any { it != 0.toByte() }) return mismatch
     return null
 }
 
-// The core saves to .frond.tmp-XXXXXX, .frondsd.tmp-XXXXXX and .frondms.tmp-XXXXXX and renames
+// A v9 session's internal NAND, beside the .frond.
+internal const val NAND_FILE = "nand.frondnand"
+
+// The core saves to .frond.tmp-XXXXXX, .frondsd.tmp-XXXXXX, .frondms.tmp-XXXXXX and .frondnand.tmp-XXXXXX and renames
 // them into place; a process killed mid-save leaves them. A running save keeps touching its
 // file, so only old ones go.
 internal fun saveTempName(name: String) =
     !liveCardName(name) && (name.contains(".frond.tmp-") || name.contains(".frondsd.tmp-") || name.contains(".frondms.tmp-") ||
-        (name.startsWith(".gen-") && name.contains("-tmp-")))
+        name.contains(".frondnand.tmp-") || (name.startsWith(".gen-") && name.contains("-tmp-")))
 
 // A running machine's candidate card and its generation files. The core flocks the candidate and
 // removes abandoned ones itself when that machine starts again.
@@ -708,11 +734,13 @@ internal fun removeStaleImports(root: File, now: Long) {
 internal fun ignoredName(name: String) =
     name.contains(".frond.tmp-") || name.contains(".frondsd.tmp-") ||
         name.contains(".frondms.tmp-") || name.contains(".frondsd.journal-") || name.contains(".frondmsp.journal-") ||
-        name.contains(".frondms.journal-") || name.contains(".gen-")
+        name.contains(".frondms.journal-") || name.contains(".frondnand.tmp-") || name.contains(".frondnand.journal-") ||
+        name.contains(".gen-")
 
 internal fun packableName(name: String): Boolean {
     if (ignoredName(name) || '/' in name || '\\' in name) return false
-    return name == "sd.frondsd" || name == "ms.frondms" || name == "ms.frondmsp" || name == "slot.json" || name.endsWith(".frond.settings.json") ||
+    return name == "sd.frondsd" || name == "ms.frondms" || name == "ms.frondmsp" || name == NAND_FILE || name == "slot.json" ||
+        name.endsWith(".frond.settings.json") ||
         (name.endsWith(".frond") && !name.endsWith(".frond.new"))
 }
 
@@ -735,13 +763,13 @@ internal fun sessionFile(dir: File): File? {
 // (sessionPathIn in the core).
 internal fun sessionPathIn(dir: File): File = sessionFile(dir) ?: File(dir, "${dir.name}.frond")
 
-// The content generation of the file-backed card (kind 1 SD, 2 classic stick or 3 Pro) a v8
-// .frond describes, with its kind, or 0 for none.
-internal fun sdCardOf(frond: File?): Pair<Long, Long> = try {
-    val head = frond?.inputStream()?.use { it.readExact(92 + 200) } ?: ByteArray(0)
-    if (head.size < 92 || le32(head, 4) != 8L) 0L to 1L
-    else (0 until minOf(le32(head, 88), 2L).toInt()).map { 92 + it * 100 }
-        .firstOrNull { it + 100 <= head.size && le32(head, it).let { kind -> kind in 1L..3L } }
+// The content generation of the file-backed card (kind 1 SD, 2 classic stick or 3 Pro) a v8 or
+// v9 .frond describes, with its kind, or 0 for none. With `nand` it's the v9 internal NAND's (kind 4).
+internal fun sdCardOf(frond: File?, nand: Boolean = false): Pair<Long, Long> = try {
+    val head = frond?.inputStream()?.use { it.readExact(92 + 300) } ?: ByteArray(0)
+    if (head.size < 92 || (le32(head, 4) != 8L && le32(head, 4) != 9L)) 0L to 1L
+    else (0 until minOf(le32(head, 88), 3L).toInt()).map { 92 + it * 100 }
+        .firstOrNull { it + 100 <= head.size && le32(head, it).let { kind -> if (nand) kind == 4L else kind in 1L..3L } }
         ?.let { le64(head, it + 92) to le32(head, it) } ?: (0L to 1L)
 } catch (e: IOException) {
     0L to 1L
@@ -753,18 +781,20 @@ internal fun sdGenerationOf(frond: File?): Long = sdCardOf(frond).first
 // sd.frondsd.journal-<G>.full, or sd.frondsd one generation behind plus sd.frondsd.journal-<G>.
 // Exports settle it as a load would, so they hold a plain sd.frondsd at G. Both null when
 // sd.frondsd is right as it is, or nothing can settle it. A Memory Stick Pro or a v2 classic stick
-// works the same way with ms.frondmsp or ms.frondms; `sibling` names the card file.
+// works the same way with ms.frondmsp or ms.frondms; `sibling` names the card file. With `nand`
+// it's the same for a v9 nand.frondnand.
 internal class SdSettle(val full: File?, val journal: File?, val sibling: String = "sd.frondsd")
 
-internal fun sdSettleOf(dir: File, frond: File? = sessionFile(dir)): SdSettle {
-    val (want, kind) = sdCardOf(frond)
-    val sibling = when (kind) { 3L -> "ms.frondmsp"; 2L -> "ms.frondms"; else -> "sd.frondsd" }
+internal fun sdSettleOf(dir: File, frond: File? = sessionFile(dir), nand: Boolean = false): SdSettle {
+    val (want, kind) = sdCardOf(frond, nand)
+    val sibling = if (nand) NAND_FILE else when (kind) { 3L -> "ms.frondmsp"; 2L -> "ms.frondms"; else -> "sd.frondsd" }
     val none = SdSettle(null, null, sibling)
     if (want == 0L) return none
     val sd = File(dir, sibling)
     val hdr = try { if (sd.isFile) sd.inputStream().use { it.readExact(64) } else ByteArray(0) } catch (e: IOException) { ByteArray(0) }
     val v2 = hdr.size == 64 && (hdr.copyOfRange(0, 8).contentEquals("FRONDSD\u0000".toByteArray(Charsets.US_ASCII)) ||
-        hdr.copyOfRange(0, 8).contentEquals("FRONDMS\u0000".toByteArray(Charsets.US_ASCII))) && le32(hdr, 8) == 2L
+        hdr.copyOfRange(0, 8).contentEquals("FRONDMS\u0000".toByteArray(Charsets.US_ASCII)) ||
+        hdr.copyOfRange(0, 8).contentEquals("FRONDNA\u0000".toByteArray(Charsets.US_ASCII))) && le32(hdr, 8) == 2L
     val have = if (v2) le64(hdr, 28) else 0L
     if (v2 && have == want) return none
     val full = File(dir, "$sibling.journal-$want.full")
@@ -872,13 +902,16 @@ internal fun writeSettledSd(sd: File, journal: File, out: java.io.OutputStream) 
 
 // Moves the cards `frond` needs from a recovery folder into `dest`: sd.frondsd with the journal
 // an unfinished save left (the load replays it), or the full copy in its place. ms.frondmsp and a
-// v2 ms.frondms move like sd.frondsd. False when one won't move.
+// v2 ms.frondms move like sd.frondsd, and nand.frondnand the same. False when one won't move.
 internal fun moveRecoveryCards(from: File, frond: File, dest: File): Boolean {
     val settle = sdSettleOf(from, frond)
+    val nandSettle = sdSettleOf(from, frond, true)
     val moves = buildList {
-        val sd = settle.full ?: File(from, settle.sibling)
-        if (sd.isFile) add(sd to settle.sibling)
-        settle.journal?.let { add(it to it.name) }
+        for (s in listOf(settle, nandSettle)) {
+            val sd = s.full ?: File(from, s.sibling)
+            if (sd.isFile) add(sd to s.sibling)
+            s.journal?.let { add(it to it.name) }
+        }
         for (other in listOf("sd.frondsd", "ms.frondms", "ms.frondmsp").filter { it != settle.sibling })
             File(from, other).takeIf { it.isFile }?.let { add(it to other) }
     }
@@ -897,15 +930,16 @@ internal fun exportPackable(dir: File?, open: () -> java.io.OutputStream?, delet
 }
 
 internal fun zipPackable(dir: File, output: java.io.OutputStream) {
-    val settle = sdSettleOf(dir)
+    val settles = listOf(sdSettleOf(dir), sdSettleOf(dir, nand = true))
     ZipOutputStream(output).use { zip ->
         val files = dir.listFiles()?.filter { it.isFile && packableName(it.name) }.orEmpty()
-            .filterNot { settle.full != null && it.name == settle.sibling }
-        val entries = (files.map { it.name to it } + listOfNotNull(settle.full?.let { settle.sibling to it }))
+            .filterNot { f -> settles.any { it.full != null && f.name == it.sibling } }
+        val entries = (files.map { it.name to it } + settles.mapNotNull { s -> s.full?.let { s.sibling to it } })
             .sortedBy { it.first }
         for ((name, file) in entries) {
             zip.putNextEntry(ZipEntry(name))
-            if (name == settle.sibling && settle.journal != null) writeSettledSd(file, settle.journal, zip)
+            val journal = settles.firstOrNull { it.sibling == name }?.journal
+            if (journal != null) writeSettledSd(file, journal, zip)
             else file.inputStream().use { it.copyTo(zip, 1 shl 20) }
             zip.closeEntry()
         }
@@ -945,25 +979,25 @@ internal const val COPY_CANCELLED = "Copy cancelled."
 // Marks a machine folder being copied into, until its <id>.json is written.
 internal const val COPY_PART = ".copy.part"
 
-// Copies a machine folder's session, settings and cards into `dest`, which must not exist, settling
-// an unfinished SD save on the way. The session file is named session.frond. Returns an error
+// Copies a machine folder's session, settings, cards and NAND file into `dest`, which must not exist,
+// settling an unfinished card or NAND save on the way. The session file is named session.frond. Returns an error
 // message, or null; `dest` is removed on any failure or cancel (COPY_CANCELLED). `free` is the room left on the disk.
 internal fun copyMachine(from: File, dest: File, free: Long, copyCard: Boolean = true, cancelled: () -> Boolean = { false }): String? {
     if (dest.exists()) return "Couldn't duplicate the session."
-    val settle = if (copyCard) sdSettleOf(from) else SdSettle(null, null)
+    val settles = listOfNotNull(if (copyCard) sdSettleOf(from) else null, sdSettleOf(from, nand = true))
     // slot.json is written by the duplicate; card files only when the card is copied.
     val files = from.listFiles()?.filter { it.isFile && packableName(it.name) && it.name != "slot.json" &&
         (copyCard || it.name !in Cards.cardFiles) }.orEmpty()
     val frond = sessionFile(from)
     val entries = (files.map { file ->
-        val source = if (settle.full != null && file.name == settle.sibling) settle.full else file
+        val source = settles.firstOrNull { it.full != null && file.name == it.sibling }?.full ?: file
         val name = when {
             file == frond -> "session.frond"
             file.name.endsWith(".frond.settings.json") -> "session.frond.settings.json"
             else -> file.name
         }
         name to source
-    } + listOfNotNull(settle.full?.takeIf { files.none { f -> f.name == settle.sibling } }?.let { settle.sibling to it }))
+    } + settles.mapNotNull { s -> s.full?.takeIf { files.none { f -> f.name == s.sibling } }?.let { s.sibling to it } })
     val needed = entries.sumOf { it.second.length() }
     if (free < needed + (16L shl 20)) return "Not enough free space to duplicate this machine. It needs ${needed / 1_000_000 + 1} MB."
     return try {
@@ -972,7 +1006,8 @@ internal fun copyMachine(from: File, dest: File, free: Long, copyCard: Boolean =
         for ((name, source) in entries) {
             if (cancelled()) throw CancellationException()
             File(dest, name).outputStream().use { out ->
-                if (name == settle.sibling && settle.journal != null) writeSettledSd(source, settle.journal, out)
+                val journal = settles.firstOrNull { it.sibling == name }?.journal
+                if (journal != null) writeSettledSd(source, journal, out)
                 else source.inputStream().use { input ->
                     while (true) {
                         if (cancelled()) throw CancellationException()

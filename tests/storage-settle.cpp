@@ -374,7 +374,8 @@ static void SessionCrashes(const fs::path& root) {
 
 // ---- Side regions ----
 
-static Bytes WithSide(const Bytes& payload, const Bytes& side, uint64_t generation) {
+static Bytes WithSide(const Bytes& payload, const Bytes& side, uint64_t generation,
+                      unsigned magic = frondSdFile::magicSd) {
     const uint64_t stored = frondSdFile::storedBytes(payload.size(), side.size());
     Bytes body(size_t(stored), 0);
     std::memcpy(body.data(), payload.data(), payload.size());
@@ -382,7 +383,7 @@ static Bytes WithSide(const Bytes& payload, const Bytes& side, uint64_t generati
     frondSdFile::ChunkCrcs crcs;
     crcs.add(body.data(), body.size());
     Bytes file(64);
-    frondSdFile::makeHeaderV2(file.data(), payload.size(), generation, crcs.table(), side.size());
+    frondSdFile::makeHeaderV2(file.data(), payload.size(), generation, crcs.table(), side.size(), magic);
     file.insert(file.end(), body.begin(), body.end());
     Bytes table;
     frondSdFile::tableBytes(crcs.table(), table);
@@ -446,6 +447,63 @@ static void SideRegions(const fs::path& root) {
     assert(frondStorage::settle(card).ok && GenerationOf(card) == 4 && Payload(card) == next);
     assert(frondStorage::verify(card, info).ok && info.sideBytes == side.size());
     SecondSettleChangesNothing(dir, card);
+}
+
+// Internal NAND (nand.frondnand): the same settle and verify, the NAND magic kept through a
+// session journal and a pending list, and never opened for Files….
+static void NandFiles(const fs::path& root) {
+    const auto mainBytes = Random(2u << 20, 31), spare = Random(65536, 32);
+    const auto file = WithSide(mainBytes, spare, 2, frondSdFile::magicNand);
+    const auto dir = Fresh(root, "nand");
+    const auto card = dir / "nand.frondnand";
+    WriteAll(card, file);
+    frondSdFile::Info info;
+    assert(frondSdFile::parseContainer(file.data(), info) && info.nand && !info.classic);
+    assert(!frondSdFile::parseHeader(file.data(), info));
+    assert(frondStorage::verify(card, info).ok && info.nand && info.generation == 2);
+    // The NAND magic needs a side region and v2.
+    auto bare = WithSide(mainBytes, {}, 2, frondSdFile::magicNand);
+    assert(!frondSdFile::parseContainer(bare.data(), info));
+
+    // A session save's journal to 3, then the load's settle.
+    auto next = Payload(card);
+    const uint64_t sideAt = frondSdFile::sideOffset(mainBytes.size());
+    std::memcpy(next.data() + 4096, "page", 4);
+    std::memcpy(next.data() + sideAt + 16, "oob!", 4);
+    {
+        frondSdFile::ChunkCrcs crcs;
+        crcs.add(next.data(), next.size());
+        frondStorage::JournalWriter writer;
+        assert(writer.open(card, next.size(), 2, 3, frondStorage::JournalKind::session));
+        assert(writer.add(4096, 4, reinterpret_cast<const uint8_t*>("page")));
+        assert(writer.add(sideAt + 16, 4, reinterpret_cast<const uint8_t*>("oob!")));
+        fs::path journal;
+        assert(writer.finish(crcs.table(), journal));
+    }
+    assert(frondStorage::settle(card, 3, mainBytes.size()).ok && GenerationOf(card) == 3 && Payload(card) == next);
+    assert(frondStorage::verify(card, info).ok && info.nand && info.sideBytes == spare.size());
+    SecondSettleChangesNothing(dir, card);
+
+    // A pending list left by a crash: the chunk CRCs are rewritten and the magic stays.
+    {
+        frondStorage::PendingWriter pending;
+        assert(pending.open(card, info.stored(), 4));
+        assert(pending.add({uint32_t(sideAt >> 20)}));
+        std::fstream f(card, std::ios::in | std::ios::out | std::ios::binary);
+        f.seekp(std::streamoff(64 + sideAt + 100));
+        f.write("nand", 4);
+    }
+    assert(frondStorage::settle(card).ok && GenerationOf(card) == 4);
+    assert(frondStorage::verify(card, info).ok && info.nand);
+
+    // Files… never opens it.
+    bool refused = false;
+    try {
+        frondStorage::CardFile open(card, false);
+    } catch (const frondStorage::Error&) {
+        refused = true;
+    }
+    assert(refused);
 }
 
 // ---- Cards with nothing beside them ----
@@ -533,6 +591,7 @@ int main(int argc, char** argv) {
     StandaloneCrashes(root);
     SessionCrashes(root);
     SideRegions(root);
+    NandFiles(root);
     NothingToDo(root);
     EditTemps(root);
     MismatchedJournal(root);

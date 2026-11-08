@@ -3,8 +3,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <vector>
 #include "CPU.h"
+#include "NandFile.h"
 #include "mem.h"
 #include "md5.h"
 #include "audio_queue.h"
@@ -76,6 +78,60 @@ static std::vector<uint8_t> state(SocPXA& soc) {
     auto data = soc.GetSavestate();
     return {static_cast<uint8_t*>(data.data), static_cast<uint8_t*>(data.data) + data.size};
 }
+// A NAND in RAM moves onto nand.frondnand at its first save; later programs, erases and read-only
+// checkpoints go through the file, the next save is a journal, and a fresh SoC on the file reads
+// the same raw NAND.
+static void nandFile() {
+    namespace fs = std::filesystem;
+    const fs::path dir = "build/e2-state-nand";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    std::vector<uint8_t> rom(8u << 20), nand(34603008, 0xff);
+    SocPXA soc(deviceTypeE2, 16u << 20, rom.data(), rom.size(), nand.data(), nand.size(), -1, 0);
+    idle(soc);
+    run(soc);
+    constexpr uint32_t first = 0x1234, second = 0x3001, later = 0x4002;
+    nandProgram(soc, first);
+    frondMachine::Media media;
+    frondNative::SdSave save;
+    assert(frondNand::beginSave(dir, soc.GetNand(), media, save) && !save.full.empty() && save.generation == 1);
+    assert(frondNand::completeSave(dir, soc.GetNand(), save));
+    assert(frondNand::fileBacking(soc.GetNand()) && nandHasText(soc, first));
+    assert(frondMachine::checkSdSibling(dir / frondMachine::nandSibling, media, true) == frondMachine::SiblingStatus::ok);
+    assert(fs::file_size(dir / frondMachine::nandSibling) == 64 + 33554432 + 1048576 + 4 * 33);
+    nandProgram(soc, second);
+    nandByte(soc, 0x04000002, 0x60);
+    nandAddress(soc, first & ~31u, false);
+    nandByte(soc, 0x04000002, 0xd0);
+    nandReady(soc);
+    assert(nandErased(soc, first) && nandHasText(soc, second));
+    NandCheckpoint checkpoint;
+    assert(nandSaveCheckpoint(soc.GetNand(), checkpoint) && checkpoint.pin && checkpoint.raw.empty());
+    nandProgram(soc, later);
+    assert(nandHasText(soc, later));
+    assert(nandRestoreCheckpoint(soc.GetNand(), checkpoint));
+    checkpoint = {};
+    assert(nandErased(soc, later) && nandHasText(soc, second));
+    assert(frondNand::beginSave(dir, soc.GetNand(), media, save) && save.full.empty() && !save.journal.empty() &&
+           save.generation == 2);
+    assert(frondNand::completeSave(dir, soc.GetNand(), save));
+    assert(frondMachine::checkSdSibling(dir / frondMachine::nandSibling, media, true) == frondMachine::SiblingStatus::ok);
+    for (const auto& entry : fs::directory_iterator(dir))
+        assert(entry.path().filename() == frondMachine::nandSibling);
+    const auto view = soc.GetNandData();
+    std::vector<uint8_t> raw(static_cast<uint8_t*>(view.data), static_cast<uint8_t*>(view.data) + view.size);
+    assert(raw.size() == nand.size() && !memcmp(raw.data() + second * 528, nandText, sizeof(nandText)));
+    SocPXA fresh(deviceTypeE2, 16u << 20, rom.data(), rom.size(), nullptr, nand.size(), -1, 0);
+    assert(frondNand::attachFile(fresh.GetNand(), dir, media));
+    const auto again = fresh.GetNandData();
+    assert(again.size == raw.size() && !memcmp(again.data, raw.data(), raw.size()));
+    // A NAND file that doesn't match its descriptor isn't attached.
+    auto wrong = media;
+    wrong.physicalSize = 528 * 1024;
+    assert(!frondNand::attachFile(fresh.GetNand(), dir, wrong));
+    fs::remove_all(dir);
+}
+
 int main() {
     for (uint32_t ram : {16u << 20, 32u << 20}) {
         std::vector<uint8_t> rom(8u << 20), nand(34603008, 0xff);
@@ -242,5 +298,6 @@ int main() {
             if (card) { soc.SdEject(); sdCardReset(); }
         }
     }
-    puts("PASS: E2 16/32 MiB GPIO keys, pen, NAND program/erase, RAM mirror, LCD, v4/v5 fresh-SoC restore, rollback and reset/card/NAND retention");
+    nandFile();
+    puts("PASS: E2 16/32 MiB GPIO keys, pen, NAND program/erase, RAM mirror, LCD, v4/v5 fresh-SoC restore, rollback and reset/card/NAND retention, nand.frondnand");
 }

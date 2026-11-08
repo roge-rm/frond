@@ -22,13 +22,14 @@
 #include <cerrno>
 #include <fcntl.h>
 #include <sys/file.h>
+#include <optional>
 #include <unistd.h>
 #include "FirmwareInput.h"
 
 // Each machine is a folder: sessions/<name>/ holds <name>.frond, <name>.frond.settings.json,
-// the lock, sd.frondsd / ms.frondms / ms.frondmsp, and <name>.frond.new until the first save.
+// the lock, sd.frondsd / ms.frondms / ms.frondmsp, nand.frondnand, and <name>.frond.new until the first save.
 namespace frondSessions {
-constexpr quint32 magic = 0x19800819, newestVersion = 8, firstNamedVersion = 6;
+constexpr quint32 magic = 0x19800819, newestVersion = 9, firstNamedVersion = 6;
 
 // TG50 jog controls: hidden, left of the LCD or left of the keyboard. The names are saved and
 // passed to the core's --jog-controls.
@@ -182,10 +183,11 @@ inline quint64 storedBytesV2(const QByteArray& hdr) {
 }
 inline bool classicV2(const QByteArray& hdr) { return hdr.left(8) == QByteArray("FRONDMS\0", 8) && le32(hdr, 8) == 2; }
 
-// Header, size and magic of each v7 or v8 sibling. A stub shorter than the TOC is no media.
-// v8 descriptors are 100 bytes and end with the SD content generation, which a .frondsd v2
-// header must match; v7 descriptors are 92 bytes and go with a v1 .frondsd. With `swap` (slot.json
-// says the slot changed since the save) each card file only has to be a good card on its own.
+// Header, size and magic of each v7, v8 or v9 sibling. A stub shorter than the TOC is no media.
+// v8 and v9 descriptors are 100 bytes and end with the content generation, which a v2 card or
+// NAND file header must match; v7 descriptors are 92 bytes and go with a v1 .frondsd. With `swap` (slot.json
+// says the slot changed since the save) each card file only has to be a good card on its own;
+// nand.frondnand (v9, kind 4) is checked against its descriptor either way.
 inline QString checkImportedSiblings(const QString& dir, const QString& frond, bool swap = false) {
     const auto mismatch = QStringLiteral("That session's card files don't match.");
     QFile file(frond);
@@ -193,7 +195,7 @@ inline QString checkImportedSiblings(const QString& dir, const QString& frond, b
     const auto head = file.read(8 + 32);
     if (head.size() < 8) return QStringLiteral("Couldn't read that file.");
     const auto version = le32(head, 4);
-    if (version != 7 && version != 8) return {};
+    if (version != 7 && version != 8 && version != 9) return {};
     const int descSize = version == 7 ? 92 : 100;
     struct Card {
         quint32 kind;
@@ -201,6 +203,7 @@ inline QString checkImportedSiblings(const QString& dir, const QString& frond, b
         quint64 generation;
     };
     QList<Card> cards;
+    std::optional<Card> nand;
     const auto toc = file.read(52);
     if (toc.size() == 52) {
         const auto mediaCount = le32(toc, 48);
@@ -228,6 +231,13 @@ inline QString checkImportedSiblings(const QString& dir, const QString& frond, b
                 bool known = false;
                 for (quint64 mb : {4, 8, 16, 32, 64, 128}) known |= logical == mb << 20 && physical == mb * 2048 * 521;
                 if (name != QLatin1String("ms.frondms") || !known) return mismatch;
+            } else if (kind == 4 && version == 9) {
+                // Internal NAND: 528-byte units of 512 main and 16 spare bytes, up to 256 MiB.
+                if (nand || name != QLatin1String("nand.frondnand") || !physical || physical % 528 ||
+                    physical > (quint64(256) << 20) || logical != physical / 33 * 32)
+                    return mismatch;
+                nand = Card{kind, physical, generation};
+                continue;
             } else {
                 return mismatch;
             }
@@ -310,6 +320,23 @@ inline QString checkImportedSiblings(const QString& dir, const QString& frond, b
     if (!expectMs && QFileInfo::exists(dir + "/ms.frondms")) return mismatch;
     if (!expectPro && QFileInfo::exists(dir + "/ms.frondmsp")) return mismatch;
     if (expectMs && expectPro) return mismatch;
+    if (nand) {
+        // v2 only: main bytes, then the spare bytes from the next MiB, one CRC a MiB of both.
+        QFile file(dir + "/nand.frondnand");
+        if (!file.open(QIODevice::ReadOnly)) return mismatch;
+        const auto hdr = file.read(64);
+        if (hdr.size() != 64 || hdr.left(8) != QByteArray("FRONDNA\0", 8)) return mismatch;
+        const quint64 payload = le64(hdr, 16), side = le64(hdr, 48);
+        const quint64 stored = storedBytesV2(hdr), chunks = (stored + (1u << 20) - 1) >> 20;
+        if (le32(hdr, 8) != 2 || le32(hdr, 12) != 512 || payload != nand->physical / 33 * 32 || side * 32 != payload ||
+            le64(hdr, 28) != nand->generation || le64(hdr, 36) != 64 + stored || le32(hdr, 44) != (1u << 20) ||
+            quint64(file.size()) != 64 + stored + 4 * chunks)
+            return mismatch;
+        for (int i = 56; i < 64; ++i)
+            if (hdr[i]) return mismatch;
+    } else if (QFileInfo::exists(dir + "/nand.frondnand")) {
+        return mismatch;
+    }
     return {};
 }
 
@@ -330,18 +357,19 @@ inline QString cleanName(QString name) {
 inline bool ignoredName(const QString& name) {
     return name.contains(".frond.tmp-") || name.contains(".frondsd.tmp-") ||
            name.contains(".frondms.tmp-") || name.contains(".frondsd.journal-") ||
-           name.contains(".frondmsp.journal-") || name.contains(".frondms.journal-") || name.contains(".gen-") ||
+           name.contains(".frondmsp.journal-") || name.contains(".frondms.journal-") || name.contains(".frondnand.tmp-") ||
+           name.contains(".frondnand.journal-") || name.contains(".gen-") ||
            name.startsWith(".dup-");
 }
 inline bool packableName(const QString& name) {
     if (ignoredName(name) || name.contains('/')) return false;
-    return name == "sd.frondsd" || name == "ms.frondms" || name == "ms.frondmsp" || name == "slot.json" ||
+    return name == "sd.frondsd" || name == "ms.frondms" || name == "ms.frondmsp" || name == "nand.frondnand" || name == "slot.json" ||
            name.endsWith(".frond.settings.json") ||
            (name.endsWith(".frond") && !name.endsWith(".frond.new"));
 }
 inline bool tempName(const QString& name) {
     return name.contains(".frond.tmp-") || name.contains(".frondsd.tmp-") || name.contains(".frondms.tmp-") ||
-           (name.startsWith(".gen-") && name.contains("-tmp-"));
+           name.contains(".frondnand.tmp-") || (name.startsWith(".gen-") && name.contains("-tmp-"));
 }
 // Files Frond keeps in a machine folder, saved or working.
 inline bool machineFileName(const QString& name) {
@@ -590,19 +618,20 @@ inline QString reserve(const QString& folder, const QString& base, const QString
     return {};
 }
 
-// The content generation of the file-backed card a v8 .frond describes, or 0 for none. `kind` gets
-// the descriptor's kind, 1 for SD, 2 for a classic stick or 3 for Pro.
-inline quint64 sdGenerationOf(const QString& frond, quint32* kind = nullptr) {
+// The content generation of the file-backed card a v8 or v9 .frond describes, or 0 for none.
+// `kind` gets the descriptor's kind, 1 for SD, 2 for a classic stick or 3 for Pro. With `nand`
+// it's the v9 internal NAND's (kind 4) instead.
+inline quint64 sdGenerationOf(const QString& frond, quint32* kind = nullptr, bool nand = false) {
     QFile file(frond);
     if (!file.open(QIODevice::ReadOnly)) return 0;
     const auto head = file.read(8 + 32 + 52);
-    if (head.size() != 8 + 32 + 52 || le32(head, 4) != 8) return 0;
+    if (head.size() != 8 + 32 + 52 || (le32(head, 4) != 8 && le32(head, 4) != 9)) return 0;
     const auto count = le32(head, 88);
-    for (quint32 i = 0; i < count && i < 2; ++i) {
+    for (quint32 i = 0; i < count && i < 4; ++i) {
         const auto desc = file.read(100);
         if (desc.size() != 100) return 0;
         const auto found = le32(desc, 0);
-        if (found == 1 || found == 2 || found == 3) {
+        if (nand ? found == 4 : found == 1 || found == 2 || found == 3) {
             if (kind) *kind = found;
             return le64(desc, 92);
         }
@@ -615,19 +644,22 @@ inline quint64 sdGenerationOf(const QString& frond, quint32* kind = nullptr) {
 // Copies settle it as a load would, so they hold a plain sd.frondsd at G. Both empty when
 // sd.frondsd is right as it is, or nothing can settle it. `frond` is the session file in `dir`.
 // A Memory Stick Pro or a v2 classic stick works the same way with ms.frondmsp or ms.frondms;
-// `sibling` names the card file.
+// `sibling` names the card file. With `nand` it's the same for a v9 nand.frondnand.
 struct SdSettle {
     QString full, journal, sibling{QStringLiteral("sd.frondsd")};
 };
-inline SdSettle sdSettleOf(const QString& dir, const QString& frond) {
+inline SdSettle sdSettleOf(const QString& dir, const QString& frond, bool nand = false) {
     quint32 kind = 1;
-    const auto want = sdGenerationOf(frond, &kind);
-    if (!want) return {};
-    const QString sibling = kind == 3 ? QStringLiteral("ms.frondmsp") : kind == 2 ? QStringLiteral("ms.frondms") : QStringLiteral("sd.frondsd");
+    const auto want = sdGenerationOf(frond, &kind, nand);
+    if (!want) return nand ? SdSettle{{}, {}, QStringLiteral("nand.frondnand")} : SdSettle{};
+    const QString sibling = nand ? QStringLiteral("nand.frondnand") : kind == 3 ? QStringLiteral("ms.frondmsp")
+                                  : kind == 2 ? QStringLiteral("ms.frondms") : QStringLiteral("sd.frondsd");
     QFile sd(dir + '/' + sibling);
     QByteArray hdr;
     if (sd.open(QIODevice::ReadOnly)) hdr = sd.read(64);
-    const bool v2 = hdr.size() == 64 && (hdr.left(8) == QByteArray("FRONDSD\0", 8) || hdr.left(8) == QByteArray("FRONDMS\0", 8)) &&
+    const bool v2 = hdr.size() == 64 &&
+                    (hdr.left(8) == QByteArray("FRONDSD\0", 8) || hdr.left(8) == QByteArray("FRONDMS\0", 8) ||
+                     hdr.left(8) == QByteArray("FRONDNA\0", 8)) &&
                     le32(hdr, 8) == 2;
     const quint64 have = v2 ? le64(hdr, 28) : 0;
     if (v2 && have == want) return {{}, {}, sibling};
@@ -698,10 +730,12 @@ inline bool applySdJournalCopy(const QString& journalPath, const QString& sdPath
 inline QString copyPackable(const QString& fromDir, const QString& toDir, const QString& newName) {
     if (!QDir().mkpath(toDir)) return QStringLiteral("Couldn't save the session.");
     const auto settle = sdSettleOf(fromDir, sessionFrondIn(fromDir));
+    const auto nandSettle = sdSettleOf(fromDir, sessionFrondIn(fromDir), true);
     bool any = false;
     for (const auto& entry : QDir(fromDir).entryInfoList(QDir::Files)) {
         if (!packableName(entry.fileName())) continue;
         if (!settle.full.isEmpty() && entry.fileName() == settle.sibling) continue;
+        if (!nandSettle.full.isEmpty() && entry.fileName() == nandSettle.sibling) continue;
         const auto dest = toDir + '/' + packableDestName(entry.fileName(), newName);
         QFile::remove(dest);
         if (!QFile::copy(entry.absoluteFilePath(), dest)) return QStringLiteral("Couldn't save the session.");
@@ -714,9 +748,16 @@ inline QString copyPackable(const QString& fromDir, const QString& toDir, const 
     }
     if (!settle.journal.isEmpty() && !applySdJournalCopy(settle.journal, toDir + '/' + settle.sibling))
         return QStringLiteral("Couldn't save the session.");
-    // A card the source doesn't have must not stay behind in an existing folder.
-    for (const auto* card : {"sd.frondsd", "ms.frondms", "ms.frondmsp"}) {
-        const bool settled = !settle.full.isEmpty() && QLatin1String(card) == settle.sibling;
+    if (!nandSettle.full.isEmpty()) {
+        QFile::remove(toDir + '/' + nandSettle.sibling);
+        if (!QFile::copy(nandSettle.full, toDir + '/' + nandSettle.sibling)) return QStringLiteral("Couldn't save the session.");
+    }
+    if (!nandSettle.journal.isEmpty() && !applySdJournalCopy(nandSettle.journal, toDir + '/' + nandSettle.sibling))
+        return QStringLiteral("Couldn't save the session.");
+    // A card or NAND file the source doesn't have must not stay behind in an existing folder.
+    for (const auto* card : {"sd.frondsd", "ms.frondms", "ms.frondmsp", "nand.frondnand"}) {
+        const bool settled = (!settle.full.isEmpty() && QLatin1String(card) == settle.sibling) ||
+                             (!nandSettle.full.isEmpty() && QLatin1String(card) == nandSettle.sibling);
         if (QFileInfo::exists(fromDir + '/' + card) || settled) continue;
         if (QFileInfo::exists(toDir + '/' + card) && !QFile::remove(toDir + '/' + card))
             return QStringLiteral("Couldn't save the session.");
@@ -904,26 +945,29 @@ inline QString duplicate(const QString& folder, const Info& info, QString* newNa
     };
     const auto frond = dest + '/' + name + ".frond";
     QList<QPair<QString, QString>> jobs;  // source, destination
-    SdSettle settle;
+    SdSettle settle, nandSettle;
     qint64 total = 0;
     const bool copyCard = choice == CardChoice::copy;
     if (info.saved) {
         settle = sdSettleOf(fromDir, info.path);
         if (!copyCard) settle = {};
+        nandSettle = sdSettleOf(fromDir, info.path, true);
         for (const auto& entry : QDir(fromDir).entryInfoList(QDir::Files)) {
             if (!packableName(entry.fileName()) || entry.fileName() == "slot.json") continue;
             if (frondCards::cardFiles.contains(entry.fileName()) && !copyCard) continue;
             auto source = entry.absoluteFilePath();
             if (!settle.full.isEmpty() && entry.fileName() == settle.sibling) source = settle.full;
+            if (!nandSettle.full.isEmpty() && entry.fileName() == nandSettle.sibling) source = nandSettle.full;
             jobs.append({source, dest + '/' + packableDestName(entry.fileName(), name)});
             total += QFileInfo(source).size();
         }
-        if (!settle.full.isEmpty()) {
-            const auto card = dest + '/' + settle.sibling;
+        for (const auto* s : {&settle, &nandSettle}) {
+            if (s->full.isEmpty()) continue;
+            const auto card = dest + '/' + s->sibling;
             const bool listed = std::any_of(jobs.cbegin(), jobs.cend(), [&](const auto& job) { return job.second == card; });
             if (!listed) {
-                jobs.append({settle.full, card});
-                total += QFileInfo(settle.full).size();
+                jobs.append({s->full, card});
+                total += QFileInfo(s->full).size();
             }
         }
         if (jobs.isEmpty()) return fail(failed);
@@ -946,6 +990,7 @@ inline QString duplicate(const QString& folder, const Info& info, QString* newNa
         if (!copyChunked(source, target, &done, total, watch))
             return fail(cancelled ? QStringLiteral("Duplicate cancelled.") : failed);
     if (!settle.journal.isEmpty() && !applySdJournalCopy(settle.journal, dest + '/' + settle.sibling)) return fail(failed);
+    if (!nandSettle.journal.isEmpty() && !applySdJournalCopy(nandSettle.journal, dest + '/' + nandSettle.sibling)) return fail(failed);
     // The copy's slot: its own new card, the link, or nothing. A card the .frond still describes
     // and the copy doesn't have loads as a swap.
     frondCards::Card copy = card;
@@ -1060,13 +1105,15 @@ inline QString importFile(const QString& folder, const QString& from, QString* n
     if (!QFile::copy(from, part) || !QFile::rename(part, target)) return fail();
     // Cards beside it are copied, settling an unfinished SD save as copyPackable does.
     const auto sourceDir = QFileInfo(from).absolutePath();
-    const auto settle = sdSettleOf(sourceDir, from);
-    for (const auto* sibling : {"sd.frondsd", "ms.frondms", "ms.frondmsp"}) {
+    const auto settle = sdSettleOf(sourceDir, from), nandSettle = sdSettleOf(sourceDir, from, true);
+    for (const auto* sibling : {"sd.frondsd", "ms.frondms", "ms.frondmsp", "nand.frondnand"}) {
         auto src = sourceDir + '/' + sibling;
         if (!settle.full.isEmpty() && QLatin1String(sibling) == settle.sibling) src = settle.full;
+        if (!nandSettle.full.isEmpty() && QLatin1String(sibling) == nandSettle.sibling) src = nandSettle.full;
         if (QFileInfo::exists(src) && !QFile::copy(src, destDir + '/' + sibling)) return fail();
     }
     if (!settle.journal.isEmpty() && !applySdJournalCopy(settle.journal, destDir + '/' + settle.sibling)) return fail();
+    if (!nandSettle.journal.isEmpty() && !applySdJournalCopy(nandSettle.journal, destDir + '/' + nandSettle.sibling)) return fail();
     if (QFileInfo(sourceDir + "/slot.json").isFile() && !QFile::copy(sourceDir + "/slot.json", destDir + "/slot.json")) return fail();
     if (const auto error = checkImportedSiblings(destDir, target, frondCards::readSlot(destDir).swap); !error.isEmpty()) {
         QDir(destDir).removeRecursively();
@@ -1104,7 +1151,9 @@ inline bool isMachineFolder(const QString& dir) {
     for (const auto& entry : entries) {
         const auto name = entry.fileName();
         if (!entry.isFile() || entry.isSymLink() || !machineFileName(name)) return false;
-        if (ignoredName(name) || name == "sd.frondsd" || name == "ms.frondms" || name == "ms.frondmsp" || name == "slot.json") continue;
+        if (ignoredName(name) || name == "sd.frondsd" || name == "ms.frondms" || name == "ms.frondmsp" || name == "nand.frondnand" ||
+            name == "slot.json")
+            continue;
         // Every .frond, settings, lock or marker file has to belong to the one session.
         const auto own = stem + ".frond";
         if (name != own && name != own + ".settings.json" && name != own + ".lock" && name != own + ".new" && name != own + ".work" &&

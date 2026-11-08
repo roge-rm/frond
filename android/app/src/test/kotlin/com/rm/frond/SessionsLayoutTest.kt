@@ -212,6 +212,53 @@ class SessionsLayoutTest {
         }
     }
 
+    // v9 with one NAND descriptor (kind 4) of `units` 528-byte units.
+    private fun v9WithNand(generation: Long, units: Long = 2048): ByteArray {
+        val name = "palm-tx".toByteArray(Charsets.US_ASCII).copyOf(32)
+        val nandName = NAND_FILE.toByteArray(Charsets.US_ASCII).copyOf(32)
+        return put32(0x19800819) + put32(9) + name +
+            put32(0) + put32(0) + ByteArray(40) + put32(1) +
+            put32(4) + nandName + put32(1) + put32(0) + "nand".toByteArray(Charsets.US_ASCII).copyOf(32) +
+            put64(units * 512) + put64(units * 528) + put64(generation)
+    }
+    private fun tinyNand(generation: Long, units: Long = 2048, fill: Byte = 0x5a): ByteArray {
+        val payload = units * 512
+        val side = units * 16
+        val stored = (payload + (1L shl 20) - 1) / (1L shl 20) * (1L shl 20) + side
+        val chunks = (stored + (1L shl 20) - 1) / (1L shl 20)
+        return "FRONDNA".toByteArray(Charsets.US_ASCII) + byteArrayOf(0) + put32(2) + put32(512) + put64(payload) +
+            put32(0) + put64(generation) + put64(64 + stored) + put32(1L shl 20) + put64(side) + ByteArray(8) +
+            ByteArray(stored.toInt()) { fill } + ByteArray(4 * chunks.toInt())
+    }
+
+    @Test fun v9NandFile() {
+        val dir = tmp.newFolder("v9")
+        val frond = File(dir, "session.frond").also { it.writeBytes(v9WithNand(2)) }
+        val nand = File(dir, NAND_FILE).also { it.writeBytes(tinyNand(2)) }
+        assertNull(checkImportedSiblings(dir, frond))
+        assertTrue(packableName(NAND_FILE))
+        assertTrue(ignoredName("$NAND_FILE.journal-3"))
+        assertTrue(saveTempName(".x.frondnand.tmp-abc"))
+        // A copy takes the full copy an unfinished save left.
+        nand.writeBytes(tinyNand(1))
+        File(dir, "$NAND_FILE.journal-2.full").writeBytes(tinyNand(2, fill = 0x33))
+        val copy = File(tmp.root, "v9-copy")
+        assertNull(copyMachine(dir, copy, Long.MAX_VALUE, copyCard = false))
+        assertTrue(File(copy, NAND_FILE).readBytes().contentEquals(tinyNand(2, fill = 0x33)))
+        assertNull(checkImportedSiblings(copy, File(copy, "session.frond")))
+        // Behind its descriptor, missing, the wrong size or beside a session with no NAND.
+        File(dir, "$NAND_FILE.journal-2.full").delete()
+        assertEquals("That session's card files don't match.", checkImportedSiblings(dir, frond))
+        nand.delete()
+        assertEquals("That session's card files don't match.", checkImportedSiblings(dir, frond))
+        nand.writeBytes(tinyNand(2, 4096))
+        assertEquals("That session's card files don't match.", checkImportedSiblings(dir, frond))
+        frond.writeBytes(v8WithSd(3))
+        File(dir, "sd.frondsd").writeBytes(tinyFrondsdV2(3))
+        nand.writeBytes(tinyNand(2))
+        assertEquals("That session's card files don't match.", checkImportedSiblings(dir, frond))
+    }
+
     @Test fun v8SiblingNeedsMatchingGeneration() {
         val dir = tmp.newFolder("v8")
         val frond = File(dir, "session.frond").also { it.writeBytes(v8WithSd(3)) }
