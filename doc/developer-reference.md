@@ -663,6 +663,7 @@ All in `tools/`. Most take `--help`.
 | `test-imx1-aitc` | i.MX1 AITC reset, enable/type/force, priority/mask/vector, masked GPIO A/B/C/D requests and transactional bootstrap rejection checks. Outside `make test`. |
 | `test-imx1-clocks-gpio` | Static i.MX1 clock/GPIO reset and configuration, access rejection and explicit clock/pin limits. Outside `make test`. |
 | `test-imx1-gpio-idle` | Held GPIO level interrupts, masked history and transactional AITC guards. Outside `make test`. |
+| `test-imx1-gpio-active` | GPIO edge/level pending bits, W1C, masked events, knownness, separate board samples and transactional AITC requests. Outside `make test`. |
 | `test-imx1-gpio-pad` | Logical pad history, inactive edge baselines, SSR feedback and guarded AITC source 11. Outside `make test`. |
 | `test-imx1-spll` | Explicit nominal System PLL staging/restart, LF/output hold, spacing, FCLK/BCLK guards, phase and portable maximum charges. See [clocks](zodiac2-clocks.md). Outside `make test`. |
 | `test-imx1-mpll` | MCU PLL fields, restart readiness, nominal asynchronous ratios, fractional handoff and chunk invariance. See [clocks](zodiac2-clocks.md). Outside `make test`. |
@@ -674,7 +675,7 @@ All in `tools/`. Most take `--help`.
 | `test-zodiac-user-bank` | Privileged User-bank transfers, bank visibility, saved-context MOVS returns and guarded forms. Outside `make test`. |
 | `test-zodiac-ldm-return` | LDM exception-return bank ordering, base writeback, partial faults, target policy, cache/MMU continuation and explicit Fast interpreter fallback. Outside `make test`. |
 | `test-zodiac-arm-add-pc` | Aligned ARM ADD PC linkage, flags, wraparound, retained fetch state and generated Exact/Fast parity. Outside `make test`. |
-| `test-zodiac-irq` | IRQ/FIQ boundaries and masks, banked return, NIMASK and unknown-input guards, timer acknowledgement, Thumb BL interruption, stall preflight, generated batches and ARMv5 regressions. See [AITC](zodiac2-aitc.md#cpu-delivery). Outside `make test`. |
+| `test-zodiac-irq` | IRQ/FIQ boundaries and masks, banked return, NIMASK and unknown-input guards, timer and GPIO ISR acknowledgement, Thumb BL interruption, stall preflight, generated batches and ARMv5 regressions. See [AITC](zodiac2-aitc.md#cpu-delivery). Outside `make test`. |
 | `test-zodiac-exception` | ARM/Thumb SWI entry and MOVS return, F preservation on exceptions, banked registers, vectors, cache/MMU continuations, probe guards and Exact/Fast generated code with ARMv5 regressions. Outside `make test`. |
 | `test-zodiac-multiply` | ARMv4T scalar multiply flags and C/V policy, operands, accumulation, rejected forms and Exact/Fast parity, including ordinary generated blocks and ARMv5TE regression vectors. Outside `make test`. |
 | `test-zodiac-armv4-probe` | Exact halfword/signed-byte and block transfers, scalar multiply and conservative probe guards. See [input scenarios](zodiac2-inputs.md). Outside `make test`. |

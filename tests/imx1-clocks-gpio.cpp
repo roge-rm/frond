@@ -14,19 +14,26 @@ int main() {
         uint32_t value = 0xdeadbeef;
         assert(gpio.access(base + 0x24, 4, false, value) == Imx1GpioAccess::externalInput);
         assert(value == 0xdeadbeef);
-        for (unsigned bit = 0; bit < 32; ++bit) {
-            value = 1u << bit;
-            assert(gpio.access(base + 0x30, 4, true, value) == Imx1GpioAccess::sideEffect);
-            assert(gpio.interruptOutput(port) == Imx1GpioLine::clear);
-            assert(gpio.access(base + 0x30, 4, false, value) == Imx1GpioAccess::ok && value == 0);
+        constexpr uint32_t usable[] = {0xffffffff, 0xffffff00, 0xfffbfff8, 0xffffffc0};
+        constexpr uint32_t selected[] = {0x00c3fffe, 0xffffffff, 0x0007ffff, 0xffffffff};
+        for (unsigned pin = 0; pin < 32; ++pin) {
+            const bool supported = (usable[port] & selected[port] & (1u << pin)) != 0;
+            value = 1u << pin;
+            assert(gpio.access(base + 0x30, 4, true, value) ==
+                   (supported ? Imx1GpioAccess::ok : Imx1GpioAccess::sideEffect));
+            assert(gpio.interruptOutput(port) == (supported ? Imx1GpioLine::unknown : Imx1GpioLine::clear));
+            value = 0;
+            assert(gpio.access(base + 0x30, 4, true, value) == Imx1GpioAccess::ok);
+            value = 0xffffffff;
+            assert(gpio.access(base + 0x34, 4, true, value) == Imx1GpioAccess::ok);
         }
         for (auto sample : {0u, 0xffffffffu}) {
             Imx1Gpio sampled;
             assert(sampled.setInput(port, sample));
             assert(sampled.interruptOutput(port) == Imx1GpioLine::clear);
             value = 0xdeadbeef;
-            assert(sampled.access(base + 0x34, 4, false, value) == Imx1GpioAccess::externalInput);
-            assert(value == 0xdeadbeef);
+            assert(sampled.access(base + 0x34, 4, false, value) == Imx1GpioAccess::ok);
+            assert(value == 0);
         }
     }
     assert(gpio.interruptOutput(4) == Imx1GpioLine::unknown);
@@ -84,9 +91,9 @@ int main() {
                 continue;
             }
             if (index == 13) {
-                assert(soc.access(address, 4, false, unknown) == Imx1BootstrapAccess::externalInput);
+                read(address, 0);
                 write(address, 0xffffffff, Imx1BootstrapAccess::ok);
-                assert(soc.access(address, 4, false, unknown) == Imx1BootstrapAccess::externalInput);
+                read(address, 0);
                 continue;
             }
             uint32_t expected = index >= 3 && index <= 6 ? 0xffffffff : 0;

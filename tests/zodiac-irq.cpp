@@ -286,10 +286,12 @@ void store(std::vector<uint32_t>& words, unsigned base, uint32_t offset, uint32_
     load(words, 1, value); words.push_back(0xe5801000 | base << 16 | offset);
 }
 Imx1ProbeResult probe(const std::vector<uint32_t>& words, Trace& trace, bool fast, uint32_t steps = 500,
-                     bool settled = false) {
+                     bool settled = false, bool gpio = false) {
     Imx1ProbeOptions options{};
     options.bootstrapPeripherals = true;
     options.rtcInitialTimeKnown = true;
+    options.gpioAInputKnown = gpio;
+    options.gpioAInput = 0;
     options.assumeMpllSettled = options.assumeSpllSettled = settled;
     options.busObserver = [](void* p, const Imx1ProbeAccess& a) { static_cast<Trace*>(p)->bus.push_back(a); };
     options.busContext = &trace;
@@ -301,10 +303,10 @@ Imx1ProbeResult probe(const std::vector<uint32_t>& words, Trace& trace, bool fas
         }, &trace, fast, &options);
 }
 void probeParity(const std::vector<uint32_t>& words, Imx1ProbeResult& result, Trace& trace, uint32_t steps = 500,
-                 bool settled = false) {
-    result = probe(words, trace, false, steps, settled);
+                 bool settled = false, bool gpio = false) {
+    result = probe(words, trace, false, steps, settled, gpio);
     Trace other;
-    const auto fast = probe(words, other, true, steps, settled);
+    const auto fast = probe(words, other, true, steps, settled, gpio);
     assert(result.stop == fast.stop && result.trace.step == fast.trace.step && result.cpsr == fast.cpsr);
     assert(result.spsr == fast.spsr && result.irqEntries == fast.irqEntries && result.fiqEntries == fast.fiqEntries);
     assert(!std::memcmp(result.registers, fast.registers, sizeof(result.registers)));
@@ -379,6 +381,45 @@ void timerDelivery() {
         assert(cleared);
     }
     std::puts("PASS: elapsed and MMIO-pending Timer 2 IRQ/FIQ, vector traces and read-before-W0C acknowledgement");
+}
+void gpioDelivery() {
+    constexpr uint32_t pins = 0x0021c000, bit = 1u << 13;
+    for (bool fiq : {false, true}) {
+        auto words = setup();
+        load(words, 0, pins); store(words, 0, 0x28, 3u << 26);
+        load(words, 0, 0x00223000);
+        if (fiq) store(words, 0, 0x1c, 1u << 11);
+        store(words, 0, 8, 11);
+        words.push_back(0xe3a07000); words.push_back(0xe321f013);
+        load(words, 0, pins);
+        const auto triggerStepPc = uint32_t(words.size() * 4 + 12);
+        store(words, 0, 0x30, bit);
+        words.push_back(0xe1a00000); words.push_back(0xe7f000f0);
+        words.resize(0x400 / 4, 0xe1a00000);
+        load(words, 9, pins);
+        words.push_back(0xe599a034); // Read the latched GPIO status.
+        words.push_back(0xe3a0b000); words.push_back(0xe589b030); // Mask before W1C of a held level.
+        words.push_back(0xe589a034); words.push_back(0xe599b034);
+        words.push_back(0xe2877001); words.push_back(0xe25ef004);
+        Trace trace; Imx1ProbeResult result{};
+        probeParity(words, result, trace, 500, false, true);
+        assert(result.stop == Imx1ProbeStop::unsupportedInstruction);
+        assert(result.irqEntries == !fiq && result.fiqEntries == fiq && result.registers[7] == 1);
+        assert(trace.interrupts.size() == 1 && trace.interrupts[0].interruptedPc == triggerStepPc + 4);
+        bool pendingRead = false, masked = false, acknowledged = false, clearRead = false;
+        for (const auto& access : trace.bus) {
+            if (access.address == pins + 0x34 && !access.write) {
+                if (!pendingRead) { assert(access.value == bit); pendingRead = true; }
+                else { assert(acknowledged && access.value == 0); clearRead = true; }
+            }
+            if (access.address == pins + 0x30 && access.write && access.value == 0) masked = true;
+            if (access.address == pins + 0x34 && access.write) {
+                assert(masked && pendingRead && access.value == bit); acknowledged = true;
+            }
+        }
+        assert(clearRead);
+    }
+    std::puts("PASS: generated GPIO unmask, next-instruction IRQ/FIQ entry, ISR read and mask/W1C acknowledgement");
 }
 void thumbPrefix() {
     for (bool fiq : {false, true}) for (bool changedReturn : {false, true})
@@ -469,6 +510,7 @@ int main() {
     controllerGates();
     continuation();
     timerDelivery();
+    gpioDelivery();
     thumbPrefix();
     returnGuards();
     stalledDelivery();

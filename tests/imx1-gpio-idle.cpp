@@ -33,11 +33,10 @@ void levels() {
             access(gpio, base + 0x28 + (pin / 16) * 4, true, mode << (2 * (pin % 16)));
             const bool bonded = port == 0 || (port == 1 && pin >= 8) ||
                 (port == 2 && pin >= 3 && pin != 18) || (port == 3 && pin >= 6);
-            const bool idle = bonded && (((mode == 0 || mode == 2) && !high) ||
-                                         ((mode == 1 || mode == 3) && high));
-            access(gpio, base + 0x30, true, mask, idle ? Access::ok : Access::sideEffect);
-            assert(access(gpio, base + 0x30, false) == (idle ? mask : 0));
-            assert(gpio.interruptOutput(port) == Imx1GpioLine::clear);
+            const bool active = mode >= 2 && high == (mode == 2);
+            access(gpio, base + 0x30, true, mask, bonded ? Access::ok : Access::sideEffect);
+            assert(access(gpio, base + 0x30, false) == (bonded ? mask : 0));
+            assert(gpio.interruptOutput(port) == (bonded && active ? Imx1GpioLine::asserted : Imx1GpioLine::clear));
         }
 }
 void controlsAndHistory() {
@@ -50,7 +49,7 @@ void controlsAndHistory() {
     access(gpio, b + 0x30, true, bit);
     for (uint32_t clear : {0u, bit, ~bit, 0xffffffffu}) {
         access(gpio, b + 0x34, true, clear);
-        access(gpio, b + 0x34, false, 0xdeadbeef, Access::externalInput);
+        assert(access(gpio, b + 0x34, false) == 0);
         assert(access(gpio, b + 0x30, false) == bit);
         assert(gpio.interruptOutput(1) == Imx1GpioLine::clear);
     }
@@ -64,20 +63,24 @@ void controlsAndHistory() {
     assert(!gpio.setInput(1, 0x08004000));
     reject(gpio, b, bit);                           // Output direction needs pin physics.
     reject(gpio, b + 0x20, 0x3fff80ff);             // B14 peripheral mux.
-    for (unsigned mode : {0u, 1u, 3u})
-        reject(gpio, b + 0x28, mode << 28);         // Enabled detector reconfiguration or active-low.
-    reject(gpio, b + 0x30, bit | (1u << 27));        // Unknown extra enabled request.
+    for (unsigned mode : {0u, 1u, 2u}) {
+        access(gpio, b + 0x28, true, mode << 28);
+        assert(gpio.interruptOutput(1) == Imx1GpioLine::clear);
+    }
+    reject(gpio, b + 0x30, bit | 1u);        // Unbonded extra request.
     access(gpio, b + 0x30, true, 0);
     access(gpio, b + 0x28, true, 0x30000000);
     access(gpio, b + 0x34, true, bit);
-    access(gpio, b + 0x30, true, bit, Access::sideEffect); // Clearing cannot make an active level idle.
+    access(gpio, b + 0x30, true, bit);
+    assert(gpio.interruptOutput(1) == Imx1GpioLine::asserted);
 
     Imx1Gpio late;
     access(late, b + 0x24, false, 0xfeedface, Access::externalInput);
     assert(!late.setInput(1, 0));                    // A new level supplies no earlier history.
     access(late, b + 0x28, true, 0x20000000);
     access(late, b + 0x34, true, 0xffffffff);
-    access(late, b + 0x30, true, bit, Access::sideEffect);
+    access(late, b + 0x30, true, bit);
+    assert(late.interruptOutput(1) == Imx1GpioLine::unknown);
     access(late, b + 0x34, false, 0xfeedface, Access::externalInput);
     assert(!late.setInput(4, 0));
 
@@ -113,7 +116,7 @@ void interruptController() {
         assert(op(0x00223000 + pending, false, 0) == 0);
     assert(op(0x00223044, false, 0) == 0xffffffff);
     op(0x0022304c, false, 0xdeadbeef, Status::externalInput); // Other sources still unknown.
-    op(b + 0x34, false, 0xdeadbeef, Status::externalInput);
+    assert(op(b + 0x34, false, 0) == 0);
     op(0x00223054, true, 1u << 12, Status::sideEffect);
     assert(op(0x00223054, false, 0) == 0);
     op(0x00223004, true, 0);                        // Priority zero masked, then forced.

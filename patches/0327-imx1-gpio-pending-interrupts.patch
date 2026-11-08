@@ -1,0 +1,319 @@
+diff --git a/src/uarm/uarm/imx1_gpio.h b/src/uarm/uarm/imx1_gpio.h
+--- a/src/uarm/uarm/imx1_gpio.h
++++ b/src/uarm/uarm/imx1_gpio.h
+@@ -13,6 +13,8 @@
+     Imx1GpioAccess access(uint32_t address, uint32_t size, bool write, uint32_t& value);
+     // Supply an immutable whole-port level before the port is accessed.
+     bool setInput(unsigned port, uint32_t sample);
++    // Runtime board samples are separate from immutable diagnostic inputs.
++    Imx1GpioAccess updateInput(unsigned port, uint32_t sample, uint32_t known);
+     Imx1GpioLine interruptOutput(unsigned port) const;
+     bool i2cPinsSelected() const {
+         constexpr uint32_t pins = (1u << 15) | (1u << 16);
+@@ -37,11 +39,14 @@
+         uint32_t sample = 0;
+         bool sampleKnown = false;
+         bool accessed = false;
++        bool boardInput = false;
++        uint32_t inputKnown = 0;
++        uint32_t statusKnown = 0xffffffff;
+         uint32_t pad = 0;
+         uint32_t padKnown = 0;
+     } ports[4];
+     static void resolvePad(Port& port);
+-    static uint32_t inactivePins(const Port& port, unsigned index);
++    static Imx1GpioAccess updateInterrupts(Port& next, const Port& old, unsigned index, bool sampleEvent);
+ };
+ 
+ #endif
+diff --git a/src/uarm/uarm/imx1_gpio.cpp b/src/uarm/uarm/imx1_gpio.cpp
+--- a/src/uarm/uarm/imx1_gpio.cpp
++++ b/src/uarm/uarm/imx1_gpio.cpp
+@@ -13,10 +13,12 @@
+ bool Imx1Gpio::setInput(unsigned port, uint32_t sample) {
+     if (port >= 4) return false;
+     auto& p = ports[port];
++    if (p.boardInput) return false;
+     if (p.sampleKnown) return p.sample == sample;
+     if (p.accessed) return false;
+     p.sample = sample;
+     p.sampleKnown = true;
++    p.inputKnown = 0xffffffff;
+     resolvePad(p);
+     return true;
+ }
+@@ -24,7 +26,7 @@
+ void Imx1Gpio::resolvePad(Port& port) {
+     const auto& r = port.registers;
+     port.pad = port.sample;
+-    port.padKnown = port.sampleKnown ? 0xffffffff : 0;
++    port.padKnown = port.inputKnown;
+     const uint32_t outputs = r[8] & r[0];
+     port.padKnown &= ~outputs;
+     for (unsigned pin = 0; pin < 32; ++pin) {
+@@ -37,28 +39,66 @@
+     }
+ }
+ 
+-uint32_t Imx1Gpio::inactivePins(const Port& port, unsigned index) {
++Imx1GpioAccess Imx1Gpio::updateInput(unsigned index, uint32_t sample, uint32_t known) {
++    if (index >= 4) return Imx1GpioAccess::unmapped;
++    auto& port = ports[index];
++    if (port.sampleKnown) return Imx1GpioAccess::sideEffect;
++    auto next = port;
++    next.boardInput = true;
++    next.sample = sample;
++    next.inputKnown = known;
++    resolvePad(next);
++    const auto status = updateInterrupts(next, port, index, true);
++    if (status == Imx1GpioAccess::ok) port = next;
++    return status;
++}
++
++Imx1GpioAccess Imx1Gpio::updateInterrupts(Port& next, const Port& old, unsigned index, bool sampleEvent) {
+     constexpr uint32_t usable[] = {0xffffffff, 0xffffff00, 0xfffbfff8, 0xffffffc0};
+-    const auto& r = port.registers;
+-    uint32_t inactive = 0;
++    const auto& r = next.registers;
++    const uint32_t inputs = usable[index] & r[8] & ~r[0];
++    const uint32_t oldInputs = usable[index] & old.registers[8] & ~old.registers[0];
++    const uint32_t enabled = r[12];
++    // Interrupts on peripheral muxes and outputs remain outside this input model.
++    if (enabled & ~inputs) return Imx1GpioAccess::sideEffect;
+     for (unsigned pin = 0; pin < 32; ++pin) {
+-        const unsigned mode = (r[10 + pin / 16] >> (2 * (pin % 16))) & 3;
+-        const bool high = (port.pad & (1u << pin)) != 0;
+-        // Edges are admitted only at the nonfiring polarity, with history below.
+-        if (((mode == 0 || mode == 2) && !high) ||
+-            ((mode == 1 || mode == 3) && high)) inactive |= 1u << pin;
++        const uint32_t bit = 1u << pin;
++        // Sections 32.5.8/.9: only unmasked events can set status.
++        if (!(enabled & bit)) continue;
++        const unsigned shift = 2 * (pin % 16), icr = 10 + pin / 16;
++        const unsigned mode = (r[icr] >> shift) & 3;
++        bool event = false, unknown = false;
++        if (mode >= 2) {
++            // Levels are sampled on enable and after W1C as well as pad changes.
++            unknown = !(next.padKnown & bit);
++            event = !unknown && bool(next.pad & bit) == (mode == 2);
++        } else if ((old.registers[12] & oldInputs & bit) &&
++                   mode == ((old.registers[icr] >> shift) & 3)) {
++            // Enabling/reconfiguring an edge detector seeds its current baseline.
++            if ((old.padKnown & next.padKnown & bit) != 0)
++                event = ((old.pad ^ next.pad) & bit) && bool(next.pad & bit) == (mode == 0);
++            else if (!(next.padKnown & bit) &&
++                     (sampleEvent || ((old.padKnown ^ next.padKnown) & bit))) unknown = true;
++        } else if (!(next.padKnown & bit)) {
++            unknown = true;
++        }
++        if (event) {
++            next.registers[13] |= bit;
++            next.statusKnown |= bit;
++        } else if (unknown && !((next.registers[13] & next.statusKnown) & bit)) {
++            next.registers[13] &= ~bit;
++            next.statusKnown &= ~bit;
++        }
+     }
+-    return inactive & port.padKnown & usable[index] & r[8] & ~r[0];
++    return Imx1GpioAccess::ok;
+ }
+ 
+ Imx1GpioLine Imx1Gpio::interruptOutput(unsigned port) const {
+     if (port >= 4) return Imx1GpioLine::unknown;
+     const auto& p = ports[port];
+-    if (!p.registers[12]) return Imx1GpioLine::clear;
+-    // Sections 32.2.2, 32.5.8/.9: masked events cannot set ISR. Reset clears it,
+-    // and writes below preserve that history by rejecting all enabled events.
+-    return (p.registers[12] & ~inactivePins(p, port)) == 0
+-        ? Imx1GpioLine::clear : Imx1GpioLine::unknown;
++    const uint32_t enabled = p.registers[12];
++    if (enabled & p.registers[13] & p.statusKnown) return Imx1GpioLine::asserted;
++    return enabled & ~p.statusKnown ? Imx1GpioLine::unknown : Imx1GpioLine::clear;
+ }
+ 
+ const char* Imx1Gpio::registerName(uint32_t address) {
+@@ -95,8 +135,7 @@
+         return Imx1GpioAccess::ok;
+     }
+     if (!write) {
+-        // Full status readback remains outside the qualified per-pin interrupt subset.
+-        if (index == 13) return Imx1GpioAccess::externalInput;
++        if (index == 13 && port.statusKnown != 0xffffffff) return Imx1GpioAccess::externalInput;
+         value = reg;
+         return Imx1GpioAccess::ok;
+     }
+@@ -106,27 +145,13 @@
+         if (value) return Imx1GpioAccess::sideEffect;
+     }
+     auto next = port;
+-    if (index == 13) next.registers[index] &= ~value;
+-    else next.registers[index] = value;
++    if (index == 13) {
++        next.registers[index] &= ~value;
++        next.statusKnown |= value;
++    } else next.registers[index] = value;
+     resolvePad(next);
+-    // Sections 32.5.8/.9: masked transitions cannot latch ISR. All enabled
+-    // events remain guarded, preserving reset/W1C clear status without timing.
+-    const uint32_t enabled = next.registers[12];
+-    if (enabled & ~inactivePins(next, portIndex)) return Imx1GpioAccess::sideEffect;
+-    for (unsigned pin = 0; pin < 32; ++pin) {
+-        const uint32_t bit = 1u << pin;
+-        if (!(enabled & bit)) continue;
+-        const unsigned shift = 2 * (pin % 16), icr = 10 + pin / 16;
+-        const unsigned mode = (next.registers[icr] >> shift) & 3;
+-        const unsigned oldMode = (port.registers[icr] >> shift) & 3;
+-        if (mode < 2) {
+-            // Establish a known unchanged baseline before unmasking an edge.
+-            if (!(port.padKnown & bit) || ((port.pad ^ next.pad) & bit))
+-                return Imx1GpioAccess::sideEffect;
+-        }
+-        if ((port.registers[12] & bit) && mode != oldMode && (mode < 2 || oldMode < 2))
+-            return Imx1GpioAccess::sideEffect;
+-    }
++    const auto status = updateInterrupts(next, port, portIndex, false);
++    if (status != Imx1GpioAccess::ok) return status;
+     port = next;
+     return Imx1GpioAccess::ok;
+ }
+diff --git a/src/uarm/uarm/imx1_bootstrap.h b/src/uarm/uarm/imx1_bootstrap.h
+--- a/src/uarm/uarm/imx1_bootstrap.h
++++ b/src/uarm/uarm/imx1_bootstrap.h
+@@ -43,6 +43,7 @@
+     void connectCpuInterrupts() { cpuInterruptsConnected = true; }
+     void setSystemPllScenario(bool enabled) { cgm.setSystemPllScenario(enabled); }
+     bool setGpioInput(unsigned port, uint32_t value) { return gpio.setInput(port, value); }
++    Imx1BootstrapAccess updateGpioInput(unsigned port, uint32_t value, uint32_t known);
+     bool setGpioDInput(uint32_t value) { return setGpioInput(3, value); }
+     void setRamMiB(uint32_t size);
+     // FastBus CPU cycles are BCLK cycles; both BCLK and PERCLK1 derive from System PLL.
+@@ -95,7 +96,7 @@
+         pwm.advanceReference(numerator, denominator);
+     }
+     void setInterruptInputs(Imx1Aitc& controller, const Imx1I2c& state, const Imx1Rtc& clock,
+-                            const Imx1Timer& first, const Imx1Timer& second, const Imx1Asp& analog, const Imx1Pwm& wave) const;
++                            const Imx1Timer& first, const Imx1Timer& second, const Imx1Asp& analog, const Imx1Pwm& wave, const Imx1Gpio& pins) const;
+     Imx1BootstrapAccess interruptGate(const Imx1I2c& state, const Imx1Rtc& clock,
+                             const Imx1Timer& first, const Imx1Timer& second) const;
+     Imx1BootstrapAccess interruptGate(const Imx1Aitc& controller) const;
+diff --git a/src/uarm/uarm/imx1_bootstrap.cpp b/src/uarm/uarm/imx1_bootstrap.cpp
+--- a/src/uarm/uarm/imx1_bootstrap.cpp
++++ b/src/uarm/uarm/imx1_bootstrap.cpp
+@@ -71,7 +71,7 @@
+ }
+ 
+ void Imx1Bootstrap::setInterruptInputs(Imx1Aitc& controller, const Imx1I2c& state, const Imx1Rtc& clock,
+-                                        const Imx1Timer& first, const Imx1Timer& second, const Imx1Asp& analog, const Imx1Pwm& wave) const {
++                                        const Imx1Timer& first, const Imx1Timer& second, const Imx1Asp& analog, const Imx1Pwm& wave, const Imx1Gpio& pins) const {
+     constexpr unsigned sources[] = {11, 12, 13, 62};
+     uint64_t known = (uint64_t(1) << 39) | (analog.inactiveInterrupts() | analog.assertedInterrupts()) | Imx1Pwm::interruptSource | Imx1Rtc::interruptSources | Imx1Watchdog::interruptSource |
+                      (uint64_t(1) << 59) | (uint64_t(1) << 58);
+@@ -79,7 +79,7 @@
+                         (first.interruptOutput() ? uint64_t(1) << 59 : 0) |
+                         (second.interruptOutput() ? uint64_t(1) << 58 : 0);
+     for (unsigned port = 0; port < 4; ++port) {
+-        const auto output = gpio.interruptOutput(port);
++        const auto output = pins.interruptOutput(port);
+         const auto bit = uint64_t(1) << sources[port];
+         if (output != Imx1GpioLine::unknown) known |= bit;
+         if (output == Imx1GpioLine::asserted) asserted |= bit;
+@@ -89,7 +89,7 @@
+ Imx1BootstrapAccess Imx1Bootstrap::interruptGate(const Imx1I2c& state, const Imx1Rtc& clock,
+                                         const Imx1Timer& first, const Imx1Timer& second) const {
+     auto next = aitc;
+-    setInterruptInputs(next, state, clock, first, second, asp, pwm);
++    setInterruptInputs(next, state, clock, first, second, asp, pwm, gpio);
+     return interruptGate(next);
+ }
+ Imx1BootstrapAccess Imx1Bootstrap::interruptGate(const Imx1Aitc& controller) const {
+@@ -99,9 +99,21 @@
+     if (!controller.interruptInputsKnown()) return Imx1BootstrapAccess::externalInput;
+     return Imx1BootstrapAccess::ok;
+ }
++Imx1BootstrapAccess Imx1Bootstrap::updateGpioInput(unsigned port, uint32_t value, uint32_t known) {
++    auto next = gpio;
++    const auto status = next.updateInput(port, value, known);
++    if (status == Imx1GpioAccess::unmapped) return Imx1BootstrapAccess::unmapped;
++    if (status != Imx1GpioAccess::ok) return Imx1BootstrapAccess::sideEffect;
++    auto controller = aitc;
++    setInterruptInputs(controller, i2c, rtc, timer1, timer2, asp, pwm, next);
++    const auto gate = interruptGate(controller);
++    if (gate != Imx1BootstrapAccess::ok) return gate;
++    gpio = next;
++    return Imx1BootstrapAccess::ok;
++}
+ Imx1Bootstrap::InterruptLines Imx1Bootstrap::interruptLines() const {
+     auto current = aitc;
+-    setInterruptInputs(current, i2c, rtc, timer1, timer2, asp, pwm);
++    setInterruptInputs(current, i2c, rtc, timer1, timer2, asp, pwm, gpio);
+     return {current.irq(), current.fiq()};
+ }
+ 
+@@ -114,7 +126,7 @@
+ 
+ Imx1AitcPending Imx1Bootstrap::interruptPending() const {
+     auto current = aitc;
+-    setInterruptInputs(current, i2c, rtc, timer1, timer2, asp, pwm);
++    setInterruptInputs(current, i2c, rtc, timer1, timer2, asp, pwm, gpio);
+     return current.pendingState();
+ }
+ 
+@@ -202,7 +214,7 @@
+         return sdramAccess((address - 0x08000000) >> 26, address & 0x03ffffff, size, write, value);
+     if (Imx1Aitc::registerName(address)) {
+         auto next = aitc;
+-        setInterruptInputs(next, i2c, rtc, timer1, timer2, asp, pwm);
++        setInterruptInputs(next, i2c, rtc, timer1, timer2, asp, pwm, gpio);
+         const auto status = next.access(address, size, write, value);
+         switch (status) {
+             case Imx1AitcAccess::unmapped: return Imx1BootstrapAccess::unmapped;
+@@ -331,7 +343,7 @@
+         const auto result = next.access(address, size, write, preview);
+         if (result == Imx1PwmAccess::ok) {
+             auto controller = aitc;
+-            setInterruptInputs(controller, i2c, rtc, timer1, timer2, asp, next);
++            setInterruptInputs(controller, i2c, rtc, timer1, timer2, asp, next, gpio);
+             const auto gate = interruptGate(controller);
+             if (gate != Imx1BootstrapAccess::ok) return gate;
+             pwm = next;
+@@ -351,7 +363,7 @@
+         const auto status = next.access(address, size, write, preview);
+         if (status == Imx1AspAccess::ok) {
+             auto controller = aitc;
+-            setInterruptInputs(controller, i2c, rtc, timer1, timer2, next, pwm);
++            setInterruptInputs(controller, i2c, rtc, timer1, timer2, next, pwm, gpio);
+             const auto gate = interruptGate(controller);
+             if (gate != Imx1BootstrapAccess::ok) return gate;
+             asp = next;
+@@ -377,16 +389,21 @@
+         }
+     }
+     if (Imx1Gpio::registerName(address)) {
+-        if (write && (i2c.active() || timer2.outputIsolationRequired())) {
+-            auto next = gpio;
+-            uint32_t preview = value;
+-            if (next.access(address, size, write, preview) == Imx1GpioAccess::ok) {
+-                if (i2c.active() && !next.i2cPinsSelected()) return Imx1BootstrapAccess::sideEffect;
+-                if (timer2.outputIsolationRequired() && !next.timer2OutputIsolated())
+-                    return Imx1BootstrapAccess::sideEffect;
+-            }
+-        }
+-        switch (gpio.access(address, size, write, value)) {
++        auto next = gpio;
++        uint32_t preview = value;
++        const auto status = next.access(address, size, write, preview);
++        if (status == Imx1GpioAccess::ok) {
++            if (i2c.active() && !next.i2cPinsSelected()) return Imx1BootstrapAccess::sideEffect;
++            if (timer2.outputIsolationRequired() && !next.timer2OutputIsolated())
++                return Imx1BootstrapAccess::sideEffect;
++            auto controller = aitc;
++            setInterruptInputs(controller, i2c, rtc, timer1, timer2, asp, pwm, next);
++            const auto gate = interruptGate(controller);
++            if (gate != Imx1BootstrapAccess::ok) return gate;
++            gpio = next;
++            value = preview;
++        }
++        switch (status) {
+             case Imx1GpioAccess::ok: return Imx1BootstrapAccess::ok;
+             case Imx1GpioAccess::unmapped: return Imx1BootstrapAccess::unmapped;
+             case Imx1GpioAccess::width: return Imx1BootstrapAccess::width;

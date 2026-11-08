@@ -41,15 +41,16 @@ void exactA14History() {
     write(gpio, 0x30, bit);
     assert(gpio.interruptOutput(0) == Imx1GpioLine::clear);
     assert(op(gpio, 0x30, false) == bit);
-    op(gpio, 0x34, false, 0xfeedface, Access::externalInput);
+    assert(op(gpio, 0x34, false) == 0);
     assert(gpio.setInput(0, 0x80));
     assert(!gpio.setInput(0, 0x4080));
-    // Unsupported enabled mux/direction/detector changes preserve both registers and baseline.
+    // Unsupported enabled mux/direction changes preserve both registers and baseline.
     reject(gpio, 0, 0x6818);
     reject(gpio, 0x20, 0x001c3ffa);
-    reject(gpio, 0x28, 0x103fc000);
-    reject(gpio, 0x28, 0x203fc000);
-    reject(gpio, 0x30, bit | (1u << 15));
+    write(gpio, 0x28, 0x103fc000); // Reconfigured edges seed a baseline.
+    write(gpio, 0x28, 0x203fc000); // Positive level stays inactive.
+    write(gpio, 0x28, 0x003fc000);
+    reject(gpio, 0x30, bit | (1u << 31));
     write(gpio, 0x1c, 0);                                 // DR/OCR do not drive A14 input.
     write(gpio, 4, 0);
     assert(gpio.interruptOutput(0) == Imx1GpioLine::clear);
@@ -76,16 +77,13 @@ void maskedTransitions() {
         // Unmasking while still an output remains guarded even with known drive.
         op(gpio, 0x30, true, bit, Access::sideEffect);
         write(gpio, 0, 0);
-        const bool idle = mode == unsigned(high);
-        op(gpio, 0x30, true, bit, idle ? Access::ok : Access::sideEffect);
-        assert(op(gpio, 0x30, false) == (idle ? bit : 0));
-        if (idle) {
-            reject(gpio, 0, bit);
-            reject(gpio, 0x20, 0);
-            reject(gpio, 0x28, (mode ^ 1) << 28);
-            write(gpio, 0x34, bit);
-            assert(gpio.interruptOutput(0) == Imx1GpioLine::clear);
-        }
+        write(gpio, 0x30, bit);
+        assert(op(gpio, 0x30, false) == bit);
+        reject(gpio, 0, bit);
+        reject(gpio, 0x20, 0);
+        write(gpio, 0x28, (mode ^ 1) << 28);
+        write(gpio, 0x34, bit);
+        assert(gpio.interruptOutput(0) == Imx1GpioLine::clear);
     }
     // Every unsupported output source stays unknown, without falling back to stimulus.
     for (unsigned source : {0u, 1u, 2u}) {
@@ -125,7 +123,8 @@ void maskedTransitions() {
     write(unknown, 0, bit);
     write(unknown, 0, 0);                               // Output history cannot supply external input.
     write(unknown, 0x34, bit);
-    op(unknown, 0x30, true, bit, Access::sideEffect);
+    write(unknown, 0x30, bit);
+    assert(unknown.interruptOutput(0) == Imx1GpioLine::unknown);
     assert(!unknown.setInput(0, 0));
     op(unknown, 0x24, false, 0xdeadbeef, Access::externalInput);
 }
@@ -158,7 +157,7 @@ void source11() {
     bus(a, true, bit, Imx1BootstrapAccess::sideEffect);
     assert(bus(a, false) == 0);
     assert(bus(a + 0x30, false) == bit);
-    bus(a + 0x34, false, 0xdeadbeef, Imx1BootstrapAccess::externalInput);
+    assert(bus(a + 0x34, false) == 0);
 }
 }
 int main() {

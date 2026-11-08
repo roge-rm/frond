@@ -152,7 +152,9 @@ void maskedGpioRequests() {
         assert(access(force, false, 0, Imx1BootstrapAccess::ok) == 0);
         for (auto mask : {1u, 0x80000000u, 0xffffffffu}) {
             value = mask;
-            assert(b.access(gpioBase + 0x30, 4, true, value) == Imx1BootstrapAccess::sideEffect);
+            const auto expected = mask == 0x80000000 && (port == 1 || port == 3)
+                ? Imx1BootstrapAccess::externalInput : Imx1BootstrapAccess::sideEffect;
+            assert(b.access(gpioBase + 0x30, 4, true, value) == expected);
             assert(b.access(gpioBase + 0x30, 4, false, value) == Imx1BootstrapAccess::ok && value == 0);
         }
         value = 0xffffffff;

@@ -77,7 +77,7 @@ def main():
             assert f'Hypothetical static from-reset full-port GPIO-B input={value:08x}' in known
             assert 'jit-blocks=0 jit-instructions=0' in known
         # Configure B14, clear only its ISR bit, enable it, read IMR then try ISR.
-        # The admitted path must still reject a full ISR read with other pins unqualified.
+        # Masked pins retain known reset status, while unknown enabled levels guard ISR.
         def interrupt_rom(mode):
             words = [0, 0, 0xe5801028, 0, 0xe5801034, 0xe5801030,
                      0xe5902030, 0xe5903034, 0xeafffffe]
@@ -91,7 +91,7 @@ def main():
             image.write(rom)
             image.flush()
 
-        for mode, sample, idle in ((2, '0x08000000', True), (2, None, False),
+        for mode, sample, _ in ((2, '0x08000000', True), (2, None, False),
                                    (2, '0x08004000', False), (3, '0x08004000', True),
                                    (3, '0x08000000', False), (0, '0x08000000', True),
                                    (0, '0x08004000', False), (1, '0x08004000', True),
@@ -101,14 +101,16 @@ def main():
             if sample is not None:
                 options.append('--gpio-b-input=' + sample)
             result = run(*options)
-            assert 'stop=unsupported-peripheral' in result
-            if idle:
-                assert 'address=0021c130 size=4 value=00004000 register=GPIO.IMR_B status=ok' in result
-                assert 'address=0021c134 size=4 value=00000000 register=GPIO.ISR_B status=external-input-unavailable' in result
-                assert 'r2=00004000' in result
+            assert 'address=0021c130 size=4 value=00004000 register=GPIO.IMR_B status=ok' in result
+            if sample is None:
+                assert 'stop=unsupported-peripheral' in result
+                assert 'register=GPIO.ISR_B status=external-input-unavailable' in result
             else:
-                assert 'address=0021c130 size=4 value=00004000 register=GPIO.IMR_B status=unsupported-side-effect' in result
-                assert 'r2=00000000' in result
+                active = mode >= 2 and bool(int(sample, 0) & 0x4000) == (mode == 2)
+                expected = '00004000' if active else '00000000'
+                assert 'stop=instruction-budget' in result
+                assert 'register=GPIO.ISR_B status=ok' in result
+                assert f'r2=00004000 r3={expected}' in result
         # Restore the sample-reader image used by the remaining parser checks.
         words = (0xe59f0018, 0xe5901000, 0xe59f0014, 0xe5902000,
                  0xe59f0010, 0xe5903000, 0xeafffffe, 0xe1a00000,
@@ -135,7 +137,7 @@ def main():
             assert 'External-input scenarios require --bootstrap-peripherals' in missing_bootstrap
         for option in ('--gpio-c-input=0', '--gpio-a-input', '--gpio-b-input', '--gpio-A-input=0', '--gpio-B-input=0'):
             assert 'Unknown diagnostic option:' in run('--bootstrap-peripherals', option, code=1)
-    print('PASS: explicit GPIO-A/B/D whole-port samples, idle interrupt/ISR guards, parsing and Exact propagation')
+    print('PASS: explicit GPIO-A/B/D whole-port samples, pending ISR readback and unknown guards, parsing and Exact propagation')
 
 
 if __name__ == '__main__':
