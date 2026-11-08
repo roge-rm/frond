@@ -12,13 +12,14 @@ import java.io.File
 import java.io.IOException
 
 // The file view for a card opened from Cards: a free card, or one in a machine that isn't running.
-// The card is exported to a private raw image, edited there, and written back when the view closes.
-// The machine's run lock (if it has one) is held until then.
+// The card file is edited in place (CardFile), each change committed as it's made. The card file's
+// lock, and the machine's run lock when a machine holds it, are kept until the view closes. A
+// machine's slot gets swap before the first write, so it loads the card as changed.
 class CardImageFiles(private val activity: HomeActivity, private val home: HomeModel, private val sessions: File) : FilesModel {
     private val app = activity.applicationContext
-    private val image = File(app.filesDir, "card-files/work.img")
     private var source: Cards.Source? = null
     private var card: Cards.Card? = null
+    private var cardFile: CardFile? = null
 
     override var title by mutableStateOf("")
         private set
@@ -39,7 +40,6 @@ class CardImageFiles(private val activity: HomeActivity, private val home: HomeM
     override var shortcuts by mutableStateOf(emptyList<String>())
         private set
     override val leaveLabel get() = "Done"
-    override var askingLeave by mutableStateOf(false)
     override val prompt = ClashPrompt()
     var note by mutableStateOf<String?>(null)
 
@@ -47,12 +47,10 @@ class CardImageFiles(private val activity: HomeActivity, private val home: HomeM
     private fun percent(progress: (Long, Long) -> Unit): (Float) -> Unit = { progress((it.coerceIn(0f, 1f) * 1000).toLong(), 1000) }
     private fun resolver(several: Boolean) = CardFiles.Resolver { name -> prompt.ask(name, several) { activity.runOnUiThread(it) } }
 
-    // Exports the card and lists its top folder.
+    // Opens the card file and lists its top folder.
     fun start(row: CardChoices.Row) {
         if (path != null) return
-        home.runJob("Opening the card", "Couldn't open the card", null, cancellable = true, reload = false) { cancelled, progress ->
-            image.parentFile?.mkdirs()
-            image.delete()
+        home.runJob("Opening the card", "Couldn't open the card", null, cancellable = false, reload = false) { _, _ ->
             val (found, error) = Cards.cardSource(sessions, row.card.id)
             if (found == null) return@runJob error
             val kept = found.card
@@ -62,19 +60,28 @@ class CardImageFiles(private val activity: HomeActivity, private val home: HomeM
                 found.close()
                 return@runJob "Open ${found.holder?.let { Cards.machineName(it) } ?: "the machine"} once to finish its last save."
             }
-            val need = 2 * kept.bytes + Cards.SPARE_BYTES
-            val room = Cards.freeSpace(image.parentFile!!)
-            if (room in 0 until need) { found.close(); return@runJob Cards.spaceMessage(2 * kept.bytes) }
-            val r = Cards.runTool(arrayOf("export", found.path.path, image.path), cancelled, progress)
-            if (!r.ok) { found.close(); image.delete(); return@runJob Cards.toolError(r) }
+            val opened = try {
+                CardFile.open(found.path, !kept.writeProtected)
+            } catch (e: IOException) {
+                found.close()
+                return@runJob e.message ?: "Couldn't read the card."
+            }
+            // A machine loads the card as changed from the first write on, even after a crash.
+            found.holder?.let { dir ->
+                opened.beforeFirstWrite = {
+                    val slot = Cards.readSlot(dir)
+                    if (!slot.swap && !Cards.writeSlot(dir, slot.copy(swap = true))) throw IOException("Couldn't write the card.")
+                }
+            }
             val shown = try {
-                FatImage.open(image, false).use { listing(it, "/") to SHORTCUTS.filter { s -> it.find(s)?.directory == true } }
+                FatImage.over(opened).use { listing(it, "/") to SHORTCUTS.filter { s -> it.find(s)?.directory == true } }
             } catch (e: Exception) {
-                found.close(); image.delete()
+                opened.close(); found.close()
                 return@runJob e.message ?: "Couldn't read the card."
             }
             source = found
             card = kept
+            cardFile = opened
             ui {
                 title = kept.name
                 canWrite = !kept.writeProtected
@@ -95,8 +102,14 @@ class CardImageFiles(private val activity: HomeActivity, private val home: HomeM
         total = list.total
     }
 
+    // The open card's file system, one user at a time.
+    private fun <T> fat(block: (FatImage) -> T): T {
+        val c = cardFile ?: throw IOException("The card is closed.")
+        return synchronized(c) { FatImage.over(c).use(block) }
+    }
+
     private fun relist(at: String) {
-        val list = FatImage.open(image, false).use { listing(it, at) }
+        val list = fat { listing(it, at) }
         ui { show(at, list) }
     }
 
@@ -104,7 +117,7 @@ class CardImageFiles(private val activity: HomeActivity, private val home: HomeM
         if (home.copying) return
         activity.lifecycleScope.launch {
             try {
-                val list = withContext(Dispatchers.IO) { FatImage.open(image, false).use { listing(it, at) } }
+                val list = withContext(Dispatchers.IO) { fat { listing(it, at) } }
                 show(at, list)
             } catch (e: Exception) {
                 home.alert = "Couldn't open the folder" to (e.message ?: "Couldn't read the card.")
@@ -117,7 +130,7 @@ class CardImageFiles(private val activity: HomeActivity, private val home: HomeM
         if (p != "/") open(p.substringBeforeLast('/').ifEmpty { "/" })
     }
 
-    // Runs a change on the edited image, then lists the folder again. Cancel keeps what was done.
+    // Runs a change on the card, then lists the folder again. Cancel keeps what was done.
     private fun change(label: String, failTitle: String, work: (FatImage, () -> Boolean, (Float) -> Unit, String) -> String?) {
         val at = path ?: return
         home.runJob(label, failTitle, null, cancellable = true, reload = false) { cancelled, progress ->
@@ -125,7 +138,7 @@ class CardImageFiles(private val activity: HomeActivity, private val home: HomeM
             var message: String? = null
             var error: String? = null
             try {
-                FatImage.open(image, true).use { fat ->
+                fat { fat ->
                     try {
                         message = work(fat, cancelled, bar, at)
                     } finally {
@@ -202,7 +215,7 @@ class CardImageFiles(private val activity: HomeActivity, private val home: HomeM
         home.runJob("Copying", "Couldn't export the file", null, cancellable = true, reload = false) { _, _ ->
             try {
                 val out = app.contentResolver.openOutputStream(to, "wt") ?: return@runJob "Couldn't write there."
-                out.use { o -> FatImage.open(image, false).use { it.read(it.find(SdCard.joined(at, entry.name)) ?: throw IOException("Not on the card."), o) } }
+                out.use { o -> fat { it.read(it.find(SdCard.joined(at, entry.name)) ?: throw IOException("Not on the card."), o) } }
                 ui { note = "${entry.name} exported" }
                 null
             } catch (e: IOException) {
@@ -216,7 +229,7 @@ class CardImageFiles(private val activity: HomeActivity, private val home: HomeM
         home.runJob("Copying", "Couldn't copy to the folder", null, cancellable = true, reload = false) { cancelled, progress ->
             val bar = percent(progress)
             try {
-                FatImage.open(image, false).use { fat ->
+                fat { fat ->
                     val paths = entries.map { SdCard.joined(at, it.name) }
                     val all = maxOf(CardFiles.bytesIn(fat, paths), 1L)
                     val n = CardFiles.exportTree(fat, paths, DocumentHost.root(app.contentResolver, tree), cancelled) { bar(it.toFloat() / all) }
@@ -231,56 +244,22 @@ class CardImageFiles(private val activity: HomeActivity, private val home: HomeM
         }
     }
 
-    override fun leaveFiles() {
-        if (changed) save() else close()
-    }
+    // Changes are already on the card, so leaving only closes it.
+    override fun leaveFiles() = close()
 
-    override fun insertEdited() = leaveFiles()
+    override fun insertEdited() = close()
 
-    override fun discard() = close()
-
-    // Drops the working image and the machine's lock, and closes the view.
+    // Closes the card file and lets go of the machine's lock.
     private fun close() {
         val held = source
+        val opened = cardFile
         source = null
         card = null
+        cardFile = null
         ui { path = null; changed = false }
         activity.lifecycleScope.launch(Dispatchers.IO) {
+            try { opened?.let { synchronized(it) { it.close() } } } catch (_: IOException) { }
             held?.close()
-            image.delete()
-            FatImage.journalOf(image).delete()
-        }
-    }
-
-    // Writes the edited image back as the card's file, then closes the view.
-    private fun save() {
-        val held = source ?: return
-        val kept = card ?: return
-        home.runJob("Saving the card", "Couldn't save the card", null, cancellable = true, reload = false) { cancelled, progress ->
-            val file = held.path
-            val temp = File(file.parentFile, file.name + ".files-new")
-            temp.delete()
-            val need = kept.bytes + Cards.SPARE_BYTES
-            val room = Cards.freeSpace(file.parentFile!!)
-            if (room in 0 until need) return@runJob Cards.spaceMessage(kept.bytes)
-            val r = Cards.runTool(arrayOf("import", image.path, Cards.toolKind(kept.kind), temp.path), cancelled, progress)
-            if (!r.ok) { temp.delete(); return@runJob Cards.toolError(r) }
-            val library = Cards.libraryFor(sessions)
-            val error = Cards.LibraryLock(library).use { lock ->
-                when {
-                    !lock.ok -> Cards.BUSY
-                    !file.isFile -> "The card moved to a machine while it was open, so the changes weren't saved."
-                    !temp.renameTo(file) -> "Couldn't write the card."
-                    else -> {
-                        held.holder?.let { dir -> Cards.writeSlot(dir, Cards.readSlot(dir).copy(swap = true)) }
-                        null
-                    }
-                }
-            }
-            temp.delete()
-            // Only a retry that could still work keeps the view open.
-            if (error == null || error != Cards.BUSY) close()
-            error
         }
     }
 

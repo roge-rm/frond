@@ -232,7 +232,8 @@ open class FrondActivity : SDLActivity() {
     // After a save of the machine that succeeded: the slot is what the .frond says again.
     fun savedMachine() {
         if (runLock == null) return
-        machineFolder()?.let { Cards.clearSwap(it) }
+        // Not while the file view has the card out: the slot must load swapped until it's back.
+        machineFolder()?.takeIf { it.canonicalFile != SdCard.editing?.canonicalFile }?.let { Cards.clearSwap(it) }
     }
 
     // The core refuses to start with --fast-audio unless the NOR it runs is the qualified one for its

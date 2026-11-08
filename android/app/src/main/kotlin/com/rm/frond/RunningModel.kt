@@ -75,7 +75,6 @@ class RunningModel(
     override var changed by mutableStateOf(false)
         private set
     // Asking whether to insert the changed card on leaving the file view.
-    override var askingLeave by mutableStateOf(false)
     // Asking for a database name: "launch", "export" or "other" (the sheets' by-name dialog), with the RAM databases found for the list.
     var naming by mutableStateOf<String?>(null)
     var found by mutableStateOf(emptyList<PalmDatabases.Info>())
@@ -863,21 +862,13 @@ class RunningModel(
         }
     }
 
-    // Leaving the file view: with changes, asks whether to insert them first.
-    override fun leaveFiles() {
-        if (changed) askingLeave = true else insertEdited()
-    }
+    // Leaving the file view puts the card back; its changes are already on it.
+    override fun leaveFiles() = insertEdited()
 
     // Closes the file view and puts the card back in the Palm, edited or not. The insert waits for
     // the Palm to notice the card was out, up to a few seconds, so the busy label stays up.
     override fun insertEdited() { job(if (device.memoryStick) "Closing files" else "Inserting", "Couldn't insert the card") { c ->
         c.finishEdit()
-        activity.runOnUiThread { path = null }
-    } }
-
-    // Closes the file view and leaves the card ejected, without the changes.
-    override fun discard() { job("Reading", "Couldn't read the card") { c ->
-        c.cancelEdit()
         activity.runOnUiThread { path = null }
     } }
 

@@ -231,18 +231,6 @@ fun CardFilesScreen(model: FilesModel, snackbar: SnackbarHostState) {
         }
     }
 
-    if (model.askingLeave) {
-        AlertDialog(
-            onDismissRequest = { model.askingLeave = false },
-            title = { Text("Insert the changed card?") },
-            confirmButton = {
-                TextButton(onClick = { model.askingLeave = false; model.insertEdited() }) { Text("Insert") }
-            },
-            dismissButton = {
-                TextButton(onClick = { model.askingLeave = false; model.discard() }) { Text("Discard changes") }
-            },
-        )
-    }
     renaming?.let { entry ->
         var name by remember(entry) { mutableStateOf(entry.name) }
         AlertDialog(

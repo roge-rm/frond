@@ -324,6 +324,10 @@ object Cards {
     }
 
     const val SAME_DISK = "Cards and sessions have to be on the same disk."
+    const val IN_FILES = "The card is open in Files. Close it first."
+
+    // A card file nobody has open in Files…, with any change a crash cut off finished.
+    fun ready(card: File) = !CardFile.inUse(card) && CardFile.settle(card)
 
     // Card file from a machine folder into the drawer. The slot gets swap first, so a crash at any
     // point loads with --card-swap; a cut-off move is fixed by reconcile rule 4. Library lock and
@@ -332,6 +336,7 @@ object Cards {
         val file = cardFileIn(dir)
         val card = readCard(entryDir(library, id))
         if (file == null || card == null) return "Couldn't move the card."
+        if (!ready(File(dir, file))) return IN_FILES
         val slot = readSlot(dir).copy(present = true, swap = true, card = id)
         if (!writeSlot(dir, slot)) return "Couldn't move the card."
         if (!File(dir, file).renameTo(File(entryDir(library, id), file))) return "Couldn't move the card into Cards. $SAME_DISK"
@@ -346,6 +351,7 @@ object Cards {
         val file = fileOfKind(card.kind)
         if (cardFileIn(dir) != null) return "Take the machine's card out first."
         if (!File(entryDir(library, id), file).isFile) return "That card is in another machine."
+        if (!ready(File(entryDir(library, id), file))) return IN_FILES
         val slot = readSlot(dir).copy(present = true, swap = true, card = id, name = card.name)
         if (!writeSlot(dir, slot)) return "Couldn't move the card."
         if (!File(entryDir(library, id), file).renameTo(File(dir, file))) {
@@ -498,10 +504,18 @@ object Cards {
                 }
                 machines += Held(dir, lock)
             }
+            settleEdits(library, machines.map { it.dir })
             reconcileMachines(sessions, library, machines.map { it.dir }, skippedClaims, skippedNames)
         } finally {
             machines.forEach { it.lock?.close() }
         }
+    }
+
+    // Finishes Files… changes a crash cut off, in the machines held and the drawer. Cards open in
+    // Files… now are left alone.
+    private fun settleEdits(library: File, dirs: List<File>) {
+        for (dir in dirs) cardFileIn(dir)?.let { CardFile.settle(File(dir, it)) }
+        for (e in entries(library)) CardFile.settle(File(e.dir, fileOfKind(e.card.kind)))
     }
 
     private fun reconcileMachines(sessions: File, library: File, dirs: List<File>, skippedClaims: Set<String>, skippedNames: Set<String>) {
@@ -594,6 +608,8 @@ object Cards {
     fun takeAtStart(sessions: File, dir: File): Start {
         val library = libraryFor(sessions)
         var heldBy: String? = null
+        // The run lock is held, so this machine's card can be settled even if the library is busy.
+        cardFileIn(dir)?.let { CardFile.settle(File(dir, it)) }
         LibraryLock(library).use { lock ->
             if (lock.ok) {
                 reconcileLocked(sessions, dir)
@@ -931,9 +947,14 @@ object Cards {
         val library = libraryFor(sessions)
         val card = readCard(entryDir(library, id)) ?: return null to "Couldn't find that card."
         val file = fileOfKind(card.kind)
-        if (File(entryDir(library, id), file).isFile) return Source(File(entryDir(library, id), file), card, null, null) to null
+        val inDrawer = File(entryDir(library, id), file)
+        if (inDrawer.isFile) {
+            if (!ready(inDrawer)) return null to IN_FILES
+            return Source(inDrawer, card, null, null) to null
+        }
         val holder = holderOf(sessions, id) ?: return null to "Couldn't find that card."
         val lock = tryRunLock(holder) ?: return null to "${machineName(holder)} is running. Stop it first."
+        if (!ready(File(holder, file))) { lock.close(); return null to IN_FILES }
         val slot = readSlot(holder)
         if (settled(holder, file, slot.swap)) return Source(File(holder, file), card, holder, lock) to null
         val settle = sdSettleOf(holder)
@@ -1028,6 +1049,7 @@ object Cards {
             if (!lock.ok) return BUSY
             val card = readCard(entryDir(library, id)) ?: return "Couldn't find that card."
             if (!File(entryDir(library, id), fileOfKind(card.kind)).isFile) return "Take the card out of its machine first."
+            if (!ready(File(entryDir(library, id), fileOfKind(card.kind)))) return IN_FILES
             if (!entryDir(library, id).deleteRecursively()) return "Couldn't delete the card."
             for (dir in sessions.listFiles { f -> f.isDirectory && !f.name.startsWith(".") }.orEmpty()) {
                 val slot = readSlot(dir)

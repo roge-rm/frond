@@ -17,9 +17,11 @@ import java.util.zip.CRC32
 // mtools: list folders, copy files in and out, make folders, and copy, move, rename and delete inside the card.
 // Data is never overwritten in place: new data goes to free clusters.
 // Each change is crash safe: new file data goes into free clusters, then the changed FAT and folder
-// sectors go through a journal next to the card (<card>.journal) before they're written in place.
-// open() replays a complete journal and drops a damaged one. Not thread safe; one editor per image file.
-class FatImage private constructor(private val image: File, private val file: RandomAccessFile) : AutoCloseable {
+// sectors are committed. On a raw image they go through a journal next to it (<image>.journal) before
+// they're written in place, and open() replays a complete journal and drops a damaged one. On a Frond
+// card file (over()) CardFile commits them with the chunk CRCs and header. Not thread safe; one editor
+// per image file.
+class FatImage private constructor(private val image: File?, private val blocks: FatBlocks, private val owned: Boolean) : AutoCloseable {
     class FatException(message: String) : IOException(message)
     // A copy stopped by its caller; the change is rolled back.
     class Cancelled : IOException("Cancelled")
@@ -66,7 +68,7 @@ class FatImage private constructor(private val image: File, private val file: Ra
     val totalBytes: Long get() = clusterCount.toLong() * clusterBytes
 
     private fun open() {
-        val size = file.length()
+        val size = blocks.length
         if (size < MIN_BYTES || size > MAX_BYTES || size % SECTOR != 0L) throw FatException("Use a 32 MB to 2 GB FAT16 card image.")
         var boot = read(0, SECTOR)
         if (String(boot, 54, 8, Charsets.US_ASCII) != "FAT16   ") {
@@ -215,8 +217,7 @@ class FatImage private constructor(private val image: File, private val file: Ra
         for (c in chain(entry.firstCluster)) {
             if (left <= 0) break
             val n = minOf(left, clusterBytes.toLong()).toInt()
-            file.seek(clusterAt(c))
-            file.readFully(buffer, 0, n)
+            blocks.read(clusterAt(c), buffer, 0, n)
             out.write(buffer, 0, n)
             left -= n
         }
@@ -363,8 +364,7 @@ class FatImage private constructor(private val image: File, private val file: Ra
             for (i in clusters.indices) {
                 if (cancelled()) throw Cancelled()
                 val n = minOf(left, clusterBytes.toLong()).toInt()
-                file.seek(clusterAt(source[i]))
-                file.readFully(buffer, 0, n)
+                blocks.read(clusterAt(source[i]), buffer, 0, n)
                 buffer.fill(0, n, clusterBytes)
                 write(clusterAt(clusters[i]), buffer, 0, clusterBytes)
                 left -= n
@@ -478,6 +478,8 @@ class FatImage private constructor(private val image: File, private val file: Ra
         } catch (e: Throwable) {
             fat = fatOnDisk.copyOf()
             staged.clear()
+            // Data already written changed free clusters; a card file gets its CRCs fixed now.
+            try { (blocks as? CardFile)?.settleData() } catch (_: Exception) { }
             throw e
         }
     }
@@ -499,6 +501,14 @@ class FatImage private constructor(private val image: File, private val file: Ra
     private fun commit() {
         stageFat()
         if (staged.isEmpty()) return
+        if (blocks is CardFile) {
+            blocks.commit(staged)
+            fatOnDisk = fat.copyOf()
+            staged.clear()
+            committed = true
+            return
+        }
+        val file = (blocks as RawBlocks).file
         if (bulk) {
             for ((at, sector) in staged) write(at, sector, 0, SECTOR)
             fatOnDisk = fat.copyOf()
@@ -510,7 +520,7 @@ class FatImage private constructor(private val image: File, private val file: Ra
         crashHook?.invoke("data")
         val records = staged.entries.map { it.key to it.value }
         val bytes = encodeJournal(records, file.length())
-        val journal = journalOf(image)
+        val journal = journalOf(image!!)
         FileOutputStream(journal).use { it.write(bytes); it.fd.sync() }
         syncDir(journal)
         bytesWritten += bytes.size
@@ -530,8 +540,7 @@ class FatImage private constructor(private val image: File, private val file: Ra
 
     private fun read(at: Long, length: Int): ByteArray {
         val b = ByteArray(length)
-        file.seek(at)
-        file.readFully(b)
+        blocks.read(at, b, 0, length)
         // Staged sectors that overlap, so a change sees its own edits.
         val first = at / SECTOR * SECTOR
         for ((sectorAt, sector) in staged.subMap(first, at + length)) {
@@ -544,8 +553,7 @@ class FatImage private constructor(private val image: File, private val file: Ra
 
     // Writes straight to the image: new data in free clusters, or a journal being applied.
     private fun write(at: Long, b: ByteArray, from: Int, length: Int) {
-        file.seek(at)
-        file.write(b, from, length)
+        blocks.write(at, b, from, length)
         bytesWritten += length
     }
 
@@ -555,7 +563,7 @@ class FatImage private constructor(private val image: File, private val file: Ra
         while (done < length) {
             val position = at + done
             val sectorAt = position / SECTOR * SECTOR
-            val sector = staged.getOrPut(sectorAt) { file.seek(sectorAt); ByteArray(SECTOR).also { file.readFully(it) } }
+            val sector = staged.getOrPut(sectorAt) { ByteArray(SECTOR).also { blocks.read(sectorAt, it, 0, SECTOR) } }
             val inSector = (position - sectorAt).toInt()
             val n = minOf(SECTOR - inSector, length - done)
             b.copyInto(sector, inSector, from + done, from + done + n)
@@ -569,12 +577,47 @@ class FatImage private constructor(private val image: File, private val file: Ra
         return (1 until fatCount).all { read(fatStart + it.toLong() * fatSectors * SECTOR, fatSectors * SECTOR).contentEquals(first) }
     }
 
+    // A FAT check, as fsck would do it: FAT copies match, every chain is sound and used once, file
+    // sizes fit their chains and no cluster is allocated without an owner. The problems found.
+    internal fun check(): List<String> {
+        val problems = mutableListOf<String>()
+        if (!fatCopiesMatch()) problems += "FAT copies differ"
+        val owner = arrayOfNulls<String>(clusterCount + 2)
+        fun walk(folder: Folder, path: String, depth: Int) {
+            if (depth > MAX_DEPTH) { problems += "$path nested too deeply"; return }
+            for (slot in slots(folder)) {
+                val e = slot.entry
+                val full = if (path == "/") "/${e.name}" else "$path/${e.name}"
+                val list = try { chain(e.firstCluster) } catch (x: FatException) { problems += "$full: ${x.message}"; continue }
+                for (c in list) {
+                    if (owner[c] != null) problems += "$full shares cluster $c with ${owner[c]}"
+                    owner[c] = full
+                }
+                if (e.directory) {
+                    if (list.isEmpty()) problems += "$full has no cluster" else walk(Folder(e.firstCluster), full, depth + 1)
+                } else if (list.size.toLong() != (e.size + clusterBytes - 1) / clusterBytes) problems += "$full size ${e.size} doesn't fit ${list.size} clusters"
+            }
+        }
+        walk(Folder(0), "/", 0)
+        for (c in 2 until clusterCount + 2) if (fat[c] != 0 && owner[c] == null) problems += "cluster $c is lost"
+        return problems
+    }
+
     fun sync() {
-        file.fd.sync()
+        blocks.sync()
     }
 
     override fun close() {
-        file.close()
+        if (owned) blocks.close()
+    }
+
+    // A raw image file.
+    private class RawBlocks(val file: RandomAccessFile) : FatBlocks {
+        override val length get() = file.length()
+        override fun read(at: Long, b: ByteArray, from: Int, length: Int) { file.seek(at); file.readFully(b, from, length) }
+        override fun write(at: Long, b: ByteArray, from: Int, length: Int) { file.seek(at); file.write(b, from, length) }
+        override fun sync() = file.fd.sync()
+        override fun close() = file.close()
     }
 
     companion object {
@@ -601,12 +644,15 @@ class FatImage private constructor(private val image: File, private val file: Ra
             recover(image)
             val raf = RandomAccessFile(image, if (writable) "rw" else "r")
             try {
-                return FatImage(image, raf).also { it.open() }
+                return FatImage(image, RawBlocks(raf), true).also { it.open() }
             } catch (e: Exception) {
                 raf.close()
                 throw e
             }
         }
+
+        // The file system on an open card file. Closing the FatImage leaves the card file open.
+        fun over(card: CardFile): FatImage = FatImage(null, card, false).also { it.open() }
 
         // Applies a complete journal to its card and deletes it; deletes an incomplete or damaged one.
         // Applying twice is harmless, so a crash while replaying just replays again.

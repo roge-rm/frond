@@ -340,34 +340,6 @@ object Sessions {
 
     private fun recoverySession(context: Context): File = recoveryFile(context)
 
-    // Room a recovery save needs: the saved session's size with some slack, or for an unsaved one its
-    // firmware and RAM, as the save is compressed but can't be smaller than nothing.
-    fun recoveryNeeds(savedSize: Long?, device: Device): Long =
-        if (savedSize != null && savedSize > 0) savedSize + savedSize / 4 + (16L shl 20)
-        else device.norSize + device.nandSize + (64L shl 20)
-
-    // Saves the running session as the recovery copy. Returns an error message or null.
-    fun saveRecovery(context: Context, link: ControlLink, name: String, session: String? = null): String? {
-        dropRecovery(context)
-        recoveryMachine(context).mkdirs()
-        val reply = link.request("save", recoveryMachine(context).path, timeoutSeconds = 120)
-        if (!reply.ok || !recoverySession(context).isFile) {
-            dropRecovery(context)
-            return reply.message.ifEmpty { "Couldn't save the session." }
-        }
-        try {
-            val meta = recoveryMeta(context)
-            val temporary = File(meta.path + ".tmp")
-            temporary.writeText(JSONObject().put("name", name)
-                .put("settings", forPath(context, session)?.settings?.json()).toString())
-            if (!temporary.renameTo(meta)) throw IOException("can't write ${meta.name}")
-        } catch (e: Exception) {
-            dropRecovery(context)
-            return "Couldn't save the session."
-        }
-        return null
-    }
-
     fun dropRecovery(context: Context) {
         recoveryFolder(context).listFiles().orEmpty().forEach { it.deleteRecursively() }
     }

@@ -45,14 +45,12 @@ interface FilesModel {
     val shortcuts: List<String>
     // What the button that leaves the view says.
     val leaveLabel: String
-    var askingLeave: Boolean
     val prompt: ClashPrompt
 
     fun open(at: String)
     fun up()
     fun leaveFiles()
     fun insertEdited()
-    fun discard()
     fun addFiles(uris: List<Uri>)
     fun addFolder(tree: Uri)
     fun makeFolder(name: String)
