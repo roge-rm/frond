@@ -1642,6 +1642,15 @@ test-imx1-sysctrl: prepare
 		build/source/src/uarm/uarm/imx1_eim.cpp build/source/src/uarm/uarm/imx1_timer.cpp build/source/src/uarm/uarm/imx1_i2c.cpp build/source/src/uarm/uarm/imx1_asp.cpp build/source/src/uarm/uarm/imx1_pwm.cpp -o build/test-imx1-sysctrl
 	./build/test-imx1-sysctrl
 
+.PHONY: test-imx1-mmcsd
+test-imx1-mmcsd: prepare
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Ibuild/source/src/uarm/uarm \
+		tests/imx1-mmcsd.cpp build/source/src/uarm/uarm/imx1_sysctrl.cpp \
+		build/source/src/uarm/uarm/imx1_watchdog.cpp build/source/src/uarm/uarm/imx1_rtc.cpp build/source/src/uarm/uarm/imx1_bootstrap.cpp build/source/src/uarm/uarm/imx1_aitc.cpp \
+		build/source/src/uarm/uarm/imx1_cgm.cpp build/source/src/uarm/uarm/imx1_gpio.cpp \
+		build/source/src/uarm/uarm/imx1_eim.cpp build/source/src/uarm/uarm/imx1_timer.cpp build/source/src/uarm/uarm/imx1_i2c.cpp build/source/src/uarm/uarm/imx1_asp.cpp build/source/src/uarm/uarm/imx1_pwm.cpp -o build/test-imx1-mmcsd
+	./build/test-imx1-mmcsd
+
 .PHONY: test-imx1-i2c test-imx1-i2c-read-window test-zodiac-i2c-image
 test-imx1-i2c-read-window: prepare
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Ibuild/source/src/uarm/uarm \

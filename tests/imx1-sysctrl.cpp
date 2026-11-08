@@ -49,7 +49,7 @@ int main() {
     assert(unknown == 0xdeadbeef);
     read(gccr, 0x6f);
     for (auto address : {0x0021b800u, 0x0021b804u, 0x0021b814u,
-                         0x00208010u, 0x00212000u, 0x00214000u, 0x00222000u}) {
+                         0x00208010u, 0x00212000u, 0x00222000u}) {
         unknown = 0xdeadbeef;
         assert(soc.access(address, 4, false, unknown, 3) == Imx1BootstrapAccess::unmapped);
         assert(unknown == 0xdeadbeef);
