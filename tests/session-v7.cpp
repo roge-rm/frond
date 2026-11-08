@@ -1653,6 +1653,39 @@ static void NandV9Folder() {
     assert(frondSession::loadPath(machine, loaded, folder) && loaded.media[0].contentGeneration == 2);
     assert(storedOf(machine / frondMachine::nandSibling) == bytes);
     assert(frondSession::sdJournals(machine, frondMachine::kindNand).empty());
+
+    // An exported session carries nand.frondnand.gz: a load into a work folder unpacks it there and
+    // leaves the export alone, a load in place unpacks it and drops the packed copy, and a packed
+    // file that doesn't unpack to a sound card is refused.
+    const auto plain = machine / frondMachine::nandSibling, gz = frondStorage::packedPath(plain);
+    assert(frondStorage::pack(plain, gz).ok && fs::file_size(gz) < fs::file_size(plain) / 2);
+    assert(frondMachine::packableName("nand.frondnand.gz"));
+    const auto original = ReadAll(plain);
+    fs::remove(plain);
+    fs::remove_all(work);
+    fs::create_directories(work);
+    assert(frondSession::loadPath(machine, loaded, folder, frondSession::msPhysicalBytes, work) && folder == work);
+    assert(ReadAll(work / frondMachine::nandSibling) == original && fs::exists(gz) && !fs::exists(plain));
+    assert(frondSession::loadPath(machine, loaded, folder) && folder == machine);
+    assert(ReadAll(plain) == original && !fs::exists(gz));
+    {
+        frondSdFile::Info info;
+        assert(frondStorage::pack(plain, gz, 1).ok && frondStorage::unpack(gz, dir / "back", &info).ok);
+        assert(ReadAll(dir / "back") == original && info.nand && info.generation == 2);
+        auto damaged = ReadAll(gz);
+        damaged[damaged.size() / 2] ^= 0x55;
+        WriteFile(dir / "damaged.gz", damaged);
+        assert(!frondStorage::unpack(dir / "damaged.gz", dir / "out").ok && !fs::exists(dir / "out"));
+        // A packed file of a damaged card unpacks to nothing.
+        auto bad = original;
+        bad[100] ^= 1;
+        WriteFile(dir / "bad", bad);
+        assert(frondStorage::pack(dir / "bad", dir / "bad.gz").ok && !frondStorage::unpack(dir / "bad.gz", dir / "out").ok);
+        for (const auto& e : fs::directory_iterator(dir)) assert(e.path().filename().string().rfind(".frond", 0) != 0);
+        fs::remove(plain);
+        WriteFile(gz, damaged);
+        assert(!frondSession::loadPath(machine, loaded, folder) && !fs::exists(plain));
+    }
     fs::remove_all(dir);
 }
 

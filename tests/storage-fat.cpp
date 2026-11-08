@@ -257,11 +257,49 @@ void crashes(const fs::path& dir) {
     }
 }
 
+// A batch, as a folder card is filled: every add and folder in one commit, dated as asked; a
+// failure in it rolls all of it back.
+void batches(const fs::path& dir) {
+    const auto file = containerCard(dir, "batch.frondsd", 16);
+    const fat::Stamp when{uint16_t((25 << 9) | (3 << 5) | 14), uint16_t((9 << 11) | (26 << 5) | 3)};
+    const auto data = randomBytes(70000, 3);
+    {
+        CardFile c(file, true);
+        int journals = 0;
+        c.crashHook = [&](const char* at) { journals += !std::strcmp(at, "journal"); };
+        FatImage fat(c);
+        fat.batch([&] {
+            fat.makeFolder("/", "PALM", when);
+            for (int i = 0; i < 20; ++i) put(fat, "/PALM", "File " + std::to_string(i) + ".prc", data);
+            fat.add("/", "top.txt", [](char* b, int64_t) { return *b = 't', int64_t(1); }, 1, when);
+        });
+        CHECK(journals == 1 && fat.committed);
+        CHECK(fat.find("/PALM")->modified.date == when.date && fat.find("/top.txt")->modified.time == when.time);
+        bool refused = false;
+        try {
+            fat.batch([&] {
+                put(fat, "/", "kept out.txt", data);
+                put(fat, "/", "huge.bin", std::vector<uint8_t>(size_t(17) << 20));
+            });
+        } catch (const Error&) {
+            refused = true;
+        }
+        CHECK(refused && !fat.find("/kept out.txt"));
+        checkSound(fat);
+    }
+    CHECK(settleCard(file) && verifiedGeneration(file));
+    CardFile c(file, false);
+    FatImage fat(c);
+    CHECK(fat.list("/PALM").size() == 20 && contents(fat, "/PALM/File 19.prc") == data && !fat.find("/kept out.txt"));
+    checkSound(fat);
+}
+
 void selftest() {
     const auto dir = scratch();
     layouts();
     fat32Refused(dir);
     crashes(dir);
+    batches(dir);
     // A FAT16 card still works as before, and FAT12 reads what format wrote.
     for (unsigned mib : {4u, 128u}) {
         const auto file = containerCard(dir, "fresh-" + std::to_string(mib) + ".frondsd", mib);
@@ -272,7 +310,7 @@ void selftest() {
         checkSound(fat);
     }
     fs::remove_all(dir);
-    std::puts("storage fat: layouts, FAT32 refused, FAT12 crashes settle");
+    std::puts("storage fat: layouts, FAT32 refused, FAT12 crashes settle, batches");
 }
 
 }  // namespace
