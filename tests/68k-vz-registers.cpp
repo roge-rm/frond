@@ -2,6 +2,7 @@
 #include <cstring>
 #include <cstdio>
 #include "EmRegsVZ.h"
+#include "EmSession.h"
 #include "EmBankMapped.h"
 #include "EmSystemState.h"
 #include "Frame.h"
@@ -24,6 +25,19 @@ class Board : public EmRegsVZ {
     uint8 ReadD() { return GetByte(0xfffff419); }
     void UpdateD() { UpdatePortDInterrupts(); }
     int32 Level() { return GetInterruptLevel(); }
+    void ApplySdctl() override {}
+    void TimerOrigin(double cycle) {
+        tmr1LastProcessedSystemCycles = cycle;
+        tmr2LastProcessedSystemCycles = cycle;
+        systemCycles = 0;
+    }
+    uint64 NextTimer() const { return nextTimerEventAfterCycle; }
+    std::vector<double> TimerState() {
+        return {double(GetWord(0xfffff608)), double(GetWord(0xfffff60a)),
+                double(GetWord(0xfffff312)), double(GetWord(0xfffff30e)),
+                double(nextTimerEventAfterCycle), tmr1LastProcessedSystemCycles,
+                tmr2LastProcessedSystemCycles};
+    }
     uint8 pins = 0;
 };
 
@@ -98,7 +112,58 @@ static void CheckAdcState() {
     }
 }
 
+static void CheckTimerLoadClock() {
+    Board board;
+    // The session normally subscribes during Initialize; this fixture has no ROM.
+    auto clock = EmHAL::onSystemClockChange.AddHandler([] { gSession->SetClockFactor(1); });
+    gSession->SetClockFactor(1);
+    board.Initialize();
+    board.Put(0xfffff200, 2, 0x2483);
+    board.Put(0xfffff202, 2, 0x0347);
+    gSession->SetClockFactor(1);
+    assert(gSession->GetClocksPerSecond() == 33161216);
+    board.Put(0xfffff600, 2, 0x13);
+    board.Put(0xfffff602, 2, 5);
+    board.Put(0xfffff604, 2, 1000);
+    board.Put(0xfffff608, 2, 7);
+    board.Put(0xfffff306, 2, 0);
+    board.TimerOrigin(-600);
+    Savestate<ChunkType> lazy;
+    assert(lazy.Save(board));
+    // Read at the saved cycle, then continue across the next timer interrupt.
+    assert(board.GetWord(0xfffff608) == 107);
+    assert(board.NextTimer() == 5358);
+    std::vector<std::vector<double>> reference;
+    for (uint64 cycle : {5357u, 5358u, 5364u}) {
+        board.Cycle(cycle, false);
+        board.GetWord(0xfffff608);
+        assert((board.Level() == 6) == (cycle == 5364));
+        reference.push_back(board.TimerState());
+    }
+    // Rebuild starts with the reset PLL. Loading must restore the clock before ticking.
+    board.Put(0xfffff200, 2, 0x24b3);
+    board.Put(0xfffff202, 2, 0x0123);
+    gSession->SetClockFactor(1);
+    assert(gSession->GetClocksPerSecond() == 8290304);
+    SavestateLoader<ChunkType> loader;
+    assert(loader.Load(lazy.GetBuffer(), lazy.GetSize(), board));
+    assert(board.GetWord(0xfffff608) == 107);
+    assert(gSession->GetClocksPerSecond() == 33161216);
+    assert(board.NextTimer() == 5358);
+    unsigned i = 0;
+    for (uint64 cycle : {5357u, 5358u, 5364u}) {
+        board.Cycle(cycle, false);
+        board.GetWord(0xfffff608);
+        assert(board.TimerState() == reference[i]);
+        ++i;
+    }
+    board.Dispose();
+    EmHAL::onSystemClockChange.RemoveHandler(clock);
+    puts("VZ load clock, lazy counter and next interrupt continuation passed");
+}
+
 int main() {
+    CheckTimerLoadClock();
     // Drive the VZ registers without running guest firmware.
     Board board;
     board.Put(0xfffff314, 2, 0);
