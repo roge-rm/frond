@@ -45,6 +45,12 @@ interface FilesModel {
     // What the button that leaves the view says.
     val leaveLabel: String
     val prompt: ClashPrompt
+    // False for a flat list with no folders: nothing to move, rename or make.
+    val folders: Boolean get() = true
+    // Shown instead of the free space line when set.
+    val summary: String? get() = null
+    // Shown under an entry instead of its size and date when set.
+    fun detailOf(entry: FatImage.Entry): String? = null
 
     fun open(at: String)
     fun up()

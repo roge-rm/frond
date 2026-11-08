@@ -9,7 +9,8 @@ import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.security.MessageDigest
 
-// Import folder as card: the size choice, the blank image, and the FatImage copy from a fake tree.
+// Import folder as card: the size choice, the fresh card layout, and the copy onto a new card file
+// from a fake tree.
 class FolderCardTest {
     @get:Rule val tmp = TemporaryFolder()
 
@@ -21,6 +22,7 @@ class FolderCardTest {
     ) : FolderCard.Node {
         override val isDirectory get() = kids != null
         override val size get() = declared ?: bytes?.size?.toLong() ?: 0L
+        override var modified = 0L
         override fun children(): List<FolderCard.Node> = kids.orEmpty()
         override fun open(): InputStream = ByteArrayInputStream(bytes ?: ByteArray(0))
     }
@@ -51,7 +53,7 @@ class FolderCardTest {
         )
         for ((mib, hash) in expected) {
             val out = ByteArrayOutputStream()
-            for ((sector, bytes) in FolderCard.layout(mib)) {
+            for ((sector, bytes) in CoreLayout.layout(mib)) {
                 out.write(ByteArray(4) { (sector shr (8 * it)).toByte() })
                 out.write(bytes)
             }
@@ -62,7 +64,7 @@ class FolderCardTest {
     @Test fun geometryMatchesWhatFatImageReads() {
         for (mib in listOf(32, 128, 1886)) {
             val image = tmp.newFile("g$mib.img")
-            FolderCard.blank(image, mib)
+            CoreLayout.blank(image, mib)
             assertEquals(mib.toLong() shl 20, image.length())
             FatImage.open(image, false).use {
                 val g = FolderCard.geometry(mib)
@@ -73,6 +75,17 @@ class FolderCardTest {
             image.delete()
         }
     }
+
+    // A new 32 MiB card file as `make` leaves it, filled with the tree.
+    private fun fill(name: String, root: FolderCard.Node, plan: FolderCard.Plan = FolderCard.measure(root), cancelled: () -> Boolean = { false },
+                     progress: ((Long, Long) -> Unit)? = null): Pair<java.io.File, String?> {
+        val card = tmp.newFile(name)
+        CoreLayout.card(card, 32)
+        val result = CardFile.open(card, true).use { c -> FatImage.over(c).use { FolderCard.fill(it, root, plan, cancelled, progress) } }
+        return card to result
+    }
+
+    private fun <T> reading(card: java.io.File, use: (FatImage) -> T): T = CardFile.open(card, false).use { c -> FatImage.over(c).use(use) }
 
     @Test fun theSmallestSizeThatFitsIsChosen() {
         val sizes = CardChoices.sizesFor("sd")
@@ -106,14 +119,13 @@ class FolderCardTest {
     }
 
     @Test fun theTreeIsCopiedOntoACardWhoseFilesMatch() {
-        val image = tmp.newFile("card.img")
         val root = tree()
-        val plan = FolderCard.measure(root)
-        FolderCard.blank(image, 32)
         val seen = mutableListOf<Long>()
-        assertNull(FolderCard.copy(image, root, plan, { false }) { done, total -> seen += done * 1000 / total })
+        val (image, result) = fill("card.frondsd", root) { done, total -> seen += done * 1000 / total }
+        assertNull(result)
         assertTrue(seen.isNotEmpty() && seen.last() == 1000L)
-        FatImage.open(image, false).use { fat ->
+        assertNotNull(CardFile.verify(image))
+        reading(image) { fat ->
             assertEquals(listOf("A rather long file name for a card.txt", "empty", "Songs"), fat.list("/").map { it.name }.sortedBy { it.lowercase() })
             val album = fat.list("/Songs/Album One").associateBy { it.name }
             assertEquals(setOf("01 - A very long track title indeed.sunvox", "notes.txt"), album.keys)
@@ -125,33 +137,48 @@ class FolderCardTest {
             assertEquals("nested", nested.toString())
             assertEquals(0L, fat.find("/empty")!!.size)
             assertTrue(fat.fatCopiesMatch())
+            assertTrue(fat.check().isEmpty())
+        }
+    }
+
+    @Test fun datesComeFromTheTree() {
+        val dated = file("old.txt", "x".toByteArray()).apply { modified = 1_000_000_000_000L }
+        val folder = dir("Old", file("in.txt", ByteArray(1))).apply { modified = 1_100_000_000_000L }
+        val (image, result) = fill("dated.frondsd", dir("Top", dated, folder))
+        assertNull(result)
+        reading(image) { fat ->
+            // FAT keeps local time to two seconds.
+            assertTrue(kotlin.math.abs(fat.find("/old.txt")!!.modified - 1_000_000_000_000L) < 2000)
+            assertTrue(kotlin.math.abs(fat.find("/Old")!!.modified - 1_100_000_000_000L) < 2000)
+            assertTrue(fat.find("/Old/in.txt")!!.modified > 1_600_000_000_000L)
         }
     }
 
     @Test fun namesPastAsciiComeBackExactly() {
-        val image = tmp.newFile("names.img")
         val names = listOf("äpfel.txt", "ÄB.txt", "naïve café.txt", "日本語.md", "README.TXT")
         val root = dir("Names", *names.map { file(it, it.toByteArray()) }.toTypedArray(), dir("Ölfarben", file("ñ", "n".toByteArray())))
-        FolderCard.blank(image, 32)
-        assertNull(FolderCard.copy(image, root, FolderCard.measure(root), { false }) { _, _ -> })
-        FatImage.open(image, false).use { fat ->
+        val (image, result) = fill("names.frondsd", root) { _, _ -> }
+        assertNull(result)
+        reading(image) { fat ->
             assertEquals((names + "Ölfarben").sorted(), fat.list("/").map { it.name }.sorted())
             assertEquals(listOf("ñ"), fat.list("/Ölfarben").map { it.name })
         }
     }
 
     @Test fun aFolderThatDoesNotFitStopsTheCopyAndCancelStopsIt() {
-        val image = tmp.newFile("small.img")
-        FolderCard.blank(image, 32)
-        // Declared small enough for the plan, but the card is too full for it: the copy says so.
+        // Declared small enough for the plan, but the card is too full for it: the copy says so,
+        // and nothing of it stays.
         val root = dir("Over", *Array(40) { file("part-$it.bin", ByteArray(1 shl 20)) })
         val plan = FolderCard.measure(root)
         assertFalse(FolderCard.fits(plan, 32))
-        assertEquals("The folder doesn't fit on a card that size.", FolderCard.copy(image, root, plan, { false }, null))
-        // Cancel while a file is read.
-        val again = tmp.newFile("again.img")
-        FolderCard.blank(again, 32)
+        val (full, result) = fill("small.frondsd", root, plan)
+        assertEquals("The folder doesn't fit on a card that size.", result)
+        reading(full) { assertTrue(it.list("/").isEmpty()) }
+        // Cancel while a file is read: rolled back too.
         var reads = 0
-        assertEquals(COPY_CANCELLED, FolderCard.copy(again, tree(), FolderCard.measure(tree()), { ++reads > 3 }, null))
+        val (again, stopped) = fill("again.frondsd", tree(), cancelled = { ++reads > 3 })
+        assertEquals(COPY_CANCELLED, stopped)
+        assertNotNull(CardFile.verify(again))
+        reading(again) { assertTrue(it.list("/").isEmpty()) }
     }
 }

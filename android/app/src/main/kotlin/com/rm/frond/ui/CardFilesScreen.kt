@@ -115,7 +115,7 @@ fun CardFilesScreen(model: FilesModel, snackbar: SnackbarHostState) {
         topBar = {
             TopAppBar(
                 title = {
-                    Text(if (selecting) "${picked.size} selected" else "${model.title} $path", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(if (selecting) "${picked.size} selected" else if (model.folders) "${model.title} $path" else model.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 },
                 navigationIcon = {
                     if (selecting) IconButton(onClick = { selected = emptySet() }) { Icon(Icons.Default.Close, contentDescription = "Clear selection") }
@@ -153,11 +153,11 @@ fun CardFilesScreen(model: FilesModel, snackbar: SnackbarHostState) {
                             OutlinedButton(onClick = { deleting = picked }, enabled = writable, shape = MaterialTheme.shapes.small, contentPadding = pad) {
                                 Text("Delete", maxLines = 1, softWrap = false, color = MaterialTheme.colorScheme.error)
                             }
-                            OutlinedButton(onClick = { clip = Clip(picked.map { fullPath(it) }, true); selected = emptySet() }, enabled = writable,
+                            if (model.folders) OutlinedButton(onClick = { clip = Clip(picked.map { fullPath(it) }, true); selected = emptySet() }, enabled = writable,
                                 shape = MaterialTheme.shapes.small, contentPadding = pad) { Text("Cut", maxLines = 1, softWrap = false) }
-                            OutlinedButton(onClick = { clip = Clip(picked.map { fullPath(it) }, false); selected = emptySet() }, enabled = ready,
+                            if (model.folders) OutlinedButton(onClick = { clip = Clip(picked.map { fullPath(it) }, false); selected = emptySet() }, enabled = ready,
                                 shape = MaterialTheme.shapes.small, contentPadding = pad) { Text("Copy", maxLines = 1, softWrap = false) }
-                            if (picked.size == 1) OutlinedButton(onClick = { renaming = picked.first() }, enabled = writable,
+                            if (model.folders && picked.size == 1) OutlinedButton(onClick = { renaming = picked.first() }, enabled = writable,
                                 shape = MaterialTheme.shapes.small, contentPadding = pad) { Text("Rename", maxLines = 1, softWrap = false) }
                             OutlinedButton(onClick = { copyOut = picked; pickTarget.launch(null) },
                                 enabled = ready,
@@ -169,13 +169,13 @@ fun CardFilesScreen(model: FilesModel, snackbar: SnackbarHostState) {
                                     Text("Paste ${c.paths.size}", maxLines = 1, softWrap = false)
                                 }
                             }
-                            OutlinedButton(onClick = { naming = true }, enabled = writable, shape = MaterialTheme.shapes.small, contentPadding = pad) {
+                            if (model.folders) OutlinedButton(onClick = { naming = true }, enabled = writable, shape = MaterialTheme.shapes.small, contentPadding = pad) {
                                 Text("New folder", maxLines = 1, softWrap = false)
                             }
                             OutlinedButton(onClick = { pickFiles.launch(arrayOf("*/*")) }, enabled = writable, shape = MaterialTheme.shapes.small, contentPadding = pad) {
                                 Text("Add files", maxLines = 1, softWrap = false)
                             }
-                            OutlinedButton(onClick = { pickTree.launch(null) }, enabled = writable, shape = MaterialTheme.shapes.small, contentPadding = pad) {
+                            if (model.folders) OutlinedButton(onClick = { pickTree.launch(null) }, enabled = writable, shape = MaterialTheme.shapes.small, contentPadding = pad) {
                                 Text("Add folder", maxLines = 1, softWrap = false)
                             }
                         }
@@ -191,7 +191,7 @@ fun CardFilesScreen(model: FilesModel, snackbar: SnackbarHostState) {
             item {
                 val size = Formatter.formatShortFileSize(context, model.total)
                 Text(
-                    "${Formatter.formatShortFileSize(context, model.free)} free of $size" + if (model.changed) " · Changed" else "",
+                    model.summary ?: ("${Formatter.formatShortFileSize(context, model.free)} free of $size" + if (model.changed) " · Changed" else ""),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
@@ -202,12 +202,12 @@ fun CardFilesScreen(model: FilesModel, snackbar: SnackbarHostState) {
                     for (s in model.shortcuts) TextButton(onClick = { model.open(s) }, enabled = ready) { Text(s, maxLines = 1, softWrap = false) }
                 }
             }
-            if (shown.isEmpty()) item { EmptyNote("Empty folder") }
+            if (shown.isEmpty() && (model.folders || model.busy == null)) item { EmptyNote(if (model.folders) "Empty folder" else "No databases") }
             items(shown, key = { it.shortName }) { e ->
                 val on = e.name in selected
                 ListItem(
                     headlineContent = { Text(e.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                    supportingContent = { Text(detail(context, e)) },
+                    supportingContent = { Text(model.detailOf(e) ?: detail(context, e)) },
                     leadingContent = {
                         Marker(if (on) MaterialTheme.colorScheme.primary
                         else if (e.directory) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.outlineVariant)

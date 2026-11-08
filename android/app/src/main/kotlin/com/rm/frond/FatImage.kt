@@ -52,10 +52,16 @@ class FatImage private constructor(private val card: CardFile, private val owned
     fun read(entry: Entry, out: OutputStream) =
         CardStorage.fatRead(live(), entry.name, entry.directory, entry.size, entry.firstCluster, out)
 
-    // Copies size bytes from input into a new file in the folder at path.
-    fun add(path: String, name: String, input: InputStream, size: Long) = CardStorage.fatAdd(live(), path, name, input, size)
+    // Copies size bytes from input into a new file in the folder at path, dated `modified`
+    // (milliseconds since 1970) or now.
+    fun add(path: String, name: String, input: InputStream, size: Long, modified: Long = 0L) =
+        CardStorage.fatAdd(live(), path, name, input, size, modified)
 
-    fun makeFolder(path: String, name: String) = CardStorage.fatMakeFolder(live(), path, name)
+    fun makeFolder(path: String, name: String, modified: Long = 0L) = CardStorage.fatMakeFolder(live(), path, name, modified)
+
+    // Runs `work`'s adds and folders as one change with one commit; a failure or cancel rolls all
+    // of it back.
+    fun batch(work: () -> Unit) = CardStorage.fatBatch(live(), Runnable { work() })
 
     // A file, or a folder with everything in it.
     fun remove(path: String) = CardStorage.fatRemove(live(), path)

@@ -41,6 +41,11 @@ internal object CardStorage {
     // The generation, or -1.
     @JvmStatic external fun verify(path: String): Long
     @JvmStatic external fun header(path: String): ByteArray?
+    // Version, payload bytes, side bytes, generation and kind (0 SD or Pro, 1 classic stick, 2 NAND)
+    // of a container, or null. With `checked`, null unless its size and every CRC check out.
+    @JvmStatic external fun cardInfo(path: String, checked: Boolean): LongArray?
+    // The card with a save's journal applied, written to `out`; neither file changes.
+    @JvmStatic external fun settledCopy(card: String, journal: String, out: OutputStream)
     @JvmStatic external fun encodeV2(payload: ByteArray, generation: Long): ByteArray?
 
     // The FAT on an open card.
@@ -53,8 +58,10 @@ internal object CardStorage {
     @JvmStatic external fun fatList(fat: Long, path: String): Array<Any>
     @JvmStatic external fun fatFind(fat: Long, path: String): Array<Any>
     @JvmStatic external fun fatRead(fat: Long, name: String, directory: Boolean, size: Long, firstCluster: Int, out: OutputStream)
-    @JvmStatic external fun fatAdd(fat: Long, path: String, name: String, input: InputStream, size: Long)
-    @JvmStatic external fun fatMakeFolder(fat: Long, path: String, name: String)
+    // `modified` in milliseconds since 1970, 0 for now.
+    @JvmStatic external fun fatAdd(fat: Long, path: String, name: String, input: InputStream, size: Long, modified: Long)
+    @JvmStatic external fun fatMakeFolder(fat: Long, path: String, name: String, modified: Long)
+    @JvmStatic external fun fatBatch(fat: Long, work: Runnable)
     @JvmStatic external fun fatRemove(fat: Long, path: String)
     @JvmStatic external fun fatMove(fat: Long, from: String, toFolder: String, newName: String?)
     @JvmStatic external fun fatCopy(fat: Long, from: String, toFolder: String, newName: String?, steps: CopySteps)

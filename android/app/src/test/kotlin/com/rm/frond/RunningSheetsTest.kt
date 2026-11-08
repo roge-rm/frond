@@ -17,12 +17,14 @@ class RunningSheetsTest {
     private val off = NetRelay.Phase.OFF
     private val gone = NetRelay.Phase.DISCONNECTED
 
-    @Test fun barButtonsFollowTheCardSlot() {
+    // Storage is on every machine, with Internal even where there's no slot.
+    @Test fun everyMachineHasStorage() {
         for (device in Device.entries) {
-            val expected = if (device.cardSupported) listOf(Sheet.APPLICATIONS, Sheet.CARD) else listOf(Sheet.APPLICATIONS)
-            assertEquals(device.id, expected, RunningSheets.barSheets(device))
+            assertEquals(device.id, listOf(Sheet.APPLICATIONS, Sheet.CARD), RunningSheets.barSheets(device))
+            assertEquals("Storage", RunningSheets.title(Sheet.CARD, device))
         }
-        assertTrue(Device.entries.any { !it.cardSupported })
+        val slotless = Device.entries.first { !it.cardSupported }
+        assertTrue(RunningSheets.cardRows(slotless, SdCard.State.NONE, false, false).isEmpty())
     }
 
     @Test fun menuRowsOpenTheirSheets() {

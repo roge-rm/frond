@@ -866,6 +866,16 @@ class RunningModel(
         try { c.finishEdit() } catch (e: Exception) { Log.w(FrondActivity.TAG, "card put back at stop: ${e.message}") }
     }
 
+    // Files… on Internal, while it's open.
+    var internal by mutableStateOf<InternalFiles?>(null)
+        private set
+
+    fun openInternal() {
+        val d = databases ?: return
+        if (busy != null || waiting() || internal != null) return
+        internal = InternalFiles(activity, d) { internal = null }.also { it.refresh() }
+    }
+
     // Leaving the file view puts the card back; its changes are already on it.
     override fun leaveFiles() = insertEdited()
 

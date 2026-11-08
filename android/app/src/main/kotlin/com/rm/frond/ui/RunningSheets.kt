@@ -200,6 +200,7 @@ private fun CardSheet(model: RunningModel, actions: RunningBarActions) {
     val shown = model.slotShown
     val device = model.device
     val rows = RunningSheets.cardRows(device, model.state, shown.linked != null, shown.linked != null && shown.linkedHolder == null)
+    if (rows.isNotEmpty()) Header(device.cardLabel, Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp))
     for (row in rows) when (row) {
         CardRow.SLOT -> {
             val usable = RunningSheets.slotUsable(model.state, model.busy != null, shown.pending)
@@ -242,6 +243,8 @@ private fun CardSheet(model: RunningModel, actions: RunningBarActions) {
             )
         }
     }
+    Header("Internal", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp))
+    SheetAction("Files…") { model.openInternal() }
     if (confirmEject || confirmFiles) CardEjectDialog(model, confirmFiles) { confirmEject = false; confirmFiles = false }
 }
 

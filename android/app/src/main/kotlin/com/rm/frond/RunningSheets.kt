@@ -6,8 +6,9 @@ object RunningSheets {
     enum class Sheet { APPLICATIONS, CARD, DISPLAY, CONNECTIONS }
 
     // The sheets with a button on the bar, in order.
-    fun barSheets(device: Device): List<Sheet> =
-        listOf(Sheet.APPLICATIONS) + if (device.cardSupported) listOf(Sheet.CARD) else emptyList()
+    // Storage is on every machine: Internal always, the slot where the device has one.
+    @Suppress("UNUSED_PARAMETER")
+    fun barSheets(device: Device): List<Sheet> = listOf(Sheet.APPLICATIONS, Sheet.CARD)
 
     // The sheet a menu row opens, if any.
     fun menuSheet(id: RunningMenu.Id): Sheet? = when (id) {
@@ -18,7 +19,7 @@ object RunningSheets {
 
     fun title(sheet: Sheet, device: Device) = when (sheet) {
         Sheet.APPLICATIONS -> "Applications"
-        Sheet.CARD -> device.cardLabel
+        Sheet.CARD -> "Storage"
         Sheet.DISPLAY -> "Display"
         Sheet.CONNECTIONS -> "Connections"
     }

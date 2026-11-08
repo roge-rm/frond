@@ -9,7 +9,9 @@
 #include <jni.h>
 
 #include <cstdint>
+#include <ctime>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -165,6 +167,15 @@ jstring reply(JNIEnv* env, const frondStorage::Result& r) {
 
 constexpr jint chunkBytes = 1 << 20;
 
+// A Kotlin time in milliseconds since 1970 as a FAT date in local time; 0 or less is now.
+std::optional<frondStorage::fat::Stamp> stampOf(jlong millis) {
+    if (millis <= 0) return std::nullopt;
+    const std::time_t seconds = std::time_t(millis / 1000);
+    std::tm t{};
+    if (!localtime_r(&seconds, &t)) return std::nullopt;
+    return frondStorage::fat::stampOf(t);
+}
+
 }  // namespace
 
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* javaVm, void*) {
@@ -289,6 +300,50 @@ extern "C" JNIEXPORT jbyteArray JNICALL STORAGE(header)(JNIEnv* env, jclass, jst
     });
 }
 
+// cardInfo(path, checked): a container's version, payload bytes, side bytes, generation and kind
+// (0 SD or Pro, 1 classic stick, 2 NAND) from its header, or null when it isn't one. With
+// `checked`, also null unless its size, header CRC and every chunk check out.
+extern "C" JNIEXPORT jlongArray JNICALL STORAGE(cardInfo)(JNIEnv* env, jclass, jstring path, jboolean checked) {
+    return guarded(env, jlongArray(nullptr), [&]() -> jlongArray {
+        const auto p = std::filesystem::path(utf8(env, path));
+        frondSdFile::Info info;
+        if (checked) {
+            if (!frondStorage::verify(p, info).ok) return nullptr;
+        } else {
+            const int fd = ::open(p.c_str(), O_RDONLY | O_CLOEXEC);
+            if (fd < 0) return nullptr;
+            frondStorage::Fd closer(fd);
+            uint8_t head[frondSdFile::headerBytes];
+            if (!frondStorage::readAllAt(fd, head, sizeof(head), 0) || !frondSdFile::parseContainer(head, info)) return nullptr;
+        }
+        return longs(env, {jlong(info.version), jlong(info.payloadBytes), jlong(info.sideBytes), jlong(info.generation),
+                           jlong(info.nand ? 2 : info.classic ? 1 : 0)});
+    });
+}
+
+// settledCopy(card, journal, out): the card with a save's journal applied, into an OutputStream,
+// neither file changed. Throws FatException when the journal doesn't apply.
+extern "C" JNIEXPORT void JNICALL STORAGE(settledCopy)(JNIEnv* env, jclass, jstring card, jstring journal, jobject out) {
+    guardedVoid(env, [&] {
+        jmethodID write = env->GetMethodID(env->GetObjectClass(out), "write", "([BII)V");
+        check(env);
+        jbyteArray buffer = env->NewByteArray(chunkBytes);
+        check(env);
+        const bool ok = frondStorage::writeApplied(utf8(env, card), utf8(env, journal), [&](const uint8_t* b, size_t n) {
+            for (size_t done = 0; done < n;) {
+                const jint part = jint(std::min<size_t>(size_t(chunkBytes), n - done));
+                env->SetByteArrayRegion(buffer, 0, part, reinterpret_cast<const jbyte*>(b + done));
+                env->CallVoidMethod(out, write, buffer, 0, part);
+                check(env);
+                done += size_t(part);
+            }
+            return true;
+        });
+        env->DeleteLocalRef(buffer);
+        if (!ok) throw frondStorage::Error("The card's unfinished save doesn't apply.");
+    });
+}
+
 // encodeV2(payload, generation): a v2 card file of the payload, as the card tool makes one.
 extern "C" JNIEXPORT jbyteArray JNICALL STORAGE(encodeV2)(JNIEnv* env, jclass, jbyteArray payload, jlong generation) {
     return guarded(env, jbyteArray(nullptr), [&]() -> jbyteArray {
@@ -358,9 +413,10 @@ extern "C" JNIEXPORT void JNICALL STORAGE(fatRead)(JNIEnv* env, jclass, jlong f,
     });
 }
 
-// fatAdd(fat, path, name, input, size): a new file of `size` bytes from an InputStream.
+// fatAdd(fat, path, name, input, size, modified): a new file of `size` bytes from an InputStream,
+// dated `modified` (milliseconds since 1970, 0 for now).
 extern "C" JNIEXPORT void JNICALL STORAGE(fatAdd)(JNIEnv* env, jclass, jlong f, jstring path, jstring name, jobject input,
-                                                   jlong size) {
+                                                   jlong size, jlong modified) {
     guardedVoid(env, [&] {
         jmethodID read = env->GetMethodID(env->GetObjectClass(input), "read", "([BII)I");
         check(env);
@@ -372,13 +428,26 @@ extern "C" JNIEXPORT void JNICALL STORAGE(fatAdd)(JNIEnv* env, jclass, jlong f, 
             if (got <= 0) return 0;
             env->GetByteArrayRegion(buffer, 0, got, reinterpret_cast<jbyte*>(b));
             return got;
-        }, size);
+        }, size, stampOf(modified));
         env->DeleteLocalRef(buffer);
     });
 }
 
-extern "C" JNIEXPORT void JNICALL STORAGE(fatMakeFolder)(JNIEnv* env, jclass, jlong f, jstring path, jstring name) {
-    guardedVoid(env, [&] { fatOf(f)->makeFolder(utf8(env, path), utf8(env, name)); });
+// fatMakeFolder(fat, path, name, modified): dated as fatAdd.
+extern "C" JNIEXPORT void JNICALL STORAGE(fatMakeFolder)(JNIEnv* env, jclass, jlong f, jstring path, jstring name, jlong modified) {
+    guardedVoid(env, [&] { fatOf(f)->makeFolder(utf8(env, path), utf8(env, name), stampOf(modified)); });
+}
+
+// fatBatch(fat, work): work.run()'s adds and folders as one change with one commit.
+extern "C" JNIEXPORT void JNICALL STORAGE(fatBatch)(JNIEnv* env, jclass, jlong f, jobject work) {
+    guardedVoid(env, [&] {
+        jmethodID run = env->GetMethodID(env->GetObjectClass(work), "run", "()V");
+        check(env);
+        fatOf(f)->batch([&] {
+            env->CallVoidMethod(work, run);
+            check(env);
+        });
+    });
 }
 
 extern "C" JNIEXPORT void JNICALL STORAGE(fatRemove)(JNIEnv* env, jclass, jlong f, jstring path) {

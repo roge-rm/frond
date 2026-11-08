@@ -16,6 +16,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
@@ -24,6 +25,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -143,8 +145,9 @@ private fun Bar(state: RunningBarState, actions: RunningBarActions) {
                 RunningSheets.Sheet.APPLICATIONS -> BarButton({ actions.openSheet(sheet) }, button) { Icon(painterResource(R.drawable.ic_apps), contentDescription = "Applications") }
                 RunningSheets.Sheet.CARD -> BarButton({ actions.openSheet(sheet) }, button) {
                     val model = state.model
-                    val icon = RunningSheets.cardIcon(model?.state ?: SdCard.State.UNKNOWN, model?.slotShown?.linked != null)
-                    Icon(painterResource(cardIconRes(icon)), contentDescription = device.cardLabel)
+                    val icon = if (!device.cardSupported) RunningSheets.CardIcon.IN
+                    else RunningSheets.cardIcon(model?.state ?: SdCard.State.UNKNOWN, model?.slotShown?.linked != null)
+                    Icon(painterResource(cardIconRes(icon)), contentDescription = "Storage")
                 }
                 else -> Unit
             }
@@ -214,6 +217,24 @@ private fun MenuDialogs(state: RunningBarState, actions: RunningBarActions) {
         }
     }
     LaunchedEffect(model.path != null) { if (model.path != null) actions.closeSheet() }
+    model.internal?.let { files ->
+        val snackbar = remember { SnackbarHostState() }
+        Dialog({ files.leaveFiles() }, DialogProperties(usePlatformDefaultWidth = false)) {
+            Surface(Modifier.fillMaxSize()) { CardFilesScreen(files, snackbar) }
+        }
+        files.alert?.let { (title, text) ->
+            AlertDialog(onDismissRequest = { files.alert = null }, title = { Text(title) }, text = { Text(text) },
+                confirmButton = { TextButton(onClick = { files.alert = null }) { Text("OK") } })
+        }
+        val context = LocalContext.current
+        LaunchedEffect(files.note) {
+            files.note?.let {
+                Toast.makeText(context, it, Toast.LENGTH_SHORT).show()
+                files.note = null
+            }
+        }
+    }
+    LaunchedEffect(model.internal != null) { if (model.internal != null) actions.closeSheet() }
     val context = LocalContext.current
     LaunchedEffect(model.note) {
         model.note?.let {

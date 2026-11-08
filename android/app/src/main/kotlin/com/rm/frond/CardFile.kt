@@ -17,6 +17,12 @@ import java.io.IOException
 // The card file holds an open file description lock while open, so other Frond processes and
 // threads, and the core in this process, leave it alone. Not thread safe.
 class CardFile private constructor(val file: File, val writable: Boolean) : AutoCloseable {
+    // A container header: kind 0 SD or Pro, 1 classic stick, 2 NAND.
+    data class Info(val version: Long, val payload: Long, val side: Long, val generation: Long, val kind: Int) {
+        val classic get() = kind == 1
+        val nand get() = kind == 2
+    }
+
     internal var handle = 0L
         private set
     private var closed = false
@@ -102,6 +108,15 @@ class CardFile private constructor(val file: File, val writable: Boolean) : Auto
 
         // The first 64 bytes of a card file, or null.
         fun header(card: File): ByteArray? = CardStorage.header(card.path)
+
+        // A card file's header as the storage library reads it, or null when it isn't a container
+        // (a v1 classic stick isn't). With `checked`, null unless its size and every CRC check out.
+        fun info(card: File, checked: Boolean = false): Info? =
+            CardStorage.cardInfo(card.path, checked)?.let { Info(it[0], it[1], it[2], it[3], it[4].toInt()) }
+
+        // The card with the save journal `journal` applied, written to `out`, neither file changed.
+        // Throws FatImage.FatException when the journal doesn't apply.
+        fun settledCopy(card: File, journal: File, out: java.io.OutputStream) = CardStorage.settledCopy(card.path, journal.path, out)
 
         // A v2 card file of `payload` (whole sectors) at `generation`, as the card tool makes one.
         internal fun encodeV2(payload: ByteArray, generation: Long): ByteArray =

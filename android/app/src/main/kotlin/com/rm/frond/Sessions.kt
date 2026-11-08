@@ -7,7 +7,6 @@ import org.json.JSONObject
 import java.io.File
 import java.io.IOException
 import java.util.UUID
-import java.util.zip.CRC32
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
@@ -488,19 +487,11 @@ private fun java.io.InputStream.readExact(n: Int): ByteArray {
     return out
 }
 
-// Header, size and CRC of each v7 or v8 sibling. A stub shorter than the TOC is no media.
-// v8 descriptors are 100 bytes and end with the SD content generation, which a .frondsd v2
-// header must match. A v2 file has one CRC32 per 1 MiB chunk after the payload, and a header
-// CRC over the header (its own field zeroed) and that table.
-// With `swap` (slot.json says the slot changed since the save) the card files are whatever is there,
-// checked against their own headers.
-// A classic stick's v2 .frondms header (FRONDMS version 2): its physical size (pages x 521) from
-// the payload and side region sizes, or 0 when they aren't one of the 4 to 128 MB layouts. The
+// A classic stick's v2 .frondms (FRONDMS version 2): its physical size (pages x 521) from the
+// payload and side region sizes, or 0 when they aren't one of the 4 to 128 MB layouts. The
 // payload is the user blocks (496 a segment of 512, 2 fewer in segment 0); the side region holds
 // the 2 boot blocks, 9 extra bytes a page, a u32 a block and the spare blocks.
-internal fun classicV2Physical(hdr: ByteArray): Long {
-    val payload = le64(hdr, 16)
-    val side = le64(hdr, 48)
+internal fun classicV2Physical(payload: Long, side: Long): Long {
     for ((b, p) in listOf(512L to 16L, 1024L to 16L, 1024L to 32L, 2048L to 32L, 4096L to 32L, 8192L to 32L)) {
         val user = b / 512 * 496 - 2
         val block = p * 512
@@ -509,16 +500,11 @@ internal fun classicV2Physical(hdr: ByteArray): Long {
     return 0L
 }
 
-// The stored bytes of a v2 card file: the payload, then the side region from the next MiB.
-internal fun storedBytesV2(hdr: ByteArray): Long {
-    val payload = le64(hdr, 16)
-    val side = le64(hdr, 48)
-    return if (side != 0L) (payload + (1L shl 20) - 1) / (1L shl 20) * (1L shl 20) + side else payload
-}
-
-internal fun classicV2(hdr: ByteArray) = hdr.size >= 64 &&
-    hdr.copyOfRange(0, 8).contentEquals("FRONDMS\u0000".toByteArray(Charsets.US_ASCII)) && le32(hdr, 8) == 2L
-
+// The sizes and generation of each v7, v8 or v9 sibling against its descriptor, and every CRC,
+// through the storage library. A stub shorter than the TOC is no media. v8 descriptors are 100
+// bytes and end with the card's generation, which a v2 card file must match. With `swap`
+// (slot.json says the slot changed since the save) the card files are whatever is there, checked
+// against their own headers. Only a v1 classic stick, which isn't a container, is read here.
 internal fun checkImportedSiblings(dir: File, frond: File, swap: Boolean = false): String? {
     val mismatch = "That session's card files don't match."
     val bytes = try { frond.readBytes() } catch (e: IOException) { return "Couldn't read that file." }
@@ -571,16 +557,18 @@ internal fun checkImportedSiblings(dir: File, frond: File, swap: Boolean = false
         for ((kind, name) in listOf(1L to "sd.frondsd", 2L to "ms.frondms", 3L to "ms.frondmsp")) {
             val file = File(dir, name)
             if (!file.isFile) continue
-            val hdr = file.inputStream().use { it.readExact(64) }
-            if (hdr.size != 64) return mismatch
-            if (kind == 2L && classicV2(hdr)) {
-                if (classicV2Physical(hdr) == 0L) return mismatch
-                cards.add(Card(kind, classicV2Physical(hdr), le64(hdr, 28)))
+            val info = CardFile.info(file)
+            if (kind == 2L && info != null) {
+                if (!info.classic || classicV2Physical(info.payload, info.side) == 0L) return mismatch
+                cards.add(Card(kind, classicV2Physical(info.payload, info.side), info.generation))
             } else if (kind == 2L) {
+                val hdr = file.inputStream().use { it.readExact(64) }
+                if (hdr.size != 64) return mismatch
                 if (Device.MEMORY_STICK_SIZES.none { file.length() - 64 == Device.memoryStickPhysicalBytes(it) }) return mismatch
                 cards.add(Card(kind, file.length() - 64, le64(hdr, 32)))
             } else {
-                cards.add(Card(kind, le64(hdr, 16), if (le32(hdr, 8) == 2L) le64(hdr, 28) else 0L))
+                if (info == null || info.kind != 0) return mismatch
+                cards.add(Card(kind, info.payload, info.generation))
             }
         }
     }
@@ -593,73 +581,27 @@ internal fun checkImportedSiblings(dir: File, frond: File, swap: Boolean = false
             if (card.kind == 1L) expectSd = true else expectPro = true
             val sd = File(dir, if (card.kind == 1L) "sd.frondsd" else "ms.frondmsp")
             if (!sd.isFile) return mismatch
-            sd.inputStream().use { input ->
-                val hdr = input.readExact(64)
-                if (hdr.size != 64 || !hdr.copyOfRange(0, 8).contentEquals("FRONDSD\u0000".toByteArray(Charsets.US_ASCII)))
-                    return mismatch
-                val sdVersion = le32(hdr, 8)
-                if ((sdVersion != 1L && sdVersion != 2L) || le32(hdr, 12) != 512L) return mismatch
-                val payload = le64(hdr, 16)
-                if (payload != card.physical) return mismatch
-                val chunk = 1L shl 20
-                val chunks = (payload + chunk - 1) / chunk
-                if (sdVersion == 1L) {
-                    if (card.generation != 0L || sd.length() != 64 + payload) return mismatch
-                    if (hdr.copyOfRange(28, 64).any { it != 0.toByte() }) return mismatch
-                } else {
-                    if (le64(hdr, 28) != card.generation || le64(hdr, 36) != 64 + payload ||
-                        le32(hdr, 44) != chunk || sd.length() != 64 + payload + 4 * chunks)
-                        return mismatch
-                    if (hdr.copyOfRange(48, 64).any { it != 0.toByte() }) return mismatch
-                }
-                val crc = CRC32()
-                val chunkCrcs = LongArray(chunks.toInt())
-                val buf = ByteArray(65536)
-                var done = 0L
-                while (done < payload) {
-                    val want = minOf(buf.size.toLong(), payload - done, chunk - done % chunk).toInt()
-                    val n = input.read(buf, 0, want)
-                    if (n <= 0) return mismatch
-                    crc.update(buf, 0, n)
-                    done += n
-                    if (sdVersion == 2L && (done % chunk == 0L || done == payload)) {
-                        chunkCrcs[((done - 1) / chunk).toInt()] = crc.value
-                        crc.reset()
-                    }
-                }
-                if (sdVersion == 1L) {
-                    if (crc.value != le32(hdr, 24)) return mismatch
-                } else {
-                    val table = input.readExact(4 * chunks.toInt())
-                    if (table.size != 4 * chunks.toInt()) return mismatch
-                    for (i in 0 until chunks.toInt()) if (le32(table, 4 * i) != chunkCrcs[i]) return mismatch
-                    val headerCrc = CRC32()
-                    headerCrc.update(hdr.copyOf().also { for (i in 24 until 28) it[i] = 0 })
-                    headerCrc.update(table)
-                    if (headerCrc.value != le32(hdr, 24)) return mismatch
-                }
-            }
+            val info = CardFile.info(sd, checked = true) ?: return mismatch
+            if (info.kind != 0 || info.side != 0L || info.payload != card.physical || info.generation != card.generation)
+                return mismatch
         } else {
             if (expectMs) return mismatch
             expectMs = true
             val ms = File(dir, "ms.frondms")
             if (!ms.isFile) return mismatch
+            // v2: logical blocks, then the side region, checked as SD is.
+            val info = CardFile.info(ms, checked = true)
+            if (info != null) {
+                if (!info.classic || classicV2Physical(info.payload, info.side).let { it == 0L || it != card.physical } ||
+                    info.generation != card.generation)
+                    return mismatch
+                continue
+            }
             ms.inputStream().use { input ->
                 val hdr = input.readExact(64)
                 if (hdr.size != 64 || !hdr.copyOfRange(0, 8).contentEquals("FRONDMS\u0000".toByteArray(Charsets.US_ASCII)))
                     return mismatch
-                if (classicV2(hdr)) {
-                    // v2: logical blocks, then the side region; generation, table and 1 MiB chunks as SD.
-                    val stored = storedBytesV2(hdr)
-                    val chunks = (stored + (1L shl 20) - 1) / (1L shl 20)
-                    if (le32(hdr, 12) != 512L || classicV2Physical(hdr) == 0L || classicV2Physical(hdr) != card.physical ||
-                        le64(hdr, 28) != card.generation || le64(hdr, 36) != 64 + stored || le32(hdr, 44) != (1L shl 20) ||
-                        ms.length() != 64 + stored + 4 * chunks)
-                        return mismatch
-                    if (hdr.copyOfRange(56, 64).any { it != 0.toByte() }) return mismatch
-                    return@use
-                }
-                // The header's blocks and pages per block must make the descriptor's size.
+                // v1: the header's blocks and pages per block must make the descriptor's size.
                 if (le32(hdr, 8) != 1L || le32(hdr, 12) * le32(hdr, 16) * 521 != card.physical ||
                     le32(hdr, 16) != (if (card.physical < Device.memoryStickPhysicalBytes(16)) 16L else 32L) ||
                     le32(hdr, 20) != 512L || le32(hdr, 24) != 9L || le64(hdr, 32) != card.generation)
@@ -676,18 +618,11 @@ internal fun checkImportedSiblings(dir: File, frond: File, swap: Boolean = false
     val nandFile = File(dir, NAND_FILE)
     val want = nand
     if (want == null) return if (nandFile.isFile) mismatch else null
-    // v2 only: main bytes, then the spare bytes from the next MiB, one CRC a MiB of both.
+    // v2 only: main bytes, then the spare bytes from the next MiB.
     if (!nandFile.isFile) return mismatch
-    val hdr = nandFile.inputStream().use { it.readExact(64) }
-    if (hdr.size != 64 || !hdr.copyOfRange(0, 8).contentEquals("FRONDNA\u0000".toByteArray(Charsets.US_ASCII))) return mismatch
-    val stored = storedBytesV2(hdr)
-    val chunks = (stored + (1L shl 20) - 1) / (1L shl 20)
-    if (le32(hdr, 8) != 2L || le32(hdr, 12) != 512L || le64(hdr, 16) != want.physical / 33 * 32 ||
-        le64(hdr, 48) * 32 != le64(hdr, 16) || le64(hdr, 28) != want.generation || le64(hdr, 36) != 64 + stored ||
-        le32(hdr, 44) != (1L shl 20) || nandFile.length() != 64 + stored + 4 * chunks)
+    val info = CardFile.info(nandFile, checked = true) ?: return mismatch
+    if (!info.nand || info.payload != want.physical / 33 * 32 || info.side * 32 != info.payload || info.generation != want.generation)
         return mismatch
-    if (hdr.copyOfRange(56, 64).any { it != 0.toByte() }) return mismatch
-    if (CardStorage.verify(nandFile.path) < 0) return mismatch
     return null
 }
 
@@ -792,11 +727,9 @@ internal fun sdSettleOf(dir: File, frond: File? = sessionFile(dir), nand: Boolea
     val none = SdSettle(null, null, sibling)
     if (want == 0L) return none
     val sd = File(dir, sibling)
-    val hdr = try { if (sd.isFile) sd.inputStream().use { it.readExact(64) } else ByteArray(0) } catch (e: IOException) { ByteArray(0) }
-    val v2 = hdr.size == 64 && (hdr.copyOfRange(0, 8).contentEquals("FRONDSD\u0000".toByteArray(Charsets.US_ASCII)) ||
-        hdr.copyOfRange(0, 8).contentEquals("FRONDMS\u0000".toByteArray(Charsets.US_ASCII)) ||
-        hdr.copyOfRange(0, 8).contentEquals("FRONDNA\u0000".toByteArray(Charsets.US_ASCII))) && le32(hdr, 8) == 2L
-    val have = if (v2) le64(hdr, 28) else 0L
+    val info = if (sd.isFile) CardFile.info(sd) else null
+    val v2 = info?.version == 2L
+    val have = if (v2) info!!.generation else 0L
     if (v2 && have == want) return none
     val full = File(dir, "$sibling.journal-$want.full")
     if (full.isFile) return SdSettle(full, null, sibling)
@@ -805,101 +738,10 @@ internal fun sdSettleOf(dir: File, frond: File? = sessionFile(dir), nand: Boolea
     return none
 }
 
-// A checked journal: its header fields, the new table and where each record's data starts.
-internal class SdJournalIndex(val payload: Long, val to: Long, val table: ByteArray, val records: List<LongArray>)
-
-// Checks a whole journal against sd.frondsd's header: trailer CRC, generations and every bound.
-internal fun readSdJournalIndex(journal: File, sdHeader: ByteArray, sdLength: Long): SdJournalIndex? =
-    java.io.RandomAccessFile(journal, "r").use { file ->
-        val size = file.length()
-        if (size < 64 + 16) return null
-        val head = ByteArray(64).also { file.seek(0); file.readFully(it) }
-        val trailer = ByteArray(16).also { file.seek(size - 16); file.readFully(it) }
-        // Version 1 (flags 0) or 2 (flags 0 for a session save, 1 for a standalone change).
-        val version = le32(head, 8)
-        val flags = le32(head, 12)
-        if (!head.copyOfRange(0, 8).contentEquals("FRONDJNL".toByteArray(Charsets.US_ASCII)) ||
-            (if (version == 1L) flags != 0L else version != 2L || flags > 1L) ||
-            !trailer.copyOfRange(0, 8).contentEquals("FRONDEND".toByteArray(Charsets.US_ASCII)) || le32(trailer, 12) != 0L)
-            return null
-        val payload = le64(head, 16)
-        val from = le64(head, 24)
-        val to = le64(head, 32)
-        val count = le64(head, 40)
-        val chunks = le64(head, 48)
-        if (le32(sdHeader, 8) != 2L || storedBytesV2(sdHeader) != payload || le64(sdHeader, 28) != from || to != from + 1 ||
-            chunks != (payload + (1L shl 20) - 1) / (1L shl 20) || sdLength != 64 + payload + 4 * chunks)
-            return null
-        val body = size - 16
-        val crc = CRC32()
-        val buf = ByteArray(1 shl 20)
-        file.seek(0)
-        var done = 0L
-        while (done < body) {
-            val n = minOf(buf.size.toLong(), body - done).toInt()
-            file.readFully(buf, 0, n)
-            crc.update(buf, 0, n)
-            done += n
-        }
-        if (crc.value != le32(trailer, 8)) return null
-        val records = ArrayList<LongArray>()
-        var at = 64L
-        val rec = ByteArray(12)
-        for (i in 0 until count) {
-            if (at + 12 > body) return null
-            file.seek(at)
-            file.readFully(rec)
-            val offset = le64(rec, 0)
-            val length = le32(rec, 8)
-            if (offset < 0 || offset > payload || length > payload - offset || at + 12 + length > body) return null
-            records.add(longArrayOf(offset, length, at + 12))
-            at += 12 + length
-        }
-        if (body - at != 4 * chunks) return null
-        val table = ByteArray((4 * chunks).toInt()).also { file.seek(at); file.readFully(it) }
-        SdJournalIndex(payload, to, table, records)
-    }
-
-// Writes sd.frondsd with the journal applied: header at the new generation with its CRC, payload
-// with each record laid over it in journal order, then the new table. Checks everything first,
-// so nothing is written for a damaged journal.
-internal fun writeSettledSd(sd: File, journal: File, out: java.io.OutputStream) {
-    val hdr = sd.inputStream().use { it.readExact(64) }
-    if (hdr.size != 64) throw IOException("short card")
-    val index = readSdJournalIndex(journal, hdr, sd.length()) ?: throw IOException("damaged journal")
-    val block = 1L shl 20
-    val byBlock = HashMap<Long, MutableList<LongArray>>()
-    for (r in index.records) {
-        if (r[1] == 0L) continue
-        for (b in r[0] / block..(r[0] + r[1] - 1) / block) byBlock.getOrPut(b) { ArrayList() }.add(r)
-    }
-    val header = hdr.copyOf()
-    for (i in 0 until 8) header[28 + i] = (index.to ushr (8 * i)).toByte()
-    for (i in 24 until 28) header[i] = 0
-    val crc = CRC32().also { it.update(header); it.update(index.table) }.value
-    for (i in 0 until 4) header[24 + i] = (crc ushr (8 * i)).toByte()
-    out.write(header)
-    java.io.RandomAccessFile(sd, "r").use { card ->
-        java.io.RandomAccessFile(journal, "r").use { j ->
-            val buf = ByteArray(block.toInt())
-            var pos = 0L
-            while (pos < index.payload) {
-                val n = minOf(block, index.payload - pos).toInt()
-                card.seek(64 + pos)
-                card.readFully(buf, 0, n)
-                for (r in byBlock[pos / block].orEmpty()) {
-                    val start = maxOf(r[0], pos)
-                    val end = minOf(r[0] + r[1], pos + n)
-                    j.seek(r[2] + (start - r[0]))
-                    j.readFully(buf, (start - pos).toInt(), (end - start).toInt())
-                }
-                out.write(buf, 0, n)
-                pos += n
-            }
-        }
-    }
-    out.write(index.table)
-}
+// Writes the card file `sd` with the save journal `journal` applied (the storage library's
+// writeApplied), neither file changed. Throws IOException when the journal doesn't apply, before
+// anything is written.
+internal fun writeSettledSd(sd: File, journal: File, out: java.io.OutputStream) = CardFile.settledCopy(sd, journal, out)
 
 // Moves the cards `frond` needs from a recovery folder into `dest`: sd.frondsd with the journal
 // an unfinished save left (the load replays it), or the full copy in its place. ms.frondmsp and a

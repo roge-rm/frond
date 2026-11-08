@@ -26,11 +26,14 @@ class PalmDatabases(private val context: Context, private val link: ControlLink)
     }
 
     // Installs a picked .prc or .pdb and returns the core's result, e.g. "Application installed.".
-    fun install(uri: Uri): String {
+    fun install(uri: Uri): String = install { context.contentResolver.openInputStream(uri) }
+
+    // The same from any stream, like a file in a picked folder.
+    fun install(open: () -> java.io.InputStream?): String {
         folder.mkdirs()
         val copy = File(folder, "install.pdb")
         try {
-            copyIn(uri, copy)
+            copyIn(open, copy)
             return run("install", copy.path).message
         } finally {
             copy.delete()
@@ -89,9 +92,12 @@ class PalmDatabases(private val context: Context, private val link: ControlLink)
         }
     }
 
-    private fun copyIn(uri: Uri, to: File) {
+    // One database as the core exports it: a ZIP holding its .prc or .pdb. The ZIP goes when use returns.
+    fun <T> exported(name: String, use: (File) -> T): T = withExport(name, use)
+
+    private fun copyIn(open: () -> java.io.InputStream?, to: File) {
         try {
-            val input = context.contentResolver.openInputStream(uri) ?: throw Failed("Couldn't read that file.")
+            val input = open() ?: throw Failed("Couldn't read that file.")
             input.use { i -> to.outputStream().use { i.copyTo(it, 1 shl 16) } }
         } catch (e: IOException) {
             to.delete()

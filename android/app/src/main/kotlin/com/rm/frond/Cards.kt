@@ -166,15 +166,16 @@ object Cards {
 
     // The SD, Pro or classic v2 generation, or a v1 classic stick's change counter, and the logical
     // size, from a card file's header.
+    // A v1 classic stick isn't a container, so only its header is read here.
     fun cardHeader(file: File): Pair<Long, Long>? = try {
-        val h = CardFile.header(file) ?: return null
-        val magic = String(h, 0, 8, Charsets.US_ASCII)
-        when (magic) {
-            "FRONDSD\u0000" -> (if (le32(h, 8) == 2L) le64(h, 28) else 0L) to le64(h, 16)
+        val info = CardFile.info(file)
+        when {
+            info?.kind == 0 -> info.generation to info.payload
             // Each MB is 2048 pages of 512 bytes plus 9.
-            "FRONDMS\u0000" -> if (classicV2(h)) le64(h, 28) to classicV2Physical(h) / 521 * 512
-                else le64(h, 32) to le32(h, 12) * le32(h, 16) * 512
-            else -> null
+            info?.classic == true -> info.generation to classicV2Physical(info.payload, info.side) / 521 * 512
+            info != null -> null
+            else -> CardFile.header(file)?.takeIf { String(it, 0, 8, Charsets.US_ASCII) == "FRONDMS\u0000" && le32(it, 8) == 1L }
+                ?.let { h -> le64(h, 32) to le32(h, 12) * le32(h, 16) * 512 }
         }
     } catch (e: IOException) {
         null
@@ -887,10 +888,10 @@ object Cards {
         return null
     }
 
-    // A folder copied once onto a new card named `name` (SD or Memory Stick Pro, `size` in MiB): a
-    // blank FAT16 image, the tree copied in with FatImage, then the card tool makes the card file.
-    // All inside cards/.new-<id>, so a refusal, an error or Cancel leaves nothing. Progress runs
-    // 0 to 1000: the copy is the first half, the card file the second.
+    // A folder copied once onto a new card named `name` (SD or Memory Stick Pro, `size` in MiB): the
+    // card tool makes a new card file, then the tree goes onto it through the storage library in
+    // one commit, as on the desktop. All inside cards/.new-<id>, so a refusal, an error or Cancel
+    // leaves nothing. Progress runs 0 to 1000: the card file to 200, the files the rest.
     fun importFolderCard(sessions: File, root: FolderCard.Node, name: String, kind: String, size: Int,
                          cancelled: () -> Boolean = { false }, progress: ((Long, Long) -> Unit)? = null,
                          made: ((String) -> Unit)? = null): String? {
@@ -904,23 +905,25 @@ object Cards {
         if (!FolderCard.fits(plan, size)) return "The folder doesn't fit on a ${Device.sizeLabel(size)} card."
         val cardBytes = size.toLong() shl 20
         val free = freeSpace(library)
-        if (free >= 0 && free < 2 * cardBytes + plan.bytes + SPARE_BYTES) return spaceMessage(2 * cardBytes + plan.bytes)
+        if (free >= 0 && free < cardBytes + SPARE_BYTES) return spaceMessage(cardBytes)
         NewCopy(library).use { copy ->
             if (!copy.ok) return "Couldn't add the card."
-            val raw = File(copy.dir, ".work.img")
-            try {
-                FolderCard.blank(raw, size)
-            } catch (e: IOException) {
-                return "Couldn't make the card."
-            }
-            FolderCard.copy(raw, root, plan, cancelled) { done, total -> progress?.invoke(done * 500 / total, 1000) }?.let { return it }
-            if (cancelled()) return COPY_CANCELLED
             val file = File(copy.dir, fileOfKind(kind))
-            val r = runTool(arrayOf("import", raw.path, toolKind(kind), file.path), cancelled) { done, total ->
-                progress?.invoke(500 + done * 500 / maxOf(total, 1), 1000)
+            val r = runTool(arrayOf("make", toolKind(kind), size.toString(), file.path), cancelled) { done, total ->
+                progress?.invoke(done * 200 / maxOf(total, 1), 1000)
             }
             if (!r.ok) return toolError(r)
-            raw.delete()
+            if (cancelled()) return COPY_CANCELLED
+            try {
+                CardFile.open(file, true).use { card ->
+                    FatImage.over(card).use { fat ->
+                        FolderCard.fill(fat, root, plan, cancelled) { done, total -> progress?.invoke(200 + done * 800 / total, 1000) }
+                            ?.let { return it }
+                    }
+                }
+            } catch (e: IOException) {
+                return "Couldn't copy the folder: ${e.message ?: "write error"}"
+            }
             val logical = cardHeader(file)?.second ?: return "Couldn't add the card."
             adoptNew(library, copy, Card(copy.id, wanted, kind, now(), null, logical, newIdentity(), false))?.let { return it }
             made?.invoke(copy.id)
