@@ -687,6 +687,7 @@ internal fun checkImportedSiblings(dir: File, frond: File, swap: Boolean = false
         le32(hdr, 44) != (1L shl 20) || nandFile.length() != 64 + stored + 4 * chunks)
         return mismatch
     if (hdr.copyOfRange(56, 64).any { it != 0.toByte() }) return mismatch
+    if (CardStorage.verify(nandFile.path) < 0) return mismatch
     return null
 }
 
@@ -952,6 +953,14 @@ internal fun unzipPackable(input: java.io.InputStream, dest: File): Boolean = tr
         while (true) {
             val entry = zip.nextEntry ?: break
             val name = File(entry.name).name
+            if (!entry.isDirectory && name == "$NAND_FILE.gz") {
+                // A desktop export carries the NAND packed; the gzip stream checks its CRC and size.
+                if (File(dest, NAND_FILE).exists()) continue
+                val part = File(dest, ".$NAND_FILE.tmp-unzip")
+                part.outputStream().use { java.util.zip.GZIPInputStream(zip.nonClosing(), 1 shl 16).copyTo(it, 1 shl 20) }
+                if (!part.renameTo(File(dest, NAND_FILE))) throw IOException("Couldn't unpack the NAND.")
+                continue
+            }
             if (entry.isDirectory || !packableName(name)) continue
             File(dest, name).outputStream().use { zip.copyTo(it, 1 shl 20) }
         }
@@ -959,6 +968,11 @@ internal fun unzipPackable(input: java.io.InputStream, dest: File): Boolean = tr
     sessionFile(dest) != null
 } catch (e: Exception) {
     false
+}
+
+// The stream without close(), so a reader wrapped round one zip entry leaves the zip open.
+private fun java.io.InputStream.nonClosing() = object : java.io.FilterInputStream(this) {
+    override fun close() {}
 }
 
 // "Palm TX 2" gives "Palm TX" when a machine called "Palm TX" exists; "Zire 72" stays as it is.

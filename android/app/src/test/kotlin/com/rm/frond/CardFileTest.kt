@@ -410,7 +410,7 @@ class CardFileTest {
         }
         fun keep(name: String, file: File) {
             file.copyTo(File(out, name), true)
-            for ((path, bytes) in files) File(out, "$name.files$path").also { it.parentFile.mkdirs() }.writeBytes(bytes)
+            for ((path, bytes) in files) File(out, "$name.files$path").also { it.parentFile?.mkdirs() }.writeBytes(bytes)
         }
         val v2 = card("core-v2")
         visit(v2, ::fill)

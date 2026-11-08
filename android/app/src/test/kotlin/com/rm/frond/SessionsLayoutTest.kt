@@ -226,9 +226,42 @@ class SessionsLayoutTest {
         val side = units * 16
         val stored = (payload + (1L shl 20) - 1) / (1L shl 20) * (1L shl 20) + side
         val chunks = (stored + (1L shl 20) - 1) / (1L shl 20)
-        return "FRONDNA".toByteArray(Charsets.US_ASCII) + byteArrayOf(0) + put32(2) + put32(512) + put64(payload) +
-            put32(0) + put64(generation) + put64(64 + stored) + put32(1L shl 20) + put64(side) + ByteArray(8) +
-            ByteArray(stored.toInt()) { fill } + ByteArray(4 * chunks.toInt())
+        val body = ByteArray(stored.toInt()) { fill }
+        val table = (0 until chunks.toInt()).fold(ByteArray(0)) { t, i ->
+            val crc = java.util.zip.CRC32()
+            crc.update(body, i shl 20, minOf(1 shl 20, body.size - (i shl 20)))
+            t + put32(crc.value)
+        }
+        val header = "FRONDNA".toByteArray(Charsets.US_ASCII) + byteArrayOf(0) + put32(2) + put32(512) + put64(payload) +
+            put32(0) + put64(generation) + put64(64 + stored) + put32(1L shl 20) + put64(side) + ByteArray(8)
+        val crc = java.util.zip.CRC32().apply { update(header); update(table) }
+        put32(crc.value).copyInto(header, 24)
+        return header + body + table
+    }
+
+    @Test fun zipWithPackedNandUnpacks() {
+        val nand = tinyNand(2)
+        fun zipOf(packed: ByteArray): ByteArray {
+            val out = ByteArrayOutputStream()
+            java.util.zip.ZipOutputStream(out).use { zip ->
+                zip.putNextEntry(java.util.zip.ZipEntry("session.frond")); zip.write(v9WithNand(2)); zip.closeEntry()
+                zip.putNextEntry(java.util.zip.ZipEntry("$NAND_FILE.gz")); zip.write(packed); zip.closeEntry()
+            }
+            return out.toByteArray()
+        }
+        val gz = ByteArrayOutputStream().also { o -> java.util.zip.GZIPOutputStream(o).use { it.write(nand) } }.toByteArray()
+        val dest = tmp.newFolder("packed")
+        assertTrue(unzipPackable(ByteArrayInputStream(zipOf(gz)), dest))
+        assertTrue(File(dest, NAND_FILE).readBytes().contentEquals(nand))
+        assertFalse(File(dest, "$NAND_FILE.gz").exists())
+        assertNull(checkImportedSiblings(dest, File(dest, "session.frond")))
+        // A damaged pack is refused.
+        val bad = gz.copyOf().also { it[it.size - 6] = (it[it.size - 6].toInt() xor 1).toByte() }
+        assertFalse(unzipPackable(ByteArrayInputStream(zipOf(bad)), tmp.newFolder("bad")))
+        // A NAND whose CRCs don't match its bytes is refused.
+        val flipped = nand.copyOf().also { it[5000] = (it[5000].toInt() xor 1).toByte() }
+        File(dest, NAND_FILE).writeBytes(flipped)
+        assertEquals("That session's card files don't match.", checkImportedSiblings(dest, File(dest, "session.frond")))
     }
 
     @Test fun v9NandFile() {
