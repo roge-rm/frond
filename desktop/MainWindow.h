@@ -112,6 +112,7 @@ class MainWindow : public QMainWindow {
     void notify(const QString& text, int ms = 5000);
     void barChosen(runningRules::Id id);
     void barPressed(RunningBar::Button button);
+    void runShortcut(runningRules::Shortcut what);
     void togglePanel(int page);
     void panelChanged(int page);
     void fitWindow();

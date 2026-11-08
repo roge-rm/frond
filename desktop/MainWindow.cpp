@@ -33,6 +33,7 @@
 #include <QFormLayout>
 #include <QGridLayout>
 #include <QGroupBox>
+#include <QApplication>
 #include <QShortcut>
 #include <QGuiApplication>
 #include <QScreen>
@@ -401,10 +402,6 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         }
     });
     connect(copyButton, &QPushButton::clicked, this, [this] { save(true); });
-    auto* saveShortcut = new QShortcut(QKeySequence::Save, this);
-    connect(saveShortcut, &QShortcut::activated, this, [this] {
-        if (client.running() && client.available() && !busy && !stopping && exchangeStage == ExchangeStage::None) save();
-    });
     auto* logDialog = new QDialog(this);
     logDialog->setWindowTitle(tr("Emulator log")); logDialog->resize(700, 400);
     auto* logLayout = new QVBoxLayout(logDialog);
@@ -427,11 +424,17 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     setCentralWidget(outer);
     setAcceptDrops(true);
     connect(panels, &PanelHost::changed, this, &MainWindow::panelChanged);
-    const std::pair<const char*, int> panelKeys[] = {{"Ctrl+1", 0}, {"Ctrl+2", 1}, {"Ctrl+3", 2}, {"Ctrl+4", 3}};
-    for (const auto& [keys, page] : panelKeys) {
-        auto* shortcut = new QShortcut(QKeySequence(QString::fromLatin1(keys)), this);
-        connect(shortcut, &QShortcut::activated, this, [this, page = page] { if (client.running()) togglePanel(page); });
+    // The same keys the Palm window sends back as shortcut events. F11 waits for full screen and
+    // Quit is the File menu's.
+    for (const auto& key : runningRules::shortcutKeys()) {
+        if (key.what == runningRules::Shortcut::FullScreen || key.what == runningRules::Shortcut::Quit) continue;
+        auto* shortcut = new QShortcut(QKeySequence(QString::fromLatin1(key.keys)), this);
+        connect(shortcut, &QShortcut::activated, this, [this, what = key.what] { runShortcut(what); });
     }
+    connect(&client, &DesktopClient::shortcut, this, [this](const QString& name) {
+        // A dialog in front owns the keys.
+        if (const auto what = runningRules::shortcutFor(name); what && !QApplication::activeModalWidget()) runShortcut(*what);
+    });
     connect(stopButton, &QPushButton::clicked, this, [this] { stop(false); });
     connect(forceButton, &QPushButton::clicked, this, [this] {
         if (QMessageBox::warning(this, tr("Force Stop"), tr("Stop without saving? Changes since the last save will be lost."),
@@ -466,6 +469,12 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
                "On the Zire 72, F1 to F4 are Calendar, Contacts, Music and Camera, and F5 is the side voice button.\n"
                "On the Sony CLIÉ TG50, F1 to F4 are Date Book, Address, To Do and Memo Pad, F5 is the voice button, F6 is Home, and left and right Alt are Blue and Red.\n"
                "Escape: Power, on devices with a power key in the button bar, except the de-NVFS E2\n\n"
+               "Shortcuts, in the Palm window and in this one:\n"
+               "Ctrl+S: Save. Ctrl+Shift+S: Save a copy. Ctrl+W: Save and Stop. Ctrl+I: Install.\n"
+               "Ctrl+1 to Ctrl+4: Applications, Card, Display and Connections panels.\n"
+               "Ctrl+M: Sound on or off. Ctrl+B: Hide or show the bar. Ctrl+L: Emulator log. Ctrl+R: Reset.\n"
+               "F12: Screenshot. Ctrl+Q: Quit.\n"
+               "With the infrared keyboard attached, the Ctrl keys go to the Palm and only F12 is a shortcut.\n\n"
                "Palm OS button assignments may change what the application buttons do."));
     });
     help->addAction(tr("&About Frond"), this, [this] {
@@ -909,6 +918,29 @@ void MainWindow::barChosen(runningRules::Id id) {
         case Id::HardReset: hardResetButton->click(); break;
         case Id::SaveStop: stopButton->click(); break;
         case Id::Network: case Id::FullScreen: break;
+    }
+}
+// Each key does what its bar button or menu row does; a control that is greyed out does nothing.
+void MainWindow::runShortcut(runningRules::Shortcut what) {
+    using runningRules::Shortcut;
+    if (what == Shortcut::Quit) { close(); return; }
+    if (!client.running()) return;
+    const bool idle = client.available() && !busy && !stopping && exchangeStage == ExchangeStage::None;
+    switch (what) {
+        case Shortcut::Save: if (idle) barChosen(runningRules::Id::Save); break;
+        case Shortcut::SaveCopy: if (idle) barChosen(runningRules::Id::SaveCopy); break;
+        case Shortcut::SaveStop: stopButton->click(); break;
+        case Shortcut::Install: if (idle) emit appsPanel->installRequested(); break;
+        case Shortcut::Applications: togglePanel(0); break;
+        case Shortcut::Card: togglePanel(1); break;
+        case Shortcut::Display: togglePanel(2); break;
+        case Shortcut::Connections: togglePanel(3); break;
+        case Shortcut::Sound: soundToggle->click(); break;
+        case Shortcut::HideBar: barChosen(runningRules::Id::HideBar); break;
+        case Shortcut::Log: barChosen(runningRules::Id::Log); break;
+        case Shortcut::Reset: barChosen(runningRules::Id::Reset); break;
+        case Shortcut::Screenshot: screenshot(); break;
+        case Shortcut::FullScreen: case Shortcut::Quit: break;
     }
 }
 void MainWindow::barPressed(RunningBar::Button button) {

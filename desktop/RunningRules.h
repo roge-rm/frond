@@ -92,6 +92,35 @@ inline std::vector<Row> rows(const Traits& t, const State& s) {
 }
 
 // The card button's icon: none without a slot, out with no card, in or ejected.
+// The keys shared by the Qt window and the Palm window. The core sends a name such as "ctrl+s" or
+// "f12" as a shortcut event when the key is pressed over the Palm.
+enum class Shortcut { Save, SaveCopy, SaveStop, Install, Applications, Card, Display, Connections, Sound, HideBar,
+                      Log, Reset, Screenshot, FullScreen, Quit };
+
+struct ShortcutKey {
+    const char* name;  // as the core sends it
+    const char* keys;  // as Qt writes it
+    Shortcut what;
+};
+
+inline const std::vector<ShortcutKey>& shortcutKeys() {
+    static const std::vector<ShortcutKey> all = {
+        {"ctrl+s", "Ctrl+S", Shortcut::Save},           {"ctrl+shift+s", "Ctrl+Shift+S", Shortcut::SaveCopy},
+        {"ctrl+w", "Ctrl+W", Shortcut::SaveStop},       {"ctrl+i", "Ctrl+I", Shortcut::Install},
+        {"ctrl+1", "Ctrl+1", Shortcut::Applications},   {"ctrl+2", "Ctrl+2", Shortcut::Card},
+        {"ctrl+3", "Ctrl+3", Shortcut::Display},        {"ctrl+4", "Ctrl+4", Shortcut::Connections},
+        {"ctrl+m", "Ctrl+M", Shortcut::Sound},          {"ctrl+b", "Ctrl+B", Shortcut::HideBar},
+        {"ctrl+l", "Ctrl+L", Shortcut::Log},            {"ctrl+r", "Ctrl+R", Shortcut::Reset},
+        {"f11", "F11", Shortcut::FullScreen},           {"f12", "F12", Shortcut::Screenshot},
+        {"ctrl+q", "Ctrl+Q", Shortcut::Quit}};
+    return all;
+}
+
+inline std::optional<Shortcut> shortcutFor(const QString& name) {
+    for (const auto& key : shortcutKeys()) if (name == QLatin1String(key.name)) return key.what;
+    return std::nullopt;
+}
+
 enum class CardIcon { None, Out, In, Ejected };
 inline CardIcon cardIcon(bool slot, bool known, bool present, bool inserted) {
     if (!slot) return CardIcon::None;

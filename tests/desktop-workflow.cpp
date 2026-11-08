@@ -2164,11 +2164,20 @@ for line in s.makefile('rb'):
         QFile core(dir + "/core");
         QVERIFY(core.open(QIODevice::WriteOnly));
         core.write(QByteArray(R"PY(#!/usr/bin/python3
-import socket,sys
+import socket,sys,threading,os,time
 s=socket.socket(socket.AF_UNIX)
 s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
 s.sendall(b'0\tevent\tready\t\n')
-log=open(sys.argv[0].rsplit('/',1)[0]+'/sent','a')
+here=sys.argv[0].rsplit('/',1)[0]
+log=open(here+'/sent','a')
+# Lines put in the "emit" file go to the app as shortcut events.
+def emit():
+    while True:
+        time.sleep(0.02)
+        try: lines=open(here+'/emit').read().split(); os.remove(here+'/emit')
+        except OSError: continue
+        for name in lines: s.sendall(b'0\tevent\tshortcut\t'+name.encode().hex().encode()+b'\n')
+threading.Thread(target=emit,daemon=True).start()
 mic=b'off'
 for line in s.makefile('rb'):
     i,cmd,arg=line.rstrip(b'\n').split(b'\t')
@@ -2184,6 +2193,94 @@ for line in s.makefile('rb'):
 )PY").replace("DEVICE", device));
         core.close();
         QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+    }
+    // Keys pressed over the Palm come back as shortcut events and do what the bar does.
+    void shortcuts() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        putSession("Keys", 6, "palm-tx", 0);
+        QTemporaryDir files;
+        const auto sent = files.path() + "/sent";
+        menuCore(files.path(), "palm-tx");
+        if (QTest::currentTestFailed()) return;
+        auto commands = [&] {
+            QFile f(sent); if (!f.open(QIODevice::ReadOnly)) return QStringList();
+            return QString::fromUtf8(f.readAll()).split('\n', Qt::SkipEmptyParts);
+        };
+        auto press = [&](const QString& names) {
+            QFile f(files.path() + "/emit.tmp"); QVERIFY(f.open(QIODevice::WriteOnly)); f.write(names.toUtf8()); f.close();
+            QVERIFY(QFile::rename(f.fileName(), files.path() + "/emit"));
+            QTRY_VERIFY_WITH_TIMEOUT(!QFile::exists(files.path() + "/emit"), 3000);
+        };
+        MainWindow window(files.path() + "/core"); window.show(); window.openSession(managedSession("Keys"), true);
+        auto* bar = window.findChild<RunningBar*>("runningBar");
+        QTRY_VERIFY_WITH_TIMEOUT(bar->isVisible() && window.findChild<QPushButton*>("save")->isEnabled(), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QAction*>("machineSave")->isEnabled(), 4000);
+        press("ctrl+s");
+        QTRY_VERIFY_WITH_TIMEOUT(commands().size() == 1 && commands()[0].startsWith("save ") && commands()[0].endsWith("/Keys.frond"), 4000);
+        QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("save")->isEnabled(), 4000);
+        // An unknown name does nothing; Ctrl+B hides the bar and shows it again.
+        press("ctrl+z");
+        press("ctrl+b");
+        QTRY_VERIFY(!bar->isVisible());
+        press("ctrl+b");
+        QTRY_VERIFY(bar->isVisible());
+        // Ctrl+1 opens the Applications panel and closes it again.
+        auto* panels = window.findChild<PanelHost*>("panelHost");
+        press("ctrl+1");
+        QTRY_COMPARE(panels->current(), 0);
+        press("ctrl+1");
+        QTRY_COMPARE(panels->current(), -1);
+        press("ctrl+3");
+        QTRY_COMPARE(panels->current(), 2);
+        press("ctrl+3");
+        QTRY_COMPARE(panels->current(), -1);
+        press("ctrl+m");
+        QTRY_VERIFY_WITH_TIMEOUT(commands().contains("audio-off "), 4000);
+        press("f12");
+        QTRY_VERIFY_WITH_TIMEOUT(commands().last().startsWith("input-replay 0 snapshot \""), 4000);
+        // The same keys work with the Qt window in front.
+        const auto before = commands().size();
+        QTest::keyClick(&window, Qt::Key_S, Qt::ControlModifier);
+        QTRY_VERIFY_WITH_TIMEOUT(commands().size() == before + 1 && commands().last().startsWith("save "), 4000);
+    }
+    // The arrow keys walk every row of the Machine menu, the red Hard reset… row included, both ways.
+    void machineMenuKeys() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        putSession("Nav", 6, "palm-tx", 0);
+        QTemporaryDir files;
+        menuCore(files.path(), "palm-tx");
+        if (QTest::currentTestFailed()) return;
+        MainWindow window(files.path() + "/core"); window.show(); window.openSession(managedSession("Nav"), true);
+        auto* bar = window.findChild<RunningBar*>("runningBar");
+        QTRY_VERIFY_WITH_TIMEOUT(bar->isVisible() && window.findChild<QAction*>("machineSave")->isEnabled(), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QAction*>("machineHardReset")->isEnabled(), 4000);
+        auto* menu = bar->menu();
+        QStringList rows;
+        for (auto* a : menu->actions()) if (!a->isSeparator() && a->isVisible() && a->isEnabled()) rows << a->objectName();
+        QVERIFY(rows.contains("machineHardReset"));
+        menu->popup(window.mapToGlobal(QPoint(40, 40)));
+        QTRY_VERIFY(menu->isVisible());
+        QStringList down, up;
+        auto active = [&] { auto* a = menu->activeAction(); return a ? a->objectName() : QString("-"); };
+        // A real popup hands keys to the focused row widget first.
+        auto key = [&](Qt::Key k) { QTest::keyClick(menu->focusWidget() ? menu->focusWidget() : menu, k); };
+        for (int i = 0; i < rows.size(); ++i) { key(Qt::Key_Down); down << active(); }
+        QCOMPARE(down, rows);
+        for (int i = rows.size() - 2; i >= 0; --i) { key(Qt::Key_Up); up << active(); }
+        QStringList back = rows; std::reverse(back.begin(), back.end()); back.removeFirst();
+        QCOMPARE(up, back);
+        // Enter on the red row triggers it.
+        QSignalSpy hard(window.findChild<QAction*>("machineHardReset"), &QAction::triggered);
+        QTimer dismiss; dismiss.setInterval(30);
+        connect(&dismiss, &QTimer::timeout, &window, [&] { if (auto* box = window.findChild<QMessageBox*>(); box && box->isVisible()) box->done(QMessageBox::Cancel); });
+        dismiss.start();
+        for (int i = 0; i < rows.size() && active() != "machineHardReset"; ++i) key(Qt::Key_Down);
+        QCOMPARE(active(), QString("machineHardReset"));
+        key(Qt::Key_Return);
+        QCOMPARE(hard.count(), 1);
+        QVERIFY(!menu->isVisible());
     }
     // The Machine menu and the bar: each row sends its command to the core.
     void runningMenu() {

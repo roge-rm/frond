@@ -179,6 +179,17 @@ class RunningRulesTest : public QObject {
         QCOMPARE(data[0].name, QString("Memo Data"));
         QVERIFY(dataOf(all, apps[0]).empty());
     }
+    void shortcutNames() {
+        QCOMPARE(*shortcutFor("ctrl+s"), Shortcut::Save);
+        QCOMPARE(*shortcutFor("ctrl+shift+s"), Shortcut::SaveCopy);
+        QCOMPARE(*shortcutFor("ctrl+3"), Shortcut::Display);
+        QCOMPARE(*shortcutFor("f12"), Shortcut::Screenshot);
+        QVERIFY(!shortcutFor("ctrl+z") && !shortcutFor("") && !shortcutFor("CTRL+S"));
+        QStringList names, keys;
+        for (const auto& key : shortcutKeys()) { QVERIFY(!names.contains(key.name) && !keys.contains(key.keys)); names << key.name; keys << key.keys; }
+        // The core's name is the Qt sequence in lower case.
+        for (const auto& key : shortcutKeys()) QCOMPARE(QString(key.keys).toLower(), QString(key.name));
+    }
 };
 QTEST_APPLESS_MAIN(RunningRulesTest)
 #include "running-rules.moc"

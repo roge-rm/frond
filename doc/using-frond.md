@@ -47,6 +47,8 @@ On Android the controls sit in a bar along the top of the running machine. Taps 
 
 On Linux the bar sits at the top of Frond's window while a machine runs, above a Machine menu with the same rows as ⋮ on Android (Hard reset… is red). The Palm stays in its own window. Applications, Card, Display and Connections open as a panel under the bar and the window grows to fit it. Ctrl+1 to Ctrl+4 open and close them, and so does the bar button or the panel's ✕.
 
+Shortcuts work in the Palm window and in Frond's: Ctrl+S Save, Ctrl+Shift+S Save a copy, Ctrl+W Save and Stop, Ctrl+I Install, Ctrl+M Sound, Ctrl+B Hide bar, Ctrl+L Emulator log, Ctrl+R Reset, F12 Screenshot, Ctrl+Q Quit. With the infrared keyboard attached the Ctrl keys go to the Palm, and only F11 and F12 still come back to Frond.
+
 - Applications lists the installed apps, each with Launch, Export and Delete. Double-click launches. Dropping PRC and PDB files on the window installs them.
 - Card has the card controls below. Display has Contrast (Palm IIIx), Sound, Microphone and Rotate. Connections has infrared beaming, Bluetooth, serial, USB HotSync, HotSync and Pair with another Frond…, which opens Pairing.
 

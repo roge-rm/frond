@@ -1,6 +1,8 @@
 #include "RunningBar.h"
 #include "Icons.h"
+#include <QCoreApplication>
 #include <QKeyEvent>
+#include <algorithm>
 #include <QPainter>
 #include <QWidgetAction>
 #include <QActionGroup>
@@ -20,6 +22,8 @@ class RedItem : public QWidget {
         setMouseTracking(true);
         setAttribute(Qt::WA_Hover);
         setEnabled(action->isEnabled());
+        // The menu's arrow-key highlight moves without the mouse, so repaint when it does.
+        if (auto* menu = qobject_cast<QMenu*>(parentWidget())) connect(menu, &QMenu::hovered, this, [this] { update(); });
     }
     QSize sizeHint() const override {
         return {fontMetrics().horizontalAdvance(act->text()) + 52, fontMetrics().height() + 10};
@@ -27,7 +31,8 @@ class RedItem : public QWidget {
  protected:
     void paintEvent(QPaintEvent*) override {
         QPainter p(this);
-        const bool lit = isEnabled() && (underMouse() || hasFocus());
+        const auto* menu = qobject_cast<QMenu*>(parentWidget());
+        const bool lit = isEnabled() && (underMouse() || hasFocus() || (menu && menu->activeAction() == act));
         if (lit) p.fillRect(rect(), palette().color(QPalette::Highlight));
         QColor colour(205, 40, 40);
         if (!isEnabled()) colour = palette().color(QPalette::Disabled, QPalette::Text);
@@ -39,8 +44,15 @@ class RedItem : public QWidget {
         if (e->button() == Qt::LeftButton && rect().contains(e->position().toPoint())) choose();
     }
     void keyPressEvent(QKeyEvent* e) override {
+        static const int navigation[] = {Qt::Key_Up, Qt::Key_Down, Qt::Key_Left, Qt::Key_Right, Qt::Key_Home, Qt::Key_End,
+                                         Qt::Key_Escape};
+        auto* menu = qobject_cast<QMenu*>(parentWidget());
         if (e->key() == Qt::Key_Return || e->key() == Qt::Key_Enter || e->key() == Qt::Key_Space) choose();
-        else QWidget::keyPressEvent(e);
+        else if (menu && std::find(std::begin(navigation), std::end(navigation), e->key()) != std::end(navigation)) {
+            // The menu walks its rows, this one included.
+            QCoreApplication::sendEvent(menu, e);
+            e->accept();
+        } else QWidget::keyPressEvent(e);
     }
     void actionEvent(QActionEvent* e) override {
         if (e->type() == QEvent::ActionChanged) { setEnabled(act->isEnabled()); updateGeometry(); update(); }
