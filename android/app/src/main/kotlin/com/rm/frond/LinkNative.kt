@@ -32,6 +32,10 @@ object LinkNative {
     @JvmStatic external fun linkPeerName(h: Long): String
     @JvmStatic external fun linkRtt(h: Long): Long
 
+    // The Bluetooth radio choice once Up: ours, and the peer's as [senderHolds 0 or 1, at ms] or null.
+    @JvmStatic external fun linkSendRadio(h: Long, senderHolds: Boolean, at: Long)
+    @JvmStatic external fun linkNextRadio(h: Long): LongArray?
+
     @JvmStatic external fun muxOpen(h: Long, kind: Int, machine: String, device: String): Int
     @JvmStatic external fun muxAccept(h: Long, ch: Int, machine: String, device: String): Boolean
     @JvmStatic external fun muxWaiting(h: Long, ch: Int): Boolean

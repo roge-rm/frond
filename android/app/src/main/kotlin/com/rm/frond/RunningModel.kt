@@ -658,8 +658,9 @@ class RunningModel(
         UsbLink.set(activity.applicationContext, l, mode)
     }
 
-    // Bluetooth over the network, as the relay says, and what the core says about the Palm's radio.
-    var bluetooth by mutableStateOf(BtLink.status.value)
+    // Bluetooth on This Frond's radio or a connection, as BluetoothLink says, and what the core says about
+    // the Palm's radio.
+    var bluetooth by mutableStateOf(BluetoothLink.status.value)
         private set
     var radio by mutableStateOf<String?>(null)
         private set
@@ -672,7 +673,7 @@ class RunningModel(
     fun watchBluetooth() {
         if (bluetoothWatcher != null) return
         bluetoothWatcher = activity.lifecycleScope.launch {
-            BtLink.status.collect {
+            BluetoothLink.status.collect {
                 bluetooth = it
                 ++bluetoothEpoch
                 radio = null
@@ -724,8 +725,12 @@ class RunningModel(
         }
     }
 
-    fun changeBluetooth(mode: BtMode) = device("Changing Bluetooth", "Couldn't change Bluetooth", false) { l ->
-        BtLink.set(activity.applicationContext, l, mode).also { activity.runOnUiThread { readRadio() } }
+    // Off, radio or link:<id>: kept in the machine's settings, then applied to the core and the link.
+    fun changeBluetooth(choice: String) = device("Changing Bluetooth", "Couldn't change Bluetooth", false) { l ->
+        sessionId?.let { id -> Sessions.updateSettings(activity.applicationContext, id) { it.copy(bluetooth = choice) } }
+        activity.runOnUiThread { settings = settings.copy(bluetooth = choice) }
+        if (InfraredChoice.linkId(choice) != null) FrondActivity.running?.askLocalNetwork()
+        BluetoothLink.apply(activity.applicationContext, l, choice, name, device.label).also { activity.runOnUiThread { readRadio() } }
     }
 
     // Both go back to the Palm, where the reset or rotation shows.

@@ -1,7 +1,10 @@
 package com.rm.frond
 
+import android.net.LocalServerSocket
 import android.net.LocalSocket
 import android.net.LocalSocketAddress
+import android.system.Os
+import android.system.OsConstants
 import android.util.Log
 import com.rm.frond.LinkWire.EventKind
 import com.rm.frond.LinkWire.LinkError
@@ -10,6 +13,7 @@ import com.rm.frond.LinkWire.PairResult
 import com.rm.frond.LinkWire.PeerState
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.Closeable
 import java.io.IOException
 import java.net.Inet4Address
 import java.net.InetAddress
@@ -30,7 +34,7 @@ import java.util.concurrent.Semaphore
 
 // The Android side of Connections, the same job as the desktop's frond --link-service (desktop/LinkHub.cpp)
 // and the same wire: the store, discovery, the TCP listener, links to paired installs and the running
-// machine's infrared and serial sockets. Clients (the Connections screen, the running machine) send it the hub's JSON
+// machine's infrared, serial and Bluetooth sockets. Clients (the Connections screen, the running machine) send it the hub's JSON
 // ops and get its events. One thread runs everything: sockets on a Selector, the native link objects,
 // and every client op, posted from other threads.
 class LinkEngine(private val store: LinkStore, private val host: Host) {
@@ -43,6 +47,12 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         fun networkAllowed(): Boolean = true
         // The engine stopped by itself (yield, or a failure); called on its thread.
         fun stopped() {}
+        // This Frond's radio (BtLink): start returns the socket its controllers connect to, or null when
+        // there's none. Called on the engine thread.
+        fun radioAvailable(): Boolean = false
+        fun startRadio(): String? = null
+        fun radioRunning(): Boolean = false
+        fun stopRadio() {}
     }
 
     // Gets events on the engine thread. Must not block for long.
@@ -103,6 +113,10 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         val kind: Int = LinkWire.KIND_INFRARED,
     ) {
         val serial get() = kind == LinkWire.KIND_SERIAL
+        val bt get() = kind == LinkWire.KIND_BLUETOOTH
+        // Bluetooth: the engine's socket the core connects to, once per controller.
+        var btServer: LocalServerSocket? = null
+        var btBound: LocalSocket? = null
         // Serial: the reader takes one buffer from the core at a time and waits on the gate until the mux has
         // taken it all (outHeld is what didn't fit yet), so the core's queue fills and its CTS drops. Bytes
         // from the link go to the writer thread; credit goes back as it writes them (unacked). pendingIn holds
@@ -129,6 +143,32 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         var lastStatus: JSONObject? = null
     }
 
+    // One Bluetooth controller: a core's connection to the engine's socket (ours), or a peer's machine on our
+    // radio. It goes to this Frond's radio, or over a Bluetooth channel to the side whose radio it is.
+    private inner class Controller {
+        var owner: Attach? = null           // the machine here it belongs to; null for a peer's
+        var peer = ""                       // a peer's: the connection it came over, and its machine
+        var machine = ""
+        var core: LocalSocket? = null       // ours: the core's connection
+        var radioSock: LocalSocket? = null  // our radio, for ours on this Frond's radio and for a peer's
+        var radioUp = false
+        var wantsRadio = false
+        var radioTry = 0L
+        var chLink: Conn? = null            // the Bluetooth channel, when the radio is on the other side
+        var ch = 0
+        var open = false                    // the channel was accepted
+        // The near socket (the core's, or the radio's for a peer's) as serial does it: the reader takes one
+        // buffer at a time and waits on the gate until the mux has it all; the writer gives it the link's
+        // bytes and credit goes back as it does (unacked). pending holds what came before the near end was up.
+        var gate: Semaphore? = null
+        var outHeld: ByteArray? = null
+        var outAt = 0
+        var writer: LinkedBlockingQueue<ByteArray>? = null
+        var unacked = 0
+        val pending = ByteArrayOutputStream()
+        var nearGeneration = 0
+    }
+
     private val clock0 = System.nanoTime()
     private fun now() = (System.nanoTime() - clock0) / 1_000_000 + 1_000_000
     private fun wall() = System.currentTimeMillis()
@@ -145,6 +185,13 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
     private val clients = ArrayList<ClientState>()
     private val conns = ArrayList<Conn>()
     private val attaches = ArrayList<Attach>()
+    private val controllers = ArrayList<Controller>()
+    // This Frond's radio, while the engine runs it.
+    private var radioOn = false
+    private var radioPath = ""
+    private var radioStarted = 0L
+    private var radioIdleSince = 0L
+    private var radioFailedAt = 0L
     private val runs = HashMap<String, PeerRun>()
     private val nearby = HashMap<String, Nearby>()
     private val recent = HashMap<String, ArrayList<Long>>()
@@ -244,8 +291,10 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
             }
             removeConn(c)
         }
-        for (a in attaches) closeCore(a)
+        for (k in ArrayList(controllers)) dropController(k, false)
+        for (a in attaches) { closeCore(a); closeBtServer(a) }
         attaches.clear()
+        if (radioOn) { host.stopRadio(); radioOn = false }
         endPairRequest("cancelled")
         try { listener?.close() } catch (_: IOException) {}
         try { udp?.close() } catch (_: IOException) {}
@@ -382,6 +431,16 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
                 pairOut = PairOut()
             }
             "pair-dismiss" -> if (code != 0L) endPairRequest("cancelled")
+            "peer-radio" -> {
+                val p = store.find(op.optString("id")) ?: return
+                val here = op.optString("radio") != "there"
+                val at = maxOf(wall(), p.bluetoothRadioAt + 1)
+                setRadio(p.id, here, at)
+                val link = runs[p.id]?.link
+                if (link != null && link.up && link.link != 0L) { LinkNative.linkSendRadio(link.link, here, at); pump(link) }
+            }
+            "bt-attach" -> btAttach(c, op)
+            "bt-detach" -> for (a in ArrayList(attaches)) if (a.client === c && a.bt) removeAttach(a)
             "ir-attach", "serial-attach" -> {
                 val kind = if (op.optString("op") == "ir-attach") LinkWire.KIND_INFRARED else LinkWire.KIND_SERIAL
                 if (attaches.any { it.client === c && it.kind == kind }) return
@@ -558,6 +617,7 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         }
         if (c.up) muxEvents(c)
         if (c !in conns) return
+        if (c.up) btRadioChoices(c)
         pump(c)
         if (c !in conns) return
         if (linkState(c) == LinkState.DOWN && !c.closing) {
@@ -599,11 +659,13 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         }
         store.save()
         matchPeer(c.peer)
+        btLinkUp(c)
     }
 
     // The link went: its channels are gone, the machines on it wait again.
     private fun linkDown(c: Conn) {
         for (a in attaches) if (a.chLink === c) clearChannel(a)
+        btLinkDown(c)
         if (c.peer.isNotEmpty()) runs[c.peer]?.let { r ->
             if (r.link === c) { r.link = null; r.held.clear(); r.nextTry = now() + LinkWire.backoff(0) }
             if (r.dialing === c) r.dialing = null
@@ -627,7 +689,9 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
                 flush(c)
                 if (c !in conns) return
             }
-            if (round == 1 || c.closing || !pullSerial(c)) break
+            if (round == 1 || c.closing) break
+            val serialMoved = pullSerial(c)
+            if (!(pullBluetooth(c) || serialMoved)) break
         }
         flush(c)
     }
@@ -885,13 +949,14 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
             val e = LinkWire.ChannelEvent.decode(raw) ?: continue
             val r = run(c.peer)
             r.idleSince = now()
+            if (e.kind != EventKind.OPEN_REQUEST) controllerOn(c, e.channel)?.let { btChannelEvent(it, e); continue }
             val a = attachOn(c, e.channel)
             when (e.kind) {
-                EventKind.OPEN_REQUEST ->
-                    // Bluetooth comes later.
-                    if (e.channelKind != LinkWire.KIND_INFRARED && e.channelKind != LinkWire.KIND_SERIAL)
-                        LinkNative.muxClose(c.link, e.channel, LinkWire.CLOSE_GONE)
-                    else channelRequest(c, e)
+                EventKind.OPEN_REQUEST -> when (e.channelKind) {
+                    LinkWire.KIND_BLUETOOTH -> btRequest(c, e)
+                    LinkWire.KIND_INFRARED, LinkWire.KIND_SERIAL -> channelRequest(c, e)
+                    else -> LinkNative.muxClose(c.link, e.channel, LinkWire.CLOSE_GONE)
+                }
                 EventKind.ACCEPTED -> if (a != null) joined(a, c, a.ch, e.machine, e.device)
                 EventKind.WAITING -> if (a != null) a.st = St.WAITING
                 EventKind.BUSY -> if (a != null) {
@@ -952,7 +1017,7 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         val c = r.link ?: return
         if (!c.up || c.link == 0L || linkState(c) != LinkState.UP) return
         for (a in attaches) {
-            if (a.link != hex || !(a.st == St.IDLE || a.st == St.BUSY) || a.retryAt > now()) continue
+            if (a.bt || a.link != hex || !(a.st == St.IDLE || a.st == St.BUSY) || a.retryAt > now()) continue
             val at = r.held.indexOfFirst { it.kind == a.kind }
             if (at >= 0) {
                 val h = r.held.removeAt(at)
@@ -977,6 +1042,7 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
     }
 
     private fun removeAttach(a: Attach) {
+        if (a.bt) dropAttachBt(a)
         unjoin(a, true)
         attaches.remove(a)
         dropCore(a)
@@ -1170,9 +1236,350 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         return moved
     }
 
+    // ---- Bluetooth ----
+    // A machine's core connects to the engine's socket for it, once per controller. Each controller goes to
+    // this Frond's radio or, on a connection whose radio is on the other side, over a Bluetooth channel to
+    // that side's radio. Lossless both ways, as serial, with the mux's 64 KB window.
+
+    private fun radioHere(hex: String): Boolean {
+        val p = store.find(hex) ?: return true
+        return LinkWire.radioHere(store.identity.hex, hex, p.bluetoothRadio, p.bluetoothRadioAt)
+    }
+
+    private fun controllerOn(c: Conn, ch: Int) = controllers.firstOrNull { it.chLink === c && it.ch == ch }
+
+    private fun btStatus(a: Attach) = JSONObject().put("type", "bt").put("listening", a.btServer != null)
+        .put("controllers", controllers.count { it.owner === a })
+
+    private fun btAttach(c: ClientState, op: JSONObject) {
+        if (attaches.any { it.client === c && it.bt }) return  // one per client
+        val a = Attach(c, op.optString("machine"), op.optString("device"), op.optString("link"), op.optString("socket"),
+            LinkWire.KIND_BLUETOOTH)
+        attaches += a
+        if (a.socketPath.isNotEmpty()) btListen(a)
+        if (a.link == LinkWire.RADIO) startRadio()
+        else {
+            val r = run(a.link)
+            if (r.link == null && r.dialing == null) { r.nextTry = now(); r.backoff = 0 }
+        }
+    }
+
+    // Listens at the attach's socket path (in a 0700 folder); the accept thread hands each connection over.
+    private fun btListen(a: Attach) {
+        val path = java.io.File(a.socketPath)
+        path.delete()
+        val bound = LocalSocket(LocalSocket.SOCKET_STREAM)
+        val server = try {
+            bound.bind(LocalSocketAddress(path.path, LocalSocketAddress.Namespace.FILESYSTEM))
+            // Listens on the bound socket's descriptor, which stays bound's to close.
+            LocalServerSocket(bound.fileDescriptor)
+        } catch (e: IOException) {
+            Log.w(TAG, "bluetooth: controller socket: $e")
+            shut(bound)
+            return
+        }
+        a.btServer = server
+        a.btBound = bound
+        Thread({
+            while (true) {
+                val s = try { server.accept() } catch (e: IOException) { break }
+                post { if (a in attaches && a.btServer === server) btAccept(a, s) else shut(s) }
+            }
+        }, "FrondLinkBtWait").apply { isDaemon = true }.start()
+    }
+
+    private fun closeBtServer(a: Attach) {
+        val server = a.btServer ?: return
+        // Shutting the descriptor down wakes the thread blocked in accept(), which close() alone doesn't.
+        try { Os.shutdown(server.fileDescriptor, OsConstants.SHUT_RDWR) } catch (_: Exception) {}
+        try { server.close() } catch (_: IOException) {}
+        a.btBound?.let(::shut)
+        a.btServer = null
+        a.btBound = null
+        java.io.File(a.socketPath).delete()
+    }
+
+    private fun dropAttachBt(a: Attach) {
+        for (k in ArrayList(controllers)) if (k.owner === a) dropController(k)
+        closeBtServer(a)
+    }
+
+    // The core made a connection: a new controller.
+    private fun btAccept(a: Attach, s: LocalSocket) {
+        val k = Controller()
+        k.owner = a
+        k.core = s
+        controllers += k
+        btRoute(k)
+    }
+
+    // One of ours goes to this Frond's radio, or over the link once it's up. Until then it waits, unread.
+    private fun btRoute(k: Controller) {
+        val a = k.owner ?: return
+        if (k.wantsRadio || k.chLink != null) return
+        if (a.link == LinkWire.RADIO || (store.find(a.link) != null && radioHere(a.link))) {
+            k.wantsRadio = true
+            btRadioConnect(k)
+            return
+        }
+        val c = runs[a.link]?.link ?: return
+        if (!c.up || c.link == 0L || linkState(c) != LinkState.UP) return
+        val ch = LinkNative.muxOpen(c.link, LinkWire.KIND_BLUETOOTH, a.machine, a.device)
+        if (ch == 0) { dropController(k); return }
+        k.chLink = c; k.ch = ch; k.open = false
+        k.core?.let { startNear(k, it) }
+        pump(c)
+    }
+
+    // The peer puts one of its controllers on our radio.
+    private fun btRequest(c: Conn, e: LinkWire.ChannelEvent) {
+        if (!radioHere(c.peer) || startRadio() == null) { LinkNative.muxClose(c.link, e.channel, LinkWire.CLOSE_GONE); return }
+        val k = Controller()
+        k.peer = c.peer
+        k.machine = e.machine
+        k.chLink = c; k.ch = e.channel; k.open = true
+        k.wantsRadio = true
+        controllers += k
+        LinkNative.muxAccept(c.link, e.channel, store.identity.name, "")
+        btRadioConnect(k)
+    }
+
+    private fun btChannelEvent(k: Controller, e: LinkWire.ChannelEvent) {
+        when (e.kind) {
+            EventKind.ACCEPTED -> { k.open = true; btPull(k) }
+            EventKind.DATA -> {
+                val w = k.writer
+                // Credit goes back once the near socket takes them.
+                if (w != null) { k.unacked += e.data.size; w.offer(e.data) } else k.pending.write(e.data)
+            }
+            EventKind.BUSY, EventKind.CLOSED -> dropController(k, false)
+            else -> {}
+        }
+    }
+
+    // Connects a controller to this Frond's radio. btvirt makes its socket a moment after it starts, so a
+    // refused connect is tried again for a while, else the controller is lost.
+    private fun btRadioConnect(k: Controller) {
+        k.radioTry = now() + RADIO_RETRY_MS
+        if (k.radioSock != null) return
+        val path = startRadio() ?: return  // shown as no radio; it waits
+        val s = LocalSocket()
+        try {
+            s.connect(LocalSocketAddress(path, LocalSocketAddress.Namespace.FILESYSTEM))
+        } catch (e: IOException) {
+            shut(s)
+            val starting = host.radioRunning() && now() - radioStarted < RADIO_START_MS
+            if (!starting) dropController(k)
+            return
+        }
+        k.radioSock = s
+        k.radioUp = true
+        val core = k.core
+        if (k.owner != null && core != null) startPipe(k, core, s) else startNear(k, s)
+    }
+
+    // Ours on this Frond's radio: the core and the radio joined straight, as blocking copies.
+    private fun startPipe(k: Controller, a: LocalSocket, b: LocalSocket) {
+        val generation = k.nearGeneration
+        for ((from, to) in listOf(a to b, b to a)) {
+            Thread({
+                val buffer = ByteArray(BT_AHEAD)
+                try {
+                    val input = from.inputStream
+                    val output = to.outputStream
+                    while (true) {
+                        val n = input.read(buffer)
+                        if (n < 0) break
+                        output.write(buffer, 0, n)
+                    }
+                } catch (_: IOException) {}
+                post { if (k in controllers && k.nearGeneration == generation) dropController(k) }
+            }, "FrondLinkBtPipe").apply { isDaemon = true }.start()
+        }
+    }
+
+    // The near socket of a controller on a channel: a gated reader and a writer, as serial.
+    private fun startNear(k: Controller, s: LocalSocket) {
+        val generation = ++k.nearGeneration
+        val gate = Semaphore(1)
+        val queue = LinkedBlockingQueue<ByteArray>()
+        k.gate = gate
+        k.writer = queue
+        Thread({
+            try {
+                val output = s.outputStream
+                while (true) {
+                    val bytes = queue.take()
+                    if (bytes.isEmpty()) break
+                    output.write(bytes)
+                    post { if (k in controllers && k.nearGeneration == generation) btWritten(k, bytes.size) }
+                }
+            } catch (_: IOException) {
+            } catch (_: InterruptedException) {}
+        }, "FrondLinkBtOut").apply { isDaemon = true }.start()
+        Thread({
+            val buffer = ByteArray(BT_AHEAD)
+            try {
+                val input = s.inputStream
+                while (true) {
+                    gate.acquire()
+                    if (k.nearGeneration != generation) break
+                    val n = input.read(buffer)
+                    if (n < 0) break
+                    val bytes = buffer.copyOf(n)
+                    post { if (k in controllers && k.nearGeneration == generation) btBytes(k, bytes) }
+                }
+            } catch (_: IOException) {
+            } catch (_: InterruptedException) {}
+            post { if (k in controllers && k.nearGeneration == generation) dropController(k) }
+        }, "FrondLinkBtIn").apply { isDaemon = true }.start()
+        if (k.pending.size() > 0) {
+            val held = k.pending.toByteArray()
+            k.pending.reset()
+            k.unacked += held.size
+            queue.offer(held)
+        }
+    }
+
+    private fun btBytes(k: Controller, data: ByteArray) {
+        k.outHeld = data
+        k.outAt = 0
+        btPull(k)
+        k.chLink?.let { pump(it) }
+    }
+
+    // Moves held near bytes into the mux, as far as the channel has room; the reader goes on once they're in.
+    private fun btPull(k: Controller): Boolean {
+        val held = k.outHeld ?: return false
+        val c = k.chLink
+        if (!k.open || c == null || c !in conns || c.link == 0L) return false
+        val took = LinkNative.muxSend(c.link, k.ch, held, k.outAt, held.size - k.outAt)
+        k.outAt += took
+        if (k.outAt >= held.size) { k.outHeld = null; k.gate?.release() }
+        return took > 0
+    }
+
+    private fun pullBluetooth(c: Conn): Boolean {
+        var moved = false
+        for (k in ArrayList(controllers)) if (k.chLink === c && btPull(k)) moved = true
+        return moved
+    }
+
+    private fun btWritten(k: Controller, n: Int) {
+        val c = k.chLink ?: return
+        if (c !in conns || c.link == 0L) return
+        val taken = minOf(n, k.unacked)
+        k.unacked -= taken
+        if (taken > 0) {
+            LinkNative.muxConsumed(c.link, k.ch, taken)
+            pump(c)
+        }
+    }
+
+    // The controller is gone: the core sees its controller lost, the far side's channel closes.
+    private fun dropController(k: Controller, closeChannel: Boolean = true) {
+        if (!controllers.remove(k)) return
+        k.nearGeneration++
+        val c = k.chLink
+        if (closeChannel && c != null && c in conns && c.link != 0L) {
+            LinkNative.muxClose(c.link, k.ch, LinkWire.CLOSE_GONE)
+            pump(c)
+        }
+        k.gate?.release()
+        k.writer?.offer(ByteArray(0))
+        k.radioSock?.let(::shut)
+        k.core?.let(::shut)
+        k.radioSock = null
+        k.core = null
+    }
+
+    private fun btLinkUp(c: Conn) {
+        if (c !in conns || c.link == 0L) return
+        val p = store.find(c.peer)
+        LinkNative.linkSendRadio(c.link, radioHere(c.peer), p?.bluetoothRadioAt ?: 0L)
+        for (k in ArrayList(controllers)) if (k in controllers && k.owner?.link == c.peer) btRoute(k)
+        pump(c)
+    }
+
+    private fun btLinkDown(c: Conn) {
+        for (k in ArrayList(controllers)) if (k.chLink === c) dropController(k, false)
+    }
+
+    // The peer's view of whose radio it is (LinkWire.radioUpdate).
+    private fun btRadioChoices(c: Conn) {
+        while (c in conns && c.link != 0L) {
+            val r = LinkNative.linkNextRadio(c.link) ?: break
+            val p = store.find(c.peer) ?: continue
+            when (val u = LinkWire.radioUpdate(store.identity.hex, c.peer, p.bluetoothRadio, p.bluetoothRadioAt, r[0] != 0L, r[1])) {
+                is LinkWire.RadioUpdate.Take -> setRadio(c.peer, u.here, u.at)
+                LinkWire.RadioUpdate.Answer -> LinkNative.linkSendRadio(c.link, radioHere(c.peer), p.bluetoothRadioAt)
+                LinkWire.RadioUpdate.Keep -> {}
+            }
+        }
+    }
+
+    private fun setRadio(hex: String, here: Boolean, at: Long) {
+        store.find(hex) ?: return
+        store.update(hex) { it.copy(bluetoothRadio = if (here) "here" else "there", bluetoothRadioAt = at) }
+        store.save()
+        btReroute(hex)
+    }
+
+    // Controllers on the side that no longer holds the radio go; the cores reconnect to the new one.
+    private fun btReroute(hex: String) {
+        val here = radioHere(hex)
+        for (k in ArrayList(controllers)) {
+            if (k !in controllers) continue
+            val owner = k.owner
+            if (owner != null && owner.link == hex && ((here && k.chLink != null) || (!here && k.wantsRadio))) dropController(k)
+            else if (owner == null && k.peer == hex && !here) dropController(k)
+        }
+    }
+
+    private fun radioWanted() = controllers.any { it.wantsRadio } || attaches.any { it.bt && it.link == LinkWire.RADIO }
+
+    // This Frond's radio's socket, starting it if it isn't running. Null while there's none.
+    private fun startRadio(): String? {
+        val wasRunning = radioOn && host.radioRunning()
+        if (wasRunning) return radioPath
+        if (radioFailedAt != 0L && now() - radioFailedAt < RADIO_START_MS) return null
+        val path = host.startRadio()
+        if (path == null) { radioFailedAt = now(); return null }
+        radioFailedAt = 0L
+        radioOn = true
+        radioPath = path
+        radioStarted = now()
+        radioIdleSince = now()
+        return path
+    }
+
+    private fun radioTick() {
+        val t = now()
+        for (k in ArrayList(controllers)) if (k in controllers && k.wantsRadio && k.radioSock == null && t >= k.radioTry) btRadioConnect(k)
+        if (!radioOn) return
+        if (radioWanted()) { radioIdleSince = t; return }
+        if (t - radioIdleSince < RADIO_IDLE_MS) return
+        host.stopRadio()
+        radioOn = false
+    }
+
+    private fun peerBluetooth(hex: String): String? {
+        val parts = ArrayList<String>()
+        for (a in attaches) if (a.bt && a.link == hex && controllers.any { it.owner === a }) parts += a.machine
+        for (k in controllers) if (k.owner == null && k.peer == hex && k.machine !in parts) parts += k.machine
+        return if (parts.isEmpty()) null else "Bluetooth: " + parts.joinToString(", ")
+    }
+
+    private fun shut(c: Closeable) {
+        if (c is LocalSocket) {
+            try { Os.shutdown(c.fileDescriptor, OsConstants.SHUT_RDWR) } catch (_: Exception) {}
+        }
+        try { c.close() } catch (_: IOException) {}
+    }
+
     // ---- Discovery ----
 
-    private fun discoveryActive() = watchers() > 0 || pairOut.client != null || attaches.isNotEmpty()
+    private fun discoveryActive() = watchers() > 0 || pairOut.client != null || attaches.any { it.link != LinkWire.RADIO }
 
     private fun beacon(type: Int, to: InetSocketAddress? = null) {
         val d = udp ?: return
@@ -1224,6 +1631,8 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
     // ---- Status ----
 
     private fun status(a: Attach): JSONObject {
+        if (a.bt && a.link == LinkWire.RADIO)
+            return btStatus(a).put("peer", "This Frond").put("state", if (host.radioAvailable()) "radio" else "noradio")
         val p = store.find(a.link)
         val r = runs[a.link]
         val state = when {
@@ -1237,6 +1646,17 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
             r != null && r.failed && r.link == null -> "notfound"
             else -> "connecting"
         }
+        if (a.bt) {
+            // Bluetooth has no channel of its own to wait for: once linked, it's on one side's radio.
+            val o = btStatus(a).put("peer", p?.name ?: "")
+            var st = state
+            if (p != null) {
+                val here = radioHere(a.link)
+                o.put("radio", if (here) "here" else "there")
+                if (st == "connecting") st = if (r?.link?.up == true) { if (!here) "there" else if (host.radioAvailable()) "here" else "noradio" } else "connecting"
+            }
+            return o.put("state", st)
+        }
         return JSONObject().put("type", if (a.serial) "serial" else "ir").put("peer", p?.name ?: "").put("state", state).put("machine", a.farMachine)
             .put("device", a.farDevice).put("busyBy", a.busyBy).put("core", a.coreUp).put("far", a.farState.text)
     }
@@ -1246,7 +1666,7 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
             val parts = attaches.filter { it.link == hex && it.kind == kind && it.st == St.JOINED }
                 .map { "${it.machine} – ${it.farMachine.ifEmpty { it.farDevice }}" }
             if (parts.isEmpty()) null else title + parts.joinToString(", ")
-        }.joinToString(" · ")
+        }.plus(listOfNotNull(peerBluetooth(hex))).joinToString(" · ")
 
     private fun snapshot(): JSONObject {
         val list = JSONArray()
@@ -1263,6 +1683,7 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
                 if (seen != null && now() - r.seenAt < NEARBY_MS) o.put("seen", seen.hostAddress)
             }
             o.put("channels", peerChannels(p.id))
+            o.put("bluetoothRadio", if (radioHere(p.id)) "here" else "there")
             list.put(o)
         }
         val near = JSONArray()
@@ -1295,11 +1716,12 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
             if (want && r.link == null && r.dialing == null && t >= r.nextTry && host.networkAllowed()) dial(p.id)
             val link = r.link
             if (link != null && !want && r.held.isEmpty() && t - r.idleSince > LINK_IDLE_MS) {
-                if (attaches.none { it.chLink === link }) closeConn(link)
+                if (attaches.none { it.chLink === link } && controllers.none { it.chLink === link }) closeConn(link)
             } else if (want || r.held.isNotEmpty()) r.idleSince = t
         }
         // Cores: reconnect after sleep, load or reset.
-        for (a in ArrayList(attaches)) if (!a.serial && !a.coreUp && a.core == null && t >= a.nextCoreTry) coreConnect(a)
+        for (a in ArrayList(attaches)) if (!a.serial && !a.bt && !a.coreUp && a.core == null && t >= a.nextCoreTry) coreConnect(a)
+        radioTick()
         syncCores()
         for (a in ArrayList(attaches)) if ((a.st == St.BUSY || a.st == St.IDLE) && a.retryAt <= t) matchPeer(a.link)
         // Discovery.
@@ -1347,5 +1769,11 @@ class LinkEngine(private val store: LinkStore, private val host: Host) {
         // Connections not yet authenticated, and new connections per address in 10 s.
         const val MAX_PENDING = 16
         const val PER_ADDRESS = 10
+        // Bluetooth bytes read ahead from a core or the radio at a time; the rest waits in its socket.
+        const val BT_AHEAD = 16384
+        const val RADIO_RETRY_MS = 100L
+        // btvirt gets this long to make its socket, and keeps running this long with no controller on it.
+        const val RADIO_START_MS = 5000L
+        const val RADIO_IDLE_MS = 5000L
     }
 }

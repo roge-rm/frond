@@ -43,12 +43,16 @@ class LinkStore(val folder: File, private val keys: Keys = NativeKeys) {
         val paired: Boolean = true,
         // ms since the epoch.
         val lastSeen: Long = 0,
+        // Whose radio Bluetooth uses with this peer, here or there, and when someone chose it (ms since the
+        // epoch, 0 if nobody has: then the side with the lower install id holds it).
         val bluetoothRadio: String = "here",
+        val bluetoothRadioAt: Long = 0,
         val keyChanged: Boolean = false,
     ) {
         override fun equals(other: Any?) = other is Peer && id == other.id && name == other.name && peerName == other.peerName &&
             key.contentEquals(other.key) && address == other.address && lastHost == other.lastHost && lastPort == other.lastPort &&
-            paired == other.paired && lastSeen == other.lastSeen && bluetoothRadio == other.bluetoothRadio && keyChanged == other.keyChanged
+            paired == other.paired && lastSeen == other.lastSeen && bluetoothRadio == other.bluetoothRadio &&
+            bluetoothRadioAt == other.bluetoothRadioAt && keyChanged == other.keyChanged
         override fun hashCode() = id.hashCode()
     }
 
@@ -137,7 +141,7 @@ class LinkStore(val folder: File, private val keys: Keys = NativeKeys) {
         for (p in peers) entries.put(JSONObject().put("id", p.id).put("name", p.name).put("peerName", p.peerName)
             .put("key", LinkWire.hex(p.key)).put("address", p.address).put("manual", p.address.isNotEmpty())
             .put("paired", p.paired).put("lastSeen", p.lastSeen).put("bluetoothRadio", p.bluetoothRadio)
-            .put("keyChanged", p.keyChanged).put("lastHost", p.lastHost).put("lastPort", p.lastPort))
+            .put("bluetoothRadioAt", p.bluetoothRadioAt).put("keyChanged", p.keyChanged).put("lastHost", p.lastHost).put("lastPort", p.lastPort))
         return writePrivate(File(folder, "connections.json"), JSONObject().put("version", 1).put("entries", entries))
     }
 
@@ -195,7 +199,8 @@ class LinkStore(val folder: File, private val keys: Keys = NativeKeys) {
                     id = id, name = e.optString("name").ifEmpty { peerName }, peerName = peerName, key = key,
                     address = e.optString("address"), lastHost = e.optString("lastHost"), lastPort = e.optInt("lastPort"),
                     paired = e.optBoolean("paired", true), lastSeen = e.optLong("lastSeen"),
-                    bluetoothRadio = e.optString("bluetoothRadio", "here"), keyChanged = e.optBoolean("keyChanged", false),
+                    bluetoothRadio = if (e.optString("bluetoothRadio", "here") == "there") "there" else "here",
+                    bluetoothRadioAt = e.optDouble("bluetoothRadioAt", 0.0).let { if (it.isNaN()) 0L else it.toLong() }, keyChanged = e.optBoolean("keyChanged", false),
                 )
             }
             return list

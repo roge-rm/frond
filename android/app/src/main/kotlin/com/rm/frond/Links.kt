@@ -64,6 +64,10 @@ object Links {
             override fun discovery(on: Boolean) = multicast(context, on)
             override fun networkAllowed() = !needsPermission(context)
             override fun stopped() = engineStopped(e)
+            override fun radioAvailable() = BtLink.available(context)
+            override fun startRadio() = BtLink.start(context)
+            override fun radioRunning() = BtLink.running()
+            override fun stopRadio() = BtLink.stop()
         })
         val failed = e.start()
         if (failed != null) {
@@ -225,10 +229,10 @@ class LinkConnection internal constructor(
     }
 
     // Replaces the op under key, sent now and after every reconnect; null clears it. A cleared or replaced
-    // ir attach is detached first.
+    // ir, serial or bt attach is detached first, as the engine takes one of each per client.
     fun setSticky(key: String, op: JSONObject?) {
         synchronized(lock) {
-            if (key == "ir" && sticky.containsKey(key)) send(JSONObject().put("op", "ir-detach"))
+            if (key in ATTACHES && sticky.containsKey(key)) send(JSONObject().put("op", "$key-detach"))
             if (op == null) sticky.remove(key) else sticky[key] = op
         }
         op?.let(::send)
@@ -326,6 +330,10 @@ class LinkConnection internal constructor(
         return true
     }
 
+    private companion object {
+        val ATTACHES = setOf("ir", "serial", "bt")
+    }
+
     private fun remote(s: LocalSocket): Boolean {
         val ops: List<JSONObject>
         synchronized(lock) {
@@ -380,4 +388,30 @@ object InfraredChoice {
     fun active(value: String, paired: List<Pair<String, String>>): String? = linkId(value)?.takeIf { id -> paired.any { it.first == id } }
 
     fun folder(context: Context): File = LinkStore.folder(context.filesDir)
+}
+
+// The machine's Bluetooth choice in its settings: off, radio (This Frond's radio) or link:<id> for a paired
+// connection, as on the desktop without its Controller socket and This computer.
+object BluetoothChoice {
+    const val OFF = "off"
+    const val RADIO = "radio"
+
+    fun normalise(value: String?): String = when {
+        value == RADIO -> RADIO
+        value != null && InfraredChoice.linkId(value) != null -> value
+        else -> OFF
+    }
+
+    // Off, This Frond, the paired connections by name, then the current value as Unknown connection if it names
+    // one that's gone.
+    fun choices(current: String, paired: List<Pair<String, String>>): List<Pair<String, String>> = buildList {
+        add(OFF to "Off")
+        add(RADIO to "This Frond")
+        for ((id, name) in paired) add("link:$id" to name)
+        if (InfraredChoice.linkId(current) != null && none { it.first == current }) add(current to "Unknown connection")
+    }
+
+    // The engine's bt-attach link: radio or the connection's id. Null for off and for a connection that's gone.
+    fun active(value: String, paired: List<Pair<String, String>>): String? =
+        if (value == RADIO) RADIO else InfraredChoice.active(value, paired)
 }

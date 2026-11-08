@@ -60,6 +60,8 @@ class ConnectionsModel(private val context: Context) {
         to.trim().takeIf { it.isNotEmpty() }?.let { send(JSONObject().put("op", "peer-rename").put("id", id).put("name", it)) }
     fun setAddress(id: String, address: String) = send(JSONObject().put("op", "peer-address").put("id", id).put("address", address.trim()))
     fun forget(id: String) = send(JSONObject().put("op", "forget").put("id", id))
+    // here or there: whose radio Bluetooth uses with this connection.
+    fun setRadio(id: String, radio: String) = send(JSONObject().put("op", "peer-radio").put("id", id).put("radio", radio))
 
     fun pairNearby(n: Nearby) {
         pairing = PairOut(n.name)
@@ -131,6 +133,7 @@ class ConnectionsModel(private val context: Context) {
                     address = it.optString("address"), up = it.optBoolean("up"), rtt = it.optLong("rtt"),
                     keyChanged = it.optBoolean("keyChanged"), forgotten = it.optBoolean("forgotten"),
                     seen = it.optString("seen"), channels = it.optString("channels"),
+                    bluetoothRadio = if (it.optString("bluetoothRadio") == "there") "there" else "here",
                 )
             }
         }

@@ -41,13 +41,7 @@ open class CoreLink(
     private var paused = false
     private var attach: JSONObject? = null
 
-    // <no_backup>/link-run, mode 0700 as the core's unix: endpoint wants it.
-    fun socketPath(context: Context): String? {
-        val folder = File(context.noBackupFilesDir, "link-run")
-        if (!folder.isDirectory && !folder.mkdirs()) return null
-        try { Os.chmod(folder.path, "700".toInt(8)) } catch (e: Exception) { return null }
-        return File(folder, "$socketName-${android.os.Process.myPid()}.sock").path
-    }
+    fun socketPath(context: Context): String? = linkRunSocket(context, socketName)
 
     // Sets the core's port and the link for choice. Blocks on the control link, so never on the main
     // thread. Returns an error to show, or null.
@@ -128,8 +122,138 @@ open class CoreLink(
     }
 }
 
+// <no_backup>/link-run/<name>-<pid>.sock, the folder at mode 0700 as the core's unix: endpoint and the
+// engine's Bluetooth socket want it.
+internal fun linkRunSocket(context: Context, name: String): String? {
+    val folder = File(context.noBackupFilesDir, "link-run")
+    if (!folder.isDirectory && !folder.mkdirs()) return null
+    try { Os.chmod(folder.path, "700".toInt(8)) } catch (e: Exception) { return null }
+    return File(folder, "$name-${android.os.Process.myPid()}.sock").path
+}
+
 object IrLink : CoreLink("ir", "irda-mode", "Infrared", "ir")
 
 // Serial is lossless: the engine opens the core's socket only once the channel joins, so the Palm's DSR and DCD
 // mean the far port is open, and the far Palm's RTS low stops the link and drops this one's CTS.
 object SerialLink : CoreLink("serial", "serial-mode", "Serial", "serial")
+
+// The running machine's Bluetooth: This Frond's radio or a connection, in the emulator's process. The link
+// engine listens on a socket in link-run and each connection the core makes there is a controller (bt-attach,
+// as the desktop hub); the core is pointed at it with bluetooth-mode once the engine listens. Set at every
+// start from the machine's settings and when changed while it runs.
+object BluetoothLink {
+    data class Status(
+        // The machine's setting: off, radio or link:<id>.
+        val choice: String = BluetoothChoice.OFF,
+        // The core's Bluetooth is on the engine's socket.
+        val active: Boolean = false,
+        val bt: LinkWire.BtStatus? = null,
+        val error: String? = null,
+    ) {
+        val text: String get() = when {
+            error != null -> "Off. $error"
+            !active && InfraredChoice.linkId(choice) != null -> "Bluetooth: Unknown connection"
+            !active -> "Off"
+            bt != null -> LinkWire.bluetoothText(bt)
+            choice == BluetoothChoice.RADIO -> "Bluetooth: This Frond's radio"
+            else -> "Bluetooth: connecting"
+        }
+    }
+
+    private const val TAG = "Frond"
+    private const val LISTEN_MS = 5000L
+
+    private val state = MutableStateFlow(Status())
+    val status: StateFlow<Status> get() = state
+
+    private val lock = Any()
+    @Volatile private var connection: LinkConnection? = null
+    private var attach: JSONObject? = null
+    // The path the core's bluetooth-mode points at, or null while it's off.
+    private var corePath: String? = null
+    @Volatile private var listening: java.util.concurrent.CountDownLatch? = null
+
+    // Sets the core's Bluetooth and the engine's attach for choice. Blocks on the control link and on the
+    // engine listening, so never on the main thread. Returns an error to show, or null.
+    fun apply(context: Context, control: ControlLink, choice: String, machine: String, device: String): String? {
+        synchronized(lock) {
+            val link = BluetoothChoice.active(choice, LinkStore.choices(InfraredChoice.folder(context)))
+            if (link == null) {
+                detach()
+                state.value = Status(choice)
+                return coreOff(control)
+            }
+            val path = linkRunSocket(context, "bt")
+                ?: return "Couldn't make a folder for the Bluetooth socket.".also { state.value = Status(choice, error = it) }
+            val op = JSONObject().put("op", "bt-attach").put("machine", machine).put("device", device)
+                .put("link", link).put("socket", path)
+            if (op.toString() == attach?.toString() && corePath == path) {
+                state.value = state.value.copy(choice = choice, error = null)
+                return null
+            }
+            val latch = java.util.concurrent.CountDownLatch(1)
+            listening = latch
+            attach = op
+            state.value = Status(choice, active = corePath == path)
+            val c = connection ?: Links.open(context, preferHost = true) { event -> onEvent(event) }.also { connection = it }
+            c.setSticky("bt", op)
+            // The core connects as soon as it's pointed there, so the engine listens first.
+            if (!latch.await(LISTEN_MS, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                detach()
+                val error = "Couldn't make the Bluetooth socket."
+                state.value = Status(choice, error = error)
+                coreOff(control)
+                return error
+            }
+            if (corePath != path) {
+                val reply = control.request("bluetooth-mode", path, timeoutSeconds = 30)
+                if (!reply.ok) {
+                    detach()
+                    state.value = Status(choice, error = reply.message)
+                    return reply.message
+                }
+                corePath = path
+            }
+            state.value = state.value.copy(choice = choice, active = true, error = null)
+            Log.i(TAG, "bluetooth: ${if (link == BluetoothChoice.RADIO) "this Frond's radio" else "link $link"}, core on $path")
+            return null
+        }
+    }
+
+    private fun coreOff(control: ControlLink): String? {
+        if (corePath == null) return null
+        corePath = null
+        val reply = control.request("bluetooth-mode", "off", timeoutSeconds = 30)
+        return if (reply.ok) null else reply.message
+    }
+
+    private fun onEvent(event: JSONObject) {
+        if (event.optString("type") != "bt" || connection == null) return
+        val bt = LinkWire.BtStatus(
+            state = event.optString("state"), peer = event.optString("peer"), listening = event.optBoolean("listening"),
+            controllers = event.optInt("controllers"),
+        )
+        if (bt.listening) listening?.countDown()
+        state.value = state.value.copy(bt = bt)
+    }
+
+    private fun detach() {
+        attach = null
+        listening = null
+        connection?.let {
+            it.setSticky("bt", null)
+            it.close()
+        }
+        connection = null
+    }
+
+    // The emulator is ending: the attach and this Frond's radio go, the core goes with the process.
+    fun stop() {
+        synchronized(lock) {
+            detach()
+            corePath = null
+            state.value = Status()
+        }
+        BtLink.stop()
+    }
+}

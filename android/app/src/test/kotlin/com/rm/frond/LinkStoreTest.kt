@@ -93,6 +93,7 @@ class LinkStoreTest {
         assertEquals("192.168.1.20", e.getString("lastHost"))
         assertEquals(5035, e.getInt("lastPort"))
         assertEquals("here", e.getString("bluetoothRadio"))
+        assertEquals(0L, e.getLong("bluetoothRadioAt"))
         val back = LinkStore.readPeers(folder())
         assertEquals(s.peers, back)
         // The pickers list paired ones only.
@@ -119,5 +120,28 @@ class LinkStoreTest {
         assertTrue(peers[0].paired)
         assertEquals(0, peers[0].lastPort)
         assertEquals(emptyList<LinkStore.Peer>(), LinkStore.readPeers(File(tmp.root, "none")))
+    }
+
+    @Test fun bluetoothRadioChoiceRoundTrips() {
+        val s = LinkStore(folder(), FakeKeys)
+        assertNull(s.open("Phone"))
+        s.put(LinkStore.Peer(id(5), "Desk", "dan-laptop", key(3), bluetoothRadio = "there", bluetoothRadioAt = 1762600000123))
+        assertTrue(s.save())
+        val e = JSONObject(File(folder(), "connections.json").readText()).getJSONArray("entries").getJSONObject(0)
+        assertEquals("there", e.getString("bluetoothRadio"))
+        assertEquals(1762600000123, e.getLong("bluetoothRadioAt"))
+        assertEquals(s.peers, LinkStore.readPeers(folder()))
+        s.close()
+        // The desktop writes the time as a JSON double; anything but there is here.
+        File(folder(), "connections.json").writeText(JSONObject().put("version", 1).put("entries", org.json.JSONArray()
+            .put(JSONObject().put("id", id(6)).put("peerName", "A").put("key", LinkWire.hex(key(1)))
+                .put("bluetoothRadio", "there").put("bluetoothRadioAt", 1.762600000123E12))
+            .put(JSONObject().put("id", id(7)).put("peerName", "B").put("key", LinkWire.hex(key(2))).put("bluetoothRadio", "odd")))
+            .toString())
+        val peers = LinkStore.readPeers(folder())
+        assertEquals("there", peers[0].bluetoothRadio)
+        assertEquals(1762600000123, peers[0].bluetoothRadioAt)
+        assertEquals("here", peers[1].bluetoothRadio)
+        assertEquals(0L, peers[1].bluetoothRadioAt)
     }
 }

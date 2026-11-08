@@ -20,6 +20,9 @@ object LinkWire {
     // ChannelKind, CloseReason, PeerState and RefuseReason values on the wire.
     const val KIND_INFRARED = 1
     const val KIND_SERIAL = 2
+    const val KIND_BLUETOOTH = 3
+    // A Bluetooth attach's link for This Frond's radio, with no connection.
+    const val RADIO = "radio"
     const val CLOSE_NORMAL = 0
     const val CLOSE_GONE = 4
     enum class PeerState(val wire: Int, val text: String) {
@@ -212,6 +215,8 @@ object LinkWire {
     data class ConnectionRow(
         val id: String, val name: String, val peerName: String, val address: String,
         val up: Boolean, val rtt: Long, val keyChanged: Boolean, val forgotten: Boolean, val seen: String, val channels: String,
+        // Whose radio Bluetooth uses with it: here or there.
+        val bluetoothRadio: String = "here",
     )
 
     fun connectionStatus(c: ConnectionRow): String = when {
@@ -248,5 +253,45 @@ object LinkWire {
             "nonetwork" -> "$title: local network access is off"
             else -> "$title: connecting to ${s.peer}"
         }
+    }
+
+    // ---- Bluetooth radio ----
+    // Bluetooth over a connection uses one side's radio. The later choice wins, at the same time the lower
+    // install id's; with no choice yet (at 0) the side with the lower install id holds it. As desktop/LinkHub.cpp.
+
+    fun radioHere(localHex: String, peerHex: String, radio: String, at: Long) =
+        if (at > 0) radio != "there" else localHex < peerHex
+
+    sealed class RadioUpdate {
+        object Keep : RadioUpdate()
+        // Ours is newer: send it back.
+        object Answer : RadioUpdate()
+        data class Take(val here: Boolean, val at: Long) : RadioUpdate()
+    }
+
+    // The peer's Radio message (senderHolds as the peer says it, at) against what's stored here.
+    fun radioUpdate(localHex: String, peerHex: String, radio: String, storedAt: Long, senderHolds: Boolean, at: Long): RadioUpdate {
+        val theyMeanHere = !senderHolds
+        val same = theyMeanHere == radioHere(localHex, peerHex, radio, storedAt)
+        if (at > storedAt || (at == storedAt && at > 0 && !same && peerHex < localHex))
+            return if (!same || at != storedAt) RadioUpdate.Take(theyMeanHere, at) else RadioUpdate.Keep
+        return if (at < storedAt) RadioUpdate.Answer else RadioUpdate.Keep
+    }
+
+    // The engine's bt event.
+    data class BtStatus(val state: String = "connecting", val peer: String = "", val listening: Boolean = true, val controllers: Int = 0)
+
+    fun bluetoothText(s: BtStatus): String = when {
+        !s.listening -> "Bluetooth: couldn't make the controller socket"
+        s.state == "radio" -> "Bluetooth: This Frond's radio"
+        s.state == "noradio" -> "Bluetooth: this Frond has no radio"
+        s.state == "here" -> "Bluetooth: this Frond's radio, with ${s.peer}"
+        s.state == "there" -> "Bluetooth: ${s.peer}'s radio"
+        s.state == "notfound" -> "Bluetooth: ${s.peer} not found"
+        s.state == "keychanged" -> "Bluetooth: ${s.peer} key changed, pair again"
+        s.state == "forgotten" -> "Bluetooth: pair again with ${s.peer}"
+        s.state == "unknown" -> "Bluetooth: Unknown connection"
+        s.state == "nonetwork" -> "Bluetooth: local network access is off"
+        else -> "Bluetooth: connecting to ${s.peer}"
     }
 }

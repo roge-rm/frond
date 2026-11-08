@@ -164,6 +164,22 @@ jbyteArray FN(linkPeerId)(JNIEnv* env, jclass, jlong h) {
 jstring FN(linkPeerName)(JNIEnv* env, jclass, jlong h) { return env->NewStringUTF(L(h)->peerName().c_str()); }
 jlong FN(linkRtt)(JNIEnv*, jclass, jlong h) { return jlong(L(h)->rttMs()); }
 
+// The Bluetooth radio choice (MsgType::Radio): ours to the peer, and the peer's, oldest first, as
+// {senderHolds 0 or 1, at} or null.
+void FN(linkSendRadio)(JNIEnv*, jclass, jlong h, jboolean senderHolds, jlong at) {
+    L(h)->sendRadio({senderHolds == JNI_TRUE, uint64_t(at)});
+}
+jlongArray FN(linkNextRadio)(JNIEnv* env, jclass, jlong h) {
+    auto& queue = L(h)->radio;
+    if (queue.empty()) return nullptr;
+    const RadioBody r = queue.front();
+    queue.pop_front();
+    const jlong v[2] = {r.senderHolds ? 1 : 0, jlong(r.at)};
+    jlongArray a = env->NewLongArray(2);
+    if (a) env->SetLongArrayRegion(a, 0, 2, v);
+    return a;
+}
+
 // ---- Channels ----
 
 jint FN(muxOpen)(JNIEnv* env, jclass, jlong h, jint kind, jstring machine, jstring device) {

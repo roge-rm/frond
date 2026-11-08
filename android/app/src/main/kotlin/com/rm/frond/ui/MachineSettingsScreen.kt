@@ -19,6 +19,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.rm.frond.Device
 import com.rm.frond.HomeModel
+import com.rm.frond.BluetoothChoice
 import com.rm.frond.InfraredChoice
 import com.rm.frond.LinkStore
 import com.rm.frond.MachineRows
@@ -64,7 +65,7 @@ fun MachineSettingsScreen(model: HomeModel) {
             if (rows.speed || rows.engine) Header("Speed", Modifier.padding(top = 16.dp))
             if (rows.speed) MachineSpeedRow(draft.settings, false) { model.changeMachineSettings(it) }
             if (rows.engine) MachineEngineRow(draft.settings, false) { model.changeMachineSettings(it) }
-            if (draft.device.infrared || draft.device.serialPort) Header("Connections", Modifier.padding(top = 16.dp))
+            if (draft.device.infrared || draft.device.serialPort || draft.device.bluetooth) Header("Connections", Modifier.padding(top = 16.dp))
             if (draft.device.infrared) {
                 val choices = remember(draft.settings.infrared) {
                     InfraredChoice.choices(draft.settings.infrared, LinkStore.choices(InfraredChoice.folder(context)))
@@ -79,6 +80,14 @@ fun MachineSettingsScreen(model: HomeModel) {
                 }
                 Choice("Serial port", draft.settings.serial, choices.map { it.first }, { v -> choices.first { it.first == v }.second }) {
                     model.changeMachineSettings(draft.settings.copy(serial = it))
+                }
+            }
+            if (draft.device.bluetooth) {
+                val choices = remember(draft.settings.bluetooth) {
+                    BluetoothChoice.choices(draft.settings.bluetooth, LinkStore.choices(InfraredChoice.folder(context)))
+                }
+                Choice("Bluetooth", draft.settings.bluetooth, choices.map { it.first }, { v -> choices.first { it.first == v }.second }) {
+                    model.changeMachineSettings(draft.settings.copy(bluetooth = it))
                 }
             }
         }

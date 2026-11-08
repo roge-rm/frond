@@ -27,6 +27,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -74,6 +75,7 @@ fun ConnectionsScreen(home: HomeModel, model: ConnectionsModel) {
     var renaming by remember { mutableStateOf<LinkWire.ConnectionRow?>(null) }
     var addressing by remember { mutableStateOf<LinkWire.ConnectionRow?>(null) }
     var forgetting by remember { mutableStateOf<LinkWire.ConnectionRow?>(null) }
+    var radioFor by remember { mutableStateOf<LinkWire.ConnectionRow?>(null) }
 
     Scaffold(
         topBar = {
@@ -114,7 +116,8 @@ fun ConnectionsScreen(home: HomeModel, model: ConnectionsModel) {
             if (!model.loaded) item(key = "loading") { Progress() }
             else if (model.rows.isEmpty()) item(key = "ec") { EmptyNote("No connections.") }
             items(model.rows, key = { "c" + it.id }) { row ->
-                ConnectionRow(row, onRename = { renaming = it }, onAddress = { addressing = it }, onForget = { forgetting = it })
+                ConnectionRow(row, onRename = { renaming = it }, onAddress = { addressing = it }, onRadio = { radioFor = it },
+                    onForget = { forgetting = it })
             }
             item(key = "hn") { Header("Nearby", Modifier.padding(start = 16.dp, top = 16.dp)) }
             if (model.loaded && model.nearby.isEmpty()) item(key = "en") { EmptyNote("No other Frond found") }
@@ -175,6 +178,26 @@ fun ConnectionsScreen(home: HomeModel, model: ConnectionsModel) {
             model.setAddress(row.id, it)
         }
     }
+    // Bluetooth on this connection uses one side's radio.
+    radioFor?.let { row ->
+        AlertDialog(
+            onDismissRequest = { radioFor = null },
+            title = { Text("Bluetooth radio") },
+            text = {
+                Column {
+                    for ((value, label) in listOf("here" to "This Frond's radio", "there" to "${row.name}'s radio")) {
+                        ListItem(
+                            headlineContent = { Text(label) },
+                            leadingContent = { RadioButton(selected = row.bluetoothRadio == value, onClick = null) },
+                            modifier = Modifier.clickableRow { radioFor = null; if (row.bluetoothRadio != value) model.setRadio(row.id, value) },
+                        )
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = { radioFor = null }) { Text("Cancel") } },
+        )
+    }
     forgetting?.let { row ->
         AlertDialog(
             onDismissRequest = { forgetting = null },
@@ -201,6 +224,7 @@ private fun ConnectionRow(
     row: LinkWire.ConnectionRow,
     onRename: (LinkWire.ConnectionRow) -> Unit,
     onAddress: (LinkWire.ConnectionRow) -> Unit,
+    onRadio: (LinkWire.ConnectionRow) -> Unit,
     onForget: (LinkWire.ConnectionRow) -> Unit,
 ) {
     var menu by remember { mutableStateOf(false) }
@@ -214,6 +238,7 @@ private fun ConnectionRow(
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                     DropdownMenuItem(text = { Text("Rename…") }, onClick = { menu = false; onRename(row) })
                     DropdownMenuItem(text = { Text("Address…") }, onClick = { menu = false; onAddress(row) })
+                    DropdownMenuItem(text = { Text("Bluetooth radio") }, onClick = { menu = false; onRadio(row) })
                     DropdownMenuItem(text = { Text("Forget") }, onClick = { menu = false; onForget(row) })
                 }
             }

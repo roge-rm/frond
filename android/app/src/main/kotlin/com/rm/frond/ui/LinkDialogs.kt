@@ -23,8 +23,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.rm.frond.BeamMode
-import com.rm.frond.BtLink
-import com.rm.frond.BtMode
+import com.rm.frond.BluetoothChoice
+import com.rm.frond.BluetoothLink
 import com.rm.frond.InfraredChoice
 import com.rm.frond.LinkStore
 import com.rm.frond.NetRelay
@@ -45,17 +45,9 @@ internal fun debuggerText(s: NetRelay.Status): String = when (s.phase) {
     else -> s.error?.let { "Off. $it" } ?: "Off"
 }
 
-internal fun bluetoothText(s: BtLink.Status, radio: String?): String {
-    val link = when (val mode = s.mode) {
-        BtMode.Off -> return s.error?.let { "Off. $it" } ?: "Off"
-        is BtMode.Host -> "Hosting on port ${mode.port}" + when (s.links) {
-            0 -> ""
-            1 -> ", 1 Frond connected"
-            else -> ", ${s.links} Fronds connected"
-        }
-        is BtMode.Join -> if (s.links > 0) "Connected to ${NetRelay.hostPort(mode.host, mode.port)}"
-        else s.error ?: "Joined to ${NetRelay.hostPort(mode.host, mode.port)}"
-    }
+internal fun bluetoothText(s: BluetoothLink.Status, radio: String?): String {
+    if (!s.active) return s.text
+    val link = s.text
     // The core's live observation of the Palm's radio and ACL links.
     val note = when {
         radio == null -> null
@@ -212,7 +204,7 @@ fun CardPickerDialogs(model: RunningModel) {
 
 enum class LinkKind { BEAM, BLUETOOTH, SERIAL, USB }
 
-// The chooser for one of the network links: off, wait for a peer, or connect to an address.
+// The chooser for one of the links: a connection, or for USB off, wait for a peer or connect to an address.
 @Composable
 fun LinkChoiceDialog(kind: LinkKind, model: RunningModel, onDismiss: () -> Unit) {
     val context = LocalContext.current
@@ -222,40 +214,21 @@ fun LinkChoiceDialog(kind: LinkKind, model: RunningModel, onDismiss: () -> Unit)
         LinkKind.USB -> RelayDialog("USB HotSync", listOf("Off", "Wait for a peer", "Connect to an address"), UsbLink,
             model.usb.mode, onDismiss) { onDismiss(); model.changeUsb(it) }
         LinkKind.BLUETOOTH -> {
-            val current = model.bluetooth.mode
-            val last = remember { BtLink.last(context) }
-            val start = if (current != BtMode.Off) current else last ?: BtMode.Off
-            LinkDialog(
-                title = "Bluetooth",
-                labels = listOf("Off", "Host other Fronds", "Join another Frond"),
-                defaultPort = BtLink.DEFAULT_PORT,
-                choice = when (current) {
-                    is BtMode.Host -> "listen"
-                    is BtMode.Join -> "connect"
-                    BtMode.Off -> "off"
-                },
-                port = (start as? BtMode.Host)?.port,
-                address = (last as? BtMode.Join ?: start as? BtMode.Join)?.let { NetRelay.hostPort(it.host, it.port) },
-                addresses = produceState<List<String>?>(null) { value = withContext(Dispatchers.IO) { NetRelay.addresses(context) } }.value,
-                onDismiss = onDismiss,
-                toMode = { choice, port, address ->
-                    when (choice) {
-                        "listen" -> NetRelay.port(port)?.let { BtMode.Host(it) }
-                        "connect" -> BtLink.address(address)?.let { BtMode.Join(it.first, it.second) }
-                        else -> BtMode.Off
-                    }
-                },
-                onChoose = { onDismiss(); model.changeBluetooth(it) },
-            )
+            val current = model.bluetooth.choice
+            val choices = remember { BluetoothChoice.choices(current, LinkStore.choices(InfraredChoice.folder(context))) }
+            ConnectionChoiceDialog("Bluetooth", current, onDismiss, choices) { onDismiss(); model.changeBluetooth(it) }
         }
     }
 }
 
-// Off or one of the paired connections, for the running machine's infrared or serial port.
+// Off or one of the paired connections, for the running machine's infrared or serial port; Bluetooth passes
+// its own choices.
 @Composable
-fun ConnectionChoiceDialog(title: String, current: String, onDismiss: () -> Unit, onChoose: (String) -> Unit) {
+fun ConnectionChoiceDialog(
+    title: String, current: String, onDismiss: () -> Unit, given: List<Pair<String, String>>? = null, onChoose: (String) -> Unit,
+) {
     val context = LocalContext.current
-    val choices = remember { InfraredChoice.choices(current, LinkStore.choices(InfraredChoice.folder(context))) }
+    val choices = given ?: remember { InfraredChoice.choices(current, LinkStore.choices(InfraredChoice.folder(context))) }
     var picked by remember { mutableStateOf(current) }
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -269,7 +242,7 @@ fun ConnectionChoiceDialog(title: String, current: String, onDismiss: () -> Unit
                         modifier = Modifier.clickableRow { picked = value },
                     )
                 }
-                if (choices.size == 1) EmptyNote("Pair with another Frond in Connections first.")
+                if (given == null && choices.size == 1) EmptyNote("Pair with another Frond in Connections first.")
             }
         },
         confirmButton = { TextButton(onClick = { onChoose(picked) }) { Text("OK") } },
