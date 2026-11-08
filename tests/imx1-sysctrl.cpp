@@ -48,7 +48,7 @@ int main() {
     }
     assert(unknown == 0xdeadbeef);
     read(gccr, 0x6f);
-    for (auto address : {0x0021b800u, 0x0021b804u, 0x0021b80cu, 0x0021b814u,
+    for (auto address : {0x0021b800u, 0x0021b804u, 0x0021b814u,
                          0x00208010u, 0x00212000u, 0x00214000u, 0x00222000u}) {
         unknown = 0xdeadbeef;
         assert(soc.access(address, 4, false, unknown, 3) == Imx1BootstrapAccess::unmapped);
@@ -58,6 +58,48 @@ int main() {
     assert(!soc.instructionWord(gccr, unknown));
     assert(!soc.instructionRead(gccr, 2, unknown));
     read(gccr, 0x6f);
+    constexpr uint32_t gpcr = 0x0021b80c;
+    assert(!std::strcmp(Imx1Bootstrap::registerName(gpcr), "SCM.GPCR"));
+    read(gpcr, 0x3fb);
+    // Each two-bit drive field retains all four settings, with no pad input or clock.
+    for (unsigned shift : {4u, 6u, 8u, 10u}) {
+        for (uint32_t field = 0; field < 4; ++field) {
+            const uint32_t setting = (0x3fb & ~(3u << shift)) | (field << shift);
+            write(gpcr, setting);
+            read(gpcr, setting);
+        }
+    }
+    write(gpcr, 0x3fb);
+    // Native MMCSD startup clears DS_SLOW then selects 26 MHz/30 pF.
+    write(gpcr, 0x3fb & ~0xc00u); read(gpcr, 0x3fb);
+    write(gpcr, 0x7fb); read(gpcr, 0x7fb);
+    for (unsigned bit = 0; bit < 32; ++bit) {
+        if ((1u << bit) & 0x9ffb) continue;
+        write(gpcr, 0x3fb | (1u << bit), Imx1BootstrapAccess::reservedBits);
+        read(gpcr, 0x7fb);
+    }
+    write(gpcr, 0x3f3, Imx1BootstrapAccess::reservedBits);
+    for (uint32_t effect : {1u, 2u, 0x1000u, 0x8000u}) {
+        write(gpcr, 0x3fb ^ effect, Imx1BootstrapAccess::sideEffect);
+        read(gpcr, 0x7fb);
+    }
+    for (uint32_t size : {0u,1u,2u,8u}) {
+        unknown = 0xdeadbeef;
+        assert(soc.access(gpcr,size,false,unknown) == Imx1BootstrapAccess::width);
+        assert(soc.access(gpcr,size,true,unknown) == Imx1BootstrapAccess::width);
+        assert(unknown == 0xdeadbeef);
+    }
+    for (unsigned lane = 1; lane < 4; ++lane) {
+        assert(soc.access(gpcr + lane,4,false,unknown) == Imx1BootstrapAccess::width);
+        assert(soc.access(gpcr + lane,4,true,unknown) == Imx1BootstrapAccess::width);
+    }
+    assert(!soc.instructionWord(gpcr, unknown));
+    assert(!soc.instructionRead(gpcr, 2, unknown));
+    auto pinsCopy = soc;
+    write(gpcr, 0x3fb);
+    assert(pinsCopy.access(gpcr,4,false,unknown) == Imx1BootstrapAccess::ok && unknown == 0x7fb);
+    Imx1Bootstrap pinsReset;
+    assert(pinsReset.access(gpcr,4,false,unknown) == Imx1BootstrapAccess::ok && unknown == 0x3fb);
     // Table 8-3 input selectors retain configuration, without supplying pin levels.
     constexpr uint32_t fmcr = 0x0021b808;
     assert(!std::strcmp(Imx1Bootstrap::registerName(fmcr), "SCM.FMCR"));
@@ -102,6 +144,9 @@ int main() {
     for (unsigned i = 0; i < 100; ++i) read(gccr, 0);
     write(gccr, 0x1f, Imx1BootstrapAccess::externalInput);
     write(gccr, 0x80, Imx1BootstrapAccess::reservedBits);
+    write(gpcr, 0xffb);
+    read(gpcr, 0xffb);
+    write(gpcr, 0x93fb, Imx1BootstrapAccess::sideEffect);
     soc.advanceFastBusCycles(1);
     read(0x00202010, 1);
     write(gccr, 0x6f);
@@ -111,5 +156,5 @@ int main() {
     write(0x00202000, 0);
     write(0x0021b000, 0x57000002, Imx1BootstrapAccess::sideEffect);
     read(0x0021b000, 0x57000003);
-    std::puts("PASS: SCM GCCR reset/configuration, transactional guards, fetch isolation and Timer 1 phase");
+    std::puts("PASS: SCM GCCR/FMCR/GPCR reset/configuration, transactional guards, fetch isolation and Timer 1 phase");
 }
