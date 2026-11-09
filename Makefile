@@ -241,6 +241,20 @@ test-dana-keyboard-art:
 		$(shell pkg-config --libs sdl2 SDL2_image) -o $(DANA_ART_BUILD)/test-dana-keyboard-art
 	$(DANA_ART_BUILD)/test-dana-keyboard-art
 
+.PHONY: test-dana-view
+test: test-dana-view
+DANA_VIEW_SOURCE ?= build/source
+DANA_VIEW_BUILD ?= build
+test-dana-view:
+	python3 tools/prepare.py --destination $(DANA_VIEW_SOURCE)
+	mkdir -p $(DANA_VIEW_BUILD)
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra $(shell pkg-config --cflags sdl2 SDL2_image) \
+		-I$(DANA_VIEW_SOURCE)/src/uarm/native -I$(DANA_VIEW_SOURCE)/src/uarm/uarm \
+		-I$(DANA_VIEW_SOURCE)/src/common \
+		tests/dana-view.cpp $(DANA_VIEW_SOURCE)/src/uarm/native/DeviceControls.cpp \
+		$(shell pkg-config --libs sdl2 SDL2_image) -o $(DANA_VIEW_BUILD)/test-dana-view
+	SDL_VIDEODRIVER=dummy $(DANA_VIEW_BUILD)/test-dana-view
+
 .PHONY: test-render-link
 test: test-render-link
 test-render-link: prepare
