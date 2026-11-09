@@ -308,6 +308,9 @@ static std::vector<Bytes> PppFrames(const std::string& text) {
 
 // ---- The call ----
 
+// What the phone's modem saves mid-call, for TestDroppedCall.
+static std::string savedCall;
+
 static void TestCall() {
     QuietNetwork network;
     PppServer ppp{network, PppServer::Options{false, false}};
@@ -441,6 +444,8 @@ static void TestCall() {
     CHECK(p.WaitFor("\r\nCONNECT 33600\r\n"));
     CHECK(phone.Modem().GetState() == HayesModem::State::Online);
     CHECK(phone.Comm().BytesFromGuest() > 40);
+    savedCall = phone.SavedCall();
+    CHECK(!savedCall.empty());
 
     // LCP: the server's Configure-Request comes; the guest asks for nothing and acks it.
     CHECK(p.WaitFor(std::string(1, char(0x7e))));
@@ -600,6 +605,61 @@ static void TestLinkLoss() {
     }
 }
 
+// ---- A session saved mid-call ----
+
+static void TestDroppedCall() {
+    QuietNetwork network;
+    PppServer ppp{network};
+    IrPhone::Options options;
+    options.modem.handshakeNs = 2000 * ms;
+    IrPhone phone{ppp, options};
+    Primary p{phone, ppp};
+
+    // Nothing to save with no call, and text SavedCall didn't write is refused.
+    CHECK(phone.SavedCall().empty());
+    CHECK(!phone.CallDropped("e1 q0"));
+    CHECK(!phone.CallDropped(savedCall + "0"));
+    CHECK(phone.CallDropped(savedCall));
+
+    // The guest's IrCOMM comes back: the first DCE lines carry CD dropping, and NO CARRIER
+    // follows with the modem back in command mode.
+    Connect(p);
+    CHECK(LmConnect(p, p.commLsap, IrComm::cookedLsap, {0x01, 0x03, 0x00, 0x01, IrComm::nineWire}) == Bytes({0x07}));
+    p.phoneCredit = 1;
+    auto frames = p.Poll();
+    bool dropped = false;
+    for (const Bytes& f : frames)
+        dropped = dropped || (f.size() >= 9 && f[2] == p.commLsap && f[3] == IrComm::cookedLsap && f[5] == 3 &&
+                              f[6] == 0x21 && f[7] == 1 && f[8] == 0x38);
+    CHECK(dropped);
+    CHECK(p.WaitFor("\r\nNO CARRIER\r\n"));
+    CHECK(phone.Modem().GetState() == HayesModem::State::Command);
+    CHECK(phone.SavedCall().empty());
+
+    // PPP bytes the guest still sends aren't echoed, and a redial connects.
+    p.fromPhone.clear();
+    p.Exchange(p.Comm(PppFrame(0xc021, {0x09, 0x01, 0x00, 0x08, 0, 0, 0, 0})));
+    p.Idle(200 * ms);
+    p.Poll();
+    CHECK(p.fromPhone.find(char(0x7e)) == std::string::npos);
+    p.Exchange(p.Comm(Text("ATDT5551234\r")));
+    CHECK(p.WaitFor("\r\nCONNECT 33600\r\n"));
+    CHECK(phone.Modem().GetState() == HayesModem::State::Online);
+
+    // A link that opens again later starts with CD up and no delta.
+    phone.Drop(p.now);
+    p.fromPhone.clear();
+    p.vs = p.vr = 0;
+    Connect(p);
+    CHECK(LmConnect(p, p.commLsap, IrComm::cookedLsap, {0x01, 0x03, 0x00, 0x01, IrComm::nineWire}) == Bytes({0x07}));
+    p.phoneCredit = 1;
+    frames = p.Poll();
+    bool plain = false;
+    for (const Bytes& f : frames)
+        plain = plain || (f.size() == 9 && f[2] == p.commLsap && f[3] == IrComm::cookedLsap && f[8] == 0x30);
+    CHECK(plain);
+}
+
 // ---- Leftovers across links, and guest-driven buffers ----
 
 // Whether any of the frames is an I frame on the IAS connection (an IAS answer).
@@ -725,13 +785,15 @@ int main() {
     const unsigned call = checks - sir;
     TestLinkLoss();
     const unsigned loss = checks - sir - call;
+    TestDroppedCall();
+    const unsigned dropped = checks - sir - call - loss;
     TestLeftovers();
-    const unsigned leftovers = checks - sir - call - loss;
+    const unsigned leftovers = checks - sir - call - loss - dropped;
     if (failures) {
         fprintf(stderr, "FAIL: %u of %u IR peer checks\n", failures, checks);
         return 1;
     }
-    printf("PASS: %u IR peer checks (%u SIR, %u call, %u link loss and raw, %u leftovers and limits)\n", checks, sir,
-           call, loss, leftovers);
+    printf("PASS: %u IR peer checks (%u SIR, %u call, %u link loss and raw, %u dropped call, %u leftovers and limits)\n",
+           checks, sir, call, loss, dropped, leftovers);
     return 0;
 }

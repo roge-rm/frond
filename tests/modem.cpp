@@ -1067,11 +1067,112 @@ static void TestHotSyncRoute() {
     CHECK_TEXT(rig.Dial("ATDT4687962"), "\r\nNO CARRIER\r\n");
 }
 
+// A session saved mid-call and loaded later: a fresh modem gets the saved settings back and tells
+// the guest the call has gone, as a real modem would after the line dropped.
+static void TestSavedCall() {
+    FakeLine line;
+    HayesModem modem(line);
+    Rig rig(modem);
+    modem.SetPower(true, rig.now);
+    CHECK(modem.SavedCall().empty());
+    rig.Command("ATQ0E0&D0&C1V1S7=90");
+    CHECK(modem.SavedCall().empty());
+    CHECK(rig.Dial("ATDT5551234").find("CONNECT") != std::string::npos);
+    const std::string saved = modem.SavedCall();
+    CHECK(!saved.empty() && saved.rfind("e0 q0 v1 x4 d0 p0 s", 0) == 0);
+    // In online command mode and while dialling the guest is still off hook.
+    rig.Run(1100 * ms);
+    rig.Type("+++");
+    rig.Run(1100 * ms);
+    CHECK(modem.GetState() == HayesModem::State::OnlineCommand && !modem.SavedCall().empty());
+    rig.Command("ATH0");
+    CHECK(modem.SavedCall().empty());
+    rig.Take();
+    rig.Type("ATDT5551234\r");
+    rig.Run(100 * ms);
+    CHECK(modem.GetState() == HayesModem::State::Dialling && !modem.SavedCall().empty());
+
+    // The loading process's modem: off until the line driver comes on, factory settings.
+    FakeLine line2;
+    HayesModem loaded(line2);
+    Rig rig2(loaded);
+    CHECK(!loaded.LineDropped("", rig2.now));
+    CHECK(!loaded.LineDropped("e0 q0 v1 x4 d0 p0 s00", rig2.now));
+    CHECK(!loaded.LineDropped(saved.substr(0, saved.size() - 1) + "g", rig2.now));
+    CHECK(!loaded.LineDropped("e2" + saved.substr(2), rig2.now));
+    CHECK(loaded.GetState() == HayesModem::State::Off && rig2.Take().empty());
+    CHECK(loaded.LineDropped(saved, rig2.now));
+    CHECK(loaded.GetState() == HayesModem::State::Command && !loaded.OffHook() && line2.answers == 0);
+    CHECK_TEXT(rig2.Take(), "\r\nNO CARRIER\r\n");
+    // PPP frames the guest sends before it notices aren't echoed (E0 came back) or answered.
+    rig2.Type("\x7e\xff\x7d\x23\xc0\x21\x7e");
+    rig2.Run(100 * ms);
+    CHECK_TEXT(rig2.Take(), "");
+    CHECK(line2.received.empty());
+    // The guest's hang-up and redial work as after any dropped call.
+    rig2.Run(1100 * ms);
+    rig2.Type("+++");
+    rig2.Run(1100 * ms);
+    rig2.Take();
+    CHECK_TEXT(rig2.Command("ATQ0H0"), ok);
+    CHECK(rig2.Dial("ATQ0E0&D0&C1V1S7=90L1DT5551234").find("CONNECT 33600") != std::string::npos);
+    CHECK(line2.answers == 1 && loaded.GetState() == HayesModem::State::Online);
+    // Numeric results come back as saved too, and a modem with a call of its own hangs it up.
+    rig2.Run(1100 * ms);
+    rig2.Type("+++");
+    rig2.Run(1100 * ms);
+    CHECK(loaded.GetState() == HayesModem::State::OnlineCommand);
+    rig2.Take();
+    CHECK(loaded.LineDropped("e0 q0 v0" + saved.substr(8), rig2.now));
+    CHECK(line2.hangups == 1 && !line2.up);
+    CHECK_TEXT(rig2.Take(), "3\r");
+}
+
+// The Unix login prompt comes again until something is typed, as Palm OS throws away what
+// comes in the first seconds after CONNECT before its script waits for "ogin:".
+static void TestLoginPrompt() {
+    FakeNet net;
+    PppServer server(net);
+    Client client;
+    Wire wire{server, client};
+    server.Answer(wire.now);
+    std::string text = wire.Pump();
+    CHECK(text.find("login: ") != std::string::npos);
+    wire.Run(1000 * ms);
+    CHECK(client.raw.size() == text.size());
+    wire.Run(2100 * ms);
+    CHECK_TEXT(client.raw.substr(text.size()), "\r\nlogin: ");
+    // The 3.5 Unix script once the prompt is seen: the user ID, CR, then the password and CR.
+    wire.Send("12");
+    const size_t typed = client.raw.size();
+    wire.Run(10000 * ms);
+    CHECK(client.raw.size() == typed);
+    wire.Send("\r");
+    CHECK(client.raw.find("Password: ") != std::string::npos);
+    wire.Send("secret\r");
+    CHECK(server.GetPhase() == PppServer::Phase::Establish && server.Login() == "12");
+
+    // Nothing typed for a minute: the server hangs up.
+    PppServer idle(net);
+    Client idleClient;
+    Wire idleWire{idle, idleClient};
+    idle.Answer(idleWire.now);
+    for (int i = 0; i < 19; ++i) idleWire.Run(3000 * ms);
+    CHECK(idle.Carrier(idleWire.now) && idle.GetPhase() == PppServer::Phase::Login);
+    size_t prompts = 0;
+    for (size_t at = 0; (at = idleClient.raw.find("login: ", at)) != std::string::npos; ++at) ++prompts;
+    CHECK(prompts == 20);
+    idleWire.Run(3000 * ms);
+    CHECK(!idle.Carrier(idleWire.now));
+}
+
 int main() {
     TestCommands();
     TestHotSyncRoute();
+    TestSavedCall();
     const unsigned commands = checks;
     TestPpp();
+    TestLoginPrompt();
     const unsigned ppp = checks - commands;
     TestSlirp();
     TestNetSyncWakeup();

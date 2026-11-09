@@ -308,7 +308,7 @@ The Palm IIIx has a snap-on modem on its serial port. Set Serial port to Modem i
 3. In Network details set PPP, Query DNS on, IP address automatic. With the Unix template the user name and password can be anything, with Windows RAS leave the script empty.
 4. Tap Connect. The state line under Serial port goes from "Modem: idle" to "Modem: dialling" to "Modem: online at 33600".
 
-Disconnect hangs up. Saving while online and loading it again gives NO CARRIER, so connect again. The guest is 10.0.2.15, the router 10.0.2.2 and DNS 10.0.2.3.
+Disconnect hangs up. Loading a session saved while online gives NO CARRIER, as if the line dropped, but Palm OS keeps thinking the link is up until you tap Disconnect and Connect in Network. The guest is 10.0.2.15, the router 10.0.2.2 and DNS 10.0.2.3.
 
 ### HotSync by modem
 

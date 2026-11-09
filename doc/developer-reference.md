@@ -620,7 +620,7 @@ The debugger costs almost nothing while no gdb is connected. `make test-frond-68
 
 ### Modem and mobile phone
 
-The snap-on modem (`modem` capability, IIIx) and the infrared phone (`irPhone` capability: IIIx, T|X, TG50, E2, E3, Zire 72) are the core's own, with no link or socket. Both run one engine from `src/common` on guest time: `HayesModem`, `PppServer` and slirp (`SlirpIp`), and for the phone IrLAP, IrLMP, IAS, Tiny TP and IrCOMM (`src/common/ir`). Accessory state isn't saved: loading a session gives NO CARRIER if a call was up, and the guest's IrLAP times out and redials.
+The snap-on modem (`modem` capability, IIIx) and the infrared phone (`irPhone` capability: IIIx, T|X, TG50, E2, E3, Zire 72) are the core's own, with no link or socket. Both run one engine from `src/common` on guest time: `HayesModem`, `PppServer` and slirp (`SlirpIp`), and for the phone IrLAP, IrLMP, IAS, Tiny TP and IrCOMM (`src/common/ir`). A call isn't saved, only that one was up: the session keeps the modem's settings and S registers in a `modem-call` or `phone-call` metadata line, and on load the modem is back in command mode with them and says NO CARRIER. The phone says it once the guest's IrLAP has timed out and IrCOMM opens again, with a CD drop in the first DCE lines. Palm PPP doesn't notice either (the EZ serial port has no DCD, PPP ignores the text and sends no LCP echo), so the guest needs Disconnect and Connect in Network.
 
 | What | Value |
 |---|---|
@@ -632,7 +632,7 @@ The snap-on modem (`modem` capability, IIIx) and the infrared phone (`irPhone` c
 | Desktop text | "Modem: idle", "Modem: dialling", "Modem: online at 33600", each with ", HotSync on PATH", and the same with "Mobile phone:" ("linked" too) |
 | Exclusive | The phone and the infrared keyboard refuse each other; the desktop greys the keyboard while the phone is on |
 
-The line is 33600. The guest is 10.0.2.15, the router 10.0.2.2 and DNS 10.0.2.3, with slirp behind it. PPP is async HDLC with LCP, PAP accepted if sent, and IPCP with DNS. A `login:` and `Password:` prompt comes first that takes any line, and the first 0x7e starts PPP, so the Unix template and Windows RAS both work. On Android DNS comes from `HostDns`, started by `FrondActivity`, which `Frond68kActivity` extends.
+The line is 33600. The guest is 10.0.2.15, the router 10.0.2.2 and DNS 10.0.2.3, with slirp behind it. PPP is async HDLC with LCP, PAP accepted if sent, and IPCP with DNS. A `login:` and `Password:` prompt comes first that takes any line, and the first 0x7e starts PPP, so the Unix template and Windows RAS both work. `login:` repeats every 3 s until something is typed, since the Palm throws away what comes in the first seconds after CONNECT, and the call hangs up after 60 s with no login. On Android DNS comes from `HostDns`, started by `FrondActivity`, which `Frond68kActivity` extends.
 
 AT commands (`HayesModem`):
 
