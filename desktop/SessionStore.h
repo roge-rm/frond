@@ -71,6 +71,8 @@ struct Preferences {
     bool peripheralsSet{false};
     // The running bar is shown over the Palm; Hide bar turns it off for this machine.
     bool barShown{true};
+    // Dana: the USB printer is plugged in.
+    bool usbPrinter{false};
     frondDana::Preferences danaView;
 };
 inline QString preferencesPath(const QString& path) { return path + ".settings.json"; }
@@ -88,6 +90,7 @@ inline bool readPreferences(const QString& path, Preferences* result) {
                std::clamp(object.value("contrast").toInt(50), 0, 100),
                object.value("speed").toString() == QLatin1String("uncapped"), object.contains("contrast")};
     result->barShown = object.value("barShown").toBool(true);
+    result->usbPrinter = object.value("usbPrinter").toBool(false);
     if (object.value("infrared").isString()) {
         result->infrared = object.value("infrared").toString();
         result->serial = object.value("serial").toString("off");
@@ -107,6 +110,7 @@ inline QString writePreferences(const QString& path, const Preferences& prefs) {
                              {"showJogControls", prefs.jogControls != JogControls::hidden},
                              {"engine", prefs.fastEngine ? "fast" : "exact"}, {"speed", prefs.uncapped ? "uncapped" : "original"}};
     if (!prefs.barShown) object.insert("barShown", false);
+    if (prefs.usbPrinter) object.insert("usbPrinter", true);
     if (prefs.contrastSet) object.insert("contrast", std::clamp(prefs.contrast, 0, 100));
     if (prefs.peripheralsSet) {
         object.insert("infrared", prefs.infrared);

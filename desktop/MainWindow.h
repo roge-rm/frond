@@ -14,6 +14,8 @@
 #include "RunningBar.h"
 #include "RunningPanels.h"
 #include "PalmView.h"
+#include "PrinterPanel.h"
+#include "PrintJob.h"
 #include <QTemporaryDir>
 class ConnectionsWindow;
 class CardsWindow;
@@ -114,6 +116,18 @@ class MainWindow : public QMainWindow {
     QString usbArgument() const;
     void showUsb(const QString& state);
     void loadUsbSettings();
+    // The Dana's USB printer. A received job is saved out of the core into printerHeld, so the
+    // choices work on the bytes in hand; more printing adds to them.
+    enum class PrinterStage { None, Collect, Discard, Attach, Chain };
+    void printerPoll();
+    bool printerResult(bool ok, const QString& message);
+    void printerCollect();
+    void printerShow();
+    void printerClearHeld();
+    void printerSavePdf();
+    void printerPrint();
+    void printerSaveRaw();
+    frond::PrintText printerText() const;
     // Peripheral choices are per machine, in its settings file; machines from before take the
     // old global choices once.
     void migratePeripherals(frondSessions::Preferences* prefs);
@@ -246,6 +260,12 @@ class MainWindow : public QMainWindow {
     QLabel* irdaState;
     QLabel* serialState;
     QLabel* usbState;
+    PrinterPanel* printerPanel;
+    QTimer* printerTimer;
+    QByteArray printerHeld;
+    frondPrint::Status printerStatus;
+    PrinterStage printerStage{PrinterStage::None};
+    std::unique_ptr<QTemporaryDir> printerDir;
     QLineEdit* bluetoothSocket;
     QComboBox* bluetooth;
     QLabel* bluetoothState;

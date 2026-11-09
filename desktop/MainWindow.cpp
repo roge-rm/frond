@@ -56,6 +56,9 @@
 #include <QStandardPaths>
 #include <QStatusBar>
 #include <QTimer>
+#include <QSaveFile>
+#include <QtPrintSupport/QPrintDialog>
+#include <QtPrintSupport/QPrinter>
 #include <QVBoxLayout>
 #include "DanaCardsDialog.h"
 
@@ -194,7 +197,32 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     danaCards = button(tr("Cards 1 and 2…"), "danaCards", true);
     cardLayout->addWidget(danaCards);
     connect(danaCards,&QPushButton::clicked,this,[this] { DanaCardsDialog dialog(client,this->core,this); dialog.exec(); });
-    auto* danaPending = new QLabel(tr("USB computer, USB host, USB printer and Wi-Fi: not available yet"), root);
+    printerPanel = new PrinterPanel(root);
+    connectionsLayout->addWidget(printerPanel);
+    connect(printerPanel, &PrinterPanel::pluggedToggled, this, [this](bool on) {
+        printerStage = PrinterStage::Attach;
+        if (!send("printer", on ? "attach on" : "attach off")) {
+            printerStage = PrinterStage::None;
+            printerPanel->setPlugged(!on);
+            notify(tr("Wait a moment and try again."));
+            return;
+        }
+        runningPreferences.usbPrinter = on;
+        savePeripherals();
+    });
+    connect(printerPanel, &PrinterPanel::pdfRequested, this, [this] { printerSavePdf(); });
+    connect(printerPanel, &PrinterPanel::printRequested, this, [this] { printerPrint(); });
+    connect(printerPanel, &PrinterPanel::rawRequested, this, [this] { printerSaveRaw(); });
+    connect(printerPanel, &PrinterPanel::discardRequested, this, [this] {
+        printerClearHeld();
+        if (!printerPanel->plugged()) return;
+        printerStage = PrinterStage::Discard;
+        if (!send("printer", "clear")) printerStage = PrinterStage::None;
+    });
+    printerTimer = new QTimer(this);
+    connect(printerTimer, &QTimer::timeout, this, [this] { printerPoll(); });
+    printerTimer->start(1000);
+    auto* danaPending = new QLabel(tr("USB computer, USB host and Wi-Fi: not available yet"), root);
     danaPending->setObjectName("danaPendingPeripherals"); danaPending->setEnabled(false); connectionsLayout->addWidget(danaPending);
     // One row: the card in the slot (opens the picker), its state when the buttons don't say it
     // (Ejected, or why there's no button) and the card's buttons. A linked card held elsewhere
@@ -706,6 +734,11 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             if (appsStale) listApps();
         });
         if (command == "db-list") { databasesReply(ok, message); return; }
+        if (command == "printer") {
+            const bool chain = printerResult(ok, message);
+            if (chain && !stopping) notify(tr("Running. Sessions save automatically on close."));
+            return;
+        }
         if (command == "window-id") {
             embedReply(ok, message);
             // The core started fitted for the embedding; on its own it goes back to following the
@@ -871,6 +904,11 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             send(command == "ms-state" && cardPresent ? "ms-protection" : "network-state"); return;
         }
         if (command == "ms-protection" && !stopping) { send("network-state"); return; }
+        if (command == "network-state" && !stopping && frondFirmware::capabilities(runningDevice).usbPrinter && runningPreferences.usbPrinter) {
+            printerStage = PrinterStage::Chain;
+            if (send("printer", "attach on")) return;
+            printerStage = PrinterStage::None;
+        }
         if ((command == "ms-create" || command == "ms-insert" || command == "ms-reinsert" || command == "ms-put-in") && !stopping) { send("ms-protection"); return; }
         notify(command == "save" ? tr("Saved.") : tr("Running. Sessions save automatically on close."));
         const bool savedWorkingCopy = command == "save" && savingPath == sessionPath;
@@ -963,6 +1001,8 @@ void MainWindow::refresh() {
     const bool dana = int(currentDevice()) == deviceTypeDana;
     danaCards->setVisible(dana);
     findChild<QLabel*>("danaPendingPeripherals")->setVisible(dana);
+    printerPanel->setSupported(caps.usbPrinter);
+    printerPanel->setEnabled(running && !stopping);
     danaCards->setEnabled(dana && client.available() && !busy && !stopping);
     const auto reason = tr("Not available on the %1 yet").arg(frondFirmware::deviceName(currentDevice()));
     auto note = [&](QWidget* w, bool supported, const QString& tip) { w->setToolTip(supported ? tip : reason); };
@@ -2213,6 +2253,97 @@ void MainWindow::loadUsbSettings() {
     const auto& value = runningPreferences.usb;
     usb->setCurrentIndex(std::max(0, usb->findData(value.startsWith("tcp:") ? QString("tcp") : value)));
     usbPort->setValue(value.startsWith("tcp:") ? value.mid(4).toInt() : 5024);
+    printerHeld.clear(); printerStatus = {}; printerStage = PrinterStage::None; printerDir.reset();
+    printerPanel->setPlugged(runningPreferences.usbPrinter);
+    printerPanel->setReadout(false, 0);
+    printerPanel->hideReceived();
+}
+void MainWindow::printerPoll() {
+    if (!client.running() || stopping || busy || !client.available() || !printerPanel->plugged() ||
+        !frondFirmware::capabilities(runningDevice).usbPrinter) return;
+    printerStage = PrinterStage::None;
+    client.request("printer", "status");
+}
+frond::PrintText MainWindow::printerText() const {
+    return frond::renderPrintText(reinterpret_cast<const uint8_t*>(printerHeld.constData()), size_t(printerHeld.size()));
+}
+void MainWindow::printerShow() {
+    printerPanel->setReadout(printerStatus.attached, printerHeld.size() + (printerStatus.valid ? printerStatus.bytes : 0));
+    if (printerHeld.isEmpty()) printerPanel->hideReceived();
+    else printerPanel->showReceived(printerHeld.size(), printerText().renderable);
+}
+void MainWindow::printerClearHeld() { printerHeld.clear(); printerShow(); }
+// Takes the job out of the core into a private temp file, reads it and deletes the file.
+void MainWindow::printerCollect() {
+    if (!printerDir) printerDir = std::make_unique<QTemporaryDir>();
+    if (!printerDir->isValid()) { failure(tr("Couldn't make a folder for the print.")); return; }
+    printerStage = PrinterStage::Collect;
+    if (!send("printer", "save " + printerDir->filePath("job.raw"))) printerStage = PrinterStage::None;
+}
+// Returns true when this was the reply that ends the start-up checks.
+bool MainWindow::printerResult(bool ok, const QString& message) {
+    const auto stage = std::exchange(printerStage, PrinterStage::None);
+    const auto status = frondPrint::parseStatus(message);
+    if (status.valid) printerStatus = status;
+    if (stage == PrinterStage::Collect) {
+        const auto path = printerDir ? printerDir->filePath("job.raw") : QString();
+        QByteArray bytes;
+        QFile file(path);
+        const bool read = ok && !path.isEmpty() && file.open(QIODevice::ReadOnly);
+        if (read) bytes = file.readAll();
+        file.close();
+        if (!path.isEmpty()) QFile::remove(path);
+        if (read) printerHeld += bytes;
+        else {
+            const auto text = status.error.isEmpty() ? message : status.error;
+            failure(status.valid && (status.last == "rejected" || status.last == "uncertain")
+                        ? tr("The print couldn't be saved (%1): %2").arg(status.last, text)
+                        : tr("The print couldn't be saved: %1").arg(text));
+        }
+    } else if (stage == PrinterStage::Attach || stage == PrinterStage::Chain) {
+        if (!ok) {
+            printerPanel->setPlugged(false);
+            runningPreferences.usbPrinter = false;
+            savePeripherals();
+            failure(message);
+        }
+    } else if (!ok) {
+        if (stage == PrinterStage::Discard) failure(message);
+        return false;
+    }
+    printerShow();
+    if (stage == PrinterStage::None && frondPrint::received(status)) printerCollect();
+    return stage == PrinterStage::Chain;
+}
+void MainWindow::printerSavePdf() {
+    const auto path = outputFile(tr("Save as PDF"), tr("PDF files (*.pdf)"), "Print.pdf");
+    if (path.isEmpty()) return;
+    QPrinter printer(QPrinter::HighResolution);
+    printer.setOutputFormat(QPrinter::PdfFormat);
+    printer.setOutputFileName(path);
+    if (frondPrint::drawPages(&printer, printerText()) == 0) { failure(tr("Couldn't write %1.").arg(path)); return; }
+    printerClearHeld();
+    notify(tr("Saved %1.").arg(path));
+}
+void MainWindow::printerPrint() {
+    QPrinter printer(QPrinter::HighResolution);
+    QPrintDialog dialog(&printer, this);
+    if (dialog.exec() != QDialog::Accepted) return;
+    if (frondPrint::drawPages(&printer, printerText()) == 0) { failure(tr("Couldn't print.")); return; }
+    printerClearHeld();
+    notify(tr("Sent to the printer."));
+}
+void MainWindow::printerSaveRaw() {
+    // The dialog has already asked about replacing an existing file.
+    const auto path = QFileDialog::getSaveFileName(this, tr("Save raw file"), QDir::homePath() + "/Print.raw");
+    if (path.isEmpty()) return;
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly) || file.write(printerHeld) != printerHeld.size() || !file.commit()) {
+        failure(tr("Couldn't write %1.").arg(path));
+        return;
+    }
+    printerClearHeld();
+    notify(tr("Saved %1.").arg(path));
 }
 QString MainWindow::outputFile(const QString& title, const QString& filter, const QString& defaultName) {
     QFileDialog dialog(this, title, QDir::homePath() + '/' + defaultName, filter);
