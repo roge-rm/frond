@@ -76,7 +76,7 @@ fun MachineSettingsScreen(model: HomeModel) {
             }
             if (draft.device.serialPort) {
                 val choices = remember(draft.settings.serial) {
-                    InfraredChoice.choices(draft.settings.serial, LinkStore.choices(InfraredChoice.folder(context)))
+                    InfraredChoice.serialChoices(draft.settings.serial, LinkStore.choices(InfraredChoice.folder(context)), draft.device.modem)
                 }
                 Choice("Serial port", draft.settings.serial, choices.map { it.first }, { v -> choices.first { it.first == v }.second }) {
                     model.changeMachineSettings(draft.settings.copy(serial = it))

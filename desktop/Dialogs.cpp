@@ -211,6 +211,7 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     };
     row(0, tr("Infrared"), "machineInfrared", prefs.infrared, 5030, infraredLabel, infrared, infraredPort);
     row(1, tr("Serial"), "machineSerial", prefs.serial, 5023, serialLabel, serial, serialPort);
+    if (prefs.serial == "modem") { frondLink::setModemChoice(serial, true); serial->setCurrentIndex(serial->findData("modem")); }
     bluetoothLabel = new QLabel(tr("Bluetooth"), peripherals);
     bluetooth = new QComboBox(peripherals);
     bluetooth->setObjectName("machineBluetooth");
@@ -314,6 +315,12 @@ void MachineSettings::setDevice(Device device) {
     bluetoothSocket->setVisible(hasBluetooth && bluetooth->currentData() == "socket");
     for (QWidget* w : {static_cast<QWidget*>(infraredLabel), static_cast<QWidget*>(infrared)}) w->setVisible(hasInfrared);
     infraredPort->setVisible(hasInfrared && infrared->currentData() == "tcp");
+    {
+        const QSignalBlocker blocked(serial);
+        const auto mode = serial->currentData();
+        frondLink::setModemChoice(serial, known && frondFirmware::capabilities(device).modem);
+        if (const int at = serial->findData(mode); at >= 0) serial->setCurrentIndex(at);
+    }
     for (QWidget* w : {static_cast<QWidget*>(serialLabel), static_cast<QWidget*>(serial)}) w->setVisible(hasSerial);
     serialPort->setVisible(hasSerial && serial->currentData() == "tcp");
     const bool tg50 = device == frondFirmware::deviceFromId("sony-clie-tg50");

@@ -104,6 +104,13 @@ inline void addConnectionChoices(QComboBox* combo, const QString& current, bool 
     if (current.startsWith("link:") && combo->findData(current) < 0)
         combo->addItem(QCoreApplication::translate("frondLink", "Unknown connection"), current);
 }
+// Shows the Modem choice (data "modem") after Wait for a peer on a serial picker only when the
+// device has a modem.
+inline void setModemChoice(QComboBox* combo, bool present) {
+    const int at = combo->findData("modem");
+    if (!present && at >= 0) combo->removeItem(at);
+    if (present && at < 0) combo->insertItem(std::max(0, combo->findData("tcp")) + 1, QCoreApplication::translate("frondLink", "Modem"), "modem");
+}
 // A link: setting whose connection is gone acts as Off.
 inline bool knownLink(const QString& value) {
     if (!value.startsWith("link:")) return false;

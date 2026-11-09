@@ -667,7 +667,8 @@ def main():
     session = arm_session(args.arm_session)
     rom = args.rom or palm_boot.palm_images() / 'Palm/Generic-OS-3.5-EZ/Palm-OS-3.5-en-ez.rom'
     (ROOT / 'build').mkdir(exist_ok=True)
-    failed = 0
+    failed = ran = 0
+    skipped = []
     with tempfile.TemporaryDirectory(prefix='core-control-', dir=ROOT / 'build') as work:
         root = (args.keep or Path(work)).resolve()
         root.mkdir(parents=True, exist_ok=True)
@@ -675,15 +676,20 @@ def main():
                                   lambda: check_arm(Path(os.environ.get('FROND_CORE') or ROOT / 'out/frond'), session.resolve(), root)),
                                  ('frond-68k', rom.is_file(), lambda: check_68k(ROOT / 'out/frond-68k', rom.resolve(), root))):
             if not ready:
-                print(f'core-control {name}: skipped, no {"ARM smoke session" if name == "frond" else "IIIx ROM"}')
+                print(f'core-control {name}: skipped, no {"ARM smoke session" if name == "frond" else f"IIIx ROM at {rom}"}')
+                skipped.append(name)
                 continue
+            ran += 1
             try:
                 result = run()
                 print(f'core-control {name}: ok' + (f' ({result})' if result else ''), flush=True)
             except AssertionError as error:
                 failed += 1
                 print(f'core-control {name}: FAIL, {error}', flush=True)
-    print('core-control: ' + ('FAIL' if failed else 'ok'))
+    if not ran:
+        print('core-control: FAIL, every side was skipped, nothing was checked')
+        return 1
+    print('core-control: ' + ('FAIL' if failed else 'ok') + (f' (skipped {", ".join(skipped)})' if skipped else ''))
     return 1 if failed else 0
 
 

@@ -16,6 +16,18 @@ class SerialChoiceTest {
             assertEquals(v, "off", MachineSettings.from(JSONObject().put("serial", v)).serial)
     }
 
+    @Test fun modemChoice() {
+        val s = MachineSettings(serial = "modem")
+        assertEquals("modem", s.json().getString("serial"))
+        assertEquals(s, MachineSettings.from(s.json()))
+        // Only the serial port takes it.
+        assertEquals("off", MachineSettings.from(JSONObject().put("infrared", "modem")).infrared)
+        val paired = listOf("aa11" to "Desk")
+        assertEquals(listOf("off", "modem", "link:aa11"), InfraredChoice.serialChoices("off", paired, true).map { it.first })
+        assertEquals(listOf("off", "link:aa11"), InfraredChoice.serialChoices("off", paired, false).map { it.first })
+        assertEquals("Modem", CoreLink.Status("modem", title = "Serial").text)
+    }
+
     @Test fun statusLine() {
         assertEquals("Off", CoreLink.Status(title = "Serial").text)
         assertEquals("Serial: Unknown connection", CoreLink.Status("link:cc33", title = "Serial").text)

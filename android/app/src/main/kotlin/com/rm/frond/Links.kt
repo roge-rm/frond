@@ -405,10 +405,15 @@ object LinkAttach {
 object InfraredChoice {
     const val OFF = "off"
 
+    const val MODEM = "modem"
+
     fun linkId(value: String): String? = value.removePrefix("link:").takeIf { value.startsWith("link:") && it.isNotEmpty() && it != "local" }
 
     // What a saved value means here: anything that isn't a link is off.
     fun normalise(value: String?): String = if (value != null && linkId(value) != null) value else OFF
+
+    // The serial port's saved value: the same, or modem.
+    fun normaliseSerial(value: String?): String = if (value == MODEM) MODEM else normalise(value)
 
     // The picker's rows as (value, label): Off, then the paired connections by name, then the current
     // value as Unknown connection if it names one that's gone.
@@ -417,6 +422,10 @@ object InfraredChoice {
         for ((id, name) in paired) add("link:$id" to name)
         if (linkId(current) != null && none { it.first == current }) add(current to "Unknown connection")
     }
+
+    // The serial port's rows: the same, with Modem after Off on a device that has one.
+    fun serialChoices(current: String, paired: List<Pair<String, String>>, modem: Boolean): List<Pair<String, String>> =
+        choices(current, paired).toMutableList().also { if (modem) it.add(1, MODEM to "Modem") }
 
     // A link to a connection that's gone acts as Off.
     fun active(value: String, paired: List<Pair<String, String>>): String? = linkId(value)?.takeIf { id -> paired.any { it.first == id } }

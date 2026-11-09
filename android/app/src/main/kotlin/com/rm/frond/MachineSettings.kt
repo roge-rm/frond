@@ -68,7 +68,7 @@ data class MachineSettings(
     val barMode: BarMode = BarMode.AUTO_HIDE,
     // Infrared: off, or link:<id> for a connection (InfraredChoice). Applied at every start.
     val infrared: String = InfraredChoice.OFF,
-    // Serial: the same values. The LAN serial options are gone.
+    // Serial: the same values, or modem on a device with a snap-on modem. The LAN serial options are gone.
     val serial: String = InfraredChoice.OFF,
     // Bluetooth: off, radio (This Frond's radio) or link:<id> (BluetoothChoice). Applied at every start.
     val bluetooth: String = BluetoothChoice.OFF,
@@ -136,7 +136,7 @@ data class MachineSettings(
                 barShown = json.optBoolean("barShown", fallback.barShown),
                 barMode = BarMode.entries.firstOrNull { it.arg == json.optString("barMode") } ?: fallback.barMode,
                 infrared = InfraredChoice.normalise(json.optString("infrared", fallback.infrared)),
-                serial = InfraredChoice.normalise(json.optString("serial", fallback.serial)),
+                serial = InfraredChoice.normaliseSerial(json.optString("serial", fallback.serial)),
                 bluetooth = BluetoothChoice.normalise(json.optString("bluetooth", fallback.bluetooth)),
             )
         }

@@ -1754,9 +1754,17 @@ for line in s.makefile('rb'):
             MainWindow window(arm.fileName()); window.show();
             auto* list = window.findChild<QListWidget*>("sessionList");
             QCOMPARE(list->count(), 1);
+            // The IIIx has a modem: a saved serial choice of modem is passed on as --serial modem.
+            {
+                frondSessions::Preferences saved;
+                QVERIFY(frondSessions::readPreferences(managedSession("Palm IIIx"), &saved));
+                saved.serial = "modem";
+                QCOMPARE(frondSessions::writePreferences(managedSession("Palm IIIx"), saved), QString());
+            }
             emit list->itemActivated(list->item(0));
             QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("stop")->isEnabled(), 5000);
             const auto args = read(".args").split('\n');
+            QVERIFY(read(".args").contains("--serial\nmodem"));
             QCOMPARE(args.value(0), QFileInfo(managedSession("Palm IIIx")).canonicalFilePath());
             QVERIFY(!args.contains("--device") && !args.contains("--work-folder"));
             QVERIFY(read(".args").contains("--contrast\n70\n") && read(".args").contains("--speed\nuncapped\n"));

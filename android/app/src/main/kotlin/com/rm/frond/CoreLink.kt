@@ -26,6 +26,7 @@ open class CoreLink(
     ) {
         val text: String get() = when {
             error != null -> "Off. $error"
+            choice == InfraredChoice.MODEM && error == null -> "Modem"
             !active && InfraredChoice.linkId(choice) != null -> "$title: Unknown connection"
             !active -> "Off"
             ir != null -> LinkWire.channelText(title, ir)
@@ -47,10 +48,17 @@ open class CoreLink(
     // thread. Returns an error to show, or null.
     fun apply(context: Context, control: ControlLink, choice: String, machine: String, device: String): String? {
         synchronized(lock) {
+            // The modem is the core's own: no link, no socket.
+            if (choice == InfraredChoice.MODEM && modeCommand == "serial-mode") {
+                detach()
+                val reply = control.request(modeCommand, "modem", timeoutSeconds = 30)
+                state.value = if (reply.ok) Status(choice, title = title) else Status(choice, error = reply.message, title = title)
+                return if (reply.ok) null else reply.message
+            }
             val id = InfraredChoice.active(choice, LinkStore.choices(InfraredChoice.folder(context)))
             if (id == null) {
                 detach()
-                val wasOn = state.value.active
+                val wasOn = state.value.active || state.value.choice == InfraredChoice.MODEM
                 state.value = Status(choice, title = title)
                 if (wasOn) {
                     val reply = control.request(modeCommand, "off", timeoutSeconds = 30)

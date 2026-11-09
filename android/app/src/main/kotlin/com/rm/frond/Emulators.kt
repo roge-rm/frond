@@ -17,6 +17,7 @@ object Emulators {
 }
 
 // The 68k core (libmain68k.so) for DragonBall devices like the Palm IIIx, in its own process.
+// HostDns starts in FrondActivity.onCreate, so the modem's PPP side has DNS too.
 class Frond68kActivity : FrondActivity() {
     override val coreLibrary get() = "main68k"
     override val controlSocket get() = "control68k.sock"

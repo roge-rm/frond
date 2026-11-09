@@ -948,6 +948,12 @@ void MainWindow::refresh() {
     auto shown = [&](bool present, std::initializer_list<QWidget*> widgets) {
         for (auto* w : widgets) w->setVisible(present);
     };
+    {
+        const QSignalBlocker blocked(serial);
+        const auto mode = serial->currentData();
+        frondLink::setModemChoice(serial, caps.modem);
+        if (const int at = serial->findData(mode); at >= 0) serial->setCurrentIndex(at);
+    }
     shown(!frondFirmware::serialAbsent(currentDevice()), {serialLabel, serial, serialPort});
     if (frondFirmware::serialAbsent(currentDevice())) serialState->setVisible(false);
     shown(!m68k || caps.network, {networkLabel, network});
@@ -2092,6 +2098,9 @@ void MainWindow::showSerial(const QString& state) {
     }
     if (state.isEmpty()) serialState->clear();
     else if (parts[0] == "off") serialState->setText(parts.size() > 1 ? tr("Serial: off, %1").arg(state.mid(4)) : QString());
+    else if (parts[0] == "modem" && parts.size() > 1)
+        serialState->setText(parts[1] == "online" && parts.size() > 2 ? tr("Modem: online at %1").arg(parts[2])
+                             : parts[1] == "dialling" ? tr("Modem: dialling") : tr("Modem: idle"));
     else if (parts.size() == 3)
         serialState->setText(tr("Serial: %1, %2").arg(parts[1], parts[2] == "connected" ? tr("connected") : tr("waiting for a connection")));
     else serialState->setText(tr("Serial: %1").arg(state));
@@ -2099,6 +2108,7 @@ void MainWindow::showSerial(const QString& state) {
 void MainWindow::loadSerialSettings() {
     const auto& value = runningPreferences.serial;
     const QSignalBlocker blocked(serial);
+    frondLink::setModemChoice(serial, frondFirmware::capabilities(runningDevice).modem);
     frondLink::addConnectionChoices(serial, value);
     serial->setCurrentIndex(std::max(0, serial->findData(value.startsWith("tcp:") ? QString("tcp") : value)));
     serialPort->setValue(value.startsWith("tcp:") ? value.mid(4).toInt() : 5023);
