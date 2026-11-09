@@ -173,6 +173,22 @@ with attached cards is not supported there yet. Those operations are refused
 without discarding either card. Dana sessions with no attached cards keep the
 ordinary session copy and import paths.
 
+### Dana USB port
+
+The Dana has one external USB port, and USB port in Connections (desktop panel, Android sheet) picks what is plugged into it: Off, Printer or Wi-Fi adapter. The choice is kept for the machine and applied at every start. Changing it while the Dana runs unplugs one and plugs in the other.
+
+With Printer, a print from the Dana is collected and "Print received" shows when it stops. Choose Save as PDF (desktop), Print, Save raw file or Discard. Only the Generic printer profile can be shown as pages.
+
+With Wi-Fi adapter, the Dana sees a USB 802.11b adapter (a Microsoft MN-510) and the readout shows the link, for example "Connected, 10.0.2.15". To set it up, open Network in the Dana's Preferences:
+
+- Make a new service, choose 802.11b and open its settings.
+- Network Type is Access Point, and Access Point is "Use first available" or "Use specific AP" with the SSID `Frond`.
+- Leave WEP off, or turn it on with any key, as Frond connects either way.
+- In the IP settings keep DHCP.
+- Connect. The Dana gets 10.0.2.15, the router is 10.0.2.2 and DNS is 10.0.2.3. Use 10.0.2.2 for a service on your computer.
+
+Peer to Peer (ad hoc) can be chosen but finds nobody, so DHCP times out.
+
 ### Cards
 
 Open Cards from the main menu on Linux, or from the home menu on Android. SD cards and Memory Sticks are listed by name with their size, and the marker lights while a card is in a machine. A linked card lists its machines.
@@ -426,9 +442,9 @@ Tested: discovery, sending a Memo or file by Bluetooth (OPP), PIN and Trusted De
 ## Availability and limits
 
 Dana has an experimental desktop and Android frontend, with its built-in
-keyboard, sound, infrared beaming and two independent SD/MMC slots. Its USB
-computer transport is available through the native localhost debug path. The
-app's USB controls, USB printers and host peripherals, and Wi-Fi remain disabled.
+keyboard, sound, infrared beaming, two independent SD/MMC slots, a USB printer
+and a USB Wi-Fi adapter. Its USB computer transport is available through the
+native localhost debug path. The app's USB computer controls stay disabled.
 
 | | T\|X | E2 | Zire 72 | TG50 | IIIx |
 |---|---|---|---|---|---|

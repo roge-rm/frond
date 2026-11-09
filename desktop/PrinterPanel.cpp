@@ -1,5 +1,6 @@
 #include "PrinterPanel.h"
-#include <QCheckBox>
+#include <algorithm>
+#include <QComboBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
@@ -11,11 +12,14 @@ PrinterPanel::PrinterPanel(QWidget* parent) : QWidget(parent) {
     auto* column = new QVBoxLayout(this);
     column->setContentsMargins(0, 0, 0, 0);
     auto* row = new QHBoxLayout;
-    switchBox = new QCheckBox(tr("USB printer"), this);
-    switchBox->setObjectName("printerPlugged");
+    auto* label = new QLabel(tr("USB port"), this);
+    portBox = new QComboBox(this);
+    portBox->setObjectName("usbPortChoice");
+    portBox->addItem(tr("Off"), "off");
     readout = new QLabel(this);
     readout->setObjectName("printerReadout");
-    row->addWidget(switchBox);
+    row->addWidget(label);
+    row->addWidget(portBox);
     row->addWidget(readout, 1);
     column->addLayout(row);
     banner = new QWidget(this);
@@ -41,18 +45,29 @@ PrinterPanel::PrinterPanel(QWidget* parent) : QWidget(parent) {
     inner->addLayout(buttons);
     column->addWidget(banner);
     banner->hide();
-    connect(switchBox, &QCheckBox::toggled, this, &PrinterPanel::pluggedToggled);
+    connect(portBox, &QComboBox::activated, this, [this] { emit portChosen(port()); });
     connect(pdf, &QPushButton::clicked, this, &PrinterPanel::pdfRequested);
     connect(print, &QPushButton::clicked, this, &PrinterPanel::printRequested);
     connect(raw, &QPushButton::clicked, this, &PrinterPanel::rawRequested);
     connect(discard, &QPushButton::clicked, this, &PrinterPanel::discardRequested);
 }
-bool PrinterPanel::plugged() const { return switchBox->isChecked(); }
-void PrinterPanel::setPlugged(bool plugged) {
-    const QSignalBlocker blocked(switchBox);
-    switchBox->setChecked(plugged);
-    if (!plugged) readout->clear();
+void PrinterPanel::setSupported(bool printer, bool wifi) {
+    const QSignalBlocker blocked(portBox);
+    const auto current = port();
+    portBox->clear();
+    portBox->addItem(tr("Off"), "off");
+    if (printer) portBox->addItem(tr("Printer"), "printer");
+    if (wifi) portBox->addItem(tr("Wi-Fi adapter"), "wifi");
+    setPort(current);
+    setVisible(printer || wifi);
 }
+QString PrinterPanel::port() const { return portBox->currentData().toString(); }
+void PrinterPanel::setPort(const QString& port) {
+    const QSignalBlocker blocked(portBox);
+    portBox->setCurrentIndex(std::max(0, portBox->findData(port)));
+    readout->clear();
+}
+void PrinterPanel::setLinkReadout(const QString& text) { readout->setText(text); }
 void PrinterPanel::setReadout(bool attached, qint64 bytes) {
     readout->setText(attached ? tr("%n byte(s) received", nullptr, int(bytes)) : QString());
 }

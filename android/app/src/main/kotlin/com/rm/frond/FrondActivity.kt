@@ -162,10 +162,10 @@ open class FrondActivity : SDLActivity() {
         link.whenConnected {
             Thread { SdCard.restorePending(applicationContext, link, sessionPath) }.apply { isDaemon = true }.start()
         }
-        // The Dana's USB printer is plugged in at every start when the machine's setting is on.
-        if (machineSettings.usbPrinter && launchDevice().usbPrinter) {
+        // The Dana's USB port gets the machine's printer or Wi-Fi adapter at every start.
+        UsbPort.startRequest(UsbPort.forStart(launchDevice(), machineSettings.usbPort))?.let { (command, argument) ->
             link.whenConnected {
-                Thread { link.request("printer", "attach on", timeoutSeconds = 30).takeIf { !it.ok }?.let { Log.w(TAG, "printer: ${it.message}") } }
+                Thread { link.request(command, argument, timeoutSeconds = 30).takeIf { !it.ok }?.let { Log.w(TAG, "usb port: ${it.message}") } }
                     .apply { isDaemon = true }.start()
             }
         }

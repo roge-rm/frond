@@ -4,6 +4,7 @@
 #include <QFontDatabase>
 #include <QFontMetricsF>
 #include <QPainter>
+#include <QObject>
 #include <QPrinter>
 #include <QRegularExpression>
 
@@ -22,6 +23,28 @@ Status parseStatus(const QString& message) {
     s.idleMs = m.captured(5).toLongLong();
     s.error = message.left(m.capturedStart()).trimmed();
     return s;
+}
+
+UsbPort parseUsbPort(const QString& message) {
+    UsbPort s;
+    const auto words = message.split(' ', Qt::SkipEmptyParts);
+    if (words.isEmpty()) return s;
+    s.port = words[0];
+    if (s.port != "off" && s.port != "printer" && s.port != "wifi") return s;
+    s.valid = true;
+    if (s.port != "wifi") return s;
+    s.powered = words.size() > 1 && words[1] == "powered";
+    for (const auto& word : words) {
+        if (word == "link=up") s.linkUp = true;
+        else if (word.startsWith("ip=")) s.ip = word.mid(3);
+    }
+    return s;
+}
+
+QString wifiReadout(const UsbPort& state) {
+    if (!state.valid || state.port != "wifi") return {};
+    if (state.linkUp) return QObject::tr("Connected") + (state.ip.isEmpty() ? QString() : ", " + state.ip);
+    return state.powered ? QObject::tr("Not connected") : QObject::tr("Waiting for the Dana");
 }
 
 int drawPages(QPrinter* printer, const frond::PrintText& text) {

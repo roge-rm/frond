@@ -73,14 +73,14 @@ data class MachineSettings(
     // Bluetooth: off, radio (This Frond's radio) or link:<id> (BluetoothChoice). Applied at every start.
     val bluetooth: String = BluetoothChoice.OFF,
     val danaView: DanaView = DanaView(),
-    // Dana: the USB printer is plugged in (applied at every start).
-    val usbPrinter: Boolean = false,
+    // Dana: what is on the USB host port, off, printer or wifi (applied at every start).
+    val usbPort: String = UsbPort.OFF,
 ) {
     fun json(): JSONObject = JSONObject().put("size", size.name).put("smoothing", smoothing)
         .put("sound", sound).put("fastAudio", fastAudio).put("microphone", microphone)
         .put("showKeyboard", showKeyboard).put("jogControls", jogControls.arg)
         .put("showJogControls", jogControls != JogControls.HIDDEN)
-        .put("engine", engine.arg).put("speed", speed.arg).put("barShown", barShown).put("barMode", barMode.arg).put("infrared", infrared).put("serial", serial).put("bluetooth", bluetooth).put("danaView", danaView.json()).put("usbPrinter", usbPrinter).also { if (contrastSet) it.put("contrast", contrast) }
+        .put("engine", engine.arg).put("speed", speed.arg).put("barShown", barShown).put("barMode", barMode.arg).put("infrared", infrared).put("serial", serial).put("bluetooth", bluetooth).put("danaView", danaView.json()).put("usbPort", usbPort).put("usbPrinter", usbPort == UsbPort.PRINTER).also { if (contrastSet) it.put("contrast", contrast) }
 
     fun applyTo(settings: Settings) = settings.copy(size = size, smoothing = smoothing, sound = sound)
 
@@ -142,7 +142,8 @@ data class MachineSettings(
                 serial = InfraredChoice.normaliseSerial(json.optString("serial", fallback.serial)),
                 bluetooth = BluetoothChoice.normalise(json.optString("bluetooth", fallback.bluetooth)),
                 danaView = DanaView.from(json.optJSONObject("danaView"), fallback.danaView),
-                usbPrinter = json.optBoolean("usbPrinter", fallback.usbPrinter),
+                usbPort = if (json.has("usbPort")) UsbPort.normalise(json.optString("usbPort"))
+                    else if (json.has("usbPrinter")) UsbPort.normalise(null, json.optBoolean("usbPrinter")) else fallback.usbPort,
             )
         }
     }

@@ -3,6 +3,25 @@ package com.rm.frond
 // The Dana's USB printer in the app: the core's status line, when a job counts as received, and the
 // Generic (6.0) text renderer (the same rules as print/PrintText.h).
 object PrintJob {
+    // What the core's usb-port-state says: "off", "printer STATUS" or "wifi powered|unpowered link=up|down ip=ADDRESS ...".
+    data class Port(val valid: Boolean = false, val port: String = "", val powered: Boolean = false, val linkUp: Boolean = false, val ip: String = "")
+
+    fun parsePort(message: String): Port {
+        val words = message.trim().split(' ').filter { it.isNotEmpty() }
+        val port = words.firstOrNull() ?: return Port()
+        if (port != UsbPort.OFF && port != UsbPort.PRINTER && port != UsbPort.WIFI) return Port()
+        if (port != UsbPort.WIFI) return Port(true, port)
+        return Port(true, port, words.getOrNull(1) == "powered", "link=up" in words, words.firstOrNull { it.startsWith("ip=") }?.substring(3) ?: "")
+    }
+
+    // The Wi-Fi adapter's readout in the Connections sheet.
+    fun wifiReadout(state: Port): String? = when {
+        !state.valid || state.port != UsbPort.WIFI -> null
+        state.linkUp -> if (state.ip.isEmpty()) "Connected" else "Connected, ${state.ip}"
+        state.powered -> "Not connected"
+        else -> "Waiting for the Dana"
+    }
+
     const val COLUMNS = 80
     const val LINES_PER_PAGE = 66
     const val NOT_TEXT = "Only the Generic printer profile can be shown as pages"
@@ -27,8 +46,8 @@ object PrintJob {
             bytes.toLongOrNull() ?: 0, idle.toLongOrNull() ?: -1)
     }
 
-    // The Dana has a printer to plug in.
-    fun rowShown(device: Device) = device.usbPrinter
+    // The Dana has a printer or a Wi-Fi adapter to plug into its USB port.
+    fun rowShown(device: Device) = device.usbPrinter || device.usbWifi
 
     class Pages(val renderable: Boolean, val reason: String, val pages: List<List<String>>)
 
@@ -101,4 +120,38 @@ object PrintJob {
     // for a font whose advance is `advance` and line spacing `spacing` times its size.
     fun fontSize(widthPt: Float, heightPt: Float, advance: Float = 0.6f, spacing: Float = 1.2f): Float =
         minOf(widthPt / (COLUMNS * advance), heightPt / (LINES_PER_PAGE * spacing))
+}
+
+// The Dana's one USB host port: nothing, the printer or the Wi-Fi adapter. Kept per machine and applied at every start.
+object UsbPort {
+    const val OFF = "off"
+    const val PRINTER = "printer"
+    const val WIFI = "wifi"
+
+    fun label(port: String) = when (port) {
+        PRINTER -> "Printer"
+        WIFI -> "Wi-Fi adapter"
+        else -> "Off"
+    }
+
+    // The choices a device offers, Off first.
+    fun choices(device: Device): List<String> = buildList {
+        add(OFF)
+        if (device.usbPrinter) add(PRINTER)
+        if (device.usbWifi) add(WIFI)
+    }
+
+    // A saved value; the older printer switch counts as Printer. Anything unknown is Off.
+    fun normalise(port: String?, legacyPrinter: Boolean = false) =
+        if (port == PRINTER || port == WIFI) port else if (port == null && legacyPrinter) PRINTER else OFF
+
+    // The port a machine starts with: what it saved, if the device has it.
+    fun forStart(device: Device, saved: String) = if (saved in choices(device)) saved else OFF
+
+    // The core's command for a choice at start or on a change.
+    fun startRequest(port: String): Pair<String, String>? = when (port) {
+        PRINTER -> "printer" to "attach on"
+        WIFI -> "usb-port" to "wifi"
+        else -> null
+    }
 }

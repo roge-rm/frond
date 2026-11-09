@@ -291,13 +291,13 @@ private fun ConnectionsSheet(model: RunningModel, actions: RunningBarActions) {
             ConnRow.SERIAL -> ConnItem("Serial port", device.serialPort, if (device.serialPort) model.serial.text else null) { choosing = LinkKind.SERIAL }
             ConnRow.USB -> ConnItem("USB HotSync", device.usb, if (device.usb) relayText(model.usb) else null) { choosing = LinkKind.USB }
             ConnRow.USB_RETRY -> SheetAction("Connect again") { UsbLink.retry() }
-            ConnRow.PRINTER -> model.printer?.let { PrinterRow(it) } ?: ConnItem("USB printer", false, null) { }
+            ConnRow.USB_PORT -> model.printer?.let { PrinterRow(it, device) } ?: ConnItem("USB port", false, null) { }
             ConnRow.CAMERA -> ConnItem("Camera", false, null) { }
             ConnRow.DEBUGGER -> ConnItem("Debugger", true, debuggerText(model.debugger)) { }
             ConnRow.HOTSYNC -> SheetAction("HotSync") { actions.closeSheet(); model.hotSync() }
         }
     }
-    if (model.danaCards != null) for (title in listOf("USB computer", "USB host", "Wi-Fi")) ConnItem(title, false, null) { }
+    if (model.danaCards != null) for (title in listOf("USB computer")) ConnItem(title, false, null) { }
     choosing?.let { LinkChoiceDialog(it, model) { choosing = null } }
 }
 

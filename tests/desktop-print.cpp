@@ -3,6 +3,7 @@
 #include <QPrinter>
 #include <QPushButton>
 #include <QLabel>
+#include <QComboBox>
 #include <QTemporaryDir>
 #include "FirmwareInput.h"
 #include "PrintJob.h"
@@ -36,6 +37,24 @@ class DesktopPrint : public QObject {
         QVERIFY(!frondPrint::parseStatus("Use attach on|off.").valid);
         QVERIFY(!frondPrint::parseStatus("").valid);
     }
+    void usbPortParsing() {
+        auto s = frondPrint::parseUsbPort("wifi powered link=up ip=10.0.2.15 mac=02:00:00:00:00:01 tx=3 rx=4 dropped=0");
+        QVERIFY(s.valid && s.powered && s.linkUp);
+        QCOMPARE(s.ip, QString("10.0.2.15"));
+        QCOMPARE(frondPrint::wifiReadout(s), QString("Connected, 10.0.2.15"));
+        s = frondPrint::parseUsbPort("wifi powered link=down ip= mac=02:00:00:00:00:01 tx=0 rx=0 dropped=0");
+        QVERIFY(s.valid && !s.linkUp);
+        QCOMPARE(frondPrint::wifiReadout(s), QString("Not connected"));
+        s = frondPrint::parseUsbPort("wifi unpowered link=down ip= mac=02:00:00:00:00:01 tx=0 rx=0 dropped=0");
+        QCOMPARE(frondPrint::wifiReadout(s), QString("Waiting for the Dana"));
+        s = frondPrint::parseUsbPort("printer attached collecting bytes=0 last=none idle=-1");
+        QVERIFY(s.valid);
+        QCOMPARE(s.port, QString("printer"));
+        QVERIFY(frondPrint::wifiReadout(s).isEmpty());
+        QVERIFY(frondPrint::parseUsbPort("off").valid);
+        QVERIFY(!frondPrint::parseUsbPort("").valid);
+        QVERIFY(!frondPrint::parseUsbPort("Use usb-port off|printer|wifi.").valid);
+    }
     void rowByCapability() {
         QWidget parent;
         PrinterPanel panel(&parent);
@@ -43,20 +62,58 @@ class DesktopPrint : public QObject {
         int shown = 0;
         for (const auto& p : deviceProfiles5) {
             const auto caps = frondFirmware::capabilities(static_cast<frondFirmware::Device>(p.deviceType));
-            panel.setSupported(caps.usbPrinter);
-            QCOMPARE(panel.isVisible(), caps.usbPrinter);
+            panel.setSupported(caps.usbPrinter, caps.usbWifi);
+            QCOMPARE(panel.isVisible(), caps.usbPrinter || caps.usbWifi);
             QCOMPARE(panel.isVisible(), p.deviceType == deviceTypeDana);
             shown += panel.isVisible();
         }
         QCOMPARE(shown, 1);
+        // The Dana lists Off, Printer and Wi-Fi adapter; a device with only a printer has no Wi-Fi choice.
+        auto* box = panel.findChild<QComboBox*>("usbPortChoice");
+        panel.setSupported(true, true);
+        QStringList choices;
+        for (int i = 0; i < box->count(); i++) choices << box->itemText(i);
+        QCOMPARE(choices, (QStringList{"Off", "Printer", "Wi-Fi adapter"}));
+        panel.setSupported(true, false);
+        QCOMPARE(box->count(), 2);
+    }
+    void portChoice() {
+        PrinterPanel panel;
+        panel.setSupported(true, true);
+        panel.show();
+        QSignalSpy chosen(&panel, &PrinterPanel::portChosen);
+        QCOMPARE(panel.port(), QString("off"));
+        panel.setPort("wifi");
+        QCOMPARE(chosen.count(), 0);
+        QCOMPARE(panel.port(), QString("wifi"));
+        QVERIFY(!panel.plugged());
+        panel.setLinkReadout("Connected, 10.0.2.15");
+        QCOMPARE(panel.findChild<QLabel*>("printerReadout")->text(), QString("Connected, 10.0.2.15"));
+        // Printer keeps the Print received row working.
+        panel.setPort("printer");
+        QVERIFY(panel.plugged());
+        QVERIFY(panel.findChild<QLabel*>("printerReadout")->text().isEmpty());
+        panel.setReadout(true, 12);
+        QVERIFY(panel.findChild<QLabel*>("printerReadout")->text().contains("12"));
+        panel.showReceived(12, true);
+        QVERIFY(panel.receivedShown());
+        // A choice by the user emits the port.
+        auto* box = panel.findChild<QComboBox*>("usbPortChoice");
+        box->setCurrentIndex(box->findData("wifi"));
+        emit box->activated(box->currentIndex());
+        QCOMPARE(chosen.count(), 1);
+        QCOMPARE(chosen.at(0).at(0).toString(), QString("wifi"));
+        // A port the device lacks falls back to Off.
+        panel.setSupported(true, false);
+        QCOMPARE(panel.port(), QString("off"));
     }
     void panelChoices() {
         PrinterPanel panel;
-        panel.setSupported(true);
+        panel.setSupported(true, true);
         panel.show();
-        QSignalSpy plugged(&panel, &PrinterPanel::pluggedToggled);
-        panel.setPlugged(true);
-        QCOMPARE(plugged.count(), 0);
+        QSignalSpy chosen(&panel, &PrinterPanel::portChosen);
+        panel.setPort("printer");
+        QCOMPARE(chosen.count(), 0);
         QVERIFY(!panel.receivedShown());
         panel.showReceived(289, true);
         QVERIFY(panel.receivedShown());

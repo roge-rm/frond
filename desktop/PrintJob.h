@@ -17,6 +17,15 @@ struct Status {
 };
 Status parseStatus(const QString& message);
 
+// "off", "printer STATUS" or "wifi powered|unpowered link=up|down ip=ADDRESS ..." from usb-port-state.
+struct UsbPort {
+    bool valid{false}, powered{false}, linkUp{false};
+    QString port, ip;
+};
+UsbPort parseUsbPort(const QString& message);
+// The Wi-Fi adapter's line in the Connections panel.
+QString wifiReadout(const UsbPort& state);
+
 // A job counts as received when bytes have come in and then stopped for this long.
 constexpr qint64 pauseMs = 3000;
 inline bool received(const Status& s) { return s.valid && s.attached && s.bytes > 0 && s.idleMs >= pauseMs; }

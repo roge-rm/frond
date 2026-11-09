@@ -71,8 +71,8 @@ struct Preferences {
     bool peripheralsSet{false};
     // The running bar is shown over the Palm; Hide bar turns it off for this machine.
     bool barShown{true};
-    // Dana: the USB printer is plugged in.
-    bool usbPrinter{false};
+    // Dana: what is on the USB host port, off, printer or wifi.
+    QString usbPort{"off"};
     frondDana::Preferences danaView;
 };
 inline QString preferencesPath(const QString& path) { return path + ".settings.json"; }
@@ -90,7 +90,9 @@ inline bool readPreferences(const QString& path, Preferences* result) {
                std::clamp(object.value("contrast").toInt(50), 0, 100),
                object.value("speed").toString() == QLatin1String("uncapped"), object.contains("contrast")};
     result->barShown = object.value("barShown").toBool(true);
-    result->usbPrinter = object.value("usbPrinter").toBool(false);
+    // Earlier machine settings only have the printer switch.
+    const auto port = object.value("usbPort").toString();
+    result->usbPort = port == "printer" || port == "wifi" ? port : object.value("usbPrinter").toBool(false) ? "printer" : "off";
     if (object.value("infrared").isString()) {
         result->infrared = object.value("infrared").toString();
         result->serial = object.value("serial").toString("off");
@@ -110,7 +112,8 @@ inline QString writePreferences(const QString& path, const Preferences& prefs) {
                              {"showJogControls", prefs.jogControls != JogControls::hidden},
                              {"engine", prefs.fastEngine ? "fast" : "exact"}, {"speed", prefs.uncapped ? "uncapped" : "original"}};
     if (!prefs.barShown) object.insert("barShown", false);
-    if (prefs.usbPrinter) object.insert("usbPrinter", true);
+    if (prefs.usbPort != "off") object.insert("usbPort", prefs.usbPort);
+    if (prefs.usbPort == "printer") object.insert("usbPrinter", true);
     if (prefs.contrastSet) object.insert("contrast", std::clamp(prefs.contrast, 0, 100));
     if (prefs.peripheralsSet) {
         object.insert("infrared", prefs.infrared);

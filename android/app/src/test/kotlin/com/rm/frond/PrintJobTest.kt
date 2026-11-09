@@ -34,7 +34,7 @@ class PrintJobTest {
     }
 
     @Test fun rowFollowsTheCapability() {
-        for (device in Device.entries) assertEquals(device.id, device.usbPrinter, PrintJob.rowShown(device))
+        for (device in Device.entries) assertEquals(device.id, device.usbPrinter || device.usbWifi, PrintJob.rowShown(device))
         assertTrue(Device.entries.any { it.usbPrinter })
     }
 

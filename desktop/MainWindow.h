@@ -120,6 +120,8 @@ class MainWindow : public QMainWindow {
     // choices work on the bytes in hand; more printing adds to them.
     enum class PrinterStage { None, Collect, Discard, Attach, Chain };
     void printerPoll();
+    void usbPortReply(bool switched, const QString& message);
+    bool usbPortResync{false};
     bool printerResult(bool ok, const QString& message);
     void printerCollect();
     void printerShow();

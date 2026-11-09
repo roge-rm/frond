@@ -199,15 +199,17 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     connect(danaCards,&QPushButton::clicked,this,[this] { DanaCardsDialog dialog(client,this->core,this); dialog.exec(); });
     printerPanel = new PrinterPanel(root);
     connectionsLayout->addWidget(printerPanel);
-    connect(printerPanel, &PrinterPanel::pluggedToggled, this, [this](bool on) {
-        printerStage = PrinterStage::Attach;
-        if (!send("printer", on ? "attach on" : "attach off")) {
+    connect(printerPanel, &PrinterPanel::portChosen, this, [this](const QString& port) {
+        const bool printer = port == "printer";
+        printerStage = printer ? PrinterStage::Attach : PrinterStage::None;
+        if (!(printer ? send("printer", "attach on") : send("usb-port", port))) {
             printerStage = PrinterStage::None;
-            printerPanel->setPlugged(!on);
+            printerPanel->setPort(runningPreferences.usbPort);
             notify(tr("Wait a moment and try again."));
             return;
         }
-        runningPreferences.usbPrinter = on;
+        runningPreferences.usbPort = port;
+        printerPanel->setLinkReadout(port == "wifi" ? frondPrint::wifiReadout({true, false, false, "wifi", {}}) : QString());
         savePeripherals();
     });
     connect(printerPanel, &PrinterPanel::pdfRequested, this, [this] { printerSavePdf(); });
@@ -222,7 +224,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     printerTimer = new QTimer(this);
     connect(printerTimer, &QTimer::timeout, this, [this] { printerPoll(); });
     printerTimer->start(1000);
-    auto* danaPending = new QLabel(tr("USB computer, USB host and Wi-Fi: not available yet"), root);
+    auto* danaPending = new QLabel(tr("USB computer: not available yet"), root);
     danaPending->setObjectName("danaPendingPeripherals"); danaPending->setEnabled(false); connectionsLayout->addWidget(danaPending);
     // One row: the card in the slot (opens the picker), its state when the buttons don't say it
     // (Ejected, or why there's no button) and the card's buttons. A linked card held elsewhere
@@ -734,6 +736,19 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             if (appsStale) listApps();
         });
         if (command == "db-list") { databasesReply(ok, message); return; }
+        if (command == "usb-port-state" || (command == "usb-port" && ok)) {
+            usbPortReply(command == "usb-port", message);
+            if (stopping && command == "usb-port") save();
+            return;
+        }
+        if (command == "usb-port") {
+            // The core keeps what it had; ask it which that is.
+            if (stopping) { save(); return; }
+            failure(message);
+            usbPortResync = true;
+            send("usb-port-state");
+            return;
+        }
         if (command == "printer") {
             const bool chain = printerResult(ok, message);
             if (stopping) { save(); return; }
@@ -906,11 +921,13 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             send(command == "ms-state" && cardPresent ? "ms-protection" : "network-state"); return;
         }
         if (command == "ms-protection" && !stopping) { send("network-state"); return; }
-        if (command == "network-state" && !stopping && frondFirmware::capabilities(runningDevice).usbPrinter && runningPreferences.usbPrinter) {
+        if (command == "network-state" && !stopping && frondFirmware::capabilities(runningDevice).usbPrinter && runningPreferences.usbPort == "printer") {
             printerStage = PrinterStage::Chain;
             if (send("printer", "attach on")) return;
             printerStage = PrinterStage::None;
         }
+        if (command == "network-state" && !stopping && frondFirmware::capabilities(runningDevice).usbWifi && runningPreferences.usbPort == "wifi" &&
+            send("usb-port", "wifi")) return;
         if ((command == "ms-create" || command == "ms-insert" || command == "ms-reinsert" || command == "ms-put-in") && !stopping) { send("ms-protection"); return; }
         notify(command == "save" ? tr("Saved.") : tr("Running. Sessions save automatically on close."));
         const bool savedWorkingCopy = command == "save" && savingPath == sessionPath;
@@ -1003,7 +1020,7 @@ void MainWindow::refresh() {
     const bool dana = int(currentDevice()) == deviceTypeDana;
     danaCards->setVisible(dana);
     findChild<QLabel*>("danaPendingPeripherals")->setVisible(dana);
-    printerPanel->setSupported(caps.usbPrinter);
+    printerPanel->setSupported(caps.usbPrinter, caps.usbWifi);
     printerPanel->setEnabled(running && !stopping);
     danaCards->setEnabled(dana && client.available() && !busy && !stopping);
     const auto reason = tr("Not available on the %1 yet").arg(frondFirmware::deviceName(currentDevice()));
@@ -2256,21 +2273,37 @@ void MainWindow::loadUsbSettings() {
     usb->setCurrentIndex(std::max(0, usb->findData(value.startsWith("tcp:") ? QString("tcp") : value)));
     usbPort->setValue(value.startsWith("tcp:") ? value.mid(4).toInt() : 5024);
     printerHeld.clear(); printerStatus = {}; printerStage = PrinterStage::None; printerDir.reset();
-    printerPanel->setPlugged(runningPreferences.usbPrinter);
+    printerPanel->setPort(runningPreferences.usbPort);
     printerPanel->setReadout(false, 0);
     printerPanel->hideReceived();
 }
 void MainWindow::printerPoll() {
-    if (!client.running() || stopping || busy || !client.available() || !printerPanel->plugged() ||
-        !frondFirmware::capabilities(runningDevice).usbPrinter) return;
+    if (!client.running() || stopping || busy || !client.available()) return;
+    const auto port = printerPanel->port();
+    if (port == "wifi" && frondFirmware::capabilities(runningDevice).usbWifi) { client.request("usb-port-state"); return; }
+    if (port != "printer" || !frondFirmware::capabilities(runningDevice).usbPrinter) return;
     printerStage = PrinterStage::None;
     client.request("printer", "status");
+}
+// The reply to usb-port or usb-port-state. A switch has taken effect; a state reply updates the readout, and
+// after a failed switch also shows which port the core kept.
+void MainWindow::usbPortReply(bool switched, const QString& message) {
+    const auto state = frondPrint::parseUsbPort(message);
+    if (!state.valid) return;
+    if (usbPortResync) {
+        usbPortResync = false;
+        runningPreferences.usbPort = state.port;
+        printerPanel->setPort(state.port);
+        savePeripherals();
+    }
+    if (state.port == "wifi" && printerPanel->port() == "wifi") printerPanel->setLinkReadout(frondPrint::wifiReadout(state));
+    if (switched && !stopping) notify(tr("Running. Sessions save automatically on close."));
 }
 frond::PrintText MainWindow::printerText() const {
     return frond::renderPrintText(reinterpret_cast<const uint8_t*>(printerHeld.constData()), size_t(printerHeld.size()));
 }
 void MainWindow::printerShow() {
-    printerPanel->setReadout(printerStatus.attached, printerHeld.size() + (printerStatus.valid ? printerStatus.bytes : 0));
+    if (printerPanel->plugged()) printerPanel->setReadout(printerStatus.attached, printerHeld.size() + (printerStatus.valid ? printerStatus.bytes : 0));
     if (printerHeld.isEmpty()) printerPanel->hideReceived();
     else printerPanel->showReceived(printerHeld.size(), printerText().renderable);
 }
@@ -2318,10 +2351,9 @@ bool MainWindow::printerResult(bool ok, const QString& message) {
         }
     } else if (stage == PrinterStage::Attach || stage == PrinterStage::Chain) {
         if (!ok) {
-            printerPanel->setPlugged(false);
-            runningPreferences.usbPrinter = false;
-            savePeripherals();
             failure(message);
+            usbPortResync = true;
+            send("usb-port-state");
         }
     } else if (!ok) {
         if (stage == PrinterStage::Discard) failure(message);

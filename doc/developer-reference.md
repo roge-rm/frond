@@ -304,7 +304,9 @@ State commands take no argument. Mode commands change the setting and reply with
 | `bluetooth-state` | | `bluetooth` |
 | `bluetooth-mode` | `off` or an absolute Unix socket path | `bluetooth` |
 | `network-state` | | `network`: mode name |
-| `network-mode` | `disabled`, `connected`, `timeout`, `disconnected`, `internet` or `wireless` | `network` |
+| `network-mode` | `disabled`, `connected`, `timeout`, `disconnected`, `internet` or `wireless` | `network`; on the Dana (`usbWifi` capability) only `wireless` and `disabled`, which pick the Wi-Fi adapter or no device on the USB port |
+| `usb-port-state` | | `usb-port`: `off`, `printer ` and the `printer status` line, or `wifi powered\|unpowered link=up\|down ip=ADDRESS mac= tx= rx= dropped=`. Every device answers `off` except the Dana |
+| `usb-port` | `off`, `printer` or `wifi` | `usb-port`: the new state. The Dana's one external USB port holds a printer, the Wi-Fi adapter (a Prism 2.5 stick, 045e:006e) or nothing. Choosing what is already there does nothing. `printer attach on` is `usb-port printer`. Other devices answer `unsupported` except for `off` |
 
 ### Card commands
 
@@ -415,9 +417,15 @@ Events: `hello` (`id`, `name`, `port`, `pid`), `state` (name, port, connections 
 
 TCP 5035 carries the links (Noise KK against the pinned keys, or a pairing request while a pair dialog is open) and UDP 5035 the beacons, sent while Connections is open, a pairing is under way or any machine has Infrared, Serial or Bluetooth on a connection, even once its link is up. Incoming links and beacons are only taken from loopback, private (10/8, 172.16/12, 192.168/16), link-local and ULA (fc00::/7) addresses. Frond dials any address, so a connection added by address can be on a VPN, but the far side still has to see this one at an address in those ranges.
 
+### Dana USB Wi-Fi
+
+The Dana's external USB port holds one device: nothing, the printer or the Wi-Fi adapter. The `usbWifi` capability (`usb_wifi` in `tools/device-profiles.json`, Dana only) says a device has the adapter. The adapter is an emulated Microsoft MN-510 (Prism 2.5, 045e:006e) on the ISP1161's external root port (`src/common/UsbPrism2Adapter.h`), its Ethernet frames go to libslirp through `frondNet::WifiRouter` (`src/common/net`), and `UsbWifiRuntime` plugs it in. It shows one open network, "Frond" on channel 6, so any WEP key connects and ad hoc finds no peers. The guest is 10.0.2.15, the router 10.0.2.2 and DNS 10.0.2.3, as on the T|X's Virtual Wi-Fi. The choice is made with `usb-port`, kept by reset and by a session load, and `usb-port-state` reads it back with the link state. A session saved with the adapter keeps its MAC and settings, but a load makes a fresh slirp, so connections drop.
+
+Desktop: the Connections panel has a USB port list (Off, Printer, Wi-Fi adapter) with a readout, and polls `usb-port-state` once a second while Wi-Fi is chosen. Android: the Connections sheet has a USB port row with the same three choices. Both save the choice as `usbPort` in the machine settings and send it at every start.
+
 ### Machine settings
 
-The per-machine settings file `<name>.frond.settings.json` has `infrared`, `serial`, `usb` and `bluetooth`. Values:
+The per-machine settings file `<name>.frond.settings.json` has `infrared`, `serial`, `usb`, `bluetooth` and, on the Dana, `usbPort`. Values:
 
 | Key | Values |
 | --- | --- |
@@ -425,6 +433,7 @@ The per-machine settings file `<name>.frond.settings.json` has `infrared`, `seri
 | `infrared` | also `phone` on a device with the `irPhone` capability: the desktop passes `--irda phone`, Android sends `irda-mode phone` once the core answers and opens no link |
 | `serial` | also `modem` on a device with the `modem` capability (the IIIx): the desktop passes `--serial modem`, Android sends `serial-mode modem` once the core answers and opens no link |
 | `usb` | `off`, `pty`, `tcp:PORT` |
+| `usbPort` | Dana: `off`, `printer` or `wifi`, the USB port choice. The desktop sends `printer attach on` or `usb-port wifi` once the core answers, Android does the same on connect. Older settings with `usbPrinter` true count as `printer`; the file still writes `usbPrinter` when the choice is the printer |
 | `bluetooth` | `off`, `radio` (This Frond), `phone` (This Frond with the mobile phone), `socket:/absolute/path`, `link:ID` |
 
 A `link:ID` that isn't in the store acts as `off` and shows as Unknown connection. The Android metadata `settings` holds `infrared`, `serial` and `bluetooth` the same way, with only `off`, `radio` and `link:ID` (and `modem` for `serial`, `phone` for `infrared`). Nothing goes into the `.frond` session. With a link or `radio` choice the desktop starts the core with `--irda`, `--serial` or `bluetooth-mode` pointing at the hub's sockets.
@@ -775,6 +784,11 @@ The IIIx works as in VS Code, in Eclipse's Terminal view.
 
 | Variable | Meaning |
 | --- | --- |
+| `FROND_DANA_SPI_ARM`, `FROND_DANA_SPI_TRACE`, `FROND_DANA_SPI_REPLAY` | Files and replay data that `tests/dana-card-spi.py` hands to its GDB script. |
+| `FROND_DANA_USB_LOAD_ONLY` | Set for `tests/dana-usb-session-gdb.py` to load the session and skip the rest of the check. |
+| `ISP_FRAME_AREA`, `ISP_HOST_AREA`, `ISP_ATL_AREA` | Scratch folders of `test-isp-frame`, `test-isp-host-pio` and `test-isp-host-atl`. |
+| `RAW_PRINT_BUILD`, `RAW_PRINT_SOURCE`, `RAW_PRINT_FILE_BUILD` | Scratch folders of `test-raw-print-job` and `test-raw-print-file`. |
+| `USB_PRINTER_AREA`, `USB_RUNTIME_AREA`, `USB_PRISM2_AREA`, `USB_WIFI_AREA` | Scratch folders of `test-usb-raw-printer`, `test-usb-printer-runtime`, `test-usb-prism2-adapter` and `test-usb-wifi-runtime`. |
 | `FROND_CORE` | Core binary for `tests/smoke.py` and similar, such as `build/frond-jit`. |
 | `FROND_DEVICE_IMAGES` | Firmware folder (laid out as `Palm/` with the device images) for `tests/smoke.py` and `tests/zire72-rom.py`. No default; those tests skip without it. |
 | `FROND_EMULATOR_CMD` | Command that launches the core in `tools/qualify-peripherals.py`, such as `heavy emulator`. Default `emulator`. |
@@ -846,6 +860,7 @@ All in `tools/`. Most take `--help`.
 | `prepare.py` | Rebuilds `build/source` from the upstream tree and `patches/` (`make prepare`). |
 | `check-reconstruction.py` | Rebuilds the core twice independently and compares them. |
 | `check-docs.py` | Checks this file against the sources (`make check-docs`). |
+| `check-usb-printer-capture.py` | Compares a private USB packet trace with one finished raw print job (`doc/usb-printer-runtime.md`). |
 | `generate-device-data.py` | Writes the device profile data for Python and Android. `--check` fails if it's stale. |
 | `firmware_variants.py` | Helper module: finds the firmware variant (such as the E2 de-NVFS image) of a NOR file for `frond-run.py`. |
 | `device-profiles.cpp`, `device-profiles.json` | Dumps and holds the device profiles. |
@@ -914,6 +929,7 @@ Tests in `make test`, by area:
 | Storage | `test-sd-image`, `test-sd`, `test-card-backing`, `test-memory-stick-controller`, `test-memory-stick-media`, `test-ms-logical-equivalence` (the version 2 stick layout against the flat physical model, `build/test-ms-logical-equivalence SEQUENCES OPERATIONS` for a longer run), `test-memory-stick-pro`, `test-card-tool`, `test-storage-settle` (needs mtools), `test-storage-fat` (needs mtools), `test-storage-ms` (classic stick writes, the settled check and blank stick formats, needs mtools), `test-card-swap` (its firmware part on whichever smoke sessions are in `FROND_ARM_SESSIONS`), `test-card-reinsert` (the same sessions) |
 | Audio | `test-sdl-audio`, `test-fast-audio`, `test-earlier-audio`, `test-audio-results`, `test-pxa-i2s-audio`, `test-tg50-pwm-audio`, `test-tg50-microphone-adc`, `test-tg50-microphone-dma`, `test-tg50-microphone-state`, `test-z72-microphone`, `test-z72-voice-memo`, `test-tg50-call-budget`, `test-tg50-pace`, `test-tg50-audio-replay`, `test-tg50-serial-board`, `test-tg50-serial-configuration` |
 | Serial, USB, infrared | `test-uart-lifecycle`, `test-uart-checkpoint`, `test-uart-flow`, `test-uart-dma-peer`, `test-tx-serial`, `test-hotsync-line`, `test-host-serial`, `test-pty-link`, `test-usb-enumeration`, `test-usb-host-fixture`, `test-usb-bridge`, `test-usb-bridge-soc`, `test-irda-endpoint`, `test-irda-link`, `test-irda-results`, `test-keyboard` |
+| Dana USB, printing and Wi-Fi | `test-68k-card-provider`, `test-68k-dana`, `test-68k-sd`, `test-68k-vz-registers`, `test-dana-card-inventory`, `test-isp-frame`, `test-isp-host-atl`, `test-isp-host-pio`, `test-print-text`, `test-raw-print-file`, `test-raw-print-job`, `test-usb-raw-printer`, `test-usb-printer-runtime`, `test-usb-prism2-adapter` (the adapter leaf), `test-net-wifi-router` (the shared Ethernet router), `test-usb-wifi-runtime` (the Dana's adapter on the ISP1161 port: enumeration, slirp ARP, supply, port reset, swap with the printer, reset, load and a rejected load). `desktop-print` in `make test-desktop` covers the USB port row |
 | Link protocol | `test-link-protocol` |
 | Bluetooth | `test-bluetooth`, `test-bluetooth-link`, `test-bluetooth-results`, `test-csr-bcsp`, `test-csr-controller-lifecycle`, `test-csr-peer-services` |
 | Network | `test-network`, `test-network-reliability`, `test-host-network`, `test-wifi`, `test-modem`, `test-ir-peer` |

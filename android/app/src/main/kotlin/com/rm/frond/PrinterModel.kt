@@ -23,7 +23,8 @@ import kotlinx.coroutines.launch
 import java.io.File
 import java.io.IOException
 
-// The Dana's USB printer while a machine runs: the plugged-in setting, the core's job polled once a second,
+// The Dana's USB port while a machine runs: the choice of printer, Wi-Fi adapter or nothing, with the Wi-Fi link
+// state polled once a second. For the printer, the core's job is polled once a second,
 // and the held job. When bytes stop arriving for PrintJob.PAUSE_MS the core saves the job to a private
 // temp file, which is appended to the held file, so more printing adds to the same job until it is printed,
 // saved or discarded. Held bytes stay in private storage and go on Discard, after a raw save and at the
@@ -33,13 +34,17 @@ class PrinterModel(
     private val device: Device,
     private val link: ControlLink,
     private val sessionId: String?,
-    initiallyPlugged: Boolean,
+    initialPort: String,
     private val inBackground: () -> Boolean,
     private val problem: (String) -> Unit,
 ) {
     class Held(val bytes: Long, val pages: PrintJob.Pages, val version: Int)
 
-    var plugged by mutableStateOf(initiallyPlugged)
+    var port by mutableStateOf(initialPort)
+        private set
+    val plugged get() = port == UsbPort.PRINTER
+    // The Wi-Fi adapter's link readout, null while it isn't the port's device.
+    var wifiText by mutableStateOf<String?>(null)
         private set
     var bytes by mutableStateOf(0L)
         private set
@@ -57,7 +62,7 @@ class PrinterModel(
         store.sweep()
         host.lifecycleScope.launch(Dispatchers.IO) {
             while (isActive) {
-                if (plugged) poll()
+                if (plugged) poll() else if (port == UsbPort.WIFI) pollWifi()
                 delay(1000)
             }
         }
@@ -74,24 +79,37 @@ class PrinterModel(
         }
     }
 
-    fun plug(on: Boolean) {
-        plugged = on
-        if (!on) bytes = 0
-        remember(on)
+    // Switches the port's device. The core keeps what it had when the change fails, and the row shows which that is.
+    fun choose(choice: String) {
+        if (choice == port) return
+        val before = port
+        port = choice
+        bytes = 0
+        wifiText = if (choice == UsbPort.WIFI) PrintJob.wifiReadout(PrintJob.Port(true, UsbPort.WIFI)) else null
+        remember(choice)
         host.lifecycleScope.launch(Dispatchers.IO) {
-            val error = store.attach(on)
-            if (error != null) host.runOnUiThread {
-                // A printer that couldn't be attached is shown and saved as off.
-                if (on) { plugged = false; bytes = 0; remember(false) }
-                problem(error)
+            val error = if (choice == UsbPort.PRINTER) store.attach(true) else {
+                val reply = link.request("usb-port", choice, timeoutSeconds = 30)
+                if (reply.ok) null else reply.message
+            }
+            if (error != null) {
+                val state = PrintJob.parsePort(link.request("usb-port-state", timeoutSeconds = 5).message)
+                val kept = if (state.valid) state.port else before
+                host.runOnUiThread { port = kept; bytes = 0; wifiText = null; remember(kept); problem(error) }
             }
         }
     }
 
-    private fun remember(on: Boolean) {
+    private fun remember(choice: String) {
         sessionId?.let { id ->
-            try { Sessions.updateSettings(host.applicationContext, id) { it.copy(usbPrinter = on) } } catch (_: Exception) { }
+            try { Sessions.updateSettings(host.applicationContext, id) { it.copy(usbPort = choice) } } catch (_: Exception) { }
         }
+    }
+
+    private fun pollWifi() {
+        val reply = link.request("usb-port-state", timeoutSeconds = 5)
+        val state = PrintJob.parsePort(reply.message)
+        if (reply.ok && state.port == UsbPort.WIFI) host.runOnUiThread { if (port == UsbPort.WIFI) wifiText = PrintJob.wifiReadout(state) }
     }
 
     private suspend fun poll() {
