@@ -29,7 +29,7 @@ int main(){
  bool fail=false;auto before=save(i);try{i.get();}catch(const std::runtime_error&){fail=true;}assert(fail);assert(save(i)==before);
  auto bad=before;uint32 invalid=4097; // appended host cursor follows all DC fields
  // The cursor is immediately before 2048 Do16 words (each occupies one serialized word).
- memcpy(bad.data()+bad.size()-2048*4-4,&invalid,4);
+ memcpy(bad.data()+bad.size()-16-2048*4-4,&invalid,4);
  assert(!load(i,bad));assert(save(i)==before);
  bad=before;bad.resize(bad.size()-4);assert(!load(i,bad));assert(save(i)==before);
  // Interrupted malformed guest headers remain saveable until list validation.
