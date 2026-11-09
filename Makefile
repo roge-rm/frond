@@ -1319,6 +1319,10 @@ test-zodiac-mmio: build/zodiac-boot-probe
 
 # Firmware-free GPIO scenario checks through the command-line probe.
 .PHONY: test-zodiac-gpio-input
+.PHONY: test-zodiac-gpio-event
+test-zodiac-gpio-event: build/zodiac-boot-probe
+	python3 tests/zodiac-gpio-event.py
+
 test-zodiac-gpio-input: build/zodiac-boot-probe
 	python3 tests/zodiac-gpio-input.py
 

@@ -205,8 +205,54 @@ void drivenOwnership() {
     assert(bus(soc, base + 0x34, false) == 0);
 }
 
+void diagnosticTransitions() {
+    for (unsigned mode : {0u, 1u, 2u, 3u}) {
+        Imx1Gpio gpio;
+        const auto active = mode == 0 || mode == 2 ? bit : 0u;
+        assert(gpio.setInputMasked(0, active ^ bit, ~0x400u));
+        assert(gpio.reserveInput(0, 0x400));
+        assert(gpio.driveInput(0, 0x400, 0x400, true) == G::ok);
+        op(gpio, 0, 0x20, true, bit);
+        op(gpio, 0, 0x28, true, mode << 26);
+        op(gpio, 0, 0x30, true, bit);
+        assert(gpio.transitionInput(0, active, bit) == G::ok);
+        assert(op(gpio, 0, 0x34, false) == bit);
+        op(gpio, 0, 0x34, true, bit);
+        assert(op(gpio, 0, 0x34, false) == (mode >= 2 ? bit : 0));
+        assert((op(gpio, 0, 0x24, false) & (bit | 0x400)) == (active | 0x400));
+        assert(gpio.transitionInput(0, 0, 0x400) == G::sideEffect);
+        assert(gpio.transitionInput(0, bit, 0) == G::sideEffect);
+        assert(gpio.transitionInput(4, 0, bit) == G::unmapped);
+    }
+    Imx1Bootstrap soc;
+    assert(soc.setGpioInputMasked(0, 0x80, ~bit));
+    assert(soc.reserveGpioInput(0, bit));
+    assert(soc.driveGpioInput(0, bit, bit, true, true) == B::ok);
+    assert(soc.setGpioInput(3, 0x600));
+    uint32_t values[4] = {0x400, 0, 0, 0x1000}, masks[4] = {0x400, 0, 0, 0x1000};
+    bus(soc, base + 0x20, true, bit | 0x400);
+    bus(soc, base + 0x28, true, 0); // Rising edge on A10.
+    bus(soc, base + 0x30, true, 0x400);
+    bus(soc, 0x00223008, true, 11);
+    assert(soc.transitionGpioInputs(values, masks) == B::sideEffect);
+    assert(bus(soc, base + 0x24, false) == (0x80 | bit));
+    assert(bus(soc, base + 0x324, false) == 0x600);
+    assert(bus(soc, base + 0x34, false) == 0);
+    soc.connectCpuInterrupts();
+    masks[3] = 0x800; // Reject the second port after previewing A10's pending edge.
+    assert(soc.transitionGpioInputs(values, masks) == B::sideEffect);
+    assert(bus(soc, base + 0x24, false) == (0x80 | bit));
+    assert(bus(soc, base + 0x34, false) == 0);
+    masks[3] = 0x1000;
+    assert(soc.transitionGpioInputs(values, masks) == B::ok);
+    assert(bus(soc, base + 0x24, false) == (0x480 | bit));
+    assert(bus(soc, base + 0x324, false) == 0x1600);
+    assert(bus(soc, base + 0x34, false) == 0x400);
+    assert(soc.interruptLines().irq == Imx1AitcLine::asserted);
+}
+
 }
 int main() {
-    levels(); edges(); knownnessAndMux(); mixedKnownness(); transactionalDelivery(); drivenOwnership();
+    diagnosticTransitions(); levels(); edges(); knownnessAndMux(); mixedKnownness(); transactionalDelivery(); drivenOwnership();
     std::puts("PASS: GPIO levels, edges, masked status, W1C, unknown history, immutable samples and transactional AITC delivery");
 }

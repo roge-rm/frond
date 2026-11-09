@@ -144,7 +144,7 @@ static bool parseRtcTime(const char* text, Imx1RtcTime& time) {
 }
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::fprintf(stderr, "Usage: %s ROM [physical|reset|linked] [instruction-budget] [exact|fast] [--bootstrap-peripherals] [--trace=peripherals] [--idle-hclk-budget=N] [--arm920-icache-index-compatibility] [--lcdc-contrast-only] [--imx1-mmcsd-empty-slot] [--frame-output=PATH] [--diagnostic-snapshot=PREFIX] [--assume-mpll-settled] [--virtual-mpll-retune] [--assume-spll-settled] [--assume-i2c-single-master] [--i2c-eeprom-image=PATH] [--asp-px1-input=high] [--asp-u-sample=WORD] [--rtc-initial-time=DAY:HH:MM:SS] [--cs4-port0-input=BYTE] [--cs4-indexed-input=BANK/INDEX/BYTE] [--cs5-reset-status-input=BYTE] [--graphics-profile=virtual5744-compatible-8mib] [--graphics-raw-axes=FIRST/SECOND] [--graphics-raw-mode1=SAMPLE] [--graphics-irq-connection=virtual-a13] [--gpio-a-input-masked=VALUE/MASK] [--gpio-a-input=VALUE] [--gpio-b-input=VALUE] [--gpio-d-input=VALUE] [--ram-mib=32|128]\n", argv[0]);
+        std::fprintf(stderr, "Usage: %s ROM [physical|reset|linked] [instruction-budget] [exact|fast] [--bootstrap-peripherals] [--trace=peripherals] [--idle-hclk-budget=N] [--arm920-icache-index-compatibility] [--lcdc-contrast-only] [--imx1-mmcsd-empty-slot] [--frame-output=PATH] [--diagnostic-snapshot=PREFIX] [--assume-mpll-settled] [--virtual-mpll-retune] [--assume-spll-settled] [--assume-i2c-single-master] [--i2c-eeprom-image=PATH] [--asp-px1-input=high] [--asp-u-sample=WORD] [--rtc-initial-time=DAY:HH:MM:SS] [--cs4-port0-input=BYTE] [--cs4-indexed-input=BANK/INDEX/BYTE] [--cs5-reset-status-input=BYTE] [--graphics-profile=virtual5744-compatible-8mib] [--graphics-raw-axes=FIRST/SECOND] [--graphics-raw-mode1=SAMPLE] [--graphics-irq-connection=virtual-a13] [--gpio-a-input-masked=VALUE/MASK] [--gpio-input-event=N/PORT/VALUE/MASK] [--gpio-a-input=VALUE] [--gpio-b-input=VALUE] [--gpio-d-input=VALUE] [--ram-mib=32|128]\n", argv[0]);
         return 1;
     }
     const char* engine = argc >= 5 ? argv[4] : "exact";
@@ -233,6 +233,29 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "Supply --graphics-irq-connection=virtual-a13 once\n"); return 1;
             }
             options.graphicsIrqA13 = true;
+        }
+        else if (!std::strncmp(argv[i], "--gpio-input-event=", 19)) {
+            const char* text = argv[i] + 19;
+            uint32_t fields[4]{};
+            bool valid = true;
+            for (unsigned field = 0; field < 4 && valid; ++field) {
+                char* end = nullptr;
+                errno = 0;
+                const auto value = std::strtoull(text, &end, 0);
+                valid = *text >= '0' && *text <= '9' && !errno && value <= UINT32_MAX &&
+                        (field == 3 ? !*end : *end == '/');
+                fields[field] = uint32_t(value);
+                if (valid && field < 3) text = end + 1;
+            }
+            const auto count = fields[0], port = fields[1], value = fields[2], mask = fields[3];
+            if (!valid || !count || count >= imx1ProbeMaximumSteps || port >= 4 || !mask ||
+                (value & ~mask) || options.gpioEventMasks[port] ||
+                (options.gpioEventAfterInstructions && options.gpioEventAfterInstructions != count)) {
+                std::fprintf(stderr, "Supply GPIO event N/PORT/VALUE/MASK once per port at one instruction count\n"); return 1;
+            }
+            options.gpioEventAfterInstructions = count;
+            options.gpioEventValues[port] = value;
+            options.gpioEventMasks[port] = mask;
         }
         else if (!std::strncmp(argv[i], "--gpio-a-input-masked=", 22)) {
             const char* text = argv[i] + 22;
@@ -408,6 +431,14 @@ int main(int argc, char** argv) {
             return 1;
         }
     }
+    if (!imx1ProbeGpioEventValid(options, budget)) {
+        std::fprintf(stderr, "GPIO event requires bootstrap, a count below the budget and lanes owned by supplied GPIO baselines\n"); return 1;
+    }
+    if (options.gpioEventAfterInstructions)
+        for (unsigned port = 0; port < 4; ++port)
+            if (options.gpioEventMasks[port])
+                std::printf("gpio-input-event before-instruction=%u port=%u value=%08x mask=%08x explicit-diagnostic-stimulus\n",
+                    options.gpioEventAfterInstructions, port, options.gpioEventValues[port], options.gpioEventMasks[port]);
     std::ifstream input(argv[1], std::ios::binary | std::ios::ate);
     if (!input || input.tellg() != 0x7d0000) {
         std::fprintf(stderr, "Expected an exact 0x7d0000-byte Zodiac ROM\n");
@@ -523,6 +554,8 @@ int main(int argc, char** argv) {
                     result.pcm.control, result.pcm.transmitControl, result.pcm.clockControl);
     std::printf("jit-blocks=%llu jit-instructions=%llu final-cpsr=%08x\n",
                 (unsigned long long)result.jitBlocks, (unsigned long long)result.jitInstructions, result.cpsr);
+    if (options.gpioEventAfterInstructions)
+        std::printf("gpio-input-event-applied=%u before-instruction=%u\n", result.gpioEventApplied, options.gpioEventAfterInstructions);
     for (unsigned i = 0; i < 16; ++i)
         std::printf("r%u=%08x%c", i, result.registers[i], i % 4 == 3 ? '\n' : ' ');
     std::printf("cpsr=%08x spsr=%08x\n", result.cpsr, result.spsr);

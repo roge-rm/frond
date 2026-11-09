@@ -34,6 +34,42 @@ static bool memory(void* data, uint32_t address, uint_fast8_t size, bool write, 
 
 int main() {
     {
+        Imx1ProbeOptions o{};
+        o.bootstrapPeripherals = true;
+        o.gpioAInputKnown = true; o.gpioAInput = 0x80;
+        o.gpioDInputKnown = true; o.gpioDInput = 0x600;
+        const auto read = [&](const Imx1ProbeOptions& options) {
+            return run({0xe59f0010, 0xe5901000, 0xe5902000, 0xe59f0008, 0xe5903000,
+                        0xeafffffe, 0x0021c024, 0x0021c324}, 8, false, &options);
+        };
+        auto r = read(o);
+        assert(r.stop == Imx1ProbeStop::budget && !r.gpioEventApplied);
+        assert(r.registers[1] == 0x80 && r.registers[2] == 0x80 && r.registers[3] == 0x600);
+        o.gpioEventAfterInstructions = 2;
+        o.gpioEventValues[0] = o.gpioEventMasks[0] = 0x400;
+        o.gpioEventValues[3] = o.gpioEventMasks[3] = 0x1000;
+        r = read(o);
+        assert(r.stop == Imx1ProbeStop::budget && r.gpioEventApplied);
+        assert(r.registers[1] == 0x80 && r.registers[2] == 0x480 && r.registers[3] == 0x1600);
+        o.gpioEventAfterInstructions = 1;
+        r = read(o);
+        assert(r.gpioEventApplied && r.registers[1] == 0x480);
+        for (auto count : {0u, 8u, imx1ProbeMaximumSteps}) {
+            o.gpioEventAfterInstructions = count;
+            r = read(o);
+            assert(r.stop == Imx1ProbeStop::unsupportedPeripheral && !r.gpioEventApplied);
+        }
+        o.gpioEventAfterInstructions = 2;
+        o.gpioAInputKnown = false; o.gpioAInputMaskedKnown = true; o.gpioAInputMask = 0xffffdfff;
+        o.gpioEventValues[0] = o.gpioEventMasks[0] = 0x2000;
+        r = read(o);
+        assert(r.stop == Imx1ProbeStop::unsupportedPeripheral && !r.gpioEventApplied);
+        o.gpioEventValues[0] = o.gpioEventMasks[0] = 0x400;
+        o.bootstrapPeripherals = false;
+        assert(read(o).stop == Imx1ProbeStop::unsupportedPeripheral);
+    }
+
+    {
         const Imx1GraphicsMemory memory;
         for (unsigned bank=0;bank<3;++bank) {
             const auto dirty=memory.dirty(bank);
