@@ -273,6 +273,94 @@ def delete_application(c, listing_text, app):
             c.ok('delete-db', name, code='deleted')
 
 
+PEN_PROBE = ROOT / 'build/pen68k-probe/FrondPen68k.prc'
+
+
+def pen_probe():
+    """The pen probe, built when prc-tools and the Palm OS 5 SDK beside the tree are here, else None."""
+    sdk = ROOT.parent / 'palm-os-sdk/sdk-5r3'
+    if not PEN_PROBE.is_file() and shutil.which('m68k-palmos-gcc') and (sdk / 'include/PalmOS.h').is_file():
+        subprocess.run([sys.executable, 'tools/build-palm-probe.py', '--probe', 'pen68k', '--sdk', str(sdk)],
+                       cwd=ROOT, check=True, capture_output=True)
+    return PEN_PROBE if PEN_PROBE.is_file() else None
+
+
+def replay(c, root, name, lines):
+    """Runs an input replay of (ms, event) lines and waits for its end."""
+    path = root / f'{name}.replay'
+    path.write_text(''.join(f'{at} {event}\n' for at, event in lines))
+    c.ok('input-replay', path)
+    end = time.monotonic() + 60
+    while c.request('replay-state')[1] != 'finished':
+        assert time.monotonic() < end, f'{name}: replay still running after 60 s'
+        time.sleep(0.2)
+
+
+def screen_rows(path):
+    """The screen rows of a snapshot (square, as wide as the snapshot) and its width."""
+    rows = palm_boot.png_rows(path)
+    width = len(rows[0]) // 4
+    return rows[:width], width
+
+
+def probe_mark(path):
+    """The centre of the pen probe's dark square, in snapshot pixels."""
+    rows, width = screen_rows(path)
+    dark = [(x, y) for y, row in enumerate(rows) for x in range(width) if sum(row[4 * x:4 * x + 3]) < 200]
+    assert len(dark) == 9, f'{path.name}: no single 3x3 mark ({len(dark)} dark pixels)'
+    return sum(x for x, _ in dark) / 9, sum(y for _, y in dark) / 9
+
+
+def check_taps(c, root, points):
+    """Taps land where they're sent: the pen probe marks each tap, in screen pixels. True when checked,
+    False without the probe (no prc-tools or SDK)."""
+    probe = pen_probe()
+    if not probe:
+        return False
+    c.ok('install', probe, code=('installed', 'needs-reset'))
+    c.ok('launch-app', 'Frond pen', code='launched')
+    time.sleep(3)
+    for x, y in points:
+        name = f'tap-{x}-{y}'
+        replay(c, root, name, [(0, f'pen-down {x} {y}'), (100, 'pen-up'), (1000, f'snapshot "{root / (name + ".png")}"')])
+        assert probe_mark(root / f'{name}.png') == (x, y), f'tap at {x},{y} landed at {probe_mark(root / (name + ".png"))}'
+    return True
+
+
+def box_icon(path):
+    """The pen probe's launcher icon, a 32x22 box, shows: a dark run of 30 or more below the title bar."""
+    rows, width = screen_rows(path)
+    for row in rows[16:]:
+        run = 0
+        for x in range(width):
+            run = run + 1 if sum(row[4 * x:4 * x + 3]) < 200 else 0
+            if run >= 30:
+                return True
+    return False
+
+
+def check_launcher_delete(c, root):
+    """Deleting an application and its data with the launcher in front and a tap on its way: the
+    delete waits for the launcher to quit, which is relaunched without the icon (a stale list
+    locked the deleted icons and the launcher failed with Invalid chunk ptr)."""
+    c.ok('launch-app', 'Launcher', code='launched')
+    time.sleep(3)
+    replay(c, root, 'launcher-before', [(0, f'snapshot "{root / "launcher-before.png"}"')])
+    assert box_icon(root / 'launcher-before.png'), 'the pen probe icon is not in the launcher'
+    tap = root / 'launcher-tap.replay'
+    tap.write_text('0 pen-down 157 80\n80 pen-up\n')
+    c.ok('input-replay', tap)
+    c.ok('delete-db', 'Frond pen', code='deleted')
+    c.ok('delete-db', 'FrondPenData', code='deleted')
+    time.sleep(2)
+    replay(c, root, 'launcher-after', [(0, f'snapshot "{root / "launcher-after.png"}"')])
+    assert not box_icon(root / 'launcher-after.png'), 'the launcher still shows the deleted application'
+    listing = c.ok('db-list', code='databases')
+    assert 'Frond pen'.encode().hex() not in listing and 'FrondPenData'.encode().hex() not in listing, listing
+    c.ok('launch-app', 'Memo Pad', code='launched')
+    c.ok('db-list', code='databases')
+
+
 def common(c, root, device, unsupported, saved):
     """The checks both runners share, ending with a save to saved."""
     assert c.ok('device-state', code='device') == device
@@ -404,6 +492,10 @@ def check_arm(core, session, root):
         c.ok('save', old, code='saved')
         assert old.read_bytes() == before, 'lone v6 .frond rewritten'
         assert (v6 / 'old/old.frond').stat().st_size > 100000, 'v6 save not where loading extracts it'
+        # Native pixels on the high-density screens; the T|X's include its status bar row.
+        points = [(8, 8), (100, 120), (312, 300), (157, 233), (55, 11)]
+        if device in ('palm-tx', 'palm-e2', 'palm-zire-72') and not check_taps(c, work, points):
+            print('core-control frond: taps skipped, no pen probe (prc-tools, SDK)')
         c.quit()
     finally:
         c.close()
@@ -636,6 +728,10 @@ def check_68k(core, rom, root):
         c.ok('reset', code='done')
         c.until_ok('guest-ready')
         c.ok('save', saved, code='saved')
+        if check_taps(c, work, [(20, 30), (80, 56), (140, 140), (79, 60)]):
+            check_launcher_delete(c, work)
+        else:
+            print('core-control frond-68k: taps and launcher delete skipped, no pen probe (prc-tools, SDK)')
         c.quit()
     finally:
         c.close()

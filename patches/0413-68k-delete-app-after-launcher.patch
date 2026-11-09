@@ -1,0 +1,316 @@
+diff --git a/src/cloudpilot/emulator/EmPalmOS.cpp b/src/cloudpilot/emulator/EmPalmOS.cpp
+index e7e3752..0d3851e 100644
+--- a/src/cloudpilot/emulator/EmPalmOS.cpp
++++ b/src/cloudpilot/emulator/EmPalmOS.cpp
+@@ -48,6 +48,8 @@ EmThreadSafeQueue<PenEvent> EmPalmOS::penEventQueueIncoming{EVENT_QUEUE_SIZE};
+ EmThreadSafeQueue<KeyboardEvent> EmPalmOS::keyboardEventQueueIncoming{EVENT_QUEUE_SIZE};
+ uint64 EmPalmOS::lastEventPromotedAt{0};
+ LocalID EmPalmOS::dbForLaunch{0};
++LocalID EmPalmOS::pendingDelete{0};
++std::optional<EmPalmOS::DeleteResult> EmPalmOS::deleteResult;
+ bool EmPalmOS::postNilEvent{false};
+ std::function<void()> EmPalmOS::safePointHandler;
+ bool EmPalmOS::safePointRequested{false};
+@@ -78,6 +80,8 @@ void EmPalmOS::Initialize(void) {
+     ClearQueues();
+     dbForLaunch = 0;
+     postNilEvent = false;
++    pendingDelete = 0;
++    deleteResult.reset();
+ 
+     EmPatchMgr::Initialize();
+ }
+@@ -105,6 +109,8 @@ void EmPalmOS::Reset(void) {
+     ClearQueues();
+     dbForLaunch = 0;
+     postNilEvent = false;
++    pendingDelete = 0;
++    deleteResult.reset();
+ }
+ 
+ /***********************************************************************
+@@ -484,22 +490,6 @@ bool EmPalmOS::LaunchAppByName(const string& name) {
+     return true;
+ }
+ 
+-// After an application is deleted, the launcher in front is relaunched so it drops the icon. Like
+-// FinishInstall, any event already waiting goes first.
+-void EmPalmOS::RelaunchLauncher() {
+-    UInt16 card = 0;
+-    LocalID current = 0;
+-    UInt32 currentCreator = 0;
+-    if (SysCurAppDatabase(&card, &current) != 0 || current == 0 ||
+-        DmDatabaseInfo(card, current, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, &currentCreator) != 0 ||
+-        currentCreator != sysFileCLauncher || dbForLaunch != 0 || HasPenEvent() || HasKeyboardEvent() ||
+-        EvtEventAvail() || EvtSysEventAvail(true))
+-        return;
+-
+-    dbForLaunch = current;
+-    postNilEvent = true;
+-}
+-
+ EmPalmOS::DeleteResult EmPalmOS::DeleteDatabaseByName(const string& name) {
+     if (!gSystemState.IsUIInitialized() || gSession->IsCpuStopped()) return DeleteResult::notReady;
+ 
+@@ -511,17 +501,54 @@ EmPalmOS::DeleteResult EmPalmOS::DeleteDatabaseByName(const string& name) {
+     LocalID current = 0;
+     if (SysCurAppDatabase(&card, &current) == 0 && current == id) return DeleteResult::running;
+ 
+-    UInt32 type = 0;
++    UInt32 type = 0, currentCreator = 0;
+     DmDatabaseInfo(0, id, 0, 0, 0, 0, 0, 0, 0, 0, 0, &type, 0);
++    if (type == sysFileTApplication && current != 0 &&
++        DmDatabaseInfo(card, current, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, &currentCreator) == 0 &&
++        currentCreator == sysFileCLauncher) {
++        if (pendingDelete != 0) return DeleteResult::failed;
++        // A launch already on its way ends the launcher just the same.
++        pendingDelete = id;
++        deleteResult.reset();
++        if (dbForLaunch == 0) dbForLaunch = current;
++        postNilEvent = true;
++        return DeleteResult::pending;
++    }
+ 
+     const Err error = DmDeleteDatabase(0, id);
+-    if (error == 0) {
+-        if (type == sysFileTApplication) RelaunchLauncher();
+-        return DeleteResult::deleted;
+-    }
++    if (error == 0) return DeleteResult::deleted;
+     return error == dmErrDatabaseOpen ? DeleteResult::open : error == dmErrROMBased ? DeleteResult::rom : DeleteResult::failed;
+ }
+ 
++std::optional<EmPalmOS::DeleteResult> EmPalmOS::TakeDeleteResult() {
++    auto result = deleteResult;
++    deleteResult.reset();
++    return result;
++}
++
++bool EmPalmOS::DeleteWaiting() { return pendingDelete != 0; }
++
++void EmPalmOS::CancelPendingDelete() {
++    pendingDelete = 0;
++    deleteResult.reset();
++}
++
++void EmPalmOS::BeforeUIAppLaunch(LocalID next) {
++    if (pendingDelete == 0) return;
++    const LocalID id = pendingDelete;
++    pendingDelete = 0;
++    // A tap on its icon got there first.
++    if (next == id) {
++        deleteResult = DeleteResult::running;
++        return;
++    }
++    const Err error = DmDeleteDatabase(0, id);
++    deleteResult = error == 0                    ? DeleteResult::deleted
++                   : error == dmErrDatabaseOpen ? DeleteResult::open
++                   : error == dmErrROMBased     ? DeleteResult::rom
++                                                : DeleteResult::failed;
++}
++
+ bool EmPalmOS::HasPendingAppForLaunch() { return dbForLaunch != 0; }
+ 
+ namespace {
+diff --git a/src/cloudpilot/emulator/EmPalmOS.h b/src/cloudpilot/emulator/EmPalmOS.h
+index dfe6c2d..2290390 100644
+--- a/src/cloudpilot/emulator/EmPalmOS.h
++++ b/src/cloudpilot/emulator/EmPalmOS.h
+@@ -15,6 +15,7 @@
+ #define EmPalmOS_h
+ 
+ #include <functional>
++#include <optional>
+ 
+ #include "EmCPU68K.h"  // ExceptionNumber
+ #include "EmPatchModuleTypes.h"
+@@ -43,10 +44,21 @@ class EmPalmOS {
+     static bool HasPendingAppForLaunch();
+ 
+     // Deletes a RAM database by name with DmDeleteDatabase. Calls into Palm OS, so only from a safe
+-    // point. A ROM database, the running application and an open database are refused. Deleting an
+-    // application while the launcher is in front relaunches the launcher so it drops the icon.
+-    enum class DeleteResult { deleted, notReady, missing, rom, running, open, failed };
++    // point. A ROM database, the running application and an open database are refused.
++    //
++    // An application with the launcher in front answers pending: the launcher keeps its icons
++    // locked and rebuilds its list when the database count changes, so the delete waits for the
++    // launcher to quit. The launcher is relaunched, and the delete runs when the UI shell starts the
++    // next application, with no application running. PendingDelete then has the result. Only one
++    // waits at a time; it isn't saved in sessions and a reset drops it.
++    enum class DeleteResult { deleted, notReady, missing, rom, running, open, failed, pending };
+     static DeleteResult DeleteDatabaseByName(const string& name);
++    // The result once a pending delete ran, or nullopt while it waits or when none is waiting.
++    static std::optional<DeleteResult> TakeDeleteResult();
++    static bool DeleteWaiting();
++    static void CancelPendingDelete();
++    // From the SysAppLaunch headpatch: a UI application is about to start.
++    static void BeforeUIAppLaunch(LocalID next);
+ 
+     // What Palm OS gets after a HotSync install, for a database just installed by name: the app
+     // with its creator gets sysAppLaunchCmdSyncNotify unless it's the app in front, and an app
+@@ -68,7 +80,6 @@ class EmPalmOS {
+ 
+    private:
+     static bool HandleSystemCall(Bool fromTrap);
+-    static void RelaunchLauncher();
+ 
+     static bool DispatchNextEvent();
+     static bool DispatchKeyboardEvent();
+@@ -85,6 +96,8 @@ class EmPalmOS {
+     static uint64 lastEventPromotedAt;
+ 
+     static LocalID dbForLaunch;
++    static LocalID pendingDelete;
++    static std::optional<DeleteResult> deleteResult;
+     static bool postNilEvent;
+ 
+     static std::function<void()> safePointHandler;
+diff --git a/src/cloudpilot/emulator/patch/EmPatchModuleSys.cpp b/src/cloudpilot/emulator/patch/EmPatchModuleSys.cpp
+index dbfd2df..b946b00 100644
+--- a/src/cloudpilot/emulator/patch/EmPatchModuleSys.cpp
++++ b/src/cloudpilot/emulator/patch/EmPatchModuleSys.cpp
+@@ -412,6 +412,24 @@ namespace {
+         return kSkipROM;
+     }
+ 
++    // The UI shell starts the next UI application here, after the last one quit: a delete that
++    // waits for the launcher to let go runs now.
++    CallROMType HeadpatchSysAppLaunch() {
++        if (!EmPalmOS::DeleteWaiting()) return kExecuteROM;
++
++        CALLED_SETUP("Err",
++                     "UInt16 cardNo, LocalID dbID, UInt16 launchFlags, UInt16 cmd, MemPtr cmdPBP,"
++                     "UInt32* resultP");
++
++        CALLED_GET_PARAM_VAL(LocalID, dbID);
++        CALLED_GET_PARAM_VAL(UInt16, launchFlags);
++
++        if (launchFlags & sysAppLaunchFlagUIApp)
++            EmPalmOS::BeforeUIAppLaunch(dbID);
++
++        return kExecuteROM;
++    }
++
+     CallROMType HeadpatchEvtGetEvent() {
+         EmPalmOS::RunSafePoint();
+         EmPalmOS::InjectUIEvent();
+@@ -443,6 +461,7 @@ namespace {
+         {sysTrapHwrIRQ4Handler, HeadpatchHwrIRQ4Handler, TailpatchHwrIRQ4Handler},
+         {sysTrapSysSleep, HeadpatchSysSleep, NULL},
+         {sysTrapEvtGetEvent, HeadpatchEvtGetEvent, NULL},
++        {sysTrapSysAppLaunch, HeadpatchSysAppLaunch, NULL},
+         {0, NULL, NULL}};
+ }  // namespace
+ 
+diff --git a/src/cloudpilot/frond/main.cpp b/src/cloudpilot/frond/main.cpp
+index e5ef83a..2d11e2d 100644
+--- a/src/cloudpilot/frond/main.cpp
++++ b/src/cloudpilot/frond/main.cpp
+@@ -623,13 +623,14 @@ class Runner {
+             if (window) PollWindow();
+             if (desktop) PollDesktop();
+             ExpireGuestCall();
++            FinishDeferredDelete();
+             if (quit) break;
+             if (gdb) gdb->Cycle(gDebugger.IsStopped() ? 10 : 0);
+             // Hidden on Android: the guest waits and nothing is drawn, while the control socket still
+             // answers so the app can save. It carries on from now when shown again. A host call
+             // waiting for the event loop (an install from the Peripherals screen) runs the guest
+             // without drawing or sound until it is done.
+-            if (hidden && !guestCall) {
++            if (hidden && !guestCall && !deferredDelete) {
+                 emulatedMs = wallMs();
+                 SDL_Delay(50);
+                 continue;
+@@ -699,6 +700,31 @@ class Runner {
+         }
+     }
+ 
++    // An application delete waiting for the launcher to quit (EmPalmOS::DeleteDatabaseByName).
++    // Like a guest call it holds back later requests, and gives up after kGuestCallSeconds.
++    struct DeferredDelete {
++        string id;
++        double deadline;
++    };
++    optional<DeferredDelete> deferredDelete;
++
++    void FinishDeferredDelete() {
++        if (!deferredDelete || !desktop) return;
++        Reply reply;
++        if (auto result = EmPalmOS::TakeDeleteResult()) {
++            reply = DeleteReply(*result);
++        } else if (!EmPalmOS::DeleteWaiting()) {
++            reply = {false, "delete", "The Palm was reset before the database could be deleted."};
++        } else if (gDebugger.IsStopped() || !gSession->IsPowerOn() || guestSeconds >= deferredDelete->deadline) {
++            EmPalmOS::CancelPendingDelete();
++            reply = {false, "not-ready", "Palm OS can't take the call now: the launcher didn't quit, nothing was deleted."};
++        } else {
++            return;
++        }
++        desktop->Reply(deferredDelete->id, reply.ok, reply.code, reply.message);
++        deferredDelete.reset();
++    }
++
+     void ExpireGuestCall() {
+         if (!guestCall) return;
+         string why;
+@@ -1295,7 +1321,7 @@ class Runner {
+         StateChanged("infrared", lastInfrared, InfraredDescription());
+         DesktopChannel::Request request;
+         // One request at a time: the next waits while one waits for the guest's event loop.
+-        switch (guestCall ? DesktopChannel::Poll::idle : desktop->Receive(request)) {
++        switch (guestCall || deferredDelete ? DesktopChannel::Poll::idle : desktop->Receive(request)) {
+             case DesktopChannel::Poll::closed: return DesktopLost();
+             case DesktopChannel::Poll::handled:
+             case DesktopChannel::Poll::idle: break;
+@@ -1312,6 +1338,11 @@ class Runner {
+                         } catch (const exception& error) {
+                             result = {false, "failed", error.what()};
+                         }
++                        // An application delete waiting for the launcher to quit answers later.
++                        if (result.code == "pending") {
++                            deferredDelete = DeferredDelete{request.id, guestSeconds + kGuestCallSeconds};
++                            return;
++                        }
+                         desktop->Reply(request.id, result.ok, result.code, result.message);
+                     }, [this, id = request.id](const string& why) {
+                         desktop->Reply(id, false, "not-ready", "Palm OS can't take the call now: " + why + ".");
+@@ -1379,6 +1410,20 @@ class Runner {
+                command == "launch-app" || command == "delete-db";
+     }
+ 
++    static Reply DeleteReply(EmPalmOS::DeleteResult result) {
++        switch (result) {
++            case EmPalmOS::DeleteResult::deleted: return {true, "deleted", "Database deleted."};
++            case EmPalmOS::DeleteResult::pending: return {false, "pending", ""};
++            case EmPalmOS::DeleteResult::notReady:
++                return {false, "not-ready", "Wait for Palm OS to reach a supported application boundary."};
++            case EmPalmOS::DeleteResult::missing: return {false, "missing", "There is no Palm database with that name."};
++            case EmPalmOS::DeleteResult::rom: return {false, "rom", "That database is in ROM and can't be deleted."};
++            case EmPalmOS::DeleteResult::running: return {false, "running", "That application is running. Switch to another one first."};
++            case EmPalmOS::DeleteResult::open: return {false, "open", "That database is open. Close its application first."};
++            default: return {false, "delete", "The database could not be deleted."};
++        }
++    }
++
+     // The same commands, codes and replies as the ARM runner's DesktopControl. What a IIIx doesn't
+     // have answers "unsupported", or reports it absent for the state queries the desktop asks every
+     // device.
+@@ -1494,15 +1539,7 @@ class Runner {
+             if (argument.empty() || argument.size() > 31)
+                 return {false, "argument", "Enter a Palm database name (up to 31 bytes)."};
+             if (!ready) return notReady;
+-            switch (EmPalmOS::DeleteDatabaseByName(argument)) {
+-                case EmPalmOS::DeleteResult::deleted: return {true, "deleted", "Database deleted."};
+-                case EmPalmOS::DeleteResult::notReady: return notReady;
+-                case EmPalmOS::DeleteResult::missing: return {false, "missing", "There is no Palm database with that name."};
+-                case EmPalmOS::DeleteResult::rom: return {false, "rom", "That database is in ROM and can't be deleted."};
+-                case EmPalmOS::DeleteResult::running: return {false, "running", "That application is running. Switch to another one first."};
+-                case EmPalmOS::DeleteResult::open: return {false, "open", "That database is open. Close its application first."};
+-                default: return {false, "delete", "The database could not be deleted."};
+-            }
++            return DeleteReply(EmPalmOS::DeleteDatabaseByName(argument));
+         }
+         if (command == "reset" || command == "hard-reset") {
+             gSession->Reset(command == "reset" ? EmSession::ResetType::soft : EmSession::ResetType::hard);

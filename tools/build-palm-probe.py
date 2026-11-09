@@ -7,7 +7,7 @@ import subprocess
 
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--sdk', type=Path, default=Path('../palm-os-sdk/sdk-5r3'))
-p.add_argument('--probe', choices=['sd', 'network', 'keyboard', 'host-network', 'compatibility', 'serial', 'serial-host', 'idle', 'debugger', 'audio', 'irda', 'irda-db', 'bluetooth', 'timing68k', 'tone68k', 'alarm68k', 'ppp68k', 'busy68k', 'sync68k'], default='sd')
+p.add_argument('--probe', choices=['sd', 'network', 'keyboard', 'host-network', 'compatibility', 'serial', 'serial-host', 'idle', 'debugger', 'audio', 'irda', 'irda-db', 'bluetooth', 'timing68k', 'tone68k', 'alarm68k', 'ppp68k', 'busy68k', 'sync68k', 'pen68k'], default='sd')
 p.add_argument('--output', type=Path)
 a = p.parse_args()
 sdk, output = a.sdk.resolve(), (a.output or Path('build/' + a.probe + '-probe')).resolve()
@@ -15,7 +15,7 @@ source = 'tests/palm/' + a.probe + '-probe'
 name = {'sd':'FrondSDProbe','network':'FrondNetProbe','keyboard':'FrondKeyboardProbe',
         'host-network':'FrondHostProbe', 'compatibility':'FrondCompatProbe', 'serial':'FrondSerialProbe', 'serial-host':'FrondSerialHostProbe',
         'idle':'FrondIdleProbe', 'debugger':'FrondDebugProbe', 'audio':'FrondAudioProbe', 'irda':'FrondIRProbe', 'irda-db':'FrondDBBeam', 'bluetooth':'FrondBluetoothProbe',
-        'timing68k':'FrondTiming68k', 'tone68k':'FrondTone68k', 'alarm68k':'FrondAlarm68k', 'ppp68k':'FrondPPP68k', 'busy68k':'FrondBusy68k', 'sync68k':'FrondSync68k'}[a.probe]
+        'timing68k':'FrondTiming68k', 'tone68k':'FrondTone68k', 'alarm68k':'FrondAlarm68k', 'ppp68k':'FrondPPP68k', 'busy68k':'FrondBusy68k', 'sync68k':'FrondSync68k', 'pen68k':'FrondPen68k'}[a.probe]
 if not (sdk / 'include/PalmOS.h').is_file():
     p.error('Supply the Palm OS 5 SDK directory with --sdk')
 output.mkdir(parents=True, exist_ok=True)
@@ -30,11 +30,17 @@ if a.probe == 'debugger':
 subprocess.run(['m68k-palmos-gcc', '-L' + str(sdk / 'lib/m68k-palmos-coff')] + objects + ['-o', str(output / 'probe')], check=True)
 # A probe with no forms builds without PilRC where it isn't installed.
 ro = [str(output / 'probe.ro')]
-if a.probe in ('timing68k', 'tone68k', 'alarm68k', 'ppp68k', 'busy68k', 'sync68k') and not shutil.which('pilrc'):
+if a.probe == 'pen68k' or (a.probe in ('timing68k', 'tone68k', 'alarm68k', 'ppp68k', 'busy68k', 'sync68k') and not shutil.which('pilrc')):
     ro = []
 else:
     subprocess.run(['pilrc', '-q', '-ro', source + '.rcp', ro[0]], check=True)
 resources = []
+if a.probe == 'pen68k':
+    # A 32x22 one-bit launcher icon (version 1 bitmap), a box, so the launcher locks an icon of it.
+    rows = [0xffffffff] + [0x80000001] * 20 + [0xffffffff]
+    icon = output / 'tAIB03e8.bin'
+    icon.write_bytes(bytes([0, 32, 0, 22, 0, 4, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0]) + b''.join(r.to_bytes(4, 'big') for r in rows))
+    resources.append(str(icon))
 if a.probe == 'compatibility':
     script = output / 'native.ld'
     script.write_text('SECTIONS { . = 0; .text : { *(.text.compatibilityEntry) '
