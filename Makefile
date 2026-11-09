@@ -1490,6 +1490,13 @@ test-usb-raw-printer:
 	$(MAKE) -C $(USB_PRINTER_AREA)/source/src/common libcommon.a net
 	$(MAKE) -C $(USB_PRINTER_AREA)/source/src/cloudpilot -f Makefile -f $(CURDIR)/tests/usb-raw-printer.mk FROND_68K=1 FROND_TEST_ROOT=$(CURDIR) USB_PRINTER_TEST=$(CURDIR)/$(USB_PRINTER_AREA)/test-usb-raw-printer usb-printer-test
 
+.PHONY: test-usb-prism2-adapter
+USB_PRISM2_AREA ?= build/usb-prism2-adapter
+test-usb-prism2-adapter:
+	python3 tools/prepare.py --destination $(USB_PRISM2_AREA)/source
+	g++ -std=c++17 -Wall -Wextra -I$(USB_PRISM2_AREA)/source/src/common -o $(USB_PRISM2_AREA)/test-usb-prism2-adapter tests/usb-prism2-adapter.cpp
+	$(USB_PRISM2_AREA)/test-usb-prism2-adapter
+
 .PHONY: test-usb-printer-runtime
 USB_RUNTIME_AREA ?= build/usb-printer-runtime
 test-usb-printer-runtime:
