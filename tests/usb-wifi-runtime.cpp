@@ -157,24 +157,49 @@ int main() {
     i.Reset(true);
     assert(i.HasHostTarget(0) && !w.adapter.linkUp());
 
-    // Load: the controller unplugs, the owner plugs in again and puts the adapter's state back.
+    // Load with the adapter coming back before the guest runs: no connect change, and the guest's
+    // address, configuration and link carry on through the real executor.
+    i.ready(); i.reg(0x95,0x10); i.now+=20000; i.get(0x0f); i.reg(0x95,0x1f0000);
     h.connect();
+    assert((i.get(0x15)&0x1f0003)==3);
     const Bytes state=w.adapter.save();
+    const auto bus=w.adapter.bus(); assert(bus.address==2 && bus.configuration==1);
     Savestate<ChunkType> saved; assert(saved.Save(i));
     {
         SavestateLoader<ChunkType> loader; assert(loader.Load(saved.GetBuffer(),saved.GetSize(),i));
         assert(!i.HasHostTarget(0));
-        w.attach(i); assert(w.adapter.load(state.data(),state.size()));
+        w.attach(i); assert(w.adapter.load(state.data(),state.size()) && w.adapter.setBus(bus));
         w.resetRouter();
         assert(i.HasHostTarget(0) && w.adapter.linkUp() && w.mac()==mac);
+        assert((i.get(0x15)&0x1f0003)==3);
+        auto get=i.transfer(0,0,false,2,{0x80,8,0,0,0,0,1,0}); assert((get[1]>>4)==0);
+        auto config=i.transfer(2,0,true,2,{},1); assert((config[1]>>4)==0 && config[8]==1);
+        i.transfer(1,0,true,2,{},0);
     }
+    // Nothing plugged back in: the guest's next access finds the port disconnected.
+    {
+        SavestateLoader<ChunkType> loader; assert(loader.Load(saved.GetBuffer(),saved.GetSize(),i));
+        w.detach();
+        assert((i.get(0x15)&0x10003)==0x10000);
+        w.attach(i); assert((i.get(0x15)&1) && w.adapter.busAddress()==0);
+    }
+    // A different device: the owner drops the kept port before plugging in its own.
+    {
+        SavestateLoader<ChunkType> loader; assert(loader.Load(saved.GetBuffer(),saved.GetSize(),i));
+        i.DropLoadedPort(0); assert(!i.HasHostTarget(0) && (i.get(0x15)&0x10003)==0x10000);
+        w.attach(i); assert(i.HasHostTarget(0) && (i.get(0x15)&1));
+    }
+    w.attach(i); i.reg(0x95,0x10); i.now+=20000; i.get(0x0f); i.reg(0x95,0x1f0000);
+    h.connect();
     // A rejected load leaves the adapter plugged in and connected.
     {
         SavestateLoader<ChunkType> loader; assert(!loader.Load(saved.GetBuffer(),saved.GetSize()-4,i));
         assert(i.HasHostTarget(0) && w.adapter.linkUp());
-        h.configure(); assert((h.command(0)>>8)==0);
+        assert(w.adapter.busAddress()==2 && (h.command(0)>>8)==0);
     }
     Bytes bad=state; bad[4]=9; assert(!w.adapter.load(bad.data(),bad.size()));
+    UsbPrism2Adapter::Bus badBus; badBus.configuration=1; assert(!w.adapter.setBus(badBus));
+    badBus={0,0,false,false,true}; assert(!w.adapter.setBus(badBus));
 
     // MAC text: locally administered unicast only.
     UsbPrism2Adapter::Mac m;
@@ -187,5 +212,5 @@ int main() {
     // Bank disposal unplugs it.
     EmBankRegs::onBeforeDispose.Dispatch();
     assert(!i.HasHostTarget(0) && w.status()=="off");
-    std::cout<<"PASS Wi-Fi runtime: plug, supply, port reset, printer swap, reset, load, rejected load, ARP\n";
+    std::cout<<"PASS Wi-Fi runtime: plug, supply, port reset, printer swap, reset, load kept and dropped, rejected load, ARP\n";
 }

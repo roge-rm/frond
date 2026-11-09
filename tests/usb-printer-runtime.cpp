@@ -84,6 +84,20 @@ int main(int argc,char** argv) {
  assert(owner.printer.state()==RawPrintJob::State::collecting && owner.printer.size()==4);
  auto more=i.transfer(1,1,true,1,{0,1,0,2},0,64);assert(more[0]==4 && owner.printer.size()==8);
  owner.detach();
+ // Load with the printer plugged back in before the guest runs: the port stays connected with no
+ // connect change and the bus state carries on; nothing plugged in disconnects at the next access.
+ {
+   bind();begin();const auto bus=owner.printer.bus();assert(bus.address==1 && bus.configuration==1 && !bus.bulkToggle);
+   i.reg(0x95,0x1f0000);assert((i.get(0x15)&0x1f0003)==3);
+   Savestate<ChunkType> kept;assert(kept.Save(i));
+   SavestateLoader<ChunkType> load;assert(load.Load(kept.GetBuffer(),kept.GetSize(),i));
+   owner.attach(i);assert(owner.printer.setBus(bus));begin();
+   assert((i.get(0x15)&0x1f0003)==3);
+   auto b=i.transfer(1,1,false,1,{0,255,0,42},0,64);assert(b[0]==4 && owner.printer.size()==4);
+   SavestateLoader<ChunkType> again;assert(again.Load(kept.GetBuffer(),kept.GetSize(),i));
+   owner.detach();assert((i.get(0x15)&0x10003)==0x10000);
+   UsbRawPrinter::Bus bad;bad.configuration=1;assert(!owner.printer.setBus(bad));
+ }
  auto* old=new Isp;owner.attach(*old);begin();EmBankRegs::onBeforeDispose.Dispatch();delete old;
  auto* replacement=new Isp;owner.attach(*replacement);begin();EmBankRegs::onBeforeDispose.Dispatch();delete replacement;
  assert(owner.printer.state()==RawPrintJob::State::aborted);
@@ -111,5 +125,5 @@ int main(int argc,char** argv) {
  }
  { UsbPrinterRuntime shutdown;shutdown.attach(i);std::string result;assert(shutdown.command("begin","",result)); }
  assert(!i.HasHostTarget(0));
- std::cout<<"PASS production owner, HC packets, cancellation, atomic invalid load and file failures\n";
+ std::cout<<"PASS production owner, HC packets, cancellation, atomic invalid load, load kept and file failures\n";
 }

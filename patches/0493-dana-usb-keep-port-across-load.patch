@@ -1,0 +1,354 @@
+diff --git a/src/cloudpilot/emulator/hardware/EmRegsISPDana.cpp b/src/cloudpilot/emulator/hardware/EmRegsISPDana.cpp
+index 7c82a83..fe16640 100644
+--- a/src/cloudpilot/emulator/hardware/EmRegsISPDana.cpp
++++ b/src/cloudpilot/emulator/hardware/EmRegsISPDana.cpp
+@@ -6,6 +6,7 @@
+ #include <tuple>
+ 
+ void EmRegsISPDana::CycleThunk(void* context, uint64, bool) {
++    static_cast<EmRegsISPDana*>(context)->SettleLoadedPorts();
+     static_cast<EmRegsISPDana*>(context)->Tick();
+ }
+ void EmRegsISPDana::Initialize() {
+@@ -36,7 +37,7 @@ void EmRegsISPDana::Reset(Bool hardware) {
+     regs[0x12]=2; regs[0x20]=0x28;
+     regs[0x27] = 0x6122; // Modelled datasheet revision; firmware checks only 0x61xx.
+     command = 0; word = 0; latch = 0;
+-    hostArmed=false; hostTargets={};
++    hostArmed=false; hostTargets={}; loadedPorts={};
+     hostAttached={}; hostLowSpeed={}; portResetCycles={};
+     hostRam.fill(0); hostCursor=0; hostWritten=0;
+     ResetDevice();
+@@ -131,6 +132,7 @@ void EmRegsISPDana::Tick() {
+     }
+ }
+ uint32 EmRegsISPDana::Read(emuptr address, int size) {
++    SettleLoadedPorts();
+     Tick();
+     if (size==2 && address==GetAddressStart()+4) return DeviceRead();
+     if (size != 2 || address != GetAddressStart() || (command & 0x80))
+@@ -155,6 +157,7 @@ uint32 EmRegsISPDana::Read(emuptr address, int size) {
+     return result;
+ }
+ void EmRegsISPDana::Write(emuptr address, int size, uint32 value) {
++    SettleLoadedPorts();
+     if (size==2 && address==GetAddressStart()+6) {
+         DeviceCommand(value & 0xff);
+         return;
+@@ -528,16 +531,16 @@ void EmRegsISPDana::Load(SavestateLoader<ChunkType>& l) {
+     if(invalid) { fields=before; l.NotifyError(); }
+     if(!invalid) {
+         if(hostCancelled) hostCancelled();
+-        hostArmed=false; hostTargets={};
+-        hostAttached={}; hostLowSpeed={}; portResetCycles={};
++        // An armed list still runs at the next frame, or completes with errors if its port goes.
++        hostArmed=(regs[0x2c]&36)==4; hostTargets={};
++        hostAttached={}; hostLowSpeed={};
+         for(unsigned i=0;i<2;++i) {
+             auto& p=regs[0x15+i];
+-            auto before=p;
+-            if(p&1) p|=0x10000;
+-            if(p&2) p|=0x20000;
+-            p&=~0x217u;
+-            if(regs[0x12]&0x200) p|=0x100;
+-            if(p!=before) regs[3]|=0x40;
++            loadedPorts[i]=p&1;
++            if(!loadedPorts[i]) {
++                portResetCycles[i]=0;
++                if((regs[0x12]&0x200) && !(p&0x100)) { p|=0x100; regs[3]|=0x40; }
++            }
+         }
+         RefreshHostInterrupt();
+     }
+@@ -775,6 +778,22 @@ bool EmRegsISPDana::CompleteHostPtd(uint8* data, unsigned size, unsigned offset,
+     return true;
+ }
+ 
++void EmRegsISPDana::SettleLoadedPorts() {
++    for(unsigned i=0;i<2;++i) if(loadedPorts[i] && !hostTargets[i]) DropLoadedPort(i);
++}
++void EmRegsISPDana::DropLoadedPort(unsigned port) {
++    if(port>=2) throw std::runtime_error("ISP invalid target port");
++    if(!loadedPorts[port]) return;
++    loadedPorts[port]=false; hostTargets[port]={};
++    auto& p=regs[0x15+port];
++    p|=0x10000;
++    if(p&2) p|=0x20000;
++    p&=~0x217u; portResetCycles[port]=0;
++    if(regs[0x12]&0x200) p|=0x100;
++    regs[3]|=0x40;
++    CancelHostWork();
++    RefreshHostInterrupt();
++}
+ void EmRegsISPDana::SetPortSupply(unsigned port, bool on) {
+     if(port>=2) throw std::runtime_error("ISP invalid supply port");
+     if(portSupply[port]==on) return;
+@@ -783,6 +802,13 @@ void EmRegsISPDana::SetPortSupply(unsigned port, bool on) {
+ }
+ void EmRegsISPDana::SetHostTarget(unsigned port, HostTarget target) {
+     if(port>=2) throw std::runtime_error("ISP invalid target port");
++    if(loadedPorts[port]) {
++        // The saved connection: the device comes back without a connect change.
++        hostTargets[port]=std::move(target);
++        if(!hostTargets[port]) return;
++        loadedPorts[port]=false; hostAttached[port]=true; hostLowSpeed[port]=regs[0x15+port]&0x200;
++        return;
++    }
+     SetHostConnection(port,false);
+     hostTargets[port]=std::move(target);
+     SetHostConnection(port,bool(hostTargets[port]));
+diff --git a/src/cloudpilot/emulator/hardware/EmRegsISPDana.h b/src/cloudpilot/emulator/hardware/EmRegsISPDana.h
+index d523dc9..3d60a26 100644
+--- a/src/cloudpilot/emulator/hardware/EmRegsISPDana.h
++++ b/src/cloudpilot/emulator/hardware/EmRegsISPDana.h
+@@ -63,7 +63,11 @@ class EmRegsISPDana : public EmRegs {
+     bool PortSupply(unsigned port) const { return portSupply.at(port); }
+     using HostTarget=std::function<HostReply(const HostPacket&)>;
+     bool HasHostTarget(unsigned port) const { return bool(hostTargets.at(port)); }
++    // After a load a connected port stays as saved: an owner that plugs its device back in before the
++    // guest runs keeps the connection; otherwise the guest's next access finds the port disconnected.
+     void SetHostTarget(unsigned port, HostTarget target);
++    // Disconnects a port kept by a load now, for an owner whose device isn't the saved one.
++    void DropLoadedPort(unsigned port);
+     void Initialize() override;
+     void Dispose() override;
+     void Reset(Bool hardware) override;
+@@ -118,6 +122,8 @@ class EmRegsISPDana : public EmRegs {
+     void Commit(uint32);
+     std::array<HostTarget,2> hostTargets{};
+     std::array<bool,2> portSupply{{true,true}};
++    std::array<bool,2> loadedPorts{}; // Connected in the loaded state, waiting for its device.
++    void SettleLoadedPorts();
+     bool hostArmed=false;
+     void ExecuteHostFrame();
+     void CancelHostWork();
+diff --git a/src/cloudpilot/frond/main.cpp b/src/cloudpilot/frond/main.cpp
+index 4b1bf6c..87fcb9f 100644
+--- a/src/cloudpilot/frond/main.cpp
++++ b/src/cloudpilot/frond/main.cpp
+@@ -239,13 +239,17 @@ bool startCore(const DeviceProfile5& profile, const uint8_t* rom, size_t size) {
+ // "modem-call" and "phone-call" are only there when the session was saved with the modem or
+ // the infrared phone in a call, so a load can tell the guest the line has gone.
+ // "wifi-mac" is the Dana Wi-Fi adapter's MAC, kept once made; "wifi-adapter" (hex) its settings
+-// and link, only when it was plugged in.
++// and link, only when it was plugged in, with "wifi-bus" its bus state (address, configuration, IN
++// halt, OUT halt, OUT toggle). "usb-printer" is the USB printer's bus state (address,
++// configuration, halt, bulk toggle), only when it was plugged in.
+ struct SessionMetadata {
+     int contrast{Lcd68k::kDefaultContrast};
+     bool wholeClocks{false};
+     string modemCall, phoneCall;
+     optional<UsbPrism2Adapter::Mac> wifiMac;
+     vector<uint8_t> wifiAdapter;
++    optional<UsbPrism2Adapter::Bus> wifiBus;
++    optional<UsbRawPrinter::Bus> printerBus;
+ };
+ 
+ string metadataText(const SessionMetadata& metadata) {
+@@ -260,6 +264,16 @@ string metadataText(const SessionMetadata& metadata) {
+         for (const auto byte : metadata.wifiAdapter) { text += digits[byte >> 4]; text += digits[byte & 15]; }
+         text += "\n";
+     }
++    if (metadata.wifiBus) {
++        const auto& b = *metadata.wifiBus;
++        text += "wifi-bus " + to_string(b.address) + " " + to_string(b.configuration) + " " + to_string(int(b.haltIn)) +
++                " " + to_string(int(b.haltOut)) + " " + to_string(int(b.outToggle)) + "\n";
++    }
++    if (metadata.printerBus) {
++        const auto& b = *metadata.printerBus;
++        text += "usb-printer " + to_string(b.address) + " " + to_string(b.configuration) + " " + to_string(int(b.halted)) +
++                " " + to_string(int(b.bulkToggle)) + "\n";
++    }
+     return text;
+ }
+ 
+@@ -297,6 +311,26 @@ string parseMetadata(const void* data, size_t size, SessionMetadata& metadata) {
+             UsbPrism2Adapter check;
+             if (hex.size() % 2 || !check.load(bytes.data(), bytes.size())) return "invalid session Wi-Fi adapter state";
+             metadata.wifiAdapter = std::move(bytes);
++        } else if (line.rfind("wifi-bus ", 0) == 0) {
++            istringstream fields(line.substr(9));
++            unsigned address, configuration, haltIn, haltOut, toggle; string extra;
++            if (!(fields >> address >> configuration >> haltIn >> haltOut >> toggle) || (fields >> extra) || haltIn > 1 ||
++                haltOut > 1 || toggle > 1)
++                return "invalid session Wi-Fi adapter state";
++            const UsbPrism2Adapter::Bus bus{address, configuration, bool(haltIn), bool(haltOut), bool(toggle)};
++            UsbPrism2Adapter check;
++            if (!check.setBus(bus)) return "invalid session Wi-Fi adapter state";
++            metadata.wifiBus = bus;
++        } else if (line.rfind("usb-printer ", 0) == 0) {
++            istringstream fields(line.substr(12));
++            unsigned address, configuration, halted, toggle; string extra;
++            UsbRawPrinter::Bus bus;
++            if (!(fields >> address >> configuration >> halted >> toggle) || (fields >> extra) || halted > 1 || toggle > 1)
++                return "invalid session USB printer state";
++            bus = {address, configuration, bool(halted), bool(toggle)};
++            UsbRawPrinter check{0};
++            if (!check.setBus(bus)) return "invalid session USB printer state";
++            metadata.printerBus = bus;
+         } else if (!line.empty()) {
+             return "unknown session metadata";
+         }
+@@ -788,7 +822,10 @@ class Runner {
+         irTransport->SessionLoaded(metadata.phoneCall);
+         piezo.Restart(gSession->GetSystemCycles());
+         usbWifi.clock=[this] { return UsbTime(); };
++        // A session opened at start brings its USB device with it.
++        if(profile.deviceType==deviceTypeDana && Isp()) usbPort=SessionUsbDevice(metadata);
+         UsbSessionLoaded(metadata);
++        if(usbPort!="off") { string result; if(!UsbPortControl(usbPort,result,true)) usbPort="off"; }
+         EmPalmOS::SetSafePointHandler([this] { RunGuestCall(); });
+         pwmHandler = EmHAL::onPwmChange.AddHandler([this](double frequency, double duty) {
+             piezo.Change(gCPU68K ? gCPU68K->CycleNow() : gSession->GetSystemCycles(), frequency, duty);
+@@ -1132,6 +1169,10 @@ class Runner {
+         if (usbWifi.hasMac()) saving.wifiMac = usbWifi.mac();
+         saving.wifiAdapter.clear();
+         if (usbPort == "wifi") saving.wifiAdapter = pendingWifi ? *pendingWifi : usbWifi.adapter.save();
++        saving.wifiBus.reset();
++        if (usbPort == "wifi") saving.wifiBus = pendingWifi ? pendingWifiBus : optional(usbWifi.adapter.bus());
++        saving.printerBus.reset();
++        if (usbPort == "printer") saving.printerBus = pendingPrinter ? *pendingPrinter : usbPrinter.printer.bus();
+         return saving;
+     }
+ 
+@@ -1157,6 +1198,9 @@ class Runner {
+     string usbPort="off";
+     // A loaded session's adapter state, put back when the adapter is next plugged in.
+     optional<vector<uint8_t>> pendingWifi;
++    optional<UsbPrism2Adapter::Bus> pendingWifiBus;
++    // A loaded session's printer bus state, the same way.
++    optional<UsbRawPrinter::Bus> pendingPrinter;
+     UsbHostBridge usbBridge;
+     unique_ptr<UsbDanaPort> usbDana;
+     UsbHostHooks usbHooks;
+@@ -1172,7 +1216,7 @@ class Runner {
+     }
+     void RestoreUsb() {
+         if(profile->deviceType!=deviceTypeDana) return;
+-        if(usbPort!="off") { string result; UsbPortControl(usbPort,result); }
++        if(usbPort!="off") { string result; UsbPortControl(usbPort,result,true); }
+         string error;
+         if(!StartUsbDebug(usbDebugMode,error)) cerr << "usb-debug: error " << error << endl;
+     }
+@@ -1188,17 +1232,23 @@ class Runner {
+         return usbPrinter.command(action,argument,result);
+     }
+     // usb-port off|printer|wifi: the one device on the Dana's external USB port.
+-    bool UsbPortControl(const string& choice,string& result) {
++    // The device already there stays plugged in unless force (plug in again after a load or reset).
++    bool UsbPortControl(const string& choice,string& result,bool force=false) {
+         if(profile->deviceType!=deviceTypeDana) { result="This device has no USB host port.";return false; }
+         if(choice!="off" && choice!="printer" && choice!="wifi") { result="Use off, printer or wifi.";return false; }
+-        auto* dc=dynamic_cast<EmRegsISPDana*>(EmBankRegs::GetSubBank(0x1f000000,2));
++        if(!force && choice==usbPort) { result=UsbPortState(); return true; }
++        auto* dc=Isp();
+         if(choice!="off" && !dc) { result="Dana controller unavailable.";return false; }
+         if(choice!="printer") usbPrinter.detach();
+         if(choice!="wifi") usbWifi.detach();
+-        if(choice=="printer") usbPrinter.attach(*dc);
++        if(choice=="printer") {
++            usbPrinter.attach(*dc);
++            if(pendingPrinter) { usbPrinter.printer.setBus(*pendingPrinter); pendingPrinter.reset(); }
++        }
+         if(choice=="wifi") {
+             usbWifi.attach(*dc);
+             if(pendingWifi) { usbWifi.adapter.load(pendingWifi->data(),pendingWifi->size()); pendingWifi.reset(); }
++            if(pendingWifiBus) { usbWifi.adapter.setBus(*pendingWifiBus); pendingWifiBus.reset(); }
+         }
+         usbPort=choice;
+         result=UsbPortState();
+@@ -1212,11 +1262,20 @@ class Runner {
+     }
+     // The network mode as the T|X names it: wireless while the Wi-Fi adapter is the port's device.
+     string NetworkState() const { return usbPort=="wifi" ? "wireless" : "disabled"; }
+-    // A session's MAC and adapter state; slirp starts again, so host connections drop.
++    EmRegsISPDana* Isp() const { return dynamic_cast<EmRegsISPDana*>(EmBankRegs::GetSubBank(0x1f000000,2)); }
++    // The device a session was saved with on the external port.
++    static string SessionUsbDevice(const SessionMetadata& m) { return !m.wifiAdapter.empty() ? "wifi" : m.printerBus ? "printer" : "off"; }
++    // A session's MAC and device state. The device stays connected through the load only if the port
++    // still has the same one; slirp starts again, so host connections drop.
+     void UsbSessionLoaded(const SessionMetadata& loaded) {
+         if(loaded.wifiMac) usbWifi.setMac(*loaded.wifiMac);
+-        if(loaded.wifiAdapter.empty()) pendingWifi.reset(); else pendingWifi=loaded.wifiAdapter;
++        pendingWifi.reset(); pendingWifiBus.reset(); pendingPrinter.reset();
+         if(usbWifi.attached()) usbWifi.resetRouter();
++        if(profile->deviceType!=deviceTypeDana) return;
++        const string device=SessionUsbDevice(loaded);
++        if(device!=usbPort) { if(auto* dc=Isp()) dc->DropLoadedPort(0); return; }
++        if(device=="wifi") { pendingWifi=loaded.wifiAdapter; pendingWifiBus=loaded.wifiBus; }
++        if(device=="printer") pendingPrinter=loaded.printerBus;
+     }
+     uint64_t UsbTime() const { return uint64_t(guestSeconds*1000000000.0); }
+     void ServiceUsb() {
+@@ -2266,6 +2325,8 @@ class Runner {
+         const auto old=runtimeCards.Snapshot();
+         runtimeCards.Install(next);
+         const auto wifiBefore=usbPort=="wifi" ? usbWifi.adapter.save() : vector<uint8_t>{};
++        const auto wifiBusBefore=usbPort=="wifi" ? optional(usbWifi.adapter.bus()) : nullopt;
++        const auto printerBefore=usbPort=="printer" ? optional<UsbRawPrinter::Bus>(usbPrinter.printer.bus()) : nullopt;
+         auto error=applySession(session);
+         if(error.empty() && !runtimeCards.Matches(next)) error="manifest and protocol insertion disagree";
+         if (!error.empty()) {
+@@ -2276,7 +2337,8 @@ class Runner {
+                 quit = true;
+                 return;
+             }
+-            if(!wifiBefore.empty()) pendingWifi=wifiBefore;
++            if(!wifiBefore.empty()) { pendingWifi=wifiBefore; pendingWifiBus=wifiBusBefore; }
++            pendingPrinter=printerBefore;
+             RestoreUsb();
+             piezo.Restart(gSession->GetSystemCycles());
+             serialTransport->SessionLoaded("");
+diff --git a/src/common/UsbPrism2Adapter.h b/src/common/UsbPrism2Adapter.h
+index ecc0f96..2871e3f 100644
+--- a/src/common/UsbPrism2Adapter.h
++++ b/src/common/UsbPrism2Adapter.h
+@@ -101,6 +101,18 @@ class UsbPrism2Adapter {
+         return true;
+     }
+ 
++    // The bus side a session keeps across a load, apart from save(): address, configuration, the
++    // bulk halts and the OUT toggle. Call after load(); anything in flight is dropped.
++    struct Bus { unsigned address = 0, configuration = 0; bool haltIn = false, haltOut = false, outToggle = false; };
++    Bus bus() const { return {address, configuration, haltIn, haltOut, outToggle}; }
++    bool setBus(const Bus& b) {
++        if(b.address > 127 || b.configuration > 1 || (b.configuration && !b.address) ||
++           (!b.configuration && (b.haltIn || b.haltOut || b.outToggle))) return false;
++        busReset();
++        address = b.address; configuration = b.configuration; haltIn = b.haltIn; haltOut = b.haltOut; outToggle = b.outToggle;
++        return true;
++    }
++
+     // Reply and Packet use the HostReply/HostPacket shape, without a core dependency.
+     template<class Reply, class Packet> Reply packet(const Packet& p) noexcept {
+         try { return packetImpl<Reply>(p); }
+diff --git a/src/common/UsbRawPrinter.h b/src/common/UsbRawPrinter.h
+index 420cbb2..adb884c 100644
+--- a/src/common/UsbRawPrinter.h
++++ b/src/common/UsbRawPrinter.h
+@@ -5,7 +5,8 @@
+ #include <string>
+ 
+ // Synthetic full-speed protocol 1 leaf. Owner and packet callback share one thread.
+-// No state serialisation; the owner must call cancel at reset/detach/load/shutdown.
++// No job serialisation; the owner must call cancel at reset/detach/load/shutdown. bus() and setBus()
++// carry the bus state across a session load.
+ class UsbRawPrinter {
+  public:
+     explicit UsbRawPrinter(size_t limit) : job(limit) {}
+@@ -32,6 +33,15 @@ class UsbRawPrinter {
+         restart(); address=configuration=0; halted=false; bulkToggle=false;
+         phase=Phase::idle; pending=Action::none; data.clear(); cached.clear(); haveCache=false;
+     }
++    // The bus side a session keeps across a load: address, configuration, halt and bulk toggle.
++    // Restoring it drops the job and any control transfer in flight.
++    struct Bus { unsigned address=0, configuration=0; bool halted=false, bulkToggle=false; };
++    Bus bus() const { return {address,configuration,halted,bulkToggle}; }
++    bool setBus(const Bus& b) {
++        if(b.address>127 || b.configuration>1 || (b.configuration && !b.address) || (!b.configuration && (b.halted || b.bulkToggle))) return false;
++        cancel(); address=b.address; configuration=b.configuration; halted=b.halted; bulkToggle=b.bulkToggle;
++        return true;
++    }
+     // Reply and Packet use the 0321 HostReply/HostPacket shape, without a core dependency.
+     template<class Reply, class Packet> Reply packet(const Packet& p) noexcept {
+         try { return packetImpl<Reply>(p); }
