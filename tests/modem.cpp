@@ -1,5 +1,5 @@
 // The emulated modem: Hayes command scripts from the Palm OS 3.1, 3.5 and 4.1 modem tables,
-// the PPP server against a scripted client, and one DNS query plus one TCP connection through
+// the HotSync number's routing and byte bridge, the PPP server against a scripted client, and one DNS query plus one TCP connection through
 // libslirp to loopback listeners. Nothing leaves the machine.
 
 #include <arpa/inet.h>
@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "modem/HayesModem.h"
+#include "modem/LineSwitch.h"
 #include "modem/PppServer.h"
 #include "net/SlirpIp.h"
 
@@ -935,18 +936,132 @@ static void TestSlirp() {
     close(echo);
 }
 
+// Network HotSync's UDP wakeup to 10.0.2.2:14237 is answered by SlirpIp itself.
+static void TestNetSyncWakeup() {
+    frondNet::SlirpIp net;
+    CHECK(net.Valid());
+    const Bytes wakeup = {0xfa, 0xde, 0x01, 0x00, 0x0a, 0x00, 0x02, 0x02, 0, 0, 0, 0, 'f', 'r', 'o', 'n', 'd', 0};
+    const Bytes packet = Udp(1031, 14237, wakeup);
+    net.Input(packet.data(), packet.size(), 1000 * ms);
+    Bytes answer;
+    CHECK(net.Receive(answer));
+    CHECK(answer.size() == 20 + 8 + wakeup.size());
+    if (answer.size() != 20 + 8 + wakeup.size()) return;
+    CHECK(answer[9] == 17 && Get32(answer, 12) == frondNet::hostAddress && Get32(answer, 16) == frondNet::guestAddress);
+    CHECK(Sum(answer, 0, 20) == 0);
+    CHECK(Get16(answer, 20) == 14237 && Get16(answer, 22) == 1031 && Get16(answer, 24) == 8 + wakeup.size());
+    const uint32_t pseudo = Get16(answer, 12) + Get16(answer, 14) + Get16(answer, 16) + Get16(answer, 18) + 17 +
+                            uint32_t(8 + wakeup.size());
+    CHECK(Sum(answer, 20, 8 + wakeup.size(), pseudo) == 0);
+    Bytes expected = wakeup;
+    expected[2] = 2;
+    CHECK(Bytes(answer.begin() + 28, answer.end()) == expected);
+    CHECK(!net.Receive(answer));
+    // Other UDP to that port, and an answer packet, go on to slirp as before.
+    const Bytes other = Udp(1031, 14237, {0xfa, 0xde, 0x02, 0x00});
+    net.Input(other.data(), other.size(), 1001 * ms);
+    const Bytes short_ = Udp(1031, 14237, {0xfa, 0xde});
+    net.Input(short_.data(), short_.size(), 1002 * ms);
+    net.Poll(1003 * ms);
+    CHECK(!net.Receive(answer));
+}
+
+// ---- The HotSync number: routing and the byte bridge ----
+
+static void TestHotSyncRoute() {
+    FakeLine data;
+    PipeLine hotsync;
+    LineSwitch line(data, hotsync);
+    HayesModem modem(line);
+    Rig rig(modem);
+    modem.SetPower(true, rig.now);
+    rig.Run(10 * ms);
+    CHECK_TEXT(rig.Command("ATE0"), "ATE0\r" + ok);
+
+    CHECK(LineSwitch::IsHotSync("4687962") && LineSwitch::IsHotSync("94687962") && !LineSwitch::IsHotSync("468796"));
+    // Nobody on the HotSync link: no answer, and the data line isn't called.
+    CHECK_TEXT(rig.Dial("ATDT4687962"), "\r\nNO ANSWER\r\n");
+    CHECK(data.answers == 0 && !hotsync.InCall());
+
+    // Another number still reaches the data line.
+    CHECK_TEXT(rig.Dial("ATDT5551234"), "\r\nCONNECT 33600\r\n");
+    CHECK(data.answers == 1 && !hotsync.InCall() && !line.HotSyncCall());
+    rig.Run(1100 * ms);
+    rig.Type("+++");
+    rig.Run(1100 * ms);
+    CHECK_TEXT(rig.Command("ATH0"), ok);
+    CHECK(data.hangups == 1);
+
+    // With a dial prefix and a pause, through the HotSync link.
+    hotsync.SetReachable(true);
+    CHECK_TEXT(rig.Dial("ATDT9,4687962"), "\r\nCONNECT 33600\r\n");
+    CHECK(hotsync.InCall() && line.HotSyncCall() && data.answers == 1);
+    // Guest bytes come out of the pipe raw.
+    const std::string dataBefore = data.received;
+    static const char wakeupBytes[] = "\xbe\xef\xed\x03\x00\x00\x2b\x2b\x2b\r";
+    const std::string wakeup(wakeupBytes, sizeof wakeupBytes - 1);
+    rig.Type(wakeup);
+    rig.Run(2 * ms);
+    std::string out;
+    uint8_t buffer[64];
+    rig.Run(20 * ms);
+    while (size_t n = hotsync.TakeOut(buffer, sizeof buffer)) out.append(reinterpret_cast<char*>(buffer), n);
+    CHECK_TEXT(out, wakeup);
+    CHECK(data.received == dataBefore);
+    // Host bytes reach the guest.
+    const std::string reply = "\xbe\xef\xed\x01\x02\x03";
+    CHECK(hotsync.PutIn(reinterpret_cast<const uint8_t*>(reply.data()), reply.size()) == reply.size());
+    rig.Run(20 * ms);
+    CHECK_TEXT(rig.Take(), reply);
+    // The host side leaving drops the call, after what it sent last has reached the guest.
+    const std::string last(200, '\x7e');
+    hotsync.PutIn(reinterpret_cast<const uint8_t*>(last.data()), last.size());
+    hotsync.PeerGone();
+    rig.Run(10 * ms);
+    CHECK(modem.GetState() == HayesModem::State::Online);
+    rig.Run(100 * ms);
+    CHECK_TEXT(rig.Take(), last + "\r\nNO CARRIER\r\n");
+    CHECK(!hotsync.InCall() && modem.GetState() == HayesModem::State::Command);
+
+    // Hanging up from the guest ends the HotSync call, and the next PPP number works again.
+    CHECK_TEXT(rig.Dial("ATDT4687962"), "\r\nCONNECT 33600\r\n");
+    CHECK(hotsync.InCall());
+    rig.Run(1100 * ms);
+    rig.Type("+++");
+    rig.Run(1100 * ms);
+    CHECK_TEXT(rig.Take(), ok);
+    CHECK_TEXT(rig.Command("ATH0"), ok);
+    CHECK(!hotsync.InCall());
+    CHECK_TEXT(rig.Dial("ATDT5551234"), "\r\nCONNECT 33600\r\n");
+    CHECK(data.answers == 2 && !line.HotSyncCall());
+    // A session load drops a HotSync call like any other.
+    modem.Drop(rig.now);
+    CHECK(data.hangups == 2);
+    CHECK_TEXT(rig.Take(), "\r\nNO CARRIER\r\n");
+    CHECK_TEXT(rig.Dial("ATDT4687962"), "\r\nCONNECT 33600\r\n");
+    modem.Drop(rig.now);
+    CHECK(!hotsync.InCall());
+    CHECK_TEXT(rig.Take(), "\r\nNO CARRIER\r\n");
+    // X0 can't tell no answer from no carrier.
+    hotsync.SetReachable(false);
+    rig.Command("ATX0");
+    CHECK_TEXT(rig.Dial("ATDT4687962"), "\r\nNO CARRIER\r\n");
+}
+
 int main() {
     TestCommands();
+    TestHotSyncRoute();
     const unsigned commands = checks;
     TestPpp();
     const unsigned ppp = checks - commands;
     TestSlirp();
+    TestNetSyncWakeup();
     const unsigned slirp = checks - commands - ppp;
     if (failures) {
         fprintf(stderr, "FAIL: %u of %u modem checks\n", failures, checks);
         return 1;
     }
-    printf("PASS: %u modem checks (%u AT command, %u PPP, %u slirp DNS and TCP over loopback)\n", checks, commands,
+    printf("PASS: %u modem checks (%u AT command and HotSync number, %u PPP, %u slirp DNS, TCP over loopback and the NetSync wakeup)\n", checks, commands,
            ppp, slirp);
     return 0;
 }

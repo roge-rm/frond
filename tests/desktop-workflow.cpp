@@ -1694,6 +1694,7 @@ for line in s.makefile('rb'):
     message={b'device-state':b'palm-iiix',b'keyboard-state':b'detached',b'network-state':b'disabled',
              b'serial-state':b'pty /dev/pts/7 waiting',b'usb-state':b'off',b'sd-state':b'none'}.get(cmd,b'done')
     if cmd==b'display': message=b'contrast '+a.split(b'=')[1]+b', smooth off'
+    if cmd==b'serial-state' and 'modem' in sys.argv: message=b'modem online 33600; hotsync pty /dev/pts/9 connected'
     if cmd==b'save':
         pathlib.Path(a.decode()).write_bytes(struct.pack('<II',0x19800819,8)+b'palm-iiix'.ljust(32,b'\0')+bytes(8)+
             struct.pack('<5Q',0x178000,0,4<<20,0,0)+bytes(4)+b'state')
@@ -1803,6 +1804,9 @@ for line in s.makefile('rb'):
             QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("stop")->isEnabled(), 5000);
             const auto args = read(".args").split('\n');
             QVERIFY(read(".args").contains("--serial\nmodem"));
+            QVERIFY(read(".args").contains("--modem-sync\npty"));
+            QTRY_COMPARE_WITH_TIMEOUT(window.findChild<QLabel*>("serialState")->text(),
+                                      QString("Modem: online at 33600, HotSync on /dev/pts/9"), 5000);
             QVERIFY(read(".args").contains("--irda\nphone"));
             QCOMPARE(window.findChild<QComboBox*>("irdaMode")->currentData().toString(), QString("phone"));
             QCOMPARE(args.value(0), QFileInfo(managedSession("Palm IIIx")).canonicalFilePath());

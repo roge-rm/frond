@@ -4,7 +4,8 @@ and wake, serial HotSync with pilot-link over a PTY, TCP and a Unix socket, the 
 and exporting databases. Each ROM boots to the launcher once; every check starts from that
 session. --only ppp also dials out over serial PPP to slirp and fetches example.com, --only
 modem does the same through the snap-on modem (--serial modem) and --only irphone through the
-infrared phone (--irda phone).
+infrared phone (--irda phone). --only modemsync HotSyncs over the modem both ways: Modem Sync to the
+HotSync number through --modem-sync pty, then Network HotSync over PPP to pilot-xfer on net:.
 
 ROMs come from --rom, else the IIIx 3.1 ROM in the private firmware folder; with none the checks
 are skipped. The probe PRCs are built with tools/build-palm-probe.py when m68k-palmos-gcc and the
@@ -29,9 +30,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 import palm_boot  # noqa: E402
 
-CHECKS = ['tones', 'backlight', 'sleep', 'serial', 'unix', 'card-flags', 'databases', 'ppp', 'modem', 'irphone']
+CHECKS = ['tones', 'backlight', 'sleep', 'serial', 'unix', 'card-flags', 'databases', 'ppp', 'modem', 'irphone',
+          'modemsync']
 # Reach example.com over the internet, so they only run when asked for with --only.
-OPT_IN = {'ppp', 'modem', 'irphone'}
+OPT_IN = {'ppp', 'modem', 'irphone', 'modemsync'}
 HELLO = Path.home() / 'Projects/palm/hello/Hello.prc'
 FRONDBENCH = ROOT / 'build/frondbench/FrondBench.prc'
 PROBES = {'tone68k': 'FrondTone68k', 'alarm68k': 'FrondAlarm68k', 'ppp68k': 'FrondPPP68k'}
@@ -543,6 +545,84 @@ def check_irphone(rom, session, root, probes):
     return f'{status}, {received} bytes; phone went {" > ".join(states)}'
 
 
+def modem_states(m, process, limit):
+    """serial-state's modem part each second until process ends and the modem is idle again."""
+    states = []
+    end = time.monotonic() + limit
+    while time.monotonic() < end:
+        state = m.send('serial-state', 'serial:').split(': ', 1)[1].split(';')[0]
+        if not states or states[-1] != state:
+            states.append(state)
+        if process.poll() is not None and state == 'modem idle':
+            break
+        time.sleep(0.5)
+    return states
+
+
+def check_modemsync(rom, session, root, probes):
+    """HotSync over the snap-on modem. Modem Sync: the HotSync app dials 4687962, the call is
+    bridged to the --modem-sync PTY and pilot-install-netsync turns on Network HotSync with 10.0.2.2
+    as the Primary PC. Network HotSync: with Modem Sync Prefs on Network the HotSync app dials the
+    Network panel's service (Palm Modem US/Canada, 5551234), PPP comes up, the core answers the
+    NetSync wakeup and pilot-xfer -l on net:127.0.0.1 answers through slirp. OS 3.5."""
+    if '3.5' not in rom.name:
+        raise Skip('the HotSync and Network panel taps are for OS 3.5')
+    if not shutil.which('pilot-xfer') or not shutil.which('pilot-install-netsync'):
+        raise Skip('no pilot-xfer or pilot-install-netsync')
+    digits = {'1': (62, 75), '2': (80, 75), '3': (98, 75), '4': (62, 91), '5': (80, 91), '6': (98, 91),
+              '7': (62, 107), '8': (80, 107), '9': (98, 107)}
+
+    def taps(m, points):
+        for x, y in points:
+            m.core.tap(m.root, x, y)
+            time.sleep(0.7)
+
+    with Machine(session, root, 'modemsync', '--serial', 'modem', '--modem-sync', 'pty') as m:
+        # The startup lines print serial before modem-sync, so ask until the PTY shows.
+        state = m.core.until('serial-state', 'serial:', 'hotsync', 30).strip()
+        if not state.startswith('serial: modem idle; hotsync pty /dev/pts/'):
+            raise AssertionError(f'no HotSync PTY: {state}')
+        port = state.split('hotsync ')[1].split()[1]
+        # Network panel: Palm Modem US/Canada and 5551234, as in check_modem.
+        m.core.launch('Preferences')
+        taps(m, [(135, 5), (125, 62), (100, 87), (110, 91), (120, 103), (128, 213)] +
+             [digits[d] for d in '5551234'] + [(16, 152), (12, 152)])
+        # HotSync app: Modem, Enter phone #, the numeric keyboard, 4687962, Done, OK.
+        m.core.launch('HotSync')
+        time.sleep(1)
+        taps(m, [(98, 50), (80, 131), (128, 213)] + [digits[d] for d in '4687962'] + [(16, 152), (12, 152)])
+        netsync = subprocess.Popen(['pilot-install-netsync', '-p', port, '-e', '-n', 'frond', '-a', '10.0.2.2'],
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=m.root)
+        time.sleep(1)
+        taps(m, [(80, 80)])
+        direct = modem_states(m, netsync, 120)
+        if netsync.poll() is None:
+            netsync.kill()
+        out = netsync.communicate()[0]
+        m.frame('modem-sync.png')
+        if 'LANSync....: Enabled' not in out or '10.0.2.2' not in out or 'modem online 33600' not in direct:
+            raise AssertionError(f'Modem Sync: {out.strip()[-300:]!r}; modem went {" > ".join(direct)}')
+        # Let the HotSync app finish, then Menu, Modem Sync Prefs, Network, OK, Select Service (the
+        # Network panel opens on the service set above), Done and the HotSync button.
+        time.sleep(8)
+        taps(m, [(20, 5), (40, 17), (40, 108), (12, 152), (80, 115), (14, 152)])
+        m.frame('network-mode.png')
+        net = subprocess.Popen(['pilot-xfer', '-p', 'net:127.0.0.1', '-l'], stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, text=True, cwd=m.root)
+        time.sleep(1)
+        taps(m, [(80, 80)])
+        network = modem_states(m, net, 180)
+        if net.poll() is None:
+            net.kill()
+        out = net.communicate()[0]
+        m.frame('network-sync.png')
+        listed = re.search(r'List complete\. (\d+) files found', out)
+        if not listed or 'modem online 33600' not in network:
+            raise AssertionError(f'Network HotSync: {out.strip()[-300:]!r}; modem went {" > ".join(network)}')
+    return (f'Modem Sync set LANSync, modem went {" > ".join(direct)}; Network HotSync listed '
+            f'{listed.group(1)} databases, modem went {" > ".join(network)}')
+
+
 def check_databases(rom, session, root, probes):
     """Install Hello.prc and FrondBench from the console, launch Hello, list the RAM databases,
     export Hello as a PRC and the RAM and all databases as zips, and FrondBench starting."""
@@ -599,10 +679,10 @@ def build_probes(root, sdk):
 
 
 NEEDS = {'tones': ['tone68k'], 'sleep': ['alarm68k'], 'backlight': [], 'serial': [], 'unix': [], 'card-flags': [], 'databases': [],
-         'ppp': ['ppp68k'], 'modem': ['ppp68k'], 'irphone': ['ppp68k']}
+         'ppp': ['ppp68k'], 'modem': ['ppp68k'], 'irphone': ['ppp68k'], 'modemsync': []}
 RUN = {'tones': check_tones, 'backlight': check_backlight, 'sleep': check_sleep, 'serial': check_serial,
        'unix': check_unix, 'card-flags': check_card_flags, 'databases': check_databases, 'ppp': check_ppp,
-       'modem': check_modem, 'irphone': check_irphone}
+       'modem': check_modem, 'irphone': check_irphone, 'modemsync': check_modemsync}
 
 
 def main():

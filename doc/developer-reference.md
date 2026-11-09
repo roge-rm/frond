@@ -300,6 +300,7 @@ State commands take no argument. Mode commands change the setting and reply with
 | `irda-state` | | `infrared`; the phone gives `phone idle\|linked\|dialling\|online 33600` |
 | `irda-stats` | | `infrared`: counters `rx= tx= rx_drop= tx_drop= pending= baud= rx_on= tx_on= power= sleeping=`; frond-68k gives `rx= tx= port=`; the phone gives `frames_in= frames_out= bad= connects= resent= timeouts=` (frond-68k with `port=` first) |
 | `serial-stats` | | frond-68k: `serial`: the modem's `power=on\|off dtr=on\|off`, or `off` outside modem mode |
+| `modem-sync` | none, or `off`, `pty`, `tcp:PORT` or `unix:PATH` | frond-68k: `modem-sync`: the modem's HotSync link, as `serial-state` shows a link; `unsupported` without a modem |
 | `bluetooth-state` | | `bluetooth` |
 | `bluetooth-mode` | `off` or an absolute Unix socket path | `bluetooth` |
 | `network-state` | | `network`: mode name |
@@ -535,6 +536,7 @@ out/frond-68k iiix.frond --serial pty
 | `--audio-output FILE` | Write the piezo sound to a WAV file. |
 | `--audio-period FRAMES` | Host audio period, 64 to 8192. Default 512. |
 | `--tone-log` | Print each tone change (`tone: HZ Hz duty D at S s`). |
+| `--modem-sync off\|pty\|tcp:PORT\|unix:PATH` | frond-68k: the modem's HotSync link. A call to the HotSync number (4687962) is bridged to it raw, for pilot-link. Devices with the `modem` capability. |
 | `--serial off\|pty\|tcp:PORT\|unix:PATH\|modem`, `--irda off\|pty\|tcp:PORT\|unix:PATH\|phone` | Connect the serial port or infrared to a host PTY, a loopback TCP listener or a Unix socket. The PTY path is printed. `modem` puts the snap-on modem on the serial port (devices with the `modem` capability): any number dialled connects at 33600 to a PPP server with slirp behind it, guest 10.0.2.15, DNS 10.0.2.3. `phone` puts a mobile phone with the same modem on the IR port (devices with the `irPhone` capability, Palm OS 3.3 or later), reached over IrCOMM. |
 | `--gdb PORT` | Start the GDB stub on 127.0.0.1:PORT, see below. |
 | `--desktop-socket PATH` | Connect to the desktop's control socket, see [Control socket](#control-socket). The console is off then. |
@@ -559,7 +561,8 @@ Read from standard input, one per line, unless `--desktop-socket` is used. Paths
 | `window-snapshot FILE` | Save the whole window, with silkscreen and buttons, as a PNG. |
 | `audio-on`, `audio-off`, `sound-state` | Turn sound on or off, or show it. |
 | `serial-mode off\|pty\|tcp:PORT\|unix:PATH\|modem`, `irda-mode off\|pty\|tcp:PORT\|unix:PATH\|phone` | Set the serial or infrared endpoint and show its state. |
-| `serial-state`, `irda-state` | Show the endpoint, `off` or `pty\|tcp\|unix ENDPOINT connected\|waiting`, for the modem `modem idle\|dialling\|online 33600`, or for the phone `phone idle\|linked\|dialling\|online 33600`. |
+| `modem-sync off\|pty\|tcp:PORT\|unix:PATH` | Set the modem's HotSync link and show it. |
+| `serial-state`, `irda-state` | Show the endpoint, `off` or `pty\|tcp\|unix ENDPOINT connected\|waiting`, for the modem `modem idle\|dialling\|online 33600` (then `; hotsync` and the HotSync link while it's on), or for the phone `phone idle\|linked\|dialling\|online 33600`. |
 | `hotsync` | Press and release the cradle's HotSync button. |
 | `backlight-state` | `backlight: on` or `off`. |
 | `speed original\|uncapped` | Set the speed. |
@@ -583,7 +586,7 @@ Read from standard input, one per line, unless `--desktop-socket` is used. Paths
 
 ### Control socket
 
-The framing, the replies and the events are the same as for `frond`. `frond-68k` answers these: `device-state`, `guest-ready`, `replay-state`, `input-replay`, `save`, `install`, `export`, `export-db`, `db-list`, `launch-app`, `reset`, `hard-reset`, `quit`, `serial-state`, `serial-mode`, `irda-state`, `irda-mode`, `irda-stats`, `serial-stats`, `speed-state`, `display` (`contrast=` and `smooth=`), `sound-state`, `sound-mode`, `audio-on`, `audio-off`, and the IIIx's own `hotsync`, `speed` (`original` or `uncapped`), `backlight-state` and `gdb-start`, `gdb-stop`, `gdb-state`. `guest-ready` and the commands that need Palm OS answer `not-ready` until the UI is up. `install`, `export`, `export-db`, `db-list` and `launch-app` wait for the app's event loop as on the console, holding back later requests, and answer `not-ready` with the reason if it doesn't come. `window-id` is answered as on `frond`. Events are `ready`, `close`, `shortcut`, `serial` and `infrared`.
+The framing, the replies and the events are the same as for `frond`. `frond-68k` answers these: `device-state`, `guest-ready`, `replay-state`, `input-replay`, `save`, `install`, `export`, `export-db`, `db-list`, `launch-app`, `reset`, `hard-reset`, `quit`, `serial-state`, `serial-mode`, `irda-state`, `irda-mode`, `irda-stats`, `serial-stats`, `modem-sync`, `speed-state`, `display` (`contrast=` and `smooth=`), `sound-state`, `sound-mode`, `audio-on`, `audio-off`, and the IIIx's own `hotsync`, `speed` (`original` or `uncapped`), `backlight-state` and `gdb-start`, `gdb-stop`, `gdb-state`. `guest-ready` and the commands that need Palm OS answer `not-ready` until the UI is up. `install`, `export`, `export-db`, `db-list` and `launch-app` wait for the app's event loop as on the console, holding back later requests, and answer `not-ready` with the reason if it doesn't come. `window-id` is answered as on `frond`. Events are `ready`, `close`, `shortcut`, `serial` and `infrared`.
 
 What a IIIx doesn't have answers as absent to the state queries the desktop asks every device (`network-state` `disabled`, `hold-state` `unavailable`, `keyboard-state` `detached`, `usb-state` `off`, `sd-state` `none`, `microphone-state` and `microphone-epoch` `off` and `0`) and with `unsupported` to the rest: `usb-mode`, `bluetooth-state`, `bluetooth-mode`, `hold`, `keyboard-attach`, `keyboard-key`, `microphone-mode`, `network-mode` (other than `disabled`), `guest-orientation`, `rotate`, `replay-snapshots`, `sd-*` and `ms-*`. `make test-core-control` runs the same requests against both cores.
 
@@ -621,12 +624,12 @@ The snap-on modem (`modem` capability, IIIx) and the infrared phone (`irPhone` c
 
 | What | Value |
 |---|---|
-| Flags | `--serial modem`, `--irda phone` |
+| Flags | `--serial modem`, `--irda phone`, `--modem-sync` (the desktop passes `pty` for every `modem` device) |
 | Console and control | `serial-mode modem`, `irda-mode phone`; `unsupported` on other devices, and for the phone on a 68k ROM before Palm OS 3.3 |
 | Settings values | `serial` `modem`, `infrared` `phone` |
-| `serial-state` | `modem idle\|dialling\|online 33600` |
+| `serial-state` | `modem idle\|dialling\|online 33600`, then `; hotsync pty PATH connected\|waiting` (or tcp, unix) with a HotSync link |
 | `irda-state` | `phone idle\|linked\|dialling\|online 33600` |
-| Desktop text | "Modem: idle", "Modem: dialling", "Modem: online at 33600", and the same with "Mobile phone:" ("linked" too) |
+| Desktop text | "Modem: idle", "Modem: dialling", "Modem: online at 33600", each with ", HotSync on PATH", and the same with "Mobile phone:" ("linked" too) |
 | Exclusive | The phone and the infrared keyboard refuse each other; the desktop greys the keyboard while the phone is on |
 
 The line is 33600. The guest is 10.0.2.15, the router 10.0.2.2 and DNS 10.0.2.3, with slirp behind it. PPP is async HDLC with LCP, PAP accepted if sent, and IPCP with DNS. A `login:` and `Password:` prompt comes first that takes any line, and the first 0x7e starts PPP, so the Unix template and Windows RAS both work. On Android DNS comes from `HostDns`, started by `FrondActivity`, which `Frond68kActivity` extends.
@@ -649,6 +652,8 @@ AT commands (`HayesModem`):
 | `+++` | Escape after a guard time (S12 in 20 ms steps) on guest time, then `ATO` or `ATH0` |
 
 Results: OK, CONNECT 33600, NO CARRIER, ERROR, NO DIALTONE, BUSY, NO ANSWER. Unknown letters give OK. Turning the serial line driver off powers the modem down: it hangs up and resets.
+
+HotSync by modem: each dial picks the far end in `LineSwitch` (`src/common/modem/LineSwitch.h`). A number whose digits end in 4687962 (`kHotSyncNumber`, HOTSYNC on a keypad, so a dial prefix still works) goes to a `PipeLine`, whose raw bytes the transport passes to the `--modem-sync` link both ways; with that link off it gives NO ANSWER. When a TCP or Unix client, or a PTY's reader, that was there during the call goes away, the modem gives NO CARRIER. Every other number goes to the PPP server, where Network HotSync reaches `pilot-xfer -p net:127.0.0.1` through slirp at 10.0.2.2 (TCP 14238). The Palm first sends a UDP wakeup (0xfade, type 1) to 14237 and connects only once it comes back as type 2; pilot-link has no UDP side, so `SlirpIp` answers a wakeup to 10.0.2.2 itself and doesn't pass it on.
 
 Dial plan: the default plan is empty, so every number connects. `HayesModem::Options::dialPlan` maps dialled digit strings to BUSY, NO ANSWER, NO DIALTONE or NO CARRIER for tests. An empty number gives NO CARRIER.
 

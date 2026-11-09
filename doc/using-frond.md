@@ -310,6 +310,13 @@ The Palm IIIx has a snap-on modem on its serial port. Set Serial port to Modem i
 
 Disconnect hangs up. Saving while online and loading it again gives NO CARRIER, so connect again. The guest is 10.0.2.15, the router 10.0.2.2 and DNS 10.0.2.3.
 
+### HotSync by modem
+
+On Linux the modem can HotSync with pilot-link two ways. The state line shows the PTY for the first, for example "Modem: idle, HotSync on /dev/pts/5".
+
+- Modem Sync to a number: dial 4687962 (HOTSYNC on a keypad) and the call goes straight to that PTY. Run `pilot-xfer -p /dev/pts/5 -l` (or another pilot-link command), then in the HotSync app tap Modem, enter 4687962 as the phone number, keep Palm Modem US/Canada and tap the HotSync button. With a dial prefix like `9,` it still works.
+- Network HotSync: set up a dial-up connection as above. In the HotSync app open Menu, Primary PC Setup and enter 10.0.2.2 as the Primary PC Address and any name (a Modem Sync with `pilot-install-netsync -p /dev/pts/5 -e -n frond -a 10.0.2.2` sets the same). Then tap Modem, Menu, Modem Sync Prefs, Network, then Select Service and pick your Network service. Run `pilot-xfer -p net:127.0.0.1 -l` and tap the HotSync button: the Palm dials the service and reaches pilot-link through 10.0.2.2.
+
 ### Mobile phone over infrared
 
 Devices with an infrared phone can use Mobile phone in the Infrared list (Linux, and Android in Machine settings and the Connections sheet) instead of Off or a connection. Frond then plays a phone with a modem, reached over IrCOMM, and the Palm gets the same internet as with the dial-up modem. Detach the infrared keyboard first, as they share the port. Mobile phone needs Palm OS 3.3 or later.

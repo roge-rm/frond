@@ -1831,6 +1831,8 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     runningDevice = startDevice == frondFirmware::Device::automatic ? frondFirmware::Device::tx : startDevice;
     loadSerialSettings(); loadUsbSettings(); loadIrdaSettings(); loadBluetoothSettings();
     if (caps.serial && serialArgument() != "off") arguments << "--serial" << serialArgument();
+    // A PTY for Modem Sync calls to the HotSync number, there whenever the modem is picked.
+    if (caps.modem) arguments << "--modem-sync" << "pty";
     if (caps.usb && usbArgument() != "off") arguments << "--usb" << usbArgument();
     if(caps.infrared && irdaArgument()!="off")arguments << "--irda" << irdaArgument();
     // This Frond and connections start off: the hub listens first, then bluetooth-mode points the core at it.
@@ -2126,9 +2128,15 @@ void MainWindow::showSerial(const QString& state) {
     }
     if (state.isEmpty()) serialState->clear();
     else if (parts[0] == "off") serialState->setText(parts.size() > 1 ? tr("Serial: off, %1").arg(state.mid(4)) : QString());
-    else if (parts[0] == "modem" && parts.size() > 1)
-        serialState->setText(parts[1] == "online" && parts.size() > 2 ? tr("Modem: online at %1").arg(parts[2])
-                             : parts[1] == "dialling" ? tr("Modem: dialling") : tr("Modem: idle"));
+    else if (parts[0] == "modem" && parts.size() > 1) {
+        // "modem STATE [SPEED]; hotsync pty /dev/pts/N connected|waiting" with a HotSync link.
+        const auto modem = state.section("; ", 0, 0).split(' ');
+        const auto sync = state.section("; hotsync ", 1).split(' ');
+        auto text = modem.value(1) == "online" && modem.size() > 2 ? tr("Modem: online at %1").arg(modem[2])
+                    : modem.value(1) == "dialling" ? tr("Modem: dialling") : tr("Modem: idle");
+        if (sync.size() > 1) text = tr("%1, HotSync on %2").arg(text, sync[1]);
+        serialState->setText(text);
+    }
     else if (parts.size() == 3)
         serialState->setText(tr("Serial: %1, %2").arg(parts[1], parts[2] == "connected" ? tr("connected") : tr("waiting for a connection")));
     else serialState->setText(tr("Serial: %1").arg(state));
