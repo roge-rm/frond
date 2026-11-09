@@ -1,0 +1,149 @@
+--- a/src/uarm/uarm/imx1_graphics_engine.h
++++ b/src/uarm/uarm/imx1_graphics_engine.h
+@@ -28,6 +28,7 @@
+     bool hostDataSubmission() const { return hostData; }
+     bool keyedCopySubmission() const { return keyedCopy; }
+     bool a4Submission() const { return a4; }
++    bool copyHelperSubmission() const { return copyHelper; }
+     uint32_t submissionBegin() const { return previousProducer; }
+     void start(uint64_t ticks) {
+         if (previousProducer != writePointer) pending.push_back({writePointer, ticks});
+@@ -79,6 +80,7 @@
+                 hostData = pc == 0x200ac300;
+                 keyedCopy = pc == 0x200aa504;
+                 a4 = pc == 0x200a9a9c;
++                copyHelper = pc == 0x200a9ed4;
+                 writePointer = value;
+             } else value = writePointer;
+             return A::ok;
+@@ -163,7 +165,7 @@
+     uint32_t clipRight = 0, clipBottom = 0;
+     uint32_t ringStage = 0, ringBase = 0, ringBaseTag = 0, ringExponent = 0;
+     uint32_t readPointer = 0, writePointer = 0, scratch = 0;
+-    bool ringEnabled = false, hostData = false, keyedCopy = false, a4 = false;
++    bool ringEnabled = false, hostData = false, keyedCopy = false, a4 = false, copyHelper = false;
+     uint32_t previousProducer = 0;
+     struct Batch { uint32_t end; uint64_t remaining; };
+     std::vector<Batch> pending;
+--- a/src/uarm/uarm/imx1_graphics_commands.h
++++ b/src/uarm/uarm/imx1_graphics_commands.h
+@@ -45,7 +45,7 @@
+             --left;
+             return true;
+         };
+-        uint32_t header, hostPackets = 0, copyPackets = 0, a4Packets = 0;
++        uint32_t header, hostPackets = 0, copyPackets = 0, plainPackets = 0, a4Packets = 0;
+         while (left) {
+             if (!take(header)) return A::sequence;
+             uint32_t first, second;
+@@ -62,16 +62,22 @@
+                 if (status != A::ok) return status;
+                 ticks += uint64_t(fill.width) * fill.height;
+                 fills.push_back(std::move(fill));
+-            } else if (header == 0xc0051c00) {
+-                if (!engine.keyedCopySubmission() || ++copyPackets != 1) return A::sideEffect;
+-                uint32_t control, sourceKey, destinationKey, sourceXY;
+-                if (!take(control) || !take(sourceKey) || !take(destinationKey) ||
+-                    !take(sourceXY) || !take(first) || !take(second)) return A::sequence;
+-                if (left || control != 0x01000005 || sourceKey > 0xffff || destinationKey ||
++            } else if (header == 0xc0051c00 || header == 0xc0021b00) {
++                const bool plain = header == 0xc0021b00;
++                if (plain ? (!engine.copyHelperSubmission() || !fills.empty() || ++plainPackets != 1) :
++                            (!engine.keyedCopySubmission() || ++copyPackets != 1)) return A::sideEffect;
++                uint32_t sourceKey = 0, sourceXY;
++                if (!plain) {
++                    uint32_t control, destinationKey;
++                    if (!take(control) || !take(sourceKey) || !take(destinationKey)) return A::sequence;
++                    if (control != 0x01000005 || sourceKey > 0xffff || destinationKey) return A::sideEffect;
++                }
++                if (!take(sourceXY) || !take(first) || !take(second)) return A::sequence;
++                if (left ||
+                     !known[0x48f] || values[0x48f] != 0xffffffff || values[0x490] != 0xffffffff)
+                     return A::sideEffect;
+                 Fill fill{};
+-                const auto status = rectangle(configuration, eim, memory, first, second, fill, false, true);
++                const auto status = rectangle(configuration, eim, memory, first, second, fill, false, true, false, plain);
+                 if (status != A::ok) return status;
+                 const uint32_t x = sourceXY >> 16, y = sourceXY & 0xffff;
+                 const uint32_t width = second >> 16, height = second & 0xffff;
+@@ -85,7 +91,8 @@
+                     !memory.contains(configuration, eim, uint32_t(address), length)) return A::sequence;
+                 fill.sourcePitch = pitch * 2;
+                 fill.sourceBase = uint32_t(address + uint64_t(fill.sourceY) * fill.sourcePitch + fill.sourceX * 2);
+-                fill.keyed = true;
++                fill.keyed = !plain;
++                fill.plain = plain;
+                 fill.colour = sourceKey;
+                 // Overlapping ranges need direction rules that this producer has not qualified.
+                 const uint64_t destinationLength = fill.height ? uint64_t(fill.height - 1) * fill.pitch + fill.width * 2 : 0;
+@@ -133,7 +140,8 @@
+         }
+         if ((engine.hostDataSubmission() && hostPackets != 1) ||
+             (engine.keyedCopySubmission() && copyPackets != 1) ||
+-            (engine.a4Submission() && a4Packets != 1)) return A::sideEffect;
++            (engine.a4Submission() && a4Packets != 1) ||
++            (values[0x41b] == 0x5598b4df && plainPackets != 1)) return A::sideEffect;
+         batch.option = values[0x4a0];
+         queuedWords += batch.words;
+         batches.push_back(std::move(batch));
+@@ -152,17 +160,17 @@
+                 const uint64_t destinationLength = fill.height ? uint64_t(fill.height - 1) * fill.pitch + fill.width * 2 : 0;
+                 const uint64_t sourceLength = fill.height ? uint64_t(fill.height - 1) * fill.sourcePitch + fill.width * 2 : 0;
+                 if (destinationLength && ((fill.base & 1) || !memory.contains(configuration, eim, fill.base, destinationLength) ||
+-                    ((fill.keyed || fill.a4) && !memory.contains(configuration, eim, fill.sourceBase, sourceLength)))) return A::sequence;
++                    ((fill.keyed || fill.plain || fill.a4) && !memory.contains(configuration, eim, fill.sourceBase, sourceLength)))) return A::sequence;
+             }
+             for (const auto& fill : batch.fills) {
+                 for (uint32_t y = 0; y < fill.height; ++y)
+                     for (uint32_t x = 0; x < fill.width; ++x) {
+                         uint32_t colour = fill.pixels.empty() ? fill.colour : fill.pixels[size_t(y) * fill.width + x];
+-                        if (fill.keyed) {
++                        if (fill.keyed || fill.plain) {
+                             const auto status = memory.accessGpu(configuration, eim,
+                                 fill.sourceBase + y * fill.sourcePitch + x * 2, 2, false, colour);
+                             if (status != A::ok) return status;
+-                            if (colour == fill.colour) continue;
++                            if (fill.keyed && colour == fill.colour) continue;
+                         }
+                         if (fill.a4) {
+                             uint32_t source = 0, destination = 0;
+@@ -187,7 +195,7 @@
+     struct Fill {
+         uint32_t base = 0, pitch = 0, width = 0, height = 0, colour = 0, sourceX = 0, sourceY = 0;
+         uint32_t sourceBase = 0, sourcePitch = 0;
+-        bool keyed = false, a4 = false;
++        bool keyed = false, plain = false, a4 = false;
+         std::vector<uint16_t> pixels;
+     };
+     struct Batch {
+@@ -203,7 +211,7 @@
+         known[reg] = true;
+         // GMC selects the same source and ROP fields as DP_MIX in the native helpers.
+         if (reg == 0x41b && known[0x4b2] &&
+-            (value == 0x5798b4df || value == 0x4598b4df || value == 0x55e0b4df || value == 0xd798d4df))
++            (value == 0x5798b4df || value == 0x4598b4df || value == 0x55e0b4df || value == 0xd798d4df || value == 0x5598b4df))
+             values[0x4b2] = (values[0x4b2] & ~0x01ff0700u) |
+                 ((value >> 1) & 0x00ff0000u) | ((value >> 17) & 0x700u) | ((value >> 7) & 0x01000000u);
+         return true;
+@@ -243,7 +251,7 @@
+         return A::ok;
+     }
+     Imx1BootstrapAccess rectangle(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim,
+-                                   const Imx1GraphicsMemory& memory, uint32_t xy, uint32_t wh, Fill& fill, bool host, bool copy = false, bool a4 = false) const {
++                                   const Imx1GraphicsMemory& memory, uint32_t xy, uint32_t wh, Fill& fill, bool host, bool copy = false, bool a4 = false, bool plain = false) const {
+         using A = Imx1BootstrapAccess;
+         for (auto reg : registers) if (reg != 0x48f &&
+             (a4 || (reg != 0x418 && reg != 0x419 && reg != 0x420 && reg != 0x421 && reg != 0x416)) && !known[reg]) return A::sequence;
+@@ -251,9 +259,11 @@
+         // Host SRCCOPY is limited to the observed native RGB565 control words.
+         if (host && !a4 && (gmc != 0x5798b4df || values[0x4b2] != 0x00cc0b00 ||
+                      values[0x4b1] != 0x40030d04 || values[0x472] != 0x3f)) return A::sideEffect;
+-        if (copy && (gmc != 0x4598b4df || values[0x4b2] != 0x00cc0a00 ||
++        if (copy && (gmc != (plain ? 0x5598b4dfu : 0x4598b4dfu) || values[0x4b2] != 0x00cc0a00 ||
+                      values[0x4b1] != 0x40030d04 || values[0x472] != 0x3f ||
+                      values[0x471] != 0x1fff1fff)) return A::sideEffect;
++        if (plain && (values[0x491] || values[0x4b3] != 0xffffffff || values[0x41d] ||
++                      values[0x41e] || values[0x30f] != 0x20)) return A::sideEffect;
+         // Only native solid PATCOPY in RGB565, without transforms or blending.
+         if (!host && !copy && (((gmc >> 4) & 15) != 13 || ((gmc >> 8) & 15) != 4 ||
+             ((gmc >> 17) & 255) != 0xf0 || !(gmc & (1u << 28)) ||

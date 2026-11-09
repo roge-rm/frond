@@ -1807,6 +1807,14 @@ test-zodiac-graphics-a4: build/zodiac-boot-probe
 	./build/test-zodiac-graphics-a4
 	python3 tests/zodiac-graphics-a4.py
 
+.PHONY: test-zodiac-graphics-plain-copy
+test-zodiac-graphics-plain-copy: build/zodiac-boot-probe
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Ibuild/source/src/uarm/uarm tests/zodiac-graphics-plain-copy.cpp \
+		build/source/src/uarm/uarm/imx1_eim.cpp -o build/test-zodiac-graphics-plain-copy
+	./build/test-zodiac-graphics-plain-copy
+	python3 tests/zodiac-graphics-plain-copy.py
+
 .PHONY: test-zodiac-graphics-display
 test-zodiac-graphics-display: build/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
