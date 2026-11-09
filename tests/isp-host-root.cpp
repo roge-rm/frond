@@ -17,8 +17,13 @@ static std::vector<uint8> save(Isp& i){Savestate<ChunkType>s;assert(s.Save(i));a
 static bool load(Isp&i,std::vector<uint8>s){SavestateLoader<ChunkType>l;return l.Load(s.data(),s.size(),i);}
 int main(){
  Isp i;
+ // ClearSuspendStatus has no effect while the port is not suspended.
+ for(auto command : {0x95,0x96}) {
+  auto before=i.get(command&0x7f);i.reg(command,8);assert(i.get(command&0x7f)==before);
+ }
  i.SetHostConnection(0,true);assert(!(i.get(0x15)&1));
  i.reg(0x94,0x10000);assert((i.get(0x15)&0x10101)==0x10101);
+ auto active=i.get(0x15);i.reg(0x95,8);assert(i.get(0x15)==active);
  assert(i.get(3)&0x40);assert(!i.HostInterruptPending());
  i.reg(0x84,0x80000040);i.reg(0xa5,0x10);assert(!i.HostInterruptPending());
  i.reg(0xa0,1);assert(i.HostInterruptPending());
