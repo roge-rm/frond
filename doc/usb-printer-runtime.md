@@ -1,6 +1,6 @@
 # Staged native raw printer
 
-Dana's native console accepts `printer attach on`, `printer begin`, `printer status`, `printer finish /absolute/unique.raw`, `printer abort` and `printer attach off`. The desktop socket accepts command `printer` with the same action and argument text. These are experimental runtime controls. Printer availability stays false and the HC physical interrupt is unconnected.
+Dana's native console accepts `printer attach on`, `printer begin`, `printer status`, `printer finish /absolute/unique.raw`, `printer abort` and `printer attach off`. The desktop socket accepts command `printer` with the same action and argument text. These are experimental runtime controls. Printer availability stays false. The HC level interrupt uses IRQ3/PD6, inferred from Dana firmware; the board net has not been measured.
 
 Attach the synthetic leaf, let the guest configure it, then explicitly begin a job. Only finish publishes bytes. Packet ends, idle and disconnect do not finish. Output is binary exact, bounded to 16 MiB. Paths are absolute, at most 4096 bytes with components at most 255 bytes, without symlink directories or dot components. The existing parent directory is required. Files are private (0600), destinations never overwrite. Choose a new external destination identity for every job. No host printer is dispatched.
 
@@ -8,4 +8,4 @@ Reset, port loss, detach, successful controller load, bank teardown and shutdown
 
 Finish consumes the spool on success or failure. Write, file flush, close and publication errors are reported. Publication uses a private random staging name and an atomic no-overwrite hard link in the destination directory. Parent-directory flush failure after publication returns uncertain and retains the complete destination. Do not automatically retry an uncertain result. A crash before publication may leave a private staging file; a crash after publication may leave a complete destination with uncertain durability. Inspect it before deciding what to submit again. This is no persistent ledger or exactly-once guarantee across restart or arbitrary guest resubmission. A unique destination blocks overwriting that path, it does not recognise equivalent jobs submitted under another name.
 
-No printer language, pages, PDF or working guest printing is qualified here. Physical HC IRQ investigation and bounded guest-language/job-boundary qualification remain separate work. Infrared printing and Wi-Fi remain separate.
+No printer language, pages, PDF or working guest printing is qualified here. Bounded guest-language/job-boundary qualification remains open. Infrared printing and Wi-Fi remain separate.

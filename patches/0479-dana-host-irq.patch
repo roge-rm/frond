@@ -1,0 +1,137 @@
+--- a/src/cloudpilot/emulator/EmDevice.cpp
++++ b/src/cloudpilot/emulator/EmDevice.cpp
+@@ -1111,6 +1111,7 @@
+         case kDeviceDana: {
+             auto* board=new EmRegsVZDana;
+             auto* isp=new EmRegsISPDana;
++            isp->SetHostIrq([board](bool high) { board->SetHcIrqPin(high); });
+             isp->SetDeviceIrq([board](bool high) { board->SetDcIrqPin(high); });
+             EmBankRegs::AddSubBank(board);
+             EmBankRegs::AddSubBank(isp);
+--- a/src/cloudpilot/emulator/hardware/EmRegsISPDana.h
++++ b/src/cloudpilot/emulator/hardware/EmRegsISPDana.h
+@@ -36,8 +36,9 @@
+     static bool DecodeHostPtd(const uint8*, unsigned, unsigned, HostPtd&);
+     static bool CompleteHostPtd(uint8*, unsigned, unsigned, uint16, uint8, bool);
+     static bool ValidateHostList(const uint8*, unsigned);
+-    // Logical HC request only; no Dana board interrupt route is established.
++    // HC logical request and level-mode pin output.
+     bool HostInterruptPending();
++    void SetHostIrq(std::function<void(bool)> sink) { hostIrqSink=std::move(sink); RefreshHostInterrupt(); }
+     void SetHostConnection(unsigned port, bool attached, bool lowSpeed=false);
+     struct HostPacket {
+         uint8 address, endpoint, direction;
+@@ -83,7 +84,7 @@
+     template <typename T> void CancellationFields(T&);
+     bool allocated=false, setupPending=false, vbus=false, deviceEnabled=false;
+     uint16 effectiveAddress=0;
+-    std::function<void(bool)> irqSink;
++    std::function<void(bool)> irqSink, hostIrqSink;
+     void RefreshIrq();
+     void Transaction(unsigned, uint16);
+     void DeviceCommand(uint16);
+--- a/src/cloudpilot/emulator/hardware/EmRegsISPDana.cpp
++++ b/src/cloudpilot/emulator/hardware/EmRegsISPDana.cpp
+@@ -28,10 +28,13 @@
+     hostAttached={}; hostLowSpeed={}; portResetCycles={};
+     hostRam.fill(0); hostCursor=0;
+     ResetDevice();
++    RefreshHostInterrupt();
+ }
+ void EmRegsISPDana::RefreshHostInterrupt() {
+     if ((regs[0x15]|regs[0x16])&0x1f0000) regs[3]|=0x40;
+     if ((regs[4]&0x80000000) && (regs[3]&regs[4]&0x7f)) regs[0x24]|=0x10;
++    bool active=(regs[0x20]&1) && (regs[0x24]&regs[0x25]&0x77);
++    if(hostIrqSink) hostIrqSink(active ? bool(regs[0x20]&4) : !bool(regs[0x20]&4));
+ }
+ bool EmRegsISPDana::HostInterruptPending() {
+     Tick(); RefreshHostInterrupt();
+@@ -189,7 +192,9 @@
+             }
+             break;
+         }
+-        case 0xa0: regs[0x20] = (value & 0x1fe7) | 8; break;
++        case 0xa0:
++            if(value&2) throw std::runtime_error("ISP HC edge interrupt unsupported");
++            regs[0x20] = (value & 0x1fe7) | 8; break;
+         case 0xa2:
+             if(value>4096) throw std::runtime_error("ISP invalid transfer count");
+             regs[0x22]=value; hostCursor=0; break;
+@@ -348,6 +353,7 @@
+     auto before=std::make_tuple(lastCycle,fractional,resetCycles,regs,command,word,latch,dcEndpoints,dcAddress,dcCommand,dcMode,dcHardware,dcScratch,dcUnlocked,dcSuspended,dcInterrupt,dcInterruptEnable,dcLatch,dcWord,fifo,configNext,cursor,allocated,setupPending,effectiveAddress,vbus,deviceEnabled,flushed,accessCancelled,hostRam,hostCursor,portResetCycles);
+     bool invalid=false;
+     LoadChunkHelper h(*c); StateFields(h);
++    if(regs[0x20]&2) invalid=true;
+     dcAddress=0; dcEndpoints.fill(0); dcEndpoints[0]=0x83; dcEndpoints[1]=0xc3;
+     fifo={}; configNext=cursor=0; allocated=setupPending=false; effectiveAddress=0; deviceEnabled=false;
+     if(version>=3) {
+--- a/src/cloudpilot/emulator/hardware/EmRegsVZDana.h
++++ b/src/cloudpilot/emulator/hardware/EmRegsVZDana.h
+@@ -43,7 +43,7 @@
+     unsigned heldCount=0, queueHead=0, queueCount=0;
+     void QueueKeys();
+     unsigned packetIndex=0;
+-    bool dcIrqHigh=true;
++    bool dcIrqHigh=true, hcIrqHigh=true;
+     bool keysDirty=false, irqPinHigh=true, irqLatched=false;
+     void UpdateStIrq();
+     void StIntControlWrite(emuptr,int,uint32);
+@@ -70,6 +70,7 @@
+     void SoundClockWrite(emuptr, int, uint32);
+     void SoundMuxWrite(emuptr, int, uint32);
+    public:
++    void SetHcIrqPin(bool high) { auto old=hcIrqHigh; hcIrqHigh=high; UpdateIRQ3(old ? 0x40 : 0); }
+     void SetDcIrqPin(bool high) { auto old=dcIrqHigh; dcIrqHigh=high; UpdateIRQ2(old ? 0x20 : 0); }
+     bool SetVirtualAnalogueInputs(uint16 mainBattery, uint16 supply, bool packDetectHigh) {
+         if(mainBattery>4095 || supply>4095) return false;
+--- a/src/cloudpilot/emulator/hardware/EmRegsVZDana.cpp
++++ b/src/cloudpilot/emulator/hardware/EmRegsVZDana.cpp
+@@ -30,7 +30,7 @@
+ }
+ 
+ uint8 EmRegsVZDana::GetPortInputValue(int port) {
+-    if(port=='D') return (EmRegsVZ::GetPortInputValue(port)&~0x20) | (dcIrqHigh?0x20:0);
++    if(port=='D') return (EmRegsVZ::GetPortInputValue(port)&~0x60) | (dcIrqHigh?0x20:0) | (hcIrqHigh?0x40:0);
+     if(port=='J') return EmRegsVZ::GetPortInputValue(port) | 2; // MISO is ready between SPI transfers.
+     if (port=='G') return (EmRegsVZ::GetPortInputValue(port)&~2) | (adc.packDetectHigh ? 2 : 0);
+     if(port=='F') {
+@@ -205,7 +205,7 @@
+         }
+         return true;
+     };
+-    UpdateIRQ2(dcIrqHigh?0x20:0);
++    UpdateIRQ2(dcIrqHigh?0x20:0); UpdateIRQ3(hcIrqHigh?0x40:0);
+     if(!valid(presentedScan)) l.NotifyError();
+     if(!valid(heldScan)) l.NotifyError();
+     for(auto& packet:packets) if(!valid(packet)) l.NotifyError();
+@@ -226,6 +226,7 @@
+     std::memset(heldScan,0,sizeof heldScan); std::memset(packets,0,sizeof packets); packetIndex=0; keysDirty=false; irqPinHigh=true; irqLatched=false; UpdateStIrq();
+     adc=AnalogueInputs();
+     SetDcIrqPin(true);
++    SetHcIrqPin(true);
+ }
+ 
+ bool EmRegsVZDana::DispatchDanaInput(const std::vector<DanaTransition5>& batch) {
+@@ -353,17 +354,17 @@
+     UpdateInterrupts();
+ }
+ void EmRegsVZDana::StIntControlWrite(emuptr a,int size,uint32 value) {
+-    // Dana's DC route supports the level mode used by its ROM.
++    // Both ISP routes support the level mode used by the ROM.
+     if(a<=0xfffff302 && a+size>0xfffff302 &&
+-       ((value >> (8*(a+size-0xfffff303)))&4))
+-        throw std::runtime_error("Dana DC edge IRQ2 unsupported");
+-    StdWrite(a,size,value); UpdateStIrq(); UpdateIRQ2(dcIrqHigh?0x20:0);
++       ((value >> (8*(a+size-0xfffff303)))&6))
++        throw std::runtime_error("Dana ISP edge interrupt unsupported");
++    StdWrite(a,size,value); UpdateStIrq(); UpdateIRQ2(dcIrqHigh?0x20:0); UpdateIRQ3(hcIrqHigh?0x40:0);
+ }
+ void EmRegsVZDana::StIntStatusWrite(emuptr a,int size,uint32 value) {
+     uint32 clear=size==4 ? value>>16 : value;
+     if(size==1 && a==0xfffff30c)clear=0;
+     if((StdRead(0xfffff302,2)&0x0800) && (clear&1))irqLatched=false;
+-    intStatusHiWrite(a,size,value); UpdateStIrq(); UpdateIRQ2(dcIrqHigh?0x20:0);
++    intStatusHiWrite(a,size,value); UpdateStIrq(); UpdateIRQ2(dcIrqHigh?0x20:0); UpdateIRQ3(hcIrqHigh?0x40:0);
+ }
+ 
+ uint64 EmRegsVZDana::InputCycle() const { return gCPU68K ? gCPU68K->CycleNow() : 0; }
