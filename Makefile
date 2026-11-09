@@ -1457,6 +1457,14 @@ test-raw-print-job:
 	$(CXX) -std=c++17 -O2 -Wall -Wextra -Werror -I$(RAW_PRINT_SOURCE)/src/common tests/raw-print-job.cpp -o $(RAW_PRINT_BUILD)/test-raw-print-job
 	$(RAW_PRINT_BUILD)/test-raw-print-job
 
+.PHONY: test-raw-print-file
+RAW_PRINT_FILE_BUILD ?= build/raw-print-file
+test-raw-print-file:
+	python3 tools/prepare.py --destination $(RAW_PRINT_FILE_BUILD)/source
+	$(CXX) -std=c++17 -O2 -Wall -Wextra -Werror -I$(RAW_PRINT_FILE_BUILD)/source/src/common tests/raw-print-file.cpp -Wl,--wrap=write,--wrap=unlinkat -o $(RAW_PRINT_FILE_BUILD)/test-raw-print-file
+	mkdir -p $(RAW_PRINT_FILE_BUILD)/output
+	$(RAW_PRINT_FILE_BUILD)/test-raw-print-file $(abspath $(RAW_PRINT_FILE_BUILD)/output)
+
 ISP_HOST_AREA ?= $(CURDIR)/build/isp-host-pio
 .PHONY: test-isp-host-pio
 test-isp-host-pio:
