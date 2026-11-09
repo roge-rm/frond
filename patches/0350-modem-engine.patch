@@ -1,0 +1,1587 @@
+diff --git a/src/common/Makefile b/src/common/Makefile
+index 56bd09b..2c2fef0 100644
+--- a/src/common/Makefile
++++ b/src/common/Makefile
+@@ -24,7 +24,9 @@ SOURCE_CXX = 						\
+ 	session/rle.cpp					\
+ 	session/session_file5.cpp		\
+ 	savestate/Chunk.cpp				\
+-	savestate/ChunkProbe.cpp
++	savestate/ChunkProbe.cpp		\
++	modem/HayesModem.cpp			\
++	modem/PppServer.cpp
+ 
+ SOURCE_C_NATIVE = $(SOURCE_C)
+ SOURCE_CXX_NATIVE = 				\
+@@ -51,6 +53,10 @@ SOURCE_CXX_TEST = 					\
+ 	test/main.cpp
+ 
+ LIBRARY_NATIVE = libcommon.a
++# libslirp behind PPP, a library of its own so only the cores link libslirp.
++LIBRARY_NET = libcommon-net.a
++OBJECTS_NET = $(BUILDDIR_NATIVE)/net/SlirpIp.o
++GARBAGE_EXTRA = $(LIBRARY_NET)
+ LIBRARY_EMCC = libcommon-wasm.a
+ BINARY_TEST = test/test
+ 
+@@ -58,9 +64,17 @@ include ../Makefile.common
+ 
+ bin: $(LIBRARY_NATIVE)
+ 
++net: $(LIBRARY_NET)
++
++$(OBJECTS_NET): CXXFLAGS_NATIVE_EXTRA += $(shell pkg-config --cflags slirp)
++
++$(LIBRARY_NET): $(OBJECTS_NET)
++	$(AR_NATIVE) cru $@ $^
++	$(RANLIB_NATIVE) $@
++
+ emscripten: $(LIBRARY_EMCC)
+ 
+ test: $(BINARY_TEST)
+ 	$(BINARY_TEST)
+ 
+-.PHONY: bin emscripten clean test
+\ No newline at end of file
++.PHONY: bin net emscripten clean test
+\ No newline at end of file
+diff --git a/src/common/modem/HayesModem.cpp b/src/common/modem/HayesModem.cpp
+new file mode 100644
+index 0000000..18cbb82
+--- /dev/null
++++ b/src/common/modem/HayesModem.cpp
+@@ -0,0 +1,498 @@
++#include "HayesModem.h"
++
++#include <algorithm>
++#include <cctype>
++#include <cstdio>
++
++namespace frondModem {
++
++namespace {
++
++constexpr uint64_t second = 1000000000ull;
++constexpr uint64_t millisecond = 1000000ull;
++// The longest command line taken; a longer one gives ERROR.
++constexpr size_t commandLimit = 255;
++// Bytes held for the line while the guest sends faster than the line speed; more are lost.
++constexpr size_t toLineLimit = 16384;
++// Bytes from the line held for the guest; the line waits while this is full.
++constexpr size_t toGuestLimit = 256;
++// The most a direction may save up between services, in bytes.
++constexpr double paceBurst = 128;
++
++const char* ResultText(HayesModem::Result result) {
++    switch (result) {
++        case HayesModem::Result::Ok: return "OK";
++        case HayesModem::Result::Connect: return "CONNECT";
++        case HayesModem::Result::Ring: return "RING";
++        case HayesModem::Result::NoCarrier: return "NO CARRIER";
++        case HayesModem::Result::Error: return "ERROR";
++        case HayesModem::Result::NoDialtone: return "NO DIALTONE";
++        case HayesModem::Result::Busy: return "BUSY";
++        case HayesModem::Result::NoAnswer: return "NO ANSWER";
++    }
++    return "ERROR";
++}
++
++// Reads a decimal argument at i, if there is one.
++unsigned Number(const std::string& text, size_t& i, bool* found = nullptr) {
++    unsigned value = 0;
++    bool any = false;
++    while (i < text.size() && isdigit(uint8_t(text[i]))) {
++        value = std::min(value * 10 + unsigned(text[i++] - '0'), 100000u);
++        any = true;
++    }
++    if (found) *found = any;
++    return value;
++}
++
++}  // namespace
++
++HayesModem::HayesModem(ModemLine& line) : HayesModem(line, Options{}) {}
++
++HayesModem::HayesModem(ModemLine& line, Options options) : line(line), options(std::move(options)) {
++    if (this->options.lineSpeed < 300) this->options.lineSpeed = 300;
++    Reset();
++}
++
++// Factory settings, as after AT&F or ATZ.
++void HayesModem::Reset() {
++    s.fill(0);
++    s[2] = '+';
++    s[3] = '\r';
++    s[4] = '\n';
++    s[5] = 8;
++    s[6] = 2;
++    s[7] = 50;
++    s[8] = 2;
++    s[9] = 6;
++    s[10] = 14;
++    s[11] = 95;
++    s[12] = 50;
++    echo = true;
++    quiet = false;
++    verbose = true;
++    x = 4;
++    dtrMode = 2;
++    pulse = false;
++    selected = 0;
++}
++
++void HayesModem::SetPower(bool on, uint64_t now) {
++    if (on == (state != State::Off)) return;
++    if (state == State::Online || state == State::OnlineCommand) line.HangUp();
++    Reset();
++    state = on ? State::Command : State::Off;
++    holding = false;
++    command.clear();
++    lastCommand.clear();
++    toGuest.clear();
++    toLine.clear();
++    escapes = 0;
++    previous = 0;
++    paceMark = now;
++}
++
++void HayesModem::SetDTR(bool on, uint64_t now) {
++    const bool dropped = dtr && !on;
++    dtr = on;
++    if (!dropped || state == State::Off) return;
++    switch (dtrMode) {
++        case 1:
++            if (state == State::Online) {
++                state = State::OnlineCommand;
++                escapes = 0;
++                Respond(Result::Ok);
++            }
++            break;
++        case 2:
++            if (state != State::Command || holding) EndCall(true);
++            break;
++        case 3:
++            EndCall(false);
++            Reset();
++            break;
++        default: break;
++    }
++}
++
++void HayesModem::Write(const uint8_t* data, size_t size, uint64_t now) {
++    if (state == State::Off) return;
++    for (size_t i = 0; i < size; ++i) {
++        const uint8_t byte = data[i];
++        switch (state) {
++            case State::Dialling:
++                // Any key while dialling gives up the call.
++                EndCall(true);
++                break;
++            case State::Online: OnlineByte(byte, now); break;
++            default: CommandByte(byte, now); break;
++        }
++    }
++}
++
++size_t HayesModem::Read(uint8_t* data, size_t max) {
++    const size_t n = std::min(max, toGuest.size());
++    std::copy(toGuest.begin(), toGuest.begin() + long(n), data);
++    toGuest.erase(toGuest.begin(), toGuest.begin() + long(n));
++    return n;
++}
++
++void HayesModem::Drop(uint64_t now) {
++    if (state == State::Off) return;
++    command.clear();
++    toGuest.clear();
++    if (state != State::Command || holding) EndCall(true);
++    paceMark = now;
++}
++
++void HayesModem::Service(uint64_t now) {
++    switch (state) {
++        case State::Dialling:
++            if (now < dialEnd) break;
++            if (dialStay) {
++                state = State::Command;
++                holding = true;
++                Respond(Result::Ok);
++            } else if (dialResult == Result::Connect) {
++                Connect(now);
++            } else {
++                state = State::Command;
++                holding = false;
++                Respond(dialResult);
++            }
++            break;
++        case State::Online:
++        case State::OnlineCommand:
++            line.Service(now);
++            if (!line.Carrier(now)) {
++                EndCall(true);
++                break;
++            }
++            // Three escape characters followed by the guard time give command mode.
++            if (state == State::Online && escapes == 3 && now - escapeAt >= Guard()) {
++                escapes = 0;
++                state = State::OnlineCommand;
++                Respond(Result::Ok);
++            }
++            Pace(now);
++            break;
++        default: break;
++    }
++}
++
++uint64_t HayesModem::Guard() const { return uint64_t(s[12]) * 20 * millisecond; }
++
++// Moves data each way no faster than the line speed (10 bits a byte).
++void HayesModem::Pace(uint64_t now) {
++    if (now > paceMark) {
++        const double bytes = double(now - paceMark) * options.lineSpeed / 10.0 / double(second);
++        toGuestCredit = std::min(toGuestCredit + bytes, paceBurst);
++        toLineCredit = std::min(toLineCredit + bytes, paceBurst);
++    }
++    paceMark = now;
++    if (state != State::Online) return;
++    size_t n = std::min(toLine.size(), size_t(toLineCredit));
++    if (n) {
++        std::vector<uint8_t> out(toLine.begin(), toLine.begin() + long(n));
++        toLine.erase(toLine.begin(), toLine.begin() + long(n));
++        toLineCredit -= double(n);
++        line.FromModem(out.data(), out.size(), now);
++    }
++    n = std::min(size_t(toGuestCredit), toGuestLimit - std::min(toGuestLimit, toGuest.size()));
++    if (n) {
++        uint8_t in[size_t(paceBurst)];
++        const size_t got = line.ToModem(in, std::min(n, sizeof(in)), now);
++        toGuest.insert(toGuest.end(), in, in + got);
++        toGuestCredit -= double(got);
++    }
++}
++
++void HayesModem::OnlineByte(uint8_t byte, uint64_t now) {
++    const uint64_t gap = now - lastByte;
++    lastByte = now;
++    if (byte == s[2] && s[2] < 128 && s[12] > 0) {
++        // The first needs the guard time before it, the others less than it between them.
++        if (escapes == 0 || escapes == 3 || gap >= Guard())
++            escapes = gap >= Guard() ? 1 : 0;
++        else
++            ++escapes;
++        if (escapes == 3) escapeAt = now;
++    } else {
++        escapes = 0;
++    }
++    // Escape characters are data too until the guard time after them has passed.
++    if (toLine.size() < toLineLimit) toLine.push_back(byte);
++}
++
++void HayesModem::CommandByte(uint8_t byte, uint64_t now) {
++    if (echo) toGuest.push_back(byte);
++    const uint8_t last = previous;
++    previous = byte;
++    if ((last == 'A' || last == 'a') && byte == '/' && command.size() == 1) {
++        command.clear();
++        Execute(lastCommand, now);
++        return;
++    }
++    if (byte == s[3]) {
++        if (command.size() >= 2) {
++            const std::string body = command.substr(2);
++            const bool tooLong = command.size() > commandLimit;
++            command.clear();
++            if (tooLong) {
++                Respond(Result::Error);
++            } else {
++                lastCommand = body;
++                Execute(body, now);
++            }
++        } else {
++            command.clear();
++        }
++        return;
++    }
++    if (byte == s[5]) {
++        if (!command.empty()) command.pop_back();
++        return;
++    }
++    if (byte < 32 || byte >= 127) return;
++    const char c = char(toupper(byte));
++    if (command.empty()) {
++        if (c == 'A') command = "A";
++    } else if (command.size() == 1) {
++        command = c == 'T' ? "AT" : c == 'A' ? "A" : "";
++    } else if (command.size() <= commandLimit) {
++        command.push_back(char(byte));
++    }
++}
++
++void HayesModem::Execute(const std::string& body, uint64_t now) {
++    size_t i = 0;
++    while (i < body.size()) {
++        const char c = char(toupper(uint8_t(body[i++])));
++        bool found = false;
++        switch (c) {
++            case ' ': break;
++            case 'D':
++                Dial(body.substr(i), now);
++                return;
++            case 'A':
++                // There's never an incoming call to answer.
++                Respond(Result::NoCarrier);
++                return;
++            case 'E': echo = Number(body, i) != 0; break;
++            case 'Q': quiet = Number(body, i) != 0; break;
++            case 'V': verbose = Number(body, i) != 0; break;
++            case 'X': {
++                const unsigned n = Number(body, i);
++                if (n > 4) {
++                    Respond(Result::Error);
++                    return;
++                }
++                x = n;
++                break;
++            }
++            case 'P': pulse = true; break;
++            case 'T': pulse = false; break;
++            case 'H':
++                if (Number(body, i) == 0 && (state == State::OnlineCommand || holding)) EndCall(false);
++                break;
++            case 'O':
++                Number(body, i);
++                if (state != State::OnlineCommand) {
++                    Respond(Result::NoCarrier);
++                    return;
++                }
++                state = State::Online;
++                escapes = 0;
++                lastByte = now;
++                Respond(Result::Connect);
++                return;
++            case 'Z':
++                EndCall(false);
++                Reset();
++                Respond(Result::Ok);
++                return;
++            case 'I': {
++                const unsigned n = Number(body, i);
++                Info(n == 0 ? std::to_string(options.lineSpeed) : "Frond data modem");
++                break;
++            }
++            case 'S': {
++                const unsigned n = Number(body, i, &found);
++                if (!found || n > 255) {
++                    Respond(Result::Error);
++                    return;
++                }
++                selected = n;
++                break;
++            }
++            case '=': {
++                const unsigned value = Number(body, i);
++                if (value > 255) {
++                    Respond(Result::Error);
++                    return;
++                }
++                s[selected] = uint8_t(value);
++                break;
++            }
++            case '?': {
++                char text[8];
++                snprintf(text, sizeof(text), "%03u", unsigned(s[selected]));
++                Info(text);
++                break;
++            }
++            case '&': {
++                const char what = i < body.size() ? char(toupper(uint8_t(body[i++]))) : 0;
++                const unsigned n = Number(body, i);
++                if (what == 'D') {
++                    if (n > 3) {
++                        Respond(Result::Error);
++                        return;
++                    }
++                    dtrMode = n;
++                } else if (what == 'F') {
++                    Reset();
++                } else if (!isalpha(uint8_t(what))) {
++                    Respond(Result::Error);
++                    return;
++                }
++                break;
++            }
++            case '+':
++                // Extended commands run to the next ';'.
++                while (i < body.size() && body[i] != ';') ++i;
++                if (i < body.size()) ++i;
++                break;
++            case '*':
++            case '%':
++            case '\\':
++            case '#':
++            case '-':
++            case '$':
++                // Vendor commands such as *NC22: a name and a number, taken and ignored.
++                while (i < body.size() && isalpha(uint8_t(body[i]))) ++i;
++                Number(body, i);
++                break;
++            default:
++                if (!isalpha(uint8_t(c))) {
++                    Respond(Result::Error);
++                    return;
++                }
++                // Other letters (B, C, L, M, N, W and the rest) are taken and ignored.
++                Number(body, i);
++                break;
++        }
++    }
++    Respond(Result::Ok);
++}
++
++void HayesModem::Dial(const std::string& text, uint64_t now) {
++    if (state == State::OnlineCommand) {
++        Respond(Result::Error);
++        return;
++    }
++    std::string number = text;
++    size_t start = 0;
++    while (start < number.size() && number[start] == ' ') ++start;
++    if (start < number.size() && toupper(uint8_t(number[start])) == 'L') number = lastNumber;
++    else lastNumber = number;
++
++    bool usePulse = pulse;
++    std::string digits;
++    uint64_t length = uint64_t(s[6]) * second;
++    dialStay = false;
++    for (const char raw : number) {
++        const char c = char(toupper(uint8_t(raw)));
++        if (isdigit(uint8_t(c)) || c == '*' || c == '#' || (c >= 'A' && c <= 'D')) {
++            digits.push_back(c);
++            const unsigned pulses = c == '0' ? 10 : isdigit(uint8_t(c)) ? unsigned(c - '0') : 1;
++            length += usePulse ? pulses * 100 * millisecond + 700 * millisecond : 100 * millisecond;
++        } else if (c == 'P') {
++            usePulse = true;
++        } else if (c == 'T') {
++            usePulse = false;
++        } else if (c == ',') {
++            length += uint64_t(s[8]) * second;
++        } else if (c == 'W' || c == '@') {
++            length += second;
++        } else if (c == '!') {
++            length += 500 * millisecond;
++        } else if (c == ';') {
++            dialStay = true;
++            break;
++        }
++    }
++
++    const auto planned = options.dialPlan.find(digits);
++    Result result = planned != options.dialPlan.end() ? planned->second : Result::Connect;
++    if (digits.empty() && !dialStay) result = Result::NoCarrier;
++    // X0 and X1 dial blind and can't tell busy from no answer; X2 and up hear the dial tone,
++    // X3 and up the busy tone.
++    if (result == Result::NoDialtone && (x == 0 || x == 1 || x == 3)) result = Result::NoCarrier;
++    if (result == Result::Busy && x < 3) result = Result::NoCarrier;
++    if (result == Result::NoAnswer && x == 0) result = Result::NoCarrier;
++
++    const uint64_t wait = uint64_t(s[7]) * second;
++    if (dialStay) {
++        dialEnd = now + length;
++    } else if (result == Result::NoDialtone) {
++        dialEnd = now + std::max<uint64_t>(s[6], 2) * second;
++    } else if (result == Result::Busy) {
++        dialEnd = now + length + 2 * second;
++    } else if (result == Result::Connect) {
++        dialEnd = now + length + options.handshakeNs;
++        if (dialEnd > now + wait) {
++            dialEnd = now + wait;
++            result = Result::NoCarrier;
++        }
++    } else {
++        dialEnd = now + std::max(wait, length);
++    }
++    dialResult = result;
++    holding = false;
++    state = State::Dialling;
++}
++
++void HayesModem::Connect(uint64_t now) {
++    state = State::Online;
++    holding = false;
++    toLine.clear();
++    toGuestCredit = toLineCredit = 0;
++    paceMark = now;
++    lastByte = now;
++    escapes = 0;
++    line.Answer(now);
++    Respond(Result::Connect);
++}
++
++// Back to command mode on hook, with NO CARRIER if report is set.
++void HayesModem::EndCall(bool report) {
++    if (state == State::Online || state == State::OnlineCommand) line.HangUp();
++    if (state != State::Off) state = State::Command;
++    holding = false;
++    toLine.clear();
++    escapes = 0;
++    if (report) Respond(Result::NoCarrier);
++}
++
++void HayesModem::Respond(Result result) {
++    if (quiet || state == State::Off) return;
++    if (verbose) {
++        std::string text = ResultText(result);
++        if (result == Result::Connect && x > 0) text += " " + std::to_string(options.lineSpeed);
++        Text(std::string() + char(s[3]) + char(s[4]) + text + char(s[3]) + char(s[4]));
++    } else {
++        Text(std::to_string(int(result)) + char(s[3]));
++    }
++}
++
++// Information text such as ATI and ATSn? answers; Q1 doesn't hide it.
++void HayesModem::Info(const std::string& text) {
++    if (verbose)
++        Text(std::string() + char(s[3]) + char(s[4]) + text + char(s[3]) + char(s[4]));
++    else
++        Text(text + char(s[3]) + char(s[4]));
++}
++
++void HayesModem::Text(const std::string& text) { toGuest.insert(toGuest.end(), text.begin(), text.end()); }
++
++}  // namespace frondModem
+diff --git a/src/common/modem/HayesModem.h b/src/common/modem/HayesModem.h
+new file mode 100644
+index 0000000..179c52c
+--- /dev/null
++++ b/src/common/modem/HayesModem.h
+@@ -0,0 +1,120 @@
++#ifndef FROND_HAYES_MODEM_H
++#define FROND_HAYES_MODEM_H
++
++// An external Hayes-compatible data modem on a guest serial port. The core feeds it what the
++// guest sends (Write), takes what the modem sends back (Read) and calls Service between slices.
++// A dialled call connects to a ModemLine, the far end of the phone line. Single-threaded; every
++// time is guest nanoseconds, so guard times and pacing follow the guest clock.
++
++#include <array>
++#include <cstddef>
++#include <cstdint>
++#include <deque>
++#include <map>
++#include <string>
++#include <vector>
++
++namespace frondModem {
++
++// The far end of a call.
++class ModemLine {
++   public:
++    virtual ~ModemLine() = default;
++    // The call is up and the modems have trained.
++    virtual void Answer(uint64_t now) = 0;
++    // The modem hung up.
++    virtual void HangUp() = 0;
++    // Data from the guest, already paced at the line speed.
++    virtual void FromModem(const uint8_t* data, size_t size, uint64_t now) = 0;
++    // Up to max bytes for the guest; the modem asks no faster than the line speed.
++    virtual size_t ToModem(uint8_t* data, size_t max, uint64_t now) = 0;
++    // False once the far end has hung up.
++    virtual bool Carrier(uint64_t now) const = 0;
++    virtual void Service(uint64_t now) {}
++};
++
++class HayesModem {
++   public:
++    enum class Result { Ok = 0, Connect = 1, Ring = 2, NoCarrier = 3, Error = 4, NoDialtone = 6, Busy = 7, NoAnswer = 8 };
++    enum class State { Off, Command, Dialling, Online, OnlineCommand };
++
++    struct Options {
++        // Line speed in bits a second, for CONNECT and for pacing data both ways.
++        unsigned lineSpeed = 33600;
++        // Ringing and training after the last digit, before CONNECT.
++        uint64_t handshakeNs = 6000000000ull;
++        // Dialled digits that don't connect, with what they give instead.
++        std::map<std::string, Result> dialPlan;
++    };
++
++    explicit HayesModem(ModemLine& line);
++    HayesModem(ModemLine& line, Options options);
++
++    // The serial line driver: off is an unpowered modem, which hangs up and forgets its settings.
++    void SetPower(bool on, uint64_t now);
++    void SetDTR(bool on, uint64_t now);
++    // Bytes from the guest's TXD.
++    void Write(const uint8_t* data, size_t size, uint64_t now);
++    // Bytes for the guest's RXD.
++    size_t Read(uint8_t* data, size_t max);
++    size_t Available() const { return toGuest.size(); }
++    void Service(uint64_t now);
++    // After a session load: an idle modem, with NO CARRIER if a call was up.
++    void Drop(uint64_t now);
++
++    State GetState() const { return state; }
++    unsigned LineSpeed() const { return options.lineSpeed; }
++    // Off hook: dialling, in a call or holding the line after a dial ending in ';'.
++    bool OffHook() const { return state != State::Off && (state != State::Command || holding); }
++
++   private:
++    void Reset();
++    void Respond(Result result);
++    void Text(const std::string& text);
++    void Info(const std::string& text);
++    void Execute(const std::string& line, uint64_t now);
++    void Dial(const std::string& number, uint64_t now);
++    void Connect(uint64_t now);
++    void EndCall(bool report);
++    void CommandByte(uint8_t byte, uint64_t now);
++    void OnlineByte(uint8_t byte, uint64_t now);
++    void Pace(uint64_t now);
++    uint64_t Guard() const;
++
++    ModemLine& line;
++    Options options;
++    State state{State::Off};
++    bool dtr{true};
++
++    // Settings that ATZ and &F restore.
++    std::array<uint8_t, 256> s{};
++    bool echo{true}, quiet{false}, verbose{true};
++    unsigned x{4}, dtrMode{2};
++    bool pulse{false};
++    unsigned selected{0};
++
++    std::string command, lastCommand;
++    std::string lastNumber;
++    bool holding{false};
++    uint8_t previous{0};
++
++    // Dialling.
++    uint64_t dialEnd{0}, dialLimit{0};
++    Result dialResult{Result::Connect};
++    bool dialStay{false};
++
++    // Escape: the time of the last guest byte while online and how many escape characters
++    // have come in a row, each within the guard time.
++    uint64_t lastByte{0};
++    unsigned escapes{0};
++    uint64_t escapeAt{0};
++
++    // Bytes waiting in each direction; line pacing moves them.
++    std::deque<uint8_t> toGuest, toLine;
++    uint64_t paceMark{0};
++    double toGuestCredit{0}, toLineCredit{0};
++};
++
++}  // namespace frondModem
++
++#endif
+diff --git a/src/common/modem/PppServer.cpp b/src/common/modem/PppServer.cpp
+new file mode 100644
+index 0000000..3283a7c
+--- /dev/null
++++ b/src/common/modem/PppServer.cpp
+@@ -0,0 +1,503 @@
++#include "PppServer.h"
++
++#include <algorithm>
++
++namespace frondModem {
++
++namespace {
++
++constexpr uint64_t second = 1000000000ull;
++constexpr uint16_t protocolIp = 0x0021;
++constexpr uint16_t protocolLcp = 0xc021;
++constexpr uint16_t protocolPap = 0xc023;
++constexpr uint16_t protocolIpcp = 0x8021;
++// Configure-Request resend time and tries (RFC 1661's defaults).
++constexpr uint64_t restartTime = 3 * second;
++constexpr unsigned maxConfigure = 10;
++// A frame longer than this (a 1500-byte MRU plus header and FCS) is dropped.
++constexpr size_t frameLimit = 1600;
++// IP packets from the network wait while this many bytes are already queued for the modem.
++constexpr size_t outLimit = 4096;
++// How long the line stays up after a Terminate-Ack has gone out.
++constexpr uint64_t dropDelay = second / 2;
++
++enum : uint8_t {
++    ConfigureRequest = 1,
++    ConfigureAck,
++    ConfigureNak,
++    ConfigureReject,
++    TerminateRequest,
++    TerminateAck,
++    CodeReject,
++    ProtocolReject,
++    EchoRequest,
++    EchoReply,
++    DiscardRequest,
++};
++
++// FCS-16 from RFC 1662, low bit first.
++uint16_t Fcs(uint16_t fcs, const uint8_t* data, size_t size) {
++    for (size_t i = 0; i < size; ++i) {
++        fcs ^= data[i];
++        for (int bit = 0; bit < 8; ++bit) fcs = (fcs & 1) ? (fcs >> 1) ^ 0x8408 : fcs >> 1;
++    }
++    return fcs;
++}
++constexpr uint16_t fcsInit = 0xffff;
++constexpr uint16_t fcsGood = 0xf0b8;
++
++uint32_t Get32(const uint8_t* at) {
++    return (uint32_t(at[0]) << 24) | (uint32_t(at[1]) << 16) | (uint32_t(at[2]) << 8) | at[3];
++}
++void Put32(std::vector<uint8_t>& to, uint32_t value) {
++    for (int shift = 24; shift >= 0; shift -= 8) to.push_back(uint8_t(value >> shift));
++}
++void Option(std::vector<uint8_t>& to, uint8_t type, uint32_t value) {
++    to.push_back(type);
++    to.push_back(6);
++    Put32(to, value);
++}
++void Option(std::vector<uint8_t>& to, const uint8_t* option) {
++    to.insert(to.end(), option, option + option[1]);
++}
++
++// Calls each(type, option) for the options in a Configure packet's data, or returns false
++// if one runs past the end.
++template <typename Each>
++bool EachOption(const std::vector<uint8_t>& data, Each each) {
++    for (size_t i = 0; i < data.size();) {
++        if (data.size() - i < 2 || data[i + 1] < 2 || data[i + 1] > data.size() - i) return false;
++        each(data[i], &data[i]);
++        i += data[i + 1];
++    }
++    return true;
++}
++
++}  // namespace
++
++PppServer::PppServer(frondNet::IpNetwork& network) : PppServer(network, Options{}) {}
++
++PppServer::PppServer(frondNet::IpNetwork& network, Options options)
++    : network(network), options(options) {}
++
++void PppServer::Reset() {
++    inFrame = escaped = false;
++    frame.clear();
++    loginStage = 0;
++    typed.clear();
++    lcp.Reset();
++    ipcp.Reset();
++    askAccm = askMagic = askAddress = true;
++    askAuth = options.askPap;
++    ourAccm = 0;
++    guestAccm = sendAccm = 0xffffffff;
++    guestPfc = guestAcfc = sendPfc = sendAcfc = false;
++    authenticated = false;
++    out.clear();
++}
++
++void PppServer::Answer(uint64_t now) {
++    Reset();
++    login.clear();
++    papPeer.clear();
++    if (options.loginPrompt) {
++        phase = Phase::Login;
++        Text("\r\n\r\nFrond dial-up\r\n\r\nlogin: ");
++    } else {
++        StartPpp(now);
++    }
++}
++
++void PppServer::HangUp() {
++    Reset();
++    phase = Phase::Idle;
++}
++
++bool PppServer::Carrier(uint64_t now) const {
++    if (phase == Phase::Down) return false;
++    return !(phase == Phase::Terminating && out.empty() && now >= dropAt);
++}
++
++size_t PppServer::ToModem(uint8_t* data, size_t max, uint64_t now) {
++    const size_t n = std::min(max, out.size());
++    std::copy(out.begin(), out.begin() + long(n), data);
++    out.erase(out.begin(), out.begin() + long(n));
++    return n;
++}
++
++void PppServer::FromModem(const uint8_t* data, size_t size, uint64_t now) {
++    for (size_t i = 0; i < size; ++i) Byte(data[i], now);
++}
++
++void PppServer::Service(uint64_t now) {
++    if (phase == Phase::Establish && !lcp.ackedOurs && now >= lcp.retryAt) {
++        if (lcp.tries >= maxConfigure) phase = Phase::Down;
++        else LcpRequest(now);
++    }
++    if (phase == Phase::Network) {
++        if (!ipcp.ackedOurs && now >= ipcp.retryAt) {
++            if (ipcp.tries >= maxConfigure) phase = Phase::Down;
++            else IpcpRequest(now);
++        }
++        Network(now);
++    }
++}
++
++void PppServer::Network(uint64_t now) {
++    network.Poll(now);
++    if (!IpcpOpen()) return;
++    std::vector<uint8_t> packet;
++    while (out.size() < outLimit && network.Receive(packet)) Send(protocolIp, packet);
++}
++
++void PppServer::Text(const std::string& text) { out.insert(out.end(), text.begin(), text.end()); }
++
++// Takes any login and password, one line each, then starts PPP.
++void PppServer::LoginByte(uint8_t byte, uint64_t now) {
++    if (byte == '\n') return;
++    if (byte != '\r') {
++        if (byte == 8 || byte == 127) {
++            if (!typed.empty()) typed.pop_back();
++        } else if (byte >= 32 && typed.size() < 64) {
++            typed.push_back(char(byte));
++        }
++        return;
++    }
++    if (loginStage == 0) {
++        if (typed.empty()) {
++            Text("\r\nlogin: ");
++            return;
++        }
++        login = typed;
++        typed.clear();
++        loginStage = 1;
++        Text("\r\nPassword: ");
++        return;
++    }
++    typed.clear();
++    Text("\r\nStarting PPP\r\n");
++    StartPpp(now);
++}
++
++void PppServer::StartPpp(uint64_t now) {
++    phase = Phase::Establish;
++    LcpRequest(now);
++}
++
++void PppServer::Byte(uint8_t byte, uint64_t now) {
++    if (phase == Phase::Login) {
++        if (byte != 0x7e) {
++            LoginByte(byte, now);
++            return;
++        }
++        StartPpp(now);
++    }
++    if (phase == Phase::Idle || phase == Phase::Terminating || phase == Phase::Down) return;
++    if (byte == 0x7e) {
++        // 0x7d then 0x7e aborts the frame.
++        if (inFrame && !frame.empty() && !escaped) Frame(now);
++        frame.clear();
++        inFrame = true;
++        escaped = false;
++        return;
++    }
++    if (!inFrame) return;
++    if (byte == 0x7d) {
++        escaped = true;
++        return;
++    }
++    if (escaped) {
++        byte ^= 0x20;
++        escaped = false;
++    }
++    if (frame.size() > frameLimit) {
++        ++badFrames;
++        inFrame = false;
++        frame.clear();
++        return;
++    }
++    frame.push_back(byte);
++}
++
++void PppServer::Frame(uint64_t now) {
++    if (frame.size() < 4 || Fcs(fcsInit, frame.data(), frame.size()) != fcsGood) {
++        ++badFrames;
++        return;
++    }
++    size_t at = 0;
++    const size_t end = frame.size() - 2;
++    if (end - at >= 2 && frame[0] == 0xff && frame[1] == 0x03) at = 2;
++    if (at >= end) return;
++    uint16_t protocol = frame[at++];
++    if (!(protocol & 1)) {
++        if (at >= end) return;
++        protocol = uint16_t(protocol << 8) | frame[at++];
++    }
++    Packet(protocol, std::vector<uint8_t>(frame.begin() + long(at), frame.begin() + long(end)), now);
++}
++
++void PppServer::Packet(uint16_t protocol, const std::vector<uint8_t>& packet, uint64_t now) {
++    if (protocol == protocolLcp) {
++        Lcp(packet, now);
++        return;
++    }
++    // Everything else waits for LCP (RFC 1661 section 3.4).
++    if (!LcpOpen()) return;
++    if (protocol == protocolPap) {
++        Pap(packet, now);
++    } else if (protocol == protocolIpcp) {
++        if (phase == Phase::Network) Ipcp(packet, now);
++    } else if (protocol == protocolIp) {
++        if (phase == Phase::Network && IpcpOpen()) network.Input(packet.data(), packet.size(), now);
++    } else {
++        std::vector<uint8_t> data{uint8_t(protocol >> 8), uint8_t(protocol)};
++        data.insert(data.end(), packet.begin(), packet.begin() + long(std::min<size_t>(packet.size(), 1400)));
++        Control(protocolLcp, ProtocolReject, ++nextId, data);
++    }
++}
++
++void PppServer::LcpRequest(uint64_t now) {
++    std::vector<uint8_t> data;
++    if (askAccm) Option(data, 2, ourAccm);
++    if (askAuth) data.insert(data.end(), {3, 4, uint8_t(protocolPap >> 8), uint8_t(protocolPap)});
++    if (askMagic) Option(data, 5, magic);
++    lcp.id = ++nextId;
++    ++lcp.tries;
++    lcp.retryAt = now + restartTime;
++    Control(protocolLcp, ConfigureRequest, lcp.id, data);
++}
++
++void PppServer::IpcpRequest(uint64_t now) {
++    std::vector<uint8_t> data;
++    if (askAddress) Option(data, 3, frondNet::hostAddress);
++    ipcp.id = ++nextId;
++    ++ipcp.tries;
++    ipcp.retryAt = now + restartTime;
++    Control(protocolIpcp, ConfigureRequest, ipcp.id, data);
++}
++
++void PppServer::LcpOpened(uint64_t now) {
++    sendAccm = guestAccm;
++    sendPfc = guestPfc;
++    sendAcfc = guestAcfc;
++    if (askAuth && !authenticated) {
++        phase = Phase::Authenticate;
++        return;
++    }
++    phase = Phase::Network;
++    IpcpRequest(now);
++}
++
++void PppServer::Lcp(const std::vector<uint8_t>& packet, uint64_t now) {
++    if (packet.size() < 4) return;
++    const size_t length = (size_t(packet[2]) << 8) | packet[3];
++    if (length < 4 || length > packet.size()) return;
++    const uint8_t code = packet[0], id = packet[1];
++    const std::vector<uint8_t> data(packet.begin() + 4, packet.begin() + long(length));
++    const bool wasOpen = LcpOpen();
++    switch (code) {
++        case ConfigureRequest: {
++            if (wasOpen) {
++                // The guest starts over: LCP and everything above it go down.
++                lcp.Reset();
++                ipcp.Reset();
++                sendAccm = 0xffffffff;
++                sendPfc = sendAcfc = false;
++                phase = Phase::Establish;
++                LcpRequest(now);
++            }
++            std::vector<uint8_t> nak, reject;
++            uint32_t accm = 0xffffffff;
++            bool pfc = false, acfc = false;
++            const bool valid = EachOption(data, [&](uint8_t type, const uint8_t* option) {
++                const uint8_t size = option[1];
++                if (type == 1 && size == 4) {
++                    // MRU: anything from 128 up is fine; the guest's TCP MSS keeps segments small.
++                    if (((option[2] << 8) | option[3]) < 128) nak.insert(nak.end(), {1, 4, 0x05, 0xdc});
++                } else if (type == 2 && size == 6) {
++                    accm = Get32(option + 2);
++                } else if (type == 5 && size == 6) {
++                    if (Get32(option + 2) == 0) Option(nak, 5, magic ^ 0x5a5a5a5a);
++                } else if (type == 7 && size == 2) {
++                    pfc = true;
++                } else if (type == 8 && size == 2) {
++                    acfc = true;
++                } else {
++                    // Asking the server to authenticate, quality reports, callback, multilink.
++                    Option(reject, option);
++                }
++            });
++            if (!valid) return;
++            if (!reject.empty()) {
++                Control(protocolLcp, ConfigureReject, id, reject);
++            } else if (!nak.empty()) {
++                Control(protocolLcp, ConfigureNak, id, nak);
++            } else {
++                guestAccm = accm;
++                guestPfc = pfc;
++                guestAcfc = acfc;
++                lcp.ackedTheirs = true;
++                Control(protocolLcp, ConfigureAck, id, data);
++            }
++            break;
++        }
++        case ConfigureAck:
++            if (id == lcp.id && phase == Phase::Establish) lcp.ackedOurs = true;
++            break;
++        case ConfigureNak:
++        case ConfigureReject:
++            if (id != lcp.id || phase != Phase::Establish) break;
++            EachOption(data, [&](uint8_t type, const uint8_t* option) {
++                if (code == ConfigureReject) {
++                    if (type == 2) askAccm = false;
++                    if (type == 3) askAuth = false;
++                    if (type == 5) askMagic = false;
++                } else if (type == 2 && option[1] == 6) {
++                    ourAccm = Get32(option + 2);
++                } else if (type == 3) {
++                    // The guest won't do PAP; go on without a login.
++                    askAuth = false;
++                } else if (type == 5) {
++                    magic = magic * 1103515245u + 12345u;
++                }
++            });
++            lcp.tries = 0;
++            LcpRequest(now);
++            break;
++        case TerminateRequest:
++            Control(protocolLcp, TerminateAck, id, {});
++            phase = Phase::Terminating;
++            dropAt = now + dropDelay;
++            return;
++        case TerminateAck:
++        case CodeReject:
++        case ProtocolReject:
++        case EchoReply:
++        case DiscardRequest:
++            break;
++        case EchoRequest:
++            if (wasOpen && data.size() >= 4) {
++                std::vector<uint8_t> reply;
++                Put32(reply, magic);
++                reply.insert(reply.end(), data.begin() + 4, data.end());
++                Control(protocolLcp, EchoReply, id, reply);
++            }
++            break;
++        default:
++            Control(protocolLcp, CodeReject, ++nextId,
++                    std::vector<uint8_t>(packet.begin(), packet.begin() + long(std::min<size_t>(length, 1400))));
++            break;
++    }
++    if (!wasOpen && LcpOpen()) LcpOpened(now);
++}
++
++void PppServer::Pap(const std::vector<uint8_t>& packet, uint64_t now) {
++    if (packet.size() < 5 || packet[0] != 1) return;
++    const size_t length = (size_t(packet[2]) << 8) | packet[3];
++    if (length < 5 || length > packet.size() || 5u + packet[4] > length) return;
++    papPeer.assign(packet.begin() + 5, packet.begin() + 5 + packet[4]);
++    // Authenticate-Ack with an empty message: any peer ID and password will do.
++    Control(protocolPap, 2, packet[1], {0});
++    authenticated = true;
++    if (phase == Phase::Authenticate) {
++        phase = Phase::Network;
++        IpcpRequest(now);
++    }
++}
++
++void PppServer::Ipcp(const std::vector<uint8_t>& packet, uint64_t now) {
++    if (packet.size() < 4) return;
++    const size_t length = (size_t(packet[2]) << 8) | packet[3];
++    if (length < 4 || length > packet.size()) return;
++    const uint8_t code = packet[0], id = packet[1];
++    const std::vector<uint8_t> data(packet.begin() + 4, packet.begin() + long(length));
++    switch (code) {
++        case ConfigureRequest: {
++            if (IpcpOpen()) {
++                ipcp.Reset();
++                IpcpRequest(now);
++            }
++            std::vector<uint8_t> nak, reject;
++            const bool valid = EachOption(data, [&](uint8_t type, const uint8_t* option) {
++                const uint8_t size = option[1];
++                // The guest's address, then primary and secondary DNS (RFC 1877).
++                const uint32_t want = type == 3 ? frondNet::guestAddress : frondNet::dnsAddress;
++                if ((type == 3 || type == 129 || type == 131) && size == 6) {
++                    if (Get32(option + 2) != want) Option(nak, type, want);
++                } else {
++                    // Van Jacobson compression, the old IP-Addresses option, NetBIOS servers.
++                    Option(reject, option);
++                }
++            });
++            if (!valid) return;
++            if (!reject.empty()) {
++                Control(protocolIpcp, ConfigureReject, id, reject);
++            } else if (!nak.empty()) {
++                Control(protocolIpcp, ConfigureNak, id, nak);
++            } else {
++                ipcp.ackedTheirs = true;
++                Control(protocolIpcp, ConfigureAck, id, data);
++            }
++            break;
++        }
++        case ConfigureAck:
++            if (id == ipcp.id) ipcp.ackedOurs = true;
++            break;
++        case ConfigureNak:
++        case ConfigureReject:
++            if (id != ipcp.id) break;
++            // The server keeps 10.0.2.2 unless the guest rejects the option outright.
++            EachOption(data, [&](uint8_t type, const uint8_t*) {
++                if (code == ConfigureReject && type == 3) askAddress = false;
++            });
++            ipcp.tries = 0;
++            IpcpRequest(now);
++            break;
++        case TerminateRequest:
++            Control(protocolIpcp, TerminateAck, id, {});
++            ipcp.Reset();
++            ipcp.retryAt = now + restartTime;
++            break;
++        case TerminateAck:
++        case CodeReject:
++            break;
++        default:
++            Control(protocolIpcp, CodeReject, ++nextId,
++                    std::vector<uint8_t>(packet.begin(), packet.begin() + long(std::min<size_t>(length, 1400))));
++            break;
++    }
++}
++
++void PppServer::Control(uint16_t protocol, uint8_t code, uint8_t id, const std::vector<uint8_t>& data) {
++    std::vector<uint8_t> packet{code, id, uint8_t((data.size() + 4) >> 8), uint8_t(data.size() + 4)};
++    packet.insert(packet.end(), data.begin(), data.end());
++    Send(protocol, packet);
++}
++
++// Frames a packet. LCP always goes with the full header and every control character escaped
++// (RFC 1662 section 7.2); the rest use what the guest agreed to.
++void PppServer::Send(uint16_t protocol, const std::vector<uint8_t>& packet) {
++    const bool lcpFrame = protocol == protocolLcp;
++    std::vector<uint8_t> raw;
++    raw.reserve(packet.size() + 6);
++    if (lcpFrame || !sendAcfc) raw.insert(raw.end(), {0xff, 0x03});
++    if (lcpFrame || !sendPfc || protocol > 0xff) raw.push_back(uint8_t(protocol >> 8));
++    raw.push_back(uint8_t(protocol));
++    raw.insert(raw.end(), packet.begin(), packet.end());
++    const uint16_t fcs = Fcs(fcsInit, raw.data(), raw.size()) ^ 0xffff;
++    raw.push_back(uint8_t(fcs));
++    raw.push_back(uint8_t(fcs >> 8));
++    const uint32_t accm = lcpFrame ? 0xffffffff : sendAccm;
++    out.push_back(0x7e);
++    for (const uint8_t byte : raw) {
++        if (byte == 0x7e || byte == 0x7d || (byte < 32 && (accm >> byte) & 1)) {
++            out.push_back(0x7d);
++            out.push_back(byte ^ 0x20);
++        } else {
++            out.push_back(byte);
++        }
++    }
++    out.push_back(0x7e);
++}
++
++}  // namespace frondModem
+diff --git a/src/common/modem/PppServer.h b/src/common/modem/PppServer.h
+new file mode 100644
+index 0000000..a2e87ef
+--- /dev/null
++++ b/src/common/modem/PppServer.h
+@@ -0,0 +1,105 @@
++#ifndef FROND_PPP_SERVER_H
++#define FROND_PPP_SERVER_H
++
++// The dial-up server at the far end of a modem call: an optional login: and Password: prompt,
++// then PPP in async HDLC framing (RFC 1661, 1662) with LCP, PAP and IPCP, carrying the guest's
++// IP packets to an IpNetwork. The guest gets 10.0.2.15 with DNS at 10.0.2.3; the server is
++// 10.0.2.2. Any login and password are taken, and the first PPP flag (0x7e) skips the prompt,
++// so both a "Unix" script and a scriptless "Windows RAS" connection work. Single-threaded;
++// time is guest nanoseconds.
++
++#include <cstdint>
++#include <deque>
++#include <string>
++#include <vector>
++
++#include "HayesModem.h"
++#include "net/IpNetwork.h"
++
++namespace frondModem {
++
++class PppServer : public ModemLine {
++   public:
++    struct Options {
++        bool loginPrompt = true;
++        // Ask the guest to log in with PAP during LCP.
++        bool askPap = false;
++    };
++    enum class Phase { Idle, Login, Establish, Authenticate, Network, Terminating, Down };
++
++    explicit PppServer(frondNet::IpNetwork& network);
++    PppServer(frondNet::IpNetwork& network, Options options);
++
++    void Answer(uint64_t now) override;
++    void HangUp() override;
++    void FromModem(const uint8_t* data, size_t size, uint64_t now) override;
++    size_t ToModem(uint8_t* data, size_t max, uint64_t now) override;
++    bool Carrier(uint64_t now) const override;
++    void Service(uint64_t now) override;
++
++    Phase GetPhase() const { return phase; }
++    bool LcpOpen() const { return lcp.ackedOurs && lcp.ackedTheirs; }
++    bool IpcpOpen() const { return ipcp.ackedOurs && ipcp.ackedTheirs; }
++    // Frames dropped for a bad FCS or length.
++    unsigned BadFrames() const { return badFrames; }
++    // Login and password as typed at the prompt, and the PAP peer ID.
++    const std::string& Login() const { return login; }
++    const std::string& PapPeer() const { return papPeer; }
++
++   private:
++    // One Configure-Request exchange each way for LCP or IPCP.
++    struct Negotiation {
++        bool ackedOurs{false}, ackedTheirs{false};
++        uint8_t id{0};
++        unsigned tries{0};
++        uint64_t retryAt{0};
++        void Reset() { *this = Negotiation{}; }
++    };
++
++    void Reset();
++    void Byte(uint8_t byte, uint64_t now);
++    void LoginByte(uint8_t byte, uint64_t now);
++    void StartPpp(uint64_t now);
++    void Frame(uint64_t now);
++    void Packet(uint16_t protocol, const std::vector<uint8_t>& packet, uint64_t now);
++    void Lcp(const std::vector<uint8_t>& packet, uint64_t now);
++    void Ipcp(const std::vector<uint8_t>& packet, uint64_t now);
++    void Pap(const std::vector<uint8_t>& packet, uint64_t now);
++    void LcpRequest(uint64_t now);
++    void IpcpRequest(uint64_t now);
++    void LcpOpened(uint64_t now);
++    void Network(uint64_t now);
++    void Send(uint16_t protocol, const std::vector<uint8_t>& packet);
++    void Control(uint16_t protocol, uint8_t code, uint8_t id, const std::vector<uint8_t>& data);
++    void Text(const std::string& text);
++
++    frondNet::IpNetwork& network;
++    Options options;
++    Phase phase{Phase::Idle};
++
++    // Receive framing.
++    bool inFrame{false}, escaped{false};
++    std::vector<uint8_t> frame;
++    unsigned badFrames{0};
++
++    // Login prompt.
++    unsigned loginStage{0};
++    std::string typed, login, papPeer;
++
++    // LCP: our requested options, what the guest's Configure-Request asked of us.
++    Negotiation lcp, ipcp;
++    bool askAccm{true}, askMagic{true}, askAuth{false}, askAddress{true};
++    uint32_t ourAccm{0}, magic{0x46726f6e};
++    // What the guest can receive: agreed in its Configure-Request, used once LCP is open.
++    uint32_t guestAccm{0xffffffff}, sendAccm{0xffffffff};
++    bool guestPfc{false}, guestAcfc{false}, sendPfc{false}, sendAcfc{false};
++    uint8_t nextId{0};
++    bool authenticated{false};
++
++    uint64_t dropAt{0};
++    std::deque<uint8_t> out;
++};
++
++}  // namespace frondModem
++
++#endif
+diff --git a/src/common/net/IpNetwork.h b/src/common/net/IpNetwork.h
+new file mode 100644
+index 0000000..f935a12
+--- /dev/null
++++ b/src/common/net/IpNetwork.h
+@@ -0,0 +1,31 @@
++#ifndef FROND_IP_NETWORK_H
++#define FROND_IP_NETWORK_H
++
++// The far side of a guest's IP link: whole IPv4 packets in and out, on guest time in
++// nanoseconds. SlirpIp is the real one; tests use their own.
++
++#include <cstddef>
++#include <cstdint>
++#include <vector>
++
++namespace frondNet {
++
++// The 10.0.2.x layout every Frond network uses: the guest, the host gateway and the DNS proxy.
++constexpr uint32_t guestAddress = 0x0a00020f;
++constexpr uint32_t hostAddress = 0x0a000202;
++constexpr uint32_t dnsAddress = 0x0a000203;
++
++class IpNetwork {
++   public:
++    virtual ~IpNetwork() = default;
++    // One IPv4 packet from the guest.
++    virtual void Input(const uint8_t* packet, size_t size, uint64_t now) = 0;
++    // Runs timers and host sockets.
++    virtual void Poll(uint64_t now) = 0;
++    // The next IPv4 packet for the guest, if there is one.
++    virtual bool Receive(std::vector<uint8_t>& packet) = 0;
++};
++
++}  // namespace frondNet
++
++#endif
+diff --git a/src/common/net/SlirpIp.cpp b/src/common/net/SlirpIp.cpp
+new file mode 100644
+index 0000000..5b996b9
+--- /dev/null
++++ b/src/common/net/SlirpIp.cpp
+@@ -0,0 +1,209 @@
++#include "SlirpIp.h"
++
++#include <arpa/inet.h>
++#include <libslirp.h>
++#include <poll.h>
++
++#include <algorithm>
++#include <cstdio>
++#include <deque>
++#include <set>
++
++namespace frondNet {
++
++namespace {
++
++// The guest's made-up MAC and the one slirp uses for 10.0.2.2.
++const uint8_t guestMac[6] = {0x02, 0x46, 0x72, 0x6f, 0x6e, 0x64};
++const uint8_t hostMac[6] = {0x52, 0x55, 0x0a, 0x00, 0x02, 0x02};
++
++// Packets slirp may queue for the guest before they're dropped; TCP resends what's lost.
++constexpr size_t queueLimit = 64;
++
++void Put16(uint8_t* at, uint16_t value) {
++    at[0] = uint8_t(value >> 8);
++    at[1] = uint8_t(value);
++}
++void Put32(uint8_t* at, uint32_t value) {
++    Put16(at, uint16_t(value >> 16));
++    Put16(at + 2, uint16_t(value));
++}
++uint16_t Get16(const uint8_t* at) { return uint16_t((at[0] << 8) | at[1]); }
++uint32_t Get32(const uint8_t* at) { return (uint32_t(Get16(at)) << 16) | Get16(at + 2); }
++
++// An ARP packet in an Ethernet frame from the guest.
++std::vector<uint8_t> Arp(uint16_t op, const uint8_t* targetMac, uint32_t targetIp) {
++    std::vector<uint8_t> frame(42, 0);
++    std::copy(targetMac, targetMac + 6, frame.begin());
++    std::copy(guestMac, guestMac + 6, frame.begin() + 6);
++    Put16(&frame[12], 0x0806);
++    Put16(&frame[14], 1);
++    Put16(&frame[16], 0x0800);
++    frame[18] = 6;
++    frame[19] = 4;
++    Put16(&frame[20], op);
++    std::copy(guestMac, guestMac + 6, frame.begin() + 22);
++    Put32(&frame[28], guestAddress);
++    if (op == 2) std::copy(targetMac, targetMac + 6, frame.begin() + 32);
++    Put32(&frame[38], targetIp);
++    return frame;
++}
++
++}  // namespace
++
++struct SlirpIp::Impl {
++    struct Timer {
++        SlirpTimerCb callback;
++        void* context;
++        int64_t deadline{-1};
++    };
++    uint64_t now{};
++    Slirp* slirp{};
++    SlirpCb callbacks{};
++    bool announced{false};
++    std::deque<std::vector<uint8_t>> incoming;
++    // ARP replies for slirp, fed in from Poll rather than from inside slirp's callback.
++    std::deque<std::vector<uint8_t>> arpReplies;
++    std::vector<pollfd> descriptors;
++    std::set<Timer*> timers;
++
++    Impl() {
++        callbacks.send_packet = [](const void* bytes, size_t size, void* context) -> slirp_ssize_t {
++            static_cast<Impl*>(context)->Output(static_cast<const uint8_t*>(bytes), size);
++            return slirp_ssize_t(size);
++        };
++        callbacks.guest_error = [](const char* message, void*) {
++            fprintf(stderr, "PPP network: %s\n", message);
++        };
++        callbacks.clock_get_ns = [](void* context) -> int64_t {
++            return int64_t(static_cast<Impl*>(context)->now);
++        };
++        callbacks.timer_new = [](SlirpTimerCb callback, void* cbcontext, void* context) -> void* {
++            auto& self = *static_cast<Impl*>(context);
++            auto* timer = new Timer{callback, cbcontext};
++            self.timers.insert(timer);
++            return timer;
++        };
++        callbacks.timer_free = [](void* timer, void* context) {
++            static_cast<Impl*>(context)->timers.erase(static_cast<Timer*>(timer));
++            delete static_cast<Timer*>(timer);
++        };
++        // slirp gives timer deadlines in milliseconds.
++        callbacks.timer_mod = [](void* timer, int64_t time, void*) {
++            static_cast<Timer*>(timer)->deadline = time;
++        };
++        callbacks.register_poll_fd = [](int, void*) {};
++        callbacks.unregister_poll_fd = [](int, void*) {};
++        callbacks.notify = [](void*) {};
++        SlirpConfig config{};
++        config.version = 4;
++        config.in_enabled = true;
++        config.in6_enabled = false;
++        config.vhostname = "frond";
++        config.vnetwork.s_addr = htonl(0x0a000200);
++        config.vnetmask.s_addr = htonl(0xffffff00);
++        config.vhost.s_addr = htonl(hostAddress);
++        config.vdhcp_start.s_addr = htonl(guestAddress);
++        config.vnameserver.s_addr = htonl(dnsAddress);
++        config.if_mtu = 1500;
++        config.if_mru = 1500;
++        slirp = slirp_new(&config, &callbacks, this);
++    }
++    ~Impl() {
++        if (slirp) slirp_cleanup(slirp);
++        for (auto* timer : timers) delete timer;
++    }
++
++    // A frame from slirp: IPv4 goes to the guest without its Ethernet header, an ARP request
++    // for the guest gets a reply, anything else is dropped.
++    void Output(const uint8_t* frame, size_t size) {
++        if (size < 14) return;
++        const uint16_t type = Get16(frame + 12);
++        if (type == 0x0800 && size >= 34) {
++            // Trim any Ethernet padding to the IP total length.
++            const size_t length = Get16(frame + 16);
++            if (length >= 20 && 14 + length <= size && incoming.size() < queueLimit)
++                incoming.emplace_back(frame + 14, frame + 14 + length);
++        } else if (type == 0x0806 && size >= 42 && Get16(frame + 20) == 1 &&
++                   Get32(frame + 38) == guestAddress && arpReplies.size() < 4) {
++            arpReplies.push_back(Arp(2, frame + 22, Get32(frame + 28)));
++        }
++    }
++
++    void Feed(const std::vector<uint8_t>& frame) { slirp_input(slirp, frame.data(), int(frame.size())); }
++
++    static int Add(int fd, int events, void* context) {
++        auto& self = *static_cast<Impl*>(context);
++        short flags = 0;
++        if (events & SLIRP_POLL_IN) flags |= POLLIN;
++        if (events & SLIRP_POLL_OUT) flags |= POLLOUT;
++        if (events & SLIRP_POLL_PRI) flags |= POLLPRI;
++        self.descriptors.push_back({fd, flags, 0});
++        return int(self.descriptors.size() - 1);
++    }
++    static int Events(int index, void* context) {
++        auto& self = *static_cast<Impl*>(context);
++        if (index < 0 || size_t(index) >= self.descriptors.size()) return SLIRP_POLL_ERR;
++        const auto flags = self.descriptors[size_t(index)].revents;
++        int events = 0;
++        if (flags & POLLIN) events |= SLIRP_POLL_IN;
++        if (flags & POLLOUT) events |= SLIRP_POLL_OUT;
++        if (flags & POLLPRI) events |= SLIRP_POLL_PRI;
++        if (flags & (POLLERR | POLLNVAL)) events |= SLIRP_POLL_ERR;
++        if (flags & POLLHUP) events |= SLIRP_POLL_HUP;
++        return events;
++    }
++};
++
++SlirpIp::SlirpIp() : impl(std::make_unique<Impl>()) {}
++SlirpIp::~SlirpIp() = default;
++
++bool SlirpIp::Valid() const { return impl->slirp; }
++
++void SlirpIp::Input(const uint8_t* packet, size_t size, uint64_t now) {
++    if (!Valid() || size < 20 || size > 1500 || (packet[0] >> 4) != 4) return;
++    impl->now = now;
++    // An ARP request first puts the guest's MAC in slirp's table, so replies need no ARP round.
++    if (!impl->announced) {
++        impl->announced = true;
++        impl->Feed(Arp(1, hostMac, hostAddress));
++    }
++    std::vector<uint8_t> frame(14 + size);
++    std::copy(hostMac, hostMac + 6, frame.begin());
++    std::copy(guestMac, guestMac + 6, frame.begin() + 6);
++    Put16(&frame[12], 0x0800);
++    std::copy(packet, packet + size, frame.begin() + 14);
++    impl->Feed(frame);
++}
++
++void SlirpIp::Poll(uint64_t now) {
++    if (!Valid()) return;
++    impl->now = now;
++    while (!impl->arpReplies.empty()) {
++        const auto reply = std::move(impl->arpReplies.front());
++        impl->arpReplies.pop_front();
++        impl->Feed(reply);
++    }
++    std::vector<Impl::Timer*> due;
++    for (auto* timer : impl->timers)
++        if (timer->deadline >= 0 && uint64_t(timer->deadline) <= now / 1000000) due.push_back(timer);
++    for (auto* timer : due)
++        if (impl->timers.count(timer)) {
++            timer->deadline = -1;
++            timer->callback(timer->context);
++        }
++    impl->descriptors.clear();
++    uint32_t timeout = 0;
++    slirp_pollfds_fill(impl->slirp, &timeout, Impl::Add, impl.get());
++    const int status = poll(impl->descriptors.data(), impl->descriptors.size(), 0);
++    slirp_pollfds_poll(impl->slirp, status < 0, Impl::Events, impl.get());
++}
++
++bool SlirpIp::Receive(std::vector<uint8_t>& packet) {
++    if (impl->incoming.empty()) return false;
++    packet = std::move(impl->incoming.front());
++    impl->incoming.pop_front();
++    return true;
++}
++
++}  // namespace frondNet
+diff --git a/src/common/net/SlirpIp.h b/src/common/net/SlirpIp.h
+new file mode 100644
+index 0000000..e15cc7f
+--- /dev/null
++++ b/src/common/net/SlirpIp.h
+@@ -0,0 +1,32 @@
++#ifndef FROND_SLIRP_IP_H
++#define FROND_SLIRP_IP_H
++
++// libslirp behind an IP-only link such as PPP. libslirp wants Ethernet frames, so this wraps
++// the guest's packets in Ethernet, answers slirp's ARP for the guest and strips Ethernet from
++// what comes back. Same 10.0.2.x layout as the Wi-Fi router: the guest is 10.0.2.15, the host
++// 10.0.2.2 and the DNS proxy 10.0.2.3. Single-threaded; time is guest nanoseconds.
++// Built into libcommon-net.a so only the cores link libslirp.
++
++#include <memory>
++
++#include "IpNetwork.h"
++
++namespace frondNet {
++
++class SlirpIp : public IpNetwork {
++   public:
++    SlirpIp();
++    ~SlirpIp() override;
++    bool Valid() const;
++    void Input(const uint8_t* packet, size_t size, uint64_t now) override;
++    void Poll(uint64_t now) override;
++    bool Receive(std::vector<uint8_t>& packet) override;
++
++   private:
++    struct Impl;
++    std::unique_ptr<Impl> impl;
++};
++
++}  // namespace frondNet
++
++#endif

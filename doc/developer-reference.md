@@ -860,7 +860,7 @@ Tests in `make test`, by area:
 | Serial, USB, infrared | `test-uart-lifecycle`, `test-uart-checkpoint`, `test-uart-flow`, `test-uart-dma-peer`, `test-tx-serial`, `test-hotsync-line`, `test-host-serial`, `test-pty-link`, `test-usb-enumeration`, `test-usb-host-fixture`, `test-usb-bridge`, `test-usb-bridge-soc`, `test-irda-endpoint`, `test-irda-link`, `test-irda-results`, `test-keyboard` |
 | Link protocol | `test-link-protocol` |
 | Bluetooth | `test-bluetooth`, `test-bluetooth-link`, `test-bluetooth-results`, `test-csr-bcsp`, `test-csr-controller-lifecycle`, `test-csr-peer-services` |
-| Network | `test-network`, `test-network-reliability`, `test-host-network`, `test-wifi` |
+| Network | `test-network`, `test-network-reliability`, `test-host-network`, `test-wifi`, `test-modem` |
 | Debugger and tools | `test-gdbstub`, `test-pace-debug`, `test-pace-step`, `test-debugger-inspect`, `test-developer-run`, `test-compatibility`, `test-gameplay-metrics`, `test-build-tools`, `test-render-link`, `test-peripheral-qualification` |
 
 Not in `make test`. The first group builds a program and runs it with a private session, the rest are firmware-free and can be run by name:

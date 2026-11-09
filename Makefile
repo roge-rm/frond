@@ -462,6 +462,17 @@ test-host-network: prepare
 		tests/host-network.cpp build/source/src/uarm/uarm/HostNetwork.cpp -pthread -o build/test-host-network
 	./build/test-host-network
 
+.PHONY: test-modem
+test: test-modem
+test-modem: prepare build/source/src/common/libcommon.a build/source/src/common/libcommon-net.a
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Wno-unused-parameter -Ibuild/source/src/common tests/modem.cpp \
+		build/source/src/common/libcommon-net.a build/source/src/common/libcommon.a \
+		$(shell pkg-config --cflags --libs slirp) -o build/test-modem
+	./build/test-modem
+
+build/source/src/common/libcommon-net.a: build/source/.prepared
+	$(MAKE) -C build/source/src/common net
+
 .PHONY: test-wifi
 test-wifi: prepare build/source/src/common/libcommon.a
 	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm \
