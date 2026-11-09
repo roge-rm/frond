@@ -165,7 +165,7 @@ static bool parseRtcTime(const char* text, Imx1RtcTime& time) {
 }
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::fprintf(stderr, "Usage: %s ROM [physical|reset|linked] [instruction-budget] [exact|fast] [--bootstrap-peripherals] [--trace=peripherals] [--trace-window=PC/OCCURRENCE] [--idle-hclk-budget=N] [--arm920-icache-index-compatibility] [--lcdc-contrast-only] [--imx1-mmcsd-empty-slot] [--frame-output=PATH] [--diagnostic-snapshot=PREFIX] [--assume-mpll-settled] [--virtual-mpll-retune] [--assume-spll-settled] [--assume-i2c-single-master] [--i2c-eeprom-image=PATH] [--asp-px1-input=high] [--asp-u-sample=WORD] [--rtc-initial-time=DAY:HH:MM:SS] [--cs4-port0-input=BYTE] [--cs4-indexed-input=BANK/INDEX/BYTE] [--cs5-reset-status-input=BYTE] [--graphics-profile=virtual5744-compatible-8mib] [--graphics-raw-axes=FIRST/SECOND] [--graphics-raw-mode1=SAMPLE] [--graphics-irq-connection=virtual-a13] [--gpio-a-input-masked=VALUE/MASK] [--gpio-input-event=N/PORT/VALUE/MASK] [--gpio-a-input=VALUE] [--gpio-b-input=VALUE] [--gpio-d-input=VALUE] [--ram-mib=32|128]\n", argv[0]);
+        std::fprintf(stderr, "Usage: %s ROM [physical|reset|linked] [instruction-budget] [exact|fast] [--bootstrap-peripherals] [--trace=peripherals] [--trace-window=PC/OCCURRENCE] [--idle-hclk-budget=N] [--arm920-icache-index-compatibility] [--lcdc-contrast-only] [--imx1-mmcsd-empty-slot] [--frame-output=PATH] [--diagnostic-snapshot=PREFIX] [--assume-mpll-settled] [--virtual-mpll-retune] [--assume-spll-settled] [--assume-i2c-single-master] [--i2c-eeprom-image=PATH] [--asp-px1-input=high] [--asp-u-sample=WORD] [--rtc-initial-time=DAY:HH:MM:SS] [--cs4-port0-input=BYTE] [--cs4-indexed-input=BANK/INDEX/BYTE] [--cs5-reset-status-input=BYTE] [--graphics-profile=virtual5744-compatible-8mib] [--graphics-virtual-a4-source-over] [--graphics-raw-axes=FIRST/SECOND] [--graphics-raw-mode1=SAMPLE] [--graphics-irq-connection=virtual-a13] [--gpio-a-input-masked=VALUE/MASK] [--gpio-input-event=N/PORT/VALUE/MASK] [--gpio-a-input=VALUE] [--gpio-b-input=VALUE] [--gpio-d-input=VALUE] [--ram-mib=32|128]\n", argv[0]);
         return 1;
     }
     const char* engine = argc >= 5 ? argv[4] : "exact";
@@ -244,6 +244,10 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "Supply --graphics-profile=virtual5744-compatible-8mib once\n"); return 1;
             }
             options.graphicsProfile = Imx1GraphicsProfile::virtual5744Compatible8MiB;
+        }
+        else if (!std::strcmp(argv[i], "--graphics-virtual-a4-source-over")) {
+            if (options.graphicsVirtualA4SourceOver) return 1;
+            options.graphicsVirtualA4SourceOver = true;
         }
         else if (!std::strncmp(argv[i], "--graphics-raw-mode1=", 21)) {
             const char* text = argv[i] + 21;
@@ -393,6 +397,12 @@ int main(int argc, char** argv) {
     }
     if (options.bootstrapPeripherals)
         std::printf("idle-hclk-budget=%u cumulative-per-run independent-of-instruction-budget\n", options.idleHclkBudget);
+    if (options.graphicsVirtualA4SourceOver && (!options.bootstrapPeripherals ||
+        options.graphicsProfile != Imx1GraphicsProfile::virtual5744Compatible8MiB)) {
+        std::fprintf(stderr, "Virtual A4 source-over requires the virtual graphics profile and bootstrap peripherals\n"); return 1;
+    }
+    std::printf("graphics-a4-policy=%s physical-arithmetic-unqualified\n",
+                options.graphicsVirtualA4SourceOver ? "virtual-source-over-565-floor-15" : "guarded");
     if (options.graphicsRawMode1Known && (!options.bootstrapPeripherals ||
         options.graphicsProfile != Imx1GraphicsProfile::virtual5744Compatible8MiB)) {
         std::fprintf(stderr, "Raw graphics mode1 requires the virtual graphics profile and bootstrap peripherals\n"); return 1;
@@ -516,7 +526,7 @@ int main(int argc, char** argv) {
             std::printf("Diagnostic RTC initial time=%u:%02u:%02u:%02u; opaque chip day, CLK32 subsecond phase zero at entry; elapsed reference clocks only, no civil epoch or host time.\n", t.day, t.hour, t.minute, t.second);
         } else std::puts("Retained RTC day/time and subsecond phase are unknown.");
         if (options.graphicsProfile != Imx1GraphicsProfile::strict)
-            std::printf("VIRTUAL GRAPHICS: virtual5744-compatible-8mib; identity=%08x revision=%08x capacity=%u are model choices; external bank plus %u-byte internal bank; bounded direct backing, configured windows and paired lookup storage; cold VRAM zero, soft reset retains bytes; wrap and other apertures unbacked; GPIO direction 1 drives ideal output pads under selector ffff, external inputs unknown; reset clears GPIO state; reset status=00, REG_BASE=01, CPU_DEFAULTS=0e transaction; unsupported controller operations stop.\n",
+            std::printf("VIRTUAL GRAPHICS: virtual5744-compatible-8mib; identity=%08x revision=%08x capacity=%u are model choices; external bank plus %u-byte internal bank; bounded direct backing, configured windows and paired CP microcode storage; cold VRAM zero, soft reset retains bytes; wrap and other apertures unbacked; GPIO direction 1 drives ideal output pads under selector ffff, external inputs unknown; reset clears GPIO state; reset status=00, REG_BASE=01, CPU_DEFAULTS=0e transaction; unsupported controller operations stop.\n",
                         Imx1Cs5Configuration::virtualIdentity, Imx1Cs5Configuration::virtualRevision,
                         Imx1Cs5Configuration::virtualExternalBytes, Imx1Cs5Configuration::virtualInternalBytes);
         if (options.graphicsProfile != Imx1GraphicsProfile::strict)
@@ -561,7 +571,9 @@ int main(int argc, char** argv) {
     if (diagnostic.prefix) {
         diagnostic.metadata.open(std::string(diagnostic.prefix)+".jsonl",std::ios::binary);
         if (!diagnostic.metadata) { std::fprintf(stderr,"Could not open diagnostic output\n"); return 1; }
-        diagnostic.metadata << "{\"schema\":\"frond-private-arm920-diagnostic-v1\",\"word_encoding\":\"unsigned-decimal-u32\",\"ram_encoding\":\"guest-little-endian-bytes\",\"ring_capacity\":4096}\n";
+        diagnostic.metadata << "{\"schema\":\"frond-private-arm920-diagnostic-v1\",\"word_encoding\":\"unsigned-decimal-u32\",\"ram_encoding\":\"guest-little-endian-bytes\",\"ring_capacity\":4096,\"graphics_a4_policy\":\""
+                            << (options.graphicsVirtualA4SourceOver ? "virtual-source-over-565-floor-15" : "guarded")
+                            << "\",\"physical_a4_arithmetic_qualified\":false}\n";
     }
     const auto result = imx1BootProbe(rom.data(), rom.size(), entry, budget, trace, nullptr,
                                      !std::strcmp(engine, "fast"), &options);
