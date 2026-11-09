@@ -455,6 +455,117 @@ void thumbPrefix() {
     }
     std::puts("PASS: IRQ/FIQ SUBS/LDM returns between Thumb BL halves restore prefix context and changed returns drop it");
 }
+void suspendedThumbPrefix() {
+    for (bool fiq : {false, true}) for (unsigned switches : {1u, 3u})
+    for (unsigned damaged : {0u, 1u, 2u}) {
+        auto words = setup();
+        load(words, 0, 0x00223000);
+        if (fiq) store(words, 0, 0x18, 1u << 26);
+        store(words, 0, 8, 58);
+        load(words, 0, 0x00203000); store(words, 0, 8, 6); store(words, 0, 0, 0x13);
+        words.push_back(0xe321f013);
+        const uint32_t thumbPc = words.size() * 4 + 16;
+        load(words, 2, thumbPc | 1); words.push_back(0xe12fff12);
+        words.push_back(0xf806f000); words.push_back(0xde00de00);
+        words.push_back(0xde00de00); words.push_back(0xde00de00);
+        words.push_back(0x47702655);
+        words.resize(0x300 / 4, 0xe1a00000);
+        if (damaged == 1) load(words, 14, 0x200);
+        load(words, 0, 0x00203000); store(words, 0, 8, 6); store(words, 0, 0, 0x13);
+        for (unsigned n = 0; n < 30; ++n) words.push_back(0xe1a00000);
+        words.push_back(0xe7f000f0);
+        installTimerHandler(words);
+        words.pop_back(); // Replace the handler's direct SUBS return.
+        words.push_back(0xe3570001);
+        const size_t skipSave = words.size(); words.push_back(0);
+        load(words, 9, 0x00300000);
+        words.push_back(0xe14f8000); words.push_back(0xe5898000);
+        words.push_back(0xe24ee004); words.push_back(0xe589e004);
+        const uint32_t choose = words.size() * 4;
+        words[skipSave] = 0x1a000000 | ((choose - (skipSave * 4 + 8)) / 4);
+        words.push_back(0xe3570000 | (switches + 1));
+        const size_t finish = words.size(); words.push_back(0);
+        load(words, 9, 0x00300000); words.push_back(0xe5998000);
+        words.push_back(0xe3c88020); words.push_back(0xe169f008);
+        load(words, 14, 0x300); words.push_back(0xe1b0f00e);
+        const uint32_t resume = words.size() * 4;
+        words[finish] = 0x0a000000 | ((resume - (finish * 4 + 8)) / 4);
+        load(words, 9, 0x00300000); words.push_back(0xe5998000);
+        if (damaged == 2) { load(words, 10, 0x80000000); words.push_back(0xe028800a); }
+        words.push_back(0xe169f008); words.push_back(0xe599e004); words.push_back(0xe1b0f00e);
+        Trace trace; Imx1ProbeResult result{}; probeParity(words, result, trace, 1000);
+        assert(result.stop == Imx1ProbeStop::unsupportedInstruction);
+        assert(trace.interrupts.size() == switches + 1);
+        assert(result.irqEntries == (fiq ? 0 : switches + 1));
+        assert(result.fiqEntries == (fiq ? switches + 1 : 0));
+        assert(trace.interrupts[0].interruptedPc == thumbPc + 2);
+        assert(result.trace.pc == thumbPc + (damaged ? 2 : 4));
+        assert(result.trace.instruction == (damaged ? 0xf806u : 0xde00u));
+        assert(result.registers[6] == (damaged ? 0u : 0x55u));
+        assert(result.registers[7] == switches + 1);
+    }
+    std::puts("PASS: suspended Thumb BL resumes after IRQ/FIQ task switches; wrong LR/flags remain guarded");
+}
+void sharedThumbPrefix() {
+    for (bool fiq : {false, true}) {
+        auto words = setup();
+        load(words, 13, 0x00300100); load(words, 3, 0x380);
+        load(words, 0, 0x00223000);
+        if (fiq) store(words, 0, 0x18, 1u << 26);
+        store(words, 0, 8, 58);
+        load(words, 0, 0x00203000); store(words, 0, 8, 6); store(words, 0, 0, 0x13);
+        words.push_back(0xe321f01f);
+        const uint32_t thumbPc = words.size() * 4 + 16;
+        load(words, 2, thumbPc | 1); words.push_back(0xe12fff12);
+        words.push_back(0xf806f000); words.push_back(0xde004718);
+        words.push_back(0xde00de00); words.push_back(0xde00de00);
+        words.push_back(0x47702655);
+        words.resize(0x300 / 4, 0xe1a00000);
+        load(words, 13, 0x00300200);
+        load(words, 0, 0x00203000); store(words, 0, 8, 6); store(words, 0, 0, 0x13);
+        words.push_back(0xe321f01f);
+        load(words, 2, thumbPc | 1); words.push_back(0xe12fff12);
+        words.resize(0x380 / 4, 0xe1a00000);
+        words.push_back(0xe2855001); words.push_back(0xe3550002);
+        const size_t completed = words.size(); words.push_back(0);
+        load(words, 0, 0x00203000); store(words, 0, 8, 6); store(words, 0, 0, 0x13);
+        for (unsigned n = 0; n < 12; ++n) words.push_back(0xe1a00000);
+        const uint32_t end = words.size() * 4;
+        words[completed] = 0x0a000000 | ((end - (completed * 4 + 8)) / 4);
+        words.push_back(0xe7f000f0);
+        installTimerHandler(words); words.pop_back();
+        words.push_back(0xe3570001);
+        const size_t later = words.size(); words.push_back(0);
+        load(words, 9, 0x00300000); words.push_back(0xe14f8000); words.push_back(0xe5898000);
+        words.push_back(0xe24ee004); words.push_back(0xe589e004);
+        words.push_back(0xe289a008); words.push_back(0xe8ca6000);
+        words.push_back(0xe3c88020); words.push_back(0xe169f008);
+        load(words, 14, 0x300); words.push_back(0xe1b0f00e);
+        const uint32_t select = words.size() * 4;
+        words[later] = 0x1a000000 | ((select - (later * 4 + 8)) / 4);
+        load(words, 9, 0x00300000); words.push_back(0xe3570002);
+        const size_t third = words.size(); words.push_back(0);
+        words.push_back(0xe289a010); words.push_back(0xe8ca2000);
+        words.push_back(0xe289a008);
+        const size_t restore = words.size(); words.push_back(0);
+        const uint32_t secondTask = words.size() * 4;
+        words[third] = 0x1a000000 | ((secondTask - (third * 4 + 8)) / 4);
+        words.push_back(0xe289a010);
+        const uint32_t loadTask = words.size() * 4;
+        words[restore] = 0xea000000 | ((loadTask - (restore * 4 + 8)) / 4);
+        words.push_back(0xe8da2000); words.push_back(0xe289a00c); words.push_back(0xe8da4000);
+        words.push_back(0xe5998000); words.push_back(0xe169f008);
+        words.push_back(0xe599e004); words.push_back(0xe1b0f00e);
+        Trace trace; Imx1ProbeResult result{}; probeParity(words, result, trace, 1000);
+        assert(result.stop == Imx1ProbeStop::unsupportedInstruction && result.trace.pc == end);
+        assert(trace.interrupts.size() == 3 && result.registers[5] == 2 && result.registers[6] == 0x55);
+        assert(trace.interrupts[0].interruptedPc == thumbPc + 2);
+        assert(trace.interrupts[1].interruptedPc == thumbPc + 2);
+        assert(trace.interrupts[0].cpsr == trace.interrupts[1].cpsr);
+        assert(result.registers[13] == 0x00300200);
+    }
+    std::puts("PASS: two tasks sharing a Thumb BL pair retain separate interrupted stacks through IRQ/FIQ resumption");
+}
 void returnGuards() {
     for (uint32_t mode : {0x10u, 0x11u, 0x12u, 0x13u, 0x17u, 0x1bu, 0x1fu})
     for (uint32_t saved : {0u, 0xd3u, 0xf3u, 0xd4u, 0x10000d3u})
@@ -512,6 +623,8 @@ int main() {
     timerDelivery();
     gpioDelivery();
     thumbPrefix();
+    suspendedThumbPrefix();
+    sharedThumbPrefix();
     returnGuards();
     stalledDelivery();
 }

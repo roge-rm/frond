@@ -217,6 +217,22 @@ void mixedProgram() {
            r.registers[5] == 0x80ff123b && r.registers[6] == 0xffff80ff && r.registers[7] == 0xffffff80);
     assert(r.registers[13] == 0x00300200 && !(r.cpsr & ARM_SR_T));
 }
+void capturedBlVeneer() {
+    Program p;
+    p.literal(0, 0xd0eabc60); p.literal(1, 0x07f8b2b9); p.literal(2, 0x6e378dac);
+    p.literal(3, base + p.bytes.size() + 16 + 1); p.word(0xe12fff13);
+    p.half(0x46c0);
+    const uint32_t prefix = base + p.bytes.size();
+    p.half(0xf000); p.half(0xfd4d); p.half(0xde00);
+    const uint32_t target = prefix + 4 + 2 * 0x54d;
+    while (base + p.bytes.size() < target) p.half(0xde00);
+    p.half(0x4778); p.half(0); // Thumb BX PC enters the aligned ARM helper.
+    p.word(0xe0900002); p.word(0xe2a11000); p.word(0xe12fff1e);
+    const auto r = compare(p);
+    assert(r.stop == Imx1ProbeStop::unsupportedInstruction && r.trace.pc == prefix + 4);
+    assert(r.registers[0] == 0x3f224a0c && r.registers[1] == 0x07f8b2ba);
+    assert(r.registers[14] == ((prefix + 4) | 1) && (r.cpsr & ARM_SR_T));
+}
 void loadBaseInList() {
     for (unsigned baseReg = 0; baseReg < 8; ++baseReg) {
         for (unsigned mask : {1u << baseReg, 0xffu, (1u << baseReg) | 1u | 0x80u}) {
@@ -261,11 +277,13 @@ void bxPc() {
     assert(r.stop == Imx1ProbeStop::unsupportedInstruction && r.trace.instruction == 0x4778);
 }
 void guards() {
-    for (uint16_t h : {0x4780, 0x4781, 0x4701, 0xe800, 0xbe00, 0xdfab, 0xde00,
+    for (uint16_t h : {0x4780, 0x4781, 0x4701, 0xe800, 0xbe00, 0xdeab, 0xde00,
                        0xb400, 0xbc00, 0xc000, 0xc001, 0xf800, 0x4340, 0xb200, 0x4400,
                        0x44ff, 0x45ff}) {
         Program p; p.enter(); p.half(h); p.half(0xde00);
         const auto r = compare(p);
+        if (r.stop != Imx1ProbeStop::unsupportedInstruction || r.trace.instruction != h)
+            std::fprintf(stderr, "Thumb guard %04x stopped at %08x instruction %08x\n", h, r.trace.pc, r.trace.instruction);
         assert(r.stop == Imx1ProbeStop::unsupportedInstruction && r.trace.instruction == h);
         assert(!r.busAccesses && r.cpsr == 0xf3);
     }
@@ -311,6 +329,6 @@ int main() {
     unsetenv("FROND_JIT");
     cpuSetJitSync(true);
     setenv("FROND_JIT_HOT", "1", 1);
-    fetchBoundaries(); blSteps(); mixedProgram(); stackReturn(); loadBaseInList(); bxPc(); guards();
+    fetchBoundaries(); blSteps(); mixedProgram(); capturedBlVeneer(); stackReturn(); loadBaseInList(); bxPc(); guards();
     std::puts("PASS: Exact/Fast Thumb fetch boundaries, retained cache, BL halfword stepping, mixed ARM/Thumb execution and probe guards");
 }
