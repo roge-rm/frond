@@ -8,7 +8,7 @@
          int fd=openat(dir,temporary.c_str(),O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);
          Guard fileGuard{fd};
          if(fd<0) {closeFd(dir);error="Cannot create private output.";return P::rejected;}
-@@ -70,10 +71,18 @@
+@@ -70,10 +71,16 @@
          bool durable=fsync(dir)==0 && fault!=Fault::directory;
          bool closed=closeFd(dir)==0;
          if(published) {
@@ -21,11 +21,9 @@
              error.clear();return P::published;
          }
 -        if(!cleaned) error+=" Private staging file cleanup failed.";
-+        if(!cleaned || !durable || !closed) {
-+            error+=!cleaned ? " Private staging file remains at " : " Staging removal durability uncertain at ";
-+            error+=stagingPath+". Do not retry automatically.";
-+            return P::uncertain;
-+        }
++        // Nothing was published. Only a staging file that is still there makes the result uncertain.
++        if(!cleaned) {error+=" Private staging file remains at "+stagingPath+". Do not retry automatically.";return P::uncertain;}
++        if(!durable || !closed) error+=" Private staging file "+stagingPath+" was removed; the removal may not be durable.";
          return P::rejected;
      }
  };

@@ -63,5 +63,23 @@ int main(int argc,char** argv) {
         assert(output.calls==1 && cleanupCalls==1 && fs::file_size(staging)==bytes.size());
         fs::remove_all(directory);
     }
-    std::cout<<"PASS partial write, refused publication and close failure retain private staging with uncertain state and path; no callback replay\n";
+    {
+        // Write fails, staging is removed, then the directory flush fails: nothing was published or kept.
+        const auto directory=root/"directory-flush";
+        assert(fs::create_directory(directory));
+        Output output((directory/"job.raw").string());
+        output.file.fault=RawPrintFile::Fault::directory;
+        const uint8_t payload[]={0,42,255,12};
+        RawPrintJob job(8);assert(job.begin());assert(job.append(payload,sizeof(payload)));
+        writes=cleanupCalls=0;failWrite=true;
+        const auto state=job.finish(Output::publish,&output);
+        failWrite=false;
+        assert(state==RawPrintJob::State::rejected);
+        assert(output.calls==1 && fs::is_empty(directory));
+        assert(output.file.error.find((directory/".frond-print-").string())!=std::string::npos);
+        assert(output.file.error.find("may not be durable")!=std::string::npos);
+        assert(job.finish(Output::publish,&output)==RawPrintJob::State::rejected && output.calls==1);
+        fs::remove_all(directory);
+    }
+    std::cout<<"PASS partial write, refused publication and close failure retain private staging with uncertain state and path; directory flush failure after cleanup is rejected with the path; no callback replay\n";
 }
