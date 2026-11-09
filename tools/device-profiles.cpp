@@ -43,6 +43,7 @@ int main() {
                   << ",\"runs_68k\":" << (deviceProfileRuns68k5(p.deviceType) ? "true" : "false")
                   << ",\"hot_sync_button\":" << (deviceProfileHasHotSyncButton5(p.deviceType) ? "true" : "false")
                   << ",\"cpu_hz\":" << p.cpuHz
+                  << ",\"original_mips\":" << deviceProfileOriginalMips5(p.deviceType)
                   << ",\"sound\":" << (p.capabilities.sound ? "true" : "false")
                   << ",\"storage_slot\":" << std::quoted(deviceProfileStorageSlot5(p) == DeviceStorageSlot5::memoryStick ? "memory-stick"
                         : deviceProfileStorageSlot5(p) == DeviceStorageSlot5::sd ? "sd" : "none");

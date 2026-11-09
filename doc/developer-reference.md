@@ -26,7 +26,7 @@ The Palm IIIx has its own runner, `out/frond-68k` (`make out/frond-68k`, install
 | `--card-identity HEX` | With `--card-swap`, the identity of a card put in, as 64 hex digits (its 32 descriptor bytes, as in `card.json`). |
 | `--card-protected` | With `--card-swap`, a card put in is write protected. |
 | `--ram-size MB` | RAM size, 16 or 32. |
-| `--mips N` | Target speed in MIPS. Default 100. |
+| `--mips N` | Target speed in MIPS. Default: the device's Original speed (150 on the T|X and Zire 72, 96 on the E2 and TG50). |
 | `--audio-period FRAMES` | Host audio period, 64 to 8192. Default 512. Low-latency audio sizes its limits from it; Android passes 1024 or more. |
 | `-q`, `--no-sound` | Start with audio off. |
 | `--fast-audio`, `--experimental-fast-audio` | Preview one qualified TX, E2, E3 or Zire 72 stereo stream before the firmware audio queue. The E3 and E2 de-NVFS image use the HAL path with an ARM stream-start verifier and no Thumb queue hooks. |
@@ -762,7 +762,6 @@ The IIIx works as in VS Code, in Eclipse's Terminal view.
 | `FROND_TRACE_WAKE` | Log `native: host wake` to stderr each time the core wakes an idle UI task for a host call (T|X and Zire 72), for `tests/host-call-wake.py`. |
 | `FROND_WIFI_TRACE` | Trace the virtual Wi-Fi card. |
 | `FROND_HOST_PROFILE` | Print host timing figures from the benchmark tools. |
-| `FROND_ENGINE_SETTING` | Desktop app: `1` shows the Engine setting. |
 | `SDL_VIDEODRIVER`, `SDL_AUDIODRIVER` | Standard SDL; `dummy` for headless. |
 
 ### Tests and tools

@@ -139,7 +139,7 @@ fun MachineContrastRow(settings: MachineSettings, listStyle: Boolean, onChange: 
     }
 }
 
-// Original or Uncapped, for 68k devices.
+// Original or Uncapped. An ARM device takes it at its next start.
 @Composable
 fun MachineSpeedRow(settings: MachineSettings, listStyle: Boolean, onChange: (MachineSettings) -> Unit) {
     MachineChoiceRow("Speed", settings.speed, CpuSpeed.entries, { it.label }, listStyle) { onChange(settings.copy(speed = it)) }

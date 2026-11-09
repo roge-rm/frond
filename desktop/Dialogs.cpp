@@ -238,10 +238,9 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     contrastLabel->setText(tr("Contrast: %1").arg(prefs.contrast));
     connect(contrast, &QSlider::valueChanged, this, [this](int value) { contrastLabel->setText(tr("Contrast: %1").arg(value)); });
     // setDevice shows the rows for the chosen device.
-    const bool engineShown = qEnvironmentVariable("FROND_ENGINE_SETTING") == QLatin1String("1");
     for (QWidget* w : {static_cast<QWidget*>(contrastLabel), static_cast<QWidget*>(contrast),
                        static_cast<QWidget*>(speedLabel), static_cast<QWidget*>(speed)}) w->setVisible(false);
-    speedGroup->setVisible(engineShown);
+    speedGroup->setVisible(true);
     windowScale->setValue(prefs.scale);
     smoothLcd->setChecked(prefs.smooth);
     audio->setChecked(prefs.audio);
@@ -339,13 +338,13 @@ void MachineSettings::setDevice(Device device) {
     fastAudio->setVisible(!m68k);
     contrastLabel->setVisible(m68k);
     contrast->setVisible(m68k);
-    // Original/Uncapped for 68k devices; the Engine choice has no JIT to pick there.
-    const bool engineShown = !m68k && qEnvironmentVariable("FROND_ENGINE_SETTING") == QLatin1String("1");
-    speedLabel->setVisible(m68k);
-    speed->setVisible(m68k);
+    // Original/Uncapped for every device; the Engine choice has no JIT to pick on a 68k.
+    const bool engineShown = !m68k;
+    speedLabel->setVisible(true);
+    speed->setVisible(true);
     engineLabel->setVisible(engineShown);
     engine->setVisible(engineShown);
-    speedGroup->setVisible(m68k || engineShown);
+    speedGroup->setVisible(true);
     const bool soundSupported = device != Device::automatic && frondFirmware::capabilities(device).sound;
     audio->setEnabled(soundSupported);
     audio->setToolTip(soundSupported ? QString() : device == Device::automatic ? tr("Choose firmware first") :

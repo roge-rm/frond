@@ -25,7 +25,7 @@ class MachineSettings : public QWidget {
     QCheckBox *smoothLcd, *audio, *fastAudio, *showKeyboard;
     QComboBox* jogControls;
     QLabel* jogControlsLabel;
-    // Only shown with FROND_ENGINE_SETTING=1 until the Fast engine is qualified; never for 68k devices.
+    // Never shown for 68k devices.
     QComboBox* engine;
     // 68k devices only.
     QSlider* contrast;

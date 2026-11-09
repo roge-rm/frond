@@ -1722,7 +1722,7 @@ for line in s.makefile('rb'):
                 ++dialogs;
                 firmware->findChild<QLineEdit*>("nor")->setText(romPath);
                 auto* settings = firmware->machineSettings;
-                // Detected as a IIIx: contrast and speed, no Engine even with FROND_ENGINE_SETTING=1.
+                // Detected as a IIIx: contrast and speed, no Engine.
                 QVERIFY(settings->contrast->isVisibleTo(firmware) && settings->speed->isVisibleTo(firmware));
                 QVERIFY(!settings->engine->isVisibleTo(firmware) && !settings->fastAudio->isVisibleTo(firmware));
                 QCOMPARE(settings->contrast->value(), 50);
@@ -1907,9 +1907,9 @@ for line in s.makefile('rb'):
         QDir(managedFolder()).removeRecursively();
         QSettings().clear();
     }
-    // Edit settings: a IIIx has Contrast and Original/Uncapped speed, never the Engine; ARM devices the reverse.
+    // Edit settings: a IIIx has Contrast and Original/Uncapped speed, never the Engine; ARM devices have
+    // the speed too, no contrast, and the Engine.
     void iiixSettings() {
-        qputenv("FROND_ENGINE_SETTING", "1");
         const auto iiix = frondFirmware::deviceFromId("palm-iiix");
         frondSessions::Preferences prefs;
         QCOMPARE(prefs.contrast, 50);
@@ -1932,12 +1932,9 @@ for line in s.makefile('rb'):
         {
             MachineSettingsDialog dialog(frondFirmware::Device::tx, prefs); dialog.show();
             QVERIFY(dialog.controls->engine->isVisibleTo(&dialog));
-            QVERIFY(!dialog.controls->contrast->isVisibleTo(&dialog) && !dialog.controls->speed->isVisibleTo(&dialog));
+            QVERIFY(!dialog.controls->contrast->isVisibleTo(&dialog) && dialog.controls->speed->isVisibleTo(&dialog));
         }
-        qunsetenv("FROND_ENGINE_SETTING");
         {
-            MachineSettingsDialog dialog(frondFirmware::Device::tx, prefs); dialog.show();
-            QVERIFY(!dialog.controls->engine->isVisibleTo(&dialog) && !dialog.controls->speed->isVisibleTo(&dialog));
             MachineSettingsDialog iiixDialog(iiix, prefs); iiixDialog.show();
             QVERIFY(!iiixDialog.controls->engine->isVisibleTo(&iiixDialog) && iiixDialog.controls->speed->isVisibleTo(&iiixDialog));
         }
@@ -3402,6 +3399,7 @@ for line in s.makefile('rb'):
             QVERIFY(read(".args").contains("--window-scale\n1.75"));
             QVERIFY(read(".args").contains("--no-sound") && read(".args").contains("--smooth-lcd") && !read(".args").contains("--fast-audio"));
             QVERIFY(read(".args").contains("--low-latency-queue"));
+            QVERIFY(!read(".args").contains("--mips"));
             sound->click(); QTRY_VERIFY(read(".commands").contains("audio-on"));
             frondSessions::Preferences prefs;
             QVERIFY(frondSessions::readPreferences(one, &prefs)); QVERIFY(prefs.audio);
@@ -3447,11 +3445,16 @@ for line in s.makefile('rb'):
             QCOMPARE(QSettings().value("lastSession").toString(), QFileInfo(one).canonicalFilePath());
         }
         {
+            // An ARM device's Uncapped speed is a high --mips; Original passes none, so the core uses the device's own.
+            frondSessions::Preferences uncapped;
+            QVERIFY(frondSessions::readPreferences(two, &uncapped)); uncapped.uncapped = true;
+            QVERIFY(frondSessions::writePreferences(two, uncapped).isEmpty());
             MainWindow next(core.fileName()); next.show(); next.openSession(two, true);
             auto* sound = next.findChild<QCheckBox*>("sound"); QTRY_VERIFY(sound->isEnabled()); QVERIFY(sound->isChecked());
             QVERIFY(read(".args").contains("--window-scale\n1"));
             QVERIFY(!read(".args").contains("--no-sound") && !read(".args").contains("--smooth-lcd") && !read(".args").contains("--fast-audio"));
             QVERIFY(!read(".args").contains("--low-latency-queue"));
+            QVERIFY(read(".args").contains("--mips\n1000\n"));
             sound->click(); QTRY_VERIFY(read(".commands").contains("audio-off"));
             frondSessions::Preferences prefs;
             QVERIFY(frondSessions::readPreferences(two, &prefs)); QVERIFY(!prefs.audio);

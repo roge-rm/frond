@@ -4,7 +4,7 @@ How to measure speed, latency and audio, and which diagnostic patches exist. Com
 
 ## Engines
 
-Each machine runs on the Exact engine (the interpreter) or the Fast engine (the Dynarmic JIT, built in on x86-64 and arm64 unless `FROND_FAST=0`). `--engine exact|fast` picks one, default exact. The desktop shows an Engine setting when started with `FROND_ENGINE_SETTING=1`. `FROND_JIT=1` or `0` in the environment overrides both. A debugger attached to a machine runs it on Exact. The Palm IIIx (`frond-68k`) only has the Exact engine, there is no JIT for 68k and the setting is hidden for it.
+Each machine runs on the Exact engine (the interpreter) or the Fast engine (the Dynarmic JIT, built in on x86-64 and arm64 unless `FROND_FAST=0`). `--engine exact|fast` picks one, default exact. `FROND_JIT=1` or `0` in the environment overrides both. A debugger attached to a machine runs it on Exact. The Palm IIIx (`frond-68k`) only has the Exact engine, there is no JIT for 68k and the setting is hidden for it.
 
 Fast interprets code until a block has been reached a few times, then compiles it on a background thread. Tuning variables, for measuring and tests only:
 
