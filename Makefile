@@ -1448,3 +1448,11 @@ test-68k-bus-state: prepare
 	$(MAKE) -C build/source/src/common libcommon.a
 	$(MAKE) -C build/source/src/cloudpilot FROND_68K=1 -f Makefile \
 		-f $(CURDIR)/tests/68k-bus-state.mk FROND_TEST_ROOT=$(CURDIR) bus-state-test
+
+.PHONY: test-raw-print-job
+RAW_PRINT_BUILD ?= build/raw-print-job
+RAW_PRINT_SOURCE ?= $(RAW_PRINT_BUILD)/source
+test-raw-print-job:
+	python3 tools/prepare.py --destination $(RAW_PRINT_SOURCE)
+	$(CXX) -std=c++17 -O2 -Wall -Wextra -Werror -I$(RAW_PRINT_SOURCE)/src/common tests/raw-print-job.cpp -o $(RAW_PRINT_BUILD)/test-raw-print-job
+	$(RAW_PRINT_BUILD)/test-raw-print-job
