@@ -1,6 +1,6 @@
 # Raw print jobs
 
-`src/common/RawPrintJob.h` owns one bounded raw byte stream, independent of USB or infrared. It is header-only and has no platform dependencies. `make test-raw-print-job` builds its focused test against an isolated reconstruction. `make test-raw-print-file` checks retained staging files and uncertain results after output and cleanup failures.
+`src/common/RawPrintJob.h` owns one bounded raw byte stream, independent of USB or infrared. It is header-only and has no platform dependencies. `make test-raw-print-job` builds its focused test against an isolated reconstruction. `make test-raw-print-file` checks retained staging files and uncertain results after output and cleanup failures, and a rejected result with the staging path when the directory flush fails after cleanup.
 
 One owner uses it on one thread. Copying is disabled. Choose the byte limit at construction, call `begin`, append packet payloads, then call `finish` with a synchronous output callback or `abort`. Append copies the whole chunk or fails the whole job. Overflow, invalid nonempty input and allocation failure discard the buffered prefix and prohibit publication. Zero-length append is valid, including with a null pointer. A zero limit permits an empty job. The buffer retains capacity for reuse, bounded by the chosen limit in logical bytes; allocator overhead and vector capacity are not a process-memory quota. Destruction discards unfinished bytes without output.
 
