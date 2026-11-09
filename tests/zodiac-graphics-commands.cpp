@@ -6,14 +6,14 @@
 #include "zodiac-graphics-hostdata.h"
 #include "zodiac-graphics-keyed-copy.h"
 
-int main() {
+static void checkCommands(bool packedMono) {
     using A = Imx1BootstrapAccess;
     Imx1Eim eim;
     uint32_t value = 0x3e00;
     assert(eim.access(0x00220028,4,true,value) == Imx1EimAccess::ok);
     value = 0x11111e01;
     assert(eim.access(0x0022002c,4,true,value) == Imx1EimAccess::ok);
-    Imx1Cs5Configuration state(Imx1GraphicsProfile::virtual5744Compatible8MiB);
+    Imx1Cs5Configuration state(Imx1GraphicsProfile::virtual5744Compatible8MiB,false,packedMono);
     configureGraphicsInterface(state,eim);
     configureGraphicsController(state,eim);
     struct Op { uint32_t pc, address, value; bool write; };
@@ -207,8 +207,14 @@ int main() {
     badRectangle[11] = 0x01e10140;
     submitRectangle(badRectangle,false);
     checkHostData(submitted,commands,eim);
+    checkPackedMono(submitted,commands,eim);
     checkKeyedCopy(submitted,commands,eim);
     submitted.reset(); commands.reset();
     assert(!submitted.engineState().completed() && !submitted.engineState().ringBytes());
     std::puts("PASS: native ring packet decoding, delayed RGB565 solid paint, consumer/busy/readback guards and rejection");
+}
+
+int main() {
+    checkCommands(false);
+    checkCommands(true);
 }

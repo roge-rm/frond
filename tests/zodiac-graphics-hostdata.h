@@ -233,4 +233,207 @@ inline void checkHostData(const Imx1Cs5Configuration& boot, const Imx1GraphicsCo
     assert(strict.access(eim,0x200ac300,0x16010220,4,true,value) != A::ok);
     std::puts("PASS: bounded native HOST_DATA_BLT RGB565, owned row pixels, clipping, timing and atomic rejection");
 }
+
+// Packed 1bpp host data. Payload shape follows the original producer and writer;
+// drawing is the named virtual policy and is only checked as that policy.
+inline void checkPackedMono(const Imx1Cs5Configuration& boot, const Imx1GraphicsCommands& bootCommands,
+                            const Imx1Eim& eim) {
+    using A = Imx1BootstrapAccess;
+    auto state = boot;
+    auto commands = bootCommands;
+    Imx1GraphicsMemory memory;
+    auto put = [&](uint32_t index, uint32_t word) {
+        assert(memory.accessGpu(state,eim,0x150000+(index & 16383)*4,4,true,word) == A::ok);
+    };
+    std::vector<uint32_t> bridge;
+    for (int i = 0; i < 5; ++i)
+        for (uint32_t w : {0x4023841fu,0xffffu,0x014001e0u}) bridge.push_back(w);
+    bridge.push_back(0x4a0); bridge.push_back(0);
+    for (unsigned i = 0; i < bridge.size(); ++i) put(47+i,bridge[i]);
+    uint32_t value = 64;
+    assert(state.access(eim,0x200b0200,0x16010220,4,true,value) == A::ok);
+    assert(commands.prepare(state,eim,memory) == A::ok);
+    state.startEngine(commands.duration());
+    assert(state.advanceCpuCycles(uint32_t(commands.duration())));
+    assert(commands.complete(state,eim,memory) == A::ok && state.engineState().consumer() == 64);
+    const auto ready = state;
+    const auto readyCommands = commands;
+    const uint32_t fg = 0x001f, bg = 0xffe0, base = 0xf51000;
+    // RGB565 host words first, then the GMC-only change the producer emits for format 0.
+    auto header = [&](uint32_t topLeft, uint32_t bottomRight, uint32_t gmc = 0x579884df) {
+        return std::vector<uint32_t>{0x4025941b,0x5798b4df,0x00cc0b00,0x41b,gmc,
+            0x40200c70,bottomRight,base,0x402,0x140,0x46f,topLeft,0x490,0xabcd0000u|fg,0x491,0x12340000u|bg};
+    };
+    // Writer 200b7984: two little-endian source halfwords per word, low then high.
+    auto words = [](const std::vector<uint8_t>& bytes) {
+        std::vector<uint32_t> out;
+        for (size_t at = 0; at < bytes.size(); at += 4) {
+            const uint32_t low = bytes[at] | uint32_t(bytes[at+1]) << 8;
+            const uint32_t high = bytes[at+2] | uint32_t(bytes[at+3]) << 8;
+            out.push_back(low | high << 16);
+        }
+        return out;
+    };
+    auto packet = [&](std::vector<uint32_t> batch, uint32_t x, uint32_t y, uint32_t width, uint32_t height,
+                      const std::vector<uint32_t>& payload) {
+        batch.push_back(0xc0001900u | ((width/32*height+1) << 16));
+        batch.push_back(y << 16 | x); batch.push_back(height << 16 | width);
+        batch.insert(batch.end(),payload.begin(),payload.end());
+        return batch;
+    };
+    auto submit = [&](const std::vector<uint32_t>& batch, Imx1Cs5Configuration& candidate, Imx1GraphicsCommands& work,
+                      uint32_t pc = 0x200ac300) {
+        for (unsigned i = 0; i < batch.size(); ++i) put(64+i,batch[i]);
+        uint32_t producer = (64+uint32_t(batch.size())) & 16383;
+        const auto status = candidate.access(eim,pc,0x16010220,4,true,producer);
+        return status == A::ok ? work.prepare(candidate,eim,memory) : status;
+    };
+    auto read = [&](uint32_t x, uint32_t y) {
+        uint32_t v = 0;
+        assert(memory.accessGpu(ready,eim,base+y*640+x*2,2,false,v) == A::ok);
+        return v;
+    };
+    auto paint = [&](uint32_t colour) {
+        for (uint32_t i = 0; i < 110*640; i += 4) {
+            uint32_t v = colour | colour << 16;
+            assert(memory.accessGpu(ready,eim,base+i,4,true,v) == A::ok);
+        }
+    };
+    auto reject = [&](const std::vector<uint32_t>& batch) {
+        auto candidate = ready; auto work = readyCommands;
+        for (unsigned i = 0; i < batch.size(); ++i) put(64+i,batch[i]);
+        const auto internal = memory.dirty(0), external = memory.dirty(1);
+        uint32_t producer = (64+uint32_t(batch.size())) & 16383;
+        assert(candidate.access(eim,0x200ac300,0x16010220,4,true,producer) == A::ok);
+        assert(work.prepare(candidate,eim,memory) != A::ok);
+        assert(work.duration() == readyCommands.duration());
+        assert(memory.dirty(0).generation == internal.generation && memory.dirty(1).generation == external.generation);
+    };
+    auto run = [&](const std::vector<uint32_t>& batch, uint64_t pixels) {
+        auto candidate = ready; auto work = readyCommands;
+        assert(submit(batch,candidate,work) == A::ok);
+        assert(work.duration() == batch.size()+1+pixels);
+        assert(candidate.engineState().hostDataSubmission() && candidate.engineState().consumer() == 64);
+        // Pending pixels and colours are owned by the command, with the ring overwritten.
+        for (unsigned i = 0; i < batch.size(); ++i) put(64+i,0);
+        candidate.startEngine(work.duration());
+        assert(candidate.advanceCpuCycles(uint32_t(work.duration()-1)));
+        assert(work.complete(candidate,eim,memory) == A::sequence);
+        assert(candidate.advanceCpuCycles(1) && work.complete(candidate,eim,memory) == A::ok);
+        assert(candidate.engineState().emptyRing());
+    };
+    // 84x84 at 1bpp: 12 source bytes a row, with the 12 padding bits set to show they stay hidden.
+    std::vector<uint8_t> source(84*12);
+    uint32_t seed = 0x1100;
+    for (auto& byte : source) { seed = seed*1103515245u+12345u; byte = uint8_t(seed >> 16); }
+    for (unsigned y = 0; y < 84; ++y) { source[y*12+10] |= 0x0f; source[y*12+11] = 0xff; }
+    const auto payload = words(source);
+    const auto whole = packet(header(0x00140064,0x006800b8),100,20,96,84,payload);
+    assert(payload.size() == 252 && whole[16] == 0xc0fd1900 && whole[18] == 0x00540060);
+    assert(!Imx1Cs5Configuration(Imx1GraphicsProfile::strict,false,true).packedMonoEnabled());
+    {
+        // The mix shadow follows GMC 579884df only under the policy. A solid fill after it
+        // still sees the boot PATCOPY mix when the policy is off.
+        auto candidate = ready; auto work = readyCommands;
+        const auto status = submit({0x41b,0x579884df,0x41b,0x55e0a4df,0xc0011a00,0,0x00020001},
+                                   candidate,work,0x200b0200);
+        assert((status == A::ok) == !boot.packedMonoEnabled());
+        // A packet cut off before its coordinates is a sequence stop either way.
+        auto cut = header(0x00140064,0x006800b8);
+        cut.push_back(0xc0fd1900);
+        candidate = ready; work = readyCommands;
+        assert(submit(cut,candidate,work) == A::sequence);
+        cut.push_back(0x00140064);
+        candidate = ready; work = readyCommands;
+        assert(submit(cut,candidate,work) == A::sequence);
+    }
+    if (!boot.packedMonoEnabled()) {
+        // Without the declared policy the producer's packed rows stay guarded.
+        reject(whole);
+        std::puts("PASS: packed 1bpp host data is guarded without the virtual policy");
+        return;
+    }
+    auto bit = [&](unsigned x, unsigned y) { return (source[y*12+x/8] >> (7-x%8)) & 1; };
+    auto checkImage = [&]() {
+        for (unsigned y = 0; y < 84; ++y) {
+            for (unsigned x = 0; x < 84; ++x) assert(read(100+x,20+y) == (bit(x,y) ? fg : bg));
+            // Padding columns 84..95 and both neighbours keep the destination.
+            for (unsigned x : {99u,184u,185u,195u,196u}) assert(read(x,20+y) == 0x1234);
+        }
+        for (unsigned x = 99; x < 197; ++x) assert(read(x,19) == 0x1234 && read(x,104) == 0x1234);
+    };
+    paint(0x1234);
+    run(whole,84*84);
+    checkImage();
+    // Synthetic 40/44 split. The 200abde4 row loop (native-submit-pseudo.c, zodiac-after-splash-budget-20261108)
+    // sets the scissor once, then commits whole-row parts at 200ac300 with Y advanced.
+    // Rows per part come from 200c78b4 and the ring space, which this test does not model.
+    paint(0x1234);
+    const std::vector<uint32_t> upper(payload.begin(),payload.begin()+40*3), lower(payload.begin()+40*3,payload.end());
+    run(packet(header(0x00140064,0x006800b8),100,20,96,40,upper),84*40);
+    for (unsigned x = 100; x < 184; ++x) assert(read(x,60) == 0x1234);
+    run(packet(header(0x00140064,0x006800b8),100,60,96,44,lower),84*44);
+    checkImage();
+    // virtualPackedMonoMsbFirst and virtualPackedMonoSetBitForeground, one bit at a time.
+    for (unsigned sample = 0; sample < 32; ++sample) {
+        std::vector<uint8_t> row(4);
+        row[sample/8] = uint8_t(0x80 >> (sample%8));
+        paint(0x1234);
+        run(packet(header(0x00050020,0x00060040),32,5,32,1,words(row)),32);
+        // virtualPackedMonoOpaqueCopy: clear bits replace the destination with the background.
+        for (unsigned x = 0; x < 32; ++x) assert(read(32+x,5) == (x == sample ? fg : bg));
+        assert(read(31,5) == 0x1234 && read(64,5) == 0x1234 && read(32,4) == 0x1234 && read(32,6) == 0x1234);
+    }
+    // virtualPackedMonoExclusiveScissor: right 37 and bottom 6 are the first column and row not drawn.
+    paint(0x1234);
+    run(packet(header(0x00050020,0x00060025),32,5,32,2,{0xffffffff,0xffffffff}),5);
+    for (unsigned x = 32; x < 37; ++x) assert(read(x,5) == fg && read(x,6) == 0x1234);
+    assert(read(37,5) == 0x1234);
+    // virtualPackedMonoZeroPhase: a row aligned to source x 0 at 96 with the left scissor at 100
+    // puts sample 4 on column 100.
+    paint(0x1234);
+    run(packet(header(0x00050064,0x00060078),96,5,32,1,words({0xf5,0xa0,0xff,0x00})),20);
+    for (unsigned x = 96; x < 100; ++x) assert(read(x,5) == 0x1234);
+    for (unsigned x = 100; x < 112; ++x) {
+        const unsigned sample = x-96;
+        assert(read(x,5) == ((sample < 8 ? 0xf5 >> (7-sample) : 0xa0 >> (15-sample)) & 1 ? fg : bg));
+    }
+    for (unsigned x = 112; x < 120; ++x) assert(read(x,5) == fg);
+    assert(read(120,5) == 0x1234);
+    // An explicit datatype write with source field 0 is also admitted.
+    auto typed = header(0x00050020,0x00060040);
+    typed.insert(typed.end(),{0x4b1,0x40000d04});
+    paint(0x1234);
+    run(packet(typed,32,5,32,1,{0}),32);
+    assert(read(32,5) == bg);
+    paint(0x1234);
+    const std::vector<uint32_t> two{0x000000ff,0xff000000};
+    // Row shape: widths that are not whole words, wrong counts and short or long payloads.
+    for (uint32_t width : {84u,31u,33u,16u,0u}) {
+        auto bad = packet(header(0x00050020,0x00060040),32,5,32,2,two); bad[18] = 2u << 16 | width; reject(bad);
+    }
+    for (uint32_t count : {2u,4u,5u}) {
+        auto bad = packet(header(0x00050020,0x00060040),32,5,32,2,two); bad[16] = 0xc0001900u | count << 16; reject(bad);
+    }
+    { auto bad = packet(header(0x00050020,0x00060040),32,5,32,2,two); bad.pop_back(); reject(bad); }
+    { auto bad = packet(header(0x00050020,0x00060040),32,5,32,2,two); bad.push_back(0); reject(bad); }
+    // Source field 1, other ROPs and other datatype words are outside the declared policy.
+    reject(packet(header(0x00050020,0x00060040,0x579894df),32,5,32,2,two));
+    { auto bad = packet(header(0x00050020,0x00060040,0x579894df),32,5,32,2,std::vector<uint32_t>(32,0));
+      bad[16] = 0xc0211900; reject(bad); }
+    reject(packet(header(0x00050020,0x00060040,0x57e084df),32,5,32,2,two));
+    for (uint32_t datatype : {0x40000c04u,0x00000d04u,0x40000d06u}) {
+        auto bad = header(0x00050020,0x00060040);
+        bad.insert(bad.end(),{0x4b1,datatype});
+        reject(packet(bad,32,5,32,2,two));
+    }
+    // RGB565 rows keep their own guard on an interior upper scissor edge.
+    { auto bad = packet(header(0x00050020,0x00060025,0x5798b4df),32,5,32,2,std::vector<uint32_t>(32,0));
+      bad[16] = 0xc0211900; reject(bad);
+      bad[6] = 0x00070040; auto candidate = ready; auto work = readyCommands;
+      assert(submit(bad,candidate,work) == A::ok); }
+    for (unsigned x = 0; x < 320; ++x) for (unsigned y = 0; y < 110; ++y) assert(read(x,y) == 0x1234);
+    std::puts("PASS: packed 1bpp host rows, 84 in 96 with split parts, under the declared virtual policy "
+              "(MsbFirst, SetBitForeground, OpaqueCopy, ExclusiveScissor, ZeroPhase)");
+}
 #endif

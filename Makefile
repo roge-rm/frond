@@ -1835,6 +1835,10 @@ test-zodiac-graphics-a4: build/zodiac-boot-probe
 	./build/test-zodiac-graphics-a4
 	python3 tests/zodiac-graphics-a4.py
 
+.PHONY: test-zodiac-graphics-packed-mono
+test-zodiac-graphics-packed-mono: build/zodiac-boot-probe
+	python3 tests/zodiac-graphics-packed-mono.py
+
 .PHONY: test-zodiac-graphics-plain-copy
 test-zodiac-graphics-plain-copy: build/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
