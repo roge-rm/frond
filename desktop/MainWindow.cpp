@@ -949,6 +949,12 @@ void MainWindow::refresh() {
         for (auto* w : widgets) w->setVisible(present);
     };
     {
+        const QSignalBlocker blocked(irda);
+        const auto mode = irda->currentData();
+        frondLink::setPhoneChoice(irda, caps.irPhone);
+        if (const int at = irda->findData(mode); at >= 0) irda->setCurrentIndex(at);
+    }
+    {
         const QSignalBlocker blocked(serial);
         const auto mode = serial->currentData();
         frondLink::setModemChoice(serial, caps.modem);
@@ -1978,6 +1984,7 @@ QString MainWindow::irdaArgument() const {
 void MainWindow::loadIrdaSettings() {
     const auto& value = runningPreferences.infrared;
     const QSignalBlocker blocked(irda);
+    frondLink::setPhoneChoice(irda, frondFirmware::capabilities(runningDevice).irPhone);
     frondLink::addConnectionChoices(irda, value);
     irda->setCurrentIndex(std::max(0, irda->findData(value.startsWith("tcp:") ? QString("tcp") : value)));
     irdaPort->setValue(value.startsWith("tcp:") ? value.mid(4).toInt() : 5030);
@@ -1999,6 +2006,13 @@ void MainWindow::showIrda(const QString& state) {
     irda->setCurrentIndex(std::max(0,irda->findData(mode)));
     if(mode=="tcp"){
         const auto port=parts.value(1).section(':',-1).toInt();if(port>0)irdaPort->setValue(port);
+    }
+    if (mode == "phone") {
+        const auto phase = parts.value(1);
+        irdaState->setText(phase == "online" && parts.size() > 2 ? tr("Mobile phone: online at %1").arg(parts[2])
+                           : phase == "dialling" ? tr("Mobile phone: dialling")
+                           : phase == "linked" ? tr("Mobile phone: linked") : tr("Mobile phone: idle"));
+        refresh(); return;
     }
     irdaState->setText(state=="off"?QString():tr("Infrared: %1").arg(state));refresh();
 }

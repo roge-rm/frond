@@ -209,7 +209,11 @@ enum class LinkKind { BEAM, BLUETOOTH, SERIAL, USB }
 fun LinkChoiceDialog(kind: LinkKind, model: RunningModel, onDismiss: () -> Unit) {
     val context = LocalContext.current
     when (kind) {
-        LinkKind.BEAM -> ConnectionChoiceDialog("Infrared beaming", model.beam.choice, onDismiss) { onDismiss(); model.changeBeam(it) }
+        LinkKind.BEAM -> {
+            val current = model.beam.choice
+            val choices = remember { InfraredChoice.infraredChoices(current, LinkStore.choices(InfraredChoice.folder(context)), model.device.irPhone) }
+            ConnectionChoiceDialog("Infrared beaming", current, onDismiss, choices) { onDismiss(); model.changeBeam(it) }
+        }
         LinkKind.SERIAL -> {
             val current = model.serial.choice
             val choices = remember { InfraredChoice.serialChoices(current, LinkStore.choices(InfraredChoice.folder(context)), model.device.modem) }

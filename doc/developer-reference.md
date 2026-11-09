@@ -421,11 +421,12 @@ The per-machine settings file `<name>.frond.settings.json` has `infrared`, `seri
 | Key | Values |
 | --- | --- |
 | `infrared`, `serial` | `off`, `pty`, `tcp:PORT`, `link:local` (This computer, desktop), `link:ID` |
+| `infrared` | also `phone` on a device with the `irPhone` capability: the desktop passes `--irda phone`, Android sends `irda-mode phone` once the core answers and opens no link |
 | `serial` | also `modem` on a device with the `modem` capability (the IIIx): the desktop passes `--serial modem`, Android sends `serial-mode modem` once the core answers and opens no link |
 | `usb` | `off`, `pty`, `tcp:PORT` |
 | `bluetooth` | `off`, `radio` (This Frond), `socket:/absolute/path`, `link:ID` |
 
-A `link:ID` that isn't in the store acts as `off` and shows as Unknown connection. The Android metadata `settings` holds `infrared`, `serial` and `bluetooth` the same way, with only `off`, `radio` and `link:ID` (and `modem` for `serial`). Nothing goes into the `.frond` session. With a link or `radio` choice the desktop starts the core with `--irda`, `--serial` or `bluetooth-mode` pointing at the hub's sockets.
+A `link:ID` that isn't in the store acts as `off` and shows as Unknown connection. The Android metadata `settings` holds `infrared`, `serial` and `bluetooth` the same way, with only `off`, `radio` and `link:ID` (and `modem` for `serial`, `phone` for `infrared`). Nothing goes into the `.frond` session. With a link or `radio` choice the desktop starts the core with `--irda`, `--serial` or `bluetooth-mode` pointing at the hub's sockets.
 
 ### btvirt
 
@@ -613,6 +614,45 @@ The debugger costs almost nothing while no gdb is connected. `make test-frond-68
 ### Serial PPP
 
 `tools/palm-pppd.sh` connects the serial port to slirp or pppd, see [Palm IIIx serial and PPP](using-frond.md#palm-iiix-serial-and-ppp).
+
+### Modem and mobile phone
+
+The snap-on modem (`modem` capability, IIIx) and the infrared phone (`irPhone` capability: IIIx, T|X, TG50, E2, E3, Zire 72) are the core's own, with no link or socket. Both run one engine from `src/common` on guest time: `HayesModem`, `PppServer` and slirp (`SlirpIp`), and for the phone IrLAP, IrLMP, IAS, Tiny TP and IrCOMM (`src/common/ir`). Accessory state isn't saved: loading a session gives NO CARRIER if a call was up, and the guest's IrLAP times out and redials.
+
+| What | Value |
+|---|---|
+| Flags | `--serial modem`, `--irda phone` |
+| Console and control | `serial-mode modem`, `irda-mode phone`; `unsupported` on other devices, and for the phone on a 68k ROM before Palm OS 3.3 |
+| Settings values | `serial` `modem`, `infrared` `phone` |
+| `serial-state` | `modem idle\|dialling\|online 33600` |
+| `irda-state` | `phone idle\|linked\|dialling\|online 33600` |
+| Desktop text | "Modem: idle", "Modem: dialling", "Modem: online at 33600", and the same with "Mobile phone:" ("linked" too) |
+| Exclusive | The phone and the infrared keyboard refuse each other; the desktop greys the keyboard while the phone is on |
+
+The line is 33600. The guest is 10.0.2.15, the router 10.0.2.2 and DNS 10.0.2.3, with slirp behind it. PPP is async HDLC with LCP, PAP accepted if sent, and IPCP with DNS. A `login:` and `Password:` prompt comes first that takes any line, and the first 0x7e starts PPP, so the Unix template and Windows RAS both work. On Android DNS comes from `HostDns`, started by `FrondActivity`, which `Frond68kActivity` extends.
+
+AT commands (`HayesModem`):
+
+| Command | Does |
+|---|---|
+| `AT`, `A/` | Prefix (case folds); `A/` repeats the last line |
+| `D`, `DT`, `DP` | Dial. Digits, `*`, `#`, `A` to `D`, `,` (S8), `W`, `@`, `!`, `;`, `L` redials. Dial time is S6 plus 100 ms a tone digit (pulse: 700 ms plus 100 ms a pulse), then 6 s of handshake, capped by S7 |
+| `A` | NO CARRIER, there is never a call to answer |
+| `E`, `Q`, `V` | Echo, quiet and verbose results (numeric CONNECT is always 1) |
+| `X0` to `X4` | Result set. X0 and X1 can't give NO DIALTONE or BUSY, X2 not BUSY; above 4 is ERROR |
+| `H`, `O`, `Z`, `&F` | Hang up, back online after `+++`, reset, factory settings |
+| `I` | 0 gives the line speed, others "Frond data modem" |
+| `Sn=v`, `Sn?` | S-registers, `?` prints three digits. S0, S2 (escape), S3, S5, S6, S7, S8, S12 are used |
+| `&Dn` | A DTR drop does nothing (0), goes to command mode (1), hangs up (2) or resets (3) |
+| `&C`, `&K`, `+...`, `*NCnn` and other vendor commands | Taken and ignored |
+| `B`, `C`, `L`, `M`, `N`, `W` and other letters | Taken and ignored |
+| `+++` | Escape after a guard time (S12 in 20 ms steps) on guest time, then `ATO` or `ATH0` |
+
+Results: OK, CONNECT 33600, NO CARRIER, ERROR, NO DIALTONE, BUSY, NO ANSWER. Unknown letters give OK. Turning the serial line driver off powers the modem down: it hangs up and resets.
+
+Dial plan: the default plan is empty, so every number connects. `HayesModem::Options::dialPlan` maps dialled digit strings to BUSY, NO ANSWER, NO DIALTONE or NO CARRIER for tests. An empty number gives NO CARRIER.
+
+IR phone details: it answers discovery in a random slot as "IrCOMM" (hints PDA and IrCOMM), takes SNRM with up to 115200 baud, window 1 and 512 byte frames, answers at the guest's own minimum turnaround, and serves `IrDA:IrCOMM` and `IrDA:IrLMP` in IAS. IrCOMM is 9-wire cooked, 3-wire cooked or raw, and the modem is powered while IrCOMM is open. `irda-stats` gives `frames_in= frames_out= bad= connects= resent= timeouts=`. Tests: `make test-modem`, `make test-ir-peer`.
 
 ## Using an IDE
 

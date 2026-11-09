@@ -68,7 +68,7 @@ fun MachineSettingsScreen(model: HomeModel) {
             if (draft.device.infrared || draft.device.serialPort || draft.device.bluetooth) Header("Connections", Modifier.padding(top = 16.dp))
             if (draft.device.infrared) {
                 val choices = remember(draft.settings.infrared) {
-                    InfraredChoice.choices(draft.settings.infrared, LinkStore.choices(InfraredChoice.folder(context)))
+                    InfraredChoice.infraredChoices(draft.settings.infrared, LinkStore.choices(InfraredChoice.folder(context)), draft.device.irPhone)
                 }
                 Choice("Infrared", draft.settings.infrared, choices.map { it.first }, { v -> choices.first { it.first == v }.second }) {
                     model.changeMachineSettings(draft.settings.copy(infrared = it))

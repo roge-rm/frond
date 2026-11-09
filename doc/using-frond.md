@@ -299,6 +299,35 @@ On 3.1 set the modem to Direct Connect if it's offered and the phone to `00`.
 
 Programs that use NetLib, like a web clipping app or a telnet client, then work until you tap Disconnect or the machine sleeps. They also dial by themselves when the service isn't connected yet.
 
+### Dial-up modem
+
+The Palm IIIx has a snap-on modem on its serial port. Set Serial port to Modem in Edit settings (Linux, or in the Connections panel while it runs) or Machine settings (Android), then set up a connection in Palm OS the way you would for a real modem. Frond answers as a modem on a 33600 line and puts you on the internet through your computer's or phone's connection, with no root. Any number you dial connects. The line driver has to be on, so the modem only works while a program has the serial port open.
+
+1. Palm OS 3.1: open Prefs, Modem and pick Standard or Palm V Modem, speed 57600 or lower, then Network. Set the service's phone number to anything, for example `5551234`.
+2. Palm OS 3.5 and 4.1: open Prefs, Connection, make a new connection with Via Modem and a Palm Modem model (US/Canada), then in Network pick a service that uses it.
+3. In Network details set PPP, Query DNS on, IP address automatic. With the Unix template the user name and password can be anything, with Windows RAS leave the script empty.
+4. Tap Connect. The state line under Serial port goes from "Modem: idle" to "Modem: dialling" to "Modem: online at 33600".
+
+Disconnect hangs up. Saving while online and loading it again gives NO CARRIER, so connect again. The guest is 10.0.2.15, the router 10.0.2.2 and DNS 10.0.2.3.
+
+### Mobile phone over infrared
+
+Devices with an infrared phone can use Mobile phone in the Infrared list (Linux, and Android in Machine settings and the Connections sheet) instead of Off or a connection. Frond then plays a phone with a modem, reached over IrCOMM, and the Palm gets the same internet as with the dial-up modem. Detach the infrared keyboard first, as they share the port. Mobile phone needs Palm OS 3.3 or later.
+
+1. Palm OS 3.5: in Prefs, Connection, make a new connection with Via IrCOMM to Modem. Use it from Network as above.
+2. Palm OS 4.1: use the built-in IR to Phone connection.
+3. Dial any number, with PPP and Query DNS as above, and Connect.
+
+The state line reads "Mobile phone: idle", "linked" once the Palm has found the phone, "dialling", then "online at 33600". It takes about 5 to 20 seconds to come up. Infrared beaming to another Frond is off while Mobile phone is on.
+
+Modem and phone by device:
+
+| | Modem on serial | Mobile phone on infrared |
+|---|---|---|
+| Palm IIIx | yes, Palm OS 3.1, 3.5, 4.1 | yes, Palm OS 3.5 and 4.1 |
+| T\|X, TG50, E2, Zire 72 | no | yes |
+| Tungsten E3 | no | yes |
+
 ### USB HotSync
 
 Plugs the Palm's USB port into the computer. On Android use Wait for a peer, then `link-pty.py PHONE:5034 --link /tmp/palm-usb` on a computer. Start HotSync on the Palm (Local, Cradle/Cable), then run pilot-link, for example `pilot-xfer -p /dev/pts/7 -l`. The status line shows the bus step, and "enumerated" means it's ready. HotSync takes 15 to 20 seconds to start. pilot-link only opens serial devices, so for a TCP port put a PTY in front with `tools/link-pty.py` (a plain `socat` PTY doesn't work). Changing the setting or loading a session unplugs the cable and plugs it back in.
@@ -345,6 +374,8 @@ Tested: discovery, sending a Memo or file by Bluetooth (OPP), PIN and Trusted De
 | USB HotSync | yes | yes | yes | yes | |
 | Infrared beaming | yes | yes | yes | yes | yes |
 | Infrared keyboard | yes | yes | yes | yes | |
+| Mobile phone (infrared) | yes | yes | yes | yes | yes |
+| Dial-up modem | | | | | yes |
 | Bluetooth | yes | yes | yes | yes | |
 | Camera | | | no sensor | | |
 | Hold | | | | yes | |

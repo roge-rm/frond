@@ -111,6 +111,12 @@ inline void setModemChoice(QComboBox* combo, bool present) {
     if (!present && at >= 0) combo->removeItem(at);
     if (present && at < 0) combo->insertItem(std::max(0, combo->findData("tcp")) + 1, QCoreApplication::translate("frondLink", "Modem"), "modem");
 }
+// The same for Mobile phone (data "phone") on an infrared picker, for devices with an infrared phone.
+inline void setPhoneChoice(QComboBox* combo, bool present) {
+    const int at = combo->findData("phone");
+    if (!present && at >= 0) combo->removeItem(at);
+    if (present && at < 0) combo->insertItem(std::max(0, combo->findData("tcp")) + 1, QCoreApplication::translate("frondLink", "Mobile phone"), "phone");
+}
 // A link: setting whose connection is gone acts as Off.
 inline bool knownLink(const QString& value) {
     if (!value.startsWith("link:")) return false;

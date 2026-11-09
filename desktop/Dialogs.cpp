@@ -211,6 +211,7 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     };
     row(0, tr("Infrared"), "machineInfrared", prefs.infrared, 5030, infraredLabel, infrared, infraredPort);
     row(1, tr("Serial"), "machineSerial", prefs.serial, 5023, serialLabel, serial, serialPort);
+    if (prefs.infrared == "phone") { frondLink::setPhoneChoice(infrared, true); infrared->setCurrentIndex(infrared->findData("phone")); }
     if (prefs.serial == "modem") { frondLink::setModemChoice(serial, true); serial->setCurrentIndex(serial->findData("modem")); }
     bluetoothLabel = new QLabel(tr("Bluetooth"), peripherals);
     bluetooth = new QComboBox(peripherals);
@@ -315,6 +316,12 @@ void MachineSettings::setDevice(Device device) {
     bluetoothSocket->setVisible(hasBluetooth && bluetooth->currentData() == "socket");
     for (QWidget* w : {static_cast<QWidget*>(infraredLabel), static_cast<QWidget*>(infrared)}) w->setVisible(hasInfrared);
     infraredPort->setVisible(hasInfrared && infrared->currentData() == "tcp");
+    {
+        const QSignalBlocker blocked(infrared);
+        const auto mode = infrared->currentData();
+        frondLink::setPhoneChoice(infrared, known && frondFirmware::capabilities(device).irPhone);
+        if (const int at = infrared->findData(mode); at >= 0) infrared->setCurrentIndex(at);
+    }
     {
         const QSignalBlocker blocked(serial);
         const auto mode = serial->currentData();

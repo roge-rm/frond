@@ -147,12 +147,13 @@ open class FrondActivity : SDLActivity() {
             Thread { SdCard.restorePending(applicationContext, link, sessionPath) }.apply { isDaemon = true }.start()
         }
         // Infrared, serial and Bluetooth over a connection are set from the machine's settings at every start.
-        val infraredLink = InfraredChoice.linkId(machineSettings.infrared) != null
+        val infraredPhone = machineSettings.infrared == InfraredChoice.PHONE && launchDevice().irPhone
+        val infraredLink = InfraredChoice.linkId(machineSettings.infrared) != null || infraredPhone
         val serialModem = machineSettings.serial == InfraredChoice.MODEM && launchDevice().modem
         val serialLink = (InfraredChoice.linkId(machineSettings.serial) != null && launchDevice().serialPort) || serialModem
         val bluetoothLink = machineSettings.bluetooth != BluetoothChoice.OFF && launchDevice().bluetooth
         if (infraredLink || serialLink || bluetoothLink) {
-            if (infraredLink || (serialLink && !serialModem) || InfraredChoice.linkId(machineSettings.bluetooth) != null) askLocalNetwork()
+            if ((infraredLink && !infraredPhone) || (serialLink && !serialModem) || InfraredChoice.linkId(machineSettings.bluetooth) != null) askLocalNetwork()
             link.whenConnected {
                 Thread({
                     val name = Sessions.forPath(applicationContext, sessionPath)?.name ?: launchDevice().label

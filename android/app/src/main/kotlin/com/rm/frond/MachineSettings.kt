@@ -66,7 +66,7 @@ data class MachineSettings(
     // Android: whether the bar over the running machine shows.
     val barShown: Boolean = true,
     val barMode: BarMode = BarMode.AUTO_HIDE,
-    // Infrared: off, or link:<id> for a connection (InfraredChoice). Applied at every start.
+    // Infrared: off, phone (the core's own mobile phone), or link:<id> for a connection (InfraredChoice). Applied at every start.
     val infrared: String = InfraredChoice.OFF,
     // Serial: the same values, or modem on a device with a snap-on modem. The LAN serial options are gone.
     val serial: String = InfraredChoice.OFF,
@@ -135,7 +135,7 @@ data class MachineSettings(
                 speed = CpuSpeed.entries.firstOrNull { it.arg == json.optString("speed") } ?: fallback.speed,
                 barShown = json.optBoolean("barShown", fallback.barShown),
                 barMode = BarMode.entries.firstOrNull { it.arg == json.optString("barMode") } ?: fallback.barMode,
-                infrared = InfraredChoice.normalise(json.optString("infrared", fallback.infrared)),
+                infrared = InfraredChoice.normaliseInfrared(json.optString("infrared", fallback.infrared)),
                 serial = InfraredChoice.normaliseSerial(json.optString("serial", fallback.serial)),
                 bluetooth = BluetoothChoice.normalise(json.optString("bluetooth", fallback.bluetooth)),
             )
