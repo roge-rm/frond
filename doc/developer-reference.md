@@ -950,6 +950,15 @@ six shifted characters), accepts ASCII and uses US key positions. Palm OS applie
 caps, sticky modifiers and repeat. SDL physical keys use Ctrl, GUI for command
 and Alt for function. Dana frontend availability is still gated separately.
 
+The native Dana keyboard art shares these physical names. `danaKeyboardArt()`
+supplies key bounds and legends; `danaKeyAt()` returns an art index, not a scan or
+button ID. `DanaKeysHeld` stores pressed states by name and `drawDanaKeyboard()`
+renders them. `danaLayout()` fits the wide LCD above the keyboard in an inset-safe
+viewport, with the keyboard optionally hidden. Callers apply the viewport offset.
+The art does not dispatch input or enable the frontend.
+`make test-dana-keyboard-art` checks key inventory, hit areas, rendering and layouts.
+`DANA_ART_SOURCE` and `DANA_ART_BUILD` select isolated source and build directories.
+
 `make test-dana-input` checks the typed Dana host route without firmware.
 `tests/device-rom.py --keyboard-session READY.frond --keyboard-probe PROBE.prc`
 selects its guest keyboard check, with `--device alphasmart-dana` and a new

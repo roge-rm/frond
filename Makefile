@@ -227,6 +227,20 @@ test-sdl-audio: out/frond
 		$(CPU_TEST_LDLIBS) -o build/test-sdl-audio-buffer
 	./build/test-sdl-audio-buffer
 
+.PHONY: test-dana-keyboard-art
+test: test-dana-keyboard-art
+DANA_ART_SOURCE ?= build/source
+DANA_ART_BUILD ?= build
+test-dana-keyboard-art:
+	python3 tools/prepare.py --destination $(DANA_ART_SOURCE)
+	mkdir -p $(DANA_ART_BUILD)
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra $(shell pkg-config --cflags sdl2 SDL2_image) \
+		-I$(DANA_ART_SOURCE)/src/uarm/native -I$(DANA_ART_SOURCE)/src/uarm/uarm \
+		-I$(DANA_ART_SOURCE)/src/common \
+		tests/dana-keyboard-art.cpp $(DANA_ART_SOURCE)/src/uarm/native/DeviceControls.cpp \
+		$(shell pkg-config --libs sdl2 SDL2_image) -o $(DANA_ART_BUILD)/test-dana-keyboard-art
+	$(DANA_ART_BUILD)/test-dana-keyboard-art
+
 .PHONY: test-render-link
 test: test-render-link
 test-render-link: prepare
