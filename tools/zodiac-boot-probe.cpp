@@ -33,6 +33,10 @@ struct DiagnosticOutput {
     }
 };
 static bool peripheralTrace = false;
+// One passive window includes the selected fetched entry and up to 4096 earlier entries.
+static uint32_t windowPc = 0, windowOccurrence = 0, windowMatches = 0, windowNext = 0, windowCount = 0;
+static bool windowEmitted = false;
+static std::vector<Imx1ProbeTrace> traceWindow;
 static bool frameOutputFailed = false;
 static void captureFrame(void* context, uint32_t width, uint32_t height, const uint32_t* pixels) {
     std::ofstream output(static_cast<const char*>(context), std::ios::binary);
@@ -41,8 +45,7 @@ static void captureFrame(void* context, uint32_t width, uint32_t height, const u
         for (unsigned lane = 0; lane < 3; ++lane) output.put(char(pixels[i] >> (lane * 8)));
     frameOutputFailed = !output;
 }
-static void trace(void*, const Imx1ProbeTrace& t) {
-    if (peripheralTrace) return;
+static void printInstruction(const Imx1ProbeTrace& t) {
     if (t.instructionSize == 2) {
         std::printf("step=%u pc=%08x instruction=%04x cpsr=%08x operand=%08x width=2\n",
                     t.step, t.pc, t.instruction, t.cpsr, t.operand);
@@ -50,6 +53,24 @@ static void trace(void*, const Imx1ProbeTrace& t) {
     }
     std::printf("step=%u pc=%08x instruction=%08x cpsr=%08x operand=%08x width=4\n",
                 t.step, t.pc, t.instruction, t.cpsr, t.operand);
+}
+static void trace(void*, const Imx1ProbeTrace& t) {
+    if (!traceWindow.empty() && !windowEmitted) {
+        if (t.pc == windowPc && ++windowMatches == windowOccurrence) {
+            std::printf("trace-window begin pc=%08x occurrence=%u preceding=%u step=%u\n",
+                        windowPc, windowOccurrence, windowCount, t.step);
+            for (uint32_t i = 0; i < windowCount; ++i)
+                printInstruction(traceWindow[(windowNext + 4096 - windowCount + i) % 4096]);
+            printInstruction(t);
+            std::puts("trace-window end");
+            windowEmitted = true;
+        } else {
+            traceWindow[windowNext] = t;
+            windowNext = (windowNext + 1) % 4096;
+            if (windowCount < 4096) ++windowCount;
+        }
+    }
+    if (!peripheralTrace) printInstruction(t);
 }
 static void bus(void* context, const Imx1ProbeAccess& t) {
     if (peripheralTrace && t.status == Imx1BootstrapAccess::ok && t.address >= 0x08000000 &&
@@ -144,7 +165,7 @@ static bool parseRtcTime(const char* text, Imx1RtcTime& time) {
 }
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::fprintf(stderr, "Usage: %s ROM [physical|reset|linked] [instruction-budget] [exact|fast] [--bootstrap-peripherals] [--trace=peripherals] [--idle-hclk-budget=N] [--arm920-icache-index-compatibility] [--lcdc-contrast-only] [--imx1-mmcsd-empty-slot] [--frame-output=PATH] [--diagnostic-snapshot=PREFIX] [--assume-mpll-settled] [--virtual-mpll-retune] [--assume-spll-settled] [--assume-i2c-single-master] [--i2c-eeprom-image=PATH] [--asp-px1-input=high] [--asp-u-sample=WORD] [--rtc-initial-time=DAY:HH:MM:SS] [--cs4-port0-input=BYTE] [--cs4-indexed-input=BANK/INDEX/BYTE] [--cs5-reset-status-input=BYTE] [--graphics-profile=virtual5744-compatible-8mib] [--graphics-raw-axes=FIRST/SECOND] [--graphics-raw-mode1=SAMPLE] [--graphics-irq-connection=virtual-a13] [--gpio-a-input-masked=VALUE/MASK] [--gpio-input-event=N/PORT/VALUE/MASK] [--gpio-a-input=VALUE] [--gpio-b-input=VALUE] [--gpio-d-input=VALUE] [--ram-mib=32|128]\n", argv[0]);
+        std::fprintf(stderr, "Usage: %s ROM [physical|reset|linked] [instruction-budget] [exact|fast] [--bootstrap-peripherals] [--trace=peripherals] [--trace-window=PC/OCCURRENCE] [--idle-hclk-budget=N] [--arm920-icache-index-compatibility] [--lcdc-contrast-only] [--imx1-mmcsd-empty-slot] [--frame-output=PATH] [--diagnostic-snapshot=PREFIX] [--assume-mpll-settled] [--virtual-mpll-retune] [--assume-spll-settled] [--assume-i2c-single-master] [--i2c-eeprom-image=PATH] [--asp-px1-input=high] [--asp-u-sample=WORD] [--rtc-initial-time=DAY:HH:MM:SS] [--cs4-port0-input=BYTE] [--cs4-indexed-input=BANK/INDEX/BYTE] [--cs5-reset-status-input=BYTE] [--graphics-profile=virtual5744-compatible-8mib] [--graphics-raw-axes=FIRST/SECOND] [--graphics-raw-mode1=SAMPLE] [--graphics-irq-connection=virtual-a13] [--gpio-a-input-masked=VALUE/MASK] [--gpio-input-event=N/PORT/VALUE/MASK] [--gpio-a-input=VALUE] [--gpio-b-input=VALUE] [--gpio-d-input=VALUE] [--ram-mib=32|128]\n", argv[0]);
         return 1;
     }
     const char* engine = argc >= 5 ? argv[4] : "exact";
@@ -178,6 +199,22 @@ int main(int argc, char** argv) {
             options.arm920IcacheIndexCompatibility = true;
         }
         else if (!std::strcmp(argv[i], "--trace=peripherals")) peripheralTrace = true;
+        else if (!std::strncmp(argv[i], "--trace-window=", 15)) {
+            const char* text = argv[i] + 15;
+            char* end = nullptr;
+            errno = 0;
+            const auto pc = std::strtoul(text, &end, 0);
+            if (!traceWindow.empty() || errno || *text < '0' || *text > '9' ||
+                pc > 0xfffffffeUL || (pc & 1) || *end != '/') return 1;
+            text = end + 1;
+            errno = 0;
+            const auto occurrence = std::strtoul(text, &end, 10);
+            if (errno || *text < '0' || *text > '9' || *end || !occurrence ||
+                occurrence > imx1ProbeMaximumSteps) return 1;
+            windowPc = uint32_t(pc);
+            windowOccurrence = uint32_t(occurrence);
+            traceWindow.resize(4096);
+        }
         else if (!std::strncmp(argv[i], "--idle-hclk-budget=", 19)) {
             const char* text = argv[i] + 19;
             char* end = nullptr;
@@ -434,6 +471,10 @@ int main(int argc, char** argv) {
     if (!imx1ProbeGpioEventValid(options, budget)) {
         std::fprintf(stderr, "GPIO event requires bootstrap, a count below the budget and lanes owned by supplied GPIO baselines\n"); return 1;
     }
+    if (windowOccurrence > budget) return 1;
+    if (!traceWindow.empty())
+        std::printf("trace-window pc=%08x occurrence=%u capacity=4096 entry-contexts passive-observer\n",
+                    windowPc, windowOccurrence);
     if (options.gpioEventAfterInstructions)
         for (unsigned port = 0; port < 4; ++port)
             if (options.gpioEventMasks[port])
@@ -524,6 +565,8 @@ int main(int argc, char** argv) {
     }
     const auto result = imx1BootProbe(rom.data(), rom.size(), entry, budget, trace, nullptr,
                                      !std::strcmp(engine, "fast"), &options);
+    if (!traceWindow.empty())
+        std::printf("trace-window-emitted=%u matched-entries=%u\n", windowEmitted, windowMatches);
     std::printf("stop=%s step=%u pc=%08x instruction=%0*x address=%08x size=%u value=%08x operand=%08x width=%u\n",
                 imx1ProbeStopName(result.stop), result.trace.step, result.trace.pc,
                 int(result.trace.instructionSize * 2), result.trace.instruction, result.address, result.size, result.value,

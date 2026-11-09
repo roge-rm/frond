@@ -1323,6 +1323,10 @@ test-zodiac-mmio: build/zodiac-boot-probe
 test-zodiac-gpio-event: build/zodiac-boot-probe
 	python3 tests/zodiac-gpio-event.py
 
+.PHONY: test-zodiac-trace-window
+test-zodiac-trace-window: build/zodiac-boot-probe
+	python3 tests/zodiac-trace-window.py
+
 test-zodiac-gpio-input: build/zodiac-boot-probe
 	python3 tests/zodiac-gpio-input.py
 
