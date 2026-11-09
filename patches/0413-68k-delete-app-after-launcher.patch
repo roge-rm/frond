@@ -1,5 +1,5 @@
 diff --git a/src/cloudpilot/emulator/EmPalmOS.cpp b/src/cloudpilot/emulator/EmPalmOS.cpp
-index e7e3752..0d3851e 100644
+index e7e3752..10967b7 100644
 --- a/src/cloudpilot/emulator/EmPalmOS.cpp
 +++ b/src/cloudpilot/emulator/EmPalmOS.cpp
 @@ -48,6 +48,8 @@ EmThreadSafeQueue<PenEvent> EmPalmOS::penEventQueueIncoming{EVENT_QUEUE_SIZE};
@@ -24,8 +24,8 @@ index e7e3752..0d3851e 100644
      ClearQueues();
      dbForLaunch = 0;
      postNilEvent = false;
++    // A delete that finished before the reset keeps its result for the reply.
 +    pendingDelete = 0;
-+    deleteResult.reset();
  }
  
  /***********************************************************************
