@@ -78,9 +78,10 @@ set_target_properties(slirp PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES "${network}/include/slirp")
 target_link_libraries(frondcore PUBLIC slirp
     "${network}/lib/libglib-2.0.a" "${network}/lib/libpcre2-8.a" "${network}/lib/libiconv.a" "${network}/lib/libintl.a" m)
-# common/net (slirp behind PPP) for frond-68k's snap-on modem and both cores' infrared phone, as
-# libcommon-net.a on the desktop. The phone's IrDA stack (common/ir) is in frondcommon.
-add_library(frondnet STATIC "${COMMON}/net/SlirpIp.cpp")
+# common/net (slirp behind PPP and Wi-Fi) for frond-68k's snap-on modem, both cores' infrared
+# phone and the Wi-Fi router, as libcommon-net.a on the desktop. The phone's IrDA stack
+# (common/ir) is in frondcommon.
+add_library(frondnet STATIC "${COMMON}/net/SlirpIp.cpp" "${COMMON}/net/WifiRouter.cpp")
 target_compile_options(frondnet PRIVATE -O2 -g -Wno-unused-parameter)
 target_link_libraries(frondnet PUBLIC frondcommon slirp
     "${network}/lib/libglib-2.0.a" "${network}/lib/libpcre2-8.a" "${network}/lib/libiconv.a" "${network}/lib/libintl.a" m)

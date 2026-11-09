@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "WifiRouter.h"
+using frondNet::WifiRouter;
 using Bytes = std::vector<uint8_t>;
 static const uint8_t mac[] = {2, 0x46, 0x72, 0x6f, 0x6e, 0x64};
 static void put16(Bytes& b, size_t off, uint16_t value) {

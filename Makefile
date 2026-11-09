@@ -511,16 +511,25 @@ build/source/src/common/libcommon-net.a: build/source/.prepared
 
 .PHONY: test-wifi
 test-wifi: prepare build/source/src/common/libcommon.a
-	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm \
-		tests/wifi-router.cpp build/source/src/uarm/uarm/WifiRouter.cpp \
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/common/net \
+		tests/wifi-router.cpp build/source/src/common/net/WifiRouter.cpp \
 		$(shell pkg-config --cflags --libs slirp) -pthread -o build/test-wifi-router
 	./build/test-wifi-router
 	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
 		tests/libertas-cf.cpp build/source/src/uarm/uarm/LibertasCF.cpp \
-		build/source/src/uarm/uarm/WifiRouter.cpp build/source/src/uarm/uarm/NetworkSimulation.cpp \
+		build/source/src/common/net/WifiRouter.cpp build/source/src/uarm/uarm/NetworkSimulation.cpp \
 		build/source/src/uarm/uarm/HostNetwork.cpp build/source/src/common/libcommon.a \
 		$(shell pkg-config --cflags --libs slirp) -pthread -lz -o build/test-libertas-cf
 	./build/test-libertas-cf
+
+# The shared Ethernet router from libcommon-net.a, as both cores link it.
+.PHONY: test-net-wifi-router
+test: test-net-wifi-router
+test-net-wifi-router: prepare build/source/src/common/libcommon-net.a
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Wno-unused-parameter -Ibuild/source/src/common tests/net-wifi-router.cpp \
+		build/source/src/common/libcommon-net.a $(shell pkg-config --cflags --libs slirp) -pthread \
+		-o build/test-net-wifi-router
+	./build/test-net-wifi-router
 
 .PHONY: test-scheduler
 test-scheduler: prepare
