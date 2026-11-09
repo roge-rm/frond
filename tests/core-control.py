@@ -107,6 +107,14 @@ class Client:
             assert time.monotonic() < end, f'{command}: still not ready after {timeout} s'
             time.sleep(1)
 
+    def until_text(self, command, done, timeout=90):
+        """Repeats command until done(text) holds; returns the text."""
+        end = time.monotonic() + timeout
+        while not done(text := self.ok(command)):
+            assert time.monotonic() < end, f'{command}: {text!r} after {timeout} s'
+            time.sleep(0.2)
+        return text
+
     def quit(self):
         self.ok('quit')
         assert self.process.wait(timeout=30) == 0, 'core exit status'
@@ -572,6 +580,16 @@ def check_68k(core, rom, root):
         assert c.ok('serial-mode', 'modem', code='serial') == 'modem idle'
         c.ok('speed-state')
         assert ('serial', 'modem idle') in c.events, c.events
+        # The cradle's DTR reaches the modem: HotSync opens the port, gives up on the modem's echo and
+        # closes it again, so DTR rises with the line driver and drops with it.
+        assert c.ok('serial-stats', code='serial') == 'power=off dtr=off dtr_rises=0 dtr_drops=0'
+        c.ok('hotsync', code='hotsync')
+
+        def closed(text):
+            fields = dict(word.split('=') for word in text.split())
+            return fields['power'] == 'off' and fields['dtr'] == 'off' and int(fields['dtr_drops']) >= 1
+        stats = dict(word.split('=') for word in c.until_text('serial-stats', closed).split())
+        assert stats['dtr_rises'] == stats['dtr_drops'], stats
         assert c.ok('serial-mode', 'off', code='serial') == 'off'
         # The IIIx's own: cradle HotSync button, speed, contrast, backlight, launch.
         c.ok('hotsync', code='hotsync')
