@@ -59,7 +59,11 @@ int main(int argc,char** argv) {
    if(boundary==0)i.Reset(true);
    if(boundary==1)i.Reset(false);
    if(boundary==2)i.SetHostConnection(0,false);
-   if(boundary==3)i.reg(0xa9,0xf6);
+   if(boundary==3) {
+     i.reg(0xa9,0xf6);assert(i.HasHostTarget(0));
+     i.reg(0x92,0x20000202);i.reg(0x94,0x8001);
+     assert((i.get(0x15)&0x101)==0x101);
+   }
    if(boundary==4){SavestateLoader<ChunkType> loader;assert(loader.Load(saved.GetBuffer(),saved.GetSize(),i));}
    if(boundary==5)owner.detach();
    if(boundary==6){EmBankRegs::onBeforeDispose.Dispatch();}

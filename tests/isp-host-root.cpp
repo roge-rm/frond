@@ -16,6 +16,36 @@ class Isp: public EmRegsISPDana {
 static std::vector<uint8> save(Isp& i){Savestate<ChunkType>s;assert(s.Save(i));auto*p=static_cast<uint8*>(s.GetBuffer());return {p,p+s.GetSize()};}
 static bool load(Isp&i,std::vector<uint8>s){SavestateLoader<ChunkType>l;return l.Load(s.data(),s.size(),i);}
 int main(){
+ // NPS overrides switching even when the target was attached without a reset.
+ {
+  Isp powered;powered.SetHostConnection(0,true);
+  powered.reg(0x92,0x20000202);powered.reg(0x94,0x8001);
+  assert((powered.get(0x15)&0x101)==0x101);
+  assert((powered.get(0x16)&0x101)==0x100);
+ }
+ // HC startup uses always-powered ports after resetting the HC.
+ for(unsigned port=0;port<2;++port) {
+  Isp startup;unsigned cancels=0;
+  startup.hostCancelled=[&]{++cancels;};
+  startup.SetHostTarget(port,[](const auto&){return EmRegsISPDana::HostReply{};});
+  startup.reg(0xa9,0xf6);
+  assert(cancels && startup.HasHostTarget(port));
+  assert(!(startup.get(0x15+port)&0x101));
+  startup.reg(0x92,0x20000202);startup.reg(0x93,1);startup.reg(0x94,0x8001);
+  startup.reg(0x95,8);startup.reg(0x96,8);
+  assert((startup.get(0x15+port)&0x101)==0x101);
+  assert((startup.get(0x16-port)&0x101)==0x100);
+  startup.reg(0x95+port,0x200);assert(startup.get(0x15+port)&0x100);
+  startup.reg(0x82,1);assert(startup.HasHostTarget(port));
+  assert((startup.get(0x15+port)&0x101)==0x101);
+  auto powered=save(startup);assert(load(startup,powered));
+  assert(!startup.HasHostTarget(port));
+  assert((startup.get(0x15+port)&0x101)==0x100);
+  startup.SetHostTarget(port,[](const auto&){return EmRegsISPDana::HostReply{};});
+  assert((startup.get(0x15+port)&0x101)==0x101);
+  startup.SetHostTarget(port,{});assert(!(startup.get(0x15+port)&1));
+  assert(startup.get(0x15+port)&0x100);
+ }
  Isp i;
  // ClearSuspendStatus has no effect while the port is not suspended.
  for(auto command : {0x95,0x96}) {
