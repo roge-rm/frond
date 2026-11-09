@@ -92,6 +92,32 @@ class DesktopPrint : public QObject {
         panel.setSupported(true, false);
         QCOMPARE(box->count(), 2);
     }
+    void infraredBanner() {
+        // The IR printer's panel is only the received-job choices, and the status line is the USB printer's.
+        PrinterPanel panel(nullptr, true);
+        panel.show();
+        QVERIFY(!panel.findChild<QComboBox*>("usbPortChoice")->isVisible());
+        QVERIFY(!panel.findChild<QLabel*>("printerReadout")->isVisible());
+        auto* label = panel.findChild<QLabel*>("irPrinterReceived");
+        QVERIFY(label);
+        QSignalSpy discard(&panel, &PrinterPanel::discardRequested);
+        panel.showReceived(289, true);
+        QVERIFY(panel.receivedShown());
+        QCOMPARE(label->text(), QString("Print received (289 byte(s))"));
+        QVERIFY(panel.findChild<QPushButton*>("irPrinterPdf")->isEnabled());
+        // Named only when another printer could also have sent it.
+        panel.setSource("infrared printer");
+        QCOMPARE(label->text(), QString("Print received from the infrared printer (289 byte(s))"));
+        panel.setSource({});
+        QCOMPARE(label->text(), QString("Print received (289 byte(s))"));
+        panel.findChild<QPushButton*>("irPrinterDiscard")->click();
+        QCOMPARE(discard.count(), 1);
+        auto s = frondPrint::parseStatus("attached receiving bytes=120 last=none idle=100");
+        QVERIFY(s.valid && s.attached && !frondPrint::received(s));
+        s = frondPrint::parseStatus("attached ready bytes=289 last=none idle=3100");
+        QVERIFY(frondPrint::received(s));
+        QVERIFY(!frondPrint::parseStatus("off off bytes=0 last=none idle=-1").attached);
+    }
     void moduleRow() {
         PrinterPanel panel;
         panel.setSupported(true, false);

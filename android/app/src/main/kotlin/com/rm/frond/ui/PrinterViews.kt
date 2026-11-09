@@ -37,6 +37,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.rm.frond.Device
 import com.rm.frond.PrintJob
+import com.rm.frond.PrintJobs
 import com.rm.frond.PrinterModel
 import com.rm.frond.UsbPort
 
@@ -53,7 +54,7 @@ fun PrinterRow(printer: PrinterModel, device: Device) {
     val ask = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
     var choosing by remember { mutableStateOf(false) }
     val text = when (printer.port) {
-        UsbPort.PRINTER -> "Printer, ${printer.bytes} bytes received"
+        UsbPort.PRINTER -> "Printer, ${printer.jobs.bytes} bytes received"
         UsbPort.WIFI -> "Wi-Fi adapter" + (printer.wifiText?.let { ", $it" } ?: "")
         else -> "Off"
     }
@@ -87,11 +88,17 @@ fun PrinterRow(printer: PrinterModel, device: Device) {
         confirmButton = {},
         dismissButton = { TextButton(onClick = { choosing = false }) { Text("Cancel") } },
     )
-    printer.held?.let { held ->
+    HeldRow(printer.jobs)
+}
+
+// A way back to a held job, in the Connections sheet.
+@Composable
+fun HeldRow(jobs: PrintJobs) {
+    jobs.held?.let { held ->
         ListItem(
-            headlineContent = { Text("Print received (${held.bytes} bytes)") },
+            headlineContent = { Text(held.title) },
             colors = androidx.compose.material3.ListItemDefaults.colors(containerColor = Color.Transparent),
-            modifier = Modifier.clickableRow { printer.choosing = true },
+            modifier = Modifier.clickableRow { jobs.choosing = true },
         )
     }
 }
@@ -127,7 +134,7 @@ fun WifiModuleRow(printer: PrinterModel) {
 
 // The snackbar for a received print, below the bar, and the choices sheet it opens.
 @Composable
-fun PrinterPrompt(printer: PrinterModel, top: Dp) {
+fun PrinterPrompt(printer: PrintJobs, top: Dp) {
     val snackbar = remember { SnackbarHostState() }
     // Registered here, which stays composed while the choices sheet closes to open the file picker.
     val save = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { printer.saveRaw(it) }
@@ -135,7 +142,7 @@ fun PrinterPrompt(printer: PrinterModel, top: Dp) {
     LaunchedEffect(version) {
         val held = printer.held ?: return@LaunchedEffect
         val result = snackbar.showSnackbar(
-            "Print received (${held.bytes} bytes)", actionLabel = "Options", withDismissAction = true, duration = SnackbarDuration.Indefinite,
+            held.title, actionLabel = "Options", withDismissAction = true, duration = SnackbarDuration.Indefinite,
         )
         if (result == SnackbarResult.ActionPerformed) printer.choosing = true
     }
@@ -145,13 +152,13 @@ fun PrinterPrompt(printer: PrinterModel, top: Dp) {
 }
 
 @Composable
-private fun PrinterChoices(printer: PrinterModel, held: PrinterModel.Held, saveRaw: () -> Unit) {
+private fun PrinterChoices(printer: PrintJobs, held: PrintJobs.Held, saveRaw: () -> Unit) {
     val activity = LocalContext.current.activity()
     val pages = held.pages
     Dialog({ printer.choosing = false }, DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(Modifier.fillMaxWidth().padding(24.dp), shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceContainerHigh) {
             Column {
-                Text("Print received (${held.bytes} bytes)", style = MaterialTheme.typography.titleMedium,
+                Text(held.title, style = MaterialTheme.typography.titleMedium,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp))
                 if (!pages.renderable) Text(pages.reason, style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))

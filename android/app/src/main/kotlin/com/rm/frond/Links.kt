@@ -409,13 +409,15 @@ object InfraredChoice {
 
     const val PHONE = "phone"
 
+    const val PRINTER = "printer"
+
     fun linkId(value: String): String? = value.removePrefix("link:").takeIf { value.startsWith("link:") && it.isNotEmpty() && it != "local" }
 
     // What a saved value means here: anything that isn't a link is off.
     fun normalise(value: String?): String = if (value != null && linkId(value) != null) value else OFF
 
-    // The infrared port's saved value: the same, or phone.
-    fun normaliseInfrared(value: String?): String = if (value == PHONE) PHONE else normalise(value)
+    // The infrared port's saved value: the same, phone or printer.
+    fun normaliseInfrared(value: String?): String = if (value == PHONE || value == PRINTER) value else normalise(value)
 
     // The serial port's saved value: the same, or modem.
     fun normaliseSerial(value: String?): String = if (value == MODEM) MODEM else normalise(value)
@@ -432,9 +434,12 @@ object InfraredChoice {
     fun serialChoices(current: String, paired: List<Pair<String, String>>, modem: Boolean): List<Pair<String, String>> =
         choices(current, paired).toMutableList().also { if (modem) it.add(1, MODEM to "Modem") }
 
-    // The infrared rows: the same, with Mobile phone after Off on a device that has an infrared phone.
-    fun infraredChoices(current: String, paired: List<Pair<String, String>>, phone: Boolean): List<Pair<String, String>> =
-        choices(current, paired).toMutableList().also { if (phone) it.add(1, PHONE to "Mobile phone") }
+    // The infrared rows: the same, with Mobile phone after Off on a device that has an infrared phone, then Printer.
+    fun infraredChoices(current: String, paired: List<Pair<String, String>>, phone: Boolean, printer: Boolean = true): List<Pair<String, String>> =
+        choices(current, paired).toMutableList().also {
+            if (printer) it.add(1, PRINTER to "Printer")
+            if (phone) it.add(1, PHONE to "Mobile phone")
+        }
 
     // A link to a connection that's gone acts as Off.
     fun active(value: String, paired: List<Pair<String, String>>): String? = linkId(value)?.takeIf { id -> paired.any { it.first == id } }

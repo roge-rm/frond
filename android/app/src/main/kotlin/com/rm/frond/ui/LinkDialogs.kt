@@ -212,7 +212,29 @@ fun LinkChoiceDialog(kind: LinkKind, model: RunningModel, onDismiss: () -> Unit)
         LinkKind.BEAM -> {
             val current = model.beam.choice
             val choices = remember { InfraredChoice.infraredChoices(current, LinkStore.choices(InfraredChoice.folder(context)), model.device.irPhone) }
-            ConnectionChoiceDialog("Infrared beaming", current, onDismiss, choices) { onDismiss(); model.changeBeam(it) }
+            // Leaving Printer with output that isn't saved asks first.
+            var leaving by remember { mutableStateOf<String?>(null) }
+            // The notification for a print that arrives in the background needs this on Android 13 and later.
+            val ask = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.RequestPermission()) { }
+            ConnectionChoiceDialog("Infrared beaming", current, onDismiss, choices) {
+                if (current == InfraredChoice.PRINTER && it != current && model.irPrinter?.unsaved == true) leaving = it
+                else {
+                    onDismiss(); model.changeBeam(it)
+                    if (it == InfraredChoice.PRINTER && android.os.Build.VERSION.SDK_INT >= 33 &&
+                        context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                        ask.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+                    }
+                }
+            }
+            leaving?.let { next ->
+                AlertDialog(
+                    onDismissRequest = { leaving = null },
+                    title = { Text("Discard the print?") },
+                    text = { Text("The infrared printer has output you haven't saved or printed. Changing the choice discards it.") },
+                    confirmButton = { TextButton(onClick = { leaving = null; onDismiss(); model.changeBeam(next) }) { Text("Discard") } },
+                    dismissButton = { TextButton(onClick = { leaving = null }) { Text("Cancel") } },
+                )
+            }
         }
         LinkKind.SERIAL -> {
             val current = model.serial.choice

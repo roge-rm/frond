@@ -182,12 +182,13 @@ open class FrondActivity : SDLActivity() {
         }
         // Infrared, serial and Bluetooth over a connection are set from the machine's settings at every start.
         val infraredPhone = machineSettings.infrared == InfraredChoice.PHONE && launchDevice().irPhone
-        val infraredLink = InfraredChoice.linkId(machineSettings.infrared) != null || infraredPhone
+        val infraredPrinter = machineSettings.infrared == InfraredChoice.PRINTER && launchDevice().infrared
+        val infraredLink = InfraredChoice.linkId(machineSettings.infrared) != null || infraredPhone || infraredPrinter
         val serialModem = machineSettings.serial == InfraredChoice.MODEM && launchDevice().modem
         val serialLink = (InfraredChoice.linkId(machineSettings.serial) != null && launchDevice().serialPort) || serialModem
         val bluetoothLink = machineSettings.bluetooth != BluetoothChoice.OFF && launchDevice().bluetooth
         if (infraredLink || serialLink || bluetoothLink) {
-            if ((infraredLink && !infraredPhone) || (serialLink && !serialModem) || InfraredChoice.linkId(machineSettings.bluetooth) != null) askLocalNetwork()
+            if ((infraredLink && !infraredPhone && !infraredPrinter) || (serialLink && !serialModem) || InfraredChoice.linkId(machineSettings.bluetooth) != null) askLocalNetwork()
             link.whenConnected {
                 Thread({
                     val name = Sessions.forPath(applicationContext, sessionPath)?.name ?: launchDevice().label
@@ -1204,6 +1205,7 @@ open class FrondActivity : SDLActivity() {
         // process instead; the next start loads the save.
         destroyed = true
         menuModel?.printer?.close()
+        menuModel?.irPrinter?.close()
         barOwner?.destroy()
         inputListener?.let { inputDevices?.unregisterInputDeviceListener(it) }
         inputListener = null

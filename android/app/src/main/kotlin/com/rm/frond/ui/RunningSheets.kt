@@ -47,6 +47,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.rm.frond.InfraredChoice
 import com.rm.frond.NetRelay
 import com.rm.frond.RunningModel
 import com.rm.frond.R
@@ -282,10 +283,15 @@ private fun ConnectionsSheet(model: RunningModel, actions: RunningBarActions) {
                 val usable = RunningSheets.beamUsable(device, model.keyboard)
                 ListItem(
                     headlineContent = { Text("Infrared beaming", color = if (usable) Color.Unspecified else Faded) },
-                    supportingContent = { Text(model.beam.text, color = if (usable) Color.Unspecified else Faded) },
+                    supportingContent = {
+                        val jobs = model.irPrinter
+                        Text(if (model.beam.choice == InfraredChoice.PRINTER && jobs != null) "Printer, ${jobs.bytes} bytes received" else model.beam.text,
+                            color = if (usable) Color.Unspecified else Faded)
+                    },
                     colors = androidx.compose.material3.ListItemDefaults.colors(containerColor = Color.Transparent),
                     modifier = if (usable) Modifier.clickableRow { choosing = LinkKind.BEAM } else Modifier,
                 )
+                model.irPrinter?.let { HeldRow(it) }
             }
             ConnRow.BLUETOOTH -> ConnItem("Bluetooth", device.bluetooth, if (device.bluetooth) bluetoothText(model.bluetooth, model.radio) else null) { choosing = LinkKind.BLUETOOTH }
             ConnRow.SERIAL -> ConnItem("Serial port", device.serialPort, if (device.serialPort) model.serial.text else null) { choosing = LinkKind.SERIAL }

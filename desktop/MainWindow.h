@@ -126,14 +126,26 @@ class MainWindow : public QMainWindow {
     bool usbPortStart{false};
     // The Dana Wireless's radio choice goes to the core once at start (moduleStartSent), ahead of the USB port.
     bool moduleStartSent{false}, moduleStartPending{false}, modulePollTurn{false};
-    bool printerResult(bool ok, const QString& message);
-    void printerCollect();
-    void printerShow();
-    void printerClearHeld();
-    void printerSavePdf();
-    void printerPrint();
-    void printerSaveRaw();
-    frond::PrintText printerText() const;
+    // One source of print jobs: the USB printer (command printer) or the infrared printer (irprinter).
+    struct PrintSource {
+        QString command;
+        PrinterPanel* panel{nullptr};
+        QByteArray held;
+        frondPrint::Status status;
+        PrinterStage stage{PrinterStage::None};
+        std::unique_ptr<QTemporaryDir> dir;
+    };
+    bool printerResult(PrintSource& src, bool ok, const QString& message);
+    void printerCollect(PrintSource& src);
+    void printerShow(PrintSource& src);
+    void printerClearHeld(PrintSource& src);
+    void printerSavePdf(PrintSource& src);
+    void printerPrint(PrintSource& src);
+    void printerSaveRaw(PrintSource& src);
+    frond::PrintText printerText(const PrintSource& src) const;
+    // Asks before the infrared printer's unsaved output is thrown away by another choice.
+    bool leavePrinterOk();
+    bool irPollTurn{false};
     // Peripheral choices are per machine, in its settings file; machines from before take the
     // old global choices once.
     void migratePeripherals(frondSessions::Preferences* prefs);
@@ -268,10 +280,7 @@ class MainWindow : public QMainWindow {
     QLabel* usbState;
     PrinterPanel* printerPanel;
     QTimer* printerTimer;
-    QByteArray printerHeld;
-    frondPrint::Status printerStatus;
-    PrinterStage printerStage{PrinterStage::None};
-    std::unique_ptr<QTemporaryDir> printerDir;
+    PrintSource usbPrint, irPrint;
     QLineEdit* bluetoothSocket;
     QComboBox* bluetooth;
     QLabel* bluetoothState;

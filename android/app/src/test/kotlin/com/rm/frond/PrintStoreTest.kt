@@ -120,4 +120,24 @@ class PrintStoreTest {
         assertNull(store(Core()).attach(true))
         assertEquals("no printer", store(Core(attachOk = false)).attach(true))
     }
+
+    // The infrared printer's store sends irprinter's status line the same way, and a local drop keeps the core out.
+    @Test fun dropLocalClearsTheHeldFileWithoutTheCore() = runBlocking {
+        val core = Core("abc"); val s = store(core)
+        assertTrue(s.poll(none) is PrintStore.Poll.Added)
+        core.log.clear()
+        var held = -1L
+        s.dropLocal { size, _ -> held = size }
+        assertEquals(0L, held)
+        assertEquals(0L, s.heldSize())
+        assertTrue(core.log.isEmpty())
+    }
+
+    @Test fun printerStatusFromTheInfraredCore() {
+        val receiving = PrintJob.parseStatus("attached receiving bytes=120 last=none idle=100")
+        assertTrue(receiving.valid && !receiving.received)
+        assertTrue(PrintJob.parseStatus("attached ready bytes=289 last=none idle=3100").received)
+        val off = PrintJob.parseStatus("off off bytes=0 last=none idle=-1")
+        assertTrue(off.valid && !off.attached && !off.received)
+    }
 }

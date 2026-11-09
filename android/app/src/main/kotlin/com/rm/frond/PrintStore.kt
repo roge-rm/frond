@@ -8,7 +8,7 @@ import java.io.IOException
 
 // The held print job on disk and the core's job behind it. Poll, discard, raw save and drop all run under one
 // lock, so a discard never lands between a status and its save, and bytes that arrive during a raw save
-// wait and go into the next held job. Core calls go through request(argument), which sends it as a "printer" command.
+// wait and go into the next held job. Core calls go through request(argument), which sends it as the printer command, printer or irprinter.
 class PrintStore(
     private val dir: File,
     private val request: (String) -> ControlLink.Reply,
@@ -76,6 +76,12 @@ class PrintStore(
         heldFile.delete()
         onHeld(0, version)
         null
+    }
+
+    // Drops the held file without asking the core, which has already thrown its job away.
+    suspend fun dropLocal(onHeld: (Long, Int) -> Unit) = lock.withLock {
+        heldFile.delete()
+        onHeld(0, version)
     }
 
     // Runs copy with the held file; the job is dropped only when it returns normally.

@@ -201,9 +201,9 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     connectionsLayout->addWidget(printerPanel);
     connect(printerPanel, &PrinterPanel::portChosen, this, [this](const QString& port) {
         const bool printer = port == "printer";
-        printerStage = printer ? PrinterStage::Attach : PrinterStage::None;
+        usbPrint.stage = printer ? PrinterStage::Attach : PrinterStage::None;
         if (!(printer ? send("printer", "attach on") : send("usb-port", port))) {
-            printerStage = PrinterStage::None;
+            usbPrint.stage = PrinterStage::None;
             printerPanel->setPort(runningPreferences.usbPort);
             notify(tr("Wait a moment and try again."));
             return;
@@ -222,15 +222,22 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         printerPanel->setModuleReadout(frondPrint::moduleReadout("off", on));
         savePeripherals();
     });
-    connect(printerPanel, &PrinterPanel::pdfRequested, this, [this] { printerSavePdf(); });
-    connect(printerPanel, &PrinterPanel::printRequested, this, [this] { printerPrint(); });
-    connect(printerPanel, &PrinterPanel::rawRequested, this, [this] { printerSaveRaw(); });
-    connect(printerPanel, &PrinterPanel::discardRequested, this, [this] {
-        printerClearHeld();
-        if (!printerPanel->plugged()) return;
-        printerStage = PrinterStage::Discard;
-        if (!send("printer", "clear")) printerStage = PrinterStage::None;
-    });
+    usbPrint = PrintSource{"printer", printerPanel};
+    // The infrared printer has only the received-job choices; its mode is the Infrared beaming picker.
+    irPrint = PrintSource{"irprinter", new PrinterPanel(root, true)};
+    connectionsLayout->addWidget(irPrint.panel);
+    for (auto* source : {&usbPrint, &irPrint}) {
+        auto* panel = source->panel;
+        connect(panel, &PrinterPanel::pdfRequested, this, [this, source] { printerSavePdf(*source); });
+        connect(panel, &PrinterPanel::printRequested, this, [this, source] { printerPrint(*source); });
+        connect(panel, &PrinterPanel::rawRequested, this, [this, source] { printerSaveRaw(*source); });
+        connect(panel, &PrinterPanel::discardRequested, this, [this, source] {
+            printerClearHeld(*source);
+            if (source == &usbPrint ? !printerPanel->plugged() : runningPreferences.infrared != "printer") return;
+            source->stage = PrinterStage::Discard;
+            if (!send(source->command, "clear")) source->stage = PrinterStage::None;
+        });
+    }
     printerTimer = new QTimer(this);
     connect(printerTimer, &QTimer::timeout, this, [this] { printerPoll(); });
     printerTimer->start(1000);
@@ -415,6 +422,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     irda->addItem(tr("Off"),"off");
     irda->addItem(tr("Terminal (PTY)"),"pty");
     irda->addItem(tr("Wait for a peer"),"tcp");
+    irda->addItem(tr("Printer"),"printer");
     irda->setToolTip(tr("Pick a connection to beam to another Frond. Pair them in File > Pairing."));
     irdaPort=new QSpinBox(root);irdaPort->setObjectName("irdaPort");
     irdaPort->setRange(1,65535);irdaPort->setPrefix(tr("Port "));loadIrdaSettings();
@@ -422,7 +430,10 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     irdaState=new QLabel(root);irdaState->setObjectName("irdaState");
     irdaState->setTextInteractionFlags(Qt::TextSelectableByMouse);grid->addWidget(irdaState, 9, 1, 1, 2);
     auto irdaChanged=[this] {
-        if(client.running()){if(client.available())send("irda-mode",irdaArgument());return;}
+        if(client.running()){
+            if (!leavePrinterOk()) { const QSignalBlocker blocked(irda); irda->setCurrentIndex(std::max(0, irda->findData("printer"))); return; }
+            if(client.available())send("irda-mode",irdaArgument());return;
+        }
         refresh();
     };
     connect(irda,qOverload<int>(&QComboBox::activated),this,irdaChanged);
@@ -776,8 +787,13 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             send("usb-port-state");
             return;
         }
+        if (command == "irprinter") {
+            printerResult(irPrint, ok, message);
+            if (stopping) save();
+            return;
+        }
         if (command == "printer") {
-            const bool chain = printerResult(ok, message);
+            const bool chain = printerResult(usbPrint, ok, message);
             if (stopping) { save(); return; }
             if (chain) {
                 // A failed attach has already asked for the state.
@@ -843,7 +859,10 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             // picker and the hub's attach follow it.
             if (command == "serial-mode") { showSerial("off " + message); attachSerial(); }
             if (command == "usb-mode") showUsb("off " + message);
-            if (command == "irda-mode") { showIrda("off error: " + message); attachInfrared(); }
+            if (command == "irda-mode") {
+                if (runningPreferences.infrared == "printer") { printerClearHeld(irPrint); irPrint.status = {}; }
+                showIrda("off error: " + message); attachInfrared();
+            }
             if (command == "bluetooth-mode") {
                 bluetoothSent.clear();
                 const QSignalBlocker blocked(bluetooth);
@@ -936,7 +955,10 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (command == "serial-state" || command == "serial-mode") showSerial(message);
         if (command == "usb-mode") { runningPreferences.usb = usbArgument(); savePeripherals(); }
         if (command == "usb-state" || command == "usb-mode") showUsb(message);
-        if (command == "irda-mode") { runningPreferences.infrared = irdaChoice(); savePeripherals(); attachInfrared(); }
+        if (command == "irda-mode") {
+            if (runningPreferences.infrared == "printer" && irdaChoice() != "printer") { printerClearHeld(irPrint); irPrint.status = {}; }
+            runningPreferences.infrared = irdaChoice(); savePeripherals(); attachInfrared();
+        }
         if(command=="irda-state" || command=="irda-mode")showIrda(message);
         if(command=="bluetooth-state" || command=="bluetooth-mode") {
             if(command=="bluetooth-mode") {
@@ -970,9 +992,9 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             moduleStartPending = false;
             const auto& port = runningPreferences.usbPort;
             if (caps.usbPrinter && port == "printer") {
-                printerStage = PrinterStage::Chain;
+                usbPrint.stage = PrinterStage::Chain;
                 if (send("printer", "attach on")) return;
-                printerStage = PrinterStage::None;
+                usbPrint.stage = PrinterStage::None;
             } else if (caps.usbPrinter || caps.usbWifi) {
                 usbPortStart = true;
                 if (send("usb-port", caps.usbWifi && port == "wifi" ? "wifi" : "off")) return;
@@ -1074,6 +1096,7 @@ void MainWindow::refresh() {
     printerPanel->setSupported(caps.usbPrinter, caps.usbWifi);
     printerPanel->setModuleSupported(caps.builtInWifi);
     printerPanel->setEnabled(running && !stopping);
+    irPrint.panel->setEnabled(running && !stopping);
     danaCards->setEnabled(dana && client.available() && !busy && !stopping);
     const auto reason = tr("Not available on the %1 yet").arg(frondFirmware::deviceName(currentDevice()));
     auto note = [&](QWidget* w, bool supported, const QString& tip) { w->setToolTip(supported ? tip : reason); };
@@ -2145,6 +2168,15 @@ QString MainWindow::irdaArgument() const {
     const auto path = frondLink::coreSocketPath("ir", QString::number(QCoreApplication::applicationPid()));
     return path.isEmpty() ? QStringLiteral("off") : "unix:" + path;
 }
+// Leaving printer mode throws away output that is still held or arriving.
+bool MainWindow::leavePrinterOk() {
+    if (runningPreferences.infrared != "printer" || irdaChoice() == "printer") return true;
+    const bool unsaved = !irPrint.held.isEmpty() || (irPrint.status.valid && irPrint.status.bytes > 0);
+    if (!unsaved) return true;
+    return QMessageBox::question(this, tr("Discard the print?"),
+                                 tr("The infrared printer has output you haven't saved or printed. Changing the choice discards it."),
+                                 QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Cancel) == QMessageBox::Discard;
+}
 void MainWindow::loadIrdaSettings() {
     const auto& value = runningPreferences.infrared;
     const QSignalBlocker blocked(irda);
@@ -2171,6 +2203,7 @@ void MainWindow::showIrda(const QString& state) {
     if(mode=="tcp"){
         const auto port=parts.value(1).section(':',-1).toInt();if(port>0)irdaPort->setValue(port);
     }
+    if (mode == "printer") { irdaState->setText(tr("Printer: ready")); refresh(); return; }
     if (mode == "phone") {
         const auto phase = parts.value(1);
         irdaState->setText(phase == "online" && parts.size() > 2 ? tr("Mobile phone: online at %1").arg(parts[2])
@@ -2324,7 +2357,8 @@ void MainWindow::loadUsbSettings() {
     const auto& value = runningPreferences.usb;
     usb->setCurrentIndex(std::max(0, usb->findData(value.startsWith("tcp:") ? QString("tcp") : value)));
     usbPort->setValue(value.startsWith("tcp:") ? value.mid(4).toInt() : 5024);
-    printerHeld.clear(); printerStatus = {}; printerStage = PrinterStage::None; printerDir.reset();
+    for (auto* source : {&usbPrint, &irPrint}) { source->held.clear(); source->status = {}; source->stage = PrinterStage::None; source->dir.reset(); }
+    irPrint.panel->hideReceived();
     usbPortStart = usbPortResync = false;
     printerPanel->setPort(runningPreferences.usbPort);
     moduleStartSent = moduleStartPending = false;
@@ -2342,9 +2376,11 @@ void MainWindow::printerPoll() {
         return;
     }
     if (port == "wifi" && frondFirmware::capabilities(runningDevice).usbWifi) { client.request("usb-port-state"); return; }
-    if (port != "printer" || !frondFirmware::capabilities(runningDevice).usbPrinter) return;
-    printerStage = PrinterStage::None;
-    client.request("printer", "status");
+    const bool usbWanted = port == "printer" && frondFirmware::capabilities(runningDevice).usbPrinter;
+    const bool irWanted = runningPreferences.infrared == "printer" && frondFirmware::capabilities(runningDevice).infrared;
+    // Both printers share the poll, a turn each.
+    if (usbWanted && (!irWanted || !(irPollTurn = !irPollTurn))) { usbPrint.stage = PrinterStage::None; client.request("printer", "status"); }
+    else if (irWanted) { irPrint.stage = PrinterStage::None; client.request("irprinter", "status"); }
 }
 // The reply to usb-port or usb-port-state. A switch has taken effect; a state reply updates the readout, and
 // after a failed switch also shows which port the core kept.
@@ -2360,35 +2396,42 @@ void MainWindow::usbPortReply(bool switched, const QString& message) {
     if (state.port == "wifi" && printerPanel->port() == "wifi") printerPanel->setLinkReadout(frondPrint::wifiReadout(state));
     if (switched && !stopping) notify(tr("Running. Sessions save automatically on close."));
 }
-frond::PrintText MainWindow::printerText() const {
-    return frond::renderPrintText(reinterpret_cast<const uint8_t*>(printerHeld.constData()), size_t(printerHeld.size()));
+frond::PrintText MainWindow::printerText(const PrintSource& src) const {
+    return frond::renderPrintText(reinterpret_cast<const uint8_t*>(src.held.constData()), size_t(src.held.size()));
 }
-void MainWindow::printerShow() {
-    if (printerPanel->plugged()) printerPanel->setReadout(printerStatus.attached, printerHeld.size() + (printerStatus.valid ? printerStatus.bytes : 0));
-    if (printerHeld.isEmpty()) printerPanel->hideReceived();
-    else printerPanel->showReceived(printerHeld.size(), printerText().renderable);
+void MainWindow::printerShow(PrintSource& src) {
+    const qint64 total = src.held.size() + (src.status.valid ? src.status.bytes : 0);
+    if (&src == &irPrint) {
+        if (irdaChoice() == "printer")
+            irdaState->setText(total > 0 ? tr("Printer: %n byte(s) received", nullptr, int(total)) : tr("Printer: ready"));
+    } else if (src.panel->plugged()) src.panel->setReadout(src.status.attached, total);
+    // Say which printer a job came from only when the Dana has both.
+    const bool both = frondFirmware::capabilities(runningDevice).usbPrinter && irdaChoice() == "printer";
+    src.panel->setSource(!both ? QString() : &src == &irPrint ? tr("infrared printer") : tr("USB printer"));
+    if (src.held.isEmpty()) src.panel->hideReceived();
+    else src.panel->showReceived(src.held.size(), printerText(src).renderable);
 }
-// The held job also lives in printerDir/held.raw, which Save raw publishes from; it goes with the
-// held bytes, and with printerDir when the machine stops or the app exits.
-void MainWindow::printerClearHeld() {
-    printerHeld.clear();
-    if (printerDir) QFile::remove(printerDir->filePath("held.raw"));
-    printerShow();
+// The held job also lives in src.dir/held.raw, which Save raw publishes from; it goes with the
+// held bytes, and with src.dir when the machine stops or the app exits.
+void MainWindow::printerClearHeld(PrintSource& src) {
+    src.held.clear();
+    if (src.dir) QFile::remove(src.dir->filePath("held.raw"));
+    printerShow(src);
 }
 // Takes the job out of the core into a private temp file, reads it and deletes the file.
-void MainWindow::printerCollect() {
-    if (!printerDir) printerDir = std::make_unique<QTemporaryDir>();
-    if (!printerDir->isValid()) { failure(tr("Couldn't make a folder for the print.")); return; }
-    printerStage = PrinterStage::Collect;
-    if (!send("printer", "save " + printerDir->filePath("job.raw"))) printerStage = PrinterStage::None;
+void MainWindow::printerCollect(PrintSource& src) {
+    if (!src.dir) src.dir = std::make_unique<QTemporaryDir>();
+    if (!src.dir->isValid()) { failure(tr("Couldn't make a folder for the print.")); return; }
+    src.stage = PrinterStage::Collect;
+    if (!send(src.command, "save " + src.dir->filePath("job.raw"))) src.stage = PrinterStage::None;
 }
 // Returns true when this was the reply that ends the start-up checks.
-bool MainWindow::printerResult(bool ok, const QString& message) {
-    const auto stage = std::exchange(printerStage, PrinterStage::None);
+bool MainWindow::printerResult(PrintSource& src, bool ok, const QString& message) {
+    const auto stage = std::exchange(src.stage, PrinterStage::None);
     const auto status = frondPrint::parseStatus(message);
-    if (status.valid) printerStatus = status;
+    if (status.valid) src.status = status;
     if (stage == PrinterStage::Collect) {
-        const auto path = printerDir ? printerDir->filePath("job.raw") : QString();
+        const auto path = src.dir ? src.dir->filePath("job.raw") : QString();
         QByteArray bytes;
         QFile file(path);
         const bool read = ok && !path.isEmpty() && file.open(QIODevice::ReadOnly);
@@ -2397,12 +2440,12 @@ bool MainWindow::printerResult(bool ok, const QString& message) {
         if (!path.isEmpty()) QFile::remove(path);
         bool kept = read;
         if (read) {
-            QFile held(printerDir->filePath("held.raw"));
+            QFile held(src.dir->filePath("held.raw"));
             kept = held.open(QIODevice::WriteOnly | QIODevice::Append) && held.write(bytes) == bytes.size();
             if (kept) held.close();
             else { held.close(); QFile::remove(held.fileName()); }
         }
-        if (kept) printerHeld += bytes;
+        if (kept) src.held += bytes;
         else if (read) failure(tr("The print couldn't be kept in the temporary folder."));
         else {
             const auto text = status.error.isEmpty() ? message : status.error;
@@ -2420,35 +2463,35 @@ bool MainWindow::printerResult(bool ok, const QString& message) {
         if (stage == PrinterStage::Discard) failure(message);
         return false;
     }
-    printerShow();
-    if (stage == PrinterStage::None && !stopping && frondPrint::received(status)) printerCollect();
+    printerShow(src);
+    if (stage == PrinterStage::None && !stopping && frondPrint::received(status)) printerCollect(src);
     return stage == PrinterStage::Chain;
 }
-void MainWindow::printerSavePdf() {
+void MainWindow::printerSavePdf(PrintSource& src) {
     const auto path = outputFile(tr("Save as PDF"), tr("PDF files (*.pdf)"), "Print.pdf");
     if (path.isEmpty()) return;
     QPrinter printer(QPrinter::HighResolution);
     printer.setOutputFormat(QPrinter::PdfFormat);
     printer.setOutputFileName(path);
-    if (frondPrint::drawPages(&printer, printerText()) == 0) { failure(tr("Couldn't write %1.").arg(path)); return; }
-    printerClearHeld();
+    if (frondPrint::drawPages(&printer, printerText(src)) == 0) { failure(tr("Couldn't write %1.").arg(path)); return; }
+    printerClearHeld(src);
     notify(tr("Saved %1.").arg(path));
 }
-void MainWindow::printerPrint() {
+void MainWindow::printerPrint(PrintSource& src) {
     QPrinter printer(QPrinter::HighResolution);
     QPrintDialog dialog(&printer, this);
     if (dialog.exec() != QDialog::Accepted) return;
-    if (frondPrint::drawPages(&printer, printerText()) == 0) { failure(tr("Couldn't print.")); return; }
-    printerClearHeld();
+    if (frondPrint::drawPages(&printer, printerText(src)) == 0) { failure(tr("Couldn't print.")); return; }
+    printerClearHeld(src);
     notify(tr("Sent to the printer."));
 }
-void MainWindow::printerSaveRaw() {
+void MainWindow::printerSaveRaw(PrintSource& src) {
     // The dialog has already asked about replacing an existing file.
     const auto path = QFileDialog::getSaveFileName(this, tr("Save raw file"), QDir::homePath() + "/Print.raw");
     if (path.isEmpty()) return;
     // QSaveFile writes a temporary file in the target folder and renames it over the target on
     // commit, so a failed or interrupted save leaves no partial file.
-    QFile source(printerDir ? printerDir->filePath("held.raw") : QString());
+    QFile source(src.dir ? src.dir->filePath("held.raw") : QString());
     QSaveFile file(path);
     bool done = source.open(QIODevice::ReadOnly) && file.open(QIODevice::WriteOnly);
     while (done && !source.atEnd()) {
@@ -2460,7 +2503,7 @@ void MainWindow::printerSaveRaw() {
         failure(tr("Couldn't write %1.").arg(path));
         return;
     }
-    printerClearHeld();
+    printerClearHeld(src);
     notify(tr("Saved %1.").arg(path));
 }
 QString MainWindow::outputFile(const QString& title, const QString& filter, const QString& defaultName) {

@@ -215,6 +215,8 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     };
     row(0, tr("Infrared"), "machineInfrared", prefs.infrared, 5030, infraredLabel, infrared, infraredPort);
     row(1, tr("Serial"), "machineSerial", prefs.serial, 5023, serialLabel, serial, serialPort);
+    infrared->insertItem(infrared->findData("tcp") + 1, tr("Printer"), "printer");
+    infrared->setCurrentIndex(std::max(0, infrared->findData(prefs.infrared.startsWith("tcp:") ? QString("tcp") : prefs.infrared)));
     if (prefs.infrared == "phone") { frondLink::setPhoneChoice(infrared, true); infrared->setCurrentIndex(infrared->findData("phone")); }
     if (prefs.serial == "modem") { frondLink::setModemChoice(serial, true); serial->setCurrentIndex(serial->findData("modem")); }
     bluetoothLabel = new QLabel(tr("Bluetooth"), peripherals);
