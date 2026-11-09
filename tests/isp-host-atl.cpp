@@ -1,6 +1,7 @@
 #include <cassert>
 #include <vector>
 #include "EmRegsISPDana.h"
+#include "EmHAL.h"
 #include "savestate/Savestate.h"
 #include "savestate/SavestateLoader.h"
 class Isp: public EmRegsISPDana {
@@ -23,7 +24,7 @@ static bool load(Isp&i,std::vector<uint8>b){SavestateLoader<ChunkType>l;return l
 int main(){
  Isp i;unsigned calls=0,accepted=0;std::vector<bool>toggles;std::vector<unsigned>sizes;
  i.ready([&](const auto&p){++calls;accepted+=p.bytes.size();toggles.push_back(p.toggle);sizes.push_back(p.requested);return Isp::HostReply{R::ack,p.toggle,{}};});
- auto b=ptd();i.submit(b);auto checkpoint=save(i);i.frame();assert(calls==3&&accepted==10);assert((sizes==std::vector<unsigned>{4,4,2}));assert((toggles==std::vector<bool>{false,true,false}));assert(i.get(0x2c)==36);assert(i.get(0x24)&2);auto out=i.read(b.size());assert(out[0]==10&&out[1]==4);i.frame();assert(calls==3);
+ auto b=ptd();i.submit(b);auto checkpoint=save(i);i.Initialize();i.now+=1000;EmHAL::DispatchCycle(i.now,false);i.Dispose();assert(calls==3&&accepted==10);assert((sizes==std::vector<unsigned>{4,4,2}));assert((toggles==std::vector<bool>{false,true,false}));assert(i.get(0x2c)==36);assert(i.get(0x24)&2);auto out=i.read(b.size());assert(out[0]==10&&out[1]==4);i.frame();assert(calls==3);
  assert(load(i,checkpoint));i.SetHostTarget(0,[&](const auto&p){++calls;return Isp::HostReply{R::ack,p.toggle,{}};});i.reg(0x94,0x10000);i.reg(0x95,2);i.frame();assert(calls==3);
  for(auto result:{R::nak,R::stall,R::noAnswer}){
  calls=0;i.ready([&](const auto&){++calls;return Isp::HostReply{result,false,{}};});i.submit(b);i.frame();out=i.read(b.size());assert(out[0]==0);if(result==R::nak){assert(calls==1&&out[1]==8);}else assert(calls==(result==R::stall?1:3)&&out[1]==(result==R::stall?0x40:0x50));

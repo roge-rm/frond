@@ -1481,3 +1481,12 @@ test-usb-raw-printer:
 	python3 tools/prepare.py --destination $(USB_PRINTER_AREA)/source
 	$(MAKE) -C $(USB_PRINTER_AREA)/source/src/common libcommon.a net
 	$(MAKE) -C $(USB_PRINTER_AREA)/source/src/cloudpilot -f Makefile -f $(CURDIR)/tests/usb-raw-printer.mk FROND_68K=1 FROND_TEST_ROOT=$(CURDIR) USB_PRINTER_TEST=$(CURDIR)/$(USB_PRINTER_AREA)/test-usb-raw-printer usb-printer-test
+
+ISP_FRAME_AREA ?= $(CURDIR)/build/isp-frame
+.PHONY: test-isp-frame
+test-isp-frame:
+	python3 tools/prepare.py --destination $(ISP_FRAME_AREA)/source
+	$(MAKE) -C $(ISP_FRAME_AREA)/source/src/common libcommon.a net
+	$(MAKE) -C $(ISP_FRAME_AREA)/source/src/cloudpilot FROND_68K=1 -f Makefile \
+		-f $(CURDIR)/tests/isp-frame.mk FROND_TEST_ROOT=$(CURDIR) \
+		ISP_FRAME_TEST=$(ISP_FRAME_AREA)/test-isp-frame isp-frame-test
