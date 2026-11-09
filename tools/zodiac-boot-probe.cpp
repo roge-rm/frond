@@ -11,6 +11,27 @@
 #include "imx1_boot_probe.h"
 #include "imx1_i2c_read_window.h"
 
+// Private diagnostic JSON-lines metadata and raw borrowed backing spans.
+struct DiagnosticOutput {
+    const char* prefix = nullptr;
+    std::ofstream metadata;
+    bool failed = false, captured = false;
+    static void words(void* context, const char* name, const uint32_t* values, uint32_t count) {
+        auto& d=*static_cast<DiagnosticOutput*>(context);
+        d.captured=true;
+        d.metadata << "{\"kind\":\"" << name << "\",\"words\":[";
+        for (uint32_t i=0;i<count;++i) d.metadata << (i ? "," : "") << values[i];
+        d.metadata << "]}\n";
+        if (!d.metadata) d.failed=true;
+    }
+    static void bytes(void* context, const char* name, const uint8_t* data, uint32_t size) {
+        auto& d=*static_cast<DiagnosticOutput*>(context);
+        std::ofstream output(std::string(d.prefix)+"."+name+".bin",std::ios::binary);
+        if (size) output.write(reinterpret_cast<const char*>(data),size);
+        output.close();
+        if (!output) d.failed=true;
+    }
+};
 static bool peripheralTrace = false;
 static bool frameOutputFailed = false;
 static void captureFrame(void* context, uint32_t width, uint32_t height, const uint32_t* pixels) {
@@ -123,7 +144,7 @@ static bool parseRtcTime(const char* text, Imx1RtcTime& time) {
 }
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::fprintf(stderr, "Usage: %s ROM [physical|reset|linked] [instruction-budget] [exact|fast] [--bootstrap-peripherals] [--trace=peripherals] [--idle-hclk-budget=N] [--arm920-icache-index-compatibility] [--lcdc-contrast-only] [--imx1-mmcsd-empty-slot] [--frame-output=PATH] [--assume-mpll-settled] [--virtual-mpll-retune] [--assume-spll-settled] [--assume-i2c-single-master] [--i2c-eeprom-image=PATH] [--asp-px1-input=high] [--asp-u-sample=WORD] [--rtc-initial-time=DAY:HH:MM:SS] [--cs4-port0-input=BYTE] [--cs4-indexed-input=BANK/INDEX/BYTE] [--cs5-reset-status-input=BYTE] [--graphics-profile=virtual5744-compatible-8mib] [--graphics-raw-axes=FIRST/SECOND] [--graphics-raw-mode1=SAMPLE] [--graphics-irq-connection=virtual-a13] [--gpio-a-input-masked=VALUE/MASK] [--gpio-a-input=VALUE] [--gpio-b-input=VALUE] [--gpio-d-input=VALUE] [--ram-mib=32|128]\n", argv[0]);
+        std::fprintf(stderr, "Usage: %s ROM [physical|reset|linked] [instruction-budget] [exact|fast] [--bootstrap-peripherals] [--trace=peripherals] [--idle-hclk-budget=N] [--arm920-icache-index-compatibility] [--lcdc-contrast-only] [--imx1-mmcsd-empty-slot] [--frame-output=PATH] [--diagnostic-snapshot=PREFIX] [--assume-mpll-settled] [--virtual-mpll-retune] [--assume-spll-settled] [--assume-i2c-single-master] [--i2c-eeprom-image=PATH] [--asp-px1-input=high] [--asp-u-sample=WORD] [--rtc-initial-time=DAY:HH:MM:SS] [--cs4-port0-input=BYTE] [--cs4-indexed-input=BANK/INDEX/BYTE] [--cs5-reset-status-input=BYTE] [--graphics-profile=virtual5744-compatible-8mib] [--graphics-raw-axes=FIRST/SECOND] [--graphics-raw-mode1=SAMPLE] [--graphics-irq-connection=virtual-a13] [--gpio-a-input-masked=VALUE/MASK] [--gpio-a-input=VALUE] [--gpio-b-input=VALUE] [--gpio-d-input=VALUE] [--ram-mib=32|128]\n", argv[0]);
         return 1;
     }
     const char* engine = argc >= 5 ? argv[4] : "exact";
@@ -132,6 +153,8 @@ int main(int argc, char** argv) {
     }
     const char* i2cImagePath = nullptr;
     Imx1ProbeOptions options{};
+    DiagnosticOutput diagnostic;
+    ArmDiagnosticSink diagnosticSink{&diagnostic,DiagnosticOutput::words,DiagnosticOutput::bytes};
     bool idleBudgetSupplied = false;
     options.interruptObserver = interrupt;
     options.busObserver = bus;
@@ -166,6 +189,11 @@ int main(int argc, char** argv) {
             }
             idleBudgetSupplied = true;
             options.idleHclkBudget = value;
+        }
+        else if (!std::strncmp(argv[i], "--diagnostic-snapshot=", 22)) {
+            if (diagnostic.prefix || !argv[i][22]) return 1;
+            diagnostic.prefix=argv[i]+22;
+            options.diagnosticSnapshot=&diagnosticSink;
         }
         else if (!std::strncmp(argv[i], "--frame-output=", 15) && argv[i][15]) {
             if (options.frameObserver) return 1;
@@ -458,6 +486,11 @@ int main(int argc, char** argv) {
         std::printf("Diagnostic RAM capacity=%u MiB, initial contents zero; bus timing unqualified.\n", options.ramMiB);
     }
     if (entry != Imx1ProbeEntry::physicalFlash) std::puts("Selected alias is an unverified mapping experiment.");
+    if (diagnostic.prefix) {
+        diagnostic.metadata.open(std::string(diagnostic.prefix)+".jsonl",std::ios::binary);
+        if (!diagnostic.metadata) { std::fprintf(stderr,"Could not open diagnostic output\n"); return 1; }
+        diagnostic.metadata << "{\"schema\":\"frond-private-arm920-diagnostic-v1\",\"word_encoding\":\"unsigned-decimal-u32\",\"ram_encoding\":\"guest-little-endian-bytes\",\"ring_capacity\":4096}\n";
+    }
     const auto result = imx1BootProbe(rom.data(), rom.size(), entry, budget, trace, nullptr,
                                      !std::strcmp(engine, "fast"), &options);
     std::printf("stop=%s step=%u pc=%08x instruction=%0*x address=%08x size=%u value=%08x operand=%08x width=%u\n",
@@ -493,6 +526,12 @@ int main(int argc, char** argv) {
     for (unsigned i = 0; i < 16; ++i)
         std::printf("r%u=%08x%c", i, result.registers[i], i % 4 == 3 ? '\n' : ' ');
     std::printf("cpsr=%08x spsr=%08x\n", result.cpsr, result.spsr);
+    if (diagnostic.prefix) {
+        diagnostic.metadata.close();
+        if (diagnostic.failed || !diagnostic.captured || !diagnostic.metadata) {
+            std::fprintf(stderr,"Could not write complete diagnostic output\n"); return 1;
+        }
+    }
     if (frameOutputFailed) { std::fprintf(stderr,"Could not write frame output\n"); return 1; }
     return 2;  // A diagnostic stop never establishes a successful boot.
 }

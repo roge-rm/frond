@@ -4,6 +4,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include <string>
+#include <utility>
+#include "cpu_diagnostics.h"
 
 #include "CPU.h"
 #include "MMU.h"
@@ -138,6 +141,39 @@ int main() {
         for (auto* m : {&exact, &fast}) { m->reset(attr); body(*m); }
         same(exact, fast);
     };
+    run(0xc0e, [](Machine& m) {
+        m.enable(); m.load(); m.store(data,0xdeadbeef);
+        assert(m.word(data)==0x11223344);
+        using Records=std::vector<std::pair<std::string,std::vector<uint32_t>>>;
+        auto collect=[](void* ctx,const char* name,const uint32_t* words,uint32_t count) {
+            static_cast<Records*>(ctx)->push_back({name,{words,words+count}});
+        };
+        Records first,second;
+        const auto original=m.ram;
+        const auto accessCount=m.accesses.size();
+        const auto exceptions=cpuExceptionSequence(m.cpu);
+        const auto flushes=mmuFlushCount(cpuGetMMU(m.cpu));
+        cpuEmitArm920Diagnostic(m.cpu,{&first,collect,nullptr});
+        cpuEmitArm920Diagnostic(m.cpu,{&second,collect,nullptr});
+        assert(first==second && m.ram==original && m.accesses.size()==accessCount);
+        assert(cpuExceptionSequence(m.cpu)==exceptions && mmuFlushCount(cpuGetMMU(m.cpu))==flushes);
+        bool dirty=false,translation=false,buffer=false;
+        for (const auto& record:first) {
+            const auto& w=record.second;
+            if (record.first=="dcache-line" && w[2]==data) {
+                assert(w[3]==data && w[4]==1 && w[5]==1 && w[6]==0xdeadbeef);
+                dirty=true;
+            }
+            if (record.first=="tlb" && w[0]==data) {
+                assert(w[1]==data && w[2]==3 && w[3]==0 && w[5]==1 && w[6]==1);
+                translation=true;
+            }
+            if (record.first=="pending-write-buffer-words") {assert(w[0]==0);buffer=true;}
+        }
+        assert(dirty && translation && buffer);
+        m.accesses.clear(); assert(m.load()==0xdeadbeef); m.noData();
+        m.cp(clean,data); assert(m.word(data)==0xdeadbeef);
+    });
     // Ccr and descriptor C/B independently select bypass, WT and WB.
     for (uint32_t attr : {0xc02u, 0xc06u, 0xc0au, 0xc0eu}) {
         for (uint32_t control : {0x4079u, 0x407du}) run(attr, [&](Machine& m) {

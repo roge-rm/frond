@@ -7,6 +7,7 @@
 #include "CPU.h"
 #include "MMU.h"
 #include "imx1_boot_probe.h"
+#include "imx1_graphics_memory.h"
 #include "patch_dispatch.h"
 #include "system_state.h"
 
@@ -32,6 +33,57 @@ static bool memory(void* data, uint32_t address, uint_fast8_t size, bool write, 
 }
 
 int main() {
+    {
+        const Imx1GraphicsMemory memory;
+        for (unsigned bank=0;bank<3;++bank) {
+            const auto dirty=memory.dirty(bank);
+            uint32_t bytes=123;
+            const auto* data=memory.diagnosticData(bank,bytes);
+            assert(bytes==(bank==0 ? 0x60000u : bank==1 ? 0x800000u : 0));
+            assert(bool(data)==(bank<2));
+            for (uint32_t i=0;i<bytes;++i) assert(data[i]==0);
+            assert(memory.dirty(bank).generation==dirty.generation && memory.dirty(bank).pending==dirty.pending);
+        }
+    }
+    struct Capture {
+        std::vector<uint32_t> steps;
+        uint32_t memoryBytes=0;
+        static void words(void* ctx,const char* name,const uint32_t* w,uint32_t count) {
+            auto& c=*static_cast<Capture*>(ctx);
+            if (!std::strcmp(name,"recent")) {
+                assert(count==10 && w[1]==0x10000000 && w[2]==0xeafffffe);
+                c.steps.push_back(w[0]);
+            }
+        }
+        static void bytes(void* ctx,const char* name,const uint8_t* bytes,uint32_t count) {
+            if (!std::strcmp(name,"sram")) {
+                assert(count==0x20000);
+                for (uint32_t i=0;i<count;++i) assert(bytes[i]==0);
+            }
+            static_cast<Capture*>(ctx)->memoryBytes+=count;
+        }
+    };
+    for (bool fast:{false,true}) for (uint32_t steps:{1u,4096u,5000u}) {
+        Capture capture;
+        ArmDiagnosticSink sink{&capture,Capture::words,Capture::bytes};
+        Imx1ProbeOptions options;
+        options.diagnosticSnapshot=&sink;
+        const auto diagnostic=run({0xeafffffe},steps,fast,&options);
+        const auto ordinary=run({0xeafffffe},steps,fast);
+        assert(diagnostic.stop==ordinary.stop && diagnostic.trace.step==ordinary.trace.step &&
+            diagnostic.busAccesses==ordinary.busAccesses && diagnostic.cpsr==ordinary.cpsr &&
+            diagnostic.spsr==ordinary.spsr && diagnostic.idleHclk==ordinary.idleHclk &&
+            !std::memcmp(diagnostic.registers,ordinary.registers,sizeof(ordinary.registers)));
+        assert(capture.steps.size()==(steps<4096 ? steps : 4096) && capture.memoryBytes==0x20000);
+        assert(capture.steps.front()==steps-capture.steps.size() && capture.steps.back()==steps-1);
+    }
+    // Guarded instructions are absent from the retired-context ring.
+    Capture guarded;
+    ArmDiagnosticSink guardedSink{&guarded,Capture::words,Capture::bytes};
+    Imx1ProbeOptions guardedOptions;
+    guardedOptions.diagnosticSnapshot=&guardedSink;
+    run({0xe16f1f10},1,false,&guardedOptions);
+    assert(guarded.steps.empty());
     for (uint32_t invalid : {0u, imx1ProbeMaximumSteps + 1}) {
         const auto rejected=imx1BootProbe(nullptr,0,Imx1ProbeEntry::physicalFlash,invalid);
         assert(rejected.stop==Imx1ProbeStop::unsupportedPeripheral && rejected.peripheralStatus==Imx1BootstrapAccess::sequence);
