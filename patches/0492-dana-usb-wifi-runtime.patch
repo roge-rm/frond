@@ -1,0 +1,530 @@
+diff --git a/src/cloudpilot/emulator/EmDevice.cpp b/src/cloudpilot/emulator/EmDevice.cpp
+index ec96816..df73c4b 100644
+--- a/src/cloudpilot/emulator/EmDevice.cpp
++++ b/src/cloudpilot/emulator/EmDevice.cpp
+@@ -1113,6 +1113,7 @@ void EmDevice::CreateRegs(void) const {
+             auto* isp=new EmRegsISPDana;
+             isp->SetHostIrq([board](bool high) { board->SetHcIrqPin(high); });
+             isp->SetDeviceIrq([board](bool high) { board->SetDcIrqPin(high); });
++            board->usbSupplySink=[isp](unsigned port, bool on) { isp->SetPortSupply(port,on); };
+             EmBankRegs::AddSubBank(board);
+             EmBankRegs::AddSubBank(isp);
+             break;
+diff --git a/src/cloudpilot/emulator/hardware/EmRegsISPDana.cpp b/src/cloudpilot/emulator/hardware/EmRegsISPDana.cpp
+index cf10043..7c82a83 100644
+--- a/src/cloudpilot/emulator/hardware/EmRegsISPDana.cpp
++++ b/src/cloudpilot/emulator/hardware/EmRegsISPDana.cpp
+@@ -244,6 +244,7 @@ void EmRegsISPDana::Commit(uint32 value) {
+                     CancelHostWork();
+                     port|=0x10;
+                     portResetCycles[index]=(ClockHz()+99)/100;
++                    if(hostPortReset) hostPortReset(index);
+                 }
+             }
+             if(port!=before) regs[3]|=0x40;
+@@ -774,6 +775,12 @@ bool EmRegsISPDana::CompleteHostPtd(uint8* data, unsigned size, unsigned offset,
+     return true;
+ }
+ 
++void EmRegsISPDana::SetPortSupply(unsigned port, bool on) {
++    if(port>=2) throw std::runtime_error("ISP invalid supply port");
++    if(portSupply[port]==on) return;
++    portSupply[port]=on;
++    if(hostSupplyChanged) hostSupplyChanged();
++}
+ void EmRegsISPDana::SetHostTarget(unsigned port, HostTarget target) {
+     if(port>=2) throw std::runtime_error("ISP invalid target port");
+     SetHostConnection(port,false);
+diff --git a/src/cloudpilot/emulator/hardware/EmRegsISPDana.h b/src/cloudpilot/emulator/hardware/EmRegsISPDana.h
+index 3c820d5..d523dc9 100644
+--- a/src/cloudpilot/emulator/hardware/EmRegsISPDana.h
++++ b/src/cloudpilot/emulator/hardware/EmRegsISPDana.h
+@@ -55,6 +55,12 @@ class EmRegsISPDana : public EmRegs {
+     // ACK accepts an OUT irrevocably; IN bytes are accepted only with matching toggle/size.
+     std::function<void()> hostCancelled; // Runtime owner, never saved.
+     std::function<void()> hostReattach; // Runtime owner: plugs its device back in after a hardware reset.
++    std::function<void(unsigned)> hostPortReset; // Runtime owner: a root port reset has started.
++    // Root port supply from the board's power lines (Dana: PM5 external, PK0 internal module).
++    // Not saved: the board sets it again on reset and load.
++    std::function<void()> hostSupplyChanged; // Runtime owner.
++    void SetPortSupply(unsigned port, bool on);
++    bool PortSupply(unsigned port) const { return portSupply.at(port); }
+     using HostTarget=std::function<HostReply(const HostPacket&)>;
+     bool HasHostTarget(unsigned port) const { return bool(hostTargets.at(port)); }
+     void SetHostTarget(unsigned port, HostTarget target);
+@@ -111,6 +117,7 @@ class EmRegsISPDana : public EmRegs {
+     void Write(emuptr, int, uint32);
+     void Commit(uint32);
+     std::array<HostTarget,2> hostTargets{};
++    std::array<bool,2> portSupply{{true,true}};
+     bool hostArmed=false;
+     void ExecuteHostFrame();
+     void CancelHostWork();
+diff --git a/src/cloudpilot/emulator/hardware/EmRegsVZDana.cpp b/src/cloudpilot/emulator/hardware/EmRegsVZDana.cpp
+index a016ea6..2949b6e 100644
+--- a/src/cloudpilot/emulator/hardware/EmRegsVZDana.cpp
++++ b/src/cloudpilot/emulator/hardware/EmRegsVZDana.cpp
+@@ -118,6 +118,7 @@ void EmRegsVZDana::KDirWrite(emuptr a, int size, uint32 value) {
+ void EmRegsVZDana::PortDataChanged(int p, uint8 old, uint8 value) {
+     EmRegsVZ::PortDataChanged(p,old,value);
+     if(p=='B' || p=='K' || p=='J' || p=='F') SyncCards();
++    if(p=='K' || p=='M') SyncUsbSupply();
+     if (p=='B' && ((old^value)&0x40)) {
+         ResetPowerProtocol();
+         resetAsserted=(value&0x40)!=0;
+@@ -160,6 +161,7 @@ void EmRegsVZDana::Load(SavestateLoader<ChunkType>& l) {
+     }
+     if(!fUART[1]->RestorePending(pending)) { l.NotifyError(); return; }
+     EmRegsVZ::Load(l);
++    SyncUsbSupply();
+     adc.Load(l);
+     if(!l.GetChunk(ChunkType::spiSlaveSD)) sd0.Reset();
+     sd0.Load(l); sd1.Load(l);
+@@ -214,9 +216,16 @@ void EmRegsVZDana::Load(SavestateLoader<ChunkType>& l) {
+ 
+ }
+ 
++void EmRegsVZDana::SyncUsbSupply() {
++    if(!usbSupplySink) return;
++    usbSupplySink(0,(StdRead(0xfffff449,1)&0x20)!=0);
++    usbSupplySink(1,(StdRead(0xfffff441,1)&1)!=0);
++}
++
+ void EmRegsVZDana::Reset(Bool hardware) {
+     EmRegsVZ::Reset(hardware);
+     DispatchPwmChange();
++    SyncUsbSupply();
+     sd0.Reset(); sd1.Reset();
+     if(!hardware) return;
+     ResetPowerProtocol();
+diff --git a/src/cloudpilot/emulator/hardware/EmRegsVZDana.h b/src/cloudpilot/emulator/hardware/EmRegsVZDana.h
+index a9f118a..921e352 100644
+--- a/src/cloudpilot/emulator/hardware/EmRegsVZDana.h
++++ b/src/cloudpilot/emulator/hardware/EmRegsVZDana.h
+@@ -1,6 +1,7 @@
+ #ifndef EM_REGS_VZ_DANA_H
+ #define EM_REGS_VZ_DANA_H
+ 
++#include <functional>
+ #include "EmRegsVZ.h"
+ #include "EmSPISlave.h"
+ #include "EmSPISlaveADS784x.h"
+@@ -70,6 +71,10 @@ class EmRegsVZDana : public EmRegsVZ, public EmSPISlave {
+     void SoundClockWrite(emuptr, int, uint32);
+     void SoundMuxWrite(emuptr, int, uint32);
+    public:
++    // USB root port supply: PM5 high powers the external port (0), PK0 high the internal module's
++    // port (1), as the ROM's helper drives them on boards with CSA size 0x0c or more (Frond's Dana).
++    std::function<void(unsigned port, bool on)> usbSupplySink;
++    void SyncUsbSupply();
+     void SetHcIrqPin(bool high) { auto old=hcIrqHigh; hcIrqHigh=high; UpdateIRQ3(old ? 0x40 : 0); }
+     void SetDcIrqPin(bool high) { auto old=dcIrqHigh; dcIrqHigh=high; UpdateIRQ2(old ? 0x20 : 0); }
+     bool SetVirtualAnalogueInputs(uint16 mainBattery, uint16 supply, bool packDetectHigh) {
+diff --git a/src/cloudpilot/emulator/hardware/UsbWifiRuntime.h b/src/cloudpilot/emulator/hardware/UsbWifiRuntime.h
+new file mode 100644
+index 0000000..2909c24
+--- /dev/null
++++ b/src/cloudpilot/emulator/hardware/UsbWifiRuntime.h
+@@ -0,0 +1,126 @@
++#pragma once
++#include <cstdio>
++#include <memory>
++#include <random>
++#include <string>
++#include "EmRegsISPDana.h"
++#include "EmBankRegs.h"
++#include "UsbPrism2Adapter.h"
++#include "net/WifiRouter.h"
++
++// The MN-510 Wi-Fi adapter on the Dana's external USB port (root port 0), its Ethernet frames
++// through a frondNet::WifiRouter (libslirp). Runner-owned, single emulation thread. The adapter
++// is only connected while the board powers the port (PM5). Dispose before register banks are freed.
++class UsbWifiRuntime {
++ public:
++    UsbPrism2Adapter adapter;
++    // Guest time in nanoseconds, for slirp's timers. Set by the owner before attach.
++    std::function<uint64_t()> clock;
++
++    UsbWifiRuntime() {
++        adapter.setTxSink([this](const std::vector<uint8_t>& frame) { transmit(frame); });
++    }
++    ~UsbWifiRuntime() { EmBankRegs::onBeforeDispose.RemoveHandler(disposeHandler); detach(); }
++    UsbWifiRuntime(const UsbWifiRuntime&) = delete;
++    UsbWifiRuntime& operator=(const UsbWifiRuntime&) = delete;
++
++    void attach(EmRegsISPDana& controller) {
++        detach(); dc=&controller;
++        if(!haveMac) newMac();
++        if(!router) resetRouter();
++        dc->hostCancelled=[] {};
++        dc->hostReattach=[this] { adapter.detach(); powered=false; supplyChanged(); };
++        dc->hostPortReset=[this](unsigned port) { if(port==0) adapter.busReset(); };
++        dc->hostSupplyChanged=[this] { supplyChanged(); };
++        powered=false;
++        supplyChanged();
++    }
++    void detach() {
++        if(dc) {
++            dc->SetHostTarget(0,{});
++            dc->hostCancelled={}; dc->hostReattach={}; dc->hostPortReset={}; dc->hostSupplyChanged={};
++            dc=nullptr;
++        }
++        adapter.detach(); powered=false;
++    }
++    bool attached() const { return dc!=nullptr; }
++
++    // Runs slirp and hands its frames to the adapter. A frame the adapter can't queue is dropped.
++    // Called often; slirp runs at most once per guest millisecond unless the guest sent something.
++    void poll() {
++        if(!dc || !router) return;
++        const uint64_t t=now();
++        if(!sent && t>=lastPoll && t-lastPoll<1000000) return;
++        sent=false; lastPoll=t;
++        router->Poll(t);
++        std::vector<uint8_t> frame;
++        while(router->Receive(frame)) {
++            if(adapter.receive(frame.data(),frame.size())) ++rxFrames; else ++dropped;
++        }
++    }
++    // A fresh slirp: host connections drop, the guest keeps its address and the link.
++    void resetRouter() { router=std::make_unique<frondNet::WifiRouter>(); }
++
++    // The adapter's MAC, made once per machine and saved with its session.
++    bool hasMac() const { return haveMac; }
++    UsbPrism2Adapter::Mac mac() const { return mac_; }
++    void setMac(const UsbPrism2Adapter::Mac& m) { mac_=m; haveMac=true; adapter.setMac(m); }
++    static std::string macText(const UsbPrism2Adapter::Mac& m) {
++        char text[18];
++        snprintf(text,sizeof text,"%02x:%02x:%02x:%02x:%02x:%02x",m[0],m[1],m[2],m[3],m[4],m[5]);
++        return text;
++    }
++    // Locally administered unicast only, as a made-up MAC must be.
++    static bool parseMac(const std::string& text,UsbPrism2Adapter::Mac& m) {
++        unsigned b[6]; char end;
++        if(text.size()!=17 || sscanf(text.c_str(),"%2x:%2x:%2x:%2x:%2x:%2x%c",&b[0],&b[1],&b[2],&b[3],&b[4],&b[5],&end)!=6) return false;
++        if((b[0]&3)!=2) return false;
++        for(unsigned i=0;i<6;++i) m[i]=uint8_t(b[i]);
++        return true;
++    }
++
++    // "off", or the port power, link, the guest's IPv4 address, MAC and frame counts.
++    std::string status() const {
++        if(!dc) return "off";
++        std::string s=std::string(powered?"powered":"unpowered")+" link="+(adapter.linkUp()?"up":"down")+" ip="+ip+
++            " mac="+macText(mac_)+" tx="+std::to_string(txFrames)+" rx="+std::to_string(rxFrames)+
++            " dropped="+std::to_string(dropped+adapter.rxDropped());
++        if(router && !router->Valid()) s+=" router=failed";
++        return s;
++    }
++
++ private:
++    uint64_t now() const { return clock ? clock() : 0; }
++    void newMac() {
++        std::random_device random;
++        UsbPrism2Adapter::Mac m;
++        for(auto& b:m) b=uint8_t(random());
++        m[0]=uint8_t((m[0]&0xfc)|2);
++        setMac(m);
++    }
++    void plug() { dc->SetHostTarget(0,[this](const auto& p) { return adapter.packet<EmRegsISPDana::HostReply>(p); }); }
++    // Power on or off is a fresh adapter; no power is an unplugged port.
++    void supplyChanged() {
++        if(!dc) return;
++        const bool on=dc->PortSupply(0);
++        if(on==powered && dc->HasHostTarget(0)==on) return;
++        powered=on; adapter.detach();
++        if(on) plug(); else dc->SetHostTarget(0,{});
++    }
++    void transmit(const std::vector<uint8_t>& frame) {
++        ++txFrames;
++        // The guest's address, from the IPv4 source of what it sends.
++        if(frame.size()>=34 && frame[12]==8 && frame[13]==0 && (frame[26]|frame[27]|frame[28]|frame[29]))
++            ip=std::to_string(frame[26])+"."+std::to_string(frame[27])+"."+std::to_string(frame[28])+"."+std::to_string(frame[29]);
++        if(router) router->Input(frame.data(),frame.size(),now());
++        sent=true;
++    }
++    EmRegsISPDana* dc=nullptr;
++    std::unique_ptr<frondNet::WifiRouter> router;
++    UsbPrism2Adapter::Mac mac_{};
++    bool haveMac=false, powered=false, sent=false;
++    uint64_t lastPoll=0;
++    std::string ip="none";
++    unsigned txFrames=0, rxFrames=0, dropped=0;
++    int disposeHandler=EmBankRegs::onBeforeDispose.AddHandler([this] { detach(); });
++};
+diff --git a/src/cloudpilot/frond/main.cpp b/src/cloudpilot/frond/main.cpp
+index 35a0375..4b1bf6c 100644
+--- a/src/cloudpilot/frond/main.cpp
++++ b/src/cloudpilot/frond/main.cpp
+@@ -2,6 +2,7 @@
+ #include "EmBankRegs.h"
+ #include "UsbDanaPort.h"
+ #include "UsbPrinterRuntime.h"
++#include "UsbWifiRuntime.h"
+ #include "UsbHostBridge.h"
+ #include <sys/syscall.h>
+ // frond-68k: the runner for DragonBall (68k) devices, built on Cloudpilot's core. It checks a ROM,
+@@ -237,10 +238,14 @@ bool startCore(const DeviceProfile5& profile, const uint8_t* rom, size_t size) {
+ // clocks; sessions without it counted in units of two clocks and are converted on load.
+ // "modem-call" and "phone-call" are only there when the session was saved with the modem or
+ // the infrared phone in a call, so a load can tell the guest the line has gone.
++// "wifi-mac" is the Dana Wi-Fi adapter's MAC, kept once made; "wifi-adapter" (hex) its settings
++// and link, only when it was plugged in.
+ struct SessionMetadata {
+     int contrast{Lcd68k::kDefaultContrast};
+     bool wholeClocks{false};
+     string modemCall, phoneCall;
++    optional<UsbPrism2Adapter::Mac> wifiMac;
++    vector<uint8_t> wifiAdapter;
+ };
+ 
+ string metadataText(const SessionMetadata& metadata) {
+@@ -248,6 +253,13 @@ string metadataText(const SessionMetadata& metadata) {
+                   "\nclock 1\n";
+     if (!metadata.modemCall.empty()) text += "modem-call " + metadata.modemCall + "\n";
+     if (!metadata.phoneCall.empty()) text += "phone-call " + metadata.phoneCall + "\n";
++    if (metadata.wifiMac) text += "wifi-mac " + UsbWifiRuntime::macText(*metadata.wifiMac) + "\n";
++    if (!metadata.wifiAdapter.empty()) {
++        text += "wifi-adapter ";
++        static const char digits[] = "0123456789abcdef";
++        for (const auto byte : metadata.wifiAdapter) { text += digits[byte >> 4]; text += digits[byte & 15]; }
++        text += "\n";
++    }
+     return text;
+ }
+ 
+@@ -269,6 +281,22 @@ string parseMetadata(const void* data, size_t size, SessionMetadata& metadata) {
+             metadata.modemCall = line.substr(11);
+         } else if (line.rfind("phone-call ", 0) == 0 && line.size() > 11) {
+             metadata.phoneCall = line.substr(11);
++        } else if (line.rfind("wifi-mac ", 0) == 0) {
++            UsbPrism2Adapter::Mac mac;
++            if (!UsbWifiRuntime::parseMac(line.substr(9), mac)) return "invalid session Wi-Fi MAC";
++            metadata.wifiMac = mac;
++        } else if (line.rfind("wifi-adapter ", 0) == 0) {
++            const string hex = line.substr(13);
++            vector<uint8_t> bytes;
++            for (size_t i = 0; i + 1 < hex.size(); i += 2) {
++                const auto nibble = [](char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1; };
++                const int high = nibble(hex[i]), low = nibble(hex[i + 1]);
++                if (high < 0 || low < 0) return "invalid session Wi-Fi adapter state";
++                bytes.push_back(uint8_t(high << 4 | low));
++            }
++            UsbPrism2Adapter check;
++            if (hex.size() % 2 || !check.load(bytes.data(), bytes.size())) return "invalid session Wi-Fi adapter state";
++            metadata.wifiAdapter = std::move(bytes);
+         } else if (!line.empty()) {
+             return "unknown session metadata";
+         }
+@@ -759,6 +787,8 @@ class Runner {
+         serialTransport->SessionLoaded(metadata.modemCall);
+         irTransport->SessionLoaded(metadata.phoneCall);
+         piezo.Restart(gSession->GetSystemCycles());
++        usbWifi.clock=[this] { return UsbTime(); };
++        UsbSessionLoaded(metadata);
+         EmPalmOS::SetSafePointHandler([this] { RunGuestCall(); });
+         pwmHandler = EmHAL::onPwmChange.AddHandler([this](double frequency, double duty) {
+             piezo.Change(gCPU68K ? gCPU68K->CycleNow() : gSession->GetSystemCycles(), frequency, duty);
+@@ -772,6 +802,7 @@ class Runner {
+ 
+     ~Runner() {
+         usbPrinter.detach();
++        usbWifi.detach();
+         EmBankRegs::onBeforeDispose.RemoveHandler(usbDisposeHandler);
+         StopUsb();
+         EmPalmOS::SetSafePointHandler(nullptr);
+@@ -1098,6 +1129,9 @@ class Runner {
+         SessionMetadata saving = metadata;
+         saving.modemCall = serialTransport->SavedCall();
+         saving.phoneCall = irTransport->SavedCall();
++        if (usbWifi.hasMac()) saving.wifiMac = usbWifi.mac();
++        saving.wifiAdapter.clear();
++        if (usbPort == "wifi") saving.wifiAdapter = pendingWifi ? *pendingWifi : usbWifi.adapter.save();
+         return saving;
+     }
+ 
+@@ -1118,7 +1152,11 @@ class Runner {
+ 
+     // Host bytes in and out, and the transports following the guest's line drivers.
+     UsbPrinterRuntime usbPrinter;
+-    bool printerAttached=false;
++    UsbWifiRuntime usbWifi;
++    // The external USB port's one device: off, printer or wifi. Kept across loads and resets.
++    string usbPort="off";
++    // A loaded session's adapter state, put back when the adapter is next plugged in.
++    optional<vector<uint8_t>> pendingWifi;
+     UsbHostBridge usbBridge;
+     unique_ptr<UsbDanaPort> usbDana;
+     UsbHostHooks usbHooks;
+@@ -1134,26 +1172,56 @@ class Runner {
+     }
+     void RestoreUsb() {
+         if(profile->deviceType!=deviceTypeDana) return;
+-        if(printerAttached) { string result; PrinterControl("attach","on",result); }
++        if(usbPort!="off") { string result; UsbPortControl(usbPort,result); }
+         string error;
+         if(!StartUsbDebug(usbDebugMode,error)) cerr << "usb-debug: error " << error << endl;
+     }
+     bool PrinterControl(const string& action,const string& argument,string& result) {
+         if(profile->deviceType!=deviceTypeDana) { result="Printer runtime requires Dana.";return false; }
+         if(action=="attach") {
+-            if(argument=="off") { usbPrinter.detach();printerAttached=false; }
+-            else if(argument=="on") {
+-                auto* dc=dynamic_cast<EmRegsISPDana*>(EmBankRegs::GetSubBank(0x1f000000,2));
+-                if(!dc) {result="Dana controller unavailable.";return false;}
+-                usbPrinter.attach(*dc);printerAttached=true;
+-            } else {result="Use attach on|off.";return false;}
++            // attach on is usb-port printer; off only unplugs the printer.
++            if(argument=="off") { if(usbPort=="printer" && !UsbPortControl("off",result)) return false; }
++            else if(argument=="on") { if(!UsbPortControl("printer",result)) return false; }
++            else {result="Use attach on|off.";return false;}
+             result=usbPrinter.status();return true;
+         }
+         return usbPrinter.command(action,argument,result);
+     }
++    // usb-port off|printer|wifi: the one device on the Dana's external USB port.
++    bool UsbPortControl(const string& choice,string& result) {
++        if(profile->deviceType!=deviceTypeDana) { result="This device has no USB host port.";return false; }
++        if(choice!="off" && choice!="printer" && choice!="wifi") { result="Use off, printer or wifi.";return false; }
++        auto* dc=dynamic_cast<EmRegsISPDana*>(EmBankRegs::GetSubBank(0x1f000000,2));
++        if(choice!="off" && !dc) { result="Dana controller unavailable.";return false; }
++        if(choice!="printer") usbPrinter.detach();
++        if(choice!="wifi") usbWifi.detach();
++        if(choice=="printer") usbPrinter.attach(*dc);
++        if(choice=="wifi") {
++            usbWifi.attach(*dc);
++            if(pendingWifi) { usbWifi.adapter.load(pendingWifi->data(),pendingWifi->size()); pendingWifi.reset(); }
++        }
++        usbPort=choice;
++        result=UsbPortState();
++        return true;
++    }
++    // "off", "printer" and the printer's status, or "wifi" and the adapter's.
++    string UsbPortState() const {
++        if(usbPort=="printer") return "printer "+usbPrinter.status();
++        if(usbPort=="wifi") return "wifi "+usbWifi.status();
++        return "off";
++    }
++    // The network mode as the T|X names it: wireless while the Wi-Fi adapter is the port's device.
++    string NetworkState() const { return usbPort=="wifi" ? "wireless" : "disabled"; }
++    // A session's MAC and adapter state; slirp starts again, so host connections drop.
++    void UsbSessionLoaded(const SessionMetadata& loaded) {
++        if(loaded.wifiMac) usbWifi.setMac(*loaded.wifiMac);
++        if(loaded.wifiAdapter.empty()) pendingWifi.reset(); else pendingWifi=loaded.wifiAdapter;
++        if(usbWifi.attached()) usbWifi.resetRouter();
++    }
+     uint64_t UsbTime() const { return uint64_t(guestSeconds*1000000000.0); }
+     void ServiceUsb() {
+         usbBridge.Service();
++        if(!gDebugger.IsStopped()) usbWifi.poll();
+         if(!gDebugger.IsStopped() && usbHooks.tick) usbHooks.tick(usbHooks.context,UsbTime());
+         for(auto& m:usbBridge.TakeMessages()) cerr << m << endl;
+     }
+@@ -1525,6 +1593,11 @@ class Runner {
+             string action,argument,result;words >> action;getline(words >> ws,argument);
+             bool ok=PrinterControl(action,argument,result);
+             cout << "printer: " << (ok?"":"error ") << result << endl;
++        } else if (command == "usb-port") {
++            string choice,result;
++            if(!(words >> choice)) { cout << "usb-port: " << (profile->deviceType==deviceTypeDana ? UsbPortState() : "off") << endl; return; }
++            bool ok=UsbPortControl(choice,result);
++            cout << "usb-port: " << (ok?"":"error ") << result << endl;
+         } else if (command == "usb-debug-mode") {
+             string mode,error;words >> mode;
+             if(!StartUsbDebug(mode,error)) cout << "usb-debug: error " << error << endl;
+@@ -1827,7 +1900,7 @@ class Runner {
+         static const char* const argumentCommands[] = {
+             "launch-app",  "delete-db", "serial-mode", "irda-mode", "display",   "hold",           "keyboard-attach",
+             "keyboard-key", "network-mode", "sound-mode", "speed", "microphone-mode", "usb-mode",
+-            "bluetooth-mode", "gdb-start"};
++            "bluetooth-mode", "gdb-start", "usb-port"};
+         const bool card = command.rfind("sd-", 0) == 0 || command.rfind("ms-", 0) == 0;
+         if(command=="dana-down" || command=="dana-up" || command=="dana-text") {
+             const auto result=DanaInputCommand(command,argument);
+@@ -2046,7 +2119,7 @@ class Runner {
+         }
+ 
+         // State queries the desktop asks every device, answered as absent.
+-        if (command == "network-state") return {true, "network", "disabled"};
++        if (command == "network-state") return {true, "network", NetworkState()};
+         if (command == "hold-state") return {true, "hold", "unavailable"};
+         if (command == "keyboard-state") return {true, "keyboard", "detached"};
+         if (command == "printer") {
+@@ -2055,12 +2128,31 @@ class Runner {
+             bool ok=PrinterControl(argument.substr(0,split),split==string::npos?"":argument.substr(split+1),result);
+             return {ok,"printer",result};
+         }
++        if (command == "usb-port" || command == "usb-port-state") {
++            if (profile->deviceType != deviceTypeDana) {
++                if (command == "usb-port-state" || argument == "off") return {true, "usb-port", "off"};
++                return {false, "unsupported", "This device has no USB host port."};
++            }
++            string result;
++            if (command == "usb-port-state") return {true, "usb-port", UsbPortState()};
++            const bool ok = UsbPortControl(argument, result);
++            return {ok, ok ? "usb-port" : "argument", result};
++        }
+         if (command == "usb-state") return {true, "usb", "off"};
+         if (command == "microphone-state") return {true, "microphone", "off"};
+         if (command == "microphone-epoch") return {true, "microphone", "0"};
+         if (command == "sd-state") return {true, "card", "none"};
+         if (command == "network-mode") {
++            // On the Dana, wireless plugs in the USB Wi-Fi adapter and disabled unplugs it.
++            if (profile->capabilities.usbWifi && (argument == "wireless" || argument == "disabled")) {
++                string result;
++                if (argument == "wireless" ? !UsbPortControl("wifi", result)
++                                           : usbPort == "wifi" && !UsbPortControl("off", result))
++                    return {false, "network", result};
++                return {true, "network", NetworkState()};
++            }
+             if (argument == "disabled") return {true, "network", "disabled"};
++            if (profile->capabilities.usbWifi) return {false, "argument", "Use disabled or wireless."};
+             return {false, "unsupported", "This device has no emulated network."};
+         }
+         if (command == "keyboard-attach") {
+@@ -2173,6 +2265,7 @@ class Runner {
+             return void(cout << "session refused: " << error << "; machine unchanged" << endl);
+         const auto old=runtimeCards.Snapshot();
+         runtimeCards.Install(next);
++        const auto wifiBefore=usbPort=="wifi" ? usbWifi.adapter.save() : vector<uint8_t>{};
+         auto error=applySession(session);
+         if(error.empty() && !runtimeCards.Matches(next)) error="manifest and protocol insertion disagree";
+         if (!error.empty()) {
+@@ -2183,6 +2276,7 @@ class Runner {
+                 quit = true;
+                 return;
+             }
++            if(!wifiBefore.empty()) pendingWifi=wifiBefore;
+             RestoreUsb();
+             piezo.Restart(gSession->GetSystemCycles());
+             serialTransport->SessionLoaded("");
+@@ -2191,6 +2285,7 @@ class Runner {
+             return void(cout << "session refused: " << error << "; machine restored"
+                                   << (usbDebugMode!="off"?"; USB peer must reconnect and reset":"") << endl);
+         }
++        UsbSessionLoaded(session.metadata);
+         RestoreUsb();
+         ReleaseInput(false);
+         metadata = session.metadata;
+diff --git a/src/common/device_profile5.h b/src/common/device_profile5.h
+index 6db79ff..6f1b4ad 100644
+--- a/src/common/device_profile5.h
++++ b/src/common/device_profile5.h
+@@ -32,6 +32,8 @@ struct DeviceCapabilities5 {
+     bool irPhone{false};
+     // usbPrinter: a USB printer leaf on the host port that collects raw print jobs (Dana).
+     bool usbPrinter{false};
++    // usbWifi: a USB Wi-Fi adapter for the same host port, one device at a time (Dana).
++    bool usbWifi{false};
+ };
+ 
+ // A device's fixed name is what sessions, settings, the control socket and command line use.
+@@ -157,7 +159,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
+     // Dana uses its built-in keyboard and two independent SD/MMC slots.
+     {deviceTypeDana, "alphasmart-dana", "AlphaSmart Dana", DeviceCohort5::vz68k, DeviceSupport5::experimentalDesktop,
+      DeviceDetect5::romHeader68k, 0x61736d74 /* asmt */, 0x44616e61 /* Dana */,
+-     DeviceBoard5::vz328, DeviceArt::none, {false, true, false, false, false, true, false, true, false, false, false, false, true},
++     DeviceBoard5::vz328, DeviceArt::none, {false, true, false, false, false, true, false, true, false, false, false, false, true, true},
+      6u << 20, 0, 8u << 20, 8u << 20, DisplayMode::mode_560x160, 1u << 9, false,
+      DeviceNorLayout5::any, 0, 0x8000, false, 32u << 20, 2048ull << 20,
+      {true, "dana", 560, 160, 0, 0, "", "", -1, -1, -1, -1, false, true, false, "", "dana"}},

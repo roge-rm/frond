@@ -799,6 +799,16 @@ int main() {
     }
     St dark; dark.SetByte(0xfffff441,0x80);assert(dark.GetLCDScreenOn());assert(!dark.GetLCDBacklightOn());
     dark.SetByte(0xfffff441,0x10);assert(!dark.GetLCDScreenOn());assert(dark.GetLCDBacklightOn());
+    {
+        // USB root port supply: PM5 powers the external port, PK0 the internal module's.
+        St power; std::vector<std::pair<unsigned,bool>> seen;
+        power.usbSupplySink=[&](unsigned port,bool on) { seen.push_back({port,on}); };
+        auto last=[&](unsigned port) { for(auto it=seen.rbegin();it!=seen.rend();++it) if(it->first==port) return it->second; assert(false); return false; };
+        power.Raw(0xfffff449,1,0x20);power.PortDataChanged('M',0,0x20);assert(last(0) && !last(1));
+        power.Raw(0xfffff441,1,0x01);power.PortDataChanged('K',0,0x01);assert(last(0) && last(1));
+        power.Raw(0xfffff449,1,0);power.PortDataChanged('M',0x20,0);assert(!last(0) && last(1));
+        power.Raw(0xfffff441,1,0);power.SyncUsbSupply();assert(!last(0) && !last(1));
+    }
 
     for(unsigned index: {1u,2u}) {
         LegacyInput fixture{index}; LegacyLoader migrated;

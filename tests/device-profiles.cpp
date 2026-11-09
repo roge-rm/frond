@@ -352,6 +352,7 @@ int main() {
                                           p.deviceType == deviceTypeTG50 || p.deviceType == deviceTypeE2 ||
                                           p.deviceType == deviceTypeFrankenE2 || p.deviceType == deviceTypeZire72));
     for (const auto& p : deviceProfiles5) assert(p.capabilities.usbPrinter == (p.deviceType == deviceTypeDana));
+    for (const auto& p : deviceProfiles5) assert(p.capabilities.usbWifi == (p.deviceType == deviceTypeDana));
     for (const auto& p : deviceProfiles5) if (p.deviceType == deviceTypeDana) assert(!p.capabilities.usb);
     // TG50 has NOR-only firmware, physical 16 MiB RAM and a qualified native board.
     {

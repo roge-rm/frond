@@ -1514,6 +1514,13 @@ test-usb-printer-runtime:
 	mkdir -p $(USB_RUNTIME_AREA)/output
 	$(MAKE) -C $(USB_RUNTIME_AREA)/source/src/cloudpilot -f Makefile -f $(CURDIR)/tests/usb-printer-runtime.mk FROND_68K=1 FROND_TEST_ROOT=$(CURDIR) USB_RUNTIME_TEST=$(CURDIR)/$(USB_RUNTIME_AREA)/test-usb-printer-runtime USB_RUNTIME_OUTPUT=$(CURDIR)/$(USB_RUNTIME_AREA)/output usb-runtime-test
 
+.PHONY: test-usb-wifi-runtime
+USB_WIFI_AREA ?= build/usb-wifi-runtime
+test-usb-wifi-runtime:
+	python3 tools/prepare.py --destination $(USB_WIFI_AREA)/source
+	$(MAKE) -C $(USB_WIFI_AREA)/source/src/common libcommon.a net
+	$(MAKE) -C $(USB_WIFI_AREA)/source/src/cloudpilot -f Makefile -f $(CURDIR)/tests/usb-wifi-runtime.mk FROND_68K=1 FROND_TEST_ROOT=$(CURDIR) USB_WIFI_TEST=$(CURDIR)/$(USB_WIFI_AREA)/test-usb-wifi-runtime usb-wifi-test
+
 ISP_FRAME_AREA ?= $(CURDIR)/build/isp-frame
 .PHONY: test-isp-frame
 test-isp-frame:
