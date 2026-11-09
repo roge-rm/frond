@@ -678,6 +678,10 @@ test-frond-68k-gdb: out/frond-68k
 	python3 tests/frond-68k-gdb.py
 	python3 tests/frond-68k-gdb.py --multiarch
 
+.PHONY: test-frond-68k-boot-save
+test-frond-68k-boot-save: out/frond-68k
+	python3 tests/frond-68k-boot-save.py
+
 build/test-frond-68k-sound: tests/frond-68k-sound.cpp build/source/.prepared
 	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/cloudpilot/frond tests/frond-68k-sound.cpp -o $@
 
