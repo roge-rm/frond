@@ -1,0 +1,96 @@
+diff --git a/src/cloudpilot/frond/main.cpp b/src/cloudpilot/frond/main.cpp
+index 2d11e2d..a56aeb4 100644
+--- a/src/cloudpilot/frond/main.cpp
++++ b/src/cloudpilot/frond/main.cpp
+@@ -65,6 +65,7 @@
+ #include "zip.h"
+ #include "PenEvent.h"
+ #include "Sound.h"
++#include "RawFingers.h"
+ #include "Touch.h"
+ #include "device_profile5.h"
+ #include "session/session_file5.h"
+@@ -1797,6 +1798,7 @@ class Runner {
+             cerr << "no window: " << SDL_GetError() << endl;
+             return;
+         }
++        RawFingers::Install();
+         CreateRenderer();
+ #ifndef __ANDROID__
+         // On Android this would bring up the soft keyboard; keys still come in as key events.
+@@ -1982,8 +1984,10 @@ class Runner {
+                     }
+                     int windowWidth = 0, windowHeight = 0;
+                     SDL_GetWindowSize(window, &windowWidth, &windowHeight);
++                    float fx = 0, fy = 0;
++                    RawFingers::Take(f, fx, fy);
+                     int x = 0, y = 0;
+-                    const bool inside = DevicePoint(int(floor(f.x * windowWidth)), int(floor(f.y * windowHeight)), x, y);
++                    const bool inside = DevicePoint(int(floor(fx * windowWidth)), int(floor(fy * windowHeight)), x, y);
+                     if (event.type == SDL_FINGERDOWN) touch.Down(f.touchId, f.fingerId, x, y, inside, penDown);
+                     else touch.Move(f.touchId, f.fingerId, x, y);
+                     break;
+diff --git a/src/cloudpilot/frond/RawFingers.h b/src/cloudpilot/frond/RawFingers.h
+new file mode 100644
+index 0000000..9ce53d6
+--- /dev/null
++++ b/src/cloudpilot/frond/RawFingers.h
+@@ -0,0 +1,58 @@
++#pragma once
++
++#include <SDL.h>
++
++#include <algorithm>
++#include <cstdint>
++#include <deque>
++#include <mutex>
++
++// SDL's renderer moves each finger point into the viewport set at the moment the touch comes
++// in, which on Android is any time, mid-frame included. This filter runs before that and keeps
++// the window points, in order, for PollWindow to take back.
++class RawFingers {
++   public:
++    static void Install() { SDL_SetEventFilter(Filter, nullptr); }
++
++    // The window point SDL had for this finger event, or the event's own if it wasn't seen.
++    static void Take(const SDL_TouchFingerEvent& event, float& x, float& y) {
++        x = event.x;
++        y = event.y;
++        std::lock_guard<std::mutex> lock(guard);
++        for (auto it = points.begin(); it != points.end(); ++it) {
++            if (it->type != event.type || it->time != event.timestamp || it->touch != event.touchId ||
++                it->finger != event.fingerId)
++                continue;
++            x = it->x;
++            y = it->y;
++            // Earlier points for the same finger were for events SDL dropped.
++            const auto touch = it->touch;
++            const auto finger = it->finger;
++            points.erase(std::remove_if(points.begin(), it + 1,
++                                        [&](const Point& p) { return p.touch == touch && p.finger == finger; }),
++                         it + 1);
++            return;
++        }
++    }
++
++   private:
++    struct Point {
++        uint32_t type, time;
++        SDL_TouchID touch;
++        SDL_FingerID finger;
++        float x, y;
++    };
++
++    static int SDLCALL Filter(void*, SDL_Event* event) {
++        if (event->type == SDL_FINGERDOWN || event->type == SDL_FINGERMOTION) {
++            std::lock_guard<std::mutex> lock(guard);
++            if (points.size() >= 256) points.pop_front();
++            const auto& f = event->tfinger;
++            points.push_back({f.type, f.timestamp, f.touchId, f.fingerId, f.x, f.y});
++        }
++        return 1;
++    }
++
++    static inline std::mutex guard;
++    static inline std::deque<Point> points;
++};

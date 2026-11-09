@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 #include <SDL.h>
+#include "RawFingers.h"
 #include "SdlEventHandler.h"
 #include "Touch.h"
 
@@ -276,6 +277,59 @@ static void m68k() {
     sink.direct = true;
 }
 
+// SDL's renderer moves finger points into its viewport; the 68k runner takes the window points back.
+static void rawFingers() {
+    SDL_SetHint(SDL_HINT_VIDEODRIVER, "dummy");
+    assert(SDL_InitSubSystem(SDL_INIT_VIDEO) == 0);
+    SDL_Window* window = SDL_CreateWindow("raw", 0, 0, 100, 200, 0);
+    assert(window);
+    RawFingers::Install();
+    SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
+    assert(renderer);
+    const SDL_Rect viewport{0, 50, 100, 100};
+    SDL_RenderSetViewport(renderer, &viewport);
+    auto push = [&](uint32_t type, SDL_FingerID finger, float y) {
+        SDL_Event event{};
+        event.tfinger.type = type;
+        event.tfinger.touchId = 7;
+        event.tfinger.fingerId = finger;
+        event.tfinger.x = 0.5f;
+        event.tfinger.y = y;
+        assert(SDL_PushEvent(&event) == 1);
+    };
+    auto next = [&](float& x, float& y) {
+        // SDL_PollEvent stops once at the sentinel its pump leaves behind.
+        SDL_Event event;
+        for (int pass = 0; pass < 2; ++pass)
+            while (SDL_PollEvent(&event))
+                if (event.type == SDL_FINGERDOWN || event.type == SDL_FINGERMOTION) {
+                    RawFingers::Take(event.tfinger, x, y);
+                    return event.tfinger.y;
+                }
+        assert(false);
+        return 0.0f;
+    };
+    float x = 0, y = 0;
+    push(SDL_FINGERDOWN, 1, 0.3f);
+    assert(next(x, y) != 0.3f);
+    assert(x == 0.5f && y == 0.3f);
+    push(SDL_FINGERDOWN, 2, 0.6f);
+    push(SDL_FINGERMOTION, 1, 0.35f);
+    push(SDL_FINGERMOTION, 1, 0.4f);
+    // The first motion is dropped before it's read; the later one still gets its own point.
+    SDL_FlushEvent(SDL_FINGERMOTION);
+    SDL_Delay(2);
+    push(SDL_FINGERMOTION, 1, 0.45f);
+    next(x, y);
+    assert(y == 0.6f);
+    next(x, y);
+    assert(y == 0.45f);
+    SDL_SetEventFilter(nullptr, nullptr);
+    SDL_DestroyRenderer(renderer);
+    SDL_DestroyWindow(window);
+    SDL_QuitSubSystem(SDL_INIT_VIDEO);
+}
+
 int main() {
     assert(SDL_Init(SDL_INIT_EVENTS) == 0);
     arm(deviceTypeTX, DeviceArt::tx, 320, 480);
@@ -283,6 +337,7 @@ int main() {
     arm(deviceTypeFrankenE2, DeviceArt::e2, 320, 480);
     arm(deviceTypeZire72, DeviceArt::zire72, 320, 320);
     m68k();
+    rawFingers();
     SDL_Quit();
     puts("PASS: multi-touch buttons and pen on the ARM and 68k runners");
 }
