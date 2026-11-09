@@ -120,7 +120,7 @@ int main() {
     guardedOptions.diagnosticSnapshot=&guardedSink;
     run({0xe16f1f10},1,false,&guardedOptions);
     assert(guarded.steps.empty());
-    for (uint32_t invalid : {0u, imx1ProbeMaximumSteps + 1}) {
+    for (uint32_t invalid : {0u, imx1ProbeMaximumSteps + 1, UINT32_MAX}) {
         const auto rejected=imx1BootProbe(nullptr,0,Imx1ProbeEntry::physicalFlash,invalid);
         assert(rejected.stop==Imx1ProbeStop::unsupportedPeripheral && rejected.peripheralStatus==Imx1BootstrapAccess::sequence);
     }

@@ -22,17 +22,17 @@ with tempfile.TemporaryDirectory(prefix='zodiac-diagnostic-', dir='build') as wo
     def invoke(*flags):
         return subprocess.run(base + list(flags), capture_output=True, text=True, timeout=15)
     plain = invoke()
-    for budget in ('100000001', '200000000'):
+    for budget in ('100000001', '200000000', '1000000000'):
         bounded = base.copy()
         bounded[3] = budget
         accepted = subprocess.run(bounded, capture_output=True, text=True, timeout=15)
         assert accepted.returncode == plain.returncode
         assert accepted.stdout.replace('budget=' + budget + ' ', 'budget=4 ') == plain.stdout
-    for budget in ('0', '200000001', '4294967296', '-1', '200000000x'):
+    for budget in ('0', '1000000001', '4294967295', '4294967296', '18446744073709551616', '-1', '1000000000x'):
         bounded = base.copy()
         bounded[3] = budget
         rejected = subprocess.run(bounded, capture_output=True, text=True, timeout=15)
-        assert rejected.returncode == 1 and 'Instruction budget must be 1..200000000' in rejected.stderr
+        assert rejected.returncode == 1 and 'Instruction budget must be 1..1000000000' in rejected.stderr
     prefix = root / 'state'
     flag = '--diagnostic-snapshot=' + str(prefix)
     captured = invoke(flag)
