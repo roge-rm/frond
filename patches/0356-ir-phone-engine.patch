@@ -1,0 +1,1568 @@
+diff --git a/src/common/Makefile b/src/common/Makefile
+index 2c2fef0..b6f1135 100644
+--- a/src/common/Makefile
++++ b/src/common/Makefile
+@@ -26,7 +26,14 @@ SOURCE_CXX = 						\
+ 	savestate/Chunk.cpp				\
+ 	savestate/ChunkProbe.cpp		\
+ 	modem/HayesModem.cpp			\
+-	modem/PppServer.cpp
++	modem/PppServer.cpp				\
++	ir/Sir.cpp						\
++	ir/IrLap.cpp					\
++	ir/IrLmp.cpp					\
++	ir/Ias.cpp						\
++	ir/TinyTp.cpp					\
++	ir/IrComm.cpp					\
++	ir/IrPhone.cpp
+ 
+ SOURCE_C_NATIVE = $(SOURCE_C)
+ SOURCE_CXX_NATIVE = 				\
+diff --git a/src/common/ir/Ias.cpp b/src/common/ir/Ias.cpp
+new file mode 100644
+index 0000000..92b2557
+--- /dev/null
++++ b/src/common/ir/Ias.cpp
+@@ -0,0 +1,102 @@
++#include "Ias.h"
++
++#include <algorithm>
++
++namespace frondIr {
++
++namespace {
++
++// IAP control byte: last frame, acknowledge, then the opcode.
++constexpr uint8_t last = 0x80, ack = 0x40, opcodeMask = 0x3f;
++constexpr uint8_t getValueByClass = 0x04;
++constexpr uint8_t typeInteger = 1, typeOctets = 2, typeString = 3;
++
++}  // namespace
++
++IasServer::IasServer(IrLmp& lmp) : lmp(lmp) { lmp.Bind(lsap, *this); }
++
++void IasServer::Add(const std::string& className, const std::string& attribute, Bytes value) {
++    auto found = std::find(classes.begin(), classes.end(), className);
++    if (found == classes.end()) found = classes.insert(classes.end(), className);
++    attributes.push_back({className, attribute, uint16_t(found - classes.begin()), std::move(value)});
++}
++
++void IasServer::AddInteger(const std::string& className, const std::string& attribute, uint32_t value) {
++    Add(className, attribute,
++        {typeInteger, uint8_t(value >> 24), uint8_t(value >> 16), uint8_t(value >> 8), uint8_t(value)});
++}
++
++void IasServer::AddOctets(const std::string& className, const std::string& attribute, const Bytes& value) {
++    Bytes encoded{typeOctets, uint8_t(value.size() >> 8), uint8_t(value.size())};
++    encoded.insert(encoded.end(), value.begin(), value.end());
++    Add(className, attribute, std::move(encoded));
++}
++
++void IasServer::AddString(const std::string& className, const std::string& attribute, const std::string& value) {
++    Bytes encoded{typeString, 0x00, uint8_t(std::min<size_t>(value.size(), 255))};
++    encoded.insert(encoded.end(), value.begin(), value.begin() + encoded[2]);
++    Add(className, attribute, std::move(encoded));
++}
++
++bool IasServer::Connect(const Bytes& data, Bytes& reply, uint64_t now) {
++    pending.clear();
++    return true;
++}
++
++void IasServer::Disconnect(uint64_t now) { pending.clear(); }
++
++void IasServer::Data(const Bytes& data, uint64_t now) {
++    if (data.empty()) return;
++    const uint8_t control = data[0];
++    // An acknowledgement of one of our frames; ours always fit in one.
++    if ((control & ack) && data.size() == 1) return;
++    // A request in several frames comes with the opcode in each and the last one marked.
++    pending.insert(pending.end(), data.begin() + 1, data.end());
++    if (!(control & last)) return;
++    Bytes request;
++    request.push_back(control & opcodeMask);
++    request.insert(request.end(), pending.begin(), pending.end());
++    pending.clear();
++    Request(request);
++}
++
++void IasServer::Request(const Bytes& request) {
++    const uint8_t opcode = request[0];
++    if (opcode != getValueByClass) {
++        // Unsupported operations answer with the opcode and 0xff.
++        const Bytes reply{uint8_t(last | opcode), 0xff};
++        lmp.Send(lsap, reply.data(), reply.size());
++        return;
++    }
++    size_t i = 1;
++    auto text = [&](std::string& out) {
++        if (i >= request.size()) return false;
++        const size_t length = request[i++];
++        if (i + length > request.size()) return false;
++        out.assign(request.begin() + i, request.begin() + i + length);
++        i += length;
++        return true;
++    };
++    std::string className, attribute;
++    if (!text(className) || !text(attribute)) return;
++    Bytes reply{uint8_t(last | getValueByClass)};
++    const bool known = std::find(classes.begin(), classes.end(), className) != classes.end();
++    std::vector<const Attribute*> found;
++    for (const Attribute& a : attributes)
++        if (a.className == className && a.name == attribute) found.push_back(&a);
++    const uint8_t result = !known ? noSuchClass : found.empty() ? noSuchAttribute : success;
++    reply.push_back(result);
++    if (result == success) {
++        reply.push_back(uint8_t(found.size() >> 8));
++        reply.push_back(uint8_t(found.size()));
++        for (const Attribute* a : found) {
++            reply.push_back(uint8_t(a->object >> 8));
++            reply.push_back(uint8_t(a->object));
++            reply.insert(reply.end(), a->value.begin(), a->value.end());
++        }
++    }
++    queries.push_back({className, attribute, result});
++    lmp.Send(lsap, reply.data(), reply.size());
++}
++
++}  // namespace frondIr
+diff --git a/src/common/ir/Ias.h b/src/common/ir/Ias.h
+new file mode 100644
+index 0000000..5bf25c4
+--- /dev/null
++++ b/src/common/ir/Ias.h
+@@ -0,0 +1,57 @@
++#ifndef FROND_IR_IAS_H
++#define FROND_IR_IAS_H
++
++// The IAS server on LSAP 0 (IrLMP 1.1 section 4.x, Information Access Service): answers
++// GetValueByClass for the classes and attributes added to it.
++
++#include <cstdint>
++#include <string>
++#include <vector>
++
++#include "IrLmp.h"
++
++namespace frondIr {
++
++class IasServer : public LmService {
++   public:
++    static constexpr uint8_t lsap = 0x00;
++    // GetValueByClass return codes.
++    static constexpr uint8_t success = 0, noSuchClass = 1, noSuchAttribute = 2;
++
++    explicit IasServer(IrLmp& lmp);
++
++    void AddInteger(const std::string& className, const std::string& attribute, uint32_t value);
++    void AddOctets(const std::string& className, const std::string& attribute, const Bytes& value);
++    void AddString(const std::string& className, const std::string& attribute, const std::string& value);
++
++    // Queries answered, for tests.
++    struct Query {
++        std::string className, attribute;
++        uint8_t result;
++    };
++    const std::vector<Query>& Queries() const { return queries; }
++
++    bool Connect(const Bytes& data, Bytes& reply, uint64_t now) override;
++    void Data(const Bytes& data, uint64_t now) override;
++    void Disconnect(uint64_t now) override;
++
++   private:
++    struct Attribute {
++        std::string className, name;
++        uint16_t object;
++        Bytes value;  // type byte then the encoded value
++    };
++
++    void Add(const std::string& className, const std::string& attribute, Bytes value);
++    void Request(const Bytes& request);
++
++    IrLmp& lmp;
++    std::vector<Attribute> attributes;
++    std::vector<std::string> classes;
++    Bytes pending;
++    std::vector<Query> queries;
++};
++
++}  // namespace frondIr
++
++#endif
+diff --git a/src/common/ir/IrComm.cpp b/src/common/ir/IrComm.cpp
+new file mode 100644
+index 0000000..836e66c
+--- /dev/null
++++ b/src/common/ir/IrComm.cpp
+@@ -0,0 +1,144 @@
++#include "IrComm.h"
++
++#include <algorithm>
++
++namespace frondIr {
++
++namespace {
++
++// Control parameters (IrCOMM section 4.5).
++constexpr uint8_t piServiceType = 0x00, piPortType = 0x01, piDteLines = 0x20, piDceLines = 0x21, piPoll = 0x22;
++// DTE line settings: delta DTR, delta RTS, DTR, RTS.
++constexpr uint8_t dteDtr = 0x04, dteRts = 0x08;
++// SDUs or frames held ready ahead of credit, so data waits in the port and not here.
++constexpr size_t ahead = 2;
++
++}  // namespace
++
++IrComm::IrComm(IrLmp& lmp, IasServer& ias, IrCommPort& port, const std::string& deviceName)
++    : lmp(lmp), port(port), tinyTp(lmp, cookedLsap, *this), raw(*this) {
++    lmp.Bind(rawLsap, raw);
++    ias.AddString("Device", "DeviceName", deviceName);
++    // IrLMP version 1, IAS and LM-MUX support bits.
++    ias.AddOctets("Device", "IrLMPSupport", {0x01, 0x00, 0x00});
++    ias.AddInteger("IrDA:IrCOMM", "IrDA:TinyTP:LsapSel", cookedLsap);
++    ias.AddInteger("IrDA:IrCOMM", "IrDA:IrLMP:LsapSel", rawLsap);
++    // Service types we take, and a serial port.
++    ias.AddOctets("IrDA:IrCOMM", "Parameters",
++                  {piServiceType, 1, uint8_t(threeWireRaw | threeWire | nineWire), piPortType, 1, 0x01});
++}
++
++void IrComm::Open(Mode next, uint64_t now) {
++    if (mode != Mode::Closed) port.Closed(now);
++    mode = next;
++    serviceType = next == Mode::Raw ? threeWireRaw : 0;
++    dtr = rts = true;
++    pending.clear();
++    port.Opened(now);
++    port.GuestLines(dtr, rts, now);
++    // The first SDU tells the guest the DCE lines; deltas follow as they change.
++    lines = port.Lines(now);
++    if (next == Mode::Cooked) pending = {piDceLines, 1, lines};
++}
++
++bool IrComm::Connect(const Bytes& data, Bytes& reply, uint64_t now) {
++    if (mode == Mode::Raw) lmp.Disconnect(rawLsap, IrLmp::userRequest, now);
++    Open(Mode::Cooked, now);
++    // Connect user data is a control channel like the start of an SDU.
++    if (!data.empty()) Parameters(data.data() + 1, std::min<size_t>(data[0], data.size() - 1), now);
++    return true;
++}
++
++void IrComm::Data(const Bytes& sdu, uint64_t now) {
++    if (sdu.empty() || mode != Mode::Cooked) return;
++    const size_t clen = std::min<size_t>(sdu[0], sdu.size() - 1);
++    Parameters(sdu.data() + 1, clen, now);
++    const size_t start = 1 + clen;
++    if (start < sdu.size()) {
++        fromGuest += sdu.size() - start;
++        port.FromGuest(sdu.data() + start, sdu.size() - start, now);
++    }
++}
++
++void IrComm::Parameters(const uint8_t* data, size_t size, uint64_t now) {
++    for (size_t i = 0; i + 2 <= size;) {
++        const uint8_t pi = data[i], pl = data[i + 1];
++        if (i + 2 + pl > size) break;
++        const uint8_t* pv = data + i + 2;
++        if (pi == piServiceType && pl) {
++            serviceType = pv[0];
++        } else if (pi == piDteLines && pl) {
++            dtr = pv[0] & dteDtr;
++            rts = pv[0] & dteRts;
++            port.GuestLines(dtr, rts, now);
++        } else if (pi == piPoll) {
++            lines = port.Lines(now);
++            pending.insert(pending.end(), {piDceLines, 1, lines});
++        }
++        i += 2 + pl;
++    }
++}
++
++void IrComm::Disconnect(uint64_t now) {
++    if (mode == Mode::Cooked) {
++        mode = Mode::Closed;
++        port.Closed(now);
++    }
++}
++
++void IrComm::Pump(uint64_t now) {
++    if (mode != Mode::Cooked) return;
++    // 3-wire cooked has no line settings, so only 9-wire (or a guest that hasn't said) gets them.
++    const uint8_t current = port.Lines(now);
++    if (current != lines && serviceType != threeWire) {
++        // Deltas for CTS, DSR, RI and CD sit four bits below their states.
++        const uint8_t deltas = uint8_t((current ^ lines) >> 4);
++        pending.insert(pending.end(), {piDceLines, 1, uint8_t(current | deltas)});
++    }
++    lines = current;
++    while (tinyTp.Queued() < ahead && tinyTp.Queued() < tinyTp.SendCredit()) {
++        const size_t room = tinyTp.MaxSdu() - 1 - std::min(pending.size(), tinyTp.MaxSdu() - 1);
++        Bytes sdu(1 + pending.size() + room);
++        sdu[0] = uint8_t(pending.size());
++        std::copy(pending.begin(), pending.end(), sdu.begin() + 1);
++        const size_t n = port.ToGuest(sdu.data() + 1 + pending.size(), room, now);
++        if (!n && pending.empty()) break;
++        sdu.resize(1 + pending.size() + n);
++        pending.clear();
++        toGuest += n;
++        tinyTp.Send(std::move(sdu));
++    }
++}
++
++bool IrComm::Raw::Connect(const Bytes& data, Bytes& reply, uint64_t now) {
++    // One port: a raw connect while cooked is open takes it over.
++    if (comm.mode == Mode::Cooked) comm.tinyTp.Disconnect(IrLmp::userRequest, now);
++    comm.Open(Mode::Raw, now);
++    return true;
++}
++
++void IrComm::Raw::Data(const Bytes& data, uint64_t now) {
++    if (comm.mode != Mode::Raw) return;
++    comm.fromGuest += data.size();
++    comm.port.FromGuest(data.data(), data.size(), now);
++}
++
++void IrComm::Raw::Disconnect(uint64_t now) {
++    if (comm.mode == Mode::Raw) {
++        comm.mode = Mode::Closed;
++        comm.port.Closed(now);
++    }
++}
++
++void IrComm::Raw::Pump(uint64_t now) {
++    if (comm.mode != Mode::Raw) return;
++    while (comm.lmp.Queued() < ahead) {
++        Bytes data(comm.lmp.MaxData());
++        const size_t n = comm.port.ToGuest(data.data(), data.size(), now);
++        if (!n) break;
++        comm.toGuest += n;
++        comm.lmp.Send(rawLsap, data.data(), n);
++    }
++}
++
++}  // namespace frondIr
+diff --git a/src/common/ir/IrComm.h b/src/common/ir/IrComm.h
+new file mode 100644
+index 0000000..d49555a
+--- /dev/null
++++ b/src/common/ir/IrComm.h
+@@ -0,0 +1,86 @@
++#ifndef FROND_IR_IRCOMM_H
++#define FROND_IR_IRCOMM_H
++
++// IrCOMM (IrDA IrCOMM 1.0) as the DCE end of the guest's virtual serial port: 9-wire and 3-wire
++// cooked over Tiny TP, and 3-wire raw straight on IrLMP. Publishes itself in IAS as
++// "IrDA:IrCOMM" and the device as "Device".
++
++#include <cstddef>
++#include <cstdint>
++#include <string>
++
++#include "Ias.h"
++#include "IrLmp.h"
++#include "TinyTp.h"
++
++namespace frondIr {
++
++// What sits on the far end of the virtual serial port.
++class IrCommPort {
++   public:
++    // DCE line bits, as in IrCOMM's DCE settings parameter.
++    static constexpr uint8_t cts = 0x10, dsr = 0x20, ri = 0x40, cd = 0x80;
++
++    virtual ~IrCommPort() = default;
++    virtual void Opened(uint64_t now) = 0;
++    virtual void Closed(uint64_t now) = 0;
++    virtual void FromGuest(const uint8_t* data, size_t size, uint64_t now) = 0;
++    virtual size_t ToGuest(uint8_t* data, size_t max, uint64_t now) = 0;
++    virtual void GuestLines(bool dtr, bool rts, uint64_t now) {}
++    // CTS, DSR, RI and CD now.
++    virtual uint8_t Lines(uint64_t now) = 0;
++};
++
++class IrComm : public TinyTpUser {
++   public:
++    static constexpr uint8_t cookedLsap = 0x02, rawLsap = 0x03;
++    // Service types (IrCOMM section 4.5.2.1).
++    static constexpr uint8_t threeWireRaw = 0x01, threeWire = 0x02, nineWire = 0x04;
++    enum class Mode { Closed, Cooked, Raw };
++
++    IrComm(IrLmp& lmp, IasServer& ias, IrCommPort& port, const std::string& deviceName);
++
++    Mode GetMode() const { return mode; }
++    // The service type the guest asked for, 0 until it says.
++    uint8_t ServiceType() const { return serviceType; }
++    bool GuestDtr() const { return dtr; }
++    uint64_t BytesFromGuest() const { return fromGuest; }
++    uint64_t BytesToGuest() const { return toGuest; }
++
++    bool Connect(const Bytes& data, Bytes& reply, uint64_t now) override;
++    void Data(const Bytes& sdu, uint64_t now) override;
++    void Disconnect(uint64_t now) override;
++    void Pump(uint64_t now) override;
++
++   private:
++    // 3-wire raw: IrLMP data is the serial data.
++    class Raw : public LmService {
++       public:
++        explicit Raw(IrComm& comm) : comm(comm) {}
++        bool Connect(const Bytes& data, Bytes& reply, uint64_t now) override;
++        void Data(const Bytes& data, uint64_t now) override;
++        void Disconnect(uint64_t now) override;
++        void Pump(uint64_t now) override;
++
++       private:
++        IrComm& comm;
++    };
++
++    void Open(Mode next, uint64_t now);
++    void Parameters(const uint8_t* data, size_t size, uint64_t now);
++
++    IrLmp& lmp;
++    IrCommPort& port;
++    TinyTp tinyTp;
++    Raw raw;
++    Mode mode{Mode::Closed};
++    uint8_t serviceType{0};
++    bool dtr{false}, rts{false};
++    uint8_t lines{0};
++    Bytes pending;
++    uint64_t fromGuest{0}, toGuest{0};
++};
++
++}  // namespace frondIr
++
++#endif
+diff --git a/src/common/ir/IrLap.cpp b/src/common/ir/IrLap.cpp
+new file mode 100644
+index 0000000..13cf6c7
+--- /dev/null
++++ b/src/common/ir/IrLap.cpp
+@@ -0,0 +1,350 @@
++#include "IrLap.h"
++
++#include <algorithm>
++
++namespace frondIr {
++
++namespace {
++
++constexpr uint64_t microsecond = 1000ull, millisecond = 1000000ull, second = 1000000000ull;
++
++// Control fields with the P/F bit set (IrLAP 1.1 section 5.2).
++constexpr uint8_t pf = 0x10;
++constexpr uint8_t snrm = 0x93, disc = 0x53, ui = 0x13, xidCommand = 0x3f, xidResponse = 0xbf, test = 0xf3,
++                  ua = 0x73, dm = 0x1f;
++constexpr uint8_t rr = 0x01, rnr = 0x05, rej = 0x09, srej = 0x0d;
++constexpr uint8_t broadcast = 0xfe;
++
++// Negotiation parameters (section 6.6), each a bit mask over these values.
++constexpr uint8_t piBaud = 0x01, piMaxTurn = 0x82, piDataSize = 0x83, piWindow = 0x84, piBofs = 0x85,
++                  piMinTurn = 0x86, piDisconnect = 0x08;
++constexpr unsigned bauds[] = {2400, 9600, 19200, 38400, 57600, 115200, 576000, 1152000};
++constexpr uint64_t maxTurns[] = {500 * millisecond, 250 * millisecond, 100 * millisecond, 50 * millisecond};
++constexpr unsigned dataSizes[] = {64, 128, 256, 512, 1024, 2048};
++constexpr unsigned bofCounts[] = {48, 24, 12, 5, 3, 2, 1, 0};
++constexpr uint64_t minTurns[] = {10 * millisecond, 5 * millisecond, 1 * millisecond, 500 * microsecond,
++                                 100 * microsecond, 50 * microsecond, 10 * microsecond, 0};
++constexpr uint64_t disconnects[] = {3 * second, 8 * second, 12 * second, 16 * second,
++                                    20 * second, 25 * second, 30 * second, 40 * second};
++// Our own receive side, sent in the UA: 500 ms turnaround, up to 2048 bytes, a window of 7, no
++// extra BOFs and no minimum turnaround.
++constexpr uint8_t ourMaxTurn = 0x01, ourDataSize = 0x3f, ourWindow = 0x7f, ourBofs = 0x80, ourMinTurn = 0x80;
++
++// Before a link is up: 10 extra BOFs at 9600, as IrLAP's defaults, and a short turnaround so a
++// discovery reply lands inside its slot.
++constexpr unsigned ndmBofs = 10;
++constexpr uint64_t ndmTurn = 1 * millisecond;
++
++// Index of the highest bit set within the table's size, or -1.
++int Highest(unsigned mask, size_t size) {
++    for (int bit = int(size) - 1; bit >= 0; --bit)
++        if (mask & (1u << bit)) return bit;
++    return -1;
++}
++
++const uint8_t* Find(const Bytes& frame, size_t start, uint8_t pi, uint8_t& length) {
++    for (size_t i = start; i + 2 <= frame.size();) {
++        const uint8_t id = frame[i], pl = frame[i + 1];
++        if (i + 2 + pl > frame.size()) break;
++        if (id == pi) {
++            length = pl;
++            return &frame[i + 2];
++        }
++        i += 2 + pl;
++    }
++    return nullptr;
++}
++
++unsigned Mask(const Bytes& frame, size_t start, uint8_t pi, unsigned fallback) {
++    uint8_t length = 0;
++    const uint8_t* value = Find(frame, start, pi, length);
++    if (!value || !length) return fallback;
++    // Multi-byte masks are little-endian; only the first byte matters for SIR speeds.
++    return value[0];
++}
++
++}  // namespace
++
++IrLap::IrLap(IrLapUser& user) : IrLap(user, Options{}) {}
++
++IrLap::IrLap(IrLapUser& user, Options options) : user(user), options(std::move(options)) {}
++
++void IrLap::Receive(const uint8_t* data, size_t size, uint64_t now) {
++    for (size_t i = 0; i < size; ++i)
++        if (unwrapper.Feed(data[i])) Frame(unwrapper.Frame(), now);
++}
++
++size_t IrLap::Read(uint8_t* data, size_t max, uint64_t now) {
++    if (now < holdUntil) return 0;
++    const size_t n = std::min(max, out.size() - outPos);
++    std::copy(out.begin() + outPos, out.begin() + outPos + n, data);
++    outPos += n;
++    if (outPos == out.size()) {
++        out.clear();
++        outPos = 0;
++    }
++    return n;
++}
++
++size_t IrLap::Available(uint64_t now) const { return now < holdUntil ? 0 : out.size() - outPos; }
++
++void IrLap::Service(uint64_t now) {
++    // The watchdog: a primary that stops polling has gone.
++    if (state == State::Nrm && now > lastHeard + link.disconnectNs) {
++        ++stats.timeouts;
++        Down(now);
++    }
++}
++
++void IrLap::Drop(uint64_t now) {
++    unwrapper.Reset();
++    out.clear();
++    outPos = 0;
++    holdUntil = 0;
++    ourSlot = lastSlot = -1;
++    answered = false;
++    if (state == State::Nrm) Down(now);
++}
++
++void IrLap::Send(Bytes info) { queue.push_back(std::move(info)); }
++
++void IrLap::Frame(const Bytes& frame, uint64_t now) {
++    if (frame.size() < 2) return;
++    // Only commands: a response would come from another secondary.
++    const uint8_t address = frame[0];
++    if (!(address & 1)) return;
++    ++stats.framesIn;
++    const uint8_t control = frame[1], target = address & 0xfe;
++    if (target == broadcast) {
++        if (control == xidCommand || control == (xidCommand & ~pf)) {
++            if (state == State::Ndm) Discovery(frame, now);
++            return;
++        }
++        if (control == snrm) return Snrm(frame, now);
++        if (control == test || control == (test & ~pf)) return Test(frame, broadcast, now);
++        return;
++    }
++    if (state == State::Nrm && target == caddr) return Nrm(frame, now);
++    // A command for a link we don't have: tell it so, if it asks for an answer.
++    if (state == State::Ndm && (control & pf) && control != ui) {
++        holdUntil = std::max(holdUntil, now + ndmTurn);
++        Emit({target, dm}, now);
++    }
++}
++
++void IrLap::Discovery(const Bytes& frame, uint64_t now) {
++    // Format, source, destination, flags, slot, version, then discovery information.
++    if (frame.size() < 14 || frame[2] != 0x01) return;
++    std::array<uint8_t, 4> source, target;
++    std::copy(frame.begin() + 3, frame.begin() + 7, source.begin());
++    std::copy(frame.begin() + 7, frame.begin() + 11, target.begin());
++    if (target != std::array<uint8_t, 4>{{0xff, 0xff, 0xff, 0xff}} && target != options.address) return;
++    const uint8_t flags = frame[11], slot = frame[12];
++    static constexpr int slotCounts[] = {1, 6, 8, 16};
++    const int slots = slotCounts[flags & 3];
++    if (slot == 0xff) {
++        // The closing frame carries the guest's hints and nickname.
++        size_t i = 14;
++        while (i < frame.size() && (frame[i] & 0x80)) ++i;
++        i += 2;
++        guestNickname.assign(frame.begin() + std::min(i, frame.size()), frame.end());
++        lastSlot = -1;
++        return;
++    }
++    if (source != guest || lastSlot < 0 || slot <= lastSlot) {
++        ++stats.discoveries;
++        guest = source;
++        answered = false;
++        // A slot that depends only on the two addresses, so runs repeat.
++        unsigned mix = 0;
++        for (const uint8_t b : source) mix = mix * 31 + b;
++        for (const uint8_t b : options.address) mix = mix * 31 + b;
++        ourSlot = int(mix % unsigned(slots));
++    }
++    lastSlot = slot;
++    if (answered || slot < ourSlot) return;
++    answered = true;
++    ++stats.xidReplies;
++    Bytes reply{broadcast, xidResponse, 0x01};
++    reply.insert(reply.end(), options.address.begin(), options.address.end());
++    reply.insert(reply.end(), source.begin(), source.end());
++    reply.insert(reply.end(), {flags, slot, 0x00});
++    reply.push_back(options.hints[0]);
++    if (options.hints[0] & 0x80) reply.push_back(options.hints[1]);
++    reply.push_back(0x00);  // ASCII
++    reply.insert(reply.end(), options.nickname.begin(), options.nickname.end());
++    holdUntil = std::max(holdUntil, now + ndmTurn);
++    Emit(reply, now);
++}
++
++void IrLap::Snrm(const Bytes& frame, uint64_t now) {
++    // Source, destination, new connection address, then parameters.
++    if (frame.size() < 11) return;
++    std::array<uint8_t, 4> source, target;
++    std::copy(frame.begin() + 2, frame.begin() + 6, source.begin());
++    std::copy(frame.begin() + 6, frame.begin() + 10, target.begin());
++    if (target != options.address) return;
++    if (state == State::Nrm) Down(now);
++    guest = source;
++    caddr = frame[10] & 0xfe;
++    if (caddr == broadcast) caddr = 0x02;
++
++    // Baud and disconnect time are agreed by both (the highest common value); the rest are the
++    // guest's own receive limits, which bind what we send.
++    const unsigned baudMask = Mask(frame, 11, piBaud, 0x02) & options.baudMask;
++    const unsigned disconnectMask = Mask(frame, 11, piDisconnect, 0x01);
++    Link next;
++    const int baud = Highest(baudMask ? baudMask : 0x02, 8);
++    next.baud = bauds[baud];
++    next.disconnectNs = disconnects[std::max(0, Highest(disconnectMask, 8))];
++    next.dataSize = dataSizes[std::max(0, Highest(Mask(frame, 11, piDataSize, 0x01), 6))];
++    next.window = 1 + std::max(0, Highest(Mask(frame, 11, piWindow, 0x01), 7));
++    next.maxTurnNs = maxTurns[std::max(0, Highest(Mask(frame, 11, piMaxTurn, 0x01), 4))];
++    next.minTurnNs = std::max(options.minTurnFloorNs, minTurns[std::max(0, Highest(Mask(frame, 11, piMinTurn, 0x01), 8))]);
++    const unsigned bofs = bofCounts[std::max(0, Highest(Mask(frame, 11, piBofs, 0x01), 8))];
++    // The extra BOF count is given for 115200 and scales with the speed.
++    next.extraBofs = unsigned(uint64_t(bofs) * next.baud / 115200);
++
++    Bytes reply{caddr, ua};
++    reply.insert(reply.end(), options.address.begin(), options.address.end());
++    reply.insert(reply.end(), source.begin(), source.end());
++    reply.insert(reply.end(), {piBaud, 1, uint8_t(baudMask ? baudMask : 0x02), piMaxTurn, 1, ourMaxTurn,
++                               piDataSize, 1, ourDataSize, piWindow, 1, ourWindow, piBofs, 1, ourBofs,
++                               piMinTurn, 1, ourMinTurn, piDisconnect, 1, uint8_t(disconnectMask ? disconnectMask : 1)});
++    // The UA goes at the old speed with the old framing, after the guest's turnaround.
++    holdUntil = std::max(holdUntil, now + next.minTurnNs);
++    Emit(reply, now);
++
++    link = next;
++    state = State::Nrm;
++    ResetSequence();
++    lastHeard = now;
++    ++stats.connects;
++    user.LinkUp(now);
++}
++
++void IrLap::Test(const Bytes& frame, uint8_t address, uint64_t now) {
++    if (!(frame[1] & pf) || frame.size() < 10) return;
++    Bytes reply{address, test};
++    reply.insert(reply.end(), options.address.begin(), options.address.end());
++    reply.insert(reply.end(), frame.begin() + 2, frame.begin() + 6);
++    reply.insert(reply.end(), frame.begin() + 10, frame.end());
++    holdUntil = std::max(holdUntil, now + (state == State::Nrm ? link.minTurnNs : ndmTurn));
++    Emit(reply, now);
++}
++
++void IrLap::Nrm(const Bytes& frame, uint64_t now) {
++    lastHeard = now;
++    const uint8_t control = frame[1];
++    const bool poll = control & pf;
++    if (!(control & 1)) {
++        // I frame.
++        const uint8_t ns = (control >> 1) & 7, nr = control >> 5;
++        Acknowledge(nr);
++        if (ns == vr && !localBusy) {
++            vr = (vr + 1) & 7;
++            user.Data(frame.data() + 2, frame.size() - 2, now);
++        } else if (ns != vr) {
++            ++stats.outOfSequence;
++            rejected = true;
++        }
++    } else if ((control & 3) == 1) {
++        // Supervisory: RR, RNR, REJ, SREJ. A reject needs nothing more: the unacknowledged
++        // frames go again on this poll.
++        const uint8_t kind = control & 0x0f;
++        Acknowledge(control >> 5);
++        remoteBusy = kind == rnr;
++        if (kind != rr && kind != rnr && kind != rej && kind != srej) return;
++    } else {
++        switch (control) {
++            case disc:
++                Emit({caddr, ua}, now);
++                holdUntil = std::max(holdUntil, now + link.minTurnNs);
++                ++stats.disconnects;
++                Down(now);
++                return;
++            case test:
++                return Test(frame, caddr, now);
++            default:
++                // UI, XID and the rest take no part in the link.
++                break;
++        }
++    }
++    if (poll) Respond(now);
++}
++
++void IrLap::Acknowledge(uint8_t nr) {
++    // nr acknowledges our frames up to nr - 1; it must fall within what we've sent.
++    const uint8_t oldest = uint8_t((vs - window.size()) & 7);
++    const size_t acked = (nr - oldest) & 7;
++    if (acked > window.size()) return;
++    window.erase(window.begin(), window.begin() + acked);
++}
++
++void IrLap::Respond(uint64_t now) {
++    user.Pump(now);
++    if (out.size() == outPos) holdUntil = std::max(holdUntil, now + link.minTurnNs);
++    const uint8_t nr = uint8_t(vr << 5);
++    if (rejected) {
++        // Out of sequence: ask for everything from vr again, and send nothing of ours this turn.
++        rejected = false;
++        ++stats.rejects;
++        Emit({caddr, uint8_t(rej | pf | nr)}, now);
++        return;
++    }
++    // Go-back-N: frames still in the window weren't received, so they go again, then new ones up
++    // to the guest's window and what fits in its turnaround time.
++    std::vector<const Sent*> frames;
++    if (!remoteBusy) {
++        for (const Sent& sent : window) frames.push_back(&sent);
++        stats.resent += unsigned(window.size());
++        const uint64_t budget = link.maxTurnNs / millisecond * link.baud / 10 / 1000;
++        uint64_t bytes = 0;
++        for (const Sent& sent : window) bytes += sent.info.size() + 6;
++        while (!queue.empty() && window.size() < link.window && (frames.empty() || bytes + queue.front().size() + 6 <= budget)) {
++            bytes += queue.front().size() + 6;
++            window.push_back({vs, std::move(queue.front())});
++            queue.pop_front();
++            vs = (vs + 1) & 7;
++            frames.push_back(&window.back());
++        }
++    }
++    if (frames.empty()) {
++        Emit({caddr, uint8_t((localBusy ? rnr : rr) | pf | nr)}, now);
++        return;
++    }
++    for (size_t i = 0; i < frames.size(); ++i) {
++        Bytes frame{caddr, uint8_t(nr | (frames[i]->ns << 1) | (i + 1 == frames.size() ? pf : 0))};
++        frame.insert(frame.end(), frames[i]->info.begin(), frames[i]->info.end());
++        Emit(frame, now);
++    }
++}
++
++void IrLap::Emit(const Bytes& frame, uint64_t now) {
++    if (outPos && outPos == out.size()) {
++        out.clear();
++        outPos = 0;
++    }
++    SirWrap(frame, ExtraBofs(), out);
++    ++stats.framesOut;
++}
++
++unsigned IrLap::ExtraBofs() const { return state == State::Nrm ? link.extraBofs : ndmBofs; }
++
++void IrLap::Down(uint64_t now) {
++    state = State::Ndm;
++    link = Link{};
++    ResetSequence();
++    queue.clear();
++    ourSlot = lastSlot = -1;
++    answered = false;
++    user.LinkDown(now);
++}
++
++void IrLap::ResetSequence() {
++    vs = vr = 0;
++    window.clear();
++    remoteBusy = rejected = false;
++}
++
++}  // namespace frondIr
+diff --git a/src/common/ir/IrLap.h b/src/common/ir/IrLap.h
+new file mode 100644
+index 0000000..51f0ad1
+--- /dev/null
++++ b/src/common/ir/IrLap.h
+@@ -0,0 +1,143 @@
++#ifndef FROND_IR_IRLAP_H
++#define FROND_IR_IRLAP_H
++
++// An IrLAP secondary station (IrDA IrLAP 1.1) over SIR: it answers the guest's discovery, takes
++// its SNRM with negotiated parameters, and then sends only when the guest polls it, in normal
++// response mode. The guest is always the primary. Fed raw SIR bytes from the guest's IR
++// transmitter and drained of raw SIR bytes for its receiver. Single-threaded; every time is
++// guest nanoseconds.
++
++#include <array>
++#include <cstddef>
++#include <cstdint>
++#include <deque>
++#include <string>
++#include <vector>
++
++#include "Sir.h"
++
++namespace frondIr {
++
++// The layer above IrLAP (IrLMP).
++class IrLapUser {
++   public:
++    virtual ~IrLapUser() = default;
++    // The link is up: the UA to the guest's SNRM is queued.
++    virtual void LinkUp(uint64_t now) = 0;
++    // The link is gone, by DISC, a new SNRM, the watchdog or Drop.
++    virtual void LinkDown(uint64_t now) = 0;
++    // The information field of an I frame in sequence.
++    virtual void Data(const uint8_t* data, size_t size, uint64_t now) = 0;
++    // Called before each response so the layers above can queue what they have.
++    virtual void Pump(uint64_t now) {}
++};
++
++class IrLap {
++   public:
++    struct Options {
++        std::array<uint8_t, 4> address{{0x46, 0x72, 0x6f, 0x6e}};
++        // Discovery service hints, two bytes (IrLMP 1.1 section 3.4.1).
++        std::array<uint8_t, 2> hints{{0x90, 0x05}};
++        std::string nickname = "Frond Phone";
++        // Baud rates offered in the UA, as the IrLAP bit mask (bit 5 is 115200).
++        uint8_t baudMask = 0x3f;
++        // The least time between the guest's poll and our answer once linked, whatever it asks
++        // for: Palm OS 3.5 and 4.1 ask for 1 or 5 ms but miss answers sooner than about 10 ms.
++        uint64_t minTurnFloorNs = 10000000;
++    };
++
++    // Negotiated link parameters in use (IrLAP 1.1 section 6.6).
++    struct Link {
++        unsigned baud{9600};
++        // What the guest takes from us: information bytes a frame and frames a turn.
++        unsigned dataSize{64}, window{1};
++        // The guest's turnaround needs, and the extra BOFs it wants at this baud.
++        uint64_t minTurnNs{10000000}, maxTurnNs{500000000};
++        unsigned extraBofs{10};
++        // No frame from the guest for this long ends the link.
++        uint64_t disconnectNs{3000000000ull};
++    };
++
++    enum class State { Ndm, Nrm };
++
++    explicit IrLap(IrLapUser& user);
++    IrLap(IrLapUser& user, Options options);
++
++    // Raw SIR bytes from the guest.
++    void Receive(const uint8_t* data, size_t size, uint64_t now);
++    // Raw SIR bytes for the guest; a response is held until the guest's minimum turnaround time
++    // after the frame that polled for it.
++    size_t Read(uint8_t* data, size_t max, uint64_t now);
++    size_t Available(uint64_t now) const;
++    void Service(uint64_t now);
++    // After a session load: back to NDM with no link and nothing queued.
++    void Drop(uint64_t now);
++
++    // Queues an I frame's information field; sent on a later poll. Never larger than DataSize().
++    void Send(Bytes info);
++    size_t Queued() const { return queue.size(); }
++    // The layer above can't take more data: polls get RNR until it clears.
++    void SetBusy(bool busy) { localBusy = busy; }
++
++    State GetState() const { return state; }
++    bool Connected() const { return state == State::Nrm; }
++    const Link& GetLink() const { return link; }
++    unsigned DataSize() const { return link.dataSize; }
++    const std::array<uint8_t, 4>& Guest() const { return guest; }
++    const std::string& GuestNickname() const { return guestNickname; }
++
++    // Counters for tests and the transport's stats.
++    struct Stats {
++        unsigned discoveries{0}, xidReplies{0}, connects{0}, disconnects{0}, timeouts{0};
++        unsigned framesIn{0}, framesOut{0}, outOfSequence{0}, rejects{0}, resent{0};
++    };
++    const Stats& GetStats() const { return stats; }
++    unsigned BadFrames() const { return unwrapper.BadFrames(); }
++
++   private:
++    struct Sent {
++        uint8_t ns;
++        Bytes info;
++    };
++
++    void Frame(const Bytes& frame, uint64_t now);
++    void Discovery(const Bytes& frame, uint64_t now);
++    void Snrm(const Bytes& frame, uint64_t now);
++    void Test(const Bytes& frame, uint8_t address, uint64_t now);
++    void Nrm(const Bytes& frame, uint64_t now);
++    void Acknowledge(uint8_t nr);
++    void Respond(uint64_t now);
++    void Emit(const Bytes& frame, uint64_t now);
++    void Down(uint64_t now);
++    void ResetSequence();
++    unsigned ExtraBofs() const;
++
++    IrLapUser& user;
++    Options options;
++    State state{State::Ndm};
++    SirUnwrapper unwrapper;
++
++    // Discovery: the guest's address and the slot we answer in, once per discovery.
++    std::array<uint8_t, 4> guest{};
++    std::string guestNickname;
++    int ourSlot{-1}, lastSlot{-1};
++    bool answered{false};
++
++    // Normal response mode.
++    uint8_t caddr{0};
++    Link link;
++    uint8_t vs{0}, vr{0};
++    std::deque<Sent> window;
++    std::deque<Bytes> queue;
++    bool localBusy{false}, remoteBusy{false}, rejected{false};
++    uint64_t lastHeard{0};
++
++    std::vector<uint8_t> out;
++    size_t outPos{0};
++    uint64_t holdUntil{0};
++    Stats stats;
++};
++
++}  // namespace frondIr
++
++#endif
+diff --git a/src/common/ir/IrLmp.cpp b/src/common/ir/IrLmp.cpp
+new file mode 100644
+index 0000000..a5fec35
+--- /dev/null
++++ b/src/common/ir/IrLmp.cpp
+@@ -0,0 +1,109 @@
++#include "IrLmp.h"
++
++#include <algorithm>
++
++namespace frondIr {
++
++namespace {
++
++// LM-PDU header: the control bit and destination LSAP, then the source LSAP.
++constexpr uint8_t controlBit = 0x80;
++// Control opcodes; bit 7 marks a confirm.
++constexpr uint8_t connect = 0x01, disconnect = 0x02, accessMode = 0x03, confirm = 0x80;
++constexpr uint8_t connectionless = 0x70;
++
++}  // namespace
++
++IrLmp::IrLmp(IrLap& lap) : lap(lap) {}
++
++void IrLmp::Bind(uint8_t lsap, LmService& service) {
++    if (lsap < connectionless) ports[lsap].service = &service;
++}
++
++void IrLmp::Send(uint8_t lsap, const uint8_t* data, size_t size) {
++    if (!Connected(lsap)) return;
++    Bytes pdu{ports[lsap].peer, lsap};
++    pdu.insert(pdu.end(), data, data + size);
++    lap.Send(std::move(pdu));
++}
++
++void IrLmp::Disconnect(uint8_t lsap, uint8_t reason, uint64_t now) {
++    if (!Connected(lsap)) return;
++    Port& port = ports[lsap];
++    port.connected = false;
++    SendControl(lsap, port.peer, {disconnect, reason});
++    port.service->Disconnect(now);
++}
++
++void IrLmp::LinkUp(uint64_t now) {}
++
++void IrLmp::LinkDown(uint64_t now) {
++    for (Port& port : ports)
++        if (port.connected) {
++            port.connected = false;
++            port.service->Disconnect(now);
++        }
++}
++
++void IrLmp::Data(const uint8_t* data, size_t size, uint64_t now) {
++    if (size < 2) return;
++    const uint8_t local = data[0] & 0x7f, peer = data[1] & 0x7f;
++    if (data[0] & controlBit) return Control(local, peer, data + 2, size - 2, now);
++    if (local >= connectionless) return;
++    Port& port = ports[local];
++    if (!port.connected || port.peer != peer) {
++        // Data for a connection that isn't there (section 4.4.2, reason 6).
++        SendControl(local, peer, {disconnect, 0x06});
++        return;
++    }
++    port.service->Data(Bytes(data + 2, data + size), now);
++}
++
++void IrLmp::Control(uint8_t local, uint8_t peer, const uint8_t* data, size_t size, uint64_t now) {
++    if (!size) return;
++    const uint8_t opcode = data[0];
++    if (opcode == connect) {
++        Port* port = local < connectionless ? &ports[local] : nullptr;
++        Bytes reply;
++        if (!port || !port->service) {
++            SendControl(local, peer, {disconnect, noClient});
++            return;
++        }
++        // A second connect replaces the first, as after a guest restart.
++        if (port->connected) port->service->Disconnect(now);
++        // Connect carries a reserved parameter byte before the user data.
++        const Bytes user(data + std::min<size_t>(size, 2), data + size);
++        if (!port->service->Connect(user, reply, now)) {
++            port->connected = false;
++            SendControl(local, peer, {disconnect, noClient});
++            return;
++        }
++        port->connected = true;
++        port->peer = peer;
++        ++connects;
++        Bytes body{uint8_t(connect | confirm), 0x00};
++        body.insert(body.end(), reply.begin(), reply.end());
++        SendControl(local, peer, std::move(body));
++    } else if (opcode == disconnect) {
++        if (local < connectionless && ports[local].connected && ports[local].peer == peer) {
++            ports[local].connected = false;
++            ports[local].service->Disconnect(now);
++        }
++    } else if (opcode == accessMode) {
++        // Exclusive mode isn't offered: confirm with status "failure" and multiplexed mode.
++        SendControl(local, peer, {uint8_t(accessMode | confirm), 0x01, 0x00});
++    }
++}
++
++void IrLmp::SendControl(uint8_t local, uint8_t peer, Bytes body) {
++    Bytes pdu{uint8_t(controlBit | peer), local};
++    pdu.insert(pdu.end(), body.begin(), body.end());
++    lap.Send(std::move(pdu));
++}
++
++void IrLmp::Pump(uint64_t now) {
++    for (Port& port : ports)
++        if (port.connected) port.service->Pump(now);
++}
++
++}  // namespace frondIr
+diff --git a/src/common/ir/IrLmp.h b/src/common/ir/IrLmp.h
+new file mode 100644
+index 0000000..ea75189
+--- /dev/null
++++ b/src/common/ir/IrLmp.h
+@@ -0,0 +1,72 @@
++#ifndef FROND_IR_IRLMP_H
++#define FROND_IR_IRLMP_H
++
++// IrLMP's multiplexer (IrLMP 1.1 section 4) on top of an IrLAP secondary: the guest connects to
++// our service access points (LSAPs) and we answer. One connection at a time a local LSAP.
++
++#include <array>
++#include <cstddef>
++#include <cstdint>
++#include <vector>
++
++#include "IrLap.h"
++
++namespace frondIr {
++
++class IrLmp;
++
++// A service bound to a local LSAP.
++class LmService {
++   public:
++    virtual ~LmService() = default;
++    // The guest's connect request with its user data; reply is the confirm's user data. False
++    // refuses it.
++    virtual bool Connect(const Bytes& data, Bytes& reply, uint64_t now) = 0;
++    virtual void Data(const Bytes& data, uint64_t now) = 0;
++    // The guest disconnected, or the link went.
++    virtual void Disconnect(uint64_t now) = 0;
++    // Called before each IrLAP response, to queue data.
++    virtual void Pump(uint64_t now) {}
++};
++
++class IrLmp : public IrLapUser {
++   public:
++    // Disconnect reasons (section 4.4.2).
++    static constexpr uint8_t userRequest = 0x01, unexpectedLapDisconnect = 0x02, noClient = 0x08;
++
++    explicit IrLmp(IrLap& lap);
++
++    void Bind(uint8_t lsap, LmService& service);
++    // A data PDU from a local LSAP to its peer; size at most MaxData().
++    void Send(uint8_t lsap, const uint8_t* data, size_t size);
++    void Disconnect(uint8_t lsap, uint8_t reason, uint64_t now);
++    bool Connected(uint8_t lsap) const { return lsap < 0x80 && ports[lsap].connected; }
++    size_t MaxData() const { return lap.DataSize() - 2; }
++    // I frames waiting to go; services hold back past a few.
++    size_t Queued() const { return lap.Queued(); }
++
++    unsigned Connects() const { return connects; }
++
++    void LinkUp(uint64_t now) override;
++    void LinkDown(uint64_t now) override;
++    void Data(const uint8_t* data, size_t size, uint64_t now) override;
++    void Pump(uint64_t now) override;
++
++   private:
++    struct Port {
++        LmService* service{nullptr};
++        bool connected{false};
++        uint8_t peer{0};
++    };
++
++    void Control(uint8_t local, uint8_t peer, const uint8_t* data, size_t size, uint64_t now);
++    void SendControl(uint8_t local, uint8_t peer, Bytes body);
++
++    IrLap& lap;
++    std::array<Port, 0x80> ports{};
++    unsigned connects{0};
++};
++
++}  // namespace frondIr
++
++#endif
+diff --git a/src/common/ir/IrPhone.cpp b/src/common/ir/IrPhone.cpp
+new file mode 100644
+index 0000000..548f5c4
+--- /dev/null
++++ b/src/common/ir/IrPhone.cpp
+@@ -0,0 +1,41 @@
++#include "IrPhone.h"
++
++namespace frondIr {
++
++using frondModem::HayesModem;
++
++IrPhone::IrPhone(frondModem::ModemLine& line) : IrPhone(line, Options{}) {}
++
++IrPhone::IrPhone(frondModem::ModemLine& line, Options options)
++    : modem(line, options.modem),
++      lmp(lap),
++      lap(lmp, options.lap),
++      ias(lmp),
++      comm(lmp, ias, *this, options.lap.nickname) {}
++
++void IrPhone::Service(uint64_t now) {
++    modem.Service(now);
++    lap.Service(now);
++}
++
++// The phone's modem is on while the guest has the IrCOMM port open; closing it ends the call.
++void IrPhone::Opened(uint64_t now) { modem.SetPower(true, now); }
++
++void IrPhone::Closed(uint64_t now) { modem.SetPower(false, now); }
++
++void IrPhone::FromGuest(const uint8_t* data, size_t size, uint64_t now) { modem.Write(data, size, now); }
++
++size_t IrPhone::ToGuest(uint8_t* data, size_t max, uint64_t now) {
++    modem.Service(now);
++    return modem.Read(data, max);
++}
++
++void IrPhone::GuestLines(bool dtr, bool rts, uint64_t now) { modem.SetDTR(dtr, now); }
++
++uint8_t IrPhone::Lines(uint64_t now) {
++    const auto state = modem.GetState();
++    const bool carrier = state == HayesModem::State::Online || state == HayesModem::State::OnlineCommand;
++    return cts | dsr | (carrier ? cd : 0);
++}
++
++}  // namespace frondIr
+diff --git a/src/common/ir/IrPhone.h b/src/common/ir/IrPhone.h
+new file mode 100644
+index 0000000..c3864da
+--- /dev/null
++++ b/src/common/ir/IrPhone.h
+@@ -0,0 +1,59 @@
++#ifndef FROND_IR_IRPHONE_H
++#define FROND_IR_IRPHONE_H
++
++// A mobile phone with a data modem, reached over infrared: the IrLAP secondary, IrLMP, IAS,
++// Tiny TP and IrCOMM, with the IrCOMM port joined to a HayesModem whose calls go to a
++// ModemLine. The core feeds it the guest's IR transmitter bytes (Write), drains its receiver
++// bytes (Read) and calls Service between slices. Single-threaded; time is guest nanoseconds.
++
++#include <cstddef>
++#include <cstdint>
++
++#include "Ias.h"
++#include "IrComm.h"
++#include "IrLap.h"
++#include "IrLmp.h"
++#include "modem/HayesModem.h"
++
++namespace frondIr {
++
++class IrPhone : private IrCommPort {
++   public:
++    struct Options {
++        IrLap::Options lap;
++        frondModem::HayesModem::Options modem;
++    };
++
++    explicit IrPhone(frondModem::ModemLine& line);
++    IrPhone(frondModem::ModemLine& line, Options options);
++
++    void Write(const uint8_t* data, size_t size, uint64_t now) { lap.Receive(data, size, now); }
++    size_t Read(uint8_t* data, size_t max, uint64_t now) { return lap.Read(data, max, now); }
++    size_t Available(uint64_t now) const { return lap.Available(now); }
++    void Service(uint64_t now);
++    // After a session load: no link, no call.
++    void Drop(uint64_t now) { lap.Drop(now); }
++
++    const IrLap& Lap() const { return lap; }
++    const IrComm& Comm() const { return comm; }
++    const IasServer& Ias() const { return ias; }
++    const frondModem::HayesModem& Modem() const { return modem; }
++
++   private:
++    void Opened(uint64_t now) override;
++    void Closed(uint64_t now) override;
++    void FromGuest(const uint8_t* data, size_t size, uint64_t now) override;
++    size_t ToGuest(uint8_t* data, size_t max, uint64_t now) override;
++    void GuestLines(bool dtr, bool rts, uint64_t now) override;
++    uint8_t Lines(uint64_t now) override;
++
++    frondModem::HayesModem modem;
++    IrLmp lmp;
++    IrLap lap;
++    IasServer ias;
++    IrComm comm;
++};
++
++}  // namespace frondIr
++
++#endif
+diff --git a/src/common/ir/Sir.cpp b/src/common/ir/Sir.cpp
+new file mode 100644
+index 0000000..962a200
+--- /dev/null
++++ b/src/common/ir/Sir.cpp
+@@ -0,0 +1,76 @@
++#include "Sir.h"
++
++namespace frondIr {
++
++namespace {
++
++constexpr uint8_t xbof = 0xff, bof = 0xc0, eof = 0xc1, escape = 0x7d;
++
++void Put(uint8_t byte, std::vector<uint8_t>& out) {
++    if (byte == bof || byte == eof || byte == escape) {
++        out.push_back(escape);
++        out.push_back(byte ^ 0x20);
++    } else {
++        out.push_back(byte);
++    }
++}
++
++}  // namespace
++
++uint16_t Fcs16(const uint8_t* data, size_t size, uint16_t fcs) {
++    for (size_t i = 0; i < size; ++i) {
++        fcs ^= data[i];
++        for (int bit = 0; bit < 8; ++bit) fcs = (fcs & 1) ? (fcs >> 1) ^ 0x8408 : fcs >> 1;
++    }
++    return fcs;
++}
++
++void SirWrap(const uint8_t* frame, size_t size, unsigned extraBofs, std::vector<uint8_t>& out) {
++    out.insert(out.end(), extraBofs, xbof);
++    out.push_back(bof);
++    for (size_t i = 0; i < size; ++i) Put(frame[i], out);
++    const uint16_t fcs = ~Fcs16(frame, size);
++    Put(fcs & 0xff, out);
++    Put(fcs >> 8, out);
++    out.push_back(eof);
++}
++
++bool SirUnwrapper::Feed(uint8_t byte) {
++    if (byte == bof) {
++        // A BOF inside a frame starts it over; several BOFs in a row are allowed.
++        inFrame = true;
++        escaped = false;
++        frame.clear();
++        return false;
++    }
++    if (!inFrame) return false;
++    if (byte == eof) {
++        inFrame = false;
++        if (escaped || frame.size() < 4 || Fcs16(frame.data(), frame.size()) != fcsGood) {
++            ++bad;
++            return false;
++        }
++        done.assign(frame.begin(), frame.end() - 2);
++        return true;
++    }
++    if (byte == escape) {
++        escaped = true;
++        return false;
++    }
++    if (escaped) byte ^= 0x20;
++    escaped = false;
++    if (frame.size() >= maxFrame) {
++        ++bad;
++        inFrame = false;
++        return false;
++    }
++    frame.push_back(byte);
++    return false;
++}
++
++void SirUnwrapper::Reset() {
++    inFrame = escaped = false;
++    frame.clear();
++}
++
++}  // namespace frondIr
+diff --git a/src/common/ir/Sir.h b/src/common/ir/Sir.h
+new file mode 100644
+index 0000000..c1d1d48
+--- /dev/null
++++ b/src/common/ir/Sir.h
+@@ -0,0 +1,48 @@
++#ifndef FROND_IR_SIR_H
++#define FROND_IR_SIR_H
++
++// SIR framing for IrLAP (IrDA Physical Layer 1.4, section 5): extra BOFs (0xff), BOF (0xc0),
++// the frame with 0xc0, 0xc1 and 0x7d escaped as 0x7d then the byte xor 0x20, the FCS-16 low
++// byte first, then EOF (0xc1).
++
++#include <cstddef>
++#include <cstdint>
++#include <deque>
++#include <vector>
++
++namespace frondIr {
++
++using Bytes = std::vector<uint8_t>;
++
++// CRC-CCITT as IrLAP uses it, starting at 0xffff. A frame with its FCS gives fcsGood.
++uint16_t Fcs16(const uint8_t* data, size_t size, uint16_t fcs = 0xffff);
++constexpr uint16_t fcsGood = 0xf0b8;
++
++// Appends one wrapped frame (address, control and information, no FCS) to out.
++void SirWrap(const uint8_t* frame, size_t size, unsigned extraBofs, std::vector<uint8_t>& out);
++inline void SirWrap(const Bytes& frame, unsigned extraBofs, std::vector<uint8_t>& out) {
++    SirWrap(frame.data(), frame.size(), extraBofs, out);
++}
++
++// Takes raw SIR bytes and gives whole frames with a good FCS, without the FCS.
++class SirUnwrapper {
++   public:
++    // The largest frame taken: 2048 bytes of information, address, control and FCS.
++    static constexpr size_t maxFrame = 2048 + 4;
++
++    // True when byte ended a good frame, which is then in Frame().
++    bool Feed(uint8_t byte);
++    const Bytes& Frame() const { return done; }
++    // Frames dropped for a bad FCS, a short frame or one too long.
++    unsigned BadFrames() const { return bad; }
++    void Reset();
++
++   private:
++    bool inFrame{false}, escaped{false};
++    Bytes frame, done;
++    unsigned bad{0};
++};
++
++}  // namespace frondIr
++
++#endif
+diff --git a/src/common/ir/TinyTp.cpp b/src/common/ir/TinyTp.cpp
+new file mode 100644
+index 0000000..8f7c90e
+--- /dev/null
++++ b/src/common/ir/TinyTp.cpp
+@@ -0,0 +1,115 @@
++#include "TinyTp.h"
++
++#include <algorithm>
++
++namespace frondIr {
++
++namespace {
++
++// First byte of each PDU: more-to-come (data) or parameters-present (connect), then credit.
++constexpr uint8_t flagBit = 0x80, creditMask = 0x7f;
++constexpr uint8_t piMaxSdu = 0x01;
++// Reassembled SDUs past this are dropped.
++constexpr size_t reassemblyLimit = 4096;
++// I frames queued at IrLAP before Tiny TP holds back, so a poll isn't flooded.
++constexpr size_t lapBacklog = 7;
++
++}  // namespace
++
++TinyTp::TinyTp(IrLmp& lmp, uint8_t lsap, TinyTpUser& user) : lmp(lmp), lsap(lsap), user(user) {
++    lmp.Bind(lsap, *this);
++}
++
++size_t TinyTp::MaxSdu() const {
++    const size_t pdu = lmp.MaxData() - 1;
++    return guestMaxSdu ? std::min(pdu, guestMaxSdu) : pdu;
++}
++
++void TinyTp::Send(Bytes sdu) { queue.push_back(std::move(sdu)); }
++
++bool TinyTp::Connect(const Bytes& data, Bytes& reply, uint64_t now) {
++    if (data.empty()) return false;
++    sendCredit = data[0] & creditMask;
++    guestMaxSdu = 0;
++    size_t i = 1;
++    if (data[0] & flagBit) {
++        // Parameters: their length, then PI, PL, PV; only MaxSduSize is defined.
++        const size_t length = i < data.size() ? data[i++] : 0;
++        const size_t end = std::min(data.size(), i + length);
++        while (i + 2 <= end) {
++            const uint8_t pi = data[i], pl = data[i + 1];
++            if (i + 2 + pl > end) break;
++            if (pi == piMaxSdu) {
++                size_t value = 0;
++                for (size_t k = 0; k < pl; ++k) value = value << 8 | data[i + 2 + k];
++                guestMaxSdu = value;
++            }
++            i += 2 + pl;
++        }
++        i = end;
++    }
++    Bytes userReply;
++    if (!user.Connect(Bytes(data.begin() + std::min(i, data.size()), data.end()), userReply, now)) return false;
++    remoteCredit = initialCredit;
++    freeCredit = 0;
++    queue.clear();
++    reassembly.clear();
++    // We send no parameters, so the guest's SDUs should fit one PDU; segmented ones are
++    // reassembled anyway.
++    reply.push_back(uint8_t(initialCredit));
++    reply.insert(reply.end(), userReply.begin(), userReply.end());
++    return true;
++}
++
++void TinyTp::Data(const Bytes& data, uint64_t now) {
++    if (data.empty()) return;
++    sendCredit = std::min(127u, sendCredit + (data[0] & creditMask));
++    // A PDU with no user data is a credit update and uses no credit.
++    if (data.size() == 1) return;
++    if (remoteCredit) --remoteCredit;
++    ++freeCredit;
++    reassembly.insert(reassembly.end(), data.begin() + 1, data.end());
++    if (reassembly.size() > reassemblyLimit) {
++        reassembly.clear();
++        return;
++    }
++    if (data[0] & flagBit) return;
++    Bytes sdu;
++    sdu.swap(reassembly);
++    user.Data(sdu, now);
++}
++
++void TinyTp::Disconnect(uint64_t now) {
++    queue.clear();
++    reassembly.clear();
++    sendCredit = remoteCredit = freeCredit = 0;
++    user.Disconnect(now);
++}
++
++void TinyTp::Pump(uint64_t now) {
++    user.Pump(now);
++    Flush();
++}
++
++void TinyTp::Flush() {
++    while (!queue.empty() && sendCredit && lmp.Queued() < lapBacklog) {
++        const uint8_t give = uint8_t(std::min(freeCredit, 127u));
++        Bytes pdu{give};
++        pdu.insert(pdu.end(), queue.front().begin(), queue.front().end());
++        queue.pop_front();
++        --sendCredit;
++        freeCredit -= give;
++        remoteCredit += give;
++        lmp.Send(lsap, pdu.data(), pdu.size());
++    }
++    // With nothing to carry it, freed credit goes in a dataless PDU once the guest runs low.
++    if (freeCredit && remoteCredit <= initialCredit / 2) {
++        const uint8_t give = uint8_t(std::min(freeCredit, 127u));
++        const Bytes pdu{give};
++        freeCredit -= give;
++        remoteCredit += give;
++        lmp.Send(lsap, pdu.data(), pdu.size());
++    }
++}
++
++}  // namespace frondIr
+diff --git a/src/common/ir/TinyTp.h b/src/common/ir/TinyTp.h
+new file mode 100644
+index 0000000..ccd079a
+--- /dev/null
++++ b/src/common/ir/TinyTp.h
+@@ -0,0 +1,62 @@
++#ifndef FROND_IR_TINYTP_H
++#define FROND_IR_TINYTP_H
++
++// Tiny TP (IrDA TinyTP 1.1) on an IrLMP LSAP: credit flow control and reassembly of segmented
++// SDUs from the guest. Our own SDUs are never segmented.
++
++#include <cstddef>
++#include <cstdint>
++#include <deque>
++
++#include "IrLmp.h"
++
++namespace frondIr {
++
++class TinyTpUser {
++   public:
++    virtual ~TinyTpUser() = default;
++    // The guest's connect user data (after Tiny TP's parameters); reply is ours.
++    virtual bool Connect(const Bytes& data, Bytes& reply, uint64_t now) = 0;
++    virtual void Data(const Bytes& sdu, uint64_t now) = 0;
++    virtual void Disconnect(uint64_t now) = 0;
++    // Room to send: queue SDUs with Send.
++    virtual void Pump(uint64_t now) {}
++};
++
++class TinyTp : public LmService {
++   public:
++    // Credit we give at the start and keep topped up: SDUs the guest may send unanswered.
++    static constexpr unsigned initialCredit = 7;
++
++    TinyTp(IrLmp& lmp, uint8_t lsap, TinyTpUser& user);
++
++    // Queues an SDU of at most MaxSdu() bytes; it goes when the guest gives credit.
++    void Send(Bytes sdu);
++    size_t MaxSdu() const;
++    // SDUs waiting for credit.
++    size_t Queued() const { return queue.size(); }
++    unsigned SendCredit() const { return sendCredit; }
++    bool Connected() const { return lmp.Connected(lsap); }
++    void Disconnect(uint8_t reason, uint64_t now) { lmp.Disconnect(lsap, reason, now); }
++
++    bool Connect(const Bytes& data, Bytes& reply, uint64_t now) override;
++    void Data(const Bytes& data, uint64_t now) override;
++    void Disconnect(uint64_t now) override;
++    void Pump(uint64_t now) override;
++
++   private:
++    void Flush();
++
++    IrLmp& lmp;
++    uint8_t lsap;
++    TinyTpUser& user;
++    // Credit the guest gave us, credit we gave it and haven't seen used, and credit freed since.
++    unsigned sendCredit{0}, remoteCredit{0}, freeCredit{0};
++    size_t guestMaxSdu{0};
++    std::deque<Bytes> queue;
++    Bytes reassembly;
++};
++
++}  // namespace frondIr
++
++#endif

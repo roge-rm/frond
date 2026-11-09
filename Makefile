@@ -470,6 +470,13 @@ test-modem: prepare build/source/src/common/libcommon.a build/source/src/common/
 		$(shell pkg-config --cflags --libs slirp) -o build/test-modem
 	./build/test-modem
 
+.PHONY: test-ir-peer
+test: test-ir-peer
+test-ir-peer: prepare build/source/src/common/libcommon.a
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Wno-unused-parameter -Ibuild/source/src/common tests/ir-peer.cpp \
+		build/source/src/common/libcommon.a -o build/test-ir-peer
+	./build/test-ir-peer
+
 build/source/src/common/libcommon-net.a: build/source/.prepared
 	$(MAKE) -C build/source/src/common net
 
