@@ -387,7 +387,7 @@ test-desktop: desktop
 	+cmake --build build/desktop --parallel $(BUILD_JOBS)
 	ctest --test-dir build/desktop --output-on-failure
 
-deb: desktop out/frond-68k build/bluetooth-provider/emulator/btvirt
+deb: desktop out/frond-68k build/bluetooth-provider/emulator/btvirt bluetooth-opp-peer
 	python3 tools/package-deb.py
 
 # This Frond's Bluetooth radio. The pinned BlueZ source is fetched once with
@@ -1289,12 +1289,18 @@ test-csr-peer-services: out/frond
 	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common tests/csr-peer-state.cpp @build/csr-peer-core.rsp build/source/src/common/libcommon.a -lSDL2 -lSDL2_image -lreadline $(CPU_TEST_LDLIBS) -o build/test-csr-peer-state
 	./build/test-csr-peer-state
 
-.PHONY: bluetooth-opp-peer test-bluetooth-opp-peer
-bluetooth-opp-peer:
-	python3 tools/build-bluetooth-opp-peer.py
+.PHONY: bluetooth-opp-peer test-bluetooth-opp-peer test-bluetooth-dun
+# The checkout tools/build-bluetooth-provider.py --fetch made and built.
+BLUETOOTH_PROVIDER ?= build/bluetooth-provider
+bluetooth-opp-peer: prepare build/source/src/common/libcommon.a build/source/src/common/libcommon-net.a $(BLUETOOTH_PROVIDER)/emulator/btvirt
+	python3 tools/build-bluetooth-opp-peer.py --source $(BLUETOOTH_PROVIDER)
 
-test-bluetooth-opp-peer:
-	python3 tools/build-bluetooth-opp-peer.py --test
+test-bluetooth-opp-peer: prepare build/source/src/common/libcommon.a build/source/src/common/libcommon-net.a $(BLUETOOTH_PROVIDER)/emulator/btvirt
+	python3 tools/build-bluetooth-opp-peer.py --source $(BLUETOOTH_PROVIDER) --test
+
+# The DUN phone through btvirt: a scripted client dials and brings LCP and IPCP up.
+test-bluetooth-dun: test-bluetooth-opp-peer
+	python3 tests/bluetooth-dun.py --btvirt $(BLUETOOTH_PROVIDER)/emulator/btvirt
 
 .PHONY: test-csr-controller-lifecycle
 test: test-csr-controller-lifecycle

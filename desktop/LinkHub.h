@@ -43,6 +43,9 @@ class Hub : public QObject {
     // The btvirt the hub runs as this Frond's radio: FROND_BTVIRT, else the one installed beside
     // the program. Empty if there is none.
     static QString radioProgram();
+    // The Bluetooth mobile phone, bluetooth-opp-peer --dun on this Frond's radio: FROND_BT_PHONE,
+    // else the one installed beside the program. Empty if there is none.
+    static QString phoneProgram();
 
     explicit Hub(QObject* parent = nullptr);
     ~Hub() override;
@@ -160,6 +163,9 @@ class Hub : public QObject {
     bool radioWanted() const;
     bool startRadio();
     void radioTick();
+    // The phone runs while a machine on this Frond's radio asks for it, and goes with the hub.
+    bool phoneWanted() const;
+    void phoneTick();
     QString radioSocket() const;
     QString peerBluetooth(const QString& hex) const;
     // Discovery
@@ -190,6 +196,8 @@ class Hub : public QObject {
     QString radioFolder;
     qint64 radioStarted{0}, radioIdleSince{0};
     bool radioFailed{false};
+    QProcess* phone{nullptr};
+    qint64 phoneStarted{-100000};
     QMap<QString, PeerRun> runs;
     QMap<QString, Nearby> nearby;
     QHash<QString, QList<qint64>> recent;  // incoming connection times per address

@@ -78,6 +78,7 @@ struct Hub::Attach {
     Client* client{nullptr};
     ChannelKind kind{ChannelKind::Infrared};
     QString machine, device, link, socketPath;
+    bool phone{false};  // Bluetooth on this Frond's radio with the mobile phone
     QLocalSocket* core{nullptr};
     bool coreUp{false};
     qint64 nextCoreTry{0};
@@ -1142,7 +1143,7 @@ QJsonObject Hub::status(const Attach* a) const {
         o["controllers"] = int(std::count_if(controllers.begin(), controllers.end(), [a](const Controller* k) { return k->owner == a; }));
         if (a->link == QLatin1String("radio")) {
             o["peer"] = QCoreApplication::translate("frondLink", "This Frond");
-            o["state"] = radioProgram().isEmpty() ? "noradio" : "radio";
+            o["state"] = radioProgram().isEmpty() ? "noradio" : a->phone && phoneProgram().isEmpty() ? "nophone" : "radio";
             return o;
         }
     }
@@ -1303,6 +1304,21 @@ QString Hub::radioProgram() {
     return {};
 }
 
+QString Hub::phoneProgram() {
+    if (qEnvironmentVariableIsSet("FROND_BT_PHONE")) {
+        const auto custom = qEnvironmentVariable("FROND_BT_PHONE");
+        return !custom.isEmpty() && QFileInfo(custom).isExecutable() ? custom : QString();
+    }
+    const auto dir = QCoreApplication::applicationDirPath();
+    for (const auto& candidate : {dir + "/../lib/frond/bluetooth-phone", dir + "/bluetooth-phone",
+                                  dir + "/../build/bluetooth-opp-peer/bluetooth-opp-peer",
+                                  dir + "/../../build/bluetooth-opp-peer/bluetooth-opp-peer"}) {
+        const QFileInfo info(candidate);
+        if (info.isFile() && info.isExecutable()) return info.canonicalFilePath();
+    }
+    return {};
+}
+
 QString Hub::radioSocket() const { return radioFolder + "/bt-server-bredr"; }
 
 // No one has chosen: the side with the lower install id holds the radio, as both sides work out the same.
@@ -1327,6 +1343,7 @@ void Hub::btAttach(Client* c, const QJsonObject& op) {
     a->device = op.value("device").toString();
     a->link = op.value("link").toString();
     a->socketPath = op.value("socket").toString();
+    a->phone = a->link == QLatin1String("radio") && op.value("phone").toBool();
     attaches.push_back(a);
     a->btServer = new QLocalServer(this);
     a->btServer->setSocketOptions(QLocalServer::UserAccessOption);
@@ -1335,8 +1352,10 @@ void Hub::btAttach(Client* c, const QJsonObject& op) {
         QLocalServer::removeServer(a->socketPath);
         a->btServer->listen(a->socketPath);
     }
-    if (a->link == QLatin1String("radio")) startRadio();
-    else if (a->link != QLatin1String("local")) {
+    if (a->link == QLatin1String("radio")) {
+        startRadio();
+        phoneTick();
+    } else if (a->link != QLatin1String("local")) {
         auto& r = runs[a->link];
         if (!r.link && !r.dialing) { r.nextTry = now(); r.backoff = 0; }
     }
@@ -1595,7 +1614,43 @@ bool Hub::startRadio() {
     return true;
 }
 
+bool Hub::phoneWanted() const {
+    return std::any_of(attaches.begin(), attaches.end(), [](const Attach* a) { return a->bt() && a->phone; });
+}
+
+// Starts the phone once the radio runs, again a while after it stops (as when the radio restarts),
+// and stops it when no machine wants it.
+void Hub::phoneTick() {
+    const bool running = phone && phone->state() != QProcess::NotRunning;
+    if (!phoneWanted() || !radio || radio->state() == QProcess::NotRunning) {
+        if (!phone) return;
+        if (running) {
+            phone->terminate();
+            if (!phone->waitForFinished(1000)) phone->kill();
+        }
+        phone->deleteLater();
+        phone = nullptr;
+        return;
+    }
+    if (running || now() - phoneStarted < kRadioStartMs) return;
+    const auto program = phoneProgram();
+    if (program.isEmpty()) return;
+    if (phone) phone->deleteLater();
+    phone = new QProcess(this);
+    phone->setProgram(program);
+    // The phone waits for the radio's socket itself.
+    phone->setArguments({radioSocket(), "--dun"});
+    phone->setStandardOutputFile(QProcess::nullDevice());
+    phone->setStandardErrorFile(QProcess::nullDevice());
+#ifdef Q_OS_LINUX
+    phone->setChildProcessModifier([] { ::prctl(PR_SET_PDEATHSIG, SIGTERM); });
+#endif
+    phoneStarted = now();
+    phone->start();
+}
+
 void Hub::radioTick() {
+    phoneTick();
     const auto t = now();
     for (auto* k : QList<Controller*>(controllers))
         if (controllers.contains(k) && k->wantsRadio && !k->radioSock && t >= k->radioTry) btRadioConnect(k);
@@ -1606,6 +1661,7 @@ void Hub::radioTick() {
     if (!radio->waitForFinished(1000)) radio->kill();
     radio->deleteLater();
     radio = nullptr;
+    phoneTick();
 }
 
 QString Hub::peerBluetooth(const QString& hex) const {

@@ -205,6 +205,27 @@ while True:
     }
     return path;
 }
+// Stands in for the Bluetooth phone (FROND_BT_PHONE): writes its arguments to <radio folder>/phone
+// and a line to <radio folder>/phone-stopped when it's stopped.
+static QString fakePhone() {
+    const auto path = QDir::currentPath() + "/build/fake-bt-phone.py";
+    QFile f(path);
+    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        f.write(R"PY(#!/usr/bin/python3
+import os,signal,sys,time
+folder=os.path.dirname(sys.argv[1])
+def stop(*_):
+    with open(os.path.join(folder,'phone-stopped'),'a') as o: o.write('x\n')
+    sys.exit(0)
+signal.signal(signal.SIGTERM,stop)
+with open(os.path.join(folder,'phone'),'w') as o: o.write('\n'.join(sys.argv[1:])+'\n')
+while True: time.sleep(1)
+)PY");
+        f.close();
+        f.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+    }
+    return path;
+}
 static int radioOpened(const QString& runtime) {
     QFile f(runtime + "/frond/radio/opened");
     return f.open(QIODevice::ReadOnly) ? int(f.readAll().count('\n')) : 0;
@@ -4290,6 +4311,66 @@ for line in s.makefile('rb'):
         }
         QSettings().clear();
     }
+    // Mobile phone: This Frond's radio through the hub, which runs the phone beside it while the
+    // machine wants it; machine settings have the choice too.
+    void bluetoothPhone() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QTemporaryDir files;
+        QFile source(files.filePath("input.frond")); QVERIFY(source.open(QIODevice::WriteOnly));
+        source.write("session"); source.close();
+        QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly));
+        core.write(R"PY(#!/usr/bin/python3
+import pathlib,socket,sys
+base=pathlib.Path(sys.argv[1]);modes=pathlib.Path(str(base)+'.modes');modes.write_text('')
+s=socket.socket(socket.AF_UNIX);s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+for line in s.makefile('rb'):
+    i,cmd,arg=line.rstrip(b'\n').split(b'\t');arg=bytes.fromhex(arg.decode())
+    message={b'device-state':b'palm-tx',b'sd-state':b'none',b'network-state':b'disabled',b'keyboard-state':b'detached'}.get(cmd,b'done')
+    if cmd==b'bluetooth-mode':
+        with modes.open('a') as m: m.write(arg.decode()+'\n')
+        message=b'off' if arg==b'off' else arg+b' connected'
+    if cmd==b'save':pathlib.Path(arg.decode()).write_text('saved')
+    s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
+    if cmd==b'quit':break
+)PY");
+        core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner));
+        const auto radioFolder = qEnvironmentVariable("XDG_RUNTIME_DIR") + "/frond/radio";
+        QFile::remove(radioFolder + "/phone"); QFile::remove(radioFolder + "/phone-stopped");
+        const auto read = [](const QString& path) { QFile f(path); return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray(); };
+        const auto hubPath = frondLink::coreSocketPath("bt", QString::number(QCoreApplication::applicationPid()));
+        {
+            MainWindow window(core.fileName()); window.show(); window.openSession(source.fileName(), true);
+            auto* mode = window.findChild<QComboBox*>("bluetoothMode"); auto* state = window.findChild<QLabel*>("bluetoothState");
+            const auto pick = [mode](const char* value) {
+                mode->setCurrentIndex(mode->findData(value));
+                QMetaObject::invokeMethod(mode, "activated", Q_ARG(int, mode->currentIndex()));
+            };
+            QTRY_VERIFY_WITH_TIMEOUT(mode->isEnabled(), 5000);
+            QCOMPARE(mode->itemText(mode->findData("phone")), QString("Mobile phone"));
+            pick("phone");
+            QTRY_VERIFY_WITH_TIMEOUT(read(source.fileName() + ".modes").contains(hubPath.toUtf8() + "\n"), 15000);
+            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Bluetooth: This Frond's radio, with the mobile phone"), 5000);
+            QTRY_COMPARE_WITH_TIMEOUT(machineSetting("bluetooth"), QString("phone"), 5000);
+            // The phone is started on the radio's socket in DUN mode.
+            QTRY_COMPARE_WITH_TIMEOUT(read(radioFolder + "/phone"), QByteArray(radioFolder.toUtf8() + "/bt-server-bredr\n--dun\n"), 10000);
+            // This Frond without the phone stops it, and the radio stays.
+            pick("radio");
+            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Bluetooth: This Frond's radio"), 5000);
+            QTRY_VERIFY_WITH_TIMEOUT(!read(radioFolder + "/phone-stopped").isEmpty(), 10000);
+            QCOMPARE(machineSetting("bluetooth"), QString("radio"));
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        }
+        {
+            frondSessions::Preferences prefs;
+            prefs.bluetooth = "phone";
+            MachineSettingsDialog dialog(frondFirmware::Device::tx, prefs); dialog.show();
+            auto* picker = dialog.findChild<QComboBox*>("machineBluetooth"); QVERIFY(picker && picker->isVisible());
+            QCOMPARE(picker->currentText(), QString("Mobile phone"));
+            QCOMPARE(dialog.controls->values().bluetooth, QString("phone"));
+        }
+        QSettings().clear();
+    }
     // A live switch from a connection that the core refuses leaves the port off and the hub's
     // attach gone, for serial and infrared.
     void linkSwitchFails() {
@@ -6472,6 +6553,7 @@ int main(int argc, char** argv) {
     app.setQuitOnLastWindowClosed(false);
     qputenv("FROND_LINK_HUB", (QCoreApplication::applicationDirPath() + "/frond-desktop").toUtf8());
     qputenv("FROND_BTVIRT", fakeRadio().toUtf8());
+    qputenv("FROND_BT_PHONE", fakePhone().toUtf8());
     // Card tool operations run on the real ARM core even where a window's core is a fake one.
     qputenv("FROND_CARD_TOOL", cardsCore().toUtf8());
     WorkflowTest test;

@@ -46,6 +46,19 @@ for f in emulator/main.c emulator/serial.c emulator/server.c emulator/vhci.c emu
     $TRIPLE-gcc -O2 -DHAVE_CONFIG_H -I$BT -I$BLUEZ -c $BLUEZ/$f -o $BT/$(echo $f | tr / _).o
 done
 $TRIPLE-gcc $BT/*.o -o build/arm64/out/btvirt
+# The Bluetooth phone: bluetooth-opp-peer --dun on bthost with the config patch, and the modem, PPP and slirp.
+PHONE=/src/build/arm64/phone
+rm -rf $PHONE && mkdir -p $PHONE/emulator
+cp $BLUEZ/emulator/bthost.c $PHONE/emulator/bthost.c
+patch --batch -p1 -d $PHONE -i /src/tools/bluez-bthost-config.patch
+make -j"$JOBS" -C build/source/src/common net $TOOLS
+SLIRP=$(pkg-config --cflags --libs slirp)
+$TRIPLE-gcc -std=gnu11 -O2 -DHAVE_CONFIG_H -I$BT -I$BLUEZ -I$BLUEZ/emulator -c $PHONE/emulator/bthost.c -o $PHONE/bthost.o
+$TRIPLE-gcc -std=gnu11 -O2 -DHAVE_CONFIG_H -I$BT -I$BLUEZ -I$BLUEZ/emulator -Itools -c tools/bluetooth-opp-peer.c -o $PHONE/peer.o
+$TRIPLE-g++ -std=c++17 -O2 -Ibuild/source/src/common $SLIRP -c tools/bluetooth-dun.cpp -o $PHONE/dun.o
+$TRIPLE-g++ $PHONE/peer.o $PHONE/dun.o $PHONE/bthost.o $(ls $BT/*.o | grep -v -e emulator_main -e emulator_bthost -e emulator_serial \
+    -e emulator_server -e emulator_vhci -e emulator_btdev -e emulator_phy -e emulator_le) \
+    build/source/src/common/libcommon-net.a build/source/src/common/libcommon.a $SLIRP -o build/arm64/out/bluetooth-phone
 export QEMU_LD_PREFIX=/
 python3 tools/package-deb.py --core build/arm64/out/frond --core-68k build/arm64/out/frond-68k --desktop build/arm64/out/frond-desktop \
-    --btvirt build/arm64/out/btvirt --architecture arm64 --strip $TRIPLE-strip --runner qemu-aarch64
+    --btvirt build/arm64/out/btvirt --phone build/arm64/out/bluetooth-phone --architecture arm64 --strip $TRIPLE-strip --runner qemu-aarch64

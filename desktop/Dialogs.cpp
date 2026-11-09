@@ -218,6 +218,7 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     bluetooth->setObjectName("machineBluetooth");
     bluetooth->addItem(tr("Off"), "off");
     bluetooth->addItem(tr("This Frond"), "radio");
+    bluetooth->addItem(tr("Mobile phone"), "phone");
     bluetooth->addItem(tr("Controller socket"), "socket");
     frondLink::addConnectionChoices(bluetooth, prefs.bluetooth, false);
     bluetooth->setCurrentIndex(std::max(0, bluetooth->findData(prefs.bluetooth.startsWith("socket:") ? QString("socket") : prefs.bluetooth)));

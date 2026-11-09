@@ -424,7 +424,7 @@ The per-machine settings file `<name>.frond.settings.json` has `infrared`, `seri
 | `infrared` | also `phone` on a device with the `irPhone` capability: the desktop passes `--irda phone`, Android sends `irda-mode phone` once the core answers and opens no link |
 | `serial` | also `modem` on a device with the `modem` capability (the IIIx): the desktop passes `--serial modem`, Android sends `serial-mode modem` once the core answers and opens no link |
 | `usb` | `off`, `pty`, `tcp:PORT` |
-| `bluetooth` | `off`, `radio` (This Frond), `socket:/absolute/path`, `link:ID` |
+| `bluetooth` | `off`, `radio` (This Frond), `phone` (This Frond with the mobile phone), `socket:/absolute/path`, `link:ID` |
 
 A `link:ID` that isn't in the store acts as `off` and shows as Unknown connection. The Android metadata `settings` holds `infrared`, `serial` and `bluetooth` the same way, with only `off`, `radio` and `link:ID` (and `modem` for `serial`, `phone` for `infrared`). Nothing goes into the `.frond` session. With a link or `radio` choice the desktop starts the core with `--irda`, `--serial` or `bluetooth-mode` pointing at the hub's sockets.
 
@@ -654,6 +654,8 @@ Dial plan: the default plan is empty, so every number connects. `HayesModem::Opt
 
 IR phone details: it answers discovery in a random slot as "IrCOMM" (hints PDA and IrCOMM), takes SNRM with up to 115200 baud, window 1 and 512 byte frames, answers at the guest's own minimum turnaround, and serves `IrDA:IrCOMM` and `IrDA:IrLMP` in IAS. IrCOMM is 9-wire cooked, 3-wire cooked or raw, and the modem is powered while IrCOMM is open. `irda-stats` gives `frames_in= frames_out= bad= connects= resent= timeouts=`. Tests: `make test-modem`, `make test-ir-peer`.
 
+Bluetooth phone (desktop only, any `bluetooth` device): the settings value `bluetooth` `phone` is This Frond's radio with `"phone": true` in the hub's `bt-attach`. While any machine asks for it the hub runs `bluetooth-opp-peer RADIO-SOCKET --dun` beside `btvirt` (`FROND_BT_PHONE`, else `../lib/frond/bluetooth-phone`, `bluetooth-phone` beside the binary, then the build tree; installed by `make deb` as `/usr/lib/frond/bluetooth-phone`). The hub's state is `nophone` when it's missing. The peer is "Frond Phone" (class of device 0x52020C) with PIN 1234 and an SDP record for Dial-up Networking (0x1103, 0x1201) on RFCOMM channel 9. The channel's bytes go to `tools/bluetooth-dun.cpp`, a C shim over the same `HayesModem`, `PppServer` and `SlirpIp` on monotonic time, powered while the channel is open. `make test-bluetooth-dun` runs a scripted client through a private `btvirt`: SDP, RFCOMM, `ATDT*99#`, CONNECT 33600, LCP and IPCP up.
+
 ## Using an IDE
 
 Frond has no IDE plugin. An IDE runs your build, then the [developer runner](#developer-runner) to install and try the app, and attaches GDB to a core started with `--gdb`.
@@ -769,6 +771,7 @@ The IIIx works as in VS Code, in Eclipse's Terminal view.
 | `FROND_GDBSTUB_TARGET` | Test target binary for `tests/gdbstub.py`. Default `build/test-gdbstub-target`. |
 | `FROND_TX_DEBUG_CONFIG` | JSON config handed to the debugger probe script by `tests/pace-debug-tx.py`. |
 | `FROND_BTVIRT` | `btvirt` binary for the Zire 72 Bluetooth test. |
+| `FROND_BT_PHONE` | The Bluetooth phone the hub runs (the desktop tests use a stand-in). |
 | `FROND_HARD_RESET` | `1` adds the TX and E2 hard-reset run to `tests/zire72-rom.py`. |
 | `FROND_ZIRE_LAUNCHER`, `FROND_ZIRE_STORAGE`, `FROND_ZIRE_PERIPHERALS` | `1` adds the launcher and key runs, the storage runs, or the peripheral runs to the Zire 72 ROM tests. |
 | `FROND_ZIRE_EVIDENCE` | Folder those runs write screenshots to. |
@@ -847,8 +850,8 @@ All in `tools/`. Most take `--help`.
 | `check-audio-probe.py`, `check-bluetooth-probe.py`, `check-irda-probe.py` | Check the logs of the Palm probe apps. |
 | `check-compatibility.py`, `compatibility-results.py`, `app-compatibility.py` | App and system compatibility runs and their result decoding. |
 | `build-palm-probe.py` | Builds a Palm probe app from `tests/palm/` with a local SDK (`--probe NAME`, `--sdk PATH`). |
-| `build-bluetooth-provider.py`, `build-bluetooth-opp-peer.py` | Build the BlueZ H4 provider (`btvirt`, also installed by `make deb` as `/usr/lib/frond/btvirt`) and the virtual OPP test peer. |
-| `bluetooth-opp-peer.c`, `bluez-bdaddr.patch`, `bluez-bthost-config.patch` | Sources and patches for those. |
+| `build-bluetooth-provider.py`, `build-bluetooth-opp-peer.py` | Build the BlueZ H4 provider (`btvirt`, also installed by `make deb` as `/usr/lib/frond/btvirt`) and the virtual peer (OPP and SPP test peer, and the Bluetooth phone, installed as `/usr/lib/frond/bluetooth-phone`). |
+| `bluetooth-opp-peer.c`, `bluetooth-dun.cpp`, `bluez-bdaddr.patch`, `bluez-bthost-config.patch` | Sources and patches for those. |
 | `palm-pppd.sh DEVICE` | Runs slirp (or pppd with `--pppd`) on the IIIx's serial PTY or `tcp:PORT`, see Palm IIIx. `slirp-select-fix.c` is the shim it preloads. |
 | `link-pty.py ENDPOINT` | Puts a PTY in front of a TCP endpoint (`PORT`, `HOST:PORT` or `listen:PORT`) for programs that only open serial devices. `--link PATH`, `--seconds N`. |
 | `link-irda.py FIRST SECOND` | Joins two infrared endpoints. `--seconds N`. |
@@ -887,7 +890,7 @@ All in `tools/`. Most take `--help`.
 | `benchmark-replay`, `benchmark-replay-jit`, `benchmark-session`, `benchmark-menu` | Build and run the benchmark programs. |
 | `frondbench` | Build FrondBench with m68k-palmos-gcc. |
 | `device-session-probe` | Build the device session probe. |
-| `bluetooth-opp-peer` | Build the OPP test peer. |
+| `bluetooth-opp-peer` | Build the OPP test peer and Bluetooth phone. |
 
 Tests in `make test`, by area:
 
@@ -925,3 +928,4 @@ Not in `make test`. The first group builds a program and runs it with a private 
 | `test-tg50-audio-lifecycle`, `test-tg50-audio-queue` | Nothing. TG50 audio unit tests. |
 | `test-host-microphone`, `test-host-microphone-state` | Nothing. Host microphone unit tests. |
 | `test-csr-bcsp-lifetime`, `test-bluetooth-opp-peer` | Nothing. Bluetooth unit tests. |
+| `test-bluetooth-dun` | `btvirt` (`BLUETOOTH_PROVIDER`, default `build/bluetooth-provider`). The Bluetooth phone end to end. |

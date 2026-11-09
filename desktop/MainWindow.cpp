@@ -372,6 +372,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     bluetooth->setObjectName("bluetoothMode");
     bluetooth->addItem(tr("Off"), "off");
     bluetooth->addItem(tr("This Frond"), "radio");
+    bluetooth->addItem(tr("Mobile phone"), "phone");
     bluetooth->addItem(tr("Controller socket"), "socket");
     bluetoothSocket = new QLineEdit(root);
     bluetoothSocket->setObjectName("bluetoothSocket");
@@ -1900,7 +1901,7 @@ QString MainWindow::bluetoothChoice() const {
 }
 bool MainWindow::bluetoothViaHub() const {
     const auto choice = bluetoothChoice();
-    return choice == "radio" || (choice.startsWith("link:") && choice != "link:local" && frondLink::knownLink(choice));
+    return choice == "radio" || choice == "phone" || (choice.startsWith("link:") && choice != "link:local" && frondLink::knownLink(choice));
 }
 // The core's endpoint: the socket path, or the hub's socket for this window.
 QString MainWindow::bluetoothArgument() const {
@@ -1933,14 +1934,18 @@ void MainWindow::attachBluetooth() {
         return;
     }
     const auto choice = bluetoothChoice();
-    const QJsonObject op{{"op", "bt-attach"}, {"machine", QFileInfo(sessionPath).completeBaseName()},
+    QJsonObject op{{"op", "bt-attach"}, {"machine", QFileInfo(sessionPath).completeBaseName()},
                          {"device", frondFirmware::deviceName(runningDevice)},
-                         {"link", choice == "radio" ? QStringLiteral("radio") : choice.mid(5)}, {"socket", bluetoothArgument()}};
+                         {"link", choice == "radio" || choice == "phone" ? QStringLiteral("radio") : choice.mid(5)},
+                         {"socket", bluetoothArgument()}};
+    // The phone is a second device on this Frond's radio, which the hub runs beside it.
+    if (choice == "phone") op["phone"] = true;
     if (op == bluetoothAttach) return;
     bluetoothAttach = op;
     bluetoothListening = false;
-    bluetoothLinkText = choice == "radio" ? tr("Bluetooth: This Frond's radio")
-                                          : tr("Bluetooth: connecting to %1").arg(frondLink::connectionName(choice.mid(5)));
+    bluetoothLinkText = choice == "radio"   ? tr("Bluetooth: This Frond's radio")
+                        : choice == "phone" ? tr("Bluetooth: This Frond's radio, with the mobile phone")
+                                            : tr("Bluetooth: connecting to %1").arg(frondLink::connectionName(choice.mid(5)));
     link.setSticky("bt", op);
     if (bluetoothCore == bluetoothArgument()) bluetoothState->setText(bluetoothLinkText);
     refresh();
@@ -1956,8 +1961,10 @@ void MainWindow::showBluetoothLink(const QJsonObject& s) {
     const auto peer = s.value("peer").toString(), state = s.value("state").toString();
     QString text;
     if (!s.value("listening").toBool()) text = tr("Bluetooth: couldn't make the controller socket");
+    else if (state == "radio" && bluetoothChoice() == "phone") text = tr("Bluetooth: This Frond's radio, with the mobile phone");
     else if (state == "radio") text = tr("Bluetooth: This Frond's radio");
     else if (state == "noradio") text = tr("Bluetooth: this Frond has no radio (btvirt is missing)");
+    else if (state == "nophone") text = tr("Bluetooth: this Frond has no mobile phone (bluetooth-phone is missing)");
     else if (state == "here") text = tr("Bluetooth: this Frond's radio, with %1").arg(peer);
     else if (state == "there") text = tr("Bluetooth: %1's radio").arg(peer);
     else if (state == "notfound") text = tr("Bluetooth: %1 not found").arg(peer);

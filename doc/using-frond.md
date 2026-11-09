@@ -320,13 +320,22 @@ Devices with an infrared phone can use Mobile phone in the Infrared list (Linux,
 
 The state line reads "Mobile phone: idle", "linked" once the Palm has found the phone, "dialling", then "online at 33600". It takes about 5 to 20 seconds to come up. Infrared beaming to another Frond is off while Mobile phone is on.
 
+### Mobile phone over Bluetooth
+
+Devices with Bluetooth can use Mobile phone in the Bluetooth list on Linux. It's This Frond's radio with a phone called "Frond Phone" on it, which offers Dial-up Networking and has the same modem and internet as the infrared phone. Machines on This Frond's radio still find each other.
+
+1. In Prefs, Connection, make a connection to a phone via Bluetooth, and find Frond Phone with Device. Pair with the passkey 1234.
+2. Dial any number, with PPP and Query DNS as above, and Connect.
+
+The status reads "Bluetooth: This Frond's radio, with the mobile phone". The Debian package includes the phone; a source checkout builds it with `make bluetooth-opp-peer` once `btvirt` is built. Android doesn't have it yet.
+
 Modem and phone by device:
 
-| | Modem on serial | Mobile phone on infrared |
-|---|---|---|
-| Palm IIIx | yes, Palm OS 3.1, 3.5, 4.1 | yes, Palm OS 3.5 and 4.1 |
-| T\|X, TG50, E2, Zire 72 | no | yes |
-| Tungsten E3 | no | yes |
+| | Modem on serial | Mobile phone on infrared | Mobile phone on Bluetooth |
+|---|---|---|---|
+| Palm IIIx | yes, Palm OS 3.1, 3.5, 4.1 | yes, Palm OS 3.5 and 4.1 | no |
+| T\|X, TG50, E2, Zire 72 | no | yes | yes, Linux |
+| Tungsten E3 | no | yes | yes, Linux |
 
 ### USB HotSync
 
@@ -360,7 +369,7 @@ On Linux, Controller socket takes the absolute path of the `bt-server-bredr` soc
 
 Identities: the T|X's address comes from its image, so two clones of one T|X image look like the same device. Use images with different addresses, or mix models. The E2, Zire 72 and TG50 are given a new address each time they connect, so trusted devices don't carry over. The Zire 72 makes one up the first time and keeps it in the session, so don't copy a session to run two.
 
-Tested: discovery, sending a Memo or file by Bluetooth (OPP), PIN and Trusted Devices on all four, and serial (SPP) on the T|X, E2 and TG50. TG50 payload transfers aren't checked on Android. Bluetooth networking and other profiles aren't supported.
+Tested: discovery, sending a Memo or file by Bluetooth (OPP), PIN and Trusted Devices on all four, and serial (SPP) on the T|X, E2 and TG50. TG50 payload transfers aren't checked on Android. Other Bluetooth networking (LAN access, PAN) and other profiles aren't supported.
 
 ## Availability and limits
 

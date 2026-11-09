@@ -35,6 +35,9 @@ code; Frond adds a small patch. Its notices are in bluez-COPYING,
 bluez-COPYING.LIB and bluez-ecc-BSD-2-Clause in this directory. The source is
 https://github.com/bluez/bluez at the revision named in
 tools/build-bluetooth-provider.py, with tools/bluez-bdaddr.patch.
+The Bluetooth mobile phone, /usr/lib/frond/bluetooth-phone, is Frond's
+tools/bluetooth-opp-peer.c built on BlueZ's emulator/bthost.c from the same
+revision with tools/bluez-bthost-config.patch, under the same BlueZ notices.
 Qt, SDL and other system libraries are supplied separately by Debian.
 
 Palm firmware and applications are not included in this package.
