@@ -67,6 +67,7 @@ int main(int argc,char** argv) {
    if(boundary==4){SavestateLoader<ChunkType> loader;assert(loader.Load(saved.GetBuffer(),saved.GetSize(),i));}
    if(boundary==5)owner.detach();
    if(boundary==6){EmBankRegs::onBeforeDispose.Dispatch();}
+   if(boundary<2) assert(i.HasHostTarget(0) && owner.status().rfind("attached",0)==0);
    if(boundary<5) assert(owner.printer.state()==RawPrintJob::State::collecting && owner.printer.size()==0 && owner.printer.idleMs()==-1);
    else {
      assert(owner.printer.state()==RawPrintJob::State::aborted);

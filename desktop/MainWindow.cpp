@@ -736,7 +736,9 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (command == "db-list") { databasesReply(ok, message); return; }
         if (command == "printer") {
             const bool chain = printerResult(ok, message);
-            if (chain && !stopping) notify(tr("Running. Sessions save automatically on close."));
+            if (stopping) { save(); return; }
+            if (chain) notify(tr("Running. Sessions save automatically on close."));
+            else if (!busy) notify(QString());
             return;
         }
         if (command == "window-id") {
@@ -2326,7 +2328,7 @@ bool MainWindow::printerResult(bool ok, const QString& message) {
         return false;
     }
     printerShow();
-    if (stage == PrinterStage::None && frondPrint::received(status)) printerCollect();
+    if (stage == PrinterStage::None && !stopping && frondPrint::received(status)) printerCollect();
     return stage == PrinterStage::Chain;
 }
 void MainWindow::printerSavePdf() {
