@@ -47,5 +47,12 @@ int main(){
  assert(!EmRegsISPDana::CompleteHostPtd(data,20,0,2,0,true));assert(data[1]==0xf8);
  assert(EmRegsISPDana::CompleteHostPtd(data,20,0,1,0,true));assert(data[1]==4);
  data[19]=1;assert(!EmRegsISPDana::ValidateHostList(data,20));
+ // Last ends the list even when the PIO transfer includes another word.
+ uint8 setup[18]={0,8,8,8,8,0,0,0,0x80,6,0,1,0,0,8,0,0,0};
+ assert(EmRegsISPDana::ValidateHostList(setup,sizeof setup));
+ setup[16]=0xff;setup[17]=0xff;
+ assert(EmRegsISPDana::ValidateHostList(setup,sizeof setup));
+ assert(!EmRegsISPDana::ValidateHostList(setup,15));
+ setup[3]=0;assert(!EmRegsISPDana::ValidateHostList(setup,sizeof setup));
  return 0;
 }
