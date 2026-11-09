@@ -506,6 +506,14 @@ test-ir-peer: prepare build/source/src/common/libcommon.a
 		build/source/src/common/libcommon.a -o build/test-ir-peer
 	./build/test-ir-peer
 
+.PHONY: test-ir-printer
+test: test-ir-printer
+# The IR printer's IrLPT and IrCOMM jobs from a scripted IrLAP primary (tests/ir-printer.cpp).
+test-ir-printer: prepare build/source/src/common/libcommon.a
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Wno-unused-parameter -Ibuild/source/src/common tests/ir-printer.cpp \
+		build/source/src/common/libcommon.a -o build/test-ir-printer
+	./build/test-ir-printer
+
 build/source/src/common/libcommon-net.a: build/source/.prepared
 	$(MAKE) -C build/source/src/common net
 
