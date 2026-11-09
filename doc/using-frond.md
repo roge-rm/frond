@@ -327,7 +327,7 @@ Devices with Bluetooth can use Mobile phone in the Bluetooth list on Linux. It's
 1. In Prefs, Connection, make a connection to a phone via Bluetooth, and find Frond Phone with Device. Pair with the passkey 1234.
 2. Dial any number, with PPP and Query DNS as above, and Connect.
 
-The status reads "Bluetooth: This Frond's radio, with the mobile phone". The Debian package includes the phone; a source checkout builds it with `make bluetooth-opp-peer` once `btvirt` is built. Android doesn't have it yet.
+The status reads "Bluetooth: This Frond's radio, Mobile phone: idle", then "dialling" and "online at 33600" during a call. The Debian package includes the phone; a source checkout builds it with `make bluetooth-opp-peer` once `btvirt` is built. Android doesn't have it yet.
 
 Modem and phone by device:
 

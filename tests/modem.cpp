@@ -487,9 +487,13 @@ static Bytes Options(const Bytes& packet) { return Bytes(packet.begin() + 4, pac
 struct FakeNet : frondNet::IpNetwork {
     std::vector<Bytes> input;
     std::deque<Bytes> output;
-    unsigned polls{0};
+    unsigned polls{0}, resets{0};
     void Input(const uint8_t* packet, size_t size, uint64_t) override { input.emplace_back(packet, packet + size); }
     void Poll(uint64_t) override { ++polls; }
+    void Reset() override {
+        ++resets;
+        output.clear();
+    }
     bool Receive(Bytes& packet) override {
         if (output.empty()) return false;
         packet = output.front();
@@ -644,6 +648,12 @@ static void TestPpp() {
     CHECK(server.GetPhase() == PppServer::Phase::Terminating && server.Carrier(wire.now));
     CHECK(client.Next(0xc021, f) && f.packet[0] == 6 && f.packet[1] == 9);
     CHECK(server.Carrier(wire.now + 400 * ms) && !server.Carrier(wire.now + 600 * ms));
+
+    // Hanging up resets the network, so packets for this call never reach the next one.
+    net.output.push_back({0x45});
+    const unsigned resets = net.resets;
+    server.HangUp();
+    CHECK(net.resets == resets + 1 && net.output.empty() && server.GetPhase() == PppServer::Phase::Idle);
 
     // A scriptless (Windows RAS) caller: the first flag skips the prompt.
     {
@@ -864,8 +874,6 @@ static void TestSlirp() {
         return data.size() >= reply.size();
     }));
     CHECK(data == reply);
-    close(peer);
-    close(listener);
 
     // The guest hangs up with LCP Terminate; the modem reports the line drop.
     rig.got.clear();
@@ -878,6 +886,53 @@ static void TestSlirp() {
     }
     CHECK(tail.find("\r\nNO CARRIER\r\n") != std::string::npos);
     CHECK(modem.GetState() == HayesModem::State::Command && server.GetPhase() == PppServer::Phase::Idle);
+    // The hang-up closed the call's host socket.
+    bool closed = false;
+    CHECK(until([&] {
+        rig.Run(ms);
+        const ssize_t r = recv(peer, buffer, sizeof(buffer), 0);
+        closed = r == 0 || (r < 0 && errno != EAGAIN && errno != EWOULDBLOCK);
+        return closed;
+    }));
+    close(peer);
+    close(listener);
+
+    // Packets slirp queued for the guest go with a reset, and slirp works again after it.
+    frondNet::SlirpIp fresh;
+    uint16_t echoPort = 0;
+    const int echo = Listener(SOCK_DGRAM, echoPort);
+    CHECK(echo >= 0);
+    uint64_t now = 1000 * ms;
+    auto poll = [&](const std::function<bool()>& done) {
+        const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (std::chrono::steady_clock::now() < end) {
+            if (done()) return true;
+            now += ms;
+            fresh.Poll(now);
+            std::this_thread::sleep_for(std::chrono::microseconds(200));
+        }
+        return false;
+    };
+    auto echoRound = [&](int replies) {
+        const Bytes ask = Udp(40002, echoPort, {'h', 'i'});
+        fresh.Input(ask.data(), ask.size(), now);
+        sockaddr_in sender{};
+        socklen_t senderLength = sizeof(sender);
+        Bytes heard(64);
+        if (!poll([&] {
+                return recvfrom(echo, heard.data(), heard.size(), 0, reinterpret_cast<sockaddr*>(&sender), &senderLength) >= 0;
+            }))
+            return false;
+        for (int i = 0; i < replies; ++i) sendto(echo, "ok", 2, 0, reinterpret_cast<sockaddr*>(&sender), senderLength);
+        return poll([&] { return fresh.Queued() == size_t(replies); });
+    };
+    CHECK(echoRound(3));
+    fresh.Reset();
+    Bytes left;
+    CHECK(fresh.Valid() && fresh.Queued() == 0 && !fresh.Receive(left));
+    CHECK(echoRound(1));
+    CHECK(fresh.Receive(left) && left.size() == 30 && Get16(left, 22) == 40002);
+    close(echo);
 }
 
 int main() {

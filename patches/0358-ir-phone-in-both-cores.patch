@@ -53,10 +53,10 @@ index f272a95..6af031b 100644
      static bool EnableRAM();
 diff --git a/src/cloudpilot/frond/IrPhoneTransport.h b/src/cloudpilot/frond/IrPhoneTransport.h
 new file mode 100644
-index 0000000..ac9f2ed
+index 0000000..bf054e7
 --- /dev/null
 +++ b/src/cloudpilot/frond/IrPhoneTransport.h
-@@ -0,0 +1,157 @@
+@@ -0,0 +1,162 @@
 +#ifndef FROND_68K_IR_PHONE_TRANSPORT_H
 +#define FROND_68K_IR_PHONE_TRANSPORT_H
 +
@@ -119,9 +119,13 @@ index 0000000..ac9f2ed
 +        credit.Restart();
 +        return true;
 +    }
++    // With the transceiver off the phone hears nothing more of this link: it drops the link and
++    // any unread answer, so a guest reset or a later link starts from discovery.
 +    bool Close() override {
 +        powered = false;
-+        return engine ? true : host.Close();
++        if (!engine) return host.Close();
++        engine->phone.Drop(Now());
++        return true;
 +    }
 +
 +    bool Read(long& count, void* data) override {
@@ -163,7 +167,7 @@ index 0000000..ac9f2ed
 +    }
 +
 +    // Called between slices with the guest's IR transceiver state, which a session load doesn't
-+    // report. With the transceiver off the phone hears nothing, and its link times out.
++    // report.
 +    void Service(bool lineDriverOn) {
 +        if (!engine) {
 +            powered = lineDriverOn;
@@ -190,6 +194,7 @@ index 0000000..ac9f2ed
 +    // A guest that sleeps while it waits for the answer wakes when the answer can be read, as the
 +    // UART's receive interrupt would, rather than at its next timer tick.
 +    void WakeForAnswer() {
++        if (!powered) return;
 +        const uint64_t ready = engine->phone.ReadyAt(), now = Now();
 +        if (ready == UINT64_MAX) return;
 +        const double wait = ready > now ? double(ready - now) * gSession->GetClocksPerSecond() / 1e9 : 0;
@@ -459,7 +464,7 @@ index b7b1c6d..f071108 100644
              (arg == "--serial" ? options.serial : options.irda) = v;
          } else if (arg == "--gdb") {
 diff --git a/src/common/ir/IrLap.cpp b/src/common/ir/IrLap.cpp
-index 13cf6c7..dd08302 100644
+index 1c72b54..5df0073 100644
 --- a/src/common/ir/IrLap.cpp
 +++ b/src/common/ir/IrLap.cpp
 @@ -200,7 +200,9 @@ void IrLap::Snrm(const Bytes& frame, uint64_t now) {
@@ -474,7 +479,7 @@ index 13cf6c7..dd08302 100644
      // The extra BOF count is given for 115200 and scales with the speed.
      next.extraBofs = unsigned(uint64_t(bofs) * next.baud / 115200);
 diff --git a/src/common/ir/IrLap.h b/src/common/ir/IrLap.h
-index 51f0ad1..9031bac 100644
+index 46dc941..fed42e1 100644
 --- a/src/common/ir/IrLap.h
 +++ b/src/common/ir/IrLap.h
 @@ -41,9 +41,6 @@ class IrLap {
@@ -636,10 +641,10 @@ index 7575842..56b02b8 100644
      program.add_argument("--usb")
          .help("connect the TX USB HotSync port to a host PTY (pty) or a TCP listener on 127.0.0.1 "
 diff --git a/src/uarm/uarm/HostInfrared.cpp b/src/uarm/uarm/HostInfrared.cpp
-index 77864c7..5cbfd3c 100644
+index 77864c7..6601da7 100644
 --- a/src/uarm/uarm/HostInfrared.cpp
 +++ b/src/uarm/uarm/HostInfrared.cpp
-@@ -4,8 +4,25 @@
+@@ -4,8 +4,27 @@
  #include "pxa_UART.h"
  #include <deque>
  #include <algorithm>
@@ -654,6 +659,8 @@ index 77864c7..5cbfd3c 100644
 +    };
      SocPXA* soc{};
 +    std::unique_ptr<Phone> phone;
++    // The IR transceiver was on at the last Service in phone mode.
++    bool phoneHeard{false};
 +    // Guest nanoseconds for the phone, carried on across a load that moves the clock back.
 +    uint64_t clock{},clockMark{};
 +    uint64_t Now() {
@@ -665,7 +672,7 @@ index 77864c7..5cbfd3c 100644
      HostByteLink link;
      HostSerial::Config config;
      uint64_t dropped{},discarded{};
-@@ -30,11 +47,14 @@ struct HostInfrared::Impl {
+@@ -30,11 +49,14 @@ struct HostInfrared::Impl {
      static uint_fast16_t Read(void* context) {
          auto& s=*static_cast<Impl*>(context);
          uint8_t value;
@@ -680,7 +687,7 @@ index 77864c7..5cbfd3c 100644
          const auto generation=s.link.PeerGeneration();
          if(!s.transmit.empty() && s.transmitPeer!=generation){s.dropped+=s.transmit.size();s.transmit.clear();}
          if(!s.link.Connected()){++s.dropped;return;}
-@@ -46,16 +66,20 @@ struct HostInfrared::Impl {
+@@ -46,16 +68,20 @@ struct HostInfrared::Impl {
          // the source guest has finished its transmit-to-receive turnaround.
      }
      static bool Pending(void* context) {
@@ -703,7 +710,7 @@ index 77864c7..5cbfd3c 100644
          // Closing the peer, rather than just clearing the userspace queues,
          // prevents old kernel-buffered bytes entering the new guest timeline.
          s.link.Close();s.transmit.clear();s.restart=true;
-@@ -68,6 +92,7 @@ bool HostInfrared::Start(SocPXA* soc,const HostSerial::Config& config,std::strin
+@@ -68,6 +94,7 @@ bool HostInfrared::Start(SocPXA* soc,const HostSerial::Config& config,std::strin
      // old peer and stay the guest's, as when a load replaces the peer. Taking the hooks again
      // would be refused until the guest had read them.
      if (impl->soc && impl->soc==soc && config.kind!=HostSerial::Kind::off) {
@@ -711,7 +718,7 @@ index 77864c7..5cbfd3c 100644
          impl->link.Close();impl->transmit.clear();impl->restart=false;impl->error.clear();
          error.clear();impl->dropped=impl->discarded=0;impl->config={};
          if (!impl->link.Open(config,error,true)) {Stop();return false;}
-@@ -88,15 +113,55 @@ bool HostInfrared::Start(SocPXA* soc,const HostSerial::Config& config,std::strin
+@@ -88,15 +115,60 @@ bool HostInfrared::Start(SocPXA* soc,const HostSerial::Config& config,std::strin
      impl->config=impl->link.GetConfig();
      return true;
  }
@@ -734,6 +741,7 @@ index 77864c7..5cbfd3c 100644
 +        impl->soc=soc;
 +    }
 +    impl->clockMark=soc->GetTime();
++    impl->phoneHeard=false;
 +    impl->phone=std::move(phone);
 +    return true;
 +}
@@ -761,6 +769,10 @@ index 77864c7..5cbfd3c 100644
 +    }
 +    if (impl->phone) {
 +        const uint64_t now=impl->Now();
++        // A transceiver turned off (IR closed, or a reset) ends the link and drops unread answers.
++        const bool heard=soc->IrPowerEnabled();
++        if (impl->phoneHeard && !heard) impl->phone->ir.Drop(now);
++        impl->phoneHeard=heard;
 +        impl->phone->ir.Service(now);
 +        // Wake the UART once an answer's turnaround time has passed.
 +        if (soc->IrPowerEnabled() && pxaUartIrReceiveEnabled(soc->GetIrUart()) && impl->phone->ir.Available(now))
@@ -768,7 +780,7 @@ index 77864c7..5cbfd3c 100644
          return;
      }
      if (impl->restart) {
-@@ -123,6 +188,7 @@ uint64_t HostInfrared::DroppedReceive() const {return impl->discarded+impl->link
+@@ -123,6 +195,7 @@ uint64_t HostInfrared::DroppedReceive() const {return impl->discarded+impl->link
  size_t HostInfrared::PendingReceive() const {return impl->link.PendingReceive();}
  HostSerial::Counters HostInfrared::GetCounters() const {return impl->link.GetCounters();}
  std::string HostInfrared::Describe() const {

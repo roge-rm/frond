@@ -1961,7 +1961,14 @@ void MainWindow::showBluetoothLink(const QJsonObject& s) {
     const auto peer = s.value("peer").toString(), state = s.value("state").toString();
     QString text;
     if (!s.value("listening").toBool()) text = tr("Bluetooth: couldn't make the controller socket");
-    else if (state == "radio" && bluetoothChoice() == "phone") text = tr("Bluetooth: This Frond's radio, with the mobile phone");
+    else if (state == "radio" && bluetoothChoice() == "phone") {
+        // The phone's call: idle, dialling or online SPEED, once the phone has said.
+        const auto call = s.value("call").toString().split(' ');
+        text = call[0] == "online" && call.size() > 1 ? tr("Bluetooth: This Frond's radio, Mobile phone: online at %1").arg(call[1])
+               : call[0] == "dialling" ? tr("Bluetooth: This Frond's radio, Mobile phone: dialling")
+               : call[0] == "idle" ? tr("Bluetooth: This Frond's radio, Mobile phone: idle")
+                                    : tr("Bluetooth: This Frond's radio, with the mobile phone");
+    }
     else if (state == "radio") text = tr("Bluetooth: This Frond's radio");
     else if (state == "noradio") text = tr("Bluetooth: this Frond has no radio (btvirt is missing)");
     else if (state == "nophone") text = tr("Bluetooth: this Frond has no mobile phone (bluetooth-phone is missing)");

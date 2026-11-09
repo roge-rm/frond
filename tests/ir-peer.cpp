@@ -600,6 +600,124 @@ static void TestLinkLoss() {
     }
 }
 
+// ---- Leftovers across links, and guest-driven buffers ----
+
+// Whether any of the frames is an I frame on the IAS connection (an IAS answer).
+static bool IasAnswered(Primary& p, const std::vector<Bytes>& frames) {
+    for (const Bytes& f : frames)
+        if (f.size() >= 5 && !(f[1] & 1) && f[2] == p.iasLsap && f[3] == 0x00) return true;
+    return false;
+}
+
+static void TestLeftovers() {
+    QuietNetwork network;
+    PppServer ppp{network};
+    IrPhone phone{ppp};
+    Primary p{phone, ppp};
+
+    // An answer the guest never reads (it turned IR off) goes with Drop, so the core stops
+    // waking for it.
+    Connect(p);
+    p.Send(p.Command(uint8_t(p.vr << 5 | 0x11)));
+    p.Idle(5 * ms);
+    CHECK(phone.ReadyAt() != UINT64_MAX && phone.Available(p.now) > 0);
+    phone.Drop(p.now);
+    CHECK(phone.ReadyAt() == UINT64_MAX && phone.Available(p.now) == 0);
+
+    // The same when the watchdog ends the link; the next link gets no stale frames, and its
+    // UA and first answer wait the guest's turnaround.
+    Connect(p, 0x01);
+    p.Send(p.Command(uint8_t(p.vr << 5 | 0x11)));
+    p.Idle(3100 * ms);
+    CHECK(!phone.Lap().Connected() && phone.Lap().GetStats().timeouts == 1);
+    CHECK(phone.ReadyAt() == UINT64_MAX);
+    bool onlyXid = true;
+    for (uint8_t slot = 0; slot < 6; ++slot) {
+        p.Send(Discovery(p.address, 0x01, slot), 10);
+        for (const Bytes& f : p.Collect(60 * ms, false)) onlyXid = onlyXid && f.size() > 2 && f[1] == 0xbf;
+    }
+    CHECK(onlyXid);
+    p.Send(Discovery(p.address, 0x01, 0xff), 10);
+    p.Idle(5 * ms);
+    p.Send(Snrm(p, phoneAddress), 10);
+    CHECK(phone.ReadyAt() == p.now + 1 * ms);
+    auto frames = p.Collect();
+    CHECK(frames.size() == 1 && frames[0].size() > 2 && frames[0][1] == 0x73);
+    p.vs = p.vr = 0;
+    p.Send(p.Command(0x11));
+    CHECK(phone.ReadyAt() == p.now + 1 * ms);
+    p.Collect();
+
+    // DISC while an answer is unread: the guest gets only the UA.
+    p.Send(p.Command(uint8_t(p.vr << 5 | 0x11)));
+    p.Idle(5 * ms);
+    p.Send(p.Command(0x53));
+    frames = p.Collect();
+    CHECK(frames.size() == 1 && frames[0] == Bytes({p.caddr, 0x73}));
+
+    // A guest reset mid-link sends no DISC: its discovery is ignored while the link lasts, and
+    // answered once the transport drops the link as the transceiver goes off.
+    Connect(p);
+    CHECK(phone.Lap().Connected());
+    const unsigned replies = phone.Lap().GetStats().xidReplies;
+    for (uint8_t slot = 0; slot < 6; ++slot) {
+        p.Send(Discovery(p.address, 0x01, slot), 10);
+        p.Collect(60 * ms, false);
+    }
+    CHECK(phone.Lap().GetStats().xidReplies == replies && phone.Lap().Connected());
+    phone.Drop(p.now);
+    unsigned answers = 0;
+    for (uint8_t slot = 0; slot < 6; ++slot) {
+        p.Send(Discovery(p.address, 0x01, slot), 10);
+        for (const Bytes& f : p.Collect(60 * ms, false)) answers += f.size() > 2 && f[1] == 0xbf;
+    }
+    CHECK(answers == 1 && phone.Lap().GetStats().xidReplies == replies + 1);
+
+    // IAS: a request that never ends is dropped whole rather than kept growing, and the next
+    // one is answered; only the last 16 queries are kept.
+    Connect(p);
+    CHECK(LmConnect(p, p.iasLsap, 0x00, {}).empty());
+    bool answered = false;
+    for (int i = 0; i < 8; ++i)
+        answered = IasAnswered(p, p.Exchange(Cat({0x00, p.iasLsap, 0x04}, Bytes(100, 'x')))) || answered;
+    answered = IasAnswered(p, p.Exchange({0x00, p.iasLsap, 0x84, 0x00, 0x00})) || answered;
+    CHECK(!answered);
+    for (int i = 0; i < 20; ++i)
+        CHECK(Ias(p, "IrDA:IrCOMM", "IrDA:TinyTP:LsapSel") ==
+              Bytes({0x00, 0x00, 0x01, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, IrComm::cookedLsap}));
+    CHECK(phone.Ias().Queries().size() == IasServer::keptQueries);
+    CHECK(Ias(p, "Device", "DeviceName").size() > 1 && phone.Ias().Queries().back().className == "Device");
+    p.Exchange({0x80, p.iasLsap, 0x02, 0x01});
+
+    // IrCOMM with an 8-byte max SDU and a flood of line polls: one DCE line setting waits, and
+    // every SDU fits the guest's limit.
+    CHECK(LmConnect(p, p.commLsap, IrComm::cookedLsap, {0x81, 0x03, 0x01, 0x01, 0x08, 0x03, 0x00, 0x01, IrComm::nineWire}) ==
+          Bytes({0x07}));
+    p.phoneCredit = 1;
+    Bytes polls;
+    for (int i = 0; i < 120; ++i) polls = Cat(polls, {0x22, 0x00});
+    p.Exchange(p.Comm({}, 0, polls));
+    p.Exchange(p.Comm(Text("AT\r"), 0, polls));
+    bool fits = true, sawLines = false;
+    p.fromPhone.clear();
+    for (unsigned i = 0; i < 200 && p.fromPhone.find("OK") == std::string::npos; ++i) {
+        if (p.phoneCredit == 0) {
+            p.phoneCredit = 1;
+            frames = p.Exchange({IrComm::cookedLsap, p.commLsap, 0x01});
+        } else {
+            frames = p.Poll();
+        }
+        for (const Bytes& f : frames)
+            if (f.size() >= 6 && !(f[1] & 1) && f[2] == p.commLsap && f[3] == IrComm::cookedLsap) {
+                fits = fits && f.size() - 5 <= 8 && f[5] <= 3;
+                sawLines = sawLines || f[5] == 3;
+            }
+        p.Idle(20 * ms);
+    }
+    CHECK(fits && sawLines);
+    CHECK(p.fromPhone.find("OK") != std::string::npos);
+}
+
 int main() {
     TestSir();
     const unsigned sir = checks;
@@ -607,10 +725,13 @@ int main() {
     const unsigned call = checks - sir;
     TestLinkLoss();
     const unsigned loss = checks - sir - call;
+    TestLeftovers();
+    const unsigned leftovers = checks - sir - call - loss;
     if (failures) {
         fprintf(stderr, "FAIL: %u of %u IR peer checks\n", failures, checks);
         return 1;
     }
-    printf("PASS: %u IR peer checks (%u SIR, %u call, %u link loss and raw)\n", checks, sir, call, loss);
+    printf("PASS: %u IR peer checks (%u SIR, %u call, %u link loss and raw, %u leftovers and limits)\n", checks, sir,
+           call, loss, leftovers);
     return 0;
 }

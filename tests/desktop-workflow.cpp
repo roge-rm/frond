@@ -27,6 +27,7 @@
 #include <QMessageBox>
 #include <QMenuBar>
 #include <QTimer>
+#include <QDeadlineTimer>
 #include <QAction>
 #include <QDialog>
 #include <QFileDialog>
@@ -206,7 +207,8 @@ while True:
     return path;
 }
 // Stands in for the Bluetooth phone (FROND_BT_PHONE): writes its arguments to <radio folder>/phone
-// and a line to <radio folder>/phone-stopped when it's stopped.
+// and a line to <radio folder>/phone-stopped when it's stopped. Once <radio folder>/phone-dial
+// exists it reports a call: dialling, then online a second later.
 static QString fakePhone() {
     const auto path = QDir::currentPath() + "/build/fake-bt-phone.py";
     QFile f(path);
@@ -219,6 +221,10 @@ def stop(*_):
     sys.exit(0)
 signal.signal(signal.SIGTERM,stop)
 with open(os.path.join(folder,'phone'),'w') as o: o.write('\n'.join(sys.argv[1:])+'\n')
+while not os.path.exists(os.path.join(folder,'phone-dial')): time.sleep(0.05)
+print('DUN_STATE dialling',flush=True)
+time.sleep(1)
+print('DUN_STATE online 33600',flush=True)
 while True: time.sleep(1)
 )PY");
         f.close();
@@ -244,6 +250,16 @@ struct FakeBt {
         closed = false; got.clear();
         s.abort(); s.connectToServer(path);
         return s.waitForConnected(2000);
+    }
+    // Connects once the hub listens. Not inside QTRY_VERIFY, which evaluates its expression
+    // more than once after it holds, and each connect() makes a new controller.
+    bool connectWithin(int ms) {
+        QDeadlineTimer deadline(ms);
+        while (!connect()) {
+            if (deadline.hasExpired()) return false;
+            QTest::qWait(50);
+        }
+        return true;
     }
     void send(const QByteArray& bytes) { s.write(bytes); s.flush(); }
 };
@@ -4196,7 +4212,7 @@ for line in s.makefile('rb'):
         QTRY_VERIFY_WITH_TIMEOUT(coreB.closed, 5000);
         QTRY_VERIFY_WITH_TIMEOUT(b1.last("hello").value("pid").toDouble() != 0 && b1.client.isConnected(), 10000);
         QTRY_COMPARE_WITH_TIMEOUT(b1.bt(), QString("there"), 20000);
-        QTRY_VERIFY_WITH_TIMEOUT(coreB.connect(), 5000);
+        QVERIFY(coreB.connectWithin(5000));
         coreA.got.clear();
         QTRY_COMPARE_WITH_TIMEOUT(radioOpened(ha.run), 3, 10000);
         coreB.send("after restart"); QTRY_COMPARE_WITH_TIMEOUT(coreA.got, QByteArray("after restart"), 5000);
@@ -4336,7 +4352,7 @@ for line in s.makefile('rb'):
 )PY");
         core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner));
         const auto radioFolder = qEnvironmentVariable("XDG_RUNTIME_DIR") + "/frond/radio";
-        QFile::remove(radioFolder + "/phone"); QFile::remove(radioFolder + "/phone-stopped");
+        QFile::remove(radioFolder + "/phone"); QFile::remove(radioFolder + "/phone-stopped"); QFile::remove(radioFolder + "/phone-dial");
         const auto read = [](const QString& path) { QFile f(path); return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray(); };
         const auto hubPath = frondLink::coreSocketPath("bt", QString::number(QCoreApplication::applicationPid()));
         {
@@ -4350,10 +4366,13 @@ for line in s.makefile('rb'):
             QCOMPARE(mode->itemText(mode->findData("phone")), QString("Mobile phone"));
             pick("phone");
             QTRY_VERIFY_WITH_TIMEOUT(read(source.fileName() + ".modes").contains(hubPath.toUtf8() + "\n"), 15000);
-            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Bluetooth: This Frond's radio, with the mobile phone"), 5000);
             QTRY_COMPARE_WITH_TIMEOUT(machineSetting("bluetooth"), QString("phone"), 5000);
-            // The phone is started on the radio's socket in DUN mode.
+            // The phone is started on the radio's socket in DUN mode, and the status follows its call.
             QTRY_COMPARE_WITH_TIMEOUT(read(radioFolder + "/phone"), QByteArray(radioFolder.toUtf8() + "/bt-server-bredr\n--dun\n"), 10000);
+            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Bluetooth: This Frond's radio, Mobile phone: idle"), 5000);
+            { QFile dial(radioFolder + "/phone-dial"); QVERIFY(dial.open(QIODevice::WriteOnly)); }
+            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Bluetooth: This Frond's radio, Mobile phone: dialling"), 5000);
+            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Bluetooth: This Frond's radio, Mobile phone: online at 33600"), 5000);
             // This Frond without the phone stops it, and the radio stays.
             pick("radio");
             QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Bluetooth: This Frond's radio"), 5000);

@@ -677,10 +677,10 @@ index 0000000..179c52c
 +#endif
 diff --git a/src/common/modem/PppServer.cpp b/src/common/modem/PppServer.cpp
 new file mode 100644
-index 0000000..3283a7c
+index 0000000..595cf82
 --- /dev/null
 +++ b/src/common/modem/PppServer.cpp
-@@ -0,0 +1,503 @@
+@@ -0,0 +1,504 @@
 +#include "PppServer.h"
 +
 +#include <algorithm>
@@ -793,6 +793,7 @@ index 0000000..3283a7c
 +
 +void PppServer::HangUp() {
 +    Reset();
++    network.Reset();
 +    phase = Phase::Idle;
 +}
 +
@@ -1297,10 +1298,10 @@ index 0000000..a2e87ef
 +#endif
 diff --git a/src/common/net/IpNetwork.h b/src/common/net/IpNetwork.h
 new file mode 100644
-index 0000000..f935a12
+index 0000000..2322be0
 --- /dev/null
 +++ b/src/common/net/IpNetwork.h
-@@ -0,0 +1,31 @@
+@@ -0,0 +1,34 @@
 +#ifndef FROND_IP_NETWORK_H
 +#define FROND_IP_NETWORK_H
 +
@@ -1327,6 +1328,9 @@ index 0000000..f935a12
 +    virtual void Poll(uint64_t now) = 0;
 +    // The next IPv4 packet for the guest, if there is one.
 +    virtual bool Receive(std::vector<uint8_t>& packet) = 0;
++    // The call is over: drops queued packets and the guest's connections, so a later call
++    // starts clean.
++    virtual void Reset() {}
 +};
 +
 +}  // namespace frondNet
@@ -1334,10 +1338,10 @@ index 0000000..f935a12
 +#endif
 diff --git a/src/common/net/SlirpIp.cpp b/src/common/net/SlirpIp.cpp
 new file mode 100644
-index 0000000..5b996b9
+index 0000000..e755924
 --- /dev/null
 +++ b/src/common/net/SlirpIp.cpp
-@@ -0,0 +1,209 @@
+@@ -0,0 +1,218 @@
 +#include "SlirpIp.h"
 +
 +#include <arpa/inet.h>
@@ -1539,6 +1543,15 @@ index 0000000..5b996b9
 +    slirp_pollfds_poll(impl->slirp, status < 0, Impl::Events, impl.get());
 +}
 +
++void SlirpIp::Reset() {
++    const uint64_t now = impl->now;
++    impl.reset();
++    impl = std::make_unique<Impl>();
++    impl->now = now;
++}
++
++size_t SlirpIp::Queued() const { return impl->incoming.size(); }
++
 +bool SlirpIp::Receive(std::vector<uint8_t>& packet) {
 +    if (impl->incoming.empty()) return false;
 +    packet = std::move(impl->incoming.front());
@@ -1549,10 +1562,10 @@ index 0000000..5b996b9
 +}  // namespace frondNet
 diff --git a/src/common/net/SlirpIp.h b/src/common/net/SlirpIp.h
 new file mode 100644
-index 0000000..e15cc7f
+index 0000000..c2f5591
 --- /dev/null
 +++ b/src/common/net/SlirpIp.h
-@@ -0,0 +1,32 @@
+@@ -0,0 +1,36 @@
 +#ifndef FROND_SLIRP_IP_H
 +#define FROND_SLIRP_IP_H
 +
@@ -1576,6 +1589,10 @@ index 0000000..e15cc7f
 +    void Input(const uint8_t* packet, size_t size, uint64_t now) override;
 +    void Poll(uint64_t now) override;
 +    bool Receive(std::vector<uint8_t>& packet) override;
++    // A fresh slirp: the old one's sockets close and its queue goes.
++    void Reset() override;
++    // Packets waiting for the guest.
++    size_t Queued() const;
 +
 +   private:
 +    struct Impl;

@@ -1144,6 +1144,7 @@ QJsonObject Hub::status(const Attach* a) const {
         if (a->link == QLatin1String("radio")) {
             o["peer"] = QCoreApplication::translate("frondLink", "This Frond");
             o["state"] = radioProgram().isEmpty() ? "noradio" : a->phone && phoneProgram().isEmpty() ? "nophone" : "radio";
+            if (a->phone && !phoneCall.isEmpty()) o["call"] = phoneCall;
             return o;
         }
     }
@@ -1630,18 +1631,37 @@ void Hub::phoneTick() {
         }
         phone->deleteLater();
         phone = nullptr;
+        phoneCall.clear();
+        phoneOutput.clear();
         return;
     }
     if (running || now() - phoneStarted < kRadioStartMs) return;
     const auto program = phoneProgram();
     if (program.isEmpty()) return;
-    if (phone) phone->deleteLater();
+    if (phone) { phone->disconnect(this); phone->deleteLater(); }
+    phoneCall.clear();
+    phoneOutput.clear();
     phone = new QProcess(this);
     phone->setProgram(program);
     // The phone waits for the radio's socket itself.
     phone->setArguments({radioSocket(), "--dun"});
-    phone->setStandardOutputFile(QProcess::nullDevice());
     phone->setStandardErrorFile(QProcess::nullDevice());
+    // It reports its call as "DUN_STATE idle|dialling|online SPEED|off" lines; off is a closed
+    // channel, which is idle to the user.
+    connect(phone, &QProcess::readyReadStandardOutput, this, [this, p = phone] {
+        if (p != phone) return;
+        phoneOutput += p->readAllStandardOutput();
+        for (int end; (end = phoneOutput.indexOf('\n')) >= 0;) {
+            const auto line = QString::fromUtf8(phoneOutput.left(end)).trimmed();
+            phoneOutput.remove(0, end + 1);
+            if (line.startsWith("DUN_STATE ")) {
+                phoneCall = line.mid(10);
+                if (phoneCall == "off") phoneCall = "idle";
+            }
+        }
+        if (phoneOutput.size() > 4096) phoneOutput.clear();
+    });
+    connect(phone, &QProcess::started, this, [this, p = phone] { if (p == phone && phoneCall.isEmpty()) phoneCall = "idle"; });
 #ifdef Q_OS_LINUX
     phone->setChildProcessModifier([] { ::prctl(PR_SET_PDEATHSIG, SIGTERM); });
 #endif

@@ -20,10 +20,10 @@ index 2c2fef0..b6f1135 100644
  SOURCE_CXX_NATIVE = 				\
 diff --git a/src/common/ir/Ias.cpp b/src/common/ir/Ias.cpp
 new file mode 100644
-index 0000000..92b2557
+index 0000000..0a955f6
 --- /dev/null
 +++ b/src/common/ir/Ias.cpp
-@@ -0,0 +1,102 @@
+@@ -0,0 +1,116 @@
 +#include "Ias.h"
 +
 +#include <algorithm>
@@ -66,10 +66,14 @@ index 0000000..92b2557
 +
 +bool IasServer::Connect(const Bytes& data, Bytes& reply, uint64_t now) {
 +    pending.clear();
++    overflow = false;
 +    return true;
 +}
 +
-+void IasServer::Disconnect(uint64_t now) { pending.clear(); }
++void IasServer::Disconnect(uint64_t now) {
++    pending.clear();
++    overflow = false;
++}
 +
 +void IasServer::Data(const Bytes& data, uint64_t now) {
 +    if (data.empty()) return;
@@ -77,8 +81,17 @@ index 0000000..92b2557
 +    // An acknowledgement of one of our frames; ours always fit in one.
 +    if ((control & ack) && data.size() == 1) return;
 +    // A request in several frames comes with the opcode in each and the last one marked.
-+    pending.insert(pending.end(), data.begin() + 1, data.end());
++    if (!overflow && pending.size() + data.size() - 1 <= maxRequest) {
++        pending.insert(pending.end(), data.begin() + 1, data.end());
++    } else {
++        overflow = true;
++        pending.clear();
++    }
 +    if (!(control & last)) return;
++    if (overflow) {
++        overflow = false;
++        return;
++    }
 +    Bytes request;
 +    request.push_back(control & opcodeMask);
 +    request.insert(request.end(), pending.begin(), pending.end());
@@ -122,16 +135,17 @@ index 0000000..92b2557
 +        }
 +    }
 +    queries.push_back({className, attribute, result});
++    if (queries.size() > keptQueries) queries.pop_front();
 +    lmp.Send(lsap, reply.data(), reply.size());
 +}
 +
 +}  // namespace frondIr
 diff --git a/src/common/ir/Ias.h b/src/common/ir/Ias.h
 new file mode 100644
-index 0000000..5bf25c4
+index 0000000..0e79c04
 --- /dev/null
 +++ b/src/common/ir/Ias.h
-@@ -0,0 +1,57 @@
+@@ -0,0 +1,63 @@
 +#ifndef FROND_IR_IAS_H
 +#define FROND_IR_IAS_H
 +
@@ -139,6 +153,7 @@ index 0000000..5bf25c4
 +// GetValueByClass for the classes and attributes added to it.
 +
 +#include <cstdint>
++#include <deque>
 +#include <string>
 +#include <vector>
 +
@@ -158,12 +173,16 @@ index 0000000..5bf25c4
 +    void AddOctets(const std::string& className, const std::string& attribute, const Bytes& value);
 +    void AddString(const std::string& className, const std::string& attribute, const std::string& value);
 +
-+    // Queries answered, for tests.
++    // The last queries answered, for tests; older ones are let go.
 +    struct Query {
 +        std::string className, attribute;
 +        uint8_t result;
 +    };
-+    const std::vector<Query>& Queries() const { return queries; }
++    static constexpr size_t keptQueries = 16;
++    const std::deque<Query>& Queries() const { return queries; }
++    // The longest request taken: the opcode's arguments, a class and an attribute name of up to
++    // 255 bytes each with their lengths. A longer one is dropped whole.
++    static constexpr size_t maxRequest = 2 + 2 * 255;
 +
 +    bool Connect(const Bytes& data, Bytes& reply, uint64_t now) override;
 +    void Data(const Bytes& data, uint64_t now) override;
@@ -183,7 +202,8 @@ index 0000000..5bf25c4
 +    std::vector<Attribute> attributes;
 +    std::vector<std::string> classes;
 +    Bytes pending;
-+    std::vector<Query> queries;
++    bool overflow{false};
++    std::deque<Query> queries;
 +};
 +
 +}  // namespace frondIr
@@ -191,10 +211,10 @@ index 0000000..5bf25c4
 +#endif
 diff --git a/src/common/ir/IrComm.cpp b/src/common/ir/IrComm.cpp
 new file mode 100644
-index 0000000..836e66c
+index 0000000..6c2849a
 --- /dev/null
 +++ b/src/common/ir/IrComm.cpp
-@@ -0,0 +1,144 @@
+@@ -0,0 +1,156 @@
 +#include "IrComm.h"
 +
 +#include <algorithm>
@@ -235,7 +255,7 @@ index 0000000..836e66c
 +    port.GuestLines(dtr, rts, now);
 +    // The first SDU tells the guest the DCE lines; deltas follow as they change.
 +    lines = port.Lines(now);
-+    if (next == Mode::Cooked) pending = {piDceLines, 1, lines};
++    if (next == Mode::Cooked) QueueLines(lines);
 +}
 +
 +bool IrComm::Connect(const Bytes& data, Bytes& reply, uint64_t now) {
@@ -270,7 +290,7 @@ index 0000000..836e66c
 +            port.GuestLines(dtr, rts, now);
 +        } else if (pi == piPoll) {
 +            lines = port.Lines(now);
-+            pending.insert(pending.end(), {piDceLines, 1, lines});
++            QueueLines(lines);
 +        }
 +        i += 2 + pl;
 +    }
@@ -290,21 +310,33 @@ index 0000000..836e66c
 +    if (current != lines && serviceType != threeWire) {
 +        // Deltas for CTS, DSR, RI and CD sit four bits below their states.
 +        const uint8_t deltas = uint8_t((current ^ lines) >> 4);
-+        pending.insert(pending.end(), {piDceLines, 1, uint8_t(current | deltas)});
++        QueueLines(uint8_t(current | deltas));
 +    }
 +    lines = current;
 +    while (tinyTp.Queued() < ahead && tinyTp.Queued() < tinyTp.SendCredit()) {
-+        const size_t room = tinyTp.MaxSdu() - 1 - std::min(pending.size(), tinyTp.MaxSdu() - 1);
-+        Bytes sdu(1 + pending.size() + room);
-+        sdu[0] = uint8_t(pending.size());
-+        std::copy(pending.begin(), pending.end(), sdu.begin() + 1);
-+        const size_t n = port.ToGuest(sdu.data() + 1 + pending.size(), room, now);
-+        if (!n && pending.empty()) break;
-+        sdu.resize(1 + pending.size() + n);
-+        pending.clear();
++        // An SDU never exceeds the guest's limit: the parameters go whole, or wait if the limit
++        // can't take them with the length byte.
++        const size_t limit = tinyTp.MaxSdu();
++        if (limit == 0) break;
++        const size_t clen = pending.size() < limit ? pending.size() : 0;
++        const size_t room = limit - 1 - clen;
++        Bytes sdu(1 + clen + room);
++        sdu[0] = uint8_t(clen);
++        std::copy(pending.begin(), pending.begin() + long(clen), sdu.begin() + 1);
++        const size_t n = port.ToGuest(sdu.data() + 1 + clen, room, now);
++        if (!n && !clen) break;
++        sdu.resize(1 + clen + n);
++        if (clen) pending.clear();
 +        toGuest += n;
 +        tinyTp.Send(std::move(sdu));
 +    }
++}
++
++void IrComm::QueueLines(uint8_t value) {
++    // States sit in the high four bits and deltas in the low four: the newest states, and every
++    // delta since the guest last heard.
++    if (pending.size() == 3) pending[2] = uint8_t((value & 0xf0) | ((pending[2] | value) & 0x0f));
++    else pending = {piDceLines, 1, value};
 +}
 +
 +bool IrComm::Raw::Connect(const Bytes& data, Bytes& reply, uint64_t now) {
@@ -341,10 +373,10 @@ index 0000000..836e66c
 +}  // namespace frondIr
 diff --git a/src/common/ir/IrComm.h b/src/common/ir/IrComm.h
 new file mode 100644
-index 0000000..d49555a
+index 0000000..df0b4da
 --- /dev/null
 +++ b/src/common/ir/IrComm.h
-@@ -0,0 +1,86 @@
+@@ -0,0 +1,89 @@
 +#ifndef FROND_IR_IRCOMM_H
 +#define FROND_IR_IRCOMM_H
 +
@@ -415,6 +447,8 @@ index 0000000..d49555a
 +
 +    void Open(Mode next, uint64_t now);
 +    void Parameters(const uint8_t* data, size_t size, uint64_t now);
++    // Queues a DCE line settings parameter, merged into one already waiting.
++    void QueueLines(uint8_t value);
 +
 +    IrLmp& lmp;
 +    IrCommPort& port;
@@ -424,6 +458,7 @@ index 0000000..d49555a
 +    uint8_t serviceType{0};
 +    bool dtr{false}, rts{false};
 +    uint8_t lines{0};
++    // Control parameters for the next SDU: at most one DCE line settings (3 bytes).
 +    Bytes pending;
 +    uint64_t fromGuest{0}, toGuest{0};
 +};
@@ -433,10 +468,10 @@ index 0000000..d49555a
 +#endif
 diff --git a/src/common/ir/IrLap.cpp b/src/common/ir/IrLap.cpp
 new file mode 100644
-index 0000000..13cf6c7
+index 0000000..1c72b54
 --- /dev/null
 +++ b/src/common/ir/IrLap.cpp
-@@ -0,0 +1,350 @@
+@@ -0,0 +1,362 @@
 +#include "IrLap.h"
 +
 +#include <algorithm>
@@ -696,12 +731,17 @@ index 0000000..13cf6c7
 +        if (kind != rr && kind != rnr && kind != rej && kind != srej) return;
 +    } else {
 +        switch (control) {
-+            case disc:
++            case disc: {
++                // Anything unread for the old link goes; the UA is the last frame it gets.
++                const uint64_t turn = link.minTurnNs;
++                out.clear();
++                outPos = 0;
 +                Emit({caddr, ua}, now);
-+                holdUntil = std::max(holdUntil, now + link.minTurnNs);
++                holdUntil = std::max(holdUntil, now + turn);
 +                ++stats.disconnects;
-+                Down(now);
++                Down(now, true);
 +                return;
++            }
 +            case test:
 +                return Test(frame, caddr, now);
 +            default:
@@ -770,7 +810,14 @@ index 0000000..13cf6c7
 +
 +unsigned IrLap::ExtraBofs() const { return state == State::Nrm ? link.extraBofs : ndmBofs; }
 +
-+void IrLap::Down(uint64_t now) {
++void IrLap::Down(uint64_t now, bool keepOutput) {
++    // Frames still unread were for the old link: a new one must not get them, and the core
++    // shouldn't keep waking for them.
++    if (!keepOutput) {
++        out.clear();
++        outPos = 0;
++        holdUntil = 0;
++    }
 +    state = State::Ndm;
 +    link = Link{};
 +    ResetSequence();
@@ -789,10 +836,10 @@ index 0000000..13cf6c7
 +}  // namespace frondIr
 diff --git a/src/common/ir/IrLap.h b/src/common/ir/IrLap.h
 new file mode 100644
-index 0000000..51f0ad1
+index 0000000..46dc941
 --- /dev/null
 +++ b/src/common/ir/IrLap.h
-@@ -0,0 +1,143 @@
+@@ -0,0 +1,144 @@
 +#ifndef FROND_IR_IRLAP_H
 +#define FROND_IR_IRLAP_H
 +
@@ -903,7 +950,8 @@ index 0000000..51f0ad1
 +    void Acknowledge(uint8_t nr);
 +    void Respond(uint64_t now);
 +    void Emit(const Bytes& frame, uint64_t now);
-+    void Down(uint64_t now);
++    // Back to NDM; unread output goes too unless keepOutput (the UA to a DISC).
++    void Down(uint64_t now, bool keepOutput = false);
 +    void ResetSequence();
 +    unsigned ExtraBofs() const;
 +

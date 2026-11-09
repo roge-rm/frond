@@ -198,6 +198,10 @@ class Hub : public QObject {
     bool radioFailed{false};
     QProcess* phone{nullptr};
     qint64 phoneStarted{-100000};
+    // The phone's call as it last reported it (DUN_STATE on its output): idle, dialling or
+    // online SPEED; empty while it isn't running.
+    QString phoneCall;
+    QByteArray phoneOutput;
     QMap<QString, PeerRun> runs;
     QMap<QString, Nearby> nearby;
     QHash<QString, QList<qint64>> recent;  // incoming connection times per address
