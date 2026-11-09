@@ -171,8 +171,8 @@ android {
         minSdk = 26
         targetSdk = 37
         testInstrumentationRunner = "com.rm.frond.MachineSettingsInstrumentation"
-        versionCode = 11
-        versionName = "0.13.0"
+        versionCode = 12
+        versionName = "0.14.0"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
         externalNativeBuild {
             cmake {
