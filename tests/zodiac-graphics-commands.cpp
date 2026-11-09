@@ -146,6 +146,64 @@ int main() {
         assert(rejected.prepare(candidate,eim,memory) != A::ok);
         assert(state.engineState().emptyRing());
     }
+    // Captured native rectangle submission follows the completed 47-word boot batch.
+    const std::vector<uint32_t> rectangleBatch{0x4023841f,0xffff,0x014001e0,
+        0x40201401,0x100000,0x1e0,0x4023646b,0x100000,0x1e0,0xc0011a00,0,0x01e00140};
+    assert(batch.size() == 47 && submitted.engineState().consumer() == 47);
+    auto submitRectangle = [&](std::vector<uint32_t> packet, bool valid) {
+        auto candidate = submitted;
+        auto work = commands;
+        Imx1GraphicsMemory storage;
+        for (unsigned i = 0; i < packet.size(); ++i) {
+            value = packet[i];
+            assert(storage.accessGpu(candidate,eim,0x150000+(47+i)*4,4,true,value) == A::ok);
+        }
+        for (uint32_t pc : {0x200b01fcu,0x200b0204u}) {
+            value = 59;
+            assert(candidate.access(eim,pc,0x16010220,4,true,value) == A::externalInput);
+            assert(candidate.engineState().emptyRing() && candidate.engineState().producer() == 47);
+        }
+        value = 59;
+        assert(candidate.access(eim,0x200b0200,0x16010220,2,true,value) == A::width);
+        value = candidate.engineState().ringBytes()/4;
+        assert(candidate.access(eim,0x200b0200,0x16010220,4,true,value) == A::sideEffect);
+        value = 59;
+        assert(candidate.access(eim,0x200b0200,0x16010220,4,true,value) == A::ok);
+        assert(candidate.engineState().consumer() == 47 && candidate.engineState().producer() == 59);
+        assert(candidate.access(eim,0x200b0200,0x16010220,4,true,value) == A::sequence);
+        assert((work.prepare(candidate,eim,storage) == A::ok) == valid);
+        assert(submitted.engineState().emptyRing() && submitted.engineState().producer() == 47);
+        for (uint32_t address : {0x100000u,0x1003beu,0x1003c0u,0x14affeu,0x14b000u})
+            assert(storage.accessGpu(candidate,eim,address,2,false,value) == A::ok && value == 0);
+        if (!valid) return;
+        assert(work.duration() == 153613);
+        candidate.startEngine(work.duration());
+        assert(candidate.advanceCpuCycles(153612));
+        assert(!candidate.engineState().completed() && candidate.engineState().consumer() == 47);
+        assert(work.complete(candidate,eim,storage) == A::sequence);
+        assert(storage.accessGpu(candidate,eim,0x100000,2,false,value) == A::ok && value == 0);
+        assert(candidate.advanceCpuCycles(1) && candidate.engineState().completed());
+        assert(work.complete(candidate,eim,storage) == A::ok);
+        assert(candidate.engineState().emptyRing() && candidate.engineState().consumer() == 59);
+        for (uint32_t address : {0x100000u,0x1003beu,0x1003c0u,0x14affeu})
+            assert(storage.accessGpu(candidate,eim,address,2,false,value) == A::ok && value == 0xffff);
+        assert(storage.accessGpu(candidate,eim,0x14b000,2,false,value) == A::ok && value == 0);
+        value = 59;
+        assert(candidate.access(eim,0x200b0200,0x16010220,4,true,value) == A::ok);
+        assert(candidate.engineState().emptyRing() && candidate.engineState().consumer() == 59);
+    };
+    submitRectangle(rectangleBatch,true);
+    for (unsigned index : {0u,3u,6u,9u}) {
+        auto bad = rectangleBatch;
+        bad[index] = 0x80000000;
+        submitRectangle(bad,false);
+    }
+    auto badRectangle = rectangleBatch;
+    badRectangle[5] = 0x1df;
+    submitRectangle(badRectangle,false);
+    badRectangle = rectangleBatch;
+    badRectangle[11] = 0x01e10140;
+    submitRectangle(badRectangle,false);
     submitted.reset(); commands.reset();
     assert(!submitted.engineState().completed() && !submitted.engineState().ringBytes());
     std::puts("PASS: native ring packet decoding, delayed RGB565 solid paint, consumer/busy/readback guards and rejection");

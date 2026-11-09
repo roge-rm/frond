@@ -1,0 +1,22 @@
+--- a/src/uarm/uarm/imx1_graphics_engine.h
++++ b/src/uarm/uarm/imx1_graphics_engine.h
+@@ -46,7 +46,7 @@
+             return A::ok;
+         }
+         if (address == 0x16010220 && pc != 0x200b8e88) {
+-            if (pc != (write ? 0x200a9ed4u : 0x200b8c70u)) return A::externalInput;
++            if (write ? (pc != 0x200a9ed4 && pc != 0x200b0200) : pc != 0x200b8c70) return A::externalInput;
+             if (!ringEnabled) return A::sequence;
+             if (write) {
+                 if (!emptyRing()) return A::sequence;
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -248,7 +248,7 @@
+             candidate.selectAcquisitionSource(first ? 0 : second ? 1 : 2);
+             const auto status = candidate.access(p.peripherals.eimState(),p.result.trace.pc,address,size,write,datum,sampledPin);
+             if (status == Imx1BootstrapAccess::ok && write && address == 0x16010220 &&
+-                p.result.trace.pc == 0x200a9ed4 && p.graphicsMemory) {
++                (p.result.trace.pc == 0x200a9ed4 || p.result.trace.pc == 0x200b0200) && p.graphicsMemory) {
+                 auto commands = p.graphicsCommands;
+                 const auto prepared = commands.prepare(candidate,p.peripherals.eimState(),*p.graphicsMemory);
+                 if (prepared != Imx1BootstrapAccess::ok) return prepared;
