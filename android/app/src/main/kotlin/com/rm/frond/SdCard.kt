@@ -104,8 +104,11 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
         val reply = link.request("ms-type", timeoutSeconds = 30)
         return reply.ok && reply.message.startsWith("pro ")
     }
+    // While Files… has the stick taken out the slot is empty, so the take-out's answer stands.
     fun protection(): Boolean? {
-        if (!memoryStick || state() == State.NONE) return null
+        if (!memoryStick) return null
+        if (cardFile != null) return protectedCard
+        if (state() == State.NONE) return null
         val reply = link.request("ms-protection", timeoutSeconds = 30)
         return if (!reply.ok) null else when (reply.message) {
             "read-only" -> true
