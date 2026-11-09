@@ -4,6 +4,7 @@
 #include "zodiac-graphics-setup.h"
 #include "imx1_graphics_commands.h"
 #include "zodiac-graphics-hostdata.h"
+#include "zodiac-graphics-keyed-copy.h"
 
 int main() {
     using A = Imx1BootstrapAccess;
@@ -206,6 +207,7 @@ int main() {
     badRectangle[11] = 0x01e10140;
     submitRectangle(badRectangle,false);
     checkHostData(submitted,commands,eim);
+    checkKeyedCopy(submitted,commands,eim);
     submitted.reset(); commands.reset();
     assert(!submitted.engineState().completed() && !submitted.engineState().ringBytes());
     std::puts("PASS: native ring packet decoding, delayed RGB565 solid paint, consumer/busy/readback guards and rejection");
