@@ -1,0 +1,22 @@
+--- a/src/uarm/uarm/imx1_boot_probe.h
++++ b/src/uarm/uarm/imx1_boot_probe.h
+@@ -9,6 +9,7 @@
+ #include "imx1_cs5_configuration.h"
+ 
+ inline constexpr uint32_t imx1ProbeMaximumSteps = 1000000000;
++inline constexpr uint32_t imx1ProbeMaximumIdleHclk = 512000000;
+ 
+ // The physical flash mapping is observed in the updater. Aliases are explicit experiments.
+ enum class Imx1ProbeEntry { physicalFlash, resetAlias, linkedAlias };
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -509,7 +509,8 @@
+         result.peripheralStatus = Imx1BootstrapAccess::sequence;
+         return result;
+     }
+-    if (options && (!imx1ProbeGpioEventValid(*options, steps) || ((options->lcdcContrastOnly || options->mmcsdEmptySlot) && !options->bootstrapPeripherals) ||
++    if (options && (options->idleHclkBudget > imx1ProbeMaximumIdleHclk ||
++        !imx1ProbeGpioEventValid(*options, steps) || ((options->lcdcContrastOnly || options->mmcsdEmptySlot) && !options->bootstrapPeripherals) ||
+         (options->virtualMpllRetune && (!options->bootstrapPeripherals || !options->assumeMpllSettled)) ||
+         !imx1GraphicsProfileValid(options->graphicsProfile) ||
+         (!options->cs4IndexedInputs.empty() && (!options->bootstrapPeripherals || !options->cs4Port0InputKnown)) ||

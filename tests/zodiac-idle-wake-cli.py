@@ -16,14 +16,14 @@ struct.pack_into('<II', image, 0x100, 0xee070f90, 0xe7f000f0)
 rom.write_bytes(image)
 base = ['build/zodiac-boot-probe', str(rom), 'physical', '4', 'exact']
 try:
-    for value in ('', '0', '-1', '+1', '64000001', '4294967296', '999999999999999999999999999', '1x', '0x10', ' 1'):
+    for value in ('', '0', '-1', '+1', '512000001', '4294967296', '999999999999999999999999999', '1x', '0x10', ' 1'):
         p = subprocess.run(base + ['--bootstrap-peripherals', '--idle-hclk-budget=' + value], capture_output=True, text=True)
         assert p.returncode == 1 and 'Supply one --idle-hclk-budget' in p.stderr, (value, p.stdout, p.stderr)
     p = subprocess.run(base + ['--idle-hclk-budget=1'], capture_output=True, text=True)
     assert p.returncode == 1 and 'requires --bootstrap-peripherals' in p.stderr
     p = subprocess.run(base + ['--bootstrap-peripherals', '--idle-hclk-budget=1', '--idle-hclk-budget=2'], capture_output=True, text=True)
     assert p.returncode == 1 and 'Supply one' in p.stderr
-    for value in (None, 1, 64000000):
+    for value in (None, 1, 64000000, 512000000):
         args = base + ['--bootstrap-peripherals']
         if value is not None:
             args.append('--idle-hclk-budget=' + str(value))

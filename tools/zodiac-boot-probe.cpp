@@ -221,8 +221,8 @@ int main(int argc, char** argv) {
             errno = 0;
             const auto value = std::strtoul(text, &end, 10);
             if (idleBudgetSupplied || errno || *text < '0' || *text > '9' || *end ||
-                !value || value > 64000000) {
-                std::fprintf(stderr, "Supply one --idle-hclk-budget value from 1 to 64000000\n"); return 1;
+                !value || value > imx1ProbeMaximumIdleHclk) {
+                std::fprintf(stderr, "Supply one --idle-hclk-budget value from 1 to %u\n", imx1ProbeMaximumIdleHclk); return 1;
             }
             idleBudgetSupplied = true;
             options.idleHclkBudget = value;

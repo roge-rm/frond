@@ -84,7 +84,8 @@ void literal(std::vector<uint32_t>& v, unsigned reg, uint32_t n) {
 struct Events { std::vector<Imx1ProbeInterrupt> irq; std::vector<Imx1ProbeAccess> bus; };
 void interrupt(void* p,const Imx1ProbeInterrupt& e){static_cast<Events*>(p)->irq.push_back(e);}
 void bus(void* p,const Imx1ProbeAccess& e){static_cast<Events*>(p)->bus.push_back(e);}
-void sequence(bool fiq, bool masked, bool pending, bool timerEnabled, bool limited = false, bool repeat = false) {
+void sequence(bool fiq, bool masked, bool pending, bool timerEnabled, bool limited = false, bool repeat = false,
+              uint32_t idleBudget = 16000000) {
     std::vector<uint32_t> v(64,0xe1a00000);
     v[0]=0xea00003e; // start at 0x100.
     v[6]=0xea000018;v[7]=0xea000017; // IRQ/FIQ vectors to 0x80.
@@ -123,13 +124,13 @@ void sequence(bool fiq, bool masked, bool pending, bool timerEnabled, bool limit
     auto run=[&](bool fast,Events& events){
         Imx1ProbeOptions o{};o.bootstrapPeripherals=true;o.assumeMpllSettled=true;
         o.virtualMpllRetune=true;o.assumeSpllSettled=true;
-        if(limited)o.idleHclkBudget=repeat?3000:16;
+        o.idleHclkBudget=limited?(repeat?3000:16):idleBudget;
         o.interruptObserver=interrupt;o.interruptContext=&events;o.busObserver=bus;o.busContext=&events;
         return imx1BootProbe(reinterpret_cast<const uint8_t*>(v.data()),v.size()*4,
             Imx1ProbeEntry::resetAlias,30000,nullptr,nullptr,fast,&o);
     };
     Events ea,eb;const auto a=run(false,ea);
-    if(limited){assert(a.stop==Imx1ProbeStop::idleBudget && a.idleHclk==(repeat?3000u:16u) && a.registers[15]==wfi+4);}
+    if(limited || !idleBudget){assert(a.stop==Imx1ProbeStop::idleBudget && a.idleHclk==(limited?(repeat?3000u:16u):0u) && a.registers[15]==wfi+4);}
     else if(!timerEnabled){assert(a.stop==Imx1ProbeStop::idleNoWake && a.registers[15]==wfi+4);}
     else {
         if(a.stop!=Imx1ProbeStop::unsupportedInstruction)std::fprintf(stderr,"stop %s pc%08x step%u addr%08x status%s wfi%x\n",imx1ProbeStopName(a.stop),a.registers[15],a.trace.step,a.address,imx1BootstrapAccessName(a.peripheralStatus),wfi);
@@ -137,6 +138,7 @@ void sequence(bool fiq, bool masked, bool pending, bool timerEnabled, bool limit
         if(masked) assert(ea.irq.empty());
         else {assert(!ea.irq.empty());const auto& e=ea.irq.back();assert(e.fiq==fiq);assert(e.link==e.interruptedPc+4);if(!pending)assert(e.link==wfi+8);}
         assert(a.idleHclk || pending);
+        assert(a.idleHclk < 64000000);
     }
 #if FROND_TEST_FAST
     const auto b=run(true,eb);
@@ -147,5 +149,25 @@ void sequence(bool fiq, bool masked, bool pending, bool timerEnabled, bool limit
     assert(b.jitInstructions);
 #endif
 }
+void budgetBounds() {
+    static_assert(imx1ProbeMaximumIdleHclk == 512000000);
+    assert(Imx1ProbeOptions{}.idleHclkBudget == 16000000);
+    const uint32_t rom[] = {0xee070f90, 0xe7f000f0};
+    Imx1ProbeOptions o{};o.bootstrapPeripherals=true;
+    for(uint32_t budget:{imx1ProbeMaximumIdleHclk+1,UINT32_MAX}) {
+        o.idleHclkBudget=budget;
+        const auto a=imx1BootProbe(nullptr,0,Imx1ProbeEntry::physicalFlash,4,nullptr,nullptr,false,&o);
+        assert(a.stop==Imx1ProbeStop::unsupportedPeripheral && a.peripheralStatus==A::sequence);
+        assert(a.trace.step==0 && a.idleHclk==0);
+    }
+    for(uint32_t budget:{0u,1u,64000000u,imx1ProbeMaximumIdleHclk}) {
+        o.idleHclkBudget=budget;
+        const auto a=imx1BootProbe(reinterpret_cast<const uint8_t*>(rom),sizeof(rom),
+            Imx1ProbeEntry::physicalFlash,4,nullptr,nullptr,false,&o);
+        assert(a.stop==Imx1ProbeStop::idleNoWake && a.idleHclk==0 && a.registers[15]==0x10000004);
+    }
+    sequence(false,false,false,true,false,false,imx1ProbeMaximumIdleHclk);
+    sequence(false,false,false,true,false,false,0);
 }
-int main(){clocks();wakeQualification();for(bool fiq:{false,true})for(bool masked:{false,true})for(bool pending:{false,true})sequence(fiq,masked,pending,true);sequence(false,true,false,false);sequence(false,true,false,true,true);sequence(false,true,false,true,true,true);std::puts("Zodiac MCU shutdown, WFI, IRQ/FIQ wake and clock restore: PASS");}
+}
+int main(){budgetBounds();clocks();wakeQualification();for(bool fiq:{false,true})for(bool masked:{false,true})for(bool pending:{false,true})sequence(fiq,masked,pending,true);sequence(false,true,false,false);sequence(false,true,false,true,true);sequence(false,true,false,true,true,true);std::puts("Zodiac MCU shutdown, WFI, IRQ/FIQ wake and clock restore: PASS");}
