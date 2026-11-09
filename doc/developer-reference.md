@@ -963,7 +963,8 @@ The art does not dispatch input or enable the frontend.
 The adaptive native view accepts `--dana-view "keyboard=auto zoom=2"`, the
 `dana-view` console/socket setter and `dana-view-state` query. Setter fields are
 `keyboard=auto|compact|full|hidden`, `zoom=fit|1|1.5|2|3`, `pointer=touch|pan`,
-`pan-x=0..560`, `pan-y=0..160`, `density=0.25..16` and `physical=on|off`.
+`pan-x=0..560`, `pan-y=0..160`, `density=0.25..16`, `physical=on|off` and
+`page=abc|symbols|more|fn`.
 Pan is in guest pixels; density is renderer output pixels per logical unit.
 The complete argument is validated before changing the view or cancelling input.
 Other devices refuse these commands.

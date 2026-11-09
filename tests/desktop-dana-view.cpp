@@ -2,7 +2,7 @@
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QSlider>
-#include "DanaView.h"
+#include "../desktop/DanaView.h"
 #include "DanaViewControls.h"
 #include "DanaViewController.h"
 #include "DesktopClient.h"
@@ -81,6 +81,84 @@ class DanaViewTest : public QObject {
         }
         prefs.panX = 123.123456789; controls.setValues(prefs);
         keyboard->setCurrentIndex(keyboard->findData("compact")); QCOMPARE(controls.values().panX, prefs.panX);
+    }
+    void queuedFailures_data() {
+        QTest::addColumn<bool>("refuse");
+        QTest::addColumn<bool>("replaceDuringRollback");
+        QTest::newRow("native-refusal") << true << false;
+        QTest::newRow("settings-save-failure") << false << false;
+        QTest::newRow("newer-choice-during-rollback") << false << true;
+    }
+    void queuedFailures() {
+        QFETCH(bool, refuse);
+        QFETCH(bool, replaceDuringRollback);
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        QFile fake(dir.filePath("core.py")); QVERIFY(fake.open(QIODevice::WriteOnly));
+        fake.write(R"PY(import os,socket,sys,time
+s=socket.socket(socket.AF_UNIX);s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+p=dict(keyboard='hidden',zoom='2',pointer='touch',**{'pan-x':'0','pan-y':'0','density':'1','physical':'on'})
+number=0
+def state():
+    return ('dana-view: '+' '.join(k+'='+v for k,v in p.items())+' resolved='+p['keyboard']).encode()
+s.sendall(b'0\tevent\tready\t\n')
+for line in s.makefile('rb'):
+    i,cmd,arg=line.rstrip(b'\n').split(b'\t');arg=bytes.fromhex(arg.decode()).decode();status=b'ok';text=b'done'
+    if cmd==b'dana-view':
+        number+=1
+        with open(sys.argv[0]+'.commands','a') as f: f.write(arg+'\n')
+        deadline=time.monotonic()+5
+        while not os.path.exists(sys.argv[0]+'.release'+str(number)):
+            if time.monotonic()>deadline: raise RuntimeError('test reply was not released')
+            time.sleep(.005)
+        next=dict(x.split('=') for x in arg.split())
+        if '--refuse-a' in sys.argv and next['zoom']=='1': status=b'error';text=b'refused'
+        else:
+            p=next;text=state();s.sendall(b'0\tevent\tdana-view\t'+text.hex().encode()+b'\n')
+    elif cmd==b'dana-view-state': text=state()
+    s.sendall(i+b'\t'+status+b'\tview\t'+text.hex().encode()+b'\n')
+    if cmd==b'quit': break
+)PY"); fake.close();
+        DesktopClient client; DanaViewController controller(client);
+        QSignalSpy replies(&client, &DesktopClient::result), errors(&controller, &DanaViewController::error);
+        QSignalSpy stopped(&client, &DesktopClient::finished);
+        QList<frondDana::Preferences> saved;
+        controller.save = [&](const frondDana::Preferences& prefs) {
+            if (!refuse && prefs.zoom == "1") return QString("Couldn't save the machine settings.");
+            saved.append(prefs); return QString();
+        };
+        controller.configure(true, {}, 1);
+        QStringList args{fake.fileName()}; if (refuse) args.append("--refuse-a");
+        QVERIFY(client.start("/usr/bin/python3", args)); QTRY_COMPARE(replies.count(), 1);
+        auto commands = [&] {
+            QFile trace(fake.fileName()+".commands");
+            return trace.open(QIODevice::ReadOnly) ? trace.readAll().split('\n') : QList<QByteArray>{};
+        };
+        auto release = [&](int number) {
+            QFile marker(fake.fileName()+".release"+QString::number(number));
+            return marker.open(QIODevice::WriteOnly);
+        };
+        frondDana::Preferences first{"full", "1", "touch", 10, 0};
+        auto latest = first; latest.zoom = "3"; latest.pointer = "pan"; latest.panX = 20;
+        controller.choose(first); QVERIFY(controller.finishChanges());
+        QTRY_COMPARE(commands().size(), 2);
+        controller.choose(latest); QVERIFY(release(1));
+        QTRY_COMPARE(commands().size(), 3);
+        QCOMPARE(commands().at(0), frondDana::argument(first, 1).toUtf8());
+        if (!refuse) {
+            QCOMPARE(commands().at(1), frondDana::argument({}, 1).toUtf8());
+            QVERIFY(controller.values() == latest);
+            if (replaceDuringRollback) {
+                latest.zoom = "1.5"; latest.panY = 7; controller.choose(latest);
+            }
+            QVERIFY(release(2)); QTRY_COMPARE(commands().size(), 4);
+        }
+        const int last = refuse ? 2 : 3;
+        QCOMPARE(commands().at(last-1), frondDana::argument(latest, 1).toUtf8());
+        QVERIFY(release(last));
+        QTRY_COMPARE(saved.size(), 1); QVERIFY(saved.last() == latest);
+        QVERIFY(controller.values() == latest); QCOMPARE(errors.count(), 1);
+        QTRY_VERIFY(client.available()); controller.suspend();
+        QVERIFY(client.request("quit")); QTRY_COMPARE(stopped.count(), 1);
     }
     void runtime() {
         QTemporaryDir dir; QVERIFY(dir.isValid());

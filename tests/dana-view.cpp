@@ -7,13 +7,18 @@ static DanaScan5 scan(const char* name) {return *DanaScan5::Named(name);}
 
 static void parsing() {
     DanaViewState state;std::string error;
-    assert(state.Parse("keyboard=compact zoom=1.5 pan-x=420 pan-y=120 pointer=pan density=3 physical=off",error));
+    assert(state.Parse("keyboard=compact zoom=1.5 pan-x=420 pan-y=120 pointer=pan density=3 physical=off page=more",error));
+    assert(state.page=="more");
     const auto before=state.Describe("compact");
     for(const char* bad:{"zoom=nan","pan-x=inf","pan-y=-1","pan-y=161","pan-x=561","zoom=1e309",
-        "density=0","density=100","zoom=1 zoom=2","physical=maybe","page=fn","zoom=2 keyboard=bad","keyboard=full mystery=2",""}) {
+        "density=0","density=100","zoom=1 zoom=2","physical=maybe","page=invalid","page=fn page=abc",
+        "zoom=3 page=invalid","zoom=2 keyboard=bad","keyboard=full mystery=2",""}) {
         assert(!state.Parse(bad,error));assert(state.Describe("compact")==before);
     }
-    assert(state.Parse("zoom=fit physical=on",error));assert(state.zoom==0&&state.physical);
+    for(const char* page:{"abc","symbols","more","fn"}) {
+        assert(state.Parse(std::string("page=")+page,error));assert(state.page==page);
+    }
+    assert(state.Parse("zoom=fit physical=on page=fn",error));assert(state.zoom==0&&state.physical&&state.page=="fn");
     std::cout<<"atomic parser and finite bounds pass\n";
 }
 static void layouts() {

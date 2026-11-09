@@ -60,7 +60,9 @@ void DanaViewController::flush() {
     emit changed();
 }
 void DanaViewController::reject(const QString& message, bool restore) {
-    desired = persisted; query = queued = restoring = false; rollbackQueued = restore;
+    // Keep a newer choice queued while this request is rejected or rolled back.
+    if (!queued) desired = persisted;
+    query = restoring = false; rollbackQueued = restore;
     emit changed(); emit error(message);
     schedule();
 }
