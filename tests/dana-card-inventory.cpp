@@ -4,7 +4,7 @@
 int main() {
     constexpr uint64_t MiB=1ull<<20;
     const auto& p=*deviceProfile5(deviceTypeDana);
-    assert(!p.frontend.available && p.support==DeviceSupport5::staged);
+    assert(p.frontend.available && p.support==DeviceSupport5::experimentalDesktop);
     assert(!deviceProfileRunnerEligible5(p.deviceType) && deviceProfileRuns68k5(p.deviceType));
     assert(!p.capabilities.usb && !p.capabilities.network && !p.capabilities.serial);
     assert(int(DeviceCardSlot5::sd0)==0 && int(DeviceCardSlot5::memoryStick)==1 && int(DeviceCardSlot5::sd2)==2);
