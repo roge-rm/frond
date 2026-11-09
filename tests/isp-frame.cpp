@@ -26,6 +26,8 @@ int main(){
  zero.reg(0x8d,0x80000005);zero.now=12;assert(zero.get(0xe)==5);
  zero.now=22;assert(zero.get(0xe)==0x80000000);
  Isp legacySource;legacySource.reg(0x81,0x80);auto legacy=save(legacySource);
+ // Version 8 ends before hostWritten (added in version 10): drop its word from the chunk.
+ legacy.resize(legacy.size()-4);uint32 words=0;std::memcpy(&words,legacy.data()+8,4);--words;std::memcpy(legacy.data()+8,&words,4);
  uint32 version=8;std::memcpy(legacy.data()+12,&version,4);
  uint64 oldFraction=12000000;std::memcpy(legacy.data()+24,&oldFraction,8);
  Isp migrated;assert(load(migrated,legacy));assert(migrated.get(0xe)==5999);
