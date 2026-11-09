@@ -2272,7 +2272,13 @@ void MainWindow::printerShow() {
     if (printerHeld.isEmpty()) printerPanel->hideReceived();
     else printerPanel->showReceived(printerHeld.size(), printerText().renderable);
 }
-void MainWindow::printerClearHeld() { printerHeld.clear(); printerShow(); }
+// The held job also lives in printerDir/held.raw, which Save raw publishes from; it goes with the
+// held bytes, and with printerDir when the machine stops or the app exits.
+void MainWindow::printerClearHeld() {
+    printerHeld.clear();
+    if (printerDir) QFile::remove(printerDir->filePath("held.raw"));
+    printerShow();
+}
 // Takes the job out of the core into a private temp file, reads it and deletes the file.
 void MainWindow::printerCollect() {
     if (!printerDir) printerDir = std::make_unique<QTemporaryDir>();
@@ -2293,7 +2299,15 @@ bool MainWindow::printerResult(bool ok, const QString& message) {
         if (read) bytes = file.readAll();
         file.close();
         if (!path.isEmpty()) QFile::remove(path);
-        if (read) printerHeld += bytes;
+        bool kept = read;
+        if (read) {
+            QFile held(printerDir->filePath("held.raw"));
+            kept = held.open(QIODevice::WriteOnly | QIODevice::Append) && held.write(bytes) == bytes.size();
+            if (kept) held.close();
+            else { held.close(); QFile::remove(held.fileName()); }
+        }
+        if (kept) printerHeld += bytes;
+        else if (read) failure(tr("The print couldn't be kept in the temporary folder."));
         else {
             const auto text = status.error.isEmpty() ? message : status.error;
             failure(status.valid && (status.last == "rejected" || status.last == "uncertain")
@@ -2337,8 +2351,17 @@ void MainWindow::printerSaveRaw() {
     // The dialog has already asked about replacing an existing file.
     const auto path = QFileDialog::getSaveFileName(this, tr("Save raw file"), QDir::homePath() + "/Print.raw");
     if (path.isEmpty()) return;
+    // QSaveFile writes a temporary file in the target folder and renames it over the target on
+    // commit, so a failed or interrupted save leaves no partial file.
+    QFile source(printerDir ? printerDir->filePath("held.raw") : QString());
     QSaveFile file(path);
-    if (!file.open(QIODevice::WriteOnly) || file.write(printerHeld) != printerHeld.size() || !file.commit()) {
+    bool done = source.open(QIODevice::ReadOnly) && file.open(QIODevice::WriteOnly);
+    while (done && !source.atEnd()) {
+        const auto chunk = source.read(1 << 16);
+        done = !chunk.isEmpty() && file.write(chunk) == chunk.size();
+    }
+    if (!done || !file.commit()) {
+        file.cancelWriting();
         failure(tr("Couldn't write %1.").arg(path));
         return;
     }
