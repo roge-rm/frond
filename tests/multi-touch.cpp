@@ -281,9 +281,12 @@ static void m68k() {
 static void rawFingers() {
     SDL_SetHint(SDL_HINT_VIDEODRIVER, "dummy");
     assert(SDL_InitSubSystem(SDL_INIT_VIDEO) == 0);
+    // Installed before the window, as the runner does: installing flushes the queue, so the
+    // window's own first events must come after it.
+    RawFingers::Install();
     SDL_Window* window = SDL_CreateWindow("raw", 0, 0, 100, 200, 0);
     assert(window);
-    RawFingers::Install();
+    assert(SDL_HasEvent(SDL_WINDOWEVENT));
     SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
     assert(renderer);
     const SDL_Rect viewport{0, 50, 100, 100};
