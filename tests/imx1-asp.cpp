@@ -262,8 +262,230 @@ void manualUInterruptGate() {
     assert(b.interruptLines().irq == Imx1AitcLine::clear);
 }
 
+Imx1AspPenInputs penStimulus(bool down = true) {
+    Imx1AspPenInputs inputs;
+    inputs.contactKnown = inputs.normalKnown = inputs.referenceKnown = true;
+    inputs.contactDown = down;
+    inputs.normal = {0x1100, 0x5500, 0xa900, 0x1234};
+    inputs.reference = {0x0180, 0x3280, 0x7100};
+    return inputs;
+}
+constexpr uint32_t penSlot = 1260 * 8 * 4, penIdle = 1260 * 4;
+void startAuto(Imx1Asp& adc, bool acal = false) {
+    write(adc, 0x2c, 0x63); write(adc, 0x14, 0x3814);
+    const uint32_t config = acal ? 0x0600d201 : 0x0200e001;
+    write(adc, 0x10, config); write(adc, 0x10, config | 2);
+}
+void penContact() {
+    Imx1Asp adc;
+    auto inputs = penStimulus(false);
+    assert(adc.replacePenInputs(inputs) == Imx1AspAccess::ok);
+    write(adc, 0x18, 0x10); assert(read(adc, 0x1c) == 0);
+    inputs.contactDown = true;
+    assert(adc.replacePenInputs(inputs) == Imx1AspAccess::ok);
+    assert(read(adc, 0x1c) == 0x40 && adc.assertedInterrupts() == (uint64_t(1) << 46));
+    write(adc, 0x1c, 0x40); assert(read(adc, 0x1c) == 0x40);
+    write(adc, 0x18, 0); assert(adc.assertedInterrupts() == 0);
+    write(adc, 0x1c, 0x40); assert(read(adc, 0x1c) == 0);
+    write(adc, 0x18, 0x10); assert(read(adc, 0x1c) == 0x40);
+    inputs.contactDown = false;
+    assert(adc.replacePenInputs(inputs) == Imx1AspAccess::ok);
+    assert(read(adc, 0x1c) == 0x40); write(adc, 0x1c, 0x40);
+    assert(read(adc, 0x1c) == 0 && adc.assertedInterrupts() == 0);
+    rejected(adc, 0x18, 0x30, Imx1AspAccess::externalInput);
+    rejected(adc, 0x18, 0x50, Imx1AspAccess::externalInput);
+    inputs.contactKnown = false;
+    assert(adc.replacePenInputs(inputs) == Imx1AspAccess::externalInput);
+    write(adc, 0x10, 1u << 23);
+    write(adc, 0x18, 0x10); assert(read(adc, 0x1c) == 0);
+}
+void penSampling() {
+    auto inputs = penStimulus();
+    Imx1Asp adc(true, true, 0x9b00);
+    assert(adc.replacePenInputs(inputs) == Imx1AspAccess::ok);
+    startAuto(adc, true);
+    adc.advance(penSlot - 1); assert(read(adc, 0x34) == 0 && read(adc, 0x1c) == 0);
+    adc.advance(1); assert(read(adc, 0x34) == 1 && read(adc, 0) == inputs.reference[0]);
+    adc.advance(2 * penSlot - 1); assert((read(adc, 0x34) & 15) == 2);
+    adc.advance(1); assert((read(adc, 0x34) & 15) == 3);
+    assert(read(adc, 0) == inputs.reference[1] && read(adc, 0) == inputs.reference[2]);
+    adc.advance(penIdle + penSlot - 1); assert((read(adc, 0x34) & 15) == 3);
+    adc.advance(1); assert(read(adc, 0) == inputs.reference[0]);
+    // ACAL reset and normal restore preserve the external stimuli and manual U.
+    write(adc, 0x10, 1u << 23);
+    startAuto(adc);
+    adc.advance(12 * penSlot + 2 * penIdle - 1);
+    assert((read(adc, 0x34) & 15) == 11 && read(adc, 0x1c) == 1);
+    adc.advance(1); assert(read(adc, 0x34) == 0 && read(adc, 0x1c) == 3);
+    for (unsigned i = 0; i < 12; ++i) assert(read(adc, 0) == inputs.normal[i % 4]);
+    assert(read(adc, 0x1c) == 0);
+    uint32_t empty = 0x12345678;
+    assert(adc.access(base, 4, false, empty) == Imx1AspAccess::sideEffect && empty == 0x12345678);
+    write(adc, 0x10, 1u << 23);
+    write(adc, 0x14, 0x1814); write(adc, 0x2c, 3);
+    write(adc, 0x10, 0x02003001); write(adc, 0x10, 0x02003003);
+    adc.advance(30240); assert(read(adc, 0) == 0x9b00);
+    write(adc, 0x10, 1u << 23);
+    write(adc, 0x14, 0x3814); write(adc, 0x2c, 3);
+    write(adc, 0x10, 0x0200d201);
+    rejected(adc, 0x10, 0x0200d203, Imx1AspAccess::externalInput); // Non-ACAL ZXY is unqualified.
+}
+void penCaptureAndClocks() {
+    Imx1Asp adc;
+    auto inputs = penStimulus();
+    assert(adc.replacePenInputs(inputs) == Imx1AspAccess::ok); startAuto(adc);
+    adc.advance(1);
+    const auto original = inputs.normal;
+    inputs.normal = {0x0200, 0x3300, 0x6400, 0xabcd};
+    assert(adc.replacePenInputs(inputs) == Imx1AspAccess::ok);
+    auto copy = adc;
+    write(adc, 0x10, 0x0000e003); adc.advance(1000000);
+    assert(read(adc, 0x1c) == 0 && adc.converting());
+    write(adc, 0x10, 0x0200e003);
+    rejected(adc, 0x2c, 4, Imx1AspAccess::sideEffect);
+    rejected(adc, 0x14, 0x3815, Imx1AspAccess::sideEffect);
+    auto unknown = inputs; unknown.normalKnown = false;
+    assert(adc.replacePenInputs(unknown) == Imx1AspAccess::externalInput);
+    adc.advance(penSlot - 2); assert(read(adc, 0x1c) == 0);
+    adc.advance(1); copy.advance(penSlot - 1);
+    assert(read(adc, 0) == original[0] && read(copy, 0) == original[0]);
+    adc.advance(3 * penSlot); copy.advance(penSlot); copy.advance(2 * penSlot);
+    for (unsigned i = 1; i < 4; ++i) assert(read(adc, 0) == inputs.normal[i] && read(copy, 0) == inputs.normal[i]);
+    adc.advance(penIdle - 1); assert(read(adc, 0x1c) == 0);
+    adc.advance(1); inputs.normal[0] = 0xffff;
+    assert(adc.replacePenInputs(inputs) == Imx1AspAccess::ok);
+    adc.advance(penSlot); assert(read(adc, 0) == 0x0200); // Slot captured at the end of idle.
+    write(adc, 0x10, 0x0200e001); adc.advance(1000000);
+    assert(!adc.converting() && read(adc, 0x34) == 0 && read(adc, 0x1c) == 0);
+}
+void penRingAndRelease() {
+    Imx1Asp adc;
+    auto inputs = penStimulus();
+    assert(adc.replacePenInputs(inputs) == Imx1AspAccess::ok); startAuto(adc);
+    adc.advance(12 * penSlot + 3 * penIdle); // At the next Z slot's start.
+    for (unsigned round = 0; round < 4; ++round) {
+        auto next = inputs;
+        for (unsigned i = 1; i < 4; ++i) next.normal[i] += (round + 1) * 0x80;
+        assert(adc.replacePenInputs(next) == Imx1AspAccess::ok);
+        // First Z was already captured; further slots use the new transaction.
+        adc.advance(4 * penSlot + penIdle);
+        const auto ptr = read(adc, 0x34) & 15;
+        assert(ptr == ((round + 1) * 4) % 12);
+        assert(read(adc, 0x1c) == 0x83);
+        uint16_t words[12];
+        for (auto& word : words) word = read(adc, 0);
+        const auto selected = ptr < 4 ? 8 : ptr < 8 ? 0 : 4;
+        assert(uint16_t(words[selected + 1] - words[selected]) >> 7 ==
+               uint16_t(next.normal[1] - next.normal[0]) >> 7);
+        assert(uint16_t(words[selected + 2] - words[selected]) >> 7 ==
+               uint16_t(next.normal[2] - next.normal[0]) >> 7);
+        assert(read(adc, 0x1c) == 0x80); write(adc, 0x1c, 0x80);
+        inputs = next;
+        // Refill the physical ring before the next overwrite test.
+        adc.advance(12 * penSlot + 3 * penIdle);
+    }
+    // A full ring's partial read clears PFF but preserves POV until W1C.
+    adc.advance(penSlot); assert(read(adc, 0x1c) == 0x83);
+    read(adc, 0); assert(read(adc, 0x1c) == 0x81);
+    write(adc, 0x1c, 0x80); assert(read(adc, 0x1c) == 1);
+    adc.advance(penSlot); assert((read(adc, 0x1c) & 0x83) == 3);
+    // Release becomes visible at a subsequently captured U slot, without PUIE.
+    inputs.contactDown = false; assert(adc.replacePenInputs(inputs) == Imx1AspAccess::ok);
+    adc.advance(4 * penSlot + penIdle); assert(read(adc, 0x1c) & 0x400);
+    assert(!(adc.assertedInterrupts() & (uint64_t(1) << 5)));
+    write(adc, 0x18, 0x400); assert(adc.assertedInterrupts() == (uint64_t(1) << 5));
+    write(adc, 0x1c, 0x400); assert(!(read(adc, 0x1c) & 0x400));
+    adc.advance(4 * penSlot + penIdle); assert(read(adc, 0x1c) & 0x400);
+    write(adc, 0x18, 0); assert(adc.assertedInterrupts() == 0);
+    write(adc, 0x10, 1u << 23); assert(read(adc, 0x1c) == 0);
+}
+void penBoardTransaction() {
+    Imx1Bootstrap board;
+    auto inputs = penStimulus(false);
+    assert(board.replaceAspPenInputs(inputs) == Imx1BootstrapAccess::ok);
+    auto store = [&](uint32_t address, uint32_t value) { return board.access(address, 4, true, value); };
+    auto status = [&]() { uint32_t value = 0; assert(board.access(base + 0x1c, 4, false, value) == Imx1BootstrapAccess::ok); return value; };
+    assert(store(base + 0x18, 0x10) == Imx1BootstrapAccess::ok);
+    assert(store(0x00223008, 46) == Imx1BootstrapAccess::ok);
+    inputs.contactDown = true;
+    assert(board.aspPenWakePossible(inputs));
+    assert(board.replaceAspPenInputs(inputs) == Imx1BootstrapAccess::sideEffect);
+    assert(status() == 0);
+    board.connectCpuInterrupts();
+    assert(board.replaceAspPenInputs(inputs, false) == Imx1BootstrapAccess::ok && status() == 0);
+    assert(board.replaceAspPenInputs(inputs) == Imx1BootstrapAccess::ok && status() == 0x40);
+    assert(board.interruptLines().irq == Imx1AitcLine::asserted);
+    assert(store(base + 0x1c, 0x40) == Imx1BootstrapAccess::ok && status() == 0x40);
+    inputs.contactDown = false; assert(board.replaceAspPenInputs(inputs) == Imx1BootstrapAccess::ok);
+    assert(store(base + 0x1c, 0x40) == Imx1BootstrapAccess::ok && status() == 0);
+    // An eligible unknown source prevents the complete input transaction.
+    assert(store(0x00223008, 4) == Imx1BootstrapAccess::externalInput);
+    inputs.contactDown = true;
+    assert(board.replaceAspPenInputs(inputs) == Imx1BootstrapAccess::ok && status() == 0x40);
+}
+
+
+void penReleaseCaptureAndWake() {
+    Imx1Asp adc;
+    auto inputs = penStimulus();
+    assert(adc.replacePenInputs(inputs) == Imx1AspAccess::ok); startAuto(adc);
+    adc.advance(3 * penSlot); // U has captured contact down.
+    inputs.contactDown = false; assert(adc.replacePenInputs(inputs) == Imx1AspAccess::ok);
+    adc.advance(penSlot); assert(!(read(adc, 0x1c) & 0x400));
+    adc.advance(penIdle + 4 * penSlot - 1); assert(!(read(adc, 0x1c) & 0x400));
+    adc.advance(1); assert(read(adc, 0x1c) & 0x400);
+    Imx1Bootstrap board;
+    assert(board.replaceAspPenInputs(inputs) == Imx1BootstrapAccess::ok);
+    auto store = [&](uint32_t address, uint32_t value) { return board.access(address, 4, true, value); };
+    assert(store(0x00223008, 5) == Imx1BootstrapAccess::ok);
+    assert(store(base + 0x2c, 3) == Imx1BootstrapAccess::ok);
+    assert(store(base + 0x14, 0x3814) == Imx1BootstrapAccess::ok);
+    assert(store(base + 0x10, 0x0200e001) == Imx1BootstrapAccess::ok);
+    assert(store(base + 0x10, 0x0200e003) == Imx1BootstrapAccess::ok);
+    assert(!board.idleWakePossible());
+    board.advanceHclkCycles(4 * penSlot);
+    assert(board.clockStatus() == Imx1BootstrapAccess::ok && board.interruptLines().irq == Imx1AitcLine::clear);
+    assert(store(base + 0x18, 0x400) == Imx1BootstrapAccess::sideEffect);
+    board.connectCpuInterrupts();
+    assert(store(base + 0x18, 0x400) == Imx1BootstrapAccess::ok);
+    assert(board.interruptLines().irq == Imx1AitcLine::asserted);
+    assert(store(base + 0x1c, 0x400) == Imx1BootstrapAccess::ok);
+    assert(board.interruptLines().irq == Imx1AitcLine::clear && board.idleWakePossible());
+    assert(store(base + 0x10, 0x0000e003) == Imx1BootstrapAccess::ok);
+    assert(!board.idleWakePossible());
+    assert(store(base + 0x10, 0x0200e003) == Imx1BootstrapAccess::ok && board.idleWakePossible());
+    board.advanceHclkCycles(penIdle + 4 * penSlot);
+    assert(board.clockStatus() == Imx1BootstrapAccess::ok && board.interruptLines().irq == Imx1AitcLine::asserted);
+    Imx1Asp heldHigh(true);
+    write(heldHigh, 0x18, 0x10);
+    inputs.contactKnown = false;
+    assert(heldHigh.replacePenInputs(inputs) == Imx1AspAccess::externalInput);
+}
+
+
+void penComparisons() {
+    for (bool acal : {false, true}) {
+        for (unsigned selected = 0; selected < 4; ++selected) {
+            Imx1Asp adc;
+            assert(adc.replacePenInputs(penStimulus()) == Imx1AspAccess::ok);
+            write(adc, 0x30, 0x40001 | selected << 16);
+            startAuto(adc, acal);
+            for (unsigned slot = 0; slot < (acal ? 3u : 4u); ++slot) {
+                adc.advance(penSlot - 1);
+                const bool before = selected && selected < (acal ? 3u : 4u) && selected < slot;
+                assert(bool(read(adc, 0x30) & 0x80000) == before);
+                adc.advance(1);
+                const bool after = selected && selected < (acal ? 3u : 4u) && selected <= slot;
+                assert(bool(read(adc, 0x30) & 0x80000) == after);
+                assert(adc.assertedInterrupts() == (after ? uint64_t(1) << 9 : 0));
+            }
+        }
+    }
+}
+
 }
 int main() {
+    penComparisons(); penReleaseCaptureAndWake(); penContact(); penSampling(); penCaptureAndClocks(); penRingAndRelease(); penBoardTransaction();
     registersAndReset(); clocksAndInputGuards(); heldHighDetector(); bootstrapInputsAndTime(); manualUConversion(); manualUComparisons(); manualUInterruptGate();
     std::puts("i.MX1 ASP configuration, reset, clock/input guards, held-high PX1 and inactive IRQs passed");
 }

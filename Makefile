@@ -1908,3 +1908,13 @@ test-zodiac-idle-wake: build/zodiac-boot-probe
 .PHONY: test-zodiac-mmcsd-empty
 test-zodiac-mmcsd-empty: build/zodiac-boot-probe
 	python3 tests/zodiac-mmcsd-empty.py
+
+.PHONY: test-zodiac-asp-pen
+test-zodiac-asp-pen: build/zodiac-asp-pen-probe
+	python3 tests/zodiac-asp-pen.py
+build/zodiac-asp-pen-probe: build/zodiac-boot-probe tests/zodiac-asp-pen-probe.cpp
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/zodiac-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/zodiac-asp-pen-probe.cpp build/source/src/uarm/uarm/imx1_boot_probe.cpp build/source/src/uarm/uarm/imx1_watchdog.cpp build/source/src/uarm/uarm/imx1_rtc.cpp build/source/src/uarm/uarm/imx1_bootstrap.cpp build/source/src/uarm/uarm/imx1_aitc.cpp build/source/src/uarm/uarm/imx1_cgm.cpp build/source/src/uarm/uarm/imx1_gpio.cpp build/source/src/uarm/uarm/imx1_sysctrl.cpp build/source/src/uarm/uarm/imx1_eim.cpp build/source/src/uarm/uarm/imx1_timer.cpp build/source/src/uarm/uarm/imx1_i2c.cpp build/source/src/uarm/uarm/imx1_asp.cpp build/source/src/uarm/uarm/imx1_pwm.cpp \
+		@build/zodiac-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $@
