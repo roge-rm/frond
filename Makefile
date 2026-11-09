@@ -1770,6 +1770,7 @@ test-zodiac-graphics-gpio: build/zodiac-boot-probe
 		-Ibuild/source/src/uarm/uarm tests/zodiac-graphics-gpio.cpp \
 		build/source/src/uarm/uarm/imx1_eim.cpp -o build/test-zodiac-graphics-gpio
 	./build/test-zodiac-graphics-gpio
+	python3 tests/zodiac-graphics-slot-gpio.py
 
 .PHONY: test-zodiac-graphics-memory
 test-zodiac-graphics-memory: build/zodiac-boot-probe

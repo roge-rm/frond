@@ -37,6 +37,7 @@ int main() {
     };
     reject(0x200b99c4, 0x160104bc, 4, true, 0xffff1fff, Access::sequence);
     configure();
+    reject(0x204d3210,0x160104b8,4,false,0xabcdef01,Access::sequence);
     reject(0x200b9a14, 0x160104b8, 4, true, 0x01ff0008, Access::sequence);
     for (const auto address : {0x160104b8u, 0x160104bcu, 0x160104c0u,
                                0x16010528u, 0x1601052cu, 0x16010530u}) {
@@ -71,6 +72,26 @@ int main() {
     read(0x200b9b80, 0x1601052c, 0xffff8001);
     read(0x200b9b50, 0x160104b8, 0x01ff0008);
     read(0x200b9c78, 0x16010528, 0x80010001);
+    // Native slot setup reads stored state, then sets only GPIO14 direction/latch.
+    reject(0x204d3226,0x160104b8,4,true,0x41ff4008,Access::sequence);
+    reject(0x204d3210,0x160104b8,2,false,0xabcdef01,Access::width);
+    reject(0x204d3226,0x160104b8,2,true,0x41ff4008,Access::width);
+    read(0x204d3210,0x160104b8,0x01ff0008);
+    reject(0x204d3226,0x160104b8,4,true,0x41ff4009,Access::sideEffect);
+    reject(0x204d3226,0x160104b8,4,true,0x41ff0008,Access::sideEffect);
+    reject(0x204d3224,0x160104b8,4,true,0x41ff4008,Access::externalInput);
+    reject(0x204d3210,0x16010528,4,false,0xabcdef01,Access::externalInput);
+    reject(0x204d3226,0x16010528,4,true,0xc0014001,Access::externalInput);
+    write(0x204d3226,0x160104b8,0x41ff4008);
+    assert(state.gpioBank(0).direction() == 0x41ff && state.gpioBank(0).padValue() == 0x4008);
+    read(0x200b9c78,0x160104b8,0x41ff4008);
+    read(0x200b9c78,0x16010528,0x80010001);
+    reject(0x204d3226,0x160104b8,4,true,0x41ff4008,Access::sequence);
+    read(0x204d3210,0x160104b8,0x41ff4008);
+    write(0x204d3226,0x160104b8,0x41ff4008);
+    read(0x204d3210,0x160104b8,0x41ff4008);
+    write(0x200b9a14,0x160104b8,0x01ff0008);
+    reject(0x204d3226,0x160104b8,4,true,0x41ff4008,Access::sequence);
     reject(0x200b9b5c,0x160104b8,4,true,0x01ff0038,Access::sideEffect);
     write(0x200b9b5c,0x160104b8,0x01ff0018);
     assert(state.gpioBank(0).padValue() == 0x18);
@@ -89,7 +110,9 @@ int main() {
     reject(0x200b9cd4, 0x160104c0, 4, false, 0xabcdef01, Access::externalInput);
     reject(0x200b9cd4, 0x16010530, 4, false, 0xabcdef01, Access::externalInput);
     reject(0x200b99c4, 0x160104bc, 4, true, 0, Access::sideEffect);
+    read(0x204d3210,0x160104b8,0x00080008);
     state.reset();
+    reject(0x204d3210,0x160104b8,4,false,0xabcdef01,Access::sequence);
     for (unsigned i = 0; i < 2; ++i) {
         const auto bank = state.gpioBank(i);
         assert(bank.control == 0 && bank.data == 0 && !bank.controlKnown && !bank.dataKnown);
@@ -100,6 +123,12 @@ int main() {
     reject(0x200b9c78, 0x160104b8, 4, false, 0xabcdef01, Access::sequence);
     write(0x200b99c4, 0x160104bc, 0xffff0000);
     write(0x200b9a14, 0x160104b8, 0x80008000);
+    reject(0x204d3226,0x160104b8,4,true,0xc000c000,Access::sequence);
     assert(state.gpioBank(0).padKnown() == 0x8000 && state.gpioBank(0).padValue() == 0x8000);
+    read(0x204d3210,0x160104b8,0x80008000);
+    write(0x204d3226,0x160104b8,0xc000c000);
+    read(0x200b9c78,0x160104b8,0xc000c000);
+    value = 0xabcdef01;
+    assert(strict.access(eim,0x204d3210,0x160104b8,4,false,value) == Access::unmapped && value == 0xabcdef01);
     std::puts("PASS: virtual GPIO bank state, logical output pads, stored readback, unknown inputs, strict/width/PC/EIM guards and reset");
 }
