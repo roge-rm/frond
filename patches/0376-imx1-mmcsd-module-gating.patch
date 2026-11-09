@@ -1,0 +1,43 @@
+--- a/src/uarm/uarm/imx1_mmcsd.h
++++ b/src/uarm/uarm/imx1_mmcsd.h
+@@ -12,7 +12,7 @@
+     bool interruptKnown() const { return emptySlot; }
+     bool interruptOutput() const { return emptySlot && interrupt; }
+     bool clockRunning() const { return running; }
+-    bool canInterrupt() const { return emptySlot && remaining && !(registers[9] & 4); }
++    bool canInterrupt() const { return emptySlot && (control & 4) && remaining && !(registers[9] & 4); }
+     void advancePerclk2(uint64_t clocks) {
+         if (!running || !(control & 4)) return;
+         static constexpr unsigned prescalers[]{1,2,3,3,4,5,5,5};
+@@ -77,6 +77,8 @@
+                 if (!enable || !stop || (value & 0x20)) return A::sequence;
+                 --recovery; ready = !recovery;
+             } else if (enable && !ready) return A::sequence;
++            // Disabling halts internal clocks without resetting the command or stop tail.
++            if (!value) { control = 0; return A::ok; }
+             if (value & 2) {
+                 if (!emptySlot) return A::externalInput;
+                 if (value != 6) return A::sideEffect;
+@@ -94,10 +96,11 @@
+                 return A::ok;
+             }
+             if (running) {
+-                // Active transfers and module gating remain outside the command-only subset.
++                if (value == 4) { control = 4; return A::ok; }
++                // Stopping an active transfer remains outside the command-only subset.
+                 if (!enable || !stop || remaining || (value & 0x20)) return A::sideEffect;
+                 if (!stopRemaining) stopRemaining = 8;
+-                status = 0; interrupt = false;
++                control = 4; status = 0; interrupt = false;
+                 return A::ok;
+             }
+             control = value & 0x24;
+@@ -106,7 +109,7 @@
+         if (index == 1) {
+             if (write) return A::sideEffect;
+             if (!emptySlot) return A::externalInput;
+-            value = status | (running ? 0x100 : 0); return A::ok;
++            value = status | (running && (control & 4) ? 0x100 : 0); return A::ok;
+         }
+         if (index == 8 || index >= 13) return A::externalInput;
+         static constexpr uint32_t masks[]{0,0,0x3f,0x1fff,0xff,0xffff,0x3ff,0xffff,0,0x7f,0x3f,0xffff,0xffff};

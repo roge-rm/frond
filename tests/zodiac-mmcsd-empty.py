@@ -46,6 +46,9 @@ with tempfile.TemporaryDirectory(prefix='zodiac-mmcsd-', dir=ROOT/'build') as wo
     load(1,0x00300222); arm(0xe5d17000)
     load(1,0x00300300); arm(0xe5918000)
     load(1,0x00300223); arm(0xe5d1a000)
+    load(0,3); load(1,2); load(12,0x204c88eb); arm(0xe1a0e00f); arm(0xe12fff1c)
+    arm(0xe1a0c000)
+    load(0,0x80014000); arm(0xe590b000)
     branch(at,at)
     # Preserve interrupted registers across the native-shaped Thumb callback.
     at = 0x10e000
@@ -87,6 +90,11 @@ with tempfile.TemporaryDirectory(prefix='zodiac-mmcsd-', dir=ROOT/'build') as wo
     literal(pc,1,0x4c6668); pc += 2
     emit(0x2004); emit(0x7008); emit(0xbc08); emit(0x4718)
     word(0x4c6660,0x80014000); word(0x4c6668,0x00300222)
+    # Native-shaped cleanup requests STOP then clears module ENABLE without waiting.
+    thumb(0x4c85e8,[0xb510,0x4c00,0x6820,0x2105,0x4308,0x6020,0x6820,0x2104,
+                     0x4388,0x6020,0x2000,0xbc10,0xbc08,0x4718])
+    literal(0x4c85ea,4,0x4c8990); word(0x4c8990,0x80014000)
+    thumb(0x4c88ea,[0xb500,0,0,0xbc08,0x4718]); bl(0x4c88ec,0x4c85e8)
     # Private verification can replace complete helpers and their original literals.
     original = os.environ.get('FROND_ZODIAC_MMCSD_ROM')
     if original:
@@ -95,6 +103,12 @@ with tempfile.TemporaryDirectory(prefix='zodiac-mmcsd-', dir=ROOT/'build') as wo
                       (0x4c5dc4,0x4c5df6),(0x4c5c54,0x4c5c86),
                       (0x4c5d8c,0x4c5d94),(0x4c665c,0x4c6668),(0x4c6170,0x4c6174)]:
             rom[lo:hi] = source[lo:hi]
+        for lo,hi in [(0x4c85e8,0x4c872c),(0x4c88ea,0x4c891a),(0x4c898c,0x4c899c)]:
+            rom[lo:hi] = source[lo:hi]
+        # External IRQ-mask and OS allocation services are explicit fixture stubs.
+        thumb(0x4cff08,[0x4901,0x6008,0x2000,0x4770]); word(0x4cff10,0x0022300c)
+        thumb(0x4cfe80,[0x4770])
+        thumb(0x4c8f98,[0x4800,0x4770]); word(0x4c8f9c,0x2904)
     path=Path(work)/'generated.rom'; path.write_bytes(rom)
     result=subprocess.run([str(ROOT/'build/zodiac-boot-probe'),str(path),'linked','500000','exact',
         '--bootstrap-peripherals','--imx1-mmcsd-empty-slot','--trace=peripherals'],
@@ -106,9 +120,13 @@ with tempfile.TemporaryDirectory(prefix='zodiac-mmcsd-', dir=ROOT/'build') as wo
     assert commands == ['00000000','00000037','00000001','00000001'],commands
     assert re.search(r'irq-entries=4 fiq-entries=0',output),output[-5000:]
     assert 'r7=00000004' in output and 'r8=00000004' in output,output[-5000:]
-    if original: assert 'r10=00000001' in output,output[-5000:]
+    assert 'r11=00000000' in output,output[-5000:]
+    if original:
+        assert 'r10=00000001' in output and 'r12=00002904' in output,output[-5000:]
+    else: assert 'r12=00000000' in output,output[-5000:]
+    assert re.search(r'operation=write address=00214000 size=4 value=00000000 register=MMCSD.STR_STP_CLK status=ok',output)
     assert 'value=00002100 register=MMCSD.STATUS status=ok' in output
     assert output.count('value=00002102 register=MMCSD.STATUS status=ok') == 3
     assert not re.search(r'register=MMCSD.(RES_FIFO|BUFFER_ACCESS)',output)
     assert len(re.findall(r'pc=204c5c58 operation=write address=00214024',output)) == 4
-print('PASS: timed empty-slot CMD0, CMD55 and two CMD1 timeouts with guest IRQ35 acknowledgement')
+print('PASS: timed empty-slot discovery, four guest IRQ35 acknowledgements and STOP/module-disable cleanup')

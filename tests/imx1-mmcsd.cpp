@@ -5,6 +5,7 @@
 #include <initializer_list>
 #include <utility>
 #include "imx1_bootstrap.h"
+#include "imx1_mmcsd.h"
 
 int main() {
     using A = Imx1BootstrapAccess;
@@ -182,5 +183,56 @@ int main() {
         value = 0xdeadbeef;
         assert(soc.access(mmc+offset,4,false,value) == A::externalInput && value == 0xdeadbeef);
     }
+    // ENABLE gates the internal command/tail clocks, including their fractional phase.
+    Imx1Mmcsd gated;
+    gated.setEmptySlot(true);
+    auto gw = [&](uint32_t address, uint32_t setting, Imx1MmcsdAccess expected = Imx1MmcsdAccess::ok) {
+        assert(gated.access(address,4,true,setting) == expected);
+    };
+    auto gr = [&](uint32_t address, uint32_t expected) {
+        uint32_t result = 0xdeadbeef;
+        assert(gated.access(address,4,false,result) == Imx1MmcsdAccess::ok && result == expected);
+    };
+    gw(psr0,0xffffc400); gw(psr1,0xfffffbff);
+    gw(mmc,8); gw(mmc,13);
+    for (unsigned i = 0; i < 8; ++i) gw(mmc,5);
+    gw(mmc+8,0x36); gw(mmc+0x24,0x78);
+    gw(mmc+0x28,0); gw(mmc+0x2c,0xff); gw(mmc+0x30,0xc000); gw(mmc+0xc,0x80);
+    gw(mmc,0); gr(mmc,0); gr(mmc+0x2c,0xff); gr(mmc+8,0x36);
+    gw(mmc,4); gw(mmc,6);
+    gated.advancePerclk2(319); gr(mmc+4,0x100);
+    assert(gated.canInterrupt());
+    gw(mmc,0); gr(mmc,0); gr(mmc+4,0);
+    assert(!gated.canInterrupt() && !gated.interruptOutput());
+    gated.advancePerclk2(1000000); gr(mmc+4,0);
+    gw(mmc+8,0,Imx1MmcsdAccess::sideEffect);
+    gw(mmc,4); gr(mmc,4); gr(mmc+4,0x100);
+    gated.advancePerclk2(320*127); gr(mmc+4,0x100);
+    gated.advancePerclk2(1); gr(mmc+4,0x2100);
+    assert(gated.interruptOutput() && !gated.canInterrupt());
+    // Disabling preserves a latched interrupt; the mask register acknowledges it.
+    gw(mmc,0); gr(mmc+4,0x2000); assert(gated.interruptOutput());
+    gated.advancePerclk2(1000000); assert(gated.interruptOutput());
+    gw(mmc+0x24,0x78); assert(!gated.interruptOutput());
+    gw(mmc,5); gated.advancePerclk2(320*3+319); gr(mmc+4,0x100);
+    gw(mmc,0); gr(mmc+4,0); gated.advancePerclk2(1000000);
+    auto gatedCopy = gated;
+    gw(mmc,5); gated.advancePerclk2(320*4); gr(mmc+4,0x100);
+    gated.advancePerclk2(1); gr(mmc+4,0); gr(mmc,4);
+    uint32_t setting = 4;
+    assert(gatedCopy.access(mmc,4,true,setting) == Imx1MmcsdAccess::ok);
+    gatedCopy.advancePerclk2(320*4+1);
+    assert(gatedCopy.access(mmc+4,4,false,value) == Imx1MmcsdAccess::ok && value == 0);
+    // Bootstrap WFI prediction follows the module gate and retains timing on resume.
+    startup(); write(mmc+0x24,0x78); stage(0,0x80); write(mmc,6);
+    assert(soc.idleWakePossible()); write(mmc,0); assert(!soc.idleWakePossible());
+    soc.advanceHclkCycles(100000); read(mmc+4,0);
+    write(mmc,4); assert(soc.idleWakePossible());
+    soc.advanceHclkCycles(320*128); assert(soc.interruptPending().normal & irq35);
+    write(mmc,5); write(mmc,0); read(mmc,0); read(mmc+4,0);
+    soc.advanceHclkCycles(320*20); read(mmc+4,0);
+    write(0x0021b020,0x000b00ab,A::sideEffect);
+    write(mmc,8); read(mmc,0); read(mmc+4,0);
+    assert(!soc.idleWakePossible() && !(soc.interruptPending().normal & irq35));
     puts("i.MX1 AIPI2/MMCSD startup and timed empty-slot discovery: PASS");
 }
