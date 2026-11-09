@@ -61,6 +61,10 @@ object RunningBar {
     // The line under the machine's name: the engine on ARM devices, else the device.
     fun subtitle(device: Device, settings: MachineSettings) = if (device.runs68k) device.label else settings.engine.label
 
+    // Where the hidden bar's handle sits: top centre in portrait, where the Palm starts below it, and the
+    // top start corner in landscape, beside the Palm, which is fitted to the height and centred.
+    fun handleCentred(portrait: Boolean) = portrait
+
     // The corner keyboard button shows while the bar is hidden.
     fun cornerButtons(shown: Boolean) = !shown
 }

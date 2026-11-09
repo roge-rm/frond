@@ -644,6 +644,7 @@ open class FrondActivity : SDLActivity() {
 
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
         super.onConfigurationChanged(newConfig)
+        layoutBar()
         updateSurfaceMargin()
     }
 
@@ -817,10 +818,15 @@ open class FrondActivity : SDLActivity() {
         val full = bar.shown || bar.sheet != null
         val width = if (full) RelativeLayout.LayoutParams.MATCH_PARENT else RelativeLayout.LayoutParams.WRAP_CONTENT
         val height = if (bar.sheet != null) RelativeLayout.LayoutParams.MATCH_PARENT else RelativeLayout.LayoutParams.WRAP_CONTENT
-        if (params.width != width || params.height != height) {
+        val portrait = resources.configuration.orientation != android.content.res.Configuration.ORIENTATION_LANDSCAPE
+        val centre = if (!full && RunningBar.handleCentred(portrait)) RelativeLayout.TRUE else 0
+        val start = if (!full && !RunningBar.handleCentred(portrait)) RelativeLayout.TRUE else 0
+        if (params.width != width || params.height != height || params.getRule(RelativeLayout.CENTER_HORIZONTAL) != centre ||
+            params.getRule(RelativeLayout.ALIGN_PARENT_START) != start) {
             params.width = width
             params.height = height
-            params.addRule(RelativeLayout.CENTER_HORIZONTAL, if (full) 0 else -1)
+            params.addRule(RelativeLayout.CENTER_HORIZONTAL, centre)
+            params.addRule(RelativeLayout.ALIGN_PARENT_START, start)
             view.layoutParams = params
         }
         syncCorner()

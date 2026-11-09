@@ -75,6 +75,11 @@ class RunningBarTest {
         assertFalse(RunningBar.cornerButtons(true))
     }
 
+    @Test fun landscapeHandleSitsBesideThePalm() {
+        assertTrue(RunningBar.handleCentred(portrait = true))
+        assertFalse(RunningBar.handleCentred(portrait = false))
+    }
+
     @Test fun onlyTheRequestPermissionsActionNeedsRequestPermissions() {
         assertTrue(BarResults.isPermissionRequest("androidx.activity.result.contract.action.REQUEST_PERMISSIONS"))
         assertFalse(BarResults.isPermissionRequest("android.intent.action.OPEN_DOCUMENT"))
