@@ -1456,3 +1456,12 @@ test-raw-print-job:
 	python3 tools/prepare.py --destination $(RAW_PRINT_SOURCE)
 	$(CXX) -std=c++17 -O2 -Wall -Wextra -Werror -I$(RAW_PRINT_SOURCE)/src/common tests/raw-print-job.cpp -o $(RAW_PRINT_BUILD)/test-raw-print-job
 	$(RAW_PRINT_BUILD)/test-raw-print-job
+
+ISP_HOST_AREA ?= $(CURDIR)/build/isp-host-pio
+.PHONY: test-isp-host-pio
+test-isp-host-pio:
+	python3 tools/prepare.py --destination $(ISP_HOST_AREA)/source
+	$(MAKE) -C $(ISP_HOST_AREA)/source/src/common libcommon.a net
+	$(MAKE) -C $(ISP_HOST_AREA)/source/src/cloudpilot FROND_68K=1 -f Makefile \
+		-f $(CURDIR)/tests/isp-host-pio.mk FROND_TEST_ROOT=$(CURDIR) \
+		ISP_HOST_TEST=$(ISP_HOST_AREA)/test-isp-host-pio isp-host-test

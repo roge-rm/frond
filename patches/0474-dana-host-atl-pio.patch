@@ -1,0 +1,199 @@
+--- a/src/cloudpilot/emulator/hardware/EmRegsISPDana.h
++++ b/src/cloudpilot/emulator/hardware/EmRegsISPDana.h
+@@ -27,6 +27,15 @@
+     uint64 PacketResetEpoch(unsigned endpoint) const { return packetResetEpoch.at(endpoint); }
+     unsigned PacketCapacity(unsigned endpoint) const { return endpoint<16 ? Capacity(endpoint) : 0; }
+     uint8 EffectiveAddress() const { return effectiveAddress; }
++    // Codec never changes output on failure. PIO prefixes are validated separately.
++    struct HostPtd {
++        uint16 actual=0, maximum=0, total=0;
++        uint8 completion=0, endpoint=0, direction=0, address=0;
++        bool active=false, toggle=false, last=false, lowSpeed=false, interrupt=false;
++    };
++    static bool DecodeHostPtd(const uint8*, unsigned, unsigned, HostPtd&);
++    static bool CompleteHostPtd(uint8*, unsigned, unsigned, uint16, uint8, bool);
++    static bool ValidateHostList(const uint8*, unsigned);
+     void Reset(Bool hardware) override;
+     void Save(Savestate<ChunkType>&) override;
+     void Save(SavestateProbe<ChunkType>&) override;
+@@ -76,6 +85,10 @@
+     unsigned dcWord=0;
+     void Write(emuptr, int, uint32);
+     void Commit(uint32);
++    std::array<uint16,2048> hostRam{};
++    unsigned hostCursor=0;
++    template <typename T> void HostFields(T&);
++    uint16 HostWord(bool writing, uint16 value=0);
+     std::array<uint32, 0x30> regs{};
+     uint16 command = 0;
+     unsigned word = 0;
+--- a/src/cloudpilot/emulator/hardware/EmRegsISPDana.cpp
++++ b/src/cloudpilot/emulator/hardware/EmRegsISPDana.cpp
+@@ -23,6 +23,7 @@
+     regs[0x12]=2; regs[0x20]=0x28;
+     regs[0x27] = 0x6122; // Modelled datasheet revision; firmware checks only 0x61xx.
+     command = 0; word = 0; latch = 0;
++    hostRam.fill(0); hostCursor=0;
+     ResetDevice();
+ }
+ void EmRegsISPDana::SetSubBankHandlers() {
+@@ -55,12 +56,13 @@
+     if (size==2 && address==GetAddressStart()+4) return DeviceRead();
+     if (size != 2 || address != GetAddressStart() || (command & 0x80))
+         throw std::runtime_error("ISP unsupported bus read");
++    if(command==0x41) return HostWord(false);
+     unsigned index = command;
+     // Only disconnected-controller registers are implemented.
+     switch (index) {
+         case 0: case 1: case 2: case 3: case 4: case 5: case 0x0d:
+         case 0x12: case 0x13: case 0x14: case 0x15: case 0x16: case 0x0f: case 0x27: case 0x11: case 0x20: case 0x24: case 0x25: case 0x28:
+-        case 0x2a: case 0x2b: case 0x2c: break;
++        case 0x22: case 0x2a: case 0x2b: case 0x2c: break;
+         default: throw std::runtime_error("ISP unqualified register read");
+     }
+     uint32 value = regs[index == 5 ? 4 : index];
+@@ -77,10 +79,16 @@
+     if (size != 2 || (address != GetAddressStart() && address != GetAddressStart()+2))
+         throw std::runtime_error("ISP unsupported bus write");
+     if (address == GetAddressStart()+2) {
++        if(value==0x41 || value==0xc1) {
++            if(!regs[0x22] || regs[0x22]>regs[0x2b])
++                throw std::runtime_error("ISP ATL count outside allocation");
++            hostCursor=0;
++        }
+         command = value; word = 0; latch = 0;
+         return;
+     }
+     if (!(command & 0x80)) throw std::runtime_error("ISP write to read command");
++    if(command==0xc1) { HostWord(true,value); return; }
+     latch |= (value & 0xffff) << (16 * word);
+     if (command < 0xa0 && word++ == 0) return;
+     uint32 complete=latch; word=0; latch=0; Commit(complete);
+@@ -126,11 +134,15 @@
+             break;
+         }
+         case 0xa0: regs[0x20] = (value & 0x1fe7) | 8; break;
++        case 0xa2:
++            if(value>4096) throw std::runtime_error("ISP invalid transfer count");
++            regs[0x22]=value; hostCursor=0; break;
+         case 0xa4: regs[0x24] &= ~(value & 0x77); break;
+         case 0xa5: regs[0x25] = value & 0x77; break;
+         case 0xa8: regs[0x28] = value; break;
+         case 0xa9:
+             if (value==0xf6) {
++                hostCursor=0;
+                 fractional=0; resetCycles=0;
+                 regs.fill(0); regs[0]=0x10; regs[0x0d]=0x2edf;
+                 regs[0x11]=0x628; regs[0x27]=0x6122; regs[0x12]=2; regs[0x20]=0x28;
+@@ -140,7 +152,7 @@
+             if (value > 4096 || (value & 3) ||
+                 (command==0xaa ? 2*value+regs[0x2b] : 2*regs[0x2a]+value)>4096)
+                 throw std::runtime_error("ISP invalid buffer length");
+-            regs[command & 0x7f] = value; break;
++            regs[command & 0x7f] = value; hostCursor=0; regs[0x2c]=0; break;
+         default: throw std::runtime_error("ISP unqualified register write");
+     }
+ }
+@@ -261,19 +273,19 @@
+ template <typename T> void EmRegsISPDana::SaveState(T& s) {
+ 
+     auto* c=s.GetChunk(ChunkType::regsISPDana); if(!c) return;
+-    c->Put32(5); SaveChunkHelper h(*c); StateFields(h);
++    c->Put32(6); SaveChunkHelper h(*c); StateFields(h);
+     h.Do16(dcAddress);
+     for (auto& value : dcEndpoints) h.Do16(value);
+-    PacketFields(h); CancellationFields(h);
++    PacketFields(h); CancellationFields(h); HostFields(h);
+ }
+ void EmRegsISPDana::Load(SavestateLoader<ChunkType>& l) {
+ 
+     auto* c=l.GetChunk(ChunkType::regsISPDana);
+     if(!c) { l.NotifyError(); return; }
+     uint32 version=c->Get32();
+-    if(version!=2 && version!=3 && version!=4 && version!=5) { l.NotifyError(); return; }
+-    auto fields=std::tie(lastCycle,fractional,resetCycles,regs,command,word,latch,dcEndpoints,dcAddress,dcCommand,dcMode,dcHardware,dcScratch,dcUnlocked,dcSuspended,dcInterrupt,dcInterruptEnable,dcLatch,dcWord,fifo,configNext,cursor,allocated,setupPending,effectiveAddress,vbus,deviceEnabled,flushed,accessCancelled);
+-    auto before=std::make_tuple(lastCycle,fractional,resetCycles,regs,command,word,latch,dcEndpoints,dcAddress,dcCommand,dcMode,dcHardware,dcScratch,dcUnlocked,dcSuspended,dcInterrupt,dcInterruptEnable,dcLatch,dcWord,fifo,configNext,cursor,allocated,setupPending,effectiveAddress,vbus,deviceEnabled,flushed,accessCancelled);
++    if(version!=2 && version!=3 && version!=4 && version!=5 && version!=6) { l.NotifyError(); return; }
++    auto fields=std::tie(lastCycle,fractional,resetCycles,regs,command,word,latch,dcEndpoints,dcAddress,dcCommand,dcMode,dcHardware,dcScratch,dcUnlocked,dcSuspended,dcInterrupt,dcInterruptEnable,dcLatch,dcWord,fifo,configNext,cursor,allocated,setupPending,effectiveAddress,vbus,deviceEnabled,flushed,accessCancelled,hostRam,hostCursor);
++    auto before=std::make_tuple(lastCycle,fractional,resetCycles,regs,command,word,latch,dcEndpoints,dcAddress,dcCommand,dcMode,dcHardware,dcScratch,dcUnlocked,dcSuspended,dcInterrupt,dcInterruptEnable,dcLatch,dcWord,fifo,configNext,cursor,allocated,setupPending,effectiveAddress,vbus,deviceEnabled,flushed,accessCancelled,hostRam,hostCursor);
+     bool invalid=false;
+     LoadChunkHelper h(*c); StateFields(h);
+     dcAddress=0; dcEndpoints.fill(0); dcEndpoints[0]=0x83; dcEndpoints[1]=0xc3;
+@@ -284,6 +296,8 @@
+     }
+     flushed=0; accessCancelled=false;
+     if(version>=4) PacketFields(h);
++    hostRam.fill(0); hostCursor=0;
++
+     if(cursor>33) invalid=true;
+     if(version>=5) CancellationFields(h);
+     else {
+@@ -304,6 +318,9 @@
+         if(version==4 && !accessCancelled && dcCommand>=1 && dcCommand<=15 && cursor && fifo[dcCommand].cpu<=1)
+             fifo[dcCommand].packet[fifo[dcCommand].cpu].writing=true;
+     }
++    if(version>=6) HostFields(h);
++    if(regs[0x22]>4096 || hostCursor>((regs[0x22]+1)&~1u) || (hostCursor&1) ||
++       (hostCursor && ((regs[0x22]+1)&~1u)>regs[0x2b]) || (regs[0x2c]&~4u)) invalid=true;
+     if(flushed>0xffff || (accessCancelled &&
+        (!((dcCommand>=1 && dcCommand<=0x10) || (dcCommand>=0x12 && dcCommand<=0x1f)) ||
+         !(flushed&(1u<<(dcCommand&15))) || cursor))) invalid=true;
+@@ -530,3 +547,58 @@
+         for(auto& b:ep.packet) h.DoBool(b.writing);
+     }
+ }
++
++// Philips ISP1161A rev.03, sections 9.3 (tables 4/5), 9.4.2/3,
++// 10.4.3 (22/A2), 10.6.3 and 10.6.7 (41/C1). Low byte is even RAM.
++uint16 EmRegsISPDana::HostWord(bool writing, uint16 value) {
++    unsigned count=regs[0x22];
++    if(!count || count>regs[0x2b] || hostCursor>=count || hostCursor+2>regs[0x2b])
++        throw std::runtime_error("ISP ATL access outside transfer");
++    auto& slot=hostRam[hostCursor/2];
++    uint16 result=slot;
++    if(writing) slot=(hostCursor+1==count) ? value&255 : value;
++    hostCursor+=2;
++    if(hostCursor>=count) {
++        regs[0x24]|=4;
++        if(writing) regs[0x2c]|=4;
++        else regs[0x2c]&=~4u;
++    }
++    return hostCursor>count ? result&255 : result;
++}
++template <typename T> void EmRegsISPDana::HostFields(T& h) {
++    h.Do32(hostCursor);
++    for(auto& value:hostRam) h.Do16(value);
++}
++bool EmRegsISPDana::DecodeHostPtd(const uint8* data, unsigned size, unsigned offset, HostPtd& out) {
++    if(!data || size>4096 || (offset&3) || offset>size || size-offset<8) return false;
++    auto p=data+offset;
++    HostPtd v;
++    v.actual=p[0]|((p[1]&3)<<8); v.toggle=p[1]&4; v.active=p[1]&8;
++    v.completion=p[1]>>4; v.maximum=p[2]|((p[3]&3)<<8);
++    v.lowSpeed=p[3]&4; v.last=p[3]&8; v.endpoint=p[3]>>4;
++    v.total=p[4]|((p[5]&3)<<8); v.direction=(p[5]>>2)&3;
++    v.interrupt=p[5]&32; v.address=p[6]&127;
++    if((p[5]&0xd0) || (p[6]&128) || p[7] || v.direction==3 ||
++       !v.maximum || v.actual>v.total || v.total>size-offset-8 ||
++       v.completion==10 || v.completion==11) return false;
++    out=v; return true;
++}
++bool EmRegsISPDana::ValidateHostList(const uint8* data, unsigned size) {
++    unsigned offset=0;
++    for(;;) {
++        HostPtd v;
++        if(!DecodeHostPtd(data,size,offset,v)) return false;
++        unsigned end=offset+8+v.total;
++        if(v.last) return size>=end && size<=((end+3)&~3u);
++        offset=(end+3)&~3u;
++    }
++}
++bool EmRegsISPDana::CompleteHostPtd(uint8* data, unsigned size, unsigned offset,
++                                   uint16 actual, uint8 completion, bool toggle) {
++    HostPtd v;
++    if(!DecodeHostPtd(data,size,offset,v) || actual>v.total || completion>15 ||
++       completion==10 || completion==11 || completion>=14) return false;
++    data[offset]=actual&255;
++    data[offset+1]=(actual>>8)|(toggle?4:0)|(completion<<4);
++    return true;
++}

@@ -929,7 +929,7 @@ int main() {
     auto good=Save(isp);
     uint32 count=0,type=0;memcpy(&count,good.data(),4);memcpy(&type,good.data()+4,4);
     assert(count==1 && type==uint32(ChunkType::regsISPDana));
-    for(auto item: {std::pair<unsigned,uint32>{0,6}, {3,1000000}, {5,256}, {6,2},
+    for(auto item: {std::pair<unsigned,uint32>{0,7}, {3,1000000}, {5,256}, {6,2},
                    {7,1}, {8,256}, {16,1}, {17,2}, {20+0x2a,4097},
                    {20+0x2b,4095}, {20+0x15,1}, {20+0x16,2}}) {
         auto bad=good;
