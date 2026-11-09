@@ -359,6 +359,17 @@ test-jit-compile-thread: build/dynarmic-trial/src/.frond-source
 		tests/jit-compile-thread.cpp -pthread -o build/test-jit-compile-thread
 	./build/test-jit-compile-thread
 
+# iWMMXt on the PXA27x: each instruction against a per-lane model.
+.PHONY: test-pxa270-wmmx
+test: test-pxa270-wmmx
+test-pxa270-wmmx: out/frond
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/wmmx-core.rsp
+	$(CXX) -std=c++17 -O1 -g \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/pxa270-wmmx.cpp @build/wmmx-core.rsp build/source/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-pxa270-wmmx
+	./build/test-pxa270-wmmx
+
 .PHONY: test-arm-conditions benchmark-menu
 test-arm-conditions: out/frond
 	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/conditions-core.rsp
