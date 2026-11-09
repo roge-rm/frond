@@ -17,6 +17,7 @@
 #include "emulator/bthost.h"
 #include "bluetooth-dun.h"
 #include <time.h>
+#include <stdint.h>
 #define CHANNEL 9
 #define RECORD_HANDLE 0x10001u
 #define OPP_MTU 1024
@@ -27,6 +28,10 @@ static unsigned rfchannel=CHANNEL;
 static bool push_mode,hold_put,client_held,spp_mode,spp_waiting_disconnect;
 /* DUN: a phone's Dial-up Networking service, the channel's bytes going to a Hayes modem and PPP (bluetooth-dun.h). */
 static bool dun_mode;
+/* The phone's BD_ADDR, 02:46:52:4E:44:50 (wire order here). Locally administered, so it can't
+   clash with a guest's factory address or btvirt's own 00:AA:01:00:00:xx. */
+static const uint8_t phone_address[6]={0x50,0x44,0x4e,0x52,0x46,0x02};
+static bool phone_address_set,phone_named,dun_disc_hangup;
 static uint16_t service_uuid(void){return dun_mode?0x1103:spp_mode?0x1101:0x1105;}
 static const char* service_name(void){return dun_mode?"Dial-up Networking":spp_mode?"Frond SPP endpoint":"Frond OPP endpoint";}
 static const char* gate_path;
@@ -145,10 +150,13 @@ static void rfcomm_data(const void*data,uint16_t length,void*p){
  if(length>sizeof(obex)-obex_size){obex_status(0xc0);return;}memcpy(obex+obex_size,data,length);obex_size+=length;
  while(obex_size>=3){size_t want=be16(obex+1);if(want<3||want>OPP_MTU){obex_status(0xc0);obex_size=0;return;}if(obex_size<want)return;obex_packet(obex,want);memmove(obex,obex+want,obex_size-want);obex_size-=want;}
 }
-/* DUN server: the channel's bytes go to the modem, and what it sends back goes out in UIH frames
-   small enough for any RFCOMM frame size the guest picked. */
+/* DUN server: one call at a time. The channel's bytes go to the modem, and what it sends back goes
+   out in UIH frames small enough for any RFCOMM frame size the guest picked. */
 static struct frond_dun* dun;
-static bool dun_open,dun_hooked;static uint16_t dun_hooked_handle;
+static bool dun_open;
+/* Links whose channel 9 has our hook. bthost frees a link's hooks with the link and btvirt reuses
+   its handle, so a handle leaves the list when its link goes. */
+static uint16_t dun_hooked[32];static unsigned dun_hooked_count;
 static char dun_state[32]="off";
 static struct bytes dun_sent;
 static uint64_t monotonic_ns(void){struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return (uint64_t)t.tv_sec*1000000000u+(uint64_t)t.tv_nsec;}
@@ -161,17 +169,29 @@ static void dun_flush(void){
  }
  dun_report();
 }
-static void dun_data(const void*data,uint16_t length,void*p){if(dun_open){frond_dun_input(dun,data,length,monotonic_ns());dun_flush();}}
+/* The hook's user data is its link's handle; only the call's link reaches the modem. */
+static void dun_data(const void*data,uint16_t length,void*p){if(dun_open&&(uint16_t)(uintptr_t)p==rfhandle){frond_dun_input(dun,data,length,monotonic_ns());dun_flush();}}
 static bool dun_tick(void*p){dun_flush();return true;}
+static bool dun_is_hooked(uint16_t h){for(unsigned i=0;i<dun_hooked_count;++i)if(dun_hooked[i]==h)return true;return false;}
 static void dun_connected(uint16_t h,uint16_t c){
+ /* Another link while a call is up gets nothing: its bytes are dropped and the call goes on. */
+ if(dun_open&&h!=rfhandle){printf("DUN_BUSY handle=%04x\n",h);fflush(stdout);return;}
  rfhandle=h;rfcid=c;if(dun_open)frond_dun_close(dun,monotonic_ns());dun_open=true;frond_dun_open(dun,monotonic_ns());
  /* bthost takes the first hook for a channel, so one per ACL link is enough. */
- if(!dun_hooked||dun_hooked_handle!=h){bthost_add_rfcomm_chan_hook(host,h,CHANNEL,dun_data,NULL);dun_hooked=true;dun_hooked_handle=h;}
+ if(!dun_is_hooked(h)){assert(dun_hooked_count<32);bthost_add_rfcomm_chan_hook(host,h,CHANNEL,dun_data,(void*)(uintptr_t)h);dun_hooked[dun_hooked_count++]=h;}
  printf("DUN_CONNECTED channel=%u handle=%04x\n",CHANNEL,h);fflush(stdout);dun_report();
 }
-static void dun_closed(uint16_t h){if(!dun_open||h!=rfhandle)return;dun_open=false;frond_dun_close(dun,monotonic_ns());puts("DUN_CLOSED");fflush(stdout);dun_report();}
+/* The call ends on RFCOMM DISC (disc), L2CAP close (l2cap) or the link going (link). */
+static void dun_closed(uint16_t h,const char*why){if(!dun_open||h!=rfhandle)return;dun_open=false;frond_dun_close(dun,monotonic_ns());printf("DUN_CLOSED %s\n",why);fflush(stdout);dun_report();}
+static void dun_link_gone(uint16_t h){for(unsigned i=0;i<dun_hooked_count;++i)if(dun_hooked[i]==h){dun_hooked[i]=dun_hooked[--dun_hooked_count];break;}dun_closed(h,"link");}
+/* bthost answers a DISC itself without telling us, so look for one on the call's channel (or the
+   multiplexer's, DLCI 0) in the incoming ACL. */
+static void dun_watch_disc(const uint8_t*p,size_t n){
+ if(!dun_open||n<11||p[0]!=2||((p[1]|p[2]<<8)&0x0fff)!=rfhandle||((p[2]>>4)&3)==1||(p[7]|p[8]<<8)!=rfcid)return;
+ if((p[10]&~0x10)==0x43&&((p[9]>>3)==CHANNEL||(p[9]>>2)==0))dun_closed(rfhandle,"disc");
+}
 static void rfcomm_connected(uint16_t h,uint16_t c,void*p,bool ok){assert(ok);if(dun_mode){dun_connected(h,c);return;}rfhandle=h;rfcid=c;bthost_add_rfcomm_chan_hook(host,h,CHANNEL,rfcomm_data,NULL);printf("RFCOMM_CONNECTED channel=%u handle=%04x\n",CHANNEL,h);fflush(stdout);}
-static void rfcomm_closed(uint16_t h,uint16_t c,void*p){if(dun_mode){dun_closed(h);return;}printf("RFCOMM_L2CAP_CLOSED complete=%u\n",completed);fflush(stdout);}
+static void rfcomm_closed(uint16_t h,uint16_t c,void*p){if(dun_mode){dun_closed(h,"l2cap");return;}printf("RFCOMM_L2CAP_CLOSED complete=%u\n",completed);fflush(stdout);}
 static void send_h4(const struct iovec*iov,int n,void*p){
  uint8_t packet[65540];size_t count=0;for(int i=0;i<n;++i){assert(iov[i].iov_len<=sizeof(packet)-count);memcpy(packet+count,iov[i].iov_base,iov[i].iov_len);count+=iov[i].iov_len;}
  size_t at=0;while(at<count){ssize_t z=send(sk,packet+at,count-at,MSG_NOSIGNAL);if(z<0&&errno==EINTR)continue;assert(z>0);at+=z;}
@@ -238,9 +258,13 @@ static void dun_ppp_send(uint16_t protocol,uint8_t code,uint8_t id,const uint8_t
 }
 static void dun_ipcp_request(void){uint8_t o[18]={3,6,0,0,0,0,129,6,0,0,0,0,131,6,0,0,0,0};
  for(int i=0;i<4;++i){o[2+i]=dun_address>>(24-8*i);o[8+i]=o[14+i]=dun_dns>>(24-8*i);}dun_ppp_send(0x8021,1,dun_ipcp_id++,o,sizeof(o));}
+static bool dun_drop_link(void*p){client_state=5;bthost_hci_disconnect(host,rfhandle,0x13);return false;}
 static void dun_finish(void){
  completed=true;disconnected=true;printf("DUN_IPCP_UP address=%u.%u.%u.%u dns=%u.%u.%u.%u\n",dun_address>>24,(dun_address>>16)&255,(dun_address>>8)&255,dun_address&255,dun_dns>>24,(dun_dns>>16)&255,(dun_dns>>8)&255,dun_dns&255);fflush(stdout);
- client_state=5;bthost_hci_disconnect(host,rfhandle,0x13);
+ if(!dun_disc_hangup){client_state=5;bthost_hci_disconnect(host,rfhandle,0x13);return;}
+ /* --disc-hangup: close the DLC first (DISC, P set) and keep the link a little longer. */
+ uint8_t disc[4]={(uint8_t)((rfchannel*2<<2)|3),0x53,1,0};uint8_t crc=0xff;for(unsigned i=0;i<3;++i){crc^=disc[i];for(unsigned j=0;j<8;++j)crc=(crc>>1)^((crc&1)?0xe0:0);}disc[3]=0xff-crc;
+ bthost_send_cid(host,rfhandle,rfcid,disc,sizeof(disc));puts("DUN_DISC_SENT");fflush(stdout);timeout_add(500,dun_drop_link,NULL,NULL);
 }
 static void dun_packet(const uint8_t*f,size_t n){
  if(n<8||f[0]!=0xff||f[1]!=3)return;uint16_t protocol=be16(f+2);uint8_t code=f[4],id=f[5];size_t length=be16(f+6);if(length<4||length>n-4)return;
@@ -286,18 +310,27 @@ static void client_sdp_open(uint8_t code,const void*data,uint16_t length,void*p)
 static void client_connected(uint16_t h,void*p){sdp_handle=h;const uint8_t request[]={1,0,0x4f,0};assert(bthost_l2cap_req(host,h,2,request,sizeof(request),client_sdp_open,NULL));}
 static bool deadline(void*p){fprintf(stderr,"Owned OPP peer deadline\n");mainloop_quit();return false;}
 
+static void send_name(void){uint8_t cmd[252]={1,0x13,0x0c,248};const char*name=dun_mode?"Frond Phone":"Frond OPP endpoint";memcpy(cmd+4,name,strlen(name)+1);assert(send(sk,cmd,sizeof(cmd),MSG_NOSIGNAL)==sizeof(cmd));}
 static void command(uint16_t op,uint8_t status,const void*data,uint8_t len,void*p){
  printf("CMD opcode=%04x status=%u len=%u\n",op,status,len);
  if(op==0x1009&&len>=7){const uint8_t*b=(const uint8_t*)data+1;printf("BDADDR_LE ");for(unsigned i=0;i<6;++i)printf("%02x",b[i]);puts("");}
+ /* After the address write, read it back (bthost keeps it), then name the phone. */
+ if(op==0xfc01&&dun_mode&&!push_mode){assert(!status);phone_address_set=true;const uint8_t cmd[]={1,0x09,0x10,0};assert(send(sk,cmd,sizeof(cmd),MSG_NOSIGNAL)==sizeof(cmd));}
+ if(op==0x1009&&phone_address_set&&!phone_named){assert(!status&&len>=7&&!memcmp((const uint8_t*)data+1,phone_address,6));phone_named=true;send_name();}
  if(op==0x0c13&&dun_mode){assert(!status);/* Class of device: a phone (smartphone) with networking, object transfer and telephony. */uint8_t cmd[]={1,0x24,0x0c,3,0x0c,0x02,0x52};assert(send(sk,cmd,sizeof(cmd),MSG_NOSIGNAL)==sizeof(cmd));}
  else if(op==0x0c13||op==0x0c24){assert(!status);bthost_write_scan_enable(host,3);}
  if(op==0x0c1a){assert(!status);printf("READY %s channel=9\n",service_name());}fflush(stdout);
 }
-static void ready(void){if(push_mode){bthost_hci_connect(host,remote_address,0);return;}uint8_t cmd[252]={1,0x13,0x0c,248};const char*name=dun_mode?"Frond Phone":"Frond OPP endpoint";memcpy(cmd+4,name,strlen(name)+1);assert(send(sk,cmd,sizeof(cmd),MSG_NOSIGNAL)==sizeof(cmd));}
+static void ready(void){
+ if(push_mode){bthost_hci_connect(host,remote_address,0);return;}
+ /* The phone keeps one address whatever order links join btvirt in, so a Palm's pairing with it holds. */
+ if(dun_mode){uint8_t cmd[10]={1,0x01,0xfc,6};memcpy(cmd+4,phone_address,6);assert(send(sk,cmd,sizeof(cmd),MSG_NOSIGNAL)==sizeof(cmd));return;}
+ send_name();
+}
 static void read_h4(int fd,uint32_t events,void*p){
  static uint8_t data[65540];static size_t count;if(events&(EPOLLERR|EPOLLHUP)){mainloop_quit();return;}
  ssize_t n=recv(fd,data+count,sizeof(data)-count,MSG_DONTWAIT);if(n<0&&(errno==EAGAIN||errno==EINTR))return;if(n<=0){mainloop_quit();return;}count+=n;
- for(;;){if(!count)break;size_t want;if(data[0]==4){if(count<3)break;want=3+data[2];}else if(data[0]==2){if(count<5)break;want=5+data[3]+((size_t)data[4]<<8);}else if(data[0]==3){if(count<4)break;want=4+data[3];}else{fprintf(stderr,"Unexpected H4 type %u\n",data[0]);exit(2);}assert(want<=sizeof(data));if(count<want)break;bool disconnected_link=push_mode && client_state==5 && want==7 && data[0]==4 && data[1]==5 && data[2]==4 && !data[3] && (data[4]|data[5]<<8)==rfhandle;if(spp_mode&&!push_mode&&completed&&want==7&&data[0]==4&&data[1]==5&&data[2]==4&&!data[3]&&(data[4]|data[5]<<8)==rfhandle){disconnected=true;puts("SPP_HCI_DISCONNECT_COMPLETE");mainloop_quit();}if(dun&&!push_mode&&want==7&&data[0]==4&&data[1]==5&&!data[3])dun_closed(data[4]|data[5]<<8);map_cids(data,want);bthost_receive_h4(host,data,want);if(disconnected_link){if(spp_mode)disconnected=true;push_link_closed=true;puts("HCI_DISCONNECT_COMPLETE");fflush(stdout);mainloop_quit();}memmove(data,data+want,count-want);count-=want;}
+ for(;;){if(!count)break;size_t want;if(data[0]==4){if(count<3)break;want=3+data[2];}else if(data[0]==2){if(count<5)break;want=5+data[3]+((size_t)data[4]<<8);}else if(data[0]==3){if(count<4)break;want=4+data[3];}else{fprintf(stderr,"Unexpected H4 type %u\n",data[0]);exit(2);}assert(want<=sizeof(data));if(count<want)break;bool disconnected_link=push_mode && client_state==5 && want==7 && data[0]==4 && data[1]==5 && data[2]==4 && !data[3] && (data[4]|data[5]<<8)==rfhandle;if(spp_mode&&!push_mode&&completed&&want==7&&data[0]==4&&data[1]==5&&data[2]==4&&!data[3]&&(data[4]|data[5]<<8)==rfhandle){disconnected=true;puts("SPP_HCI_DISCONNECT_COMPLETE");mainloop_quit();}if(dun&&!push_mode&&want==7&&data[0]==4&&data[1]==5&&!data[3])dun_link_gone(data[4]|data[5]<<8);if(dun&&!push_mode)dun_watch_disc(data,want);map_cids(data,want);bthost_receive_h4(host,data,want);if(disconnected_link){if(spp_mode)disconnected=true;push_link_closed=true;puts("HCI_DISCONNECT_COMPLETE");fflush(stdout);mainloop_quit();}memmove(data,data+want,count-want);count-=want;}
 }
 static void stopped(int sig,void*p){mainloop_quit();}
 static void debug(const char*line,void*p){printf("H4 %s\n",line);fflush(stdout);}
@@ -317,8 +350,12 @@ static void dun_tests(void){
  dun_open=true;frond_dun_open(dun,monotonic_ns());dun_flush();assert(!strcmp(dun_state,"idle"));
  const char at[]="AT\r";dun_data(at,3,NULL);add(&dun_sent,"",1);assert(strstr((char*)dun_sent.b,"OK"));dun_sent.n=0;
  const char dial[]="ATDT*99#\r";dun_data(dial,sizeof(dial)-1,NULL);assert(!strcmp(dun_state,"dialling"));
- dun_closed(rfhandle);assert(!strcmp(dun_state,"off"));frond_dun_destroy(dun);dun=NULL;
- puts("PASS DUN UUID1103 record on channel 9 and modem commands");
+ /* A second link's connect and bytes don't touch the call. */
+ dun_sent.n=0;dun_connected(rfhandle+1,0x40);assert(dun_open&&rfhandle==0);dun_data(at,3,(void*)(uintptr_t)1);dun_flush();assert(!dun_sent.n&&!strcmp(dun_state,"dialling"));
+ /* A DISC on the call's channel ends it. */
+ rfcid=0x40;uint8_t acl[13]={2,0,0x20,8,0,4,0,0x40,0,(CHANNEL*2<<2)|3,0x53,1,0};dun_watch_disc(acl,sizeof(acl));assert(!dun_open&&!strcmp(dun_state,"off"));
+ dun_open=true;frond_dun_open(dun,monotonic_ns());dun_flush();dun_link_gone(rfhandle);assert(!dun_open&&!strcmp(dun_state,"off"));frond_dun_destroy(dun);dun=NULL;
+ puts("PASS DUN UUID1103 record on channel 9, modem commands, one call at a time, DISC and link loss end the call");
 }
 int main(int argc,char**argv){
  if(argc==2&&!strcmp(argv[1],"--selftest-spp")){spp_tests();return 0;}
@@ -326,7 +363,7 @@ int main(int argc,char**argv){
  if(argc==2&&!strcmp(argv[1],"--selftest")){tests();return 0;}assert(argc>=3);
  /* SOCKET OUTPUT [options] for OPP and SPP; SOCKET --dun [--pin PIN] for the phone and SOCKET --dun-dial ADDRESS for its test client. */
  int first=3;if(!strncmp(argv[2],"--",2))first=2;else output_path=argv[2];
- for(int at=first;at<argc;++at){if(!strcmp(argv[at],"--spp-echo")){spp_mode=true;continue;}if(!strcmp(argv[at],"--dun")){dun_mode=true;continue;}if(!strcmp(argv[at],"--hold-put")){hold_put=true;continue;}if(!strcmp(argv[at],"--pin")){assert(++at<argc && strlen(argv[at])>=1 && strlen(argv[at])<=16);pin_code=argv[at];continue;}if(!strcmp(argv[at],"--gate")){assert(++at<argc);gate_path=argv[at];assert(access(gate_path,F_OK)!=0);continue;}bool spp_arg=!strcmp(argv[at],"--spp-push"),dun_arg=!strcmp(argv[at],"--dun-dial");assert((!strcmp(argv[at],"--push")||spp_arg||dun_arg) && ++at<argc && strlen(argv[at])==12);spp_mode|=spp_arg;dun_mode|=dun_arg;push_mode=true;for(unsigned i=0;i<6;++i){unsigned value;assert(sscanf(argv[at]+2*i,"%2x",&value)==1);remote_address[i]=value;}}assert(!hold_put||!push_mode);assert(!gate_path||push_mode);assert(dun_mode!=!!output_path&&!(dun_mode&&spp_mode));if(output_path)assert(access(output_path,F_OK)!=0);
+ for(int at=first;at<argc;++at){if(!strcmp(argv[at],"--spp-echo")){spp_mode=true;continue;}if(!strcmp(argv[at],"--dun")){dun_mode=true;continue;}if(!strcmp(argv[at],"--disc-hangup")){dun_disc_hangup=true;continue;}if(!strcmp(argv[at],"--hold-put")){hold_put=true;continue;}if(!strcmp(argv[at],"--pin")){assert(++at<argc && strlen(argv[at])>=1 && strlen(argv[at])<=16);pin_code=argv[at];continue;}if(!strcmp(argv[at],"--gate")){assert(++at<argc);gate_path=argv[at];assert(access(gate_path,F_OK)!=0);continue;}bool spp_arg=!strcmp(argv[at],"--spp-push"),dun_arg=!strcmp(argv[at],"--dun-dial");assert((!strcmp(argv[at],"--push")||spp_arg||dun_arg) && ++at<argc && strlen(argv[at])==12);spp_mode|=spp_arg;dun_mode|=dun_arg;push_mode=true;for(unsigned i=0;i<6;++i){unsigned value;assert(sscanf(argv[at]+2*i,"%2x",&value)==1);remote_address[i]=value;}}assert(!hold_put||!push_mode);assert(!dun_disc_hangup||(dun_mode&&push_mode));assert(!gate_path||push_mode);assert(dun_mode!=!!output_path&&!(dun_mode&&spp_mode));if(output_path)assert(access(output_path,F_OK)!=0);
  if(dun_mode&&!push_mode){dun=frond_dun_create();if(!dun){fprintf(stderr,"slirp did not start\n");return 2;}}
  sk=socket(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0);assert(sk>=0);struct sockaddr_un a={.sun_family=AF_UNIX};assert(strlen(argv[1])<sizeof(a.sun_path));strcpy(a.sun_path,argv[1]);
  /* The phone may start beside a btvirt that hasn't made its socket yet. */

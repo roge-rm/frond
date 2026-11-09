@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""The Bluetooth phone (bluetooth-opp-peer --dun) on a private btvirt: a second peer finds its DUN
-service, connects RFCOMM, dials and brings PPP's LCP and IPCP up."""
+"""The Bluetooth phone (bluetooth-opp-peer --dun) on a private btvirt: it takes its fixed address, and a
+second peer finds its DUN service, connects RFCOMM, dials and brings PPP's LCP and IPCP up, twice:
+once hanging up by dropping the link, once by RFCOMM DISC."""
 import argparse
 from pathlib import Path
 import queue
@@ -11,6 +12,8 @@ import threading
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
+# The phone's fixed BD_ADDR in wire order (02:46:52:4E:44:50).
+PHONE_ADDRESS = '50444e524602'
 
 
 def reader(process, lines):
@@ -53,27 +56,44 @@ def main():
             processes.append(phone)
             server = queue.Queue()
             threading.Thread(target=reader, args=(phone, server), daemon=True).start()
-            address = wait_for(server, 'BDADDR_LE ', 10, server_log)
             ready = wait_for(server, 'READY ', 10, server_log)
-            if not address or not ready:
+            if not ready:
                 raise RuntimeError('the phone did not come up')
-            client = subprocess.run([str(args.peer), str(socket), '--dun-dial', address.split()[1]],
-                                    stdout=subprocess.PIPE, text=True, timeout=60)
-            client_log = client.stdout.splitlines()
-            # The phone's own view of the call, read once the client has gone.
-            wait_for(server, 'DUN_STATE off', 5, server_log)
+            # The phone writes its fixed address (0xfc01) and reads it back before it's ready.
+            addresses = [line.split()[1] for line in server_log if line.startswith('BDADDR_LE ')]
+            if not addresses or addresses[-1] != PHONE_ADDRESS:
+                raise RuntimeError(f'phone address {addresses[-1:] or "missing"}, not {PHONE_ADDRESS}')
+
             def seen(log, text):
                 return any(text in line for line in log)
-            for text in ('CLIENT_DUN_CHANNEL 9', 'DUN_DIALLED CONNECT 33600', 'DUN_LCP_UP',
-                         'DUN_IPCP_UP address=10.0.2.15 dns=10.0.2.3', 'HCI_DISCONNECT_COMPLETE'):
-                if not seen(client_log, text):
-                    failures.append(f'client: no {text}')
-            if client.returncode:
-                failures.append(f'client exit {client.returncode}')
-            for text in ('SDP opcode=', 'DUN_CONNECTED channel=9', 'DUN_STATE dialling', 'DUN_STATE online 33600',
-                         'DUN_CLOSED', 'DUN_STATE off'):
-                if not seen(server_log, text):
-                    failures.append(f'phone: no {text}')
+
+            # Two calls in a row on the same handle: the first ends with the link dropped, the
+            # second with an RFCOMM DISC while the link is still up.
+            handles = []
+            for call, extra, closed in ((1, [], 'DUN_CLOSED link'), (2, ['--disc-hangup'], 'DUN_CLOSED disc')):
+                start = len(server_log)
+                client = subprocess.run([str(args.peer), str(socket), '--dun-dial', PHONE_ADDRESS, *extra],
+                                        stdout=subprocess.PIPE, text=True, timeout=60)
+                client_log.append(f'-- call {call}')
+                client_log.extend(client.stdout.splitlines())
+                # The phone's own view of the call, read once the client has gone.
+                wait_for(server, 'DUN_STATE off', 5, server_log)
+                calls = client.stdout.splitlines()
+                phone = server_log[start:]
+                for text in ('CLIENT_DUN_CHANNEL 9', 'DUN_DIALLED CONNECT 33600', 'DUN_LCP_UP',
+                             'DUN_IPCP_UP address=10.0.2.15 dns=10.0.2.3', 'HCI_DISCONNECT_COMPLETE'):
+                    if not seen(calls, text):
+                        failures.append(f'call {call} client: no {text}')
+                if client.returncode:
+                    failures.append(f'call {call} client exit {client.returncode}')
+                for text in ('SDP opcode=', 'DUN_CONNECTED channel=9', 'DUN_STATE dialling', 'DUN_STATE online 33600',
+                             closed, 'DUN_STATE off'):
+                    if not seen(phone, text):
+                        failures.append(f'call {call} phone: no {text}')
+                handles += [line.split('handle=')[1] for line in phone if line.startswith('DUN_CONNECTED ')]
+            # btvirt hands the second link the first one's handle; that's the case being checked.
+            if len(handles) != 2 or handles[0] != handles[1]:
+                failures.append(f'handles {handles}, expected the same one twice')
         except Exception as error:
             failures.append(str(error))
         finally:
@@ -88,7 +108,8 @@ def main():
                          *[l for l in client_log if not l.startswith('H4 ')]]), file=sys.stderr)
         print('FAIL ' + '; '.join(failures))
         return 1
-    print('PASS Bluetooth DUN: SDP, RFCOMM channel 9, CONNECT 33600, LCP and IPCP up (10.0.2.15, DNS 10.0.2.3)')
+    print(f'PASS Bluetooth DUN: address {PHONE_ADDRESS}, SDP, RFCOMM channel 9, CONNECT 33600, LCP and IPCP up (10.0.2.15, DNS 10.0.2.3), '
+          'twice on one handle, link drop and DISC hang up')
     return 0
 
 

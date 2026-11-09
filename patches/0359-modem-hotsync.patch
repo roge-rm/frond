@@ -267,10 +267,10 @@ index cd9b680..afafdc6 100644
  class HayesModem {
 diff --git a/src/common/modem/LineSwitch.h b/src/common/modem/LineSwitch.h
 new file mode 100644
-index 0000000..7d500df
+index 0000000..4c1f0d0
 --- /dev/null
 +++ b/src/common/modem/LineSwitch.h
-@@ -0,0 +1,112 @@
+@@ -0,0 +1,123 @@
 +#ifndef FROND_MODEM_LINE_SWITCH_H
 +#define FROND_MODEM_LINE_SWITCH_H
 +
@@ -295,13 +295,16 @@ index 0000000..7d500df
 +class PipeLine : public ModemLine {
 +   public:
 +    static constexpr size_t kQueueBytes = 65536;
++    // Once the far end has gone, bytes still on their way to the guest are dropped if the modem
++    // takes none of them for this long (in online command mode it takes none).
++    static constexpr uint64_t kDrainStallNs = 1000000000;
 +
 +    // Someone is there to answer; with nobody the number gives NO ANSWER.
 +    void SetReachable(bool on) { reachable = on; }
 +    bool Reachable() const { return reachable; }
 +    bool InCall() const { return inCall; }
 +    // The far end went away during the call: the modem reports NO CARRIER once the bytes it
-+    // sent before going have reached the guest.
++    // sent before going have reached the guest, or after kDrainStallNs with none taken.
 +    void PeerGone() { carrier = false; }
 +
 +    // Bytes the guest sent, for the owner to pass on.
@@ -320,7 +323,8 @@ index 0000000..7d500df
 +    }
 +    size_t InRoom() const { return kQueueBytes - std::min(kQueueBytes, in.size()); }
 +
-+    void Answer(uint64_t) override {
++    void Answer(uint64_t now) override {
++        drainMark = now;
 +        inCall = true;
 +        carrier = true;
 +        in.clear();
@@ -335,16 +339,23 @@ index 0000000..7d500df
 +        const size_t n = std::min(size, kQueueBytes - std::min(kQueueBytes, out.size()));
 +        out.insert(out.end(), data, data + n);
 +    }
-+    size_t ToModem(uint8_t* data, size_t max, uint64_t) override {
++    size_t ToModem(uint8_t* data, size_t max, uint64_t now) override {
 +        const size_t n = std::min(max, in.size());
 +        std::copy_n(in.begin(), n, data);
 +        in.erase(in.begin(), in.begin() + long(n));
++        if (n) drainMark = now;
 +        return n;
++    }
++    // Called by the modem before Carrier while a call is up.
++    void Service(uint64_t now) override {
++        if (carrier || in.empty()) drainMark = now;
++        else if (now - drainMark >= kDrainStallNs) in.clear();
 +    }
 +    bool Carrier(uint64_t) const override { return carrier || !in.empty(); }
 +
 +   private:
 +    bool reachable{false}, inCall{false}, carrier{true};
++    uint64_t drainMark{0};
 +    std::deque<uint8_t> in, out;
 +};
 +

@@ -963,7 +963,11 @@ static void TestNetSyncWakeup() {
     const Bytes short_ = Udp(1031, 14237, {0xfa, 0xde});
     net.Input(short_.data(), short_.size(), 1002 * ms);
     net.Poll(1003 * ms);
-    CHECK(!net.Receive(answer));
+    // With nothing on the host's UDP 14237, slirp may hand back an ICMP port unreachable; no
+    // UDP answer comes.
+    bool udp = false;
+    while (net.Receive(answer)) udp |= answer.size() >= 20 && answer[9] == 17;
+    CHECK(!udp);
 }
 
 // ---- The HotSync number: routing and the byte bridge ----
@@ -1021,6 +1025,21 @@ static void TestHotSyncRoute() {
     CHECK(modem.GetState() == HayesModem::State::Online);
     rig.Run(100 * ms);
     CHECK_TEXT(rig.Take(), last + "\r\nNO CARRIER\r\n");
+    CHECK(!hotsync.InCall() && modem.GetState() == HayesModem::State::Command);
+
+    // The host side leaving while the guest is in online command mode: nothing takes its last
+    // bytes, so they're dropped after the stall time and NO CARRIER comes.
+    CHECK_TEXT(rig.Dial("ATDT4687962"), "\r\nCONNECT 33600\r\n");
+    rig.Run(1100 * ms);
+    rig.Type("+++");
+    rig.Run(1100 * ms);
+    CHECK_TEXT(rig.Take(), ok);
+    hotsync.PutIn(reinterpret_cast<const uint8_t*>(last.data()), last.size());
+    hotsync.PeerGone();
+    rig.Run(500 * ms);
+    CHECK(modem.GetState() == HayesModem::State::OnlineCommand && rig.Take().empty());
+    rig.Run(600 * ms);
+    CHECK_TEXT(rig.Take(), "\r\nNO CARRIER\r\n");
     CHECK(!hotsync.InCall() && modem.GetState() == HayesModem::State::Command);
 
     // Hanging up from the guest ends the HotSync call, and the next PPP number works again.
