@@ -94,6 +94,13 @@ int main(int argc,char** argv) {
    owner.attach(i);assert(owner.printer.setBus(bus));begin();
    assert((i.get(0x15)&0x1f0003)==3);
    auto b=i.transfer(1,1,false,1,{0,255,0,42},0,64);assert(b[0]==4 && owner.printer.size()==4);
+   // Saved part way through a job: the bulk toggle carries on, so the guest's next packet is new data
+   // rather than a repeat. The bytes before the save aren't kept.
+   const auto midBus=owner.printer.bus();assert(midBus.bulkToggle);
+   Savestate<ChunkType> mid;assert(mid.Save(i));
+   SavestateLoader<ChunkType> midLoad;assert(midLoad.Load(mid.GetBuffer(),mid.GetSize(),i));
+   owner.attach(i);assert(owner.printer.setBus(midBus));begin();
+   auto next=i.transfer(1,1,true,1,{1,2,3,4,5},0,64);assert(next[0]==5 && owner.printer.size()==5);
    SavestateLoader<ChunkType> again;assert(again.Load(kept.GetBuffer(),kept.GetSize(),i));
    owner.detach();assert((i.get(0x15)&0x10003)==0x10000);
    UsbRawPrinter::Bus bad;bad.configuration=1;assert(!owner.printer.setBus(bad));

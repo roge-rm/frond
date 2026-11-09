@@ -54,18 +54,22 @@ PrinterPanel::PrinterPanel(QWidget* parent) : QWidget(parent) {
 void PrinterPanel::setSupported(bool printer, bool wifi) {
     const QSignalBlocker blocked(portBox);
     const auto current = port();
+    const auto text = readout->text();
     portBox->clear();
     portBox->addItem(tr("Off"), "off");
     if (printer) portBox->addItem(tr("Printer"), "printer");
     if (wifi) portBox->addItem(tr("Wi-Fi adapter"), "wifi");
-    setPort(current);
+    portBox->setCurrentIndex(std::max(0, portBox->findData(current)));
+    readout->setText(port() == current ? text : QString());
     setVisible(printer || wifi);
 }
 QString PrinterPanel::port() const { return portBox->currentData().toString(); }
+// The readout belongs to the port, so it only clears when the port changes.
 void PrinterPanel::setPort(const QString& port) {
     const QSignalBlocker blocked(portBox);
+    const auto before = this->port();
     portBox->setCurrentIndex(std::max(0, portBox->findData(port)));
-    readout->clear();
+    if (this->port() != before) readout->clear();
 }
 void PrinterPanel::setLinkReadout(const QString& text) { readout->setText(text); }
 void PrinterPanel::setReadout(bool attached, qint64 bytes) {

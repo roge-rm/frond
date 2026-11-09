@@ -148,10 +148,12 @@ object UsbPort {
     // The port a machine starts with: what it saved, if the device has it.
     fun forStart(device: Device, saved: String) = if (saved in choices(device)) saved else OFF
 
-    // The core's command for a choice at start or on a change.
-    fun startRequest(port: String): Pair<String, String>? = when (port) {
-        PRINTER -> "printer" to "attach on"
-        WIFI -> "usb-port" to "wifi"
-        else -> null
+    // The core's command for a choice at start or on a change. Off is sent too, since a session brings the
+    // device it was saved with. Null when the device has no USB host port.
+    fun startRequest(device: Device, port: String): Pair<String, String>? = when {
+        choices(device).size < 2 -> null
+        port == PRINTER -> "printer" to "attach on"
+        port == WIFI -> "usb-port" to "wifi"
+        else -> "usb-port" to "off"
     }
 }

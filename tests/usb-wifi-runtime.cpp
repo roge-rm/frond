@@ -86,13 +86,14 @@ struct Host {
         assert(w.adapter.linkUp());
     }
     // An Ethernet II payload sent the ROM's way: 802.3 header and SNAP.
-    void transmit(const uint8_t* dest,uint16_t type,const Bytes& payload) {
+    void transmit(const uint8_t* dest,uint16_t type,const Bytes& payload) { out(frame(dest,type,payload)); }
+    Bytes frame(const uint8_t* dest,uint16_t type,const Bytes& payload) {
         Bytes m(60,0);
         std::memcpy(&m[46],dest,6); auto mac=w.mac(); std::memcpy(&m[52],mac.data(),6);
         const unsigned n=8+payload.size(); m[58]=uint8_t(n>>8); m[59]=uint8_t(n);
         const uint8_t snap[8]={0xaa,0xaa,3,0,0,0,uint8_t(type>>8),uint8_t(type)};
         m.insert(m.end(),snap,snap+8); m.insert(m.end(),payload.begin(),payload.end());
-        out(m);
+        return m;
     }
 };
 
@@ -197,6 +198,41 @@ int main() {
         assert(i.HasHostTarget(0) && w.adapter.linkUp());
         assert(w.adapter.busAddress()==2 && (h.command(0)>>8)==0);
     }
+    // Saved mid OUT frame with a reply waiting: after the load the guest finishes the ARP request,
+    // reads the reply and gets slirp's answer. The bus line goes through its session text.
+    // Enable again after the Initialize above, so the link is up.
+    assert((h.command(1)>>8)==0); assert(le(h.in(),6)==1 && w.adapter.linkUp());
+    {
+        Bytes c(10); w16(c,0,1); w16(c,2,0x11); w16(c,4,0xf200); h.out(c);
+        Bytes f=h.frame(broadcast,0x0806,arp); f.resize((f.size()+63)&~size_t(63));
+        assert(f.size()==128);
+        assert(h.send(2,1,h.outT,64,Bytes(f.begin(),f.begin()+64)).result==Result::ack); h.outT=!h.outT;
+        const Bytes adapterState=w.adapter.save();
+        const std::string line=UsbWifiRuntime::busText(w.adapter.bus());
+        UsbPrism2Adapter::Bus loaded;
+        assert(UsbWifiRuntime::parseBus(line,loaded) && !loaded.flight.empty() && loaded.outToggle==h.outT);
+        assert(!UsbWifiRuntime::parseBus(line+" 00",loaded));
+        assert(!UsbWifiRuntime::parseBus(line+"0",loaded));
+        assert(!UsbWifiRuntime::parseBus(line.substr(0,line.size()-1),loaded));
+        assert(!UsbWifiRuntime::parseBus("2 1 0 0 0 zz",loaded));
+        assert(!UsbWifiRuntime::parseBus("0 0 0 0 0"+line.substr(line.rfind(' ')),loaded));
+        assert(UsbWifiRuntime::parseBus("2 1 0 0 1",loaded) && loaded.flight.empty());
+        assert(UsbWifiRuntime::parseBus(line,loaded));
+        Savestate<ChunkType> mid; assert(mid.Save(i));
+        SavestateLoader<ChunkType> loader; assert(loader.Load(mid.GetBuffer(),mid.GetSize(),i));
+        w.attach(i); assert(w.adapter.load(adapterState.data(),adapterState.size()) && w.adapter.setBus(loaded));
+        w.sessionLoaded();
+        assert(w.adapter.queuedMessages()==2);
+        assert(h.send(2,1,h.outT,64,Bytes(f.begin()+64,f.end())).result==Result::ack); h.outT=!h.outT;
+        Bytes r=h.in(); assert(le(r,0)==0x8001 && le(r,2)==0x11);
+        r=h.in(); assert(le(r,0)==0x8000 && le(r,4)==0xf200 && le(r,6)==1);
+        t+=2000000; w.poll();
+        r=h.in();
+        assert(r.size()>=60+8+28 && le(r,0)==0x2000 && r[66]==8 && r[67]==6 && r[68+7]==2);
+        assert(r[68+14]==10 && r[68+17]==2);
+    }
+    // A router kept from earlier Wi-Fi use starts again on load while the adapter is unplugged.
+    w.detach(); w.sessionLoaded(); w.attach(i);
     Bytes bad=state; bad[4]=9; assert(!w.adapter.load(bad.data(),bad.size()));
     UsbPrism2Adapter::Bus badBus; badBus.configuration=1; assert(!w.adapter.setBus(badBus));
     badBus={0,0,false,false,true}; assert(!w.adapter.setBus(badBus));

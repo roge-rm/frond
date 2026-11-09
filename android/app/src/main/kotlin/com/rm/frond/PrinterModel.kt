@@ -100,6 +100,15 @@ class PrinterModel(
         }
     }
 
+    // Takes the core's port as it is after the start request, so the row and settings match the core.
+    fun adopt(state: PrintJob.Port) {
+        if (!state.valid || state.port == port) return
+        port = state.port
+        bytes = 0
+        wifiText = PrintJob.wifiReadout(state)
+        remember(state.port)
+    }
+
     private fun remember(choice: String) {
         sessionId?.let { id ->
             try { Sessions.updateSettings(host.applicationContext, id) { it.copy(usbPort = choice) } } catch (_: Exception) { }

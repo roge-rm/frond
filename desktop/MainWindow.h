@@ -122,6 +122,8 @@ class MainWindow : public QMainWindow {
     void printerPoll();
     void usbPortReply(bool switched, const QString& message);
     bool usbPortResync{false};
+    // The start-up USB port choice and the state read after it are in flight.
+    bool usbPortStart{false};
     bool printerResult(bool ok, const QString& message);
     void printerCollect();
     void printerShow();

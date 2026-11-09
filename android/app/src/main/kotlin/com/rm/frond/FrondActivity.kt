@@ -64,6 +64,8 @@ open class FrondActivity : SDLActivity() {
     private var barResults: BarResults? = null
     // The menu's and sheets' model, on the control link.
     private var menuModel: RunningModel? = null
+    // The core's USB port state read after the start request, for a running bar made after it came back.
+    private var startUsbPort: PrintJob.Port? = null
     private var imeVisible = false
     @Volatile private var pendingMicrophone = false
     @Volatile private var foreground = false
@@ -162,11 +164,17 @@ open class FrondActivity : SDLActivity() {
         link.whenConnected {
             Thread { SdCard.restorePending(applicationContext, link, sessionPath) }.apply { isDaemon = true }.start()
         }
-        // The Dana's USB port gets the machine's printer or Wi-Fi adapter at every start.
-        UsbPort.startRequest(UsbPort.forStart(launchDevice(), machineSettings.usbPort))?.let { (command, argument) ->
+        // The Dana's USB port gets the machine's choice at every start, then the row shows what the core has.
+        UsbPort.startRequest(launchDevice(), UsbPort.forStart(launchDevice(), machineSettings.usbPort))?.let { (command, argument) ->
             link.whenConnected {
-                Thread { link.request(command, argument, timeoutSeconds = 30).takeIf { !it.ok }?.let { Log.w(TAG, "usb port: ${it.message}") } }
-                    .apply { isDaemon = true }.start()
+                Thread {
+                    link.request(command, argument, timeoutSeconds = 30).takeIf { !it.ok }?.let { Log.w(TAG, "usb port: ${it.message}") }
+                    val state = PrintJob.parsePort(link.request("usb-port-state", timeoutSeconds = 5).message)
+                    if (state.valid) runOnUiThread {
+                        startUsbPort = state
+                        menuModel?.printer?.adopt(state)
+                    }
+                }.apply { isDaemon = true }.start()
             }
         }
         // Infrared, serial and Bluetooth over a connection are set from the machine's settings at every start.
@@ -786,6 +794,7 @@ open class FrondActivity : SDLActivity() {
             device, SdCard(this, link, sessionPath, device), PalmDatabases(this, link), link, session?.name ?: device.label,
         )
         menuModel = model
+        startUsbPort?.let { model.printer?.adopt(it) }
         bar.device = device
         bar.model = model
         model.watchGdb()

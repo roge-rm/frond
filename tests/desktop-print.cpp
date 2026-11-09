@@ -89,6 +89,10 @@ class DesktopPrint : public QObject {
         QVERIFY(!panel.plugged());
         panel.setLinkReadout("Connected, 10.0.2.15");
         QCOMPARE(panel.findChild<QLabel*>("printerReadout")->text(), QString("Connected, 10.0.2.15"));
+        // Refreshing the choices or setting the same port keeps the readout.
+        panel.setSupported(true, true);
+        panel.setPort("wifi");
+        QCOMPARE(panel.findChild<QLabel*>("printerReadout")->text(), QString("Connected, 10.0.2.15"));
         // Printer keeps the Print received row working.
         panel.setPort("printer");
         QVERIFY(panel.plugged());

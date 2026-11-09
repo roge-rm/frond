@@ -736,6 +736,19 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             if (appsStale) listApps();
         });
         if (command == "db-list") { databasesReply(ok, message); return; }
+        // At start the machine's USB port choice goes to the core, then the panel shows what the core has.
+        if (usbPortStart && (command == "usb-port" || command == "usb-port-state")) {
+            if (stopping) { usbPortStart = usbPortResync = false; save(); return; }
+            if (command == "usb-port") {
+                if (!ok) failure(message);
+                usbPortResync = true;
+                if (send("usb-port-state")) return;
+                usbPortResync = false;
+            } else usbPortReply(false, message);
+            usbPortStart = false;
+            notify(tr("Running. Sessions save automatically on close."));
+            return;
+        }
         if (command == "usb-port-state" || (command == "usb-port" && ok)) {
             usbPortReply(command == "usb-port", message);
             if (stopping && command == "usb-port") save();
@@ -752,7 +765,15 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (command == "printer") {
             const bool chain = printerResult(ok, message);
             if (stopping) { save(); return; }
-            if (chain) notify(tr("Running. Sessions save automatically on close."));
+            if (chain) {
+                // A failed attach has already asked for the state.
+                usbPortStart = true;
+                if (usbPortResync) return;
+                usbPortResync = true;
+                if (send("usb-port-state")) return;
+                usbPortStart = usbPortResync = false;
+                notify(tr("Running. Sessions save automatically on close."));
+            }
             else if (!busy) notify(QString());
             return;
         }
@@ -921,13 +942,21 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             send(command == "ms-state" && cardPresent ? "ms-protection" : "network-state"); return;
         }
         if (command == "ms-protection" && !stopping) { send("network-state"); return; }
-        if (command == "network-state" && !stopping && frondFirmware::capabilities(runningDevice).usbPrinter && runningPreferences.usbPort == "printer") {
-            printerStage = PrinterStage::Chain;
-            if (send("printer", "attach on")) return;
-            printerStage = PrinterStage::None;
+        // The Dana's USB port always gets the machine's choice, Off included, since a session brings the
+        // device it was saved with.
+        if (command == "network-state" && !stopping) {
+            const auto caps = frondFirmware::capabilities(runningDevice);
+            const auto& port = runningPreferences.usbPort;
+            if (caps.usbPrinter && port == "printer") {
+                printerStage = PrinterStage::Chain;
+                if (send("printer", "attach on")) return;
+                printerStage = PrinterStage::None;
+            } else if (caps.usbPrinter || caps.usbWifi) {
+                usbPortStart = true;
+                if (send("usb-port", caps.usbWifi && port == "wifi" ? "wifi" : "off")) return;
+                usbPortStart = false;
+            }
         }
-        if (command == "network-state" && !stopping && frondFirmware::capabilities(runningDevice).usbWifi && runningPreferences.usbPort == "wifi" &&
-            send("usb-port", "wifi")) return;
         if ((command == "ms-create" || command == "ms-insert" || command == "ms-reinsert" || command == "ms-put-in") && !stopping) { send("ms-protection"); return; }
         notify(command == "save" ? tr("Saved.") : tr("Running. Sessions save automatically on close."));
         const bool savedWorkingCopy = command == "save" && savingPath == sessionPath;
@@ -2273,6 +2302,7 @@ void MainWindow::loadUsbSettings() {
     usb->setCurrentIndex(std::max(0, usb->findData(value.startsWith("tcp:") ? QString("tcp") : value)));
     usbPort->setValue(value.startsWith("tcp:") ? value.mid(4).toInt() : 5024);
     printerHeld.clear(); printerStatus = {}; printerStage = PrinterStage::None; printerDir.reset();
+    usbPortStart = usbPortResync = false;
     printerPanel->setPort(runningPreferences.usbPort);
     printerPanel->setReadout(false, 0);
     printerPanel->hideReceived();

@@ -430,6 +430,17 @@ int main() {
         Bytes m = doRrid(h, 0xfd41); assert(le(m, 6) == 4 && !std::memcmp(&m[8], "peer", 4));
         m = doRrid(h, 0xfdc1); assert(le(m, 6) == 3);
     }
+    // Ad hoc has no peers: nothing the guest sends leaves, nothing comes in.
+    {
+        const uint8_t a[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+        const size_t n = sent.size();
+        const unsigned frames = dev.txFrames(), drops = dev.rxDropped();
+        assert(h.out(romTx(a, mac.data(), 0x0800, Bytes(300, 1))));
+        assert(sent.size() == n && dev.txFrames() == frames + 1);
+        Bytes e(14 + 46, 0); e[12] = 0x08;
+        assert(!dev.receive(e.data(), e.size()) && dev.rxDropped() == drops + 1);
+        assert(h.in().empty());
+    }
     // A WEP key never stops the link.
     assert(doCmd(h, 0x02));
     romConnect(h, false, "Frond", 6, true);
@@ -464,6 +475,87 @@ int main() {
         assert(!third.load(dup.data(), dup.size()) && third.save() == pristine);
         assert(!third.linkUp() && !third.isEnabled());
     }
+    // A session saved mid OUT frame, part way through a reply and with replies waiting: the loaded
+    // adapter carries on where the guest left off. An RX frame nobody started reading is dropped.
+    {
+        assert(doWrid(h, 0xfce5, {1u << 5, 3, 0}, 4));
+        assert(h.out(rrid(0xfd89)));
+        Rp first = h.send(1, 2, h.inT, 64);
+        assert(first.result == R::ack && first.bytes.size() == 64); h.inT = !h.inT;
+        assert(h.out(cmd(0x11, 0xf200)));
+        Bytes e(14 + 46, 0); std::memcpy(&e[0], mac.data(), 6); e[6] = 0x52; e[12] = 0x08;
+        assert(dev.receive(e.data(), e.size()));
+        const uint8_t dst[6] = {0x52, 0x55, 0x0a, 0, 2, 2};
+        Bytes payload(1500); for(size_t k = 0; k < payload.size(); ++k) payload[k] = uint8_t(k * 7);
+        Bytes frame = romTx(dst, mac.data(), 0x0800, payload);
+        frame.resize((frame.size() + 63) & ~size_t(63));
+        for(size_t o = 0; o < 3 * 64; o += 64) {
+            assert(h.send(2, 1, h.outT, 64, Bytes(frame.begin() + o, frame.begin() + o + 64)).result == R::ack);
+            h.outT = !h.outT;
+        }
+        const size_t before = sent.size();
+        const UsbPrism2Adapter::Bus bus = dev.bus();
+        assert(!bus.flight.empty() && bus.address == 2 && bus.configuration == 1 && bus.outToggle == h.outT);
+        const Bytes saved = dev.save();
+
+        UsbPrism2Adapter other;
+        other.setMac(mac);
+        std::vector<Bytes> sent2;
+        other.setTxSink([&](const Bytes& f) { sent2.push_back(f); });
+        assert(other.load(saved.data(), saved.size()) && other.setBus(bus));
+        assert(other.queuedMessages() == 3 && other.bus().flight == bus.flight);
+        Host h2(other); h2.addr = 2; h2.outT = h.outT; h2.inT = h.inT;
+        Bytes reply = first.bytes, rest = h2.in();
+        reply.insert(reply.end(), rest.begin(), rest.end());
+        assert(reply.size() == 74 && le(reply, 0) == 0x8003 && le(reply, 4) == 0xfd89 && le(reply, 6) == 64 && le(reply, 10) == 6);
+        assert(status(next(h2), 0x8001) == 0x11);
+        assert(linkStatusIs(next(h2), 1));
+        assert(h2.in().empty());
+        for(size_t o = 3 * 64; o < frame.size(); o += 64) {
+            assert(h2.send(2, 1, h2.outT, 64, Bytes(frame.begin() + o, frame.begin() + o + 64)).result == R::ack);
+            h2.outT = !h2.outT;
+        }
+        Bytes want(dst, dst + 6); want.insert(want.end(), mac.begin(), mac.end());
+        want.push_back(0x08); want.push_back(0x00); want.insert(want.end(), payload.begin(), payload.end());
+        assert(sent2.size() == 1 && sent2[0] == want && sent.size() == before);
+        assert(other.bus().flight.empty());
+        assert(doCmd(h2, 0x11, 0xf200) && linkStatusIs(next(h2), 1));
+        // The first adapter takes the second's bus state, with nothing in flight.
+        assert(dev.setBus(other.bus()) && dev.queuedMessages() == 0);
+        h.outT = h2.outT; h.inT = h2.inT;
+
+        // Damaged in-flight data is refused and changes nothing.
+        UsbPrism2Adapter third;
+        const auto pristine = third.bus();
+        auto refused = [&](const Bytes& flight, unsigned configuration = 1) {
+            UsbPrism2Adapter::Bus b{2, configuration, false, false, false, flight};
+            const bool ok = third.setBus(b);
+            const auto now = third.bus();
+            return !ok && now.address == pristine.address && now.configuration == pristine.configuration && now.flight.empty();
+        };
+        auto edited = [&](size_t at, uint8_t v) { Bytes f = bus.flight; f[at] = v; return f; };
+        const size_t held = le(bus.flight, 3);
+        assert(held == 3 * 64);
+        const size_t first0 = 5 + held + 1;  // first message: flags, pos, size
+        assert(refused(bus.flight, 0));
+        assert(refused(edited(0, 2)));
+        assert(refused(edited(1, 64)));                                  // skip past a packet
+        assert(refused(edited(5 + held, 65)));                           // too many messages
+        assert(refused(edited(first0, 2)));                              // unknown flags
+        assert(refused(edited(first0 + 1, 74)));                         // read past its end
+        assert(refused(edited(first0 + 3, 64)));                         // a multiple of 64
+        assert(refused(Bytes(bus.flight.begin(), bus.flight.end() - 1)));
+        { Bytes f = bus.flight; f.push_back(0); assert(refused(f)); }
+        { Bytes f = bus.flight; f[5 + 58] = 0x40; assert(refused(f)); }  // the held frame's length out of range
+        // A complete request can't still be held; part of one can.
+        Bytes c = cmd(0x11, 0xf200);
+        Bytes whole{1, 0, 0, 10, 0}; whole.insert(whole.end(), c.begin(), c.end()); whole.push_back(0);
+        assert(refused(whole));
+        Bytes part{1, 0, 0, 4, 0}; part.insert(part.end(), c.begin(), c.begin() + 4); part.push_back(0);
+        UsbPrism2Adapter::Bus partBus{2, 1, false, false, true, part};
+        assert(third.setBus(partBus) && third.bus().flight == part);
+    }
+
     // Initialize returns to defaults; detach does too and drops the address.
     assert(doCmd(h, 0x00));
     assert(!dev.isEnabled() && le(doRrid(h, 0xfc07), 6) == 2304 && le(doRrid(h, 0xfc2a), 6) == 1);

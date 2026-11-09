@@ -27,9 +27,11 @@ class UsbPortTest {
         assertEquals("wifi", UsbPort.forStart(dana, "wifi"))
         assertEquals("off", UsbPort.forStart(other, "wifi"))
         assertEquals("off", UsbPort.forStart(other, "printer"))
-        assertEquals("usb-port" to "wifi", UsbPort.startRequest("wifi"))
-        assertEquals("printer" to "attach on", UsbPort.startRequest("printer"))
-        assertNull(UsbPort.startRequest("off"))
+        assertEquals("usb-port" to "wifi", UsbPort.startRequest(dana, "wifi"))
+        assertEquals("printer" to "attach on", UsbPort.startRequest(dana, "printer"))
+        // Off goes to the core too, since a session brings the device it was saved with.
+        assertEquals("usb-port" to "off", UsbPort.startRequest(dana, "off"))
+        assertNull(UsbPort.startRequest(Device.entries.first { !it.usbWifi && !it.usbPrinter }, "off"))
     }
 
     @Test fun settingsKeepTheChoice() {
