@@ -2,6 +2,7 @@
 #include <vector>
 #include "EmRegsISPDana.h"
 #include "EmHAL.h"
+#include "UsbRawPrinter.h"
 #include "savestate/Savestate.h"
 #include "savestate/SavestateLoader.h"
 class Isp: public EmRegsISPDana {
@@ -22,6 +23,43 @@ static std::vector<uint8> ptd(unsigned total=10,unsigned direction=1){std::vecto
 static std::vector<uint8> save(Isp&i){Savestate<ChunkType>s;assert(s.Save(i));auto*p=static_cast<uint8*>(s.GetBuffer());return {p,p+s.GetSize()};}
 static bool load(Isp&i,std::vector<uint8>b){SavestateLoader<ChunkType>l;return l.Load(b.data(),b.size(),i);}
 int main(){
+ {
+  Isp host;UsbRawPrinter printer(128);
+  host.ready([&](const auto& packet){return printer.packet<Isp::HostReply>(packet);});
+  host.submit({0,8,8,8,8,0,0,0,0x80,6,0,1,0,0,8,0,0,0});host.frame();
+  assert(host.read(16)[0]==8);
+  host.submit({0,12,8,8,8,8,0,0,0,0});
+  // A new read counter does not enlarge the submitted input prefix.
+  host.reg(0xa2,16);host.frame();auto descriptor=host.read(16);
+  assert(descriptor[0]==8 && descriptor[1]==0 && descriptor[8]==18 && descriptor[9]==1 && descriptor[15]==8);
+ }
+ // A truncated OUT at the end invalidates the whole list before any callback.
+ {
+  Isp host;unsigned calls=0;host.ready([&](const auto& packet){++calls;return Isp::HostReply{R::ack,packet.toggle,{}};});
+  auto list=ptd(4);list[3]=0;auto tail=ptd(8);tail.resize(10);list.insert(list.end(),tail.begin(),tail.end());
+  host.submit(list);bool failed=false;try{host.frame();}catch(...){failed=true;}assert(failed&&calls==0);
+ }
+ // Observed Dana IN8 header plus trailing word, with an unwritten destination.
+ for(unsigned received : {2u,8u}) {
+  Isp host; unsigned calls=0;
+  host.ready([&](const auto& packet){++calls;assert(packet.direction==2 && packet.requested==8 && packet.bytes.empty());return Isp::HostReply{R::ack,packet.toggle,std::vector<uint8>(received,0x12)};});
+  std::vector<uint8> in={0,12,8,8,8,8,0,0,0,0};
+  host.submit(in);host.frame();auto result=host.read(16);
+  assert(calls==1 && result[0]==received && !(result[1]&8));
+  assert((result[1]>>4)==(received==8?0:9));
+  for(unsigned n=0;n<8;++n) assert(result[8+n]==(n<received?0x12:0));
+ }
+ // Each streamed successor follows the full reserved IN RAM range.
+ {
+  Isp host;unsigned calls=0;
+  host.ready([&](const auto& packet){++calls;return Isp::HostReply{R::ack,packet.toggle,packet.direction==2?std::vector<uint8>{1,2,3,4}:std::vector<uint8>{}};});
+  auto in=ptd(4,2);in[3]=0;auto out=ptd(1);in.insert(in.end(),out.begin(),out.end());
+  host.submit(in);host.frame();assert(calls==2);
+  // A stale successor cannot complete a newly written header-only list.
+  in.resize(8);host.submit(in);bool failed=false;
+  try{host.frame();}catch(...){failed=true;}assert(failed&&calls==2);
+ }
+
  Isp i;unsigned calls=0,accepted=0;std::vector<bool>toggles;std::vector<unsigned>sizes;
  i.ready([&](const auto&p){++calls;accepted+=p.bytes.size();toggles.push_back(p.toggle);sizes.push_back(p.requested);return Isp::HostReply{R::ack,p.toggle,{}};});
  auto b=ptd();i.submit(b);auto checkpoint=save(i);i.Initialize();i.now+=1000;EmHAL::DispatchCycle(i.now,false);i.Dispose();assert(calls==3&&accepted==10);assert((sizes==std::vector<unsigned>{4,4,2}));assert((toggles==std::vector<bool>{false,true,false}));assert(i.get(0x2c)==36);assert(i.get(0x24)&2);auto out=i.read(b.size());assert(out[0]==10&&out[1]==4);i.frame();assert(calls==3);

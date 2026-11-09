@@ -20,7 +20,15 @@ static std::vector<uint8> save(Isp& i){Savestate<ChunkType> s;assert(s.Save(i));
 static bool load(Isp& i,std::vector<uint8> s){SavestateLoader<ChunkType> l;return l.Load(s.data(),s.size(),i);}
 int main(){
  Isp i;i.reg(0xab,4096);i.reg(0xa2,11);i.cmd(0xc1);i.put(0x1234);
- auto partial=save(i);i.put(0x5678);assert(load(i,partial));i.put(0x5678);
+ auto partial=save(i);
+ auto invalidWritten=partial;uint32 excessive=4097;
+ memcpy(invalidWritten.data()+invalidWritten.size()-4,&excessive,4);
+ assert(!load(i,invalidWritten));assert(save(i)==partial);
+ auto legacy=partial;legacy.resize(legacy.size()-4);
+ uint32 legacyVersion=9,legacyWords=(legacy.size()-12)/4;
+ memcpy(legacy.data()+8,&legacyWords,4);memcpy(legacy.data()+12,&legacyVersion,4);
+ assert(load(i,legacy));assert(save(i)==partial);
+i.put(0x5678);assert(load(i,partial));i.put(0x5678);
  for(int n=0;n<4;++n)i.put(0xffff);
  i.cmd(0x24);assert(i.get()&4);i.cmd(0x2c);assert(i.get()==4);
  i.reg(0xa2,11);i.cmd(0x41);assert(i.get()==0x1234);assert(i.get()==0x5678);
@@ -29,7 +37,7 @@ int main(){
  bool fail=false;auto before=save(i);try{i.get();}catch(const std::runtime_error&){fail=true;}assert(fail);assert(save(i)==before);
  auto bad=before;uint32 invalid=4097; // appended host cursor follows all DC fields
  // The cursor is immediately before 2048 Do16 words (each occupies one serialized word).
- memcpy(bad.data()+bad.size()-16-2048*4-4,&invalid,4);
+ memcpy(bad.data()+bad.size()-4-16-2048*4-4,&invalid,4);
  assert(!load(i,bad));assert(save(i)==before);
  bad=before;bad.resize(bad.size()-4);assert(!load(i,bad));assert(save(i)==before);
  // Interrupted malformed guest headers remain saveable until list validation.
@@ -54,5 +62,11 @@ int main(){
  assert(EmRegsISPDana::ValidateHostList(setup,sizeof setup));
  assert(!EmRegsISPDana::ValidateHostList(setup,15));
  setup[3]=0;assert(!EmRegsISPDana::ValidateHostList(setup,sizeof setup));
+ uint8 in[24]={0,12,8,8,8,8,0,0,0,0};
+ assert(EmRegsISPDana::ValidateHostList(in,10,16));
+ assert(!EmRegsISPDana::ValidateHostList(in,10,12));
+ assert(!EmRegsISPDana::ValidateHostList(in,7,16));
+ in[5]=4;assert(!EmRegsISPDana::ValidateHostList(in,10,16));
+ in[5]=8;in[3]=0;assert(!EmRegsISPDana::ValidateHostList(in,10,24));
  return 0;
 }

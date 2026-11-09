@@ -53,7 +53,7 @@ int main(){
   auto detached=save(event);assert(load(event,detached));
   assert(!(event.get(3)&0x40));
   for(uint32 version : {6u,7u}) {
-   auto legacy=detached;
+   auto legacy=detached;legacy.resize(legacy.size()-4);
    if(version==6) legacy.resize(legacy.size()-16);
    uint32 words=(legacy.size()-12)/4;
    memcpy(legacy.data()+8,&words,4);memcpy(legacy.data()+12,&version,4);

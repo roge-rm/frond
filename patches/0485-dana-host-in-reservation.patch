@@ -1,0 +1,159 @@
+--- a/src/cloudpilot/emulator/hardware/EmRegsISPDana.cpp
++++ b/src/cloudpilot/emulator/hardware/EmRegsISPDana.cpp
+@@ -38,7 +38,7 @@
+     command = 0; word = 0; latch = 0;
+     hostArmed=false; hostTargets={};
+     hostAttached={}; hostLowSpeed={}; portResetCycles={};
+-    hostRam.fill(0); hostCursor=0;
++    hostRam.fill(0); hostCursor=0; hostWritten=0;
+     ResetDevice();
+     RefreshHostInterrupt();
+ }
+@@ -166,6 +166,7 @@
+             if(!regs[0x22] || regs[0x22]>regs[0x2b])
+                 throw std::runtime_error("ISP ATL count outside allocation");
+             hostCursor=0;
++            if(value==0xc1) { hostRam.fill(0); hostArmed=false; hostWritten=0; }
+         }
+         command = value; word = 0; latch = 0;
+         return;
+@@ -259,7 +260,7 @@
+             if (value==0xf6) {
+                 // HC reset cancels transfers without unplugging external devices.
+                 CancelHostWork();
+-                hostCursor=0; portResetCycles={};
++                hostCursor=0; hostWritten=0; portResetCycles={};
+                 fractional=0; resetCycles=0;
+                 regs.fill(0); regs[0]=0x10; regs[0x0d]=0x2edf;
+                 regs[0x11]=0x628; regs[0x27]=0x6122; regs[0x12]=2; regs[0x20]=0x28;
+@@ -269,7 +270,7 @@
+             if (value > 4096 || (value & 3) ||
+                 (command==0xaa ? 2*value+regs[0x2b] : 2*regs[0x2a]+value)>4096)
+                 throw std::runtime_error("ISP invalid buffer length");
+-            regs[command & 0x7f] = value; hostArmed=false; hostCursor=0; regs[0x2c]=0; break;
++            regs[command & 0x7f] = value; hostArmed=false; hostCursor=0; hostWritten=0; regs[0x2c]=0; break;
+         default: throw std::runtime_error("ISP unqualified register write");
+     }
+     RefreshHostInterrupt();
+@@ -391,20 +392,21 @@
+ template <typename T> void EmRegsISPDana::SaveState(T& s) {
+ 
+     auto* c=s.GetChunk(ChunkType::regsISPDana); if(!c) return;
+-    c->Put32(9); SaveChunkHelper h(*c); StateFields(h);
++    c->Put32(10); SaveChunkHelper h(*c); StateFields(h);
+     h.Do16(dcAddress);
+     for (auto& value : dcEndpoints) h.Do16(value);
+     PacketFields(h); CancellationFields(h); HostFields(h);
+     for(auto& cycles:portResetCycles) h.Do64(cycles);
++    h.Do32(hostWritten);
+ }
+ void EmRegsISPDana::Load(SavestateLoader<ChunkType>& l) {
+ 
+     auto* c=l.GetChunk(ChunkType::regsISPDana);
+     if(!c) { l.NotifyError(); return; }
+     uint32 version=c->Get32();
+-    if(version!=2 && version!=3 && version!=4 && version!=5 && version!=6 && version!=7 && version!=8 && version!=9) { l.NotifyError(); return; }
+-    auto fields=std::tie(lastCycle,fractional,resetCycles,regs,command,word,latch,dcEndpoints,dcAddress,dcCommand,dcMode,dcHardware,dcScratch,dcUnlocked,dcSuspended,dcInterrupt,dcInterruptEnable,dcLatch,dcWord,fifo,configNext,cursor,allocated,setupPending,effectiveAddress,vbus,deviceEnabled,flushed,accessCancelled,hostRam,hostCursor,portResetCycles);
+-    auto before=std::make_tuple(lastCycle,fractional,resetCycles,regs,command,word,latch,dcEndpoints,dcAddress,dcCommand,dcMode,dcHardware,dcScratch,dcUnlocked,dcSuspended,dcInterrupt,dcInterruptEnable,dcLatch,dcWord,fifo,configNext,cursor,allocated,setupPending,effectiveAddress,vbus,deviceEnabled,flushed,accessCancelled,hostRam,hostCursor,portResetCycles);
++    if(version!=2 && version!=3 && version!=4 && version!=5 && version!=6 && version!=7 && version!=8 && version!=9 && version!=10) { l.NotifyError(); return; }
++    auto fields=std::tie(lastCycle,fractional,resetCycles,regs,command,word,latch,dcEndpoints,dcAddress,dcCommand,dcMode,dcHardware,dcScratch,dcUnlocked,dcSuspended,dcInterrupt,dcInterruptEnable,dcLatch,dcWord,fifo,configNext,cursor,allocated,setupPending,effectiveAddress,vbus,deviceEnabled,flushed,accessCancelled,hostRam,hostCursor,portResetCycles,hostWritten);
++    auto before=std::make_tuple(lastCycle,fractional,resetCycles,regs,command,word,latch,dcEndpoints,dcAddress,dcCommand,dcMode,dcHardware,dcScratch,dcUnlocked,dcSuspended,dcInterrupt,dcInterruptEnable,dcLatch,dcWord,fifo,configNext,cursor,allocated,setupPending,effectiveAddress,vbus,deviceEnabled,flushed,accessCancelled,hostRam,hostCursor,portResetCycles,hostWritten);
+     bool invalid=false;
+     LoadChunkHelper h(*c); StateFields(h);
+     if(version<9) {
+@@ -429,7 +431,7 @@
+     }
+     flushed=0; accessCancelled=false;
+     if(version>=4) PacketFields(h);
+-    hostRam.fill(0); hostCursor=0;
++    hostRam.fill(0); hostCursor=0; hostWritten=0;
+ 
+     if(cursor>33) invalid=true;
+     if(version>=5) CancellationFields(h);
+@@ -454,6 +456,11 @@
+     if(version>=6) HostFields(h);
+     portResetCycles={};
+     if(version>=7) for(auto& cycles:portResetCycles) h.Do64(cycles);
++    // Legacy images used the transfer counter as the submitted extent.
++    hostWritten=version>=6 ? (command==0xc1 ? std::min<unsigned>(hostCursor,regs[0x22]) : std::min<unsigned>(regs[0x22],regs[0x2b])) : 0;
++    if(version>=10) h.Do32(hostWritten);
++    if(hostWritten>regs[0x2b] ||
++       (version>=10 && command==0xc1 && hostWritten!=std::min<unsigned>(hostCursor,regs[0x22]))) invalid=true;
+     for(unsigned i=0;i<2;++i) {
+         auto p=regs[0x15+i];
+         if(portResetCycles[i]>(ClockHz()+99)/100 ||
+@@ -714,6 +721,7 @@
+     uint16 result=slot;
+     if(writing) slot=(hostCursor+1==count) ? value&255 : value;
+     hostCursor+=2;
++    if(writing) hostWritten=std::min<unsigned>(hostCursor,count);
+     if(hostCursor>=count) {
+         regs[0x24]|=4;
+         if(writing) { regs[0x2c]=(regs[0x2c]&~32u)|4; hostArmed=true; }
+@@ -739,13 +747,18 @@
+        v.completion==10 || v.completion==11) return false;
+     out=v; return true;
+ }
+-bool EmRegsISPDana::ValidateHostList(const uint8* data, unsigned size) {
++bool EmRegsISPDana::ValidateHostList(const uint8* data, unsigned size, unsigned allocation) {
++    if(!allocation) allocation=size;
++    if(size>allocation || allocation>4096) return false;
+     unsigned offset=0;
+     for(;;) {
+         HostPtd v;
+-        if(!DecodeHostPtd(data,size,offset,v)) return false;
++        if(offset>size || size-offset<8 ||
++           !DecodeHostPtd(data,allocation,offset,v)) return false;
+         unsigned end=offset+8+v.total;
+-        if(v.last) return size>=end;
++        // IN destinations occupy RAM, but need no input bytes after Last.
++        if(v.direction!=2 && end>size) return false;
++        if(v.last) return true;
+         offset=(end+3)&~3u;
+     }
+ }
+@@ -770,9 +783,9 @@
+     // rev.03 sections 9.3-9.5: DWORD PTDs, round-robin packets, frame readback.
+     // Bounds are model policies, not cycle-accurate USB wire timing.
+     std::array<uint8,4096> data{};
+-    const unsigned size=regs[0x22];
+-    for(unsigned i=0;i<size;++i) data[i]=hostRam[i/2]>>((i&1)*8);
+-    if(!ValidateHostList(data.data(),size))
++    const unsigned written=hostWritten, size=regs[0x2b];
++    for(unsigned i=0;i<written;++i) data[i]=hostRam[i/2]>>((i&1)*8);
++    if(!ValidateHostList(data.data(),written,size))
+         throw std::runtime_error("ISP malformed ATL submission");
+     std::vector<unsigned> offsets;
+     for(unsigned o=0;;) {
+@@ -833,9 +846,9 @@
+     if(!hostArmed) return;
+     hostArmed=false;
+     std::array<uint8,4096> data{};
+-    unsigned size=regs[0x22];
+-    for(unsigned i=0;i<size;++i) data[i]=hostRam[i/2]>>((i&1)*8);
+-    if(!ValidateHostList(data.data(),size)) return;
++    unsigned written=hostWritten, size=regs[0x2b];
++    for(unsigned i=0;i<written;++i) data[i]=hostRam[i/2]>>((i&1)*8);
++    if(!ValidateHostList(data.data(),written,size)) return;
+     for(unsigned o=0;;) {
+         HostPtd p; DecodeHostPtd(data.data(),size,o,p);
+         if(p.active) {
+--- a/src/cloudpilot/emulator/hardware/EmRegsISPDana.h
++++ b/src/cloudpilot/emulator/hardware/EmRegsISPDana.h
+@@ -35,7 +35,7 @@
+     };
+     static bool DecodeHostPtd(const uint8*, unsigned, unsigned, HostPtd&);
+     static bool CompleteHostPtd(uint8*, unsigned, unsigned, uint16, uint8, bool);
+-    static bool ValidateHostList(const uint8*, unsigned);
++    static bool ValidateHostList(const uint8*, unsigned, unsigned allocation=0);
+     // HC logical request and level-mode pin output.
+     bool HostInterruptPending();
+     void SetHostIrq(std::function<void(bool)> sink) { hostIrqSink=std::move(sink); RefreshHostInterrupt(); }
+@@ -119,6 +119,7 @@
+     void RefreshHostInterrupt();
+     std::array<uint16,2048> hostRam{};
+     unsigned hostCursor=0;
++    unsigned hostWritten=0;
+     template <typename T> void HostFields(T&);
+     uint16 HostWord(bool writing, uint16 value=0);
+     std::array<uint32, 0x30> regs{};
