@@ -252,6 +252,43 @@ class FirmwareInputTest : public QObject {
         QVERIFY(!frondFirmware::validateFiles(Device::tx, txPath, nandPath).isEmpty());
         QVERIFY(!frondFirmware::validateFiles(Device::tx, txPath, {}).isEmpty());
     }
+    // The Dana Wireless takes the Dana's ROM, which names the Dana; the Dana still can't take another device's.
+    void danaWirelessRom() {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const auto dana = frondFirmware::deviceFromId("alphasmart-dana"), wireless = frondFirmware::deviceFromId("alphasmart-dana-wireless");
+        QVERIFY(dana != Device::automatic && wireless != Device::automatic && dana != wireless);
+        QVERIFY(frondFirmware::isDana(dana) && frondFirmware::isDana(wireless) && !frondFirmware::isDana(Device::tx));
+        QVERIFY(frondFirmware::runs68k(wireless));
+        QCOMPARE(frondFirmware::deviceName(wireless), QString("AlphaSmart Dana Wireless"));
+        const auto romPath = dir.filePath("rom");
+        QFile rom(romPath);
+        QVERIFY(rom.open(QIODevice::ReadWrite)); QVERIFY(rom.resize(6 << 20));
+        auto be = [&](qint64 at, quint32 value, int bytes) {
+            char out[4];
+            for (int i = 0; i < bytes; ++i) out[i] = char(value >> (8 * (bytes - 1 - i)));
+            rom.seek(at); rom.write(out, bytes);
+        };
+        // A small card at 0 and the big card at 0x8000, both for the Dana's company and HAL IDs.
+        for (qint64 base : {qint64(0), qint64(0x8000)}) {
+            be(base, 0x3000, 4); be(base + 4, base ? 0x1000c80a : 0x100002a2, 4); be(base + 8, 0xfeedbeef, 4);
+            be(base + 0x0c, 5, 2); be(base + 0x0e, 0x40, 2);
+            rom.seek(base + 0x10); rom.write("PalmCard", 9);
+            be(base + 0x6c, base ? 0x5c8000 : 0x6000, 4);
+            be(base + 0x7e, 0x61736d74, 4); be(base + 0x82, 0x44616e61, 4);
+        }
+        rom.flush();
+        Device resolved = Device::automatic;
+        QVERIFY(frondFirmware::validateFiles(dana, romPath, {}, &resolved).isEmpty());
+        QCOMPARE(resolved, dana);
+        QCOMPARE(frondFirmware::detectDevice(romPath), dana);
+        resolved = Device::automatic;
+        QVERIFY2(frondFirmware::validateFiles(wireless, romPath, {}, &resolved).isEmpty(),
+                 qPrintable(frondFirmware::validateFiles(wireless, romPath, {})));
+        QCOMPARE(resolved, wireless);
+        QVERIFY(frondFirmware::validateFiles(wireless, romPath, dir.filePath("nand")).contains("no NAND"));
+        QVERIFY(!frondFirmware::validateFiles(Device::tx, romPath, {}).isEmpty());
+    }
     // The IIIx takes one ROM file, told from its big-endian card header: the 3.1 retail and debug
     // ROMs, the generic OS 3.5 EZ ROMs and the IIIx/V 4.1 ROM.
     void iiixRoms() {

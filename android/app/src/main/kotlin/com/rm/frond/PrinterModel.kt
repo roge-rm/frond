@@ -35,6 +35,7 @@ class PrinterModel(
     private val link: ControlLink,
     private val sessionId: String?,
     initialPort: String,
+    initialModule: Boolean,
     private val inBackground: () -> Boolean,
     private val problem: (String) -> Unit,
 ) {
@@ -45,6 +46,11 @@ class PrinterModel(
     val plugged get() = port == UsbPort.PRINTER
     // The Wi-Fi adapter's link readout, null while it isn't the port's device.
     var wifiText by mutableStateOf<String?>(null)
+        private set
+    // The Dana Wireless's built-in Wi-Fi module: its radio, and the link readout polled once a second.
+    var moduleOn by mutableStateOf(initialModule)
+        private set
+    var moduleText by mutableStateOf<String?>(null)
         private set
     var bytes by mutableStateOf(0L)
         private set
@@ -63,6 +69,7 @@ class PrinterModel(
         host.lifecycleScope.launch(Dispatchers.IO) {
             while (isActive) {
                 if (plugged) poll() else if (port == UsbPort.WIFI) pollWifi()
+                if (device.builtInWifi) pollModule()
                 delay(1000)
             }
         }
@@ -113,6 +120,31 @@ class PrinterModel(
         sessionId?.let { id ->
             try { Sessions.updateSettings(host.applicationContext, id) { it.copy(usbPort = choice) } } catch (_: Exception) { }
         }
+    }
+
+    // Turns the built-in module's radio on or off. A refused change goes back to what the core has.
+    fun chooseModule(on: Boolean) {
+        val request = UsbPort.moduleRequest(device, on) ?: return
+        if (on == moduleOn) return
+        val before = moduleOn
+        moduleOn = on
+        moduleText = PrintJob.moduleReadout("off", on)
+        rememberModule(on)
+        host.lifecycleScope.launch(Dispatchers.IO) {
+            val reply = link.request(request.first, request.second, timeoutSeconds = 30)
+            if (!reply.ok) host.runOnUiThread { moduleOn = before; rememberModule(before); problem(reply.message) }
+        }
+    }
+
+    private fun rememberModule(on: Boolean) {
+        sessionId?.let { id ->
+            try { Sessions.updateSettings(host.applicationContext, id) { it.copy(wifiModule = on) } } catch (_: Exception) { }
+        }
+    }
+
+    private fun pollModule() {
+        val reply = link.request("wifi-module-state", timeoutSeconds = 5)
+        if (reply.ok) host.runOnUiThread { moduleText = PrintJob.moduleReadout(reply.message, moduleOn) }
     }
 
     private fun pollWifi() {

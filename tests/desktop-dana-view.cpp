@@ -43,6 +43,14 @@ class DanaViewTest : public QObject {
         frondSessions::Preferences loaded;
         QVERIFY(frondSessions::readPreferences(path, &loaded));
         QVERIFY(loaded.danaView == prefs.danaView); QCOMPARE(loaded.scale, 7); QVERIFY(loaded.smooth);
+        // The Wireless's Wi-Fi radio is on unless the machine turned it off.
+        QVERIFY(loaded.wifiModule);
+        prefs.wifiModule = false;
+        QVERIFY(frondSessions::writePreferences(path, prefs).isEmpty());
+        QVERIFY(frondSessions::readPreferences(path, &loaded)); QVERIFY(!loaded.wifiModule);
+        prefs.wifiModule = true;
+        QVERIFY(frondSessions::writePreferences(path, prefs).isEmpty());
+        QVERIFY(frondSessions::readPreferences(path, &loaded)); QVERIFY(loaded.wifiModule);
         QFile file(frondSessions::preferencesPath(path)); QVERIFY(file.open(QIODevice::ReadOnly));
         auto json = QJsonDocument::fromJson(file.readAll()).object(); file.close();
         const auto view = json.value("danaView").toObject();

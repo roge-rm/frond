@@ -47,6 +47,12 @@ QString wifiReadout(const UsbPort& state) {
     return state.powered ? QObject::tr("Not connected") : QObject::tr("Waiting for the Dana");
 }
 
+QString moduleReadout(const QString& state, bool radioOn) {
+    if (!radioOn) return QObject::tr("Off");
+    if (state.trimmed() == "off") return QObject::tr("Waiting for the Dana");
+    return wifiReadout(parseUsbPort("wifi " + state));
+}
+
 int drawPages(QPrinter* printer, const frond::PrintText& text) {
     QPainter painter;
     if (!painter.begin(printer)) return 0;

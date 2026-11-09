@@ -315,7 +315,7 @@ object Sessions {
     // the main thread. Returns an error message or null. The copy is a zip of packable files; SAF
     // cannot promise atomic replacement of an existing document.
     fun saveCopy(context: Context, link: ControlLink, to: Uri, session: String? = null): String? {
-        if (forPath(context, session)?.device?.id == "alphasmart-dana") {
+        if (forPath(context, session)?.device?.isDana() == true) {
             val cards = listOf("sd-state", "sd2-state").map { link.request(it) }
             DanaCardProtocol.sessionCopyError(cards.map { if (it.ok) it.message else null })?.let { return refuseOutput(context, to, it) }
         }
@@ -403,7 +403,7 @@ object Sessions {
     private fun header(file: File): Header? = try {
         if (DanaSession.wrapped(file)) {
             val inspected = DanaSession.inspect(file) ?: return null
-            return Header(MAGIC, inspected.version, "alphasmart-dana")
+            return Header(MAGIC, inspected.version, inspected.device)
         }
         java.io.DataInputStream(file.inputStream()).use { input ->
             val b = ByteArray(8 + DEVICE_NAME_SIZE)

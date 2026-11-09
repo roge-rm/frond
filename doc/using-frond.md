@@ -175,7 +175,7 @@ ordinary session copy and import paths.
 
 ### Dana USB port
 
-The Dana has one external USB port, and USB port in Connections (desktop panel, Android sheet) picks what is plugged into it: Off, Printer or Wi-Fi adapter. The choice is kept for the machine and applied at every start. Changing it while the Dana runs unplugs one and plugs in the other.
+The Dana has one external USB port, and USB port in Connections (desktop panel, Android sheet) picks what is plugged into it: Off, Printer or Wi-Fi adapter. The choice is kept for the machine and applied at every start. Changing it while the Dana runs unplugs one and plugs in the other. The Dana Wireless offers Off and Printer only, as its Wi-Fi is built in, see [Dana Wireless](#dana-wireless).
 
 With Printer, a print from the Dana is collected and "Print received" shows when it stops. Choose Save as PDF (desktop), Print, Save raw file or Discard. Only the Generic printer profile can be shown as pages.
 
@@ -188,6 +188,14 @@ With Wi-Fi adapter, the Dana sees a USB 802.11b adapter (a Microsoft MN-510) and
 - Connect. The Dana gets 10.0.2.15, the router is 10.0.2.2 and DNS is 10.0.2.3. Use 10.0.2.2 for a service on your computer.
 
 Peer to Peer (ad hoc) can be chosen but finds nobody, so DHCP times out.
+
+### Dana Wireless
+
+The AlphaSmart Dana Wireless is its own device in the device list, with 16 MB of RAM and the Dana's built-in 802.11b module. It uses the same ROM file as the Dana (AlphaSmart-Dana-1.5.rom), the same screen, keyboard, buttons and two card slots, and the same import steps. Choose AlphaSmart Dana Wireless when you add the device, as the ROM itself says Dana. A ROM without the serial number token the Wireless needs is refused when it starts, with the reason shown.
+
+Connections has a Wi-Fi row with On and Off for the built-in module, and a readout like "Connected, 10.0.2.15". It's kept for the machine and sent at every start. The USB port row offers Off and Printer. Set up Network in the Dana's Preferences as in Dana USB port above, using the built-in module; the network, address and limits are the same.
+
+A session belongs to the device it was saved with, so a Dana session opens as a Dana and a Wireless session as a Wireless. Frond doesn't turn one into the other.
 
 ### Cards
 
@@ -441,9 +449,10 @@ Tested: discovery, sending a Memo or file by Bluetooth (OPP), PIN and Trusted De
 
 ## Availability and limits
 
-Dana has an experimental desktop and Android frontend, with its built-in
+Dana has a desktop and Android frontend, with its built-in
 keyboard, sound, infrared beaming, two independent SD/MMC slots, a USB printer
-and a USB Wi-Fi adapter. Its USB computer transport is available through the
+and a USB Wi-Fi adapter. The Dana Wireless has the same, with built-in Wi-Fi
+instead of the adapter. Its USB computer transport is available through the
 native localhost debug path. The app's USB computer controls stay disabled.
 
 | | T\|X | E2 | Zire 72 | TG50 | IIIx |

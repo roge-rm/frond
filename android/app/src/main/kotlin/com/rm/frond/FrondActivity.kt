@@ -165,9 +165,12 @@ open class FrondActivity : SDLActivity() {
             Thread { SdCard.restorePending(applicationContext, link, sessionPath) }.apply { isDaemon = true }.start()
         }
         // The Dana's USB port gets the machine's choice at every start, then the row shows what the core has.
+        // The Dana Wireless's radio goes first, as the machine had it.
+        val moduleRequest = UsbPort.moduleRequest(launchDevice(), machineSettings.wifiModule)
         UsbPort.startRequest(launchDevice(), UsbPort.forStart(launchDevice(), machineSettings.usbPort))?.let { (command, argument) ->
             link.whenConnected {
                 Thread {
+                    moduleRequest?.let { (c, a) -> link.request(c, a, timeoutSeconds = 30).takeIf { !it.ok }?.let { Log.w(TAG, "wifi module: ${it.message}") } }
                     link.request(command, argument, timeoutSeconds = 30).takeIf { !it.ok }?.let { Log.w(TAG, "usb port: ${it.message}") }
                     val state = PrintJob.parsePort(link.request("usb-port-state", timeoutSeconds = 5).message)
                     if (state.valid) runOnUiThread {

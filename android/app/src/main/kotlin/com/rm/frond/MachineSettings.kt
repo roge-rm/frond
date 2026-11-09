@@ -75,12 +75,14 @@ data class MachineSettings(
     val danaView: DanaView = DanaView(),
     // Dana: what is on the USB host port, off, printer or wifi (applied at every start).
     val usbPort: String = UsbPort.OFF,
+    // Dana Wireless: the built-in Wi-Fi module's radio (applied at every start).
+    val wifiModule: Boolean = true,
 ) {
     fun json(): JSONObject = JSONObject().put("size", size.name).put("smoothing", smoothing)
         .put("sound", sound).put("fastAudio", fastAudio).put("microphone", microphone)
         .put("showKeyboard", showKeyboard).put("jogControls", jogControls.arg)
         .put("showJogControls", jogControls != JogControls.HIDDEN)
-        .put("engine", engine.arg).put("speed", speed.arg).put("barShown", barShown).put("barMode", barMode.arg).put("infrared", infrared).put("serial", serial).put("bluetooth", bluetooth).put("danaView", danaView.json()).put("usbPort", usbPort).put("usbPrinter", usbPort == UsbPort.PRINTER).also { if (contrastSet) it.put("contrast", contrast) }
+        .put("engine", engine.arg).put("speed", speed.arg).put("barShown", barShown).put("barMode", barMode.arg).put("infrared", infrared).put("serial", serial).put("bluetooth", bluetooth).put("danaView", danaView.json()).put("usbPort", usbPort).put("usbPrinter", usbPort == UsbPort.PRINTER).also { if (contrastSet) it.put("contrast", contrast); if (!wifiModule) it.put("wifiModule", false) }
 
     fun applyTo(settings: Settings) = settings.copy(size = size, smoothing = smoothing, sound = sound)
 
@@ -144,6 +146,7 @@ data class MachineSettings(
                 danaView = DanaView.from(json.optJSONObject("danaView"), fallback.danaView),
                 usbPort = if (json.has("usbPort")) UsbPort.normalise(json.optString("usbPort"))
                     else if (json.has("usbPrinter")) UsbPort.normalise(null, json.optBoolean("usbPrinter")) else fallback.usbPort,
+                wifiModule = json.optBoolean("wifiModule", true),
             )
         }
     }

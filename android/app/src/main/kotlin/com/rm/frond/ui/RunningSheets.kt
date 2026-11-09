@@ -292,6 +292,7 @@ private fun ConnectionsSheet(model: RunningModel, actions: RunningBarActions) {
             ConnRow.USB -> ConnItem("USB HotSync", device.usb, if (device.usb) relayText(model.usb) else null) { choosing = LinkKind.USB }
             ConnRow.USB_RETRY -> SheetAction("Connect again") { UsbLink.retry() }
             ConnRow.USB_PORT -> model.printer?.let { PrinterRow(it, device) } ?: ConnItem("USB port", false, null) { }
+            ConnRow.WIFI_MODULE -> model.printer?.let { WifiModuleRow(it) } ?: ConnItem("Wi-Fi", false, null) { }
             ConnRow.CAMERA -> ConnItem("Camera", false, null) { }
             ConnRow.DEBUGGER -> ConnItem("Debugger", true, debuggerText(model.debugger)) { }
             ConnRow.HOTSYNC -> SheetAction("HotSync") { actions.closeSheet(); model.hotSync() }

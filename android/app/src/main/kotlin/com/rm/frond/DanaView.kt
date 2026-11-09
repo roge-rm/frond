@@ -2,7 +2,8 @@ package com.rm.frond
 
 import org.json.JSONObject
 
-fun Device.isDana() = id == "alphasmart-dana"
+// The Dana and the Dana Wireless share one board, ROM, art and keyboard.
+fun Device.isDana() = id == "alphasmart-dana" || id == "alphasmart-dana-wireless"
 
 enum class DanaKeyboard(val label: String, val arg: String) {
     AUTO("Automatic", "auto"), COMPACT("Compact", "compact"), FULL("Full Dana", "full"), HIDDEN("Hidden", "hidden"),

@@ -212,6 +212,16 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         printerPanel->setLinkReadout(port == "wifi" ? frondPrint::wifiReadout({true, false, false, "wifi", {}}) : QString());
         savePeripherals();
     });
+    connect(printerPanel, &PrinterPanel::moduleChosen, this, [this](bool on) {
+        if (!send("network-mode", on ? "wireless" : "disabled")) {
+            printerPanel->setModuleOn(runningPreferences.wifiModule);
+            notify(tr("Wait a moment and try again."));
+            return;
+        }
+        runningPreferences.wifiModule = on;
+        printerPanel->setModuleReadout(frondPrint::moduleReadout("off", on));
+        savePeripherals();
+    });
     connect(printerPanel, &PrinterPanel::pdfRequested, this, [this] { printerSavePdf(); });
     connect(printerPanel, &PrinterPanel::printRequested, this, [this] { printerPrint(); });
     connect(printerPanel, &PrinterPanel::rawRequested, this, [this] { printerSaveRaw(); });
@@ -736,6 +746,10 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             if (appsStale) listApps();
         });
         if (command == "db-list") { databasesReply(ok, message); return; }
+        if (command == "wifi-module-state") {
+            if (ok) printerPanel->setModuleReadout(frondPrint::moduleReadout(message, printerPanel->moduleOn()));
+            return;
+        }
         // At start the machine's USB port choice goes to the core, then the panel shows what the core has.
         if (usbPortStart && (command == "usb-port" || command == "usb-port-state")) {
             if (stopping) { usbPortStart = usbPortResync = false; save(); return; }
@@ -848,6 +862,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             if (code == "not-ready" && (command == "export" || command == "export-db" || command == "install" || command == "launch-app"))
                 failure(message + tr("\n\nWait for Palm OS to finish its current activity, then try again."));
             else failure(message);
+            if (command == "network-mode" && moduleStartPending) { moduleStartPending = false; send("network-state"); return; }
             if (command == "hold" && !stopping) send("hold-state");
             if (command == "ms-read-only" && !stopping) send("ms-protection");
             return;
@@ -934,7 +949,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             showBluetooth(message);
         }
         refresh();
-        if (command == "network-state" && !stopping && int(runningDevice)!=deviceTypeDana) { send("keyboard-state"); return; }
+        if (command == "network-state" && !stopping && !frondFirmware::isDana(runningDevice)) { send("keyboard-state"); return; }
         if (command == "keyboard-state" && !stopping && frondFirmware::capabilities(runningDevice).serial && serialArgument() != "off") { send("serial-state"); return; }
         if ((command == "keyboard-state" || command == "serial-state") && !stopping &&
             frondFirmware::capabilities(runningDevice).usb && usbArgument() != "off") { send("usb-state"); return; }
@@ -944,8 +959,15 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (command == "ms-protection" && !stopping) { send("network-state"); return; }
         // The Dana's USB port always gets the machine's choice, Off included, since a session brings the
         // device it was saved with.
-        if (command == "network-state" && !stopping) {
+        if ((command == "network-state" || (command == "network-mode" && moduleStartPending)) && !stopping) {
             const auto caps = frondFirmware::capabilities(runningDevice);
+            // The Dana Wireless's radio first, as the machine had it.
+            if (caps.builtInWifi && !moduleStartSent) {
+                moduleStartSent = moduleStartPending = true;
+                if (send("network-mode", runningPreferences.wifiModule ? "wireless" : "disabled")) return;
+                moduleStartPending = false;
+            }
+            moduleStartPending = false;
             const auto& port = runningPreferences.usbPort;
             if (caps.usbPrinter && port == "printer") {
                 printerStage = PrinterStage::Chain;
@@ -1007,7 +1029,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
 }
 void MainWindow::refresh() {
     const bool running = client.running();
-    danaControls->setVisible(running && frondFirmware::deviceId(runningDevice) == "alphasmart-dana");
+    danaControls->setVisible(running && frondFirmware::isDana(runningDevice));
     danaControls->setEnabled(running && !stopping);
     home->setVisible(!running);
     runArea->setVisible(running);
@@ -1046,10 +1068,11 @@ void MainWindow::refresh() {
     stopButton->setEnabled(running && !busy && !stopping);
     const auto caps = frondFirmware::capabilities(currentDevice());
     const bool infraredKeyboard = frondFirmware::infraredKeyboard(currentDevice());
-    const bool dana = int(currentDevice()) == deviceTypeDana;
+    const bool dana = frondFirmware::isDana(currentDevice());
     danaCards->setVisible(dana);
     findChild<QLabel*>("danaPendingPeripherals")->setVisible(dana);
     printerPanel->setSupported(caps.usbPrinter, caps.usbWifi);
+    printerPanel->setModuleSupported(caps.builtInWifi);
     printerPanel->setEnabled(running && !stopping);
     danaCards->setEnabled(dana && client.available() && !busy && !stopping);
     const auto reason = tr("Not available on the %1 yet").arg(frondFirmware::deviceName(currentDevice()));
@@ -1950,7 +1973,7 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
         sessionLock.reset(); return failure(error);
     }
     runningDevice = startDevice == frondFirmware::Device::automatic ? frondFirmware::Device::tx : startDevice;
-    const bool dana = frondFirmware::deviceId(startDevice) == "alphasmart-dana";
+    const bool dana = frondFirmware::isDana(startDevice);
     danaControls->setValues(runningPreferences.danaView);
     danaView.configure(dana, runningPreferences.danaView, devicePixelRatioF());
     if (dana) arguments << "--dana-view" << frondDana::argument(runningPreferences.danaView, devicePixelRatioF());
@@ -2304,12 +2327,20 @@ void MainWindow::loadUsbSettings() {
     printerHeld.clear(); printerStatus = {}; printerStage = PrinterStage::None; printerDir.reset();
     usbPortStart = usbPortResync = false;
     printerPanel->setPort(runningPreferences.usbPort);
+    moduleStartSent = moduleStartPending = false;
+    printerPanel->setModuleOn(runningPreferences.wifiModule);
+    printerPanel->setModuleReadout({});
     printerPanel->setReadout(false, 0);
     printerPanel->hideReceived();
 }
 void MainWindow::printerPoll() {
     if (!client.running() || stopping || busy || !client.available()) return;
     const auto port = printerPanel->port();
+    // One request at a time: the module's readout shares the poll with the printer's status.
+    if (frondFirmware::capabilities(runningDevice).builtInWifi && moduleStartSent && (port != "printer" || (modulePollTurn = !modulePollTurn))) {
+        client.request("wifi-module-state");
+        return;
+    }
     if (port == "wifi" && frondFirmware::capabilities(runningDevice).usbWifi) { client.request("usb-port-state"); return; }
     if (port != "printer" || !frondFirmware::capabilities(runningDevice).usbPrinter) return;
     printerStage = PrinterStage::None;
@@ -2452,7 +2483,7 @@ void MainWindow::save(bool saveAs) {
 }
 void MainWindow::saveCopyTo(const QString& path) {
     if (!client.available()) return;
-    if (int(runningDevice)==deviceTypeDana) {
+    if (frondFirmware::isDana(runningDevice)) {
         for (const auto* slot : {"sd-state", "sd2-state"}) {
             const auto result=DanaCardsDialog::requestWithClient(client,slot);
             if (!result.ok) return failure(result.message);
@@ -2834,7 +2865,7 @@ bool MainWindow::memoryStick() const {
     return deviceProfileStorageSlot5(frondFirmware::profile(currentDevice())) == DeviceStorageSlot5::memoryStick;
 }
 bool MainWindow::storageSupported() const {
-    if (int(currentDevice())==deviceTypeDana) return false;
+    if (frondFirmware::isDana(currentDevice())) return false;
     const auto& frontend = frondFirmware::profile(currentDevice()).frontend;
     return memoryStick() ? frontend.memoryStick : frontend.sdSlot;
 }

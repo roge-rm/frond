@@ -64,10 +64,25 @@ class DesktopPrint : public QObject {
             const auto caps = frondFirmware::capabilities(static_cast<frondFirmware::Device>(p.deviceType));
             panel.setSupported(caps.usbPrinter, caps.usbWifi);
             QCOMPARE(panel.isVisible(), caps.usbPrinter || caps.usbWifi);
-            QCOMPARE(panel.isVisible(), p.deviceType == deviceTypeDana);
+            QCOMPARE(panel.isVisible(), deviceTypeIsDana5(p.deviceType));
             shown += panel.isVisible();
         }
-        QCOMPARE(shown, 1);
+        QCOMPARE(shown, 2);
+        // The Wireless has the USB port row for Off and Printer only, and the module row; the Dana has no module row.
+        auto* moduleRow = panel.findChild<QWidget*>("wifiModuleRow");
+        for (const auto& p : deviceProfiles5) {
+            const auto caps = frondFirmware::capabilities(static_cast<frondFirmware::Device>(p.deviceType));
+            panel.setSupported(caps.usbPrinter, caps.usbWifi);
+            panel.setModuleSupported(caps.builtInWifi);
+            QCOMPARE(moduleRow->isVisible(), p.deviceType == deviceTypeDanaWireless);
+            if (p.deviceType == deviceTypeDanaWireless) {
+                QVERIFY(panel.isVisible());
+                auto* port = panel.findChild<QComboBox*>("usbPortChoice");
+                QStringList items;
+                for (int i = 0; i < port->count(); i++) items << port->itemText(i);
+                QCOMPARE(items, (QStringList{"Off", "Printer"}));
+            }
+        }
         // The Dana lists Off, Printer and Wi-Fi adapter; a device with only a printer has no Wi-Fi choice.
         auto* box = panel.findChild<QComboBox*>("usbPortChoice");
         panel.setSupported(true, true);
@@ -76,6 +91,37 @@ class DesktopPrint : public QObject {
         QCOMPARE(choices, (QStringList{"Off", "Printer", "Wi-Fi adapter"}));
         panel.setSupported(true, false);
         QCOMPARE(box->count(), 2);
+    }
+    void moduleRow() {
+        PrinterPanel panel;
+        panel.setSupported(true, false);
+        panel.setModuleSupported(true);
+        panel.show();
+        QSignalSpy chosen(&panel, &PrinterPanel::moduleChosen);
+        auto* box = panel.findChild<QComboBox*>("wifiModuleChoice");
+        auto* readout = panel.findChild<QLabel*>("wifiModuleReadout");
+        QVERIFY(panel.moduleOn());
+        panel.setModuleOn(false);
+        QVERIFY(!panel.moduleOn());
+        QCOMPARE(chosen.count(), 0);
+        box->setCurrentIndex(box->findData(true));
+        emit box->activated(box->currentIndex());
+        QCOMPARE(chosen.count(), 1);
+        QCOMPARE(chosen.at(0).at(0).toBool(), true);
+        panel.setModuleReadout("Connected");
+        QCOMPARE(readout->text(), QString("Connected"));
+        panel.setModuleSupported(false);
+        QVERIFY(readout->text().isEmpty());
+        QVERIFY(!panel.findChild<QWidget*>("wifiModuleRow")->isVisible());
+    }
+    void moduleReadouts() {
+        QCOMPARE(frondPrint::moduleReadout("off", false), QString("Off"));
+        QCOMPARE(frondPrint::moduleReadout("off", true), QString("Waiting for the Dana"));
+        QCOMPARE(frondPrint::moduleReadout("powered link=up ip=10.0.2.15 mac=02:00:00:00:00:02 tx=3 rx=4 dropped=0", true),
+                 QString("Connected, 10.0.2.15"));
+        QCOMPARE(frondPrint::moduleReadout("powered link=down ip= mac=02:00:00:00:00:02 tx=0 rx=0 dropped=0", true), QString("Not connected"));
+        QCOMPARE(frondPrint::moduleReadout("unpowered link=down ip= mac=02:00:00:00:00:02 tx=0 rx=0 dropped=0", true),
+                 QString("Waiting for the Dana"));
     }
     void portChoice() {
         PrinterPanel panel;

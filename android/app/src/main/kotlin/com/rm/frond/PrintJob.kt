@@ -49,6 +49,14 @@ object PrintJob {
     // The Dana has a printer or a Wi-Fi adapter to plug into its USB port.
     fun rowShown(device: Device) = device.usbPrinter || device.usbWifi
 
+    // The Dana Wireless's built-in module, from wifi-module-state: "off" (also while the Dana hasn't powered it), or the
+    // usb-port-state fields without the leading word.
+    fun moduleReadout(state: String, radioOn: Boolean): String? = when {
+        !radioOn -> "Off"
+        state.trim() == "off" -> "Waiting for the Dana"
+        else -> wifiReadout(parsePort("wifi $state"))
+    }
+
     class Pages(val renderable: Boolean, val reason: String, val pages: List<List<String>>)
 
     private val high = intArrayOf(
@@ -140,6 +148,10 @@ object UsbPort {
         if (device.usbPrinter) add(PRINTER)
         if (device.usbWifi) add(WIFI)
     }
+
+    // The core's command for the Dana Wireless's built-in Wi-Fi radio; null on a device without the module.
+    fun moduleRequest(device: Device, on: Boolean): Pair<String, String>? =
+        if (device.builtInWifi) "network-mode" to (if (on) "wireless" else "disabled") else null
 
     // A saved value; the older printer switch counts as Printer. Anything unknown is Off.
     fun normalise(port: String?, legacyPrinter: Boolean = false) =

@@ -44,7 +44,7 @@ int main() {
         assert(deviceProfileSupportsDesktop5(p.deviceType) ==
                (p.deviceType == deviceTypeTX || p.deviceType == deviceTypeE2 || p.deviceType == deviceTypeZire72 ||
                 p.deviceType == deviceTypeTG50 || p.deviceType == deviceTypeIIIx || p.deviceType == deviceTypeFrankenE2 ||
-                p.deviceType == deviceTypeDana));
+                deviceTypeIsDana5(p.deviceType)));
         assert((p.deviceType == deviceTypeZire72) == (p.board == DeviceBoard5::pxa270Zire72));
         assert(deviceConfigurationGetNandSize(p.deviceType) == p.nandSize);
         assert(deviceConfigurationDefaultDisplayMode(p.deviceType) == p.defaultDisplay);
@@ -100,7 +100,7 @@ int main() {
         nor.resize(at + 12);
         assert(!inspect().profile && !inspect().hasHeader);
     }
-    assert(desktopCount == 7 && names.size() == 10 && types.size() == 9);
+    assert(desktopCount == 8 && names.size() == 10 && types.size() == 9);
     assert(std::string(deviceName5(deviceTypeTX)) == "palm-tx" && std::string(deviceName5(deviceTypeE2)) == "palm-e2");
     assert(deviceProfileNamed5("palm-tx")->capabilities.serial && deviceProfileNamed5("palm-e2")->capabilities.serial);
     // Unknown names are refused, including numbers, old ids, case and prefixes.
@@ -665,7 +665,7 @@ static void danaInventory() {
 }
 
 // Dana Wireless: the Dana board with 16 MiB and the built-in module, on the Dana's ROM. Only chosen by
-// name; the ROM's header still says Dana. The frontends don't offer it yet.
+// name; the ROM's header still says Dana.
 static void danaWirelessInventory() {
     const auto* p = deviceProfileNamed5("alphasmart-dana-wireless");
     const auto* dana = deviceProfileNamed5("alphasmart-dana");
@@ -673,7 +673,7 @@ static void danaWirelessInventory() {
     assert(deviceTypeIsDana5(deviceTypeDana) && deviceTypeIsDana5(deviceTypeDanaWireless) && !deviceTypeIsDana5(deviceTypeIIIx));
     assert(p->board == DeviceBoard5::vz328 && p->detect == DeviceDetect5::none && p->art == dana->art);
     assert(p->companyId == dana->companyId && p->halId == dana->halId && p->norSize == dana->norSize);
-    assert(!p->frontend.available && !deviceProfileSupportsDesktop5(p->deviceType));
+    assert(p->frontend.available && deviceProfileSupportsDesktop5(p->deviceType));
     assert(std::string(p->frontend.setup) == "dana" && std::string(p->frontend.launcher) == "dana" &&
            p->frontend.width == 560 && p->frontend.height == 160 && p->frontend.sdSlot);
     assert(deviceProfileRuns68k5(p->deviceType) && !deviceProfileRunnerEligible5(p->deviceType));

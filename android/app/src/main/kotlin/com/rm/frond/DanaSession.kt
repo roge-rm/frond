@@ -6,7 +6,7 @@ import java.io.RandomAccessFile
 
 // Inspection only. The core checks media ownership, durable history and machine state on load.
 internal object DanaSession {
-    data class Header(val offset: Long, val version: Long, val portable: Boolean)
+    data class Header(val offset: Long, val version: Long, val portable: Boolean, val device: String)
     private val magics = listOf("FRONDLINKSD1\n", "FRONDPORTSD1\n")
     fun wrapped(file: File): Boolean = try {
         file.inputStream().use { input ->
@@ -47,8 +47,8 @@ internal object DanaSession {
             val version = u32()
             if (version !in 6..8) return null
             val name = ByteArray(32).also { input.readFully(it) }.toString(Charsets.US_ASCII).substringBefore('\u0000')
-            if (name != "alphasmart-dana") return null
-            Header(offset, version, portable)
+            if (name != "alphasmart-dana" && name != "alphasmart-dana-wireless") return null
+            Header(offset, version, portable, name)
         }
     } catch (_: Exception) { null }
 

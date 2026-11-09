@@ -73,6 +73,8 @@ struct Preferences {
     bool barShown{true};
     // Dana: what is on the USB host port, off, printer or wifi.
     QString usbPort{"off"};
+    // Dana Wireless: the built-in Wi-Fi module's radio.
+    bool wifiModule{true};
     frondDana::Preferences danaView;
 };
 inline QString preferencesPath(const QString& path) { return path + ".settings.json"; }
@@ -93,6 +95,7 @@ inline bool readPreferences(const QString& path, Preferences* result) {
     // Earlier machine settings only have the printer switch.
     const auto port = object.value("usbPort").toString();
     result->usbPort = port == "printer" || port == "wifi" ? port : object.value("usbPrinter").toBool(false) ? "printer" : "off";
+    result->wifiModule = object.value("wifiModule").toBool(true);
     if (object.value("infrared").isString()) {
         result->infrared = object.value("infrared").toString();
         result->serial = object.value("serial").toString("off");
@@ -114,6 +117,7 @@ inline QString writePreferences(const QString& path, const Preferences& prefs) {
     if (!prefs.barShown) object.insert("barShown", false);
     if (prefs.usbPort != "off") object.insert("usbPort", prefs.usbPort);
     if (prefs.usbPort == "printer") object.insert("usbPrinter", true);
+    if (!prefs.wifiModule) object.insert("wifiModule", false);
     if (prefs.contrastSet) object.insert("contrast", std::clamp(prefs.contrast, 0, 100));
     if (prefs.peripheralsSet) {
         object.insert("infrared", prefs.infrared);
@@ -139,7 +143,7 @@ inline Header readHeader(const QString& path) {
     const auto dana=frondDanaSession::inspect(path);
     if (dana.wrapped) {
         header.readable=true;
-        if (dana.valid) { header.magic=magic; header.version=dana.version; header.device="alphasmart-dana"; }
+        if (dana.valid) { header.magic=magic; header.version=dana.version; header.device=dana.device; }
         return header;
     }
     QFile file(path);

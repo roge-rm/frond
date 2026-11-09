@@ -807,7 +807,7 @@
       "sd_max_bytes": 2147483648,
       "ms_sizes_mb": [],
       "ms_pro_max_mb": 0,
-      "available": false,
+      "available": true,
       "setup": "dana",
       "launcher": "dana",
       "width": 560,

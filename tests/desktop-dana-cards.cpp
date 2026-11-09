@@ -10,10 +10,10 @@ class DanaCardsTest : public QObject {
         if (portable) return "frond-portable-sd 3\n0 sd sd0.frondsd "+key+" 305419896 33554432 1 0 123 sd\n2 sd sd2.frondsd "+second+" 591751049 33554432 0 1 456 mmc\n";
         return "frond-linked-sd 3\n0 sd \"/cards/a.frondsd\" "+key+" 305419896 33554432 1 0 1 2 3 sd 9\n2 sd \"/cards/b.frondsd\" "+second+" 591751049 33554432 0 1 1 4 5 mmc 7\n";
     }
-    void write(const QString& path, const QByteArray& manifest,bool portable=false) {
+    void write(const QString& path, const QByteArray& manifest,bool portable=false,const QByteArray& name="alphasmart-dana") {
         QByteArray machine(80,'\0');
         auto put=[](QByteArray& bytes,int at,quint32 value) { for (int n=0;n<4;++n) bytes[at+n]=char(value>>(8*n)); };
-        put(machine,0,frondSessions::magic); put(machine,4,8); machine.replace(8,14,"alphasmart-dana");
+        put(machine,0,frondSessions::magic); put(machine,4,8); machine.replace(8,14,name);
         QByteArray descriptor(12,'\0'); put(descriptor,0,manifest.size()); put(descriptor,4,frondDanaSession::hash(machine)); put(descriptor,8,frondDanaSession::hash(manifest));
         QFile file(path); QVERIFY(file.open(QIODevice::WriteOnly)); file.write(portable?"FRONDPORTSD1\n":"FRONDLINKSD1\n"); file.write(descriptor); file.write(manifest); file.write(machine);
     }
@@ -29,6 +29,17 @@ class DanaCardsTest : public QObject {
             QCOMPARE(frondDanaCards::sizes(*dana,slot,DeviceCardFamily5::sdsc),QList<int>({32,64,128,256,512}));
             QCOMPARE(frondDanaCards::sizes(*dana,slot,DeviceCardFamily5::legacyMmc),QList<int>({32,64,128,256}));
         }
+    }
+    void wirelessSessionHeader() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const auto path=dir.path()+"/machine.frond";
+        write(path,manifest(),false,"alphasmart-dana-wireless");
+        QVERIFY(frondDanaSession::inspect(path).valid);
+        const auto header=frondSessions::readHeader(path);
+        QCOMPARE(header.device,QString("alphasmart-dana-wireless"));
+        QVERIFY(frondSessions::openable(header));
+        write(path,manifest(),false,"alphasmart-dana-other");
+        QVERIFY(!frondDanaSession::inspect(path).valid);
     }
     void state() {
         const auto card=frondDanaCards::state("ejected "+key+" protected io-error mmc");

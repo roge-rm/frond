@@ -336,7 +336,7 @@ void MachineSettings::setDevice(Device device) {
     }
     for (QWidget* w : {static_cast<QWidget*>(serialLabel), static_cast<QWidget*>(serial)}) w->setVisible(hasSerial);
     serialPort->setVisible(hasSerial && serial->currentData() == "tcp");
-    const bool dana = frondFirmware::deviceId(device) == "alphasmart-dana";
+    const bool dana = frondFirmware::isDana(device);
     danaView->setVisible(dana);
     windowScale->setVisible(!dana); scaleLabel->setVisible(!dana);
     const bool tg50 = device == frondFirmware::deviceFromId("sony-clie-tg50");

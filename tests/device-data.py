@@ -81,19 +81,21 @@ class DeviceDataTest(unittest.TestCase):
         self.assertIn('alphasmart-dana', palm_boot.DEVICES_68K)
         self.assertTrue(dana['runs_68k'])
 
-    def test_dana_wireless_core_only(self):
+    def test_dana_wireless_offered(self):
         inventory = json.loads((ROOT / 'tools/device-profiles.json').read_text())
         dana = next(p for p in inventory['profiles'] if p['name'] == 'alphasmart-dana')
         wireless = next(p for p in inventory['profiles'] if p['name'] == 'alphasmart-dana-wireless')
         self.assertEqual(wireless['display_name'], 'AlphaSmart Dana Wireless')
         self.assertEqual((wireless['ram_min_bytes'], wireless['ram_max_bytes']), (16 << 20, 16 << 20))
         self.assertTrue(wireless['built_in_wifi'] and wireless['usb_printer'] and wireless['runs_68k'])
-        self.assertFalse(wireless['usb_wifi'] or wireless['available'] or wireless['runner_eligible'])
+        self.assertTrue(wireless['available'])
+        self.assertFalse(wireless['usb_wifi'] or wireless['runner_eligible'])
         for key in ('nor_bytes', 'company_id', 'hal_id', 'width', 'height', 'setup', 'launcher', 'keyboard',
                     'infrared', 'sound', 'sd_slot', 'default_display_mode'):
             self.assertEqual(wireless[key], dana[key], key)
         kotlin = next(data for path, data in generator.outputs(inventory).items() if path.suffix == '.kt')
-        self.assertNotIn('alphasmart-dana-wireless', kotlin)
+        self.assertIn('id = "alphasmart-dana-wireless"', kotlin)
+        self.assertIn('builtInWifi = true', kotlin)
         self.assertIn('alphasmart-dana-wireless', palm_boot.DEVICES_68K)
 
     def test_sd_bounds(self):

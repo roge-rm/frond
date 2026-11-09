@@ -22,6 +22,21 @@ PrinterPanel::PrinterPanel(QWidget* parent) : QWidget(parent) {
     row->addWidget(portBox);
     row->addWidget(readout, 1);
     column->addLayout(row);
+    moduleRow = new QWidget(this);
+    moduleRow->setObjectName("wifiModuleRow");
+    auto* moduleLayout = new QHBoxLayout(moduleRow);
+    moduleLayout->setContentsMargins(0, 0, 0, 0);
+    moduleBox = new QComboBox(moduleRow);
+    moduleBox->setObjectName("wifiModuleChoice");
+    moduleBox->addItem(tr("On"), true);
+    moduleBox->addItem(tr("Off"), false);
+    moduleReadout = new QLabel(moduleRow);
+    moduleReadout->setObjectName("wifiModuleReadout");
+    moduleLayout->addWidget(new QLabel(tr("Wi-Fi"), moduleRow));
+    moduleLayout->addWidget(moduleBox);
+    moduleLayout->addWidget(moduleReadout, 1);
+    column->addWidget(moduleRow);
+    moduleRow->hide();
     banner = new QWidget(this);
     banner->setObjectName("printerBanner");
     auto* inner = new QVBoxLayout(banner);
@@ -46,6 +61,7 @@ PrinterPanel::PrinterPanel(QWidget* parent) : QWidget(parent) {
     column->addWidget(banner);
     banner->hide();
     connect(portBox, &QComboBox::activated, this, [this] { emit portChosen(port()); });
+    connect(moduleBox, &QComboBox::activated, this, [this] { emit moduleChosen(moduleOn()); });
     connect(pdf, &QPushButton::clicked, this, &PrinterPanel::pdfRequested);
     connect(print, &QPushButton::clicked, this, &PrinterPanel::printRequested);
     connect(raw, &QPushButton::clicked, this, &PrinterPanel::rawRequested);
@@ -63,6 +79,17 @@ void PrinterPanel::setSupported(bool printer, bool wifi) {
     readout->setText(port() == current ? text : QString());
     setVisible(printer || wifi);
 }
+void PrinterPanel::setModuleSupported(bool supported) {
+    moduleRow->setVisible(supported);
+    if (!supported) moduleReadout->clear();
+    if (supported) setVisible(true);
+}
+bool PrinterPanel::moduleOn() const { return moduleBox->currentData().toBool(); }
+void PrinterPanel::setModuleOn(bool on) {
+    const QSignalBlocker blocked(moduleBox);
+    moduleBox->setCurrentIndex(moduleBox->findData(on));
+}
+void PrinterPanel::setModuleReadout(const QString& text) { moduleReadout->setText(text); }
 QString PrinterPanel::port() const { return portBox->currentData().toString(); }
 // The readout belongs to the port, so it only clears when the port changes.
 void PrinterPanel::setPort(const QString& port) {

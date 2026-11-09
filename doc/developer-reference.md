@@ -304,7 +304,8 @@ State commands take no argument. Mode commands change the setting and reply with
 | `bluetooth-state` | | `bluetooth` |
 | `bluetooth-mode` | `off` or an absolute Unix socket path | `bluetooth` |
 | `network-state` | | `network`: mode name |
-| `network-mode` | `disabled`, `connected`, `timeout`, `disconnected`, `internet` or `wireless` | `network`; on the Dana (`usbWifi` capability) only `wireless` and `disabled`, which pick the Wi-Fi adapter or no device on the USB port |
+| `network-mode` | `disabled`, `connected`, `timeout`, `disconnected`, `internet` or `wireless` | `network`; on the Dana (`usbWifi` capability) only `wireless` and `disabled`, which pick the Wi-Fi adapter or no device on the USB port; on the Dana Wireless (`builtInWifi`) only `wireless` and `disabled`, which turn the built-in module's radio on and off (on by default) |
+| `wifi-module-state` | | `wifi-module`: `off`, or `powered\|unpowered link=up\|down ip=ADDRESS mac= tx= rx= dropped=`. `off` also while the Dana hasn't raised PK0 to power the module. Console: `wifi-module [on\|off]` |
 | `usb-port-state` | | `usb-port`: `off`, `printer ` and the `printer status` line, or `wifi powered\|unpowered link=up\|down ip=ADDRESS mac= tx= rx= dropped=`. Every device answers `off` except the Dana |
 | `usb-port` | `off`, `printer` or `wifi` | `usb-port`: the new state. The Dana's one external USB port holds a printer, the Wi-Fi adapter (a Prism 2.5 stick, 045e:006e) or nothing. Choosing what is already there does nothing. `printer attach on` is `usb-port printer`. Other devices answer `unsupported` except for `off` |
 
@@ -421,11 +422,13 @@ TCP 5035 carries the links (Noise KK against the pinned keys, or a pairing reque
 
 The Dana's external USB port holds one device: nothing, the printer or the Wi-Fi adapter. The `usbWifi` capability (`usb_wifi` in `tools/device-profiles.json`, Dana only) says a device has the adapter. The adapter is an emulated Microsoft MN-510 (Prism 2.5, 045e:006e) on the ISP1161's external root port (`src/common/UsbPrism2Adapter.h`), its Ethernet frames go to libslirp through `frondNet::WifiRouter` (`src/common/net`), and `UsbWifiRuntime` plugs it in. It shows one open network, "Frond" on channel 6, so any WEP key connects and ad hoc finds no peers. The guest is 10.0.2.15, the router 10.0.2.2 and DNS 10.0.2.3, as on the T|X's Virtual Wi-Fi. The choice is made with `usb-port`, kept by reset and by a session load, and `usb-port-state` reads it back with the link state. A session saved with the adapter keeps its MAC, settings and what was part way over USB (a request half sent, a reply not yet read), but a load makes a fresh slirp, so connections drop. Frontends send the machine's USB port choice at every start, Off included, and then read `usb-port-state`, so the setting wins over the device a session was saved with.
 
-Desktop: the Connections panel has a USB port list (Off, Printer, Wi-Fi adapter) with a readout, and polls `usb-port-state` once a second while Wi-Fi is chosen. Android: the Connections sheet has a USB port row with the same three choices. Both save the choice as `usbPort` in the machine settings and send it at every start.
+The Dana Wireless (`alphasmart-dana-wireless`, device type 8, `builtInWifi` / `built_in_wifi`) runs the Dana's ROM with 16 MiB and an MN-510 leaf on the ISP1161's second root port, attached while PK0 is high (`UsbWifiRuntime moduleWifi`), with its own MAC and router. The core sets the ROM's `snum` token to read as a Wireless one and refuses a ROM with no such token. `usb-port wifi` is refused there, and the USB port holds Off or Printer. Its session keys `module-mac`, `module-adapter` and `module-bus` are the external adapter's `wifi-mac`, `wifi-adapter` and `wifi-bus` for the module (the last two only while its radio is on). A `.frond` session carries its device name, so a Dana session doesn't load as a Wireless or the other way round.
+
+Desktop: the Connections panel has a USB port list (Off, Printer, Wi-Fi adapter) with a readout, and polls `usb-port-state` once a second while Wi-Fi is chosen. Android: the Connections sheet has a USB port row with the same three choices. Both save the choice as `usbPort` in the machine settings and send it at every start. On the Dana Wireless the list is Off and Printer, and a Wi-Fi row (On, Off and a readout from `wifi-module-state`, polled once a second) sends `network-mode wireless|disabled`, saved as `wifiModule`.
 
 ### Machine settings
 
-The per-machine settings file `<name>.frond.settings.json` has `infrared`, `serial`, `usb`, `bluetooth` and, on the Dana, `usbPort`. Values:
+The per-machine settings file `<name>.frond.settings.json` has `infrared`, `serial`, `usb`, `bluetooth` and, on the Dana, `usbPort` (and `wifiModule` on the Wireless). Values:
 
 | Key | Values |
 | --- | --- |
@@ -434,6 +437,7 @@ The per-machine settings file `<name>.frond.settings.json` has `infrared`, `seri
 | `serial` | also `modem` on a device with the `modem` capability (the IIIx): the desktop passes `--serial modem`, Android sends `serial-mode modem` once the core answers and opens no link |
 | `usb` | `off`, `pty`, `tcp:PORT` |
 | `usbPort` | Dana: `off`, `printer` or `wifi`, the USB port choice. The desktop sends `printer attach on` or `usb-port wifi` once the core answers, Android does the same on connect. Older settings with `usbPrinter` true count as `printer`; the file still writes `usbPrinter` when the choice is the printer |
+| `wifiModule` | Dana Wireless: `false` when the built-in Wi-Fi is off, left out when on. Sent as `network-mode disabled` or `wireless` at every start, before the USB port choice |
 | `bluetooth` | `off`, `radio` (This Frond), `phone` (This Frond with the mobile phone), `socket:/absolute/path`, `link:ID` |
 
 A `link:ID` that isn't in the store acts as `off` and shows as Unknown connection. The Android metadata `settings` holds `infrared`, `serial` and `bluetooth` the same way, with only `off`, `radio` and `link:ID` (and `modem` for `serial`, `phone` for `infrared`). Nothing goes into the `.frond` session. With a link or `radio` choice the desktop starts the core with `--irda`, `--serial` or `bluetooth-mode` pointing at the hub's sockets.

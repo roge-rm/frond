@@ -124,6 +124,8 @@ class MainWindow : public QMainWindow {
     bool usbPortResync{false};
     // The start-up USB port choice and the state read after it are in flight.
     bool usbPortStart{false};
+    // The Dana Wireless's radio choice goes to the core once at start (moduleStartSent), ahead of the USB port.
+    bool moduleStartSent{false}, moduleStartPending{false}, modulePollTurn{false};
     bool printerResult(bool ok, const QString& message);
     void printerCollect();
     void printerShow();

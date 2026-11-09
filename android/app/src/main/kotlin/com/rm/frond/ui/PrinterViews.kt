@@ -96,6 +96,35 @@ fun PrinterRow(printer: PrinterModel, device: Device) {
     }
 }
 
+// The Connections row for the Dana Wireless's built-in Wi-Fi: on or off, with the link readout.
+@Composable
+fun WifiModuleRow(printer: PrinterModel) {
+    var choosing by remember { mutableStateOf(false) }
+    val text = if (printer.moduleOn) (printer.moduleText ?: "On") else "Off"
+    ListItem(
+        headlineContent = { Text("Wi-Fi") },
+        supportingContent = { Text(text) },
+        colors = androidx.compose.material3.ListItemDefaults.colors(containerColor = Color.Transparent),
+        modifier = Modifier.clickableRow { choosing = true },
+    )
+    if (choosing) AlertDialog(
+        onDismissRequest = { choosing = false },
+        title = { Text("Wi-Fi") },
+        text = {
+            Column {
+                for (on in listOf(true, false)) ListItem(
+                    headlineContent = { Text(if (on) "On" else "Off") },
+                    leadingContent = { RadioButton(selected = on == printer.moduleOn, onClick = null) },
+                    colors = androidx.compose.material3.ListItemDefaults.colors(containerColor = Color.Transparent),
+                    modifier = Modifier.clickableRow { choosing = false; printer.chooseModule(on) },
+                )
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = { choosing = false }) { Text("Cancel") } },
+    )
+}
+
 // The snackbar for a received print, below the bar, and the choices sheet it opens.
 @Composable
 fun PrinterPrompt(printer: PrinterModel, top: Dp) {

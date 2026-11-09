@@ -1,0 +1,21 @@
+Offer the Dana Wireless in the frontends.
+
+diff --git a/src/common/device_profile5.h b/src/common/device_profile5.h
+--- a/src/common/device_profile5.h
++++ b/src/common/device_profile5.h
+@@ -168,13 +168,13 @@
+      {true, "dana", 560, 160, 0, 0, "", "", -1, -1, -1, -1, false, true, false, "", "dana"}},
+     // The Dana board with 16 MiB and built-in Wi-Fi, on the same ROM: the core makes the ROM's serial
+     // number token read as a Wireless one. The USB host port takes the printer only, as the module
+-    // already gives it Wi-Fi. Not offered by the frontends yet.
++    // already gives it Wi-Fi.
+     {deviceTypeDanaWireless, "alphasmart-dana-wireless", "AlphaSmart Dana Wireless", DeviceCohort5::vz68k,
+      DeviceSupport5::experimentalDesktop, DeviceDetect5::none, 0x61736d74 /* asmt */, 0x44616e61 /* Dana */,
+      DeviceBoard5::vz328, DeviceArt::none, {false, true, false, false, false, true, false, true, false, false, false, false, true, false, true},
+      6u << 20, 0, 16u << 20, 16u << 20, DisplayMode::mode_560x160, 1u << 9, false,
+      DeviceNorLayout5::any, 0, 0x8000, false, 32u << 20, 2048ull << 20,
+-     {false, "dana", 560, 160, 0, 0, "", "", -1, -1, -1, -1, false, true, false, "", "dana"}},
++     {true, "dana", 560, 160, 0, 0, "", "", -1, -1, -1, -1, false, true, false, "", "dana"}},
+     // Reserved names: art only, no board yet.
+     {deviceTypeInvalid, "palm-m515", "Palm m515", DeviceCohort5::reserved, DeviceSupport5::reserved,
+      DeviceDetect5::none, 0, 0, DeviceBoard5::none, DeviceArt::m515, {},

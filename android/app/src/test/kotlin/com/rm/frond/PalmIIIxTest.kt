@@ -94,8 +94,8 @@ class PalmIIIxTest {
         assertFalse(d.network || d.keyboard || d.usb || d.bluetooth || d.microphone || d.camera || d.fastAudio)
         assertFalse(d.cardSupported || d.holdPresent)
         assertEquals(listOf("--device", "palm-iiix"), d.coreFlags)
-        // The Dana runs on the 68k core too; every other device is ARM.
-        for (arm in Device.entries.filter { it != d && it.id != "alphasmart-dana" }) assertFalse(arm.id, arm.runs68k)
+        // The Danas run on the 68k core too; every other device is ARM.
+        for (arm in Device.entries.filter { it != d && !it.isDana() }) assertFalse(arm.id, arm.runs68k)
     }
 
     @Test fun settingsRowsFollowTheDevice() {

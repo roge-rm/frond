@@ -5,7 +5,7 @@
 #include "device_profile5.h"
 
 namespace frondDanaSession {
-struct Header { bool wrapped{}, valid{}, portable{}; qint64 offset{}; quint32 version{}; };
+struct Header { bool wrapped{}, valid{}, portable{}; qint64 offset{}; quint32 version{}; QString device; };
 inline quint32 u32(const QByteArray& bytes, int at) {
     quint32 result=0;
     for (int i=0;i<4;++i) result |= quint32(uchar(bytes[at+i])) << (8*i);
@@ -16,6 +16,7 @@ inline quint32 hash(const QByteArray& bytes, quint32 value=2166136261u) {
     return value;
 }
 // Display metadata only. Loading still goes through the core's media and history checks.
+inline bool isDana(const QByteArray& name) { return name=="alphasmart-dana" || name=="alphasmart-dana-wireless"; }
 inline Header inspect(const QString& path) {
     QFile file(path);
     Header out;
@@ -65,7 +66,8 @@ inline Header inspect(const QString& path) {
     if (checksum!=u32(descriptor,4) || !file.seek(out.offset)) return out;
     const auto machine=file.read(40);
     if (machine.size()!=40 || u32(machine,0)!=0x19800819u || u32(machine,4)<6 || u32(machine,4)>8 ||
-        machine.mid(8,32).split('\0').first()!="alphasmart-dana") return out;
+        !isDana(machine.mid(8,32).split('\0').first())) return out;
+    out.device=QString::fromLatin1(machine.mid(8,32).split('\0').first());
     out.version=u32(machine,4); out.valid=true;
     return out;
 }

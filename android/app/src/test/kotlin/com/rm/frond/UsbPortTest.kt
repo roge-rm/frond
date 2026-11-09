@@ -21,6 +21,42 @@ class UsbPortTest {
         assertEquals(1, Device.entries.count { it.usbWifi })
     }
 
+    @Test fun wirelessOffersPrinterAndItsOwnModule() {
+        val wireless = Device.byId("alphasmart-dana-wireless")!!
+        assertTrue(wireless.builtInWifi && wireless.usbPrinter && !wireless.usbWifi && wireless.isDana())
+        assertEquals(listOf("off", "printer"), UsbPort.choices(wireless))
+        // The external Wi-Fi adapter isn't offered, and an old saved choice of it falls back to Off.
+        assertEquals("off", UsbPort.forStart(wireless, "wifi"))
+        assertEquals("printer", UsbPort.forStart(wireless, "printer"))
+        assertEquals("printer" to "attach on", UsbPort.startRequest(wireless, "printer"))
+        assertEquals("usb-port" to "off", UsbPort.startRequest(wireless, "off"))
+        assertEquals("network-mode" to "wireless", UsbPort.moduleRequest(wireless, true))
+        assertEquals("network-mode" to "disabled", UsbPort.moduleRequest(wireless, false))
+        for (device in Device.entries.filter { it != wireless }) {
+            assertFalse(device.id, device.builtInWifi)
+            assertNull(device.id, UsbPort.moduleRequest(device, true))
+        }
+        assertEquals(1, Device.entries.count { it.builtInWifi })
+        assertTrue(Device.byId("alphasmart-dana")!!.isDana())
+        assertFalse(wireless.infraredKeyboard)
+    }
+
+    @Test fun moduleChoiceIsKeptPerMachine() {
+        assertTrue(MachineSettings().wifiModule)
+        assertFalse(MachineSettings().json().has("wifiModule"))
+        val off = MachineSettings(wifiModule = false).json()
+        assertFalse(MachineSettings.from(off, MachineSettings()).wifiModule)
+        assertTrue(MachineSettings.from(MachineSettings(wifiModule = true).json(), MachineSettings(wifiModule = false)).wifiModule)
+    }
+
+    @Test fun moduleReadouts() {
+        assertEquals("Off", PrintJob.moduleReadout("off", false))
+        assertEquals("Waiting for the Dana", PrintJob.moduleReadout("off", true))
+        assertEquals("Connected, 10.0.2.15", PrintJob.moduleReadout("powered link=up ip=10.0.2.15 mac=02:00:00:00:00:02 tx=3 rx=4 dropped=0", true))
+        assertEquals("Not connected", PrintJob.moduleReadout("powered link=down ip= mac=02:00:00:00:00:02 tx=0 rx=0 dropped=0", true))
+        assertEquals("Waiting for the Dana", PrintJob.moduleReadout("unpowered link=down ip= mac=02:00:00:00:00:02 tx=0 rx=0 dropped=0", true))
+    }
+
     @Test fun startUsesWhatTheDeviceHas() {
         val dana = Device.entries.first { it.usbWifi }
         val other = Device.entries.first { !it.usbWifi }

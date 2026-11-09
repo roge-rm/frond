@@ -82,6 +82,8 @@ data class Device internal constructor(
     val usbPrinter: Boolean = false,
     // A USB 802.11b adapter on the same port, with the network through the core's router.
     val usbWifi: Boolean = false,
+    // The Dana Wireless's built-in 802.11b module, with the network through the core's router.
+    val builtInWifi: Boolean = false,
     // DragonBall devices run in libmain68k.so (Frond68kActivity), the others in libmain.so (FrondActivity).
     val runs68k: Boolean = false,
     val hotSyncButton: Boolean = false,
@@ -90,7 +92,7 @@ data class Device internal constructor(
 ) {
     // The real Zire 72 has no serial port, so it's left out of the list rather than greyed.
     val serialAbsent: Boolean get() = id == "palm-zire-72"
-    val infraredKeyboard: Boolean get() = keyboard && id != "alphasmart-dana"
+    val infraredKeyboard: Boolean get() = keyboard && !isDana()
     val cardSupported: Boolean get() = sdSlot || memoryStick
     val cardLabel: String get() = if (storageSlot == "memory-stick") "Memory Stick" else "SD card"
     val hasNand: Boolean get() = nandSize > 0
