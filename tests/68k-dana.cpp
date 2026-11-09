@@ -919,11 +919,12 @@ int main() {
     assert(refused);isp.Reset(true);
     }
 
+    // Entering operational starts frame 1; each 1 ms frame (12000 bit times) adds one.
     isp.Command(0x81);isp.Data(0x80);isp.Data(0);
-    isp.now=1500;isp.Command(0x0f);assert(isp.Data()==1);assert(isp.Data()==0);
+    isp.now=1500;isp.Command(0x0f);assert(isp.Data()==2);assert(isp.Data()==0);
     auto fraction=Save(isp);
-    isp.now=2000;isp.Command(0x0f);assert(isp.Data()==2);
-    isp.now=1500;assert(Load(isp,fraction));isp.now=2000;isp.Command(0x0f);assert(isp.Data()==2);
+    isp.now=2000;isp.Command(0x0f);assert(isp.Data()==3);
+    isp.now=1500;assert(Load(isp,fraction));isp.now=2000;isp.Command(0x0f);assert(isp.Data()==3);
     isp.Command(0x24);assert(isp.Data()==1);isp.Command(0xa4);isp.Data(1);isp.Command(0x24);assert(isp.Data()==0);
     // Malformed host command, latch counters, buffer sizes and fractional time.
     auto good=Save(isp);
