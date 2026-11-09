@@ -114,6 +114,7 @@ class RunningSheetsTest {
             assertEquals(device.id, !device.runs68k || device.usb, ConnRow.USB in rows)
             assertEquals(device.id, !device.runs68k || device.bluetooth, ConnRow.BLUETOOTH in rows)
             assertEquals(device.id, device.camera, ConnRow.CAMERA in rows)
+            assertEquals(device.id, device.usbPrinter, ConnRow.PRINTER in rows)
             assertFalse(ConnRow.DEBUGGER in rows)
             assertFalse(ConnRow.USB_RETRY in rows)
         }

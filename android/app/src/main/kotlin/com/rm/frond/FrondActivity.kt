@@ -95,6 +95,7 @@ open class FrondActivity : SDLActivity() {
     // The Palm infrared keyboard, as the core last said.
     @Volatile private var keyboardAttached = false
     @Volatile private var stopped = false
+    val inBackground get() = stopped
     // One save at a time: the background save and the save on back.
     private val saveLock = Any()
     // Sound as last sent to the core; Settings can change it while the Palm runs. UI thread only.
@@ -160,6 +161,13 @@ open class FrondActivity : SDLActivity() {
         // is after gdb first connects.
         link.whenConnected {
             Thread { SdCard.restorePending(applicationContext, link, sessionPath) }.apply { isDaemon = true }.start()
+        }
+        // The Dana's USB printer is plugged in at every start when the machine's setting is on.
+        if (machineSettings.usbPrinter && launchDevice().usbPrinter) {
+            link.whenConnected {
+                Thread { link.request("printer", "attach on", timeoutSeconds = 30).takeIf { !it.ok }?.let { Log.w(TAG, "printer: ${it.message}") } }
+                    .apply { isDaemon = true }.start()
+            }
         }
         // Infrared, serial and Bluetooth over a connection are set from the machine's settings at every start.
         val infraredPhone = machineSettings.infrared == InfraredChoice.PHONE && launchDevice().irPhone
@@ -1183,6 +1191,7 @@ open class FrondActivity : SDLActivity() {
         // core, and a second core can't start in this process, so save the session and end the
         // process instead; the next start loads the save.
         destroyed = true
+        menuModel?.printer?.close()
         barOwner?.destroy()
         inputListener?.let { inputDevices?.unregisterInputDeviceListener(it) }
         inputListener = null

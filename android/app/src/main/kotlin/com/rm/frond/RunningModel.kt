@@ -531,6 +531,11 @@ class RunningModel(
     var settings by mutableStateOf(machineSettings())
         private set
 
+    // The Dana's USB printer; null on any other device.
+    val printer: PrinterModel? = if (PrintJob.rowShown(device) && link != null)
+        PrinterModel(activity, link, sessionId, settings.usbPrinter, { FrondActivity.running?.inBackground == true }) { alert = "USB printer" to it }
+    else null
+
     // Saves one field of the machine settings, leaving the others as they are on disk.
     fun changeSettings(next: MachineSettings) {
         val id = sessionId ?: return

@@ -4,6 +4,8 @@
     <!-- Virtual Wi-Fi and Internet via host, and the network's DNS servers for the Wi-Fi router. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- A notification when the Dana prints while Frond is in the background. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- Connections: beacons on the Wi-Fi, and Android 17's local network access. -->
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />

@@ -113,6 +113,7 @@ fun RunningBarView(state: RunningBarState, actions: RunningBarActions) {
         Box(if (state.sheet != null) Modifier.fillMaxSize() else Modifier) {
             if (state.shown) Bar(state, actions) else Handle(actions, Modifier.align(Alignment.TopCenter))
             state.sheet?.let { SheetLayer(it, state, actions) }
+            state.model?.printer?.let { PrinterPrompt(it, if (state.shown) RunningBar.heightDp(state.portrait).dp else 24.dp) }
         }
         MenuDialogs(state, actions)
     }
