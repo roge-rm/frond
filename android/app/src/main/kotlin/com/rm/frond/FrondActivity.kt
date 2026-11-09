@@ -3,6 +3,9 @@ package com.rm.frond
 import android.app.AlertDialog
 import android.content.Context
 import android.content.pm.ApplicationInfo
+import android.content.res.Configuration
+import android.hardware.input.InputManager
+import android.view.InputDevice
 import android.media.AudioManager
 import android.system.Os
 import android.view.Gravity
@@ -84,6 +87,11 @@ open class FrondActivity : SDLActivity() {
         }.apply { isDaemon = true }.start()
     }
     private var keyboard: PalmKeyboard? = null
+    @Volatile private var danaState: DanaViewState? = null
+    private var danaEnvironment = ""
+    private var lastDanaKeyboard = DanaKeyboard.AUTO
+    private var inputDevices: InputManager? = null
+    private var inputListener: InputManager.InputDeviceListener? = null
     // The Palm infrared keyboard, as the core last said.
     @Volatile private var keyboardAttached = false
     @Volatile private var stopped = false
@@ -124,6 +132,9 @@ open class FrondActivity : SDLActivity() {
         link = ControlLink(File(filesDir, controlSocket)) { name, state ->
             if (name == "close") leave()
             if (name == "microphone") Log.i(TAG, "microphone: $state")
+            if (name == "dana-view" && launchDevice().isDana()) {
+                DanaViewState.parse(state)?.let { acceptDanaState(it) }
+            }
         }
         chooseAudioDriver()
         // SDL keeps its thread running while paused; the core idles itself in the background and
@@ -140,6 +151,10 @@ open class FrondActivity : SDLActivity() {
         startDebugger()
         addKeyboard()
         addController()
+        if (device.isDana()) {
+            keyboardButton?.visibility = View.VISIBLE
+            link.whenConnected { if (link.connectedOnce) updateDanaEnvironment() }
+        }
         SdCard.clean(this)
         // An edited card kept from a kill goes back into the Palm once the core answers, which with the debugger on
         // is after gdb first connects.
@@ -203,6 +218,9 @@ open class FrondActivity : SDLActivity() {
         }
         arguments += machineSettings.arguments(soundSupported = launchDevice().sound,
             tg50Controls = launchDevice().id == "sony-clie-tg50", m68k = launchDevice().runs68k)
+        if (launchDevice().isDana()) {
+            arguments += listOf("--dana-view", machineSettings.danaView.argument() + " " + currentDanaEnvironment())
+        }
         arguments += listOf("--window-background", BACKGROUND_HEX)
         arguments += machineSettings.audioArguments(launchDevice().lowLatencyAudio, audioPeriod()) { fastAudioQualified() }
         debugPort?.let { arguments += listOf("--gdb", it.toString()) }
@@ -394,14 +412,16 @@ open class FrondActivity : SDLActivity() {
     // Controller mapping for this device from Settings, and releases when a controller goes away.
     private fun addController() {
         configureController(runningDevice)
-        getSystemService(android.hardware.input.InputManager::class.java)?.registerInputDeviceListener(
-            object : android.hardware.input.InputManager.InputDeviceListener {
-                override fun onInputDeviceAdded(deviceId: Int) {}
-                override fun onInputDeviceChanged(deviceId: Int) {}
-                override fun onInputDeviceRemoved(deviceId: Int) = controller.release(deviceId)
-            },
-            null,
-        )
+        inputDevices = getSystemService(InputManager::class.java)
+        inputListener = object : InputManager.InputDeviceListener {
+            override fun onInputDeviceAdded(deviceId: Int) = updateDanaEnvironment()
+            override fun onInputDeviceChanged(deviceId: Int) = updateDanaEnvironment()
+            override fun onInputDeviceRemoved(deviceId: Int) {
+                controller.release(deviceId)
+                updateDanaEnvironment()
+            }
+        }
+        inputDevices?.registerInputDeviceListener(inputListener!!, null)
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -524,13 +544,15 @@ open class FrondActivity : SDLActivity() {
         }, "FrondStopSave").start()
     }
 
-    // While the Palm infrared keyboard is attached, a keyboard button in the corner shows
-    // and hides the soft keyboard. Hardware keys reach the core through SDL either way.
+    // Dana toggles its native keyboard. Other devices show the IME only for an attached infrared keyboard,
+    // with a keyboard button in the corner. Hardware keys reach the core through SDL either way.
     private fun addKeyboard() {
         val layout = SDLActivity.getContentView() as? RelativeLayout ?: return
-        val input = PalmKeyboard(this)
-        layout.addView(input, RelativeLayout.LayoutParams(1, 1))
-        keyboard = input
+        if (!launchDevice().isDana()) {
+            val input = PalmKeyboard(this)
+            layout.addView(input, RelativeLayout.LayoutParams(1, 1))
+            keyboard = input
+        }
         val button = android.widget.ImageButton(this).apply {
             setImageResource(R.drawable.ic_keyboard)
             contentDescription = "Keyboard"
@@ -552,6 +574,16 @@ open class FrondActivity : SDLActivity() {
         ViewCompat.getRootWindowInsets(window.decorView)?.isVisible(WindowInsetsCompat.Type.ime()) == true
 
     private fun toggleKeyboard() {
+        if (launchDevice().isDana()) {
+            val view = danaState?.view ?: machineSettings.danaView
+            val mode = danaState?.toggledKeyboard(lastDanaKeyboard)
+                ?: if (view.keyboard == DanaKeyboard.HIDDEN) lastDanaKeyboard else DanaKeyboard.HIDDEN
+            changeDanaView(view.copy(keyboard = mode)) { _, error ->
+                if (error != null && !destroyed && !leaving) AlertDialog.Builder(this)
+                    .setTitle("Couldn't change keyboard").setMessage(error).setPositiveButton("OK", null).show()
+            }
+            return
+        }
         val input = keyboard ?: return
         if (imeShowing()) hideKeyboard() else if (keyboardAttached) input.show()
     }
@@ -582,6 +614,9 @@ open class FrondActivity : SDLActivity() {
     // window once the Palm shows again.
     fun applyDisplay() {
         val saved = Sessions.forPath(this, sessionPath)?.settings ?: return
+        if (launchDevice().isDana() && saved.danaView != (danaState?.view ?: machineSettings.danaView)) {
+            changeDanaView(saved.danaView) { _, error -> if (error != null) Log.w(TAG, "dana-view: $error") }
+        }
         val wanted = saved.displayArgument(tg50Controls = launchDevice().id == "sony-clie-tg50", m68k = launchDevice().runs68k)
         if (wanted == display) return
         display = wanted
@@ -610,9 +645,78 @@ open class FrondActivity : SDLActivity() {
         }, "FrondSpeedSet").apply { isDaemon = true }.start()
     }
 
+    private fun currentDanaEnvironment(): String {
+        val manager = getSystemService(InputManager::class.java)
+        val keyboards = manager?.inputDeviceIds?.asSequence()?.mapNotNull { id ->
+            manager.getInputDevice(id)?.let {
+                DanaKeyboardDevice(it.isVirtual, it.keyboardType == InputDevice.KEYBOARD_TYPE_ALPHABETIC, Build.VERSION.SDK_INT < 27 || it.isEnabled)
+            }
+        }?.toList() ?: emptyList()
+        return danaEnvironment(resources.displayMetrics.density, hasDanaHardwareKeyboard(keyboards))
+    }
+
+    // Host changes send only host fields, preserving the core's current zoom and pan.
+    private fun updateDanaEnvironment() {
+        if (!launchDevice().isDana() || destroyed || leaving || !link.connectedOnce) return
+        val wanted = currentDanaEnvironment()
+        if (wanted == danaEnvironment) return
+        danaEnvironment = wanted
+        soundSender.execute {
+            if (destroyed || leaving) return@execute
+            val reply = link.request("dana-view", wanted, timeoutSeconds = 10)
+            if (!reply.ok) {
+                if (danaEnvironment == wanted) danaEnvironment = ""
+                Log.w(TAG, "dana-view: ${reply.message}")
+            } else readDanaState()
+        }
+    }
+
+    private fun readDanaState(): DanaViewState? {
+        val reply = link.request("dana-view-state", timeoutSeconds = 10)
+        return if (reply.ok) DanaViewState.parse(reply.message)?.also { acceptDanaState(it) } else null
+    }
+
+    // Native notifications update preferences directly, without echoing another setter.
+    private fun acceptDanaState(state: DanaViewState) {
+        danaState = state
+        runOnUiThread {
+            if (destroyed) return@runOnUiThread
+            if (state.view.keyboard != DanaKeyboard.HIDDEN) lastDanaKeyboard = state.view.keyboard
+            val previous = machineSettings.danaView
+            machineSettings = machineSettings.copy(danaView = state.view)
+            keyboardButton?.contentDescription = if (state.resolved == DanaKeyboard.HIDDEN) "Show keyboard" else "Hide keyboard"
+            if (previous != state.view) {
+                try {
+                    Sessions.forPath(this, sessionPath)?.let { session ->
+                        Sessions.updateSettings(this, session.id) { it.copy(danaView = state.view) }
+                    }
+                } catch (e: Exception) { Log.w(TAG, "couldn't save Dana view: ${e.message}") }
+            }
+        }
+    }
+
+    // A refused command leaves the saved preference and menu at the last accepted native state.
+    fun changeDanaView(view: DanaView, done: (DanaView?, String?) -> Unit) {
+        if (!launchDevice().isDana() || destroyed || leaving) {
+            done(null, "The emulator isn't running.")
+            return
+        }
+        soundSender.execute {
+            val reply = link.request("dana-view", view.argument(), timeoutSeconds = 10)
+            val actual = readDanaState()
+            runOnUiThread {
+                if (!destroyed) done(actual?.view, if (!reply.ok) reply.message else if (actual == null) "Couldn't read the Dana view." else null)
+            }
+        }
+    }
+
     // Asks the core whether the infrared keyboard is attached and shows the keyboard button to match. Waits for
     // the control link first, which with the debugger on can be a long time.
     private fun readKeyboard() {
+        if (launchDevice().isDana()) {
+            keyboardButton?.visibility = if (leaving) View.GONE else View.VISIBLE
+            return
+        }
         if (!link.connectedOnce) {
             link.whenConnected { if (!leaving && link.connectedOnce) runOnUiThread { readKeyboard() } }
             return
@@ -640,12 +744,16 @@ open class FrondActivity : SDLActivity() {
         if (!leaving) applyDisplay()
         menuModel?.readMicrophone()
         if (bar.sheet == RunningSheets.Sheet.CONNECTIONS) menuModel?.startBluetoothRefresh()
+        if (!leaving) updateDanaEnvironment()
     }
 
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
         super.onConfigurationChanged(newConfig)
+        requestedOrientation = settings.orientation.request
         layoutBar()
         updateSurfaceMargin()
+        ViewCompat.requestApplyInsets(SDLActivity.getContentView() ?: window.decorView)
+        updateDanaEnvironment()
     }
 
     // The ComposeView over the Palm: the whole width while the bar shows, just the handle when it's hidden,
@@ -1076,6 +1184,8 @@ open class FrondActivity : SDLActivity() {
         // process instead; the next start loads the save.
         destroyed = true
         barOwner?.destroy()
+        inputListener?.let { inputDevices?.unregisterInputDeviceListener(it) }
+        inputListener = null
         if (!isFinishing && !leaving) {
             if (waitingForGdb) {
                 // Nothing has run since the session loaded, so there's nothing to save.

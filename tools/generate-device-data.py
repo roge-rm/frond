@@ -68,12 +68,14 @@ def outputs(profiles):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check', action='store_true')
+    parser.add_argument('--source', type=Path, default=ROOT / 'build/source', help='prepared native source root')
+    parser.add_argument('--build-dir', type=Path, default=ROOT / 'build/device-data', help='exporter build folder')
     args = parser.parse_args()
-    work = ROOT / 'build/device-data'
+    work = args.build_dir.absolute()
     work.mkdir(parents=True, exist_ok=True)
     exporter = work / 'export'
     subprocess.run([os.environ.get('CXX', 'c++'), '-std=c++17', '-O0',
-                    '-I' + str(ROOT / 'build/source/src/common'), str(ROOT / 'tools/device-profiles.cpp'),
+                    '-I' + str(args.source.absolute() / 'src/common'), str(ROOT / 'tools/device-profiles.cpp'),
                     '-o', str(exporter)], check=True)
     profiles = json.loads(subprocess.check_output([str(exporter)], text=True))
     stale = []

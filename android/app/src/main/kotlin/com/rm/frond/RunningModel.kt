@@ -519,6 +519,18 @@ class RunningModel(
     fun changeSettings(next: MachineSettings) {
         val id = sessionId ?: return
         val old = settings
+        if (device.isDana() && next.danaView != old.danaView) {
+            val running = FrondActivity.running
+            if (running == null) {
+                alert = "Couldn't change display" to "The emulator isn't running."
+                return
+            }
+            running.changeDanaView(next.danaView) { _, error ->
+                settings = machineSettings()
+                if (error != null) alert = "Couldn't change display" to error
+            }
+            return
+        }
         try {
             Sessions.updateSettings(activity.applicationContext, id) { cur ->
                 var s = cur

@@ -19,6 +19,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import com.rm.frond.DanaKeyboard
+import com.rm.frond.DanaPointer
+import com.rm.frond.DanaZoom
+import com.rm.frond.isDana
 import com.rm.frond.CpuSpeed
 import com.rm.frond.Device
 import com.rm.frond.Engine
@@ -77,7 +81,19 @@ fun <T> MachineChoiceRow(
 // Size, Smooth pixels, Contrast on 68k devices, Top bar, and on the TG50 Show keyboard and Jog controls.
 @Composable
 fun MachineDisplayRows(device: Device, settings: MachineSettings, listStyle: Boolean, onChange: (MachineSettings) -> Unit) {
-    MachineChoiceRow("Size", settings.size, ScreenSize.entries, { it.label }, listStyle) { onChange(settings.copy(size = it)) }
+    if (device.isDana()) {
+        MachineChoiceRow("Keyboard", settings.danaView.keyboard, DanaKeyboard.entries, { it.label }, listStyle) {
+            onChange(settings.copy(danaView = settings.danaView.copy(keyboard = it)))
+        }
+        MachineChoiceRow("Screen zoom", settings.danaView.zoom, DanaZoom.entries, { it.label }, listStyle) {
+            onChange(settings.copy(danaView = settings.danaView.copy(zoom = it)))
+        }
+        MachineChoiceRow("Screen pointer", settings.danaView.pointer, DanaPointer.entries, { it.label }, listStyle) {
+            onChange(settings.copy(danaView = settings.danaView.copy(pointer = it)))
+        }
+    } else {
+        MachineChoiceRow("Size", settings.size, ScreenSize.entries, { it.label }, listStyle) { onChange(settings.copy(size = it)) }
+    }
     MachineSwitchRow("Smooth pixels", settings.smoothing, listStyle) { onChange(settings.copy(smoothing = it)) }
     if (device.runs68k) MachineContrastRow(settings, listStyle, onChange)
     MachineChoiceRow("Top bar", settings.barMode, BarMode.entries, { it.label }, listStyle) { onChange(settings.copy(barMode = it)) }

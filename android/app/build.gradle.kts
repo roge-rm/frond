@@ -16,7 +16,10 @@ val releaseStoreFile = signingProperties?.getProperty("storeFile")
 
 // The repo root, one above android/. The core is reconstructed there in build/source.
 val repoRoot: File = rootProject.projectDir.parentFile
-val coreSource: File = File(repoRoot, "build/source")
+// An isolated prepared source can be used without replacing another session's build/source.
+val coreSourceOverride = providers.gradleProperty("frond.coreSource").orNull
+val coreSource: File = coreSourceOverride?.let { File(it).let { path -> if (path.isAbsolute) path else File(repoRoot, it) } }
+    ?: File(repoRoot, "build/source")
 
 // SDL2 and SDL2_image match the desktop build (Debian's libsdl2 2.32.4 and
 // libsdl2-image 2.8.8). The tarballs are the GitHub releases, checked against these
@@ -44,7 +47,8 @@ val prepareCore = tasks.register<Exec>("prepareCore") {
     group = "build"
     description = "Reconstructs the patched core in build/source with tools/prepare.py"
     workingDir(repoRoot)
-    commandLine("python3", "tools/prepare.py")
+    if (coreSourceOverride == null) commandLine("python3", "tools/prepare.py")
+    else commandLine("python3", "tools/prepare.py", "--destination", coreSource.absolutePath)
 }
 
 // The Fast engine's Dynarmic source, exported and patched into build/dynarmic-trial/src by the
@@ -78,7 +82,8 @@ tasks.configureEach {
 val checkDeviceData = tasks.register<Exec>("checkDeviceData") {
     dependsOn(prepareCore)
     workingDir(repoRoot)
-    commandLine("python3", "tools/generate-device-data.py", "--check")
+    commandLine("python3", "tools/generate-device-data.py", "--check", "--source", coreSource.absolutePath,
+        "--build-dir", layout.buildDirectory.dir("device-data").get().asFile.absolutePath)
 }
 tasks.named("preBuild") { dependsOn(checkDeviceData) }
 
