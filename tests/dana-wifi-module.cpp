@@ -1,7 +1,8 @@
 // The Dana Wireless's built-in Wi-Fi module (UsbWifiRuntime on root port 1) on an ISP1161 model
 // with no firmware: port supply (PK0) on and off, the printer on port 0 at the same time, port
 // resets kept to their own port, machine reset, load kept and dropped, a rejected load, one ARP
-// exchange with slirp, and the serial number token a Dana ROM gets.
+// exchange with slirp, the power-up delay before it connects, and the serial number token a Dana
+// ROM gets.
 #include <cassert>
 #include <cstring>
 #include <iostream>
@@ -240,8 +241,22 @@ int main() {
         external.detach(); assert(!i.HasHostTarget(0) && i.HasHostTarget(1));
     }
 
+    // With a power-up delay, PK0 rising connects the module only once that much guest time has
+    // passed (in poll); PK0 falling first cancels it. Attaching still connects at once.
+    {
+        Isp d; UsbWifiRuntime late{1,50000000}; uint64_t lt=0; late.clock=[&] { return lt; };
+        late.attach(d); assert(d.HasHostTarget(1));
+        d.SetPortSupply(1,false); assert(!d.HasHostTarget(1));
+        d.SetPortSupply(1,true); assert(!d.HasHostTarget(1) && late.status().rfind("powered",0)==0);
+        lt=49999999; late.poll(); assert(!d.HasHostTarget(1));
+        lt=50000000; late.poll(); assert(d.HasHostTarget(1));
+        d.SetPortSupply(1,false); d.SetPortSupply(1,true); lt+=10000000;
+        d.SetPortSupply(1,false); lt+=60000000; late.poll(); assert(!d.HasHostTarget(1));
+        d.SetPortSupply(1,true); late.detach(); lt+=60000000; late.poll(); assert(!d.HasHostTarget(1));
+    }
+
     // Bank disposal unplugs it.
     EmBankRegs::onBeforeDispose.Dispatch();
     assert(!i.HasHostTarget(1) && m.status()=="off" && !i.hostOwner[1].supplyChanged);
-    std::cout<<"PASS Dana Wireless module: serial token, PK0 supply, printer beside it, port resets, reset, load kept and dropped, rejected load, ARP\n";
+    std::cout<<"PASS Dana Wireless module: serial token, PK0 supply, printer beside it, port resets, reset, load kept and dropped, rejected load, ARP, power-up delay\n";
 }

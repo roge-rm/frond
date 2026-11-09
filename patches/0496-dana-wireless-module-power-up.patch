@@ -1,0 +1,98 @@
+diff --git a/src/cloudpilot/emulator/hardware/UsbWifiRuntime.h b/src/cloudpilot/emulator/hardware/UsbWifiRuntime.h
+index ca1ba77..7e9409f 100644
+--- a/src/cloudpilot/emulator/hardware/UsbWifiRuntime.h
++++ b/src/cloudpilot/emulator/hardware/UsbWifiRuntime.h
+@@ -14,13 +14,16 @@
+ // powered by PM5), or the Dana Wireless's built-in module (root port 1, powered by PK0). It is only
+ // connected while the board powers its port. Runner-owned, single emulation thread. Dispose before
+ // register banks are freed.
++// connectDelayNs is guest time from the board powering the port to the device connecting, the
++// module's power-up. The Dana Wireless ROM polls for its module every 100 ms after raising PK0 and
++// gives up if a poll finds it half enumerated, so the module can't connect at once.
+ class UsbWifiRuntime {
+  public:
+     UsbPrism2Adapter adapter;
+     // Guest time in nanoseconds, for slirp's timers. Set by the owner before attach.
+     std::function<uint64_t()> clock;
+ 
+-    explicit UsbWifiRuntime(unsigned rootPort=0): port(rootPort) {
++    explicit UsbWifiRuntime(unsigned rootPort=0,uint64_t connectDelayNs=0): port(rootPort),connectDelay(connectDelayNs) {
+         adapter.setTxSink([this](const std::vector<uint8_t>& frame) { transmit(frame); });
+     }
+     ~UsbWifiRuntime() { EmBankRegs::onBeforeDispose.RemoveHandler(disposeHandler); detach(); }
+@@ -35,7 +38,7 @@ class UsbWifiRuntime {
+         owner={};
+         owner.reattach=[this] { adapter.detach(); powered=false; supplyChanged(); };
+         owner.portReset=[this] { adapter.busReset(); };
+-        owner.supplyChanged=[this] { supplyChanged(); };
++        owner.supplyChanged=[this] { supplyChanged(true); };
+         powered=false;
+         supplyChanged();
+     }
+@@ -45,7 +48,7 @@ class UsbWifiRuntime {
+             dc->hostOwner[port]={};
+             dc=nullptr;
+         }
+-        adapter.detach(); powered=false;
++        adapter.detach(); powered=false; connecting=false;
+     }
+     bool attached() const { return dc!=nullptr; }
+     unsigned rootPort() const { return port; }
+@@ -53,6 +56,7 @@ class UsbWifiRuntime {
+     // Runs slirp and hands its frames to the adapter. A frame the adapter can't queue is dropped.
+     // Called often; slirp runs at most once per guest millisecond unless the guest sent something.
+     void poll() {
++        if(dc && connecting && now()>=connectAt) { connecting=false; plug(); }
+         if(!dc || !router) return;
+         const uint64_t t=now();
+         if(!sent && t>=lastPoll && t-lastPoll<1000000) return;
+@@ -147,13 +151,17 @@ class UsbWifiRuntime {
+         setMac(m);
+     }
+     void plug() { dc->SetHostTarget(port,[this](const auto& p) { return adapter.packet<EmRegsISPDana::HostReply>(p); }); }
+-    // Power on or off is a fresh adapter; no power is an unplugged port.
+-    void supplyChanged() {
++    // Power on or off is a fresh adapter; no power is an unplugged port. A board power-on connects
++    // the device after connectDelay (in poll); attaching and reattaching connect it at once.
++    void supplyChanged(bool powerOn=false) {
+         if(!dc) return;
+         const bool on=dc->PortSupply(port);
+-        if(on==powered && dc->HasHostTarget(port)==on) return;
+-        powered=on; adapter.detach();
+-        if(on) plug(); else dc->SetHostTarget(port,{});
++        if(on==powered && (dc->HasHostTarget(port) || connecting)==on) return;
++        powered=on; adapter.detach(); connecting=false;
++        if(!on) { dc->SetHostTarget(port,{}); return; }
++        if(!powerOn || !connectDelay) { plug(); return; }
++        dc->SetHostTarget(port,{});
++        connecting=true; connectAt=now()+connectDelay;
+     }
+     void transmit(const std::vector<uint8_t>& frame) {
+         ++txFrames;
+@@ -167,8 +175,9 @@ class UsbWifiRuntime {
+     EmRegsISPDana* dc=nullptr;
+     std::unique_ptr<frondNet::WifiRouter> router;
+     UsbPrism2Adapter::Mac mac_{};
+-    bool haveMac=false, powered=false, sent=false;
+-    uint64_t lastPoll=0;
++    const uint64_t connectDelay;
++    bool haveMac=false, powered=false, sent=false, connecting=false;
++    uint64_t lastPoll=0, connectAt=0;
+     std::string ip="none";
+     unsigned txFrames=0, rxFrames=0, dropped=0;
+     int disposeHandler=EmBankRegs::onBeforeDispose.AddHandler([this] { detach(); });
+diff --git a/src/cloudpilot/frond/main.cpp b/src/cloudpilot/frond/main.cpp
+index e9e315c..6285778 100644
+--- a/src/cloudpilot/frond/main.cpp
++++ b/src/cloudpilot/frond/main.cpp
+@@ -1225,7 +1225,9 @@ class Runner {
+     // The Dana Wireless's built-in Wi-Fi module on root port 1, and whether its radio is on (network-mode
+     // wireless or disabled). Kept across loads and resets; the module's state from a loaded session
+     // waits in pendingModule the same way.
+-    UsbWifiRuntime moduleWifi{1};
++    // The module connects 50 ms after PK0 rises, a power-up within USB's 100 ms attach limit that
++    // puts its enumeration between the ROM's polls.
++    UsbWifiRuntime moduleWifi{1,50000000};
+     bool moduleOn=true;
+     optional<vector<uint8_t>> pendingModule;
+     optional<UsbPrism2Adapter::Bus> pendingModuleBus;
