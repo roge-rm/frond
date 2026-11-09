@@ -1465,3 +1465,12 @@ test-isp-host-pio:
 	$(MAKE) -C $(ISP_HOST_AREA)/source/src/cloudpilot FROND_68K=1 -f Makefile \
 		-f $(CURDIR)/tests/isp-host-pio.mk FROND_TEST_ROOT=$(CURDIR) \
 		ISP_HOST_TEST=$(ISP_HOST_AREA)/test-isp-host-pio isp-host-test
+
+ISP_ATL_AREA ?= $(CURDIR)/build/isp-host-atl
+.PHONY: test-isp-host-atl
+test-isp-host-atl:
+	python3 tools/prepare.py --destination $(ISP_ATL_AREA)/source
+	$(MAKE) -C $(ISP_ATL_AREA)/source/src/common libcommon.a net
+	$(MAKE) -C $(ISP_ATL_AREA)/source/src/cloudpilot FROND_68K=1 -f Makefile \
+		-f $(CURDIR)/tests/isp-host-atl.mk FROND_TEST_ROOT=$(CURDIR) \
+		ISP_ATL_TEST=$(ISP_ATL_AREA)/test-isp-host-atl isp-atl-test
