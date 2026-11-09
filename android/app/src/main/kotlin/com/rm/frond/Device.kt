@@ -52,6 +52,8 @@ data class Device internal constructor(
     val holdPresent: Boolean = false, val holdSupported: Boolean = false,
     val memoryStick: Boolean = false,
     val microphone: Boolean = false,
+    // A snap-on modem for the serial port, run by the core.
+    val modem: Boolean = false,
     // DragonBall devices run in libmain68k.so (Frond68kActivity), the others in libmain.so (FrondActivity).
     val runs68k: Boolean = false,
     val hotSyncButton: Boolean = false,

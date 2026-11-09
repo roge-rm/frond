@@ -295,8 +295,8 @@ State commands take no argument. Mode commands change the setting and reply with
 | `microphone-state`, `microphone-epoch` | | `microphone` |
 | `microphone-mode` | `on`, `off` or `on-return:N` (arm when the Palm app returns to the foreground, N from `microphone-epoch`) | `microphone` |
 | `display` | words `fit=`(`none` `fit` `whole` `fill`), `smooth=`(`on` `off`), `keyboard=`(`on` `off`), `jog=`(`hidden` `screen` `keyboard`) | `display`: `queued`, applied once the app is in the foreground |
-| `serial-state`, `usb-state` | | `serial`, `usb`: `off`, `pty PATH waiting\|connected`, `tcp PORT waiting\|connected`, `unix PATH waiting\|connected`, or `off` with an error |
-| `serial-mode`, `usb-mode`, `irda-mode` | `off`, `pty`, `tcp:PORT` or `unix:PATH` | the state |
+| `serial-state`, `usb-state` | | `serial`, `usb`: `off`, `pty PATH waiting\|connected`, `tcp PORT waiting\|connected`, `unix PATH waiting\|connected`, or `off` with an error; frond-68k's modem gives `modem idle\|dialling\|online 33600` |
+| `serial-mode`, `usb-mode`, `irda-mode` | `off`, `pty`, `tcp:PORT` or `unix:PATH`, and `modem` for `serial-mode` on a device with a snap-on modem (frond-68k, `unsupported` elsewhere there) | the state |
 | `irda-state` | | `infrared` |
 | `irda-stats` | | `infrared`: counters `rx= tx= rx_drop= tx_drop= pending= baud= rx_on= tx_on= power= sleeping=` |
 | `bluetooth-state` | | `bluetooth` |
@@ -532,7 +532,7 @@ out/frond-68k iiix.frond --serial pty
 | `--audio-output FILE` | Write the piezo sound to a WAV file. |
 | `--audio-period FRAMES` | Host audio period, 64 to 8192. Default 512. |
 | `--tone-log` | Print each tone change (`tone: HZ Hz duty D at S s`). |
-| `--serial off\|pty\|tcp:PORT\|unix:PATH`, `--irda off\|pty\|tcp:PORT\|unix:PATH` | Connect the serial port or infrared to a host PTY, a loopback TCP listener or a Unix socket. The PTY path is printed. |
+| `--serial off\|pty\|tcp:PORT\|unix:PATH\|modem`, `--irda off\|pty\|tcp:PORT\|unix:PATH` | Connect the serial port or infrared to a host PTY, a loopback TCP listener or a Unix socket. The PTY path is printed. `modem` puts the snap-on modem on the serial port (devices with the `modem` capability): any number dialled connects at 33600 to a PPP server with slirp behind it, guest 10.0.2.15, DNS 10.0.2.3. |
 | `--gdb PORT` | Start the GDB stub on 127.0.0.1:PORT, see below. |
 | `--desktop-socket PATH` | Connect to the desktop's control socket, see [Control socket](#control-socket). The console is off then. |
 | `--save-on-disconnect FILE` | As on the ARM core. |
@@ -555,8 +555,8 @@ Read from standard input, one per line, unless `--desktop-socket` is used. Paths
 | `snapshot FILE` | Save the Palm screen as a PNG. |
 | `window-snapshot FILE` | Save the whole window, with silkscreen and buttons, as a PNG. |
 | `audio-on`, `audio-off`, `sound-state` | Turn sound on or off, or show it. |
-| `serial-mode off\|pty\|tcp:PORT\|unix:PATH`, `irda-mode off\|pty\|tcp:PORT\|unix:PATH` | Set the serial or infrared endpoint and show its state. |
-| `serial-state`, `irda-state` | Show the endpoint, `off` or `pty\|tcp\|unix ENDPOINT connected\|waiting`. |
+| `serial-mode off\|pty\|tcp:PORT\|unix:PATH\|modem`, `irda-mode off\|pty\|tcp:PORT\|unix:PATH` | Set the serial or infrared endpoint and show its state. |
+| `serial-state`, `irda-state` | Show the endpoint, `off` or `pty\|tcp\|unix ENDPOINT connected\|waiting`, or for the modem `modem idle\|dialling\|online 33600`. |
 | `hotsync` | Press and release the cradle's HotSync button. |
 | `backlight-state` | `backlight: on` or `off`. |
 | `speed original\|uncapped` | Set the speed. |

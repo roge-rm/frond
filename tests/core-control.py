@@ -348,6 +348,7 @@ def check_arm(core, session, root):
         saved = next((p for p in (copy / (session.name + '.frond'), *sorted(copy.glob('*.frond'))) if p.is_file()),
                      copy) if copy.is_dir() else copy.parent / copy.stem / (copy.stem + '.frond')
         common(c, work, device, unsupported, saved)
+        c.fails('serial-mode', 'modem', code='argument')  # the snap-on modem is frond-68k's
         if not copy.is_dir():
             # Saving back to the lone file goes to the folder it was loaded into and leaves the file as it was.
             before, stamp = copy.read_bytes(), saved.stat().st_mtime_ns
@@ -563,6 +564,15 @@ def check_68k(core, rom, root):
         assert c.ok('hold-state') == 'unavailable'
         saved = work / 'saved.frond'
         common(c, work, 'palm-iiix', unsupported, saved)
+        # The snap-on modem takes the serial port's place, and a link takes it back.
+        c.events.clear()
+        assert c.ok('serial-mode', 'modem', code='serial') == 'modem idle'
+        assert c.ok('serial-state', code='serial') == 'modem idle'
+        assert c.ok('serial-mode', 'pty', code='serial').startswith('pty /dev/pts/')
+        assert c.ok('serial-mode', 'modem', code='serial') == 'modem idle'
+        c.ok('speed-state')
+        assert ('serial', 'modem idle') in c.events, c.events
+        assert c.ok('serial-mode', 'off', code='serial') == 'off'
         # The IIIx's own: cradle HotSync button, speed, contrast, backlight, launch.
         c.ok('hotsync', code='hotsync')
         c.ok('speed', 'uncapped', code='speed')

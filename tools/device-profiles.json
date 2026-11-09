@@ -59,6 +59,7 @@
       "usb": true,
       "infrared": true,
       "bluetooth": true,
+      "modem": false,
       "firmware_variants": []
     },
     {
@@ -119,6 +120,7 @@
       "usb": true,
       "infrared": true,
       "bluetooth": true,
+      "modem": false,
       "firmware_variants": [
         {
           "id": "e2-denvfs",
@@ -192,6 +194,7 @@
       "usb": true,
       "infrared": true,
       "bluetooth": true,
+      "modem": false,
       "firmware_variants": []
     },
     {
@@ -252,6 +255,7 @@
       "usb": false,
       "infrared": false,
       "bluetooth": false,
+      "modem": false,
       "firmware_variants": []
     },
     {
@@ -312,6 +316,7 @@
       "usb": true,
       "infrared": true,
       "bluetooth": true,
+      "modem": false,
       "firmware_variants": []
     },
     {
@@ -379,6 +384,7 @@
       "usb": true,
       "infrared": true,
       "bluetooth": true,
+      "modem": false,
       "firmware_variants": []
     },
     {
@@ -439,6 +445,7 @@
       "usb": false,
       "infrared": true,
       "bluetooth": false,
+      "modem": true,
       "firmware_variants": []
     },
     {
@@ -499,6 +506,7 @@
       "usb": false,
       "infrared": false,
       "bluetooth": false,
+      "modem": false,
       "firmware_variants": []
     }
   ]

@@ -150,7 +150,7 @@ out/frond: build/source/.prepared build/source/src/common/libcommon.a $(CORE_JIT
 	mv -f out/frond.new out/frond
 
 # The 68k runner for DragonBall devices, from Cloudpilot's core in src/cloudpilot.
-out/frond-68k: build/source/.prepared build/source/src/common/libcommon.a
+out/frond-68k: build/source/.prepared build/source/src/common/libcommon.a build/source/src/common/libcommon-net.a
 	$(MAKE) -C build/source/src/cloudpilot FROND_68K=1 frond-68k
 	mkdir -p out
 	cp build/source/src/cloudpilot/frond-68k out/frond-68k.new
