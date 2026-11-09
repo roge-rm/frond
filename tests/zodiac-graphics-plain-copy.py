@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-PROBE = ROOT / 'build/zodiac-boot-probe'
+PROBE = ROOT / os.environ.get('FROND_ZODIAC_PROBE', 'build/zodiac-boot-probe')
 with tempfile.TemporaryDirectory(prefix='zodiac-plain-copy-', dir=ROOT / 'build') as work:
     rom = bytearray(0x7d0000)
     for base in (0, 0x20000):
@@ -73,7 +73,7 @@ with tempfile.TemporaryDirectory(prefix='zodiac-plain-copy-', dir=ROOT / 'build'
             branch(0xe4100,scratch+0x40)
     branch(0xe3000,0xe3000)
     path.write_bytes(rom)
-    result = subprocess.run([str(PROBE),str(path),'linked','2000','exact','--bootstrap-peripherals',
+    result = subprocess.run([str(PROBE),str(path),'linked','2000',os.environ.get('FROND_ZODIAC_PROBE_ENGINE','exact'),'--bootstrap-peripherals',
         '--graphics-profile=virtual5744-compatible-8mib','--trace=peripherals'],
         text=True,capture_output=True,timeout=15)
     output = result.stdout+result.stderr

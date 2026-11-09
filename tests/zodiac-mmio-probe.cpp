@@ -27,8 +27,8 @@ void access(void* context, const Imx1ProbeAccess& trace) {
             for (const auto* t : {&x, &y}) {
                 if (i >= t->accesses.size()) continue;
                 const auto& e = t->accesses[i];
-                std::fprintf(stderr, "%s %zu step=%u pc=%08x %c %08x size=%u value=%08x status=%u\n",
-                             t == &x ? "Exact" : "Fast", i, e.step, e.pc, e.write ? 'W' : 'R',
+                std::fprintf(stderr, "%s %zu step=%llu pc=%08x %c %08x size=%u value=%08x status=%u\n",
+                             t == &x ? "Exact" : "Fast", i, (unsigned long long)e.step, e.pc, e.write ? 'W' : 'R',
                              e.address, e.size, e.value, unsigned(e.status));
             }
         }

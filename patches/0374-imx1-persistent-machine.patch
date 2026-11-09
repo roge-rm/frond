@@ -1,0 +1,511 @@
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -31,9 +31,19 @@
+     std::vector<uint8_t> rom;
+     uint32_t alias;
+     Imx1ProbeResult result{};
+-    struct Recent { uint32_t step, pc, instruction, cpsr, sp, lr, r0, r1, r2, r3; };
++    struct Recent { uint64_t step; uint32_t pc, instruction, cpsr, sp, lr, r0, r1, r2, r3; };
+     std::vector<Recent> recent;
+     uint32_t recentNext = 0, recentCount = 0;
++    uint64_t retired = 0;
++    Imx1ProbeObserver observer = nullptr;
++    void* observerContext = nullptr;
++    bool blPrefix = false;
++    uint32_t blNextPc = 0;
++    struct InterruptedPrefix { uint32_t pc, cpsr, mode, lr, sp; };
++    std::array<InterruptedPrefix, 256> interruptedPrefixes{};
++    size_t interruptedPrefixCount = 0;
++    bool prefixCapacityExceeded = false;
++    bool terminal = false, stopped = false;
+     bool failed = false;
+     ArmCpu* cpu = nullptr;
+     ArmMem* mem = nullptr;
+@@ -46,7 +56,8 @@
+     Imx1GraphicsFrame graphicsFrame;
+     Imx1GraphicsCommands graphicsCommands;
+     uint32_t graphicsSampledPin = 32, graphicsSampleOffset = 0;
+-    uint32_t i2cIssueStep = 0, i2cIssuePc = 0;
++    uint64_t i2cIssueStep = 0;
++    uint32_t i2cIssuePc = 0;
+     bool irqRaised = false, fiqRaised = false;
+     Imx1BootstrapAccess acceptGraphics(const Imx1Cs5Configuration& candidate, bool commit) {
+         if (options.graphicsIrqA13) {
+@@ -209,7 +220,8 @@
+         if (p.failed) return false;
+         uint32_t value = 0;
+         if (write && size <= 4) std::memcpy(&value, data, size);
+-        const auto previousIssueStep = p.i2cIssueStep, previousIssuePc = p.i2cIssuePc;
++        const auto previousIssueStep = p.i2cIssueStep;
++        const auto previousIssuePc = p.i2cIssuePc;
+         if (address == 0x00217010 || (write && address == 0x00217008)) {
+             p.i2cIssueStep = p.result.trace.step;
+             p.i2cIssuePc = p.result.trace.pc;
+@@ -504,17 +516,20 @@
+ }
+ }  // namespace
+ 
+-Imx1ProbeResult imx1BootProbe(const uint8_t* rom, uint32_t size, Imx1ProbeEntry entry,
+-                            uint32_t steps, Imx1ProbeObserver observer, void* context, bool fast,
+-                            const Imx1ProbeOptions* options) {
+-    if (!steps || steps > imx1ProbeMaximumSteps) {
+-        Imx1ProbeResult result{};
+-        result.stop = Imx1ProbeStop::unsupportedPeripheral;
+-        result.peripheralStatus = Imx1BootstrapAccess::sequence;
+-        return result;
++struct Imx1Machine { Probe* probe; };
++namespace { Imx1Machine* activeMachine = nullptr; }
++
++Imx1Machine* imx1MachineCreate(const uint8_t* rom, uint32_t size, Imx1ProbeEntry entry,
++                             bool fast, const Imx1ProbeOptions& config,
++                             Imx1ProbeObserver observer, void* context, Imx1ProbeResult* error) {
++    const auto* options = &config;
++    if (activeMachine) {
++        if (error) { *error = {}; error->stop = Imx1ProbeStop::unsupportedPeripheral;
++                     error->peripheralStatus = Imx1BootstrapAccess::sequence; }
++        return nullptr;
+     }
+     if (options && (options->idleHclkBudget > imx1ProbeMaximumIdleHclk ||
+-        !imx1ProbeGpioEventValid(*options, steps) || ((options->lcdcContrastOnly || options->mmcsdEmptySlot) && !options->bootstrapPeripherals) ||
++        !imx1ProbeGpioEventValid(*options, UINT32_MAX) || ((options->lcdcContrastOnly || options->mmcsdEmptySlot) && !options->bootstrapPeripherals) ||
+         (options->virtualMpllRetune && (!options->bootstrapPeripherals || !options->assumeMpllSettled)) ||
+         !imx1GraphicsProfileValid(options->graphicsProfile) ||
+         (!options->cs4IndexedInputs.empty() && (!options->bootstrapPeripherals || !options->cs4Port0InputKnown)) ||
+@@ -535,12 +550,12 @@
+         Imx1ProbeResult result{};
+         result.stop = Imx1ProbeStop::unsupportedPeripheral;
+         result.peripheralStatus = Imx1BootstrapAccess::sequence;
+-        return result;
++        if (error) *error = result;
++        return nullptr;
+     }
+     if (!cpuSetFastEngine(fast)) {
+-        Imx1ProbeResult result{};
+-        result.stop = Imx1ProbeStop::engineUnavailable;
+-        return result;
++        if (error) { *error = {}; error->stop = Imx1ProbeStop::engineUnavailable; }
++        return nullptr;
+     }
+     // The core has process lifetime, as in the existing standalone CPU diagnostics.
+     auto* p = new Probe(options ? *options : Imx1ProbeOptions{});
+@@ -548,7 +563,9 @@
+     if (p->options.rtcInitialTimeKnown && !p->peripherals.setRtcInitialTime(p->options.rtcInitialTime)) {
+         p->result.stop = Imx1ProbeStop::unsupportedPeripheral;
+         p->result.peripheralStatus = Imx1BootstrapAccess::externalInput;
+-        return p->result;
++        if (error) *error = p->result;
++        delete p;
++        return nullptr;
+     }
+     if (p->options.gpioAInputKnown) p->peripherals.setGpioInput(0, p->options.gpioAInput);
+     if (p->options.gpioAInputMaskedKnown)
+@@ -558,7 +575,9 @@
+             p->acceptGraphics(p->cs5Configuration, true) != Imx1BootstrapAccess::ok) {
+             p->result.stop = Imx1ProbeStop::unsupportedPeripheral;
+             p->result.peripheralStatus = Imx1BootstrapAccess::sequence;
+-            return p->result;
++            if (error) *error = p->result;
++            delete p;
++            return nullptr;
+         }
+     }
+     if (p->options.gpioBInputKnown) p->peripherals.setGpioInput(1, p->options.gpioBInput);
+@@ -585,14 +604,49 @@
+     cpuArm920SetMemoryCheck(p->cpu, Probe::cacheMemoryCheck, p);
+     cpuArm920SetIcacheIndexCompatibility(p->cpu, p->options.arm920IcacheIndexCompatibility);
+     p->result.stop = Imx1ProbeStop::budget;
+-    bool blPrefix = false;
+-    uint32_t blNextPc = 0;
+-    struct InterruptedPrefix { uint32_t pc, cpsr, mode, lr, sp; };
+-    std::array<InterruptedPrefix, 256> interruptedPrefixes{};
+-    size_t interruptedPrefixCount = 0;
+-    bool prefixCapacityExceeded = false;
+-    for (uint32_t step = 0; step < steps; ++step) {
+-        if (p->options.gpioEventAfterInstructions && step == p->options.gpioEventAfterInstructions) {
++    p->observer = observer;
++    p->observerContext = context;
++    activeMachine = new Imx1Machine{p};
++    return activeMachine;
++}
++
++Imx1MachineRun imx1MachineInspect(Imx1Machine* machine) {
++    auto* p = machine->probe;
++    if (p->stopped) return {Imx1MachineStatus::stopped, p->retired, p->result};
++    if (p->options.bootstrapPeripherals) p->result.interruptPending = p->peripherals.interruptPending();
++    if (p->options.bootstrapPeripherals) p->result.pcm = p->peripherals.pcmState();
++    std::memcpy(p->result.registers, cpuGetRegisters(p->cpu), sizeof(p->result.registers));
++    p->result.cpsr = cpuGetRegExternal(p->cpu, ARM_REG_NUM_CPSR);
++    p->result.spsr = cpuGetRegExternal(p->cpu, ARM_REG_NUM_SPSR);
++    p->result.graphicsLcdEnabled = p->graphicsFrame.lcdEnabled();
++    p->result.graphicsFrameWidth = p->result.graphicsFrameHeight = p->result.graphicsFrameHash = 0;
++    if (const auto* frame = p->graphicsFrame.peekFrame()) {
++        p->result.graphicsFrameWidth = p->graphicsFrame.width();
++        p->result.graphicsFrameHeight = p->graphicsFrame.height();
++        uint32_t hash = 2166136261u;
++        for (uint32_t i = 0; i < p->result.graphicsFrameWidth * p->result.graphicsFrameHeight; ++i)
++            for (unsigned lane = 0; lane < 4; ++lane) hash = (hash ^ uint8_t(frame[i] >> (lane * 8))) * 16777619u;
++        p->result.graphicsFrameHash = hash;
++    }
++    cpuJitExecutionCounts(p->cpu, &p->result.jitBlocks, &p->result.jitInstructions);
++    return {p->terminal ? Imx1MachineStatus::terminal :
++            p->result.stop == Imx1ProbeStop::idleNoWake ? Imx1MachineStatus::waiting :
++            Imx1MachineStatus::yielded, p->retired, p->result};
++}
++
++Imx1MachineRun imx1MachineRunSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idleHclkLimit) {
++    auto* p = machine->probe;
++    if (p->stopped || p->terminal || !retiredBudget) return imx1MachineInspect(machine);
++    if (retiredBudget > imx1ProbeMaximumSteps || UINT64_MAX - p->retired < retiredBudget) {
++        p->result.stop = Imx1ProbeStop::unsupportedPeripheral;
++        p->result.peripheralStatus = Imx1BootstrapAccess::sequence;
++        p->terminal = true;
++        return imx1MachineInspect(machine);
++    }
++    p->result.stop = Imx1ProbeStop::budget;
++    for (uint32_t slice = 0; slice < retiredBudget; ++slice) {
++        const uint64_t step = p->retired;
++        if (!p->result.gpioEventApplied && p->options.gpioEventAfterInstructions && step == p->options.gpioEventAfterInstructions) {
+             const auto status = p->peripherals.transitionGpioInputs(p->options.gpioEventValues, p->options.gpioEventMasks);
+             if (status != Imx1BootstrapAccess::ok) {
+                 p->result.stop = Imx1ProbeStop::unsupportedPeripheral;
+@@ -611,7 +665,7 @@
+                     p->result.stop = Imx1ProbeStop::idleNoWake;
+                     break;
+                 }
+-                if (p->result.idleHclk == p->options.idleHclkBudget) { p->result.stop = Imx1ProbeStop::idleBudget; break; }
++                if (p->result.idleHclk >= idleHclkLimit) { p->result.stop = Imx1ProbeStop::idleBudget; break; }
+                 // One HCLK preserves event ordering, including requests already high at entry.
+                 const auto period = p->peripherals.busReferencePeriod();
+                 p->peripherals.advanceHclkCycles(1);
+@@ -650,18 +704,18 @@
+             if (cpuProcessPendingInterrupts(p->cpu)) {
+                 const auto vector = cpuGetRegisters(p->cpu)[15];
+                 const auto mode = cpuGetRegExternal(p->cpu, ARM_REG_NUM_CPSR) & 31;
+-                if (blPrefix) {
++                if (p->blPrefix) {
+                     bool known = false;
+-                    for (size_t n = 0; n < interruptedPrefixCount; ++n) {
+-                        const auto& saved = interruptedPrefixes[n];
++                    for (size_t n = 0; n < p->interruptedPrefixCount; ++n) {
++                        const auto& saved = p->interruptedPrefixes[n];
+                         known |= saved.pc == pc && saved.cpsr == cpsr && saved.mode == mode && saved.lr == lr && saved.sp == sp;
+                     }
+                     if (!known) {
+-                        if (interruptedPrefixCount == interruptedPrefixes.size()) prefixCapacityExceeded = true;
+-                        else interruptedPrefixes[interruptedPrefixCount++] = {pc, cpsr, mode, lr, sp};
++                        if (p->interruptedPrefixCount == p->interruptedPrefixes.size()) p->prefixCapacityExceeded = true;
++                        else p->interruptedPrefixes[p->interruptedPrefixCount++] = {pc, cpsr, mode, lr, sp};
+                     }
+                 }
+-                blPrefix = false;
++                p->blPrefix = false;
+                 const bool fiq = mode == ARM_SR_MODE_FIQ;
+                 if (fiq) ++p->result.fiqEntries; else ++p->result.irqEntries;
+                 if (p->options.interruptObserver) p->options.interruptObserver(p->options.interruptContext,
+@@ -685,10 +739,10 @@
+             const unsigned source = (t.instruction >> 12) & 15;
+             t.operand = source == 15 ? t.pc + 8 : cpuGetRegisters(p->cpu)[source];
+         }
+-        if (observer) observer(context, t);
++        if (p->observer) p->observer(p->observerContext, t);
+         const bool thumb = t.instructionSize == 2;
+-        if (prefixCapacityExceeded || (blPrefix && (!thumb || t.pc != blNextPc || (t.instruction & 0xf800) != 0xf800)) ||
+-            (thumb ? !bootstrapThumb(t.instruction, cpuGetRegisters(p->cpu), blPrefix && t.pc == blNextPc) :
++        if (p->prefixCapacityExceeded || (p->blPrefix && (!thumb || t.pc != p->blNextPc || (t.instruction & 0xf800) != 0xf800)) ||
++            (thumb ? !bootstrapThumb(t.instruction, cpuGetRegisters(p->cpu), p->blPrefix && t.pc == p->blNextPc) :
+              t.instruction >> 28 == 15 ||
+              (condition(t.instruction, t.cpsr) && !bootstrapInstruction(t.instruction, cpuGetRegisters(p->cpu), t.cpsr,
+                                                                             cpuGetRegExternal(p->cpu, ARM_REG_NUM_SPSR))))) {
+@@ -746,8 +800,8 @@
+             p->recentNext=(p->recentNext+1)%4096;
+             if (p->recentCount<4096) ++p->recentCount;
+         }
+-        blPrefix = thumb && (t.instruction & 0xf800) == 0xf000;
+-        blNextPc = t.pc + 2;
++        p->blPrefix = thumb && (t.instruction & 0xf800) == 0xf000;
++        p->blNextPc = t.pc + 2;
+         const bool contextReturn = !thumb && condition(t.instruction, t.cpsr) &&
+             (((t.instruction & 0x0ffffff0) == 0x01b0f000) ||
+              ((t.instruction & 0x0fffffff) == 0x025ef004) ||
+@@ -756,17 +810,18 @@
+         if (contextReturn) {
+             const auto* registers = cpuGetRegisters(p->cpu);
+             const auto cpsr = cpuGetRegExternal(p->cpu, ARM_REG_NUM_CPSR);
+-            for (size_t n = interruptedPrefixCount; n > 0; --n) {
+-                const auto& saved = interruptedPrefixes[n - 1];
++            for (size_t n = p->interruptedPrefixCount; n > 0; --n) {
++                const auto& saved = p->interruptedPrefixes[n - 1];
+                 if ((t.cpsr & 31) == saved.mode && registers[15] == saved.pc &&
+                     cpsr == saved.cpsr && registers[14] == saved.lr && registers[13] == saved.sp) {
+-                    blPrefix = true;
+-                    blNextPc = saved.pc;
+-                    interruptedPrefixes[n - 1] = interruptedPrefixes[--interruptedPrefixCount];
++                    p->blPrefix = true;
++                    p->blNextPc = saved.pc;
++                    p->interruptedPrefixes[n - 1] = p->interruptedPrefixes[--p->interruptedPrefixCount];
+                     break;
+                 }
+             }
+         }
++        ++p->retired;
+         if (p->options.bootstrapPeripherals) {
+             const auto graphicsStatus = p->advanceGraphicsCpu(cycles, p->peripherals.cpuReferencePeriod(cpuArm920ClockMode(p->cpu)));
+             if (graphicsStatus != Imx1BootstrapAccess::ok) {
+@@ -779,30 +834,37 @@
+             if (p->clockBoundary()) break;
+         }
+     }
+-    if (p->options.bootstrapPeripherals) p->result.interruptPending = p->peripherals.interruptPending();
+-    if (p->options.bootstrapPeripherals) p->result.pcm = p->peripherals.pcmState();
+-    std::memcpy(p->result.registers, cpuGetRegisters(p->cpu), sizeof(p->result.registers));
+-    p->result.cpsr = cpuGetRegExternal(p->cpu, ARM_REG_NUM_CPSR);
+-    p->result.spsr = cpuGetRegExternal(p->cpu, ARM_REG_NUM_SPSR);
+-    p->result.graphicsLcdEnabled = p->graphicsFrame.lcdEnabled();
+-    uint32_t firstRow = 0, lastRow = 0;
+-    if (const auto* frame = p->graphicsFrame.getPendingFrame(firstRow, lastRow)) {
+-        p->result.graphicsFrameWidth = p->graphicsFrame.width();
+-        p->result.graphicsFrameHeight = p->graphicsFrame.height();
+-        uint32_t hash = 2166136261u;
+-        for (uint32_t i = 0; i < p->result.graphicsFrameWidth * p->result.graphicsFrameHeight; ++i)
+-            for (unsigned lane = 0; lane < 4; ++lane) hash = (hash ^ uint8_t(frame[i] >> (lane * 8))) * 16777619u;
+-        p->result.graphicsFrameHash = hash;
+-        if (p->options.frameObserver) p->options.frameObserver(p->options.frameContext,
+-            p->result.graphicsFrameWidth,p->result.graphicsFrameHeight,frame);
+-    }
+-    cpuJitExecutionCounts(p->cpu, &p->result.jitBlocks, &p->result.jitInstructions);
+-    if (p->options.diagnosticSnapshot) {
+-        const auto& sink=*p->options.diagnosticSnapshot;
+-        const uint32_t end[] = {uint32_t(p->result.stop),p->result.trace.step,p->result.trace.pc,
+-            uint32_t(p->result.idleHclk),uint32_t(p->result.idleHclk >> 32),
+-            uint32_t(p->result.busAccesses),uint32_t(p->result.busAccesses >> 32),p->result.graphicsFrameHash};
+-        sink.emit("stop",end,8);
++    p->terminal = p->result.stop != Imx1ProbeStop::budget &&
++                  p->result.stop != Imx1ProbeStop::idleBudget && p->result.stop != Imx1ProbeStop::idleNoWake;
++    return imx1MachineInspect(machine);
++}
++
++const uint32_t* imx1MachinePeekFrame(const Imx1Machine* machine, uint32_t& width, uint32_t& height) {
++    const auto& frame = machine->probe->graphicsFrame;
++    width = frame.width(); height = frame.height();
++    return frame.peekFrame();
++}
++const uint32_t* imx1MachineAcquireFrame(Imx1Machine* machine, uint32_t& width, uint32_t& height,
++                                      uint32_t& first, uint32_t& last) {
++    auto& frame = machine->probe->graphicsFrame;
++    width = frame.width(); height = frame.height();
++    return frame.getPendingFrame(first, last);
++}
++void imx1MachineAcknowledgeFrame(Imx1Machine* machine) { machine->probe->graphicsFrame.acknowledgeFrame(); }
++Imx1BootstrapAccess imx1MachineReplacePenInputs(Imx1Machine* machine, const Imx1AspPenInputs& inputs, bool commit) {
++    auto* p = machine->probe;
++    if (p->stopped || p->terminal || !p->options.bootstrapPeripherals) return Imx1BootstrapAccess::sequence;
++    return p->peripherals.replaceAspPenInputs(inputs, commit);
++}
++
++namespace {
++void emitDiagnostic(Probe* p, const ArmDiagnosticSink& sink, bool legacy) {
++        if (legacy) {
++            const uint32_t end[] = {uint32_t(p->result.stop),uint32_t(p->result.trace.step),p->result.trace.pc,
++                uint32_t(p->result.idleHclk),uint32_t(p->result.idleHclk >> 32),
++                uint32_t(p->result.busAccesses),uint32_t(p->result.busAccesses >> 32),p->result.graphicsFrameHash};
++            sink.emit("stop",end,8);
++        }
+         cpuEmitArm920Diagnostic(p->cpu,sink);
+         p->peripherals.emitDiagnosticMemory(sink);
+         if (p->graphicsMemory) {
+@@ -829,13 +891,65 @@
+         const uint32_t romMap[] = {0x10000000,uint32_t(p->rom.size()),p->alias,
+             p->alias == 0 ? uint32_t(p->rom.size() > 0x100000 ? 0x100000 : p->rom.size()) : uint32_t(p->rom.size())};
+         sink.emit("rom-map",romMap,4);
+-        for (uint32_t i=0;i<p->recentCount;++i) {
++        for (uint32_t i=0;legacy && i<p->recentCount;++i) {
+             const auto& r=p->recent[(p->recentNext+4096-p->recentCount+i)%4096];
+-            const uint32_t row[] = {r.step,r.pc,r.instruction,r.cpsr,r.sp,r.lr,r.r0,r.r1,r.r2,r.r3};
++            const uint32_t row[] = {uint32_t(r.step),r.pc,r.instruction,r.cpsr,r.sp,r.lr,r.r0,r.r1,r.r2,r.r3};
+             sink.emit("recent",row,10);
+         }
+-    }
+-    return p->result;
++}
++}
++
++void imx1MachineEmitDiagnostic(Imx1Machine* machine, const Imx1MachineDiagnosticSink& sink) {
++    auto* p = machine->probe;
++    if (!sink.counters) return;
++    imx1MachineInspect(machine);
++    const uint64_t schema[] = {2};
++    sink.counters(sink.context, "machine-schema", schema, 1);
++    emitDiagnostic(p, sink.architecture, false);
++    const uint64_t end[] = {uint64_t(p->result.stop), p->result.trace.step, p->result.trace.pc,
++        p->retired, p->result.idleHclk, p->result.busAccesses, p->result.cs5WaitClocks,
++        p->result.irqEntries, p->result.fiqEntries, p->result.jitBlocks, p->result.jitInstructions};
++    sink.counters(sink.context, "machine-stop", end, 11);
++    for (uint32_t i = 0; i < p->recentCount; ++i) {
++        const auto& r = p->recent[(p->recentNext + 4096 - p->recentCount + i) % 4096];
++        const uint64_t row[] = {r.step,r.pc,r.instruction,r.cpsr,r.sp,r.lr,r.r0,r.r1,r.r2,r.r3};
++        sink.counters(sink.context, "machine-recent", row, 10);
++    }
++}
++
++void imx1MachineStop(Imx1Machine* machine) {
++    auto* p = machine->probe;
++    if (p->stopped) return;
++    p->peripherals.setI2cObserver(nullptr, nullptr);
++    p->peripherals.setI2cBus(nullptr);
++    p->options = {};
++    p->observer = nullptr; p->observerContext = nullptr;
++    p->stopped = true;
++    if (activeMachine == machine) activeMachine = nullptr;
++}
++
++Imx1ProbeResult imx1BootProbe(const uint8_t* rom, uint32_t size, Imx1ProbeEntry entry,
++                            uint32_t steps, Imx1ProbeObserver observer, void* context, bool fast,
++                            const Imx1ProbeOptions* options) {
++    Imx1ProbeResult error{};
++    if (!steps || steps > imx1ProbeMaximumSteps ||
++        (options && (options->idleHclkBudget > imx1ProbeMaximumIdleHclk || !imx1ProbeGpioEventValid(*options, steps)))) {
++        error.stop = Imx1ProbeStop::unsupportedPeripheral;
++        error.peripheralStatus = Imx1BootstrapAccess::sequence;
++        return error;
++    }
++    auto* machine = imx1MachineCreate(rom, size, entry, fast, options ? *options : Imx1ProbeOptions{}, observer, context, &error);
++    if (!machine) return error;
++    auto* p = machine->probe;
++    const auto result = imx1MachineRunSlice(machine, steps, p->options.idleHclkBudget).result;
++    if (p->options.frameObserver) {
++        uint32_t first = 0, last = 0;
++        if (const auto* frame = p->graphicsFrame.getPendingFrame(first, last))
++            p->options.frameObserver(p->options.frameContext, p->result.graphicsFrameWidth, p->result.graphicsFrameHeight, frame);
++    }
++    if (p->options.diagnosticSnapshot) emitDiagnostic(p, *p->options.diagnosticSnapshot, true);
++    imx1MachineStop(machine);
++    return result;
+ }
+ 
+ const char* imx1ProbeStopName(Imx1ProbeStop stop) {
+--- a/src/uarm/uarm/imx1_boot_probe.h
++++ b/src/uarm/uarm/imx1_boot_probe.h
+@@ -18,11 +18,13 @@
+     unsupportedPeripheral, unsupportedDataCache, idleBudget, idleNoWake
+ };
+ struct Imx1ProbeTrace {
+-    uint32_t step, pc, instruction, cpsr, operand;
++    uint64_t step;
++    uint32_t pc, instruction, cpsr, operand;
+     uint32_t instructionSize;
+ };
+ struct Imx1ProbeAccess {
+-    uint32_t step, pc, address, size, value;
++    uint64_t step;
++    uint32_t pc, address, size, value;
+     bool write;
+     Imx1BootstrapAccess status;
+     bool diagnosticCs4 = false;
+@@ -33,14 +35,18 @@
+ };
+ using Imx1ProbeBusObserver = void (*)(void*, const Imx1ProbeAccess&);
+ struct Imx1ProbeI2cEvent {
+-    uint32_t step, pc, issueStep, issuePc;
++    uint64_t step;
++    uint32_t pc;
++    uint64_t issueStep;
++    uint32_t issuePc;
+     Imx1I2cTransfer transfer;
+     Imx1I2cResponse response;
+     uint32_t control, status, divider;
+ };
+ using Imx1ProbeI2cObserver = void (*)(void*, const Imx1ProbeI2cEvent&);
+ struct Imx1ProbeInterrupt {
+-    uint32_t step, interruptedPc, cpsr, vector, link;
++    uint64_t step;
++    uint32_t interruptedPc, cpsr, vector, link;
+     bool fiq;
+     Imx1AitcPending pending;
+ };
+@@ -140,6 +146,40 @@
+     Imx1AitcPending interruptPending{};
+ };
+ using Imx1ProbeObserver = void (*)(void*, const Imx1ProbeTrace&);
++// Execution-thread API. One active machine per process, without another core runner.
++// CPU/memory allocations remain until process exit; stop detaches borrowed callbacks.
++// No reset, portable state or general recreate/cleanup support. Callbacks cannot re-enter.
++// ROM/options are copied. Observer contexts and I2C bus must outlive stop.
++struct Imx1Machine;
++enum class Imx1MachineStatus { yielded, waiting, terminal, stopped };
++struct Imx1MachineRun {
++    Imx1MachineStatus status;
++    uint64_t retiredInstructions;
++    Imx1ProbeResult result;
++};
++Imx1Machine* imx1MachineCreate(const uint8_t* rom, uint32_t size, Imx1ProbeEntry entry,
++                             bool fast, const Imx1ProbeOptions& options,
++                             Imx1ProbeObserver observer = nullptr, void* context = nullptr,
++                             Imx1ProbeResult* error = nullptr);
++// Retired-instruction slices include atomic bus waits and WFI wake. The idle limit
++// is cumulative HCLK, independently of the retired budget. Zero retires nothing.
++Imx1MachineRun imx1MachineRunSlice(Imx1Machine*, uint32_t retiredBudget, uint64_t idleHclkLimit);
++Imx1MachineRun imx1MachineInspect(Imx1Machine*);
++// Borrowed pixels last until the next execution call. Peek does not acquire/ack.
++const uint32_t* imx1MachinePeekFrame(const Imx1Machine*, uint32_t& width, uint32_t& height);
++const uint32_t* imx1MachineAcquireFrame(Imx1Machine*, uint32_t& width, uint32_t& height,
++                                      uint32_t& firstRow, uint32_t& lastRow);
++void imx1MachineAcknowledgeFrame(Imx1Machine*);
++Imx1BootstrapAccess imx1MachineReplacePenInputs(Imx1Machine*, const Imx1AspPenInputs&, bool commit = true);
++// v2 requires counters; absolute counters/recent rows are u64, memory stays u32.
++// A configured diagnosticSnapshot retains recent entries, without automatic emission.
++struct Imx1MachineDiagnosticSink {
++    ArmDiagnosticSink architecture;
++    void (*counters)(void*, const char*, const uint64_t*, uint32_t) = nullptr;
++    void* context = nullptr;
++};
++void imx1MachineEmitDiagnostic(Imx1Machine*, const Imx1MachineDiagnosticSink&);
++void imx1MachineStop(Imx1Machine*);
+ // One process-owned CPU with optional bootstrap registers/RAM and qualified interrupt inputs.
+ Imx1ProbeResult imx1BootProbe(const uint8_t* rom, uint32_t size, Imx1ProbeEntry entry,
+                             uint32_t steps, Imx1ProbeObserver observer = nullptr, void* context = nullptr,
+--- a/src/uarm/uarm/imx1_cs4_capture.h
++++ b/src/uarm/uarm/imx1_cs4_capture.h
+@@ -62,7 +62,8 @@
+ };
+ 
+ struct Imx1ProbeCs4Event {
+-    uint32_t step, pc, address, size, value;
++    uint64_t step;
++    uint32_t pc, address, size, value;
+     bool write;
+     int index, bank;
+     Imx1BootstrapAccess status;
+--- a/src/uarm/uarm/imx1_cs5_configuration.h
++++ b/src/uarm/uarm/imx1_cs5_configuration.h
+@@ -358,7 +358,8 @@
+ };
+ 
+ struct Imx1ProbeCs5ConfigurationEvent {
+-    uint32_t step, pc, address, size, value;
++    uint64_t step;
++    uint32_t pc, address, size, value;
+     bool write, defaultsKnown;
+     Imx1BootstrapAccess status;
+     uint32_t knownMask = 0xffffffff;
+--- a/src/uarm/uarm/imx1_cs5_reset.h
++++ b/src/uarm/uarm/imx1_cs5_reset.h
+@@ -36,7 +36,8 @@
+ };
+ 
+ struct Imx1ProbeCs5ResetEvent {
+-    uint32_t step, pc, address, size, value;
++    uint64_t step;
++    uint32_t pc, address, size, value;
+     bool write;
+     unsigned phase;
+     Imx1BootstrapAccess status;
+--- a/src/uarm/uarm/imx1_graphics_frame.h
++++ b/src/uarm/uarm/imx1_graphics_frame.h
+@@ -19,6 +19,7 @@
+     bool lcdEnabled() const { return enabled; }
+     uint32_t width() const { return valid ? surface.width : 0; }
+     uint32_t height() const { return valid ? surface.height : 0; }
++    const uint32_t* peekFrame() const { return valid && enabled ? pixels.data() : nullptr; }
+     const uint32_t* getPendingFrame(uint32_t& first, uint32_t& last) {
+         if (!pending || !enabled) return nullptr;
+         first = firstRow;

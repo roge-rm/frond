@@ -133,7 +133,7 @@ void sequence(bool fiq, bool masked, bool pending, bool timerEnabled, bool limit
     if(limited || !idleBudget){assert(a.stop==Imx1ProbeStop::idleBudget && a.idleHclk==(limited?(repeat?3000u:16u):0u) && a.registers[15]==wfi+4);}
     else if(!timerEnabled){assert(a.stop==Imx1ProbeStop::idleNoWake && a.registers[15]==wfi+4);}
     else {
-        if(a.stop!=Imx1ProbeStop::unsupportedInstruction)std::fprintf(stderr,"stop %s pc%08x step%u addr%08x status%s wfi%x\n",imx1ProbeStopName(a.stop),a.registers[15],a.trace.step,a.address,imx1BootstrapAccessName(a.peripheralStatus),wfi);
+        if(a.stop!=Imx1ProbeStop::unsupportedInstruction)std::fprintf(stderr,"stop %s pc%08x step%llu addr%08x status%s wfi%x\n",imx1ProbeStopName(a.stop),a.registers[15],(unsigned long long)a.trace.step,a.address,imx1BootstrapAccessName(a.peripheralStatus),wfi);
         assert(a.stop==Imx1ProbeStop::unsupportedInstruction && a.registers[6]==0x55);
         if(masked) assert(ea.irq.empty());
         else {assert(!ea.irq.empty());const auto& e=ea.irq.back();assert(e.fiq==fiq);assert(e.link==e.interruptedPc+4);if(!pending)assert(e.link==wfi+8);}

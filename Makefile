@@ -656,6 +656,25 @@ test-zodiac-boot-probe: build/zodiac-boot-probe
 	./build/test-zodiac-boot-probe
 	python3 tests/zodiac-diagnostic-cli.py
 
+ZODIAC_MACHINE_SOURCES = build/source/src/uarm/uarm/imx1_boot_probe.cpp build/source/src/uarm/uarm/imx1_watchdog.cpp build/source/src/uarm/uarm/imx1_rtc.cpp build/source/src/uarm/uarm/imx1_bootstrap.cpp build/source/src/uarm/uarm/imx1_aitc.cpp build/source/src/uarm/uarm/imx1_cgm.cpp build/source/src/uarm/uarm/imx1_gpio.cpp build/source/src/uarm/uarm/imx1_sysctrl.cpp build/source/src/uarm/uarm/imx1_eim.cpp build/source/src/uarm/uarm/imx1_timer.cpp build/source/src/uarm/uarm/imx1_i2c.cpp build/source/src/uarm/uarm/imx1_asp.cpp build/source/src/uarm/uarm/imx1_pwm.cpp
+
+.PHONY: test-zodiac-machine
+# Reuse qualified generated guests, comparing one-shot and sliced execution.
+test-zodiac-machine: build/zodiac-boot-probe
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/zodiac-machine.cpp $(ZODIAC_MACHINE_SOURCES) \
+		@build/zodiac-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-machine
+	./build/test-zodiac-machine
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/zodiac-machine-cli.cpp $(ZODIAC_MACHINE_SOURCES) \
+		@build/zodiac-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-machine-cli
+	FROND_ZODIAC_PROBE=build/test-zodiac-machine-cli python3 tests/zodiac-graphics-plain-copy.py
+	FROND_ZODIAC_PROBE=build/test-zodiac-machine-cli FROND_ZODIAC_PROBE_ENGINE=fast python3 tests/zodiac-graphics-plain-copy.py
+	FROND_ZODIAC_PROBE=build/test-zodiac-machine-cli python3 tests/zodiac-gpio-event.py
+	python3 tests/zodiac-machine-frame.py
+
 # Experimental ARM920T instruction checks and optional private-ROM trace comparison.
 .PHONY: test-zodiac-jit
 ifeq ($(FROND_FAST),1)

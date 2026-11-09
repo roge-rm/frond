@@ -47,18 +47,18 @@ static void captureFrame(void* context, uint32_t width, uint32_t height, const u
 }
 static void printInstruction(const Imx1ProbeTrace& t) {
     if (t.instructionSize == 2) {
-        std::printf("step=%u pc=%08x instruction=%04x cpsr=%08x operand=%08x width=2\n",
-                    t.step, t.pc, t.instruction, t.cpsr, t.operand);
+        std::printf("step=%llu pc=%08x instruction=%04x cpsr=%08x operand=%08x width=2\n",
+                    (unsigned long long)t.step, t.pc, t.instruction, t.cpsr, t.operand);
         return;
     }
-    std::printf("step=%u pc=%08x instruction=%08x cpsr=%08x operand=%08x width=4\n",
-                t.step, t.pc, t.instruction, t.cpsr, t.operand);
+    std::printf("step=%llu pc=%08x instruction=%08x cpsr=%08x operand=%08x width=4\n",
+                (unsigned long long)t.step, t.pc, t.instruction, t.cpsr, t.operand);
 }
 static void trace(void*, const Imx1ProbeTrace& t) {
     if (!traceWindow.empty() && !windowEmitted) {
         if (t.pc == windowPc && ++windowMatches == windowOccurrence) {
-            std::printf("trace-window begin pc=%08x occurrence=%u preceding=%u step=%u\n",
-                        windowPc, windowOccurrence, windowCount, t.step);
+            std::printf("trace-window begin pc=%08x occurrence=%u preceding=%u step=%llu\n",
+                        windowPc, windowOccurrence, windowCount, (unsigned long long)t.step);
             for (uint32_t i = 0; i < windowCount; ++i)
                 printInstruction(traceWindow[(windowNext + 4096 - windowCount + i) % 4096]);
             printInstruction(t);
@@ -77,8 +77,8 @@ static void bus(void* context, const Imx1ProbeAccess& t) {
         !(t.address >= 0x15000000 && t.address < 0x17000000)) return;
     const char* name = Imx1Bootstrap::registerName(t.address);
     if (!name && t.address >= 0x08000000 && t.address < 0x10000000) name = "SDRAM";
-    std::printf("bus step=%u pc=%08x operation=%s address=%08x size=%u value=%08x register=%s status=%s%s",
-                t.step, t.pc, t.write ? "write" : "read", t.address, t.size, t.value,
+    std::printf("bus step=%llu pc=%08x operation=%s address=%08x size=%u value=%08x register=%s status=%s%s",
+                (unsigned long long)t.step, t.pc, t.write ? "write" : "read", t.address, t.size, t.value,
                 name ? name : "unknown", imx1BootstrapAccessName(t.status),
                 (t.diagnosticCs5Configuration || t.diagnosticCs5Reset) &&
                     static_cast<Imx1ProbeOptions*>(context)->graphicsProfile != Imx1GraphicsProfile::strict ? " source=virtual5744-compatible-8mib" :
@@ -91,16 +91,16 @@ static void bus(void* context, const Imx1ProbeAccess& t) {
 }
 
 static void cs5Reset(void* context, const Imx1ProbeCs5ResetEvent& event) {
-    std::printf("cs5-reset step=%u pc=%08x operation=%s address=%08x size=%u value=%02x phase=%u status=%s source=%s\n",
-                event.step, event.pc, event.write ? "write" : "read", event.address, event.size,
+    std::printf("cs5-reset step=%llu pc=%08x operation=%s address=%08x size=%u value=%02x phase=%u status=%s source=%s\n",
+                (unsigned long long)event.step, event.pc, event.write ? "write" : "read", event.address, event.size,
                 event.value, event.phase, imx1BootstrapAccessName(event.status),
                 static_cast<Imx1ProbeOptions*>(context)->graphicsProfile != Imx1GraphicsProfile::strict ?
                     "virtual5744-compatible-8mib" : "diagnostic-reset-echo");
 }
 
 static void cs5Configuration(void* context, const Imx1ProbeCs5ConfigurationEvent& event) {
-    std::printf("cs5-configuration step=%u pc=%08x operation=%s address=%08x size=%u value=%08x defaults-known=%u status=%s source=%s",
-                event.step, event.pc, event.write ? "write" : "read", event.address, event.size,
+    std::printf("cs5-configuration step=%llu pc=%08x operation=%s address=%08x size=%u value=%08x defaults-known=%u status=%s source=%s",
+                (unsigned long long)event.step, event.pc, event.write ? "write" : "read", event.address, event.size,
                 event.value, event.defaultsKnown, imx1BootstrapAccessName(event.status),
                 static_cast<Imx1ProbeOptions*>(context)->graphicsProfile != Imx1GraphicsProfile::strict ?
                     "virtual5744-compatible-8mib" : "configured-virtual-aperture");
@@ -119,21 +119,21 @@ static void cs4(void*, const Imx1ProbeCs4Event& event) {
         (event.write ? "data-command" : "data-read") : "unmapped";
     const bool indexedSample = !event.write && event.address == 0x15000001 && event.status == Imx1BootstrapAccess::ok;
     if (indexedSample) operation = "raw-indexed-input";
-    std::printf("cs4-capture step=%u pc=%08x operation=%s address=%08x size=%u value=%02x index=%s bank=%s status=%s source=%s\n",
-                event.step, event.pc, operation, event.address, event.size, event.value, index, bank,
+    std::printf("cs4-capture step=%llu pc=%08x operation=%s address=%08x size=%u value=%02x index=%s bank=%s status=%s source=%s\n",
+                (unsigned long long)event.step, event.pc, operation, event.address, event.size, event.value, index, bank,
                 imx1BootstrapAccessName(event.status), indexedSample ? "diagnostic-indexed-input" : "diagnostic-recorder");
 }
 
 static void i2c(void*, const Imx1ProbeI2cEvent& event) {
     const auto& t = event.transfer;
-    std::printf("i2c step=%u pc=%08x issue-step=%u issue-pc=%08x phase=%s address=%02x byte=%02x direction=%s master-ack=%u response=%s control=%02x status=%02x hclk-divider=%u irq-source=39\n",
-                event.step, event.pc, event.issueStep, event.issuePc, imx1I2cPhaseName(t.phase),
+    std::printf("i2c step=%llu pc=%08x issue-step=%llu issue-pc=%08x phase=%s address=%02x byte=%02x direction=%s master-ack=%u response=%s control=%02x status=%02x hclk-divider=%u irq-source=39\n",
+                (unsigned long long)event.step, event.pc, (unsigned long long)event.issueStep, event.issuePc, imx1I2cPhaseName(t.phase),
                 t.address, t.byte, t.read ? "read" : "write", t.acknowledge, imx1I2cResponseName(event.response),
                 event.control, event.status, event.divider);
 }
 static void interrupt(void*, const Imx1ProbeInterrupt& event) {
-    std::printf("interrupt step=%u interrupted-pc=%08x cpsr=%08x vector=%08x link=%08x type=%s normal-pending=%016llx fast-pending=%016llx\n",
-                event.step, event.interruptedPc, event.cpsr, event.vector, event.link, event.fiq ? "fiq" : "irq",
+    std::printf("interrupt step=%llu interrupted-pc=%08x cpsr=%08x vector=%08x link=%08x type=%s normal-pending=%016llx fast-pending=%016llx\n",
+                (unsigned long long)event.step, event.interruptedPc, event.cpsr, event.vector, event.link, event.fiq ? "fiq" : "irq",
                 (unsigned long long)event.pending.normal, (unsigned long long)event.pending.fast);
 }
 static bool parseCs4IndexedInput(const char* text, Imx1Cs4IndexedInputs& inputs) {
@@ -579,8 +579,8 @@ int main(int argc, char** argv) {
                                      !std::strcmp(engine, "fast"), &options);
     if (!traceWindow.empty())
         std::printf("trace-window-emitted=%u matched-entries=%u\n", windowEmitted, windowMatches);
-    std::printf("stop=%s step=%u pc=%08x instruction=%0*x address=%08x size=%u value=%08x operand=%08x width=%u\n",
-                imx1ProbeStopName(result.stop), result.trace.step, result.trace.pc,
+    std::printf("stop=%s step=%llu pc=%08x instruction=%0*x address=%08x size=%u value=%08x operand=%08x width=%u\n",
+                imx1ProbeStopName(result.stop), (unsigned long long)result.trace.step, result.trace.pc,
                 int(result.trace.instructionSize * 2), result.trace.instruction, result.address, result.size, result.value,
                 result.trace.operand, result.trace.instructionSize);
     std::printf("bus-accesses=%llu peripheral-status=%s\n", (unsigned long long)result.busAccesses,

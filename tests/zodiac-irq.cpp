@@ -627,4 +627,5 @@ int main() {
     sharedThumbPrefix();
     returnGuards();
     stalledDelivery();
+    return 0;
 }
