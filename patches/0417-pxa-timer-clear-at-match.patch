@@ -1,0 +1,15 @@
+--- a/src/uarm/uarm/pxa_TIMR.cpp
++++ b/src/uarm/uarm/pxa_TIMR.cpp
+@@ -130,8 +130,11 @@
+                 break;
+ 
+             case 5:
++                // A match sets its bit as the counter reaches it, so clearing it while the
++                // counter still equals the match leaves it clear. A fast guest's tick handler
++                // clears it within the same count; setting it again runs the handler twice.
+                 timr->OSSR = timr->OSSR & ~val;
+-                pxaTimrPrvUpdateSingleStep(timr);
++                pxaTimrPrvRaiseLowerInts(timr);
+                 break;
+ 
+             case 6:
