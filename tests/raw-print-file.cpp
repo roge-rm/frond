@@ -33,6 +33,8 @@ struct Output {
 int main(int argc,char** argv) {
     assert(argc==2);
     const fs::path root=argv[1];
+    // A failed earlier run can leave its folders behind.
+    fs::remove_all(root);fs::create_directories(root);
     for(unsigned test=0;test<4;++test) {
         const auto directory=root/std::to_string(test);
         assert(fs::create_directory(directory));
