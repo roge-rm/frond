@@ -37,7 +37,11 @@ int main(){
  for(size_t n=16;n+4<=bad.size();n+=4){uint32 v;memcpy(&v,bad.data()+n,4);if(v==0x1009){v|=2;memcpy(bad.data()+n,&v,4);++matches;}}
  assert(matches==1);assert(!load(i,bad));assert(save(i)==before&&pending());
  i.Reset(false);assert(pending());
- i.reg(0x95,0x10000);i.reg(0x83,0x40);i.reg(0xa4,0x10);assert(high&&!pending());
+ i.reg(0x83,0x40);i.reg(0xa4,0x10);assert(high&&!pending());
+ b.SetDcIrqPin(false);assert((b.GetWord(0xfffff310)&6)==2);
+ i.SetHostConnection(0,false);assert(!high&&pending());
+ i.reg(0x83,0x40);i.reg(0xa4,0x10);assert(high&&!pending());
+ assert((b.GetWord(0xfffff310)&6)==2);b.SetDcIrqPin(true);
  assert(load(i,before));assert(pending());
  i.Reset(true);assert(high&&!pending());
  i.reg(0xa0,1);i.SetHostConnection(0,true);i.reg(0x94,0x10000);i.reg(0x84,0x80000040);i.reg(0xa5,0x10);assert(pending());

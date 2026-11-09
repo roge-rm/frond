@@ -1,0 +1,74 @@
+--- a/src/cloudpilot/emulator/hardware/EmRegsISPDana.cpp
++++ b/src/cloudpilot/emulator/hardware/EmRegsISPDana.cpp
+@@ -31,7 +31,6 @@
+     RefreshHostInterrupt();
+ }
+ void EmRegsISPDana::RefreshHostInterrupt() {
+-    if ((regs[0x15]|regs[0x16])&0x1f0000) regs[3]|=0x40;
+     if ((regs[4]&0x80000000) && (regs[3]&regs[4]&0x7f)) regs[0x24]|=0x10;
+     bool active=(regs[0x20]&1) && (regs[0x24]&regs[0x25]&0x77);
+     if(hostIrqSink) hostIrqSink(active ? bool(regs[0x20]&4) : !bool(regs[0x20]&4));
+@@ -45,6 +44,7 @@
+     if(!attached) CancelHostWork();
+     Tick(); hostAttached[index]=attached; hostLowSpeed[index]=attached && lowSpeed;
+     auto& p=regs[0x15+index];
++    auto before=p;
+     bool connected=attached && (p&0x100);
+     if(bool(p&1)!=connected) p|=0x10000;
+     if(!connected) {
+@@ -52,14 +52,18 @@
+         if(p&2) p|=0x20000;
+         p&=~0x217u; portResetCycles[index]=0;
+     } else p=(p&~0x200u)|1|(lowSpeed?0x200:0);
++    if(p!=before) regs[3]|=0x40;
+     RefreshHostInterrupt();
+ }
+ void EmRegsISPDana::HostPortPower(unsigned index, bool on) {
+     if(regs[0x12]&0x200) on=true;
+     if(!on) CancelHostWork();
+     auto& p=regs[0x15+index];
++    auto before=p;
+     if(on) p|=0x100; else p&=~0x100u;
+     SetHostConnection(index,hostAttached[index],hostLowSpeed[index]);
++    if(p!=before) regs[3]|=0x40;
++    RefreshHostInterrupt();
+ }
+ void EmRegsISPDana::SetSubBankHandlers() {
+     EmRegs::SetSubBankHandlers();
+@@ -79,6 +83,7 @@
+     for(unsigned i=0;i<2;++i) if(portResetCycles[i]) {
+         if(delta>=portResetCycles[i]) {
+             portResetCycles[i]=0;
++            regs[3]|=0x40; // Reset completion is a new event even with CSC still set.
+             regs[0x15+i]=(regs[0x15+i]&~0x40014u)|0x100002;
+         } else portResetCycles[i]-=delta;
+     }
+@@ -180,6 +185,7 @@
+             if((value&4) || ((value&8) && (port&4)))
+                 throw std::runtime_error("ISP host suspend/resume unqualified");
+             port &= ~(value & 0x1f0000);
++            auto before=port;
+             bool controlled=(regs[0x12]&0x100) && (regs[0x13]&(1u<<(17+index)));
+             if(controlled) {
+                 if(value&0x200) HostPortPower(index,false);
+@@ -195,6 +201,7 @@
+                     portResetCycles[index]=(ClockHz()+99)/100;
+                 }
+             }
++            if(port!=before) regs[3]|=0x40;
+             break;
+         }
+         case 0xa0:
+@@ -460,10 +467,12 @@
+         hostAttached={}; hostLowSpeed={}; portResetCycles={};
+         for(unsigned i=0;i<2;++i) {
+             auto& p=regs[0x15+i];
++            auto before=p;
+             if(p&1) p|=0x10000;
+             if(p&2) p|=0x20000;
+             p&=~0x217u;
+             if(regs[0x12]&0x200) p|=0x100;
++            if(p!=before) regs[3]|=0x40;
+         }
+         RefreshHostInterrupt();
+     }

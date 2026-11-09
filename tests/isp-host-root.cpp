@@ -16,6 +16,52 @@ class Isp: public EmRegsISPDana {
 static std::vector<uint8> save(Isp& i){Savestate<ChunkType>s;assert(s.Save(i));auto*p=static_cast<uint8*>(s.GetBuffer());return {p,p+s.GetSize()};}
 static bool load(Isp&i,std::vector<uint8>s){SavestateLoader<ChunkType>l;return l.Load(s.data(),s.size(),i);}
 int main(){
+ // ISR order: HC status W1C, port reads, then microprocessor OPR W1C.
+ for(bool oprFirst : {false,true}) {
+  Isp event;event.reg(0x92,0x20000202);event.SetHostConnection(0,true);
+  event.reg(0x84,0x80000040);event.reg(0xa5,0x10);event.reg(0xa0,1);
+  auto ack=[&] {
+   if(oprFirst) {event.reg(0xa4,0x10);assert(event.HostInterruptPending());}
+   event.reg(0x83,0x40);assert(!(event.get(3)&0x40));
+   event.reg(0xa4,0x10);assert(!event.HostInterruptPending());
+  };
+  assert(event.HostInterruptPending());ack();
+  for(int n=0;n<10;++n) {assert(event.get(0x15)==0x10101);assert(!(event.get(3)&0x40));}
+  event.reg(0x95,0x10);ack();event.now=10000;
+  assert(event.get(0x15)==0x110103);assert(event.HostInterruptPending());ack();
+  assert(event.get(0x15)==0x110103);
+  event.reg(0x85,0x80000000);event.SetHostConnection(1,true);
+  assert(event.get(3)&0x40);assert(!event.HostInterruptPending());
+  event.reg(0x84,0x80000000);assert(event.HostInterruptPending());ack();
+  event.reg(0xa5,0);event.SetHostConnection(1,false);
+  assert(event.get(3)&0x40);assert(!event.HostInterruptPending());
+  event.reg(0xa5,0x10);assert(event.HostInterruptPending());ack();
+  event.reg(0xa0,0);event.SetHostConnection(1,true);
+  assert(event.get(3)&0x40);assert(!event.HostInterruptPending());
+  event.reg(0xa0,1);assert(event.HostInterruptPending());ack();
+  event.SetHostConnection(1,false);ack();
+  event.reg(0x85,0x40);event.SetHostConnection(0,false);
+  assert(event.get(3)&0x40);assert(!event.HostInterruptPending());
+  event.reg(0x84,0x40);assert(event.HostInterruptPending());ack();
+  event.SetHostConnection(0,true);assert(event.HostInterruptPending());ack();
+  event.reg(0x95,0x10000);assert(event.get(0x15)&0x100000);
+  assert(!(event.get(3)&0x40));
+  event.SetHostConnection(1,true);assert(event.get(3)&0x40);
+  event.reg(0x96,0x10000);assert(event.get(3)&0x40);ack();
+  auto stable=save(event);assert(load(event,stable));
+  assert(event.get(3)&0x40);ack(); // Loading detaches the live port.
+  auto detached=save(event);assert(load(event,detached));
+  assert(!(event.get(3)&0x40));
+  for(uint32 version : {6u,7u}) {
+   auto legacy=detached;
+   if(version==6) legacy.resize(legacy.size()-16);
+   uint32 words=(legacy.size()-12)/4;
+   memcpy(legacy.data()+8,&words,4);memcpy(legacy.data()+12,&version,4);
+   assert(load(event,legacy));assert(!(event.get(3)&0x40));
+   event.SetHostConnection(0,true);assert(event.get(3)&0x40);ack();
+  }
+  event.reg(0xa9,0xf6);assert(!(event.get(3)&0x40));
+ }
  // NPS overrides switching even when the target was attached without a reset.
  {
   Isp powered;powered.SetHostConnection(0,true);
