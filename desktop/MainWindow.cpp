@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "DanaViewControls.h"
 #include "LicencesDialog.h"
 #include "FirmwareInput.h"
 #include "CardFilesWindow.h"
@@ -248,6 +249,19 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     connect(internalButton, &QPushButton::clicked, this, &MainWindow::openInternal);
     connect(cardsButton, &QPushButton::clicked, this, [this] { showCards(); });
     connect(cardReadOnly, &QCheckBox::clicked, this, [this](bool on) { send("ms-read-only", on ? "on" : "off"); });
+
+    danaControls = new DanaViewControls(root);
+    displayLayout->addWidget(danaControls);
+    connect(danaControls, &DanaViewControls::changed, this, [this] { danaView.choose(danaControls->values()); });
+    connect(&danaView, &DanaViewController::changed, this, [this] { danaControls->setValues(danaView.values()); refresh(); });
+    connect(&danaView, &DanaViewController::error, this, [this](const QString& message) { failure(message); });
+    danaView.save = [this](const frondDana::Preferences& view) {
+        auto prefs = runningPreferences;
+        prefs.danaView = view;
+        const auto error = frondSessions::writePreferences(sessionPath, prefs);
+        if (error.isEmpty()) runningPreferences = prefs;
+        return error;
+    };
 
     auto* displayGrid = new QGridLayout;
     displayLayout->addLayout(displayGrid);
@@ -673,6 +687,11 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (cardProgress && total > 0) cardProgress->setValue(int(done * 1000 / total));
     });
     connect(&client, &DesktopClient::result, this, [this](const QString& command, bool ok, const QString& code, const QString& message) {
+        if (command == "dana-view" || command == "dana-view-state") {
+            forceButton->hide(); refresh();
+            if (stopping && exchangeStage == ExchangeStage::None) save();
+            return;
+        }
         if (cardProgress) { cardProgress->hide(); cardProgress->deleteLater(); cardProgress = nullptr; }
         busy = false; forceButton->hide(); runningBar->setForceStop(false); refresh();
         QTimer::singleShot(0, this, [this] {
@@ -895,6 +914,8 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
 }
 void MainWindow::refresh() {
     const bool running = client.running();
+    danaControls->setVisible(running && frondFirmware::deviceId(runningDevice) == "alphasmart-dana");
+    danaControls->setEnabled(running && !stopping);
     home->setVisible(!running);
     runArea->setVisible(running);
     palmHolder->setVisible(running && embedded);
@@ -1829,6 +1850,10 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
         sessionLock.reset(); return failure(error);
     }
     runningDevice = startDevice == frondFirmware::Device::automatic ? frondFirmware::Device::tx : startDevice;
+    const bool dana = frondFirmware::deviceId(startDevice) == "alphasmart-dana";
+    danaControls->setValues(runningPreferences.danaView);
+    danaView.configure(dana, runningPreferences.danaView, devicePixelRatioF());
+    if (dana) arguments << "--dana-view" << frondDana::argument(runningPreferences.danaView, devicePixelRatioF());
     loadSerialSettings(); loadUsbSettings(); loadIrdaSettings(); loadBluetoothSettings();
     if (caps.serial && serialArgument() != "off") arguments << "--serial" << serialArgument();
     // A PTY for Modem Sync calls to the HotSync number, there whenever the modem is picked.
@@ -2186,6 +2211,7 @@ QString MainWindow::outputFile(const QString& title, const QString& filter, cons
 }
 void MainWindow::save(bool saveAs) {
     if (!client.available()) return;
+    if (stopping && danaView.finishChanges()) return;
     if (!saveAs) {
         savingPath = sessionPath; send("save", sessionPath);
         return;
@@ -2519,7 +2545,10 @@ void MainWindow::askStop(const QString& message) {
         QMessageBox::Retry | QMessageBox::Cancel | QMessageBox::Discard, QMessageBox::Retry);
     if (answer == QMessageBox::Retry) save();
     else if (answer == QMessageBox::Discard) send("quit");
-    else { stopping = closeAfterStop = false; refresh(); }
+    else {
+        stopping = closeAfterStop = false;
+        refresh();
+    }
 }
 // The device the controls follow: the running one, else the TX (nothing greyed).
 frondFirmware::Device MainWindow::currentDevice() const {
@@ -2528,6 +2557,10 @@ frondFirmware::Device MainWindow::currentDevice() const {
 }
 QString MainWindow::deviceLabel() const {
     return frondFirmware::deviceName(runningDevice);
+}
+bool MainWindow::event(QEvent* event) {
+    if (event->type() == QEvent::ScreenChangeInternal) danaView.setDensity(devicePixelRatioF());
+    return QMainWindow::event(event);
 }
 void MainWindow::showDevice(const QString& id) {
     runningDevice = frondFirmware::deviceFromId(id);

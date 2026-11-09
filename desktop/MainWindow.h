@@ -6,6 +6,8 @@
 #include <QPointer>
 #include <QProgressDialog>
 #include "DesktopClient.h"
+#include "DanaViewController.h"
+#include "SdExchange.h"
 #include "FirmwareInput.h"
 #include "SessionStore.h"
 #include "LinkClient.h"
@@ -37,6 +39,7 @@ class QPlainTextEdit;
 class QLabel;
 class QSpinBox;
 class QSlider;
+class DanaViewControls;
 class MainWindow : public QMainWindow {
     Q_OBJECT
  public:
@@ -56,6 +59,7 @@ class MainWindow : public QMainWindow {
     bool eventFilter(QObject* watched, QEvent* event) override;
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dropEvent(QDropEvent* event) override;
+    bool event(QEvent* event) override;
  private:
     void start();
     void startSession(const frondSessions::Info& info);
@@ -168,6 +172,8 @@ class MainWindow : public QMainWindow {
     frondFirmware::Device currentDevice() const;
     QString outputFile(const QString& title, const QString& filter, const QString& defaultName);
     DesktopClient client;
+    DanaViewController danaView{client, this};
+    DanaViewControls* danaControls;
     LinkClient link;
     QPointer<ConnectionsWindow> connectionsWindow;
     RunningBar* runningBar{nullptr};

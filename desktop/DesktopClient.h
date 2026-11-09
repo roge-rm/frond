@@ -30,6 +30,7 @@ class DesktopClient : public QObject {
     void infraredState(const QString& state);
     void bluetoothState(const QString& state);
     void sdProgress(qint64 done, qint64 total);  // SD create, import and export
+    void danaViewState(const QString& state);
     void cardState(const QString& state);  // a card put in while the machine was off went in
     void stalled();
     void diagnostic(const QString& text);

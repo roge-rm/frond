@@ -10,6 +10,7 @@ class QLineEdit;
 class QSlider;
 class QSpinBox;
 class QGroupBox;
+class DanaViewControls;
 
 // Window scale in quarters that fits the screen, from the layout the core draws for the device.
 int fittingScaleQuarters(frondFirmware::Device device, bool keyboard, frondSessions::JogControls jog);
@@ -23,6 +24,7 @@ class MachineSettings : public QWidget {
     QSlider* windowScale;
     QLabel* scaleLabel;
     QCheckBox *smoothLcd, *audio, *fastAudio, *showKeyboard;
+    DanaViewControls* danaView;
     QComboBox* jogControls;
     QLabel* jogControlsLabel;
     // Only shown with FROND_ENGINE_SETTING=1 until the Fast engine is qualified; never for 68k devices.

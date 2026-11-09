@@ -26,6 +26,7 @@
 #include <unistd.h>
 #include "FirmwareInput.h"
 #include "storage/Packed.h"
+#include "DanaView.h"
 
 // Each machine is a folder: sessions/<name>/ holds <name>.frond, <name>.frond.settings.json,
 // the lock, sd.frondsd / ms.frondms / ms.frondmsp, nand.frondnand, and <name>.frond.new until the first save.
@@ -69,6 +70,7 @@ struct Preferences {
     bool peripheralsSet{false};
     // The running bar is shown over the Palm; Hide bar turns it off for this machine.
     bool barShown{true};
+    frondDana::Preferences danaView;
 };
 inline QString preferencesPath(const QString& path) { return path + ".settings.json"; }
 inline bool readPreferences(const QString& path, Preferences* result) {
@@ -92,6 +94,7 @@ inline bool readPreferences(const QString& path, Preferences* result) {
         result->bluetooth = object.value("bluetooth").toString("off");
         result->peripheralsSet = true;
     }
+    if (object.value("danaView").isObject()) frondDana::fromJson(object.value("danaView").toObject(), &result->danaView);
     return true;
 }
 // The caller holds the session lock, or has just reserved a new machine.
@@ -110,6 +113,7 @@ inline QString writePreferences(const QString& path, const Preferences& prefs) {
         object.insert("usb", prefs.usb);
         object.insert("bluetooth", prefs.bluetooth);
     }
+    object.insert("danaView", frondDana::json(prefs.danaView));
     const auto bytes = QJsonDocument(object).toJson(QJsonDocument::Compact);
     if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit())
         return QStringLiteral("Couldn't save the machine settings.");

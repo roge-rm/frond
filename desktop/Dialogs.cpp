@@ -1,3 +1,4 @@
+#include "DanaViewControls.h"
 #include <algorithm>
 #include "Dialogs.h"
 #include "FirmwareStore.h"
@@ -137,6 +138,9 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     jogControlsLabel->setBuddy(jogControls);
     showKeyboard->setChecked(prefs.showKeyboard);
     jogControls->setCurrentIndex(jogControls->findData(int(prefs.jogControls)));
+    danaView = new DanaViewControls(display);
+    danaView->setValues(prefs.danaView);
+    displayLayout->addWidget(danaView);
     displayLayout->addWidget(scaleLabel);
     displayLayout->addWidget(windowScale);
     displayLayout->addWidget(smoothLcd);
@@ -271,6 +275,7 @@ int fittingScaleQuarters(Device device, bool keyboard, frondSessions::JogControl
 
 frondSessions::Preferences MachineSettings::values() const {
     auto prefs = originalPreferences;
+    prefs.danaView = danaView->values();
     prefs.scale = windowScale->value();
     prefs.smooth = smoothLcd->isChecked();
     prefs.audio = audio->isChecked();
@@ -331,6 +336,9 @@ void MachineSettings::setDevice(Device device) {
     }
     for (QWidget* w : {static_cast<QWidget*>(serialLabel), static_cast<QWidget*>(serial)}) w->setVisible(hasSerial);
     serialPort->setVisible(hasSerial && serial->currentData() == "tcp");
+    const bool dana = frondFirmware::deviceId(device) == "alphasmart-dana";
+    danaView->setVisible(dana);
+    windowScale->setVisible(!dana); scaleLabel->setVisible(!dana);
     const bool tg50 = device == frondFirmware::deviceFromId("sony-clie-tg50");
     showKeyboard->setVisible(tg50);
     jogControlsLabel->setVisible(tg50);
