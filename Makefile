@@ -1521,6 +1521,13 @@ test-usb-wifi-runtime:
 	$(MAKE) -C $(USB_WIFI_AREA)/source/src/common libcommon.a net
 	$(MAKE) -C $(USB_WIFI_AREA)/source/src/cloudpilot -f Makefile -f $(CURDIR)/tests/usb-wifi-runtime.mk FROND_68K=1 FROND_TEST_ROOT=$(CURDIR) USB_WIFI_TEST=$(CURDIR)/$(USB_WIFI_AREA)/test-usb-wifi-runtime usb-wifi-test
 
+# The Dana Wireless's built-in Wi-Fi module on root port 1, built in the same area.
+.PHONY: test-dana-wifi-module
+test-dana-wifi-module:
+	python3 tools/prepare.py --destination $(USB_WIFI_AREA)/source
+	$(MAKE) -C $(USB_WIFI_AREA)/source/src/common libcommon.a net
+	$(MAKE) -C $(USB_WIFI_AREA)/source/src/cloudpilot -f Makefile -f $(CURDIR)/tests/usb-wifi-runtime.mk FROND_68K=1 FROND_TEST_ROOT=$(CURDIR) DANA_MODULE_TEST=$(CURDIR)/$(USB_WIFI_AREA)/test-dana-wifi-module dana-module-test
+
 ISP_FRAME_AREA ?= $(CURDIR)/build/isp-frame
 .PHONY: test-isp-frame
 test-isp-frame:

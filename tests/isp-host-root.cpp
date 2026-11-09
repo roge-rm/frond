@@ -72,7 +72,7 @@ int main(){
  // HC startup uses always-powered ports after resetting the HC.
  for(unsigned port=0;port<2;++port) {
   Isp startup;unsigned cancels=0;
-  startup.hostCancelled=[&]{++cancels;};
+  startup.hostOwner[0].cancelled=[&]{++cancels;};
   startup.SetHostTarget(port,[](const auto&){return EmRegsISPDana::HostReply{};});
   startup.reg(0xa9,0xf6);
   assert(cancels && startup.HasHostTarget(port));

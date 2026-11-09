@@ -147,7 +147,7 @@ int main() {
     // The printer takes the port's place and gives it back; the MAC stays.
     {
         UsbPrinterRuntime printer;
-        w.detach(); assert(!i.HasHostTarget(0) && !i.hostPortReset && !i.hostSupplyChanged && w.status()=="off");
+        w.detach(); assert(!i.HasHostTarget(0) && !i.hostOwner[0].portReset && !i.hostOwner[0].supplyChanged && w.status()=="off");
         printer.attach(i); assert(i.HasHostTarget(0) && printer.status().rfind("attached",0)==0);
         printer.detach(); assert(!i.HasHostTarget(0));
     }
