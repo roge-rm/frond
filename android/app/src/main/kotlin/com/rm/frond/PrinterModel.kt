@@ -11,6 +11,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.provider.DocumentsContract
 import android.print.PrintManager
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -19,9 +20,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.io.File
-import java.io.FileOutputStream
+import java.io.IOException
 
 // The Dana's USB printer while a machine runs: the plugged-in setting, the core's job polled once a second,
 // and the held job. When bytes stop arriving for PrintJob.PAUSE_MS the core saves the job to a private
@@ -30,6 +30,7 @@ import java.io.FileOutputStream
 // next machine start.
 class PrinterModel(
     private val host: ModelHost,
+    private val device: Device,
     private val link: ControlLink,
     private val sessionId: String?,
     initiallyPlugged: Boolean,
@@ -47,14 +48,13 @@ class PrinterModel(
     // The choices sheet is open.
     var choosing by mutableStateOf(false)
 
-    private val dir = File(host.applicationContext.filesDir, "print")
-    private val heldFile = File(dir, "held.raw")
-    private var version = 0
+    private val store = PrintStore(File(host.applicationContext.filesDir, "print")) { argument ->
+        link.request("printer", argument, timeoutSeconds = if (argument == "status") 5 else 30)
+    }
+    private var lastError = ""
 
     init {
-        dir.mkdirs()
-        heldFile.delete()
-        dir.listFiles()?.forEach { if (it.name.startsWith("job-")) it.delete() }
+        store.sweep()
         host.lifecycleScope.launch(Dispatchers.IO) {
             while (isActive) {
                 if (plugged) poll()
@@ -63,86 +63,95 @@ class PrinterModel(
         }
     }
 
+    // Updates the held state in the order the store changed the file.
+    private fun publish(size: Long, version: Int) {
+        val h = if (size > 0) Held(size, if (size > MAX_RENDER) PrintJob.Pages(false, PrintJob.NOT_TEXT, emptyList())
+            else PrintJob.render(store.heldBytes()), version) else null
+        host.runOnUiThread {
+            held = h
+            if (h == null) { choosing = false; cancelNotification() }
+            else if (inBackground()) notify(size)
+        }
+    }
+
     fun plug(on: Boolean) {
         plugged = on
         if (!on) bytes = 0
+        remember(on)
+        host.lifecycleScope.launch(Dispatchers.IO) {
+            val error = store.attach(on)
+            if (error != null) host.runOnUiThread {
+                // A printer that couldn't be attached is shown and saved as off.
+                if (on) { plugged = false; bytes = 0; remember(false) }
+                problem(error)
+            }
+        }
+    }
+
+    private fun remember(on: Boolean) {
         sessionId?.let { id ->
             try { Sessions.updateSettings(host.applicationContext, id) { it.copy(usbPrinter = on) } } catch (_: Exception) { }
-        }
-        host.lifecycleScope.launch(Dispatchers.IO) {
-            val reply = link.request("printer", "attach " + if (on) "on" else "off", timeoutSeconds = 30)
-            if (!reply.ok) host.runOnUiThread { problem(reply.message) }
         }
     }
 
     private suspend fun poll() {
-        val status = PrintJob.parseStatus(link.request("printer", "status", timeoutSeconds = 5).message)
-        if (!status.valid) return
-        host.runOnUiThread { bytes = status.bytes }
-        if (!status.received) return
-        val job = File(dir, "job-${++version}.raw")
-        val reply = link.request("printer", "save " + job.absolutePath, timeoutSeconds = 30)
-        try {
-            if (!reply.ok || !job.isFile) {
-                host.runOnUiThread { problem(PrintJob.parseStatus(reply.message).error.ifEmpty { reply.message }) }
-                return
-            }
-            FileOutputStream(heldFile, true).use { out ->
-                job.inputStream().use { it.copyTo(out) }
-                out.fd.sync()
-            }
-        } finally {
-            job.delete()
+        val result = try {
+            store.poll(::publish)
+        } catch (e: java.io.IOException) {
+            PrintStore.Poll.Failed(e.message ?: "Couldn't store the print.")
         }
-        val size = heldFile.length()
-        val pages = if (size > MAX_RENDER) PrintJob.Pages(false, PrintJob.NOT_TEXT, emptyList())
-        else PrintJob.render(heldFile.readBytes())
-        host.runOnUiThread {
-            held = Held(size, pages, version)
-            if (inBackground()) notify(size)
+        when (result) {
+            is PrintStore.Poll.Bytes -> host.runOnUiThread { bytes = result.bytes }
+            is PrintStore.Poll.Added -> { lastError = ""; host.runOnUiThread { bytes = result.bytes } }
+            is PrintStore.Poll.Failed -> if (result.message != lastError) {
+                lastError = result.message
+                host.runOnUiThread { problem(result.message) }
+            }
+            PrintStore.Poll.Idle -> { }
         }
     }
 
-    // Draws the held pages through the system print dialog, which also saves as PDF.
+    // Draws the held pages through the system print dialog, which also saves as PDF. The job is dropped when
+    // the pages were written; a cancelled print keeps it.
     fun print(activity: Activity) {
         val h = held ?: return
         if (!h.pages.renderable) return
         val manager = activity.getSystemService(Context.PRINT_SERVICE) as PrintManager
         val name = "Dana print"
-        manager.print(name, PagesAdapter(activity, name, h.pages.pages), null)
+        manager.print(name, PagesAdapter(activity, name, h.pages.pages) { wrote ->
+            if (wrote) host.lifecycleScope.launch(Dispatchers.IO) { store.dropIfVersion(h.version, ::publish) }
+        }, null)
     }
 
-    // Copies the held job to the chosen file, then deletes it.
+    // Copies the held job to the chosen file, then deletes it. A failed copy deletes the new file and keeps the job.
     fun saveRaw(uri: Uri?) {
         if (uri == null || held == null) return
-        host.lifecycleScope.launch {
-            val error = withContext(Dispatchers.IO) {
+        host.lifecycleScope.launch(Dispatchers.IO) {
+            val error = store.saveRaw(::publish) { file ->
                 try {
-                    host.contentResolver.openOutputStream(uri, "wt")!!.use { out -> heldFile.inputStream().use { it.copyTo(out) } }
-                    null
-                } catch (e: Exception) { e.message ?: "Couldn't save the file." }
+                    val out = host.contentResolver.openOutputStream(uri, "wt") ?: throw IOException("Couldn't open the file.")
+                    val copied = out.use { o -> val n = file.inputStream().use { it.copyTo(o) }; o.flush(); n }
+                    if (copied != file.length()) throw IOException("The file was not fully written.")
+                } catch (e: Exception) {
+                    try { DocumentsContract.deleteDocument(host.contentResolver, uri) } catch (_: Exception) { }
+                    throw e
+                }
             }
-            if (error != null) problem(error)
-            else drop()
+            if (error != null) host.runOnUiThread { problem(error) }
         }
     }
 
     fun discard() {
-        host.lifecycleScope.launch {
-            val reply = withContext(Dispatchers.IO) { link.request("printer", "clear", timeoutSeconds = 30) }
-            if (!reply.ok) problem(reply.message)
-            drop()
+        host.lifecycleScope.launch(Dispatchers.IO) {
+            val error = store.discard(::publish)
+            if (error != null) host.runOnUiThread { problem(error) }
         }
     }
 
-    private fun drop() {
-        heldFile.delete()
-        held = null
-        choosing = false
+    fun close() {
         cancelNotification()
+        store.sweep()
     }
-
-    fun close() = cancelNotification()
 
     private fun notify(size: Long) {
         val context = host.applicationContext
@@ -151,7 +160,8 @@ class PrinterModel(
         manager.createNotificationChannel(NotificationChannel(CHANNEL, "Printing", NotificationManager.IMPORTANCE_DEFAULT))
         val open = PendingIntent.getActivity(
             context, 0,
-            Intent(context, FrondActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT),
+            Intent(context, Emulators.activity(device)).putExtra(FrondActivity.EXTRA_DEVICE, device.id)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
         manager.notify(NOTIFICATION, Notification.Builder(context, CHANNEL)

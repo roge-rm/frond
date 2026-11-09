@@ -15,7 +15,13 @@ import java.io.FileOutputStream
 
 // Draws PrintJob pages for PrintManager, one text page per paper page in a monospaced font sized so 80
 // columns by 66 lines fit the page's printable area.
-class PagesAdapter(private val context: Context, private val name: String, private val pages: List<List<String>>) : PrintDocumentAdapter() {
+class PagesAdapter(private val context: Context, private val name: String, private val pages: List<List<String>>,
+    // Called when the print dialog is done, with whether the pages were written out.
+    private val finished: (Boolean) -> Unit = { }) : PrintDocumentAdapter() {
+    private var wrote = false
+
+    override fun onFinish() = finished(wrote)
+
     private var attributes: PrintAttributes? = null
     private val count get() = pages.size.coerceAtLeast(1)
 
@@ -53,6 +59,7 @@ class PagesAdapter(private val context: Context, private val name: String, priva
                 document.finishPage(page)
             }
             FileOutputStream(destination.fileDescriptor).use { document.writeTo(it) }
+            wrote = true
             callback.onWriteFinished(ranges.toList().toTypedArray())
         } catch (e: Exception) {
             callback.onWriteFailed(e.message)

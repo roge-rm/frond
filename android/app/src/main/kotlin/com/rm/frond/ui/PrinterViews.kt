@@ -63,6 +63,8 @@ fun PrinterRow(printer: PrinterModel) {
 @Composable
 fun PrinterPrompt(printer: PrinterModel, top: Dp) {
     val snackbar = remember { SnackbarHostState() }
+    // Registered here, which stays composed while the choices sheet closes to open the file picker.
+    val save = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { printer.saveRaw(it) }
     val version = printer.held?.version
     LaunchedEffect(version) {
         val held = printer.held ?: return@LaunchedEffect
@@ -73,13 +75,12 @@ fun PrinterPrompt(printer: PrinterModel, top: Dp) {
     }
     SnackbarHost(snackbar, Modifier.padding(top = top))
     val held = printer.held
-    if (printer.choosing && held != null) PrinterChoices(printer, held)
+    if (printer.choosing && held != null) PrinterChoices(printer, held) { save.launch("print.raw") }
 }
 
 @Composable
-private fun PrinterChoices(printer: PrinterModel, held: PrinterModel.Held) {
+private fun PrinterChoices(printer: PrinterModel, held: PrinterModel.Held, saveRaw: () -> Unit) {
     val activity = LocalContext.current.activity()
-    val save = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { printer.saveRaw(it) }
     val pages = held.pages
     Dialog({ printer.choosing = false }, DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(Modifier.fillMaxWidth().padding(24.dp), shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceContainerHigh) {
@@ -97,7 +98,7 @@ private fun PrinterChoices(printer: PrinterModel, held: PrinterModel.Held) {
                 ListItem(
                     headlineContent = { Text("Save raw file") },
                     colors = androidx.compose.material3.ListItemDefaults.colors(containerColor = Color.Transparent),
-                    modifier = Modifier.clickableRow { printer.choosing = false; save.launch("print.raw") },
+                    modifier = Modifier.clickableRow { printer.choosing = false; saveRaw() },
                 )
                 ListItem(
                     headlineContent = { Text("Discard", color = MaterialTheme.colorScheme.error) },
