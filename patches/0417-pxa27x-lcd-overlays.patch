@@ -1,5 +1,5 @@
 diff --git a/src/uarm/uarm/pxa_LCD.cpp b/src/uarm/uarm/pxa_LCD.cpp
-index 5fee2f0..625c177 100644
+index 5fee2f0..bc28979 100644
 --- a/src/uarm/uarm/pxa_LCD.cpp
 +++ b/src/uarm/uarm/pxa_LCD.cpp
 @@ -6,6 +6,7 @@
@@ -47,11 +47,12 @@ index 5fee2f0..625c177 100644
  
      if ((ints && !lcd->intWasPending) || (!ints && lcd->intWasPending)) {
          lcd->intWasPending = !!ints;
-@@ -180,10 +186,38 @@ static bool pxaLcdPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size,
+@@ -180,10 +186,39 @@ static bool pxaLcdPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size,
              case 9:
              case 10:
              case 11:
 -            case 13:
++            case 12:  // FBR4
                  lcd->fbr[pa - 8] = val;
                  break;
  
@@ -87,11 +88,12 @@ index 5fee2f0..625c177 100644
              case 14:
                  lcd->lcsr &= ~val;
                  pxaLcdPrvUpdateInts(lcd);
-@@ -247,10 +281,33 @@ static bool pxaLcdPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size,
+@@ -247,10 +282,34 @@ static bool pxaLcdPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size,
              case 9:
              case 10:
              case 11:
 -            case 13:
++            case 12:
                  val = lcd->fbr[pa - 8];
                  break;
  
@@ -122,7 +124,7 @@ index 5fee2f0..625c177 100644
              case 14:
                  val = lcd->lcsr;
                  break;
-@@ -409,10 +466,106 @@ static bool pxaLcdPrvScreenData16FromRam(struct PxaLcd *lcd, uint32_t addr, uint
+@@ -409,10 +468,122 @@ static bool pxaLcdPrvScreenData16FromRam(struct PxaLcd *lcd, uint32_t addr, uint
      return true;
  }
  
@@ -132,8 +134,7 @@ index 5fee2f0..625c177 100644
 +
 +// Takes the next descriptor of DMA channel ch, or the branch in FBRch, as the base plane's
 +// channel 0 does once a frame, and sets that channel's SOF, EOF and branch bits in LCSR1.
-+// Returns the frame data's length in bytes.
-+static uint32_t pxaLcdPrvOverlayDescriptor(struct PxaLcd *lcd, unsigned ch) {
++static void pxaLcdPrvOverlayDescriptor(struct PxaLcd *lcd, unsigned ch) {
 +    uint32_t descrAddr;
 +    if (lcd->fbr[ch] & 1) {
 +        lcd->fbr[ch] &= ~1UL;
@@ -148,14 +149,31 @@ index 5fee2f0..625c177 100644
 +    lcd->ldcmd[ch] = pxaLcdPrvGetWord(lcd, descrAddr + 12);
 +    if (lcd->ldcmd[ch] & 0x00400000UL) lcd->lcsr1 |= 1UL << (ch - 1);
 +    if (lcd->ldcmd[ch] & 0x00200000UL) lcd->lcsr1 |= 1UL << (8 + ch - 1);
-+    return lcd->ldcmd[ch] & 0x001FFFFFUL;
 +}
 +
-+// Reads one plane of `lines` rows. The row stride is the DMA length over the rows, so padded
-+// rows work; false if the data is shorter than `bytesPerLine` a row.
++// Overlay 2's YCbCr format: 0 RGB, 1 packed, 2 to 4 planar on channels 2 (Y), 3 (Cb) and 4 (Cr).
++static inline uint32_t pxaLcdPrvOverlay2Format(const struct PxaLcd *lcd) { return (lcd->ovl2c2 >> 20) & 7; }
++
++// Each enabled overlay channel takes its next descriptor once a base frame, as on the PXA27x,
++// whether or not Frond can draw the overlay's format.
++static void pxaLcdPrvOverlayFrame(struct PxaLcd *lcd) {
++    if (lcd->ovl1c1 & 0x80000000UL) pxaLcdPrvOverlayDescriptor(lcd, 1);
++    if (lcd->ovl2c1 & 0x80000000UL) {
++        pxaLcdPrvOverlayDescriptor(lcd, 2);
++        const uint32_t format = pxaLcdPrvOverlay2Format(lcd);
++        if (format >= 2 && format <= 4) {
++            pxaLcdPrvOverlayDescriptor(lcd, 3);
++            pxaLcdPrvOverlayDescriptor(lcd, 4);
++        }
++    }
++}
++
++// Reads one plane of `lines` rows from channel ch's current descriptor. The row stride is the
++// DMA length over the rows, so padded rows work; false if the data is shorter than
++// `bytesPerLine` a row.
 +static bool pxaLcdPrvOverlayPlane(struct PxaLcd *lcd, unsigned ch, uint32_t bytesPerLine, uint32_t lines,
 +                                  std::vector<uint8_t> &plane, uint32_t &stride) {
-+    const uint32_t len = pxaLcdPrvOverlayDescriptor(lcd, ch);
++    const uint32_t len = lcd->ldcmd[ch] & 0x001FFFFFUL;
 +    if (!lines || len / lines < bytesPerLine) return false;
 +    stride = len / lines;
 +    plane.resize((size_t)stride * lines);
@@ -183,7 +201,7 @@ index 5fee2f0..625c177 100644
 +                                 uint32_t c2) {
 +    const uint32_t w = (c1 & 0x3FF) + 1, h = ((c1 >> 10) & 0x3FF) + 1;
 +    const uint32_t x0 = c2 & 0x3FF, y0 = (c2 >> 10) & 0x3FF;
-+    const uint32_t format = overlay == 2 ? (c2 >> 20) & 7 : 0;
++    const uint32_t format = overlay == 2 ? pxaLcdPrvOverlay2Format(lcd) : 0;
 +    const uint32_t bpp = (c1 >> 20) & 0xF;
 +    const unsigned ch = overlay == 1 ? 1 : 2;
 +    std::vector<uint8_t> y, cb, cr;
@@ -229,7 +247,7 @@ index 5fee2f0..625c177 100644
  
      if (addr != lcd->framebufferBase || len != lcd->framebufferSize || bpp != lcd->framebufferBpp) {
          lcd->framebufferBase = addr;
-@@ -437,7 +590,9 @@ static void pxaLcdPrvScreenDataDma(struct PxaLcd *lcd, uint32_t addr /*PA*/, uin
+@@ -437,7 +608,9 @@ static void pxaLcdPrvScreenDataDma(struct PxaLcd *lcd, uint32_t addr /*PA*/, uin
          }
      }
  
@@ -240,7 +258,7 @@ index 5fee2f0..625c177 100644
  
      if (bpp == 4 && pxaLcdPrvScreenData16FromRam(lcd, addr, len)) len = 0;
  
-@@ -489,6 +644,9 @@ static void pxaLcdPrvScreenDataDma(struct PxaLcd *lcd, uint32_t addr /*PA*/, uin
+@@ -489,6 +662,9 @@ static void pxaLcdPrvScreenDataDma(struct PxaLcd *lcd, uint32_t addr /*PA*/, uin
          }
      }
  
@@ -250,7 +268,15 @@ index 5fee2f0..625c177 100644
      lcd->framebufferDirty = false;
      lcd->soc->ClearFramebufferDirty();
  }
-@@ -628,6 +786,7 @@ void pxaLcdLoad(struct PxaLcd *lcd, T &loader) {
+@@ -553,6 +729,7 @@ void pxaLcdTick(struct PxaLcd *lcd) {
+                         pxaLcdUpdatePalette(lcd, len);
+                     } else {
+                         lcd->frameNum++;
++                        pxaLcdPrvOverlayFrame(lcd);
+ 
+                         if (!(lcd->frameNum & 63)) pxaLcdPrvScreenDataDma(lcd, lcd->fsadr[0], len);
+                     }
+@@ -628,6 +805,7 @@ void pxaLcdLoad(struct PxaLcd *lcd, T &loader) {
      if (!chunk) return;
  
      LoadChunkHelper helper(*chunk);
