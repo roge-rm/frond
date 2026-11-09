@@ -588,11 +588,15 @@ def check_68k(core, rom, root):
         def closed(text):
             fields = dict(word.split('=') for word in text.split())
             return fields['power'] == 'off' and fields['dtr'] == 'off' and int(fields['dtr_drops']) >= 1
-        stats = dict(word.split('=') for word in c.until_text('serial-stats', closed).split())
+        # HotSync is done when the port stays closed for a second, as it retries more than once.
+        text = None
+        while (seen := c.until_text('serial-stats', closed)) != text:
+            text = seen
+            time.sleep(1)
+        stats = dict(word.split('=') for word in text.split())
         assert stats['dtr_rises'] == stats['dtr_drops'], stats
         assert c.ok('serial-mode', 'off', code='serial') == 'off'
-        # The IIIx's own: cradle HotSync button, speed, contrast, backlight, launch.
-        c.ok('hotsync', code='hotsync')
+        # The IIIx's own: speed, contrast, backlight, launch. The cradle HotSync button is the row above.
         c.ok('speed', 'uncapped', code='speed')
         assert c.ok('speed-state').endswith('uncapped')
         c.ok('speed', 'original', code='speed')
@@ -602,7 +606,12 @@ def check_68k(core, rom, root):
         assert c.ok('backlight-state') in ('on', 'off')
         c.ok('launch-app', 'Memo Pad', code='launched')
         c.fails('launch-app', '', code='argument')
+        # Each step finishes before the next, as a person would wait: db-list runs at Memo Pad's event
+        # loop, and the save waits for the boot to reach the UI. A reset during the ROM's store header
+        # update (about 2 ms after each key press and every 5 s) formats RAM on a real IIIx too.
+        c.ok('db-list', code='databases')
         c.ok('reset', code='done')
+        c.until_ok('guest-ready')
         c.ok('save', saved, code='saved')
         c.quit()
     finally:
