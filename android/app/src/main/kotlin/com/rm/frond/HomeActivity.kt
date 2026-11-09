@@ -414,12 +414,13 @@ class HomeActivity : ComponentActivity() {
                 delay(250)
                 model.refreshRunning()
             }
-        }
-        // FrondActivity leaves a note when the core stopped without being asked to.
-        val note = File(filesDir, FrondActivity.START_ERROR)
-        if (note.isFile) {
-            model.alert = "Emulator stopped" to note.readText()
-            note.delete()
+            // FrondActivity leaves a note when the core stopped without being asked to. It writes it
+            // as its process ends, which can be after this resume.
+            val note = File(filesDir, FrondActivity.START_ERROR)
+            if (note.isFile) {
+                model.alert = "Emulator stopped" to note.readText()
+                note.delete()
+            }
         }
     }
 

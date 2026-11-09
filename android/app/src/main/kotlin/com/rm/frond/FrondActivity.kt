@@ -229,7 +229,7 @@ open class FrondActivity : SDLActivity() {
         }
         if (runLock != null) return super.getMainFunction()
         Log.w(TAG, "couldn't take ${folder.name}/${Cards.RUN_LOCK}, not starting")
-        startRefused = "Couldn't start ${folder.name}: Frond is still using it. Try again in a moment."
+        startRefused = "Couldn't start ${Sessions.forPath(this, sessionPath)?.name ?: folder.name}: Frond is still using it. Try again in a moment."
         return "frond_not_started"
     }
 
