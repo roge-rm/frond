@@ -188,6 +188,10 @@ private fun OtherDatabaseDialog(model: RunningModel, onLaunch: (String) -> Unit,
 @Composable
 private fun CardSheet(model: RunningModel, actions: RunningBarActions) {
     LaunchedEffect(Unit) { model.readCard() }
+    if (model.danaCards != null) {
+        DanaCardsRows(model)
+        return
+    }
     var confirmEject by remember { mutableStateOf(false) }
     var confirmFiles by remember { mutableStateOf(false) }
     val saveImage = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
@@ -292,6 +296,7 @@ private fun ConnectionsSheet(model: RunningModel, actions: RunningBarActions) {
             ConnRow.HOTSYNC -> SheetAction("HotSync") { actions.closeSheet(); model.hotSync() }
         }
     }
+    if (model.danaCards != null) for (title in listOf("USB computer", "USB host", "USB printer", "Wi-Fi")) ConnItem(title, false, null) { }
     choosing?.let { LinkChoiceDialog(it, model) { choosing = null } }
 }
 

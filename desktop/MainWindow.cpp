@@ -57,6 +57,7 @@
 #include <QStatusBar>
 #include <QTimer>
 #include <QVBoxLayout>
+#include "DanaCardsDialog.h"
 
 // frond-68k sits beside the ARM core: out/frond-68k in a build tree, frond-68k-core when installed.
 static QString siblingCore68k(const QString& core) {
@@ -190,6 +191,11 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     storageHeading = new QLabel(tr("SD card"), root);
     storageHeading->setObjectName("storageHeading");
     cardLayout->addWidget(storageHeading);
+    danaCards = button(tr("Cards 1 and 2…"), "danaCards", true);
+    cardLayout->addWidget(danaCards);
+    connect(danaCards,&QPushButton::clicked,this,[this] { DanaCardsDialog dialog(client,this->core,this); dialog.exec(); });
+    auto* danaPending = new QLabel(tr("USB computer, USB host, USB printer and Wi-Fi: not available yet"), root);
+    danaPending->setObjectName("danaPendingPeripherals"); danaPending->setEnabled(false); connectionsLayout->addWidget(danaPending);
     // One row: the card in the slot (opens the picker), its state when the buttons don't say it
     // (Ejected, or why there's no button) and the card's buttons. A linked card held elsewhere
     // shows where it is, and Insert once it is free.
@@ -687,6 +693,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (cardProgress && total > 0) cardProgress->setValue(int(done * 1000 / total));
     });
     connect(&client, &DesktopClient::result, this, [this](const QString& command, bool ok, const QString& code, const QString& message) {
+        if (client.property("danaCardRequest").toString()==command) return;
         if (command == "dana-view" || command == "dana-view-state") {
             forceButton->hide(); refresh();
             if (stopping && exchangeStage == ExchangeStage::None) save();
@@ -856,7 +863,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             showBluetooth(message);
         }
         refresh();
-        if (command == "network-state" && !stopping) { send("keyboard-state"); return; }
+        if (command == "network-state" && !stopping && int(runningDevice)!=deviceTypeDana) { send("keyboard-state"); return; }
         if (command == "keyboard-state" && !stopping && frondFirmware::capabilities(runningDevice).serial && serialArgument() != "off") { send("serial-state"); return; }
         if ((command == "keyboard-state" || command == "serial-state") && !stopping &&
             frondFirmware::capabilities(runningDevice).usb && usbArgument() != "off") { send("usb-state"); return; }
@@ -952,12 +959,17 @@ void MainWindow::refresh() {
     addButton->setEnabled(!running && !busy);
     stopButton->setEnabled(running && !busy && !stopping);
     const auto caps = frondFirmware::capabilities(currentDevice());
+    const bool infraredKeyboard = frondFirmware::infraredKeyboard(currentDevice());
+    const bool dana = int(currentDevice()) == deviceTypeDana;
+    danaCards->setVisible(dana);
+    findChild<QLabel*>("danaPendingPeripherals")->setVisible(dana);
+    danaCards->setEnabled(dana && client.available() && !busy && !stopping);
     const auto reason = tr("Not available on the %1 yet").arg(frondFirmware::deviceName(currentDevice()));
     auto note = [&](QWidget* w, bool supported, const QString& tip) { w->setToolTip(supported ? tip : reason); };
-    note(network, caps.network, networkTip); note(keyboard, caps.keyboard, keyboardTip);
+    note(network, caps.network, networkTip); note(keyboard, infraredKeyboard, keyboardTip);
     note(serial, caps.serial, serialTip); note(serialPort, caps.serial, {});
     note(usb, caps.usb, usbTip); note(usbPort, caps.usb, {});
-    note(irda, caps.infrared, caps.keyboard ? irdaTip + " " + tr("Detach the infrared keyboard first.") : irdaTip);note(irdaPort,caps.infrared,{});
+    note(irda, caps.infrared, infraredKeyboard ? irdaTip + " " + tr("Detach the infrared keyboard first.") : irdaTip);note(irdaPort,caps.infrared,{});
     const bool enabled = client.available() && !busy && !stopping && exchangeStage == ExchangeStage::None;
     for (auto* w : runningButtons) w->setEnabled(enabled);
     microphoneToggle->setEnabled(enabled && caps.microphone);
@@ -985,7 +997,7 @@ void MainWindow::refresh() {
     shown(!frondFirmware::serialAbsent(currentDevice()), {serialLabel, serial, serialPort});
     if (frondFirmware::serialAbsent(currentDevice())) serialState->setVisible(false);
     shown(!m68k || caps.network, {networkLabel, network});
-    shown(!m68k || caps.keyboard, {keyboardLabel, keyboard});
+    shown(!m68k || infraredKeyboard, {keyboardLabel, keyboard});
     shown(!m68k || caps.usb, {usbLabel, usb, usbPort});
     shown(!m68k || caps.bluetooth, {bluetoothLabel, bluetooth, bluetoothSocket});
     shown(!m68k || caps.microphone, {microphoneLabel, microphoneToggle});
@@ -1007,7 +1019,7 @@ void MainWindow::refresh() {
     note(holdToggle, frontend.holdSupported, {});
     importAction->setEnabled(!running && !busy);
     network->setEnabled(enabled && caps.network);
-    keyboard->setEnabled(enabled && caps.keyboard && irda->currentData()=="off");
+    keyboard->setEnabled(enabled && infraredKeyboard && irda->currentData()=="off");
     const bool editable = !busy && !stopping && (!running || enabled);
     serial->setEnabled(editable && caps.serial);
     serialPort->setEnabled(caps.serial && serial->currentData() == "tcp"); serialPort->setReadOnly(!editable);
@@ -2222,6 +2234,15 @@ void MainWindow::save(bool saveAs) {
 }
 void MainWindow::saveCopyTo(const QString& path) {
     if (!client.available()) return;
+    if (int(runningDevice)==deviceTypeDana) {
+        for (const auto* slot : {"sd-state", "sd2-state"}) {
+            const auto result=DanaCardsDialog::requestWithClient(client,slot);
+            if (!result.ok) return failure(result.message);
+            const auto state=frondDanaCards::state(result.message);
+            if (!state.known) return failure(tr("Couldn't read both card slots."));
+            if (state.present) return failure(tr("Use Cards 1 and 2 to export a portable session folder with both cards."));
+        }
+    }
     const auto dest = frondSessions::exportDestDir(path);
     if (QFileInfo(dest).canonicalFilePath() == QFileInfo(frondSessions::machineDirOf(sessionPath)).canonicalFilePath() &&
         QFileInfo(dest).exists())
@@ -2595,6 +2616,7 @@ bool MainWindow::memoryStick() const {
     return deviceProfileStorageSlot5(frondFirmware::profile(currentDevice())) == DeviceStorageSlot5::memoryStick;
 }
 bool MainWindow::storageSupported() const {
+    if (int(currentDevice())==deviceTypeDana) return false;
     const auto& frontend = frondFirmware::profile(currentDevice()).frontend;
     return memoryStick() ? frontend.memoryStick : frontend.sdSlot;
 }

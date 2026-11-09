@@ -1,0 +1,40 @@
+--- a/src/common/device_profile5.h
++++ b/src/common/device_profile5.h
+@@ -147,13 +147,13 @@
+      {true, "iiix", 160, 160, 60, 44, "Date Book|Address|To Do List|Memo Pad",
+       "up|down|app1|app2|app3|app4|power", -1, -1, -1, -1, false, false, false, "", "iiix"},
+      0, 0, 16580608},
+-    // Dana has a staged core backend with keyboard and sound; frontends remain unavailable.
+-    {deviceTypeDana, "alphasmart-dana", "AlphaSmart Dana", DeviceCohort5::vz68k, DeviceSupport5::staged,
++    // Dana uses its built-in keyboard and two independent SD/MMC slots.
++    {deviceTypeDana, "alphasmart-dana", "AlphaSmart Dana", DeviceCohort5::vz68k, DeviceSupport5::experimentalDesktop,
+      DeviceDetect5::romHeader68k, 0x61736d74 /* asmt */, 0x44616e61 /* Dana */,
+      DeviceBoard5::vz328, DeviceArt::none, {false, true, false, false, false, true, false, true},
+      6u << 20, 0, 8u << 20, 8u << 20, DisplayMode::mode_560x160, 1u << 9, false,
+      DeviceNorLayout5::any, 0, 0x8000, false, 32u << 20, 2048ull << 20,
+-     {false, "dana", 560, 160, 0, 0, "", "", -1, -1, -1, -1, false, true, false, "", "dana"}},
++     {true, "dana", 560, 160, 0, 0, "", "", -1, -1, -1, -1, false, true, false, "", "dana"}},
+     // Reserved names: art only, no board yet.
+     {deviceTypeInvalid, "palm-m515", "Palm m515", DeviceCohort5::reserved, DeviceSupport5::reserved,
+      DeviceDetect5::none, 0, 0, DeviceBoard5::none, DeviceArt::m515, {},
+--- a/src/cloudpilot/frond/main.cpp
++++ b/src/cloudpilot/frond/main.cpp
+@@ -1562,6 +1562,18 @@
+     // have answers "unsupported", or reports it absent for the state queries the desktop asks every
+     // device.
+     Reply DesktopCommand(const string& command, const string& argument) {
++        if (command == "export-portable" || command == "copy-session" || command == "duplicate-session") {
++            if (profile->deviceType != deviceTypeDana)
++                return {false, "unsupported", "This command is for Dana's independent cards."};
++            if (argument.empty() || argument.front() != '/' || argument.find_first_of("\r\n") != string::npos || argument.find('\0') != string::npos)
++                return {false, "argument", "An absolute new folder path is required."};
++            const auto result = savePortable(argument, *profile, metadata);
++            if (result == PortablePublication::durable)
++                return {true, "portable", "Portable folder saved with both card slots."};
++            if (result == PortablePublication::publishedUncertain)
++                return {false, "durability-uncertain", "Output published, but its directory flush failed. Keep it and verify it before use."};
++            return {false, "portable", "Portable export refused. A new folder and managed cards are required."};
++        }
+         if(command=="dana-view"||command=="dana-view-state") {
+             if(profile->deviceType!=deviceTypeDana)return {false,"unsupported","This device has no Dana view."};
+             string error;

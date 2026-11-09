@@ -269,6 +269,7 @@ class MainWindow : public QMainWindow {
     QLabel* holdLabel;
     bool holdKnown{false}, holdOn{false};
     QLabel *sdStatus, *storageHeading;
+    QPushButton* danaCards;
     // Files… on the running machine's SD card: eject, save, take the card out into the machine
     // folder's sd.frondsd, edit it there in place, then put it back in (ejected again if it was out).
     enum class ExchangeStage { None, Eject, Save, TakeOut, Open, PutIn, EjectAgain };

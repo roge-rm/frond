@@ -948,7 +948,8 @@ Input can be refused while the bounded keyboard queue is busy; retry after the
 machine runs. A text request holds at most 24 scan transitions (12 unshifted or
 six shifted characters), accepts ASCII and uses US key positions. Palm OS applies
 caps, sticky modifiers and repeat. SDL physical keys use Ctrl, GUI for command
-and Alt for function. Dana frontend availability is still gated separately.
+and Alt for function. The built-in keyboard is separate from infrared keyboard
+attachment.
 
 The native Dana keyboard art shares these physical names. `danaKeyboardArt()`
 supplies key bounds and legends; `danaKeyAt()` returns an art index, not a scan or
@@ -958,6 +959,22 @@ viewport, with the keyboard optionally hidden. Callers apply the viewport offset
 The art does not dispatch input or enable the frontend.
 `make test-dana-keyboard-art` checks key inventory, hit areas, rendering and layouts.
 `DANA_ART_SOURCE` and `DANA_ART_BUILD` select isolated source and build directories.
+
+The adaptive native view accepts `--dana-view "keyboard=auto zoom=2"`, the
+`dana-view` console/socket setter and `dana-view-state` query. Setter fields are
+`keyboard=auto|compact|full|hidden`, `zoom=fit|1|1.5|2|3`, `pointer=touch|pan`,
+`pan-x=0..560`, `pan-y=0..160`, `density=0.25..16` and `physical=on|off`.
+Pan is in guest pixels; density is renderer output pixels per logical unit.
+The complete argument is validated before changing the view or cancelling input.
+Other devices refuse these commands.
+
+Replies and `dana-view` notifications share the `dana-view:` prefix and include
+the desired fields, `resolved` keyboard mode and `page=abc|symbols|more|fn`.
+Frontends save the user's view choices; density and physical-keyboard presence
+remain live host state. Desired pan survives resizing while the rendered offset
+is clamped to the visible region. `make test-dana-view` checks layout, coordinate
+mapping and touch ownership; `DANA_VIEW_SOURCE` and `DANA_VIEW_BUILD` select
+isolated directories.
 
 `make test-dana-input` checks the typed Dana host route without firmware.
 `tests/device-rom.py --keyboard-session READY.frond --keyboard-probe PROBE.prc`
@@ -1001,9 +1018,9 @@ remount, and missing legacy Dana SD chunks reset their instances. No card
 contents are rewound by these snapshots. Read-only CardImage policy is fixed
 at construction and rejects sector and byte-range writes and formatting.
 
-Dana D3c is complete in the native backend: per-slot runtime attachment, linked
-sessions and portable folders. The profile remains staged and the frontend
-unavailable until D4.
+Dana's experimental frontend uses the native per-slot runtime attachments and
+linked sessions. The native backend also supports portable folders. Frontend
+transfer paths that cannot preserve both backings are refused.
 
 Dana runtime cards (staged): `sd-attach` and `sd2-attach` take an absolute
 `.frondsd` path, a distinct 32-character lowercase hexadecimal identity and

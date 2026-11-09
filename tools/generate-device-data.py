@@ -42,6 +42,19 @@ def outputs(profiles):
         kotlin += '    Device(\n'
         for key, source in fields.items():
             kotlin += f'        {key} = {literal(key, profile[source])},\n'
+        slots = profile.get('storage_slots', [])
+        if slots:
+            kotlin += '        storageSlots = listOf(\n'
+            for slot in slots:
+                kotlin += f'            StorageSlot({slot["id"]}, {slot["label"]}, {json.dumps(slot["kind"])}, listOf(\n'
+                for family in slot.get('media_families', []):
+                    sizes = lambda key: 'listOf(' + ', '.join(str(n) + 'L' for n in family.get(key, [])) + ')'
+                    kotlin += (f'                CardFamily({json.dumps(family["family"])}, '
+                               f'{family["min_bytes"]}L, {min(family["max_bytes"], (1 << 63) - 1)}L, '
+                               f'{json.dumps(family["size_rule"])}, {sizes("runtime_sizes_bytes")}, '
+                               f'{sizes("guest_qualified_sizes_bytes")}),\n')
+                kotlin += '            )),\n'
+            kotlin += '        ),\n'
         variants = profile.get('firmware_variants', [])
         if variants:
             kotlin += '        firmwareVariants = listOf(\n'

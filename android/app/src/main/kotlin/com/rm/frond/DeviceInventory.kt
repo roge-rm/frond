@@ -49,6 +49,11 @@ internal val deviceInventory = listOf(
         msProMax = 0,
         runs68k = false,
         hotSyncButton = true,
+        storageSlots = listOf(
+            StorageSlot(0, 1, "sd", listOf(
+                CardFamily("sdsc", 33554432L, 2147483648L, "legacy-profile-aligned-512", listOf(), listOf()),
+            )),
+        ),
     ),
     Device(
         id = "palm-e2",
@@ -97,6 +102,11 @@ internal val deviceInventory = listOf(
         msProMax = 0,
         runs68k = false,
         hotSyncButton = true,
+        storageSlots = listOf(
+            StorageSlot(0, 1, "sd", listOf(
+                CardFamily("sdsc", 512L, 1073741824L, "legacy-profile-aligned-512", listOf(), listOf()),
+            )),
+        ),
         firmwareVariants = listOf(
             FirmwareVariant(
                 id = "e2-denvfs",
@@ -159,6 +169,11 @@ internal val deviceInventory = listOf(
         msProMax = 0,
         runs68k = false,
         hotSyncButton = true,
+        storageSlots = listOf(
+            StorageSlot(0, 1, "sd", listOf(
+                CardFamily("sdsc", 512L, 1073741824L, "legacy-profile-aligned-512", listOf(), listOf()),
+            )),
+        ),
     ),
     Device(
         id = "palm-zire-72",
@@ -207,6 +222,11 @@ internal val deviceInventory = listOf(
         msProMax = 0,
         runs68k = false,
         hotSyncButton = false,
+        storageSlots = listOf(
+            StorageSlot(0, 1, "sd", listOf(
+                CardFamily("sdsc", 33554432L, 2147483648L, "legacy-profile-aligned-512", listOf(), listOf()),
+            )),
+        ),
     ),
     Device(
         id = "sony-clie-tg50",
@@ -255,6 +275,10 @@ internal val deviceInventory = listOf(
         msProMax = 1886,
         runs68k = false,
         hotSyncButton = false,
+        storageSlots = listOf(
+            StorageSlot(1, 1, "memory-stick", listOf(
+            )),
+        ),
     ),
     Device(
         id = "palm-iiix",
@@ -303,5 +327,63 @@ internal val deviceInventory = listOf(
         msProMax = 0,
         runs68k = true,
         hotSyncButton = true,
+    ),
+    Device(
+        id = "alphasmart-dana",
+        label = "AlphaSmart Dana",
+        norSize = 6291456L,
+        nandSize = 0L,
+        nandRequired = false,
+        fastAudioNorMd5 = null,
+        sound = true,
+        storageSlot = "sd",
+        sdSlot = true,
+        memoryStick = false,
+        network = false,
+        serialPort = false,
+        microphone = false,
+        camera = false,
+        keyboard = true,
+        usb = false,
+        infrared = true,
+        bluetooth = false,
+        modem = false,
+        irPhone = false,
+        detectKind = 3,
+        companyId = 1634954612L,
+        halId = 1147235937L,
+        norLayout = 0,
+        headerOffset = 0L,
+        bigCardOffset = 32768L,
+        width = 560,
+        height = 160,
+        sideTabWidth = 0,
+        silkscreenHeight = 0,
+        appNamesText = "",
+        buttonsText = "",
+        holdPresent = false,
+        holdSupported = false,
+        homeKey = 0,
+        homeX = -1,
+        homeY = -1,
+        menuX = -1,
+        menuY = -1,
+        rotatingStatusBar = false,
+        sdMin = 33554432L,
+        sdMax = 2147483648L,
+        msSizes = listOf(),
+        msProMax = 0,
+        runs68k = true,
+        hotSyncButton = false,
+        storageSlots = listOf(
+            StorageSlot(0, 1, "sd", listOf(
+                CardFamily("sdsc", 33554432L, 2147483648L, "legacy-csd-fixed-512", listOf(), listOf(33554432L)),
+                CardFamily("legacy-mmc-spi", 33554432L, 268435456L, "legacy-csd-fixed-512", listOf(33554432L, 67108864L, 134217728L, 268435456L), listOf(33554432L)),
+            )),
+            StorageSlot(2, 2, "sd", listOf(
+                CardFamily("sdsc", 33554432L, 2147483648L, "legacy-csd-fixed-512", listOf(), listOf(33554432L)),
+                CardFamily("legacy-mmc-spi", 33554432L, 268435456L, "legacy-csd-fixed-512", listOf(33554432L, 67108864L, 134217728L, 268435456L), listOf(33554432L)),
+            )),
+        ),
     ),
 )

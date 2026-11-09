@@ -38,6 +38,20 @@ class RunningModel(
     // The running session's name, for the copy's file name.
     val name: String,
 ) : FilesModel {
+    val danaCards = if (device.id == "alphasmart-dana" && link != null) DanaCards(activity.applicationContext, link, device) else null
+    fun danaJob(work: (DanaCards) -> Unit = {}) {
+        val cards = danaCards ?: return
+        if (busy != null || waiting()) return
+        busy = "Reading cards"
+        activity.lifecycleScope.launch {
+            val error = withContext(Dispatchers.IO) {
+                try { work(cards); null } catch (e: Exception) { e.message ?: "Couldn't change the card." }
+                    .also { cards.refresh() }
+            }
+            busy = null
+            if (error != null) alert = "Cards" to error
+        }
+    }
     var state by mutableStateOf(SdCard.State.UNKNOWN)
         private set
     var writeProtected by mutableStateOf<Boolean?>(null)
@@ -147,6 +161,7 @@ class RunningModel(
 
     // The card's state without a busy dialog, for the bar's icon.
     fun readCard() {
+        if (danaCards != null) { danaJob(); return }
         val c = card ?: return
         if (busy != null || waitingForGdb || !device.cardSupported) return
         activity.lifecycleScope.launch {
@@ -475,6 +490,7 @@ class RunningModel(
         private set
 
     fun readKeyboard() {
+        if (!device.infraredKeyboard) { keyboard = false; return }
         val l = link ?: return
         if (waitingForGdb) return
         activity.lifecycleScope.launch {
@@ -592,12 +608,14 @@ class RunningModel(
 
     fun microphoneDenied() { changeMicrophone(false); microphone = "off Permission denied" }
 
-    fun attachKeyboard(on: Boolean) =
+    fun attachKeyboard(on: Boolean) {
+        if (!device.infraredKeyboard) return
         device(if (on) "Attaching" else "Detaching", if (on) "Couldn't attach the keyboard" else "Couldn't detach the keyboard", false) { l ->
             val reply = l.request("keyboard-attach", if (on) "on" else "off", timeoutSeconds = 30)
             if (reply.ok) activity.runOnUiThread { keyboard = reply.message == "attached" }
             if (reply.ok) null else reply.message
         }
+    }
 
     // The core's network mode, null until it says.
     var network by mutableStateOf<NetworkMode?>(null)
@@ -789,6 +807,7 @@ class RunningModel(
     }
 
     fun refresh() {
+        if (danaCards != null) { danaJob(); return }
         if (device.cardSupported) job("Reading", "Couldn't read the card") { }
     }
 

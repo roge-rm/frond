@@ -27,6 +27,7 @@
 #include "FirmwareInput.h"
 #include "storage/Packed.h"
 #include "DanaView.h"
+#include "DanaSession.h"
 
 // Each machine is a folder: sessions/<name>/ holds <name>.frond, <name>.frond.settings.json,
 // the lock, sd.frondsd / ms.frondms / ms.frondmsp, nand.frondnand, and <name>.frond.new until the first save.
@@ -128,6 +129,12 @@ struct Header {
 
 inline Header readHeader(const QString& path) {
     Header header;
+    const auto dana=frondDanaSession::inspect(path);
+    if (dana.wrapped) {
+        header.readable=true;
+        if (dana.valid) { header.magic=magic; header.version=dana.version; header.device="alphasmart-dana"; }
+        return header;
+    }
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) return header;
     const auto bytes = file.read(8 + 32);
@@ -770,6 +777,8 @@ inline bool copyChunked(const QString& from, const QString& to, qint64* done, qi
 // and packed as one count; false from it stops the copy with cancelledText().
 inline QString copyPackable(const QString& fromDir, const QString& toDir, const QString& newName,
                             const CopyProgress& progress = {}, bool packNandFile = false) {
+    if (frondDanaSession::inspect(sessionFrondIn(fromDir)).wrapped)
+        return QStringLiteral("This session has independent cards. Open it and export a portable folder.");
     const QString failed = QStringLiteral("Couldn't save the session.");
     if (!QDir().mkpath(toDir)) return failed;
     const auto settle = sdSettleOf(fromDir, sessionFrondIn(fromDir));
@@ -976,6 +985,8 @@ enum class CardChoice { link, copy, none };
 // deleted if it fails, is cancelled or the disk is too full.
 inline QString duplicate(const QString& folder, const Info& info, QString* newName = nullptr, const CopyProgress& progress = {},
                          CardChoice choice = CardChoice::copy) {
+    if (frondDanaSession::inspect(info.path).wrapped)
+        return QStringLiteral("This session has independent cards. Open it and export a portable folder.");
     if (info.old) return QStringLiteral("This session was saved by an older Frond.");
     QLockFile lock(info.path + ".lock");
     lock.setStaleLockTime(0);
@@ -1128,6 +1139,8 @@ inline QString adoptImportedCard(const QString& folder, const QString& dir) {
 inline QString importFolder(const QString& folder, const QString& from, QString* newName = nullptr,
                             const std::function<bool(qint64, qint64)>& progress = {}) {
     const auto frond = sessionFrondIn(from);
+    if (frondDanaSession::inspect(frond).wrapped)
+        return QStringLiteral("Importing an independent-card session isn't available yet. Keep its complete portable folder.");
     const auto header = readHeader(frond);
     if (const auto error = importError(header); !error.isEmpty()) return error;
     if (!QDir().mkpath(folder)) return QStringLiteral("Couldn't save the session.");
@@ -1172,6 +1185,8 @@ inline QString importFolder(const QString& folder, const QString& from, QString*
 inline QString importFile(const QString& folder, const QString& from, QString* newName = nullptr,
                           const std::function<bool(qint64, qint64)>& progress = {}) {
     if (QFileInfo(from).isDir()) return importFolder(folder, from, newName, progress);
+    if (frondDanaSession::inspect(from).wrapped)
+        return QStringLiteral("Importing an independent-card session isn't available yet. Keep its complete portable folder.");
     const auto header = readHeader(from);
     if (const auto error = importError(header); !error.isEmpty()) return error;
     if (!QDir().mkpath(folder)) return QStringLiteral("Couldn't save the session.");
@@ -1406,6 +1421,8 @@ inline QString exportDestDir(const QString& to) {
 // is the folder. Only a folder that is already a Frond session is replaced. Safe off the GUI
 // thread; `progress` follows the copy and the NAND pack, and false stops it, giving cancelledText().
 inline QString exportFile(const Info& info, const QString& to, const std::function<bool(qint64, qint64)>& progress = {}) {
+    if (frondDanaSession::inspect(info.path).wrapped)
+        return QStringLiteral("This session has independent cards. Open it and export a portable folder.");
     const auto destDir = exportDestDir(to);
     const auto destName = QFileInfo(destDir).fileName();
     const auto sourceDir = machineDirOf(info.path);

@@ -54,19 +54,22 @@ class DeviceDataTest(unittest.TestCase):
             if p is not dana:
                 self.assertNotIn(2, [s['id'] for s in p['storage_slots']])
 
-    def test_dana_core_backend_stays_out_of_frontends(self):
+    def test_dana_frontend_uses_independent_storage_metadata(self):
         inventory = json.loads((ROOT / 'tools/device-profiles.json').read_text())
         dana = next(p for p in inventory['profiles'] if p['name'] == 'alphasmart-dana')
-        self.assertEqual(dana['status'], 'staged')
+        self.assertEqual(dana['status'], 'experimental-desktop')
         self.assertEqual((dana['width'], dana['height']), (560, 160))
         self.assertTrue(dana['sd_slot'])
         self.assertTrue(dana['keyboard'])
         self.assertTrue(dana['sound'])
         self.assertTrue(dana['infrared'])
-        for key in ('available', 'runner_eligible', 'usb', 'network', 'serial', 'bluetooth', 'microphone'):
+        self.assertTrue(dana['available'])
+        for key in ('runner_eligible', 'usb', 'network', 'serial', 'bluetooth', 'microphone'):
             self.assertFalse(dana[key], key)
         kotlin = next(data for path, data in generator.outputs(inventory).items() if path.suffix == '.kt')
-        self.assertNotIn('id = "alphasmart-dana"', kotlin)
+        self.assertIn('id = "alphasmart-dana"', kotlin)
+        self.assertIn('StorageSlot(2, 2, "sd"', kotlin)
+        self.assertIn('CardFamily("legacy-mmc-spi"', kotlin)
         self.assertNotIn('alphasmart-dana', palm_boot.DEVICES)
         self.assertIn('alphasmart-dana', palm_boot.DEVICES_68K)
         self.assertTrue(dana['runs_68k'])

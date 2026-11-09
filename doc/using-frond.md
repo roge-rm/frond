@@ -117,6 +117,29 @@ The IIIx has the four app buttons, the scroll rocker and power under the screen,
 
 On Android a game controller presses the Palm's buttons. The d-pad and left stick are the five-way, A is select, L1, X, Y and R1 are the four app buttons and Select is Menu. To change them go to Settings → Controller → Set controls, tap a Palm button, then press the controller key. Reset to defaults puts them back.
 
+### Dana screen and keyboard
+
+Dana keeps its wide screen in both phone orientations. Screen zoom and the
+onscreen keyboard have separate sizes. Choose Fit to see the whole screen, or
+a larger zoom for reading. Select Pan to drag the view; select Touch to use the
+Palm's pen. On desktop, the middle mouse button pans and the wheel zooms while
+panning. The machine keeps your zoom and position when the window changes size.
+
+The keyboard choices are Automatic, Compact, Full Dana and Hidden. Automatic
+uses the compact keyboard in a narrow window, the full keyboard when it fits,
+and hides it when a physical keyboard is detected. Desktop starts with the
+onscreen keyboard hidden. Full Dana remains available as a manual choice.
+
+On the compact keyboard, use the symbols page for punctuation and Fn for Dana's
+app and function keys. Tap a modifier once for the next key, again to hold it,
+then once more to release it. The full keyboard uses held keys, including
+multi-finger chords. Connecting a physical keyboard does not override an explicit
+onscreen keyboard choice.
+
+These choices are saved with the machine. Android's Orientation setting chooses
+portrait, landscape or following the phone; it does not rotate the guest image.
+Panning is manual.
+
 ## Storage cards
 
 The T|X, E2, E3 and Zire 72 take an SD card, the TG50 a Memory Stick. A card is its own thing, kept in the Cards drawer, and sits in one machine at a time. Delete a machine and its card stays in the drawer.
@@ -131,6 +154,24 @@ While a machine runs, Storage (the bar button, Ctrl+2 on Linux) lists its card s
 | Import folder as card | yes | yes | yes | Pro only |
 
 SDHC isn't supported, so 2 GB is the top. A new 2 GB card is 1886 MB, like a real one, and Palm OS formats it. New cards are blank, so let Palm OS format them. On the TG50 a blank stick gets Palm OS's Unrecognized Format prompt, and a Pro stick needs a saved machine.
+
+### Dana cards
+
+While Dana runs, open Cards 1 and 2 on desktop, or the Card 1 and Card 2 rows on
+Android. Each slot takes its own SD or MMC card. Choose the family when creating
+or importing an image, and choose Write protected before attaching it. The SD
+size choices are 32, 64, 128, 256 and 512 MB; MMC offers 32, 64, 128 and 256 MB.
+Eject a card before removing it. Export writes that card as a `.frondsd` image.
+
+The machine's normal session preserves both attachments, including ejected and
+write-protected cards. Desktop can export a native portable session folder while
+the machine is open. Keep that folder intact; moving it to another filesystem or
+copying its files individually is unsupported.
+
+Android can export each card image. Copying or importing a whole Dana session
+with attached cards is not supported there yet. Those operations are refused
+without discarding either card. Dana sessions with no attached cards keep the
+ordinary session copy and import paths.
 
 ### Cards
 
@@ -383,6 +424,11 @@ Identities: the T|X's address comes from its image, so two clones of one T|X ima
 Tested: discovery, sending a Memo or file by Bluetooth (OPP), PIN and Trusted Devices on all four, and serial (SPP) on the T|X, E2 and TG50. TG50 payload transfers aren't checked on Android. Other Bluetooth networking (LAN access, PAN) and other profiles aren't supported.
 
 ## Availability and limits
+
+Dana has an experimental desktop and Android frontend, with its built-in
+keyboard, sound, infrared beaming and two independent SD/MMC slots. Its USB
+computer transport is available through the native localhost debug path. The
+app's USB controls, USB printers and host peripherals, and Wi-Fi remain disabled.
 
 | | T\|X | E2 | Zire 72 | TG50 | IIIx |
 |---|---|---|---|---|---|

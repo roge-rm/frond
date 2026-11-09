@@ -548,7 +548,7 @@
       "name": "alphasmart-dana",
       "display_name": "AlphaSmart Dana",
       "cohort": "vz68k-rom",
-      "status": "staged",
+      "status": "experimental-desktop",
       "nor_bytes": 6291456,
       "raw_nand_bytes": 0,
       "ram_min_bytes": 8388608,
@@ -647,7 +647,7 @@
       "sd_max_bytes": 2147483648,
       "ms_sizes_mb": [],
       "ms_pro_max_mb": 0,
-      "available": false,
+      "available": true,
       "setup": "dana",
       "launcher": "dana",
       "width": 560,
@@ -676,6 +676,8 @@
       "usb": false,
       "infrared": true,
       "bluetooth": false,
+      "modem": false,
+      "ir_phone": false,
       "firmware_variants": []
     },
     {

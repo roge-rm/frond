@@ -40,6 +40,7 @@ inline QString deviceName(Device device) { return QString::fromUtf8(profile(devi
 // Which settings a device supports, from the device table.
 using Capabilities = DeviceCapabilities5;
 inline Capabilities capabilities(Device device) { return profile(device).capabilities; }
+inline bool infraredKeyboard(Device device) { return capabilities(device).keyboard && int(device)!=deviceTypeDana; }
 
 // DragonBall devices run in frond-68k. Their capabilities list all the hardware they have, so
 // controls for anything else are hidden rather than greyed.

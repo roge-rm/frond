@@ -83,7 +83,10 @@ object Sessions {
     private fun <T> withNor(file: File, device: Device? = null, supportedSizes: Set<Long>? = null,
                             read: (java.io.InputStream, Long) -> T?): T? = try {
         val frond = if (file.isDirectory) sessionFile(file) ?: return null else file
+        val offset = if (DanaSession.wrapped(frond)) DanaSession.inspect(frond)?.offset ?: return null else 0L
         java.io.DataInputStream(java.io.BufferedInputStream(frond.inputStream())).use { input ->
+            var wrapperLeft = offset
+            while (wrapperLeft > 0) { val n = input.skip(wrapperLeft); if (n <= 0) return null; wrapperLeft -= n }
             fun read32(): Long {
                 val b = ByteArray(4)
                 input.readFully(b)
@@ -230,6 +233,7 @@ object Sessions {
     // says. Blocks; run it off the main thread. Returns an error message or null (COPY_CANCELLED when
     // cancelled). The copy is deleted if it fails.
     fun duplicate(context: Context, s: Session, cancelled: () -> Boolean = { false }, choice: CardChoice = CardChoice.COPY): String? {
+        if (DanaSession.wrapped(s.file)) return "Android can't duplicate a session with independent cards yet."
         val device = s.device
         if (s.old || device == null) return "This session was saved by an older Frond."
         val id = UUID.randomUUID().toString()
@@ -298,6 +302,7 @@ object Sessions {
 
     // Packs the machine's files, its card and slot.json. Its card is moved in first.
     fun export(context: Context, s: Session, to: Uri): String? {
+        if (DanaSession.wrapped(s.file)) return refuseOutput(context, to, "Android can't export a session with independent cards yet. Export each card separately.")
         val lock = Cards.tryRunLock(s.folder)
         lock.use { Cards.reconcile(folder(context), if (lock != null) s.folder else null) }
         return exportPackable(s.folder,
@@ -310,6 +315,10 @@ object Sessions {
     // the main thread. Returns an error message or null. The copy is a zip of packable files; SAF
     // cannot promise atomic replacement of an existing document.
     fun saveCopy(context: Context, link: ControlLink, to: Uri, session: String? = null): String? {
+        if (forPath(context, session)?.device?.id == "alphasmart-dana") {
+            val cards = listOf("sd-state", "sd2-state").map { link.request(it) }
+            DanaCardProtocol.sessionCopyError(cards.map { if (it.ok) it.message else null })?.let { return refuseOutput(context, to, it) }
+        }
         val folder = File(context.cacheDir, "sessions").also { it.mkdirs() }
         // A copy left by a process killed mid-save would lend its old card to this one.
         val copy = File(folder, "copy").also { it.deleteRecursively(); it.mkdirs() }
@@ -328,6 +337,12 @@ object Sessions {
             copy.deleteRecursively()
         }
     }
+
+    private fun refuseOutput(context: Context, to: Uri, message: String): String {
+        try { android.provider.DocumentsContract.deleteDocument(context.contentResolver, to) } catch (_: Exception) {}
+        return message
+    }
+
 
     // A session saved before an SD card exchange, like the desktop's recovery folder:
     // files/recovery/before-exchange/, and before-exchange.json with the name it came from,
@@ -386,6 +401,10 @@ object Sessions {
     // Reads the session header: little-endian 32-bit magic and version, then the device's fixed
     // name, NUL-padded to 32 bytes. Versions before 6 have no name.
     private fun header(file: File): Header? = try {
+        if (DanaSession.wrapped(file)) {
+            val inspected = DanaSession.inspect(file) ?: return null
+            return Header(MAGIC, inspected.version, "alphasmart-dana")
+        }
         java.io.DataInputStream(file.inputStream()).use { input ->
             val b = ByteArray(8 + DEVICE_NAME_SIZE)
             input.readFully(b, 0, 8)
@@ -427,6 +446,7 @@ object Sessions {
                 }
             }
             val frond = sessionFile(staged) ?: return "That isn't a Frond session."
+            if (DanaSession.wrapped(frond)) return "Importing a session with independent cards requires its portable folder, which Android can't import yet."
             val header = header(frond) ?: Header(0L, 0L, null)
             val device = Device.byId(header.device)
             val error = when {
@@ -773,6 +793,8 @@ internal fun exportPackable(dir: File?, open: () -> java.io.OutputStream?, delet
 }
 
 internal fun zipPackable(dir: File, output: java.io.OutputStream) {
+    if (sessionFile(dir)?.let { DanaSession.wrapped(it) } == true)
+        throw IOException("Independent-card sessions require a native portable folder export.")
     val settles = listOf(sdSettleOf(dir), sdSettleOf(dir, nand = true))
     ZipOutputStream(output).use { zip ->
         val files = dir.listFiles()?.filter { it.isFile && packableName(it.name) }.orEmpty()
@@ -930,6 +952,8 @@ enum class CardChoice { LINK, COPY, NONE }
 // Copy makes the copy's card a new library card with its own serial, None leaves it out. A copy
 // that had a card loads with swap. Source machine held. `dest` is removed on failure.
 internal fun duplicateMachine(sessions: File, from: File, dest: File, cancelled: () -> Boolean, wanted: CardChoice): String? {
+    if (sessionFile(from)?.let { DanaSession.wrapped(it) } == true)
+        return "Android can't duplicate a session with independent cards yet."
     val failed = "Couldn't duplicate the session."
     val library = Cards.libraryFor(sessions)
     Cards.reconcile(sessions, from)?.let { return it }

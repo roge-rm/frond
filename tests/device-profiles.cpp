@@ -613,9 +613,9 @@ static void palmIIIx() {
 // Dana runs in the core only; frontend and peripheral acceptance are separate.
 static void danaInventory() {
     const auto* p = deviceProfileNamed5("alphasmart-dana");
-    assert(p && p->deviceType == deviceTypeDana && p->support == DeviceSupport5::staged);
+    assert(p && p->deviceType == deviceTypeDana && p->support == DeviceSupport5::experimentalDesktop);
     assert(p->board == DeviceBoard5::vz328);
-    assert(!p->frontend.available && !deviceProfileSupportsDesktop5(p->deviceType));
+    assert(p->frontend.available && deviceProfileSupportsDesktop5(p->deviceType));
     assert(deviceProfileRuns68k5(p->deviceType) && !deviceProfileRunnerEligible5(p->deviceType));
     assert(p->frontend.sdSlot && !deviceProfileSdSizeValid5(p->deviceType, 512));
     assert(p->capabilities.keyboard && !p->capabilities.usb && p->capabilities.infrared && p->capabilities.sound);
