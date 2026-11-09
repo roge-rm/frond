@@ -88,6 +88,14 @@ int main() {
     assert(read(5) == 0 && !lines[0]);
     write(0, read(4) + 32500);
     assert(read(5) == 0 && !lines[0]);
+    // Nor does rewriting OIER with the channel still enabled or programming another channel.
+    timr = pxaTimrInit(nullptr, nullptr);
+    write(0, 10); write(7, 1);
+    pxaTimrTick(timr, 10);
+    write(5, 1);
+    write(7, 3);
+    write(1, 50);
+    assert(read(4) == 10 && read(5) == 0 && !lines[0]);
     // Batched clocks are still visible during a CPU batch, and a new match
     // reschedules from the original timer phase, including already observed ticks.
     timr = pxaTimrInit(nullptr, nullptr);

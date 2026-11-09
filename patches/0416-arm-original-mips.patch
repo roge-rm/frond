@@ -59,15 +59,16 @@
      // DragonBall EZ with 4 MiB RAM and a 2 MiB flash part, run by frond-68k. Takes the IIIx 3.1 ROMs, the
      // generic OS 3.5 EZ ROMs and the IIIx/V 4.1 ROM. Piezo, serial, IrDA and the snap-on Palm III modem; nothing else
      // is on the device.
-@@ -358,6 +363,14 @@
+@@ -358,6 +363,15 @@
      return profile && profile->board == DeviceBoard5::ez328;
  }
  
 +// Guest MIPS an ARM device runs at in Original speed: 150 on the 312 MHz PXA270 (set against ZQuake on a
 +// T|X), scaled by CPU clock for the others. The 200 MHz PXA25x figure (96) is an estimate, not measured.
 +inline uint32_t deviceProfileOriginalMips5(int32_t deviceType) {
++    if (deviceProfileRuns68k5(deviceType)) return 100;
 +    const auto* profile = deviceProfile5(deviceType);
-+    if (!profile || profile->board == DeviceBoard5::ez328 || !profile->cpuHz) return 100;
++    if (!profile || !profile->cpuHz) return 100;
 +    return uint32_t((uint64_t(150) * profile->cpuHz + 156000000) / 312000000);
 +}
 +
