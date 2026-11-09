@@ -1506,3 +1506,10 @@ test-isp-frame:
 	$(MAKE) -C $(ISP_FRAME_AREA)/source/src/cloudpilot FROND_68K=1 -f Makefile \
 		-f $(CURDIR)/tests/isp-frame.mk FROND_TEST_ROOT=$(CURDIR) \
 		ISP_FRAME_TEST=$(ISP_FRAME_AREA)/test-isp-frame isp-frame-test
+
+.PHONY: test-print-text
+test: test-print-text
+test-print-text:
+	mkdir -p build/print-text
+	$(CXX) -std=c++17 -O2 -Wall -Wextra -Werror tests/print-text.cpp -o build/print-text/test-print-text
+	build/print-text/test-print-text
