@@ -49,4 +49,10 @@ int main(){
  i.reg(0x81,0x80);assert(i.get(0xe)==5);i.reg(0x8d,0);i.now+=12;assert(i.get(0xe)==0);auto n=i.get(0xf);i.now+=2;assert(i.get(0xf)==((n+1)&0xffff));
  i.now+=2*65536;assert(i.get(0xf)==((n+1)&0xffff));assert(i.get(3)&0x20);
  i.reg(0x82,1);assert(i.get(0xe)==0);assert(i.get(0xf)==0);i.Reset(true);assert(i.get(0xe)==0);
+ // A frame boundary the CPU ran through without sleeping doesn't hold back the wake for the next one.
+ {struct Root: EmHALHandler { uint32 CyclesToNextInterrupt(uint64) override { return 1000000; } } root;
+  Isp w;w.Initialize();w.reg(0x81,0x80);w.reg(0xa5,1);w.reg(0xa0,1);
+  w.now=100;w.get(0x24);w.now=30000;w.get(0x24);
+  assert(EmHAL::CyclesToNextInterrupt(30000)==18000);assert(EmHAL::CyclesToNextInterrupt(48000)==1000000);
+  w.Dispose();}
 }
