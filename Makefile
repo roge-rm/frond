@@ -1415,7 +1415,7 @@ test-68k-vz-registers: prepare
 .PHONY: test-68k-dana
 test: test-68k-dana
 test-68k-dana: prepare
-	$(MAKE) -C build/source/src/common libcommon.a
+	$(MAKE) -C build/source/src/common libcommon.a net
 	$(MAKE) -C build/source/src/cloudpilot FROND_68K=1 -f Makefile \
 		-f $(CURDIR)/tests/68k-dana.mk FROND_TEST_ROOT=$(CURDIR) dana-test
 
