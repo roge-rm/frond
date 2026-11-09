@@ -1474,3 +1474,10 @@ test-isp-host-atl:
 	$(MAKE) -C $(ISP_ATL_AREA)/source/src/cloudpilot FROND_68K=1 -f Makefile \
 		-f $(CURDIR)/tests/isp-host-atl.mk FROND_TEST_ROOT=$(CURDIR) \
 		ISP_ATL_TEST=$(ISP_ATL_AREA)/test-isp-host-atl isp-atl-test
+
+.PHONY: test-usb-raw-printer
+USB_PRINTER_AREA ?= build/usb-raw-printer
+test-usb-raw-printer:
+	python3 tools/prepare.py --destination $(USB_PRINTER_AREA)/source
+	$(MAKE) -C $(USB_PRINTER_AREA)/source/src/common libcommon.a net
+	$(MAKE) -C $(USB_PRINTER_AREA)/source/src/cloudpilot -f Makefile -f $(CURDIR)/tests/usb-raw-printer.mk FROND_68K=1 FROND_TEST_ROOT=$(CURDIR) USB_PRINTER_TEST=$(CURDIR)/$(USB_PRINTER_AREA)/test-usb-raw-printer usb-printer-test
