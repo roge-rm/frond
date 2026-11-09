@@ -692,6 +692,10 @@ open class FrondActivity : SDLActivity() {
             }
         }
         barView = view
+        // Compose makes its window recomposer from the content view's owners, so SDL's layout needs them too.
+        layout.setViewTreeLifecycleOwner(owner)
+        layout.setViewTreeViewModelStoreOwner(owner)
+        layout.setViewTreeSavedStateRegistryOwner(owner)
         layout.addView(view, RelativeLayout.LayoutParams(RelativeLayout.LayoutParams.MATCH_PARENT, RelativeLayout.LayoutParams.WRAP_CONTENT).apply {
             addRule(RelativeLayout.ALIGN_PARENT_TOP)
         })

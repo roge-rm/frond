@@ -67,7 +67,7 @@ fun MachineSettingsScreen(model: HomeModel) {
             if (rows.engine) MachineEngineRow(draft.settings, false) { model.changeMachineSettings(it) }
             if (draft.device.infrared || draft.device.serialPort || draft.device.bluetooth) Header("Connections", Modifier.padding(top = 16.dp))
             if (draft.device.infrared) {
-                val choices = remember(draft.settings.infrared) {
+                val choices = remember(draft.device, draft.settings.infrared) {
                     InfraredChoice.infraredChoices(draft.settings.infrared, LinkStore.choices(InfraredChoice.folder(context)), draft.device.irPhone)
                 }
                 Choice("Infrared", draft.settings.infrared, choices.map { it.first }, { v -> choices.first { it.first == v }.second }) {
@@ -75,7 +75,7 @@ fun MachineSettingsScreen(model: HomeModel) {
                 }
             }
             if (draft.device.serialPort) {
-                val choices = remember(draft.settings.serial) {
+                val choices = remember(draft.device, draft.settings.serial) {
                     InfraredChoice.serialChoices(draft.settings.serial, LinkStore.choices(InfraredChoice.folder(context)), draft.device.modem)
                 }
                 Choice("Serial port", draft.settings.serial, choices.map { it.first }, { v -> choices.first { it.first == v }.second }) {
@@ -83,7 +83,7 @@ fun MachineSettingsScreen(model: HomeModel) {
                 }
             }
             if (draft.device.bluetooth) {
-                val choices = remember(draft.settings.bluetooth) {
+                val choices = remember(draft.device, draft.settings.bluetooth) {
                     BluetoothChoice.choices(draft.settings.bluetooth, LinkStore.choices(InfraredChoice.folder(context)))
                 }
                 Choice("Bluetooth", draft.settings.bluetooth, choices.map { it.first }, { v -> choices.first { it.first == v }.second }) {
