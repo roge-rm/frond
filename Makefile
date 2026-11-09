@@ -658,6 +658,14 @@ test-zodiac-boot-probe: build/zodiac-boot-probe
 
 ZODIAC_MACHINE_SOURCES = build/source/src/uarm/uarm/imx1_boot_probe.cpp build/source/src/uarm/uarm/imx1_watchdog.cpp build/source/src/uarm/uarm/imx1_rtc.cpp build/source/src/uarm/uarm/imx1_bootstrap.cpp build/source/src/uarm/uarm/imx1_aitc.cpp build/source/src/uarm/uarm/imx1_cgm.cpp build/source/src/uarm/uarm/imx1_gpio.cpp build/source/src/uarm/uarm/imx1_sysctrl.cpp build/source/src/uarm/uarm/imx1_eim.cpp build/source/src/uarm/uarm/imx1_timer.cpp build/source/src/uarm/uarm/imx1_i2c.cpp build/source/src/uarm/uarm/imx1_asp.cpp build/source/src/uarm/uarm/imx1_pwm.cpp
 
+.PHONY: test-zodiac-live-controls
+test-zodiac-live-controls: build/zodiac-boot-probe
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/zodiac-live-controls.cpp $(ZODIAC_MACHINE_SOURCES) \
+		@build/zodiac-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-live-controls
+	./build/test-zodiac-live-controls
+
 .PHONY: test-zodiac-machine
 # Reuse qualified generated guests, comparing one-shot and sliced execution.
 test-zodiac-machine: build/zodiac-boot-probe
@@ -1870,7 +1878,7 @@ test-zodiac-graphics-sd: prepare
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Ibuild/source/src/uarm/uarm tests/zodiac-graphics-sd.cpp -o build/test-zodiac-graphics-sd
 	./build/test-zodiac-graphics-sd
 
-test-zodiac-graphics-acquisition: zodiac-boot-probe prepare
+test-zodiac-graphics-acquisition: zodiac-boot-probe prepare test-zodiac-live-controls
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Ibuild/source/src/uarm/uarm tests/zodiac-graphics-acquisition.cpp build/source/src/uarm/uarm/imx1_gpio.cpp -o build/test-zodiac-graphics-acquisition
 	./build/test-zodiac-graphics-acquisition
 	python3 tests/zodiac-graphics-acquisition.py

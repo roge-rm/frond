@@ -92,4 +92,97 @@ def check(rom, word, branch, path, bootstrap, profile, expected):
         outputs.append(re.sub(r'^jit-blocks=.*\n','',re.sub(r'engine=(exact|fast)','engine=checked',output),flags=re.M))
     assert outputs[0]==outputs[1],'mode1 Exact/Fast trace mismatch'
     print('PASS: independent mode1 input, native bounded poll/count/stop/tag9 single-read closure and Exact/Fast parity')
+    # Mode/count/tag alone cannot distinguish alternate-board axes and the auxiliary domain.
+    def mode2(selector):
+        program = [(0x16010d08,0x2000),(0x16010d08,0x2800),(0x16010d08,0x2000),
+                   (0x16010d10,0x1700a),(0x16010d08,0x2402),(0x16010d1c,8)]
+        if selector is not None:
+            direction, outputs, mux = selector
+            program += [(0x0021c120,0x0f400000),(0x0021c100,direction),
+                        (0x0021c108,mux),(0x0021c11c,outputs)]
+        program += [(0x16010d0c,0x400)]
+        branch(0xdb000,0xe2000)
+        for i,(address,value) in enumerate(program):
+            at=0xe2000+i*0x40
+            for j,v in enumerate([0xe59f0010,0xe59f1010,0xe59fe010,0xe59f2010,0xe12fff12]): word(at+j*4,v)
+            word(at+0x18,address);word(at+0x1c,value)
+            word(at+0x20,0x20000000+at+0x40);word(at+0x24,0x200869b7)
+        branch(0xe2000+len(program)*0x40,0xe3000)
+        for i in range(22000):word(0xe3000+i*4,0xe1a00000)
+        at=0xe3000+22000*4
+        for j,v in enumerate([0xe59f0010,0xe59f1010,0xe59fe010,0xe59f2010,0xe12fff12]): word(at+j*4,v)
+        word(at+0x18,0x16010d14);word(at+0x1c,0x16010000)
+        word(at+0x20,0x20000000+at+0x40);word(at+0x24,0x200871db)
+        branch(at+0x40,at+0x40);path.write_bytes(rom)
+    first=(0x0a400000,0x08000000,0x00cc3000)
+    second=(0x05400000,0x04000000,0x00ff3000)
+    high=(0x0a400000,0x08400000,0x00cc3000)
+    input22=(0x0a000000,0x08000000,0x00cc3000)
+    unmatched=(0x00400000,0,0x3000)
+    for selector,route,aux,expected in [
+            (first,None,None,None),
+            (first,'alternate-mux',None,128),(second,'alternate-mux',None,900),
+            (input22,'alternate-mux',900,None),(unmatched,'alternate-mux',900,None),
+            (high,'alternate-mux',None,None),(high,'alternate-mux',900,900),
+            (None,'default-aux',None,None),(None,'default-aux',900,900),
+            (first,'default-aux',512,512)]:
+        mode2(selector)
+        flags=[bootstrap,profile,'--graphics-raw-axes=128/900','--graphics-raw-mode1=712']
+        if route: flags+=['--graphics-mode2-route='+route]
+        if aux is not None: flags+=['--graphics-raw-aux='+str(aux)]
+        for engine in ('exact','fast'):
+            p=subprocess.run(common+[engine]+flags,capture_output=True,text=True,timeout=30)
+            output=p.stdout+p.stderr
+            assert p.returncode==2,output[-3000:]
+            if expected is None:
+                assert 'stop=unsupported-peripheral' in output and 'peripheral-status=external-input-unavailable' in output,output[-3000:]
+                assert not any('address=16010d14 ' in x for x in output.splitlines() if x.startswith('bus ')),output[-3000:]
+            else:
+                assert 'stop=instruction-budget' in output,output[-3000:]
+                rows=[x for x in output.splitlines() if x.startswith('bus ') and 'address=16010d14 ' in x]
+                assert len(rows)==1 and ('value=%08x '%(0x0a000000|expected)) in rows[0],rows
+    for option in ('--graphics-mode2-route=', '--graphics-mode2-route=unknown',
+                   '--graphics-mode2-route=defaultAux', '--graphics-raw-aux=',
+                   '--graphics-raw-aux=-1', '--graphics-raw-aux=1024',
+                   '--graphics-raw-aux=4294967296', '--graphics-raw-aux=1x'):
+        p=subprocess.run(common+['exact',bootstrap,profile,option],capture_output=True,text=True,timeout=30)
+        assert p.returncode==1,(option,p.stdout,p.stderr)
+    for new in ('--graphics-raw-aux=900','--graphics-mode2-route=default-aux'):
+        for flags in ([new],[bootstrap,new],[profile,new],[bootstrap,profile,new,new]):
+            p=subprocess.run(common+['exact']+flags,capture_output=True,text=True,timeout=30)
+            assert p.returncode==1,(flags,p.stdout,p.stderr)
+    print('PASS: explicit mode2 board routes, B22 output selector, independent auxiliary input and guarded missing sources')
+    # Supply a generated guest to the machine API fixture. It updates axes only after
+    # the first completed instruction which writes START, without guest execution in the API.
+    branch(0xdb000,0xe2000)
+    program=[]
+    def write(address,value):program.append((address,value,None))
+    def delay():program.append((None,None,None))
+    def read(reg):program.append((0x16010d14,None,reg))
+    for address,value in [(0x16010d08,0x2000),(0x16010d08,0x2800),(0x16010d08,0x2000),
+                          (0x16010d10,0x2700a),(0x16010d08,0x2400),(0x16010d1c,8)]:write(address,value)
+    for registers,mode in [((4,5),0),((6,7),0),((8,),1),((9,),2)]:
+        write(0x16010d08,0x2400|mode);write(0x16010d10,0x2700a if mode==0 else 0x1700a)
+        write(0x16010d0c,0x400);delay();write(0x16010d0c,0)
+        for reg in registers:read(reg)
+    at=0xe2000
+    for address,value,reg in program:
+        if address is None:
+            for i in range(22000):word(at+i*4,0xe1a00000)
+            at+=22000*4
+        elif reg is None:
+            for j,v in enumerate([0xe59f0010,0xe59f1010,0xe59fe010,0xe59f2010,0xe12fff12]):word(at+j*4,v)
+            word(at+0x18,address);word(at+0x1c,value)
+            word(at+0x20,0x20000000+at+0x40);word(at+0x24,0x200869b7);at+=0x40
+        else:
+            for j,v in enumerate([0xe59f0010,0xe59f1010,0xe59fe010,0xe59f2010,0xe12fff12]):word(at+j*4,v)
+            word(at+0x18,address);word(at+0x1c,0x16010000)
+            word(at+0x20,0x20000000+at+0x40);word(at+0x24,0x200871db)
+            word(at+0x40,0xe1a00000 | reg<<12)
+            at+=0x44
+    word(at,0xe7f000f0);path.write_bytes(rom)
+    for engine in ('exact','fast'):
+        p=subprocess.run(['build/test-zodiac-live-controls',str(path),engine],capture_output=True,text=True,timeout=30)
+        assert p.returncode==0,(engine,p.stdout,p.stderr)
+        print(p.stdout.strip())
 g.main(check)

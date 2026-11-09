@@ -19,10 +19,28 @@ int main() {
     auto pinPut = [&](uint32_t offset, uint32_t value) { assert(pins.access(0x0021c100+offset,4,true,value)==Imx1GpioAccess::ok); };
     pinPut(0x20,0x0f400000); pinPut(0x00,0x0a400000); pinPut(0x08,0x00cc0000); pinPut(0x1c,0x08000000);
     assert(pins.outputPattern(1,0x05000000,0x08000000,0x02000000));
+    assert(!pins.outputPattern(1,0,0,0x00400000));
+    pinPut(0x08,0x00cc3000);
+    assert(pins.outputPattern(1,0,0,0x00400000));
+    assert(!pins.outputPattern(1,0,0x00400000,0));
     assert(!pins.outputPattern(1,0x0a000000,0x04000000,0x01000000));
     pinPut(0x00,0x05400000); pinPut(0x08,0x00ff0000); pinPut(0x1c,0x04000000);
     assert(pins.outputPattern(1,0x0a000000,0x04000000,0x01000000));
     pinPut(0x08,0); assert(!pins.outputPattern(1,0x0a000000,0x04000000,0x01000000));
+    Imx1GraphicsAcquisition auxiliaryOnly;
+    assert(auxiliaryOnly.setAuxInput(900));
+    assert(auxiliaryOnly.setMode2Route(Imx1GraphicsMode2Route::defaultAux));
+    configure(auxiliaryOnly);
+    put(auxiliaryOnly,0xd0c,0x400,A::externalInput); // An auxiliary sample supplies neither axis nor battery.
+    put(auxiliaryOnly,0xd08,0x2401); put(auxiliaryOnly,0xd10,0x1700a);
+    put(auxiliaryOnly,0xd0c,0x400,A::externalInput);
+    put(auxiliaryOnly,0xd08,0x2402); put(auxiliaryOnly,0xd0c,0x400);
+    auxiliaryOnly.advance(20000); put(auxiliaryOnly,0xd0c,0);
+    assert(get(auxiliaryOnly,0xd14)==0x0a000384);
+    assert(auxiliaryOnly.setMode2Route(Imx1GraphicsMode2Route::alternateMux));
+    auxiliaryOnly.selectSource(2); put(auxiliaryOnly,0xd0c,0x400);
+    auxiliaryOnly.advance(20000); put(auxiliaryOnly,0xd0c,0);
+    assert(get(auxiliaryOnly,0xd14)==0x0a000384);
     Imx1GraphicsAcquisition s; configure(s);
     put(s,0xd0c,0x400,A::externalInput); assert(get(s,0xd0c)==0);
     assert(s.setInput(128,900)); assert(!s.setInput(1024,1));
@@ -47,12 +65,29 @@ int main() {
     s.reset(); assert(get(s,0xd08)==0 && get(s,0xd1c)==0);
     configure(s); put(s,0xd08,0x2402); put(s,0xd10,0x1700a); put(s,0xd0c,0x400,A::externalInput);
     assert(!s.deadlineRemaining() && !s.queued());
+    s.selectSource(0); put(s,0xd0c,0x400,A::externalInput); // Raw axes alone leave mode 2 unqualified.
+    assert(!s.setMode2Route(static_cast<Imx1GraphicsMode2Route>(99)));
+    assert(s.setMode2Route(Imx1GraphicsMode2Route::alternateMux));
+    s.selectSource(2); put(s,0xd0c,0x400,A::externalInput); // No auxiliary source supplied.
     for (uint32_t source : {0u,1u}) {
         s.selectSource(source); put(s,0xd0c,0x400); s.advance(20000);
         assert(s.queued()==1); put(s,0xd0c,0);
         put(s,0xd10,get(s,0xd10)); assert(s.queued()==1);
         assert(get(s,0xd14)==(0x0a000000 | (source ? 24 : 23)));
     }
+    assert(s.setAuxInput(900)); assert(!s.setAuxInput(1024));
+    s.selectSource(3); put(s,0xd0c,0x400,A::externalInput);
+    s.selectSource(2); put(s,0xd0c,0x400);
+    auto auxiliaryCopy = s;
+    assert(s.setAuxInput(512)); assert(s.setInput(100,200));
+    s.advance(20000); auxiliaryCopy.advance(20000); put(s,0xd0c,0);
+    assert(get(s,0xd14)==0x0a000384 && get(auxiliaryCopy,0xd14)==0x0a000384);
+    assert(s.setMode2Route(Imx1GraphicsMode2Route::defaultAux));
+    s.selectSource(3); put(s,0xd0c,0x400); s.advance(20000); put(s,0xd0c,0);
+    assert(get(s,0xd14)==0x0a000200); // The independent auxiliary sample is never axis centre.
+    s.reset(); configure(s); put(s,0xd08,0x2402); put(s,0xd10,0x1700a);
+    put(s,0xd0c,0x400); s.advance(20000); put(s,0xd0c,0);
+    assert(get(s,0xd14)==0x0a000200); // Reset retains source policy and supplied auxiliary input.
     put(s,0xd08,0x2401); put(s,0xd10,0x1700a);
     put(s,0xd0c,0x400,A::externalInput); // Axis stimuli do not supply mode 1.
     assert(get(s,0xd0c)==0 && !s.deadlineRemaining() && !s.queued());
