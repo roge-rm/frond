@@ -80,6 +80,7 @@
       "bluetooth": true,
       "modem": false,
       "ir_phone": true,
+      "usb_printer": false,
       "firmware_variants": []
     },
     {
@@ -161,6 +162,7 @@
       "bluetooth": true,
       "modem": false,
       "ir_phone": true,
+      "usb_printer": false,
       "firmware_variants": [
         {
           "id": "e2-denvfs",
@@ -255,6 +257,7 @@
       "bluetooth": true,
       "modem": false,
       "ir_phone": true,
+      "usb_printer": false,
       "firmware_variants": []
     },
     {
@@ -318,6 +321,7 @@
       "bluetooth": false,
       "modem": false,
       "ir_phone": false,
+      "usb_printer": false,
       "firmware_variants": []
     },
     {
@@ -399,6 +403,7 @@
       "bluetooth": true,
       "modem": false,
       "ir_phone": true,
+      "usb_printer": false,
       "firmware_variants": []
     },
     {
@@ -479,6 +484,7 @@
       "bluetooth": true,
       "modem": false,
       "ir_phone": true,
+      "usb_printer": false,
       "firmware_variants": []
     },
     {
@@ -542,6 +548,7 @@
       "bluetooth": false,
       "modem": true,
       "ir_phone": true,
+      "usb_printer": false,
       "firmware_variants": []
     },
     {
@@ -678,6 +685,7 @@
       "bluetooth": false,
       "modem": false,
       "ir_phone": false,
+      "usb_printer": true,
       "firmware_variants": []
     },
     {
@@ -741,6 +749,7 @@
       "bluetooth": false,
       "modem": false,
       "ir_phone": false,
+      "usb_printer": false,
       "firmware_variants": []
     }
   ]

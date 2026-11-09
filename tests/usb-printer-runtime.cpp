@@ -67,8 +67,11 @@ int main(int argc,char** argv) {
    if(boundary==4){SavestateLoader<ChunkType> loader;assert(loader.Load(saved.GetBuffer(),saved.GetSize(),i));}
    if(boundary==5)owner.detach();
    if(boundary==6){EmBankRegs::onBeforeDispose.Dispatch();}
-   assert(owner.printer.state()==RawPrintJob::State::aborted);
-   result.clear();assert(!owner.command("finish",root+"/aborted",result));assert(access((root+"/aborted").c_str(),F_OK)!=0);
+   if(boundary<5) assert(owner.printer.state()==RawPrintJob::State::collecting && owner.printer.size()==0 && owner.printer.idleMs()==-1);
+   else {
+     assert(owner.printer.state()==RawPrintJob::State::aborted);
+     result.clear();assert(!owner.command("finish",root+"/aborted",result));assert(access((root+"/aborted").c_str(),F_OK)!=0);
+   }
  }
  bind();begin();bytes();Savestate<ChunkType> saved;assert(saved.Save(i));
  SavestateLoader<ChunkType> loader;assert(!loader.Load(saved.GetBuffer(),saved.GetSize()-4,i));
@@ -83,6 +86,28 @@ int main(int argc,char** argv) {
  auto* old=new Isp;owner.attach(*old);begin();EmBankRegs::onBeforeDispose.Dispatch();delete old;
  auto* replacement=new Isp;owner.attach(*replacement);begin();EmBankRegs::onBeforeDispose.Dispatch();delete replacement;
  assert(owner.printer.state()==RawPrintJob::State::aborted);
+ {
+   // save and clear keep the job collecting, and status carries last= and idle=.
+   bind();
+   result.clear();assert(owner.command("status","",result));assert(result=="attached collecting bytes=0 last=none idle=-1");
+   bytes();
+   result.clear();assert(owner.command("status","",result));
+   assert(result.rfind("attached collecting bytes=4 last=none idle=",0)==0 && std::stoll(result.substr(result.rfind('=')+1))>=0);
+   result.clear();assert(owner.command("clear","",result));assert(result=="attached collecting bytes=0 last=none idle=-1");
+   auto again=i.transfer(1,1,true,1,{5,6,7},0,64);assert(again[0]==3 && owner.printer.size()==3);
+   result.clear();assert(owner.command("save",root+"/saved.raw",result));
+   assert(result.rfind("attached collecting bytes=0 last=published idle=-1")==0);
+   { std::ifstream saved(root+"/saved.raw",std::ios::binary);std::string d((std::istreambuf_iterator<char>(saved)),{});assert(d==std::string("\5\6\7",3)); }
+   auto next=i.transfer(1,1,false,1,{9},0,64);assert(next[0]==1 && owner.printer.size()==1);
+   result.clear();assert(!owner.command("save",root+"/saved.raw",result));
+   assert(result.find("attached collecting bytes=0 last=rejected idle=-1")!=std::string::npos);
+   result.clear();assert(!owner.command("save","relative.raw",result));
+   result.clear();assert(owner.command("begin","",result));
+   owner.detach();
+   result.clear();assert(!owner.command("save",root+"/off.raw",result));assert(access((root+"/off.raw").c_str(),F_OK)!=0);
+   assert(result.rfind("off aborted",0)==0);
+   result.clear();assert(!owner.command("clear","",result));
+ }
  { UsbPrinterRuntime shutdown;shutdown.attach(i);std::string result;assert(shutdown.command("begin","",result)); }
  assert(!i.HasHostTarget(0));
  std::cout<<"PASS production owner, HC packets, cancellation, atomic invalid load and file failures\n";

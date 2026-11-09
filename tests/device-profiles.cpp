@@ -42,7 +42,8 @@ int main() {
         desktopCount += deviceProfileSupportsDesktop5(p.deviceType);
         assert(deviceProfileSupportsDesktop5(p.deviceType) ==
                (p.deviceType == deviceTypeTX || p.deviceType == deviceTypeE2 || p.deviceType == deviceTypeZire72 ||
-                p.deviceType == deviceTypeTG50 || p.deviceType == deviceTypeIIIx || p.deviceType == deviceTypeFrankenE2));
+                p.deviceType == deviceTypeTG50 || p.deviceType == deviceTypeIIIx || p.deviceType == deviceTypeFrankenE2 ||
+                p.deviceType == deviceTypeDana));
         assert((p.deviceType == deviceTypeZire72) == (p.board == DeviceBoard5::pxa270Zire72));
         assert(deviceConfigurationGetNandSize(p.deviceType) == p.nandSize);
         assert(deviceConfigurationDefaultDisplayMode(p.deviceType) == p.defaultDisplay);
@@ -97,7 +98,7 @@ int main() {
         nor.resize(at + 12);
         assert(!inspect().profile && !inspect().hasHeader);
     }
-    assert(desktopCount == 6 && names.size() == 9 && types.size() == 8);
+    assert(desktopCount == 7 && names.size() == 9 && types.size() == 8);
     assert(std::string(deviceName5(deviceTypeTX)) == "palm-tx" && std::string(deviceName5(deviceTypeE2)) == "palm-e2");
     assert(deviceProfileNamed5("palm-tx")->capabilities.serial && deviceProfileNamed5("palm-e2")->capabilities.serial);
     // Unknown names are refused, including numbers, old ids, case and prefixes.
@@ -350,6 +351,8 @@ int main() {
         assert(p.capabilities.irPhone == (p.deviceType == deviceTypeIIIx || p.deviceType == deviceTypeTX ||
                                           p.deviceType == deviceTypeTG50 || p.deviceType == deviceTypeE2 ||
                                           p.deviceType == deviceTypeFrankenE2 || p.deviceType == deviceTypeZire72));
+    for (const auto& p : deviceProfiles5) assert(p.capabilities.usbPrinter == (p.deviceType == deviceTypeDana));
+    for (const auto& p : deviceProfiles5) if (p.deviceType == deviceTypeDana) assert(!p.capabilities.usb);
     // TG50 has NOR-only firmware, physical 16 MiB RAM and a qualified native board.
     {
         const auto* p = deviceProfileNamed5("sony-clie-tg50");

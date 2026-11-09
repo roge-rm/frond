@@ -90,5 +90,25 @@ int main(){
  p.cancel();
  assert(packet({0,0,0,false,false,8,{0,5,3,0,0,0,0,0}}).result==R::ack);
  p.cancel();assert(packet({3,0,2,true,false,0,{}}).result==R::noAnswer);
+ // Keep-collecting mode: a job is always collecting, and the leaf stays configured through clear and finish.
+ {
+  UsbRawPrinter q(128);q.keepCollecting(true);
+  assert(q.state()==RawPrintJob::State::collecting&&q.size()==0&&q.idleMs()==-1);
+  auto qp=[&](P x){return q.packet<Reply>(x);};
+  auto control=[&](unsigned a,std::vector<uint8> s){assert(qp({a,0,0,false,false,8,s}).result==R::ack);assert(qp({a,0,2,true,false,0,{}}).result==R::ack);};
+  control(0,{0,5,3,0,0,0,0,0});control(3,{0,9,1,0,0,0,0,0});
+  assert(qp({3,1,1,false,false,2,{1,2}}).result==R::ack&&q.size()==2&&q.idleMs()>=0);
+  q.clear();assert(q.state()==RawPrintJob::State::collecting&&q.size()==0&&q.idleMs()==-1);
+  assert(qp({3,1,1,true,false,1,{7}}).result==R::ack&&q.size()==1);
+  std::vector<uint8> got;unsigned before=outputs;
+  assert(q.finish(output,&got)==RawPrintJob::State::published&&outputs==before+1&&got==std::vector<uint8>{7});
+  assert(q.state()==RawPrintJob::State::collecting&&q.size()==0&&q.idleMs()==-1);
+  assert(qp({3,1,1,false,false,1,{8}}).result==R::ack&&q.size()==1);
+  control(3,{0,9,1,0,0,0,0,0});assert(q.state()==RawPrintJob::State::collecting&&q.size()==0);
+  assert(qp({3,1,1,false,false,1,{9}}).result==R::ack&&q.size()==1);
+  q.cancel();assert(q.state()==RawPrintJob::State::collecting&&q.size()==0);
+  assert(qp({3,1,1,false,false,1,{9}}).result==R::noAnswer);
+  q.keepCollecting(false);q.cancel();assert(q.state()==RawPrintJob::State::aborted);
+ }
  std::cout<<"USB printer HC/control/raw adapter PASS\n";
 }

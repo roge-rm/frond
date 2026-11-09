@@ -64,6 +64,7 @@ class DeviceDataTest(unittest.TestCase):
         self.assertTrue(dana['sound'])
         self.assertTrue(dana['infrared'])
         self.assertTrue(dana['available'])
+        self.assertTrue(dana['usb_printer'])
         for key in ('runner_eligible', 'usb', 'network', 'serial', 'bluetooth', 'microphone'):
             self.assertFalse(dana[key], key)
         kotlin = next(data for path, data in generator.outputs(inventory).items() if path.suffix == '.kt')

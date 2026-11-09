@@ -116,6 +116,7 @@ int main() {
                   << ",\"bluetooth\":" << (p.capabilities.bluetooth ? "true" : "false")
                   << ",\"modem\":" << (p.capabilities.modem ? "true" : "false")
                   << ",\"ir_phone\":" << (p.capabilities.irPhone ? "true" : "false")
+                  << ",\"usb_printer\":" << (p.capabilities.usbPrinter ? "true" : "false")
                   << ",\"firmware_variants\":[";
         bool firstVariant = true;
         for (const auto& v : deviceFirmwareVariants5) {

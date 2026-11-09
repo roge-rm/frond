@@ -78,6 +78,8 @@ data class Device internal constructor(
     val modem: Boolean = false,
     // A mobile phone on the infrared port, run by the core.
     val irPhone: Boolean = false,
+    // A USB printer on the host port that collects raw print jobs, run by the core.
+    val usbPrinter: Boolean = false,
     // DragonBall devices run in libmain68k.so (Frond68kActivity), the others in libmain.so (FrondActivity).
     val runs68k: Boolean = false,
     val hotSyncButton: Boolean = false,
