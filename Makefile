@@ -1086,7 +1086,7 @@ test-memory-stick-pro: build/source/src/common/libcommon.a
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter \
 		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/uarm/native -Ibuild/source/src/common \
 		tests/memory-stick-pro.cpp build/source/src/uarm/uarm/mmiodev_MemoryStickController.cpp \
-		build/source/src/common/libcommon.a -lz -o build/test-memory-stick-pro
+		build/source/src/uarm/uarm/sdcard.cpp build/source/src/common/libcommon.a -lz -o build/test-memory-stick-pro
 	./build/test-memory-stick-pro
 
 .PHONY: test-tg50-serial-configuration test-microwire64x16
