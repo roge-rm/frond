@@ -2,8 +2,9 @@
 """frond-68k peripheral and workflow checks on private IIIx ROMs: piezo tones, backlight, sleep
 and wake, serial HotSync with pilot-link over a PTY, TCP and a Unix socket, the unix: endpoints, the ARM card swap flags refused, and installing, launching, listing
 and exporting databases. Each ROM boots to the launcher once; every check starts from that
-session. --only ppp also dials out over serial PPP to slirp and fetches example.com, and --only
-modem does the same through the snap-on modem (--serial modem).
+session. --only ppp also dials out over serial PPP to slirp and fetches example.com, --only
+modem does the same through the snap-on modem (--serial modem) and --only irphone through the
+infrared phone (--irda phone).
 
 ROMs come from --rom, else the IIIx 3.1 ROM in the private firmware folder; with none the checks
 are skipped. The probe PRCs are built with tools/build-palm-probe.py when m68k-palmos-gcc and the
@@ -28,9 +29,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 import palm_boot  # noqa: E402
 
-CHECKS = ['tones', 'backlight', 'sleep', 'serial', 'unix', 'card-flags', 'databases', 'ppp', 'modem']
+CHECKS = ['tones', 'backlight', 'sleep', 'serial', 'unix', 'card-flags', 'databases', 'ppp', 'modem', 'irphone']
 # Reach example.com over the internet, so they only run when asked for with --only.
-OPT_IN = {'ppp', 'modem'}
+OPT_IN = {'ppp', 'modem', 'irphone'}
 HELLO = Path.home() / 'Projects/palm/hello/Hello.prc'
 FRONDBENCH = ROOT / 'build/frondbench/FrondBench.prc'
 PROBES = {'tone68k': 'FrondTone68k', 'alarm68k': 'FrondAlarm68k', 'ppp68k': 'FrondPPP68k'}
@@ -493,6 +494,55 @@ def check_modem(rom, session, root, probes):
     return f'{status}, {received} bytes; modem went {" > ".join(states)}'
 
 
+def check_irphone(rom, session, root, probes):
+    """The infrared phone (--irda phone): a new "IrCOMM to Modem" connection in the Connection panel,
+    picked in the Network panel with a phone number, then the PPP probe dials with the guest's own
+    NetLib, Modem Manager and IrCOMM, through the core's IrLAP peer, modem and PPP server to slirp,
+    and fetches example.com. Passes on the probe's FrondPPPLog showing HTTP 200 and the phone having
+    been online. OS 3.5."""
+    if '3.5' not in rom.name:
+        raise Skip('the Connection and Network panel taps are for OS 3.5')
+    with Machine(session, root, 'irphone', '--irda', 'phone') as m:
+        if m.send('irda-state', 'infrared:') != 'infrared: phone idle':
+            raise AssertionError('phone not idle at the start')
+        m.install(probes['ppp68k'])
+        m.core.launch('Preferences')
+        # Panel picker, Connection, New, the Connection Method trigger, IrCOMM to Modem, OK (the new
+        # connection is called Custom); panel picker, Network, the Connection trigger, Custom, the
+        # Phone field, the silkscreen's numeric keyboard, 5551234, Done, then OK in Phone Setup.
+        digits = {'1': (62, 75), '2': (80, 75), '3': (98, 75), '4': (62, 91), '5': (80, 91)}
+        taps = [(135, 5), (125, 18), (16, 151), (110, 53), (100, 87), (20, 147),
+                (135, 5), (125, 62), (100, 89), (110, 141), (120, 103), (128, 213)]
+        taps += [digits[d] for d in '5551234'] + [(16, 152), (12, 152)]
+        for x, y in taps:
+            m.core.tap(m.root, x, y)
+            time.sleep(0.7)
+        m.frame('network.png')
+        m.core.launch('Frond PPP')
+        # The probe writes FrondPPPLog when it's done; it leaves the call up.
+        states, reply = [], ''
+        log = m.root / 'log.pdb'
+        end = time.monotonic() + 150
+        while time.monotonic() < end and 'written' not in reply:
+            state = m.send('irda-state', 'infrared:').split(': ', 1)[1]
+            if not states or states[-1] != state:
+                states.append(state)
+            if 'online' in state:
+                reply = m.send(f'db-export-db FrondPPPLog "{log}"', 'export')
+            time.sleep(1)
+        m.frame('probe.png')
+    if 'written' not in reply:
+        raise AssertionError(f'no FrondPPPLog: {reply}; phone went {" > ".join(states)}')
+    data = log.read_bytes()
+    record = data[int.from_bytes(data[78:82], 'big'):]
+    lines = record.split(b'\0')[0].decode(errors='replace').splitlines()
+    status = next((line for line in lines if line.startswith('HTTP/')), '')
+    if ' 200' not in status or 'phone online 33600' not in states:
+        raise AssertionError(f'probe: {" | ".join(lines)}; phone went {" > ".join(states)}')
+    received = next((line.split()[-1] for line in lines if line.startswith('received')), '?')
+    return f'{status}, {received} bytes; phone went {" > ".join(states)}'
+
+
 def check_databases(rom, session, root, probes):
     """Install Hello.prc and FrondBench from the console, launch Hello, list the RAM databases,
     export Hello as a PRC and the RAM and all databases as zips, and FrondBench starting."""
@@ -549,10 +599,10 @@ def build_probes(root, sdk):
 
 
 NEEDS = {'tones': ['tone68k'], 'sleep': ['alarm68k'], 'backlight': [], 'serial': [], 'unix': [], 'card-flags': [], 'databases': [],
-         'ppp': ['ppp68k'], 'modem': ['ppp68k']}
+         'ppp': ['ppp68k'], 'modem': ['ppp68k'], 'irphone': ['ppp68k']}
 RUN = {'tones': check_tones, 'backlight': check_backlight, 'sleep': check_sleep, 'serial': check_serial,
        'unix': check_unix, 'card-flags': check_card_flags, 'databases': check_databases, 'ppp': check_ppp,
-       'modem': check_modem}
+       'modem': check_modem, 'irphone': check_irphone}
 
 
 def main():

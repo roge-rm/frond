@@ -60,6 +60,7 @@
       "infrared": true,
       "bluetooth": true,
       "modem": false,
+      "ir_phone": true,
       "firmware_variants": []
     },
     {
@@ -121,6 +122,7 @@
       "infrared": true,
       "bluetooth": true,
       "modem": false,
+      "ir_phone": true,
       "firmware_variants": [
         {
           "id": "e2-denvfs",
@@ -195,6 +197,7 @@
       "infrared": true,
       "bluetooth": true,
       "modem": false,
+      "ir_phone": true,
       "firmware_variants": []
     },
     {
@@ -256,6 +259,7 @@
       "infrared": false,
       "bluetooth": false,
       "modem": false,
+      "ir_phone": false,
       "firmware_variants": []
     },
     {
@@ -317,6 +321,7 @@
       "infrared": true,
       "bluetooth": true,
       "modem": false,
+      "ir_phone": true,
       "firmware_variants": []
     },
     {
@@ -385,6 +390,7 @@
       "infrared": true,
       "bluetooth": true,
       "modem": false,
+      "ir_phone": true,
       "firmware_variants": []
     },
     {
@@ -446,6 +452,7 @@
       "infrared": true,
       "bluetooth": false,
       "modem": true,
+      "ir_phone": true,
       "firmware_variants": []
     },
     {
@@ -507,6 +514,7 @@
       "infrared": false,
       "bluetooth": false,
       "modem": false,
+      "ir_phone": false,
       "firmware_variants": []
     }
   ]

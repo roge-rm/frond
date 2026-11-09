@@ -344,14 +344,17 @@ static void TestCall() {
     CHECK(answers.size() == 1 && answers[0].size() > 12 && answers[0][12] == 0x00);
 
     // An SNRM for someone else is ignored; ours gets the UA with the agreed speed and our limits,
-    // after a turnaround of at least 10 ms.
+    // after exactly the 1 ms turnaround the guest asks for.
     p.Send(Snrm(p, {0x01, 0x02, 0x03, 0x04}), 10);
     CHECK(p.Collect(30 * ms).empty());
     p.Send(Snrm(p, phoneAddress), 10);
     const uint64_t sent = p.now;
+    CHECK(phone.Lap().ReadyAt() == sent + 1 * ms);
+    CHECK(phone.Available(sent + 1 * ms - 1) == 0 && phone.Available(sent + 1 * ms) > 0);
     auto frames = p.Collect();
     CHECK(frames.size() == 1);
-    CHECK(p.now - sent >= 10 * ms);
+    CHECK(p.now - sent >= 1 * ms);
+    CHECK(phone.ReadyAt() == UINT64_MAX);
     if (frames.size() == 1) {
         const Bytes ua = Cat(Cat(Cat({p.caddr, 0x73}, phoneAddress), p.address),
                              {0x01, 0x01, 0x3f, 0x82, 0x01, 0x01, 0x83, 0x01, 0x3f, 0x84, 0x01, 0x7f, 0x85, 0x01,
@@ -362,7 +365,7 @@ static void TestCall() {
     const IrLap::Link& link = phone.Lap().GetLink();
     CHECK(phone.Lap().Connected());
     CHECK(link.baud == 115200 && link.dataSize == 512 && link.window == 1);
-    CHECK(link.minTurnNs == 10 * ms && link.maxTurnNs == 500 * ms && link.extraBofs == 5);
+    CHECK(link.minTurnNs == 1 * ms && link.maxTurnNs == 500 * ms && link.extraBofs == 5);
     CHECK(link.disconnectNs == 40000 * ms);
 
     // The first poll: RR with F and nr 0, after five extra BOFs.

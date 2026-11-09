@@ -1,0 +1,806 @@
+diff --git a/src/cloudpilot/emulator/hardware/EmHAL.cpp b/src/cloudpilot/emulator/hardware/EmHAL.cpp
+index 545518d..ae92762 100644
+--- a/src/cloudpilot/emulator/hardware/EmHAL.cpp
++++ b/src/cloudpilot/emulator/hardware/EmHAL.cpp
+@@ -13,6 +13,8 @@
+ 
+ #include "EmHAL.h"
+ 
++#include <algorithm>
++
+ #include "EmCommon.h"
+ #include "EmSession.h"
+ #include "EmTransportSerial.h"
+@@ -439,9 +441,23 @@ uint16 EmHAL::GetLEDState(void) {
+     return EmHAL::GetRootHandler()->GetLEDState();
+ }
+ 
++namespace {
++    uint64 wakeAt = ~uint64(0);
++}
++
+ uint32 EmHAL::CyclesToNextInterrupt(uint64 systemCycles) {
+     EmAssert(EmHAL::GetRootHandler());
+-    return EmHAL::GetRootHandler()->CyclesToNextInterrupt(systemCycles);
++    const uint32 next = EmHAL::GetRootHandler()->CyclesToNextInterrupt(systemCycles);
++    if (wakeAt == ~uint64(0)) return next;
++    if (systemCycles >= wakeAt) {
++        wakeAt = ~uint64(0);
++        return next;
++    }
++    return uint32(std::min<uint64>(next, wakeAt - systemCycles));
++}
++
++void EmHAL::WakeAt(uint64 systemCycles) {
++    if (systemCycles < wakeAt) wakeAt = systemCycles;
+ }
+ 
+ void EmHAL::ScaleCycles(uint32 factor) {
+diff --git a/src/cloudpilot/emulator/hardware/EmHAL.h b/src/cloudpilot/emulator/hardware/EmHAL.h
+index f272a95..6af031b 100644
+--- a/src/cloudpilot/emulator/hardware/EmHAL.h
++++ b/src/cloudpilot/emulator/hardware/EmHAL.h
+@@ -89,6 +89,10 @@ class EmHAL {
+     static uint16 GetLEDState(void);
+ 
+     static uint32 CyclesToNextInterrupt(uint64 systemCycles);
++    // A host transport whose bytes become readable at this system cycle: a stopped CPU runs its
++    // idle tasks (and so the UART) by then instead of sleeping on to the next timer interrupt.
++    // One deadline at a time, the earliest; it clears once passed.
++    static void WakeAt(uint64 systemCycles);
+     // Multiplies every saved cycle stamp after the session's counter changed units.
+     static void ScaleCycles(uint32 factor);
+     static bool EnableRAM();
+diff --git a/src/cloudpilot/frond/IrPhoneTransport.h b/src/cloudpilot/frond/IrPhoneTransport.h
+new file mode 100644
+index 0000000..ac9f2ed
+--- /dev/null
++++ b/src/cloudpilot/frond/IrPhoneTransport.h
+@@ -0,0 +1,157 @@
++#ifndef FROND_68K_IR_PHONE_TRANSPORT_H
++#define FROND_68K_IR_PHONE_TRANSPORT_H
++
++// The IR port's transport: a host link (HostTransport68k) or, in phone mode, a mobile phone with
++// a data modem (frondIr::IrPhone) whose calls reach a PPP server and slirp. The guest's IR bytes
++// are raw SIR; the phone is the IrLAP secondary. Its clock is guest time in nanoseconds that never
++// runs backwards, so a session load doesn't upset its timers. All on the emulator thread.
++
++#include <memory>
++#include <string>
++
++#include "EmCPU68K.h"
++#include "EmHAL.h"
++#include "HostTransport.h"
++#include "ir/IrPhone.h"
++#include "modem/PppServer.h"
++#include "net/SlirpIp.h"
++
++class IrPhoneTransport68k : public EmTransportSerial {
++   public:
++    explicit IrPhoneTransport68k(HostLink68k& link) : host(link) {}
++
++    HostTransport68k& Host() { return host; }
++    const HostTransport68k& Host() const { return host; }
++    bool PhoneMode() const { return bool(engine); }
++
++    // Phone mode on or off. Turning it on starts slirp and fails if slirp can't start.
++    bool SetPhoneMode(bool on, std::string& error) {
++        if (on == PhoneMode()) return true;
++        if (!on) {
++            engine.reset();
++            return true;
++        }
++        auto made = std::make_unique<Engine>();
++        if (!made->network.Valid()) {
++            error = "slirp did not start";
++            return false;
++        }
++        engine = std::move(made);
++        credit.Restart();
++        return true;
++    }
++
++    // phone idle, phone linked, phone dialling or phone online SPEED.
++    std::string Describe() const { return engine ? engine->phone.Describe() : "off"; }
++
++    // The phone's IrLAP counters, or off outside phone mode.
++    std::string Stats() const {
++        if (!engine) return "off";
++        const auto& s = engine->phone.Lap().GetStats();
++        return std::string("port=") + (powered ? "open" : "closed") + " frames_in=" + std::to_string(s.framesIn) +
++               " frames_out=" + std::to_string(s.framesOut) + " bad=" + std::to_string(engine->phone.Lap().BadFrames()) +
++               " connects=" + std::to_string(s.connects) + " resent=" + std::to_string(s.resent) +
++               " timeouts=" + std::to_string(s.timeouts);
++    }
++
++    bool Open() override {
++        powered = true;
++        if (!engine) return host.Open();
++        credit.Restart();
++        return true;
++    }
++    bool Close() override {
++        powered = false;
++        return engine ? true : host.Close();
++    }
++
++    bool Read(long& count, void* data) override {
++        if (!engine) return host.Read(count, data);
++        const long n = std::max(0L, std::min(count, credit.Take(config.fBaud)));
++        count = long(engine->phone.Read(static_cast<uint8_t*>(data), size_t(n), Now()));
++        credit -= count;
++        return true;
++    }
++    bool Write(long& count, const void* data) override {
++        if (!engine) return host.Write(count, data);
++        if (powered && count > 0) {
++            engine->phone.Write(static_cast<const uint8_t*>(data), size_t(count), Now());
++            WakeForAnswer();
++        }
++        return true;
++    }
++    bool CanRead() override {
++        if (!engine) return host.CanRead();
++        return powered && engine->phone.Available(Now()) && credit.Take(config.fBaud) > 0;
++    }
++    bool CanWrite() override { return engine ? powered : host.CanWrite(); }
++    size_t BytesPending() override {
++        if (!engine) return host.BytesPending();
++        return powered ? std::min<size_t>(engine->phone.Available(Now()), size_t(credit.Take(config.fBaud))) : 0;
++    }
++
++    void SetConfig(const Config& next) override {
++        EmTransportSerial::SetConfig(next);
++        host.SetConfig(next);
++    }
++    void SetRTS(RTSControl control) override { host.SetRTS(control); }
++    void SetDTR(bool dtr) override { host.SetDTR(dtr); }
++    void SetBreak(bool on) override { host.SetBreak(on); }
++    bool RequiresSync() override { return false; }
++    void OnTransactionStateChange(EmUARTDragonball::TransactionState from,
++                                  EmUARTDragonball::TransactionState to) override {
++        host.OnTransactionStateChange(from, to);
++    }
++
++    // Called between slices with the guest's IR transceiver state, which a session load doesn't
++    // report. With the transceiver off the phone hears nothing, and its link times out.
++    void Service(bool lineDriverOn) {
++        if (!engine) {
++            powered = lineDriverOn;
++            return host.Service(lineDriverOn);
++        }
++        if (lineDriverOn != powered) lineDriverOn ? Open() : Close();
++        engine->phone.Service(Now());
++        WakeForAnswer();
++    }
++
++    // After a session load: no link and no call.
++    void SessionLoaded() {
++        if (engine) engine->phone.Drop(Now());
++        credit.Restart();
++    }
++
++   private:
++    struct Engine {
++        frondNet::SlirpIp network;
++        frondModem::PppServer ppp{network};
++        frondIr::IrPhone phone{ppp};
++    };
++
++    // A guest that sleeps while it waits for the answer wakes when the answer can be read, as the
++    // UART's receive interrupt would, rather than at its next timer tick.
++    void WakeForAnswer() {
++        const uint64_t ready = engine->phone.ReadyAt(), now = Now();
++        if (ready == UINT64_MAX) return;
++        const double wait = ready > now ? double(ready - now) * gSession->GetClocksPerSecond() / 1e9 : 0;
++        EmHAL::WakeAt(cycleMark + uint64_t(wait) + 1);
++    }
++
++    // Guest nanoseconds, carried on across a load that moves the cycle count back. The CPU's own
++    // count, so bytes written mid-slice get the time they were written.
++    uint64_t Now() {
++        const uint64_t cycles = gCPU68K ? gCPU68K->CycleNow() : gSession->GetSystemCycles();
++        if (cycles > cycleMark) clock += double(cycles - cycleMark) * 1e9 / gSession->GetClocksPerSecond();
++        cycleMark = cycles;
++        return uint64_t(clock);
++    }
++
++    HostTransport68k host;
++    std::unique_ptr<Engine> engine;
++    bool powered{false};
++    BaudCredit68k credit;
++    uint64_t cycleMark{0};
++    double clock{0};
++};
++
++#endif
+diff --git a/src/cloudpilot/frond/main.cpp b/src/cloudpilot/frond/main.cpp
+index b7b1c6d..f071108 100644
+--- a/src/cloudpilot/frond/main.cpp
++++ b/src/cloudpilot/frond/main.cpp
+@@ -58,6 +58,7 @@
+ #include "GdbStub.h"
+ #include "HostLink.h"
+ #include "HostTransport.h"
++#include "IrPhoneTransport.h"
+ #include "ModemTransport.h"
+ #include "Lcd.h"
+ #include "Miscellaneous.h"
+@@ -114,7 +115,7 @@ void usage() {
+             "                 [--framebuffer-output PNG] [--input-replay FILE] [--speed original|uncapped]\n"
+             "                 [--contrast 0-100] [--window-scale 1-4] [--no-sound] [--audio-output WAV]\n"
+             "                 [--tone-log] [--serial off|pty|tcp:PORT|unix:PATH|modem]\n"
+-            "                 [--irda off|pty|tcp:PORT|unix:PATH]\n"
++            "                 [--irda off|pty|tcp:PORT|unix:PATH|phone]\n"
+             "                 [--gdb PORT] [--smooth-lcd] [--desktop-socket PATH] [--save-on-disconnect FILE]\n"
+             "                 [--window-fit fit|whole|fill] [--window-background RRGGBB] [--audio-period FRAMES]\n"
+             "FILE is a ROM or a saved session. --run-for runs headless for that many guest seconds.\n"
+@@ -553,7 +554,7 @@ class Runner {
+         desktopMode = bool(options.desktopSocket);
+         // The session owns the transports; they live as long as the process.
+         serialTransport = new ModemTransport68k(serialLink);
+-        irTransport = new HostTransport68k(irLink);
++        irTransport = new IrPhoneTransport68k(irLink);
+         gSession->SetTransportSerial(kUARTSerial, serialTransport);
+         gSession->SetTransportSerial(kUARTIR, irTransport);
+         piezo.Restart(gSession->GetSystemCycles());
+@@ -736,7 +737,7 @@ class Runner {
+         for (auto [link, mode, name] : {make_tuple(&serialLink, options.serial, "serial"),
+                                         make_tuple(&irLink, options.irda, "infrared")}) {
+             string error;
+-            if (link == &serialLink ? !SetSerial(mode, error) : !SetLink(*link, mode, error)) {
++            if (link == &serialLink ? !SetSerial(mode, error) : !SetInfrared(mode, error)) {
+                 cerr << name << ": " << error << endl;
+                 // The desktop runs on with the link off and shows why.
+                 if (!desktopMode) return false;
+@@ -744,22 +745,12 @@ class Runner {
+                 continue;
+             }
+             if (link == &serialLink && serialTransport->ModemMode()) cout << name << ": " << serialTransport->Describe() << endl;
++            else if (link == &irLink && irTransport->PhoneMode()) cout << name << ": " << irTransport->Describe() << endl;
+             else if (link->GetKind() != HostLink68k::Kind::off) cout << name << ": " << link->Describe() << endl;
+         }
+         return true;
+     }
+ 
+-    static bool SetLink(HostLink68k& link, const string& mode, string& error) {
+-        HostLink68k::Kind kind;
+-        uint16_t port;
+-        string path;
+-        if (!HostLink68k::Parse(mode, kind, port, &path)) {
+-            error = "use off, pty, tcp:PORT or unix:PATH";
+-            return false;
+-        }
+-        return link.Open(kind, port, error, path);
+-    }
+-
+     // The serial port's mode: a host link, or modem for the snap-on modem on a device that has one.
+     bool SetSerial(const string& mode, string& error) {
+         if (mode == "modem") {
+@@ -783,6 +774,47 @@ class Runner {
+         return serialLink.Open(kind, port, error, path);
+     }
+ 
++    // The IR port's mode: a host link, or phone for the core's mobile phone on a device that has one.
++    // Palm OS before 3.3 has no IrCOMM, so it can't use the phone.
++    bool SetInfrared(const string& mode, string& error) {
++        if (mode == "phone") {
++            if (!profile->capabilities.irPhone) {
++                error = string(profile->displayName) + " has no infrared phone";
++                return false;
++            }
++            if (!RomHasIrComm()) {
++                error = "the infrared phone needs Palm OS 3.3 or later";
++                return false;
++            }
++            if (!irTransport->SetPhoneMode(true, error)) return false;
++            irLink.Close();
++            return true;
++        }
++        HostLink68k::Kind kind;
++        uint16_t port;
++        string path;
++        if (!HostLink68k::Parse(mode, kind, port, &path)) {
++            error = "use off, pty, tcp:PORT, unix:PATH or phone";
++            return false;
++        }
++        irTransport->SetPhoneMode(false, error);
++        return irLink.Open(kind, port, error, path);
++    }
++
++    // Palm OS 3.3 or later in the running ROM.
++    static bool RomHasIrComm() {
++        const auto rom = gSession->GetRomImage();
++        EmROMReader reader(rom.second, rom.first);
++        if (!reader.Read()) return false;
++        int major, minor, fix, stage, build;
++        reader.Version(major, minor, fix, stage, build);
++        return major > 3 || (major == 3 && minor >= 3);
++    }
++
++    string InfraredState() const {
++        return irTransport->PhoneMode() ? irTransport->Describe() : LinkState(irLink, irTransport->Host());
++    }
++
+     // A new modem, or one after a load, takes the guest's DTR as it is now.
+     void SyncDTR() {
+         serialTransport->SyncDTR(EmHAL::GetDTR(0));
+@@ -795,7 +827,7 @@ class Runner {
+     // Host bytes in and out, and the transports following the guest's line drivers.
+     void ServiceLinks() {
+         if (serialLink.GetKind() == HostLink68k::Kind::off && irLink.GetKind() == HostLink68k::Kind::off &&
+-            !serialTransport->ModemMode())
++            !serialTransport->ModemMode() && !irTransport->PhoneMode())
+             return;
+         serialLink.Poll();
+         irLink.Poll();
+@@ -1050,14 +1082,14 @@ class Runner {
+             const bool serial = command == "serial-mode";
+             string mode, error;
+             if (!(words >> mode))
+-                return void(cout << "usage: " << command << " off|pty|tcp:PORT|unix:PATH" << (serial ? "|modem" : "") << endl);
+-            if (serial ? !SetSerial(mode, error) : !SetLink(irLink, mode, error))
++                return void(cout << "usage: " << command << " off|pty|tcp:PORT|unix:PATH" << (serial ? "|modem" : "|phone") << endl);
++            if (serial ? !SetSerial(mode, error) : !SetInfrared(mode, error))
+                 return void(cout << (serial ? "serial: " : "infrared: ") << "error " << error << endl);
+-            cout << (serial ? "serial: " + SerialState() : "infrared: " + LinkState(irLink, *irTransport)) << endl;
++            cout << (serial ? "serial: " + SerialState() : "infrared: " + InfraredState()) << endl;
+         } else if (command == "serial-state") {
+             cout << "serial: " << SerialState() << endl;
+         } else if (command == "irda-state") {
+-            cout << "infrared: " << LinkState(irLink, *irTransport) << endl;
++            cout << "infrared: " << InfraredState() << endl;
+         } else if (command == "hotsync") {
+             // The cradle's HotSync button, pressed and let go.
+             gSession->QueueButtonEvent(ButtonEvent(ButtonEvent::Button::cradle, ButtonEvent::Type::press));
+@@ -1199,7 +1231,7 @@ class Runner {
+     // events. After quit, the core leaves once the reply is sent.
+     void PollDesktop() {
+         StateChanged("serial", lastSerial, SerialDescription());
+-        StateChanged("infrared", lastInfrared, LinkDescription(irLink, infraredError));
++        StateChanged("infrared", lastInfrared, InfraredDescription());
+         DesktopChannel::Request request;
+         // One request at a time: the next waits while one waits for the guest's event loop.
+         switch (guestCall ? DesktopChannel::Poll::idle : desktop->Receive(request)) {
+@@ -1266,6 +1298,10 @@ class Runner {
+         return serialTransport->ModemMode() ? serialTransport->Describe() : LinkDescription(serialLink, serialError);
+     }
+ 
++    string InfraredDescription() const {
++        return irTransport->PhoneMode() ? irTransport->Describe() : LinkDescription(irLink, infraredError);
++    }
++
+     static string LinkDescription(const HostLink68k& link, const string& error) {
+         const auto state = link.Describe();
+         return state == "off" && !error.empty() ? "off " + error : state;
+@@ -1419,7 +1455,7 @@ class Runner {
+             return {true, "hotsync", "HotSync button pressed."};
+         }
+         if (command == "serial-state") return {true, "serial", SerialDescription()};
+-        if (command == "irda-state") return {true, "infrared", LinkDescription(irLink, infraredError)};
++        if (command == "irda-state") return {true, "infrared", InfraredDescription()};
+         if (command == "serial-mode" || command == "irda-mode") {
+             const bool serial = command == "serial-mode";
+             HostLink68k::Kind kind;
+@@ -1431,20 +1467,31 @@ class Runner {
+                 if (!SetSerial(argument, serialError)) return {false, "serial", serialError};
+                 return {true, "serial", SerialDescription()};
+             }
++            if (!serial && argument == "phone") {
++                infraredError.clear();
++                if (!profile->capabilities.irPhone)
++                    return {false, "unsupported", string(profile->displayName) + " has no infrared phone."};
++                if (!RomHasIrComm()) return {false, "unsupported", "The infrared phone needs Palm OS 3.3 or later."};
++                if (!SetInfrared(argument, infraredError)) return {false, "infrared", infraredError};
++                return {true, "infrared", InfraredDescription()};
++            }
+             if (!HostLink68k::Parse(argument, kind, port, &path))
+-                return {false, "argument", serial ? "Use off, pty, tcp:PORT, unix:PATH or modem." : "Use off, pty, tcp:PORT or unix:PATH."};
++                return {false, "argument", serial ? "Use off, pty, tcp:PORT, unix:PATH or modem." : "Use off, pty, tcp:PORT, unix:PATH or phone."};
+             HostLink68k& link = serial ? serialLink : irLink;
+             string& error = serial ? serialError : infraredError;
+             error.clear();
+             if (serial) serialTransport->SetModemMode(false, error);
++            else irTransport->SetPhoneMode(false, error);
+             // A failed open leaves the link off, and its state shows why.
+             if (!link.Open(kind, port, error, path)) return {false, serial ? "serial" : "infrared", error};
+             return {true, serial ? "serial" : "infrared", link.Describe()};
+         }
+         if (command == "serial-stats") return {true, "serial", serialTransport->Stats()};
+-        if (command == "irda-stats")
++        if (command == "irda-stats") {
++            if (irTransport->PhoneMode()) return {true, "infrared", irTransport->Stats()};
+             return {true, "infrared", "rx=" + to_string(irLink.Received()) + " tx=" + to_string(irLink.Sent()) +
+-                                          " port=" + (irTransport->IsOpen() ? "open" : "closed")};
++                                          " port=" + (irTransport->Host().IsOpen() ? "open" : "closed")};
++        }
+         if (command == "speed-state") return {true, "speed", SpeedState()};
+         if (command == "speed") {
+             if (argument != "original" && argument != "uncapped") return {false, "argument", "Use original or uncapped."};
+@@ -1614,6 +1661,7 @@ class Runner {
+             }
+             piezo.Restart(gSession->GetSystemCycles());
+             serialTransport->SessionLoaded();
++            irTransport->SessionLoaded();
+             SyncDTR();
+             return void(cout << "session refused: " << error << "; machine restored" << endl);
+         }
+@@ -1622,7 +1670,13 @@ class Runner {
+         SetSpeed(speed);
+         piezo.Restart(gSession->GetSystemCycles());
+         serialTransport->SessionLoaded();
++        irTransport->SessionLoaded();
+         SyncDTR();
++        // A session on an older ROM can't keep the phone.
++        if (irTransport->PhoneMode() && !RomHasIrComm()) {
++            irTransport->SetPhoneMode(false, infraredError);
++            infraredError = "the infrared phone needs Palm OS 3.3 or later";
++        }
+         cout << "loaded session " << path << endl;
+     }
+ 
+@@ -1963,7 +2017,7 @@ class Runner {
+     string lastSerial, lastInfrared, serialError, infraredError;
+     HostLink68k serialLink, irLink;
+     ModemTransport68k* serialTransport{nullptr};
+-    HostTransport68k* irTransport{nullptr};
++    IrPhoneTransport68k* irTransport{nullptr};
+ };
+ 
+ bool parseOptions(int argc, char** argv, Options& options) {
+@@ -2018,7 +2072,8 @@ bool parseOptions(int argc, char** argv, Options& options) {
+             HostLink68k::Kind kind;
+             uint16_t port;
+             string path;
+-            if (!v || (!(arg == "--serial" && string(v) == "modem") && !HostLink68k::Parse(v, kind, port, &path)))
++            if (!v || (!(arg == "--serial" && string(v) == "modem") && !(arg == "--irda" && string(v) == "phone") &&
++                       !HostLink68k::Parse(v, kind, port, &path)))
+                 return false;
+             (arg == "--serial" ? options.serial : options.irda) = v;
+         } else if (arg == "--gdb") {
+diff --git a/src/common/ir/IrLap.cpp b/src/common/ir/IrLap.cpp
+index 13cf6c7..dd08302 100644
+--- a/src/common/ir/IrLap.cpp
++++ b/src/common/ir/IrLap.cpp
+@@ -200,7 +200,9 @@ void IrLap::Snrm(const Bytes& frame, uint64_t now) {
+     next.dataSize = dataSizes[std::max(0, Highest(Mask(frame, 11, piDataSize, 0x01), 6))];
+     next.window = 1 + std::max(0, Highest(Mask(frame, 11, piWindow, 0x01), 7));
+     next.maxTurnNs = maxTurns[std::max(0, Highest(Mask(frame, 11, piMaxTurn, 0x01), 4))];
+-    next.minTurnNs = std::max(options.minTurnFloorNs, minTurns[std::max(0, Highest(Mask(frame, 11, piMinTurn, 0x01), 8))]);
++    // Answers wait exactly the guest's own minimum turnaround: Palm OS 3.5 asks for 1 ms and 4.1
++    // for 5 ms, and both stop listening if an answer comes much later.
++    next.minTurnNs = minTurns[std::max(0, Highest(Mask(frame, 11, piMinTurn, 0x01), 8))];
+     const unsigned bofs = bofCounts[std::max(0, Highest(Mask(frame, 11, piBofs, 0x01), 8))];
+     // The extra BOF count is given for 115200 and scales with the speed.
+     next.extraBofs = unsigned(uint64_t(bofs) * next.baud / 115200);
+diff --git a/src/common/ir/IrLap.h b/src/common/ir/IrLap.h
+index 51f0ad1..9031bac 100644
+--- a/src/common/ir/IrLap.h
++++ b/src/common/ir/IrLap.h
+@@ -41,9 +41,6 @@ class IrLap {
+         std::string nickname = "Frond Phone";
+         // Baud rates offered in the UA, as the IrLAP bit mask (bit 5 is 115200).
+         uint8_t baudMask = 0x3f;
+-        // The least time between the guest's poll and our answer once linked, whatever it asks
+-        // for: Palm OS 3.5 and 4.1 ask for 1 or 5 ms but miss answers sooner than about 10 ms.
+-        uint64_t minTurnFloorNs = 10000000;
+     };
+ 
+     // Negotiated link parameters in use (IrLAP 1.1 section 6.6).
+@@ -69,6 +66,8 @@ class IrLap {
+     // after the frame that polled for it.
+     size_t Read(uint8_t* data, size_t max, uint64_t now);
+     size_t Available(uint64_t now) const;
++    // When bytes queued for the guest can be read, or UINT64_MAX with none queued.
++    uint64_t ReadyAt() const { return out.size() == outPos ? UINT64_MAX : holdUntil; }
+     void Service(uint64_t now);
+     // After a session load: back to NDM with no link and nothing queued.
+     void Drop(uint64_t now);
+diff --git a/src/common/ir/IrPhone.cpp b/src/common/ir/IrPhone.cpp
+index 548f5c4..e735549 100644
+--- a/src/common/ir/IrPhone.cpp
++++ b/src/common/ir/IrPhone.cpp
+@@ -13,6 +13,15 @@ IrPhone::IrPhone(frondModem::ModemLine& line, Options options)
+       ias(lmp),
+       comm(lmp, ias, *this, options.lap.nickname) {}
+ 
++std::string IrPhone::Describe() const {
++    switch (modem.GetState()) {
++        case HayesModem::State::Dialling: return "phone dialling";
++        case HayesModem::State::Online:
++        case HayesModem::State::OnlineCommand: return "phone online " + std::to_string(modem.LineSpeed());
++        default: return lap.Connected() ? "phone linked" : "phone idle";
++    }
++}
++
+ void IrPhone::Service(uint64_t now) {
+     modem.Service(now);
+     lap.Service(now);
+diff --git a/src/common/ir/IrPhone.h b/src/common/ir/IrPhone.h
+index c3864da..cfbb2a5 100644
+--- a/src/common/ir/IrPhone.h
++++ b/src/common/ir/IrPhone.h
+@@ -8,6 +8,7 @@
+ 
+ #include <cstddef>
+ #include <cstdint>
++#include <string>
+ 
+ #include "Ias.h"
+ #include "IrComm.h"
+@@ -30,9 +31,12 @@ class IrPhone : private IrCommPort {
+     void Write(const uint8_t* data, size_t size, uint64_t now) { lap.Receive(data, size, now); }
+     size_t Read(uint8_t* data, size_t max, uint64_t now) { return lap.Read(data, max, now); }
+     size_t Available(uint64_t now) const { return lap.Available(now); }
++    uint64_t ReadyAt() const { return lap.ReadyAt(); }
+     void Service(uint64_t now);
+     // After a session load: no link, no call.
+     void Drop(uint64_t now) { lap.Drop(now); }
++    // phone idle, phone linked (IrLAP up), phone dialling or phone online SPEED.
++    std::string Describe() const;
+ 
+     const IrLap& Lap() const { return lap; }
+     const IrComm& Comm() const { return comm; }
+diff --git a/src/uarm/Makefile b/src/uarm/Makefile
+index b2bce8d..a2ae171 100644
+--- a/src/uarm/Makefile
++++ b/src/uarm/Makefile
+@@ -162,8 +162,9 @@ SOURCE_CXX_TEST =						\
+ 	test/scheduler.cpp 					\
+ 	test/queue.cpp
+ 
+-OBJECTS_EXTRA_NATIVE = ../common/libcommon.a
+-OBJECTS_EXTRA_TEST = ../common/libcommon.a
++# The infrared phone's slirp side (common/net), ahead of libcommon.a.
++OBJECTS_EXTRA_NATIVE = ../common/libcommon-net.a ../common/libcommon.a
++OBJECTS_EXTRA_TEST = ../common/libcommon-net.a ../common/libcommon.a
+ OBJECTS_EXTRA_EMCC = ../common/libcommon-wasm.a
+ 
+ # Fast engine: FROND_DYNARMIC_SRC is a patched Dynarmic source tree and FROND_DYNARMIC_LIBS its
+diff --git a/src/uarm/native/DesktopControl.h b/src/uarm/native/DesktopControl.h
+index c41bde5..ab243c1 100644
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -310,6 +310,7 @@ class DesktopControl {
+             if (!ctx.infrared || !caps.infrared)
+                 return {false,"unsupported","This device has no infrared endpoint."};
+             auto* machine=static_cast<SocPXA*>(ctx.soc);const auto state=pxaUartIrState(machine->GetIrUart());
++            if (ctx.infrared->PhoneMode()) return {true,"infrared",ctx.infrared->PhoneStats()};
+             const auto c=ctx.infrared->GetCounters();
+             return {true,"infrared", "rx="+std::to_string(c.received)+" tx="+std::to_string(c.sent)+
+                 " rx_drop="+std::to_string(ctx.infrared->DroppedReceive())+" tx_drop="+std::to_string(ctx.infrared->DroppedTransmit())+
+@@ -321,8 +322,13 @@ class DesktopControl {
+         if (command == "irda-mode") {
+             if (!caps.infrared)
+                 return {false,"unsupported","This device has no infrared port."};
++            if (ctx.infrared && path == "phone") {
++                if (!caps.irPhone) return {false,"unsupported","This device has no infrared phone."};
++                const bool ok=ctx.infrared->StartPhone(static_cast<SocPXA*>(ctx.soc),ctx.infraredError);
++                return {ok,"infrared",ok?ctx.infrared->Describe():ctx.infraredError};
++            }
+             HostSerial::Config config;
+-            if (!ctx.infrared || !HostSerial::Parse(path,config)) return {false,"argument","Use off, pty, tcp:PORT or unix:PATH."};
++            if (!ctx.infrared || !HostSerial::Parse(path,config)) return {false,"argument","Use off, pty, tcp:PORT, unix:PATH or phone."};
+             const bool ok=ctx.infrared->Start(static_cast<SocPXA*>(ctx.soc),config,ctx.infraredError);
+             return {ok,"infrared",ok?ctx.infrared->Describe():ctx.infraredError};
+         }
+diff --git a/src/uarm/native/main.cpp b/src/uarm/native/main.cpp
+index 7575842..56b02b8 100644
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -427,8 +427,9 @@ namespace {
+             return false;
+         }
+         HostSerial::Config infraredConfig;
+-        if (options.infrared && !HostSerial::Parse(*options.infrared,infraredConfig)) {
+-            cerr << "--irda must be off, pty, tcp:PORT or unix:PATH" << endl; return false;
++        const bool infraredPhone = options.infrared && *options.infrared == "phone";
++        if (options.infrared && !infraredPhone && !HostSerial::Parse(*options.infrared,infraredConfig)) {
++            cerr << "--irda must be off, pty, tcp:PORT, unix:PATH or phone" << endl; return false;
+         }
+         HostSerial::Config usbConfig;
+         if (options.usb && !HostSerial::Parse(*options.usb, usbConfig)) {
+@@ -819,7 +820,13 @@ namespace {
+         }
+         HostInfrared infrared;
+         commandContext.infrared = &infrared;
+-        if (infraredConfig.kind != HostSerial::Kind::off) {
++        if (infraredPhone) {
++            if (!capabilities.irPhone) commandContext.infraredError = "This device has no infrared phone.";
++            if (!capabilities.irPhone || !infrared.StartPhone(static_cast<SocPXA*>(soc),commandContext.infraredError)) {
++                cerr << "infrared: " << commandContext.infraredError << endl; return false;
++            }
++            cout << "infrared: " << infrared.Describe() << endl;
++        } else if (infraredConfig.kind != HostSerial::Kind::off) {
+             if (!capabilities.infrared ||
+                 !infrared.Start(static_cast<SocPXA*>(soc),infraredConfig,commandContext.infraredError)) {
+                 cerr << "infrared: " << commandContext.infraredError << endl; return false;
+@@ -1029,7 +1036,7 @@ namespace {
+                     lowLatencyActive = queueOnlyHadSound && soc->PcmOutputEnabled() &&
+                                        audioQueuePendingSamples(audioQueue) > 0 && now - queueOnlySoundAt < 100000;
+                 }
+-                mainLoop.SetTimesliceUsec(infrared.GetConfig().kind!=HostSerial::Kind::off ? 1000 :
++                mainLoop.SetTimesliceUsec(infrared.Active() ? 1000 :
+                     lowLatencyActive ? 1000000 / 120 : 1000000 / MAIN_LOOP_FPS);
+ 
+                 if (!headless && lowLatencyActive) {
+@@ -1459,8 +1466,8 @@ int main(int argc, char** argv) {
+         .metavar("<off|/controller/socket>");
+ 
+     program.add_argument("--irda")
+-        .help("connect infrared SIR bytes to a host PTY, loopback TCP listener or Unix socket; exclusive with keyboard; default off")
+-        .metavar("<off|pty|tcp:PORT|unix:PATH>");
++        .help("connect infrared SIR bytes to a host PTY, loopback TCP listener or Unix socket, or phone for the core's mobile phone; exclusive with keyboard; default off")
++        .metavar("<off|pty|tcp:PORT|unix:PATH|phone>");
+ 
+     program.add_argument("--usb")
+         .help("connect the TX USB HotSync port to a host PTY (pty) or a TCP listener on 127.0.0.1 "
+diff --git a/src/uarm/uarm/HostInfrared.cpp b/src/uarm/uarm/HostInfrared.cpp
+index 77864c7..5cbfd3c 100644
+--- a/src/uarm/uarm/HostInfrared.cpp
++++ b/src/uarm/uarm/HostInfrared.cpp
+@@ -4,8 +4,25 @@
+ #include "pxa_UART.h"
+ #include <deque>
+ #include <algorithm>
++#include "ir/IrPhone.h"
++#include "modem/PppServer.h"
++#include "net/SlirpIp.h"
+ struct HostInfrared::Impl {
++    struct Phone {
++        frondNet::SlirpIp network;
++        frondModem::PppServer ppp{network};
++        frondIr::IrPhone ir{ppp};
++    };
+     SocPXA* soc{};
++    std::unique_ptr<Phone> phone;
++    // Guest nanoseconds for the phone, carried on across a load that moves the clock back.
++    uint64_t clock{},clockMark{};
++    uint64_t Now() {
++        const uint64_t t=soc?soc->GetTime():0;
++        if(t>clockMark)clock+=t-clockMark;
++        clockMark=t;
++        return clock;
++    }
+     HostByteLink link;
+     HostSerial::Config config;
+     uint64_t dropped{},discarded{};
+@@ -30,11 +47,14 @@ struct HostInfrared::Impl {
+     static uint_fast16_t Read(void* context) {
+         auto& s=*static_cast<Impl*>(context);
+         uint8_t value;
++        if(s.phone) return s.phone->ir.Read(&value,1,s.Now())==1 ? value : UART_CHAR_NONE;
+         return s.link.Receive(&value,1)==1 ? value : UART_CHAR_NONE;
+     }
+     static void Write(uint_fast16_t value,void* context) {
+         auto& s=*static_cast<Impl*>(context);
+         if (value&~0xffu) { ++s.dropped; return; }
++        // The UART paced this byte, so now is when its last bit went out.
++        if (s.phone) { const uint8_t byte=uint8_t(value); s.phone->ir.Write(&byte,1,s.Now()); return; }
+         const auto generation=s.link.PeerGeneration();
+         if(!s.transmit.empty() && s.transmitPeer!=generation){s.dropped+=s.transmit.size();s.transmit.clear();}
+         if(!s.link.Connected()){++s.dropped;return;}
+@@ -46,16 +66,20 @@ struct HostInfrared::Impl {
+         // the source guest has finished its transmit-to-receive turnaround.
+     }
+     static bool Pending(void* context) {
+-        return static_cast<Impl*>(context)->link.PendingReceive()!=0;
++        auto& s=*static_cast<Impl*>(context);
++        if (s.phone) return s.phone->ir.Available(s.Now())!=0;
++        return s.link.PendingReceive()!=0;
+     }
+     static void ModeChanged(void* context) {
+-        auto& s=*static_cast<Impl*>(context);if (!s.soc) return;
++        auto& s=*static_cast<Impl*>(context);if (!s.soc || s.phone) return;
+         const auto state=pxaUartIrState(s.soc->GetIrUart());
+         const uint64_t tag=(uint64_t(state.baud)<<8)|(state.lcr&0x3f);
+         s.link.SetReceiveWindow(s.soc->IrPowerEnabled() && state.receive,tag);
+     }
+     static void Replaced(void* context) {
+         auto& s=*static_cast<Impl*>(context);
++        // The phone loses its link and call, as after a reset, sleep or load.
++        if (s.phone) { s.phone->ir.Drop(s.Now()); return; }
+         // Closing the peer, rather than just clearing the userspace queues,
+         // prevents old kernel-buffered bytes entering the new guest timeline.
+         s.link.Close();s.transmit.clear();s.restart=true;
+@@ -68,6 +92,7 @@ bool HostInfrared::Start(SocPXA* soc,const HostSerial::Config& config,std::strin
+     // old peer and stay the guest's, as when a load replaces the peer. Taking the hooks again
+     // would be refused until the guest had read them.
+     if (impl->soc && impl->soc==soc && config.kind!=HostSerial::Kind::off) {
++        impl->phone.reset();
+         impl->link.Close();impl->transmit.clear();impl->restart=false;impl->error.clear();
+         error.clear();impl->dropped=impl->discarded=0;impl->config={};
+         if (!impl->link.Open(config,error,true)) {Stop();return false;}
+@@ -88,15 +113,55 @@ bool HostInfrared::Start(SocPXA* soc,const HostSerial::Config& config,std::strin
+     impl->config=impl->link.GetConfig();
+     return true;
+ }
++bool HostInfrared::StartPhone(SocPXA* soc,std::string& error) {
++    error.clear();
++    if (!soc) {error="Infrared needs a Palm TX or Tungsten E2.";return false;}
++    auto phone=std::make_unique<Impl::Phone>();
++    if (!phone->network.Valid()) {error="slirp did not start";return false;}
++    if (impl->phone && impl->soc==soc) return true;
++    // A host endpoint on the same machine hands its hooks over, as Start does between endpoints.
++    if (impl->soc==soc) {
++        impl->link.Close();impl->transmit.clear();impl->restart=false;impl->error.clear();
++        impl->dropped=impl->discarded=0;impl->config={};
++    } else {
++        Stop();impl->dropped=impl->discarded=0;
++        IrHostHooks hooks{impl.get(),Impl::Read,Impl::Write,Impl::Pending,Impl::Replaced,Impl::ModeChanged};
++        if (!soc->SetIrHostHooks(&hooks)) {
++            error="Infrared UART is busy; detach the keyboard, or wait for the Palm to finish sending.";return false;
++        }
++        impl->soc=soc;
++    }
++    impl->clockMark=soc->GetTime();
++    impl->phone=std::move(phone);
++    return true;
++}
++bool HostInfrared::PhoneMode() const {return bool(impl->phone);}
++bool HostInfrared::Active() const {return impl->phone || impl->config.kind!=HostSerial::Kind::off;}
++std::string HostInfrared::PhoneStats() const {
++    if (!impl->phone) return "off";
++    const auto& lap=impl->phone->ir.Lap();const auto& s=lap.GetStats();
++    return "frames_in="+std::to_string(s.framesIn)+" frames_out="+std::to_string(s.framesOut)+
++        " bad="+std::to_string(lap.BadFrames())+" connects="+std::to_string(s.connects)+
++        " resent="+std::to_string(s.resent)+" timeouts="+std::to_string(s.timeouts);
++}
+ void HostInfrared::Stop() {
+     if (impl->soc) impl->soc->SetIrHostHooks(nullptr);
++    impl->phone.reset();
+     impl->link.Close();impl->transmit.clear();impl->soc=nullptr;impl->config={};impl->restart=false;impl->error.clear();
+ }
+ void HostInfrared::Service() {
+     auto* soc=impl->soc;
+     if (!soc || soc->HostIoPaused()) return;
+     if (soc->PowerSleeping()) {
+-        if (impl->link.IsOpen()) Impl::Replaced(impl.get());
++        if (!impl->phone && impl->link.IsOpen()) Impl::Replaced(impl.get());
++        return;
++    }
++    if (impl->phone) {
++        const uint64_t now=impl->Now();
++        impl->phone->ir.Service(now);
++        // Wake the UART once an answer's turnaround time has passed.
++        if (soc->IrPowerEnabled() && pxaUartIrReceiveEnabled(soc->GetIrUart()) && impl->phone->ir.Available(now))
++            pxaUartKick(soc->GetIrUart());
+         return;
+     }
+     if (impl->restart) {
+@@ -123,6 +188,7 @@ uint64_t HostInfrared::DroppedReceive() const {return impl->discarded+impl->link
+ size_t HostInfrared::PendingReceive() const {return impl->link.PendingReceive();}
+ HostSerial::Counters HostInfrared::GetCounters() const {return impl->link.GetCounters();}
+ std::string HostInfrared::Describe() const {
++    if (impl->phone) return impl->phone->ir.Describe();
+     if (impl->config.kind==HostSerial::Kind::off) return impl->error.empty()?"off":"off error: "+impl->error;
+     return HostSerial::Format(impl->config)+" "+impl->link.Endpoint()+
+         (impl->link.Connected()?" connected":" waiting")+
+diff --git a/src/uarm/uarm/HostInfrared.h b/src/uarm/uarm/HostInfrared.h
+index 7d6e12a..f37a718 100644
+--- a/src/uarm/uarm/HostInfrared.h
++++ b/src/uarm/uarm/HostInfrared.h
+@@ -6,6 +6,8 @@
+ #include "HostSerial.h"
+ class SocPXA;
+ // A SIR byte endpoint. The guest owns IrLAP, IAS, TinyTP and OBEX.
++// Or, in phone mode, the core's mobile phone (frondIr::IrPhone, the IrLAP secondary) with PPP
++// and slirp behind its modem, on guest time.
+ // All calls run on the emulation thread; HostByteLink owns the host worker.
+ class HostInfrared {
+  public:
+@@ -14,7 +16,14 @@ class HostInfrared {
+     HostInfrared(const HostInfrared&)=delete;
+     HostInfrared& operator=(const HostInfrared&)=delete;
+     bool Start(SocPXA* soc,const HostSerial::Config& config,std::string& error);
++    // The phone in place of a host endpoint; Start or Stop ends it.
++    bool StartPhone(SocPXA* soc,std::string& error);
+     void Stop();
++    bool PhoneMode() const;
++    // A host endpoint or the phone is on the IR port.
++    bool Active() const;
++    // The phone's IrLAP counters.
++    std::string PhoneStats() const;
+     void Service();
+     HostSerial::Config GetConfig() const;
+     std::string Describe() const;

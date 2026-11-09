@@ -357,6 +357,19 @@ def check_arm(core, session, root):
                      copy) if copy.is_dir() else copy.parent / copy.stem / (copy.stem + '.frond')
         common(c, work, device, unsupported, saved)
         c.fails('serial-mode', 'modem', code='argument')  # the snap-on modem is frond-68k's
+        # The infrared phone takes the IR port, and the IR keyboard and the phone keep each other out.
+        c.events.clear()
+        assert c.ok('irda-mode', 'phone', code='infrared') == 'phone idle'
+        assert c.ok('irda-state', code='infrared') == 'phone idle'
+        assert c.ok('irda-stats', code='infrared').startswith('frames_in=0 ')
+        c.ok('speed-state')
+        assert ('infrared', 'phone idle') in c.events, c.events
+        c.fails('keyboard-attach', 'on', code='infrared')
+        assert c.ok('irda-mode', 'pty', code='infrared').startswith('pty /dev/pts/')
+        assert c.ok('irda-mode', 'off', code='infrared') == 'off'
+        assert c.ok('keyboard-attach', 'on', code='keyboard') == 'attached'
+        c.fails('irda-mode', 'phone', code='infrared')
+        assert c.ok('keyboard-attach', 'off', code='keyboard') == 'detached'
         if not copy.is_dir():
             # Saving back to the lone file goes to the folder it was loaded into and leaves the file as it was.
             before, stamp = copy.read_bytes(), saved.stat().st_mtime_ns
@@ -596,6 +609,16 @@ def check_68k(core, rom, root):
         stats = dict(word.split('=') for word in text.split())
         assert stats['dtr_rises'] == stats['dtr_drops'], stats
         assert c.ok('serial-mode', 'off', code='serial') == 'off'
+        # The infrared phone takes the IR port's place, and a link takes it back.
+        c.events.clear()
+        assert c.ok('irda-mode', 'phone', code='infrared') == 'phone idle'
+        assert c.ok('irda-state', code='infrared') == 'phone idle'
+        assert c.ok('irda-stats', code='infrared').startswith('port=')
+        assert c.ok('irda-mode', 'pty', code='infrared').startswith('pty /dev/pts/')
+        assert c.ok('irda-mode', 'phone', code='infrared') == 'phone idle'
+        c.ok('speed-state')
+        assert ('infrared', 'phone idle') in c.events, c.events
+        assert c.ok('irda-mode', 'off', code='infrared') == 'off'
         # The IIIx's own: speed, contrast, backlight, launch. The cradle HotSync button is the row above.
         c.ok('speed', 'uncapped', code='speed')
         assert c.ok('speed-state').endswith('uncapped')
@@ -638,6 +661,13 @@ def check_68k(core, rom, root):
     finally:
         shutil.rmtree(short, ignore_errors=True)
     assert bad.returncode != 0 and 'cannot connect' in bad.stderr, bad.stderr
+    # Palm OS 3.1 has no IrCOMM, so frond-68k refuses the infrared phone there.
+    old = palm_boot.palm_images() / 'Palm/IIIx/Palm-IIIx-3.1-en.rom'
+    if old.is_file():
+        refused = subprocess.run([str(core), '--rom', str(old), '--device', 'palm-iiix', '--irda', 'phone', '--run-for', '1'],
+                                 capture_output=True, text=True, timeout=60,
+                                 env=dict(os.environ, SDL_VIDEODRIVER='dummy', SDL_AUDIODRIVER='dummy'))
+        assert refused.returncode != 0 and 'needs Palm OS 3.3 or later' in refused.stderr, refused.stderr
     both = subprocess.run([str(core), str(saved), '--run-for', '1', '--desktop-socket', 'x'],
                           capture_output=True, text=True, timeout=60)
     assert both.returncode == 2, both.stderr

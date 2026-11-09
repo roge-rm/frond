@@ -55,7 +55,7 @@ A `DeviceProfile5` has these fields. The name is what sessions, settings, the co
 | `detect`, `companyId`, `halId` | How firmware is recognised: `cardHeader` (the Palm card header's company and HAL IDs, company 0 matches any), `norSize`, or `none` |
 | `board` | Which board model runs it. `none` means no runner can start it |
 | `art` | Which button bar and silkscreen it gets |
-| `capabilities` | `network`, `keyboard`, `serial`, `usb`, `fastAudio`, `infrared`, `bluetooth`, `sound`, `microphone`, `backgroundPanel`, `modem` (see Peripherals) |
+| `capabilities` | `network`, `keyboard`, `serial`, `usb`, `fastAudio`, `infrared`, `bluetooth`, `sound`, `microphone`, `backgroundPanel`, `modem`, `irPhone` (see Peripherals) |
 | `norSize`, `nandSize` | Exact NOR size and raw NAND size including spare bytes. Zero for no fixed size or no NAND |
 | `minRam`, `maxRam` | Powers of two, in bytes |
 | `defaultDisplay`, `displayModes` | Default `DisplayMode` and a mask with a bit per allowed mode. The numbers are saved in sessions |
@@ -102,6 +102,7 @@ A `DeviceProfile5` has these fields. The name is what sessions, settings, the co
 | `fastAudio` | yes | yes | no | no | no |
 | `microphone`, `backgroundPanel` | no | no | no | yes | no |
 | `modem` | no | no | no | no | yes |
+| `irPhone` | yes | yes | yes | yes | yes |
 | Camera, Hold | no, no | no, no | camera present (no sensor, stays off), no | no, Hold switch works | no, no |
 | Home and Menu taps | Menu 54,466 | 27,351 and 27,405 | 23,352 and 23,412 | none (Home key F6) | none |
 | `setup`, `launcher` | `tx`, `wallpaper` | `e2`, `wallpaper-upper` | `zire`, `wallpaper` | `tg50`, `tg50-clie` | `iiix`, `iiix` |
@@ -179,7 +180,7 @@ The Fast engine is a JIT (Dynarmic). A new board runs in it when these hold:
 
 - The JIT keeps copies of code. Anything that changes guest code from the host (PACE patching, peephole patches, reset, session load) has to clear it through `jitClear`. Guest writes to translated RAM pages drop the code by themselves.
 - Instructions the JIT can't run, the PCs of hooks and watched sites go to the interpreter (`cpuJitPlain`). A new hook that changes instructions needs the same rule.
-- `capabilities.backgroundPanel` (the TG50) keeps the machine running without drawing while the device menu is open in the background, with its audio output fenced. `capabilities.microphone` also fences the microphone and audio output during checkpointed guest work. Other boards leave both off. `capabilities.modem` (the IIIx) lets `--serial modem` put the core's snap-on Hayes modem on the serial port.
+- `capabilities.backgroundPanel` (the TG50) keeps the machine running without drawing while the device menu is open in the background, with its audio output fenced. `capabilities.microphone` also fences the microphone and audio output during checkpointed guest work. Other boards leave both off. `capabilities.modem` (the IIIx) lets `--serial modem` put the core's snap-on Hayes modem on the serial port. `capabilities.irPhone` lets `--irda phone` put the core's mobile phone on the IR port.
 - Run `make test-jit-differential` after any CPU change. It compares the JIT with the interpreter on random machine states and blocks. `make test-jit-overshoot` checks how far a run can pass its cycle budget.
 - Smoke the device in Fast (`FROND_CORE=build/frond-jit tests/smoke.py run DEVICE`, see Smoke and setup).
 

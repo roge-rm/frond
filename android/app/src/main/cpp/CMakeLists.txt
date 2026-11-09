@@ -78,11 +78,13 @@ set_target_properties(slirp PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES "${network}/include/slirp")
 target_link_libraries(frondcore PUBLIC slirp
     "${network}/lib/libglib-2.0.a" "${network}/lib/libpcre2-8.a" "${network}/lib/libiconv.a" "${network}/lib/libintl.a" m)
-# common/net (slirp behind PPP) for frond-68k's snap-on modem, as libcommon-net.a on the desktop.
+# common/net (slirp behind PPP) for frond-68k's snap-on modem and both cores' infrared phone, as
+# libcommon-net.a on the desktop. The phone's IrDA stack (common/ir) is in frondcommon.
 add_library(frondnet STATIC "${COMMON}/net/SlirpIp.cpp")
 target_compile_options(frondnet PRIVATE -O2 -g -Wno-unused-parameter)
 target_link_libraries(frondnet PUBLIC frondcommon slirp
     "${network}/lib/libglib-2.0.a" "${network}/lib/libpcre2-8.a" "${network}/lib/libiconv.a" "${network}/lib/libintl.a" m)
+target_link_libraries(frondcore PUBLIC frondnet)
 target_compile_definitions(frondcore PUBLIC _FILE_OFFSET_BITS=64)
 # The core is too slow to use at -O0, so debug builds optimise it as well.
 target_compile_options(frondcore PRIVATE -O2 -g

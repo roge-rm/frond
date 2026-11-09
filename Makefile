@@ -1,6 +1,7 @@
 .PHONY: all clean prepare test test-cpu test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-pxa-timer benchmark-session test-native-governor test-db-list test-export-checkpoint test-db-backup test-checkpoint-input test-native-database
 BUILD_JOBS ?= 4
-CPU_TEST_LDLIBS ?= -lcurl -lpthread -lresolv $(shell pkg-config --libs slirp)
+# libcommon-net.a: the core's .o files include HostInfrared's phone (SlirpIp).
+CPU_TEST_LDLIBS ?= build/source/src/common/libcommon-net.a -lcurl -lpthread -lresolv $(shell pkg-config --libs slirp)
 
 # The Fast engine (Dynarmic JIT) is built in on x86-64 and arm64 hosts; FROND_FAST=0 leaves it out.
 # Its source is exported into build/ by make dynarmic-source and built once in build/dynarmic.
@@ -143,7 +144,7 @@ FORCE:
 build/source/.prepared: FORCE
 	python3 tools/prepare.py
 
-out/frond: build/source/.prepared build/source/src/common/libcommon.a $(CORE_JIT_DEPS)
+out/frond: build/source/.prepared build/source/src/common/libcommon.a build/source/src/common/libcommon-net.a $(CORE_JIT_DEPS)
 	$(MAKE) -C build/source/src/uarm bin $(CORE_JIT_FLAGS)
 	mkdir -p out
 	cp build/source/src/uarm/cp-uarm out/frond.new
