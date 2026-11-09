@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstring>
 #include <initializer_list>
+#include <utility>
 #include "imx1_bootstrap.h"
 
 int main() {
@@ -61,18 +62,19 @@ int main() {
     write(psr0,0xffffc410,A::sideEffect); read(psr0,0xffffc400);
     for (uint32_t setting : {0u,0x3fu}) { write(mmc+8,setting); read(mmc+8,setting); }
     write(mmc+8,0x40,A::reservedBits); read(mmc+8,0x3f);
-    for (uint32_t setting : {2u,6u,0x26u}) write(mmc,setting,A::sideEffect);
+    write(mmc,2,A::sideEffect); write(mmc,6,A::sequence);
+    write(mmc,0x26,A::sideEffect);
     write(mmc,7,A::reservedBits); write(mmc,0x10,A::reservedBits); read(mmc,4);
     for (uint32_t setting : {0x400u,0x800u,0x100u,0x300u,7u})
         write(mmc+0xc,setting,A::sideEffect);
     read(mmc+0xc,0);
     write(mmc+4,0,A::sideEffect); read(mmc+4,0);
-    for (uint32_t offset : {0x20u,0x28u,0x2cu,0x30u,0x34u,0x38u}) {
+    for (uint32_t offset : {0x20u,0x34u,0x38u}) {
         value = 0xdeadbeef;
         assert(soc.access(mmc+offset,4,false,value) == A::externalInput && value == 0xdeadbeef);
         write(mmc+offset,0,A::externalInput);
     }
-    for (uint32_t address : {psr0,psr1,mmc,mmc+4,mmc+8,mmc+0x24}) {
+    for (uint32_t address : {psr0,psr1,mmc,mmc+4,mmc+8,mmc+0x24,mmc+0x28,mmc+0x2c,mmc+0x30}) {
         assert(Imx1Bootstrap::registerName(address));
         for (uint32_t size : {0u,1u,2u,8u}) {
             value = 0xdeadbeef;
@@ -96,5 +98,89 @@ int main() {
     Imx1Bootstrap fresh;
     assert(fresh.access(psr0,4,false,value) == A::ok && value == 0xffffc410);
     soc.advanceHclkCycles(1000); read(mmc+4,0);
-    puts("i.MX1 AIPI2/MMCSD idle startup: PASS");
+    startup();
+    constexpr uint64_t irq35 = uint64_t(1) << 35;
+    write(mmc+0x24,0x78);
+    auto stage = [&](uint32_t command, uint32_t format) {
+        write(mmc+0x28,command); write(mmc+0x2c,0xff); write(mmc+0x30,0xc000);
+        write(mmc+0xc,format);
+    };
+    // An idle PERCLK2 divider write discards the old divider's partial period.
+    auto retimed = soc;
+    auto retimeWrite = [&](uint32_t address, uint32_t setting) {
+        assert(retimed.access(address,4,true,setting) == A::ok);
+    };
+    retimeWrite(mmc+8,0);
+    retimeWrite(0x0021b020,0x000b00fb);
+    retimed.advanceHclkCycles(1);
+    retimeWrite(0x0021b020,0x000b000b);
+    retimeWrite(mmc+0x28,0); retimeWrite(mmc+0x2c,0); retimeWrite(mmc+0x30,0);
+    retimeWrite(mmc+0xc,0x80); retimeWrite(mmc,6);
+    retimed.advanceHclkCycles(10);
+    assert(retimed.access(mmc+4,4,false,value) == A::ok && value == 0x100);
+    assert(!(retimed.interruptPending().normal & irq35));
+    retimed.advanceHclkCycles(1);
+    assert(retimed.access(mmc+4,4,false,value) == A::ok && value == 0x2100);
+    assert(retimed.interruptPending().normal & irq35);
+    stage(0,0x80);
+    write(mmc,6); read(mmc+4,0x100);
+    assert(soc.idleWakePossible());
+    write(mmc+8,0,A::sideEffect); read(mmc+8,0x36);
+    write(mmc+0x28,55,A::sideEffect); read(mmc+0x28,0);
+    write(mmc,5,A::sideEffect);
+    write(0x0021b020,0x000b00ab,A::sideEffect);
+    soc.advanceHclkCycles(320*128-1); read(mmc+4,0x100);
+    assert(!(soc.interruptPending().normal & irq35));
+    auto inFlight = soc;
+    soc.advanceHclkCycles(1); read(mmc+4,0x2100);
+    assert(soc.interruptPending().normal & irq35);
+    assert(!(inFlight.interruptPending().normal & irq35));
+    inFlight.advanceHclkCycles(1);
+    assert(inFlight.interruptPending().normal & irq35);
+    write(mmc+0x24,0x78); read(mmc+4,0x2100);
+    assert(!(soc.interruptPending().normal & irq35));
+    auto stopClock = [&] {
+        write(mmc,5); read(mmc+4,0x100);
+        soc.advanceHclkCycles(320*8-1); read(mmc+4,0x100);
+        soc.advanceHclkCycles(1); read(mmc+4,0);
+    };
+    stopClock();
+    for (uint32_t command : {55u,1u,1u}) {
+        stage(command,command == 55 ? 1 : 3);
+        read(mmc+0x2c,0xff); read(mmc+0x30,0xc000);
+        write(mmc,6); read(mmc+4,0x100);
+        soc.advanceHclkCycles(320*(48+255)-1); read(mmc+4,0x100);
+        soc.advanceHclkCycles(1); read(mmc+4,0x2102);
+        assert(soc.interruptPending().normal & irq35);
+        write(mmc+0x24,0x78); read(mmc+4,0x2102);
+        assert(!(soc.interruptPending().normal & irq35));
+        stopClock();
+    }
+    // The no-card response timer uses the selected clock rate and timeout.
+    write(mmc+8,0); write(mmc+0x10,7); write(mmc+0x24,0x7f);
+    stage(55,1); write(mmc,6);
+    soc.advanceHclkCycles(54); read(mmc+4,0x100);
+    soc.advanceHclkCycles(1); read(mmc+4,0x2102);
+    assert(!(soc.interruptPending().normal & irq35));
+    write(mmc+0x24,0x78);
+    assert(!(soc.interruptPending().normal & irq35));
+    // Reset clears in-flight timing, status and the interrupt latch.
+    write(mmc,8); read(mmc+4,0);
+    soc.advanceHclkCycles(100000); read(mmc+4,0);
+    assert(!(soc.interruptPending().normal & irq35));
+    startup(); write(mmc+0x24,0x78);
+    for (auto pair : {std::pair<uint32_t,uint32_t>{41,3},{17,9},{0,0},{0,0xc0},{55,3}}) {
+        stage(pair.first,pair.second); write(mmc,6,A::sideEffect); read(mmc+4,0);
+    }
+    stage(55,1); write(mmc+0x10,0); write(mmc,6,A::sideEffect); read(mmc+4,0);
+    write(mmc+0x10,2); soc.setMmcsdEmptySlot(false);
+    write(mmc,6,A::externalInput);
+    assert(soc.access(mmc+4,4,false,value) == A::externalInput);
+    soc.setMmcsdEmptySlot(true); write(mmc,6);
+    soc.advanceHclkCycles(320*50); read(mmc+4,0x2102);
+    for (uint32_t offset : {0x34u,0x38u}) {
+        value = 0xdeadbeef;
+        assert(soc.access(mmc+offset,4,false,value) == A::externalInput && value == 0xdeadbeef);
+    }
+    puts("i.MX1 AIPI2/MMCSD startup and timed empty-slot discovery: PASS");
 }

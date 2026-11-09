@@ -1904,3 +1904,7 @@ test-zodiac-idle-wake: build/zodiac-boot-probe
 		@build/zodiac-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-idle-wake
 	./build/test-zodiac-idle-wake
 	python3 tests/zodiac-idle-wake-cli.py
+
+.PHONY: test-zodiac-mmcsd-empty
+test-zodiac-mmcsd-empty: build/zodiac-boot-probe
+	python3 tests/zodiac-mmcsd-empty.py

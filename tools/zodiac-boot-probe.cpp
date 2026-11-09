@@ -512,7 +512,7 @@ int main(int argc, char** argv) {
     if (!options.bootstrapPeripherals) std::puts("No RAM or MMIO model.");
     else {
         std::puts("Documented bootstrap register subset enabled; unsupported operations stop.");
-        if (options.mmcsdEmptySlot) std::puts("Diagnostic i.MX MMCSD empty slot; card transactions and attached pin effects remain guarded.");
+        if (options.mmcsdEmptySlot) std::puts("Diagnostic i.MX MMCSD empty slot; timed command discovery, no card responses or data.");
         std::printf("MPLL settled assumption=%s; nominal FCLK only after completed restart; no lock claim.\n",
                     options.assumeMpllSettled ? "enabled" : "disabled");
         std::printf("virtual-mpll-retune=%s policy=equal-decoded-ratio-continuous-nominal-output-restart-two-clk32-periods-write-spacing-56-fclk-no-analogue-lock-claim\n",
