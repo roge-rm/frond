@@ -49,8 +49,8 @@ object PrintJob {
     // The Dana has a printer or a Wi-Fi adapter to plug into its USB port.
     fun rowShown(device: Device) = device.usbPrinter || device.usbWifi
 
-    // The Dana Wireless's built-in module, from wifi-module-state: "off" (also while the Dana hasn't powered it), or the
-    // usb-port-state fields without the leading word.
+    // The Dana Wireless's built-in module, from wifi-module-state: "off" while its radio is off, or the usb-port-state
+    // fields without the leading word, "unpowered" while the Dana hasn't powered it.
     fun moduleReadout(state: String, radioOn: Boolean): String? = when {
         !radioOn -> "Off"
         state.trim() == "off" -> "Waiting for the Dana"

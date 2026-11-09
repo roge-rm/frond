@@ -305,7 +305,7 @@ State commands take no argument. Mode commands change the setting and reply with
 | `bluetooth-mode` | `off` or an absolute Unix socket path | `bluetooth` |
 | `network-state` | | `network`: mode name |
 | `network-mode` | `disabled`, `connected`, `timeout`, `disconnected`, `internet` or `wireless` | `network`; on the Dana (`usbWifi` capability) only `wireless` and `disabled`, which pick the Wi-Fi adapter or no device on the USB port; on the Dana Wireless (`builtInWifi`) only `wireless` and `disabled`, which turn the built-in module's radio on and off (on by default) |
-| `wifi-module-state` | | `wifi-module`: `off`, or `powered\|unpowered link=up\|down ip=ADDRESS mac= tx= rx= dropped=`. `off` also while the Dana hasn't raised PK0 to power the module. Console: `wifi-module [on\|off]` |
+| `wifi-module-state` | | `wifi-module`: `off`, or `powered\|unpowered link=up\|down ip=ADDRESS mac= tx= rx= dropped=`. `off` while the radio is off, `unpowered` while the Dana hasn't raised PK0 to power the module. Console: `wifi-module [on\|off]` |
 | `usb-port-state` | | `usb-port`: `off`, `printer ` and the `printer status` line, or `wifi powered\|unpowered link=up\|down ip=ADDRESS mac= tx= rx= dropped=`. Every device answers `off` except the Dana |
 | `usb-port` | `off`, `printer` or `wifi` | `usb-port`: the new state. The Dana's one external USB port holds a printer, the Wi-Fi adapter (a Prism 2.5 stick, 045e:006e) or nothing. Choosing what is already there does nothing. `printer attach on` is `usb-port printer`. Other devices answer `unsupported` except for `off` |
 

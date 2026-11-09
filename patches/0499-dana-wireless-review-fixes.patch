@@ -1,0 +1,110 @@
+diff --git a/src/cloudpilot/emulator/hardware/EmRegsISPDana.cpp b/src/cloudpilot/emulator/hardware/EmRegsISPDana.cpp
+index 54dc96c..79ce1dc 100644
+--- a/src/cloudpilot/emulator/hardware/EmRegsISPDana.cpp
++++ b/src/cloudpilot/emulator/hardware/EmRegsISPDana.cpp
+@@ -133,7 +133,7 @@ void EmRegsISPDana::Tick() {
+     // A frame that can raise an interrupt (an armed ATL list, or SOF) wakes a sleeping CPU at its
+     // boundary, so the interrupt isn't late. A late one leaves the guest's handler running into the
+     // next frame, which completes the list it just armed, and its clear then loses that interrupt.
+-    if((regs[0x20]&1) && ((hostArmed && (regs[0x2c]&4)) || (regs[0x25]&1))) {
++    if((regs[0x20]&1) && ((hostArmed && (regs[0x2c]&4) && (regs[0x25]&2)) || (regs[0x25]&1))) {
+         const uint64 phase=(remaining+1)*hz;
+         const uint64 needed=phase>fractional ? phase-fractional : 1;
+         EmHAL::WakeAt(now+(needed+11999999)/12000000,now);
+@@ -786,7 +786,7 @@ bool EmRegsISPDana::CompleteHostPtd(uint8* data, unsigned size, unsigned offset,
+     return true;
+ }
+ 
+-// A port's own events cancel only that port's owner; controller resets and loads cancel both.
++// A port's own events tell only that port's owner; controller resets and loads tell both.
+ void EmRegsISPDana::HostCancelled(int port) {
+     for(unsigned i=0;i<2;++i) if((port<0 || unsigned(port)==i) && hostOwner[i].cancelled) hostOwner[i].cancelled();
+ }
+@@ -890,9 +890,12 @@ void EmRegsISPDana::ExecuteHostFrame() {
+     regs[0x2c]|=32; regs[0x24]|=2;
+ }
+ 
++// A port's reset, disable, power or disconnect leaves the ATL list armed, as on the ISP1161: the
++// next frame completes that port's PTDs with cc 5 as their device no longer answers, and the
++// other port's run on. A controller reset or load completes every active PTD with cc 5.
+ void EmRegsISPDana::CancelHostWork(int port) {
+     HostCancelled(port);
+-    if(!hostArmed) return;
++    if(port>=0 || !hostArmed) return;
+     hostArmed=false;
+     std::array<uint8,4096> data{};
+     unsigned written=hostWritten, size=regs[0x2b];
+diff --git a/src/cloudpilot/emulator/hardware/EmRegsISPDana.h b/src/cloudpilot/emulator/hardware/EmRegsISPDana.h
+index 6a377a0..62ba7bb 100644
+--- a/src/cloudpilot/emulator/hardware/EmRegsISPDana.h
++++ b/src/cloudpilot/emulator/hardware/EmRegsISPDana.h
+@@ -53,8 +53,8 @@ class EmRegsISPDana : public EmRegs {
+     };
+     // Synchronous, same-thread target. It must not re-enter the controller or throw.
+     // ACK accepts an OUT irrevocably; IN bytes are accepted only with matching toggle/size.
+-    // Each root port's runtime owner, never saved. cancelled: host work was cancelled by this port's
+-    // reset, disable, power or disconnect, or by a controller reset or load;
++    // Each root port's runtime owner, never saved. cancelled: this port's reset, disable, power or
++    // disconnect, or a controller reset or load, ended its device's host work;
+     // reattach: plug the device back in after a hardware reset; portReset: a reset of this port has
+     // started; supplyChanged: this port's supply changed.
+     struct HostOwner {
+@@ -67,6 +67,8 @@ class EmRegsISPDana : public EmRegs {
+     bool PortSupply(unsigned port) const { return portSupply.at(port); }
+     using HostTarget=std::function<HostReply(const HostPacket&)>;
+     bool HasHostTarget(unsigned port) const { return bool(hostTargets.at(port)); }
++    // Connected in a loaded state and waiting for its device to come back.
++    bool PortLoaded(unsigned port) const { return loadedPorts.at(port); }
+     // After a load a connected port stays as saved: an owner that plugs its device back in before the
+     // guest runs keeps the connection; otherwise the guest's next access finds the port disconnected.
+     void SetHostTarget(unsigned port, HostTarget target);
+diff --git a/src/cloudpilot/emulator/hardware/UsbWifiRuntime.h b/src/cloudpilot/emulator/hardware/UsbWifiRuntime.h
+index 7e9409f..b52579f 100644
+--- a/src/cloudpilot/emulator/hardware/UsbWifiRuntime.h
++++ b/src/cloudpilot/emulator/hardware/UsbWifiRuntime.h
+@@ -38,7 +38,7 @@ class UsbWifiRuntime {
+         owner={};
+         owner.reattach=[this] { adapter.detach(); powered=false; supplyChanged(); };
+         owner.portReset=[this] { adapter.busReset(); };
+-        owner.supplyChanged=[this] { supplyChanged(true); };
++        owner.supplyChanged=[this] { supplyChanged(); };
+         powered=false;
+         supplyChanged();
+     }
+@@ -151,15 +151,17 @@ class UsbWifiRuntime {
+         setMac(m);
+     }
+     void plug() { dc->SetHostTarget(port,[this](const auto& p) { return adapter.packet<EmRegsISPDana::HostReply>(p); }); }
+-    // Power on or off is a fresh adapter; no power is an unplugged port. A board power-on connects
+-    // the device after connectDelay (in poll); attaching and reattaching connect it at once.
+-    void supplyChanged(bool powerOn=false) {
++    // Power on or off is a fresh adapter; no power is an unplugged port. A powered port connects the
++    // device after connectDelay (in poll), whether the board just powered it, it was attached or a
++    // reset plugged it in again. A port connected in a loaded session gets its device back at once,
++    // so it doesn't enumerate again.
++    void supplyChanged() {
+         if(!dc) return;
+         const bool on=dc->PortSupply(port);
+         if(on==powered && (dc->HasHostTarget(port) || connecting)==on) return;
+         powered=on; adapter.detach(); connecting=false;
+         if(!on) { dc->SetHostTarget(port,{}); return; }
+-        if(!powerOn || !connectDelay) { plug(); return; }
++        if(!connectDelay || dc->PortLoaded(port)) { plug(); return; }
+         dc->SetHostTarget(port,{});
+         connecting=true; connectAt=now()+connectDelay;
+     }
+diff --git a/src/cloudpilot/frond/main.cpp b/src/cloudpilot/frond/main.cpp
+index 6285778..decb80d 100644
+--- a/src/cloudpilot/frond/main.cpp
++++ b/src/cloudpilot/frond/main.cpp
+@@ -1225,8 +1225,8 @@ class Runner {
+     // The Dana Wireless's built-in Wi-Fi module on root port 1, and whether its radio is on (network-mode
+     // wireless or disabled). Kept across loads and resets; the module's state from a loaded session
+     // waits in pendingModule the same way.
+-    // The module connects 50 ms after PK0 rises, a power-up within USB's 100 ms attach limit that
+-    // puts its enumeration between the ROM's polls.
++    // The module connects 50 ms after it's powered or plugged in again, a power-up within USB's
++    // 100 ms attach limit that puts its enumeration between the ROM's polls.
+     UsbWifiRuntime moduleWifi{1,50000000};
+     bool moduleOn=true;
+     optional<vector<uint8_t>> pendingModule;

@@ -34,6 +34,16 @@ class Isp: public EmRegsISPDana {
         for(unsigned x=0;x<b.size();x+=2) { auto w=GetWord(0x1f000000); b[x]=w; if(x+1<b.size()) b[x+1]=w>>8; }
         return b;
     }
+    // Arms a list without running a frame, and reads it back after one.
+    void submit(const std::vector<uint8>& b) {
+        reg(0xa2,b.size()); SetWord(0x1f000002,0xc1);
+        for(unsigned x=0;x<b.size();x+=2) SetWord(0x1f000000,b[x]|(x+1<b.size()?b[x+1]<<8:0));
+    }
+    std::vector<uint8> frame(unsigned size) {
+        now+=1000; get(0x0f); reg(0xa2,size); SetWord(0x1f000002,0x41); std::vector<uint8> b(size);
+        for(unsigned x=0;x<size;x+=2) { auto w=GetWord(0x1f000000); b[x]=w; if(x+1<size) b[x+1]=w>>8; }
+        return b;
+    }
     // Resets a root port (0x95 or 0x96) and clears its change bits.
     void resetPort(unsigned port) { reg(0x95+port,0x10); now+=20000; get(0x0f); reg(0x95+port,0x1f0000); }
 };
@@ -166,6 +176,28 @@ int main() {
     auto get=i.transfer(0,0,false,2,{0x80,6,0,1,0,0,18,0},0,8); assert((get[1]>>4)==0);
     desc=i.transfer(2,0,true,2,{},18,8); assert((desc[1]>>4)==0 && desc[0]==18 && desc[8+8]!=0x5e);
     i.transfer(1,0,true,2,{},0,8);
+    // A list with a SETUP for the printer and one for the module: PK0 dropping or a reset of port 1
+    // fails only the module's PTD, and the printer's owner isn't told.
+    {
+        unsigned cancels=0; auto keep=i.hostOwner[0].cancelled;
+        i.hostOwner[0].cancelled=[&] { ++cancels; };
+        for(unsigned event=0;event<2;++event) {
+            Bytes list(32,0);
+            const uint8 get8[8]={0x80,6,0,1,0,0,8,0};
+            for(unsigned n=0;n<2;++n) {
+                uint8* p=&list[n*16]; p[1]=8; p[2]=8; p[3]=n?8:0; p[4]=8; p[6]=n?3:2;
+                std::memcpy(p+8,get8,8);
+            }
+            i.submit(list);
+            if(event==0) i.resetPort(1); else i.SetPortSupply(1,false);
+            auto r=i.frame(32);
+            assert(r[0]==8 && (r[1]>>4)==0 && r[16]==0 && (r[17]>>4)==5 && cancels==0);
+            auto in=i.transfer(2,0,true,2,{},8,8); assert((in[1]>>4)==0 && in[8]==18);
+            i.transfer(1,0,true,2,{},0,8);
+            assert(printer.printer.bus().address==2);
+        }
+        i.hostOwner[0].cancelled=keep;
+    }
     // PK0 off and on drops and brings back the module only.
     i.SetPortSupply(1,false); assert(!i.HasHostTarget(1) && printer.printer.bus().address==2);
     i.SetPortSupply(1,true); i.reg(0x96,2); i.resetPort(1);
@@ -241,15 +273,38 @@ int main() {
         external.detach(); assert(!i.HasHostTarget(0) && i.HasHostTarget(1));
     }
 
-    // With a power-up delay, PK0 rising connects the module only once that much guest time has
-    // passed (in poll); PK0 falling first cancels it. Attaching still connects at once.
+    // With a power-up delay, PK0 rising, attaching and a machine reset connect the module only once
+    // that much guest time has passed (in poll); PK0 falling first cancels it. A port connected in a
+    // loaded session gets the module back at once, without enumerating again.
     {
         Isp d; UsbWifiRuntime late{1,50000000}; uint64_t lt=0; late.clock=[&] { return lt; };
-        late.attach(d); assert(d.HasHostTarget(1));
+        late.attach(d); assert(!d.HasHostTarget(1));
+        lt=50000000; late.poll(); assert(d.HasHostTarget(1));
+        d.Reset(true); assert(!d.HasHostTarget(1));
+        lt+=50000000; late.poll(); assert(d.HasHostTarget(1));
+        d.ready(); d.reg(0x96,2); d.resetPort(1);
+        Host lh{late}; lh.connect(); assert((d.get(0x16)&0x1f0003)==3);
+        const Bytes ls=late.adapter.save(); const auto lb=late.adapter.bus();
+        Savestate<ChunkType> connected; assert(connected.Save(d));
+        {
+            SavestateLoader<ChunkType> loader; assert(loader.Load(connected.GetBuffer(),connected.GetSize(),d));
+            late.attach(d); assert(late.adapter.load(ls.data(),ls.size()) && late.adapter.setBus(lb));
+            assert(d.HasHostTarget(1) && late.adapter.linkUp() && (d.get(0x16)&0x1f0003)==3);
+            assert(late.adapter.busAddress()==3 && (lh.command(0)>>8)==0);
+        }
+        // Saved inside the delay: the port wasn't connected, so the load waits for the delay again.
+        d.SetPortSupply(1,false); d.SetPortSupply(1,true); lt+=10000000;
+        Savestate<ChunkType> early; assert(early.Save(d));
+        {
+            SavestateLoader<ChunkType> loader; assert(loader.Load(early.GetBuffer(),early.GetSize(),d));
+            late.attach(d); assert(!d.HasHostTarget(1));
+            lt+=49999999; late.poll(); assert(!d.HasHostTarget(1));
+            lt+=1; late.poll(); assert(d.HasHostTarget(1) && (d.get(0x16)&0x10001)==0x10001);
+        }
         d.SetPortSupply(1,false); assert(!d.HasHostTarget(1));
         d.SetPortSupply(1,true); assert(!d.HasHostTarget(1) && late.status().rfind("powered",0)==0);
-        lt=49999999; late.poll(); assert(!d.HasHostTarget(1));
-        lt=50000000; late.poll(); assert(d.HasHostTarget(1));
+        lt+=49999999; late.poll(); assert(!d.HasHostTarget(1));
+        lt+=1; late.poll(); assert(d.HasHostTarget(1));
         d.SetPortSupply(1,false); d.SetPortSupply(1,true); lt+=10000000;
         d.SetPortSupply(1,false); lt+=60000000; late.poll(); assert(!d.HasHostTarget(1));
         d.SetPortSupply(1,true); late.detach(); lt+=60000000; late.poll(); assert(!d.HasHostTarget(1));
@@ -258,5 +313,5 @@ int main() {
     // Bank disposal unplugs it.
     EmBankRegs::onBeforeDispose.Dispatch();
     assert(!i.HasHostTarget(1) && m.status()=="off" && !i.hostOwner[1].supplyChanged);
-    std::cout<<"PASS Dana Wireless module: serial token, PK0 supply, printer beside it, port resets, reset, load kept and dropped, rejected load, ARP, power-up delay\n";
+    std::cout<<"PASS Dana Wireless module: serial token, PK0 supply, printer beside it, port resets, reset, load kept and dropped, rejected load, ARP, power-up delay, another port's PTDs kept\n";
 }

@@ -25,8 +25,8 @@ struct UsbPort {
 UsbPort parseUsbPort(const QString& message);
 // The Wi-Fi adapter's line in the Connections panel.
 QString wifiReadout(const UsbPort& state);
-// The Dana Wireless's built-in module, from wifi-module-state: "off" (also while the Dana hasn't powered it) or the
-// same fields without the leading word.
+// The Dana Wireless's built-in module, from wifi-module-state: "off" while its radio is off, or the same fields
+// without the leading word, "unpowered" while the Dana hasn't powered it.
 QString moduleReadout(const QString& state, bool radioOn);
 
 // A job counts as received when bytes have come in and then stopped for this long.

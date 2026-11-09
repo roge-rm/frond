@@ -86,6 +86,14 @@ int main(){
  // Detach and reset never undo previously accepted bytes.
  i.submit(out);i.SetHostConnection(0,false);calls=0;i.frame();assert(calls==0);out=i.read(b.size());assert(out[0]==32&&out[1]==0x50);
  i.submit(b);i.Reset(true);i.frame();assert(calls==0);
+ // Another port's disconnect, disable or reset leaves this port's armed list to run.
+ for(unsigned event=0;event<3;++event){
+  Isp o;unsigned sent=0,cancels=0;o.ready([&](const auto&p){++sent;return Isp::HostReply{R::ack,p.toggle,{}};});
+  o.hostOwner[0].cancelled=[&]{++cancels;};o.reg(0x96,2);o.SetHostTarget(1,[](const auto&){return Isp::HostReply{};});
+  o.submit(ptd());
+  if(event==0)o.SetHostConnection(1,false);else if(event==1)o.reg(0x96,1);else o.reg(0x96,0x10);
+  o.frame();auto r=o.read(18);assert(sent==3&&cancels==0&&r[0]==10&&(r[1]>>4)==0&&(o.get(0x24)&2));
+ }
  // Invalid load preserves target and armed submission.
  i.ready([&](const auto&p){++calls;return Isp::HostReply{R::ack,p.toggle,{}};});b=ptd(4);i.submit(b);auto good=save(i),bad=good;bad.resize(bad.size()-4);assert(!load(i,bad));assert(save(i)==good);i.frame();assert(calls==1);
 }

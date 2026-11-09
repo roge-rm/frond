@@ -12,6 +12,7 @@ public:
  uint64 ClockHz() const override{return 24000000;}
  void reg(uint16 c,uint32 v){SetWord(0x1f000002,c);SetWord(0x1f000000,v);if(c<0xa0)SetWord(0x1f000000,v>>16);}
  uint32 get(uint16 c){SetWord(0x1f000002,c);uint32 v=GetWord(0x1f000000);if(c<0x20)v|=uint32(GetWord(0x1f000000))<<16;return v;}
+ void submit(const std::vector<uint8>& b){reg(0xa2,b.size());SetWord(0x1f000002,0xc1);for(unsigned n=0;n<b.size();n+=2)SetWord(0x1f000000,b[n]|(n+1<b.size()?b[n+1]<<8:0));}
 };
 static std::vector<uint8> save(Isp&i){Savestate<ChunkType>s;assert(s.Save(i));auto*p=(uint8*)s.GetBuffer();return {p,p+s.GetSize()};}
 static bool load(Isp&i,std::vector<uint8>s){SavestateLoader<ChunkType>l;return l.Load(s.data(),s.size(),i);}
@@ -54,5 +55,12 @@ int main(){
   Isp w;w.Initialize();w.reg(0x81,0x80);w.reg(0xa5,1);w.reg(0xa0,1);
   w.now=100;w.get(0x24);w.now=30000;w.get(0x24);
   assert(EmHAL::CyclesToNextInterrupt(30000)==18000);assert(EmHAL::CyclesToNextInterrupt(48000)==1000000);
+  w.Dispose();}
+ // An armed ATL list wakes the CPU only while its done interrupt is enabled.
+ {struct Root: EmHALHandler { uint32 CyclesToNextInterrupt(uint64) override { return 1000000; } } root;
+  Isp w;w.Initialize();w.reg(0x81,0x80);w.reg(0xa0,1);w.reg(0xab,64);
+  w.submit({0,8,8,8,8,0,0,0,0x80,6,0,1,0,0,8,0});
+  w.now=100;w.get(0x24);assert(EmHAL::CyclesToNextInterrupt(100)==1000000);
+  w.reg(0xa5,2);w.get(0x24);assert(EmHAL::CyclesToNextInterrupt(100)==23900);
   w.Dispose();}
 }
