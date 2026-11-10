@@ -1,0 +1,123 @@
+--- a/src/uarm/native/SdlEventHandler.cpp
++++ b/src/uarm/native/SdlEventHandler.cpp
+@@ -273,19 +273,24 @@
+ 
+             case SDL_CONTROLLERDEVICEREMOVED:
+                 if (auto* controller = SDL_GameControllerFromInstanceID(event.cdevice.which)) SDL_GameControllerClose(controller);
+-                pad = {};
++                pads.erase(event.cdevice.which);
++                if (lastStickPad == event.cdevice.which) lastStickPad = -1;
+                 UpdateGamepad();
+                 break;
+ 
+-            case SDL_CONTROLLERAXISMOTION:
+-                if (event.caxis.axis == SDL_CONTROLLER_AXIS_LEFTX) pad.leftX = event.caxis.value;
+-                else if (event.caxis.axis == SDL_CONTROLLER_AXIS_LEFTY) pad.leftY = event.caxis.value;
++            case SDL_CONTROLLERAXISMOTION: {
++                GamepadState& one = pads[event.caxis.which];
++                if (event.caxis.axis == SDL_CONTROLLER_AXIS_LEFTX) one.leftX = event.caxis.value;
++                else if (event.caxis.axis == SDL_CONTROLLER_AXIS_LEFTY) one.leftY = event.caxis.value;
+                 else break;
++                lastStickPad = event.caxis.which;
+                 UpdateGamepad();
+                 break;
++            }
+ 
+             case SDL_CONTROLLERBUTTONDOWN:
+             case SDL_CONTROLLERBUTTONUP: {
++                GamepadState& pad = pads[event.cbutton.which];
+                 const bool down = event.type == SDL_CONTROLLERBUTTONDOWN;
+                 switch (event.cbutton.button) {
+                     case SDL_CONTROLLER_BUTTON_A: pad.a = down; break;
+@@ -316,6 +321,8 @@
+ 
+             case SDL_APP_DIDENTERFOREGROUND:
+                 background = false;
++                padFocused = true;
++                UpdateGamepad();
+                 redrawRequested = true;
+                 break;
+ 
+@@ -323,6 +330,9 @@
+                 if (event.window.event==SDL_WINDOWEVENT_FOCUS_LOST ||
+                     event.window.event==SDL_WINDOWEVENT_HIDDEN ||
+                     event.window.event==SDL_WINDOWEVENT_MINIMIZED) ReleaseInputs();
++                if (event.window.event==SDL_WINDOWEVENT_FOCUS_GAINED ||
++                    event.window.event==SDL_WINDOWEVENT_SHOWN ||
++                    event.window.event==SDL_WINDOWEVENT_RESTORED) { padFocused = true; UpdateGamepad(); }
+                 if (event.window.event==SDL_WINDOWEVENT_SIZE_CHANGED) { ReleaseFingers(); ReleasePointer(); resized=true; }
+                 if (event.window.event==SDL_WINDOWEVENT_LEAVE) ReleasePointer();
+                 if (event.window.event==SDL_WINDOWEVENT_EXPOSED) redrawRequested=true;
+@@ -477,8 +487,10 @@
+     ReleasePointer();
+     soc->ReleaseKeyboard();
+     stickKeys = 0;
+-    // The controller's keys are let go with the built-in holds below.
+-    pad = {};
++    // The controllers' buttons are let go with the built-in holds below. Their sticks are only
++    // taken off the device: the axes stay, so a stick still pushed is back when focus returns.
++    for (auto& entry : pads) { GamepadState kept; kept.leftX = entry.second.leftX; kept.leftY = entry.second.leftY; entry.second = kept; }
++    padFocused = false;
+     padKeys = 0;
+     padStick = {};
+     UpdateStick();
+@@ -531,9 +543,26 @@
+ }
+ // A key the controller holds counts with the built-in holds, so a key held some other way too goes
+ // down once and comes up when the last of them lets go.
++// A button is down if any controller holds it. The stick is the one moved last, or while that one
++// is at rest or gone, the first controller with its stick pushed.
++GamepadState SdlEventHandler::CombinedPads() const {
++    GamepadState all;
++    const GamepadState* stickPad = nullptr;
++    if (auto it = pads.find(lastStickPad); it != pads.end() && (it->second.leftX || it->second.leftY)) stickPad = &it->second;
++    for (const auto& entry : pads) {
++        const GamepadState& one = entry.second;
++        all.a |= one.a; all.b |= one.b; all.x |= one.x; all.y |= one.y;
++        all.leftShoulder |= one.leftShoulder; all.rightShoulder |= one.rightShoulder; all.leftStick |= one.leftStick;
++        all.back |= one.back; all.start |= one.start; all.guide |= one.guide;
++        if (!stickPad && (one.leftX || one.leftY)) stickPad = &one;
++    }
++    if (stickPad) { all.leftX = stickPad->leftX; all.leftY = stickPad->leftY; }
++    return all;
++}
+ void SdlEventHandler::UpdateGamepad() {
+     if (controls.style != DeviceControlStyle::zodiac) return;
+-    const GamepadInput input = zodiacGamepadInput(pad);
++    if (!padFocused) return;
++    const GamepadInput input = zodiacGamepadInput(CombinedPads());
+     for (unsigned key = 1; key < keyIdCount; ++key) {
+         const DeviceKeyMask bit = deviceKeyBit(KeyId(key));
+         if ((input.keys & bit) == (padKeys & bit)) continue;
+--- a/src/uarm/native/SdlEventHandler.h
++++ b/src/uarm/native/SdlEventHandler.h
+@@ -6,6 +6,7 @@
+ #include <array>
+ #include <atomic>
+ #include <functional>
++#include <map>
+ #include <string>
+ #include "DeviceControls.h"
+ #include "Gamepad.h"
+@@ -82,6 +83,7 @@
+     void TapStickPress();
+     // Sends what the game controller holds now: its keys that changed and the stick.
+     void UpdateGamepad();
++    GamepadState CombinedPads() const;
+ 
+    private:
+     SoC* soc;
+@@ -111,8 +113,11 @@
+     bool pointerPressPending{false};
+     float pointerDownX{0}, pointerDownY{0};
+     uint8_t stickKeys{0};
+-    // The game controller as last reported, and the keys and stick it holds on the device.
+-    GamepadState pad{};
++    // Each game controller as last reported (by instance id), the one whose stick moved last, and
++    // the keys and stick they hold on the device together. Off while the window has lost focus.
++    std::map<SDL_JoystickID, GamepadState> pads;
++    SDL_JoystickID lastStickPad{-1};
++    bool padFocused{true};
+     DeviceKeyMask padKeys{0};
+     DeviceStick padStick{};
+     DeviceStick stick{};

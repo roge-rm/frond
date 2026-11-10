@@ -1586,6 +1586,8 @@ static void zodiacControls() {
     input.HandleEvent(lost);
     guest.expect({{keyIdHome,false},{keyIdFunction,false},{keyIdTriggerLeft,false},{keyIdTriggerRight,false},{keyIdStickPress,false}});
     guest.noStick();
+    {SDL_Event e{};e.type=SDL_WINDOWEVENT;e.window.event=SDL_WINDOWEVENT_FOCUS_GAINED;input.HandleEvent(e);}
+    guest.expect({});guest.noStick();
     // A game controller, as the mapping alone and through the handler's events.
     {
         GamepadState s;
@@ -1615,11 +1617,11 @@ static void zodiacControls() {
         // A full push reaches the machine's whole travel.
         assert(zodiacStickOffset(at(32767,0).x)==511 && zodiacStickOffset(at(0,-32768).y)==-511);
     }
-    auto padButton=[&](int button,bool down) {
-        SDL_Event e{};e.type=down ? SDL_CONTROLLERBUTTONDOWN : SDL_CONTROLLERBUTTONUP;e.cbutton.button=Uint8(button);input.HandleEvent(e);
+    auto padButton=[&](int button,bool down,int which=0) {
+        SDL_Event e{};e.type=down ? SDL_CONTROLLERBUTTONDOWN : SDL_CONTROLLERBUTTONUP;e.cbutton.which=which;e.cbutton.button=Uint8(button);input.HandleEvent(e);
     };
-    auto padAxis=[&](int axis,int value) {
-        SDL_Event e{};e.type=SDL_CONTROLLERAXISMOTION;e.caxis.axis=Uint8(axis);e.caxis.value=Sint16(value);input.HandleEvent(e);
+    auto padAxis=[&](int axis,int value,int which=0) {
+        SDL_Event e{};e.type=SDL_CONTROLLERAXISMOTION;e.caxis.which=which;e.caxis.axis=Uint8(axis);e.caxis.value=Sint16(value);input.HandleEvent(e);
     };
     for(auto [button,key]:{std::pair{SDL_CONTROLLER_BUTTON_A,keyIdHard1},{SDL_CONTROLLER_BUTTON_B,keyIdHard2},
                            {SDL_CONTROLLER_BUTTON_X,keyIdHard3},{SDL_CONTROLLER_BUTTON_Y,keyIdHard4},
@@ -1651,6 +1653,32 @@ static void zodiacControls() {
     padButton(SDL_CONTROLLER_BUTTON_B,true);padAxis(SDL_CONTROLLER_AXIS_LEFTX,-32768);guest.expect({{keyIdHard2,true}});guest.lastStick();
     input.HandleEvent(lost);guest.expect({{keyIdHard2,false}});st=guest.lastStick();assert(st.x==0 && st.y==0 && !input.PressedButtons());
     padButton(SDL_CONTROLLER_BUTTON_B,false);guest.expect({});
+    // A stick still pushed when focus returns is read in full again, not only the axis moved next.
+    {SDL_Event e{};e.type=SDL_WINDOWEVENT;e.window.event=SDL_WINDOWEVENT_FOCUS_GAINED;input.HandleEvent(e);}
+    st=guest.lastStick();assert(st.x==-1 && std::fabs(st.y)<0.05f && input.Stick().held);guest.expect({});
+    padAxis(SDL_CONTROLLER_AXIS_LEFTX,0);st=guest.lastStick();assert(st.x==0 && st.y==0 && !input.Stick().held);
+    padAxis(SDL_CONTROLLER_AXIS_LEFTX,-32768);padAxis(SDL_CONTROLLER_AXIS_LEFTY,32767);guest.lastStick();
+    input.HandleEvent(lost);st=guest.lastStick();assert(st.x==0 && st.y==0);
+    {SDL_Event e{};e.type=SDL_WINDOWEVENT;e.window.event=SDL_WINDOWEVENT_FOCUS_GAINED;input.HandleEvent(e);}
+    st=guest.lastStick();assert(st.x==-1 && st.y==1);
+    padAxis(SDL_CONTROLLER_AXIS_LEFTX,0);padAxis(SDL_CONTROLLER_AXIS_LEFTY,0);guest.lastStick();
+    // Two controllers share the device: a button is down while either holds it, and pulling one out
+    // lets go of only its own.
+    padButton(SDL_CONTROLLER_BUTTON_A,true,1);guest.expect({{keyIdHard1,true}});
+    padButton(SDL_CONTROLLER_BUTTON_B,true,2);guest.expect({{keyIdHard2,true}});
+    {SDL_Event e{};e.type=SDL_CONTROLLERDEVICEREMOVED;e.cdevice.which=2;input.HandleEvent(e);}
+    guest.expect({{keyIdHard2,false}});assert(input.PressedButtons()==deviceKeyBit(keyIdHard1));
+    padButton(SDL_CONTROLLER_BUTTON_A,true,2);guest.expect({});
+    padButton(SDL_CONTROLLER_BUTTON_A,false,2);guest.expect({});assert(input.PressedButtons()==deviceKeyBit(keyIdHard1));
+    padButton(SDL_CONTROLLER_BUTTON_A,false,1);guest.expect({{keyIdHard1,false}});assert(!input.PressedButtons());
+    // The stick follows the pad moved last, and falls back to the other when that one is at rest.
+    padAxis(SDL_CONTROLLER_AXIS_LEFTX,32767,1);st=guest.lastStick();assert(st.x==1);
+    padAxis(SDL_CONTROLLER_AXIS_LEFTY,-32768,2);st=guest.lastStick();assert(st.x==0 && st.y==-1);
+    padAxis(SDL_CONTROLLER_AXIS_LEFTY,0,2);st=guest.lastStick();assert(st.x==1 && st.y==0);
+    {SDL_Event e{};e.type=SDL_CONTROLLERDEVICEREMOVED;e.cdevice.which=1;input.HandleEvent(e);}
+    st=guest.lastStick();assert(st.x==0 && st.y==0);
+    {SDL_Event e{};e.type=SDL_CONTROLLERDEVICEREMOVED;e.cdevice.which=2;input.HandleEvent(e);}
+    guest.noStick();
     padButton(SDL_CONTROLLER_BUTTON_Y,true);padAxis(SDL_CONTROLLER_AXIS_LEFTY,32767);guest.expect({{keyIdHard4,true}});guest.lastStick();
     {SDL_Event e{};e.type=SDL_CONTROLLERDEVICEREMOVED;e.cdevice.which=0;input.HandleEvent(e);}
     guest.expect({{keyIdHard4,false}});st=guest.lastStick();assert(st.x==0 && st.y==0 && !input.PressedButtons());
