@@ -96,10 +96,15 @@ int main() {
         read(gpcr, 0x7fb);
     }
     write(gpcr, 0x3f3, Imx1BootstrapAccess::reservedBits);
-    for (uint32_t effect : {1u, 2u, 0x1000u, 0x8000u}) {
+    for (uint32_t effect : {1u, 2u, 0x8000u}) {
         write(gpcr, 0x3fb ^ effect, Imx1BootstrapAccess::sideEffect);
         read(gpcr, 0x7fb);
     }
+    // BTAEN gates the BTA clock inputs (table 8-4). The ROM's Bluetooth power-up sets it at 200fc8c8.
+    write(gpcr, 0x17fb); read(gpcr, 0x17fb);
+    unknown = 0;
+    assert(soc.access(0x00216000, 4, false, unknown) == Imx1BootstrapAccess::unmapped);
+    write(gpcr, 0x7fb); read(gpcr, 0x7fb);
     for (uint32_t size : {0u,1u,2u,8u}) {
         unknown = 0xdeadbeef;
         assert(soc.access(gpcr,size,false,unknown) == Imx1BootstrapAccess::width);
