@@ -20,6 +20,7 @@
 
 #include "SDL.h"
 #include "SDL_image.h"
+#include "IrKeyboardMapping.h"
 #include "audio_queue.h"
 #include "session/session_file5.h"
 #include "soc_PXA.h"
@@ -80,7 +81,11 @@ std::vector<Event> replay(const char* path, uint64_t end, int width=320, int hei
         } else if (e.kind=="snapshot") {
             // Accept native replay syntax but always redirect into the private output directory.
             if (!(tokens>>std::quoted(extra)) || extra.empty()) throw std::runtime_error("missing snapshot path");
-        } else if (e.kind!="pen-up") throw std::runtime_error("unsupported replay command");
+        } else if (e.kind=="keyboard-down" || e.kind=="keyboard-up") {
+            if (!(tokens>>std::quoted(extra))) throw std::runtime_error("invalid keyboard key");
+            e.x=irKeyboardCode(SDL_GetScancodeFromName(extra.c_str()));
+            if (!e.x) throw std::runtime_error("invalid keyboard key");
+        } else if (e.kind!="pen-up" && e.kind!="keyboard-attach" && e.kind!="keyboard-detach") throw std::runtime_error("unsupported replay command");
         if ((tokens>>extra) && extra[0]!='#') throw std::runtime_error("extra replay arguments");
         events.push_back(e);
     }
@@ -94,7 +99,10 @@ uint64_t hashBytes(uint64_t hash, const void* data, size_t count) {
 }
 constexpr uint64_t hashInit=14695981039346656037ull;
 
+// A machine folder has no bytes to read here: loadPath opens it.
 std::vector<uint8_t> readFile(const char* path) {
+    std::error_code ec;
+    if (std::filesystem::is_directory(path,ec)) return {};
     std::ifstream input(path,std::ios::binary|std::ios::ate);
     if (!input || input.tellg()<=0 || input.tellg()>512*1024*1024)
         throw std::runtime_error("cannot read session or NOR image");
@@ -111,23 +119,30 @@ struct Machine {
     std::vector<uint8_t> nor, nand, memory, savestate;
     std::vector<frondMachine::Media> media;
     std::filesystem::path folder;  // the work copy a folder session's cards and NAND run from
-    bool legacy{};                 // a v5/v6 TX session, restored as this tool always did
+    bool legacy{};                 // a v6 TX session, restored as this tool always did
 };
+
+bool pxaBoard(DeviceBoard5 board) {
+    return board==DeviceBoard5::pxa255E2 || board==DeviceBoard5::pxa270Tx ||
+           board==DeviceBoard5::pxa270Zire72 || board==DeviceBoard5::pxa250SonyTG50;
+}
 
 uint32_t ramSizeFromMemorySize(uint32_t memorySize) {
     return memorySize ? (1u << (31 - __builtin_clz(memorySize))) : 0;
 }
 
-// A v5/v6 TX session restores from its bytes. Any other session is copied into OUTPUT/machine
+// A v6 TX session restores from its bytes. Any other session is copied into OUTPUT/machine
 // first, so its cards and NAND run on copies and the original is never written.
 Machine loadSession(const char* path, const std::vector<uint8_t>& data, const std::filesystem::path& output) {
     Machine m;
+    uint32_t version=0; std::string headerDevice;
+    frondSession::peekHeader(data.data(),data.size(),version,headerDevice);
     SessionFile5 legacy;
     auto bytes=[](std::vector<uint8_t>& out, const void* data, size_t size) {
         const auto* p=static_cast<const uint8_t*>(data);
         out.assign(p,p+size);
     };
-    if (legacy.Deserialize(data.size(),data.data()) && legacy.GetDeviceName()=="palm-tx") {
+    if (version==6 && legacy.Deserialize(data.size(),data.data()) && legacy.GetDeviceName()=="palm-tx") {
         if (legacy.GetSdSize()) throw std::runtime_error("use a session without an SD image for this benchmark");
         m.legacy=true;
         m.device=DeviceType5::deviceTypeTX;
@@ -146,7 +161,7 @@ Machine loadSession(const char* path, const std::vector<uint8_t>& data, const st
     if (!frondSession::loadPath(std::filesystem::absolute(path),contents,folder,frondSession::msPhysicalBytes,work))
         throw std::runtime_error("session did not load");
     const auto* profile=deviceProfileNamed5(contents.deviceName.c_str());
-    if (!profile || !deviceProfileRunnerEligible5(profile->deviceType))
+    if (!profile || !deviceProfileRunnerEligible5(profile->deviceType) || !pxaBoard(profile->board))
         throw std::runtime_error("this session's device runs in frond-68k or has no board: "+contents.deviceName);
     m.device=DeviceType5(profile->deviceType);
     m.ramSize=contents.ramSize?contents.ramSize:ramSizeFromMemorySize(contents.memory.size());
@@ -175,7 +190,8 @@ Machine loadNor(std::vector<uint8_t> data, const std::string& deviceName) {
     }
     if (!rom.IsValid() || device==deviceTypeInvalid) throw std::runtime_error("not a session or a NOR image Frond knows");
     if (device==DeviceType5::deviceTypeTX) throw std::runtime_error("a TX cold boot needs its NAND: use a session");
-    if (!deviceProfileRunnerEligible5(device)) throw std::runtime_error("this ROM's device runs in frond-68k or has no board");
+    if (!deviceProfileRunnerEligible5(device) || !pxaBoard(deviceProfile5(device)->board))
+        throw std::runtime_error("this ROM's device runs in frond-68k or has no board");
     if (deviceProfileValidateFirmware5(device,data.size(),0,false,false,rom.GetFirmwareVariant())!=DeviceFirmwareError5::none)
         throw std::runtime_error("invalid firmware geometry for the device");
     m.device=device;
@@ -206,7 +222,8 @@ uint64_t palmEpochSeconds() {
 int main(int argc, char** argv) {
     // Fast compiles where asked for, so runs repeat. BENCH_JIT_ASYNC=1 compiles on the compile
     // thread as the app does: its time is closer to the app's, but Fast hashes may change from run to run.
-    const bool jitAsync=std::getenv("BENCH_JIT_ASYNC")!=nullptr;
+    const char* asyncEnv=std::getenv("BENCH_JIT_ASYNC");
+    const bool jitAsync=asyncEnv && *asyncEnv && std::string(asyncEnv)!="0";
     cpuSetJitSync(!jitAsync);
     try {
         if (argc==4 && std::string(argv[1])=="--check-replay") {
@@ -228,7 +245,8 @@ int main(int argc, char** argv) {
         const std::filesystem::path output=arg[6];
         auto data=readFile(arg[1]);
         uint32_t version=0; std::string headerDevice;
-        const bool coldBoot=!frondSession::peekHeader(data.data(),data.size(),version,headerDevice);
+        const bool folderSession=data.empty();
+        const bool coldBoot=!folderSession && !frondSession::peekHeader(data.data(),data.size(),version,headerDevice);
         if (!coldBoot && !deviceName.empty()) throw std::runtime_error("--device is for a NOR image; a session names its device");
         Machine m;
         if (coldBoot) { m=loadNor(std::move(data),deviceName); data={}; }
@@ -332,6 +350,8 @@ int main(int argc, char** argv) {
                 else if (e.kind=="pen-up") soc->PenUp();
                 else if (e.kind=="key-down") soc->KeyDown(e.key);
                 else if (e.kind=="key-up") soc->KeyUp(e.key);
+                else if (e.kind=="keyboard-down" || e.kind=="keyboard-up") soc->KeyboardKey(uint8_t(e.x),e.kind=="keyboard-down");
+                else if (e.kind=="keyboard-attach" || e.kind=="keyboard-detach") soc->AttachKeyboard(e.kind=="keyboard-attach");
                 else {
                     // Before the first LCD frame (a cold boot with the LCD still off) it saves black.
                     if (!haveFrame) std::fprintf(stderr,"snapshot %u at %llu ms: no LCD frame yet, saved black\n",
