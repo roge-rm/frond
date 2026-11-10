@@ -38,6 +38,17 @@ static void alterLateFailure(std::vector<uint8_t>& bytes,unsigned power){
  }
  assert(gpio&&late&&pos*4==bytes.size());
 }
+static std::vector<uint8_t> withoutChunk(const std::vector<uint8_t>& bytes,ChunkType removed){
+ const auto*w=reinterpret_cast<const uint32_t*>(bytes.data());const auto count=w[0];size_t pos=1+2*count;
+ std::vector<uint32_t> header,data;
+ for(unsigned i=0;i<count;++i){const auto type=w[1+2*i],size=w[2+2*i];
+    if(type!=uint32_t(removed)){header.push_back(type);header.push_back(size);data.insert(data.end(),w+pos,w+pos+size);}
+    pos+=size;
+ }
+ assert(pos*4==bytes.size() && header.size()==2*(count-1));
+ std::vector<uint32_t> words{count-1};words.insert(words.end(),header.begin(),header.end());words.insert(words.end(),data.begin(),data.end());
+ return {reinterpret_cast<uint8_t*>(words.data()),reinterpret_cast<uint8_t*>(words.data()+words.size())};
+}
 int main(){
  for(auto device:{deviceTypeTX,deviceTypeE2,deviceTypeFrankenE2}){
     Server server;const bool tx=device==deviceTypeTX;const unsigned power=tx?17:32,reset=tx?83:80;const uint32_t uart=tx?PXA_BTUART_BASE:PXA_HWUART_BASE;
@@ -45,10 +56,20 @@ int main(){
     SocPXA soc(device,32*1024*1024,nor.data(),nor.size(),nand.data(),nand.size(),-1,tx?2:0);
     write(soc,0xa0003000,0xeafffffe);cpuInvalidateCodeCache(soc.GetCpu());cpuSetReg(soc.GetCpu(),ARM_REG_NUM_CPSR,ARM_SR_MODE_SVC|ARM_SR_I|ARM_SR_F);cpuSetReg(soc.GetCpu(),15,0xa0003000);
     pin(soc,power,false);pin(soc,reset,true);std::string error;
-    assert(soc.SetBluetooth(server.path,error));server.Accept();uint8_t buf[64];assert(recv(server.peer,buf,sizeof(buf),0)==0);
+    // Each controller connection starts with the machine's own address (Write_BD_ADDR), the
+    // same one every time, and its completion never reaches the guest.
+    std::vector<uint8_t> address;uint8_t buf[64];
+    auto connect=[&](){
+        server.Accept();run(soc);
+        assert(recv(server.peer,buf,10,0)==10 && !memcmp(buf,"\1\1\374\6",4) && buf[9]==2);
+        if(address.empty())address.assign(buf+4,buf+10);
+        assert(std::vector<uint8_t>(buf+4,buf+10)==address);
+        server.Send({4,14,4,1,1,0xfc,0});run(soc); // Read and dropped before any later close.
+    };
+    assert(soc.SetBluetooth(server.path,error));server.Accept();assert(recv(server.peer,buf,sizeof(buf),0)==0);
     pin(soc,power,true);
     write(soc,uart+12,0x83);write(soc,uart,8);write(soc,uart+4,0);write(soc,uart+12,3);write(soc,uart+16,0xb);write(soc,uart+8,7);write(soc,uart+4,0x41);
-    for(uint8_t c:{1,3,12,0})write(soc,uart,c);run(soc);server.Accept();run(soc);
+    for(uint8_t c:{1,3,12,0})write(soc,uart,c);run(soc);connect();
     assert(recv(server.peer,buf,sizeof(buf),0)==4 && !memcmp(buf,"\1\3\14\0",4));assert(soc.BluetoothState()=="connected");
     const std::vector<uint8_t> reply{4,14,4,1,3,12,0};
     auto consume=[&](){std::vector<uint8_t> v;while(read(soc,uart+20)&1)v.push_back(read(soc,uart));return v;};
@@ -77,11 +98,11 @@ int main(){
     assert(recv(server.peer,buf,sizeof(buf),MSG_DONTWAIT)<0); // Same FD, no speculative HCI.
     assert(soc.Load(good.size(),good.data()));assert(recv(server.peer,buf,sizeof(buf),0)==0);
     assert(soc.BluetoothState()!="connected");
-    pin(soc,power,false);pin(soc,power,true);for(uint8_t c:{1,3,12,0})write(soc,uart,c);run(soc);server.Accept();run(soc);
+    pin(soc,power,false);pin(soc,power,true);for(uint8_t c:{1,3,12,0})write(soc,uart,c);run(soc);connect();
     assert(recv(server.peer,buf,sizeof(buf),0)==4);server.Send(reply);run(soc);assert(consume()==reply);
     {ReadOnlyGuest temporary(soc);pin(soc,power,false);pin(soc,power,true);temporary.Commit();}
     assert(recv(server.peer,buf,sizeof(buf),0)==0); // Same final levels, new controller epoch.
-    for(uint8_t c:{1,3,12,0})write(soc,uart,c);run(soc);server.Accept();run(soc);
+    for(uint8_t c:{1,3,12,0})write(soc,uart,c);run(soc);connect();
     assert(recv(server.peer,buf,sizeof(buf),0)==4);server.Send(reply);run(soc);assert(consume()==reply);
     const uint32_t af=0x40e00054+4*(power/16),original=read(soc,af),alternate=original|(1u<<(2*(power%16)));
     server.Send(reply);
@@ -89,10 +110,28 @@ int main(){
     assert(soc.BluetoothState()=="connected");run(soc);assert(consume()==reply);
     {ReadOnlyGuest temporary(soc);write(soc,af,alternate);write(soc,af,original);temporary.Commit();}
     assert(recv(server.peer,buf,sizeof(buf),0)==0);
-    for(uint8_t c:{1,3,12,0})write(soc,uart,c);run(soc);server.Accept();run(soc);assert(recv(server.peer,buf,sizeof(buf),0)==4);
+    for(uint8_t c:{1,3,12,0})write(soc,uart,c);run(soc);connect();assert(recv(server.peer,buf,sizeof(buf),0)==4);
     write(soc,af,alternate);assert(recv(server.peer,buf,sizeof(buf),0)==0); // No UART tick needed.
-    write(soc,af,original);for(uint8_t c:{1,3,12,0})write(soc,uart,c);run(soc);server.Accept();run(soc);assert(recv(server.peer,buf,sizeof(buf),0)==4);
+    write(soc,af,original);for(uint8_t c:{1,3,12,0})write(soc,uart,c);run(soc);connect();assert(recv(server.peer,buf,sizeof(buf),0)==4);
     soc.Reset();assert(recv(server.peer,buf,sizeof(buf),0)==0);
-    printf("PASS %s board: real GPIO/UART, checkpoint power fence, late-invalid load rollback retains peer/exact pending bytes, accepted load/reset close and power-cycle recovery\n",tx?"TX":device==deviceTypeFrankenE2?"E3":"E2");
+    // The address stays through a reset and in the session, and a session from before it was
+    // kept loads and keeps the machine's address.
+    // Reset clears the CPU, pins and UART, so set them up again as the boot code would.
+    write(soc,0xa0003000,0xeafffffe);cpuInvalidateCodeCache(soc.GetCpu());cpuSetReg(soc.GetCpu(),ARM_REG_NUM_CPSR,ARM_SR_MODE_SVC|ARM_SR_I|ARM_SR_F);cpuSetReg(soc.GetCpu(),15,0xa0003000);
+    pin(soc,power,false);pin(soc,reset,true);
+    write(soc,uart+12,0x83);write(soc,uart,8);write(soc,uart+4,0);write(soc,uart+12,3);write(soc,uart+16,0xb);write(soc,uart+8,7);write(soc,uart+4,0x41);
+    const auto saved=snapshot(soc);
+    pin(soc,power,false);pin(soc,power,true);for(uint8_t c:{1,3,12,0})write(soc,uart,c);run(soc);connect();
+    assert(recv(server.peer,buf,sizeof(buf),0)==4);
+    for(const bool old:{false,true}){
+        SocPXA restarted(device,32*1024*1024,nor.data(),nor.size(),nand.data(),nand.size(),-1,tx?2:0);
+        auto bytes=old?withoutChunk(saved,ChunkType::bluetoothAddress):saved;
+        assert((bytes.size()<saved.size())==old);assert(restarted.Load(bytes.size(),bytes.data()));
+        assert(restarted.SetBluetooth(server.path,error));server.Accept();assert(recv(server.peer,buf,sizeof(buf),0)==0);
+        pin(restarted,power,false);pin(restarted,power,true);for(uint8_t c:{1,3,12,0})write(restarted,uart,c);run(restarted);
+        server.Accept();run(restarted);assert(recv(server.peer,buf,10,0)==10 && !memcmp(buf,"\1\1\374\6",4));
+        assert((std::vector<uint8_t>(buf+4,buf+10)==address)!=old);
+    }
+    printf("PASS %s board: real GPIO/UART, checkpoint power fence, late-invalid load rollback retains peer/exact pending bytes, accepted load/reset close, power-cycle recovery and a kept machine address\n",tx?"TX":device==deviceTypeFrankenE2?"E3":"E2");
  }
 }

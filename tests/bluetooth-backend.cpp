@@ -1,3 +1,4 @@
+#include <array>
 #include <cassert>
 #include <cstdio>
 #include <cstring>
@@ -42,5 +43,21 @@ int main(){
  s.Send({1,3,12,0});b.Poll();assert(!b.Connected() && !b.Pending()); // Controller must never emit an HCI command.
  assert(b.Open(s.path,error));s.Accept();close(s.peer);s.peer=-1;b.Poll();assert(!b.Connected() && !b.Pending());
  assert(b.Open(s.path,error));s.Accept();assert(!b.Write(frame.data(),BluetoothBackend::maxFrame+1) && !b.Connected());
- puts("PASS H4 Unix endpoint: framing, coalescing, short writes, exact 512KiB output, failed replacement, disconnect, generation and bounds");
+ // A machine address goes first on every connection, before any guest command, and
+ // its completion (or an Unknown Command status from a controller without it) is dropped.
+ const std::vector<uint8_t> address{0x11,0x22,0x33,0x44,0x55,0x02};
+ std::vector<uint8_t> program{1,1,0xfc,6};program.insert(program.end(),address.begin(),address.end());
+ auto received=[&](size_t n){std::vector<uint8_t> v(n);size_t got=0;for(unsigned i=0;i<1000 && got<n;++i){b.Poll();const auto r=recv(s.peer,v.data()+got,n-got,MSG_DONTWAIT);if(r>0)got+=size_t(r);}assert(got==n);return v;};
+ b.SetAddress({0x11,0x22,0x33,0x44,0x55,0x02});
+ for(const auto& answer:{std::vector<uint8_t>{4,14,4,1,1,0xfc,0},std::vector<uint8_t>{4,15,4,1,1,1,0xfc}}){
+    assert(b.Open(s.path,error));s.Accept();const uint8_t reset[]={1,3,12,0};assert(b.Write(reset,sizeof(reset)));
+    auto sent=received(program.size()+4);auto expect=program;expect.insert(expect.end(),reset,reset+4);assert(sent==expect);
+    s.Send(answer);s.Send(complete);b.Poll();assert(drain(b)==complete);
+    s.Send(answer);b.Poll();assert(drain(b)==answer); // Only the first one is the address's.
+ }
+ // The guest's own Write_BD_ADDR (the T|X's factory address) becomes the machine's.
+ const uint8_t own[]={1,1,0xfc,6,0x0e,0xe8,0x0c,0xe0,0x07,0x00};assert(b.Write(own,sizeof(own)));
+ std::array<uint8_t,6> kept{};assert(b.Address(kept) && kept==(std::array<uint8_t,6>{0x0e,0xe8,0x0c,0xe0,0x07,0x00}));
+ assert(b.Open(s.path,error));s.Accept();assert(received(10)==std::vector<uint8_t>(own,own+10));
+ puts("PASS H4 Unix endpoint: framing, coalescing, short writes, exact 512KiB output, failed replacement, disconnect, generation, bounds and machine address");
 }
