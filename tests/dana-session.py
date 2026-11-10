@@ -13,7 +13,7 @@ from palm_boot import Core, dana_setup, dana_launcher, dana_reset, session_file
 
 
 def session_chunks(data):
-    assert struct.unpack_from('<II', data) == (0x19800819, 8)
+    assert struct.unpack_from('<II', data) in ((0x19800819, 8), (0x19800819, 9))
     sizes = struct.unpack_from('<5Q', data, 48)
     assert struct.unpack_from('<I', data, 88)[0] == 0
     raw = zlib.decompress(data[92:])
