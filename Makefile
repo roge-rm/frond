@@ -641,12 +641,14 @@ check-reconstruction:
 # Experimental board probe, excluded from the public runners and firmware-free by default.
 .PHONY: zodiac-boot-probe test-zodiac-boot-probe
 zodiac-boot-probe: build/zodiac-boot-probe
-build/zodiac-boot-probe: out/frond tools/zodiac-boot-probe.cpp
+# Kept in every state the probe saves: the commit, a + for uncommitted changes and the patch count.
+ZODIAC_STATE_BUILD_NOTE = $(shell git rev-parse --short HEAD 2>/dev/null)$(shell git diff --quiet HEAD 2>/dev/null || echo +) patches=$(words $(wildcard patches/*.patch))
+build/zodiac-boot-probe: out/frond tools/zodiac-boot-probe.cpp tools/zodiac-state-file.h
 	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/zodiac-core.rsp
-	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -DFROND_STATE_BUILD_NOTE='"$(ZODIAC_STATE_BUILD_NOTE)"' \
 		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
 		tools/zodiac-boot-probe.cpp build/source/src/uarm/uarm/imx1_boot_probe.cpp build/source/src/uarm/uarm/imx1_watchdog.cpp build/source/src/uarm/uarm/imx1_rtc.cpp build/source/src/uarm/uarm/imx1_bootstrap.cpp build/source/src/uarm/uarm/imx1_aitc.cpp build/source/src/uarm/uarm/imx1_cgm.cpp build/source/src/uarm/uarm/imx1_gpio.cpp build/source/src/uarm/uarm/imx1_sysctrl.cpp build/source/src/uarm/uarm/imx1_eim.cpp build/source/src/uarm/uarm/imx1_timer.cpp build/source/src/uarm/uarm/imx1_i2c.cpp build/source/src/uarm/uarm/imx1_asp.cpp build/source/src/uarm/uarm/imx1_pwm.cpp \
-		@build/zodiac-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $@
+		@build/zodiac-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -lz -o $@
 
 test-zodiac-boot-probe: build/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
@@ -1689,7 +1691,7 @@ test-imx1-mmcsd: prepare
 
 .PHONY: test-imx1-i2c test-imx1-i2c-read-window test-zodiac-i2c-image
 test-imx1-i2c-read-window: prepare
-	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Ibuild/source/src/uarm/uarm \
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Ibuild/source/src/uarm/uarm -Ibuild/source/src/common \
 		tests/imx1-i2c-read-window.cpp build/source/src/uarm/uarm/imx1_i2c.cpp -o build/test-imx1-i2c-read-window
 	./build/test-imx1-i2c-read-window
 
@@ -1949,6 +1951,26 @@ build/zodiac-asp-pen-probe: build/zodiac-boot-probe tests/zodiac-asp-pen-probe.c
 		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
 		tests/zodiac-asp-pen-probe.cpp build/source/src/uarm/uarm/imx1_boot_probe.cpp build/source/src/uarm/uarm/imx1_watchdog.cpp build/source/src/uarm/uarm/imx1_rtc.cpp build/source/src/uarm/uarm/imx1_bootstrap.cpp build/source/src/uarm/uarm/imx1_aitc.cpp build/source/src/uarm/uarm/imx1_cgm.cpp build/source/src/uarm/uarm/imx1_gpio.cpp build/source/src/uarm/uarm/imx1_sysctrl.cpp build/source/src/uarm/uarm/imx1_eim.cpp build/source/src/uarm/uarm/imx1_timer.cpp build/source/src/uarm/uarm/imx1_i2c.cpp build/source/src/uarm/uarm/imx1_asp.cpp build/source/src/uarm/uarm/imx1_pwm.cpp \
 		@build/zodiac-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $@
+
+.PHONY: test-zodiac-machine-state
+test-zodiac-machine-state: build/zodiac-boot-probe
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/zodiac-machine-state.cpp $(ZODIAC_MACHINE_SOURCES) \
+		@build/zodiac-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-machine-state
+	./build/test-zodiac-machine-state
+
+.PHONY: test-zodiac-machine-state-reject test-zodiac-machine-state-cli
+test-zodiac-machine-state-reject: build/zodiac-boot-probe
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/zodiac-machine-state-reject.cpp $(ZODIAC_MACHINE_SOURCES) \
+		@build/zodiac-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-machine-state-reject
+	./build/test-zodiac-machine-state-reject
+
+# Two probe processes: one saves, the other loads and has to end like an uninterrupted run.
+test-zodiac-machine-state-cli: build/zodiac-boot-probe
+	python3 tests/zodiac-machine-state-cli.py
 
 .PHONY: test-zodiac-bounded
 test-zodiac-bounded: build/zodiac-boot-probe

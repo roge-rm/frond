@@ -10,6 +10,7 @@
 #include "device_profile5.h"
 #include "imx1_boot_probe.h"
 #include "imx1_i2c_read_window.h"
+#include "zodiac-state-file.h"
 
 // Private diagnostic JSON-lines metadata and raw borrowed backing spans.
 struct DiagnosticOutput {
@@ -163,9 +164,69 @@ static bool parseRtcTime(const char* text, Imx1RtcTime& time) {
     time = {fields[0], fields[1], fields[2], fields[3]};
     return Imx1Rtc::validTime(time);
 }
+// Machine states: one to start from and any number to write at rising retired counts.
+struct StateSave { const char* path; uint64_t after; };
+static std::vector<StateSave> stateSaves;
+static const char* stateLoad = nullptr;
+static bool stateOverwrite = false, stateAnyRevision = false;
+// Runs to the budget through the machine calls, loading first and saving on the way.
+// The budget counts from reset, so a loaded run ends where an uninterrupted one would.
+static bool runWithStates(const std::vector<uint8_t>& rom, Imx1ProbeEntry entry, uint64_t budget, bool fast,
+                          const Imx1ProbeOptions& options, Imx1ProbeResult& result) {
+    auto* machine = imx1MachineCreate(rom.data(), uint32_t(rom.size()), entry, fast, options, trace, nullptr, &result);
+    if (!machine) return true;
+    std::printf("state-build=\"%s\" core-revision=%u\n", zodiac_state::buildNote(), imx1MachineStateCoreRevision);
+    bool ok = true;
+    if (stateLoad) {
+        Imx1StateInfo info;
+        const auto reason = zodiac_state::load(machine, stateLoad, stateAnyRevision ? imx1StateAllowCoreRevision : 0, &info);
+        if (!reason.empty()) {
+            std::fprintf(stderr, "Cannot load state %s: %s (state core revision %u, this build %u, %s)\n", stateLoad,
+                         reason.c_str(), info.coreRevision, imx1MachineStateCoreRevision, zodiac_state::buildNote());
+            ok = false;
+        } else {
+            std::printf("state-loaded=%s retired=%llu engine-changed=%u core-revision-differs=%u build-note-differs=%u\n",
+                        stateLoad, (unsigned long long)info.retired, unsigned(info.engineChanged),
+                        unsigned(info.coreRevisionDiffers), unsigned(info.buildNoteDiffers));
+        }
+    }
+    auto run = imx1MachineInspect(machine);
+    const auto advance = [&](uint64_t target) {
+        if (target > run.retiredInstructions)
+            run = imx1MachineRunSlice(machine, uint32_t(target - run.retiredInstructions), options.idleHclkBudget);
+    };
+    for (size_t n = 0; ok && n < stateSaves.size(); ++n) {
+        const auto& save = stateSaves[n];
+        advance(save.after);
+        if (run.retiredInstructions != save.after) {
+            std::fprintf(stderr, "Cannot save state %s: the run is at %llu retired instructions, not %llu\n", save.path,
+                         (unsigned long long)run.retiredInstructions, (unsigned long long)save.after);
+            ok = false;
+            break;
+        }
+        const auto reason = zodiac_state::save(machine, save.path, stateOverwrite);
+        if (!reason.empty()) {
+            std::fprintf(stderr, "Cannot save state %s: %s\n", save.path, reason.c_str());
+            ok = false;
+            break;
+        }
+        std::printf("state-saved=%s retired=%llu\n", save.path, (unsigned long long)save.after);
+    }
+    if (ok) advance(budget);
+    result = run.result;
+    if (ok && options.frameObserver) {
+        uint32_t width = 0, height = 0, first = 0, last = 0;
+        if (const auto* frame = imx1MachineAcquireFrame(machine, width, height, first, last)) {
+            options.frameObserver(options.frameContext, result.graphicsFrameWidth, result.graphicsFrameHeight, frame);
+            imx1MachineAcknowledgeFrame(machine);
+        }
+    }
+    imx1MachineStop(machine);
+    return ok;
+}
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::fprintf(stderr, "Usage: %s ROM [physical|reset|linked] [instruction-budget] [exact|fast] [--bootstrap-peripherals] [--trace=peripherals] [--trace-window=PC/OCCURRENCE] [--idle-hclk-budget=N] [--arm920-icache-index-compatibility] [--lcdc-contrast-only] [--imx1-mmcsd-empty-slot] [--frame-output=PATH] [--diagnostic-snapshot=PREFIX] [--assume-mpll-settled] [--virtual-mpll-retune] [--assume-spll-settled] [--assume-i2c-single-master] [--i2c-eeprom-image=PATH] [--asp-px1-input=high] [--asp-u-sample=WORD] [--rtc-initial-time=DAY:HH:MM:SS] [--cs4-port0-input=BYTE] [--cs4-indexed-input=BANK/INDEX/BYTE] [--cs5-reset-status-input=BYTE] [--graphics-profile=virtual5744-compatible-8mib] [--graphics-virtual-a4-source-over] [--graphics-virtual-packed-mono] [--graphics-raw-axes=FIRST/SECOND] [--graphics-raw-mode1=SAMPLE] [--graphics-mode2-route=default-aux|alternate-mux] [--graphics-raw-aux=SAMPLE] [--graphics-irq-connection=virtual-a13] [--gpio-a-input-masked=VALUE/MASK] [--gpio-input-event=N/PORT/VALUE/MASK] [--gpio-a-input=VALUE] [--gpio-b-input=VALUE] [--gpio-d-input=VALUE] [--ram-mib=32|128]\n", argv[0]);
+        std::fprintf(stderr, "Usage: %s ROM [physical|reset|linked] [instruction-budget] [exact|fast] [--bootstrap-peripherals] [--trace=peripherals] [--trace-window=PC/OCCURRENCE] [--idle-hclk-budget=N] [--idle-stepped] [--save-state FILE --save-after N]... [--save-state-overwrite] [--load-state FILE] [--load-state-any-revision] [--arm920-icache-index-compatibility] [--lcdc-contrast-only] [--imx1-mmcsd-empty-slot] [--frame-output=PATH] [--diagnostic-snapshot=PREFIX] [--assume-mpll-settled] [--virtual-mpll-retune] [--assume-spll-settled] [--assume-i2c-single-master] [--i2c-eeprom-image=PATH] [--asp-px1-input=high] [--asp-u-sample=WORD] [--rtc-initial-time=DAY:HH:MM:SS] [--cs4-port0-input=BYTE] [--cs4-indexed-input=BANK/INDEX/BYTE] [--cs5-reset-status-input=BYTE] [--graphics-profile=virtual5744-compatible-8mib] [--graphics-virtual-a4-source-over] [--graphics-virtual-packed-mono] [--graphics-raw-axes=FIRST/SECOND] [--graphics-raw-mode1=SAMPLE] [--graphics-mode2-route=default-aux|alternate-mux] [--graphics-raw-aux=SAMPLE] [--graphics-irq-connection=virtual-a13] [--gpio-a-input-masked=VALUE/MASK] [--gpio-input-event=N/PORT/VALUE/MASK] [--gpio-a-input=VALUE] [--gpio-b-input=VALUE] [--gpio-d-input=VALUE] [--ram-mib=32|128]\n", argv[0]);
         return 1;
     }
     const char* engine = argc >= 5 ? argv[4] : "exact";
@@ -215,6 +276,27 @@ int main(int argc, char** argv) {
             windowOccurrence = uint32_t(occurrence);
             traceWindow.resize(4096);
         }
+        else if (!std::strcmp(argv[i], "--idle-stepped")) options.idleStepped = true;
+        else if (!std::strcmp(argv[i], "--save-state")) {
+            char* end = nullptr;
+            errno = 0;
+            const char* text = i + 3 < argc ? argv[i + 3] : "";
+            const auto after = std::strtoull(text, &end, 10);
+            if (i + 3 >= argc || !argv[i + 1][0] || std::strcmp(argv[i + 2], "--save-after") || errno || *text < '0' ||
+                *text > '9' || *end || after > imx1ProbeMaximumSteps || (!stateSaves.empty() && after <= stateSaves.back().after)) {
+                std::fprintf(stderr, "Supply --save-state FILE --save-after N, with N rising when repeated\n"); return 1;
+            }
+            stateSaves.push_back({argv[i + 1], after});
+            i += 3;
+        }
+        else if (!std::strcmp(argv[i], "--save-state-overwrite")) stateOverwrite = true;
+        else if (!std::strcmp(argv[i], "--load-state")) {
+            if (stateLoad || i + 1 >= argc || !argv[i + 1][0]) {
+                std::fprintf(stderr, "Supply one --load-state FILE\n"); return 1;
+            }
+            stateLoad = argv[++i];
+        }
+        else if (!std::strcmp(argv[i], "--load-state-any-revision")) stateAnyRevision = true;
         else if (!std::strncmp(argv[i], "--idle-hclk-budget=", 19)) {
             const char* text = argv[i] + 19;
             char* end = nullptr;
@@ -516,6 +598,19 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "GPIO event requires bootstrap, a count below the budget and lanes owned by supplied GPIO baselines\n"); return 1;
     }
     if (windowOccurrence > budget) return 1;
+    const bool states = stateLoad || !stateSaves.empty();
+    if ((stateOverwrite && stateSaves.empty()) || (stateAnyRevision && !stateLoad) ||
+        (!stateSaves.empty() && stateSaves.back().after > budget) || (states && diagnostic.prefix)) {
+        std::fprintf(stderr, "State flags: --save-after is at most the instruction budget, --save-state-overwrite needs "
+                             "--save-state, --load-state-any-revision needs --load-state, and none of them goes with "
+                             "--diagnostic-snapshot\n");
+        return 1;
+    }
+    // The window counts its PC from reset in this process, a loaded run would miss the earlier ones.
+    if (stateLoad && !traceWindow.empty()) {
+        std::fprintf(stderr, "State flags: --load-state does not go with --trace-window\n");
+        return 1;
+    }
     if (!traceWindow.empty())
         std::printf("trace-window pc=%08x occurrence=%u capacity=4096 entry-contexts passive-observer\n",
                     windowPc, windowOccurrence);
@@ -611,8 +706,9 @@ int main(int argc, char** argv) {
                             << (options.graphicsVirtualPackedMono ? "virtual-msb-first-set-bit-foreground-opaque-copy-exclusive-scissor-zero-phase" : "guarded")
                             << "\",\"physical_packed_mono_qualified\":false}\n";
     }
-    const auto result = imx1BootProbe(rom.data(), rom.size(), entry, budget, trace, nullptr,
-                                     !std::strcmp(engine, "fast"), &options);
+    Imx1ProbeResult result{};
+    if (!states) result = imx1BootProbe(rom.data(), rom.size(), entry, budget, trace, nullptr, !std::strcmp(engine, "fast"), &options);
+    else if (!runWithStates(rom, entry, budget, !std::strcmp(engine, "fast"), options, result)) return 1;
     if (!traceWindow.empty())
         std::printf("trace-window-emitted=%u matched-entries=%u\n", windowEmitted, windowMatches);
     std::printf("stop=%s step=%llu pc=%08x instruction=%0*x address=%08x size=%u value=%08x operand=%08x width=%u\n",
