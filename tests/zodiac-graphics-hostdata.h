@@ -260,7 +260,7 @@ inline void checkPackedMono(const Imx1Cs5Configuration& boot, const Imx1Graphics
     const auto readyCommands = commands;
     const uint32_t fg = 0x001f, bg = 0xffe0, base = 0xf51000;
     // RGB565 host words first, then the GMC-only change the producer emits for format 0.
-    auto header = [&](uint32_t topLeft, uint32_t bottomRight, uint32_t gmc = 0x579884df) {
+    auto header = [&](uint32_t topLeft, uint32_t bottomRight, uint32_t gmc = 0x579804df) {
         return std::vector<uint32_t>{0x4025941b,0x5798b4df,0x00cc0b00,0x41b,gmc,
             0x40200c70,bottomRight,base,0x402,0x140,0x46f,topLeft,0x490,0xabcd0000u|fg,0x491,0x12340000u|bg};
     };
@@ -332,10 +332,10 @@ inline void checkPackedMono(const Imx1Cs5Configuration& boot, const Imx1Graphics
     assert(payload.size() == 252 && whole[16] == 0xc0fd1900 && whole[18] == 0x00540060);
     assert(!Imx1Cs5Configuration(Imx1GraphicsProfile::strict,false,true).packedMonoEnabled());
     {
-        // The mix shadow follows GMC 579884df only under the policy. A solid fill after it
+        // The mix shadow follows GMC 579804df only under the policy. A solid fill after it
         // still sees the boot PATCOPY mix when the policy is off.
         auto candidate = ready; auto work = readyCommands;
-        const auto status = submit({0x41b,0x579884df,0x41b,0x55e0a4df,0xc0011a00,0,0x00020001},
+        const auto status = submit({0x41b,0x579804df,0x41b,0x55e0a4df,0xc0011a00,0,0x00020001},
                                    candidate,work,0x200b0200);
         assert((status == A::ok) == !boot.packedMonoEnabled());
         // A packet cut off before its coordinates is a sequence stop either way.
@@ -418,10 +418,12 @@ inline void checkPackedMono(const Imx1Cs5Configuration& boot, const Imx1Graphics
     { auto bad = packet(header(0x00050020,0x00060040),32,5,32,2,two); bad.pop_back(); reject(bad); }
     { auto bad = packet(header(0x00050020,0x00060040),32,5,32,2,two); bad.push_back(0); reject(bad); }
     // Source field 1, other ROPs and other datatype words are outside the declared policy.
-    reject(packet(header(0x00050020,0x00060040,0x579894df),32,5,32,2,two));
-    { auto bad = packet(header(0x00050020,0x00060040,0x579894df),32,5,32,2,std::vector<uint32_t>(32,0));
+    reject(packet(header(0x00050020,0x00060040,0x579814df),32,5,32,2,two));
+    { auto bad = packet(header(0x00050020,0x00060040,0x579814df),32,5,32,2,std::vector<uint32_t>(32,0));
       bad[16] = 0xc0211900; reject(bad); }
-    reject(packet(header(0x00050020,0x00060040,0x57e084df),32,5,32,2,two));
+    reject(packet(header(0x00050020,0x00060040,0x57e004df),32,5,32,2,two));
+    // 579884df was a static guess that the run did not show.
+    reject(packet(header(0x00050020,0x00060040,0x579884df),32,5,32,2,two));
     for (uint32_t datatype : {0x40000c04u,0x00000d04u,0x40000d06u}) {
         auto bad = header(0x00050020,0x00060040);
         bad.insert(bad.end(),{0x4b1,datatype});
@@ -433,6 +435,39 @@ inline void checkPackedMono(const Imx1Cs5Configuration& boot, const Imx1Graphics
       bad[6] = 0x00070040; auto candidate = ready; auto work = readyCommands;
       assert(submit(bad,candidate,work) == A::ok); }
     for (unsigned x = 0; x < 320; ++x) for (unsigned y = 0; y < 110; ++y) assert(read(x,y) == 0x1234);
+    {
+        // Replay of the 9 November 2026 empty-card run's terminal submission (steps 411540176 on):
+        // its eleven ring words after the run's shadow state, with a generated payload.
+        auto candidate = ready; auto work = readyCommands;
+        const std::vector<uint32_t> shadow{0x401,0x100000,0x402,0x1e0,0x4025941b,0x5798b4df,0x00cc0b00,
+            0x4b1,0x40030d04,0x472,0x3f,0x488,4,0x4a0,0,0x4a1,0};
+        assert(submit(shadow,candidate,work,0x200b0200) == A::ok);
+        candidate.startEngine(work.duration());
+        assert(candidate.advanceCpuCycles(uint32_t(work.duration())) && work.complete(candidate,eim,memory) == A::ok);
+        std::vector<uint32_t> witness{0x4024841b,0x579804df,0x00000000,0x40237c91,0x0000ffff,0x00de014e,
+            0x00000470,0x013201a2,0xc0fd1900,0x00de014e,0x00540060};
+        witness.insert(witness.end(),payload.begin(),payload.end());
+        const uint32_t begin = 64+uint32_t(shadow.size());
+        for (unsigned i = 0; i < witness.size(); ++i) put(begin+i,witness[i]);
+        auto pixel = [&](uint32_t x, uint32_t y, bool write = false, uint32_t v = 0) {
+            assert(memory.accessGpu(ready,eim,0x100000+y*960+x*2,2,write,v) == A::ok);
+            return v;
+        };
+        for (unsigned y = 221; y < 307; ++y) for (unsigned x = 333; x < 431; ++x) pixel(x,y,true,0x1234);
+        uint32_t producer = begin+uint32_t(witness.size());
+        assert(candidate.access(eim,0x200ac300,0x16010220,4,true,producer) == A::ok);
+        assert(work.prepare(candidate,eim,memory) == A::ok);
+        assert(work.duration() == witness.size()+1+84*84);
+        candidate.startEngine(work.duration());
+        assert(candidate.advanceCpuCycles(uint32_t(work.duration())) && work.complete(candidate,eim,memory) == A::ok);
+        assert(candidate.engineState().emptyRing());
+        // 84x84 at 334,222 on the 480 pitch: set bits in register 490 (0), clear bits in 491 (ffff).
+        for (unsigned y = 0; y < 84; ++y) {
+            for (unsigned x = 0; x < 84; ++x) assert(pixel(334+x,222+y) == (bit(x,y) ? 0u : 0xffffu));
+            for (unsigned x : {333u,418u,429u,430u}) assert(pixel(x,222+y) == 0x1234);
+        }
+        for (unsigned x = 333; x < 431; ++x) assert(pixel(x,221) == 0x1234 && pixel(x,306) == 0x1234);
+    }
     std::puts("PASS: packed 1bpp host rows, 84 in 96 with split parts, under the declared virtual policy "
               "(MsbFirst, SetBitForeground, OpaqueCopy, ExclusiveScissor, ZeroPhase)");
 }

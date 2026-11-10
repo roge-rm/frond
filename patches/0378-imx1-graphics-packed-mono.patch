@@ -132,7 +132,7 @@
          if (reg == 0x41b && known[0x4b2] &&
 -            (value == 0x5798b4df || value == 0x4598b4df || value == 0x55e0b4df || value == 0xd798d4df || value == 0x5598b4df))
 +            (value == 0x5798b4df || value == 0x4598b4df || value == 0x55e0b4df || value == 0xd798d4df || value == 0x5598b4df ||
-+             (packedMono && value == 0x579884df)))
++             (packedMono && value == 0x579804df)))
              values[0x4b2] = (values[0x4b2] & ~0x01ff0700u) |
                  ((value >> 1) & 0x00ff0000u) | ((value >> 17) & 0x700u) | ((value >> 7) & 0x01000000u);
          return true;
@@ -167,9 +167,9 @@
 -        if (host && !a4 && (gmc != 0x5798b4df || values[0x4b2] != 0x00cc0b00 ||
 +        if (host && !a4 && !mono && (gmc != 0x5798b4df || values[0x4b2] != 0x00cc0b00 ||
                       values[0x4b1] != 0x40030d04 || values[0x472] != 0x3f)) return A::sideEffect;
-+        // Virtual admission: the RGB565 host words with the producer's source field 0.
++        // Admitted GMC and shadow words are those of the 9 November 2026 empty-card run.
 +        // The producer changes its datatype shadow without emitting it, so that field is not compared.
-+        if (mono && (gmc != 0x579884df || values[0x4b2] != 0x00cc0b00 ||
++        if (mono && (gmc != 0x579804df || values[0x4b2] != 0x00cc0b00 ||
 +                     (values[0x4b1] & ~0x00070000u) != 0x40000d04 || values[0x472] != 0x3f)) return A::sideEffect;
          if (copy && (gmc != (plain ? 0x5598b4dfu : 0x4598b4dfu) || values[0x4b2] != 0x00cc0a00 ||
                       values[0x4b1] != 0x40030d04 || values[0x472] != 0x3f ||
