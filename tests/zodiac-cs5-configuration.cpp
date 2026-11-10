@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <initializer_list>
 #include "imx1_cs5_configuration.h"
+#include "zodiac-graphics-setup.h"
 
 int main() {
     using Access = Imx1BootstrapAccess;
@@ -55,5 +56,27 @@ int main() {
         configure(0x00220028, 0x3e01);
         reject(pc, 0x16000010, 1, false, 0x76543210, Access::sequence);
     }
-    std::puts("PASS: both native aperture paths, exact defaults transaction, unknown full identity/revision and transactional EIM/width/PC/value guards");
+    {
+        // b30, the chip's USB function register: reads 0 and takes 0 once the chip is set up (marked assumption).
+        Imx1Eim wired;
+        uint32_t upper = 0x3e00, lower = 0x11111e01;
+        assert(wired.access(0x00220028, 4, true, upper) == Imx1EimAccess::ok);
+        assert(wired.access(0x0022002c, 4, true, lower) == Imx1EimAccess::ok);
+        Imx1Cs5Configuration chip(Imx1GraphicsProfile::virtual5744Compatible8MiB), plain;
+        uint32_t value = 0x76543210;
+        assert(chip.access(wired, 0x200c5348, 0x16010b30, 4, false, value) == Access::sequence && value == 0x76543210);
+        assert(plain.access(wired, 0x200c5348, 0x16010b30, 4, false, value) == Access::unmapped);
+        configureGraphicsInterface(chip, wired);
+        assert(chip.access(wired, 0x200c5348, 0x16010b30, 4, false, value) == Access::ok && value == 0);
+        assert(chip.access(wired, 0x200c537c, 0x16010b30, 4, true, value) == Access::ok);
+        for (uint32_t on : {1u, 0x400u, 0x401u, 0x80000000u}) {
+            value = on;
+            assert(chip.access(wired, 0x20177e60, 0x16010b30, 4, true, value) == Access::sideEffect);
+        }
+        value = 0;
+        assert(chip.access(wired, 0x200c5348, 0x16010b30, 2, false, value) == Access::width);
+        value = 0x76543210;
+        assert(chip.access(wired, 0x200c5348, 0x16010b30, 4, false, value) == Access::ok && value == 0);
+    }
+    std::puts("PASS: both native aperture paths, exact defaults transaction, unknown full identity/revision and transactional EIM/width/PC/value guards, b30 reads and takes 0");
 }

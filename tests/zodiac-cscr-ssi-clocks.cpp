@@ -171,6 +171,26 @@ void guards() {
         write(off, ssi + 8, 0x9900); write(off, dma + 8, 0x7ff); write(off, ssi + 0xc, 0xe8);
         write(off, cgm + 32, 0x007f0012, A::sideEffect);
         write(off, cgm, 0x57003c03, A::sideEffect, 0);
+        {
+            // The ROM's display off (200cefd0, 2009f0c8, then 200845c4): transmit DMA and TE off with SSI1 left
+            // on and channel 10 set up, then HCLK slowed. With no burst under way it asks for no beat.
+            Imx1Bootstrap quiet; configure(quiet);
+            write(quiet, ssi + 8, 0); write(quiet, ssi + 8, 0x9b00);
+            write(quiet, dma, 1); write(quiet, dma + 8, 0x3ff);
+            write(quiet, ch, 0x300000); write(quiet, ch + 4, ssi); write(quiet, ch + 8, 4);
+            write(quiet, ch + 12, 0x2088); write(quiet, ch + 16, 16); write(quiet, ch + 20, 8);
+            write(quiet, ssi + 0xc, 0xe8);
+            write(quiet, ch + 12, 0x2089);
+            quiet.advanceCpuCycles(64, 3, true);
+            assert(quiet.pcmState().dmaActive && quiet.pcmDmaRemaining() == 4);
+            write(quiet, ssi + 8, 0x9900);
+            write(quiet, cgm, 0x5700ac03);
+            quiet.advanceCpuCycles(64, 3, true);
+            assert(quiet.pcmState().dmaActive && quiet.pcmDmaRemaining() == 4 && quiet.clockStatus() == A::ok);
+            // Asking again with HCLK slowed is refused as before.
+            write(quiet, ssi + 0xc, 0x2e8);
+            write(quiet, cgm, 0x57000003, A::sideEffect);
+        }
         write(off, ssi + 8, 0x9800); write(off, ssi + 0x28, 0x40);
         assert(off.pcmState().dmaActive);
         write(off, cgm + 32, 0x007f0012);
