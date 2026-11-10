@@ -102,6 +102,57 @@ struct FakePort : ZodiacInputPort {
     bool setStick(int x, int y) override { if (refuse) return false; stickX = x; stickY = y; return true; }
 };
 
+// The ROM's stick driver samples every 30 ms and drops a sample over 200 counts from the last one
+// (20095de6). Whatever the host does and however often input is pumped, no sample is dropped.
+void stickRamp() {
+    constexpr uint64_t sample = ZodiacInput::ticksPerSecond * 30 / 1000;
+    const int moves[][2] = {{511, 0}, {0, 0}, {-511, 511}, {511, -511}, {0, 300}, {37, -420}, {0, 0}};
+    for (const uint64_t pumpTicks : {1u, 33u, 200u, 328u, 491u, 492u, 546u, 700u, 983u, 2000u})
+        for (uint64_t phase = 0; phase < sample; phase += 97) {
+            FakePort port;
+            ZodiacInput input;
+            input.pump(port);
+            assert(port.stickX == 0 && port.stickY == 0 && input.stickSettled());
+            int lastX = 0, lastY = 0, steps = 0;
+            uint64_t nextSample = phase, started = 0;
+            // The driver's samples up to now, or only the ones before it.
+            const auto sampled = [&](bool now) {
+                for (; nextSample + (now ? 0 : 1) <= input.time(); nextSample += sample) {
+                    assert(std::abs(port.stickX - lastX) <= 200 && std::abs(port.stickY - lastY) <= 200);
+                    lastX = port.stickX; lastY = port.stickY;
+                }
+            };
+            for (const auto& move : moves) {
+                input.stick(move[0], move[1]);
+                started = input.time();
+                while (!input.stickSettled()) {
+                    sampled(false);
+                    input.pump(port);
+                    sampled(true);
+                    assert(std::abs(port.stickX) <= 511 && std::abs(port.stickY) <= 511);
+                    if (!input.stickSettled()) input.advance(pumpTicks);
+                    assert(++steps < 100000);
+                }
+                assert(port.stickX == move[0] && port.stickY == move[1]);
+                // Rest to full in six steps, 75 ms from the first, when input is pumped often enough.
+                if (pumpTicks == 1 && &move == &moves[0])
+                    assert(input.time() - started >= 5 * ZodiacInput::stickStepTicks &&
+                           input.time() - started <= 6 * ZodiacInput::stickStepTicks);
+                // The driver's next samples see the stick where it now is.
+                input.advance(2 * sample);
+                sampled(true);
+                assert(lastX == move[0] && lastY == move[1]);
+            }
+        }
+    // A machine that refuses the stick for now gets the same step later.
+    FakePort port;
+    ZodiacInput input;
+    input.pump(port);
+    input.stick(511, 0);
+    port.refuse = true; input.advance(1000); input.pump(port); assert(port.stickX == 0);
+    port.refuse = false; input.pump(port); assert(port.stickX == 100);
+}
+
 void holds() {
     constexpr uint64_t hold = ZodiacInput::minimumHoldTicks;
     FakePort port;
@@ -134,8 +185,11 @@ void holds() {
     assert(input.pen(port, true, 10, 20) && port.penDown && !input.pen(port, false, 0, 0));
     assert(input.pen(port, true, 30, 40) && port.penX == 30);
     input.advance(hold); assert(input.pen(port, false, 0, 0) && !port.penDown && port.penX == 30 && port.penY == 40);
-    // The stick is sent when it changes.
-    input.stick(100, -200); input.pump(port); assert(port.stickX == 100 && port.stickY == -200);
+    // The stick moves a step at a time towards where the host has it.
+    input.stick(100, -200); input.pump(port); assert(port.stickX == 100 && port.stickY == -100 && !input.stickSettled());
+    input.pump(port); assert(port.stickY == -100);
+    input.advance(ZodiacInput::stickStepTicks - 1); input.pump(port); assert(port.stickY == -100);
+    input.advance(1); input.pump(port); assert(port.stickX == 100 && port.stickY == -200 && input.stickSettled());
     // A load with a key and the pen down in the machine: both are let go there, the host's keys
     // count as up, and input waits until that is done.
     assert(input.key(port, 2, true) && input.pen(port, true, 5, 6));
@@ -223,6 +277,7 @@ int main() {
     rotation();
     pen();
     stick();
+    stickRamp();
     eeprom();
     holds();
     buttonsFromReset();
