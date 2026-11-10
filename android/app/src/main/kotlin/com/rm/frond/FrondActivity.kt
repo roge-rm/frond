@@ -46,6 +46,8 @@ open class FrondActivity : SDLActivity() {
     private lateinit var settings: Settings
     private var machineSettings = MachineSettings()
     private var savingNote: TextView? = null
+    // The bar's and keyboard button's visibility as leave() found them, for Keep running after a failed save.
+    private var shownBeforeLeave: Pair<Int, Int>? = null
     // The core's loopback gdb port while the debugger is on (Settings), else null, and the socket holding it.
     private var debugPort: Int? = null
     private var debugReservation: java.net.Socket? = null
@@ -494,6 +496,7 @@ open class FrondActivity : SDLActivity() {
         runOnUiThread {
             controller.releaseAll()
             hideKeyboard()
+            shownBeforeLeave = (barView?.visibility ?: View.VISIBLE) to (keyboardButton?.visibility ?: View.GONE)
             keyboardButton?.visibility = View.GONE
             barView?.visibility = View.GONE
             savingNote?.visibility = View.VISIBLE
@@ -1191,13 +1194,24 @@ open class FrondActivity : SDLActivity() {
         AlertDialog.Builder(this)
             .setTitle("Couldn't save the session")
             .setMessage(message)
-            .setPositiveButton("Keep running") { _, _ ->
-                leaving = false
-                savingNote?.visibility = View.GONE
-            }
+            .setPositiveButton("Keep running") { _, _ -> keepRunning() }
             .setNegativeButton("Quit without saving") { _, _ -> Thread(::quit, "FrondQuit").start() }
             .setCancelable(false)
             .show()
+    }
+
+    // Back to the running machine after a failed save: the bar, the keyboard button and the Palm's
+    // focus as leave() found them.
+    private fun keepRunning() {
+        leaving = false
+        savingNote?.visibility = View.GONE
+        layoutBar()
+        shownBeforeLeave?.let { (bar, keyboard) ->
+            barView?.visibility = bar
+            keyboardButton?.visibility = keyboard
+        }
+        shownBeforeLeave = null
+        if (hasWindowFocus()) SDLActivity.nativeFocusChanged(true)
     }
 
     override fun onDestroy() {
