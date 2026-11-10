@@ -18,9 +18,11 @@ enum class DanaPointer(val label: String, val arg: String) {
 }
 
 // Only user choices belong in the session. Density and attached keyboards are live host state.
+// Zoom is guest pixels per dp, so 1x is already 560 dp wide; Fit is the default so the wide
+// screen fits a phone's width, centred.
 data class DanaView(
     val keyboard: DanaKeyboard = DanaKeyboard.AUTO,
-    val zoom: DanaZoom = DanaZoom.TWO,
+    val zoom: DanaZoom = DanaZoom.FIT,
     val panX: Double = 0.0,
     val panY: Double = 0.0,
     val pointer: DanaPointer = DanaPointer.TOUCH,

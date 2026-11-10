@@ -15,6 +15,8 @@ class DanaViewTest {
         val fallback = MachineSettings(danaView = DanaView(zoom = DanaZoom.THREE))
         assertEquals(fallback.danaView, MachineSettings.from(JSONObject(), fallback).danaView)
         assertEquals(DanaView(), MachineSettings.from(JSONObject()).danaView)
+        // A new Dana fits the wide screen to the phone instead of starting zoomed past its width.
+        assertEquals(DanaZoom.FIT, MachineSettings().danaView.zoom)
         val invalid = JSONObject().put("keyboard", "future").put("zoom", "7").put("panX", -1).put("panY", 161).put("pointer", "pan")
         assertEquals(DanaView(zoom = DanaZoom.THREE, pointer = DanaPointer.PAN), DanaView.from(invalid, fallback.danaView))
         invalid.put("panX", "NaN").put("panY", "Infinity")
