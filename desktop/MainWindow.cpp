@@ -686,7 +686,9 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         // The end of the emulator log, since the log button goes away when the core stops.
         auto lines = log->toPlainText().split('\n');
         while (!lines.isEmpty() && lines.last().trimmed().isEmpty()) lines.removeLast();
-        failure(message, lines.mid(qMax(0, int(lines.size()) - 40)).join('\n'));
+        const auto details = lines.mid(qMax(0, int(lines.size()) - 40)).join('\n');
+        const auto refused = frondSessions::refusal(details);
+        failure(refused.isEmpty() ? message : refused, details);
     });
     connect(&client, &DesktopClient::stalled, this, [this] {
         forceButton->show(); runningBar->setForceStop(true); notify(tr("The emulator is not responding. Waiting for it to finish…"), 0);

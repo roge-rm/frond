@@ -187,6 +187,14 @@ class SessionStoreTest : public QObject {
     void initTestCase() { QVERIFY(directory.isValid()); QVERIFY(QDir().mkpath(folder())); }
     void cleanup() { QDir(folder()).removeRecursively(); QDir().mkpath(folder()); }
 
+    void refusalReason() {
+        // A load refusal from the core is the failure's main text, not only under Details.
+        QCOMPARE(frondSessions::refusal("args: x\nsession refused: linked card committed history missing or invalid\nexit 1"),
+                 QString("Frond couldn't open this session: a card's saved changes are missing or don't match the session."));
+        QCOMPARE(frondSessions::refusal("session refused: device alphasmart-dana doesn't match\n"),
+                 QString("Frond couldn't open this session: device alphasmart-dana doesn't match."));
+        QVERIFY(frondSessions::refusal("Segmentation fault\n").isEmpty());
+    }
     void headers() {
         write(folder() + "/a.frond", header(6, "palm-tx"));
         const auto h = readHeader(folder() + "/a.frond");

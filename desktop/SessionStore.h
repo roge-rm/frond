@@ -757,6 +757,20 @@ inline bool applySdJournalCopy(const QString& journalPath, const QString& sdPath
 
 // What a stopped job returns, so the caller shows no failure.
 inline QString cancelledText() { return QStringLiteral("Cancelled."); }
+// The core's reason for refusing a session at load, from the end of its log, as the main text of
+// the failure; empty when the log has none.
+inline QString refusal(const QString& log) {
+    static const QString prefix = QStringLiteral("session refused: ");
+    const auto lines = log.split('\n');
+    for (auto i = lines.size() - 1; i >= 0; --i) {
+        if (!lines[i].startsWith(prefix)) continue;
+        auto reason = lines[i].mid(prefix.size()).trimmed();
+        if (reason.startsWith(QStringLiteral("linked card committed history")))
+            reason = QStringLiteral("a card's saved changes are missing or don't match the session");
+        return QStringLiteral("Frond couldn't open this session: %1.").arg(reason);
+    }
+    return {};
+}
 
 // The library's progress over a CopyProgress, which may be empty.
 inline frondStorage::Progress storageProgress(const std::function<bool(qint64, qint64)>& progress) {
