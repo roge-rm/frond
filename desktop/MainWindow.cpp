@@ -2624,6 +2624,8 @@ void MainWindow::openInternal() {
     connect(internalFiles, &QDialog::finished, this, [this] { refresh(); });
     internalFiles->show();
     refresh();
+    // The window asked for the list while it was being built, before internalFiles was set.
+    listInternal();
 }
 // Asks for db-list for the Internal window once the core is free.
 void MainWindow::listInternal() {
