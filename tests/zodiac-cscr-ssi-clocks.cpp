@@ -291,8 +291,32 @@ void wholePair() {
 #endif
 }
 
+// The ASP converts on PERCLK2 (manual table 12-6). With the ROM's clocks, System PLL 96 MHz, HCLK /1,
+// PERCLK2 /2 and ASP_CLKDIV 3, a 6-count slot is 1260 * 6 * 4 PERCLK2 cycles, 60480 System PLL clocks.
+// The idle code's HCLK /16 write (20084608) lands mid-conversion and doesn't retime it.
+void aspOnPerclk2() {
+    constexpr uint32_t asp = 0x215000;
+    Imx1Bootstrap b(true, true, 0x8000); configure(b);
+    write(b, asp + 0x2c, 3); write(b, asp + 0x14, 0x1814); write(b, asp + 0x10, 0x02003001);
+    write(b, 0x223008, 33);
+    write(b, asp + 0x10, 0x02003003);
+    // Past the 30240 clocks an HCLK-timed slot would take.
+    b.advanceHclkCycles(30300);
+    assert(read(b, asp + 0x1c) == 0);
+    // A PERCLK2 divider change would retime the conversion and stays refused.
+    write(b, cgm + 32, 0x00100032, A::sideEffect, 0);
+    write(b, cgm, 0x57003c03, A::ok, 0);
+    assert(read(b, cgm) == 0x57003c03);
+    // 30180 System PLL clocks are left: 1886.25 HCLK periods at /16.
+    b.advanceHclkCycles(1885);
+    assert(read(b, asp + 0x1c) == 0);
+    b.advanceHclkCycles(2);
+    assert(read(b, asp + 0x1c) == 1 && b.clockStatus() == A::ok);
+    write(b, cgm + 32, 0x00100032, A::ok, 0);
+}
+
 }
 int main() {
-    serialDomains(); fastBusDomains(); latentPeripheralPhase(); guards(); wholePair();
-    std::puts("PASS: independent SSI/PERCLK/BCLK domains, FastBus live dividers, retained fractions, DMA guards and equal-time state");
+    serialDomains(); fastBusDomains(); latentPeripheralPhase(); guards(); wholePair(); aspOnPerclk2();
+    std::puts("PASS: independent SSI/PERCLK/BCLK domains, FastBus live dividers, retained fractions, DMA guards, equal-time state and the ASP on PERCLK2");
 }

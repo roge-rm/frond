@@ -1,0 +1,87 @@
+--- a/src/uarm/uarm/imx1_asp.cpp
++++ b/src/uarm/uarm/imx1_asp.cpp
+@@ -122,11 +122,11 @@
+     capturedUp = automatic() && !calibration() && slot == 3 && !contactDown();
+ }
+ 
+-void Imx1Asp::advance(uint64_t hclkCycles) {
++void Imx1Asp::advance(uint64_t perclk2Cycles) {
+     const auto divide = clockDivider();
+     if (!remaining || !divide) return;
+-    uint64_t clocks = hclkCycles / divide + (hclkCycles % divide + phase) / divide;
+-    phase = (hclkCycles % divide + phase) % divide;
++    uint64_t clocks = perclk2Cycles / divide + (perclk2Cycles % divide + phase) / divide;
++    phase = (perclk2Cycles % divide + phase) % divide;
+     while (remaining && clocks >= remaining) {
+         clocks -= remaining;
+         remaining = 0;
+--- a/src/uarm/uarm/imx1_asp.h
++++ b/src/uarm/uarm/imx1_asp.h
+@@ -24,12 +24,13 @@
+     // Execution-thread transaction. In-flight slots keep their captured input.
+     Imx1AspAccess replacePenInputs(const Imx1AspPenInputs& inputs);
+     const Imx1AspPenInputs& currentPenInputs() const { return penInputs; }
+-    void advance(uint64_t hclkCycles);
++    // The pen ADC clock is divided from PERCLK2 (manual table 12-6), so HCLK and BCLK_DIV don't time it.
++    void advance(uint64_t perclk2Cycles);
+     uint64_t futureInterrupts() const;
+-    // HCLK cycles until the running slot or pause ends.
+-    uint64_t idleQuietHclk() const {
++    // PERCLK2 cycles until the running slot or pause ends, 0 when nothing runs.
++    uint64_t idleQuietPerclk2() const {
+         const uint64_t divide = clockDivider();
+-        if (!remaining || !divide) return UINT64_MAX;
++        if (!remaining || !divide) return 0;
+         return phase < divide ? remaining * divide - phase : 1;
+     }
+     bool converting() const { return remaining != 0; }
+--- a/src/uarm/uarm/imx1_boot_probe.h
++++ b/src/uarm/uarm/imx1_boot_probe.h
+@@ -251,7 +251,7 @@
+ // budget and idleStepped may differ. A failed check or load leaves the machine as it was.
+ // Saving drops translated code, so the saved and the loaded machine also agree on jitBlocks.
+ // Bump the revision in any patch that changes guest-visible i.MX1 or ARM920 behaviour or a state() list.
+-inline constexpr uint32_t imx1MachineStateCoreRevision = 742;
++inline constexpr uint32_t imx1MachineStateCoreRevision = 743;
+ enum class Imx1StateStatus {
+     ok, notAtBoundary, unsupportedConfiguration, truncated, badMagic, badFormatVersion, coreRevisionMismatch,
+     layoutMismatch, corruptSection, missingSection, romMismatch, optionsMismatch, busMismatch, invalidValue
+--- a/src/uarm/uarm/imx1_bootstrap.cpp
++++ b/src/uarm/uarm/imx1_bootstrap.cpp
+@@ -75,7 +75,8 @@
+     else if (pwm.enabled())
+         quiet = std::min(quiet, imx1StepsUntilDivided(pwm.idleQuietCycles(), cgm.perclk1Divider(), perclk1Phase, bus));
+     quiet = std::min(quiet, i2c.idleQuietHclk());
+-    quiet = std::min(quiet, asp.idleQuietHclk());
++    if (const auto cycles = asp.idleQuietPerclk2())
++        quiet = std::min(quiet, imx1StepsUntilDivided(cycles, cgm.perclk2Divider(), perclk2Phase, bus));
+     if (sysctrl.dmaClockEnabled() && dmaResetClocks) quiet = std::min<uint64_t>(quiet, dmaResetClocks);
+     quiet = std::min(quiet, pcmIdleQuietHclk());
+     if (const auto cycles = mmcsd.idleQuietPerclk2())
+@@ -129,7 +130,6 @@
+     const uint64_t busClocks = systemClocks + bclkPhase;
+     i2c.advance(busClocks / cgm.busDivider());
+     pwm.advance(busClocks / cgm.busDivider());
+-    asp.advance(busClocks / cgm.busDivider());
+     if (sysctrl.dmaClockEnabled())
+         dmaResetClocks -= uint32_t(std::min<uint64_t>(dmaResetClocks, busClocks / cgm.busDivider()));
+     bclkPhase = busClocks % cgm.busDivider();
+@@ -137,6 +137,7 @@
+     if (lcdcContrastOnly && (rmcr & 2) && (pwmr & 0x100))
+         contrastPhase = (contrastPhase + contrastClocks / cgm.perclk2Divider()) & 255;
+     mmcsd.advancePerclk2(contrastClocks / cgm.perclk2Divider());
++    asp.advance(contrastClocks / cgm.perclk2Divider());
+     perclk2Phase = contrastClocks % cgm.perclk2Divider();
+     const uint64_t clocks = systemClocks + perclk1Phase;
+     const uint32_t divider = cgm.perclk1Divider();
+@@ -716,7 +717,9 @@
+             if (cpuClockMode == 3 && peripheralChanged) return Imx1BootstrapAccess::sideEffect;
+             if (peripheralChanged && (timer1.enabled() || timer2.enabled()))
+                 return Imx1BootstrapAccess::sideEffect;
+-            if (busChanged && asp.converting()) return Imx1BootstrapAccess::sideEffect;
++            // The ASP runs on PERCLK2 (table 12-6), so only that divider matters to a conversion. The ROM's
++            // idle code drops HCLK to /16 with the pen down and a conversion under way (20084608).
++            if (perclk2Changed && asp.converting()) return Imx1BootstrapAccess::sideEffect;
+             if (peripheralChanged && pwm.usesPerclk1())
+                 return Imx1BootstrapAccess::sideEffect;
+             // A character, a software reset or an idle count under way is timed in PERCLK1.
