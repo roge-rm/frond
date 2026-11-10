@@ -77,23 +77,23 @@ The T|X plays videos in Media. On a slower computer use the Fast engine for it.
 
 <img src="doc/images/android-home.png" width="200" alt="The Frond home screen listing all seven devices">
 
-Each Palm you run is a session on the home screen, where you can rename, duplicate, export, import and delete them. There's no autosave, so a crash loses anything since the last save. On Linux closing the window saves it, Save and Stop goes back to the list and Save a copy… keeps a separate snapshot. Sessions have your firmware and personal data in them, so keep them to yourself.
+Each Palm you run is a session on the home screen. You can rename one, duplicate it, export it, import one or delete it. There's no autosave, so a crash loses anything since the last save. On Linux, closing the window saves. Save and Stop goes back to the list. Save a copy… keeps a separate snapshot. A session has your firmware and your data in it, so keep it to yourself.
 
-Hard reset erases the Palm, and Save first saves it before you do. The T|X, E2 and IIIx ask first (press up to erase), the Zire erases straight away.
+Hard reset erases the Palm. Save first saves it before you do. The T|X, E2 and IIIx ask first (press up to erase). The Zire erases straight away.
 
 ## Screen
 
 <img src="doc/images/desktop-tx.png" width="300" alt="The Palm T|X on Linux at 2x, with the running bar">
 
-On Linux pick a scale from 1× to 2× in 0.25 steps, it starts at the largest that fits. On Android the screen fits the phone, in whole steps or filling it, and follows the phone or stays in portrait or landscape. Pixels stay sharp, or turn on Smooth pixels to soften them.
+On Linux the scale goes from 1× to 2× in steps of 0.25, and it starts at the largest that fits. On Android the screen fits the phone, in whole steps or filling it, and it can follow the phone or stay portrait or landscape. Pixels stay sharp. Smooth pixels softens them.
 
-While a machine runs, the bar along the top has Applications, Storage, Sound, Power and a menu with the rest. On Linux, Applications, Storage, Display and Connections open as a panel beside the Palm. On Android they open as a sheet, and Hide bar leaves a small handle at the top.
+While a machine runs, the bar along the top has Applications, Storage, Sound, Power and a menu with the rest. On Linux, Applications, Storage, Display and Connections open as a panel beside the Palm. On Android they open as a sheet. Hide bar leaves a small handle at the top.
 
 ## Settings
 
 <img src="doc/images/desktop-edit-settings.png" width="200" alt="Edit settings with the Speed list open, Original or Uncapped">
 
-Each machine has its own display, sound, speed and connection settings. Set them when you add it, or with Edit settings while it's stopped. On Android most are in the Display sheet while it runs too.
+Each machine has its own display, sound, speed and connection settings. Set them when you add it, or with Edit settings while it's stopped. On Android most of them are in the Display sheet while it runs too.
 
 - Speed is Original or Uncapped. Original runs the machine at its real speed, and Uncapped lets your computer or phone run it as fast as it can.
 - Engine is Exact or Fast. Fast is the JIT, and the 68k machines (IIIx and both Danas) only have Exact.
@@ -102,21 +102,21 @@ See [Settings](doc/using-frond.md#settings).
 
 ## Buttons
 
-The buttons under the screen and the silkscreens can be clicked or tapped. On a keyboard the arrow keys are the five-way, Enter selects and F1 to F4 are the app buttons. Help → Hardware Keyboard Controls lists the rest. On Android game controllers press the Palm's buttons, and you can change which does what in Settings.
+The buttons under the screen and the silkscreen can be clicked or tapped. On a keyboard the arrow keys are the five-way, Enter selects and F1 to F4 are the app buttons. Help → Hardware Keyboard Controls lists the rest. On Android a game controller presses the Palm's buttons. You can change which one does what in Settings.
 
-The TG50 has its keyboard, jog wheel, Home, Back and Hold. Hold locks the controls and turns off the screen, and audio keeps playing.
+The TG50 has its keyboard, jog wheel, Home, Back and Hold. Hold locks the controls and turns the screen off. Audio keeps playing.
 
-You can also type with an emulated Palm infrared keyboard, if Palm's keyboard driver is installed.
+You can also type with an emulated Palm infrared keyboard, once Palm's keyboard driver is installed.
 
 ## Apps and cards
 
 <img src="doc/images/android-internal-files.png" width="200" alt="The T|X's internal databases listed in Files on Android">
 
-Install PRC and PDB files with Install…, in the Applications panel on Linux or sheet on Android. Launch, Export and Delete are on each app's row.
+Install PRC and PDB files with Install…, from the Applications panel on Linux or the sheet on Android. Each app's row has Launch, Export and Delete.
 
-Cards are kept in a Cards drawer and sit in one machine at a time. Frond makes and imports SD card images up to 2 GB (1 GB on the E2 and E3), and Files copies files between your computer or phone and the card. Close any files on the Palm before ejecting. Files also opens the Palm's own databases, under Internal.
+Cards live in a Cards drawer, and a card sits in one machine at a time. Frond makes and imports SD images up to 2 GB, 1 GB on the E2 and E3. Files copies between your computer or phone and the card. Close any files on the Palm before you eject. Files also opens the Palm's own databases, under Internal.
 
-The TG50 takes a Memory Stick from 4 to 128 MB, or a Memory Stick Pro from 256 MB to 2 GB. Files copies files and folders to and from it, and Sony Launcher runs apps from its Card category. See [Storage cards](doc/using-frond.md#storage-cards).
+The TG50 takes a Memory Stick from 4 to 128 MB, or a Memory Stick Pro from 256 MB to 2 GB. Files copies files and folders to and from it. Sony Launcher runs apps from its Card category. See [Storage cards](doc/using-frond.md#storage-cards).
 
 ## Peripherals
 
@@ -137,47 +137,47 @@ The TG50 takes a Memory Stick from 4 to 128 MB, or a Memory Stick Pro from 256 M
 | [Mobile phone over infrared](doc/using-frond.md#mobile-phone-over-infrared) | yes | yes | | yes | yes | yes | | |
 | [Mobile phone over Bluetooth](doc/using-frond.md#mobile-phone-over-bluetooth) | yes | yes | | yes | yes | | | |
 
-Anything else stays greyed out until it's done, like the E2's and Zire's networking and the Zire's camera. The Zire 72 has no serial port, as on the real one. Mobile phone over Bluetooth and HotSync by modem are Linux only for now.
+Anything still grey isn't done. The E2 and the Zire don't have their networking yet, and the Zire doesn't have its camera. The Zire 72 has no serial port, same as the real one. Mobile phone over Bluetooth and HotSync by modem are Linux only for now.
 
-The Palm IIIx (Palm OS 3.1, 68k DragonBall EZ) runs in its own runner, `frond-68k`. It has sound, backlight, serial with the HotSync button, infrared and the screen contrast, and no SD, USB, Bluetooth or Wi-Fi, as on the real one. Networking is PPP over the serial port or the dial-up modem, see [Palm IIIx serial and PPP](doc/using-frond.md#palm-iiix-serial-and-ppp). Android has it too, and the debugger works with prc-tools' gdb, see [Palm IIIx](doc/developer-reference.md#palm-iiix-frond-68k).
+The Palm IIIx runs in its own runner, `frond-68k`. Palm OS 3.1 on a 68k DragonBall EZ. It has sound, a backlight, serial with the HotSync button, infrared and the screen contrast. No SD, USB, Bluetooth or Wi-Fi, same as the real one. Networking is PPP over the serial port or the dial-up modem. See [Palm IIIx serial and PPP](doc/using-frond.md#palm-iiix-serial-and-ppp). Android has it too, and the debugger works with prc-tools' gdb. See [Palm IIIx](doc/developer-reference.md#palm-iiix-frond-68k).
 
-The infrared keyboard and beaming share the port, so take the keyboard off before turning beaming on. On Android infrared, Bluetooth, serial, USB HotSync and the gdb server go over the network, to another Frond or to `tools/link-irda.py`, `tools/link-bluetooth.py` and `tools/link-pty.py` (for pilot-link) on a computer.
+The infrared keyboard and beaming share the port. Take the keyboard off before you turn beaming on. On Android, infrared, Bluetooth, serial, USB HotSync and the gdb server go over the network, to another Frond or to `tools/link-irda.py`, `tools/link-bluetooth.py` and `tools/link-pty.py` (for pilot-link) on a computer.
 
-The TG50 plays beeps, alarms and Sony Voice Recorder audio. Its microphone is off each time it starts, and saving, stopping or going to the background turns it off again. Android asks for permission the first time. Bluetooth is tested with serial (SPP) and object exchange. Its early Palm OS 5 has no SndStream, as on the real one, so apps like SunVox need Modern Clie Audio 2 installed first. The remote control, MagicGate and Memory Stick audio aren't there yet.
+The TG50 plays beeps, alarms and Sony Voice Recorder audio. Its microphone is off each time it starts, and saving, stopping or going to the background turns it off again. Android asks for permission the first time. Bluetooth is tested with serial (SPP) and object exchange. Its early Palm OS 5 has no SndStream, same as the real one, so SunVox needs Modern Clie Audio 2 installed first. The remote control, MagicGate and Memory Stick audio aren't there yet.
 
 ## Connections
 
 <img src="doc/images/android-tx-connections.png" width="200" alt="T|X Connections on Android, infrared joined to a Tungsten E2 on a computer">
 
-Two Frond installs on the same network can be paired once, and then a machine's Infrared, Serial or Bluetooth setting can name the other install. The two Palms then talk to each other, for example beaming a memo from a Tungsten E2 on a phone to a T|X on your computer. On Linux, This computer joins machines in different windows on the same computer. See [Connections between Fronds](doc/using-frond.md#connections-between-fronds).
+Two Frond installs on the same network can be paired once. After that, a machine's Infrared, Serial or Bluetooth setting can name the other install. You can beam a memo from an E2 on a phone to a T|X on your computer. On Linux, This computer joins machines in different windows on the same computer. See [Connections between Fronds](doc/using-frond.md#connections-between-fronds).
 
 ## Modem and phones
 
 <img src="doc/images/desktop-iiix-modem-hotsync.png" width="300" alt="The Palm IIIx doing a Modem HotSync, online at 33600">
 
-The Palm IIIx has a snap-on modem on its serial port. Frond answers as a modem on a 33600 line and puts you on the internet through your computer's or phone's connection, and any number you dial connects. On Linux the modem can also HotSync with pilot-link, by dialling 4687962 or over Network HotSync.
+The Palm IIIx has a snap-on modem on its serial port. Frond answers as a modem on a 33600 line and puts you on the internet through your computer or phone. Any number you dial connects. On Linux the modem can also HotSync with pilot-link, by dialling 4687962 or over Network HotSync.
 
-The T|X, E2, Zire 72 and TG50 can dial out through a mobile phone over infrared, and on Linux over Bluetooth, with the same modem and internet. The IIIx can use the infrared phone too, on Palm OS 3.5 and 4.1. See [Dial-up modem](doc/using-frond.md#dial-up-modem).
+The T|X, E2, Zire 72 and TG50 can dial out through a mobile phone over infrared, and on Linux over Bluetooth, with the same modem and the same internet. The IIIx can use the infrared phone too, on Palm OS 3.5 and 4.1. See [Dial-up modem](doc/using-frond.md#dial-up-modem).
 
 ## Printing
 
 <img src="doc/images/desktop-dana-print.png" width="400" alt="A PrintBoy test page received from the Dana over infrared">
 
-Pick Printer in a machine's Infrared list and print apps see "Frond Printer" over IrDA. The Dana and Dana Wireless can also print to a USB printer. When a print stops, "Print received" shows, then choose Save as PDF (Linux), Print, Save raw file or Discard. Only the Generic printer profile can be shown as pages, so for a printer's own language (PCL, ESC/P) use Save raw file. See [Printing over infrared](doc/using-frond.md#printing-over-infrared).
+Pick Printer in a machine's Infrared list. Print apps see "Frond Printer" over IrDA. The Dana and Dana Wireless can also print to a USB printer. When a print stops, "Print received" shows. Then choose Save as PDF (Linux), Print, Save raw file or Discard. Only the Generic printer profile comes out as pages. For a printer's own language (PCL, ESC/P) use Save raw file. See [Printing over infrared](doc/using-frond.md#printing-over-infrared).
 
 ## The Dana
 
 <img src="doc/images/desktop-dana-wifi.png" width="400" alt="The Dana's Network Log pinging the virtual router over its USB Wi-Fi adapter">
 
-The AlphaSmart Dana has its wide screen, built-in keyboard, sound, infrared and two SD or MMC slots. Zoom in, or pick Fit to see the whole screen, and the onscreen keyboard can be compact, full or hidden.
+The AlphaSmart Dana has the wide screen, the built-in keyboard, sound, infrared and two SD or MMC slots. Zoom in, or pick Fit to see the whole screen. The onscreen keyboard can be compact, full or hidden.
 
-Its USB port takes a printer or a USB 802.11b adapter, and the Dana Wireless has the Wi-Fi built in. Make an 802.11b service in the Dana's Network preferences and connect to `Frond`, and the Dana gets on the internet through your computer or phone. See [Dana USB port](doc/using-frond.md#dana-usb-port).
+The USB port takes a printer or a USB 802.11b adapter. The Dana Wireless has the Wi-Fi built in. Make an 802.11b service in the Dana's Network preferences and connect to `Frond`, and the Dana gets on the internet through your computer or phone. See [Dana USB port](doc/using-frond.md#dana-usb-port).
 
-Peer to Peer (ad hoc) Wi-Fi finds nobody, and the USB computer controls stay greyed out. On Android a Dana session with cards in it can't be copied or imported yet, but each card can be exported.
+Peer to Peer (ad hoc) Wi-Fi finds nobody, and the USB computer controls stay greyed out. On Android a Dana session with cards in it can't be copied or imported yet. Each card can still be exported.
 
 ## Low-latency audio
 
-Off by default. On the T|X, E2, E3 and Zire 72 it plays one 44.1 kHz stereo stream with less delay, for music apps like SunVox, and drops back to the normal path when your computer or phone can't keep up. On the TG50, and these with other firmware, it keeps a shorter audio queue while sound plays, about 35 ms less delay. See [Low-latency audio](doc/using-frond.md#low-latency-audio).
+Off by default. On the T|X, E2, E3 and Zire 72 it plays one 44.1 kHz stereo stream with less delay, for music apps like SunVox, and drops back to the normal path if your computer or phone can't keep up. On the TG50, and on these with other firmware, it keeps a shorter queue while sound plays, about 35 ms less delay. See [Low-latency audio](doc/using-frond.md#low-latency-audio).
 
 ## For developers
 
