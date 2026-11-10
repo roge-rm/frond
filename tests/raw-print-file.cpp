@@ -81,5 +81,19 @@ int main(int argc,char** argv) {
         assert(job.finish(Output::publish,&output)==RawPrintJob::State::rejected && output.calls==1);
         fs::remove_all(directory);
     }
-    std::cout<<"PASS partial write, refused publication and close failure retain private staging with uncertain state and path; directory flush failure after cleanup is rejected with the path; no callback replay\n";
+    {
+        // A parent the user can only search, as / and /data are for an Android app: the job still lands.
+        const auto parent=root/"search-only", directory=parent/"print";
+        assert(fs::create_directory(parent) && fs::create_directory(directory));
+        fs::permissions(parent,fs::perms::owner_write|fs::perms::owner_exec);
+        Output output((directory/"job.raw").string());
+        const uint8_t payload[]={7,8,9};
+        RawPrintJob job(8);assert(job.begin());assert(job.append(payload,sizeof(payload)));
+        const auto state=job.finish(Output::publish,&output);
+        assert(state==RawPrintJob::State::published && output.file.error.empty());
+        assert(fs::file_size(directory/"job.raw")==sizeof(payload));
+        fs::permissions(parent,fs::perms::owner_all);
+        fs::remove_all(parent);
+    }
+    std::cout<<"PASS search-only parent; partial write, refused publication and close failure retain private staging with uncertain state and path; directory flush failure after cleanup is rejected with the path; no callback replay\n";
 }
