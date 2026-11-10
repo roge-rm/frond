@@ -9,6 +9,18 @@ class PrintJobTest {
     private fun r(s: String) = PrintJob.render(s.toByteArray(Charsets.ISO_8859_1))
     private fun pages(s: String) = r(s).pages
 
+    // The preview writes the pages too, so only a system job that went ahead drops the held job.
+    @Test fun onlyAPrintThatWentAheadDropsTheJob() {
+        assertTrue(PrintJobs.wentAhead(android.print.PrintJobInfo.STATE_QUEUED))
+        assertTrue(PrintJobs.wentAhead(android.print.PrintJobInfo.STATE_STARTED))
+        assertTrue(PrintJobs.wentAhead(android.print.PrintJobInfo.STATE_BLOCKED))
+        assertTrue(PrintJobs.wentAhead(android.print.PrintJobInfo.STATE_COMPLETED))
+        assertFalse(PrintJobs.wentAhead(android.print.PrintJobInfo.STATE_CREATED))
+        assertFalse(PrintJobs.wentAhead(android.print.PrintJobInfo.STATE_CANCELED))
+        assertFalse(PrintJobs.wentAhead(android.print.PrintJobInfo.STATE_FAILED))
+        assertFalse(PrintJobs.wentAhead(null))
+    }
+
     @Test fun statusParses() {
         val s = PrintJob.parseStatus("attached collecting bytes=289 last=none idle=3500")
         assertTrue(s.valid && s.attached)
