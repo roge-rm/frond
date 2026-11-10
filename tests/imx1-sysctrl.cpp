@@ -127,6 +127,12 @@ int main() {
     assert(soc.access(0x0022304c, 4, false, unknown) == Imx1BootstrapAccess::externalInput && unknown == 0xdeadbeef);
     write(clockControl, 0x1000, Imx1BootstrapAccess::reservedBits);
     write(clockControl, 0x10000, Imx1BootstrapAccess::reservedBits);
+    // RFM (bits 15 to 13) takes 011 and 100 and the reset value 000. Table 16-57 reserves the rest.
+    for (uint32_t rfm : {1u, 2u, 5u, 6u, 7u}) write(clockControl, 0x0221 | rfm << 13, Imx1BootstrapAccess::reservedBits);
+    read(clockControl, 0x6221);
+    write(clockControl, 0x8221); read(clockControl, 0x8221);
+    write(clockControl, 0x6862); read(clockControl, 0x6862);
+    write(clockControl, 0x6221);
     read(clockControl, 0x6221);
     unknown = 0x6221;
     assert(soc.access(clockControl, 2, true, unknown) == Imx1BootstrapAccess::width);
