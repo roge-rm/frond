@@ -150,7 +150,9 @@ A version 2 `ms.frondms` keeps every byte the Sony driver can see. The payload i
 | 64 MB | 4096 | 32 | FAT12 |
 | 128 MB | 8192 | 32 | FAT16 |
 
-A 128 MB stick takes 136.6 MB. A version 1 `ms.frondms` (the physical pages with their extra bytes, and a change counter at bytes 32-39) still loads, and its next save writes version 2 at the counter plus one.
+A 128 MB stick takes 136.6 MB. A new stick (`frond --card make ms`, `ms-create`) has every logical block in its home block with zero data and no file system, so Palm OS asks to format it. On a stick of erased blocks the TG50 driver reads every page of each free block before it uses it, which takes about 50 s at 128 MB.
+
+A version 1 `ms.frondms` (the physical pages with their extra bytes, and a change counter at bytes 32-39) still loads, and its next save writes version 2 at the counter plus one.
 
 Files writes a stick as the driver does:
 
