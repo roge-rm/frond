@@ -69,6 +69,7 @@ For a heavier workload than the probes, install the app with `install FILE` and 
 ## Packages and CI
 
 - `make deb` builds the amd64 package, `make deb-arm64` the arm64 one (Docker only, built from a fresh core). `python3 tools/check-package.py [--architecture arm64] FILE.deb` checks version, architecture, dependencies, ownership, modes and the full file list without installing it.
+- `make appimage` and `make appimage-arm64` build `out/Frond-VERSION-x86_64.AppImage` and `-aarch64.AppImage` in Docker on Debian 12, so they run on glibc 2.36 and newer. The arm64 one is cross built and can only be tried on arm64 hardware.
 - `.github/workflows/validate.yml` runs by hand (`workflow_dispatch`) on Debian trixie: `make test-build-tools check-reconstruction check-docs`, then `make -j2 test test-desktop`, then `check-reconstruction` again. It uploads nothing and uses no firmware.
 - The Qt tests run offscreen. They don't replace trying the desktop on a real display, installing a package on a clean system, or the firmware and audio checks above.
 

@@ -1,0 +1,6 @@
+#!/bin/sh
+# Frond as an AppImage: the desktop app, which finds the cores and Bluetooth helpers in usr/lib/frond.
+# Each program finds its libraries in usr/lib by its RPATH and Qt finds its plugins from usr/bin/qt.conf,
+# so nothing here leaks into the programs Frond starts.
+here="$(dirname "$(readlink -f "$0")")"
+exec "$here/usr/bin/frond-desktop" "$@"

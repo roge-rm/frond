@@ -156,7 +156,7 @@ make -j4
 ./out/frond-desktop
 ```
 
-`make deb` builds a Debian package in `out/` instead, which also needs `dpkg-dev` and `binutils`. Neither the packages nor the APK have firmware or Palm apps in them.
+`make deb` builds a Debian package in `out/` instead, which also needs `dpkg-dev` and `binutils`. `make appimage` and `make appimage-arm64` build AppImages in Docker that run on most distributions from 2023 on (glibc 2.36). Neither the packages nor the APK have firmware or Palm apps in them.
 
 The Android app is in `android/` and builds with Gradle (`./gradlew assembleDebug`).
 

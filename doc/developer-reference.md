@@ -849,6 +849,7 @@ The IIIx works as in VS Code, in Eclipse's Terminal view.
 | `FROND_FAST` | `0` leaves the Fast engine (Dynarmic) out. Default on for x86-64 and arm64. |
 | `BUILD_JOBS` | Parallel jobs for the desktop and Dynarmic builds. Default 4. |
 | `ARM64_JOBS` | Jobs for the arm64 Docker build. |
+| `APPIMAGE_JOBS` | Jobs for the AppImage Docker builds. |
 | `FROND_DYNARMIC_SRC`, `FROND_DYNARMIC_LIBS` | Where the core's makefile finds the Dynarmic source and libraries. `make` sets them from `DYNARMIC_SRC`. |
 | `DYNARMIC_SRC` | Where the patched Dynarmic source goes. Default `build/dynarmic-trial/src`. |
 | `DYNARMIC_DONOR` | A Dynarmic clone to export the pinned source from. Default `build/dynarmic-donor`, fetched on first use. |
@@ -911,6 +912,7 @@ All in `tools/`. Most take `--help`.
 | `frond-jit` | Copy of `out/frond` for runs that name the JIT. |
 | `desktop` | The Qt app, `out/frond-desktop`. |
 | `deb`, `deb-arm64` | Debian packages. The arm64 one is built in Docker. |
+| `appimage`, `appimage-arm64` | AppImages for x86-64 and arm64, built in Docker on Debian 12. |
 | `clean` | Remove build output. |
 | `dynarmic-source` | Export the pinned Dynarmic source again. |
 | `device-profiles` | Build the device profile dump. |

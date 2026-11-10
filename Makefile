@@ -450,6 +450,25 @@ deb-arm64: build/dynarmic-trial/src/.frond-source
 		-v $(CURDIR):/src -v $(CURDIR)/build/arm64/source:/src/build/source \
 		-w /src frond-arm64-cross tools/arm64/build.sh
 
+# AppImages for x86-64 and arm64, built in Docker on Debian 12 so they run on glibc 2.36 and newer
+# (tools/appimage/). Needs Docker and the BlueZ checkout from tools/build-bluetooth-provider.py --fetch.
+# The core is prepared fresh in build/appimage/ARCH/source. The arm64 one is cross built.
+APPIMAGE_JOBS ?= 10
+define build-appimage
+	rm -rf build/appimage/$(1)/source
+	python3 tools/prepare.py --destination $(CURDIR)/build/appimage/$(1)/source
+	docker build -t frond-appimage-$(2) --build-arg ARCH=$(2) tools/appimage
+	docker run --rm --user $$(id -u):$$(id -g) -e JOBS=$(APPIMAGE_JOBS) -e ARCH=$(1) \
+		-e SOURCE_DATE_EPOCH=$${SOURCE_DATE_EPOCH:-$$(git log -1 --format=%ct)} \
+		-v $(CURDIR):/src -w /src frond-appimage-$(2) tools/appimage/build.sh
+	SOURCE_DATE_EPOCH=$${SOURCE_DATE_EPOCH:-$$(git log -1 --format=%ct)} python3 tools/appimage/make-appimage.py --arch $(1)
+endef
+.PHONY: appimage appimage-arm64
+appimage: build/dynarmic-trial/src/.frond-source
+	$(call build-appimage,x86_64,amd64)
+appimage-arm64: build/dynarmic-trial/src/.frond-source
+	$(call build-appimage,aarch64,arm64)
+
 .PHONY: test-sd-image test-sd
 test-sd-image: prepare
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Ibuild/source/src/uarm/native tests/sd-image.cpp -o build/test-sd-image
