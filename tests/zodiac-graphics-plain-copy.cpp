@@ -462,16 +462,17 @@ void stretch() {
         assert(f.read(destination+(row*13+4)*2) == 0xabcd && f.read(destination+(row*13+5)*2) == 0xa55a);
     }
     // Refused: more than one copy from the copy helper or the fill routine, a word count that is not 3n,
-    // two runs to the same place, and a source inside the span of the destinations.
+    // two runs to the same place, and a run's source on another run's destination.
     planes(f);
     assert(f.append(with(p,runs),0x200a9ed4) == A::sideEffect);
     assert(f.append(with(p,runs),0x200b0200) == A::sideEffect);
     auto bad = runs; bad[0] = 0xc00a1b00; bad.pop_back();
     assert(f.append(with(p,bad),0x200b1790) == A::sideEffect);
     bad = runs; bad[5] = 0x00020003;
-    assert(f.append(with(p,bad),0x200b1790) == A::sideEffect);
+    assert(f.append(with(p,bad),0x200b1790) == A::sideEffect && refused(f,"stretch-runs-overlap",1));
     auto same = p; same[13] = destination; same[15] = 13;
-    assert(f.append(with(same,{0xc0051b00,0x00000000,0x00020003,0x00010001,0x00030003,0x00050003,0x00010001}),0x200b1790) == A::sideEffect);
+    assert(f.append(with(same,{0xc0051b00,0x00000000,0x00020003,0x00010001,0x00020003,0x00050003,0x00010001}),0x200b1790) == A::sideEffect &&
+           refused(f,"stretch-source-overlap",1));
     bad = runs; bad.push_back(0);
     assert(f.append(with(p,bad),0x200b1790) != A::ok);
     bad = runs; bad.pop_back();
@@ -481,6 +482,38 @@ void stretch() {
     assert(f.state.access(f.eim,0x200b1790,0x16010220,4,true,value) == A::sideEffect);
     assert(f.state.access(f.eim,0x200b1794,0x16010220,4,true,value) == A::externalInput);
     std::puts("PASS: stretch packets of n plain copies from 200b1568 and 200b1790, order and overlap guards");
+}
+// Source and destination side by side on one surface share no pixel and are drawn. Shared pixels stop.
+void sideBySide() {
+    Fixture f; planes(f);
+    auto pixel = [](unsigned x, unsigned y) { return destination + (y * 13 + x) * 2; };
+    f.write(pixel(0,0),0x1111); f.write(pixel(1,0),0x2222); f.write(pixel(0,1),0x3333); f.write(pixel(1,1),0x4444);
+    f.write(pixel(3,3),0x5555);
+    auto p = packet(); p[13] = destination; p[15] = 13;
+    // One 2 by 2 copy from (0,0) to (3,0): its rows lie between the source's in memory.
+    p[21] = 0; p[22] = 0x00030000; p[23] = 0x00020002;
+    assert(f.append(p) == A::ok); f.finish();
+    assert(f.read(pixel(3,0)) == 0x1111 && f.read(pixel(4,0)) == 0x2222);
+    assert(f.read(pixel(3,1)) == 0x3333 && f.read(pixel(4,1)) == 0x4444 && f.read(pixel(5,0)) == 0xa55a);
+    p[22] = 0x00010001;
+    assert(f.append(p) == A::sideEffect && refused(f,"copy-overlap",0));
+    // Two stretch runs, (0,0) to (2,3) and (3,3) to (5,3), with the sources' span over the first destination.
+    p.resize(20);
+    auto runs = p;
+    runs.insert(runs.end(),{0xc0051b00,0x00000000,0x00020003,0x00010001,0x00030003,0x00050003,0x00010001});
+    assert(f.append(runs,0x200b1790) == A::ok); f.finish();
+    assert(f.read(pixel(2,3)) == 0x1111 && f.read(pixel(5,3)) == 0x5555 && f.read(pixel(4,3)) == 0xa55a);
+    // The chip's stretch blit with its source beside the destination on the screen, then on it.
+    stretchPlanes(f);
+    for (unsigned y = 0; y < 11; ++y)
+        for (unsigned x = 0; x < 9; ++x) f.write(screen+((296+y)*480+40+x)*2, bitmapBit(x,y) ? 0 : 0xffff);
+    auto blit = dateBookStretch(); blit[19] = blit[28] = screen+(296*480+40)*2; blit[21] = blit[27] = 480;
+    assert(f.append(blit,0x200b0b14) == A::ok); f.finish();
+    for (unsigned y = 296; y < 318; ++y)
+        for (unsigned x = 2; x < 20; ++x) assert(f.read(screen+(y*480+x)*2) == (bitmapBit((x-2)/2,(y-296)/2) ? 0u : 0xffffu));
+    blit = dateBookStretch(); blit[19] = blit[28] = screen+(296*480+10)*2; blit[21] = blit[27] = 480;
+    assert(f.append(blit,0x200b0b14) == A::sideEffect && refused(f,"stretch-overlap",0x00020128));
+    std::puts("PASS: copies, stretch runs and the stretch blit side by side on one surface, shared pixels refused");
 }
 // The vertical wait reads the scan status with any batch in the ring.
 void scanStatus() {
@@ -606,6 +639,6 @@ void privateCapture() {
 }
 int main() {
     hostSourceType();
-    geometry(); guards(); scissor(); stretchBlit(); keyedModes(); brushUpload(); fills(); stretch(); scanStatus(); executionAndReset(); privateCapture();
+    geometry(); guards(); scissor(); stretchBlit(); keyedModes(); brushUpload(); fills(); stretch(); sideBySide(); scanStatus(); executionAndReset(); privateCapture();
     std::puts("PASS: plain RGB565 copy geometry, bounds, atomic append, queued A4 execution-time source, deadlines, reset and routes");
 }
