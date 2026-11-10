@@ -46,6 +46,8 @@ open class FrondActivity : SDLActivity() {
     private lateinit var settings: Settings
     private var machineSettings = MachineSettings()
     private var savingNote: TextView? = null
+    private var mipsNote: TextView? = null
+    private val mipsRunning = java.util.concurrent.atomic.AtomicBoolean(false)
     // The core's loopback gdb port while the debugger is on (Settings), else null, and the socket holding it.
     private var debugPort: Int? = null
     private var debugReservation: java.net.Socket? = null
@@ -151,6 +153,7 @@ open class FrondActivity : SDLActivity() {
         fitInsideSystemBars()
         requestFrameRate()
         addSavingNote()
+        addMipsNote()
         startDebugger()
         addKeyboard()
         addController()
@@ -204,6 +207,7 @@ open class FrondActivity : SDLActivity() {
         running = this
         resolveRunningDevice()
         if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) logSpeed()
+        applyMips()
         if (Build.VERSION.SDK_INT >= 33) {
             onBackInvokedDispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT) { back() }
         }
@@ -1134,6 +1138,46 @@ open class FrondActivity : SDLActivity() {
             addRule(RelativeLayout.CENTER_IN_PARENT)
         })
         savingNote = note
+    }
+
+    // A small MIPS readout in the bottom right corner of the screen, for ARM devices.
+    private fun addMipsNote() {
+        val layout = SDLActivity.getContentView() as? RelativeLayout ?: return
+        val note = TextView(this).apply {
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            setPadding(12, 4, 12, 4)
+            setBackgroundColor(Color.argb(0x99, 0x00, 0x00, 0x00))
+            visibility = View.GONE
+        }
+        layout.addView(note, RelativeLayout.LayoutParams(RelativeLayout.LayoutParams.WRAP_CONTENT, RelativeLayout.LayoutParams.WRAP_CONTENT).apply {
+            addRule(RelativeLayout.ALIGN_PARENT_BOTTOM)
+            addRule(RelativeLayout.ALIGN_PARENT_RIGHT)
+        })
+        mipsNote = note
+    }
+
+    // Shows or hides the readout from the saved setting. While shown, the core's speed-state is read once a second.
+    fun applyMips() {
+        if (launchDevice().runs68k) return
+        val on = Sessions.forPath(this, sessionPath)?.settings?.showMips ?: return
+        runOnUiThread { mipsNote?.visibility = if (on) View.VISIBLE else View.GONE }
+        if (!on || !mipsRunning.compareAndSet(false, true)) return
+        Thread({
+            try {
+                while (!leaving && !destroyed) {
+                    Thread.sleep(1000)
+                    if (stopped) continue
+                    if (Sessions.forPath(this, sessionPath)?.settings?.showMips != true) break
+                    val reply = link.request("speed-state", timeoutSeconds = 5)
+                    if (reply.code == "closed") break
+                    val mips = if (reply.ok) reply.message.substringBefore(" MIPS").toDoubleOrNull() else null
+                    if (mips != null) runOnUiThread { mipsNote?.text = "${Math.round(mips)} MIPS" }
+                }
+            } finally {
+                mipsRunning.set(false)
+            }
+        }, "FrondMips").apply { isDaemon = true }.start()
     }
 
     // Debug builds log the core's speed every 5 s while shown.

@@ -3,6 +3,8 @@
 #include <QSize>
 #include <QWidget>
 #include <vector>
+class QLabel;
+class QResizeEvent;
 class QTimer;
 class QWindow;
 
@@ -28,12 +30,16 @@ class PalmHolder : public QWidget {
     void focusPalm();
     void focusFrond();
     bool palmWantsKeys() const { return wantPalm; }
+    // The MIPS readout in the Palm's bottom right corner. The reply text starts with the figure;
+    // empty text hides it.
+    void setMips(const QString& reply);
     // Puts the Palm's window above the other native windows of Frond's window.
     void raisePalm();
     // The Palm's rectangle in global coordinates, empty when not embedded.
     QRect palmGlobalRect() const;
  protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
  private:
     void setInputFocus(quint32 window);
     void poll();
@@ -42,6 +48,8 @@ class PalmHolder : public QWidget {
     QPointer<QWidget> container;
     QPointer<QWindow> palm;
     QWidget* keySink{nullptr};
+    QLabel* mips{nullptr};
+    void placeMips();
     QTimer* pollTimer{nullptr};
     QSize wanted;
     // The Palm's X window and its parents, refreshed about once a second and on each press.

@@ -95,6 +95,7 @@ fun MachineDisplayRows(device: Device, settings: MachineSettings, listStyle: Boo
         MachineChoiceRow("Size", settings.size, ScreenSize.entries, { it.label }, listStyle) { onChange(settings.copy(size = it)) }
     }
     MachineSwitchRow("Smooth pixels", settings.smoothing, listStyle) { onChange(settings.copy(smoothing = it)) }
+    if (!device.runs68k) MachineSwitchRow("Show MIPS", settings.showMips, listStyle) { onChange(settings.copy(showMips = it)) }
     if (device.runs68k) MachineContrastRow(settings, listStyle, onChange)
     MachineChoiceRow("Top bar", settings.barMode, BarMode.entries, { it.label }, listStyle) { onChange(settings.copy(barMode = it)) }
     if (device.isTg50()) {

@@ -238,6 +238,9 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             if (!send(source->command, "clear")) source->stage = PrinterStage::None;
         });
     }
+    mipsTimer = new QTimer(this);
+    mipsTimer->setInterval(1000);
+    connect(mipsTimer, &QTimer::timeout, this, [this] { pollMips(); });
     printerTimer = new QTimer(this);
     connect(printerTimer, &QTimer::timeout, this, [this] { printerPoll(); });
     printerTimer->start(1000);
@@ -491,6 +494,9 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     smoothToggle = new QCheckBox(tr("Smooth pixels"), root);
     smoothToggle->setObjectName("runningSmooth");
     displayGrid->addWidget(smoothToggle, 4, 0, 1, 3);
+    mipsToggle = new QCheckBox(tr("Show MIPS"), root);
+    mipsToggle->setObjectName("runningShowMips");
+    displayGrid->addWidget(mipsToggle, 8, 0, 1, 3);
     keyboardShow = new QCheckBox(tr("Show keyboard"), root);
     keyboardShow->setObjectName("runningShowKeyboard");
     displayGrid->addWidget(keyboardShow, 5, 0, 1, 3);
@@ -507,9 +513,10 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     speedBox->addItem(tr("Original"), false);
     speedBox->addItem(tr("Uncapped"), true);
     displayGrid->addWidget(speedBox, 7, 1, 1, 2);
-    for (auto* w : std::initializer_list<QWidget*>{sizeSlider, smoothToggle, keyboardShow, jogBox, speedBox}) runningButtons << w;
+    for (auto* w : std::initializer_list<QWidget*>{sizeSlider, smoothToggle, mipsToggle, keyboardShow, jogBox, speedBox}) runningButtons << w;
     connect(sizeSlider, &QSlider::valueChanged, this, [this](int value) { liveDisplay("size"); (void)value; });
     connect(smoothToggle, &QCheckBox::clicked, this, [this] { liveDisplay("smooth"); });
+    connect(mipsToggle, &QCheckBox::clicked, this, [this] { liveDisplay("mips"); });
     connect(keyboardShow, &QCheckBox::clicked, this, [this] { liveDisplay("keyboard"); });
     connect(jogBox, qOverload<int>(&QComboBox::activated), this, [this] { liveDisplay("jog"); });
     connect(speedBox, qOverload<int>(&QComboBox::activated), this, [this] { liveDisplay("speed"); });
@@ -707,6 +714,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         else endExchange();
         if (cardProgress) { cardProgress->hide(); cardProgress->deleteLater(); cardProgress = nullptr; }
         holdKnown = holdOn = irdaQueued = false;
+        mipsTimer->stop();
         palmHolder->release(); embedded = embedWanted = embedTried = panelWasOpen = fitOffPending = false;
         appsStale = false; deleteApp = {}; knownDatabases.clear(); appsPanel->setDatabases({});
         if (internalFiles) internalFiles->close();
@@ -766,6 +774,11 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (command == "dana-view" || command == "dana-view-state") {
             forceButton->hide(); refresh();
             if (stopping && exchangeStage == ExchangeStage::None) save();
+            return;
+        }
+        if (command == "speed-state") {
+            // Polled once a second: leaves the busy state alone.
+            if (ok) palmHolder->setMips(message);
             return;
         }
         if (cardProgress) { cardProgress->hide(); cardProgress->deleteLater(); cardProgress = nullptr; }
@@ -1155,6 +1168,7 @@ void MainWindow::refresh() {
     shown(!m68k || caps.microphone, {microphoneLabel, microphoneToggle});
     if (m68k) for (auto* state : {usbState, bluetoothState}) state->setVisible(false);
     shown(m68k, {contrastLabel, contrast});
+    shown(!m68k, {mipsToggle});
     shown(embedded, {sizeLabel, sizeSlider});
     shown(currentDevice() == frondFirmware::deviceFromId("sony-clie-tg50"), {keyboardShow, jogLabel, jogBox});
     shown(m68k, {speedLabel, speedBox});
@@ -1425,10 +1439,12 @@ void MainWindow::embedReply(bool ok, const QString& message) {
 // nothing named it only shows the settings in the controls.
 void MainWindow::liveDisplay(const QString& what) {
     if (what.isEmpty() || !client.available()) {
-        const QSignalBlocker a(sizeSlider), b(smoothToggle), c(keyboardShow), d(jogBox), e(speedBox);
+        const QSignalBlocker a(sizeSlider), b(smoothToggle), m(mipsToggle), c(keyboardShow), d(jogBox), e(speedBox);
         if (!sizeSlider->isSliderDown()) sizeSlider->setValue(runningPreferences.scale);
         sizeLabel->setText(tr("Size: %1×").arg(sizeSlider->value() / 4.0));
         smoothToggle->setChecked(runningPreferences.smooth);
+        mipsToggle->setChecked(runningPreferences.showMips);
+        updateMips();
         keyboardShow->setChecked(runningPreferences.showKeyboard);
         jogBox->setCurrentIndex(std::max(0, jogBox->findData(int(runningPreferences.jogControls))));
         speedBox->setCurrentIndex(runningPreferences.uncapped ? 1 : 0);
@@ -1439,6 +1455,13 @@ void MainWindow::liveDisplay(const QString& what) {
     const auto onOff = [](bool on) { return on ? QStringLiteral("on") : QStringLiteral("off"); };
     if (what == "size") prefs.scale = sizeSlider->value();
     else if (what == "smooth") { prefs.smooth = smoothToggle->isChecked(); argument = "smooth=" + onOff(prefs.smooth); }
+    else if (what == "mips") {
+        prefs.showMips = mipsToggle->isChecked();
+        if (const auto error = frondSessions::writePreferences(sessionPath, prefs); !error.isEmpty()) { liveDisplay({}); return failure(error); }
+        runningPreferences = prefs;
+        updateMips();
+        return;
+    }
     else if (what == "keyboard") { prefs.showKeyboard = keyboardShow->isChecked(); argument = "keyboard=" + onOff(prefs.showKeyboard); }
     else if (what == "jog") {
         prefs.jogControls = frondSessions::JogControls(jogBox->currentData().toInt());
@@ -1460,6 +1483,17 @@ void MainWindow::liveDisplay(const QString& what) {
         return;
     }
     send(command, argument);
+}
+// The MIPS readout: polled once a second while it is on, for an ARM device that is up and idle.
+// The reply starts "148.00 MIPS, limit ...".
+void MainWindow::updateMips() {
+    const bool wanted = runningPreferences.showMips && client.running() && !frondFirmware::runs68k(runningDevice);
+    if (!wanted) { mipsTimer->stop(); palmHolder->setMips({}); return; }
+    if (!mipsTimer->isActive()) { mipsTimer->start(); pollMips(); }
+}
+void MainWindow::pollMips() {
+    if (!client.running() || !client.available() || busy || stopping) return;
+    client.request("speed-state", {});
 }
 void MainWindow::afterDevice() {
     send(frondFirmware::profile(runningDevice).frontend.holdPresent ? "hold-state" :
