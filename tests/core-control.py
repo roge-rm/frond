@@ -647,6 +647,9 @@ def disconnect(core, args, target, root, name):
     c = run('gone-fails')
     try:
         c.until_ok('guest-ready')
+        # The session was saved straight after a delete, whose last NAND pages the T|X writes up to
+        # 2 s on; a page written to the read-only folder would end the core before the save is tried.
+        time.sleep(3)
         folder.chmod(0o500)
         c.drop()
         assert c.process.wait(timeout=60) != 0, 'a failed save on disconnect exited 0'
