@@ -45,6 +45,18 @@ class PrintStoreTest {
         assertEquals(2, again.version)
     }
 
+    @Test fun saveHandsTheCoreAPathWithoutSymlinks() = runBlocking {
+        val real = tmp.newFolder("real")
+        val link = File(tmp.root, "link").toPath()
+        java.nio.file.Files.createSymbolicLink(link, real.toPath())
+        var saved = ""
+        val core = Core("abc")
+        val s = PrintStore(link.toFile()) { if (it.startsWith("save ")) saved = it.substringAfter(' '); core.reply(it) }
+        assertTrue(s.poll(none) is PrintStore.Poll.Added)
+        assertEquals(real.canonicalFile, File(saved).parentFile)
+        assertEquals("abc", String(s.heldBytes()))
+    }
+
     @Test fun failedSaveKeepsNothingAndReports() = runBlocking {
         val core = Core("abc", saveOk = false); val s = store(core)
         assertTrue(s.poll(none) is PrintStore.Poll.Failed)
