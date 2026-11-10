@@ -47,6 +47,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.rm.frond.InfraredChoice
 import com.rm.frond.NetRelay
 import com.rm.frond.RunningModel
 import com.rm.frond.R
@@ -276,13 +277,24 @@ private fun ConnectionsSheet(model: RunningModel, actions: RunningBarActions) {
     var choosing by remember { mutableStateOf<LinkKind?>(null) }
     val device = model.device
     val debuggerShown = model.debugger.phase != NetRelay.Phase.OFF || model.debugger.error != null
+    // Prints waiting for a choice come first, one row each, so the prints notice's Show lands on them.
+    val ready = listOfNotNull(model.printer?.jobs, model.irPrinter).filter { it.held != null }
+    if (ready.isNotEmpty()) {
+        Header("Prints", Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp))
+        for (jobs in ready) HeldRow(jobs, ready.size > 1)
+        Header("Connections", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp))
+    }
     for (row in RunningSheets.connectionRows(device, model.usb.phase, debuggerShown)) {
         when (row) {
             ConnRow.BEAM -> {
                 val usable = RunningSheets.beamUsable(device, model.keyboard)
                 ListItem(
                     headlineContent = { Text("Infrared beaming", color = if (usable) Color.Unspecified else Faded) },
-                    supportingContent = { Text(model.beam.text, color = if (usable) Color.Unspecified else Faded) },
+                    supportingContent = {
+                        val jobs = model.irPrinter
+                        Text(if (model.beam.choice == InfraredChoice.PRINTER && jobs != null) "Printer, ${jobs.bytes} bytes received" else model.beam.text,
+                            color = if (usable) Color.Unspecified else Faded)
+                    },
                     colors = androidx.compose.material3.ListItemDefaults.colors(containerColor = Color.Transparent),
                     modifier = if (usable) Modifier.clickableRow { choosing = LinkKind.BEAM } else Modifier,
                 )

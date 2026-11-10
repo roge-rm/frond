@@ -35,9 +35,20 @@ class SerialChoiceTest {
         // Only the infrared port takes it.
         assertEquals("off", MachineSettings.from(JSONObject().put("serial", "phone")).serial)
         val paired = listOf("aa11" to "Desk")
-        assertEquals(listOf("off", "phone", "link:aa11"), InfraredChoice.infraredChoices("off", paired, true).map { it.first })
-        assertEquals(listOf("off", "link:aa11"), InfraredChoice.infraredChoices("off", paired, false).map { it.first })
+        assertEquals(listOf("off", "phone", "printer", "link:aa11"), InfraredChoice.infraredChoices("off", paired, true).map { it.first })
+        assertEquals(listOf("off", "printer", "link:aa11"), InfraredChoice.infraredChoices("off", paired, false).map { it.first })
+        assertEquals(listOf("off", "link:aa11"), InfraredChoice.infraredChoices("off", paired, false, false).map { it.first })
         assertEquals("Mobile phone", CoreLink.Status("phone", title = "Infrared").text)
+    }
+
+    @Test fun printerChoice() {
+        val s = MachineSettings(infrared = "printer")
+        assertEquals("printer", s.json().getString("infrared"))
+        assertEquals(s, MachineSettings.from(s.json()))
+        // Only the infrared port takes it.
+        assertEquals("off", MachineSettings.from(JSONObject().put("serial", "printer")).serial)
+        assertEquals("off", MachineSettings.from(JSONObject().put("bluetooth", "printer")).bluetooth)
+        assertEquals("Printer", CoreLink.Status("printer", title = "Infrared").text)
     }
 
     @Test fun statusLine() {

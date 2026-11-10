@@ -506,6 +506,14 @@ test-ir-peer: prepare build/source/src/common/libcommon.a
 		build/source/src/common/libcommon.a -o build/test-ir-peer
 	./build/test-ir-peer
 
+.PHONY: test-ir-printer
+test: test-ir-printer
+# The IR printer's IrLPT and IrCOMM jobs from a scripted IrLAP primary (tests/ir-printer.cpp).
+test-ir-printer: prepare build/source/src/common/libcommon.a
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Wno-unused-parameter -Ibuild/source/src/common tests/ir-printer.cpp \
+		build/source/src/common/libcommon.a -o build/test-ir-printer
+	./build/test-ir-printer
+
 build/source/src/common/libcommon-net.a: build/source/.prepared
 	$(MAKE) -C build/source/src/common net
 
@@ -724,6 +732,12 @@ test-session-folder-card: out/frond
 .PHONY: test-core-control
 test-core-control: out/frond out/frond-68k
 	python3 tests/core-control.py
+
+# The printer commands (irprinter and the Dana's printer) through both runners' control sockets; needs
+# a private ARM smoke session and the Dana ROM, else that side is skipped.
+.PHONY: test-printer-control
+test-printer-control: out/frond out/frond-68k
+	python3 tests/printer-control.py
 
 .PHONY: test-frond-68k-gdb
 test-frond-68k-gdb: out/frond-68k

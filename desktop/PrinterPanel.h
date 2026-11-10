@@ -10,7 +10,10 @@ class QPushButton;
 class PrinterPanel : public QWidget {
     Q_OBJECT
  public:
-    explicit PrinterPanel(QWidget* parent = nullptr);
+    // bannerOnly: just the received-job choices, for a printer whose mode is picked elsewhere.
+    explicit PrinterPanel(QWidget* parent = nullptr, bool bannerOnly = false);
+    // Names the printer in the banner; empty when there is only one it could be.
+    void setSource(const QString& name);
     // The row shows on a device with a USB printer or a Wi-Fi adapter, and lists what it has.
     void setSupported(bool printer, bool wifi);
     // The built-in Wi-Fi module's row (On or Off and a readout), for the Dana Wireless.
@@ -40,6 +43,8 @@ class PrinterPanel : public QWidget {
     QComboBox *portBox, *moduleBox;
     QWidget* moduleRow;
     QLabel *readout, *moduleReadout, *received, *note;
+    QString source;
+    qint64 receivedBytes{0};
     QWidget* banner;
     QPushButton *pdf, *print, *raw, *discard;
 };

@@ -9,11 +9,12 @@ class QPrinter;
 
 namespace frondPrint {
 
-// "[error text ]attached|off STATE bytes=N last=LAST idle=MS"; valid is false for anything else.
+// "[error text ]attached|off STATE bytes=N [receiving=R ]last=LAST idle=MS"; valid is false for anything
+// else. R, the bytes of a job still coming in, is only on the IR printer's line.
 struct Status {
     bool valid{false}, attached{false};
     QString state, last, error;
-    qint64 bytes{0}, idleMs{-1};
+    qint64 bytes{0}, receiving{0}, idleMs{-1};
 };
 Status parseStatus(const QString& message);
 

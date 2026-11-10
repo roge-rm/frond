@@ -7,7 +7,7 @@
 #include <QSignalBlocker>
 #include <QVBoxLayout>
 
-PrinterPanel::PrinterPanel(QWidget* parent) : QWidget(parent) {
+PrinterPanel::PrinterPanel(QWidget* parent, bool bannerOnly) : QWidget(parent) {
     setObjectName("printerPanel");
     auto* column = new QVBoxLayout(this);
     column->setContentsMargins(0, 0, 0, 0);
@@ -60,6 +60,14 @@ PrinterPanel::PrinterPanel(QWidget* parent) : QWidget(parent) {
     inner->addLayout(buttons);
     column->addWidget(banner);
     banner->hide();
+    if (bannerOnly) {
+        setObjectName("irPrinterPanel");
+        for (QWidget* w : {static_cast<QWidget*>(label), static_cast<QWidget*>(portBox), static_cast<QWidget*>(readout)}) w->hide();
+        banner->setObjectName("irPrinterBanner");
+        received->setObjectName("irPrinterReceived");
+        pdf->setObjectName("irPrinterPdf"); print->setObjectName("irPrinterPrint");
+        raw->setObjectName("irPrinterRaw"); discard->setObjectName("irPrinterDiscard");
+    }
     connect(portBox, &QComboBox::activated, this, [this] { emit portChosen(port()); });
     connect(moduleBox, &QComboBox::activated, this, [this] { emit moduleChosen(moduleOn()); });
     connect(pdf, &QPushButton::clicked, this, &PrinterPanel::pdfRequested);
@@ -103,7 +111,9 @@ void PrinterPanel::setReadout(bool attached, qint64 bytes) {
     readout->setText(attached ? tr("%n byte(s) received", nullptr, int(bytes)) : QString());
 }
 void PrinterPanel::showReceived(qint64 bytes, bool renderable) {
-    received->setText(tr("Print received (%n byte(s))", nullptr, int(bytes)));
+    receivedBytes = bytes;
+    received->setText(source.isEmpty() ? tr("Print received (%n byte(s))", nullptr, int(bytes))
+                                       : tr("Print received from the %1 (%n byte(s))", nullptr, int(bytes)).arg(source));
     pdf->setEnabled(renderable);
     print->setEnabled(renderable);
     note->setVisible(!renderable);
@@ -111,3 +121,8 @@ void PrinterPanel::showReceived(qint64 bytes, bool renderable) {
 }
 void PrinterPanel::hideReceived() { banner->hide(); }
 bool PrinterPanel::receivedShown() const { return !banner->isHidden(); }
+void PrinterPanel::setSource(const QString& name) {
+    if (name == source) return;
+    source = name;
+    if (!banner->isHidden()) showReceived(receivedBytes, pdf->isEnabled());
+}

@@ -66,7 +66,7 @@ data class MachineSettings(
     // Android: whether the bar over the running machine shows.
     val barShown: Boolean = true,
     val barMode: BarMode = BarMode.AUTO_HIDE,
-    // Infrared: off, phone (the core's own mobile phone), or link:<id> for a connection (InfraredChoice). Applied at every start.
+    // Infrared: off, phone (the core's own mobile phone), printer (an IrDA printer), or link:<id> for a connection (InfraredChoice). Applied at every start.
     val infrared: String = InfraredChoice.OFF,
     // Serial: the same values, or modem on a device with a snap-on modem. The LAN serial options are gone.
     val serial: String = InfraredChoice.OFF,

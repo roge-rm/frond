@@ -120,4 +120,53 @@ class PrintStoreTest {
         assertNull(store(Core()).attach(true))
         assertEquals("no printer", store(Core(attachOk = false)).attach(true))
     }
+
+    // The infrared printer's store sends irprinter's status line the same way, and a local drop keeps the core out.
+    @Test fun dropLocalClearsTheHeldFileWithoutTheCore() = runBlocking {
+        val core = Core("abc"); val s = store(core)
+        assertTrue(s.poll(none) is PrintStore.Poll.Added)
+        core.log.clear()
+        var held = -1L
+        s.dropLocal { size, _ -> held = size }
+        assertEquals(0L, held)
+        assertEquals(0L, s.heldSize())
+        assertTrue(core.log.isEmpty())
+    }
+
+    @Test fun printerStatusFromTheInfraredCore() {
+        val receiving = PrintJob.parseStatus("attached receiving bytes=120 last=none idle=100")
+        assertTrue(receiving.valid && !receiving.received)
+        assertTrue(PrintJob.parseStatus("attached ready bytes=289 last=none idle=3100").received)
+        val off = PrintJob.parseStatus("off off bytes=0 last=none idle=-1")
+        assertTrue(off.valid && !off.attached && !off.received)
+        // The infrared line also counts a job still coming in.
+        val arriving = PrintJob.parseStatus("attached receiving bytes=289 receiving=40 last=none idle=50")
+        assertTrue(arriving.valid && !arriving.received)
+        assertEquals(289L, arriving.bytes)
+        assertEquals(40L, arriving.receiving)
+        assertEquals("none", arriving.last)
+        assertEquals(50L, arriving.idleMs)
+        assertEquals(0L, PrintJob.parseStatus("attached ready bytes=289 last=none idle=3100").receiving)
+    }
+
+    @Test fun pollCountsAJobStillComingIn() = runBlocking {
+        val s = PrintStore(tmp.newFolder()) { ControlLink.Reply(true, "irprinter", "attached receiving bytes=0 receiving=120 last=none idle=10") }
+        val poll = s.poll(none)
+        assertTrue(poll is PrintStore.Poll.Bytes && poll.bytes == 120L)
+    }
+
+    @Test fun oneNoticeForEveryPrinter() {
+        assertNull(PrintNotices.text("Palm m515", emptyList()))
+        assertEquals("Print received" to "289 bytes from the infrared printer on the Palm m515",
+            PrintNotices.text("Palm m515", listOf("infrared printer" to 289L)))
+        assertEquals("2 prints ready" to "From the USB printer and the infrared printer on the AlphaSmart Dana",
+            PrintNotices.text("AlphaSmart Dana", listOf("USB printer" to 289L, "infrared printer" to 12L)))
+        val pages = PrintJob.Pages(true, "", emptyList())
+        val usb = PrintJobs.Held(289, pages, 1, "USB printer", "USB printer")
+        val ir = PrintJobs.Held(12, pages, 1, null, "infrared printer")
+        assertNull(PrintNotices.prompt(emptyList()))
+        assertEquals("Print received from the USB printer (289 bytes)" to "Options", PrintNotices.prompt(listOf(usb)))
+        assertEquals("2 prints ready" to "Show", PrintNotices.prompt(listOf(usb, ir)))
+        assertEquals("Print received from the infrared printer (12 bytes)", ir.namedTitle)
+    }
 }

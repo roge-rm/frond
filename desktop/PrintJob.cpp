@@ -11,7 +11,7 @@
 namespace frondPrint {
 
 Status parseStatus(const QString& message) {
-    static const QRegularExpression pattern(R"((attached|off) (\S+) bytes=(\d+) last=(\S+) idle=(-?\d+)\s*$)");
+    static const QRegularExpression pattern(R"((attached|off) (\S+) bytes=(\d+)(?: receiving=(\d+))? last=(\S+) idle=(-?\d+)\s*$)");
     Status s;
     const auto m = pattern.match(message);
     if (!m.hasMatch()) return s;
@@ -19,8 +19,9 @@ Status parseStatus(const QString& message) {
     s.attached = m.captured(1) == "attached";
     s.state = m.captured(2);
     s.bytes = m.captured(3).toLongLong();
-    s.last = m.captured(4);
-    s.idleMs = m.captured(5).toLongLong();
+    s.receiving = m.captured(4).toLongLong();
+    s.last = m.captured(5);
+    s.idleMs = m.captured(6).toLongLong();
     s.error = message.left(m.capturedStart()).trimmed();
     return s;
 }
