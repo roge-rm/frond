@@ -9,6 +9,7 @@ firmware folder. A side with neither is skipped. FROND_CORE picks another ARM co
 """
 import argparse
 import fcntl
+import json
 import os
 from pathlib import Path
 import shutil
@@ -28,6 +29,8 @@ sys.path.insert(0, str(ROOT / 'tools'))
 import palm_boot  # noqa: E402
 
 PATTERN = ROOT / 'tests/fixtures/frond-pattern.pdb'
+# Devices with a serial port; serial-mode answers unsupported on the others.
+SERIAL = {p['name'] for p in json.loads((ROOT / 'tools/device-profiles.json').read_text())['profiles'] if p.get('serial')}
 PATTERN_NAME = 'frond-pattern.sunvox'
 
 
@@ -157,11 +160,12 @@ class Client:
         shutil.rmtree(self.socket_dir, ignore_errors=True)
 
 
-def unix_modes(c):
+def unix_modes(c, serial=True):
     """The unix: endpoint through the live mode commands and their state replies, for serial and infrared."""
     folder = Path(tempfile.mkdtemp(prefix='frond-'))  # short, so the path fits a socket address
+    modes = (('serial-mode', 'serial-state', 'serial'),) if serial else ()
     try:
-        for command, state, code in (('serial-mode', 'serial-state', 'serial'), ('irda-mode', 'irda-state', 'infrared')):
+        for command, state, code in (*modes, ('irda-mode', 'irda-state', 'infrared')):
             path = folder / f'{code}.sock'
 
             def until(text):
@@ -311,6 +315,21 @@ def probe_mark(path):
     return sum(x for x, _ in dark) / 9, sum(y for _, y in dark) / 9
 
 
+def clear_reminder(c, root, device):
+    """Dismisses the Zire's setup reminder, which comes due as soon as an older smoke session loads
+    and keeps install and the other guest calls waiting. OK at (50, 280) clears it, as in smoke.py."""
+    if device != 'palm-zire-72':
+        return
+    time.sleep(3)
+    shot = root / 'reminder.png'
+    replay(c, root, 'reminder', [(0, f'snapshot "{shot}"')])
+    if not palm_boot.zire_reminder(palm_boot.png_rows(shot)):
+        return
+    replay(c, root, 'reminder-ok', [(0, 'pen-down 50 280'), (150, 'pen-up'), (1500, f'snapshot "{shot}"')])
+    assert not palm_boot.zire_reminder(palm_boot.png_rows(shot)), 'setup reminder still showing after OK'
+    print('core-control frond: setup reminder dismissed', flush=True)
+
+
 def check_taps(c, root, points):
     """Taps land where they're sent: the pen probe marks each tap, in screen pixels. True when checked,
     False without the probe (no prc-tools or SDK)."""
@@ -375,14 +394,17 @@ def common(c, root, device, unsupported, saved):
     for command in ('network-state', 'keyboard-state', 'usb-state', 'sd-state', 'speed-state', 'serial-state',
                     'irda-state', 'microphone-state'):
         c.ok(command)
-    c.fails('serial-mode', 'bogus', code='argument')
-    assert c.ok('serial-mode', 'pty', code='serial').startswith('pty /dev/pts/')
-    c.ok('speed-state')
-    assert any(name == 'serial' and text.startswith('pty ') for name, text in c.events), c.events
-    assert c.ok('serial-mode', 'off', code='serial') == 'off'
+    if device in SERIAL:
+        c.fails('serial-mode', 'bogus', code='argument')
+        assert c.ok('serial-mode', 'pty', code='serial').startswith('pty /dev/pts/')
+        c.ok('speed-state')
+        assert any(name == 'serial' and text.startswith('pty ') for name, text in c.events), c.events
+        assert c.ok('serial-mode', 'off', code='serial') == 'off'
+    else:
+        c.fails('serial-mode', 'pty', code='unsupported')
     assert c.ok('irda-mode', 'pty', code='infrared').startswith('pty /dev/pts/')
     assert c.ok('irda-mode', 'off', code='infrared') == 'off'
-    unix_modes(c)
+    unix_modes(c, device in SERIAL)
     c.ok('display', 'smooth=on')
     c.fails('display', 'smooth=maybe', code='argument')
     c.fails('display', 'jog=screen', code='argument')
@@ -462,9 +484,11 @@ def check_arm(core, session, root):
         lone = copy.is_file() and copy.read_bytes()[4:8] == struct.pack('<I', 6)
         saved = next((p for p in (copy / (session.name + '.frond'), *sorted(copy.glob('*.frond'))) if p.is_file()),
                      copy) if copy.is_dir() else copy.parent / copy.stem / (copy.stem + '.frond') if lone else copy
+        clear_reminder(c, work, device)
         common(c, work, device, unsupported, saved)
         reset_after_change(c, work, device)
-        c.fails('serial-mode', 'modem', code='argument')  # the snap-on modem is frond-68k's
+        # The snap-on modem is frond-68k's.
+        c.fails('serial-mode', 'modem', code='argument' if device in SERIAL else 'unsupported')
         # The infrared phone takes the IR port, and the IR keyboard and the phone keep each other out.
         c.events.clear()
         assert c.ok('irda-mode', 'phone', code='infrared') == 'phone idle'
