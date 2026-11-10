@@ -66,6 +66,9 @@ static void checkCommands(bool packedMono) {
         assert(drawing.access(eim,0x200adb14,0x1601054c,4,false,scan) == A::ok && (scan & ~0x400u) == 0);
         assert(drawing.access(eim,0x200adb08,0x1601054c,2,false,scan) == A::width);
         assert(drawing.access(eim,0x200adb08,0x1601054c,4,true,scan) == A::sequence);
+        // The status query at 200ad7b0 wasn't seen with a batch in the ring.
+        scan = 0xdeadbeef;
+        assert(drawing.access(eim,0x200ad7b0,0x1601054c,4,false,scan) == A::sequence && scan == 0xdeadbeef);
         assert(drawing.access(eim,0x200aeb68,0x160104d8,4,true,scan) == A::sequence);
         assert(!drawing.engineState().emptyRing());
     }

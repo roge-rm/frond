@@ -1,0 +1,18 @@
+--- a/src/uarm/uarm/imx1_cs5_configuration.h
++++ b/src/uarm/uarm/imx1_cs5_configuration.h
+@@ -170,9 +170,12 @@
+         }
+         if (virtualProfile() && Imx1GraphicsDisplay::owns(address)) {
+             if (size != 4) return Imx1BootstrapAccess::width;
+-            // The vertical-interval status read (54c) only follows the scan phase, so the ROM's wait
+-            // at 200adb08 may run while a batch is still drawing. Everything else needs an empty ring.
+-            const bool scanStatus = !write && (address & 0xffff) == 0x054c;
++            // Everything here needs an empty ring but the ROM's vertical wait (200adb04), whose two reads
++            // of the scan status (54c) run while a copy-helper batch is still drawing.
++            // Assumed, not shown: the status follows the scan phase alone, whatever the engine is doing.
++            const bool scanStatus = !write && (address & 0xffff) == 0x054c && (pc == 0x200adb08 || pc == 0x200adb14) &&
++                engine.copyHelperSubmission() && !engine.hostDataSubmission() &&
++                !engine.keyedCopySubmission() && !engine.a4Submission() && !engine.completed();
+             if (!memoryReady(eim) || (!engine.emptyRing() && !scanStatus)) return Imx1BootstrapAccess::sequence;
+             return display.access(windows, pc, address, size, write, value);
+         }
