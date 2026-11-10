@@ -1518,6 +1518,24 @@ test-isp-host-atl:
 		-f $(CURDIR)/tests/isp-host-atl.mk FROND_TEST_ROOT=$(CURDIR) \
 		ISP_ATL_TEST=$(ISP_ATL_AREA)/test-isp-host-atl isp-atl-test
 
+ISP_IRQ_AREA ?= $(CURDIR)/build/isp-host-irq
+.PHONY: test-isp-host-irq
+test-isp-host-irq:
+	python3 tools/prepare.py --destination $(ISP_IRQ_AREA)/source
+	$(MAKE) -C $(ISP_IRQ_AREA)/source/src/common libcommon.a net
+	$(MAKE) -C $(ISP_IRQ_AREA)/source/src/cloudpilot FROND_68K=1 -f Makefile \
+		-f $(CURDIR)/tests/isp-host-irq.mk FROND_TEST_ROOT=$(CURDIR) \
+		ISP_IRQ_TEST=$(ISP_IRQ_AREA)/test-isp-host-irq isp-irq-test
+
+ISP_ROOT_AREA ?= $(CURDIR)/build/isp-host-root
+.PHONY: test-isp-host-root
+test-isp-host-root:
+	python3 tools/prepare.py --destination $(ISP_ROOT_AREA)/source
+	$(MAKE) -C $(ISP_ROOT_AREA)/source/src/common libcommon.a net
+	$(MAKE) -C $(ISP_ROOT_AREA)/source/src/cloudpilot FROND_68K=1 -f Makefile \
+		-f $(CURDIR)/tests/isp-host-root.mk FROND_TEST_ROOT=$(CURDIR) \
+		ISP_ROOT_TEST=$(ISP_ROOT_AREA)/test-isp-host-root isp-root-test
+
 .PHONY: test-usb-raw-printer
 USB_PRINTER_AREA ?= build/usb-raw-printer
 test-usb-raw-printer:
