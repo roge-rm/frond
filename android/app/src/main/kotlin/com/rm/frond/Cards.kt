@@ -139,7 +139,7 @@ object Cards {
     class Descriptor(val kind: Long, val inserted: Boolean, val writeProtected: Boolean, val identity: ByteArray,
                      val logical: Long, val physical: Long, val generation: Long)
 
-    // The .frond's version (0 if unreadable) and its media descriptors (v7 and v8).
+    // The .frond's version (0 if unreadable) and its media descriptors (v7, v8 and v9).
     fun descriptorsOf(frond: File?): Pair<Long, List<Descriptor>> = try {
         if (frond == null || !frond.isFile) 0L to emptyList()
         else RandomAccessFile(frond, "r").use { f ->
@@ -147,7 +147,7 @@ object Cards {
             val n = f.read(head)
             if (n < 8 || le32(head, 0) != 0x19800819L) return 0L to emptyList()
             val version = le32(head, 4)
-            if ((version != 7L && version != 8L) || n != 92) return version to emptyList()
+            if ((version != 7L && version != 8L && version != 9L) || n != 92) return version to emptyList()
             val size = if (version == 7L) 92 else 100
             val list = ArrayList<Descriptor>()
             for (i in 0 until minOf(le32(head, 88), 4L).toInt()) {

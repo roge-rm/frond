@@ -131,7 +131,7 @@ struct Descriptor {
     QByteArray identity;
     quint64 logical{0}, physical{0}, generation{0};
 };
-// The .frond's version (0 if unreadable) and its media descriptors (v7 and v8).
+// The .frond's version (0 if unreadable) and its media descriptors (v7, v8 and v9).
 inline QList<Descriptor> descriptorsOf(const QString& frond, quint32* version = nullptr) {
     using frondSessions::le32;
     using frondSessions::le64;
@@ -143,7 +143,7 @@ inline QList<Descriptor> descriptorsOf(const QString& frond, quint32* version = 
     if (head.size() < 8 || le32(head, 0) != frondSessions::magic) return result;
     const auto v = le32(head, 4);
     if (version) *version = v;
-    if ((v != 7 && v != 8) || head.size() != 92) return result;
+    if ((v != 7 && v != 8 && v != 9) || head.size() != 92) return result;
     const int size = v == 7 ? 92 : 100;
     const auto count = le32(head, 88);
     for (quint32 i = 0; i < count && i < 4; ++i) {

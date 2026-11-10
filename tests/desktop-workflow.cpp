@@ -378,17 +378,17 @@ struct TestMedia {
     quint64 logical{32ull << 20}, physical{32ull << 20}, generation{1};
     QByteArray identity{QByteArray("c4c4c4c4frondcardstoretest0251c4")};
 };
-// A v8 .frond with a device header and media descriptors, enough for the store and a fake core.
-static void writeFrond(const QString& path, const QString& device, const QList<TestMedia>& media) {
+// A v8 (or `version`) .frond with a device header and media descriptors, enough for the store and a fake core.
+static void writeFrond(const QString& path, const QString& device, const QList<TestMedia>& media, int version = 8) {
     QByteArray b(8 + 32 + 52, '\0');
-    putLe(b, 0, frondSessions::magic, 4); putLe(b, 4, 8, 4);
+    putLe(b, 0, frondSessions::magic, 4); putLe(b, 4, version, 4);
     const auto id = device.toLatin1();
     for (int i = 0; i < id.size(); ++i) b[8 + i] = id[i];
     putLe(b, 88, quint64(media.size()), 4);
     for (const auto& m : media) {
         QByteArray d(100, '\0');
         putLe(d, 0, m.kind, 4);
-        const QByteArray name = m.kind == 1 ? "sd.frondsd" : m.kind == 2 ? "ms.frondms" : "ms.frondmsp";
+        const QByteArray name = m.kind == 1 ? "sd.frondsd" : m.kind == 2 ? "ms.frondms" : m.kind == 4 ? "nand.frondnand" : "ms.frondmsp";
         for (int i = 0; i < name.size(); ++i) d[4 + i] = name[i];
         putLe(d, 36, 1, 4);
         for (int i = 0; i < 32; ++i) d[44 + i] = m.identity.leftJustified(32, '\0', true)[i];
@@ -5475,6 +5475,27 @@ for line in s.makefile('rb'):
         }
         frondCards::reconcile(cardsSessions());
         QVERIFY(QFileInfo(a + "/sd.frondsd").isFile() && frondCards::readSlot(a).swap);
+    }
+    // Every device saves v9: its SD descriptor counts, so a card saved in the machine stays there
+    // (not taken for an unfinished take-out) and keeps the machine's serial.
+    void cardsV9Session() {
+        cardsReset();
+        const auto a = cardsMachine("Palm TX", true);
+        TestMedia sd;
+        sd.identity = machineIdentity("Palm TX");
+        writeFrond(a + "/Palm TX.frond", "palm-tx", {sd, TestMedia{4, 32 * 1024, 33 * 1024, 1}}, 9);
+        quint32 version = 0;
+        const auto described = frondCards::descriptorsOf(a + "/Palm TX.frond", &version);
+        QCOMPARE(version, 9u);
+        QCOMPARE(described.size(), 2);
+        frondCards::reconcile(cardsSessions());
+        const auto card = onlyCard();
+        QCOMPARE(card.identity, machineIdentity("Palm TX"));
+        QVERIFY(!frondCards::readSlot(a).swap);
+        frondCards::reconcile(cardsSessions());
+        QVERIFY(QFileInfo(a + "/sd.frondsd").isFile());
+        QCOMPARE(frondCards::readSlot(a).card, card.id);
+        QVERIFY(!frondCards::entries(cardsLibrary()).value(0).inDrawer);
     }
     // A move to another file system fails rather than copying the card.
     void cardsMoveNeverCopies() {
