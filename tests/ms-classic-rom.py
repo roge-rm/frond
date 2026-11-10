@@ -26,6 +26,7 @@ import palm_boot  # noqa: E402
 
 DEVICE = 'sony-clie-tg50'
 OUT = ROOT / 'build/step-large-card/ms-classic'
+MIB = 1 << 20
 GEOMETRY = {4: (512, 16), 8: (1024, 16), 16: (1024, 32), 32: (2048, 32), 64: (4096, 32), 128: (8192, 32)}
 
 
@@ -194,10 +195,15 @@ def reload(mb, work, result, payload, saved, folder2, image):
     blocks, pages = GEOMETRY[mb]
     header = image.read_bytes()[:64]
     size = image.stat().st_size
-    result['export'] = {'bytes': size, 'blocks': struct.unpack_from('<I', header, 12)[0],
-                        'pages': struct.unpack_from('<I', header, 16)[0]}
-    if size != 64 + blocks * pages * 521 or result['export']['blocks'] != blocks or result['export']['pages'] != pages:
-        problems.append(f'export {result["export"]} is not {mb} MB')
+    # A version 2 .frondms: the logical blocks (494 in the first segment, 496 in each later one)
+    # as the payload, the side region after the next 1 MiB, then a CRC32 per 1 MiB chunk.
+    payload, side = struct.unpack_from('<Q', header, 16)[0], struct.unpack_from('<Q', header, 48)[0]
+    stored = -(-payload // MIB) * MIB + side
+    result['export'] = {'bytes': size, 'version': struct.unpack_from('<I', header, 8)[0], 'payload': payload, 'side': side}
+    logical = 494 + 496 * (blocks // 512 - 1)
+    if (header[:8] != b'FRONDMS\0' or result['export']['version'] != 2 or payload != logical * pages * 512
+            or not side or size != 64 + stored + 4 * -(-stored // MIB)):
+        problems.append(f'export {result["export"]} is not a {mb} MB version 2 stick')
 
 
 def main():
