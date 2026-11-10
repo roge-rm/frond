@@ -2180,6 +2180,15 @@ test-zodiac-machine-state: build/zodiac-boot-probe
 		@build/zodiac-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-machine-state
 	./build/test-zodiac-machine-state
 
+.PHONY: test-zodiac-fast-lean
+# The Fast engine's lean path against Exact: TLB flush on CP15 writes, the stop pc and an unsupported access.
+test-zodiac-fast-lean: build/zodiac-boot-probe
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/zodiac-fast-lean.cpp $(ZODIAC_MACHINE_SOURCES) \
+		@build/zodiac-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-fast-lean
+	./build/test-zodiac-fast-lean
+
 .PHONY: test-zodiac-machine-state-reject test-zodiac-machine-state-cli
 test-zodiac-machine-state-reject: build/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
