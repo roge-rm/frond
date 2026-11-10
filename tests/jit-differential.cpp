@@ -1500,8 +1500,7 @@ struct Engines {
     uint32_t worstOver = 0;  // most any Fast call ran past its budget
 };
 
-Outcome runCase(Engines& e, const Case& c, Snapshot* exactState = nullptr) {
-    const Assembled a = assemble(c);
+Outcome runAssembled(Engines& e, const Case& c, const Assembled& a, Snapshot* exactState = nullptr) {
     Outcome o;
     prepare(e.exact, c, a);
     prepare(e.fast, c, a);
@@ -1527,6 +1526,10 @@ Outcome runCase(Engines& e, const Case& c, Snapshot* exactState = nullptr) {
     }
     o.ok = o.diffs.empty();
     return o;
+}
+
+Outcome runCase(Engines& e, const Case& c, Snapshot* exactState = nullptr) {
+    return runAssembled(e, c, assemble(c), exactState);
 }
 
 void printCase(const Case& c) {
@@ -1718,6 +1721,9 @@ bool directed(Engines& e) {
         // MRC/MCR p15 c3 in user mode: undefined through the interpreter (the 2e note).
         {"user mrc p15, 0, r0, c3, c0, 0", {0xe3a01005, 0xee130f10}, false, USR, {{0, 0x1234}}},
         {"user mcr p15, 0, r0, c3, c0, 0", {0xe3a01005, 0xee030f10}, false, USR, {{0, 0x0}}},
+        {"user mcr p15, 0, r0, c7, c5, 1", {0xe3a01005, 0xee070f35}, false, USR, {{0, 0x10000}}},
+        {"svc mcr p15, 0, r0, c7, c5, 1", {0xe3a01005, 0xee070f35, 0xe2811001}, false, SVC, {{0, 0x10000}},
+         {{Expect::REG, 1, 6}}},
         {"svc mrc/mcr p15 c3", {0xe3a00007, 0xee030f10, 0xee131f10}, false, SVC, {}},
         // ADC with S: V is signed overflow of the sum with the carry in.
         {"adcs r2, r0, r1: -1 + 1 + 0", {0xe328f000, 0xe0b02001}, false, USR, {{0, 0xffffffff}, {1, 1}},
@@ -2049,6 +2055,78 @@ int staleAhead() {
     return 0;
 }
 
+// Privilege switches with code kept per privilege level, as on the TG50, which runs
+// applications in user mode. S is set, so the vectors and kCode are privileged only. User
+// code at U loops 8 times: a load from the privileged-only page (data abort, skipped), a
+// SWI into a handler at 0x200 that reads that page, stores to Y and, on its 4th entry,
+// rewrites the first word of X (a user function on a page user code ran) and invalidates
+// its I-cache line, then a call to X, then the same MCR in user mode (undefined). The run
+// gets to user mode by MOVS PC from SVC, or by MSR CPSR_c from code on a user page. X adds
+// 1 to r0 until it's rewritten to add 16: r0 is 3 + 5 * 16 at the end. The privileged store
+// to X goes through the page table that had Y's page writable before user code ran X, so
+// it only reaches the user level's code if X's code flag write-protected both levels.
+bool privilegeSwitch(Engines& e) {
+    constexpr uint32_t U = 0x24000, X = 0x25000, Y = X + 0x100, M = 0x26000;
+    bool ok = true;
+    for (int variant = 0; variant < 2; ++variant) {
+        const char* name = variant ? "privilege switch, msr cpsr_c" : "privilege switch, movs pc";
+        const Directed d{name,
+                         {0xe3a09000, 0xe361f010, 0xe1a0e005, 0xe1b0f00e},  // mov r9, #0; msr spsr_c, #usr;
+                         false,                                             // mov lr, r5; movs pc, lr
+                         SVC,
+                         {{0, 0}, {1, 0x28000}, {2, 0xe2800010}, {4, X}, {5, U}, {7, 0x5a5a5a5a}},
+                         {{Expect::REG, 0, 83}, {Expect::REG, 3, 0}, {Expect::REG, 9, 8},
+                          {Expect::LOADED, 6, 0x28000}, {Expect::CPSR, 0, USR, 0x3f},
+                          {Expect::MEM, Y, 0x5a5a5a5a}, {Expect::MEM, X, 0xe2800010}},
+                         0x100};
+        for (uint64_t seed = 1; seed <= 8; ++seed) {
+            const Case c = directedCase(d, seed);
+            Assembled a = assemble(c);
+            auto put = [&](uint32_t addr, uint32_t v) { memcpy(&a.image[addr], &v, 4); };
+            put(0x08, 0xea00007c);  // b 0x200
+            const uint32_t handler[] = {
+                0xe5916000,  // ldr r6, [r1]
+                0xe5847100,  // str r7, [r4, #0x100]
+                0xe2899001,  // add r9, r9, #1
+                0xe3590004,  // cmp r9, #4
+                0x05842000,  // streq r2, [r4]
+                0xee074f35,  // mcr p15, 0, r4, c7, c5, 1
+                0xe1b0f00e,  // movs pc, lr
+            };
+            const uint32_t user[] = {
+                0xe3a03008,  // mov r3, #8
+                0xe5918000,  // ldr r8, [r1] (aborts)
+                0xef000000,  // swi 0
+                0xeb0003fb,  // bl X
+                0xee074f35,  // mcr p15, 0, r4, c7, c5, 1 (undefined)
+                0xe2533001,  // subs r3, r3, #1
+                0x1afffff9,  // bne U + 4
+                kSpinArm,
+            };
+            for (uint32_t i = 0; i < 7; ++i) put(0x200 + 4 * i, handler[i]);
+            for (uint32_t i = 0; i < 8; ++i) put(U + 4 * i, user[i]);
+            put(X, 0xe2800001);      // add r0, r0, #1
+            put(X + 4, 0xe12fff1e);  // bx lr
+            put(M, 0xe3a09000);      // mov r9, #0
+            put(M + 4, 0xe321f010);  // msr cpsr_c, #usr
+            put(M + 8, 0xe1a0f005);  // mov pc, r5
+            if (variant) a.start = M;
+            Snapshot xs;
+            Outcome o = runAssembled(e, c, a, &xs);
+            if (o.ok && !o.unstopped) {
+                o.diffs = unexpected(d, xs);
+                if (o.diffs.empty() && xs.stopped) continue;
+                if (!xs.stopped) o.diffs.push_back("exact did not stop");
+            }
+            printf("FAIL %s (seed %" PRIu64 ")%s\n", name, seed, o.unstopped ? " did not stop" : "");
+            for (const auto& s : o.diffs) printf("  %s\n", s.c_str());
+            ok = false;
+            break;
+        }
+    }
+    return ok;
+}
+
 struct CpuSaver {
     ArmCpu* cpu;
     template <class T>
@@ -2274,6 +2352,7 @@ int main(int argc, char** argv) {
     bool ok = true;
     if (runDirected && !single) {
         ok = directed(e) && ok;
+        ok = privilegeSwitch(e) && ok;
         ok = wmmxCompiles(e) && ok;
         ok = fetchBuffer(e, true) == 0 && ok;
         ok = fetchBuffer(e, false) == 0 && ok;
