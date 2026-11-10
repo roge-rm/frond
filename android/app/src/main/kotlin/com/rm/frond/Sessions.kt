@@ -323,7 +323,7 @@ object Sessions {
         // A copy left by a process killed mid-save would lend its old card to this one.
         val copy = File(folder, "copy").also { it.deleteRecursively(); it.mkdirs() }
         try {
-            val reply = link.request("save", copy.path, timeoutSeconds = 120)
+            val reply = link.request("save", copySavePath(copy, forPath(context, session)?.device?.runs68k == true), timeoutSeconds = 120)
             if (!reply.ok) throw IOException(reply.message)
             // The copy carries the machine's slot.json, as an export does.
             forPath(context, session)?.folder?.let { if (!Cards.stageSlot(it, copy)) throw IOException("slot") }
@@ -692,6 +692,11 @@ internal fun ignoredName(name: String) =
         name.contains(".frondms.tmp-") || name.contains(".frondsd.journal-") || name.contains(".frondmsp.journal-") ||
         name.contains(".frondms.journal-") || name.contains(".frondnand.tmp-") || name.contains(".frondnand.journal-") ||
         name.contains(".gen-")
+
+// Where the core writes a Save a copy: the ARM core takes the folder, the 68k core writes one
+// session file and needs its path.
+internal fun copySavePath(copy: File, runs68k: Boolean): String =
+    if (runs68k) File(copy, "session.frond").path else copy.path
 
 internal fun packableName(name: String): Boolean {
     if (ignoredName(name) || '/' in name || '\\' in name) return false
