@@ -7,7 +7,7 @@ class QTimer;
 class QWindow;
 
 // Holds the core's Palm window inside Frond's window. The core's X11 window is wrapped and
-// reparented here, and the core's `--window-fit whole` makes it follow this widget's size.
+// reparented here, and the core's `--window-fit fit` makes it follow this widget's size.
 class PalmHolder : public QWidget {
     Q_OBJECT
  public:

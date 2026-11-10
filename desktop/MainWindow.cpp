@@ -2030,7 +2030,8 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     // The Palm's window follows Frond's window when it is embedded.
     embedWanted = runningRules::embedPossible(QGuiApplication::platformName(), qEnvironmentVariableIsSet("FROND_TRY_EMBED"));
     embedTried = embedded = false;
-    if (embedWanted) arguments << "--window-fit" << "whole";
+    // fit, so the Palm takes the window's size at the quarter steps too; whole would floor 1.25x to 1x.
+    if (embedWanted) arguments << "--window-fit" << "fit";
     runningBar->setBarShown(runningPreferences.barShown);
     if (runningPreferences.smooth) arguments << "--smooth-lcd";
     if (m68k) {
