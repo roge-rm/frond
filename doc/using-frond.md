@@ -79,8 +79,8 @@ Set these when you add a machine, or in Edit settings while it's stopped. On And
 | Sound | Turns Palm sound on or off. It can also be switched in the Display panel or the bar. |
 | Low-latency audio | Less delay between a tap and the sound. See below. |
 | Contrast | Palm IIIx only. 0 to 100, default 50, lower fades the ink and higher darkens the panel. It's in the Display panel too and is saved with the machine. |
-| Speed | Palm IIIx only. Original runs at the real 16.58 MHz, Uncapped lets the host run it as fast as it can (timers stay real time). On Android it's in the Display sheet too and applies at once. |
-| Engine | Exact or Fast. It's hidden: on Linux set `FROND_ENGINE_SETTING=1`, on Android it shows in debug builds. See [performance.md](performance.md). The IIIx only has Exact, so it never shows there. |
+| Speed | Original or Uncapped. On the Palm IIIx, Original runs at the real 16.58 MHz and Uncapped lets the host run it as fast as it can (timers stay real time); on Android it's in the Display sheet too and applies at once. On the other devices Original runs at the device's own MIPS (150 on the T|X and Zire 72, 96 on the E2 and TG50, scaled from the 312 MHz figure by clock) and Uncapped passes `--mips 1000`; both apply at the next start. |
+| Engine | Exact or Fast. See [performance.md](performance.md). The IIIx only has Exact, so it never shows there. |
 
 Android also has Settings in the home menu: Orientation (follow the phone, portrait or landscape), the gdb server and its port, and the controller keys.
 

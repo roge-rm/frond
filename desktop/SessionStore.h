@@ -58,7 +58,7 @@ struct Preferences {
     JogControls jogControls{JogControls::keyboard};
     // Engine: Fast is the JIT, Exact the interpreter. Applies at next launch.
     bool fastEngine{false};
-    // 68k devices: LCD contrast 0-100, and Uncapped speed instead of the real clock.
+    // Uncapped speed instead of the device's Original speed; 68k devices also have an LCD contrast 0-100.
     int contrast{50};
     bool uncapped{false};
     // False until a contrast is chosen, so a session's own saved contrast stays.

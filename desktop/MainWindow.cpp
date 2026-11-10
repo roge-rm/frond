@@ -2036,7 +2036,10 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     if (m68k) {
         if (runningPreferences.contrastSet) arguments << "--contrast" << QString::number(runningPreferences.contrast);
         if (runningPreferences.uncapped) arguments << "--speed" << "uncapped";
-    } else if (runningPreferences.fastEngine) arguments << "--engine" << "fast";
+    } else {
+        if (runningPreferences.fastEngine) arguments << "--engine" << "fast";
+        if (runningPreferences.uncapped) arguments << "--mips" << "1000";
+    }
     {
         const QSignalBlocker blocked(contrast);
         contrast->setValue(runningPreferences.contrast);

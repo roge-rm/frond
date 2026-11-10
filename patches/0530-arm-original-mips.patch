@@ -1,0 +1,132 @@
+diff --git a/src/common/device_profile5.h b/src/common/device_profile5.h
+index eb98545..52b3500 100644
+--- a/src/common/device_profile5.h
++++ b/src/common/device_profile5.h
+@@ -87,7 +87,8 @@ struct DeviceProfile5 {
+     uint32_t msSizes{0};
+     // Largest Memory Stick Pro in MiB (256, 512, 1024 or 1886 for "2 GB"); 0 for none.
+     uint32_t msProMaxMib{0};
+-    // Real CPU clock in Hz for the Original speed setting; 0 where the board works it out itself.
++    // Real CPU clock in Hz for the Original speed setting; 0 where the board works it out itself (an ARM
++    // device then runs at 100 MIPS). ARM devices run at deviceProfileOriginalMips5 of it.
+     uint32_t cpuHz{0};
+ };
+ 
+@@ -103,7 +104,8 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
+      DeviceNorLayout5::any, 0, 0, false, 32u << 20, 2048u << 20,
+      {true, "tx", 320, 480, 0, 84, "Home|Calendar|Contacts|Web",
+       "up|down|left|right|centre|app1|app2|app3|app4|menu|power", -1, -1, 54, 466, true, true, false,
+-      "85b048a692aa317763a7077ea72da6cb", "wallpaper"}},
++      "85b048a692aa317763a7077ea72da6cb", "wallpaper"},
++     0, 0, 312000000},
+     {deviceTypeE2, "palm-e2", "Tungsten E2", DeviceCohort5::e2Nand, DeviceSupport5::e2Desktop,
+      DeviceDetect5::cardHeader, deviceCompanyPalm5, 0x68737072 /* hspr */, DeviceBoard5::pxa255E2,
+      DeviceArt::e2, {false, true, true, true, true, true, true, true, false, false, false, true},
+@@ -111,7 +113,8 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
+      DeviceNorLayout5::headerOffset, 0x20000, 0, true, 512, 1024u << 20,
+      {true, "e2", 320, 320, 120, 80, "Calendar|Contacts|Tasks|Note Pad",
+       "up|down|left|right|centre|app1|app2|app3|app4|home|menu|power", 27, 351, 27, 405, false, true, false,
+-      "2a9faf69b43ba590cfb9ba78e4eef11c", "wallpaper-upper"}},
++      "2a9faf69b43ba590cfb9ba78e4eef11c", "wallpaper-upper"},
++     0, 0, 200000000},
+     // The E2 board with a patched E3-style ROM.
+     {deviceTypeFrankenE2, "palm-e2-franken", "Tungsten E3", DeviceCohort5::patchedE2,
+      DeviceSupport5::experimentalDesktop, DeviceDetect5::cardHeader, deviceCompanyPalm5,
+@@ -120,7 +123,8 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
+      8u << 20, 34603008, 16u << 20, 32u << 20, DisplayMode::mode_320x480, 1u << 6, false,
+      DeviceNorLayout5::headerOffset, 0x20000, 0, true, 512, 1024u << 20,
+      {true, "e3", 320, 480, 0, 80, "Calendar|Contacts|Tasks|Note Pad",
+-      "up|down|left|right|centre|app1|app2|app3|app4|home|menu", 20, 466, 88, 466, false, true, false, "a79f98bddd50c61e7eb89eee46eb81bd", "e3-stock"}},
++      "up|down|left|right|centre|app1|app2|app3|app4|home|menu", 20, 466, 88, 466, false, true, false, "a79f98bddd50c61e7eb89eee46eb81bd", "e3-stock"},
++     0, 0, 200000000},
+     {deviceTypePV, "repalm", "rePalm paravirtualized", DeviceCohort5::paravirtual,
+      DeviceSupport5::inheritedUnverified, DeviceDetect5::cardHeader, 0, 0x50765076 /* PvPv */,
+      DeviceBoard5::paravirtual, DeviceArt::none, {},
+@@ -135,7 +139,8 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
+      DeviceNorLayout5::smallAndBigCards, 0, 0x20000, false, 32u << 20, 2048u << 20,
+      {true, "zire", 320, 320, 120, 96, "Calendar|Contacts|Music|Camera",
+       "up|down|left|right|centre|app1|app2|app3|app4|home|menu|voice|power", 23, 352, 23, 412, false, true, true,
+-      "0f3e0bf04ceaa5ad73a1768b7d9ede98", "wallpaper"}},
++      "0f3e0bf04ceaa5ad73a1768b7d9ede98", "wallpaper"},
++     0, 0, 312000000},
+     // PXA250 with a built-in keyboard; unsupported transports stay disabled.
+     {deviceTypeTG50, "sony-clie-tg50", "Sony CLIÉ TG50", DeviceCohort5::tg50Nor, DeviceSupport5::experimentalDesktop,
+      DeviceDetect5::cardHeader, 0x736f6e79 /* sony */, 0x76726e61 /* vrna */,
+@@ -146,7 +151,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
+      {true, "tg50", 320, 320, 0, 251, "Date Book|Address|To Do|Memo Pad",
+       "up|down|app1|app2|app3|app4|home|power", -1, -1, -1, -1, false, false, false, "", "tg50-clie",
+       DeviceStorageSlot5::memoryStick, 1073741887, true, true, 38, true},
+-     4 | 8 | 16 | 32 | 64 | 128, 1886},
++     4 | 8 | 16 | 32 | 64 | 128, 1886, 200000000},
+     // DragonBall EZ with 4 MiB RAM and a 2 MiB flash part, run by frond-68k. Takes the IIIx 3.1 ROMs, the
+     // generic OS 3.5 EZ ROMs and the IIIx/V 4.1 ROM. Piezo, serial, IrDA and the snap-on Palm III modem; nothing else
+     // is on the device.
+@@ -409,6 +414,15 @@ inline bool deviceProfileRuns68k5(int32_t deviceType) {
+     return profile && (profile->board == DeviceBoard5::ez328 || profile->board == DeviceBoard5::vz328);
+ }
+ 
++// Guest MIPS an ARM device runs at in Original speed: 150 on the 312 MHz PXA270 (set against ZQuake on a
++// T|X), scaled by CPU clock for the others. The 200 MHz PXA25x figure (96) is an estimate, not measured.
++inline uint32_t deviceProfileOriginalMips5(int32_t deviceType) {
++    if (deviceProfileRuns68k5(deviceType)) return 100;
++    const auto* profile = deviceProfile5(deviceType);
++    if (!profile || !profile->cpuHz) return 100;
++    return uint32_t((uint64_t(150) * profile->cpuHz + 156000000) / 312000000);
++}
++
+ inline DeviceStorageSlot5 deviceProfileStorageSlot5(const DeviceProfile5& profile) {
+     return profile.frontend.sdSlot ? DeviceStorageSlot5::sd : profile.frontend.storageSlot;
+ }
+diff --git a/src/uarm/native/main.cpp b/src/uarm/native/main.cpp
+index 782fd32..b1a6a89 100644
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -70,7 +70,7 @@ struct Options {
+     optional<string> nand;
+     optional<string> sd;
+     optional<unsigned int> gdbPort;
+-    unsigned int mips;
++    optional<unsigned int> mips; // Unset runs at the device's Original MIPS.
+     bool disableAudio;
+     unsigned int audioPeriod;
+     optional<string> script;
+@@ -441,7 +441,7 @@ namespace {
+             cerr << "--audio-period must be 64..8192 frames" << endl;
+             return false;
+         }
+-        if (options.mips == 0) {
++        if (options.mips && *options.mips == 0) {
+             cerr << "MIPS must be finite" << endl;
+             return false;
+         }
+@@ -735,7 +735,7 @@ namespace {
+ 
+         MainLoop mainLoop(soc);
+         if (options.experimentalFastAudio) mainLoop.SetTimesliceUsec(1000000 / 120);
+-        mainLoop.SetCyclesPerSecondLimit(options.mips * 1000000);
++        mainLoop.SetCyclesPerSecondLimit(uint64_t(options.mips.value_or(deviceProfileOriginalMips5(deviceType))) * 1000000);
+ 
+         Rotation rotation = Rotation::portrait_0;
+ 
+@@ -1373,10 +1373,9 @@ int main(int argc, char** argv) {
+         .scan<'u', unsigned int>();
+ 
+     program.add_argument("--mips")
+-        .help("target speed in MIPS")
++        .help("target speed in MIPS; default: the device's Original speed")
+         .metavar("<mips>")
+-        .scan<'u', unsigned int>()
+-        .default_value(100u);
++        .scan<'u', unsigned int>();
+ 
+     program.add_argument("--small-window")
+         .help("use a 1x window (alias for --window-scale 1)")
+@@ -1501,7 +1500,7 @@ int main(int argc, char** argv) {
+                        .nand = program.present("--nand"),
+                        .sd = program.present("--sd"),
+                        .gdbPort = program.present<unsigned int>("--gdb"),
+-                       .mips = program.get<unsigned int>("--mips"),
++                       .mips = program.present<unsigned int>("--mips"),
+                        .disableAudio = program.get<bool>("--no-sound"),
+                        .audioPeriod = program.get<unsigned int>("--audio-period"),
+                        .script = program.present("--script"),

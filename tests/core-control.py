@@ -425,6 +425,23 @@ def common(c, root, device, unsupported, saved):
     c.ok('guest-ready')
 
 
+def reset_after_change(c, root, device):
+    """A reset straight after an install or delete keeps the change. The T|X writes a database's
+    last pages to its NAND store up to 2 s later, so the core lets the guest run that far first."""
+    if device not in ('palm-tx', 'palm-e2'):
+        print(f'core-control frond: reset after change skipped, {device} has no NAND store (needs a T|X or E2 session)')
+        return
+    name = 'frond-reset-test'
+    c.ok('install', palm_database(root / f'{name}.pdb', name, b'DATA', b'FRst', False), code=('installed', 'needs-reset'))
+    c.ok('reset', code='done')
+    c.until_ok('guest-ready')
+    assert name.encode().hex() in c.ok('db-list', code='databases'), 'install lost by a reset straight after it'
+    c.ok('delete-db', name, code='deleted')
+    c.ok('reset', code='done')
+    c.until_ok('guest-ready')
+    assert name.encode().hex() not in c.ok('db-list', code='databases'), 'delete undone by a reset straight after it'
+
+
 def check_arm(core, session, root):
     work = root / 'arm'
     work.mkdir()
@@ -441,9 +458,12 @@ def check_arm(core, session, root):
             unsupported.append(('hold', 'on'))
         # As the desktop does, the ARM core saves over the session it runs in its machine folder.
         # A lone file is extracted to <stem>/ on load, so the save goes to <stem>/<stem>.frond.
+        # A lone v7 or later file runs in the folder it was copied to and saves back to itself.
+        lone = copy.is_file() and copy.read_bytes()[4:8] == struct.pack('<I', 6)
         saved = next((p for p in (copy / (session.name + '.frond'), *sorted(copy.glob('*.frond'))) if p.is_file()),
-                     copy) if copy.is_dir() else copy.parent / copy.stem / (copy.stem + '.frond')
+                     copy) if copy.is_dir() else copy.parent / copy.stem / (copy.stem + '.frond') if lone else copy
         common(c, work, device, unsupported, saved)
+        reset_after_change(c, work, device)
         c.fails('serial-mode', 'modem', code='argument')  # the snap-on modem is frond-68k's
         # The infrared phone takes the IR port, and the IR keyboard and the phone keep each other out.
         c.events.clear()
@@ -458,7 +478,7 @@ def check_arm(core, session, root):
         assert c.ok('keyboard-attach', 'on', code='keyboard') == 'attached'
         c.fails('irda-mode', 'phone', code='infrared')
         assert c.ok('keyboard-attach', 'off', code='keyboard') == 'detached'
-        if not copy.is_dir():
+        if lone:
             # Saving back to the lone file goes to the folder it was loaded into and leaves the file as it was.
             before, stamp = copy.read_bytes(), saved.stat().st_mtime_ns
             c.ok('save', copy, code='saved')
@@ -779,6 +799,9 @@ def check_68k(core, rom, root):
 
 def arm_session(given):
     if given:
+        # A machine folder's own session file stands for the folder: <name>/<name>.frond.
+        if given.is_file() and given.name == given.parent.name + '.frond':
+            return given.parent
         return given
     if os.environ.get('FROND_ARM_SESSION'):
         return Path(os.environ['FROND_ARM_SESSION'])

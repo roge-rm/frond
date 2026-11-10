@@ -1,6 +1,5 @@
 package com.rm.frond.ui
 
-import android.content.pm.ApplicationInfo
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -56,7 +55,7 @@ fun MachineSettingsScreen(model: HomeModel) {
             }
             Header("Display")
             MachineDisplayRows(draft.device, draft.settings, false) { model.changeMachineSettings(it) }
-            val rows = MachineRows.of(draft.device, context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0)
+            val rows = MachineRows.of(draft.device)
             Header("Audio", Modifier.padding(top = 16.dp))
             MachineSoundRow(draft.device, draft.settings, false) { model.changeMachineSettings(it) }
             if (rows.audioPreview) {

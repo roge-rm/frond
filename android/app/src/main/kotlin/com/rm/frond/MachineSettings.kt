@@ -19,8 +19,8 @@ enum class Engine(val label: String, val arg: String) {
     FAST("Fast", "fast"),
 }
 
-// A 68k device's speed; arg is the saved name and frond-68k's --speed value. Original runs at the real
-// clock, Uncapped as fast as the host can with the guest's timers on real time.
+// A device's speed; arg is the saved name and frond-68k's --speed value. Original runs at the real
+// clock (an ARM device at its profile's MIPS), Uncapped as fast as the host can; on ARM that is a high --mips.
 enum class CpuSpeed(val label: String, val arg: String) {
     ORIGINAL("Original", "original"),
     UNCAPPED("Uncapped", "uncapped"),
@@ -33,14 +33,14 @@ enum class BarMode(val label: String, val arg: String) {
     OWN_SPACE("Own space", "space"),
 }
 
-// Which per-machine rows Edit settings and the running menu show. A 68k device has contrast and speed
-// and no engine or low-latency audio; the engine shows only in debug builds.
+// Which per-machine rows Edit settings and the running menu show. Every device has speed. A 68k device
+// has contrast and no engine or low-latency audio.
 data class MachineRows(val contrast: Boolean, val speed: Boolean, val engine: Boolean, val audioPreview: Boolean) {
     companion object {
-        fun of(device: Device, debuggable: Boolean) = MachineRows(
+        fun of(device: Device) = MachineRows(
             contrast = device.runs68k,
-            speed = device.runs68k,
-            engine = debuggable && !device.runs68k,
+            speed = true,
+            engine = !device.runs68k,
             audioPreview = !device.runs68k,
         )
     }
@@ -86,7 +86,7 @@ data class MachineSettings(
 
     fun applyTo(settings: Settings) = settings.copy(size = size, smoothing = smoothing, sound = sound)
 
-    // m68k: frond-68k's arguments, with contrast and speed and no engine.
+    // m68k: frond-68k's arguments, with contrast and speed and no engine. ARM: Uncapped is a high --mips.
     fun arguments(soundSupported: Boolean = true, tg50Controls: Boolean = false, m68k: Boolean = false): List<String> = buildList {
         addAll(listOf("--window-fit", this@MachineSettings.size.arg))
         if (smoothing) add("--smooth-lcd")
@@ -96,8 +96,9 @@ data class MachineSettings(
         if (m68k) {
             if (contrastSet) addAll(listOf("--contrast", contrast.toString()))
             if (speed == CpuSpeed.UNCAPPED) addAll(listOf("--speed", speed.arg))
-        } else if (engine == Engine.FAST) {
-            addAll(listOf("--engine", engine.arg))
+        } else {
+            if (engine == Engine.FAST) addAll(listOf("--engine", engine.arg))
+            if (speed == CpuSpeed.UNCAPPED) addAll(listOf("--mips", UNCAPPED_MIPS.toString()))
         }
     }
 
@@ -118,6 +119,8 @@ data class MachineSettings(
 
     companion object {
         const val DEFAULT_CONTRAST = 50
+        // The --mips an ARM device gets when Uncapped; the core runs at what the host manages.
+        const val UNCAPPED_MIPS = 1000
 
         // Settings saved before the choice only had showJogControls: shown was left of the screen.
         private fun jogControls(json: JSONObject): JogControls =
