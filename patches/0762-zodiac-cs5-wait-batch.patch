@@ -1,0 +1,58 @@
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -238,6 +238,16 @@
+         }
+     }
+ 
++    // Wait clocks from now that change no board or graphics state, at most a whole transaction. 0 with the
++    // stepped idle loop, before the chip's clocks are programmed or with a clock status already pending.
++    uint32_t quietWaitClocks(Imx1PllRatio busPeriod) const {
++        if (options.idleStepped || !cs5Configuration.clockState().programmed() ||
++            peripherals.clockStatus() != Imx1BootstrapAccess::ok) return 0;
++        // The last period of each count is the one with the change.
++        uint64_t quiet = std::min<uint64_t>(peripherals.idleQuietHclk(), uint64_t(1) << 30);
++        quiet = std::min(quiet, cs5Configuration.idleQuietSteps(busPeriod.numerator, busPeriod.denominator));
++        return quiet > 1 ? uint32_t(std::min<uint64_t>(quiet - 1, Imx1Cs5Bus::timeoutClocks)) : 0;
++    }
+     Imx1BootstrapAccess cs5Wait(uint32_t& elapsed) {
+         const auto mode = peripherals.eimState().cs5Mode();
+         if (mode == Imx1Cs5Mode::unsupported) return Imx1BootstrapAccess::sequence;
+@@ -257,7 +267,37 @@
+         bool ready = mode == Imx1Cs5Mode::fixed;
+         auto timedStatus = Imx1BootstrapAccess::ok;
+         auto state = transaction.sample(0,true,mode == Imx1Cs5Mode::dtack ? !ready : ready);
+-        while (state == Imx1Cs5Bus::State::waiting) {
++        // Wait clocks inside a quiet span of the board and the chip are charged in one piece. The ready line
++        // and the bus state are worked out first, as the chip's clock rate can't change there. The clocks
++        // after the span run one at a time below.
++        if (state == Imx1Cs5Bus::State::waiting) {
++            const uint32_t limit = quietWaitClocks(busPeriod);
++            if (limit && acceptGraphics(cs5Configuration, false) == Imx1BootstrapAccess::ok) {
++                const auto rate = cs5Configuration.clockState().systemRate();
++                uint32_t clocks = 0;
++                while (state == Imx1Cs5Bus::State::waiting && clocks < limit) {
++                    if (!ready && rate.numerator) {
++                        const uint64_t numerator = busPeriod.numerator * rate.numerator;
++                        const uint64_t denominator = uint64_t(busPeriod.denominator) * 32768 * rate.denominator;
++                        // The clock loop below refuses it at the same clock.
++                        if (!service.supports(denominator)) break;
++                        ready = service.add(numerator,denominator) != 0;
++                    }
++                    ++clocks;
++                    state = transaction.sample(elapsed + clocks,true,mode == Imx1Cs5Mode::dtack ? !ready : ready);
++                }
++                if (clocks) {
++                    peripherals.advanceHclkCycles(clocks);
++                    auto candidate = cs5Configuration;
++                    candidate.advanceBusCycles(clocks,busPeriod,cpuPeriod);
++                    timedStatus = acceptGraphics(candidate, true);
++                    elapsed += clocks;
++                    work += clocks;
++                    if (timedStatus == Imx1BootstrapAccess::ok) timedStatus = peripherals.clockStatus();
++                }
++            }
++        }
++        while (timedStatus == Imx1BootstrapAccess::ok && state == Imx1Cs5Bus::State::waiting) {
+             const auto rate = cs5Configuration.clockState().systemRate();
+             if (!ready && rate.numerator) {
+                 const uint64_t numerator = busPeriod.numerator * rate.numerator;
