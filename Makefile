@@ -677,7 +677,7 @@ test-pace-debug: build/test-gdbstub-target
 benchmark-replay: out/frond
 	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' ! -name timeutil.o > build/replay-core.rsp
 	$(CXX) -std=c++17 -O2 -g $(shell sdl2-config --cflags) \
-		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/uarm/native -Ibuild/source/src/common \
 		tools/benchmark-replay.cpp @build/replay-core.rsp build/source/src/common/libcommon.a \
 		$(CPU_TEST_LDLIBS) $(shell pkg-config --libs sdl2 SDL2_image) -o build/benchmark-replay
 

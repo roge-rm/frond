@@ -40,11 +40,13 @@ Correctness against the interpreter: `make test-jit-differential` and `make test
 
 ```sh
 ./build/benchmark-replay SESSION REPLAY GUEST_MS MIPS on|off NEWDIR [PALM_EPOCH_SECONDS]
+./build/benchmark-replay --device sony-clie-tg50 NOR.bin REPLAY GUEST_MS MIPS on|off NEWDIR
 ```
 
-- `MIPS` is the virtual CPU budget, not a hardware clock. `on|off` is PCM scheduling: compare on with on and off with off, because off changes what the guest runs.
-- It needs a complete TX session with networking off and no SD card. Events are sent through the normal pen and key queues at the first 1 ms boundary after their time. The RTC follows guest time so runs repeat.
-- `NEWDIR` gets `summary.json` (CPU and wall time after restore, guest time and cycles, LCD frame counts, frame-sequence hash, PCM count, hash, peak and silence), `frames.csv`, `inputs.csv` and numbered PNGs for `snapshot` lines. Observation and PNG writing are in the measured cost.
+- `MIPS` is the virtual CPU budget, not a hardware clock; `original` takes the device's real speed (96 on the TG50). `on|off` is PCM scheduling: compare on with on and off with off, because off changes what the guest runs.
+- It runs a complete session of any ARM device (TX, Zire 72, E2, TG50) with networking off and no SD card; SESSION can be a machine folder. Boards that aren't PXA are refused. A Memory Stick in the session runs from a copy. A NOR image with `--device` cold boots instead (not the TX, which needs its NAND). `REPLAY` takes the runner's `--input-replay` lines, or `-` for none (pen, key, keyboard-down/up, keyboard-attach/detach and snapshot lines work). Events are sent through the normal pen and key queues at the first 1 ms boundary after their time. The RTC follows guest time so runs repeat. `FROND_JIT=0|1` picks Exact or Fast, `FROND_JIT_STATS=1` prints the JIT's counters at the end. Fast compiles each block where it's asked for so runs repeat; `BENCH_JIT_ASYNC=1` (any value but empty or 0) compiles on the compile thread as the app does, closer to the app's time but Fast hashes change from run to run.
+- `NEWDIR` gets `summary.json` (device, CPU and wall time after restore, user and system CPU, host MIPS, guest time and cycles, LCD frame counts, frame-sequence hash, PCM count, hash, peak and silence), `frames.csv`, `inputs.csv` and numbered PNGs for `snapshot` lines; a session other than a v6 TX one is copied into `NEWDIR/machine` and run from there. The same figures go to stdout as one line. Observation and PNG writing are in the measured cost.
+- On Android, `-Pfrond.jitDifferential=true` builds it as `benchmark-replay` in the APK's build tree, for `adb push` to `/data/local/tmp`.
 - `BENCH_DUMP_RAM=1` also writes guest RAM at start and end (`ram-start.bin`, `ram-end.bin`).
 - `python3 tools/analyze-gameplay.py DIR [--compare OTHERDIR]` summarises a run and fails if guest progress, frames or PCM differ. Hashes catch regressions, they don't prove identical state.
 - `FROND_HOST_PROFILE=1` (Linux x86-64) samples the host PC into `host-pc.csv`. Resolve `executable_relative_pc` with `addr2line -f -C -e` on the same binary. Profile in separate runs from timings.
