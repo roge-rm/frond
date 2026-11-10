@@ -46,6 +46,12 @@ class DeviceDataTest(unittest.TestCase):
         # Nothing it has is done yet but the screen, pen, buttons and stick.
         for key in ('runs_68k', 'sound', 'usb', 'infrared', 'bluetooth', 'serial', 'network', 'microphone', 'sd_slot'):
             self.assertFalse(profile[key], key)
+        # The Android app has no Zodiac controls yet, so its generated list leaves the device out.
+        self.assertIn('tapwave-zodiac-2', generator.DESKTOP_ONLY)
+        for kotlin in (next(data for path, data in generator.outputs(inventory).items() if path.suffix == '.kt'),
+                       (ROOT / 'android/app/src/main/kotlin/com/rm/frond/DeviceInventory.kt').read_text()):
+            self.assertNotIn('tapwave-zodiac-2', kotlin)
+            self.assertIn('id = "sony-clie-tg50"', kotlin)
         self.assertEqual(profile['setup'], '')
 
     def test_dana_independent_native_card_inventory(self):
