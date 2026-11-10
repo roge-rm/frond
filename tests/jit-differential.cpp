@@ -4,7 +4,8 @@
 // SPSRs, flags, CP15 fault and domain registers, iWMMXt registers, data memory, page
 // attributes) and a random block of ARMv5TE and Thumb segments, weighted towards LDM/STM,
 // conditional execution, shifts by register, PC writes, Thumb switching, transfers that
-// fault part-way and iWMMXt instructions (which the JIT hands to the interpreter). Both
+// fault part-way and iWMMXt instructions (data processing and register transfers run in the
+// JIT's cp0 and cp1 slots, loads, stores and the rest in the interpreter). Both
 // engines run the case from the same state until they stop on a B . (the block's end, or
 // the reset, prefetch abort, IRQ and FIQ vectors; undefined and SWI return to the next
 // instruction and a data abort skips the one that aborted). Then their registers, CPSR,
@@ -42,6 +43,7 @@
 #include "pace_patch.h"
 #include "memory_buffer.h"
 #include "patch_dispatch.h"
+#include "jit_dynarmic.h"
 #include "pxa270_WMMX.h"
 #include "savestate/savestateAll.h"
 #include "system_state.h"
@@ -1021,6 +1023,106 @@ struct Gen {
     }
 
     // In user mode for sure: a jump into the privileged-only page, a prefetch abort when taken.
+    // An iWMMXt CDP, MCR, MRC, MCRR or MRRC the JIT runs (pxa270wmmxJitValid), condition AL.
+    uint32_t wmmxValid(uint32_t pattern, uint32_t random) {
+        for (int tries = 0; tries < 200; ++tries) {
+            const uint32_t w = AL | pattern | (g.u32() & random);
+            if (pxa270wmmxJitValid(w)) return w;
+        }
+        return AL | 0x0e000000;  // wor wR0, wR0, wR0
+    }
+    uint32_t wmmxCdp() { return wmmxValid(0x0e000000, 0x00fff1ef); }
+    uint32_t wmmxMrc(uint32_t rd) { return wmmxValid(0x0e100010 | (rd << 12), 0x00ef01ef); }
+
+    // Valid iWMMXt instructions for the JIT's slots, with the state around them: saturating
+    // arithmetic on boundary values, the flag registers, MRC into the CPSR flags followed by
+    // a conditional instruction, CPAR changes, and TMIA (interpreted) mixed in.
+    void armWmmxValid(Item& it) {
+        static const uint32_t edges[] = {0x7fffffff, 0x80000000, 0xffffffff, 0, 0x7f7f7f7f, 0x80808080,
+                                         0x7fff8000, 0xff00ff00, 0x00010001, 0x01010101};
+        const uint32_t k = g.below(12), cp = g.below(2) << 8;
+        const uint32_t ra = reg(), rb = reg();
+        if (k < 3) {
+            it.kind = "iwmmxt valid cdp";
+            for (uint32_t n = 1 + g.below(4); n--;) {
+                const uint32_t w = wmmxCdp();
+                it.ins.push_back({g.chance(20) ? (w & 0x0fffffff) | cond() : w, false});
+            }
+        } else if (k < 5) {
+            // TMCRR boundary values into one or two registers, then a saturating add,
+            // subtract or pack on them, then wCSSF or wCASF out.
+            it.kind = "iwmmxt saturation";
+            const uint32_t wn = g.below(16), wm = g.below(16);
+            for (uint32_t wr : {wn, wm}) {
+                armConst(it, ra, g.chance(70) ? g.pick(edges) : g.u32());
+                armConst(it, rb, g.chance(70) ? g.pick(edges) : g.u32());
+                it.ins.push_back({AL | 0x0c400000 | (rb << 16) | (ra << 12) | wr, false});  // tmcrr
+            }
+            if (g.chance(30)) it.ins.push_back({AL | 0x0e020110, false});  // tmcr wCSSF, r0
+            static const uint32_t sat[] = {1, 3};
+            uint32_t op;
+            if (g.chance(70))  // WADD, WSUB (cp1 op2 4, 5): size 0-2, unsigned or signed saturation
+                op = 0x0e000100 | (((g.below(3) << 2) | g.pick(sat)) << 20) | ((4 + g.below(2)) << 5);
+            else  // WPACK (cp0 op2 4): from halfword, word or doubleword
+                op = 0x0e000000 | ((((1 + g.below(3)) << 2) | g.pick(sat)) << 20) | (4 << 5);
+            it.ins.push_back({AL | op | (wn << 16) | (g.below(16) << 12) | wm, false});
+            it.ins.push_back({AL | 0x0e100110 | ((g.chance(50) ? 2 : 3) << 16) | (ra << 12), false});  // tmrc
+        } else if (k < 7) {
+            // An MRC into the CPSR flags (TANDC, TORC, TEXTRC, TMRC and the rest with r15),
+            // then a conditional MOV that shows them.
+            it.kind = "iwmmxt mrc r15";
+            uint32_t w;
+            if (g.chance(60)) {  // TANDC, TORC (op2 1, 2) or TEXTRC (op2 3) on wCASF
+                const uint32_t op2 = 1 + g.below(3);
+                w = AL | 0x0e13f110 | ((g.below(3) << 1) << 21) | (op2 << 5) | (op2 == 3 ? g.below(8) : 0);
+            } else {
+                w = wmmxMrc(15);
+            }
+            if (g.chance(50)) it.ins.push_back({wmmxCdp(), false});  // sets wCASF, most of them
+            it.ins.push_back({w, false});
+            it.ins.push_back({dpImm(cond(), 13, false, 0, ra, armImm(g.below(256))), false});
+        } else if (k < 8) {
+            // TMCR of any control register (wCID and the holes are undefined), then TMRC.
+            it.kind = "iwmmxt tmcr/tmrc";
+            static const uint32_t regs[] = {1, 2, 3, 8, 9, 10, 11};
+            const uint32_t c = g.chance(80) ? g.pick(regs) : g.below(16);
+            if (g.chance(50)) armConst(it, ra, g.chance(50) ? g.pick(edges) : g.u32());
+            it.ins.push_back({cond() | 0x0e000110 | (c << 16) | (ra << 12), false});
+            it.ins.push_back({cond() | 0x0e100110 | (c << 16) | (rb << 12), false});
+        } else if (k < 9) {
+            it.kind = "iwmmxt tmcrr/tmrrc";
+            uint32_t rc = reg(), rd = reg();
+            while (rd == rc) rd = reg();
+            it.ins.push_back({cond() | 0x0c400000 | (rb << 16) | (ra << 12) | g.below(16), false});
+            if (g.chance(50)) it.ins.push_back({wmmxCdp(), false});
+            it.ins.push_back({cond() | 0x0c500000 | (rd << 16) | (rc << 12) | g.below(16), false});
+        } else if (k < 10) {
+            // TMIA, TMIAPH, TMIAxy: interpreted, between JIT ones.
+            it.kind = "iwmmxt tmia";
+            static const uint32_t kinds[] = {0, 8, 12, 13, 14, 15};
+            it.ins.push_back({wmmxCdp(), false});
+            it.ins.push_back({cond() | 0x0e200010 | (g.pick(kinds) << 16) | (ra << 12) | cp | (g.below(8) << 5) |
+                                  g.below(15),
+                              false});
+            it.ins.push_back({wmmxCdp(), false});
+        } else {
+            // A CPAR write (privileged; undefined in user mode), then iWMMXt that may now be
+            // undefined, then often CPAR back to 3 and the same again.
+            it.kind = "iwmmxt cpar";
+            const uint32_t a = wmmxCdp(), b = wmmxMrc(rb == 15 ? 0 : rb);
+            it.ins.push_back({movImm(ra, g.below(4)), false});
+            it.ins.push_back({AL | 0x0e0f0f11 | (ra << 12), false});  // mcr p15, 0, ra, c15, c1, 0
+            it.ins.push_back({a, false});
+            it.ins.push_back({b, false});
+            if (g.chance(60)) {
+                it.ins.push_back({movImm(ra, 3), false});
+                it.ins.push_back({AL | 0x0e0f0f11 | (ra << 12), false});
+                it.ins.push_back({a, false});
+                it.ins.push_back({b, false});
+            }
+        }
+    }
+
     void armUserFetch(Item& it) {
         it.kind = "user fetch, privileged page";
         const uint32_t rt = reg();
@@ -1041,7 +1143,8 @@ struct Gen {
         else if (k < 60) armBlock(it);
         else if (k < 66) armStatus(it);
         else if (k < 70) armCp15(it);
-        else if (k < 77) armWmmx(it);
+        else if (k < 72) armWmmx(it);
+        else if (k < 77) armWmmxValid(it);
         else if (k < 79) armMisc(it);
         else if (k < 80 && modes == bit(USR)) armUserFetch(it);
         else if (!armPcWrite(it)) {
@@ -1666,6 +1769,24 @@ bool directed(Engines& e) {
          {0xe16ff002, 0xe58d3000, 0xe8dd8000, 0x4f70f800, 0xe7fee7fe}, false, IRQ,
          {{0, 0x20100}, {2, 0xf2}, {3, 0x1000c}, {13, 0x20200}, {14, 0x1000e}},
          {{Expect::REG, 0, 0x20100}, {Expect::REG, 14, 0x1000f}, {Expect::CPSR, 0, 0x32, 0x3f}}},
+        // iWMMXt in the JIT's slots. WADDHSS on 0x7fff and 0xffff lanes plus 1: lanes 1 and 3
+        // saturate (wCSSF bits 2 and 6), lanes 0 and 2 wrap to 0.
+        {"iwmmxt waddhss saturating, wcssf",
+         {0xe3a00000, 0xee020110, 0xe3e00102, 0xe1a01000, 0xec410002, 0xe3a02801, 0xe3822001, 0xe1a03002,
+          0xec432003, 0xee721183, 0xee126110, 0xec598001},
+         false, USR, {},
+         {{Expect::REG, 6, 0x44}, {Expect::REG, 8, 0x7fff0000}, {Expect::REG, 9, 0x7fff0000}}},
+        // TANDCW r15 with every wCASF nibble set: NZCV all set, then MI and EQ both pass.
+        {"iwmmxt tandcw r15, conditional after",
+         {0xe3e00000, 0xee030110, 0xe3a01000, 0xe3a02000, 0xee93f130, 0x43a01001, 0x03a02001}, false, USR, {},
+         {{Expect::REG, 1, 1}, {Expect::REG, 2, 1}, {Expect::CPSR, 0, 0xf0000000, 0xf0000000}}},
+        // The same block three times, CPAR 3, 2, 3: the second time WOR (cp0) at 0x1000c is
+        // undefined (r14_und 0x10010, read into r7 at the end) and TMRC (cp1) still runs.
+        {"iwmmxt cpar off and on in a loop",
+         {0xe3a04003, 0xe3a05003, 0xee0f4f11, 0xee021003, 0xee136110, 0xe2244001, 0xee0f4f11, 0xe2555001,
+          0x1afffff8, 0xe3a07000, 0xe321f0db, 0xe1a0700e, 0xe321f0d3},
+         false, SVC, {},
+         {{Expect::REG, 5, 0}, {Expect::REG, 4, 2}, {Expect::REG, 7, 0x10010}}},
     };
     for (const auto& d : tests) {
         for (uint64_t seed = 1; seed <= 4; ++seed) {
@@ -1945,6 +2066,26 @@ int fetchBuffer(Engines& e, bool moveOn) {
 
 }  // namespace
 
+// Every iWMMXt word pxa270wmmxJitValid accepts (all CDP, MCR, MRC, MCRR and MRRC encodings
+// on cp0 and cp1, condition AL) gets a callback from the JIT's slot as dynarmic would ask for
+// it: dynarmic asserts on a refusal.
+bool wmmxCompiles(Engines& e) {
+    uint64_t valid[2] = {}, refused = 0;
+    auto check = [&](uint32_t w, int k) {
+        if (!pxa270wmmxJitValid(w)) return;
+        ++valid[k];
+        if (cpuJitWmmxCompiles(e.fast.cpu, w)) return;
+        if (++refused <= 10) printf("FAIL iwmmxt %08x is valid for the JIT but its slot refuses it\n", w);
+    };
+    for (uint32_t x = 0; x < (1u << 24); ++x)
+        if (!(x & 0xe00)) check(AL | 0x0e000000 | x, 0);  // CDP, MCR, MRC
+    for (uint32_t x = 0; x < (1u << 21); ++x)
+        if (!(x & 0xe00)) check(AL | 0x0c400000 | x, 1);  // MCRR, MRRC
+    printf("iwmmxt slots: %" PRIu64 " CDP/MCR/MRC and %" PRIu64 " MCRR/MRRC words valid, %" PRIu64 " refused\n",
+           valid[0], valid[1], refused);
+    return !refused && valid[0] && valid[1];
+}
+
 int main(int argc, char** argv) {
     uint64_t first = 1, last = 30001, one = 0;
     bool single = false, show = false, runDirected = true, open = false;
@@ -2011,6 +2152,7 @@ int main(int argc, char** argv) {
     bool ok = true;
     if (runDirected && !single) {
         ok = directed(e) && ok;
+        ok = wmmxCompiles(e) && ok;
         ok = fetchBuffer(e, true) == 0 && ok;
         ok = fetchBuffer(e, false) == 0 && ok;
         ok = staleLink() == 0 && ok;
