@@ -37,7 +37,26 @@ static void run(bool reverse,unsigned failure) {
     assert(!l2cap_config_rsp(&host,&connection,2,&response,sizeof(response)));
     assert(starts==(failure==1||failure==4?0:1));
 }
+static void hook(const void* data,uint16_t len,void* context){(void)data;(void)len;(void)context;}
+static struct cid_hook* add_hook(struct btconn* connection,uint16_t cid){
+    struct cid_hook* h=calloc(1,sizeof(*h));assert(h);h->cid=cid;h->func=hook;h->next=connection->cid_hooks;connection->cid_hooks=h;return h;
+}
+/* A closed channel's CID hook goes with it, so a later channel on the same CID (Palm OS reuses
+   0x0040 for RFCOMM after SDP) reaches RFCOMM instead of the old SDP hook. */
+static void closed_channel_hooks(bool response){
+    struct bthost host={0};struct btconn connection={0};struct l2conn* channel=calloc(1,sizeof(*channel));
+    struct bt_l2cap_pdu_disconn_req request={0};struct bt_l2cap_pdu_disconn_rsp reply={0};
+    assert(channel);host.acl_mtu=192;host.send_handler=output;host.conns=&connection;connection.handle=1;
+    channel->scid=0x40;channel->dcid=0x40;channel->psm=1;connection.l2conns=channel;
+    add_hook(&connection,0x40);add_hook(&connection,0x41);
+    request.dcid=cpu_to_le16(0x40);request.scid=cpu_to_le16(0x40);reply.dcid=cpu_to_le16(0x40);reply.scid=cpu_to_le16(0x40);
+    if(response)assert(l2cap_disconn_rsp(&host,&connection,3,&reply,sizeof(reply)));
+    else assert(l2cap_disconn_req(&host,&connection,3,&request,sizeof(request)));
+    assert(!connection.l2conns);assert(!find_cid_hook(&connection,0x40));assert(find_cid_hook(&connection,0x41));
+    free(connection.cid_hooks);
+}
 int main(void) {
     unsigned failure;for(failure=0;failure<5;++failure){run(false,failure);run(true,failure);}
+    closed_channel_hooks(false);closed_channel_hooks(true);puts("PASS closed channel drops its CID hook");
     puts("PASS bilateral RFCOMM config orders, duplicate, failure, continuation and removed-channel response");return 0;
 }
