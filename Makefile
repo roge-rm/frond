@@ -231,8 +231,9 @@ test-sdl-audio: out/frond
 test: test-dana-keyboard-art
 DANA_ART_SOURCE ?= build/source
 DANA_ART_BUILD ?= build
-test-dana-keyboard-art:
-	python3 tools/prepare.py --destination $(DANA_ART_SOURCE)
+# The default source comes from prepare, so it isn't prepared twice side by side under -j.
+test-dana-keyboard-art: $(if $(filter build/source,$(DANA_ART_SOURCE)),prepare)
+	$(if $(filter-out build/source,$(DANA_ART_SOURCE)),python3 tools/prepare.py --destination $(DANA_ART_SOURCE))
 	mkdir -p $(DANA_ART_BUILD)
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra $(shell pkg-config --cflags sdl2 SDL2_image) \
 		-I$(DANA_ART_SOURCE)/src/uarm/native -I$(DANA_ART_SOURCE)/src/uarm/uarm \
@@ -245,8 +246,9 @@ test-dana-keyboard-art:
 test: test-dana-view
 DANA_VIEW_SOURCE ?= build/source
 DANA_VIEW_BUILD ?= build
-test-dana-view:
-	python3 tools/prepare.py --destination $(DANA_VIEW_SOURCE)
+# The default source comes from prepare, so it isn't prepared twice side by side under -j.
+test-dana-view: $(if $(filter build/source,$(DANA_VIEW_SOURCE)),prepare)
+	$(if $(filter-out build/source,$(DANA_VIEW_SOURCE)),python3 tools/prepare.py --destination $(DANA_VIEW_SOURCE))
 	mkdir -p $(DANA_VIEW_BUILD)
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra $(shell pkg-config --cflags sdl2 SDL2_image) \
 		-I$(DANA_VIEW_SOURCE)/src/uarm/native -I$(DANA_VIEW_SOURCE)/src/uarm/uarm \
@@ -1439,17 +1441,17 @@ test-e2-family-peripherals: out/frond
 		build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-e2-family-peripherals
 	timeout 120 ./build/test-e2-family-peripherals
 
+# The 68k tests link from cloudpilot's .build-frond objects. out/frond-68k builds them once first,
+# so their sub-makes running side by side only link and never rewrite an object another one is reading.
 .PHONY: test-68k-vz-registers
 test: test-68k-vz-registers
-test-68k-vz-registers: prepare
-	$(MAKE) -C build/source/src/common libcommon.a
+test-68k-vz-registers: prepare out/frond-68k
 	$(MAKE) -C build/source/src/cloudpilot FROND_68K=1 -f Makefile \
 		-f $(CURDIR)/tests/68k-vz-registers.mk FROND_TEST_ROOT=$(CURDIR) vz-register-test
 
 .PHONY: test-68k-dana
 test: test-68k-dana
-test-68k-dana: prepare
-	$(MAKE) -C build/source/src/common libcommon.a net
+test-68k-dana: prepare out/frond-68k
 	$(MAKE) -C build/source/src/cloudpilot FROND_68K=1 -f Makefile \
 		-f $(CURDIR)/tests/68k-dana.mk FROND_TEST_ROOT=$(CURDIR) dana-test
 
@@ -1478,8 +1480,7 @@ test-dana-card-inventory: prepare
 
 .PHONY: test-68k-bus-state
 test: test-68k-bus-state
-test-68k-bus-state: prepare
-	$(MAKE) -C build/source/src/common libcommon.a
+test-68k-bus-state: prepare out/frond-68k
 	$(MAKE) -C build/source/src/cloudpilot FROND_68K=1 -f Makefile \
 		-f $(CURDIR)/tests/68k-bus-state.mk FROND_TEST_ROOT=$(CURDIR) bus-state-test
 
