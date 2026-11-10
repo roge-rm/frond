@@ -443,7 +443,7 @@ Infrared keyboard (Attached) makes your keyboard a Palm Universal Wireless Keybo
 
 ### Bluetooth
 
-Bluetooth is off by default, and uses the original Palm Bluetooth stack against a virtual controller from `btvirt`. Set Bluetooth to This Frond and Frond runs `btvirt` for you, then turn Bluetooth off and on again in Palm OS (Sony Preferences on the TG50). Set Discoverable to Yes on the receiving Palm. The status shows the radio and the link state. Each machine gets its own virtual controller, and only machines on the same radio can see each other, so two machines on one computer set to This Frond find each other. To reach another install, pick a connection, see Connections between Fronds above. Frond never touches a real Bluetooth adapter.
+Bluetooth is off by default, and uses the original Palm Bluetooth stack against a virtual controller from `btvirt`. Set Bluetooth to This Frond and Frond runs `btvirt` for you, then turn Bluetooth off and on again in Palm OS (Sony Preferences on the TG50). Do that again after any change to the Bluetooth setting or its connection, or the Palm won't find anything. Set Discoverable to Yes on the receiving Palm. The status shows the radio and the link state. Each machine gets its own virtual controller, with an address saved in the machine so pairings and trusted devices stay. Only machines on the same radio can see each other, so two machines on one computer set to This Frond find each other. To reach another install, pick a connection, see Connections between Fronds above. Frond never touches a real Bluetooth adapter.
 
 The Debian package and the Android app include `btvirt`. A source checkout builds it once (needs Git, a C toolchain, autotools, pkg-config and the GLib, D-Bus and readline headers):
 
