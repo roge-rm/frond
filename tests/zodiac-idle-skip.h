@@ -466,10 +466,51 @@ inline void pcm() {
     }
 }
 
+// The end of channel 10's buffer (DMA interrupt, source 61) counts as a wake on its own, with no timer running.
+inline void dmaWake() {
+    for (bool repeat : {false, true}) for (bool masked : {false, true}) {
+        Imx1Bootstrap b;
+        b.connectCpuInterrupts();
+        write(b, 0x0021b000, 0x57000003); write(b, 0x0021b020, 0);
+        write(b, 0x00223008, 61);
+        write(b, 0x00209000, 1); write(b, 0x00209008, masked ? 0x7ff : 0x3ff);
+        write(b, 0x00218008, 0x9900); write(b, 0x00218014, 0x6100); write(b, 0x00218020, 4);
+        write(b, 0x0021800c, 0xe8);
+        for (unsigned i = 0; i < 8; ++i) write(b, 0x00218000, 0x100 + i);
+        for (unsigned i = 0; i < 4; ++i) write(b, 0x00300000 + i * 4, 0x12340001 + i * 0x10002);
+        write(b, 0x00209300, 0x00300000); write(b, 0x00209304, 0x00218000); write(b, 0x00209308, 16);
+        write(b, 0x0020930c, repeat ? 0x208c : 0x2088);
+        write(b, 0x00209310, 16); write(b, 0x00209314, 8);
+        assert(!b.idleWakePossible());
+        write(b, 0x0020930c, repeat ? 0x208d : 0x2089);
+        write(b, 0x0021800c, 0x2e8); write(b, 0x00218008, 0x9b00);
+        assert(b.interruptLines().irq == Imx1AitcLine::clear);
+        // A masked channel that stops at the end of its buffer never raises the interrupt.
+        assert(b.idleWakePossible() == (repeat || !masked));
+        // Not while source 61 is disabled in the AITC.
+        write(b, 0x0022300c, 61); assert(!b.idleWakePossible());
+        write(b, 0x00223008, 61); assert(b.idleWakePossible() == (repeat || !masked));
+        uint64_t clocks = 0;
+        while (b.interruptLines().irq == Imx1AitcLine::clear && clocks < 1000000) {
+            const auto steps = std::min<uint64_t>(b.idleQuietHclk(), 1u << 20);
+            b.advanceHclkCycles(uint32_t(steps)); clocks += steps;
+        }
+        if (!repeat && masked) {
+            assert(b.interruptLines().irq == Imx1AitcLine::clear && (read(b, 0x00209004) & 0x400) && !b.idleWakePossible());
+            continue;
+        }
+        assert(b.interruptLines().irq == Imx1AitcLine::asserted && b.interruptPending().normal == uint64_t(1) << 61);
+        write(b, 0x00209004, 0x400);
+        assert(b.interruptLines().irq == Imx1AitcLine::clear && b.idleWakePossible() == repeat);
+    }
+    std::puts("PASS: the end of the PCM DMA buffer counts as an idle wake, once and repeating, masked and with source 61 disabled");
+}
+
 inline void run() {
     graphics();
     peripherals();
     pcm();
+    dmaWake();
     const auto options = wakeOptions();
     for (bool fast : {false, true}) {
         const auto timer = wakeGuest(100000, 0, 4);
