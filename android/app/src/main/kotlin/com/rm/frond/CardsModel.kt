@@ -145,7 +145,8 @@ class CardsModel(private val activity: HomeActivity, private val home: HomeModel
                 if (error != null) removeDocument(to)
                 return@runJob error
             }
-            val temp = File(app.cacheDir, "card-export.img")
+            // The card tool writes a classic stick as a .frondms only when the file is named so.
+            val temp = File(app.cacheDir, if (row.card.kind == "ms") "card-export.frondms" else "card-export.img")
             try {
                 temp.delete()
                 Cards.exportCardImage(sessions, row.card.id, temp, cancelled, progress)?.let { return@runJob it }
