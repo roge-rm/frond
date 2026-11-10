@@ -841,7 +841,7 @@ test-zodiac-machine: build/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
 		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
 		tests/zodiac-machine-cli.cpp $(ZODIAC_MACHINE_SOURCES) \
-		@build/zodiac-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-machine-cli
+		@build/zodiac-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -lz -o build/test-zodiac-machine-cli
 	FROND_ZODIAC_PROBE=build/test-zodiac-machine-cli python3 tests/zodiac-graphics-plain-copy.py
 	FROND_ZODIAC_PROBE=build/test-zodiac-machine-cli FROND_ZODIAC_PROBE_ENGINE=fast python3 tests/zodiac-graphics-plain-copy.py
 	FROND_ZODIAC_PROBE=build/test-zodiac-machine-cli python3 tests/zodiac-gpio-event.py

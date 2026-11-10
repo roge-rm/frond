@@ -637,7 +637,7 @@ static void palmIIIx() {
 static void zodiac2() {
     const auto* p = deviceProfileNamed5("tapwave-zodiac-2");
     assert(p && p->deviceType == deviceTypeZodiac2 && p->support == DeviceSupport5::staged);
-    assert(p->board == DeviceBoard5::none && p->art == DeviceArt::none);
+    assert(p->board == DeviceBoard5::none && p->art == DeviceArt::zodiac);
     assert(!p->frontend.available && !deviceProfileRunnerEligible5(p->deviceType));
     assert(!deviceProfileRuns68k5(p->deviceType) && !deviceProfileSupportsDesktop5(p->deviceType));
     const auto& c = p->capabilities;
