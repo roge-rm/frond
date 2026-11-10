@@ -164,6 +164,21 @@ void guards() {
     write(b, cgm, 0x57003c03, A::sideEffect, 0);
     write(b, cgm + 32, 0x000f0012, A::sideEffect);
     compare(b, untouched);
+    {
+        // The ROM's sound power-down (2009f9a8..20084608): SSI1 off with channel 10 left set up,
+        // then PERCLK3 and HCLK slowed. Neither clock has a user left.
+        auto off = b;
+        write(off, ssi + 8, 0x9900); write(off, dma + 8, 0x7ff); write(off, ssi + 0xc, 0xe8);
+        write(off, cgm + 32, 0x007f0012, A::sideEffect);
+        write(off, cgm, 0x57003c03, A::sideEffect, 0);
+        write(off, ssi + 8, 0x9800); write(off, ssi + 0x28, 0x40);
+        assert(off.pcmState().dmaActive);
+        write(off, cgm + 32, 0x007f0012);
+        write(off, cgm, 0x57003c03, A::ok, 0);
+        assert(off.pcmState().dmaActive && off.pcmDmaRemaining() == b.pcmDmaRemaining());
+        off.advanceCpuCycles(64, 0, true);
+        assert(off.pcmDmaRemaining() == b.pcmDmaRemaining());
+    }
     for (unsigned i = 0; i < 3000; ++i) {
         b.advanceCpuCycles(1, 3, true); untouched.advanceCpuCycles(1, 3, true); compare(b, untouched);
     }

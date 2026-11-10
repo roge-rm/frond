@@ -43,6 +43,10 @@ int main() {
     soc.advanceHclkCycles(256);
     assert(soc.lcdcContrastPhase() == 5 && copied.lcdcContrastPhase() == 5);
     write(pwm,0x580,A::sequence); read(pwm,0x500);
+    // CC_EN alone may go off with the LCDC on, the ROM's sound power-down order. The counter stops.
+    write(pwm,0x400); read(pwm,0x400); read(refresh,2); soc.advanceHclkCycles(99);
+    assert(soc.lcdcContrastPhase() == 5);
+    write(pwm,0x500,A::sequence); write(pwm,0x401,A::sequence);
     write(refresh,0); soc.advanceHclkCycles(99);
     assert(soc.lcdcContrastPhase() == 5);
     write(pwm,0x400); soc.advanceHclkCycles(99);
