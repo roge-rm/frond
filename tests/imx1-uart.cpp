@@ -280,11 +280,31 @@ void refusals() {
     assert(put(u, uesc, 0x100) == A::reservedBits && put(u, uesc, 0x7e) == A::ok && get(u, uesc) == 0x7e);
     assert(put(u, utim, 0x1000) == A::reservedBits && put(u, utim, 0xfff) == A::ok && get(u, utim) == 0xfff);
     assert(put(u, ubrc, 0) == A::sideEffect && put(u, uts, 0x1000) == A::sideEffect && put(u, uts, 0x2000) == A::sideEffect);
+    assert(put(u, uts, 0x400) == A::sideEffect);
     assert(put(u, uts, 0x69) == A::ok && get(u, uts) == 0x60);
     // UBMR alone leaves the rate as it was, and UBIR after it is out of order.
     assert(get(u, ucr1) == 0x205 && get(u, ucr2) == 0x60a7);
     assert(put(u, ubmr, 0x1387) == A::ok && get(u, ubmr) == 0x1387 && put(u, utxd, 1) == A::ok);
     assert(u.idleQuietCycles() == 20000 && put(u, ubir, 0x2f) == A::sideEffect);
+    // A refused rate change leaves UBMR as it was.
+    {
+        Imx1Uart v(true);
+        open(v);
+        assert(put(v, utxd, 1) == A::ok && put(v, ubir, 0x2f) == A::ok);
+        assert(put(v, ubmr, 0x1387) == A::sideEffect && get(v, ubmr) == 0x270f && v.idleQuietCycles() == 3334);
+        // An idle condition or a frame shorter than the idle time already counted is refused.
+        Imx1Uart w(true);
+        open(w);
+        assert(put(w, ucr1, 0xe05) == A::ok && w.receive(0x11));
+        w.advance(100 * 3334);
+        assert(put(w, ucr1, 0x205) == A::sideEffect && get(w, ucr1) == 0xe05);
+        assert(put(w, ucr1, 0x605) == A::sideEffect && put(w, ucr1, 0xa05) == A::ok);
+        assert(put(w, ucr2, 0x6087) == A::ok && put(w, ucr2, 0x60a7) == A::ok && !(get(w, usr2) & 0x1000));
+        const uint64_t quiet = w.idleQuietCycles();
+        assert(quiet >= 59 * 3333 && quiet <= 61 * 3334);
+        w.advance(quiet - 1); assert(!(get(w, usr2) & 0x1000));
+        w.advance(1); assert((get(w, usr2) & 0x1000) && !w.busy());
+    }
     // Disabled: nothing moves, and the FIFO keeps its character.
     assert(put(u, ucr1, 0x204) == A::ok && !u.busy());
     u.advance(1000000);
@@ -364,6 +384,9 @@ void bootstrap() {
     assert(soc.interruptPending().normal == uint64_t(1) << 23);
     write(soc, uart2 + utxd, 0x41); write(soc, uart2 + utxd + 0x3c, 0x42);
     assert(soc.interruptLines().irq == Imx1AitcLine::clear && soc.idleWakePossible());
+    // PERCLK1 can't change under a character on its way out.
+    write(soc, cgm + 32, 1, B::sideEffect);
+    assert(read(soc, cgm + 32) == 0);
     uint64_t hclk = 0;
     while (soc.interruptLines().irq == Imx1AitcLine::clear) {
         const uint64_t quiet = soc.idleQuietHclk();
@@ -372,6 +395,7 @@ void bootstrap() {
     }
     assert(soc.uartState(2).transmittedCharacters() == 2 && soc.interruptPending().normal == uint64_t(1) << 23);
     std::printf("two characters took %llu HCLK\n", static_cast<unsigned long long>(hclk));
+    write(soc, cgm + 32, 1); write(soc, cgm + 32, 0);
     write(soc, uart1 + ucr1, 5); write(soc, uart1 + ucr2, 0x4027); write(soc, uart1 + ucr4, 0x8041);
     assert(soc.uart(1).receive(1) && soc.interruptPending().normal == (uint64_t(1) << 23 | uint64_t(1) << 30));
 }
