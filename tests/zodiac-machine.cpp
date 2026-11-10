@@ -4,6 +4,7 @@
 #include "zodiac-irq.cpp"
 #undef main
 #undef imx1BootProbe
+#include "zodiac-idle-skip.h"
 namespace {
 Imx1AspPenInputs pen(bool down) {
     Imx1AspPenInputs p;
@@ -121,6 +122,7 @@ int main() {
     Imx1ProbeOptions invalid;invalid.rtcInitialTimeKnown=true;invalid.rtcInitialTime.hour=99;
     assert(!imx1MachineCreate(nullptr,0,Imx1ProbeEntry::resetAlias,false,invalid));
     for(bool fast:{false,true}) { penWait(fast);timedAsp(fast);timerWait(fast); }
+    idle_skip::run();
     thumbPrefix(); suspendedThumbPrefix(); sharedThumbPrefix(); stalledDelivery();
     std::puts("PASS: persistent Exact/Fast slices across interrupted Thumb BL, task switches and timed stalls");
 }
