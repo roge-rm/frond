@@ -33,6 +33,19 @@ inline bool fits(const QString& path, DeviceCardSlot5 slot, DeviceCardFamily5 fa
     if (!frondCards::cardHeader(path,nullptr,&logical) || logical<=0) return false;
     return deviceProfileCardSizeValid5(deviceTypeDana,slot,family,quint64(logical));
 }
+// Desktop text for a card command the core refused; other refusals pass through as they are.
+inline QString message(const QString& core) {
+    if (core.contains("duplicate identity or serial")) return QObject::tr("That card is already in the other slot.");
+    if (core.contains("cannot lock card file")) return QObject::tr("That card is open somewhere else.");
+    return core;
+}
+// Why a card can't be exported to path, empty when it can. The core only says the file couldn't be made.
+inline QString exportProblem(const QString& path) {
+    const QFileInfo file(path);
+    if (file.exists()) return QObject::tr("Choose a new file. The core won't replace an existing card.");
+    if (!QFileInfo(file.absolutePath()).isWritable()) return QObject::tr("Can't write to that folder.");
+    return {};
+}
 struct State {
     bool known{}, present{}, inserted{}, protectedCard{}, failed{};
     QString identity, protocol;
@@ -67,7 +80,7 @@ class DanaCardsDialog : public QDialog {
                     else if (operation=="Export") {
                         const auto path=QFileDialog::getSaveFileName(this,tr("Export card"),QString("Dana card %1.frondsd").arg(n+1),tr("Frond SD cards (*.frondsd)"));
                         if (!path.isEmpty()) {
-                            if (QFileInfo::exists(path)) QMessageBox::warning(this,tr("Card"),tr("Choose a new file. The core won't replace an existing card."));
+                            if (const auto problem=frondDanaCards::exportProblem(path); !problem.isEmpty()) QMessageBox::warning(this,tr("Card"),problem);
                             else perform(n,"export",frondDanaCards::quote(path));
                         }
                     } else if (operation=="Eject") {
@@ -125,7 +138,7 @@ class DanaCardsDialog : public QDialog {
     Reply request(const QString& command,const QString& argument={}) { return requestWithClient(client,command,argument); }
     bool perform(int n,const QString& operation,const QString& argument={}) {
         const auto result=request(n?"sd2-"+operation:"sd-"+operation,argument);
-        if (!result.ok) QMessageBox::warning(this,tr("Card"),result.message);
+        if (!result.ok) QMessageBox::warning(this,tr("Card"),frondDanaCards::message(result.message));
         return result.ok;
     }
     void refresh() {

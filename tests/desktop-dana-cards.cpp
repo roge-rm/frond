@@ -73,6 +73,20 @@ class DanaCardsTest : public QObject {
         write(path,manifest(),false,"alphasmart-dana",5);
         QVERIFY(!frondDanaSession::inspect(path).valid);
     }
+    void refusalMessages() {
+        // Core refusals the user can meet get plain text; anything else passes through.
+        QCOMPARE(frondDanaCards::message("error: duplicate identity or serial"),QString("That card is already in the other slot."));
+        QCOMPARE(frondDanaCards::message("error: cannot lock card file"),QString("That card is open somewhere else."));
+        QCOMPARE(frondDanaCards::message("error: something new"),QString("error: something new"));
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        QVERIFY(frondDanaCards::exportProblem(dir.filePath("card.frondsd")).isEmpty());
+        QFile existing(dir.filePath("old.frondsd")); QVERIFY(existing.open(QIODevice::WriteOnly)); existing.close();
+        QVERIFY(frondDanaCards::exportProblem(existing.fileName()).contains("new file"));
+        QVERIFY(QDir(dir.path()).mkdir("locked"));
+        QVERIFY(QFile::setPermissions(dir.filePath("locked"),QFile::ReadOwner|QFile::ExeOwner));
+        QCOMPARE(frondDanaCards::exportProblem(dir.filePath("locked/card.frondsd")),QString("Can't write to that folder."));
+        QVERIFY(QFile::setPermissions(dir.filePath("locked"),QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner));
+    }
     void state() {
         const auto card=frondDanaCards::state("ejected "+key+" protected io-error mmc");
         QVERIFY(card.known && card.present && !card.inserted && card.protectedCard && card.failed); QCOMPARE(card.protocol,QString("mmc"));
