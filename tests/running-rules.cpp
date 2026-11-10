@@ -180,6 +180,13 @@ class RunningRulesTest : public QObject {
         QVERIFY(hardResetEnabled(true, traitsFor(named("palm-tx"))));
         QVERIFY(!hardResetEnabled(true, traitsFor(named("tapwave-zodiac-2"))));
     }
+    void machineStopIsTheFailureText() {
+        QCOMPARE(machineStopText("device: tapwave-zodiac-2\nzodiac: the machine stopped: x, after 5 instructions\n"
+                                 "Tapwave Zodiac 2: the machine stopped: unsupported-peripheral (side-effect) at pc 200885fc\n"),
+                 QString("The Tapwave Zodiac 2 stopped: unsupported-peripheral (side-effect) at pc 200885fc."));
+        QVERIFY(machineStopText("device: palm-tx\nsave: the device state snapshot failed\n").isEmpty());
+        QVERIFY(machineStopText(": the machine stopped: \n").isEmpty());
+    }
     void screenshotNamesAreFileSafe() {
         QCOMPARE(screenshotName("Palm TX", "20261107-133000"), QString("Frond Palm TX 20261107-133000.png"));
         QCOMPARE(screenshotName("a/b", "1"), QString("Frond a_b 1.png"));

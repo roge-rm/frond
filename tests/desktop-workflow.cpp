@@ -1831,13 +1831,33 @@ for line in s.makefile('rb'):
         QSettings().clear();
     }
     // Opt-in run with a real Zodiac ROM, not in ctest: FROND_ZODIAC_ROM, and FROND_ZODIAC_SHOTS for
-    // screenshots. FROND_ZODIAC_STATE (a machine state file, read by the core) starts it at the launcher,
-    // which the pen, stick and reset steps need; a cold boot takes too long for them. Uses xdotool.
+    // screenshots. FROND_ZODIAC_STATE (a bring-up state file, read by the developer build of the core,
+    // out/frond-zodiac-developer) starts it at the launcher, which the pen, stick, stop and reset steps
+    // need; a cold boot takes too long for them. Uses xdotool.
     void zodiacRealRom() {
         const auto rom = qEnvironmentVariable("FROND_ZODIAC_ROM");
         if (rom.isEmpty()) QSKIP("Set FROND_ZODIAC_ROM");
         const auto shots = qEnvironmentVariable("FROND_ZODIAC_SHOTS");
         const bool launcher = !qEnvironmentVariableIsEmpty("FROND_ZODIAC_STATE");
+        // Only the developer build of the core takes FROND_ZODIAC_STATE (make out/frond-zodiac-developer).
+        const auto core = launcher && qEnvironmentVariableIsEmpty("FROND_TEST_CORE")
+            ? QDir::cleanPath(QCoreApplication::applicationDirPath() + "/../../out/frond-zodiac-developer") : cardsCore();
+        // The Palm's own window, wherever it is, and a view position in it as xdotool arguments. The
+        // screen is as tall as the window, with the controls at its sides.
+        QString palm;
+        const auto at = [&](int viewX, int viewY, QString& x, QString& y) {
+            QProcess find; find.start("xdotool", {"search", "--onlyvisible", "--class", "^frond(-zodiac-developer)?$"});
+            QVERIFY(find.waitForFinished());
+            palm = qEnvironmentVariable("FROND_ZODIAC_WINDOW", QString::fromLatin1(find.readAllStandardOutput()).split('\n', Qt::SkipEmptyParts).value(0));
+            QVERIFY(!palm.isEmpty());
+            QProcess size; size.start("xdotool", {"getwindowgeometry", "--shell", palm});
+            QVERIFY(size.waitForFinished());
+            const auto geometry = QString::fromLatin1(size.readAllStandardOutput());
+            const int width = QRegularExpression("WIDTH=(\\d+)").match(geometry).captured(1).toInt();
+            const int height = QRegularExpression("HEIGHT=(\\d+)").match(geometry).captured(1).toInt();
+            QVERIFY(width > 0 && height > 0);
+            x = QString::number((width - 480 * height / 320) / 2 + viewX * height / 320); y = QString::number(viewY * height / 320);
+        };
         const auto shot = [&](QWidget& window, const QString& name) {
             if (shots.isEmpty()) return;
             QVERIFY(window.grab().save(shots + "/desktop-" + name));
@@ -1856,7 +1876,7 @@ for line in s.makefile('rb'):
             else { errors << box->text(); box->accept(); }
         };
         {
-            MainWindow window(cardsCore()); window.show();
+            MainWindow window(core); window.show();
             QTimer poll; poll.setInterval(50);
             connect(&poll, &QTimer::timeout, &window, [&] {
                 answer(window);
@@ -1884,20 +1904,10 @@ for line in s.makefile('rb'):
             QTest::qWait(8000);
             shot(window, "1-running.png");
             if (launcher) {
-                // The Palm's own window, wherever it is: a tap on Prefs in the launcher's list, then the
-                // stick held down with the Down key.
-                QProcess find; find.start("xdotool", {"search", "--onlyvisible", "--class", "^frond$"});
-                QVERIFY(find.waitForFinished());
-                const auto palm = qEnvironmentVariable("FROND_ZODIAC_WINDOW", QString::fromLatin1(find.readAllStandardOutput()).split('\n', Qt::SkipEmptyParts).value(0));
-                QVERIFY(!palm.isEmpty());
-                QProcess size; size.start("xdotool", {"getwindowgeometry", "--shell", palm});
-                QVERIFY(size.waitForFinished());
-                const auto geometry = QString::fromLatin1(size.readAllStandardOutput());
-                const int width = QRegularExpression("WIDTH=(\\d+)").match(geometry).captured(1).toInt();
-                const int height = QRegularExpression("HEIGHT=(\\d+)").match(geometry).captured(1).toInt();
-                QVERIFY(width > 0 && height > 0);
-                // The screen is as tall as the window, with the controls at its sides.
-                const auto x = QString::number((width - 480 * height / 320) / 2 + 350 * height / 320), y = QString::number(77 * height / 320);
+                // A tap on Prefs in the launcher's list, then the stick held down with the Down key.
+                QString x, y;
+                at(350, 77, x, y);
+                if (QTest::currentTestFailed()) return;
                 QCOMPARE(QProcess::execute("xdotool", {"mousemove", "--window", palm, x, y, "mousedown", "1", "sleep", "0.4", "mouseup", "1"}), 0);
                 QTest::qWait(25000);
                 shot(window, "2-pen-prefs.png");
@@ -1922,21 +1932,50 @@ for line in s.makefile('rb'):
         }
         const auto saved = frondSessions::describe(session);
         QVERIFY(saved.saved && !saved.old); QCOMPARE(saved.device, QString("tapwave-zodiac-2"));
-        {
-            // The saved session runs again where it stopped, then a reset starts the boot over.
+        if (launcher) {
+            // The pen held down until a battery poll comes stops the machine, for now. The stop is
+            // shown with its reason and the session stays as it was saved.
+            const auto before = digest(session);
             QSettings().setValue("resume", true);
-            MainWindow window(cardsCore()); window.show();
+            MainWindow window(core); window.show();
             QTimer poll; poll.setInterval(50);
             connect(&poll, &QTimer::timeout, &window, [&] { answer(window); });
             poll.start();
             auto* reset = window.findChild<QPushButton*>("reset");
             QTRY_VERIFY_WITH_TIMEOUT(reset->isEnabled() && logText(window).contains("device: tapwave-zodiac-2"), 60000);
             QTest::qWait(8000);
-            shot(window, "5-resumed.png");
+            QString x, y;
+            at(240, 300, x, y);
+            if (QTest::currentTestFailed()) return;
+            QCOMPARE(QProcess::execute("xdotool", {"mousemove", "--window", palm, x, y, "mousedown", "1"}), 0);
+            QTRY_VERIFY_WITH_TIMEOUT(!errors.isEmpty(), 400000);
+            QProcess::execute("xdotool", {"mouseup", "1"});
+            QVERIFY2(errors.first().startsWith("The Tapwave Zodiac 2 stopped: unsupported-peripheral"), qPrintable(errors.join('\n')));
+            QTRY_VERIFY_WITH_TIMEOUT(!reset->isEnabled(), 30000);
+            shot(window, "5-stopped.png");
+            errors.clear();
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 120000);
+            poll.stop();
+            QCOMPARE(digest(session), before);
+            if (!shots.isEmpty()) {
+                QFile log(shots + "/stopped-log.txt"); QVERIFY(log.open(QIODevice::WriteOnly)); log.write(logText(window).toUtf8());
+            }
+        }
+        {
+            // The saved session runs again where it stopped, then a reset starts the boot over.
+            QSettings().setValue("resume", true);
+            MainWindow window(core); window.show();
+            QTimer poll; poll.setInterval(50);
+            connect(&poll, &QTimer::timeout, &window, [&] { answer(window); });
+            poll.start();
+            auto* reset = window.findChild<QPushButton*>("reset");
+            QTRY_VERIFY_WITH_TIMEOUT(reset->isEnabled() && logText(window).contains("device: tapwave-zodiac-2"), 60000);
+            QTest::qWait(8000);
+            shot(window, "6-resumed.png");
             confirm = true;
             reset->click();
             QTest::qWait(15000);
-            shot(window, "6-after-reset.png");
+            shot(window, "7-after-reset.png");
             window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 120000);
             poll.stop();
             QVERIFY2(errors.isEmpty(), qPrintable(errors.join('\n')));

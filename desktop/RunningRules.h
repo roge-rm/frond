@@ -233,6 +233,20 @@ inline Buttons buttons(const Traits& t, const State& s) {
 // without guest calls.
 inline bool hardResetEnabled(bool controlsEnabled, const Traits& t) { return controlsEnabled && t.guestServices; }
 
+// The core's reason when a machine stopped by itself, as the failure's main text. The core's last
+// line like "Tapwave Zodiac 2: the machine stopped: REASON" gives "The Tapwave Zodiac 2 stopped:
+// REASON."; empty when the log has no such line.
+inline QString machineStopText(const QString& log) {
+    static const QString marker = QStringLiteral(": the machine stopped: ");
+    const auto lines = log.split('\n');
+    for (auto i = lines.size() - 1; i >= 0; --i) {
+        const auto at = lines[i].indexOf(marker);
+        const auto reason = at > 0 ? lines[i].mid(at + marker.size()).trimmed() : QString();
+        if (!reason.isEmpty()) return QObject::tr("The %1 stopped: %2.").arg(lines[i].left(at).trimmed(), reason);
+    }
+    return {};
+}
+
 // The line under the machine's name: the engine on ARM devices, else the device.
 inline QString subtitle(const Traits& t, bool fastEngine, const QString& deviceName) {
     return t.runs68k ? deviceName : fastEngine && t.guestServices ? QObject::tr("Fast") : QObject::tr("Exact");
