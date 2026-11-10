@@ -1,0 +1,190 @@
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -1315,7 +1315,7 @@
+     }
+ };
+ #if defined(__GLIBCXX__) && defined(__x86_64__)
+-static_assert(sizeof(Probe) == 26024, "update ProbeState and its stateVersion");
++static_assert(sizeof(Probe) == 26032, "update ProbeState and its stateVersion");
+ static_assert(sizeof(Imx1ProbeResult) == 352, "update ProbeState and its stateVersion");
+ static_assert(sizeof(Imx1ProbeOptions) == 1352, "update stateOptionFields and stateIdentityVersion");
+ #endif
+@@ -1329,7 +1329,7 @@
+         Imx1Aitc::stateVersion, sizeof(Imx1Aitc), Imx1Cgm::stateVersion, sizeof(Imx1Cgm),
+         Imx1Gpio::stateVersion, sizeof(Imx1Gpio), Imx1Eim::stateVersion, sizeof(Imx1Eim),
+         Imx1Timer::stateVersion, sizeof(Imx1Timer), Imx1Sysctrl::stateVersion, sizeof(Imx1Sysctrl),
+-        Imx1Reset::stateVersion, sizeof(Imx1Reset),
++        Imx1Reset::stateVersion, sizeof(Imx1Reset), Imx1Bta::stateVersion, sizeof(Imx1Bta),
+         Imx1Uart::stateVersion, sizeof(Imx1Uart),
+         Imx1Mmcsd::stateVersion, sizeof(Imx1Mmcsd), Imx1I2c::stateVersion, sizeof(Imx1I2c),
+         Imx1Asp::stateVersion, sizeof(Imx1Asp), Imx1Pwm::stateVersion, sizeof(Imx1Pwm),
+--- a/src/uarm/uarm/imx1_boot_probe.h
++++ b/src/uarm/uarm/imx1_boot_probe.h
+@@ -220,6 +220,10 @@
+ Imx1BootstrapAccess imx1MachineReplaceGraphicsAxes(Imx1Machine*, uint32_t first, uint32_t second,
+                                                  bool commit = true);
+ // The Zodiac 2's controls. Each is one GPIO input that reads low while pressed (ROM key scan 20084af4).
++// The ROM proves the pins of Home, power, the stick click and the pins and key codes of the triggers and action
++// buttons. ASSUMPTION "Zodiac button sides": which trigger is left and where each action button sits.
++// ASSUMPTION "Zodiac Function and Bluetooth pins": D12 and D13 by elimination, the ROM has no key code for them.
++// Not wired: D22 (cradle or HotSync, active high) and B23 (the scan's other stick click input).
+ enum class Imx1ZodiacControl {
+     home, triggerLeft, triggerRight, power, stickClick, actionRight, actionUp, actionLeft, function, bluetooth,
+     actionDown, count
+@@ -251,7 +255,7 @@
+ // budget and idleStepped may differ. A failed check or load leaves the machine as it was.
+ // Saving drops translated code, so the saved and the loaded machine also agree on jitBlocks.
+ // Bump the revision in any patch that changes guest-visible i.MX1 or ARM920 behaviour or a state() list.
+-inline constexpr uint32_t imx1MachineStateCoreRevision = 745;
++inline constexpr uint32_t imx1MachineStateCoreRevision = 746;
+ enum class Imx1StateStatus {
+     ok, notAtBoundary, unsupportedConfiguration, truncated, badMagic, badFormatVersion, coreRevisionMismatch,
+     layoutMismatch, corruptSection, missingSection, romMismatch, optionsMismatch, busMismatch, invalidValue
+--- a/src/uarm/uarm/imx1_bootstrap.cpp
++++ b/src/uarm/uarm/imx1_bootstrap.cpp
+@@ -168,6 +168,7 @@
+     if (dmaControl && (dmaStatus & ~dmaMask)) asserted |= uint64_t(1) << 61;
+     // SSI interrupt enables remain guarded; DMA requests go directly to the DMAC.
+     known |= uint64_t(0xf) << 42;
++    known |= Imx1Bta::interruptSources;
+     if (mmcsd.interruptKnown()) known |= uint64_t(1) << 35;
+     if (mmcsd.interruptOutput()) asserted |= uint64_t(1) << 35;
+     // 6.2: PFERR, RTS, DTR, UARTC, TX and RX from 19 for UART2 and from 25 for UART1, which has no DTR.
+@@ -434,6 +435,8 @@
+     if (const auto* name = Imx1Sysctrl::registerName(address)) return name;
+     if (const auto* name = Imx1Mmcsd::registerName(address)) return name;
+     switch (address & ~3u) {
++        case 0x00216110: return "BTA.WU_CONTROL";
++        case 0x00216118: return "BTA.CLK_CONTROL";
+         case 0x0020502c: return "LCDC.PWMR";
+         case 0x00205034: return "LCDC.RMCR";
+         case 0x00209000: return "DMA.DCR";
+@@ -865,6 +868,15 @@
+             case Imx1ResetAccess::readOnly: return Imx1BootstrapAccess::sideEffect;
+         }
+     }
++    if (Imx1Bta::contains(address)) {
++        switch (bta.access(address, size, write, value, sysctrl.btaClockEnabled())) {
++            case Imx1BtaAccess::ok: return Imx1BootstrapAccess::ok;
++            case Imx1BtaAccess::unmapped: return Imx1BootstrapAccess::unmapped;
++            case Imx1BtaAccess::width: return Imx1BootstrapAccess::width;
++            case Imx1BtaAccess::reservedBits: return Imx1BootstrapAccess::reservedBits;
++            case Imx1BtaAccess::sideEffect: return Imx1BootstrapAccess::sideEffect;
++        }
++    }
+     if (Imx1Sysctrl::registerName(address)) {
+         switch (sysctrl.access(address, size, write, value)) {
+             case Imx1SysctrlAccess::ok: return Imx1BootstrapAccess::ok;
+--- a/src/uarm/uarm/imx1_bootstrap.h
++++ b/src/uarm/uarm/imx1_bootstrap.h
+@@ -12,6 +12,7 @@
+ #include "imx1_timer.h"
+ #include "imx1_uart.h"
+ #include "imx1_sysctrl.h"
++#include "imx1_bta.h"
+ #include "imx1_reset.h"
+ #include "imx1_mmcsd.h"
+ #include "imx1_i2c.h"
+@@ -172,7 +173,7 @@
+                (address >= 0x08000000 && address < 0x10000000);
+     }
+     // Registers, clocks and every model, without the memories below.
+-    static constexpr uint32_t stateVersion = 3;
++    static constexpr uint32_t stateVersion = 4;
+     template <class A> void state(A& a) {
+         a.Do64(elapsedReference.ticks).Do64(elapsedReference.numerator).Do64(elapsedReference.denominator);
+         a.Require(elapsedReference.valid(), "reference time");
+@@ -194,7 +195,7 @@
+         a.DoBool(dmaPcmActive);
+         for (auto& s : sdram)
+             a.Do32(s.control).Fixed32(s.bytes).DoBool(s.controlKnown).DoBool(s.precharged).DoBool(s.modeSet).Do32(s.refreshes);
+-        reset.state(a);
++        reset.state(a); bta.state(a);
+     }
+     template <class A> void stateSram(A& a) {
+         const size_t bytes = sram.size();
+@@ -265,6 +266,7 @@
+     Imx1Eim eim;
+     Imx1Timer timer1, timer2;
+     Imx1Sysctrl sysctrl;
++    Imx1Bta bta;
+     Imx1Mmcsd mmcsd;
+     uint32_t perclk1Phase = 0;
+     uint64_t systemPllPhase = 0;
+@@ -312,7 +314,7 @@
+ };
+ 
+ #if defined(__GLIBCXX__) && defined(__x86_64__)
+-static_assert(sizeof(Imx1Bootstrap) == 2320, "update state() and stateVersion");
++static_assert(sizeof(Imx1Bootstrap) == 2328, "update state() and stateVersion");
+ #endif
+ 
+ const char* imx1BootstrapAccessName(Imx1BootstrapAccess access);
+--- a/src/uarm/uarm/imx1_sysctrl.cpp
++++ b/src/uarm/uarm/imx1_sysctrl.cpp
+@@ -15,7 +15,7 @@
+             // MC9328MX1RM table 8-4: bit 3 stays set for normal operation.
+             if ((value & ~0x9ffbu) || !(value & 8)) return Imx1SysctrlAccess::reservedBits;
+             // MEMC test routing and MMA/CSI access control are unqualified. BTAEN only gates the clock
+-            // inputs of the BTA module (table 8-4), which has no model: its registers stay unmapped.
++            // inputs of the BTA module (table 8-4).
+             if ((value ^ gpcr) & 0x8003) return Imx1SysctrlAccess::sideEffect;
+             gpcr = value;
+         } else value = gpcr;
+--- a/src/uarm/uarm/imx1_sysctrl.h
++++ b/src/uarm/uarm/imx1_sysctrl.h
+@@ -9,6 +9,7 @@
+ class Imx1Sysctrl {
+    public:
+     bool dmaClockEnabled() const { return gccr & 8; }
++    bool btaClockEnabled() const { return gpcr & 0x1000; }
+     Imx1SysctrlAccess access(uint32_t address, uint32_t size, bool write, uint32_t& value);
+     static const char* registerName(uint32_t address);
+     static constexpr uint32_t stateVersion = 1;
+--- /dev/null
++++ b/src/uarm/uarm/imx1_bta.h
+@@ -0,0 +1,44 @@
++#ifndef FROND_IMX1_BTA_H
++#define FROND_IMX1_BTA_H
++
++#include <cstdint>
++
++enum class Imx1BtaAccess { ok, unmapped, width, reservedBits, sideEffect };
++
++// Bluetooth Accelerator (MC9328MX1RM chapter 16), only what the Zodiac ROM's radio probe at 200fc874 touches.
++// POLICY "Zodiac Bluetooth radio absent": nothing drives the BTA's radio pins or its reference clock, so its
++// SysTick never runs and BTSYS (source 55) stays low. BTTIM and BTWUI need the timer and the wake-up sequence,
++// which are refused here, so they stay low too.
++class Imx1Bta {
++   public:
++    static constexpr uint64_t interruptSources = uint64_t(7) << 55;
++    static bool contains(uint32_t address) { return address >= 0x00216000 && address < 0x00217000; }
++    // clocked is GPCR BTAEN (table 8-4). With it clear the module is left unmapped.
++    Imx1BtaAccess access(uint32_t address, uint32_t size, bool write, uint32_t& value, bool clocked) {
++        if (!clocked || (address != 0x00216110 && address != 0x00216118)) return Imx1BtaAccess::unmapped;
++        if (size != 4) return Imx1BtaAccess::width;
++        if (address == 0x00216110) {
++            // WU_CONTROL is write only (a read gives WU_STATUS). PDE and CLR_CNT start things that have no model.
++            if (!write) return Imx1BtaAccess::unmapped;
++            if (value & ~0x18u) return Imx1BtaAccess::reservedBits;
++            return value ? Imx1BtaAccess::sideEffect : Imx1BtaAccess::ok;
++        }
++        // CLK_CONTROL (16.5.9.1): bus wait slots and the reference clock divider, reset 0. The register list
++        // has it as write/read and the ROM reads it back to restore it.
++        if (write) {
++            if (value & ~0xeff3u) return Imx1BtaAccess::reservedBits;
++            clockControl = value;
++        } else value = clockControl;
++        return Imx1BtaAccess::ok;
++    }
++    static constexpr uint32_t stateVersion = 1;
++    template <class A> void state(A& a) { a.Do32(clockControl); }
++
++   private:
++    uint32_t clockControl = 0;
++};
++#if defined(__GLIBCXX__) && defined(__x86_64__)
++static_assert(sizeof(Imx1Bta) == 4, "update state() and stateVersion");
++#endif
++
++#endif

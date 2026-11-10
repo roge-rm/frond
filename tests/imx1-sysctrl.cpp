@@ -101,9 +101,26 @@ int main() {
         read(gpcr, 0x7fb);
     }
     // BTAEN gates the BTA clock inputs (table 8-4). The ROM's Bluetooth power-up sets it at 200fc8c8.
-    write(gpcr, 0x17fb); read(gpcr, 0x17fb);
+    // The BTA answers only with BTAEN set, and then only the two registers the ROM's radio probe uses.
+    constexpr uint32_t wakeControl = 0x00216110, clockControl = 0x00216118;
     unknown = 0;
+    assert(soc.access(clockControl, 4, false, unknown) == Imx1BootstrapAccess::unmapped);
+    write(wakeControl, 0, Imx1BootstrapAccess::unmapped);
+    write(gpcr, 0x17fb); read(gpcr, 0x17fb);
     assert(soc.access(0x00216000, 4, false, unknown) == Imx1BootstrapAccess::unmapped);
+    assert(soc.access(wakeControl, 4, false, unknown) == Imx1BootstrapAccess::unmapped);
+    write(wakeControl, 0);
+    write(wakeControl, 0x10, Imx1BootstrapAccess::sideEffect);
+    write(wakeControl, 8, Imx1BootstrapAccess::sideEffect);
+    write(wakeControl, 0x20, Imx1BootstrapAccess::reservedBits);
+    read(clockControl, 0);
+    write(clockControl, 0x6221); read(clockControl, 0x6221);
+    write(clockControl, 0x1000, Imx1BootstrapAccess::reservedBits);
+    write(clockControl, 0x10000, Imx1BootstrapAccess::reservedBits);
+    read(clockControl, 0x6221);
+    unknown = 0x6221;
+    assert(soc.access(clockControl, 2, true, unknown) == Imx1BootstrapAccess::width);
+    write(clockControl, 0); read(clockControl, 0);
     write(gpcr, 0x7fb); read(gpcr, 0x7fb);
     for (uint32_t size : {0u,1u,2u,8u}) {
         unknown = 0xdeadbeef;
