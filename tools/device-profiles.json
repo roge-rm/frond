@@ -588,6 +588,7 @@
       "runs_68k": true,
       "hot_sync_button": false,
       "cpu_hz": 0,
+      "original_mips": 100,
       "sound": true,
       "storage_slot": "sd",
       "storage_slots": [
@@ -727,6 +728,7 @@
       "runs_68k": true,
       "hot_sync_button": false,
       "cpu_hz": 0,
+      "original_mips": 100,
       "sound": true,
       "storage_slot": "sd",
       "storage_slots": [
