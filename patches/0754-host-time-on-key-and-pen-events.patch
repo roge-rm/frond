@@ -1,0 +1,66 @@
+--- a/src/uarm/uarm/SoC.cpp
++++ b/src/uarm/uarm/SoC.cpp
+@@ -1,3 +1,4 @@
++#include <chrono>
+ #include "SoC.h"
+ 
+ #include <cstring>
+@@ -17,11 +18,18 @@
+ 
+ using namespace std;
+ 
+-SoC::PenEvent SoC::PenEvent::PenDown(int x, int y) { return {.penDown = true, .x = x, .y = y}; }
+-SoC::PenEvent SoC::PenEvent::PenUp() { return {.penDown = false, .x = -1, .y = -1}; }
++namespace {
++    uint64_t hostMsecNow() {
++        return uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
++            std::chrono::steady_clock::now().time_since_epoch()).count());
++    }
++}
+ 
+-SoC::KeyEvent SoC::KeyEvent::KeyDown(enum KeyId key) { return {.keyDown = true, .key = key}; }
+-SoC::KeyEvent SoC::KeyEvent::KeyUp(enum KeyId key) { return {.keyDown = false, .key = key}; }
++SoC::PenEvent SoC::PenEvent::PenDown(int x, int y) { return {.penDown = true, .x = x, .y = y, .hostMsec = hostMsecNow()}; }
++SoC::PenEvent SoC::PenEvent::PenUp() { return {.penDown = false, .x = -1, .y = -1, .hostMsec = hostMsecNow()}; }
++
++SoC::KeyEvent SoC::KeyEvent::KeyDown(enum KeyId key) { return {.keyDown = true, .key = key, .hostMsec = hostMsecNow()}; }
++SoC::KeyEvent SoC::KeyEvent::KeyUp(enum KeyId key) { return {.keyDown = false, .key = key, .hostMsec = hostMsecNow()}; }
+ 
+ SoC::SoC()
+     : savestate(make_unique<Savestate<ChunkType>>()),
+--- a/src/uarm/uarm/SoC.h
++++ b/src/uarm/uarm/SoC.h
+@@ -175,6 +175,8 @@
+     struct PenEvent {
+         bool penDown;
+         int x, y;
++        // When the host made the event, steady clock milliseconds.
++        uint64_t hostMsec{0};
+ 
+         static PenEvent PenDown(int x, int y);
+         static PenEvent PenUp();
+@@ -183,6 +185,7 @@
+     struct KeyEvent {
+         bool keyDown;
+         enum KeyId key;
++        uint64_t hostMsec{0};
+ 
+         static KeyEvent KeyDown(enum KeyId key);
+         static KeyEvent KeyUp(enum KeyId key);
+--- a/src/uarm/uarm/soc_IMX1.cpp
++++ b/src/uarm/uarm/soc_IMX1.cpp
+@@ -238,11 +238,14 @@
+     while (keyEventQueue->GetSize()) {
+         const KeyEvent event = keyEventQueue->Peek();
+         const int control = controlFor(event.key);
++        // A hold is measured between the host's own events, however late they are taken.
++        input.hostTime(event.hostMsec);
+         if (control >= 0 && !input.key(port, unsigned(control), event.keyDown)) break;
+         keyEventQueue->Pop();
+     }
+     while (penEventQueue->GetSize()) {
+         const PenEvent event = penEventQueue->Peek();
++        input.hostTime(event.hostMsec);
+         if (!input.pen(port, event.penDown, event.x, event.y)) break;
+         penEventQueue->Pop();
+     }

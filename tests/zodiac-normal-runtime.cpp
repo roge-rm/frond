@@ -1,6 +1,8 @@
 // The Zodiac's view, pen, stick and EEPROM identity as the normal runtime works them out, its input
 // holds and releases, and SocIMX1 on made-up ROMs: the buttons from reset, a pen held over a save, a
 // stopped machine.
+#include <chrono>
+#include <thread>
 #include <array>
 #include <cassert>
 #include <cstdint>
@@ -262,6 +264,8 @@ void buttonsFromReset() {
     const auto o = zodiacMachineOptions(nullptr);
     // Every button pin reads high, released, from reset, and nothing is scheduled to change them.
     assert(o.gpioAInputMaskedKnown && (o.gpioAInput & 0x780) == 0x780 && o.gpioDInputKnown && (o.gpioDInput & 0x7780) == 0x7780);
+    // The cradle line D22 reads high too, off the cradle.
+    assert(o.gpioDInput & 0x00400000);
     assert(!o.gpioEventAfterInstructions);
     for (unsigned port = 0; port < 4; ++port) assert(!o.gpioEventMasks[port] && !o.gpioEventValues[port]);
     for (const auto& pin : imx1ZodiacControlPins) assert((pin.port == 0 ? o.gpioAInput : o.gpioDInput) >> pin.pin & 1);
@@ -297,6 +301,22 @@ void machine() {
     assert(!soc->PenContact());
     // The host's own pen-up after the load changes nothing, and the next tap works.
     soc->PenUp(); run(*soc, 1); assert(!soc->PenContact());
+    soc->PenDown(50, 60); run(*soc, 1); assert(soc->PenContact());
+    // A tap whose press and release are taken in one pump is held as long as the host held it:
+    // 300 ms here, past the 125 ms a hold of no length would get.
+    auto lift = [&] {
+        const uint64_t from = soc->Status().time.ticks;
+        for (int i = 0; i < 100000 && soc->PenContact(); ++i) run(*soc, 1);
+        assert(!soc->PenContact());
+        return soc->Status().time.ticks - from;
+    };
+    soc->PenUp(); lift();
+    soc->PenDown(50, 60);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    soc->PenUp();
+    run(*soc, 1); assert(soc->PenContact());
+    const uint64_t held = lift();
+    assert(held > 9000 && held < 17500);
     soc->PenDown(50, 60); run(*soc, 1); assert(soc->PenContact());
     // Reset starts the machine over with input live again.
     soc->Reset();
