@@ -6642,6 +6642,11 @@ for line in s.makefile('rb'):
             }
             QCOMPARE(frondCards::deleteCard(cardsSessions(), free), QString("The card is open in Files. Close it first."));
         }
+        // Cards left open while the machine stops: its card's Files comes back.
+        window.findChild<QPushButton*>("stop")->click();
+        QTRY_VERIFY_WITH_TIMEOUT(!window.findChild<QPushButton*>("stop")->isVisible() || !window.findChild<QPushButton*>("stop")->isEnabled(), 20000);
+        QTRY_VERIFY_WITH_TIMEOUT(filesAction("Runner card")->isEnabled(), 20000);
+        QCOMPARE(filesAction("Runner card")->text(), QString("Files…"));
         window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 10000);
         QSettings().clear();
     }
