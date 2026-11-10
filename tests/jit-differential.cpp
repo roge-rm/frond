@@ -1762,6 +1762,21 @@ bool directed(Engines& e) {
         {"svc mcr p15, 0, r0, c7, c5, 1", {0xe3a01005, 0xee070f35, 0xe2811001}, false, SVC, {{0, 0x10000}},
          {{Expect::REG, 1, 6}}},
         {"svc mrc/mcr p15 c3", {0xe3a00007, 0xee030f10, 0xee131f10}, false, SVC, {}},
+        // DACR changes in a loop: the JIT drops the page table entries of pages in changed
+        // domains and keeps the rest. r10: both client, r11: domain 0 manager, r12: domain 1
+        // no access, r9: as r12 with domain 5 client. The domain 1 page filled by the first
+        // load faults after r12 (r8 stays 0), the AP 0 page takes a store under manager only,
+        // and the domain 0 page filled writable keeps taking stores.
+        {"svc dacr loop",
+         {0xee03af10, 0xe5945000, 0xe5817000, 0xe5926000, 0xee03bf10, 0xe5827004, 0xe5817004, 0xee03cf10,
+          0xe5817008, 0xe5948000, 0xee039f10, 0xe5948004, 0xe581700c, 0xe5827008, 0xe2877001, 0xe2533001,
+          0x1affffee},
+         false, SVC,
+         {{1, 0x21000}, {2, 0x2c000}, {3, 8}, {4, 0x101044}, {7, 0x77}, {8, 0}, {9, 0x401}, {10, 5}, {11, 7},
+          {12, 1}},
+         {{Expect::REG, 3, 0}, {Expect::REG, 8, 0}, {Expect::MEM, 0x2c004, 0x7e}, {Expect::MEM, 0x2100c, 0x7e},
+          {Expect::FSR, 0, 0x0f, 0xff}, {Expect::FAR, 0, 0x2c008}},
+         0x200, 5},
         // ADC with S: V is signed overflow of the sum with the carry in.
         {"adcs r2, r0, r1: -1 + 1 + 0", {0xe328f000, 0xe0b02001}, false, USR, {{0, 0xffffffff}, {1, 1}},
          {{Expect::REG, 2, 0}, {Expect::CPSR, 0, 0x60000000, 0xf8000000}}},
