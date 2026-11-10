@@ -144,7 +144,14 @@ void PalmHolder::setMips(const QString& reply) {
 
 void PalmHolder::placeMips() {
     if (!container) return;
-    const auto corner = container->geometry().bottomRight();
+    // The core draws the device fitted and centred in its window, so the corner is the fitted rectangle's.
+    QRect area = container->geometry();
+    if (wanted.isValid() && area.width() > 0 && area.height() > 0) {
+        const double fit = std::min(double(area.width()) / wanted.width(), double(area.height()) / wanted.height());
+        const QSize drawn(qRound(wanted.width() * fit), qRound(wanted.height() * fit));
+        area = QRect(area.center() - QPoint(drawn.width() / 2, drawn.height() / 2), drawn);
+    }
+    const auto corner = area.bottomRight();
     mips->move(corner.x() + 1 - mips->width() - 4, corner.y() + 1 - mips->height() - 4);
 }
 
