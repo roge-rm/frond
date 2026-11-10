@@ -370,8 +370,8 @@ Programs that use NetLib, like a web clipping app or a telnet client, then work 
 
 The Palm IIIx has a snap-on modem on its serial port. Set Serial port to Modem in Edit settings (Linux, or in the Connections panel while it runs) or Machine settings (Android), then set up a connection in Palm OS the way you would for a real modem. Frond answers as a modem on a 33600 line and puts you on the internet through your computer's or phone's connection, with no root. Any number you dial connects. The line driver has to be on, so the modem only works while a program has the serial port open.
 
-1. Palm OS 3.1: open Prefs, Modem and pick Standard or Palm V Modem, speed 57600 or lower, then Network. Set the service's phone number to anything, for example `5551234`.
-2. Palm OS 3.5 and 4.1: open Prefs, Connection, make a new connection with Via Modem and a Palm Modem model (US/Canada), then in Network pick a service that uses it.
+1. Palm OS 3.1: the Modem panel's defaults (Standard, 57,600 bps) work. In Prefs, Network set the service's phone number to anything, for example `5551234`.
+2. Palm OS 3.5 and 4.1: open Prefs, Network, pick a service and set its Connection to the built-in Palm Modem US/Canada (the Modem settings it comes with work). Set the phone number to anything.
 3. In Network details set PPP, Query DNS on, IP address automatic. With the Unix template the user name and password can be anything, with Windows RAS leave the script empty.
 4. Tap Connect. The state line under Serial port goes from "Modem: idle" to "Modem: dialling" to "Modem: online at 33600".
 
