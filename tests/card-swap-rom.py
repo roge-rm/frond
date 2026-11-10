@@ -87,7 +87,9 @@ class Case:
 
 def settled(folder, name):
     names = [p.name for p in folder.iterdir()]
-    leftovers = [n for n in names if '.tmp-' in n or '.gen-' in n or '.journal-' in n]
+    # A v9 machine closed without a save keeps its NAND's working generations for the next load;
+    # only the card's own files have to settle.
+    leftovers = [n for n in names if ('.tmp-' in n or '.gen-' in n or '.journal-' in n) and 'nand.frondnand' not in n]
     smoke.need(name in names and not leftovers, f'{folder.name}: not settled: {sorted(names)}')
 
 
