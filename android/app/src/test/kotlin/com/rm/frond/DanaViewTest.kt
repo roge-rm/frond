@@ -93,4 +93,17 @@ class DanaViewTest {
         assertFalse("--dana-view" in other.arguments())
         assertEquals("fit=fit smooth=off", other.displayArgument())
     }
+
+    @Test
+    fun wirelessGetsTheDanaViewAndFit() {
+        // The Wireless takes the Dana's view, keyboard and Fit zoom, from a new machine and from an imported one.
+        for (id in listOf("alphasmart-dana", "alphasmart-dana-wireless")) {
+            val device = Device.byId(id)!!
+            assertTrue(id, device.isDana())
+            assertEquals(id, 560 to 160, device.width to device.height)
+        }
+        assertEquals(DanaZoom.FIT, MachineSettings().danaView.zoom)
+        assertEquals(DanaZoom.FIT, MachineSettings.from(JSONObject()).danaView.zoom)
+        assertEquals(DanaZoom.FIT, MachineSettings.from(JSONObject().put("danaView", JSONObject())).danaView.zoom)
+    }
 }
