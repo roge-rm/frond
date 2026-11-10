@@ -18,10 +18,12 @@ def save(c, tag):
     path = r / (tag + '.frond')
     c.send(f'save-session "{path}"', 'wrote session')
     raw, cs = chunks(path.read_bytes())
+    # ISP v10: version, StateFields (words 1-67), dcAddress (68), the 16 DC endpoint
+    # configurations (69-84), then packet, cancellation and host state.
     at, n = cs[0x1f0]
-    assert n == 85, n
-    v = struct.unpack_from('<85I', raw, at)
-    assert v[0] == 3 and v[69:71] == (0x83, 0xc3), v
+    assert n == 3443, n
+    v = struct.unpack_from(f'<{n}I', raw, at)
+    assert v[0] == 10 and v[69:71] == (0x83, 0xc3), v[:85]
     return path, raw, cs, v
 source = r / 'input.frond'
 shutil.copy2(a.session.resolve(), source)
@@ -36,8 +38,8 @@ try:
     active, raw, cs, v = save(c, 'usb-startup')
     expected = (0x83, 0xc3, 0x01, 0x41, 0x23, 0x63,
                 0x23, 0x63, 0x23, 0x63, 0x23, 0x63, 0x23, 0x63, 0x23, 0x63)
-    assert v[69:] == expected, v[69:]
-    print('PASS guest programmed all16 ECRs:', v[69:], flush=True)
+    assert v[69:85] == expected, v[69:85]
+    print('PASS guest programmed all16 ECRs:', v[69:85], flush=True)
     for tag, word, value in [('version', 0, 4), ('address', 68, 256),
                              ('control-out', 69, 0), ('control-in', 70, 0), ('ecr', 71, 256)]:
         bad = bytearray(raw)
@@ -45,7 +47,7 @@ try:
         path = r / (tag + '.frond')
         path.write_bytes(active.read_bytes()[:92] + zlib.compress(bad))
         assert 'machine restored' in c.send(f'load-session "{path}"', 'session refused:')
-        assert save(c, tag + '-after')[3][68:] == v[68:]
+        assert save(c, tag + '-after')[3][68:85] == v[68:85]
     print('PASS five production malformed DC register rollback cases', flush=True)
 finally:
     status = c.close()
@@ -53,7 +55,7 @@ finally:
         assert status == 0, status
 c = open_core(active, 'fresh')
 try:
-    assert save(c, 'fresh-restored')[3][68:] == v[68:]
+    assert save(c, 'fresh-restored')[3][68:85] == v[68:85]
     print('PASS fresh-process DC register restore; enumeration unimplemented', flush=True)
 finally:
     status = c.close()
