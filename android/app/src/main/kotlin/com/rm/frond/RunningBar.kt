@@ -65,6 +65,10 @@ object RunningBar {
     // top start corner in landscape, beside the Palm, which is fitted to the height and centred.
     fun handleCentred(portrait: Boolean) = portrait
 
+    // The hidden bar's touch area around its tab.
+    const val HANDLE_TOUCH_WIDTH_DP = 96
+    const val HANDLE_TOUCH_HEIGHT_DP = 40
+
     // The corner keyboard button shows while the bar is hidden.
     fun cornerButtons(shown: Boolean) = !shown
 }

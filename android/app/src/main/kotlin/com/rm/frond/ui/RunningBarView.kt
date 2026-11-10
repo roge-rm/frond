@@ -3,7 +3,8 @@ package com.rm.frond.ui
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -45,6 +46,7 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -267,22 +269,27 @@ private fun MenuDialogs(state: RunningBarState, actions: RunningBarActions) {
     }
 }
 
-// A small tab at the top edge; a tap or a swipe down brings the bar back.
+// A small tab at the top edge; a tap or a swipe down brings the bar back. The touch area is bigger than
+// the tab, and any finger lift on it counts as a tap however far the finger slid.
 @Composable
 private fun Handle(actions: RunningBarActions, modifier: Modifier = Modifier) {
-    run {
+    Box(
+        modifier.width(RunningBar.HANDLE_TOUCH_WIDTH_DP.dp).height(RunningBar.HANDLE_TOUCH_HEIGHT_DP.dp)
+            .semantics { contentDescription = "Show bar"; onClick { actions.show(); true } }
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    while (true) {
+                        val change = awaitPointerEvent().changes.firstOrNull() ?: break
+                        if (!change.pressed) { actions.show(); break }
+                    }
+                }
+            },
+        contentAlignment = Alignment.TopCenter,
+    ) {
         Box(
-            modifier.width(72.dp).height(20.dp)
-                .background(MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.8f), RoundedCornerShape(bottomStart = 10.dp, bottomEnd = 10.dp))
-                .semantics { contentDescription = "Show bar" }
-                .clickable { actions.show() }
-                .pointerInput(Unit) {
-                    var drag = 0f
-                    detectVerticalDragGestures(onDragStart = { drag = 0f }, onVerticalDrag = { _, y ->
-                        drag += y
-                        if (drag > 12.dp.toPx()) { drag = Float.NEGATIVE_INFINITY; actions.show() }
-                    })
-                },
+            Modifier.width(72.dp).height(20.dp)
+                .background(MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.8f), RoundedCornerShape(bottomStart = 10.dp, bottomEnd = 10.dp)),
             contentAlignment = Alignment.Center,
         ) {
             Box(Modifier.width(28.dp).height(3.dp).background(MaterialTheme.colorScheme.onSurfaceVariant, RoundedCornerShape(2.dp)))
