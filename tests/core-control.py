@@ -409,7 +409,12 @@ def common(c, root, device, unsupported, saved):
     unix_modes(c, device in SERIAL)
     c.ok('display', 'smooth=on')
     c.fails('display', 'smooth=maybe', code='argument')
-    c.fails('display', 'jog=screen', code='argument')
+    if device == 'sony-clie-tg50':
+        # The TG50's jog dial and keyboard are on-screen controls the window can place.
+        c.ok('display', 'jog=screen', code='display')
+        c.fails('display', 'jog=sideways', code='argument')
+    else:
+        c.fails('display', 'jog=screen', code='argument')
     for command, argument in unsupported:
         c.fails(command, argument, code='unsupported')
     c.until_ok('guest-ready')
@@ -479,7 +484,8 @@ def check_arm(core, session, root):
     c = Client(core, [copy], root, 'arm')
     try:
         device = c.ok('device-state')
-        unsupported = [('ms-state', ''), ('ms-files', '/')]
+        # The TG50 has a Memory Stick slot; the others answer the ms- commands as absent.
+        unsupported = [] if device == 'sony-clie-tg50' else [('ms-state', ''), ('ms-files', '/')]
         if device == 'palm-tx':
             unsupported.append(('hold', 'on'))
         # As the desktop does, the ARM core saves over the session it runs in its machine folder.
