@@ -87,6 +87,7 @@ class PrintJobTest {
         assertEquals("€", pages("\u0080")[0][0])
         assertEquals("’", pages("\u0092")[0][0])
         assertEquals("�", pages("\u0081")[0][0])
+        assertEquals("♦♣♥♠", pages("\u008d\u008e\u008f\u0090")[0][0])
         assertEquals("a b", pages("a b")[0][0])
         assertEquals(1, pages("é".repeat(80))[0].size)
     }
