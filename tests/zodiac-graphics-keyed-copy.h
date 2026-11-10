@@ -151,7 +151,7 @@ inline void checkKeyedCopy(const Imx1Cs5Configuration& ready, const Imx1Graphics
     auto bad = copy; bad.push_back(0); reject(bad);
     bad = copy; bad.insert(bad.begin()+11,{0x4b2,0x00cc0b00}); reject(bad); // explicit DP_MIX after GMC wins
     bad = copy; bad[7] = destination; reject(bad); // overlapping memory
-    for (uint32_t reg : {0x4a1u,0x42eu,0x488u,0x490u,0x4b1u,0x472u,0x471u}) {
+    for (uint32_t reg : {0x4a1u,0x42eu,0x488u,0x4b1u,0x472u,0x471u}) {
         bad = copy; bad.insert(bad.begin()+11,{reg,1}); reject(bad);
     }
     reject(copy,0x200aa508);
@@ -166,6 +166,14 @@ inline void checkKeyedCopy(const Imx1Cs5Configuration& ready, const Imx1Graphics
     assert(append(state,commands,copy,0x200aa504) == A::ok);
     assert(state.advanceCpuCycles(uint32_t(uploadTicks+commands.duration())));
     assert(commands.complete(state,eim,memory) == A::ok);
+    check();
+    // The text producer's foreground in 490 doesn't change a keyed copy.
+    clear(); state = ready; commands = readyCommands;
+    assert(append(state,commands,host,0x200ac300) == A::ok);
+    auto afterText = copy;
+    afterText.insert(afterText.begin()+11,{0x490,0});
+    assert(append(state,commands,afterText,0x200aa504) == A::ok);
+    assert(state.advanceCpuCycles(1000) && commands.complete(state,eim,memory) == A::ok);
     check();
     // Left/top clipping advances both the source and destination with separate row strides.
     clear(); state = ready; commands = readyCommands;
