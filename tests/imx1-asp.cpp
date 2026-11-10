@@ -484,8 +484,61 @@ void penComparisons() {
 }
 
 }
+// The battery routine's restore with the pen down: one write sets the mode and PADE together.
+void oneWriteRestore() {
+    Imx1AspPenInputs inputs;
+    inputs.contactKnown = inputs.contactDown = inputs.normalKnown = inputs.referenceKnown = true;
+    inputs.normal = {0x1100, 0x7580, 0x7880, 0x1234};
+    const auto prepared = [&](uint32_t rate = 0x3814, uint32_t interrupts = 0x10, uint32_t divider = 99) {
+        Imx1Asp adc(true);
+        assert(adc.replacePenInputs(inputs) == Imx1AspAccess::ok);
+        // Sampling as the pen driver leaves it, then the routine's reset and rewrites.
+        write(adc, 0x2c, 3); write(adc, 0x14, 0x3814); write(adc, 0x18, 0x10);
+        write(adc, 0x10, 0x0200e001); write(adc, 0x10, 0x0200e003); adc.advance(40000000);
+        assert(read(adc, 0x1c) & 1);
+        write(adc, 0x10, 0x0200e001); write(adc, 0x10, 0x0280e001);
+        assert(read(adc, 0x10) == 0x02000000 && !(read(adc, 0x1c) & 3) && read(adc, 0x34) == 0);
+        write(adc, 0x2c, divider); write(adc, 0x14, rate); write(adc, 0x18, interrupts);
+        return adc;
+    };
+    {
+        auto adc = prepared();
+        write(adc, 0x10, 0x0200e003);
+        assert(read(adc, 0x10) == 0x0200e003 && adc.converting() && !(read(adc, 0x1c) & 3) && read(adc, 0x34) == 0);
+        // The same samples, in the same time, as the mode write followed by the PADE write.
+        auto two = prepared();
+        write(two, 0x10, 0x0200e001); write(two, 0x10, 0x0200e003);
+        for (unsigned step = 0; step < 400; ++step) {
+            adc.advance(100000); two.advance(100000);
+            assert(read(adc, 0x1c) == read(two, 0x1c) && read(adc, 0x34) == read(two, 0x34));
+        }
+        assert(read(adc, 0x1c) & 2);
+        for (const uint16_t expected : inputs.normal) assert(read(adc, 0) == expected && read(two, 0) == expected);
+    }
+    // Any other word in one write, or the word on a module the routine didn't leave, still refuses.
+    for (const uint32_t value : {0x0200e002u, 0x0200d003u, 0x0200f003u, 0x0000e003u, 0x0600d203u, 0x02003003u, 0x0200e203u}) {
+        auto adc = prepared();
+        rejected(adc, 0x10, value, Imx1AspAccess::sideEffect);
+    }
+    { auto adc = prepared(0x1814); rejected(adc, 0x10, 0x0200e003, Imx1AspAccess::sideEffect); }
+    { auto adc = prepared(0x3814, 0); rejected(adc, 0x10, 0x0200e003, Imx1AspAccess::sideEffect); }
+    { auto adc = prepared(0x3814, 0x10, 4); rejected(adc, 0x10, 0x0200e003, Imx1AspAccess::sideEffect); }
+    {
+        auto adc = prepared();
+        write(adc, 0x30, 0x10100);
+        rejected(adc, 0x10, 0x0200e003, Imx1AspAccess::sideEffect);
+    }
+    {
+        // Unknown pen samples refuse it the way they refuse the two writes.
+        auto adc = prepared();
+        auto unknown = inputs; unknown.normalKnown = false;
+        assert(adc.replacePenInputs(unknown) == Imx1AspAccess::ok);
+        rejected(adc, 0x10, 0x0200e003, Imx1AspAccess::externalInput);
+    }
+}
 int main() {
     penComparisons(); penReleaseCaptureAndWake(); penContact(); penSampling(); penCaptureAndClocks(); penRingAndRelease(); penBoardTransaction();
     registersAndReset(); clocksAndInputGuards(); heldHighDetector(); bootstrapInputsAndTime(); manualUConversion(); manualUComparisons(); manualUInterruptGate();
     std::puts("i.MX1 ASP configuration, reset, clock/input guards, held-high PX1 and inactive IRQs passed");
+    oneWriteRestore();
 }
