@@ -55,7 +55,7 @@ internal fun bluetoothText(s: BluetoothLink.Status, radio: String?): String {
         radio.startsWith("disconnected: ") -> radio.removePrefix("disconnected: ")
         else -> radio.takeUnless { it.isBlank() || it == "off" }
     }
-    return if (note == null) link else "$link. $note"
+    return if (note == null) link else "$link. ${note.replaceFirstChar { it.uppercaseChar() }}"
 }
 
 // Off, wait for a peer on a port, or connect to an address, for one of the network relays.
