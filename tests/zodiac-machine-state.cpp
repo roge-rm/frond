@@ -854,6 +854,21 @@ void refusals() {
         auto changed = g; changed.options.rtcInitialTimeKnown = true;
         Live m(changed, false);
         assert(imx1MachineCheckState(m.machine, exact.data(), exact.size()).status == Imx1StateStatus::optionsMismatch);
+        // The boot input flag excuses only the GPIO A and D levels and the scheduled event.
+        assert(imx1MachineCheckState(m.machine, exact.data(), exact.size(), imx1StateAllowBootInputs).status ==
+               Imx1StateStatus::optionsMismatch);
+    }
+    {
+        // Other GPIO A and D levels at reset are refused, and taken with the boot input flag. The
+        // state then runs on with the pin levels it holds.
+        auto changed = g; changed.options.gpioAInput ^= 0x400; changed.options.gpioDInput ^= 0x1000;
+        Live m(changed, false);
+        const auto refused = imx1MachineCheckState(m.machine, exact.data(), exact.size());
+        assert(refused.status == Imx1StateStatus::optionsMismatch && !std::strncmp(refused.detail, "gpio", 4));
+        assert(imx1MachineLoadState(m.machine, exact.data(), exact.size()).status == Imx1StateStatus::optionsMismatch);
+        assert(imx1MachineLoadState(m.machine, exact.data(), exact.size(), imx1StateAllowBootInputs).status == Imx1StateStatus::ok);
+        const auto done = imx1MachineRunSlice(m.machine, 500, 10000);
+        assert(done.status == Imx1MachineStatus::terminal && done.result.registers[6] == 0x55 && done.result.irqEntries == 1);
     }
     {
         // The idle stepping choice is not part of a state.

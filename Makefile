@@ -150,6 +150,13 @@ out/frond: build/source/.prepared build/source/src/common/libcommon.a build/sour
 	cp build/source/src/uarm/cp-uarm out/frond.new
 	mv -f out/frond.new out/frond
 
+# The core with the Zodiac developer start: FROND_ZODIAC_STATE=/path/to.state runs the ROM from a
+# bring-up state. For tests and bring-up, never packaged.
+out/frond-zodiac-developer: out/frond
+	$(MAKE) -C build/source/src/uarm zodiac-developer $(CORE_JIT_FLAGS)
+	cp build/source/src/uarm/cp-uarm-zodiac-developer out/frond-zodiac-developer.new
+	mv -f out/frond-zodiac-developer.new out/frond-zodiac-developer
+
 # The 68k runner for DragonBall devices, from Cloudpilot's core in src/cloudpilot.
 out/frond-68k: build/source/.prepared build/source/src/common/libcommon.a build/source/src/common/libcommon-net.a
 	$(MAKE) -C build/source/src/cloudpilot FROND_68K=1 frond-68k
@@ -832,11 +839,14 @@ test-zodiac-live-controls: build/zodiac-boot-probe
 
 .PHONY: test-zodiac-normal-runtime
 # The normal runtime's view turn, pen, stick and EEPROM identity, with no firmware.
-test-zodiac-normal-runtime: prepare
+test-zodiac-normal-runtime: out/frond
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/zodiac-runtime-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
-		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/common \
-		tests/zodiac-normal-runtime.cpp -o build/test-zodiac-normal-runtime
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/zodiac-normal-runtime.cpp @build/zodiac-runtime-core.rsp build/source/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -lz -o build/test-zodiac-normal-runtime
 	./build/test-zodiac-normal-runtime
+	ZODIAC_TEST_STOP=1 ./build/test-zodiac-normal-runtime
 
 .PHONY: test-zodiac-machine
 # Reuse qualified generated guests, comparing one-shot and sliced execution.
