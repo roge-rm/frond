@@ -5471,6 +5471,8 @@ for line in s.makefile('rb'):
     void cardsDuplicate() {
         cardsReset();
         const auto a = cardsMachine("Palm TX", true);
+        const auto privateMode = QFile::ReadOwner | QFile::WriteOwner;
+        QVERIFY(QFile::setPermissions(frondSessions::sessionFrondIn(a), privateMode));
         QString name;
         // Copy: a settled copy as a new card in the copy, with its own serial, loaded as a swap.
         QVERIFY(frondSessions::duplicate(cardsSessions(), frondSessions::describe(a), &name, {}, frondSessions::CardChoice::copy).isEmpty());
@@ -5482,6 +5484,7 @@ for line in s.makefile('rb'):
         QVERIFY(frondCards::readSlot(copyDir).swap);
         QVERIFY(frondCards::launchArguments(cardsSessions(), copyDir).join(' ').contains("--card-identity " + copy.identity.toHex()));
         QCOMPARE(digest(copyDir + "/sd.frondsd"), digest(a + "/sd.frondsd"));
+        QCOMPARE(QFile::permissions(frondSessions::sessionFrondIn(copyDir)) & 0x7077, privateMode);
         // No card.
         QVERIFY(frondSessions::duplicate(cardsSessions(), frondSessions::describe(a), &name, {}, frondSessions::CardChoice::none).isEmpty());
         auto slot = frondCards::readSlot(cardsSessions() + '/' + name);

@@ -1077,9 +1077,12 @@ inline QString duplicate(const QString& folder, const Info& info, QString* newNa
         if (progress && !progress(n, all)) cancelled = true;
         return !cancelled;
     };
-    for (const auto& [source, target] : jobs)
+    // The copy keeps each file's mode, so a private (0600) session stays private.
+    for (const auto& [source, target] : jobs) {
         if (!copyChunked(source, target, &done, total, watch))
             return fail(cancelled ? QStringLiteral("Duplicate cancelled.") : failed);
+        QFile::setPermissions(target, QFile::permissions(source));
+    }
     if (!settle.journal.isEmpty() && !applySdJournalCopy(settle.journal, dest + '/' + settle.sibling)) return fail(failed);
     if (!nandSettle.journal.isEmpty() && !applySdJournalCopy(nandSettle.journal, dest + '/' + nandSettle.sibling)) return fail(failed);
     // The copy's slot: its own new card, the link, or nothing. A card the .frond still describes
