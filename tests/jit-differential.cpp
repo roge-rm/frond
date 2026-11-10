@@ -408,6 +408,7 @@ struct Case {
     bool devicePage = true;
     uint32_t dacr = 0;
     uint32_t sr = 0x200;  // the control register's S (0x100) and R (0x200) bits
+    std::vector<uint32_t> swiHandler;  // replaces the SWI vector's movs pc, lr when not empty
 };
 
 struct Assembled {
@@ -438,6 +439,10 @@ Assembled assemble(const Case& c) {
     put32(0x04, 0xe1b0f00e);   // movs pc, lr
     put32(0x08, 0xe1b0f00e);   // movs pc, lr
     put32(0x10, 0xea00003a);   // b 0x100
+    if (!c.swiHandler.empty()) {
+        put32(0x08, 0xea000044);  // b 0x120
+        for (size_t i = 0; i < c.swiHandler.size(); ++i) put32(0x120 + 4 * i, c.swiHandler[i]);
+    }
     put32(0x100, 0xe14fd000);  // mrs sp, spsr
     put32(0x104, 0xe31d0020);  // tst sp, #0x20
     put32(0x108, 0x025ef004);  // subeqs pc, lr, #4
@@ -1670,6 +1675,7 @@ struct Directed {
     std::vector<Expect> expect;
     uint32_t sr = 0x200;  // control S and R
     uint32_t dacr = 1;    // domain 0 client, domain 1 no access
+    std::vector<uint32_t> swiHandler;
 };
 
 // Where the setup table holds r8-r14 of a mode: FIQ r8-r14, then r13 and r14 (and an SPSR)
@@ -1721,6 +1727,7 @@ Case directedCase(const Directed& d, uint64_t seed) {
     c.items.push_back(end);
     c.cpsr = (c.cpsr & 0xf0000000) | 0xc0 | (d.thumb ? 0x20 : 0) | d.mode;
     c.dacr = d.dacr;
+    c.swiHandler = d.swiHandler;
     c.table[2] = d.dacr;
     c.alignCheck = false;
     c.devicePage = true;
@@ -1777,6 +1784,16 @@ bool directed(Engines& e) {
          {{Expect::REG, 3, 0}, {Expect::REG, 8, 0}, {Expect::MEM, 0x2c004, 0x7e}, {Expect::MEM, 0x2100c, 0x7e},
           {Expect::FSR, 0, 0x0f, 0xff}, {Expect::FAR, 0, 0x2c008}},
          0x200, 5},
+        // The user Env keeps its own page table: a user read fills the privileged-only page
+        // while domain 0 is manager, a SWI handler sets domain 0 back to client, and the
+        // user read of the page then takes a permission fault (FSR 0xf, r8 stays 0x77). The
+        // first load touches the vector page, as a first translation of a page empties the
+        // page tables (a full flush) and the exception entry would otherwise do that.
+        {"usr dacr manager then client, read of AP 1",
+         {0xe5997000, 0xe3a06003, 0xee036f10, 0xe321f0d0, 0xe5945000, 0xef000000, 0xe5948000}, false, SVC,
+         {{4, 0x28010}, {5, 0x5555}, {8, 0x77}, {9, 0}},
+         {{Expect::REG, 8, 0x77}, {Expect::FSR, 0, 0x0f, 0xff}, {Expect::FAR, 0, 0x28010}, {Expect::CPSR, 0, USR, 0x1f}},
+         0x200, 1, {0xe3a06001, 0xee036f10, 0xe1b0f00e}},
         // ADC with S: V is signed overflow of the sum with the carry in.
         {"adcs r2, r0, r1: -1 + 1 + 0", {0xe328f000, 0xe0b02001}, false, USR, {{0, 0xffffffff}, {1, 1}},
          {{Expect::REG, 2, 0}, {Expect::CPSR, 0, 0x60000000, 0xf8000000}}},
