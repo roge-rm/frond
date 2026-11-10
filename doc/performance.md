@@ -51,7 +51,7 @@ Correctness against the interpreter: `make test-jit-differential` and `make test
 
 Workloads:
 - A game level: `tests/fixtures/bike-level1.replay` (10000 guest ms) on a paused level-one session you make with the runner (install the app, resume it with `--resume-app`, save). Check the screenshots to see the replay really plays.
-- `make frondbench` builds `build/frondbench/FrondBench.prc`, a Palm benchmark with Integer, Memory, Drawing and Database tests (needs `m68k-palmos-gcc`, `pilrc`, `build-prc` and `PALM_SDK`). Run it once in the guest, save the session, and replay `tests/fixtures/frondbench-run.replay` (40000 guest ms) from it.
+- `make frondbench` builds `build/frondbench/FrondBench.prc`, a Palm benchmark with Integer, Memory, Drawing and Database tests (needs `m68k-palmos-gcc`, `pilrc`, `build-prc` and `PALM_SDK`). Run it once in the guest, save the session, and replay `tests/fixtures/frondbench-run-tx0414.replay` (40000 guest ms) from it. Its Run tap is placed for the reference session, which was calibrated by hand; `frondbench-run.replay` is the same tap for cores before 0414.
 - `make benchmark-menu` builds `build/benchmark-menu`; `./build/benchmark-menu SESSION [MIPS]` runs 24 guest seconds of a playing SunVox session with the menu closed and reports CPU cost, guest latency and the first menu region's hash.
 - `make benchmark-session` builds `build/benchmark-session`; `./build/benchmark-session SESSION SECONDS MIPS [NEW.raw]` runs a playing session without pacing and drains the codec directly, to compare execution cost apart from SDL starvation. Silence statistics skip the first 132300 frames. It rejects sessions with an embedded card.
 

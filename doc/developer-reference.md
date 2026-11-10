@@ -835,6 +835,7 @@ The IIIx works as in VS Code, in Eclipse's Terminal view.
 | `FROND_TEST_TG50_CORE`, `FROND_TEST_TG50_NOR`, `FROND_TEST_TG50_SESSION`, `FROND_TEST_TG50_HOST_SESSION`, `FROND_TEST_TG50_TONE_SESSION`, `FROND_TEST_TG50_SHOTS`, `FROND_TEST_TG50_BT_SOCKET` | TG50 core, firmware, sessions, picture folder and Bluetooth socket for the TG50 desktop tests. |
 | `BENCH_DUMP_RAM` | `1` makes `benchmark-replay` write guest RAM at the start and end. |
 | `BIKE_SESSION`, `FRONDBENCH_SESSION` | Session files for `make speed-check`. No default; a workload without one is skipped. |
+| `BIKE_REPLAY`, `FRONDBENCH_REPLAY` | Another replay for a `make speed-check` workload, such as `tests/fixtures/frondbench-run.replay` for a core before the T\|X touch calibration change (0414). |
 | `SPEED_BENCH` | `benchmark-replay` binary for `tools/speed-check.py`. |
 | `SPEED_MIPS` | MIPS setting for `make speed-check`. Default 100. |
 | `SPEED_HOST` | Run `make speed-check` on another machine: an ssh destination (`user@host`), working in `~/frond-speed/`. |
