@@ -268,6 +268,7 @@ class MainWindow : public QMainWindow {
     QString bluetoothCore{"off"};  // what the core's Bluetooth is set to now
     QString bluetoothCoreChoice{"off"};  // the choice that gave it
     QString bluetoothSent;  // the bluetooth-mode argument waiting for its reply
+    bool irdaQueued = false;  // an infrared choice waiting for the core to finish a request
     QSettings settings;
     QString core, core68k, sessionPath, savingPath, pendingCopy, copyStaging;
     bool hardResetAfterSave{false};

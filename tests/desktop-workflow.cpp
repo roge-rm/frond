@@ -1256,6 +1256,64 @@ for line in s.makefile('rb'):
         QCOMPARE(machineSetting("infrared", frondSessions::preferencesPath(QSettings().value("lastSession").toString())), QString("tcp:5097"));
         QSettings().clear();
     }
+    // Leaving IR printer mode with a job arriving asks first. A Discard while a printer poll is still out
+    // waits for its reply and then switches, so the core follows the choice.
+    void infraredPrinterDiscard() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QTemporaryDir files;
+        QFile source(files.filePath("input.frond")); QVERIFY(source.open(QIODevice::WriteOnly));
+        source.write("session"); source.close();
+        QFile identity(source.fileName()+".device"); QVERIFY(identity.open(QIODevice::WriteOnly)); identity.write("alphasmart-dana"); identity.close();
+        const auto polled = files.filePath("polled"), modes = files.filePath("modes");
+        QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly));
+        core.write(QString(R"PY(#!/usr/bin/python3
+import pathlib,socket,sys,time
+base=pathlib.Path(sys.argv[1]);device=pathlib.Path(str(base)+'.device').read_bytes()
+s=socket.socket(socket.AF_UNIX);s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+for line in s.makefile('rb'):
+    i,cmd,arg=line.rstrip(b'\n').split(b'\t');arg=bytes.fromhex(arg.decode())
+    message={b'device-state':device,b'sd-state':b'none',b'network-state':b'disabled',b'keyboard-state':b'detached'}.get(cmd,b'done')
+    if cmd==b'irprinter' and arg==b'status':
+        with open('%1','a') as f: f.write('poll\n')
+        time.sleep(0.8);message=b'attached receiving bytes=752 receiving=752 last=none idle=0'
+    if cmd==b'irda-mode':
+        with open('%2','a') as f: f.write(arg.decode()+'\n')
+        message=b'off' if arg==b'off' else arg+b' ready'
+    if cmd==b'save':pathlib.Path(arg.decode()).write_text('saved')
+    s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
+    if cmd==b'quit':break
+)PY").arg(polled, modes).toUtf8());
+        core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner));
+        {
+            MainWindow window(core.fileName()); window.show(); window.openSession(source.fileName(),true);
+            auto* mode=window.findChild<QComboBox*>("irdaMode"); QVERIFY(mode);
+            auto polls=[&]{ QFile f(polled); return f.open(QIODevice::ReadOnly) ? f.readAll().count('\n') : 0; };
+            auto sent=[&]{ QFile f(modes); return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray(); };
+            QTRY_VERIFY_WITH_TIMEOUT(mode->isEnabled(), 10000);
+            mode->setCurrentIndex(mode->findData("printer")); QMetaObject::invokeMethod(mode,"activated",Q_ARG(int,mode->currentIndex()));
+            // Wait for a poll reply that shows output arriving.
+            QTRY_VERIFY_WITH_TIMEOUT(sent() == "printer\n" && polls() >= 2 && mode->isEnabled(), 10000);
+            QCOMPARE(mode->currentData().toString(), QString("printer"));
+            int seen = -1; bool clicked = false; QTimer confirm; confirm.setInterval(10);
+            connect(&confirm, &QTimer::timeout, &window, [&] {
+                auto* box = window.findChild<QMessageBox*>();
+                if (!box || !box->isVisible() || clicked) return;
+                // Discard only once another poll has gone out and is still waiting for its reply.
+                if (seen < 0) seen = polls();
+                else if (polls() > seen) { clicked = true; box->button(QMessageBox::Discard)->click(); }
+            });
+            confirm.start();
+            mode->setCurrentIndex(mode->findData("off")); QMetaObject::invokeMethod(mode,"activated",Q_ARG(int,mode->currentIndex()));
+            QVERIFY(clicked);
+            QTRY_VERIFY_WITH_TIMEOUT(sent() == "printer\noff\n", 5000);
+            confirm.stop();
+            QCOMPARE(mode->currentData().toString(), QString("off"));
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(),5000);
+        }
+        QCOMPARE(machineSetting("infrared", frondSessions::preferencesPath(QSettings().value("lastSession").toString())), QString("off"));
+        QSettings().clear();
+    }
     void bluetoothSetting_data() {
         QTest::addColumn<QByteArray>("deviceId");
         QTest::newRow("tx") << QByteArray("palm-tx");

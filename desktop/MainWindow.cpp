@@ -432,7 +432,9 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     auto irdaChanged=[this] {
         if(client.running()){
             if (!leavePrinterOk()) { const QSignalBlocker blocked(irda); irda->setCurrentIndex(std::max(0, irda->findData("printer"))); return; }
-            if(client.available())send("irda-mode",irdaArgument());return;
+            // The confirm dialog lets a poll go out, so the switch may have to wait for its reply.
+            if(client.available())send("irda-mode",irdaArgument()); else irdaQueued=true;
+            return;
         }
         refresh();
     };
@@ -701,7 +703,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (exchangeDialog) exchangeDialog->reject();
         else endExchange();
         if (cardProgress) { cardProgress->hide(); cardProgress->deleteLater(); cardProgress = nullptr; }
-        holdKnown = holdOn = false;
+        holdKnown = holdOn = irdaQueued = false;
         palmHolder->release(); embedded = embedWanted = embedTried = panelWasOpen = fitOffPending = false;
         appsStale = false; deleteApp = {}; knownDatabases.clear(); appsPanel->setDatabases({});
         if (internalFiles) internalFiles->close();
@@ -732,7 +734,10 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     connect(&client, &DesktopClient::bluetoothState, this, &MainWindow::showBluetooth);
     connect(&client,&DesktopClient::infraredState,this,[this](const QString& state){showIrda(state);});
     // A Bluetooth switch waiting for the core to be free goes once the current request is done.
-    connect(&client, &DesktopClient::result, this, [this] { QTimer::singleShot(0, this, [this] { applyBluetoothLink(); }); });
+    connect(&client, &DesktopClient::result, this, [this] { QTimer::singleShot(0, this, [this] {
+        applyBluetoothLink();
+        if (irdaQueued && client.running() && !stopping && client.available()) { irdaQueued = false; send("irda-mode", irdaArgument()); }
+    }); });
     connect(&link, &LinkClient::message, this, [this](const QJsonObject& m) {
         const auto type = m.value("type").toString();
         if (type == "ir") showIrdaLink(m);
@@ -2381,7 +2386,7 @@ void MainWindow::loadUsbSettings() {
     printerPanel->hideReceived();
 }
 void MainWindow::printerPoll() {
-    if (!client.running() || stopping || busy || !client.available()) return;
+    if (!client.running() || stopping || busy || irdaQueued || !client.available()) return;
     const auto caps = frondFirmware::capabilities(runningDevice);
     const auto port = printerPanel->port();
     // One request at a time: every source that's wanted takes a turn of the poll, the Dana Wireless's
