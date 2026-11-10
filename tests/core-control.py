@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """Runs the same desktop control socket commands against out/frond (an ARM smoke session) and
-out/frond-68k (a IIIx ROM booted to the launcher), checking the replies, the pushed link events, save
-and reload, and that commands a device can't do fail cleanly as "unsupported".
+out/frond-68k (a IIIx ROM booted to the launcher, and the Dana and Dana Wireless USB port and Wi-Fi rows),
+checking the replies, the pushed link events, save and reload, and that commands a device can't do fail
+cleanly as "unsupported".
 
 Private firmware and sessions: --arm-session, else FROND_ARM_SESSION, else the palm-tx smoke machine
 (build/smoke/machines/palm-tx, or an older build/smoke/palm-tx.session); --rom, else the generic OS 3.5 EZ ROM in the
-firmware folder. A side with neither is skipped. FROND_CORE picks another ARM core binary. Scratch goes in build/core-control-*.
+firmware folder; --dana-rom, else the Dana 1.5 ROM there. A side without its input is skipped. FROND_CORE picks another ARM core binary. Scratch goes in build/core-control-*.
 """
 import argparse
 import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import select
 import socket
@@ -705,6 +707,44 @@ def work_folder(core, session, work, root, device):
         c.close()
 
 
+WIFI_STATE = re.compile(r'(powered|unpowered) link=(up|down) ip=\S+ mac=[0-9a-f:]{17} tx=\d+ rx=\d+ dropped=\d+')
+
+
+def check_dana(core, rom, root):
+    """The USB port and Wi-Fi rows on both Danas, from the ROM at start: the Dana's port takes the
+    printer or the Wi-Fi adapter and has no built-in module; the Wireless's module answers
+    wifi-module-state and network-mode turns its radio off and on, and its port refuses Wi-Fi."""
+    for device in ('alphasmart-dana', 'alphasmart-dana-wireless'):
+        c = Client(core, ['--rom', rom, '--device', device], root, device)
+        try:
+            assert c.ok('device-state', code='device') == device
+            assert c.ok('usb-port-state', code='usb-port') == 'off'
+            assert c.ok('usb-port', 'printer', code='usb-port').startswith('printer ')
+            assert c.ok('usb-port-state', code='usb-port').startswith('printer ')
+            assert c.ok('usb-port', 'off', code='usb-port') == 'off'
+            c.fails('usb-port', 'bogus', code='argument')
+            c.fails('network-mode', 'internet', code='argument')
+            if device == 'alphasmart-dana':
+                assert c.ok('wifi-module-state', code='wifi-module') == 'off'
+                assert WIFI_STATE.fullmatch(c.ok('usb-port', 'wifi', code='usb-port').removeprefix('wifi '))
+                assert c.ok('network-state', code='network') == 'wireless'
+                assert c.ok('network-mode', 'disabled', code='network') == 'disabled'
+                assert c.ok('usb-port-state', code='usb-port') == 'off'
+            else:
+                assert c.ok('network-state', code='network') == 'wireless'
+                assert WIFI_STATE.fullmatch(c.ok('wifi-module-state', code='wifi-module'))
+                assert 'built in' in c.fails('usb-port', 'wifi', code='argument')
+                assert c.ok('usb-port-state', code='usb-port') == 'off'
+                assert c.ok('network-mode', 'disabled', code='network') == 'disabled'
+                assert c.ok('wifi-module-state', code='wifi-module') == 'off'
+                assert c.ok('network-mode', 'wireless', code='network') == 'wireless'
+                assert WIFI_STATE.fullmatch(c.ok('wifi-module-state', code='wifi-module'))
+            c.quit()
+        finally:
+            c.close()
+    return 'Dana and Dana Wireless'
+
+
 def check_68k(core, rom, root):
     work = root / 'iiix'
     work.mkdir()
@@ -845,10 +885,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--arm-session', type=Path)
     parser.add_argument('--rom', type=Path)
+    parser.add_argument('--dana-rom', type=Path)
     parser.add_argument('--keep', type=Path, help='keep logs, saves and exports here')
     args = parser.parse_args()
     session = arm_session(args.arm_session)
     rom = args.rom or palm_boot.palm_images() / 'Palm/Generic-OS-3.5-EZ/Palm-OS-3.5-en-ez.rom'
+    dana = args.dana_rom or palm_boot.palm_images() / 'AlphaSmart/Dana/AlphaSmart-Dana-1.5.rom'
     (ROOT / 'build').mkdir(exist_ok=True)
     failed = ran = 0
     skipped = []
@@ -857,9 +899,11 @@ def main():
         root.mkdir(parents=True, exist_ok=True)
         for name, ready, run in (('frond', session and session.exists(),
                                   lambda: check_arm(Path(os.environ.get('FROND_CORE') or ROOT / 'out/frond'), session.resolve(), root)),
-                                 ('frond-68k', rom.is_file(), lambda: check_68k(ROOT / 'out/frond-68k', rom.resolve(), root))):
+                                 ('frond-68k', rom.is_file(), lambda: check_68k(ROOT / 'out/frond-68k', rom.resolve(), root)),
+                                 ('frond-68k dana', dana.is_file(), lambda: check_dana(ROOT / 'out/frond-68k', dana.resolve(), root))):
             if not ready:
-                print(f'core-control {name}: skipped, no {"ARM smoke session" if name == "frond" else f"IIIx ROM at {rom}"}')
+                missing = {'frond': 'ARM smoke session', 'frond-68k': f'IIIx ROM at {rom}'}.get(name, f'Dana ROM at {dana}')
+                print(f'core-control {name}: skipped, no {missing}')
                 skipped.append(name)
                 continue
             ran += 1
