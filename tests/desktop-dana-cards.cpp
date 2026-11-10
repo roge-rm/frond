@@ -30,6 +30,24 @@ class DanaCardsTest : public QObject {
             QCOMPARE(frondDanaCards::sizes(*dana,slot,DeviceCardFamily5::legacyMmc),QList<int>({32,64,128,256}));
         }
     }
+    void importedCardSizeMatchesFamily() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        auto card=[&](quint64 payload) {
+            QByteArray h("FRONDSD\0",8); h.append(QByteArray(56,'\0'));
+            h[8]=1; h[13]=2;
+            for (int n=0;n<8;++n) h[16+n]=char(payload>>(8*n));
+            const auto path=dir.filePath(QString::number(payload)+".frondsd");
+            QFile file(path); if (file.open(QIODevice::WriteOnly)) file.write(h);
+            return path;
+        };
+        for (auto slot : {DeviceCardSlot5::sd0,DeviceCardSlot5::sd2}) {
+            QVERIFY(frondDanaCards::fits(card(512ull<<20),slot,DeviceCardFamily5::sdsc));
+            QVERIFY(!frondDanaCards::fits(card(512ull<<20),slot,DeviceCardFamily5::legacyMmc));
+            QVERIFY(frondDanaCards::fits(card(256ull<<20),slot,DeviceCardFamily5::legacyMmc));
+            QVERIFY(!frondDanaCards::fits(card(1024ull<<20),slot,DeviceCardFamily5::sdsc));
+        }
+        QVERIFY(!frondDanaCards::fits(dir.filePath("missing.frondsd"),DeviceCardSlot5::sd0,DeviceCardFamily5::sdsc));
+    }
     void wirelessSessionHeader() {
         QTemporaryDir dir; QVERIFY(dir.isValid());
         const auto path=dir.path()+"/machine.frond";

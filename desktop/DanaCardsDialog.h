@@ -27,6 +27,12 @@ inline QList<int> sizes(const DeviceProfile5& profile, DeviceCardSlot5 slot, Dev
         if (deviceProfileCardSizeValid5(profile.deviceType,slot,family,quint64(size)<<20)) result.append(size);
     return result;
 }
+// Whether a .frondsd card's payload is a size this slot takes for the family.
+inline bool fits(const QString& path, DeviceCardSlot5 slot, DeviceCardFamily5 family) {
+    qint64 logical=0;
+    if (!frondCards::cardHeader(path,nullptr,&logical) || logical<=0) return false;
+    return deviceProfileCardSizeValid5(deviceTypeDana,slot,family,quint64(logical));
+}
 struct State {
     bool known{}, present{}, inserted{}, protectedCard{}, failed{};
     QString identity, protocol;
@@ -117,9 +123,10 @@ class DanaCardsDialog : public QDialog {
     }
  private:
     Reply request(const QString& command,const QString& argument={}) { return requestWithClient(client,command,argument); }
-    void perform(int n,const QString& operation,const QString& argument={}) {
+    bool perform(int n,const QString& operation,const QString& argument={}) {
         const auto result=request(n?"sd2-"+operation:"sd-"+operation,argument);
         if (!result.ok) QMessageBox::warning(this,tr("Card"),result.message);
+        return result.ok;
     }
     void refresh() {
         for (int n=1;n>=0;--n) {
@@ -161,9 +168,10 @@ class DanaCardsDialog : public QDialog {
         auto* import=actions->addButton(tr("Import image"),QDialogButtonBox::ActionRole);
         actions->addButton(QDialogButtonBox::Cancel); connect(actions,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
         auto use=[&](QString id) {
-            if (!QRegularExpression("^[0-9a-f]{32}$").match(id).hasMatch()) return;
-            perform(n,"attach",frondDanaCards::quote(root()+'/'+id+".frondsd")+' '+id+' '+(protect.isChecked()?"protected":"writable")+' '+family.currentData().toString());
+            if (!QRegularExpression("^[0-9a-f]{32}$").match(id).hasMatch()) return false;
+            if (!perform(n,"attach",frondDanaCards::quote(root()+'/'+id+".frondsd")+' '+id+' '+(protect.isChecked()?"protected":"writable")+' '+family.currentData().toString())) return false;
             dialog.accept();
+            return true;
         };
         connect(attach,&QPushButton::clicked,&dialog,[&] { use(existing.currentData().toString()); });
         auto create=[&](bool importing) {
@@ -184,12 +192,17 @@ class DanaCardsDialog : public QDialog {
                 if (fd>=0) ::close(fd);
             }
             else result=frondCards::runCardTool(frondCards::cardTool(tool),importing?QStringList{"import",source,"sd",path}:QStringList{"make","sd",size.currentData().toString(),path});
-            if (!result.ok) { QMessageBox::warning(&dialog,tr("Card"),result.message); return; }
+            if (!result.ok) { QFile::remove(path); QMessageBox::warning(&dialog,tr("Card"),result.message); return; }
+            if (!frondDanaCards::fits(path,DeviceCardSlot5(n?2:0),family.currentData()=="mmc"?DeviceCardFamily5::legacyMmc:DeviceCardFamily5::sdsc)) {
+                QFile::remove(path); QMessageBox::warning(&dialog,tr("Card"),tr("That size isn't supported by this card family.")); return;
+            }
             QFile meta(root()+'/'+id+".json");
             if (!meta.open(QIODevice::WriteOnly) || meta.write(QJsonDocument(QJsonObject{{"protocol",family.currentData().toString()},{"name",importing?QFileInfo(source).fileName():family.currentText()+" "+size.currentText()}}).toJson())<0) {
-                QMessageBox::warning(&dialog,tr("Card"),tr("Couldn't save card details.")); return;
+                meta.remove(); QFile::remove(path); QMessageBox::warning(&dialog,tr("Card"),tr("Couldn't save card details.")); return;
             }
-            meta.close(); use(id);
+            meta.close();
+            // A card the first attach refuses would stay in the library and never attach.
+            if (!use(id)) { QFile::remove(meta.fileName()); QFile::remove(path); }
         };
         connect(make,&QPushButton::clicked,&dialog,[&] { create(false); });
         connect(import,&QPushButton::clicked,&dialog,[&] { create(true); });

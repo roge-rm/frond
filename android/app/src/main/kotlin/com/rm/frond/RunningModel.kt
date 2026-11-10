@@ -161,7 +161,14 @@ class RunningModel(
 
     // The card's state without a busy dialog, for the bar's icon.
     fun readCard() {
-        if (danaCards != null) { danaJob(); return }
+        danaCards?.let { cards ->
+            // Silent: the bar reads this at every start and menu open, before the core may have connected.
+            if (busy != null || waiting()) return
+            activity.lifecycleScope.launch {
+                withContext(Dispatchers.IO) { try { cards.refresh() } catch (_: Exception) {} }
+            }
+            return
+        }
         val c = card ?: return
         if (busy != null || waitingForGdb || !device.cardSupported) return
         activity.lifecycleScope.launch {
@@ -545,6 +552,11 @@ class RunningModel(
             { if (printer?.plugged == true) "infrared printer" else null }) { alert = "Infrared printer" to it }
             .also { it.startPolling { settings.infrared == InfraredChoice.PRINTER } }
     else null
+
+    // The core's Dana view changed (keyboard button, pan, zoom); keeps the sheet's choices current.
+    fun acceptDanaView(view: DanaView) {
+        if (settings.danaView != view) settings = settings.copy(danaView = view)
+    }
 
     // Saves one field of the machine settings, leaving the others as they are on disk.
     fun changeSettings(next: MachineSettings) {

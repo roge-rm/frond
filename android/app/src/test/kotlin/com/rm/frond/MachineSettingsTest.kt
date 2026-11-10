@@ -215,4 +215,10 @@ class MachineSettingsTest {
             MachineSettings(fastAudio = true).audioArguments(true, 1024, unqualified))
         assertEquals(2, reads)
     }
+
+    @Test fun wifiModuleUsesTheFallbackWhenUnset() {
+        assertFalse(MachineSettings.from(JSONObject(), MachineSettings(wifiModule = false)).wifiModule)
+        assertTrue(MachineSettings.from(JSONObject().put("wifiModule", true), MachineSettings(wifiModule = false)).wifiModule)
+        assertTrue(MachineSettings.from(JSONObject()).wifiModule)
+    }
 }

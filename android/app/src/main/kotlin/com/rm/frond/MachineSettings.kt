@@ -82,7 +82,7 @@ data class MachineSettings(
         .put("sound", sound).put("fastAudio", fastAudio).put("microphone", microphone)
         .put("showKeyboard", showKeyboard).put("jogControls", jogControls.arg)
         .put("showJogControls", jogControls != JogControls.HIDDEN)
-        .put("engine", engine.arg).put("speed", speed.arg).put("barShown", barShown).put("barMode", barMode.arg).put("infrared", infrared).put("serial", serial).put("bluetooth", bluetooth).put("danaView", danaView.json()).put("usbPort", usbPort).put("usbPrinter", usbPort == UsbPort.PRINTER).also { if (contrastSet) it.put("contrast", contrast); if (!wifiModule) it.put("wifiModule", false) }
+        .put("engine", engine.arg).put("speed", speed.arg).put("barShown", barShown).put("barMode", barMode.arg).put("infrared", infrared).put("serial", serial).put("bluetooth", bluetooth).put("danaView", danaView.json()).put("usbPort", usbPort).put("usbPrinter", usbPort == UsbPort.PRINTER).put("wifiModule", wifiModule).also { if (contrastSet) it.put("contrast", contrast) }
 
     fun applyTo(settings: Settings) = settings.copy(size = size, smoothing = smoothing, sound = sound)
 
@@ -149,7 +149,7 @@ data class MachineSettings(
                 danaView = DanaView.from(json.optJSONObject("danaView"), fallback.danaView),
                 usbPort = if (json.has("usbPort")) UsbPort.normalise(json.optString("usbPort"))
                     else if (json.has("usbPrinter")) UsbPort.normalise(null, json.optBoolean("usbPrinter")) else fallback.usbPort,
-                wifiModule = json.optBoolean("wifiModule", true),
+                wifiModule = json.optBoolean("wifiModule", fallback.wifiModule),
             )
         }
     }

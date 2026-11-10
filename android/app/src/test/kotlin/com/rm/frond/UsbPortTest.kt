@@ -43,7 +43,8 @@ class UsbPortTest {
 
     @Test fun moduleChoiceIsKeptPerMachine() {
         assertTrue(MachineSettings().wifiModule)
-        assertFalse(MachineSettings().json().has("wifiModule"))
+        // Written either way, so a missing field can fall back to the caller's choice.
+        assertTrue(MachineSettings().json().getBoolean("wifiModule"))
         val off = MachineSettings(wifiModule = false).json()
         assertFalse(MachineSettings.from(off, MachineSettings()).wifiModule)
         assertTrue(MachineSettings.from(MachineSettings(wifiModule = true).json(), MachineSettings(wifiModule = false)).wifiModule)

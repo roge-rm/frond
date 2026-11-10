@@ -704,6 +704,7 @@ open class FrondActivity : SDLActivity() {
             if (state.view.keyboard != DanaKeyboard.HIDDEN) lastDanaKeyboard = state.view.keyboard
             val previous = machineSettings.danaView
             machineSettings = machineSettings.copy(danaView = state.view)
+            menuModel?.acceptDanaView(state.view)
             keyboardButton?.contentDescription = if (state.resolved == DanaKeyboard.HIDDEN) "Show keyboard" else "Hide keyboard"
             if (previous != state.view) {
                 try {

@@ -88,4 +88,15 @@ class DanaCardsTest {
                 listOf("none",null),listOf("none","unknown"),listOf("none")))
             assertNotNull(DanaCardProtocol.sessionCopyError(states))
     }
+    @Test fun frondsdImportIsCheckedAgainstTheFamilySize() {
+        fun head(payload: Long) = "FRONDSD\u0000".toByteArray(Charsets.US_ASCII) + ByteArray(8) +
+            ByteArray(8) { (payload shr (8 * it)).toByte() }
+        val (sd, mmc) = dana.storageSlots[0].families
+        assertTrue(DanaCardProtocol.frondsdFits(head(512L shl 20), sd))
+        assertFalse(DanaCardProtocol.frondsdFits(head(512L shl 20), mmc))
+        assertTrue(DanaCardProtocol.frondsdFits(head(256L shl 20), mmc))
+        assertFalse(DanaCardProtocol.frondsdFits(head(0), sd))
+        assertFalse(DanaCardProtocol.frondsdFits(head(32L shl 20).copyOf(20), sd))
+        assertFalse(DanaCardProtocol.frondsdFits("FRONDMS\u0000".toByteArray(Charsets.US_ASCII) + head(32L shl 20).copyOfRange(8, 24), sd))
+    }
 }
