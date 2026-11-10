@@ -83,10 +83,12 @@ int main() {
     soc.Run(1024, 10000000);
     assert(read32(0x40a00010) - cpuGetRegExternal(cpu, 1) <= 2);
     assert(cpuCyclesInProgress(cpu) == 0);
-    // TX-only register banks and the seventh LCD DMA channel must survive reload.
+    // TX-only register banks, the seventh LCD DMA channel, FBR4 and the overlay registers
+    // must survive reload.
     const uint32_t registers[] = {0x58000000, 0x41500048, 0x40600004, 0x40600008,
         0x4060000c, 0x40600018, 0x40600020, 0x40600024, 0x40600404,
-        0x40f00040, 0x40f00050, 0x40f00080, 0x40f000fc, 0x44000260};
+        0x40f00040, 0x40f00050, 0x40f00080, 0x40f000fc, 0x44000260,
+        0x44000030, 0x44000050, 0x44000060, 0x44000070, 0x44000080, 0x44000090};
     std::vector<uint32_t> expected;
     for (unsigned i = 0; i < sizeof(registers) / sizeof(registers[0]); ++i) {
         write32(registers[i], 0x13579bdfu + i * 0x1020304u);
