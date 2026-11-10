@@ -69,7 +69,9 @@ void resetAndIsolation() {
     write(soc, timer2 + 20, 0); assert(read(soc, timer2 + 20) == 0);
     // Rejected divider and source writes retain the second timer's fractional progress.
     soc.advanceFastBusCycles(4);
-    write(soc, cgm, 0x57000403, Imx1BootstrapAccess::sideEffect);
+    // A BCLK_DIV change is taken with a timer running (patch 0692: PERCLK1 is independent of BCLK).
+    // Shown on a copy so this machine keeps its timing.
+    { auto copy = soc; write(copy, cgm, 0x57000403); }
     write(soc, cgm + 32, 3, Imx1BootstrapAccess::sideEffect);
     write(soc, timer2 + 4, 3, Imx1BootstrapAccess::sideEffect);
     write(soc, timer2, 5, Imx1BootstrapAccess::sideEffect);

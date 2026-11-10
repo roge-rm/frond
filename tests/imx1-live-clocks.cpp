@@ -180,9 +180,10 @@ void manualUClockPhases() {
     b.advanceCpuCycles(137, 3, true);
     for (unsigned n = 0; n < 137; ++n) chunks.advanceCpuCycles(1, 3, true);
     assert(read(b, adc + 0x1c) == 0 && read(chunks, adc + 0x1c) == 0);
-    write(b, cgm, 0x5700ac03, A::sideEffect);
-    write(b, cgm, 0x5700ac03, A::sideEffect, 0);
-    write(chunks, cgm, 0x5700ac03, A::sideEffect);
+    // The ASP runs on PERCLK2, so a BCLK_DIV change is taken while it converts (patch 0743).
+    write(b, cgm, 0x5700ac03);
+    write(b, cgm, 0x5700ac03, A::ok, 0);
+    write(chunks, cgm, 0x5700ac03);
     write(b, cgm, 0x57008003); write(chunks, cgm, 0x57008003);
     b.advanceCpuCycles(10000, 3, true);
     for (unsigned n = 0; n < 100; ++n) chunks.advanceCpuCycles(100, 3, true);

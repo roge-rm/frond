@@ -97,7 +97,8 @@ void pendingAndAtomicity() {
     assert(read(guarded, rtc + 24) == 0 && read(guarded, rtc + 20) == 8);
     // A masked unknown AITC source becomes eligible only in the prospective write.
     Imx1Bootstrap unknown; start(unknown);
-    write(unknown, aitc + 4, 30); write(unknown, aitc + 8, 0);
+    // Source 6 (CSI) is unknown. Source 0 is known low in reset since patch 0748.
+    write(unknown, aitc + 4, 30); write(unknown, aitc + 8, 6);
     write(unknown, rtc + 24, 8);
     write(unknown, aitc + 4, 31, A::externalInput);
     assert(read(unknown, aitc + 4) == 30 && read(unknown, rtc + 24) == 8);

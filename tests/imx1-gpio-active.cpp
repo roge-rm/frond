@@ -140,7 +140,8 @@ void transactionalDelivery() {
     bus(soc, base + 0x30, true, bit);
     assert(soc.interruptLines().irq == Imx1AitcLine::asserted);
     assert(bus(soc, 0x0022305c, false) == 1u << 11);
-    bus(soc, 0x00223008, true, 1, B::externalInput); // Known source 11 cannot hide source 1 uncertainty.
+    // Known source 11 cannot hide source 6 (CSI) uncertainty. Source 1 is known low in reset since patch 0748.
+    bus(soc, 0x00223008, true, 6, B::externalInput);
     assert(bus(soc, 0x00223014, false) == 1u << 11);
     bus(soc, base + 0x30, true, 0);
     bus(soc, base + 0x34, true, bit);

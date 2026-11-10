@@ -106,7 +106,8 @@ void bootstrapInactiveRequest() {
     assert(read(soc, aitc + 0x60) == 0);
     write(soc, aitc + 0x50, 0x80000000, B::sideEffect);
     assert(read(soc, aitc + 0x50) == 0);
-    write(soc, aitc + 8, 0, B::externalInput); // Unmodelled interrupt input remains unknown.
+    // Unmodelled interrupt input remains unknown: source 6 (CSI). Source 0 is known low in reset since patch 0748.
+    write(soc, aitc + 8, 6, B::externalInput);
     write(soc, base, 0x7f16, B::resetRequest);
     write(soc, base, 0x7f13, B::sideEffect);
     assert(read(soc, base) == 0x7f12);

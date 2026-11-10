@@ -88,7 +88,13 @@ int main() {
     soc.advanceFastBusCycles(1); busRead(0x00202010, 1);
     for (unsigned i = 0; i < 96; ++i) soc.advanceFastBusCycles(1);
     busRead(0x00202010, 2);
-    busWrite(0x0021b000, 0x57000403, Imx1BootstrapAccess::sideEffect);
+    // A BCLK_DIV change is taken with Timer 1 running (patch 0692: PERCLK1 is independent of BCLK).
+    // Shown on a copy so this machine keeps its timing.
+    {
+        auto copy = soc;
+        uint32_t value = 0x57000403;
+        assert(copy.access(0x0021b000, 4, true, value) == Imx1BootstrapAccess::ok);
+    }
     busWrite(0x0021b020, 0x00100013, Imx1BootstrapAccess::sideEffect);
     busRead(0x0021b000, 0x57000003); busRead(0x0021b020, 0x00100012);
     // Other peripheral divider changes do not alter Timer 1's input clock.

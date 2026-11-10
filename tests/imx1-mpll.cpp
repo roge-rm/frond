@@ -98,15 +98,25 @@ int main() {
     busWrite(cscr, 0x57000003); busWrite(0x0021b020, 0x00100012);
     busWrite(0x00202004, 31); busWrite(0x00202000, 0x103);
     soc.advanceFastBusCycles(94);
-    // Reject the whole transaction, including its otherwise permitted restart request.
-    busWrite(cscr, 0x57200403, Imx1BootstrapAccess::sideEffect);
+    // In FastBus mode a BCLK_DIV change with Timer 1 running is taken (patch 0692: PERCLK1 is independent of
+    // BCLK), restart request and all. Shown on a copy so this machine keeps its timing.
+    {
+        auto copy = soc;
+        uint32_t value = 0x57200403;
+        assert(copy.access(cscr, 4, true, value) == Imx1BootstrapAccess::ok);
+    }
     busRead(cscr, 0x57000003);
     busWrite(mpctl0, 0x03e717bf);
     busWrite(cscr, 0x57208003);
     soc.advanceFastBusCycles(1); busRead(0x00202010, 0);
     soc.advanceFastBusCycles(1); busRead(0x00202010, 1);
-    // Rejected writes preserve both Timer 1 phase and the restart deadline.
-    busWrite(cscr, 0x57008403, Imx1BootstrapAccess::sideEffect);
+    // Rejected writes preserve both Timer 1 phase and the restart deadline. A BCLK_DIV change is taken
+    // with Timer 1 running since patch 0692, so it is shown on a copy.
+    {
+        auto copy = soc;
+        uint32_t value = 0x57008403;
+        assert(copy.access(cscr, 4, true, value) == Imx1BootstrapAccess::ok);
+    }
     busWrite(mpctl0, 0x003f1437, Imx1BootstrapAccess::externalInput);
     busRead(cscr, 0x57208003); busRead(mpctl0, 0x03e717bf);
     soc.advanceFastBusCycles(5997);

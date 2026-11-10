@@ -109,7 +109,10 @@ void unknownAndBootstrap() {
     };
     access(0x10, true, 0, Imx1BootstrapAccess::ok);
     access(0x14, true, 0, Imx1BootstrapAccess::ok);
-    access(8, true, 3, Imx1BootstrapAccess::externalInput);
+    // Source 6 (CSI) has no model. UART3's sources 0 to 4 are known low in reset since patch 0748.
+    access(8, true, 3, Imx1BootstrapAccess::ok);
+    access(0xc, true, 3, Imx1BootstrapAccess::ok);
+    access(8, true, 6, Imx1BootstrapAccess::externalInput);
     assert(access(0x14, false, 0, Imx1BootstrapAccess::ok) == 0);
     access(0x54, true, 0x80000000, Imx1BootstrapAccess::ok);
     access(8, true, 31, Imx1BootstrapAccess::sideEffect);
@@ -133,9 +136,10 @@ void maskedGpioRequests() {
         assert(b.access(base + offset, 4, write, value) == status);
         return value;
     };
-    for (unsigned source = 0; source < 64; ++source) {
-        if ((gpioMask & (uint64_t(1) << source)) || source == 31 || source == 32 || source == 39 ||
-            source == 58 || source == 59 || source == 63 || source == 5 || source == 9 || source == 17 || source == 18 || source == 33 || source == 34 || source == 46) continue;
+    // Sources with no known level in reset. The rest are known: the DMA's 60 and 61 (patch 0677), SSI1's 42 to 45
+    // (0679), UART1 and UART2 (0722), the BTA's 55 to 57 (0746), and UART3, SSI2, SPI and USBD in reset (0748).
+    // 27 is UART1's missing DTR and 35 the MMC/SD module before discovery.
+    for (unsigned source : {6u, 7u, 8u, 10u, 14u, 15u, 16u, 27u, 35u}) {
         access(8, true, source, Imx1BootstrapAccess::externalInput);
         assert(access(0x10, false, 0, Imx1BootstrapAccess::ok) == 0);
         assert(access(0x14, false, 0, Imx1BootstrapAccess::ok) == 0);

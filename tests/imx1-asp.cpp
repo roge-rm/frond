@@ -422,8 +422,9 @@ void penBoardTransaction() {
     assert(store(base + 0x1c, 0x40) == Imx1BootstrapAccess::ok && status() == 0x40);
     inputs.contactDown = false; assert(board.replaceAspPenInputs(inputs) == Imx1BootstrapAccess::ok);
     assert(store(base + 0x1c, 0x40) == Imx1BootstrapAccess::ok && status() == 0);
-    // An eligible unknown source prevents the complete input transaction.
-    assert(store(0x00223008, 4) == Imx1BootstrapAccess::externalInput);
+    // An eligible unknown source prevents the complete input transaction: source 6 (CSI). Source 4 is known
+    // low in reset since patch 0748.
+    assert(store(0x00223008, 6) == Imx1BootstrapAccess::externalInput);
     inputs.contactDown = true;
     assert(board.replaceAspPenInputs(inputs) == Imx1BootstrapAccess::ok && status() == 0x40);
 }

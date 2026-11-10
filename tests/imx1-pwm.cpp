@@ -269,7 +269,9 @@ void bootstrapEnabledTimingAndIrq() {
     Imx1Bootstrap board;
     write(board, base, 0x10);
     write(board, pcdr, 0, Imx1BootstrapAccess::sideEffect);
-    write(board, cscr, 0x0f00a003, Imx1BootstrapAccess::sideEffect);
+    // A BCLK_DIV change is taken with the PWM on PERCLK1 (patch 0692: PERCLK1 is independent of BCLK).
+    // Shown on a copy so this machine keeps its timing.
+    { auto copy = board; write(copy, cscr, 0x0f00a003); }
     assert(read(board, pcdr) == 0xb00bb && read(board, cscr) == 0x0f00ac03);
     board.advanceFastBusCycles(2); // System /12 to BCLK, independent PERCLK1 /12, then PWM /2.
     assert(read(board, base + 12) == 1);
