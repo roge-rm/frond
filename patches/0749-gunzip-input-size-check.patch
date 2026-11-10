@@ -1,0 +1,22 @@
+--- a/src/common/GunzipContext.cpp
++++ b/src/common/GunzipContext.cpp
+@@ -162,7 +162,7 @@
+ }
+ 
+ void GunzipContext::ReadHeaderFooter() {
+-    if (uncompressedSize <= HEADER_SIZE + FOOTER_SIZE) return SetError("not enough input");
++    if (compressedSize <= HEADER_SIZE + FOOTER_SIZE) return SetError("not enough input");
+ 
+     headerFooter.magic = Read16(0);
+     headerFooter.compressionMethod = Read8(2);
+--- a/src/common/GunzipContext.h
++++ b/src/common/GunzipContext.h
+@@ -65,7 +65,7 @@
+     const uint8_t* payload;
+ 
+     std::unique_ptr<uint8_t[]> uncompressedData;
+-    size_t uncompressedSize;
++    size_t uncompressedSize{0};
+ 
+     std::string errorDescription{"no error"};
+     GzipHeaderFooter headerFooter;
