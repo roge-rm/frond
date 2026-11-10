@@ -923,6 +923,16 @@ test-checkpoint-input: out/frond
 		$(CPU_TEST_LDLIBS) -o build/test-checkpoint-input
 	./build/test-checkpoint-input
 
+.PHONY: test-nand-store-fail
+test: test-nand-store-fail
+test-nand-store-fail: out/frond
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/nand-store-fail-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/native \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/nand-store-fail.cpp @build/nand-store-fail-core.rsp build/source/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-nand-store-fail
+	./build/test-nand-store-fail
+
 test-native-database: prepare build/source/src/common/libcommon.a
 	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/native \
 		-Ibuild/source/src/uarm -Ibuild/source/src/uarm/uarm -Ibuild/source/src/common -Ibuild/source/src/common/zip \

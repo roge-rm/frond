@@ -493,6 +493,7 @@ Microphone (Zire 72 and TG50) is off each time it starts. Turn it on under Micro
 - Gaps in sound on a PipeWire desktop: check that PipeWire's real-time threads get priority. `systemctl status rtkit-daemon` and `ps -eLo pid,tid,cls,rtprio,comm | grep -E 'pipewire|data-loop|frond'` show it.
 - If `journalctl --user -u pipewire -u xdg-desktop-portal` reports `Could not get pidns`, tell PipeWire to use RTKit directly. Put `module.rt.args = { rtportal.enabled = false }` in `~/.config/pipewire/pipewire.conf.d/90-direct-rtkit.conf`, `~/.config/pipewire/pipewire-pulse.conf.d/90-direct-rtkit.conf` and `~/.config/pipewire/client.conf.d/90-direct-rtkit.conf`, then run `systemctl --user restart pipewire pipewire-pulse wireplumber`, which briefly interrupts audio in other apps. Remove the files and restart to undo it.
 - Low-latency audio drops back to normal on starvation until the next reset. Use normal audio for projects that need a bigger queue.
+- A full disk or a machine folder that can't be written: on a device with NAND the machine keeps running, Palm OS sees its writes to internal storage fail (an install says out of memory) and the Emulator log says "NAND: a write to the machine's NAND file failed". Free some space, then reset the Palm.
 - A card that stops responding after an eject or sleep during writes: reset the Palm. The card image is intact.
 - "This session is open in another Frond": close the other window, or it's still running.
 - Diagnostics and logs for bug reports: Emulator log, and [performance.md](performance.md) for speed and audio traces.
