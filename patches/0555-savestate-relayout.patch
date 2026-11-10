@@ -7,7 +7,7 @@
 +    template <typename T>
 +    bool SaveChunks(T& t);
 +
-+    // Every chunk the layout has was written to its end and no chunk was asked for that it lacks.
++    // No chunk was asked for that the layout lacks. A chunk that came out short is fine to load.
 +    bool LayoutHeld() const;
  
     private:
@@ -44,23 +44,19 @@
      for (auto& [chunkType, chunk] : chunkMap) chunk.Reset();
  
      target.Save(*this);
-@@ -73,6 +96,15 @@
+@@ -73,6 +96,11 @@
  }
  
  template <typename ChunkType>
 +bool Savestate<ChunkType>::LayoutHeld() const {
-+    if (missingChunk) return false;
-+    for (auto& [chunkType, chunk] : chunkMap)
-+        if (!chunk.IsAtEnd()) return false;
-+
-+    return true;
++    return !missingChunk;
 +}
 +
 +template <typename ChunkType>
  template <typename T>
  bool Savestate<ChunkType>::AllocateBuffer(T& target) {
      SavestateProbe<ChunkType> probe;
-@@ -123,7 +155,7 @@
+@@ -123,7 +151,7 @@
      }
  
      if (chunkMap.find(type) == chunkMap.end()) {
@@ -69,7 +65,7 @@
          return nullptr;
      }
  
-@@ -158,6 +190,7 @@
+@@ -158,6 +186,7 @@
      buffer.reset();
      size = 0;
      error = false;
