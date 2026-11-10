@@ -253,7 +253,28 @@ static void clocksAndInterrupts() {
     assert(read(sampled, 0x00223014) == 0);
     write(sampled, base + 20, 0x8000); write(sampled, 0x00223008, 18);
 }
+// A reset through RESET_IN: the time goes on, everything else is back at its reset value.
+static void externalReset() {
+    Imx1Bootstrap before;
+    assert(before.setRtcInitialTime({1, 12, 34, 56}));
+    write(before, base + 0, 300); write(before, base + 12, read(before, base + 4)); write(before, base + 24, 0x10);
+    assert(read(before, base + 12) != 0 && read(before, base + 24) == 0x10);
+    write(before, 0x0021b000, 0x57000003);
+    write(before, 0x0021b020, 2);
+    Imx1Bootstrap after;
+    assert(after.resetSource() == Imx1ResetSource::powerOn && read(after, 0x0021b800) == 0);
+    after.takeExternalReset(before);
+    assert(read(after, base + 0) == read(before, base + 0) && read(after, base + 4) == read(before, base + 4));
+    assert(read(after, base + 8) == read(before, base + 8) && read(after, base + 0) == 300);
+    assert(read(after, base + 12) == 0 && read(after, base + 16) == 0x80 && read(after, base + 24) == 0);
+    // The clock controller is not reset and RSR says what the reset was.
+    assert(read(after, 0x0021b000) == 0x57000003 && read(after, 0x0021b020) == 2);
+    assert(after.resetSource() == Imx1ResetSource::external && read(after, 0x0021b800) == 1);
+    Imx1Bootstrap cold;
+    assert(read(cold, 0x0021b000) == 0x0f00ac03 && read(cold, 0x0021b800) == 0);
+}
 int main() {
+    externalReset();
     resetAndRegisters(); elapsedAndEvents(); fractionsAndBounds(); clocksAndInterrupts();
     std::puts("PASS: RTC retained domain, explicit time, binary ranges, elapsed CLK32, events, phases, rollover, SPLL stall and IRQ guards");
 }

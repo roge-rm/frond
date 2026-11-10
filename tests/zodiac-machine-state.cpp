@@ -504,7 +504,8 @@ void sdram(bool fast) {
 void keepMemory() {
     Guest g{"keep memory", setup(), {}};
     auto& words = g.words;
-    // The SDRAM setup of the guest above, then r7 = [0x08000010] before the store there.
+    // r8 = RSR, the SDRAM setup of the guest above, then r7 = [0x08000010] before the store there.
+    load(words, 0, 0x0021b800); words.push_back(0xe5908000);
     load(words, 0, 0x00221000);
     load(words, 1, 0x91120200); words.push_back(0xe5801000);
     load(words, 2, 0x08200000); words.push_back(0xe5923000);
@@ -534,10 +535,21 @@ void keepMemory() {
     // A plain load brings RAM back too.
     a.load(powerOn);
     assert(a.save() == powerOn && finish() == first);
+    const auto source = [&] { return imx1MachineInspect(a.machine).result.registers[8]; };
+    // The reset source register reads 0 after power-on (POR), and after a load that says nothing else.
+    assert(source() == 0);
     const auto info = imx1MachineLoadState(a.machine, powerOn.data(), powerOn.size(), imx1StateKeepMemory);
     assert(info.status == Imx1StateStatus::ok && imx1MachineGetStatus(a.machine).retired == 0);
     assert(a.save() != powerOn);
-    assert(finish() == 0x12345678);
+    assert(finish() == 0x12345678 && source() == 0);
+    // A reset through RESET_IN reads EXR, a state saved after it keeps that, and power-on clears it.
+    assert(imx1MachineLoadState(a.machine, powerOn.data(), powerOn.size(), imx1StateExternalReset).status == Imx1StateStatus::ok);
+    const Bytes afterReset = a.save();
+    assert(afterReset != powerOn && finish() == 0x12345678 && source() == 1);
+    a.load(powerOn);
+    assert(finish() == first && source() == 0);
+    a.load(afterReset);
+    assert(finish() == 0x12345678 && source() == 1);
 }
 // A guest for the virtual graphics profile. Every bus access runs from the PC the graphics
 // models expect for it, reached from a stub that loads the address, the value and the return.

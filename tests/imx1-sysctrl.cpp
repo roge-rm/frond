@@ -48,7 +48,24 @@ int main() {
     }
     assert(unknown == 0xdeadbeef);
     read(gccr, 0x6f);
-    for (auto address : {0x0021b800u, 0x0021b804u, 0x0021b814u,
+    // The reset module's RSR: 0 after power-on, EXR after RESET_IN, WDR after a watchdog time-out
+    // (MC9328MX1RM table 6-3). Read-only, and only the 32-bit read is answered.
+    constexpr uint32_t rsr = 0x0021b800;
+    assert(!std::strcmp(Imx1Bootstrap::registerName(rsr), "RST.RSR"));
+    read(rsr, 0);
+    assert(soc.resetSource() == Imx1ResetSource::powerOn);
+    soc.setResetSource(Imx1ResetSource::external); read(rsr, 1);
+    soc.setResetSource(Imx1ResetSource::watchdog); read(rsr, 2);
+    for (uint32_t value : {0u, 1u, 3u, 0xffffffffu}) write(rsr, value, Imx1BootstrapAccess::sideEffect);
+    read(rsr, 2);
+    for (uint32_t size : {0u, 1u, 2u, 8u}) {
+        unknown = 0xdeadbeef;
+        assert(soc.access(rsr, size, false, unknown, 3) == Imx1BootstrapAccess::width && unknown == 0xdeadbeef);
+    }
+    for (unsigned offset = 1; offset < 4; ++offset)
+        assert(soc.access(rsr + offset, 4, false, unknown, 3) == Imx1BootstrapAccess::width);
+    soc.setResetSource(Imx1ResetSource::powerOn); read(rsr, 0);
+    for (auto address : {0x0021b804u, 0x0021b814u,
                          0x00208010u, 0x00212000u, 0x00222000u}) {
         unknown = 0xdeadbeef;
         assert(soc.access(address, 4, false, unknown, 3) == Imx1BootstrapAccess::unmapped);
