@@ -357,6 +357,17 @@ void brushUpload() {
         0xc0011a00,0x00010001,0x00020002},0x200b0200) == A::sideEffect && refused(f,"pattern-brush",10));
 }
 // Scissor word 470 is the first column and row not drawn, for copies and fills alike.
+void hostSourceType() {
+    // RGB565 rows go in with 4b1 source type 3 or 0, as the ROM leaves it. Other types stop with the value.
+    for (uint32_t datatype : {0x40030d04u,0x40000d04u,0x40010d04u,0x40037d04u}) {
+        Fixture f;
+        const std::vector<uint32_t> host{0x41b,0x5798b4df,0x4b2,0x00cc0b00,0x4b1,datatype,
+            0xc0031900,0,0x00020002,0x1234f800,0x56780000};
+        if (datatype == 0x40030d04 || datatype == 0x40000d04) {
+            assert(f.append(host,0x200ac300) == A::ok); f.finish();
+        } else assert(f.append(host,0x200ac300) == A::sideEffect && refused(f,"host-upload-state",datatype));
+    }
+}
 void scissor() {
     Fixture f; planes(f);
     // The 3 by 2 copy to x 5, y 3 cut at column 7 and row 4: two pixels of its first row.
@@ -594,6 +605,7 @@ void privateCapture() {
 }
 }
 int main() {
+    hostSourceType();
     geometry(); guards(); scissor(); stretchBlit(); keyedModes(); brushUpload(); fills(); stretch(); scanStatus(); executionAndReset(); privateCapture();
     std::puts("PASS: plain RGB565 copy geometry, bounds, atomic append, queued A4 execution-time source, deadlines, reset and routes");
 }
