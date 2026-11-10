@@ -238,6 +238,9 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             if (!send(source->command, "clear")) source->stage = PrinterStage::None;
         });
     }
+    connect(&client, &DesktopClient::backgroundResult, this, [this](const QString& command, bool ok, const QString& message) {
+        if (command == "speed-state" && runningPreferences.showMips) palmHolder->setMips(ok ? message : QString());
+    });
     mipsTimer = new QTimer(this);
     mipsTimer->setInterval(1000);
     connect(mipsTimer, &QTimer::timeout, this, [this] { pollMips(); });
@@ -774,11 +777,6 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (command == "dana-view" || command == "dana-view-state") {
             forceButton->hide(); refresh();
             if (stopping && exchangeStage == ExchangeStage::None) save();
-            return;
-        }
-        if (command == "speed-state") {
-            // Polled once a second: leaves the busy state alone.
-            if (ok) palmHolder->setMips(message);
             return;
         }
         if (cardProgress) { cardProgress->hide(); cardProgress->deleteLater(); cardProgress = nullptr; }
@@ -1492,8 +1490,9 @@ void MainWindow::updateMips() {
     if (!mipsTimer->isActive()) { mipsTimer->start(); pollMips(); }
 }
 void MainWindow::pollMips() {
-    if (!client.running() || !client.available() || busy || stopping) return;
-    client.request("speed-state", {});
+    // It doesn't use the request slot, so it never holds up or drops anything the user does.
+    if (!client.running() || stopping || QApplication::activeModalWidget()) return;
+    client.requestBackground("speed-state");
 }
 void MainWindow::afterDevice() {
     send(frondFirmware::profile(runningDevice).frontend.holdPresent ? "hold-state" :

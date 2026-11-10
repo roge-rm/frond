@@ -41,7 +41,7 @@ DesktopClient::DesktopClient(QObject* parent) : QObject(parent) {
         if (!expectingExit && (status == QProcess::CrashExit || code != 0))
             emit error(tr("The emulator stopped unexpectedly."));
         else if (!expectingExit) emit error(tr("The emulator stopped."));
-        deadline.stop(); lostConnection.stop(); ready = false; pending.clear();
+        deadline.stop(); lostConnection.stop(); ready = false; pending.clear(); backgroundId = 0;
         if (socket) { socket->disconnect(this); socket->deleteLater(); socket = nullptr; }
         server.close(); directory.reset();
         emit finished();
@@ -58,7 +58,7 @@ bool DesktopClient::start(const QString& core, const QStringList& arguments) {
     if (running()) return false;
     if (socket) { socket->disconnect(this); socket->deleteLater(); socket = nullptr; }
     lostConnection.stop();
-    server.close(); input.clear(); pending.clear(); ready = false; expectingExit = false;
+    server.close(); input.clear(); pending.clear(); backgroundId = 0; ready = false; expectingExit = false;
     directory = std::make_unique<QTemporaryDir>(QDir::tempPath() + "/frond-XXXXXX");
     if (!directory->isValid()) { emit error(tr("Could not create the private control directory.")); return false; }
     server.setSocketOptions(QLocalServer::UserAccessOption);
@@ -78,6 +78,14 @@ bool DesktopClient::request(const QString& command, const QString& argument) {
         pending.clear(); emit error(tr("Could not send the emulator command.")); return false;
     }
     deadline.start(120000);
+    return true;
+}
+bool DesktopClient::requestBackground(const QString& command) {
+    if (!available() || !socket || backgroundId) return false;
+    backgroundId = ++serial;
+    backgroundCommand = command;
+    const auto line = QByteArray::number(backgroundId) + '\t' + command.toUtf8() + "\t\n";
+    if (socket->write(line) != line.size()) { backgroundId = 0; return false; }
     return true;
 }
 bool DesktopClient::cancelFiles() {
@@ -133,6 +141,13 @@ void DesktopClient::receive() {
                 emit sdProgress(done, total);
             }
             else return fail(tr("The emulator sent an unexpected event."));
+            continue;
+        }
+        if (backgroundId && fields[0] == QByteArray::number(backgroundId) && (fields[1] == "ok" || fields[1] == "error") &&
+            fields[3].size() % 2 == 0 && QByteArray::fromHex(fields[3]).toHex() == fields[3]) {
+            const auto command = backgroundCommand;
+            backgroundId = 0;
+            emit backgroundResult(command, fields[1] == "ok", QString::fromUtf8(QByteArray::fromHex(fields[3])));
             continue;
         }
         if (pending.isEmpty() || fields[0] != QByteArray::number(serial) ||

@@ -288,4 +288,5 @@ bool PalmHolder::eventFilter(QObject* watched, QEvent* event) {
 
 void PalmHolder::raisePalm() {
     if (palm) palm->raise();
+    if (mips->isVisible()) if (auto* handle = mips->windowHandle()) handle->raise();
 }
