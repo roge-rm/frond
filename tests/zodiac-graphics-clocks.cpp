@@ -196,6 +196,19 @@ int main() {
     put(c,0x200c1148,0x9c,c.word(0x9c)&~0x80u);
     uint32_t badPm=c.word(0x88)|4u;
     assert(c.access(0x200c1174,0x16010088,4,true,badPm)==A::sideEffect);
+    // The chip power down's second half: stored words, each checked against the copy it is built from.
+    put(c,0x200c128c,0x80,c.word(0x80)|0x80u);
+    uint32_t badDown=c.word(0x88)|0xcu;
+    assert(c.access(0x200c12b8,0x16010088,4,true,badDown)==A::sideEffect);
+    put(c,0x200c12b8,0x88,c.word(0x88)|4u);
+    assert(c.pllRate().numerator==pll.numerator && c.pllRate().denominator==pll.denominator);
+    put(c,0x200c12fc,0x88,c.word(0x88)&~4u);
+    put(c,0x200c1550,0x98,c.word(0x98)|0x10u);
+    put(c,0x200c133c,0x98,(c.word(0x98)|1u)&~0xc0u);
+    assert(c.word(0x98)&0x10);
+    uint32_t badStored=c.word(0x98)|0x20u;
+    assert(c.access(0x200c4c00,0x16010098,4,true,badStored)==A::sideEffect);
+    put(c,0x200c1368,0x9c,c.word(0x9c)|0x80u);
     c.reset(); assert(!c.programmed() && !c.count());
     std::puts("virtual graphics clock tests passed");
 }

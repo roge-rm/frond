@@ -2120,6 +2120,18 @@ test-zodiac-cscr-ssi-clocks: build/zodiac-boot-probe
 		@build/zodiac-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-cscr-ssi-clocks
 	./build/test-zodiac-cscr-ssi-clocks
 
+# Stop mode: both PLLs off, CLK32 only, wake on the GPIO lines and the RTC.
+.PHONY: test-zodiac-stop-mode
+test-zodiac-stop-mode: build/zodiac-boot-probe
+	$(CXX) -DFROND_TEST_FAST=$(FROND_FAST) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/zodiac-stop-mode.cpp build/source/src/uarm/uarm/imx1_boot_probe.cpp \
+		build/source/src/uarm/uarm/imx1_watchdog.cpp build/source/src/uarm/uarm/imx1_rtc.cpp build/source/src/uarm/uarm/imx1_bootstrap.cpp build/source/src/uarm/uarm/imx1_aitc.cpp \
+		build/source/src/uarm/uarm/imx1_cgm.cpp build/source/src/uarm/uarm/imx1_gpio.cpp \
+		build/source/src/uarm/uarm/imx1_sysctrl.cpp build/source/src/uarm/uarm/imx1_eim.cpp build/source/src/uarm/uarm/imx1_timer.cpp build/source/src/uarm/uarm/imx1_i2c.cpp build/source/src/uarm/uarm/imx1_asp.cpp build/source/src/uarm/uarm/imx1_pwm.cpp \
+		@build/zodiac-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-stop-mode
+	./build/test-zodiac-stop-mode
+
 # MCU PLL shutdown and qualified WFI wake.
 .PHONY: test-zodiac-idle-wake
 test-zodiac-idle-wake: build/zodiac-boot-probe

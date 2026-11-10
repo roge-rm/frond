@@ -525,6 +525,33 @@ int main() {
     assert(state.access(eim,0x200adaa4,0x16010414,4,false,value) == A::ok && !(value & 0x2000000));
     assert(!state.displayState().lcdEnabled());
     assert(frame.advance(state,memory,eim) && !frame.lcdEnabled());
+    // Bits 25 and 26 follow the requests in 23 and 24: cleared at once, set 32 cycles after the request,
+    // and read at the four loop pcs only.
+    auto follow = [&](uint32_t pc) {
+        uint32_t word = 0xdeadbeef;
+        assert(state.access(eim,pc,0x16010414,4,false,word) == A::ok);
+        return word & 0x6000000;
+    };
+    store(state,eim,0x200adac8,0x414,0x1c06);
+    assert(follow(0x200adad0) == 0);
+    for (auto pc : {0u,0x200ad808u,0x200ad810u,0x200adaa0u,0x200adad4u}) {
+        value = 0xdeadbeef;
+        assert(state.access(eim,pc,0x16010414,4,false,value) == A::externalInput && value == 0xdeadbeef);
+    }
+    store(state,eim,0x200ad804,0x414,0x801c06);
+    assert(follow(0x200ad80c) == 0);
+    state.advanceCpuCycles(31);
+    assert(follow(0x200ad80c) == 0);
+    state.advanceCpuCycles(1);
+    assert(follow(0x200ad80c) == 0x2000000);
+    store(state,eim,0x200ad830,0x414,0x1801c06);
+    assert(follow(0x200ad838) == 0x2000000);
+    state.advanceCpuCycles(31);
+    assert(follow(0x200ad838) == 0x2000000);
+    state.advanceCpuCycles(1);
+    assert(follow(0x200ad838) == 0x6000000);
+    store(state,eim,0x200ada9c,0x414,0x1001c06);
+    assert(follow(0x200adaa4) == 0x4000000);
     state.reset();
     frame.reset();
     assert(!state.displayState().latchPending() && !state.displayState().lcdEnabled());

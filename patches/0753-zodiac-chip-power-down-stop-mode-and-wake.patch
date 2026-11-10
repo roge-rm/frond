@@ -1,0 +1,416 @@
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -810,12 +810,15 @@
+             p->result.gpioEventApplied = true;
+         }
+         if (p->options.bootstrapPeripherals &&
+-            (cpuArm920Waiting(p->cpu) || !p->peripherals.mcuEnabled() || p->peripherals.mcuWakePending())) {
++            (cpuArm920Waiting(p->cpu) || !p->peripherals.mcuEnabled() || p->peripherals.mcuWakePending() ||
++             p->peripherals.systemStopped())) {
+             if (!p->chargeDeferred()) { p->clockBoundary(); break; }
+             bool wake = p->peripherals.wakeMcuFromInterrupt();
+             // The first period of a wait always runs alone, so every check below has seen the state the skip starts from.
+             bool settled = false;
+-            while (cpuArm920Waiting(p->cpu) && (!wake || p->peripherals.mcuWakePending())) {
++            // In stop mode the CPU's clock is off wherever it is, in a wait or not.
++            while ((cpuArm920Waiting(p->cpu) || p->peripherals.cpuClockHeld(cpuArm920ClockMode(p->cpu))) &&
++                   (!wake || p->peripherals.mcuWakePending())) {
+                 if (p->boundReached()) break;
+                 if (!wake && !p->idleWakePossible()) {
+                     p->result.stop = Imx1ProbeStop::idleNoWake;
+@@ -1006,6 +1009,8 @@
+             quietCycles -= cycles;
+         } else if (p->options.bootstrapPeripherals) {
+             if (!p->chargeDeferred()) { p->clockBoundary(); break; }
++            // The write that turned the CPU's own clock off ends there. The time after it passes in the wait loop.
++            if (p->peripherals.cpuClockHeld(cpuArm920ClockMode(p->cpu))) continue;
+             const auto graphicsStatus = p->advanceGraphicsCpu(cycles, p->peripherals.cpuReferencePeriod(cpuArm920ClockMode(p->cpu)));
+             if (graphicsStatus != Imx1BootstrapAccess::ok) {
+                 p->result.stop = Imx1ProbeStop::unsupportedPeripheral;
+@@ -1316,7 +1321,7 @@
+     }
+ };
+ #if defined(__GLIBCXX__) && defined(__x86_64__)
+-static_assert(sizeof(Probe) == 26032, "update ProbeState and its stateVersion");
++static_assert(sizeof(Probe) == 26048, "update ProbeState and its stateVersion");
+ static_assert(sizeof(Imx1ProbeResult) == 352, "update ProbeState and its stateVersion");
+ static_assert(sizeof(Imx1ProbeOptions) == 1352, "update stateOptionFields and stateIdentityVersion");
+ #endif
+--- a/src/uarm/uarm/imx1_boot_probe.h
++++ b/src/uarm/uarm/imx1_boot_probe.h
+@@ -255,7 +255,7 @@
+ // budget and idleStepped may differ. A failed check or load leaves the machine as it was.
+ // Saving drops translated code, so the saved and the loaded machine also agree on jitBlocks.
+ // Bump the revision in any patch that changes guest-visible i.MX1 or ARM920 behaviour or a state() list.
+-inline constexpr uint32_t imx1MachineStateCoreRevision = 752;
++inline constexpr uint32_t imx1MachineStateCoreRevision = 753;
+ enum class Imx1StateStatus {
+     ok, notAtBoundary, unsupportedConfiguration, truncated, badMagic, badFormatVersion, coreRevisionMismatch,
+     layoutMismatch, corruptSection, missingSection, romMismatch, optionsMismatch, busMismatch, invalidValue
+--- a/src/uarm/uarm/imx1_bootstrap.cpp
++++ b/src/uarm/uarm/imx1_bootstrap.cpp
+@@ -11,6 +11,7 @@
+         const auto system = cgm.systemPllActiveRatio();
+         if (!advanceReference(uint64_t(cycles) * cgm.busDivider() * system.denominator, system.numerator)) return;
+         advanceSystemOutput(uint64_t(cycles) * cgm.busDivider());
++        settleSystemStop(cycles);
+         return;
+     }
+     const auto mcu = cgm.mcuPllTargetRatio();
+@@ -59,18 +60,34 @@
+ 
+ void Imx1Bootstrap::advanceHclkCycles(uint32_t cycles) {
+     assert(!cgm.systemRestartRemaining());
++    if (systemStopped()) {
++        // Only CLK32 runs: the reference time, the RTC, the watchdog and the PLL lock count.
++        if (!advanceReference(cycles, 1)) return;
++        if (systemStop == stopWaking && !cgm.mcuWakePending()) {
++            systemStop = stopRunning;
++            systemPllPhase = 0;
++        }
++        return;
++    }
+     const auto period = busReferencePeriod();
+     if (!advanceReference(uint64_t(cycles) * period.numerator, period.denominator)) return;
+     advanceSystemOutput(uint64_t(cycles) * cgm.busDivider());
++    settleSystemStop(cycles);
+ }
+ 
+ uint64_t Imx1Bootstrap::idleQuietHclk() const {
++    // The shutdown count is looked at after every charge.
++    if (systemStopArmed()) return 1;
+     const auto period = busReferencePeriod();
+     const uint64_t numerator = period.numerator, denominator = period.denominator;
+     const uint64_t bus = cgm.busDivider();
+     uint64_t quiet = cgm.idleQuietSteps(numerator, denominator);
+     quiet = std::min(quiet, rtc.idleQuietSteps(numerator, denominator));
+     quiet = std::min(quiet, watchdog.idleQuietSteps(numerator, denominator));
++    if (systemStopped()) {
++        if (pwm.usesReference()) quiet = std::min(quiet, pwm.idleQuietReferenceSteps(numerator, denominator));
++        return quiet ? quiet : 1;
++    }
+     if (pwm.usesReference()) quiet = std::min(quiet, pwm.idleQuietReferenceSteps(numerator, denominator));
+     else if (pwm.enabled())
+         quiet = std::min(quiet, imx1StepsUntilDivided(pwm.idleQuietCycles(), cgm.perclk1Divider(), perclk1Phase, bus));
+@@ -698,10 +715,26 @@
+         // Holding System PLL output high requires the independent asynchronous MCU clock.
+         if (write && address == 0x0021b000 && (value & 0x00400000) && cpuClockMode != 3)
+             return Imx1BootstrapAccess::sideEffect;
++        // MPEN alone is only cleared by a CPU on HCLK. With SPEN cleared too it is stop mode, which an
++        // asynchronous CPU enters at once, as its FCLK goes with the MCU PLL (table 12-3).
+         if (write && address == 0x0021b000 && (!(value & 1) || bool(value & 1) != cgm.mcuEnabled()) &&
+-            (cpuClockMode != 0 || !cgm.mcuPowerQualified())) return Imx1BootstrapAccess::sideEffect;
++            ((cpuClockMode != 0 && (value & 2)) || !cgm.mcuPowerQualified())) return Imx1BootstrapAccess::sideEffect;
++        // The shutdown count is not restarted or called off by a write (table 12-5 has an interrupt only).
++        if (write && systemStop != stopRunning) return Imx1BootstrapAccess::sideEffect;
+         auto next = cgm;
+         const auto result = next.access(address, size, write, value);
++        if (result == Imx1CgmAccess::ok && write && !next.systemPllEnabled()) {
++            // HCLK stops under whatever is still running on it. The ROM's sleep path turns these off first.
++            if (timer1.enabled() || timer2.enabled() || uart1.busy() || uart2.busy() || i2c.active() ||
++                asp.converting() || pwm.resetting() || mmcsd.clockRunning() || dmaPcmBurst ||
++                (dmaPcmActive && (ssi1Words[0] & 0x100)) || ssi1Shifting)
++                return Imx1BootstrapAccess::sideEffect;
++            systemStop = stopArmed;
++            systemStopHclk = 16;
++            systemStopTick = elapsedReference.ticks + next.systemShutdownEdges();
++            cgm = next;
++            return Imx1BootstrapAccess::ok;
++        }
+         if (result == Imx1CgmAccess::ok && write) {
+             const auto referenceDenominator = cpuClockMode == 3 ?
+                 next.mcuPllTargetRatio().numerator : next.systemPllActiveRatio().numerator;
+--- a/src/uarm/uarm/imx1_bootstrap.h
++++ b/src/uarm/uarm/imx1_bootstrap.h
+@@ -80,7 +80,20 @@
+         return gpio.outputPattern(port, inputs, high, low);
+     }
+     bool cs5PinsSelected(bool acknowledge) const { return gpio.cs5PinsSelected(acknowledge); }
++    // Stop mode (MC9328MX1RM 12.4.3): with SPEN and MPEN clear both PLLs are off and only CLK32 runs,
++    // so the CPU and every module on HCLK or a PERCLK stand still. The System PLL goes on until the
++    // CLK32 edges of SD_CNT have passed, 16 HCLK at least (table 12-5), and an interrupt before that
++    // keeps it on. An asserted IRQ or FIQ turns both PLLs on again (table 12-3), locked 300 us at most
++    // later (12.4.2), taken as the nine CLK32 periods the MCU PLL wake already uses.
++    bool systemStopArmed() const { return systemStop == stopArmed; }
++    bool systemStopped() const { return systemStop >= stopStopped; }
++    // Whether the CPU's clock is off: stopped, or on FCLK (clock mode 3) with the MCU PLL already off.
++    bool cpuClockHeld(uint32_t cpuClockMode) const {
++        return systemStopped() || (systemStopArmed() && cpuClockMode == 3);
++    }
++    // The step a waiting CPU's time passes in: one HCLK period, or one CLK32 period in stop mode.
+     Imx1PllRatio busReferencePeriod() const {
++        if (systemStopped()) return {1, 1};
+         const auto rate = cgm.systemPllActiveRatio();
+         return {uint64_t(rate.denominator) * cgm.busDivider(), uint32_t(rate.numerator)};
+     }
+@@ -95,8 +108,11 @@
+     bool wakeMcuFromInterrupt() {
+         const auto lines = interruptLines();
+         const bool asserted = lines.irq == Imx1AitcLine::asserted || lines.fiq == Imx1AitcLine::asserted;
+-        if (asserted) cgm.wakeMcuPll();
+-        return asserted;
++        if (!asserted) return false;
++        if (systemStop == stopStopped) { cgm.wakePlls(); systemStop = stopWaking; }
++        else if (systemStop == stopArmed) { cgm.wakePlls(); systemStop = stopRunning; }
++        else cgm.wakeMcuPll();
++        return true;
+     }
+     bool gpioWakePossible(unsigned port, uint32_t value, uint32_t known) const {
+         auto pins = gpio;
+@@ -106,6 +122,8 @@
+         return controller.irq() == Imx1AitcLine::asserted || controller.fiq() == Imx1AitcLine::asserted;
+     }
+     bool idleWakePossible() const {
++        // Stopped, time goes on in CLK32 periods whatever can interrupt, so the RTC keeps the time.
++        if (systemStop != stopRunning) return true;
+         auto candidate = aitc;
+         uint64_t sources = rtc.futureInterrupts() | asp.futureInterrupts() |
+             (mmcsd.canInterrupt() ? uint64_t(1) << 35 : 0) |
+@@ -173,7 +191,7 @@
+                (address >= 0x08000000 && address < 0x10000000);
+     }
+     // Registers, clocks and every model, without the memories below.
+-    static constexpr uint32_t stateVersion = 4;
++    static constexpr uint32_t stateVersion = 5;
+     template <class A> void state(A& a) {
+         a.Do64(elapsedReference.ticks).Do64(elapsedReference.numerator).Do64(elapsedReference.denominator);
+         a.Require(elapsedReference.valid(), "reference time");
+@@ -196,6 +214,8 @@
+         for (auto& s : sdram)
+             a.Do32(s.control).Fixed32(s.bytes).DoBool(s.controlKnown).DoBool(s.precharged).DoBool(s.modeSet).Do32(s.refreshes);
+         reset.state(a); bta.state(a);
++        a.Do32(systemStop).Do32(systemStopHclk).Do64(systemStopTick);
++        a.Require(systemStop <= stopWaking, "stop mode");
+     }
+     template <class A> void stateSram(A& a) {
+         const size_t bytes = sram.size();
+@@ -259,6 +279,16 @@
+                             const Imx1Timer& first, const Imx1Timer& second) const;
+     Imx1BootstrapAccess interruptGate(const Imx1Aitc& controller) const;
+     bool cpuInterruptsConnected = false;
++    // Stop mode: running, SPEN cleared with the shutdown count going, stopped, and locking again.
++    static constexpr uint32_t stopRunning = 0, stopArmed = 1, stopStopped = 2, stopWaking = 3;
++    uint32_t systemStop = stopRunning, systemStopHclk = 0;
++    // The CLK32 edge the shutdown waits for, as a whole reference tick.
++    uint64_t systemStopTick = 0;
++    void settleSystemStop(uint64_t hclk) {
++        if (systemStop != stopArmed) return;
++        systemStopHclk -= uint32_t(std::min<uint64_t>(hclk, systemStopHclk));
++        if (!systemStopHclk && elapsedReference.ticks >= systemStopTick) systemStop = stopStopped;
++    }
+     Imx1Rtc rtc;
+     Imx1I2c i2c;
+     Imx1Asp asp;
+@@ -319,7 +349,7 @@
+ };
+ 
+ #if defined(__GLIBCXX__) && defined(__x86_64__)
+-static_assert(sizeof(Imx1Bootstrap) == 2328, "update state() and stateVersion");
++static_assert(sizeof(Imx1Bootstrap) == 2344, "update state() and stateVersion");
+ #endif
+ 
+ const char* imx1BootstrapAccessName(Imx1BootstrapAccess access);
+--- a/src/uarm/uarm/imx1_cgm.cpp
++++ b/src/uarm/uarm/imx1_cgm.cpp
+@@ -53,6 +53,16 @@
+     return true;
+ }
+ 
++void Imx1Cgm::wakePlls() {
++    const bool mcu = !mcuEnabled();
++    cscr |= 2;
++    if (mcu) { wakeMcuPll(); return; }
++    // The System PLL alone: the same nominal lock time, with the MCU PLL's state left as it is.
++    mcuWakeRemaining = 9;
++    mcuWakePhase = 0;
++    mcuWakeDenominator = 1;
++}
++
+ void Imx1Cgm::wakeMcuPll() {
+     if (mcuEnabled()) return;
+     cscr |= 1;
+@@ -178,12 +188,22 @@
+         return Imx1CgmAccess::ok;
+     }
+     if (value & ~mask) return Imx1CgmAccess::reservedBits;
++    if (address != 0x0021b000 && !systemPllEnabled()) return Imx1CgmAccess::sideEffect;
+     if ((address == 0x0021b004 || address == 0x0021b00c) &&
+         (!(value & 0x03ff0000) || (value & 1023) == 1023))
+         return Imx1CgmAccess::reservedBits;
+     if (address == 0x0021b000) {
+         if ((value >> 29) > 5) return Imx1CgmAccess::reservedBits;
+-        if (!(value & 2)) return Imx1CgmAccess::sideEffect;
++        // Stop mode (12.4.3): SPEN and MPEN cleared, in one write or MPEN first, and nothing else changed.
++        // The board model times the shutdown and holds everything but CLK32 while it lasts.
++        if (!(value & 2)) {
++            if ((value & 1) || ((value ^ cscr) & ~3u) || !systemPllEnabled() || !mcuOutputQualified ||
++                mcuRestartCycles || mcuReferenceRemaining || mcuWakeRemaining || systemRestartUnits || systemWriteDelay)
++                return Imx1CgmAccess::sideEffect;
++            *reg = value;
++            return Imx1CgmAccess::ok;
++        }
++        if (!systemPllEnabled()) return Imx1CgmAccess::sideEffect;
+         const bool powerChanged = (value ^ cscr) & 1;
+         if (powerChanged && (!mcuOutputQualified || mcuRestartCycles || mcuReferenceRemaining ||
+             mcuWakeRemaining || systemRestartUnits || (value & 0x00600000) ||
+--- a/src/uarm/uarm/imx1_cgm.h
++++ b/src/uarm/uarm/imx1_cgm.h
+@@ -33,6 +33,11 @@
+     // Reset output is known; programmed output needs restart completion and an explicit assumption.
+     // The equal-frequency retune scenario keeps that qualified nominal output continuous.
+     bool mcuEnabled() const { return cscr & 1; }
++    // SPEN, and the CLK32 edges the System PLL goes on for once it is cleared (SD_CNT, table 12-5).
++    bool systemPllEnabled() const { return cscr & 2; }
++    uint32_t systemShutdownEdges() const { return ((cscr >> 24) & 3) + 1; }
++    // Both PLLs back on after an interrupt (table 12-3), locked after the wake time of 12.4.2.
++    void wakePlls();
+     bool mcuWakePending() const { return mcuWakeRemaining != 0; }
+     void wakeMcuPll();
+     // Steps of numerator/denominator CLK32 periods until a clock state changes. 1 while a restart or write delay runs.
+--- a/src/uarm/uarm/imx1_cs5_configuration.h
++++ b/src/uarm/uarm/imx1_cs5_configuration.h
+@@ -160,7 +160,9 @@
+             if (!deviceConfigured(eim) || !memoryInterfaceReady()) return Imx1BootstrapAccess::sequence;
+             return interrupts.access(pc, address, size, write, value, sd.cardEventsKnown());
+         }
+-        if (virtualProfile() && ((pc >= 0x20086952 && pc <= 0x20086a60 && !Imx1GraphicsDisplay::owns(address)) || address == 0x16010184)) {
++        // The chip interrupt set-up on the way up from sleep (20086e0c) does the same 018 update as the boot's.
++        const bool wakeInterface = address == 0x16010018 && (pc == 0x20086e10 || pc == 0x20086e1a);
++        if (virtualProfile() && ((pc >= 0x20086952 && pc <= 0x20086a60 && !Imx1GraphicsDisplay::owns(address)) || address == 0x16010184 || wakeInterface)) {
+             if (!deviceConfigured(eim)) return Imx1BootstrapAccess::sequence;
+             return boardAccess(pc,address,size,write,value);
+         }
+@@ -330,7 +332,8 @@
+             {0x20086a44,0x16010018,0,0,false},{0x20086a52,0x16010018,0x100000,0x400,true},{0x20086a54,0x16010018,0,0,false},
+             {0x20086a5a,0x16010020,0,0,false},{0x20086a5e,0x16010020,0,0x100000,true},{0x20086a60,0x16010020,0,0,false},
+             {0x20086974,0x16010018,0,0,false},
+-            {0x20086982,0x16010018,0x100000,0x400,true}};
++            {0x20086982,0x16010018,0x100000,0x400,true},
++            {0x20086e10,0x16010018,0,0,false},{0x20086e1a,0x16010018,0x100000,0x400,true}};
+         const Operation* op = nullptr;
+         for (const auto& candidate : operations) if (candidate.pc == pc && candidate.address == address && candidate.write == write) {op=&candidate;break;}
+         if (!op) return Imx1BootstrapAccess::externalInput;
+--- a/src/uarm/uarm/imx1_graphics_clocks.h
++++ b/src/uarm/uarm/imx1_graphics_clocks.h
+@@ -150,16 +150,28 @@
+             (pc == 0x200c15f0 && value != ((word(0x8c) & ~0xfu) | 1))) return A::sideEffect;
+         if ((pc == 0x200c1148 && value != (word(0x9c) & ~0x80u)) ||
+             (pc == 0x200c1174 && value != (word(0x88) & ~4u))) return A::sideEffect;
++        // The second half of the ROM's chip power down (clock handler 50002, mode 2, 200c11d0). Each word is
++        // written whole from the driver's RAM copy and none is read back or tested.
++        if ((pc == 0x200c128c && value != (word(0x80) | 0x80u)) ||
++            (pc == 0x200c12b8 && value != (word(0x88) | 4u)) ||
++            (pc == 0x200c12fc && value != (word(0x88) & ~4u)) ||
++            (pc == 0x200c133c && value != ((word(0x98) | 1u) & ~0xc0u)) ||
++            (pc == 0x200c1368 && value != (word(0x9c) | 0x80u))) return A::sideEffect;
+         if ((pc == 0x200c54c0 && ((value ^ word(0x90)) & ~0xfu)) ||
+             (pc == 0x200c54e0 && ((value ^ word(0x90)) & ~0xf0u))) return A::sideEffect;
+         if (offset == 0x98) {
+-            if ((value & 0x32) || (value & 12) == 8) return A::sideEffect;
++            // Bits 5:4 are stored and change nothing here. The power down sets bit 4 (200c1550 with byte 11,
++            // kept by 200c133c) and the way back writes the word whole again (200c4c00).
++            const uint32_t stored = pc == 0x200c1550 || pc == 0x200c133c ? 0x30u : 0;
++            if ((value & 0x32 & ~stored) || (value & 12) == 8) return A::sideEffect;
+             // Only the native condition pair is qualified for automatic activity.
+             if ((pc == 0x200c4c00 || (value & 0xc0)) && (value & 0xff00) != 0x4000) return A::sideEffect;
+             if (pc != 0x200c4c00 && ((value ^ word(0x98)) & 0xff00)) return A::sideEffect;
+         }
+         // Pump current and auxiliary PLL controls retain the native nominal settings.
+-        if (offset == 0x88 && (value & ~0x80f0fc43u) != 0x4b000200u) return A::sideEffect;
++        // Bit 2 of 88 is stored and changes nothing here: the power down sets it at 200c12b8 and clears it
++        // again in its next write (200c12fc).
++        if (offset == 0x88 && (value & ~(0x80f0fc43u | (pc == 0x200c12b8 ? 4u : 0u))) != 0x4b000200u) return A::sideEffect;
+         if (offset == 0x9c && pc == 0x200c4cac && value != 0x6e) return A::sideEffect;
+         if (offset == 0xa0 && value != 0xffff0000u) return A::sideEffect;
+         if ((offset == 0x8c || offset == 0x90) && (value & 15) > 1) return A::sideEffect;
+@@ -200,6 +212,7 @@
+         {0x200c11c4,0x98,true},{0x200c15c0,0x80,true},{0x200c15f0,0x8c,true},
+         {0x200c14e4,0x80,true},{0x200c1550,0x98,true},{0x200c165c,0x80,true},{0x200c16ac,0x88,true},
+         {0x200c1148,0x9c,true},{0x200c1174,0x88,true},
++        {0x200c128c,0x80,true},{0x200c12b8,0x88,true},{0x200c12fc,0x88,true},{0x200c133c,0x98,true},{0x200c1368,0x9c,true},
+         {0x200c54a8,0x90,false},{0x200c54c0,0x90,true},
+         {0x200c54c8,0x90,false},{0x200c54e0,0x90,true},
+         {0x200c55c0,0x8c,true},{0x200c5f50,0x8c,true},
+--- a/src/uarm/uarm/imx1_graphics_controller.h
++++ b/src/uarm/uarm/imx1_graphics_controller.h
+@@ -54,8 +54,10 @@
+         return Imx1BootstrapAccess::ok;
+     }
+    private:
+-    // Native polling consumes bit 4 before draining and bit 0 after mode setup.
+-    // The virtual mode command completes after 32 charged guest CPU cycles.
++    // ASSUMPTION "chip memory status 1b8": bit 4 reads 0 at 200c4114 (the power down waits for it to clear,
++    // no bound) and bit 0 reads 1 at 200c4380 once the mode command is done (the power up waits for it to
++    // set, no bound). The ROM never writes 1b8 and nothing says what the bits are, so a read of 1b8 from
++    // any other pc is refused. The mode command is taken as done after 32 charged guest CPU cycles.
+     struct Operation { uint32_t pc, offset; bool write; uint32_t keep, set; };
+     inline static constexpr std::array<Operation, 29> operations{{
+         {0x200c4114, 0x1b8, false, 0, 0},
+@@ -92,6 +94,9 @@
+             return Imx1BootstrapAccess::ok;
+         }
+         if (!write && address == 0x160101b0 && pc == 0x200c41c4 && ready() && externalStep == operations.size()) externalStep = 11;
++        // The memory power down (200c4108) starts the list again on a chip that is up, and leaves it at the
++        // power up half (200c41b8), which the ROM runs on the way back.
++        if (!write && address == 0x160101b8 && pc == 0x200c4114 && ready() && externalStep == operations.size()) externalStep = 0;
+         unsigned index = 0;
+         for (; index < operations.size(); ++index)
+             if (pc == operations[index].pc && address == 0x16010000 + operations[index].offset &&
+--- a/src/uarm/uarm/imx1_graphics_display.h
++++ b/src/uarm/uarm/imx1_graphics_display.h
+@@ -59,6 +59,9 @@
+         value = activeSurface;
+         return true;
+     }
++    // ASSUMPTION "display clock acknowledge 414": bits 25 and 26 follow the requests in bits 23 and 24. The
++    // loops in 200ad7cc (200ad80c, 200ad838) wait for each to set and the ones in the panel off (200adaa4,
++    // 200adad0) for each to clear, with no bound. A set follows 32 ticks after its request, a clear at once.
+     uint32_t clockAcknowledgements() const {
+         return (pclk ? 0x2000000u : 0) | (sclk ? 0x4000000u : 0);
+     }
+--- a/src/uarm/uarm/imx1_graphics_gpio.h
++++ b/src/uarm/uarm/imx1_graphics_gpio.h
+@@ -45,9 +45,11 @@
+             }
+             return Imx1BootstrapAccess::ok;
+         }
++        // The card driver's own updates of pin 14: direction set, latch cleared (204d26f4) or set (204d2716,
++        // and 204d2f6e when it comes back from sleep with the slot empty).
+         if (!index && offset == 0 &&
+-            ((!write && (pc == 0x204d26f4 || pc == 0x204d2716)) ||
+-             (write && (pc == 0x204d2708 || pc == 0x204d272a)))) {
++            ((!write && (pc == 0x204d26f4 || pc == 0x204d2716 || pc == 0x204d2f6e)) ||
++             (write && (pc == 0x204d2708 || pc == 0x204d272a || pc == 0x204d2f82)))) {
+             if (!state.dataKnown || !state.controlKnown) return Imx1BootstrapAccess::sequence;
+             if (!write) value = state.data;
+             else {
+--- a/src/uarm/uarm/soc_IMX1.cpp
++++ b/src/uarm/uarm/soc_IMX1.cpp
+@@ -18,6 +18,9 @@
+     constexpr auto runHostLimit = std::chrono::milliseconds(12);
+     // Every button pin, ports A and D. They read high while released.
+     constexpr uint32_t buttonPinsA = 0x780, buttonPinsD = 0x7780;
++    // ASSUMPTION "cradle line D22 idles high": the sleep path arms D22 as a low level interrupt with the
++    // other wake lines (cradle or cable detect by the ROM's use), so off the cradle it has to read high.
++    constexpr uint32_t cradlePinD = 0x00400000;
+ 
+     int controlFor(KeyId key) {
+         switch (key) {
+@@ -43,7 +46,7 @@
+                    imx1MachineSetZodiacControl(machine, Imx1ZodiacControl(control), down, true) == Imx1BootstrapAccess::ok;
+         }
+         bool releaseControls() override {
+-            const uint32_t pins[4] = {buttonPinsA, 0, 0, buttonPinsD};
++            const uint32_t pins[4] = {buttonPinsA, 0, 0, buttonPinsD | cradlePinD};
+             return imx1MachineReplaceGpioInputs(machine, pins, pins, false) == Imx1BootstrapAccess::ok &&
+                    imx1MachineReplaceGpioInputs(machine, pins, pins, true) == Imx1BootstrapAccess::ok;
+         }
+@@ -73,7 +76,7 @@
+     o.bootstrapPeripherals = true; o.assumeMpllSettled = true; o.assumeSpllSettled = true;
+     o.assumeI2cSingleMaster = true; o.i2cBus = eeprom; o.aspPx1HighFromReset = true;
+     o.gpioBInputKnown = true; o.gpioBInput = 0x08100000;
+-    o.gpioDInputKnown = true; o.gpioDInput = buttonPinsD;
++    o.gpioDInputKnown = true; o.gpioDInput = buttonPinsD | cradlePinD;
+     o.ramMiB = 128; o.cs4Port0InputKnown = true; o.cs4Port0Input = 0;
+     o.rtcInitialTimeKnown = true; o.rtcInitialTime = {1, 12, 34, 56};
+     o.aspUSampleKnown = true; o.aspUSample = 0x9b00;

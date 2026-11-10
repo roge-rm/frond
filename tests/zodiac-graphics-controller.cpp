@@ -130,5 +130,19 @@ int main() {
     configureGraphicsController(state, eim);
     value = 0;
     assert(memory.access(state, eim, 0x16800000, 4, false, value) == Access::ok && value == 0x12345678);
+    // The 1b8 status is read at the power down's and the power up's own pcs only.
+    for (auto pc : {0u, 0x200c4110u, 0x200c4118u, 0x200c437cu, 0x200c4384u}) {
+        value = 0xdeadbeef;
+        assert(state.access(eim, pc, 0x160101b8, 4, false, value) == Access::externalInput && value == 0xdeadbeef);
+        assert(state.access(eim, pc, 0x160101b8, 4, true, value) == Access::externalInput);
+    }
+    // The power down on a chip that is up: bit 4 reads clear, the list starts again and stops at its
+    // power up half, where the bit 0 poll is out of order until the mode command has been given again.
+    value = 0xdeadbeef;
+    assert(state.access(eim, 0x200c4114, 0x160101b8, 4, false, value) == Access::ok && !(value & 0x10));
+    value = 0xdeadbeef;
+    assert(state.access(eim, 0x200c4380, 0x160101b8, 4, false, value) == Access::sequence && value == 0xdeadbeef);
+    assert(state.access(eim, 0x200c4114, 0x160101b8, 4, false, value) == Access::sequence && value == 0xdeadbeef);
+    assert(state.access(eim, 0x200c4130, 0x160101b0, 4, false, value) == Access::ok);
     std::puts("PASS: native MC sequence gates shared VRAM, strict/width/caller/value/order guards, IO readback and reset retention");
 }
