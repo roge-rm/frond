@@ -14,6 +14,8 @@
 #include "SdlRenderer.h"
 #include "DisplayChange.h"
 #include "WindowScale.h"
+#include "zodiac_input.h"
+#include "zodiac_panel.h"
 #include <SDL_image.h>
 // Synthetic finger events come from a touch id SDL doesn't know, so count them as a touch screen.
 struct TouchInput : SdlEventHandler {
@@ -1581,6 +1583,79 @@ static void zodiacControls() {
     keyEvent(SDLK_UP,false);st=guest.lastStick();assert(st.x==0 && st.y==0);guest.expect({});
     keyEvent(SDLK_F7,true);keyEvent(SDLK_F8,true);keyEvent(SDLK_F9,true);keyEvent(SDLK_F6,true);keyEvent(SDLK_F10,true);
     guest.expect({{keyIdFunction,true},{keyIdTriggerLeft,true},{keyIdTriggerRight,true},{keyIdHome,true},{keyIdStickPress,true}});
+    input.HandleEvent(lost);
+    guest.expect({{keyIdHome,false},{keyIdFunction,false},{keyIdTriggerLeft,false},{keyIdTriggerRight,false},{keyIdStickPress,false}});
+    guest.noStick();
+    // A game controller, as the mapping alone and through the handler's events.
+    {
+        GamepadState s;
+        assert(zodiacGamepadInput(s).keys==0 && zodiacGamepadInput(s).stick==DeviceStick{});
+        const std::pair<bool GamepadState::*,KeyId> buttons[]={{&GamepadState::a,keyIdHard1},{&GamepadState::b,keyIdHard2},
+            {&GamepadState::x,keyIdHard3},{&GamepadState::y,keyIdHard4},{&GamepadState::leftShoulder,keyIdTriggerLeft},
+            {&GamepadState::rightShoulder,keyIdTriggerRight},{&GamepadState::leftStick,keyIdStickPress},
+            {&GamepadState::start,keyIdHome},{&GamepadState::guide,keyIdHome},{&GamepadState::back,keyIdFunction}};
+        DeviceKeyMask all=0;
+        for(const auto& [member,key]:buttons) {
+            GamepadState one;one.*member=true;
+            assert(zodiacGamepadInput(one).keys==deviceKeyBit(key) && !zodiacGamepadInput(one).stick.held);
+            s.*member=true;all|=deviceKeyBit(key);
+        }
+        assert(zodiacGamepadInput(s).keys==all);
+        // Every key the controller sends is on the Zodiac's bar, and none is Bluetooth or power.
+        for(unsigned k=1;k<keyIdCount;++k) if(all&deviceKeyBit(KeyId(k))) assert(zodiacControlFor(KeyId(k))>=0);
+        assert(!(all&(deviceKeyBit(keyIdBluetooth)|deviceKeyBit(keyIdPower))));
+        // The stick: at rest near the centre, full at the ends of each axis and in the corners.
+        auto at=[](int x,int y) {GamepadState g;g.leftX=int16_t(x);g.leftY=int16_t(y);return zodiacGamepadInput(g).stick;};
+        assert(!at(3000,-2000).held && at(3000,-2000).x==0 && at(3000,-2000).y==0);
+        assert(at(32767,0).held && at(32767,0).x==1 && at(32767,0).y==0);
+        assert(at(-32768,0).x==-1 && at(0,32767).y==1 && at(0,-32768).y==-1);
+        assert(at(32767,-32768).x==1 && at(32767,-32768).y==-1);
+        const auto half=at(16384,0),small=at(4200,0);
+        assert(half.x>0.4f && half.x<0.5f && half.y==0 && small.held && small.x>0 && small.x<0.02f);
+        // A full push reaches the machine's whole travel.
+        assert(zodiacStickOffset(at(32767,0).x)==511 && zodiacStickOffset(at(0,-32768).y)==-511);
+    }
+    auto padButton=[&](int button,bool down) {
+        SDL_Event e{};e.type=down ? SDL_CONTROLLERBUTTONDOWN : SDL_CONTROLLERBUTTONUP;e.cbutton.button=Uint8(button);input.HandleEvent(e);
+    };
+    auto padAxis=[&](int axis,int value) {
+        SDL_Event e{};e.type=SDL_CONTROLLERAXISMOTION;e.caxis.axis=Uint8(axis);e.caxis.value=Sint16(value);input.HandleEvent(e);
+    };
+    for(auto [button,key]:{std::pair{SDL_CONTROLLER_BUTTON_A,keyIdHard1},{SDL_CONTROLLER_BUTTON_B,keyIdHard2},
+                           {SDL_CONTROLLER_BUTTON_X,keyIdHard3},{SDL_CONTROLLER_BUTTON_Y,keyIdHard4},
+                           {SDL_CONTROLLER_BUTTON_LEFTSHOULDER,keyIdTriggerLeft},{SDL_CONTROLLER_BUTTON_RIGHTSHOULDER,keyIdTriggerRight},
+                           {SDL_CONTROLLER_BUTTON_LEFTSTICK,keyIdStickPress},{SDL_CONTROLLER_BUTTON_START,keyIdHome},
+                           {SDL_CONTROLLER_BUTTON_GUIDE,keyIdHome},{SDL_CONTROLLER_BUTTON_BACK,keyIdFunction}}) {
+        padButton(button,true);guest.expect({{key,true}});assert(input.PressedButtons()==deviceKeyBit(key));
+        padButton(button,false);guest.expect({{key,false}});assert(!input.PressedButtons());
+    }
+    // Buttons with no place on the Zodiac and the other axes do nothing.
+    padButton(SDL_CONTROLLER_BUTTON_DPAD_UP,true);padButton(SDL_CONTROLLER_BUTTON_DPAD_UP,false);
+    padAxis(SDL_CONTROLLER_AXIS_RIGHTX,32767);padAxis(SDL_CONTROLLER_AXIS_TRIGGERLEFT,32767);guest.expect({});guest.noStick();
+    // Start and Guide together hold Home once, and a key held on the keyboard too stays down until both let go.
+    padButton(SDL_CONTROLLER_BUTTON_START,true);padButton(SDL_CONTROLLER_BUTTON_GUIDE,true);guest.expect({{keyIdHome,true}});
+    padButton(SDL_CONTROLLER_BUTTON_START,false);guest.expect({});padButton(SDL_CONTROLLER_BUTTON_GUIDE,false);guest.expect({{keyIdHome,false}});
+    padButton(SDL_CONTROLLER_BUTTON_A,true);keyEvent(SDLK_F1,true);guest.expect({{keyIdHard1,true}});
+    padButton(SDL_CONTROLLER_BUTTON_A,false);guest.expect({});assert(input.PressedButtons()==deviceKeyBit(keyIdHard1));
+    keyEvent(SDLK_F1,false);guest.expect({{keyIdHard1,false}});
+    // The controller's stick over its range; it wins over the arrow keys and the pointer wins over it.
+    padAxis(SDL_CONTROLLER_AXIS_LEFTX,32767);st=guest.lastStick();assert(st.x==1 && st.y==0 && input.Stick().held);
+    padAxis(SDL_CONTROLLER_AXIS_LEFTY,-32768);st=guest.lastStick();assert(st.x==1 && st.y==-1);
+    padAxis(SDL_CONTROLLER_AXIS_LEFTX,0);st=guest.lastStick();assert(st.x==0 && st.y==-1);
+    keyEvent(SDLK_RIGHT,true);guest.noStick();
+    pointer(SDL_MOUSEBUTTONDOWN,sx,well.y+well.h-3);st=guest.lastStick();assert(st.y>0.9f);
+    pointer(SDL_MOUSEBUTTONUP,sx,well.y+well.h-3);st=guest.lastStick();assert(st.x==0 && st.y==-1);
+    padAxis(SDL_CONTROLLER_AXIS_LEFTY,1000);st=guest.lastStick();assert(st.x==1 && st.y==0);
+    keyEvent(SDLK_RIGHT,false);st=guest.lastStick();assert(st.x==0 && st.y==0 && !input.Stick().held);
+    // Focus loss and a controller pulled out let go of what it held.
+    padButton(SDL_CONTROLLER_BUTTON_B,true);padAxis(SDL_CONTROLLER_AXIS_LEFTX,-32768);guest.expect({{keyIdHard2,true}});guest.lastStick();
+    input.HandleEvent(lost);guest.expect({{keyIdHard2,false}});st=guest.lastStick();assert(st.x==0 && st.y==0 && !input.PressedButtons());
+    padButton(SDL_CONTROLLER_BUTTON_B,false);guest.expect({});
+    padButton(SDL_CONTROLLER_BUTTON_Y,true);padAxis(SDL_CONTROLLER_AXIS_LEFTY,32767);guest.expect({{keyIdHard4,true}});guest.lastStick();
+    {SDL_Event e{};e.type=SDL_CONTROLLERDEVICEREMOVED;e.cdevice.which=0;input.HandleEvent(e);}
+    guest.expect({{keyIdHard4,false}});st=guest.lastStick();assert(st.x==0 && st.y==0 && !input.PressedButtons());
+    keyEvent(SDLK_F7,true);keyEvent(SDLK_F8,true);keyEvent(SDLK_F9,true);keyEvent(SDLK_F6,true);keyEvent(SDLK_F10,true);
+    guest.expect({{keyIdFunction,true},{keyIdTriggerLeft,true},{keyIdTriggerRight,true},{keyIdHome,true},{keyIdStickPress,true}});
     // Changing arrangement lets go of the pointer and fingers on the old one; keyboard keys stay
     // held until their key-up or focus loss.
     keyEvent(SDLK_LEFT,true);guest.lastStick();
@@ -1609,6 +1684,9 @@ static void zodiacControls() {
     SdlEventHandler txInput(&tx,1.f,txDisplay,Rotation::portrait_0);
     for(SDL_Keycode k:{SDLK_F7,SDLK_F8,SDLK_F9,SDLK_F10}) {SDL_Event e{};e.type=SDL_KEYDOWN;e.key.keysym.sym=k;txInput.HandleEvent(e);}
     tx.expect({});
+    // A game controller does nothing on the TX.
+    {SDL_Event e{};e.type=SDL_CONTROLLERBUTTONDOWN;e.cbutton.button=SDL_CONTROLLER_BUTTON_A;txInput.HandleEvent(e);tx.expect({});}
+    {SDL_Event e{};e.type=SDL_CONTROLLERAXISMOTION;e.caxis.axis=SDL_CONTROLLER_AXIS_LEFTX;e.caxis.value=32767;txInput.HandleEvent(e);tx.expect({});}
     {SDL_Event e{};e.type=SDL_KEYDOWN;e.key.keysym.sym=SDLK_RIGHT;txInput.HandleEvent(e);tx.expect({{keyIdRight,true}});}
     // At 90 and 270 the shown LCD is 320x480: keys, the stick and its press follow it in both arrangements.
     for(auto rotation:{Rotation::landscape_90,Rotation::landscape_270})
@@ -1710,7 +1788,7 @@ int main(int argc,char** argv) {
         tg50LiveDisplay();SDL_Quit();puts("PASS: TG50 display command parsing and live view/fit changes with releases and hit areas");return 0;
     }
     if(argc==2 && std::strcmp(argv[1],"--zodiac")==0) {
-        zodiacControls();SDL_Quit();puts("PASS: Zodiac below and around arrangements, keys, Bluetooth, stick, multi-touch, releases and pressed art");return 0;
+        zodiacControls();SDL_Quit();puts("PASS: Zodiac below and around arrangements, keys, Bluetooth, stick, game controller, multi-touch, releases and pressed art");return 0;
     }
     if(argc==2 && std::strcmp(argv[1],"--tg50-layout")==0) {
         tg50RuntimeTab();SDL_Quit();puts("PASS: TG50 sidebar/LCD pixel boundaries and pen bounds at fractional scales and four rotations");return 0;
