@@ -1375,7 +1375,7 @@ struct ZodiacGuest : Guest {
     DeviceStick lastStick() {assert(!sticks.empty());auto s=sticks.back();sticks.clear();return s;}
     void noStick() {assert(sticks.empty());}
 };
-struct ZodiacInput : SdlEventHandler {
+struct ZodiacHandler : SdlEventHandler {
     using SdlEventHandler::SdlEventHandler;
     bool DirectTouch(SDL_TouchID) const override {return true;}
 };
@@ -1416,7 +1416,7 @@ static void zodiacControls() {
         }
         std::sort(keys.begin(),keys.end());
         const std::vector<KeyId> expected{keyIdHard1,keyIdHard2,keyIdHard3,keyIdHard4,keyIdHome,
-                                          keyIdFunction,keyIdTriggerLeft,keyIdTriggerRight};
+                                          keyIdFunction,keyIdTriggerLeft,keyIdTriggerRight,keyIdBluetooth};
         assert(keys==expected && sticks==1);
     }
     for(size_t i=0;i<p.count;++i) {
@@ -1464,7 +1464,7 @@ static void zodiacControls() {
             }
         }
         const SDL_Rect stick=deviceStickRect(p,sw,sh,view);
-        assert(shown.size()==9 && stick.w>0);
+        assert(shown.size()==10 && stick.w>0);
         // The middle of the Action diamond is a gap; Bottom is hard1 and Top hard4.
         const auto a=rectOf(keyIdHard1,view,sw,sh),d=rectOf(keyIdHard4,view,sw,sh);
         assert(a.y>d.y && deviceControlAt(p,sw,sh,a.x+a.w/2,(a.y+d.y+d.h)/2,view)==keyInvalid);
@@ -1472,15 +1472,19 @@ static void zodiacControls() {
         const auto tl=rectOf(keyIdTriggerLeft,view,sw,sh),tr=rectOf(keyIdTriggerRight,view,sw,sh);
         // Function sits above Home in both arrangements.
         assert(fn.y+fn.h<=home.y);
+        // Bluetooth is round, on the diamond's side, above its middle and under the trigger.
+        const auto bt=rectOf(keyIdBluetooth,view,sw,sh),right=rectOf(keyIdHard2,view,sw,sh);
+        assert(std::abs(bt.w-bt.h)<=1 && deviceControlAt(p,sw,sh,bt.x,bt.y,view)==keyInvalid);
+        assert(bt.y>=tr.y+tr.h && bt.y+bt.h<=right.y && bt.x>=fn.x+fn.w);
         if(side) {
             // Left panel top to bottom: trigger, stick, Function, Home; the right panel has the
-            // trigger and the diamond only. The triggers stay at the top of a taller panel and the
+            // trigger, Bluetooth and the diamond. The triggers stay at the top of a taller panel and the
             // rest are centred on it.
             const int top=(sh-320)/2;
             assert(tl.y==8 && tr.y==8 && tr.x>=150+sw);
             assert(stick.x+stick.w<=150 && fn.x+fn.w<=150 && home.x+home.w<=150);
             assert(tl.y+tl.h<=stick.y && stick.y+stick.h<=fn.y && stick.y==52+top && home.y==272+top);
-            for(KeyId k:{keyIdHard1,keyIdHard2,keyIdHard3,keyIdHard4}) assert(rectOf(k,view,sw,sh).x>=150+sw);
+            for(KeyId k:{keyIdHard1,keyIdHard2,keyIdHard3,keyIdHard4,keyIdBluetooth}) assert(rectOf(k,view,sw,sh).x>=150+sw);
         } else {
             // Under the screen: Function and Home between the stick and the diamond.
             const auto left=rectOf(keyIdHard3,view,sw,sh);
@@ -1491,7 +1495,7 @@ static void zodiacControls() {
 
     // Input on a stand-in guest, around the screen at scale 1.
     ZodiacGuest guest;auto display=guest.display();
-    ZodiacInput input(&guest,1.f,display,Rotation::portrait_0,around);
+    ZodiacHandler input(&guest,1.f,display,Rotation::portrait_0,around);
     input.SetDirectCapture(false);
     auto centre=[&](KeyId key,const DeviceControlView& view) {
         for(size_t i=0;i<p.count;++i) if(p.buttons[i].key==key && deviceControlShown(p.buttons[i],view)) {
@@ -1511,7 +1515,7 @@ static void zodiacControls() {
     auto keyEvent=[&](SDL_Keycode k,bool down) {
         SDL_Event e{};e.type=down ? SDL_KEYDOWN : SDL_KEYUP;e.key.keysym.sym=k;input.HandleEvent(e);
     };
-    for(KeyId k:{keyIdHard1,keyIdHard2,keyIdHard3,keyIdHard4,keyIdHome,keyIdFunction,keyIdTriggerLeft,keyIdTriggerRight}) {
+    for(KeyId k:{keyIdHard1,keyIdHard2,keyIdHard3,keyIdHard4,keyIdHome,keyIdFunction,keyIdTriggerLeft,keyIdTriggerRight,keyIdBluetooth}) {
         const auto [x,y]=centre(k,around);
         pointer(SDL_MOUSEBUTTONDOWN,x,y);guest.expect({{k,true}});assert(input.PressedButtons()==deviceKeyBit(k));
         pointer(SDL_MOUSEBUTTONUP,x,y);guest.expect({{k,false}});guest.noPen();
@@ -1610,13 +1614,13 @@ static void zodiacControls() {
     for(auto rotation:{Rotation::landscape_90,Rotation::landscape_270})
     for(auto view:{around,below}) {
         ZodiacGuest turned;auto turnedDisplay=turned.display();
-        ZodiacInput sideways(&turned,1.f,turnedDisplay,rotation,view);sideways.SetDirectCapture(false);
+        ZodiacHandler sideways(&turned,1.f,turnedDisplay,rotation,view);sideways.SetDirectCapture(false);
         auto press=[&](Uint32 type,int x,int y) {
             SDL_Event e{};e.type=type;
             if(type==SDL_MOUSEMOTION) {e.motion.x=x;e.motion.y=y;} else {e.button.button=SDL_BUTTON_LEFT;e.button.x=x;e.button.y=y;}
             sideways.HandleEvent(e);
         };
-        for(KeyId k:{keyIdHard1,keyIdHard2,keyIdHard3,keyIdHard4,keyIdHome,keyIdFunction,keyIdTriggerLeft,keyIdTriggerRight}) {
+        for(KeyId k:{keyIdHard1,keyIdHard2,keyIdHard3,keyIdHard4,keyIdHome,keyIdFunction,keyIdTriggerLeft,keyIdTriggerRight,keyIdBluetooth}) {
             const auto r=rectOf(k,view,320,480);
             press(SDL_MOUSEBUTTONDOWN,r.x+r.w/2,r.y+r.h/2);turned.expect({{k,true}});
             press(SDL_MOUSEBUTTONUP,r.x+r.w/2,r.y+r.h/2);turned.expect({{k,false}});turned.noPen();
@@ -1706,7 +1710,7 @@ int main(int argc,char** argv) {
         tg50LiveDisplay();SDL_Quit();puts("PASS: TG50 display command parsing and live view/fit changes with releases and hit areas");return 0;
     }
     if(argc==2 && std::strcmp(argv[1],"--zodiac")==0) {
-        zodiacControls();SDL_Quit();puts("PASS: Zodiac below and around arrangements, keys, stick, multi-touch, releases and pressed art");return 0;
+        zodiacControls();SDL_Quit();puts("PASS: Zodiac below and around arrangements, keys, Bluetooth, stick, multi-touch, releases and pressed art");return 0;
     }
     if(argc==2 && std::strcmp(argv[1],"--tg50-layout")==0) {
         tg50RuntimeTab();SDL_Quit();puts("PASS: TG50 sidebar/LCD pixel boundaries and pen bounds at fractional scales and four rotations");return 0;

@@ -1,0 +1,178 @@
+--- a/src/uarm/native/DeviceControls.cpp
++++ b/src/uarm/native/DeviceControls.cpp
+@@ -1549,9 +1549,9 @@
+ 
+ // Tapwave Zodiac: original vector art on a dark graphite body. The shoulder triggers are slim tabs,
+ // the stick a ribbed knob in a round well that follows the held position, the Action keys glossy
+-// round buttons and Home and Function small pills. Paints the body from x0 to x1 and 0 to h and the
+-// keys of one section authored from x0 to x1, in the section's own units; screenHeight places
+-// around keys on a panel taller than authored.
++// round buttons, Home and Function small pills and Bluetooth a small round key with a blue lamp.
++// Paints the body from x0 to x1 and 0 to h and the keys of one section authored from x0 to x1,
++// in the section's own units; screenHeight places around keys on a panel taller than authored.
+ void paintZodiacControls(Canvas& canvas, const DeviceControlProfile& profile, DeviceKeyMask pressed,
+                          DeviceStick stick, DeviceControlSection section, float x0, float x1, float h,
+                          int screenHeight=0) {
+@@ -1625,6 +1625,15 @@
+                 return canvas.edge(iconDistance(DeviceControlIcon::home,(x-cx)/0.9f,(y-cy-sink)/0.9f)*0.9f-0.6f);
+             },[&](float,float,Rgb) {return ink;});
+         }
++        if(b.icon==DeviceControlIcon::bluetooth) {
++            // A blue lamp in the middle with a soft glow round it.
++            const Rgb lamp=held ? Rgb{60,104,190} : Rgb{86,148,255};
++            canvas.paint(cx-8,cy-8,cx+8,cy+8,[&](float x,float y) {
++                return clamp01(1-std::hypot(x-cx,y-cy-sink)/7)*0.35f;
++            },[&](float,float,Rgb) {return lamp;});
++            canvas.paint(cx-5,cy-5,cx+5,cy+5,[&](float x,float y) {return canvas.edge(std::hypot(x-cx,y-cy-sink)-3.2f);},
++                         [&](float,float,Rgb) {return lamp;});
++        }
+     }
+ }
+ }  // namespace
+--- a/src/uarm/native/DeviceControls.h
++++ b/src/uarm/native/DeviceControls.h
+@@ -16,7 +16,7 @@
+ 
+ enum class DeviceControlIcon { home, calendar, contacts, web, up, down, left, right, select, power, tasks, notes,
+                                media, music, phone, memo, graffiti, back, legend, stick, action, function,
+-                               trigger };
++                               trigger, bluetooth };
+ enum class DeviceControlStyle { tx, e2, zire72, m515, iiix, tg50, zodiac };
+ // Parts of a strip that can be hidden: the TG50's keyboard and its side tab. A device with two
+ // arrangements, like the Zodiac, puts its keys under the screen (below) or in panels either side of
+@@ -242,9 +242,9 @@
+     static const DeviceControlProfile tg50Profile{320,224,tg50,std::size(tg50),{0,0,0,0},0,{0,0,0,0},
+                                                   DeviceControlStyle::tg50,0.3f,1,0,176,{-38,-236,38,208},38};
+     // Tapwave Zodiac: the analogue stick and Function on the left and four round Action keys in a
+-    // diamond on the right, the shoulder triggers above them, and Home. Action keys are named by
+-    // place; which of hard1-4 each one sends isn't known yet. The stick entries place its well
+-    // and carry its press.
++    // diamond on the right, the shoulder triggers above them, Home, and the small round Bluetooth
++    // button up and to the right. Action keys are named by place; which of hard1-4 each one sends
++    // isn't known yet. The stick entries place its well and carry its press.
+     // Below: one strip under the screen, scaled to the screen's width. Around: a panel either side
+     // of the screen, each 150 wide and authored 320 tall; the right panel's keys are authored
+     // from x 150 and move past the screen. On a taller screen the triggers stay at the top and
+@@ -261,6 +261,7 @@
+         {keyIdHard4, {365,53,38,38}, "Top action button", DeviceControlIcon::action, 19, below},
+         {keyIdFunction, {176,96,62,26}, "Function", DeviceControlIcon::function, 13, below},
+         {keyIdHome, {176,150,62,26}, "Home", DeviceControlIcon::home, 13, below},
++        {keyIdBluetooth, {268,56,28,28}, "Bluetooth", DeviceControlIcon::bluetooth, 14, below},
+         {keyIdTriggerLeft, {8,8,120,24}, "Left trigger", DeviceControlIcon::trigger, 10, around},
+         {keyIdStickPress, {17,52,116,116}, "Analogue stick", DeviceControlIcon::stick, 58, around},
+         {keyIdFunction, {44,186,62,26}, "Function", DeviceControlIcon::function, 13, around},
+@@ -270,6 +271,7 @@
+         {keyIdHard2, {247,131,38,38}, "Right action button", DeviceControlIcon::action, 19, around},
+         {keyIdHard3, {165,131,38,38}, "Left action button", DeviceControlIcon::action, 19, around},
+         {keyIdHard4, {206,90,38,38}, "Top action button", DeviceControlIcon::action, 19, around},
++        {keyIdBluetooth, {256,46,28,28}, "Bluetooth", DeviceControlIcon::bluetooth, 14, around},
+     };
+     static const DeviceControlProfile zodiacProfile{480,200,zodiac,std::size(zodiac),{0,0,0,0},0,{0,0,0,0},
+                                                     DeviceControlStyle::zodiac,0.5f,1,0,0,{0,0,0,0},0,150,320};
+--- a/src/uarm/uarm/keys.h
++++ b/src/uarm/uarm/keys.h
+@@ -43,7 +43,9 @@
+     keyIdTriggerRight = keyIdTriggerLeft + 1,
+     // Pushing the Zodiac's analogue stick in.
+     keyIdStickPress = keyIdTriggerRight + 1,
+-    keyIdCount = keyIdStickPress + 1
++    // The Zodiac's Bluetooth button.
++    keyIdBluetooth = keyIdStickPress + 1,
++    keyIdCount = keyIdBluetooth + 1
+ };
+ 
+ // TG50 keyboard key at drive line 2-7 and column 0-6 of the ROM's keyboard code table; column c
+--- a/src/uarm/uarm/soc_IMX1.cpp
++++ b/src/uarm/uarm/soc_IMX1.cpp
+@@ -22,22 +22,6 @@
+     // other wake lines (cradle or cable detect by the ROM's use), so off the cradle it has to read high.
+     constexpr uint32_t cradlePinD = 0x00400000;
+ 
+-    int controlFor(KeyId key) {
+-        switch (key) {
+-            case keyIdHard1: return int(Imx1ZodiacControl::actionDown);
+-            case keyIdHard2: return int(Imx1ZodiacControl::actionRight);
+-            case keyIdHard3: return int(Imx1ZodiacControl::actionLeft);
+-            case keyIdHard4: return int(Imx1ZodiacControl::actionUp);
+-            case keyIdHome: return int(Imx1ZodiacControl::home);
+-            case keyIdFunction: return int(Imx1ZodiacControl::function);
+-            case keyIdTriggerLeft: return int(Imx1ZodiacControl::triggerLeft);
+-            case keyIdTriggerRight: return int(Imx1ZodiacControl::triggerRight);
+-            case keyIdStickPress: return int(Imx1ZodiacControl::stickClick);
+-            case keyIdPower: return int(Imx1ZodiacControl::power);
+-            default: return -1;
+-        }
+-    }
+-
+     // The machine as the input code reaches it. Every change is previewed, then committed.
+     struct MachinePort : ZodiacInputPort {
+         explicit MachinePort(Imx1Machine* machine) : machine(machine) {}
+@@ -70,6 +54,12 @@
+ }  // namespace
+ 
+ static_assert(ZodiacInput::controls == unsigned(Imx1ZodiacControl::count));
++static_assert(zodiacControlFor(keyIdHome) == int(Imx1ZodiacControl::home) && zodiacControlFor(keyIdTriggerLeft) == int(Imx1ZodiacControl::triggerLeft) &&
++              zodiacControlFor(keyIdTriggerRight) == int(Imx1ZodiacControl::triggerRight) && zodiacControlFor(keyIdPower) == int(Imx1ZodiacControl::power) &&
++              zodiacControlFor(keyIdStickPress) == int(Imx1ZodiacControl::stickClick) && zodiacControlFor(keyIdHard2) == int(Imx1ZodiacControl::actionRight) &&
++              zodiacControlFor(keyIdHard4) == int(Imx1ZodiacControl::actionUp) && zodiacControlFor(keyIdHard3) == int(Imx1ZodiacControl::actionLeft) &&
++              zodiacControlFor(keyIdFunction) == int(Imx1ZodiacControl::function) && zodiacControlFor(keyIdBluetooth) == int(Imx1ZodiacControl::bluetooth) &&
++              zodiacControlFor(keyIdHard1) == int(Imx1ZodiacControl::actionDown));
+ 
+ Imx1ProbeOptions zodiacMachineOptions(Imx1I2cBus* eeprom) {
+     Imx1ProbeOptions o;
+@@ -223,7 +213,7 @@
+ void SocIMX1::AnalogStick(float x, float y) { input.stick(zodiacStickOffset(x), zodiacStickOffset(y)); }
+ 
+ void SocIMX1::JamKey(enum KeyId key, uint32_t durationMsec) {
+-    const int control = controlFor(key);
++    const int control = zodiacControlFor(key);
+     if (control < 0 || halted) return;
+     MachinePort port(machine);
+     input.jam(port, unsigned(control), durationMsec);
+@@ -237,7 +227,7 @@
+     input.pump(port);
+     while (keyEventQueue->GetSize()) {
+         const KeyEvent event = keyEventQueue->Peek();
+-        const int control = controlFor(event.key);
++        const int control = zodiacControlFor(event.key);
+         // A hold is measured between the host's own events, however late they are taken.
+         input.hostTime(event.hostMsec);
+         if (control >= 0 && !input.key(port, unsigned(control), event.keyDown)) break;
+--- a/src/uarm/uarm/zodiac_input.h
++++ b/src/uarm/uarm/zodiac_input.h
+@@ -4,6 +4,8 @@
+ #include <array>
+ #include <cstdint>
+ 
++#include "keys.h"
++
+ // Host input on its way to the Zodiac's machine: buttons as pin levels, the pen and the stick.
+ // It keeps what the host holds, gives a key or the pen its shortest time down and sends the
+ // releases a load or a reset owes. The machine is reached through the port.
+@@ -19,6 +21,26 @@
+     virtual bool setStick(int x, int y) = 0;
+ };
+ 
++// The machine's control for a shared key id, -1 for a key the Zodiac doesn't have. The numbers are
++// Imx1ZodiacControl's, in the order of its pin table: Home A7, the triggers A8 and A9, power A10,
++// stick click D7, Action right D8, up D9, left D10, Function D12, Bluetooth D13, Action down D14.
++constexpr int zodiacControlFor(KeyId key) {
++    switch (key) {
++        case keyIdHome: return 0;
++        case keyIdTriggerLeft: return 1;
++        case keyIdTriggerRight: return 2;
++        case keyIdPower: return 3;
++        case keyIdStickPress: return 4;
++        case keyIdHard2: return 5;
++        case keyIdHard4: return 6;
++        case keyIdHard3: return 7;
++        case keyIdFunction: return 8;
++        case keyIdBluetooth: return 9;
++        case keyIdHard1: return 10;
++        default: return -1;
++    }
++}
++
+ class ZodiacInput {
+    public:
+     static constexpr unsigned controls = 11;

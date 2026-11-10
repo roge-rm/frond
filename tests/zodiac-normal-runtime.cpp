@@ -104,6 +104,35 @@ struct FakePort : ZodiacInputPort {
     bool setStick(int x, int y) override { if (refuse) return false; stickX = x; stickY = y; return true; }
 };
 
+// Each shared key id reaches its own pin, and a key the Zodiac doesn't have reaches none.
+void keyPins() {
+    struct { KeyId key; uint8_t port, pin; } const expected[] = {
+        {keyIdHome, 0, 7}, {keyIdTriggerLeft, 0, 8}, {keyIdTriggerRight, 0, 9}, {keyIdPower, 0, 10}, {keyIdStickPress, 3, 7},
+        {keyIdHard2, 3, 8}, {keyIdHard4, 3, 9}, {keyIdHard3, 3, 10}, {keyIdFunction, 3, 12}, {keyIdBluetooth, 3, 13},
+        {keyIdHard1, 3, 14}};
+    unsigned mapped = 0;
+    for (unsigned key = 0; key < keyIdCount; ++key) {
+        const int control = zodiacControlFor(KeyId(key));
+        if (control < 0) continue;
+        ++mapped;
+        assert(unsigned(control) < ZodiacInput::controls);
+        bool found = false;
+        for (const auto& e : expected)
+            if (e.key == KeyId(key)) found = imx1ZodiacControlPins[control].port == e.port && imx1ZodiacControlPins[control].pin == e.pin;
+        assert(found);
+    }
+    assert(mapped == ZodiacInput::controls && zodiacControlFor(keyIdUp) < 0 && zodiacControlFor(keyIdHotSync) < 0);
+    // The Bluetooth key goes down and up on D13's control like any other key.
+    FakePort port;
+    ZodiacInput input;
+    input.pump(port);
+    const unsigned bluetooth = unsigned(zodiacControlFor(keyIdBluetooth));
+    assert(std::string(imx1ZodiacControlPins[bluetooth].name) == "bluetooth");
+    assert(input.key(port, bluetooth, true) && port.down[bluetooth]);
+    input.advance(ZodiacInput::longestOwedHoldTicks);
+    assert(input.key(port, bluetooth, false) && !port.down[bluetooth]);
+}
+
 // The ROM's stick driver samples every 30 ms and drops a sample over 200 counts from the last one
 // (20095de6). Whatever the host does and however often input is pumped, no sample is dropped.
 void stickRamp() {
@@ -347,7 +376,8 @@ int main() {
     holds();
     guestTimeHolds();
     buttonsFromReset();
-    std::puts("PASS: the Zodiac's view turn, pen samples, stick offsets, EEPROM identity, input holds and released buttons");
+    keyPins();
+    std::puts("PASS: the Zodiac's view turn, pen samples, stick offsets, EEPROM identity, input holds, key pins and released buttons");
     machine();
     return 0;
 }
