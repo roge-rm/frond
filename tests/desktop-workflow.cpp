@@ -3942,6 +3942,27 @@ for line in s.makefile('rb'):
         QDir(managedFolder()).removeRecursively();
         QSettings().clear();
     }
+    void cardsAfterImport() {
+        // An imported machine's card shows in a Cards window left open.
+        cardsReset();
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QTemporaryDir files;
+        const auto dir = files.filePath("Away");
+        TestMedia media;
+        media.identity = machineIdentity("Away");
+        writeFrond(dir + "/Away.frond", "palm-tx", {media});
+        QVERIFY(cardTool({"make", "sd", "32", dir + "/sd.frondsd"}));
+        MainWindow window{QString()}; window.show();
+        auto* cards = window.showCards();
+        auto* sd = cards->findChild<QListWidget*>("sdCards");
+        QCOMPARE(sd->count(), 0);
+        QVERIFY(window.importSession(dir).isEmpty());
+        QCOMPARE(sd->count(), 1);
+        QCOMPARE(rowLabel(sd, 0, "cardName"), QString("Away card"));
+        window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 8000);
+        cardsReset();
+        QSettings().clear();
+    }
     void unsupportedSoundKeepsMachinePreference() {
         frondSessions::Preferences prefs;
         prefs.audio = true;

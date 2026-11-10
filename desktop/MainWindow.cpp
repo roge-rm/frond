@@ -1848,6 +1848,11 @@ QString MainWindow::importSession(const QString& path) {
         return frondSessions::importFile(folder, path, &name, progress);
     });
     if (error.isEmpty()) refreshSessions(frondSessions::filePath(sessionFolder(), name));
+    // An open Cards window lists the imported machine's card.
+    if (cardsWindow) {
+        frondCards::reconcile(sessionFolder());
+        cardsWindow->refresh();
+    }
     return error;
 }
 void MainWindow::importSessionDialog() {
