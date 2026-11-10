@@ -1,0 +1,692 @@
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -34,6 +34,7 @@
+ #include "patch68k.h"
+ #include "patch_dispatch.h"
+ #include "peephole.h"
++#include "pxa270_WMMX.h"
+ #include "savestate/savestateAll.h"
+ #include "system_state.h"
+ 
+@@ -148,6 +149,7 @@
+     uint16_t CPAR;
+ 
+     struct ArmCoprocessor coproc[16];  // coprocessors
++    struct Pxa270wmmx *wmmx;            // iWMMXt on coprocessors 0 and 1, or null
+ 
+     // various other cpu config options
+     uint32_t vectorBase;  // address of vector base
+@@ -4423,6 +4425,10 @@
+ 
+ bool cpuJitPrivileged(ArmCpu *cpu) { return cpu->privileged; }
+ 
++Pxa270wmmx *cpuJitWmmx(ArmCpu *cpu) { return cpu->wmmx; }
++
++bool cpuJitWmmxCompiles(ArmCpu *cpu, uint32_t word) { return cpu->jit && jitWmmxCompiles(cpu->jit, word); }
++
+ // MRC and MCR p15, 0, Rd, c3: what cp15prvCoprocRegXferFunc does for CRn 3, any CRm and op2.
+ uint32_t cpuJitGetDomain(ArmCpu *cpu) { return mmuGetDomainCfg(cpu->memorySystem.mmu); }
+ void cpuJitSetDomain(ArmCpu *cpu, uint32_t value) { mmuSetDomainCfg(cpu->memorySystem.mmu, value); }
+@@ -4472,6 +4478,10 @@
+     if ((i & 0x0ff000f0) == 0x01200070) return false;                           // BKPT
+     // MRC and MCR p15, 0, Rd, c3 (domain access control), Rd not PC: the JIT's p15 slot.
+     if ((i & 0x0fef0f10) == 0x0e030f10) return !thumb && ((i >> 12) & 15) != 15;
++    // iWMMXt CDP, MCR, MRC, MCRR and MRRC: the JIT's cp0 and cp1 slots, on a CPU that has
++    // iWMMXt with the coprocessor's CPAR bit set (checked in cpuJitPlain, outside the memo).
++    if ((i & 0x0c000000) == 0x0c000000 && (i & 0x0f000000) != 0x0f000000 && ((i >> 8) & 14) == 0 && !thumb)
++        return pxa270wmmxJitValid(i);
+     if ((i & 0x0c000000) == 0x0c000000) return false;                           // coprocessor, SWI
+     if ((i & 0x0e000000) == 0x08000000 && (i & (1 << 22))) return false;        // LDM^, STM^
+     if ((i & 0x0d200000) == 0x04200000 && !(i & (1 << 24))) return false;       // LDRT, STRT...
+@@ -4534,9 +4544,13 @@
+ }
+ 
+ bool cpuJitPlain(ArmCpu *cpu, uint32_t pc, uint32_t word, bool thumb) {
+-    // ARM coprocessor and SWI encodings other than MRC and MCR p15 c3 never go to the JIT
+-    // (cpuPrvJitPlainArm), so they're turned down before any other check.
+-    if (!thumb && (word & 0x0c000000) == 0x0c000000 && (word & 0x0fef0f10) != 0x0e030f10) return false;
++    // ARM coprocessor and SWI encodings other than MRC and MCR p15 c3 and iWMMXt never go
++    // to the JIT (cpuPrvJitPlainArm), so they're turned down before any other check.
++    // iWMMXt (cp0 and cp1, not SWI) also needs the unit and its CPAR bit.
++    if (!thumb && (word & 0x0c000000) == 0x0c000000 && (word & 0x0fef0f10) != 0x0e030f10) {
++        const uint32_t cp = (word >> 8) & 15;
++        if ((word & 0x0f000000) == 0x0f000000 || cp > 1 || !cpu->wmmx || !(cpu->CPAR & (1u << cp))) return false;
++    }
+     // The interpreter runs a fetch buffer's words before memory's. A buffer can hold other
+     // words than memory, like the patched PACE entry a session restores while its RAM has
+     // the original, so those instructions go to the interpreter.
+@@ -4803,7 +4817,16 @@
+ 
+ uint16_t cpuGetCPAR(struct ArmCpu *cpu) { return cpu->CPAR; }
+ 
+-void cpuSetCPAR(struct ArmCpu *cpu, uint16_t cpar) { cpu->CPAR = cpar; }
++// Fast only runs iWMMXt instructions whose coprocessor CPAR allows (cpuJitPlain), so a
++// change to bit 0 or 1 drops the translated code.
++void cpuSetCPAR(struct ArmCpu *cpu, uint16_t cpar) {
++#ifdef FROND_DYNARMIC
++    if (cpu->jit) jitCparWritten(cpu->jit, cpu->wmmx && ((cpu->CPAR ^ cpar) & 3));
++#endif
++    cpu->CPAR = cpar;
++}
++
++void cpuSetWmmx(struct ArmCpu *cpu, struct Pxa270wmmx *wmmx) { cpu->wmmx = wmmx; }
+ 
+ void cpuSetSleeping(struct ArmCpu *cpu) {
+     cpu->sleeping = true;
+--- a/src/uarm/uarm/CPU.h
++++ b/src/uarm/uarm/CPU.h
+@@ -156,6 +156,9 @@
+ 
+ uint16_t cpuGetCPAR(struct ArmCpu *cpu);
+ void cpuSetCPAR(struct ArmCpu *cpu, uint16_t cpar);
++// The iWMMXt unit on coprocessors 0 and 1 (PXA27x), for the Fast engine.
++struct Pxa270wmmx;
++void cpuSetWmmx(struct ArmCpu *cpu, struct Pxa270wmmx *wmmx);
+ 
+ void cpuSetSleeping(struct ArmCpu *cpu);
+ void cpuWakeup(struct ArmCpu *cpu);
+--- a/src/uarm/uarm/jit_dynarmic.cpp
++++ b/src/uarm/uarm/jit_dynarmic.cpp
+@@ -1,5 +1,6 @@
+ // dynarmic JIT for ordinary guest code (trial). Built as C++20 with FROND_DYNARMIC.
+-// MRS and MSR run in generated code through the fork's psr_coprocessor. Other privileged,
++// MRS and MSR run in generated code through the fork's psr_coprocessor, and iWMMXt data
++// processing and register transfers through the cp0 and cp1 slots. Other privileged,
+ // coprocessor and Frond's special instructions end the block and go back to the
+ // interpreter, which also takes every exception and IRQ between runs.
+ #include "jit_dynarmic.h"
+@@ -16,6 +17,7 @@
+ #include <vector>
+ 
+ #include "MMU.h"
++#include "pxa270_WMMX.h"
+ #include "dynarmic/frontend/A32/a32_ir_emitter.h"
+ #include "dynarmic/interface/A32/a32.h"
+ #include "dynarmic/interface/A32/config.h"
+@@ -34,6 +36,11 @@
+     uint64_t queued = 0;  // of those, at code waiting for the compile thread
+     uint64_t psr = 0;  // MSR CPSR and MOVS PC calls from generated code
+     uint64_t cp15 = 0, cp15User = 0;  // MRC and MCR p15 c3 calls, and those in user mode
++    uint64_t wmmx = 0;  // iWMMXt calls from generated code
++    uint64_t cparWrites = 0, cparChanges = 0;  // CPAR writes, and those that dropped the code
++    // Interpreter exits at cp0 and cp1 words (not SWI) by class: CDP, MCR/MRC, MCRR/MRRC,
++    // LDC/STC, and cond NV forms of any of them. Counted with FROND_JIT_STATS only.
++    uint64_t interpWmmx[5] = {};
+     // Code pages noted, dropped for a write, a changed mapping, a guest invalidation
+     // (unwatched pages only) or lost fetch permission, and how often the mappings were checked.
+     uint64_t codePages = 0, unwatched = 0, pagesWritten = 0, mapChecks = 0, mapChanged = 0, unwatchedDropped = 0;
+@@ -99,6 +106,13 @@
+                 (unsigned long long)fetchDropped,
+                 (unsigned long long)psr, (unsigned long long)writeMaps, (unsigned long long)writeProtects,
+                 (unsigned long long)cp15, (unsigned long long)cp15User);
++        fprintf(stderr,
++                "jit: wmmx %llu cparWrites %llu cparChanges %llu interpret wmmx cdp %llu mcr/mrc %llu "
++                "mcrr/mrrc %llu ldc/stc %llu nv %llu\n",
++                (unsigned long long)wmmx, (unsigned long long)cparWrites, (unsigned long long)cparChanges,
++                (unsigned long long)interpWmmx[0], (unsigned long long)interpWmmx[1],
++                (unsigned long long)interpWmmx[2], (unsigned long long)interpWmmx[3],
++                (unsigned long long)interpWmmx[4]);
+         std::vector<std::pair<uint64_t, uint32_t>> top;
+         for (auto &[pc, n] : interpPc) top.push_back({n, pc});
+         std::sort(top.rbegin(), top.rend());
+@@ -379,6 +393,13 @@
+     // load starts from the same state as a fresh process.
+     void Clear() {
+         stats.clears++;
++        ClearCode();
++        resetState = true;
++    }
++
++    // Drops all translated code but keeps dynarmic's state, for a CPAR change made by the
++    // guest between runs.
++    void ClearCode() {
+         ClearPages();
+         jit->ClearCache();
+         std::fill(heat.begin(), heat.end(), Heat{});
+@@ -390,7 +411,6 @@
+         cpuJitForgetCode(cpu);
+         gen = ~0ull;
+         mapGen = cpuJitMapGen(cpu);
+-        resetState = true;
+     }
+ 
+     bool resetState = false;
+@@ -596,11 +616,18 @@
+     void MemoryWrite64(A32::VAddr va, std::uint64_t v) override { Write(va, v); }
+ 
+     void InterpreterFallback(A32::VAddr pc, size_t) override {
+-        if (stats.on && !stats.interpPc[pc]++) {
++        if (stats.on) {
+             uint32_t w = 0;
+             cpuJitFetch(cpu, pc & ~3u, &w);
+             const bool thumb = jit->Cpsr() & 0x20;
+-            stats.interpWord[pc] = thumb ? ((pc & 2) ? w >> 16 : w & 0xffff) : w;
++            if (!stats.interpPc[pc]++) stats.interpWord[pc] = thumb ? ((pc & 2) ? w >> 16 : w & 0xffff) : w;
++            if (!thumb && (w & 0x0c000000) == 0x0c000000 && (w & 0x0f000000) != 0x0f000000 && ((w >> 8) & 14) == 0) {
++                if ((w >> 28) == 15) stats.interpWmmx[4]++;
++                else if ((w & 0x0f000010) == 0x0e000000) stats.interpWmmx[0]++;
++                else if ((w & 0x0f000000) == 0x0e000000) stats.interpWmmx[1]++;
++                else if ((w & 0x0fe00000) == 0x0c400000) stats.interpWmmx[2]++;
++                else stats.interpWmmx[3]++;
++            }
+         }
+         jit->HaltExecution(kInterpret);
+     }
+@@ -682,6 +709,56 @@
+         return 0;
+     }
+ 
++    // iWMMXt instructions, by encoding without the condition and core registers: the
++    // fields for pxa270_WMMX's cores. Kept for the process like cp15Ops.
++    struct WmmxOp {
++        Pxa270wmmx *w;
++        bool cp1;
++        uint8_t op1, a, b, c, op2;  // CDP: CRd, CRn, CRm; MCR/MRC: CRn, CRm; MCRR/MRRC: CRm
++    };
++    std::unordered_map<uint32_t, WmmxOp> wmmxOps;
++    std::mutex wmmxMutex;
++
++    WmmxOp *Wmmx(uint32_t key, WmmxOp op) {
++        std::lock_guard lock{wmmxMutex};
++        return &wmmxOps.try_emplace(key, op).first->second;
++    }
++
++    // None of these can fail: the plain check let only encodings in that
++    // pxa270wmmxJitValid accepts, and a false return depends only on the encoding.
++    static std::uint64_t WmmxCdp(void *arg, std::uint32_t, std::uint32_t) {
++        const WmmxOp &op = *static_cast<WmmxOp *>(arg);
++        stats.wmmx++;
++        pxa270wmmxCdp(op.w, op.cp1, op.op1, op.a, op.b, op.c, op.op2);
++        return 0;
++    }
++    static std::uint64_t WmmxMcr(void *arg, std::uint32_t value, std::uint32_t) {
++        const WmmxOp &op = *static_cast<WmmxOp *>(arg);
++        stats.wmmx++;
++        pxa270wmmxMcr(op.w, op.cp1, op.op1, op.a, op.b, op.op2, value);
++        return 0;
++    }
++    static std::uint64_t WmmxMrc(void *arg, std::uint32_t, std::uint32_t) {
++        const WmmxOp &op = *static_cast<WmmxOp *>(arg);
++        stats.wmmx++;
++        uint32_t value = 0;
++        pxa270wmmxMrc(op.w, op.cp1, op.op1, op.a, op.b, op.op2, &value);
++        return value;
++    }
++    static std::uint64_t WmmxMcrr(void *arg, std::uint32_t lo, std::uint32_t hi) {
++        const WmmxOp &op = *static_cast<WmmxOp *>(arg);
++        stats.wmmx++;
++        pxa270wmmxMcrr(op.w, op.cp1, op.op1, op.c, lo, hi);
++        return 0;
++    }
++    static std::uint64_t WmmxMrrc(void *arg, std::uint32_t, std::uint32_t) {
++        const WmmxOp &op = *static_cast<WmmxOp *>(arg);
++        stats.wmmx++;
++        uint64_t value = 0;
++        pxa270wmmxMrrc(op.w, op.cp1, op.op1, op.c, &value);
++        return value;
++    }
++
+     void AddTicks(std::uint64_t ticks) override { ran += ticks; }
+     std::uint64_t GetTicksRemaining() override { return budget; }
+ 
+@@ -752,6 +829,59 @@
+     }
+ };
+ 
++// iWMMXt slots, coprocessors 0 and 1. Only encodings pxa270wmmxJitValid accepts get here
++// (cpuJitPlain), so each Compile* rebuilds the word, with Rt r0 and Rt2 r1 standing for
++// the core registers dynarmic already checked, and asks it again: an encoding that got
++// here and isn't valid would be a bug in the plain check, and dynarmic asserts on it.
++// Loads and stores (LDC, STC) stay in the interpreter.
++struct WmmxCoprocessor final : public A32::Coprocessor {
++    Env *env;
++    bool cp1;
++    WmmxCoprocessor(Env *e, bool c) : env(e), cp1(c) {}
++
++    static uint8_t R(A32::CoprocReg r) { return uint8_t(r); }
++    uint32_t Word(uint32_t bits) const { return 0xe0000000 | bits | (cp1 ? 0x100 : 0); }
++    Env::WmmxOp *Op(uint32_t word, unsigned op1, unsigned a, unsigned b, unsigned c, unsigned op2) {
++        return env->Wmmx(word, Env::WmmxOp{cpuJitWmmx(env->cpu), cp1, uint8_t(op1), uint8_t(a), uint8_t(b),
++                                           uint8_t(c), uint8_t(op2)});
++    }
++
++    std::optional<Callback> CompileInternalOperation(bool two, unsigned opc1, A32::CoprocReg CRd, A32::CoprocReg CRn,
++                                                     A32::CoprocReg CRm, unsigned opc2) override {
++        const uint32_t w = Word(0x0e000000 | (opc1 << 20) | (R(CRn) << 16) | (R(CRd) << 12) | (opc2 << 5) | R(CRm));
++        if (two || !cpuJitWmmx(env->cpu) || !pxa270wmmxJitValid(w)) return std::nullopt;
++        return Callback{&Env::WmmxCdp, Op(w, opc1, R(CRd), R(CRn), R(CRm), opc2)};
++    }
++    CallbackOrAccessOneWord CompileSendOneWord(bool two, unsigned opc1, A32::CoprocReg CRn, A32::CoprocReg CRm,
++                                               unsigned opc2) override {
++        const uint32_t w = Word(0x0e000010 | (opc1 << 21) | (R(CRn) << 16) | (opc2 << 5) | R(CRm));
++        if (two || !cpuJitWmmx(env->cpu) || !pxa270wmmxJitValid(w)) return std::monostate{};
++        return Callback{&Env::WmmxMcr, Op(w, opc1, R(CRn), R(CRm), 0, opc2)};
++    }
++    CallbackOrAccessOneWord CompileGetOneWord(bool two, unsigned opc1, A32::CoprocReg CRn, A32::CoprocReg CRm,
++                                              unsigned opc2) override {
++        const uint32_t w = Word(0x0e100010 | (opc1 << 21) | (R(CRn) << 16) | (opc2 << 5) | R(CRm));
++        if (two || !cpuJitWmmx(env->cpu) || !pxa270wmmxJitValid(w)) return std::monostate{};
++        return Callback{&Env::WmmxMrc, Op(w, opc1, R(CRn), R(CRm), 0, opc2)};
++    }
++    CallbackOrAccessTwoWords CompileSendTwoWords(bool two, unsigned opc, A32::CoprocReg CRm) override {
++        const uint32_t w = Word(0x0c410000 | (opc << 4) | R(CRm));
++        if (two || !cpuJitWmmx(env->cpu) || !pxa270wmmxJitValid(w)) return std::monostate{};
++        return Callback{&Env::WmmxMcrr, Op(w, opc, 0, 0, R(CRm), 0)};
++    }
++    CallbackOrAccessTwoWords CompileGetTwoWords(bool two, unsigned opc, A32::CoprocReg CRm) override {
++        const uint32_t w = Word(0x0c510000 | (opc << 4) | R(CRm));
++        if (two || !cpuJitWmmx(env->cpu) || !pxa270wmmxJitValid(w)) return std::monostate{};
++        return Callback{&Env::WmmxMrrc, Op(w, opc, 0, 0, R(CRm), 0)};
++    }
++    std::optional<Callback> CompileLoadWords(bool, bool, A32::CoprocReg, std::optional<std::uint8_t>) override {
++        return std::nullopt;
++    }
++    std::optional<Callback> CompileStoreWords(bool, bool, A32::CoprocReg, std::optional<std::uint8_t>) override {
++        return std::nullopt;
++    }
++};
++
+ }  // namespace
+ 
+ struct FrondJit {
+@@ -759,6 +889,7 @@
+     PageTable pages{};
+     std::unique_ptr<A32::Jit> jit;
+     uint32_t maxUnchecked = 0;
++    std::shared_ptr<WmmxCoprocessor> wmmx[2];
+ };
+ 
+ // Instructions between budget checks in generated code. It bounds how far a run can pass
+@@ -833,6 +964,10 @@
+     conf.coprocessors[kPsrCoprocessor] = std::make_shared<PsrCoprocessor>(&j->env);
+     conf.psr_coprocessor = kPsrCoprocessor;
+     conf.coprocessors[15] = std::make_shared<Cp15Coprocessor>(&j->env);
++    j->wmmx[0] = std::make_shared<WmmxCoprocessor>(&j->env, false);
++    j->wmmx[1] = std::make_shared<WmmxCoprocessor>(&j->env, true);
++    conf.coprocessors[0] = j->wmmx[0];
++    conf.coprocessors[1] = j->wmmx[1];
+     j->jit = std::make_unique<A32::Jit>(conf);
+     j->env.jit = j->jit.get();
+     j->env.maxInstructions = j->maxUnchecked;
+@@ -876,6 +1011,31 @@
+ 
+ void jitClear(FrondJit *j) { j->env.Clear(); }
+ 
++void jitCparWritten(FrondJit *j, bool changed) {
++    stats.cparWrites++;
++    if (!changed) return;
++    stats.cparChanges++;
++    j->env.ClearCode();
++}
++
++// Fields as dynarmic's decoder takes them from an ARM word with a condition other than NV.
++bool jitWmmxCompiles(FrondJit *j, uint32_t w) {
++    const unsigned cp = (w >> 8) & 15;
++    if (cp > 1 || (w >> 28) == 15) return false;
++    WmmxCoprocessor &c = *j->wmmx[cp];
++    const auto reg = [&](unsigned shift) { return A32::CoprocReg((w >> shift) & 15); };
++    const auto isCallback = [](const auto &v) { return std::holds_alternative<A32::Coprocessor::Callback>(v); };
++    if ((w & 0x0f000010) == 0x0e000000)
++        return c.CompileInternalOperation(false, (w >> 20) & 15, reg(12), reg(16), reg(0), (w >> 5) & 7).has_value();
++    if ((w & 0x0f100010) == 0x0e000010)
++        return isCallback(c.CompileSendOneWord(false, (w >> 21) & 7, reg(16), reg(0), (w >> 5) & 7));
++    if ((w & 0x0f100010) == 0x0e100010)
++        return isCallback(c.CompileGetOneWord(false, (w >> 21) & 7, reg(16), reg(0), (w >> 5) & 7));
++    if ((w & 0x0ff00000) == 0x0c400000) return isCallback(c.CompileSendTwoWords(false, (w >> 4) & 15, reg(0)));
++    if ((w & 0x0ff00000) == 0x0c500000) return isCallback(c.CompileGetTwoWords(false, (w >> 4) & 15, reg(0)));
++    return false;
++}
++
+ void jitCodeWritten(FrondJit *j, uint8_t *hostPage) { j->env.CodeWritten(hostPage); }
+ 
+ void jitWriteProtect(FrondJit *j, const uint8_t *host, uint32_t size) {
+--- a/src/uarm/uarm/jit_dynarmic.h
++++ b/src/uarm/uarm/jit_dynarmic.h
+@@ -8,6 +8,7 @@
+ 
+ struct ArmCpu;
+ struct FrondJit;
++struct Pxa270wmmx;
+ 
+ enum FrondJitStop {
+     FROND_JIT_BUDGET,     // ran out of cycles
+@@ -41,6 +42,12 @@
+ void jitGuestInvalidateAll(FrondJit *jit, uint32_t pc);
+ // Host side changes (reset, session load, PACE and peephole patching): drops everything.
+ void jitClear(FrondJit *jit);
++// A CPAR write; changed: bit 0 or 1 changed on a CPU with iWMMXt, which drops all translated
++// code, since whether the JIT runs iWMMXt instructions depends on those bits.
++void jitCparWritten(FrondJit *jit, bool changed);
++// For tests: whether the iWMMXt slot gives a callback for the ARM word (CDP, MCR, MRC, MCRR
++// or MRRC on coprocessor 0 or 1), as it would when dynarmic compiles it.
++bool jitWmmxCompiles(FrondJit *jit, uint32_t word);
+ // The first write to a watched RAM line since code was translated from it.
+ void jitCodeWritten(FrondJit *jit, uint8_t *hostPage);
+ // Sends stores to the RAM pages in [host, host + size) back through the callbacks.
+@@ -91,6 +98,10 @@
+ // MOVS PC or SUBS PC: CPSR = SPSR in any mode and PC = target, as in the interpreter.
+ uint32_t cpuJitExceptionReturn(ArmCpu *cpu, uint32_t *regs, uint32_t cpsr, uint32_t target);
+ bool cpuJitPrivileged(ArmCpu *cpu);
++// The iWMMXt unit, or null on a CPU without one.
++Pxa270wmmx *cpuJitWmmx(ArmCpu *cpu);
++// For tests: jitWmmxCompiles on the CPU's JIT, false without one.
++bool cpuJitWmmxCompiles(ArmCpu *cpu, uint32_t word);
+ // The domain access control register (MRC and MCR p15, 0, Rd, c3), privileged modes only.
+ uint32_t cpuJitGetDomain(ArmCpu *cpu);
+ void cpuJitSetDomain(ArmCpu *cpu, uint32_t value);
+--- a/src/uarm/uarm/pxa270_WMMX.cpp
++++ b/src/uarm/uarm/pxa270_WMMX.cpp
+@@ -464,96 +464,89 @@
+     return true;
+ }
+ 
+-// MCR and MRC. Rx is bits 15:12, CRn bits 19:16, CRm bits 3:0; op1 is bits 23:21.
+-bool regXfer(Pxa270wmmx *w, bool cp1, struct ArmCpu *cpu, bool two, bool read, uint8_t op1, uint8_t Rx,
+-             uint8_t CRn, uint8_t CRm, uint8_t op2) {
+-    if (two) return false;
+-
+-    if (op1 == 1) {
+-        // TMIA, TMIAPH, TMIAxy: wRd is bits 8:5 (the coprocessor bit and op2), CRn picks the kind,
+-        // Rx is Rs and CRm is Rm.
+-        if (read) return false;
+-        const unsigned d = op2 | (cp1 ? 8 : 0);
+-        const uint32_t vm = cpuGetRegExternal(cpu, CRm), vs = cpuGetRegExternal(cpu, Rx);
+-        int64_t add;
+-        switch (CRn) {
+-            case 0:  // TMIA
+-                add = (int64_t)(int32_t)vm * (int32_t)vs;
+-                break;
+-            case 8:  // TMIAPH
+-                add = (int64_t)(int16_t)vm * (int16_t)vs + (int64_t)(int16_t)(vm >> 16) * (int16_t)(vs >> 16);
+-                break;
+-            case 12:
+-            case 13:
+-            case 14:
+-            case 15:  // TMIABB, TMIABT, TMIATB, TMIATT: x picks Rm's half, y Rs's
+-                add = (int64_t)(int16_t)((CRn & 2) ? vm >> 16 : vm) * (int16_t)((CRn & 1) ? vs >> 16 : vs);
+-                break;
+-            default:
+-                return false;
+-        }
+-        setReg(w, d, w->wR[d].v64 + (uint64_t)add);
+-        return true;
++// TMIA, TMIAPH, TMIAxy (MCR op1 1): wRd is bits 8:5 (the coprocessor bit and op2), CRn picks
++// the kind, vs is Rs (the Rx field) and vm is Rm (the CRm field).
++bool tmia(Pxa270wmmx *w, bool cp1, unsigned CRn, unsigned op2, uint32_t vm, uint32_t vs) {
++    const unsigned d = op2 | (cp1 ? 8 : 0);
++    int64_t add;
++    switch (CRn) {
++        case 0:  // TMIA
++            add = (int64_t)(int32_t)vm * (int32_t)vs;
++            break;
++        case 8:  // TMIAPH
++            add = (int64_t)(int16_t)vm * (int16_t)vs + (int64_t)(int16_t)(vm >> 16) * (int16_t)(vs >> 16);
++            break;
++        case 12:
++        case 13:
++        case 14:
++        case 15:  // TMIABB, TMIABT, TMIATB, TMIATT: x picks Rm's half, y Rs's
++            add = (int64_t)(int16_t)((CRn & 2) ? vm >> 16 : vm) * (int16_t)((CRn & 1) ? vs >> 16 : vs);
++            break;
++        default:
++            return false;
+     }
++    setReg(w, d, w->wR[d].v64 + (uint64_t)add);
++    return true;
++}
+ 
+-    if (op1 == 0 && cp1 && op2 == 0) {  // TMCR, TMRC
++// MRC: the value for the core register. TANDC, TORC and TEXTRC give the flags in bits 31:28,
++// which go to the CPSR when the register is r15.
++bool mrc(Pxa270wmmx *w, bool cp1, unsigned op1, unsigned CRn, unsigned CRm, unsigned op2, uint32_t &out) {
++    if (op1 == 0 && cp1 && op2 == 0) {  // TMRC
+         if (CRm) return false;
+-        if (read) {
+-            uint32_t val;
+-            if (!readControl(w, CRn, val)) return false;
+-            setCoreReg(cpu, Rx, val);
+-            return true;
+-        }
+-        return writeControl(w, CRn, cpuGetRegExternal(cpu, Rx));
++        return readControl(w, CRn, out);
+     }
+-
+     // The rest have the element size in op1 bits 2:1 (byte, halfword, word).
+-    if (read) {
+-        if (op1 & 1) return false;
+-        const unsigned size = op1 >> 1, bits = sizeBits(size);
+-        if (!bits) return false;
+-        switch (op2) {
+-            case 1:
+-                if (CRm) return false;
+-                if (!cp1) {  // TMOVMSK: the top bit of each lane of wRn
+-                    uint32_t val = 0;
+-                    for (unsigned i = 0; i < 64 / bits; i++)
+-                        val |= (uint32_t)((lane(w->wR[CRn].v64, bits, i) >> (bits - 1)) & 1) << i;
+-                    setCoreReg(cpu, Rx, val);
+-                    return true;
+-                }
+-                [[fallthrough]];  // TANDC on coprocessor 1
+-            case 2: {  // TANDC, TORC: every lane's NZCV nibble ANDed or ORed into the CPSR
+-                if (!cp1 || CRm || CRn != 3) return false;
+-                const bool isAnd = op2 == 1;
+-                uint32_t val = isAnd ? 0xf : 0;
+-                for (unsigned i = 0; i < 64 / bits; i++) {
+-                    const uint32_t nibble = (w->wCASF >> flagShift(bits, i)) & 0xf;
+-                    val = isAnd ? val & nibble : val | nibble;
+-                }
+-                setCoreReg(cpu, Rx, val << 28);
++    if (op1 & 1) return false;
++    const unsigned size = op1 >> 1, bits = sizeBits(size);
++    if (!bits) return false;
++    switch (op2) {
++        case 1:
++            if (CRm) return false;
++            if (!cp1) {  // TMOVMSK: the top bit of each lane of wRn
++                uint32_t val = 0;
++                for (unsigned i = 0; i < 64 / bits; i++)
++                    val |= (uint32_t)((lane(w->wR[CRn].v64, bits, i) >> (bits - 1)) & 1) << i;
++                out = val;
+                 return true;
+             }
+-            case 3:
+-                if (cp1) {  // TEXTRC: one lane's NZCV nibble into the CPSR
+-                    if ((CRm & 8) || CRn != 3) return false;
+-                    const unsigned i = (CRm & 7) % (64 / bits);
+-                    setCoreReg(cpu, Rx, ((w->wCASF >> flagShift(bits, i)) & 0xf) << 28);
+-                } else {  // TEXTRM: CRm bit 3 sign extends, bits 2:0 pick the lane
+-                    const unsigned i = (CRm & 7) % (64 / bits);
+-                    const uint64_t v = w->wR[CRn].v64;
+-                    setCoreReg(cpu, Rx, (uint32_t)((CRm & 8) ? (uint64_t)slane(v, bits, i) : lane(v, bits, i)));
+-                }
+-                return true;
+-            default:
+-                return false;
++            [[fallthrough]];  // TANDC on coprocessor 1
++        case 2: {  // TANDC, TORC: every lane's NZCV nibble ANDed or ORed into the CPSR
++            if (!cp1 || CRm || CRn != 3) return false;
++            const bool isAnd = op2 == 1;
++            uint32_t val = isAnd ? 0xf : 0;
++            for (unsigned i = 0; i < 64 / bits; i++) {
++                const uint32_t nibble = (w->wCASF >> flagShift(bits, i)) & 0xf;
++                val = isAnd ? val & nibble : val | nibble;
++            }
++            out = val << 28;
++            return true;
+         }
++        case 3:
++            if (cp1) {  // TEXTRC: one lane's NZCV nibble into the CPSR
++                if ((CRm & 8) || CRn != 3) return false;
++                const unsigned i = (CRm & 7) % (64 / bits);
++                out = ((w->wCASF >> flagShift(bits, i)) & 0xf) << 28;
++            } else {  // TEXTRM: CRm bit 3 sign extends, bits 2:0 pick the lane
++                const unsigned i = (CRm & 7) % (64 / bits);
++                const uint64_t v = w->wR[CRn].v64;
++                out = (uint32_t)((CRm & 8) ? (uint64_t)slane(v, bits, i) : lane(v, bits, i));
++            }
++            return true;
++        default:
++            return false;
+     }
++}
+ 
++// MCR other than TMIA: v is the core register's value.
++bool mcr(Pxa270wmmx *w, bool cp1, unsigned op1, unsigned CRn, unsigned CRm, unsigned op2, uint32_t v) {
++    if (op1 == 0 && cp1 && op2 == 0) {  // TMCR
++        if (CRm) return false;
++        return writeControl(w, CRn, v);
++    }
+     if (cp1) return false;
+     const unsigned bits = sizeBits(op2 >> 1);
+     if (!bits || (op2 & 1)) return false;
+-    const uint32_t v = cpuGetRegExternal(cpu, Rx);
+     if (op1 == 2) {  // TBCST: Rn into every lane of wRd
+         if (CRm) return false;
+         uint64_t r = 0;
+@@ -571,17 +564,47 @@
+     return false;
+ }
+ 
++// MCR and MRC. Rx is bits 15:12, CRn bits 19:16, CRm bits 3:0; op1 is bits 23:21.
++bool regXfer(Pxa270wmmx *w, bool cp1, struct ArmCpu *cpu, bool two, bool read, uint8_t op1, uint8_t Rx,
++             uint8_t CRn, uint8_t CRm, uint8_t op2) {
++    if (two) return false;
++    if (op1 == 1) {
++        if (read) return false;
++        return tmia(w, cp1, CRn, op2, cpuGetRegExternal(cpu, CRm), cpuGetRegExternal(cpu, Rx));
++    }
++    if (read) {
++        uint32_t val;
++        if (!mrc(w, cp1, op1, CRn, CRm, op2, val)) return false;
++        setCoreReg(cpu, Rx, val);
++        return true;
++    }
++    return mcr(w, cp1, op1, CRn, CRm, op2, cpuGetRegExternal(cpu, Rx));
++}
++
++// TMCRR and TMRRC on coprocessor 0 with op 0; the 64-bit value is high:low.
++bool mcrr(Pxa270wmmx *w, bool cp1, unsigned op, unsigned wR, uint32_t lo, uint32_t hi) {
++    if (cp1 || op) return false;
++    setReg(w, wR, ((uint64_t)hi << 32) | lo);
++    return true;
++}
++
++bool mrrc(Pxa270wmmx *w, bool cp1, unsigned op, unsigned wR, uint64_t &out) {
++    if (cp1 || op) return false;
++    out = w->wR[wR].v64;
++    return true;
++}
++
+ // TMCRR, TMRRC: Rd (bits 15:12) is the low word, Rn (bits 19:16) the high word.
+ bool twoReg(Pxa270wmmx *w, bool cp1, struct ArmCpu *cpu, bool read, uint8_t op, uint8_t RdLo,
+             uint8_t RdHi, uint8_t wR) {
+-    if (cp1 || op) return false;
+     if (read) {
+-        setCoreReg(cpu, RdLo, (uint32_t)w->wR[wR].v64);
+-        setCoreReg(cpu, RdHi, (uint32_t)(w->wR[wR].v64 >> 32));
+-    } else {
+-        setReg(w, wR, ((uint64_t)cpuGetRegExternal(cpu, RdHi) << 32) | cpuGetRegExternal(cpu, RdLo));
++        uint64_t v;
++        if (!mrrc(w, cp1, op, wR, v)) return false;
++        setCoreReg(cpu, RdLo, (uint32_t)v);
++        setCoreReg(cpu, RdHi, (uint32_t)(v >> 32));
++        return true;
+     }
+-    return true;
++    return mcrr(w, cp1, op, wR, cpuGetRegExternal(cpu, RdLo), cpuGetRegExternal(cpu, RdHi));
+ }
+ 
+ // WLDR and WSTR. Coprocessor 0 moves bytes (N clear) or halfwords (N set) with an unscaled
+@@ -677,6 +700,56 @@
+ 
+ }  // namespace
+ 
++bool pxa270wmmxCdp(Pxa270wmmx *w, bool cp1, unsigned op1, unsigned CRd, unsigned CRn, unsigned CRm, unsigned op2) {
++    return cp1 ? cdp1(w, op1, op2, CRd, CRn, CRm) : cdp0(w, op1, op2, CRd, CRn, CRm);
++}
++
++bool pxa270wmmxMcr(Pxa270wmmx *w, bool cp1, unsigned op1, unsigned CRn, unsigned CRm, unsigned op2, uint32_t value) {
++    return op1 != 1 && mcr(w, cp1, op1, CRn, CRm, op2, value);
++}
++
++bool pxa270wmmxMrc(Pxa270wmmx *w, bool cp1, unsigned op1, unsigned CRn, unsigned CRm, unsigned op2, uint32_t *value) {
++    return mrc(w, cp1, op1, CRn, CRm, op2, *value);
++}
++
++bool pxa270wmmxMcrr(Pxa270wmmx *w, bool cp1, unsigned op, unsigned wR, uint32_t lo, uint32_t hi) {
++    return mcrr(w, cp1, op, wR, lo, hi);
++}
++
++bool pxa270wmmxMrrc(Pxa270wmmx *w, bool cp1, unsigned op, unsigned wR, uint64_t *value) {
++    return mrrc(w, cp1, op, wR, *value);
++}
++
++// Whether a false return depends only on the encoding (never on register values), so
++// running the instruction on scratch state answers for any state.
++bool pxa270wmmxJitValid(uint32_t i) {
++    const uint32_t cp = (i >> 8) & 15;
++    if ((i >> 28) == 15 || cp > 1) return false;
++    const bool cp1 = cp;
++    Pxa270wmmx scratch;
++    memset(&scratch, 0, sizeof(scratch));
++    if ((i & 0x0f000010) == 0x0e000000)  // CDP
++        return pxa270wmmxCdp(&scratch, cp1, (i >> 20) & 15, (i >> 12) & 15, (i >> 16) & 15, i & 15, (i >> 5) & 7);
++    if ((i & 0x0f000010) == 0x0e000010) {  // MCR, MRC
++        const unsigned op1 = (i >> 21) & 7, CRn = (i >> 16) & 15, CRm = i & 15, op2 = (i >> 5) & 7;
++        if (i & (1 << 20)) {
++            uint32_t v;
++            return pxa270wmmxMrc(&scratch, cp1, op1, CRn, CRm, op2, &v);
++        }
++        return ((i >> 12) & 15) != 15 && pxa270wmmxMcr(&scratch, cp1, op1, CRn, CRm, op2, 0);
++    }
++    if ((i & 0x0fe00000) == 0x0c400000) {  // MCRR, MRRC
++        const uint32_t rt = (i >> 12) & 15, rt2 = (i >> 16) & 15;
++        if (rt == 15 || rt2 == 15 || rt == rt2) return false;
++        if (i & (1 << 20)) {
++            uint64_t v;
++            return pxa270wmmxMrrc(&scratch, cp1, (i >> 4) & 15, i & 15, &v);
++        }
++        return pxa270wmmxMcrr(&scratch, cp1, (i >> 4) & 15, i & 15, 0, 0);
++    }
++    return false;
++}
++
+ struct Pxa270wmmx *pxa270wmmxInit(struct ArmCpu *cpu) {
+     struct Pxa270wmmx *wmmx = (struct Pxa270wmmx *)malloc(sizeof(*wmmx));
+     if (!wmmx) ERR("cannot alloc WMMX");
+@@ -698,6 +771,7 @@
+     };
+     cpuCoprocessorRegister(cpu, 0, &cp0);
+     cpuCoprocessorRegister(cpu, 1, &cp1);
++    cpuSetWmmx(cpu, wmmx);
+ 
+     return wmmx;
+ }
+--- a/src/uarm/uarm/pxa270_WMMX.h
++++ b/src/uarm/uarm/pxa270_WMMX.h
+@@ -10,6 +10,25 @@
+ 
+ struct Pxa270wmmx* pxa270wmmxInit(struct ArmCpu* cpu);
+ 
++// The instructions on their own, for the Fast engine; the interpreter's coprocessor entries
++// call the same code. Each returns false, changing nothing, for an encoding that is
++// undefined. op1, CRd, CRn, CRm and op2 are the CDP and MCR/MRC fields; for MCRR and MRRC
++// op is bits 7:4 and wR is CRm. TMIA (MCR op1 1) needs two core registers and isn't here.
++bool pxa270wmmxCdp(struct Pxa270wmmx* w, bool cp1, unsigned op1, unsigned CRd, unsigned CRn, unsigned CRm,
++                   unsigned op2);
++bool pxa270wmmxMcr(struct Pxa270wmmx* w, bool cp1, unsigned op1, unsigned CRn, unsigned CRm, unsigned op2,
++                   uint32_t value);
++bool pxa270wmmxMrc(struct Pxa270wmmx* w, bool cp1, unsigned op1, unsigned CRn, unsigned CRm, unsigned op2,
++                   uint32_t* value);
++bool pxa270wmmxMcrr(struct Pxa270wmmx* w, bool cp1, unsigned op, unsigned wR, uint32_t lo, uint32_t hi);
++bool pxa270wmmxMrrc(struct Pxa270wmmx* w, bool cp1, unsigned op, unsigned wR, uint64_t* value);
++
++// Whether the ARM word is a coprocessor 0 or 1 instruction the Fast engine runs: CDP, MCR,
++// MRC, MCRR or MRRC, defined for iWMMXt, not a cond NV (two) form, not TMIA, MCR with Rt
++// not r15, MCRR and MRRC with two different registers other than r15. Depends only on the
++// word; the CPU's CPAR is checked separately.
++bool pxa270wmmxJitValid(uint32_t word);
++
+ #include "savestate/ChunkTypeUarm.h"
+ template <typename T> class SavestateLoader;
+ template <typename T> void pxa270wmmxSave(Pxa270wmmx *state, T &savestate);

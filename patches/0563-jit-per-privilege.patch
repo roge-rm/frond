@@ -1,0 +1,580 @@
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -4365,8 +4365,7 @@
+ 
+ uint64_t cpuJitPermContext(ArmCpu *cpu) {
+     ArmMmu *mmu = cpu->memorySystem.mmu;
+-    return uint64_t(mmuGetDomainCfg(mmu)) | (uint64_t(mmuGetS(mmu)) << 32) |
+-           (uint64_t(mmuGetR(mmu)) << 33) | (uint64_t(cpu->privileged) << 34);
++    return uint64_t(mmuGetDomainCfg(mmu)) | (uint64_t(mmuGetS(mmu)) << 32) | (uint64_t(mmuGetR(mmu)) << 33);
+ }
+ 
+ // A store to a flagged RAM line: drop the JIT's code from the page and any fetch buffer it
+@@ -4415,9 +4414,8 @@
+ 
+ uint32_t cpuJitMapGen(ArmCpu *cpu) { return mmuFlushCount(cpu->memorySystem.mmu); }
+ 
+-uint64_t cpuJitPageGen(ArmCpu *cpu) {
+-    return (uint64_t(cpu->mem->hostTlb.gen) << 1) | (cpu->privileged ? 1 : 0);
+-}
++// The host TLB's keys hold the privilege, so its generation alone covers both levels.
++uint64_t cpuJitPageGen(ArmCpu *cpu) { return cpu->mem->hostTlb.gen; }
+ 
+ bool cpuJitSlowPath(ArmCpu *cpu) { return cpu->slowPath != 0; }
+ 
+@@ -4429,6 +4427,8 @@
+ 
+ bool cpuJitWmmxCompiles(ArmCpu *cpu, uint32_t word) { return cpu->jit && jitWmmxCompiles(cpu->jit, word); }
+ 
++void cpuJitIcacheInvalLine(ArmCpu *cpu, uint32_t va) { icacheInvalAddr(cpu->ic, va); }
++
+ // MRC and MCR p15, 0, Rd, c3: what cp15prvCoprocRegXferFunc does for CRn 3, any CRm and op2.
+ uint32_t cpuJitGetDomain(ArmCpu *cpu) { return mmuGetDomainCfg(cpu->memorySystem.mmu); }
+ void cpuJitSetDomain(ArmCpu *cpu, uint32_t value) { mmuSetDomainCfg(cpu->memorySystem.mmu, value); }
+@@ -4476,8 +4476,9 @@
+     if ((i & 0x0fb0f0f0) == 0x0120f000) return !(i & 0xf00) && (i & 15) != 15 && (i & 0x000f0000);
+     if ((i & 0x0fb0f000) == 0x0320f000) return (i & 0x000f0000) != 0;
+     if ((i & 0x0ff000f0) == 0x01200070) return false;                           // BKPT
+-    // MRC and MCR p15, 0, Rd, c3 (domain access control), Rd not PC: the JIT's p15 slot.
+-    if ((i & 0x0fef0f10) == 0x0e030f10) return !thumb && ((i >> 12) & 15) != 15;
++    // MRC and MCR p15, 0, Rd, c3 (domain access control) and MCR p15, 0, Rd, c7, c5, 1
++    // (I-cache line invalidate), Rd not PC: the JIT's p15 slot.
++    if ((i & 0x0fef0f10) == 0x0e030f10 || (i & 0x0fff0fff) == 0x0e070f35) return !thumb && ((i >> 12) & 15) != 15;
+     // iWMMXt CDP, MCR, MRC, MCRR, MRRC, LDC and STC: the JIT's cp0 and cp1 slots, on a CPU
+     // that has iWMMXt with the coprocessor's CPAR bit set (checked in cpuJitPlain, outside
+     // the memo).
+@@ -4545,10 +4546,12 @@
+ }
+ 
+ bool cpuJitPlain(ArmCpu *cpu, uint32_t pc, uint32_t word, bool thumb) {
+-    // ARM coprocessor and SWI encodings other than MRC and MCR p15 c3 and iWMMXt never go
+-    // to the JIT (cpuPrvJitPlainArm), so they're turned down before any other check.
+-    // iWMMXt (cp0 and cp1, not SWI) also needs the unit and its CPAR bit.
+-    if (!thumb && (word & 0x0c000000) == 0x0c000000 && (word & 0x0fef0f10) != 0x0e030f10) {
++    // ARM coprocessor and SWI encodings other than the p15 slot's (MRC and MCR p15 c3, MCR
++    // p15 c7 c5 1) and iWMMXt never go to the JIT (cpuPrvJitPlainArm), so they're turned
++    // down before any other check. iWMMXt (cp0 and cp1, not SWI) also needs the unit and
++    // its CPAR bit.
++    if (!thumb && (word & 0x0c000000) == 0x0c000000 && (word & 0x0fef0f10) != 0x0e030f10 &&
++        (word & 0x0fff0fff) != 0x0e070f35) {
+         const uint32_t cp = (word >> 8) & 15;
+         if ((word & 0x0f000000) == 0x0f000000 || cp > 1 || !cpu->wmmx || !(cpu->CPAR & (1u << cp))) return false;
+     }
+--- a/src/uarm/uarm/jit_dynarmic.cpp
++++ b/src/uarm/uarm/jit_dynarmic.cpp
+@@ -1,6 +1,8 @@
+ // dynarmic JIT for ordinary guest code (trial). Built as C++20 with FROND_DYNARMIC.
+ // MRS and MSR run in generated code through the fork's psr_coprocessor, and iWMMXt data
+-// processing and register transfers through the cp0 and cp1 slots. Other privileged,
++// processing and register transfers through the cp0 and cp1 slots. Each CPU has one JIT
++// per privilege level (user, privileged), each with its own code cache and page table, so
++// switching between them keeps both. Other privileged,
+ // coprocessor and Frond's special instructions end the block and go back to the
+ // interpreter, which also takes every exception and IRQ between runs.
+ #include "jit_dynarmic.h"
+@@ -35,7 +37,9 @@
+     uint64_t cold = 0;  // runs ended at code not compiled yet
+     uint64_t queued = 0;  // of those, at code waiting for the compile thread
+     uint64_t psr = 0;  // MSR CPSR and MOVS PC calls from generated code
+-    uint64_t cp15 = 0, cp15User = 0;  // MRC and MCR p15 c3 calls, and those in user mode
++    uint64_t cp15 = 0, cp15User = 0;  // MRC and MCR p15 c3 and c7 c5 1 calls, and those in user mode
++    uint64_t icacheLine = 0;  // of those, MCR p15 c7 c5 1 (I-cache line invalidate)
++    uint64_t privSwitches = 0;  // runs ended by a privilege change in generated code
+     uint64_t wmmx = 0;  // iWMMXt calls from generated code
+     uint64_t wmmxXfer = 0, wmmxFaults = 0;  // of those, WLDR and WSTR, and those that failed
+     uint64_t cparWrites = 0, cparChanges = 0;  // CPAR writes, and those that dropped the code
+@@ -101,12 +105,13 @@
+         fprintf(stderr,
+                 "jit: codePages %llu unwatched %llu pagesWritten %llu mapChecks %llu mapChanged %llu "
+                 "unwatchedDropped %llu fetchDropped %llu msrCpsr %llu writeMaps %llu writeProtects %llu cp15 %llu "
+-                "cp15User %llu\n",
++                "cp15User %llu icacheLine %llu privSwitches %llu\n",
+                 (unsigned long long)codePages, (unsigned long long)unwatched, (unsigned long long)pagesWritten,
+                 (unsigned long long)mapChecks, (unsigned long long)mapChanged, (unsigned long long)unwatchedDropped,
+                 (unsigned long long)fetchDropped,
+                 (unsigned long long)psr, (unsigned long long)writeMaps, (unsigned long long)writeProtects,
+-                (unsigned long long)cp15, (unsigned long long)cp15User);
++                (unsigned long long)cp15, (unsigned long long)cp15User, (unsigned long long)icacheLine,
++                (unsigned long long)privSwitches);
+         fprintf(stderr,
+                 "jit: wmmx %llu ldc/stc %llu failed %llu cparWrites %llu cparChanges %llu interpret wmmx "
+                 "cdp %llu mcr/mrc %llu mcrr/mrrc %llu ldc/stc %llu nv %llu\n",
+@@ -142,9 +147,17 @@
+ constexpr HaltReason kFault = HaltReason::MemoryAbort;
+ // The block at PC isn't compiled yet (ShouldCompile), for the interpreter.
+ constexpr HaltReason kCold = HaltReason::UserDefined4;
++// MSR CPSR or an exception return changed the privilege: the run ends there and the next
++// one goes to the other privilege level's JIT.
++constexpr HaltReason kPrivilege = HaltReason::UserDefined5;
++
++// The instructions the p15 slot runs: MRC and MCR p15, 0, Rd, c3 (domain access control)
++// and MCR p15, 0, Rd, c7, c5, 1 (I-cache line invalidate). Each ends its block, so a user
++// mode one can be undone and handed to the interpreter, which raises the undefined
++// instruction.
++inline bool Cp15Slot(uint32_t w) { return (w & 0x0fef0f10) == 0x0e030f10 || (w & 0x0fff0fff) == 0x0e070f35; }
+ 
+-// MRC and MCR p15 c3 run in generated code and end their block, so a user mode one can
+-// be undone and handed to the interpreter, which raises the undefined instruction.
++// The p15 slot's instructions end their block (Cp15Slot).
+ // Translation and emission of a block run back to back on one thread (the guest thread or
+ // the compile thread), so the block's one p15 instruction is still current there when the
+ // coprocessor compiles it.
+@@ -162,7 +175,7 @@
+     }
+     uint32_t w;
+     if (plain(pc, w)) {
+-        if (!thumb && (w & 0x0fef0f10) == 0x0e030f10) {
++        if (!thumb && Cp15Slot(w)) {
+             cp15Pc = pc;
+             cp15Rd = (w >> 12) & 15;
+         }
+@@ -233,6 +246,11 @@
+     A32::Jit *jit = nullptr;
+     PageTable *pages = nullptr;
+     std::vector<uint32_t> filled;  // page table entries to clear
++    // The privilege level this JIT runs at, and the other level's Env (null until that one
++    // first runs). Everything here is only used while the CPU is at this level, apart from
++    // what both get: invalidations, clears, write protection and code writes.
++    bool privileged = true;
++    Env *other = nullptr;
+ 
+     // Page table entries with bit 0 set are read-only (the fork's page_table_write_protect_bit):
+     // stores to them come to the callbacks. A RAM page is filled read-only and made writable
+@@ -273,10 +291,10 @@
+     // vector page. ROM only changes from the host side, which
+     // clears everything. Pages that are neither (host null) can't be watched, so the
+     // guest's I-cache invalidations drop them instead.
+-    // Dynarmic keeps blocks by PC and CPSR state, not privilege or permissions, so each
+-    // code page also has its domain and AP (access). When the domains, S, R or the
+-    // privilege change, the code of every page that can't be fetched now is dropped, and
+-    // fetching it again takes the prefetch abort.
++    // Dynarmic keeps blocks by PC and CPSR state, not permissions, so each code page also
++    // has its domain and AP (access). When the domains, S or R change, the code of every
++    // page that can't be fetched now is dropped, and fetching it again takes the prefetch
++    // abort. Each Env only runs at its own privilege, so that isn't part of the context.
+     struct CodePage {
+         uint32_t pa;  // physical page, or ~0u when the page tables had no mapping
+         uint8_t *host;
+@@ -301,8 +319,11 @@
+         if (it == code.end()) it = NotePage(page);
+         uint8_t *lines = it->second.lines;
+         if (lines && !lines[(va & 0xfffu) >> 6]) {
++            // The flags are the CPU's, so both privilege levels' direct stores to the page
++            // have to come back through the callbacks.
+             lines[(va & 0xfffu) >> 6] = 1;
+             ProtectHost(it->second.host);
++            if (other) other->ProtectHost(it->second.host);
+         }
+     }
+ 
+@@ -332,8 +353,8 @@
+         code.erase(it);
+     }
+ 
+-    // Drops the code of pages that can't be fetched with the current domains, S, R and
+-    // privilege. Only a change of those can make a page unfetchable without a TLB flush.
++    // Drops the code of pages that can't be fetched with the current domains, S and R. Only a
++    // change of those can make a page unfetchable without a TLB flush.
+     void CheckFetch() {
+         const uint64_t context = cpuJitPermContext(cpu);
+         if (context == permContext) return;
+@@ -560,7 +581,7 @@
+                 if (size == 4) word(at + 2);
+             }
+             if (!whole && EndsBlock(w, at, thumb)) break;
+-            if (!thumb && (w & 0x0fef0f10) == 0x0e030f10) break;  // p15 c3 ends its block
++            if (!thumb && Cp15Slot(w)) break;  // p15 slot instructions end their block
+             at += size;
+         }
+         s->runnable = s->plain.front().second;
+@@ -645,18 +666,27 @@
+ 
+     // MSR CPSR with more than the flags. The fork ends the block after this call, so the
+     // banked registers and CPSR can change under it. A set slow path (an unmasked pending
+-    // interrupt, a Thumb switch) ends the run there; a privilege change empties the page
+-    // table, which was filled with the old privilege's permissions.
++    // interrupt, a Thumb switch) ends the run there, and so does a privilege change, with
++    // nothing run or checked at the new privilege in this JIT.
+     static std::uint64_t SetCpsr(void *arg, std::uint32_t value, std::uint32_t mask) {
+         Env &e = *static_cast<Env *>(arg);
+         stats.psr++;
+         const uint32_t cpsr = cpuJitSetCpsr(e.cpu, e.jit->Regs().data(), e.jit->Cpsr(), mask, value);
+         e.jit->SetCpsr(cpsr);
+-        e.CheckGen();
+-        e.AfterIo();
++        e.AfterPsr();
+         return 0;
+     }
+ 
++    void AfterPsr() {
++        if (cpuJitPrivileged(cpu) != privileged) {
++            stats.privSwitches++;
++            jit->HaltExecution(kPrivilege);
++        } else {
++            CheckGen();
++        }
++        AfterIo();
++    }
++
+     // MOVS PC or SUBS PC. The fork returns to the dispatcher after this call, which picks up
+     // the new PC and Thumb state.
+     static std::uint64_t ExceptionReturn(void *arg, std::uint32_t target, std::uint32_t) {
+@@ -664,8 +694,7 @@
+         stats.psr++;
+         const uint32_t cpsr = cpuJitExceptionReturn(e.cpu, e.jit->Regs().data(), e.jit->Cpsr(), target);
+         e.jit->SetCpsr(cpsr);
+-        e.CheckGen();
+-        e.AfterIo();
++        e.AfterPsr();
+         return 0;
+     }
+ 
+@@ -711,6 +740,22 @@
+         return 0;
+     }
+ 
++    // MCR p15 c7 c5 1: the interpreter's I-cache line invalidate, which also drops the code
++    // of unwatched pages in that line from both JITs (jitInvalidate). If that drops the
++    // running block, dynarmic finishes it first; the block ends after this instruction.
++    static std::uint64_t Cp15InvalLine(void *arg, std::uint32_t value, std::uint32_t) {
++        const Cp15Op &op = *static_cast<Cp15Op *>(arg);
++        Env &e = *op.env;
++        stats.cp15++;
++        if (!cpuJitPrivileged(e.cpu)) {
++            e.Cp15User(op.pc);
++            return 0;
++        }
++        stats.icacheLine++;
++        cpuJitIcacheInvalLine(e.cpu, value);
++        return 0;
++    }
++
+     // iWMMXt instructions, by encoding without the condition and core registers: the
+     // fields for pxa270_WMMX's cores. Kept for the process like cp15Ops.
+     struct WmmxOp {
+@@ -826,8 +871,8 @@
+     }
+ };
+ 
+-// p15 slot: only MRC and MCR p15, 0, Rd, c3 get here (cpuJitPlain), any CRm and op2 as
+-// in the interpreter.
++// p15 slot: only MRC and MCR p15, 0, Rd, c3, any CRm and op2 as in the interpreter, and
++// MCR p15, 0, Rd, c7, c5, 1 get here (cpuJitPlain).
+ struct Cp15Coprocessor final : public A32::Coprocessor {
+     Env *env;
+     explicit Cp15Coprocessor(Env *e) : env(e) {}
+@@ -836,10 +881,13 @@
+                                                      A32::CoprocReg, unsigned) override {
+         return std::nullopt;
+     }
+-    CallbackOrAccessOneWord CompileSendOneWord(bool two, unsigned opc1, A32::CoprocReg crn, A32::CoprocReg,
+-                                               unsigned) override {
+-        if (two || opc1 || crn != A32::CoprocReg::C3 || cp15Pc == ~0u) return std::monostate{};
+-        return Callback{&Env::Cp15Write, env->Cp15Current()};
++    CallbackOrAccessOneWord CompileSendOneWord(bool two, unsigned opc1, A32::CoprocReg crn, A32::CoprocReg crm,
++                                               unsigned opc2) override {
++        if (two || opc1 || cp15Pc == ~0u) return std::monostate{};
++        if (crn == A32::CoprocReg::C3) return Callback{&Env::Cp15Write, env->Cp15Current()};
++        if (crn == A32::CoprocReg::C7 && crm == A32::CoprocReg::C5 && opc2 == 1)
++            return Callback{&Env::Cp15InvalLine, env->Cp15Current()};
++        return std::monostate{};
+     }
+     CallbackOrAccessTwoWords CompileSendTwoWords(bool, unsigned, A32::CoprocReg) override { return std::monostate{}; }
+     CallbackOrAccessOneWord CompileGetOneWord(bool two, unsigned opc1, A32::CoprocReg crn, A32::CoprocReg,
+@@ -925,14 +973,34 @@
+ 
+ }  // namespace
+ 
+-struct FrondJit {
++// One privilege level's JIT. The page table is calloc'd, so only the entries used take
++// memory.
++struct Level {
+     Env env;
+-    PageTable pages{};
++    PageTable *pages = nullptr;
+     std::unique_ptr<A32::Jit> jit;
+-    uint32_t maxUnchecked = 0;
+     std::shared_ptr<WmmxCoprocessor> wmmx[2];
++    ~Level() {
++        jit.reset();
++        free(pages);
++    }
+ };
+ 
++struct FrondJit {
++    ArmCpu *cpu = nullptr;
++    // [0] user, made when the CPU first runs in user mode; [1] privileged.
++    std::unique_ptr<Level> level[2];
++    uint32_t maxUnchecked = 0, hot = 1;
++    A32::Jit::CompileThread mode{};
++    unsigned ahead = 0;
++};
++
++template <typename F>
++void jitPrvEach(FrondJit *j, F f) {
++    for (auto &l : j->level)
++        if (l) f(l->env);
++}
++
+ // Instructions between budget checks in generated code. It bounds how far a run can pass
+ // its budget, which audio admission reserves for. 64, 128 and 256 ran Bike and FrondBench
+ // equally fast, so the smallest. FROND_JIT_MAX_UNCHECKED overrides it for measuring, 0 for
+@@ -981,49 +1049,79 @@
+     return kMaxUnchecked;
+ }
+ 
+-FrondJit *jitCreate(ArmCpu *cpu) {
+-    auto *j = new FrondJit;
+-    j->env.cpu = cpu;
+-    j->env.pages = &j->pages;
++// Code cache per JIT, address space reserved up front and used as code is written. The user
++// level's is smaller on Android.
++static constexpr size_t kCodeCache = 64 << 20;
++#ifdef __ANDROID__
++static constexpr size_t kUserCodeCache = 16 << 20;
++#else
++static constexpr size_t kUserCodeCache = kCodeCache;
++#endif
++
++static Level *jitPrvMakeLevel(FrondJit *j, bool privileged) {
++    auto l = std::make_unique<Level>();
++    l->pages = static_cast<PageTable *>(calloc(1, sizeof(PageTable)));
++    if (!l->pages) abort();
++    Env &e = l->env;
++    e.cpu = j->cpu;
++    e.pages = l->pages;
++    e.privileged = privileged;
++    e.hot = j->hot;
+     A32::UserConfig conf;
+-    conf.callbacks = &j->env;
++    conf.callbacks = &e;
+     conf.arch_version = A32::ArchVersion::v5TE;
+-    conf.page_table = &j->pages;
++    conf.page_table = l->pages;
+     conf.page_table_writes_via_callbacks = false;
+     conf.page_table_write_protect_bit = true;
+     conf.page_table_pointer_mask_bits = 1;
+     conf.check_halt_on_link = true;
+     conf.check_halt_on_memory_access = true;
+-    j->maxUnchecked = jitPrvMaxUnchecked();
+-    j->env.hot = jitPrvHot();
+     conf.max_unchecked_instructions = j->maxUnchecked;
+     // Unaligned accesses go through the callbacks, which fault on them.
+     conf.detect_misaligned_access_via_page_table = 16 | 32 | 64;
+     conf.only_detect_misalignment_via_page_table_on_page_boundary = false;
+     conf.always_little_endian = true;
+-    conf.code_cache_size = 64 * 1024 * 1024;
+-    conf.coprocessors[kPsrCoprocessor] = std::make_shared<PsrCoprocessor>(&j->env);
++    conf.code_cache_size = privileged ? kCodeCache : kUserCodeCache;
++    conf.coprocessors[kPsrCoprocessor] = std::make_shared<PsrCoprocessor>(&e);
+     conf.psr_coprocessor = kPsrCoprocessor;
+-    conf.coprocessors[15] = std::make_shared<Cp15Coprocessor>(&j->env);
+-    j->wmmx[0] = std::make_shared<WmmxCoprocessor>(&j->env, false);
+-    j->wmmx[1] = std::make_shared<WmmxCoprocessor>(&j->env, true);
+-    conf.coprocessors[0] = j->wmmx[0];
+-    conf.coprocessors[1] = j->wmmx[1];
++    conf.coprocessors[15] = std::make_shared<Cp15Coprocessor>(&e);
++    l->wmmx[0] = std::make_shared<WmmxCoprocessor>(&e, false);
++    l->wmmx[1] = std::make_shared<WmmxCoprocessor>(&e, true);
++    conf.coprocessors[0] = l->wmmx[0];
++    conf.coprocessors[1] = l->wmmx[1];
+     conf.coprocessor_unscaled_offsets = 1;  // iWMMXt WLDRB/H and WSTRB/H offsets are in bytes
+-    j->jit = std::make_unique<A32::Jit>(conf);
+-    j->env.jit = j->jit.get();
+-    j->env.maxInstructions = j->maxUnchecked;
+-    const A32::Jit::CompileThread mode = jitPrvCompileThread();
+-    j->jit->SetCompileThread(mode);
+-    j->jit->SetCompileAhead(jitPrvAhead(mode));
+-    if (stats.on) stats.jits.push_back(j->jit.get());
++    l->jit = std::make_unique<A32::Jit>(conf);
++    e.jit = l->jit.get();
++    e.maxInstructions = j->maxUnchecked;
++    l->jit->SetCompileThread(j->mode);
++    l->jit->SetCompileAhead(j->ahead);
++    if (Level *o = j->level[!privileged].get()) {
++        e.other = &o->env;
++        o->env.other = &e;
++    }
++    if (stats.on) stats.jits.push_back(l->jit.get());
++    j->level[privileged] = std::move(l);
++    return j->level[privileged].get();
++}
++
++FrondJit *jitCreate(ArmCpu *cpu) {
++    auto *j = new FrondJit;
++    j->cpu = cpu;
++    j->maxUnchecked = jitPrvMaxUnchecked();
++    j->hot = jitPrvHot();
++    j->mode = jitPrvCompileThread();
++    j->ahead = jitPrvAhead(j->mode);
++    jitPrvMakeLevel(j, true);
+     return j;
+ }
+ 
+ void jitDestroy(FrondJit *j) {
+     if (stats.on) {
+-        stats.AddCompiled(*j->jit);
+-        std::erase(stats.jits, j->jit.get());
++        for (auto &l : j->level) {
++            if (!l) continue;
++            stats.AddCompiled(*l->jit);
++            std::erase(stats.jits, l->jit.get());
++        }
+     }
+     delete j;
+ }
+@@ -1031,40 +1129,50 @@
+ uint32_t jitMaxUnchecked(const FrondJit *j) { return j->maxUnchecked; }
+ 
+ void jitCompileCounts(const FrondJit *j, uint64_t *stale, uint64_t *aheadCompiled, uint64_t *aheadUsed) {
+-    const A32::Jit::CompileStats c = j->jit->GetCompileStats();
+-    *stale = c.stale;
+-    *aheadCompiled = c.ahead_compiled;
+-    *aheadUsed = c.ahead_used;
++    *stale = *aheadCompiled = *aheadUsed = 0;
++    for (const auto &l : j->level) {
++        if (!l) continue;
++        const A32::Jit::CompileStats c = l->jit->GetCompileStats();
++        *stale += c.stale;
++        *aheadCompiled += c.ahead_compiled;
++        *aheadUsed += c.ahead_used;
++    }
+ }
+ 
+ void jitInvalidate(FrondJit *j, uint32_t va, uint32_t size) {
+     stats.invalRange++;
+-    Env &e = j->env;
+-    if (e.unwatched.empty()) return;
+-    e.DropUnwatched(va >> 12, uint32_t((uint64_t(va) + size - 1) >> 12));
++    jitPrvEach(j, [&](Env &e) {
++        if (!e.unwatched.empty()) e.DropUnwatched(va >> 12, uint32_t((uint64_t(va) + size - 1) >> 12));
++    });
+ }
+ 
+ void jitGuestInvalidateAll(FrondJit *j, uint32_t pc) {
+     stats.invalAll++;
+     auto &st = stats.invalAllPc[pc];
+-    if (!st.first++ && stats.on) cpuJitFetch(j->env.cpu, pc & ~3u, &st.second);
+-    if (!j->env.unwatched.empty()) j->env.DropUnwatched(0, ~0u);
++    if (!st.first++ && stats.on) cpuJitFetch(j->cpu, pc & ~3u, &st.second);
++    jitPrvEach(j, [](Env &e) {
++        if (!e.unwatched.empty()) e.DropUnwatched(0, ~0u);
++    });
+ }
+ 
+-void jitClear(FrondJit *j) { j->env.Clear(); }
++// Both levels clear together: a clear forgets the CPU's RAM code flags, which the other
++// level's code relies on too.
++void jitClear(FrondJit *j) {
++    jitPrvEach(j, [](Env &e) { e.Clear(); });
++}
+ 
+ void jitCparWritten(FrondJit *j, bool changed) {
+     stats.cparWrites++;
+     if (!changed) return;
+     stats.cparChanges++;
+-    j->env.ClearCode();
++    jitPrvEach(j, [](Env &e) { e.ClearCode(); });
+ }
+ 
+ // Fields as dynarmic's decoder takes them from an ARM word with a condition other than NV.
+ bool jitWmmxCompiles(FrondJit *j, uint32_t w) {
+     const unsigned cp = (w >> 8) & 15;
+     if (cp > 1 || (w >> 28) == 15) return false;
+-    WmmxCoprocessor &c = *j->wmmx[cp];
++    WmmxCoprocessor &c = *j->level[1]->wmmx[cp];
+     const auto reg = [&](unsigned shift) { return A32::CoprocReg((w >> shift) & 15); };
+     const auto isCallback = [](const auto &v) { return std::holds_alternative<A32::Coprocessor::Callback>(v); };
+     if ((w & 0x0f000010) == 0x0e000000)
+@@ -1086,17 +1194,28 @@
+     return false;
+ }
+ 
+-void jitCodeWritten(FrondJit *j, uint8_t *hostPage) { j->env.CodeWritten(hostPage); }
++void jitCodeWritten(FrondJit *j, uint8_t *hostPage) {
++    jitPrvEach(j, [&](Env &e) { e.CodeWritten(hostPage); });
++}
+ 
+ void jitWriteProtect(FrondJit *j, const uint8_t *host, uint32_t size) {
+-    if (!j->env.writable.empty()) j->env.Protect(host, size);
++    jitPrvEach(j, [&](Env &e) {
++        if (!e.writable.empty()) e.Protect(host, size);
++    });
+ }
+ 
+-void jitWriteProtectPage(FrondJit *j, uint8_t *hostPage) { j->env.ProtectHost(hostPage); }
++void jitWriteProtectPage(FrondJit *j, uint8_t *hostPage) {
++    jitPrvEach(j, [&](Env &e) { e.ProtectHost(hostPage); });
++}
+ 
++// Runs the JIT for the CPU's current privilege level. A privilege change in generated code
++// ends the run as if the budget ran out, and the next run goes to the other level.
+ uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, int &stop) {
+-    Env &e = j->env;
+-    A32::Jit &jit = *j->jit;
++    const bool privileged = cpuJitPrivileged(j->cpu);
++    Level *l = j->level[privileged].get();
++    if (!l) l = jitPrvMakeLevel(j, privileged);
++    Env &e = l->env;
++    A32::Jit &jit = *l->jit;
+     if (e.resetState) {
+         e.resetState = false;
+         jit.Reset();
+@@ -1113,7 +1232,7 @@
+     e.ran = 0;
+     e.undoTick = false;
+     const HaltReason hr = jit.Run();
+-    jit.ClearHalt(kInterpret | kSlowPath | kFault | kCold);
++    jit.ClearHalt(kInterpret | kSlowPath | kFault | kCold | kPrivilege);
+     if (e.rewindPc != ~0u) {
+         jit.Regs()[15] = e.rewindPc;
+         e.rewindPc = ~0u;
+--- a/src/uarm/uarm/jit_dynarmic.h
++++ b/src/uarm/uarm/jit_dynarmic.h
+@@ -1,6 +1,7 @@
+ // dynarmic JIT for ordinary guest code (trial, FROND_DYNARMIC builds only).
+ // The JIT holds no guest state between runs: CPU.cpp passes the registers and CPSR in
+-// and takes them back after every run.
++// and takes them back after every run. Each CPU has one JIT per privilege level; jitRun
++// picks by cpuJitPrivileged, and the other calls here go to both.
+ #ifndef _JIT_DYNARMIC_H_
+ #define _JIT_DYNARMIC_H_
+ 
+@@ -11,7 +12,7 @@
+ struct Pxa270wmmx;
+ 
+ enum FrondJitStop {
+-    FROND_JIT_BUDGET,     // ran out of cycles
++    FROND_JIT_BUDGET,     // ran out of cycles, or the privilege changed
+     FROND_JIT_INTERPRET,  // regs[15] is an instruction the interpreter has to run, or one
+                           // whose data access faulted
+     FROND_JIT_HALT,       // a callback set the slow path
+@@ -76,7 +77,8 @@
+ bool cpuJitCodePa(ArmCpu *cpu, uint32_t va, uint32_t *pa, uint32_t *access);
+ // Whether code from a page with that access may be fetched now, in the current mode.
+ bool cpuJitAccessReadable(ArmCpu *cpu, uint32_t access);
+-// Domains, S, R and privilege: what cpuJitAccessReadable depends on besides the access.
++// Domains, S and R: what cpuJitAccessReadable depends on besides the access and the
++// privilege.
+ uint64_t cpuJitPermContext(ArmCpu *cpu);
+ // Host page holding the code at pa: RAM or ROM's peephole copy, null for anything else. For
+ // RAM, *lines gets the page's code flags, one per 64 bytes: set one and the first write to
+@@ -86,7 +88,7 @@
+ void cpuJitForgetCode(ArmCpu *cpu);
+ // Moves on with every TLB flush, which every mapping change goes through.
+ uint32_t cpuJitMapGen(ArmCpu *cpu);
+-// Moves on whenever cpuJitReadPage could answer differently.
++// Moves on whenever cpuJitReadPage could answer differently at the same privilege.
+ uint64_t cpuJitPageGen(ArmCpu *cpu);
+ bool cpuJitSlowPath(ArmCpu *cpu);
+ // Status registers for MRS and MSR in generated code. The SPSR is read and written in
+@@ -102,6 +104,9 @@
+ Pxa270wmmx *cpuJitWmmx(ArmCpu *cpu);
+ // For tests: jitWmmxCompiles on the CPU's JIT, false without one.
+ bool cpuJitWmmxCompiles(ArmCpu *cpu, uint32_t word);
++// MCR p15, 0, Rd, c7, c5, 1 (I-cache line invalidate) as the interpreter runs it,
++// privileged modes only.
++void cpuJitIcacheInvalLine(ArmCpu *cpu, uint32_t va);
+ // The domain access control register (MRC and MCR p15, 0, Rd, c3), privileged modes only.
+ uint32_t cpuJitGetDomain(ArmCpu *cpu);
+ void cpuJitSetDomain(ArmCpu *cpu, uint32_t value);

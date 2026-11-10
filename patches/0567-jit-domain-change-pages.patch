@@ -1,0 +1,251 @@
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -4455,7 +4455,13 @@
+ uint32_t cpuJitMapGen(ArmCpu *cpu) { return mmuFlushCount(cpu->memorySystem.mmu); }
+ 
+ // The host TLB's keys hold the privilege, so its generation alone covers both levels.
+-uint64_t cpuJitPageGen(ArmCpu *cpu) { return cpu->mem->hostTlb.gen; }
++uint64_t cpuJitPageGen(ArmCpu *cpu) {
++    return (uint64_t(cpu->mem->hostTlb.epoch) << 32) | cpu->mem->hostTlb.gen;
++}
++
++int cpuJitPageAccess(ArmCpu *cpu, uint32_t va, bool privileged) {
++    return mmuPageAccess(cpu->memorySystem.mmu, va, privileged);
++}
+ 
+ bool cpuJitSlowPath(ArmCpu *cpu) { return cpu->slowPath != 0; }
+ 
+--- a/src/uarm/uarm/MMU.cpp
++++ b/src/uarm/uarm/MMU.cpp
+@@ -328,7 +328,17 @@
+ void mmuSetDomainCfg(struct ArmMmu *mmu, uint32_t val) {
+     if (val == mmu->domainCfg) return;
+     mmu->domainCfg = val;
+-    mmuPrvPermChanged(mmu);
++    hostTlbFlushDomains(&mmu->mem->hostTlb);
++    if (mmu->permChanged) mmu->permChanged(mmu->permChangedCtx);
++}
++
++int mmuPageAccess(struct ArmMmu *mmu, uint32_t va, bool privileged) {
++    if (mmu->transTablPA == MMU_DISABLED_TTP) return (MMU_DOMAIN_NONE << 2) | 3;
++    const struct TlbEntry &entry = mmu->tlb[va >> 12];
++    if (entry.revision != mmu->revision) return -1;
++    return (entry.domain << 2) |
++           (checkPermissions(mmu, entry.ap, entry.domain, entry.section, privileged, false) ? 0 : 1) |
++           (checkPermissions(mmu, entry.ap, entry.domain, entry.section, privileged, true) ? 0 : 2);
+ }
+ 
+ ///////////////////////////  debugging helpers  ///////////////////////////
+--- a/src/uarm/uarm/MMU.h
++++ b/src/uarm/uarm/MMU.h
+@@ -53,6 +53,11 @@
+ bool mmuGetR(struct ArmMmu *mmu);
+ 
+ uint32_t mmuGetDomainCfg(struct ArmMmu *mmu);
++// The TLB entry for va: its domain << 2 (MMU_DOMAIN_NONE with the MMU off) and what it
++// allows in this mode now, bit 0 reads and bit 1 writes. -1 when the TLB doesn't hold va.
++#define MMU_DOMAIN_NONE 16
++#define MMU_DOMAIN_UNKNOWN 17
++int mmuPageAccess(struct ArmMmu *mmu, uint32_t va, bool privileged);
+ void mmuSetDomainCfg(struct ArmMmu *mmu, uint32_t val);
+ 
+ void mmuTlbFlush(struct ArmMmu *mmu);
+--- a/src/uarm/uarm/jit_dynarmic.cpp
++++ b/src/uarm/uarm/jit_dynarmic.cpp
+@@ -60,7 +60,7 @@
+         const char *v = getenv("FROND_JIT_STATS");
+         return v && *v && strcmp(v, "0");
+     }();
+-    uint64_t pageClears = 0, pageFills = 0, reads = 0, writes = 0;
++    uint64_t pageClears = 0, pageFills = 0, reads = 0, writes = 0, domainChecks = 0, pageDrops = 0, pageReadOnly = 0;
+     // Pages mapped for direct stores, and pages sent back to the callbacks by
+     // jitWriteProtect or a code flag.
+     uint64_t writeMaps = 0, writeProtects = 0;
+@@ -97,11 +97,12 @@
+                 (unsigned long long)compiled.ahead_skipped);
+         fprintf(stderr,
+                 "jit: runs %llu ran %llu interpret %llu cold %llu queued %llu halt %llu fault %llu aborts %llu invalAll %llu "
+-                "invalRange %llu clears %llu pageClears %llu pageFills %llu reads %llu writes %llu\n",
++                "invalRange %llu clears %llu pageClears %llu domainChecks %llu pageDrops %llu pageReadOnly %llu pageFills %llu reads %llu writes %llu\n",
+                 (unsigned long long)runs, (unsigned long long)ran, (unsigned long long)interpret, (unsigned long long)cold,
+                 (unsigned long long)queued,
+                 (unsigned long long)halt, (unsigned long long)fault, (unsigned long long)aborts, (unsigned long long)invalAll,
+                 (unsigned long long)invalRange, (unsigned long long)clears, (unsigned long long)pageClears,
++                (unsigned long long)domainChecks, (unsigned long long)pageDrops, (unsigned long long)pageReadOnly,
+                 (unsigned long long)pageFills, (unsigned long long)reads, (unsigned long long)writes);
+         fprintf(stderr,
+                 "jit: codePages %llu unwatched %llu pagesWritten %llu mapChecks %llu mapChanged %llu "
+@@ -249,7 +250,9 @@
+     ArmCpu *cpu = nullptr;
+     A32::Jit *jit = nullptr;
+     PageTable *pages = nullptr;
+-    std::vector<uint32_t> filled;  // page table entries to clear
++    // Page table entries to clear, and each one's domain when filled (cpuJitPageAccess).
++    std::vector<uint32_t> filled;
++    std::vector<uint8_t> filledDomain;
+     // The privilege level this JIT runs at, and the other level's Env (null until that one
+     // first runs). Everything here is only used while the CPU is at this level, apart from
+     // what both get: invalidations, clears, write protection and code writes.
+@@ -445,20 +448,79 @@
+     uint64_t gen = ~0ull;
+     uint64_t budget = 0, ran = 0;
+ 
++    uint32_t domains = 0;  // DACR at the last CheckGen
++
+     void ClearPages() {
+         stats.pageClears++;
+         for (uint32_t i : filled) (*pages)[i] = nullptr;
+         filled.clear();
++        filledDomain.clear();
+         writable.clear();
+     }
+ 
++    void NoteFilled(uint32_t page) {
++        filled.push_back(page);
++        const int access = cpuJitPageAccess(cpu, page << 12, privileged);
++        filledDomain.push_back(uint8_t(access < 0 ? MMU_DOMAIN_UNKNOWN : access >> 2));
++    }
++
++    // Only the DACR changed since the pages were filled, so each page has the mapping and
++    // TLB entry it was filled with. Pages in domains whose two bits changed (or whose
++    // domain wasn't known) are checked again: a writable entry the MMU now allows reads
++    // only on goes read-only, and an entry it allows no reads on is dropped. The rest grant
++    // no more than the MMU does now.
++    void CheckDomains(uint32_t changed) {
++        stats.domainChecks++;
++        uint32_t mask = 1u << MMU_DOMAIN_UNKNOWN;
++        for (unsigned d = 0; d < 16; d++)
++            if ((changed >> (2 * d)) & 3) mask |= 1u << d;
++        size_t kept = 0;
++        for (size_t i = 0; i < filled.size(); i++) {
++            const uint32_t page = filled[i];
++            uint8_t *const entry = (*pages)[page];
++            if (mask & (1u << filledDomain[i])) {
++                int access = filledDomain[i] == MMU_DOMAIN_UNKNOWN ? -1 : cpuJitPageAccess(cpu, page << 12, privileged);
++                if (access > 0) access &= 3;
++                const bool writableEntry = entry && !(uintptr_t(entry) & 1);
++                if (access < 0 || !(access & 1) || (writableEntry && !(access & 2))) {
++                    if (writableEntry) {
++                        const auto it = writable.find(entry);
++                        if (it != writable.end()) {
++                            std::erase(it->second, page);
++                            if (it->second.empty()) writable.erase(it);
++                        }
++                    }
++                    if (access > 0 && (access & 1)) {
++                        (*pages)[page] = ReadOnly(entry);
++                        stats.pageReadOnly++;
++                    } else {
++                        (*pages)[page] = nullptr;
++                        stats.pageDrops++;
++                        continue;
++                    }
++                }
++            }
++            filled[kept] = page;
++            filledDomain[kept++] = filledDomain[i];
++        }
++        filled.resize(kept);
++        filledDomain.resize(kept);
++    }
++
+     void CheckGen() {
+         const uint64_t g = cpuJitPageGen(cpu);
+-        if (g != gen) {
++        if (g != gen) GenChanged(g);
++    }
++
++    [[gnu::noinline]] void GenChanged(uint64_t g) {
++        const uint32_t d = cpuJitGetDomain(cpu);
++        if (gen == ~0ull || (g >> 32) != (gen >> 32))
+             ClearPages();
+-            gen = g;
+-            CheckFetch();
+-        }
++        else if (d != domains)
++            CheckDomains(d ^ domains);
++        gen = g;
++        domains = d;
++        CheckFetch();
+     }
+ 
+     void Fault() { jit->HaltExecution(kFault); }
+@@ -518,7 +580,7 @@
+             if (host && !(uintptr_t(host) & 1)) {
+                 stats.pageFills++;
+                 (*pages)[page] = ReadOnly(host);
+-                filled.push_back(page);
++                NoteFilled(page);
+             } else {
+                 AfterIo();
+             }
+@@ -543,7 +605,7 @@
+             uint8_t *host = cpuJitWritePage(cpu, va);
+             if (host && !(uintptr_t(host) & 1)) {
+                 stats.writeMaps++;
+-                if (!entry) filled.push_back(page);
++                if (!entry) NoteFilled(page);
+                 (*pages)[page] = host;
+                 writable[host].push_back(page);
+             }
+@@ -742,7 +804,7 @@
+         return cpuJitGetDomain(e.cpu);
+     }
+ 
+-    // A domain change flushes the host TLB, so the page table empties too.
++    // A domain change flushes the host TLB; the page table drops the pages in changed domains.
+     static std::uint64_t Cp15Write(void *arg, std::uint32_t value, std::uint32_t) {
+         const Cp15Op &op = *static_cast<Cp15Op *>(arg);
+         Env &e = *op.env;
+--- a/src/uarm/uarm/jit_dynarmic.h
++++ b/src/uarm/uarm/jit_dynarmic.h
+@@ -102,8 +102,14 @@
+ void cpuJitForgetCode(ArmCpu *cpu);
+ // Moves on with every TLB flush, which every mapping change goes through.
+ uint32_t cpuJitMapGen(ArmCpu *cpu);
+-// Moves on whenever cpuJitReadPage could answer differently at the same privilege.
++// Moves on whenever cpuJitReadPage could answer differently at the same privilege. The top
++// 32 bits (the epoch) move on with every change but a domain (DACR) change: while they
++// stay, a page table entry filled with cpuJitReadPage or cpuJitWritePage stays right
++// unless its page's domain changed.
+ uint64_t cpuJitPageGen(ArmCpu *cpu);
++// The MMU TLB entry for va: domain << 2 (MMU_DOMAIN_NONE with the MMU off) and what it
++// allows now, bit 0 reads and bit 1 writes. -1 if the TLB doesn't hold va.
++int cpuJitPageAccess(ArmCpu *cpu, uint32_t va, bool privileged);
+ bool cpuJitSlowPath(ArmCpu *cpu);
+ // Status registers for MRS and MSR in generated code. The SPSR is read and written in
+ // place (an MSR writes all of it, as in the interpreter). cpuJitSetCpsr runs an MSR CPSR
+--- a/src/uarm/uarm/mem_internal.h
++++ b/src/uarm/uarm/mem_internal.h
+@@ -34,6 +34,9 @@
+ 
+ struct HostTlb {
+     uint32_t gen;
++    // Moves on with every flush but a domain change, so the JIT can tell a domain change
++    // (where only pages in changed domains answer differently) from the rest.
++    uint32_t epoch;
+     struct ArmRam *ram;  // primary RAM when the write entries were filled
+     struct HostTlbEntry read[HOST_TLB_SIZE];
+     struct HostTlbEntry write[HOST_TLB_SIZE];
+@@ -43,14 +46,20 @@
+     return (uint64_t(gen) << 32) | ((va >> 12) << 1) | (privileged ? 1 : 0);
+ }
+ 
+-static inline void hostTlbFlush(struct HostTlb *tlb) {
++static inline void hostTlbFlushDomains(struct HostTlb *tlb) {
+     if (++tlb->gen == 0) {
+         for (auto &e : tlb->read) e = {};
+         for (auto &e : tlb->write) e = {};
+         tlb->gen = 1;
++        tlb->epoch++;
+     }
+ }
+ 
++static inline void hostTlbFlush(struct HostTlb *tlb) {
++    tlb->epoch++;
++    hostTlbFlushDomains(tlb);
++}
++
+ struct ArmMem {
+     struct ArmMemRegion regions[NUM_MEM_REGIONS];
+     // Primary RAM while memHoldRam has it out of the address map, and the slot that
