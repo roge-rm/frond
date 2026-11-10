@@ -52,8 +52,23 @@ def run(args):
             floor=len(records());text('d');has(ord('d'))
             print('PASS fresh-process pending input',flush=True)
         finally: assert c.close()==0
+    def startup_replay(session):
+        # A replay given on the command line survives the window's first hidden events.
+        nonlocal c,floor
+        replay=root/'startup.replay';replay.write_text('400 key-down dana.x\n450 key-up dana.x\n')
+        c=palm_boot.Core([session,'--device','alphasmart-dana'],root/'startup.log','--speed','original','--input-replay',replay)
+        try:
+            end=time.monotonic()+20
+            while not any('replay event 2 ' in line for line in c.lines) and time.monotonic()<end: time.sleep(.1)
+            assert any('replay event 2 ' in line for line in c.lines),'startup replay dropped'
+            time.sleep(.3)
+            assert ord('x') in [e[1] for e in records() if e[0]==4][-4:]
+            print('PASS startup input replay',flush=True)
+        finally: assert c.close()==0
     if args.fresh_only:
         c=None;fresh(args.session,None);return
+    if args.replay_only:
+        c=None;startup_replay(args.session);return
     c=palm_boot.Core([args.session,'--device','alphasmart-dana'],root/'guest.log','--speed','original')
     try:
         c.until(f'install "{args.probe.resolve()}"','installation ','successful');launch()
@@ -168,6 +183,7 @@ if __name__=='__main__':
     parser.add_argument('--core',type=Path)
     parser.add_argument('--skip-basics',action='store_true',help='Run only chord and input lifecycle checks')
     parser.add_argument('--fresh-only',action='store_true',help='Start a new process on --session, a pending.frond from an earlier run, and check its pending text')
+    parser.add_argument('--replay-only',action='store_true',help='Start a new process on --session, a pending.frond from an earlier run, with an --input-replay and check its key arrives')
     args=parser.parse_args()
-    if not args.fresh_only and not args.probe: parser.error('--probe is required')
+    if not args.fresh_only and not args.replay_only and not args.probe: parser.error('--probe is required')
     run(args)

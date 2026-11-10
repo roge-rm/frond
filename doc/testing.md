@@ -149,6 +149,8 @@ while developing input state. The full check also covers every ordinary key grou
 and enables Sticky Keys through the guest Keyboard application.
 `--fresh-only --session pending.frond` starts a new process on the pending.frond
 an earlier run saved and checks only that its queued text arrives.
+`--replay-only --session pending.frond` starts it with an `--input-replay` and checks
+the replay's key arrives through the window's first hide.
 
 Dana ordinary power development: `python3 tests/dana-power.py --session READY.frond
 --core out/frond-68k --evidence NEW-DIRECTORY` checks Power long holds, ordinary
