@@ -122,6 +122,7 @@ class CardsTest {
         return when (args[0]) {
             "make" -> { File(args[3]).writeBytes(sdCard(1, ByteArray(512))); "ok ${args[1]} 512" }
             "import" -> { val raw = File(args[1]).readBytes(); File(args[3]).writeBytes(sdCard(1, raw)); "ok ${args[2]} ${raw.size}" }
+            "import-fd" -> { File(args[3]).writeBytes(sdCard(1, ByteArray(512))); "ok ${args[2]} 512" }
             "export" -> { File(args[2]).writeBytes(payloadOf(File(args[1]))); "ok image 512" }
             // The fake "fd" is a path, so the test can read the result.
             "export-fd" -> { File(args[2]).writeBytes(payloadOf(File(args[1]))); "ok image 512" }
@@ -705,6 +706,10 @@ class CardsTest {
         val raw = File(tmp.root, "photos.img").apply { writeBytes(ByteArray(1024) { 7 }) }
         assertNull(Cards.importCard(sessions, raw, "sd", "photos"))
         assertArrayEquals(raw.readBytes(), payloadOf(File(Cards.entryDir(library, named("photos")!!.id), "sd.frondsd")))
+        // A picked document is read through its descriptor, not reopened by path.
+        assertNull(Cards.importCard(sessions, File("/proc/self/fd/41"), "sd", "picked", fd = 41))
+        assertEquals(listOf("import-fd", "41", "sd"), toolCalls.last().take(3))
+        assertNotNull(named("picked"))
         assertNull(Cards.duplicateCard(sessions, music.id))
         assertFalse(named("Music 2")!!.identity.contentEquals(music.identity))
         assertEquals("There's already a card called Music 2.", Cards.renameCard(sessions, music.id, "Music 2"))

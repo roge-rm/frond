@@ -170,9 +170,9 @@ class CardsModel(private val activity: HomeActivity, private val home: HomeModel
             }
         }
 
-    // The picked image is read in place through its file descriptor (/proc/self/fd/N), so a 2 GB
-    // card needs no second copy. A document that isn't a plain file is copied to a private file first.
-    // Asks for the type when SD and Pro both fit.
+    // A raw SD or Pro image is read in place through its open file descriptor, so a 2 GB card needs no
+    // second copy. A classic stick, and a document that isn't a plain file, is copied to a private file
+    // first. Asks for the type when more than one fits.
     fun importImage(from: Uri) =
         home.runJob("Reading the image", "Couldn't import the image", null, cancellable = true) { cancelled, progress ->
             val base = (displayName(from) ?: "").substringBeforeLast('.')
@@ -189,17 +189,21 @@ class CardsModel(private val activity: HomeActivity, private val home: HomeModel
                 if (kinds.isEmpty()) { direct.close(); return@runJob "No device here takes a card like that." }
                 val image = File("/proc/self/fd/${direct.fd}")
                 if (kinds.size > 1) {
-                    activity.runOnUiThread { importing = image to kinds; pendingName = base; pendingFd = direct }
+                    activity.runOnUiThread { importing = image to kinds; pendingName = base; pendingFd = direct; pendingFrom = from }
                     return@runJob null
                 }
-                return@runJob direct.use { Cards.importCard(sessions, image, kinds.first(), base, cancelled, progress) }
+                if (kinds.first() == "ms") { direct.close(); return@runJob copyAndImport(from, base, cancelled, progress) }
+                return@runJob direct.use { Cards.importCard(sessions, image, kinds.first(), base, cancelled, progress, fd = it.fd) }
             }
             copyAndImport(from, base, cancelled, progress)
         }
 
     private var pendingFd: ParcelFileDescriptor? = null
+    private var pendingFrom: Uri? = null
 
-    private fun copyAndImport(from: Uri, base: String, cancelled: () -> Boolean, progress: (Long, Long) -> Unit): String? {
+    // `chosen` is the kind already picked for this image, so it isn't asked again.
+    private fun copyAndImport(from: Uri, base: String, cancelled: () -> Boolean, progress: (Long, Long) -> Unit,
+                              chosen: String? = null): String? {
         val temp = File(app.cacheDir, "card-import.img")
         temp.delete()
         val size = sizeOf(from)
@@ -230,7 +234,7 @@ class CardsModel(private val activity: HomeActivity, private val home: HomeModel
         }
         val head = ByteArray(8)
         temp.inputStream().use { it.read(head) }
-        val kinds = CardChoices.imageKinds(head, temp.length())
+        val kinds = chosen?.let { listOf(it) } ?: CardChoices.imageKinds(head, temp.length())
         if (kinds.isEmpty()) { temp.delete(); return "No device here takes a card like that." }
         if (kinds.size > 1) {
             activity.runOnUiThread { importing = temp to kinds; pendingName = base }
@@ -271,11 +275,14 @@ class CardsModel(private val activity: HomeActivity, private val home: HomeModel
         val (image, _) = importing ?: return
         importing = null
         val fd = pendingFd
+        val from = pendingFrom
         pendingFd = null
+        pendingFrom = null
         if (kind == null) { fd?.close(); if (fd == null) image.delete(); return }
         val base = pendingName
         home.runJob("Importing the image", "Couldn't import the image", null, cancellable = true) { cancelled, progress ->
-            if (fd != null) fd.use { Cards.importCard(sessions, image, kind, base, cancelled, progress) }
+            if (fd != null && kind == "ms" && from != null) { fd.close(); copyAndImport(from, base, cancelled, progress, kind) }
+            else if (fd != null) fd.use { Cards.importCard(sessions, image, kind, base, cancelled, progress, fd = it.fd) }
             else finishImport(image, kind, base, cancelled, progress)
         }
     }

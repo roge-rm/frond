@@ -22,4 +22,8 @@ object CardTool {
     // The raw image of an SD or Memory Stick Pro card file, written into the open regular file `fd`
     // (a picked document) with no temp copy. Same replies as export; a classic stick is "error kind".
     @JvmStatic external fun exportFd(card: String, fd: Int, listener: CardToolProgress?, cancel: AtomicBoolean?): String
+
+    // A raw SD or Memory Stick Pro image read from the open regular file `fd` into the new card file
+    // `dest`, with no temp copy. Same replies as import; a classic stick is "error kind".
+    @JvmStatic external fun importFd(fd: Int, kind: String, dest: String, listener: CardToolProgress?, cancel: AtomicBoolean?): String
 }
