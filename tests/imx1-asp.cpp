@@ -319,8 +319,12 @@ void penSampling() {
     adc.advance(1); assert(read(adc, 0x34) == 0 && read(adc, 0x1c) == 3);
     for (unsigned i = 0; i < 12; ++i) assert(read(adc, 0) == inputs.normal[i % 4]);
     assert(read(adc, 0x1c) == 0);
-    uint32_t empty = 0x12345678;
-    assert(adc.access(base, 4, false, empty) == Imx1AspAccess::sideEffect && empty == 0x12345678);
+    // ASSUMPTION "ASP ring read": with the ring read out, auto sampling on and PADE set, a read gives the
+    // word at the read pointer again and moves on. The ROM reads all 12 slots on every tick (20096cd0).
+    for (unsigned i = 0; i < 12; ++i) {
+        assert(read(adc, 0) == inputs.normal[i % 4] && read(adc, 0x1c) == 0);
+        assert(read(adc, 0x34) == (((i + 1) % 12) << 4));
+    }
     write(adc, 0x10, 1u << 23);
     write(adc, 0x14, 0x1814); write(adc, 0x2c, 3);
     write(adc, 0x10, 0x02003001); write(adc, 0x10, 0x02003003);
