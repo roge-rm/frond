@@ -58,6 +58,12 @@ int main() {
     uint32_t resetEnable = 1;
     assert(state.access(0x20086970, 0x16010200, 4, true, resetEnable) == A::sideEffect);
     assert(state.enableValue() == 0);
+    // The shutdown write at 20086c06 turns every source off, and only takes 0.
+    uint32_t shutdownEnable = 1;
+    assert(state.access(0x20086c06, 0x16010200, 4, true, shutdownEnable) == A::sideEffect);
+    assert(state.access(0x20086e08, 0x16010200, 4, true, shutdownEnable) == A::ok && state.enableValue() == 1);
+    shutdownEnable = 0;
+    assert(state.access(0x20086c06, 0x16010200, 4, true, shutdownEnable) == A::ok && state.enableValue() == 0);
     uint32_t value = 0xfeedface;
     assert(state.access(0, 0x16010204, 4, false, value) == A::externalInput && value == 0xfeedface);
     assert(state.access(0x200868cc, 0x16010204, 2, false, value) == A::width);
