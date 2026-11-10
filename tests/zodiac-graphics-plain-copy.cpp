@@ -192,6 +192,121 @@ void guards() {
     assert(f.commands.complete(f.state,f.eim,f.memory) == A::ok);
     assert(f.read(destination) == 0xffff); f.write(destination,0xa55a); check(f);
 }
+// The fill routine's frame of up to four strips in one packet, and ROP3 5a (destination xor pattern).
+void fills() {
+    Fixture f; planes(f);
+    const std::vector<uint32_t> surface{0x401,destination,0x402,13,0x46f,0,0x470,0x0014000d,0x41f,0x07e0};
+    // A frame one pixel wide at x 2, y 1, 8 by 5: top, left, right, bottom.
+    const std::vector<uint32_t> frame{0xc0071a00,0x00020001,0x00080001,0x00020002,0x00010003,
+        0x00090002,0x00010003,0x00020005,0x00080001};
+    auto with = [&](std::vector<uint32_t> p, const std::vector<uint32_t>& tail) { p.insert(p.end(),tail.begin(),tail.end()); return p; };
+    assert(f.append(with(surface,frame),0x200b0200) == A::ok && f.commands.duration() == surface.size()+frame.size()+1+22);
+    f.finish();
+    for (unsigned y = 0; y < 8; ++y)
+        for (unsigned x = 0; x < 13; ++x) {
+            const bool inside = x >= 2 && x < 10 && y >= 1 && y < 6;
+            const bool edge = inside && (x == 2 || x == 9 || y == 1 || y == 5);
+            assert(f.read(destination+(y*13+x)*2) == (edge ? 0x07e0u : 0xa55au));
+        }
+    // Two and three strips (a clipped frame), then what no producer sends.
+    assert(f.append({0xc0031a00,0x00000000,0x00010001,0x00010000,0x00010001},0x200b0200) == A::ok); f.finish();
+    assert(f.read(destination) == 0x07e0 && f.read(destination+2) == 0x07e0 && f.read(destination+4) == 0xa55a);
+    assert(f.append({0xc0051a00,0,0x00010001,0x00010000,0x00010001,0x00020000,0x00010001},0x200b0200) == A::ok); f.finish();
+    assert(f.read(destination+4) == 0x07e0);
+    assert(f.append(frame,0x200a9ed4) == A::sideEffect);
+    assert(f.append({0xc0031a00,0,0x00010001,0x00010000,0x00010001},0x200a9ed4) == A::sideEffect);
+    assert(f.append({0xc0091a00,0,0x00010001,0,0x00010001,0,0x00010001,0,0x00010001,0,0x00010001},0x200b0200) == A::sideEffect);
+    assert(f.append({0xc0021a00,0,0x00010001,0},0x200b0200) == A::sideEffect);
+    assert(f.append({0xc0031a00,0,0x00010001,0x00010000,0x00000001},0x200b0200) == A::sideEffect);
+    assert(f.append({0xc0031a00,0,0x00010001},0x200b0200) != A::ok);
+    // Invert: 41b and 4b2 both carry 5a, the result is destination xor colour, and twice gives it back.
+    const std::vector<uint32_t> invert{0x41b,0x54b4b4df,0x4b2,0x005a0a00,0x41f,0x0ff0,0xc0011a00,0x00050007,0x00020001};
+    f.write(destination+(7*13+5)*2,0x1234);
+    assert(f.append(invert,0x200b0200) == A::ok); f.finish();
+    assert(f.read(destination+(7*13+5)*2) == (0x1234 ^ 0x0ff0) && f.read(destination+(7*13+6)*2) == (0xa55a ^ 0x0ff0));
+    assert(f.read(destination+(7*13+4)*2) == 0xa55a && f.read(destination+(7*13+7)*2) == 0xa55a);
+    assert(f.append({0xc0011a00,0x00050007,0x00020001},0x200b0200) == A::ok); f.finish();
+    assert(f.read(destination+(7*13+5)*2) == 0x1234 && f.read(destination+(7*13+6)*2) == 0xa55a);
+    // Four inverted strips in one packet.
+    assert(f.append(frame,0x200b0200) == A::ok); f.finish();
+    assert(f.read(destination+(1*13+2)*2) == (0x07e0 ^ 0x0ff0) && f.read(destination+(3*13+5)*2) == 0xa55a);
+    // The copy helper is not known to invert, the two ROP fields must agree, and other ROPs stay refused.
+    assert(f.append({0xc0011a00,0x00050007,0x00020001},0x200a9ed4) == A::sideEffect);
+    assert(f.append({0x4b2,0x00f00a00,0xc0011a00,0x00050007,0x00020001},0x200b0200) == A::sideEffect);
+    for (uint32_t rop : {0x55u,0x0fu,0x00u,0xffu,0xa5u})
+        assert(f.append({0x41b,0x5400b4df | rop << 17,0x4b2,0x00000a00 | rop << 16,0xc0011a00,0x00050007,0x00020001},0x200b0200) == A::sideEffect);
+    assert(f.append({0x41b,0x55e0b4df,0x4b2,0x00f00a00,0x41f,0x1234,0xc0011a00,0,0x00010001},0x200b0200) == A::ok); f.finish();
+    assert(f.read(destination) == 0x1234);
+    std::puts("PASS: fill packets of one to four rectangles, ROP3 f0 and 5a, producer and ROP guards");
+}
+// The software stretch's packets of n plain copies, from its two submit sites.
+void stretch() {
+    Fixture f; planes(f);
+    auto p = packet();
+    // One copy from the stretch is the copy helper's packet.
+    assert(f.append(p,0x200b1790) == A::ok); f.finish(); check(f);
+    planes(f); p = packet(); p.resize(20);
+    // Source pixels (2,1) and (3,1) doubled along x into row 3 from x 2: four 1 by 1 copies.
+    const std::vector<uint32_t> runs{0xc00b1b00,0x00020001,0x00020003,0x00010001,0x00020001,0x00030003,0x00010001,
+        0x00030001,0x00040003,0x00010001,0x00030001,0x00050003,0x00010001};
+    auto with = [&](std::vector<uint32_t> head, const std::vector<uint32_t>& tail) { head.insert(head.end(),tail.begin(),tail.end()); return head; };
+    assert(f.append(with(p,runs),0x200b1568) == A::ok && f.commands.duration() == p.size()+runs.size()+1+4);
+    f.finish();
+    for (unsigned i = 0; i < 13*8; ++i) {
+        const uint32_t expected = i == 41 || i == 42 ? 0 : i == 43 || i == 44 ? 0xf800 : 0xa55a;
+        assert(f.read(destination+i*2) == expected);
+    }
+    // The next packet of the same stretch: two runs of unequal size, row 2 of the source into rows 4 and 5.
+    assert(f.append({0xc0051b00,0x00020002,0x00020004,0x00030001,0x00020002,0x00020005,0x00030001},0x200b1790) == A::ok);
+    f.finish();
+    for (unsigned row : {4u,5u}) {
+        assert(f.read(destination+(row*13+2)*2) == 0x5678 && f.read(destination+(row*13+3)*2) == 0xffff);
+        assert(f.read(destination+(row*13+4)*2) == 0xabcd && f.read(destination+(row*13+5)*2) == 0xa55a);
+    }
+    // Refused: more than one copy from the copy helper or the fill routine, a word count that is not 3n,
+    // two runs to the same place, and a source inside the span of the destinations.
+    planes(f);
+    assert(f.append(with(p,runs),0x200a9ed4) == A::sideEffect);
+    assert(f.append(with(p,runs),0x200b0200) == A::sideEffect);
+    auto bad = runs; bad[0] = 0xc00a1b00; bad.pop_back();
+    assert(f.append(with(p,bad),0x200b1790) == A::sideEffect);
+    bad = runs; bad[5] = 0x00020003;
+    assert(f.append(with(p,bad),0x200b1790) == A::sideEffect);
+    auto same = p; same[13] = destination; same[15] = 13;
+    assert(f.append(with(same,{0xc0051b00,0x00000000,0x00020003,0x00010001,0x00030003,0x00050003,0x00010001}),0x200b1790) == A::sideEffect);
+    bad = runs; bad.push_back(0);
+    assert(f.append(with(p,bad),0x200b1790) != A::ok);
+    bad = runs; bad.pop_back();
+    assert(f.append(with(p,bad),0x200b1790) != A::ok);
+    for (unsigned i = 0; i < 13*8; ++i) assert(f.read(destination+i*2) == 0xa55a);
+    uint32_t value = f.state.engineState().producer();
+    assert(f.state.access(f.eim,0x200b1790,0x16010220,4,true,value) == A::sideEffect);
+    assert(f.state.access(f.eim,0x200b1794,0x16010220,4,true,value) == A::externalInput);
+    std::puts("PASS: stretch packets of n plain copies from 200b1568 and 200b1790, order and overlap guards");
+}
+// The vertical wait reads the scan status with any batch in the ring.
+void scanStatus() {
+    Fixture f; planes(f);
+    struct Case { std::vector<uint32_t> batch; uint32_t pc; };
+    auto keyed = std::vector<uint32_t>{0x41b,0x4598b4df,0x4b2,0x00cc0a00,0x401,source,
+        0x402,9,0x46b,destination,0x46c,13,0xc0051c00,0x01000005,0xf800,0,0,0,0x00020002};
+    auto host = std::vector<uint32_t>{0x41b,0x5798b4df,0x4b2,0x00cc0b00,0x4b1,0x40030d04,
+        0x401,destination,0x402,13,0xc0031900,0,0x00020002,0x1234f800,0x56780000};
+    for (const auto& item : {Case{{0x401,destination,0x402,13,0xc0011a00,0,0x00010001},0x200b0200}, Case{packet(),0x200a9ed4},
+                             Case{packet(),0x200b1790}, Case{keyed,0x200aa504}, Case{host,0x200ac300}}) {
+        assert(f.append(item.batch,item.pc) == A::ok && !f.state.engineState().emptyRing());
+        uint32_t scan = 0xdeadbeef;
+        assert(f.state.access(f.eim,0x200adb08,0x1601054c,4,false,scan) == A::ok && (scan & ~0x400u) == 0);
+        assert(f.state.access(f.eim,0x200adb14,0x1601054c,4,false,scan) == A::ok && (scan & ~0x400u) == 0);
+        scan = 0xdeadbeef;
+        // The status query (200ad7b0) and every other display access still wait for an empty ring.
+        assert(f.state.access(f.eim,0x200ad7b0,0x1601054c,4,false,scan) == A::sequence && scan == 0xdeadbeef);
+        assert(f.state.access(f.eim,0x200adb08,0x1601054c,4,true,scan) == A::sequence);
+        assert(f.state.access(f.eim,0x200aeb68,0x160104d8,4,true,scan) == A::sequence);
+        f.finish();
+    }
+    std::puts("PASS: scan status read by the vertical wait with any batch queued");
+}
 void executionAndReset() {
     for (bool combined : {false,true}) {
         Fixture f; planes(f);
@@ -292,6 +407,6 @@ void privateCapture() {
 }
 }
 int main() {
-    geometry(); guards(); executionAndReset(); privateCapture();
+    geometry(); guards(); fills(); stretch(); scanStatus(); executionAndReset(); privateCapture();
     std::puts("PASS: plain RGB565 copy geometry, bounds, atomic append, queued A4 execution-time source, deadlines, reset and routes");
 }
