@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
+#include <string>
 #include "zodiac-graphics-setup.h"
 #include "imx1_graphics_commands.h"
 
@@ -191,6 +192,169 @@ void guards() {
     assert(f.state.advanceCpuCycles(uint32_t(duration+f.commands.duration())));
     assert(f.commands.complete(f.state,f.eim,f.memory) == A::ok);
     assert(f.read(destination) == 0xffff); f.write(destination,0xa55a); check(f);
+}
+bool refused(const Fixture& f, const char* what, uint32_t value) {
+    const auto& r = f.commands.refusal();
+    return r.what && std::string(r.what) == what && r.value == value;
+}
+constexpr uint32_t scratch = 0xf51000, screen = 0x100000;
+bool bitmapBit(unsigned x, unsigned y) { return ((x * 7 + y * 13 + x * y) % 5) < 2; }
+// The Date Book capture's ring words: a 9 by 11 bitmap on the scratch surface drawn 18 by 22 at x 2, y 296.
+std::vector<uint32_t> dateBookStretch() {
+    return {0x4a1,0,0x41b,0xd598b4df,0x472,0x3f,0x4b2,0x01cc1200,0x4b1,0x40037d04,
+        0x46f,0x01280002,0x470,0x013e0014,0x401,screen,0x402,0x1e0,0x46b,scratch,0x46c,0x140,0x488,0x02020009,
+        0x416,4,0x4020c419,0x140,scratch,0x00020410,0x13,0x16,0x00800080,0x00020420,0x13,0x16,0x00800080,
+        0x00020464,0,0x00020128,0x00120016};
+}
+void stretchPlanes(Fixture& f) {
+    // The bitmap as its one bit upload leaves it, black on white, with red where it must not be read.
+    for (unsigned y = 0; y < 12; ++y)
+        for (unsigned x = 0; x < 10; ++x)
+            f.write(scratch+(y*0x140+x)*2, x < 9 && y < 11 ? (bitmapBit(x,y) ? 0 : 0xffff) : 0xf800);
+    for (unsigned y = 290; y < 320; ++y) for (unsigned x = 0; x < 64; ++x) f.write(screen+(y*480+x)*2,0xa55a);
+}
+// The chip's stretch blit from 200b0b14 at ratio 80 hex: each source pixel twice each way, into memory.
+void stretchBlit() {
+    Fixture f; stretchPlanes(f);
+    auto p = dateBookStretch();
+    assert(f.append(p,0x200b0b14) == A::ok && f.commands.duration() == p.size()+1+18*22);
+    f.finish();
+    for (unsigned y = 290; y < 320; ++y)
+        for (unsigned x = 0; x < 64; ++x) {
+            const bool inside = x >= 2 && x < 20 && y >= 296 && y < 318;
+            const uint32_t expected = !inside ? 0xa55au : bitmapBit((x-2)/2,(y-296)/2) ? 0u : 0xffffu;
+            assert(f.read(screen+(y*480+x)*2) == expected);
+        }
+    // A scissor one pixel inside each edge keeps every pixel on its own source pixel.
+    stretchPlanes(f); p = dateBookStretch(); p[11] = 0x01290003; p[13] = 0x013d0013;
+    assert(f.append(p,0x200b0b14) == A::ok && f.commands.duration() == p.size()+1+16*20);
+    f.finish();
+    for (unsigned y = 290; y < 320; ++y)
+        for (unsigned x = 0; x < 64; ++x) {
+            const bool inside = x >= 3 && x < 19 && y >= 297 && y < 317;
+            const uint32_t expected = !inside ? 0xa55au : bitmapBit((x-2)/2,(y-296)/2) ? 0u : 0xffffu;
+            assert(f.read(screen+(y*480+x)*2) == expected);
+        }
+    // Any other ratio stops and the stop names it. So do repeated words that disagree and other state.
+    for (uint32_t ratio : {0x00800100u,0x00400040u,0x01000100u,0x00800081u}) {
+        p = dateBookStretch(); p[32] = p[36] = ratio;
+        assert(f.append(p,0x200b0b14) == A::sideEffect && refused(f,"stretch-ratio",ratio));
+    }
+    p = dateBookStretch(); p[36] = 0x00800100;
+    assert(f.append(p,0x200b0b14) == A::sideEffect && refused(f,"stretch-words",0));
+    for (auto item : {std::pair<unsigned,uint32_t>{25,0},{27,0x141},{28,scratch+2},{30,0x12},{31,0x15},{34,0x14}}) {
+        p = dateBookStretch(); p[item.first] = item.second;
+        assert(f.append(p,0x200b0b14) == A::sideEffect && refused(f,"stretch-words",0));
+    }
+    for (auto item : {std::pair<unsigned,uint32_t>{3,0x5598b4df},{7,0x00cc1200},{9,0x40030d04},{23,0x02020008},{23,4}}) {
+        p = dateBookStretch(); p[item.first] = item.second;
+        assert(f.append(p,0x200b0b14) == A::sideEffect && refused(f,"stretch-state",p[item.first-1]));
+    }
+    // The stretch words from any other producer, and other packets from this one, are refused.
+    for (uint32_t pc : {0x200a9ed4u,0x200b0200u,0x200b1790u}) assert(f.append(dateBookStretch(),pc) != A::ok);
+    p = dateBookStretch(); p.insert(p.end(),{0xc0011a00,0,0x00010001});
+    assert(f.append(p,0x200b0b14) != A::ok);
+    p = dateBookStretch(); p.resize(p.size()-4);
+    assert(f.append(p,0x200b0b14) != A::ok);
+    // The source must lie in memory and clear of what is written.
+    p = dateBookStretch(); p[19] = p[28] = screen+296*960;
+    assert(f.append(p,0x200b0b14) == A::sideEffect);
+    assert(f.read(screen+(297*480+3)*2) == (bitmapBit(0,0) ? 0u : 0xffffu) && f.read(screen+(296*480+2)*2) == 0xa55a);
+}
+// The bitmap routine's erase and mask: stretch to a second scratch surface, then a keyed copy from it that
+// paints the back colour (ROP f0, solid brush) where the source is the key (control 4) or is not (5).
+void keyedModes() {
+    const uint32_t second = 0xe03000;
+    for (uint32_t control : {0x01000004u,0x01000005u}) {
+        Fixture f; stretchPlanes(f);
+        auto p = dateBookStretch();
+        p[11] = 0; p[13] = 0x00160012; p[15] = second; p[17] = 0x20; p[39] = 0;
+        assert(f.append(p,0x200b0b14) == A::ok);
+        const std::vector<uint32_t> keyed{0x488,4,0x4b1,0x40030d04,0x4b2,0x00f00a00,0x41b,0x45e0b4df,0x41f,0x07e0,
+            0x401,screen,0x402,0x1e0,0x46b,second,0x46c,0x20,0x46f,0,0x470,0x014001e0,
+            0xc0051c00,control,0xffff,0,0,0x00280128,0x00120016};
+        assert(f.append(keyed,0x200aa504) == A::ok);
+        assert(f.state.advanceCpuCycles(4000) && f.commands.complete(f.state,f.eim,f.memory) == A::ok);
+        for (unsigned y = 0; y < 22; ++y)
+            for (unsigned x = 0; x < 18; ++x) {
+                assert(f.read(second+(y*0x20+x)*2) == (bitmapBit(x/2,y/2) ? 0u : 0xffffu));
+                const bool painted = bitmapBit(x/2,y/2) == (control == 0x01000005);
+                assert(f.read(screen+((296+y)*480+40+x)*2) == (painted ? 0x07e0u : 0xa55au));
+            }
+        assert(f.read(screen+(296*480+39)*2) == 0xa55a && f.read(screen+(296*480+58)*2) == 0xa55a);
+    }
+    Fixture f; stretchPlanes(f);
+    std::vector<uint32_t> keyed{0x4b2,0x00cc0a00,0x41b,0x4598b4df,0x401,screen,0x402,0x1e0,0x46b,scratch,0x46c,0x140,0x46f,0,0x470,0x014001e0,
+        0xc0051c00,0x01000004,0xffff,0,0,0x00280128,0x00090005};
+    // Control 4 with ROP cc copies the pixels that match the key.
+    assert(f.append(keyed,0x200aa504) == A::ok); f.finish();
+    for (unsigned x = 0; x < 9; ++x) assert(f.read(screen+(296*480+40+x)*2) == (bitmapBit(x,0) ? 0xa55au : 0xffffu));
+    // Other compare words and other ROPs stop by name.
+    for (uint32_t control : {0x01000001u,0x01000000u,0x02000405u,0x01000105u}) {
+        keyed[17] = control;
+        assert(f.append(keyed,0x200aa504) == A::sideEffect && refused(f,"keyed-control",control));
+    }
+    keyed[17] = 0x01000005; keyed[3] = 0x45b4b4df;
+    assert(f.append(keyed,0x200aa504) == A::sideEffect && refused(f,"keyed-copy-41b",0x45b4b4df));
+    auto p = packet(); p[1] = 0x5532b4df;
+    assert(f.append(p) == A::sideEffect && refused(f,"plain-copy-41b",0x5532b4df));
+    // The line packet is known by its producer and header, and not drawn.
+    assert(f.append({0xc0021500,0x00010001,0x00050005,0},0x200affe4) == A::sideEffect && refused(f,"line-packet",0xc0021500));
+    assert(f.append({0xc0021500,0x00010001,0x00050005,0},0x200b0200) == A::sideEffect);
+}
+// The brush uploads of 200aedd0 land on the brush surface as sent. A fill with a pattern brush type stops.
+void brushUpload() {
+    const uint32_t brush = 0xe05000;
+    const uint8_t rows[8]{0xaa,0x55,0x88,0x22,0xdd,0x77,0x01,0x80};
+    const uint32_t d0 = rows[0]|rows[1]<<8|rows[2]<<16|uint32_t(rows[3])<<24, d1 = rows[4]|rows[5]<<8|rows[6]<<16|uint32_t(rows[7])<<24;
+    {
+        Fixture f;
+        for (unsigned i = 0; i < 48; ++i) f.write(brush-8+i,0xee,1);
+        const std::vector<uint32_t> mono{0x423,brush,0x401,brush,0x402,0x10,0x4b2,0x00cc0b00,0x41b,0x5798b303,0x4b1,0x40036003,
+            0xc0011a00,0,0x00100001,0x000704f0,d0,d0>>8,d0>>16,d0>>24,d1,d1>>8,d1>>16,d1>>24};
+        assert(f.append(mono,0x200af1fc) == A::ok && f.commands.duration() == mono.size()+1+16);
+        f.finish();
+        // Row i of the pattern is the low byte of word i.
+        for (unsigned i = 0; i < 8; ++i) assert(f.read(brush+i*4,1) == rows[i]);
+        assert(f.read(brush,4) == d0 && f.read(brush+12,4) == d0>>24 && f.read(brush+28,4) == d1>>24);
+        assert(f.read(brush-1,1) == 0xee && f.read(brush+32,1) == 0xee);
+        // The driver puts the surface back and fills with brush type 0 or 1: a stop that names the type.
+        for (uint32_t type : {0u,1u,6u,7u,10u}) {
+            const uint32_t gmc = 0x55e0340f | type << 4;
+            assert(f.append({0x401,destination,0x402,13,0x4b2,0x00f00a00,0x41b,gmc,0x4b1,0x00030004u|type<<8,
+                0xc0011a00,0x00010001,0x00020002},0x200b0200) == A::sideEffect && refused(f,"pattern-brush",type));
+        }
+        // A 32 by 1 brush is four words.
+        std::vector<uint32_t> wide{0x41b,0x5798b303,0x402,8,0xc0011a00,0,0x00080001,0x000304f0,d1,d1>>8,d1>>16,d1>>24};
+        assert(f.append(wide,0x200af1fc) == A::ok); f.finish();
+        for (unsigned i = 0; i < 4; ++i) assert(f.read(brush+i*4,1) == rows[4+i]);
+        assert(f.read(brush+16,1) == rows[4]);
+        // Wrong surface, pitch, state, data header, length and producer.
+        auto bad = mono; bad[3] = brush+0x80;
+        assert(f.append(bad,0x200af1fc) == A::sideEffect && refused(f,"brush-state",0x401));
+        bad = mono; bad[5] = 0x20;
+        assert(f.append(bad,0x200af1fc) == A::sideEffect && refused(f,"brush-state",0x402));
+        bad = mono; bad[9] = 0x5798b30b;
+        assert(f.append(bad,0x200af1fc) == A::sideEffect && refused(f,"brush-state",0x41b));
+        bad = mono; bad[15] = 0x000784f0;
+        assert(f.append(bad,0x200af1fc) == A::sideEffect && refused(f,"brush-packet",0x00100001));
+        bad = mono; bad[14] = 0x00100002;
+        assert(f.append(bad,0x200af1fc) == A::sideEffect);
+        bad = mono; bad.pop_back(); assert(f.append(bad,0x200af1fc) != A::ok);
+        bad = mono; bad.push_back(0); assert(f.append(bad,0x200af1fc) != A::ok);
+        assert(f.append(mono,0x200af448) != A::ok && f.append(mono,0x200b0200) != A::ok);
+    }
+    Fixture f;
+    std::vector<uint32_t> colour{0x423,brush,0x401,brush,0x402,0x40,0x4b2,0x00cc0b00,0x41b,0x5798b4f3,0x4b1,0x40036f04,
+        0xc0011a00,0,0x00400001,0x001f84f0};
+    for (uint32_t i = 0; i < 32; ++i) colour.push_back((0x1000+i*2) | (0x1001+i*2) << 16);
+    assert(f.append(colour,0x200af448) == A::ok && f.commands.duration() == colour.size()+1+64);
+    f.finish();
+    // 64 pixels of 16 bits, row after row.
+    for (uint32_t i = 0; i < 64; ++i) assert(f.read(brush+i*2) == 0x1000+i);
+    assert(f.append(colour,0x200af1fc) != A::ok);
+    assert(f.append({0x401,destination,0x402,13,0x4b2,0x00f00a00,0x41b,0x55e0b4af,0x4b1,0x40030a04,
+        0xc0011a00,0x00010001,0x00020002},0x200b0200) == A::sideEffect && refused(f,"pattern-brush",10));
 }
 // Scissor word 470 is the first column and row not drawn, for copies and fills alike.
 void scissor() {
@@ -430,6 +594,6 @@ void privateCapture() {
 }
 }
 int main() {
-    geometry(); guards(); scissor(); fills(); stretch(); scanStatus(); executionAndReset(); privateCapture();
+    geometry(); guards(); scissor(); stretchBlit(); keyedModes(); brushUpload(); fills(); stretch(); scanStatus(); executionAndReset(); privateCapture();
     std::puts("PASS: plain RGB565 copy geometry, bounds, atomic append, queued A4 execution-time source, deadlines, reset and routes");
 }
