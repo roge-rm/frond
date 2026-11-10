@@ -39,6 +39,9 @@ struct Call {
     uint32_t retired = 0;
     uint64_t idle = 0, work = 0, deadlineTicks = 0, deadlineDivisor = 1;
     bool penDown = false;
+    // A named control to press or let go, and a stick position, set before running.
+    int control = -1; bool pressed = false;
+    bool stick = false; int stickX = 0, stickY = 0;
     // Stop at this retired count instead of after `retired` more.
     uint64_t until = 0;
     // Take and acknowledge the pending frame before running.
@@ -121,6 +124,9 @@ struct Live {
         const uint64_t before = imx1MachineGetStatus(machine).retired;
         const uint32_t retired = c.until ? uint32_t(c.until > before ? c.until - before : 0) : c.retired;
         if (c.penDown) assert(imx1MachineReplacePenInputs(machine, pen(true)) == Imx1BootstrapAccess::ok);
+        if (c.control >= 0)
+            assert(imx1MachineSetZodiacControl(machine, Imx1ZodiacControl(c.control), c.pressed) == Imx1BootstrapAccess::ok);
+        if (c.stick) assert(imx1MachineSetZodiacStick(machine, c.stickX, c.stickY) == Imx1BootstrapAccess::ok);
         if (c.bounded) {
             auto deadline = never;
             if (c.deadlineTicks) { deadline = imx1MachineGetStatus(machine).time; assert(deadline.add(c.deadlineTicks, c.deadlineDivisor)); }
@@ -289,6 +295,42 @@ void penWait(bool fast) {
     assert(r[6].run.status == Imx1MachineStatus::terminal && r[6].run.result.registers[6] == 0x55);
     r = roundTrip(g, fast, {bounded(500, 100000), touchRun, bounded(500, 100000)}, always);
     assert(r[1].boundedRun.reason == Imx1MachineYield::waiting && r.back().run.result.registers[6] == 0x55);
+}
+// A wait that Home (A7, falling edge, source 11) ends. Saves while waiting, with the stick moved, with
+// Home down but not yet run, and after. The stick and the pin level have to come back from the save.
+void controlsWait(bool fast) {
+    Guest g{"controls wait", setup(), {}, true};
+    auto& words = g.words;
+    load(words, 0, 0x0021b000); store(words, 0, 0, 0x57000003); store(words, 0, 0x20, 0);
+    load(words, 0, 0x0021c000); store(words, 0, 0x20, 0x80); store(words, 0, 0x28, 1u << 14); store(words, 0, 0x30, 0x80);
+    load(words, 0, 0x00223000); store(words, 0, 8, 11);
+    words.push_back(0xe321f013);
+    words.push_back(0xee070f90); words.push_back(0xe3a06055); words.push_back(0xe7f000f0);
+    words.resize(0x400 / 4, 0xe1a00000);
+    load(words, 0, 0x0021c000); store(words, 0, 0x30, 0); store(words, 0, 0x34, 0x80);
+    words.push_back(0xe25ef004);
+    g.options.bootstrapPeripherals = true;
+    g.options.graphicsProfile = Imx1GraphicsProfile::virtual5744Compatible8MiB; g.options.graphicsIrqA13 = true;
+    g.options.graphicsRawAxesKnown = true; g.options.graphicsRawFirst = g.options.graphicsRawSecond = 512;
+    g.options.gpioAInputMaskedKnown = true; g.options.gpioAInputMask = 0xffffdfff; g.options.gpioAInput = 0x780;
+    g.options.gpioDInputKnown = true; g.options.gpioDInput = 0x7780;
+    Call stick; stick.stick = true; stick.stickX = -300; stick.stickY = 511;
+    Call function; function.control = int(Imx1ZodiacControl::function); function.pressed = true;
+    Call home; home.control = int(Imx1ZodiacControl::home); home.pressed = true;
+    Call up = slice(500, 10000); up.control = int(Imx1ZodiacControl::home);
+    auto r = roundTrip(g, fast, {slice(500, 10000), stick, function, home, slice(500, 10000)}, always);
+    assert(r.size() == 6 && r[1].run.status == Imx1MachineStatus::waiting && r[4].run.status == Imx1MachineStatus::waiting);
+    assert(r[1].save != r[2].save && r[2].save != r[3].save && r[3].save != r[4].save);
+    assert(r[1].run.retiredInstructions == r[4].run.retiredInstructions && !r[4].run.result.irqEntries);
+    assert(r[5].run.status == Imx1MachineStatus::terminal && r[5].run.result.registers[6] == 0x55 &&
+           r[5].run.result.irqEntries == 1);
+    // Home let go again before the run: the latched edge still ends the wait.
+    r = roundTrip(g, fast, {slice(500, 10000), home, up}, always);
+    assert(r.back().run.status == Imx1MachineStatus::terminal && r.back().run.result.irqEntries == 1);
+    // The rest position is what the options gave, so putting the stick back gives the first save again.
+    Call rest; rest.stick = true;
+    r = roundTrip(g, fast, {slice(500, 10000), stick, rest}, always);
+    assert(r[1].save != r[2].save && r[1].save == r[3].save);
 }
 bool blPrefix(const Record& r) {
     return r.run.result.trace.instructionSize == 2 && (r.run.result.trace.instruction & 0xf800) == 0xf000;
@@ -817,6 +859,7 @@ int ZODIAC_STATE_MAIN() {
     for (bool fast : {false, true}) {
         timerWfi(fast);
         penWait(fast);
+        controlsWait(fast);
         uartWfi(fast);
         for (bool ldm : {false, true}) thumbBl(fast, ldm, ldm);
         maskedIrq(fast);

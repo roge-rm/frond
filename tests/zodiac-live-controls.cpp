@@ -75,6 +75,51 @@ void pins(bool fast) {
     assert(imx1MachineReplaceGraphicsAxes(nullptr,0,0)==A::sequence);
     puts("PASS: live independent raw pins, atomic ports, passive preview, A13 ownership and consumed startup event");
 }
+// Every named control lowers its own pin and nothing else, and the stick maps onto the two raw words.
+void named(bool fast) {
+    const std::vector<uint32_t> words={0xe59f0010,0xe5901000,0xe59f000c,0xe5902000,
+                                      0xeafffffa,0xe1a00000,0x0021c024,0x0021c324};
+    Imx1ProbeOptions o; o.bootstrapPeripherals=true;
+    o.graphicsProfile=Imx1GraphicsProfile::virtual5744Compatible8MiB;o.graphicsIrqA13=true;
+    o.graphicsRawAxesKnown=true;o.graphicsRawFirst=o.graphicsRawSecond=512;
+    o.gpioAInputMaskedKnown=true;o.gpioAInputMask=0xffffdfff;o.gpioAInput=0x780;
+    o.gpioDInputKnown=true;o.gpioDInput=0x7780;
+    auto* m=create(words,fast,o);
+    auto state=imx1MachineRunSlice(m,5,0);
+    const uint32_t restA=state.result.registers[1],restD=state.result.registers[2];
+    assert((restA&0x780)==0x780 && restD==0x7780);
+    static const struct {Imx1ZodiacControl control;unsigned port;uint32_t bit;const char* name;} expected[]={
+        {Imx1ZodiacControl::home,0,1u<<7,"home"},{Imx1ZodiacControl::triggerLeft,0,1u<<8,"trigger-left"},
+        {Imx1ZodiacControl::triggerRight,0,1u<<9,"trigger-right"},{Imx1ZodiacControl::power,0,1u<<10,"power"},
+        {Imx1ZodiacControl::stickClick,3,1u<<7,"stick-click"},{Imx1ZodiacControl::actionRight,3,1u<<8,"action-right"},
+        {Imx1ZodiacControl::actionUp,3,1u<<9,"action-up"},{Imx1ZodiacControl::actionLeft,3,1u<<10,"action-left"},
+        {Imx1ZodiacControl::function,3,1u<<12,"function"},{Imx1ZodiacControl::bluetooth,3,1u<<13,"bluetooth"},
+        {Imx1ZodiacControl::actionDown,3,1u<<14,"action-down"}};
+    assert(sizeof expected/sizeof *expected==size_t(Imx1ZodiacControl::count));
+    for(const auto& e:expected) {
+        const auto& pin=imx1ZodiacControlPins[unsigned(e.control)];
+        assert(!std::strcmp(pin.name,e.name) && pin.port==e.port && (1u<<pin.pin)==e.bit);
+        const auto before=imx1MachineInspect(m);
+        assert(imx1MachineSetZodiacControl(m,e.control,true,false)==A::ok);
+        machine_test::same(before.result,imx1MachineInspect(m).result);
+        assert(imx1MachineSetZodiacControl(m,e.control,true)==A::ok);
+        state=imx1MachineRunSlice(m,5,0);
+        assert(state.result.registers[1]==(restA&~(e.port==0?e.bit:0)) && state.result.registers[2]==(restD&~(e.port==3?e.bit:0)));
+        assert(imx1MachineSetZodiacControl(m,e.control,false)==A::ok);
+        state=imx1MachineRunSlice(m,5,0);
+        assert(state.result.registers[1]==restA && state.result.registers[2]==restD);
+    }
+    assert(imx1MachineSetZodiacControl(m,Imx1ZodiacControl::count,true)==A::sideEffect);
+    for(int bad:{-512,512}) {
+        assert(imx1MachineSetZodiacStick(m,bad,0)==A::sideEffect && imx1MachineSetZodiacStick(m,0,bad)==A::sideEffect);
+    }
+    assert(imx1MachineSetZodiacStick(m,-511,511,false)==A::ok && imx1MachineSetZodiacStick(m,511,-511)==A::ok);
+    assert(imx1MachineSetZodiacStick(m,0,0)==A::ok);
+    imx1MachineStop(m);
+    assert(imx1MachineSetZodiacControl(m,Imx1ZodiacControl::home,true)==A::sequence);
+    assert(imx1MachineSetZodiacStick(m,0,0)==A::sequence && imx1MachineSetZodiacStick(nullptr,0,0)==A::sequence);
+    puts("PASS: eleven named controls each lower one pin, stick range and stopped machines are refused");
+}
 void wake(bool fast) {
     std::vector<uint32_t> words(0x100/4,0xe1a00000);
     words[0]=0xea00003e;words[0x18/4]=0xea0000f8;
@@ -144,7 +189,7 @@ int main(int argc, char** argv) {
         return 0;
     }
     assert(argc==1);
-    for(bool fast : {false,true}) { pins(fast);wake(fast); }
+    for(bool fast : {false,true}) { pins(fast);named(fast);wake(fast); }
     Imx1ProbeOptions o;const std::vector<uint32_t> words={0xeafffffe};
     auto* m=create(words,false,o);uint32_t values[4]{},masks[4]{1,0,0,0};
     assert(imx1MachineReplaceGpioInputs(m,values,masks)==A::sequence);
