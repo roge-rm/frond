@@ -433,7 +433,7 @@ deb: desktop out/frond-68k build/bluetooth-provider/emulator/btvirt bluetooth-op
 
 # This Frond's Bluetooth radio. The pinned BlueZ source is fetched once with
 # python3 tools/build-bluetooth-provider.py --fetch.
-build/bluetooth-provider/emulator/btvirt:
+build/bluetooth-provider/emulator/btvirt: tools/bluez-bdaddr.patch
 	python3 tools/build-bluetooth-provider.py --jobs $(BUILD_JOBS)
 
 # arm64 package for Raspberry Pi OS trixie, cross built in Docker. Needs Docker and the BlueZ
@@ -442,6 +442,9 @@ build/bluetooth-provider/emulator/btvirt:
 ARM64_JOBS ?= 10
 .PHONY: deb-arm64
 deb-arm64: build/dynarmic-trial/src/.frond-source
+# btvirt is cross built from the BlueZ checkout as it stands, so it must carry the current patch.
+	git -C $(BLUETOOTH_PROVIDER) diff --no-ext-diff --no-color HEAD | cmp -s - tools/bluez-bdaddr.patch || \
+		{ echo "$(BLUETOOTH_PROVIDER) doesn't carry tools/bluez-bdaddr.patch: run python3 tools/build-bluetooth-provider.py" >&2; exit 1; }
 	rm -rf build/arm64/source
 	python3 tools/prepare.py --destination $(CURDIR)/build/arm64/source
 	docker build -t frond-arm64-cross tools/arm64
@@ -455,6 +458,8 @@ deb-arm64: build/dynarmic-trial/src/.frond-source
 # The core is prepared fresh in build/appimage/ARCH/source. The arm64 one is cross built.
 APPIMAGE_JOBS ?= 10
 define build-appimage
+	git -C $(BLUETOOTH_PROVIDER) diff --no-ext-diff --no-color HEAD | cmp -s - tools/bluez-bdaddr.patch || \
+		{ echo "$(BLUETOOTH_PROVIDER) doesn't carry tools/bluez-bdaddr.patch: run python3 tools/build-bluetooth-provider.py" >&2; exit 1; }
 	rm -rf build/appimage/$(1)/source
 	python3 tools/prepare.py --destination $(CURDIR)/build/appimage/$(1)/source
 	docker build -t frond-appimage-$(2) --build-arg ARCH=$(2) tools/appimage
